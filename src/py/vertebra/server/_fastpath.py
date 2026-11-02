@@ -1,0 +1,346 @@
+"""Shared zero-closure ASGI/WSGI fastpath wrappers, direct raw send, and multi-framework mount attachment."""
+
+from __future__ import annotations
+
+import inspect
+from collections.abc import Callable
+from contextlib import suppress
+from typing import Any, cast
+
+from vertebra.utils.module_loader import import_optional
+
+__all__ = (
+    "attach_framework_fastpath",
+    "extract_scope_body_fast",
+    "resolve_relative_path",
+    "send_asgi_direct",
+    "wrap_asgi_fastpath",
+)
+
+_BODYLESS_HTTP_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "DELETE", "OPTIONS"})
+
+
+def resolve_relative_path(scope: Any, mount_prefix: str = "") -> str:
+    """Resolve the route-matching path from an ASGI scope by stripping mount_prefix or root_path."""
+    raw_path = str(scope.get("path", "/") if hasattr(scope, "get") else scope["path"])
+    prefix = mount_prefix or str((scope.get("root_path", "") if hasattr(scope, "get") else "") or "")
+    if prefix:
+        norm = prefix.rstrip("/")
+        if norm:
+            if raw_path == norm:
+                return "/"
+            if raw_path.startswith(f"{norm}/"):
+                return raw_path[len(norm) :]
+    return raw_path or "/"
+
+
+async def extract_scope_body_fast(
+    scope: Any,
+    receive: Any,
+    body: bytes | None = None,
+    *,
+    method: str = "POST",
+) -> bytes:
+    """Extract request body bytes synchronously from AsgiScope/AsgiProtocol before falling back to receive()."""
+    if body is not None:
+        return body
+    if method in _BODYLESS_HTTP_METHODS:
+        return b""
+    body_bytes_fn = getattr(scope, "body_bytes", None)
+    if callable(body_bytes_fn):
+        snap_bytes: bytes = body_bytes_fn()
+        if snap_bytes:
+            return snap_bytes
+    recv_owner = getattr(receive, "__self__", None)
+    owner_body_fn = getattr(recv_owner, "body_bytes", None)
+    if callable(owner_body_fn):
+        owner_bytes: bytes = owner_body_fn()
+        return owner_bytes
+    if not callable(receive):
+        return b""
+
+    chunks: list[bytes] = []
+    while True:
+        message = await receive()
+        if not isinstance(message, dict):
+            break
+        if message.get("type") == "http.disconnect":
+            break
+        chunk = message.get("body", b"")
+        if chunk:
+            chunks.append(chunk if isinstance(chunk, bytes) else bytes(chunk))
+        if not message.get("more_body", False):
+            break
+    return b"" if not chunks else (chunks[0] if len(chunks) == 1 else b"".join(chunks))
+
+
+async def send_asgi_direct(
+    send: Any,
+    status_code: int,
+    encoded_headers: list[tuple[bytes, bytes]],
+    raw_body: bytes,
+) -> None:
+    """Emit an HTTP response via single-call send_raw_response when supported, or standard 2-dict ASGI send."""
+    raw_send = getattr(send, "send_raw_response", None)
+    if raw_send is None:
+        send_owner = getattr(send, "__self__", None)
+        if send_owner is not None:
+            raw_send = getattr(send_owner, "send_raw_response", None)
+    if callable(raw_send):
+        res = raw_send(status_code, encoded_headers, raw_body)
+        if inspect.isawaitable(res):
+            await res
+        return
+
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status_code,
+            "headers": encoded_headers,
+        }
+    )
+    await send(
+        {
+            "type": "http.response.body",
+            "body": raw_body,
+            "more_body": False,
+        }
+    )
+
+
+def wrap_asgi_fastpath(bypass: Any, fallback_app: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap an ASGI 3.0 callable with zero-closure C-API fastpath dispatch and replay fallback."""
+    dispatch_fn = getattr(bypass, "dispatch_async", None) or bypass.dispatch
+
+    async def _fastpath_asgi_app(scope: Any, receive: Any, send: Any) -> None:
+        send_owner = getattr(send, "__self__", None)
+        has_native_send_state = hasattr(send, "started") or (send_owner is not None and hasattr(send_owner, "started"))
+        body_bytes_fn = getattr(scope, "body_bytes", None)
+        method = str(scope.get("method", "GET") if hasattr(scope, "get") else "GET").upper()
+        has_prebuffered_body = callable(body_bytes_fn) and (
+            method in _BODYLESS_HTTP_METHODS
+            or bool(body_bytes_fn())
+            or callable(getattr(getattr(receive, "__self__", None), "body_bytes", None))
+        )
+
+        if has_native_send_state and has_prebuffered_body:
+            direct = await dispatch_fn(scope, receive, send)
+            if direct is not None:
+                status_code, encoded_headers, raw_body = direct
+                await send_asgi_direct(send, status_code, encoded_headers, raw_body)
+                return
+            already_started = bool(
+                getattr(send, "started", False) or (send_owner is not None and getattr(send_owner, "started", False))
+            )
+            if already_started:
+                return
+            await fallback_app(scope, receive, send)
+            return
+
+        sent_via_callback = False
+        buffered_messages: list[Any] = []
+        upstream_exhausted = False
+
+        async def _buffering_receive() -> Any:
+            nonlocal upstream_exhausted
+            msg = await receive()
+            buffered_messages.append(msg)
+            if isinstance(msg, dict) and msg.get("type") == "http.request" and not msg.get("more_body", False):
+                upstream_exhausted = True
+            return msg
+
+        async def _tracked_send(message: Any) -> None:
+            nonlocal sent_via_callback
+            sent_via_callback = True
+            await send(message)
+
+        direct = await dispatch_fn(scope, _buffering_receive, _tracked_send)
+        if direct is not None:
+            status_code, encoded_headers, raw_body = direct
+            await send_asgi_direct(send, status_code, encoded_headers, raw_body)
+            return
+        if sent_via_callback:
+            return
+        if not buffered_messages:
+            await fallback_app(scope, receive, send)
+            return
+
+        replay_idx = 0
+
+        async def _replay_receive() -> Any:
+            nonlocal replay_idx
+            if replay_idx < len(buffered_messages):
+                item = buffered_messages[replay_idx]
+                replay_idx += 1
+                return item
+            if upstream_exhausted:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            return await receive()
+
+        await fallback_app(scope, _replay_receive, send)
+
+    dyn_app = cast("Any", _fastpath_asgi_app)
+    dyn_app._vertebra_fastpath = bypass
+    dyn_app.__vertebra_fastpath__ = bypass
+    dyn_app.__vertebra_fastpath_attached__ = True
+    return _fastpath_asgi_app
+
+
+def attach_framework_fastpath(
+    app: Any,
+    *,
+    mount_prefix: str = "",
+    protocol: str = "auto",
+) -> Any:
+    """Idempotently detect and attach a framework FastPath wrapper to an ASGI or WSGI application."""
+    if app is None:
+        return app
+    norm_prefix = mount_prefix.rstrip("/")
+
+    if getattr(app, "__vertebra_fastpath_attached__", False):
+        existing_fp = (
+            getattr(app, "_vertebra_fastpath", None)
+            or getattr(app, "__vertebra_fastpath__", None)
+            or getattr(app, "fastpath", None)
+        )
+        if existing_fp is not None and norm_prefix and hasattr(existing_fp, "_mount_prefix"):
+            existing_fp._mount_prefix = norm_prefix
+        if protocol == "wsgi" and not callable(app) and callable(getattr(app, "wsgi_app", None)):
+            return app.wsgi_app
+        return app
+
+    if hasattr(app, "wrap_asgi") and hasattr(app, "dispatch"):
+        if norm_prefix and hasattr(app, "_mount_prefix"):
+            app._mount_prefix = norm_prefix
+        if protocol == "wsgi" and hasattr(app, "wrap_wsgi"):
+            return app.wrap_wsgi()
+        return app.wrap_asgi()
+
+    for candidate_app in (app, getattr(app, "_inner", None)):
+        if candidate_app is None:
+            continue
+        cand_state = getattr(candidate_app, "state", None)
+        if cand_state is not None:
+            plugin = (
+                cand_state.get("vertebra_plugin")
+                if hasattr(cand_state, "get")
+                else getattr(cand_state, "vertebra_plugin", None)
+            )
+            ensure_fn = getattr(plugin, "ensure_finalized", None)
+            if callable(ensure_fn):
+                ensure_fn(candidate_app)
+
+    existing_fp = (
+        getattr(app, "_vertebra_fastpath", None)
+        or getattr(app, "__vertebra_fastpath__", None)
+        or getattr(app, "fastpath", None)
+    )
+    if existing_fp is None:
+        state = getattr(app, "state", None)
+        if state is not None:
+            existing_fp = getattr(app, "__vertebra_fastpath__", None) or (
+                state.get("vertebra_fastpath_bypass")
+                if hasattr(state, "get")
+                else getattr(state, "vertebra_fastpath_bypass", None)
+            )
+    if existing_fp is None:
+        extensions = getattr(app, "extensions", None)
+        if isinstance(extensions, dict) and "vertebra" in extensions:
+            existing_fp = getattr(extensions["vertebra"], "fastpath", None)
+
+    if existing_fp is not None:
+        if norm_prefix and hasattr(existing_fp, "_mount_prefix"):
+            existing_fp._mount_prefix = norm_prefix
+        if protocol == "wsgi" and hasattr(existing_fp, "wrap_wsgi"):
+            fallback_wsgi = (
+                app.wsgi_app
+                if callable(getattr(app, "wsgi_app", None))
+                else (
+                    getattr(app, "_wsgi_app", None)
+                    if callable(getattr(app, "_wsgi_app", None))
+                    else (app if callable(app) else None)
+                )
+            )
+            wrapped_wsgi = existing_fp.wrap_wsgi(fallback_wsgi)
+            dyn_wsgi = cast("Any", wrapped_wsgi)
+            dyn_wsgi._vertebra_fastpath = existing_fp
+            dyn_wsgi.__vertebra_fastpath__ = existing_fp
+            dyn_wsgi.__vertebra_fastpath_attached__ = True
+            return wrapped_wsgi
+        if hasattr(existing_fp, "wrap_asgi"):
+            fallback_asgi = app if callable(app) else None
+            return existing_fp.wrap_asgi(fallback_asgi)
+
+    cls_name = type(app).__name__
+    mod_name = str(getattr(type(app), "__module__", "") or "")
+
+    if cls_name == "Litestar" or mod_name.startswith("litestar"):
+        ls_mod = import_optional("vertebra.extensions.litestar.fastpath")
+        if ls_mod is not None:
+            fp = ls_mod.FastPath.from_app(app, mount_prefix=norm_prefix)
+            state = getattr(app, "state", None)
+            if state is not None:
+                with suppress(TypeError, AttributeError):
+                    state["vertebra_fastpath_bypass"] = fp
+            dyn_app = cast("Any", app)
+            with suppress(AttributeError, TypeError):
+                dyn_app._vertebra_fastpath = fp
+                dyn_app.__vertebra_fastpath__ = fp
+            return fp.wrap_asgi(app)
+
+    if cls_name == "FastAPI" or mod_name.startswith("fastapi") or hasattr(app, "dependency_overrides"):
+        fa_mod = import_optional("vertebra.extensions.fastapi.fastpath")
+        if fa_mod is not None:
+            fp = fa_mod.FastPath.from_app(app, mount_prefix=norm_prefix)
+            dyn_app = cast("Any", app)
+            dyn_app._vertebra_fastpath = fp
+            dyn_app.__vertebra_fastpath__ = fp
+            return fp.wrap_asgi(app if callable(app) else None)
+
+    if (
+        cls_name == "Starlette"
+        or mod_name.startswith("starlette")
+        or (hasattr(app, "routes") and hasattr(app, "user_middleware"))
+    ):
+        st_mod = import_optional("vertebra.extensions.starlette.fastpath")
+        if st_mod is not None:
+            fp = st_mod.FastPath.from_app(app, mount_prefix=norm_prefix)
+            dyn_app = cast("Any", app)
+            dyn_app._vertebra_fastpath = fp
+            dyn_app.__vertebra_fastpath__ = fp
+            return fp.wrap_asgi(app if callable(app) else None)
+
+    if (
+        cls_name == "Flask"
+        or mod_name.startswith("flask")
+        or (hasattr(app, "url_map") and hasattr(app, "view_functions"))
+    ):
+        fl_fp_mod = import_optional("vertebra.extensions.flask.fastpath")
+        fl_rt_mod = import_optional("vertebra.extensions.flask.router")
+        if fl_fp_mod is not None and fl_rt_mod is not None:
+            compiler = fl_rt_mod.RouteCompiler(app)
+            fp = fl_fp_mod.FastPath(compiler, mount_prefix=norm_prefix)
+            dyn_app = cast("Any", app)
+            dyn_app._vertebra_fastpath = fp
+            dyn_app.__vertebra_fastpath__ = fp
+            if protocol == "asgi":
+                return fp.wrap_asgi()
+            target_wsgi = getattr(app, "wsgi_app", app)
+            wrapped_wsgi = fp.wrap_wsgi(target_wsgi if callable(target_wsgi) else None)
+            dyn_app.wsgi_app = wrapped_wsgi
+            dyn_app.__vertebra_fastpath_attached__ = True
+            return wrapped_wsgi
+
+    if cls_name in {"WSGIHandler", "ASGIHandler"} or mod_name.startswith("django") or hasattr(app, "urlpatterns"):
+        dj_fp_mod = import_optional("vertebra.extensions.django.fastpath")
+        dj_rt_mod = import_optional("vertebra.extensions.django.router")
+        if dj_fp_mod is not None and dj_rt_mod is not None:
+            urlconf = getattr(app, "urlconf", None)
+            urlpatterns = getattr(app, "urlpatterns", None)
+            compiler = dj_rt_mod.RouteCompiler(urlpatterns=urlpatterns, urlconf=urlconf)
+            fp = dj_fp_mod.FastPath(compiler, mount_prefix=norm_prefix)
+            if protocol == "asgi" or cls_name == "ASGIHandler":
+                return fp.wrap_asgi(app if callable(app) else None)
+            return fp.wrap_wsgi(app if callable(app) else None)
+
+    return app

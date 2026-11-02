@@ -173,12 +173,15 @@ async def test_asgi_runner_lifespan_state_and_zerocopysend_integration() -> None
         await resp(scope, receive, send)
 
     runner = AsgiRunner(app, lifespan_state=lifespan_state)
-    req = Request.from_parts("GET", "/test", b"", request_id=42, handler_id=1)
-    result = await runner.run_single(req)
+    try:
+        req = Request.from_parts("GET", "/test", b"", request_id=42, handler_id=1)
+        result = await runner.run_single(req)
 
-    assert result.status == 201
-    assert result.body == b"zero-copy-payload"
-    assert lifespan_state["counter"] == 1
+        assert result.status == 201
+        assert result.body == b"zero-copy-payload"
+        assert lifespan_state["counter"] == 1
+    finally:
+        runner.close()
 
 
 @pytest.mark.anyio
@@ -193,18 +196,21 @@ async def test_asgi_trailers_forwarded_to_native_response() -> None:
         await resp(scope, receive, send)
 
     runner = AsgiRunner(app)
-    req = Request.from_parts("POST", "/rpc.Service/Call", b"", request_id=88, handler_id=1)
-    result = await runner.run_single(req)
+    try:
+        req = Request.from_parts("POST", "/rpc.Service/Call", b"", request_id=88, handler_id=1)
+        result = await runner.run_single(req)
 
-    assert result.status == 200
-    assert result.trailers == [(b"grpc-status", b"0"), (b"x-digest", b"sha256:abcd")]
-    assert len(runner.last_trailer_frames) == 1
-    raw_frame = runner.last_trailer_frames[0]
-    flags_in_frame = int.from_bytes(raw_frame[10:12], "little")
-    assert flags_in_frame & FLAG_TRAILERS == FLAG_TRAILERS
-    assert flags_in_frame & FLAG_FINAL == FLAG_FINAL
-    assert b"grpc-status" in raw_frame
-    assert b"sha256:abcd" in raw_frame
+        assert result.status == 200
+        assert result.trailers == [(b"grpc-status", b"0"), (b"x-digest", b"sha256:abcd")]
+        assert len(runner.last_trailer_frames) == 1
+        raw_frame = runner.last_trailer_frames[0]
+        flags_in_frame = int.from_bytes(raw_frame[10:12], "little")
+        assert flags_in_frame & FLAG_TRAILERS == FLAG_TRAILERS
+        assert flags_in_frame & FLAG_FINAL == FLAG_FINAL
+        assert b"grpc-status" in raw_frame
+        assert b"sha256:abcd" in raw_frame
+    finally:
+        runner.close()
 
 
 @pytest.mark.anyio
@@ -218,17 +224,20 @@ async def test_asgi_zerocopysend_retains_buffer_without_bytes_copy() -> None:
         await resp(scope, receive, send)
 
     runner = AsgiRunner(app)
-    req = Request.from_parts("GET", "/zero-copy", b"", request_id=55, handler_id=1)
-    asgi_resp = await runner.run_single(req)
+    try:
+        req = Request.from_parts("GET", "/zero-copy", b"", request_id=55, handler_id=1)
+        asgi_resp = await runner.run_single(req)
 
-    assert asgi_resp.zero_copy_buffer is not None
-    assert isinstance(asgi_resp.body, memoryview)
-    assert asgi_resp.zero_copy_buffer.obj is backing
+        assert asgi_resp.zero_copy_buffer is not None
+        assert isinstance(asgi_resp.body, memoryview)
+        assert asgi_resp.zero_copy_buffer.obj is backing
 
-    native_resp = runner._to_native_response(asgi_resp, 55)
-    assert native_resp.status == 200
-    assert native_resp.body == b"zero-copy-shared-memory-view"
-    assert native_resp.request_id == 55
+        native_resp = runner._to_native_response(asgi_resp, 55)
+        assert native_resp.status == 200
+        assert native_resp.body == b"zero-copy-shared-memory-view"
+        assert native_resp.request_id == 55
+    finally:
+        runner.close()
 
 
 @pytest.mark.anyio

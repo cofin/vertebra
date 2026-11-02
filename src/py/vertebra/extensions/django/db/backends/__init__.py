@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
 
 from vertebra._vertebra import AlloyDBDialer, CloudSQLDialer, LeaseBroker, LeaseGrant
+from vertebra.db._registry import AnyDatabaseConfig, DatabaseRegistry
+from vertebra.db.duckdb import DuckDBConfig
+from vertebra.db.mssql import MSSQLConfig
+from vertebra.db.mysql import MySQLConfig
+from vertebra.db.oracle import OracleConfig
+from vertebra.db.postgres import PoolerMode, PostgreSQLConfig
+from vertebra.db.sqlite import SQLiteConfig
 from vertebra.extensions.django.orm import rows_to_structs
 from vertebra.utils.module_loader import import_optional
 
@@ -59,13 +66,104 @@ class DatabaseWrapperMixin:
             enable_vector_handlers=bool(options.get("enable_vector_handlers", True)),
             max_connections=int(options.get("max_connections", 32)),
         )
-        self._broker = LeaseBroker(pool_size=self.pooler_config.max_connections)
+        self._share_pool: bool = bool(options.get("share_pool", True))
+        self._broker = (
+            DatabaseRegistry.default_broker(pool_size=self.pooler_config.max_connections)
+            if self._share_pool
+            else LeaseBroker(pool_size=self.pooler_config.max_connections)
+        )
         self._active_lease: LeaseGrant | None = None
         self._cloud_dialer: CloudSQLDialer | AlloyDBDialer | None = None
         if self.pooler_config.cloud_sql_instance:
             self._cloud_dialer = CloudSQLDialer(self.pooler_config.cloud_sql_instance)
         elif self.pooler_config.alloydb_instance_uri:
             self._cloud_dialer = AlloyDBDialer(self.pooler_config.alloydb_instance_uri)
+        self._native_driver: Any = None
+        self._async_native_driver: Any = None
+
+    @property
+    def share_pool(self) -> bool:
+        """Return True when this wrapper shares its native driver pool and LeaseBroker via DatabaseRegistry.default()."""
+        return self._share_pool
+
+    @property
+    def native_driver(self) -> Any:
+        """Return the synchronous Vertebra native driver instance backing this wrapper."""
+        if self._native_driver is None:
+            cfg = self._build_native_config()
+            registry = DatabaseRegistry.default() if self._share_pool else DatabaseRegistry(broker=self._broker)
+            self._native_driver = registry.get_shared_sync_driver(cfg)
+        return self._native_driver
+
+    @property
+    def async_native_driver(self) -> Any:
+        """Return the asynchronous Vertebra native driver instance backing this wrapper."""
+        if self._async_native_driver is None:
+            cfg = self._build_native_config()
+            registry = DatabaseRegistry.default() if self._share_pool else DatabaseRegistry(broker=self._broker)
+            self._async_native_driver = registry.get_shared_driver(cfg)
+        return self._async_native_driver
+
+    def _build_native_config(self) -> AnyDatabaseConfig:
+        host = str(self.settings_dict.get("HOST") or "localhost")
+        port = int(self.settings_dict.get("PORT") or self._default_port())
+        name = str(self.settings_dict.get("NAME") or "")
+        user = str(self.settings_dict.get("USER") or "")
+        password = str(self.settings_dict.get("PASSWORD") or "")
+        auth = f"{user}:{password}@" if (user and password) else (f"{user}@" if user else "")
+        if self.vendor == "postgresql":
+            db_name = name or "postgres"
+            dsn = f"postgresql://{auth}{host}:{port}/{db_name}"
+            return PostgreSQLConfig(
+                dsn=dsn,
+                direct_dsn=self.pooler_config.direct_dsn,
+                pooler_mode=cast("PoolerMode", self.pooler_config.pooler_mode),
+                pgbouncer=self.pooler_config.pgbouncer,
+                cloud_sql_instance=self.pooler_config.cloud_sql_instance,
+                alloydb_instance_uri=self.pooler_config.alloydb_instance_uri,
+                broker=self._broker,
+            )
+        if self.vendor == "mysql":
+            dsn = f"mysql://{auth}{host}:{port}/{name}"
+            return MySQLConfig(
+                dsn=dsn,
+                cloud_sql_instance=self.pooler_config.cloud_sql_instance,
+                broker=self._broker,
+            )
+        if self.vendor in {"sqlite", "sqlite3"}:
+            db_path = name or ":memory:"
+            return SQLiteConfig(path=db_path, database=db_path, broker=self._broker)
+        if self.vendor == "oracle":
+            svc = name or "FREEPDB1"
+            dsn = f"oracle://{auth}{host}:{port}/{svc}"
+            return OracleConfig(
+                dsn=dsn,
+                host=host,
+                port=port,
+                service_name=svc,
+                user=user or "system",
+                password=password,
+                wallet_zip=self.pooler_config.wallet_zip,
+                broker=self._broker,
+            )
+        if self.vendor == "mssql":
+            db_name = name or "master"
+            dsn = f"mssql://{auth}{host}:{port}/{db_name}"
+            return MSSQLConfig(
+                dsn=dsn,
+                host=host,
+                port=port,
+                database=db_name,
+                user=user or "sa",
+                password=password,
+                cloudsql_instance=self.pooler_config.cloud_sql_instance,
+                broker=self._broker,
+            )
+        if self.vendor == "duckdb":
+            duck_path = name or ":memory:"
+            return DuckDBConfig(path=duck_path, database=duck_path, broker=self._broker)
+        db_path = name or ":memory:"
+        return SQLiteConfig(path=db_path, database=db_path, broker=self._broker)
 
     @property
     def engine(self) -> str:

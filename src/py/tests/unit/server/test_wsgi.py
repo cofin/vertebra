@@ -480,3 +480,27 @@ def test_wsgi_environ_request_and_scan_in_place_headers() -> None:
     assert req.method == "POST"
     assert req.path == "/items"
     assert req.decode_msgspec() == {"id": 7}
+
+
+def test_wsgi_start_response_send_raw_response_in_batch() -> None:
+    """Verify _WsgiStartResponse.send_raw_response writes status, raw headers, and body in a single call."""
+    init_transport()
+    seen_methods: list[bool] = []
+
+    def raw_wsgi_app(environ: dict[str, Any], start_response: Any) -> Iterable[bytes]:
+        del environ
+        has_raw = hasattr(start_response, "send_raw_response")
+        seen_methods.append(has_raw)
+        return start_response.send_raw_response(
+            201,
+            [(b"content-type", b"application/json"), (b"x-wsgi-fast", b"1")],
+            b'{"wsgi":true}',
+        )
+
+    adapter = WsgiAdapter(raw_wsgi_app)
+    resp = adapter.handle_request(Request.from_parts("GET", "/raw", request_id=88))
+    assert seen_methods == [True]
+    assert resp.status == 201
+    assert resp.body == b'{"wsgi":true}'
+    assert (b"content-type", b"application/json") in resp.headers
+    assert (b"x-wsgi-fast", b"1") in resp.headers

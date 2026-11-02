@@ -214,8 +214,10 @@ class DjangoPlugin:
             matched = self._fastpath.match(method, path)
             if matched is not None:
                 compiled, params = matched
-                if getattr(compiled.callback, "__vertebra_fastpath__", False) and not compiled.is_async:
-                    return dispatch_django_direct(compiled, request, params)
+                if getattr(compiled.callback, "__vertebra_fastpath__", False):
+                    fast_resp = dispatch_django_direct(compiled, request, params)
+                    if fast_resp is not None:
+                        return fast_resp
         if self._wsgi_app is not None:
             environ = request.wsgi_environ()
             return run_wsgi_callable(self._wsgi_app, environ, int(request.request_id))

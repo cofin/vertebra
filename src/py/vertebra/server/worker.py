@@ -42,6 +42,7 @@ from vertebra.server._dispatch import (
     dispatch_batch,
     partition_batch,
 )
+from vertebra.server._fastpath import attach_framework_fastpath
 from vertebra.server._gil_audit import GilAuditReport
 from vertebra.server._loops import (
     EventLoopPool,
@@ -98,17 +99,24 @@ class _AsgiMountRunner:
         """Return the underlying ``AsgiRunner``."""
         return self._runner
 
+    @property
+    def __vertebra_fastpath_attached__(self) -> bool:
+        """Return True when a zero-copy FastPath wrapper is attached to the underlying runner."""
+        return self._runner.__vertebra_fastpath_attached__
+
     def __call__(self, requests: list[Any]) -> list[AsgiResponse]:
         """Run a batch of requests across the sharded event loop pool."""
         if not requests:
             return []
         coros = [self._runner.run_single(req) for req in requests]
         futures = self._pool.schedule_batch(coros)
-        concurrent.futures.wait(futures)
+        done, not_done = concurrent.futures.wait(futures, timeout=10.0)
+        for fut in not_done:
+            fut.cancel()
         results: list[AsgiResponse] = []
         for req, fut in zip(requests, futures, strict=True):
             try:
-                results.append(fut.result())
+                results.append(fut.result(timeout=1.0))
             except Exception:
                 req_id = getattr(req, "request_id", 0)
                 results.append(
@@ -183,6 +191,7 @@ def _instantiate_mount_runners(
     result: list[tuple[str, Any, str]] = []
     for prefix, app, protocol in mounts:
         resolved: str = detect_interface(app, configured=configured_iface) if protocol == "auto" else protocol
+        app = attach_framework_fastpath(app, mount_prefix=prefix, protocol=resolved)
         state = lifespan_states.get(prefix) if lifespan_states is not None else None
         if resolved == "asgi":
             if isinstance(scheduler, EventLoopPool) and scheduler.size > 1:
@@ -363,6 +372,7 @@ class Worker:
         loop_pool = EventLoopPool(
             size=shard_count,
             inline_single_loop=(shard_count == 1 and (use_inline_event_loop or not needs_event_loop)),
+            gil_report=self._gil_report,
         )
         executor: ThreadPoolExecutor | None = (
             ThreadPoolExecutor(

@@ -19,6 +19,7 @@ import msgspec
 
 from vertebra._vertebra import (
     Response,
+    drive_native_batch,
     submit_batch_raw,
     submit_response,
     submit_response_raw,
@@ -374,6 +375,53 @@ def compile_handler_spec(
             arg_resolver=_resolve_sync_args,
         )
 
+    if handler_is_async and not has_async_di and not has_async_guards and not has_gen_di:
+
+        def _invoke_compiled_sync_to_coro(
+            request: Any,
+            _h: Any = handler,
+            _plans: tuple[_CompiledParamPlan, ...] = compiled_plans,
+            _segments: tuple[str | ParamSpec, ...] = segments,
+            _needs_path: bool = needs_path_params,
+            _needs_query: bool = needs_query_map,
+            _guards: tuple[Callable[..., Any], ...] = guards,
+            _container: Container | None = bound_container,
+            _has_di: bool = has_di_params,
+        ) -> Any:
+            path_map = _extract_params_from_segments(_segments, getattr(request, "path", "/")) if _needs_path else {}
+            query_map = _parse_query_dict(getattr(request, "query", None)) if _needs_query else {}
+            if _guards:
+                _enforce_guards_sync(_guards, request, _container, path_map)
+            if _has_di and _container is not None:
+                req_cache: dict[str, Any] = {}
+                call_args = [
+                    _container.resolve_sync(
+                        p.di_key,
+                        request=request,
+                        request_cache=req_cache,
+                        extra_context=path_map,
+                    )
+                    if (p.kind == "di" and p.di_key is not None)
+                    else (p.extractor(request, path_map, query_map) if p.extractor is not None else request)
+                    for p in _plans
+                ]
+                return _h(*call_args)
+
+            call_args = [
+                p.extractor(request, path_map, query_map) if p.extractor is not None else request for p in _plans
+            ]
+            return _h(*call_args)
+
+        return HandlerSpec(
+            has_params=has_params,
+            is_async=True,
+            param_names=params,
+            invoker=_invoke_compiled_sync_to_coro,
+            sync_to_thread=False,
+            status_code=status_code,
+            arg_resolver=_resolve_sync_args,
+        )
+
     async def _invoke_compiled_async(
         request: Any,
         _h: Any = handler,
@@ -724,10 +772,12 @@ def dispatch_batch(
             ]
             if hasattr(scheduler, "schedule_batch"):
                 futures = scheduler.schedule_batch(coros)
-                concurrent.futures.wait(futures)
+                done, not_done = concurrent.futures.wait(futures, timeout=10.0)
+                for fut in not_done:
+                    fut.cancel()
                 for (idx, _request, _spec), fut in zip(partitioned.async_native, futures, strict=True):
                     try:
-                        results[idx] = fut.result()
+                        results[idx] = fut.result(timeout=1.0)
                     except Exception as exc:
                         results[idx] = build_error_response(exc, _request, error_handler, vr_cls)
             elif isinstance(loop, asyncio.AbstractEventLoop):
@@ -855,30 +905,50 @@ def dispatch_batch(
             active_exec.submit(_dispatch_sync_item)
 
     if partitioned.async_native:
-        async_coros: list[Coroutine[Any, Any, None]] = []
-        for _idx, request, spec in partitioned.async_native:
-            req_id = getattr(request, "request_id", 0)
-            try:
-                coro = spec.invoker(request)
-            except Exception as exc:
-                err_resp = build_error_response(exc, request, error_handler, vr_cls)
-                active_submit(err_resp)
-                continue
-            err_target = request if error_handler is not None else _AsyncErrorStub(request_id=req_id)
-            async_coros.append(
-                _await_async_item(
-                    coro,
-                    req_id,
-                    err_target,
-                    error_handler,
-                    vr_cls,
-                    active_submit,
-                    active_submit_raw,
-                    spec.status_code,
+        if use_native_batch_submit and error_handler is None and getattr(scheduler, "size", 1) == 1:
+            if raw_batch:
+                submit_batch_raw(raw_batch)
+                raw_batch.clear()
+            native_items: list[tuple[int, Any, int]] = []
+            for _idx, request, spec in partitioned.async_native:
+                req_id = getattr(request, "request_id", 0)
+                try:
+                    coro = spec.invoker(request)
+                except Exception as exc:
+                    err_resp = build_error_response(exc, request, error_handler, vr_cls)
+                    active_submit(err_resp)
+                    continue
+                native_items.append((req_id, coro, spec.status_code))
+            if native_items:
+                drive_native_batch(
+                    native_items,
+                    loop_obj=loop if isinstance(loop, asyncio.AbstractEventLoop) else None,
                 )
-            )
+        else:
+            async_coros: list[Coroutine[Any, Any, None]] = []
+            for _idx, request, spec in partitioned.async_native:
+                req_id = getattr(request, "request_id", 0)
+                try:
+                    coro = spec.invoker(request)
+                except Exception as exc:
+                    err_resp = build_error_response(exc, request, error_handler, vr_cls)
+                    active_submit(err_resp)
+                    continue
+                err_target = request if error_handler is not None else _AsyncErrorStub(request_id=req_id)
+                async_coros.append(
+                    _await_async_item(
+                        coro,
+                        req_id,
+                        err_target,
+                        error_handler,
+                        vr_cls,
+                        active_submit,
+                        active_submit_raw,
+                        spec.status_code,
+                    )
+                )
 
-        _schedule_coros(scheduler or loop, async_coros)
+            _schedule_coros(scheduler or loop, async_coros)
 
     if partitioned.mounts:
         resolved_lookup = mount_lookup or {prefix: (adapter, protocol) for prefix, adapter, protocol in mount_runners}

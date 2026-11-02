@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import inspect
 import mmap
+import os
 import struct
 from collections.abc import Awaitable, Buffer, Callable, Iterator, Mapping, Sequence
 from typing import Any, Literal
@@ -661,8 +662,13 @@ class SyncPostgreSQLDriver:
             return None
         if hasattr(self._broker, "get_or_compile_statement") and self._config.effective_statement_cache_size > 0:
             self._broker.get_or_compile_statement("postgresql", sql, lambda s: (s, ()))
+        if hasattr(self._broker, "lease_table") and self._broker.lease_table is not None:
+            return self._broker.lease_table.acquire(os.getpid())
         if hasattr(self._broker, "acquire"):
-            return self._broker.acquire(bind_key="postgresql")
+            try:
+                return self._broker.acquire(bind_key="postgresql")
+            except TypeError:
+                return self._broker.acquire(os.getpid())
         return None
 
     def execute_with_description(

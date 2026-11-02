@@ -59,6 +59,12 @@ logger = logging.getLogger("vertebra.cli.run")
     default="auto",
     help="Gateway protocol interface (auto, asgi, rsgi, or wsgi)",
 )
+@click.option(
+    "--loop",
+    type=click.Choice(["auto", "uvloop", "winloop", "rloop", "asyncio"], case_sensitive=False),
+    default="auto",
+    help="Event loop backend (auto, uvloop, winloop, rloop, or asyncio)",
+)
 @click.option("--tls-cert", type=click.Path(exists=True), help="Path to PEM certificate for HTTPS")
 @click.option("--tls-key", type=click.Path(exists=True), help="Path to PEM private key for HTTPS")
 @click.option(
@@ -104,6 +110,7 @@ def run(
     shutdown_timeout: int,
     asgi: bool,
     interface: str,
+    loop: str,
     tls_cert: str | None,
     tls_key: str | None,
     worker_only: bool,
@@ -138,6 +145,7 @@ def run(
         topology=topology,
         threads=threads,
         jit=resolved_jit,
+        loop=loop,
         with_workers=effective_with_workers,
         worker_queues=effective_queues or ("default",),
         worker_lane_concurrency=effective_lanes,

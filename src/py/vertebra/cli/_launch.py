@@ -112,6 +112,7 @@ class ServerLaunchEnv(msgspec.Struct, frozen=True, gc=False):
     topology: str | None = None
     threads: int | None = None
     jit: bool | None = None
+    loop: str = "auto"
     with_workers: bool = False
     worker_queues: tuple[str, ...] = ("default",)
     worker_lane_concurrency: dict[str, int] = msgspec.field(default_factory=dict)
@@ -142,6 +143,8 @@ class ServerLaunchEnv(msgspec.Struct, frozen=True, gc=False):
         env["VERTEBRA_PORT"] = str(self.port)
         env["VERTEBRA_LOG_LEVEL"] = self.log_level
         env["VERTEBRA_NATIVE"] = "1" if self.native else "0"
+        resolved_loop = (self.loop or env.get("VERTEBRA_LOOP") or "auto").strip().lower()
+        env["VERTEBRA_LOOP"] = resolved_loop or "auto"
 
         raw_topology = (self.topology or env.get("VERTEBRA_TOPOLOGY") or "auto").strip().lower()
         effective_workers = self.workers

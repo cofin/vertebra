@@ -9,7 +9,12 @@ from typing import TYPE_CHECKING, Any, cast, get_type_hints
 import msgspec
 
 from vertebra._vertebra import Request, Response, WsgiEnviron, WsgiInput
-from vertebra.utils.serializers import encode_json_bytes
+from vertebra.server._fastpath import (
+    extract_scope_body_fast,
+    resolve_relative_path,
+    wrap_asgi_fastpath,
+)
+from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -220,12 +225,25 @@ def _serialize_flask_result(
     return Response(status=status, body=body_bytes, headers=headers, request_id=request_id)
 
 
-def dispatch_wsgi_direct(
+def _step_coro_sync(coro: Any) -> tuple[bool, Any]:
+    """Step a coroutine once via send(None) and return (True, value) if it completes without suspending."""
+    try:
+        coro.send(None)
+    except StopIteration as stop:
+        return True, stop.value
+    finally:
+        close_fn = getattr(coro, "close", None)
+        if callable(close_fn):
+            close_fn()
+    return False, None
+
+
+def _prepare_flask_kwargs(
     compiled: CompiledRoute,
     request_or_environ: Request | WsgiEnviron | dict[str, Any],
     path_params: dict[str, str],
-) -> Response:
-    """Execute a synchronous Flask view directly using zero-copy body decoding."""
+) -> tuple[int, dict[str, Any]]:
+    """Build keyword arguments for a compiled Flask view function."""
     request_id = int(getattr(request_or_environ, "request_id", 0))
     kwargs: dict[str, Any] = {}
     converter_map = dict(compiled.param_converters)
@@ -267,21 +285,49 @@ def dispatch_wsgi_direct(
             elif wsgi_inp is not None and hasattr(wsgi_inp, "read"):
                 raw = wsgi_inp.read()
                 if compiled.body_type is not None:
-                    kwargs[compiled.body_param_name] = msgspec.json.decode(raw, type=compiled.body_type)
+                    kwargs[compiled.body_param_name] = decode_json(raw, type=compiled.body_type)
                 else:
-                    kwargs[compiled.body_param_name] = msgspec.json.decode(raw)
+                    kwargs[compiled.body_param_name] = decode_json(raw)
+    return request_id, kwargs
 
+
+def dispatch_wsgi_direct(
+    compiled: CompiledRoute,
+    request_or_environ: Request | WsgiEnviron | dict[str, Any],
+    path_params: dict[str, str],
+) -> Response | None:
+    """Execute a synchronous or non-suspending async Flask view directly using zero-copy body decoding."""
+    request_id, kwargs = _prepare_flask_kwargs(compiled, request_or_environ, path_params)
     result = compiled.view_func(**kwargs)
+    if inspect.iscoroutine(result):
+        completed, stepped_val = _step_coro_sync(result)
+        if not completed:
+            return None
+        result = stepped_val
+    return _serialize_flask_result(result, compiled.status_code, request_id)
+
+
+async def _dispatch_flask_async(
+    compiled: CompiledRoute,
+    request_obj: Request,
+    path_params: dict[str, str],
+) -> Response:
+    """Execute a synchronous or async Flask view within an ASGI event loop."""
+    request_id, kwargs = _prepare_flask_kwargs(compiled, request_obj, path_params)
+    result = compiled.view_func(**kwargs)
+    if inspect.isawaitable(result):
+        result = await result
     return _serialize_flask_result(result, compiled.status_code, request_id)
 
 
 class FastPath:
     """Fastpath route table and dispatcher for Flask applications."""
 
-    __slots__ = ("_compiler", "_routes")
+    __slots__ = ("_compiler", "_mount_prefix", "_routes")
 
-    def __init__(self, compiler: RouteCompiler) -> None:
+    def __init__(self, compiler: RouteCompiler, *, mount_prefix: str = "") -> None:
         self._compiler = compiler
+        self._mount_prefix = mount_prefix
         self._routes = compile_fastpath_routes(compiler)
 
     @property
@@ -306,9 +352,42 @@ class FastPath:
         if matched is None:
             return None
         compiled, params = matched
-        if compiled.is_async:
+        if not getattr(compiled.view_func, "__vertebra_fastpath__", True):
             return None
         return dispatch_wsgi_direct(compiled, request, params)
+
+    async def dispatch_async(
+        self,
+        scope: Any,
+        receive: Any,
+        send: Any,
+        *,
+        body: bytes | None = None,
+    ) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
+        """Dispatch an ASGI request directly through a compiled sync or async Flask view."""
+        _ = send
+        scope_type = scope.get("type", "http") if hasattr(scope, "get") else scope["type"]
+        if scope_type != "http":
+            return None
+        method = str(scope.get("method", "GET") if hasattr(scope, "get") else scope["method"]).upper()
+        path = resolve_relative_path(scope, self._mount_prefix)
+        matched = self.match(method, path)
+        if matched is None:
+            return None
+        compiled, params = matched
+        if not getattr(compiled.view_func, "__vertebra_fastpath__", True):
+            return None
+        raw_body = await extract_scope_body_fast(scope, receive, body, method=method)
+        req_obj = Request.from_parts(method=method, path=path, body=raw_body)
+        resp = await _dispatch_flask_async(compiled, req_obj, params)
+        encoded_headers = [
+            (
+                k if isinstance(k, bytes) else str(k).encode("latin-1"),
+                v if isinstance(v, bytes) else str(v).encode("latin-1"),
+            )
+            for k, v in resp.headers
+        ]
+        return int(resp.status), encoded_headers, bytes(resp.body)
 
     def dispatch_wsgi(
         self,
@@ -317,14 +396,26 @@ class FastPath:
     ) -> list[bytes] | None:
         """Attempt zero-copy fastpath dispatch for a PEP 3333 WSGI call."""
         method = str(environ.get("REQUEST_METHOD", "GET"))
-        path = str(environ.get("PATH_INFO", "/"))
-        matched = self.match(method, path)
+        raw_path = str(environ.get("PATH_INFO", "/"))
+        prefix = self._mount_prefix or str(environ.get("SCRIPT_NAME", "") or "")
+        if prefix:
+            norm = prefix.rstrip("/")
+            if norm and raw_path.startswith(f"{norm}/"):
+                raw_path = raw_path[len(norm) :]
+            elif norm and raw_path == norm:
+                raw_path = "/"
+        matched = self.match(method, raw_path)
         if matched is None:
             return None
         compiled, params = matched
-        if compiled.is_async or not getattr(compiled.view_func, "__vertebra_fastpath__", True):
+        if not getattr(compiled.view_func, "__vertebra_fastpath__", True):
             return None
         resp = dispatch_wsgi_direct(compiled, environ, params)
+        if resp is None:
+            return None
+        raw_send = getattr(start_response, "send_raw_response", None)
+        if callable(raw_send):
+            return cast("list[bytes]", raw_send(int(resp.status), resp.headers, bytes(resp.body)))
         status_line = f"{resp.status} OK" if resp.status < 400 else f"{resp.status} ERROR"
         hdrs = [
             (
@@ -335,3 +426,31 @@ class FastPath:
         ]
         start_response(status_line, hdrs)
         return [bytes(resp.body)]
+
+    def wrap_wsgi(self, wsgi_app: Callable[..., Any] | None = None) -> Callable[..., Any]:
+        """Wrap a WSGI callable so eligible routes execute via the zero-copy fastpath."""
+        target = wsgi_app or getattr(getattr(self._compiler, "_app", None), "wsgi_app", None)
+
+        def _wrapped_wsgi(environ: WsgiEnviron | dict[str, Any], start_response: Callable[..., Any]) -> Any:
+            chunks = self.dispatch_wsgi(environ, start_response)
+            if chunks is not None:
+                return chunks
+            if callable(target):
+                return target(environ, start_response)
+            start_response("404 Not Found", [("content-type", "text/plain")])
+            return [b"Not Found"]
+
+        dyn_wsgi = cast("Any", _wrapped_wsgi)
+        dyn_wsgi._vertebra_fastpath = self
+        dyn_wsgi.__vertebra_fastpath__ = self
+        dyn_wsgi.__vertebra_fastpath_attached__ = True
+        return _wrapped_wsgi
+
+    def wrap_asgi(self, fallback_app: Callable[..., Any] | None = None) -> Callable[..., Any]:
+        """Wrap an ASGI callable so eligible sync and async Flask views execute via the fastpath."""
+
+        async def _default_fallback(_scope: Any, _receive: Any, send: Any) -> None:
+            await send({"type": "http.response.start", "status": 404, "headers": [(b"content-type", b"text/plain")]})
+            await send({"type": "http.response.body", "body": b"Not Found", "more_body": False})
+
+        return wrap_asgi_fastpath(self, fallback_app or _default_fallback)

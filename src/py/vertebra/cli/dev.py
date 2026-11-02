@@ -36,6 +36,12 @@ logger = logging.getLogger("vertebra.cli.dev")
     default="auto",
     help="Gateway protocol interface (auto, asgi, rsgi, or wsgi)",
 )
+@click.option(
+    "--loop",
+    type=click.Choice(["auto", "uvloop", "winloop", "rloop", "asyncio"], case_sensitive=False),
+    default="auto",
+    help="Event loop backend (auto, uvloop, winloop, rloop, or asyncio)",
+)
 @click.option("--no-banner", is_flag=True, help="Suppress startup banner")
 @click.option("--no-tui", is_flag=True, help="Disable interactive TUI dashboard")
 @click.option("--verbose", is_flag=True, help="Enable verbose tracebacks with local variables")
@@ -64,6 +70,7 @@ def dev(
     no_reload: bool,
     asgi: bool,
     interface: str,
+    loop: str,
     no_banner: bool,
     no_tui: bool,
     verbose: bool,
@@ -93,6 +100,7 @@ def dev(
         log_level=log_level,
         dev=True,
         native=not asgi,
+        loop=loop,
         with_workers=effective_with_workers,
         worker_queues=effective_queues or ("default",),
         worker_lane_concurrency=effective_lanes,

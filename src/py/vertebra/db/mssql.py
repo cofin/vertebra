@@ -300,15 +300,23 @@ class SyncMSSQLDriver:
         return self._last_tds_batch
 
     def _prepare_and_lease(self, sql: str) -> Any:
-        if self._broker is not None and hasattr(self._broker, "statement_cache"):
-            cached = self._broker.statement_cache.lookup(MSSQL_DIALECT_TAG, sql)
+        sc_attr = getattr(self._broker, "statement_cache", None) if self._broker is not None else None
+        sc = sc_attr() if callable(sc_attr) else sc_attr
+        if sc is not None and hasattr(sc, "lookup") and hasattr(sc, "insert"):
+            sql_bytes = sql.encode("utf-8")
+            try:
+                cached = sc.lookup(MSSQL_DIALECT_TAG, sql)
+                use_bytes_key = False
+            except TypeError:
+                cached = sc.lookup(MSSQL_DIALECT_TAG, sql_bytes)
+                use_bytes_key = True
             if cached is not None and cached.compiled_sql:
                 rewritten = cached.compiled_sql.decode("utf-8")
             else:
                 rewritten, count = rewrite_mssql_placeholders(sql)
-                self._broker.statement_cache.insert(
+                sc.insert(
                     MSSQL_DIALECT_TAG,
-                    sql,
+                    sql_bytes if use_bytes_key else sql,
                     count,
                     rewritten.encode("utf-8"),
                     b"",
@@ -319,13 +327,21 @@ class SyncMSSQLDriver:
         self._last_rewritten_sql = rewritten
         self._last_tds_batch = encode_tds_sql_batch(rewritten, 0)
 
-        if self._broker is not None and hasattr(self._broker, "lease_table"):
+        if self._broker is not None and hasattr(self._broker, "lease_table") and self._broker.lease_table is not None:
             return self._broker.lease_table.acquire(os.getpid())
+        if self._broker is not None and hasattr(self._broker, "acquire"):
+            try:
+                return self._broker.acquire(os.getpid())
+            except TypeError:
+                return self._broker.acquire(bind_key="mssql")
         return None
 
     def _release_lease(self, grant: Any) -> None:
-        if grant is not None and self._broker is not None and hasattr(self._broker, "lease_table"):
-            self._broker.lease_table.release(grant.slot_index, grant.generation)
+        if grant is not None and self._broker is not None:
+            if hasattr(self._broker, "lease_table") and self._broker.lease_table is not None:
+                self._broker.lease_table.release(grant.slot_index, grant.generation)
+            elif hasattr(self._broker, "release") and hasattr(grant, "slot_index"):
+                self._broker.release(grant.slot_index, grant.generation)
 
     def execute(self, sql: str, params: Sequence[Any] | Mapping[str, Any] | None = None) -> int:
         """Execute a DML or DDL statement and return affected row count."""

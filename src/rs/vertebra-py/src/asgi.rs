@@ -1323,6 +1323,77 @@ impl AsgiProtocol {
         Ok(fut_py)
     }
 
+    pub fn body_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, self.body_source.as_slice())
+    }
+
+    pub fn __call__(
+        &self,
+        py: Python<'_>,
+        message: &Bound<'_, PyDict>,
+    ) -> PyResult<Py<PyEmptyAwaitable>> {
+        self.send(py, message)
+    }
+
+    #[pyo3(signature = (status, headers=None, body=None))]
+    pub fn send_raw_response(
+        &self,
+        py: Python<'_>,
+        status: u16,
+        headers: Option<&Bound<'_, PyAny>>,
+        body: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyEmptyAwaitable>> {
+        let mut immediate_flush: Option<FlushedProtocolResponse> = None;
+        {
+            let mut st = self
+                .state
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("ASGI state lock poisoned"))?;
+            if st.started {
+                return Err(PyRuntimeError::new_err(
+                    "Duplicate 'http.response.start' message",
+                ));
+            }
+            st.started = true;
+            st.complete = true;
+            st.status = status;
+            if let Some(hdrs) = headers {
+                let mut has_cl = st.has_content_length;
+                encode_py_headers_into(py, hdrs, &mut st.headers_raw, &mut has_cl)?;
+                st.has_content_length = has_cl;
+            }
+            if let Some(body_obj) = body
+                && !body_obj.is_none()
+            {
+                if let Ok(py_b) = body_obj.cast::<PyBytes>() {
+                    if !py_b.as_bytes().is_empty() {
+                        st.single_body_py = Some(py_b.clone().unbind());
+                    }
+                } else {
+                    with_buffer_slice(py, body_obj, |slice| {
+                        if !slice.is_empty() {
+                            st.body_buf.extend_from_slice(slice);
+                        }
+                        Ok(())
+                    })?;
+                }
+            }
+            if self.direct_submit && st.immediate_submit && !st.submitted {
+                immediate_flush = Some(Self::extract_prepared_from_guard(self.request_id, &mut st));
+            }
+        }
+        if let Some(flushed) = immediate_flush {
+            ResponseSubmitter::submit_raw_inner(
+                py,
+                flushed.request_id,
+                flushed.status,
+                &flushed.headers_raw,
+                flushed.body.as_slice(py),
+            )?;
+        }
+        get_empty_awaitable(py)
+    }
+
     pub fn send(
         &self,
         py: Python<'_>,
@@ -1635,23 +1706,155 @@ impl AsgiProtocol {
     }
 }
 
+pub(crate) const JSON_CONTENT_TYPE_COMPACT: &[u8] = b"\x0ccontent-type\x10\x00application/json";
+pub(crate) const NATIVE_ERROR_403_BODY: &[u8] = b"forbidden";
+pub(crate) const NATIVE_ERROR_500_BODY: &[u8] = b"internal server error";
+
+static ENCODE_JSON_BYTES_FN: pyo3::sync::PyOnceLock<Py<PyAny>> = pyo3::sync::PyOnceLock::new();
+
+fn prepare_native_flushed_response(
+    py: Python<'_>,
+    request_id: u64,
+    default_status: u16,
+    raw: &Bound<'_, PyAny>,
+) -> PyResult<FlushedProtocolResponse> {
+    if let Ok(py_b) = raw.cast::<PyBytes>() {
+        return Ok(FlushedProtocolResponse {
+            request_id,
+            status: default_status,
+            headers_raw: Vec::new(),
+            body: PreparedRawBody::PyBytes(py_b.clone().unbind()),
+        });
+    }
+    if let Ok(py_s) = raw.cast::<PyString>() {
+        return Ok(FlushedProtocolResponse {
+            request_id,
+            status: default_status,
+            headers_raw: Vec::new(),
+            body: PreparedRawBody::Owned(py_s.to_str()?.as_bytes().to_vec()),
+        });
+    }
+    if let Ok(resp) = raw.cast::<Response>() {
+        let r = resp.borrow();
+        let resolved_id = if r.request_id == 0 {
+            request_id
+        } else {
+            r.request_id
+        };
+        let headers_raw = encode_headers_compact(&r.headers);
+        return Ok(FlushedProtocolResponse {
+            request_id: resolved_id,
+            status: r.status,
+            headers_raw,
+            body: PreparedRawBody::Owned(r.body.to_vec()),
+        });
+    }
+    if raw.is_instance_of::<pyo3::types::PyByteArray>()
+        || raw.is_instance_of::<pyo3::types::PyMemoryView>()
+    {
+        let owned = with_buffer_slice(py, raw, |s| Ok(s.to_vec()))?;
+        return Ok(FlushedProtocolResponse {
+            request_id,
+            status: default_status,
+            headers_raw: Vec::new(),
+            body: PreparedRawBody::Owned(owned),
+        });
+    }
+    let encode_fn = ENCODE_JSON_BYTES_FN.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+        let serializers = py.import(pyo3::intern!(py, "vertebra.utils.serializers"))?;
+        Ok(serializers
+            .getattr(pyo3::intern!(py, "encode_json_bytes"))?
+            .unbind())
+    })?;
+    let encoded_any = encode_fn.bind(py).call1((raw,))?;
+    if let Ok(py_b) = encoded_any.cast::<PyBytes>() {
+        return Ok(FlushedProtocolResponse {
+            request_id,
+            status: default_status,
+            headers_raw: JSON_CONTENT_TYPE_COMPACT.to_vec(),
+            body: PreparedRawBody::PyBytes(py_b.clone().unbind()),
+        });
+    }
+    let extracted = with_buffer_slice(py, &encoded_any, |s| Ok(s.to_vec()))?;
+    Ok(FlushedProtocolResponse {
+        request_id,
+        status: default_status,
+        headers_raw: JSON_CONTENT_TYPE_COMPACT.to_vec(),
+        body: PreparedRawBody::Owned(extracted),
+    })
+}
+
+fn prepare_native_error_response(
+    py: Python<'_>,
+    request_id: u64,
+    err: &PyErr,
+) -> FlushedProtocolResponse {
+    let is_permission_denied = err
+        .get_type(py)
+        .name()
+        .is_ok_and(|n| n == "PermissionDeniedError");
+    if is_permission_denied {
+        FlushedProtocolResponse {
+            request_id,
+            status: 403,
+            headers_raw: ERROR_500_HEADERS_RAW.to_vec(),
+            body: PreparedRawBody::Owned(NATIVE_ERROR_403_BODY.to_vec()),
+        }
+    } else {
+        FlushedProtocolResponse {
+            request_id,
+            status: 500,
+            headers_raw: ERROR_500_HEADERS_RAW.to_vec(),
+            body: PreparedRawBody::Owned(NATIVE_ERROR_500_BODY.to_vec()),
+        }
+    }
+}
+
 pub(crate) enum ProtocolFinalizer {
     Asgi(Py<AsgiProtocol>),
     Rsgi(Py<crate::rsgi::http::RsgiHttpProtocol>),
+    Native {
+        request_id: u64,
+        default_status: u16,
+    },
 }
 
 impl ProtocolFinalizer {
-    fn on_return(&self, py: Python<'_>) -> PyResult<()> {
+    fn on_return(&self, py: Python<'_>, ret_val: &Bound<'_, PyAny>) -> PyResult<()> {
         match self {
             Self::Asgi(proto) => proto.bind(py).get().finalize_async_return(py),
             Self::Rsgi(proto) => proto.bind(py).get().finalize_async_return(py),
+            Self::Native {
+                request_id,
+                default_status,
+            } => {
+                let flushed =
+                    prepare_native_flushed_response(py, *request_id, *default_status, ret_val)?;
+                ResponseSubmitter::submit_raw_inner(
+                    py,
+                    flushed.request_id,
+                    flushed.status,
+                    &flushed.headers_raw,
+                    flushed.body.as_slice(py),
+                )
+            }
         }
     }
 
-    fn on_error(&self, py: Python<'_>) -> PyResult<()> {
+    fn on_error(&self, py: Python<'_>, err: &PyErr) -> PyResult<()> {
         match self {
             Self::Asgi(proto) => proto.bind(py).get().finalize_async_error(py),
             Self::Rsgi(proto) => proto.bind(py).get().finalize_async_error(py),
+            Self::Native { request_id, .. } => {
+                let flushed = prepare_native_error_response(py, *request_id, err);
+                ResponseSubmitter::submit_raw_inner(
+                    py,
+                    flushed.request_id,
+                    flushed.status,
+                    &flushed.headers_raw,
+                    flushed.body.as_slice(py),
+                )
+            }
         }
     }
 }
@@ -1709,7 +1912,7 @@ impl SteppedCoroutine {
                 self.coro = None;
                 self.self_task = None;
                 if let Some(fin) = self.finalizer.take() {
-                    fin.on_return(py)?;
+                    fin.on_return(py, ret_val.bind(py))?;
                 }
                 Err(PyStopIteration::new_err(ret_val))
             }
@@ -1719,7 +1922,7 @@ impl SteppedCoroutine {
                 self.self_task = None;
                 log_app_exception(py, self.protocol_label, &err);
                 if let Some(fin) = self.finalizer.take() {
-                    let _ = fin.on_error(py);
+                    let _ = fin.on_error(py, &err);
                 }
                 Err(PyStopIteration::new_err(py.None()))
             }
@@ -1780,7 +1983,11 @@ impl SteppedCoroutine {
                 self.self_task = None;
                 if err.is_instance_of::<PyStopIteration>(py) {
                     if let Some(fin) = self.finalizer.take() {
-                        fin.on_return(py)?;
+                        let val_bound = err
+                            .value(py)
+                            .getattr(pyo3::intern!(py, "value"))
+                            .unwrap_or_else(|_| py.None().into_bound(py));
+                        fin.on_return(py, &val_bound)?;
                     }
                     return Err(err);
                 }
@@ -1793,7 +2000,7 @@ impl SteppedCoroutine {
                 }
                 log_app_exception(py, self.protocol_label, &err);
                 if let Some(fin) = self.finalizer.take() {
-                    let _ = fin.on_error(py);
+                    let _ = fin.on_error(py, &err);
                 }
                 Err(PyStopIteration::new_err(py.None()))
             }
@@ -2037,9 +2244,8 @@ fn drive_asgi_targets_inline(
         let proto_py = Py::new(py, proto)?;
         let proto_bound = proto_py.bind(py);
         let receive_fn = proto_bound.getattr(pyo3::intern!(py, "receive"))?;
-        let send_fn = proto_bound.getattr(pyo3::intern!(py, "send"))?;
 
-        let call_res = app.call1((scope_py.bind(py), receive_fn, send_fn));
+        let call_res = app.call1((scope_py.bind(py), receive_fn, proto_bound));
         let coro = match call_res {
             Ok(c) => c,
             Err(err) => {
@@ -2172,6 +2378,164 @@ pub fn drive_asgi_batch(
                     loop_obj: lp.clone().unbind(),
                     root_path: root_path.to_string(),
                     lifespan_state: lifespan_state.map(|d| d.clone().unbind()),
+                },
+            )?;
+            lp.call_method1(pyo3::intern!(py, "call_soon_threadsafe"), (cb,))?;
+            Ok(0)
+        }
+    }
+}
+
+#[pyclass(name = "_NativeBatchLoopCallback", frozen, immutable_type)]
+struct NativeBatchLoopCallback {
+    items: Py<PyAny>,
+    loop_obj: Py<PyAny>,
+}
+
+#[pymethods]
+impl NativeBatchLoopCallback {
+    fn __call__(&self, py: Python<'_>) -> PyResult<()> {
+        let _ = drive_native_items_inline(
+            py,
+            self.items.bind(py),
+            Some(self.loop_obj.bind(py)),
+            false,
+        )?;
+        Ok(())
+    }
+}
+
+fn drive_native_items_inline(
+    py: Python<'_>,
+    items: &Bound<'_, PyAny>,
+    active_loop: Option<&Bound<'_, PyAny>>,
+    drive_until_complete: bool,
+) -> PyResult<usize> {
+    let cap = items.len().unwrap_or(8);
+    if cap == 0 {
+        return Ok(0);
+    }
+    let mut ready_responses: Vec<FlushedProtocolResponse> = Vec::with_capacity(cap);
+    let mut spawned_tasks: Vec<Bound<'_, PyAny>> = Vec::new();
+    let mut completed_inline = 0usize;
+
+    for entry in items.try_iter()? {
+        let entry = entry?;
+        let tup = entry.cast::<PyTuple>()?;
+        if tup.len() < 2 {
+            return Err(PyTypeError::new_err(
+                "drive_native_batch items must be (request_id, coro[, status_code]) tuples",
+            ));
+        }
+        let request_id = tup.get_item(0)?.extract::<u64>()?;
+        let coro = tup.get_item(1)?;
+        let default_status = if tup.len() >= 3 {
+            tup.get_item(2)?.extract::<u16>().unwrap_or(200)
+        } else {
+            200
+        };
+
+        let mut yielded: *mut ffi::PyObject = std::ptr::null_mut();
+        let send_res = unsafe { ffi::PyIter_Send(coro.as_ptr(), ffi::Py_None(), &mut yielded) };
+        match send_res {
+            ffi::PySendResult::PYGEN_RETURN => {
+                let ret_bound = if yielded.is_null() {
+                    py.None().into_bound(py)
+                } else {
+                    unsafe { Bound::from_owned_ptr(py, yielded) }
+                };
+                match prepare_native_flushed_response(py, request_id, default_status, &ret_bound) {
+                    Ok(flushed) => ready_responses.push(flushed),
+                    Err(err) => {
+                        log_app_exception(py, "Native", &err);
+                        ready_responses.push(prepare_native_error_response(py, request_id, &err));
+                    }
+                }
+                completed_inline += 1;
+            }
+            ffi::PySendResult::PYGEN_ERROR => {
+                let err = PyErr::fetch(py);
+                log_app_exception(py, "Native", &err);
+                ready_responses.push(prepare_native_error_response(py, request_id, &err));
+                completed_inline += 1;
+            }
+            ffi::PySendResult::PYGEN_NEXT => {
+                let first_yielded = unsafe { Bound::from_owned_ptr(py, yielded) }.unbind();
+                let lp = match active_loop {
+                    Some(l) => l.clone(),
+                    None => py
+                        .import(pyo3::intern!(py, "asyncio"))?
+                        .call_method0(pyo3::intern!(py, "get_running_loop"))?,
+                };
+                let task = spawn_stepped_coroutine(
+                    py,
+                    &lp,
+                    coro.unbind(),
+                    first_yielded,
+                    ProtocolFinalizer::Native {
+                        request_id,
+                        default_status,
+                    },
+                    "Native",
+                )?;
+                if drive_until_complete {
+                    spawned_tasks.push(task);
+                }
+            }
+        }
+    }
+
+    if !ready_responses.is_empty() {
+        let batch_slices: Vec<(u64, u16, &[u8], &[u8])> = ready_responses
+            .iter()
+            .map(|r| {
+                (
+                    r.request_id,
+                    r.status,
+                    r.headers_raw.as_slice(),
+                    r.body.as_slice(py),
+                )
+            })
+            .collect();
+        ResponseSubmitter::submit_batch_raw_inner(py, &batch_slices)?;
+    }
+
+    if drive_until_complete
+        && !spawned_tasks.is_empty()
+        && let Some(lp) = active_loop
+    {
+        let asyncio = py.import(pyo3::intern!(py, "asyncio"))?;
+        let gather = asyncio.getattr(pyo3::intern!(py, "gather"))?;
+        let args = PyTuple::new(py, &spawned_tasks)?;
+        let gathered = gather.call1(args)?;
+        lp.call_method1(pyo3::intern!(py, "run_until_complete"), (gathered,))?;
+    }
+
+    Ok(completed_inline)
+}
+
+/// Step a batch of native `async def` handler coroutines in C via `PyIter_Send`.
+#[pyfunction]
+#[pyo3(name = "drive_native_batch", signature = (items, *, loop_obj=None))]
+pub fn drive_native_batch(
+    py: Python<'_>,
+    items: &Bound<'_, PyAny>,
+    loop_obj: Option<&Bound<'_, PyAny>>,
+) -> PyResult<usize> {
+    if items.len().unwrap_or(0) == 0 {
+        return Ok(0);
+    }
+    match classify_loop_mode(py, loop_obj)? {
+        LoopExecutionMode::Inline {
+            active_loop,
+            drive_until_complete,
+        } => drive_native_items_inline(py, items, active_loop.as_ref(), drive_until_complete),
+        LoopExecutionMode::CrossThread(lp) => {
+            let cb = Py::new(
+                py,
+                NativeBatchLoopCallback {
+                    items: items.clone().unbind(),
+                    loop_obj: lp.clone().unbind(),
                 },
             )?;
             lp.call_method1(pyo3::intern!(py, "call_soon_threadsafe"), (cb,))?;

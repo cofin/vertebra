@@ -19,7 +19,7 @@ Root index for **Vertebra** — the Rust-powered, full-stack Python & TypeScript
 
 - **[Product Overview](product/product.md)** — Vision, core capabilities, runtime topologies (`Auto`, `Embedded`, and `Shm`, Python `3.12`–`3.15` and free-threaded `3.14t`/`3.15t`), multicloud object storage, database drivers, telemetry, and Litestar/Starlette/FastAPI/Flask/Django/SQLSpec/Alchemy/APEX/gRPC integrations.
 - **[Product & Engineering Guidelines](product/product-guidelines.md)** — Clean-break domain naming rules, deep-module seam classification, zero-copy hot-path invariants, `msgspec.Struct(..., frozen=True, gc=False)` value objects, Python module layout, and Git/PR discipline.
-- **[Technology Stack](product/tech-stack.md)** — Complete Rust workspace (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`), Python (`vertebra-core` PyPI distribution / `vertebra` import namespace), and TypeScript (`@vertebra/client` `0.2.0`) dependency and toolchain matrix.
+- **[Technology Stack](product/tech-stack.md)** — Complete Rust workspace (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`), Python (`vertebra-core` PyPI distribution / `vertebra` import namespace), and TypeScript (`@vertebra/client` `0.3.0`) dependency and toolchain matrix.
 
 ## 2. Engineering Knowledge Base (`knowledge/`)
 
@@ -52,6 +52,6 @@ Root index for **Vertebra** — the Rust-powered, full-stack Python & TypeScript
 
 ## 3. Specifications, Research & Activity Log
 
-- **`specs/` (lazy)** — Materialized only when active Flow specifications or task worksheets exist.
+- **[Active Spec: Async Loop Backend, C-API Coroutine Stepper & Multi-Framework FastPath (`async-loop-and-framework-fastpath`)](specs/async-loop-and-framework-fastpath/spec.md)** — `uvloop`/`winloop`/`rloop` `LoopBackend`, C-API `PyIter_Send` native `async def` stepper, `AsgiSend.send_raw_response` / `_WsgiStartResponse.send_raw_response`, `RustCompletionRing` + `Notifier` for `vertebra-storage`/`vertebra-db`, and unified `FastPath` + auto-stacked `app.mount()` across `Native`, `Litestar`, `FastAPI`, `Starlette`, `Flask`, and `Django`.
 - **`research/` (lazy)** — Materialized only when un-promoted technical research briefs exist.
 - **[Bundle Activity Log](log.md)** — Chronological log of bundle initialization, syntheses, and archived flows.

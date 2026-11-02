@@ -6,6 +6,8 @@ from typing import Any
 
 import msgspec
 
+from vertebra._vertebra import PyEmptyAwaitable
+
 __all__ = (
     "DEFAULT_STREAM_HIGH_WATERMARK",
     "DEFAULT_STREAM_LOW_WATERMARK",
@@ -23,6 +25,7 @@ __all__ = (
 DEFAULT_STREAM_QUEUE_MAXSIZE = 256
 DEFAULT_STREAM_HIGH_WATERMARK = 192
 DEFAULT_STREAM_LOW_WATERMARK = 64
+_EMPTY_SEND_AWAITABLE = PyEmptyAwaitable()
 
 ChunkCallback = Callable[[int, bytes], None]
 
@@ -282,6 +285,36 @@ class AsgiSend:
 
         msg = f"Unexpected ASGI send message type: {msg_type!r}"
         raise AsgiProtocolError(msg)
+
+    def send_raw_response(
+        self,
+        status: int,
+        headers: Iterable[tuple[bytes | str, bytes | str]] | None = None,
+        body: Buffer = b"",
+    ) -> PyEmptyAwaitable:
+        """Write status, headers, and body in a single call and return an immediately completed awaitable."""
+        if self._started:
+            msg = "Duplicate 'http.response.start' message"
+            raise AsgiProtocolError(msg)
+        self._started = True
+        self._complete = True
+        self._status = int(status)
+        if headers:
+            self._headers = [
+                (
+                    k.decode("latin-1") if isinstance(k, bytes) else str(k),
+                    v.decode("latin-1") if isinstance(v, bytes) else str(v),
+                )
+                for k, v in headers
+            ]
+        else:
+            self._headers = []
+        if body:
+            raw = body if isinstance(body, bytes) else bytes(body)
+            self._body_chunks.append(raw)
+            if self._on_chunk is not None:
+                self._on_chunk(self._request_id, raw)
+        return _EMPTY_SEND_AWAITABLE
 
     def _assert_started(self, msg_type: str) -> None:
         if not self._started:

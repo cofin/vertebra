@@ -7,6 +7,7 @@ from typing import Any, ClassVar, Self, cast
 
 import msgspec
 
+from vertebra.db._registry import DatabaseRegistry
 from vertebra.db.dialer.alloydb import AlloyDBDialer
 from vertebra.db.dialer.cloudsql import CloudSQLDialer
 from vertebra.db.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
@@ -842,19 +843,29 @@ class SyncAdapterConfig[ConfigT, DriverT: SyncDriverAdapterBase](SyncDatabaseCon
         *,
         bind_key: str = "default",
         broker: Any = None,
+        share_pool: bool = True,
         arrow_threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
         statement_config: StatementConfig | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize synchronous configuration."""
         self.bind_key = bind_key
-        self.broker = broker
+        self.share_pool: bool = bool(share_pool)
+        config_broker = getattr(config, "broker", None) if config is not None else None
+        if broker is not None:
+            self.broker = broker
+        elif config_broker is not None:
+            self.broker = config_broker
+        elif self.share_pool:
+            self.broker = DatabaseRegistry.default_broker()
+        else:
+            self.broker = None
         self.arrow_threshold_rows = arrow_threshold_rows
         if config is not None:
             self.driver_config: ConfigT = config
         else:
-            if broker is not None and "broker" not in kwargs:
-                kwargs["broker"] = broker
+            if self.broker is not None and "broker" not in kwargs:
+                kwargs["broker"] = self.broker
             self.driver_config = self._config_cls(**kwargs)
         self._driver_instance: DriverT | None = None
         super().__init__(
@@ -873,7 +884,10 @@ class SyncAdapterConfig[ConfigT, DriverT: SyncDriverAdapterBase](SyncDatabaseCon
     def create_driver(self) -> DriverT:
         """Instantiate or return the cached synchronous Vertebra database driver adapter."""
         if self._driver_instance is None:
-            native = self._driver_cls(self.driver_config, broker=self.broker)
+            if self.share_pool and self.broker is DatabaseRegistry.default_broker():
+                native = DatabaseRegistry.default().get_shared_sync_driver(cast("Any", self.driver_config))
+            else:
+                native = self._driver_cls(self.driver_config, broker=self.broker)
             adapter = self.driver_type(native, statement_config=self.statement_config)
             self._driver_instance = cast("DriverT", adapter)
         return self._driver_instance
@@ -914,19 +928,29 @@ class AsyncAdapterConfig[ConfigT, DriverT: AsyncDriverAdapterBase](AsyncDatabase
         *,
         bind_key: str = "default",
         broker: Any = None,
+        share_pool: bool = True,
         arrow_threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
         statement_config: StatementConfig | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize asynchronous configuration."""
         self.bind_key = bind_key
-        self.broker = broker
+        self.share_pool: bool = bool(share_pool)
+        config_broker = getattr(config, "broker", None) if config is not None else None
+        if broker is not None:
+            self.broker = broker
+        elif config_broker is not None:
+            self.broker = config_broker
+        elif self.share_pool:
+            self.broker = DatabaseRegistry.default_broker()
+        else:
+            self.broker = None
         self.arrow_threshold_rows = arrow_threshold_rows
         if config is not None:
             self.driver_config: ConfigT = config
         else:
-            if broker is not None and "broker" not in kwargs:
-                kwargs["broker"] = broker
+            if self.broker is not None and "broker" not in kwargs:
+                kwargs["broker"] = self.broker
             self.driver_config = self._config_cls(**kwargs)
         self._driver_instance: DriverT | None = None
         super().__init__(
@@ -945,7 +969,10 @@ class AsyncAdapterConfig[ConfigT, DriverT: AsyncDriverAdapterBase](AsyncDatabase
     def create_driver(self) -> DriverT:
         """Instantiate or return the cached asynchronous Vertebra database driver adapter."""
         if self._driver_instance is None:
-            native = self._driver_cls(self.driver_config, broker=self.broker)
+            if self.share_pool and self.broker is DatabaseRegistry.default_broker():
+                native = DatabaseRegistry.default().get_shared_driver(cast("Any", self.driver_config))
+            else:
+                native = self._driver_cls(self.driver_config, broker=self.broker)
             adapter = self.driver_type(native, statement_config=self.statement_config)
             self._driver_instance = cast("DriverT", adapter)
         return self._driver_instance

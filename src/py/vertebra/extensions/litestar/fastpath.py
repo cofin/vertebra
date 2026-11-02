@@ -4,7 +4,7 @@ import contextlib
 import enum
 import inspect
 from collections.abc import AsyncGenerator, AsyncIterable, Callable, Generator, Iterable
-from typing import Annotated, Any, Self, get_origin, get_type_hints
+from typing import Annotated, Any, Self, get_args, get_origin, get_type_hints
 from urllib.parse import parse_qsl
 
 import msgspec
@@ -24,6 +24,11 @@ from vertebra.extensions.litestar.router import (
     ExtractedRoute,
     RouterTable,
     extract_routes,
+)
+from vertebra.server._fastpath import (
+    extract_scope_body_fast,
+    resolve_relative_path,
+    wrap_asgi_fastpath,
 )
 from vertebra.typing import Empty
 from vertebra.utils.module_loader import import_optional
@@ -79,7 +84,7 @@ class CompiledRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 class FastPath:
     """Fast-path bypass router dispatching directly to compiled Litestar routes."""
 
-    __slots__ = ("_app", "_compiled_routes", "_direct_plans", "_router_table")
+    __slots__ = ("_app", "_compiled_routes", "_direct_plans", "_mount_prefix", "_router_table")
 
     def __init__(
         self,
@@ -87,6 +92,7 @@ class FastPath:
         *,
         app: Any = None,
         compiled_routes: dict[int, CompiledRoute] | None = None,
+        mount_prefix: str = "",
     ) -> None:
         resolved_app = app
         resolved_table = router_table
@@ -101,6 +107,7 @@ class FastPath:
             resolved_table = extract_routes(resolved_app)
 
         self._app = resolved_app
+        self._mount_prefix = mount_prefix
         self._router_table: RouterTable | None = None
         self._compiled_routes: dict[int, CompiledRoute] = {}
         self._direct_plans: dict[int, _DirectSignaturePlan] = {}
@@ -112,11 +119,11 @@ class FastPath:
         return self._router_table
 
     @classmethod
-    def from_app(cls, app: Any) -> Self:
+    def from_app(cls, app: Any, *, mount_prefix: str = "") -> Self:
         """Construct a bound FastPath directly from an initialized Litestar application."""
         table = extract_routes(app)
         compiled = compile_fastpath_routes(app, router_table=table)
-        return cls(table, app=app, compiled_routes=compiled)
+        return cls(table, app=app, compiled_routes=compiled, mount_prefix=mount_prefix)
 
     def bind_app(
         self,
@@ -151,65 +158,7 @@ class FastPath:
 
     def wrap_asgi(self, fallback_app: Callable[..., Any]) -> Callable[..., Any]:
         """Wrap an ASGI 3.0 callable so eligible HTTP requests execute via direct fastpath dispatch."""
-        bypass = self
-
-        async def _fastpath_asgi_app(scope: Any, receive: Any, send: Any) -> None:
-            sent_via_callback = False
-            buffered_messages: list[Any] = []
-            upstream_exhausted = False
-
-            async def _buffering_receive() -> Any:
-                nonlocal upstream_exhausted
-                msg = await receive()
-                buffered_messages.append(msg)
-                if isinstance(msg, dict) and msg.get("type") == "http.request" and not msg.get("more_body", False):
-                    upstream_exhausted = True
-                return msg
-
-            async def _tracked_send(message: Any) -> None:
-                nonlocal sent_via_callback
-                sent_via_callback = True
-                await send(message)
-
-            direct = await bypass.dispatch(scope, _buffering_receive, _tracked_send)
-            if direct is not None:
-                status_code, encoded_headers, raw_body = direct
-                await send(
-                    {
-                        "type": "http.response.start",
-                        "status": status_code,
-                        "headers": encoded_headers,
-                    }
-                )
-                await send(
-                    {
-                        "type": "http.response.body",
-                        "body": raw_body,
-                        "more_body": False,
-                    }
-                )
-                return
-            if sent_via_callback:
-                return
-            if not buffered_messages:
-                await fallback_app(scope, receive, send)
-                return
-
-            replay_idx = 0
-
-            async def _replay_receive() -> Any:
-                nonlocal replay_idx
-                if replay_idx < len(buffered_messages):
-                    item = buffered_messages[replay_idx]
-                    replay_idx += 1
-                    return item
-                if upstream_exhausted:
-                    return {"type": "http.request", "body": b"", "more_body": False}
-                return await receive()
-
-            await fallback_app(scope, _replay_receive, send)
-
-        return _fastpath_asgi_app
+        return wrap_asgi_fastpath(self, fallback_app)
 
     async def dispatch(
         self,
@@ -244,7 +193,7 @@ class FastPath:
             return None
 
         method = str(scope.get("method", "GET") if hasattr(scope, "get") else scope["method"]).upper()
-        path = str(scope.get("path", "/") if hasattr(scope, "get") else scope["path"])
+        path = resolve_relative_path(scope, self._mount_prefix)
 
         try:
             matched = (
@@ -361,6 +310,9 @@ async def dispatch_handler_direct(
         elif resp_cls_name == "ASGIFileResponse" and _is_default_local_filesystem(
             getattr(asgi_response, "file_system", None)
         ):
+            file_info = getattr(asgi_response, "file_info", None)
+            if inspect.iscoroutine(file_info):
+                file_info.close()
             file_path = getattr(asgi_response, "file_path", None)
             if file_path is not None:
                 await send(
@@ -727,6 +679,25 @@ def _handler_has_custom_response_metadata(handler: Any) -> bool:
     return bool(not _is_empty_sentinel(resp_cls) and getattr(resp_cls, "__name__", "Response") != "Response")
 
 
+def _unwrap_direct_param_annotation(ann: Any, expected_marker_cls: str) -> tuple[bool, Any]:
+    if get_origin(ann) is not Annotated:
+        return True, ann
+    args = get_args(ann)
+    if len(args) != 2:
+        return False, None
+    meta = args[1]
+    meta_cls = type(meta)
+    if meta_cls.__name__ != expected_marker_cls:
+        return False, None
+    try:
+        is_default = bool(meta == meta_cls())
+    except Exception:
+        return False, None
+    if not is_default:
+        return False, None
+    return True, args[0]
+
+
 def _compile_direct_signature_plan(
     entry: ExtractedRoute,
     compiled: CompiledRoute,
@@ -769,16 +740,23 @@ def _compile_direct_signature_plan(
             return None
         if param.name in _RESERVED_CONNECTION_KWARGS:
             return None
-        ann = hints.get(param.name, param.annotation)
-        if get_origin(ann) is Annotated:
-            return None
+        raw_ann = hints.get(param.name, param.annotation)
 
         if param.name in entry.param_types:
+            ok, _ = _unwrap_direct_param_annotation(raw_ann, "PathParameter")
+            if not ok:
+                return None
             path_param_names.append(param.name)
         elif param.name == "data":
+            ok, ann = _unwrap_direct_param_annotation(raw_ann, "BodyKwarg")
+            if not ok:
+                return None
             body_param = "data"
             body_type = Any if ann is inspect.Parameter.empty else ann
         else:
+            ok, ann = _unwrap_direct_param_annotation(raw_ann, "QueryParameter")
+            if not ok:
+                return None
             converter = _resolve_scalar_query_converter(ann)
             if converter is None:
                 return None
@@ -864,18 +842,7 @@ async def _resolve_request_body(
             return preseeded
         if isinstance(preseeded, bytearray | memoryview):
             return bytes(preseeded)
-    if method in _BODYLESS_HTTP_METHODS or not callable(receive):
-        return b""
-
-    chunks: list[bytes] = []
-    while True:
-        message = await receive()
-        chunk = message.get("body", b"")
-        if chunk:
-            chunks.append(chunk if isinstance(chunk, bytes) else bytes(chunk))
-        if not message.get("more_body", False):
-            break
-    resolved = b"" if not chunks else (chunks[0] if len(chunks) == 1 else b"".join(chunks))
+    resolved = await extract_scope_body_fast(scope, receive, body, method=method)
     preseed_scope_body(scope, resolved)
     return resolved
 

@@ -10,6 +10,7 @@ sources:
   - resource: src/py/vertebra/extensions/broker/transport.py
   - resource: src/py/vertebra/extensions/broker/plugin.py
   - resource: src/py/vertebra/extensions/alchemy/broker.py
+  - resource: src/py/vertebra/db/_registry.py
   - resource: src/py/vertebra/utils/sync_tools.py
   - resource: src/py/tests/unit/db/test_native_db_drivers.py
 ---
@@ -43,4 +44,5 @@ Vertebra provides cross-process shared-memory database connection management and
 
 - **`ShmBrokerTransport` & `InMemoryBrokerTransport`**: Coordinate lease requests and statement plan caching across workers via `LeaseBroker` and `StatementCache`, with an in-process thread-safe fallback.
 - **`BrokerPlugin` & `ShmSessionBroker`**: Install broker state, DI providers, ZPages diagnostics, OpenTelemetry `DbPoolRecorder` metrics, and SQLAlchemy `checkout`/`checkin` pool event listeners.
-- **`SyncPool` & `LoopShardedResource`** ([`vertebra.utils.sync_tools`](../../../../../src/py/vertebra/utils/sync_tools.py)): Offload blocking operations without event-loop starvation and shard resources per event-loop thread in multi-loop or free-threaded (Python 3.14t) topologies.
+- **`DatabaseRegistry.default()` & Cross-Framework Shared Pools** ([`vertebra.db._registry`](../../../../../src/py/vertebra/db/_registry.py)): `DatabaseRegistry.default()`, `DatabaseRegistry.default_broker()`, and `DatabaseRegistry.pool_fingerprint(config_or_url)` normalize `(vendor, host_or_path, port, database, user, pooler_mode, cloud_sql_instance, alloydb_instance_uri)` so native database adapters declared independently across stacked `Django` (`DatabaseWrapperMixin`), `Litestar` (`SQLSpec` `SyncAdapterConfig` / `AsyncAdapterConfig`), `SQLAlchemy` (`+vtb` `DBAPIConnection` / `AsyncDBAPIConnection`), and `Vertebra Native` apps reuse the exact same underlying connection pool, `CloudSQLDialer` / `AlloyDBDialer`, and process-wide SHM `LeaseBroker` (unless `share_pool=False` is set).
+- **`SyncPool` & `LoopShardedResource`** ([`vertebra.utils.sync_tools`](../../../../../src/py/vertebra/utils/sync_tools.py)): `SyncPool` right-sizes its thread pool (`max(4, min(32, cpu_count * 2))` on GIL builds, `cpu_count * 4` on `3.14t`/`3.15t`) and coalesces `submit_async` completion wakeups per event loop via `_LoopCompletionQueue` (`0 -> 1` transition triggers a single `loop.call_soon_threadsafe(_drain_completions)` wakeup per burst). `LoopShardedResource[T]` shards non-thread-safe async primitives per event-loop thread.

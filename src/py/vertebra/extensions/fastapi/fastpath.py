@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import inspect
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any, Self, get_type_hints
 from urllib.parse import parse_qsl
 
@@ -26,6 +27,10 @@ from vertebra.extensions.starlette.fastpath import (
     _resolve_request_body,
     _serialize_starlette_http_exception,
     preseed_request_body,
+)
+from vertebra.server._fastpath import (
+    resolve_relative_path,
+    wrap_asgi_fastpath,
 )
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
@@ -60,6 +65,14 @@ class CompiledRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     body_is_msgspec: bool
     body_is_pydantic: bool
     response_serializer: Callable[[Any], bytes] | None
+    sync_to_thread: bool = False
+
+    @property
+    def needs_request(self) -> bool:
+        """Return True when the endpoint or any sub-dependency accepts a Request parameter."""
+        if self.request_param_name is not None:
+            return True
+        return bool(self.dependant_plan is not None and self.dependant_plan.needs_request)
 
     @property
     def is_bypass_eligible(self) -> bool:
@@ -72,7 +85,7 @@ class CompiledRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 class FastPath:
     """Fast-path bypass router dispatching directly to compiled FastAPI APIRoutes."""
 
-    __slots__ = ("_app", "_compiled_routes", "_router_table")
+    __slots__ = ("_app", "_compiled_routes", "_mount_prefix", "_router_table", "_sync_to_thread")
 
     def __init__(
         self,
@@ -80,6 +93,8 @@ class FastPath:
         *,
         app: Any = None,
         compiled_routes: dict[int, CompiledRoute] | None = None,
+        mount_prefix: str = "",
+        sync_to_thread: bool = False,
     ) -> None:
         resolved_app = app
         resolved_table = router_table
@@ -94,6 +109,8 @@ class FastPath:
             resolved_table = extract_routes(resolved_app)
 
         self._app = resolved_app
+        self._mount_prefix = mount_prefix
+        self._sync_to_thread = sync_to_thread
         self._router_table: RouterTable | None = None
         self._compiled_routes: dict[int, CompiledRoute] = {}
         self.bind_app(resolved_app, router_table=resolved_table, compiled_routes=compiled_routes)
@@ -109,11 +126,17 @@ class FastPath:
         return self._compiled_routes
 
     @classmethod
-    def from_app(cls, app: Any) -> Self:
+    def from_app(cls, app: Any, *, mount_prefix: str = "", sync_to_thread: bool = False) -> Self:
         """Construct a bound FastPath directly from a FastAPI application."""
         table = extract_routes(app)
         compiled = compile_fastpath_routes(app, router_table=table)
-        return cls(table, app=app, compiled_routes=compiled)
+        return cls(
+            table,
+            app=app,
+            compiled_routes=compiled,
+            mount_prefix=mount_prefix,
+            sync_to_thread=sync_to_thread,
+        )
 
     def bind_app(
         self,
@@ -137,65 +160,7 @@ class FastPath:
 
     def wrap_asgi(self, fallback_app: Callable[..., Any]) -> Callable[..., Any]:
         """Wrap an ASGI 3.0 callable so eligible HTTP requests execute via direct FastAPI fastpath."""
-        bypass = self
-
-        async def _fastpath_asgi_app(scope: Any, receive: Any, send: Any) -> None:
-            sent_via_callback = False
-            buffered_messages: list[Any] = []
-            upstream_exhausted = False
-
-            async def _buffering_receive() -> Any:
-                nonlocal upstream_exhausted
-                msg = await receive()
-                buffered_messages.append(msg)
-                if isinstance(msg, dict) and msg.get("type") == "http.request" and not msg.get("more_body", False):
-                    upstream_exhausted = True
-                return msg
-
-            async def _tracked_send(message: Any) -> None:
-                nonlocal sent_via_callback
-                sent_via_callback = True
-                await send(message)
-
-            direct = await bypass.dispatch(scope, _buffering_receive, _tracked_send)
-            if direct is not None:
-                status_code, encoded_headers, raw_body = direct
-                await send(
-                    {
-                        "type": "http.response.start",
-                        "status": status_code,
-                        "headers": encoded_headers,
-                    }
-                )
-                await send(
-                    {
-                        "type": "http.response.body",
-                        "body": raw_body,
-                        "more_body": False,
-                    }
-                )
-                return
-            if sent_via_callback:
-                return
-            if not buffered_messages:
-                await fallback_app(scope, receive, send)
-                return
-
-            replay_idx = 0
-
-            async def _replay_receive() -> Any:
-                nonlocal replay_idx
-                if replay_idx < len(buffered_messages):
-                    item = buffered_messages[replay_idx]
-                    replay_idx += 1
-                    return item
-                if upstream_exhausted:
-                    return {"type": "http.request", "body": b"", "more_body": False}
-                return await receive()
-
-            await fallback_app(scope, _replay_receive, send)
-
-        return _fastpath_asgi_app
+        return wrap_asgi_fastpath(self, fallback_app)
 
     async def dispatch(
         self,
@@ -215,7 +180,7 @@ class FastPath:
             return None
 
         method = str(scope.get("method", "GET") if hasattr(scope, "get") else scope["method"]).upper()
-        path = str(scope.get("path", "/") if hasattr(scope, "get") else scope["path"])
+        path = resolve_relative_path(scope, self._mount_prefix)
 
         try:
             matched = table.match_with_params(method, path)
@@ -251,6 +216,7 @@ class FastPath:
                 receive=receive,
                 send=send,
                 dependency_overrides=overrides,
+                sync_to_thread=self._sync_to_thread,
             )
         except Exception as exc:
             http_exc_resp = _serialize_starlette_http_exception(exc)
@@ -278,11 +244,14 @@ async def dispatch_handler_direct(
     receive: Any,
     send: Any,
     dependency_overrides: dict[Callable[..., Any], Callable[..., Any]] | None = None,
+    sync_to_thread: bool = False,
 ) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
     """Execute a FastAPI APIRoute with zero-AsyncExitStack Depends() and zero-copy DTO decoding."""
-    req_cls = _get_starlette_request_cls()
-    request = req_cls(scope, receive=receive, send=send)
-    preseed_request_body(scope, request, body)
+    request: Any = None
+    if compiled.needs_request:
+        req_cls = _get_starlette_request_cls()
+        request = req_cls(scope, receive=receive, send=send)
+        preseed_request_body(scope, request, body)
 
     native_req: Any = None
     req_fn = getattr(scope, "request", None)
@@ -326,7 +295,7 @@ async def dispatch_handler_direct(
                     exit_stack=stack,
                 )
                 kwargs.update(dep_kwargs)
-                result = await _invoke_endpoint(compiled, kwargs)
+                result = await _invoke_endpoint(compiled, kwargs, sync_to_thread=sync_to_thread)
         else:
             dep_kwargs = await execute_dependant_plan(
                 plan,
@@ -337,9 +306,9 @@ async def dispatch_handler_direct(
                 exit_stack=None,
             )
             kwargs.update(dep_kwargs)
-            result = await _invoke_endpoint(compiled, kwargs)
+            result = await _invoke_endpoint(compiled, kwargs, sync_to_thread=sync_to_thread)
     else:
-        result = await _invoke_endpoint(compiled, kwargs)
+        result = await _invoke_endpoint(compiled, kwargs, sync_to_thread=sync_to_thread)
 
     return await _serialize_fastapi_result(
         compiled,
@@ -350,10 +319,17 @@ async def dispatch_handler_direct(
     )
 
 
-async def _invoke_endpoint(compiled: CompiledRoute, kwargs: dict[str, Any]) -> Any:
+async def _invoke_endpoint(
+    compiled: CompiledRoute,
+    kwargs: dict[str, Any],
+    *,
+    sync_to_thread: bool = False,
+) -> Any:
     if compiled.is_async:
         return await compiled.endpoint(**kwargs)
-    return await anyio.to_thread.run_sync(lambda: compiled.endpoint(**kwargs))
+    if compiled.sync_to_thread or sync_to_thread:
+        return await anyio.to_thread.run_sync(lambda: compiled.endpoint(**kwargs))
+    return compiled.endpoint(**kwargs)
 
 
 def _decode_body_payload(
@@ -369,7 +345,7 @@ def _decode_body_payload(
                 return native_req.decode_msgspec(body_type)
             except Exception:
                 pass
-        return msgspec.json.decode(body, type=body_type)
+        return decode_json(body, type=body_type)
 
     if compiled.body_is_pydantic:
         if native_req is not None and len(body) > 0:
@@ -574,14 +550,13 @@ def _compile_routes_from_table(
             body_is_msgspec=_is_msgspec_struct_type(body_type),
             body_is_pydantic=_is_pydantic_model_type(body_type),
             response_serializer=resp_serializer,
+            sync_to_thread=bool(getattr(endpoint, "__vertebra_sync_to_thread__", False)),
         )
     return compiled
 
 
 def _build_synthetic_dependant(sig: inspect.Signature, hints: dict[str, Any]) -> Any:
     """Construct a lightweight Dependant tree from inspect.Signature default Depends() markers."""
-    from types import SimpleNamespace
-
     children: list[Any] = []
     for p_name, param in sig.parameters.items():
         dep_marker = param.default

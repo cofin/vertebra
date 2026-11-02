@@ -479,7 +479,8 @@ def _extract_static_mounts(app: Any) -> tuple[StaticMountOffloadSpec, ...]:
     mounts: list[StaticMountOffloadSpec] = []
     seen_prefixes: set[str] = set()
 
-    v2_configs = getattr(app, "static_files_config", None) or ()
+    static_cfg_attr = "_static_files_config" if hasattr(app, "_static_files_config") else "static_files_config"
+    v2_configs = getattr(app, static_cfg_attr, None) or ()
     if not isinstance(v2_configs, list | tuple):
         v2_configs = (v2_configs,)
     for cfg in v2_configs:

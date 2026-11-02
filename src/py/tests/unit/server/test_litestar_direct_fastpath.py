@@ -5,7 +5,7 @@ import inspect
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 import pytest
@@ -54,6 +54,7 @@ def _load_litestar_fastpath_test_primitives() -> dict[str, Any]:
     di_mod = import_optional("litestar.di")
     dto_mod = import_optional("litestar.dto")
     exc_mod = import_optional("litestar.exceptions")
+    params_mod = import_optional("litestar.params")
     resp_mod = import_optional("litestar.response")
     store_mod = import_optional("litestar.stores.memory")
     if (
@@ -68,6 +69,7 @@ def _load_litestar_fastpath_test_primitives() -> dict[str, Any]:
         and di_mod is not None
         and dto_mod is not None
         and exc_mod is not None
+        and params_mod is not None
         and resp_mod is not None
         and store_mod is not None
     ):
@@ -101,6 +103,10 @@ def _load_litestar_fastpath_test_primitives() -> dict[str, Any]:
             "CSRFConfig": csrf_mod.CSRFConfig,
             "ASGIConnection": conn_mod.ASGIConnection,
             "Provide": di_mod.Provide,
+            "NamedDependency": di_mod.NamedDependency,
+            "FromPath": params_mod.FromPath,
+            "FromQuery": params_mod.FromQuery,
+            "JSONBody": params_mod.JSONBody,
             "MsgspecDTO": dto_mod.MsgspecDTO,
             "NotAuthorizedException": exc_mod.NotAuthorizedException,
             "File": resp_mod.File,
@@ -356,6 +362,10 @@ def _load_litestar_fastpath_test_primitives() -> dict[str, Any]:
         "CSRFConfig": CSRFConfigStub,
         "ASGIConnection": RequestStub,
         "Provide": ProvideStub,
+        "NamedDependency": MsgspecDTOStub,
+        "FromPath": MsgspecDTOStub,
+        "FromQuery": MsgspecDTOStub,
+        "JSONBody": MsgspecDTOStub,
         "MsgspecDTO": MsgspecDTOStub,
         "NotAuthorizedException": NotAuthorizedExceptionStub,
         "File": FileStub,
@@ -366,24 +376,44 @@ def _load_litestar_fastpath_test_primitives() -> dict[str, Any]:
 
 
 _PRIMS = _load_litestar_fastpath_test_primitives()
-Litestar = _PRIMS["Litestar"]
-Request = _PRIMS["Request"]
-Router = _PRIMS.get("Router")
-get = _PRIMS["get"]
-post = _PRIMS["post"]
-ChannelsPlugin = _PRIMS["ChannelsPlugin"]
-MemoryChannelsBackend = _PRIMS["MemoryChannelsBackend"]
-ResponseCacheConfig = _PRIMS["ResponseCacheConfig"]
-CompressionConfig = _PRIMS["CompressionConfig"]
-CORSConfig = _PRIMS["CORSConfig"]
-CSRFConfig = _PRIMS["CSRFConfig"]
-ASGIConnection = _PRIMS["ASGIConnection"]
-Provide = _PRIMS["Provide"]
-MsgspecDTO = _PRIMS["MsgspecDTO"]
-NotAuthorizedException = _PRIMS["NotAuthorizedException"]
-File = _PRIMS["File"]
-ServerSentEvent = _PRIMS["ServerSentEvent"]
-LitestarMemoryStore = _PRIMS["MemoryStore"]
+if TYPE_CHECKING:
+    from litestar import Litestar, Request, Router, get, post
+    from litestar.channels import ChannelsPlugin
+    from litestar.channels.backends.memory import MemoryChannelsBackend
+    from litestar.config.compression import CompressionConfig
+    from litestar.config.cors import CORSConfig
+    from litestar.config.csrf import CSRFConfig
+    from litestar.config.response_cache import ResponseCacheConfig
+    from litestar.connection import ASGIConnection
+    from litestar.di import NamedDependency, Provide
+    from litestar.dto import MsgspecDTO
+    from litestar.exceptions import NotAuthorizedException
+    from litestar.params import FromPath, FromQuery, JSONBody
+    from litestar.response import File, ServerSentEvent
+    from litestar.stores.memory import MemoryStore as LitestarMemoryStore
+else:
+    Litestar = _PRIMS["Litestar"]
+    Request = _PRIMS["Request"]
+    Router = _PRIMS.get("Router")
+    get = _PRIMS["get"]
+    post = _PRIMS["post"]
+    ChannelsPlugin = _PRIMS["ChannelsPlugin"]
+    MemoryChannelsBackend = _PRIMS["MemoryChannelsBackend"]
+    ResponseCacheConfig = _PRIMS["ResponseCacheConfig"]
+    CompressionConfig = _PRIMS["CompressionConfig"]
+    CORSConfig = _PRIMS["CORSConfig"]
+    CSRFConfig = _PRIMS["CSRFConfig"]
+    ASGIConnection = _PRIMS["ASGIConnection"]
+    Provide = _PRIMS["Provide"]
+    NamedDependency = _PRIMS["NamedDependency"]
+    FromPath = _PRIMS["FromPath"]
+    FromQuery = _PRIMS["FromQuery"]
+    JSONBody = _PRIMS["JSONBody"]
+    MsgspecDTO = _PRIMS["MsgspecDTO"]
+    NotAuthorizedException = _PRIMS["NotAuthorizedException"]
+    File = _PRIMS["File"]
+    ServerSentEvent = _PRIMS["ServerSentEvent"]
+    LitestarMemoryStore = _PRIMS["MemoryStore"]
 
 
 def _make_scope(
@@ -414,8 +444,8 @@ def _make_scope(
 async def test_preseed_scope_state_body_zero_receive_calls() -> None:
     """Verify preseed_litestar_scope_body allows await request.body() without calling receive()."""
 
-    @post("/echo", sync_to_thread=False)
-    async def echo_handler(request: Any) -> bytes:
+    @post("/echo")
+    async def echo_handler(request: Request[Any, Any, Any]) -> bytes:
         body_bytes: bytes = await request.body()
         return body_bytes
 
@@ -474,7 +504,10 @@ async def test_direct_dispatch_preserves_di_dto_guards_and_after_response() -> N
         dependencies={"multiplier": Provide(provide_multiplier, sync_to_thread=False)},
         after_response=record_after_response,
     )
-    async def create_order(data: CreateOrderPayload, multiplier: int) -> dict[str, Any]:
+    async def create_order(
+        data: JSONBody[CreateOrderPayload],
+        multiplier: NamedDependency[int],
+    ) -> dict[str, Any]:
         return {"sku": data.sku, "total": data.quantity * multiplier}
 
     app = Litestar(route_handlers=[create_order])
@@ -716,11 +749,11 @@ async def test_fastpath_bypass_dispatches_eligible_sync_and_async_routes_and_ski
         return middleware
 
     @get("/items/{item_id:int}", sync_to_thread=False)
-    def get_item(item_id: int, limit: int = 5) -> dict[str, int]:
+    def get_item(item_id: FromPath[int], limit: FromQuery[int] = 5) -> dict[str, int]:
         return {"id": item_id, "limit": limit}
 
     @post("/fast-orders")
-    async def create_fast_order(data: CreateOrderPayload) -> dict[str, Any]:
+    async def create_fast_order(data: JSONBody[CreateOrderPayload]) -> dict[str, Any]:
         return {"sku": data.sku, "qty": data.quantity}
 
     @get("/guarded", guards=[sample_guard], sync_to_thread=False)
@@ -784,7 +817,7 @@ async def test_fastpath_wrap_asgi_replays_body_on_fallback_and_handles_empty_sen
     """Verify ScopeState.body starts as Empty and wrap_asgi replays drained receive() chunks to fallback_app."""
 
     @post("/strict-order")
-    async def strict_order(data: CreateOrderPayload) -> dict[str, Any]:
+    async def strict_order(data: JSONBody[CreateOrderPayload]) -> dict[str, Any]:
         return {"sku": data.sku, "quantity": data.quantity}
 
     app = Litestar(route_handlers=[strict_order])
@@ -858,7 +891,7 @@ async def test_fastpath_http_exception_serialization_disqualifiers_query_and_upl
         raise NotAuthorizedException("token expired", status_code=401, headers={"x-auth-error": "expired"})
 
     @get("/plain-text", sync_to_thread=False)
-    def plain_text_route(tag: str = "none") -> str:
+    def plain_text_route(tag: FromQuery[str] = "none") -> str:
         return f"hello:{tag}"
 
     @get("/with-custom-headers", response_headers={"x-custom": "1"}, sync_to_thread=False)
@@ -919,8 +952,8 @@ async def test_fastpath_http_exception_serialization_disqualifiers_query_and_upl
         async def close(self) -> None:
             closed_files.append(self.name)
 
-    @post("/upload", sync_to_thread=False)
-    async def upload_handler(request: Any) -> dict[str, str]:
+    @post("/upload")
+    async def upload_handler(request: Request[Any, Any, Any]) -> dict[str, str]:
         conn_state = ScopeState.from_scope(request.scope)
         if hasattr(conn_state, "form"):
             conn_state.form = {"file": _UploadFileDouble("doc.pdf")}
@@ -1054,7 +1087,7 @@ async def test_v2_ownership_layers_hooks_metadata_and_unoffloaded_middleware_dis
     assert rust_cors_res[0] == 200
 
     @post("/mv-echo")
-    async def mv_echo(data: CreateOrderPayload) -> dict[str, Any]:
+    async def mv_echo(data: JSONBody[CreateOrderPayload]) -> dict[str, Any]:
         return {"sku": data.sku, "quantity": data.quantity}
 
     mv_app = Litestar(route_handlers=[mv_echo])
@@ -1069,3 +1102,44 @@ async def test_v2_ownership_layers_hooks_metadata_and_unoffloaded_middleware_dis
     mv_res = await mv_bypass.dispatch(mv_scope, noop_receive, noop_send)
     assert mv_res is not None
     assert decode_json(mv_res[2]) == {"sku": "MV1", "quantity": 2}
+
+
+@pytest.mark.anyio
+async def test_litestar_fastpath_wrap_asgi_uses_send_raw_response_and_mount_prefix() -> None:
+    """Verify LitestarFastPathBypass.wrap_asgi invokes send.send_raw_response directly and strips root_path."""
+
+    @get("/items/{item_id:int}", sync_to_thread=False)
+    def get_item(item_id: FromPath[int]) -> dict[str, int]:
+        return {"item_id": item_id}
+
+    app = Litestar(route_handlers=[get_item])
+    bypass = FastPath.from_app(app)
+
+    async def fallback_app(_scope: Any, _receive: Any, _send: Any) -> None:
+        raise AssertionError("fallback_app must not be called for matched fastpath route")
+
+    wrapped = bypass.wrap_asgi(fallback_app)
+    proto = AsgiProtocol(b"")
+    scope = AsgiScope.from_parts(method="GET", path="/sub/items/99")
+    scope["root_path"] = "/sub"
+
+    raw_calls: list[tuple[int, list[tuple[bytes, bytes]], bytes]] = []
+
+    class _RawSendTracker:
+        async def __call__(self, message: dict[str, Any]) -> None:
+            await proto.send(message)
+
+        async def send_raw_response(
+            self,
+            status: int,
+            headers: list[tuple[bytes, bytes]],
+            body: bytes,
+        ) -> None:
+            raw_calls.append((status, headers, body))
+            await proto.send_raw_response(status, headers, body)
+
+    await wrapped(scope, proto.receive, _RawSendTracker())
+    assert len(raw_calls) == 1
+    assert raw_calls[0][0] == 200
+    assert decode_json(raw_calls[0][2]) == {"item_id": 99}
+    assert proto.complete is True

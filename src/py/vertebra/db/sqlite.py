@@ -149,13 +149,23 @@ class SyncSQLiteDriver:
         if hasattr(self._broker, "get_or_compile_statement"):
             self._broker.get_or_compile_statement("sqlite", sql, lambda s: (s, ()))
         elif hasattr(self._broker, "statement_cache") and self._broker.statement_cache is not None:
-            sc = self._broker.statement_cache
-            if hasattr(sc, "lookup") and hasattr(sc, "insert") and sc.lookup(3, sql) is None:
-                sc.insert(3, sql, 0, sql.encode("utf-8"), b"")
-        if hasattr(self._broker, "acquire"):
-            return self._broker.acquire(bind_key="sqlite")
+            sc_attr = self._broker.statement_cache
+            sc = sc_attr() if callable(sc_attr) else sc_attr
+            if sc is not None and hasattr(sc, "lookup") and hasattr(sc, "insert"):
+                sql_bytes = sql.encode("utf-8")
+                try:
+                    if sc.lookup(3, sql) is None:
+                        sc.insert(3, sql, 0, sql_bytes, b"")
+                except TypeError:
+                    if sc.lookup(3, sql_bytes) is None:
+                        sc.insert(3, sql_bytes, 0, sql_bytes, b"")
         if hasattr(self._broker, "lease_table") and self._broker.lease_table is not None:
             return self._broker.lease_table.acquire(os.getpid())
+        if hasattr(self._broker, "acquire"):
+            try:
+                return self._broker.acquire(bind_key="sqlite")
+            except TypeError:
+                return self._broker.acquire(os.getpid())
         return None
 
     def execute_with_description(
@@ -176,6 +186,8 @@ class SyncSQLiteDriver:
             if lease is not None:
                 if hasattr(lease, "release"):
                     lease.release()
+                elif self._broker is not None and hasattr(self._broker, "release") and hasattr(lease, "slot_index"):
+                    self._broker.release(lease.slot_index, lease.generation)
                 elif (
                     self._broker is not None
                     and hasattr(self._broker, "lease_table")

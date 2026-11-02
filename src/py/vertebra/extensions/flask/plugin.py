@@ -153,13 +153,9 @@ class FlaskPlugin:
     def handle_request(self, request: Request) -> Response:
         """Dispatch a Vertebra ``Request`` via fastpath or fallback to ``run_wsgi_callable``."""
         if self._fastpath is not None:
-            matched = self._fastpath.match(request.method, request.path)
-            if matched is not None:
-                compiled, params = matched
-                if getattr(compiled.view_func, "__vertebra_fastpath__", True) and not compiled.is_async:
-                    from vertebra.extensions.flask.fastpath import dispatch_wsgi_direct
-
-                    return dispatch_wsgi_direct(compiled, request, params)
+            fast_resp = self._fastpath.dispatch(request)
+            if fast_resp is not None:
+                return fast_resp
         environ = request.wsgi_environ()
         wsgi_target = getattr(self._app, "wsgi_app", self._app)
         return run_wsgi_callable(wsgi_target, environ, int(request.request_id))

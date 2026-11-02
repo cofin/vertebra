@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+import contextlib
+import re
+import threading
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import msgspec
 import pytest
+import starlette.requests
 
-from vertebra._vertebra import AsgiScope
+from vertebra._vertebra import AsgiProtocol, AsgiScope, Request
+from vertebra.extensions.django import (
+    DjangoPlugin,
+)
+from vertebra.extensions.django import (
+    MsgspecView as DjangoMsgspecView,
+)
 from vertebra.extensions.fastapi import (
     FastAPIConfig,
     FastAPIPlugin,
@@ -23,6 +33,17 @@ from vertebra.extensions.fastapi import (
     mcp_tool,
     offload_middlewares,
 )
+from vertebra.extensions.flask import FlaskPlugin, vertebra_route
+from vertebra.extensions.litestar.fastpath import (
+    FastPath as LitestarFastPath,
+)
+from vertebra.extensions.litestar.router import ExtractedRoute as LitestarExtractedRoute
+from vertebra.extensions.litestar.router import RouterTable as LitestarRouterTable
+from vertebra.extensions.starlette import StarlettePlugin
+from vertebra.framework._app import App
+from vertebra.server._fastpath import attach_framework_fastpath
+from vertebra.server.worker import _instantiate_mount_runners
+from vertebra.utils.serializers import decode_json
 
 
 class _OrderInput(msgspec.Struct, frozen=True, gc=False):
@@ -176,8 +197,6 @@ async def test_compiled_dependant_generator_and_overrides() -> None:
     assert plan is not None
     assert plan.has_generator_dependencies is True
 
-    import contextlib
-
     async with contextlib.AsyncExitStack() as stack:
         resolved = await execute_dependant_plan(
             plan,
@@ -195,3 +214,258 @@ async def test_compiled_dependant_generator_and_overrides() -> None:
     assert resp.body == b'{"hello":"world"}'
     offloaded = offload_middlewares(_make_mock_fastapi_app()[0])
     assert offloaded.openapi is not None
+
+
+@pytest.mark.anyio
+async def test_fastapi_fastpath_lazy_request_inline_sync_and_send_raw_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify FastAPI FastPath skips Request instantiation when unneeded, runs sync inline by default, and uses send_raw_response."""
+    caller_tid = threading.get_ident()
+    observed_tids: dict[str, int] = {}
+
+    def sync_inline_item(item_id: int) -> dict[str, int]:
+        observed_tids["inline"] = threading.get_ident()
+        return {"item_id": item_id}
+
+    def sync_threaded_item(item_id: int) -> dict[str, int]:
+        observed_tids["threaded"] = threading.get_ident()
+        return {"item_id": item_id}
+
+    cast("Any", sync_threaded_item).__vertebra_sync_to_thread__ = True
+
+    routes = [
+        SimpleNamespace(
+            path="/inline/{item_id:int}",
+            endpoint=sync_inline_item,
+            methods=["GET"],
+            status_code=200,
+            name="sync_inline_item",
+            dependant=None,
+            body_field=None,
+            response_field=None,
+        ),
+        SimpleNamespace(
+            path="/threaded/{item_id:int}",
+            endpoint=sync_threaded_item,
+            methods=["GET"],
+            status_code=200,
+            name="sync_threaded_item",
+            dependant=None,
+            body_field=None,
+            response_field=None,
+        ),
+    ]
+    app = SimpleNamespace(
+        routes=routes,
+        user_middleware=[],
+        exception_handlers={},
+        dependency_overrides={},
+        openapi_url="/openapi.json",
+        openapi=lambda: {"openapi": "3.1.0", "info": {"title": "Sync API", "version": "1.0.0"}, "paths": {}},
+        state=SimpleNamespace(),
+        router=SimpleNamespace(routes=routes, default_response_class=None),
+    )
+    plugin = FastAPIPlugin(app)
+    fastpath: FastPath = app.__vertebra_fastpath__
+
+    inline_route = next(r for r in plugin.compiled_routes.values() if r.path_template == "/inline/{item_id:int}")
+    assert inline_route.needs_request is False
+
+    def _forbid_request(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("starlette.requests.Request must not be instantiated when needs_request is False")
+
+    monkeypatch.setattr(starlette.requests, "Request", _forbid_request)
+
+    async def fallback_app(_scope: Any, _receive: Any, _send: Any) -> None:
+        raise AssertionError("fallback_app must not be called")
+
+    wrapped = fastpath.wrap_asgi(fallback_app)
+    proto = AsgiProtocol(b"")
+    raw_calls: list[int] = []
+
+    class _RawSender:
+        async def __call__(self, message: dict[str, Any]) -> None:
+            await proto.send(message)
+
+        async def send_raw_response(
+            self,
+            status: int,
+            headers: list[tuple[bytes, bytes]],
+            body: bytes,
+        ) -> None:
+            raw_calls.append(status)
+            await proto.send_raw_response(status, headers, body)
+
+    scope_inline = AsgiScope.from_parts(method="GET", path="/api/inline/12")
+    scope_inline["root_path"] = "/api"
+    await wrapped(scope_inline, proto.receive, _RawSender())
+    assert raw_calls == [200]
+    assert observed_tids["inline"] == caller_tid
+    assert msgspec.json.decode(proto.take_response().body) == {"item_id": 12}
+
+    proto_th = AsgiProtocol(b"")
+    scope_th = AsgiScope.from_parts(method="GET", path="/threaded/15")
+    await wrapped(scope_th, proto_th.receive, proto_th.send)
+    assert observed_tids["threaded"] != caller_tid
+    assert msgspec.json.decode(proto_th.take_response().body) == {"item_id": 15}
+
+
+@pytest.mark.anyio
+async def test_multi_framework_stacked_app_mount_auto_attaches_fastpath() -> None:
+    """Verify App.mount() and _instantiate_mount_runners auto-attach stacked FastPaths across Litestar, FastAPI, Starlette, Flask, and Django."""
+
+    async def ls_handler(item_id: int) -> dict[str, Any]:
+        return {"fw": "litestar", "id": item_id}
+
+    ls_handler_obj = SimpleNamespace(
+        fn=ls_handler,
+        status_code=200,
+        media_type="application/json",
+        sync_to_thread=False,
+        guards=(),
+        middleware=(),
+        exception_handlers={},
+        opt={},
+    )
+    ls_table = LitestarRouterTable(
+        {
+            901: LitestarExtractedRoute(
+                handler_id=901,
+                method="GET",
+                path_template="/items/{item_id}",
+                matchit_path="/items/{item_id}",
+                route=SimpleNamespace(),
+                route_handler=ls_handler_obj,
+                kwargs_model=None,
+                param_types={"item_id": "int"},
+                regex_pattern=re.compile(r"^/items/(?P<item_id>[^/]+)$"),
+            )
+        }
+    )
+
+    async def litestar_app(_scope: Any, _receive: Any, _send: Any) -> None:
+        raise AssertionError("Litestar fallback must not be called")
+
+    cast("Any", litestar_app).__vertebra_fastpath__ = LitestarFastPath(ls_table)
+
+    fastapi_app, _ = _make_mock_fastapi_app()
+    FastAPIPlugin(fastapi_app)
+
+    async def st_item(request: Any) -> dict[str, Any]:
+        return {"fw": "starlette", "id": int(request.path_params["item_id"])}
+
+    st_routes = [
+        SimpleNamespace(
+            path="/items/{item_id:int}",
+            endpoint=st_item,
+            methods=["GET"],
+            name="st_item",
+        )
+    ]
+
+    class _StarletteApp:
+        def __init__(self) -> None:
+            self.routes = st_routes
+            self.user_middleware: list[Any] = []
+            self.exception_handlers: dict[Any, Any] = {}
+            self.state = SimpleNamespace()
+            self.router = SimpleNamespace(routes=st_routes)
+
+        async def __call__(self, _scope: Any, _receive: Any, _send: Any) -> None:
+            raise AssertionError("Starlette fallback must not be called")
+
+    starlette_app = _StarletteApp()
+    StarlettePlugin(starlette_app)
+
+    @vertebra_route(status_code=200)
+    def fl_item(item_id: int) -> dict[str, Any]:
+        return {"fw": "flask", "id": item_id}
+
+    class _FlaskRule:
+        def __init__(self) -> None:
+            self.rule = "/items/<int:item_id>"
+            self.endpoint = "fl_item"
+            self.methods = {"GET"}
+
+    class _FlaskURLMap:
+        def iter_rules(self) -> list[_FlaskRule]:
+            return [_FlaskRule()]
+
+    class _FlaskApp:
+        def __init__(self) -> None:
+            self.name = "stacked_flask"
+            self.url_map = _FlaskURLMap()
+            self.view_functions = {"fl_item": fl_item}
+            self.config: dict[str, Any] = {}
+            self.extensions: dict[str, Any] = {}
+
+        def wsgi_app(self, _environ: Any, start_response: Any) -> list[bytes]:
+            start_response("404 Not Found", [("content-type", "text/plain")])
+            return [b"not-found"]
+
+        def __call__(self, environ: Any, start_response: Any) -> Any:
+            return self.wsgi_app(environ, start_response)
+
+    flask_app = _FlaskApp()
+    FlaskPlugin(flask_app)
+
+    class _DjangoItemView(DjangoMsgspecView):
+        def get(self, request: Request, item_id: int) -> dict[str, Any]:
+            assert request.method == "GET"
+            return {"fw": "django", "id": item_id}
+
+    class _DjangoPattern:
+        def __init__(self) -> None:
+            self.pattern = SimpleNamespace(_route="items/<int:item_id>/", _regex=None)
+            self.callback = _DjangoItemView.as_view()
+            self.name = "dj_item"
+
+    dj_plugin = DjangoPlugin(urlpatterns=[_DjangoPattern()])
+
+    root_app = App()
+    root_app.mount("/litestar", litestar_app)
+    root_app.mount("/fastapi", fastapi_app)
+    root_app.mount("/starlette", starlette_app)
+    root_app.mount("/flask", flask_app, protocol="wsgi")
+    root_app.mount("/django", dj_plugin, protocol="wsgi")
+
+    mount_runners = dict(
+        (prefix, (runner, proto)) for prefix, runner, proto in _instantiate_mount_runners(root_app.mounts)
+    )
+    for prefix in ("/litestar", "/fastapi", "/starlette", "/flask", "/django"):
+        runner, _proto = mount_runners[prefix]
+        assert getattr(runner, "__vertebra_fastpath_attached__", False) is True
+
+    wrapped_once = attach_framework_fastpath(litestar_app, mount_prefix="/litestar", protocol="asgi")
+    assert attach_framework_fastpath(wrapped_once, mount_prefix="/litestar", protocol="asgi") is wrapped_once
+
+    ls_runner = mount_runners["/litestar"][0]
+    ls_resp = await ls_runner.handle_path("/litestar/items/42")
+    assert ls_resp.status == 200
+    assert decode_json(ls_resp.body) == {"fw": "litestar", "id": 42}
+
+    fa_runner = mount_runners["/fastapi"][0]
+    fa_resp = await fa_runner.handle_path(
+        "/fastapi/orders/77",
+        method="POST",
+        query="tenant=acme",
+        body=b'{"sku":"GPU","quantity":2}',
+    )
+    assert fa_resp.status == 201
+    assert decode_json(fa_resp.body)["order_id"] == 77
+
+    st_runner = mount_runners["/starlette"][0]
+    st_resp = await st_runner.handle_path("/starlette/items/42")
+    assert st_resp.status == 200
+    assert decode_json(st_resp.body) == {"fw": "starlette", "id": 42}
+
+    fl_runner = mount_runners["/flask"][0]
+    fl_resp = fl_runner.handle_request(Request.from_parts("GET", "/flask/items/42"))
+    assert fl_resp.status == 200
+    assert decode_json(bytes(fl_resp.body)) == {"fw": "flask", "id": 42}
+
+    dj_runner = mount_runners["/django"][0]
+    dj_resp = dj_runner.handle_request(Request.from_parts("GET", "/django/items/42/"))
+    assert dj_resp.status == 200
+    assert decode_json(bytes(dj_resp.body)) == {"fw": "django", "id": 42}

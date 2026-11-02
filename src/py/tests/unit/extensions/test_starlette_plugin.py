@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 from typing import Any
 
 import msgspec
 import pytest
 
-from vertebra._vertebra import AsgiScope
+from vertebra._vertebra import AsgiProtocol, AsgiScope
 from vertebra.agent.mcp.controllers import mcp_tool
 from vertebra.extensions.starlette import (
     CacheStore,
@@ -218,3 +219,50 @@ async def test_starlette_ecosystem_bridges() -> None:
     assert mcp_reg.get_tool("create_item") is not None
     plan = offload_middlewares(app)
     assert plan.compression is not None
+
+
+@pytest.mark.anyio
+async def test_starlette_fastpath_inline_sync_and_send_raw_response() -> None:
+    """Verify Starlette FastPath runs sync endpoints inline by default and wrap_asgi uses send_raw_response."""
+    caller_tid = threading.get_ident()
+    observed_tids: list[int] = []
+
+    def sync_ping(request: Any) -> dict[str, str]:
+        observed_tids.append(threading.get_ident())
+        return {"pong": str(request.query_params.get("echo", "ok"))}
+
+    app = SimpleNamespace(
+        routes=[SimpleNamespace(path="/ping", endpoint=sync_ping, methods=["GET"], name="sync_ping")],
+        user_middleware=[],
+        exception_handlers={},
+        state=SimpleNamespace(),
+    )
+    StarlettePlugin(app)
+    fastpath: FastPath = app.__vertebra_fastpath__
+
+    async def fallback_app(_scope: Any, _receive: Any, _send: Any) -> None:
+        raise AssertionError("fallback_app must not be called")
+
+    wrapped = fastpath.wrap_asgi(fallback_app)
+    proto = AsgiProtocol(b"")
+    raw_calls: list[int] = []
+
+    class _RawSender:
+        async def __call__(self, message: dict[str, Any]) -> None:
+            await proto.send(message)
+
+        async def send_raw_response(
+            self,
+            status: int,
+            headers: list[tuple[bytes, bytes]],
+            body: bytes,
+        ) -> None:
+            raw_calls.append(status)
+            await proto.send_raw_response(status, headers, body)
+
+    scope = AsgiScope.from_parts(method="GET", path="/sub/ping", query_string="echo=inline")
+    scope["root_path"] = "/sub"
+    await wrapped(scope, proto.receive, _RawSender())
+    assert raw_calls == [200]
+    assert observed_tids == [caller_tid]
+    assert msgspec.json.decode(proto.take_response().body) == {"pong": "inline"}

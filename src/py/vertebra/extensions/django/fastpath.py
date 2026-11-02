@@ -9,7 +9,12 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast, get_type_hints
 import msgspec
 
 from vertebra._vertebra import Request, Response, WsgiEnviron, WsgiInput
-from vertebra.utils.serializers import encode_json_bytes
+from vertebra.server._fastpath import (
+    extract_scope_body_fast,
+    resolve_relative_path,
+    wrap_asgi_fastpath,
+)
+from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -78,9 +83,10 @@ class MsgspecView:
     @classmethod
     def as_view(cls, **initkwargs: Any) -> Callable[..., Any]:
         """Return a fastpath-enabled view callable dispatching by HTTP method."""
+        cached_instance = cls() if not initkwargs else None
 
         def _view(request: Request, *args: Any, **kwargs: Any) -> Any:
-            self = cls(**initkwargs)
+            self = cached_instance if cached_instance is not None else cls(**initkwargs)
             handler = getattr(self, request.method.lower(), None)
             if handler is None:
                 return Response.error(405, int(request.request_id))
@@ -93,6 +99,9 @@ class MsgspecView:
         dyn_view.__vertebra_view_class__ = cls
         methods = tuple(m.upper() for m in cls.http_method_names if hasattr(cls, m))
         dyn_view.__vertebra_methods__ = methods or ("GET",)
+        dyn_view.__vertebra_is_async__ = any(
+            inspect.iscoroutinefunction(getattr(cls, m, None)) for m in cls.http_method_names if hasattr(cls, m)
+        )
         return _view
 
 
@@ -119,13 +128,25 @@ def _compile_single_callback(
     pattern: str,
     callback: Callable[..., Any],
     param_converters: tuple[tuple[str, str], ...],
+    *,
+    http_method: str = "GET",
 ) -> CompiledRoute:
     """Inspect a Django view callable and type annotations to build a ``CompiledRoute``."""
-    is_async = inspect.iscoroutinefunction(callback)
-    status_code = int(getattr(callback, "__vertebra_status_code__", 200))
-    sig = inspect.signature(callback)
+    view_cls = getattr(callback, "__vertebra_view_class__", None)
+    target_fn: Callable[..., Any] = (
+        getattr(view_cls, http_method.lower(), callback) if view_cls is not None else callback
+    )
+    is_async = (
+        inspect.iscoroutinefunction(target_fn)
+        if view_cls is not None
+        else (inspect.iscoroutinefunction(target_fn) or bool(getattr(callback, "__vertebra_is_async__", False)))
+    )
+    status_code = int(
+        getattr(target_fn, "__vertebra_status_code__", getattr(callback, "__vertebra_status_code__", 200))
+    )
+    sig = inspect.signature(target_fn)
     try:
-        hints = get_type_hints(callback)
+        hints = get_type_hints(target_fn)
     except Exception:
         hints = {}
 
@@ -134,11 +155,13 @@ def _compile_single_callback(
     body_type: Any = None
     body_is_msgspec = False
     body_is_pydantic = False
-    accepts_request = False
+    accepts_request = view_cls is not None
 
     params = list(sig.parameters.values())
     for idx, param in enumerate(params):
         p_name = param.name
+        if p_name == "self":
+            continue
         ann = hints.get(p_name, param.annotation)
         if (
             p_name == "request"
@@ -191,6 +214,7 @@ def compile_fastpath_routes(compiler: RouteCompiler) -> dict[int, CompiledRoute]
             pattern=entry.pattern,
             callback=entry.callback,
             param_converters=entry.param_converters,
+            http_method=entry.methods[0] if entry.methods else "GET",
         )
     return compiled
 
@@ -243,12 +267,25 @@ def _serialize_django_result(result: Any, default_status: int, request_id: int) 
     )
 
 
-def dispatch_django_direct(
+def _step_coro_sync(coro: Any) -> tuple[bool, Any]:
+    """Step a coroutine once via send(None) and return (True, value) if it completes without suspending."""
+    try:
+        coro.send(None)
+    except StopIteration as stop:
+        return True, stop.value
+    finally:
+        close_fn = getattr(coro, "close", None)
+        if callable(close_fn):
+            close_fn()
+    return False, None
+
+
+def _prepare_django_kwargs(
     compiled: CompiledRoute,
     request_or_environ: Request | WsgiEnviron | dict[str, Any],
     path_params: dict[str, str],
-) -> Response:
-    """Execute a synchronous Django view directly using zero-copy body decoding."""
+) -> tuple[int, Request | None, dict[str, Any]]:
+    """Build keyword arguments and Request handle for a compiled Django view."""
     request_id = int(getattr(request_or_environ, "request_id", 0))
     kwargs: dict[str, Any] = {}
     converter_map = dict(compiled.param_converters)
@@ -274,21 +311,58 @@ def dispatch_django_direct(
                     kwargs[compiled.body_param_name] = wsgi_inp.decode_pydantic_json(compiled.body_type)
                 else:
                     kwargs[compiled.body_param_name] = wsgi_inp.decode_msgspec(compiled.body_type)
+            elif wsgi_inp is not None and hasattr(wsgi_inp, "read"):
+                raw = wsgi_inp.read()
+                if compiled.body_type is not None:
+                    kwargs[compiled.body_param_name] = decode_json(raw, type=compiled.body_type)
+                else:
+                    kwargs[compiled.body_param_name] = decode_json(raw)
+    return request_id, req_obj, kwargs
 
+
+def dispatch_django_direct(
+    compiled: CompiledRoute,
+    request_or_environ: Request | WsgiEnviron | dict[str, Any],
+    path_params: dict[str, str],
+) -> Response | None:
+    """Execute a synchronous or non-suspending async Django view directly using zero-copy body decoding."""
+    request_id, req_obj, kwargs = _prepare_django_kwargs(compiled, request_or_environ, path_params)
     if compiled.accepts_request and req_obj is not None:
         result = compiled.callback(req_obj, **kwargs)
     else:
         result = compiled.callback(**kwargs)
+    if inspect.iscoroutine(result):
+        completed, stepped_val = _step_coro_sync(result)
+        if not completed:
+            return None
+        result = stepped_val
+    return _serialize_django_result(result, compiled.status_code, request_id)
+
+
+async def _dispatch_django_async(
+    compiled: CompiledRoute,
+    request_obj: Request,
+    path_params: dict[str, str],
+) -> Response:
+    """Execute a synchronous or async Django view within an ASGI event loop."""
+    request_id, req_obj, kwargs = _prepare_django_kwargs(compiled, request_obj, path_params)
+    if compiled.accepts_request and req_obj is not None:
+        result = compiled.callback(req_obj, **kwargs)
+    else:
+        result = compiled.callback(**kwargs)
+    if inspect.isawaitable(result):
+        result = await result
     return _serialize_django_result(result, compiled.status_code, request_id)
 
 
 class FastPath:
     """Fastpath route table and dispatcher for Django applications."""
 
-    __slots__ = ("_compiler", "_routes")
+    __slots__ = ("_compiler", "_mount_prefix", "_routes")
 
-    def __init__(self, compiler: RouteCompiler) -> None:
+    def __init__(self, compiler: RouteCompiler, *, mount_prefix: str = "") -> None:
         self._compiler = compiler
+        self._mount_prefix = mount_prefix
         self._routes = compile_fastpath_routes(compiler)
 
     @property
@@ -313,9 +387,42 @@ class FastPath:
         if matched is None:
             return None
         compiled, params = matched
-        if compiled.is_async:
+        if not getattr(compiled.callback, "__vertebra_fastpath__", True):
             return None
         return dispatch_django_direct(compiled, request, params)
+
+    async def dispatch_async(
+        self,
+        scope: Any,
+        receive: Any,
+        send: Any,
+        *,
+        body: bytes | None = None,
+    ) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
+        """Dispatch an ASGI request directly through a compiled sync or async Django view."""
+        _ = send
+        scope_type = scope.get("type", "http") if hasattr(scope, "get") else scope["type"]
+        if scope_type != "http":
+            return None
+        method = str(scope.get("method", "GET") if hasattr(scope, "get") else scope["method"]).upper()
+        path = resolve_relative_path(scope, self._mount_prefix)
+        matched = self.match(method, path)
+        if matched is None:
+            return None
+        compiled, params = matched
+        if not getattr(compiled.callback, "__vertebra_fastpath__", True):
+            return None
+        raw_body = await extract_scope_body_fast(scope, receive, body, method=method)
+        req_obj = Request.from_parts(method=method, path=path, body=raw_body)
+        resp = await _dispatch_django_async(compiled, req_obj, params)
+        encoded_headers = [
+            (
+                k if isinstance(k, bytes) else str(k).encode("latin-1"),
+                v if isinstance(v, bytes) else str(v).encode("latin-1"),
+            )
+            for k, v in resp.headers
+        ]
+        return int(resp.status), encoded_headers, bytes(resp.body)
 
     def dispatch_wsgi(
         self,
@@ -324,14 +431,26 @@ class FastPath:
     ) -> list[bytes] | None:
         """Attempt zero-copy fastpath dispatch for a PEP 3333 WSGI call."""
         method = str(environ.get("REQUEST_METHOD", "GET"))
-        path = str(environ.get("PATH_INFO", "/"))
-        matched = self.match(method, path)
+        raw_path = str(environ.get("PATH_INFO", "/"))
+        prefix = self._mount_prefix or str(environ.get("SCRIPT_NAME", "") or "")
+        if prefix:
+            norm = prefix.rstrip("/")
+            if norm and raw_path.startswith(f"{norm}/"):
+                raw_path = raw_path[len(norm) :]
+            elif norm and raw_path == norm:
+                raw_path = "/"
+        matched = self.match(method, raw_path)
         if matched is None:
             return None
         compiled, params = matched
-        if compiled.is_async or not getattr(compiled.callback, "__vertebra_fastpath__", True):
+        if not getattr(compiled.callback, "__vertebra_fastpath__", True):
             return None
         resp = dispatch_django_direct(compiled, environ, params)
+        if resp is None:
+            return None
+        raw_send = getattr(start_response, "send_raw_response", None)
+        if callable(raw_send):
+            return cast("list[bytes]", raw_send(int(resp.status), resp.headers, bytes(resp.body)))
         status_line = f"{resp.status} OK" if resp.status < 400 else f"{resp.status} ERROR"
         hdrs = [
             (
@@ -342,3 +461,30 @@ class FastPath:
         ]
         start_response(status_line, hdrs)
         return [bytes(resp.body)]
+
+    def wrap_wsgi(self, wsgi_handler: Callable[..., Any] | None = None) -> Callable[..., Any]:
+        """Wrap a Django WSGI callable so eligible routes execute via the zero-copy fastpath."""
+
+        def _wrapped_wsgi(environ: WsgiEnviron | dict[str, Any], start_response: Callable[..., Any]) -> Any:
+            chunks = self.dispatch_wsgi(environ, start_response)
+            if chunks is not None:
+                return chunks
+            if callable(wsgi_handler):
+                return wsgi_handler(environ, start_response)
+            start_response("404 Not Found", [("content-type", "text/plain")])
+            return [b"Not Found"]
+
+        dyn_wsgi = cast("Any", _wrapped_wsgi)
+        dyn_wsgi._vertebra_fastpath = self
+        dyn_wsgi.__vertebra_fastpath__ = self
+        dyn_wsgi.__vertebra_fastpath_attached__ = True
+        return _wrapped_wsgi
+
+    def wrap_asgi(self, fallback_app: Callable[..., Any] | None = None) -> Callable[..., Any]:
+        """Wrap an ASGI callable so eligible sync and async Django views execute via the fastpath."""
+
+        async def _default_fallback(_scope: Any, _receive: Any, send: Any) -> None:
+            await send({"type": "http.response.start", "status": 404, "headers": [(b"content-type", b"text/plain")]})
+            await send({"type": "http.response.body", "body": b"Not Found", "more_body": False})
+
+        return wrap_asgi_fastpath(self, fallback_app or _default_fallback)

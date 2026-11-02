@@ -100,19 +100,66 @@ class LoopShardedResource[T]:
             self._by_loop.clear()
 
 
+class _LoopCompletionQueue:
+    """Per-event-loop completion queue coalescing worker-thread wakeups into a single callback."""
+
+    __slots__ = ("_items", "_lock", "_loop_ref", "_wake_armed")
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop_ref = weakref.ref(loop)
+        self._items: list[tuple[asyncio.Future[Any], Any, BaseException | None]] = []
+        self._lock = threading.Lock()
+        self._wake_armed = False
+
+    def complete(self, fut: asyncio.Future[Any], value: Any, exc: BaseException | None) -> None:
+        """Append a completed future outcome and schedule a loop drain if none is currently armed."""
+        should_wake = False
+        with self._lock:
+            self._items.append((fut, value, exc))
+            if not self._wake_armed:
+                self._wake_armed = True
+                should_wake = True
+        if should_wake:
+            loop = self._loop_ref()
+            if loop is not None and not loop.is_closed():
+                with contextlib.suppress(RuntimeError):
+                    loop.call_soon_threadsafe(self.drain)
+
+    def drain(self) -> None:
+        """Resolve all queued futures on the owning event loop thread."""
+        while True:
+            with self._lock:
+                if not self._items:
+                    self._wake_armed = False
+                    return
+                batch = self._items
+                self._items = []
+            for fut, value, exc in batch:
+                if fut.done():
+                    continue
+                if exc is not None:
+                    fut.set_exception(exc)
+                else:
+                    fut.set_result(value)
+
+
 class SyncPool:
     """Dedicated worker pool for executing synchronous callables in parallel on Python 3.12+/3.14t."""
 
     _default_instance: ClassVar[SyncPool | None] = None
     _default_lock: ClassVar[threading.Lock] = threading.Lock()
 
-    __slots__ = ("_executor", "_max_workers", "_pid")
+    __slots__ = ("_executor", "_loop_queues", "_loop_queues_lock", "_max_workers", "_pid")
 
     def __init__(self, max_workers: int | None = None) -> None:
         cpu_count = os.cpu_count() or 4
         self._max_workers = max(1, max_workers if max_workers is not None else cpu_count * 2)
         self._executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._pid: int | None = None
+        self._loop_queues: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _LoopCompletionQueue] = (
+            weakref.WeakKeyDictionary()
+        )
+        self._loop_queues_lock = threading.Lock()
 
     @property
     def max_workers(self) -> int:
@@ -139,15 +186,23 @@ class SyncPool:
         return executor.submit(_invoke)
 
     async def submit_async[**P, R](self, fn: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> R:
-        """Execute a synchronous callable on the pool and await its completion on the active event loop."""
+        """Execute a synchronous callable on the pool and await its completion via coalesced loop wakeups."""
         loop = asyncio.get_running_loop()
+        fut: asyncio.Future[R] = loop.create_future()
+        queue = self._get_loop_queue(loop)
         executor = self._ensure_executor()
         ctx = contextvars.copy_context()
 
-        def _invoke() -> R:
-            return ctx.run(fn, *args, **kwargs)
+        def _invoke() -> None:
+            try:
+                res = ctx.run(fn, *args, **kwargs)
+            except BaseException as exc:
+                queue.complete(fut, None, exc)
+            else:
+                queue.complete(fut, res, None)
 
-        return await loop.run_in_executor(executor, _invoke)
+        executor.submit(_invoke)
+        return await fut
 
     def shutdown(self, *, wait: bool = True) -> None:
         """Shut down the underlying thread pool executor."""
@@ -156,6 +211,17 @@ class SyncPool:
                 self._executor.shutdown(wait=wait)
             self._executor = None
             self._pid = None
+
+    def _get_loop_queue(self, loop: asyncio.AbstractEventLoop) -> _LoopCompletionQueue:
+        queue = self._loop_queues.get(loop)
+        if queue is not None:
+            return queue
+        with self._loop_queues_lock:
+            queue = self._loop_queues.get(loop)
+            if queue is None:
+                queue = _LoopCompletionQueue(loop)
+                self._loop_queues[loop] = queue
+            return queue
 
     def _ensure_executor(self) -> concurrent.futures.ThreadPoolExecutor:
         current_pid = os.getpid()

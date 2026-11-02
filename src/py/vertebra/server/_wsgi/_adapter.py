@@ -1,7 +1,7 @@
 """WsgiAdapter: executes PEP 3333 WSGI callables on the Rust-backed environment."""
 
 from collections.abc import Callable, Iterable
-from typing import Any
+from typing import Any, cast
 
 from vertebra._vertebra import (
     Request,
@@ -13,6 +13,7 @@ from vertebra._vertebra import (
     run_wsgi_callable,
     submit_response,
 )
+from vertebra.server._fastpath import attach_framework_fastpath
 
 __all__ = (
     "WsgiAdapter",
@@ -31,12 +32,25 @@ class WsgiAdapter:
 
     def __init__(
         self,
-        app: Callable[..., Iterable[bytes]],
+        app: Callable[..., Iterable[bytes]] | Any,
         *,
         mount_prefix: str = "",
     ) -> None:
-        self._app = app
         self._mount_prefix = mount_prefix.rstrip("/")
+        wrapped = attach_framework_fastpath(app, mount_prefix=self._mount_prefix, protocol="wsgi")
+        if (
+            not callable(wrapped)
+            and callable(getattr(wrapped, "wsgi_app", None))
+            or callable(getattr(wrapped, "wsgi_app", None))
+            and getattr(wrapped.wsgi_app, "__vertebra_fastpath_attached__", False)
+        ):
+            wrapped = wrapped.wsgi_app
+        self._app: Callable[..., Iterable[bytes]] = cast("Callable[..., Iterable[bytes]]", wrapped)
+
+    @property
+    def __vertebra_fastpath_attached__(self) -> bool:
+        """Return True when a zero-copy FastPath wrapper is attached to this adapter."""
+        return bool(getattr(self._app, "__vertebra_fastpath_attached__", False))
 
     @property
     def app(self) -> Callable[..., Iterable[bytes]]:

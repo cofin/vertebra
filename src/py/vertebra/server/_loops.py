@@ -7,6 +7,8 @@ import os
 import sys
 import threading
 from collections.abc import Coroutine, Iterable
+from contextlib import suppress
+from enum import StrEnum
 from typing import Any
 
 from vertebra.server._gil_audit import GilAuditReport
@@ -15,27 +17,110 @@ from vertebra.utils.module_loader import import_optional
 
 __all__ = (
     "EventLoopPool",
+    "LoopBackend",
     "configure_worker_affinity",
     "create_event_loop",
+    "resolve_loop_backend",
     "resolve_loop_shards",
 )
 
 
-def create_event_loop() -> asyncio.AbstractEventLoop:
-    """Create a high-performance event loop preferring uvloop on POSIX and winloop on Windows."""
-    loop: asyncio.AbstractEventLoop | None = None
+class LoopBackend(StrEnum):
+    """Supported asyncio event loop backend implementations."""
+
+    AUTO = "auto"
+    UVLOOP = "uvloop"
+    WINLOOP = "winloop"
+    RLOOP = "rloop"
+    ASYNCIO = "asyncio"
+
+
+def resolve_loop_backend(
+    backend: LoopBackend | str | None = None,
+    *,
+    quarantined_modules: frozenset[str] | tuple[str, ...] = frozenset(),
+) -> LoopBackend:
+    """Resolve the active event loop backend honoring explicit overrides, env vars, and GIL quarantine."""
+    raw = str(backend if backend is not None else os.environ.get("VERTEBRA_LOOP", "auto")).strip().lower()
+    try:
+        requested = LoopBackend(raw) if raw else LoopBackend.AUTO
+    except ValueError:
+        requested = LoopBackend.AUTO
+
+    if requested == LoopBackend.ASYNCIO:
+        return LoopBackend.ASYNCIO
+
+    quarantined_prefixes: set[str] = {mod.split("==", 1)[0].strip().lower() for mod in quarantined_modules if mod}
+    env_quarantined = os.environ.get("VERTEBRA_QUARANTINED_LOOPS", "").strip()
+    if env_quarantined:
+        for token in env_quarantined.split(","):
+            cleaned = token.split("==", 1)[0].strip().lower()
+            if cleaned:
+                quarantined_prefixes.add(cleaned)
+
+    if requested == LoopBackend.RLOOP:
+        if "rloop" not in quarantined_prefixes and import_optional("rloop") is not None:
+            return LoopBackend.RLOOP
+        return LoopBackend.ASYNCIO
+
+    if requested == LoopBackend.WINLOOP:
+        if "winloop" not in quarantined_prefixes and import_optional("winloop") is not None:
+            return LoopBackend.WINLOOP
+        return LoopBackend.ASYNCIO
+
+    if requested == LoopBackend.UVLOOP:
+        if "uvloop" not in quarantined_prefixes and import_optional("uvloop") is not None:
+            return LoopBackend.UVLOOP
+        return LoopBackend.ASYNCIO
+
     if sys.platform == "win32":
-        winloop = import_optional("winloop")
-        if winloop is not None:
-            loop = winloop.new_event_loop()
-    else:
-        uvloop = import_optional("uvloop")
-        if uvloop is not None:
-            loop = uvloop.new_event_loop()
+        if "winloop" not in quarantined_prefixes and import_optional("winloop") is not None:
+            return LoopBackend.WINLOOP
+        return LoopBackend.ASYNCIO
+
+    if "uvloop" not in quarantined_prefixes and import_optional("uvloop") is not None:
+        return LoopBackend.UVLOOP
+    if not quarantined_prefixes and import_optional("rloop") is not None:
+        return LoopBackend.RLOOP
+    return LoopBackend.ASYNCIO
+
+
+def _eager_task_factory(
+    loop: asyncio.AbstractEventLoop,
+    coro: Any,
+    **kwargs: Any,
+) -> asyncio.Task[Any]:
+    """Execute task immediately via asyncio.eager_task_factory with safe argument absorption."""
+    kwargs.pop("eager_start", None)
+    return asyncio.eager_task_factory(loop, coro, **kwargs)
+
+
+def create_event_loop(
+    backend: LoopBackend | str | None = None,
+    *,
+    quarantined_modules: frozenset[str] | tuple[str, ...] = frozenset(),
+) -> asyncio.AbstractEventLoop:
+    """Create a high-performance event loop for the resolved LoopBackend."""
+    resolved = resolve_loop_backend(backend, quarantined_modules=quarantined_modules)
+    loop: asyncio.AbstractEventLoop | None = None
+    if resolved == LoopBackend.RLOOP:
+        rloop_mod = import_optional("rloop")
+        if rloop_mod is not None:
+            loop = rloop_mod.new_event_loop()
+    elif resolved == LoopBackend.WINLOOP:
+        winloop_mod = import_optional("winloop")
+        if winloop_mod is not None:
+            loop = winloop_mod.new_event_loop()
+    elif resolved == LoopBackend.UVLOOP:
+        uvloop_mod = import_optional("uvloop")
+        if uvloop_mod is not None:
+            loop = uvloop_mod.new_event_loop()
+
     if loop is None:
         loop = asyncio.new_event_loop()
-    if hasattr(asyncio, "eager_task_factory"):
-        loop.set_task_factory(asyncio.eager_task_factory)
+        if hasattr(asyncio, "eager_task_factory"):
+            with suppress(AttributeError, NotImplementedError, TypeError):
+                loop.set_task_factory(_eager_task_factory)
     return loop
 
 
@@ -86,16 +171,37 @@ def resolve_loop_shards(
 class EventLoopPool:
     """Sharded pool of persistent event loops with optional inline single-thread mode."""
 
-    __slots__ = ("_counter", "_inline_single", "_loops", "_size", "_stopped", "_task_sets", "_threads")
+    __slots__ = (
+        "_counter",
+        "_inline_single",
+        "_loop_backend",
+        "_loops",
+        "_quarantined_modules",
+        "_size",
+        "_stopped",
+        "_task_sets",
+        "_threads",
+    )
 
-    def __init__(self, size: int | None = None, *, inline_single_loop: bool = False) -> None:
-        resolved_size = size if size is not None else resolve_loop_shards()
+    def __init__(
+        self,
+        size: int | None = None,
+        *,
+        inline_single_loop: bool = False,
+        loop_backend: LoopBackend | str | None = None,
+        gil_report: GilAuditReport | None = None,
+    ) -> None:
+        resolved_size = size if size is not None else resolve_loop_shards(audit_report=gil_report)
         if resolved_size < 1:
             msg = "EventLoopPool size must be >= 1"
             raise ValueError(msg)
 
         self._size = resolved_size
         self._inline_single = inline_single_loop and resolved_size == 1
+        self._loop_backend = loop_backend
+        self._quarantined_modules: frozenset[str] = (
+            frozenset(gil_report.quarantined_modules) if gil_report is not None else frozenset()
+        )
         self._loops: list[asyncio.AbstractEventLoop] = []
         self._threads: list[threading.Thread] = []
         self._task_sets: list[set[asyncio.Task[Any]]] = []
@@ -103,13 +209,21 @@ class EventLoopPool:
         self._stopped = False
 
         if self._inline_single:
-            self._loops.append(create_event_loop())
+            self._loops.append(
+                create_event_loop(
+                    backend=self._loop_backend,
+                    quarantined_modules=self._quarantined_modules,
+                )
+            )
             self._task_sets.append(set())
             return
 
         for shard_idx in range(resolved_size):
             ready = threading.Event()
-            loop = create_event_loop()
+            loop = create_event_loop(
+                backend=self._loop_backend,
+                quarantined_modules=self._quarantined_modules,
+            )
             self._loops.append(loop)
             self._task_sets.append(set())
             thread = threading.Thread(
@@ -269,21 +383,36 @@ class EventLoopPool:
             if not entries:
                 continue
             loop = self._loops[idx]
+            tasks = self._task_sets[idx]
 
             def _schedule_shard(
                 target_loop: asyncio.AbstractEventLoop = loop,
+                target_tasks: set[asyncio.Task[Any]] = tasks,
                 shard_entries: list[tuple[Coroutine[Any, Any, T], concurrent.futures.Future[T]]] = entries,
             ) -> None:
+                discard = target_tasks.discard
                 for c, f in shard_entries:
-                    task = target_loop.create_task(c)
+                    try:
+                        task = target_loop.create_task(c)
+                    except Exception as exc:
+                        if not f.done():
+                            f.set_exception(exc)
+                        continue
+
+                    target_tasks.add(task)
+                    task.add_done_callback(discard)
 
                     def _on_done(t: asyncio.Task[T], fut: concurrent.futures.Future[T] = f) -> None:
-                        if t.cancelled():
-                            fut.cancel()
-                        elif exc := t.exception():
-                            fut.set_exception(exc)
-                        else:
-                            fut.set_result(t.result())
+                        try:
+                            if t.cancelled():
+                                fut.cancel()
+                            elif exc := t.exception():
+                                fut.set_exception(exc)
+                            else:
+                                fut.set_result(t.result())
+                        except Exception as exc2:
+                            if not fut.done():
+                                fut.set_exception(exc2)
 
                     task.add_done_callback(_on_done)
 
@@ -314,17 +443,15 @@ class EventLoopPool:
                 target_loop: asyncio.AbstractEventLoop = loop,
                 target_tasks: set[asyncio.Task[Any]] = tasks,
             ) -> None:
-                async def _wait_tasks() -> None:
-                    if target_tasks:
-                        await asyncio.wait(list(target_tasks), timeout=2.0)
-                    target_loop.stop()
-
-                target_loop.create_task(_wait_tasks())
+                for t in list(target_tasks):
+                    if not t.done():
+                        t.cancel()
+                target_loop.stop()
 
             loop.call_soon_threadsafe(_shutdown)
 
         for thread in self._threads:
-            thread.join(timeout=5.0)
+            thread.join(timeout=2.0)
 
         for loop in self._loops:
             if not loop.is_closed():
