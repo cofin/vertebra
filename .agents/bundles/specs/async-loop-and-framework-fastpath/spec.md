@@ -3,17 +3,17 @@ type: Spec
 flow_id: async-loop-and-framework-fastpath
 title: "Unified Event Loop Backends, C-API Coroutine Stepping, Rust Completion Ring, 6-Framework Stacked FastPath & Shared Native Database Pool"
 description: "Unified LoopBackend (uvloop 0.23+, winloop 0.8+, rloop, asyncio), C-API PyIter_Send native coroutine driver (drive_native_batch), AsgiProtocol/AsgiSend/WsgiStartResponse send_raw_response, per-loop RustCompletionRing + Notifier in vertebra-storage and SyncPool, zero-closure stacked FastPath, and cross-framework shared native database pool/broker across Vertebra Native, Litestar, FastAPI, Starlette, Flask, and Django."
-state: planned
+state: in_progress
 parent_prd: null
 research:
   - research/event-loop-and-async-optimizations_20261101.md
 plan_revision: 2
 plan_commit: 34429ff8c50d4622d0cacbd1288525f8a1211dc8
-state_revision: 0
-current_task: null
-last_verified_checkpoint: null
+state_revision: 2
+current_task: async-loop-and-framework-fastpath:t02
+last_verified_checkpoint: 5763c37
 created_at: 2026-11-01T23:48:00Z
-updated_at: 2026-11-02T00:03:00Z
+updated_at: 2026-11-02T00:19:15Z
 tags:
   - feature
   - server
@@ -157,8 +157,8 @@ Vertebra's Rust HTTP ingress (`vertebra-http`) and C-API ASGI/RSGI runners (`dri
 ## 4. Implementation Plan
 
 ### Phase 1: Event Loop Backends, C-API Coroutine Stepper & Rust Completion Ring
-- [ ] t01 — Add unified `LoopBackend` (`uvloop`, `winloop`, `rloop`, `asyncio`) selector and remove deprecated `EventLoopPolicy` APIs (tasks/t01-loop-backend-and-gil-audit.md)
-- [ ] t02 — Add C-API `drive_native_batch` (`PyIter_Send`), `AsgiScope.body_bytes()`, `AsgiProtocol.send_raw_response`, `AsgiSend.send_raw_response`, and `_WsgiStartResponse.send_raw_response` in `vertebra-py` (tasks/t02-capi-native-async-stepper-and-raw-send.md)
+- [x] t01 — Add unified `LoopBackend` (`uvloop`, `winloop`, `rloop`, `asyncio`) selector and remove deprecated `EventLoopPolicy` APIs (tasks/t01-loop-backend-and-gil-audit.md)
+- [~] t02 — Add C-API `drive_native_batch` (`PyIter_Send`), `AsgiScope.body_bytes()`, `AsgiProtocol.send_raw_response`, `AsgiSend.send_raw_response`, and `_WsgiStartResponse.send_raw_response` in `vertebra-py` (tasks/t02-capi-native-async-stepper-and-raw-send.md)
 - [ ] t03 — Replace per-op `call_soon_threadsafe` with `RustCompletionRing` + `Notifier` in `vertebra-storage` and batched `SyncPool.submit_async` wakeups (tasks/t03-rust-completion-ring-storage-and-db.md)
 - **Phase 1 Recovery Checkpoint**: `make dev && uv run --no-sync pytest src/py/tests/unit/server/test_runtime_tuning.py src/py/tests/unit/server/test_asgi_capi_runner.py src/py/tests/unit/server/test_wsgi_batch_runner.py src/py/tests/unit/storage/test_gcs_token_refresh.py src/py/tests/unit/db/test_native_db_drivers.py -q`
 

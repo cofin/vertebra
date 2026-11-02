@@ -363,6 +363,7 @@ class Worker:
         loop_pool = EventLoopPool(
             size=shard_count,
             inline_single_loop=(shard_count == 1 and (use_inline_event_loop or not needs_event_loop)),
+            gil_report=self._gil_report,
         )
         executor: ThreadPoolExecutor | None = (
             ThreadPoolExecutor(

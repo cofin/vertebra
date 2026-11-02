@@ -2,7 +2,7 @@
 type: Task
 id: async-loop-and-framework-fastpath:t01
 title: "Add unified LoopBackend (uvloop, winloop, rloop, asyncio) selector and remove deprecated EventLoopPolicy APIs"
-state: pending
+state: done
 priority: P0
 verification_strategy: behavior_tdd
 depends_on: []
@@ -10,6 +10,7 @@ files:
   - pyproject.toml
   - src/py/vertebra/server/_gil_audit.py
   - src/py/vertebra/server/_loops.py
+  - src/py/vertebra/server/worker.py
   - src/py/vertebra/cli/_launch.py
   - src/py/vertebra/cli/run.py
   - src/py/vertebra/cli/dev.py
@@ -18,17 +19,17 @@ tests:
   - src/py/tests/unit/server/test_runtime_tuning.py
 plan_revision: 2
 plan_commit: 34429ff8c50d4622d0cacbd1288525f8a1211dc8
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: agent:executor
+claimed_at: 2026-11-02T00:12:20Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-02T00:19:06Z
+last_verified_commit: 5763c37
+verification_evidence: "uv run --no-sync pytest src/py/tests/unit/server/test_runtime_tuning.py -W 'error::DeprecationWarning:vertebra' -q (16 passed); ruff & mypy clean"
 created_at: 2026-11-01T23:48:00Z
-updated_at: 2026-11-02T00:03:00Z
+updated_at: 2026-11-02T00:19:06Z
 commit: null
 tags: [server, event-loop, uvloop, winloop, rloop, tdd]
 ---
@@ -72,8 +73,10 @@ uv run --no-sync mypy src/py/vertebra/server/_gil_audit.py src/py/vertebra/serve
 ```
 
 ## Acceptance Criteria
-- [ ] `LoopBackend`, `resolve_loop_backend`, and `create_event_loop` support `auto`, `uvloop`, `winloop`, `rloop`, and `asyncio` and honor `VERTEBRA_LOOP` and `quarantined_modules` (R1).
-- [ ] Zero `DeprecationWarning`s are emitted by `_gil_audit.py` or `test_runtime_tuning.py` on Python 3.14/3.15/3.15t (R1).
-- [ ] `vtb run` and `vtb dev` accept `--loop` and export `VERTEBRA_LOOP` via `ServerLaunchEnv` (R1).
+- [x] `LoopBackend`, `resolve_loop_backend`, and `create_event_loop` support `auto`, `uvloop`, `winloop`, `rloop`, and `asyncio` and honor `VERTEBRA_LOOP` and `quarantined_modules` (R1).
+- [x] Zero `DeprecationWarning`s are emitted by `_gil_audit.py` or `test_runtime_tuning.py` on Python 3.14/3.15/3.15t (R1).
+- [x] `vtb run` and `vtb dev` accept `--loop` and export `VERTEBRA_LOOP` via `ServerLaunchEnv` (R1).
 
 ## Notes & Discoveries
+- Added `LoopBackend(StrEnum)` (`AUTO`, `UVLOOP`, `WINLOOP`, `RLOOP`, `ASYNCIO`), `resolve_loop_backend`, and `quarantined_modules` propagation through `create_event_loop` and `EventLoopPool`.
+- Removed deprecated `asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())` from `GilAuditReport.quarantine_unsafe_modules` and exported `VERTEBRA_QUARANTINED_LOOPS` for quarantined loop extensions (`uvloop <= 0.21.99`).

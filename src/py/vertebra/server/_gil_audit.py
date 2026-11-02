@@ -1,6 +1,5 @@
-"""Free-threaded CPython 3.14t GIL re-enablement auditor and extension quarantine."""
+"""Free-threaded CPython 3.14t/3.15t GIL re-enablement auditor and extension quarantine."""
 
-import asyncio
 import logging
 import os
 import sys
@@ -16,6 +15,7 @@ __all__ = (
 
 log = logging.getLogger(__name__)
 _NATIVE_SUFFIXES = (".so", ".pyd", ".dylib")
+_LOOP_MODULE_NAMES = frozenset({"uvloop", "winloop", "rloop"})
 
 
 def is_free_threaded() -> bool:
@@ -41,7 +41,7 @@ class GilAuditReport(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     suspect_extensions: tuple[str, ...] = ()
     """Newly imported native extensions present when `gil_reenabled_on_import` is True."""
     quarantined_modules: tuple[str, ...] = ()
-    """Loaded modules known to be unsafe under free-threaded execution (e.g. `uvloop<=0.22.1`)."""
+    """Loaded modules known to be unsafe under free-threaded execution (e.g. `uvloop<=0.21.99`)."""
 
     @staticmethod
     def gil_enabled() -> bool:
@@ -74,15 +74,19 @@ class GilAuditReport(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         return cls.snapshot_extensions()
 
     def quarantine_unsafe_modules(self, requested_shards: int) -> int:
-        """Enforce standard asyncio policy and single-shard execution when GIL is re-enabled or extensions are suspect."""
-        if self.gil_reenabled_on_import or bool(self.suspect_extensions):
-            asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+        """Record quarantined loop extensions and enforce single-shard execution when unsafe."""
+        quarantined_loops = {
+            mod.split("==", 1)[0] for mod in self.quarantined_modules if mod.split("==", 1)[0] in _LOOP_MODULE_NAMES
+        }
+        if quarantined_loops:
+            os.environ["VERTEBRA_QUARANTINED_LOOPS"] = ",".join(sorted(quarantined_loops))
+        if self.gil_reenabled_on_import or bool(self.suspect_extensions) or bool(quarantined_loops):
             return 1
         return max(1, requested_shards)
 
     @staticmethod
     def detect_unsafe_modules(allowlist: Iterable[str] | None = None) -> tuple[str, ...]:
-        """Detect known 3.14t-unsafe event loop modules such as uvloop <= 0.22.1."""
+        """Detect known free-threaded unsafe event loop modules such as uvloop <= 0.21.99."""
         allowed = set(allowlist) if allowlist is not None else set()
         if not GilAuditReport.is_free_threaded_build() and GilAuditReport.gil_enabled():
             return ()
@@ -96,7 +100,7 @@ class GilAuditReport(msgspec.Struct, frozen=True, gc=False, kw_only=True):
                     digits = "".join(ch for ch in token if ch.isdigit())
                     parts.append(int(digits) if digits else 0)
                 version_tuple = tuple(parts)
-                if version_tuple <= (0, 22, 1):
+                if version_tuple <= (0, 21, 99):
                     quarantined.append(f"uvloop=={raw_ver}")
                     log.warning(
                         "Quarantining uvloop %s on free-threaded Python; falling back to standard asyncio loop",

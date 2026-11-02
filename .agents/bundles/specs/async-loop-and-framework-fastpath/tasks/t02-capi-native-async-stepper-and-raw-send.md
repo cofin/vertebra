@@ -2,7 +2,7 @@
 type: Task
 id: async-loop-and-framework-fastpath:t02
 title: "Add C-API drive_native_batch (PyIter_Send), AsgiScope.body_bytes(), AsgiProtocol.send_raw_response, AsgiSend.send_raw_response, and _WsgiStartResponse.send_raw_response in vertebra-py"
-state: pending
+state: in_progress
 priority: P0
 verification_strategy: behavior_tdd
 depends_on:
@@ -19,9 +19,9 @@ tests:
   - src/py/tests/unit/server/test_wsgi_batch_runner.py
 plan_revision: 2
 plan_commit: 34429ff8c50d4622d0cacbd1288525f8a1211dc8
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: agent:executor
+claimed_at: 2026-11-02T00:19:50Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -29,7 +29,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: 2026-11-01T23:48:00Z
-updated_at: 2026-11-02T00:03:00Z
+updated_at: 2026-11-02T00:19:50Z
 commit: null
 tags: [rust, pyo3, c-api, asgi, wsgi, dispatch, tdd]
 ---

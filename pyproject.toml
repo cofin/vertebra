@@ -14,6 +14,8 @@ dependencies = [
     "msgspec>=0.18",
     "rich>=13.0",
     "rich-click>=1.7",
+    "uvloop>=0.23.0; sys_platform != 'win32'",
+    "winloop>=0.8.1; sys_platform == 'win32'",
 ]
 
 [project.scripts]
@@ -112,6 +114,9 @@ saq = [
 embeddings = [
     "fastembed>=0.6.0",
 ]
+rloop = [
+    "rloop>=0.5.0; sys_platform != 'win32'",
+]
 all = [
     "sqlspec>=0.69.0",
     "advanced-alchemy>=1.12.0",
@@ -135,6 +140,7 @@ all = [
     "litestar-asyncapi>=0.2.0",
     "litestar-htmx>=0.5.0",
     "litestar-saq>=0.8.0",
+    "rloop>=0.5.0; sys_platform != 'win32'",
 ]
 
 [dependency-groups]
@@ -193,7 +199,7 @@ bench = [
     "duckdb>=1.0",
     "uvicorn[standard]>=0.30",
     "httptools>=0.6",
-    "uvloop>=0.21",
+    "uvloop>=0.23.0; sys_platform != 'win32'",
     "granian>=1.6",
     "spikard>=0.12",
 ]
@@ -255,6 +261,8 @@ module = [
     "polars",
     "polars.*",
     "uvloop",
+    "winloop",
+    "rloop",
     "starlette",
     "starlette.*",
     "fastapi",
