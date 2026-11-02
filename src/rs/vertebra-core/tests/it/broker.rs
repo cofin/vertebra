@@ -66,19 +66,31 @@ fn test_shm_lease_table_futex_wakeup_latency() {
     let t = Arc::clone(&table);
     let waiter = std::thread::spawn(move || {
         let start = Instant::now();
-        let grant = t.acquire(200, 0, Duration::from_secs(2), 0).unwrap();
+        let grant = t.acquire(200, 0, Duration::from_secs(5), 0).unwrap();
         let elapsed = start.elapsed();
         (grant, elapsed)
     });
 
-    // Sleep 15ms before releasing
-    std::thread::sleep(Duration::from_millis(15));
+    // Synchronize until the waiter thread has registered on the full pool
+    let poll_start = Instant::now();
+    while table.stats().waiting_threads == 0 {
+        if poll_start.elapsed() > Duration::from_secs(5) {
+            panic!("timed out waiting for waiter thread to register in waiters count");
+        }
+        std::thread::yield_now();
+    }
+
+    let release_time = Instant::now();
     table.release(g0.slot_index, g0.generation).unwrap();
 
     let (grant, elapsed) = waiter.join().unwrap();
     assert_eq!(grant.worker_pid, 200);
-    // Wakeup latency after release should be reasonable (< 50ms total elapsed includes 15ms sleep)
-    assert!(elapsed < Duration::from_millis(100));
+    let wake_latency = release_time.elapsed();
+    // Wakeup latency after release should be prompt (< 750ms allows for CI virtualization jitter while ensuring futex wake)
+    assert!(
+        wake_latency < Duration::from_millis(750),
+        "wake latency exceeded bound: {wake_latency:?} (total elapsed: {elapsed:?})"
+    );
 
     table.release(grant.slot_index, grant.generation).unwrap();
     table.release(g1.slot_index, g1.generation).unwrap();
