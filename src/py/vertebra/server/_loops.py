@@ -85,6 +85,16 @@ def resolve_loop_backend(
     return LoopBackend.ASYNCIO
 
 
+def _eager_task_factory(
+    loop: asyncio.AbstractEventLoop,
+    coro: Any,
+    **kwargs: Any,
+) -> asyncio.Task[Any]:
+    """Execute task immediately via asyncio.eager_task_factory with safe argument absorption."""
+    kwargs.pop("eager_start", None)
+    return asyncio.eager_task_factory(loop, coro, **kwargs)
+
+
 def create_event_loop(
     backend: LoopBackend | str | None = None,
     *,
@@ -108,9 +118,9 @@ def create_event_loop(
 
     if loop is None:
         loop = asyncio.new_event_loop()
-    if hasattr(asyncio, "eager_task_factory"):
-        with suppress(AttributeError, NotImplementedError, TypeError):
-            loop.set_task_factory(asyncio.eager_task_factory)
+        if hasattr(asyncio, "eager_task_factory"):
+            with suppress(AttributeError, NotImplementedError, TypeError):
+                loop.set_task_factory(_eager_task_factory)
     return loop
 
 
