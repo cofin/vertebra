@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any, cast
 
 import pytest
@@ -34,6 +36,7 @@ from vertebra.db import (
 from vertebra.extensions.litestar import ChannelsBackend, MemoryStore
 from vertebra.storage import ObjectStore
 from vertebra.typing import MissingDependencyError
+from vertebra.utils.sync_tools import SyncPool
 
 
 def test_cloudsql_and_alloydb_dialers() -> None:
@@ -214,3 +217,33 @@ async def test_database_channel_backend_multi_engine_and_object_store_spill() ->
     assert len(history) == 1
     assert b'"operation":"INSERT"' in history[0]
     await cdc_bus.on_shutdown()
+
+
+@pytest.mark.anyio
+async def test_sync_pool_submit_async_coalesced_loop_wakeups() -> None:
+    """Verify SyncPool.submit_async coalesces concurrent worker thread completions via a per-loop completion queue."""
+    pool = SyncPool(max_workers=8)
+    loop = asyncio.get_running_loop()
+    orig_csts = loop.call_soon_threadsafe
+    csts_calls = 0
+
+    def tracked_csts(callback: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal csts_calls
+        csts_calls += 1
+        return orig_csts(callback, *args, **kwargs)
+
+    def _work(idx: int) -> int:
+        if idx < 16:
+            time.sleep(0.002)
+        return idx * 2
+
+    csts_attr = "call_soon_threadsafe"
+    setattr(loop, csts_attr, tracked_csts)
+    try:
+        results = await asyncio.gather(*(pool.submit_async(_work, i) for i in range(64)))
+        assert results == [i * 2 for i in range(64)]
+    finally:
+        setattr(loop, csts_attr, orig_csts)
+        pool.shutdown()
+
+    assert csts_calls < 32

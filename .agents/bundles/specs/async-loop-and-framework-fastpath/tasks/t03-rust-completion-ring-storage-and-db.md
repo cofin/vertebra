@@ -2,7 +2,7 @@
 type: Task
 id: async-loop-and-framework-fastpath:t03
 title: "Replace per-op call_soon_threadsafe with RustCompletionRing + Notifier in vertebra-storage and batched SyncPool.submit_async wakeups"
-state: in_progress
+state: done
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -10,24 +10,23 @@ depends_on:
 files:
   - src/rs/vertebra-storage/Cargo.toml
   - src/rs/vertebra-storage/src/lib.rs
-  - src/py/vertebra/_storage.pyi
   - src/py/vertebra/utils/sync_tools.py
 tests:
   - src/py/tests/unit/storage/test_gcs_token_refresh.py
   - src/py/tests/unit/db/test_native_db_drivers.py
 plan_revision: 2
 plan_commit: 34429ff8c50d4622d0cacbd1288525f8a1211dc8
-state_revision: 1
-claimed_by: agent:executor
-claimed_at: 2026-11-02T00:33:25Z
+state_revision: 2
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-02T00:41:34Z
+last_verified_commit: 7e1dc5fd635b32e7ab77ca83e88869a282c8b873
+verification_evidence: "uv run --no-sync pytest src/py/tests/unit/storage/test_gcs_token_refresh.py src/py/tests/unit/db/test_native_db_drivers.py -q -> 15 passed in 3.95s; mypy.stubtest vertebra._storage -> exit 0"
 created_at: 2026-11-01T23:48:00Z
-updated_at: 2026-11-02T00:33:25Z
+updated_at: 2026-11-02T00:41:45Z
 commit: null
 tags: [rust, pyo3, storage, database, async, eventfd, tdd]
 ---
@@ -64,7 +63,9 @@ uv run --no-sync pytest src/py/tests/unit/storage/test_gcs_token_refresh.py src/
 ```
 
 ## Acceptance Criteria
-- [ ] `spawn_rust_task` in `vertebra-storage` completes Tokio tasks without acquiring the GIL on Tokio threads when `add_reader` is active and coalesces wakeups via `Notifier` (R3).
-- [ ] `SyncPool.submit_async` coalesces concurrent worker thread completions per event loop into a single batched wakeup and resolves all `vertebra.db` async driver futures accurately (R3).
+- [x] `spawn_rust_task` in `vertebra-storage` completes Tokio tasks without acquiring the GIL on Tokio threads when `add_reader` is active and coalesces wakeups via `Notifier` (R3).
+- [x] `SyncPool.submit_async` coalesces concurrent worker thread completions per event loop into a single batched wakeup and resolves all `vertebra.db` async driver futures accurately (R3).
 
 ## Notes & Discoveries
+- Added `RustCompletionRing` + `_StorageCompletionDrainer` backed by `vertebra_core::notify::Notifier` (`eventfd`/`kqueue`) registered via `loop.add_reader` on the running Python event loop in `src/rs/vertebra-storage/src/lib.rs`.
+- Added per-loop `_LoopCompletionQueue` with `wake_armed` coalescing in `src/py/vertebra/utils/sync_tools.py::SyncPool.submit_async`.

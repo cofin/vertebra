@@ -123,7 +123,10 @@ class _MockTokenServer:
                 self.send_response(404)
                 self.end_headers()
 
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        class _HighConcurrencyHTTPServer(ThreadingHTTPServer):
+            request_queue_size = 256
+
+        self._server = _HighConcurrencyHTTPServer(("127.0.0.1", 0), Handler)
         self.port = self._server.server_port
         self.base_url = f"http://127.0.0.1:{self.port}"
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
@@ -458,5 +461,38 @@ def test_high_concurrency_async_storage_and_token_refresh_no_gil_blocking(
             await hb_task
 
         assert max_loop_lag_s < 0.25
+
+    asyncio.run(_run())
+
+
+def test_storage_completion_ring_eventfd_coalesced_wakeup(tmp_path: Path) -> None:
+    """Verify ObjectStore async operations use per-loop Notifier (eventfd/kqueue) + completion ring instead of per-task call_soon_threadsafe."""
+    store = ObjectStore(f"file://{tmp_path / 'ring_bucket'}")
+    payload = b"completion-ring-payload" * 64
+
+    async def _run() -> None:
+        loop = asyncio.get_running_loop()
+        orig_csts = loop.call_soon_threadsafe
+        csts_calls = 0
+
+        def tracked_csts(callback: Any, *args: Any, **kwargs: Any) -> Any:
+            nonlocal csts_calls
+            csts_calls += 1
+            return orig_csts(callback, *args, **kwargs)
+
+        csts_attr = "call_soon_threadsafe"
+        setattr(loop, csts_attr, tracked_csts)
+        try:
+            metas = await asyncio.gather(*(store.put_async(f"k-{i}.bin", payload) for i in range(64)))
+            assert len(metas) == 64
+            assert all(m.size == len(payload) for m in metas)
+
+            blobs = await asyncio.gather(*(store.get_async(f"k-{i}.bin") for i in range(64)))
+            assert len(blobs) == 64
+            assert all(b == payload for b in blobs)
+        finally:
+            setattr(loop, csts_attr, orig_csts)
+
+        assert csts_calls == 0
 
     asyncio.run(_run())

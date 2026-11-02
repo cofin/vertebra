@@ -2,7 +2,7 @@
 type: Task
 id: async-loop-and-framework-fastpath:t04
 title: "Unify zero-closure wrap_asgi, AsgiSend.send_raw_response, lazy Request, and inline sync execution across Litestar, FastAPI, and Starlette FastPath"
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -15,13 +15,13 @@ files:
   - src/py/vertebra/extensions/starlette/fastpath.py
 tests:
   - src/py/tests/unit/server/test_litestar_direct_fastpath.py
-  - src/py/tests/unit/extensions/test_fastapi.py
-  - src/py/tests/unit/extensions/test_starlette.py
+  - src/py/tests/unit/extensions/test_fastapi_plugin.py
+  - src/py/tests/unit/extensions/test_starlette_plugin.py
 plan_revision: 2
 plan_commit: 34429ff8c50d4622d0cacbd1288525f8a1211dc8
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: agent:executor
+claimed_at: 2026-11-02T00:41:45Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -29,7 +29,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: 2026-11-01T23:48:00Z
-updated_at: 2026-11-02T00:03:00Z
+updated_at: 2026-11-02T00:41:45Z
 commit: null
 tags: [litestar, fastapi, starlette, asgi, fastpath, zero-copy, tdd]
 ---

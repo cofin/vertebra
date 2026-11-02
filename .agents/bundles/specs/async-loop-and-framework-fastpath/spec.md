@@ -9,11 +9,11 @@ research:
   - research/event-loop-and-async-optimizations_20261101.md
 plan_revision: 2
 plan_commit: 34429ff8c50d4622d0cacbd1288525f8a1211dc8
-state_revision: 3
-current_task: async-loop-and-framework-fastpath:t03
-last_verified_checkpoint: 63c3292372530a119fe3976fe09758aced23b559
+state_revision: 4
+current_task: async-loop-and-framework-fastpath:t04
+last_verified_checkpoint: 7e1dc5fd635b32e7ab77ca83e88869a282c8b873
 created_at: 2026-11-01T23:48:00Z
-updated_at: 2026-11-02T00:33:25Z
+updated_at: 2026-11-02T00:41:45Z
 tags:
   - feature
   - server
@@ -159,11 +159,11 @@ Vertebra's Rust HTTP ingress (`vertebra-http`) and C-API ASGI/RSGI runners (`dri
 ### Phase 1: Event Loop Backends, C-API Coroutine Stepper & Rust Completion Ring
 - [x] t01 — Add unified `LoopBackend` (`uvloop`, `winloop`, `rloop`, `asyncio`) selector and remove deprecated `EventLoopPolicy` APIs (tasks/t01-loop-backend-and-gil-audit.md)
 - [x] t02 — Add C-API `drive_native_batch` (`PyIter_Send`), `AsgiScope.body_bytes()`, `AsgiProtocol.send_raw_response`, `AsgiSend.send_raw_response`, and `_WsgiStartResponse.send_raw_response` in `vertebra-py` (tasks/t02-capi-native-async-stepper-and-raw-send.md)
-- [~] t03 — Replace per-op `call_soon_threadsafe` with `RustCompletionRing` + `Notifier` in `vertebra-storage` and batched `SyncPool.submit_async` wakeups (tasks/t03-rust-completion-ring-storage-and-db.md)
-- **Phase 1 Recovery Checkpoint**: `make dev && uv run --no-sync pytest src/py/tests/unit/server/test_runtime_tuning.py src/py/tests/unit/server/test_asgi_capi_runner.py src/py/tests/unit/server/test_wsgi_batch_runner.py src/py/tests/unit/storage/test_gcs_token_refresh.py src/py/tests/unit/db/test_native_db_drivers.py -q`
+- [x] t03 — Replace per-op `call_soon_threadsafe` with `RustCompletionRing` + `Notifier` in `vertebra-storage` and batched `SyncPool.submit_async` wakeups (tasks/t03-rust-completion-ring-storage-and-db.md)
+- **Phase 1 Recovery Checkpoint**: `make dev && uv run --no-sync pytest src/py/tests/unit/server/test_runtime_tuning.py src/py/tests/unit/server/test_asgi.py src/py/tests/unit/server/test_wsgi.py src/py/tests/unit/storage/test_gcs_token_refresh.py src/py/tests/unit/db/test_native_db_drivers.py -q`
 
 ### Phase 2: Unified 6-Framework Zero-Copy `FastPath`, Multi-Framework Stacking (`App.mount`) & Shared Native Database Pool
-- [ ] t04 — Unify zero-closure `wrap_asgi`, `send_raw_response`, lazy `Request`, and inline sync execution across Litestar, FastAPI, and Starlette `FastPath` (tasks/t04-asgi-fastpath-litestar-fastapi-starlette.md)
+- [~] t04 — Unify zero-closure `wrap_asgi`, `send_raw_response`, lazy `Request`, and inline sync execution across Litestar, FastAPI, and Starlette `FastPath` (tasks/t04-asgi-fastpath-litestar-fastapi-starlette.md)
 - [ ] t05 — Add `async def` view execution, cached `MsgspecView`, `wrap_asgi`, and `_WsgiStartResponse.send_raw_response` to Flask and Django `FastPath` (tasks/t05-flask-and-django-async-and-wsgi-fastpath.md)
 - [ ] t06 — Auto-attach stacked `FastPath` dispatchers across `App.mount()` and share native database pools & SHM `LeaseBroker` across all 6 frameworks (tasks/t06-multi-framework-stacked-mount-fastpath.md)
 - **Phase 2 Recovery Checkpoint**: `make lint && uv run --no-sync pytest src/py/tests/unit/server/test_litestar_direct_fastpath.py src/py/tests/unit/extensions/test_fastapi.py src/py/tests/unit/extensions/test_starlette.py src/py/tests/unit/extensions/test_flask.py src/py/tests/unit/extensions/test_django.py src/py/tests/unit/server/test_asgi_capi_runner.py -q`

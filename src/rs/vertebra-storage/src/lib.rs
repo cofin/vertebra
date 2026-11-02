@@ -8,6 +8,7 @@ pub mod store;
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -15,6 +16,7 @@ use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyFileNotFoundError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+use vertebra_core::notify::Notifier;
 
 use crate::gcp_auth::{
     GcpTokenCache as NativeGcpTokenCache, GcpTokenSnapshot as NativeGcpTokenSnapshot,
@@ -110,40 +112,151 @@ impl StorageBuffer {
 
 type OutcomeProducer = Box<dyn FnOnce(Python<'_>) -> PyResult<Py<PyAny>> + Send>;
 
-#[pyclass(name = "_TaskCompletionCallback", frozen, immutable_type)]
-struct TaskCompletionCallback {
+struct CompletedStorageTask {
     future: Py<PyAny>,
-    outcome: Arc<Mutex<Option<OutcomeProducer>>>,
+    produce: OutcomeProducer,
+}
+
+struct RustCompletionRing {
+    queue: Mutex<Vec<CompletedStorageTask>>,
+    wake_armed: AtomicBool,
+    notifier: Option<Notifier>,
+    fallback_wakeup: Mutex<Option<(Py<PyAny>, Py<PyAny>)>>,
+}
+
+impl RustCompletionRing {
+    fn signal(&self) {
+        if let Some(ref notifier) = self.notifier
+            && notifier.notify().is_ok()
+        {
+            return;
+        }
+        let pair = self
+            .fallback_wakeup
+            .lock()
+            .expect("lock storage fallback wakeup")
+            .as_ref()
+            .map(|(loop_ref, drainer_ref)| {
+                Python::attach(|py| (loop_ref.clone_ref(py), drainer_ref.clone_ref(py)))
+            });
+        if let Some((loop_ref, drainer_ref)) = pair {
+            Python::attach(|py| {
+                let _ = loop_ref
+                    .bind(py)
+                    .call_method1("call_soon_threadsafe", (&drainer_ref,));
+            });
+        }
+    }
+}
+
+#[pyclass(name = "_StorageCompletionDrainer", frozen, immutable_type)]
+struct StorageCompletionDrainer {
+    ring: Arc<RustCompletionRing>,
 }
 
 #[pymethods]
-impl TaskCompletionCallback {
+impl StorageCompletionDrainer {
     fn __call__(&self, py: Python<'_>) -> PyResult<()> {
-        let producer = self
-            .outcome
-            .lock()
-            .expect("lock task completion outcome")
-            .take();
-        if let Some(produce) = producer {
-            let fut = self.future.bind(py);
-            let cancelled: bool = fut
-                .call_method0("cancelled")
-                .and_then(|v| v.extract())
-                .unwrap_or(false);
-            if cancelled {
-                return Ok(());
-            }
-            match produce(py) {
-                Ok(val) => {
-                    let _ = fut.call_method1("set_result", (val,));
+        if let Some(ref notifier) = self.ring.notifier {
+            let _ = notifier.clear();
+        }
+        loop {
+            let batch: Vec<CompletedStorageTask> = {
+                let mut guard = self.ring.queue.lock().expect("lock storage completion queue");
+                if guard.is_empty() {
+                    self.ring.wake_armed.store(false, Ordering::Release);
+                    break;
                 }
-                Err(err) => {
-                    let _ = fut.call_method1("set_exception", (err.into_value(py),));
+                std::mem::take(&mut *guard)
+            };
+            for item in batch {
+                let fut = item.future.bind(py);
+                let cancelled: bool = fut
+                    .call_method0("cancelled")
+                    .and_then(|v| v.extract())
+                    .unwrap_or(false);
+                if cancelled {
+                    continue;
+                }
+                match (item.produce)(py) {
+                    Ok(val) => {
+                        let _ = fut.call_method1("set_result", (val,));
+                    }
+                    Err(err) => {
+                        let _ = fut.call_method1("set_exception", (err.into_value(py),));
+                    }
                 }
             }
         }
         Ok(())
     }
+}
+
+fn ensure_loop_completion_ring(
+    py: Python<'_>,
+    loop_obj: &Bound<'_, PyAny>,
+) -> PyResult<Arc<RustCompletionRing>> {
+    const ATTR_NAME: &str = "_vertebra_storage_drainer";
+    if let Ok(existing) = loop_obj.getattr(ATTR_NAME)
+        && let Ok(drainer) = existing.cast::<StorageCompletionDrainer>()
+    {
+        return Ok(Arc::clone(&drainer.borrow().ring));
+    }
+
+    let mut notifier = Notifier::new().ok();
+    let ring = Arc::new(RustCompletionRing {
+        queue: Mutex::new(Vec::with_capacity(64)),
+        wake_armed: AtomicBool::new(false),
+        notifier: None,
+        fallback_wakeup: Mutex::new(None),
+    });
+
+    let mut reader_registered = false;
+    #[cfg(unix)]
+    if let Some(ref n) = notifier {
+        let fd = n.as_raw_fd();
+        let temp_ring = Arc::new(RustCompletionRing {
+            queue: Mutex::new(Vec::with_capacity(64)),
+            wake_armed: AtomicBool::new(false),
+            notifier: notifier.take(),
+            fallback_wakeup: Mutex::new(None),
+        });
+        let drainer_py = Py::new(
+            py,
+            StorageCompletionDrainer {
+                ring: Arc::clone(&temp_ring),
+            },
+        )?;
+        if loop_obj
+            .call_method1("add_reader", (fd, drainer_py.bind(py)))
+            .is_ok()
+        {
+            let _ = loop_obj.setattr(ATTR_NAME, drainer_py.bind(py));
+            return Ok(temp_ring);
+        }
+        *temp_ring
+            .fallback_wakeup
+            .lock()
+            .expect("lock storage fallback wakeup") =
+            Some((loop_obj.clone().unbind(), drainer_py.clone_ref(py).into_any()));
+        let _ = loop_obj.setattr(ATTR_NAME, drainer_py.bind(py));
+        return Ok(temp_ring);
+    }
+
+    let _ = (&mut notifier, &mut reader_registered);
+    let drainer_py = Py::new(
+        py,
+        StorageCompletionDrainer {
+            ring: Arc::clone(&ring),
+        },
+    )?;
+    *ring
+        .fallback_wakeup
+        .lock()
+        .expect("lock storage fallback wakeup") =
+        Some((loop_obj.clone().unbind(), drainer_py.clone_ref(py).into_any()));
+    let _ = loop_obj.setattr(ATTR_NAME, drainer_py.bind(py));
+    Ok(ring)
 }
 
 /// Native Rust awaitable backed by the shared Tokio runtime without `asyncio.to_thread`.
@@ -169,35 +282,26 @@ where
     let asyncio = py.import("asyncio")?;
     let loop_obj = asyncio.call_method0("get_running_loop")?;
     let py_fut = loop_obj.call_method0("create_future")?;
-    let loop_ref = loop_obj.unbind();
+    let ring = ensure_loop_completion_ring(py, &loop_obj)?;
     let fut_for_cb = py_fut.clone().unbind();
     let fut_for_await = py_fut.unbind();
-    let outcome_slot: Arc<Mutex<Option<OutcomeProducer>>> = Arc::new(Mutex::new(None));
-    let outcome_for_task = Arc::clone(&outcome_slot);
-    let cb = Py::new(
-        py,
-        TaskCompletionCallback {
-            future: fut_for_cb,
-            outcome: outcome_slot,
-        },
-    )?;
 
     runtime_handle().spawn(async move {
         let output = fut.await;
-        {
-            let mut guard = outcome_for_task
-                .lock()
-                .expect("lock task completion outcome");
-            *guard = Some(Box::new(move |py| match output {
-                Ok(val) => map_fn(py, val),
-                Err(err) => Err(to_py_err(err)),
-            }));
+        let should_signal = {
+            let mut guard = ring.queue.lock().expect("lock storage completion queue");
+            guard.push(CompletedStorageTask {
+                future: fut_for_cb,
+                produce: Box::new(move |py| match output {
+                    Ok(val) => map_fn(py, val),
+                    Err(err) => Err(to_py_err(err)),
+                }),
+            });
+            !ring.wake_armed.swap(true, Ordering::AcqRel)
+        };
+        if should_signal {
+            ring.signal();
         }
-        Python::attach(|py| {
-            let _ = loop_ref
-                .bind(py)
-                .call_method1("call_soon_threadsafe", (&cb,));
-        });
     });
 
     Ok(RustTaskAwaitable {

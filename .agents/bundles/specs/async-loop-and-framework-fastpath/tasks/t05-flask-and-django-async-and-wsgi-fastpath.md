@@ -11,8 +11,8 @@ files:
   - src/py/vertebra/extensions/flask/fastpath.py
   - src/py/vertebra/extensions/django/fastpath.py
 tests:
-  - src/py/tests/unit/extensions/test_flask.py
-  - src/py/tests/unit/extensions/test_django.py
+  - src/py/tests/unit/extensions/test_flask_plugin.py
+  - src/py/tests/unit/extensions/test_django_plugin.py
 plan_revision: 2
 plan_commit: 34429ff8c50d4622d0cacbd1288525f8a1211dc8
 state_revision: 0

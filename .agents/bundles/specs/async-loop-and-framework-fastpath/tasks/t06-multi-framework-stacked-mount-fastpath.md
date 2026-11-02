@@ -16,9 +16,9 @@ files:
   - src/py/vertebra/extensions/sqlspec/adapters.py
   - src/py/vertebra/extensions/sqlalchemy/dialects.py
 tests:
-  - src/py/tests/unit/extensions/test_fastapi.py
-  - src/py/tests/unit/extensions/test_django.py
-  - src/py/tests/unit/server/test_asgi_capi_runner.py
+  - src/py/tests/unit/extensions/test_fastapi_plugin.py
+  - src/py/tests/unit/extensions/test_django_plugin.py
+  - src/py/tests/unit/server/test_asgi.py
 plan_revision: 2
 plan_commit: 34429ff8c50d4622d0cacbd1288525f8a1211dc8
 state_revision: 0
