@@ -10,6 +10,12 @@ tags:
 
 # Bundle Activity Log
 
+## [2026-11-02] flow-archive | Completed and Archived Development Welcome Page & HTML Docs Content-Type (`dev-welcome-page`)
+
+- Completed and archived Flow `dev-welcome-page` (2 tasks across `vertebra.framework`, `vertebra.supervisor`, `vertebra.server`, and `vertebra-http`):
+  - **Offline-Ready Welcome Page Renderer & `App.ensure_dev_welcome_route()` (`t01`)**: Implemented `WelcomeRouteItem`, `WelcomeSnapshot`, and `WelcomePageRenderer` in `src/py/vertebra/framework/_welcome.py` (lazy-exported on `vertebra.framework`), added `App(debug: bool = False)`, `App.debug`, and `App.ensure_dev_welcome_route()` in `src/py/vertebra/framework/_app.py` with automatic preemption/eviction when user routes or root mounts claim `"/"` and without polluting `app.routes`, and updated `App.enable_docs()` to return `Response(200, html_bytes, [("content-type", "text/html; charset=utf-8")])`.
+  - **Supervisor, Worker & `vertebra-http` Route Table Wiring (`t02`)**: Wired `ensure_dev_welcome_route()` into `src/py/vertebra/supervisor/_worker.py::{resolve_worker_targets,_build_app_asgi_adapter}`, `src/py/vertebra/server/worker.py::Worker.__init__`, and `src/rs/vertebra-http/src/main.rs::{build_route_table_from_app,spawn_python_workers}`, and curated `knowledge/domains/framework/routing-and-app.md`.
+
 ## [2026-11-02] flow-archive | Completed and Archived Unified Event Loop Backends, C-API Coroutine Stepper, Rust Completion Ring, 6-Framework Stacked FastPath & Shared Native Database Pool (`async-loop-and-framework-fastpath`)
 
 - Completed and archived Flow `async-loop-and-framework-fastpath` (6 tasks across `vertebra-py`, `vertebra-storage`, `vertebra.server`, `vertebra.db`, `vertebra.utils`, and `vertebra.extensions.*`):

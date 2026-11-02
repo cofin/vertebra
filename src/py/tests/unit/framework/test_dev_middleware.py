@@ -2,10 +2,12 @@
 
 import asyncio
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 
+from vertebra.framework import App, WelcomePageRenderer
 from vertebra.framework.dev import DevMiddleware, TypeBridge, _ws_clients, broadcast_hmr_event
 from vertebra.utils.serializers import decode_json, encode_json
 
@@ -133,3 +135,33 @@ async def test_dev_middleware_serves_wheel_bundled_client_and_hmr_subpath(middle
         body = next(m for m in sent if m["type"] == "http.response.body")
         assert start["status"] == 200
         assert len(body["body"]) > 50
+
+
+@pytest.mark.anyio()
+async def test_dev_middleware_injects_hmr_script_into_welcome_page(type_bridge: TypeBridge) -> None:
+    """DevMiddleware injects the /__vertebra/hmr script into the WelcomePageRenderer HTML response."""
+    app = App(debug=True)
+    welcome_resp = WelcomePageRenderer.make_handler(app)()
+
+    async def asgi_welcome_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        del scope, receive
+        raw_headers = [
+            (
+                k if isinstance(k, bytes) else k.encode("latin-1"),
+                v if isinstance(v, bytes) else v.encode("latin-1"),
+            )
+            for k, v in welcome_resp.headers
+        ]
+        await send({"type": "http.response.start", "status": welcome_resp.status, "headers": raw_headers})
+        await send({"type": "http.response.body", "body": bytes(welcome_resp.body), "more_body": False})
+
+    dev_mw = DevMiddleware(asgi_welcome_app, type_bridge)
+    send = AsyncMock()
+    await dev_mw({"type": "http", "method": "GET", "path": "/"}, AsyncMock(), send)
+    sent = [c.args[0] for c in send.call_args_list]
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    body = next(m for m in sent if m["type"] == "http.response.body")
+    assert start["status"] == 200
+    assert (b"content-type", b"text/html; charset=utf-8") in start["headers"]
+    assert b"/__vertebra/client/hmr.js" in body["body"]
+    assert b"VERTEBRA" in body["body"]

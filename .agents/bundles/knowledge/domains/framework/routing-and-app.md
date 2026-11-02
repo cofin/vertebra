@@ -9,6 +9,7 @@ sources:
   - resource: src/py/vertebra/framework/__init__.py
   - resource: src/py/vertebra/framework/_app.py
   - resource: src/py/vertebra/framework/_router.py
+  - resource: src/py/vertebra/framework/_welcome.py
   - resource: src/py/vertebra/framework/inertia/__init__.py
   - resource: src/py/vertebra/utils/serializers/_json.py
   - resource: src/py/vertebra/utils/serializers/_msgpack.py
@@ -22,11 +23,12 @@ sources:
 
 [`vertebra`](../../../../../src/py/vertebra/__init__.py), [`vertebra.framework`](../../../../../src/py/vertebra/framework/__init__.py), and [`vertebra.utils`](../../../../../src/py/vertebra/utils/__init__.py) define the Python-facing application container, declarative router, PEP 810 `__lazy_modules__` exports, Inertia.js v3 protocol middleware, and JSON/MessagePack serialization primitives.
 
-## 1. Application Container & Routing (`_app.py`, `_router.py`)
+## 1. Application Container & Routing (`_app.py`, `_router.py`, `_welcome.py`)
 
 | Symbol | Source | Responsibility |
 |---|---|---|
-| [`App`](../../../../../src/py/vertebra/framework/_app.py) | `vertebra.framework._app` | Top-level HTTP container (`@app.get`, `@app.post`, `@app.put`, `@app.delete`, `@app.patch`, each accepting `sync_to_thread`, `dependencies`, `guards`, `tags`, `status_code`), `register(Router \| Controller \| ProcedureRouter \| Procedure \| Route \| handler)`, `add_route(Route)`, `call_procedure(name, payload)`, `mount(prefix, sub_app, protocol="auto")`, `on_startup`/`on_shutdown` hooks (`startup()`, `shutdown()`), and `handler_index: dict[int, HandlerInfo]`. |
+| [`App`](../../../../../src/py/vertebra/framework/_app.py) | `vertebra.framework._app` | Top-level HTTP container (`@app.get`, `@app.post`, `@app.put`, `@app.delete`, `@app.patch`, each accepting `sync_to_thread`, `dependencies`, `guards`, `tags`, `status_code`), `debug: bool = False`, `ensure_dev_welcome_route()`, `enable_docs()`, `register(Router \| Controller \| ProcedureRouter \| Procedure \| Route \| handler)`, `add_route(Route)`, `call_procedure(name, payload)`, `mount(prefix, sub_app, protocol="auto")`, `on_startup`/`on_shutdown` hooks (`startup()`, `shutdown()`), and `handler_index: dict[int, HandlerInfo]`. |
+| [`WelcomePageRenderer`](../../../../../src/py/vertebra/framework/_welcome.py) / [`WelcomeSnapshot`](../../../../../src/py/vertebra/framework/_welcome.py) | `vertebra.framework._welcome` | Renders the self-contained, offline-ready Litestar-Org and Vertebra HTML5 development welcome page (`collect_snapshot(app)`, `render_html(app)`, `make_handler(app)`) automatically bound to unclaimed `GET /` when `App(debug=True)` or `VERTEBRA_DEV=1` is active without mutating `app.routes`. |
 | [`Controller`](../../../../../src/py/vertebra/framework/_router.py) | `vertebra.framework._router` | Declarative class-based route and procedure group (`path`, `dependencies`, `guards`, `tags`, `sync_to_thread`) supporting both singleton instance binding and constructor dependency injection via `get_routes()` and `get_procedures()`. |
 | [`Router`](../../../../../src/py/vertebra/framework/_router.py) | `vertebra.framework._router` | Prefix route group (`__slots__ = ("dependencies", "guards", "prefix", "procedures", "routes", "tags")`) that collects functions decorated with module-level `get`/`post`/`put`/`delete`/`patch`, `Controller` classes/instances, `Procedure` instances, and nested `Router` instances via `register(target)` and `route_handlers`. |
 | [`Route`](../../../../../src/py/vertebra/framework/_router.py) / [`ParamSpec`](../../../../../src/py/vertebra/framework/_router.py) | `vertebra.framework._router` | Frozen `msgspec.Struct(gc=False)` (`cache_hash=True` on `ParamSpec`) with `method`, `path`, `handler`, `sync_to_thread: bool = False`, `dependencies`, `guards`, `tags`, `status_code`, and compiled `segments: tuple[str \| ParamSpec, ...]`. Stable FNV-1a 64-bit route IDs come from `handler_id(method, path)`; `extract_path_params(template, path)` coerces typed path parameters (`int`, `float`, `bool`, `uuid`, `path`, `str`). |
