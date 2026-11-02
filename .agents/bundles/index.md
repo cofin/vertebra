@@ -52,6 +52,6 @@ Root index for **Vertebra** — the Rust-powered, full-stack Python & TypeScript
 
 ## 3. Specifications, Research & Activity Log
 
-- **`specs/` (lazy)** — Materialized only when active Flow specifications or task worksheets exist.
+- **[Active Spec: Async Loop Backend, C-API Coroutine Stepper & Multi-Framework FastPath (`async-loop-and-framework-fastpath`)](specs/async-loop-and-framework-fastpath/spec.md)** — `uvloop`/`winloop`/`rloop` `LoopBackend`, C-API `PyIter_Send` native `async def` stepper, `AsgiSend.send_raw_response` / `_WsgiStartResponse.send_raw_response`, `RustCompletionRing` + `Notifier` for `vertebra-storage`/`vertebra-db`, and unified `FastPath` + auto-stacked `app.mount()` across `Native`, `Litestar`, `FastAPI`, `Starlette`, `Flask`, and `Django`.
 - **`research/` (lazy)** — Materialized only when un-promoted technical research briefs exist.
 - **[Bundle Activity Log](log.md)** — Chronological log of bundle initialization, syntheses, and archived flows.

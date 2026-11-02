@@ -10,6 +10,16 @@ tags:
 
 # Bundle Activity Log
 
+## [2026-11-01] flow-plan | Planned Async Loop Backend, C-API Coroutine Stepper & Multi-Framework FastPath (`async-loop-and-framework-fastpath`)
+
+- Authored Flow specification [`specs/async-loop-and-framework-fastpath/spec.md`](specs/async-loop-and-framework-fastpath/spec.md), research brief [`specs/async-loop-and-framework-fastpath/research/event-loop-and-async-optimizations_20261101.md`](specs/async-loop-and-framework-fastpath/research/event-loop-and-async-optimizations_20261101.md), and 6 vertical-slice task worksheets (`t01`–`t06`) anchored to `34429ff8c50d4622d0cacbd1288525f8a1211dc8`:
+  - `t01`: Unified `LoopBackend` (`uvloop>=0.23.0`, `winloop>=0.8.1`, `rloop>=0.5.0`, `asyncio`) and removal of deprecated `EventLoopPolicy` calls in `_gil_audit.py`.
+  - `t02`: Rust `drive_native_batch` (`PyIter_Send` + `SteppedCoroutine`), flattened `compile_handler_spec` for native `async def` routes, and direct `send_raw_response` on `AsgiSend`, `AsgiProtocol`, and `_WsgiStartResponse`.
+  - `t03`: Per-loop `RustCompletionRing` + `Notifier` (`eventfd`/`kqueue`) in `vertebra-storage` and non-blocking async methods (`execute_async`, `fetch_arrow_async`, `commit_async`, `rollback_async`) on `DatabasePool` (`PyDatabasePool`).
+  - `t04`: Zero-closure C-API `FastPath` across `Litestar`, `FastAPI` (lazily instantiating `starlette.requests.Request` and invoking sync `def` endpoints inline), and `Starlette`.
+  - `t05`: `Flask` (`FlaskFastPath.wrap_asgi` for `async def` views + raw-bytes `dispatch_wsgi`) and `Django` (`DjangoFastPath` async view support + raw-bytes `dispatch_wsgi`).
+  - `t06`: `resolve_framework_fastpath(sub_app)` in `Worker._instantiate_mount_runners` and `dispatch_stacked_asgi_batch` for auto-stacked multi-framework `app.mount("/prefix", sub_app)` trees across all 6 frameworks.
+
 ## [2026-11-01] flow-archive | Completed and Archived Shared-Memory Vector Embeddings, Active GCP ADC Credential Refresh, `vtb ai` CLI & Documentation Split (`shm-vector-embeddings`)
 
 - Completed and archived Flow `shm-vector-embeddings` (7 tasks across `vertebra-core`, `vertebra-storage`, `vertebra-db`, `vertebra-http`, `vertebra-py`, `vertebra`, and `docs/`):
