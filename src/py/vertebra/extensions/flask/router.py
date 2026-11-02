@@ -105,11 +105,14 @@ class CompiledRouter:
 class RouteCompiler:
     """Compiles a Flask application's ``url_map`` into a ``CompiledRouter``."""
 
-    __slots__ = ("_entries", "_router")
+    __slots__ = ("_app", "_entries", "_router")
 
-    def __init__(self) -> None:
+    def __init__(self, app: Any = None) -> None:
+        self._app: Any = app
         self._entries: dict[int, RouteEntry] = {}
         self._router: CompiledRouter | None = None
+        if app is not None:
+            self.compile_app(app)
 
     @property
     def entries(self) -> dict[int, RouteEntry]:
@@ -125,6 +128,7 @@ class RouteCompiler:
 
     def compile_app(self, app: Any) -> CompiledRouter:
         """Inspect ``app.url_map`` and ``app.view_functions`` and build a ``CompiledRouter``."""
+        self._app = app
         url_map = getattr(app, "url_map", None)
         view_functions: dict[str, Callable[..., Any]] = getattr(app, "view_functions", {}) or {}
         if url_map is not None and hasattr(url_map, "iter_rules"):

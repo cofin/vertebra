@@ -2,7 +2,7 @@
 type: Task
 id: async-loop-and-framework-fastpath:t06
 title: "Auto-attach stacked FastPath dispatchers across App.mount() and share native database pools & SHM LeaseBroker across all 6 frameworks"
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -21,9 +21,9 @@ tests:
   - src/py/tests/unit/server/test_asgi.py
 plan_revision: 2
 plan_commit: 34429ff8c50d4622d0cacbd1288525f8a1211dc8
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: agent:executor
+claimed_at: 2026-11-02T00:54:55Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -31,7 +31,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: 2026-11-01T23:48:00Z
-updated_at: 2026-11-02T00:03:00Z
+updated_at: 2026-11-02T00:54:55Z
 commit: null
 tags: [server, fastpath, mount, database, multi-framework, litestar, fastapi, starlette, flask, django, tdd]
 ---

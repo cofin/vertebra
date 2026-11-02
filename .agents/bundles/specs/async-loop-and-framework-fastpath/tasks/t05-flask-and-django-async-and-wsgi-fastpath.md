@@ -2,30 +2,34 @@
 type: Task
 id: async-loop-and-framework-fastpath:t05
 title: "Add async def view execution, cached MsgspecView, wrap_asgi, and _WsgiStartResponse.send_raw_response to Flask and Django FastPath"
-state: in_progress
+state: done
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
   - async-loop-and-framework-fastpath:t04
 files:
+  - src/py/vertebra/extensions/flask/router.py
   - src/py/vertebra/extensions/flask/fastpath.py
+  - src/py/vertebra/extensions/flask/plugin.py
+  - src/py/vertebra/extensions/django/router.py
   - src/py/vertebra/extensions/django/fastpath.py
+  - src/py/vertebra/extensions/django/plugin.py
 tests:
   - src/py/tests/unit/extensions/test_flask_plugin.py
   - src/py/tests/unit/extensions/test_django_plugin.py
 plan_revision: 2
 plan_commit: 34429ff8c50d4622d0cacbd1288525f8a1211dc8
-state_revision: 1
-claimed_by: agent:executor
-claimed_at: 2026-11-02T00:49:15Z
+state_revision: 2
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-02T00:54:55Z
+last_verified_commit: 317fee9
+verification_evidence: "uv run --no-sync pytest src/py/tests/unit/extensions/test_flask_plugin.py src/py/tests/unit/extensions/test_django_plugin.py -q -> 7 passed; ruff & mypy -> exit 0"
 created_at: 2026-11-01T23:48:00Z
-updated_at: 2026-11-02T00:49:15Z
+updated_at: 2026-11-02T00:54:55Z
 commit: null
 tags: [flask, django, wsgi, asgi, fastpath, async, tdd]
 ---
@@ -69,8 +73,10 @@ uv run --no-sync mypy src/py/vertebra/extensions/flask/fastpath.py src/py/verteb
 ```
 
 ## Acceptance Criteria
-- [ ] `Flask` and `Django` `FastPath` execute both synchronous `def` and `async def` views (including `MsgspecView` async methods) across `dispatch`, `dispatch_async`, `dispatch_wsgi`, and `wrap_asgi` (R5).
-- [ ] `MsgspecView.as_view()` reuses a pre-allocated view instance when `initkwargs` is empty (R5).
-- [ ] `dispatch_wsgi` in both `Flask` and `Django` invokes `start_response.send_raw_response` when supported (R5).
+- [x] `Flask` and `Django` `FastPath` execute both synchronous `def` and `async def` views (including `MsgspecView` async methods) across `dispatch`, `dispatch_async`, `dispatch_wsgi`, and `wrap_asgi` (R5).
+- [x] `MsgspecView.as_view()` reuses a pre-allocated view instance when `initkwargs` is empty (R5).
+- [x] `dispatch_wsgi` in both `Flask` and `Django` invokes `start_response.send_raw_response` when supported (R5).
 
 ## Notes & Discoveries
+- Added `_step_coro_sync`, `dispatch_async`, `wrap_asgi`, and `start_response.send_raw_response` support to `Flask` (`FlaskFastPath`) and `Django` (`DjangoFastPath`).
+- Updated `MsgspecView.as_view()` to pre-allocate and reuse `cached_instance = cls()` when `initkwargs` is empty and inspect per-HTTP-method `async def` handlers during route compilation.

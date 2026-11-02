@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import asyncio
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import msgspec
 import pyarrow as pa
 import pydantic
 import pytest
 
-from vertebra._vertebra import Request, WsgiEnviron, run_wsgi_callable
+from vertebra._vertebra import AsgiProtocol, AsgiScope, Request, WsgiEnviron, run_wsgi_callable
 from vertebra.extensions.django import (
     ArrowManager,
     ArrowQuerySet,
@@ -21,12 +22,14 @@ from vertebra.extensions.django import (
     DjangoPlugin,
     DjangoStorage,
     EmailBackend,
+    FastPath,
     MCPConfig,
     MemoryConfig,
     MsgspecView,
     OpenAPIConfig,
     ORMBridge,
     QueuesBackend,
+    RouteCompiler,
     SecurityBridge,
     SwaggerDocsConfig,
     TemplateBridge,
@@ -428,3 +431,105 @@ async def test_django_cache_storage_mail_channels_queues_security_and_templates(
     assert rendered_resp.status == 200
     assert b"<h1>Dashboard</h1>" in bytes(rendered_resp.body)
     assert b"http://localhost:5173/src/app.ts" in bytes(rendered_resp.body)
+
+
+@pytest.mark.anyio
+async def test_django_fastpath_async_views_cached_msgspec_view_wrap_asgi_and_send_raw_response() -> None:
+    """Verify Django FastPath supports async def views, caches stateless MsgspecView, and uses send_raw_response."""
+
+    @vertebra_view(methods=("POST",), status_code=201)
+    async def create_async_order_view(
+        request: Request,
+        order_id: int,
+        body: OrderInput,
+    ) -> OrderRecord:
+        assert request.method == "POST"
+        await asyncio.sleep(0)
+        return OrderRecord(id=order_id, sku=body.sku, qty=body.qty)
+
+    class CachedAsyncItemView(MsgspecView):
+        init_count: ClassVar[int] = 0
+
+        def __init__(self, **kwargs: Any) -> None:
+            type(self).init_count += 1
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+        def get(self, request: Request, item_id: int) -> OrderRecord:
+            return OrderRecord(id=item_id, sku="SYNC-CBV", qty=1)
+
+        async def post(self, request: Request, item_id: int, body: OrderInput) -> OrderRecord:
+            return OrderRecord(id=item_id, sku=body.sku, qty=body.qty)
+
+    cbv_fn = CachedAsyncItemView.as_view()
+    assert CachedAsyncItemView.init_count == 1
+
+    urlpatterns: list[Any] = [
+        _MockURLPattern(
+            "orders/<int:order_id>/",
+            create_async_order_view,
+            name="create_async_order",
+        ),
+        _MockURLPattern(
+            "items/<int:item_id>/",
+            cbv_fn,
+            name="cached_item_view",
+        ),
+    ]
+    compiler = RouteCompiler(urlpatterns=urlpatterns)
+    fastpath = FastPath(compiler)
+
+    get_req_1 = Request.from_parts(method="GET", path="/items/10/")
+    get_req_2 = Request.from_parts(method="GET", path="/items/20/")
+    resp_1 = fastpath.dispatch(get_req_1)
+    resp_2 = fastpath.dispatch(get_req_2)
+    assert resp_1 is not None and resp_2 is not None
+    assert CachedAsyncItemView.init_count == 1
+
+    post_cbv_req = Request.from_parts(
+        method="POST",
+        path="/items/30/",
+        headers=[(b"content-type", b"application/json")],
+        body=b'{"sku":"ASYNC-CBV","qty":4}',
+    )
+    post_cbv_resp = fastpath.dispatch(post_cbv_req)
+    assert post_cbv_resp is not None
+    assert decode_json(bytes(post_cbv_resp.body)) == {"id": 30, "sku": "ASYNC-CBV", "qty": 4}
+    assert CachedAsyncItemView.init_count == 1
+
+    raw_wsgi_calls: list[tuple[int, Any, bytes]] = []
+
+    class _RawWsgiStartResponse:
+        def __call__(self, _status_line: str, _headers: Any) -> None:
+            raise AssertionError("Standard start_response must not be called when send_raw_response is present")
+
+        def send_raw_response(self, status: int, headers: Any, body: bytes) -> list[bytes]:
+            raw_wsgi_calls.append((status, headers, body))
+            return [body]
+
+    wsgi_env = WsgiEnviron.from_parts(
+        method="POST",
+        path="/items/40/",
+        headers=[(b"content-type", b"application/json")],
+        body=b'{"sku":"WSGI-RAW","qty":6}',
+    )
+    wsgi_chunks = fastpath.dispatch_wsgi(wsgi_env, _RawWsgiStartResponse())
+    assert wsgi_chunks is not None
+    assert len(raw_wsgi_calls) == 1
+    assert raw_wsgi_calls[0][0] == 200
+    assert decode_json(raw_wsgi_calls[0][2]) == {"id": 40, "sku": "WSGI-RAW", "qty": 6}
+
+    asgi_app = fastpath.wrap_asgi()
+    proto = AsgiProtocol(b'{"sku":"ASGI-DJ","qty":9}')
+    scope = AsgiScope.from_parts(
+        method="POST",
+        path="/django/orders/55/",
+        headers=[(b"content-type", b"application/json")],
+        body=b'{"sku":"ASGI-DJ","qty":9}',
+    )
+    scope["root_path"] = "/django"
+    await asgi_app(scope, proto.receive, proto.send)
+    assert proto.complete is True
+    assert proto.status == 201
+    assert decode_json(proto.take_response().body) == {"id": 55, "sku": "ASGI-DJ", "qty": 9}
+

@@ -9,11 +9,11 @@ research:
   - research/event-loop-and-async-optimizations_20261101.md
 plan_revision: 2
 plan_commit: 34429ff8c50d4622d0cacbd1288525f8a1211dc8
-state_revision: 5
-current_task: async-loop-and-framework-fastpath:t05
-last_verified_checkpoint: 3e7a775
+state_revision: 6
+current_task: async-loop-and-framework-fastpath:t06
+last_verified_checkpoint: 317fee9
 created_at: 2026-11-01T23:48:00Z
-updated_at: 2026-11-02T00:49:15Z
+updated_at: 2026-11-02T00:54:55Z
 tags:
   - feature
   - server
@@ -164,8 +164,8 @@ Vertebra's Rust HTTP ingress (`vertebra-http`) and C-API ASGI/RSGI runners (`dri
 
 ### Phase 2: Unified 6-Framework Zero-Copy `FastPath`, Multi-Framework Stacking (`App.mount`) & Shared Native Database Pool
 - [x] t04 — Unify zero-closure `wrap_asgi`, `send_raw_response`, lazy `Request`, and inline sync execution across Litestar, FastAPI, and Starlette `FastPath` (tasks/t04-asgi-fastpath-litestar-fastapi-starlette.md)
-- [~] t05 — Add `async def` view execution, cached `MsgspecView`, `wrap_asgi`, and `_WsgiStartResponse.send_raw_response` to Flask and Django `FastPath` (tasks/t05-flask-and-django-async-and-wsgi-fastpath.md)
-- [ ] t06 — Auto-attach stacked `FastPath` dispatchers across `App.mount()` and share native database pools & SHM `LeaseBroker` across all 6 frameworks (tasks/t06-multi-framework-stacked-mount-fastpath.md)
+- [x] t05 — Add `async def` view execution, cached `MsgspecView`, `wrap_asgi`, and `_WsgiStartResponse.send_raw_response` to Flask and Django `FastPath` (tasks/t05-flask-and-django-async-and-wsgi-fastpath.md)
+- [~] t06 — Auto-attach stacked `FastPath` dispatchers across `App.mount()` and share native database pools & SHM `LeaseBroker` across all 6 frameworks (tasks/t06-multi-framework-stacked-mount-fastpath.md)
 - **Phase 2 Recovery Checkpoint**: `make lint && uv run --no-sync pytest src/py/tests/unit/server/test_litestar_direct_fastpath.py src/py/tests/unit/extensions/test_fastapi.py src/py/tests/unit/extensions/test_starlette.py src/py/tests/unit/extensions/test_flask.py src/py/tests/unit/extensions/test_django.py src/py/tests/unit/server/test_asgi_capi_runner.py -q`
 
 ---

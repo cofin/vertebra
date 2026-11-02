@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import threading
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import msgspec
 import pytest
@@ -214,7 +214,7 @@ async def test_fastapi_fastpath_lazy_request_inline_sync_and_send_raw_response(
         observed_tids["threaded"] = threading.get_ident()
         return {"item_id": item_id}
 
-    setattr(sync_threaded_item, "__vertebra_sync_to_thread__", True)
+    cast("Any", sync_threaded_item).__vertebra_sync_to_thread__ = True
 
     routes = [
         SimpleNamespace(

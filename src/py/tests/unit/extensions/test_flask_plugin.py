@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 import msgspec
 import pydantic
 import pytest
 
-from vertebra._vertebra import Request, WsgiEnviron, run_wsgi_callable
+from vertebra._vertebra import AsgiProtocol, AsgiScope, Request, WsgiEnviron, run_wsgi_callable
 from vertebra.extensions.flask import (
     AsyncAPIDocsConfig,
+    FastPath,
     FlaskCachingBackend,
     FlaskConfig,
     FlaskPlugin,
@@ -24,6 +26,7 @@ from vertebra.extensions.flask import (
     OpenAPIConfig,
     QueueBackend,
     RateLimitGuard,
+    RouteCompiler,
     SwaggerDocsConfig,
     ViteConfig,
     attach_storage,
@@ -256,3 +259,97 @@ async def test_flask_ecosystem_bridges() -> None:
     jwt = JWTAuthGuard(b"super-secret-key-at-least-32-bytes-long")
     assert jwt.verify_header(None) is None
     assert jwt.verify_header("Basic abc") is None
+
+
+@pytest.mark.anyio
+async def test_flask_fastpath_async_views_wrap_asgi_and_wsgi_send_raw_response() -> None:
+    """Verify Flask FastPath executes async def views, wrap_asgi, and start_response.send_raw_response."""
+    app = _MockFlaskApp()
+
+    @vertebra_route(status_code=201)
+    async def create_async_order(order_id: int, body: CreateOrderPayload) -> dict[str, Any]:
+        return {"order_id": order_id, "sku": body.sku, "qty": body.qty, "mode": "immediate"}
+
+    @vertebra_route(status_code=200)
+    async def suspended_async_order(order_id: int, body: CreateOrderPayload) -> dict[str, Any]:
+        await asyncio.sleep(0)
+        return {"order_id": order_id, "sku": body.sku, "qty": body.qty, "mode": "suspended"}
+
+    app.add_url_rule(
+        "/async-orders/<int:order_id>",
+        endpoint="create_async_order",
+        view_func=create_async_order,
+        methods=["POST"],
+    )
+    app.add_url_rule(
+        "/suspended-orders/<int:order_id>",
+        endpoint="suspended_async_order",
+        view_func=suspended_async_order,
+        methods=["POST"],
+    )
+
+    compiler = RouteCompiler(app)
+    fastpath = FastPath(compiler)
+
+    req = Request.from_parts(
+        method="POST",
+        path="/async-orders/11",
+        headers=[(b"content-type", b"application/json")],
+        body=b'{"sku":"A-11","qty":2}',
+    )
+    sync_resp = fastpath.dispatch(req)
+    assert sync_resp is not None
+    assert sync_resp.status == 201
+    assert decode_json(bytes(sync_resp.body)) == {
+        "order_id": 11,
+        "sku": "A-11",
+        "qty": 2,
+        "mode": "immediate",
+    }
+
+    raw_wsgi_calls: list[tuple[int, Any, bytes]] = []
+
+    class _RawWsgiStartResponse:
+        def __call__(self, _status_line: str, _headers: Any) -> None:
+            raise AssertionError("Standard start_response must not be called when send_raw_response is present")
+
+        def send_raw_response(self, status: int, headers: Any, body: bytes) -> list[bytes]:
+            raw_wsgi_calls.append((status, headers, body))
+            return [body]
+
+    wsgi_env = WsgiEnviron.from_parts(
+        method="POST",
+        path="/async-orders/12",
+        headers=[(b"content-type", b"application/json")],
+        body=b'{"sku":"A-12","qty":5}',
+    )
+    wsgi_chunks = fastpath.dispatch_wsgi(wsgi_env, _RawWsgiStartResponse())
+    assert wsgi_chunks is not None
+    assert len(raw_wsgi_calls) == 1
+    assert raw_wsgi_calls[0][0] == 201
+    assert decode_json(raw_wsgi_calls[0][2]) == {
+        "order_id": 12,
+        "sku": "A-12",
+        "qty": 5,
+        "mode": "immediate",
+    }
+
+    asgi_app = fastpath.wrap_asgi()
+    proto = AsgiProtocol(b'{"sku":"S-99","qty":7}')
+    scope = AsgiScope.from_parts(
+        method="POST",
+        path="/flask/suspended-orders/99",
+        headers=[(b"content-type", b"application/json")],
+        body=b'{"sku":"S-99","qty":7}',
+    )
+    scope["root_path"] = "/flask"
+    await asgi_app(scope, proto.receive, proto.send)
+    assert proto.complete is True
+    assert proto.status == 200
+    assert decode_json(proto.take_response().body) == {
+        "order_id": 99,
+        "sku": "S-99",
+        "qty": 7,
+        "mode": "suspended",
+    }
+

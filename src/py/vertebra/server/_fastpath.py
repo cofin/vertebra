@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from vertebra.utils.module_loader import import_optional
 
@@ -109,6 +109,7 @@ async def send_asgi_direct(
 
 def wrap_asgi_fastpath(bypass: Any, fallback_app: Callable[..., Any]) -> Callable[..., Any]:
     """Wrap an ASGI 3.0 callable with zero-closure C-API fastpath dispatch and replay fallback."""
+    dispatch_fn = getattr(bypass, "dispatch_async", None) or bypass.dispatch
 
     async def _fastpath_asgi_app(scope: Any, receive: Any, send: Any) -> None:
         send_owner = getattr(send, "__self__", None)
@@ -124,7 +125,7 @@ def wrap_asgi_fastpath(bypass: Any, fallback_app: Callable[..., Any]) -> Callabl
         )
 
         if has_native_send_state and has_prebuffered_body:
-            direct = await bypass.dispatch(scope, receive, send)
+            direct = await dispatch_fn(scope, receive, send)
             if direct is not None:
                 status_code, encoded_headers, raw_body = direct
                 await send_asgi_direct(send, status_code, encoded_headers, raw_body)
@@ -155,7 +156,7 @@ def wrap_asgi_fastpath(bypass: Any, fallback_app: Callable[..., Any]) -> Callabl
             sent_via_callback = True
             await send(message)
 
-        direct = await bypass.dispatch(scope, _buffering_receive, _tracked_send)
+        direct = await dispatch_fn(scope, _buffering_receive, _tracked_send)
         if direct is not None:
             status_code, encoded_headers, raw_body = direct
             await send_asgi_direct(send, status_code, encoded_headers, raw_body)
@@ -180,9 +181,10 @@ def wrap_asgi_fastpath(bypass: Any, fallback_app: Callable[..., Any]) -> Callabl
 
         await fallback_app(scope, _replay_receive, send)
 
-    setattr(_fastpath_asgi_app, "_vertebra_fastpath", bypass)
-    setattr(_fastpath_asgi_app, "__vertebra_fastpath__", bypass)
-    setattr(_fastpath_asgi_app, "__vertebra_fastpath_attached__", True)
+    dyn_app = cast("Any", _fastpath_asgi_app)
+    dyn_app._vertebra_fastpath = bypass
+    dyn_app.__vertebra_fastpath__ = bypass
+    dyn_app.__vertebra_fastpath_attached__ = True
     return _fastpath_asgi_app
 
 

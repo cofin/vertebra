@@ -126,9 +126,18 @@ class RouteCompiler:
 
     __slots__ = ("_entries", "_router")
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        urlpatterns: Iterable[Any] | None = None,
+        urlconf: str | Any = None,
+    ) -> None:
         self._entries: dict[int, RouteEntry] = {}
         self._router: CompiledRouter | None = None
+        if urlpatterns is not None:
+            self.compile_urlpatterns(urlpatterns)
+        elif urlconf is not None:
+            self.compile_urlconf(urlconf)
 
     @property
     def entries(self) -> list[RouteEntry]:
