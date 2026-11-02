@@ -9,11 +9,11 @@ research:
   - research/event-loop-and-async-optimizations_20261101.md
 plan_revision: 2
 plan_commit: 34429ff8c50d4622d0cacbd1288525f8a1211dc8
-state_revision: 2
-current_task: async-loop-and-framework-fastpath:t02
-last_verified_checkpoint: 5763c37
+state_revision: 3
+current_task: async-loop-and-framework-fastpath:t03
+last_verified_checkpoint: 63c3292372530a119fe3976fe09758aced23b559
 created_at: 2026-11-01T23:48:00Z
-updated_at: 2026-11-02T00:19:15Z
+updated_at: 2026-11-02T00:33:25Z
 tags:
   - feature
   - server
@@ -158,8 +158,8 @@ Vertebra's Rust HTTP ingress (`vertebra-http`) and C-API ASGI/RSGI runners (`dri
 
 ### Phase 1: Event Loop Backends, C-API Coroutine Stepper & Rust Completion Ring
 - [x] t01 — Add unified `LoopBackend` (`uvloop`, `winloop`, `rloop`, `asyncio`) selector and remove deprecated `EventLoopPolicy` APIs (tasks/t01-loop-backend-and-gil-audit.md)
-- [~] t02 — Add C-API `drive_native_batch` (`PyIter_Send`), `AsgiScope.body_bytes()`, `AsgiProtocol.send_raw_response`, `AsgiSend.send_raw_response`, and `_WsgiStartResponse.send_raw_response` in `vertebra-py` (tasks/t02-capi-native-async-stepper-and-raw-send.md)
-- [ ] t03 — Replace per-op `call_soon_threadsafe` with `RustCompletionRing` + `Notifier` in `vertebra-storage` and batched `SyncPool.submit_async` wakeups (tasks/t03-rust-completion-ring-storage-and-db.md)
+- [x] t02 — Add C-API `drive_native_batch` (`PyIter_Send`), `AsgiScope.body_bytes()`, `AsgiProtocol.send_raw_response`, `AsgiSend.send_raw_response`, and `_WsgiStartResponse.send_raw_response` in `vertebra-py` (tasks/t02-capi-native-async-stepper-and-raw-send.md)
+- [~] t03 — Replace per-op `call_soon_threadsafe` with `RustCompletionRing` + `Notifier` in `vertebra-storage` and batched `SyncPool.submit_async` wakeups (tasks/t03-rust-completion-ring-storage-and-db.md)
 - **Phase 1 Recovery Checkpoint**: `make dev && uv run --no-sync pytest src/py/tests/unit/server/test_runtime_tuning.py src/py/tests/unit/server/test_asgi_capi_runner.py src/py/tests/unit/server/test_wsgi_batch_runner.py src/py/tests/unit/storage/test_gcs_token_refresh.py src/py/tests/unit/db/test_native_db_drivers.py -q`
 
 ### Phase 2: Unified 6-Framework Zero-Copy `FastPath`, Multi-Framework Stacking (`App.mount`) & Shared Native Database Pool

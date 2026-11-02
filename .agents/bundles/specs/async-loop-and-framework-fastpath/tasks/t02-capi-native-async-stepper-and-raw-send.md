@@ -2,7 +2,7 @@
 type: Task
 id: async-loop-and-framework-fastpath:t02
 title: "Add C-API drive_native_batch (PyIter_Send), AsgiScope.body_bytes(), AsgiProtocol.send_raw_response, AsgiSend.send_raw_response, and _WsgiStartResponse.send_raw_response in vertebra-py"
-state: in_progress
+state: done
 priority: P0
 verification_strategy: behavior_tdd
 depends_on:
@@ -14,22 +14,23 @@ files:
   - src/py/vertebra/_vertebra.pyi
   - src/py/vertebra/server/_asgi/_queues.py
   - src/py/vertebra/server/_dispatch.py
+  - src/py/vertebra/server/lanes.py
 tests:
-  - src/py/tests/unit/server/test_asgi_capi_runner.py
-  - src/py/tests/unit/server/test_wsgi_batch_runner.py
+  - src/py/tests/unit/server/test_asgi.py
+  - src/py/tests/unit/server/test_wsgi.py
 plan_revision: 2
 plan_commit: 34429ff8c50d4622d0cacbd1288525f8a1211dc8
-state_revision: 1
-claimed_by: agent:executor
-claimed_at: 2026-11-02T00:19:50Z
+state_revision: 2
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-02T00:32:36Z
+last_verified_commit: 63c3292372530a119fe3976fe09758aced23b559
+verification_evidence: "111 passed in test_asgi.py, test_wsgi.py, and test_runner.py; stubtest, ruff, and mypy clean"
 created_at: 2026-11-01T23:48:00Z
-updated_at: 2026-11-02T00:19:50Z
+updated_at: 2026-11-02T00:32:36Z
 commit: null
 tags: [rust, pyo3, c-api, asgi, wsgi, dispatch, tdd]
 ---
@@ -77,8 +78,9 @@ uv run --no-sync pytest src/py/tests/unit/server/test_asgi_capi_runner.py src/py
 ```
 
 ## Acceptance Criteria
-- [ ] `AsgiScope.body_bytes()`, `AsgiProtocol.body_bytes()`, `AsgiProtocol.__call__`, `AsgiProtocol.send_raw_response`, `AsgiSend.send_raw_response`, and `_WsgiStartResponse.send_raw_response` work with zero intermediate ASGI response dicts or header string round-trips (R2).
-- [ ] `drive_native_batch` steps native `async def` coroutines via `PyIter_Send`, flushing `PYGEN_RETURN` results with zero `asyncio.Task` allocations and promoting `PYGEN_NEXT` coroutines via `SteppedCoroutine` (R2).
-- [ ] `compile_handler_spec` avoids wrapping `async def` handlers in `_invoke_compiled_async` when all guards and dependencies are synchronous (R2).
+- [x] `AsgiScope.body_bytes()`, `AsgiProtocol.body_bytes()`, `AsgiProtocol.__call__`, `AsgiProtocol.send_raw_response`, `AsgiSend.send_raw_response`, and `_WsgiStartResponse.send_raw_response` work with zero intermediate ASGI response dicts or header string round-trips (R2).
+- [x] `drive_native_batch` steps native `async def` coroutines via `PyIter_Send`, flushing `PYGEN_RETURN` results with zero `asyncio.Task` allocations and promoting `PYGEN_NEXT` coroutines via `SteppedCoroutine` (R2).
+- [x] `compile_handler_spec` avoids wrapping `async def` handlers in `_invoke_compiled_async` when all guards and dependencies are synchronous (R2).
 
 ## Notes & Discoveries
+- Moved `from vertebra.framework.queues.base import QueueService, TaskLane` into `if TYPE_CHECKING:` in `src/py/vertebra/server/lanes.py` to eliminate an import-order cycle when `vertebra.server.worker` is imported before `vertebra.framework.queues`.

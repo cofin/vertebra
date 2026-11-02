@@ -23,7 +23,7 @@ pub mod wsgi;
 pub use agent::{SchemaDigestCache, classify_jsonrpc_frame};
 pub use asgi::{
     AsgiProtocol, AsgiScope, AsgiScopeIterator, PyEmptyAwaitable, PyValueAwaitable,
-    drive_asgi_batch,
+    drive_asgi_batch, drive_native_batch,
 };
 pub use broker::{
     BrokerStats, LeaseBroker, LeaseGrant, StatementCache, StatementCacheStats, StatementPlan,
@@ -111,6 +111,7 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(wsgi::run_wsgi_callable, m)?)?;
     m.add_function(wrap_pyfunction!(wsgi::drive_wsgi_batch, m)?)?;
     m.add_function(wrap_pyfunction!(asgi::drive_asgi_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(asgi::drive_native_batch, m)?)?;
     m.add_function(wrap_pyfunction!(rsgi::drive_rsgi_batch, m)?)?;
 
     // Telemetry helpers

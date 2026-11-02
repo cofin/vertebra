@@ -14,8 +14,10 @@ from vertebra._vertebra import (
     PyValueAwaitable,
     Request,
     drive_asgi_batch,
+    drive_native_batch,
     init_transport,
 )
+from vertebra.framework._router import get
 from vertebra.server._asgi._queues import (
     AsgiProtocolError,
     AsgiReceive,
@@ -28,6 +30,7 @@ from vertebra.server._asgi._wire import (
     compile_guard_pattern,
     is_static_route,
 )
+from vertebra.server._dispatch import compile_handler_spec
 
 
 class MockRequest:
@@ -712,3 +715,89 @@ def test_asgi_lifespan_startup_shutdown_state_and_unsupported_app() -> None:
     with lifespan_ctx as empty_state:
         assert empty_state == {}
         assert lifespan_ctx.supported is False
+
+
+@pytest.mark.anyio
+async def test_asgi_scope_and_protocol_body_bytes_and_raw_response() -> None:
+    """Verify AsgiScope.body_bytes, AsgiProtocol.body_bytes/__call__/send_raw_response, and AsgiSend.send_raw_response."""
+    scope = AsgiScope.from_parts(method="POST", path="/echo", body=b"raw-body")
+    assert scope.body_bytes() == b"raw-body"
+
+    proto = AsgiProtocol(b"proto-body", request_id=99)
+    assert proto.body_bytes() == b"proto-body"
+    await proto.send_raw_response(201, [(b"content-type", b"application/json")], b'{"ok":true}')
+    assert proto.started is True
+    assert proto.complete is True
+    resp = proto.take_response()
+    assert resp.status == 201
+    assert resp.body == b'{"ok":true}'
+    assert (b"content-type", b"application/json") in resp.headers
+
+    proto2 = AsgiProtocol(b"", request_id=100)
+    await proto2({"type": "http.response.start", "status": 204, "headers": []})
+    await proto2({"type": "http.response.body", "body": b""})
+    assert proto2.take_response().status == 204
+
+    send = AsgiSend(request_id=77)
+    await send.send_raw_response(202, [(b"x-fast", b"1")], b"fast-body")
+    assert send.started is True
+    assert send.complete is True
+    assert send.response.status == 202
+    assert send.response.body == b"fast-body"
+    assert send.response.headers == [("x-fast", "1")]
+
+
+@pytest.mark.anyio
+async def test_drive_native_batch_and_flattened_compile_handler_spec() -> None:
+    """Verify flattened compile_handler_spec and drive_native_batch C-API PyIter_Send stepping."""
+
+    @get("/users/{user_id:int}")
+    async def parameterized_async(user_id: int, tag: str = "v1") -> dict[str, Any]:
+        return {"user_id": user_id, "tag": tag}
+
+    spec = compile_handler_spec(parameterized_async)
+    req = Request.from_parts("GET", "/users/42?tag=fast", request_id=701, handler_id=1)
+    coro = spec.invoker(req)
+    try:
+        assert coro.__qualname__ == parameterized_async.__qualname__
+    finally:
+        coro.close()
+
+    init_transport()
+    loop = asyncio.get_running_loop()
+    orig_create_task = loop.create_task
+    task_creations: list[asyncio.Task[Any]] = []
+
+    def tracked_create_task(c: Any, **kwargs: Any) -> asyncio.Task[Any]:
+        t = orig_create_task(c, **kwargs)
+        task_creations.append(t)
+        return t
+
+    completed_tags: list[str] = []
+
+    async def fast_coro() -> dict[str, Any]:
+        completed_tags.append("fast")
+        return {"ok": True}
+
+    async def slow_coro() -> bytes:
+        await asyncio.sleep(0.002)
+        completed_tags.append("slow")
+        return b"slow-done"
+
+    create_task_attr = "create_task"
+    setattr(loop, create_task_attr, tracked_create_task)
+    try:
+        inline = drive_native_batch(
+            [
+                (710, fast_coro(), 200),
+                (711, slow_coro(), 200),
+            ],
+            loop_obj=loop,
+        )
+        assert inline == 1
+        assert len(task_creations) == 1
+        await asyncio.gather(*task_creations)
+    finally:
+        setattr(loop, create_task_attr, orig_create_task)
+
+    assert completed_tags == ["fast", "slow"]

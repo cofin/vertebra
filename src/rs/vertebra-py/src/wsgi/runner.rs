@@ -153,6 +153,53 @@ impl WsgiStartResponse {
         }
         Ok(())
     }
+
+    #[pyo3(signature = (status, headers=None, body=None))]
+    pub fn send_raw_response<'py>(
+        &self,
+        py: Python<'py>,
+        status: u16,
+        headers: Option<&Bound<'py, PyAny>>,
+        body: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        if !(100..=999).contains(&status) {
+            return Err(PyRuntimeError::new_err(format!(
+                "WSGI status code out of range: {status}"
+            )));
+        }
+        let mut headers_raw = Vec::new();
+        let mut has_content_length = false;
+        if let Some(hdrs) = headers {
+            encode_py_headers_into(py, hdrs, &mut headers_raw, &mut has_content_length)?;
+        }
+        let mut st = self
+            .state
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("start_response lock poisoned"))?;
+        if st.called {
+            return Err(PyRuntimeError::new_err(
+                "start_response called a second time without exc_info",
+            ));
+        }
+        st.called = true;
+        st.status = status;
+        st.headers_raw = headers_raw;
+        st.has_content_length = has_content_length;
+        drop(st);
+
+        let body_bytes: Bound<'py, PyBytes> = match body {
+            Some(b) if !b.is_none() => {
+                if let Ok(py_b) = b.cast::<PyBytes>() {
+                    py_b.clone()
+                } else {
+                    let extracted = extract_buffer_bytes(py, b)?;
+                    PyBytes::new(py, &extracted)
+                }
+            }
+            _ => PyBytes::new(py, b""),
+        };
+        PyList::new(py, [body_bytes])
+    }
 }
 
 #[inline]

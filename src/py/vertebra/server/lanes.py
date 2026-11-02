@@ -12,13 +12,13 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 
-from vertebra.framework.queues.base import QueueService, TaskLane
 from vertebra.server.platform import LameDuckController
 from vertebra.telemetry.otel import SpanData, SpanExporter, TraceContext
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
+    from vertebra.framework.queues.base import QueueService, TaskLane
     from vertebra.framework.queues.scheduler import CronScheduler
 
 __all__ = (

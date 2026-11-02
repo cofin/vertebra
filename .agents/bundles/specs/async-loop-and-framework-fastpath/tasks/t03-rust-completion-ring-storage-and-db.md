@@ -2,7 +2,7 @@
 type: Task
 id: async-loop-and-framework-fastpath:t03
 title: "Replace per-op call_soon_threadsafe with RustCompletionRing + Notifier in vertebra-storage and batched SyncPool.submit_async wakeups"
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -17,9 +17,9 @@ tests:
   - src/py/tests/unit/db/test_native_db_drivers.py
 plan_revision: 2
 plan_commit: 34429ff8c50d4622d0cacbd1288525f8a1211dc8
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: agent:executor
+claimed_at: 2026-11-02T00:33:25Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -27,7 +27,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: 2026-11-01T23:48:00Z
-updated_at: 2026-11-02T00:03:00Z
+updated_at: 2026-11-02T00:33:25Z
 commit: null
 tags: [rust, pyo3, storage, database, async, eventfd, tdd]
 ---
