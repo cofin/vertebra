@@ -420,7 +420,7 @@ class AsgiRunner:
         loop = self._ensure_loop()
         if loop.is_running():
             future = asyncio.run_coroutine_threadsafe(self.run_batch(requests), loop)
-            return future.result()
+            return future.result(timeout=10.0)
         return loop.run_until_complete(self.run_batch(requests))
 
     def spawn_single(self, request: Any) -> Any:

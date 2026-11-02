@@ -373,21 +373,36 @@ class EventLoopPool:
             if not entries:
                 continue
             loop = self._loops[idx]
+            tasks = self._task_sets[idx]
 
             def _schedule_shard(
                 target_loop: asyncio.AbstractEventLoop = loop,
+                target_tasks: set[asyncio.Task[Any]] = tasks,
                 shard_entries: list[tuple[Coroutine[Any, Any, T], concurrent.futures.Future[T]]] = entries,
             ) -> None:
+                discard = target_tasks.discard
                 for c, f in shard_entries:
-                    task = target_loop.create_task(c)
+                    try:
+                        task = target_loop.create_task(c)
+                    except Exception as exc:
+                        if not f.done():
+                            f.set_exception(exc)
+                        continue
+
+                    target_tasks.add(task)
+                    task.add_done_callback(discard)
 
                     def _on_done(t: asyncio.Task[T], fut: concurrent.futures.Future[T] = f) -> None:
-                        if t.cancelled():
-                            fut.cancel()
-                        elif exc := t.exception():
-                            fut.set_exception(exc)
-                        else:
-                            fut.set_result(t.result())
+                        try:
+                            if t.cancelled():
+                                fut.cancel()
+                            elif exc := t.exception():
+                                fut.set_exception(exc)
+                            else:
+                                fut.set_result(t.result())
+                        except Exception as exc2:
+                            if not fut.done():
+                                fut.set_exception(exc2)
 
                     task.add_done_callback(_on_done)
 
@@ -418,17 +433,15 @@ class EventLoopPool:
                 target_loop: asyncio.AbstractEventLoop = loop,
                 target_tasks: set[asyncio.Task[Any]] = tasks,
             ) -> None:
-                async def _wait_tasks() -> None:
-                    if target_tasks:
-                        await asyncio.wait(list(target_tasks), timeout=2.0)
-                    target_loop.stop()
-
-                target_loop.create_task(_wait_tasks())
+                for t in list(target_tasks):
+                    if not t.done():
+                        t.cancel()
+                target_loop.stop()
 
             loop.call_soon_threadsafe(_shutdown)
 
         for thread in self._threads:
-            thread.join(timeout=5.0)
+            thread.join(timeout=2.0)
 
         for loop in self._loops:
             if not loop.is_closed():
@@ -437,5 +450,5 @@ class EventLoopPool:
     @staticmethod
     def _run_loop_shard(loop: asyncio.AbstractEventLoop, ready: threading.Event) -> None:
         asyncio.set_event_loop(loop)
-        loop.call_soon(ready.set)
+        ready.set()
         loop.run_forever()

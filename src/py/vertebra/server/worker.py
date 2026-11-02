@@ -110,11 +110,13 @@ class _AsgiMountRunner:
             return []
         coros = [self._runner.run_single(req) for req in requests]
         futures = self._pool.schedule_batch(coros)
-        concurrent.futures.wait(futures)
+        done, not_done = concurrent.futures.wait(futures, timeout=10.0)
+        for fut in not_done:
+            fut.cancel()
         results: list[AsgiResponse] = []
         for req, fut in zip(requests, futures, strict=True):
             try:
-                results.append(fut.result())
+                results.append(fut.result(timeout=1.0))
             except Exception:
                 req_id = getattr(req, "request_id", 0)
                 results.append(

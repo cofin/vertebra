@@ -772,10 +772,12 @@ def dispatch_batch(
             ]
             if hasattr(scheduler, "schedule_batch"):
                 futures = scheduler.schedule_batch(coros)
-                concurrent.futures.wait(futures)
+                done, not_done = concurrent.futures.wait(futures, timeout=10.0)
+                for fut in not_done:
+                    fut.cancel()
                 for (idx, _request, _spec), fut in zip(partitioned.async_native, futures, strict=True):
                     try:
-                        results[idx] = fut.result()
+                        results[idx] = fut.result(timeout=1.0)
                     except Exception as exc:
                         results[idx] = build_error_response(exc, _request, error_handler, vr_cls)
             elif isinstance(loop, asyncio.AbstractEventLoop):
