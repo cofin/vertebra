@@ -450,5 +450,5 @@ class EventLoopPool:
     @staticmethod
     def _run_loop_shard(loop: asyncio.AbstractEventLoop, ready: threading.Event) -> None:
         asyncio.set_event_loop(loop)
-        ready.set()
+        loop.call_soon(ready.set)
         loop.run_forever()
