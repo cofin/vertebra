@@ -1069,3 +1069,45 @@ async def test_v2_ownership_layers_hooks_metadata_and_unoffloaded_middleware_dis
     mv_res = await mv_bypass.dispatch(mv_scope, noop_receive, noop_send)
     assert mv_res is not None
     assert decode_json(mv_res[2]) == {"sku": "MV1", "quantity": 2}
+
+
+@pytest.mark.anyio
+async def test_litestar_fastpath_wrap_asgi_uses_send_raw_response_and_mount_prefix() -> None:
+    """Verify LitestarFastPathBypass.wrap_asgi invokes send.send_raw_response directly and strips root_path."""
+
+    @get("/items/{item_id:int}", sync_to_thread=False)
+    def get_item(item_id: int) -> dict[str, int]:
+        return {"item_id": item_id}
+
+    app = Litestar(route_handlers=[get_item])
+    bypass = FastPath.from_app(app)
+
+    async def fallback_app(_scope: Any, _receive: Any, _send: Any) -> None:
+        raise AssertionError("fallback_app must not be called for matched fastpath route")
+
+    wrapped = bypass.wrap_asgi(fallback_app)
+    proto = AsgiProtocol(b"")
+    scope = AsgiScope.from_parts(method="GET", path="/sub/items/99")
+    scope["root_path"] = "/sub"
+
+    raw_calls: list[tuple[int, list[tuple[bytes, bytes]], bytes]] = []
+
+    class _RawSendTracker:
+        async def __call__(self, message: dict[str, Any]) -> None:
+            await proto.send(message)
+
+        async def send_raw_response(
+            self,
+            status: int,
+            headers: list[tuple[bytes, bytes]],
+            body: bytes,
+        ) -> None:
+            raw_calls.append((status, headers, body))
+            await proto.send_raw_response(status, headers, body)
+
+    await wrapped(scope, proto.receive, _RawSendTracker())
+    assert len(raw_calls) == 1
+    assert raw_calls[0][0] == 200
+    assert decode_json(raw_calls[0][2]) == {"item_id": 99}
+    assert proto.complete is True
+

@@ -41,6 +41,7 @@ class CompiledDependantPlan(msgspec.Struct, frozen=True, gc=False, kw_only=True)
     root_dep_params: tuple[tuple[str, tuple[Any, tuple[str, ...]]], ...]
     has_generator_dependencies: bool
     has_security_requirements: bool
+    needs_request: bool = False
 
 
 def compile_dependant_plan(dependant: Any, *, path_param_names: set[str] | None = None) -> CompiledDependantPlan | None:
@@ -141,6 +142,7 @@ def compile_dependant_plan(dependant: Any, *, path_param_names: set[str] | None 
         root_dep_params=tuple(root_deps),
         has_generator_dependencies=has_generators,
         has_security_requirements=has_security,
+        needs_request=any(n.request_param_name is not None for n in ordered_nodes),
     )
 
 
@@ -193,12 +195,14 @@ async def execute_dependant_plan(
             val = exit_stack.enter_context(sync_cm)
         elif node.is_async or inspect.iscoroutinefunction(target_call):
             val = await target_call(**kwargs)
-        else:
+        elif getattr(target_call, "__vertebra_sync_to_thread__", False):
 
             def _invoke_sync(fn: Callable[..., Any] = target_call, kw: dict[str, Any] = kwargs) -> Any:
                 return fn(**kw)
 
             val = await anyio.to_thread.run_sync(_invoke_sync)
+        else:
+            val = target_call(**kwargs)
 
         cache[node.cache_key] = val
 

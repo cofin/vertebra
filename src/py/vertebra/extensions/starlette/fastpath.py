@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable
 from typing import Any, Self
+from urllib.parse import parse_qsl
 
 import anyio.to_thread
 import msgspec
@@ -13,6 +14,11 @@ from vertebra.extensions.starlette.offload import has_non_offloadable_middleware
 from vertebra.extensions.starlette.router import (
     RouterTable,
     extract_routes,
+)
+from vertebra.server._fastpath import (
+    extract_scope_body_fast,
+    resolve_relative_path,
+    wrap_asgi_fastpath,
 )
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
@@ -39,6 +45,7 @@ class CompiledRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     is_async: bool
     has_middleware: bool
     has_custom_exception_handlers: bool = False
+    sync_to_thread: bool = False
 
     @property
     def is_bypass_eligible(self) -> bool:
@@ -49,7 +56,7 @@ class CompiledRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 class FastPath:
     """Fast-path bypass router dispatching directly to compiled Starlette routes."""
 
-    __slots__ = ("_app", "_compiled_routes", "_router_table")
+    __slots__ = ("_app", "_compiled_routes", "_mount_prefix", "_router_table", "_sync_to_thread")
 
     def __init__(
         self,
@@ -57,6 +64,8 @@ class FastPath:
         *,
         app: Any = None,
         compiled_routes: dict[int, CompiledRoute] | None = None,
+        mount_prefix: str = "",
+        sync_to_thread: bool = False,
     ) -> None:
         resolved_app = app
         resolved_table = router_table
@@ -71,6 +80,8 @@ class FastPath:
             resolved_table = extract_routes(resolved_app)
 
         self._app = resolved_app
+        self._mount_prefix = mount_prefix
+        self._sync_to_thread = sync_to_thread
         self._router_table: RouterTable | None = None
         self._compiled_routes: dict[int, CompiledRoute] = {}
         self.bind_app(resolved_app, router_table=resolved_table, compiled_routes=compiled_routes)
@@ -86,11 +97,17 @@ class FastPath:
         return self._compiled_routes
 
     @classmethod
-    def from_app(cls, app: Any) -> Self:
+    def from_app(cls, app: Any, *, mount_prefix: str = "", sync_to_thread: bool = False) -> Self:
         """Construct a bound FastPath directly from a Starlette application."""
         table = extract_routes(app)
         compiled = compile_fastpath_routes(app, router_table=table)
-        return cls(table, app=app, compiled_routes=compiled)
+        return cls(
+            table,
+            app=app,
+            compiled_routes=compiled,
+            mount_prefix=mount_prefix,
+            sync_to_thread=sync_to_thread,
+        )
 
     def bind_app(
         self,
@@ -114,65 +131,7 @@ class FastPath:
 
     def wrap_asgi(self, fallback_app: Callable[..., Any]) -> Callable[..., Any]:
         """Wrap an ASGI 3.0 callable so eligible HTTP requests execute via direct fastpath dispatch."""
-        bypass = self
-
-        async def _fastpath_asgi_app(scope: Any, receive: Any, send: Any) -> None:
-            sent_via_callback = False
-            buffered_messages: list[Any] = []
-            upstream_exhausted = False
-
-            async def _buffering_receive() -> Any:
-                nonlocal upstream_exhausted
-                msg = await receive()
-                buffered_messages.append(msg)
-                if isinstance(msg, dict) and msg.get("type") == "http.request" and not msg.get("more_body", False):
-                    upstream_exhausted = True
-                return msg
-
-            async def _tracked_send(message: Any) -> None:
-                nonlocal sent_via_callback
-                sent_via_callback = True
-                await send(message)
-
-            direct = await bypass.dispatch(scope, _buffering_receive, _tracked_send)
-            if direct is not None:
-                status_code, encoded_headers, raw_body = direct
-                await send(
-                    {
-                        "type": "http.response.start",
-                        "status": status_code,
-                        "headers": encoded_headers,
-                    }
-                )
-                await send(
-                    {
-                        "type": "http.response.body",
-                        "body": raw_body,
-                        "more_body": False,
-                    }
-                )
-                return
-            if sent_via_callback:
-                return
-            if not buffered_messages:
-                await fallback_app(scope, receive, send)
-                return
-
-            replay_idx = 0
-
-            async def _replay_receive() -> Any:
-                nonlocal replay_idx
-                if replay_idx < len(buffered_messages):
-                    item = buffered_messages[replay_idx]
-                    replay_idx += 1
-                    return item
-                if upstream_exhausted:
-                    return {"type": "http.request", "body": b"", "more_body": False}
-                return await receive()
-
-            await fallback_app(scope, _replay_receive, send)
-
-        return _fastpath_asgi_app
+        return wrap_asgi_fastpath(self, fallback_app)
 
     async def dispatch(
         self,
@@ -192,7 +151,7 @@ class FastPath:
             return None
 
         method = str(scope.get("method", "GET") if hasattr(scope, "get") else scope["method"]).upper()
-        path = str(scope.get("path", "/") if hasattr(scope, "get") else scope["path"])
+        path = resolve_relative_path(scope, self._mount_prefix)
 
         try:
             matched = table.match_with_params(method, path)
@@ -223,6 +182,7 @@ class FastPath:
                 body=resolved_body,
                 receive=receive,
                 send=send,
+                sync_to_thread=self._sync_to_thread,
             )
         except Exception as exc:
             http_exc_resp = _serialize_starlette_http_exception(exc)
@@ -258,6 +218,7 @@ async def dispatch_handler_direct(
     body: bytes,
     receive: Any,
     send: Any,
+    sync_to_thread: bool = False,
 ) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
     """Execute a middleware-free Starlette endpoint with pre-seeded Request._body."""
     req_cls = _get_starlette_request_cls()
@@ -270,8 +231,10 @@ async def dispatch_handler_direct(
 
     if compiled.is_async:
         response = await compiled.endpoint(request)
-    else:
+    elif compiled.sync_to_thread or sync_to_thread:
         response = await anyio.to_thread.run_sync(compiled.endpoint, request)
+    else:
+        response = compiled.endpoint(request)
 
     if response is None:
         return 204, [], b""
@@ -343,8 +306,6 @@ class _FallbackStarletteRequest:
         text = raw.decode("latin-1") if isinstance(raw, bytes) else str(raw)
         if not text:
             return {}
-        from urllib.parse import parse_qsl
-
         return dict(parse_qsl(text, keep_blank_values=True))
 
     async def body(self) -> bytes:
@@ -399,6 +360,7 @@ def _compile_routes_from_table(
             is_async=_is_async_endpoint(entry.endpoint),
             has_middleware=has_mw,
             has_custom_exception_handlers=has_exc,
+            sync_to_thread=bool(getattr(entry.endpoint, "__vertebra_sync_to_thread__", False)),
         )
     return compiled
 
@@ -410,29 +372,7 @@ async def _resolve_request_body(
     *,
     method: str,
 ) -> bytes:
-    if body is not None:
-        return body
-    body_bytes_fn = getattr(scope, "body_bytes", None)
-    if callable(body_bytes_fn):
-        snap_bytes: bytes = body_bytes_fn()
-        if snap_bytes:
-            return snap_bytes
-    if method in _BODYLESS_HTTP_METHODS or receive is None:
-        return b""
-    chunks: list[bytes] = []
-    while True:
-        message = await receive()
-        if not isinstance(message, dict):
-            break
-        msg_type = message.get("type")
-        if msg_type == "http.disconnect":
-            break
-        chunk = message.get("body", b"")
-        if chunk:
-            chunks.append(bytes(chunk))
-        if not message.get("more_body", False):
-            break
-    return b"".join(chunks) if len(chunks) != 1 else chunks[0]
+    return await extract_scope_body_fast(scope, receive, body, method=method)
 
 
 def _serialize_starlette_http_exception(exc: Exception) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:

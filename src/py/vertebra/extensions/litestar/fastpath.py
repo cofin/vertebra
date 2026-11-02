@@ -25,6 +25,11 @@ from vertebra.extensions.litestar.router import (
     RouterTable,
     extract_routes,
 )
+from vertebra.server._fastpath import (
+    extract_scope_body_fast,
+    resolve_relative_path,
+    wrap_asgi_fastpath,
+)
 from vertebra.typing import Empty
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
@@ -79,7 +84,7 @@ class CompiledRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 class FastPath:
     """Fast-path bypass router dispatching directly to compiled Litestar routes."""
 
-    __slots__ = ("_app", "_compiled_routes", "_direct_plans", "_router_table")
+    __slots__ = ("_app", "_compiled_routes", "_direct_plans", "_mount_prefix", "_router_table")
 
     def __init__(
         self,
@@ -87,6 +92,7 @@ class FastPath:
         *,
         app: Any = None,
         compiled_routes: dict[int, CompiledRoute] | None = None,
+        mount_prefix: str = "",
     ) -> None:
         resolved_app = app
         resolved_table = router_table
@@ -101,6 +107,7 @@ class FastPath:
             resolved_table = extract_routes(resolved_app)
 
         self._app = resolved_app
+        self._mount_prefix = mount_prefix
         self._router_table: RouterTable | None = None
         self._compiled_routes: dict[int, CompiledRoute] = {}
         self._direct_plans: dict[int, _DirectSignaturePlan] = {}
@@ -112,11 +119,11 @@ class FastPath:
         return self._router_table
 
     @classmethod
-    def from_app(cls, app: Any) -> Self:
+    def from_app(cls, app: Any, *, mount_prefix: str = "") -> Self:
         """Construct a bound FastPath directly from an initialized Litestar application."""
         table = extract_routes(app)
         compiled = compile_fastpath_routes(app, router_table=table)
-        return cls(table, app=app, compiled_routes=compiled)
+        return cls(table, app=app, compiled_routes=compiled, mount_prefix=mount_prefix)
 
     def bind_app(
         self,
@@ -151,65 +158,7 @@ class FastPath:
 
     def wrap_asgi(self, fallback_app: Callable[..., Any]) -> Callable[..., Any]:
         """Wrap an ASGI 3.0 callable so eligible HTTP requests execute via direct fastpath dispatch."""
-        bypass = self
-
-        async def _fastpath_asgi_app(scope: Any, receive: Any, send: Any) -> None:
-            sent_via_callback = False
-            buffered_messages: list[Any] = []
-            upstream_exhausted = False
-
-            async def _buffering_receive() -> Any:
-                nonlocal upstream_exhausted
-                msg = await receive()
-                buffered_messages.append(msg)
-                if isinstance(msg, dict) and msg.get("type") == "http.request" and not msg.get("more_body", False):
-                    upstream_exhausted = True
-                return msg
-
-            async def _tracked_send(message: Any) -> None:
-                nonlocal sent_via_callback
-                sent_via_callback = True
-                await send(message)
-
-            direct = await bypass.dispatch(scope, _buffering_receive, _tracked_send)
-            if direct is not None:
-                status_code, encoded_headers, raw_body = direct
-                await send(
-                    {
-                        "type": "http.response.start",
-                        "status": status_code,
-                        "headers": encoded_headers,
-                    }
-                )
-                await send(
-                    {
-                        "type": "http.response.body",
-                        "body": raw_body,
-                        "more_body": False,
-                    }
-                )
-                return
-            if sent_via_callback:
-                return
-            if not buffered_messages:
-                await fallback_app(scope, receive, send)
-                return
-
-            replay_idx = 0
-
-            async def _replay_receive() -> Any:
-                nonlocal replay_idx
-                if replay_idx < len(buffered_messages):
-                    item = buffered_messages[replay_idx]
-                    replay_idx += 1
-                    return item
-                if upstream_exhausted:
-                    return {"type": "http.request", "body": b"", "more_body": False}
-                return await receive()
-
-            await fallback_app(scope, _replay_receive, send)
-
-        return _fastpath_asgi_app
+        return wrap_asgi_fastpath(self, fallback_app)
 
     async def dispatch(
         self,
@@ -244,7 +193,7 @@ class FastPath:
             return None
 
         method = str(scope.get("method", "GET") if hasattr(scope, "get") else scope["method"]).upper()
-        path = str(scope.get("path", "/") if hasattr(scope, "get") else scope["path"])
+        path = resolve_relative_path(scope, self._mount_prefix)
 
         try:
             matched = (
@@ -864,18 +813,7 @@ async def _resolve_request_body(
             return preseeded
         if isinstance(preseeded, bytearray | memoryview):
             return bytes(preseeded)
-    if method in _BODYLESS_HTTP_METHODS or not callable(receive):
-        return b""
-
-    chunks: list[bytes] = []
-    while True:
-        message = await receive()
-        chunk = message.get("body", b"")
-        if chunk:
-            chunks.append(chunk if isinstance(chunk, bytes) else bytes(chunk))
-        if not message.get("more_body", False):
-            break
-    resolved = b"" if not chunks else (chunks[0] if len(chunks) == 1 else b"".join(chunks))
+    resolved = await extract_scope_body_fast(scope, receive, body, method=method)
     preseed_scope_body(scope, resolved)
     return resolved
 

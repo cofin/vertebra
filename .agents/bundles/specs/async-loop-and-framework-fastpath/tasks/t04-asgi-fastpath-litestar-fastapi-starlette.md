@@ -2,7 +2,7 @@
 type: Task
 id: async-loop-and-framework-fastpath:t04
 title: "Unify zero-closure wrap_asgi, AsgiSend.send_raw_response, lazy Request, and inline sync execution across Litestar, FastAPI, and Starlette FastPath"
-state: in_progress
+state: done
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -19,17 +19,17 @@ tests:
   - src/py/tests/unit/extensions/test_starlette_plugin.py
 plan_revision: 2
 plan_commit: 34429ff8c50d4622d0cacbd1288525f8a1211dc8
-state_revision: 1
-claimed_by: agent:executor
-claimed_at: 2026-11-02T00:41:45Z
+state_revision: 2
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-02T00:49:01Z
+last_verified_commit: 3e7a775
+verification_evidence: "uv run --no-sync pytest src/py/tests/unit/server/test_litestar_direct_fastpath.py src/py/tests/unit/extensions/test_fastapi_plugin.py src/py/tests/unit/extensions/test_starlette_plugin.py -q -> 16 passed; ruff & mypy -> exit 0"
 created_at: 2026-11-01T23:48:00Z
-updated_at: 2026-11-02T00:41:45Z
+updated_at: 2026-11-02T00:49:15Z
 commit: null
 tags: [litestar, fastapi, starlette, asgi, fastpath, zero-copy, tdd]
 ---
@@ -71,8 +71,10 @@ uv run --no-sync mypy src/py/vertebra/server/_fastpath.py src/py/vertebra/extens
 ```
 
 ## Acceptance Criteria
-- [ ] `Litestar`, `FastAPI`, and `Starlette` `FastPath.wrap_asgi` emit responses via `send.send_raw_response` in 1 C-API call when supported and preserve replay fallback on unbuffered `dict` scopes (R4).
-- [ ] `FastAPI` `dispatch_handler_direct` skips constructing `starlette.requests.Request` when `needs_request` is `False` (R4).
-- [ ] Synchronous `def` endpoints in `FastAPI` and `Starlette` `FastPath` execute inline when `sync_to_thread=False` (R4).
+- [x] `Litestar`, `FastAPI`, and `Starlette` `FastPath.wrap_asgi` emit responses via `send.send_raw_response` in 1 C-API call when supported and preserve replay fallback on unbuffered `dict` scopes (R4).
+- [x] `FastAPI` `dispatch_handler_direct` skips constructing `starlette.requests.Request` when `needs_request` is `False` (R4).
+- [x] Synchronous `def` endpoints in `FastAPI` and `Starlette` `FastPath` execute inline when `sync_to_thread=False` (R4).
 
 ## Notes & Discoveries
+- Created `src/py/vertebra/server/_fastpath.py` with `resolve_relative_path`, `extract_scope_body_fast`, `send_asgi_direct`, `wrap_asgi_fastpath`, and `attach_framework_fastpath`.
+- Wired `wrap_asgi_fastpath`, `resolve_relative_path`, and `extract_scope_body_fast` across `Litestar`, `FastAPI`, and `Starlette` `FastPath`, added `CompiledRoute.needs_request` in `FastAPI`, and defaulted sync fastpath endpoints and dependencies to inline execution (`sync_to_thread: bool = False`).
