@@ -266,4 +266,3 @@ async def test_starlette_fastpath_inline_sync_and_send_raw_response() -> None:
     assert raw_calls == [200]
     assert observed_tids == [caller_tid]
     assert msgspec.json.decode(proto.take_response().body) == {"pong": "inline"}
-

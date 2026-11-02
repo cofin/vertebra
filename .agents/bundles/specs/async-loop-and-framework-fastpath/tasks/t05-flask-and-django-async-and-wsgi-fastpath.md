@@ -40,17 +40,17 @@ tags: [flask, django, wsgi, asgi, fastpath, async, tdd]
 Enable `async def` view functions and `MsgspecView` async methods in `Flask` (`src/py/vertebra/extensions/flask/fastpath.py::FlaskFastPath`) and `Django` (`src/py/vertebra/extensions/django/fastpath.py::DjangoFastPath`), cache stateless `MsgspecView` instances in `MsgspecView.as_view`, add ASGI `dispatch_async` and `wrap_asgi` to both `FlaskFastPath` and `DjangoFastPath`, make the target WSGI callable optional in `wrap_wsgi`, and wire `_WsgiStartResponse.send_raw_response` in `dispatch_wsgi`.
 
 ## Context
-- **Verification Strategy (`behavior_tdd`)**: Write failing tests in `src/py/tests/unit/extensions/test_flask.py` and `src/py/tests/unit/extensions/test_django.py` testing `async def` Flask views and `async def` Django views / `MsgspecView` async methods across `FastPath.dispatch`, `FastPath.dispatch_async`, `FastPath.dispatch_wsgi` (with `send_raw_response`), and `FastPath.wrap_asgi`.
+- **Verification Strategy (`behavior_tdd`)**: Write failing tests in `src/py/tests/unit/extensions/test_flask_plugin.py` and `src/py/tests/unit/extensions/test_django_plugin.py` testing `async def` Flask views and `async def` Django views / `MsgspecView` async methods across `FastPath.dispatch`, `FastPath.dispatch_async`, `FastPath.dispatch_wsgi` (with `send_raw_response`), and `FastPath.wrap_asgi`.
 - **Architectural Invariants**:
   - When a non-suspending `async def` view is invoked via synchronous `dispatch()` or `dispatch_wsgi()`, step the coroutine via `coro.send(None)`: if it raises `StopIteration(val)`, serialize `val` immediately with zero event loop overhead; if it yields a pending awaitable, drive it via `dispatch_async` / `wrap_asgi`.
   - In `MsgspecView.as_view(**initkwargs)`, pre-instantiate `cached_instance = cls()` once at `as_view()` time when `not initkwargs`, and inspect whether any HTTP method handler (`get`, `post`, `put`, `patch`, `delete`) is an `async def` coroutine function.
 
 ## Steps
 1. **Write failing unit tests (`RED`)**:
-   - In `src/py/tests/unit/extensions/test_flask.py`, add tests for:
+   - In `src/py/tests/unit/extensions/test_flask_plugin.py`, add tests for:
      - `@vertebra_route` on an `async def` Flask view with path params and a `msgspec.Struct` body executed via `FlaskFastPath.dispatch`, `FlaskFastPath.dispatch_async`, `FlaskFastPath.dispatch_wsgi`, and `FlaskFastPath.wrap_asgi`.
      - `FlaskFastPath.dispatch_wsgi` calling `start_response.send_raw_response` when present on `start_response`.
-   - In `src/py/tests/unit/extensions/test_django.py`, add tests for:
+   - In `src/py/tests/unit/extensions/test_django_plugin.py`, add tests for:
      - `@vertebra_view` on an `async def` Django view and a `MsgspecView` subclass with `async def post(self, request, payload: ...)` executed via `DjangoFastPath.dispatch`, `DjangoFastPath.dispatch_async`, `DjangoFastPath.dispatch_wsgi`, and `DjangoFastPath.wrap_asgi`.
      - Stateless `MsgspecView.as_view()` reusing its pre-allocated instance across requests.
 2. **Implement Flask & Django `async def`, `wrap_asgi`, and `send_raw_response` (`GREEN`)**:
@@ -67,8 +67,8 @@ Enable `async def` view functions and `MsgspecView` async methods in `Flask` (`s
 
 ## Verification
 ```bash
-uv run --no-sync pytest src/py/tests/unit/extensions/test_flask.py src/py/tests/unit/extensions/test_django.py -q
-uv run --no-sync ruff check src/py/vertebra/extensions/flask/fastpath.py src/py/vertebra/extensions/django/fastpath.py src/py/tests/unit/extensions/test_flask.py src/py/tests/unit/extensions/test_django.py
+uv run --no-sync pytest src/py/tests/unit/extensions/test_flask_plugin.py src/py/tests/unit/extensions/test_django_plugin.py -q
+uv run --no-sync ruff check src/py/vertebra/extensions/flask/fastpath.py src/py/vertebra/extensions/django/fastpath.py src/py/tests/unit/extensions/test_flask_plugin.py src/py/tests/unit/extensions/test_django_plugin.py
 uv run --no-sync mypy src/py/vertebra/extensions/flask/fastpath.py src/py/vertebra/extensions/django/fastpath.py
 ```
 

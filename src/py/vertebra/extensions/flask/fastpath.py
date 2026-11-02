@@ -14,7 +14,7 @@ from vertebra.server._fastpath import (
     resolve_relative_path,
     wrap_asgi_fastpath,
 )
-from vertebra.utils.serializers import encode_json_bytes
+from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -285,9 +285,9 @@ def _prepare_flask_kwargs(
             elif wsgi_inp is not None and hasattr(wsgi_inp, "read"):
                 raw = wsgi_inp.read()
                 if compiled.body_type is not None:
-                    kwargs[compiled.body_param_name] = msgspec.json.decode(raw, type=compiled.body_type)
+                    kwargs[compiled.body_param_name] = decode_json(raw, type=compiled.body_type)
                 else:
-                    kwargs[compiled.body_param_name] = msgspec.json.decode(raw)
+                    kwargs[compiled.body_param_name] = decode_json(raw)
     return request_id, kwargs
 
 

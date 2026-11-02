@@ -37,6 +37,7 @@ from vertebra.server._asgi._queues import (
     AsgiStreamSend,
     ChunkCallback,
 )
+from vertebra.server._fastpath import attach_framework_fastpath
 from vertebra.server._loops import EventLoopPool
 
 __all__ = (
@@ -279,18 +280,40 @@ class AsgiRunner:
         lifespan_state: dict[str, Any] | None = None,
         on_chunk: ChunkCallback | None = None,
     ) -> None:
+        self._mount_prefix = mount_prefix.rstrip("/")
         self._app = app
-        self._fastpath = self._resolve_fastpath(app)
+        wrapped_app = (
+            attach_framework_fastpath(app, mount_prefix=self._mount_prefix, protocol="asgi")
+            if on_chunk is None
+            else app
+        )
+        self._fastpath = self._resolve_fastpath(wrapped_app) or self._resolve_fastpath(app)
+        if self._fastpath is not None and self._mount_prefix and hasattr(self._fastpath, "_mount_prefix"):
+            self._fastpath._mount_prefix = self._mount_prefix
         self._dispatch_app: Callable[..., Any] = (
-            self._fastpath.wrap_asgi(app) if (self._fastpath is not None and on_chunk is None) else app
+            self._fastpath.wrap_asgi(app)
+            if (
+                self._fastpath is not None
+                and on_chunk is None
+                and not getattr(wrapped_app, "__vertebra_fastpath_attached__", False)
+            )
+            else wrapped_app
         )
         self._loop = loop
         self._owns_loop = loop is None
         self._owned_pool: EventLoopPool | None = None
-        self._mount_prefix = mount_prefix.rstrip("/")
         self._lifespan_state: dict[str, Any] = lifespan_state if lifespan_state is not None else {}
         self._on_chunk = on_chunk
         self._last_trailer_frames: list[bytes] = []
+
+    @property
+    def __vertebra_fastpath_attached__(self) -> bool:
+        """Return True when a zero-copy FastPath wrapper is attached to this runner."""
+        return bool(
+            getattr(self._dispatch_app, "__vertebra_fastpath_attached__", False)
+            or getattr(self._app, "__vertebra_fastpath_attached__", False)
+            or self._fastpath is not None
+        )
 
     @property
     def dispatch_app(self) -> Callable[..., Any]:

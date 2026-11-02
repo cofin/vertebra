@@ -345,7 +345,7 @@ def _decode_body_payload(
                 return native_req.decode_msgspec(body_type)
             except Exception:
                 pass
-        return msgspec.json.decode(body, type=body_type)
+        return decode_json(body, type=body_type)
 
     if compiled.body_is_pydantic:
         if native_req is not None and len(body) > 0:

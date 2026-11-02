@@ -41,19 +41,19 @@ tags: [rust, pyo3, c-api, asgi, wsgi, dispatch, tdd]
 Add C-API single-step coroutine driving (`drive_native_batch` via `ffi::PyIter_Send`) for native `async def` handlers alongside `AsgiScope.body_bytes()`, `AsgiProtocol.body_bytes()`, `AsgiProtocol.__call__`, `AsgiProtocol.send_raw_response`, `AsgiSend.send_raw_response` (`src/py/vertebra/server/_asgi/_queues.py`), and `WsgiStartResponse.send_raw_response` (`_WsgiStartResponse` in `src/rs/vertebra-py/src/wsgi/runner.rs`), and flatten `compile_handler_spec` in `src/py/vertebra/server/_dispatch.py` so synchronous parameter extraction on `async def` routes returns the handler coroutine directly without outer coroutine wrappers.
 
 ## Context
-- **Verification Strategy (`behavior_tdd`)**: Write failing tests in `src/py/tests/unit/server/test_asgi_capi_runner.py` and `src/py/tests/unit/server/test_wsgi_batch_runner.py` verifying `drive_native_batch` (both `PYGEN_RETURN` zero-Task fastpath and `PYGEN_NEXT` `SteppedCoroutine` promotion), `AsgiScope.body_bytes()`, `AsgiProtocol.send_raw_response` (including when `proto_bound` is passed directly as `send` in `drive_asgi_targets_inline`), `AsgiSend.send_raw_response`, `_WsgiStartResponse.send_raw_response`, and flattened `compile_handler_spec` in `_dispatch.py`.
+- **Verification Strategy (`behavior_tdd`)**: Write failing tests in `src/py/tests/unit/server/test_asgi.py` and `src/py/tests/unit/server/test_wsgi.py` verifying `drive_native_batch` (both `PYGEN_RETURN` zero-Task fastpath and `PYGEN_NEXT` `SteppedCoroutine` promotion), `AsgiScope.body_bytes()`, `AsgiProtocol.send_raw_response` (including when `proto_bound` is passed directly as `send` in `drive_asgi_targets_inline`), `AsgiSend.send_raw_response`, `_WsgiStartResponse.send_raw_response`, and flattened `compile_handler_spec` in `_dispatch.py`.
 - **Architectural Invariants**:
   - Keep `#[pymodule(gil_used = false)]` and conditional `freelist = 128` (`#[cfg_attr(not(Py_GIL_DISABLED), ...)]`).
   - Update `src/py/vertebra/_vertebra.pyi` so `python -m mypy.stubtest vertebra._vertebra` passes with zero errors.
 
 ## Steps
 1. **Write failing unit tests (`RED`)**:
-   - In `src/py/tests/unit/server/test_asgi_capi_runner.py`, add tests for:
+   - In `src/py/tests/unit/server/test_asgi.py`, add tests for:
      - `AsgiScope.body_bytes()` and `AsgiProtocol.body_bytes()` returning the request body `bytes` with zero awaitable allocation.
      - `AsgiProtocol.send_raw_response(status, headers, body)` and `AsgiSend.send_raw_response(status, headers, body)` writing status, headers, and body in one call, and `AsgiProtocol.__call__(message)` acting as `send(message)` so `drive_asgi_targets_inline` can pass `proto_bound` directly as `send`.
      - `drive_native_batch` stepping non-suspending `async def` coroutines via `PyIter_Send` with zero `loop.create_task` calls and promoting suspending `async def` coroutines (`await asyncio.sleep(0)`) via `SteppedCoroutine`.
      - `compile_handler_spec` for an `async def` handler with path/query/`msgspec.Struct` parameters returning the handler's direct coroutine without an outer `_invoke_compiled_async` wrapper when guards/dependencies are synchronous.
-   - In `src/py/tests/unit/server/test_wsgi_batch_runner.py`, add a test verifying `start_response.send_raw_response(status, headers, body)` inside `drive_wsgi_batch`.
+   - In `src/py/tests/unit/server/test_wsgi.py`, add a test verifying `start_response.send_raw_response(status, headers, body)` inside `drive_wsgi_batch`.
 2. **Implement Rust C-API methods and flattened `_dispatch.py` (`GREEN`)**:
    - In `src/rs/vertebra-py/src/asgi.rs`:
      - Add `pub fn body_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes>` to `AsgiScope` (`PyBytes::new(py, self.batch.body(self.index))`) and `AsgiProtocol` (`PyBytes::new(py, self.body.as_slice())`).
@@ -74,7 +74,7 @@ Add C-API single-step coroutine driving (`drive_native_batch` via `ffi::PyIter_S
 ```bash
 make dev
 uv run --no-sync python -m mypy.stubtest vertebra._vertebra --allowlist tools/stubtest_allowlist.txt
-uv run --no-sync pytest src/py/tests/unit/server/test_asgi_capi_runner.py src/py/tests/unit/server/test_wsgi_batch_runner.py -q
+uv run --no-sync pytest src/py/tests/unit/server/test_asgi.py src/py/tests/unit/server/test_wsgi.py -q
 ```
 
 ## Acceptance Criteria

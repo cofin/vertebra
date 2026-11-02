@@ -9,11 +9,11 @@ research:
   - research/event-loop-and-async-optimizations_20261101.md
 plan_revision: 2
 plan_commit: 34429ff8c50d4622d0cacbd1288525f8a1211dc8
-state_revision: 6
-current_task: async-loop-and-framework-fastpath:t06
-last_verified_checkpoint: 317fee9
+state_revision: 7
+current_task: null
+last_verified_checkpoint: 1ec45d8
 created_at: 2026-11-01T23:48:00Z
-updated_at: 2026-11-02T00:54:55Z
+updated_at: 2026-11-02T01:32:53Z
 tags:
   - feature
   - server
@@ -146,11 +146,11 @@ Vertebra's Rust HTTP ingress (`vertebra-http`) and C-API ASGI/RSGI runners (`dri
 | Requirement | Owning Task(s) | Verification Strategy | Confirmed Public Seam & Canonical Test Surface |
 | --- | --- | --- | --- |
 | R1 (`LoopBackend` & `_gil_audit.py` policy deprecation removal) | `t01` | `behavior_tdd` | `src/py/tests/unit/server/test_runtime_tuning.py` |
-| R2 (C-API `drive_native_batch`, `AsgiScope.body_bytes()`, `AsgiProtocol.__call__`, flattened `compile_handler_spec`, `send_raw_response`) | `t02` | `behavior_tdd` | `src/py/tests/unit/server/test_asgi_capi_runner.py`, `src/py/tests/unit/server/test_wsgi_batch_runner.py` |
+| R2 (C-API `drive_native_batch`, `AsgiScope.body_bytes()`, `AsgiProtocol.__call__`, flattened `compile_handler_spec`, `send_raw_response`) | `t02` | `behavior_tdd` | `src/py/tests/unit/server/test_asgi.py`, `src/py/tests/unit/server/test_wsgi.py` |
 | R3 (`RustCompletionRing` + `Notifier` in `_storage` & batched `SyncPool.submit_async` wakeups) | `t03` | `behavior_tdd` | `src/py/tests/unit/storage/test_gcs_token_refresh.py`, `src/py/tests/unit/db/test_native_db_drivers.py` |
-| R4 (Zero-closure ASGI `FastPath` for Litestar, FastAPI, Starlette + lazy `Request` & inline sync) | `t04` | `behavior_tdd` | `src/py/tests/unit/server/test_litestar_direct_fastpath.py`, `src/py/tests/unit/extensions/test_fastapi.py`, `src/py/tests/unit/extensions/test_starlette.py` |
-| R5 (`Flask` & `Django` `async def` views, cached `MsgspecView`, `wrap_asgi`, WSGI `send_raw_response`) | `t05` | `behavior_tdd` | `src/py/tests/unit/extensions/test_flask.py`, `src/py/tests/unit/extensions/test_django.py` |
-| R6 & R7 (Auto-attached prefix-aware `FastPath` stacking across `App.mount` + cross-framework shared native `DatabaseRegistry.default()` pool & `LeaseBroker`) | `t06` | `behavior_tdd` | `src/py/tests/unit/extensions/test_fastapi.py`, `src/py/tests/unit/extensions/test_django.py`, `src/py/tests/unit/server/test_asgi_capi_runner.py` |
+| R4 (Zero-closure ASGI `FastPath` for Litestar, FastAPI, Starlette + lazy `Request` & inline sync) | `t04` | `behavior_tdd` | `src/py/tests/unit/server/test_litestar_direct_fastpath.py`, `src/py/tests/unit/extensions/test_fastapi_plugin.py`, `src/py/tests/unit/extensions/test_starlette_plugin.py` |
+| R5 (`Flask` & `Django` `async def` views, cached `MsgspecView`, `wrap_asgi`, WSGI `send_raw_response`) | `t05` | `behavior_tdd` | `src/py/tests/unit/extensions/test_flask_plugin.py`, `src/py/tests/unit/extensions/test_django_plugin.py` |
+| R6 & R7 (Auto-attached prefix-aware `FastPath` stacking across `App.mount` + cross-framework shared native `DatabaseRegistry.default()` pool & `LeaseBroker`) | `t06` | `behavior_tdd` | `src/py/tests/unit/extensions/test_fastapi_plugin.py`, `src/py/tests/unit/extensions/test_django_plugin.py`, `src/py/tests/unit/server/test_asgi.py` |
 
 ---
 
@@ -165,15 +165,15 @@ Vertebra's Rust HTTP ingress (`vertebra-http`) and C-API ASGI/RSGI runners (`dri
 ### Phase 2: Unified 6-Framework Zero-Copy `FastPath`, Multi-Framework Stacking (`App.mount`) & Shared Native Database Pool
 - [x] t04 — Unify zero-closure `wrap_asgi`, `send_raw_response`, lazy `Request`, and inline sync execution across Litestar, FastAPI, and Starlette `FastPath` (tasks/t04-asgi-fastpath-litestar-fastapi-starlette.md)
 - [x] t05 — Add `async def` view execution, cached `MsgspecView`, `wrap_asgi`, and `_WsgiStartResponse.send_raw_response` to Flask and Django `FastPath` (tasks/t05-flask-and-django-async-and-wsgi-fastpath.md)
-- [~] t06 — Auto-attach stacked `FastPath` dispatchers across `App.mount()` and share native database pools & SHM `LeaseBroker` across all 6 frameworks (tasks/t06-multi-framework-stacked-mount-fastpath.md)
-- **Phase 2 Recovery Checkpoint**: `make lint && uv run --no-sync pytest src/py/tests/unit/server/test_litestar_direct_fastpath.py src/py/tests/unit/extensions/test_fastapi.py src/py/tests/unit/extensions/test_starlette.py src/py/tests/unit/extensions/test_flask.py src/py/tests/unit/extensions/test_django.py src/py/tests/unit/server/test_asgi_capi_runner.py -q`
+- [x] t06 — Auto-attach stacked `FastPath` dispatchers across `App.mount()` and share native database pools & SHM `LeaseBroker` across all 6 frameworks (tasks/t06-multi-framework-stacked-mount-fastpath.md)
+- **Phase 2 Recovery Checkpoint**: `make lint && uv run --no-sync pytest src/py/tests/unit/server/test_litestar_direct_fastpath.py src/py/tests/unit/extensions/test_fastapi_plugin.py src/py/tests/unit/extensions/test_starlette_plugin.py src/py/tests/unit/extensions/test_flask_plugin.py src/py/tests/unit/extensions/test_django_plugin.py src/py/tests/unit/server/test_asgi.py -q`
 
 ---
 
 ## 5. Continuity Snapshot
-- **Flow ID**: `async-loop-and-framework-fastpath` (`state: planned`, `plan_revision: 2`, `plan_commit: 34429ff8c50d4622d0cacbd1288525f8a1211dc8`)
+- **Flow ID**: `async-loop-and-framework-fastpath` (`state: in_progress`, `plan_revision: 2`, `plan_commit: 34429ff8c50d4622d0cacbd1288525f8a1211dc8`)
 - **Current Task**: `null`
-- **Last Verified Checkpoint**: `34429ff8c50d4622d0cacbd1288525f8a1211dc8`
+- **Last Verified Checkpoint**: `c4b139c`
 - **Key Decisions**:
   - Adopt unified `LoopBackend` (`auto`, `uvloop>=0.23.0`, `winloop>=0.8.1`, `rloop>=0.5.0`, `asyncio`) and remove deprecated `EventLoopPolicy` calls.
   - Drive native `async def` handlers via C-API `PyIter_Send` (`drive_native_batch`), expose `AsgiScope.body_bytes()` and `AsgiProtocol.__call__`, and add `send_raw_response` on `AsgiProtocol`, `AsgiSend`, and `_WsgiStartResponse`.

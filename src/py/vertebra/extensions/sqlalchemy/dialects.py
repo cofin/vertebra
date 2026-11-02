@@ -239,7 +239,7 @@ class DBAPICursor:
 class DBAPIConnection:
     """PEP 249 DBAPI 2.0 connection backed by Vertebra native drivers or sqlite3."""
 
-    __slots__ = ("_autocommit", "_broker", "_config", "_driver", "_sqlite_conn", "_url", "closed")
+    __slots__ = ("_autocommit", "_broker", "_config", "_driver", "_share_pool", "_sqlite_conn", "_url", "closed")
 
     def __init__(
         self,
@@ -247,6 +247,7 @@ class DBAPIConnection:
         *,
         driver: Any = None,
         broker: Any = None,
+        share_pool: bool = True,
         database: str | None = None,
         **kwargs: Any,
     ) -> None:
@@ -255,19 +256,22 @@ class DBAPIConnection:
         if database is not None and (url == "sqlite+vtb:///:memory:" or not url):
             resolved_url = f"sqlite+vtb:///{database}"
         self._url = resolved_url
-        self._broker = broker
+        self._share_pool = bool(share_pool)
+        self._broker = (
+            broker if broker is not None else (DatabaseRegistry.default_broker() if self._share_pool else None)
+        )
         self._autocommit = False
         self.closed: bool = False
 
         self._config: Any = None
         try:
             self._config = (
-                DatabaseRegistry.parse_url(resolved_url, broker=broker)
-                if broker is not None
+                DatabaseRegistry.parse_url(resolved_url, broker=self._broker)
+                if self._broker is not None
                 else DatabaseRegistry.parse_url(resolved_url)
             )
         except Exception:
-            self._config = SQLiteConfig(database=database or ":memory:")
+            self._config = SQLiteConfig(database=database or ":memory:", broker=self._broker)
 
         self._driver = driver
         self._sqlite_conn: sqlite3.Connection | None = None
@@ -278,17 +282,22 @@ class DBAPIConnection:
                 if db_target.startswith("sqlite+"):
                     db_target = db_target.split(":///", 1)[-1] if ":///" in db_target else ":memory:"
                 self._sqlite_conn = sqlite3.connect(db_target, check_same_thread=False)
-                self._driver = SyncSQLiteDriver(self._config, broker=broker)
+                if self._share_pool and broker is None:
+                    self._driver = DatabaseRegistry.default().get_shared_sync_driver(self._config)
+                else:
+                    self._driver = SyncSQLiteDriver(self._config, broker=self._broker)
+            elif self._share_pool and broker is None:
+                self._driver = DatabaseRegistry.default().get_shared_sync_driver(self._config)
             elif isinstance(self._config, PostgreSQLConfig):
-                self._driver = SyncPostgreSQLDriver(self._config, broker=broker)
+                self._driver = SyncPostgreSQLDriver(self._config, broker=self._broker)
             elif isinstance(self._config, MySQLConfig):
-                self._driver = SyncMySQLDriver(self._config, broker=broker)
+                self._driver = SyncMySQLDriver(self._config, broker=self._broker)
             elif isinstance(self._config, OracleConfig):
-                self._driver = SyncOracleDriver(self._config, broker=broker)
+                self._driver = SyncOracleDriver(self._config, broker=self._broker)
             elif isinstance(self._config, MSSQLConfig):
-                self._driver = SyncMSSQLDriver(self._config, broker=broker)
+                self._driver = SyncMSSQLDriver(self._config, broker=self._broker)
             elif isinstance(self._config, DuckDBConfig):
-                self._driver = SyncDuckDBDriver(self._config, broker=broker)
+                self._driver = SyncDuckDBDriver(self._config, broker=self._broker)
 
     @property
     def url(self) -> str:
@@ -553,7 +562,7 @@ class AsyncDBAPICursor:
 class AsyncDBAPIConnection:
     """Asynchronous DBAPI connection adapting Vertebra async drivers."""
 
-    __slots__ = ("_autocommit", "_broker", "_config", "_driver", "_url", "closed")
+    __slots__ = ("_autocommit", "_broker", "_config", "_driver", "_share_pool", "_url", "closed")
 
     def __init__(
         self,
@@ -561,6 +570,7 @@ class AsyncDBAPIConnection:
         *,
         driver: Any = None,
         broker: Any = None,
+        share_pool: bool = True,
         database: str | None = None,
         **kwargs: Any,
     ) -> None:
@@ -569,34 +579,39 @@ class AsyncDBAPIConnection:
         if database is not None and (url == "sqlite+vtb_async:///:memory:" or not url):
             resolved_url = f"sqlite+vtb_async:///{database}"
         self._url = resolved_url
-        self._broker = broker
+        self._share_pool = bool(share_pool)
+        self._broker = (
+            broker if broker is not None else (DatabaseRegistry.default_broker() if self._share_pool else None)
+        )
         self._autocommit = False
         self.closed: bool = False
 
         self._config: Any = None
         try:
             self._config = (
-                DatabaseRegistry.parse_url(resolved_url, broker=broker)
-                if broker is not None
+                DatabaseRegistry.parse_url(resolved_url, broker=self._broker)
+                if self._broker is not None
                 else DatabaseRegistry.parse_url(resolved_url)
             )
         except Exception:
-            self._config = SQLiteConfig(database=database or ":memory:")
+            self._config = SQLiteConfig(database=database or ":memory:", broker=self._broker)
 
         self._driver = driver
         if self._driver is None:
-            if isinstance(self._config, SQLiteConfig):
-                self._driver = AsyncSQLiteDriver(self._config, broker=broker)
+            if self._share_pool and broker is None:
+                self._driver = DatabaseRegistry.default().get_shared_driver(self._config)
+            elif isinstance(self._config, SQLiteConfig):
+                self._driver = AsyncSQLiteDriver(self._config, broker=self._broker)
             elif isinstance(self._config, PostgreSQLConfig):
-                self._driver = AsyncPostgreSQLDriver(self._config, broker=broker)
+                self._driver = AsyncPostgreSQLDriver(self._config, broker=self._broker)
             elif isinstance(self._config, MySQLConfig):
-                self._driver = AsyncMySQLDriver(self._config, broker=broker)
+                self._driver = AsyncMySQLDriver(self._config, broker=self._broker)
             elif isinstance(self._config, OracleConfig):
-                self._driver = AsyncOracleDriver(self._config, broker=broker)
+                self._driver = AsyncOracleDriver(self._config, broker=self._broker)
             elif isinstance(self._config, MSSQLConfig):
-                self._driver = AsyncMSSQLDriver(self._config, broker=broker)
+                self._driver = AsyncMSSQLDriver(self._config, broker=self._broker)
             elif isinstance(self._config, DuckDBConfig):
-                self._driver = AsyncDuckDBDriver(self._config, broker=broker)
+                self._driver = AsyncDuckDBDriver(self._config, broker=self._broker)
 
     @property
     def driver(self) -> Any:

@@ -5,7 +5,7 @@ from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import pytest
@@ -21,11 +21,16 @@ from vertebra.extensions.litestar.router import (
 )
 
 
-def _load_litestar_primitives() -> tuple[Any, Any, Any]:
+def _load_litestar_primitives() -> tuple[Any, Any, Any, Any]:
     """Load Litestar routing primitives or fallback stubs when optional extra is absent."""
     try:
         mod = importlib.import_module("litestar")
+        params_mod = importlib.import_module("litestar.params")
     except ImportError:
+
+        class _FromPathStub:
+            def __class_getitem__(cls, item: Any) -> Any:
+                return item
 
         def make_decorator(http_method: str) -> Callable[..., Callable[[Callable[..., Any]], Any]]:
             def decorator(path: str, **_kwargs: Any) -> Callable[[Callable[..., Any]], Any]:
@@ -57,11 +62,15 @@ def _load_litestar_primitives() -> tuple[Any, Any, Any]:
                     for path, method_map in by_path.items()
                 ]
 
-        return LitestarStub, make_decorator("GET"), make_decorator("POST")
-    return mod.Litestar, mod.get, mod.post
+        return LitestarStub, make_decorator("GET"), make_decorator("POST"), _FromPathStub
+    return mod.Litestar, mod.get, mod.post, params_mod.FromPath
 
 
-Litestar, get, post = _load_litestar_primitives()
+if TYPE_CHECKING:
+    from litestar import Litestar, get, post
+    from litestar.params import FromPath
+else:
+    Litestar, get, post, FromPath = _load_litestar_primitives()
 
 
 def test_asgi_scope_20_known_keys_no_extras_allocation() -> None:
@@ -181,11 +190,11 @@ def test_extract_litestar_routes_and_405_allow_discovery() -> None:
     """Verify extract_routes inspects app.routes and discovers 405 Allow headers."""
 
     @get("/items/{item_id:int}", sync_to_thread=False)
-    def get_item(item_id: int) -> dict[str, int]:
+    def get_item(item_id: FromPath[int]) -> dict[str, int]:
         return {"item_id": item_id}
 
     @post("/items/{item_id:int}", sync_to_thread=False)
-    def update_item(item_id: int) -> dict[str, int]:
+    def update_item(item_id: FromPath[int]) -> dict[str, int]:
         return {"item_id": item_id}
 
     app = Litestar(route_handlers=[get_item, update_item])

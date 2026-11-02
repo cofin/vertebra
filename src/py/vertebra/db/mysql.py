@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import collections
+import os
 import urllib.parse
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
@@ -187,8 +188,13 @@ class SyncMySQLDriver:
         if self._broker is not None:
             if hasattr(self._broker, "get_or_compile_statement"):
                 self._broker.get_or_compile_statement("mysql", sql, lambda s: (s, ()))
-            if hasattr(self._broker, "acquire"):
-                lease = self._broker.acquire(bind_key="mysql")
+            if hasattr(self._broker, "lease_table") and self._broker.lease_table is not None:
+                lease = self._broker.lease_table.acquire(os.getpid())
+            elif hasattr(self._broker, "acquire"):
+                try:
+                    lease = self._broker.acquire(bind_key="mysql")
+                except TypeError:
+                    lease = self._broker.acquire(os.getpid())
 
         try:
             if self._config.dsn.startswith("memory://") and self._connect_factory is None:

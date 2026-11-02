@@ -4,7 +4,7 @@ import contextlib
 import enum
 import inspect
 from collections.abc import AsyncGenerator, AsyncIterable, Callable, Generator, Iterable
-from typing import Annotated, Any, Self, get_origin, get_type_hints
+from typing import Annotated, Any, Self, get_args, get_origin, get_type_hints
 from urllib.parse import parse_qsl
 
 import msgspec
@@ -310,6 +310,9 @@ async def dispatch_handler_direct(
         elif resp_cls_name == "ASGIFileResponse" and _is_default_local_filesystem(
             getattr(asgi_response, "file_system", None)
         ):
+            file_info = getattr(asgi_response, "file_info", None)
+            if inspect.iscoroutine(file_info):
+                file_info.close()
             file_path = getattr(asgi_response, "file_path", None)
             if file_path is not None:
                 await send(
@@ -676,6 +679,25 @@ def _handler_has_custom_response_metadata(handler: Any) -> bool:
     return bool(not _is_empty_sentinel(resp_cls) and getattr(resp_cls, "__name__", "Response") != "Response")
 
 
+def _unwrap_direct_param_annotation(ann: Any, expected_marker_cls: str) -> tuple[bool, Any]:
+    if get_origin(ann) is not Annotated:
+        return True, ann
+    args = get_args(ann)
+    if len(args) != 2:
+        return False, None
+    meta = args[1]
+    meta_cls = type(meta)
+    if meta_cls.__name__ != expected_marker_cls:
+        return False, None
+    try:
+        is_default = bool(meta == meta_cls())
+    except Exception:
+        return False, None
+    if not is_default:
+        return False, None
+    return True, args[0]
+
+
 def _compile_direct_signature_plan(
     entry: ExtractedRoute,
     compiled: CompiledRoute,
@@ -718,16 +740,23 @@ def _compile_direct_signature_plan(
             return None
         if param.name in _RESERVED_CONNECTION_KWARGS:
             return None
-        ann = hints.get(param.name, param.annotation)
-        if get_origin(ann) is Annotated:
-            return None
+        raw_ann = hints.get(param.name, param.annotation)
 
         if param.name in entry.param_types:
+            ok, _ = _unwrap_direct_param_annotation(raw_ann, "PathParameter")
+            if not ok:
+                return None
             path_param_names.append(param.name)
         elif param.name == "data":
+            ok, ann = _unwrap_direct_param_annotation(raw_ann, "BodyKwarg")
+            if not ok:
+                return None
             body_param = "data"
             body_type = Any if ann is inspect.Parameter.empty else ann
         else:
+            ok, ann = _unwrap_direct_param_annotation(raw_ann, "QueryParameter")
+            if not ok:
+                return None
             converter = _resolve_scalar_query_converter(ann)
             if converter is None:
                 return None

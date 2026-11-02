@@ -845,22 +845,45 @@ class SyncOracleDriver:
         if self._broker is None:
             return None
         if hasattr(self._broker, "statement_cache"):
-            cached = self._broker.statement_cache.lookup(ORACLE_DIALECT_TAG, sql)
-            if cached is None:
-                self._broker.statement_cache.insert(
-                    ORACLE_DIALECT_TAG,
-                    sql,
-                    param_count,
-                    sql.encode("utf-8"),
-                    b"\x00\x01",
-                )
-        if hasattr(self._broker, "lease_table"):
+            sc_attr = self._broker.statement_cache
+            sc = sc_attr() if callable(sc_attr) else sc_attr
+            if sc is not None and hasattr(sc, "lookup") and hasattr(sc, "insert"):
+                sql_bytes = sql.encode("utf-8")
+                try:
+                    cached = sc.lookup(ORACLE_DIALECT_TAG, sql)
+                    if cached is None:
+                        sc.insert(
+                            ORACLE_DIALECT_TAG,
+                            sql,
+                            param_count,
+                            sql_bytes,
+                            b"\x00\x01",
+                        )
+                except TypeError:
+                    cached = sc.lookup(ORACLE_DIALECT_TAG, sql_bytes)
+                    if cached is None:
+                        sc.insert(
+                            ORACLE_DIALECT_TAG,
+                            sql_bytes,
+                            param_count,
+                            sql_bytes,
+                            b"\x00\x01",
+                        )
+        if hasattr(self._broker, "lease_table") and self._broker.lease_table is not None:
             return self._broker.lease_table.acquire(os.getpid())
+        if hasattr(self._broker, "acquire"):
+            try:
+                return self._broker.acquire(os.getpid())
+            except TypeError:
+                return self._broker.acquire(bind_key="oracle")
         return None
 
     def _release_broker_lease(self, grant: Any) -> None:
-        if grant is not None and self._broker is not None and hasattr(self._broker, "lease_table"):
-            self._broker.lease_table.release(grant.slot_index, grant.generation)
+        if grant is not None and self._broker is not None:
+            if hasattr(self._broker, "lease_table") and self._broker.lease_table is not None:
+                self._broker.lease_table.release(grant.slot_index, grant.generation)
+            elif hasattr(self._broker, "release") and hasattr(grant, "slot_index"):
+                self._broker.release(grant.slot_index, grant.generation)
 
     def _consume_piggyback(self) -> None:
         if self._pending_session_attrs is not None:

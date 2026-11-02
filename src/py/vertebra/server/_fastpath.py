@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
+from contextlib import suppress
 from typing import Any, cast
 
 from vertebra.utils.module_loader import import_optional
@@ -113,9 +114,7 @@ def wrap_asgi_fastpath(bypass: Any, fallback_app: Callable[..., Any]) -> Callabl
 
     async def _fastpath_asgi_app(scope: Any, receive: Any, send: Any) -> None:
         send_owner = getattr(send, "__self__", None)
-        has_native_send_state = hasattr(send, "started") or (
-            send_owner is not None and hasattr(send_owner, "started")
-        )
+        has_native_send_state = hasattr(send, "started") or (send_owner is not None and hasattr(send_owner, "started"))
         body_bytes_fn = getattr(scope, "body_bytes", None)
         method = str(scope.get("method", "GET") if hasattr(scope, "get") else "GET").upper()
         has_prebuffered_body = callable(body_bytes_fn) and (
@@ -131,8 +130,7 @@ def wrap_asgi_fastpath(bypass: Any, fallback_app: Callable[..., Any]) -> Callabl
                 await send_asgi_direct(send, status_code, encoded_headers, raw_body)
                 return
             already_started = bool(
-                getattr(send, "started", False)
-                or (send_owner is not None and getattr(send_owner, "started", False))
+                getattr(send, "started", False) or (send_owner is not None and getattr(send_owner, "started", False))
             )
             if already_started:
                 return
@@ -197,22 +195,81 @@ def attach_framework_fastpath(
     """Idempotently detect and attach a framework FastPath wrapper to an ASGI or WSGI application."""
     if app is None:
         return app
+    norm_prefix = mount_prefix.rstrip("/")
+
     if getattr(app, "__vertebra_fastpath_attached__", False):
-        existing_fp = getattr(app, "_vertebra_fastpath", None) or getattr(app, "__vertebra_fastpath__", None)
-        if existing_fp is not None and mount_prefix and hasattr(existing_fp, "_mount_prefix"):
-            existing_fp._mount_prefix = mount_prefix
+        existing_fp = (
+            getattr(app, "_vertebra_fastpath", None)
+            or getattr(app, "__vertebra_fastpath__", None)
+            or getattr(app, "fastpath", None)
+        )
+        if existing_fp is not None and norm_prefix and hasattr(existing_fp, "_mount_prefix"):
+            existing_fp._mount_prefix = norm_prefix
+        if protocol == "wsgi" and not callable(app) and callable(getattr(app, "wsgi_app", None)):
+            return app.wsgi_app
         return app
 
-    existing_fp = getattr(app, "_vertebra_fastpath", None) or getattr(app, "__vertebra_fastpath__", None)
+    if hasattr(app, "wrap_asgi") and hasattr(app, "dispatch"):
+        if norm_prefix and hasattr(app, "_mount_prefix"):
+            app._mount_prefix = norm_prefix
+        if protocol == "wsgi" and hasattr(app, "wrap_wsgi"):
+            return app.wrap_wsgi()
+        return app.wrap_asgi()
+
+    for candidate_app in (app, getattr(app, "_inner", None)):
+        if candidate_app is None:
+            continue
+        cand_state = getattr(candidate_app, "state", None)
+        if cand_state is not None:
+            plugin = (
+                cand_state.get("vertebra_plugin")
+                if hasattr(cand_state, "get")
+                else getattr(cand_state, "vertebra_plugin", None)
+            )
+            ensure_fn = getattr(plugin, "ensure_finalized", None)
+            if callable(ensure_fn):
+                ensure_fn(candidate_app)
+
+    existing_fp = (
+        getattr(app, "_vertebra_fastpath", None)
+        or getattr(app, "__vertebra_fastpath__", None)
+        or getattr(app, "fastpath", None)
+    )
+    if existing_fp is None:
+        state = getattr(app, "state", None)
+        if state is not None:
+            existing_fp = getattr(app, "__vertebra_fastpath__", None) or (
+                state.get("vertebra_fastpath_bypass")
+                if hasattr(state, "get")
+                else getattr(state, "vertebra_fastpath_bypass", None)
+            )
+    if existing_fp is None:
+        extensions = getattr(app, "extensions", None)
+        if isinstance(extensions, dict) and "vertebra" in extensions:
+            existing_fp = getattr(extensions["vertebra"], "fastpath", None)
+
     if existing_fp is not None:
-        if mount_prefix and hasattr(existing_fp, "_mount_prefix"):
-            existing_fp._mount_prefix = mount_prefix
+        if norm_prefix and hasattr(existing_fp, "_mount_prefix"):
+            existing_fp._mount_prefix = norm_prefix
         if protocol == "wsgi" and hasattr(existing_fp, "wrap_wsgi"):
-            wrapped_wsgi = existing_fp.wrap_wsgi(app)
-            wrapped_wsgi.__vertebra_fastpath_attached__ = True
+            fallback_wsgi = (
+                app.wsgi_app
+                if callable(getattr(app, "wsgi_app", None))
+                else (
+                    getattr(app, "_wsgi_app", None)
+                    if callable(getattr(app, "_wsgi_app", None))
+                    else (app if callable(app) else None)
+                )
+            )
+            wrapped_wsgi = existing_fp.wrap_wsgi(fallback_wsgi)
+            dyn_wsgi = cast("Any", wrapped_wsgi)
+            dyn_wsgi._vertebra_fastpath = existing_fp
+            dyn_wsgi.__vertebra_fastpath__ = existing_fp
+            dyn_wsgi.__vertebra_fastpath_attached__ = True
             return wrapped_wsgi
         if hasattr(existing_fp, "wrap_asgi"):
-            return existing_fp.wrap_asgi(app)
+            fallback_asgi = app if callable(app) else None
+            return existing_fp.wrap_asgi(fallback_asgi)
 
     cls_name = type(app).__name__
     mod_name = str(getattr(type(app), "__module__", "") or "")
@@ -220,51 +277,70 @@ def attach_framework_fastpath(
     if cls_name == "Litestar" or mod_name.startswith("litestar"):
         ls_mod = import_optional("vertebra.extensions.litestar.fastpath")
         if ls_mod is not None:
-            fp = ls_mod.FastPath.from_app(app, mount_prefix=mount_prefix)
-            app._vertebra_fastpath = fp
-            app.__vertebra_fastpath__ = fp
+            fp = ls_mod.FastPath.from_app(app, mount_prefix=norm_prefix)
+            state = getattr(app, "state", None)
+            if state is not None:
+                with suppress(TypeError, AttributeError):
+                    state["vertebra_fastpath_bypass"] = fp
+            dyn_app = cast("Any", app)
+            with suppress(AttributeError, TypeError):
+                dyn_app._vertebra_fastpath = fp
+                dyn_app.__vertebra_fastpath__ = fp
             return fp.wrap_asgi(app)
 
-    if cls_name == "FastAPI" or mod_name.startswith("fastapi"):
+    if cls_name == "FastAPI" or mod_name.startswith("fastapi") or hasattr(app, "dependency_overrides"):
         fa_mod = import_optional("vertebra.extensions.fastapi.fastpath")
         if fa_mod is not None:
-            fp = fa_mod.FastPath.from_app(app, mount_prefix=mount_prefix)
-            app._vertebra_fastpath = fp
-            app.__vertebra_fastpath__ = fp
-            return fp.wrap_asgi(app)
+            fp = fa_mod.FastPath.from_app(app, mount_prefix=norm_prefix)
+            dyn_app = cast("Any", app)
+            dyn_app._vertebra_fastpath = fp
+            dyn_app.__vertebra_fastpath__ = fp
+            return fp.wrap_asgi(app if callable(app) else None)
 
-    if cls_name == "Starlette" or mod_name.startswith("starlette"):
+    if (
+        cls_name == "Starlette"
+        or mod_name.startswith("starlette")
+        or (hasattr(app, "routes") and hasattr(app, "user_middleware"))
+    ):
         st_mod = import_optional("vertebra.extensions.starlette.fastpath")
         if st_mod is not None:
-            fp = st_mod.FastPath.from_app(app, mount_prefix=mount_prefix)
-            app._vertebra_fastpath = fp
-            app.__vertebra_fastpath__ = fp
-            return fp.wrap_asgi(app)
+            fp = st_mod.FastPath.from_app(app, mount_prefix=norm_prefix)
+            dyn_app = cast("Any", app)
+            dyn_app._vertebra_fastpath = fp
+            dyn_app.__vertebra_fastpath__ = fp
+            return fp.wrap_asgi(app if callable(app) else None)
 
-    if cls_name == "Flask" or mod_name.startswith("flask"):
+    if (
+        cls_name == "Flask"
+        or mod_name.startswith("flask")
+        or (hasattr(app, "url_map") and hasattr(app, "view_functions"))
+    ):
         fl_fp_mod = import_optional("vertebra.extensions.flask.fastpath")
         fl_rt_mod = import_optional("vertebra.extensions.flask.router")
         if fl_fp_mod is not None and fl_rt_mod is not None:
             compiler = fl_rt_mod.RouteCompiler(app)
-            fp = fl_fp_mod.FastPath(compiler, mount_prefix=mount_prefix)
-            app._vertebra_fastpath = fp
-            app.__vertebra_fastpath__ = fp
+            fp = fl_fp_mod.FastPath(compiler, mount_prefix=norm_prefix)
+            dyn_app = cast("Any", app)
+            dyn_app._vertebra_fastpath = fp
+            dyn_app.__vertebra_fastpath__ = fp
             if protocol == "asgi":
                 return fp.wrap_asgi()
             target_wsgi = getattr(app, "wsgi_app", app)
-            app.wsgi_app = fp.wrap_wsgi(target_wsgi)
-            app.__vertebra_fastpath_attached__ = True
-            return app
+            wrapped_wsgi = fp.wrap_wsgi(target_wsgi if callable(target_wsgi) else None)
+            dyn_app.wsgi_app = wrapped_wsgi
+            dyn_app.__vertebra_fastpath_attached__ = True
+            return wrapped_wsgi
 
-    if cls_name in {"WSGIHandler", "ASGIHandler"} or mod_name.startswith("django"):
+    if cls_name in {"WSGIHandler", "ASGIHandler"} or mod_name.startswith("django") or hasattr(app, "urlpatterns"):
         dj_fp_mod = import_optional("vertebra.extensions.django.fastpath")
         dj_rt_mod = import_optional("vertebra.extensions.django.router")
         if dj_fp_mod is not None and dj_rt_mod is not None:
             urlconf = getattr(app, "urlconf", None)
-            compiler = dj_rt_mod.RouteCompiler(urlconf=urlconf)
-            fp = dj_fp_mod.FastPath(compiler, mount_prefix=mount_prefix)
+            urlpatterns = getattr(app, "urlpatterns", None)
+            compiler = dj_rt_mod.RouteCompiler(urlpatterns=urlpatterns, urlconf=urlconf)
+            fp = dj_fp_mod.FastPath(compiler, mount_prefix=norm_prefix)
             if protocol == "asgi" or cls_name == "ASGIHandler":
-                return fp.wrap_asgi(app)
-            return fp.wrap_wsgi(app)
+                return fp.wrap_asgi(app if callable(app) else None)
+            return fp.wrap_wsgi(app if callable(app) else None)
 
     return app

@@ -135,6 +135,7 @@ def test_gil_audit_report_strict_mode_raises() -> None:
 
 def test_gil_audit_quarantines_unsafe_modules_to_single_shard(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify GilAuditReport.quarantine_unsafe_modules forces single-shard execution and loop quarantine."""
+    monkeypatch.setenv("VERTEBRA_QUARANTINED_LOOPS", "")
     monkeypatch.delenv("VERTEBRA_QUARANTINED_LOOPS", raising=False)
     reenabled_report = GilAuditReport(
         free_threaded_build=True,
@@ -167,6 +168,8 @@ def test_gil_audit_quarantines_unsafe_modules_to_single_shard(monkeypatch: pytes
 
 def test_event_loop_pool_resolves_shards_from_cgroup_and_audit(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify resolve_loop_shards respects explicit overrides, env vars, and GilAuditReport quarantine."""
+    monkeypatch.setenv("VERTEBRA_QUARANTINED_LOOPS", "")
+    monkeypatch.delenv("VERTEBRA_QUARANTINED_LOOPS", raising=False)
     monkeypatch.setenv("VERTEBRA_LOOP_SHARDS", "4")
     assert resolve_loop_shards() == 4
     assert resolve_loop_shards(explicit=6) == 6
@@ -233,6 +236,7 @@ def test_event_loop_pool_primary_loop_is_idempotent() -> None:
 
 def test_gil_audit_quarantine_forces_single_loop_shard(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify GilAuditReport.audit with newly loaded suspect extension forces single-shard execution."""
+    monkeypatch.setenv("VERTEBRA_QUARANTINED_LOOPS", "")
     monkeypatch.delenv("VERTEBRA_QUARANTINED_LOOPS", raising=False)
     baseline = frozenset({"_abc"})
     report = GilAuditReport.audit(

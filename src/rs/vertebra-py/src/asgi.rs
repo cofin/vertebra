@@ -1379,8 +1379,7 @@ impl AsgiProtocol {
                 }
             }
             if self.direct_submit && st.immediate_submit && !st.submitted {
-                immediate_flush =
-                    Some(Self::extract_prepared_from_guard(self.request_id, &mut st));
+                immediate_flush = Some(Self::extract_prepared_from_guard(self.request_id, &mut st));
             }
         }
         if let Some(flushed) = immediate_flush {

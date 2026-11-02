@@ -162,7 +162,11 @@ impl StorageCompletionDrainer {
         }
         loop {
             let batch: Vec<CompletedStorageTask> = {
-                let mut guard = self.ring.queue.lock().expect("lock storage completion queue");
+                let mut guard = self
+                    .ring
+                    .queue
+                    .lock()
+                    .expect("lock storage completion queue");
                 if guard.is_empty() {
                     self.ring.wake_armed.store(false, Ordering::Release);
                     break;
@@ -237,8 +241,10 @@ fn ensure_loop_completion_ring(
         *temp_ring
             .fallback_wakeup
             .lock()
-            .expect("lock storage fallback wakeup") =
-            Some((loop_obj.clone().unbind(), drainer_py.clone_ref(py).into_any()));
+            .expect("lock storage fallback wakeup") = Some((
+            loop_obj.clone().unbind(),
+            drainer_py.clone_ref(py).into_any(),
+        ));
         let _ = loop_obj.setattr(ATTR_NAME, drainer_py.bind(py));
         return Ok(temp_ring);
     }
@@ -253,8 +259,10 @@ fn ensure_loop_completion_ring(
     *ring
         .fallback_wakeup
         .lock()
-        .expect("lock storage fallback wakeup") =
-        Some((loop_obj.clone().unbind(), drainer_py.clone_ref(py).into_any()));
+        .expect("lock storage fallback wakeup") = Some((
+        loop_obj.clone().unbind(),
+        drainer_py.clone_ref(py).into_any(),
+    ));
     let _ = loop_obj.setattr(ATTR_NAME, drainer_py.bind(py));
     Ok(ring)
 }

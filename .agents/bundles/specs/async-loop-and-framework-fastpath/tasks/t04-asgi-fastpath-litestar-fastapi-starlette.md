@@ -40,7 +40,7 @@ tags: [litestar, fastapi, starlette, asgi, fastpath, zero-copy, tdd]
 Create `src/py/vertebra/server/_fastpath.py` with shared zero-closure `wrap_asgi_fastpath`, zero-copy `AsgiScope.body_bytes()` body extraction (`extract_scope_body_fast`), and single-call `send_asgi_direct` (`send.send_raw_response`), and wire it across `Litestar` (`LitestarFastPathBypass`, including adding `wrap_asgi`), `FastAPI` (`FastAPIFastPath`), and `Starlette` (`StarletteFastPath`)—along with lazy `starlette.requests.Request` instantiation and default inline sync execution (`sync_to_thread: bool = False`) in `FastAPI` and `Starlette`.
 
 ## Context
-- **Verification Strategy (`behavior_tdd`)**: Write failing tests in `src/py/tests/unit/server/test_litestar_direct_fastpath.py`, `src/py/tests/unit/extensions/test_fastapi.py`, and `src/py/tests/unit/extensions/test_starlette.py` verifying that `wrap_asgi` uses `send.send_raw_response` when `send` is a native `AsgiProtocol` / `AsgiSend` (or custom callable exposing `send_raw_response`), reads `AsgiScope.body_bytes()` without calling `await receive()`, skips instantiating `starlette.requests.Request` in `FastAPI` when neither the endpoint nor `Depends()` requests `Request`, and executes sync endpoints inline when `sync_to_thread=False`.
+- **Verification Strategy (`behavior_tdd`)**: Write failing tests in `src/py/tests/unit/server/test_litestar_direct_fastpath.py`, `src/py/tests/unit/extensions/test_fastapi_plugin.py`, and `src/py/tests/unit/extensions/test_starlette_plugin.py` verifying that `wrap_asgi` uses `send.send_raw_response` when `send` is a native `AsgiProtocol` / `AsgiSend` (or custom callable exposing `send_raw_response`), reads `AsgiScope.body_bytes()` without calling `await receive()`, skips instantiating `starlette.requests.Request` in `FastAPI` when neither the endpoint nor `Depends()` requests `Request`, and executes sync endpoints inline when `sync_to_thread=False`.
 - **Architectural Invariants**:
   - Preserve full replay fallback semantics (`_buffering_receive` / `_replay_receive`) when a route reads from `receive()` on a plain `dict` scope and subsequently returns `None` to fall back to `fallback_app`.
   - Strip `root_path` / `mount_prefix` from `scope["path"]` when matching routes in `FastPath.dispatch` so mounted sub-apps match relative paths cleanly.
@@ -48,11 +48,11 @@ Create `src/py/vertebra/server/_fastpath.py` with shared zero-closure `wrap_asgi
 ## Steps
 1. **Write failing unit tests (`RED`)**:
    - In `src/py/tests/unit/server/test_litestar_direct_fastpath.py`, add a test verifying `LitestarFastPathBypass.wrap_asgi` invokes `send.send_raw_response(status, headers, body)` directly when available on `send` and strips `root_path` prefix when matching mounted routes.
-   - In `src/py/tests/unit/extensions/test_fastapi.py`, add tests verifying:
+   - In `src/py/tests/unit/extensions/test_fastapi_plugin.py`, add tests verifying:
      - `CompiledRoute.needs_request` is `False` when neither the endpoint nor `CompiledDependantPlan` accepts a `Request` parameter, and `dispatch_handler_direct` does not instantiate `starlette.requests.Request`.
      - Synchronous `def` FastAPI endpoints execute inline on the calling thread by default (`sync_to_thread=False`) and offload to `anyio.to_thread.run_sync` when `__vertebra_sync_to_thread__ = True`.
      - `FastAPIFastPath.wrap_asgi` calls `send.send_raw_response` when available.
-   - In `src/py/tests/unit/extensions/test_starlette.py`, add tests verifying `send.send_raw_response` usage and `sync_to_thread=False` inline sync execution.
+   - In `src/py/tests/unit/extensions/test_starlette_plugin.py`, add tests verifying `send.send_raw_response` usage and `sync_to_thread=False` inline sync execution.
 2. **Implement `_fastpath.py` and update `Litestar`, `FastAPI`, and `Starlette` `FastPath` (`GREEN`)**:
    - Create `src/py/vertebra/server/_fastpath.py` with:
      - `resolve_relative_path(scope: Any, mount_prefix: str = "") -> str` (stripping `mount_prefix` or `scope["root_path"]` prefix from `scope["path"]`).
@@ -65,7 +65,7 @@ Create `src/py/vertebra/server/_fastpath.py` with shared zero-closure `wrap_asgi
 
 ## Verification
 ```bash
-uv run --no-sync pytest src/py/tests/unit/server/test_litestar_direct_fastpath.py src/py/tests/unit/extensions/test_fastapi.py src/py/tests/unit/extensions/test_starlette.py -q
+uv run --no-sync pytest src/py/tests/unit/server/test_litestar_direct_fastpath.py src/py/tests/unit/extensions/test_fastapi_plugin.py src/py/tests/unit/extensions/test_starlette_plugin.py -q
 uv run --no-sync ruff check src/py/vertebra/server/_fastpath.py src/py/vertebra/extensions/litestar/fastpath.py src/py/vertebra/extensions/fastapi/ src/py/vertebra/extensions/starlette/fastpath.py
 uv run --no-sync mypy src/py/vertebra/server/_fastpath.py src/py/vertebra/extensions/litestar/fastpath.py src/py/vertebra/extensions/fastapi/ src/py/vertebra/extensions/starlette/fastpath.py
 ```

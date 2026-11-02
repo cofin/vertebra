@@ -80,7 +80,7 @@ def resolve_loop_backend(
 
     if "uvloop" not in quarantined_prefixes and import_optional("uvloop") is not None:
         return LoopBackend.UVLOOP
-    if "rloop" not in quarantined_prefixes and import_optional("rloop") is not None:
+    if not quarantined_prefixes and import_optional("rloop") is not None:
         return LoopBackend.RLOOP
     return LoopBackend.ASYNCIO
 

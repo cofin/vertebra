@@ -352,4 +352,3 @@ async def test_flask_fastpath_async_views_wrap_asgi_and_wsgi_send_raw_response()
         "qty": 7,
         "mode": "suspended",
     }
-

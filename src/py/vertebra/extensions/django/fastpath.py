@@ -14,7 +14,7 @@ from vertebra.server._fastpath import (
     resolve_relative_path,
     wrap_asgi_fastpath,
 )
-from vertebra.utils.serializers import encode_json_bytes
+from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -136,8 +136,14 @@ def _compile_single_callback(
     target_fn: Callable[..., Any] = (
         getattr(view_cls, http_method.lower(), callback) if view_cls is not None else callback
     )
-    is_async = inspect.iscoroutinefunction(target_fn) or bool(getattr(callback, "__vertebra_is_async__", False))
-    status_code = int(getattr(target_fn, "__vertebra_status_code__", getattr(callback, "__vertebra_status_code__", 200)))
+    is_async = (
+        inspect.iscoroutinefunction(target_fn)
+        if view_cls is not None
+        else (inspect.iscoroutinefunction(target_fn) or bool(getattr(callback, "__vertebra_is_async__", False)))
+    )
+    status_code = int(
+        getattr(target_fn, "__vertebra_status_code__", getattr(callback, "__vertebra_status_code__", 200))
+    )
     sig = inspect.signature(target_fn)
     try:
         hints = get_type_hints(target_fn)
@@ -308,9 +314,9 @@ def _prepare_django_kwargs(
             elif wsgi_inp is not None and hasattr(wsgi_inp, "read"):
                 raw = wsgi_inp.read()
                 if compiled.body_type is not None:
-                    kwargs[compiled.body_param_name] = msgspec.json.decode(raw, type=compiled.body_type)
+                    kwargs[compiled.body_param_name] = decode_json(raw, type=compiled.body_type)
                 else:
-                    kwargs[compiled.body_param_name] = msgspec.json.decode(raw)
+                    kwargs[compiled.body_param_name] = decode_json(raw)
     return request_id, req_obj, kwargs
 
 

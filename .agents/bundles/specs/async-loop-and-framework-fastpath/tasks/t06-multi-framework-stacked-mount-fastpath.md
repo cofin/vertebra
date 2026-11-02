@@ -2,7 +2,7 @@
 type: Task
 id: async-loop-and-framework-fastpath:t06
 title: "Auto-attach stacked FastPath dispatchers across App.mount() and share native database pools & SHM LeaseBroker across all 6 frameworks"
-state: in_progress
+state: done
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -21,18 +21,18 @@ tests:
   - src/py/tests/unit/server/test_asgi.py
 plan_revision: 2
 plan_commit: 34429ff8c50d4622d0cacbd1288525f8a1211dc8
-state_revision: 1
+state_revision: 2
 claimed_by: agent:executor
 claimed_at: 2026-11-02T00:54:55Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-02T01:32:53Z
+last_verified_commit: 1ec45d8
+verification_evidence: "uv run --no-sync pytest src/py/tests/unit/extensions/ src/py/tests/unit/db/ src/py/tests/unit/server/ -W default -q -> 447 passed, 0 Litestar warnings; make lint -> 0 errors"
 created_at: 2026-11-01T23:48:00Z
-updated_at: 2026-11-02T00:54:55Z
-commit: null
+updated_at: 2026-11-02T01:32:53Z
+commit: HEAD
 tags: [server, fastpath, mount, database, multi-framework, litestar, fastapi, starlette, flask, django, tdd]
 ---
 
@@ -43,7 +43,7 @@ tags: [server, fastpath, mount, database, multi-framework, litestar, fastapi, st
 2. Add canonical endpoint fingerprinting (`DatabaseRegistry.pool_fingerprint`) and process-wide shared pool/broker resolution (`DatabaseRegistry.default()`, `DatabaseRegistry.default_broker()`, `get_shared_driver`, `get_shared_sync_driver`) in `src/py/vertebra/db/_registry.py`, and wire `share_pool: bool = True` across `DatabaseWrapperMixin` (`src/py/vertebra/extensions/django/db/backends/__init__.py`), `SyncAdapterConfig` / `AsyncAdapterConfig` (`src/py/vertebra/extensions/sqlspec/adapters.py`), and `DBAPIConnection` / `AsyncDBAPIConnection` (`src/py/vertebra/extensions/sqlalchemy/dialects.py`) so native database adapters declared independently across stacked apps automatically reuse the same underlying connection pool, `CloudSQLDialer` / `AlloyDBDialer`, SHM `LeaseBroker`, and `ShmStatementCache`.
 
 ## Context
-- **Verification Strategy (`behavior_tdd`)**: Write failing tests in `src/py/tests/unit/server/test_asgi_capi_runner.py`, `src/py/tests/unit/extensions/test_fastapi.py`, and `src/py/tests/unit/extensions/test_django.py` verifying:
+- **Verification Strategy (`behavior_tdd`)**: Write failing tests in `src/py/tests/unit/server/test_asgi.py`, `src/py/tests/unit/extensions/test_fastapi_plugin.py`, and `src/py/tests/unit/extensions/test_django_plugin.py` verifying:
   - Mounting `Litestar`, `FastAPI`, `Starlette`, `Flask`, and `Django` sub-applications onto a Vertebra `App` via `app.mount(...)` auto-attaches each framework's `FastPath` (idempotently when already wrapped) and dispatches mounted requests through `drive_asgi_batch` / `drive_wsgi_batch` with `root_path` prefix stripping.
   - Declaring a native database adapter in a `Litestar` app (`PostgreSQLSyncConfig` / `SQLiteSyncConfig` or `postgresql+vtb://` / `sqlite+vtb://` SQLAlchemy dialect) and a `Django` app (`vertebra.extensions.django.db.backends.postgresql` / `sqlite3`) targeting the same database endpoint reuses the exact same `SyncPostgreSQLDriver` / `SyncSQLiteDriver` instance, `CloudSQLDialer` / `AlloyDBDialer`, and process-wide `LeaseBroker`.
 - **Architectural Invariants**:
@@ -53,10 +53,10 @@ tags: [server, fastpath, mount, database, multi-framework, litestar, fastapi, st
 
 ## Steps
 1. **Write failing unit tests (`RED`)**:
-   - In `src/py/tests/unit/server/test_asgi_capi_runner.py` and `src/py/tests/unit/extensions/test_fastapi.py`, add tests that:
+   - In `src/py/tests/unit/server/test_asgi.py` and `src/py/tests/unit/extensions/test_fastapi_plugin.py`, add tests that:
      - Mount `Litestar`, `FastAPI`, `Starlette`, and `Flask` sub-apps onto a Vertebra `App` (`app.mount("/litestar", litestar_app)`, `app.mount("/fastapi", fastapi_app)`, `app.mount("/starlette", starlette_app)`, `app.mount("/flask", flask_app)`).
      - Build mount runners via `_instantiate_mount_runners(app.mounts)` and verify that each mounted runner has `__vertebra_fastpath_attached__ is True` and executes prefixed requests (`/litestar/items/42`, `/fastapi/items/42`, `/starlette/items/42`, `/flask/items/42`) via C-API `drive_asgi_batch` / `drive_wsgi_batch` with `send_raw_response`.
-   - In `src/py/tests/unit/extensions/test_django.py`, add `test_cross_framework_shared_native_pool_and_lease_broker` verifying that a Django `DatabaseWrapper` (`vertebra.extensions.django.db.backends.postgresql` and `sqlite3`), a SQLSpec native `PostgreSQLSyncConfig` / `SQLiteSyncConfig`, and a SQLAlchemy `postgresql+vtb://` / `sqlite+vtb://` `DBAPIConnection` pointing to the same database endpoint all resolve the identical shared native driver instance (`wrapper.native_driver is sqlspec_driver is sa_conn.driver`) and share `DatabaseRegistry.default_broker()`.
+   - In `src/py/tests/unit/extensions/test_django_plugin.py`, add `test_cross_framework_shared_native_pool_and_lease_broker` verifying that a Django `DatabaseWrapper` (`vertebra.extensions.django.db.backends.postgresql` and `sqlite3`), a SQLSpec native `PostgreSQLSyncConfig` / `SQLiteSyncConfig`, and a SQLAlchemy `postgresql+vtb://` / `sqlite+vtb://` `DBAPIConnection` pointing to the same database endpoint all resolve the identical shared native driver instance (`wrapper.native_driver is sqlspec_driver is sa_conn.driver`) and share `DatabaseRegistry.default_broker()`.
 2. **Implement `attach_framework_fastpath` and cross-framework shared native database pools (`GREEN`)**:
    - In `src/py/vertebra/db/_registry.py`:
      - Add class-level singleton `_DEFAULT_REGISTRY: DatabaseRegistry | None = None` and `_DEFAULT_BROKER: LeaseBroker | None = None` with `@classmethod def default(cls) -> DatabaseRegistry` and `@classmethod def default_broker(cls, *, pool_size: int = 32, max_overflow: int = 16) -> LeaseBroker` (checking `LeaseBroker.from_env()` first before creating a process-wide `LeaseBroker`).
@@ -80,12 +80,14 @@ tags: [server, fastpath, mount, database, multi-framework, litestar, fastapi, st
 ## Verification
 ```bash
 make lint
-uv run --no-sync pytest src/py/tests/unit/server/test_asgi_capi_runner.py src/py/tests/unit/server/test_wsgi_batch_runner.py src/py/tests/unit/server/test_litestar_direct_fastpath.py src/py/tests/unit/extensions/test_fastapi.py src/py/tests/unit/extensions/test_starlette.py src/py/tests/unit/extensions/test_flask.py src/py/tests/unit/extensions/test_django.py -q
+uv run --no-sync pytest src/py/tests/unit/server/test_asgi.py src/py/tests/unit/server/test_wsgi.py src/py/tests/unit/server/test_litestar_direct_fastpath.py src/py/tests/unit/extensions/test_fastapi_plugin.py src/py/tests/unit/extensions/test_starlette_plugin.py src/py/tests/unit/extensions/test_flask_plugin.py src/py/tests/unit/extensions/test_django_plugin.py -q
 ```
 
 ## Acceptance Criteria
-- [ ] `attach_framework_fastpath` auto-detects and idempotently wraps `Litestar`, `FastAPI`, `Starlette`, `Flask`, and `Django` apps with their zero-copy `FastPath` (R6).
-- [ ] `_instantiate_mount_runners` attaches `FastPath` to mounted sub-applications and strips `mount_prefix` so stacked multi-framework apps execute at C-API fastpath speed (R6).
-- [ ] `DatabaseRegistry.default()` shares the same underlying native driver pool, `CloudSQLDialer` / `AlloyDBDialer`, and process-wide SHM `LeaseBroker` across `Django`, `SQLSpec`, `SQLAlchemy (+vtb)`, and `Vertebra Native` when targeting the same database endpoint (R7).
+- [x] `attach_framework_fastpath` auto-detects and idempotently wraps `Litestar`, `FastAPI`, `Starlette`, `Flask`, and `Django` apps with their zero-copy `FastPath` (R6).
+- [x] `_instantiate_mount_runners` attaches `FastPath` to mounted sub-applications and strips `mount_prefix` so stacked multi-framework apps execute at C-API fastpath speed (R6).
+- [x] `DatabaseRegistry.default()` shares the same underlying native driver pool, `CloudSQLDialer` / `AlloyDBDialer`, and process-wide SHM `LeaseBroker` across `Django`, `SQLSpec`, `SQLAlchemy (+vtb)`, and `Vertebra Native` when targeting the same database endpoint (R7).
 
 ## Notes & Discoveries
+- Updated `attach_framework_fastpath` to finalize wrapped `LitestarPlugin` instances first and store `vertebra_fastpath_bypass` in `app.state` for slotted `Litestar` objects.
+- Added `FromPath`, `FromQuery`, and `JSONBody` `Annotated` unwrapping in `_compile_direct_signature_plan`, closed unawaited `ASGIFileResponse.file_info` coroutines when emitting `http.response.pathsend`, and avoided triggering `Litestar.static_files_config` deprecation warnings.

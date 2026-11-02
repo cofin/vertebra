@@ -11,6 +11,7 @@ import pydantic
 import pytest
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope, Request, WsgiEnviron, run_wsgi_callable
+from vertebra.db._registry import DatabaseRegistry
 from vertebra.extensions.django import (
     ArrowManager,
     ArrowQuerySet,
@@ -50,6 +51,8 @@ from vertebra.extensions.django.db.backends.sqlite3 import (
     DatabaseWrapper as SQLiteDatabaseWrapper,
 )
 from vertebra.extensions.django.templatetags.vertebra_vite import vite_asset, vite_hmr_client
+from vertebra.extensions.sqlalchemy.dialects import DBAPIConnection
+from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncConfig, SQLiteSyncConfig
 from vertebra.utils.serializers import decode_json
 
 if TYPE_CHECKING:
@@ -533,3 +536,59 @@ async def test_django_fastpath_async_views_cached_msgspec_view_wrap_asgi_and_sen
     assert proto.status == 201
     assert decode_json(proto.take_response().body) == {"id": 55, "sku": "ASGI-DJ", "qty": 9}
 
+
+def test_cross_framework_shared_native_pool_and_lease_broker(tmp_path: Any) -> None:
+    """Verify Django, SQLSpec, and SQLAlchemy (+vtb) share the same native driver pool, Cloud Dialer, and LeaseBroker."""
+    alloy_uri = "projects/p/locations/us-central1/clusters/c/instances/i"
+    dj_pg = PostgresDatabaseWrapper(
+        {
+            "HOST": "10.0.0.5",
+            "PORT": 6432,
+            "NAME": "appdb",
+            "USER": "postgres",
+            "OPTIONS": {
+                "pgbouncer": True,
+                "pooler_mode": "transaction",
+                "alloydb_instance_uri": alloy_uri,
+            },
+        },
+        alias="default",
+    )
+    sqlspec_pg = PostgreSQLSyncConfig(
+        dsn="postgresql://postgres@10.0.0.5:6432/appdb",
+        pgbouncer=True,
+        pooler_mode="transaction",
+        alloydb_instance_uri=alloy_uri,
+    )
+    sa_pg = DBAPIConnection(
+        f"postgresql+vtb://postgres@10.0.0.5:6432/appdb?pgbouncer=true&pooler_mode=transaction&alloydb_instance_uri={alloy_uri}"
+    )
+
+    assert dj_pg.native_driver is sqlspec_pg.create_driver().native_driver
+    assert dj_pg.native_driver is sa_pg.driver
+    assert dj_pg.broker is DatabaseRegistry.default_broker()
+    assert sa_pg.broker is DatabaseRegistry.default_broker()
+    assert dj_pg.native_driver._dialer is not None
+
+    db_file = tmp_path / "shared_cross_fw.db"
+    dj_sqlite = SQLiteDatabaseWrapper({"NAME": str(db_file)})
+    sqlspec_sqlite = SQLiteSyncConfig(path=str(db_file))
+    sa_sqlite = DBAPIConnection(f"sqlite+vtb:///{db_file}")
+
+    assert dj_sqlite.native_driver is sqlspec_sqlite.create_driver().native_driver
+    assert dj_sqlite.native_driver is sa_sqlite.driver
+    assert dj_sqlite.broker is DatabaseRegistry.default_broker()
+
+    isolated_dj = SQLiteDatabaseWrapper(
+        {
+            "NAME": str(db_file),
+            "OPTIONS": {"share_pool": False},
+        }
+    )
+    isolated_sqlspec = SQLiteSyncConfig(path=str(db_file), share_pool=False)
+    isolated_sa = DBAPIConnection(f"sqlite+vtb:///{db_file}", share_pool=False)
+
+    assert isolated_dj.native_driver is not dj_sqlite.native_driver
+    assert isolated_dj.broker is not DatabaseRegistry.default_broker()
+    assert isolated_sqlspec.create_driver().native_driver is not dj_sqlite.native_driver
+    assert isolated_sa.driver is not dj_sqlite.native_driver
