@@ -2,7 +2,7 @@
 type: Task
 id: gcp-driver-resilience:t02
 title: Async gcloud fetch, proxy policy, explicit OAuth scopes
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on: []
@@ -20,17 +20,17 @@ tests:
   - src/rs/vertebra-core/tests/it/gcp_auth.rs
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: executor
+claimed_at: 2026-11-03T20:14:15Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-03T20:29:36Z
+last_verified_commit: 6f35339
+verification_evidence: "cargo test -p vertebra-core --features gcp-auth --test it gcp_auth (6 passed), cargo test -p vertebra-storage (11 passed), cargo test -p vertebra-db (56 passed), cargo clippy --workspace --all-targets -- -D warnings, cargo fmt --check, pytest src/py/tests/unit/storage (27 passed)"
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T16:10:00Z
+updated_at: 2026-11-03T20:29:36Z
 commit: null
 tags: [rust, gcp, auth, bugfix]
 ---
@@ -84,8 +84,10 @@ tags: [rust, gcp, auth, bugfix]
 
 ## Acceptance Criteria
 
-- [ ] R3: async gcloud fetch with per-source binary and timeout; the runtime keeps running during the fetch.
-- [ ] R4: `ProxyPolicy` routes token/IAM requests; metadata requests bypass proxies.
-- [ ] R5: explicit default scopes; no GCS default; `from_gcs_options` gone; tests mutate no environment variables.
+- [x] R3: async gcloud fetch with per-source binary and timeout; the runtime keeps running during the fetch.
+- [x] R4: `ProxyPolicy` routes token/IAM requests; metadata requests bypass proxies.
+- [x] R5: explicit default scopes; no GCS default; `from_gcs_options` gone; tests mutate no environment variables.
 
 ## Notes & Discoveries
+
+- `ProxyPolicy::Environment` bypasses ambient environment proxies when the configured token/IAM endpoint host is a loopback address (`127.0.0.1`, `localhost`, `::1`) while `ProxyPolicy::Explicit` always routes through the supplied `reqwest::Proxy`.

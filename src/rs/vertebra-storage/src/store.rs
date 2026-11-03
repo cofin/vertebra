@@ -426,7 +426,10 @@ impl ObjectStoreEngine {
             }
             "gs" | "gcs" => {
                 let bucket = parsed.host_str().unwrap_or_default().to_string();
-                let credential_cache = crate::gcp_auth::GcpTokenCache::from_gcs_options(&opts);
+                let credential_cache = crate::gcp_auth::GcpTokenCache::from_options(
+                    &opts,
+                    crate::gcp_auth::GCS_OAUTH_SCOPES,
+                );
                 Self::new(BackendConfig::Gcs {
                     bucket,
                     service_account_path: opts.get("service_account_path").cloned(),

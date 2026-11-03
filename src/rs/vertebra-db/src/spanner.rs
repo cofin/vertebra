@@ -34,6 +34,12 @@ pub const DEFAULT_SPANNER_ENDPOINT: &str = "https://spanner.googleapis.com";
 /// Default Cloud Spanner DatabaseAdmin REST endpoint.
 pub const DEFAULT_SPANNER_ADMIN_ENDPOINT: &str = "https://spanner.googleapis.com";
 
+/// Default OAuth2 scopes for Cloud Spanner data-plane and platform authentication.
+pub const SPANNER_OAUTH_SCOPES: &[&str] = &[
+    "https://www.googleapis.com/auth/spanner.data",
+    "https://www.googleapis.com/auth/cloud-platform",
+];
+
 /// Default deadline (`600 s`) for `UpdateDatabaseDdl` long-running operation polling.
 pub const DEFAULT_DDL_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -1358,11 +1364,7 @@ impl SpannerClient {
         let token_cache = if config.is_cleartext() && config.auth_options.is_empty() {
             None
         } else {
-            let mut opts = config.auth_options.clone();
-            opts.entry("scopes".to_string()).or_insert_with(|| {
-                "https://www.googleapis.com/auth/spanner.data,https://www.googleapis.com/auth/spanner.admin,https://www.googleapis.com/auth/cloud-platform".to_string()
-            });
-            GcpTokenCache::from_options(&opts)
+            GcpTokenCache::from_options(&config.auth_options, SPANNER_OAUTH_SCOPES)
         };
         Ok(Self {
             config,

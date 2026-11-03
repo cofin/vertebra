@@ -7,10 +7,15 @@ use object_store::CredentialProvider;
 use object_store::gcp::GcpCredential;
 
 pub use vertebra_core::gcp_auth::{
-    DEFAULT_GCP_SCOPES, DEFAULT_REFRESH_SKEW_MS, GcpAuthSource, GcpTokenCache, GcpTokenSnapshot,
-    ServiceAccountKey, current_unix_ms, discover_adc_file_path, extract_adc_service_account_key,
-    parse_service_account_key_json,
+    DEFAULT_GCP_SCOPES, DEFAULT_REFRESH_SKEW_MS, GCLOUD_CLI_TIMEOUT, GcpAuthSource, GcpTokenCache,
+    GcpTokenSnapshot, ProxyPolicy, ServiceAccountKey, current_unix_ms, default_gcloud_binary,
+    discover_adc_file_path, extract_adc_service_account_key, parse_service_account_key_json,
 };
+
+pub const GCS_OAUTH_SCOPES: &[&str] = &[
+    "https://www.googleapis.com/auth/devstorage.full_control",
+    "https://www.googleapis.com/auth/cloud-platform",
+];
 
 #[derive(Debug, Clone)]
 pub struct RefreshingGcpCredentialProvider {
@@ -101,7 +106,7 @@ mod tests {
         let expires_in = Arc::new(AtomicU64::new(3600));
         let (base_url, calls) = spawn_mock_oauth_server(expires_in.clone()).await;
 
-        let cache = Arc::new(GcpTokenCache::new(
+        let cache = Arc::new(GcpTokenCache::with_proxy_policy(
             GcpAuthSource::AuthorizedUser {
                 client_id: "cid".to_string(),
                 client_secret: "csec".to_string(),
@@ -110,6 +115,7 @@ mod tests {
                 token_uri: format!("{base_url}/token"),
             },
             DEFAULT_REFRESH_SKEW_MS,
+            ProxyPolicy::Direct,
         ));
 
         let mut handles = Vec::new();
@@ -147,7 +153,7 @@ mod tests {
         let expires_in = Arc::new(AtomicU64::new(3600));
         let (base_url, calls) = spawn_mock_oauth_server(expires_in).await;
 
-        let cache = Arc::new(GcpTokenCache::new(
+        let cache = Arc::new(GcpTokenCache::with_proxy_policy(
             GcpAuthSource::ImpersonatedServiceAccount {
                 base: Box::new(GcpAuthSource::MetadataServer {
                     service_account: "default".to_string(),
@@ -161,6 +167,7 @@ mod tests {
                 quota_project_id: Some("proj".to_string()),
             },
             DEFAULT_REFRESH_SKEW_MS,
+            ProxyPolicy::Direct,
         ));
 
         let provider = RefreshingGcpCredentialProvider::new(cache);

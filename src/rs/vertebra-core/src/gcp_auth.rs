@@ -4,16 +4,58 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_REFRESH_SKEW_MS: u64 = 300_000;
 pub const DEFAULT_GCP_SCOPES: &[&str] = &["https://www.googleapis.com/auth/cloud-platform"];
+pub const GCLOUD_CLI_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_TOKEN_TTL_MS: u64 = 3_600_000;
 const DEFAULT_OAUTH_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
 const DEFAULT_IAM_ENDPOINT: &str = "https://iamcredentials.googleapis.com";
+
+/// How token and IAM HTTP requests reach the network; metadata requests never use a proxy.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, Default)]
+pub enum ProxyPolicy {
+    #[default]
+    Environment,
+    Direct,
+    Explicit(reqwest::Proxy),
+}
+
+pub fn default_gcloud_binary() -> PathBuf {
+    std::env::var("GCLOUD_BIN")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("gcloud"))
+}
+
+fn url_is_loopback(raw_url: &str) -> bool {
+    url::Url::parse(raw_url)
+        .ok()
+        .and_then(|u| {
+            u.host_str()
+                .map(|h| matches!(h, "127.0.0.1" | "localhost" | "::1" | "[::1]"))
+        })
+        .unwrap_or(false)
+}
+
+fn source_uses_loopback_endpoint(source: &GcpAuthSource) -> bool {
+    match source {
+        GcpAuthSource::AuthorizedUser { token_uri, .. } => url_is_loopback(token_uri),
+        GcpAuthSource::ServiceAccount { key, .. } => url_is_loopback(&key.token_uri),
+        GcpAuthSource::ImpersonatedServiceAccount {
+            base, iam_endpoint, ..
+        } => url_is_loopback(iam_endpoint) || source_uses_loopback_endpoint(base),
+        GcpAuthSource::MetadataServer { endpoint, .. } => url_is_loopback(endpoint),
+        GcpAuthSource::Static { .. } | GcpAuthSource::GcloudCli { .. } => false,
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GcpTokenSnapshot {
@@ -64,6 +106,8 @@ pub enum GcpAuthSource {
         quota_project_id: Option<String>,
     },
     GcloudCli {
+        binary: PathBuf,
+        timeout: Duration,
         quota_project_id: Option<String>,
         impersonate_service_account: Option<String>,
     },
@@ -308,37 +352,49 @@ pub fn discover_ambient_impersonated_service_account(allow_ambient: bool) -> Opt
     None
 }
 
-fn fetch_token_from_gcloud_cli(impersonate_sa: Option<&str>) -> Result<String, String> {
-    let gcloud_bin = std::env::var("GCLOUD_BIN").unwrap_or_else(|_| "gcloud".to_string());
+async fn fetch_token_from_gcloud_cli(
+    binary: &Path,
+    timeout: Duration,
+    impersonate_sa: Option<&str>,
+) -> Result<String, String> {
     let subcommands: &[&[&str]] = &[
         &["auth", "application-default", "print-access-token"],
         &["auth", "print-access-token"],
     ];
     let mut last_err = String::new();
     for args in subcommands {
-        let mut cmd = std::process::Command::new(&gcloud_bin);
+        let mut cmd = tokio::process::Command::new(binary);
         cmd.args(*args);
         cmd.arg("--quiet");
         if let Some(sa) = impersonate_sa.filter(|s| !s.trim().is_empty()) {
             cmd.arg(format!("--impersonate-service-account={sa}"));
         }
-        match cmd.output() {
-            Ok(out) if out.status.success() => {
+        cmd.kill_on_drop(true);
+        match tokio::time::timeout(timeout, cmd.output()).await {
+            Ok(Ok(out)) if out.status.success() => {
                 let tok = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 if !tok.is_empty() {
                     return Ok(tok);
                 }
             }
-            Ok(out) => {
+            Ok(Ok(out)) => {
                 last_err = String::from_utf8_lossy(&out.stderr).trim().to_string();
             }
-            Err(e) => {
-                return Err(format!("failed to execute `{gcloud_bin}` CLI: {e}"));
+            Ok(Err(e)) => {
+                return Err(format!("failed to execute `{}` CLI: {e}", binary.display()));
+            }
+            Err(_) => {
+                return Err(format!(
+                    "`{}` print-access-token timed out after {} ms",
+                    binary.display(),
+                    timeout.as_millis()
+                ));
             }
         }
     }
     Err(format!(
-        "`{gcloud_bin}` print-access-token failed: {last_err}"
+        "`{}` print-access-token failed: {last_err}",
+        binary.display()
     ))
 }
 
@@ -402,6 +458,7 @@ pub struct GcpTokenCache {
     refresh_lock: tokio::sync::Mutex<()>,
     generation: AtomicU64,
     client: reqwest::Client,
+    metadata_client: reqwest::Client,
 }
 
 impl std::fmt::Debug for GcpTokenCache {
@@ -415,9 +472,27 @@ impl std::fmt::Debug for GcpTokenCache {
 
 impl GcpTokenCache {
     pub fn new(source: GcpAuthSource, refresh_skew_ms: u64) -> Self {
-        let client = reqwest::Client::builder()
+        Self::with_proxy_policy(source, refresh_skew_ms, ProxyPolicy::Environment)
+    }
+
+    pub fn with_proxy_policy(
+        source: GcpAuthSource,
+        refresh_skew_ms: u64,
+        policy: ProxyPolicy,
+    ) -> Self {
+        let builder = reqwest::Client::builder().timeout(Duration::from_secs(5));
+        let builder = match policy {
+            ProxyPolicy::Environment if source_uses_loopback_endpoint(&source) => {
+                builder.no_proxy()
+            }
+            ProxyPolicy::Environment => builder,
+            ProxyPolicy::Direct => builder.no_proxy(),
+            ProxyPolicy::Explicit(proxy) => builder.no_proxy().proxy(proxy),
+        };
+        let client = builder.build().unwrap_or_else(|_| reqwest::Client::new());
+        let metadata_client = reqwest::Client::builder()
             .no_proxy()
-            .timeout(std::time::Duration::from_secs(5))
+            .timeout(Duration::from_secs(5))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {
@@ -427,15 +502,27 @@ impl GcpTokenCache {
             refresh_lock: tokio::sync::Mutex::new(()),
             generation: AtomicU64::new(0),
             client,
+            metadata_client,
         }
     }
 
-    pub fn from_options(raw_opts: &HashMap<String, String>) -> Option<Arc<Self>> {
+    pub fn from_options(
+        raw_opts: &HashMap<String, String>,
+        default_scopes: &[&str],
+    ) -> Option<Arc<Self>> {
         let opts = normalize_gcp_options(raw_opts);
         let skew_ms = opts
             .get("refresh_skew_ms")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(DEFAULT_REFRESH_SKEW_MS);
+        let proxy_policy = match opts
+            .get("proxy_policy")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("direct") => ProxyPolicy::Direct,
+            _ => ProxyPolicy::Environment,
+        };
         let allow_ambient = opts
             .get("allow_ambient_adc")
             .is_none_or(|v| v != "false" && v != "0");
@@ -451,14 +538,16 @@ impl GcpTokenCache {
             .filter(|s| !s.is_empty())
             .or_else(|| discover_ambient_impersonated_service_account(allow_ambient));
         let custom_scopes = parse_scopes_option(&opts);
-        let default_sa_scopes = || -> Vec<String> {
-            custom_scopes.clone().unwrap_or_else(|| {
+        let fallback_scopes = || -> Vec<String> {
+            let base = if default_scopes.is_empty() {
                 DEFAULT_GCP_SCOPES
-                    .iter()
-                    .map(|s| (*s).to_string())
-                    .collect()
-            })
+            } else {
+                default_scopes
+            };
+            base.iter().map(|s| (*s).to_string()).collect()
         };
+        let default_sa_scopes =
+            || -> Vec<String> { custom_scopes.clone().unwrap_or_else(&fallback_scopes) };
 
         let explicit_adc = opts
             .get("application_credentials_path")
@@ -601,6 +690,8 @@ impl GcpTokenCache {
                 .is_some_and(|v| v == "true" || v == "1")
             {
                 base_source = Some(GcpAuthSource::GcloudCli {
+                    binary: default_gcloud_binary(),
+                    timeout: GCLOUD_CLI_TIMEOUT,
                     quota_project_id: quota_project_id.clone(),
                     impersonate_service_account: None,
                 });
@@ -648,12 +739,7 @@ impl GcpTokenCache {
                 .get("iam_endpoint")
                 .cloned()
                 .unwrap_or_else(|| DEFAULT_IAM_ENDPOINT.to_string());
-            let impersonation_scopes = custom_scopes.unwrap_or_else(|| {
-                vec![
-                    "https://www.googleapis.com/auth/devstorage.full_control".to_string(),
-                    "https://www.googleapis.com/auth/cloud-platform".to_string(),
-                ]
-            });
+            let impersonation_scopes = custom_scopes.unwrap_or_else(&fallback_scopes);
             GcpAuthSource::ImpersonatedServiceAccount {
                 base: Box::new(resolved_base),
                 target_service_account: target_sa,
@@ -665,11 +751,11 @@ impl GcpTokenCache {
             base_source?
         };
 
-        Some(Arc::new(Self::new(source, skew_ms)))
-    }
-
-    pub fn from_gcs_options(raw_opts: &HashMap<String, String>) -> Option<Arc<Self>> {
-        Self::from_options(raw_opts)
+        Some(Arc::new(Self::with_proxy_policy(
+            source,
+            skew_ms,
+            proxy_policy,
+        )))
     }
 
     pub fn service_account_key(&self) -> Option<&ServiceAccountKey> {
@@ -813,7 +899,12 @@ impl GcpTokenCache {
                     if !resp.status().is_success() {
                         let status = resp.status();
                         if token_uri == DEFAULT_OAUTH_TOKEN_URI
-                            && let Ok(cli_tok) = fetch_token_from_gcloud_cli(None)
+                            && let Ok(cli_tok) = fetch_token_from_gcloud_cli(
+                                &default_gcloud_binary(),
+                                GCLOUD_CLI_TIMEOUT,
+                                None,
+                            )
+                            .await
                         {
                             return Ok((
                                 cli_tok,
@@ -914,7 +1005,7 @@ impl GcpTokenCache {
                         )
                     };
                     let resp = self
-                        .client
+                        .metadata_client
                         .get(&url)
                         .header("Metadata-Flavor", "Google")
                         .send()
@@ -982,10 +1073,17 @@ impl GcpTokenCache {
                     ))
                 }
                 GcpAuthSource::GcloudCli {
+                    binary,
+                    timeout,
                     quota_project_id,
                     impersonate_service_account,
                 } => {
-                    let tok = fetch_token_from_gcloud_cli(impersonate_service_account.as_deref())?;
+                    let tok = fetch_token_from_gcloud_cli(
+                        binary,
+                        *timeout,
+                        impersonate_service_account.as_deref(),
+                    )
+                    .await?;
                     Ok((
                         tok,
                         now_unix_ms.saturating_add(DEFAULT_TOKEN_TTL_MS),

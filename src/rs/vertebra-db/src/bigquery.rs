@@ -33,6 +33,12 @@ pub const DEFAULT_BIGQUERY_STORAGE_ENDPOINT: &str = "https://bigquerystorage.goo
 /// Maximum Arrow payload size per `AppendRowsRequest` message (`9 MiB` safe bound under `10 MiB` limit).
 pub const MAX_APPEND_ROWS_CHUNK_BYTES: usize = 9 * 1024 * 1024;
 
+/// Default OAuth2 scopes for BigQuery REST v2 and Storage API v1 authentication.
+pub const BIGQUERY_OAUTH_SCOPES: &[&str] = &[
+    "https://www.googleapis.com/auth/bigquery",
+    "https://www.googleapis.com/auth/cloud-platform",
+];
+
 static SHM_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 fn next_bigquery_shm_name() -> String {
@@ -818,18 +824,12 @@ impl BigQueryClient {
             .map_err(|e| BigQueryError::Http(e.to_string()))?;
 
         let mut auth_opts = config.auth_options.clone();
-        if !auth_opts.contains_key("scopes") {
-            auth_opts.insert(
-                "scopes".to_string(),
-                "https://www.googleapis.com/auth/bigquery,https://www.googleapis.com/auth/cloud-platform".to_string(),
-            );
-        }
         if is_cleartext {
             auth_opts
                 .entry("allow_ambient_adc".to_string())
                 .or_insert_with(|| "false".to_string());
         }
-        let token_cache = GcpTokenCache::from_options(&auth_opts);
+        let token_cache = GcpTokenCache::from_options(&auth_opts, BIGQUERY_OAUTH_SCOPES);
 
         Ok(Self {
             config,

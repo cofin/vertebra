@@ -10,11 +10,11 @@ research:
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 2
-current_task: gcp-driver-resilience:t02
-last_verified_checkpoint: f6a57aa
+state_revision: 3
+current_task: gcp-driver-resilience:t03
+last_verified_checkpoint: 6f35339
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T20:13:20Z
+updated_at: 2026-11-03T20:29:36Z
 tags: [rust, gcp, pyo3, python, exceptions, auth, bugfix]
 ---
 
@@ -147,12 +147,12 @@ Rust: `vertebra_py::errors::{exception_types, spanner_error_to_py, bigquery_erro
 ### Phase 1: Runtime safety and auth
 
 - [x] t01 — Panic-safe, cancellable completion bridge (tasks/t01-completion-bridge.md)
-- [~] t02 — Async gcloud fetch, proxy policy, explicit OAuth scopes (tasks/t02-gcp-auth.md)
+- [x] t02 — Async gcloud fetch, proxy policy, explicit OAuth scopes (tasks/t02-gcp-auth.md)
 - **Phase 1 Recovery Checkpoint**: `make lint && cd src/rs && cargo test -p vertebra-py && cargo test -p vertebra-core --features gcp-auth --test it && cargo test -p vertebra-storage && cd ../.. && make dev && uv run python -m mypy.stubtest vertebra._vertebra`
 
 ### Phase 2: Errors and SQL
 
-- [ ] t03 — BigQuery REST warnings and URL encoding (tasks/t03-bigquery-rest.md)
+- [~] t03 — BigQuery REST warnings and URL encoding (tasks/t03-bigquery-rest.md)
 - [ ] t05 — Char-aware GoogleSQL placeholder lexer (tasks/t05-googlesql-placeholders.md)
 - [ ] t04 — Typed Google Cloud exception hierarchy across bindings and drivers (tasks/t04-typed-exceptions.md)
 - **Phase 2 Recovery Checkpoint**: `make lint-all && make rs-test && make py-test`

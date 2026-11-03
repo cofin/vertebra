@@ -2,13 +2,16 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use vertebra_core::gcp_auth::{DEFAULT_REFRESH_SKEW_MS, GcpAuthSource, GcpTokenCache};
+use vertebra_core::gcp_auth::{
+    DEFAULT_GCP_SCOPES, DEFAULT_REFRESH_SKEW_MS, GcpAuthSource, GcpTokenCache, ProxyPolicy,
+};
 
 const TEST_RSA_PRIVATE_KEY_PEM: &str = concat!(
     "-----BEGIN PRIVATE KEY-----\n",
@@ -179,13 +182,15 @@ async fn service_account_jwt_assertion_single_flight_and_invalidation() {
 
     let mut opts = HashMap::new();
     opts.insert("service_account_key".to_string(), sa_json);
+    opts.insert("proxy_policy".to_string(), "direct".to_string());
     opts.insert(
         "scopes".to_string(),
         "https://www.googleapis.com/auth/bigquery, https://www.googleapis.com/auth/spanner.data"
             .to_string(),
     );
 
-    let cache = GcpTokenCache::from_options(&opts).expect("build service account cache");
+    let cache = GcpTokenCache::from_options(&opts, DEFAULT_GCP_SCOPES)
+        .expect("build service account cache");
     assert!(cache.service_account_key().is_some());
 
     let mut tasks = Vec::new();
@@ -234,7 +239,9 @@ fn service_account_sign_jwt_for_audience_zero_network() {
 
     let mut opts = HashMap::new();
     opts.insert("service_account_key".to_string(), sa_json);
-    let cache = GcpTokenCache::from_options(&opts).expect("build service account cache");
+    opts.insert("proxy_policy".to_string(), "direct".to_string());
+    let cache = GcpTokenCache::from_options(&opts, DEFAULT_GCP_SCOPES)
+        .expect("build service account cache");
 
     let jwt = cache
         .sign_jwt_for_audience("https://spanner.googleapis.com/")
@@ -257,7 +264,7 @@ fn service_account_sign_jwt_for_audience_zero_network() {
     assert!(decoded.claims.scope.is_none());
     assert_eq!(decoded.claims.exp - decoded.claims.iat, 3600);
 
-    let auth_user_cache = GcpTokenCache::new(
+    let auth_user_cache = GcpTokenCache::with_proxy_policy(
         GcpAuthSource::AuthorizedUser {
             client_id: "cid".to_string(),
             client_secret: "csec".to_string(),
@@ -266,6 +273,7 @@ fn service_account_sign_jwt_for_audience_zero_network() {
             token_uri: "http://127.0.0.1:9/token".to_string(),
         },
         DEFAULT_REFRESH_SKEW_MS,
+        ProxyPolicy::Direct,
     );
     assert!(
         auth_user_cache
@@ -315,13 +323,207 @@ async fn metadata_server_and_impersonation_custom_scopes() {
         "target@proj.iam.gserviceaccount.com".to_string(),
     );
     opts.insert("iam_endpoint".to_string(), base_url);
+    opts.insert("proxy_policy".to_string(), "direct".to_string());
     opts.insert(
         "scopes".to_string(),
         "https://www.googleapis.com/auth/bigquery https://www.googleapis.com/auth/spanner.data"
             .to_string(),
     );
 
-    let cache = GcpTokenCache::from_options(&opts).expect("build impersonated cache");
+    let cache =
+        GcpTokenCache::from_options(&opts, DEFAULT_GCP_SCOPES).expect("build impersonated cache");
     let snap = cache.get_or_refresh().await.expect("impersonated token");
     assert_eq!(snap.access_token, "impersonated-custom-scope-token");
+}
+
+#[tokio::test]
+async fn impersonation_defaults_to_caller_scopes() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let base_url = format!("http://127.0.0.1:{}", addr.port());
+
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let req = read_http_request(&mut stream).await;
+                let body = if req.contains("/computeMetadata/v1/instance/service-accounts/") {
+                    assert!(req.contains(
+                        "GET /computeMetadata/v1/instance/service-accounts/default/token HTTP/1.1"
+                    ));
+                    r#"{"access_token":"meta-base-token","expires_in":3600,"token_type":"Bearer"}"#
+                        .to_string()
+                } else {
+                    assert!(req.contains(":generateAccessToken"));
+                    assert!(req.contains("https://www.googleapis.com/auth/spanner.data"));
+                    assert!(!req.contains("devstorage"));
+                    r#"{"accessToken":"impersonated-spanner-scope-token","expireTime":"2099-01-01T00:00:00Z"}"#
+                        .to_string()
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut opts = HashMap::new();
+    opts.insert("use_metadata_server".to_string(), "true".to_string());
+    opts.insert("metadata_host".to_string(), base_url.clone());
+    opts.insert(
+        "target_service_account".to_string(),
+        "target@proj.iam.gserviceaccount.com".to_string(),
+    );
+    opts.insert("iam_endpoint".to_string(), base_url);
+    opts.insert("proxy_policy".to_string(), "direct".to_string());
+
+    let cache =
+        GcpTokenCache::from_options(&opts, &["https://www.googleapis.com/auth/spanner.data"])
+            .expect("build impersonated cache");
+    let snap = cache.get_or_refresh().await.expect("impersonated token");
+    assert_eq!(snap.access_token, "impersonated-spanner-scope-token");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn gcloud_cli_token_fetch_is_async_and_times_out() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script_path = dir.path().join("mock-gcloud");
+    std::fs::write(&script_path, "#!/bin/sh\nsleep 60\n").expect("write script");
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod script");
+
+    let cache = GcpTokenCache::new(
+        GcpAuthSource::GcloudCli {
+            binary: script_path,
+            timeout: Duration::from_millis(200),
+            quota_project_id: None,
+            impersonate_service_account: None,
+        },
+        60_000,
+    );
+
+    let ticked = Arc::new(AtomicBool::new(false));
+    let ticked_clone = Arc::clone(&ticked);
+    let ticker = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        ticked_clone.store(true, Ordering::SeqCst);
+    });
+
+    let outcome = cache.get_or_refresh().await;
+    let _ = ticker.await;
+    assert!(outcome.is_err());
+    let err = outcome.unwrap_err();
+    assert!(
+        err.contains("timed out after 200 ms"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        ticked.load(Ordering::SeqCst),
+        "tokio runtime was blocked during gcloud token fetch"
+    );
+}
+
+#[tokio::test]
+async fn explicit_proxy_routes_token_requests_and_metadata_bypasses_it() {
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind proxy");
+    let proxy_port = proxy_listener.local_addr().expect("proxy addr").port();
+    let proxy_count = Arc::new(AtomicUsize::new(0));
+    let proxy_count_server = Arc::clone(&proxy_count);
+    let proxy_request_line = Arc::new(std::sync::Mutex::new(String::new()));
+    let proxy_request_line_server = Arc::clone(&proxy_request_line);
+
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = proxy_listener.accept().await {
+            let count = Arc::clone(&proxy_count_server);
+            let req_line = Arc::clone(&proxy_request_line_server);
+            tokio::spawn(async move {
+                let req = read_http_request(&mut stream).await;
+                let first_line = req.lines().next().unwrap_or_default().to_string();
+                *req_line.lock().expect("lock") = first_line;
+                count.fetch_add(1, Ordering::SeqCst);
+                let body = r#"{"access_token":"proxied","expires_in":3600,"token_type":"Bearer"}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let proxy = reqwest::Proxy::http(format!("http://127.0.0.1:{proxy_port}")).expect("proxy");
+    let token_cache = GcpTokenCache::with_proxy_policy(
+        GcpAuthSource::AuthorizedUser {
+            client_id: "c".into(),
+            client_secret: "s".into(),
+            refresh_token: "r".into(),
+            quota_project_id: None,
+            token_uri: "http://oauth.invalid/token".into(),
+        },
+        60_000,
+        ProxyPolicy::Explicit(proxy.clone()),
+    );
+    let snap = token_cache
+        .get_or_refresh()
+        .await
+        .expect("proxied oauth token");
+    assert_eq!(snap.access_token, "proxied");
+    assert_eq!(proxy_count.load(Ordering::SeqCst), 1);
+    assert!(
+        proxy_request_line
+            .lock()
+            .expect("lock")
+            .starts_with("POST http://oauth.invalid/token"),
+        "unexpected proxy request line: {}",
+        proxy_request_line.lock().expect("lock")
+    );
+
+    let meta_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind metadata");
+    let meta_port = meta_listener.local_addr().expect("meta addr").port();
+    let meta_count = Arc::new(AtomicUsize::new(0));
+    let meta_count_server = Arc::clone(&meta_count);
+
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = meta_listener.accept().await {
+            let count = Arc::clone(&meta_count_server);
+            tokio::spawn(async move {
+                let _req = read_http_request(&mut stream).await;
+                count.fetch_add(1, Ordering::SeqCst);
+                let body =
+                    r#"{"access_token":"direct-metadata","expires_in":3600,"token_type":"Bearer"}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let meta_cache = GcpTokenCache::with_proxy_policy(
+        GcpAuthSource::MetadataServer {
+            service_account: "default".into(),
+            quota_project_id: None,
+            endpoint: format!("http://127.0.0.1:{meta_port}"),
+            scopes: Vec::new(),
+        },
+        60_000,
+        ProxyPolicy::Explicit(proxy),
+    );
+    let meta_snap = meta_cache
+        .get_or_refresh()
+        .await
+        .expect("direct metadata token");
+    assert_eq!(meta_snap.access_token, "direct-metadata");
+    assert_eq!(meta_count.load(Ordering::SeqCst), 1);
+    assert_eq!(proxy_count.load(Ordering::SeqCst), 1);
 }

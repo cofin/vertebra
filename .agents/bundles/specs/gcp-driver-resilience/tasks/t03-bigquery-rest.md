@@ -2,7 +2,7 @@
 type: Task
 id: gcp-driver-resilience:t03
 title: BigQuery REST warnings and URL encoding
-state: pending
+state: in_progress
 priority: P2
 verification_strategy: regression_tdd
 depends_on: [gcp-driver-resilience:t02]
@@ -12,9 +12,9 @@ tests:
   - src/rs/vertebra-db/tests/bigquery_wire_tests.rs
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: executor
+claimed_at: 2026-11-03T20:29:36Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
