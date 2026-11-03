@@ -2,7 +2,7 @@
 type: Task
 id: gcp-driver-resilience:t01
 title: Panic-safe, cancellable completion bridge
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on: []
@@ -14,17 +14,17 @@ tests:
   - src/rs/vertebra-py/src/completion.rs
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: executor
+claimed_at: 2026-11-03T20:09:10Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-03T20:13:00Z
+last_verified_commit: f6a57aa
+verification_evidence: "cd src/rs && cargo test -p vertebra-py completion::tests && cargo clippy -p vertebra-py --all-targets -- -D warnings && cargo fmt --check && cd ../.. && make dev && uv run python -m mypy.stubtest vertebra._vertebra && uv run pytest src/py/tests/unit/db -q"
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T16:10:00Z
+updated_at: 2026-11-03T20:13:00Z
 commit: null
 tags: [rust, pyo3, asyncio, bugfix]
 ---
@@ -119,7 +119,9 @@ tags: [rust, pyo3, asyncio, bugfix]
 
 ## Acceptance Criteria
 
-- [ ] R1: future and `map_ok` panics raise `TaskPanicError` with the panic message.
-- [ ] R2: cancellation drops the Rust future within 1 s; `RustDbTaskAwaitable` has no stub constructor.
+- [x] R1: future and `map_ok` panics raise `TaskPanicError` with the panic message.
+- [x] R2: cancellation drops the Rust future within 1 s; `RustDbTaskAwaitable` has no stub constructor.
 
 ## Notes & Discoveries
+
+- Verified RED failure on `cancelled_await_aborts_rust_task`, implemented `TaskPanicError`, `DbTaskCanceller`, and `catch_unwind` around `(item.produce)(py)`, and verified 3 passed in `completion::tests`, `mypy.stubtest`, and `pytest src/py/tests/unit/db`.

@@ -3,18 +3,18 @@ type: Spec
 flow_id: gcp-driver-resilience
 title: GCP Driver Resilience and Typed Errors
 description: Make the PyO3 completion bridge panic-safe and cancellable, raise one typed Google Cloud exception hierarchy (rooted at VertebraError) from sync and async bindings, fix GCP auth (async gcloud, proxy policy, explicit scopes), fix BigQuery REST error and URL handling, lex GoogleSQL correctly in the placeholder rewriter, and document the result.
-state: planned
+state: active
 parent_prd: integration-remediation
 research:
   - ../integration-remediation/research/google-cloud-rust_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 0
-current_task: null
-last_verified_checkpoint: null
+state_revision: 2
+current_task: gcp-driver-resilience:t02
+last_verified_checkpoint: f6a57aa
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T16:10:00Z
+updated_at: 2026-11-03T20:13:20Z
 tags: [rust, gcp, pyo3, python, exceptions, auth, bugfix]
 ---
 
@@ -146,8 +146,8 @@ Rust: `vertebra_py::errors::{exception_types, spanner_error_to_py, bigquery_erro
 
 ### Phase 1: Runtime safety and auth
 
-- [ ] t01 — Panic-safe, cancellable completion bridge (tasks/t01-completion-bridge.md)
-- [ ] t02 — Async gcloud fetch, proxy policy, explicit OAuth scopes (tasks/t02-gcp-auth.md)
+- [x] t01 — Panic-safe, cancellable completion bridge (tasks/t01-completion-bridge.md)
+- [~] t02 — Async gcloud fetch, proxy policy, explicit OAuth scopes (tasks/t02-gcp-auth.md)
 - **Phase 1 Recovery Checkpoint**: `make lint && cd src/rs && cargo test -p vertebra-py && cargo test -p vertebra-core --features gcp-auth --test it && cargo test -p vertebra-storage && cd ../.. && make dev && uv run python -m mypy.stubtest vertebra._vertebra`
 
 ### Phase 2: Errors and SQL

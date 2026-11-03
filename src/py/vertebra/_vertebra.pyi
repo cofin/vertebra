@@ -44,6 +44,7 @@ __all__ = [
     "StatementCacheStats",
     "StatementPlan",
     "StaticEmbedderCore",
+    "TaskPanicError",
     "VectorBatchView",
     "VectorCache",
     "VectorView",
@@ -1271,9 +1272,11 @@ def uuid7_u128() -> int: ...
 def uuid7_str() -> str: ...
 def nanoid_generate(size: int = 21) -> str: ...
 
+class TaskPanicError(RuntimeError):
+    """Raised when a Rust background task panics before producing a result."""
+
 @final
 class RustDbTaskAwaitable:
-    def __new__(cls) -> RustDbTaskAwaitable: ...
     def __await__(self) -> Any: ...
 
 @final

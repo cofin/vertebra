@@ -34,7 +34,7 @@ pub use bigquery::PyBigQueryClient;
 pub use broker::{
     BrokerStats, LeaseBroker, LeaseGrant, StatementCache, StatementCacheStats, StatementPlan,
 };
-pub use completion::RustDbTaskAwaitable;
+pub use completion::{RustDbTaskAwaitable, TaskPanicError};
 pub use db::{AlloyDBDialer, ArrowCursor, CloudSQLDialer};
 pub use gcp_auth::{PyGcpTokenCache, PyGcpTokenSnapshot};
 pub use headers::{Headers, HeadersIterator};
