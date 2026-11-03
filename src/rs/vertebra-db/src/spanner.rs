@@ -1,30 +1,8 @@
-//! Pure-Rust Google Cloud Spanner v1 gRPC engine (`google.spanner.v1.Spanner` &
-//! `google.spanner.admin.database.v1.DatabaseAdmin`).
-//!
-//! Provides:
-//! - Cached multiplexed session management (`CreateSession` with `multiplexed: true`, 7-day
-//!   proactive rotation, and transparent recreation on `Session` `NOT_FOUND`).
-//! - Selective `x-goog-spanner-route-to-leader: true` routing metadata (present on `CreateSession`,
-//!   `ReadWrite`, `PartitionedDml`, and `BatchWrite`; omitted on `ReadOnly` and `PartitionQuery`
-//!   so Spanner serves reads from local replicas) and monotonic
-//!   `x-goog-spanner-request-id: 1.{rand64_hex}.{client_id}.{channel_id}.{req_seq}.{attempt}` headers.
-//! - Streaming `PartialResultSet` chunk merger (`chunked_value: true` string concatenation prior to
-//!   base64/numeric/timestamp/JSON decoding + recursive `ListValue` tail merging) with bounded
-//!   `32 MiB` `resume_token` replay on transient `UNAVAILABLE` / `INTERNAL` stream interruptions.
-//! - Multiplexed `ReadWrite` transaction state machine with inline `TransactionSelector.begin` on
-//!   statement #1 (`0` extra RTT), fallback `BeginTransaction` with `mutation_key` on mutation-only
-//!   transactions, monotonic 1-based `seqno`, highest-`seq_num` `MultiplexedSessionPrecommitToken`
-//!   tracking, `CommitResponse.MultiplexedSessionRetry` replay (empty `mutations`),
-//!   `ExecuteBatchDmlResponse.status` inspection, and `Aborted` wound-wait retry with `RetryInfo`
-//!   and `multiplexed_session_previous_transaction_id`.
-//! - `Mutation` builders (`insert`, `update`, `insert_or_update`, `replace`, `delete`), `BatchWrite`
-//!   (chunked at `<= 80,000` mutated cells), `PartitionedDml`, and batched `UpdateDatabaseDdl` LRO
-//!   polling.
-//! - Parallel `PartitionQuery` + `data_boost_enabled` fan-out streaming directly into a zero-copy
-//!   `VTBARROW` POSIX shared-memory segment via `ShmArrowStreamWriter`.
+//! Google Cloud Spanner v1 engine (`google.spanner.v1.Spanner` &
+//! `google.spanner.admin.database.v1.DatabaseAdmin`) backed by the official
+//! `google-cloud-spanner` Rust client.
 
 use std::collections::HashMap;
-use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -32,10 +10,21 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
+use futures::future::try_join_all;
+use google_cloud_spanner::channel_pool::StaticChannelPoolConfig;
+use google_cloud_spanner::client::{DatabaseAdmin, DatabaseClient, Spanner, SpannerBuilderExt};
+use google_cloud_spanner::model as spanner_model;
+use google_cloud_spanner::omni::TlsConfig;
+use google_cloud_spanner::result::ResultSet;
+use google_cloud_spanner::statement::Statement;
+use google_cloud_spanner::transaction::{Timestamp, TimestampBound};
+use google_cloud_spanner::types::Type as OfficialType;
+use google_cloud_spanner::value::{Kind, Value as OfficialValue};
+use tokio::sync::OnceCell;
+use url::Url;
 use vertebra_core::gcp_auth::GcpTokenCache;
-use vertebra_core::shm::ShmRegion;
 
-use crate::arrow_shm::ShmArrowStreamWriter;
+use crate::gcp::{install_rustls_ring_provider, official_credentials};
 use crate::grpc::{
     GrpcChannelPool, GrpcCode, GrpcErrorDetail, GrpcPoolConfig, GrpcRequestMetadata, GrpcStatus,
     ProtoError, ProtoReader, ProtoWriter, WireType, generate_request_uuid_v4,
@@ -54,7 +43,6 @@ pub const MAX_MUTATION_CELLS_PER_BATCH: usize = 80_000;
 pub const MULTIPLEXED_SESSION_ROTATION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 
 static NEXT_SPANNER_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
-static NEXT_SPANNER_SHM_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Cloud Spanner SQL dialect (`GoogleSQL` or `Spangres`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -156,33 +144,20 @@ impl SpannerClientConfig {
 }
 
 /// Errors produced by [`SpannerClient`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error)]
 pub enum SpannerError {
+    #[error("Spanner invalid argument: {0}")]
     InvalidArgument(String),
-    Grpc(GrpcStatus),
+    #[error("Spanner gRPC error: {0}")]
+    Grpc(#[from] GrpcStatus),
+    #[error("Spanner protocol error: {0}")]
     Protocol(String),
+    #[error("Spanner auth error: {0}")]
     Auth(String),
+    #[error("Spanner SHM error: {0}")]
     Shm(String),
-}
-
-impl fmt::Display for SpannerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidArgument(msg) => write!(f, "Spanner invalid argument: {msg}"),
-            Self::Grpc(status) => write!(f, "Spanner gRPC error: {status}"),
-            Self::Protocol(msg) => write!(f, "Spanner protocol error: {msg}"),
-            Self::Auth(msg) => write!(f, "Spanner auth error: {msg}"),
-            Self::Shm(msg) => write!(f, "Spanner SHM error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for SpannerError {}
-
-impl From<GrpcStatus> for SpannerError {
-    fn from(status: GrpcStatus) -> Self {
-        Self::Grpc(status)
-    }
+    #[error("Spanner client error: {0}")]
+    Client(#[from] google_cloud_spanner::Error),
 }
 
 impl From<ProtoError> for SpannerError {
@@ -2023,10 +1998,239 @@ pub struct SpannerBatchWriteResult {
     pub commit_timestamp_micros: Option<i64>,
 }
 
-/// Pure-Rust Google Cloud Spanner v1 client.
+fn endpoint_is_googleapis(endpoint: &str) -> bool {
+    Url::parse(endpoint)
+        .ok()
+        .and_then(|u| {
+            u.host_str()
+                .map(|h| h == "googleapis.com" || h.ends_with(".googleapis.com"))
+        })
+        .unwrap_or(false)
+}
+
+fn validate_spanner_config(config: &SpannerClientConfig) -> Result<(), SpannerError> {
+    if config.database.trim().is_empty() {
+        return Err(SpannerError::InvalidArgument(
+            "SpannerClientConfig.database must not be empty".to_string(),
+        ));
+    }
+    let endpoint = config.effective_endpoint();
+    if config.ca_pem.is_some() {
+        if endpoint_is_googleapis(&endpoint) {
+            return Err(SpannerError::InvalidArgument(
+                "SpannerClientConfig.ca_pem applies only to non-googleapis endpoints (Spanner Omni or private test servers); Cloud Spanner uses the system trust store".to_string(),
+            ));
+        }
+        if Url::parse(&endpoint)
+            .ok()
+            .is_some_and(|u| u.scheme() == "http")
+        {
+            return Err(SpannerError::InvalidArgument(
+                "ca_pem requires an https:// endpoint".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn wkt_timestamp(us: i64) -> Result<Timestamp, SpannerError> {
+    Timestamp::new(
+        us.div_euclid(1_000_000),
+        (us.rem_euclid(1_000_000) * 1_000) as i32,
+    )
+    .map_err(|e| SpannerError::InvalidArgument(e.to_string()))
+}
+
+fn timestamp_bound(staleness: SpannerStaleness) -> Result<TimestampBound, SpannerError> {
+    match staleness {
+        SpannerStaleness::Strong => Ok(TimestampBound::strong()),
+        SpannerStaleness::ExactStalenessMs(ms) => {
+            Ok(TimestampBound::exact_staleness(Duration::from_millis(ms)))
+        }
+        SpannerStaleness::MaxStalenessMs(ms) => {
+            Ok(TimestampBound::max_staleness(Duration::from_millis(ms)))
+        }
+        SpannerStaleness::ReadTimestampUnixMicros(us) => {
+            Ok(TimestampBound::read_timestamp(wkt_timestamp(us)?))
+        }
+        SpannerStaleness::MinReadTimestampUnixMicros(us) => {
+            Ok(TimestampBound::min_read_timestamp(wkt_timestamp(us)?))
+        }
+    }
+}
+
+fn official_value(value: &ProtobufValue) -> OfficialValue {
+    match value {
+        ProtobufValue::Null => OfficialValue::null(),
+        ProtobufValue::Bool(b) => (*b).into(),
+        ProtobufValue::Number(n) => (*n).into(),
+        ProtobufValue::String(s) => s.clone().into(),
+        ProtobufValue::List(items) => items
+            .iter()
+            .map(official_value)
+            .collect::<Vec<OfficialValue>>()
+            .into(),
+        ProtobufValue::Struct(entries) => entries
+            .iter()
+            .map(|(_, v)| official_value(v))
+            .collect::<Vec<OfficialValue>>()
+            .into(),
+    }
+}
+
+fn official_type(ty: &SpannerType) -> OfficialType {
+    let mut model = spanner_model::Type::new()
+        .set_code(spanner_model::TypeCode::from(ty.code as i32))
+        .set_type_annotation(spanner_model::TypeAnnotationCode::from(
+            ty.type_annotation as i32,
+        ));
+    if let Some(ref elem) = ty.array_element_type {
+        model = model.set_array_element_type(spanner_model::Type::from(official_type(elem)));
+    }
+    if !ty.struct_fields.is_empty() {
+        let fields = ty
+            .struct_fields
+            .iter()
+            .map(|f| {
+                spanner_model::struct_type::Field::new()
+                    .set_name(&f.name)
+                    .set_type(spanner_model::Type::from(official_type(&f.field_type)))
+            })
+            .collect::<Vec<_>>();
+        model = model.set_struct_type(spanner_model::StructType::new().set_fields(fields));
+    }
+    if let Some(ref fqn) = ty.proto_type_fqn {
+        model = model.set_proto_type_fqn(fqn.clone());
+    }
+    OfficialType::from(model)
+}
+
+fn protobuf_value(value: &OfficialValue) -> Result<ProtobufValue, SpannerError> {
+    match value.kind() {
+        Kind::Null => Ok(ProtobufValue::Null),
+        Kind::Bool => value
+            .as_bool()
+            .map(ProtobufValue::Bool)
+            .ok_or_else(|| SpannerError::Protocol("unsupported Spanner value kind".into())),
+        Kind::Number => value
+            .as_f64()
+            .map(ProtobufValue::Number)
+            .ok_or_else(|| SpannerError::Protocol("unsupported Spanner value kind".into())),
+        Kind::String => value
+            .as_str()
+            .map(|s| ProtobufValue::String(s.to_string()))
+            .ok_or_else(|| SpannerError::Protocol("unsupported Spanner value kind".into())),
+        Kind::List => {
+            let items = value
+                .as_list()
+                .ok_or_else(|| SpannerError::Protocol("unsupported Spanner value kind".into()))?;
+            let mut out = Vec::with_capacity(items.len());
+            for item in items.iter() {
+                out.push(protobuf_value(item)?);
+            }
+            Ok(ProtobufValue::List(out))
+        }
+        _ => Err(SpannerError::Protocol(
+            "unsupported Spanner value kind".into(),
+        )),
+    }
+}
+
+fn spanner_type(ty: &OfficialType) -> SpannerType {
+    spanner_type_from_model(&spanner_model::Type::from(ty.clone()))
+}
+
+fn spanner_type_from_model(model: &spanner_model::Type) -> SpannerType {
+    let code = SpannerTypeCode::from_i32(model.code.value().unwrap_or(0));
+    let type_annotation =
+        SpannerTypeAnnotation::from_i32(model.type_annotation.value().unwrap_or(0));
+    let array_element_type = model
+        .array_element_type
+        .as_deref()
+        .map(|elem| Box::new(spanner_type_from_model(elem)));
+    let struct_fields = model
+        .struct_type
+        .as_ref()
+        .map(|st| {
+            st.fields
+                .iter()
+                .map(|f| SpannerStructField {
+                    name: f.name.clone(),
+                    field_type: f
+                        .r#type
+                        .as_deref()
+                        .map(spanner_type_from_model)
+                        .unwrap_or_default(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let proto_type_fqn = if model.proto_type_fqn.is_empty() {
+        None
+    } else {
+        Some(model.proto_type_fqn.clone())
+    };
+    SpannerType {
+        code,
+        array_element_type,
+        struct_fields,
+        type_annotation,
+        proto_type_fqn,
+    }
+}
+
+async fn collect_query_result(mut rs: ResultSet) -> Result<SpannerQueryResult, SpannerError> {
+    let mut raw_rows = Vec::new();
+    while let Some(row) = rs.next().await {
+        raw_rows.push(row?.into_values());
+    }
+    let meta = rs.metadata();
+    let columns = meta.column_names().to_vec();
+    let schema = columns
+        .iter()
+        .zip(meta.column_types().iter())
+        .map(|(name, ty)| SpannerStructField {
+            name: name.clone(),
+            field_type: spanner_type(ty),
+        })
+        .collect::<Vec<_>>();
+    let mut rows = Vec::with_capacity(raw_rows.len());
+    for raw_row in &raw_rows {
+        let mut decoded_row = Vec::with_capacity(raw_row.len());
+        for (idx, cell) in raw_row.iter().enumerate() {
+            let pb = protobuf_value(cell)?;
+            let field_ty = schema
+                .get(idx)
+                .map(|f| &f.field_type)
+                .cloned()
+                .unwrap_or_else(|| SpannerType::scalar(SpannerTypeCode::String));
+            decoded_row.push(SpannerValue::from_protobuf_value(&pb, &field_ty)?);
+        }
+        rows.push(decoded_row);
+    }
+    let row_count_exact = rs.stats().and_then(|s| s.row_count_exact().copied());
+    let row_count_lower_bound = rs.stats().and_then(|s| s.row_count_lower_bound().copied());
+    Ok(SpannerQueryResult {
+        columns,
+        schema,
+        rows,
+        transaction_id: None,
+        read_timestamp_micros: None,
+        row_count_exact,
+        row_count_lower_bound,
+        precommit_token: None,
+    })
+}
+
+/// Google Cloud Spanner v1 client.
 pub struct SpannerClient {
     config: SpannerClientConfig,
     token_cache: Option<Arc<GcpTokenCache>>,
+    injected_spanner: Option<Spanner>,
+    #[allow(dead_code)]
+    injected_admin: Option<DatabaseAdmin>,
+    official: OnceCell<Spanner>,
+    database_client: OnceCell<DatabaseClient>,
     grpc_pool: GrpcChannelPool,
     cached_session: RwLock<Option<Arc<SpannerSessionHandle>>>,
     client_id: u64,
@@ -2037,17 +2241,12 @@ pub struct SpannerClient {
 impl SpannerClient {
     /// Construct a new [`SpannerClient`].
     pub fn new(config: SpannerClientConfig) -> Result<Self, SpannerError> {
-        if config.database.trim().is_empty() {
-            return Err(SpannerError::InvalidArgument(
-                "SpannerClientConfig.database must not be empty".to_string(),
-            ));
-        }
+        validate_spanner_config(&config)?;
         let endpoint = config.effective_endpoint();
         let mut pool_cfg = GrpcPoolConfig::new(endpoint);
         pool_cfg.pool_size = config.pool_size.max(1);
         pool_cfg.connect_timeout = Duration::from_secs(10);
         pool_cfg.user_agent = "vertebra-spanner/0.1".to_string();
-        pool_cfg.ca_pem = config.ca_pem.clone();
         let grpc_pool =
             GrpcChannelPool::new(pool_cfg).map_err(|e| SpannerError::Protocol(e.message))?;
 
@@ -2068,12 +2267,107 @@ impl SpannerClient {
         Ok(Self {
             config,
             token_cache,
+            injected_spanner: None,
+            injected_admin: None,
+            official: OnceCell::new(),
+            database_client: OnceCell::new(),
             grpc_pool,
             cached_session: RwLock::new(None),
             client_id,
             rand64_hex,
             req_seq: AtomicU64::new(1),
         })
+    }
+
+    /// Construct a [`SpannerClient`] with pre-built [`Spanner`] and optional [`DatabaseAdmin`] handles.
+    pub fn with_clients(
+        spanner: Spanner,
+        admin: Option<DatabaseAdmin>,
+        config: SpannerClientConfig,
+    ) -> Result<Self, SpannerError> {
+        validate_spanner_config(&config)?;
+        let endpoint = config.effective_endpoint();
+        let mut pool_cfg = GrpcPoolConfig::new(endpoint);
+        pool_cfg.pool_size = config.pool_size.max(1);
+        pool_cfg.connect_timeout = Duration::from_secs(10);
+        pool_cfg.user_agent = "vertebra-spanner/0.1".to_string();
+        let grpc_pool =
+            GrpcChannelPool::new(pool_cfg).map_err(|e| SpannerError::Protocol(e.message))?;
+
+        let uuid = generate_request_uuid_v4().replace('-', "");
+        let rand64_hex = uuid.chars().take(16).collect::<String>();
+        let client_id = NEXT_SPANNER_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
+
+        Ok(Self {
+            config,
+            token_cache: None,
+            injected_spanner: Some(spanner),
+            injected_admin: admin,
+            official: OnceCell::new(),
+            database_client: OnceCell::new(),
+            grpc_pool,
+            cached_session: RwLock::new(None),
+            client_id,
+            rand64_hex,
+            req_seq: AtomicU64::new(1),
+        })
+    }
+
+    async fn official_spanner(&self) -> Result<&Spanner, SpannerError> {
+        if let Some(ref spanner) = self.injected_spanner {
+            return Ok(spanner);
+        }
+        self.official
+            .get_or_try_init(|| async {
+                install_rustls_ring_provider();
+                let mut builder = Spanner::builder()
+                    .with_endpoint(self.config.effective_endpoint())
+                    .with_credentials(official_credentials(self.token_cache.clone()))
+                    .with_channel_pool(StaticChannelPoolConfig::new(self.config.pool_size.max(1)));
+                if let Some(ref pem) = self.config.ca_pem {
+                    builder = builder
+                        .with_omni_tls(TlsConfig::new().with_root_certificate_pem(pem.clone()));
+                }
+                builder.build().await.map_err(|e| {
+                    SpannerError::Protocol(format!("failed to build Spanner client: {e}"))
+                })
+            })
+            .await
+    }
+
+    async fn database_client(&self) -> Result<&DatabaseClient, SpannerError> {
+        self.database_client
+            .get_or_try_init(|| async {
+                let spanner = self.official_spanner().await?;
+                let mut builder = spanner
+                    .database_client(&self.config.database)
+                    .with_leader_aware_routing(self.config.route_to_leader_enabled);
+                if let Some(ref role) = self.config.database_role
+                    && !role.is_empty()
+                {
+                    builder = builder.with_database_role(role.clone());
+                }
+                Ok(builder.build().await?)
+            })
+            .await
+    }
+
+    fn statement(&self, sql: &str, params: &[SpannerQueryParameter]) -> Statement {
+        let effective_sql = if self.config.dialect == SpannerDialect::GoogleSql && sql.contains('$')
+        {
+            rewrite_spangres_placeholders(sql).0
+        } else {
+            sql.to_string()
+        };
+        let mut builder = Statement::builder(effective_sql);
+        for param in params {
+            builder = builder.add_typed_param(
+                &param.name,
+                official_value(&param.value),
+                official_type(&param.param_type),
+            );
+        }
+        builder.build()
     }
 
     /// Client configuration reference.
@@ -2414,19 +2708,79 @@ impl SpannerClient {
         }
     }
 
-    /// Execute a read-only query with the specified [`SpannerStaleness`] bound (`route_to_leader = false`).
-    pub async fn query_read_only(
+    /// Execute a single-use read-only query with the specified [`SpannerStaleness`] bound.
+    pub async fn query(
         &self,
         sql: &str,
         params: &[SpannerQueryParameter],
         staleness: SpannerStaleness,
     ) -> Result<SpannerQueryResult, SpannerError> {
-        let selector = SpannerTransactionSelector::SingleUse(SpannerTransactionOptions::ReadOnly {
-            staleness,
-            return_read_timestamp: staleness != SpannerStaleness::Strong,
-        });
-        self.execute_streaming_sql(sql, params, &selector, 0, None, false, false, None, None)
-            .await
+        let db = self.database_client().await?;
+        let bound = timestamp_bound(staleness)?;
+        let rs = db
+            .single_use()
+            .set_timestamp_bound(bound)
+            .build()
+            .execute_query(self.statement(sql, params))
+            .await?;
+        collect_query_result(rs).await
+    }
+
+    /// Execute a batch read-only `PartitionQuery` and run all partitions concurrently.
+    pub async fn partitioned_query(
+        &self,
+        sql: &str,
+        params: &[SpannerQueryParameter],
+        max_partitions: i64,
+        data_boost_enabled: bool,
+        staleness: SpannerStaleness,
+    ) -> Result<SpannerQueryResult, SpannerError> {
+        let db = self.database_client().await?;
+        let bound = timestamp_bound(staleness)?;
+        let batch_tx = db
+            .batch_read_only_transaction()
+            .set_timestamp_bound(bound)
+            .build()
+            .await?;
+        let options =
+            spanner_model::PartitionOptions::new().set_max_partitions(max_partitions.max(1));
+        let partitions = batch_tx
+            .partition_query(self.statement(sql, params), options)
+            .await?;
+        let part_results = try_join_all(partitions.into_iter().map(|part| async move {
+            let rs = part.set_data_boost(data_boost_enabled).execute(db).await?;
+            collect_query_result(rs).await
+        }))
+        .await?;
+
+        let mut columns = Vec::new();
+        let mut schema = Vec::new();
+        let mut rows = Vec::new();
+        let mut row_count_exact: Option<i64> = None;
+        let mut row_count_lower_bound: Option<i64> = None;
+        for part in part_results {
+            if schema.is_empty() && !part.schema.is_empty() {
+                columns = part.columns;
+                schema = part.schema;
+            }
+            rows.extend(part.rows);
+            if let Some(exact) = part.row_count_exact {
+                row_count_exact = Some(row_count_exact.unwrap_or(0) + exact);
+            }
+            if let Some(lower) = part.row_count_lower_bound {
+                row_count_lower_bound = Some(row_count_lower_bound.unwrap_or(0) + lower);
+            }
+        }
+        Ok(SpannerQueryResult {
+            columns,
+            schema,
+            rows,
+            transaction_id: None,
+            read_timestamp_micros: None,
+            row_count_exact,
+            row_count_lower_bound,
+            precommit_token: None,
+        })
     }
 
     /// Execute a statement inside a [`SpannerReadWriteTransaction`], using inline `Begin` on
@@ -2877,176 +3231,6 @@ impl SpannerClient {
         }
         Ok(op_name)
     }
-
-    /// Execute `/google.spanner.v1.Spanner/PartitionQuery` and fan out concurrent
-    /// `/google.spanner.v1.Spanner/ExecuteStreamingSql` streams (with `data_boost_enabled`) into a
-    /// zero-copy `VTBARROW` shared-memory segment via [`ShmArrowStreamWriter`].
-    pub async fn execute_partitioned_arrow(
-        self: &Arc<Self>,
-        sql: &str,
-        params: &[SpannerQueryParameter],
-        max_partitions: i64,
-        data_boost_enabled: bool,
-        staleness: SpannerStaleness,
-    ) -> Result<(String, usize, usize, Arc<ShmRegion>), SpannerError> {
-        let ro_opts = SpannerTransactionOptions::ReadOnly {
-            staleness,
-            return_read_timestamp: true,
-        };
-        let (tx_id, _, _) = self.begin_transaction(&ro_opts, None, None).await?;
-        let session = self.get_or_create_multiplexed_session(false).await?;
-
-        let mut pw = ProtoWriter::with_capacity(256);
-        pw.write_str(1, &session.name);
-        pw.write_nested(2, |tw| {
-            SpannerTransactionSelector::Id(tx_id.clone()).encode(tw)
-        });
-        pw.write_str(3, sql);
-        if !params.is_empty() {
-            let entries: Vec<(String, ProtobufValue)> = params
-                .iter()
-                .map(|p| (p.name.clone(), p.value.clone()))
-                .collect();
-            pw.write_nested(4, |sw| encode_protobuf_struct(&entries, sw));
-            for p in params {
-                pw.write_nested(5, |mw| {
-                    mw.write_str(1, &p.name);
-                    mw.write_nested(2, |tw| p.param_type.encode(tw));
-                });
-            }
-        }
-        if max_partitions > 0 {
-            pw.write_nested(6, |ow| {
-                ow.write_i64(2, max_partitions);
-            });
-        }
-
-        let req_seq = self.next_request_sequence();
-        let meta = self.build_metadata(false, req_seq, 1).await?;
-        let partition_tokens = match self
-            .grpc_pool
-            .unary(
-                "/google.spanner.v1.Spanner/PartitionQuery",
-                pw.finish(),
-                &meta,
-            )
-            .await
-        {
-            Ok((resp_bytes, _)) => decode_partition_response(&resp_bytes)?,
-            Err(status)
-                if matches!(
-                    status.code,
-                    GrpcCode::InvalidArgument | GrpcCode::Unimplemented
-                ) =>
-            {
-                Vec::new()
-            }
-            Err(status) => return Err(SpannerError::Grpc(status)),
-        };
-
-        let mut results: Vec<SpannerQueryResult> = Vec::new();
-        if partition_tokens.is_empty() {
-            let single = self
-                .execute_streaming_sql(
-                    sql,
-                    params,
-                    &SpannerTransactionSelector::Id(tx_id),
-                    0,
-                    None,
-                    data_boost_enabled,
-                    false,
-                    None,
-                    None,
-                )
-                .await?;
-            results.push(single);
-        } else {
-            let mut handles = Vec::with_capacity(partition_tokens.len());
-            for token in partition_tokens {
-                let client = Arc::clone(self);
-                let sql_owned = sql.to_string();
-                let params_owned = params.to_vec();
-                let tx_id_owned = tx_id.clone();
-                handles.push(tokio::spawn(async move {
-                    client
-                        .execute_streaming_sql(
-                            &sql_owned,
-                            &params_owned,
-                            &SpannerTransactionSelector::Id(tx_id_owned),
-                            0,
-                            Some(&token),
-                            data_boost_enabled,
-                            false,
-                            None,
-                            None,
-                        )
-                        .await
-                }));
-            }
-            for h in handles {
-                let part_res = h.await.map_err(|e| {
-                    SpannerError::Protocol(format!("partition task panicked: {e}"))
-                })??;
-                results.push(part_res);
-            }
-        }
-
-        let columns = results
-            .iter()
-            .find(|r| !r.columns.is_empty())
-            .map(|r| r.columns.clone())
-            .unwrap_or_default();
-        let schema_frame = encode_encapsulated_arrow_ipc_frame(
-            1,
-            &serde_json::to_vec(&columns).unwrap_or_default(),
-        );
-        let shm_seq = NEXT_SPANNER_SHM_SEQ.fetch_add(1, Ordering::Relaxed);
-        let shm_name = format!("/vtb-spn-arrow-{}-{shm_seq}", std::process::id());
-        let mut writer = ShmArrowStreamWriter::create(&shm_name, 64 * 1024, &schema_frame)
-            .map_err(SpannerError::Shm)?;
-
-        for part in &results {
-            if part.rows.is_empty() {
-                continue;
-            }
-            let json_rows: Vec<Vec<serde_json::Value>> = part
-                .rows
-                .iter()
-                .map(|row| row.iter().map(SpannerValue::to_serde_json).collect())
-                .collect();
-            let batch_body = serde_json::to_vec(&json_rows).unwrap_or_default();
-            let batch_frame = encode_encapsulated_arrow_ipc_frame(3, &batch_body);
-            writer
-                .append_ipc_frame(&batch_frame, part.rows.len())
-                .map_err(SpannerError::Shm)?;
-        }
-
-        let total_rows = writer.row_count();
-        let (norm_name, byte_len, region) = writer.finish().map_err(SpannerError::Shm)?;
-        Ok((norm_name, byte_len, total_rows, region))
-    }
-}
-
-/// Build an encapsulated Arrow IPC frame (`[0xFF, 0xFF, 0xFF, 0xFF]` + `meta_len_le32` +
-/// 24-byte FlatBuffer Message header with `header_type` + 8-byte aligned `body`).
-pub fn encode_encapsulated_arrow_ipc_frame(header_type: u8, body: &[u8]) -> Vec<u8> {
-    let padded_body_len = (body.len() + 7) & !7;
-    let mut flatbuf = [0u8; 24];
-    flatbuf[0..4].copy_from_slice(&12i32.to_le_bytes());
-    flatbuf[4..6].copy_from_slice(&8u16.to_le_bytes());
-    flatbuf[6..8].copy_from_slice(&8u16.to_le_bytes());
-    flatbuf[8..10].copy_from_slice(&0u16.to_le_bytes());
-    flatbuf[10..12].copy_from_slice(&4u16.to_le_bytes());
-    flatbuf[12..16].copy_from_slice(&8i32.to_le_bytes());
-    flatbuf[16] = header_type;
-
-    let mut out = Vec::with_capacity(8 + flatbuf.len() + padded_body_len);
-    out.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
-    out.extend_from_slice(&(flatbuf.len() as i32).to_le_bytes());
-    out.extend_from_slice(&flatbuf);
-    out.extend_from_slice(body);
-    out.resize(8 + flatbuf.len() + padded_body_len, 0u8);
-    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3231,27 +3415,6 @@ fn decode_batch_write_response(bytes: &[u8]) -> Result<SpannerBatchWriteResult, 
         status_message,
         commit_timestamp_micros: commit_ts,
     })
-}
-
-fn decode_partition_response(bytes: &[u8]) -> Result<Vec<Vec<u8>>, SpannerError> {
-    let mut r = ProtoReader::new(bytes);
-    let mut tokens = Vec::new();
-    while let Some((field, wt)) = r.next_tag()? {
-        if field == 1 && wt == WireType::LengthDelimited {
-            let pb = r.read_bytes()?;
-            let mut pr = ProtoReader::new(pb);
-            while let Some((pf, pwt)) = pr.next_tag()? {
-                if pf == 1 && pwt == WireType::LengthDelimited {
-                    tokens.push(pr.read_bytes()?.to_vec());
-                } else {
-                    pr.skip_field(pwt)?;
-                }
-            }
-        } else {
-            r.skip_field(wt)?;
-        }
-    }
-    Ok(tokens)
 }
 
 fn decode_lro_operation(bytes: &[u8]) -> Result<(String, bool, Option<GrpcStatus>), SpannerError> {

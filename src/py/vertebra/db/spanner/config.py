@@ -308,7 +308,7 @@ class SpannerConfig(BaseDatabaseConfig, frozen=True, gc=False):
     """Maximum entries retained in the shared-memory SQL statement plan cache."""
 
     ca_pem: bytes | None = None
-    """Optional PEM-encoded root certificate bundle for custom TLS verification."""
+    """PEM root certificates for a non-googleapis `https://` endpoint (Spanner Omni or a private test server). Rejected for `*.googleapis.com` endpoints, which use the system trust store, and for `http://` endpoints."""
 
     broker: Any = None
     """Optional shared-memory `LeaseBroker` instance."""

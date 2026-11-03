@@ -13,7 +13,6 @@ from typing import Any
 import pytest
 
 from vertebra.db import (
-    ArrowCursor,
     AsyncSpannerDriver,
     DatabaseRegistry,
     DataFusionEngine,
@@ -277,7 +276,7 @@ class FakeSpannerClient:
         """Apply Spanner DDL statements asynchronously against the test double."""
         return self.update_ddl(statements)
 
-    def execute_partitioned_arrow(
+    def partitioned_query(
         self,
         sql: str,
         params_json: str | None = None,
@@ -285,17 +284,12 @@ class FakeSpannerClient:
         data_boost_enabled: bool = True,
         staleness_mode: str = "strong",
         staleness_ms: int = 0,
-    ) -> ArrowCursor:
-        """Execute a partitioned Arrow read against the test double."""
+    ) -> dict[str, Any]:
+        """Execute a partitioned query against the test double."""
         _ = (max_partitions, data_boost_enabled)
-        res = self.query(sql, params_json, staleness_mode, staleness_ms)
-        return ArrowCursor.from_rows(
-            res.get("rows", ()),
-            columns=[str(c) for c in res.get("columns", ())],
-            threshold_rows=1,
-        )
+        return self.query(sql, params_json, staleness_mode, staleness_ms)
 
-    async def execute_partitioned_arrow_async(
+    async def partitioned_query_async(
         self,
         sql: str,
         params_json: str | None = None,
@@ -303,9 +297,9 @@ class FakeSpannerClient:
         data_boost_enabled: bool = True,
         staleness_mode: str = "strong",
         staleness_ms: int = 0,
-    ) -> ArrowCursor:
-        """Execute an asynchronous partitioned Arrow read against the test double."""
-        return self.execute_partitioned_arrow(
+    ) -> dict[str, Any]:
+        """Execute an asynchronous partitioned query against the test double."""
+        return self.partitioned_query(
             sql,
             params_json,
             max_partitions,

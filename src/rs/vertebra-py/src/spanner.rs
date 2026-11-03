@@ -1,7 +1,7 @@
 //! PyO3 bindings for `vertebra_db::spanner` (`SpannerClient`, multiplexed session management,
 //! `ReadOnly` staleness queries, multiplexed `ReadWrite` transactions with `ExecuteBatchDml` and
 //! `MultiplexedSessionPrecommitToken` tracking, `PartitionedDml`, `BatchWrite`, `UpdateDatabaseDdl`,
-//! and parallel `PartitionQuery` + Data Boost into `VTBARROW` shared-memory `ArrowCursor`).
+//! and parallel `PartitionQuery` + Data Boost queries).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,7 +17,6 @@ use vertebra_db::spanner::{
 };
 
 use crate::completion::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task};
-use crate::db::ArrowCursor;
 
 fn spanner_err_to_py(err: SpannerError) -> PyErr {
     match err {
@@ -100,11 +99,6 @@ fn query_result_to_py(py: Python<'_>, res: SpannerQueryResult) -> PyResult<Py<Py
         rows_list.append(row_list)?;
     }
     dict.set_item("rows", rows_list)?;
-    dict.set_item(
-        "transaction_id",
-        res.transaction_id.as_deref().map(|b| PyBytes::new(py, b)),
-    )?;
-    dict.set_item("read_timestamp_micros", res.read_timestamp_micros)?;
     dict.set_item("row_count_exact", res.row_count_exact)?;
     dict.set_item("row_count_lower_bound", res.row_count_lower_bound)?;
     Ok(dict.into_any().unbind())
@@ -399,7 +393,7 @@ impl PySpannerClient {
             .detach(|| {
                 block_on_db(async move {
                     client
-                        .query_read_only(&sql_owned, &params, staleness)
+                        .query(&sql_owned, &params, staleness)
                         .await
                         .map_err(|e| e.to_string())
                 })
@@ -423,7 +417,7 @@ impl PySpannerClient {
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task(
             py,
-            async move { client.query_read_only(&sql, &params, staleness).await },
+            async move { client.query(&sql, &params, staleness).await },
             query_result_to_py,
             spanner_err_to_py,
         )
@@ -767,7 +761,7 @@ impl PySpannerClient {
         staleness_ms=0
     ))]
     #[allow(clippy::too_many_arguments)]
-    fn execute_partitioned_arrow(
+    fn partitioned_query(
         &self,
         py: Python<'_>,
         sql: &str,
@@ -776,16 +770,16 @@ impl PySpannerClient {
         data_boost_enabled: bool,
         staleness_mode: &str,
         staleness_ms: i64,
-    ) -> PyResult<ArrowCursor> {
+    ) -> PyResult<Py<PyAny>> {
         let params = parse_spanner_parameters_json(params_json).map_err(spanner_err_to_py)?;
         let staleness = parse_staleness(staleness_mode, staleness_ms);
         let client = Arc::clone(&self.inner);
         let sql_owned = sql.to_string();
-        let (shm_name, byte_len, row_count, region) = py
+        let res = py
             .detach(|| {
                 block_on_db(async move {
                     client
-                        .execute_partitioned_arrow(
+                        .partitioned_query(
                             &sql_owned,
                             &params,
                             max_partitions,
@@ -797,9 +791,7 @@ impl PySpannerClient {
                 })
             })
             .map_err(PyRuntimeError::new_err)?;
-        Ok(ArrowCursor::from_shm_region(
-            shm_name, byte_len, row_count, region,
-        ))
+        query_result_to_py(py, res)
     }
 
     #[pyo3(signature = (
@@ -811,7 +803,7 @@ impl PySpannerClient {
         staleness_ms=0
     ))]
     #[allow(clippy::too_many_arguments)]
-    fn execute_partitioned_arrow_async(
+    fn partitioned_query_async(
         &self,
         py: Python<'_>,
         sql: String,
@@ -829,19 +821,10 @@ impl PySpannerClient {
             py,
             async move {
                 client
-                    .execute_partitioned_arrow(
-                        &sql,
-                        &params,
-                        max_partitions,
-                        data_boost_enabled,
-                        staleness,
-                    )
+                    .partitioned_query(&sql, &params, max_partitions, data_boost_enabled, staleness)
                     .await
             },
-            |py, (shm_name, byte_len, row_count, region)| {
-                let cursor = ArrowCursor::from_shm_region(shm_name, byte_len, row_count, region);
-                Ok(Py::new(py, cursor)?.into_any())
-            },
+            query_result_to_py,
             spanner_err_to_py,
         )
     }

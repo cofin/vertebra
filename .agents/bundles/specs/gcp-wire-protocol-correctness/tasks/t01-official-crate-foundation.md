@@ -2,7 +2,7 @@
 type: Task
 id: gcp-wire-protocol-correctness:t01
 title: Official crate dependencies and GCP credential bridge
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -16,18 +16,18 @@ tests:
   - src/rs/vertebra-db/tests/gcp_credentials_tests.rs
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-03T18:15:39Z
+last_verified_commit: 5494583
+verification_evidence: "RED: compile error E0433/E0432 on google_cloud_auth and vertebra_db::gcp; GREEN: 4 passed in gcp_credentials_tests.rs, cargo clippy -p vertebra-db --all-targets -- -D warnings, cargo fmt --check, and all cargo tree/grep feature gates passed"
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T16:10:00Z
-commit: null
+updated_at: 2026-11-03T18:16:22Z
+commit: fadb99e
 tags: [rust, gcp, dependencies, auth]
 ---
 
@@ -208,7 +208,7 @@ Add the official Google Cloud Rust crates to `vertebra-db` with every default fe
 
 ## Acceptance Criteria
 
-- [ ] R1: official crates added with default features off; no monitoring exporter; `tonic` has `tls-ring` and `tls-webpki-roots`; gates exit 0.
-- [ ] R2: bearer and quota headers; anonymous without a cache; idempotent ring provider install.
+- [x] R1: official crates added with default features off; no monitoring exporter; `tonic` has `tls-ring` and `tls-webpki-roots`; gates exit 0.
+- [x] R2: bearer and quota headers; anonymous without a cache; idempotent ring provider install.
 
 ## Notes & Discoveries

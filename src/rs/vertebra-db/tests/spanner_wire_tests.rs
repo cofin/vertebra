@@ -3,6 +3,7 @@
 //! `resume_token` replay, `ReadWrite` transaction state machine with `MultiplexedSessionPrecommitToken`
 //! and wound-wait `Aborted` retry, and parallel `PartitionQuery` + Data Boost into `VTBARROW` SHM).
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,32 +12,487 @@ use std::sync::{Arc, Mutex};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
+use google_cloud_auth::credentials::anonymous::Builder as Anonymous;
+use google_cloud_gax::error::Error as GaxError;
+use google_cloud_gax::error::rpc::{Code as RpcCode, Status as RpcStatus};
+use google_cloud_gax::options::RequestOptions;
+use google_cloud_gax::response::Response as GaxResponse;
+use google_cloud_gax::streaming::ResponseStream;
+use google_cloud_spanner::channel_pool::StaticChannelPoolConfig;
+use google_cloud_spanner::client::{Spanner, SpannerBuilderExt};
+use google_cloud_spanner::model;
+use google_cloud_spanner::stub::Spanner as SpannerStub;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::server::conn::http2;
 use hyper::service::service_fn;
 use hyper::{HeaderMap, Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use prost::Message as _;
 use tokio::net::TcpListener;
-use vertebra_db::arrow_shm::{ARROW_IPC_EOS_MARKER, read_shm_arrow_frame, release_shm_arrow_frame};
-use vertebra_db::grpc::{
-    DEFAULT_CLIENT_MAX_GRPC_MESSAGE_SIZE, ProtoReader, ProtoWriter, WireType, encode_lpm_frame,
-};
+use tokio::sync::mpsc;
+use vertebra_db::grpc::{DEFAULT_CLIENT_MAX_GRPC_MESSAGE_SIZE, ProtoWriter, encode_lpm_frame};
 use vertebra_db::spanner::{
     MultiplexedSessionPrecommitToken, PartialResultSetAssembler, PartialResultSetFrame,
-    ProtobufValue, SpannerBatchDmlStatement, SpannerClient, SpannerClientConfig, SpannerMutation,
-    SpannerQueryParameter, SpannerReadWriteTransaction, SpannerStaleness, SpannerStructField,
-    SpannerType, SpannerTypeCode, SpannerValue, rewrite_spangres_placeholders,
+    ProtobufValue, SpannerBatchDmlStatement, SpannerClient, SpannerClientConfig, SpannerError,
+    SpannerMutation, SpannerQueryParameter, SpannerReadWriteTransaction, SpannerStaleness,
+    SpannerStructField, SpannerType, SpannerTypeCode, SpannerValue, rewrite_spangres_placeholders,
 };
 
-#[derive(Clone, Debug)]
-struct RecordedRpc {
-    path: String,
-    route_to_leader: Option<String>,
-    request_id: Option<String>,
-    resource_prefix: Option<String>,
-    routing_params: Option<String>,
-    body: Vec<u8>,
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProstSession {
+    #[prost(string, tag = "1")]
+    name: String,
+    #[prost(bool, tag = "6")]
+    multiplexed: bool,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProstTransaction {
+    #[prost(bytes = "vec", tag = "1")]
+    id: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProstPartitionOptions {
+    #[prost(int64, tag = "1")]
+    partition_size_bytes: i64,
+    #[prost(int64, tag = "2")]
+    max_partitions: i64,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProstPartitionQueryRequest {
+    #[prost(string, tag = "1")]
+    session: String,
+    #[prost(string, tag = "3")]
+    sql: String,
+    #[prost(message, optional, tag = "6")]
+    partition_options: Option<ProstPartitionOptions>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProstPartition {
+    #[prost(bytes = "vec", tag = "1")]
+    partition_token: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProstPartitionResponse {
+    #[prost(message, repeated, tag = "1")]
+    partitions: Vec<ProstPartition>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProstType {
+    #[prost(int32, tag = "1")]
+    code: i32,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProstStructField {
+    #[prost(string, tag = "1")]
+    name: String,
+    #[prost(message, optional, tag = "2")]
+    r#type: Option<ProstType>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProstStructType {
+    #[prost(message, repeated, tag = "1")]
+    fields: Vec<ProstStructField>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProstResultSetMetadata {
+    #[prost(message, optional, tag = "1")]
+    row_type: Option<ProstStructType>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProstResultSetStats {
+    #[prost(int64, optional, tag = "3")]
+    row_count_exact: Option<i64>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProstExecuteSqlRequest {
+    #[prost(string, tag = "1")]
+    session: String,
+    #[prost(string, tag = "3")]
+    sql: String,
+    #[prost(message, optional, tag = "4")]
+    params: Option<prost_types::Struct>,
+    #[prost(map = "string, message", tag = "5")]
+    param_types: HashMap<String, ProstType>,
+    #[prost(bytes = "vec", tag = "8")]
+    partition_token: Vec<u8>,
+    #[prost(bool, tag = "16")]
+    data_boost_enabled: bool,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProstPartialResultSet {
+    #[prost(message, optional, tag = "1")]
+    metadata: Option<ProstResultSetMetadata>,
+    #[prost(message, repeated, tag = "2")]
+    values: Vec<prost_types::Value>,
+    #[prost(message, optional, tag = "5")]
+    stats: Option<ProstResultSetStats>,
+}
+
+fn prost_lpm_frame<M: prost::Message>(msg: &M) -> Vec<u8> {
+    let encoded = msg.encode_to_vec();
+    let len = encoded.len() as u32;
+    let mut out = Vec::with_capacity(5 + encoded.len());
+    out.push(0);
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(&encoded);
+    out
+}
+
+fn prost_grpc_ok(frames: Vec<Vec<u8>>) -> Response<Full<Bytes>> {
+    let payload = frames.into_iter().flatten().collect::<Vec<u8>>();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/grpc")
+        .header("grpc-status", "0")
+        .body(Full::new(Bytes::from(payload)))
+        .expect("grpc ok")
+}
+
+fn prost_grpc_err(code: i32, message: &str) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/grpc")
+        .header("grpc-status", code.to_string())
+        .header("grpc-message", message)
+        .body(Full::new(Bytes::new()))
+        .expect("grpc err")
+}
+
+fn prost_value_to_json(val: &prost_types::Value) -> serde_json::Value {
+    match &val.kind {
+        Some(prost_types::value::Kind::NullValue(_)) | None => serde_json::Value::Null,
+        Some(prost_types::value::Kind::BoolValue(b)) => serde_json::Value::Bool(*b),
+        Some(prost_types::value::Kind::NumberValue(n)) => serde_json::json!(*n),
+        Some(prost_types::value::Kind::StringValue(s)) => serde_json::Value::String(s.clone()),
+        Some(prost_types::value::Kind::ListValue(list)) => {
+            serde_json::Value::Array(list.values.iter().map(prost_value_to_json).collect())
+        }
+        Some(prost_types::value::Kind::StructValue(st)) => serde_json::Value::Object(
+            st.fields
+                .iter()
+                .map(|(k, v)| (k.clone(), prost_value_to_json(v)))
+                .collect(),
+        ),
+    }
+}
+
+fn json_to_prost_value(val: &serde_json::Value) -> prost_types::Value {
+    let kind = match val {
+        serde_json::Value::Null => prost_types::value::Kind::NullValue(0),
+        serde_json::Value::Bool(b) => prost_types::value::Kind::BoolValue(*b),
+        serde_json::Value::Number(n) => {
+            prost_types::value::Kind::NumberValue(n.as_f64().unwrap_or(0.0))
+        }
+        serde_json::Value::String(s) => prost_types::value::Kind::StringValue(s.clone()),
+        serde_json::Value::Array(items) => {
+            prost_types::value::Kind::ListValue(prost_types::ListValue {
+                values: items.iter().map(json_to_prost_value).collect(),
+            })
+        }
+        serde_json::Value::Object(map) => {
+            prost_types::value::Kind::StructValue(prost_types::Struct {
+                fields: map
+                    .iter()
+                    .map(|(k, v)| (k.clone(), json_to_prost_value(v)))
+                    .collect(),
+            })
+        }
+    };
+    prost_types::Value { kind: Some(kind) }
+}
+
+#[derive(Clone, Debug, Default)]
+struct RecordingSpanner {
+    sql_requests: Arc<Mutex<Vec<model::ExecuteSqlRequest>>>,
+    partition_requests: Arc<Mutex<Vec<model::PartitionQueryRequest>>>,
+    partitions: Vec<Vec<u8>>,
+    partition_error: bool,
+}
+
+impl google_cloud_spanner::stub::Spanner for RecordingSpanner {
+    async fn create_session(
+        &self,
+        _req: model::CreateSessionRequest,
+        _options: RequestOptions,
+    ) -> google_cloud_gax::Result<GaxResponse<model::Session>> {
+        Ok(GaxResponse::from(
+            model::Session::new()
+                .set_name("projects/p/instances/i/databases/d/sessions/mux1")
+                .set_multiplexed(true),
+        ))
+    }
+
+    async fn begin_transaction(
+        &self,
+        _req: model::BeginTransactionRequest,
+        _options: RequestOptions,
+    ) -> google_cloud_gax::Result<GaxResponse<model::Transaction>> {
+        Ok(GaxResponse::from(
+            model::Transaction::new().set_id(b"ro-tx".to_vec()),
+        ))
+    }
+
+    async fn partition_query(
+        &self,
+        req: model::PartitionQueryRequest,
+        _options: RequestOptions,
+    ) -> google_cloud_gax::Result<GaxResponse<model::PartitionResponse>> {
+        self.partition_requests.lock().unwrap().push(req);
+        if self.partition_error {
+            return Err(GaxError::service(
+                RpcStatus::default()
+                    .set_code(RpcCode::InvalidArgument)
+                    .set_message("query is not root partitionable"),
+            ));
+        }
+        let partitions = self
+            .partitions
+            .iter()
+            .cloned()
+            .map(|token| model::Partition::new().set_partition_token(token))
+            .collect::<Vec<_>>();
+        Ok(GaxResponse::from(
+            model::PartitionResponse::new().set_partitions(partitions),
+        ))
+    }
+
+    async fn execute_streaming_sql(
+        &self,
+        req: model::ExecuteSqlRequest,
+        _options: RequestOptions,
+    ) -> google_cloud_gax::Result<ResponseStream<model::PartialResultSet>> {
+        let token = req.partition_token.to_vec();
+        self.sql_requests.lock().unwrap().push(req);
+        let values = match token.as_slice() {
+            b"p0" => vec![
+                serde_json::Value::String("1".into()),
+                serde_json::Value::String("a".into()),
+            ],
+            b"p1" => vec![
+                serde_json::Value::String("2".into()),
+                serde_json::Value::String("b".into()),
+            ],
+            _ => vec![
+                serde_json::Value::String("1".into()),
+                serde_json::Value::String("a".into()),
+                serde_json::Value::String("2".into()),
+                serde_json::Value::String("b".into()),
+            ],
+        };
+        let row_type = model::StructType::new().set_fields(vec![
+            model::struct_type::Field::new()
+                .set_name("id")
+                .set_type(model::Type::new().set_code(model::TypeCode::Int64)),
+            model::struct_type::Field::new()
+                .set_name("name")
+                .set_type(model::Type::new().set_code(model::TypeCode::String)),
+        ]);
+        let prs = model::PartialResultSet::new()
+            .set_metadata(model::ResultSetMetadata::new().set_row_type(row_type))
+            .set_stats(model::ResultSetStats::new().set_row_count_exact(2))
+            .set_values(values);
+        let (tx, rx) = mpsc::channel(2);
+        tx.try_send(Ok(prs)).expect("send partial result set");
+        drop(tx);
+        Ok(ResponseStream::from(rx))
+    }
+}
+
+async fn stub_client(stub: RecordingSpanner) -> SpannerClient {
+    if stub.partition_error {
+        return SpannerClient::with_clients(
+            Spanner::from_stub(stub),
+            None,
+            SpannerClientConfig::new("projects/p/instances/i/databases/d"),
+        )
+        .expect("client");
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let stub = stub.clone();
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let svc = service_fn(move |req: Request<Incoming>| {
+                    let stub = stub.clone();
+                    async move {
+                        let path = req.uri().path().to_string();
+                        let raw = req
+                            .into_body()
+                            .collect()
+                            .await
+                            .map(|c| c.to_bytes().to_vec())
+                            .unwrap_or_default();
+                        let payload = if raw.len() >= 5 { &raw[5..] } else { &raw[..] };
+                        let resp = match path.as_str() {
+                            "/google.spanner.v1.Spanner/CreateSession" => {
+                                let s = SpannerStub::create_session(
+                                    &stub,
+                                    model::CreateSessionRequest::new(),
+                                    RequestOptions::default(),
+                                )
+                                .await
+                                .expect("create_session")
+                                .into_body();
+                                prost_grpc_ok(vec![prost_lpm_frame(&ProstSession {
+                                    name: s.name,
+                                    multiplexed: s.multiplexed,
+                                })])
+                            }
+                            "/google.spanner.v1.Spanner/BeginTransaction" => {
+                                let tx = SpannerStub::begin_transaction(
+                                    &stub,
+                                    model::BeginTransactionRequest::new(),
+                                    RequestOptions::default(),
+                                )
+                                .await
+                                .expect("begin_transaction")
+                                .into_body();
+                                prost_grpc_ok(vec![prost_lpm_frame(&ProstTransaction {
+                                    id: tx.id.to_vec(),
+                                })])
+                            }
+                            "/google.spanner.v1.Spanner/PartitionQuery" => {
+                                let decoded = ProstPartitionQueryRequest::decode(payload)
+                                    .expect("decode PartitionQueryRequest");
+                                let mut mreq = model::PartitionQueryRequest::new()
+                                    .set_session(decoded.session)
+                                    .set_sql(decoded.sql);
+                                if let Some(opts) = decoded.partition_options {
+                                    mreq = mreq.set_partition_options(
+                                        model::PartitionOptions::new()
+                                            .set_partition_size_bytes(opts.partition_size_bytes)
+                                            .set_max_partitions(opts.max_partitions),
+                                    );
+                                }
+                                match SpannerStub::partition_query(
+                                    &stub,
+                                    mreq,
+                                    RequestOptions::default(),
+                                )
+                                .await
+                                {
+                                    Ok(resp) => {
+                                        let body = resp.into_body();
+                                        let partitions = body
+                                            .partitions
+                                            .into_iter()
+                                            .map(|p| ProstPartition {
+                                                partition_token: p.partition_token.to_vec(),
+                                            })
+                                            .collect();
+                                        prost_grpc_ok(vec![prost_lpm_frame(
+                                            &ProstPartitionResponse { partitions },
+                                        )])
+                                    }
+                                    Err(err) => prost_grpc_err(3, &err.to_string()),
+                                }
+                            }
+                            "/google.spanner.v1.Spanner/ExecuteStreamingSql" => {
+                                let decoded = ProstExecuteSqlRequest::decode(payload)
+                                    .expect("decode ExecuteSqlRequest");
+                                let mut mreq = model::ExecuteSqlRequest::new()
+                                    .set_session(decoded.session)
+                                    .set_sql(decoded.sql)
+                                    .set_partition_token(decoded.partition_token)
+                                    .set_data_boost_enabled(decoded.data_boost_enabled);
+                                if let Some(params) = decoded.params {
+                                    let map = params
+                                        .fields
+                                        .iter()
+                                        .map(|(k, v)| (k.clone(), prost_value_to_json(v)))
+                                        .collect::<serde_json::Map<String, serde_json::Value>>();
+                                    mreq = mreq.set_params(map);
+                                }
+                                if !decoded.param_types.is_empty() {
+                                    let pt = decoded
+                                        .param_types
+                                        .into_iter()
+                                        .map(|(k, v)| {
+                                            (
+                                                k,
+                                                model::Type::new()
+                                                    .set_code(model::TypeCode::from(v.code)),
+                                            )
+                                        })
+                                        .collect::<HashMap<String, model::Type>>();
+                                    mreq = mreq.set_param_types(pt);
+                                }
+                                let mut stream = SpannerStub::execute_streaming_sql(
+                                    &stub,
+                                    mreq,
+                                    RequestOptions::default(),
+                                )
+                                .await
+                                .expect("execute_streaming_sql");
+                                let mut frames = Vec::new();
+                                while let Some(item) = stream.next().await {
+                                    let prs = item.expect("prs item");
+                                    let metadata = prs.metadata.map(|m| ProstResultSetMetadata {
+                                        row_type: m.row_type.map(|rt| ProstStructType {
+                                            fields: rt
+                                                .fields
+                                                .into_iter()
+                                                .map(|f| ProstStructField {
+                                                    name: f.name,
+                                                    r#type: f.r#type.map(|t| ProstType {
+                                                        code: t.code.value().unwrap_or(0),
+                                                    }),
+                                                })
+                                                .collect(),
+                                        }),
+                                    });
+                                    let stats = prs.stats.map(|s| ProstResultSetStats {
+                                        row_count_exact: s.row_count_exact().copied(),
+                                    });
+                                    let values =
+                                        prs.values.iter().map(json_to_prost_value).collect();
+                                    frames.push(prost_lpm_frame(&ProstPartialResultSet {
+                                        metadata,
+                                        values,
+                                        stats,
+                                    }));
+                                }
+                                prost_grpc_ok(frames)
+                            }
+                            _ => prost_grpc_err(12, "unimplemented"),
+                        };
+                        Ok::<_, Infallible>(resp)
+                    }
+                });
+                let _ = http2::Builder::new(TokioExecutor::new())
+                    .serve_connection(io, svc)
+                    .await;
+            });
+        }
+    });
+    let spanner = Spanner::builder()
+        .with_endpoint(format!("http://{addr}"))
+        .with_credentials(Anonymous::new().build())
+        .with_channel_pool(StaticChannelPoolConfig::new(1))
+        .build()
+        .await
+        .expect("build spanner");
+    SpannerClient::with_clients(
+        spanner,
+        None,
+        SpannerClientConfig::new("projects/p/instances/i/databases/d"),
+    )
+    .expect("client")
 }
 
 fn strip_lpm_prefix(raw: &[u8]) -> &[u8] {
@@ -289,172 +745,141 @@ fn test_spangres_placeholder_rewriter() {
 }
 
 #[tokio::test]
-async fn test_multiplexed_session_caching_routing_headers_and_resume_token_replay() {
-    let rpcs: Arc<Mutex<Vec<RecordedRpc>>> = Arc::new(Mutex::new(Vec::new()));
-    let stream_calls = Arc::new(AtomicUsize::new(0));
-
-    let rpcs_clone = Arc::clone(&rpcs);
-    let stream_calls_clone = Arc::clone(&stream_calls);
-
-    let addr = start_mock_spanner_h2c_server(move |path, headers, raw_body| {
-        let body = strip_lpm_prefix(&raw_body).to_vec();
-        rpcs_clone.lock().unwrap().push(RecordedRpc {
-            path: path.clone(),
-            route_to_leader: headers
-                .get("x-goog-spanner-route-to-leader")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string),
-            request_id: headers
-                .get("x-goog-spanner-request-id")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string),
-            resource_prefix: headers
-                .get("google-cloud-resource-prefix")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string),
-            routing_params: headers
-                .get("x-goog-request-params")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string),
-            body: body.clone(),
-        });
-
-        match path.as_str() {
-            "/google.spanner.v1.Spanner/CreateSession" => {
-                let mut w = ProtoWriter::new();
-                w.write_str(
-                    1,
-                    "projects/p1/instances/i1/databases/d1/sessions/mux-sess-1",
-                );
-                w.write_bool(6, true);
-                grpc_ok_response(vec![w.finish()])
-            }
-            "/google.spanner.v1.Spanner/ExecuteStreamingSql" => {
-                let call_idx = stream_calls_clone.fetch_add(1, Ordering::SeqCst);
-                if call_idx == 0 {
-                    let mut prs1 = ProtoWriter::new();
-                    prs1.write_nested(1, |mw| {
-                        mw.write_nested(1, |stw| {
-                            stw.write_nested(1, |fw| {
-                                fw.write_str(1, "id");
-                                fw.write_nested(2, |tw| tw.write_i32(1, 2)); // INT64
-                            });
-                            stw.write_nested(1, |fw| {
-                                fw.write_str(1, "name");
-                                fw.write_nested(2, |tw| tw.write_i32(1, 6)); // STRING
-                            });
-                        });
-                    });
-                    prs1.write_nested(2, |vw| vw.write_str(3, "101"));
-                    prs1.write_nested(2, |vw| vw.write_str(3, "Ada "));
-                    prs1.write_bool(3, true); // chunked_value = true
-
-                    let mut prs2 = ProtoWriter::new();
-                    prs2.write_nested(2, |vw| vw.write_str(3, "Lovelace"));
-                    prs2.write_bool(3, false);
-                    prs2.write_bytes(4, b"tok-1");
-                    prs2.write_bool(9, true);
-
-                    grpc_ok_response(vec![prs1.finish(), prs2.finish()])
-                } else {
-                    let mut prs = ProtoWriter::new();
-                    prs.write_nested(1, |mw| {
-                        mw.write_nested(1, |stw| {
-                            stw.write_nested(1, |fw| {
-                                fw.write_str(1, "id");
-                                fw.write_nested(2, |tw| tw.write_i32(1, 2));
-                            });
-                        });
-                    });
-                    prs.write_nested(2, |vw| vw.write_str(3, "202"));
-                    prs.write_bytes(4, b"tok-2");
-                    grpc_ok_response(vec![prs.finish()])
-                }
-            }
-            _ => grpc_error_response(12, "unimplemented", None),
-        }
-    })
-    .await;
-
-    let mut cfg = SpannerClientConfig::new("projects/p1/instances/i1/databases/d1");
-    cfg.endpoint = format!("http://{}:{}", addr.ip(), addr.port());
-    cfg.database_role = Some("analytics_reader".to_string());
-    let client = SpannerClient::new(cfg).expect("create SpannerClient");
-
-    let res1 = client
-        .query_read_only(
-            "SELECT id, name FROM users WHERE id = @id",
-            &[SpannerQueryParameter::from_value(
-                "id",
-                &SpannerValue::Int64(101),
-            )],
-            SpannerStaleness::ExactStalenessMs(5_000),
+async fn query_maps_staleness_params_and_decodes_rows() {
+    let stub = RecordingSpanner::default();
+    let client = stub_client(stub.clone()).await;
+    let params = vec![SpannerQueryParameter::from_value(
+        "p1",
+        &SpannerValue::Int64(7),
+    )];
+    let result = client
+        .query(
+            "SELECT id, name FROM t WHERE id > @p1",
+            &params,
+            SpannerStaleness::MaxStalenessMs(15_000),
         )
         .await
-        .expect("query_read_only 1");
-    assert_eq!(res1.columns, vec!["id", "name"]);
-    assert_eq!(res1.rows.len(), 1);
-    assert_eq!(res1.rows[0][0], SpannerValue::Int64(101));
+        .expect("query");
+    assert_eq!(result.columns, vec!["id".to_string(), "name".to_string()]);
     assert_eq!(
-        res1.rows[0][1],
-        SpannerValue::String("Ada Lovelace".to_string())
+        result.rows,
+        vec![
+            vec![SpannerValue::Int64(1), SpannerValue::String("a".into())],
+            vec![SpannerValue::Int64(2), SpannerValue::String("b".into())],
+        ]
     );
+    assert_eq!(result.row_count_exact, Some(2));
+    let sent = stub.sql_requests.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].sql, "SELECT id, name FROM t WHERE id > @p1");
+    assert!(
+        sent[0]
+            .params
+            .as_ref()
+            .is_some_and(|p| p.contains_key("p1"))
+    );
+    assert_eq!(sent[0].param_types["p1"].code, model::TypeCode::Int64);
+}
 
-    let res2 = client
-        .query_read_only("SELECT id FROM users", &[], SpannerStaleness::Strong)
+#[tokio::test]
+async fn query_rewrites_positional_placeholders_for_googlesql() {
+    let stub = RecordingSpanner::default();
+    let client = stub_client(stub.clone()).await;
+    let params = vec![SpannerQueryParameter::from_value(
+        "p1",
+        &SpannerValue::Int64(7),
+    )];
+    client
+        .query(
+            "SELECT id, name FROM t WHERE id > $1",
+            &params,
+            SpannerStaleness::Strong,
+        )
         .await
-        .expect("query_read_only 2");
-    assert_eq!(res2.rows.len(), 1);
-    assert_eq!(res2.rows[0][0], SpannerValue::Int64(202));
+        .expect("query");
+    assert_eq!(
+        stub.sql_requests.lock().unwrap()[0].sql,
+        "SELECT id, name FROM t WHERE id > @p1"
+    );
+}
 
-    let log = rpcs.lock().unwrap();
-    let create_sessions: Vec<&RecordedRpc> = log
-        .iter()
-        .filter(|r| r.path == "/google.spanner.v1.Spanner/CreateSession")
-        .collect();
+#[tokio::test]
+async fn partitioned_query_sets_data_boost_and_concatenates_partitions() {
+    let stub = RecordingSpanner {
+        partitions: vec![b"p0".to_vec(), b"p1".to_vec()],
+        ..Default::default()
+    };
+    let client = stub_client(stub.clone()).await;
+    let result = client
+        .partitioned_query(
+            "SELECT id, name FROM t",
+            &[],
+            4,
+            true,
+            SpannerStaleness::Strong,
+        )
+        .await
+        .expect("partitioned query");
     assert_eq!(
-        create_sessions.len(),
-        1,
-        "multiplexed session must be cached and reused across queries"
+        result.rows,
+        vec![
+            vec![SpannerValue::Int64(1), SpannerValue::String("a".into())],
+            vec![SpannerValue::Int64(2), SpannerValue::String("b".into())],
+        ]
     );
     assert_eq!(
-        create_sessions[0].route_to_leader.as_deref(),
-        Some("true"),
-        "CreateSession must set x-goog-spanner-route-to-leader: true"
+        stub.partition_requests.lock().unwrap()[0]
+            .partition_options
+            .as_ref()
+            .map(|o| o.max_partitions),
+        Some(4)
     );
+    let sent = stub.sql_requests.lock().unwrap();
     assert_eq!(
-        create_sessions[0].resource_prefix.as_deref(),
-        Some("projects/p1/instances/i1/databases/d1")
+        sent.iter()
+            .map(|r| r.partition_token.to_vec())
+            .collect::<Vec<_>>(),
+        vec![b"p0".to_vec(), b"p1".to_vec()]
     );
-    assert_eq!(
-        create_sessions[0].routing_params.as_deref(),
-        Some("database=projects/p1/instances/i1/databases/d1")
-    );
-    assert!(
-        create_sessions[0]
-            .body
-            .windows(b"analytics_reader".len())
-            .any(|w| w == b"analytics_reader"),
-        "CreateSession request body must encode Session.creator_role"
-    );
-    let req_id = create_sessions[0]
-        .request_id
-        .as_deref()
-        .expect("x-goog-spanner-request-id present");
-    assert!(
-        req_id.starts_with("1.") && req_id.split('.').count() == 6,
-        "unexpected x-goog-spanner-request-id format: {req_id}"
-    );
+    assert!(sent.iter().all(|r| r.data_boost_enabled));
+}
 
-    let streaming_calls: Vec<&RecordedRpc> = log
-        .iter()
-        .filter(|r| r.path == "/google.spanner.v1.Spanner/ExecuteStreamingSql")
-        .collect();
-    assert_eq!(streaming_calls.len(), 2);
-    assert!(
-        streaming_calls[0].route_to_leader.is_none(),
-        "ReadOnly ExecuteStreamingSql must omit x-goog-spanner-route-to-leader"
-    );
+#[tokio::test]
+async fn partitioned_query_propagates_partition_errors() {
+    let stub = RecordingSpanner {
+        partition_error: true,
+        ..Default::default()
+    };
+    let client = stub_client(stub.clone()).await;
+    let outcome = client
+        .partitioned_query("SELECT 1", &[], 4, true, SpannerStaleness::Strong)
+        .await;
+    assert!(matches!(outcome, Err(SpannerError::Client(_))));
+    assert!(stub.sql_requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn ca_pem_policy_follows_endpoint_host() {
+    let pem = b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n".to_vec();
+    let mut cloud = SpannerClientConfig::new("projects/p/instances/i/databases/d");
+    cloud.ca_pem = Some(pem.clone());
+    assert!(matches!(
+        SpannerClient::new(cloud),
+        Err(SpannerError::InvalidArgument(_))
+    ));
+    let mut omni = SpannerClientConfig::new("projects/p/instances/i/databases/d");
+    omni.endpoint = "https://omni.internal:15000".into();
+    omni.ca_pem = Some(pem.clone());
+    assert!(SpannerClient::new(omni).is_ok());
+    let mut plaintext = SpannerClientConfig::new("projects/p/instances/i/databases/d");
+    plaintext.endpoint = "http://127.0.0.1:9010".into();
+    plaintext.ca_pem = Some(pem);
+    match SpannerClient::new(plaintext) {
+        Err(SpannerError::InvalidArgument(message)) => {
+            assert_eq!(message, "ca_pem requires an https:// endpoint")
+        }
+        other => panic!("expected InvalidArgument, got {:?}", other.err()),
+    }
 }
 
 #[tokio::test]
@@ -631,102 +1056,4 @@ async fn test_read_write_transaction_inline_begin_precommit_retry_and_aborted_wo
             .any(|w| w == b"audit_log"),
         "MultiplexedSessionRetry replay CommitRequest must omit already-buffered mutations"
     );
-}
-
-#[tokio::test]
-async fn test_partition_query_and_data_boost_to_vtbarrow_shm() {
-    let data_boost_flags: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
-    let boost_clone = Arc::clone(&data_boost_flags);
-
-    let addr = start_mock_spanner_h2c_server(move |path, _headers, raw_body| {
-        let body = strip_lpm_prefix(&raw_body).to_vec();
-        match path.as_str() {
-            "/google.spanner.v1.Spanner/CreateSession" => {
-                let mut w = ProtoWriter::new();
-                w.write_str(
-                    1,
-                    "projects/p1/instances/i1/databases/d1/sessions/mux-part-1",
-                );
-                w.write_bool(6, true);
-                grpc_ok_response(vec![w.finish()])
-            }
-            "/google.spanner.v1.Spanner/BeginTransaction" => {
-                let mut w = ProtoWriter::new();
-                w.write_bytes(1, b"ro-snap-1");
-                grpc_ok_response(vec![w.finish()])
-            }
-            "/google.spanner.v1.Spanner/PartitionQuery" => {
-                let mut w = ProtoWriter::new();
-                w.write_nested(1, |pw| pw.write_bytes(1, b"part-token-A"));
-                w.write_nested(1, |pw| pw.write_bytes(1, b"part-token-B"));
-                grpc_ok_response(vec![w.finish()])
-            }
-            "/google.spanner.v1.Spanner/ExecuteStreamingSql" => {
-                let mut r = ProtoReader::new(&body);
-                let mut boost = false;
-                let mut part_tok = Vec::new();
-                while let Some((f, wt)) = r.next_tag().unwrap_or(None) {
-                    match (f, wt) {
-                        (8, WireType::LengthDelimited) => {
-                            part_tok = r.read_bytes().unwrap_or(&[]).to_vec();
-                        }
-                        (16, WireType::Varint) => {
-                            boost = r.read_bool().unwrap_or(false);
-                        }
-                        _ => {
-                            let _ = r.skip_field(wt);
-                        }
-                    }
-                }
-                boost_clone.lock().unwrap().push(boost);
-
-                let row_val = if part_tok == b"part-token-A" {
-                    "10"
-                } else {
-                    "20"
-                };
-                let mut prs = ProtoWriter::new();
-                prs.write_nested(1, |mw| {
-                    mw.write_nested(1, |stw| {
-                        stw.write_nested(1, |fw| {
-                            fw.write_str(1, "metric");
-                            fw.write_nested(2, |tw| tw.write_i32(1, 2)); // INT64
-                        });
-                    });
-                });
-                prs.write_nested(2, |vw| vw.write_str(3, row_val));
-                prs.write_bytes(4, b"part-done");
-                grpc_ok_response(vec![prs.finish()])
-            }
-            _ => grpc_error_response(12, "unimplemented", None),
-        }
-    })
-    .await;
-
-    let mut cfg = SpannerClientConfig::new("projects/p1/instances/i1/databases/d1");
-    cfg.endpoint = format!("http://{}:{}", addr.ip(), addr.port());
-    let client = Arc::new(SpannerClient::new(cfg).expect("create SpannerClient"));
-
-    let (shm_name, byte_len, row_count, _region) = client
-        .execute_partitioned_arrow(
-            "SELECT metric FROM telemetry",
-            &[],
-            2,
-            true,
-            SpannerStaleness::Strong,
-        )
-        .await
-        .expect("execute_partitioned_arrow");
-
-    assert_eq!(row_count, 2);
-    assert!(byte_len > 32);
-
-    let flags = data_boost_flags.lock().unwrap().clone();
-    assert_eq!(flags, vec![true, true]);
-
-    let shm_payload = read_shm_arrow_frame(&shm_name).expect("read VTBARROW payload");
-    assert_eq!(shm_payload.len(), byte_len);
-    assert_eq!(&shm_payload[0..4], &[0xFF, 0xFF, 0xFF, 0xFF]);
-    assert_eq!(&shm_payload[shm_payload.len() - 8..], &ARROW_IPC_EOS_MARKER);
-    assert!(release_shm_arrow_frame(&shm_name));
 }

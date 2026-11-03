@@ -1419,7 +1419,7 @@ class BigQueryClient:
 
 @final
 class SpannerClient:
-    """Pure-Rust Google Cloud Spanner v1 gRPC client with Multiplexed Sessions, ReadWrite transactions, and Data Boost Arrow."""
+    """Google Cloud Spanner client built on the official Rust client. ``query`` and ``partitioned_query`` return ``columns``, ``schema``, ``rows``, ``row_count_exact``, and ``row_count_lower_bound``. ``ca_pem`` is accepted only for non-googleapis ``https://`` endpoints (Spanner Omni or private test servers)."""
 
     def __new__(
         cls,
@@ -1529,7 +1529,7 @@ class SpannerClient:
         self,
         statements: Sequence[str],
     ) -> RustDbTaskAwaitable: ...
-    def execute_partitioned_arrow(
+    def partitioned_query(
         self,
         sql: str,
         params_json: str | None = None,
@@ -1537,8 +1537,8 @@ class SpannerClient:
         data_boost_enabled: bool = False,
         staleness_mode: str = "strong",
         staleness_ms: int = 0,
-    ) -> ArrowCursor: ...
-    def execute_partitioned_arrow_async(
+    ) -> dict[str, Any]: ...
+    def partitioned_query_async(
         self,
         sql: str,
         params_json: str | None = None,

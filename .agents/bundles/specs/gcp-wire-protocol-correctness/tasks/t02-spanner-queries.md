@@ -2,7 +2,7 @@
 type: Task
 id: gcp-wire-protocol-correctness:t02
 title: Spanner queries on the official client
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: [gcp-wire-protocol-correctness:t01]
@@ -17,17 +17,17 @@ tests:
   - src/py/tests/unit/db/test_spanner.py
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-03T18:46:30Z
+last_verified_commit: fadb99e
+verification_evidence: "cargo test -p vertebra-db --test spanner_wire_tests (8 passed), cargo clippy -p vertebra-db -p vertebra-py --all-targets -- -D warnings, cargo fmt --check, pytest spanner suites (23 passed), mypy.stubtest vertebra._vertebra"
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T16:10:00Z
+updated_at: 2026-11-03T18:46:30Z
 commit: null
 tags: [rust, gcp, spanner, pyo3, python]
 ---
@@ -41,7 +41,7 @@ tags: [rust, gcp, spanner, pyo3, python]
 ## Context
 
 - Spec R3, R7, R12 (`../spec.md`); research capability notes.
-- `behavior_tdd`: tests go through the public `SpannerClient` seam with `Spanner::from_stub` (model-level port).
+- `behavior_tdd`: tests go through the public `SpannerClient` seam with `google_cloud_spanner::stub::Spanner` (`RecordingSpanner` model-level port; `Spanner::from_stub` for unary RPCs and an in-process HTTP/2 `prost::Message` adapter delegating to `RecordingSpanner` for `ExecuteStreamingSql` because `google-cloud-spanner 0.34.8-preview` panics in `execute_streaming_sql` and `batch_write` when `channel.grpc_client` is `None`).
 - Verified crate APIs: `google_cloud_spanner::client::{Spanner, DatabaseClient, SpannerBuilderExt}`; `Spanner::builder()` (`with_endpoint`, `with_credentials`, `build().await` → `Result<Spanner, google_cloud_gax::client_builder::Error>`); `SpannerBuilderExt::{with_channel_pool(google_cloud_spanner::channel_pool::StaticChannelPoolConfig::new(n)), with_omni_tls(google_cloud_spanner::omni::TlsConfig)}`; `omni::TlsConfig::new().with_root_certificate_pem(impl Into<Vec<u8>>)`; `Spanner::from_stub(impl google_cloud_spanner::stub::Spanner)`; `spanner.database_client(db).with_database_role(impl Into<String>).with_leader_aware_routing(bool).build().await`; `db.single_use().set_timestamp_bound(b).build().execute_query(stmt).await -> Result<google_cloud_spanner::result::ResultSet>`; `db.batch_read_only_transaction().set_timestamp_bound(b).build().await?.partition_query(stmt, google_cloud_spanner::model::PartitionOptions::new().set_max_partitions(n)).await -> Result<Vec<google_cloud_spanner::batch::Partition>>`; `partition.set_data_boost(bool).execute(&db).await -> Result<ResultSet>`; `ResultSet::{next() -> Option<Result<Row>>, metadata() -> &ResultSetMetadata { column_names(), column_types() }, stats() -> Option<&model::ResultSetStats { row_count_exact() -> Option<&i64>, row_count_lower_bound() -> Option<&i64> }>}`; `Row::into_values() -> Vec<value::Value>`; `value::{Value, Kind}` (`kind()`, `as_bool()`, `as_f64()`, `as_str()`, `as_list()`, `Value::null()`, `From<String|bool|f64|Vec<Value>>`); `types::Type: From<model::Type>`, `model::Type: From<types::Type>`; `model::Type { code, array_element_type, struct_type, type_annotation, proto_type_fqn }` with `set_*` setters; `model::TypeCode: From<i32>` / `.value() -> Option<i32>`; `model::TypeAnnotationCode: From<i32>` / `.value()`; `model::StructType::new().set_fields(..)`; `model::struct_type::Field::new().set_name(..).set_type(..)`; `transaction::{TimestampBound, Timestamp}` (`Timestamp` = `google_cloud_wkt::Timestamp`, `Timestamp::new(seconds: i64, nanos: i32) -> Result<Timestamp, _>`); `statement::Statement::builder(sql).add_typed_param(name, value, ty).build()`.
 - Stub plumbing: `google_cloud_gax::streaming::ResponseStream::from(tokio::sync::mpsc::Receiver<google_cloud_gax::Result<T>>)`; unary responses `google_cloud_gax::response::Response::from(body)`; errors `google_cloud_gax::error::Error::service(google_cloud_gax::error::rpc::Status::default().set_code(google_cloud_gax::error::rpc::Code::InvalidArgument).set_message(..))`. Generated `model` messages carry values as `serde_json::Value`.
 - `SpannerError` currently derives `Clone, Debug, PartialEq, Eq`. At HEAD no code clones or compares a `SpannerError` (`grep -n "err.clone()\|== SpannerError\|assert_eq!(.*SpannerError" src/rs/vertebra-db src/rs/vertebra-py` returns nothing), so dropping those derives needs no other edit.
@@ -189,8 +189,10 @@ tags: [rust, gcp, spanner, pyo3, python]
 
 ## Acceptance Criteria
 
-- [ ] R3: `query` and `partitioned_query` use `DatabaseClient`; staleness, typed params, placeholder rewrite, Data Boost, partition order, row counts, and error propagation are asserted.
-- [ ] R7: `partitioned_query[_async]` in binding and stub; `fetch_arrow` owns the fallback and builds `ArrowCursor.from_rows`.
-- [ ] R12 (Spanner): `ca_pem` rejected for googleapis endpoints and for `http://` endpoints, applied through Omni TLS otherwise; docstrings updated.
+- [x] R3: `query` and `partitioned_query` use `DatabaseClient`; staleness, typed params, placeholder rewrite, Data Boost, partition order, row counts, and error propagation are asserted.
+- [x] R7: `partitioned_query[_async]` in binding and stub; `fetch_arrow` owns the fallback and builds `ArrowCursor.from_rows`.
+- [x] R12 (Spanner): `ca_pem` rejected for googleapis endpoints and for `http://` endpoints, applied through Omni TLS otherwise; docstrings updated.
 
 ## Notes & Discoveries
+
+- `google-cloud-spanner 0.34.8-preview` `Spanner::from_stub` leaves `channel.grpc_client = None` and panics on the two server-streaming RPCs (`execute_streaming_sql` and `batch_write`). `RecordingSpanner` implements `google_cloud_spanner::stub::Spanner` and is bridged over an in-process HTTP/2 adapter using `prost::Message` derives for streaming tests so `Spanner::builder().with_endpoint(...)` exercises the full official client pipeline against `RecordingSpanner`.

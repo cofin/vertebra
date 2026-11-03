@@ -50,6 +50,8 @@ zstd = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
 tempfile = "3"
 
 [features]

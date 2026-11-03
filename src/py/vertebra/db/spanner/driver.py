@@ -1017,7 +1017,7 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         **kwargs: Any,
     ) -> ArrowCursor:
         """Execute a parallel `PartitionQuery` + Data Boost read into a `VTBARROW` `ArrowCursor`."""
-        _ = (threshold_rows, kwargs)
+        _ = kwargs
         sql = SpannerCore.build_select_sql_if_table(sql_or_table)
         bound = staleness or StalenessBound.strong()
         client = self._ensure_client()
@@ -1025,7 +1025,7 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         partitions = max_partitions if max_partitions is not None else self.config.max_partitions
         boost = data_boost_enabled if data_boost_enabled is not None else self.config.data_boost_enabled
         try:
-            raw_cursor = client.execute_partitioned_arrow(
+            raw = client.partitioned_query(
                 rewritten_sql,
                 params_json,
                 max(1, int(partitions)),
@@ -1033,16 +1033,15 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
                 bound.mode,
                 bound.effective_value(),
             )
-            return raw_cursor if isinstance(raw_cursor, ArrowCursor) else ArrowCursor(raw_cursor)
         except Exception as exc:
             if not SpannerCore.is_partitioned_arrow_fallback_error(exc):
                 raise
             raw = self._run_query_sync(sql, parameters, staleness=bound)
-            return ArrowCursor.from_rows(
-                raw.get("rows", ()),
-                columns=[str(c) for c in raw.get("columns", ())],
-                threshold_rows=1,
-            )
+        return ArrowCursor.from_rows(
+            raw.get("rows", ()),
+            columns=[str(c) for c in raw.get("columns", ())],
+            threshold_rows=threshold_rows,
+        )
 
     def select_to_arrow(
         self,
@@ -1674,7 +1673,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         **kwargs: Any,
     ) -> ArrowCursor:
         """Execute an async parallel `PartitionQuery` + Data Boost read into an `ArrowCursor`."""
-        _ = (threshold_rows, kwargs)
+        _ = kwargs
         sql = SpannerCore.build_select_sql_if_table(sql_or_table)
         bound = staleness or StalenessBound.strong()
         client = self._ensure_client()
@@ -1682,7 +1681,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         partitions = max_partitions if max_partitions is not None else self.config.max_partitions
         boost = data_boost_enabled if data_boost_enabled is not None else self.config.data_boost_enabled
         try:
-            raw_cursor = await client.execute_partitioned_arrow_async(
+            raw = await client.partitioned_query_async(
                 rewritten_sql,
                 params_json,
                 max(1, int(partitions)),
@@ -1690,16 +1689,15 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
                 bound.mode,
                 bound.effective_value(),
             )
-            return raw_cursor if isinstance(raw_cursor, ArrowCursor) else ArrowCursor(raw_cursor)
         except Exception as exc:
             if not SpannerCore.is_partitioned_arrow_fallback_error(exc):
                 raise
             raw = await self._run_query_async(sql, parameters, staleness=bound)
-            return ArrowCursor.from_rows(
-                raw.get("rows", ()),
-                columns=[str(c) for c in raw.get("columns", ())],
-                threshold_rows=1,
-            )
+        return ArrowCursor.from_rows(
+            raw.get("rows", ()),
+            columns=[str(c) for c in raw.get("columns", ())],
+            threshold_rows=threshold_rows,
+        )
 
     async def select_to_arrow(
         self,

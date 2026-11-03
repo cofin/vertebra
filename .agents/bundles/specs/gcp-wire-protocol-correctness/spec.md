@@ -3,18 +3,18 @@ type: Spec
 flow_id: gcp-wire-protocol-correctness
 title: Official Google Cloud Rust Clients for Spanner and BigQuery Storage
 description: Replace the hand-written Spanner and BigQuery Storage protobuf clients (wrong field numbers, false success, unsafe resends) with googleapis/google-cloud-rust crates behind the existing vertebra-db and _vertebra seams, harden the Arrow IPC splitter, delete grpc.rs, and document the result.
-state: planned
+state: active
 parent_prd: integration-remediation
 research:
   - research/google-cloud-rust_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 0
-current_task: null
-last_verified_checkpoint: null
+state_revision: 3
+current_task: gcp-wire-protocol-correctness:t03
+last_verified_checkpoint: fadb99e
 created_at: 2026-11-03T03:30:00Z
-updated_at: 2026-11-03T16:10:00Z
+updated_at: 2026-11-03T18:46:30Z
 tags: [rust, gcp, spanner, bigquery, protobuf, bugfix, dependencies]
 ---
 
@@ -52,7 +52,7 @@ Non-goals:
 
 | Area | Files Examined (`path/to/file::Symbol`) | Public Seam, Dependency Category & Integration |
 | --- | --- | --- |
-| Spanner client | `src/rs/vertebra-db/src/spanner.rs::{SpannerClient, SpannerClientConfig, SpannerError, SpannerValue, SpannerType, ProtobufValue, SpannerQueryParameter, SpannerQueryResult, SpannerMutation, SpannerMutationGroup, SpannerStaleness, PartialResultSetAssembler, encode_execute_sql_request, decode_transaction_message, commit_read_write_tx, update_database_ddl, execute_partitioned_arrow, rewrite_spangres_placeholders}` | `SpannerClient` stays the seam used by `vertebra-py`. Remote-owned: `google_cloud_spanner::client::{Spanner, DatabaseClient, DatabaseAdmin}`; tests inject `Spanner::from_stub` / `DatabaseAdmin::from_stub` (model-level port). Conversions are in-process. |
+| Spanner client | `src/rs/vertebra-db/src/spanner.rs::{SpannerClient, SpannerClientConfig, SpannerError, SpannerValue, SpannerType, ProtobufValue, SpannerQueryParameter, SpannerQueryResult, SpannerMutation, SpannerMutationGroup, SpannerStaleness, PartialResultSetAssembler, encode_execute_sql_request, decode_transaction_message, commit_read_write_tx, update_database_ddl, execute_partitioned_arrow, rewrite_spangres_placeholders}` | `SpannerClient` stays the seam used by `vertebra-py`. Remote-owned: `google_cloud_spanner::client::{Spanner, DatabaseClient, DatabaseAdmin}`; tests inject `Spanner::from_stub` / `DatabaseAdmin::from_stub` (model-level port, bridged via an in-process HTTP/2 `prost::Message` adapter for the two server-streaming RPCs `ExecuteStreamingSql` and `BatchWrite`). Conversions are in-process. |
 | BigQuery Storage | `src/rs/vertebra-db/src/bigquery.rs::{BigQueryClient::{read_table_to_shm_arrow_with_compression, append_arrow_stream, normalize_table_resource}, encode_create_read_session_request, decode_read_session_response, decode_read_rows_response, read_single_storage_stream_with_retry, encode_append_rows_request, decode_append_rows_request, decode_append_rows_response, check_batch_commit_response, split_arrow_ipc_stream, try_parse_encapsulated_arrow_stream, inspect_arrow_message_flatbuffer, BigQueryError}` | `BigQueryClient` stays the seam. Remote-owned: `google_cloud_bigquery::client::{Read, Write}`; Read tests inject `Read::from_stub`; the Write plan and verification are pure functions. |
 | gRPC pool | `src/rs/vertebra-db/src/grpc.rs`, `src/rs/vertebra-db/tests/grpc_wire_and_pool_tests.rs` | Deleted after both migrations. |
 | GCP auth bridge | `src/rs/vertebra-core/src/gcp_auth.rs::{GcpTokenCache, GcpAuthSource, GcpTokenSnapshot}` | New `vertebra_db::gcp::GcpTokenCredentials` (`CredentialsProvider`). In-process. |
@@ -174,13 +174,13 @@ pub async fn update_database_ddl(&self, statements: &[String]) -> Result<String,
 
 ### Phase 1: Foundation
 
-- [ ] t01 — Official crate dependencies and GCP credential bridge (tasks/t01-official-crate-foundation.md)
+- [x] [fadb99e] t01 — Official crate dependencies and GCP credential bridge (tasks/t01-official-crate-foundation.md)
 - **Phase 1 Recovery Checkpoint**: `cd src/rs && cargo test -p vertebra-db --test gcp_credentials_tests && cargo clippy -p vertebra-db --all-targets -- -D warnings && cargo fmt --check`
 
 ### Phase 2: Spanner
 
-- [ ] t02 — Spanner queries on the official client (tasks/t02-spanner-queries.md)
-- [ ] t03 — Spanner writes and DDL on the official client; delete hand-written Spanner wire code (tasks/t03-spanner-writes-and-ddl.md)
+- [x] t02 — Spanner queries on the official client (tasks/t02-spanner-queries.md)
+- [~] t03 — Spanner writes and DDL on the official client; delete hand-written Spanner wire code (tasks/t03-spanner-writes-and-ddl.md)
 - **Phase 2 Recovery Checkpoint**: `make lint && cd src/rs && cargo test -p vertebra-db --test spanner_wire_tests && cd ../.. && make dev && uv run pytest src/py/tests/unit/db/test_spanner.py src/py/tests/unit/db/test_spanner_queue_and_cdc.py src/py/tests/unit/extensions/test_sqlspec_spanner.py -q && uv run python -m mypy.stubtest vertebra._vertebra`
 
 ### Phase 3: BigQuery Storage

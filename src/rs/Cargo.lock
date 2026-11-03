@@ -5528,6 +5528,8 @@ dependencies = [
  "hyper-util",
  "lz4_flex",
  "proptest",
+ "prost",
+ "prost-types",
  "rcgen",
  "reqwest 0.13.5",
  "rmp-serde",
