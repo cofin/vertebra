@@ -590,12 +590,7 @@ class SpannerChangeStreamSource:
     ) -> list[ChangeEvent]:
         """Synchronously query a single partition token and publish resulting ``ChangeEvent`` items."""
         sql = self.build_read_query()
-        params = {
-            "start_ts": start_timestamp,
-            "end_ts": end_timestamp,
-            "token": partition_token,
-            "heartbeat_ms": self._heartbeat_milliseconds,
-        }
+        params = self._build_read_params(partition_token, start_timestamp, end_timestamp)
         rows = self._driver.select(sql, params)
         parsed: list[SpannerChangeStreamRecord] = []
         for row in rows:
@@ -614,12 +609,7 @@ class SpannerChangeStreamSource:
     ) -> list[ChangeEvent]:
         """Asynchronously query a single partition token and publish resulting ``ChangeEvent`` items."""
         sql = self.build_read_query()
-        params = {
-            "start_ts": start_timestamp,
-            "end_ts": end_timestamp,
-            "token": partition_token,
-            "heartbeat_ms": self._heartbeat_milliseconds,
-        }
+        params = self._build_read_params(partition_token, start_timestamp, end_timestamp)
         res = self._driver.select(sql, params)
         rows = await res if asyncio.iscoroutine(res) else res
         parsed: list[SpannerChangeStreamRecord] = []
@@ -629,3 +619,24 @@ class SpannerChangeStreamSource:
         if partition_token is not None:
             self.complete_partition(partition_token)
         return events
+
+    def _build_read_params(
+        self,
+        partition_token: str | None,
+        start_timestamp: str,
+        end_timestamp: str | None,
+    ) -> dict[str, Any] | list[Any]:
+        """Return change stream TVF bind parameters for the active dialect.
+
+        Spangres binds the positional ``$1..$4`` placeholders, which the Spanner driver maps to
+        ``p1..p4``. GoogleSQL binds the named ``@start_ts``, ``@end_ts``, ``@token``, and
+        ``@heartbeat_ms`` placeholders.
+        """
+        if self._dialect == "spangres":
+            return [start_timestamp, end_timestamp, partition_token, self._heartbeat_milliseconds]
+        return {
+            "start_ts": start_timestamp,
+            "end_ts": end_timestamp,
+            "token": partition_token,
+            "heartbeat_ms": self._heartbeat_milliseconds,
+        }

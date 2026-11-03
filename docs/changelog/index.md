@@ -34,6 +34,8 @@ Release introducing shared-memory vector embeddings, zero-copy PEP 3118 vector v
 
 - Fixed `dorny/paths-filter@v4` shallow-clone `git fetch` failure on `push` events to `main` by setting `fetch-depth: 2` in `.github/workflows/ci.yml`, and removed failing `git push` commit step from `.github/workflows/benchmark.yml` ([PR #64](https://github.com/cofin/vertebra/pull/64)).
 - Scoped `[tool.bumpversion.files]` search/replace in `pyproject.toml` to `version = "{current_version}"` so `make release` does not rewrite dependency version floors, and automated `uv.lock` and `Cargo.lock` synchronization in `Makefile` `release`/`pre-release` targets ([PR #64](https://github.com/cofin/vertebra/pull/64)).
+- `BaseSyncDriver.apply_tenant_predicate` and `BaseAsyncDriver.apply_tenant_predicate` in `vertebra.extensions.sqlspec` now raise when the tenant GUC `SET` fails instead of returning an unenforced predicate.
+- `DatabaseRegistry.parse_url` accepts `spangres://` URLs, and `SpannerChangeStreamSource.poll_partition_sync` / `poll_partition_async` bind positional `$1..$4` parameters in Spangres mode.
 
 ## 0.2.0
 

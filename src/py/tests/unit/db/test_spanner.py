@@ -26,7 +26,7 @@ from vertebra.db import (
 )
 from vertebra.embeddings import SpannerEmbedder
 from vertebra.storage import ObjectStore
-from vertebra.typing import FrozenBaseStruct
+from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
 from vertebra.utils.serializers import decode_json, encode_json
 
 
@@ -623,6 +623,21 @@ def test_spanner_config_from_dsn_variants() -> None:
     fp = reg.pool_fingerprint(cfg_gsql)
     assert fp[0] == "spanner"
     assert len(fp) == 5
+
+
+@pytest.mark.parametrize("url", ["spangres://proj-pg/inst-pg/db-pg", "spanner+spangres://proj-pg/inst-pg/db-pg"])
+def test_registry_parses_spangres_scheme(url: str) -> None:
+    """DatabaseRegistry.parse_url routes Spangres URLs to SpannerConfig with the spangres dialect."""
+    config = DatabaseRegistry.parse_url(url)
+    assert isinstance(config, SpannerConfig)
+    assert config.dialect == "spangres"
+    assert (config.project_id, config.instance_id, config.database_id) == ("proj-pg", "inst-pg", "db-pg")
+
+
+def test_registry_rejects_spanner_postgresql_scheme() -> None:
+    """The unsupported spanner+postgresql scheme is rejected by SpannerConfig.from_dsn."""
+    with pytest.raises(ImproperConfigurationError, match=r"spanner\+postgresql"):
+        DatabaseRegistry.parse_url("spanner+postgresql://proj/inst/db")
 
 
 def test_sync_spanner_driver_crud_transactions_and_mutations() -> None:

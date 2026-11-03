@@ -261,9 +261,7 @@ class DatabaseRegistry:
             return AlloyDBConfig(instance_uri=instance_uri, **overrides)
         if base_scheme in ("bigquery", "bq"):
             return BigQueryConfig.from_dsn(url, **overrides)
-        if base_scheme == "spanner":
-            if "+postgresql" in scheme and "dialect" not in overrides:
-                overrides["dialect"] = "postgresql"
+        if base_scheme in ("spanner", "spangres"):
             return SpannerConfig.from_dsn(url, **overrides)
 
         msg = f"Unsupported database URL scheme: {scheme!r}"

@@ -2,7 +2,7 @@
 type: Task
 id: critical-correctness-fixes:t01
 title: Tenant predicate raises, Spangres URL routing, and Spangres CDC positional params
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on: []
@@ -19,17 +19,17 @@ tests:
   - src/py/tests/unit/db/test_spanner_queue_and_cdc.py
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-03T16:33:00Z
+last_verified_commit: 0d178f2
+verification_evidence: "RED: 5 failed, 4 passed (DID NOT RAISE OperationalError, ValueError: Unsupported database URL scheme 'spangres', dict vs list CDC params); GREEN: 27 passed in test_enterprise_olap_drivers.py, test_spanner.py, test_spanner_queue_and_cdc.py; ruff check, ruff format --check, mypy exit 0"
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T16:00:00Z
+updated_at: 2026-11-03T16:33:00Z
 commit: null
 tags: [bugfix, db, tenancy, spanner, cdc]
 ---
@@ -259,11 +259,11 @@ Make three data-layer paths fail loudly or bind correctly: the tenant GUC `SET` 
 
 ## Acceptance Criteria
 
-- [ ] R1: Sync and async `apply_tenant_predicate` propagate `sqlite3.OperationalError` on SQLite; no `suppress` around the GUC statement.
-- [ ] R2: `parse_url("spangres://...")` and `parse_url("spanner+spangres://...")` return `SpannerConfig(dialect="spangres")`; `spanner+postgresql://` raises `ImproperConfigurationError`; the `+postgresql` branch is gone.
-- [ ] R3: Spangres polls pass `[start, end, token, heartbeat]`; GoogleSQL polls pass the named mapping; both sync and async.
-- [ ] Knowledge chapters and changelog updated as specified.
-- [ ] Targeted tests, ruff, ruff format, and mypy pass; one signed commit.
+- [x] R1: Sync and async `apply_tenant_predicate` propagate `sqlite3.OperationalError` on SQLite; no `suppress` around the GUC statement.
+- [x] R2: `parse_url("spangres://...")` and `parse_url("spanner+spangres://...")` return `SpannerConfig(dialect="spangres")`; `spanner+postgresql://` raises `ImproperConfigurationError`; the `+postgresql` branch is gone.
+- [x] R3: Spangres polls pass `[start, end, token, heartbeat]`; GoogleSQL polls pass the named mapping; both sync and async.
+- [x] Knowledge chapters and changelog updated as specified.
+- [x] Targeted tests, ruff, ruff format, and mypy pass; one signed commit.
 
 ## Notes & Discoveries
 
