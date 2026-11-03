@@ -8,15 +8,15 @@ import urllib.parse
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from vertebra.db.dialer.cloudsql import CloudSQLConfig, CloudSQLDialer
-from vertebra.db.postgres import (
+from vertebra.db._arrow import (
     ARROW_SHM_THRESHOLD_ROWS,
     ArrowCursor,
     _hydrate_rows_with_schema,
-    _normalize_driver_params,
     _table_to_rows_and_cols,
     write_arrow_shm,
 )
+from vertebra.db.dialer.cloudsql import CloudSQLConfig, CloudSQLDialer
+from vertebra.db.postgres import _normalize_driver_params
 from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.module_loader import ensure_module
 
@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     import ssl
 
 __all__ = (
+    "ArrowCursor",
     "AsyncMySQLDriver",
     "MySQLConfig",
     "SyncMySQLDriver",

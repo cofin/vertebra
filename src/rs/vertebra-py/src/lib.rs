@@ -7,8 +7,10 @@ use pyo3::prelude::*;
 pub mod agent;
 pub mod asgi;
 pub mod broker;
+pub mod completion;
 pub mod db;
 pub mod file_io;
+pub mod gcp_auth;
 pub mod headers;
 pub mod msgspec_bridge;
 pub mod request;
@@ -29,7 +31,9 @@ pub use asgi::{
 pub use broker::{
     BrokerStats, LeaseBroker, LeaseGrant, StatementCache, StatementCacheStats, StatementPlan,
 };
+pub use completion::RustDbTaskAwaitable;
 pub use db::{AlloyDBDialer, ArrowCursor, CloudSQLDialer};
+pub use gcp_auth::{PyGcpTokenCache, PyGcpTokenSnapshot};
 pub use headers::{Headers, HeadersIterator};
 pub use msgspec_bridge::{
     call_vectorcall, hydrate_one_vectorcall, hydrate_rows_vectorcall,
@@ -138,6 +142,8 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(msgspec_bridge::pack_grpc_lpm_frame, m)?)?;
 
     // Native database dialers, wire codecs, and SHM Arrow IPC cursors
+    completion::register(m)?;
+    gcp_auth::register(m)?;
     db::register_db_bindings(m)?;
     vector::register_vector_bindings(m)?;
     text::register(m)?;

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import struct
 import zipfile
 from typing import TYPE_CHECKING
@@ -625,3 +626,89 @@ def test_driver_schema_hydration_load_from_arrow_and_topologies() -> None:
         schema_type=_LedgerRow,
     ) == _LedgerRow(id=1, label="alpha")
     sqlite_drv.close()
+
+
+def test_native_arrow_cursor_pep3118_zero_copy_survives_shm_unlink() -> None:
+    """Verify PEP 3118 memoryview and ArrowCursor.to_pyarrow() survive cursor.release() unlink."""
+    import pyarrow as pa
+
+    from vertebra._vertebra import ArrowCursor as NativeArrowCursor
+
+    batch_a = pa.RecordBatch.from_pydict({"id": [1, 2], "name": ["alpha", "beta"]})
+    batch_b = pa.RecordBatch.from_pydict({"id": [3, 4], "name": ["gamma", "delta"]})
+    table = pa.Table.from_batches([batch_a, batch_b])
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        for b in table.to_batches():
+            writer.write_batch(b)
+    ipc_bytes = sink.getvalue().to_pybytes()
+
+    shm_name = f"/vtb-test-pep3118-{os.getpid()}"
+    cursor = NativeArrowCursor.write_ipc_to_shm(shm_name, ipc_bytes, 4)
+    assert cursor.row_count == 4
+    assert cursor.byte_len == len(ipc_bytes)
+
+    mv = memoryview(cursor)
+    view = cursor.buffer_view()
+    assert mv.readonly
+    assert len(mv) == len(ipc_bytes)
+    assert bytes(view) == ipc_bytes
+
+    assert cursor.release() is True
+    assert cursor.release() is False
+
+    decoded_from_mv = pa.ipc.open_stream(pa.py_buffer(mv)).read_all()
+    assert decoded_from_mv.to_pylist() == [
+        {"id": 1, "name": "alpha"},
+        {"id": 2, "name": "beta"},
+        {"id": 3, "name": "gamma"},
+        {"id": 4, "name": "delta"},
+    ]
+    assert cursor.to_pyarrow().to_pylist() == decoded_from_mv.to_pylist()
+    assert cursor.to_arrow_table().num_rows == 4
+    del decoded_from_mv
+    mv.release()
+    view.release()
+
+
+def test_unified_db_arrow_cursor_identity_and_native_delegation() -> None:
+    """Verify vertebra.db.ArrowCursor identity across drivers and native _vertebra.ArrowCursor delegation."""
+    import pyarrow as pa
+
+    import vertebra.db as db_pkg
+    import vertebra.db._arrow as db_arrow_mod
+    import vertebra.db.duckdb as db_duckdb_mod
+    import vertebra.db.mssql as db_mssql_mod
+    import vertebra.db.mysql as db_mysql_mod
+    import vertebra.db.oracle as db_oracle_mod
+    import vertebra.db.postgres as db_postgres_mod
+    import vertebra.db.sqlite as db_sqlite_mod
+    from vertebra._vertebra import ArrowCursor as NativeArrowCursor
+
+    assert db_pkg.ArrowCursor is db_arrow_mod.ArrowCursor
+    assert db_postgres_mod.ArrowCursor is db_pkg.ArrowCursor
+    assert db_duckdb_mod.ArrowCursor is db_pkg.ArrowCursor
+    assert db_mysql_mod.ArrowCursor is db_pkg.ArrowCursor
+    assert db_oracle_mod.ArrowCursor is db_pkg.ArrowCursor
+    assert db_sqlite_mod.ArrowCursor is db_pkg.ArrowCursor
+    assert db_mssql_mod.ArrowCursor is db_pkg.ArrowCursor
+
+    tbl = pa.Table.from_pydict({"k": [10, 20, 30], "v": ["x", "y", "z"]})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, tbl.schema) as writer:
+        writer.write_table(tbl)
+    raw_ipc = sink.getvalue().to_pybytes()
+
+    native_cur = NativeArrowCursor.write_ipc_to_shm(f"/vtb-test-wrap-{os.getpid()}", raw_ipc, 3)
+    with db_pkg.ArrowCursor(native_cur) as wrapped:
+        assert wrapped.used_shm is True
+        assert len(wrapped) == 3
+        assert wrapped.row_count == 3
+        assert bytes(wrapped.buffer_view()) == raw_ipc
+        assert wrapped.to_pyarrow().num_rows == 3
+        assert wrapped.to_arrow_table().num_rows == 3
+        assert wrapped.to_pylist() == [
+            {"k": 10, "v": "x"},
+            {"k": 20, "v": "y"},
+            {"k": 30, "v": "z"},
+        ]

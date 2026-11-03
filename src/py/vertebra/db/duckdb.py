@@ -9,7 +9,7 @@ import sqlite3
 import threading
 from typing import TYPE_CHECKING, Any
 
-from vertebra.db.postgres import (
+from vertebra.db._arrow import (
     ARROW_SHM_THRESHOLD_ROWS,
     ArrowCursor,
     _hydrate_rows_with_schema,
@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 __all__ = (
+    "ArrowCursor",
     "AsyncDuckDBDriver",
     "DUCKDB_DIALECT_TAG",
     "DuckDBConfig",

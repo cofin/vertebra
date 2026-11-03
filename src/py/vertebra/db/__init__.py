@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from vertebra.db._arrow import (
+    ARROW_SHM_THRESHOLD_ROWS,
+    ArrowCursor,
+)
 from vertebra.db._registry import DatabaseRegistry
 from vertebra.db.cdc import (
     CDCConfig,
@@ -69,8 +73,6 @@ from vertebra.db.pipeline import (
     RelOverlay,
 )
 from vertebra.db.postgres import (
-    ARROW_SHM_THRESHOLD_ROWS,
-    ArrowCursor,
     AsyncPostgreSQLDriver,
     PoolerMode,
     PostgreSQLConfig,

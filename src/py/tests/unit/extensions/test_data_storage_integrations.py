@@ -277,3 +277,85 @@ async def test_alchemy_storage_backend_file_object_and_session_tracker_rollback(
             "users/42/multipart.bin",
         ]
     )
+
+
+@pytest.mark.anyio
+async def test_streaming_storage_response_exported_from_vertebra_storage() -> None:
+    """Verify StreamingStorageResponse is canonically exported from vertebra.storage and re-exported in sqlspec."""
+    from vertebra.extensions.sqlspec.storage import (
+        StreamingStorageResponse as SqlSpecStreamingStorageResponse,
+    )
+    from vertebra.storage import ObjectStore, StreamingStorageResponse
+
+    assert StreamingStorageResponse is SqlSpecStreamingStorageResponse
+    store = ObjectStore.from_memory("streaming-export-test")
+    store.put("blobs/sample.bin", b"abcdefghij")
+    resp = StreamingStorageResponse(store=store, key="blobs/sample.bin", total_size=10, chunk_size=4)
+    sync_chunks = [bytes(c) for c in resp.iter_chunks()]
+    async_chunks = [bytes(c) async for c in resp.aiter_chunks()]
+    assert sync_chunks == [b"abcd", b"efgh", b"ij"]
+    assert async_chunks == [b"abcd", b"efgh", b"ij"]
+
+
+@pytest.mark.anyio
+async def test_object_store_backend_write_arrow_cursor_and_uri_qualified_globs() -> None:
+    """Verify ObjectStoreBackend write_arrow_cursor_[sync|async], URI-qualified globs, and token_cache handoff."""
+    from vertebra.db._arrow import ArrowCursor
+    from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
+    from vertebra.storage import GcpTokenCache, ObjectStore
+
+    cursor_part_0 = ArrowCursor.from_rows(
+        [{"id": 1, "region": "us"}, {"id": 2, "region": "eu"}],
+        threshold_rows=1,
+    )
+    cursor_part_1 = ArrowCursor.from_rows(
+        [{"id": 3, "region": "apac"}, {"id": 4, "region": "us"}],
+        threshold_rows=1,
+    )
+
+    mem_backend = ObjectStoreBackend("memory://", base_path="warehouse")
+    mem_backend.write_arrow_cursor_sync("snapshots/batch.ipc", cursor_part_0)
+    ipc_table = mem_backend.read_arrow_sync("snapshots/batch.ipc")
+    assert ipc_table.to_pylist() == [{"id": 1, "region": "us"}, {"id": 2, "region": "eu"}]
+
+    token_cache = GcpTokenCache({"access_token": "initial-token"}, allow_ambient_adc=False)
+    gcs_sim_store = ObjectStore.from_memory("gcs-sim")
+    gcs_backend = ObjectStoreBackend(
+        "gs://analytics-bucket",
+        store=gcs_sim_store,
+        token_cache=token_cache,
+    )
+    assert gcs_backend.store.token_cache is token_cache
+
+    gcs_backend.write_arrow_cursor_sync(
+        "gs://analytics-bucket/events/dt=2026-11-01/part-0.parquet",
+        cursor_part_0,
+    )
+    await gcs_backend.write_arrow_cursor_async(
+        "gs://analytics-bucket/events/dt=2026-11-02/part-1.parquet",
+        cursor_part_1,
+    )
+
+    sync_matches = gcs_backend.glob_sync("gs://analytics-bucket/events/dt=*/part-*.parquet")
+    async_matches = await gcs_backend.glob_async("gs://analytics-bucket/events/dt=*/part-*.parquet")
+    assert sorted(sync_matches) == [
+        "events/dt=2026-11-01/part-0.parquet",
+        "events/dt=2026-11-02/part-1.parquet",
+    ]
+    assert sorted(async_matches) == sorted(sync_matches)
+
+    streamed_rows: list[dict[str, object]] = []
+    for batch in gcs_backend.stream_arrow_sync("gs://analytics-bucket/events/dt=*/part-*.parquet"):
+        streamed_rows.extend(batch.to_pylist())
+    assert sorted(streamed_rows, key=lambda r: int(str(r["id"]))) == [
+        {"id": 1, "region": "us"},
+        {"id": 2, "region": "eu"},
+        {"id": 3, "region": "apac"},
+        {"id": 4, "region": "us"},
+    ]
+
+    with pytest.raises(ValueError, match="does not match store URI"):
+        gcs_backend.glob_sync("gs://other-bucket/events/*.parquet")
+
+    cursor_part_0.close()
+    cursor_part_1.close()

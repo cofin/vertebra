@@ -1,5 +1,8 @@
 //! Presigned URL signing and verification for HMAC-SHA256, S3 SigV4, and GCS V4 (with keyless IAM signBlob).
 
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, RwLock};
+
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::{DateTime, TimeZone, Utc};
@@ -12,6 +15,7 @@ use rsa::signature::{SignatureEncoding, Signer};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use url::Url;
+use vertebra_core::gcp_auth::{GcpTokenCache, extract_adc_service_account_key};
 use vertebra_core::util::{constant_time_eq, sha256_hex};
 
 use crate::store::StorageError;
@@ -254,116 +258,88 @@ struct IamSignBlobResponse {
     signed_blob: String,
 }
 
-#[derive(Deserialize)]
-struct MetadataTokenResponse {
-    access_token: String,
-}
+static SIGNING_TOKEN_CACHES: LazyLock<RwLock<HashMap<String, Arc<GcpTokenCache>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
 
-#[derive(Deserialize)]
-struct AdcAuthorizedUserFile {
-    #[serde(rename = "type")]
-    cred_type: Option<String>,
-    client_id: Option<String>,
-    client_secret: Option<String>,
-    refresh_token: Option<String>,
-    token_uri: Option<String>,
-}
-
-async fn resolve_gcp_adc_access_token(client: &reqwest::Client) -> Option<String> {
-    for env_var in ["GOOGLE_OAUTH_ACCESS_TOKEN", "CLOUDSDK_AUTH_ACCESS_TOKEN"] {
-        if let Ok(tok) = std::env::var(env_var)
-            && !tok.trim().is_empty()
+fn get_or_create_signing_token_cache(
+    credentials_options: Option<&HashMap<String, String>>,
+    iam_base_url: &str,
+) -> Option<Arc<GcpTokenCache>> {
+    if let Some(opts) = credentials_options {
+        let mut pairs: Vec<(&str, &str)> =
+            opts.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        pairs.sort_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.cmp(b.1)));
+        let cache_key = format!(
+            "opts:{}",
+            pairs
+                .into_iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join("&")
+        );
+        if let Some(existing) = SIGNING_TOKEN_CACHES
+            .read()
+            .expect("signing token cache read lock")
+            .get(&cache_key)
         {
-            return Some(tok.trim().to_string());
+            return Some(Arc::clone(existing));
         }
-    }
-
-    let adc_candidates: Vec<std::path::PathBuf> = {
-        let mut paths = Vec::new();
-        if let Ok(explicit) = std::env::var("GOOGLE_APPLICATION_CREDENTIALS")
-            && !explicit.trim().is_empty()
-        {
-            paths.push(std::path::PathBuf::from(explicit));
-        }
-        if let Ok(cfg_dir) = std::env::var("CLOUDSDK_CONFIG")
-            && !cfg_dir.trim().is_empty()
-        {
-            paths.push(
-                std::path::PathBuf::from(cfg_dir).join("application_default_credentials.json"),
-            );
-        }
-        if let Ok(home) = std::env::var("HOME")
-            && !home.trim().is_empty()
-        {
-            paths.push(
-                std::path::PathBuf::from(home)
-                    .join(".config")
-                    .join("gcloud")
-                    .join("application_default_credentials.json"),
-            );
-        }
-        paths
-    };
-
-    for path in adc_candidates {
-        let Ok(raw) = tokio::fs::read_to_string(&path).await else {
-            continue;
-        };
-        let Ok(parsed) = serde_json::from_str::<AdcAuthorizedUserFile>(&raw) else {
-            continue;
-        };
-        if parsed.cred_type.as_deref() == Some("authorized_user")
-            && let (Some(cid), Some(csec), Some(rtok)) =
-                (parsed.client_id, parsed.client_secret, parsed.refresh_token)
-        {
-            let token_uri = parsed
-                .token_uri
-                .unwrap_or_else(|| "https://oauth2.googleapis.com/token".to_string());
-            let form_body = url::form_urlencoded::Serializer::new(String::new())
-                .append_pair("grant_type", "refresh_token")
-                .append_pair("client_id", &cid)
-                .append_pair("client_secret", &csec)
-                .append_pair("refresh_token", &rtok)
-                .finish();
-            if let Ok(resp) = client
-                .post(&token_uri)
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(form_body)
-                .send()
-                .await
-                && resp.status().is_success()
-                && let Ok(tok_resp) = resp.json::<MetadataTokenResponse>().await
-            {
-                return Some(tok_resp.access_token);
+        let created = GcpTokenCache::from_options(opts).or_else(|| {
+            if iam_base_url.contains("googleapis.com") {
+                let mut fallback = opts.clone();
+                fallback.insert("use_metadata_server".to_string(), "true".to_string());
+                GcpTokenCache::from_options(&fallback)
+            } else {
+                None
             }
-        }
+        })?;
+        let mut guard = SIGNING_TOKEN_CACHES
+            .write()
+            .expect("signing token cache write lock");
+        let entry = guard
+            .entry(cache_key)
+            .or_insert_with(|| Arc::clone(&created));
+        return Some(Arc::clone(entry));
     }
 
-    let metadata_host = std::env::var("GCE_METADATA_HOST")
-        .ok()
-        .filter(|h| !h.trim().is_empty())
-        .unwrap_or_else(|| "metadata.google.internal".to_string());
-    let metadata_url = format!(
-        "http://{}/computeMetadata/v1/instance/service-accounts/default/token",
-        metadata_host.trim_end_matches('/')
+    if !iam_base_url.contains("googleapis.com") {
+        return None;
+    }
+
+    let ambient_key = format!(
+        "ambient:{:?}:{:?}:{:?}:{:?}:{:?}",
+        std::env::var("GOOGLE_APPLICATION_CREDENTIALS").ok(),
+        std::env::var("CLOUDSDK_CONFIG").ok(),
+        std::env::var("GOOGLE_OAUTH_ACCESS_TOKEN").ok(),
+        std::env::var("CLOUDSDK_AUTH_ACCESS_TOKEN").ok(),
+        std::env::var("GCE_METADATA_HOST").ok(),
     );
-    if let Ok(resp) = client
-        .get(&metadata_url)
-        .header("Metadata-Flavor", "Google")
-        .timeout(std::time::Duration::from_secs(2))
-        .send()
-        .await
-        && resp.status().is_success()
-        && let Ok(tok_resp) = resp.json::<MetadataTokenResponse>().await
+    if let Some(existing) = SIGNING_TOKEN_CACHES
+        .read()
+        .expect("signing token cache read lock")
+        .get(&ambient_key)
     {
-        return Some(tok_resp.access_token);
+        return Some(Arc::clone(existing));
     }
-
-    None
+    let created = GcpTokenCache::from_options(&HashMap::new()).or_else(|| {
+        let mut fallback = HashMap::new();
+        fallback.insert("use_metadata_server".to_string(), "true".to_string());
+        GcpTokenCache::from_options(&fallback)
+    })?;
+    let mut guard = SIGNING_TOKEN_CACHES
+        .write()
+        .expect("signing token cache write lock");
+    let entry = guard
+        .entry(ambient_key)
+        .or_insert_with(|| Arc::clone(&created));
+    Some(Arc::clone(entry))
 }
 
-pub async fn sign_gcs_v4_with_iam_endpoint(
+#[allow(clippy::too_many_arguments)]
+pub async fn sign_gcs_v4_with_options_and_cache(
     config: &GcsSignConfig,
+    credentials_options: Option<&HashMap<String, String>>,
+    token_cache: Option<&Arc<GcpTokenCache>>,
     method: &str,
     object_path: &str,
     expires_in_secs: u64,
@@ -377,10 +353,43 @@ pub async fn sign_gcs_v4_with_iam_endpoint(
     let goog_date = timestamp.format("%Y%m%dT%H%M%SZ").to_string();
     let datestamp = timestamp.format("%Y%m%d").to_string();
 
+    let mut local_sa_identity: Option<(String, String)> = config
+        .private_key_pem
+        .as_ref()
+        .map(|pem| (config.service_account_email.clone(), pem.clone()));
+
+    if local_sa_identity.is_none() && config.access_token.is_none() {
+        let has_target_sa_override = credentials_options.is_some_and(|opts| {
+            opts.get("target_service_account")
+                .or_else(|| opts.get("google_target_service_account"))
+                .or_else(|| opts.get("gcs_target_service_account"))
+                .is_some_and(|v| !v.trim().is_empty())
+        });
+        if !has_target_sa_override {
+            let discovered_key = token_cache
+                .and_then(|c| c.service_account_key().cloned())
+                .or_else(|| match credentials_options {
+                    Some(opts) => extract_adc_service_account_key(opts, true),
+                    None => extract_adc_service_account_key(&HashMap::new(), true),
+                });
+            if let Some(sa_key) = discovered_key
+                && (config.service_account_email.is_empty()
+                    || sa_key.client_email == config.service_account_email)
+            {
+                local_sa_identity = Some((sa_key.client_email, sa_key.private_key_pem));
+            }
+        }
+    }
+
+    let effective_sa_email = local_sa_identity
+        .as_ref()
+        .map(|(email, _)| email.as_str())
+        .unwrap_or(config.service_account_email.as_str());
+
     let trimmed = object_path.trim_start_matches('/');
     let canonical_uri = format!("/{}/{}", config.bucket, trimmed);
     let credential_scope = format!("{datestamp}/auto/storage/goog4_request");
-    let credential = format!("{}/{}", config.service_account_email, credential_scope);
+    let credential = format!("{effective_sa_email}/{credential_scope}");
 
     let mut query_params = [
         (
@@ -413,7 +422,7 @@ pub async fn sign_gcs_v4_with_iam_endpoint(
         sha256_hex(canonical_request.as_bytes())
     );
 
-    if let Some(ref pem) = config.private_key_pem {
+    if let Some((_, ref pem)) = local_sa_identity {
         let rsa_key = RsaPrivateKey::from_pkcs8_pem(pem)
             .or_else(|_| RsaPrivateKey::from_pkcs1_pem(pem))
             .map_err(|e| StorageError::Signing(format!("invalid GCS RSA private key PEM: {e}")))?;
@@ -429,29 +438,66 @@ pub async fn sign_gcs_v4_with_iam_endpoint(
     let url_endpoint = format!(
         "{}/v1/projects/-/serviceAccounts/{}:signBlob",
         iam_base_url.trim_end_matches('/'),
-        config.service_account_email
+        effective_sa_email
     );
     let client = reqwest::Client::builder()
         .no_proxy()
         .build()
         .unwrap_or_default();
-    let effective_token = match config.access_token {
-        Some(ref tok) => Some(tok.clone()),
-        None if iam_base_url.contains("googleapis.com") => {
-            resolve_gcp_adc_access_token(&client).await
-        }
-        None => None,
+    let payload_b64 = BASE64_STANDARD.encode(string_to_sign.as_bytes());
+
+    let resolved_cache = if config.access_token.is_some() {
+        None
+    } else if let Some(cache) = token_cache {
+        Some(Arc::clone(cache))
+    } else {
+        get_or_create_signing_token_cache(credentials_options, iam_base_url)
     };
-    let mut req = client.post(&url_endpoint).json(&IamSignBlobRequest {
-        payload: BASE64_STANDARD.encode(string_to_sign.as_bytes()),
-    });
-    if let Some(ref token) = effective_token {
-        req = req.bearer_auth(token);
-    }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| StorageError::Signing(format!("IAM signBlob request failed: {e}")))?;
+
+    let resp = if let Some(ref cache) = resolved_cache {
+        let snap = cache
+            .get_or_refresh()
+            .await
+            .map_err(StorageError::Signing)?;
+        let first_resp = client
+            .post(&url_endpoint)
+            .bearer_auth(&snap.access_token)
+            .json(&IamSignBlobRequest {
+                payload: payload_b64.clone(),
+            })
+            .send()
+            .await
+            .map_err(|e| StorageError::Signing(format!("IAM signBlob request failed: {e}")))?;
+        if first_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            cache.invalidate(snap.generation);
+            let refreshed = cache
+                .get_or_refresh()
+                .await
+                .map_err(StorageError::Signing)?;
+            client
+                .post(&url_endpoint)
+                .bearer_auth(&refreshed.access_token)
+                .json(&IamSignBlobRequest {
+                    payload: payload_b64,
+                })
+                .send()
+                .await
+                .map_err(|e| StorageError::Signing(format!("IAM signBlob request failed: {e}")))?
+        } else {
+            first_resp
+        }
+    } else {
+        let mut req = client.post(&url_endpoint).json(&IamSignBlobRequest {
+            payload: payload_b64,
+        });
+        if let Some(ref token) = config.access_token {
+            req = req.bearer_auth(token);
+        }
+        req.send()
+            .await
+            .map_err(|e| StorageError::Signing(format!("IAM signBlob request failed: {e}")))?
+    };
+
     if !resp.status().is_success() {
         return Err(StorageError::Signing(format!(
             "IAM signBlob returned HTTP {}",
@@ -471,6 +517,27 @@ pub async fn sign_gcs_v4_with_iam_endpoint(
         "https://storage.googleapis.com{}?{}&X-Goog-Signature={}",
         canonical_uri, canonical_querystring, hex_sig
     ))
+}
+
+pub async fn sign_gcs_v4_with_iam_endpoint(
+    config: &GcsSignConfig,
+    method: &str,
+    object_path: &str,
+    expires_in_secs: u64,
+    now_unix: i64,
+    iam_base_url: &str,
+) -> Result<String, StorageError> {
+    sign_gcs_v4_with_options_and_cache(
+        config,
+        None,
+        None,
+        method,
+        object_path,
+        expires_in_secs,
+        now_unix,
+        iam_base_url,
+    )
+    .await
 }
 
 #[derive(Clone, Debug)]

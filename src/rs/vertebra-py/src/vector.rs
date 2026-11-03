@@ -20,7 +20,7 @@ use vertebra_core::vector::{
     l2_normalize_in_place, mrl_truncate_and_normalize, quantize_f32_to_binary, quantize_f32_to_i8,
     splice_prefix_tokens as rs_splice_prefix_tokens, top_k_search,
 };
-use vertebra_db::duckdb_engine::write_shm_arrow_frame;
+use vertebra_db::arrow_shm::write_shm_arrow_region;
 use vertebra_db::oracle::{
     encode_oracle_vector_binary as rs_encode_oracle_vector_binary,
     encode_oracle_vector_f32 as rs_encode_oracle_vector_f32,
@@ -784,30 +784,38 @@ impl VectorBatchView {
             let ipc_pybytes: Bound<'_, PyBytes> =
                 pa_out_buf.call_method0("to_pybytes")?.cast_into()?;
             let ipc_vec = ipc_pybytes.as_bytes().to_vec();
-            let (norm_name, byte_len) = py
-                .detach(move || write_shm_arrow_frame(&resolved_shm_name, &ipc_vec))
+            let row_count = self.slab.count();
+            let (norm_name, byte_len, region) = py
+                .detach(move || write_shm_arrow_region(&resolved_shm_name, &ipc_vec))
                 .map_err(PyRuntimeError::new_err)?;
-            return Ok(ArrowCursor::new(norm_name, byte_len));
+            return Ok(ArrowCursor::from_shm_region(
+                norm_name, byte_len, row_count, region,
+            ));
         }
         let slab_ref = Arc::clone(&self.slab);
+        let row_count = slab_ref.count();
         let col_owned = resolved_col.to_string();
-        let (norm_name, byte_len) = py
-            .detach(move || -> Result<(String, usize), String> {
-                let mut payload = Vec::with_capacity(64 + slab_ref.data_byte_len());
-                payload.extend_from_slice(b"VTBVECAR");
-                payload.extend_from_slice(&(slab_ref.count() as u32).to_le_bytes());
-                payload.extend_from_slice(&(slab_ref.dimensions() as u32).to_le_bytes());
-                payload.push(slab_ref.dtype() as u8);
-                let col_bytes = col_owned.as_bytes();
-                payload.extend_from_slice(&(col_bytes.len() as u16).to_le_bytes());
-                payload.extend_from_slice(col_bytes);
-                for i in 0..slab_ref.count() {
-                    payload.extend_from_slice(slab_ref.row_bytes(i)?);
-                }
-                write_shm_arrow_frame(&resolved_shm_name, &payload)
-            })
+        let (norm_name, byte_len, region) = py
+            .detach(
+                move || -> Result<(String, usize, Arc<vertebra_core::shm::ShmRegion>), String> {
+                    let mut payload = Vec::with_capacity(64 + slab_ref.data_byte_len());
+                    payload.extend_from_slice(b"VTBVECAR");
+                    payload.extend_from_slice(&(slab_ref.count() as u32).to_le_bytes());
+                    payload.extend_from_slice(&(slab_ref.dimensions() as u32).to_le_bytes());
+                    payload.push(slab_ref.dtype() as u8);
+                    let col_bytes = col_owned.as_bytes();
+                    payload.extend_from_slice(&(col_bytes.len() as u16).to_le_bytes());
+                    payload.extend_from_slice(col_bytes);
+                    for i in 0..slab_ref.count() {
+                        payload.extend_from_slice(slab_ref.row_bytes(i)?);
+                    }
+                    write_shm_arrow_region(&resolved_shm_name, &payload)
+                },
+            )
             .map_err(PyRuntimeError::new_err)?;
-        Ok(ArrowCursor::new(norm_name, byte_len))
+        Ok(ArrowCursor::from_shm_region(
+            norm_name, byte_len, row_count, region,
+        ))
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 
-from vertebra.db.postgres import (
+from vertebra.db._arrow import (
     ARROW_SHM_THRESHOLD_ROWS,
     ArrowCursor,
     _hydrate_rows_with_schema,
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 __all__ = [
+    "ArrowCursor",
     "ORACLE_DIALECT_TAG",
     "ORACLE_VECTOR_FMT_BINARY",
     "ORACLE_VECTOR_FMT_F32",

@@ -125,8 +125,10 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """When True, send unsigned requests against anonymous buckets or local emulators."""
     refresh_skew_seconds: int = 300
     """Proactive OAuth2 token refresh skew window in seconds before expiration."""
+    quota_project_id: str | None = None
+    """Optional Google Cloud quota project ID forwarded as `x-goog-user-project`."""
 
-    def to_url_and_options(self) -> tuple[str, dict[str, str]]:
+    def to_url_and_options(self, *, eager_impersonation: bool = True) -> tuple[str, dict[str, str]]:
         """Convert configuration into a canonical URL and options dictionary."""
         opts: dict[str, str] = {
             "refresh_skew_ms": str(max(0, int(self.refresh_skew_seconds * 1000))),
@@ -142,9 +144,11 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             opts["service_account_email"] = self.service_account_email
         if self.target_service_account:
             opts["target_service_account"] = self.target_service_account
+        if self.quota_project_id:
+            opts["quota_project_id"] = self.quota_project_id
 
         resolved_token = self.access_token
-        if resolved_token is None and self.target_service_account:
+        if resolved_token is None and self.target_service_account and eager_impersonation:
             resolved_token = self.resolve_adc_token()
         if resolved_token:
             opts["access_token"] = resolved_token
@@ -181,7 +185,7 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
         return f"gs://{self.bucket}", opts
 
-    def extract_service_account_identity(self) -> tuple[str | None, str | None]:
+    def extract_service_account_identity(self, *, allow_ambient: bool = True) -> tuple[str | None, str | None]:
         """Extract `(client_email, private_key_pem)` when service account JSON material is configured."""
         raw_json: str | bytes | None = None
         if self.service_account_key:
@@ -190,17 +194,20 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             sa_path = Path(self.service_account_path)
             if sa_path.is_file():
                 raw_json = sa_path.read_bytes()
-        elif self.application_credentials:
-            adc_path = Path(self.application_credentials)
-            if adc_path.is_file():
-                raw_json = adc_path.read_bytes()
+        else:
+            adc_path = self._resolve_adc_file(allow_ambient=allow_ambient)
+            if adc_path is not None:
+                try:
+                    raw_json = adc_path.read_bytes()
+                except OSError:
+                    raw_json = None
 
         if raw_json is not None:
             try:
                 payload = decode_json(raw_json)
             except (ValueError, TypeError, msgspec.DecodeError):
                 payload = None
-            if isinstance(payload, dict):
+            if isinstance(payload, dict) and payload.get("type") in {None, "service_account"}:
                 email = payload.get("client_email")
                 pem = payload.get("private_key")
                 resolved_email = (
@@ -319,6 +326,9 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             if xdg_cfg:
                 candidates.append(str(Path(xdg_cfg) / "application_default_credentials.json"))
             else:
+                appdata_cfg = os.environ.get("APPDATA", "").strip()
+                if appdata_cfg:
+                    candidates.append(str(Path(appdata_cfg) / "gcloud" / "application_default_credentials.json"))
                 candidates.append(str(Path.home() / ".config" / "gcloud" / "application_default_credentials.json"))
 
         for raw in candidates:
@@ -487,13 +497,23 @@ class GcpTokenSnapshot(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 class GcpTokenCache:
     """Thread-safe and async-aware Google Cloud ADC token cache backed by Rust Tokio off-GIL refresh."""
 
-    __slots__ = ("_allow_ambient_adc", "_config", "_generation", "_lock", "_native", "_refresh_lock", "_snapshot")
+    __slots__ = (
+        "_allow_ambient_adc",
+        "_config",
+        "_generation",
+        "_lock",
+        "_native",
+        "_refresh_lock",
+        "_scopes",
+        "_snapshot",
+    )
 
     def __init__(
         self,
         config: GCSConfig | Mapping[str, str] | None = None,
         *,
         allow_ambient_adc: bool = True,
+        scopes: Sequence[str] | None = None,
     ) -> None:
         raw_opts: dict[str, str] | None = None
         if isinstance(config, Mapping):
@@ -502,11 +522,14 @@ class GcpTokenCache:
                 bucket=raw_opts.get("bucket", ""),
                 service_account_path=raw_opts.get("service_account_path"),
                 service_account_key=raw_opts.get("service_account_key"),
-                application_credentials=raw_opts.get("application_credentials_path"),
+                application_credentials=(
+                    raw_opts.get("application_credentials_path") or raw_opts.get("application_credentials")
+                ),
                 service_account_email=raw_opts.get("service_account_email"),
                 target_service_account=raw_opts.get("target_service_account"),
                 iam_endpoint=raw_opts.get("iam_endpoint", "https://iamcredentials.googleapis.com"),
                 access_token=raw_opts.get("access_token"),
+                quota_project_id=raw_opts.get("quota_project_id"),
             )
         elif config is None:
             resolved_config = GCSConfig(bucket="")
@@ -514,37 +537,51 @@ class GcpTokenCache:
             resolved_config = config
         self._config = resolved_config
         self._allow_ambient_adc = allow_ambient_adc
+        self._scopes: tuple[str, ...] | None = tuple(scopes) if scopes is not None else None
         self._generation = 0
         self._snapshot: GcpTokenSnapshot | None = None
         self._lock = threading.RLock()
         self._refresh_lock = threading.Lock()
         self._native: Any = None
-        native_mod = ObjectStore._get_native_module()
-        if native_mod is not None and hasattr(native_mod, "GcpTokenCache"):
-            if raw_opts is not None:
-                opts = dict(raw_opts)
-            else:
-                opts = {
-                    "refresh_skew_ms": str(max(0, int(resolved_config.refresh_skew_seconds * 1000))),
-                    "iam_endpoint": resolved_config.iam_endpoint,
-                    "allow_ambient_adc": "true" if allow_ambient_adc else "false",
-                }
-                if resolved_config.application_credentials:
-                    opts["application_credentials_path"] = resolved_config.application_credentials
-                if resolved_config.target_service_account:
-                    opts["target_service_account"] = resolved_config.target_service_account
-                if resolved_config.access_token:
-                    opts["access_token"] = resolved_config.access_token
-                if not (
-                    resolved_config.application_credentials
-                    or resolved_config.service_account_path
-                    or resolved_config.service_account_key
-                    or resolved_config.access_token
-                ):
-                    opts["use_metadata_server"] = "true"
+        if raw_opts is not None:
+            opts = dict(raw_opts)
+            if self._scopes:
+                opts["scopes"] = ",".join(self._scopes)
+        else:
+            opts = {
+                "refresh_skew_ms": str(max(0, int(resolved_config.refresh_skew_seconds * 1000))),
+                "iam_endpoint": resolved_config.iam_endpoint,
+                "allow_ambient_adc": "true" if allow_ambient_adc else "false",
+            }
+            if resolved_config.service_account_path:
+                opts["service_account_path"] = resolved_config.service_account_path
+            if resolved_config.service_account_key:
+                opts["service_account_key"] = resolved_config.service_account_key
+            if resolved_config.application_credentials:
+                opts["application_credentials_path"] = resolved_config.application_credentials
+            if resolved_config.target_service_account:
+                opts["target_service_account"] = resolved_config.target_service_account
+            if resolved_config.access_token:
+                opts["access_token"] = resolved_config.access_token
+            if resolved_config.quota_project_id:
+                opts["quota_project_id"] = resolved_config.quota_project_id
+            if self._scopes:
+                opts["scopes"] = ",".join(self._scopes)
+            if not (
+                resolved_config.application_credentials
+                or resolved_config.service_account_path
+                or resolved_config.service_account_key
+                or resolved_config.access_token
+            ):
+                opts["use_metadata_server"] = "true"
+        for candidate_mod in (import_optional("vertebra._vertebra"), ObjectStore._get_native_module()):
+            native_cls = getattr(candidate_mod, "GcpTokenCache", None) if candidate_mod is not None else None
+            if native_cls is None:
+                continue
             try:
-                self._native = native_mod.GcpTokenCache(opts)
-            except (RuntimeError, ValueError, OSError):
+                self._native = native_cls(opts)
+                break
+            except (TypeError, RuntimeError, ValueError, OSError):
                 self._native = None
 
     @property
@@ -562,10 +599,33 @@ class GcpTokenCache:
             return int(self._native.refresh_skew_ms)
         return max(0, int(self._config.refresh_skew_seconds * 1000))
 
+    @property
+    def has_service_account_key(self) -> bool:
+        """Return True when backed by a Google Cloud Service Account RSA private key."""
+        if self._native is not None and hasattr(self._native, "has_service_account_key"):
+            return bool(self._native.has_service_account_key)
+        _, pem = self._config.extract_service_account_identity(allow_ambient=self._allow_ambient_adc)
+        return pem is not None
+
+    @property
+    def service_account_email(self) -> str | None:
+        """Return the Service Account client_email when backed by a Service Account key."""
+        if self._native is not None and hasattr(self._native, "service_account_email"):
+            val = self._native.service_account_email
+            return str(val) if val else None
+        email, _ = self._config.extract_service_account_identity(allow_ambient=self._allow_ambient_adc)
+        return email
+
     @classmethod
-    def from_gcs_config(cls, config: GCSConfig, *, allow_ambient_adc: bool = True) -> GcpTokenCache:
+    def from_gcs_config(
+        cls,
+        config: GCSConfig,
+        *,
+        allow_ambient_adc: bool = True,
+        scopes: Sequence[str] | None = None,
+    ) -> GcpTokenCache:
         """Construct a `GcpTokenCache` bound to a `GCSConfig`."""
-        return cls(config, allow_ambient_adc=allow_ambient_adc)
+        return cls(config, allow_ambient_adc=allow_ambient_adc, scopes=scopes)
 
     def needs_refresh(self, *, now_unix_ms: int | None = None) -> bool:
         """Return True when no token is cached or the cached token is within the proactive skew window."""
@@ -585,6 +645,13 @@ class GcpTokenCache:
         with self._lock:
             if self._snapshot is not None and self._snapshot.generation == failed_generation:
                 self._snapshot = None
+
+    def sign_jwt_for_audience(self, audience: str) -> str:
+        """Sign a self-issued RS256 JWT assertion for the given target audience URI."""
+        if self._native is not None and hasattr(self._native, "sign_jwt_for_audience"):
+            return str(self._native.sign_jwt_for_audience(audience))
+        msg = "GcpTokenCache requires native RSA support and a service_account key for sign_jwt_for_audience"
+        raise ValueError(msg)
 
     def get_token(self, *, force_refresh: bool = False) -> GcpTokenSnapshot:
         """Return a valid `GcpTokenSnapshot`, refreshing off-GIL under a single-flight lock when needed."""
@@ -608,9 +675,10 @@ class GcpTokenCache:
                     if self._snapshot is not None:
                         return self._snapshot
 
-            token, expires_at_ms, quota_project = self._config._fetch_adc_token_with_expiry(
-                allow_ambient_adc=self._allow_ambient_adc
-            )
+            fetch_kwargs: dict[str, Any] = {"allow_ambient_adc": self._allow_ambient_adc}
+            if self._scopes is not None:
+                fetch_kwargs["scopes"] = self._scopes
+            token, expires_at_ms, quota_project = self._config._fetch_adc_token_with_expiry(**fetch_kwargs)
             if not token:
                 msg = f"Failed to resolve Google Cloud ADC access token for bucket '{self._config.bucket}'"
                 raise RuntimeError(msg)
@@ -957,7 +1025,16 @@ class ObjectStore:
 
     _native_module: ClassVar[Any] = None
     _native_loaded: ClassVar[bool] = False
-    __slots__ = ("_local_root", "_memory", "_native", "_options", "_scheme", "_signing", "_url")
+    __slots__ = (
+        "_gcp_token_cache",
+        "_local_root",
+        "_memory",
+        "_native",
+        "_options",
+        "_scheme",
+        "_signing",
+        "_url",
+    )
 
     def __init__(
         self,
@@ -965,9 +1042,13 @@ class ObjectStore:
         *,
         options: dict[str, str] | None = None,
         signing: SigningConfig | None = None,
+        token_cache: GcpTokenCache | None = None,
     ) -> None:
         if not isinstance(url, str):
-            resolved_url, cfg_opts = url.to_url_and_options()
+            if isinstance(url, GCSConfig):
+                resolved_url, cfg_opts = url.to_url_and_options(eager_impersonation=False)
+            else:
+                resolved_url, cfg_opts = url.to_url_and_options()
             merged_opts = dict(cfg_opts)
             if options:
                 merged_opts.update(options)
@@ -977,6 +1058,7 @@ class ObjectStore:
         self._url = url
         self._options = dict(options or {})
         self._signing = signing
+        self._gcp_token_cache = token_cache
         parsed = urlparse(url)
         self._scheme = parsed.scheme or "memory"
         self._memory: dict[str, tuple[bytes, ObjectMeta]] = {}
@@ -1023,17 +1105,26 @@ class ObjectStore:
         """Return a copy of the configured options dictionary."""
         return dict(self._options)
 
+    @property
+    def token_cache(self) -> GcpTokenCache | None:
+        """Return the active Google Cloud OAuth2 token cache bound to this store, if any."""
+        return self._gcp_token_cache
+
     @classmethod
     def from_config(
         cls,
         config: StorageConfig,
         *,
         signing: SigningConfig | None = None,
+        token_cache: GcpTokenCache | None = None,
     ) -> ObjectStore:
         """Construct an ObjectStore from any provider StorageConfig."""
-        url, options = config.to_url_and_options()
+        if isinstance(config, GCSConfig):
+            url, options = config.to_url_and_options(eager_impersonation=False)
+        else:
+            url, options = config.to_url_and_options()
         resolved_signing = signing if signing is not None else cls._derive_signing_from_config(config)
-        return cls(url, options=options, signing=resolved_signing)
+        return cls(url, options=options, signing=resolved_signing, token_cache=token_cache)
 
     @classmethod
     def from_local(cls, root: str | Path, *, create_dirs: bool = True) -> ObjectStore:
@@ -1083,6 +1174,7 @@ class ObjectStore:
         allow_http: bool = False,
         skip_signature: bool = False,
         signing: SigningConfig | None = None,
+        token_cache: GcpTokenCache | None = None,
     ) -> ObjectStore:
         """Construct an ObjectStore backed by Google Cloud Storage."""
         cfg = GCSConfig(
@@ -1098,7 +1190,7 @@ class ObjectStore:
             allow_http=allow_http,
             skip_signature=skip_signature,
         )
-        return cls.from_config(cfg, signing=signing)
+        return cls.from_config(cfg, signing=signing, token_cache=token_cache)
 
     @classmethod
     def from_azure(
@@ -1851,22 +1943,10 @@ class ObjectStore:
         expected_sig = parse_qs(urlparse(expected_url).query)["X-Amz-Signature"][0]
         return hmac.compare_digest(signature, expected_sig)
 
-    def _sign_gcs_v4_iam(
-        self,
-        key: str,
-        *,
-        method: str,
-        expires_in_secs: int,
-        now_ts: int,
-    ) -> str:
-        assert self._signing is not None
-        effective_email = self._signing.target_service_account or self._signing.service_account_email
-        if not effective_email:
-            msg = "service_account_email or target_service_account is required for GCS V4 URL signing"
-            raise ValueError(msg)
-        private_key_pem = None if self._signing.target_service_account else self._signing.private_key_pem
-        access_token = self._signing.access_token or self._options.get("access_token")
-        if access_token is None and private_key_pem is None:
+    def _ensure_gcs_token_cache(self, effective_email: str) -> GcpTokenCache:
+        """Lazily initialize and return the store-scoped `GcpTokenCache` for keyless GCS IAM signing."""
+        if self._gcp_token_cache is None:
+            assert self._signing is not None
             adc_helper = GCSConfig(
                 bucket=self._signing.bucket,
                 service_account_path=self._options.get("service_account_path"),
@@ -1875,8 +1955,28 @@ class ObjectStore:
                 service_account_email=effective_email,
                 iam_endpoint=self._signing.iam_endpoint,
             )
-            access_token = adc_helper.resolve_adc_token()
+            self._gcp_token_cache = GcpTokenCache.from_gcs_config(adc_helper)
+        return self._gcp_token_cache
 
+    @staticmethod
+    def _is_iam_unauthorized_error(exc: BaseException) -> bool:
+        """Return True when an IAM signBlob error indicates an HTTP 401 Unauthorized response."""
+        if isinstance(exc, urllib.error.HTTPError) and exc.code == 401:
+            return True
+        return isinstance(exc, RuntimeError) and "HTTP 401" in str(exc)
+
+    def _execute_gcs_v4_iam_sign(
+        self,
+        key: str,
+        *,
+        effective_email: str,
+        method: str,
+        expires_in_secs: int,
+        now_ts: int,
+        access_token: str | None,
+        private_key_pem: str | None,
+    ) -> str:
+        assert self._signing is not None
         native_mod = self._get_native_module()
         if native_mod is not None:
             return str(
@@ -1933,6 +2033,54 @@ class ObjectStore:
         hex_sig = raw_sig.hex()
         return f"https://storage.googleapis.com{canonical_uri}?{canonical_qs}&X-Goog-Signature={hex_sig}"
 
+    def _sign_gcs_v4_iam(
+        self,
+        key: str,
+        *,
+        method: str,
+        expires_in_secs: int,
+        now_ts: int,
+    ) -> str:
+        assert self._signing is not None
+        effective_email = self._signing.target_service_account or self._signing.service_account_email
+        if not effective_email:
+            msg = "service_account_email or target_service_account is required for GCS V4 URL signing"
+            raise ValueError(msg)
+        private_key_pem = None if self._signing.target_service_account else self._signing.private_key_pem
+        access_token = self._signing.access_token
+        token_generation: int | None = None
+        if access_token is None and private_key_pem is None:
+            cache = self._ensure_gcs_token_cache(effective_email)
+            snap = cache.get_token()
+            access_token = snap.access_token
+            token_generation = snap.generation
+
+        try:
+            return self._execute_gcs_v4_iam_sign(
+                key,
+                effective_email=effective_email,
+                method=method,
+                expires_in_secs=expires_in_secs,
+                now_ts=now_ts,
+                access_token=access_token,
+                private_key_pem=private_key_pem,
+            )
+        except (RuntimeError, urllib.error.HTTPError) as exc:
+            if token_generation is None or not self._is_iam_unauthorized_error(exc):
+                raise
+            cache = self._ensure_gcs_token_cache(effective_email)
+            cache.invalidate(token_generation)
+            refreshed = cache.get_token()
+            return self._execute_gcs_v4_iam_sign(
+                key,
+                effective_email=effective_email,
+                method=method,
+                expires_in_secs=expires_in_secs,
+                now_ts=now_ts,
+                access_token=refreshed.access_token,
+                private_key_pem=private_key_pem,
+            )
+
     async def _sign_gcs_v4_iam_async(
         self,
         key: str,
@@ -1947,35 +2095,49 @@ class ObjectStore:
             msg = "service_account_email or target_service_account is required for GCS V4 URL signing"
             raise ValueError(msg)
         private_key_pem = None if self._signing.target_service_account else self._signing.private_key_pem
-        access_token = self._signing.access_token or self._options.get("access_token")
+        access_token = self._signing.access_token
+        token_generation: int | None = None
         if access_token is None and private_key_pem is None:
-            adc_helper = GCSConfig(
-                bucket=self._signing.bucket,
-                service_account_path=self._options.get("service_account_path"),
-                service_account_key=self._options.get("service_account_key"),
-                application_credentials=self._options.get("application_credentials_path"),
-                service_account_email=effective_email,
-                iam_endpoint=self._signing.iam_endpoint,
-            )
-            cache = GcpTokenCache.from_gcs_config(adc_helper)
+            cache = self._ensure_gcs_token_cache(effective_email)
             snap = await cache.get_token_async()
             access_token = snap.access_token
+            token_generation = snap.generation
 
         native_mod = self._get_native_module()
         if native_mod is not None and hasattr(native_mod, "py_sign_gcs_v4_iam_url_async"):
-            return str(
-                await native_mod.py_sign_gcs_v4_iam_url_async(
-                    self._signing.bucket,
-                    effective_email,
-                    method,
-                    key,
-                    expires_in_secs,
-                    now_ts,
-                    self._signing.iam_endpoint,
-                    access_token,
-                    private_key_pem,
+            try:
+                return str(
+                    await native_mod.py_sign_gcs_v4_iam_url_async(
+                        self._signing.bucket,
+                        effective_email,
+                        method,
+                        key,
+                        expires_in_secs,
+                        now_ts,
+                        self._signing.iam_endpoint,
+                        access_token,
+                        private_key_pem,
+                    )
                 )
-            )
+            except RuntimeError as exc:
+                if token_generation is None or not self._is_iam_unauthorized_error(exc):
+                    raise
+                cache = self._ensure_gcs_token_cache(effective_email)
+                cache.invalidate(token_generation)
+                refreshed = await cache.get_token_async()
+                return str(
+                    await native_mod.py_sign_gcs_v4_iam_url_async(
+                        self._signing.bucket,
+                        effective_email,
+                        method,
+                        key,
+                        expires_in_secs,
+                        now_ts,
+                        self._signing.iam_endpoint,
+                        refreshed.access_token,
+                        private_key_pem,
+                    )
+                )
         return self._sign_gcs_v4_iam(
             key,
             method=method,

@@ -15,10 +15,10 @@ vertebra-core = { path = "../vertebra-core" }
 _vertebra = { path = "../vertebra-py", package = "vertebra-py", optional = true }
 
 # HTTP stack
-hyper          = { version = "1", features = ["full"] }
-hyper-util     = { version = "0.1", features = ["full"] }
-http           = "1"
-http-body-util = "0.1"
+hyper          = { workspace = true }
+hyper-util     = { workspace = true }
+http           = { workspace = true }
+http-body-util = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true }
@@ -29,9 +29,9 @@ futures-util = "0.3"
 tokio-tungstenite = "0.30"
 
 # TLS (optional feature)
-rustls          = { version = "0.23", optional = true, features = ["ring"] }
-tokio-rustls    = { version = "0.26", optional = true }
-rustls-pemfile  = { version = "2", optional = true }
+rustls          = { workspace = true, optional = true }
+tokio-rustls    = { workspace = true, optional = true }
+rustls-pemfile  = { workspace = true, optional = true }
 quinn           = { workspace = true, optional = true }
 h3              = { workspace = true, optional = true }
 h3-quinn        = { workspace = true, optional = true }
@@ -52,13 +52,13 @@ tokio-util = { version = "0.7", features = ["rt"] }
 
 # Utilities
 brotli     = "7.0"
-flate2     = "1.1"
+flate2     = { workspace = true }
 multer     = "3.1.0"
 thiserror  = { workspace = true }
 tracing    = "0.1"
 fnv        = "1.0"
 bytes      = { workspace = true }
-dashmap    = "6"
+dashmap    = { workspace = true }
 mimalloc   = { workspace = true, optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -78,8 +78,8 @@ tokio-test     = "0.4"
 criterion      = { workspace = true }
 reqwest        = { version = "0.13", features = ["json", "http2", "blocking"] }
 tempfile       = "3"
-rustls-pemfile = "2"
-rcgen          = "0.14"
+rustls-pemfile = { workspace = true }
+rcgen          = { workspace = true }
 serde_json     = { workspace = true }
 
 [[bench]]

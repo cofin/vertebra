@@ -12,17 +12,18 @@ from typing import Any
 
 import msgspec
 
-from vertebra.db.postgres import (
+from vertebra.db._arrow import (
     ArrowCursor,
     _hydrate_rows_with_schema,
-    _normalize_driver_params,
     _table_to_rows_and_cols,
     write_arrow_shm,
 )
+from vertebra.db.postgres import _normalize_driver_params
 from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.module_loader import import_optional
 
 __all__ = (
+    "ArrowCursor",
     "AsyncSQLiteDriver",
     "SQLiteConfig",
     "SyncSQLiteDriver",

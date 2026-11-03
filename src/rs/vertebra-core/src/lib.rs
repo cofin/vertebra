@@ -8,6 +8,8 @@ pub mod broker;
 pub mod buffer;
 pub mod channel;
 pub mod cleanup;
+#[cfg(feature = "gcp-auth")]
+pub mod gcp_auth;
 pub mod guards;
 pub mod id;
 pub mod ipc;
@@ -35,5 +37,6 @@ pub use broker::{
 };
 pub use channel::{MpmcSlotView, SlotView};
 pub use layout::CacheLine;
+pub use notify::{CompletionQueue, Notifier};
 pub use transport::ring_pair::{RingPair, TieredRingSet};
 pub use transport::{BatchSnapshot, InProcessRequest, TransportError, TransportNode};

@@ -7,6 +7,10 @@ from typing import Any, ClassVar, Self, cast
 
 import msgspec
 
+from vertebra.db._arrow import (
+    ARROW_SHM_THRESHOLD_ROWS,
+    ArrowCursor,
+)
 from vertebra.db._registry import DatabaseRegistry
 from vertebra.db.dialer.alloydb import AlloyDBDialer
 from vertebra.db.dialer.cloudsql import CloudSQLDialer
@@ -14,10 +18,8 @@ from vertebra.db.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
 from vertebra.db.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLDriver
 from vertebra.db.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
 from vertebra.db.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
-from vertebra.db.pipeline import QueryPipeline
+from vertebra.db.pipeline import PipelineDialect, QueryPipeline
 from vertebra.db.postgres import (
-    ARROW_SHM_THRESHOLD_ROWS,
-    ArrowCursor,
     AsyncPostgreSQLDriver,
     PostgreSQLConfig,
     SyncPostgreSQLDriver,
@@ -326,7 +328,10 @@ class BaseSyncDriver(SyncDriverAdapterBase):
                 break
 
         if all_read and len(operations) > 1:
-            pipeline = QueryPipeline()
+            pipeline_dialect: PipelineDialect = (
+                "googlesql" if self.dialect in {"bigquery", "spanner", "googlesql"} else "postgres"
+            )
+            pipeline = QueryPipeline(dialect=pipeline_dialect)
             for idx, op in enumerate(operations):
                 stmt_sql = str(getattr(op, "statement", ""))
                 args = getattr(op, "arguments", ())
@@ -641,7 +646,10 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
                 break
 
         if all_read and len(operations) > 1:
-            pipeline = QueryPipeline()
+            pipeline_dialect: PipelineDialect = (
+                "googlesql" if self.dialect in {"bigquery", "spanner", "googlesql"} else "postgres"
+            )
+            pipeline = QueryPipeline(dialect=pipeline_dialect)
             for idx, op in enumerate(operations):
                 stmt_sql = str(getattr(op, "statement", ""))
                 args = getattr(op, "arguments", ())

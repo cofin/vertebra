@@ -1,0 +1,375 @@
+//! Zero-copy POSIX shared-memory (`VTBARROW`) framing and multi-batch stream writer.
+//!
+//! Frame layout in POSIX shared memory (`/dev/shm`):
+//! - `[0..8]`: Magic bytes `b"VTBARROW"`
+//! - `[8..16]`: `u64` little-endian payload byte length
+//! - `[16..16 + byte_len]`: Arrow IPC stream bytes (`Schema` + `RecordBatch*` + `EOS`)
+
+use std::sync::{Arc, LazyLock};
+
+use dashmap::DashMap;
+use vertebra_core::shm::ShmRegion;
+
+/// 8-byte magic header prefixing every `VTBARROW` shared-memory frame.
+pub const SHM_ARROW_MAGIC: &[u8; 8] = b"VTBARROW";
+
+/// 8-byte Arrow IPC stream End-of-Stream (EOS) marker (`0xFFFFFFFF` continuation + `0` length).
+pub const ARROW_IPC_EOS_MARKER: [u8; 8] = [0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00];
+
+const PAGE_SIZE: usize = 4096;
+
+/// 16-byte header written at offset `0` of a shared-memory Arrow IPC `ShmRegion`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShmArrowFrameHeader {
+    pub magic: [u8; 8],
+    pub byte_len: u64,
+}
+
+impl ShmArrowFrameHeader {
+    /// Total byte width of the `VTBARROW` frame header (`16` bytes).
+    pub const SIZE: usize = 16;
+
+    /// Encode header into 16 bytes.
+    #[inline]
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut out = [0u8; Self::SIZE];
+        out[0..8].copy_from_slice(&self.magic);
+        out[8..16].copy_from_slice(&self.byte_len.to_le_bytes());
+        out
+    }
+
+    /// Decode header from the first 16 bytes of a slice.
+    #[inline]
+    pub fn from_slice(buf: &[u8]) -> Result<Self, String> {
+        if buf.len() < Self::SIZE {
+            return Err("buffer too short for 16-byte ShmArrowFrameHeader".to_string());
+        }
+        let mut magic = [0u8; 8];
+        magic.copy_from_slice(&buf[0..8]);
+        if &magic != SHM_ARROW_MAGIC {
+            return Err("invalid ShmArrowFrameHeader magic (expected VTBARROW)".to_string());
+        }
+        let byte_len = u64::from_le_bytes([
+            buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
+        ]);
+        Ok(Self { magic, byte_len })
+    }
+}
+
+/// Process-local registry keeping active `VTBARROW` shared-memory regions alive.
+pub static ACTIVE_ARROW_SHM_REGIONS: LazyLock<DashMap<String, Arc<ShmRegion>>> =
+    LazyLock::new(DashMap::new);
+
+/// Normalize a POSIX shared-memory segment name so it begins with `/`.
+#[inline]
+pub fn normalize_shm_name(shm_name: &str) -> String {
+    let trimmed = shm_name.trim();
+    if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
+    }
+}
+
+#[inline]
+fn page_align(size: usize) -> usize {
+    let min_size = size.max(PAGE_SIZE);
+    (min_size + (PAGE_SIZE - 1)) & !(PAGE_SIZE - 1)
+}
+
+#[inline]
+fn allocate_shm_region(norm_name: &str, alloc_size: usize) -> Result<ShmRegion, String> {
+    #[cfg(unix)]
+    {
+        match ShmRegion::create_named(norm_name, alloc_size) {
+            Ok(r) => Ok(r),
+            Err(_) => ShmRegion::create(alloc_size)
+                .map_err(|e| format!("failed to create Arrow ShmRegion `{norm_name}`: {e}")),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        ShmRegion::create(alloc_size)
+            .map_err(|e| format!("failed to create Arrow ShmRegion `{norm_name}`: {e}"))
+    }
+}
+
+/// Write an Arrow IPC byte stream into a shared-memory `ShmRegion`, returning
+/// `(normalized_shm_name, payload_len, Arc<ShmRegion>)`.
+pub fn write_shm_arrow_region(
+    shm_name: &str,
+    ipc_bytes: &[u8],
+) -> Result<(String, usize, Arc<ShmRegion>), String> {
+    let name = normalize_shm_name(shm_name);
+    let total_size = ShmArrowFrameHeader::SIZE
+        .checked_add(ipc_bytes.len())
+        .ok_or_else(|| "SHM Arrow frame size overflow".to_string())?;
+    let alloc_size = page_align(total_size);
+    let mut region = allocate_shm_region(&name, alloc_size)?;
+
+    let header = ShmArrowFrameHeader {
+        magic: *SHM_ARROW_MAGIC,
+        byte_len: ipc_bytes.len() as u64,
+    };
+    let hdr_bytes = header.to_bytes();
+
+    // SAFETY: We exclusively own `region` during initialization before publishing to ACTIVE_ARROW_SHM_REGIONS.
+    unsafe {
+        let slice = region.as_mut_slice();
+        slice[0..ShmArrowFrameHeader::SIZE].copy_from_slice(&hdr_bytes);
+        slice[ShmArrowFrameHeader::SIZE..ShmArrowFrameHeader::SIZE + ipc_bytes.len()]
+            .copy_from_slice(ipc_bytes);
+    }
+
+    let arc_region = Arc::new(region);
+    ACTIVE_ARROW_SHM_REGIONS.insert(name.clone(), Arc::clone(&arc_region));
+    Ok((name, ipc_bytes.len(), arc_region))
+}
+
+/// Write an Arrow IPC byte stream into a shared-memory `ShmRegion`, returning `(normalized_shm_name, payload_len)`.
+pub fn write_shm_arrow_frame(shm_name: &str, ipc_bytes: &[u8]) -> Result<(String, usize), String> {
+    let (name, len, _) = write_shm_arrow_region(shm_name, ipc_bytes)?;
+    Ok((name, len))
+}
+
+/// Resolve or open a named `VTBARROW` SHM region and return `(Arc<ShmRegion>, payload_len)`.
+pub fn open_shm_arrow_region(shm_name: &str) -> Result<(Arc<ShmRegion>, usize), String> {
+    let name = normalize_shm_name(shm_name);
+    if let Some(region_ref) = ACTIVE_ARROW_SHM_REGIONS.get(&name) {
+        let region = Arc::clone(region_ref.value());
+        // SAFETY: Region was initialized before publication and is immutable thereafter.
+        let slice = unsafe { region.as_slice() };
+        let header = ShmArrowFrameHeader::from_slice(slice)?;
+        let len = header.byte_len as usize;
+        if slice.len() < ShmArrowFrameHeader::SIZE + len {
+            return Err("corrupted ShmArrowFrameHeader byte_len exceeds region size".to_string());
+        }
+        return Ok((region, len));
+    }
+
+    #[cfg(unix)]
+    {
+        let probe = ShmRegion::open_named(&name, PAGE_SIZE)
+            .map_err(|e| format!("failed to open Arrow ShmRegion `{name}`: {e}"))?;
+        let header = unsafe { ShmArrowFrameHeader::from_slice(probe.as_slice()) }?;
+        let len = header.byte_len as usize;
+        let total_size = ShmArrowFrameHeader::SIZE + len;
+        if total_size <= probe.len() {
+            return Ok((Arc::new(probe), len));
+        }
+        drop(probe);
+        let full = ShmRegion::open_named(&name, total_size)
+            .map_err(|e| format!("failed to map full Arrow ShmRegion `{name}`: {e}"))?;
+        Ok((Arc::new(full), len))
+    }
+    #[cfg(not(unix))]
+    {
+        Err(format!("Arrow ShmRegion `{name}` not found"))
+    }
+}
+
+/// Borrow an Arrow IPC byte stream from a shared-memory `ShmRegion` without intermediate `Vec<u8>` allocation.
+pub fn read_shm_arrow_frame_with<R, F>(shm_name: &str, f: F) -> Result<R, String>
+where
+    F: FnOnce(&[u8]) -> R,
+{
+    let (region, len) = open_shm_arrow_region(shm_name)?;
+    // SAFETY: `open_shm_arrow_region` validated `ShmArrowFrameHeader::SIZE + len <= region.len()`.
+    let slice = unsafe { region.as_slice() };
+    Ok(f(
+        &slice[ShmArrowFrameHeader::SIZE..ShmArrowFrameHeader::SIZE + len]
+    ))
+}
+
+/// Read an Arrow IPC byte stream from a shared-memory `ShmRegion`.
+pub fn read_shm_arrow_frame(shm_name: &str) -> Result<Vec<u8>, String> {
+    read_shm_arrow_frame_with(shm_name, |slice| slice.to_vec())
+}
+
+/// Release an active shared-memory Arrow IPC `ShmRegion` from the process-local registry.
+pub fn release_shm_arrow_frame(shm_name: &str) -> bool {
+    let name = normalize_shm_name(shm_name);
+    ACTIVE_ARROW_SHM_REGIONS.remove(&name).is_some()
+}
+
+/// Single-owner incremental stream writer that concatenates Arrow IPC frames into a
+/// page-aligned `VTBARROW` shared-memory segment with 8-byte frame padding and EOS termination.
+pub struct ShmArrowStreamWriter {
+    shm_name: String,
+    region: ShmRegion,
+    capacity: usize,
+    write_offset: usize,
+    row_count: usize,
+    batch_count: usize,
+}
+
+impl ShmArrowStreamWriter {
+    /// Initialize a new `ShmArrowStreamWriter` at `shm_name` and write the initial `schema_ipc_frame`
+    /// immediately after the 16-byte `ShmArrowFrameHeader` reservation.
+    pub fn create(
+        shm_name: &str,
+        initial_capacity: usize,
+        schema_ipc_frame: &[u8],
+    ) -> Result<Self, String> {
+        let norm_name = normalize_shm_name(shm_name);
+        let stripped_schema = Self::strip_trailing_eos(schema_ipc_frame);
+        let padded_schema_len = (stripped_schema.len() + 7) & !7;
+        let min_required = ShmArrowFrameHeader::SIZE
+            .checked_add(padded_schema_len)
+            .and_then(|v| v.checked_add(ARROW_IPC_EOS_MARKER.len()))
+            .ok_or_else(|| "SHM stream initial capacity overflow".to_string())?;
+        let capacity = page_align(initial_capacity.max(min_required));
+        let region = allocate_shm_region(&norm_name, capacity)?;
+
+        let mut writer = Self {
+            shm_name: norm_name,
+            region,
+            capacity,
+            write_offset: ShmArrowFrameHeader::SIZE,
+            row_count: 0,
+            batch_count: 0,
+        };
+        if !stripped_schema.is_empty() {
+            writer.write_padded_bytes(stripped_schema)?;
+        }
+        Ok(writer)
+    }
+
+    /// Total number of rows appended across all frames.
+    #[inline]
+    pub fn row_count(&self) -> usize {
+        self.row_count
+    }
+
+    /// Total number of record-batch frames appended.
+    #[inline]
+    pub fn batch_count(&self) -> usize {
+        self.batch_count
+    }
+
+    /// Normalized POSIX SHM segment name (`/<name>`).
+    #[inline]
+    pub fn shm_name(&self) -> &str {
+        &self.shm_name
+    }
+
+    #[inline]
+    fn strip_trailing_eos(bytes: &[u8]) -> &[u8] {
+        if bytes.len() >= ARROW_IPC_EOS_MARKER.len()
+            && bytes[bytes.len() - ARROW_IPC_EOS_MARKER.len()..] == ARROW_IPC_EOS_MARKER
+        {
+            &bytes[..bytes.len() - ARROW_IPC_EOS_MARKER.len()]
+        } else {
+            bytes
+        }
+    }
+
+    fn ensure_capacity(&mut self, additional_bytes: usize) -> Result<(), String> {
+        let required = self
+            .write_offset
+            .checked_add(additional_bytes)
+            .and_then(|v| v.checked_add(ARROW_IPC_EOS_MARKER.len()))
+            .ok_or_else(|| "SHM Arrow stream capacity overflow".to_string())?;
+        if required <= self.capacity {
+            return Ok(());
+        }
+        let doubled = required
+            .checked_mul(2)
+            .ok_or_else(|| "SHM Arrow stream resize overflow".to_string())?;
+        let next_capacity = page_align(doubled.max(self.capacity.saturating_mul(2)));
+
+        #[cfg(unix)]
+        self.region.disarm_unlink();
+
+        let mut next_region = allocate_shm_region(&self.shm_name, next_capacity)?;
+        // SAFETY: Both `self.region` and `next_region` are exclusively owned by `self` and have
+        // at least `self.write_offset` valid initialized bytes.
+        unsafe {
+            let src = &self.region.as_slice()[..self.write_offset];
+            let dst = &mut next_region.as_mut_slice()[..self.write_offset];
+            dst.copy_from_slice(src);
+        }
+        self.region = next_region;
+        self.capacity = next_capacity;
+        Ok(())
+    }
+
+    fn write_padded_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let padded_len = (bytes.len() + 7) & !7;
+        let pad_bytes = padded_len - bytes.len();
+        self.ensure_capacity(padded_len)?;
+        // SAFETY: `ensure_capacity` guarantees `self.write_offset + padded_len <= self.capacity`.
+        unsafe {
+            let dst = self.region.as_mut_slice();
+            dst[self.write_offset..self.write_offset + bytes.len()].copy_from_slice(bytes);
+            if pad_bytes > 0 {
+                dst[self.write_offset + bytes.len()..self.write_offset + padded_len].fill(0);
+            }
+        }
+        self.write_offset += padded_len;
+        Ok(())
+    }
+
+    /// Append a serialized Arrow IPC `RecordBatch` frame, padding to an 8-byte boundary with `0u8`.
+    pub fn append_ipc_frame(
+        &mut self,
+        frame_bytes: &[u8],
+        rows_in_frame: usize,
+    ) -> Result<(), String> {
+        if frame_bytes.is_empty() {
+            return Ok(());
+        }
+        self.write_padded_bytes(frame_bytes)?;
+        self.row_count = self.row_count.saturating_add(rows_in_frame);
+        self.batch_count = self.batch_count.saturating_add(1);
+        Ok(())
+    }
+
+    /// Append a raw Arrow IPC stream chunk (stripping any trailing 8-byte EOS marker so multiple
+    /// chunks concatenate into a single Arrow IPC stream) and pad to an 8-byte boundary.
+    pub fn append_raw_stream_chunk(
+        &mut self,
+        stream_bytes: &[u8],
+        rows_in_chunk: usize,
+    ) -> Result<(), String> {
+        let stripped = Self::strip_trailing_eos(stream_bytes);
+        if stripped.is_empty() {
+            return Ok(());
+        }
+        self.write_padded_bytes(stripped)?;
+        self.row_count = self.row_count.saturating_add(rows_in_chunk);
+        self.batch_count = self.batch_count.saturating_add(1);
+        Ok(())
+    }
+
+    /// Finalize the stream by appending the 8-byte Arrow IPC EOS marker, stamping the 16-byte
+    /// `ShmArrowFrameHeader` at offset `0..16`, and publishing `Arc<ShmRegion>` in
+    /// [`ACTIVE_ARROW_SHM_REGIONS`].
+    pub fn finish(mut self) -> Result<(String, usize, Arc<ShmRegion>), String> {
+        self.ensure_capacity(0)?;
+        // SAFETY: `ensure_capacity(0)` reserves space for `ARROW_IPC_EOS_MARKER` (`8` bytes).
+        unsafe {
+            let dst = self.region.as_mut_slice();
+            dst[self.write_offset..self.write_offset + ARROW_IPC_EOS_MARKER.len()]
+                .copy_from_slice(&ARROW_IPC_EOS_MARKER);
+        }
+        self.write_offset += ARROW_IPC_EOS_MARKER.len();
+        let byte_len = self.write_offset - ShmArrowFrameHeader::SIZE;
+        let header = ShmArrowFrameHeader {
+            magic: *SHM_ARROW_MAGIC,
+            byte_len: byte_len as u64,
+        };
+        let hdr_bytes = header.to_bytes();
+        unsafe {
+            let dst = self.region.as_mut_slice();
+            dst[0..ShmArrowFrameHeader::SIZE].copy_from_slice(&hdr_bytes);
+        }
+        let arc_region = Arc::new(self.region);
+        ACTIVE_ARROW_SHM_REGIONS.insert(self.shm_name.clone(), Arc::clone(&arc_region));
+        Ok((self.shm_name, byte_len, arc_region))
+    }
+}

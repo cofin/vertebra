@@ -9,13 +9,13 @@ import sqlite3
 import struct
 from typing import TYPE_CHECKING, Any
 
-from vertebra.db.dialer.cloudsql import CloudSQLConfig
-from vertebra.db.postgres import (
+from vertebra.db._arrow import (
     ARROW_SHM_THRESHOLD_ROWS,
     ArrowCursor,
     _hydrate_rows_with_schema,
     _table_to_rows_and_cols,
 )
+from vertebra.db.dialer.cloudsql import CloudSQLConfig
 from vertebra.typing import FrozenBaseStruct, VertebraError
 from vertebra.utils.module_loader import import_optional
 
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 __all__ = (
+    "ArrowCursor",
     "AsyncMSSQLDriver",
     "MSSQLConfig",
     "MSSQL_DIALECT_TAG",

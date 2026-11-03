@@ -17,6 +17,8 @@ __all__ = [
     "AsgiScopeIterator",
     "BrokerStats",
     "CloudSQLDialer",
+    "GcpTokenCache",
+    "GcpTokenSnapshot",
     "Headers",
     "HeadersIterator",
     "JWTGuard",
@@ -33,6 +35,7 @@ __all__ = [
     "RsgiHttpProtocol",
     "RsgiScope",
     "RsgiTransport",
+    "RustDbTaskAwaitable",
     "SchemaDigestCache",
     "SimilarityMatch",
     "StatementCache",
@@ -48,6 +51,7 @@ __all__ = [
     "WsgiInput",
     "_WsgiStartResponse",
     "__version__",
+    "camelize",
     "cancel_request_sleep",
     "call_vectorcall",
     "classify_jsonrpc_frame",
@@ -90,22 +94,43 @@ __all__ = [
     "format_traceparent",
     "get_batch",
     "get_request_notify_fd",
+    "humanize",
+    "humanize_bytes",
+    "humanize_duration",
+    "humanize_number",
+    "humanize_rate",
     "hydrate_one_vectorcall",
     "hydrate_rows_vectorcall",
     "init_transport",
     "instantiate_struct_vectorcall",
+    "kebabize",
+    "nanoid_generate",
+    "normalize_identifier",
+    "ordinalize",
     "orm_to_struct_vectorcall",
     "pack_grpc_lpm_frame",
+    "parse_bytes",
     "parse_cluster_redirect",
+    "parse_duration",
     "parse_tnsnames_ora",
     "parse_traceparent",
+    "pascalize",
+    "pluralize",
     "prepare_request_sleep",
+    "quote_backtick_identifier",
+    "quote_bracket_identifier",
+    "quote_dialect_identifier",
+    "quote_identifier",
     "redis_hash_slot",
     "resolve_tns_alias",
     "rewrite_mssql_placeholders",
     "run_wsgi_callable",
     "sanitize_sql",
+    "singularize",
+    "slugify",
+    "snake_case",
     "splice_prefix_tokens",
+    "split_qualified_identifier",
     "sqlite_initialization_pragmas",
     "stream_file_chunks",
     "strip_pg_jsonb_header",
@@ -114,7 +139,16 @@ __all__ = [
     "submit_response",
     "submit_response_raw",
     "submit_results",
+    "titleize",
+    "truncate",
+    "truncate_utf8_bytes",
     "try_get_batch",
+    "uuid4_hex",
+    "uuid4_str",
+    "uuid4_u128",
+    "uuid7_str",
+    "uuid7_u128",
+    "validate_identifier",
 ]
 
 @final
@@ -936,13 +970,23 @@ class ArrowCursor:
     """POSIX shared-memory segment name holding the Arrow IPC stream."""
     byte_len: int
     """Length in bytes of the Arrow IPC payload written to the segment."""
-    def __new__(cls, shm_name: str, byte_len: int) -> Self: ...
+    row_count: int
+    """Total number of rows encoded across all record batches in the stream."""
+    def __new__(cls, shm_name: str, byte_len: int, row_count: int = 0) -> Self: ...
+    def __buffer__(self, flags: int, /) -> memoryview: ...
     @staticmethod
-    def write_ipc_to_shm(shm_name: str, payload: bytes) -> ArrowCursor: ...
+    def write_ipc_to_shm(shm_name: str, payload: bytes, row_count: int = 0) -> ArrowCursor: ...
     @staticmethod
     def read_ipc_from_shm(shm_name: str) -> bytes: ...
     def read_bytes(self) -> bytes: ...
+    def buffer_view(self) -> memoryview: ...
+    def to_pyarrow(self) -> Any: ...
+    def to_arrow_table(self) -> Any: ...
+    def to_polars(self) -> Any: ...
     def release(self) -> bool: ...
+    def close(self) -> bool: ...
+    def __enter__(self) -> Self: ...
+    def __exit__(self, exc_type: Any = None, exc_val: Any = None, exc_tb: Any = None) -> None: ...
 
 def encode_alloydb_metadata_exchange(
     user_agent: str = "vertebra-db/0.1",
@@ -1224,3 +1268,45 @@ def uuid4_hex() -> str: ...
 def uuid7_u128() -> int: ...
 def uuid7_str() -> str: ...
 def nanoid_generate(size: int = 21) -> str: ...
+
+@final
+class RustDbTaskAwaitable:
+    def __new__(cls) -> RustDbTaskAwaitable: ...
+    def __await__(self) -> Any: ...
+
+@final
+class GcpTokenSnapshot:
+    def __new__(
+        cls,
+        *,
+        access_token: str,
+        expires_at_unix_ms: int,
+        generation: int,
+        quota_project_id: str | None = None,
+    ) -> GcpTokenSnapshot: ...
+    @property
+    def access_token(self) -> str: ...
+    @property
+    def expires_at_unix_ms(self) -> int: ...
+    @property
+    def generation(self) -> int: ...
+    @property
+    def quota_project_id(self) -> str | None: ...
+    def __repr__(self) -> str: ...
+
+@final
+class GcpTokenCache:
+    def __new__(cls, options: dict[str, str]) -> GcpTokenCache: ...
+    @property
+    def generation(self) -> int: ...
+    @property
+    def refresh_skew_ms(self) -> int: ...
+    @property
+    def has_service_account_key(self) -> bool: ...
+    @property
+    def service_account_email(self) -> str | None: ...
+    def needs_refresh(self, *, now_unix_ms: int | None = None) -> bool: ...
+    def invalidate(self, failed_generation: int) -> None: ...
+    def sign_jwt_for_audience(self, audience: str) -> str: ...
+    def get_token(self, *, force_refresh: bool = False) -> GcpTokenSnapshot: ...
+    def get_token_async(self, *, force_refresh: bool = False) -> RustDbTaskAwaitable: ...

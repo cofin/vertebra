@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import base64
 import json
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs
 
 import pytest
 
+import vertebra.embeddings._google as google_embeddings_mod
+from vertebra._vertebra import GcpTokenCache as CoreGcpTokenCache
 from vertebra.db.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
+from vertebra.embeddings import VertexEmbedder
 from vertebra.storage import GcpTokenCache, GcpTokenSnapshot, GCSConfig, ObjectStore, SigningConfig
 
 
@@ -25,6 +32,7 @@ class _MockTokenServer:
         self.iam_calls = 0
         self.gcs_calls = 0
         self.last_headers: dict[str, str] = {}
+        self.last_post_body: bytes = b""
         self.expires_in: int = 3600
         self.expire_time_iso: str = "2099-01-01T00:00:00Z"
         self._lock = threading.Lock()
@@ -76,9 +84,10 @@ class _MockTokenServer:
 
             def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length", "0"))
-                _ = self.rfile.read(length) if length > 0 else b""
+                body = self.rfile.read(length) if length > 0 else b""
                 with parent._lock:
                     parent.last_headers = {k.lower(): v for k, v in self.headers.items()}
+                    parent.last_post_body = body
                     if self.path == "/token":
                         parent.oauth_calls += 1
                         idx = parent.oauth_calls
@@ -496,3 +505,84 @@ def test_storage_completion_ring_eventfd_coalesced_wakeup(tmp_path: Path) -> Non
         assert csts_calls == 0
 
     asyncio.run(_run())
+
+
+def test_vertebra_core_gcp_token_cache_service_account_and_audience_jwt(
+    token_server: _MockTokenServer,
+) -> None:
+    """Verify vertebra._vertebra.GcpTokenCache exchanges Service Account RS256 assertions and signs audience JWTs."""
+    pem_key = subprocess.check_output(
+        ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"],
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    sa_json = json.dumps(
+        {
+            "type": "service_account",
+            "project_id": "test-gcp-proj",
+            "private_key_id": "key-id-99",
+            "private_key": pem_key,
+            "client_email": "bq-worker@test-gcp-proj.iam.gserviceaccount.com",
+            "token_uri": f"{token_server.base_url}/token",
+        }
+    )
+    cache = CoreGcpTokenCache(
+        {
+            "service_account_key": sa_json,
+            "scopes": "https://www.googleapis.com/auth/bigquery,https://www.googleapis.com/auth/spanner.data",
+            "quota_project_id": "custom-quota-proj",
+        }
+    )
+    assert cache.has_service_account_key is True
+    assert cache.service_account_email == "bq-worker@test-gcp-proj.iam.gserviceaccount.com"
+
+    snap1 = cache.get_token()
+    assert snap1.access_token == "mock-oauth-token-user-1"
+    assert snap1.generation == 1
+    assert snap1.quota_project_id == "custom-quota-proj"
+    assert token_server.oauth_calls == 1
+
+    form = parse_qs(token_server.last_post_body.decode("utf-8"))
+    assert form["grant_type"] == ["urn:ietf:params:oauth:grant-type:jwt-bearer"]
+    assertion_parts = form["assertion"][0].split(".")
+    assert len(assertion_parts) == 3
+
+    aud_jwt = cache.sign_jwt_for_audience("https://bigquery.googleapis.com/")
+    jwt_parts = aud_jwt.split(".")
+    assert len(jwt_parts) == 3
+    claims_padded = jwt_parts[1] + "=" * ((4 - len(jwt_parts[1]) % 4) % 4)
+    claims = json.loads(base64.urlsafe_b64decode(claims_padded))
+    assert claims["iss"] == "bq-worker@test-gcp-proj.iam.gserviceaccount.com"
+    assert claims["sub"] == "bq-worker@test-gcp-proj.iam.gserviceaccount.com"
+    assert claims["aud"] == "https://bigquery.googleapis.com/"
+
+    cache.invalidate(1)
+
+    async def _run_async() -> None:
+        snap2 = await cache.get_token_async()
+        assert snap2.access_token == "mock-oauth-token-user-2"
+        assert snap2.generation == 2
+
+    asyncio.run(_run_async())
+    assert token_server.oauth_calls == 2
+
+
+def test_google_embedder_uses_vertebra_gcp_token_cache_without_storage_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify vertebra.embeddings._google imports GcpTokenCache from vertebra._vertebra and handles TypeError stub."""
+    source_path = Path(google_embeddings_mod.__file__)
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    imported_modules = [
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    ]
+    assert "vertebra.storage" not in imported_modules
+    assert "vertebra._vertebra" in imported_modules
+
+    dummy_stub = type("GcpTokenCache", (), {})
+    monkeypatch.setattr(google_embeddings_mod, "GcpTokenCache", dummy_stub)
+    embedder = VertexEmbedder("gemini-embedding-001", project="test-proj")
+    resolved_cache = embedder._ensure_token_cache()
+    assert isinstance(resolved_cache, GcpTokenCache)

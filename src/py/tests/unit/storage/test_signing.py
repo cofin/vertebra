@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import calendar
+import json
+import subprocess
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlparse
+
+import pytest
 
 from vertebra.storage import ObjectStore, SigningConfig
 
@@ -71,3 +80,154 @@ def test_signing_functions_default_to_current_utc_timestamp() -> None:
     presigned_params = parse_qs(urlparse(presigned).query)
     assert int(presigned_params["X-Vtb-Expires"][0]) >= before_ts + 600
     assert store.verify_presigned_url(presigned, method="GET")
+
+
+def test_gcs_from_gcs_ambient_service_account_adc_presigns_zero_rtt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify ObjectStore.from_gcs auto-extracts ambient service_account ADC keys for zero-RTT local RSA signing."""
+    pem_key = subprocess.check_output(
+        ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"],
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    sa_file = tmp_path / "ambient_sa.json"
+    sa_file.write_text(
+        json.dumps(
+            {
+                "type": "service_account",
+                "project_id": "test-gcp-proj",
+                "private_key_id": "key-1",
+                "private_key": pem_key,
+                "client_email": "ambient-sa@test-gcp-proj.iam.gserviceaccount.com",
+                "token_uri": "http://127.0.0.1:9/token",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(sa_file))
+    store = ObjectStore.from_gcs("test-bucket", iam_endpoint="http://127.0.0.1:9")
+    assert store.supports_signing is True
+
+    sync_url = store.presign_get("dir/file.parquet", expires_in_secs=600, timestamp=1_700_000_000)
+    assert "X-Goog-Algorithm=GOOG4-RSA-SHA256" in sync_url
+    assert "ambient-sa%40test-gcp-proj.iam.gserviceaccount.com" in sync_url
+
+    async def _run_async() -> str:
+        return await store.presign_get_async("dir/file.parquet", expires_in_secs=600, timestamp=1_700_000_000)
+
+    async_url = asyncio.run(_run_async())
+    assert async_url == sync_url
+
+
+def test_gcs_keyless_presign_reuses_object_store_token_cache(
+    tmp_path: Path,
+) -> None:
+    """Verify keyless ObjectStore.from_gcs reuses self._gcp_token_cache and retries IAM signBlob once on HTTP 401."""
+    oauth_calls = 0
+    sign_blob_calls = 0
+    seen_auth_headers: list[str] = []
+    lock = threading.Lock()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            _ = (format, args)
+
+        def do_POST(self) -> None:
+            nonlocal oauth_calls, sign_blob_calls
+            length = int(self.headers.get("Content-Length", "0"))
+            _ = self.rfile.read(length) if length > 0 else b""
+            with lock:
+                if self.path == "/token":
+                    oauth_calls += 1
+                    body = json.dumps(
+                        {
+                            "access_token": f"test-access-token-{oauth_calls}",
+                            "expires_in": 3600,
+                            "token_type": "Bearer",
+                        }
+                    ).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+
+                if ":signBlob" in self.path:
+                    sign_blob_calls += 1
+                    auth_hdr = self.headers.get("Authorization", "")
+                    seen_auth_headers.append(auth_hdr)
+                    if sign_blob_calls == 2:
+                        err = b'{"error":{"code":401,"message":"UNAUTHENTICATED"}}'
+                        self.send_response(401)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(err)))
+                        self.end_headers()
+                        self.wfile.write(err)
+                        return
+                    sig_b64 = base64.b64encode(f"sig-{sign_blob_calls}".encode()).decode("ascii")
+                    body = json.dumps({"keyId": "k1", "signedBlob": sig_b64}).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+
+            self.send_response(404)
+            self.end_headers()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        adc_file = tmp_path / "adc.json"
+        adc_file.write_text(
+            json.dumps(
+                {
+                    "type": "authorized_user",
+                    "client_id": "cid",
+                    "client_secret": "csec",
+                    "refresh_token": "rtok",
+                    "token_uri": f"{base_url}/token",
+                }
+            ),
+            encoding="utf-8",
+        )
+        store = ObjectStore.from_gcs(
+            "test-bucket",
+            application_credentials=str(adc_file),
+            target_service_account="signer@proj.iam.gserviceaccount.com",
+            iam_endpoint=base_url,
+        )
+        url1 = store.presign_get("dir/a.parquet", expires_in_secs=600, timestamp=1_700_000_000)
+        assert "X-Goog-Signature=" in url1
+        assert oauth_calls == 1
+        assert sign_blob_calls == 1
+
+        url2 = store.presign_get("dir/b.parquet", expires_in_secs=600, timestamp=1_700_000_000)
+        assert "X-Goog-Signature=" in url2
+        assert oauth_calls == 2
+        assert sign_blob_calls == 3
+
+        async def _presign_third() -> str:
+            return await store.presign_get_async("dir/c.parquet", expires_in_secs=600, timestamp=1_700_000_000)
+
+        url3 = asyncio.run(_presign_third())
+        assert "X-Goog-Signature=" in url3
+        assert oauth_calls == 2
+        assert sign_blob_calls == 4
+        assert seen_auth_headers == [
+            "Bearer test-access-token-1",
+            "Bearer test-access-token-1",
+            "Bearer test-access-token-2",
+            "Bearer test-access-token-2",
+        ]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)

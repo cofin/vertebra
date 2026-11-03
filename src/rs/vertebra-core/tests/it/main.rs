@@ -3,6 +3,8 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 mod broker;
+#[cfg(feature = "gcp-auth")]
+mod gcp_auth;
 mod mpmc;
 mod ring;
 mod shm;

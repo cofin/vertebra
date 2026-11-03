@@ -19,8 +19,10 @@
 //! - Pure-Rust Redis 7.2+/8.0+ and Valkey 8.0+/9.0+ RESP3 wire framing, recursive parser, `invalidate`
 //!   push frame extractor, Sentinel master discovery, and Cluster CRC16-XMODEM slot routing (`resp3`).
 
+pub mod arrow_shm;
 pub mod dialer;
 pub mod duckdb_engine;
+pub mod grpc;
 pub mod mssql;
 pub mod mysql;
 pub mod oracle;
@@ -29,16 +31,14 @@ pub mod resp3;
 pub mod sqlite;
 pub mod tns;
 
+pub use arrow_shm::*;
 pub use dialer::{
     AlloyDbClusterUri, AlloyDbDialer, AuthType, CloudSqlDialer, CloudSqlInstanceUri, IpType,
     decode_alloydb_metadata_response, encode_alloydb_metadata_exchange,
     encode_alloydb_metadata_response, exchange_alloydb_metadata_over_stream,
     generate_ephemeral_keypair_pem,
 };
-pub use duckdb_engine::{
-    DuckdbBrokerPool, DuckdbConfig, ShmArrowFrameHeader, read_shm_arrow_frame,
-    release_shm_arrow_frame, write_shm_arrow_frame,
-};
+pub use duckdb_engine::{DuckdbBrokerPool, DuckdbConfig};
 pub use mssql::{
     MssqlPool, TdsPacketType, decode_tds_packet, encode_tds_packet, encode_tds_sql_batch,
     rewrite_mssql_placeholders,

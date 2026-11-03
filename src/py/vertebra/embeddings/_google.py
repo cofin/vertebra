@@ -12,6 +12,7 @@ from typing import Any
 import msgspec
 
 from vertebra._vertebra import (
+    GcpTokenCache,
     VectorBatchView,
     VectorCache,
     VectorView,
@@ -21,7 +22,7 @@ from vertebra._vertebra import (
     encode_gemini_embed_grpc_frame,
 )
 from vertebra.embeddings._base import Embedder, MultimodalPart
-from vertebra.storage import GcpTokenCache
+from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json
 
 __all__ = (
@@ -207,7 +208,7 @@ class VertexEmbedder(Embedder):
             raise RuntimeError(f"Vertex/Gemini embedding gRPC status {grpc_status}: {msg}")
         return resp_body
 
-    def _ensure_token_cache(self) -> GcpTokenCache:
+    def _ensure_token_cache(self) -> Any:
         """Lazily initialize the default `GcpTokenCache` when not explicitly injected."""
         if self._token_cache is None:
             opts: dict[str, str] = {"use_metadata_server": "true"}
@@ -215,7 +216,13 @@ class VertexEmbedder(Embedder):
                 opts["target_service_account"] = self._target_service_account
             if self._quota_project_id:
                 opts["quota_project_id"] = self._quota_project_id
-            self._token_cache = GcpTokenCache(opts)
+            try:
+                self._token_cache = GcpTokenCache(opts)
+            except TypeError:
+                fallback_mod = import_optional("vertebra.storage._store")
+                if fallback_mod is None:
+                    raise
+                self._token_cache = fallback_mod.GcpTokenCache(opts)
         return self._token_cache
 
     def _build_headers(self, token: str, quota_project: str | None) -> dict[str, str]:
@@ -425,8 +432,14 @@ class OracleEmbedder(Embedder):
     async def _ensure_oracle_credential_fresh(self) -> None:
         """Rotate `DBMS_VECTOR.CREATE_CREDENTIAL` when `GcpTokenCache` advances to a new generation."""
         if self._token_cache is None and self._provider == "vertexai":
+            opts = {"use_metadata_server": "true"}
             try:
-                self._token_cache = GcpTokenCache({"use_metadata_server": "true"})
+                self._token_cache = GcpTokenCache(opts)
+            except TypeError:
+                fallback_mod = import_optional("vertebra.storage._store")
+                if fallback_mod is None:
+                    return
+                self._token_cache = fallback_mod.GcpTokenCache(opts)
             except ValueError:
                 return
         if self._token_cache is None:
