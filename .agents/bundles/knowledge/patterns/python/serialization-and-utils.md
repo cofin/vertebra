@@ -1,10 +1,25 @@
 ---
 type: Pattern
 title: "Serialization & Python Utility Conventions"
-description: "How `vertebra.utils` centralizes JSON and MessagePack encoding and decoding, schema dumping, async/sync bridging, free-threaded worker pools, optional imports, and config lookup."
+description: "How `vertebra.utils` centralizes JSON and MessagePack encoding and decoding, Rust-accelerated text/humanize/UUID primitives, type dispatch, schema hydration, async/sync bridging, free-threaded worker pools, optional imports, and config lookup."
 status: stable
-tags: [patterns, python, serialization, concurrency]
+tags: [patterns, python, serialization, concurrency, text, humanize]
 sources:
+  - resource: src/rs/vertebra-core/src/text.rs
+  - resource: src/rs/vertebra-core/src/id.rs
+  - resource: src/rs/vertebra-py/src/text.rs
+  - resource: src/py/vertebra/utils/__init__.py
+  - resource: src/py/vertebra/utils/text.py
+  - resource: src/py/vertebra/utils/humanize.py
+  - resource: src/py/vertebra/utils/uuids.py
+  - resource: src/py/vertebra/utils/dispatch.py
+  - resource: src/py/vertebra/utils/schema.py
+  - resource: src/py/vertebra/utils/type_converters.py
+  - resource: src/py/vertebra/utils/type_guards.py
+  - resource: src/py/vertebra/utils/config_tools.py
+  - resource: src/py/vertebra/utils/module_loader.py
+  - resource: src/py/vertebra/utils/deprecation.py
+  - resource: src/py/vertebra/utils/correlation.py
   - resource: src/py/vertebra/utils/serializers/__init__.py
   - resource: src/py/vertebra/utils/serializers/_json.py
   - resource: src/py/vertebra/utils/serializers/_msgpack.py
@@ -13,12 +28,10 @@ sources:
   - resource: src/py/vertebra/utils/serializers/_zero_copy.py
   - resource: src/py/vertebra/utils/sync_tools.py
   - resource: src/py/vertebra/utils/portal.py
-  - resource: src/py/vertebra/utils/module_loader.py
-  - resource: src/py/vertebra/utils/config_tools.py
-  - resource: src/py/vertebra/utils/uuids.py
-  - resource: src/py/vertebra/utils/type_guards.py
-  - resource: src/py/vertebra/db/pipeline.py
-  - resource: src/py/vertebra/db/rls.py
+  - resource: src/py/tests/unit/utils/test_text_and_humanize.py
+  - resource: src/py/tests/unit/utils/test_dispatch_schema_converters.py
+  - resource: src/py/tests/unit/utils/test_deprecation_and_correlation.py
+  - resource: src/py/tests/unit/utils/test_utils_core.py
   - resource: src/py/tests/unit/utils/test_sync_tools.py
 ---
 
@@ -70,8 +83,6 @@ Fallbacks: when `msgspec` raises any other `TypeError` or a `ValueError`, `encod
 |---|---|
 | `async_(fn, *, limiter=None)` | Wraps a blocking callable. On free-threaded builds (`sys._is_gil_enabled() is False`) it runs on `SyncPool.default()`; otherwise it uses `asyncio.to_thread`. An optional `CapacityLimiter` bounds concurrency. |
 | `run_(async_fn)` | Blocking wrapper. Inside a running loop it uses the global portal. Otherwise it calls `asyncio.run`, installing `uvloop` first when available on non-Windows GIL builds. |
-| `await_(async_fn, raise_sync_error=False)` | Blocking wrapper that routes through the portal, or uses `run_coroutine_threadsafe` when called from a non-task thread that owns the loop. With `raise_sync_error=True` it raises instead of falling back. |
-| `ensure_async_`, `with_ensure_async_`, `get_next`, `NO_VALUE` | Adapt sync callables and context managers to async. `get_next` is `anext` with an optional default. |
 | `SyncPool` | Lazily created `ThreadPoolExecutor` (`max_workers` default `2 × cpu_count`, thread prefix `vertebra-ft-sync`). `submit` / `submit_async` copy `contextvars`. The executor is rebuilt after `fork` (PID check). `SyncPool.default()` is a double-checked singleton. |
 | `CapacityLimiter` | One `asyncio.Semaphore` per event loop (`WeakKeyDictionary`), reset after fork. Assigning `total_tokens` drops existing semaphores. |
 | `LoopShardedResource[T]` | One resource per event loop from `factory` or `async_factory`. A factory set up with only `async_factory` must be read with `get_async()`. |
@@ -80,21 +91,19 @@ Fallbacks: when `msgspec` raises any other `TypeError` or a `ValueError`, `encod
 
 Outside `vertebra.utils`, `vertebra.extensions.sqlalchemy.dialects` (`SyncPool`) imports `sync_tools`. Tests are in [`test_sync_tools.py`](../../../../../src/py/tests/unit/utils/test_sync_tools.py).
 
-## 4. Optional Dependencies, Config, SQL Identifiers & IDs
+## 4. Rust-Accelerated Text, Humanize, UUIDs & Runtime Utilities (`vertebra.utils`)
 
-- [`module_loader.py`](../../../../../src/py/vertebra/utils/module_loader.py): `import_app("module:attr")`, `import_string`, `import_optional` (caches imported `ModuleType` or `None` in `_module_cache` so repeated positive and negative lookups are $O(1)$ without re-running `importlib.import_module`), `ensure_module` (returns cached `ModuleType` or raises `MissingDependencyError`), `module_available`, `dependency_flag`, `module_to_os_path`, `ensure_{sqlspec,sqlalchemy,advanced_alchemy,uvloop,pyarrow,msgspec}` (raise `MissingDependencyError`), `reset_dependency_cache` (clears `_availability_cache`, `_module_cache`, and resets `OptionalDependency` flags).
-- [`config_tools.py`](../../../../../src/py/vertebra/utils/config_tools.py): `get_env(key, default, type_hint)` (bool coercion from `1/true/yes/on` and `0/false/no/off`), `find_pyproject_toml`, `parse_pyproject_config` / `read_pyproject_section` (reads `[tool.vertebra]` with `[tool.vtb]` fallback), and `SingletonMeta` (thread-safe per-class singleton metaclass).
-- [`pipeline.py`](../../../../../src/py/vertebra/db/pipeline.py) and [`rls.py`](../../../../../src/py/vertebra/db/rls.py): `_IDENT_RE` (`^[A-Za-z_][A-Za-z0-9_]*$`) and `_validate_identifier()` validate SQL, PL/SQL, CTE, and GUC identifiers before string interpolation.
-- [`uuids.py`](../../../../../src/py/vertebra/utils/uuids.py): `uuid3/4/5/6/7` and `nanoid` use `uuid_utils` / `fastnanoid` when installed. `uuid6` falls back to `uuid4` with a warning.
-- [`type_guards.py`](../../../../../src/py/vertebra/utils/type_guards.py): `is_dataclass_instance`, `is_pydantic_model`, `is_msgspec_struct`, `is_attrs_instance`, `dataclass_to_dict`.
+- [`text.py`](../../../../../src/py/vertebra/utils/text.py) & [`vertebra-core/src/text.rs`](../../../../../src/rs/vertebra-core/src/text.rs): Single-pass, zero-regex Rust state machines exposed on `vertebra._vertebra` with pure-Python `--only-group doc` fallbacks for `snake_case`, `camelize`, `pascalize`, `kebabize`, `slugify`, `quote_identifier`, `quote_backtick_identifier`, `quote_bracket_identifier`, `quote_dialect_identifier`, `split_qualified_identifier`, `normalize_identifier`, `validate_identifier`, $O(1)$ `truncate_utf8_bytes` (`floor_char_boundary`), and `truncate`.
+- [`humanize.py`](../../../../../src/py/vertebra/utils/humanize.py) & [`vertebra-core/src/text.rs`](../../../../../src/rs/vertebra-core/src/text.rs): Rust-backed human-friendly formatting, English noun inflection, and unit parsing (`humanize`, `titleize`, `pluralize`, `singularize`, `ordinalize`, `humanize_bytes`, `parse_bytes`, `humanize_duration`, `parse_duration`, `humanize_number`, `humanize_rate`).
+- [`uuids.py`](../../../../../src/py/vertebra/utils/uuids.py) & [`vertebra-core/src/id.rs`](../../../../../src/rs/vertebra-core/src/id.rs): `uuid3`, `uuid4`, `uuid5`, `uuid6`, `uuid7`, `nanoid`, `uuid_from_string`, `uuid_from_bytes`, and `uuid_from_int`. `uuid4()`, `uuid7()` (lock-free `AtomicU64` monotonic millisecond + 12-bit sequence counter), and `nanoid()` dispatch to `_vertebra.{uuid4_u128,uuid7_u128,nanoid_generate}` by default while honoring monkeypatched `_load_uuid_utils()` in tests.
+- [`dispatch.py`](../../../../../src/py/vertebra/utils/dispatch.py), [`schema.py`](../../../../../src/py/vertebra/utils/schema.py), [`type_converters.py`](../../../../../src/py/vertebra/utils/type_converters.py), and [`type_guards.py`](../../../../../src/py/vertebra/utils/type_guards.py): $O(1)$ MRO-cached `TypeDispatcher[T]`, `transform_dict_keys`, `to_schema`, `to_value_type`, `build_decimal_converter`, `build_nested_decimal_normalizer`, `build_uuid_coercions`, `should_json_encode_sequence`, `time_iso_convert`, and runtime type guards (`is_readable`, `is_async_readable`, `is_typed_dict`, `is_dict_row`, `is_mapping_like`, `is_iterable_parameters`, `is_attrs_schema`, `is_schema`, `is_schema_or_dict`, `is_schema_or_dict_sequence`, `get_msgspec_rename_config`, `extract_dataclass_fields`, `extract_dataclass_items`, `supports_close`).
+- [`module_loader.py`](../../../../../src/py/vertebra/utils/module_loader.py) & [`config_tools.py`](../../../../../src/py/vertebra/utils/config_tools.py): `import_app`, `import_string`, `import_optional`, `import_optional_attr`, `resolve_optional_attr`, `module_to_os_path`, `ensure_module`, `ensure_{pyarrow,numpy,pandas}`, `lazy_exports`, `SingletonMeta`, `get_env`, `get_env_with_aliases`, `is_env_set`, `find_pyproject_toml`, `read_pyproject_section` / `parse_pyproject_config` (reading `[tool.vertebra]` with `[tool.vtb]` fallback), `get_config_val`, `get_config_val_with_aliases`, `normalize_connection_config`, `parse_mysql_dsn`, `parse_odbc_connection_string`, `resolve_config_sync`, and `resolve_config_async`.
+- [`deprecation.py`](../../../../../src/py/vertebra/utils/deprecation.py) & [`correlation.py`](../../../../../src/py/vertebra/utils/correlation.py): PEP 695 `@deprecated` and `warn_deprecation` with external caller stack attribution, and `CorrelationContext` (`context()`, `extract_from_headers()`, `to_headers()`, `get_correlation_adapter()`).
 
 <!-- truth: start -->
 - No module under `src/py/vertebra` outside `utils/serializers/` calls `msgspec.json.encode`, `msgspec.json.decode`, `msgspec.msgpack.encode`, `msgspec.msgpack.decode`, `json.dumps`, `json.loads`, or `orjson`.
-- `encode_json` and `encode_json_bytes` fall back to stdlib `json.dumps` for any `msgspec` `TypeError` other than "unsupported JSON value", and for any `ValueError`. `encode_json_into` has no fallback.
-- `decode_json` falls back to `json.loads` on `msgspec` `TypeError` or `ValueError`.
-- The JSON `enc_hook` encodes `Decimal` as `float` and naive `datetime` as UTC with a `Z` suffix.
+- `vertebra.utils.{text,humanize,uuids}` dispatch to compiled Rust functions in `vertebra._vertebra` (`vertebra-core::{text,id}`) when available and fall back cleanly to pure Python in `--only-group doc` environments by guarding `callable(fn) and not isinstance(fn, type)`.
 - `BaseStruct`, `CamelizedBaseStruct`, `FrozenBaseStruct`, and `FrozenCamelizedStruct` configure `gc=False, omit_defaults=True, repr_omit_defaults=True` (with `frozen=True` on the frozen variants and `rename="camel"` on the camelized variants) and expose `.to_dict()` via `msgspec.structs.asdict`.
-- `async_` dispatches to `SyncPool.default()` only when `sys._is_gil_enabled()` returns `False`. Otherwise it uses `asyncio.to_thread`.
-- `SyncPool`, `CapacityLimiter`, and `PortalManager` rebuild their executor, semaphores, or provider when `os.getpid()` changes.
+- `async_` dispatches to `SyncPool.default()` only when `sys._is_gil_enabled()` returns `False`, and `SyncPool`, `CapacityLimiter`, and `PortalManager` rebuild their executor, semaphores, or provider when `os.getpid()` changes.
 - `vertebra.utils.config_tools` reads `[tool.vertebra]` (falling back to `[tool.vtb]`) and `vertebra.telemetry.LoggingConfig` reads `[tool.vertebra.logging]`.
 <!-- truth: end -->

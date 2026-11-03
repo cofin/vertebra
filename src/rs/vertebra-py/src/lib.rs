@@ -16,6 +16,7 @@ pub mod response;
 pub mod rsgi;
 pub mod synthetic;
 pub mod telemetry;
+pub mod text;
 pub mod transport;
 pub mod vector;
 pub mod wsgi;
@@ -139,6 +140,7 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Native database dialers, wire codecs, and SHM Arrow IPC cursors
     db::register_db_bindings(m)?;
     vector::register_vector_bindings(m)?;
+    text::register(m)?;
 
     Ok(())
 }

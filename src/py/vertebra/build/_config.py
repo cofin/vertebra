@@ -1,10 +1,11 @@
 """Build configuration from ``[tool.vertebra]`` in *pyproject.toml*."""
 
-import tomllib
 from pathlib import Path
 from typing import Any
 
 import msgspec
+
+from vertebra.utils.config_tools import read_pyproject_section
 
 __all__ = ("BuildConfig", "JsConfig")
 
@@ -43,15 +44,8 @@ class BuildConfig(msgspec.Struct, frozen=True, gc=False):
         if not pyproject_path.is_file():
             return cls()
 
-        with open(pyproject_path, "rb") as fh:
-            data: dict[str, Any] = tomllib.load(fh)
-
-        tool_section = data.get("tool", {})
-        if not isinstance(tool_section, dict):
-            return cls()
-
-        vertebra_cfg = tool_section.get("vertebra") or tool_section.get("vtb") or {}
-        if not isinstance(vertebra_cfg, dict) or not vertebra_cfg:
+        vertebra_cfg = read_pyproject_section(start_path=pyproject_path)
+        if not vertebra_cfg:
             return cls()
 
         entry: str = vertebra_cfg.get("entry", "")

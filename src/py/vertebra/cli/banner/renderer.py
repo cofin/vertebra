@@ -19,6 +19,7 @@ from vertebra.cli.theme import (
     render_shutdown_blocks,
     render_startup_blocks,
 )
+from vertebra.utils.humanize import pluralize
 from vertebra.utils.module_loader import import_optional
 
 __all__ = ("render_banner", "render_shutdown")
@@ -60,7 +61,7 @@ def render_banner(
 
     target.blank()
 
-    worker_label = f"{workers} worker{'s' if workers != 1 else ''}"
+    worker_label = pluralize("worker", workers, include_count=True)
     target.info(f"{mode} → {host}:{port} ({worker_label})")
 
     rust_status = f"[{SUCCESS}]{SYM_SUCCESS}[/{SUCCESS}]" if has_rust else f"[{SECONDARY}]—[/{SECONDARY}]"

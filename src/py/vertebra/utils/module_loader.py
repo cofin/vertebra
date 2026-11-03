@@ -1,11 +1,11 @@
-"""Module loading utilities for Vertebra.
+"""Module loading, optional attribute resolution, and lazy export utilities for Vertebra."""
 
-Provides functions for dynamic module imports, path resolution, and dependency
-availability checking. Aligned with vtb.
-"""
+from __future__ import annotations
 
 import importlib
+import importlib.util
 import sys
+from pathlib import Path
 from typing import Any
 
 from vertebra.typing import (
@@ -20,12 +20,18 @@ __all__ = (
     "MissingDependencyError",
     "dependency_flag",
     "ensure_module",
+    "ensure_numpy",
+    "ensure_pandas",
+    "ensure_pyarrow",
     "import_app",
     "import_optional",
+    "import_optional_attr",
     "import_string",
     "lazy_exports",
     "module_available",
+    "module_to_os_path",
     "reset_dependency_cache",
+    "resolve_optional_attr",
 )
 
 
@@ -61,6 +67,45 @@ def import_optional(module_name: str) -> Any | None:
     return mod
 
 
+def import_optional_attr(module_name: str, attr_name: str, default: Any = None) -> Any:
+    """Import ``module_name`` when available and return ``getattr(mod, attr_name, default)``."""
+    mod = import_optional(module_name)
+    if mod is None:
+        return default
+    return getattr(mod, attr_name, default)
+
+
+def resolve_optional_attr(
+    module_name: str,
+    attr_name: str,
+    *,
+    fallback: Any = None,
+) -> tuple[Any, bool]:
+    """Resolve ``(attr, True)`` from an optional module when installed, or ``(fallback, False)``."""
+    mod = import_optional(module_name)
+    if mod is None:
+        return fallback, False
+    sentinel = object()
+    resolved = getattr(mod, attr_name, sentinel)
+    if resolved is sentinel:
+        return fallback, False
+    return resolved, True
+
+
+def module_to_os_path(dotted_path: str = "vertebra") -> Path:
+    """Resolve the filesystem directory or file path for an importable module path."""
+    spec = importlib.util.find_spec(dotted_path)
+    if spec is None:
+        msg = f"Cannot locate module specification for {dotted_path!r}"
+        raise ModuleNotFoundError(msg)
+    if spec.submodule_search_locations:
+        return Path(next(iter(spec.submodule_search_locations))).resolve()
+    if spec.origin and spec.origin not in {"built-in", "frozen"}:
+        return Path(spec.origin).resolve().parent
+    msg = f"Module {dotted_path!r} does not have a filesystem path"
+    raise TypeError(msg)
+
+
 def ensure_module(
     module_name: str,
     *,
@@ -77,6 +122,21 @@ def ensure_module(
             extra=extra,
         )
     return mod
+
+
+def ensure_pyarrow() -> Any:
+    """Ensure ``pyarrow`` is installed and return the imported module."""
+    return ensure_module("pyarrow", package="pyarrow", install_package="pyarrow", extra="arrow")
+
+
+def ensure_numpy() -> Any:
+    """Ensure ``numpy`` is installed and return the imported module."""
+    return ensure_module("numpy", package="numpy", install_package="numpy", extra="numpy")
+
+
+def ensure_pandas() -> Any:
+    """Ensure ``pandas`` is installed and return the imported module."""
+    return ensure_module("pandas", package="pandas", install_package="pandas", extra="pandas")
 
 
 def import_string(dotted_path: str) -> Any:
@@ -119,39 +179,22 @@ def import_string(dotted_path: str) -> Any:
     return obj
 
 
-def _raise_import_error(msg: str, exc: Exception | None = None) -> None:
-    """Raise an ImportError with optional exception chaining."""
-    if exc is not None:
-        raise ImportError(msg) from exc
-    raise ImportError(msg)
-
-
-def _resolve_import_attr(obj: Any, attr: str, module: Any | None, dotted_path: str) -> Any:
-    """Resolve a dotted attribute path segment on a module or object."""
-    try:
-        return obj.__getattribute__(attr)
-    except AttributeError as exc:
-        module_name = module.__name__ if module is not None else "unknown"
-        _raise_import_error(f"Module '{module_name}' has no attribute '{attr}' in '{dotted_path}'", exc)
-        raise
-
-
 def lazy_exports(
     module_name: str,
     exports_or_map: tuple[str, ...] | dict[str, Any],
     mapping: dict[str, tuple[str, str]] | None = None,
 ) -> tuple[Any, Any]:
-    """Create __getattr__ and __dir__ hooks for lazy module attribute exports.
+    """Create ``__getattr__`` and ``__dir__`` hooks for lazy module attribute exports.
 
     Args:
-        module_name: Fully-qualified name of the module (e.g. __name__).
+        module_name: Fully-qualified name of the module (e.g. ``__name__``).
         exports_or_map: Either a tuple/list of public export names, or a dict
-            mapping attribute names to their module paths or (module, attr) tuples.
-        mapping: Optional dictionary mapping attribute names to (submodule_path, attr_name)
-            tuples, used when exports_or_map is a tuple of names.
+            mapping attribute names to their module paths or ``(module, attr)`` tuples.
+        mapping: Optional dictionary mapping attribute names to ``(submodule_path, attr_name)``
+            tuples, used when ``exports_or_map`` is a tuple of names.
 
     Returns:
-        A tuple of (getattr_fn, dir_fn) suitable for assigning to __getattr__ and __dir__.
+        A tuple of ``(getattr_fn, dir_fn)`` suitable for assigning to ``__getattr__`` and ``__dir__``.
     """
     if mapping is not None:
         exports = tuple(exports_or_map)
@@ -190,3 +233,20 @@ def lazy_exports(
         return sorted(set(exports) | set(export_map.keys()) | mod_keys)
 
     return getattr_fn, dir_fn
+
+
+def _raise_import_error(msg: str, exc: Exception | None = None) -> None:
+    """Raise an ImportError with optional exception chaining."""
+    if exc is not None:
+        raise ImportError(msg) from exc
+    raise ImportError(msg)
+
+
+def _resolve_import_attr(obj: Any, attr: str, module: Any | None, dotted_path: str) -> Any:
+    """Resolve a dotted attribute path segment on a module or object."""
+    try:
+        return obj.__getattribute__(attr)
+    except AttributeError as exc:
+        module_name = module.__name__ if module is not None else "unknown"
+        _raise_import_error(f"Module '{module_name}' has no attribute '{attr}' in '{dotted_path}'", exc)
+        raise

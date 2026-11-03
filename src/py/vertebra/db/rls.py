@@ -2,25 +2,16 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 import msgspec
+
+from vertebra.utils.text import validate_identifier
 
 __all__ = (
     "TenantPredicate",
     "TenantScopeConfig",
 )
-
-_IDENTIFIER_PATTERN: re.Pattern[str] = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
-
-
-def _validate_sql_identifier(identifier: str, field_name: str = "identifier") -> str:
-    """Validate that identifier matches safe SQL naming syntax."""
-    if not _IDENTIFIER_PATTERN.match(identifier):
-        msg = f"Invalid SQL identifier for {field_name}: {identifier!r}"
-        raise ValueError(msg)
-    return identifier
 
 
 class TenantScopeConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -35,9 +26,9 @@ class TenantScopeConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
     def __post_init__(self) -> None:
         """Validate configured SQL identifiers."""
-        _validate_sql_identifier(self.tenant_column, "tenant_column")
+        validate_identifier(self.tenant_column, "tenant_column")
         if self.parameter_cast is not None:
-            _validate_sql_identifier(self.parameter_cast, "parameter_cast")
+            validate_identifier(self.parameter_cast, "parameter_cast")
 
 
 class TenantPredicate(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -53,7 +44,7 @@ class TenantPredicate(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     def __post_init__(self) -> None:
         """Validate table alias identifier when supplied."""
         if self.table_alias:
-            _validate_sql_identifier(self.table_alias, "table_alias")
+            validate_identifier(self.table_alias, "table_alias")
 
     def to_sql_fragment(self, param_index: int = 1) -> str:
         """Render ``<alias>.<tenant_column> = $<N>[::<cast>]`` with cast on the parameter, never the column."""

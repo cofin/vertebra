@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
-import re
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast, overload
@@ -16,6 +15,7 @@ from vertebra.storage import GCSConfig, ObjectMeta, ObjectStore, SigningConfig
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_msgpack, encode_msgpack_bytes
+from vertebra.utils.text import validate_identifier
 
 if TYPE_CHECKING:
     from sqlspec.protocols import ObjectStoreProtocol
@@ -29,8 +29,6 @@ __all__ = (
     "build_duckdb_gcs_secret_sql",
     "register_storage_alias",
 )
-
-_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class ArrowFlightSerializer:
@@ -631,9 +629,7 @@ def build_duckdb_gcs_secret_sql(
     Resolves an OAuth2 bearer token via `GCSConfig.resolve_adc_token()` (including optional
     `target_service_account` impersonation) when `bearer_token` is omitted.
     """
-    if not _IDENTIFIER_RE.match(secret_name):
-        msg = f"Invalid SQL identifier for DuckDB secret name: {secret_name!r}"
-        raise ValueError(msg)
+    validate_identifier(secret_name, "DuckDB secret name", allow_dots=False)
     token = bearer_token
     if token is None and config is not None:
         token = config.resolve_adc_token()

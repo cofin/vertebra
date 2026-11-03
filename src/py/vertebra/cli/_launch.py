@@ -3,14 +3,13 @@
 import os
 import sys
 import sysconfig
-import tomllib
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
 
 import msgspec
 
 from vertebra.server.platform import CgroupQuota
+from vertebra.utils.config_tools import read_pyproject_section
 
 __all__ = (
     "ServerLaunchEnv",
@@ -59,18 +58,8 @@ def load_workers_pyproject_config(
     pyproject_path = root / "pyproject.toml"
     if not pyproject_path.is_file():
         return False, ("default",), {}
-    try:
-        data: dict[str, Any] = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
-        return False, ("default",), {}
-    tool_cfg = data.get("tool")
-    if not isinstance(tool_cfg, dict):
-        return False, ("default",), {}
-    vtb_cfg = tool_cfg.get("vertebra")
-    if not isinstance(vtb_cfg, dict):
-        return False, ("default",), {}
-    workers_cfg = vtb_cfg.get("workers")
-    if not isinstance(workers_cfg, dict):
+    workers_cfg = read_pyproject_section("workers", start_path=pyproject_path)
+    if not workers_cfg:
         return False, ("default",), {}
 
     enabled = bool(workers_cfg.get("enabled_in_run", False))

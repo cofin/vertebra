@@ -142,7 +142,44 @@ def main(argv: list[str] | None = None) -> int:
 
 def _make_stub_getattr(
     fallback_none_attrs: frozenset[str] = frozenset(
-        {"ObjectStore", "SchemaDigestCache", "field_id", "handler_id", "state_id"}
+        {
+            "ObjectStore",
+            "SchemaDigestCache",
+            "camelize",
+            "field_id",
+            "handler_id",
+            "humanize",
+            "humanize_bytes",
+            "humanize_duration",
+            "humanize_number",
+            "humanize_rate",
+            "kebabize",
+            "nanoid_generate",
+            "normalize_identifier",
+            "ordinalize",
+            "parse_bytes",
+            "parse_duration",
+            "pascalize",
+            "pluralize",
+            "quote_backtick_identifier",
+            "quote_bracket_identifier",
+            "quote_dialect_identifier",
+            "quote_identifier",
+            "singularize",
+            "slugify",
+            "snake_case",
+            "split_qualified_identifier",
+            "state_id",
+            "titleize",
+            "truncate",
+            "truncate_utf8_bytes",
+            "uuid4_hex",
+            "uuid4_str",
+            "uuid4_u128",
+            "uuid7_str",
+            "uuid7_u128",
+            "validate_identifier",
+        }
     ),
 ) -> Callable[[str], Any]:
     """Return a module __getattr__ hook that defers optional native symbols to Python fallbacks."""

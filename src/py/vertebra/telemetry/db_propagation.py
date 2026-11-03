@@ -6,6 +6,7 @@ from urllib.parse import quote
 
 from vertebra._vertebra import sanitize_sql as _native_sanitize_sql
 from vertebra.telemetry.otel import TraceContext
+from vertebra.utils.text import truncate_utf8_bytes as _truncate_utf8_bytes
 
 __all__ = ("SqlTracePropagator",)
 
@@ -21,10 +22,7 @@ class SqlTracePropagator:
     @staticmethod
     def truncate_utf8_bytes(value: str, max_bytes: int) -> str:
         """Truncate a string to at most ``max_bytes`` of UTF-8 without splitting multi-byte codepoints."""
-        encoded = value.encode("utf-8")
-        if len(encoded) <= max_bytes:
-            return value
-        return encoded[:max_bytes].decode("utf-8", errors="ignore")
+        return _truncate_utf8_bytes(value, max_bytes)
 
     @staticmethod
     def apply_oracle_trace(

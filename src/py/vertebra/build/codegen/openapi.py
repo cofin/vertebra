@@ -19,6 +19,7 @@ from vertebra.build.codegen._ir import (
 )
 from vertebra.build.codegen._json_schema import resolve_parameter_node
 from vertebra.build.codegen._metadata import RouteMetadata
+from vertebra.utils.humanize import titleize
 from vertebra.utils.serializers import encode_json
 
 __all__ = ("OpenAPIGenerator",)
@@ -101,7 +102,7 @@ class OpenAPIGenerator(SchemaEmitter):
 
         operation: dict[str, Any] = {
             "operationId": route.operation_id,
-            "summary": route.handler_name.replace("_", " ").title(),
+            "summary": titleize(route.handler_name),
             "parameters": parameters,
             "responses": {
                 "200": {

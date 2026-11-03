@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, Any
 
 import msgspec
 
 from vertebra.utils.serializers import decode_json
+from vertebra.utils.text import validate_identifier
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -19,16 +19,6 @@ __all__ = (
     "QueryPipeline",
     "RelOverlay",
 )
-
-_IDENTIFIER_PATTERN: re.Pattern[str] = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
-
-
-def _validate_sql_identifier(identifier: str, field_name: str = "identifier") -> str:
-    """Validate that identifier matches safe SQL naming syntax."""
-    if not _IDENTIFIER_PATTERN.match(identifier):
-        msg = f"Invalid SQL identifier for {field_name}: {identifier!r}"
-        raise ValueError(msg)
-    return identifier
 
 
 class RelOverlay(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -45,16 +35,16 @@ class RelOverlay(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
     def __post_init__(self) -> None:
         """Validate all constituent SQL identifiers."""
-        _validate_sql_identifier(self.base_table, "base_table")
+        validate_identifier(self.base_table, "base_table")
         if self.inserted_cte is not None:
-            _validate_sql_identifier(self.inserted_cte, "inserted_cte")
+            validate_identifier(self.inserted_cte, "inserted_cte")
         if self.deleted_ids_cte is not None:
-            _validate_sql_identifier(self.deleted_ids_cte, "deleted_ids_cte")
-        _validate_sql_identifier(self.id_column, "id_column")
+            validate_identifier(self.deleted_ids_cte, "deleted_ids_cte")
+        validate_identifier(self.id_column, "id_column")
 
     def to_cte_sql(self, overlay_name: str) -> str:
         """Render the overlay CTE combining uncommitted CTE mutations with the base table."""
-        _validate_sql_identifier(overlay_name, "overlay_name")
+        validate_identifier(overlay_name, "overlay_name")
         base_select = f"SELECT * FROM {self.base_table}"
         if self.deleted_ids_cte:
             base_select = (
@@ -79,7 +69,7 @@ class CTEStep(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
     def __post_init__(self) -> None:
         """Validate step name identifier."""
-        _validate_sql_identifier(self.name, "name")
+        validate_identifier(self.name, "name")
 
 
 class QueryPipeline:
@@ -130,7 +120,7 @@ class QueryPipeline:
 
     def add_overlay(self, overlay_name: str, overlay: RelOverlay) -> QueryPipeline:
         """Register an intra-statement ``RelOverlay`` CTE."""
-        _validate_sql_identifier(overlay_name, "overlay_name")
+        validate_identifier(overlay_name, "overlay_name")
         self._overlays.append((overlay_name, overlay))
         return self
 
