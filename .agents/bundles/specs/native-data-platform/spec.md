@@ -65,9 +65,9 @@ Two features Vertebra has committed to, both feature complete:
 
 1. **Layout** *(user decision)*.
    - Engine code lives in `vertebra/db/adapters/<engine>/` (`config.py`, `core.py`, `driver.py`, plus engine primitives such as `pipeline.py`, `notify.py`, `queue.py`, `change_stream.py`, `embeddings.py`).
-   - Engine-agnostic code lives in `vertebra/db/common/`: driver bases moved from `db/driver/`, capability protocols, the registry, `ArrowCursor`, the broker client, and Cloud SQL/AlloyDB dialers.
-   - The Rust crate mirrors this as `vertebra-db/src/<engine>/` modules plus shared `vertebra-db/src/common/`.
-2. **Driver contract.** One `SyncDatabaseDriver`/`AsyncDatabaseDriver` contract in `db/common/`:
+   - Engine-agnostic code stays directly under `vertebra/db/` (`driver/`, `registry.py`, `arrow.py`, `cdc.py`, `rls.py`, `dialer/`): driver bases, capability protocols, the registry, `ArrowCursor`, the broker client, and Cloud SQL/AlloyDB dialers.
+   - The Rust crate mirrors this as `vertebra-db/src/<engine>/` modules plus shared top-level modules.
+2. **Driver contract.** One `SyncDatabaseDriver`/`AsyncDatabaseDriver` contract in `db/driver/`:
    - `execute`, `execute_many`, `select*`, `select_to_arrow`, `stream_arrow_batches`, `load_from_arrow`
    - transactions
    - `pipeline()` (`PipelineCapable`)
@@ -86,7 +86,7 @@ Two features Vertebra has committed to, both feature complete:
 
 | Ch | Flow ID | Title | Key Deliverables | Depends on | State |
 | --- | --- | --- | --- | --- | --- |
-| 1 | `db-layout-and-contract` | `db/adapters` + `db/common` layout and driver conformance suite | Package move, driver contract, capability protocols, registry polymorphism, import gate, cross-engine conformance test suite | integration-remediation Ch1 | draft |
+| 1 | `db-layout-and-contract` | `db/adapters` layout and driver conformance suite | Package move, driver contract, capability protocols, registry polymorphism, import gate, cross-engine conformance test suite | integration-remediation Ch1 | draft |
 | 2 | `native-postgres-driver` | Rust Postgres client | Startup/SCRAM-SHA-256/TLS/IAM, extended protocol, binary codecs, statement cache, COPY, LISTEN/NOTIFY, pipeline mode, cancel, Arrow; psycopg/asyncpg removed | 1 | draft |
 | 3 | `broker-pool-sharing` | Shared pools for any SQLSpec / AA / SQLAlchemy config | Broker-owned pools, SHM session leases, transactions/affinity, streaming, `ProxySync/AsyncConfig` for upstream configs, SQLAlchemy broker `Pool`, crash reclamation | 1, 2 | draft |
 | 4 | `native-oracle-driver` | Rust Oracle thin client | TNS/O5LOGON/TLS/wallet, TTC execute/fetch, binds/defines, LOBs, OSON/VECTOR, DRCP, pipelining (23ai), Arrow; sqlite3 fake removed | 1 | draft |
@@ -113,9 +113,17 @@ The global constraints from [integration-remediation](../integration-remediation
 - AWS RDS/Aurora DSQL IAM ([vertebra#67](https://github.com/cofin/vertebra/issues/67)) and Azure Entra ID ([vertebra#68](https://github.com/cofin/vertebra/issues/68)) auth in the native clients.
 - CockroachDB- and AlloyDB-specific protocol features beyond Postgres compatibility.
 
+## Open Questions
+
+- **Q5 — Leverage existing Rust protocol crates for the other engines?**
+  - Oracle now builds on Oracle's official pure-Rust thin `oracledb` crate instead of a from-scratch TTC client.
+  - The same approach is available elsewhere: `tokio-postgres`/`postgres-protocol` (Postgres, automatic pipelining), `mysql_async` (MySQL), `tiberius` (MSSQL TDS), `rusqlite` (SQLite), `duckdb` (DuckDB), and `redis-rs`/`fred` (Redis/Valkey).
+  - Recommended: wrap a crate behind the Vertebra `Connection` trait and driver contract wherever it meets the requirements (async on Tokio, zero-copy result paths into VTBARROW, pipelining, cancellation). Keep the existing Vertebra codecs (JSONB, pgvector, OSON, VECTOR, pgcopy) where they are faster, and hand-roll only the protocol pieces a crate lacks.
+  - Each driver chapter verifies its crate against the conformance suite and `make bench-check` before adopting it.
+
 ## Implementation Plan
 
-- [ ] db-layout-and-contract — `db/adapters` + `db/common` layout and driver conformance suite (../db-layout-and-contract/spec.md)
+- [ ] db-layout-and-contract — `db/adapters` layout and driver conformance suite (../db-layout-and-contract/spec.md)
 - [ ] native-postgres-driver — Rust Postgres client (../native-postgres-driver/spec.md)
 - [ ] broker-pool-sharing — Shared pools for any SQLSpec / AA / SQLAlchemy config (../broker-pool-sharing/spec.md)
 - [ ] native-oracle-driver — Rust Oracle thin client (../native-oracle-driver/spec.md)
@@ -129,5 +137,5 @@ The global constraints from [integration-remediation](../integration-remediation
 - **Key decisions** *(user, 2026-11-03)*:
   - Shared broker pools for any AA/SQLSpec config and Vertebra's own Rust drivers for every engine are required, feature complete.
   - Storage and other components are complete too.
-  - Layout is `db/adapters/<engine>` plus `db/common`.
+  - Layout: `db/adapters/<engine>` for engine code, and `db/*` for engine-agnostic code.
 - **Research:** [gap-analysis_20261103.md](research/gap-analysis_20261103.md) records the verified broker, driver, storage, and remaining-fake gaps, each mapped to a child flow.

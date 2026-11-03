@@ -19,6 +19,20 @@ tags: [rust, oracle, driver, pipeline]
 
 # Flow Charter: Rust Oracle Thin Client
 
+## Approach
+
+- Build on Oracle's official pure-Rust thin driver: the `oracledb` crate from `oracle/rust-oracledb`, a Thin-mode TNS/TTC implementation with no Instant Client. Reported features: pooling, DRCP, statement caching, native network encryption, JSON/VECTOR/LOB types, and optional Arrow.
+- Wrap it behind the Vertebra `Connection` trait and driver contract instead of writing the protocol from scratch.
+- Before the plan is locked, verify against the crate source:
+  - async/Tokio support;
+  - 23ai pipelining;
+  - Arrow output that can feed VTBARROW zero-copy;
+  - license compatibility;
+  - release maturity (reported as a 26.0.0 beta).
+- Contribute or patch only the gaps.
+- Rejected: `oracle` (rust-oracle) on ODPI-C and `sibyl` on OCI both need Oracle Instant Client at runtime. The community `oracle-rs` crate is a fallback if the official crate lacks async.
+- Vertebra's existing `oracle.rs`/`tns.rs` codecs (OSON, VECTOR, TTC piggyback, tnsnames/wallet parsing) are kept only where the crate does not already cover them.
+
 ## Scope
 
 1. **Connection.**

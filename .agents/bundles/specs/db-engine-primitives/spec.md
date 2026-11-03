@@ -21,12 +21,12 @@ tags: [db, layering, cdc, embeddings, pipeline]
 
 ## Charter
 
-After `native-data-platform/db-layout-and-contract` creates `db/adapters/<engine>/` and `db/common/`, this flow empties the generic modules of engine code. It also removes the CTE-based `QueryPipeline` now that the native drivers expose `pipeline()`. Real driver I/O, the registry, protocols, and the import gate belong to the native-data-platform PRD.
+After `native-data-platform/db-layout-and-contract` creates `db/adapters/<engine>/`, this flow empties the generic modules of engine code. It also removes the CTE-based `QueryPipeline` now that the native drivers expose `pipeline()`. Real driver I/O, the registry, protocols, and the import gate belong to the native-data-platform PRD.
 
 ## Scope
 
 1. **CDC and notifications.**
-   - `db/cdc.py` keeps only the generic `ChangeEvent` and moves to `db/common/cdc.py`.
+   - `db/cdc.py` keeps only the generic `ChangeEvent`.
    - The Postgres pieces move to `db/adapters/postgres/notify.py`: `pg_logical_emit_message`, the slot/publication settings from `CDCConfig`, and NOTIFY spill hydration with a bounded spill store and no swallowed exceptions.
    - `SpannerChildPartition`, `SpannerChangeStreamRecord`, and `SpannerChangeStreamSource` move to `db/adapters/spanner/change_stream.py`, implementing `ChangeSource` with separate sync and async readers (no `asyncio.iscoroutine` duck-typing).
    - Oracle TxEventQ and Redis pub/sub use the `NotificationSource` implementations from the native driver chapters.
@@ -40,12 +40,12 @@ After `native-data-platform/db-layout-and-contract` creates `db/adapters/<engine
 4. **Pipelining.**
    - Delete `db/pipeline.py` (`QueryPipeline`, `CTEStep`, `RelOverlay`), its exports, and its use in `extensions/sqlspec/{bigquery,spanner}.py::*Driver.execute_stack`.
    - Delete `docs/usage/query-pipelines.md`. Rewrite the references in `docs/usage/databases.md`, `docs/usage/extensions.md`, `docs/index.md`, and `docs/reference/index.md` to document `driver.pipeline()`.
-5. **RLS.** `db/rls.py` moves to `db/common/rls.py`, with the dialect-specific GUC SQL supplied by each adapter's `core.py`.
+5. **RLS.** `db/rls.py` stays generic, with the dialect-specific GUC SQL supplied by each adapter's `core.py`.
 6. **Knowledge.** Update `domains/data/query-pipeline-cdc-and-tenancy.md` and `domains/agent/embeddings-and-vectors.md`.
 
 ## Public Seams
 
-`vertebra.db.common.cdc.ChangeEvent`, `vertebra.db.adapters.spanner.change_stream.SpannerChangeStreamSource`, `vertebra.db.adapters.postgres.notify.*`, and `vertebra.embeddings.PushdownEmbedder`.
+`vertebra.db.cdc.ChangeEvent`, `vertebra.db.adapters.spanner.change_stream.SpannerChangeStreamSource`, `vertebra.db.adapters.postgres.notify.*`, and `vertebra.embeddings.PushdownEmbedder`.
 
 ## Dependencies
 
@@ -53,7 +53,7 @@ integration-remediation `critical-correctness-fixes`. native-data-platform `db-l
 
 ## Acceptance Boundary
 
-- No engine names remain in `db/common/` modules apart from the registry tables.
+- No engine names remain in the engine-agnostic `vertebra/db/*` modules (everything outside `db/adapters/`) apart from the registry tables.
 - The import gate passes.
 - The docs build (`make docs`).
 - `make lint-all` and `make py-test` pass.

@@ -105,7 +105,7 @@ flowchart LR
    - `vertebra.db` never imports upward.
 2. **Engine packages** *(user decision)*.
    - Engine code lives in `vertebra/db/adapters/<engine>/{config,core,driver}.py`, plus optional `pipeline.py`, `notify.py`, `change_stream.py`, `queue.py`, and `embeddings.py`.
-   - Engine-agnostic code lives in `vertebra/db/common/`: driver bases, capability protocols (`PipelineCapable`, `NotificationSource`, `ChangeSource`, `QueueStore`, `EmbeddingPushdown`), the registry, `ArrowCursor`, the broker client, and the dialers.
+   - Engine-agnostic code stays directly under `vertebra/db/`: driver bases, capability protocols (`PipelineCapable`, `NotificationSource`, `ChangeSource`, `QueueStore`, `EmbeddingPushdown`), the registry, `ArrowCursor`, the broker client, and the dialers.
    - The [native-data-platform](../native-data-platform/spec.md) PRD (`db-layout-and-contract`) owns this layout.
 3. **Driver I/O** *(user decision: required, feature complete)*.
    - Vertebra's own Rust drivers back every engine. The native-data-platform PRD owns this.
@@ -157,7 +157,7 @@ flowchart LR
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | `critical-correctness-fixes` | Silent failure and security fixes | Behavior fixes only; see charter | existing APIs | — | draft |
 | 2 | `gcp-wire-protocol-correctness` | Rust GCP wire correctness | Field consts + golden tests, no false success, panic-safe/cancellable completion, typed exceptions | `_vertebra.pyi` exceptions, `SpannerClient`, `BigQueryClient` | — | draft |
-| 3 | `db-engine-primitives` | Engine primitives relocation and QueryPipeline removal | CDC/notify/change-stream/embedding pushdown moved to `db/adapters/<engine>`, `DatabaseChannelBackend` and `QueryPipeline` deleted, DB tools moved to extension tool providers, RLS to `db/common` | `vertebra.db.common.cdc`, `vertebra.db.adapters.*.{notify,change_stream,embeddings}`, `PushdownEmbedder` | 1; native-data-platform Ch1–2 | draft |
+| 3 | `db-engine-primitives` | Engine primitives relocation and QueryPipeline removal | CDC/notify/change-stream/embedding pushdown moved to `db/adapters/<engine>`, `DatabaseChannelBackend` and `QueryPipeline` deleted, DB tools moved to extension tool providers, RLS stays generic in `db/rls.py` | `vertebra.db.cdc`, `vertebra.db.adapters.*.{notify,change_stream,embeddings}`, `PushdownEmbedder` | 1; native-data-platform Ch1–2 | draft |
 | 4 | `sqlspec-adapter-parity` | Feature-complete sqlspec adapters | Per-engine adapter packages, dispatch-contract drivers, upstream-base stores, data dictionaries, resolver shim, shared-pool safety | `<Engine>{Sync,Async}Config`, `adapter_name` | 3 | draft |
 | 5 | `queues-tasks-and-channels` | Working queues, tasks, channels, stores | Real `QueueStore`s, settings-driven backends, litestar-queues backend, Django tasks backend, DI, one cron parser, per-engine channels, Valkey store | `QueueService`, `QueueBackend`, `QueueBackendSettings` | 3, 4 | draft |
 | 6 | `sqlalchemy-and-django-integration` | SQLAlchemy / AA / Django DB integration | Dialect split + real GCP dialect bases, shared DB-API module, AA dogpile cache backend, real Django backends including Spanner via `django_spanner` | dialect entry points, `create_cache_config`, Django `ENGINE` paths | 3 | draft |
@@ -201,7 +201,7 @@ flowchart LR
 
 ## Open Questions
 
-- **Resolved Q1** *(user)*: engine code goes in `vertebra/db/adapters/<engine>/` and engine-agnostic code in `vertebra/db/common/`.
+- **Resolved Q1** *(user)*: engine code goes in `vertebra/db/adapters/<engine>/`, and engine-agnostic code stays directly under `vertebra/db/`.
 - **Resolved Q2** *(user)*: native Vertebra queue backends for Postgres and Oracle first, plugged into first-party queues, litestar-queues, and Django tasks.
 - **Resolved Q4** *(user)*: Vertebra's own Rust drivers back every engine, broker pool sharing works for any AA/SQLSpec config, and storage is complete. See [native-data-platform](../native-data-platform/spec.md).
 - **Q3 — Django DB backends (awaiting confirmation).**

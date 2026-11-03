@@ -44,7 +44,7 @@ tags: [storage, object-store, sqlspec, advanced-alchemy, django, litestar]
 8. **Django contract.** `DjangoStorage` subclasses `django.core.files.storage.Storage`, is `@deconstructible`, returns a `File` from `open()`, signs URLs, and implements `listdir`, `path`, `get_available_name`, `generate_filename`, `get_valid_name`, `get_*_time`, and `get_alternative_name`.
 9. **Litestar.** A `litestar.stores.base.Store` over ObjectStore, and a static-files file-system adapter.
 10. **Arrow.**
-    - `db/common/arrow.py::ArrowCursor.from_rows` never writes JSON pseudo-Arrow.
+    - `db/arrow.py::ArrowCursor.from_rows` never writes JSON pseudo-Arrow.
     - `arrow_shm.rs::allocate_shm_region` errors instead of falling back to anonymous memory.
     - `provider.py::SharedArrowBuffer` is deleted.
     - `_iter_arrow_async` streams without materializing every batch.

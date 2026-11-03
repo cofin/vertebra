@@ -1,8 +1,8 @@
 ---
 type: Spec
 flow_id: db-layout-and-contract
-title: db/adapters and db/common Layout, Driver Contract, and Conformance Suite
-description: Move engine code to vertebra/db/adapters/<engine>, engine-agnostic code to vertebra/db/common, define one driver contract and capability protocols, make the registry polymorphic, enforce the db import boundary, and add a cross-engine driver conformance suite.
+title: db/adapters Layout, Driver Contract, and Conformance Suite
+description: Move engine code to vertebra/db/adapters/<engine>, engine-agnostic code kept at vertebra/db/*, define one driver contract and capability protocols, make the registry polymorphic, enforce the db import boundary, and add a cross-engine driver conformance suite.
 state: draft
 parent_prd: native-data-platform
 research:
@@ -17,7 +17,7 @@ updated_at: 2026-11-03T04:05:00Z
 tags: [db, layout, contract, registry, conformance]
 ---
 
-# Flow Charter: db/adapters and db/common Layout, Driver Contract, and Conformance Suite
+# Flow Charter: db/adapters Layout, Driver Contract, and Conformance Suite
 
 ## Charter
 
@@ -27,10 +27,10 @@ This flow sets the structure every native driver and integration builds on.
 
 1. **Layout.**
    - Move `vertebra/db/<engine>/` → `vertebra/db/adapters/<engine>/` for postgres, mysql, sqlite, oracle, mssql, duckdb, bigquery, spanner, redis, valkey, and datafusion (from `db/datafusion.py`).
-   - Move `vertebra/db/driver/` → `vertebra/db/common/driver/`, `db/_registry.py` → `db/common/registry.py`, `db/_arrow.py` → `db/common/arrow.py`, and `db/dialer/` → `db/common/dialer/`.
+   - Engine-agnostic modules stay directly under `vertebra/db/`: `driver/` (bases and capability protocols), `registry.py` (renamed from `_registry.py`), `arrow.py` (renamed from `_arrow.py`), `cdc.py`, `rls.py`, and `dialer/` *(user decision: `db.adapters.*` for engines, `db.*` for the rest)*.
    - `db/__init__.py` exports only the curated public names.
-   - The Rust `vertebra-db/src/` gains `<engine>/` modules and `common/` (lease table, statement cache, Arrow SHM, framing helpers).
-2. **Driver contract** (`db/common/driver/`).
+   - The Rust `vertebra-db/src/` gains `<engine>/` modules, while shared code stays in top-level modules (`connection.rs`, `arrow_shm.rs`, the statement cache, framing helpers).
+2. **Driver contract** (`db/driver/`).
    - `SyncDatabaseDriver`/`AsyncDatabaseDriver` with `execute`, `execute_many`, `select`, `select_one`, `select_one_or_none`, `select_value`, `select_to_arrow`, `stream_arrow_batches`, `load_from_arrow`, `begin`/`commit`/`rollback`, a `transaction()` context, `cancel()`, and `close()`.
    - A typed exception hierarchy with engine error codes.
    - Remove the `# type: ignore[override]` signature drift across the engine drivers.
@@ -40,7 +40,7 @@ This flow sets the structure every native driver and integration builds on.
    - `DatabaseRegistry.parse_url`, `pool_fingerprint`, `_build_async_driver`, and `_build_sync_driver` become table lookups.
    - `provide_driver(name_or_config, *, sync=False)` replaces `provide_bigquery_driver`/`provide_spanner_driver`, including the re-exports in `extensions/litestar/__init__.py`.
 5. **Import boundary.** A layout test asserts that no module under `vertebra/db/` imports `vertebra.agent`, `vertebra.framework`, `vertebra.extensions`, or `vertebra.server`.
-6. **Shared Rust connection core.** `vertebra-db/src/common/connection.rs`:
+6. **Shared Rust connection core.** `vertebra-db/src/connection.rs`:
    - a `Connection` trait;
    - TCP/Unix stream + rustls TLS, reusing the `grpc.rs` connector;
    - `dialer.rs` integration;
@@ -55,7 +55,7 @@ This flow sets the structure every native driver and integration builds on.
 
 ## Public Seams
 
-`vertebra.db.common.driver.*`, `vertebra.db.adapters.<engine>.*`, `BaseDatabaseConfig.from_url/pool_key`, and `provide_driver`.
+`vertebra.db.driver.*`, `vertebra.db.adapters.<engine>.*`, `BaseDatabaseConfig.from_url/pool_key`, and `provide_driver`.
 
 ## Dependencies
 
