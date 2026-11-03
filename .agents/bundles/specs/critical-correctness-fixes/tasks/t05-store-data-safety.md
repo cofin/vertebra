@@ -11,6 +11,7 @@ files:
   - src/py/vertebra/framework/stores.py
   - src/py/vertebra/extensions/litestar/store.py
   - src/py/vertebra/extensions/starlette/store.py
+  - src/py/vertebra/extensions/alchemy/cache.py
   - src/py/vertebra/extensions/litestar/config.py
   - docs/usage/queues-and-realtime.md
   - docs/usage/extensions.md
@@ -21,7 +22,8 @@ tests:
   - src/py/tests/unit/db/test_redis_valkey_driver.py
   - src/py/tests/unit/server/test_litestar_direct_fastpath.py
   - src/py/tests/unit/extensions/test_starlette_plugin.py
-plan_revision: 2
+  - src/py/tests/unit/extensions/test_alchemy_cache_backend.py
+plan_revision: 3
 plan_commit: 24e2931
 state_revision: 2
 claimed_by: executor
@@ -29,12 +31,12 @@ claimed_at: 2026-11-03T16:50:15Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: 2026-11-03T16:56:00Z
-last_verified_commit: 78ffdf6
-verification_evidence: "RED: 19 failed in 1.35s; GREEN: 76 passed in 1.46s, ruff check/format and mypy passed"
+last_verified_at: 2026-11-03T17:42:00Z
+last_verified_commit: 670fd6a
+verification_evidence: "RED: 19 failed in 1.35s + 7 failed on SQLAlchemyCacheBackend prefix clear and millisecond TTLs; GREEN: 84 passed across store and SQLAlchemy cache suites, ruff check/format and mypy passed"
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T16:57:05Z
-commit: 78ffdf6
+updated_at: 2026-11-03T17:42:00Z
+commit: 670fd6a
 tags: [bugfix, data-loss, stores, redis, litestar]
 ---
 
@@ -53,7 +55,7 @@ tags: [bugfix, data-loss, stores, redis, litestar]
   - Both `expires_in` methods return `-1` for keys without expiry (local entry or driver `PTTL == -1`). Litestar's `Store.expires_in` contract returns `None` when the key does not exist or has no expiry.
   - `src/py/vertebra/extensions/litestar/config.py::LitestarConfig` defaults `swap_memory_channels=True` and `swap_memory_response_cache=True`, so `LitestarPlugin._finalize_app_acceleration` replaces the app's `MemoryChannelsBackend` and response-cache `MemoryStore` without the user asking. A planning probe confirmed the swap with the default config.
   - The stores have no namespace, so no prefix-scoped delete is possible. The driver (`src/py/vertebra/db/redis/driver.py::SyncRedisDriver` / `::AsyncRedisDriver`) has no `scan`, `unlink`, or `px` support.
-  - Found during planning: `src/py/vertebra/extensions/starlette/store.py::CacheStore.delete_all` has the same `flushdb()` call, and its module helper `_compute_expiry` has the same `int(ttl_s)` truncation. It gets the same fix. `src/py/vertebra/extensions/alchemy/cache.py::SQLAlchemyCacheBackend.clear` / `clear_async` also call `flushdb()`; scoping them requires aligning the backend's driver keys with Advanced Alchemy's region `key_prefix`, which the `sqlalchemy-and-django-integration` chapter owns (recorded in spec Non-Goals).
+  - `src/py/vertebra/extensions/starlette/store.py::CacheStore.delete_all` and `src/py/vertebra/extensions/alchemy/cache.py::SQLAlchemyCacheBackend.clear` / `clear_async` also call `flushdb()` and truncate sub-second TTLs (`_compute_expiry` / `_resolve_driver_ex`). Both get the same prefix-scoped `SCAN` + `UNLINK` and millisecond `PX` TTL fix (`CacheStore` defaults to `key_prefix="vertebra"`; `SQLAlchemyCacheBackend` defaults to `key_prefix="vtb:aa:"`, matching `create_cache_config(key_prefix="vtb:aa:")`).
 - **Decisions** (spec §2.2):
   - New keyword `key_prefix: str = "vertebra"` on both store constructors and on `from_valkey` / `from_redis`. Driver keys are `f"{key_prefix}:{key}"`. The name avoids a clash with the existing `KeyValueStore.namespace(prefix)` method. `key_prefix` is validated with `validate_identifier(key_prefix, "key_prefix", allow_hyphens=True)`, which rejects glob characters (`*`, `?`, `[`) that would widen `SCAN MATCH`.
   - The local `_entries` dict is keyed by the full prefixed key, so Valkey invalidation pushes (which carry server keys) evict entries without translation.
@@ -407,7 +409,7 @@ tags: [bugfix, data-loss, stores, redis, litestar]
 
 ## Acceptance Criteria
 
-- [x] R8: `delete_all` removes only `<key_prefix>:*` in all three stores; foreign keys survive; no `flushdb` call remains in `framework/stores.py`, `extensions/litestar/store.py`, or `extensions/starlette/store.py`.
+- [x] R8: `delete_all` and `SQLAlchemyCacheBackend.clear` / `clear_async` remove only `<key_prefix>:*` across all four stores/caches; foreign keys survive; no `flushdb` call remains in `framework/stores.py`, `extensions/litestar/store.py`, `extensions/starlette/store.py`, or `extensions/alchemy/cache.py`.
 - [x] R8: Sub-second TTLs reach the driver as `PX`; non-positive TTLs raise `ValueError`; `expires_in` returns `None` for missing and non-expiring keys.
 - [x] R8: Driver `scan`, `unlink`, and `set(px=...)` work in `memory://` and network modes; `ex` with `px` raises.
 - [x] R9: Default `LitestarConfig` leaves `MemoryChannelsBackend` and the response cache `MemoryStore` in place.

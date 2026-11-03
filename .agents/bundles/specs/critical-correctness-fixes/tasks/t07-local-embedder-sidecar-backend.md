@@ -15,7 +15,7 @@ files:
   - docs/changelog/index.md
 tests:
   - src/py/tests/unit/embeddings/test_embedding_broker.py
-plan_revision: 2
+plan_revision: 3
 plan_commit: 24e2931
 state_revision: 2
 claimed_by: null
@@ -193,14 +193,13 @@ In `src/py/tests/unit/embeddings/test_embedding_broker.py`:
 
        The quarantined sidecar receives this value over its JSON pipe and imports ``target`` itself,
        so the factory must be importable in a fresh interpreter.
-
-       Attributes:
-           target: ``"package.module:qualname"`` of a callable returning a ``BackendInferenceCallable``.
-           options: Keyword arguments passed to the target callable.
        """
 
        target: str
+       """``"package.module:qualname"`` of a callable returning a ``BackendInferenceCallable``."""
+
        options: dict[str, Any] = msgspec.field(default_factory=dict)
+       """Keyword arguments passed to the target callable."""
 
        def build(self) -> BackendInferenceCallable:
            """Import ``target`` and call it with ``options``.
@@ -361,7 +360,7 @@ In `src/py/tests/unit/embeddings/test_embedding_broker.py`:
 - **GREEN**:
 
   ```bash
-  uv run pytest src/py/tests/unit/embeddings -q
+  uv run pytest src/py/tests/unit/embeddings src/py/tests/unit/tools/test_public_docstrings.py -q
   uv run ruff check src/py/vertebra/embeddings src/py/tests/unit/embeddings/test_embedding_broker.py
   uv run ruff format --check src/py/vertebra/embeddings src/py/tests/unit/embeddings/test_embedding_broker.py
   uv run mypy src/py/vertebra/embeddings

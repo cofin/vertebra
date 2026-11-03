@@ -14,7 +14,7 @@ files:
 tests:
   - src/py/tests/unit/agent/test_mcp_conformance.py
   - src/py/tests/unit/agent/test_core_and_observability.py
-plan_revision: 2
+plan_revision: 3
 plan_commit: 24e2931
 state_revision: 2
 claimed_by: executor

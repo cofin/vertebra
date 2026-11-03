@@ -8,6 +8,7 @@ verification_strategy: regression_tdd
 depends_on: []
 files:
   - src/py/vertebra/server/_loops.py
+  - src/py/vertebra/server/_dispatch.py
   - src/py/vertebra/server/worker.py
   - docs/usage/server-and-workers.md
   - .agents/bundles/knowledge/architecture/runtime/platform-and-lifecycle.md
@@ -15,7 +16,7 @@ files:
   - docs/changelog/index.md
 tests:
   - src/py/tests/unit/server/test_runner.py
-plan_revision: 2
+plan_revision: 3
 plan_commit: 24e2931
 state_revision: 2
 claimed_by: null
@@ -23,12 +24,12 @@ claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: 2026-11-03T17:09:22Z
-last_verified_commit: 21ff97a
-verification_evidence: "RED: 11 failed, 1 passed in 1.21s; GREEN: 254 passed in 2.33s; ruff check/format and mypy passed on 2 source files"
+last_verified_at: 2026-11-03T17:42:00Z
+last_verified_commit: 1a339be
+verification_evidence: "RED: 11 failed, 1 passed in 1.21s + 1 failed on buffered async_native dispatch_batch timeout; GREEN: 34 passed in test_runner.py; 1498 passed across full Python test suite; ruff check/format and mypy passed"
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T17:12:00Z
-commit: 5edc876
+updated_at: 2026-11-03T17:42:00Z
+commit: 1a339be
 tags: [bugfix, server, event-loop, asgi]
 ---
 
@@ -51,8 +52,7 @@ tags: [bugfix, server, event-loop, asgi]
   - Shutdown drains every task on the shard (`asyncio.all_tasks()` minus the draining task), awaits them with `gather(return_exceptions=True)`, then `await loop.shutdown_asyncgens()`. A drain that exceeds the timeout is logged and the loop is still stopped. A loop whose thread is alive after the join timeout is logged and left open.
   - Shard start failure raises `RuntimeError(f"Event loop shard {idx} did not start within {timeout}s")` after calling `self.stop()`.
   - `_AsgiMountRunner(..., batch_timeout: float | None = 30.0)`; `None` waits without a timeout. Timed-out requests return `AsgiResponse(status=504, headers=[("content-type", "text/plain")], body=b"Gateway Timeout", request_id=<id>)` and their tasks are cancelled.
-  - `_instantiate_mount_runners` resolves the timeout from `VERTEBRA_ASGI_BATCH_TIMEOUT` (seconds) through a new module function `_resolve_asgi_batch_timeout`, next to the existing `_resolve_configured_interface`. Unset or empty → `30.0`; `0` or `none` (any case) → `None`; a positive number → that value; negative or non-numeric → `ImproperConfigurationError` (from `vertebra.typing`).
-- **Related, out of scope**: `dispatch_batch`'s buffered `async_native` branch has the same hardcoded `concurrent.futures.wait(futures, timeout=10.0)`; `runtime-structure-and-throughput` owns the dispatch restructure (recorded in spec Non-Goals).
+  - `_instantiate_mount_runners` and `dispatch_batch` (in its buffered `async_mode=False` `async_native` branch) resolve the timeout from `VERTEBRA_ASGI_BATCH_TIMEOUT` (seconds) through `_resolve_asgi_batch_timeout` in `vertebra.server._dispatch` (re-exported in `vertebra.server.worker`). Unset or empty → `30.0`; `0` or `none` (any case) → `None`; a positive number → that value; negative or non-numeric → `ImproperConfigurationError` (from `vertebra.typing`). On timeout, `dispatch_batch(async_mode=False)` cancels timed-out futures and returns `vr_cls(status=504, body=b"Gateway Timeout", request_id=...)`.
 - **Fault injection note**: `test_event_loop_pool_raises_when_shard_does_not_start` replaces the shard thread target `EventLoopPool._run_loop_shard` with a function that returns without signaling readiness. This simulates a shard thread that dies during startup; it does not replace the behavior under test (`__init__`'s readiness check).
 - **Request carrier**: the mount runner test uses the module's existing `MockRequest` (method, path, query, headers, body, request_id). `AsgiRunner._build_scope` accepts duck-typed request objects through `_build_scope_from_stub`, so no private request class is imported.
 - **Canonical test module**: `src/py/tests/unit/server/test_runner.py` (imports `EventLoopPool`, `asyncio`, `threading`, `AsyncIterator`, `Any`, `pytest`, `MockRequest`, and `vertebra.server.worker`).
@@ -413,7 +413,7 @@ In `src/py/tests/unit/server/test_runner.py`:
 - [x] R12: `stop()` runs task cancellation handlers and async-generator finalizers on every shard and closes loops only after their threads exit.
 - [x] R12: `EventLoopPool(size>1)` raises `RuntimeError` when a shard does not signal readiness.
 - [x] R12: Cancelling a `schedule_batch` future cancels its asyncio task.
-- [x] R13: `_AsgiMountRunner` defaults to a 30 s timeout, reads `VERTEBRA_ASGI_BATCH_TIMEOUT` (`0`/`none` disables), rejects negative and non-numeric values, returns 504 on timeout, and cancels the task.
+- [x] R13: `_AsgiMountRunner` and `dispatch_batch(async_mode=False)`'s `async_native` branch default to a 30 s timeout, read `VERTEBRA_ASGI_BATCH_TIMEOUT` (`0`/`none` disables), reject negative and non-numeric values, return 504 on timeout, and cancel the task.
 - [x] Docs, knowledge, and changelog updated; targeted checks and the phase gate pass; one signed commit.
 
 ## Notes & Discoveries

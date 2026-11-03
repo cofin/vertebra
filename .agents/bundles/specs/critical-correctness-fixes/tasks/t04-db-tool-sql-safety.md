@@ -11,7 +11,7 @@ files:
   - docs/changelog/index.md
 tests:
   - src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
-plan_revision: 2
+plan_revision: 3
 plan_commit: 24e2931
 state_revision: 2
 claimed_by: executor

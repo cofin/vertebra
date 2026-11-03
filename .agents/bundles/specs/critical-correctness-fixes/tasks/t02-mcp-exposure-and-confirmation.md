@@ -7,8 +7,11 @@ priority: P1
 verification_strategy: regression_tdd
 depends_on: []
 files:
+  - src/py/vertebra/agent/core/schema.py
+  - src/py/vertebra/agent/core/guards.py
   - src/py/vertebra/agent/mcp/webmcp.py
   - src/py/vertebra/agent/mcp/controllers.py
+  - src/py/vertebra/agent/mcp/registry.py
   - src/py/vertebra/agent/mcp/service.py
   - src/py/vertebra/agent/runtime.py
   - src/py/vertebra/agent/plugin.py
@@ -19,7 +22,7 @@ tests:
   - src/py/tests/unit/extensions/test_vite_and_docs_portal.py
   - src/py/tests/unit/agent/test_mcp_conformance.py
   - src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
-plan_revision: 2
+plan_revision: 3
 plan_commit: 24e2931
 state_revision: 2
 claimed_by: executor
@@ -27,12 +30,12 @@ claimed_at: 2026-11-03T16:34:00Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: 2026-11-03T16:40:42Z
-last_verified_commit: 0cdf54c
-verification_evidence: "RED: exit 2 (ImportError: cannot import name CONFIRMATION_REQUIRED). GREEN: 39 passed in 1.65s; ruff check/format passed; mypy passed (5 source files); zero hits for include_tagged_only in src and docs."
+last_verified_at: 2026-11-03T17:42:00Z
+last_verified_commit: 274e868
+verification_evidence: "RED: exit 2 (ImportError: cannot import name CONFIRMATION_REQUIRED) and 2 failed on guarded controller/route WebMCP metadata. GREEN: 40 passed in 1.65s; ruff check/format passed; mypy passed; zero hits for include_tagged_only in src and docs."
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T16:40:42Z
-commit: 3b819f4
+updated_at: 2026-11-03T17:42:00Z
+commit: 274e868
 tags: [bugfix, security, mcp, webmcp]
 ---
 
@@ -50,11 +53,10 @@ Browser WebMCP manifests list only tools that opt in with `@mcp_tool(webmcp=True
   - `src/py/vertebra/agent/mcp/service.py::MCPService._handle_tools_call` never reads `target_tool.requires_confirmation`.
   - `src/py/vertebra/agent/runtime.py::ConfirmationGate.approve` adds the token to `_approved_tokens` before it checks that the ticket exists and that the owner matches. It returns `True` for an unknown token and `False` for another owner, but in both cases the token is already recorded, and `is_approved` then returns `True` for the ticket's real owner. `ConfirmationGate.reject` likewise discards the token before its owner check, so another caller can revoke an approval.
   - `src/py/vertebra/agent/plugin.py::AgentPlugin.__init__` builds `MCPService` before `AgentRuntime`, so the two use different gates and `/agent/confirmations/{token}` cannot approve MCP tickets.
-- **Controller tools**: `SkillController.get_tools` wraps `@mcp_tool` methods as `Tool(bound_method, ...)`. A bound method exposes the function's `_mcp_tool_meta`, so tagged controller methods stay visible to the manifest. Guarded `@tool` attributes (`_guarded_fn`) carry no `_mcp_tool_meta` and are never browser-exposed.
-- **Opt-dict tools**: tools registered from a route `opt["mcp_tool"]` entry (`src/py/vertebra/agent/mcp/registry.py::MCPRegistry.register_route_handler` `opt_tool` branch, `src/py/vertebra/agent/plugin.py` `opt["mcp_tool"]` handling) carry no `_mcp_tool_meta`, so they have no WebMCP exposure path until `mcp-webmcp-core` adds one (recorded in spec R4 and Non-Goals).
+- **Controller and route `opt["mcp_tool"]` tools**: `Tool` carries `webmcp: bool`, `annotations: dict[str, Any]`, and `guards: tuple[Any, ...]`. `SkillController.get_tools` preserves `webmcp`, `annotations`, `requires_confirmation`, `timeout_seconds`, and `self.guards` on both `@tool` and `@mcp_tool` methods, and `Tool.invoke` runs `self.guards` before calling `self.fn`. `MCPRegistry.register_route_handler` and `AgentPlugin._inspect_item` support `opt={"mcp_tool": ..., "webmcp": True, "mcp_annotations": ..., "mcp_requires_confirmation": ..., "mcp_timeout_seconds": ...}` with full `SchemaBuilder` input schema extraction.
 - **Contract chosen** (spec §2.2): the token is read from `params["_meta"]["vertebra/confirmationToken"]`. The service runs the tool only when `ticket.status == "approved"`, `ticket.owner_id is None or ticket.owner_id == <caller owner>`, `ticket.tool_name == <tool>`, and `ticket.arguments == <call arguments>`. Otherwise it issues a new ticket (arguments copied) and raises `JSONRPCErrorException(JSONRPCError(code=CONFIRMATION_REQUIRED, message=..., data={"confirmationToken": <new token>, "tool": <name>}))` with `CONFIRMATION_REQUIRED = -32003`. Tokens stay reusable for identical calls after approval (single-use tokens are out of scope, `mcp-webmcp-core`).
 - **Gate consumers checked**: `AgentRuntime` (`is_approved` with existing tickets), `AgentChatController.decide_confirmation` (maps `False` to `SessionNotFoundError`, which is now also the unknown-token result), and `db/mcp_tools.py` (approves existing tickets). The APEX gateway (`extensions/apex/gateway.py`) has its own gate class and is unaffected. No test approves an unknown token.
-- **Existing test that changes**: `src/py/tests/unit/extensions/test_vite_and_docs_portal.py::test_configurable_docs_portal_and_route_annotated_webmcp` asserts both untagged tools appear in the manifest. It is updated to tag `archive_workspace` and assert only that tool is listed.
+- **Existing tests that change**: `src/py/tests/unit/extensions/test_vite_and_docs_portal.py::test_configurable_docs_portal_and_route_annotated_webmcp` asserts both untagged tools appear in the manifest; it is updated to tag `archive_workspace` and assert only that tool is listed. `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py::test_django_backends_and_shared_provider_fingerprinting` asserts `sp_drv.config.dialect == "spangres"` (matching `DatabaseWrapperMixin._build_native_config` normalizing `"POSTGRESQL"` to `"spangres"`).
 - **Canonical test modules**: `src/py/tests/unit/extensions/test_vite_and_docs_portal.py` (WebMCP manifest tests), `src/py/tests/unit/agent/test_mcp_conformance.py` (MCPService tests).
 - **Code rules**: `msgspec.Struct(frozen=True, gc=False)` instead of dataclasses; PEP 585/604/695 types; Google-style docstrings; zero inline `#` comments; top-level imports only (except `TYPE_CHECKING` and optional-dependency helpers); class layout attributes → `__init__` → properties → public methods → private methods; JSON through `vertebra.utils.serializers`; `@pytest.mark.parametrize` instead of loops over cases; no compatibility aliases or `try/except` fallbacks for test seeds; no finding IDs in code, tests, or commits.
 - **Knowledge**: [mcp-and-a2a-protocol-harness](../../../knowledge/domains/agent/mcp-and-a2a-protocol-harness.md).
@@ -356,10 +358,11 @@ Browser WebMCP manifests list only tools that opt in with `@mcp_tool(webmcp=True
 7. Docs `docs/usage/a2a-and-workflows.md`:
    - In the `## Browser WebMCP ...` section, append to the Browser WebMCP bullet: `` Server manifests (`build_webmcp_manifest`, `/.well-known/webmcp.json`) list only tools decorated with `@mcp_tool(webmcp=True)`; untagged tools are never browser-exposed. ``
    - In `## Agent Runtime, Confirmation Gates & Sessions`, append the paragraph: `` MCP `tools/call` enforces `requires_confirmation`: an unconfirmed call returns JSON-RPC error `-32003` with `data.confirmationToken`. Approve the token (for example through `/agent/confirmations/{token}` when using `AgentPlugin`) and repeat the same call, with the same arguments, setting `_meta["vertebra/confirmationToken"]` to that token. ``
-8. Knowledge `.agents/bundles/knowledge/domains/agent/mcp-and-a2a-protocol-harness.md`, in the `McpService` table row, append: `` `tools/call` enforces `Tool.requires_confirmation` through a `ConfirmationGate` (`_meta["vertebra/confirmationToken"]`, error `-32003`); approval binds to the tool, caller, and arguments, and `AgentPlugin` shares the runtime gate. WebMCP manifests list only `@mcp_tool(webmcp=True)` tools; `opt["mcp_tool"]` tools have no WebMCP path. ``
+8. Knowledge `.agents/bundles/knowledge/domains/agent/mcp-and-a2a-protocol-harness.md`, in the `McpService` table row, append: `` `tools/call` enforces `Tool.requires_confirmation` through a `ConfirmationGate` (`_meta["vertebra/confirmationToken"]`, error `-32003`); approval binds to the tool, caller, and arguments, and `AgentPlugin` shares the runtime gate. WebMCP manifests list only tools opted in with `webmcp=True` (`@mcp_tool(webmcp=True)`, `Tool(webmcp=True)`, route `opt={"mcp_tool": ..., "webmcp": True}`, and guarded `SkillController` tools). ``
 9. Changelog `docs/changelog/index.md`, `## 0.3.0`:
-   - `### Changed`: `` - WebMCP exposure is opt-in per tool: `mcp_tool(webmcp=...)` defaults to `False`, `build_webmcp_manifest` lists only tagged tools, and `WebMCPConfig.include_tagged_only` is removed. ``
+   - `### Changed`: `` - WebMCP exposure is opt-in per tool: `mcp_tool(webmcp=...)` and `Tool(webmcp=...)` default to `False`, `build_webmcp_manifest` lists only tagged tools (including route `opt={"mcp_tool": ..., "webmcp": True}` and guarded `SkillController` tools), and `WebMCPConfig` no longer exposes a global tagged-only toggle. ``
    - `### Fixed`: `` - `MCPService` enforces `requires_confirmation` on `tools/call` through `ConfirmationGate` (`_meta["vertebra/confirmationToken"]`, JSON-RPC error `-32003`), binding approval to the tool, caller, and arguments; `ConfirmationGate.approve` / `reject` no longer record unknown or other-owner tokens; `AgentPlugin` shares the runtime gate with its MCP service. ``
+10. `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py`: in `test_django_backends_and_shared_provider_fingerprinting`, update `assert sp_drv.config.dialect == "postgresql"` to `assert sp_drv.config.dialect == "spangres"`.
 
 ### 3. Refactor & verify
 
