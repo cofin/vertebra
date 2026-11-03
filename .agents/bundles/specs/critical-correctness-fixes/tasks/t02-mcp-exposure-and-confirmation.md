@@ -32,7 +32,7 @@ last_verified_commit: 0cdf54c
 verification_evidence: "RED: exit 2 (ImportError: cannot import name CONFIRMATION_REQUIRED). GREEN: 39 passed in 1.65s; ruff check/format passed; mypy passed (5 source files); zero hits for include_tagged_only in src and docs."
 created_at: 2026-11-03T15:30:00Z
 updated_at: 2026-11-03T16:40:42Z
-commit: null
+commit: 3b819f4
 tags: [bugfix, security, mcp, webmcp]
 ---
 

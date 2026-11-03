@@ -2,7 +2,7 @@
 type: Task
 id: critical-correctness-fixes:t03
 title: Mcp-Name binding and nested-params rejection
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on: []
@@ -16,17 +16,17 @@ tests:
   - src/py/tests/unit/agent/test_core_and_observability.py
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: executor
+claimed_at: 2026-11-03T16:42:30Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-03T16:44:27Z
+last_verified_commit: 3b819f4
+verification_evidence: "RED: 5 failed in 0.31s (nested-params, missing-name, batch-body, unwrapping, retry). GREEN: 44 passed in 0.96s across src/py/tests/unit/agent; ruff check/format passed; mypy passed (2 source files)."
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T16:00:00Z
+updated_at: 2026-11-03T16:44:27Z
 commit: null
 tags: [bugfix, security, mcp, jsonrpc]
 ---
@@ -217,11 +217,11 @@ An `Mcp-Name` header always binds to the body field it names, `Mcp-Method`/`Mcp-
 
 ## Acceptance Criteria
 
-- [ ] R6: A present `Mcp-Name` header with a missing or different body field returns `HEADER_MISMATCH` and the tool does not run.
-- [ ] R6: `Mcp-Method` or `Mcp-Name` headers on a JSON array body return `HEADER_MISMATCH` and no call in the batch runs.
-- [ ] R6: Handlers with a `params` parameter receive the dict unchanged; nested `params` keys are never unwrapped; handler `TypeError`s are not retried.
-- [ ] A2A and MCP test suites stay green.
-- [ ] Knowledge chapter and changelog updated; targeted lint/type checks pass; one signed commit.
+- [x] R6: A present `Mcp-Name` header with a missing or different body field returns `HEADER_MISMATCH` and the tool does not run.
+- [x] R6: `Mcp-Method` or `Mcp-Name` headers on a JSON array body return `HEADER_MISMATCH` and no call in the batch runs.
+- [x] R6: Handlers with a `params` parameter receive the dict unchanged; nested `params` keys are never unwrapped; handler `TypeError`s are not retried.
+- [x] A2A and MCP test suites stay green.
+- [x] Knowledge chapter and changelog updated; targeted lint/type checks pass; one signed commit.
 
 ## Notes & Discoveries
 

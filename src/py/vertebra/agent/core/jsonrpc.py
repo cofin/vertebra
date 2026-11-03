@@ -118,7 +118,12 @@ class JSONRPCRouter:
         params: Any,
         context: Any,
     ) -> Any:
-        """Invoke a handler with params and optional context injection."""
+        """Invoke a handler with params and optional context injection.
+
+        A dict ``params`` is passed as ``params=<dict>`` to handlers that declare a ``params``
+        parameter and unpacked as keyword arguments otherwise. Nested ``params`` keys are never
+        unwrapped.
+        """
         sig = inspect.signature(handler)
         kwargs: dict[str, Any] = {}
         accepts_context = "context" in sig.parameters or any(
@@ -137,22 +142,12 @@ class JSONRPCRouter:
         if params is None:
             result = handler(**kwargs) if kwargs else handler()
         elif isinstance(params, dict):
-            call_kwargs = dict(params)
-            call_kwargs.update(kwargs)
-            try:
+            if "params" in sig.parameters:
+                result = handler(params=params, **kwargs)
+            else:
+                call_kwargs = dict(params)
+                call_kwargs.update(kwargs)
                 result = handler(**call_kwargs)
-            except TypeError:
-                if "params" in sig.parameters:
-                    call_kwargs_fallback = {"params": params}
-                    if accepts_context and context is not None:
-                        call_kwargs_fallback["context"] = context
-                    result = handler(**call_kwargs_fallback)
-                elif len(sig.parameters) == 1 and not kwargs:
-                    result = handler(params)
-                elif len(sig.parameters) == 2 and kwargs:
-                    result = handler(params, **kwargs)
-                else:
-                    raise
         elif isinstance(params, (list, tuple)):
             result = handler(*params, **kwargs) if kwargs else handler(*params)
         else:

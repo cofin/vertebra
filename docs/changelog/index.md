@@ -38,6 +38,7 @@ Release introducing shared-memory vector embeddings, zero-copy PEP 3118 vector v
 - `BaseSyncDriver.apply_tenant_predicate` and `BaseAsyncDriver.apply_tenant_predicate` in `vertebra.extensions.sqlspec` now raise when the tenant GUC `SET` fails instead of returning an unenforced predicate.
 - `DatabaseRegistry.parse_url` accepts `spangres://` URLs, and `SpannerChangeStreamSource.poll_partition_sync` / `poll_partition_async` bind positional `$1..$4` parameters in Spangres mode.
 - `MCPService` enforces `requires_confirmation` on `tools/call` through `ConfirmationGate` (`_meta["vertebra/confirmationToken"]`, JSON-RPC error `-32003`), binding approval to the tool, caller, and arguments; `ConfirmationGate.approve` / `reject` no longer record unknown or other-owner tokens; `AgentPlugin` shares the runtime gate with its MCP service.
+- `MCPHttpHandler.handle_request` rejects an `Mcp-Name` header when the body name is missing and rejects MCP routing headers on JSON-RPC batch bodies; `JSONRPCRouter` no longer unwraps nested `params` objects or retries handlers that raise `TypeError`.
 
 ## 0.2.0
 

@@ -188,7 +188,7 @@ class MCPHttpHandler:
             return 200, {"Content-Type": "application/json"}, err_body
 
         try:
-            _, frame_method, frame_id = classify_jsonrpc_frame(body)
+            frame_kind, frame_method, frame_id = classify_jsonrpc_frame(body)
         except Exception as exc:
             err = JSONRPCError(code=-32700, message=f"Parse error: {exc}")
             err_body = encode_json_bytes(
@@ -201,6 +201,17 @@ class MCPHttpHandler:
             return 200, {"Content-Type": "application/json"}, err_body
 
         mcp_method_header = lower_headers.get("mcp-method")
+        mcp_name_header = lower_headers.get("mcp-name")
+        if frame_kind == 2 and (mcp_method_header is not None or mcp_name_header is not None):
+            err = JSONRPCError(
+                code=HEADER_MISMATCH,
+                message="Mcp-Method and Mcp-Name headers cannot be used with JSON-RPC batch requests",
+            )
+            err_body = encode_json_bytes(
+                {"jsonrpc": "2.0", "id": None, "error": {"code": err.code, "message": err.message}}
+            )
+            return 200, {"Content-Type": "application/json"}, err_body
+
         if mcp_method_header is not None and frame_method is not None and mcp_method_header != frame_method:
             err = JSONRPCError(
                 code=HEADER_MISMATCH,
@@ -215,19 +226,19 @@ class MCPHttpHandler:
             )
             return 200, {"Content-Type": "application/json"}, err_body
 
-        mcp_name_header = lower_headers.get("mcp-name")
         if mcp_name_header is not None and frame_method in MCP_NAME_FIELDS:
             decoded_name = decode_mcp_header_value(mcp_name_header)
             field_name = MCP_NAME_FIELDS[frame_method]
             body_dict = decode_json(body)
-            params = body_dict.get("params") or {}
+            raw_params = body_dict.get("params") if isinstance(body_dict, dict) else None
+            params = raw_params if isinstance(raw_params, dict) else {}
             target_val = params.get(field_name)
             if target_val is None and field_name == "taskId":
                 target_val = params.get("task_id")
-            if target_val is not None and str(target_val) != decoded_name:
+            if target_val is None or str(target_val) != decoded_name:
                 err = JSONRPCError(
                     code=HEADER_MISMATCH,
-                    message=f"Header Mcp-Name '{decoded_name}' does not match body parameter '{target_val}'",
+                    message=f"Header Mcp-Name '{decoded_name}' does not match body parameter {field_name!r}",
                 )
                 err_body = encode_json_bytes(
                     {

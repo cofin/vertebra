@@ -461,3 +461,37 @@ def test_rust_agent_ffi_classifier_schema_cache_and_async_logger() -> None:
     assert d1 > 0
     assert py_cache.get_etag("tool:calc") == e1
     assert py_cache.combined_etag().startswith('"W/')
+
+
+@pytest.mark.anyio
+async def test_jsonrpc_router_passes_dict_params_without_unwrapping() -> None:
+    """Handlers declaring ``params`` receive the request params dict as-is, nested keys included."""
+    router = JSONRPCRouter()
+    received: list[object] = []
+
+    async def capture(params: object = None, context: object = None) -> str:
+        received.append(params)
+        return "ok"
+
+    router.register("capture", capture)
+    nested = {"params": {"name": "calc_add"}}
+    response = await router.dispatch(JSONRPCRequest(method="capture", id=1, params=nested))
+    assert response == {"jsonrpc": "2.0", "id": 1, "result": "ok"}
+    assert received == [nested]
+
+
+@pytest.mark.anyio
+async def test_jsonrpc_router_does_not_retry_handler_type_errors() -> None:
+    """A TypeError raised inside a sync params handler is reported once, with the params unchanged."""
+    router = JSONRPCRouter()
+    attempts: list[object] = []
+
+    def broken(params: object = None, context: object = None) -> str:
+        attempts.append(params)
+        raise TypeError("handler bug")
+
+    router.register("broken", broken)
+    response = await router.dispatch(JSONRPCRequest(method="broken", id=2, params={"params": {"x": 1}}))
+    assert response is not None
+    assert response["error"]["code"] == INTERNAL_ERROR
+    assert attempts == [{"params": {"x": 1}}]

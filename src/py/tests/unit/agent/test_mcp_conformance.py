@@ -39,7 +39,7 @@ from vertebra.agent.mcp.service import CONFIRMATION_REQUIRED, CONFIRMATION_TOKEN
 from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
 from vertebra.agent.runtime import ConfirmationGate
 from vertebra.typing import FrozenBaseStruct
-from vertebra.utils.serializers import decode_json
+from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
 @pytest.mark.anyio
@@ -522,3 +522,50 @@ async def test_agent_plugin_mcp_confirmation_uses_runtime_gate() -> None:
         {"name": "purge_cache", "arguments": {}, "_meta": {CONFIRMATION_TOKEN_META_KEY: token}}
     )
     assert result["content"][0]["text"] == "purged"
+
+
+_CALC_ADD_CALL = {
+    "jsonrpc": "2.0",
+    "id": 7,
+    "method": "tools/call",
+    "params": {"name": "calc_add", "arguments": {"a": 1, "b": 2}},
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {"params": {"name": "calc_add", "arguments": {"a": 1, "b": 2}}},
+        },
+        {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"arguments": {"a": 1, "b": 2}}},
+        [_CALC_ADD_CALL],
+    ],
+    ids=["nested-params", "missing-name", "batch-body"],
+)
+async def test_mcp_http_handler_rejects_mcp_name_without_body_name(payload: object) -> None:
+    """An Mcp-Name header with no matching body name, or on a batch body, is rejected before the tool runs."""
+    service = MCPService()
+    calls: list[tuple[int, int]] = []
+
+    @tool(name="calc_add", description="Add two integers")
+    def add(a: int, b: int) -> int:
+        calls.append((a, b))
+        return a + b
+
+    service.registry.register_tool(add)
+    handler = MCPHttpHandler(service)
+    status, _, raw = await handler.handle_request(
+        "POST",
+        "/mcp",
+        {"Mcp-Method": "tools/call", "Mcp-Name": "other"},
+        encode_json_bytes(payload),
+    )
+    assert status == 200
+    decoded = decode_json(raw)
+    assert decoded["error"]["code"] == HEADER_MISMATCH
+    assert calls == []
