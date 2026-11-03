@@ -45,6 +45,7 @@ When running inside Docker, Kubernetes, or Cloud Run:
 1. **Automatic CPU & Memory Detection**: `CgroupQuota.effective_cpu_count()` reads `/sys/fs/cgroup/cpu.max` so `VERTEBRA_THREADS` matches the container's CPU limit automatically.
 2. **Shared-Memory Allocation (`ShmAllocationPolicy`)**: Uses anonymous `memfd_create` descriptors passed over `SCM_RIGHTS` UNIX sockets (or `/dev/shm` when available) so `--topology shm` works cleanly even on read-only container root filesystems.
 3. **Process Supervision (`vertebra.supervisor`)**: In multi-worker deployments (`--workers > 1`), `run_supervisor` monitors worker processes, coordinates graceful `SIGTERM` drains, and restarts crashed workers.
+4. **TLS Trust Store for Google Cloud Clients**: The Spanner Data and BigQuery Storage gRPC clients trust the operating system certificate store plus bundled Mozilla roots (`webpki-roots`). Spanner Database Admin DDL (`update_database_ddl`) runs over REST and uses the operating system trust store (`rustls-native-certs`), so minimal container images that execute Spanner DDL must include a system CA bundle (such as `ca-certificates`). Standard proxy environment variables (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`) apply to REST calls.
 
 ## WebAssembly Plugin Sandboxes (`vertebra.wasm`)
 

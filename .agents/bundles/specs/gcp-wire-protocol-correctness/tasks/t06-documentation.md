@@ -2,7 +2,7 @@
 type: Task
 id: gcp-wire-protocol-correctness:t06
 title: Document official GCP clients, configuration, and TLS requirements
-state: pending
+state: completed
 priority: P2
 verification_strategy: documentation_validation
 depends_on: [gcp-wire-protocol-correctness:t05]
@@ -15,17 +15,17 @@ files:
 tests: []
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: executor
+claimed_at: 2026-11-03T19:50:45Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-03T19:57:21Z
+last_verified_commit: c6047cd
+verification_evidence: "make docs && make lint-all && ! grep -rnE 'grpc\\.rs|execute_partitioned_arrow' docs .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md .agents/bundles/product --exclude-dir=changelog"
 created_at: 2026-11-03T16:10:00Z
-updated_at: 2026-11-03T16:10:00Z
+updated_at: 2026-11-03T19:57:30Z
 commit: null
 tags: [docs, gcp, spanner, bigquery]
 ---
@@ -66,6 +66,8 @@ Contributor and user documentation describe the official Google Cloud Rust clien
 
 ## Acceptance Criteria
 
-- [ ] R13: tech stack, knowledge chapter, usage docs, deployment docs, and changelog describe the change; `make docs` passes.
+- [x] R13: tech stack, knowledge chapter, usage docs, deployment docs, and changelog describe the change; `make docs` passes.
 
 ## Notes & Discoveries
+
+- Baseline and post-edit `make docs`, `make lint-all`, and stale-reference grep checks passed.

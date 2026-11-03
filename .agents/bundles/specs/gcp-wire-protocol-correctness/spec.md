@@ -3,18 +3,18 @@ type: Spec
 flow_id: gcp-wire-protocol-correctness
 title: Official Google Cloud Rust Clients for Spanner and BigQuery Storage
 description: Replace the hand-written Spanner and BigQuery Storage protobuf clients (wrong field numbers, false success, unsafe resends) with googleapis/google-cloud-rust crates behind the existing vertebra-db and _vertebra seams, harden the Arrow IPC splitter, delete grpc.rs, and document the result.
-state: active
+state: completed
 parent_prd: integration-remediation
 research:
   - research/google-cloud-rust_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 6
-current_task: gcp-wire-protocol-correctness:t06
-last_verified_checkpoint: 7c20e42
+state_revision: 7
+current_task: null
+last_verified_checkpoint: c6047cd
 created_at: 2026-11-03T03:30:00Z
-updated_at: 2026-11-03T19:48:50Z
+updated_at: 2026-11-03T19:57:50Z
 tags: [rust, gcp, spanner, bigquery, protobuf, bugfix, dependencies]
 ---
 
@@ -186,19 +186,19 @@ pub async fn update_database_ddl(&self, statements: &[String]) -> Result<String,
 ### Phase 3: BigQuery Storage
 
 - [x] [7c20e42] t04 — BigQuery Storage Read on the official client (tasks/t04-bigquery-storage-read.md)
-- [x] t05 — BigQuery Storage Write, hardened Arrow append plan, grpc.rs removal (tasks/t05-bigquery-storage-write.md)
+- [x] [c6047cd] t05 — BigQuery Storage Write, hardened Arrow append plan, grpc.rs removal (tasks/t05-bigquery-storage-write.md)
 - **Phase 3 Recovery Checkpoint**: `make lint-all && make rs-test && make py-test && make bench-check`
 
 ### Phase 4: Documentation
 
-- [ ] t06 — Document official GCP clients, configuration, and TLS requirements (tasks/t06-documentation.md)
+- [x] t06 — Document official GCP clients, configuration, and TLS requirements (tasks/t06-documentation.md)
 - **Phase 4 Recovery Checkpoint**: `make docs && make lint-all`
 
 ## 5. Continuity Snapshot
 
-- **Flow ID**: `gcp-wire-protocol-correctness` (`state: planned`, `plan_revision: 2`, `plan_commit: 24e2931`)
+- **Flow ID**: `gcp-wire-protocol-correctness` (`state: completed`, `plan_revision: 2`, `plan_commit: 24e2931`)
 - **Current Task**: `null`
-- **Last Verified Checkpoint**: `null`
+- **Last Verified Checkpoint**: `c6047cd`
 - **Key Decisions**:
   - Adopt `google-cloud-spanner =0.34.8-preview` and `google-cloud-bigquery =0.19.0` (Read, Write); keep BigQuery REST and `GcpTokenCache` (bridged).
   - Tests use `from_stub` ports and pure append-plan functions; no golden fixtures.

@@ -65,6 +65,28 @@ app = Litestar(
 | **Valkey** | — | `ValkeyConfig` | `SyncValkeyDriver`, `AsyncValkeyDriver` | Valkey 8.0+/9.0+ RESP3 client-side caching, Cluster/Sentinel, GCP Memorystore IAM auth |
 | **DataFusion** | — | `DataFusionConfig` | `DataFusionEngine` | Federated SQL across PostgreSQL, MySQL, SQLite, DuckDB, BigQuery, Cloud Spanner, and Parquet/CSV object storage |
 
+### Google Cloud Spanner and BigQuery
+
+The native Spanner and BigQuery drivers delegate gRPC Data, Database Admin, Storage Read, and Storage Write calls to the official Google Cloud Rust clients (`google-cloud-spanner` and `google-cloud-bigquery`):
+
+- **Partitioned Arrow Reads (`fetch_arrow`)**: `SyncSpannerDriver.fetch_arrow` and `AsyncSpannerDriver.fetch_arrow` execute a Data Boost partitioned query (`partitioned_query` / `partitioned_query_async`), automatically falling back to a single-stream query when the statement is not root-partitionable, and materialize the rows into a shared-memory `ArrowCursor` (`VTBARROW`).
+- **Spanner DDL Endpoint (`SpannerConfig.admin_endpoint`)**: Database Admin DDL (`update_database_ddl`) runs over REST. When `admin_endpoint` is omitted, Vertebra derives `https://spanner.googleapis.com` for `*.googleapis.com` endpoints and maps the Cloud Spanner Emulator's `:9010` gRPC port to its `:9020` REST port (`http://localhost:9010` → `http://localhost:9020`). Any other non-Google endpoint requires an explicit `admin_endpoint` before running DDL.
+- **Custom CA Certificates (`ca_pem`)**:
+  - `SpannerConfig.ca_pem` configures TLS trust for Spanner Omni or private HTTPS endpoints only; passing `ca_pem` with a `*.googleapis.com` or `http://` endpoint raises an error.
+  - `BigQueryConfig.ca_pem` applies to the BigQuery REST v2 API only; Storage Read and Storage Write gRPC streams always use the system and bundled Mozilla trust roots.
+
+```python
+from vertebra.db.spanner import SpannerConfig, SyncSpannerDriver
+
+emulator_config = SpannerConfig(
+    project_id="local-project",
+    instance_id="test-instance",
+    database_id="app-db",
+    endpoint="http://localhost:9010",
+)
+driver = SyncSpannerDriver(emulator_config)
+```
+
 ## Topic Guides
 
 | Guide | What You Will Learn |
