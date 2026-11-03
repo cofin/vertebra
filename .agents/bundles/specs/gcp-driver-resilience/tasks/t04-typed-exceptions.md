@@ -2,7 +2,7 @@
 type: Task
 id: gcp-driver-resilience:t04
 title: Typed Google Cloud exception hierarchy across bindings and drivers
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: [gcp-driver-resilience:t01, gcp-driver-resilience:t02, gcp-driver-resilience:t03, gcp-driver-resilience:t05]
@@ -25,9 +25,9 @@ tests:
   - src/py/tests/unit/db/test_bigquery.py
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: executor
+claimed_at: 2026-11-03T20:41:00Z
 blocked_reason: null
 unblock_condition: null
 next_step: null

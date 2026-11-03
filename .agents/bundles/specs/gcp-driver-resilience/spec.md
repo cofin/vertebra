@@ -10,11 +10,11 @@ research:
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 4
-current_task: gcp-driver-resilience:t05
+state_revision: 5
+current_task: gcp-driver-resilience:t04
 last_verified_checkpoint: 0ec5f3b
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T20:36:30Z
+updated_at: 2026-11-03T20:41:00Z
 tags: [rust, gcp, pyo3, python, exceptions, auth, bugfix]
 ---
 
@@ -153,8 +153,8 @@ Rust: `vertebra_py::errors::{exception_types, spanner_error_to_py, bigquery_erro
 ### Phase 2: Errors and SQL
 
 - [x] t03 — BigQuery REST warnings and URL encoding (tasks/t03-bigquery-rest.md)
-- [~] t05 — Char-aware GoogleSQL placeholder lexer (tasks/t05-googlesql-placeholders.md)
-- [ ] t04 — Typed Google Cloud exception hierarchy across bindings and drivers (tasks/t04-typed-exceptions.md)
+- [x] t05 — Char-aware GoogleSQL placeholder lexer (tasks/t05-googlesql-placeholders.md)
+- [~] t04 — Typed Google Cloud exception hierarchy across bindings and drivers (tasks/t04-typed-exceptions.md)
 - **Phase 2 Recovery Checkpoint**: `make lint-all && make rs-test && make py-test`
 
 ### Phase 3: Documentation
