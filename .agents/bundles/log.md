@@ -10,6 +10,13 @@ tags:
 
 # Bundle Activity Log
 
+## [2026-11-03] flow-plan | Planned `critical-correctness-fixes`, `gcp-wire-protocol-correctness`, and `gcp-driver-resilience`
+
+- `critical-correctness-fixes`: 8 regression-TDD tasks (plan_revision 2) covering tenant isolation, MCP confirmation/exposure/header binding, DB tool SQL safety, store data safety, embedder errors, the free-threaded embedding backend, and loop shutdown.
+- `gcp-wire-protocol-correctness`: 6 tasks (plan_revision 2) moving Spanner and BigQuery Storage onto the official `googleapis/google-cloud-rust` crates and deleting the hand-written gRPC wire code. Rationale is in `research/google-cloud-rust_20261103.md`.
+- `gcp-driver-resilience` (new Chapter 9): 6 tasks (plan_revision 2) covering the panic-safe/cancellable completion bridge, async gcloud and proxy policy, BigQuery REST fixes, typed `GoogleCloudError` exceptions on `VertebraError`, and the GoogleSQL placeholder lexer.
+- Each plan passed two rounds of zero-context review.
+
 ## [2026-11-03] flow-prd | Authored Master PRD `native-data-platform` and revised `integration-remediation`
 
 - User decisions:

@@ -128,7 +128,7 @@ The global constraints from [integration-remediation](../integration-remediation
   | SQLite | `rusqlite` 0.41.1 |
   | DuckDB | `duckdb` 1.20000.1 |
   | Redis/Valkey | `redis` 1.8.1 |
-  | BigQuery/Spanner | keep the hand-written clients; revisit `google-cloud-rust` at 1.0 |
+  | BigQuery/Spanner | official `googleapis/google-cloud-rust` crates wherever they are functional, even pre-1.0 *(user decision, 2026-11-03)*; the hand-written clients are kept only for capabilities the crates lack. The per-area decision is made in `gcp-wire-protocol-correctness` |
 
   Cross-cutting rules:
   - Disable default features everywhere and standardize on rustls + `ring`, to avoid aws-lc-rs, OpenSSL, and native-tls.

@@ -35,6 +35,7 @@ SQLAlchemy and Advanced Alchemy are the primary user path. Vertebra's dialects a
 3. **Advanced Alchemy.**
    - Replace `alchemy/cache.py::SQLAlchemyCacheBackend` with a dogpile `CacheBackend` registered as `vertebra.valkey` / `vertebra.redis`, so AA's stock `CacheManager` works. Keep `AsyncCacheManager` only for native async L2.
    - Remove the unused `shm_name`, the dead `TYPE_CHECKING` block, and the URL-as-backend-name bug in `create_cache_config`.
+   - `SQLAlchemyCacheBackend.clear`/`clear_async` call `flushdb()` and wipe the whole Redis/Valkey database. Scope them to the AA region key prefix (`create_cache_config(key_prefix="vtb:aa:")`) with `SCAN` + `UNLINK`, aligning driver keys with the region prefix.
    - Delete the `sqlalchemy/cache.py` re-export shim and `alchemy/broker.py::StatementCache`.
    - Replace the `alchemy/storage.py` `storages.get` monkeypatch with AA's registration API.
    - `alchemy/plugin.py::normalize_alchemy_url` reads schemes from the config classes (`url_schemes` from native-data-platform `db-layout-and-contract`).
