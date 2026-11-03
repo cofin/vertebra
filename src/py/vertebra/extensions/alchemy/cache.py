@@ -7,6 +7,7 @@ import collections
 import datetime as dt
 import decimal
 import inspect
+import math
 import threading
 import time
 import uuid
@@ -28,6 +29,7 @@ from vertebra.utils.serializers import (
     encode_json_bytes,
     encode_msgpack_bytes,
 )
+from vertebra.utils.text import validate_identifier
 
 try:
     from advanced_alchemy.cache import CacheConfig, CacheManager, setup_cache_listeners
@@ -102,10 +104,12 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
         "_async_driver",
         "_capacity",
         "_default_ttl",
+        "_driver_prefix",
         "_entries",
         "_evictions",
         "_expirations",
         "_hits",
+        "_key_prefix",
         "_lock",
         "_misses",
         "_region_mode",
@@ -122,8 +126,10 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
         sync_driver: SyncValkeyDriver | SyncRedisDriver | None = None,
         async_driver: AsyncValkeyDriver | AsyncRedisDriver | None = None,
         region_mode: bool = False,
+        key_prefix: str = "vtb:aa:",
     ) -> None:
-        """Initialize unified cache backend with L1 capacity, TTL, and optional L2 Valkey/Redis drivers."""
+        """Initialize unified cache backend with L1 capacity, TTL, key prefix, and optional L2 Valkey/Redis drivers."""
+        normalized_prefix, driver_prefix = self._normalize_key_prefix(key_prefix)
         self._entries: collections.OrderedDict[Any, CacheEntry] = collections.OrderedDict()
         self._capacity = capacity
         self._default_ttl = default_ttl.total_seconds() if isinstance(default_ttl, timedelta) else default_ttl
@@ -131,6 +137,8 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
         self._sync_driver = sync_driver
         self._async_driver = async_driver
         self._region_mode = region_mode
+        self._key_prefix = normalized_prefix
+        self._driver_prefix = driver_prefix
         self._lock = threading.RLock()
         self._hits = 0
         self._misses = 0
@@ -147,10 +155,12 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
         name: str | None = None,
         capacity: int = 1024,
         default_ttl: float | timedelta | None = None,
+        *,
+        key_prefix: str = "vtb:aa:",
     ) -> Self:
         """Create a shared-memory backed cache backend instance."""
         resolved_name = name or f"vtb-cache-{id(cls)}-{int(time.time())}"
-        return cls(capacity=capacity, default_ttl=default_ttl, shm_name=resolved_name)
+        return cls(capacity=capacity, default_ttl=default_ttl, shm_name=resolved_name, key_prefix=key_prefix)
 
     @classmethod
     def from_valkey(
@@ -161,6 +171,7 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
         default_ttl: float | timedelta | None = 3600.0,
         shm_name: str | None = None,
         region_mode: bool = False,
+        key_prefix: str = "vtb:aa:",
     ) -> Self:
         """Create a cache backend backed by both SyncValkeyDriver and AsyncValkeyDriver."""
         cfg = ValkeyConfig(url=config_or_url) if isinstance(config_or_url, str) else config_or_url
@@ -171,6 +182,7 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
             sync_driver=SyncValkeyDriver(cfg),
             async_driver=AsyncValkeyDriver(cfg),
             region_mode=region_mode,
+            key_prefix=key_prefix,
         )
 
     @classmethod
@@ -182,6 +194,7 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
         default_ttl: float | timedelta | None = 3600.0,
         shm_name: str | None = None,
         region_mode: bool = False,
+        key_prefix: str = "vtb:aa:",
     ) -> Self:
         """Create a cache backend backed by both SyncRedisDriver and AsyncRedisDriver."""
         cfg = RedisConfig(url=config_or_url) if isinstance(config_or_url, str) else config_or_url
@@ -192,6 +205,7 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
             sync_driver=SyncRedisDriver(cfg),
             async_driver=AsyncRedisDriver(cfg),
             region_mode=region_mode,
+            key_prefix=key_prefix,
         )
 
     @classmethod
@@ -203,6 +217,7 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
         default_ttl: float | timedelta | None = 3600.0,
         shm_name: str | None = None,
         region_mode: bool = False,
+        key_prefix: str = "vtb:aa:",
     ) -> Self:
         """Create a cache backend from a URI (`valkey://`, `redis://`, `shm://`, or `memory://`)."""
         if not url or url.startswith("memory://"):
@@ -211,6 +226,7 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
                 default_ttl=default_ttl,
                 shm_name=shm_name,
                 region_mode=region_mode,
+                key_prefix=key_prefix,
             )
         if url.startswith("shm://"):
             segment = url.removeprefix("shm://").strip("/") or shm_name or "vtb-aa-cache"
@@ -219,6 +235,7 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
                 default_ttl=default_ttl,
                 shm_name=segment,
                 region_mode=region_mode,
+                key_prefix=key_prefix,
             )
         if url.startswith(("valkey://", "valkeys://")):
             return cls.from_valkey(
@@ -227,6 +244,7 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
                 default_ttl=default_ttl,
                 shm_name=shm_name,
                 region_mode=region_mode,
+                key_prefix=key_prefix,
             )
         if url.startswith(("redis://", "rediss://")):
             return cls.from_redis(
@@ -235,12 +253,14 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
                 default_ttl=default_ttl,
                 shm_name=shm_name,
                 region_mode=region_mode,
+                key_prefix=key_prefix,
             )
         return cls(
             capacity=capacity,
             default_ttl=default_ttl,
             shm_name=shm_name,
             region_mode=region_mode,
+            key_prefix=key_prefix,
         )
 
     @property
@@ -257,6 +277,11 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
     def shm_name(self) -> str | None:
         """Shared-memory segment name when configured."""
         return self._shm_name
+
+    @property
+    def key_prefix(self) -> str:
+        """Namespace prefix applied to keys written to the L2 Valkey/Redis driver."""
+        return self._key_prefix
 
     @property
     def sync_driver(self) -> SyncValkeyDriver | SyncRedisDriver | None:
@@ -297,6 +322,10 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
             self._capacity = int(args["capacity"])
         if "shm_name" in args and args["shm_name"] is not None:
             self._shm_name = str(args["shm_name"])
+        if "key_prefix" in args and args["key_prefix"] is not None:
+            normalized_prefix, driver_prefix = self._normalize_key_prefix(str(args["key_prefix"]))
+            self._key_prefix = normalized_prefix
+            self._driver_prefix = driver_prefix
         url = args.get("url")
         if isinstance(url, str):
             if url.startswith(("valkey://", "valkeys://")) and self._sync_driver is None:
@@ -396,7 +425,7 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
                     return entry.value
 
         if self._sync_driver is not None and isinstance(key, str):
-            raw = self._sync_driver.get(key)
+            raw = self._sync_driver.get(self._driver_key(key))
             if raw is not None:
                 decoded = self._decode_driver_payload(raw)
                 with self._lock:
@@ -441,8 +470,8 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
             self._entries.move_to_end(key)
             self._evict_if_needed()
         if self._sync_driver is not None and isinstance(key, str):
-            ex_seconds = self._resolve_driver_ex(ttl)
-            self._sync_driver.set(key, self._encode_driver_payload(value), ex=ex_seconds)
+            px_ms = self._resolve_driver_px(ttl)
+            self._sync_driver.set(self._driver_key(key), self._encode_driver_payload(value), px=px_ms)
 
     def delete(self, key: Any) -> bool:
         """Remove key from cache. Return True if key was present, False otherwise."""
@@ -450,7 +479,7 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
             entry = self._entries.pop(key, None)
             removed = entry is not None
         if self._sync_driver is not None and isinstance(key, str):
-            deleted_count = self._sync_driver.delete(key)
+            deleted_count = self._sync_driver.delete(self._driver_key(key))
             removed = removed or (deleted_count > 0)
         return removed
 
@@ -488,7 +517,7 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
                 else:
                     return True
         if self._sync_driver is not None and isinstance(key, str):
-            return self._sync_driver.get(key) is not None
+            return self._sync_driver.get(self._driver_key(key)) is not None
         return False
 
     def expires_in(self, key: Any) -> float | None:
@@ -503,7 +532,7 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
                     return None
                 return max(0.0, entry.expires_at - now)
         if self._sync_driver is not None and isinstance(key, str):
-            pttl_ms = self._sync_driver.pttl(key)
+            pttl_ms = self._sync_driver.pttl(self._driver_key(key))
             if pttl_ms <= 0:
                 return None
             return pttl_ms / 1000.0
@@ -522,11 +551,18 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
             return entry.value
 
     def clear(self) -> None:
-        """Remove all entries from L1 and optional L2 driver."""
+        """Remove all entries under this backend's key_prefix from L1 and optional L2 driver."""
         with self._lock:
             self._entries.clear()
         if self._sync_driver is not None:
-            self._sync_driver.flushdb()
+            pattern = f"{self._driver_prefix}*"
+            cursor = 0
+            while True:
+                cursor, keys = self._sync_driver.scan(cursor, match=pattern, count=500)
+                if keys:
+                    self._sync_driver.unlink(*keys)
+                if cursor == 0:
+                    break
 
     async def get_async(
         self,
@@ -551,7 +587,7 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
                     return entry.value
 
         if self._async_driver is not None and isinstance(key, str):
-            raw = await self._async_driver.get(key)
+            raw = await self._async_driver.get(self._driver_key(key))
             if raw is not None:
                 decoded = self._decode_driver_payload(raw)
                 with self._lock:
@@ -597,8 +633,8 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
             self._entries.move_to_end(key)
             self._evict_if_needed()
         if self._async_driver is not None and isinstance(key, str):
-            ex_seconds = self._resolve_driver_ex(ttl)
-            await self._async_driver.set(key, self._encode_driver_payload(value), ex=ex_seconds)
+            px_ms = self._resolve_driver_px(ttl)
+            await self._async_driver.set(self._driver_key(key), self._encode_driver_payload(value), px=px_ms)
 
     async def delete_async(self, key: Any) -> bool:
         """Asynchronously remove key from cache."""
@@ -606,7 +642,7 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
             entry = self._entries.pop(key, None)
             removed = entry is not None
         if self._async_driver is not None and isinstance(key, str):
-            deleted_count = await self._async_driver.delete(key)
+            deleted_count = await self._async_driver.delete(self._driver_key(key))
             removed = removed or (deleted_count > 0)
         return removed
 
@@ -651,7 +687,7 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
                 else:
                     return True
         if self._async_driver is not None and isinstance(key, str):
-            return (await self._async_driver.get(key)) is not None
+            return (await self._async_driver.get(self._driver_key(key))) is not None
         return False
 
     async def expires_in_async(self, key: Any) -> float | None:
@@ -666,18 +702,44 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
                     return None
                 return max(0.0, entry.expires_at - now)
         if self._async_driver is not None and isinstance(key, str):
-            pttl_ms = await self._async_driver.pttl(key)
+            pttl_ms = await self._async_driver.pttl(self._driver_key(key))
             if pttl_ms <= 0:
                 return None
             return pttl_ms / 1000.0
         return None
 
     async def clear_async(self) -> None:
-        """Asynchronously remove all entries."""
+        """Asynchronously remove all entries under this backend's key_prefix from L1 and optional L2 driver."""
         with self._lock:
             self._entries.clear()
         if self._async_driver is not None:
-            await self._async_driver.flushdb()
+            pattern = f"{self._driver_prefix}*"
+            cursor = 0
+            while True:
+                cursor, keys = await self._async_driver.scan(cursor, match=pattern, count=500)
+                if keys:
+                    await self._async_driver.unlink(*keys)
+                if cursor == 0:
+                    break
+
+    def _driver_key(self, key: str) -> str:
+        """Return the prefix-qualified key sent to the L2 Valkey/Redis driver."""
+        return key if key.startswith(self._driver_prefix) else f"{self._driver_prefix}{key}"
+
+    @staticmethod
+    def _normalize_key_prefix(key_prefix: str) -> tuple[str, str]:
+        """Validate key_prefix and return (normalized_prefix, trailing_colon_driver_prefix)."""
+        stripped = key_prefix.strip(":")
+        if not stripped:
+            msg = f"Invalid key_prefix: {key_prefix!r}"
+            raise ValueError(msg)
+        for segment in stripped.split(":"):
+            if not segment:
+                msg = f"Invalid key_prefix: {key_prefix!r}"
+                raise ValueError(msg)
+            validate_identifier(segment, "key_prefix", allow_hyphens=True)
+        driver_prefix = key_prefix if key_prefix.endswith(":") else f"{key_prefix}:"
+        return key_prefix, driver_prefix
 
     def _resolve_expires_at(self, ttl: float | int | timedelta | None) -> float | None:
         """Compute monotonic expiration timestamp from provided or default TTL."""
@@ -690,8 +752,8 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
             return None
         return time.monotonic() + effective_ttl
 
-    def _resolve_driver_ex(self, ttl: float | int | timedelta | None) -> int | None:
-        """Resolve integer TTL in seconds for Valkey/Redis SET EX."""
+    def _resolve_driver_px(self, ttl: float | int | timedelta | None) -> int | None:
+        """Resolve integer TTL in milliseconds for Valkey/Redis SET PX."""
         effective_ttl: float | None = None
         if ttl is not None:
             effective_ttl = ttl.total_seconds() if isinstance(ttl, timedelta) else float(ttl)
@@ -699,7 +761,7 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
             effective_ttl = self._default_ttl
         if effective_ttl is None or effective_ttl <= 0:
             return None
-        return max(1, int(effective_ttl))
+        return max(1, math.ceil(effective_ttl * 1000))
 
     def _evict_if_needed(self) -> None:
         """Evict oldest entries when capacity is exceeded."""
@@ -714,6 +776,8 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
         with self._lock:
             for key in keys:
                 self._entries.pop(key, None)
+                if isinstance(key, str) and key.startswith(self._driver_prefix):
+                    self._entries.pop(key.removeprefix(self._driver_prefix), None)
 
     @staticmethod
     def _encode_driver_payload(value: Any) -> bytes:
@@ -1139,6 +1203,7 @@ def create_cache_config(
             default_ttl=float(expiration_time) if expiration_time > 0 else None,
             shm_name=shm_name,
             region_mode=True,
+            key_prefix=key_prefix,
         )
     )
     resolved_backend._region_mode = True
@@ -1153,6 +1218,7 @@ def create_cache_config(
             "url": url,
             "capacity": capacity,
             "shm_name": shm_name,
+            "key_prefix": key_prefix,
         },
         key_prefix=key_prefix,
         enabled=True,
