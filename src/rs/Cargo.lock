@@ -5600,6 +5600,9 @@ name = "vertebra-py"
 version = "0.3.0"
 dependencies = [
  "bytes",
+ "google-cloud-gax",
+ "google-cloud-rpc",
+ "google-cloud-wkt",
  "jsonwebtoken",
  "libc",
  "pyo3",

@@ -15,6 +15,7 @@ from vertebra._vertebra import (
     BigQueryClient as _RustBigQueryClient,
 )
 from vertebra._vertebra import (
+    BigQueryError,
     hydrate_rows_vectorcall,
 )
 from vertebra.db._arrow import ArrowCursor, write_arrow_shm
@@ -33,6 +34,7 @@ __all__ = ("BigQueryCore",)
 
 _ON_DEMAND_TIB_PRICE_USD: Final[float] = 6.25
 _BYTES_PER_TIB: Final[float] = float(1 << 40)
+_STORAGE_API_FALLBACK_CODES: Final[frozenset[int]] = frozenset({7, 9, 12, 14})
 
 
 class BigQueryCore:
@@ -253,28 +255,12 @@ class BigQueryCore:
 
     @staticmethod
     def is_storage_api_fallback_error(exc: BaseException) -> bool:
-        """Return whether a Storage Read/Write gRPC error indicates the Storage API is unavailable or disabled."""
-        msg = str(exc).lower()
-        return any(
-            token in msg
-            for token in (
-                "bigquerystorage.googleapis.com",
-                "service_disabled",
-                "has not been used in project",
-                "it is disabled",
-                "permission_denied",
-                "access_token_scope_insufficient",
-                "unimplemented",
-                "unavailable",
-                "failed_precondition",
-                "connection refused",
-                "connect error",
-                "status 403",
-                "status 404",
-                "status 501",
-                "status 503",
-            )
-        )
+        """Return whether a Storage Read/Write gRPC error indicates the Storage API is unavailable or disabled.
+
+        Matches canonical gRPC status codes on `BigQueryError`: `7` (`PERMISSION_DENIED`),
+        `9` (`FAILED_PRECONDITION`), `12` (`UNIMPLEMENTED`), and `14` (`UNAVAILABLE`).
+        """
+        return isinstance(exc, BigQueryError) and getattr(exc, "code", None) in _STORAGE_API_FALLBACK_CODES
 
     @staticmethod
     def build_table_or_query_sql(

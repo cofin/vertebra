@@ -2,7 +2,7 @@
 type: Task
 id: gcp-driver-resilience:t04
 title: Typed Google Cloud exception hierarchy across bindings and drivers
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: [gcp-driver-resilience:t01, gcp-driver-resilience:t02, gcp-driver-resilience:t03, gcp-driver-resilience:t05]
@@ -25,17 +25,17 @@ tests:
   - src/py/tests/unit/db/test_bigquery.py
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 1
-claimed_by: executor
-claimed_at: 2026-11-03T20:41:00Z
+state_revision: 2
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-03T20:58:25Z
+last_verified_commit: 5b74b01
+verification_evidence: "make lint-all && make rs-test && make py-test"
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T16:10:00Z
+updated_at: 2026-11-03T20:58:25Z
 commit: null
 tags: [rust, pyo3, python, exceptions]
 ---
@@ -199,7 +199,11 @@ Every Spanner, BigQuery, and `GcpTokenCache` binding (sync and async) raises one
 
 ## Acceptance Criteria
 
-- [ ] R8: sync and async bindings raise the same typed exceptions rooted at `VertebraError` with the documented attributes.
-- [ ] R9: Python fallbacks and retries use codes and classes; no substring matching remains.
+- [x] R8: sync and async bindings raise the same typed exceptions rooted at `VertebraError` with the documented attributes.
+- [x] R9: Python fallbacks and retries use codes and classes; no substring matching remains.
 
 ## Notes & Discoveries
+
+- Added `vertebra_py::errors` registering `GoogleCloudError(VertebraError)`, `GoogleCloudAuthError`, `SpannerError`, `SpannerAbortedError`, `BigQueryError`, and `BigQueryRowError` on `vertebra._vertebra` with canonical gRPC status codes (`0`..=`16`), `code_name`, `message`, `http_status`, `retry_delay_ms`, `reason`, and `row_errors`.
+- Updated `spawn_rust_db_task` (`EMap: FnOnce(Python<'_>, E) -> PyErr + Send + 'static`) and all sync/async `SpannerClient`, `BigQueryClient`, and `GcpTokenCache` bindings to raise typed exceptions.
+- Replaced substring checks in `SpannerCore.is_partitioned_query_fallback_error`, `BigQueryCore.is_storage_api_fallback_error`, and `SyncSpannerDriver` / `AsyncSpannerDriver` `run_in_transaction` with canonical code and `SpannerAbortedError` checks.

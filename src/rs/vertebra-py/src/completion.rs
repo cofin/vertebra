@@ -235,7 +235,7 @@ where
     T: Send + 'static,
     E: Send + 'static,
     M: FnOnce(Python<'_>, T) -> PyResult<Py<PyAny>> + Send + 'static,
-    EMap: FnOnce(E) -> PyErr + Send + 'static,
+    EMap: FnOnce(Python<'_>, E) -> PyErr + Send + 'static,
 {
     let asyncio = py.import("asyncio")?;
     let loop_obj = asyncio.call_method0("get_running_loop")?;
@@ -257,7 +257,7 @@ where
     db_runtime_handle().spawn(async move {
         let produce: DbOutcomeProducer = match worker.await {
             Ok(Ok(value)) => Box::new(move |py| map_ok(py, value)),
-            Ok(Err(err)) => Box::new(move |_| Err(map_err(err))),
+            Ok(Err(err)) => Box::new(move |py| Err(map_err(py, err))),
             Err(join) if join.is_panic() => {
                 let message = panic_message(join.into_panic());
                 Box::new(move |_| Err(TaskPanicError::new_err(message)))
@@ -335,7 +335,7 @@ mod tests {
                         Ok::<i64, String>(1)
                     },
                     |py, v| Ok(v.into_pyobject(py)?.into_any().unbind()),
-                    pyo3::exceptions::PyRuntimeError::new_err,
+                    |_, e| pyo3::exceptions::PyRuntimeError::new_err(e),
                 )
             })
             .expect("closure");
@@ -371,7 +371,7 @@ mod tests {
                         }
                         Ok(v.into_pyobject(py)?.into_any().unbind())
                     },
-                    pyo3::exceptions::PyRuntimeError::new_err,
+                    |_, e| pyo3::exceptions::PyRuntimeError::new_err(e),
                 )
             })
             .expect("closure");
@@ -415,7 +415,7 @@ mod tests {
                             Ok::<i64, String>(1)
                         },
                         |py, v| Ok(v.into_pyobject(py)?.into_any().unbind()),
-                        pyo3::exceptions::PyRuntimeError::new_err,
+                        |_, e| pyo3::exceptions::PyRuntimeError::new_err(e),
                     )
                 })
                 .expect("closure");

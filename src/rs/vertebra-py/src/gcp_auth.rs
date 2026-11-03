@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use vertebra_core::gcp_auth::{
     GcpTokenCache as NativeGcpTokenCache, GcpTokenSnapshot as NativeGcpTokenSnapshot,
@@ -11,6 +11,7 @@ use vertebra_core::gcp_auth::{
 };
 
 use crate::completion::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task};
+use crate::errors::auth_error_to_py;
 
 /// Immutable snapshot of a cached Google Cloud OAuth2 bearer token.
 #[pyclass(name = "GcpTokenSnapshot", frozen, immutable_type, from_py_object)]
@@ -140,7 +141,7 @@ impl PyGcpTokenCache {
             .detach(|| {
                 block_on_db(async move { cache.get_or_refresh_with_force(force_refresh).await })
             })
-            .map_err(PyRuntimeError::new_err)?;
+            .map_err(|e| auth_error_to_py(py, e))?;
         Ok(PyGcpTokenSnapshot::from(snap.as_ref()))
     }
 
@@ -155,7 +156,7 @@ impl PyGcpTokenCache {
             py,
             async move { cache.get_or_refresh_with_force(force_refresh).await },
             |py, snap| Ok(Py::new(py, PyGcpTokenSnapshot::from(snap.as_ref()))?.into_any()),
-            PyRuntimeError::new_err,
+            auth_error_to_py,
         )
     }
 }

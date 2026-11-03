@@ -2,7 +2,7 @@
 type: Task
 id: gcp-driver-resilience:t06
 title: Document typed errors, completion safety, and auth behavior
-state: pending
+state: in_progress
 priority: P2
 verification_strategy: documentation_validation
 depends_on: [gcp-driver-resilience:t04]
@@ -14,9 +14,9 @@ files:
 tests: []
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: executor
+claimed_at: 2026-11-03T20:58:25Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
