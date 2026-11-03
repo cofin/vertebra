@@ -27,7 +27,7 @@ last_verified_commit: 3b819f4
 verification_evidence: "RED: 5 failed in 0.31s (nested-params, missing-name, batch-body, unwrapping, retry). GREEN: 44 passed in 0.96s across src/py/tests/unit/agent; ruff check/format passed; mypy passed (2 source files)."
 created_at: 2026-11-03T15:30:00Z
 updated_at: 2026-11-03T16:44:27Z
-commit: null
+commit: 97dc3df
 tags: [bugfix, security, mcp, jsonrpc]
 ---
 

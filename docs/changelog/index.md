@@ -39,6 +39,7 @@ Release introducing shared-memory vector embeddings, zero-copy PEP 3118 vector v
 - `DatabaseRegistry.parse_url` accepts `spangres://` URLs, and `SpannerChangeStreamSource.poll_partition_sync` / `poll_partition_async` bind positional `$1..$4` parameters in Spangres mode.
 - `MCPService` enforces `requires_confirmation` on `tools/call` through `ConfirmationGate` (`_meta["vertebra/confirmationToken"]`, JSON-RPC error `-32003`), binding approval to the tool, caller, and arguments; `ConfirmationGate.approve` / `reject` no longer record unknown or other-owner tokens; `AgentPlugin` shares the runtime gate with its MCP service.
 - `MCPHttpHandler.handle_request` rejects an `Mcp-Name` header when the body name is missing and rejects MCP routing headers on JSON-RPC batch bodies; `JSONRPCRouter` no longer unwraps nested `params` objects or retries handlers that raise `TypeError`.
+- The governed GCP database MCP tools (`register_gcp_database_tools`) validate `bigquery_object_table_inspect` table names, reject SQL with more than one statement, and require confirmation for `EXECUTE`, `CALL`, `GRANT`, `REVOKE`, `EXPORT DATA`, and `LOAD DATA` (`is_mutating_sql`).
 
 ## 0.2.0
 

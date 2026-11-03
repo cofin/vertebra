@@ -2,7 +2,7 @@
 type: Task
 id: critical-correctness-fixes:t04
 title: DB tool identifier validation and statement classification
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on: []
@@ -13,17 +13,17 @@ tests:
   - src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: executor
+claimed_at: 2026-11-03T16:45:30Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-03T16:47:08Z
+last_verified_commit: 97dc3df
+verification_evidence: "RED: 15 failed, 7 passed in 1.56s. GREEN: 27 passed in 1.19s across test_gcp_adapters_and_sqlalchemy.py; ruff check/format passed; mypy passed (1 source file)."
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T16:00:00Z
+updated_at: 2026-11-03T16:47:08Z
 commit: null
 tags: [bugfix, security, sql, mcp-tools]
 ---
@@ -269,10 +269,10 @@ In `src/py/vertebra/db/mcp_tools.py`:
 
 ## Acceptance Criteria
 
-- [ ] R7: Invalid `table_name` values raise `ValueError` before any SQL runs; hyphenated project-qualified names work.
-- [ ] R7: Non-trailing semicolons raise `PermissionDeniedError` in `is_mutating_sql` and `spanner_query`.
-- [ ] R7: `EXECUTE`, `CALL`, `GRANT`, `REVOKE`, `EXPORT`, `LOAD` are mutating; Spanner `GRANT`/`REVOKE` go through `update_ddl` after confirmation.
-- [ ] Changelog updated; targeted lint/type checks pass; one signed commit.
+- [x] R7: Invalid `table_name` values raise `ValueError` before any SQL runs; hyphenated project-qualified names work.
+- [x] R7: Non-trailing semicolons raise `PermissionDeniedError` in `is_mutating_sql` and `spanner_query`.
+- [x] R7: `EXECUTE`, `CALL`, `GRANT`, `REVOKE`, `EXPORT`, `LOAD` are mutating; Spanner `GRANT`/`REVOKE` go through `update_ddl` after confirmation.
+- [x] Changelog updated; targeted lint/type checks pass; one signed commit.
 
 ## Notes & Discoveries
 

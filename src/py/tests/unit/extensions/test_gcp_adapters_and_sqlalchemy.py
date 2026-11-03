@@ -513,6 +513,115 @@ async def test_governed_mcp_and_a2a_gcp_database_tools() -> None:
     assert schema_res["table_name"] == "orders"
 
 
+@pytest.fixture
+def gcp_database_tools() -> dict[str, Any]:
+    """Governed GCP database tools backed by the stub BigQuery driver and the fake Spanner client."""
+    bq_driver = _StubBigQueryDriver(
+        BigQueryConfig(
+            project_id="analytics-proj",
+            dataset_id="warehouse",
+            rest_endpoint="http://localhost:9050",
+            maximum_bytes_billed=1_000,
+        )
+    )
+    spanner_driver = SyncSpannerDriver(
+        SpannerConfig(
+            project_id="core-proj",
+            instance_id="prod-inst",
+            database_id="orders-db",
+            endpoint="http://localhost:9010",
+        ),
+        client=FakeSpannerClient(),
+    )
+    return dict(
+        register_gcp_database_tools(
+            bigquery_driver=bq_driver,
+            spanner_driver=spanner_driver,
+            maximum_bytes_billed=1_000,
+            confirmation_gate=ConfirmationGate(),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        ("SELECT * FROM users", False),
+        ("WITH cte AS (SELECT 1) SELECT * FROM cte", False),
+        ("SELECT 1;", False),
+        ("/* audit */ SELECT 1", False),
+        ("INSERT INTO users (id) VALUES (1)", True),
+        ("DROP TABLE users", True),
+        ("EXECUTE IMMEDIATE 'DELETE FROM users WHERE TRUE'", True),
+        ("CALL warehouse.cleanup()", True),
+        ("GRANT `roles/bigquery.dataViewer` ON TABLE warehouse.t TO 'user:a@example.com'", True),
+        ("REVOKE SELECT ON TABLE orders FROM ROLE analyst", True),
+        ("EXPORT DATA OPTIONS (uri = 'gs://bucket/*.csv', format = 'CSV') AS SELECT * FROM t", True),
+        ("LOAD DATA INTO warehouse.t FROM FILES (format = 'CSV', uris = ['gs://bucket/a.csv'])", True),
+    ],
+)
+def test_is_mutating_sql_classifies_statements(sql: str, expected: bool) -> None:
+    """is_mutating_sql flags DML, DDL, procedural, privilege, export, and load statements."""
+    assert is_mutating_sql(sql) is expected
+
+
+@pytest.mark.parametrize(
+    "sql",
+    ["SELECT 1; DELETE FROM orders", "SELECT 1; -- done", "SELECT 'a;b' AS v"],
+    ids=["second-statement", "trailing-comment", "semicolon-in-literal"],
+)
+def test_is_mutating_sql_rejects_non_trailing_semicolons(sql: str) -> None:
+    """Any semicolon before the trailing terminator is rejected, so no second statement can hide."""
+    with pytest.raises(PermissionDeniedError, match="Multi-statement SQL is not allowed"):
+        is_mutating_sql(sql)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "table_name",
+    ["warehouse.invoices_obj LIMIT 1; DROP TABLE x", "warehouse.`obj`", "1warehouse.obj"],
+)
+async def test_bigquery_object_table_inspect_rejects_invalid_table_name(
+    gcp_database_tools: dict[str, Any],
+    table_name: str,
+) -> None:
+    """bigquery_object_table_inspect rejects table names that are not plain qualified identifiers."""
+    with pytest.raises(ValueError, match="table_name"):
+        await gcp_database_tools["bigquery_object_table_inspect"].fn(table_name=table_name)
+
+
+@pytest.mark.anyio
+async def test_bigquery_object_table_inspect_accepts_project_qualified_name(
+    gcp_database_tools: dict[str, Any],
+) -> None:
+    """Hyphenated project IDs remain valid table name prefixes."""
+    result = await gcp_database_tools["bigquery_object_table_inspect"].fn(
+        table_name="analytics-proj.warehouse.invoices_obj"
+    )
+    assert result["row_count"] == 1
+
+
+@pytest.mark.anyio
+async def test_spanner_query_rejects_multiple_statements(gcp_database_tools: dict[str, Any]) -> None:
+    """spanner_query rejects a SELECT followed by a second statement."""
+    with pytest.raises(PermissionDeniedError, match="Multi-statement SQL is not allowed"):
+        await gcp_database_tools["spanner_query"].fn(sql="SELECT 1; DELETE FROM orders WHERE id = 1")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "sql",
+    ["GRANT SELECT ON TABLE orders TO ROLE analyst", "CALL cancel_query('12345')"],
+)
+async def test_spanner_query_requires_confirmation_for_privilege_and_procedure_calls(
+    gcp_database_tools: dict[str, Any],
+    sql: str,
+) -> None:
+    """GRANT and CALL statements are gated by the ConfirmationGate."""
+    with pytest.raises(PermissionDeniedError, match="ConfirmationGate"):
+        await gcp_database_tools["spanner_query"].fn(sql=sql)
+
+
 def test_sqlalchemy_vtb_dialects_types_and_alembic_batching() -> None:
     """Verify SQLAlchemy 2.1 +vtb dialects, Vector/BinaryJSON types, CreateVectorIndexOp, and SpannerAlembicImpl."""
     for scheme in (

@@ -13,6 +13,7 @@ from vertebra.db.bigquery import AsyncBigQueryDriver, BigQueryConfig, ObjectTabl
 from vertebra.db.spanner import AsyncSpannerDriver, SpannerConfig, StalenessBound, SyncSpannerDriver
 from vertebra.framework.security import PermissionDeniedError
 from vertebra.typing import FrozenBaseStruct
+from vertebra.utils.text import validate_identifier
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -33,9 +34,19 @@ _MUTATING_VERBS: frozenset[str] = frozenset(
         "ALTER",
         "DROP",
         "TRUNCATE",
+        "EXECUTE",
+        "CALL",
+        "GRANT",
+        "REVOKE",
+        "EXPORT",
+        "LOAD",
     }
 )
-_DDL_VERBS: frozenset[str] = frozenset({"CREATE", "ALTER", "DROP", "TRUNCATE"})
+_DDL_VERBS: frozenset[str] = frozenset({"CREATE", "ALTER", "DROP", "TRUNCATE", "GRANT", "REVOKE"})
+_MULTI_STATEMENT_MESSAGE: str = (
+    "Multi-statement SQL is not allowed; submit one statement per call and pass values containing ';' "
+    "as query parameters"
+)
 _LEADING_COMMENT_RE: re.Pattern[str] = re.compile(r"^\s*(?:--[^\n]*\n|/\*.*?\*/\s*)+", re.DOTALL)
 
 
@@ -49,8 +60,19 @@ def _extract_leading_verb(sql: str) -> str:
 
 
 def is_mutating_sql(sql: str) -> bool:
-    """Return True when `sql` begins with a mutating DML or DDL keyword."""
-    return _extract_leading_verb(sql) in _MUTATING_VERBS
+    """Return True when ``sql`` changes data, schema, or privileges, or runs procedural code.
+
+    ``sql`` must hold exactly one statement. Any semicolon before the trailing terminator is
+    rejected, including one inside a literal or comment, because GoogleSQL and Spangres quote
+    literals differently and a dialect-specific parse could hide a second statement.
+
+    Raises:
+        PermissionDeniedError: When ``sql`` contains a semicolon before its trailing terminator.
+    """
+    body = (sql or "").rstrip().rstrip(";").rstrip()
+    if ";" in body:
+        raise PermissionDeniedError(_MULTI_STATEMENT_MESSAGE)
+    return _extract_leading_verb(body) in _MUTATING_VERBS
 
 
 class GCPDatabaseToolPolicy(FrozenBaseStruct, frozen=True, gc=False):
@@ -194,7 +216,12 @@ def register_gcp_database_tools(
         object_uri_prefix: str | None = None,
         limit: int = 50,
     ) -> dict[str, Any]:
-        """Inspect a BigQuery Object Table over GCS and return object metadata rows and DDL."""
+        """Inspect a BigQuery Object Table over GCS and return object metadata rows and DDL.
+
+        Raises:
+            ValueError: When table_name is not a dotted identifier.
+        """
+        validate_identifier(table_name, "table_name", allow_hyphens=True)
         drv = _resolve_bq()
         bounded_limit = max(1, min(int(limit), 1000))
         uri_pattern = object_uri_prefix or f"gs://{table_name.replace('.', '/')}/*"
@@ -222,8 +249,8 @@ def register_gcp_database_tools(
     ) -> dict[str, Any]:
         """Execute a governed Cloud Spanner query using lock-free ReadOnly snapshots for SELECTs."""
         drv = _resolve_spanner()
-        verb = _extract_leading_verb(sql)
-        if verb in _MUTATING_VERBS:
+        if is_mutating_sql(sql):
+            verb = _extract_leading_verb(sql)
             _require_confirmation("spanner_query", sql, confirmation_token)
             if verb in _DDL_VERBS:
                 op_Meta = await _maybe_await(drv.update_ddl([sql]))
