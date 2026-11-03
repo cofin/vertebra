@@ -74,6 +74,7 @@ The native Spanner and BigQuery drivers delegate gRPC Data, Database Admin, Stor
 - **Custom CA Certificates (`ca_pem`)**:
   - `SpannerConfig.ca_pem` configures TLS trust for Spanner Omni or private HTTPS endpoints only; passing `ca_pem` with a `*.googleapis.com` or `http://` endpoint raises an error.
   - `BigQueryConfig.ca_pem` applies to the BigQuery REST v2 API only; Storage Read and Storage Write gRPC streams always use the system and bundled Mozilla trust roots.
+- **GoogleSQL Positional Placeholders**: In GoogleSQL mode (`dialect="googlesql"`), positional `$1..$N` placeholders outside single-, double-, triple-quoted, raw, or bytes literals, backtick identifiers, and `--`, `#`, or `/* */` comments are rewritten to `@p1..@pN`.
 
 ```python
 from vertebra.db.spanner import SpannerConfig, SyncSpannerDriver
@@ -86,6 +87,28 @@ emulator_config = SpannerConfig(
 )
 driver = SyncSpannerDriver(emulator_config)
 ```
+
+### Error Handling for Google Cloud Drivers
+
+Both synchronous and asynchronous Spanner, BigQuery, and `GcpTokenCache` methods raise a unified exception hierarchy rooted at `vertebra.typing.VertebraError` and exposed on `vertebra._vertebra`:
+
+- `GoogleCloudError(VertebraError)`: Base exception carrying `code` (`int`, canonical gRPC status `0..16`), `code_name` (`str`), `message` (`str`), `http_status` (`int | None`), `retry_delay_ms` (`int | None`), and `reason` (`str | None`).
+- `GoogleCloudAuthError(GoogleCloudError)`: Raised when credentials cannot be obtained or are rejected (`code == 16`, `UNAUTHENTICATED`).
+- `SpannerError(GoogleCloudError)` and `SpannerAbortedError(SpannerError)`: Raised by Cloud Spanner operations; `SpannerAbortedError` (`code == 10`, `ABORTED`) signals an aborted transaction and is the only exception retried by `run_in_transaction`.
+- `BigQueryError(GoogleCloudError)` and `BigQueryRowError(BigQueryError)`: Raised by BigQuery REST and Storage Read/Write operations; `BigQueryRowError` carries per-row errors in `row_errors` (`list[tuple[int, int, str]]`).
+
+```python
+from vertebra._vertebra import SpannerAbortedError, SpannerError
+
+try:
+    driver.execute("UPDATE singers SET active = TRUE WHERE singer_id = @id", {"id": 1})
+except SpannerAbortedError as exc:
+    retry_ms = exc.retry_delay_ms or 10
+except SpannerError as exc:
+    status_code = exc.code
+```
+
+Cancelling an awaited async driver call aborts its background Rust task at the next suspension point; RPCs already transmitted on the wire may still complete server-side. In debug builds, an unexpected Rust task panic surfaces on the awaiting coroutine as `vertebra._vertebra.TaskPanicError` rather than leaving the future pending.
 
 ## Topic Guides
 

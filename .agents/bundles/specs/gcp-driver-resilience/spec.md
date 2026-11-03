@@ -3,18 +3,18 @@ type: Spec
 flow_id: gcp-driver-resilience
 title: GCP Driver Resilience and Typed Errors
 description: Make the PyO3 completion bridge panic-safe and cancellable, raise one typed Google Cloud exception hierarchy (rooted at VertebraError) from sync and async bindings, fix GCP auth (async gcloud, proxy policy, explicit scopes), fix BigQuery REST error and URL handling, lex GoogleSQL correctly in the placeholder rewriter, and document the result.
-state: active
+state: completed
 parent_prd: integration-remediation
 research:
   - ../integration-remediation/research/google-cloud-rust_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 6
-current_task: gcp-driver-resilience:t06
-last_verified_checkpoint: 5b74b01
+state_revision: 7
+current_task: null
+last_verified_checkpoint: c64b9b8
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T20:58:25Z
+updated_at: 2026-11-03T21:03:33Z
 tags: [rust, gcp, pyo3, python, exceptions, auth, bugfix]
 ---
 
@@ -159,14 +159,14 @@ Rust: `vertebra_py::errors::{exception_types, spanner_error_to_py, bigquery_erro
 
 ### Phase 3: Documentation
 
-- [~] t06 — Document typed errors, completion safety, and auth behavior (tasks/t06-documentation.md)
+- [x] t06 — Document typed errors, completion safety, and auth behavior (tasks/t06-documentation.md)
 - **Phase 3 Recovery Checkpoint**: `make docs && make lint-all`
 
 ## 5. Continuity Snapshot
 
-- **Flow ID**: `gcp-driver-resilience` (`state: planned`, `plan_revision: 2`, `plan_commit: 24e2931`)
+- **Flow ID**: `gcp-driver-resilience` (`state: completed`, `plan_revision: 2`, `plan_commit: 24e2931`)
 - **Current Task**: `null`
-- **Last Verified Checkpoint**: `null`
+- **Last Verified Checkpoint**: `c64b9b8`
 - **Key Decisions**:
   - Exceptions are created with `PyErr::new_type` on top of `VertebraError` and registered on `vertebra._vertebra`.
   - Completion bridge uses a worker task, a completion task, an `AbortHandle`, and a future done-callback.

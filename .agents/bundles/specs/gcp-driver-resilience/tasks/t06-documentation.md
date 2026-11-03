@@ -2,7 +2,7 @@
 type: Task
 id: gcp-driver-resilience:t06
 title: Document typed errors, completion safety, and auth behavior
-state: in_progress
+state: completed
 priority: P2
 verification_strategy: documentation_validation
 depends_on: [gcp-driver-resilience:t04]
@@ -14,17 +14,17 @@ files:
 tests: []
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 1
-claimed_by: executor
-claimed_at: 2026-11-03T20:58:25Z
+state_revision: 2
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-03T21:03:33Z
+last_verified_commit: c64b9b8
+verification_evidence: "make docs && make lint-all && ! grep -rn \"from_gcs_options\" docs .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md --exclude-dir=changelog"
 created_at: 2026-11-03T16:10:00Z
-updated_at: 2026-11-03T16:10:00Z
+updated_at: 2026-11-03T21:03:33Z
 commit: null
 tags: [docs, exceptions, auth]
 ---
@@ -61,6 +61,10 @@ User and contributor docs describe the Google Cloud exception hierarchy, `TaskPa
 
 ## Acceptance Criteria
 
-- [ ] R11: usage docs, knowledge chapter, and changelog describe the changes; `make docs` passes.
+- [x] R11: usage docs, knowledge chapter, and changelog describe the changes; `make docs` passes.
 
 ## Notes & Discoveries
+
+- Added "Error Handling for Google Cloud Drivers" and GoogleSQL positional placeholder rules to `docs/usage/databases.md`.
+- Documented per-client OAuth scopes, proxy environment handling, and async `gcloud` CLI timeout/binary selection in `docs/usage/storage-auth-and-signing.md`.
+- Updated `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` and `docs/changelog/index.md` for 0.3.0.

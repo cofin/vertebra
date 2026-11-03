@@ -44,6 +44,8 @@ signing_store = ObjectStore.from_config(
 
 - **Proactive Refresh & Generation Invalidation**: Expired or `401`-rejected tokens trigger `invalidate_if_generation(observed_gen)` so concurrent tasks coalesce into a single refresh call.
 - **Keyless V4 Presigning**: Pass `service_account_email` to sign upload and download URLs via Google Cloud IAM's `signBlob` API without storing long-lived private keys in containers.
+- **Per-Client OAuth Scopes**: Each client requests its own default OAuth scopes when refreshing credentials or impersonating a service account (`https://www.googleapis.com/auth/spanner.data` and `spanner.admin` for Spanner, `https://www.googleapis.com/auth/bigquery` for BigQuery, `https://www.googleapis.com/auth/devstorage.full_control` for GCS, and `https://www.googleapis.com/auth/cloud-platform` for `GcpTokenCache`), overridable via the `scopes` auth option.
+- **Proxy & `gcloud` CLI Behavior**: Token exchange and IAM impersonation requests honor `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, and `NO_PROXY` environment variables, whereas GCE/GKE metadata-server requests (`169.254.169.254`) always connect directly without a proxy. When falling back to the `gcloud` CLI (`gcloud auth print-access-token`), Vertebra spawns an async subprocess using the binary path in `GCLOUD_BIN` (default `gcloud`) with a 30-second timeout.
 
 ## Presigned URLs (`SigningConfig`)
 

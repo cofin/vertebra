@@ -25,6 +25,8 @@ Release introducing shared-memory vector embeddings, zero-copy PEP 3118 vector v
 - `EmbeddingError` in `vertebra.embeddings` for providers that return no usable vector.
 - `BackendFactory` in `vertebra.embeddings` and `FastEmbedder.build_backend` for importable embedding backends.
 - `SpannerConfig.admin_endpoint` and `SpannerClient(admin_endpoint=...)` select the REST endpoint for DDL.
+- `GoogleCloudError`, `GoogleCloudAuthError`, `SpannerError`, `SpannerAbortedError`, `BigQueryError`, and `BigQueryRowError` in `vertebra._vertebra`, carrying the canonical gRPC status.
+- `TaskPanicError` for panics in background Rust tasks.
 
 ### Changed
 
@@ -37,6 +39,8 @@ Release introducing shared-memory vector embeddings, zero-copy PEP 3118 vector v
 - `vertebra-db` Spanner and BigQuery Storage clients run on the official `google-cloud-spanner` and `google-cloud-bigquery` crates; the hand-written gRPC transport is removed.
 - `SpannerClient.execute_partitioned_arrow` and `SpannerClient.execute_partitioned_arrow_async` are replaced by `SpannerClient.partitioned_query` and `SpannerClient.partitioned_query_async`, which return rows; `SyncSpannerDriver.fetch_arrow` and `AsyncSpannerDriver.fetch_arrow` build the `ArrowCursor`.
 - Spanner query results no longer include `transaction_id` or `read_timestamp_micros`.
+- `GcpTokenCache::from_options` takes the default OAuth scopes from the caller; `from_gcs_options` is removed.
+- Google Cloud token requests honor proxy environment variables.
 
 ### Fixed
 
@@ -52,6 +56,7 @@ Release introducing shared-memory vector embeddings, zero-copy PEP 3118 vector v
 - `EmbeddingBroker` runs the configured model in the free-threaded sidecar instead of a hash backend, requires `backend_fn` or `backend_factory`, and `FastEmbedder` no longer builds a discarded `TextEmbedding` at construction.
 - `EventLoopPool.stop` delivers task cancellation, runs `shutdown_asyncgens`, and closes loops only after their threads exit; `EventLoopPool` raises when a shard fails to start; the buffered sharded ASGI mount and `dispatch_batch(async_mode=False)` `async_native` paths read their timeout from `VERTEBRA_ASGI_BATCH_TIMEOUT` (default 30 s, `0`/`none` disables) instead of a fixed 10 s, return `504 Gateway Timeout`, and cancel timed-out request tasks.
 - Spanner commits without a commit timestamp, DDL operations that are still running, and BigQuery Storage Write appends with missing or mismatched responses now raise errors instead of reporting success; malformed Arrow input to `BigQueryClient.append_arrow` raises an error instead of panicking; Spanner and BigQuery Storage requests use the official protobuf field numbers.
+- Cancelled async driver calls stop their Rust task; panics no longer leave futures pending; `gcloud` token fetches no longer block the async runtime; BigQuery queries that report only warnings succeed; BigQuery result URLs percent-encode job id, location, and page token; positional placeholder rewriting preserves non-ASCII text and GoogleSQL literals; Spanner and BigQuery fallbacks use status codes instead of message text.
 
 ## 0.2.0
 

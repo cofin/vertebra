@@ -35,8 +35,8 @@ last_verified_at: 2026-11-03T20:58:25Z
 last_verified_commit: 5b74b01
 verification_evidence: "make lint-all && make rs-test && make py-test"
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T20:58:25Z
-commit: null
+updated_at: 2026-11-03T21:00:51Z
+commit: c64b9b8
 tags: [rust, pyo3, python, exceptions]
 ---
 
