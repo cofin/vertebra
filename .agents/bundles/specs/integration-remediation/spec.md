@@ -164,7 +164,7 @@ flowchart LR
 | 6 | `sqlalchemy-and-django-integration` | SQLAlchemy / AA / Django DB integration | Dialect split + real GCP dialect bases, shared DB-API module, AA dogpile cache backend, real Django backends including Spanner via `django_spanner` | dialect entry points, `create_cache_config`, Django `ENGINE` paths | 3 | draft |
 | 7 | `mcp-webmcp-core` | MCP 2026-07-28 core and WebMCP bridge | `ToolSpec`/`ToolRegistry`/`MCPCore`, ASGI/WSGI adapters, litestar-mcp delegation, TS bridge on `document.modelContext`, conformance | `ToolSpec`, `MCPCore`, `registerWebMCPTools` | 1, 3 | draft |
 | 8 | `runtime-structure-and-throughput` | Fastpath, Rust modules, helpers | Shared fastpath core + provider registry, table-driven loops, Rust module splits + shared proto/status/retry/auth, copy removal, Vertex HTTP/2 transport, utils fallback removal | `FastPathProvider`, `vertebra.utils.*` (names unchanged) | 2, 3, 9 | draft |
-| 9 | `gcp-driver-resilience` | GCP driver resilience and typed errors | Panic-safe/cancellable completion bridge, typed `GoogleCloudError` hierarchy with gRPC codes across sync/async bindings, async gcloud + proxy + explicit scopes, BigQuery REST fixes, GoogleSQL placeholder lexer | `_vertebra.pyi` exceptions, `TaskPanicError`, `GcpTokenCache::from_options` | 2 | planned |
+| 9 | `gcp-driver-resilience` | GCP driver resilience and typed errors | Panic-safe/cancellable completion bridge, typed `GoogleCloudError` hierarchy with gRPC codes across sync/async bindings, async gcloud + proxy + explicit scopes, BigQuery REST fixes, GoogleSQL placeholder lexer | `_vertebra.pyi` exceptions, `TaskPanicError`, `GcpTokenCache::from_options` | 2 | completed |
 
 ## 4. Global Constraints (Applicable to All Child Flows)
 
@@ -215,7 +215,7 @@ flowchart LR
 
 - [x] [b61726a] critical-correctness-fixes — Silent failure and security fixes (archived in `log.md`)
 - [x] [260ae8d] gcp-wire-protocol-correctness — Official Google Cloud Rust clients for Spanner and BigQuery Storage (archived in `log.md`)
-- [ ] gcp-driver-resilience — GCP driver resilience and typed errors (../gcp-driver-resilience/spec.md)
+- [x] [cf0b0e5] gcp-driver-resilience — GCP driver resilience and typed errors (archived in `log.md`)
 - [ ] db-engine-primitives — Engine primitives relocation and QueryPipeline removal (../db-engine-primitives/spec.md)
 - [ ] sqlspec-adapter-parity — Feature-complete sqlspec adapters (../sqlspec-adapter-parity/spec.md)
 - [ ] queues-tasks-and-channels — Working queues, tasks, channels, stores (../queues-tasks-and-channels/spec.md)
