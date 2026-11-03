@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from vertebra.embeddings._base import (
     Embedder,
+    EmbeddingError,
     EmbeddingTask,
     MultimodalPart,
     SimilarityMatch,
@@ -51,6 +52,7 @@ __all__ = (
     "Embedder",
     "EmbeddingBroker",
     "EmbeddingBrokerConfig",
+    "EmbeddingError",
     "EmbeddingTask",
     "FastEmbedder",
     "GeminiEmbedder",

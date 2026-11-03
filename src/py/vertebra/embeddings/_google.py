@@ -21,7 +21,7 @@ from vertebra._vertebra import (
     decode_pgvector_f32,
     encode_gemini_embed_grpc_frame,
 )
-from vertebra.embeddings._base import Embedder, MultimodalPart
+from vertebra.embeddings._base import Embedder, EmbeddingError, MultimodalPart
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json
 
@@ -470,7 +470,11 @@ class OracleEmbedder(Embedder):
         task: str = "document",
         titles: list[str | None] | None = None,
     ) -> VectorBatchView:
-        """Execute `DBMS_VECTOR.UTL_TO_EMBEDDING` and decode Oracle 26ai `0xDB` binary vectors."""
+        """Execute `DBMS_VECTOR.UTL_TO_EMBEDDING` and decode Oracle 26ai `0xDB` binary vectors.
+
+        Raises:
+            EmbeddingError: When Oracle returns no row for a text.
+        """
         await self._ensure_oracle_credential_fresh()
         params_dict: dict[str, Any] = {
             "provider": self._provider,
@@ -484,8 +488,11 @@ class OracleEmbedder(Embedder):
 
         sql = "SELECT DBMS_VECTOR.UTL_TO_EMBEDDING(:text, JSON(:params)) FROM DUAL"
         decoded_rows: list[list[float]] = []
-        for item_text in texts:
+        for idx, item_text in enumerate(texts):
             rows = await self._driver.fetch_all(sql, {"text": item_text, "params": params_json})
+            if not rows:
+                msg = f"Oracle DBMS_VECTOR.UTL_TO_EMBEDDING returned no embedding row for text index {idx}"
+                raise EmbeddingError(msg)
             cell = rows[0][0] if isinstance(rows[0], (tuple, list)) else rows[0]
             if isinstance(cell, (bytes, bytearray, memoryview)):
                 vec = decode_oracle_vector_f32(bytes(cell))

@@ -9,11 +9,11 @@ research:
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 8
-current_task: t05
+state_revision: 10
+current_task: null
 last_verified_checkpoint: ddc4a3d
 created_at: 2026-11-03T03:30:00Z
-updated_at: 2026-11-03T16:50:15Z
+updated_at: 2026-11-03T17:01:41Z
 tags: [bugfix, security, regression-tdd]
 ---
 
@@ -294,8 +294,8 @@ Error modes:
 
 ### Phase 2: Stores, Embeddings, and Server Shutdown
 
-- [~] t05 — Store prefix-scoped delete, millisecond TTLs, `expires_in` contract, and Litestar swap defaults (tasks/t05-store-data-safety.md)
-- [ ] t06 — Remote embedder error propagation and identifier validation (tasks/t06-remote-embedder-errors.md)
+- [x] [78ffdf6] t05 — Store prefix-scoped delete, millisecond TTLs, `expires_in` contract, and Litestar swap defaults (tasks/t05-store-data-safety.md)
+- [x] t06 — Remote embedder error propagation and identifier validation (tasks/t06-remote-embedder-errors.md)
 - [ ] t07 — Local embedders run the configured model on free-threaded builds (tasks/t07-local-embedder-sidecar-backend.md)
 - [ ] t08 — `EventLoopPool.stop` drain and configurable ASGI mount timeout (tasks/t08-loop-shutdown-and-mount-timeout.md)
 - **Phase 2 Recovery Checkpoint**:

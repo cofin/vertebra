@@ -20,7 +20,7 @@ from vertebra.db import (
     ObjectTableConfig,
     SyncBigQueryDriver,
 )
-from vertebra.embeddings import BigQueryEmbedder
+from vertebra.embeddings import BigQueryEmbedder, EmbeddingError
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
 from vertebra.storage import ObjectStore, SigningConfig
 from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
@@ -444,3 +444,53 @@ async def test_bigquery_embedder_and_datafusion_registration() -> None:
         assert rows == [{"id": 1, "name": "alpha"}]
     finally:
         server.close()
+
+
+class _StubBigQuerySelectDriver:
+    """BigQuery driver stand-in returning fixed rows from select."""
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = list(rows)
+
+    def select(self, sql: str, parameters: Any = None) -> list[dict[str, Any]]:
+        return list(self.rows)
+
+
+def test_bigquery_embedder_builders_reject_invalid_identifiers() -> None:
+    """BigQuery SQL builders validate model, table, column, and distance values."""
+    with pytest.raises(ValueError, match="model_endpoint"):
+        BigQueryEmbedder(object(), model="analytics.model`; DROP TABLE x; --").build_generate_embedding_sql()
+    embedder = BigQueryEmbedder(object(), model="analytics-proj.analytics.text_embedding_model")
+    assert "MODEL `analytics-proj.analytics.text_embedding_model`" in embedder.build_generate_embedding_sql()
+    with pytest.raises(ValueError, match="base_table"):
+        embedder.build_vector_search_sql("analytics.docs) --")
+    with pytest.raises(ValueError, match="embedding_column"):
+        embedder.build_vector_search_sql("analytics.docs", embedding_column="emb' OR '1")
+    with pytest.raises(ValueError, match="distance_type"):
+        embedder.build_vector_search_sql("analytics.docs", distance_type="MANHATTAN")
+
+
+@pytest.mark.parametrize("use_ai_function", [False, True], ids=["ml-generate", "ai-generate"])
+def test_bigquery_embedder_generate_sql_orders_rows_by_input_index(use_ai_function: bool) -> None:
+    """The generated SQL carries the input offset through the model and orders the output by it."""
+    sql = BigQueryEmbedder(
+        object(), model="analytics.text_embedding_model", use_ai_function=use_ai_function
+    ).build_generate_embedding_sql()
+    assert sql.startswith("SELECT ") and ", idx FROM " in sql
+    assert "(SELECT content, idx FROM UNNEST(@texts) AS content WITH OFFSET AS idx)" in sql
+    assert sql.endswith(") ORDER BY idx")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "rows",
+    [[{"embedding": [0.25, 0.5]}], [{"embedding": [0.25, 0.5]}, {"embedding": []}]],
+    ids=["missing-row", "empty-vector"],
+)
+async def test_bigquery_embedder_rejects_incomplete_results(rows: list[dict[str, Any]]) -> None:
+    """A short result or an empty vector raises EmbeddingError."""
+    embedder = BigQueryEmbedder(
+        _StubBigQuerySelectDriver(rows), model="analytics.text_embedding_model", dimensions=2, normalize=False
+    )
+    with pytest.raises(EmbeddingError):
+        await embedder.embed_many(["alpha", "beta"])

@@ -82,6 +82,8 @@ alloy_emb = AlloyDbEmbedder(model="gemini-embedding-001")
 oracle_emb = OracleEmbedder(model="gemini-embedding-001")
 ```
 
+In-database embedders raise `EmbeddingError` (a `RuntimeError`) when the database returns no vector for a text, and propagate driver errors unchanged. Model, table, and column names passed to the SQL builders must be plain dotted identifiers.
+
 ## Local `1x` RAM Broker & `EmbeddingGemma`
 
 When running multiple HTTP or background worker processes, `EmbeddingBroker` loads model weights **once (`1x` RAM)**, forms token-budgeted length-sorted batches (`max_batch_tokens=8192`), and writes outputs into `VectorSlab`. On free-threaded Python `3.14t`/`3.15t`, `EmbeddingBroker` automatically isolates `onnxruntime` / `ctranslate2` in a dedicated child process so HTTP workers keep `sys._is_gil_enabled() == False`:

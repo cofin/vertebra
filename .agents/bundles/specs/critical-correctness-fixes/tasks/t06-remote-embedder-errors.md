@@ -2,7 +2,7 @@
 type: Task
 id: critical-correctness-fixes:t06
 title: Remote embedder error propagation and identifier validation
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on: []
@@ -21,17 +21,17 @@ tests:
   - src/py/tests/unit/embeddings/test_google_embedders.py
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-03T17:01:41Z
+last_verified_commit: 78ffdf6
+verification_evidence: "RED: 3 collection ImportErrors (then 12 failed, 18 passed); GREEN: 41 passed in 3.18s; ruff check/format and mypy passed on 9 source files"
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T16:00:00Z
+updated_at: 2026-11-03T17:01:41Z
 commit: null
 tags: [bugfix, embeddings, spanner, oracle, bigquery]
 ---
@@ -415,13 +415,14 @@ In-database embedders return real vectors or raise: `SpannerEmbedder` propagates
 
 ## Acceptance Criteria
 
-- [ ] R10: `SpannerEmbedder` propagates driver errors, raises `EmbeddingError` on count mismatch and vector-less rows, and has no `_deterministic_vector`.
-- [ ] R10: `OracleEmbedder` raises `EmbeddingError` on an empty result.
-- [ ] R10: `BigQueryEmbedder` raises `EmbeddingError` on a row-count mismatch or an empty vector.
-- [ ] R10: Both generate builders select the vector first, pass `idx` through the model function as the second column, and end with `ORDER BY idx`.
-- [ ] R10: BigQuery and Spanner builders raise `ValueError` for invalid model, table, column, and distance values; valid hyphenated BigQuery names still build.
-- [ ] `EmbeddingError` exported from `vertebra.embeddings`; docs, knowledge, and changelog updated; targeted checks pass; one signed commit.
+- [x] R10: `SpannerEmbedder` propagates driver errors, raises `EmbeddingError` on count mismatch and vector-less rows, and has no `_deterministic_vector`.
+- [x] R10: `OracleEmbedder` raises `EmbeddingError` on an empty result.
+- [x] R10: `BigQueryEmbedder` raises `EmbeddingError` on a row-count mismatch or an empty vector.
+- [x] R10: Both generate builders select the vector first, pass `idx` through the model function as the second column, and end with `ORDER BY idx`.
+- [x] R10: BigQuery and Spanner builders raise `ValueError` for invalid model, table, column, and distance values; valid hyphenated BigQuery names still build.
+- [x] `EmbeddingError` exported from `vertebra.embeddings`; docs, knowledge, and changelog updated; targeted checks pass; one signed commit.
 
 ## Notes & Discoveries
 
 - [2026-11-03 15:30] Planning: the existing Spanner embedder assertion only passed because SQLite errors were replaced with hash vectors.
+- [2026-11-03 17:01] Verified RED (`3 errors` at collection, `12 failed, 18 passed` after adding `EmbeddingError` stub) and GREEN (`41 passed in 3.18s`, `ruff check`, `ruff format --check`, and `mypy` passed on 9 source files).

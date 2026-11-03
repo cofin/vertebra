@@ -17,6 +17,7 @@ from vertebra._vertebra import (
     VectorView,
 )
 from vertebra.telemetry.genai import GenAiUsage
+from vertebra.typing import VertebraError
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 
 __all__ = (
     "Embedder",
+    "EmbeddingError",
     "EmbeddingTask",
     "MultimodalPart",
     "SimilarityMatch",
@@ -44,6 +46,10 @@ EmbeddingTask = Literal[
     "semantic_similarity",
     "code_retrieval",
 ]
+
+
+class EmbeddingError(VertebraError, RuntimeError):
+    """Raised when an embedding provider returns no usable vector for a requested text."""
 
 
 class MultimodalPart(msgspec.Struct, frozen=True, gc=False, kw_only=True):

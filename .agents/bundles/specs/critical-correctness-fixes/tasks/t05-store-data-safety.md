@@ -30,11 +30,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: 2026-11-03T16:56:00Z
-last_verified_commit: null
+last_verified_commit: 78ffdf6
 verification_evidence: "RED: 19 failed in 1.35s; GREEN: 76 passed in 1.46s, ruff check/format and mypy passed"
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T16:56:00Z
-commit: null
+updated_at: 2026-11-03T16:57:05Z
+commit: 78ffdf6
 tags: [bugfix, data-loss, stores, redis, litestar]
 ---
 
