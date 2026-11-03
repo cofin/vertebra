@@ -265,5 +265,5 @@ fn test_shm_lease_table_colocated_statement_cache_and_channel_ring_across_named_
     assert_eq!(vertebra_core::broker::DIALECT_TAG_DUCKDB, 6);
     assert_eq!(vertebra_core::broker::DIALECT_TAG_BIGQUERY, 7);
     assert_eq!(vertebra_core::broker::DIALECT_TAG_SPANNER, 8);
-    assert_eq!(vertebra_core::broker::DIALECT_TAG_SPANNER_POSTGRESQL, 9);
+    assert_eq!(vertebra_core::broker::DIALECT_TAG_SPANGRES, 9);
 }

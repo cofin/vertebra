@@ -38,7 +38,7 @@ pub const DIALECT_TAG_MSSQL: u16 = 5;
 pub const DIALECT_TAG_DUCKDB: u16 = 6;
 pub const DIALECT_TAG_BIGQUERY: u16 = 7;
 pub const DIALECT_TAG_SPANNER: u16 = 8;
-pub const DIALECT_TAG_SPANNER_POSTGRESQL: u16 = 9;
+pub const DIALECT_TAG_SPANGRES: u16 = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum BrokerError {

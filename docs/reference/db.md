@@ -4,11 +4,11 @@ Native database configurations, synchronous and asynchronous drivers, single-RTT
 
 | Category | Classes | Highlights |
 | --- | --- | --- |
-| **SQLSpec Adapters (Litestar)** | `PostgreSQLAsyncConfig`, `MySQLAsyncConfig`, `SQLiteAsyncConfig`, `OracleAsyncConfig`, `MSSQLAsyncConfig`, `DuckDBAsyncConfig` | Canonical Litestar adapter configurations (`vertebra.extensions.sqlspec.adapters`) backed by native Rust drivers and connection leasing |
-| **Registry & CTE Pipelines** | `DatabaseRegistry`, `QueryPipeline`, `CTEStep`, `RelOverlay`, `ArrowCursor` | Named driver management, single-RTT read-your-own-writes CTE compilation, and zero-copy Arrow IPC cursors |
-| **Relational & OLAP Configs** | `PostgreSQLConfig`, `MySQLConfig`, `SQLiteConfig`, `OracleConfig`, `MSSQLConfig`, `DuckDBConfig` | Pooler-aware statement caching, WAL/mmap pragmas, Oracle 26ai `VECTOR`/`OSON` & Cloud Wallets, TDS 7.4 `@P1` rewriting, and DuckDB Arrow streaming |
+| **SQLSpec Adapters (Litestar)** | `PostgreSQLAsyncConfig`, `MySQLAsyncConfig`, `SQLiteAsyncConfig`, `OracleAsyncConfig`, `MSSQLAsyncConfig`, `DuckDBAsyncConfig`, `BigQueryAsyncConfig`, `SpannerAsyncConfig` | Canonical Litestar adapter configurations (`vertebra.extensions.sqlspec`) backed by native Rust drivers and connection leasing |
+| **Registry & CTE Pipelines** | `DatabaseRegistry`, `QueryPipeline`, `CTEStep`, `RelOverlay`, `ArrowCursor` | Named driver management, single-RTT read-your-own-writes CTE compilation (`postgresql` and `googlesql`), and zero-copy Arrow IPC cursors |
+| **Relational & OLAP Configs** | `PostgreSQLConfig`, `MySQLConfig`, `SQLiteConfig`, `OracleConfig`, `MSSQLConfig`, `DuckDBConfig`, `BigQueryConfig`, `SpannerConfig` | Pooler-aware statement caching, WAL/mmap pragmas, Oracle 26ai `VECTOR`/`OSON` & Cloud Wallets, TDS 7.4 `@P1` rewriting, DuckDB Arrow streaming, BigQuery Storage Read/Write v1 + Object Tables, and Cloud Spanner Multiplexed Sessions + `BatchWrite` |
 | **RESP3 & Federated SQL** | `RedisConfig`, `ValkeyConfig`, `DataFusionEngine` | RESP3 `HELLO 3` client-side cache invalidation, Cluster/Sentinel routing, and cross-engine SQL federation |
-| **Cloud Dialers, CDC & RLS** | `AlloyDBConfig`, `AlloyDBDialer`, `CloudSQLConfig`, `CloudSQLDialer`, `ChangeFeed`, `TenantScopeConfig`, `TenantPredicate` | Zero-sidecar `:5433` AlloyDB and `:3307` Cloud SQL mTLS connectors, logical replication streaming, and index-friendly tenant isolation |
+| **Cloud Dialers, CDC & RLS** | `AlloyDBConfig`, `AlloyDBDialer`, `CloudSQLConfig`, `CloudSQLDialer`, `ChangeFeed`, `SpannerChangeStreamSource`, `TenantScopeConfig`, `TenantPredicate` | Direct TCP/TLS IAM OAuth2 token password resolution (`:5432`, `:3306`), zero-sidecar `:5433` AlloyDB and `:3307` Cloud SQL mTLS connectors, logical replication / Spanner change-stream streaming, and index-friendly tenant isolation |
 
 ## Database Registry & Query Pipeline
 
@@ -32,56 +32,12 @@ Native database configurations, synchronous and asynchronous drivers, single-RTT
         - execute
         - execute_async
 
-::: vertebra.db.pipeline.CTEStep
-    options:
-      heading_level: 4
-      members: false
-
-::: vertebra.db.pipeline.RelOverlay
-    options:
-      heading_level: 4
-      members: false
-
 ::: vertebra._vertebra.ArrowCursor
     options:
       heading_level: 4
       members: false
 
-## SQLSpec Adapters (`vertebra.extensions.sqlspec.adapters`)
-
-First-class SQLSpec adapter configurations connecting Litestar applications to Vertebra's native Rust drivers.
-
-::: vertebra.extensions.sqlspec.adapters.PostgreSQLAsyncConfig
-    options:
-      heading_level: 4
-      members: false
-
-::: vertebra.extensions.sqlspec.adapters.MySQLAsyncConfig
-    options:
-      heading_level: 4
-      members: false
-
-::: vertebra.extensions.sqlspec.adapters.SQLiteAsyncConfig
-    options:
-      heading_level: 4
-      members: false
-
-::: vertebra.extensions.sqlspec.adapters.OracleAsyncConfig
-    options:
-      heading_level: 4
-      members: false
-
-::: vertebra.extensions.sqlspec.adapters.MSSQLAsyncConfig
-    options:
-      heading_level: 4
-      members: false
-
-::: vertebra.extensions.sqlspec.adapters.DuckDBAsyncConfig
-    options:
-      heading_level: 4
-      members: false
-
-## Relational & Analytical Drivers (`postgres`, `mysql`, `sqlite`, `oracle`, `mssql`, `duckdb`)
+## Relational, Cloud & Analytical Drivers (`postgres`, `mysql`, `sqlite`, `oracle`, `mssql`, `duckdb`, `bigquery`, `spanner`)
 
 ::: vertebra.db.postgres.PostgreSQLConfig
     options:
@@ -113,6 +69,16 @@ First-class SQLSpec adapter configurations connecting Litestar applications to V
       heading_level: 4
       members: false
 
+::: vertebra.db.bigquery.BigQueryConfig
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.db.spanner.SpannerConfig
+    options:
+      heading_level: 4
+      members: false
+
 ## RESP3 Key-Value Stores & DataFusion (`redis`, `valkey`, `datafusion`)
 
 ::: vertebra.db.redis.RedisConfig
@@ -124,6 +90,7 @@ First-class SQLSpec adapter configurations connecting Litestar applications to V
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ::: vertebra.db.datafusion.DataFusionEngine
     options:
@@ -141,17 +108,7 @@ First-class SQLSpec adapter configurations connecting Litestar applications to V
       heading_level: 4
       members: false
 
-::: vertebra.db.dialer.alloydb.AlloyDBDialer
-    options:
-      heading_level: 4
-      members: false
-
 ::: vertebra.db.dialer.cloudsql.CloudSQLConfig
-    options:
-      heading_level: 4
-      members: false
-
-::: vertebra.db.dialer.cloudsql.CloudSQLDialer
     options:
       heading_level: 4
       members: false
@@ -163,11 +120,6 @@ First-class SQLSpec adapter configurations connecting Litestar applications to V
         - publish_event
         - replay_since
         - flush_to_parquet
-
-::: vertebra.db.rls.TenantScopeConfig
-    options:
-      heading_level: 4
-      members: false
 
 ::: vertebra.db.rls.TenantPredicate
     options:

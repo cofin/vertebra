@@ -41,6 +41,7 @@ from vertebra.framework.security import (
     Principal,
     SecurityContext,
 )
+from vertebra.server._fastpath import serialize_fastpath_special_result
 from vertebra.utils.serializers import (
     ZeroCopyCodecRegistry,
     decode_json,
@@ -519,6 +520,10 @@ def _coerce_response(raw: Any, request_id: int, vr_cls: Any, *, status_code: int
     elif isinstance(raw, str):
         body = raw.encode("utf-8")
     else:
+        special = serialize_fastpath_special_result(raw, default_status=status_code)
+        if special is not None:
+            sp_status, _sp_headers, sp_body = special
+            return vr_cls(status=sp_status, body=sp_body, request_id=request_id)
         body = encode_json_bytes(raw)
     return vr_cls(status=status_code, body=body, request_id=request_id)
 
@@ -544,6 +549,15 @@ def _submit_coerced(
             if getattr(raw, "request_id", 0) == 0:
                 raw.request_id = request_id
             submit(raw)
+            return
+        special = serialize_fastpath_special_result(raw, default_status=status_code)
+        if special is not None:
+            sp_status, sp_headers, sp_body = special
+            ct = next((v.decode("latin1") for k, v in sp_headers if k == b"content-type"), None)
+            if ct is not None:
+                submit_raw(request_id, sp_status, sp_body, ct)
+            else:
+                submit_raw(request_id, sp_status, sp_body)
             return
         submit_raw(request_id, status_code, encode_json_bytes(raw), _JSON_CONTENT_TYPE_COMPACT)
         return

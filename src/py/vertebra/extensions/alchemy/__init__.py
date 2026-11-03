@@ -34,6 +34,7 @@ from vertebra.extensions.alchemy.plugin import (
     create_flask_alchemy,
     create_starlette_alchemy,
     create_sync_alchemy_config,
+    normalize_alchemy_url,
 )
 from vertebra.extensions.alchemy.storage import (
     ObjectStoreBackend,
@@ -68,6 +69,7 @@ __all__ = (
     "create_sync_alchemy_config",
     "msgspec_model_deserializer",
     "msgspec_model_serializer",
+    "normalize_alchemy_url",
     "register_storage_backend",
     "setup_cache_listeners",
 )

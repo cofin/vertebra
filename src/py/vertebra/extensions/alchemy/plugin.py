@@ -44,7 +44,24 @@ __all__ = (
     "create_flask_alchemy",
     "create_starlette_alchemy",
     "create_sync_alchemy_config",
+    "normalize_alchemy_url",
 )
+
+
+def normalize_alchemy_url(connection_string: str, *, is_async: bool = True) -> str:
+    """Normalize shorthand `bigquery://`, `spanner://`, and `spangres://` URLs to `+vtb` dialects."""
+    if "://" not in connection_string:
+        return connection_string
+    scheme, rest = connection_string.split("://", 1)
+    lowered = scheme.lower()
+    driver_suffix = "+vtb_async" if is_async else "+vtb"
+    if lowered in ("bigquery", "bq"):
+        return f"bigquery{driver_suffix}://{rest}"
+    if lowered == "spanner":
+        return f"spanner{driver_suffix}://{rest}"
+    if lowered == "spangres":
+        return f"spangres{driver_suffix}://{rest}"
+    return connection_string
 
 
 def _prepare_engine_config(
@@ -128,10 +145,11 @@ def create_async_alchemy_config(
     **kwargs: Any,
 ) -> Any:
     """Create an Advanced Alchemy SQLAlchemyAsyncConfig with optional broker, storage, and cache."""
+    resolved_url = normalize_alchemy_url(connection_string, is_async=True)
     _register_storage_if_provided(storage_backend, storage_key)
-    _prepare_engine_config(connection_string, broker, kwargs)
+    _prepare_engine_config(resolved_url, broker, kwargs)
     _prepare_cache_config(cache_config, kwargs)
-    return config_cls(connection_string=connection_string, **kwargs)
+    return config_cls(connection_string=resolved_url, **kwargs)
 
 
 def create_sync_alchemy_config(
@@ -145,10 +163,11 @@ def create_sync_alchemy_config(
     **kwargs: Any,
 ) -> Any:
     """Create an Advanced Alchemy SQLAlchemySyncConfig with optional broker, storage, and cache."""
+    resolved_url = normalize_alchemy_url(connection_string, is_async=False)
     _register_storage_if_provided(storage_backend, storage_key)
-    _prepare_engine_config(connection_string, broker, kwargs)
+    _prepare_engine_config(resolved_url, broker, kwargs)
     _prepare_cache_config(cache_config, kwargs)
-    return config_cls(connection_string=connection_string, **kwargs)
+    return config_cls(connection_string=resolved_url, **kwargs)
 
 
 def create_alchemy_plugin(

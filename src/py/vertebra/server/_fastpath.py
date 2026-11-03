@@ -10,14 +10,45 @@ from typing import Any, cast
 from vertebra.utils.module_loader import import_optional
 
 __all__ = (
+    "ARROW_STREAM_MEDIA_TYPE",
     "attach_framework_fastpath",
     "extract_scope_body_fast",
     "resolve_relative_path",
     "send_asgi_direct",
+    "serialize_fastpath_special_result",
     "wrap_asgi_fastpath",
 )
 
+ARROW_STREAM_MEDIA_TYPE: bytes = b"application/vnd.apache.arrow.stream"
 _BODYLESS_HTTP_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "DELETE", "OPTIONS"})
+
+
+def serialize_fastpath_special_result(
+    result: Any,
+    *,
+    default_status: int = 200,
+) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
+    """Serialize `ArrowCursor` or `StreamingStorageResponse` directly without JSON encoding."""
+    if result is None:
+        return None
+    cls_name = type(result).__name__
+    if cls_name == "ArrowCursor":
+        buffer_view_fn = getattr(result, "buffer_view", None)
+        if callable(buffer_view_fn):
+            raw_arrow = bytes(buffer_view_fn())
+            return (
+                default_status,
+                [
+                    (b"content-type", ARROW_STREAM_MEDIA_TYPE),
+                    (b"content-length", str(len(raw_arrow)).encode("ascii")),
+                ],
+                raw_arrow,
+            )
+    if cls_name == "StreamingStorageResponse":
+        to_tuple_fn = getattr(result, "to_fastpath_tuple", None)
+        if callable(to_tuple_fn):
+            return cast("tuple[int, list[tuple[bytes, bytes]], bytes]", to_tuple_fn())
+    return None
 
 
 def resolve_relative_path(scope: Any, mount_prefix: str = "") -> str:

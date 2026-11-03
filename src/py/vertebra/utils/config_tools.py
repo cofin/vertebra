@@ -215,9 +215,7 @@ def parse_pyproject_config(pyproject_path: Path) -> str | None:
             raise ValueError(msg)
         return ",".join(config)
 
-    msg = (
-        f"Invalid {section_label}.config in {pyproject_path}: must be string or list of strings, got {type(config).__name__}"
-    )
+    msg = f"Invalid {section_label}.config in {pyproject_path}: must be string or list of strings, got {type(config).__name__}"
     raise ValueError(msg)
 
 

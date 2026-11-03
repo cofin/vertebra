@@ -369,7 +369,6 @@ class SHMBrokerTransport:
         "duckdb": 6,
         "bigquery": 7,
         "spanner": 8,
-        "spanner_postgresql": 9,
         "spangres": 9,
     }
 

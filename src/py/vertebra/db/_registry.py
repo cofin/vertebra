@@ -9,6 +9,7 @@ from typing import Any, ClassVar, cast
 from urllib.parse import parse_qsl, urlparse
 
 from vertebra._vertebra import LeaseBroker
+from vertebra.db.bigquery import AsyncBigQueryDriver, BigQueryConfig, SyncBigQueryDriver
 from vertebra.db.dialer.alloydb import AlloyDBConfig, AlloyDBDialer
 from vertebra.db.dialer.cloudsql import CloudSQLConfig, CloudSQLDialer
 from vertebra.db.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
@@ -17,10 +18,18 @@ from vertebra.db.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
 from vertebra.db.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
 from vertebra.db.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
 from vertebra.db.redis import AsyncRedisDriver, RedisConfig, SyncRedisDriver
+from vertebra.db.spanner import AsyncSpannerDriver, SpannerConfig, SyncSpannerDriver
 from vertebra.db.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
 from vertebra.db.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
 
-__all__ = ("AnyDatabaseConfig", "AnyDatabaseDriver", "AnySyncDatabaseDriver", "DatabaseRegistry")
+__all__ = (
+    "AnyDatabaseConfig",
+    "AnyDatabaseDriver",
+    "AnySyncDatabaseDriver",
+    "DatabaseRegistry",
+    "provide_bigquery_driver",
+    "provide_spanner_driver",
+)
 
 type AnyDatabaseConfig = (
     PostgreSQLConfig
@@ -29,6 +38,8 @@ type AnyDatabaseConfig = (
     | OracleConfig
     | MSSQLConfig
     | DuckDBConfig
+    | BigQueryConfig
+    | SpannerConfig
     | RedisConfig
     | ValkeyConfig
     | CloudSQLConfig
@@ -42,6 +53,8 @@ type AnyDatabaseDriver = (
     | AsyncOracleDriver
     | AsyncMSSQLDriver
     | AsyncDuckDBDriver
+    | AsyncBigQueryDriver
+    | AsyncSpannerDriver
     | AsyncRedisDriver
     | AsyncValkeyDriver
     | CloudSQLDialer
@@ -55,6 +68,8 @@ type AnySyncDatabaseDriver = (
     | SyncOracleDriver
     | SyncMSSQLDriver
     | SyncDuckDBDriver
+    | SyncBigQueryDriver
+    | SyncSpannerDriver
     | SyncRedisDriver
     | SyncValkeyDriver
     | CloudSQLDialer
@@ -156,6 +171,23 @@ class DatabaseRegistry:
             raw_duck = str(config.path if config.path != ":memory:" else (config.database or ":memory:"))
             norm_duck = raw_duck if raw_duck == ":memory:" else os.path.abspath(raw_duck)
             return ("duckdb", norm_duck, bool(config.read_only))
+        if isinstance(config, BigQueryConfig):
+            return (
+                "bigquery",
+                config.effective_project_id(),
+                config.effective_dataset_id() or "",
+                config.location,
+                config.rest_endpoint,
+                config.storage_endpoint,
+            )
+        if isinstance(config, SpannerConfig):
+            return (
+                "spanner",
+                config.database_uri,
+                config.database_role or "",
+                config.dialect,
+                config.endpoint,
+            )
         if isinstance(config, ValkeyConfig):
             return ("valkey", config.url)
         if isinstance(config, RedisConfig):
@@ -227,6 +259,12 @@ class DatabaseRegistry:
         if base_scheme == "alloydb":
             instance_uri = parsed.path if parsed.path.startswith("/projects/") else f"/{parsed.netloc}{parsed.path}"
             return AlloyDBConfig(instance_uri=instance_uri, **overrides)
+        if base_scheme in ("bigquery", "bq"):
+            return BigQueryConfig.from_dsn(url, **overrides)
+        if base_scheme == "spanner":
+            if "+postgresql" in scheme and "dialect" not in overrides:
+                overrides["dialect"] = "postgresql"
+            return SpannerConfig.from_dsn(url, **overrides)
 
         msg = f"Unsupported database URL scheme: {scheme!r}"
         raise ValueError(msg)
@@ -334,6 +372,10 @@ class DatabaseRegistry:
             return AsyncMSSQLDriver(config, broker=broker)
         if isinstance(config, DuckDBConfig):
             return AsyncDuckDBDriver(config, broker=broker)
+        if isinstance(config, BigQueryConfig):
+            return AsyncBigQueryDriver(config, broker=broker)
+        if isinstance(config, SpannerConfig):
+            return AsyncSpannerDriver(config, broker=broker)
         if isinstance(config, ValkeyConfig):
             return AsyncValkeyDriver(config)
         if isinstance(config, RedisConfig):
@@ -367,6 +409,10 @@ class DatabaseRegistry:
             return SyncMSSQLDriver(config, broker=broker)
         if isinstance(config, DuckDBConfig):
             return SyncDuckDBDriver(config, broker=broker)
+        if isinstance(config, BigQueryConfig):
+            return SyncBigQueryDriver(config, broker=broker)
+        if isinstance(config, SpannerConfig):
+            return SyncSpannerDriver(config, broker=broker)
         if isinstance(config, ValkeyConfig):
             return SyncValkeyDriver(config)
         if isinstance(config, RedisConfig):
@@ -377,3 +423,43 @@ class DatabaseRegistry:
             return self._get_or_create_dialer(config)
         msg = f"Unsupported config type: {type(config)!r}"
         raise TypeError(msg)
+
+
+def provide_bigquery_driver(
+    config_or_url: BigQueryConfig | str = "default",
+    *,
+    sync: bool = False,
+    registry: DatabaseRegistry | None = None,
+) -> AsyncBigQueryDriver | SyncBigQueryDriver:
+    """Resolve a shared BigQuery driver from `DatabaseRegistry.default()` for framework DI."""
+    reg = registry if registry is not None else DatabaseRegistry.default()
+    resolved_cfg: AnyDatabaseConfig | str = (
+        reg.get_config(config_or_url)
+        if (isinstance(config_or_url, str) and "://" not in config_or_url and config_or_url in reg._configs)
+        else config_or_url
+    )
+    if isinstance(resolved_cfg, str) and "://" not in resolved_cfg:
+        driver = reg.get_sync_driver(resolved_cfg) if sync else reg.get_driver(resolved_cfg)
+    else:
+        driver = reg.get_shared_sync_driver(resolved_cfg) if sync else reg.get_shared_driver(resolved_cfg)
+    return cast("AsyncBigQueryDriver | SyncBigQueryDriver", driver)
+
+
+def provide_spanner_driver(
+    config_or_url: SpannerConfig | str = "default",
+    *,
+    sync: bool = False,
+    registry: DatabaseRegistry | None = None,
+) -> AsyncSpannerDriver | SyncSpannerDriver:
+    """Resolve a shared Cloud Spanner driver from `DatabaseRegistry.default()` for framework DI."""
+    reg = registry if registry is not None else DatabaseRegistry.default()
+    resolved_cfg: AnyDatabaseConfig | str = (
+        reg.get_config(config_or_url)
+        if (isinstance(config_or_url, str) and "://" not in config_or_url and config_or_url in reg._configs)
+        else config_or_url
+    )
+    if isinstance(resolved_cfg, str) and "://" not in resolved_cfg:
+        driver = reg.get_sync_driver(resolved_cfg) if sync else reg.get_driver(resolved_cfg)
+    else:
+        driver = reg.get_shared_sync_driver(resolved_cfg) if sync else reg.get_shared_driver(resolved_cfg)
+    return cast("AsyncSpannerDriver | SyncSpannerDriver", driver)

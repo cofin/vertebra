@@ -19,7 +19,7 @@ use vertebra_db::dialer::{
     decode_alloydb_metadata_response as rs_decode_alloydb_metadata_response,
     encode_alloydb_metadata_exchange as rs_encode_alloydb_metadata_exchange,
 };
-use vertebra_db::duckdb_engine::DuckdbConfig;
+use vertebra_db::duckdb::DuckdbConfig;
 use vertebra_db::mssql::{
     encode_tds_sql_batch as rs_encode_tds_sql_batch,
     rewrite_mssql_placeholders as rs_rewrite_mssql_placeholders,

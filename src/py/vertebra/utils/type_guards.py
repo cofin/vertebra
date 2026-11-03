@@ -182,12 +182,7 @@ def supports_close(obj: Any) -> TypeGuard[SupportsClose]:
 
 def is_schema(obj: Any) -> bool:
     """Check if ``obj`` is a msgspec Struct, dataclass, Pydantic model, or attrs class/instance."""
-    return (
-        is_msgspec_struct(obj)
-        or is_dataclass(obj)
-        or is_pydantic_model(obj)
-        or is_attrs_schema(obj)
-    )
+    return is_msgspec_struct(obj) or is_dataclass(obj) or is_pydantic_model(obj) or is_attrs_schema(obj)
 
 
 def is_schema_or_dict(obj: Any) -> bool:

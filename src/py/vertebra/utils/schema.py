@@ -33,10 +33,7 @@ __all__ = (
 def transform_dict_keys(data: Any, converter: Callable[[str], str]) -> Any:
     """Recursively transform dictionary keys across nested mappings, lists, and tuples."""
     if isinstance(data, Mapping):
-        return {
-            (converter(k) if isinstance(k, str) else k): transform_dict_keys(v, converter)
-            for k, v in data.items()
-        }
+        return {(converter(k) if isinstance(k, str) else k): transform_dict_keys(v, converter) for k, v in data.items()}
     if isinstance(data, list):
         return [transform_dict_keys(item, converter) for item in data]
     if isinstance(data, tuple):
@@ -88,7 +85,12 @@ def to_value_type[T](value: Any, value_type: type[T]) -> T:
         except TypeError:
             pass
 
-    if is_msgspec_struct(value_type) or is_dataclass(value_type) or is_pydantic_model(value_type) or is_attrs_schema(value_type):
+    if (
+        is_msgspec_struct(value_type)
+        or is_dataclass(value_type)
+        or is_pydantic_model(value_type)
+        or is_attrs_schema(value_type)
+    ):
         return cast("T", _hydrate_single_schema(value, value_type))
 
     if value_type is bool:

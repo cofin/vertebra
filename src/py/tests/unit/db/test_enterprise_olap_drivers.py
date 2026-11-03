@@ -507,8 +507,8 @@ async def test_sqlspec_adapters_and_async_drivers() -> None:
 
 
 def test_sqlalchemy_vtb_dialects_nullpool_and_dbapi_broker_forwarding() -> None:
-    """Verify all 6 SQLAlchemy +vtb dialects use NullPool and forward DBAPI operations through the SHM broker."""
-    assert len(ALL_DIALECT_SCHEMES) == 12
+    """Verify all SQLAlchemy +vtb dialects use NullPool and forward DBAPI operations through the SHM broker."""
+    assert len(ALL_DIALECT_SCHEMES) == 24
     for dialect_name in (
         "postgresql.vtb",
         "mysql.vtb",

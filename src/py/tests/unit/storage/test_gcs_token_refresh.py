@@ -574,9 +574,7 @@ def test_google_embedder_uses_vertebra_gcp_token_cache_without_storage_import(
     source_path = Path(google_embeddings_mod.__file__)
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
     imported_modules = [
-        node.module
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module is not None
+        node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None
     ]
     assert "vertebra.storage" not in imported_modules
     assert "vertebra._vertebra" in imported_modules

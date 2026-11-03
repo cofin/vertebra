@@ -336,6 +336,7 @@ def test_parse_odbc_and_resolve_config_sync_and_async() -> None:
 @pytest.mark.anyio
 async def test_resolve_config_async_awaitable_and_callable() -> None:
     """Verify resolve_config_async resolves dicts, sync callables, and async callables."""
+
     async def _load() -> dict[str, str]:
         return {"mode": "async"}
 

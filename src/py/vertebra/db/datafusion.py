@@ -30,7 +30,18 @@ class TableRegistration(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
     name: str
     uri: str
-    format: Literal["parquet", "vortex", "arrow", "postgres", "oracle"] = "parquet"
+    format: Literal[
+        "parquet",
+        "vortex",
+        "arrow",
+        "csv",
+        "ndjson",
+        "duckdb",
+        "postgres",
+        "oracle",
+        "bigquery",
+        "spanner",
+    ] = "parquet"
 
 
 class DataFusionConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -118,6 +129,146 @@ class DataFusionEngine:
         """Register a Parquet dataset located in an ObjectStore."""
         uri = f"{store.url.rstrip('/')}/{key.lstrip('/')}"
         reg = TableRegistration(name=name, uri=uri, format="parquet")
+        return self.register_table(reg)
+
+    def register_bigquery_table(
+        self,
+        name: str,
+        driver: Any,
+        table: str,
+        *,
+        selected_fields: list[str] | tuple[str, ...] | None = None,
+        row_restriction: str | None = None,
+    ) -> TableRegistration:
+        """Fetch a BigQuery table via zero-copy ``ArrowCursor`` and register it in DataFusion."""
+        cursor = driver.fetch_arrow(
+            table,
+            selected_fields=selected_fields,
+            row_restriction=row_restriction,
+        )
+        pa = import_optional("pyarrow")
+        arrow_table: Any
+        if pa is not None:
+            try:
+                arrow_table = cursor.to_pyarrow()
+            except Exception:
+                arrow_table = _FallbackArrowTable(cursor.to_pylist())
+        else:
+            arrow_table = _FallbackArrowTable(cursor.to_pylist())
+        self._arrow_tables[name] = arrow_table
+        if self._ctx is not None:
+            with contextlib.suppress(Exception):
+                self._ctx.register_table(name, arrow_table)
+        project = getattr(driver, "project_id", "bigquery")
+        reg = TableRegistration(
+            name=name,
+            uri=f"bigquery://{project}/{table}",
+            format="bigquery",
+        )
+        return self.register_table(reg)
+
+    def register_bigquery_query(
+        self,
+        name: str,
+        driver: Any,
+        sql: str,
+        parameters: Any = None,
+    ) -> TableRegistration:
+        """Execute a BigQuery query into a zero-copy ``ArrowCursor`` and register it in DataFusion."""
+        cursor = driver.fetch_arrow(sql, parameters)
+        pa = import_optional("pyarrow")
+        arrow_table: Any
+        if pa is not None:
+            try:
+                arrow_table = cursor.to_pyarrow()
+            except Exception:
+                arrow_table = _FallbackArrowTable(cursor.to_pylist())
+        else:
+            arrow_table = _FallbackArrowTable(cursor.to_pylist())
+        self._arrow_tables[name] = arrow_table
+        if self._ctx is not None:
+            with contextlib.suppress(Exception):
+                self._ctx.register_table(name, arrow_table)
+        project = getattr(driver, "project_id", "bigquery")
+        reg = TableRegistration(
+            name=name,
+            uri=f"bigquery://{project}/query/{name}",
+            format="bigquery",
+        )
+        return self.register_table(reg)
+
+    def register_spanner_table(
+        self,
+        name: str,
+        driver: Any,
+        table: str,
+        *,
+        max_partitions: int | None = None,
+        data_boost_enabled: bool | None = None,
+    ) -> TableRegistration:
+        """Fetch a Cloud Spanner table via zero-copy ``ArrowCursor`` and register it in DataFusion."""
+        cursor = driver.fetch_arrow(
+            table,
+            max_partitions=max_partitions,
+            data_boost_enabled=data_boost_enabled,
+        )
+        pa = import_optional("pyarrow")
+        arrow_table: Any
+        if pa is not None:
+            try:
+                arrow_table = cursor.to_pyarrow()
+            except Exception:
+                arrow_table = _FallbackArrowTable(cursor.to_pylist())
+        else:
+            arrow_table = _FallbackArrowTable(cursor.to_pylist())
+        self._arrow_tables[name] = arrow_table
+        if self._ctx is not None:
+            with contextlib.suppress(Exception):
+                self._ctx.register_table(name, arrow_table)
+        db_uri = getattr(driver, "database_uri", "projects/p/instances/i/databases/d")
+        reg = TableRegistration(
+            name=name,
+            uri=f"spanner://{db_uri}/tables/{table}",
+            format="spanner",
+        )
+        return self.register_table(reg)
+
+    def register_spanner_query(
+        self,
+        name: str,
+        driver: Any,
+        sql: str,
+        parameters: Any = None,
+        *,
+        max_partitions: int | None = None,
+        data_boost_enabled: bool | None = None,
+    ) -> TableRegistration:
+        """Execute a partitioned Cloud Spanner query into an ``ArrowCursor`` and register it in DataFusion."""
+        cursor = driver.fetch_arrow(
+            sql,
+            parameters,
+            max_partitions=max_partitions,
+            data_boost_enabled=data_boost_enabled,
+        )
+        pa = import_optional("pyarrow")
+        arrow_table: Any
+        if pa is not None:
+            try:
+                arrow_table = cursor.to_pyarrow()
+            except Exception:
+                arrow_table = _FallbackArrowTable(cursor.to_pylist())
+        else:
+            arrow_table = _FallbackArrowTable(cursor.to_pylist())
+        self._arrow_tables[name] = arrow_table
+        if self._ctx is not None:
+            with contextlib.suppress(Exception):
+                self._ctx.register_table(name, arrow_table)
+        db_uri = getattr(driver, "database_uri", "projects/p/instances/i/databases/d")
+        reg = TableRegistration(
+            name=name,
+            uri=f"spanner://{db_uri}/query/{name}",
+            format="spanner",
+        )
         return self.register_table(reg)
 
     def explain_plan(self, sql: str) -> dict[str, Any]:

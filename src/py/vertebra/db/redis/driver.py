@@ -1,4 +1,4 @@
-"""Redis RESP3 driver, topology routing, client-side caching, and pub/sub multiplexing."""
+"""Synchronous and asynchronous Redis RESP3 drivers."""
 
 from __future__ import annotations
 
@@ -12,521 +12,41 @@ import socket
 import ssl
 import threading
 import time
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import urlparse
 
-from vertebra.typing import (
-    FrozenBaseStruct,
-    ImproperConfigurationError,
-    VertebraError,
+from vertebra.db.driver import CommonDriverMixin
+from vertebra.db.redis.config import RedisConfig
+from vertebra.db.redis.core import (
+    NON_KEY_COMMANDS,
+    PubSubMessage,
+    RedisCore,
+    Resp3Error,
+    Resp3Parser,
+    encode_hello3_handshake,
+    encode_resp_command,
+    hash_slot,
+    parse_cluster_redirect,
 )
-from vertebra.utils.module_loader import import_optional
+from vertebra.typing import ImproperConfigurationError, VertebraError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Generator, Iterator, Sequence
 
 __all__ = (
     "AsyncRedisDriver",
-    "ClusterRedirect",
-    "PubSubMessage",
-    "RedisConfig",
-    "Resp3Error",
-    "Resp3Parser",
     "SyncRedisDriver",
-    "crc16_xmodem",
-    "encode_hello3_handshake",
-    "encode_resp_command",
-    "hash_slot",
-    "parse_cluster_redirect",
-    "redis_hash_slot",
-)
-
-_HASH_SLOT_COUNT = 16384
-_NON_KEY_COMMANDS = frozenset(
-    {
-        "ASKING",
-        "AUTH",
-        "CLIENT",
-        "CLUSTER",
-        "COMMAND",
-        "ECHO",
-        "EXEC",
-        "FLUSHALL",
-        "FLUSHDB",
-        "HELLO",
-        "INFO",
-        "MULTI",
-        "PING",
-        "PSUBSCRIBE",
-        "PUNSUBSCRIBE",
-        "QUIT",
-        "READONLY",
-        "READWRITE",
-        "ROLE",
-        "SELECT",
-        "SENTINEL",
-        "SSUBSCRIBE",
-        "SUBSCRIBE",
-        "SUNSUBSCRIBE",
-        "UNSUBSCRIBE",
-    }
 )
 
 
-def crc16_xmodem(data: bytes | bytearray | memoryview | str) -> int:
-    """Compute CRC16-XMODEM (polynomial 0x1021, initial value 0x0000) for Redis Cluster."""
-    raw = data.encode("utf-8") if isinstance(data, str) else bytes(data)
-    native = _get_native_module()
-    if native is not None:
-        native_fn = getattr(native, "crc16_xmodem", None)
-        if callable(native_fn):
-            with contextlib.suppress(TypeError):
-                return int(native_fn(raw))
-    crc = 0x0000
-    for byte in raw:
-        crc ^= byte << 8
-        for _ in range(8):
-            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if (crc & 0x8000) else (crc << 1) & 0xFFFF
-    return crc
-
-
-def hash_slot(key: str | bytes) -> int:
-    """Compute the Redis Cluster hash slot (0..16383) for key with {tag} extraction."""
-    raw = key.encode("utf-8") if isinstance(key, str) else bytes(key)
-    native = _get_native_module()
-    if native is not None:
-        native_fn = getattr(native, "redis_hash_slot", None) or getattr(native, "redis_hash_slot_native", None)
-        if callable(native_fn):
-            with contextlib.suppress(TypeError):
-                return int(native_fn(raw))
-    start = raw.find(b"{")
-    if start != -1:
-        end = raw.find(b"}", start + 1)
-        if end != -1 and end > start + 1:
-            raw = raw[start + 1 : end]
-    return crc16_xmodem(raw) % _HASH_SLOT_COUNT
-
-
-redis_hash_slot = hash_slot
-
-
-class ClusterRedirect(FrozenBaseStruct, frozen=True, gc=False):
-    """Parsed Redis/Valkey Cluster MOVED or ASK redirection directive."""
-
-    kind: Literal["MOVED", "ASK"]
-    slot: int
-    host: str
-    port: int
-
-    @classmethod
-    def parse(cls, error_message: str | bytes) -> ClusterRedirect | None:
-        """Parse a MOVED or ASK error string into a ClusterRedirect struct."""
-        return parse_cluster_redirect(error_message)
-
-
-def parse_cluster_redirect(error_message: str | bytes) -> ClusterRedirect | None:
-    """Parse a Redis Cluster MOVED or ASK redirection response into ClusterRedirect."""
-    text = error_message.decode("utf-8") if isinstance(error_message, bytes) else str(error_message)
-    native = _get_native_module()
-    if native is not None:
-        native_fn = getattr(native, "parse_cluster_redirect", None)
-        if callable(native_fn):
-            with contextlib.suppress(TypeError, ValueError):
-                res = native_fn(text)
-                if res is None:
-                    return None
-                if isinstance(res, ClusterRedirect):
-                    return res
-                if isinstance(res, tuple) and len(res) == 4:
-                    kind_str = str(res[0]).upper()
-                    kind_lit: Literal["MOVED", "ASK"] = "MOVED" if kind_str == "MOVED" else "ASK"
-                    return ClusterRedirect(kind=kind_lit, slot=int(res[1]), host=str(res[2]), port=int(res[3]))
-                if hasattr(res, "kind") and hasattr(res, "slot"):
-                    kind_attr: Literal["MOVED", "ASK"] = "MOVED" if str(res.kind).upper() == "MOVED" else "ASK"
-                    return ClusterRedirect(
-                        kind=kind_attr,
-                        slot=int(res.slot),
-                        host=str(res.host),
-                        port=int(res.port),
-                    )
-    cleaned = text.strip()
-    if cleaned.startswith("-"):
-        cleaned = cleaned[1:].strip()
-    parts = cleaned.split()
-    if len(parts) < 3:
-        return None
-    directive = parts[0].upper()
-    if directive not in ("MOVED", "ASK"):
-        return None
-    try:
-        slot = int(parts[1])
-        host_port = parts[2]
-        host, port_str = host_port.rsplit(":", 1)
-        host = host.strip("[]")
-        port = int(port_str)
-    except ValueError:
-        return None
-    if not host or port <= 0 or slot < 0 or slot >= _HASH_SLOT_COUNT:
-        return None
-    kind_val: Literal["MOVED", "ASK"] = "MOVED" if directive == "MOVED" else "ASK"
-    return ClusterRedirect(kind=kind_val, slot=slot, host=host, port=port)
-
-
-class PubSubMessage(FrozenBaseStruct, frozen=True, gc=False):
-    """RESP3 multiplexed Pub/Sub push message."""
-
-    kind: str
-    channel: str
-    payload: bytes
-    pattern: str | None = None
-
-
-def encode_resp_command(*parts: str | bytes | int) -> bytes:
-    """Encode a Redis or Valkey RESP3 bulk-string array command."""
-    native = _get_native_module()
-    if native is not None:
-        native_fn = getattr(native, "encode_resp_command", None)
-        if callable(native_fn):
-            with contextlib.suppress(TypeError):
-                encoded = native_fn([_encode_part_bytes(p) for p in parts])
-                if isinstance(encoded, bytes):
-                    return encoded
-    chunks = [f"*{len(parts)}\r\n".encode("ascii")]
-    for arg in parts:
-        raw = _encode_part_bytes(arg)
-        chunks.append(f"${len(raw)}\r\n".encode("ascii"))
-        chunks.append(raw)
-        chunks.append(b"\r\n")
-    return b"".join(chunks)
-
-
-def encode_hello3_handshake(
-    *,
-    username: str | None = None,
-    password: str | None = None,
-    client_name: str | None = "vertebra",
-) -> bytes:
-    """Encode a RESP3 HELLO 3 handshake command with optional AUTH and SETNAME."""
-    native = _get_native_module()
-    if native is not None:
-        native_fn = getattr(native, "encode_hello3_handshake", None)
-        if callable(native_fn):
-            with contextlib.suppress(TypeError):
-                encoded = bytes(native_fn(client_name or "", username, password, False, []))
-                return encoded
-    parts: list[bytes | str] = ["HELLO", "3"]
-    if password is not None:
-        parts.extend(["AUTH", username or "default", password])
-    if client_name:
-        parts.extend(["SETNAME", client_name])
-    return encode_resp_command(*parts)
-
-
-class Resp3Error(VertebraError):
-    """Exception raised when a Redis or Valkey server returns a RESP3 error frame."""
-
-    def __init__(self, message: str, *, next_offset: int = 0) -> None:
-        super().__init__(message)
-        self.next_offset = next_offset
-
-
-class Resp3Parser:
-    """Zero-copy and low-overhead parser for the Redis Serialization Protocol (RESP3)."""
-
-    @classmethod
-    def parse_frame(
-        cls,
-        data: bytes | bytearray | memoryview,
-        offset: int = 0,
-    ) -> tuple[Any, int]:
-        """Parse a single RESP3 frame from data at offset, returning (value, next_offset)."""
-        if isinstance(data, memoryview):
-            return cls._parse_view(data, offset)
-        buf = memoryview(data)
-        try:
-            return cls._parse_view(buf, offset)
-        finally:
-            buf.release()
-
-    @classmethod
-    def _parse_view(cls, buf: memoryview, offset: int) -> tuple[Any, int]:
-        """Parse a single RESP3 frame from an active memoryview."""
-        total_len = len(buf)
-        if offset >= total_len:
-            msg = "Unexpected end of RESP3 buffer"
-            raise ValueError(msg)
-
-        marker = buf[offset]
-        pos = offset + 1
-
-        if marker == 43:
-            idx = cls._find_crlf(buf, pos)
-            text = bytes(buf[pos:idx]).decode("utf-8")
-            return text, idx + 2
-
-        if marker == 45:
-            idx = cls._find_crlf(buf, pos)
-            err_msg = bytes(buf[pos:idx]).decode("utf-8")
-            raise Resp3Error(err_msg, next_offset=idx + 2)
-
-        if marker == 33:
-            idx = cls._find_crlf(buf, pos)
-            length = int(bytes(buf[pos:idx]).decode("ascii"))
-            val_start = idx + 2
-            val_end = val_start + length
-            if val_end + 2 > total_len:
-                msg = "Incomplete blob error frame"
-                raise ValueError(msg)
-            err_msg = bytes(buf[val_start:val_end]).decode("utf-8")
-            raise Resp3Error(err_msg, next_offset=val_end + 2)
-
-        if marker == 58:
-            idx = cls._find_crlf(buf, pos)
-            num = int(bytes(buf[pos:idx]).decode("ascii"))
-            return num, idx + 2
-
-        if marker == 44:
-            idx = cls._find_crlf(buf, pos)
-            val_str = bytes(buf[pos:idx]).decode("ascii").lower()
-            if val_str == "inf":
-                f_val = float("inf")
-            elif val_str == "-inf":
-                f_val = float("-inf")
-            elif val_str == "nan":
-                f_val = float("nan")
-            else:
-                f_val = float(val_str)
-            return f_val, idx + 2
-
-        if marker == 35:
-            idx = cls._find_crlf(buf, pos)
-            b_char = buf[pos]
-            return b_char == 116, idx + 2
-
-        if marker == 95:
-            idx = cls._find_crlf(buf, pos)
-            return None, idx + 2
-
-        if marker == 36:
-            idx = cls._find_crlf(buf, pos)
-            length = int(bytes(buf[pos:idx]).decode("ascii"))
-            if length == -1:
-                return None, idx + 2
-            val_start = idx + 2
-            val_end = val_start + length
-            if val_end + 2 > total_len:
-                msg = "Incomplete bulk string frame"
-                raise ValueError(msg)
-            return bytes(buf[val_start:val_end]), val_end + 2
-
-        if marker == 61:
-            idx = cls._find_crlf(buf, pos)
-            length = int(bytes(buf[pos:idx]).decode("ascii"))
-            val_start = idx + 2
-            val_end = val_start + length
-            if val_end + 2 > total_len:
-                msg = "Incomplete verbatim string frame"
-                raise ValueError(msg)
-            return bytes(buf[val_start + 4 : val_end]), val_end + 2
-
-        if marker == 42:
-            idx = cls._find_crlf(buf, pos)
-            count = int(bytes(buf[pos:idx]).decode("ascii"))
-            if count == -1:
-                return None, idx + 2
-            curr = idx + 2
-            items: list[Any] = []
-            for _ in range(count):
-                item, curr = cls._parse_view(buf, curr)
-                items.append(item)
-            return items, curr
-
-        if marker == 126:
-            idx = cls._find_crlf(buf, pos)
-            count = int(bytes(buf[pos:idx]).decode("ascii"))
-            curr = idx + 2
-            set_items: set[Any] = set()
-            for _ in range(count):
-                item, curr = cls._parse_view(buf, curr)
-                set_items.add(item)
-            return set_items, curr
-
-        if marker == 37:
-            idx = cls._find_crlf(buf, pos)
-            pairs = int(bytes(buf[pos:idx]).decode("ascii"))
-            curr = idx + 2
-            dict_items: dict[Any, Any] = {}
-            for _ in range(pairs):
-                k, curr = cls._parse_view(buf, curr)
-                v, curr = cls._parse_view(buf, curr)
-                dict_items[k] = v
-            return dict_items, curr
-
-        if marker == 62:
-            idx = cls._find_crlf(buf, pos)
-            count = int(bytes(buf[pos:idx]).decode("ascii"))
-            curr = idx + 2
-            push_items: list[Any] = []
-            for _ in range(count):
-                item, curr = cls._parse_view(buf, curr)
-                push_items.append(item)
-            return ("push", push_items), curr
-
-        msg = f"Unsupported RESP3 marker byte: {chr(marker)!r} ({marker})"
-        raise ValueError(msg)
-
-    @staticmethod
-    def _find_crlf(buf: memoryview, start: int) -> int:
-        """Locate next carriage return and line feed delimiter."""
-        total = len(buf)
-        pos = start
-        while pos + 1 < total:
-            if buf[pos] == 13 and buf[pos + 1] == 10:
-                return pos
-            pos += 1
-        msg = "Incomplete RESP3 frame delimiter"
-        raise ValueError(msg)
-
-
-class RedisConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
-    """Configuration for Redis 7.2+ / 8.0+ standalone, Sentinel, and Cluster connections."""
-
-    url: str = "redis://localhost:6379/0"
-    """Redis connection URI (`redis://`, `rediss://`, or `memory://`)."""
-    username: str | None = None
-    """Optional Redis 6+ ACL username passed to `HELLO 3 AUTH`."""
-    password: str | None = None
-    """Optional Redis password or ACL token passed to `HELLO 3 AUTH`."""
-    client_name: str = "vertebra"
-    """Connection name registered via `HELLO 3 ... SETNAME`."""
-    protocol: Literal[2, 3] = 3
-    """RESP wire protocol version (`3` for RESP3 with push/tracking support, `2` for legacy RESP2)."""
-    topology: Literal["standalone", "sentinel", "cluster"] = "standalone"
-    """Deployment topology mode (`"standalone"`, `"sentinel"`, or `"cluster"`)."""
-    sentinel_service_name: str | None = None
-    """Alias for `sentinel_master_name` when discovering the primary via Redis Sentinel."""
-    sentinel_master_name: str | None = None
-    """Monitored primary service name queried via `SENTINEL get-master-addr-by-name`."""
-    sentinel_nodes: tuple[tuple[str, int] | str, ...] = ()
-    """Seed Redis Sentinel `(host, port)` endpoints."""
-    cluster_enabled: bool = False
-    """When True, route commands across the 16,384 CRC16-XMODEM hash slots."""
-    cluster_nodes: tuple[tuple[str, int] | str, ...] = ()
-    """Seed Redis Cluster `(host, port)` endpoints used for slot map discovery."""
-    max_redirections: int = 5
-    """Maximum number of `-MOVED` or `-ASK` cluster redirections followed per command."""
-    enable_client_side_caching: bool = False
-    """When True, cache read responses locally and invalidate on RESP3 `>invalidate` push frames."""
-    enable_client_tracking: bool = False
-    """When True, issue `CLIENT TRACKING ON` during connection handshake."""
-    client_tracking_prefixes: tuple[str, ...] = ()
-    """Key prefixes subscribed in `BCAST` tracking mode (`PREFIX <prefix>`)."""
-    client_cache_capacity: int = 4096
-    """Maximum number of keys retained in the local LRU client-side cache."""
-    max_cached_keys: int = 4096
-    """Alias for `client_cache_capacity` specifying maximum locally cached keys."""
-    client_cache_ttl_seconds: float | None = None
-    """Optional local TTL in seconds applied to cached RESP3 entries."""
-    enable_gcp_iam_auth: bool = False
-    """When True, authenticate using Google Cloud Memorystore IAM tokens."""
-    iam_auth_enabled: bool = False
-    """Alias for `enable_gcp_iam_auth` enabling IAM token authentication."""
-    token_provider: Any = None
-    """Optional zero-argument callable returning an ephemeral IAM access token."""
-    iam_token_provider: Any = None
-    """Alias for `token_provider` supplying IAM authentication tokens."""
-    max_connections: int = 32
-    """Maximum pooled sockets maintained per target node."""
-    broker: Any = None
-    """Optional shared-memory `DatabaseBroker` or `SHMBrokerTransport` for cross-worker push fan-out."""
-
-    @property
-    def uses_tls(self) -> bool:
-        """Return True if the URL scheme uses TLS (`rediss://`)."""
-        return self.url.startswith("rediss://")
-
-    @property
-    def effective_cache_capacity(self) -> int:
-        """Return the configured LRU client cache capacity."""
-        if self.client_cache_capacity != 4096:
-            return self.client_cache_capacity
-        if self.max_cached_keys != 4096:
-            return self.max_cached_keys
-        return self.client_cache_capacity
-
-    @property
-    def effective_iam_enabled(self) -> bool:
-        """Return True when GCP Memorystore IAM authentication is enabled."""
-        return bool(
-            self.iam_auth_enabled
-            or self.enable_gcp_iam_auth
-            or getattr(self, "enable_gcp_memorystore_iam", False)
-            or (self.token_provider is not None)
-            or (self.iam_token_provider is not None)
-        )
-
-    @property
-    def effective_token_provider(self) -> Callable[[], Any] | None:
-        """Return the configured IAM token provider callable."""
-        provider = self.token_provider if self.token_provider is not None else self.iam_token_provider
-        return provider if callable(provider) else None
-
-    @property
-    def effective_tracking_enabled(self) -> bool:
-        """Return True when RESP3 client-side tracking/caching is enabled."""
-        return bool(self.enable_client_tracking or self.enable_client_side_caching)
-
-    @property
-    def effective_sentinel_master_name(self) -> str | None:
-        """Return the configured Sentinel master service name."""
-        return self.sentinel_master_name or self.sentinel_service_name
-
-    @property
-    def effective_cluster_enabled(self) -> bool:
-        """Return True when Cluster topology routing is active."""
-        return bool(self.cluster_enabled or self.topology == "cluster" or self.cluster_nodes)
-
-    @property
-    def effective_sentinel_enabled(self) -> bool:
-        """Return True when Sentinel master discovery is active."""
-        return bool(self.topology == "sentinel" or (self.sentinel_nodes and self.effective_sentinel_master_name))
-
-    def build_handshake_commands(self, *, iam_token: str | None = None) -> list[bytes]:
-        """Build the initial RESP3 HELLO 3 and optional CLIENT TRACKING wire commands."""
-        parsed = urlparse(self.url)
-        iam_active = self.effective_iam_enabled
-        if iam_active and iam_token is not None:
-            effective_password: str | None = iam_token
-        else:
-            effective_password = self.password if self.password is not None else parsed.password
-        if iam_active:
-            effective_user: str | None = self.username or parsed.username or "default"
-        else:
-            effective_user = self.username if self.username is not None else parsed.username
-        cmds = [
-            encode_hello3_handshake(
-                username=effective_user,
-                password=effective_password,
-                client_name=self.client_name,
-            )
-        ]
-        if self.effective_tracking_enabled:
-            tracking_cmd: list[bytes | str] = ["CLIENT", "TRACKING", "ON"]
-            for prefix in self.client_tracking_prefixes:
-                tracking_cmd.extend(["PREFIX", prefix])
-            tracking_cmd.append("BCAST")
-            cmds.append(encode_resp_command(*tracking_cmd))
-        return cmds
-
-
-class SyncRedisDriver:
+class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
     """Synchronous Redis RESP3 driver with topology routing, client cache, and pub/sub."""
 
+    dialect: ClassVar[str] = "redis"
+    dialect_tag: ClassVar[int] = 7
+
     __slots__ = (
-        "_broker",
         "_client_cache",
-        "_closed",
-        "_config",
         "_connections",
         "_invalidation_listeners",
         "_kv",
@@ -553,8 +73,8 @@ class SyncRedisDriver:
         broker: Any = None,
         socket_factory: Callable[[tuple[str, int]], socket.socket] | None = None,
     ) -> None:
-        self._config = config or RedisConfig()
-        self._broker = broker if broker is not None else self._config.broker
+        resolved = config or RedisConfig()
+        super().__init__(resolved, broker=broker)
         self._socket_factory = socket_factory
         self._kv: dict[str, bytes] = {}
         self._ttls: dict[str, float] = {}
@@ -573,23 +93,17 @@ class SyncRedisDriver:
         self._subscribed_patterns: set[str] = set()
         self._subscribed_shards: set[str] = set()
         self._lock = threading.Lock()
-        self._closed = False
         self.register_push_callback(self._on_push_frame)
 
     @property
-    def config(self) -> RedisConfig:
+    def _config(self) -> RedisConfig:
         """Return the active RedisConfig."""
-        return self._config
-
-    @property
-    def broker(self) -> Any:
-        """Return the attached broker transport if configured."""
-        return self._broker
+        return self.config
 
     @property
     def cached_keys(self) -> tuple[str, ...]:
         """Return the keys currently tracked in the local RESP3 client-side cache."""
-        if not self._config.url.startswith("memory://"):
+        if not self.config.url.startswith("memory://"):
             self._drain_idle_sockets()
         now = time.monotonic()
         expired: list[str] = []
@@ -653,7 +167,7 @@ class SyncRedisDriver:
             evicted = len(normalized)
             self._client_cache.clear()
         else:
-            normalized = [_decode_part(k) for k in keys]
+            normalized = [RedisCore.decode_part(k) for k in keys]
             evicted = 0
             for k in normalized:
                 if self._client_cache.pop(k, None) is not None:
@@ -665,7 +179,7 @@ class SyncRedisDriver:
 
     def discover_sentinel_master(self) -> tuple[str, int]:
         """Query configured Sentinel nodes for the active primary (host, port)."""
-        master_name = self._config.effective_sentinel_master_name
+        master_name = self.config.effective_sentinel_master_name
         if not master_name:
             msg = "sentinel_master_name or sentinel_service_name must be set for Sentinel discovery"
             raise ImproperConfigurationError(msg)
@@ -682,8 +196,8 @@ class SyncRedisDriver:
                 if isinstance(reply, dict):
                     reply = self._read_socket_reply(sock, buf=buf)
                 if isinstance(reply, (list, tuple)) and len(reply) >= 2:
-                    m_host = _decode_part(reply[0])
-                    m_port = int(_decode_part(reply[1]))
+                    m_host = RedisCore.decode_part(reply[0])
+                    m_port = int(RedisCore.decode_part(reply[1]))
                     self._master_address = (m_host, m_port)
                     return self._master_address
             except Exception as err:
@@ -698,7 +212,7 @@ class SyncRedisDriver:
 
     async def discover_sentinel_master_async(self) -> tuple[str, int]:
         """Asynchronously query configured Sentinel nodes for the active primary (host, port)."""
-        master_name = self._config.effective_sentinel_master_name
+        master_name = self.config.effective_sentinel_master_name
         if not master_name:
             msg = "sentinel_master_name or sentinel_service_name must be set for Sentinel discovery"
             raise ImproperConfigurationError(msg)
@@ -707,7 +221,7 @@ class SyncRedisDriver:
         for s_host, s_port in candidates:
             writer: asyncio.StreamWriter | None = None
             try:
-                ssl_ctx = ssl.create_default_context() if self._config.uses_tls else None
+                ssl_ctx = ssl.create_default_context() if self.config.uses_tls else None
                 reader, writer = await asyncio.open_connection(s_host, s_port, ssl=ssl_ctx)
                 writer.write(self.encode_command("SENTINEL", "get-master-addr-by-name", master_name))
                 await writer.drain()
@@ -716,8 +230,8 @@ class SyncRedisDriver:
                 if isinstance(reply, dict):
                     reply = await self._read_stream_reply_once(reader, buf)
                 if isinstance(reply, (list, tuple)) and len(reply) >= 2:
-                    m_host = _decode_part(reply[0])
-                    m_port = int(_decode_part(reply[1]))
+                    m_host = RedisCore.decode_part(reply[0])
+                    m_port = int(RedisCore.decode_part(reply[1]))
                     self._master_address = (m_host, m_port)
                     return self._master_address
             except Exception as err:
@@ -734,13 +248,13 @@ class SyncRedisDriver:
 
     def get(self, key: str) -> bytes | None:
         """Fetch a key value, consulting the bounded LRU client-side cache when enabled."""
-        if not self._config.url.startswith("memory://"):
+        if not self.config.url.startswith("memory://"):
             self._drain_idle_sockets()
-        if self._config.effective_tracking_enabled:
+        if self.config.effective_tracking_enabled:
             cached = self._cache_get(key)
             if cached is not None:
                 return cached
-        if self._config.url.startswith("memory://"):
+        if self.config.url.startswith("memory://"):
             with self._lock:
                 exp = self._ttls.get(key)
                 if exp is not None and time.monotonic() >= exp:
@@ -748,21 +262,21 @@ class SyncRedisDriver:
                     self._ttls.pop(key, None)
                     return None
                 val = self._kv.get(key)
-            if val is not None and self._config.effective_tracking_enabled:
+            if val is not None and self.config.effective_tracking_enabled:
                 self._cache_put(key, val)
             return val
         res = self.execute_command("GET", key)
         out = bytes(res) if isinstance(res, (bytes, bytearray)) else None
-        if out is not None and self._config.effective_tracking_enabled:
+        if out is not None and self.config.effective_tracking_enabled:
             self._cache_put(key, out)
         return out
 
     def set(self, key: str, value: bytes | str, *, ex: int | None = None) -> None:
         """Set a key value and update local bounded LRU client-side cache state."""
         raw = value.encode("utf-8") if isinstance(value, str) else bytes(value)
-        if self._config.effective_tracking_enabled:
+        if self.config.effective_tracking_enabled:
             self._cache_put(key, raw, ttl_seconds=float(ex) if ex is not None else None)
-        if self._config.url.startswith("memory://"):
+        if self.config.url.startswith("memory://"):
             with self._lock:
                 self._kv[key] = raw
                 if ex is not None:
@@ -778,7 +292,7 @@ class SyncRedisDriver:
     def delete(self, key: str) -> bool:
         """Delete a key and evict it from the client-side cache."""
         self._client_cache.pop(key, None)
-        if self._config.url.startswith("memory://"):
+        if self.config.url.startswith("memory://"):
             with self._lock:
                 self._ttls.pop(key, None)
                 return self._kv.pop(key, None) is not None
@@ -787,7 +301,7 @@ class SyncRedisDriver:
 
     def pttl(self, key: str) -> int:
         """Return the remaining time to live of a key in milliseconds."""
-        if self._config.url.startswith("memory://"):
+        if self.config.url.startswith("memory://"):
             with self._lock:
                 if key not in self._kv:
                     return -2
@@ -806,7 +320,7 @@ class SyncRedisDriver:
     def flushdb(self) -> None:
         """Clear all keys in the store and local client-side cache."""
         self._client_cache.clear()
-        if self._config.url.startswith("memory://"):
+        if self.config.url.startswith("memory://"):
             with self._lock:
                 self._kv.clear()
                 self._ttls.clear()
@@ -816,7 +330,7 @@ class SyncRedisDriver:
     def publish(self, channel: str, message: bytes | str) -> int:
         """Publish a message to a Redis or Valkey pub/sub channel."""
         raw = message.encode("utf-8") if isinstance(message, str) else bytes(message)
-        if self._config.url.startswith("memory://"):
+        if self.config.url.startswith("memory://"):
             return self._publish_memory(channel, raw)
         res = self.execute_command("PUBLISH", channel, raw)
         return int(res) if isinstance(res, int) else 1
@@ -825,7 +339,7 @@ class SyncRedisDriver:
         """Subscribe to channels on the multiplexed RESP3 connection and return a message stream."""
         for ch in channels:
             self._subscribed_channels.add(ch)
-        if channels and not self._config.url.startswith("memory://"):
+        if channels and not self.config.url.startswith("memory://"):
             self._send_pubsub_command("SUBSCRIBE", *channels)
         return _SyncSubscriptionStream(self, channels)
 
@@ -833,7 +347,7 @@ class SyncRedisDriver:
         """Subscribe to glob patterns on the multiplexed RESP3 connection."""
         for pat in patterns:
             self._subscribed_patterns.add(pat)
-        if patterns and not self._config.url.startswith("memory://"):
+        if patterns and not self.config.url.startswith("memory://"):
             self._send_pubsub_command("PSUBSCRIBE", *patterns)
         return _SyncSubscriptionStream(self, patterns)
 
@@ -841,7 +355,7 @@ class SyncRedisDriver:
         """Subscribe to cluster shard channels (SSUBSCRIBE) on the multiplexed RESP3 connection."""
         for sch in shard_channels:
             self._subscribed_shards.add(sch)
-        if shard_channels and not self._config.url.startswith("memory://"):
+        if shard_channels and not self.config.url.startswith("memory://"):
             self._send_pubsub_command("SSUBSCRIBE", *shard_channels)
         return _SyncSubscriptionStream(self, shard_channels)
 
@@ -852,12 +366,12 @@ class SyncRedisDriver:
                 self._subscribed_channels.discard(ch)
         else:
             self._subscribed_channels.clear()
-        if not self._config.url.startswith("memory://"):
+        if not self.config.url.startswith("memory://"):
             self._send_pubsub_command("UNSUBSCRIBE", *channels)
 
     def drain_messages(self) -> list[PubSubMessage]:
         """Drain and return all pending PubSubMessage items from the multiplexed subscription queue."""
-        if not self._config.url.startswith("memory://"):
+        if not self.config.url.startswith("memory://"):
             self._drain_idle_sockets()
         messages: list[PubSubMessage] = []
         while self._pubsub_queue:
@@ -881,12 +395,12 @@ class SyncRedisDriver:
 
     def execute_command(self, *parts: str | bytes | int) -> Any:
         """Execute a single RESP3 command with Cluster MOVED/ASK redirection and Sentinel support."""
-        if self._config.url.startswith("memory://"):
+        if self.config.url.startswith("memory://"):
             return self._execute_memory_command(*parts)
 
         target_node = self._select_target_node(parts)
         asking = False
-        max_redirects = max(0, self._config.max_redirections)
+        max_redirects = max(0, self.config.max_redirections)
 
         for attempt in range(max_redirects + 1):
             sock, from_pool = self._get_socket_for_node(target_node)
@@ -953,7 +467,7 @@ class SyncRedisDriver:
         """Execute a batch of pipelined RESP3 commands into a single wire buffer."""
         if not commands:
             return []
-        if self._config.url.startswith("memory://"):
+        if self.config.url.startswith("memory://"):
             return [self._execute_memory_command(*cmd) for cmd in commands]
         wire_buf = self.encode_pipeline(commands)
         target_node = self._select_target_node(commands[0])
@@ -1009,11 +523,11 @@ class SyncRedisDriver:
 
     def _cache_put(self, key: str, value: bytes, *, ttl_seconds: float | None = None) -> None:
         """Insert or update a key in the bounded LRU client cache, evicting oldest entries on overflow."""
-        capacity = self._config.effective_cache_capacity
+        capacity = self.config.effective_cache_capacity
         if capacity <= 0:
             self._client_cache.clear()
             return
-        effective_ttl = ttl_seconds if ttl_seconds is not None else self._config.client_cache_ttl_seconds
+        effective_ttl = ttl_seconds if ttl_seconds is not None else self.config.client_cache_ttl_seconds
         expires_at = (time.monotonic() + effective_ttl) if effective_ttl is not None else None
         self._client_cache[key] = (value, expires_at)
         self._client_cache.move_to_end(key)
@@ -1025,10 +539,10 @@ class SyncRedisDriver:
         if not items:
             return
         unwrapped = items
-        first = _decode_part(unwrapped[0]).lower()
+        first = RedisCore.decode_part(unwrapped[0]).lower()
         if first == "pubsub" and len(unwrapped) > 1:
             unwrapped = unwrapped[1:]
-            first = _decode_part(unwrapped[0]).lower()
+            first = RedisCore.decode_part(unwrapped[0]).lower()
 
         if first == "invalidate":
             raw_keys = unwrapped[1] if len(unwrapped) > 1 else None
@@ -1037,17 +551,17 @@ class SyncRedisDriver:
             return
 
         if first in ("message", "smessage") and len(unwrapped) >= 3:
-            ch = _decode_part(unwrapped[1])
-            payload = _ensure_bytes(unwrapped[2])
+            ch = RedisCore.decode_part(unwrapped[1])
+            payload = RedisCore.ensure_bytes(unwrapped[2])
             msg = PubSubMessage(kind=first, channel=ch, payload=payload, pattern=None)
             self._pubsub_queue.append(msg)
             self._notify_broker_pubsub(ch, payload)
             return
 
         if first == "pmessage" and len(unwrapped) >= 4:
-            pat = _decode_part(unwrapped[1])
-            ch = _decode_part(unwrapped[2])
-            payload = _ensure_bytes(unwrapped[3])
+            pat = RedisCore.decode_part(unwrapped[1])
+            ch = RedisCore.decode_part(unwrapped[2])
+            payload = RedisCore.ensure_bytes(unwrapped[3])
             msg = PubSubMessage(kind="pmessage", channel=ch, payload=payload, pattern=pat)
             self._pubsub_queue.append(msg)
             self._notify_broker_pubsub(ch, payload)
@@ -1154,7 +668,7 @@ class SyncRedisDriver:
                 cb(frame[1])
             return
         if isinstance(frame, list) and frame:
-            tag = _decode_part(frame[0]).lower()
+            tag = RedisCore.decode_part(frame[0]).lower()
             if tag in ("message", "pmessage", "smessage", "invalidate", "pubsub"):
                 for cb in self._push_callbacks:
                     cb(frame)
@@ -1172,7 +686,7 @@ class SyncRedisDriver:
                     cb(frame[1])
                 continue
             if isinstance(frame, list) and frame:
-                tag = _decode_part(frame[0]).lower()
+                tag = RedisCore.decode_part(frame[0]).lower()
                 if tag in (
                     "message",
                     "pmessage",
@@ -1221,31 +735,31 @@ class SyncRedisDriver:
 
     def _get_sentinel_candidates(self) -> list[tuple[str, int]]:
         """Return the ordered list of Sentinel (host, port) endpoints."""
-        if self._config.sentinel_nodes:
-            return [_normalize_node(n, default_port=26379) for n in self._config.sentinel_nodes]
-        parsed = urlparse(self._config.url)
+        if self.config.sentinel_nodes:
+            return [RedisCore.normalize_node(n, default_port=26379) for n in self.config.sentinel_nodes]
+        parsed = urlparse(self.config.url)
         return [(parsed.hostname or "127.0.0.1", parsed.port or 26379)]
 
     def _default_node(self) -> tuple[str, int]:
         """Return the default (host, port) target node."""
         if self._master_address is not None:
             return self._master_address
-        if self._config.effective_sentinel_enabled:
+        if self.config.effective_sentinel_enabled:
             return self.discover_sentinel_master()
-        if self._config.cluster_nodes:
-            return _normalize_node(self._config.cluster_nodes[0], default_port=6379)
-        parsed = urlparse(self._config.url)
+        if self.config.cluster_nodes:
+            return RedisCore.normalize_node(self.config.cluster_nodes[0], default_port=6379)
+        parsed = urlparse(self.config.url)
         return (parsed.hostname or "127.0.0.1", parsed.port or 6379)
 
     def _select_target_node(self, parts: Sequence[str | bytes | int]) -> tuple[str, int]:
         """Select the target (host, port) for a command based on Cluster slot map or default node."""
         if not parts:
             return self._default_node()
-        if self._config.effective_cluster_enabled or self._slot_map:
-            cmd_name = _decode_part(parts[0]).upper()
-            if len(parts) >= 2 and cmd_name not in _NON_KEY_COMMANDS:
+        if self.config.effective_cluster_enabled or self._slot_map:
+            cmd_name = RedisCore.decode_part(parts[0]).upper()
+            if len(parts) >= 2 and cmd_name not in NON_KEY_COMMANDS:
                 key_arg = parts[1]
-                key_bytes = _encode_part_bytes(key_arg)
+                key_bytes = RedisCore.encode_part_bytes(key_arg)
                 slot = hash_slot(key_bytes)
                 mapped = self._slot_map.get(slot)
                 if mapped is not None:
@@ -1254,9 +768,9 @@ class SyncRedisDriver:
 
     def _resolve_iam_token(self) -> str | None:
         """Fetch a fresh GCP Memorystore IAM token synchronously when configured."""
-        if not self._config.effective_iam_enabled:
+        if not self.config.effective_iam_enabled:
             return None
-        provider = self._config.effective_token_provider
+        provider = self.config.effective_token_provider
         if provider is None:
             return None
         token = provider()
@@ -1271,14 +785,14 @@ class SyncRedisDriver:
 
     def _build_handshake_frames(self, *, iam_token: str | None = None) -> list[bytes]:
         """Build the sequence of handshake command frames for a newly opened connection."""
-        return self._config.build_handshake_commands(iam_token=iam_token)
+        return self.config.build_handshake_commands(iam_token=iam_token)
 
     def _create_raw_socket(self, host: str, port: int) -> socket.socket:
         """Create a raw TCP or TLS socket to (host, port)."""
         if self._socket_factory is not None:
             return self._socket_factory((host, port))
         sock = socket.create_connection((host, port), timeout=10.0)
-        if self._config.uses_tls:
+        if self.config.uses_tls:
             ctx = ssl.create_default_context()
             sock = ctx.wrap_socket(sock, server_hostname=host)
         return sock
@@ -1358,13 +872,13 @@ class SyncRedisDriver:
                 self._close_socket(sock)
                 return
             if target == default_node:
-                if len(self._connections) < self._config.max_connections:
+                if len(self._connections) < self.config.max_connections:
                     self._connections.append(sock)
                 else:
                     self._close_socket(sock)
             else:
                 pool = self._node_connections.setdefault(target, collections.deque())
-                if len(pool) < self._config.max_connections:
+                if len(pool) < self.config.max_connections:
                     pool.append(sock)
                 else:
                     self._close_socket(sock)
@@ -1432,54 +946,54 @@ class SyncRedisDriver:
         """Simulate RESP3 commands against in-memory dictionary state."""
         if not parts:
             return None
-        cmd = _decode_part(parts[0]).upper()
+        cmd = RedisCore.decode_part(parts[0]).upper()
         if cmd == "GET":
-            k = _decode_part(parts[1])
+            k = RedisCore.decode_part(parts[1])
             return self.get(k)
         if cmd == "SET":
-            k = _decode_part(parts[1])
+            k = RedisCore.decode_part(parts[1])
             raw_v = parts[2]
             v = str(raw_v) if isinstance(raw_v, int) else raw_v
             ex = None
-            if len(parts) >= 5 and _decode_part(parts[3]).upper() == "EX":
+            if len(parts) >= 5 and RedisCore.decode_part(parts[3]).upper() == "EX":
                 ex = int(parts[4])
             self.set(k, v, ex=ex)
             return "OK"
         if cmd == "DEL":
             count = 0
             for raw_k in parts[1:]:
-                k = _decode_part(raw_k)
+                k = RedisCore.decode_part(raw_k)
                 if self.delete(k):
                     count += 1
             return count
         if cmd == "PTTL":
-            k = _decode_part(parts[1])
+            k = RedisCore.decode_part(parts[1])
             return self.pttl(k)
         if cmd == "FLUSHDB":
             self.flushdb()
             return "OK"
         if cmd == "PUBLISH":
-            ch = _decode_part(parts[1])
-            payload = _ensure_bytes(parts[2]) if len(parts) > 2 else b""
+            ch = RedisCore.decode_part(parts[1])
+            payload = RedisCore.ensure_bytes(parts[2]) if len(parts) > 2 else b""
             return self._publish_memory(ch, payload)
         if cmd == "PING":
             return parts[1] if len(parts) > 1 else "PONG"
         if cmd == "EVAL":
-            script = _decode_part(parts[1])
+            script = RedisCore.decode_part(parts[1])
             sha = hashlib.sha1(script.encode("utf-8")).hexdigest()
             numkeys = int(parts[2])
-            keys = [_decode_part(parts[3 + i]) for i in range(numkeys)]
+            keys = [RedisCore.decode_part(parts[3 + i]) for i in range(numkeys)]
             args = list(parts[3 + numkeys :])
             self._scripts[sha] = script
             return self._eval_memory_script(script, keys, args)
         if cmd == "EVALSHA":
-            sha = _decode_part(parts[1])
+            sha = RedisCore.decode_part(parts[1])
             if sha not in self._scripts:
                 msg = f"NOSCRIPT No matching script. Please use EVAL. (sha: {sha})"
                 raise Resp3Error(msg)
             script = self._scripts[sha]
             numkeys = int(parts[2])
-            keys = [_decode_part(parts[3 + i]) for i in range(numkeys)]
+            keys = [RedisCore.decode_part(parts[3 + i]) for i in range(numkeys)]
             args = list(parts[3 + numkeys :])
             return self._eval_memory_script(script, keys, args)
         if cmd == "CLIENT":
@@ -1502,14 +1016,14 @@ class SyncRedisDriver:
         return "OK"
 
 
-class AsyncRedisDriver:
+class AsyncRedisDriver(CommonDriverMixin[RedisConfig]):
     """Asynchronous Redis RESP3 driver with topology routing, client cache, and pub/sub."""
 
+    dialect: ClassVar[str] = "redis"
+    dialect_tag: ClassVar[int] = 7
+
     __slots__ = (
-        "_broker",
         "_client_cache",
-        "_closed",
-        "_config",
         "_connections",
         "_idle_readers",
         "_invalidation_listeners",
@@ -1528,9 +1042,9 @@ class AsyncRedisDriver:
     )
 
     def __init__(self, config: RedisConfig | None = None, *, broker: Any = None) -> None:
-        self._config = config or RedisConfig()
-        self._broker = broker if broker is not None else self._config.broker
-        self._sync = SyncRedisDriver(self._config, broker=self._broker)
+        resolved = config or RedisConfig()
+        super().__init__(resolved, broker=broker)
+        self._sync = SyncRedisDriver(self.config, broker=self._broker)
         self._client_cache = self._sync._client_cache
         self._invalidation_listeners = self._sync._invalidation_listeners
         self._slot_map = self._sync._slot_map
@@ -1549,17 +1063,11 @@ class AsyncRedisDriver:
         self._master_address: tuple[str, int] | None = None
         self._push_callbacks: list[Callable[[list[Any]], None]] = [self._sync._on_push_frame]
         self._lock = asyncio.Lock()
-        self._closed = False
 
     @property
-    def config(self) -> RedisConfig:
+    def _config(self) -> RedisConfig:
         """Return the active RedisConfig."""
-        return self._config
-
-    @property
-    def broker(self) -> Any:
-        """Return the attached broker transport if configured."""
-        return self._broker
+        return self.config
 
     @property
     def cached_keys(self) -> tuple[str, ...]:
@@ -1609,24 +1117,24 @@ class AsyncRedisDriver:
     async def get(self, key: str) -> bytes | None:
         """Asynchronously fetch a key value, consulting the bounded LRU client cache when enabled."""
         self._drain_idle_readers()
-        if self._config.effective_tracking_enabled:
+        if self.config.effective_tracking_enabled:
             cached = self._sync._cache_get(key)
             if cached is not None:
                 return cached
-        if self._config.url.startswith("memory://"):
+        if self.config.url.startswith("memory://"):
             return self._sync.get(key)
         res = await self.execute_command("GET", key)
         out = bytes(res) if isinstance(res, (bytes, bytearray)) else None
-        if out is not None and self._config.effective_tracking_enabled:
+        if out is not None and self.config.effective_tracking_enabled:
             self._sync._cache_put(key, out)
         return out
 
     async def set(self, key: str, value: bytes | str, *, ex: int | None = None) -> None:
         """Asynchronously set a key value and update bounded LRU client cache."""
         raw = value.encode("utf-8") if isinstance(value, str) else bytes(value)
-        if self._config.effective_tracking_enabled:
+        if self.config.effective_tracking_enabled:
             self._sync._cache_put(key, raw, ttl_seconds=float(ex) if ex is not None else None)
-        if self._config.url.startswith("memory://"):
+        if self.config.url.startswith("memory://"):
             self._sync.set(key, raw, ex=ex)
             return
         if ex is not None:
@@ -1637,14 +1145,14 @@ class AsyncRedisDriver:
     async def delete(self, key: str) -> bool:
         """Asynchronously delete a key and evict from client cache."""
         self._client_cache.pop(key, None)
-        if self._config.url.startswith("memory://"):
+        if self.config.url.startswith("memory://"):
             return self._sync.delete(key)
         res = await self.execute_command("DEL", key)
         return bool(res and res > 0)
 
     async def pttl(self, key: str) -> int:
         """Return remaining TTL of key in milliseconds."""
-        if self._config.url.startswith("memory://"):
+        if self.config.url.startswith("memory://"):
             return self._sync.pttl(key)
         res = await self.execute_command("PTTL", key)
         return int(res) if isinstance(res, int) else -2
@@ -1652,7 +1160,7 @@ class AsyncRedisDriver:
     async def flushdb(self) -> None:
         """Asynchronously clear all keys in the store and client cache."""
         self._client_cache.clear()
-        if self._config.url.startswith("memory://"):
+        if self.config.url.startswith("memory://"):
             self._sync.flushdb()
             return
         await self.execute_command("FLUSHDB")
@@ -1660,7 +1168,7 @@ class AsyncRedisDriver:
     async def publish(self, channel: str, message: bytes | str) -> int:
         """Asynchronously publish a message to a Redis or Valkey pub/sub channel."""
         raw = message.encode("utf-8") if isinstance(message, str) else bytes(message)
-        if self._config.url.startswith("memory://"):
+        if self.config.url.startswith("memory://"):
             return self._sync._publish_memory(channel, raw)
         res = await self.execute_command("PUBLISH", channel, raw)
         return int(res) if isinstance(res, int) else 1
@@ -1690,7 +1198,7 @@ class AsyncRedisDriver:
                 self._subscribed_channels.discard(ch)
         else:
             self._subscribed_channels.clear()
-        if not self._config.url.startswith("memory://"):
+        if not self.config.url.startswith("memory://"):
             await self._send_pubsub_command_async("UNSUBSCRIBE", *channels)
 
     def drain_messages(self) -> _AwaitableMessageList:
@@ -1718,12 +1226,12 @@ class AsyncRedisDriver:
 
     async def execute_command(self, *parts: str | bytes | int) -> Any:
         """Asynchronously execute a single RESP3 command with Cluster MOVED/ASK redirection."""
-        if self._config.url.startswith("memory://"):
+        if self.config.url.startswith("memory://"):
             return self._sync._execute_memory_command(*parts)
 
         target_node = await self._select_target_node_async(parts)
         asking = False
-        max_redirects = max(0, self._config.max_redirections)
+        max_redirects = max(0, self.config.max_redirections)
 
         for attempt in range(max_redirects + 1):
             reader, writer, from_pool = await self._get_connection_for_node(target_node)
@@ -1793,7 +1301,7 @@ class AsyncRedisDriver:
         """Asynchronously execute a batch of pipelined RESP3 commands."""
         if not commands:
             return []
-        if self._config.url.startswith("memory://"):
+        if self.config.url.startswith("memory://"):
             return self._sync.execute_pipeline(commands)
         wire_buf = self._sync.encode_pipeline(commands)
         target_node = await self._select_target_node_async(commands[0])
@@ -1912,21 +1420,21 @@ class AsyncRedisDriver:
         if self._sync._master_address is not None:
             self._master_address = self._sync._master_address
             return self._master_address
-        if self._config.effective_sentinel_enabled:
+        if self.config.effective_sentinel_enabled:
             return await self.discover_sentinel_master()
-        if self._config.cluster_nodes:
-            return _normalize_node(self._config.cluster_nodes[0], default_port=6379)
-        parsed = urlparse(self._config.url)
+        if self.config.cluster_nodes:
+            return RedisCore.normalize_node(self.config.cluster_nodes[0], default_port=6379)
+        parsed = urlparse(self.config.url)
         return (parsed.hostname or "127.0.0.1", parsed.port or 6379)
 
     async def _select_target_node_async(self, parts: Sequence[str | bytes | int]) -> tuple[str, int]:
         """Select the target (host, port) for an async command using the Cluster slot map."""
         if not parts:
             return await self._default_node_async()
-        if self._config.effective_cluster_enabled or self._slot_map:
-            cmd_name = _decode_part(parts[0]).upper()
-            if len(parts) >= 2 and cmd_name not in _NON_KEY_COMMANDS:
-                key_bytes = _encode_part_bytes(parts[1])
+        if self.config.effective_cluster_enabled or self._slot_map:
+            cmd_name = RedisCore.decode_part(parts[0]).upper()
+            if len(parts) >= 2 and cmd_name not in NON_KEY_COMMANDS:
+                key_bytes = RedisCore.encode_part_bytes(parts[1])
                 slot = hash_slot(key_bytes)
                 mapped = self._slot_map.get(slot)
                 if mapped is not None:
@@ -1935,9 +1443,9 @@ class AsyncRedisDriver:
 
     async def _resolve_iam_token(self) -> str | None:
         """Fetch a fresh GCP Memorystore IAM token (sync or async callable) when configured."""
-        if not self._config.effective_iam_enabled:
+        if not self.config.effective_iam_enabled:
             return None
-        provider = self._config.effective_token_provider
+        provider = self.config.effective_token_provider
         if provider is None:
             return None
         res = provider()
@@ -1947,7 +1455,7 @@ class AsyncRedisDriver:
 
     def _build_handshake_frames(self, *, iam_token: str | None = None) -> list[bytes]:
         """Build the sequence of handshake command frames for a newly opened async stream."""
-        return self._config.build_handshake_commands(iam_token=iam_token)
+        return self.config.build_handshake_commands(iam_token=iam_token)
 
     def _install_reader_hook(self, reader: asyncio.StreamReader) -> None:
         """Install a feed_data hook on reader to process push frames while idle in the pool."""
@@ -1975,7 +1483,7 @@ class AsyncRedisDriver:
             target_port = port or default_port
         else:
             target_host, target_port = host, port
-        ssl_ctx = ssl.create_default_context() if self._config.uses_tls else None
+        ssl_ctx = ssl.create_default_context() if self.config.uses_tls else None
         reader, writer = await asyncio.open_connection(target_host, target_port, ssl=ssl_ctx)
         buf = bytearray()
         self._reader_buffers[id(reader)] = buf
@@ -2047,14 +1555,14 @@ class AsyncRedisDriver:
             self._pull_transport_buffer(reader, buf)
             self._sync._consume_buffered_push_frames(buf)
             if target == default_node:
-                if len(self._connections) < self._config.max_connections:
+                if len(self._connections) < self.config.max_connections:
                     self._idle_readers.add(id(reader))
                     self._connections.append((reader, writer))
                 else:
                     await self._close_connection(reader, writer)
             else:
                 pool = self._node_connections.setdefault(target, collections.deque())
-                if len(pool) < self._config.max_connections:
+                if len(pool) < self.config.max_connections:
                     self._idle_readers.add(id(reader))
                     pool.append((reader, writer))
                 else:
@@ -2134,7 +1642,7 @@ class _SyncSubscriptionStream:
         while self._driver._pubsub_queue:
             msg = self._driver._pubsub_queue.popleft()
             yield msg.channel, msg.payload
-        if self._driver._config.url.startswith("memory://"):
+        if self._driver.config.url.startswith("memory://"):
             return
         sock = self._driver._get_socket()
         buf = self._driver._socket_buffers.setdefault(id(sock), bytearray())
@@ -2172,7 +1680,7 @@ class _AsyncSubscriptionStream:
         return self._execute_subscribe().__await__()
 
     async def _execute_subscribe(self) -> _AsyncSubscriptionStream:
-        if self._channels and not self._driver._config.url.startswith("memory://"):
+        if self._channels and not self._driver.config.url.startswith("memory://"):
             await self._driver._send_pubsub_command_async(self._command, *self._channels)
         return self
 
@@ -2183,7 +1691,7 @@ class _AsyncSubscriptionStream:
         while self._driver._pubsub_queue:
             queued = self._driver._pubsub_queue.popleft()
             yield queued.channel, queued.payload
-        if self._driver._config.url.startswith("memory://"):
+        if self._driver.config.url.startswith("memory://"):
             return
         reader, writer = await self._driver._open_stream()
         buf = self._driver._reader_buffers.setdefault(id(reader), bytearray())
@@ -2219,47 +1727,3 @@ class _AsyncSubscriptionStream:
                     yield msg.channel, msg.payload
         finally:
             await self._driver._close_connection(reader, writer)
-
-
-def _get_native_module() -> Any | None:
-    """Return the optional native Rust extension module when compiled."""
-    return import_optional("vertebra._vertebra")
-
-
-def _decode_part(part: str | bytes | int) -> str:
-    """Decode a command or frame part to string."""
-    if isinstance(part, bytes):
-        return part.decode("utf-8")
-    return str(part)
-
-
-def _encode_part_bytes(part: str | bytes | int) -> bytes:
-    """Encode a command part to raw bytes."""
-    if isinstance(part, int):
-        return str(part).encode("ascii")
-    if isinstance(part, str):
-        return part.encode("utf-8")
-    return bytes(part)
-
-
-def _ensure_bytes(value: Any) -> bytes:
-    """Convert a frame payload to bytes."""
-    if isinstance(value, bytes):
-        return value
-    if isinstance(value, bytearray):
-        return bytes(value)
-    return str(value).encode("utf-8")
-
-
-def _normalize_node(node: tuple[str, int] | str, *, default_port: int = 6379) -> tuple[str, int]:
-    """Normalize a node endpoint from either (host, port) or 'host:port' string."""
-    if isinstance(node, tuple):
-        return (str(node[0]), int(node[1]))
-    raw = str(node).strip()
-    if "://" in raw:
-        parsed = urlparse(raw)
-        return (parsed.hostname or "127.0.0.1", parsed.port or default_port)
-    if ":" in raw:
-        host, port_s = raw.rsplit(":", 1)
-        return (host.strip("[]"), int(port_s))
-    return (raw, default_port)

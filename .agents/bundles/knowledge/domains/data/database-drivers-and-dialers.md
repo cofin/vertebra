@@ -1,9 +1,9 @@
 ---
 type: Guide
 title: "Database Drivers & Cloud Dialers"
-description: "The `vertebra-db` and `vertebra.db` Rust-native shared-memory drivers across PostgreSQL, MySQL, SQLite, Oracle, SQL Server, DuckDB, Redis, and Valkey, `ArrowCursor`, `DatabaseRegistry`, and Cloud SQL and AlloyDB mTLS dialers."
+description: "The `vertebra-db` and `vertebra.db` Rust-native shared-memory drivers across PostgreSQL, MySQL, SQLite, Oracle, SQL Server, DuckDB, BigQuery, Spanner, Redis, and Valkey, the `vertebra.db.driver` base hierarchy, `ArrowCursor`, `DatabaseRegistry`, and Cloud SQL / AlloyDB dialers."
 status: stable
-tags: [domains, database, drivers, cloud-sql, alloydb, arrow, shm]
+tags: [domains, database, drivers, bigquery, spanner, cloud-sql, alloydb, arrow, shm]
 sources:
   - resource: src/rs/vertebra-db/src/lib.rs
   - resource: src/rs/vertebra-db/src/postgres.rs
@@ -12,55 +12,68 @@ sources:
   - resource: src/rs/vertebra-db/src/oracle.rs
   - resource: src/rs/vertebra-db/src/tns.rs
   - resource: src/rs/vertebra-db/src/mssql.rs
-  - resource: src/rs/vertebra-db/src/duckdb_engine.rs
+  - resource: src/rs/vertebra-db/src/duckdb.rs
+  - resource: src/rs/vertebra-db/src/bigquery.rs
+  - resource: src/rs/vertebra-db/src/spanner.rs
   - resource: src/rs/vertebra-db/src/resp3.rs
   - resource: src/rs/vertebra-db/src/dialer.rs
   - resource: src/py/vertebra/db/__init__.py
   - resource: src/py/vertebra/db/_registry.py
-  - resource: src/py/vertebra/db/postgres.py
-  - resource: src/py/vertebra/db/mysql.py
-  - resource: src/py/vertebra/db/sqlite.py
-  - resource: src/py/vertebra/db/oracle.py
-  - resource: src/py/vertebra/db/mssql.py
-  - resource: src/py/vertebra/db/duckdb.py
-  - resource: src/py/vertebra/db/redis.py
-  - resource: src/py/vertebra/db/valkey.py
+  - resource: src/py/vertebra/db/driver/__init__.py
+  - resource: src/py/vertebra/db/driver/_common.py
+  - resource: src/py/vertebra/db/driver/_sync.py
+  - resource: src/py/vertebra/db/driver/_async.py
+  - resource: src/py/vertebra/db/postgres/__init__.py
+  - resource: src/py/vertebra/db/mysql/__init__.py
+  - resource: src/py/vertebra/db/sqlite/__init__.py
+  - resource: src/py/vertebra/db/oracle/__init__.py
+  - resource: src/py/vertebra/db/mssql/__init__.py
+  - resource: src/py/vertebra/db/duckdb/__init__.py
+  - resource: src/py/vertebra/db/bigquery/__init__.py
+  - resource: src/py/vertebra/db/spanner/__init__.py
+  - resource: src/py/vertebra/db/redis/__init__.py
+  - resource: src/py/vertebra/db/valkey/__init__.py
   - resource: src/py/vertebra/db/dialer/cloudsql.py
   - resource: src/py/vertebra/db/dialer/alloydb.py
   - resource: src/py/tests/unit/db/test_native_db_drivers.py
   - resource: src/py/tests/unit/db/test_enterprise_olap_drivers.py
   - resource: src/py/tests/unit/db/test_redis_valkey_resp3.py
+  - resource: src/py/tests/unit/db/test_bigquery.py
+  - resource: src/py/tests/unit/db/test_spanner.py
 ---
 
 # Database Drivers & Cloud Dialers
 
 <!-- truth: start -->
+- **Structured Per-Driver Package Layout (`src/py/vertebra/db/<driver>/{config,core,driver,__init__}.py` & `src/py/vertebra/db/driver/`)**: Every built-in database and cache driver in `vertebra.db` (`postgres`, `mysql`, `sqlite`, `oracle`, `mssql`, `duckdb`, `bigquery`, `spanner`, `redis`, `valkey`) is organized as a package with `config.py` (`msgspec.Struct(..., frozen=True, gc=False, kw_only=True)` inheriting `BaseDatabaseConfig`), `core.py` (compiled domain core class encapsulating wire codecs, parameter normalization, and SQL rewrites), `driver.py` (`Sync*Driver(SyncDatabaseDriver)` and `Async*Driver(AsyncDatabaseDriver)`), and `__init__.py`.
 - **Binary Vector Wire Codecs (`postgres.rs`, `oracle.rs`, `vertebra-py/src/db.rs`)**: PostgreSQL (`postgres.rs`) encodes and decodes binary `pgvector` (`vector` `f32`, `halfvec` `f16`, and `bit` bit-packed) frames without text formatting, while Oracle 26ai (`oracle.rs`, `vertebra-py/src/db.rs`) encodes and decodes binary `0xDB` `VECTOR` frames directly over PEP 3118 `PyBuffer` views (`encode_oracle_vector_binary`, `decode_oracle_vector_binary`).
-- **Per-Session DuckDB `httpfs` Secret Rotation (`duckdb.py`, `duckdb_engine.rs`)**: Each pooled DuckDB connection tracks `applied_token_generation: u64` against the shared [`GcpTokenCache`](../../../../../src/rs/vertebra-storage/src/gcp_auth.rs) and executes `CREATE OR REPLACE SECRET vtb_gcs_adc (TYPE GCS, BEARER_TOKEN '...')` whenever the cached ADC token generation advances.
+- **Per-Session DuckDB `httpfs` Secret Rotation (`duckdb/`, `duckdb.rs`)**: Each pooled DuckDB connection tracks `applied_token_generation: u64` against the shared [`GcpTokenCache`](../../../../../src/rs/vertebra-storage/src/gcp_auth.rs) and executes `CREATE OR REPLACE SECRET vtb_gcs_adc (TYPE GCS, BEARER_TOKEN '...')` whenever the cached ADC token generation advances.
 <!-- truth: end -->
 
-[`src/rs/vertebra-db`](../../../../../src/rs/vertebra-db/src/lib.rs) and [`vertebra.db`](../../../../../src/py/vertebra/db/__init__.py) implement Vertebra's Tier-1 shared-memory database and cache drivers, typed connection configs (`msgspec.Struct(frozen=True, gc=False, kw_only=True)`), zero-copy `ShmRegion` Arrow IPC cursors, and Cloud SQL / AlloyDB mTLS dialers. Query composition, CDC, and tenancy in the same package are covered in [query-pipeline-cdc-and-tenancy](query-pipeline-cdc-and-tenancy.md).
+[`src/rs/vertebra-db`](../../../../../src/rs/vertebra-db/src/lib.rs) and [`vertebra.db`](../../../../../src/py/vertebra/db/__init__.py) implement Vertebra's Tier-1 shared-memory database and cache drivers, the [`vertebra.db.driver`](../../../../../src/py/vertebra/db/driver/__init__.py) base hierarchy (`BaseDatabaseConfig`, `CommonDriverMixin`, `SyncDatabaseDriver`, `AsyncDatabaseDriver`, `ThreadOffloadAsyncDatabaseDriver`), zero-copy `ShmRegion` Arrow IPC cursors, and Cloud SQL / AlloyDB mTLS and IAM token dialers. Query composition, CDC, and tenancy in the same package are covered in [query-pipeline-cdc-and-tenancy](query-pipeline-cdc-and-tenancy.md).
 
 ## 1. Registry (`_registry.py`)
 
 [`DatabaseRegistry`](../../../../../src/py/vertebra/db/_registry.py) maps names to configs and lazily built drivers.
 
-- `parse_url(url, **overrides)` dispatches on the scheme prefix before `+`: `postgres`/`postgresql` → `PostgresConfig`, `mysql`/`mariadb` → `MySQLConfig`, `sqlite` → `SQLiteConfig` (`:memory:` for an empty path), `oracle` → `OracleConfig`, `mssql`/`sqlserver` → `MSSQLConfig`, `duckdb` → `DuckDBConfig`, `redis`/`rediss` → `RedisConfig`, `valkey`/`valkeys` → `ValkeyConfig`, `cloudsql` → `CloudSQLConfig`, `alloydb` → `AlloyDBConfig`.
+- `parse_url(url, **overrides)` dispatches on the scheme prefix before `+`: `postgres`/`postgresql` → `PostgresConfig`, `mysql`/`mariadb` → `MySQLConfig`, `sqlite` → `SQLiteConfig` (`:memory:` for an empty path), `oracle` → `OracleConfig`, `mssql`/`sqlserver` → `MSSQLConfig`, `duckdb` → `DuckDBConfig`, `bigquery` → `BigQueryConfig`, `spanner` → `SpannerConfig`, `redis`/`rediss` → `RedisConfig`, `valkey`/`valkeys` → `ValkeyConfig`, `cloudsql` → `CloudSQLConfig`, `alloydb` → `AlloyDBConfig`.
 - `register(name, config_or_url)` stores a config and drops any cached driver. `get_driver(name)` builds the `Async*Driver` or dialer that matches the config type.
-- [`vertebra.extensions.sqlalchemy.dialects`](../../../../../src/py/vertebra/extensions/sqlalchemy/dialects.py) integrates all six relational/analytical drivers into SQLAlchemy 2.1 via the `+vtb` dialect suffix (`{postgresql,oracle,mysql,sqlite,mssql,duckdb}+{vertebra,vtb}`).
+- [`vertebra.extensions.sqlalchemy.dialects`](../../../../../src/py/vertebra/extensions/sqlalchemy/dialects.py) integrates the relational and analytical drivers into SQLAlchemy 2.1 via the `+vtb` dialect suffix (`{postgresql,oracle,mysql,sqlite,mssql,duckdb,bigquery,spanner,spangres}+{vertebra,vtb}`).
 
 ## 2. Driver Implementations (`vertebra-db` & `vertebra.db`)
 
-| Module | Config | Driver behavior |
+| Package / Module | Config & Core | Driver behavior |
 |---|---|---|
-| [`postgres.py`](../../../../../src/py/vertebra/db/postgres.py) / [`postgres.rs`](../../../../../src/rs/vertebra-db/src/postgres.rs) | `PostgresConfig`, `PoolerMode = Literal["direct", "transaction", "session"]` | Native v3 wire framing (`StartupMessage`, `SASLInitialResponse` / `SASLResponse` SCRAM-SHA-256, `Parse`/`Bind`/`Describe`/`Execute`/`Sync`, binary `DataRow`, `CopyOutResponse`). `strip_jsonb_header` validates the `0x01` JSONB version byte and returns a zero-copy `memoryview` slice. Supports `execute_arrow_shm()` into `ArrowCursor`. |
-| [`mysql.py`](../../../../../src/py/vertebra/db/mysql.py) / [`mysql.rs`](../../../../../src/rs/vertebra-db/src/mysql.rs) | `MySQLConfig` | Handshake v10 packet parsing, `caching_sha2_password` / `mysql_native_password` auth, `COM_QUERY` and `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` dispatch, length-encoded integer and binary result row decoding, and `execute_arrow_shm()`. |
-| [`sqlite.py`](../../../../../src/py/vertebra/db/sqlite.py) / [`sqlite.rs`](../../../../../src/rs/vertebra-db/src/sqlite.rs) | `SQLiteConfig` | Opens WAL-mode connections (`journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout`, `mmap_size`, `temp_store=MEMORY`), serializes writes through `LeaseBroker` slots when `broker` is attached, and streams `execute_arrow_shm()` via `ArrowCursor`. |
-| [`oracle.py`](../../../../../src/py/vertebra/db/oracle.py) / [`oracle.rs`](../../../../../src/rs/vertebra-db/src/oracle.rs) | `OracleConfig` | Pure-Rust Thin TNS/TTC framing (zero ODPI-C / Instant Client dependency), Autonomous Database mTLS `ewallet.pem` + `tnsnames.ora` zip extraction, `O5LOGON` verifier parsing, and native Oracle 26ai `VECTOR` (`FLOAT32`/`FLOAT64`/`INT8`/`BINARY`) and `OSON` binary JSON codecs (`encode_vector_binary`, `decode_vector_binary`, `encode_oson_frame`, `decode_oson_frame`). |
-| [`mssql.py`](../../../../../src/py/vertebra/db/mssql.py) / [`mssql.rs`](../../../../../src/rs/vertebra-db/src/mssql.rs) | `MSSQLConfig` | Pure-Rust `tiberius` TDS 7.4/8.0 wire protocol (`PRELOGIN` `0x12`, `LOGIN7` `0x10`, `SQL_BATCH` `0x01`, `RPC_REQUEST` `0x03` `sp_executesql`), automatic positional (`?`/`$1`) and named (`:name`) parameter rewriting to `@P1..@Pn` via `rewrite_sql_to_tds_params`, and Cloud SQL for SQL Server `:3307` TLS routing. |
-| [`duckdb.py`](../../../../../src/py/vertebra/db/duckdb.py) / [`duckdb_engine.rs`](../../../../../src/rs/vertebra-db/src/duckdb_engine.rs) | `DuckDBConfig` | Single-writer / multi-reader SHM analytical architecture preventing `IO Error: Could not set lock on file` across multi-worker forks, DuckDB 2.0-safe startup pragmas (`threads`, `memory_limit`, `temp_directory`, `preserve_insertion_order`), and zero-copy Arrow `RecordBatch` streaming over `ShmRegion` (`execute_arrow_shm()`). |
-| [`redis.py`](../../../../../src/py/vertebra/db/redis.py) / [`resp3.rs`](../../../../../src/rs/vertebra-db/src/resp3.rs) | `RedisConfig` | Rust `RESP2`/`RESP3` parser (`+`, `-`, `:`, `$`, `*`, `_`, `,`, `#`, `!`, `=`, `%`, `~`, `>`, `\|`), `HELLO 3` negotiation, `CLIENT TRACKING ON ... BCAST` invalidation push handling with bounded LRU cache, Sentinel master discovery, Cluster CRC16 slot routing (`MOVED`/`ASK`), and multiplexed Pub/Sub fan-out. |
-| [`valkey.py`](../../../../../src/py/vertebra/db/valkey.py) | `ValkeyConfig` | Full Redis RESP3 compatibility plus Valkey 8.0+/9.0+ client tracking, Cluster slot routing, and GCP Memorystore IAM token authentication (`needs_iam_refresh` / `authenticate_iam`). |
+| [`postgres/`](../../../../../src/py/vertebra/db/postgres/__init__.py) / [`postgres.rs`](../../../../../src/rs/vertebra-db/src/postgres.rs) | `PostgresConfig`, `PostgreSQLCore`, `PoolerMode = Literal["direct", "transaction", "session"]` | Native v3 wire framing (`StartupMessage`, `SASLInitialResponse` / `SASLResponse` SCRAM-SHA-256, `Parse`/`Bind`/`Describe`/`Execute`/`Sync`, binary `DataRow`, `CopyOutResponse`). `PostgreSQLCore.strip_jsonb_header` validates the `0x01` JSONB version byte and returns a zero-copy `memoryview` slice. Supports `execute_arrow_shm()` into `ArrowCursor` and direct `:5432` IAM OAuth2 token password authentication (`enable_iam_auth=True`). |
+| [`mysql/`](../../../../../src/py/vertebra/db/mysql/__init__.py) / [`mysql.rs`](../../../../../src/rs/vertebra-db/src/mysql.rs) | `MySQLConfig`, `MySQLCore` | Handshake v10 packet parsing, `caching_sha2_password` / `mysql_native_password` / `mysql_clear_password` auth, `COM_QUERY` and `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` dispatch, length-encoded integer and binary result row decoding, `execute_arrow_shm()`, and direct `:3306` IAM OAuth2 token password authentication (`enable_iam_auth=True`). |
+| [`sqlite/`](../../../../../src/py/vertebra/db/sqlite/__init__.py) / [`sqlite.rs`](../../../../../src/rs/vertebra-db/src/sqlite.rs) | `SQLiteConfig`, `SQLiteCore` | Opens WAL-mode connections (`journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout`, `mmap_size`, `temp_store=MEMORY`), serializes writes through `LeaseBroker` slots when `broker` is attached, and streams `execute_arrow_shm()` via `ArrowCursor`. |
+| [`oracle/`](../../../../../src/py/vertebra/db/oracle/__init__.py) / [`oracle.rs`](../../../../../src/rs/vertebra-db/src/oracle.rs) | `OracleConfig`, `OracleCore` | Pure-Rust Thin TNS/TTC framing (zero ODPI-C / Instant Client dependency), Autonomous Database mTLS `ewallet.pem` + `tnsnames.ora` zip extraction, `O5LOGON` verifier parsing, and native Oracle 26ai `VECTOR` (`FLOAT32`/`FLOAT64`/`INT8`/`BINARY`) and `OSON` binary JSON codecs (`OracleCore.encode_vector_binary`, `OracleCore.decode_vector_binary`, `OracleCore.encode_oson_frame`, `OracleCore.decode_oson_frame`). |
+| [`mssql/`](../../../../../src/py/vertebra/db/mssql/__init__.py) / [`mssql.rs`](../../../../../src/rs/vertebra-db/src/mssql.rs) | `MSSQLConfig`, `MSSQLCore` | Pure-Rust TDS 7.4/8.0 wire protocol (`PRELOGIN` `0x12`, `LOGIN7` `0x10`, `SQL_BATCH` `0x01`, `RPC_REQUEST` `0x03` `sp_executesql`), automatic positional (`?`/`$1`) and named (`:name`) parameter rewriting to `@P1..@Pn` via `MSSQLCore.rewrite_sql_to_tds_params`, and Cloud SQL for SQL Server `:3307` TLS routing. |
+| [`duckdb/`](../../../../../src/py/vertebra/db/duckdb/__init__.py) / [`duckdb.rs`](../../../../../src/rs/vertebra-db/src/duckdb.rs) | `DuckDBConfig`, `DuckDBCore` | Single-writer / multi-reader SHM analytical architecture preventing `IO Error: Could not set lock on file` across multi-worker forks, DuckDB 2.0-safe startup pragmas (`threads`, `memory_limit`, `temp_directory`, `preserve_insertion_order`), and zero-copy Arrow `RecordBatch` streaming over `ShmRegion` (`execute_arrow_shm()`). |
+| [`bigquery/`](../../../../../src/py/vertebra/db/bigquery/__init__.py) / [`bigquery.rs`](../../../../../src/rs/vertebra-db/src/bigquery.rs) | `BigQueryConfig`, `BigQueryCore` | Pure-Rust BigQuery REST v2 (`jobs.query`, `jobs.getQueryResults`, `jobs.insert` dry-run) + Storage Read/Write gRPC APIs (`CreateReadSession`, `ReadRows`, `AppendRows`) streaming into `VTBARROW` shared memory (`ArrowCursor`), with automatic fallback to `jobs.query` when `bigquerystorage.googleapis.com` is disabled (`SERVICE_DISABLED` / `PERMISSION_DENIED`). |
+| [`spanner/`](../../../../../src/py/vertebra/db/spanner/__init__.py) / [`spanner.rs`](../../../../../src/rs/vertebra-db/src/spanner.rs) | `SpannerConfig`, `SpannerCore` | Pure-Rust Cloud Spanner v1 gRPC (`CreateSession` multiplexed session, `ExecuteStreamingSql`, `ExecuteBatchDml`, `Commit` with inline `BeginTransaction`, `MultiplexedSessionPrecommitToken` tracking, `BatchWrite`, `PartitionQuery` + Data Boost `VTBARROW` `ArrowCursor`) across GoogleSQL and Spangres dialects. |
+| [`redis/`](../../../../../src/py/vertebra/db/redis/__init__.py) / [`resp3.rs`](../../../../../src/rs/vertebra-db/src/resp3.rs) | `RedisConfig`, `RedisCore` | Rust `RESP2`/`RESP3` parser (`+`, `-`, `:`, `$`, `*`, `_`, `,`, `#`, `!`, `=`, `%`, `~`, `>`, `\|`), `HELLO 3` negotiation, `CLIENT TRACKING ON ... BCAST` invalidation push handling with bounded LRU cache, Sentinel master discovery, Cluster CRC16 slot routing (`MOVED`/`ASK`), and multiplexed Pub/Sub fan-out. |
+| [`valkey/`](../../../../../src/py/vertebra/db/valkey/__init__.py) | `ValkeyConfig`, `ValkeyCore` | Full Redis RESP3 compatibility plus Valkey 8.0+/9.0+ client tracking, Cluster slot routing, and GCP Memorystore IAM token authentication (`needs_iam_refresh` / `authenticate_iam`). |
 
 `PostgresConfig` rules:
 

@@ -1,149 +1,196 @@
-"""SQLite WAL driver with SQLite 3.45+ binary JSONB, SHM broker leasing, and Arrow IPC support."""
+"""Synchronous and asynchronous SQLite WAL drivers."""
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
 import sqlite3
 from collections.abc import Mapping, Sequence
-from pathlib import Path
-from typing import Any
-
-import msgspec
+from typing import Any, ClassVar
 
 from vertebra.db._arrow import (
     ArrowCursor,
     _hydrate_rows_with_schema,
     _table_to_rows_and_cols,
-    write_arrow_shm,
 )
-from vertebra.db.postgres import _normalize_driver_params
-from vertebra.typing import FrozenBaseStruct
-from vertebra.utils.module_loader import import_optional
+from vertebra.db.driver import (
+    SyncDatabaseDriver,
+    ThreadOffloadAsyncDatabaseDriver,
+    _normalize_driver_params,
+)
+from vertebra.db.sqlite.config import SQLiteConfig
+from vertebra.db.sqlite.core import VALID_SQLITE_SYNCHRONOUS
 
 __all__ = (
-    "ArrowCursor",
     "AsyncSQLiteDriver",
-    "SQLiteConfig",
     "SyncSQLiteDriver",
 )
 
-_VALID_SYNCHRONOUS = {"OFF", "NORMAL", "FULL", "EXTRA"}
 
-
-class SQLiteConfig(FrozenBaseStruct, frozen=True, gc=False):
-    """Configuration for SQLite 3.45+ with WAL mode, memory-mapped I/O, and SHM broker leasing."""
-
-    path: str = ":memory:"
-    """Filesystem path to the SQLite database file or `":memory:"`."""
-    wal_mode: bool = True
-    """When True, enable `PRAGMA journal_mode = WAL` for concurrent readers alongside a single writer."""
-    synchronous: str = "NORMAL"
-    """SQLite `PRAGMA synchronous` durability level (`"OFF"`, `"NORMAL"`, `"FULL"`, or `"EXTRA"`)."""
-    mmap_size: int = 268_435_456
-    """Maximum memory-mapped I/O window in bytes (`PRAGMA mmap_size`, default 256 MiB)."""
-    busy_timeout_ms: int = 5000
-    """Lock contention wait timeout in milliseconds (`PRAGMA busy_timeout`)."""
-    max_readers: int = 8
-    """Maximum number of concurrent read connections leased across workers."""
-    foreign_keys: bool = True
-    """When True, enforce referential integrity via `PRAGMA foreign_keys = ON`."""
-    broker: Any = None
-    """Optional shared-memory `DatabaseBroker` coordinating single-writer/multi-reader leases."""
-    database: str | Path | None = None
-    """Optional alias for `path` accepting a `pathlib.Path` or string."""
-    enable_jsonb: bool = True
-    """When True, use SQLite 3.45+ binary `JSONB` functions when available."""
-
-    def __post_init__(self) -> None:
-        if self.database is not None and self.path == ":memory:":
-            msgspec.structs.force_setattr(self, "path", str(self.database))
-        if self.database is None:
-            msgspec.structs.force_setattr(self, "database", self.path)
-        if self.busy_timeout_ms < 0:
-            msg = f"busy_timeout_ms must be non-negative (got {self.busy_timeout_ms})"
-            raise ValueError(msg)
-        sync_upper = self.synchronous.upper()
-        if sync_upper not in _VALID_SYNCHRONOUS:
-            msg = f"Invalid synchronous mode: {self.synchronous!r}"
-            raise ValueError(msg)
-        msgspec.structs.force_setattr(self, "synchronous", sync_upper)
-
-    @property
-    def is_in_memory(self) -> bool:
-        """Return True if the target database is in-memory."""
-        raw = str(self.path)
-        return raw == ":memory:" or "mode=memory" in raw
-
-    def initialization_pragmas(self) -> list[str]:
-        """Return the list of PRAGMA statements executed upon connection initialization."""
-        native_mod = import_optional("vertebra._vertebra")
-        if native_mod is not None:
-            native_fn = getattr(native_mod, "sqlite_initialization_pragmas", None)
-            if callable(native_fn):
-                with contextlib.suppress(TypeError, ValueError, RuntimeError):
-                    res = native_fn(
-                        self.wal_mode,
-                        self.synchronous,
-                        self.mmap_size,
-                        self.busy_timeout_ms,
-                        self.foreign_keys,
-                    )
-                    if isinstance(res, list) and all(isinstance(p, str) for p in res):
-                        return list(res)
-
-        pragmas = [f"PRAGMA busy_timeout = {self.busy_timeout_ms}"]
-        if self.wal_mode:
-            pragmas.append("PRAGMA journal_mode = WAL")
-        pragmas.append(f"PRAGMA synchronous = {self.synchronous}")
-        if self.mmap_size > 0:
-            pragmas.append(f"PRAGMA mmap_size = {self.mmap_size}")
-        pragmas.append(f"PRAGMA foreign_keys = {'ON' if self.foreign_keys else 'OFF'}")
-        return pragmas
-
-    def startup_pragmas(self) -> list[str]:
-        """Return startup PRAGMA statements for connection initialization."""
-        return self.initialization_pragmas()
-
-
-class SyncSQLiteDriver:
+class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
     """Synchronous SQLite driver returning plain Python tuples with SHM broker and Arrow IPC support."""
 
-    __slots__ = ("_broker", "_closed", "_config", "_conn")
+    dialect: ClassVar[str] = "sqlite"
+    dialect_tag: ClassVar[int] = 3
+
+    __slots__ = ("_conn",)
 
     def __init__(self, config: SQLiteConfig | None = None, *, broker: Any = None) -> None:
-        self._config = config or SQLiteConfig()
-        if self._config.synchronous not in _VALID_SYNCHRONOUS:
-            msg = f"Invalid synchronous mode: {self._config.synchronous!r}"
+        resolved = config or SQLiteConfig()
+        if resolved.synchronous not in VALID_SQLITE_SYNCHRONOUS:
+            msg = f"Invalid synchronous mode: {resolved.synchronous!r}"
             raise ValueError(msg)
-        self._broker = broker if broker is not None else self._config.broker
-        self._closed = False
-        self._conn = sqlite3.connect(str(self._config.path), check_same_thread=False)
-        for pragma in self._config.initialization_pragmas():
+        super().__init__(resolved, broker=broker)
+        self._conn = sqlite3.connect(str(self.config.path), check_same_thread=False)
+        for pragma in self.config.initialization_pragmas():
             self._conn.execute(pragma)
 
     @property
-    def config(self) -> SQLiteConfig:
+    def _config(self) -> SQLiteConfig:
         """Return the active SQLiteConfig."""
-        return self._config
-
-    @property
-    def broker(self) -> Any:
-        """Return the attached SHM connection broker transport if present."""
-        return self._broker
-
-    @property
-    def closed(self) -> bool:
-        """Return True when the SQLite connection has been closed."""
-        return self._closed
+        return self.config
 
     @property
     def raw_connection(self) -> sqlite3.Connection:
         """Return the underlying sqlite3.Connection."""
         return self._conn
 
-    def _acquire_broker_lease(self, sql: str) -> Any:
+    def execute_with_description(  # type: ignore[override]
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+    ) -> tuple[list[tuple[Any, ...]], tuple[tuple[str, Any, None, None, None, None, None], ...] | None]:
+        """Execute a SQL statement and return plain tuples and column descriptions."""
+        lease = self._acquire_sqlite_broker_lease(sql)
+        try:
+            cur = self._conn.execute(sql, parameters)
+            rows = [tuple(row) for row in cur.fetchall()]
+            desc = (
+                tuple((d[0], d[1], None, None, None, None, None) for d in cur.description) if cur.description else None
+            )
+            return rows, desc
+        finally:
+            if lease is not None:
+                if hasattr(lease, "release"):
+                    lease.release()
+                elif self._broker is not None and hasattr(self._broker, "release") and hasattr(lease, "slot_index"):
+                    self._broker.release(lease.slot_index, lease.generation)
+                elif (
+                    self._broker is not None
+                    and hasattr(self._broker, "lease_table")
+                    and self._broker.lease_table is not None
+                ):
+                    self._broker.lease_table.release(lease.slot_index, lease.generation)
+
+    def execute_tuples(  # type: ignore[override]
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+    ) -> list[tuple[Any, ...]]:
+        """Execute a SQL statement and return plain Python tuples (`list[tuple[Any, ...]]`)."""
+        rows, _ = self.execute_with_description(sql, parameters)
+        return rows
+
+    def execute(  # type: ignore[override]
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+    ) -> list[tuple[Any, ...]]:
+        """Execute a SQL statement with variadic positional or explicit parameters."""
+        resolved = _normalize_driver_params(params, parameters)
+        return self.execute_tuples(sql, resolved)
+
+    def select(  # type: ignore[override]
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+        schema_type: type[Any] | None = None,
+    ) -> list[Any]:
+        """Execute a SELECT statement and return rows as dictionaries or hydrated `schema_type` instances."""
+        resolved = _normalize_driver_params(params, parameters)
+        rows, desc = self.execute_with_description(sql, resolved)
+        if not rows:
+            return []
+        cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]))]
+        return _hydrate_rows_with_schema(rows, cols, schema_type)
+
+    def select_one(  # type: ignore[override]
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+        schema_type: type[Any] | None = None,
+    ) -> Any:
+        """Execute a SELECT statement and return the first row or raise `ValueError`."""
+        rows = self.select(sql, *params, parameters=parameters, schema_type=schema_type)
+        if not rows:
+            msg = "No row found for select_one"
+            raise ValueError(msg)
+        return rows[0]
+
+    def select_one_or_none(  # type: ignore[override]
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+        schema_type: type[Any] | None = None,
+    ) -> Any | None:
+        """Execute a SELECT statement and return the first row or `None`."""
+        rows = self.select(sql, *params, parameters=parameters, schema_type=schema_type)
+        return rows[0] if rows else None
+
+    def load_from_arrow(  # type: ignore[override]
+        self,
+        table_name: str,
+        data: Any,
+        *,
+        columns: Sequence[str] | None = None,
+    ) -> int:
+        """Bulk-ingest an Arrow Table, `ArrowCursor`, or row sequence into `table_name`."""
+        rows, cols = _table_to_rows_and_cols(data, columns)
+        if not rows or not cols:
+            return 0
+        placeholders = ", ".join("?" for _ in cols)
+        col_list = ", ".join(cols)
+        sql = f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders})"
+        lease = self._acquire_sqlite_broker_lease(sql)
+        try:
+            self._conn.executemany(sql, rows)
+            self._conn.commit()
+            return len(rows)
+        finally:
+            if lease is not None and hasattr(lease, "release"):
+                lease.release()
+
+    def select_to_arrow(  # type: ignore[override]
+        self,
+        sql: str,
+        *params: Any,
+        parameters: Sequence[Any] | Mapping[str, Any] = (),
+        shm_threshold_rows: int = 0,
+    ) -> ArrowCursor:
+        """Execute a query and return an ArrowCursor via zero-copy ShmRegion Arrow IPC."""
+        resolved = _normalize_driver_params(params, parameters)
+        rows, desc = self.execute_with_description(sql, resolved)
+        cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]) if rows else 0)]
+        return ArrowCursor.from_rows(rows, cols, threshold_rows=shm_threshold_rows)
+
+    def commit(self) -> None:
+        """Commit the current SQLite transaction."""
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        """Roll back the current SQLite transaction."""
+        self._conn.rollback()
+
+    def close(self) -> None:
+        """Close the underlying SQLite connection."""
+        self._closed = True
+        self._conn.close()
+
+    def _acquire_sqlite_broker_lease(self, sql: str) -> Any:
         """Acquire a lease and statement cache plan from the attached broker if present."""
         if self._broker is None:
             return None
@@ -169,170 +216,26 @@ class SyncSQLiteDriver:
                 return self._broker.acquire(os.getpid())
         return None
 
-    def execute_with_description(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] = (),
-    ) -> tuple[list[tuple[Any, ...]], tuple[tuple[str, Any, None, None, None, None, None], ...] | None]:
-        """Execute a SQL statement and return plain tuples and column descriptions."""
-        lease = self._acquire_broker_lease(sql)
-        try:
-            cur = self._conn.execute(sql, parameters)
-            rows = [tuple(row) for row in cur.fetchall()]
-            desc = (
-                tuple((d[0], d[1], None, None, None, None, None) for d in cur.description) if cur.description else None
-            )
-            return rows, desc
-        finally:
-            if lease is not None:
-                if hasattr(lease, "release"):
-                    lease.release()
-                elif self._broker is not None and hasattr(self._broker, "release") and hasattr(lease, "slot_index"):
-                    self._broker.release(lease.slot_index, lease.generation)
-                elif (
-                    self._broker is not None
-                    and hasattr(self._broker, "lease_table")
-                    and self._broker.lease_table is not None
-                ):
-                    self._broker.lease_table.release(lease.slot_index, lease.generation)
 
-    def execute_tuples(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] = (),
-    ) -> list[tuple[Any, ...]]:
-        """Execute a SQL statement and return plain Python tuples (`list[tuple[Any, ...]]`)."""
-        rows, _ = self.execute_with_description(sql, parameters)
-        return rows
-
-    def execute(
-        self,
-        sql: str,
-        *params: Any,
-        parameters: Sequence[Any] | Mapping[str, Any] = (),
-    ) -> list[tuple[Any, ...]]:
-        """Execute a SQL statement with variadic positional or explicit parameters."""
-        resolved = _normalize_driver_params(params, parameters)
-        return self.execute_tuples(sql, resolved)
-
-    def select(
-        self,
-        sql: str,
-        *params: Any,
-        parameters: Sequence[Any] | Mapping[str, Any] = (),
-        schema_type: type[Any] | None = None,
-    ) -> list[Any]:
-        """Execute a SELECT statement and return rows as dictionaries or hydrated `schema_type` instances."""
-        resolved = _normalize_driver_params(params, parameters)
-        rows, desc = self.execute_with_description(sql, resolved)
-        if not rows:
-            return []
-        cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]))]
-        return _hydrate_rows_with_schema(rows, cols, schema_type)
-
-    def select_one(
-        self,
-        sql: str,
-        *params: Any,
-        parameters: Sequence[Any] | Mapping[str, Any] = (),
-        schema_type: type[Any] | None = None,
-    ) -> Any:
-        """Execute a SELECT statement and return the first row or raise `ValueError`."""
-        rows = self.select(sql, *params, parameters=parameters, schema_type=schema_type)
-        if not rows:
-            msg = "No row found for select_one"
-            raise ValueError(msg)
-        return rows[0]
-
-    def select_one_or_none(
-        self,
-        sql: str,
-        *params: Any,
-        parameters: Sequence[Any] | Mapping[str, Any] = (),
-        schema_type: type[Any] | None = None,
-    ) -> Any | None:
-        """Execute a SELECT statement and return the first row or `None`."""
-        rows = self.select(sql, *params, parameters=parameters, schema_type=schema_type)
-        return rows[0] if rows else None
-
-    def load_from_arrow(
-        self,
-        table_name: str,
-        data: Any,
-        *,
-        columns: Sequence[str] | None = None,
-    ) -> int:
-        """Bulk-ingest an Arrow Table, `ArrowCursor`, or row sequence into `table_name`."""
-        rows, cols = _table_to_rows_and_cols(data, columns)
-        if not rows or not cols:
-            return 0
-        placeholders = ", ".join("?" for _ in cols)
-        col_list = ", ".join(cols)
-        sql = f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders})"
-        lease = self._acquire_broker_lease(sql)
-        try:
-            self._conn.executemany(sql, rows)
-            self._conn.commit()
-            return len(rows)
-        finally:
-            if lease is not None and hasattr(lease, "release"):
-                lease.release()
-
-    def select_to_arrow(
-        self,
-        sql: str,
-        *params: Any,
-        parameters: Sequence[Any] | Mapping[str, Any] = (),
-        shm_threshold_rows: int = 0,
-    ) -> ArrowCursor:
-        """Execute a query and return an ArrowCursor via zero-copy ShmRegion Arrow IPC."""
-        resolved = _normalize_driver_params(params, parameters)
-        rows, desc = self.execute_with_description(sql, resolved)
-        cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]) if rows else 0)]
-        return ArrowCursor.from_rows(rows, cols, threshold_rows=shm_threshold_rows)
-
-    def write_arrow_shm(self, table: Any) -> memoryview:
-        """Write an Arrow Table into a shared-memory Arrow IPC buffer and return a memoryview."""
-        return write_arrow_shm(table)
-
-    def commit(self) -> None:
-        """Commit the current SQLite transaction."""
-        self._conn.commit()
-
-    def rollback(self) -> None:
-        """Roll back the current SQLite transaction."""
-        self._conn.rollback()
-
-    def close(self) -> None:
-        """Close the underlying SQLite connection."""
-        self._closed = True
-        self._conn.close()
-
-
-class AsyncSQLiteDriver:
+class AsyncSQLiteDriver(ThreadOffloadAsyncDatabaseDriver[SQLiteConfig, SyncSQLiteDriver]):
     """Asynchronous SQLite driver facade compatible with Python 3.12+ and free-threaded 3.14t."""
 
-    __slots__ = ("_sync",)
+    dialect: ClassVar[str] = "sqlite"
+    dialect_tag: ClassVar[int] = 3
+
+    __slots__ = ()
 
     def __init__(self, config: SQLiteConfig | None = None, *, broker: Any = None) -> None:
-        self._sync = SyncSQLiteDriver(config, broker=broker)
-
-    @property
-    def config(self) -> SQLiteConfig:
-        """Return the active SQLiteConfig."""
-        return self._sync.config
-
-    @property
-    def broker(self) -> Any:
-        """Return the attached SHM connection broker transport if present."""
-        return self._sync.broker
+        resolved = config or SQLiteConfig()
+        sync_driver = SyncSQLiteDriver(resolved, broker=broker)
+        super().__init__(resolved, sync_driver, broker=sync_driver.broker)
 
     @property
     def closed(self) -> bool:
         """Return True when the SQLite connection has been closed."""
         return self._sync.closed
 
-    async def execute_with_description(
+    async def execute_with_description(  # type: ignore[override]
         self,
         sql: str,
         parameters: Sequence[Any] | Mapping[str, Any] = (),
@@ -340,7 +243,7 @@ class AsyncSQLiteDriver:
         """Asynchronously execute a SQL statement returning rows and column descriptions."""
         return await asyncio.to_thread(self._sync.execute_with_description, sql, parameters)
 
-    async def execute_tuples(
+    async def execute_tuples(  # type: ignore[override]
         self,
         sql: str,
         parameters: Sequence[Any] | Mapping[str, Any] = (),
@@ -348,7 +251,7 @@ class AsyncSQLiteDriver:
         """Asynchronously execute a SQL statement and return plain Python tuples."""
         return await asyncio.to_thread(self._sync.execute_tuples, sql, parameters)
 
-    async def execute(
+    async def execute(  # type: ignore[override]
         self,
         sql: str,
         *params: Any,
@@ -358,7 +261,7 @@ class AsyncSQLiteDriver:
         resolved = _normalize_driver_params(params, parameters)
         return await asyncio.to_thread(self._sync.execute_tuples, sql, resolved)
 
-    async def select(
+    async def select(  # type: ignore[override]
         self,
         sql: str,
         *params: Any,
@@ -369,7 +272,7 @@ class AsyncSQLiteDriver:
         resolved = _normalize_driver_params(params, parameters)
         return await asyncio.to_thread(self._sync.select, sql, parameters=resolved, schema_type=schema_type)
 
-    async def select_one(
+    async def select_one(  # type: ignore[override]
         self,
         sql: str,
         *params: Any,
@@ -380,7 +283,7 @@ class AsyncSQLiteDriver:
         resolved = _normalize_driver_params(params, parameters)
         return await asyncio.to_thread(self._sync.select_one, sql, parameters=resolved, schema_type=schema_type)
 
-    async def select_one_or_none(
+    async def select_one_or_none(  # type: ignore[override]
         self,
         sql: str,
         *params: Any,
@@ -396,7 +299,7 @@ class AsyncSQLiteDriver:
             schema_type=schema_type,
         )
 
-    async def load_from_arrow(
+    async def load_from_arrow(  # type: ignore[override]
         self,
         table_name: str,
         data: Any,
@@ -406,7 +309,7 @@ class AsyncSQLiteDriver:
         """Asynchronously bulk-ingest an Arrow Table or `ArrowCursor` into `table_name`."""
         return await asyncio.to_thread(self._sync.load_from_arrow, table_name, data, columns=columns)
 
-    async def select_to_arrow(
+    async def select_to_arrow(  # type: ignore[override]
         self,
         sql: str,
         *params: Any,
@@ -421,19 +324,3 @@ class AsyncSQLiteDriver:
             parameters=resolved,
             shm_threshold_rows=shm_threshold_rows,
         )
-
-    def write_arrow_shm(self, table: Any) -> memoryview:
-        """Write an Arrow Table into a shared-memory Arrow IPC buffer and return a memoryview."""
-        return self._sync.write_arrow_shm(table)
-
-    async def commit(self) -> None:
-        """Commit the current SQLite transaction."""
-        await asyncio.to_thread(self._sync.commit)
-
-    async def rollback(self) -> None:
-        """Roll back the current SQLite transaction."""
-        await asyncio.to_thread(self._sync.rollback)
-
-    async def close(self) -> None:
-        """Close the underlying SQLite connection."""
-        await asyncio.to_thread(self._sync.close)

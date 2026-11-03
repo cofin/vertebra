@@ -5,6 +5,7 @@ description: "The `vertebra-storage` Rust crate (`vertebra._storage`) and the `v
 status: stable
 tags: [domains, storage, object-store, signing]
 sources:
+  - resource: src/rs/vertebra-core/src/gcp_auth.rs
   - resource: src/rs/vertebra-storage/Cargo.toml
   - resource: src/rs/vertebra-storage/src/lib.rs
   - resource: src/rs/vertebra-storage/src/store.rs
@@ -14,6 +15,7 @@ sources:
   - resource: src/rs/vertebra-storage/tests/storage_engine_tests.rs
   - resource: src/py/vertebra/storage/__init__.py
   - resource: src/py/vertebra/storage/_store.py
+  - resource: src/py/vertebra/storage/_streaming.py
   - resource: src/py/vertebra/extensions/alchemy/storage.py
   - resource: src/py/vertebra/extensions/sqlspec/storage.py
   - resource: src/py/tests/integration/storage/conftest.py
@@ -22,8 +24,8 @@ sources:
 # Object Storage, Presigning & Upload Tracking
 
 <!-- truth: start -->
-- **Rust Extension & GIL-Free Async Execution (`vertebra-storage`, `vertebra.storage`)**: [`vertebra-storage`](../../../../../src/rs/vertebra-storage/src/lib.rs) is a PyO3 crate built as `_storage` (`#[pymodule(gil_used = false)]`) over `object_store 0.13`. Sync I/O methods release the GIL via `py.detach()`, while `*_async` methods return an `asyncio.Future` backed by a per-loop [`RustCompletionRing`](../../../../../src/rs/vertebra-storage/src/lib.rs) and `vertebra_core::notify::Notifier` (`eventfd` on Linux, `kqueue`/pipe on macOS) registered once via `loop.add_reader`, completing on the `STORAGE_RUNTIME` Tokio pool with zero Tokio `Python::attach` GIL acquisitions and coalesced event-loop wakeups.
-- **Active GCP ADC Credential Caching & Refresh (`gcp_auth.rs`)**: [`RefreshingGcpCredentialProvider`](../../../../../src/rs/vertebra-storage/src/gcp_auth.rs) and [`GcpTokenCache`](../../../../../src/rs/vertebra-storage/src/gcp_auth.rs) cache [`GcpTokenSnapshot`](../../../../../src/rs/vertebra-storage/src/gcp_auth.rs) instances inside an `ArcSwapOption<GcpTokenSnapshot>`, proactively refreshing tokens `300s` (`DEFAULT_REFRESH_SKEW_MS = 300_000`) before expiry under a single-flight `tokio::sync::Mutex<()>` across `AuthorizedUser`, `MetadataServer`, `ImpersonatedServiceAccount`, and `Static` sources.
+- **Rust Extension & GIL-Free Async Execution (`vertebra-storage`, `vertebra.storage`)**: [`vertebra-storage`](../../../../../src/rs/vertebra-storage/src/lib.rs) is a PyO3 crate built as `_storage` (`#[pymodule(gil_used = false)]`) over `object_store 0.13`. Sync I/O methods release the GIL via `py.detach()`, while `*_async` methods return an `asyncio.Future` backed by a per-loop [`CompletionQueue`](../../../../../src/rs/vertebra-core/src/completion.rs) and `vertebra_core::notify::Notifier` (`eventfd` on Linux, `kqueue`/pipe on macOS) registered once via `loop.add_reader`, completing on the `STORAGE_RUNTIME` Tokio pool with zero Tokio `Python::attach` GIL acquisitions and coalesced event-loop wakeups.
+- **Shared GCP ADC Credential Caching & Local RSA-SHA256 GCS V4 Signing (`vertebra_core::gcp_auth`, `signing.rs`)**: [`vertebra_core::gcp_auth::GcpTokenCache`](../../../../../src/rs/vertebra-core/src/gcp_auth.rs) caches [`GcpTokenSnapshot`](../../../../../src/rs/vertebra-core/src/gcp_auth.rs) instances inside an `ArcSwapOption<GcpTokenSnapshot>` across `ServiceAccountKey` (local PKCS#8 RSA-SHA256 JWT assertion), `AuthorizedUser`, `MetadataServer`, `ImpersonatedServiceAccount`, and `Static` sources with `quota_project_id` (`x-goog-user-project`) and custom OAuth scopes. `sign_gcs_v4_url` signs GCS V4 URLs in-process with zero network RTT when a PKCS#8 `private_key_pem` is present, falling back to IAM Credentials `signBlob` with cached `GcpTokenCache` Bearer tokens otherwise.
 <!-- truth: end -->
 
 Object storage has two layers. [`vertebra-storage`](../../../../../src/rs/vertebra-storage/src/lib.rs) is a PyO3 crate built as the `_storage` extension (`#[pymodule(gil_used = false)]`) on top of `object_store 0.13`. [`vertebra.storage`](../../../../../src/py/vertebra/storage/__init__.py) is the public Python API. It loads `vertebra._storage` lazily and falls back to pure-Python code when the extension is missing.
@@ -74,8 +76,9 @@ Provider configs are `msgspec.Struct(frozen=True, gc=False, kw_only=True)` with 
 | Symbol | Source | Responsibility |
 |---|---|---|
 | [`ReadableFile`](../../../../../src/py/vertebra/storage/_store.py) | `_store.py` | Read-only seekable `io.RawIOBase` backed by `get_range`, with `read_at` / `read_at_async` that leave the cursor alone. It lets PyArrow or Polars read Parquet footers and row groups without downloading the whole object. |
+| [`StreamingStorageResponse`](../../../../../src/py/vertebra/storage/_streaming.py) | `_streaming.py` | Frozen `msgspec.Struct` descriptor for streaming objects, HTTP `206 Partial Content` byte ranges (`Content-Range`), and `307 Temporary Redirect` presigned URL handoffs (`X-Vertebra-Signed-Url`) directly through `FastPath` across native, Litestar, FastAPI, Starlette, Flask, and Django handlers. |
 | [`ObjectStoreBackend`](../../../../../src/py/vertebra/extensions/alchemy/storage.py) | `extensions/alchemy/storage.py` | Drop-in `advanced_alchemy.types.file_object.StorageBackend` implementation wrapping `ObjectStore` with sync and async file attachments, content streaming, and presigned URLs. |
-| [`ObjectStoreBackend`](../../../../../src/py/vertebra/extensions/sqlspec/storage.py) | `extensions/sqlspec/storage.py` | Drop-in `sqlspec.protocols.ObjectStoreProtocol` implementation wrapping `ObjectStore` with buffer, streaming, and range operations. |
+| [`ObjectStoreBackend`](../../../../../src/py/vertebra/extensions/sqlspec/storage.py) | `extensions/sqlspec/storage.py` | Drop-in `sqlspec.protocols.ObjectStoreProtocol` implementation wrapping `ObjectStore` with buffer, streaming, range, and `VTBARROW` `ArrowCursor` (`read_arrow_shm`, `write_arrow_shm`) operations. |
 
 Vertebra delegates storage registry and multi-store management to upstream ecosystems (`advanced_alchemy.types.file_object.StorageRegistry` and `sqlspec.storage.registry.StorageRegistry`), eliminating redundant internal abstractions.
 

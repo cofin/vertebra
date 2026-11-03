@@ -10,11 +10,13 @@ from collections.abc import Buffer, Mapping, Sequence
 from typing import Any, Final, Self
 
 from vertebra.utils.module_loader import import_optional
+from vertebra.utils.schema import to_schema
 from vertebra.utils.serializers import (
     ZeroCopyCodecRegistry,
     decode_json,
     encode_json_bytes,
 )
+from vertebra.utils.type_guards import get_msgspec_rename_config
 
 __all__ = (
     "ARROW_SHM_THRESHOLD_ROWS",
@@ -334,19 +336,29 @@ def _hydrate_rows_with_schema(
     columns: Sequence[str],
     schema_type: type[Any] | None = None,
 ) -> list[Any]:
-    """Hydrate tabular rows into dictionaries or typed `schema_type` instances via C-API vectorcall."""
+    """Hydrate tabular rows into dictionaries or typed `schema_type` instances via C-API vectorcall or `to_schema`."""
     if not rows:
         return []
     if schema_type is None or schema_type is dict:
         if isinstance(rows[0], Mapping):
             return [dict(r) for r in rows]
         return [{col: (r[i] if i < len(r) else None) for i, col in enumerate(columns)} for r in rows]
-    plan = ZeroCopyCodecRegistry.compile(schema_type)
-    if isinstance(rows[0], Mapping):
-        col_tuple = tuple(columns) if columns else tuple(rows[0].keys())
-        tuple_rows = [tuple(r.get(c) for c in col_tuple) for r in rows]
-        return plan.hydrate_rows(tuple_rows, col_tuple)
-    return plan.hydrate_rows(rows, columns)
+    if get_msgspec_rename_config(schema_type) is None:
+        try:
+            plan = ZeroCopyCodecRegistry.compile(schema_type)
+            if isinstance(rows[0], Mapping):
+                col_tuple = tuple(columns) if columns else tuple(rows[0].keys())
+                tuple_rows = [tuple(r.get(c) for c in col_tuple) for r in rows]
+                return plan.hydrate_rows(tuple_rows, col_tuple)
+            return plan.hydrate_rows(rows, columns)
+        except Exception:
+            pass
+    dict_rows = (
+        [dict(r) for r in rows]
+        if isinstance(rows[0], Mapping)
+        else [{col: (r[i] if i < len(r) else None) for i, col in enumerate(columns)} for r in rows]
+    )
+    return list(to_schema(dict_rows, schema_type=schema_type))
 
 
 def _table_to_rows_and_cols(

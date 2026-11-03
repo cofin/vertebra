@@ -146,7 +146,6 @@ def test_broker_dialect_tags_cover_all_nine_sql_dialects() -> None:
     assert tags["duckdb"] == 6
     assert tags["bigquery"] == 7
     assert tags["spanner"] == 8
-    assert tags["spanner_postgresql"] == 9
     assert tags["spangres"] == 9
 
     transport = SHMBrokerTransport(BrokerConfig())
@@ -160,7 +159,7 @@ def test_broker_dialect_tags_cover_all_nine_sql_dialects() -> None:
         "duckdb",
         "bigquery",
         "spanner",
-        "spanner_postgresql",
+        "spangres",
     )
     compiled_count = 0
 

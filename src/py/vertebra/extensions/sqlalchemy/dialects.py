@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.connectors.asyncio import AsyncAdapt_dbapi_connection
@@ -19,11 +19,13 @@ from sqlalchemy.engine.url import URL
 from sqlalchemy.pool import AsyncAdaptedQueuePool, NullPool, Pool, QueuePool, StaticPool
 
 from vertebra.db._registry import DatabaseRegistry
+from vertebra.db.bigquery import AsyncBigQueryDriver, BigQueryConfig, SyncBigQueryDriver
 from vertebra.db.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
 from vertebra.db.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLDriver
 from vertebra.db.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
 from vertebra.db.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
 from vertebra.db.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
+from vertebra.db.spanner import AsyncSpannerDriver, SpannerConfig, SyncSpannerDriver
 from vertebra.db.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.sync_tools import SyncPool
@@ -36,10 +38,13 @@ if TYPE_CHECKING:
 
 __all__ = (
     "ALL_DIALECT_SCHEMES",
+    "DIALECT_DESCRIPTORS",
     "DIALECT_SCHEMES",
     "AsyncDBAPIConnection",
     "AsyncDBAPICursor",
     "AsyncDBAPIModule",
+    "BigQueryAsyncDialect",
+    "BigQueryDialect",
     "DBAPIConnection",
     "DBAPICursor",
     "DBAPIModule",
@@ -65,6 +70,10 @@ __all__ = (
     "ProgrammingError",
     "SQLiteAsyncDialect",
     "SQLiteDialect",
+    "SpangresAsyncDialect",
+    "SpangresDialect",
+    "SpannerAsyncDialect",
+    "SpannerDialect",
     "SyncEngineAdapter",
     "Warning",
     "attach_serverless_disconnect_guard",
@@ -95,6 +104,18 @@ ALL_DIALECT_SCHEMES: tuple[str, ...] = (
     "mssql+vtb",
     "duckdb+vertebra",
     "duckdb+vtb",
+    "bigquery+vertebra",
+    "bigquery+vtb",
+    "bigquery+vertebra_async",
+    "bigquery+vtb_async",
+    "spanner+vertebra",
+    "spanner+vtb",
+    "spanner+vertebra_async",
+    "spanner+vtb_async",
+    "spangres+vertebra",
+    "spangres+vtb",
+    "spangres+vertebra_async",
+    "spangres+vtb_async",
 )
 
 
@@ -298,6 +319,10 @@ class DBAPIConnection:
                 self._driver = SyncMSSQLDriver(self._config, broker=self._broker)
             elif isinstance(self._config, DuckDBConfig):
                 self._driver = SyncDuckDBDriver(self._config, broker=self._broker)
+            elif isinstance(self._config, BigQueryConfig):
+                self._driver = SyncBigQueryDriver(self._config, broker=self._broker)
+            elif isinstance(self._config, SpannerConfig):
+                self._driver = SyncSpannerDriver(self._config, broker=self._broker)
 
     @property
     def url(self) -> str:
@@ -363,6 +388,15 @@ class DBAPIConnection:
                     if rows
                     else None
                 )
+                return rows, desc
+            if hasattr(self._driver, "select"):
+                dict_params = parameters if isinstance(parameters, dict) else None
+                dict_rows = self._driver.select(sql, dict_params)
+                if not dict_rows:
+                    return [], None
+                keys = tuple(dict_rows[0].keys())
+                desc = tuple((str(k), None, None, None, None, None, None) for k in keys)
+                rows = [tuple(r.get(k) for k in keys) for r in dict_rows]
                 return rows, desc
         return [], None
 
@@ -495,6 +529,18 @@ class AsyncDBAPICursor:
                 else None
             )
             self.rowcount = len(self._rows)
+        elif self._driver is not None and hasattr(self._driver, "select"):
+            dict_params = params if isinstance(params, dict) else None
+            dict_rows = await self._driver.select(operation, dict_params)
+            if dict_rows:
+                keys = tuple(dict_rows[0].keys())
+                self.description = tuple((str(k), None, None, None, None, None, None) for k in keys)
+                self._rows = [tuple(r.get(k) for k in keys) for r in dict_rows]
+                self.rowcount = len(self._rows)
+            else:
+                self._rows = []
+                self.description = None
+                self.rowcount = 0
         else:
             self._rows = []
             self.description = None
@@ -612,6 +658,10 @@ class AsyncDBAPIConnection:
                 self._driver = AsyncMSSQLDriver(self._config, broker=self._broker)
             elif isinstance(self._config, DuckDBConfig):
                 self._driver = AsyncDuckDBDriver(self._config, broker=self._broker)
+            elif isinstance(self._config, BigQueryConfig):
+                self._driver = AsyncBigQueryDriver(self._config, broker=self._broker)
+            elif isinstance(self._config, SpannerConfig):
+                self._driver = AsyncSpannerDriver(self._config, broker=self._broker)
 
     @property
     def driver(self) -> Any:
@@ -1039,6 +1089,173 @@ class DuckDBAsyncDialect(DefaultDialect):
         return AsyncAdaptedQueuePool
 
 
+class BigQueryDialect(DefaultDialect):
+    """SQLAlchemy 2.1 synchronous dialect for Google BigQuery (+vtb / +vertebra)."""
+
+    name = "bigquery"
+    driver = "vtb"
+    paramstyle = "named"
+    default_paramstyle = "named"
+    supports_statement_cache = True
+    supports_native_jsonb = False
+    positional = False
+
+    dbapi: Any = classmethod(lambda cls: DBAPIModule(paramstyle="named"))
+
+    @classmethod
+    def import_dbapi(cls) -> Any:
+        """Return the PEP 249 DBAPI module for SQLAlchemy 2.0/2.1."""
+        return cls.dbapi()
+
+    @classmethod
+    def get_pool_class(cls, url: URL) -> type[Pool]:
+        """Return NullPool so BigQuery delegates connection pooling to DatabaseRegistry."""
+        _ = url
+        return NullPool
+
+    @classmethod
+    def compile_merge_upsert(
+        cls,
+        target_table: str,
+        source_table: str,
+        on_keys: Sequence[str],
+        update_columns: Sequence[str],
+        insert_columns: Sequence[str] | None = None,
+    ) -> str:
+        """Compile a GoogleSQL `MERGE INTO` upsert statement for BigQuery."""
+        if not on_keys:
+            msg = "BigQuery MERGE upsert requires at least one key column in on_keys"
+            raise ValueError(msg)
+        resolved_insert = list(insert_columns) if insert_columns is not None else [*on_keys, *update_columns]
+        on_clause = " AND ".join(f"T.{k} = S.{k}" for k in on_keys)
+        set_clause = ", ".join(f"T.{c} = S.{c}" for c in update_columns)
+        ins_cols = ", ".join(resolved_insert)
+        ins_vals = ", ".join(f"S.{c}" for c in resolved_insert)
+        return (
+            f"MERGE INTO {target_table} AS T "
+            f"USING {source_table} AS S "
+            f"ON {on_clause} "
+            f"WHEN MATCHED THEN UPDATE SET {set_clause} "
+            f"WHEN NOT MATCHED THEN INSERT ({ins_cols}) VALUES ({ins_vals})"
+        )
+
+
+class BigQueryAsyncDialect(BigQueryDialect):
+    """SQLAlchemy 2.1 asynchronous dialect for Google BigQuery (+vtb_async / +vertebra_async)."""
+
+    driver = "vtb_async"
+    is_async = True
+    supports_statement_cache = True
+
+    dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="named"))
+
+
+class SpannerDialect(DefaultDialect):
+    """SQLAlchemy 2.1 synchronous dialect for Cloud Spanner GoogleSQL (+vtb / +vertebra)."""
+
+    name = "spanner"
+    driver = "vtb"
+    paramstyle = "named"
+    default_paramstyle = "named"
+    supports_statement_cache = True
+    supports_native_jsonb = False
+    positional = False
+
+    dbapi: Any = classmethod(lambda cls: DBAPIModule(paramstyle="named"))
+
+    @classmethod
+    def import_dbapi(cls) -> Any:
+        """Return the PEP 249 DBAPI module for SQLAlchemy 2.0/2.1."""
+        return cls.dbapi()
+
+    @classmethod
+    def get_pool_class(cls, url: URL) -> type[Pool]:
+        """Return NullPool so Cloud Spanner multiplexes over DatabaseRegistry gRPC channels."""
+        _ = url
+        return NullPool
+
+    @classmethod
+    def compile_insert_or_update(
+        cls,
+        table_name: str,
+        columns: Sequence[str],
+    ) -> str:
+        """Compile a GoogleSQL `INSERT OR UPDATE INTO` statement with `@param` bindings."""
+        if not columns:
+            msg = "Spanner INSERT OR UPDATE requires at least one column"
+            raise ValueError(msg)
+        cols_str = ", ".join(columns)
+        vals_str = ", ".join(f"@{c}" for c in columns)
+        return f"INSERT OR UPDATE INTO {table_name} ({cols_str}) VALUES ({vals_str})"
+
+    @classmethod
+    def extract_interleave_options(cls, table_kwargs: Mapping[str, Any]) -> tuple[str | None, str]:
+        """Extract `(parent_table, on_delete)` from SQLAlchemy table dialect options."""
+        parent = table_kwargs.get("spanner_interleave_in_parent")
+        on_delete = str(table_kwargs.get("spanner_interleave_on_delete") or "CASCADE").upper()
+        if on_delete not in {"CASCADE", "NO ACTION"}:
+            msg = f"Invalid spanner_interleave_on_delete option: {on_delete!r}"
+            raise ValueError(msg)
+        return (str(parent) if parent else None, on_delete)
+
+    @classmethod
+    def compile_interleave_clause(
+        cls,
+        parent_table: str,
+        *,
+        on_delete: str = "CASCADE",
+    ) -> str:
+        """Render a Cloud Spanner `INTERLEAVE IN PARENT` table suffix clause."""
+        norm_delete = on_delete.upper()
+        if norm_delete not in {"CASCADE", "NO ACTION"}:
+            msg = f"Unsupported INTERLEAVE ON DELETE action: {on_delete!r}"
+            raise ValueError(msg)
+        return f", INTERLEAVE IN PARENT {parent_table} ON DELETE {norm_delete}"
+
+
+class SpannerAsyncDialect(SpannerDialect):
+    """SQLAlchemy 2.1 asynchronous dialect for Cloud Spanner GoogleSQL (+vtb_async / +vertebra_async)."""
+
+    driver = "vtb_async"
+    is_async = True
+    supports_statement_cache = True
+
+    dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="named"))
+
+
+class SpangresDialect(PGDialect):
+    """SQLAlchemy 2.1 synchronous dialect for Cloud Spanner Spangres (+vtb / +vertebra)."""
+
+    name = "spangres"
+    driver = "vtb"
+    paramstyle = "pyformat"
+    supports_statement_cache = True
+    supports_native_jsonb = True
+
+    dbapi: Any = classmethod(lambda cls: DBAPIModule(paramstyle="pyformat"))
+
+    @classmethod
+    def import_dbapi(cls) -> Any:
+        """Return the PEP 249 DBAPI module for SQLAlchemy 2.0/2.1."""
+        return cls.dbapi()
+
+    @classmethod
+    def get_pool_class(cls, url: URL) -> type[Pool]:
+        """Return NullPool so Cloud Spanner Spangres multiplexes over DatabaseRegistry gRPC channels."""
+        _ = url
+        return NullPool
+
+
+class SpangresAsyncDialect(SpangresDialect):
+    """SQLAlchemy 2.1 asynchronous dialect for Cloud Spanner Spangres (+vtb_async / +vertebra_async)."""
+
+    driver = "vtb_async"
+    is_async = True
+    supports_statement_cache = True
+
+    dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="pyformat"))
+
+
 class SyncEngineAdapter:
     """Optional-greenlet SQLAlchemy 2.1 execution adapter for free-threaded Python 3.14t."""
 
@@ -1078,6 +1295,45 @@ def attach_serverless_disconnect_guard(engine: Any) -> None:
         pass
 
 
+DIALECT_DESCRIPTORS: dict[str, type[DefaultDialect]] = {
+    "postgresql+vtb": PostgreSQLDialect,
+    "postgresql+vertebra": PostgreSQLDialect,
+    "postgresql+vtb_async": PostgreSQLAsyncDialect,
+    "postgresql+vertebra_async": PostgreSQLAsyncDialect,
+    "mysql+vtb": MySQLDialect,
+    "mysql+vertebra": MySQLDialect,
+    "mysql+vtb_async": MySQLAsyncDialect,
+    "mysql+vertebra_async": MySQLAsyncDialect,
+    "sqlite+vtb": SQLiteDialect,
+    "sqlite+vertebra": SQLiteDialect,
+    "sqlite+vtb_async": SQLiteAsyncDialect,
+    "sqlite+vertebra_async": SQLiteAsyncDialect,
+    "oracle+vtb": OracleDialect,
+    "oracle+vertebra": OracleDialect,
+    "oracle+vtb_async": OracleAsyncDialect,
+    "oracle+vertebra_async": OracleAsyncDialect,
+    "mssql+vtb": MSSQLDialect,
+    "mssql+vertebra": MSSQLDialect,
+    "mssql+vtb_async": MSSQLAsyncDialect,
+    "mssql+vertebra_async": MSSQLAsyncDialect,
+    "duckdb+vtb": DuckDBDialect,
+    "duckdb+vertebra": DuckDBDialect,
+    "duckdb+vtb_async": DuckDBAsyncDialect,
+    "duckdb+vertebra_async": DuckDBAsyncDialect,
+    "bigquery+vtb": BigQueryDialect,
+    "bigquery+vertebra": BigQueryDialect,
+    "bigquery+vtb_async": BigQueryAsyncDialect,
+    "bigquery+vertebra_async": BigQueryAsyncDialect,
+    "spanner+vtb": SpannerDialect,
+    "spanner+vertebra": SpannerDialect,
+    "spanner+vtb_async": SpannerAsyncDialect,
+    "spanner+vertebra_async": SpannerAsyncDialect,
+    "spangres+vtb": SpangresDialect,
+    "spangres+vertebra": SpangresDialect,
+    "spangres+vtb_async": SpangresAsyncDialect,
+    "spangres+vertebra_async": SpangresAsyncDialect,
+}
+
 _DIALECT_REGISTRATIONS: tuple[tuple[str, str, str], ...] = (
     ("postgresql.vtb", "vertebra.extensions.sqlalchemy.dialects", "PostgreSQLDialect"),
     ("postgresql.vertebra", "vertebra.extensions.sqlalchemy.dialects", "PostgreSQLDialect"),
@@ -1103,6 +1359,18 @@ _DIALECT_REGISTRATIONS: tuple[tuple[str, str, str], ...] = (
     ("duckdb.vertebra", "vertebra.extensions.sqlalchemy.dialects", "DuckDBDialect"),
     ("duckdb.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "DuckDBAsyncDialect"),
     ("duckdb.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "DuckDBAsyncDialect"),
+    ("bigquery.vtb", "vertebra.extensions.sqlalchemy.dialects", "BigQueryDialect"),
+    ("bigquery.vertebra", "vertebra.extensions.sqlalchemy.dialects", "BigQueryDialect"),
+    ("bigquery.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "BigQueryAsyncDialect"),
+    ("bigquery.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "BigQueryAsyncDialect"),
+    ("spanner.vtb", "vertebra.extensions.sqlalchemy.dialects", "SpannerDialect"),
+    ("spanner.vertebra", "vertebra.extensions.sqlalchemy.dialects", "SpannerDialect"),
+    ("spanner.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "SpannerAsyncDialect"),
+    ("spanner.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "SpannerAsyncDialect"),
+    ("spangres.vtb", "vertebra.extensions.sqlalchemy.dialects", "SpangresDialect"),
+    ("spangres.vertebra", "vertebra.extensions.sqlalchemy.dialects", "SpangresDialect"),
+    ("spangres.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "SpangresAsyncDialect"),
+    ("spangres.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "SpangresAsyncDialect"),
 )
 
 for _name, _mod, _cls_name in _DIALECT_REGISTRATIONS:

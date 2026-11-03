@@ -7,7 +7,7 @@ import contextlib
 from collections import deque
 from typing import TYPE_CHECKING, Any, Self
 
-from vertebra.db.cdc import CDCConfig, ChangeFeed
+from vertebra.db.cdc import CDCConfig, ChangeFeed, SpannerChangeStreamSource
 from vertebra.db.oracle import AsyncOracleDriver, OracleConfig
 from vertebra.db.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig
 from vertebra.db.redis import AsyncRedisDriver, RedisConfig
@@ -174,6 +174,42 @@ class DatabaseChannelBackend:
         if hasattr(feed, "add_listener"):
             feed.add_listener(instance._on_changefeed_event)
         return instance
+
+    @classmethod
+    def from_spanner_change_stream(
+        cls,
+        driver: Any,
+        stream_name: str,
+        *,
+        channel: str = "spanner_cdc",
+        history: int = 0,
+        spill_store: ObjectStore | None = None,
+        object_store: ObjectStore | None = None,
+        spill_threshold_bytes: int = 7500,
+        heartbeat_milliseconds: int = 10_000,
+    ) -> tuple[Self, SpannerChangeStreamSource]:
+        """Create a channel backend and ``SpannerChangeStreamSource`` wired through a ``ChangeFeed``."""
+        resolved_store = spill_store if spill_store is not None else object_store
+        feed = ChangeFeed(
+            CDCConfig(
+                channel=channel,
+                spill_threshold_bytes=spill_threshold_bytes,
+                spill_prefix=f"cdc/spanner/{stream_name}",
+                max_history_size=max(1024, history),
+            ),
+            store=resolved_store,
+        )
+        source = SpannerChangeStreamSource(
+            driver,
+            stream_name,
+            change_feed=feed,
+            store=resolved_store,
+            channel=channel,
+            heartbeat_milliseconds=heartbeat_milliseconds,
+            spill_threshold_bytes=spill_threshold_bytes,
+        )
+        backend = cls.from_changefeed(feed, history=history)
+        return backend, source
 
     @classmethod
     def from_sqlspec(cls, sqlspec_config_or_channel: Any, *, history: int = 0) -> Self:

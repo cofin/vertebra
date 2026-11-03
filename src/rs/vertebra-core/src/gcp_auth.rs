@@ -63,6 +63,10 @@ pub enum GcpAuthSource {
         scopes: Vec<String>,
         quota_project_id: Option<String>,
     },
+    GcloudCli {
+        quota_project_id: Option<String>,
+        impersonate_service_account: Option<String>,
+    },
 }
 
 #[derive(Deserialize)]
@@ -249,6 +253,95 @@ fn parse_scopes_option(opts: &HashMap<String, String>) -> Option<Vec<String>> {
     }
 }
 
+pub fn discover_ambient_quota_project(allow_ambient: bool) -> Option<String> {
+    if !allow_ambient {
+        return None;
+    }
+    for env_key in [
+        "GOOGLE_CLOUD_QUOTA_PROJECT",
+        "CLOUDSDK_BILLING_QUOTA_PROJECT",
+    ] {
+        if let Ok(val) = std::env::var(env_key) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    let config_dir = std::env::var("CLOUDSDK_CONFIG")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| Path::new(h.trim()).join(".config").join("gcloud"))
+        })?;
+    let default_cfg = config_dir.join("configurations").join("config_default");
+    let raw = std::fs::read_to_string(default_cfg).ok()?;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("quota_project") {
+            let val = rest.trim_start().strip_prefix('=')?.trim();
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+    }
+    None
+}
+
+pub fn discover_ambient_impersonated_service_account(allow_ambient: bool) -> Option<String> {
+    if !allow_ambient {
+        return None;
+    }
+    for env_key in [
+        "GOOGLE_IMPERSONATE_SERVICE_ACCOUNT",
+        "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT",
+    ] {
+        if let Ok(val) = std::env::var(env_key) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn fetch_token_from_gcloud_cli(impersonate_sa: Option<&str>) -> Result<String, String> {
+    let gcloud_bin = std::env::var("GCLOUD_BIN").unwrap_or_else(|_| "gcloud".to_string());
+    let subcommands: &[&[&str]] = &[
+        &["auth", "application-default", "print-access-token"],
+        &["auth", "print-access-token"],
+    ];
+    let mut last_err = String::new();
+    for args in subcommands {
+        let mut cmd = std::process::Command::new(&gcloud_bin);
+        cmd.args(*args);
+        cmd.arg("--quiet");
+        if let Some(sa) = impersonate_sa.filter(|s| !s.trim().is_empty()) {
+            cmd.arg(format!("--impersonate-service-account={sa}"));
+        }
+        match cmd.output() {
+            Ok(out) if out.status.success() => {
+                let tok = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !tok.is_empty() {
+                    return Ok(tok);
+                }
+            }
+            Ok(out) => {
+                last_err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            }
+            Err(e) => {
+                return Err(format!("failed to execute `{gcloud_bin}` CLI: {e}"));
+            }
+        }
+    }
+    Err(format!(
+        "`{gcloud_bin}` print-access-token failed: {last_err}"
+    ))
+}
+
 pub fn extract_adc_service_account_key(
     raw_opts: &HashMap<String, String>,
     allow_ambient: bool,
@@ -343,10 +436,20 @@ impl GcpTokenCache {
             .get("refresh_skew_ms")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(DEFAULT_REFRESH_SKEW_MS);
+        let allow_ambient = opts
+            .get("allow_ambient_adc")
+            .is_none_or(|v| v != "false" && v != "0");
         let quota_project_id = opts
             .get("quota_project_id")
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+            .or_else(|| discover_ambient_quota_project(allow_ambient));
+        let target_service_account = opts
+            .get("target_service_account")
+            .or_else(|| opts.get("impersonate_service_account"))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| discover_ambient_impersonated_service_account(allow_ambient));
         let custom_scopes = parse_scopes_option(&opts);
         let default_sa_scopes = || -> Vec<String> {
             custom_scopes.clone().unwrap_or_else(|| {
@@ -357,9 +460,6 @@ impl GcpTokenCache {
             })
         };
 
-        let allow_ambient = opts
-            .get("allow_ambient_adc")
-            .is_none_or(|v| v != "false" && v != "0");
         let explicit_adc = opts
             .get("application_credentials_path")
             .or_else(|| opts.get("application_credentials"))
@@ -463,6 +563,16 @@ impl GcpTokenCache {
                 });
             } else if let Some(ref adc_path) = explicit_adc_candidate {
                 base_source = parse_adc_source(adc_path);
+            } else if let Some(tok) = opts
+                .get("access_token")
+                .or_else(|| opts.get("bearer_token"))
+                .filter(|s| !s.trim().is_empty())
+            {
+                base_source = Some(GcpAuthSource::Static {
+                    access_token: tok.clone(),
+                    expires_at_unix_ms: None,
+                    quota_project_id: quota_project_id.clone(),
+                });
             } else if opts
                 .get("use_metadata_server")
                 .is_some_and(|v| v == "true" || v == "1")
@@ -486,43 +596,36 @@ impl GcpTokenCache {
                     endpoint,
                     scopes: custom_scopes.clone().unwrap_or_default(),
                 });
+            } else if opts
+                .get("use_gcloud_cli")
+                .is_some_and(|v| v == "true" || v == "1")
+            {
+                base_source = Some(GcpAuthSource::GcloudCli {
+                    quota_project_id: quota_project_id.clone(),
+                    impersonate_service_account: None,
+                });
             } else if let Some(ref adc_path) = ambient_adc_candidate {
                 base_source = parse_adc_source(adc_path);
             }
         }
 
-        if base_source.is_none() && !opts.contains_key("target_service_account") {
-            if let Some(tok) = opts
-                .get("access_token")
-                .or_else(|| opts.get("bearer_token"))
-                .filter(|s| !s.trim().is_empty())
-            {
-                base_source = Some(GcpAuthSource::Static {
-                    access_token: tok.clone(),
-                    expires_at_unix_ms: None,
-                    quota_project_id: quota_project_id.clone(),
-                });
-            } else if allow_ambient {
-                for env_var in ["GOOGLE_OAUTH_ACCESS_TOKEN", "CLOUDSDK_AUTH_ACCESS_TOKEN"] {
-                    if let Ok(tok) = std::env::var(env_var) {
-                        let trimmed = tok.trim();
-                        if !trimmed.is_empty() {
-                            base_source = Some(GcpAuthSource::Static {
-                                access_token: trimmed.to_string(),
-                                expires_at_unix_ms: None,
-                                quota_project_id: quota_project_id.clone(),
-                            });
-                            break;
-                        }
+        if base_source.is_none() && target_service_account.is_none() && allow_ambient {
+            for env_var in ["GOOGLE_OAUTH_ACCESS_TOKEN", "CLOUDSDK_AUTH_ACCESS_TOKEN"] {
+                if let Ok(tok) = std::env::var(env_var) {
+                    let trimmed = tok.trim();
+                    if !trimmed.is_empty() {
+                        base_source = Some(GcpAuthSource::Static {
+                            access_token: trimmed.to_string(),
+                            expires_at_unix_ms: None,
+                            quota_project_id: quota_project_id.clone(),
+                        });
+                        break;
                     }
                 }
             }
         }
 
-        let source = if let Some(target_sa) = opts
-            .get("target_service_account")
-            .filter(|s| !s.trim().is_empty())
-        {
+        let source = if let Some(target_sa) = target_service_account {
             let resolved_base = base_source.unwrap_or_else(|| {
                 let host = opts
                     .get("metadata_host")
@@ -553,7 +656,7 @@ impl GcpTokenCache {
             });
             GcpAuthSource::ImpersonatedServiceAccount {
                 base: Box::new(resolved_base),
-                target_service_account: target_sa.clone(),
+                target_service_account: target_sa,
                 iam_endpoint,
                 scopes: impersonation_scopes,
                 quota_project_id,
@@ -708,7 +811,17 @@ impl GcpTokenCache {
                         .await
                         .map_err(|e| format!("OAuth2 refresh request failed: {e}"))?;
                     if !resp.status().is_success() {
-                        return Err(format!("OAuth2 refresh returned HTTP {}", resp.status()));
+                        let status = resp.status();
+                        if token_uri == DEFAULT_OAUTH_TOKEN_URI
+                            && let Ok(cli_tok) = fetch_token_from_gcloud_cli(None)
+                        {
+                            return Ok((
+                                cli_tok,
+                                now_unix_ms.saturating_add(DEFAULT_TOKEN_TTL_MS),
+                                quota_project_id.clone(),
+                            ));
+                        }
+                        return Err(format!("OAuth2 refresh returned HTTP {status}"));
                     }
                     let parsed: OAuthTokenResponse = resp
                         .json()
@@ -866,6 +979,17 @@ impl GcpTokenCache {
                         parsed.access_token,
                         expires_at_unix_ms,
                         quota_project_id.clone().or(base_qp),
+                    ))
+                }
+                GcpAuthSource::GcloudCli {
+                    quota_project_id,
+                    impersonate_service_account,
+                } => {
+                    let tok = fetch_token_from_gcloud_cli(impersonate_service_account.as_deref())?;
+                    Ok((
+                        tok,
+                        now_unix_ms.saturating_add(DEFAULT_TOKEN_TTL_MS),
+                        quota_project_id.clone(),
                     ))
                 }
             }

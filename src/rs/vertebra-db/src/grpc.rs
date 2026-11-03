@@ -21,7 +21,6 @@ use http_body_util::BodyExt;
 use hyper::body::{Body, Frame, Incoming};
 use hyper::client::conn::http2::{self, SendRequest};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use rsa::rand_core::{OsRng, RngCore};
 use rustls::RootCertStore;
 use rustls::pki_types::ServerName;
 use thiserror::Error;
@@ -1020,31 +1019,9 @@ pub fn format_grpc_timeout(timeout: Duration) -> String {
     format!("{}H", mins / 60)
 }
 
-/// Generate an RFC 4122 version 4 UUID string using `OsRng` without external `uuid` dependencies.
+/// Generate an RFC 9562 version 4 UUID string via `vertebra_core::id::uuid4_str`.
 pub fn generate_request_uuid_v4() -> String {
-    let mut bytes = [0u8; 16];
-    OsRng.fill_bytes(&mut bytes);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0],
-        bytes[1],
-        bytes[2],
-        bytes[3],
-        bytes[4],
-        bytes[5],
-        bytes[6],
-        bytes[7],
-        bytes[8],
-        bytes[9],
-        bytes[10],
-        bytes[11],
-        bytes[12],
-        bytes[13],
-        bytes[14],
-        bytes[15]
-    )
+    vertebra_core::id::uuid4_str()
 }
 
 /// Configuration for [`GrpcChannelPool`].

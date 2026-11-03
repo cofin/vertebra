@@ -24,6 +24,7 @@ type PipelineDialect = Literal["postgres", "googlesql"]
 
 _VALID_PIPELINE_DIALECTS: frozenset[str] = frozenset({"postgres", "googlesql"})
 
+
 class RelOverlay(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Intra-statement read-your-own-writes CTE overlay (`UNION ALL` / `EXCEPT` over base table)."""
 
@@ -167,9 +168,7 @@ class QueryPipeline:
                 for step in self._steps
                 if step.return_json_agg
             ]
-            envelope_expr = (
-                f"TO_JSON_STRING(TO_JSON(STRUCT({', '.join(struct_fields)})))" if struct_fields else "'{}'"
-            )
+            envelope_expr = f"TO_JSON_STRING(TO_JSON(STRUCT({', '.join(struct_fields)})))" if struct_fields else "'{}'"
             full_sql = f"WITH {', '.join(cte_parts)} SELECT {envelope_expr} AS payload"
             return full_sql, merged_params
 
@@ -340,4 +339,3 @@ class QueryPipeline:
             return self._unpack_payload_value(payload)
         msg = f"Unsupported asynchronous driver for QueryPipeline.execute_async: {type(driver)!r}"
         raise TypeError(msg)
-

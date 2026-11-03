@@ -660,6 +660,9 @@ class QueueService:
         if scheme in ("oracle",):
             backend_cls = import_string("vertebra.framework.queues.oracle.OracleQueueBackend")
             return cast("QueueBackend", backend_cls(config))
+        if scheme in ("spanner", "spanner+googlesql", "spangres", "spanner+spangres"):
+            backend_cls = import_string("vertebra.framework.queues.spanner.SpannerQueueBackend")
+            return cast("QueueBackend", backend_cls(config))
         msg = f"Unsupported queue backend URL scheme: {scheme!r}"
         raise UnsupportedBackendError(msg)
 

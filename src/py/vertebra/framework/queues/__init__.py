@@ -33,6 +33,10 @@ from vertebra.framework.queues.scheduler import (
     CronExpression,
     CronScheduler,
 )
+from vertebra.framework.queues.spanner import (
+    SpannerQueueBackend,
+    SpannerQueueExecutor,
+)
 from vertebra.server.lanes import (
     LaneConfig,
     LaneMetrics,
@@ -59,6 +63,8 @@ __all__ = (
     "QueueService",
     "RedisQueueBackend",
     "RedisStreamClient",
+    "SpannerQueueBackend",
+    "SpannerQueueExecutor",
     "TaskDef",
     "TaskEnvelope",
     "TaskLane",

@@ -58,6 +58,7 @@ def test_warn_deprecation_and_sync_decorator(
     details: str | None,
 ) -> None:
     """Verify warn_deprecation and @deprecated emit the expected warning category and message."""
+
     @deprecated("1.2.0", alternative=alternative, details=details, pending=pending)
     def old_func(x: int) -> int:
         return x + 1
@@ -79,6 +80,7 @@ async def test_deprecated_async_function_and_class(
     captured_warnings: list[warnings.WarningMessage],
 ) -> None:
     """Verify @deprecated preserves async coroutines and class instantiation."""
+
     @deprecated("1.3.0", alternative="async_new")
     async def async_old(val: str) -> str:
         return f"ok:{val}"
@@ -103,7 +105,10 @@ async def test_deprecated_async_function_and_class(
     [
         ({"X-Correlation-ID": "corr-123"}, "corr-123"),
         ({"x-request-id": "req-456"}, "req-456"),
-        ({"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}, "4bf92f3577b34da6a3ce929d0e0e4736"),
+        (
+            {"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"},
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+        ),
         ([(b"x-correlation-id", b"bytes-789")], "bytes-789"),
         ({}, None),
     ],

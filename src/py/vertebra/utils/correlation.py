@@ -28,7 +28,9 @@ class CorrelationLoggerAdapter(logging.LoggerAdapter[logging.Logger]):
 
     def process(self, msg: Any, kwargs: Any) -> tuple[Any, Any]:
         """Attach ``correlation_id`` to ``kwargs['extra']`` and prefix the formatted message when active."""
-        cid = CorrelationContext.get() or (self.extra.get("correlation_id") if isinstance(self.extra, Mapping) else None)
+        cid = CorrelationContext.get() or (
+            self.extra.get("correlation_id") if isinstance(self.extra, Mapping) else None
+        )
         extra = dict(kwargs.get("extra") or {})
         extra["correlation_id"] = cid
         kwargs["extra"] = extra
