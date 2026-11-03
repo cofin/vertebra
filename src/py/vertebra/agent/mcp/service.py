@@ -33,10 +33,14 @@ from vertebra.agent.mcp.models import (
 )
 from vertebra.agent.mcp.registry import MCPRegistry
 from vertebra.agent.mcp.tasks import MCPTaskStore, TaskLookupError, TaskRecord, TaskStateError
+from vertebra.agent.runtime import ConfirmationGate
 from vertebra.agent.telemetry import AgentTelemetryRecorder
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 logger = logging.getLogger(__name__)
+
+CONFIRMATION_REQUIRED: int = -32003
+CONFIRMATION_TOKEN_META_KEY: str = "vertebra/confirmationToken"
 
 
 def _task_to_dict(task: TaskRecord) -> dict[str, Any]:
@@ -72,6 +76,7 @@ class MCPService:
         stream_broker: SseStreamBroker | None = None,
         task_store: MCPTaskStore | None = None,
         skill_catalog: Any | None = None,
+        confirmation_gate: ConfirmationGate | None = None,
     ) -> None:
         self.config = config if config is not None else MCPConfig()
         self.registry = registry if registry is not None else MCPRegistry()
@@ -79,6 +84,7 @@ class MCPService:
         self.stream_broker = stream_broker if stream_broker is not None else SseStreamBroker()
         self.task_store = task_store if task_store is not None else MCPTaskStore(stream_broker=self.stream_broker)
         self.skill_catalog = skill_catalog
+        self.confirmation_gate = confirmation_gate if confirmation_gate is not None else ConfirmationGate()
         self.router = JSONRPCRouter()
         self._resource_subscriptions: dict[str, set[str]] = {}
 
@@ -194,6 +200,10 @@ class MCPService:
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
 
         meta = params.get("_meta", {})
+        call_id = str(params.get("callId", "call_0"))
+        if target_tool.requires_confirmation:
+            self._require_confirmation(tool_name, call_id, arguments, meta, context)
+
         if isinstance(meta, dict) and meta.get("io.modelcontextprotocol/task") and self.task_store is not None:
             owner_id = context.identity.owner_key() if context and getattr(context, "identity", None) else None
             task = self.task_store.create(tool_name=tool_name, owner_id=owner_id)
@@ -208,8 +218,6 @@ class MCPService:
 
             asyncio.create_task(_run_async_tool())
             return {"task": {"taskId": task.task_id, "status": task.status, "pollInterval": task.poll_interval_ms}}
-
-        call_id = str(params.get("callId", "call_0"))
 
         with self.telemetry.span_tool(tool_name, call_id):
             try:
@@ -538,6 +546,51 @@ class MCPService:
             return str(key) if key is not None else None
         return None
 
+    def _require_confirmation(
+        self,
+        tool_name: str,
+        call_id: str,
+        arguments: dict[str, Any],
+        meta: Any,
+        context: Any,
+    ) -> None:
+        """Raise unless the call carries a ticket approved for this tool, caller, and arguments.
+
+        The token is read from ``_meta["vertebra/confirmationToken"]``. It must name an existing
+        ticket with ``status == "approved"``, issued for ``tool_name`` with identical
+        ``arguments``, and owned by the caller (or by no owner).
+
+        Raises:
+            JSONRPCErrorException: With code ``CONFIRMATION_REQUIRED`` and a newly issued ticket
+                token in ``data`` when the token is missing, unknown, unapproved, owned by another
+                caller, or issued for another tool or other arguments.
+        """
+        owner_id = self._caller_owner(context)
+        token = meta.get(CONFIRMATION_TOKEN_META_KEY) if isinstance(meta, Mapping) else None
+        ticket = self.confirmation_gate.get_ticket(token) if isinstance(token, str) else None
+        if (
+            ticket is not None
+            and ticket.status == "approved"
+            and (ticket.owner_id is None or ticket.owner_id == owner_id)
+            and ticket.tool_name == tool_name
+            and ticket.arguments == arguments
+        ):
+            return
+        issued = self.confirmation_gate.request_confirmation(
+            tool_name,
+            call_id,
+            dict(arguments),
+            owner_id=owner_id,
+            reason=f"Tool '{tool_name}' requires confirmation.",
+        )
+        raise JSONRPCErrorException(
+            JSONRPCError(
+                code=CONFIRMATION_REQUIRED,
+                message=f"Tool '{tool_name}' requires confirmation",
+                data={"confirmationToken": issued.token, "tool": tool_name},
+            )
+        )
+
     async def _handle_tasks_get(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Retrieve task execution record by task ID."""
         if not isinstance(params, Mapping):
@@ -617,5 +670,7 @@ class MCPService:
 
 
 __all__ = [
+    "CONFIRMATION_REQUIRED",
+    "CONFIRMATION_TOKEN_META_KEY",
     "MCPService",
 ]

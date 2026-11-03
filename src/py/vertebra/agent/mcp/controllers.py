@@ -29,9 +29,19 @@ def mcp_tool(
     requires_confirmation: bool = False,
     timeout_seconds: float | None = None,
     annotations: dict[str, Any] | None = None,
-    webmcp: bool = True,
+    webmcp: bool = False,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Decorator marking a route handler or function as an explicit MCP tool without wrapping its type."""
+    """Decorator marking a route handler or function as an explicit MCP tool without wrapping its type.
+
+    Args:
+        name: Optional override for the MCP tool name.
+        description: Optional override for the MCP tool description.
+        requires_confirmation: Require a human confirmation ticket before invoking the tool.
+        timeout_seconds: Optional execution timeout in seconds.
+        annotations: Optional metadata dictionary attached to the tool descriptor.
+        webmcp: List the tool in the browser WebMCP manifest. Defaults to `False`; browser
+            exposure is opt-in per tool.
+    """
 
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
         target_fn: Any = fn

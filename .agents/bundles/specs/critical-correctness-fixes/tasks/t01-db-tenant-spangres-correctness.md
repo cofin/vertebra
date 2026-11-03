@@ -26,11 +26,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: 2026-11-03T16:33:00Z
-last_verified_commit: 0d178f2
+last_verified_commit: 0cdf54c
 verification_evidence: "RED: 5 failed, 4 passed (DID NOT RAISE OperationalError, ValueError: Unsupported database URL scheme 'spangres', dict vs list CDC params); GREEN: 27 passed in test_enterprise_olap_drivers.py, test_spanner.py, test_spanner_queue_and_cdc.py; ruff check, ruff format --check, mypy exit 0"
 created_at: 2026-11-03T15:30:00Z
 updated_at: 2026-11-03T16:33:00Z
-commit: null
+commit: 0cdf54c
 tags: [bugfix, db, tenancy, spanner, cdc]
 ---
 

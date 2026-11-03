@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from vertebra.agent.core.schema import Tool
 from vertebra.agent.mcp import (
     MCPRegistry,
     SkillController,
@@ -248,7 +249,7 @@ def test_configurable_docs_portal_and_route_annotated_webmcp() -> None:
         skill_id = "workspace_tools"
         skill_name = "Workspace Tools"
 
-        @mcp_tool(name="archive_workspace", description="Archive a workspace by ID")
+        @mcp_tool(name="archive_workspace", description="Archive a workspace by ID", webmcp=True)
         async def archive(self, workspace_id: str) -> dict[str, str]:
             return {"archived": workspace_id}
 
@@ -291,6 +292,29 @@ def test_configurable_docs_portal_and_route_annotated_webmcp() -> None:
     webmcp_json = render_webmcp_manifest_json(registry, WebMCPConfig(mcp_endpoint="/mcp"))
     webmcp_data = decode_json(webmcp_json)
     assert webmcp_data["mcpEndpoint"] == "/mcp"
-    assert [t["name"] for t in webmcp_data["tools"]] == ["archive_workspace", "create_ticket"]
+    assert [t["name"] for t in webmcp_data["tools"]] == ["archive_workspace"]
     manifest_obj = build_webmcp_manifest(registry)
-    assert len(manifest_obj.tools) == 2
+    assert [t.name for t in manifest_obj.tools] == ["archive_workspace"]
+
+
+def test_webmcp_manifest_lists_only_tagged_tools() -> None:
+    """build_webmcp_manifest lists @mcp_tool(webmcp=True) tools and omits untagged tools."""
+
+    @mcp_tool(name="browser_search", description="Search from the browser", webmcp=True)
+    def browser_search(query: str) -> list[str]:
+        return [query]
+
+    @mcp_tool(name="server_only", description="Server-side only tool")
+    def server_only(query: str) -> list[str]:
+        return [query]
+
+    def bigquery_query(sql: str) -> dict[str, str]:
+        return {"sql": sql}
+
+    registry = MCPRegistry()
+    registry.register_route_handler(browser_search)
+    registry.register_route_handler(server_only)
+    registry.register_tool(Tool(bigquery_query, name="bigquery_query", description="Run a governed query"))
+
+    manifest = build_webmcp_manifest(registry, WebMCPConfig())
+    assert [t.name for t in manifest.tools] == ["browser_search"]

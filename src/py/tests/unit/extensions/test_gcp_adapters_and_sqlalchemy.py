@@ -333,7 +333,7 @@ def test_django_backends_and_shared_provider_fingerprinting() -> None:
     assert sp_drv.config.project_id == "core-proj"
     assert sp_drv.config.instance_id == "prod-inst"
     assert sp_drv.config.database_id == "ledger-db"
-    assert sp_drv.config.dialect == "postgresql"
+    assert sp_drv.config.dialect == "spangres"
 
     bq_cfg = BigQueryConfig(
         project_id="analytics-proj",

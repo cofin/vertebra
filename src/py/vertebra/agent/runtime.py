@@ -196,47 +196,35 @@ class ConfirmationGate:
         return ticket
 
     def approve(self, token: str, *, owner_id: str | None = None) -> bool:
-        """Approve a pending confirmation ticket."""
-        self._approved_tokens.add(token)
+        """Approve a pending confirmation ticket.
+
+        Returns:
+            True when the ticket exists and ``owner_id`` may decide it; False otherwise, with no
+            change to the gate.
+        """
         ticket = self._tickets.get(token)
         if ticket is None:
-            return True
+            return False
         if owner_id is not None and ticket.owner_id is not None and ticket.owner_id != owner_id:
             return False
-
-        updated = ConfirmationTicket(
-            token=ticket.token,
-            tool_name=ticket.tool_name,
-            call_id=ticket.call_id,
-            arguments=ticket.arguments,
-            owner_id=ticket.owner_id,
-            reason=ticket.reason,
-            status="approved",
-            created_at_iso=ticket.created_at_iso,
-        )
-        self._tickets[token] = updated
+        self._approved_tokens.add(token)
+        self._tickets[token] = msgspec.structs.replace(ticket, status="approved")
         return True
 
     def reject(self, token: str, *, owner_id: str | None = None, reason: str = "") -> bool:
-        """Reject a pending confirmation ticket."""
-        self._approved_tokens.discard(token)
+        """Reject a pending confirmation ticket.
+
+        Returns:
+            True when the ticket exists and ``owner_id`` may decide it; False otherwise, with no
+            change to the gate.
+        """
         ticket = self._tickets.get(token)
         if ticket is None:
             return False
         if owner_id is not None and ticket.owner_id is not None and ticket.owner_id != owner_id:
             return False
-
-        updated = ConfirmationTicket(
-            token=ticket.token,
-            tool_name=ticket.tool_name,
-            call_id=ticket.call_id,
-            arguments=ticket.arguments,
-            owner_id=ticket.owner_id,
-            reason=reason or ticket.reason,
-            status="rejected",
-            created_at_iso=ticket.created_at_iso,
-        )
-        self._tickets[token] = updated
+        self._approved_tokens.discard(token)
+        self._tickets[token] = msgspec.structs.replace(ticket, status="rejected", reason=reason or ticket.reason)
         return True
 
     def is_approved(self, token: str | None, *, owner_id: str | None = None) -> bool:

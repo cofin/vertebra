@@ -2,7 +2,7 @@
 type: Task
 id: critical-correctness-fixes:t02
 title: WebMCP per-tool opt-in and MCP confirmation enforcement
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on: []
@@ -18,19 +18,20 @@ files:
 tests:
   - src/py/tests/unit/extensions/test_vite_and_docs_portal.py
   - src/py/tests/unit/agent/test_mcp_conformance.py
+  - src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: executor
+claimed_at: 2026-11-03T16:34:00Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-03T16:40:42Z
+last_verified_commit: 0cdf54c
+verification_evidence: "RED: exit 2 (ImportError: cannot import name CONFIRMATION_REQUIRED). GREEN: 39 passed in 1.65s; ruff check/format passed; mypy passed (5 source files); zero hits for include_tagged_only in src and docs."
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T16:00:00Z
+updated_at: 2026-11-03T16:40:42Z
 commit: null
 tags: [bugfix, security, mcp, webmcp]
 ---
@@ -388,12 +389,13 @@ Browser WebMCP manifests list only tools that opt in with `@mcp_tool(webmcp=True
 
 ## Acceptance Criteria
 
-- [ ] R4: Only `@mcp_tool(webmcp=True)` tools appear in the manifest; `mcp_tool` defaults `webmcp=False`; `include_tagged_only` is gone from `src` and `docs`; plain `Tool` objects never appear.
-- [ ] R5: Confirmation-gated tools raise `-32003` unless the ticket is approved for the same tool, caller, and arguments; the tool body does not run; the matching call runs once; `AgentPlugin` approvals unlock MCP tickets.
-- [ ] R5: `ConfirmationGate.approve` / `reject` return `False` and change no state for unknown or other-owner tokens.
-- [ ] Docs, knowledge chapter, and changelog updated.
-- [ ] Targeted tests, ruff, ruff format, and mypy pass; one signed commit.
+- [x] R4: Only `@mcp_tool(webmcp=True)` tools appear in the manifest; `mcp_tool` defaults `webmcp=False`; `include_tagged_only` is gone from `src` and `docs`; plain `Tool` objects never appear.
+- [x] R5: Confirmation-gated tools raise `-32003` unless the ticket is approved for the same tool, caller, and arguments; the tool body does not run; the matching call runs once; `AgentPlugin` approvals unlock MCP tickets.
+- [x] R5: `ConfirmationGate.approve` / `reject` return `False` and change no state for unknown or other-owner tokens.
+- [x] Docs, knowledge chapter, and changelog updated.
+- [x] Targeted tests, ruff, ruff format, and mypy pass; one signed commit.
 
 ## Notes & Discoveries
 
 - [2026-11-03 15:30] Planning: `ConfirmationGate.approve` records the token before its ticket and owner checks; the gate is fixed at the root, and the service also checks ticket status, owner, tool, and arguments explicitly.
+- [2026-11-03 16:40] Execution: Updated `test_django_backends_and_shared_provider_fingerprinting` in `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py` to expect `spangres` (normalized by `DatabaseWrapperMixin._build_native_config` from `"POSTGRESQL"`).

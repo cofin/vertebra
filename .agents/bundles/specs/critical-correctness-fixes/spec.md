@@ -9,11 +9,11 @@ research:
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 1
-current_task: t01
+state_revision: 3
+current_task: null
 last_verified_checkpoint: null
 created_at: 2026-11-03T03:30:00Z
-updated_at: 2026-11-03T16:00:00Z
+updated_at: 2026-11-03T16:40:42Z
 tags: [bugfix, security, regression-tdd]
 ---
 
@@ -281,8 +281,8 @@ Error modes:
 
 ### Phase 1: Data Layer and MCP Security
 
-- [x] t01 — Tenant predicate raises, Spangres URL routing, and Spangres CDC positional params (tasks/t01-db-tenant-spangres-correctness.md)
-- [ ] t02 — WebMCP per-tool opt-in and MCP confirmation enforcement (tasks/t02-mcp-exposure-and-confirmation.md)
+- [x] [0cdf54c] t01 — Tenant predicate raises, Spangres URL routing, and Spangres CDC positional params (tasks/t01-db-tenant-spangres-correctness.md)
+- [x] t02 — WebMCP per-tool opt-in and MCP confirmation enforcement (tasks/t02-mcp-exposure-and-confirmation.md)
 - [ ] t03 — `Mcp-Name` binding and nested-params rejection (tasks/t03-mcp-name-binding.md)
 - [ ] t04 — DB tool identifier validation and statement classification (tasks/t04-db-tool-sql-safety.md)
 - **Phase 1 Recovery Checkpoint**:

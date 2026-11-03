@@ -30,7 +30,6 @@ class WebMCPConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     enabled: bool = True
     manifest_path: str = "/.well-known/webmcp.json"
     mcp_endpoint: str = "/mcp"
-    include_tagged_only: bool = False
 
 
 class WebMCPToolDescriptor(
@@ -68,13 +67,16 @@ def build_webmcp_manifest(
     source: MCPRegistry | Sequence[Tool],
     config: WebMCPConfig | None = None,
 ) -> WebMCPManifest:
-    """Build a WebMCPManifest from an MCPRegistry or sequence of Tool descriptors."""
+    """Build a WebMCPManifest listing only tools decorated with ``@mcp_tool(webmcp=True)``.
+
+    Tools without that tag, including plain ``Tool`` objects, are never browser-exposed.
+    """
     cfg = config or WebMCPConfig()
     tools_list: Sequence[Tool] = cast("Any", source).list_tools() if hasattr(source, "list_tools") else source
     descriptors: list[WebMCPToolDescriptor] = []
     for t in tools_list:
-        meta = getattr(t.fn, "_mcp_tool_meta", {}) or {}
-        if cfg.include_tagged_only and not meta.get("webmcp", True):
+        meta = getattr(t.fn, "_mcp_tool_meta", None) or {}
+        if meta.get("webmcp") is not True:
             continue
         annotations = dict(meta.get("annotations", {}))
         descriptors.append(

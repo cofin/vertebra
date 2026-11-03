@@ -5,8 +5,10 @@ from typing import Any
 
 import pytest
 
+from vertebra.agent.controller import ConfirmationDecisionRequest
 from vertebra.agent.core.context import AgentContext, CallerIdentity
 from vertebra.agent.core.guards import GuardProtocol, PermissionDeniedError
+from vertebra.agent.core.jsonrpc import JSONRPCErrorException
 from vertebra.agent.core.schema import tool
 from vertebra.agent.mcp import (
     HEADER_MISMATCH,
@@ -33,6 +35,9 @@ from vertebra.agent.mcp import (
     prompt,
     resource,
 )
+from vertebra.agent.mcp.service import CONFIRMATION_REQUIRED, CONFIRMATION_TOKEN_META_KEY
+from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
+from vertebra.agent.runtime import ConfirmationGate
 from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.serializers import decode_json
 
@@ -381,3 +386,139 @@ async def test_mcp_tasks_store_and_async_promotion() -> None:
     assert "task" in promoted_res
     async_task_id = promoted_res["task"]["taskId"]
     assert async_task_id.startswith("task_")
+
+
+@pytest.mark.anyio
+async def test_mcp_tool_call_requires_approved_confirmation_token() -> None:
+    """A confirmation-gated tool runs only with an approved ticket issued for that tool."""
+    gate = ConfirmationGate()
+    service = MCPService(confirmation_gate=gate)
+    calls: list[str] = []
+
+    @tool(name="drop_workspace", description="Drop a workspace", requires_confirmation=True)
+    def drop_workspace(workspace_id: str) -> str:
+        calls.append(workspace_id)
+        return f"dropped:{workspace_id}"
+
+    @tool(name="archive_workspace", description="Archive a workspace", requires_confirmation=True)
+    def archive_workspace(workspace_id: str) -> str:
+        calls.append(f"archive:{workspace_id}")
+        return f"archived:{workspace_id}"
+
+    service.registry.register_tool(drop_workspace)
+    service.registry.register_tool(archive_workspace)
+
+    with pytest.raises(JSONRPCErrorException) as first:
+        await service.handle_tool_call({"name": "drop_workspace", "arguments": {"workspace_id": "w1"}})
+    assert first.value.error.code == CONFIRMATION_REQUIRED
+    assert first.value.error.data["tool"] == "drop_workspace"
+    token = first.value.error.data["confirmationToken"]
+    assert calls == []
+
+    with pytest.raises(JSONRPCErrorException) as unapproved:
+        await service.handle_tool_call(
+            {
+                "name": "drop_workspace",
+                "arguments": {"workspace_id": "w1"},
+                "_meta": {CONFIRMATION_TOKEN_META_KEY: token},
+            }
+        )
+    assert unapproved.value.error.code == CONFIRMATION_REQUIRED
+    assert calls == []
+
+    assert gate.approve(token) is True
+    with pytest.raises(JSONRPCErrorException) as wrong_tool:
+        await service.handle_tool_call(
+            {
+                "name": "archive_workspace",
+                "arguments": {"workspace_id": "w1"},
+                "_meta": {CONFIRMATION_TOKEN_META_KEY: token},
+            }
+        )
+    assert wrong_tool.value.error.code == CONFIRMATION_REQUIRED
+    assert calls == []
+
+    with pytest.raises(JSONRPCErrorException) as wrong_arguments:
+        await service.handle_tool_call(
+            {
+                "name": "drop_workspace",
+                "arguments": {"workspace_id": "w2"},
+                "_meta": {CONFIRMATION_TOKEN_META_KEY: token},
+            }
+        )
+    assert wrong_arguments.value.error.code == CONFIRMATION_REQUIRED
+    assert calls == []
+
+    result = await service.handle_tool_call(
+        {"name": "drop_workspace", "arguments": {"workspace_id": "w1"}, "_meta": {CONFIRMATION_TOKEN_META_KEY: token}}
+    )
+    assert result["content"][0]["text"] == "dropped:w1"
+    assert calls == ["w1"]
+
+
+@pytest.mark.anyio
+async def test_mcp_confirmation_rejects_approval_by_another_owner() -> None:
+    """A failed approval by another owner changes no gate state and leaves the call blocked."""
+    gate = ConfirmationGate()
+    service = MCPService(confirmation_gate=gate)
+    calls: list[str] = []
+
+    @tool(name="drop_workspace", description="Drop a workspace", requires_confirmation=True)
+    def drop_workspace(workspace_id: str) -> str:
+        calls.append(workspace_id)
+        return f"dropped:{workspace_id}"
+
+    service.registry.register_tool(drop_workspace)
+    alice = AgentContext(identity=CallerIdentity(user_id="alice"))
+    call = {"name": "drop_workspace", "arguments": {"workspace_id": "w1"}}
+
+    with pytest.raises(JSONRPCErrorException) as first:
+        await service.handle_tool_call(call, context=alice)
+    token = first.value.error.data["confirmationToken"]
+    ticket = gate.get_ticket(token)
+    assert ticket is not None
+    assert ticket.owner_id == "default:alice"
+
+    assert gate.approve(token, owner_id="default:mallory") is False
+    ticket_after = gate.get_ticket(token)
+    assert ticket_after is not None
+    assert ticket_after.status == "pending"
+    assert gate.is_approved(token, owner_id="default:alice") is False
+
+    with pytest.raises(JSONRPCErrorException) as blocked:
+        await service.handle_tool_call({**call, "_meta": {CONFIRMATION_TOKEN_META_KEY: token}}, context=alice)
+    assert blocked.value.error.code == CONFIRMATION_REQUIRED
+    assert calls == []
+
+
+def test_confirmation_gate_rejects_unknown_tokens() -> None:
+    """Approving or rejecting an unknown token fails without recording the token."""
+    gate = ConfirmationGate()
+    assert gate.approve("unknown-token") is False
+    assert gate.is_approved("unknown-token") is False
+    assert gate.reject("unknown-token") is False
+    assert gate.get_ticket("unknown-token") is None
+
+
+@pytest.mark.anyio
+async def test_agent_plugin_mcp_confirmation_uses_runtime_gate() -> None:
+    """AgentPlugin approvals through the chat controller unlock MCP confirmation tickets."""
+    plugin = AgentPlugin(AgentPluginConfig(mcp=MCPConfig(server_name="confirm-mcp")))
+    assert plugin.mcp_service is not None
+
+    @tool(name="purge_cache", description="Purge the cache", requires_confirmation=True)
+    def purge_cache() -> str:
+        return "purged"
+
+    plugin.mcp_service.registry.register_tool(purge_cache)
+    with pytest.raises(JSONRPCErrorException) as exc_info:
+        await plugin.mcp_service.handle_tool_call({"name": "purge_cache", "arguments": {}})
+    token = exc_info.value.error.data["confirmationToken"]
+
+    decision = await plugin.chat_controller.decide_confirmation(token, ConfirmationDecisionRequest(decision="approve"))
+    assert decision == {"status": "ok", "decision": "approve", "token": token}
+
+    result = await plugin.mcp_service.handle_tool_call(
+        {"name": "purge_cache", "arguments": {}, "_meta": {CONFIRMATION_TOKEN_META_KEY: token}}
+    )
+    assert result["content"][0]["text"] == "purged"

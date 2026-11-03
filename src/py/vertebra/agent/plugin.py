@@ -49,12 +49,14 @@ class AgentPlugin:
         self.config = config or AgentPluginConfig()
         self.observability = self.config.observability or AgentTelemetryRecorder()
         recorder = getattr(self.observability, "recorder", self.observability)
+        self.runtime = self.config.runtime or AgentRuntime(telemetry=recorder)
         self.mcp_registry = MCPRegistry()
         self.mcp_service = (
             MCPService(
                 registry=self.mcp_registry,
                 config=self.config.mcp,
                 telemetry=recorder,
+                confirmation_gate=self.runtime.confirmation_gate,
             )
             if self.config.mcp is not None
             else None
@@ -67,7 +69,6 @@ class AgentPlugin:
             if self.config.a2a is not None
             else None
         )
-        self.runtime = self.config.runtime or AgentRuntime(telemetry=recorder)
         self.chat_controller = AgentChatController(
             runtime=self.runtime,
             session_store=self.config.session_store,
