@@ -130,3 +130,55 @@ def test_broker_plugin_zpages_integration() -> None:
     code, payload = zpages.handle_zpage("/debug/zpages/broker")
     data = decode_json(payload)
     assert data["brokers"]["default"]["active_leases"] == 0
+
+
+def test_broker_dialect_tags_cover_all_nine_sql_dialects() -> None:
+    """Verify SHMBrokerTransport._DIALECT_TAGS maps all 9 SQL dialects and aliases to distinct tags 1..9."""
+    tags = SHMBrokerTransport._DIALECT_TAGS
+    assert tags["postgresql"] == 1
+    assert tags["postgres"] == 1
+    assert tags["mysql"] == 2
+    assert tags["mariadb"] == 2
+    assert tags["sqlite"] == 3
+    assert tags["oracle"] == 4
+    assert tags["mssql"] == 5
+    assert tags["sqlserver"] == 5
+    assert tags["duckdb"] == 6
+    assert tags["bigquery"] == 7
+    assert tags["spanner"] == 8
+    assert tags["spangres"] == 9
+
+    transport = SHMBrokerTransport(BrokerConfig())
+    sql = "SELECT * FROM events WHERE tenant_id = :tenant_id"
+    canonical_dialects = (
+        "postgresql",
+        "mysql",
+        "sqlite",
+        "oracle",
+        "mssql",
+        "duckdb",
+        "bigquery",
+        "spanner",
+        "spangres",
+    )
+    compiled_count = 0
+
+    def _compile_for(target_dialect: str):
+        def _inner(_raw: str) -> tuple[str, tuple[str, ...]]:
+            nonlocal compiled_count
+            compiled_count += 1
+            return (f"compiled_{target_dialect}", ("tenant_id",))
+
+        return _inner
+
+    for dialect in canonical_dialects:
+        plan = transport.get_or_compile_statement(dialect, sql, _compile_for(dialect))
+        assert plan.compiled_sql == f"compiled_{dialect}"
+        assert plan.dialect == dialect
+
+    assert compiled_count == 9
+    for dialect in canonical_dialects:
+        cached_plan = transport.get_or_compile_statement(dialect, sql, _compile_for("unexpected"))
+        assert cached_plan.compiled_sql == f"compiled_{dialect}"
+    assert compiled_count == 9
+    transport.close()

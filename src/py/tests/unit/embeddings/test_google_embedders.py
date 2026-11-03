@@ -9,9 +9,9 @@ from typing import Any
 import pytest
 
 import vertebra
-from vertebra._storage import GcpTokenSnapshot
 from vertebra._vertebra import (
     ArrowCursor,
+    GcpTokenSnapshot,
     VectorBatchView,
     VectorCache,
     VectorView,

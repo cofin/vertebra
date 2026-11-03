@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
 import alembic.ddl.impl as alembic_impl_mod
@@ -22,6 +24,7 @@ if TYPE_CHECKING:
 
 __all__ = (
     "AlembicImpl",
+    "BigQueryAlembicImpl",
     "CreateVectorIndexOp",
     "CreateViewOp",
     "DropVectorIndexOp",
@@ -32,6 +35,7 @@ __all__ = (
     "OracleAlembicImpl",
     "PostgreSQLAlembicImpl",
     "SQLiteAlembicImpl",
+    "SpannerAlembicImpl",
 )
 
 
@@ -39,13 +43,44 @@ class CreateVectorIndexOp(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """SQLAlchemy 2.1 CreateVectorIndex DDL operation for Alembic migrations."""
 
     index_name: str
+    """Identifier of the vector index to create."""
     table_name: str
+    """Target table containing the vector column."""
     column_name: str
+    """Target vector column to index."""
     metric: str = "cosine"
+    """Distance metric (`cosine`, `l2`, or `inner_product`)."""
+    storing: tuple[str, ...] = ()
+    """Optional `STORING (...)` columns included in Cloud Spanner ScaNN indexes."""
+    not_null_filtered: bool = True
+    """Whether to include `WHERE <column> IS NOT NULL` on Cloud Spanner ScaNN indexes."""
 
     def to_sql(self, dialect_name: str = "postgresql") -> str:
         """Render the dialect-aware CREATE VECTOR INDEX statement."""
         base = dialect_name.split("+", 1)[0].lower()
+        if base == "spanner":
+            sp_metric = {
+                "cosine": "COSINE",
+                "l2": "EUCLIDEAN",
+                "inner_product": "DOT_PRODUCT",
+            }.get(self.metric.lower(), self.metric.upper())
+            storing_clause = f" STORING ({', '.join(self.storing)})" if self.storing else ""
+            where_clause = f" WHERE {self.column_name} IS NOT NULL" if self.not_null_filtered else ""
+            return (
+                f"CREATE VECTOR INDEX {self.index_name} ON {self.table_name} "
+                f"({self.column_name}){storing_clause}{where_clause} "
+                f"OPTIONS (tree_type = 'SCANN', distance_type = '{sp_metric}')"
+            )
+        if base == "bigquery":
+            bq_metric = {
+                "cosine": "COSINE",
+                "l2": "EUCLIDEAN",
+                "inner_product": "DOT_PRODUCT",
+            }.get(self.metric.lower(), self.metric.upper())
+            return (
+                f"CREATE VECTOR INDEX {self.index_name} ON {self.table_name}({self.column_name}) "
+                f"OPTIONS(index_type = 'IVF', distance_type = '{bq_metric}')"
+            )
         if base == "oracle":
             metric_kw = {
                 "cosine": "DISTANCE COSINE",
@@ -75,14 +110,22 @@ class DropVectorIndexOp(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """SQLAlchemy 2.1 DropVectorIndex DDL operation for Alembic migrations."""
 
     index_name: str
+    """Identifier of the vector index to drop."""
     table_name: str = ""
+    """Optional table name when required by the target dialect."""
     if_exists: bool = True
+    """Whether to emit `IF EXISTS` in the `DROP INDEX` statement."""
 
     def to_sql(self, dialect_name: str = "postgresql") -> str:
         """Render the dialect-aware DROP INDEX statement."""
         base = dialect_name.split("+", 1)[0].lower()
         if base == "oracle":
             return f"DROP INDEX {self.index_name}"
+        if base == "bigquery" and self.table_name:
+            exists_bq = "IF EXISTS " if self.if_exists else ""
+            return f"DROP VECTOR INDEX {exists_bq}{self.index_name} ON {self.table_name}"
+        if base == "spanner":
+            return f"DROP VECTOR INDEX {self.index_name}"
         exists_clause = "IF EXISTS " if self.if_exists else ""
         return f"DROP INDEX {exists_clause}{self.index_name}"
 
@@ -91,9 +134,13 @@ class CreateViewOp(msgspec.Struct, frozen=True, gc=False):
     """SQLAlchemy 2.1 CreateView DDL operation for Alembic migrations."""
 
     view_name: str
+    """Identifier of the view or materialized view to create."""
     select_sql: str
+    """Defining `SELECT` query for the view body."""
     or_replace: bool = False
+    """Whether to emit `CREATE OR REPLACE VIEW`."""
     materialized: bool = False
+    """Whether to create a `MATERIALIZED VIEW`."""
 
     def to_sql(self, dialect_name: str = "postgresql") -> str:
         """Render the dialect-aware CREATE VIEW DDL statement."""
@@ -112,8 +159,11 @@ class DropViewOp(msgspec.Struct, frozen=True, gc=False):
     """SQLAlchemy 2.1 DropView DDL operation for Alembic migrations."""
 
     view_name: str
+    """Identifier of the view or materialized view to drop."""
     if_exists: bool = True
+    """Whether to emit `IF EXISTS` in the `DROP VIEW` statement."""
     materialized: bool = False
+    """Whether the target is a `MATERIALIZED VIEW`."""
 
     def to_sql(self, dialect_name: str = "postgresql") -> str:
         """Render the dialect-aware DROP VIEW DDL statement."""
@@ -163,6 +213,67 @@ class DuckDBAlembicImpl(DefaultImpl):
 
     __dialect__ = "duckdb+vtb"
     transactional_ddl: bool = True
+
+
+class BigQueryAlembicImpl(DefaultImpl):
+    """Alembic DefaultImpl for Google BigQuery +vtb and +vertebra dialects."""
+
+    __dialect__ = "bigquery+vtb"
+    transactional_ddl: bool = False
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize BigQueryAlembicImpl."""
+        if args or kwargs:
+            super().__init__(*args, **kwargs)
+
+
+class SpannerAlembicImpl(DefaultImpl):
+    """DDL-batching Alembic DefaultImpl for Cloud Spanner +vtb and +vertebra dialects."""
+
+    __dialect__ = "spanner+vtb"
+    transactional_ddl: bool = False
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize SpannerAlembicImpl with an empty DDL batch buffer."""
+        if args or kwargs:
+            super().__init__(*args, **kwargs)
+        self._ddl_buffer: list[str] = []
+
+    @property
+    def buffered_ddl(self) -> tuple[str, ...]:
+        """Return the currently buffered DDL statements awaiting a batched `UpdateDatabaseDdl` LRO."""
+        return tuple(self._ddl_buffer)
+
+    def buffer_ddl(self, sql: str | Sequence[str]) -> None:
+        """Append one or more DDL statements to the single-LRO migration batch buffer."""
+        if isinstance(sql, str):
+            stmt = sql.strip().rstrip(";")
+            if stmt:
+                self._ddl_buffer.append(stmt)
+            return
+        for item in sql:
+            stmt = str(item).strip().rstrip(";")
+            if stmt:
+                self._ddl_buffer.append(stmt)
+
+    def flush_ddl_batch(self, driver: Any) -> Any:
+        """Flush all buffered DDL statements in a single `driver.update_ddl(statements)` LRO call."""
+        if not self._ddl_buffer:
+            return None
+        statements = list(self._ddl_buffer)
+        self._ddl_buffer.clear()
+        return driver.update_ddl(statements)
+
+    async def flush_ddl_batch_async(self, driver: Any) -> Any:
+        """Asynchronously flush all buffered DDL statements in a single `driver.update_ddl(statements)` LRO call."""
+        if not self._ddl_buffer:
+            return None
+        statements = list(self._ddl_buffer)
+        self._ddl_buffer.clear()
+        res = driver.update_ddl(statements)
+        if inspect.isawaitable(res):
+            return await res
+        return res
 
 
 def _compare_type_impl(
@@ -229,6 +340,18 @@ class AlembicImpl(DefaultImpl):
             "duckdb+vtb": DuckDBAlembicImpl,
             "duckdb+vertebra_async": DuckDBAlembicImpl,
             "duckdb+vtb_async": DuckDBAlembicImpl,
+            "bigquery+vertebra": BigQueryAlembicImpl,
+            "bigquery+vtb": BigQueryAlembicImpl,
+            "bigquery+vertebra_async": BigQueryAlembicImpl,
+            "bigquery+vtb_async": BigQueryAlembicImpl,
+            "spanner+vertebra": SpannerAlembicImpl,
+            "spanner+vtb": SpannerAlembicImpl,
+            "spanner+vertebra_async": SpannerAlembicImpl,
+            "spanner+vtb_async": SpannerAlembicImpl,
+            "spangres+vertebra": SpannerAlembicImpl,
+            "spangres+vtb": SpannerAlembicImpl,
+            "spangres+vertebra_async": SpannerAlembicImpl,
+            "spangres+vtb_async": SpannerAlembicImpl,
         }
         for name, impl_cls in impl_map.items():
             alembic_impl_mod._impls[name] = impl_cls

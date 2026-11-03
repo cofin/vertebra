@@ -256,4 +256,14 @@ fn test_shm_lease_table_colocated_statement_cache_and_channel_ring_across_named_
     assert_eq!(drained[0].timestamp_ns, 123_456);
     assert_eq!(drained[0].lease_id.as_deref(), Some(&b"0:1"[..]));
     assert!(primary.drain_channel(b"events").is_empty());
+
+    assert_eq!(vertebra_core::broker::DIALECT_TAG_POSTGRES, 1);
+    assert_eq!(vertebra_core::broker::DIALECT_TAG_MYSQL, 2);
+    assert_eq!(vertebra_core::broker::DIALECT_TAG_SQLITE, 3);
+    assert_eq!(vertebra_core::broker::DIALECT_TAG_ORACLE, 4);
+    assert_eq!(vertebra_core::broker::DIALECT_TAG_MSSQL, 5);
+    assert_eq!(vertebra_core::broker::DIALECT_TAG_DUCKDB, 6);
+    assert_eq!(vertebra_core::broker::DIALECT_TAG_BIGQUERY, 7);
+    assert_eq!(vertebra_core::broker::DIALECT_TAG_SPANNER, 8);
+    assert_eq!(vertebra_core::broker::DIALECT_TAG_SPANGRES, 9);
 }

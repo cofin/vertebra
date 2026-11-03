@@ -46,6 +46,18 @@ vtb = "vertebra.cli:cli"
 "duckdb.vtb" = "vertebra.extensions.sqlalchemy.dialects:DuckDBDialect"
 "duckdb.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects:DuckDBAsyncDialect"
 "duckdb.vtb_async" = "vertebra.extensions.sqlalchemy.dialects:DuckDBAsyncDialect"
+"bigquery.vertebra" = "vertebra.extensions.sqlalchemy.dialects:BigQueryDialect"
+"bigquery.vtb" = "vertebra.extensions.sqlalchemy.dialects:BigQueryDialect"
+"bigquery.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects:BigQueryAsyncDialect"
+"bigquery.vtb_async" = "vertebra.extensions.sqlalchemy.dialects:BigQueryAsyncDialect"
+"spanner.vertebra" = "vertebra.extensions.sqlalchemy.dialects:SpannerDialect"
+"spanner.vtb" = "vertebra.extensions.sqlalchemy.dialects:SpannerDialect"
+"spanner.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects:SpannerAsyncDialect"
+"spanner.vtb_async" = "vertebra.extensions.sqlalchemy.dialects:SpannerAsyncDialect"
+"spangres.vertebra" = "vertebra.extensions.sqlalchemy.dialects:SpangresDialect"
+"spangres.vtb" = "vertebra.extensions.sqlalchemy.dialects:SpangresDialect"
+"spangres.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects:SpangresAsyncDialect"
+"spangres.vtb_async" = "vertebra.extensions.sqlalchemy.dialects:SpangresAsyncDialect"
 
 [project.optional-dependencies]
 sqlspec = [

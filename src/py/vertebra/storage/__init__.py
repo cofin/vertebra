@@ -18,6 +18,7 @@ from vertebra.storage._store import (
     SigningConfig,
     StorageConfig,
 )
+from vertebra.storage._streaming import StreamingStorageResponse
 
 __all__ = (
     "AzureConfig",
@@ -36,4 +37,5 @@ __all__ = (
     "S3Config",
     "SigningConfig",
     "StorageConfig",
+    "StreamingStorageResponse",
 )

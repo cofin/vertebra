@@ -11,6 +11,7 @@ from vertebra.embeddings._base import (
     VectorCache,
     VectorView,
 )
+from vertebra.embeddings._bigquery import BigQueryEmbedder
 from vertebra.embeddings._broker import (
     BackendInferenceCallable,
     EmbeddingBroker,
@@ -40,11 +41,13 @@ from vertebra.embeddings._remote import (
     RemoteEmbedResponse,
     create_embedding_grpc_service,
 )
+from vertebra.embeddings._spanner import SpannerEmbedder
 
 __all__ = (
     "MODEL_CATALOG",
     "AlloyDbEmbedder",
     "BackendInferenceCallable",
+    "BigQueryEmbedder",
     "Embedder",
     "EmbeddingBroker",
     "EmbeddingBrokerConfig",
@@ -60,6 +63,7 @@ __all__ = (
     "RemoteEmbedResponse",
     "RemoteEmbedder",
     "SimilarityMatch",
+    "SpannerEmbedder",
     "StaticEmbedder",
     "VectorBatchView",
     "VectorCache",

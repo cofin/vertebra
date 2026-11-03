@@ -21,13 +21,17 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, default-features = false, features = ["sync"] }
 bytes = { workspace = true }
+chrono = { workspace = true, optional = true }
 jsonwebtoken = { workspace = true }
 lz4_flex = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 
 [features]
-default = ["compression"]
+default = ["compression", "gcp-auth"]
 compression = ["dep:lz4_flex", "dep:zstd"]
+gcp-auth = ["dep:reqwest", "dep:url", "dep:chrono"]
 macos-ulock = []
 
 [target.'cfg(unix)'.dependencies]

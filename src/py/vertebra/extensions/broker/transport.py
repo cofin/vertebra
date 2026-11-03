@@ -359,9 +359,17 @@ class SHMBrokerTransport:
 
     _DIALECT_TAGS = {
         "postgresql": 1,
+        "postgres": 1,
         "mysql": 2,
-        "oracle": 3,
-        "sqlite": 4,
+        "mariadb": 2,
+        "sqlite": 3,
+        "oracle": 4,
+        "mssql": 5,
+        "sqlserver": 5,
+        "duckdb": 6,
+        "bigquery": 7,
+        "spanner": 8,
+        "spangres": 9,
     }
 
     def __init__(

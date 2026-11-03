@@ -223,10 +223,7 @@ def test_validate_identifier_valid_parity(
     allow_hyphens: bool,
 ) -> None:
     """Verify validate_identifier accepts valid identifiers across Rust and Python."""
-    assert (
-        validate_identifier(identifier, field_name, allow_dots=allow_dots, allow_hyphens=allow_hyphens)
-        == identifier
-    )
+    assert validate_identifier(identifier, field_name, allow_dots=allow_dots, allow_hyphens=allow_hyphens) == identifier
 
 
 @pytest.mark.parametrize(

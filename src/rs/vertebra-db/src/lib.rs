@@ -15,30 +15,33 @@
 //! - Pure-Rust SQL Server Tabular Data Stream (TDS 7.4) packet/batch framing and single-pass `@P1`
 //!   placeholder rewriter (`mssql`).
 //! - SHM-brokered single-writer DuckDB analytical engine, DuckDB 2.0-safe `SET` bootstrap statements,
-//!   and `ShmRegion` Arrow IPC framing (`duckdb_engine`).
+//!   and `ShmRegion` Arrow IPC framing (`duckdb`).
 //! - Pure-Rust Redis 7.2+/8.0+ and Valkey 8.0+/9.0+ RESP3 wire framing, recursive parser, `invalidate`
 //!   push frame extractor, Sentinel master discovery, and Cluster CRC16-XMODEM slot routing (`resp3`).
 
+pub mod arrow_shm;
+pub mod bigquery;
 pub mod dialer;
-pub mod duckdb_engine;
+pub mod duckdb;
+pub mod grpc;
 pub mod mssql;
 pub mod mysql;
 pub mod oracle;
 pub mod postgres;
 pub mod resp3;
+pub mod spanner;
 pub mod sqlite;
 pub mod tns;
 
+pub use arrow_shm::*;
+pub use bigquery::*;
 pub use dialer::{
     AlloyDbClusterUri, AlloyDbDialer, AuthType, CloudSqlDialer, CloudSqlInstanceUri, IpType,
     decode_alloydb_metadata_response, encode_alloydb_metadata_exchange,
     encode_alloydb_metadata_response, exchange_alloydb_metadata_over_stream,
     generate_ephemeral_keypair_pem,
 };
-pub use duckdb_engine::{
-    DuckdbBrokerPool, DuckdbConfig, ShmArrowFrameHeader, read_shm_arrow_frame,
-    release_shm_arrow_frame, write_shm_arrow_frame,
-};
+pub use duckdb::{DuckdbBrokerPool, DuckdbConfig};
 pub use mssql::{
     MssqlPool, TdsPacketType, decode_tds_packet, encode_tds_packet, encode_tds_sql_batch,
     rewrite_mssql_placeholders,
@@ -65,6 +68,7 @@ pub use resp3::{
     encode_resp_command, encode_sentinel_get_master_cmd, extract_invalidation_keys,
     parse_cluster_redirect, parse_resp3_frame, redis_hash_slot,
 };
+pub use spanner::*;
 pub use sqlite::{SqliteConfig, SqlitePool};
 pub use tns::{
     OracleConnectDescriptor, OracleWalletMaterial, parse_tnsnames_ora, resolve_tns_alias,

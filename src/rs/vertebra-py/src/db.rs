@@ -1,19 +1,25 @@
 //! PyO3 bindings for `vertebra-db` cloud dialers, wire codecs, and shared-memory Arrow IPC cursors.
 
 use std::collections::HashMap;
+use std::ffi::{c_int, c_void};
+use std::sync::Arc;
 
 use pyo3::buffer::PyBuffer;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyBufferError, PyRuntimeError, PyValueError};
+use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+use vertebra_core::shm::ShmRegion;
+use vertebra_db::arrow_shm::{
+    ShmArrowFrameHeader, open_shm_arrow_region, read_shm_arrow_frame_with, release_shm_arrow_frame,
+    write_shm_arrow_region,
+};
 use vertebra_db::dialer::{
     AlloyDbDialer as RsAlloyDbDialer, AuthType, CloudSqlDialer as RsCloudSqlDialer, IpType,
     decode_alloydb_metadata_response as rs_decode_alloydb_metadata_response,
     encode_alloydb_metadata_exchange as rs_encode_alloydb_metadata_exchange,
 };
-use vertebra_db::duckdb_engine::{
-    DuckdbConfig, read_shm_arrow_frame_with, release_shm_arrow_frame, write_shm_arrow_frame,
-};
+use vertebra_db::duckdb::DuckdbConfig;
 use vertebra_db::mssql::{
     encode_tds_sql_batch as rs_encode_tds_sql_batch,
     rewrite_mssql_placeholders as rs_rewrite_mssql_placeholders,
@@ -185,23 +191,57 @@ pub struct ArrowCursor {
     pub shm_name: String,
     #[pyo3(get)]
     pub byte_len: usize,
+    #[pyo3(get)]
+    pub row_count: usize,
+    region: Option<Arc<ShmRegion>>,
+}
+
+impl ArrowCursor {
+    pub fn from_shm_region(
+        shm_name: String,
+        byte_len: usize,
+        row_count: usize,
+        region: Arc<ShmRegion>,
+    ) -> Self {
+        Self {
+            shm_name,
+            byte_len,
+            row_count,
+            region: Some(region),
+        }
+    }
 }
 
 #[pymethods]
 impl ArrowCursor {
     #[new]
-    pub fn new(shm_name: String, byte_len: usize) -> Self {
-        Self { shm_name, byte_len }
+    #[pyo3(signature = (shm_name, byte_len, row_count=0))]
+    pub fn new(shm_name: String, byte_len: usize, row_count: usize) -> Self {
+        let region = open_shm_arrow_region(&shm_name).ok().map(|(r, _)| r);
+        Self {
+            shm_name,
+            byte_len,
+            row_count,
+            region,
+        }
     }
 
     #[staticmethod]
-    pub fn write_ipc_to_shm(py: Python<'_>, shm_name: &str, payload: &[u8]) -> PyResult<Self> {
-        let (norm_name, len) = py
-            .detach(|| write_shm_arrow_frame(shm_name, payload))
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    #[pyo3(signature = (shm_name, payload, row_count=0))]
+    pub fn write_ipc_to_shm(
+        py: Python<'_>,
+        shm_name: &str,
+        payload: &[u8],
+        row_count: usize,
+    ) -> PyResult<Self> {
+        let (norm_name, len, region) = py
+            .detach(|| write_shm_arrow_region(shm_name, payload))
+            .map_err(PyRuntimeError::new_err)?;
         Ok(Self {
             shm_name: norm_name,
             byte_len: len,
+            row_count,
+            region: Some(region),
         })
     }
 
@@ -216,17 +256,121 @@ impl ArrowCursor {
                 Ok(())
             })
         })
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?
+        .map_err(PyRuntimeError::new_err)?
     }
 
     pub fn read_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        if let Some(ref region) = self.region {
+            let slice = unsafe { region.as_slice() };
+            let end = ShmArrowFrameHeader::SIZE.saturating_add(self.byte_len);
+            if slice.len() >= end {
+                let payload = &slice[ShmArrowFrameHeader::SIZE..end];
+                return PyBytes::new_with(py, payload.len(), |buf| {
+                    buf.copy_from_slice(payload);
+                    Ok(())
+                });
+            }
+        }
         Self::read_ipc_from_shm(py, &self.shm_name)
+    }
+
+    pub fn buffer_view<'py>(slf: Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        // SAFETY: `slf.as_ptr()` is a valid borrowed `PyObject*` implementing the buffer protocol.
+        let ptr = unsafe { ffi::PyMemoryView_FromObject(slf.as_ptr()) };
+        if ptr.is_null() {
+            return Err(PyErr::fetch(py));
+        }
+        Ok(unsafe { Bound::from_owned_ptr(py, ptr) })
+    }
+
+    pub fn to_pyarrow<'py>(slf: Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let pa = py.import("pyarrow")?;
+        let mv = Self::buffer_view(slf)?;
+        let pa_buf = pa.call_method1("py_buffer", (mv,))?;
+        let reader = pa.getattr("ipc")?.call_method1("open_stream", (pa_buf,))?;
+        reader.call_method0("read_all")
+    }
+
+    pub fn to_arrow_table<'py>(slf: Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        Self::to_pyarrow(slf)
+    }
+
+    pub fn to_polars<'py>(slf: Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let pl = py.import("polars")?;
+        let tbl = Self::to_pyarrow(slf)?;
+        pl.call_method1("from_arrow", (tbl,))
     }
 
     pub fn release(&self, py: Python<'_>) -> bool {
         let name = self.shm_name.clone();
         py.detach(move || release_shm_arrow_frame(&name))
     }
+
+    pub fn close(&self, py: Python<'_>) -> bool {
+        self.release(py)
+    }
+
+    pub fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    #[pyo3(signature = (exc_type=None, exc_val=None, exc_tb=None))]
+    pub fn __exit__(
+        &self,
+        py: Python<'_>,
+        exc_type: Option<&Bound<'_, PyAny>>,
+        exc_val: Option<&Bound<'_, PyAny>>,
+        exc_tb: Option<&Bound<'_, PyAny>>,
+    ) {
+        let _ = (exc_type, exc_val, exc_tb);
+        let _ = self.release(py);
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    unsafe fn __getbuffer__(
+        slf: Bound<'_, Self>,
+        view: *mut ffi::Py_buffer,
+        flags: c_int,
+    ) -> PyResult<()> {
+        let py = slf.py();
+        if (flags & ffi::PyBUF_WRITABLE) == ffi::PyBUF_WRITABLE {
+            return Err(PyBufferError::new_err("ArrowCursor buffer is read-only"));
+        }
+        let this = slf.get();
+        let region_ref = match this.region {
+            Some(ref r) => r,
+            None => {
+                return Err(PyBufferError::new_err(
+                    "ArrowCursor has no anchored ShmRegion",
+                ));
+            }
+        };
+        let end = ShmArrowFrameHeader::SIZE.saturating_add(this.byte_len);
+        if region_ref.len() < end {
+            return Err(PyBufferError::new_err(
+                "ArrowCursor ShmRegion smaller than declared byte_len",
+            ));
+        }
+        let ptr = region_ref.as_ptr().add(ShmArrowFrameHeader::SIZE) as *mut c_void;
+        let ret = ffi::PyBuffer_FillInfo(
+            view,
+            slf.as_ptr(),
+            ptr,
+            this.byte_len as ffi::Py_ssize_t,
+            1,
+            flags,
+        );
+        if ret == -1 {
+            return Err(PyErr::fetch(py));
+        }
+        Ok(())
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    unsafe fn __releasebuffer__(&self, _view: *mut ffi::Py_buffer) {}
 }
 
 /// Encode a 4-byte length-prefixed AlloyDB `MetadataExchangeRequest` protobuf wire frame.

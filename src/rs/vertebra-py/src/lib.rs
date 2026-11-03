@@ -6,14 +6,18 @@ use pyo3::prelude::*;
 
 pub mod agent;
 pub mod asgi;
+pub mod bigquery;
 pub mod broker;
+pub mod completion;
 pub mod db;
 pub mod file_io;
+pub mod gcp_auth;
 pub mod headers;
 pub mod msgspec_bridge;
 pub mod request;
 pub mod response;
 pub mod rsgi;
+pub mod spanner;
 pub mod synthetic;
 pub mod telemetry;
 pub mod text;
@@ -26,10 +30,13 @@ pub use asgi::{
     AsgiProtocol, AsgiScope, AsgiScopeIterator, PyEmptyAwaitable, PyValueAwaitable,
     drive_asgi_batch, drive_native_batch,
 };
+pub use bigquery::PyBigQueryClient;
 pub use broker::{
     BrokerStats, LeaseBroker, LeaseGrant, StatementCache, StatementCacheStats, StatementPlan,
 };
+pub use completion::RustDbTaskAwaitable;
 pub use db::{AlloyDBDialer, ArrowCursor, CloudSQLDialer};
+pub use gcp_auth::{PyGcpTokenCache, PyGcpTokenSnapshot};
 pub use headers::{Headers, HeadersIterator};
 pub use msgspec_bridge::{
     call_vectorcall, hydrate_one_vectorcall, hydrate_rows_vectorcall,
@@ -38,6 +45,7 @@ pub use msgspec_bridge::{
 pub use request::{Request, RequestBatch, RequestBatchIterator};
 pub use response::Response;
 pub use rsgi::{RsgiHttpProtocol, RsgiScope, RsgiTransport, drive_rsgi_batch};
+pub use spanner::PySpannerClient;
 pub use telemetry::{
     JWTGuard, LogSink, RateLimiter, format_traceparent, parse_traceparent, sanitize_sql,
 };
@@ -138,6 +146,10 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(msgspec_bridge::pack_grpc_lpm_frame, m)?)?;
 
     // Native database dialers, wire codecs, and SHM Arrow IPC cursors
+    completion::register(m)?;
+    gcp_auth::register(m)?;
+    bigquery::register(m)?;
+    spanner::register(m)?;
     db::register_db_bindings(m)?;
     vector::register_vector_bindings(m)?;
     text::register(m)?;

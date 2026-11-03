@@ -2,11 +2,32 @@
 
 from __future__ import annotations
 
-from vertebra.db._registry import DatabaseRegistry
+from vertebra.db._arrow import (
+    ARROW_SHM_THRESHOLD_ROWS,
+    ArrowCursor,
+)
+from vertebra.db._registry import (
+    DatabaseRegistry,
+    provide_bigquery_driver,
+    provide_spanner_driver,
+)
+from vertebra.db.bigquery import (
+    BIGQUERY_DIALECT_TAG,
+    AsyncBigQueryDriver,
+    BigQueryConfig,
+    BigQueryCore,
+    BigQueryDryRunResult,
+    ObjectRef,
+    ObjectTableConfig,
+    SyncBigQueryDriver,
+)
 from vertebra.db.cdc import (
     CDCConfig,
     ChangeEvent,
     ChangeFeed,
+    SpannerChangeStreamRecord,
+    SpannerChangeStreamSource,
+    SpannerChildPartition,
 )
 from vertebra.db.channels import DatabaseChannelBackend
 from vertebra.db.datafusion import (
@@ -25,25 +46,40 @@ from vertebra.db.dialer import (
     CloudSQLDialer,
     CloudSQLInstanceURI,
 )
+from vertebra.db.driver import (
+    AsyncDatabaseDriver,
+    BaseDatabaseConfig,
+    CommonDriverMixin,
+    SyncDatabaseDriver,
+    ThreadOffloadAsyncDatabaseDriver,
+)
 from vertebra.db.duckdb import (
     AsyncDuckDBDriver,
     DuckDBConfig,
+    DuckDBCore,
     DuckDBSecretConfig,
     SyncDuckDBDriver,
     duckdb_bootstrap_statements,
 )
+from vertebra.db.mcp_tools import (
+    GCPDatabaseToolPolicy,
+    is_mutating_sql,
+    register_gcp_database_tools,
+)
 from vertebra.db.mssql import (
     AsyncMSSQLDriver,
     MSSQLConfig,
+    MSSQLCore,
     SyncMSSQLDriver,
     encode_tds_sql_batch,
     rewrite_mssql_placeholders,
 )
-from vertebra.db.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
+from vertebra.db.mysql import AsyncMySQLDriver, MySQLConfig, MySQLCore, SyncMySQLDriver
 from vertebra.db.oracle import (
     AsyncOracleDriver,
     OracleConfig,
     OracleConnectDescriptor,
+    OracleCore,
     OracleDriverFeatures,
     OracleSessionAttrs,
     OracleTopologyConfig,
@@ -69,27 +105,43 @@ from vertebra.db.pipeline import (
     RelOverlay,
 )
 from vertebra.db.postgres import (
-    ARROW_SHM_THRESHOLD_ROWS,
-    ArrowCursor,
     AsyncPostgreSQLDriver,
     PoolerMode,
     PostgreSQLConfig,
+    PostgreSQLCore,
     SyncPostgreSQLDriver,
 )
 from vertebra.db.redis import (
     AsyncRedisDriver,
     RedisConfig,
+    RedisCore,
     SyncRedisDriver,
 )
 from vertebra.db.rls import (
     TenantPredicate,
     TenantScopeConfig,
 )
-from vertebra.db.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
+from vertebra.db.spanner import (
+    SPANGRES_DIALECT_TAG,
+    SPANNER_GOOGLESQL_DIALECT_TAG,
+    AsyncSpannerDriver,
+    AsyncSpannerSnapshot,
+    AsyncSpannerTransaction,
+    Mutation,
+    MutationGroup,
+    SpannerConfig,
+    SpannerCore,
+    SpannerSnapshot,
+    SpannerTransaction,
+    StalenessBound,
+    SyncSpannerDriver,
+)
+from vertebra.db.sqlite import AsyncSQLiteDriver, SQLiteConfig, SQLiteCore, SyncSQLiteDriver
 from vertebra.db.valkey import (
     AsyncValkeyDriver,
     SyncValkeyDriver,
     ValkeyConfig,
+    ValkeyCore,
 )
 
 __all__ = (
@@ -100,6 +152,8 @@ __all__ = (
     "AlloyDBConfig",
     "AlloyDBDialer",
     "ArrowCursor",
+    "AsyncBigQueryDriver",
+    "AsyncDatabaseDriver",
     "AsyncDuckDBDriver",
     "AsyncMSSQLDriver",
     "AsyncMySQLDriver",
@@ -107,7 +161,15 @@ __all__ = (
     "AsyncPostgreSQLDriver",
     "AsyncRedisDriver",
     "AsyncSQLiteDriver",
+    "AsyncSpannerDriver",
+    "AsyncSpannerSnapshot",
+    "AsyncSpannerTransaction",
     "AsyncValkeyDriver",
+    "BIGQUERY_DIALECT_TAG",
+    "BaseDatabaseConfig",
+    "BigQueryConfig",
+    "BigQueryCore",
+    "BigQueryDryRunResult",
     "CDCConfig",
     "CTEStep",
     "ChangeEvent",
@@ -115,27 +177,52 @@ __all__ = (
     "CloudSQLConfig",
     "CloudSQLDialer",
     "CloudSQLInstanceURI",
+    "CommonDriverMixin",
     "DataFusionConfig",
     "DataFusionEngine",
     "DataFusionMode",
     "DatabaseChannelBackend",
     "DatabaseRegistry",
     "DuckDBConfig",
+    "DuckDBCore",
     "DuckDBSecretConfig",
+    "GCPDatabaseToolPolicy",
     "MSSQLConfig",
+    "MSSQLCore",
+    "Mutation",
+    "MutationGroup",
     "MySQLConfig",
+    "MySQLCore",
+    "ObjectRef",
+    "ObjectTableConfig",
     "OracleConfig",
     "OracleConnectDescriptor",
+    "OracleCore",
     "OracleDriverFeatures",
     "OracleSessionAttrs",
     "OracleTopologyConfig",
     "OracleWallet",
     "PoolerMode",
     "PostgreSQLConfig",
+    "PostgreSQLCore",
     "QueryPipeline",
     "RedisConfig",
+    "RedisCore",
     "RelOverlay",
+    "SPANGRES_DIALECT_TAG",
+    "SPANNER_GOOGLESQL_DIALECT_TAG",
     "SQLiteConfig",
+    "SQLiteCore",
+    "SpannerChangeStreamRecord",
+    "SpannerChangeStreamSource",
+    "SpannerChildPartition",
+    "SpannerConfig",
+    "SpannerCore",
+    "SpannerSnapshot",
+    "SpannerTransaction",
+    "StalenessBound",
+    "SyncBigQueryDriver",
+    "SyncDatabaseDriver",
     "SyncDuckDBDriver",
     "SyncMSSQLDriver",
     "SyncMySQLDriver",
@@ -143,11 +230,14 @@ __all__ = (
     "SyncPostgreSQLDriver",
     "SyncRedisDriver",
     "SyncSQLiteDriver",
+    "SyncSpannerDriver",
     "SyncValkeyDriver",
     "TableRegistration",
     "TenantPredicate",
     "TenantScopeConfig",
+    "ThreadOffloadAsyncDatabaseDriver",
     "ValkeyConfig",
+    "ValkeyCore",
     "decode_oson",
     "decode_vector_binary",
     "decode_vector_f32",
@@ -161,7 +251,11 @@ __all__ = (
     "encode_vector_f32",
     "encode_vector_f64",
     "encode_vector_i8",
+    "is_mutating_sql",
     "parse_tnsnames_ora",
+    "provide_bigquery_driver",
+    "provide_spanner_driver",
+    "register_gcp_database_tools",
     "resolve_tns_alias",
     "rewrite_mssql_placeholders",
 )

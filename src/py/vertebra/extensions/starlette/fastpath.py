@@ -18,6 +18,7 @@ from vertebra.extensions.starlette.router import (
 from vertebra.server._fastpath import (
     extract_scope_body_fast,
     resolve_relative_path,
+    serialize_fastpath_special_result,
     wrap_asgi_fastpath,
 )
 from vertebra.utils.module_loader import import_optional
@@ -238,6 +239,10 @@ async def dispatch_handler_direct(
 
     if response is None:
         return 204, [], b""
+
+    special = serialize_fastpath_special_result(response, default_status=200)
+    if special is not None:
+        return special
 
     if isinstance(response, (dict, list, msgspec.Struct)):
         payload = encode_json_bytes(response)

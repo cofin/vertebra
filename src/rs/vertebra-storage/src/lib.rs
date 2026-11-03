@@ -8,7 +8,6 @@ pub mod store;
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -16,7 +15,7 @@ use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyFileNotFoundError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
-use vertebra_core::notify::Notifier;
+use vertebra_core::notify::{CompletionQueue, Notifier};
 
 use crate::gcp_auth::{
     GcpTokenCache as NativeGcpTokenCache, GcpTokenSnapshot as NativeGcpTokenSnapshot,
@@ -118,17 +117,13 @@ struct CompletedStorageTask {
 }
 
 struct RustCompletionRing {
-    queue: Mutex<Vec<CompletedStorageTask>>,
-    wake_armed: AtomicBool,
-    notifier: Option<Notifier>,
+    completion: CompletionQueue<CompletedStorageTask>,
     fallback_wakeup: Mutex<Option<(Py<PyAny>, Py<PyAny>)>>,
 }
 
 impl RustCompletionRing {
-    fn signal(&self) {
-        if let Some(ref notifier) = self.notifier
-            && notifier.notify().is_ok()
-        {
+    fn signal_fallback(&self) {
+        if self.completion.notifier().is_some() {
             return;
         }
         let pair = self
@@ -157,23 +152,10 @@ struct StorageCompletionDrainer {
 #[pymethods]
 impl StorageCompletionDrainer {
     fn __call__(&self, py: Python<'_>) -> PyResult<()> {
-        if let Some(ref notifier) = self.ring.notifier {
-            let _ = notifier.clear();
-        }
-        loop {
-            let batch: Vec<CompletedStorageTask> = {
-                let mut guard = self
-                    .ring
-                    .queue
-                    .lock()
-                    .expect("lock storage completion queue");
-                if guard.is_empty() {
-                    self.ring.wake_armed.store(false, Ordering::Release);
-                    break;
-                }
-                std::mem::take(&mut *guard)
-            };
-            for item in batch {
+        self.ring.completion.clear_notifier();
+        let mut batch = Vec::new();
+        while self.ring.completion.drain_into(&mut batch) {
+            for item in batch.drain(..) {
                 let fut = item.future.bind(py);
                 let cancelled: bool = fut
                     .call_method0("cancelled")
@@ -207,22 +189,11 @@ fn ensure_loop_completion_ring(
         return Ok(Arc::clone(&drainer.borrow().ring));
     }
 
-    let mut notifier = Notifier::new().ok();
-    let ring = Arc::new(RustCompletionRing {
-        queue: Mutex::new(Vec::with_capacity(64)),
-        wake_armed: AtomicBool::new(false),
-        notifier: None,
-        fallback_wakeup: Mutex::new(None),
-    });
-
-    let mut reader_registered = false;
     #[cfg(unix)]
-    if let Some(ref n) = notifier {
-        let fd = n.as_raw_fd();
+    if let Ok(notifier) = Notifier::new() {
+        let fd = notifier.as_raw_fd();
         let temp_ring = Arc::new(RustCompletionRing {
-            queue: Mutex::new(Vec::with_capacity(64)),
-            wake_armed: AtomicBool::new(false),
-            notifier: notifier.take(),
+            completion: CompletionQueue::new(Some(notifier)),
             fallback_wakeup: Mutex::new(None),
         });
         let drainer_py = Py::new(
@@ -238,18 +209,12 @@ fn ensure_loop_completion_ring(
             let _ = loop_obj.setattr(ATTR_NAME, drainer_py.bind(py));
             return Ok(temp_ring);
         }
-        *temp_ring
-            .fallback_wakeup
-            .lock()
-            .expect("lock storage fallback wakeup") = Some((
-            loop_obj.clone().unbind(),
-            drainer_py.clone_ref(py).into_any(),
-        ));
-        let _ = loop_obj.setattr(ATTR_NAME, drainer_py.bind(py));
-        return Ok(temp_ring);
     }
 
-    let _ = (&mut notifier, &mut reader_registered);
+    let ring = Arc::new(RustCompletionRing {
+        completion: CompletionQueue::new(None),
+        fallback_wakeup: Mutex::new(None),
+    });
     let drainer_py = Py::new(
         py,
         StorageCompletionDrainer {
@@ -296,19 +261,15 @@ where
 
     runtime_handle().spawn(async move {
         let output = fut.await;
-        let should_signal = {
-            let mut guard = ring.queue.lock().expect("lock storage completion queue");
-            guard.push(CompletedStorageTask {
-                future: fut_for_cb,
-                produce: Box::new(move |py| match output {
-                    Ok(val) => map_fn(py, val),
-                    Err(err) => Err(to_py_err(err)),
-                }),
-            });
-            !ring.wake_armed.swap(true, Ordering::AcqRel)
-        };
+        let should_signal = ring.completion.push(CompletedStorageTask {
+            future: fut_for_cb,
+            produce: Box::new(move |py| match output {
+                Ok(val) => map_fn(py, val),
+                Err(err) => Err(to_py_err(err)),
+            }),
+        });
         if should_signal {
-            ring.signal();
+            ring.signal_fallback();
         }
     });
 
@@ -395,6 +356,18 @@ impl PyGcpTokenCache {
         self.inner.refresh_skew_ms()
     }
 
+    #[getter]
+    fn has_service_account_key(&self) -> bool {
+        self.inner.service_account_key().is_some()
+    }
+
+    #[getter]
+    fn service_account_email(&self) -> Option<String> {
+        self.inner
+            .service_account_key()
+            .map(|k| k.client_email.clone())
+    }
+
     #[pyo3(signature = (*, now_unix_ms=None))]
     fn needs_refresh(&self, now_unix_ms: Option<u64>) -> bool {
         self.inner
@@ -403,6 +376,11 @@ impl PyGcpTokenCache {
 
     fn invalidate(&self, failed_generation: u64) {
         self.inner.invalidate(failed_generation);
+    }
+
+    fn sign_jwt_for_audience(&self, py: Python<'_>, audience: &str) -> PyResult<String> {
+        py.detach(|| self.inner.sign_jwt_for_audience(audience))
+            .map_err(PyValueError::new_err)
     }
 
     #[pyo3(signature = (*, force_refresh=false))]

@@ -23,13 +23,13 @@ The `pipeline`, `rls`, `cdc`, and `datafusion` modules in [`vertebra.db`](../../
 |---|---|
 | [`CteStep`](../../../../../src/py/vertebra/db/pipeline.py) | Frozen struct: `name`, `sql`, `params`, `return_json_agg` (default `True`). |
 | `RelOverlay` | Read-your-own-writes view inside one statement. `to_cte_sql(name)` validates `name`, `base_table`, `inserted_cte`, `deleted_ids_cte`, and `id_column` via `SqlIdentifier.validate`, then renders `SELECT * FROM base` and excludes `id_column` values in `deleted_ids_cte`, appending `UNION ALL SELECT * FROM inserted_cte`. |
-| `QueryPipeline` | Fluent builder: `add_step(name, sql, *, params, return_json_agg)` and `add_overlay(name, overlay)` validate CTE names via `SqlIdentifier.validate` and return `self`. `compile()` returns `(sql, params)`. |
-| `QueryPipeline.build_jsonb_object` (static) | Validates column names via `SqlIdentifier.validate` and builds `jsonb_build_object(...)`. Pairs are chunked at `max_pairs_per_call` (1–50, default `chunk_size=50`) and joined with `\|\|`, so wide objects stay under PostgreSQL's 100-argument function limit. An empty column list returns `'{}'::jsonb`. |
+| `QueryPipeline` | Fluent builder (`dialect: Literal["postgresql", "googlesql"] = "postgresql"`): `add_step(name, sql, *, params, return_json_agg)` and `add_overlay(name, overlay)` validate CTE names via `SqlIdentifier.validate` and return `self`. `compile()` returns `(sql, params)`. |
+| `QueryPipeline.build_jsonb_object` (static) | Validates column names via `SqlIdentifier.validate` and builds `jsonb_build_object(...)` on `postgresql` or `JSON_OBJECT(...)` on `googlesql`. Pairs are chunked at `max_pairs_per_call` (1–50, default `chunk_size=50`) and joined with `\|\|`, so wide objects stay under PostgreSQL's 100-argument function limit. An empty column list returns `'{}'::jsonb` (`postgresql`) or `JSON '{}'` (`googlesql`). |
 
 Behavior of `compile()`:
 
 - It raises `ValueError` when there are no steps or when any CTE/column identifier fails `SqlIdentifier.validate`.
-- It emits `WITH step AS (...), ..., overlay AS (...) SELECT <envelope> AS payload`. The envelope is a JSONB object keyed by step name. Each value is `COALESCE((SELECT jsonb_agg(row_to_json(step)) FROM step), '[]'::jsonb)`, and envelope pairs are chunked 25 per call.
+- It emits `WITH step AS (...), ..., overlay AS (...) SELECT <envelope> AS payload`. On `postgresql`, each value is `COALESCE((SELECT jsonb_agg(row_to_json(step)) FROM step), '[]'::jsonb)` inside chunked `jsonb_build_object` calls; on `googlesql` (BigQuery and Cloud Spanner), each value is `COALESCE((SELECT TO_JSON(ARRAY_AGG( step)) FROM step), JSON '[]')` inside `TO_JSON_STRING(JSON_OBJECT(...))`.
 - Steps with `return_json_agg=False` still run as CTEs but are left out of the envelope.
 - Step parameter dicts are merged in order, so a later step silently overwrites an earlier step's value for the same key.
 
@@ -53,6 +53,7 @@ The intended layering is an explicit predicate for plan quality plus a session G
 | `ChangeFeed.hydrate_notification(envelope)` | Decodes with `decode_json` and restores spilled payloads by `event_id`. An unknown spilled id yields an empty payload. |
 | `ChangeFeed.replay_since(last_event_id)` | Returns buffered events newer than the id. |
 | `ChangeFeed.build_emit_message_sql` (static) | Returns `SELECT pg_logical_emit_message($1, $2, $3)` with `(transactional, prefix, bytes)`, which emits to the WAL without writing a table. |
+| [`SpannerChangeStreamSource`](../../../../../src/py/vertebra/db/cdc.py) / `SpannerPartitionRecord` | Queries `READ_json_<stream_name>` (GoogleSQL) or `spanner.read_json_<stream_name>` (Spangres), parses `DataChangeRecord`, `HeartbeatRecord`, and `ChildPartitionsRecord` payloads, fans out child partition readers respecting parent watermark progression, and forwards data changes into `ChangeFeed.publish_event()`. |
 
 Spill storage and history live in process memory and grow without bound. `spill_table`, `replication_slot_name`, `publication_name`, and `max_slot_wal_keep_size_mb` are configuration fields that no code reads.
 
@@ -62,6 +63,6 @@ Spill storage and history live in process memory and grow without bound. `spill_
 |---|---|
 | `ARROW_STREAM_MEDIA_TYPE` | `"application/vnd.apache.arrow.stream"`, also exposed as `DataFusionEngine.ARROW_STREAM_MEDIA_TYPE`. |
 | `DataFusionMode` | `Literal["in_process", "pgwire_fdw"]`. |
-| [`TableRegistration`](../../../../../src/py/vertebra/db/datafusion.py) | `name`, `uri`, `format` (`parquet`, `vortex`, `arrow`, `postgres`, `oracle`). |
+| [`TableRegistration`](../../../../../src/py/vertebra/db/datafusion.py) | `name`, `uri`, `format` (`parquet`, `vortex`, `arrow`, `postgres`, `oracle`, `bigquery`, `spanner`). |
 | `DataFusionConfig` | `mode`, `target_partitions`, `memory_limit_mb`, `pgwire_host`, `pgwire_port=5434`, `require_mtls_for_pgwire`. |
-| `DataFusionEngine` | `register_table`, `tables`, `supports_cloud_run_ingress` (true for `in_process`). `explain_plan(sql)` returns a dict with mode, media type, and the registered table names that appear as substrings of `sql`. `execute_sql(sql)` raises `UnsupportedBackendError` until a native DataFusion runtime is attached. |
+| `DataFusionEngine` | `register_table`, `register_bigquery_table`, `register_spanner_table`, `tables`, `supports_cloud_run_ingress` (true for `in_process`). `explain_plan(sql)` returns a dict with mode, media type, and the registered table names that appear as substrings of `sql`. `execute_arrow(sql)` streams registered BigQuery/Spanner tables into zero-copy `ArrowCursor` segments. |

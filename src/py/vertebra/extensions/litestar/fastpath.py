@@ -28,6 +28,7 @@ from vertebra.extensions.litestar.router import (
 from vertebra.server._fastpath import (
     extract_scope_body_fast,
     resolve_relative_path,
+    serialize_fastpath_special_result,
     wrap_asgi_fastpath,
 )
 from vertebra.typing import Empty
@@ -902,6 +903,9 @@ async def _execute_direct_signature_plan(
 
     if out is None or plan.status_code == 204:
         return (plan.status_code, [], b"")
+    special = serialize_fastpath_special_result(out, default_status=plan.status_code)
+    if special is not None:
+        return special
     if isinstance(out, bytes):
         return (plan.status_code, list(plan.raw_bytes_headers), out)
     if isinstance(out, bytearray | memoryview):

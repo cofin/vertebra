@@ -1,23 +1,25 @@
-"""MySQL and MariaDB driver and Cloud SQL (:3307) configuration."""
+"""Synchronous and asynchronous MySQL and MariaDB drivers."""
 
 from __future__ import annotations
 
 import collections
 import os
-import urllib.parse
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
-from vertebra.db.dialer.cloudsql import CloudSQLConfig, CloudSQLDialer
-from vertebra.db.postgres import (
+from vertebra.db._arrow import (
     ARROW_SHM_THRESHOLD_ROWS,
     ArrowCursor,
     _hydrate_rows_with_schema,
-    _normalize_driver_params,
     _table_to_rows_and_cols,
-    write_arrow_shm,
 )
-from vertebra.typing import FrozenBaseStruct
+from vertebra.db.dialer.cloudsql import CloudSQLDialer
+from vertebra.db.driver import (
+    AsyncDatabaseDriver,
+    SyncDatabaseDriver,
+    _normalize_driver_params,
+)
+from vertebra.db.mysql.config import MySQLConfig
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
@@ -25,72 +27,17 @@ if TYPE_CHECKING:
 
 __all__ = (
     "AsyncMySQLDriver",
-    "MySQLConfig",
     "SyncMySQLDriver",
 )
 
 
-class MySQLConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
-    """Configuration for MySQL 8.0+/9.0+ and MariaDB connections."""
-
-    dsn: str = "mysql://localhost:3306/mysql"
-    """MySQL or MariaDB connection URI."""
-    min_size: int = 1
-    """Minimum number of idle connections retained in the worker pool."""
-    max_size: int = 10
-    """Maximum number of concurrent connections allowed in the worker pool."""
-    cloud_sql_instance: str | None = None
-    """Optional Google Cloud SQL instance connection name (`project:region:instance`) for zero-sidecar port 3307 mTLS."""
-    enable_iam_auth: bool = False
-    """When True, authenticate using Google Cloud SQL IAM database authentication tokens."""
-    charset: str = "utf8mb4"
-    """Connection character set negotiated during handshake."""
-    autocommit: bool = False
-    """When True, execute statements in autocommit mode outside explicit transactions."""
-    broker: Any = None
-    """Optional shared-memory `DatabaseBroker` for cross-worker connection and statement leasing."""
-
-    def __post_init__(self) -> None:
-        if self.min_size < 0 or self.max_size < 1 or self.min_size > self.max_size:
-            msg = f"Invalid pool bounds: min_size={self.min_size}, max_size={self.max_size}"
-            raise ValueError(msg)
-
-    def to_cloud_dialer_config(self) -> CloudSQLConfig | None:
-        """Return CloudSQLConfig when `cloud_sql_instance` is set."""
-        if self.cloud_sql_instance:
-            return CloudSQLConfig(
-                instance_connection_name=self.cloud_sql_instance,
-                enable_iam_auth=self.enable_iam_auth,
-            )
-        return None
-
-    def parse_dsn_params(self) -> dict[str, Any]:
-        """Parse DSN connection string into connection parameters for driver pools."""
-        parsed = urllib.parse.urlparse(self.dsn)
-        host = parsed.hostname or "localhost"
-        port = parsed.port or 3306
-        user = parsed.username or ""
-        password = parsed.password or ""
-        database = parsed.path.lstrip("/") if parsed.path else ""
-        query = urllib.parse.parse_qs(parsed.query)
-        charset = query.get("charset", [self.charset])[0]
-        autocommit_val = query.get("autocommit", [str(self.autocommit).lower()])[0]
-        autocommit = autocommit_val.lower() in ("true", "1", "yes")
-        return {
-            "host": host,
-            "port": port,
-            "user": user,
-            "password": password,
-            "database": database,
-            "charset": charset,
-            "autocommit": autocommit,
-        }
-
-
-class SyncMySQLDriver:
+class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
     """Synchronous MySQL driver facade with bounded connection pooling and SHM broker integration."""
 
-    __slots__ = ("_broker", "_closed", "_config", "_connect_factory", "_dialer", "_idle_conns", "_in_memory_rows")
+    dialect: ClassVar[str] = "mysql"
+    dialect_tag: ClassVar[int] = 2
+
+    __slots__ = ("_connect_factory", "_dialer", "_idle_conns", "_in_memory_rows")
 
     def __init__(
         self,
@@ -100,81 +47,28 @@ class SyncMySQLDriver:
         broker: Any = None,
         connect_factory: Any = None,
     ) -> None:
-        self._config = config or MySQLConfig()
+        resolved = config or MySQLConfig()
+        super().__init__(resolved, broker=broker)
         self._dialer = dialer
         if self._dialer is None:
-            csql_cfg = self._config.to_cloud_dialer_config()
+            csql_cfg = self.config.to_cloud_dialer_config()
             if csql_cfg is not None:
                 self._dialer = CloudSQLDialer(csql_cfg)
-        self._broker = broker if broker is not None else self._config.broker
         self._connect_factory = connect_factory
-        self._idle_conns: collections.deque[Any] = collections.deque(maxlen=self._config.max_size)
-        self._closed: bool = False
+        self._idle_conns: collections.deque[Any] = collections.deque(maxlen=self.config.max_size)
         self._in_memory_rows: list[tuple[Any, ...]] = []
 
     @property
-    def config(self) -> MySQLConfig:
+    def _config(self) -> MySQLConfig:
         """Return the active MySQLConfig."""
-        return self._config
+        return self.config
 
     @property
     def dialer(self) -> CloudSQLDialer | None:
         """Return the attached CloudSQLDialer if configured."""
         return self._dialer
 
-    @property
-    def broker(self) -> Any:
-        """Return the attached SHM connection broker transport if configured."""
-        return self._broker
-
-    def _create_connection(self) -> Any:
-        """Create a new database connection or raise MissingDependencyError."""
-        params = self._config.parse_dsn_params()
-        tls_sock: ssl.SSLSocket | None = None
-        if self._dialer is not None:
-            tls_sock = self._dialer.connect_sync(host=params["host"])
-
-        if self._connect_factory is not None:
-            if tls_sock is not None:
-                try:
-                    return self._connect_factory(sock=tls_sock)
-                except TypeError:
-                    return self._connect_factory()
-            return self._connect_factory()
-
-        pymysql: Any = ensure_module("pymysql", install_package="pymysql", extra="mysql")
-
-        connect_kwargs: dict[str, Any] = {
-            "host": params["host"],
-            "port": params["port"],
-            "user": params["user"],
-            "password": params["password"],
-            "database": params["database"],
-            "charset": params["charset"],
-            "autocommit": params["autocommit"],
-        }
-        if tls_sock is not None:
-            connect_kwargs["sock"] = tls_sock
-        return pymysql.connect(**connect_kwargs)
-
-    def _acquire(self) -> Any:
-        """Acquire an idle connection or create a new connection."""
-        if self._closed:
-            msg = "SyncMySQLDriver is closed"
-            raise RuntimeError(msg)
-        if self._idle_conns:
-            return self._idle_conns.pop()
-        return self._create_connection()
-
-    def _release(self, conn: Any) -> None:
-        """Release a connection back to the idle pool or close it."""
-        if self._closed or len(self._idle_conns) >= self._config.max_size:
-            if hasattr(conn, "close"):
-                conn.close()
-        else:
-            self._idle_conns.append(conn)
-
-    def execute_with_description(
+    def execute_with_description(  # type: ignore[override]
         self,
         sql: str,
         parameters: Sequence[Any] | Mapping[str, Any] = (),
@@ -197,7 +91,7 @@ class SyncMySQLDriver:
                     lease = self._broker.acquire(os.getpid())
 
         try:
-            if self._config.dsn.startswith("memory://") and self._connect_factory is None:
+            if self.config.dsn.startswith("memory://") and self._connect_factory is None:
                 desc = (
                     tuple((f"col_{i}", None, None, None, None, None, None) for i in range(len(self._in_memory_rows[0])))
                     if self._in_memory_rows
@@ -243,7 +137,7 @@ class SyncMySQLDriver:
             if lease is not None and hasattr(lease, "release"):
                 lease.release()
 
-    def execute_tuples(
+    def execute_tuples(  # type: ignore[override]
         self,
         sql: str,
         parameters: Sequence[Any] | Mapping[str, Any] = (),
@@ -252,7 +146,7 @@ class SyncMySQLDriver:
         rows, _ = self.execute_with_description(sql, parameters)
         return rows
 
-    def execute(
+    def execute(  # type: ignore[override]
         self,
         sql: str,
         *params: Any,
@@ -262,7 +156,7 @@ class SyncMySQLDriver:
         resolved = _normalize_driver_params(params, parameters)
         return self.execute_tuples(sql, resolved)
 
-    def select(
+    def select(  # type: ignore[override]
         self,
         sql: str,
         *params: Any,
@@ -277,7 +171,7 @@ class SyncMySQLDriver:
         cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]))]
         return _hydrate_rows_with_schema(rows, cols, schema_type)
 
-    def select_one(
+    def select_one(  # type: ignore[override]
         self,
         sql: str,
         *params: Any,
@@ -291,7 +185,7 @@ class SyncMySQLDriver:
             raise ValueError(msg)
         return rows[0]
 
-    def select_one_or_none(
+    def select_one_or_none(  # type: ignore[override]
         self,
         sql: str,
         *params: Any,
@@ -302,7 +196,7 @@ class SyncMySQLDriver:
         rows = self.select(sql, *params, parameters=parameters, schema_type=schema_type)
         return rows[0] if rows else None
 
-    def load_from_arrow(
+    def load_from_arrow(  # type: ignore[override]
         self,
         table_name: str,
         data: Any,
@@ -320,7 +214,7 @@ class SyncMySQLDriver:
             self.execute_tuples(sql, row)
         return len(rows)
 
-    def select_to_arrow(
+    def select_to_arrow(  # type: ignore[override]
         self,
         sql: str,
         *params: Any,
@@ -332,10 +226,6 @@ class SyncMySQLDriver:
         cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]) if rows else 0)]
         cursor = ArrowCursor.from_rows(rows, cols, threshold_rows=ARROW_SHM_THRESHOLD_ROWS)
         return cursor.to_arrow_table()
-
-    def write_arrow_shm(self, table: Any) -> memoryview:
-        """Write an Arrow Table into a shared-memory Arrow IPC buffer and return a memoryview."""
-        return write_arrow_shm(table)
 
     def commit(self) -> None:
         """Commit the active transaction across active connections."""
@@ -363,11 +253,61 @@ class SyncMySQLDriver:
         if hasattr(self._connect_factory, "close"):
             self._connect_factory.close()
 
+    def _create_connection(self) -> Any:
+        """Create a new database connection or raise MissingDependencyError."""
+        params = self.config.parse_dsn_params()
+        tls_sock: ssl.SSLSocket | None = None
+        if self._dialer is not None:
+            tls_sock = self._dialer.connect_sync(host=params["host"])
 
-class AsyncMySQLDriver:
+        if self._connect_factory is not None:
+            if tls_sock is not None:
+                try:
+                    return self._connect_factory(sock=tls_sock)
+                except TypeError:
+                    return self._connect_factory()
+            return self._connect_factory()
+
+        pymysql: Any = ensure_module("pymysql", install_package="pymysql", extra="mysql")
+
+        connect_kwargs: dict[str, Any] = {
+            "host": params["host"],
+            "port": params["port"],
+            "user": params["user"],
+            "password": params["password"],
+            "database": params["database"],
+            "charset": params["charset"],
+            "autocommit": params["autocommit"],
+        }
+        if tls_sock is not None:
+            connect_kwargs["sock"] = tls_sock
+        return pymysql.connect(**connect_kwargs)
+
+    def _acquire(self) -> Any:
+        """Acquire an idle connection or create a new connection."""
+        if self._closed:
+            msg = "SyncMySQLDriver is closed"
+            raise RuntimeError(msg)
+        if self._idle_conns:
+            return self._idle_conns.pop()
+        return self._create_connection()
+
+    def _release(self, conn: Any) -> None:
+        """Release a connection back to the idle pool or close it."""
+        if self._closed or len(self._idle_conns) >= self.config.max_size:
+            if hasattr(conn, "close"):
+                conn.close()
+        else:
+            self._idle_conns.append(conn)
+
+
+class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
     """Asynchronous MySQL driver facade backed by asyncmy and SHM broker leasing."""
 
-    __slots__ = ("_broker", "_closed", "_config", "_dialer", "_in_memory_rows", "_pool")
+    dialect: ClassVar[str] = "mysql"
+    dialect_tag: ClassVar[int] = 2
+
+    __slots__ = ("_dialer", "_in_memory_rows", "_pool")
 
     def __init__(
         self,
@@ -377,53 +317,27 @@ class AsyncMySQLDriver:
         broker: Any = None,
         pool: Any = None,
     ) -> None:
-        self._config = config or MySQLConfig()
+        resolved = config or MySQLConfig()
+        super().__init__(resolved, broker=broker)
         self._dialer = dialer
         if self._dialer is None:
-            csql_cfg = self._config.to_cloud_dialer_config()
+            csql_cfg = self.config.to_cloud_dialer_config()
             if csql_cfg is not None:
                 self._dialer = CloudSQLDialer(csql_cfg)
-        self._broker = broker if broker is not None else self._config.broker
         self._pool = pool
-        self._closed: bool = False
         self._in_memory_rows: list[tuple[Any, ...]] = []
 
     @property
-    def config(self) -> MySQLConfig:
+    def _config(self) -> MySQLConfig:
         """Return the active MySQLConfig."""
-        return self._config
+        return self.config
 
     @property
     def dialer(self) -> CloudSQLDialer | None:
         """Return the attached CloudSQLDialer if configured."""
         return self._dialer
 
-    @property
-    def broker(self) -> Any:
-        """Return the attached SHM connection broker transport if configured."""
-        return self._broker
-
-    async def _ensure_pool(self) -> Any:
-        """Ensure connection pool is initialized or raise MissingDependencyError."""
-        if self._pool is not None:
-            return self._pool
-        asyncmy: Any = ensure_module("asyncmy", install_package="asyncmy", extra="mysql")
-        params = self._config.parse_dsn_params()
-        pool_kwargs: dict[str, Any] = {
-            "host": params["host"],
-            "port": params["port"],
-            "user": params["user"],
-            "password": params["password"],
-            "db": params["database"],
-            "charset": params["charset"],
-            "autocommit": params["autocommit"],
-            "minsize": self._config.min_size,
-            "maxsize": self._config.max_size,
-        }
-        self._pool = await asyncmy.create_pool(**pool_kwargs)
-        return self._pool
-
-    async def execute_with_description(
+    async def execute_with_description(  # type: ignore[override]
         self,
         sql: str,
         parameters: Sequence[Any] | Mapping[str, Any] = (),
@@ -443,7 +357,7 @@ class AsyncMySQLDriver:
                 lease = self._broker.acquire(bind_key="mysql")
 
         try:
-            if self._config.dsn.startswith("memory://") and self._pool is None:
+            if self.config.dsn.startswith("memory://") and self._pool is None:
                 desc = (
                     tuple((f"col_{i}", None, None, None, None, None, None) for i in range(len(self._in_memory_rows[0])))
                     if self._in_memory_rows
@@ -488,7 +402,7 @@ class AsyncMySQLDriver:
             if lease is not None and hasattr(lease, "release"):
                 lease.release()
 
-    async def execute_tuples(
+    async def execute_tuples(  # type: ignore[override]
         self,
         sql: str,
         parameters: Sequence[Any] | Mapping[str, Any] = (),
@@ -497,7 +411,7 @@ class AsyncMySQLDriver:
         rows, _ = await self.execute_with_description(sql, parameters)
         return rows
 
-    async def execute(
+    async def execute(  # type: ignore[override]
         self,
         sql: str,
         *params: Any,
@@ -507,7 +421,7 @@ class AsyncMySQLDriver:
         resolved = _normalize_driver_params(params, parameters)
         return await self.execute_tuples(sql, resolved)
 
-    async def select(
+    async def select(  # type: ignore[override]
         self,
         sql: str,
         *params: Any,
@@ -522,7 +436,7 @@ class AsyncMySQLDriver:
         cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]))]
         return _hydrate_rows_with_schema(rows, cols, schema_type)
 
-    async def select_one(
+    async def select_one(  # type: ignore[override]
         self,
         sql: str,
         *params: Any,
@@ -536,7 +450,7 @@ class AsyncMySQLDriver:
             raise ValueError(msg)
         return rows[0]
 
-    async def select_one_or_none(
+    async def select_one_or_none(  # type: ignore[override]
         self,
         sql: str,
         *params: Any,
@@ -547,7 +461,7 @@ class AsyncMySQLDriver:
         rows = await self.select(sql, *params, parameters=parameters, schema_type=schema_type)
         return rows[0] if rows else None
 
-    async def load_from_arrow(
+    async def load_from_arrow(  # type: ignore[override]
         self,
         table_name: str,
         data: Any,
@@ -565,7 +479,7 @@ class AsyncMySQLDriver:
             await self.execute_tuples(sql, row)
         return len(rows)
 
-    async def select_to_arrow(
+    async def select_to_arrow(  # type: ignore[override]
         self,
         sql: str,
         *params: Any,
@@ -578,10 +492,6 @@ class AsyncMySQLDriver:
         cursor = ArrowCursor.from_rows(rows, cols, threshold_rows=ARROW_SHM_THRESHOLD_ROWS)
         return cursor.to_arrow_table()
 
-    def write_arrow_shm(self, table: Any) -> memoryview:
-        """Write an Arrow Table into a shared-memory Arrow IPC buffer and return a memoryview."""
-        return write_arrow_shm(table)
-
     async def close(self) -> None:
         """Close the async driver pool."""
         self._closed = True
@@ -592,3 +502,23 @@ class AsyncMySQLDriver:
                     await res
             if hasattr(self._pool, "wait_closed"):
                 await self._pool.wait_closed()
+
+    async def _ensure_pool(self) -> Any:
+        """Ensure connection pool is initialized or raise MissingDependencyError."""
+        if self._pool is not None:
+            return self._pool
+        asyncmy: Any = ensure_module("asyncmy", install_package="asyncmy", extra="mysql")
+        params = self.config.parse_dsn_params()
+        pool_kwargs: dict[str, Any] = {
+            "host": params["host"],
+            "port": params["port"],
+            "user": params["user"],
+            "password": params["password"],
+            "db": params["database"],
+            "charset": params["charset"],
+            "autocommit": params["autocommit"],
+            "minsize": self.config.min_size,
+            "maxsize": self.config.max_size,
+        }
+        self._pool = await asyncmy.create_pool(**pool_kwargs)
+        return self._pool

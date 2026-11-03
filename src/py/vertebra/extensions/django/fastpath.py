@@ -12,6 +12,7 @@ from vertebra._vertebra import Request, Response, WsgiEnviron, WsgiInput
 from vertebra.server._fastpath import (
     extract_scope_body_fast,
     resolve_relative_path,
+    serialize_fastpath_special_result,
     wrap_asgi_fastpath,
 )
 from vertebra.utils.serializers import decode_json, encode_json_bytes
@@ -223,6 +224,12 @@ def _serialize_django_result(result: Any, default_status: int, request_id: int) 
     """Convert a Django view return value into a Rust ``Response``."""
     if isinstance(result, Response):
         return result
+
+    special = serialize_fastpath_special_result(result, default_status=default_status)
+    if special is not None:
+        sp_status, sp_headers, sp_body = special
+        str_headers = [(k.decode("latin-1"), v.decode("latin-1")) for k, v in sp_headers]
+        return Response(status=sp_status, body=sp_body, headers=str_headers, request_id=request_id)
 
     if hasattr(result, "status_code") and hasattr(result, "content"):
         status = int(result.status_code)

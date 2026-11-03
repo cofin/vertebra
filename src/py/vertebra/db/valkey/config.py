@@ -1,48 +1,19 @@
-"""Valkey 8.0+ / 9.0+ RESP3 driver, Cluster/Sentinel support, and GCP Memorystore for Valkey IAM."""
+"""Valkey 8.0+ / 9.0+ RESP3 configuration supporting Cluster, Sentinel, and GCP Memorystore IAM."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any, ClassVar
 
-from vertebra.db.redis import (
-    AsyncRedisDriver,
-    ClusterRedirect,
-    PubSubMessage,
-    RedisConfig,
-    Resp3Error,
-    Resp3Parser,
-    SyncRedisDriver,
-    crc16_xmodem,
-    encode_hello3_handshake,
-    encode_resp_command,
-    hash_slot,
-    parse_cluster_redirect,
-    redis_hash_slot,
-)
+from vertebra.db.redis.config import RedisConfig
 
-if TYPE_CHECKING:
-    import socket
-    from collections.abc import Callable
-
-__all__ = (
-    "AsyncValkeyDriver",
-    "ClusterRedirect",
-    "PubSubMessage",
-    "Resp3Error",
-    "Resp3Parser",
-    "SyncValkeyDriver",
-    "ValkeyConfig",
-    "crc16_xmodem",
-    "encode_hello3_handshake",
-    "encode_resp_command",
-    "hash_slot",
-    "parse_cluster_redirect",
-    "redis_hash_slot",
-)
+__all__ = ("ValkeyConfig",)
 
 
 class ValkeyConfig(RedisConfig, frozen=True, gc=False, kw_only=True):
     """Configuration for Valkey 8.0+ / 9.0+ standalone, Sentinel, Cluster, and GCP Memorystore."""
+
+    dialect: ClassVar[str] = "valkey"
+    dialect_tag: ClassVar[int] = 8
 
     url: str = "valkey://localhost:6379/0"
     """Valkey connection URI (`valkey://`, `valkeys://`, `redis://`, `rediss://`, or `memory://`)."""
@@ -105,39 +76,3 @@ class ValkeyConfig(RedisConfig, frozen=True, gc=False, kw_only=True):
     def to_redis_config(self) -> RedisConfig:
         """Convert to equivalent RedisConfig."""
         return self
-
-
-class SyncValkeyDriver(SyncRedisDriver):
-    """Synchronous Valkey 8.0+/9.0+ driver with RESP3 client-side cache tracking and topology routing."""
-
-    __slots__ = ("_valkey_config",)
-
-    def __init__(
-        self,
-        config: ValkeyConfig | None = None,
-        *,
-        broker: Any = None,
-        socket_factory: Callable[[tuple[str, int]], socket.socket] | None = None,
-    ) -> None:
-        self._valkey_config = config or ValkeyConfig()
-        super().__init__(self._valkey_config, broker=broker, socket_factory=socket_factory)
-
-    @property
-    def config(self) -> ValkeyConfig:
-        """Return the active ValkeyConfig."""
-        return self._valkey_config
-
-
-class AsyncValkeyDriver(AsyncRedisDriver):
-    """Asynchronous Valkey 8.0+/9.0+ RESP3 driver with client-side cache tracking and topology routing."""
-
-    __slots__ = ("_valkey_config",)
-
-    def __init__(self, config: ValkeyConfig | None = None, *, broker: Any = None) -> None:
-        self._valkey_config = config or ValkeyConfig()
-        super().__init__(self._valkey_config, broker=broker)
-
-    @property
-    def config(self) -> ValkeyConfig:
-        """Return the active ValkeyConfig."""
-        return self._valkey_config

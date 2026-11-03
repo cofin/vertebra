@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from vertebra.extensions.sqlalchemy.alembic import (
     AlembicImpl,
+    BigQueryAlembicImpl,
     CreateVectorIndexOp,
     CreateViewOp,
     DropVectorIndexOp,
@@ -13,6 +14,7 @@ from vertebra.extensions.sqlalchemy.alembic import (
     MySQLAlembicImpl,
     OracleAlembicImpl,
     PostgreSQLAlembicImpl,
+    SpannerAlembicImpl,
     SQLiteAlembicImpl,
 )
 from vertebra.extensions.sqlalchemy.cache import (
@@ -22,10 +24,13 @@ from vertebra.extensions.sqlalchemy.cache import (
 )
 from vertebra.extensions.sqlalchemy.dialects import (
     ALL_DIALECT_SCHEMES,
+    DIALECT_DESCRIPTORS,
     DIALECT_SCHEMES,
     AsyncDBAPIConnection,
     AsyncDBAPICursor,
     AsyncDBAPIModule,
+    BigQueryAsyncDialect,
+    BigQueryDialect,
     DatabaseError,
     DataError,
     DBAPIConnection,
@@ -49,6 +54,10 @@ from vertebra.extensions.sqlalchemy.dialects import (
     PostgreSQLAsyncDialect,
     PostgreSQLDialect,
     ProgrammingError,
+    SpangresAsyncDialect,
+    SpangresDialect,
+    SpannerAsyncDialect,
+    SpannerDialect,
     SQLiteAsyncDialect,
     SQLiteDialect,
     SyncEngineAdapter,
@@ -70,11 +79,15 @@ from vertebra.extensions.sqlalchemy.types import (
 
 __all__ = (
     "ALL_DIALECT_SCHEMES",
+    "DIALECT_DESCRIPTORS",
     "DIALECT_SCHEMES",
     "AlembicImpl",
     "AsyncDBAPIConnection",
     "AsyncDBAPICursor",
     "AsyncDBAPIModule",
+    "BigQueryAlembicImpl",
+    "BigQueryAsyncDialect",
+    "BigQueryDialect",
     "BinaryJSON",
     "CacheEntry",
     "CacheStats",
@@ -118,6 +131,11 @@ __all__ = (
     "SQLiteDialect",
     "SQLAlchemyCacheBackend",
     "SelectInLoadSpec",
+    "SpangresAsyncDialect",
+    "SpangresDialect",
+    "SpannerAlembicImpl",
+    "SpannerAsyncDialect",
+    "SpannerDialect",
     "SyncEngineAdapter",
     "Vector",
     "VectorDistanceExpr",

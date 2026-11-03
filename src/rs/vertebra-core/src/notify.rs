@@ -11,10 +11,12 @@
 //! cross-process IPC via fork.
 
 #[cfg(windows)]
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::AtomicU32;
+use core::sync::atomic::{AtomicBool, Ordering};
 use std::io;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::sync::Mutex;
 #[cfg(windows)]
 use std::time::Duration;
 
@@ -373,8 +375,85 @@ impl AsRawFd for Notifier {
     }
 }
 
+/// Pure-Rust completion queue with coalesced wake-arming for event loop drainers.
+///
+/// Multiple background tasks can push completed items concurrently without acquiring
+/// the Python GIL. Only the transition from `wake_armed == false` to `wake_armed == true`
+/// returns `true` from [`CompletionQueue::push`] (and signals the optional [`Notifier`]),
+/// coalescing burst completions into a single event-loop wakeup.
+pub struct CompletionQueue<T> {
+    queue: Mutex<Vec<T>>,
+    wake_armed: AtomicBool,
+    notifier: Option<Notifier>,
+}
+
+impl<T> CompletionQueue<T> {
+    /// Create a completion queue with an optional platform [`Notifier`].
+    pub fn new(notifier: Option<Notifier>) -> Self {
+        Self {
+            queue: Mutex::new(Vec::with_capacity(64)),
+            wake_armed: AtomicBool::new(false),
+            notifier,
+        }
+    }
+
+    /// Create a completion queue backed by [`Notifier::new`] when available.
+    pub fn with_platform_notifier() -> Self {
+        Self::new(Notifier::new().ok())
+    }
+
+    /// Borrow the underlying [`Notifier`], if present.
+    pub fn notifier(&self) -> Option<&Notifier> {
+        self.notifier.as_ref()
+    }
+
+    /// Clear any pending readiness state on the underlying [`Notifier`].
+    pub fn clear_notifier(&self) {
+        if let Some(ref notifier) = self.notifier {
+            let _ = notifier.clear();
+        }
+    }
+
+    /// Push a completed item onto the queue.
+    ///
+    /// Returns `true` if this push transitioned `wake_armed` from `false` to `true`
+    /// (meaning the caller should wake the consumer if not relying solely on `notifier`),
+    /// or `false` if a wakeup is already armed.
+    pub fn push(&self, item: T) -> bool {
+        let mut guard = self.queue.lock().expect("lock completion queue");
+        guard.push(item);
+        let should_signal = !self.wake_armed.swap(true, Ordering::AcqRel);
+        if should_signal && let Some(ref notifier) = self.notifier {
+            let _ = notifier.notify();
+        }
+        should_signal
+    }
+
+    /// Drain all queued items into `out`.
+    ///
+    /// When the queue is non-empty, swaps its contents into `out` and returns `true`.
+    /// When the queue is empty, clears any pending [`Notifier`] readiness, disarms
+    /// `wake_armed` with `Ordering::Release`, and returns `false`.
+    pub fn drain_into(&self, out: &mut Vec<T>) -> bool {
+        let mut guard = self.queue.lock().expect("lock completion queue");
+        if guard.is_empty() {
+            if let Some(ref notifier) = self.notifier {
+                let _ = notifier.clear();
+            }
+            self.wake_armed.store(false, Ordering::Release);
+            return false;
+        }
+        out.clear();
+        std::mem::swap(&mut *guard, out);
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::thread;
+
     use super::*;
 
     #[test]
@@ -488,5 +567,70 @@ mod tests {
         assert!(child_notifier.has_pending());
         child_notifier.clear().expect("clear failed");
         assert!(!child_notifier.has_pending());
+    }
+
+    #[test]
+    fn completion_queue_arms_once_per_burst_and_rearms_after_drain() {
+        let queue = Arc::new(CompletionQueue::<u32>::with_platform_notifier());
+        if let Some(notifier) = queue.notifier() {
+            assert!(!notifier.has_pending());
+        }
+
+        let mut handles = Vec::with_capacity(5);
+        for idx in 0..5u32 {
+            let q = Arc::clone(&queue);
+            handles.push(thread::spawn(move || q.push(idx)));
+        }
+
+        let armed_count = handles
+            .into_iter()
+            .map(|h| h.join().expect("producer thread panicked"))
+            .filter(|&armed| armed)
+            .count();
+        assert_eq!(
+            armed_count, 1,
+            "only the first push in a burst should arm wakeup"
+        );
+        if let Some(notifier) = queue.notifier() {
+            assert!(notifier.has_pending());
+        }
+
+        let mut drained = Vec::new();
+        assert!(queue.drain_into(&mut drained));
+        drained.sort_unstable();
+        assert_eq!(drained, vec![0, 1, 2, 3, 4]);
+
+        let mut empty = Vec::new();
+        assert!(
+            !queue.drain_into(&mut empty),
+            "empty drain_into should disarm wake_armed and return false"
+        );
+        if let Some(notifier) = queue.notifier() {
+            assert!(!notifier.has_pending());
+        }
+
+        assert!(
+            queue.push(99),
+            "subsequent push after empty drain_into must re-arm wakeup"
+        );
+        if let Some(notifier) = queue.notifier() {
+            assert!(notifier.has_pending());
+        }
+    }
+
+    #[test]
+    fn completion_queue_coalesces_wake_signal_until_drained() {
+        let queue = CompletionQueue::<u32>::with_platform_notifier();
+        assert!(queue.push(10));
+        assert!(!queue.push(20));
+        assert!(!queue.push(30));
+
+        let mut batch = Vec::new();
+        let mut total = Vec::new();
+        while queue.drain_into(&mut batch) {
+            total.extend_from_slice(&batch);
+        }
+        assert_eq!(total, vec![10, 20, 30]);
+        assert!(queue.push(40));
     }
 }

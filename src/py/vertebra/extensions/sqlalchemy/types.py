@@ -38,7 +38,7 @@ type VectorDistanceMetric = Literal["cosine", "l2", "inner_product"]
 class VectorDistanceExpr:
     """Dialect-aware SQL expression descriptor for vector similarity operations."""
 
-    __slots__ = ("_column_name", "_metric", "_param_name", "_query_vector")
+    __slots__ = ("_approximate", "_column_name", "_metric", "_num_leaves_to_search", "_param_name", "_query_vector")
 
     def __init__(
         self,
@@ -47,12 +47,16 @@ class VectorDistanceExpr:
         *,
         metric: VectorDistanceMetric = "cosine",
         param_name: str = "query_vec",
+        approximate: bool = False,
+        num_leaves_to_search: int | None = None,
     ) -> None:
         """Initialize vector distance expression with target column, vector, and metric."""
         self._column_name = column_name
         self._query_vector = tuple(float(v) for v in query_vector)
         self._metric = metric
         self._param_name = param_name
+        self._approximate = approximate
+        self._num_leaves_to_search = num_leaves_to_search
 
     @property
     def column_name(self) -> str:
@@ -74,9 +78,41 @@ class VectorDistanceExpr:
         """Return the bind parameter name."""
         return self._param_name
 
+    @property
+    def approximate(self) -> bool:
+        """Return True when compiling an approximate ANN distance function."""
+        return self._approximate
+
     def compile_sql(self, dialect_name: str = "postgresql") -> str:
         """Compile the vector distance expression for the target database dialect."""
-        base = dialect_name.split("+", 1)[0].lower()
+        lowered = dialect_name.lower()
+        base = lowered.split("+", 1)[0]
+        if base == "spangres":
+            op = {
+                "cosine": "<=>",
+                "l2": "<->",
+                "inner_product": "<#>",
+            }[self._metric]
+            return f"{self._column_name} {op} :{self._param_name}"
+        if base in ("bigquery", "spanner"):
+            if self._approximate and base == "spanner":
+                approx_fn = {
+                    "cosine": "APPROX_COSINE_DISTANCE",
+                    "l2": "APPROX_EUCLIDEAN_DISTANCE",
+                    "inner_product": "APPROX_DOT_PRODUCT",
+                }[self._metric]
+                if self._num_leaves_to_search is not None:
+                    return (
+                        f"{approx_fn}({self._column_name}, @{self._param_name}, "
+                        f"options => JSON '{{\"num_leaves_to_search\": {int(self._num_leaves_to_search)}}}')"
+                    )
+                return f"{approx_fn}({self._column_name}, @{self._param_name})"
+            gcp_fn = {
+                "cosine": "COSINE_DISTANCE",
+                "l2": "EUCLIDEAN_DISTANCE",
+                "inner_product": "DOT_PRODUCT",
+            }[self._metric]
+            return f"{gcp_fn}({self._column_name}, @{self._param_name})"
         if base == "oracle":
             ora_metric = {
                 "cosine": "COSINE",
@@ -142,8 +178,18 @@ class Vector(UserDefinedType[Any]):
             target_name = dialect_name
         elif "dialect" in kw:
             target_name = getattr(kw["dialect"], "name", "")
-        base = target_name.split("+", 1)[0].lower() if target_name else "postgresql"
+        lowered = target_name.lower() if target_name else "postgresql"
+        base = lowered.split("+", 1)[0]
+        if base == "spangres":
+            return f"VECTOR({self.dimensions})" if self.dimensions is not None else "VECTOR"
 
+        if base == "bigquery":
+            return "ARRAY<FLOAT64>"
+        if base == "spanner":
+            elem_type = "FLOAT64" if self.precision == "float64" else "FLOAT32"
+            if self.dimensions is not None:
+                return f"ARRAY<{elem_type}>(vector_length=>{self.dimensions})"
+            return f"ARRAY<{elem_type}>"
         if base == "oracle":
             ora_fmt = {
                 "float32": "FLOAT32",
@@ -191,6 +237,8 @@ class Vector(UserDefinedType[Any]):
         typecode = "d" if self.precision == "float64" else "f"
 
         if isinstance(value, _vertebra.VectorView):
+            if base in ("bigquery", "spanner"):
+                return [float(x) for x in value.to_list()]
             if base == "oracle":
                 if self.binary_format:
                     return value.to_oracle_bytes()
@@ -201,6 +249,8 @@ class Vector(UserDefinedType[Any]):
                 return value.to_pgvector_bytes()
             return "[" + ",".join(str(float(x)) for x in value.to_list()) + "]"
 
+        if base in ("bigquery", "spanner"):
+            return [float(x) for x in value]
         if base == "oracle":
             if self.binary_format:
                 return _vertebra.encode_oracle_vector_f32(value)
@@ -258,6 +308,23 @@ class Vector(UserDefinedType[Any]):
         """Build a cosine distance expression for this vector column."""
         return VectorDistanceExpr(self.column_name, query_vector, metric="cosine", param_name=param_name)
 
+    def approx_cosine_distance(
+        self,
+        query_vector: Sequence[float],
+        *,
+        param_name: str = "query_vec",
+        num_leaves_to_search: int | None = None,
+    ) -> VectorDistanceExpr:
+        """Build an approximate cosine distance expression (`APPROX_COSINE_DISTANCE` on Spanner ScaNN)."""
+        return VectorDistanceExpr(
+            self.column_name,
+            query_vector,
+            metric="cosine",
+            param_name=param_name,
+            approximate=True,
+            num_leaves_to_search=num_leaves_to_search,
+        )
+
     def l2_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
         """Build an L2 / Euclidean distance expression for this vector column."""
         return VectorDistanceExpr(self.column_name, query_vector, metric="l2", param_name=param_name)
@@ -265,6 +332,21 @@ class Vector(UserDefinedType[Any]):
     def inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
         """Build an inner-product / dot-product expression for this vector column."""
         return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
+
+
+@compiles(Vector, "bigquery")
+def _compile_vector_bigquery(element: Vector, compiler: Any, **kw: Any) -> str:
+    _ = (element, compiler, kw)
+    return "ARRAY<FLOAT64>"
+
+
+@compiles(Vector, "spanner")
+def _compile_vector_spanner(element: Vector, compiler: Any, **kw: Any) -> str:
+    _ = (compiler, kw)
+    elem_type = "FLOAT64" if element.precision == "float64" else "FLOAT32"
+    if element.dimensions is not None:
+        return f"ARRAY<{elem_type}>(vector_length=>{element.dimensions})"
+    return f"ARRAY<{elem_type}>"
 
 
 @compiles(Vector, "postgresql")
@@ -321,7 +403,7 @@ class BinaryJSON(TypeDecorator[Any]):
     def load_dialect_impl(self, dialect: Dialect | Any) -> TypeEngine[Any]:
         """Select the dialect-native JSON type implementation."""
         name = getattr(dialect, "name", "").lower()
-        if name in ("postgresql", "cockroachdb"):
+        if name in ("postgresql", "cockroachdb", "spangres"):
             return dialect.type_descriptor(JSONB())
         if name == "mssql":
             return dialect.type_descriptor(NVARCHAR(None))
@@ -358,8 +440,9 @@ class BinaryJSON(TypeDecorator[Any]):
         target = dialect_name
         if not target and "dialect" in kw:
             target = getattr(kw["dialect"], "name", "")
-        base = target.split("+", 1)[0].lower() if target else "postgresql"
-        if base in ("postgres", "postgresql", "sqlite"):
+        lowered = target.lower() if target else "postgresql"
+        base = lowered.split("+", 1)[0]
+        if base in ("postgres", "postgresql", "spangres", "sqlite"):
             return "JSONB"
         if base == "mssql":
             return "NVARCHAR(MAX)"

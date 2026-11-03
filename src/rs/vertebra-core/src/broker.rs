@@ -30,6 +30,16 @@ pub const CHAN_MAX_NAME_BYTES: usize = 64;
 pub const CHAN_MAX_LEASE_ID_BYTES: usize = 32;
 pub const CHAN_MAX_PAYLOAD_BYTES: usize = 256;
 
+pub const DIALECT_TAG_POSTGRES: u16 = 1;
+pub const DIALECT_TAG_MYSQL: u16 = 2;
+pub const DIALECT_TAG_SQLITE: u16 = 3;
+pub const DIALECT_TAG_ORACLE: u16 = 4;
+pub const DIALECT_TAG_MSSQL: u16 = 5;
+pub const DIALECT_TAG_DUCKDB: u16 = 6;
+pub const DIALECT_TAG_BIGQUERY: u16 = 7;
+pub const DIALECT_TAG_SPANNER: u16 = 8;
+pub const DIALECT_TAG_SPANGRES: u16 = 9;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum BrokerError {
     #[error("invalid broker capacity specified")]

@@ -30,6 +30,7 @@ from vertebra.extensions.starlette.fastpath import (
 )
 from vertebra.server._fastpath import (
     resolve_relative_path,
+    serialize_fastpath_special_result,
     wrap_asgi_fastpath,
 )
 from vertebra.utils.serializers import decode_json, encode_json_bytes
@@ -370,6 +371,10 @@ async def _serialize_fastapi_result(
 ) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
     if result is None:
         return compiled.status_code, [], b""
+
+    special = serialize_fastpath_special_result(result, default_status=compiled.status_code)
+    if special is not None:
+        return special
 
     raw_headers = getattr(result, "raw_headers", None)
     resp_body = getattr(result, "body", None)

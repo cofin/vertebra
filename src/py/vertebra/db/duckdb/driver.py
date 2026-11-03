@@ -1,4 +1,4 @@
-"""Embedded DuckDB OLAP driver with SHM single-writer/multi-reader coordination and Arrow IPC streaming."""
+"""Synchronous and asynchronous DuckDB analytical drivers."""
 
 from __future__ import annotations
 
@@ -7,17 +7,17 @@ import contextlib
 import os
 import sqlite3
 import threading
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
-from vertebra.db.postgres import (
+from vertebra.db._arrow import (
     ARROW_SHM_THRESHOLD_ROWS,
     ArrowCursor,
     _hydrate_rows_with_schema,
     _table_to_rows_and_cols,
-    read_arrow_shm,
-    write_arrow_shm,
 )
-from vertebra.typing import FrozenBaseStruct
+from vertebra.db.driver import SyncDatabaseDriver, ThreadOffloadAsyncDatabaseDriver
+from vertebra.db.duckdb.config import DuckDBConfig
+from vertebra.db.duckdb.core import DUCKDB_DIALECT_TAG, DuckDBCore
 from vertebra.utils.module_loader import import_optional
 
 if TYPE_CHECKING:
@@ -25,137 +25,19 @@ if TYPE_CHECKING:
 
 __all__ = (
     "AsyncDuckDBDriver",
-    "DUCKDB_DIALECT_TAG",
-    "DuckDBConfig",
-    "DuckDBSecretConfig",
     "SyncDuckDBDriver",
-    "duckdb_bootstrap_statements",
-    "read_arrow_shm",
-    "write_arrow_shm",
 )
 
-DUCKDB_DIALECT_TAG = 6
 
-
-class DuckDBSecretConfig(FrozenBaseStruct, frozen=True, gc=False):
-    """Cloud storage secret configuration (`CREATE SECRET`) for DuckDB `httpfs` / S3 / GCS / R2."""
-
-    name: str = "default_s3"
-    """Unique DuckDB secret identifier."""
-    secret_type: str = "S3"
-    """DuckDB secret type (`"S3"`, `"GCS"`, `"R2"`, or `"AZURE"`)."""
-    key_id: str = ""
-    """Cloud storage access key ID (`KEY_ID`)."""
-    secret: str = ""
-    """Cloud storage secret access key (`SECRET`)."""
-    region: str = "us-east-1"
-    """Cloud storage region (`REGION`)."""
-    endpoint: str | None = None
-    """Optional custom S3-compatible endpoint (`ENDPOINT`, e.g. RustFS or MinIO)."""
-
-    def to_create_secret_sql(self) -> str:
-        """Render a `CREATE OR REPLACE SECRET` SQL statement for DuckDB."""
-        parts = [f"TYPE {self.secret_type}"]
-        if self.key_id:
-            parts.append(f"KEY_ID '{self.key_id}'")
-        if self.secret:
-            parts.append(f"SECRET '{self.secret}'")
-        if self.region:
-            parts.append(f"REGION '{self.region}'")
-        if self.endpoint:
-            parts.append(f"ENDPOINT '{self.endpoint}'")
-        inner = ", ".join(parts)
-        return f"CREATE OR REPLACE SECRET {self.name} ({inner})"
-
-
-class DuckDBConfig(FrozenBaseStruct, frozen=True, gc=False):
-    """Configuration for the embedded DuckDB analytical engine."""
-
-    path: str = ":memory:"
-    """Filesystem path to the DuckDB database file or `":memory:"`."""
-    database: str = ":memory:"
-    """Fallback database path alias used when `path` is left at `":memory:"`."""
-    memory_limit_mb: int = 512
-    """Maximum buffer manager memory allowance in MiB (`SET memory_limit`)."""
-    threads: int = 4
-    """Number of DuckDB execution threads (`SET threads`)."""
-    parquet_metadata_cache: bool = True
-    """When True, enable `SET parquet_metadata_cache = true` after connection bootstrap."""
-    httpfs_connection_caching: bool = True
-    """When True, keep remote HTTP/S3 object storage connections warm (`SET http_keep_alive = true`)."""
-    enable_http_metadata_cache: bool = True
-    """When True, cache remote HTTP/Parquet `HEAD` metadata (`SET enable_http_metadata_cache = true`)."""
-    read_only: bool = False
-    """When True, open the DuckDB file in read-only mode allowing multi-process readers."""
-    secrets: tuple[DuckDBSecretConfig, ...] = ()
-    """Optional cloud storage secrets (`CREATE OR REPLACE SECRET`) executed at connection bootstrap."""
-    pool_min_size: int = 1
-    """Minimum number of pooled DuckDB cursors per worker."""
-    pool_max_size: int = 10
-    """Maximum number of pooled DuckDB cursors per worker."""
-    statement_cache_size: int = 256
-    """Maximum number of prepared analytical statements cached per worker."""
-    broker: Any = None
-    """Optional shared-memory `DatabaseBroker` coordinating single-writer/multi-reader leases."""
-    gcs_token_cache: Any = None
-    """Optional `GcpTokenCache` used to rotate session-local GCS `BEARER_TOKEN` secrets on token refresh."""
-
-    def resolved_path(self) -> str:
-        """Resolve the effective database path from `path` or `database`."""
-        if self.path != ":memory:":
-            return self.path
-        return self.database
-
-    def bootstrap_statements(self) -> list[str]:
-        """Return post-initialization `SET` statements (`parquet_metadata_cache` is always post-init SQL)."""
-        native = import_optional("vertebra._vertebra")
-        if native is not None and hasattr(native, "duckdb_bootstrap_statements"):
-            raw_stmts = native.duckdb_bootstrap_statements(
-                self.resolved_path(),
-                self.memory_limit_mb,
-                self.threads,
-                self.parquet_metadata_cache,
-                self.httpfs_connection_caching,
-                self.enable_http_metadata_cache,
-            )
-            stmts = [s.replace("SET httpfs_connection_caching = ", "SET http_keep_alive = ") for s in raw_stmts]
-        else:
-            parquet_flag = "true" if self.parquet_metadata_cache else "false"
-            keep_alive_flag = "true" if self.httpfs_connection_caching else "false"
-            http_meta_flag = "true" if self.enable_http_metadata_cache else "false"
-            stmts = [
-                f"SET memory_limit = '{self.memory_limit_mb}MB'",
-                f"SET threads = {self.threads}",
-                f"SET parquet_metadata_cache = {parquet_flag}",
-                f"SET http_keep_alive = {keep_alive_flag}",
-                f"SET enable_http_metadata_cache = {http_meta_flag}",
-            ]
-        for secret in self.secrets:
-            stmts.append(secret.to_create_secret_sql())
-        return stmts
-
-
-def duckdb_bootstrap_statements(config: DuckDBConfig | None = None) -> list[str]:
-    """Generate post-init DuckDB `SET` statements for the given `DuckDBConfig`."""
-    cfg = config or DuckDBConfig()
-    return cfg.bootstrap_statements()
-
-
-def _is_write_statement(sql: str) -> bool:
-    """Return True if the SQL statement mutates state and requires the single-writer lock."""
-    head = sql.lstrip().split(None, 1)
-    if not head:
-        return False
-    verb = head[0].upper()
-    return verb in {"INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "COPY", "MERGE", "TRUNCATE", "ATTACH"}
-
-
-class SyncDuckDBDriver:
+class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
     """Synchronous DuckDB analytical driver with single-writer coordination and SHM Arrow streaming."""
 
+    dialect: ClassVar[str] = "duckdb"
+    dialect_tag: ClassVar[int] = DUCKDB_DIALECT_TAG
+
     def __init__(self, config: DuckDBConfig | None = None, *, broker: Any = None) -> None:
-        self.config = config or DuckDBConfig()
-        self._broker = broker if broker is not None else self.config.broker
+        resolved = config or DuckDBConfig()
+        super().__init__(resolved, broker=broker)
         self._writer_lock = threading.RLock()
         self.applied_token_generation: int = 0
         self.last_gcs_secret_sql: str = ""
@@ -175,11 +57,15 @@ class SyncDuckDBDriver:
             self._conn = sqlite3.connect(db_path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
 
-    def execute(self, sql: str, params: Sequence[Any] | Mapping[str, Any] | None = None) -> int:
+    def execute(  # type: ignore[override]
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> int:
         """Execute a DDL or DML statement under single-writer coordination."""
         self._sync_gcs_token_secret()
         bound = tuple(params) if isinstance(params, (list, tuple)) else (params or ())
-        grant = self._acquire_broker_lease(sql, len(bound) if isinstance(bound, tuple) else 0)
+        grant = self._acquire_duckdb_lease(sql, len(bound) if isinstance(bound, tuple) else 0)
         try:
             with self._writer_lock:
                 cur = self._conn.execute(sql, bound) if bound else self._conn.execute(sql)
@@ -188,9 +74,9 @@ class SyncDuckDBDriver:
                 rowcount = getattr(cur, "rowcount", 0)
                 return max(int(rowcount or 0), 0)
         finally:
-            self._release_broker_lease(grant)
+            self._release_duckdb_lease(grant)
 
-    def select(
+    def select(  # type: ignore[override]
         self,
         sql: str,
         params: Sequence[Any] | Mapping[str, Any] | None = None,
@@ -200,9 +86,9 @@ class SyncDuckDBDriver:
         """Execute an analytical `SELECT` query and return rows as dictionaries or `schema_type` instances."""
         self._sync_gcs_token_secret()
         bound = tuple(params) if isinstance(params, (list, tuple)) else (params or ())
-        grant = self._acquire_broker_lease(sql, len(bound) if isinstance(bound, tuple) else 0)
+        grant = self._acquire_duckdb_lease(sql, len(bound) if isinstance(bound, tuple) else 0)
         try:
-            if _is_write_statement(sql):
+            if DuckDBCore.is_write_statement(sql):
                 with self._writer_lock:
                     cur = self._conn.execute(sql, bound) if bound else self._conn.execute(sql)
                     rows = cur.fetchall()
@@ -216,9 +102,9 @@ class SyncDuckDBDriver:
             tuple_rows = [tuple(row) for row in rows]
             return _hydrate_rows_with_schema(tuple_rows, cols, schema_type)
         finally:
-            self._release_broker_lease(grant)
+            self._release_duckdb_lease(grant)
 
-    def select_one(
+    def select_one(  # type: ignore[override]
         self,
         sql: str,
         params: Sequence[Any] | Mapping[str, Any] | None = None,
@@ -232,7 +118,7 @@ class SyncDuckDBDriver:
             raise ValueError(msg)
         return rows[0]
 
-    def select_one_or_none(
+    def select_one_or_none(  # type: ignore[override]
         self,
         sql: str,
         params: Sequence[Any] | Mapping[str, Any] | None = None,
@@ -243,7 +129,7 @@ class SyncDuckDBDriver:
         rows = self.select(sql, params, schema_type=schema_type)
         return rows[0] if rows else None
 
-    def load_from_arrow(
+    def load_from_arrow(  # type: ignore[override]
         self,
         table_name: str,
         data: Any,
@@ -258,7 +144,7 @@ class SyncDuckDBDriver:
         placeholders = ", ".join("?" for _ in cols)
         col_list = ", ".join(cols)
         sql = f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders})"
-        grant = self._acquire_broker_lease(sql, len(cols))
+        grant = self._acquire_duckdb_lease(sql, len(cols))
         try:
             with self._writer_lock:
                 self._conn.executemany(sql, rows)
@@ -266,15 +152,17 @@ class SyncDuckDBDriver:
                     self._conn.commit()
                 return len(rows)
         finally:
-            self._release_broker_lease(grant)
+            self._release_duckdb_lease(grant)
 
-    def execute_tuples(
-        self, sql: str, params: Sequence[Any] | Mapping[str, Any] | None = None
+    def execute_tuples(  # type: ignore[override]
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
     ) -> list[tuple[Any, ...]]:
         """Execute a query and return positional tuples."""
         self._sync_gcs_token_secret()
         bound = tuple(params) if isinstance(params, (list, tuple)) else (params or ())
-        grant = self._acquire_broker_lease(sql, len(bound) if isinstance(bound, tuple) else 0)
+        grant = self._acquire_duckdb_lease(sql, len(bound) if isinstance(bound, tuple) else 0)
         try:
             with self._writer_lock:
                 cur = self._conn.execute(sql, bound) if bound else self._conn.execute(sql)
@@ -283,15 +171,17 @@ class SyncDuckDBDriver:
                     self._conn.commit()
                 return rows
         finally:
-            self._release_broker_lease(grant)
+            self._release_duckdb_lease(grant)
 
-    def execute_with_description(
-        self, sql: str, params: Sequence[Any] | Mapping[str, Any] | None = None
+    def execute_with_description(  # type: ignore[override]
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
     ) -> tuple[list[tuple[Any, ...]], tuple[tuple[Any, ...], ...] | None, int]:
         """Execute SQL and return `(rows, description, rowcount)` for DBAPI compatibility."""
         self._sync_gcs_token_secret()
         bound = tuple(params) if isinstance(params, (list, tuple)) else (params or ())
-        grant = self._acquire_broker_lease(sql, len(bound) if isinstance(bound, tuple) else 0)
+        grant = self._acquire_duckdb_lease(sql, len(bound) if isinstance(bound, tuple) else 0)
         try:
             with self._writer_lock:
                 cur = self._conn.execute(sql, bound) if bound else self._conn.execute(sql)
@@ -303,9 +193,9 @@ class SyncDuckDBDriver:
                     self._conn.commit()
                 return [], None, max(int(getattr(cur, "rowcount", 0) or 0), 0)
         finally:
-            self._release_broker_lease(grant)
+            self._release_duckdb_lease(grant)
 
-    def select_to_arrow(
+    def select_to_arrow(  # type: ignore[override]
         self,
         sql: str,
         params: Sequence[Any] | Mapping[str, Any] | None = None,
@@ -318,6 +208,7 @@ class SyncDuckDBDriver:
 
     def close(self) -> None:
         """Close the underlying DuckDB connection."""
+        self._closed = True
         self._conn.close()
 
     def _sync_gcs_token_secret(self) -> None:
@@ -340,7 +231,7 @@ class SyncDuckDBDriver:
                     with self._writer_lock, contextlib.suppress(RuntimeError, ValueError, OSError):
                         self._conn.execute(secret_sql)
 
-    def _acquire_broker_lease(self, sql: str, param_count: int) -> Any:
+    def _acquire_duckdb_lease(self, sql: str, param_count: int) -> Any:
         if self._broker is None:
             return None
         if hasattr(self._broker, "statement_cache"):
@@ -377,7 +268,7 @@ class SyncDuckDBDriver:
                 return self._broker.acquire(bind_key="duckdb")
         return None
 
-    def _release_broker_lease(self, grant: Any) -> None:
+    def _release_duckdb_lease(self, grant: Any) -> None:
         if grant is not None and self._broker is not None:
             if hasattr(self._broker, "lease_table") and self._broker.lease_table is not None:
                 self._broker.lease_table.release(grant.slot_index, grant.generation)
@@ -385,12 +276,16 @@ class SyncDuckDBDriver:
                 self._broker.release(grant.slot_index, grant.generation)
 
 
-class AsyncDuckDBDriver:
+class AsyncDuckDBDriver(ThreadOffloadAsyncDatabaseDriver[DuckDBConfig, SyncDuckDBDriver]):
     """Asynchronous DuckDB analytical driver with single-writer coordination and SHM Arrow streaming."""
 
+    dialect: ClassVar[str] = "duckdb"
+    dialect_tag: ClassVar[int] = DUCKDB_DIALECT_TAG
+
     def __init__(self, config: DuckDBConfig | None = None, *, broker: Any = None) -> None:
-        self.config = config or DuckDBConfig()
-        self._sync = SyncDuckDBDriver(self.config, broker=broker)
+        resolved = config or DuckDBConfig()
+        sync_driver = SyncDuckDBDriver(resolved, broker=broker)
+        super().__init__(resolved, sync_driver, broker=sync_driver.broker)
 
     @property
     def executed_bootstrap_statements(self) -> tuple[str, ...]:
@@ -407,12 +302,16 @@ class AsyncDuckDBDriver:
         """Return the last `CREATE OR REPLACE SECRET` SQL statement applied for GCS ADC auth."""
         return self._sync.last_gcs_secret_sql
 
-    async def execute(self, sql: str, params: Sequence[Any] | Mapping[str, Any] | None = None) -> int:
+    async def execute(  # type: ignore[override]
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> int:
         """Execute a DDL or DML statement asynchronously."""
         await self._ensure_gcs_token_async()
         return await asyncio.to_thread(self._sync.execute, sql, params)
 
-    async def select(
+    async def select(  # type: ignore[override]
         self,
         sql: str,
         params: Sequence[Any] | Mapping[str, Any] | None = None,
@@ -423,7 +322,7 @@ class AsyncDuckDBDriver:
         await self._ensure_gcs_token_async()
         return await asyncio.to_thread(self._sync.select, sql, params, schema_type=schema_type)
 
-    async def select_one(
+    async def select_one(  # type: ignore[override]
         self,
         sql: str,
         params: Sequence[Any] | Mapping[str, Any] | None = None,
@@ -434,7 +333,7 @@ class AsyncDuckDBDriver:
         await self._ensure_gcs_token_async()
         return await asyncio.to_thread(self._sync.select_one, sql, params, schema_type=schema_type)
 
-    async def select_one_or_none(
+    async def select_one_or_none(  # type: ignore[override]
         self,
         sql: str,
         params: Sequence[Any] | Mapping[str, Any] | None = None,
@@ -445,7 +344,7 @@ class AsyncDuckDBDriver:
         await self._ensure_gcs_token_async()
         return await asyncio.to_thread(self._sync.select_one_or_none, sql, params, schema_type=schema_type)
 
-    async def load_from_arrow(
+    async def load_from_arrow(  # type: ignore[override]
         self,
         table_name: str,
         data: Any,
@@ -456,7 +355,7 @@ class AsyncDuckDBDriver:
         await self._ensure_gcs_token_async()
         return await asyncio.to_thread(self._sync.load_from_arrow, table_name, data, columns=columns)
 
-    async def select_to_arrow(
+    async def select_to_arrow(  # type: ignore[override]
         self,
         sql: str,
         params: Sequence[Any] | Mapping[str, Any] | None = None,

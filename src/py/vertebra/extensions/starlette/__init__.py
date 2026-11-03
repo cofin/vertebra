@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from vertebra.utils.module_loader import lazy_exports
 
 if TYPE_CHECKING:
+    from vertebra.db._registry import provide_bigquery_driver, provide_spanner_driver
     from vertebra.extensions.starlette.channels import ChannelsBackend, attach_channels
     from vertebra.extensions.starlette.config import StarletteConfig
     from vertebra.extensions.starlette.fastpath import (
@@ -169,6 +170,8 @@ __all__ = (
     "normalize_path_for_matchit",
     "offload_middlewares",
     "preseed_request_body",
+    "provide_bigquery_driver",
+    "provide_spanner_driver",
     "render_page_shell",
     "render_webmcp_manifest_json",
 )
@@ -244,6 +247,8 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "normalize_path_for_matchit": ("vertebra.extensions.starlette.router", "normalize_path_for_matchit"),
     "offload_middlewares": ("vertebra.extensions.starlette.offload", "offload_middlewares"),
     "preseed_request_body": ("vertebra.extensions.starlette.fastpath", "preseed_request_body"),
+    "provide_bigquery_driver": ("vertebra.db._registry", "provide_bigquery_driver"),
+    "provide_spanner_driver": ("vertebra.db._registry", "provide_spanner_driver"),
     "render_page_shell": ("vertebra.extensions.starlette.vite", "render_page_shell"),
     "render_webmcp_manifest_json": ("vertebra.extensions.starlette.mcp", "render_webmcp_manifest_json"),
 }

@@ -15,8 +15,11 @@ __all__ = [
     "AsgiProtocol",
     "AsgiScope",
     "AsgiScopeIterator",
+    "BigQueryClient",
     "BrokerStats",
     "CloudSQLDialer",
+    "GcpTokenCache",
+    "GcpTokenSnapshot",
     "Headers",
     "HeadersIterator",
     "JWTGuard",
@@ -33,8 +36,10 @@ __all__ = [
     "RsgiHttpProtocol",
     "RsgiScope",
     "RsgiTransport",
+    "RustDbTaskAwaitable",
     "SchemaDigestCache",
     "SimilarityMatch",
+    "SpannerClient",
     "StatementCache",
     "StatementCacheStats",
     "StatementPlan",
@@ -48,6 +53,7 @@ __all__ = [
     "WsgiInput",
     "_WsgiStartResponse",
     "__version__",
+    "camelize",
     "cancel_request_sleep",
     "call_vectorcall",
     "classify_jsonrpc_frame",
@@ -90,22 +96,43 @@ __all__ = [
     "format_traceparent",
     "get_batch",
     "get_request_notify_fd",
+    "humanize",
+    "humanize_bytes",
+    "humanize_duration",
+    "humanize_number",
+    "humanize_rate",
     "hydrate_one_vectorcall",
     "hydrate_rows_vectorcall",
     "init_transport",
     "instantiate_struct_vectorcall",
+    "kebabize",
+    "nanoid_generate",
+    "normalize_identifier",
+    "ordinalize",
     "orm_to_struct_vectorcall",
     "pack_grpc_lpm_frame",
+    "parse_bytes",
     "parse_cluster_redirect",
+    "parse_duration",
     "parse_tnsnames_ora",
     "parse_traceparent",
+    "pascalize",
+    "pluralize",
     "prepare_request_sleep",
+    "quote_backtick_identifier",
+    "quote_bracket_identifier",
+    "quote_dialect_identifier",
+    "quote_identifier",
     "redis_hash_slot",
     "resolve_tns_alias",
     "rewrite_mssql_placeholders",
     "run_wsgi_callable",
     "sanitize_sql",
+    "singularize",
+    "slugify",
+    "snake_case",
     "splice_prefix_tokens",
+    "split_qualified_identifier",
     "sqlite_initialization_pragmas",
     "stream_file_chunks",
     "strip_pg_jsonb_header",
@@ -114,7 +141,16 @@ __all__ = [
     "submit_response",
     "submit_response_raw",
     "submit_results",
+    "titleize",
+    "truncate",
+    "truncate_utf8_bytes",
     "try_get_batch",
+    "uuid4_hex",
+    "uuid4_str",
+    "uuid4_u128",
+    "uuid7_str",
+    "uuid7_u128",
+    "validate_identifier",
 ]
 
 @final
@@ -936,13 +972,23 @@ class ArrowCursor:
     """POSIX shared-memory segment name holding the Arrow IPC stream."""
     byte_len: int
     """Length in bytes of the Arrow IPC payload written to the segment."""
-    def __new__(cls, shm_name: str, byte_len: int) -> Self: ...
+    row_count: int
+    """Total number of rows encoded across all record batches in the stream."""
+    def __new__(cls, shm_name: str, byte_len: int, row_count: int = 0) -> Self: ...
+    def __buffer__(self, flags: int, /) -> memoryview: ...
     @staticmethod
-    def write_ipc_to_shm(shm_name: str, payload: bytes) -> ArrowCursor: ...
+    def write_ipc_to_shm(shm_name: str, payload: bytes, row_count: int = 0) -> ArrowCursor: ...
     @staticmethod
     def read_ipc_from_shm(shm_name: str) -> bytes: ...
     def read_bytes(self) -> bytes: ...
+    def buffer_view(self) -> memoryview: ...
+    def to_pyarrow(self) -> Any: ...
+    def to_arrow_table(self) -> Any: ...
+    def to_polars(self) -> Any: ...
     def release(self) -> bool: ...
+    def close(self) -> bool: ...
+    def __enter__(self) -> Self: ...
+    def __exit__(self, exc_type: Any = None, exc_val: Any = None, exc_tb: Any = None) -> None: ...
 
 def encode_alloydb_metadata_exchange(
     user_agent: str = "vertebra-db/0.1",
@@ -1224,3 +1270,280 @@ def uuid4_hex() -> str: ...
 def uuid7_u128() -> int: ...
 def uuid7_str() -> str: ...
 def nanoid_generate(size: int = 21) -> str: ...
+
+@final
+class RustDbTaskAwaitable:
+    def __new__(cls) -> RustDbTaskAwaitable: ...
+    def __await__(self) -> Any: ...
+
+@final
+class GcpTokenSnapshot:
+    def __new__(
+        cls,
+        *,
+        access_token: str,
+        expires_at_unix_ms: int,
+        generation: int,
+        quota_project_id: str | None = None,
+    ) -> GcpTokenSnapshot: ...
+    @property
+    def access_token(self) -> str: ...
+    @property
+    def expires_at_unix_ms(self) -> int: ...
+    @property
+    def generation(self) -> int: ...
+    @property
+    def quota_project_id(self) -> str | None: ...
+    def __repr__(self) -> str: ...
+
+@final
+class GcpTokenCache:
+    def __new__(cls, options: dict[str, str]) -> GcpTokenCache: ...
+    @property
+    def generation(self) -> int: ...
+    @property
+    def refresh_skew_ms(self) -> int: ...
+    @property
+    def has_service_account_key(self) -> bool: ...
+    @property
+    def service_account_email(self) -> str | None: ...
+    def needs_refresh(self, *, now_unix_ms: int | None = None) -> bool: ...
+    def invalidate(self, failed_generation: int) -> None: ...
+    def sign_jwt_for_audience(self, audience: str) -> str: ...
+    def get_token(self, *, force_refresh: bool = False) -> GcpTokenSnapshot: ...
+    def get_token_async(self, *, force_refresh: bool = False) -> RustDbTaskAwaitable: ...
+
+@final
+class BigQueryClient:
+    def __new__(
+        cls,
+        project_id: str,
+        dataset_id: str | None = None,
+        location: str | None = None,
+        rest_endpoint: str | None = None,
+        storage_endpoint: str | None = None,
+        maximum_bytes_billed: int | None = None,
+        job_timeout_ms: int | None = None,
+        priority: str | None = None,
+        labels: dict[str, str] | None = None,
+        auth_options: dict[str, str] | None = None,
+        pool_size: int = 4,
+        ca_pem: bytes | None = None,
+    ) -> BigQueryClient: ...
+    @property
+    def project_id(self) -> str: ...
+    @property
+    def dataset_id(self) -> str | None: ...
+    @property
+    def location(self) -> str | None: ...
+    @property
+    def rest_endpoint(self) -> str: ...
+    @property
+    def storage_endpoint(self) -> str: ...
+    @property
+    def maximum_bytes_billed(self) -> int | None: ...
+    @property
+    def job_timeout_ms(self) -> int | None: ...
+    @property
+    def priority(self) -> str | None: ...
+    @property
+    def pool_size(self) -> int: ...
+    def query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        session_id: str | None = None,
+        create_session: bool = False,
+        destination_table: str | None = None,
+        write_disposition: str | None = None,
+        maximum_bytes_billed: int | None = None,
+        job_timeout_ms: int | None = None,
+        priority: str | None = None,
+        labels: dict[str, str] | None = None,
+    ) -> dict[str, Any]: ...
+    def query_async(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        session_id: str | None = None,
+        create_session: bool = False,
+        destination_table: str | None = None,
+        write_disposition: str | None = None,
+        maximum_bytes_billed: int | None = None,
+        job_timeout_ms: int | None = None,
+        priority: str | None = None,
+        labels: dict[str, str] | None = None,
+    ) -> RustDbTaskAwaitable: ...
+    def dry_run(
+        self,
+        sql: str,
+        params_json: str | None = None,
+    ) -> dict[str, Any]: ...
+    def dry_run_async(
+        self,
+        sql: str,
+        params_json: str | None = None,
+    ) -> RustDbTaskAwaitable: ...
+    def read_table_arrow(
+        self,
+        project_id: str,
+        dataset_id: str,
+        table_id: str,
+        selected_fields: Sequence[str] | None = None,
+        row_restriction: str | None = None,
+        max_streams: int = 4,
+        compression: str = "LZ4_FRAME",
+    ) -> ArrowCursor: ...
+    def read_table_arrow_async(
+        self,
+        project_id: str,
+        dataset_id: str,
+        table_id: str,
+        selected_fields: Sequence[str] | None = None,
+        row_restriction: str | None = None,
+        max_streams: int = 4,
+        compression: str = "LZ4_FRAME",
+    ) -> RustDbTaskAwaitable: ...
+    def append_arrow(
+        self,
+        parent_table: str,
+        arrow_ipc_bytes: bytes,
+        mode: str = "_default",
+    ) -> dict[str, Any]: ...
+    def append_arrow_async(
+        self,
+        parent_table: str,
+        arrow_ipc_bytes: bytes,
+        mode: str = "_default",
+    ) -> RustDbTaskAwaitable: ...
+
+@final
+class SpannerClient:
+    """Pure-Rust Google Cloud Spanner v1 gRPC client with Multiplexed Sessions, ReadWrite transactions, and Data Boost Arrow."""
+
+    def __new__(
+        cls,
+        database: str,
+        database_role: str | None = None,
+        endpoint: str | None = None,
+        dialect: str = "googlesql",
+        pool_size: int = 4,
+        route_to_leader_enabled: bool = True,
+        max_commit_delay_ms: int | None = None,
+        auth_options: dict[str, str] | None = None,
+        ca_pem: bytes | None = None,
+    ) -> SpannerClient: ...
+    @property
+    def database(self) -> str: ...
+    @property
+    def database_role(self) -> str | None: ...
+    @property
+    def endpoint(self) -> str: ...
+    @property
+    def dialect(self) -> str: ...
+    @property
+    def pool_size(self) -> int: ...
+    @property
+    def route_to_leader_enabled(self) -> bool: ...
+    @property
+    def max_commit_delay_ms(self) -> int | None: ...
+    def query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        staleness_mode: str = "strong",
+        staleness_ms: int = 0,
+    ) -> dict[str, Any]: ...
+    def query_async(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        staleness_mode: str = "strong",
+        staleness_ms: int = 0,
+    ) -> RustDbTaskAwaitable: ...
+    def execute_dml(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+    ) -> int: ...
+    def execute_dml_async(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+    ) -> RustDbTaskAwaitable: ...
+    def execute_batch_dml(
+        self,
+        statements_json: str,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+    ) -> list[int]: ...
+    def execute_batch_dml_async(
+        self,
+        statements_json: str,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+    ) -> RustDbTaskAwaitable: ...
+    def execute_partitioned_dml(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        exclude_txn_from_change_streams: bool = False,
+    ) -> int: ...
+    def execute_partitioned_dml_async(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        exclude_txn_from_change_streams: bool = False,
+    ) -> RustDbTaskAwaitable: ...
+    def apply_mutations(
+        self,
+        mutations_json: str,
+        transaction_tag: str | None = None,
+        exclude_txn_from_change_streams: bool = False,
+    ) -> dict[str, Any]: ...
+    def apply_mutations_async(
+        self,
+        mutations_json: str,
+        transaction_tag: str | None = None,
+        exclude_txn_from_change_streams: bool = False,
+    ) -> RustDbTaskAwaitable: ...
+    def batch_write(
+        self,
+        mutation_groups_json: str,
+        exclude_txn_from_change_streams: bool = False,
+    ) -> list[dict[str, Any]]: ...
+    def batch_write_async(
+        self,
+        mutation_groups_json: str,
+        exclude_txn_from_change_streams: bool = False,
+    ) -> RustDbTaskAwaitable: ...
+    def update_ddl(
+        self,
+        statements: Sequence[str],
+    ) -> str: ...
+    def update_ddl_async(
+        self,
+        statements: Sequence[str],
+    ) -> RustDbTaskAwaitable: ...
+    def execute_partitioned_arrow(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        max_partitions: int = 4,
+        data_boost_enabled: bool = False,
+        staleness_mode: str = "strong",
+        staleness_ms: int = 0,
+    ) -> ArrowCursor: ...
+    def execute_partitioned_arrow_async(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        max_partitions: int = 4,
+        data_boost_enabled: bool = False,
+        staleness_mode: str = "strong",
+        staleness_ms: int = 0,
+    ) -> RustDbTaskAwaitable: ...

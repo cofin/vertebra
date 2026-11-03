@@ -10,11 +10,13 @@ import msgspec
 
 from vertebra._vertebra import AlloyDBDialer, CloudSQLDialer, LeaseBroker, LeaseGrant
 from vertebra.db._registry import AnyDatabaseConfig, DatabaseRegistry
+from vertebra.db.bigquery import BigQueryConfig
 from vertebra.db.duckdb import DuckDBConfig
 from vertebra.db.mssql import MSSQLConfig
 from vertebra.db.mysql import MySQLConfig
 from vertebra.db.oracle import OracleConfig
 from vertebra.db.postgres import PoolerMode, PostgreSQLConfig
+from vertebra.db.spanner import SpannerConfig
 from vertebra.db.sqlite import SQLiteConfig
 from vertebra.extensions.django.orm import rows_to_structs
 from vertebra.utils.module_loader import import_optional
@@ -48,6 +50,8 @@ class DatabaseWrapperMixin:
     """Mixin enhancing Django ``BaseDatabaseWrapper`` with SHM ``LeaseBroker``, Cloud Dialers, and PgBouncer."""
 
     vendor: str = "generic"
+    display_name: str = "Generic (Vertebra)"
+    driver_scheme: str = "generic"
 
     def __init__(self, settings_dict: dict[str, Any], alias: str = "default") -> None:
         self.settings_dict = dict(settings_dict)
@@ -162,6 +166,65 @@ class DatabaseWrapperMixin:
         if self.vendor == "duckdb":
             duck_path = name or ":memory:"
             return DuckDBConfig(path=duck_path, database=duck_path, broker=self._broker)
+        if self.vendor == "bigquery":
+            options = dict(self.settings_dict.get("OPTIONS") or {})
+            dsn = str(options.get("dsn") or "")
+            if dsn:
+                return BigQueryConfig.from_dsn(dsn)
+            project_id = str(options.get("project_id") or self.settings_dict.get("PROJECT") or name or "test-project")
+            dataset_id = (
+                options.get("dataset_id")
+                or self.settings_dict.get("DATASET")
+                or (name if self.settings_dict.get("PROJECT") and name else None)
+            )
+            location = str(options.get("location") or self.settings_dict.get("LOCATION") or "US")
+            max_billed_raw = options.get("maximum_bytes_billed") or self.settings_dict.get("MAXIMUM_BYTES_BILLED")
+            max_billed = int(max_billed_raw) if max_billed_raw is not None else None
+            rest_endpoint = str(
+                options.get("rest_endpoint")
+                or (
+                    f"http://{host}:{port}"
+                    if host not in {"localhost", ""} and port
+                    else "https://bigquery.googleapis.com"
+                )
+            )
+            storage_endpoint = str(options.get("storage_endpoint") or "https://bigquerystorage.googleapis.com")
+            return BigQueryConfig(
+                project_id=project_id,
+                dataset_id=str(dataset_id) if dataset_id is not None else None,
+                location=location,
+                rest_endpoint=rest_endpoint,
+                storage_endpoint=storage_endpoint,
+                maximum_bytes_billed=max_billed,
+            )
+        if self.vendor == "spanner":
+            options = dict(self.settings_dict.get("OPTIONS") or {})
+            dsn = str(options.get("dsn") or "")
+            if dsn:
+                return SpannerConfig.from_dsn(dsn)
+            if name.startswith("projects/"):
+                return SpannerConfig.from_dsn(f"spanner://{name}")
+            project_id = str(options.get("project_id") or self.settings_dict.get("PROJECT") or "test-project")
+            instance_id = str(options.get("instance_id") or self.settings_dict.get("INSTANCE") or "test-instance")
+            db_name = name or str(options.get("database_id") or "test-db")
+            dialect_raw = str(options.get("dialect") or self.settings_dict.get("DIALECT") or "googlesql").lower()
+            database_role = options.get("database_role")
+            endpoint = str(
+                options.get("endpoint")
+                or (
+                    f"http://{host}:{port}"
+                    if host not in {"localhost", ""} and port
+                    else "https://spanner.googleapis.com"
+                )
+            )
+            return SpannerConfig(
+                project_id=project_id,
+                instance_id=instance_id,
+                database_id=db_name,
+                dialect="spangres" if dialect_raw in {"spangres", "postgresql", "pg"} else "googlesql",
+                database_role=str(database_role) if database_role is not None else None,
+                endpoint=endpoint,
+            )
         db_path = name or ":memory:"
         return SQLiteConfig(path=db_path, database=db_path, broker=self._broker)
 
