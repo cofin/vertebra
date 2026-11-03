@@ -25,6 +25,7 @@ from vertebra.build.codegen._ir import (
 )
 from vertebra.build.codegen._json_schema import resolve_parameter_node
 from vertebra.build.codegen._metadata import RouteCollector, RouteMetadata
+from vertebra.utils.text import pascalize, snake_case
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -339,8 +340,7 @@ class ProtobufParser:
 
     @staticmethod
     def _to_snake_case(name: str) -> str:
-        s1 = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
-        return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s1).lower()
+        return snake_case(name)
 
 
 class ProtobufGenerator(SchemaEmitter):
@@ -585,7 +585,7 @@ class ProtobufGenerator(SchemaEmitter):
 
     @staticmethod
     def _to_pascal_case(identifier: str) -> str:
-        return "".join(part[:1].upper() + part[1:] for part in identifier.replace("-", "_").split("_") if part)
+        return pascalize(identifier)
 
 
 def _extract_procedure_routes(app: Any) -> list[RouteMetadata]:

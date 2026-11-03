@@ -13,6 +13,7 @@ import msgspec
 import msgspec.inspect
 
 from vertebra.utils.serializers import decode_msgpack, encode_msgpack_bytes
+from vertebra.utils.text import pascalize
 
 __all__ = (
     "GrpcContext",
@@ -194,7 +195,7 @@ def grpc_method(
         else:
             kind = GrpcMethodKind.UNARY
 
-        rpc_name = name or _pascal_case(fn.__name__)
+        rpc_name = name or pascalize(fn.__name__)
         qualified_service = f"{package}.{service}" if package else service
         full_path = f"/{qualified_service}/{rpc_name}"
 
@@ -546,8 +547,3 @@ def _unwrap_stream_type(annotation: Any) -> tuple[bool, type[msgspec.Struct]]:
         return False, annotation
 
     raise TypeError(f"gRPC message annotation {annotation!r} must be a msgspec.Struct or AsyncIterator[Struct]")
-
-
-def _pascal_case(name: str) -> str:
-    """Convert a snake_case identifier to PascalCase."""
-    return "".join(part.capitalize() for part in name.split("_") if part)

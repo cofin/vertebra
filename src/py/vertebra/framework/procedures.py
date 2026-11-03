@@ -13,11 +13,13 @@ from vertebra.framework.di import (
     ParamBinding,
     inspect_callable_bindings,
 )
+from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import (
     ZeroCopyCodecRegistry,
     decode_grpc_frame,
     decode_json,
 )
+from vertebra.utils.text import snake_case
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -306,11 +308,12 @@ class ProcedureRouter:
         container: Container | None = None,
     ) -> ProcedureRouter:
         """Create a ProcedureRouter populated from a .proto v3 schema and optional handler mapping."""
-        from vertebra.build.codegen.protobuf import ProtobufGenerator, ProtobufParser
-
-        spec = ProtobufParser.parse(proto_source)
+        protobuf_mod = ensure_module("vertebra.build.codegen.protobuf")
+        spec = protobuf_mod.ProtobufParser.parse(proto_source)
         resolved_types = (
-            dict(runtime_types) if runtime_types is not None else ProtobufGenerator.load_runtime_types(proto_source)
+            dict(runtime_types)
+            if runtime_types is not None
+            else protobuf_mod.ProtobufGenerator.load_runtime_types(proto_source)
         )
         handler_map = dict(handlers) if handlers else {}
 
@@ -332,7 +335,7 @@ class ProcedureRouter:
             for method in svc.methods:
                 in_cls = resolved_types.get(method.input_type)
                 out_cls = resolved_types.get(method.output_type)
-                snake_name = ProtobufParser._to_snake_case(method.name)
+                snake_name = snake_case(method.name)
                 fn = handler_map.get(method.name) or handler_map.get(snake_name)
                 if fn is None:
 

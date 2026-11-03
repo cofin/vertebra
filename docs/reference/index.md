@@ -6,7 +6,7 @@ Complete reference documentation for Vertebra's Python packages (`vertebra.*`), 
 
 | Module / Page | Summary |
 | --- | --- |
-| **[vertebra](vertebra.md)** | Top-level application (`App`), routing (`Controller`, `Router`, `Route`, HTTP method decorators), base `msgspec.Struct` schemas (`BaseStruct`, `FrozenBaseStruct`), and JSON/Msgpack serializers. |
+| **[vertebra](vertebra.md)** | Top-level application (`App`), routing (`Controller`, `Router`, `Route`, HTTP method decorators), base `msgspec.Struct` schemas (`BaseStruct`, `FrozenBaseStruct`), JSON/Msgpack serializers, and `vertebra.utils` (`text`, `humanize`, `uuids`, `dispatch`, `schema`, `config_tools`, `deprecation`, `correlation`). |
 | **[Framework](framework.md)** | Dependency injection (`Container`, `Provide`, `Inject`), security (`Guard`, `SecurityConfig`, `Principal`), OpenAPI & AsyncAPI builders, `LiveState`, procedures (`Procedure`, `ProcedureRouter`), channels, email, and response cache stores. |
 | **[Task Queues](queues.md)** | Background task queues (`QueueService`, `QueueConfig`, `TaskRetryPolicy`), cron scheduling (`CronScheduler`), and Memory, PostgreSQL, Redis, Valkey, and Oracle backends. |
 

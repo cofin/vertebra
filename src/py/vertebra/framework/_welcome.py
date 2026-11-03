@@ -19,6 +19,8 @@ import msgspec
 
 from vertebra import __version__
 from vertebra._vertebra import FREE_THREADED, Response
+from vertebra.utils.config_tools import get_env, is_env_set
+from vertebra.utils.humanize import pluralize
 
 if TYPE_CHECKING:
     from vertebra.framework._app import App
@@ -99,16 +101,18 @@ class WelcomePageRenderer:
         """Collect runtime topology, interpreter state, and registered routes from ``app``."""
         gil_enabled_fn = getattr(sys, "_is_gil_enabled", None)
         is_free_threaded = bool(FREE_THREADED or (callable(gil_enabled_fn) and not gil_enabled_fn()))
-        raw_topology = os.environ.get("VERTEBRA_TOPOLOGY", "embedded").strip().lower()
+        raw_topology = str(get_env("VERTEBRA_TOPOLOGY", "embedded")).strip().lower()
         topology = "SHM" if raw_topology == "shm" else "Embedded"
-        loop_backend = os.environ.get("VERTEBRA_LOOP", "auto").strip() or "auto"
-        raw_workers = os.environ.get("VERTEBRA_WORKERS", "1").strip()
+        loop_backend = str(get_env("VERTEBRA_LOOP", "auto")).strip() or "auto"
         try:
-            workers = max(1, int(raw_workers))
+            workers = max(1, int(get_env("VERTEBRA_WORKERS", 1, int)))
         except ValueError:
             workers = 1
 
-        dev_env = os.environ.get("VERTEBRA_DEV", "").strip().lower() in {"1", "true", "yes", "on"}
+        try:
+            dev_env = is_env_set("VERTEBRA_DEV", default=False)
+        except ValueError:
+            dev_env = False
         raw_hmr = os.environ.get("VERTEBRA_HMR", "1").strip().lower()
         hmr_enabled = (bool(getattr(app, "debug", False)) or dev_env) and raw_hmr not in {
             "0",
@@ -163,7 +167,7 @@ class WelcomePageRenderer:
         snap = cls.collect_snapshot(app)
         esc = cls._escape
         gil_tag = "3.14t/3.15t Free-Threaded" if snap.free_threaded else f"Python {esc(snap.python_version)}"
-        worker_label = f"{snap.workers} worker" if snap.workers == 1 else f"{snap.workers} workers"
+        worker_label = pluralize("worker", snap.workers, include_count=True)
         endpoints_html = cls._render_endpoints_strip(snap)
 
         if snap.openapi_enabled and snap.docs_url:

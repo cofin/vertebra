@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
 
-import vertebra.utils.sync_tools as sync_tools_mod
+import pytest
+
 from vertebra.utils.portal import PortalProvider
 from vertebra.utils.serializers import decode_json, format_json
 from vertebra.utils.sync_tools import (
@@ -15,16 +17,25 @@ from vertebra.utils.sync_tools import (
     run_,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
-def test_sync_pool_and_run_and_async_wrappers() -> None:
-    """Verify SyncPool, run_, and async_ execute synchronous and asynchronous callables."""
+
+@pytest.fixture
+def sync_pool() -> Iterator[SyncPool]:
+    """Provide a bounded SyncPool instance and shut it down after the test."""
     pool = SyncPool(max_workers=2)
     try:
-        assert pool.max_workers == 2
-        fut = pool.submit(lambda x, y: x + y, 20, 22)
-        assert fut.result(timeout=5.0) == 42
+        yield pool
     finally:
         pool.shutdown()
+
+
+def test_sync_pool_and_run_and_async_wrappers(sync_pool: SyncPool) -> None:
+    """Verify SyncPool, run_, and async_ execute synchronous and asynchronous callables."""
+    assert sync_pool.max_workers == 2
+    fut = sync_pool.submit(lambda x, y: x + y, 20, 22)
+    assert fut.result(timeout=5.0) == 42
 
     async def _compute_async(val: int) -> int:
         await asyncio.sleep(0)
@@ -33,8 +44,11 @@ def test_sync_pool_and_run_and_async_wrappers() -> None:
     blocking_fn = run_(_compute_async)
     assert blocking_fn(21) == 42
 
+    def _add_ten(val: int) -> int:
+        return val + 10
+
     async def _run_wrapped() -> int:
-        async_fn = async_(lambda v: v + 10)
+        async_fn = async_(_add_ten)
         return await async_fn(32)
 
     assert asyncio.run(_run_wrapped()) == 42
@@ -73,17 +87,3 @@ def test_portal_provider_default_and_call() -> None:
 
     result = portal.call(_add, 10, 32)
     assert result == 42
-
-
-def test_sync_tools_dead_functions_removed() -> None:
-    """Verify dead sync utility functions and sentinels have been removed."""
-    for dead_name in (
-        "NoValue",
-        "NO_VALUE",
-        "await_",
-        "ensure_async_",
-        "with_ensure_async_",
-        "get_next",
-        "_Awaiter",
-    ):
-        assert not hasattr(sync_tools_mod, dead_name)

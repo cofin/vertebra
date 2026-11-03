@@ -13,6 +13,7 @@ from vertebra.build.codegen._ir import TypeNode, UnknownType
 from vertebra.framework._app import App
 from vertebra.framework._router import Route
 from vertebra.framework.di import Container, inspect_callable_bindings
+from vertebra.utils.text import slugify
 
 __all__ = (
     "ChannelKeyAllocator",
@@ -64,7 +65,9 @@ class ChannelKeyAllocator:
                 param_name = inner.split(":", 1)[-1].strip()
                 segments.append(f"by_{param_name}")
             else:
-                segments.append(raw.replace("-", "_").replace(".", "_"))
+                slug_part = slugify(raw, separator="_")
+                if slug_part:
+                    segments.append(slug_part)
         return "_".join(segments) if segments else "root"
 
 

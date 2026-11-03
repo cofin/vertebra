@@ -23,6 +23,7 @@ from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
 from vertebra.extensions.litestar.plugin import enter_litestar_server_lifespan
 from vertebra.framework.queues import WorkerRunner
 from vertebra.supervisor._supervisor import build_server_command, run_supervisor
+from vertebra.utils.config_tools import get_env
 from vertebra.utils.module_loader import import_app
 from vertebra.utils.serializers import decode_json
 
@@ -213,11 +214,10 @@ def _resolve_jit_setting(jit_flag: bool | None) -> bool | None:
     """Resolve the requested JIT setting from CLI flag or VERTEBRA_JIT, skipping free-threaded builds."""
     requested = jit_flag
     if requested is None:
-        raw = os.environ.get("VERTEBRA_JIT", "").strip().lower()
-        if raw in {"1", "true", "yes", "on"}:
-            requested = True
-        elif raw in {"0", "false", "no", "off"}:
-            requested = False
+        try:
+            requested = get_env("VERTEBRA_JIT", None, bool)
+        except ValueError:
+            requested = None
 
     if requested is True and is_free_threaded_runtime():
         logger.warning("CPython JIT is unavailable on free-threaded builds; skipping PYTHON_JIT=1")
