@@ -155,7 +155,7 @@ flowchart LR
 
 | Ch | Flow ID | Title | Key Deliverables | Public Seams | Depends on | State |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | `critical-correctness-fixes` | Silent failure and security fixes | Behavior fixes only; see charter | existing APIs | — | draft |
+| 1 | `critical-correctness-fixes` | Silent failure and security fixes | Behavior fixes only; see charter | existing APIs | — | completed |
 | 2 | `gcp-wire-protocol-correctness` | Official Google Cloud Rust clients for Spanner and BigQuery Storage | Spanner and BigQuery Storage Read/Write on `google-cloud-spanner`/`google-cloud-bigquery` behind the existing seams, commit/DDL/append verification, hardened Arrow append plan, `grpc.rs` removed | `SpannerClient` (`partitioned_query`), `BigQueryClient` | — | planned |
 | 3 | `db-engine-primitives` | Engine primitives relocation and QueryPipeline removal | CDC/notify/change-stream/embedding pushdown moved to `db/adapters/<engine>`, `DatabaseChannelBackend` and `QueryPipeline` deleted, DB tools moved to extension tool providers, RLS stays generic in `db/rls.py` | `vertebra.db.cdc`, `vertebra.db.adapters.*.{notify,change_stream,embeddings}`, `PushdownEmbedder` | 1; native-data-platform Ch1–2 | draft |
 | 4 | `sqlspec-adapter-parity` | Feature-complete sqlspec adapters | Per-engine adapter packages, dispatch-contract drivers, upstream-base stores, data dictionaries, resolver shim, shared-pool safety | `<Engine>{Sync,Async}Config`, `adapter_name` | 3 | draft |
@@ -212,7 +212,7 @@ flowchart LR
 
 ## Implementation Plan
 
-- [ ] critical-correctness-fixes — Silent failure and security fixes (../critical-correctness-fixes/spec.md)
+- [x] [b61726a] critical-correctness-fixes — Silent failure and security fixes (archived in `log.md`)
 - [ ] gcp-wire-protocol-correctness — Official Google Cloud Rust clients for Spanner and BigQuery Storage (../gcp-wire-protocol-correctness/spec.md)
 - [ ] gcp-driver-resilience — GCP driver resilience and typed errors (../gcp-driver-resilience/spec.md)
 - [ ] db-engine-primitives — Engine primitives relocation and QueryPipeline removal (../db-engine-primitives/spec.md)
