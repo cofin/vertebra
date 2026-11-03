@@ -115,7 +115,8 @@ The global constraints from [integration-remediation](../integration-remediation
 
 ## Open Questions
 
-- **Q5 — Leverage existing Rust protocol crates for the other engines?**
+- **Resolved Q5 approach** *(user, 2026-11-03)*: build each native driver on the official or best-in-class Rust client for its engine, extending it as needed, and require it as an optional dependency (a Cargo feature plus a Python extra). The per-engine crate choices come from the crate research brief, added under `research/` once it lands.
+- **Q5 detail (pending research)**
   - Oracle now builds on Oracle's official pure-Rust thin `oracledb` crate instead of a from-scratch TTC client.
   - The same approach is available elsewhere: `tokio-postgres`/`postgres-protocol` (Postgres, automatic pipelining), `mysql_async` (MySQL), `tiberius` (MSSQL TDS), `rusqlite` (SQLite), `duckdb` (DuckDB), and `redis-rs`/`fred` (Redis/Valkey).
   - Recommended: wrap a crate behind the Vertebra `Connection` trait and driver contract wherever it meets the requirements (async on Tokio, zero-copy result paths into VTBARROW, pipelining, cancellation). Keep the existing Vertebra codecs (JSONB, pgvector, OSON, VECTOR, pgcopy) where they are faster, and hand-roll only the protocol pieces a crate lacks.
