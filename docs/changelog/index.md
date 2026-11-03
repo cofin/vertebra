@@ -46,6 +46,7 @@ Release introducing shared-memory vector embeddings, zero-copy PEP 3118 vector v
 - `KeyValueStore.delete_all`, Litestar `MemoryStore.delete_all`, and Starlette `CacheStore.delete_all` delete only their prefix with `SCAN` + `UNLINK` instead of `FLUSHDB`; sub-second expiries are sent as `PX` milliseconds; `expires_in` returns `None` for keys without expiry. `SyncRedisDriver` / `AsyncRedisDriver` gain `scan`, `unlink`, and `set(px=...)`.
 - `SpannerEmbedder` propagates driver errors and raises `EmbeddingError` on missing rows instead of returning hash vectors; `BigQueryEmbedder` raises `EmbeddingError` on short or vector-less results; both order generated embeddings by input offset; `OracleEmbedder` raises `EmbeddingError` on empty results; `BigQueryEmbedder` and `SpannerEmbedder` SQL builders validate model, table, column, and distance values.
 - `EmbeddingBroker` runs the configured model in the free-threaded sidecar instead of a hash backend, requires `backend_fn` or `backend_factory`, and `FastEmbedder` no longer builds a discarded `TextEmbedding` at construction.
+- `EventLoopPool.stop` delivers task cancellation, runs `shutdown_asyncgens`, and closes loops only after their threads exit; `EventLoopPool` raises when a shard fails to start; the buffered sharded ASGI mount path reads its timeout from `VERTEBRA_ASGI_BATCH_TIMEOUT` (default 30 s, `0`/`none` disables) instead of a fixed 10 s and cancels timed-out request tasks.
 
 ## 0.2.0
 

@@ -2,7 +2,7 @@
 type: Task
 id: critical-correctness-fixes:t08
 title: EventLoopPool.stop drain and configurable ASGI mount timeout
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on: []
@@ -17,17 +17,17 @@ tests:
   - src/py/tests/unit/server/test_runner.py
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-03T17:09:22Z
+last_verified_commit: 21ff97a
+verification_evidence: "RED: 11 failed, 1 passed in 1.21s; GREEN: 254 passed in 2.33s; ruff check/format and mypy passed on 2 source files"
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T16:00:00Z
+updated_at: 2026-11-03T17:09:22Z
 commit: null
 tags: [bugfix, server, event-loop, asgi]
 ---
@@ -410,13 +410,14 @@ In `src/py/tests/unit/server/test_runner.py`:
 
 ## Acceptance Criteria
 
-- [ ] R12: `stop()` runs task cancellation handlers and async-generator finalizers on every shard and closes loops only after their threads exit.
-- [ ] R12: `EventLoopPool(size>1)` raises `RuntimeError` when a shard does not signal readiness.
-- [ ] R12: Cancelling a `schedule_batch` future cancels its asyncio task.
-- [ ] R13: `_AsgiMountRunner` defaults to a 30 s timeout, reads `VERTEBRA_ASGI_BATCH_TIMEOUT` (`0`/`none` disables), rejects negative and non-numeric values, returns 504 on timeout, and cancels the task.
-- [ ] Docs, knowledge, and changelog updated; targeted checks and the phase gate pass; one signed commit.
+- [x] R12: `stop()` runs task cancellation handlers and async-generator finalizers on every shard and closes loops only after their threads exit.
+- [x] R12: `EventLoopPool(size>1)` raises `RuntimeError` when a shard does not signal readiness.
+- [x] R12: Cancelling a `schedule_batch` future cancels its asyncio task.
+- [x] R13: `_AsgiMountRunner` defaults to a 30 s timeout, reads `VERTEBRA_ASGI_BATCH_TIMEOUT` (`0`/`none` disables), rejects negative and non-numeric values, returns 504 on timeout, and cancels the task.
+- [x] Docs, knowledge, and changelog updated; targeted checks and the phase gate pass; one signed commit.
 
 ## Notes & Discoveries
 
 - [2026-11-03 15:30] Planning: `concurrent.futures.Future.cancel()` on the futures returned by `schedule_batch` succeeds (they stay `PENDING`) but never reached the asyncio task before this change.
 - [2026-11-03 15:50] Caller grep: `_AsgiMountRunner.__call__` is reached only from `server/_dispatch.py::dispatch_batch` with `async_mode=False`; `Worker._process_batch` uses `async_mode=True`, which routes ASGI mounts to `spawn_batch`. The buffered path never served streaming responses.
+- [2026-11-03 17:09] Verified RED (`11 failed, 1 passed in 1.21s`) and GREEN (`254 passed in 2.33s`, `ruff check`, `ruff format --check`, and `mypy` passed on 2 source files).

@@ -59,6 +59,7 @@ from vertebra.server.platform import (
     SHMAllocationPolicy,
     ZPagesRegistry,
 )
+from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import encode_json_bytes
 
 __all__ = (
@@ -71,12 +72,13 @@ __all__ = (
 
 logger = logging.getLogger(__name__)
 _INLINE_DRAIN_BUDGET = 16
+_DEFAULT_ASGI_BATCH_TIMEOUT_SECONDS: float = 30.0
 
 
 class _AsgiMountRunner:
     """Sharded ASGI mount runner dispatching across an ``EventLoopPool``."""
 
-    __slots__ = ("_pool", "_runner")
+    __slots__ = ("_batch_timeout", "_pool", "_runner")
 
     def __init__(
         self,
@@ -85,8 +87,20 @@ class _AsgiMountRunner:
         *,
         mount_prefix: str = "",
         lifespan_state: dict[str, Any] | None = None,
+        batch_timeout: float | None = _DEFAULT_ASGI_BATCH_TIMEOUT_SECONDS,
     ) -> None:
+        """Initialize the sharded ASGI mount runner.
+
+        Args:
+            app: ASGI 3.0 application callable.
+            pool: Sharded event loop pool.
+            mount_prefix: Path prefix stripped before building the ASGI scope.
+            lifespan_state: Shared lifespan state dictionary.
+            batch_timeout: Seconds to wait for a buffered batch before answering 504 and
+                cancelling the request tasks. ``None`` waits without a timeout.
+        """
         self._pool = pool
+        self._batch_timeout = batch_timeout
         self._runner = AsgiRunner(
             app,
             loop=pool.primary_loop,
@@ -100,25 +114,41 @@ class _AsgiMountRunner:
         return self._runner
 
     @property
+    def batch_timeout(self) -> float | None:
+        """Return the batch timeout in seconds, or None when batches wait without a timeout."""
+        return self._batch_timeout
+
+    @property
     def __vertebra_fastpath_attached__(self) -> bool:
         """Return True when a zero-copy FastPath wrapper is attached to the underlying runner."""
         return self._runner.__vertebra_fastpath_attached__
 
     def __call__(self, requests: list[Any]) -> list[AsgiResponse]:
-        """Run a batch of requests across the sharded event loop pool."""
+        """Run a batch across the sharded loop pool, answering 504 for requests past ``batch_timeout``."""
         if not requests:
             return []
         coros = [self._runner.run_single(req) for req in requests]
         futures = self._pool.schedule_batch(coros)
-        done, not_done = concurrent.futures.wait(futures, timeout=10.0)
+        _done, not_done = concurrent.futures.wait(futures, timeout=self._batch_timeout)
         for fut in not_done:
             fut.cancel()
         results: list[AsgiResponse] = []
         for req, fut in zip(requests, futures, strict=True):
+            req_id = getattr(req, "request_id", 0)
+            if fut in not_done:
+                results.append(
+                    AsgiResponse(
+                        status=504,
+                        headers=[("content-type", "text/plain")],
+                        body=b"Gateway Timeout",
+                        request_id=req_id,
+                    )
+                )
+                continue
             try:
-                results.append(fut.result(timeout=1.0))
+                results.append(fut.result())
             except Exception:
-                req_id = getattr(req, "request_id", 0)
+                logger.exception("Sharded ASGI mount request failed (request_id=%d)", req_id)
                 results.append(
                     AsgiResponse(
                         status=500,
@@ -188,6 +218,7 @@ def _instantiate_mount_runners(
         else (scheduler.loop if hasattr(scheduler, "loop") else scheduler)
     )
     configured_iface = _resolve_configured_interface()
+    asgi_batch_timeout = _resolve_asgi_batch_timeout()
     result: list[tuple[str, Any, str]] = []
     for prefix, app, protocol in mounts:
         resolved: str = detect_interface(app, configured=configured_iface) if protocol == "auto" else protocol
@@ -200,6 +231,7 @@ def _instantiate_mount_runners(
                     scheduler,
                     mount_prefix=prefix,
                     lifespan_state=state,
+                    batch_timeout=asgi_batch_timeout,
                 )
             else:
                 runner = AsgiRunner(
@@ -725,3 +757,27 @@ def _resolve_configured_interface() -> InterfaceMode:
     if raw == "wsgi":
         return "wsgi"
     return "auto"
+
+
+def _resolve_asgi_batch_timeout() -> float | None:
+    """Resolve ``VERTEBRA_ASGI_BATCH_TIMEOUT`` (seconds) for buffered sharded ASGI mount batches.
+
+    Unset or empty means the 30 second default. ``0`` or ``none`` (any case) disables the
+    timeout. Any other value must be a positive number of seconds.
+
+    Raises:
+        ImproperConfigurationError: When the value is negative or not a number.
+    """
+    raw = os.environ.get("VERTEBRA_ASGI_BATCH_TIMEOUT", "").strip()
+    if not raw:
+        return _DEFAULT_ASGI_BATCH_TIMEOUT_SECONDS
+    if raw.lower() == "none":
+        return None
+    msg = f"VERTEBRA_ASGI_BATCH_TIMEOUT must be a non-negative number of seconds or 'none', got {raw!r}"
+    try:
+        timeout = float(raw)
+    except ValueError as exc:
+        raise ImproperConfigurationError(msg) from exc
+    if timeout < 0:
+        raise ImproperConfigurationError(msg)
+    return None if timeout == 0 else timeout

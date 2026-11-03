@@ -27,8 +27,8 @@ last_verified_at: 2026-11-03T17:05:55Z
 last_verified_commit: b2bfa30
 verification_evidence: "RED: 1 collection ImportError; GREEN: 22 passed in 0.62s; ruff check/format and mypy passed on 9 source files"
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T17:05:55Z
-commit: null
+updated_at: 2026-11-03T17:06:41Z
+commit: 21ff97a
 tags: [bugfix, embeddings, free-threaded, broker]
 ---
 

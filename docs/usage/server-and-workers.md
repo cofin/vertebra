@@ -61,6 +61,10 @@ status, body = zpages.handle_zpage("/healthz")
 
 When `lame_duck.enter_lame_duck()` is called on `SIGTERM`, `/healthz` immediately returns `503` so load balancers stop sending new traffic while in-flight requests finish draining.
 
+## ASGI Mount Timeouts
+
+When an ASGI mount is served through the buffered batch path, each request waits up to 30 seconds by default. Set `VERTEBRA_ASGI_BATCH_TIMEOUT` to another number of seconds, or to `0` or `none` to disable the limit. A request that exceeds it receives `504 Gateway Timeout` and its task is cancelled. Streaming responses use a separate path and are not affected.
+
 ## Free-Threaded Python & GIL Auditing (`3.14t` / `3.15t`)
 
 When compiled for free-threaded Python (`Py_GIL_DISABLED`), `vertebra._vertebra.FREE_THREADED` is `True`. Under `--topology embedded`, multiple worker threads run Python handlers in parallel inside a single process.
