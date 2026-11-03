@@ -7,6 +7,7 @@ state: planned
 parent_prd: null
 research:
   - research/audit-findings_20261103.md
+  - research/google-cloud-rust_20261103.md
 plan_revision: 1
 plan_commit: null
 state_revision: 0
@@ -138,7 +139,7 @@ flowchart LR
    - The WebMCP manifest is a projection filtered by `exposure`.
    - Litestar apps delegate to litestar-mcp.
 9. **Rust GCP clients** *(user decision 2026-11-03: official googleapis crates are cleared when functional, including pre-1.0)*.
-   - Spanner and BigQuery Storage Read/Write run on `google-cloud-spanner` / `google-cloud-bigquery` (default features off, rustls + ring) behind `vertebra_db::{SpannerClient, BigQueryClient}`; the hand-written protobuf code and `grpc.rs` are deleted ([research](../gcp-wire-protocol-correctness/research/google-cloud-rust_20261103.md)).
+   - Spanner and BigQuery Storage Read/Write run on `google-cloud-spanner` / `google-cloud-bigquery` (default features off, rustls + ring) behind `vertebra_db::{SpannerClient, BigQueryClient}`; the hand-written protobuf code and `grpc.rs` are deleted ([research](research/google-cloud-rust_20261103.md)).
    - BigQuery REST and `GcpTokenCache` stay Vertebra code; the cache is bridged into the official clients.
    - Tests use the crates' `from_stub` ports; golden-byte fixtures apply only where hand-written protobuf remains (none after Chapter 2).
    - Emulator-only gaps get `xfail(strict=True)`.
@@ -156,7 +157,7 @@ flowchart LR
 | Ch | Flow ID | Title | Key Deliverables | Public Seams | Depends on | State |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | `critical-correctness-fixes` | Silent failure and security fixes | Behavior fixes only; see charter | existing APIs | — | completed |
-| 2 | `gcp-wire-protocol-correctness` | Official Google Cloud Rust clients for Spanner and BigQuery Storage | Spanner and BigQuery Storage Read/Write on `google-cloud-spanner`/`google-cloud-bigquery` behind the existing seams, commit/DDL/append verification, hardened Arrow append plan, `grpc.rs` removed | `SpannerClient` (`partitioned_query`), `BigQueryClient` | — | planned |
+| 2 | `gcp-wire-protocol-correctness` | Official Google Cloud Rust clients for Spanner and BigQuery Storage | Spanner and BigQuery Storage Read/Write on `google-cloud-spanner`/`google-cloud-bigquery` behind the existing seams, commit/DDL/append verification, hardened Arrow append plan, `grpc.rs` removed | `SpannerClient` (`partitioned_query`), `BigQueryClient` | — | completed |
 | 3 | `db-engine-primitives` | Engine primitives relocation and QueryPipeline removal | CDC/notify/change-stream/embedding pushdown moved to `db/adapters/<engine>`, `DatabaseChannelBackend` and `QueryPipeline` deleted, DB tools moved to extension tool providers, RLS stays generic in `db/rls.py` | `vertebra.db.cdc`, `vertebra.db.adapters.*.{notify,change_stream,embeddings}`, `PushdownEmbedder` | 1; native-data-platform Ch1–2 | draft |
 | 4 | `sqlspec-adapter-parity` | Feature-complete sqlspec adapters | Per-engine adapter packages, dispatch-contract drivers, upstream-base stores, data dictionaries, resolver shim, shared-pool safety | `<Engine>{Sync,Async}Config`, `adapter_name` | 3 | draft |
 | 5 | `queues-tasks-and-channels` | Working queues, tasks, channels, stores | Real `QueueStore`s, settings-driven backends, litestar-queues backend, Django tasks backend, DI, one cron parser, per-engine channels, Valkey store | `QueueService`, `QueueBackend`, `QueueBackendSettings` | 3, 4 | draft |
@@ -213,7 +214,7 @@ flowchart LR
 ## Implementation Plan
 
 - [x] [b61726a] critical-correctness-fixes — Silent failure and security fixes (archived in `log.md`)
-- [ ] gcp-wire-protocol-correctness — Official Google Cloud Rust clients for Spanner and BigQuery Storage (../gcp-wire-protocol-correctness/spec.md)
+- [x] [260ae8d] gcp-wire-protocol-correctness — Official Google Cloud Rust clients for Spanner and BigQuery Storage (archived in `log.md`)
 - [ ] gcp-driver-resilience — GCP driver resilience and typed errors (../gcp-driver-resilience/spec.md)
 - [ ] db-engine-primitives — Engine primitives relocation and QueryPipeline removal (../db-engine-primitives/spec.md)
 - [ ] sqlspec-adapter-parity — Feature-complete sqlspec adapters (../sqlspec-adapter-parity/spec.md)
