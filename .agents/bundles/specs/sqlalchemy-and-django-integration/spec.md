@@ -38,7 +38,7 @@ SQLAlchemy and Advanced Alchemy are the primary user path. Vertebra's dialects a
    - Delete the `sqlalchemy/cache.py` re-export shim and `alchemy/broker.py::StatementCache`.
    - Replace the `alchemy/storage.py` `storages.get` monkeypatch with AA's registration API.
    - `alchemy/plugin.py::normalize_alchemy_url` reads schemes from the config classes (`url_schemes` from native-data-platform `db-layout-and-contract`).
-4. **Django backends** (Open Question Q3; recommended default shown).
+4. **Django backends** *(user decision)*.
    - `extensions/django/db/backends/{postgresql,mysql,oracle,sqlite3}/base.py::DatabaseWrapper` subclass Django's built-in backends and swap in the vertebra DB-API module.
    - `spanner/base.py::DatabaseWrapper` subclasses `django_spanner.base.DatabaseWrapper` (googleapis `django-google-spanner`, Django 5.2/6.0) and swaps its `google.cloud.spanner_dbapi` connection for the vertebra DB-API.
    - The BigQuery Django backend is removed.

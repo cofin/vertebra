@@ -72,7 +72,7 @@ Vertebra's value is its Rust runtime and drivers. Users mostly reach them throug
 
 ### Success metrics
 - No production driver class opens SQLite or serves fake rows unless it is the SQLite driver. Each engine passes integration tests against its real database through `pytest-databases`.
-- `driver.pipeline()` sends N statements in one round trip on Postgres and on Oracle 23ai, through the native Rust clients.
+- `driver.pipeline()` sends N statements in one round trip on Postgres through the native Rust client. Oracle exposes the same API and executes sequentially until upstream support lands.
 - Every Rust GCP encoder/decoder passes golden-byte tests generated from the official `.proto` files.
 - Vertebra sqlspec adapters pass the upstream ADK, events, and litestar store contracts.
 - First-party queues deliver across processes on Postgres, Oracle, Spanner, and Redis.
@@ -113,7 +113,7 @@ flowchart LR
    - Storage and the other data components are feature complete (`storage-completeness`).
    - No third-party Python DB clients, `memory://` modes, or SQLite stand-ins remain in production drivers.
 4. **Native pipelining.**
-   - `driver.pipeline()` (sync and async) is implemented in the Rust Postgres (extended-protocol batch, single `Sync`) and Oracle (TTC pipelining on 23ai, sequential on older servers) clients.
+   - `driver.pipeline()` (sync and async) is implemented in the Rust Postgres client (extended-protocol batch, single `Sync`). Oracle exposes the same API and executes sequentially until the official `oracledb` crate supports 26ai pipelining.
    - The sqlspec adapter `execute_stack` uses it.
    - `db/pipeline.py::QueryPipeline`, `RelOverlay`, `CTEStep`, and the `execute_stack` CTE emulation are deleted (`db-engine-primitives`).
 5. **Registry polymorphism.**
@@ -204,10 +204,7 @@ flowchart LR
 - **Resolved Q1** *(user)*: engine code goes in `vertebra/db/adapters/<engine>/`, and engine-agnostic code stays directly under `vertebra/db/`.
 - **Resolved Q2** *(user)*: native Vertebra queue backends for Postgres and Oracle first, plugged into first-party queues, litestar-queues, and Django tasks.
 - **Resolved Q4** *(user)*: Vertebra's own Rust drivers back every engine, broker pool sharing works for any AA/SQLSpec config, and storage is complete. See [native-data-platform](../native-data-platform/spec.md).
-- **Q3 — Django DB backends (awaiting confirmation).**
-  - Make Postgres/MySQL/Oracle/SQLite real by subclassing Django's built-in backends with the Vertebra DB-API.
-  - For Spanner, subclass the official `django_spanner.base.DatabaseWrapper` (googleapis `django-google-spanner`, Django 5.2/6.0) with the Vertebra Rust-backed DB-API in place of `google.cloud.spanner_dbapi`.
-  - Drop BigQuery: there is no official Django backend, and it is an analytical store without enforced constraints or row-level transactions.
+- **Resolved Q3** *(user, 2026-11-03)*: Django backends for Postgres/MySQL/Oracle/SQLite subclass Django's built-in backends and use the Vertebra DB-API. Spanner subclasses the official `django_spanner.base.DatabaseWrapper` (googleapis `django-google-spanner`) with the Vertebra Rust-backed DB-API in place of `google.cloud.spanner_dbapi`. The BigQuery Django backend is removed.
 
 ## Implementation Plan
 
@@ -232,7 +229,7 @@ flowchart LR
   - MCPCore design, with Litestar delegating to litestar-mcp.
   - Protobuf field consts + golden tests; emulator gaps are `xfail`.
   - `utils` stays public.
-  - Pipelining is native protocol pipelining in the Rust Postgres and Oracle clients, and `QueryPipeline` is deleted.
+  - Pipelining is native protocol pipelining in the Rust Postgres client, Oracle runs sequentially until upstream supports it, and `QueryPipeline` is deleted.
 - **Recent discoveries:**
   - The Oracle and MSSQL drivers are SQLite-backed fakes.
   - The async Postgres pool returns the asyncpg module.

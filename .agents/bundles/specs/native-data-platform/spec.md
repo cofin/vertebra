@@ -50,7 +50,7 @@ Two features Vertebra has committed to, both feature complete:
 - No production driver imports a third-party Python DB client or opens SQLite for a non-SQLite engine.
 - Each engine passes the shared driver conformance suite against real servers (`pytest-databases`).
 - An unmodified upstream `AsyncpgConfig`, `OracleAsyncConfig`, or AA `SQLAlchemyAsyncConfig` wrapped by Vertebra runs across N workers with one broker-owned pool. Verified by server-side connection counts.
-- `driver.pipeline()` sends N statements in one round trip on Postgres and Oracle 23ai.
+- `driver.pipeline()` sends N statements in one round trip on Postgres. On Oracle the same API runs the operations sequentially until the official `oracledb` crate supports 26ai pipelining.
 - `make bench-check` shows the Rust drivers at or above the third-party clients they replace.
 
 ### Risks and mitigations
@@ -80,7 +80,7 @@ Two features Vertebra has committed to, both feature complete:
    - The broker process owns the real Rust connections per pool key (`BaseDatabaseConfig.pool_key()`).
    - Workers lease a connection over the SHM ring for a session/transaction scope, and statements and results move zero-copy through SHM (VTBARROW for result sets).
    - Upstream SQLSpec configs are wrapped by `ProxySyncConfig`/`ProxyAsyncConfig`. AA/SQLAlchemy configs get a broker-backed SQLAlchemy `Pool` and `creator` through the Vertebra DB-API.
-4. **Pipelining.** Implemented natively in the Rust clients: the Postgres extended-protocol batch with a single `Sync`, and Oracle TTC pipelining on 23ai with sequential execution on older servers. This is distinct from the sqlspec `StatementStack`, which uses it.
+4. **Pipelining.** Postgres implements it natively in the Rust client as an extended-protocol batch with a single `Sync`. Oracle exposes the same `pipeline()` API but executes sequentially until the official `oracledb` crate supports 26ai pipelining *(user decision)*. This is distinct from the sqlspec `StatementStack`, which uses it.
 5. **Storage.** `vertebra-storage` `ObjectStore` (gs/s3/r2/oci/az/file) is the single implementation behind the sqlspec `ObjectStoreProtocol`, the AA `StorageBackend`, Django `Storage`, Litestar static/file responses, and the Arrow export/import paths, with zero-copy streaming and signing.
 
 ## 3. Master Roadmap (Ordered Child Flows)
@@ -90,7 +90,7 @@ Two features Vertebra has committed to, both feature complete:
 | 1 | `db-layout-and-contract` | `db/adapters` layout and driver conformance suite | Package move, driver contract, capability protocols, registry polymorphism, import gate, cross-engine conformance test suite | integration-remediation Ch1 | draft |
 | 2 | `native-postgres-driver` | Rust Postgres client | Startup/SCRAM-SHA-256/TLS/IAM, extended protocol, binary codecs, statement cache, COPY, LISTEN/NOTIFY, pipeline mode, cancel, Arrow; psycopg/asyncpg removed | 1 | draft |
 | 3 | `broker-pool-sharing` | Shared pools for any SQLSpec / AA / SQLAlchemy config | Broker-owned pools, SHM session leases, transactions/affinity, streaming, `ProxySync/AsyncConfig` for upstream configs, SQLAlchemy broker `Pool`, crash reclamation | 1, 2 | draft |
-| 4 | `native-oracle-driver` | Rust Oracle thin client | TNS/O5LOGON/TLS/wallet, TTC execute/fetch, binds/defines, LOBs, OSON/VECTOR, DRCP, pipelining (23ai), Arrow; sqlite3 fake removed | 1 | draft |
+| 4 | `native-oracle-driver` | Rust Oracle thin client | TNS/O5LOGON/TLS/wallet, TTC execute/fetch, binds/defines, LOBs, OSON/VECTOR, DRCP, `pipeline()` API (sequential until upstream supports 26ai pipelining), Arrow; sqlite3 fake removed | 1 | draft |
 | 5 | `native-mysql-mssql-drivers` | Rust MySQL and MSSQL clients | MySQL handshake/caching_sha2/TLS/binary protocol; MSSQL TDS 7.4 prelogin/TLS/login7/RPC/token stream/bulk copy; pymysql and sqlite3 fakes removed | 1 | draft |
 | 6 | `native-embedded-and-cache-drivers` | SQLite, DuckDB, Redis/Valkey in Rust | Rust SQLite and DuckDB embeddings with Arrow zero-copy; RESP3 client with cluster, pub/sub, client tracking; `memory://` modes removed | 1 | draft |
 | 7 | `storage-completeness` | Feature-complete storage | ObjectStore across backends behind sqlspec/AA/Django/Litestar contracts, zero-copy streaming, ranges, signing, one shared `GcpTokenCache` | 1 | draft |
@@ -123,7 +123,7 @@ The global constraints from [integration-remediation](../integration-remediation
   | --- | --- |
   | Postgres | `postgres-protocol` 0.6.12 + Vertebra connection (tokio-postgres as test oracle) |
   | MySQL | `mysql_async` 0.37.1 |
-  | Oracle | `oracledb` =26.0.0-beta.5 (sync; pipelining/async extension pending) |
+  | Oracle | `oracledb` =26.0.0-beta.5 (sync, on blocking threads; sequential `pipeline()` until upstream) |
   | MSSQL | `tiberius` 0.13.0 (rustls) |
   | SQLite | `rusqlite` 0.41.1 |
   | DuckDB | `duckdb` 1.20000.1 |
@@ -134,7 +134,7 @@ The global constraints from [integration-remediation](../integration-remediation
   - Disable default features everywhere and standardize on rustls + `ring`, to avoid aws-lc-rs, OpenSSL, and native-tls.
   - oracledb (arrow 59) and duckdb (arrow 60) stay behind features and bridge to VTBARROW through the Arrow C Data Interface.
   - `make bench-check` gates each adoption.
-- **Q6 — Oracle pipelining and async (open).** The official `oracledb` crate is synchronous and lists 26ai pipelining as unsupported. Recommended: extend it with TTC pipelining and an async transport (offered upstream) rather than shipping sequential-only pipelining. See [native-oracle-driver](../native-oracle-driver/spec.md).
+- **Resolved Q6** *(user, 2026-11-03)*: Oracle ships on the official `oracledb` crate, with each connection on a blocking thread. `pipeline()` runs sequentially until the crate supports 26ai pipelining, and Vertebra adopts it when it does.
 
 ## Implementation Plan
 

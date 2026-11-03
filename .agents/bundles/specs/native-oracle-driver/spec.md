@@ -2,7 +2,7 @@
 type: Spec
 flow_id: native-oracle-driver
 title: Rust Oracle Thin Client
-description: Complete Rust Oracle thin-protocol client (TNS, O5LOGON, TTC) with TLS/wallets, binds/defines, LOBs, OSON/VECTOR, DRCP, 23ai pipelining, and Arrow results, replacing the sqlite3 stand-in in the Python Oracle driver.
+description: Complete Rust Oracle thin-protocol client (TNS, O5LOGON, TTC) with TLS/wallets, binds/defines, LOBs, OSON/VECTOR, DRCP, a pipeline() API (sequential until upstream 26ai support), and Arrow results, replacing the sqlite3 stand-in in the Python Oracle driver.
 state: draft
 parent_prd: native-data-platform
 research:
@@ -29,12 +29,9 @@ tags: [rust, oracle, driver, pipeline]
   - The API is synchronous, with no Tokio dependency.
   - Unsupported: 26ai pipelining, token auth, AQ/TxEventQ, CQN, direct path loads, Application Continuity, TPC, implicit results.
   - v1 runs each broker-owned connection on a dedicated blocking thread (`tokio::task::spawn_blocking`) and bridges Arrow 59 to VTBARROW through the C Data Interface.
-  - The pipelining decision is open; see below.
+  - `pipeline()` executes its queued operations sequentially until the crate supports 26ai pipelining *(user decision)*.
 - Wrap it behind the Vertebra `Connection` trait and driver contract instead of writing the protocol from scratch.
-- **Open decision: 23ai pipelining and native async.** The crate has neither. Options:
-  - (a) Implement TTC pipelining and an async transport in a Vertebra extension of the crate and offer it upstream to `oracle/rust-oracledb`.
-  - (b) Ship v1 with sequential pipeline execution and add true pipelining once upstream supports it.
-  - Recommended: (a). It is the only way to meet the user requirement that Oracle supports pipelining, and Vertebra's existing `oracle.rs` TTC encoders are the starting point.
+- **Pipelining and async** *(user decision)*. v1 runs each connection on a dedicated blocking thread. `pipeline()` keeps the same API as Postgres and executes sequentially. When `oracle/rust-oracledb` ships 26ai pipelining or an async API, Vertebra adopts it behind the same interface. A tracking test asserts the crate still lacks pipelining, so the adoption is not missed.
 - The scope items below that the crate lacks (AQ/TxEventQ, token auth, implicit results) are built on top of it.
 - Rejected: `oracle` (rust-oracle) on ODPI-C and `sibyl` on OCI both need Oracle Instant Client at runtime. The community `oracle-rs` crate is a fallback if the official crate lacks async.
 - Vertebra's existing `oracle.rs`/`tns.rs` codecs (OSON, VECTOR, TTC piggyback, tnsnames/wallet parsing) are kept only where the crate does not already cover them.
@@ -53,7 +50,7 @@ tags: [rust, oracle, driver, pipeline]
    - CLOB/BLOB/NCLOB, both inline and through LOB locators.
    - JSON/OSON (existing codec) and VECTOR (existing f32/f64/i8/binary codecs).
 4. **Pooling.** Leases through the broker, DRCP (`:pooled`, connection class/purity), and the statement cache.
-5. **Pipelining.** `pipeline()` sends multiple TTC operations in one round trip on 23ai+ and executes sequentially on older servers. Sync and async forms.
+5. **Pipelining.** `pipeline()` (sync and async forms) queues operations and executes them sequentially on the connection, with ordered results and per-operation errors. True round-trip pipelining is adopted when the crate supports it.
 6. **Bulk and Arrow.** `execute_many` (array DML with batch errors), `select_to_arrow`/`stream_arrow_batches` into VTBARROW, and `load_from_arrow`.
 7. **Notifications.** TxEventQ dequeue/enqueue for `NotificationSource`.
 8. **Python driver.** `db/adapters/oracle/driver.py` runs on the Rust client, and the `sqlite3.connect(":memory:")` stand-in is removed.
@@ -69,7 +66,7 @@ tags: [rust, oracle, driver, pipeline]
 ## Acceptance Boundary
 
 - The conformance suite passes against Oracle 23ai Free and 19c through `pytest-databases`.
-- Golden fixtures cover TNS, O5LOGON, and TTC execute/fetch/pipeline.
+- The pipeline API returns ordered results and per-operation errors.
 - `make bench-check` is at or above the python-oracledb Thin baseline.
 
 ## Draft Task Outline
@@ -80,7 +77,7 @@ tags: [rust, oracle, driver, pipeline]
 - t04 Type codecs incl. LOBs.
 - t05 PL/SQL, implicit results, `execute_many`.
 - t06 DRCP + statement cache + broker leases.
-- t07 Pipelining.
+- t07 Sequential `pipeline()` + tracking test.
 - t08 Arrow + TxEventQ + Python cutover.
 
 This chapter may split into two flows (protocol core, and types/features) at `/flow:plan` time.
