@@ -18,6 +18,12 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 flate2 = { workspace = true }
+futures = { workspace = true }
+google-cloud-auth = { workspace = true }
+google-cloud-bigquery = { workspace = true }
+google-cloud-gax = { workspace = true }
+google-cloud-longrunning = { workspace = true }
+google-cloud-spanner = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }
 http = { workspace = true }
@@ -37,6 +43,7 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
+tonic = { workspace = true }
 url = { workspace = true }
 webpki-root-certs = { workspace = true }
 zstd = { workspace = true }
