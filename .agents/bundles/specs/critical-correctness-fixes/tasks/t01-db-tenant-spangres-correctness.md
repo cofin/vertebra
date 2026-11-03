@@ -18,7 +18,7 @@ tests:
   - src/py/tests/unit/db/test_spanner.py
   - src/py/tests/unit/db/test_spanner_queue_and_cdc.py
 plan_revision: 3
-plan_commit: 24e2931
+plan_commit: 1a339be
 state_revision: 2
 claimed_by: null
 claimed_at: null

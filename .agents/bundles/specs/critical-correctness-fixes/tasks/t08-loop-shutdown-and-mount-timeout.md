@@ -17,7 +17,7 @@ files:
 tests:
   - src/py/tests/unit/server/test_runner.py
 plan_revision: 3
-plan_commit: 24e2931
+plan_commit: 1a339be
 state_revision: 2
 claimed_by: null
 claimed_at: null

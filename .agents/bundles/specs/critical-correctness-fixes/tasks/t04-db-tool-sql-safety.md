@@ -12,10 +12,10 @@ files:
 tests:
   - src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
 plan_revision: 3
-plan_commit: 24e2931
+plan_commit: 1a339be
 state_revision: 2
-claimed_by: executor
-claimed_at: 2026-11-03T16:45:30Z
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null

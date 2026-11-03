@@ -23,19 +23,19 @@ tests:
   - src/py/tests/unit/agent/test_mcp_conformance.py
   - src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
 plan_revision: 3
-plan_commit: 24e2931
+plan_commit: 1a339be
 state_revision: 2
-claimed_by: executor
-claimed_at: 2026-11-03T16:34:00Z
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: 2026-11-03T17:42:00Z
-last_verified_commit: 274e868
+last_verified_at: 2026-11-03T17:57:00Z
+last_verified_commit: 79166fc
 verification_evidence: "RED: exit 2 (ImportError: cannot import name CONFIRMATION_REQUIRED) and 2 failed on guarded controller/route WebMCP metadata. GREEN: 40 passed in 1.65s; ruff check/format passed; mypy passed; zero hits for include_tagged_only in src and docs."
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T17:42:00Z
-commit: 274e868
+updated_at: 2026-11-03T17:57:00Z
+commit: 79166fc
 tags: [bugfix, security, mcp, webmcp]
 ---
 

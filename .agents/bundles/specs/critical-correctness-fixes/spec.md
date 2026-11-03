@@ -9,11 +9,11 @@ research:
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 3
 plan_commit: 1a339be
-state_revision: 17
+state_revision: 18
 current_task: null
-last_verified_checkpoint: 1a339be
+last_verified_checkpoint: 79166fc
 created_at: 2026-11-03T03:30:00Z
-updated_at: 2026-11-03T17:44:00Z
+updated_at: 2026-11-03T17:57:00Z
 tags: [bugfix, security, regression-tdd]
 ---
 
@@ -280,7 +280,7 @@ Error modes:
 ### Phase 1: Data Layer and MCP Security
 
 - [x] [0cdf54c] t01 — Tenant predicate raises, Spangres URL routing, and Spangres CDC positional params (tasks/t01-db-tenant-spangres-correctness.md)
-- [x] [3b819f4] t02 — WebMCP per-tool opt-in and MCP confirmation enforcement (tasks/t02-mcp-exposure-and-confirmation.md)
+- [x] [79166fc] t02 — WebMCP per-tool opt-in and MCP confirmation enforcement (tasks/t02-mcp-exposure-and-confirmation.md)
 - [x] [97dc3df] t03 — `Mcp-Name` binding and nested-params rejection (tasks/t03-mcp-name-binding.md)
 - [x] [ddc4a3d] t04 — DB tool identifier validation and statement classification (tasks/t04-db-tool-sql-safety.md)
 - **Phase 1 Recovery Checkpoint**:
@@ -292,10 +292,10 @@ Error modes:
 
 ### Phase 2: Stores, Embeddings, and Server Shutdown
 
-- [x] [78ffdf6] t05 — Store prefix-scoped delete, millisecond TTLs, `expires_in` contract, and Litestar swap defaults (tasks/t05-store-data-safety.md)
+- [x] [670fd6a] t05 — Store prefix-scoped delete, millisecond TTLs, `expires_in` contract, and Litestar swap defaults (tasks/t05-store-data-safety.md)
 - [x] [b2bfa30] t06 — Remote embedder error propagation and identifier validation (tasks/t06-remote-embedder-errors.md)
 - [x] [21ff97a] t07 — Local embedders run the configured model on free-threaded builds (tasks/t07-local-embedder-sidecar-backend.md)
-- [x] [5edc876] t08 — `EventLoopPool.stop` drain and configurable ASGI mount timeout (tasks/t08-loop-shutdown-and-mount-timeout.md)
+- [x] [1a339be] t08 — `EventLoopPool.stop` drain and configurable ASGI mount timeout (tasks/t08-loop-shutdown-and-mount-timeout.md)
 - **Phase 2 Recovery Checkpoint**:
 
   ```bash
@@ -305,9 +305,9 @@ Error modes:
 
 ## 5. Continuity Snapshot
 
-- **Flow ID**: `critical-correctness-fixes` (`state: active`, `plan_revision: 3`, `plan_commit: 24e2931`)
-- **Current task**: none. All 8 tasks (`t01`–`t08`) completed on branch `fix/critical-correctness`; ready for `/flow:review`.
-- **Last verified checkpoint**: `c5f0598` (Phase 2 Recovery Checkpoint passed: `make lint-all`, `make py-test`, and `make docs`).
+- **Flow ID**: `critical-correctness-fixes` (`state: active`, `plan_revision: 3`, `plan_commit: 1a339be`)
+- **Current task**: none. All 8 tasks (`t01`–`t08`) completed and reviewed on branch `fix/critical-correctness`; ready for `/flow:finish`.
+- **Last verified checkpoint**: `79166fc` (Phase 2 Recovery Checkpoint and `/flow:review` passed: `make lint-all`, `make py-test`, and `make docs`).
 - **Key decisions**:
   - Driver exceptions propagate unchanged from the tenant GUC `SET`.
   - WebMCP exposure is per-tool opt-in (`@mcp_tool(webmcp=True)`, `Tool(webmcp=True)`, or route `opt={"mcp_tool": ..., "webmcp": True}`), preserved across guarded `SkillController` methods, and `include_tagged_only` is removed.
