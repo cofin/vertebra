@@ -34,7 +34,20 @@ tags: [storage, object-store, sqlspec, advanced-alchemy, django, litestar]
    - `extensions/django/storage.py` implements the Django `Storage` API (open, save, url, exists, size, listdir, delete).
    - Litestar file/static responses stream from ObjectStore with Range/416 support. `storage/_streaming.py::to_fastpath_tuple` streams without a full copy and without blocking the loop.
 4. **Arrow data plane.** The ObjectStore ↔ `ArrowCursor` VTBARROW export/import paths (`select_to_arrow` → Parquet, `load_from_arrow` ← Parquet) are shared by every driver.
-5. **Audit.** Remove production fakes and fallbacks found by the gap analysis in storage-adjacent components (recorded in `research/`).
+5. **Remove fakes and fallbacks** ([gap analysis](../native-data-platform/research/gap-analysis_20261103.md) §3):
+   - `storage/_store.py::ObjectStore.__init__` raises on native construction failure instead of falling back to `self._memory`.
+   - The `memory://` defaults are removed from `ObjectStore`, `extensions/sqlspec/storage.py::ObjectStoreBackend`, `extensions/alchemy/storage.py::ObjectStoreBackend`/`register_storage_backend`, `extensions/django/storage.py::DjangoStorage`, and the Spanner artifact store.
+6. **Rust streaming and operations.**
+   - `vertebra-storage/src/store.rs` gains `get_stream`, exposed as a chunk iterator over the buffer protocol, and a streaming multipart writer (no `Vec<Bytes>`, no R2 re-concatenation).
+   - Paginated `list` / `list_with_delimiter`, rename, conditional put, and content-type/attributes.
+7. **One token cache, Rust only.** Delete the Python `GCSConfig._fetch_adc_token_with_expiry`/`_open_http_json` and the Python `GcpTokenCache`.
+8. **Django contract.** `DjangoStorage` subclasses `django.core.files.storage.Storage`, is `@deconstructible`, returns a `File` from `open()`, signs URLs, and implements `listdir`, `path`, `get_available_name`, `generate_filename`, `get_valid_name`, `get_*_time`, and `get_alternative_name`.
+9. **Litestar.** A `litestar.stores.base.Store` over ObjectStore, and a static-files file-system adapter.
+10. **Arrow.**
+    - `db/common/arrow.py::ArrowCursor.from_rows` never writes JSON pseudo-Arrow.
+    - `arrow_shm.rs::allocate_shm_region` errors instead of falling back to anonymous memory.
+    - `provider.py::SharedArrowBuffer` is deleted.
+    - `_iter_arrow_async` streams without materializing every batch.
 
 ## Public Seams
 

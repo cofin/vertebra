@@ -43,7 +43,10 @@ SQLAlchemy and Advanced Alchemy are the primary user path. Vertebra's dialects a
    - `spanner/base.py::DatabaseWrapper` subclasses `django_spanner.base.DatabaseWrapper` (googleapis `django-google-spanner`, Django 5.2/6.0) and swaps its `google.cloud.spanner_dbapi` connection for the vertebra DB-API.
    - The BigQuery Django backend is removed.
    - Vendor config resolution moves from `backends/__init__.py::DatabaseWrapperMixin._build_native_config` into each `<vendor>/base.py`.
-5. **Docs.** Correct `domains/extensions/sqlspec-alchemy-and-dialects.md` (false claims: a `ShmRegion` L1 and "real" GCP dialects).
+5. **Remaining fakes.**
+   - `extensions/sqlalchemy/dbapi.py::DBAPIConnection` raises on URL parse errors instead of falling back to `SQLiteConfig(":memory:")`.
+   - The `extensions/alchemy/cache.py` `shm://` scheme is either backed by a real Rust SHM slab (reusing the `broker.rs`/`vector.rs` seqlock), with a two-process cache-hit test, or removed.
+6. **Docs.** Correct `domains/extensions/sqlspec-alchemy-and-dialects.md` (false claims: a `ShmRegion` L1 and "real" GCP dialects).
 
 ## Out of Scope
 

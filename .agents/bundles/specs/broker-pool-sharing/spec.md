@@ -44,7 +44,29 @@ A user keeps their existing configuration, for example `sqlspec.adapters.asyncpg
    - Metrics are exported through zpages (`extensions/broker/plugin.py::BrokerPlugin.snapshot_metrics`).
 6. **Docs.** Usage docs show both wrapping patterns, and the verification guide covers server-side connection counts.
 
-The exact current gaps (fake transports, duck-typing, missing async/affinity/streaming) are recorded in `research/` once the gap analysis lands.
+### Verified current gaps
+See [gap-analysis_20261103.md](../native-data-platform/research/gap-analysis_20261103.md) §1.
+- **Admission only.** `vertebra-core/src/broker.rs::ShmLeaseTable` counts admissions; it owns no connections, and `BrokerRpcRequest`/`BrokerRpcResponse` are never served.
+- **No cross-worker sharing.** `ProxySyncConfig` builds a per-worker `SQLSpecProvider` that uses the upstream pool inside that worker.
+- **One global capacity.** All databases share 20+10 slots; nothing partitions per `pool_key`.
+- **Hashes disagree across workers.** Python `hash()` is seeded per process.
+- **TTL overcommit.** A 30 s lease TTL is reaped under contention while the connection is still held.
+- **Per-statement leases.** The Postgres/MySQL drivers lease per statement, and `acquire(bind_key=...)` raises `TypeError`, which falls back to the pid.
+- **No-op statement cache.** Every caller passes the identity compiler.
+- **Proxy breaks the contract.** `ProxySyncDriver` is not a `SyncDriverAdapterBase`.
+- **Duck-typed provider.** `_call_broker_acquire` uses `inspect.signature`, `BEGIN` falls back to a raw string, and rollback errors are suppressed.
+- **No streaming.** Results are fully materialized.
+- **AA can't use it.** There is no broker `Pool`/`creator`, `connect_args["broker"]` breaks third-party URLs, and `SHMSessionBroker.attach_to_engine` is never called.
+- **Per-process tables.** `DatabaseRegistry.default_broker()` and the GCP drivers create per-process tables outside the supervisor.
+- **Dead pool wrappers.** `vertebra-db` `*Pool`/`SqlitePool`/`DuckdbBrokerPool` are unused.
+- **Docs overclaim.** `docs/usage/extensions.md` and `docs/architecture/pyo3-and-workers.md`.
+
+### Additional scope from the gaps
+- A versioned msgspec `array_like` RPC frame set: execute/many, begin/commit/rollback/savepoint, fetch-chunk, cancel, close. It is carried on `vertebra-core/src/transport/ring_pair.rs` as a new `vertebra-core/src/dbrpc/` module, and the broker is spawned from `vertebra-http/src/workers/factory.rs`.
+- Per-pool partitions in `ShmLeaseTable`, a lease heartbeat in place of the blind TTL reap, stable hashes (xxh3/FNV), and server-side rollback on `reclaim_worker`.
+- A standalone broker mode for uvicorn/granian deployments, so workers outside the Vertebra supervisor still share one table.
+- Delete the dead `*Pool` wrappers, `InMemoryBrokerTransport`/`BrokerPlugin(use_shm=False)`, and `alchemy/broker.py::StatementCache`.
+- Fix the overclaiming docs.
 
 ## Public Seams
 

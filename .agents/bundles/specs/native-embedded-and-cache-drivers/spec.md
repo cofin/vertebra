@@ -28,7 +28,9 @@ tags: [rust, sqlite, duckdb, redis, valkey]
    - pipelining (existing `execute_pipeline`) and transactions (MULTI/EXEC/WATCH);
    - pub/sub and sharded pub/sub implementing `NotificationSource`;
    - streams, cluster slot routing (existing `ClusterRedirect`), and Valkey `CLIENT TRACKING` invalidation.
+   - The Python socket code (`db/redis/driver.py::_create_raw_socket`, `asyncio.open_connection`) and the Python RESP parser (`db/redis/core.py::RedisCore._parse_view`) are replaced by the Rust client: Tokio + rustls I/O, a multiplexed pipelined connection, RESP3 push for tracking, and Sentinel.
    - The `memory://` mode is removed.
+   - The DuckDB crate's C++ build cost (several minutes, roughly 30–50 MB, medium confidence) is measured. Arrow export passes through the Arrow C Data Interface, so no arrow-rs dependency is added.
 
 ## Public Seams
 

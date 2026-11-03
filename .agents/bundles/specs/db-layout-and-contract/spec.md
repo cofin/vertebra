@@ -40,7 +40,16 @@ This flow sets the structure every native driver and integration builds on.
    - `DatabaseRegistry.parse_url`, `pool_fingerprint`, `_build_async_driver`, and `_build_sync_driver` become table lookups.
    - `provide_driver(name_or_config, *, sync=False)` replaces `provide_bigquery_driver`/`provide_spanner_driver`, including the re-exports in `extensions/litestar/__init__.py`.
 5. **Import boundary.** A layout test asserts that no module under `vertebra/db/` imports `vertebra.agent`, `vertebra.framework`, `vertebra.extensions`, or `vertebra.server`.
-6. **Conformance suite.**
+6. **Shared Rust connection core.** `vertebra-db/src/common/connection.rs`:
+   - a `Connection` trait;
+   - TCP/Unix stream + rustls TLS, reusing the `grpc.rs` connector;
+   - `dialer.rs` integration;
+   - cancellation;
+   - a typed error → Python exception map.
+
+   It runs on the panic- and cancel-safe completion bridge from `gcp-wire-protocol-correctness`. Every native engine client builds on it.
+7. **DataFusion.** `db/datafusion.py::execute_dicts` raises DataFusion errors instead of re-running the SQL on `sqlite3`.
+8. **Conformance suite.**
    - `src/py/tests/integration/db/test_driver_conformance.py` is parameterized over engines through `pytest-databases`. It covers types (NULL, NUMERIC precision, timestamps with time zones, Unicode, bytes, JSON, vectors), transactions, errors, Arrow, cancellation, and pipelining for engines that are `PipelineCapable`.
    - Engines not yet native are `xfail(strict=True)` with the owning chapter named.
 

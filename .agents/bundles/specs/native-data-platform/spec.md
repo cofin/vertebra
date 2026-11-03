@@ -6,6 +6,7 @@ description: Master PRD for the committed product features - any Advanced Alchem
 state: planned
 parent_prd: null
 research:
+  - research/gap-analysis_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 1
 plan_commit: null
@@ -129,4 +130,4 @@ The global constraints from [integration-remediation](../integration-remediation
   - Shared broker pools for any AA/SQLSpec config and Vertebra's own Rust drivers for every engine are required, feature complete.
   - Storage and other components are complete too.
   - Layout is `db/adapters/<engine>` plus `db/common`.
-- **Open item:** broker, driver, and storage gap analysis to be appended to `research/` when the analyst report lands.
+- **Research:** [gap-analysis_20261103.md](research/gap-analysis_20261103.md) records the verified broker, driver, storage, and remaining-fake gaps, each mapped to a child flow.
