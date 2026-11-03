@@ -150,10 +150,12 @@ class GuardChain:
             PermissionDeniedError: If any guard denies access.
         """
         for guard in self._guards:
-            sig = inspect.signature(guard)
+            check_fn = getattr(guard, "check", None)
+            target = check_fn if callable(check_fn) else guard
+            sig = inspect.signature(target)
             param_count = len(sig.parameters)
 
-            res = guard(connection, route_handler) if param_count == 2 and connection is not None else guard(ctx)
+            res = target(connection, route_handler) if param_count == 2 and connection is not None else target(ctx)
 
             if inspect.isawaitable(res):
                 await res

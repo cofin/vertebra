@@ -30,8 +30,11 @@ from vertebra.agent.mcp import (
     SkillIntegrityError,
     TaskLookupError,
     TextContent,
+    WebMCPConfig,
+    build_webmcp_manifest,
     decode_mcp_header_value,
     encode_mcp_header_value,
+    mcp_tool,
     prompt,
     resource,
 )
@@ -569,3 +572,60 @@ async def test_mcp_http_handler_rejects_mcp_name_without_body_name(payload: obje
     decoded = decode_json(raw)
     assert decoded["error"]["code"] == HEADER_MISMATCH
     assert calls == []
+
+
+@pytest.mark.anyio
+async def test_guarded_skill_controller_and_agent_plugin_preserve_webmcp_and_guards() -> None:
+    """SkillController guards wrap @mcp_tool methods while preserving webmcp, and AgentPlugin route opt['mcp_tool'] preserves schema and webmcp."""
+
+    class RequireAuthGuard(GuardProtocol):
+        async def check(self, context: Any) -> None:
+            if context is None or not getattr(getattr(context, "identity", None), "user_id", None):
+                raise PermissionDeniedError("Authentication required")
+
+    class GuardedOps(SkillController):
+        guards = (RequireAuthGuard(),)
+
+        @mcp_tool(
+            name="guarded_web_ping",
+            description="Guarded browser ping",
+            webmcp=True,
+            requires_confirmation=True,
+            annotations={"readOnlyHint": True},
+        )
+        def guarded_web_ping(self, target: str) -> str:
+            return f"pong:{target}"
+
+    class _OptRoute:
+        opt = {"mcp_tool": "opt_route_echo", "webmcp": True, "mcp_requires_confirmation": True}
+
+        @staticmethod
+        def fn(text: str, count: int = 1) -> str:
+            """Repeat text count times."""
+            return text * count
+
+    class _FakeAppConfig:
+        route_handlers = [_OptRoute()]
+
+    plugin = AgentPlugin(AgentPluginConfig())
+    plugin.mcp_registry.register_controller(GuardedOps())
+    plugin.on_app_init(_FakeAppConfig())
+
+    manifest = build_webmcp_manifest(plugin.mcp_registry, WebMCPConfig())
+    assert [t.name for t in manifest.tools] == ["guarded_web_ping", "opt_route_echo"]
+
+    echo_tool = plugin.mcp_registry.get_tool("opt_route_echo")
+    assert echo_tool.webmcp is True
+    assert echo_tool.requires_confirmation is True
+    assert "text" in echo_tool.input_schema.get("properties", {})
+
+    ping_tool = plugin.mcp_registry.get_tool("guarded_web_ping")
+    assert ping_tool.webmcp is True
+    assert ping_tool.requires_confirmation is True
+    assert ping_tool.annotations == {"readOnlyHint": True}
+
+    with pytest.raises(PermissionDeniedError, match="Authentication required"):
+        await ping_tool.invoke({"target": "edge"})
+
+    authed_ctx = AgentContext(identity=CallerIdentity(user_id="alice", tenant_id="t1"))
+    assert await ping_tool.invoke({"target": "edge"}, context=authed_ctx) == "pong:edge"

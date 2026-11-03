@@ -67,18 +67,18 @@ def build_webmcp_manifest(
     source: MCPRegistry | Sequence[Tool],
     config: WebMCPConfig | None = None,
 ) -> WebMCPManifest:
-    """Build a WebMCPManifest listing only tools decorated with ``@mcp_tool(webmcp=True)``.
+    """Build a WebMCPManifest listing only tools opted in with ``webmcp=True``.
 
-    Tools without that tag, including plain ``Tool`` objects, are never browser-exposed.
+    Tools without ``webmcp=True``, including plain ``Tool`` objects, are never browser-exposed.
     """
     cfg = config or WebMCPConfig()
     tools_list: Sequence[Tool] = cast("Any", source).list_tools() if hasattr(source, "list_tools") else source
     descriptors: list[WebMCPToolDescriptor] = []
     for t in tools_list:
         meta = getattr(t.fn, "_mcp_tool_meta", None) or {}
-        if meta.get("webmcp") is not True:
+        if not (bool(getattr(t, "webmcp", False)) or meta.get("webmcp") is True):
             continue
-        annotations = dict(meta.get("annotations", {}))
+        annotations = dict(getattr(t, "annotations", None) or meta.get("annotations", {}))
         descriptors.append(
             WebMCPToolDescriptor(
                 name=t.name,
