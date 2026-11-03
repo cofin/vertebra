@@ -10,6 +10,15 @@ tags:
 
 # Bundle Activity Log
 
+## [2026-11-03] flow-prd | Authored Master PRD `native-data-platform` and revised `integration-remediation`
+
+- User decisions:
+  - Engine code moves to `db/adapters/<engine>` and engine-agnostic code to `db/common`.
+  - Native Vertebra queue backends ship for Postgres and Oracle first and plug into first-party queues, litestar-queues, and Django tasks.
+  - Required and feature complete: any AA/SQLSpec config shares a broker-owned pool over the SHM ring, and Vertebra's own Rust drivers and storage back every engine.
+- Added `native-data-platform` with child flows `db-layout-and-contract`, `native-postgres-driver`, `broker-pool-sharing`, `native-oracle-driver`, `native-mysql-mssql-drivers`, `native-embedded-and-cache-drivers`, and `storage-completeness`.
+- Renamed `db-driver-foundation` to `db-engine-primitives` and rescoped `queues-tasks-and-channels`.
+
 ## [2026-11-03] flow-prd | Authored Master PRD `integration-remediation`
 
 - Audited `d3d5f8b..142cc49` (PRs #64, #65, #66, #69, #70) across the database extensions, framework/embeddings/utils/server, the Rust GCP drivers, MCP/WebMCP, and `vertebra.db`. Findings are in `specs/integration-remediation/research/audit-findings_20261103.md`.

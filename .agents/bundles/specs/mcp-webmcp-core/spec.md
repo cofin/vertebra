@@ -27,7 +27,7 @@ Each tool is defined once and reaches standard MCP clients and browser agents th
 
 1. **`ToolSpec` and registry.**
    - `agent/core/schema.py` gains `ToolSpec` (frozen msgspec Struct) with: name, title, description, input/output schema, annotations (`read_only`, `destructive`, `idempotent`, `open_world`, `consequential`), `exposure: frozenset[Literal["mcp", "webmcp", "a2a"]]`, `requires_confirmation`, and guards.
-   - A `ToolRegistry` is fed by `ToolProvider` implementations: controllers, route discovery, and the BigQuery/Spanner DB tool providers relocated by Chapter 3.
+   - A `ToolRegistry` is fed by `ToolProvider` implementations: controllers, route discovery, and the BigQuery/Spanner DB tool providers relocated by `db-engine-primitives`.
    - The four discovery paths are replaced: `MCPRegistry.discover_app_routes`, `AgentPlugin._inspect_item`, `SkillController`, and `db/mcp_tools.py`.
 2. **Schemas.** Built once with `get_type_hints(include_extras=True)` → `msgspec.defstruct` → `msgspec.json.schema_components`. Invocation uses `msgspec.convert`. This replaces the `SchemaBuilder` string-annotation path and the `eval` in `_convert_argument`, so PEP 563 modules produce correct schemas. Signatures are cached.
 3. **`MCPCore.handle(McpHttpRequest) -> McpHttpResponse`.**
@@ -63,7 +63,7 @@ Each tool is defined once and reaches standard MCP clients and browser agents th
 
 ## Dependencies
 
-Chapter 1 (security fixes land first) and Chapter 3 (DB tool relocation).
+Chapter 1 (security fixes land first) and `db-engine-primitives` (DB tool relocation).
 
 ## Acceptance Boundary
 

@@ -35,7 +35,6 @@ This flow removes structural duplication and hot-path waste left by the merged r
    - `extract_scope_body_fast` enforces a body-size cap.
    - `wrap_asgi_fastpath` calls the body accessor once.
    - `serialize_fastpath_special_result` dispatches on type and passes Arrow buffers zero-copy.
-   - `storage/_streaming.py::to_fastpath_tuple` streams without a full copy and returns 416 for invalid ranges.
    - `_AsgiSend.send_raw_response` keeps bytes headers.
 3. **Loops.**
    - `server/_loops.py::resolve_loop_backend` becomes table-driven, and its quarantine check considers only loop modules.
@@ -52,7 +51,6 @@ This flow removes structural duplication and hot-path waste left by the merged r
    - Glob re-exports and the empty `duckdb` feature are removed.
    - `json_cell_to_protobuf_value` is deduplicated.
    - `percent-encoding`, `url`, and the `getrandom` crate (with a fork guard) are adopted.
-   - One `GcpTokenCache` is shared by `_vertebra` and `_storage`.
    - Dead code is removed (`SpannerTypeCode::Unspecified` no-op, `generate_request_uuid_v4`, the public test-only `decode_append_rows_request`).
    - SAFETY comments are added on the `arrow_shm.rs` unsafe blocks, and `allocate_shm_region` errors instead of falling back to anonymous memory.
    - Python honors `max_commit_delay_ms`.

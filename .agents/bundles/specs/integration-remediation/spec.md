@@ -32,7 +32,7 @@ Vertebra's value is its Rust runtime and drivers. Users mostly reach them throug
   - DuckDB falls back to SQLite, and Postgres/MySQL serve `memory://` fake rows.
   - The async Postgres path returns the `asyncpg` module instead of a pool (`db/postgres/driver.py::AsyncPostgreSQLDriver._ensure_async_pool`).
 - **Pipelining not exposed.**
-  - psycopg 3 has pipeline mode (`Connection.pipeline()`), and python-oracledb 2.4+ has `create_pipeline()` + `AsyncConnection.run_pipeline()`. Vertebra exposes neither.
+  - Postgres and Oracle both support protocol pipelining (as psycopg 3 `pipeline()` and python-oracledb `run_pipeline()` demonstrate). The Vertebra drivers expose neither.
   - Instead it ships `db/pipeline.py::QueryPipeline`, which compiles steps into one CTE. That is a different feature and not what pipelining means.
 - **Rust GCP wire format.**
   - BigQuery Storage Read/Write and Spanner Session/ExecuteSql/Transaction/Commit use wrong protobuf field numbers, and the tests mock the same wrong numbers.
@@ -66,13 +66,13 @@ Vertebra's value is its Rust runtime and drivers. Users mostly reach them throug
   - Python `text`/`humanize` fallbacks shadowing mandatory Rust.
 
 ### What is new and why it succeeds
-- Each driver package (`vertebra/db/<engine>/`) talks to its real database through a proven client and exposes small engine-local primitives: native pipeline, notification listener, change source, queue store, embedding pushdown.
+- Each driver package (`vertebra/db/adapters/<engine>/`) talks to its real database through Vertebra's own Rust client (native-data-platform PRD) and exposes small engine-local primitives: native pipeline, notification listener, change source, queue store, embedding pushdown.
 - Framework extensions consume those primitives and implement each framework's own contract: sqlspec stores, litestar-queues backends, Django tasks, Litestar channels, SQLAlchemy dialects, MCP tool providers.
 - A behavior fix therefore lands in one place, users get upstream-compatible schemas and services, and the public API stays small because AA/SQLA remains the primary path.
 
 ### Success metrics
 - No production driver class opens SQLite or serves fake rows unless it is the SQLite driver. Each engine passes integration tests against its real database through `pytest-databases`.
-- `driver.pipeline()` sends N statements in one round trip on Postgres (psycopg pipeline mode) and on Oracle 23ai (`run_pipeline`).
+- `driver.pipeline()` sends N statements in one round trip on Postgres and on Oracle 23ai, through the native Rust clients.
 - Every Rust GCP encoder/decoder passes golden-byte tests generated from the official `.proto` files.
 - Vertebra sqlspec adapters pass the upstream ADK, events, and litestar store contracts.
 - First-party queues deliver across processes on Postgres, Oracle, Spanner, and Redis.
@@ -103,41 +103,36 @@ flowchart LR
    - `vertebra.db` holds drivers, configs, and basic engine-local primitives.
    - Framework integrations live in `vertebra.extensions.*` or `vertebra.framework.*` and consume those primitives: sqlspec stores, AA cache, litestar-queues backends, Litestar channels, Django tasks, MCP tool providers.
    - `vertebra.db` never imports upward.
-2. **Engine packages.**
-   - Layout: `vertebra/db/<engine>/{config,core,driver}.py` plus optional `pipeline.py`, `notify.py`, `change_stream.py`, `queue.py`, and `embeddings.py`.
-   - Capability protocols live in `vertebra/db/driver/` beside `SyncDatabaseDriver`/`AsyncDatabaseDriver`: `PipelineCapable`, `NotificationSource`, `ChangeSource`, `QueueStore`, `EmbeddingPushdown`.
-3. **Driver I/O.**
-   - Each engine executes through a proven client:
-     - Postgres: psycopg 3 sync and async.
-     - Oracle: python-oracledb Thin, sync and async.
-     - MSSQL: `mssql-python`.
-     - DuckDB: `duckdb`, with no fallback.
-     - MySQL: the existing pymysql path, minus the fakes.
-     - BigQuery and Spanner: the Rust gRPC/REST clients.
-   - Rust keeps the codecs (JSONB, pgvector, OSON, VECTOR, TTC piggyback, TDS), the lease broker, the statement cache, and Arrow/SHM.
-   - `memory://` and SQLite fallbacks are removed from every non-SQLite driver. See Open Question Q4.
+2. **Engine packages** *(user decision)*.
+   - Engine code lives in `vertebra/db/adapters/<engine>/{config,core,driver}.py`, plus optional `pipeline.py`, `notify.py`, `change_stream.py`, `queue.py`, and `embeddings.py`.
+   - Engine-agnostic code lives in `vertebra/db/common/`: driver bases, capability protocols (`PipelineCapable`, `NotificationSource`, `ChangeSource`, `QueueStore`, `EmbeddingPushdown`), the registry, `ArrowCursor`, the broker client, and the dialers.
+   - The [native-data-platform](../native-data-platform/spec.md) PRD (`db-layout-and-contract`) owns this layout.
+3. **Driver I/O** *(user decision: required, feature complete)*.
+   - Vertebra's own Rust drivers back every engine. The native-data-platform PRD owns this.
+   - Any existing AA/SQLAlchemy or SQLSpec config can share one broker-owned pool over the SHM ring (`broker-pool-sharing`).
+   - Storage and the other data components are feature complete (`storage-completeness`).
+   - No third-party Python DB clients, `memory://` modes, or SQLite stand-ins remain in production drivers.
 4. **Native pipelining.**
-   - `driver.pipeline()` (context manager, sync and async) wraps psycopg pipeline mode and python-oracledb `create_pipeline()`/`run_pipeline()`. On servers older than 23ai, Oracle executes sequentially.
-   - The sqlspec adapter `execute_stack` uses it, mirroring sqlspec's psycopg adapter.
-   - `db/pipeline.py::QueryPipeline`, `RelOverlay`, `CTEStep`, and the `execute_stack` CTE emulation are deleted.
+   - `driver.pipeline()` (sync and async) is implemented in the Rust Postgres (extended-protocol batch, single `Sync`) and Oracle (TTC pipelining on 23ai, sequential on older servers) clients.
+   - The sqlspec adapter `execute_stack` uses it.
+   - `db/pipeline.py::QueryPipeline`, `RelOverlay`, `CTEStep`, and the `execute_stack` CTE emulation are deleted (`db-engine-primitives`).
 5. **Registry polymorphism.**
-   - `BaseDatabaseConfig` gains `url_schemes: ClassVar[tuple[str, ...]]`, `from_url(url, **overrides)`, `pool_key() -> tuple`, and `driver_classes: ClassVar[tuple[type, type]]`.
+   - `BaseDatabaseConfig` gains `url_schemes`, `from_url`, `pool_key`, and `driver_classes`.
    - `DatabaseRegistry` becomes table-driven.
    - `provide_driver(name_or_config, *, sync=False)` replaces the per-engine providers.
+   - Owned by native-data-platform `db-layout-and-contract`.
 6. **SQLSpec adapter parity** *(user decision: feature-complete like upstream adapters)*.
    - Layout: `extensions/sqlspec/adapters/<engine>/{config,driver,core,data_dictionary,adk/,events/,litestar/}.py`.
    - Drivers implement the `SyncDriverAdapterBase`/`AsyncDriverAdapterBase` dispatch contract.
    - Stores subclass upstream bases and keep upstream DDL.
    - Configs declare `adapter_name: ClassVar[str]`.
-7. **Queues** *(user decision: working queues with real backends, plus framework backends and DI)*.
-   - First-party `framework/queues::QueueService` runs on `db/<engine>/queue.py::*QueueStore`:
-     - Postgres: `FOR UPDATE SKIP LOCKED` + LISTEN/NOTIFY wakeup.
-     - Oracle: `SKIP LOCKED`.
-     - Spanner: lease columns.
-     - Redis: streams with consumer groups.
-   - Durable backends are selected by settings.
-   - The same stores back a litestar-queues backend and a Django `django.tasks` backend.
+7. **Queues** *(user decision: native Vertebra components that plug into the other frameworks; Postgres and Oracle first)*.
+   - Native `db/adapters/{postgres,oracle}/queue.py` stores back three integrations, selected by settings:
+     - first-party `QueueService`;
+     - native litestar-queues `BaseQueueBackend` implementations;
+     - a Django `django.tasks` backend.
    - Workers resolve dependencies through `framework/di.py::Container`.
+   - Other engines build on these stores later.
 8. **MCP** *(user decision)*.
    - One `ToolSpec` (msgspec), a `ToolRegistry` fed by `ToolProvider`s, and a transport-agnostic `MCPCore.handle()` with ASGI, WSGI, and native adapters.
    - The WebMCP manifest is a projection filtered by `exposure`.
@@ -162,7 +157,7 @@ flowchart LR
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | `critical-correctness-fixes` | Silent failure and security fixes | Behavior fixes only; see charter | existing APIs | — | draft |
 | 2 | `gcp-wire-protocol-correctness` | Rust GCP wire correctness | Field consts + golden tests, no false success, panic-safe/cancellable completion, typed exceptions | `_vertebra.pyi` exceptions, `SpannerClient`, `BigQueryClient` | — | draft |
-| 3 | `db-driver-foundation` | Real driver I/O, native pipelining, registry and capability primitives | Real Oracle/MSSQL/Postgres-async I/O, fakes removed, `driver.pipeline()`, `QueryPipeline` deleted, registry polymorphism, engine primitives relocated, import gate | `vertebra.db.driver.*`, `BaseDatabaseConfig.from_url/pool_key`, `driver.pipeline()`, `provide_driver` | 1, 2 | draft |
+| 3 | `db-engine-primitives` | Engine primitives relocation and QueryPipeline removal | CDC/notify/change-stream/embedding pushdown moved to `db/adapters/<engine>`, `DatabaseChannelBackend` and `QueryPipeline` deleted, DB tools moved to extension tool providers, RLS to `db/common` | `vertebra.db.common.cdc`, `vertebra.db.adapters.*.{notify,change_stream,embeddings}`, `PushdownEmbedder` | 1; native-data-platform Ch1–2 | draft |
 | 4 | `sqlspec-adapter-parity` | Feature-complete sqlspec adapters | Per-engine adapter packages, dispatch-contract drivers, upstream-base stores, data dictionaries, resolver shim, shared-pool safety | `<Engine>{Sync,Async}Config`, `adapter_name` | 3 | draft |
 | 5 | `queues-tasks-and-channels` | Working queues, tasks, channels, stores | Real `QueueStore`s, settings-driven backends, litestar-queues backend, Django tasks backend, DI, one cron parser, per-engine channels, Valkey store | `QueueService`, `QueueBackend`, `QueueBackendSettings` | 3, 4 | draft |
 | 6 | `sqlalchemy-and-django-integration` | SQLAlchemy / AA / Django DB integration | Dialect split + real GCP dialect bases, shared DB-API module, AA dogpile cache backend, real Django backends including Spanner via `django_spanner` | dialect entry points, `create_cache_config`, Django `ENGINE` paths | 3 | draft |
@@ -199,31 +194,26 @@ flowchart LR
 
 ## 5. Backlog (Deferred Items)
 
-- A native `VertebraQueueBackend` implementing the full litestar-queues `BaseQueueBackend` contract (execution refs, maintenance leases), if the sqlspec-backed option proves too slow.
+- Spanner and Redis/Valkey native queue backends, built on the Postgres/Oracle `QueueStore` pattern.
 - AWS RDS/Aurora DSQL IAM dialer ([vertebra#67](https://github.com/cofin/vertebra/issues/67)) and Azure Entra ID dialer ([vertebra#68](https://github.com/cofin/vertebra/issues/68)).
 - Rust `arrow-ipc` behind a feature flag, if the hardened flatbuffer verifier proves insufficient.
 - Removing `extensions/sqlspec/_compat.py` once sqlspec#876 and litestar-queues#186 ship. The pinning test in Chapter 4 tracks this.
-- Completing Rust wire-protocol clients for Postgres/Oracle/MSSQL, if Q4 is decided that way later.
 
 ## Open Questions
 
-- **Q1 — Engine package path.** Keep `vertebra/db/<engine>/` (recommended; it is the shipped layout) or rename to `vertebra/db/adapters/<engine>/`?
-- **Q2 — litestar-queues backend options.** The recommendation is `QueueBackendSettings(kind="sqlspec" | "shm" | "memory")`:
-  - `sqlspec` runs litestar-queues' SQLSpec backend with a vertebra adapter config, after litestar-queues#186 or through the shim.
-  - `shm` is the existing `SHMQueueBackend`, for single-host.
-- **Q3 — Django DB backends.**
-  - Recommended: make Postgres/MySQL/Oracle/SQLite real by subclassing Django's built-in backends and swapping in the vertebra DB-API module.
-  - For Spanner, subclass the official `django_spanner.base.DatabaseWrapper` (googleapis `django-google-spanner`, Django 5.2/6.0) and swap its `google.cloud.spanner_dbapi` connection for the vertebra Rust-backed DB-API.
-  - Drop BigQuery: there is no official Django backend, and an analytical store without enforced constraints or row-level transactions is a poor ORM fit. Serve it through SQLAlchemy/sqlspec.
-- **Q4 — Driver I/O backing.**
-  - Recommended: proven clients for I/O (psycopg 3, python-oracledb Thin, mssql-python, duckdb) with Rust codecs/broker/Arrow.
-  - The alternative is completing the Rust wire-protocol clients that `postgres.rs`/`oracle.rs`/`mssql.rs` currently only encode frames for.
+- **Resolved Q1** *(user)*: engine code goes in `vertebra/db/adapters/<engine>/` and engine-agnostic code in `vertebra/db/common/`.
+- **Resolved Q2** *(user)*: native Vertebra queue backends for Postgres and Oracle first, plugged into first-party queues, litestar-queues, and Django tasks.
+- **Resolved Q4** *(user)*: Vertebra's own Rust drivers back every engine, broker pool sharing works for any AA/SQLSpec config, and storage is complete. See [native-data-platform](../native-data-platform/spec.md).
+- **Q3 — Django DB backends (awaiting confirmation).**
+  - Make Postgres/MySQL/Oracle/SQLite real by subclassing Django's built-in backends with the Vertebra DB-API.
+  - For Spanner, subclass the official `django_spanner.base.DatabaseWrapper` (googleapis `django-google-spanner`, Django 5.2/6.0) with the Vertebra Rust-backed DB-API in place of `google.cloud.spanner_dbapi`.
+  - Drop BigQuery: there is no official Django backend, and it is an analytical store without enforced constraints or row-level transactions.
 
 ## Implementation Plan
 
 - [ ] critical-correctness-fixes — Silent failure and security fixes (../critical-correctness-fixes/spec.md)
 - [ ] gcp-wire-protocol-correctness — Rust GCP wire correctness (../gcp-wire-protocol-correctness/spec.md)
-- [ ] db-driver-foundation — Real driver I/O, native pipelining, registry and capability primitives (../db-driver-foundation/spec.md)
+- [ ] db-engine-primitives — Engine primitives relocation and QueryPipeline removal (../db-engine-primitives/spec.md)
 - [ ] sqlspec-adapter-parity — Feature-complete sqlspec adapters (../sqlspec-adapter-parity/spec.md)
 - [ ] queues-tasks-and-channels — Working queues, tasks, channels, stores (../queues-tasks-and-channels/spec.md)
 - [ ] sqlalchemy-and-django-integration — SQLAlchemy / AA / Django DB integration (../sqlalchemy-and-django-integration/spec.md)
@@ -234,6 +224,7 @@ flowchart LR
 
 - **Flow ID:** `integration-remediation` (`state: planned`, `plan_revision: 1`, `plan_commit: null`)
 - **Key decisions:**
+  - Sibling PRD `native-data-platform` owns the layout, the native Rust drivers, broker pool sharing, and storage (2026-11-03).
   - Master PRD with ordered child flows.
   - sqlspec adapters are feature-complete on upstream bases, with a resolver shim until sqlspec#876.
   - Engine primitives live in `db/<engine>`; framework integrations live in the extensions.
@@ -241,7 +232,7 @@ flowchart LR
   - MCPCore design, with Litestar delegating to litestar-mcp.
   - Protobuf field consts + golden tests; emulator gaps are `xfail`.
   - `utils` stays public.
-  - Pipelining means native psycopg/oracledb pipeline mode, and `QueryPipeline` is deleted.
+  - Pipelining is native protocol pipelining in the Rust Postgres and Oracle clients, and `QueryPipeline` is deleted.
 - **Recent discoveries:**
   - The Oracle and MSSQL drivers are SQLite-backed fakes.
   - The async Postgres pool returns the asyncpg module.

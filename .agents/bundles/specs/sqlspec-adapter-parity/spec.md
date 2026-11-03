@@ -59,7 +59,7 @@ Vertebra's sqlspec adapters must be feature-complete in the same way upstream ad
 
 ## Dependencies
 
-Chapter 3: driver contract, `driver.pipeline()`, real I/O.
+native-data-platform `db-layout-and-contract`, `native-postgres-driver`, `broker-pool-sharing` (proxy configs), and `native-oracle-driver`; integration-remediation `db-engine-primitives`.
 
 ## Acceptance Boundary
 

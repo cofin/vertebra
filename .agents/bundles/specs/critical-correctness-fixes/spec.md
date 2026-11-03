@@ -51,7 +51,7 @@ This flow fixes defects that silently lose data, bypass security, or return fabr
 
 ## Out of Scope
 
-- Moving `db/mcp_tools.py` (Chapter 3), the MCP core redesign (Chapter 7), and store replacement (Chapter 5).
+- Moving `db/mcp_tools.py` (`db-engine-primitives`), the MCP core redesign (Chapter 7), and store replacement (Chapter 5).
 
 ## Public Seams
 

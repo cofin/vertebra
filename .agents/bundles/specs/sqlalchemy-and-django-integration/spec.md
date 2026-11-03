@@ -37,7 +37,7 @@ SQLAlchemy and Advanced Alchemy are the primary user path. Vertebra's dialects a
    - Remove the unused `shm_name`, the dead `TYPE_CHECKING` block, and the URL-as-backend-name bug in `create_cache_config`.
    - Delete the `sqlalchemy/cache.py` re-export shim and `alchemy/broker.py::StatementCache`.
    - Replace the `alchemy/storage.py` `storages.get` monkeypatch with AA's registration API.
-   - `alchemy/plugin.py::normalize_alchemy_url` reads schemes from the config classes (Chapter 3 `url_schemes`).
+   - `alchemy/plugin.py::normalize_alchemy_url` reads schemes from the config classes (`url_schemes` from native-data-platform `db-layout-and-contract`).
 4. **Django backends** (Open Question Q3; recommended default shown).
    - `extensions/django/db/backends/{postgresql,mysql,oracle,sqlite3}/base.py::DatabaseWrapper` subclass Django's built-in backends and swap in the vertebra DB-API module.
    - `spanner/base.py::DatabaseWrapper` subclasses `django_spanner.base.DatabaseWrapper` (googleapis `django-google-spanner`, Django 5.2/6.0) and swaps its `google.cloud.spanner_dbapi` connection for the vertebra DB-API.
@@ -55,7 +55,7 @@ Dialect entry points (`<engine>+vtb`, `<engine>+vtb_async`, `spangres+vtb`), `cr
 
 ## Dependencies
 
-Chapter 3.
+native-data-platform `db-layout-and-contract` (DB-API over native drivers) and `broker-pool-sharing` (broker SQLAlchemy pool).
 
 ## Acceptance Boundary
 
