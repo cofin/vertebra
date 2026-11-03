@@ -9,7 +9,7 @@ research:
   - research/google-cloud-rust_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
-plan_commit: null
+plan_commit: 24e2931
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
@@ -196,7 +196,7 @@ pub async fn update_database_ddl(&self, statements: &[String]) -> Result<String,
 
 ## 5. Continuity Snapshot
 
-- **Flow ID**: `gcp-wire-protocol-correctness` (`state: planned`, `plan_revision: 2`, `plan_commit: null`)
+- **Flow ID**: `gcp-wire-protocol-correctness` (`state: planned`, `plan_revision: 2`, `plan_commit: 24e2931`)
 - **Current Task**: `null`
 - **Last Verified Checkpoint**: `null`
 - **Key Decisions**:

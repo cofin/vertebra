@@ -8,7 +8,7 @@ parent_prd: integration-remediation
 research:
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
-plan_commit: null
+plan_commit: 24e2931
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
@@ -307,7 +307,7 @@ Error modes:
 
 ## 5. Continuity Snapshot
 
-- **Flow ID**: `critical-correctness-fixes` (`state: planned`, `plan_revision: 2`, `plan_commit: null`)
+- **Flow ID**: `critical-correctness-fixes` (`state: planned`, `plan_revision: 2`, `plan_commit: 24e2931`)
 - **Current task**: none. Start with `t01` on branch `fix/critical-correctness`.
 - **Last verified checkpoint**: none.
 - **Key decisions**:

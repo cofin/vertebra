@@ -22,7 +22,7 @@ tests:
   - src/py/tests/unit/server/test_litestar_direct_fastpath.py
   - src/py/tests/unit/extensions/test_starlette_plugin.py
 plan_revision: 2
-plan_commit: null
+plan_commit: 24e2931
 state_revision: 0
 claimed_by: null
 claimed_at: null

@@ -16,7 +16,7 @@ files:
 tests:
   - src/py/tests/unit/embeddings/test_embedding_broker.py
 plan_revision: 2
-plan_commit: null
+plan_commit: 24e2931
 state_revision: 0
 claimed_by: null
 claimed_at: null
