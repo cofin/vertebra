@@ -10,6 +10,12 @@ tags:
 
 # Bundle Activity Log
 
+## [2026-11-03] flow-prd | Authored Master PRD `integration-remediation`
+
+- Audited `d3d5f8b..142cc49` (PRs #64, #65, #66, #69, #70) across the database extensions, framework/embeddings/utils/server, the Rust GCP drivers, MCP/WebMCP, and `vertebra.db`. Findings are in `specs/integration-remediation/research/audit-findings_20261103.md`.
+- Seeded draft child flows `critical-correctness-fixes`, `gcp-wire-protocol-correctness`, `db-driver-foundation`, `sqlspec-adapter-parity`, `queues-tasks-and-channels`, `sqlalchemy-and-django-integration`, `mcp-webmcp-core`, and `runtime-structure-and-throughput`.
+- Filed upstream [sqlspec#876](https://github.com/litestar-org/sqlspec/issues/876) and [litestar-queues#186](https://github.com/cofin/litestar-queues/issues/186) for adapter-name resolution outside `sqlspec.adapters`.
+
 ## [2026-11-03] flow-archive | Completed and Archived Google Cloud BigQuery and Cloud Spanner Platform (`google-bigquery-and-spanner-platform` & Chapters 1–4)
 
 - Completed and archived Master PRD `google-bigquery-and-spanner-platform` and all 4 child flows (`gcp-foundation-and-object-pipelines`, `bigquery-driver-objects-and-sqlspec`, `spanner-driver-objects-and-sqlspec`, `gcp-framework-adapters-and-sqlalchemy`):

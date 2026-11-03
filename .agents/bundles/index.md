@@ -52,6 +52,6 @@ Root index for **Vertebra** — the Rust-powered, full-stack Python & TypeScript
 
 ## 3. Specifications, Research & Activity Log
 
-- **`specs/` (lazy)** — Materialized only when active Flow feature specifications exist.
+- **`specs/` (active)** — [Master PRD `integration-remediation`](specs/integration-remediation/spec.md) with draft child flows `critical-correctness-fixes`, `gcp-wire-protocol-correctness`, `db-driver-foundation`, `sqlspec-adapter-parity`, `queues-tasks-and-channels`, `sqlalchemy-and-django-integration`, `mcp-webmcp-core`, and `runtime-structure-and-throughput`.
 - **`research/` (lazy)** — Materialized only when un-promoted technical research briefs exist.
 - **[Bundle Activity Log](log.md)** — Chronological log of bundle initialization, syntheses, and archived flows.
