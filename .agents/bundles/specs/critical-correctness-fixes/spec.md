@@ -9,11 +9,11 @@ research:
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 14
+state_revision: 15
 current_task: null
-last_verified_checkpoint: ddc4a3d
+last_verified_checkpoint: 5edc876
 created_at: 2026-11-03T03:30:00Z
-updated_at: 2026-11-03T17:09:22Z
+updated_at: 2026-11-03T17:12:00Z
 tags: [bugfix, security, regression-tdd]
 ---
 
@@ -297,7 +297,7 @@ Error modes:
 - [x] [78ffdf6] t05 — Store prefix-scoped delete, millisecond TTLs, `expires_in` contract, and Litestar swap defaults (tasks/t05-store-data-safety.md)
 - [x] [b2bfa30] t06 — Remote embedder error propagation and identifier validation (tasks/t06-remote-embedder-errors.md)
 - [x] [21ff97a] t07 — Local embedders run the configured model on free-threaded builds (tasks/t07-local-embedder-sidecar-backend.md)
-- [x] t08 — `EventLoopPool.stop` drain and configurable ASGI mount timeout (tasks/t08-loop-shutdown-and-mount-timeout.md)
+- [x] [5edc876] t08 — `EventLoopPool.stop` drain and configurable ASGI mount timeout (tasks/t08-loop-shutdown-and-mount-timeout.md)
 - **Phase 2 Recovery Checkpoint**:
 
   ```bash
@@ -307,9 +307,9 @@ Error modes:
 
 ## 5. Continuity Snapshot
 
-- **Flow ID**: `critical-correctness-fixes` (`state: planned`, `plan_revision: 2`, `plan_commit: 24e2931`)
-- **Current task**: none. Start with `t01` on branch `fix/critical-correctness`.
-- **Last verified checkpoint**: none.
+- **Flow ID**: `critical-correctness-fixes` (`state: active`, `plan_revision: 2`, `plan_commit: 24e2931`)
+- **Current task**: none. All 8 tasks (`t01`–`t08`) completed on branch `fix/critical-correctness`; ready for `/flow:review`.
+- **Last verified checkpoint**: `5edc876` (Phase 2 Recovery Checkpoint passed: `make lint-all` and `1490 passed, 1 skipped` in `src/py/tests`).
 - **Key decisions**:
   - Driver exceptions propagate unchanged from the tenant GUC `SET`.
   - WebMCP exposure is per-tool opt-in (`@mcp_tool(webmcp=True)`), and `include_tagged_only` is removed.

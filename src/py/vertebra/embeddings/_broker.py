@@ -43,14 +43,12 @@ class BackendFactory(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
     The quarantined sidecar receives this value over its JSON pipe and imports ``target`` itself,
     so the factory must be importable in a fresh interpreter.
-
-    Attributes:
-        target: ``"package.module:qualname"`` of a callable returning a ``BackendInferenceCallable``.
-        options: Keyword arguments passed to the target callable.
     """
 
     target: str
+    """``"package.module:qualname"`` of a callable returning a ``BackendInferenceCallable``."""
     options: dict[str, Any] = msgspec.field(default_factory=dict)
+    """Keyword arguments passed to the target callable."""
 
     def build(self) -> BackendInferenceCallable:
         """Import ``target`` and call it with ``options``.

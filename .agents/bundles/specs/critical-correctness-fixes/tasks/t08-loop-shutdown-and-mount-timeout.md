@@ -27,8 +27,8 @@ last_verified_at: 2026-11-03T17:09:22Z
 last_verified_commit: 21ff97a
 verification_evidence: "RED: 11 failed, 1 passed in 1.21s; GREEN: 254 passed in 2.33s; ruff check/format and mypy passed on 2 source files"
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T17:09:22Z
-commit: null
+updated_at: 2026-11-03T17:12:00Z
+commit: 5edc876
 tags: [bugfix, server, event-loop, asgi]
 ---
 
