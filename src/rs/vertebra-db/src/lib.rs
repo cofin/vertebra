@@ -25,7 +25,6 @@ pub mod bigquery;
 pub mod dialer;
 pub mod duckdb;
 pub mod gcp;
-pub mod grpc;
 pub mod mssql;
 pub mod mysql;
 pub mod oracle;

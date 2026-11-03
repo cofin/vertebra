@@ -1,16 +1,14 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
+use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
-use hyper::body::{Body, Frame, Incoming};
+use hyper::body::Incoming;
 use hyper::service::service_fn;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, mpsc};
@@ -22,61 +20,11 @@ use google_cloud_gax::response::Response as GaxResponse;
 use google_cloud_gax::streaming::ResponseStream;
 use vertebra_db::arrow_shm::{ARROW_IPC_EOS_MARKER, ShmArrowFrameHeader};
 use vertebra_db::bigquery::{
-    BigQueryArrowCompression, BigQueryCellValue, BigQueryClient, BigQueryClientConfig,
-    BigQueryError, BigQueryParamValue, BigQueryQueryOptions, BigQueryQueryParameter,
-    DEFAULT_BIGQUERY_STORAGE_ENDPOINT, decode_append_rows_request,
+    ArrowAppendPlan, BigQueryArrowCompression, BigQueryCellValue, BigQueryClient,
+    BigQueryClientConfig, BigQueryError, BigQueryParamValue, BigQueryQueryOptions,
+    BigQueryQueryParameter, BigQueryWriteMode, DEFAULT_BIGQUERY_STORAGE_ENDPOINT,
+    MAX_APPEND_ROWS_CHUNK_BYTES,
 };
-use vertebra_db::grpc::{
-    GrpcCode, LpmFrameDecoder, ProtoReader, ProtoWriter, WireType, encode_lpm_frame,
-};
-
-struct MockGrpcBody {
-    rx: mpsc::Receiver<Frame<Bytes>>,
-}
-
-impl Body for MockGrpcBody {
-    type Data = Bytes;
-    type Error = Infallible;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        match self.rx.poll_recv(cx) {
-            Poll::Ready(Some(frame)) => Poll::Ready(Some(Ok(frame))),
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-fn make_grpc_response(
-    frames: Vec<Bytes>,
-    grpc_status: GrpcCode,
-    grpc_message: &str,
-) -> Response<MockGrpcBody> {
-    let (tx, rx) = mpsc::channel::<Frame<Bytes>>(16);
-    let status_val = (grpc_status as i32).to_string();
-    let msg_val = grpc_message.to_string();
-    tokio::spawn(async move {
-        for payload in frames {
-            let lpm = encode_lpm_frame(&payload, false, 64 * 1024 * 1024).expect("lpm frame");
-            let _ = tx.send(Frame::data(lpm)).await;
-        }
-        let mut trailers = HeaderMap::new();
-        trailers.insert("grpc-status", HeaderValue::from_str(&status_val).unwrap());
-        if !msg_val.is_empty() {
-            trailers.insert("grpc-message", HeaderValue::from_str(&msg_val).unwrap());
-        }
-        let _ = tx.send(Frame::trailers(trailers)).await;
-    });
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "application/grpc+proto")
-        .body(MockGrpcBody { rx })
-        .unwrap()
-}
 
 fn build_mock_arrow_ipc_stream(schema_payload: &[u8], batch_payloads: &[(&[u8], i64)]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -591,162 +539,108 @@ async fn read_table_writes_schema_then_stream_batches_in_order() {
     assert!(shm_name.starts_with('/'));
 }
 
-#[tokio::test]
-async fn test_bigquery_storage_write_default_pending_and_row_errors() {
-    let committed_streams: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let committed_clone = Arc::clone(&committed_streams);
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("addr");
-
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let committed = Arc::clone(&committed_clone);
-            tokio::spawn(async move {
-                let io = TokioIo::new(stream);
-                let svc = service_fn(move |req: Request<Incoming>| {
-                    let committed = Arc::clone(&committed);
-                    async move {
-                        let path = req.uri().path().to_string();
-                        let raw_body = req.into_body().collect().await.unwrap().to_bytes();
-                        let mut dec = LpmFrameDecoder::new(64 * 1024 * 1024);
-                        dec.push_chunk(&raw_body);
-
-                        if path.ends_with("/CreateWriteStream") {
-                            let mut w = ProtoWriter::new();
-                            w.write_str(
-                                1,
-                                "projects/p1/datasets/d1/tables/t1/streams/pending-stream-1",
-                            );
-                            Ok::<_, Infallible>(make_grpc_response(
-                                vec![w.finish()],
-                                GrpcCode::Ok,
-                                "",
-                            ))
-                        } else if path.ends_with("/AppendRows") {
-                            let mut resp_frames = Vec::new();
-                            let mut msg_idx = 0usize;
-                            let mut current_stream = String::new();
-                            while let Some(frame) = dec.next_frame().unwrap() {
-                                let parsed = decode_append_rows_request(&frame).unwrap();
-                                if msg_idx == 0 {
-                                    assert!(!parsed.write_stream.is_empty());
-                                    assert!(parsed.writer_schema.is_some());
-                                    current_stream = parsed.write_stream.clone();
-                                }
-                                msg_idx += 1;
-
-                                if current_stream.contains("reject_table") {
-                                    let mut w = ProtoWriter::new();
-                                    w.write_nested(5, |re| {
-                                        re.write_i64(1, 0);
-                                        re.write_i32(2, 3);
-                                        re.write_str(3, "schema mismatch on column x");
-                                    });
-                                    resp_frames.push(w.finish());
-                                } else {
-                                    let mut w = ProtoWriter::new();
-                                    w.write_nested(1, |res| {
-                                        res.write_nested(1, |off| {
-                                            off.write_i64(1, parsed.offset.unwrap_or(0));
-                                        });
-                                    });
-                                    resp_frames.push(w.finish());
-                                }
-                            }
-                            Ok::<_, Infallible>(make_grpc_response(resp_frames, GrpcCode::Ok, ""))
-                        } else if path.ends_with("/FinalizeWriteStream") {
-                            let mut w = ProtoWriter::new();
-                            w.write_i64(1, 5);
-                            Ok::<_, Infallible>(make_grpc_response(
-                                vec![w.finish()],
-                                GrpcCode::Ok,
-                                "",
-                            ))
-                        } else if path.ends_with("/BatchCommitWriteStreams") {
-                            let frame = dec.next_frame().unwrap().unwrap_or_default();
-                            let mut r = ProtoReader::new(&frame);
-                            while let Some((f, wt)) = r.next_tag().unwrap() {
-                                if f == 2 && wt == WireType::LengthDelimited {
-                                    committed
-                                        .lock()
-                                        .await
-                                        .push(r.read_str().unwrap().to_string());
-                                } else {
-                                    r.skip_field(wt).unwrap();
-                                }
-                            }
-                            let mut w = ProtoWriter::new();
-                            w.write_nested(1, |ts| {
-                                ts.write_i64(1, 1_700_000_000);
-                            });
-                            Ok::<_, Infallible>(make_grpc_response(
-                                vec![w.finish()],
-                                GrpcCode::Ok,
-                                "",
-                            ))
-                        } else {
-                            Ok::<_, Infallible>(make_grpc_response(
-                                vec![],
-                                GrpcCode::Unimplemented,
-                                "unimplemented",
-                            ))
-                        }
-                    }
-                });
-                let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
-                    .serve_connection(io, svc)
-                    .await;
-            });
-        }
-    });
-
-    let mut cfg = BigQueryClientConfig::new("p1");
-    cfg.dataset_id = Some("d1".to_string());
-    cfg.location = Some("US".to_string());
-    cfg.storage_endpoint = format!("http://{addr}");
-    let client = BigQueryClient::new(cfg).expect("client");
-
-    let ipc_bytes = build_mock_arrow_ipc_stream(
-        b"SCHEMA_PAYLOAD_BYTES",
-        &[(b"BATCH_1_DATA", 3), (b"BATCH_2_DATA", 2)],
-    );
-
-    let default_res = client
-        .append_arrow_stream("projects/p1/datasets/d1/tables/t1", &ipc_bytes, "_default")
-        .await
-        .expect("default append");
-    assert_eq!(default_res.appended_rows, 5);
-    assert!(default_res.write_stream.ends_with("/streams/_default"));
-
-    let pending_res = client
-        .append_arrow_stream("projects/p1/datasets/d1/tables/t1", &ipc_bytes, "PENDING")
-        .await
-        .expect("pending append");
-    assert_eq!(pending_res.appended_rows, 5);
+#[test]
+fn append_plan_assigns_offsets_per_record_batch() {
+    let ipc = build_mock_arrow_ipc_stream(b"SCHEMA", &[(b"B1", 3), (b"B2", 2), (b"B3", 4)]);
+    let plan = ArrowAppendPlan::build(&ipc, BigQueryWriteMode::Pending).expect("plan");
     assert_eq!(
-        pending_res.write_stream,
-        "projects/p1/datasets/d1/tables/t1/streams/pending-stream-1"
+        plan.requests.iter().map(|r| r.offset).collect::<Vec<_>>(),
+        vec![Some(0), Some(3), Some(5)]
     );
     assert_eq!(
-        *committed_streams.lock().await,
-        vec!["projects/p1/datasets/d1/tables/t1/streams/pending-stream-1".to_string()]
+        plan.requests
+            .iter()
+            .map(|r| r.row_count)
+            .collect::<Vec<_>>(),
+        vec![3, 2, 4]
     );
+    assert_eq!(plan.total_rows(), 9);
+    assert_eq!(
+        &plan.schema[..],
+        &build_encapsulated_arrow_frame(1, b"SCHEMA", 0)[..]
+    );
+    assert_eq!(
+        &plan.requests[1].record_batch[..],
+        &build_encapsulated_arrow_frame(3, b"B2", 2)[..]
+    );
+    let default_plan = ArrowAppendPlan::build(&ipc, BigQueryWriteMode::Default).expect("plan");
+    assert!(default_plan.requests.iter().all(|r| r.offset.is_none()));
+}
 
-    let err = client
-        .append_arrow_stream(
-            "projects/p1/datasets/d1/tables/reject_table",
-            &ipc_bytes,
-            "_default",
-        )
-        .await
-        .expect_err("row_errors should fail");
-    match err {
-        BigQueryError::RowErrors(errors) => {
-            assert!(!errors.is_empty());
-            assert_eq!(errors[0].index, 0);
-            assert!(errors[0].message.contains("schema mismatch"));
-        }
-        other => panic!("expected RowErrors, got {other:?}"),
+#[test]
+fn append_plan_verification_rejects_missing_and_mismatched_offsets() {
+    let ipc = build_mock_arrow_ipc_stream(b"SCHEMA", &[(b"B1", 3), (b"B2", 2)]);
+    let plan = ArrowAppendPlan::build(&ipc, BigQueryWriteMode::Committed).expect("plan");
+    assert_eq!(
+        plan.verify_responses(&[Some(0), Some(3)])
+            .expect("verified"),
+        5
+    );
+    assert!(matches!(
+        plan.verify_responses(&[Some(0)]),
+        Err(BigQueryError::AppendVerification(_))
+    ));
+    assert!(matches!(
+        plan.verify_responses(&[Some(0), Some(4)]),
+        Err(BigQueryError::AppendVerification(_))
+    ));
+    let default_plan = ArrowAppendPlan::build(&ipc, BigQueryWriteMode::Default).expect("plan");
+    assert_eq!(
+        default_plan
+            .verify_responses(&[None, None])
+            .expect("verified"),
+        5
+    );
+}
+
+#[test]
+fn append_plan_rejects_malformed_streams() {
+    let schema = build_encapsulated_arrow_frame(1, b"SCHEMA", 0);
+    let batch = build_encapsulated_arrow_frame(3, b"B1", 3);
+    let mut negative_vtable = schema.clone();
+    negative_vtable[28..32].copy_from_slice(&1000i32.to_le_bytes());
+    let oversized =
+        build_encapsulated_arrow_frame(3, &vec![0u8; MAX_APPEND_ROWS_CHUNK_BYTES + 8], 1);
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        (
+            "missing continuation marker",
+            b"ARROW1\0\0garbage-bytes".to_vec(),
+        ),
+        ("record batch before schema", batch.clone()),
+        (
+            "dictionary batch",
+            [
+                schema.clone(),
+                build_encapsulated_arrow_frame(2, b"DICT", 0),
+            ]
+            .concat(),
+        ),
+        ("negative vtable offset", negative_vtable),
+        (
+            "oversized record batch",
+            [schema.clone(), oversized].concat(),
+        ),
+        (
+            "truncated body",
+            [schema.clone(), batch[..batch.len() - 8].to_vec()].concat(),
+        ),
+        (
+            "duplicate schema",
+            [schema.clone(), schema.clone()].concat(),
+        ),
+    ];
+    for (label, bytes) in cases {
+        let outcome = ArrowAppendPlan::build(&bytes, BigQueryWriteMode::Default);
+        assert!(
+            matches!(outcome, Err(BigQueryError::InvalidArgument(_))),
+            "{label}: {outcome:?}"
+        );
     }
+    assert_eq!(
+        ArrowAppendPlan::build(&[], BigQueryWriteMode::Default)
+            .expect("empty")
+            .requests
+            .len(),
+        0
+    );
 }

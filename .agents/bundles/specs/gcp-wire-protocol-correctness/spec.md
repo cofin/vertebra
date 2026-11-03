@@ -10,11 +10,11 @@ research:
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 5
-current_task: gcp-wire-protocol-correctness:t05
-last_verified_checkpoint: a75507c
+state_revision: 6
+current_task: gcp-wire-protocol-correctness:t06
+last_verified_checkpoint: 7c20e42
 created_at: 2026-11-03T03:30:00Z
-updated_at: 2026-11-03T19:23:19Z
+updated_at: 2026-11-03T19:48:50Z
 tags: [rust, gcp, spanner, bigquery, protobuf, bugfix, dependencies]
 ---
 
@@ -185,8 +185,8 @@ pub async fn update_database_ddl(&self, statements: &[String]) -> Result<String,
 
 ### Phase 3: BigQuery Storage
 
-- [x] t04 — BigQuery Storage Read on the official client (tasks/t04-bigquery-storage-read.md)
-- [ ] t05 — BigQuery Storage Write, hardened Arrow append plan, grpc.rs removal (tasks/t05-bigquery-storage-write.md)
+- [x] [7c20e42] t04 — BigQuery Storage Read on the official client (tasks/t04-bigquery-storage-read.md)
+- [x] t05 — BigQuery Storage Write, hardened Arrow append plan, grpc.rs removal (tasks/t05-bigquery-storage-write.md)
 - **Phase 3 Recovery Checkpoint**: `make lint-all && make rs-test && make py-test && make bench-check`
 
 ### Phase 4: Documentation
