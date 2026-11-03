@@ -1431,6 +1431,7 @@ class SpannerClient:
         route_to_leader_enabled: bool = True,
         max_commit_delay_ms: int | None = None,
         auth_options: dict[str, str] | None = None,
+        admin_endpoint: str | None = None,
         ca_pem: bytes | None = None,
     ) -> SpannerClient: ...
     @property
@@ -1439,6 +1440,8 @@ class SpannerClient:
     def database_role(self) -> str | None: ...
     @property
     def endpoint(self) -> str: ...
+    @property
+    def admin_endpoint(self) -> str | None: ...
     @property
     def dialect(self) -> str: ...
     @property

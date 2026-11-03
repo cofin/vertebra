@@ -52,6 +52,7 @@ class SpannerCore:
             route_to_leader_enabled=config.route_to_leader_enabled,
             max_commit_delay_ms=config.max_commit_delay_ms,
             auth_options=config.build_auth_options() or None,
+            admin_endpoint=config.admin_endpoint,
             ca_pem=config.ca_pem,
         )
 

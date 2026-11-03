@@ -10,11 +10,11 @@ research:
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 3
-current_task: gcp-wire-protocol-correctness:t03
-last_verified_checkpoint: fadb99e
+state_revision: 4
+current_task: gcp-wire-protocol-correctness:t04
+last_verified_checkpoint: 2742099
 created_at: 2026-11-03T03:30:00Z
-updated_at: 2026-11-03T18:46:30Z
+updated_at: 2026-11-03T19:11:03Z
 tags: [rust, gcp, spanner, bigquery, protobuf, bugfix, dependencies]
 ---
 
@@ -179,8 +179,8 @@ pub async fn update_database_ddl(&self, statements: &[String]) -> Result<String,
 
 ### Phase 2: Spanner
 
-- [x] t02 — Spanner queries on the official client (tasks/t02-spanner-queries.md)
-- [~] t03 — Spanner writes and DDL on the official client; delete hand-written Spanner wire code (tasks/t03-spanner-writes-and-ddl.md)
+- [x] [2742099] t02 — Spanner queries on the official client (tasks/t02-spanner-queries.md)
+- [x] t03 — Spanner writes and DDL on the official client; delete hand-written Spanner wire code (tasks/t03-spanner-writes-and-ddl.md)
 - **Phase 2 Recovery Checkpoint**: `make lint && cd src/rs && cargo test -p vertebra-db --test spanner_wire_tests && cd ../.. && make dev && uv run pytest src/py/tests/unit/db/test_spanner.py src/py/tests/unit/db/test_spanner_queue_and_cdc.py src/py/tests/unit/extensions/test_sqlspec_spanner.py -q && uv run python -m mypy.stubtest vertebra._vertebra`
 
 ### Phase 3: BigQuery Storage

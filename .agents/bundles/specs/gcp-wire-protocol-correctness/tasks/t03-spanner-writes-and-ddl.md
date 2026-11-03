@@ -2,7 +2,7 @@
 type: Task
 id: gcp-wire-protocol-correctness:t03
 title: Spanner writes and DDL on the official client; delete hand-written Spanner wire code
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on: [gcp-wire-protocol-correctness:t02]
@@ -20,17 +20,17 @@ tests:
   - src/py/tests/unit/db/test_spanner.py
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: executor
+claimed_at: 2026-11-03T18:48:30Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-03T19:11:03Z
+last_verified_commit: 2742099
+verification_evidence: "cargo test -p vertebra-db --test spanner_wire_tests (15 passed, 1 ignored); pytest Spanner suites (51 passed); mypy.stubtest vertebra._vertebra (0 issues); make lint && make rs-test passed"
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T16:10:00Z
+updated_at: 2026-11-03T19:11:03Z
 commit: null
 tags: [rust, gcp, spanner, pyo3, bugfix]
 ---
@@ -109,9 +109,11 @@ Move `execute_dml`, `execute_batch_dml`, `execute_partitioned_dml`, `apply_mutat
 
 ## Acceptance Criteria
 
-- [ ] R4: DML, batch DML, PDML, mutations, BatchWrite on official APIs; a missing commit timestamp is `SpannerError::Protocol`.
-- [ ] R5: DDL honors `admin_endpoint` rule, returns the operation name, `Ddl` on failure, `DdlTimeout` past the deadline; emulator test is present and ignored by default.
-- [ ] R6: hand-written Spanner wire code and its tests are gone.
-- [ ] R7: `admin_endpoint` flows from `SpannerConfig` to the binding and stub.
+- [x] R4: DML, batch DML, PDML, mutations, BatchWrite on official APIs; a missing commit timestamp is `SpannerError::Protocol`.
+- [x] R5: DDL honors `admin_endpoint` rule, returns the operation name, `Ddl` on failure, `DdlTimeout` past the deadline; emulator test is present and ignored by default.
+- [x] R6: hand-written Spanner wire code and its tests are gone.
+- [x] R7: `admin_endpoint` flows from `SpannerConfig` to the binding and stub.
 
 ## Notes & Discoveries
+
+- `TransactionRunner::run` takes `F: AsyncFnMut(ReadWriteTransaction) -> Result<T>`. Passing `move |tx: ReadWriteTransaction| { let stmt = stmt.clone(); async move { tx.execute_update(stmt).await } }` keeps the returned future `'static + Send` when `execute_dml_async` / `execute_batch_dml_async` spawn the transaction runner onto Tokio via `spawn_rust_db_task`.

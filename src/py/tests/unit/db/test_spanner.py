@@ -23,6 +23,7 @@ from vertebra.db import (
     StalenessBound,
     SyncSpannerDriver,
 )
+from vertebra.db.spanner.core import SpannerCore
 from vertebra.embeddings import EmbeddingError, SpannerEmbedder
 from vertebra.storage import ObjectStore
 from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
@@ -901,3 +902,16 @@ def test_spanner_embedder_generate_sql_orders_rows_by_input_index(use_ai_functio
     assert sql.startswith("SELECT embeddings.values AS embedding, idx FROM ")
     assert "(SELECT content, idx FROM UNNEST(@texts) AS content WITH OFFSET AS idx)" in sql
     assert sql.endswith(") ORDER BY idx")
+
+
+def test_spanner_config_passes_admin_endpoint() -> None:
+    """SpannerCore.create_rust_client forwards admin_endpoint to the Rust SpannerClient."""
+    cfg = SpannerConfig(
+        project_id="p",
+        instance_id="i",
+        database_id="d",
+        endpoint="http://localhost:9010",
+        admin_endpoint="http://localhost:9020",
+    )
+    client = SpannerCore.create_rust_client(cfg)
+    assert client.admin_endpoint == "http://localhost:9020"

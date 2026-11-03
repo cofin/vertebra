@@ -261,6 +261,9 @@ class SpannerConfig(BaseDatabaseConfig, frozen=True, gc=False):
     endpoint: str = DEFAULT_SPANNER_ENDPOINT
     """Cloud Spanner v1 gRPC endpoint URI."""
 
+    admin_endpoint: str | None = None
+    """REST endpoint for DDL (`UpdateDatabaseDdl`). Defaults to `https://spanner.googleapis.com` for Google endpoints and to port 9020 of an `http://…:9010` emulator endpoint; required for any other endpoint."""
+
     pool_size: int = 4
     """Number of pooled HTTP/2 `h2` channels maintained by `GrpcChannelPool`."""
 
@@ -377,6 +380,8 @@ class SpannerConfig(BaseDatabaseConfig, frozen=True, gc=False):
             kwargs["dialect"] = "spangres" if dl in {"spangres", "postgresql", "pg"} else "googlesql"
         if "endpoint" in query_params:
             kwargs["endpoint"] = query_params["endpoint"][-1]
+        if "admin_endpoint" in query_params:
+            kwargs["admin_endpoint"] = query_params["admin_endpoint"][-1]
         if "pool_size" in query_params:
             kwargs["pool_size"] = int(query_params["pool_size"][-1])
         if "route_to_leader" in query_params:

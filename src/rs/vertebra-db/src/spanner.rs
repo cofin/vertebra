@@ -3,21 +3,23 @@
 //! `google-cloud-spanner` Rust client.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use bytes::Bytes;
 use futures::future::try_join_all;
+use google_cloud_longrunning::model::operation::Result as OperationResult;
+use google_cloud_spanner::batch::BatchDml;
 use google_cloud_spanner::channel_pool::StaticChannelPoolConfig;
 use google_cloud_spanner::client::{DatabaseAdmin, DatabaseClient, Spanner, SpannerBuilderExt};
+use google_cloud_spanner::key::{Key, KeySet};
 use google_cloud_spanner::model as spanner_model;
+use google_cloud_spanner::mutation::{Mutation, MutationGroup};
 use google_cloud_spanner::omni::TlsConfig;
 use google_cloud_spanner::result::ResultSet;
 use google_cloud_spanner::statement::Statement;
-use google_cloud_spanner::transaction::{Timestamp, TimestampBound};
+use google_cloud_spanner::transaction::{ReadWriteTransaction, Timestamp, TimestampBound};
 use google_cloud_spanner::types::Type as OfficialType;
 use google_cloud_spanner::value::{Kind, Value as OfficialValue};
 use tokio::sync::OnceCell;
@@ -25,24 +27,18 @@ use url::Url;
 use vertebra_core::gcp_auth::GcpTokenCache;
 
 use crate::gcp::{install_rustls_ring_provider, official_credentials};
-use crate::grpc::{
-    GrpcChannelPool, GrpcCode, GrpcErrorDetail, GrpcPoolConfig, GrpcRequestMetadata, GrpcStatus,
-    ProtoError, ProtoReader, ProtoWriter, WireType, generate_request_uuid_v4,
-};
 
 /// Default Cloud Spanner gRPC endpoint.
 pub const DEFAULT_SPANNER_ENDPOINT: &str = "https://spanner.googleapis.com";
 
-/// Maximum un-checkpointed byte buffer (`32 MiB`) before requiring a `resume_token` flush.
-pub const MAX_UNCHECKPOINTED_RESUME_BYTES: usize = 32 * 1024 * 1024;
+/// Default Cloud Spanner DatabaseAdmin REST endpoint.
+pub const DEFAULT_SPANNER_ADMIN_ENDPOINT: &str = "https://spanner.googleapis.com";
+
+/// Default deadline (`600 s`) for `UpdateDatabaseDdl` long-running operation polling.
+pub const DEFAULT_DDL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Maximum mutated cells per `BatchWrite` or `Commit` batch (`80,000`, below Spanner's `100,000` limit).
 pub const MAX_MUTATION_CELLS_PER_BATCH: usize = 80_000;
-
-/// Multiplexed session rotation interval (`7` days in milliseconds).
-pub const MULTIPLEXED_SESSION_ROTATION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
-
-static NEXT_SPANNER_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Cloud Spanner SQL dialect (`GoogleSQL` or `Spangres`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -85,6 +81,10 @@ pub struct SpannerClientConfig {
     pub database_role: Option<String>,
     /// Cloud Spanner gRPC endpoint (`https://spanner.googleapis.com` by default).
     pub endpoint: String,
+    /// REST endpoint for DDL (`UpdateDatabaseDdl`); derived when absent.
+    pub admin_endpoint: Option<String>,
+    /// Maximum duration to poll an `UpdateDatabaseDdl` operation before returning [`SpannerError::DdlTimeout`].
+    pub ddl_timeout: Duration,
     /// SQL dialect (`GoogleSql` or `Spangres`).
     pub dialect: SpannerDialect,
     /// Number of HTTP/2 gRPC channels in the pool (default `4`).
@@ -95,7 +95,7 @@ pub struct SpannerClientConfig {
     pub max_commit_delay_ms: Option<u64>,
     /// Options forwarded to `GcpTokenCache::from_options`.
     pub auth_options: HashMap<String, String>,
-    /// Optional custom PEM root certificate bundle for testing.
+    /// Optional custom PEM root certificate bundle for non-googleapis `https://` endpoints.
     pub ca_pem: Option<Vec<u8>>,
 }
 
@@ -106,6 +106,8 @@ impl SpannerClientConfig {
             database: database.into(),
             database_role: None,
             endpoint: DEFAULT_SPANNER_ENDPOINT.to_string(),
+            admin_endpoint: None,
+            ddl_timeout: DEFAULT_DDL_TIMEOUT,
             dialect: SpannerDialect::GoogleSql,
             pool_size: 4,
             route_to_leader_enabled: true,
@@ -148,22 +150,22 @@ impl SpannerClientConfig {
 pub enum SpannerError {
     #[error("Spanner invalid argument: {0}")]
     InvalidArgument(String),
-    #[error("Spanner gRPC error: {0}")]
-    Grpc(#[from] GrpcStatus),
-    #[error("Spanner protocol error: {0}")]
-    Protocol(String),
     #[error("Spanner auth error: {0}")]
     Auth(String),
-    #[error("Spanner SHM error: {0}")]
-    Shm(String),
     #[error("Spanner client error: {0}")]
     Client(#[from] google_cloud_spanner::Error),
-}
-
-impl From<ProtoError> for SpannerError {
-    fn from(err: ProtoError) -> Self {
-        Self::Protocol(err.to_string())
-    }
+    #[error("Spanner protocol error: {0}")]
+    Protocol(String),
+    #[error("UpdateDatabaseDdl operation {operation} failed with code {code}: {message}")]
+    Ddl {
+        operation: String,
+        code: i32,
+        message: String,
+    },
+    #[error(
+        "UpdateDatabaseDdl operation {operation} did not finish within {timeout_ms} ms; it may still be running"
+    )]
+    DdlTimeout { operation: String, timeout_ms: u64 },
 }
 
 /// Cloud Spanner `TypeCode` (`google.spanner.v1.TypeCode`).
@@ -334,104 +336,10 @@ impl SpannerType {
             proto_type_fqn: None,
         }
     }
-
-    /// Encode this `google.spanner.v1.Type` message into a [`ProtoWriter`].
-    pub fn encode(&self, w: &mut ProtoWriter) {
-        if self.code != SpannerTypeCode::Unspecified {
-            w.write_i32(1, self.code as i32);
-        }
-        if let Some(ref elem) = self.array_element_type {
-            w.write_nested(2, |nw| elem.encode(nw));
-        }
-        if !self.struct_fields.is_empty() {
-            w.write_nested(3, |nw| {
-                encode_struct_type_fields(&self.struct_fields, nw);
-            });
-        }
-        if self.type_annotation != SpannerTypeAnnotation::Unspecified {
-            w.write_i32(4, self.type_annotation as i32);
-        }
-        if let Some(ref fqn) = self.proto_type_fqn {
-            w.write_str(5, fqn);
-        }
-    }
-
-    /// Decode a `google.spanner.v1.Type` message from wire bytes.
-    pub fn decode(bytes: &[u8]) -> Result<Self, SpannerError> {
-        let mut r = ProtoReader::new(bytes);
-        let mut out = Self::default();
-        while let Some((field, wt)) = r.next_tag()? {
-            match (field, wt) {
-                (1, WireType::Varint) => {
-                    out.code = SpannerTypeCode::from_i32(r.read_i32()?);
-                }
-                (2, WireType::LengthDelimited) => {
-                    let sub = r.read_bytes()?;
-                    out.array_element_type = Some(Box::new(Self::decode(sub)?));
-                }
-                (3, WireType::LengthDelimited) => {
-                    let sub = r.read_bytes()?;
-                    out.struct_fields = decode_struct_type_fields(sub)?;
-                }
-                (4, WireType::Varint) => {
-                    out.type_annotation = SpannerTypeAnnotation::from_i32(r.read_i32()?);
-                }
-                (5, WireType::LengthDelimited) => {
-                    out.proto_type_fqn = Some(r.read_str()?.to_string());
-                }
-                _ => {
-                    r.skip_field(wt)?;
-                }
-            }
-        }
-        Ok(out)
-    }
 }
 
-fn encode_struct_type_fields(fields: &[SpannerStructField], w: &mut ProtoWriter) {
-    for f in fields {
-        w.write_nested(1, |fw| {
-            if !f.name.is_empty() {
-                fw.write_str(1, &f.name);
-            }
-            fw.write_nested(2, |tw| f.field_type.encode(tw));
-        });
-    }
-}
-
-fn decode_struct_type_fields(bytes: &[u8]) -> Result<Vec<SpannerStructField>, SpannerError> {
-    let mut r = ProtoReader::new(bytes);
-    let mut fields = Vec::new();
-    while let Some((field, wt)) = r.next_tag()? {
-        if field == 1 && wt == WireType::LengthDelimited {
-            let f_bytes = r.read_bytes()?;
-            let mut fr = ProtoReader::new(f_bytes);
-            let mut name = String::new();
-            let mut field_type = SpannerType::default();
-            while let Some((ff, fwt)) = fr.next_tag()? {
-                match (ff, fwt) {
-                    (1, WireType::LengthDelimited) => {
-                        name = fr.read_str()?.to_string();
-                    }
-                    (2, WireType::LengthDelimited) => {
-                        let tb = fr.read_bytes()?;
-                        field_type = SpannerType::decode(tb)?;
-                    }
-                    _ => {
-                        fr.skip_field(fwt)?;
-                    }
-                }
-            }
-            fields.push(SpannerStructField { name, field_type });
-        } else {
-            r.skip_field(wt)?;
-        }
-    }
-    Ok(fields)
-}
-
-/// Wire representation of `google.protobuf.Value` used inside Spanner `PartialResultSet`,
-/// `ExecuteSqlRequest.params`, and `Mutation` key/value lists.
+/// Wire representation of `google.protobuf.Value` used inside Spanner query parameters,
+/// results, and `Mutation` key/value lists.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum ProtobufValue {
     #[default]
@@ -443,186 +351,7 @@ pub enum ProtobufValue {
     List(Vec<ProtobufValue>),
 }
 
-impl ProtobufValue {
-    /// Encode this `google.protobuf.Value` into a [`ProtoWriter`].
-    pub fn encode(&self, w: &mut ProtoWriter) {
-        match self {
-            Self::Null => {
-                w.write_varint(1, 0);
-            }
-            Self::Number(n) => {
-                w.write_f64(2, *n);
-            }
-            Self::String(s) => {
-                w.write_str(3, s);
-            }
-            Self::Bool(b) => {
-                w.write_bool(4, *b);
-            }
-            Self::Struct(entries) => {
-                w.write_nested(5, |sw| {
-                    encode_protobuf_struct(entries, sw);
-                });
-            }
-            Self::List(items) => {
-                w.write_nested(6, |lw| {
-                    encode_protobuf_list_value(items, lw);
-                });
-            }
-        }
-    }
-
-    /// Decode a `google.protobuf.Value` from wire bytes.
-    pub fn decode(bytes: &[u8]) -> Result<Self, SpannerError> {
-        let mut r = ProtoReader::new(bytes);
-        let mut out = Self::Null;
-        while let Some((field, wt)) = r.next_tag()? {
-            match (field, wt) {
-                (1, WireType::Varint) => {
-                    let _ = r.read_varint()?;
-                    out = Self::Null;
-                }
-                (2, WireType::Fixed64) => {
-                    out = Self::Number(r.read_f64()?);
-                }
-                (3, WireType::LengthDelimited) => {
-                    out = Self::String(r.read_str()?.to_string());
-                }
-                (4, WireType::Varint) => {
-                    out = Self::Bool(r.read_bool()?);
-                }
-                (5, WireType::LengthDelimited) => {
-                    let sub = r.read_bytes()?;
-                    out = Self::Struct(decode_protobuf_struct(sub)?);
-                }
-                (6, WireType::LengthDelimited) => {
-                    let sub = r.read_bytes()?;
-                    out = Self::List(decode_protobuf_list_value(sub)?);
-                }
-                _ => {
-                    r.skip_field(wt)?;
-                }
-            }
-        }
-        Ok(out)
-    }
-
-    /// Estimate the in-memory byte footprint of this value (used for bounded `resume_token` buffering).
-    pub fn estimated_byte_size(&self) -> usize {
-        match self {
-            Self::Null | Self::Bool(_) => 8,
-            Self::Number(_) => 16,
-            Self::String(s) => 24 + s.len(),
-            Self::Struct(entries) => {
-                24 + entries
-                    .iter()
-                    .map(|(k, v)| 16 + k.len() + v.estimated_byte_size())
-                    .sum::<usize>()
-            }
-            Self::List(items) => 24 + items.iter().map(Self::estimated_byte_size).sum::<usize>(),
-        }
-    }
-
-    /// Merge a chunked `ProtobufValue` continuation (`src`) into `self` (`dst`) according to the
-    /// Cloud Spanner `PartialResultSet.chunked_value` specification:
-    /// - Two `StringValue`s are concatenated directly (before base64, numeric, timestamp, or JSON
-    ///   decoding).
-    /// - Two `ListValue`s are merged by concatenating their lists, recursively merging the last
-    ///   element of the first list with the first element of the second list if and only if both
-    ///   are `StringValue`s or both are `ListValue`s.
-    pub fn merge_chunked(&mut self, src: ProtobufValue) -> Result<(), SpannerError> {
-        match (self, src) {
-            (ProtobufValue::String(dst_str), ProtobufValue::String(src_str)) => {
-                dst_str.push_str(&src_str);
-                Ok(())
-            }
-            (ProtobufValue::List(dst_list), ProtobufValue::List(mut src_list)) => {
-                if !dst_list.is_empty() && !src_list.is_empty() {
-                    let should_merge_boundary = matches!(
-                        (dst_list.last(), src_list.first()),
-                        (
-                            Some(ProtobufValue::String(_)),
-                            Some(ProtobufValue::String(_))
-                        ) | (Some(ProtobufValue::List(_)), Some(ProtobufValue::List(_)))
-                    );
-                    if should_merge_boundary {
-                        let first_src = src_list.remove(0);
-                        if let Some(last_dst) = dst_list.last_mut() {
-                            last_dst.merge_chunked(first_src)?;
-                        }
-                    }
-                }
-                dst_list.extend(src_list);
-                Ok(())
-            }
-            (dst, other) => Err(SpannerError::Protocol(format!(
-                "cannot merge chunked PartialResultSet values of incompatible kinds: {dst:?} vs {other:?}"
-            ))),
-        }
-    }
-}
-
-pub fn encode_protobuf_struct(entries: &[(String, ProtobufValue)], w: &mut ProtoWriter) {
-    for (k, v) in entries {
-        w.write_nested(1, |mw| {
-            mw.write_str(1, k);
-            mw.write_nested(2, |vw| v.encode(vw));
-        });
-    }
-}
-
-pub fn decode_protobuf_struct(bytes: &[u8]) -> Result<Vec<(String, ProtobufValue)>, SpannerError> {
-    let mut r = ProtoReader::new(bytes);
-    let mut entries = Vec::new();
-    while let Some((field, wt)) = r.next_tag()? {
-        if field == 1 && wt == WireType::LengthDelimited {
-            let entry_bytes = r.read_bytes()?;
-            let mut er = ProtoReader::new(entry_bytes);
-            let mut key = String::new();
-            let mut val = ProtobufValue::Null;
-            while let Some((ef, ewt)) = er.next_tag()? {
-                match (ef, ewt) {
-                    (1, WireType::LengthDelimited) => {
-                        key = er.read_str()?.to_string();
-                    }
-                    (2, WireType::LengthDelimited) => {
-                        let vb = er.read_bytes()?;
-                        val = ProtobufValue::decode(vb)?;
-                    }
-                    _ => {
-                        er.skip_field(ewt)?;
-                    }
-                }
-            }
-            entries.push((key, val));
-        } else {
-            r.skip_field(wt)?;
-        }
-    }
-    Ok(entries)
-}
-
-pub fn encode_protobuf_list_value(items: &[ProtobufValue], w: &mut ProtoWriter) {
-    for item in items {
-        w.write_nested(1, |vw| item.encode(vw));
-    }
-}
-
-pub fn decode_protobuf_list_value(bytes: &[u8]) -> Result<Vec<ProtobufValue>, SpannerError> {
-    let mut r = ProtoReader::new(bytes);
-    let mut items = Vec::new();
-    while let Some((field, wt)) = r.next_tag()? {
-        if field == 1 && wt == WireType::LengthDelimited {
-            let vb = r.read_bytes()?;
-            items.push(ProtobufValue::decode(vb)?);
-        } else {
-            r.skip_field(wt)?;
-        }
-    }
-    Ok(items)
-}
-
-/// Decoded Cloud Spanner cell value hydrated after `PartialResultSet` chunk reassembly.
+/// Decoded Cloud Spanner cell value hydrated from official `ResultSet` rows.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SpannerValue {
     Null,
@@ -641,7 +370,7 @@ pub enum SpannerValue {
 }
 
 impl SpannerValue {
-    /// Decode a complete (un-chunked) [`ProtobufValue`] using its [`SpannerType`] schema.
+    /// Decode a [`ProtobufValue`] using its [`SpannerType`] schema.
     pub fn from_protobuf_value(
         raw: &ProtobufValue,
         col_type: &SpannerType,
@@ -1124,108 +853,6 @@ pub fn rewrite_spangres_placeholders(sql: &str) -> (String, Vec<String>) {
     (out, names)
 }
 
-/// Token emitted on a multiplexed session to coordinate `ReadWrite` transaction commit state
-/// (`google.spanner.v1.MultiplexedSessionPrecommitToken`).
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub struct MultiplexedSessionPrecommitToken {
-    /// Opaque precommit token bytes (`field 1`).
-    pub precommit_token: Vec<u8>,
-    /// Monotonic sequence number assigned by Spanner (`field 2`).
-    pub seq_num: i32,
-}
-
-impl MultiplexedSessionPrecommitToken {
-    /// Encode into a [`ProtoWriter`].
-    pub fn encode(&self, w: &mut ProtoWriter) {
-        if !self.precommit_token.is_empty() {
-            w.write_bytes(1, &self.precommit_token);
-        }
-        if self.seq_num != 0 {
-            w.write_i32(2, self.seq_num);
-        }
-    }
-
-    /// Decode from wire bytes.
-    pub fn decode(bytes: &[u8]) -> Result<Self, SpannerError> {
-        let mut r = ProtoReader::new(bytes);
-        let mut token = Vec::new();
-        let mut seq_num = 0i32;
-        while let Some((field, wt)) = r.next_tag()? {
-            match (field, wt) {
-                (1, WireType::LengthDelimited) => {
-                    let b = r.read_bytes()?;
-                    token = b.to_vec();
-                }
-                (2, WireType::Varint) => {
-                    seq_num = r.read_i32()?;
-                }
-                _ => {
-                    r.skip_field(wt)?;
-                }
-            }
-        }
-        if seq_num == 0
-            && !token.is_empty()
-            && token[0] == 0x0A
-            && let Ok(inner) = Self::decode_inner_only(&token)
-            && !inner.precommit_token.is_empty()
-        {
-            return Ok(inner);
-        }
-        Ok(Self {
-            precommit_token: token,
-            seq_num,
-        })
-    }
-
-    fn decode_inner_only(bytes: &[u8]) -> Result<Self, SpannerError> {
-        let mut r = ProtoReader::new(bytes);
-        let mut token = Vec::new();
-        let mut seq_num = 0i32;
-        let mut saw_seq = false;
-        while let Some((field, wt)) = r.next_tag()? {
-            match (field, wt) {
-                (1, WireType::LengthDelimited) => {
-                    token = r.read_bytes()?.to_vec();
-                }
-                (2, WireType::Varint) => {
-                    seq_num = r.read_i32()?;
-                    saw_seq = true;
-                }
-                _ => return Err(SpannerError::Protocol("not an inner token".to_string())),
-            }
-        }
-        if saw_seq {
-            Ok(Self {
-                precommit_token: token,
-                seq_num,
-            })
-        } else {
-            Err(SpannerError::Protocol("no seq_num".to_string()))
-        }
-    }
-}
-
-/// Update `slot` if `candidate` has a higher (or equal with non-empty token) `seq_num`.
-pub fn update_highest_precommit_token(
-    slot: &mut Option<MultiplexedSessionPrecommitToken>,
-    candidate: Option<MultiplexedSessionPrecommitToken>,
-) {
-    let Some(cand) = candidate.filter(|c| !c.precommit_token.is_empty()) else {
-        return;
-    };
-    match slot {
-        Some(existing) => {
-            if cand.seq_num >= existing.seq_num {
-                *existing = cand;
-            }
-        }
-        None => {
-            *slot = Some(cand);
-        }
-    }
-}
-
 /// Read-only staleness bound (`google.spanner.v1.TransactionOptions.ReadOnly`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SpannerStaleness {
@@ -1235,153 +862,6 @@ pub enum SpannerStaleness {
     MaxStalenessMs(u64),
     ReadTimestampUnixMicros(i64),
     MinReadTimestampUnixMicros(i64),
-}
-
-impl SpannerStaleness {
-    fn encode_read_only(&self, return_read_timestamp: bool, w: &mut ProtoWriter) {
-        match *self {
-            Self::Strong => {
-                w.write_bool(1, true);
-            }
-            Self::MinReadTimestampUnixMicros(us) => {
-                w.write_nested(2, |tw| encode_timestamp_micros(us, tw));
-            }
-            Self::MaxStalenessMs(ms) => {
-                w.write_nested(3, |dw| encode_duration_ms(ms, dw));
-            }
-            Self::ReadTimestampUnixMicros(us) => {
-                w.write_nested(4, |tw| encode_timestamp_micros(us, tw));
-            }
-            Self::ExactStalenessMs(ms) => {
-                w.write_nested(5, |dw| encode_duration_ms(ms, dw));
-            }
-        }
-        if return_read_timestamp {
-            w.write_bool(6, true);
-        }
-    }
-}
-
-fn encode_duration_ms(ms: u64, w: &mut ProtoWriter) {
-    let secs = (ms / 1_000) as i64;
-    let nanos = ((ms % 1_000) * 1_000_000) as i32;
-    if secs != 0 {
-        w.write_i64(1, secs);
-    }
-    if nanos != 0 {
-        w.write_i32(2, nanos);
-    }
-}
-
-fn encode_timestamp_micros(micros: i64, w: &mut ProtoWriter) {
-    let secs = micros.div_euclid(1_000_000);
-    let nanos = (micros.rem_euclid(1_000_000) * 1_000) as i32;
-    if secs != 0 {
-        w.write_i64(1, secs);
-    }
-    if nanos != 0 {
-        w.write_i32(2, nanos);
-    }
-}
-
-fn decode_timestamp_micros(bytes: &[u8]) -> Result<i64, SpannerError> {
-    let mut r = ProtoReader::new(bytes);
-    let mut secs = 0i64;
-    let mut nanos = 0i32;
-    while let Some((field, wt)) = r.next_tag()? {
-        match (field, wt) {
-            (1, WireType::Varint) => secs = r.read_i64()?,
-            (2, WireType::Varint) => nanos = r.read_i32()?,
-            _ => r.skip_field(wt)?,
-        }
-    }
-    Ok(secs
-        .saturating_mul(1_000_000)
-        .saturating_add(i64::from(nanos) / 1_000))
-}
-
-/// Transaction options (`google.spanner.v1.TransactionOptions`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SpannerTransactionOptions {
-    ReadWrite {
-        previous_transaction_id: Option<Vec<u8>>,
-        exclude_txn_from_change_streams: bool,
-    },
-    PartitionedDml {
-        exclude_txn_from_change_streams: bool,
-    },
-    ReadOnly {
-        staleness: SpannerStaleness,
-        return_read_timestamp: bool,
-    },
-}
-
-impl SpannerTransactionOptions {
-    /// Return `true` when this transaction mode requires `x-goog-spanner-route-to-leader: true`.
-    #[inline]
-    pub const fn requires_leader_routing(&self) -> bool {
-        matches!(self, Self::ReadWrite { .. } | Self::PartitionedDml { .. })
-    }
-
-    pub fn encode(&self, w: &mut ProtoWriter) {
-        match self {
-            Self::ReadWrite {
-                previous_transaction_id,
-                exclude_txn_from_change_streams,
-            } => {
-                w.write_nested(1, |rw| {
-                    if let Some(prev) = previous_transaction_id
-                        && !prev.is_empty()
-                    {
-                        rw.write_bytes(2, prev);
-                    }
-                });
-                if *exclude_txn_from_change_streams {
-                    w.write_bool(5, true);
-                }
-            }
-            Self::ReadOnly {
-                staleness,
-                return_read_timestamp,
-            } => {
-                w.write_nested(2, |ro| {
-                    staleness.encode_read_only(*return_read_timestamp, ro);
-                });
-            }
-            Self::PartitionedDml {
-                exclude_txn_from_change_streams,
-            } => {
-                w.write_nested(3, |_pdml| {});
-                if *exclude_txn_from_change_streams {
-                    w.write_bool(5, true);
-                }
-            }
-        }
-    }
-}
-
-/// Selector choosing how a statement binds to a Spanner transaction (`google.spanner.v1.TransactionSelector`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SpannerTransactionSelector {
-    SingleUse(SpannerTransactionOptions),
-    Id(Vec<u8>),
-    Begin(SpannerTransactionOptions),
-}
-
-impl SpannerTransactionSelector {
-    pub fn encode(&self, w: &mut ProtoWriter) {
-        match self {
-            Self::SingleUse(opts) => {
-                w.write_nested(1, |ow| opts.encode(ow));
-            }
-            Self::Id(tx_id) => {
-                w.write_bytes(2, tx_id);
-            }
-            Self::Begin(opts) => {
-                w.write_nested(3, |ow| opts.encode(ow));
-            }
-        }
-    }
 }
 
 /// Write or delete mutation (`google.spanner.v1.Mutation`).
@@ -1494,68 +974,6 @@ impl SpannerMutation {
             Self::Delete { keys, .. } => keys.len().max(1),
         }
     }
-
-    /// Encode this `google.spanner.v1.Mutation` into a [`ProtoWriter`].
-    pub fn encode(&self, w: &mut ProtoWriter) {
-        match self {
-            Self::Insert {
-                table,
-                columns,
-                values,
-            } => {
-                w.write_nested(1, |mw| encode_write_mutation(table, columns, values, mw));
-            }
-            Self::Update {
-                table,
-                columns,
-                values,
-            } => {
-                w.write_nested(2, |mw| encode_write_mutation(table, columns, values, mw));
-            }
-            Self::InsertOrUpdate {
-                table,
-                columns,
-                values,
-            } => {
-                w.write_nested(3, |mw| encode_write_mutation(table, columns, values, mw));
-            }
-            Self::Replace {
-                table,
-                columns,
-                values,
-            } => {
-                w.write_nested(4, |mw| encode_write_mutation(table, columns, values, mw));
-            }
-            Self::Delete { table, keys, all } => {
-                w.write_nested(5, |dw| {
-                    dw.write_str(1, table);
-                    dw.write_nested(2, |kw| {
-                        for key_tuple in keys {
-                            kw.write_nested(1, |lw| encode_protobuf_list_value(key_tuple, lw));
-                        }
-                        if *all {
-                            kw.write_bool(3, true);
-                        }
-                    });
-                });
-            }
-        }
-    }
-}
-
-fn encode_write_mutation(
-    table: &str,
-    columns: &[String],
-    values: &[Vec<ProtobufValue>],
-    w: &mut ProtoWriter,
-) {
-    w.write_str(1, table);
-    for col in columns {
-        w.write_str(2, col);
-    }
-    for row in values {
-        w.write_nested(3, |lw| encode_protobuf_list_value(row, lw));
-    }
 }
 
 /// Group of mutations executed atomically inside a `BatchWrite` RPC (`google.spanner.v1.BatchWriteRequest.MutationGroup`).
@@ -1572,398 +990,16 @@ impl SpannerMutationGroup {
     pub fn cell_count(&self) -> usize {
         self.mutations.iter().map(SpannerMutation::cell_count).sum()
     }
-
-    pub fn encode(&self, w: &mut ProtoWriter) {
-        for m in &self.mutations {
-            w.write_nested(1, |mw| m.encode(mw));
-        }
-    }
 }
 
-/// Decoded `PartialResultSet` wire frame (`google.spanner.v1.PartialResultSet`).
-#[derive(Clone, Debug, Default)]
-pub struct PartialResultSetFrame {
-    pub row_type: Option<Vec<SpannerStructField>>,
-    pub transaction_id: Option<Vec<u8>>,
-    pub read_timestamp_micros: Option<i64>,
-    pub values: Vec<ProtobufValue>,
-    pub chunked_value: bool,
-    pub resume_token: Vec<u8>,
-    pub row_count_exact: Option<i64>,
-    pub row_count_lower_bound: Option<i64>,
-    pub precommit_token: Option<MultiplexedSessionPrecommitToken>,
-    pub last: bool,
-}
-
-impl PartialResultSetFrame {
-    /// Decode a `google.spanner.v1.PartialResultSet` message from wire bytes.
-    pub fn decode(bytes: &[u8]) -> Result<Self, SpannerError> {
-        let mut r = ProtoReader::new(bytes);
-        let mut out = Self::default();
-        while let Some((field, wt)) = r.next_tag()? {
-            match (field, wt) {
-                (1, WireType::LengthDelimited) => {
-                    let meta_bytes = r.read_bytes()?;
-                    let (fields, tx_id, read_ts, tx_precommit) =
-                        decode_result_set_metadata(meta_bytes)?;
-                    if !fields.is_empty() || out.row_type.is_none() {
-                        out.row_type = Some(fields);
-                    }
-                    if tx_id.is_some() {
-                        out.transaction_id = tx_id;
-                    }
-                    if read_ts.is_some() {
-                        out.read_timestamp_micros = read_ts;
-                    }
-                    update_highest_precommit_token(&mut out.precommit_token, tx_precommit);
-                }
-                (2, WireType::LengthDelimited) => {
-                    let vb = r.read_bytes()?;
-                    out.values.push(ProtobufValue::decode(vb)?);
-                }
-                (3, WireType::Varint) => {
-                    out.chunked_value = r.read_bool()?;
-                }
-                (4, WireType::LengthDelimited) => {
-                    out.resume_token = r.read_bytes()?.to_vec();
-                }
-                (5, WireType::LengthDelimited) => {
-                    let sb = r.read_bytes()?;
-                    let (exact, lower) = decode_result_set_stats(sb)?;
-                    out.row_count_exact = exact;
-                    out.row_count_lower_bound = lower;
-                }
-                (8, WireType::LengthDelimited) => {
-                    let pb = r.read_bytes()?;
-                    let tok = MultiplexedSessionPrecommitToken::decode(pb)?;
-                    update_highest_precommit_token(&mut out.precommit_token, Some(tok));
-                }
-                (9, WireType::Varint) => {
-                    out.last = r.read_bool()?;
-                }
-                _ => {
-                    r.skip_field(wt)?;
-                }
-            }
-        }
-        Ok(out)
-    }
-}
-
-type DecodedResultSetMetadata = (
-    Vec<SpannerStructField>,
-    Option<Vec<u8>>,
-    Option<i64>,
-    Option<MultiplexedSessionPrecommitToken>,
-);
-
-type DecodedTransactionMessage = (
-    Vec<u8>,
-    Option<i64>,
-    Option<MultiplexedSessionPrecommitToken>,
-);
-
-fn decode_result_set_metadata(bytes: &[u8]) -> Result<DecodedResultSetMetadata, SpannerError> {
-    let mut r = ProtoReader::new(bytes);
-    let mut fields = Vec::new();
-    let mut tx_id = None;
-    let mut read_ts = None;
-    let mut precommit = None;
-    while let Some((field, wt)) = r.next_tag()? {
-        match (field, wt) {
-            (1, WireType::LengthDelimited) => {
-                let st_bytes = r.read_bytes()?;
-                fields = decode_struct_type_fields(st_bytes)?;
-            }
-            (2, WireType::LengthDelimited) => {
-                let tx_bytes = r.read_bytes()?;
-                let (id, ts, tok) = decode_transaction_message(tx_bytes)?;
-                if !id.is_empty() {
-                    tx_id = Some(id);
-                }
-                read_ts = ts;
-                precommit = tok;
-            }
-            _ => {
-                r.skip_field(wt)?;
-            }
-        }
-    }
-    Ok((fields, tx_id, read_ts, precommit))
-}
-
-fn decode_transaction_message(bytes: &[u8]) -> Result<DecodedTransactionMessage, SpannerError> {
-    let mut r = ProtoReader::new(bytes);
-    let mut id = Vec::new();
-    let mut read_ts = None;
-    let mut precommit = None;
-    while let Some((field, wt)) = r.next_tag()? {
-        match (field, wt) {
-            (1, WireType::LengthDelimited) => {
-                id = r.read_bytes()?.to_vec();
-            }
-            (2, WireType::LengthDelimited) => {
-                let ts_bytes = r.read_bytes()?;
-                read_ts = Some(decode_timestamp_micros(ts_bytes)?);
-            }
-            (8, WireType::LengthDelimited) => {
-                let pb = r.read_bytes()?;
-                precommit = Some(MultiplexedSessionPrecommitToken::decode(pb)?);
-            }
-            _ => {
-                r.skip_field(wt)?;
-            }
-        }
-    }
-    Ok((id, read_ts, precommit))
-}
-
-fn decode_result_set_stats(bytes: &[u8]) -> Result<(Option<i64>, Option<i64>), SpannerError> {
-    let mut r = ProtoReader::new(bytes);
-    let mut exact = None;
-    let mut lower = None;
-    while let Some((field, wt)) = r.next_tag()? {
-        match (field, wt) {
-            (3, WireType::Varint) => {
-                exact = Some(r.read_i64()?);
-            }
-            (4, WireType::Varint) => {
-                lower = Some(r.read_i64()?);
-            }
-            _ => {
-                r.skip_field(wt)?;
-            }
-        }
-    }
-    Ok((exact, lower))
-}
-
-/// Stateful streaming `PartialResultSet` assembler implementing chunk merging and bounded
-/// `32 MiB` `resume_token` checkpointing.
-#[derive(Clone, Debug, Default)]
-pub struct PartialResultSetAssembler {
-    pub schema: Vec<SpannerStructField>,
-    pub transaction_id: Option<Vec<u8>>,
-    pub read_timestamp_micros: Option<i64>,
-    pub row_count_exact: Option<i64>,
-    pub row_count_lower_bound: Option<i64>,
-    pub latest_precommit_token: Option<MultiplexedSessionPrecommitToken>,
-    pub last_resume_token: Vec<u8>,
-    committed_values: Vec<ProtobufValue>,
-    pending_values: Vec<ProtobufValue>,
-    pending_bytes: usize,
-    chunked_tail: bool,
-}
-
-impl PartialResultSetAssembler {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Push a decoded [`PartialResultSetFrame`] into the assembler.
-    pub fn push_frame(&mut self, mut frame: PartialResultSetFrame) -> Result<(), SpannerError> {
-        if let Some(fields) = frame.row_type
-            && (!fields.is_empty() || self.schema.is_empty())
-        {
-            self.schema = fields;
-        }
-        if let Some(tx_id) = frame.transaction_id {
-            self.transaction_id = Some(tx_id);
-        }
-        if let Some(ts) = frame.read_timestamp_micros {
-            self.read_timestamp_micros = Some(ts);
-        }
-        if let Some(exact) = frame.row_count_exact {
-            self.row_count_exact = Some(exact);
-        }
-        if let Some(lower) = frame.row_count_lower_bound {
-            self.row_count_lower_bound = Some(lower);
-        }
-        update_highest_precommit_token(&mut self.latest_precommit_token, frame.precommit_token);
-
-        if self.chunked_tail && !frame.values.is_empty() {
-            let first = frame.values.remove(0);
-            if let Some(last_pending) = self.pending_values.last_mut() {
-                last_pending.merge_chunked(first)?;
-            } else if let Some(last_committed) = self.committed_values.last_mut() {
-                last_committed.merge_chunked(first)?;
-            } else {
-                return Err(SpannerError::Protocol(
-                    "received continuation PartialResultSet with no prior chunked value"
-                        .to_string(),
-                ));
-            }
-            self.chunked_tail = false;
-        }
-
-        for val in frame.values {
-            self.pending_bytes = self.pending_bytes.saturating_add(val.estimated_byte_size());
-            self.pending_values.push(val);
-        }
-
-        self.chunked_tail = frame.chunked_value;
-
-        if !frame.resume_token.is_empty() && !self.chunked_tail {
-            self.last_resume_token = frame.resume_token;
-            self.committed_values.append(&mut self.pending_values);
-            self.pending_bytes = 0;
-        } else if self.pending_bytes > MAX_UNCHECKPOINTED_RESUME_BYTES && !self.chunked_tail {
-            self.committed_values.append(&mut self.pending_values);
-            self.pending_bytes = 0;
-            self.last_resume_token.clear();
-        }
-        Ok(())
-    }
-
-    /// Discard any un-checkpointed values collected after `last_resume_token` so the stream can
-    /// safely replay from `last_resume_token`.
-    pub fn rollback_to_last_resume_token(&mut self) -> Option<Vec<u8>> {
-        if self.last_resume_token.is_empty() {
-            return None;
-        }
-        self.pending_values.clear();
-        self.pending_bytes = 0;
-        self.chunked_tail = false;
-        Some(self.last_resume_token.clone())
-    }
-
-    /// Finalize the stream and decode all assembled [`ProtobufValue`] cells into rows of [`SpannerValue`].
-    pub fn finish(mut self) -> Result<SpannerQueryResult, SpannerError> {
-        if self.chunked_tail {
-            return Err(SpannerError::Protocol(
-                "PartialResultSet stream ended while chunked_value was still true".to_string(),
-            ));
-        }
-        self.committed_values.append(&mut self.pending_values);
-        let num_cols = self.schema.len();
-        let columns: Vec<String> = self.schema.iter().map(|f| f.name.clone()).collect();
-        let mut rows = Vec::new();
-        if num_cols > 0 {
-            if !self.committed_values.len().is_multiple_of(num_cols) {
-                return Err(SpannerError::Protocol(format!(
-                    "PartialResultSet total value count ({}) is not a multiple of schema column count ({num_cols})",
-                    self.committed_values.len()
-                )));
-            }
-            for row_slice in self.committed_values.chunks(num_cols) {
-                let mut row = Vec::with_capacity(num_cols);
-                for (col_idx, raw_val) in row_slice.iter().enumerate() {
-                    let col_type = &self.schema[col_idx].field_type;
-                    row.push(SpannerValue::from_protobuf_value(raw_val, col_type)?);
-                }
-                rows.push(row);
-            }
-        }
-        Ok(SpannerQueryResult {
-            columns,
-            schema: self.schema,
-            rows,
-            transaction_id: self.transaction_id,
-            read_timestamp_micros: self.read_timestamp_micros,
-            row_count_exact: self.row_count_exact,
-            row_count_lower_bound: self.row_count_lower_bound,
-            precommit_token: self.latest_precommit_token,
-        })
-    }
-}
-
-/// Complete decoded result set returned by `ExecuteStreamingSql` / `ExecuteSql`.
+/// Complete decoded result set returned by `query` and `partitioned_query`.
 #[derive(Clone, Debug, Default)]
 pub struct SpannerQueryResult {
     pub columns: Vec<String>,
     pub schema: Vec<SpannerStructField>,
     pub rows: Vec<Vec<SpannerValue>>,
-    pub transaction_id: Option<Vec<u8>>,
-    pub read_timestamp_micros: Option<i64>,
     pub row_count_exact: Option<i64>,
     pub row_count_lower_bound: Option<i64>,
-    pub precommit_token: Option<MultiplexedSessionPrecommitToken>,
-}
-
-/// Cached multiplexed session handle (`google.spanner.v1.Session`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SpannerSessionHandle {
-    pub name: String,
-    pub database_role: Option<String>,
-    pub multiplexed: bool,
-    pub created_at_unix_ms: i64,
-}
-
-impl SpannerSessionHandle {
-    /// Return `true` when this session has exceeded the 7-day rotation window.
-    pub fn should_rotate(&self, now_ms: i64) -> bool {
-        now_ms.saturating_sub(self.created_at_unix_ms) >= MULTIPLEXED_SESSION_ROTATION_MS
-    }
-}
-
-/// Mutable state for a multiplexed `ReadWrite` transaction.
-#[derive(Clone, Debug, Default)]
-pub struct SpannerReadWriteTransaction {
-    pub transaction_id: Option<Vec<u8>>,
-    pub previous_transaction_id: Option<Vec<u8>>,
-    pub seqno: i64,
-    pub latest_precommit_token: Option<MultiplexedSessionPrecommitToken>,
-    pub mutations: Vec<SpannerMutation>,
-    pub transaction_tag: Option<String>,
-    pub exclude_txn_from_change_streams: bool,
-}
-
-impl SpannerReadWriteTransaction {
-    /// Create a new `ReadWrite` transaction state.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Create a retry `ReadWrite` transaction preserving wound-wait priority from `aborted_tx_id`.
-    pub fn retry_from_aborted(aborted_tx_id: Option<Vec<u8>>) -> Self {
-        Self {
-            transaction_id: None,
-            previous_transaction_id: aborted_tx_id,
-            seqno: 0,
-            latest_precommit_token: None,
-            mutations: Vec::new(),
-            transaction_tag: None,
-            exclude_txn_from_change_streams: false,
-        }
-    }
-
-    /// Advance and return the next 1-based statement `seqno`.
-    pub fn next_seqno(&mut self) -> i64 {
-        self.seqno += 1;
-        self.seqno
-    }
-
-    /// Buffer a [`SpannerMutation`] to be sent on `Commit`.
-    pub fn add_mutation(&mut self, mutation: SpannerMutation) {
-        self.mutations.push(mutation);
-    }
-
-    /// Build the [`SpannerTransactionSelector`] for the next statement (using inline `Begin` on
-    /// statement #1 when `transaction_id` is not yet assigned).
-    pub fn selector_for_statement(&self) -> SpannerTransactionSelector {
-        if let Some(ref id) = self.transaction_id {
-            SpannerTransactionSelector::Id(id.clone())
-        } else {
-            SpannerTransactionSelector::Begin(SpannerTransactionOptions::ReadWrite {
-                previous_transaction_id: self.previous_transaction_id.clone(),
-                exclude_txn_from_change_streams: self.exclude_txn_from_change_streams,
-            })
-        }
-    }
-
-    /// Record any newly returned `transaction_id` and `precommit_token`.
-    pub fn observe_response(
-        &mut self,
-        tx_id: Option<Vec<u8>>,
-        precommit_token: Option<MultiplexedSessionPrecommitToken>,
-    ) {
-        if let Some(id) = tx_id
-            && !id.is_empty()
-        {
-            self.transaction_id = Some(id);
-        }
-        update_highest_precommit_token(&mut self.latest_precommit_token, precommit_token);
-    }
 }
 
 /// Statement item inside `ExecuteBatchDmlRequest`.
@@ -1971,14 +1007,6 @@ impl SpannerReadWriteTransaction {
 pub struct SpannerBatchDmlStatement {
     pub sql: String,
     pub params: Vec<SpannerQueryParameter>,
-}
-
-/// Result of `ExecuteBatchDml`.
-#[derive(Clone, Debug)]
-pub struct SpannerBatchDmlResult {
-    pub row_counts: Vec<i64>,
-    pub transaction_id: Option<Vec<u8>>,
-    pub precommit_token: Option<MultiplexedSessionPrecommitToken>,
 }
 
 /// Result of `Commit`.
@@ -2214,11 +1242,101 @@ async fn collect_query_result(mut rs: ResultSet) -> Result<SpannerQueryResult, S
         columns,
         schema,
         rows,
-        transaction_id: None,
-        read_timestamp_micros: None,
         row_count_exact,
         row_count_lower_bound,
-        precommit_token: None,
+    })
+}
+
+fn official_mutation_rows(mutation: &SpannerMutation) -> Vec<Mutation> {
+    match mutation {
+        SpannerMutation::Insert {
+            table,
+            columns,
+            values,
+        } => values
+            .iter()
+            .map(|row| {
+                let mut builder = Mutation::new_insert_builder(table);
+                for (col, cell) in columns.iter().zip(row.iter()) {
+                    builder = builder.set(col).to(official_value(cell));
+                }
+                builder.build()
+            })
+            .collect(),
+        SpannerMutation::Update {
+            table,
+            columns,
+            values,
+        } => values
+            .iter()
+            .map(|row| {
+                let mut builder = Mutation::new_update_builder(table);
+                for (col, cell) in columns.iter().zip(row.iter()) {
+                    builder = builder.set(col).to(official_value(cell));
+                }
+                builder.build()
+            })
+            .collect(),
+        SpannerMutation::InsertOrUpdate {
+            table,
+            columns,
+            values,
+        } => values
+            .iter()
+            .map(|row| {
+                let mut builder = Mutation::new_insert_or_update_builder(table);
+                for (col, cell) in columns.iter().zip(row.iter()) {
+                    builder = builder.set(col).to(official_value(cell));
+                }
+                builder.build()
+            })
+            .collect(),
+        SpannerMutation::Replace {
+            table,
+            columns,
+            values,
+        } => values
+            .iter()
+            .map(|row| {
+                let mut builder = Mutation::new_replace_builder(table);
+                for (col, cell) in columns.iter().zip(row.iter()) {
+                    builder = builder.set(col).to(official_value(cell));
+                }
+                builder.build()
+            })
+            .collect(),
+        SpannerMutation::Delete { table, keys, all } => {
+            let key_set = if *all {
+                KeySet::all()
+            } else {
+                keys.iter()
+                    .fold(KeySet::builder(), |builder, key_tuple| {
+                        builder.add_key(Key::new(key_tuple.iter().map(official_value).collect()))
+                    })
+                    .build()
+            };
+            vec![Mutation::delete(table, key_set)]
+        }
+    }
+}
+
+fn commit_result(
+    resp: &spanner_model::CommitResponse,
+) -> Result<SpannerCommitResult, SpannerError> {
+    let Some(ref ts) = resp.commit_timestamp else {
+        return Err(SpannerError::Protocol(
+            "Commit returned no commit_timestamp; the transaction outcome is unknown".into(),
+        ));
+    };
+    let micros = ts
+        .seconds()
+        .saturating_mul(1_000_000)
+        .saturating_add(i64::from(ts.nanos()) / 1_000);
+    let mutation_count = resp.commit_stats.as_ref().map(|s| s.mutation_count);
+    Ok(SpannerCommitResult {
+        commit_timestamp_micros: Some(micros),
+        mutation_count,
+        retry_count: 0,
     })
 }
 
@@ -2227,43 +1345,25 @@ pub struct SpannerClient {
     config: SpannerClientConfig,
     token_cache: Option<Arc<GcpTokenCache>>,
     injected_spanner: Option<Spanner>,
-    #[allow(dead_code)]
     injected_admin: Option<DatabaseAdmin>,
     official: OnceCell<Spanner>,
     database_client: OnceCell<DatabaseClient>,
-    grpc_pool: GrpcChannelPool,
-    cached_session: RwLock<Option<Arc<SpannerSessionHandle>>>,
-    client_id: u64,
-    rand64_hex: String,
-    req_seq: AtomicU64,
+    admin_client: OnceCell<DatabaseAdmin>,
 }
 
 impl SpannerClient {
     /// Construct a new [`SpannerClient`].
     pub fn new(config: SpannerClientConfig) -> Result<Self, SpannerError> {
         validate_spanner_config(&config)?;
-        let endpoint = config.effective_endpoint();
-        let mut pool_cfg = GrpcPoolConfig::new(endpoint);
-        pool_cfg.pool_size = config.pool_size.max(1);
-        pool_cfg.connect_timeout = Duration::from_secs(10);
-        pool_cfg.user_agent = "vertebra-spanner/0.1".to_string();
-        let grpc_pool =
-            GrpcChannelPool::new(pool_cfg).map_err(|e| SpannerError::Protocol(e.message))?;
-
         let token_cache = if config.is_cleartext() && config.auth_options.is_empty() {
             None
         } else {
             let mut opts = config.auth_options.clone();
             opts.entry("scopes".to_string()).or_insert_with(|| {
-                "https://www.googleapis.com/auth/spanner.data,https://www.googleapis.com/auth/cloud-platform".to_string()
+                "https://www.googleapis.com/auth/spanner.data,https://www.googleapis.com/auth/spanner.admin,https://www.googleapis.com/auth/cloud-platform".to_string()
             });
             GcpTokenCache::from_options(&opts)
         };
-
-        let uuid = generate_request_uuid_v4().replace('-', "");
-        let rand64_hex = uuid.chars().take(16).collect::<String>();
-        let client_id = NEXT_SPANNER_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
-
         Ok(Self {
             config,
             token_cache,
@@ -2271,11 +1371,7 @@ impl SpannerClient {
             injected_admin: None,
             official: OnceCell::new(),
             database_client: OnceCell::new(),
-            grpc_pool,
-            cached_session: RwLock::new(None),
-            client_id,
-            rand64_hex,
-            req_seq: AtomicU64::new(1),
+            admin_client: OnceCell::new(),
         })
     }
 
@@ -2286,18 +1382,6 @@ impl SpannerClient {
         config: SpannerClientConfig,
     ) -> Result<Self, SpannerError> {
         validate_spanner_config(&config)?;
-        let endpoint = config.effective_endpoint();
-        let mut pool_cfg = GrpcPoolConfig::new(endpoint);
-        pool_cfg.pool_size = config.pool_size.max(1);
-        pool_cfg.connect_timeout = Duration::from_secs(10);
-        pool_cfg.user_agent = "vertebra-spanner/0.1".to_string();
-        let grpc_pool =
-            GrpcChannelPool::new(pool_cfg).map_err(|e| SpannerError::Protocol(e.message))?;
-
-        let uuid = generate_request_uuid_v4().replace('-', "");
-        let rand64_hex = uuid.chars().take(16).collect::<String>();
-        let client_id = NEXT_SPANNER_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
-
         Ok(Self {
             config,
             token_cache: None,
@@ -2305,12 +1389,38 @@ impl SpannerClient {
             injected_admin: admin,
             official: OnceCell::new(),
             database_client: OnceCell::new(),
-            grpc_pool,
-            cached_session: RwLock::new(None),
-            client_id,
-            rand64_hex,
-            req_seq: AtomicU64::new(1),
+            admin_client: OnceCell::new(),
         })
+    }
+
+    /// Client configuration reference.
+    #[inline]
+    pub fn config(&self) -> &SpannerClientConfig {
+        &self.config
+    }
+
+    /// Resolve the effective DatabaseAdmin REST endpoint for `UpdateDatabaseDdl`.
+    pub fn effective_admin_endpoint(&self) -> Result<String, SpannerError> {
+        if let Some(ref explicit) = self.config.admin_endpoint {
+            let trimmed = explicit.trim().trim_end_matches('/');
+            if !trimmed.is_empty() {
+                return Ok(trimmed.to_string());
+            }
+        }
+        let endpoint = self.config.effective_endpoint();
+        if endpoint_is_googleapis(&endpoint) {
+            return Ok(DEFAULT_SPANNER_ADMIN_ENDPOINT.to_string());
+        }
+        if let Ok(mut parsed) = Url::parse(&endpoint)
+            && parsed.scheme() == "http"
+            && parsed.port() == Some(9010)
+        {
+            let _ = parsed.set_port(Some(9020));
+            return Ok(parsed.as_str().trim_end_matches('/').to_string());
+        }
+        Err(SpannerError::InvalidArgument(format!(
+            "set SpannerClientConfig.admin_endpoint: the DDL REST endpoint cannot be derived from {endpoint}"
+        )))
     }
 
     async fn official_spanner(&self) -> Result<&Spanner, SpannerError> {
@@ -2352,7 +1462,36 @@ impl SpannerClient {
             .await
     }
 
+    async fn database_admin(&self) -> Result<&DatabaseAdmin, SpannerError> {
+        if let Some(ref admin) = self.injected_admin {
+            return Ok(admin);
+        }
+        self.admin_client
+            .get_or_try_init(|| async {
+                install_rustls_ring_provider();
+                let admin_ep = self.effective_admin_endpoint()?;
+                DatabaseAdmin::builder()
+                    .with_endpoint(admin_ep)
+                    .with_credentials(official_credentials(self.token_cache.clone()))
+                    .build()
+                    .await
+                    .map_err(|e| {
+                        SpannerError::Protocol(format!("failed to build DatabaseAdmin: {e}"))
+                    })
+            })
+            .await
+    }
+
     fn statement(&self, sql: &str, params: &[SpannerQueryParameter]) -> Statement {
+        self.statement_with_tag(sql, params, None)
+    }
+
+    fn statement_with_tag(
+        &self,
+        sql: &str,
+        params: &[SpannerQueryParameter],
+        request_tag: Option<&str>,
+    ) -> Statement {
         let effective_sql = if self.config.dialect == SpannerDialect::GoogleSql && sql.contains('$')
         {
             rewrite_spangres_placeholders(sql).0
@@ -2367,345 +1506,10 @@ impl SpannerClient {
                 official_type(&param.param_type),
             );
         }
+        if let Some(tag) = request_tag.filter(|t| !t.is_empty()) {
+            builder = builder.set_request_tag(tag);
+        }
         builder.build()
-    }
-
-    /// Client configuration reference.
-    #[inline]
-    pub fn config(&self) -> &SpannerClientConfig {
-        &self.config
-    }
-
-    fn next_request_sequence(&self) -> u64 {
-        self.req_seq.fetch_add(1, Ordering::Relaxed)
-    }
-
-    async fn bearer_token_and_quota(
-        &self,
-    ) -> Result<(Option<String>, Option<String>), SpannerError> {
-        if self.config.is_cleartext() && self.config.auth_options.is_empty() {
-            return Ok((None, None));
-        }
-        if let Some(tok) = self.config.auth_options.get("access_token")
-            && !tok.trim().is_empty()
-        {
-            let qp = self
-                .config
-                .auth_options
-                .get("quota_project_id")
-                .cloned()
-                .filter(|s| !s.is_empty());
-            return Ok((Some(tok.trim().to_string()), qp));
-        }
-        if let Some(ref cache) = self.token_cache {
-            let snap = cache
-                .get_or_refresh()
-                .await
-                .map_err(|e| SpannerError::Auth(e.to_string()))?;
-            return Ok((
-                Some(snap.access_token.clone()),
-                snap.quota_project_id.clone(),
-            ));
-        }
-        Ok((None, None))
-    }
-
-    async fn build_metadata(
-        &self,
-        route_to_leader: bool,
-        req_seq: u64,
-        attempt: u32,
-    ) -> Result<GrpcRequestMetadata, SpannerError> {
-        let (bearer_token, quota_project) = self.bearer_token_and_quota().await?;
-        let pool_size = self.config.pool_size.max(1) as u64;
-        let channel_id = ((req_seq.saturating_sub(1)) % pool_size) + 1;
-        let spanner_request_id = format!(
-            "1.{}.{}.{}.{}.{}",
-            self.rand64_hex, self.client_id, channel_id, req_seq, attempt
-        );
-        let mut extra_headers = vec![
-            (
-                "google-cloud-resource-prefix".to_string(),
-                self.config.database.clone(),
-            ),
-            (
-                "x-goog-spanner-end-to-end-tracing".to_string(),
-                "true".to_string(),
-            ),
-            (
-                "x-goog-spanner-enable-afe-server-timing".to_string(),
-                "true".to_string(),
-            ),
-        ];
-        if route_to_leader && self.config.route_to_leader_enabled {
-            extra_headers.push((
-                "x-goog-spanner-route-to-leader".to_string(),
-                "true".to_string(),
-            ));
-        }
-        Ok(GrpcRequestMetadata {
-            bearer_token,
-            routing_params: Some(format!("database={}", self.config.database)),
-            quota_project,
-            spanner_request_id: Some(spanner_request_id),
-            timeout: Some(Duration::from_secs(60)),
-            compress_gzip: false,
-            extra_headers,
-        })
-    }
-
-    /// Return the cached multiplexed session handle, creating or rotating it via
-    /// `/google.spanner.v1.Spanner/CreateSession` when absent, expired (`>= 7` days), or forced.
-    pub async fn get_or_create_multiplexed_session(
-        &self,
-        force_recreate: bool,
-    ) -> Result<Arc<SpannerSessionHandle>, SpannerError> {
-        let now_ms = current_unix_ms();
-        if !force_recreate
-            && let Ok(guard) = self.cached_session.read()
-            && let Some(ref existing) = *guard
-            && !existing.should_rotate(now_ms)
-        {
-            return Ok(Arc::clone(existing));
-        }
-
-        let mut req = ProtoWriter::with_capacity(128);
-        req.write_str(1, &self.config.database);
-        req.write_nested(2, |sw| {
-            if let Some(ref role) = self.config.database_role
-                && !role.is_empty()
-            {
-                sw.write_str(4, role);
-            }
-            sw.write_bool(6, true);
-        });
-
-        let req_seq = self.next_request_sequence();
-        let meta = self.build_metadata(true, req_seq, 1).await?;
-        let (resp_bytes, _) = self
-            .grpc_pool
-            .unary(
-                "/google.spanner.v1.Spanner/CreateSession",
-                req.finish(),
-                &meta,
-            )
-            .await?;
-
-        let mut r = ProtoReader::new(&resp_bytes);
-        let mut session_name = String::new();
-        let mut multiplexed = true;
-        while let Some((field, wt)) = r.next_tag()? {
-            match (field, wt) {
-                (1, WireType::LengthDelimited) => {
-                    session_name = r.read_str()?.to_string();
-                }
-                (6, WireType::Varint) => {
-                    multiplexed = r.read_bool()?;
-                }
-                _ => {
-                    r.skip_field(wt)?;
-                }
-            }
-        }
-        if session_name.is_empty() {
-            return Err(SpannerError::Protocol(
-                "CreateSession response returned an empty session name".to_string(),
-            ));
-        }
-
-        let handle = Arc::new(SpannerSessionHandle {
-            name: session_name,
-            database_role: self.config.database_role.clone(),
-            multiplexed,
-            created_at_unix_ms: now_ms,
-        });
-        if let Ok(mut guard) = self.cached_session.write() {
-            *guard = Some(Arc::clone(&handle));
-        }
-        Ok(handle)
-    }
-
-    fn is_session_not_found(err: &SpannerError) -> bool {
-        match err {
-            SpannerError::Grpc(status) => {
-                status.code == GrpcCode::NotFound
-                    && (status.message.to_ascii_lowercase().contains("session")
-                        || status.details.iter().any(|d| match d {
-                            GrpcErrorDetail::ResourceInfo { resource_type, .. } => {
-                                resource_type.to_ascii_lowercase().contains("session")
-                            }
-                            _ => false,
-                        }))
-            }
-            _ => false,
-        }
-    }
-
-    /// Explicitly start a transaction via `/google.spanner.v1.Spanner/BeginTransaction`.
-    pub async fn begin_transaction(
-        &self,
-        options: &SpannerTransactionOptions,
-        mutation_key: Option<&SpannerMutation>,
-        transaction_tag: Option<&str>,
-    ) -> Result<
-        (
-            Vec<u8>,
-            Option<i64>,
-            Option<MultiplexedSessionPrecommitToken>,
-        ),
-        SpannerError,
-    > {
-        let mut recreated = false;
-        loop {
-            let session = self.get_or_create_multiplexed_session(recreated).await?;
-            let mut w = ProtoWriter::with_capacity(256);
-            w.write_str(1, &session.name);
-            w.write_nested(2, |ow| options.encode(ow));
-            if let Some(tag) = transaction_tag
-                && !tag.is_empty()
-            {
-                w.write_nested(3, |rw| {
-                    rw.write_str(3, tag);
-                });
-            }
-            if let Some(mkey) = mutation_key {
-                w.write_nested(4, |mw| mkey.encode(mw));
-            }
-            let req_seq = self.next_request_sequence();
-            let meta = self
-                .build_metadata(options.requires_leader_routing(), req_seq, 1)
-                .await?;
-            match self
-                .grpc_pool
-                .unary(
-                    "/google.spanner.v1.Spanner/BeginTransaction",
-                    w.finish(),
-                    &meta,
-                )
-                .await
-                .map_err(SpannerError::from)
-            {
-                Ok((resp_bytes, _)) => {
-                    let (id, read_ts, tok) = decode_transaction_message(&resp_bytes)?;
-                    if id.is_empty() {
-                        return Err(SpannerError::Protocol(
-                            "BeginTransaction returned an empty transaction id".to_string(),
-                        ));
-                    }
-                    return Ok((id, read_ts, tok));
-                }
-                Err(err) if !recreated && Self::is_session_not_found(&err) => {
-                    recreated = true;
-                }
-                Err(err) => return Err(err),
-            }
-        }
-    }
-
-    /// Execute a streaming SQL query or DML statement via `/google.spanner.v1.Spanner/ExecuteStreamingSql`,
-    /// reassembling `PartialResultSet` chunks and replaying from `resume_token` on transient
-    /// `UNAVAILABLE` / `INTERNAL` stream drops.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn execute_streaming_sql(
-        &self,
-        sql: &str,
-        params: &[SpannerQueryParameter],
-        selector: &SpannerTransactionSelector,
-        seqno: i64,
-        partition_token: Option<&[u8]>,
-        data_boost_enabled: bool,
-        route_to_leader: bool,
-        request_tag: Option<&str>,
-        transaction_tag: Option<&str>,
-    ) -> Result<SpannerQueryResult, SpannerError> {
-        let (effective_sql, _) =
-            if self.config.dialect == SpannerDialect::GoogleSql && sql.contains('$') {
-                rewrite_spangres_placeholders(sql)
-            } else {
-                (sql.to_string(), Vec::new())
-            };
-
-        let mut recreated_session = false;
-        let mut assembler = PartialResultSetAssembler::new();
-        let mut current_resume_token: Vec<u8> = Vec::new();
-        let mut attempt: u32 = 1;
-        let req_seq = self.next_request_sequence();
-
-        loop {
-            let session = self
-                .get_or_create_multiplexed_session(recreated_session)
-                .await?;
-            let payload = encode_execute_sql_request(
-                &session.name,
-                selector,
-                &effective_sql,
-                params,
-                &current_resume_token,
-                partition_token,
-                seqno,
-                data_boost_enabled,
-                request_tag,
-                transaction_tag,
-            );
-            let meta = self
-                .build_metadata(route_to_leader, req_seq, attempt)
-                .await?;
-
-            let stream_res = self
-                .grpc_pool
-                .server_streaming(
-                    "/google.spanner.v1.Spanner/ExecuteStreamingSql",
-                    payload,
-                    &meta,
-                )
-                .await
-                .map_err(SpannerError::from);
-
-            let mut stream = match stream_res {
-                Ok(s) => s,
-                Err(err) if !recreated_session && Self::is_session_not_found(&err) => {
-                    recreated_session = true;
-                    continue;
-                }
-                Err(err) => return Err(err),
-            };
-
-            let mut stream_interrupted: Option<GrpcStatus> = None;
-            loop {
-                match stream.next_message().await {
-                    Ok(Some(frame_bytes)) => {
-                        let frame = PartialResultSetFrame::decode(&frame_bytes)?;
-                        assembler.push_frame(frame)?;
-                    }
-                    Ok(None) => break,
-                    Err(status) => {
-                        stream_interrupted = Some(status);
-                        break;
-                    }
-                }
-            }
-
-            if let Some(status) = stream_interrupted {
-                let err = SpannerError::Grpc(status.clone());
-                if !recreated_session && Self::is_session_not_found(&err) {
-                    recreated_session = true;
-                    assembler = PartialResultSetAssembler::new();
-                    current_resume_token.clear();
-                    continue;
-                }
-                if matches!(status.code, GrpcCode::Unavailable | GrpcCode::Internal)
-                    && attempt < 4
-                    && let Some(tok) = assembler.rollback_to_last_resume_token()
-                {
-                    current_resume_token = tok;
-                    attempt += 1;
-                    continue;
-                }
-                return Err(err);
-            }
-
-            return assembler.finish();
-        }
     }
 
     /// Execute a single-use read-only query with the specified [`SpannerStaleness`] bound.
@@ -2775,345 +1579,134 @@ impl SpannerClient {
             columns,
             schema,
             rows,
-            transaction_id: None,
-            read_timestamp_micros: None,
             row_count_exact,
             row_count_lower_bound,
-            precommit_token: None,
         })
     }
 
-    /// Execute a statement inside a [`SpannerReadWriteTransaction`], using inline `Begin` on
-    /// statement #1 and falling back to explicit `BeginTransaction` if statement #1 fails before
-    /// returning a transaction ID.
-    pub async fn execute_in_read_write_tx(
+    /// Execute a single DML statement inside a read-write transaction and return the modified row count.
+    pub async fn execute_dml(
         &self,
-        tx: &mut SpannerReadWriteTransaction,
         sql: &str,
         params: &[SpannerQueryParameter],
         request_tag: Option<&str>,
-    ) -> Result<SpannerQueryResult, SpannerError> {
-        let was_first_stmt = tx.transaction_id.is_none();
-        let selector = tx.selector_for_statement();
-        let seqno = tx.next_seqno();
-        let tx_tag = tx.transaction_tag.clone();
-
-        match self
-            .execute_streaming_sql(
-                sql,
-                params,
-                &selector,
-                seqno,
-                None,
-                false,
-                true,
-                request_tag,
-                tx_tag.as_deref(),
-            )
-            .await
-        {
-            Ok(res) => {
-                tx.observe_response(res.transaction_id.clone(), res.precommit_token.clone());
-                if tx.transaction_id.is_none() && was_first_stmt {
-                    let opts = SpannerTransactionOptions::ReadWrite {
-                        previous_transaction_id: tx.previous_transaction_id.clone(),
-                        exclude_txn_from_change_streams: tx.exclude_txn_from_change_streams,
-                    };
-                    let (id, _, tok) = self
-                        .begin_transaction(&opts, None, tx_tag.as_deref())
-                        .await?;
-                    tx.observe_response(Some(id), tok);
-                }
-                Ok(res)
-            }
-            Err(err) => Err(err),
+        transaction_tag: Option<&str>,
+    ) -> Result<i64, SpannerError> {
+        let db = self.database_client().await?;
+        let stmt = self.statement_with_tag(sql, params, request_tag);
+        let mut runner_builder = db.read_write_transaction();
+        if let Some(tag) = transaction_tag.filter(|t| !t.is_empty()) {
+            runner_builder = runner_builder.set_transaction_tag(tag);
         }
+        if let Some(delay_ms) = self.config.max_commit_delay_ms
+            && delay_ms > 0
+        {
+            runner_builder = runner_builder.set_max_commit_delay(Duration::from_millis(delay_ms));
+        }
+        let outcome = runner_builder
+            .build()
+            .run(move |tx: ReadWriteTransaction| {
+                let stmt = stmt.clone();
+                async move { tx.execute_update(stmt).await }
+            })
+            .await?;
+        let _ = commit_result(&outcome.commit_response)?;
+        Ok(outcome.result)
     }
 
-    /// Execute a batch of DML statements inside a [`SpannerReadWriteTransaction`] via
-    /// `/google.spanner.v1.Spanner/ExecuteBatchDml`, inspecting the embedded `ExecuteBatchDmlResponse.status`.
+    /// Execute a batch of DML statements inside a read-write transaction and return per-statement row counts.
     pub async fn execute_batch_dml(
         &self,
-        tx: &mut SpannerReadWriteTransaction,
         statements: &[SpannerBatchDmlStatement],
         request_tag: Option<&str>,
-    ) -> Result<SpannerBatchDmlResult, SpannerError> {
+        transaction_tag: Option<&str>,
+    ) -> Result<Vec<i64>, SpannerError> {
         if statements.is_empty() {
-            return Ok(SpannerBatchDmlResult {
-                row_counts: Vec::new(),
-                transaction_id: tx.transaction_id.clone(),
-                precommit_token: tx.latest_precommit_token.clone(),
-            });
+            return Ok(Vec::new());
         }
-        let session = self.get_or_create_multiplexed_session(false).await?;
-        let selector = tx.selector_for_statement();
-        let seqno = tx.next_seqno();
+        let db = self.database_client().await?;
+        let mut batch_builder = BatchDml::builder();
+        for item in statements {
+            batch_builder = batch_builder.add_statement(self.statement(&item.sql, &item.params));
+        }
+        if let Some(tag) = request_tag.filter(|t| !t.is_empty()) {
+            batch_builder = batch_builder.set_request_tag(tag);
+        }
+        let batch = batch_builder.build();
 
-        let mut w = ProtoWriter::with_capacity(512);
-        w.write_str(1, &session.name);
-        w.write_nested(2, |tw| selector.encode(tw));
-        for stmt in statements {
-            w.write_nested(3, |sw| {
-                sw.write_str(1, &stmt.sql);
-                if !stmt.params.is_empty() {
-                    let entries: Vec<(String, ProtobufValue)> = stmt
-                        .params
-                        .iter()
-                        .map(|p| (p.name.clone(), p.value.clone()))
-                        .collect();
-                    sw.write_nested(2, |pw| encode_protobuf_struct(&entries, pw));
-                    for p in &stmt.params {
-                        sw.write_nested(3, |mw| {
-                            mw.write_str(1, &p.name);
-                            mw.write_nested(2, |tw| p.param_type.encode(tw));
-                        });
-                    }
-                }
-            });
+        let mut runner_builder = db.read_write_transaction();
+        if let Some(tag) = transaction_tag.filter(|t| !t.is_empty()) {
+            runner_builder = runner_builder.set_transaction_tag(tag);
         }
-        w.write_i64(4, seqno);
-        if request_tag.is_some() || tx.transaction_tag.is_some() {
-            w.write_nested(5, |rw| {
-                if let Some(rt) = request_tag
-                    && !rt.is_empty()
-                {
-                    rw.write_str(2, rt);
-                }
-                if let Some(ref tt) = tx.transaction_tag
-                    && !tt.is_empty()
-                {
-                    rw.write_str(3, tt);
-                }
-            });
+        if let Some(delay_ms) = self.config.max_commit_delay_ms
+            && delay_ms > 0
+        {
+            runner_builder = runner_builder.set_max_commit_delay(Duration::from_millis(delay_ms));
         }
-
-        let req_seq = self.next_request_sequence();
-        let meta = self.build_metadata(true, req_seq, 1).await?;
-        let (resp_bytes, _) = self
-            .grpc_pool
-            .unary(
-                "/google.spanner.v1.Spanner/ExecuteBatchDml",
-                w.finish(),
-                &meta,
-            )
+        let outcome = runner_builder
+            .build()
+            .run(move |tx: ReadWriteTransaction| {
+                let batch = batch.clone();
+                async move { tx.execute_batch_update(batch).await }
+            })
             .await?;
-
-        let mut r = ProtoReader::new(&resp_bytes);
-        let mut row_counts = Vec::new();
-        let mut embedded_status: Option<GrpcStatus> = None;
-        while let Some((field, wt)) = r.next_tag()? {
-            match (field, wt) {
-                (1, WireType::LengthDelimited) => {
-                    let rs_bytes = r.read_bytes()?;
-                    let (count, tx_id, tok) = decode_batch_dml_result_set(rs_bytes)?;
-                    row_counts.push(count);
-                    tx.observe_response(tx_id, tok);
-                }
-                (2, WireType::LengthDelimited) => {
-                    let st_bytes = r.read_bytes()?;
-                    let st = decode_embedded_rpc_status(st_bytes)?;
-                    if st.code != GrpcCode::Ok {
-                        embedded_status = Some(st);
-                    }
-                }
-                (3, WireType::LengthDelimited) => {
-                    let pb = r.read_bytes()?;
-                    let tok = MultiplexedSessionPrecommitToken::decode(pb)?;
-                    tx.observe_response(None, Some(tok));
-                }
-                _ => {
-                    r.skip_field(wt)?;
-                }
-            }
-        }
-
-        if let Some(status) = embedded_status {
-            return Err(SpannerError::Grpc(status));
-        }
-
-        Ok(SpannerBatchDmlResult {
-            row_counts,
-            transaction_id: tx.transaction_id.clone(),
-            precommit_token: tx.latest_precommit_token.clone(),
-        })
+        let _ = commit_result(&outcome.commit_response)?;
+        Ok(outcome.result)
     }
 
-    /// Commit a [`SpannerReadWriteTransaction`] via `/google.spanner.v1.Spanner/Commit`,
-    /// handling mutation-only `BeginTransaction(mutation_key)` and `CommitResponse.MultiplexedSessionRetry`.
-    pub async fn commit_read_write_tx(
-        &self,
-        tx: &mut SpannerReadWriteTransaction,
-    ) -> Result<SpannerCommitResult, SpannerError> {
-        if tx.transaction_id.is_none() {
-            let opts = SpannerTransactionOptions::ReadWrite {
-                previous_transaction_id: tx.previous_transaction_id.clone(),
-                exclude_txn_from_change_streams: tx.exclude_txn_from_change_streams,
-            };
-            let mutation_key = tx.mutations.first();
-            let (id, _, tok) = self
-                .begin_transaction(&opts, mutation_key, tx.transaction_tag.as_deref())
-                .await?;
-            tx.observe_response(Some(id), tok);
-        }
-
-        let tx_id = tx.transaction_id.clone().ok_or_else(|| {
-            SpannerError::Protocol(
-                "cannot commit ReadWrite transaction without transaction_id".to_string(),
-            )
-        })?;
-        let session = self.get_or_create_multiplexed_session(false).await?;
-        let req_seq = self.next_request_sequence();
-        let mut retry_count = 0u32;
-        let mut send_mutations = true;
-
-        loop {
-            let mut w = ProtoWriter::with_capacity(256);
-            w.write_str(1, &session.name);
-            w.write_bytes(2, &tx_id);
-            if send_mutations {
-                for m in &tx.mutations {
-                    w.write_nested(4, |mw| m.encode(mw));
-                }
-            }
-            w.write_bool(5, true);
-            if let Some(ref tag) = tx.transaction_tag
-                && !tag.is_empty()
-            {
-                w.write_nested(6, |rw| {
-                    rw.write_str(3, tag);
-                });
-            }
-            if let Some(delay_ms) = self.config.max_commit_delay_ms
-                && delay_ms > 0
-            {
-                w.write_nested(8, |dw| encode_duration_ms(delay_ms, dw));
-            }
-            if let Some(ref precommit) = tx.latest_precommit_token
-                && !precommit.precommit_token.is_empty()
-            {
-                w.write_nested(12, |pw| precommit.encode(pw));
-            }
-
-            let meta = self.build_metadata(true, req_seq, retry_count + 1).await?;
-            let (resp_bytes, _) = self
-                .grpc_pool
-                .unary("/google.spanner.v1.Spanner/Commit", w.finish(), &meta)
-                .await?;
-
-            let (commit_ts, mutation_count, retry_precommit) = decode_commit_response(&resp_bytes)?;
-            if let Some(new_token) = retry_precommit {
-                tx.observe_response(None, Some(new_token));
-                send_mutations = false;
-                retry_count += 1;
-                if retry_count <= 4 {
-                    continue;
-                }
-            }
-            return Ok(SpannerCommitResult {
-                commit_timestamp_micros: commit_ts,
-                mutation_count,
-                retry_count,
-            });
-        }
-    }
-
-    /// Roll back an active `ReadWrite` transaction via `/google.spanner.v1.Spanner/Rollback`.
-    pub async fn rollback(&self, transaction_id: &[u8]) -> Result<(), SpannerError> {
-        if transaction_id.is_empty() {
-            return Ok(());
-        }
-        let session = self.get_or_create_multiplexed_session(false).await?;
-        let mut w = ProtoWriter::with_capacity(128);
-        w.write_str(1, &session.name);
-        w.write_bytes(2, transaction_id);
-        let req_seq = self.next_request_sequence();
-        let meta = self.build_metadata(true, req_seq, 1).await?;
-        let _ = self
-            .grpc_pool
-            .unary("/google.spanner.v1.Spanner/Rollback", w.finish(), &meta)
-            .await?;
-        Ok(())
-    }
-
-    /// Execute an async closure inside a multiplexed `ReadWrite` transaction, automatically
-    /// retrying on `GrpcCode::Aborted` with `RetryInfo` backoff and preserving wound-wait priority
-    /// via `ReadWrite.multiplexed_session_previous_transaction_id`.
-    pub async fn run_in_read_write_transaction<F, Fut, T>(
-        &self,
-        max_attempts: u32,
-        mut op: F,
-    ) -> Result<(T, SpannerCommitResult), SpannerError>
-    where
-        F: FnMut(SpannerReadWriteTransaction) -> Fut,
-        Fut: std::future::Future<
-                Output = Result<(T, SpannerReadWriteTransaction), (SpannerError, Option<Vec<u8>>)>,
-            >,
-    {
-        let mut prev_tx_id: Option<Vec<u8>> = None;
-        let limit = max_attempts.max(1);
-        for attempt in 1..=limit {
-            let tx = SpannerReadWriteTransaction::retry_from_aborted(prev_tx_id.clone());
-            match op(tx).await {
-                Ok((val, mut completed_tx)) => {
-                    match self.commit_read_write_tx(&mut completed_tx).await {
-                        Ok(commit_res) => return Ok((val, commit_res)),
-                        Err(err) => {
-                            if let Some(delay_ms) = extract_aborted_retry_delay_ms(&err)
-                                && attempt < limit
-                            {
-                                if completed_tx.transaction_id.is_some() {
-                                    prev_tx_id = completed_tx.transaction_id;
-                                }
-                                tokio::time::sleep(Duration::from_millis(delay_ms.min(500))).await;
-                                continue;
-                            }
-                            return Err(err);
-                        }
-                    }
-                }
-                Err((err, aborted_id)) => {
-                    if let Some(delay_ms) = extract_aborted_retry_delay_ms(&err)
-                        && attempt < limit
-                    {
-                        if aborted_id.is_some() {
-                            prev_tx_id = aborted_id;
-                        }
-                        tokio::time::sleep(Duration::from_millis(delay_ms.min(500))).await;
-                        continue;
-                    }
-                    return Err(err);
-                }
-            }
-        }
-        Err(SpannerError::Protocol(
-            "ReadWrite transaction exceeded max_attempts".to_string(),
-        ))
-    }
-
-    /// Execute a Partitioned DML (`PDML`) statement (`BeginTransaction(PartitionedDml)` +
-    /// `ExecuteStreamingSql`) and return `row_count_lower_bound`.
+    /// Execute a Partitioned DML (`PDML`) statement and return the lower-bound modified row count.
     pub async fn execute_partitioned_dml(
         &self,
         sql: &str,
         params: &[SpannerQueryParameter],
         exclude_txn_from_change_streams: bool,
     ) -> Result<i64, SpannerError> {
-        let opts = SpannerTransactionOptions::PartitionedDml {
-            exclude_txn_from_change_streams,
-        };
-        let (tx_id, _, _) = self.begin_transaction(&opts, None, None).await?;
-        let selector = SpannerTransactionSelector::Id(tx_id);
-        let res = self
-            .execute_streaming_sql(sql, params, &selector, 1, None, false, true, None, None)
+        let db = self.database_client().await?;
+        let count = db
+            .partitioned_dml_transaction()
+            .set_exclude_txn_from_change_streams(exclude_txn_from_change_streams)
+            .build()
+            .execute_update(self.statement(sql, params))
             .await?;
-        Ok(res
-            .row_count_lower_bound
-            .or(res.row_count_exact)
-            .unwrap_or(0))
+        Ok(count)
     }
 
-    /// Execute `/google.spanner.v1.Spanner/BatchWrite` across `mutation_groups`, chunking batches so
-    /// each RPC stays at or below [`MAX_MUTATION_CELLS_PER_BATCH`] (`80,000` cells).
+    /// Commit a list of [`SpannerMutation`] items in a write-only transaction.
+    pub async fn apply_mutations(
+        &self,
+        mutations: &[SpannerMutation],
+        transaction_tag: Option<&str>,
+        exclude_txn_from_change_streams: bool,
+    ) -> Result<SpannerCommitResult, SpannerError> {
+        if mutations.is_empty() {
+            return Ok(SpannerCommitResult {
+                commit_timestamp_micros: None,
+                mutation_count: Some(0),
+                retry_count: 0,
+            });
+        }
+        let db = self.database_client().await?;
+        let official_mutations = mutations
+            .iter()
+            .flat_map(official_mutation_rows)
+            .collect::<Vec<_>>();
+        let mut tx_builder = db
+            .write_only_transaction()
+            .set_exclude_txn_from_change_streams(exclude_txn_from_change_streams);
+        if let Some(tag) = transaction_tag.filter(|t| !t.is_empty()) {
+            tx_builder = tx_builder.set_transaction_tag(tag);
+        }
+        if let Some(delay_ms) = self.config.max_commit_delay_ms
+            && delay_ms > 0
+        {
+            tx_builder = tx_builder.set_max_commit_delay(Duration::from_millis(delay_ms));
+        }
+        let resp = tx_builder.build().write(official_mutations).await?;
+        commit_result(&resp)
+    }
+
+    /// Execute `BatchWrite` across `mutation_groups`, chunking batches so each RPC stays at or below
+    /// [`MAX_MUTATION_CELLS_PER_BATCH`] (`80,000` cells).
     pub async fn batch_write(
         &self,
         mutation_groups: &[SpannerMutationGroup],
@@ -3122,18 +1715,21 @@ impl SpannerClient {
         if mutation_groups.is_empty() {
             return Ok(Vec::new());
         }
-        let session = self.get_or_create_multiplexed_session(false).await?;
+        let db = self.database_client().await?;
         let mut results = Vec::new();
         let mut chunk: Vec<&SpannerMutationGroup> = Vec::new();
         let mut chunk_cells: usize = 0;
+        let mut chunk_start: i32 = 0;
 
         for group in mutation_groups {
             let group_cells = group.cell_count();
             if !chunk.is_empty() && chunk_cells + group_cells > MAX_MUTATION_CELLS_PER_BATCH {
+                let chunk_len = chunk.len() as i32;
                 let mut part = self
-                    .batch_write_chunk(&session.name, &chunk, exclude_txn_from_change_streams)
+                    .batch_write_chunk(db, &chunk, chunk_start, exclude_txn_from_change_streams)
                     .await?;
                 results.append(&mut part);
+                chunk_start += chunk_len;
                 chunk.clear();
                 chunk_cells = 0;
             }
@@ -3142,7 +1738,7 @@ impl SpannerClient {
         }
         if !chunk.is_empty() {
             let mut part = self
-                .batch_write_chunk(&session.name, &chunk, exclude_txn_from_change_streams)
+                .batch_write_chunk(db, &chunk, chunk_start, exclude_txn_from_change_streams)
                 .await?;
             results.append(&mut part);
         }
@@ -3151,337 +1747,99 @@ impl SpannerClient {
 
     async fn batch_write_chunk(
         &self,
-        session_name: &str,
+        db: &DatabaseClient,
         groups: &[&SpannerMutationGroup],
+        chunk_start: i32,
         exclude_txn_from_change_streams: bool,
     ) -> Result<Vec<SpannerBatchWriteResult>, SpannerError> {
-        let mut w = ProtoWriter::with_capacity(512);
-        w.write_str(1, session_name);
-        for g in groups {
-            w.write_nested(4, |gw| g.encode(gw));
-        }
-        if exclude_txn_from_change_streams {
-            w.write_bool(5, true);
-        }
-        let req_seq = self.next_request_sequence();
-        let meta = self.build_metadata(true, req_seq, 1).await?;
-        let mut stream = self
-            .grpc_pool
-            .server_streaming("/google.spanner.v1.Spanner/BatchWrite", w.finish(), &meta)
+        let official_groups = groups
+            .iter()
+            .map(|g| {
+                MutationGroup::new(
+                    g.mutations
+                        .iter()
+                        .flat_map(official_mutation_rows)
+                        .collect(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut stream = db
+            .batch_write_transaction()
+            .set_exclude_txn_from_change_streams(exclude_txn_from_change_streams)
+            .build()
+            .execute_streaming(official_groups)
             .await?;
-
         let mut out = Vec::new();
-        while let Some(msg) = stream.next_message().await? {
-            out.push(decode_batch_write_response(&msg)?);
+        while let Some(item) = stream.next().await {
+            let resp = item?;
+            let (status_code, status_message) = resp
+                .status
+                .as_ref()
+                .map(|st| (st.code, st.message.clone()))
+                .unwrap_or((0, String::new()));
+            let commit_timestamp_micros = resp.commit_timestamp.as_ref().map(|ts| {
+                ts.seconds()
+                    .saturating_mul(1_000_000)
+                    .saturating_add(i64::from(ts.nanos()) / 1_000)
+            });
+            out.push(SpannerBatchWriteResult {
+                indexes: resp.indexes.into_iter().map(|i| i + chunk_start).collect(),
+                status_code,
+                status_message,
+                commit_timestamp_micros,
+            });
         }
         Ok(out)
     }
 
-    /// Execute batched DDL statements in a single `/google.spanner.admin.database.v1.DatabaseAdmin/UpdateDatabaseDdl`
-    /// long-running operation and poll `/google.longrunning.Operations/GetOperation` until `done == true`.
+    /// Execute batched DDL statements via `DatabaseAdmin::update_database_ddl` and poll `get_operation`
+    /// until `done == true` or `config.ddl_timeout` elapses.
     pub async fn update_database_ddl(&self, statements: &[String]) -> Result<String, SpannerError> {
         if statements.is_empty() {
             return Ok(String::new());
         }
-        let mut w = ProtoWriter::with_capacity(256);
-        w.write_str(1, &self.config.database);
-        for stmt in statements {
-            w.write_str(2, stmt);
-        }
-        let req_seq = self.next_request_sequence();
-        let meta = self.build_metadata(true, req_seq, 1).await?;
-        let (resp_bytes, _) = self
-            .grpc_pool
-            .unary(
-                "/google.spanner.admin.database.v1.DatabaseAdmin/UpdateDatabaseDdl",
-                w.finish(),
-                &meta,
-            )
-            .await?;
+        let admin = self.database_admin().await?;
+        let deadline = Instant::now() + self.config.ddl_timeout;
+        let timeout_ms = self.config.ddl_timeout.as_millis() as u64;
+        let mut op = admin
+            .update_database_ddl()
+            .set_database(&self.config.database)
+            .set_statements(statements.to_vec())
+            .send()
+            .await
+            .map_err(|e| SpannerError::Protocol(format!("UpdateDatabaseDdl failed: {e}")))?;
 
-        let (mut op_name, mut done, mut op_err) = decode_lro_operation(&resp_bytes)?;
-        if let Some(status) = op_err {
-            return Err(SpannerError::Grpc(status));
-        }
-        let mut polls = 0u32;
-        while !done && !op_name.is_empty() && polls < 120 {
-            polls += 1;
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            let mut get_w = ProtoWriter::with_capacity(64);
-            get_w.write_str(1, &op_name);
-            let poll_seq = self.next_request_sequence();
-            let poll_meta = self.build_metadata(false, poll_seq, 1).await?;
-            let (poll_bytes, _) = self
-                .grpc_pool
-                .unary(
-                    "/google.longrunning.Operations/GetOperation",
-                    get_w.finish(),
-                    &poll_meta,
-                )
-                .await?;
-            let (next_name, next_done, next_err) = decode_lro_operation(&poll_bytes)?;
-            if !next_name.is_empty() {
-                op_name = next_name;
-            }
-            done = next_done;
-            op_err = next_err;
-            if let Some(status) = op_err {
-                return Err(SpannerError::Grpc(status));
-            }
-        }
-        Ok(op_name)
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn encode_execute_sql_request(
-    session_name: &str,
-    selector: &SpannerTransactionSelector,
-    sql: &str,
-    params: &[SpannerQueryParameter],
-    resume_token: &[u8],
-    partition_token: Option<&[u8]>,
-    seqno: i64,
-    data_boost_enabled: bool,
-    request_tag: Option<&str>,
-    transaction_tag: Option<&str>,
-) -> Bytes {
-    let mut w = ProtoWriter::with_capacity(512);
-    w.write_str(1, session_name);
-    w.write_nested(2, |tw| selector.encode(tw));
-    w.write_str(3, sql);
-    if !params.is_empty() {
-        let entries: Vec<(String, ProtobufValue)> = params
-            .iter()
-            .map(|p| (p.name.clone(), p.value.clone()))
-            .collect();
-        w.write_nested(4, |sw| encode_protobuf_struct(&entries, sw));
-        for p in params {
-            w.write_nested(5, |mw| {
-                mw.write_str(1, &p.name);
-                mw.write_nested(2, |tw| p.param_type.encode(tw));
-            });
-        }
-    }
-    if !resume_token.is_empty() {
-        w.write_bytes(6, resume_token);
-    }
-    if let Some(ptok) = partition_token
-        && !ptok.is_empty()
-    {
-        w.write_bytes(8, ptok);
-    }
-    if seqno > 0 {
-        w.write_i64(9, seqno);
-    }
-    if request_tag.is_some() || transaction_tag.is_some() {
-        w.write_nested(10, |rw| {
-            if let Some(rt) = request_tag
-                && !rt.is_empty()
-            {
-                rw.write_str(2, rt);
-            }
-            if let Some(tt) = transaction_tag
-                && !tt.is_empty()
-            {
-                rw.write_str(3, tt);
-            }
-        });
-    }
-    if data_boost_enabled {
-        w.write_bool(16, true);
-    }
-    w.finish()
-}
-
-type DecodedBatchDmlResultSet = (
-    i64,
-    Option<Vec<u8>>,
-    Option<MultiplexedSessionPrecommitToken>,
-);
-
-type DecodedCommitResponse = (
-    Option<i64>,
-    Option<i64>,
-    Option<MultiplexedSessionPrecommitToken>,
-);
-
-fn decode_batch_dml_result_set(bytes: &[u8]) -> Result<DecodedBatchDmlResultSet, SpannerError> {
-    let mut r = ProtoReader::new(bytes);
-    let mut count = 0i64;
-    let mut tx_id = None;
-    let mut precommit = None;
-    while let Some((field, wt)) = r.next_tag()? {
-        match (field, wt) {
-            (1, WireType::LengthDelimited) => {
-                let mb = r.read_bytes()?;
-                let (_, id, _, tok) = decode_result_set_metadata(mb)?;
-                if id.is_some() {
-                    tx_id = id;
+        let mut backoff = Duration::from_millis(100);
+        loop {
+            if op.done {
+                if let Some(OperationResult::Error(status)) = op.result {
+                    return Err(SpannerError::Ddl {
+                        operation: op.name,
+                        code: status.code,
+                        message: status.message,
+                    });
                 }
-                update_highest_precommit_token(&mut precommit, tok);
+                return Ok(op.name);
             }
-            (3, WireType::LengthDelimited) => {
-                let sb = r.read_bytes()?;
-                let (exact, lower) = decode_result_set_stats(sb)?;
-                count = exact.or(lower).unwrap_or(0);
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(SpannerError::DdlTimeout {
+                    operation: op.name,
+                    timeout_ms,
+                });
             }
-            (5, WireType::LengthDelimited) => {
-                let pb = r.read_bytes()?;
-                let tok = MultiplexedSessionPrecommitToken::decode(pb)?;
-                update_highest_precommit_token(&mut precommit, Some(tok));
-            }
-            _ => {
-                r.skip_field(wt)?;
-            }
+            let sleep_for = backoff.min(deadline.saturating_duration_since(now));
+            tokio::time::sleep(sleep_for).await;
+            backoff = (backoff * 2).min(Duration::from_secs(5));
+            let op_name = op.name.clone();
+            op = admin
+                .get_operation()
+                .set_name(&op_name)
+                .send()
+                .await
+                .map_err(|e| {
+                    SpannerError::Protocol(format!("GetOperation({op_name}) failed: {e}"))
+                })?;
         }
     }
-    Ok((count, tx_id, precommit))
-}
-
-fn decode_commit_response(bytes: &[u8]) -> Result<DecodedCommitResponse, SpannerError> {
-    let mut r = ProtoReader::new(bytes);
-    let mut commit_ts = None;
-    let mut mutation_count = None;
-    let mut retry_token = None;
-    while let Some((field, wt)) = r.next_tag()? {
-        match (field, wt) {
-            (1, WireType::LengthDelimited) => {
-                let tb = r.read_bytes()?;
-                commit_ts = Some(decode_timestamp_micros(tb)?);
-            }
-            (2, WireType::LengthDelimited) => {
-                let sb = r.read_bytes()?;
-                let mut sr = ProtoReader::new(sb);
-                while let Some((sf, swt)) = sr.next_tag()? {
-                    if sf == 1 && swt == WireType::Varint {
-                        mutation_count = Some(sr.read_i64()?);
-                    } else {
-                        sr.skip_field(swt)?;
-                    }
-                }
-            }
-            (4, WireType::LengthDelimited) => {
-                let pb = r.read_bytes()?;
-                let tok = MultiplexedSessionPrecommitToken::decode(pb)?;
-                if !tok.precommit_token.is_empty() {
-                    retry_token = Some(tok);
-                }
-            }
-            _ => {
-                r.skip_field(wt)?;
-            }
-        }
-    }
-    Ok((commit_ts, mutation_count, retry_token))
-}
-
-fn decode_batch_write_response(bytes: &[u8]) -> Result<SpannerBatchWriteResult, SpannerError> {
-    let mut r = ProtoReader::new(bytes);
-    let mut indexes = Vec::new();
-    let mut status_code = 0i32;
-    let mut status_message = String::new();
-    let mut commit_ts = None;
-    while let Some((field, wt)) = r.next_tag()? {
-        match (field, wt) {
-            (1, WireType::Varint) => {
-                indexes.push(r.read_i32()?);
-            }
-            (1, WireType::LengthDelimited) => {
-                let packed = r.read_bytes()?;
-                let mut pr = ProtoReader::new(packed);
-                while pr.remaining() > 0 {
-                    indexes.push(pr.read_i32()?);
-                }
-            }
-            (2, WireType::LengthDelimited) => {
-                let sb = r.read_bytes()?;
-                let st = decode_embedded_rpc_status(sb)?;
-                status_code = st.raw_code;
-                status_message = st.message;
-            }
-            (3, WireType::LengthDelimited) => {
-                let tb = r.read_bytes()?;
-                commit_ts = Some(decode_timestamp_micros(tb)?);
-            }
-            _ => {
-                r.skip_field(wt)?;
-            }
-        }
-    }
-    Ok(SpannerBatchWriteResult {
-        indexes,
-        status_code,
-        status_message,
-        commit_timestamp_micros: commit_ts,
-    })
-}
-
-fn decode_lro_operation(bytes: &[u8]) -> Result<(String, bool, Option<GrpcStatus>), SpannerError> {
-    let mut r = ProtoReader::new(bytes);
-    let mut name = String::new();
-    let mut done = false;
-    let mut err_status = None;
-    while let Some((field, wt)) = r.next_tag()? {
-        match (field, wt) {
-            (1, WireType::LengthDelimited) => {
-                name = r.read_str()?.to_string();
-            }
-            (3, WireType::Varint) => {
-                done = r.read_bool()?;
-            }
-            (4, WireType::LengthDelimited) => {
-                let sb = r.read_bytes()?;
-                let st = decode_embedded_rpc_status(sb)?;
-                if st.code != GrpcCode::Ok {
-                    err_status = Some(st);
-                }
-            }
-            _ => {
-                r.skip_field(wt)?;
-            }
-        }
-    }
-    Ok((name, done, err_status))
-}
-
-fn decode_embedded_rpc_status(bytes: &[u8]) -> Result<GrpcStatus, SpannerError> {
-    let mut r = ProtoReader::new(bytes);
-    let mut raw_code = 0i32;
-    let mut message = String::new();
-    while let Some((field, wt)) = r.next_tag()? {
-        match (field, wt) {
-            (1, WireType::Varint) => {
-                raw_code = r.read_i32()?;
-            }
-            (2, WireType::LengthDelimited) => {
-                message = r.read_str()?.to_string();
-            }
-            _ => {
-                r.skip_field(wt)?;
-            }
-        }
-    }
-    Ok(GrpcStatus {
-        code: GrpcCode::from_i32(raw_code),
-        raw_code,
-        message,
-        details: Vec::new(),
-    })
-}
-
-fn extract_aborted_retry_delay_ms(err: &SpannerError) -> Option<u64> {
-    match err {
-        SpannerError::Grpc(status) if status.code == GrpcCode::Aborted => {
-            status.retry_delay_ms().or(Some(10))
-        }
-        _ => None,
-    }
-}
-
-fn current_unix_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
 }

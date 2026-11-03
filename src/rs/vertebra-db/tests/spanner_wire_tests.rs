@@ -1,16 +1,11 @@
-//! Integration and wire-level tests for `vertebra_db::spanner` (Cloud Spanner v1 gRPC multiplexed
-//! sessions, `x-goog-spanner-route-to-leader` routing, `PartialResultSet` chunk merging +
-//! `resume_token` replay, `ReadWrite` transaction state machine with `MultiplexedSessionPrecommitToken`
-//! and wound-wait `Aborted` retry, and parallel `PartitionQuery` + Data Boost into `VTBARROW` SHM).
+//! Integration tests for `vertebra_db::spanner` backed by the official
+//! `google-cloud-spanner` client and stub seams.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
 use google_cloud_auth::credentials::anonymous::Builder as Anonymous;
 use google_cloud_gax::error::Error as GaxError;
@@ -18,25 +13,26 @@ use google_cloud_gax::error::rpc::{Code as RpcCode, Status as RpcStatus};
 use google_cloud_gax::options::RequestOptions;
 use google_cloud_gax::response::Response as GaxResponse;
 use google_cloud_gax::streaming::ResponseStream;
+use google_cloud_longrunning::model::Operation;
+use google_cloud_longrunning::model::operation::Result as OperationResult;
 use google_cloud_spanner::channel_pool::StaticChannelPoolConfig;
-use google_cloud_spanner::client::{Spanner, SpannerBuilderExt};
+use google_cloud_spanner::client::{DatabaseAdmin, Spanner, SpannerBuilderExt};
 use google_cloud_spanner::model;
 use google_cloud_spanner::stub::Spanner as SpannerStub;
+use google_cloud_spanner::transaction::Timestamp;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::server::conn::http2;
 use hyper::service::service_fn;
-use hyper::{HeaderMap, Request, Response, StatusCode};
+use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use prost::Message as _;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use vertebra_db::grpc::{DEFAULT_CLIENT_MAX_GRPC_MESSAGE_SIZE, ProtoWriter, encode_lpm_frame};
 use vertebra_db::spanner::{
-    MultiplexedSessionPrecommitToken, PartialResultSetAssembler, PartialResultSetFrame,
     ProtobufValue, SpannerBatchDmlStatement, SpannerClient, SpannerClientConfig, SpannerError,
-    SpannerMutation, SpannerQueryParameter, SpannerReadWriteTransaction, SpannerStaleness,
-    SpannerStructField, SpannerType, SpannerTypeCode, SpannerValue, rewrite_spangres_placeholders,
+    SpannerMutation, SpannerMutationGroup, SpannerQueryParameter, SpannerStaleness, SpannerValue,
+    rewrite_spangres_placeholders,
 };
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -141,6 +137,24 @@ struct ProstPartialResultSet {
     stats: Option<ProstResultSetStats>,
 }
 
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProstRpcStatus {
+    #[prost(int32, tag = "1")]
+    code: i32,
+    #[prost(string, tag = "2")]
+    message: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProstBatchWriteResponse {
+    #[prost(int32, repeated, tag = "1")]
+    indexes: Vec<i32>,
+    #[prost(message, optional, tag = "2")]
+    status: Option<ProstRpcStatus>,
+    #[prost(message, optional, tag = "3")]
+    commit_timestamp: Option<prost_types::Timestamp>,
+}
+
 fn prost_lpm_frame<M: prost::Message>(msg: &M) -> Vec<u8> {
     let encoded = msg.encode_to_vec();
     let len = encoded.len() as u32;
@@ -217,9 +231,12 @@ fn json_to_prost_value(val: &serde_json::Value) -> prost_types::Value {
 #[derive(Clone, Debug, Default)]
 struct RecordingSpanner {
     sql_requests: Arc<Mutex<Vec<model::ExecuteSqlRequest>>>,
+    batch_dml_requests: Arc<Mutex<Vec<model::ExecuteBatchDmlRequest>>>,
+    commit_requests: Arc<Mutex<Vec<model::CommitRequest>>>,
     partition_requests: Arc<Mutex<Vec<model::PartitionQueryRequest>>>,
     partitions: Vec<Vec<u8>>,
     partition_error: bool,
+    omit_commit_timestamp: bool,
 }
 
 impl google_cloud_spanner::stub::Spanner for RecordingSpanner {
@@ -241,8 +258,56 @@ impl google_cloud_spanner::stub::Spanner for RecordingSpanner {
         _options: RequestOptions,
     ) -> google_cloud_gax::Result<GaxResponse<model::Transaction>> {
         Ok(GaxResponse::from(
-            model::Transaction::new().set_id(b"ro-tx".to_vec()),
+            model::Transaction::new().set_id(b"rw-tx".to_vec()),
         ))
+    }
+
+    async fn execute_sql(
+        &self,
+        req: model::ExecuteSqlRequest,
+        _options: RequestOptions,
+    ) -> google_cloud_gax::Result<GaxResponse<model::ResultSet>> {
+        self.sql_requests.lock().unwrap().push(req);
+        let rs = model::ResultSet::new()
+            .set_metadata(
+                model::ResultSetMetadata::new()
+                    .set_transaction(model::Transaction::new().set_id(b"rw-tx".to_vec())),
+            )
+            .set_stats(model::ResultSetStats::new().set_row_count_exact(3));
+        Ok(GaxResponse::from(rs))
+    }
+
+    async fn execute_batch_dml(
+        &self,
+        req: model::ExecuteBatchDmlRequest,
+        _options: RequestOptions,
+    ) -> google_cloud_gax::Result<GaxResponse<model::ExecuteBatchDmlResponse>> {
+        self.batch_dml_requests.lock().unwrap().push(req);
+        let rs1 = model::ResultSet::new()
+            .set_metadata(
+                model::ResultSetMetadata::new()
+                    .set_transaction(model::Transaction::new().set_id(b"rw-tx".to_vec())),
+            )
+            .set_stats(model::ResultSetStats::new().set_row_count_exact(2));
+        let rs2 =
+            model::ResultSet::new().set_stats(model::ResultSetStats::new().set_row_count_exact(5));
+        let resp = model::ExecuteBatchDmlResponse::new()
+            .set_result_sets(vec![rs1, rs2])
+            .set_status(google_cloud_rpc::model::Status::new().set_code(0));
+        Ok(GaxResponse::from(resp))
+    }
+
+    async fn commit(
+        &self,
+        req: model::CommitRequest,
+        _options: RequestOptions,
+    ) -> google_cloud_gax::Result<GaxResponse<model::CommitResponse>> {
+        self.commit_requests.lock().unwrap().push(req);
+        let mut resp = model::CommitResponse::new();
+        if !self.omit_commit_timestamp {
+            resp = resp.set_commit_timestamp(Timestamp::new(1_700_000_000, 0).expect("ts"));
+        }
+        Ok(GaxResponse::from(resp))
     }
 
     async fn partition_query(
@@ -309,6 +374,93 @@ impl google_cloud_spanner::stub::Spanner for RecordingSpanner {
         drop(tx);
         Ok(ResponseStream::from(rx))
     }
+
+    async fn batch_write(
+        &self,
+        _req: model::BatchWriteRequest,
+        _options: RequestOptions,
+    ) -> google_cloud_gax::Result<ResponseStream<model::BatchWriteResponse>> {
+        let r0 = model::BatchWriteResponse::new()
+            .set_indexes(vec![0])
+            .set_status(google_cloud_rpc::model::Status::new().set_code(0))
+            .set_commit_timestamp(Timestamp::new(1_700_000_000, 0).expect("ts"));
+        let r1 = model::BatchWriteResponse::new()
+            .set_indexes(vec![1])
+            .set_status(
+                google_cloud_rpc::model::Status::new()
+                    .set_code(6)
+                    .set_message("already exists"),
+            );
+        let (tx, rx) = mpsc::channel(4);
+        tx.try_send(Ok(r0)).expect("send batch_write r0");
+        tx.try_send(Ok(r1)).expect("send batch_write r1");
+        drop(tx);
+        Ok(ResponseStream::from(rx))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+enum AdminMode {
+    #[default]
+    Succeed,
+    Fail,
+    NeverDone,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RecordingAdmin {
+    mode: AdminMode,
+    statements: Arc<Mutex<Vec<String>>>,
+}
+
+impl google_cloud_spanner_admin_database_v1::stub::DatabaseAdmin for RecordingAdmin {
+    async fn update_database_ddl(
+        &self,
+        req: google_cloud_spanner_admin_database_v1::model::UpdateDatabaseDdlRequest,
+        _options: RequestOptions,
+    ) -> google_cloud_gax::Result<GaxResponse<Operation>> {
+        *self.statements.lock().unwrap() = req.statements;
+        Ok(GaxResponse::from(
+            Operation::new()
+                .set_name("projects/p/instances/i/databases/d/operations/op1")
+                .set_done(false),
+        ))
+    }
+
+    async fn get_operation(
+        &self,
+        req: google_cloud_longrunning::model::GetOperationRequest,
+        _options: RequestOptions,
+    ) -> google_cloud_gax::Result<GaxResponse<Operation>> {
+        let op = match self.mode {
+            AdminMode::NeverDone => Operation::new().set_name(req.name).set_done(false),
+            AdminMode::Succeed => Operation::new().set_name(req.name).set_done(true),
+            AdminMode::Fail => Operation::new()
+                .set_name(req.name)
+                .set_done(true)
+                .set_result(OperationResult::Error(Box::new(
+                    google_cloud_rpc::model::Status::new()
+                        .set_code(3)
+                        .set_message("Duplicate name in schema: t"),
+                ))),
+        };
+        Ok(GaxResponse::from(op))
+    }
+}
+
+fn stub_client_with_admin(
+    stub: RecordingSpanner,
+    admin: RecordingAdmin,
+    ddl_timeout: Duration,
+) -> SpannerClient {
+    let mut cfg = SpannerClientConfig::new("projects/p/instances/i/databases/d");
+    cfg.ddl_timeout = ddl_timeout;
+    SpannerClient::with_clients(
+        Spanner::from_stub(stub),
+        Some(DatabaseAdmin::from_stub(admin)),
+        cfg,
+    )
+    .expect("client")
 }
 
 async fn stub_client(stub: RecordingSpanner) -> SpannerClient {
@@ -469,6 +621,34 @@ async fn stub_client(stub: RecordingSpanner) -> SpannerClient {
                                 }
                                 prost_grpc_ok(frames)
                             }
+                            "/google.spanner.v1.Spanner/BatchWrite" => {
+                                let mut stream = SpannerStub::batch_write(
+                                    &stub,
+                                    model::BatchWriteRequest::new(),
+                                    RequestOptions::default(),
+                                )
+                                .await
+                                .expect("batch_write");
+                                let mut frames = Vec::new();
+                                while let Some(item) = stream.next().await {
+                                    let bwr = item.expect("bwr item");
+                                    let status = bwr.status.map(|st| ProstRpcStatus {
+                                        code: st.code,
+                                        message: st.message,
+                                    });
+                                    let commit_timestamp =
+                                        bwr.commit_timestamp.map(|ts| prost_types::Timestamp {
+                                            seconds: ts.seconds(),
+                                            nanos: ts.nanos(),
+                                        });
+                                    frames.push(prost_lpm_frame(&ProstBatchWriteResponse {
+                                        indexes: bwr.indexes,
+                                        status,
+                                        commit_timestamp,
+                                    }));
+                                }
+                                prost_grpc_ok(frames)
+                            }
                             _ => prost_grpc_err(12, "unimplemented"),
                         };
                         Ok::<_, Infallible>(resp)
@@ -493,244 +673,6 @@ async fn stub_client(stub: RecordingSpanner) -> SpannerClient {
         SpannerClientConfig::new("projects/p/instances/i/databases/d"),
     )
     .expect("client")
-}
-
-fn strip_lpm_prefix(raw: &[u8]) -> &[u8] {
-    if raw.len() >= 5 { &raw[5..] } else { raw }
-}
-
-fn grpc_ok_response(frames: Vec<Bytes>) -> Response<Full<Bytes>> {
-    let mut payload = Vec::new();
-    for frame in frames {
-        let lpm = encode_lpm_frame(&frame, false, DEFAULT_CLIENT_MAX_GRPC_MESSAGE_SIZE)
-            .expect("encode lpm frame");
-        payload.extend_from_slice(&lpm);
-    }
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "application/grpc")
-        .header("grpc-status", "0")
-        .body(Full::new(Bytes::from(payload)))
-        .expect("build grpc ok response")
-}
-
-fn grpc_error_response(
-    code: i32,
-    message: &str,
-    status_details_b64: Option<&str>,
-) -> Response<Full<Bytes>> {
-    let mut builder = Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "application/grpc")
-        .header("grpc-status", code.to_string())
-        .header("grpc-message", message);
-    if let Some(b64) = status_details_b64 {
-        builder = builder.header("grpc-status-details-bin", b64);
-    }
-    builder
-        .body(Full::new(Bytes::new()))
-        .expect("build grpc error response")
-}
-
-fn encode_retry_info_status_bin(code: i32, message: &str, delay_ms: u64) -> String {
-    let mut retry_info = ProtoWriter::new();
-    retry_info.write_nested(1, |dw| {
-        let secs = (delay_ms / 1_000) as i64;
-        let nanos = ((delay_ms % 1_000) * 1_000_000) as i32;
-        if secs > 0 {
-            dw.write_i64(1, secs);
-        }
-        if nanos > 0 {
-            dw.write_i32(2, nanos);
-        }
-    });
-    let retry_bytes = retry_info.finish();
-
-    let mut status = ProtoWriter::new();
-    status.write_i32(1, code);
-    status.write_str(2, message);
-    status.write_nested(3, |any_w| {
-        any_w.write_str(1, "type.googleapis.com/google.rpc.RetryInfo");
-        any_w.write_bytes(2, &retry_bytes);
-    });
-    BASE64_STANDARD.encode(status.finish())
-}
-
-async fn start_mock_spanner_h2c_server<F>(handler: F) -> SocketAddr
-where
-    F: Fn(String, HeaderMap, Vec<u8>) -> Response<Full<Bytes>> + Send + Sync + 'static,
-{
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind h2c listener");
-    let addr = listener.local_addr().expect("local_addr");
-    let handler = Arc::new(handler);
-
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let h = Arc::clone(&handler);
-            tokio::spawn(async move {
-                let io = TokioIo::new(stream);
-                let svc = service_fn(move |req: Request<Incoming>| {
-                    let h = Arc::clone(&h);
-                    async move {
-                        let path = req.uri().path().to_string();
-                        let headers = req.headers().clone();
-                        let body = req
-                            .into_body()
-                            .collect()
-                            .await
-                            .map(|c| c.to_bytes().to_vec())
-                            .unwrap_or_default();
-                        Ok::<_, Infallible>(h(path, headers, body))
-                    }
-                });
-                let _ = http2::Builder::new(TokioExecutor::new())
-                    .serve_connection(io, svc)
-                    .await;
-            });
-        }
-    });
-
-    addr
-}
-
-#[test]
-fn test_partial_result_set_chunk_merger_split_bytes_json_and_nested_list() {
-    let raw_bytes = b"Vertebra-Spanner-Zero-Copy-Binary-Payload-123456";
-    let b64_full = BASE64_STANDARD.encode(raw_bytes);
-    let split_at = 11;
-    let b64_part1 = &b64_full[..split_at];
-    let b64_part2 = &b64_full[split_at..];
-
-    let json_part1 = r#"{"service":"vertebra","#;
-    let json_part2 = r#""multiplexed":true}"#;
-
-    let schema = vec![
-        SpannerStructField {
-            name: "payload".to_string(),
-            field_type: SpannerType::scalar(SpannerTypeCode::Bytes),
-        },
-        SpannerStructField {
-            name: "meta".to_string(),
-            field_type: SpannerType::scalar(SpannerTypeCode::Json),
-        },
-        SpannerStructField {
-            name: "tags".to_string(),
-            field_type: SpannerType::array(SpannerType::scalar(SpannerTypeCode::String)),
-        },
-    ];
-
-    let mut assembler = PartialResultSetAssembler::new();
-
-    // Frame 1: `payload` split mid-base64 string (`chunked_value = true`).
-    assembler
-        .push_frame(PartialResultSetFrame {
-            row_type: Some(schema),
-            transaction_id: Some(b"tx-chunk-1".to_vec()),
-            read_timestamp_micros: None,
-            values: vec![ProtobufValue::String(b64_part1.to_string())],
-            chunked_value: true,
-            resume_token: Vec::new(),
-            row_count_exact: None,
-            row_count_lower_bound: None,
-            precommit_token: Some(MultiplexedSessionPrecommitToken {
-                precommit_token: b"tok-1".to_vec(),
-                seq_num: 1,
-            }),
-            last: false,
-        })
-        .expect("push frame 1");
-
-    // Frame 2: finishes `payload`, starts `meta` JSON and splits mid-JSON (`chunked_value = true`).
-    assembler
-        .push_frame(PartialResultSetFrame {
-            row_type: None,
-            transaction_id: None,
-            read_timestamp_micros: None,
-            values: vec![
-                ProtobufValue::String(b64_part2.to_string()),
-                ProtobufValue::String(json_part1.to_string()),
-            ],
-            chunked_value: true,
-            resume_token: Vec::new(),
-            row_count_exact: None,
-            row_count_lower_bound: None,
-            precommit_token: Some(MultiplexedSessionPrecommitToken {
-                precommit_token: b"tok-2".to_vec(),
-                seq_num: 2,
-            }),
-            last: false,
-        })
-        .expect("push frame 2");
-
-    // Frame 3: finishes `meta` JSON, starts `tags` ARRAY<STRING> where `"alp"` is split into `"ha"`.
-    assembler
-        .push_frame(PartialResultSetFrame {
-            row_type: None,
-            transaction_id: None,
-            read_timestamp_micros: None,
-            values: vec![
-                ProtobufValue::String(json_part2.to_string()),
-                ProtobufValue::List(vec![
-                    ProtobufValue::String("first".to_string()),
-                    ProtobufValue::String("alp".to_string()),
-                ]),
-            ],
-            chunked_value: true,
-            resume_token: Vec::new(),
-            row_count_exact: None,
-            row_count_lower_bound: None,
-            precommit_token: None,
-            last: false,
-        })
-        .expect("push frame 3");
-
-    // Frame 4: finishes `"alpha"` and adds `"omega"`, with checkpoint `resume_token`.
-    assembler
-        .push_frame(PartialResultSetFrame {
-            row_type: None,
-            transaction_id: None,
-            read_timestamp_micros: None,
-            values: vec![ProtobufValue::List(vec![
-                ProtobufValue::String("ha".to_string()),
-                ProtobufValue::String("omega".to_string()),
-            ])],
-            chunked_value: false,
-            resume_token: b"resume-row-1".to_vec(),
-            row_count_exact: None,
-            row_count_lower_bound: None,
-            precommit_token: None,
-            last: true,
-        })
-        .expect("push frame 4");
-
-    let res = assembler.finish().expect("finish assembler");
-    assert_eq!(res.rows.len(), 1);
-    assert_eq!(
-        res.rows[0][0],
-        SpannerValue::Bytes(raw_bytes.to_vec()),
-        "base64 decoding must occur only after chunked StringValue fragments are concatenated"
-    );
-    assert_eq!(
-        res.rows[0][1],
-        SpannerValue::Json(r#"{"service":"vertebra","multiplexed":true}"#.to_string())
-    );
-    assert_eq!(
-        res.rows[0][2],
-        SpannerValue::Array(vec![
-            SpannerValue::String("first".to_string()),
-            SpannerValue::String("alpha".to_string()),
-            SpannerValue::String("omega".to_string()),
-        ])
-    );
-    assert_eq!(
-        res.precommit_token,
-        Some(MultiplexedSessionPrecommitToken {
-            precommit_token: b"tok-2".to_vec(),
-            seq_num: 2,
-        })
-    );
 }
 
 #[test]
@@ -883,177 +825,279 @@ fn ca_pem_policy_follows_endpoint_host() {
 }
 
 #[tokio::test]
-async fn test_read_write_transaction_inline_begin_precommit_retry_and_aborted_wound_wait() {
-    let commit_calls = Arc::new(AtomicUsize::new(0));
-    let stmt_calls = Arc::new(AtomicUsize::new(0));
-    let observed_commit_bodies: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
-    let observed_stmt_bodies: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
-
-    let commit_calls_c = Arc::clone(&commit_calls);
-    let stmt_calls_c = Arc::clone(&stmt_calls);
-    let commit_bodies_c = Arc::clone(&observed_commit_bodies);
-    let stmt_bodies_c = Arc::clone(&observed_stmt_bodies);
-
-    let addr = start_mock_spanner_h2c_server(move |path, _headers, raw_body| {
-        let body = strip_lpm_prefix(&raw_body).to_vec();
-        match path.as_str() {
-            "/google.spanner.v1.Spanner/CreateSession" => {
-                let mut w = ProtoWriter::new();
-                w.write_str(1, "projects/p1/instances/i1/databases/d1/sessions/mux-rw-1");
-                w.write_bool(6, true);
-                grpc_ok_response(vec![w.finish()])
-            }
-            "/google.spanner.v1.Spanner/ExecuteStreamingSql" => {
-                stmt_bodies_c.lock().unwrap().push(body);
-                let idx = stmt_calls_c.fetch_add(1, Ordering::SeqCst);
-                let tx_id = if idx == 0 {
-                    b"tx-attempt-1".to_vec()
-                } else {
-                    b"tx-attempt-2".to_vec()
-                };
-                let mut prs = ProtoWriter::new();
-                prs.write_nested(1, |mw| {
-                    mw.write_nested(2, |tw| {
-                        tw.write_bytes(1, &tx_id);
-                        tw.write_nested(8, |pw| {
-                            pw.write_bytes(1, b"precommit-seq-1");
-                            pw.write_i32(2, 1);
-                        });
-                    });
-                });
-                prs.write_nested(5, |sw| {
-                    sw.write_i64(3, 1);
-                });
-                prs.write_nested(8, |pw| {
-                    pw.write_bytes(1, b"precommit-seq-2");
-                    pw.write_i32(2, 2);
-                });
-                grpc_ok_response(vec![prs.finish()])
-            }
-            "/google.spanner.v1.Spanner/ExecuteBatchDml" => {
-                let mut resp = ProtoWriter::new();
-                resp.write_nested(1, |rsw| {
-                    rsw.write_nested(3, |sw| sw.write_i64(3, 2));
-                });
-                resp.write_nested(2, |stw| {
-                    stw.write_i32(1, 0);
-                });
-                resp.write_nested(3, |pw| {
-                    pw.write_bytes(1, b"precommit-seq-5");
-                    pw.write_i32(2, 5);
-                });
-                grpc_ok_response(vec![resp.finish()])
-            }
-            "/google.spanner.v1.Spanner/Commit" => {
-                commit_bodies_c.lock().unwrap().push(body);
-                let c_idx = commit_calls_c.fetch_add(1, Ordering::SeqCst);
-                if c_idx == 0 {
-                    let details = encode_retry_info_status_bin(10, "Transaction aborted", 5);
-                    grpc_error_response(10, "Transaction aborted", Some(&details))
-                } else if c_idx == 1 {
-                    let mut resp = ProtoWriter::new();
-                    resp.write_nested(4, |pw| {
-                        pw.write_bytes(1, b"precommit-retry-99");
-                        pw.write_i32(2, 99);
-                    });
-                    grpc_ok_response(vec![resp.finish()])
-                } else {
-                    let mut resp = ProtoWriter::new();
-                    resp.write_nested(1, |tw| {
-                        tw.write_i64(1, 1_700_000_000);
-                    });
-                    resp.write_nested(2, |sw| {
-                        sw.write_i64(1, 3);
-                    });
-                    grpc_ok_response(vec![resp.finish()])
-                }
-            }
-            _ => grpc_error_response(12, "unimplemented", None),
-        }
-    })
-    .await;
-
-    let mut cfg = SpannerClientConfig::new("projects/p1/instances/i1/databases/d1");
-    cfg.endpoint = format!("http://{}:{}", addr.ip(), addr.port());
-    let client = Arc::new(SpannerClient::new(cfg).expect("create SpannerClient"));
-
-    let client_ref = Arc::clone(&client);
-    let (batch_counts, commit_res) = client
-        .run_in_read_write_transaction(3, move |mut tx: SpannerReadWriteTransaction| {
-            let c = Arc::clone(&client_ref);
-            async move {
-                let dml1 = c
-                    .execute_in_read_write_tx(
-                        &mut tx,
-                        "UPDATE accounts SET balance = balance - 10 WHERE id = 1",
-                        &[],
-                        Some("debit"),
-                    )
-                    .await
-                    .map_err(|e| (e, tx.transaction_id.clone()))?;
-                assert_eq!(dml1.row_count_exact, Some(1));
-
-                let batch_res = c
-                    .execute_batch_dml(
-                        &mut tx,
-                        &[SpannerBatchDmlStatement {
-                            sql: "UPDATE accounts SET balance = balance + 10 WHERE id = 2"
-                                .to_string(),
-                            params: Vec::new(),
-                        }],
-                        Some("credit-batch"),
-                    )
-                    .await
-                    .map_err(|e| (e, tx.transaction_id.clone()))?;
-
-                tx.add_mutation(SpannerMutation::insert_or_update(
-                    "audit_log",
-                    vec!["id".to_string(), "event".to_string()],
-                    vec![vec![
-                        ProtobufValue::String("1".to_string()),
-                        ProtobufValue::String("transfer".to_string()),
-                    ]],
-                ));
-                Ok((batch_res.row_counts, tx))
-            }
-        })
+async fn execute_dml_runs_in_read_write_transaction_with_tags() {
+    let stub = RecordingSpanner::default();
+    let client = stub_client_with_admin(
+        stub.clone(),
+        RecordingAdmin::default(),
+        Duration::from_secs(5),
+    );
+    let params = vec![SpannerQueryParameter::from_value(
+        "p1",
+        &SpannerValue::Int64(1),
+    )];
+    let count = client
+        .execute_dml(
+            "UPDATE t SET v = 1 WHERE id = @p1",
+            &params,
+            Some("req-a"),
+            Some("tx-a"),
+        )
         .await
-        .expect("run_in_read_write_transaction");
+        .expect("execute_dml");
+    assert_eq!(count, 3);
+    let sql_reqs = stub.sql_requests.lock().unwrap();
+    assert_eq!(sql_reqs.len(), 1);
+    assert_eq!(
+        sql_reqs[0]
+            .request_options
+            .as_ref()
+            .map(|o| o.request_tag.as_str()),
+        Some("req-a")
+    );
+    let commit_reqs = stub.commit_requests.lock().unwrap();
+    assert_eq!(commit_reqs.len(), 1);
+    assert_eq!(
+        commit_reqs[0]
+            .request_options
+            .as_ref()
+            .map(|o| o.transaction_tag.as_str()),
+        Some("tx-a")
+    );
+}
 
-    assert_eq!(batch_counts, vec![2]);
-    assert_eq!(commit_res.retry_count, 1);
-    assert_eq!(commit_res.mutation_count, Some(3));
+#[tokio::test]
+async fn execute_batch_dml_returns_row_counts() {
+    let stub = RecordingSpanner::default();
+    let client = stub_client_with_admin(
+        stub.clone(),
+        RecordingAdmin::default(),
+        Duration::from_secs(5),
+    );
+    let stmts = vec![
+        SpannerBatchDmlStatement {
+            sql: "UPDATE t SET v = 1 WHERE id = 1".into(),
+            params: vec![],
+        },
+        SpannerBatchDmlStatement {
+            sql: "UPDATE t SET v = 2 WHERE id = 2".into(),
+            params: vec![],
+        },
+    ];
+    let counts = client
+        .execute_batch_dml(&stmts, Some("batch-req"), Some("batch-tx"))
+        .await
+        .expect("execute_batch_dml");
+    assert_eq!(counts, vec![2, 5]);
+}
 
-    let stmt_bodies = observed_stmt_bodies.lock().unwrap();
-    assert_eq!(stmt_bodies.len(), 2);
-    assert!(
-        stmt_bodies[1]
-            .windows(b"tx-attempt-1".len())
-            .any(|w| w == b"tx-attempt-1"),
-        "retry attempt after Aborted must include aborted transaction_id in multiplexed_session_previous_transaction_id"
+#[tokio::test]
+async fn apply_mutations_commits_insert_rows() {
+    let stub = RecordingSpanner::default();
+    let client = stub_client_with_admin(
+        stub.clone(),
+        RecordingAdmin::default(),
+        Duration::from_secs(5),
+    );
+    let mutation = SpannerMutation::insert(
+        "t",
+        vec!["id".into(), "v".into()],
+        vec![vec![
+            ProtobufValue::String("1".into()),
+            ProtobufValue::String("x".into()),
+        ]],
+    );
+    let res = client
+        .apply_mutations(&[mutation], Some("mut-tx"), false)
+        .await
+        .expect("apply_mutations");
+    assert_eq!(res.commit_timestamp_micros, Some(1_700_000_000_000_000));
+    let commits = stub.commit_requests.lock().unwrap();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].mutations.len(), 1);
+    let insert = commits[0].mutations[0].insert().expect("insert mutation");
+    assert_eq!(insert.table, "t");
+    assert_eq!(insert.columns, vec!["id".to_string(), "v".to_string()]);
+}
+
+#[tokio::test]
+async fn apply_mutations_rejects_commit_without_timestamp() {
+    let stub = RecordingSpanner {
+        omit_commit_timestamp: true,
+        ..Default::default()
+    };
+    let client = stub_client_with_admin(stub, RecordingAdmin::default(), Duration::from_secs(5));
+    let mutation = SpannerMutation::insert(
+        "t",
+        vec!["id".into()],
+        vec![vec![ProtobufValue::String("1".into())]],
+    );
+    match client.apply_mutations(&[mutation], None, false).await {
+        Err(SpannerError::Protocol(msg)) => assert!(msg.contains("commit_timestamp")),
+        other => panic!("expected Protocol error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn batch_write_reports_group_status() {
+    let stub = RecordingSpanner::default();
+    let client = stub_client(stub).await;
+    let g0 = SpannerMutationGroup {
+        mutations: vec![SpannerMutation::insert(
+            "t",
+            vec!["id".into()],
+            vec![vec![ProtobufValue::String("1".into())]],
+        )],
+    };
+    let g1 = SpannerMutationGroup {
+        mutations: vec![SpannerMutation::insert(
+            "t",
+            vec!["id".into()],
+            vec![vec![ProtobufValue::String("2".into())]],
+        )],
+    };
+    let results = client
+        .batch_write(&[g0, g1], false)
+        .await
+        .expect("batch_write");
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].indexes, vec![0]);
+    assert_eq!(results[0].status_code, 0);
+    assert_eq!(results[1].indexes, vec![1]);
+    assert_eq!(results[1].status_code, 6);
+    assert_eq!(results[1].status_message, "already exists");
+}
+
+#[tokio::test]
+async fn update_database_ddl_returns_operation_name() {
+    let admin = RecordingAdmin {
+        mode: AdminMode::Succeed,
+        ..Default::default()
+    };
+    let client = stub_client_with_admin(
+        RecordingSpanner::default(),
+        admin.clone(),
+        Duration::from_secs(5),
+    );
+    let op_name = client
+        .update_database_ddl(&["CREATE TABLE t (id INT64) PRIMARY KEY (id)".into()])
+        .await
+        .expect("update_database_ddl");
+    assert_eq!(op_name, "projects/p/instances/i/databases/d/operations/op1");
+    assert_eq!(
+        *admin.statements.lock().unwrap(),
+        vec!["CREATE TABLE t (id INT64) PRIMARY KEY (id)".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn update_database_ddl_surfaces_operation_error() {
+    let admin = RecordingAdmin {
+        mode: AdminMode::Fail,
+        ..Default::default()
+    };
+    let client = stub_client_with_admin(RecordingSpanner::default(), admin, Duration::from_secs(5));
+    match client
+        .update_database_ddl(&["CREATE TABLE t (id INT64) PRIMARY KEY (id)".into()])
+        .await
+    {
+        Err(SpannerError::Ddl {
+            operation,
+            code,
+            message,
+        }) => {
+            assert!(operation.ends_with("/operations/op1"));
+            assert_eq!(code, 3);
+            assert!(message.contains("Duplicate name in schema"));
+        }
+        other => panic!("expected SpannerError::Ddl, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn update_database_ddl_times_out_while_operation_pending() {
+    let admin = RecordingAdmin {
+        mode: AdminMode::NeverDone,
+        ..Default::default()
+    };
+    let client = stub_client_with_admin(
+        RecordingSpanner::default(),
+        admin,
+        Duration::from_millis(200),
+    );
+    let started = std::time::Instant::now();
+    match client
+        .update_database_ddl(&["CREATE TABLE t (id INT64) PRIMARY KEY (id)".into()])
+        .await
+    {
+        Err(SpannerError::DdlTimeout {
+            operation,
+            timeout_ms,
+        }) => {
+            assert!(operation.ends_with("/operations/op1"));
+            assert_eq!(timeout_ms, 200);
+            assert!(started.elapsed() < Duration::from_secs(5));
+        }
+        other => panic!("expected SpannerError::DdlTimeout, got {other:?}"),
+    }
+}
+
+#[test]
+fn admin_endpoint_rule() {
+    let mut explicit = SpannerClientConfig::new("projects/p/instances/i/databases/d");
+    explicit.endpoint = "http://localhost:7000".into();
+    explicit.admin_endpoint = Some("http://admin.local:8080".into());
+    assert_eq!(
+        SpannerClient::new(explicit)
+            .expect("client")
+            .effective_admin_endpoint()
+            .expect("admin endpoint"),
+        "http://admin.local:8080"
     );
 
-    let commits = observed_commit_bodies.lock().unwrap();
-    assert_eq!(commits.len(), 3);
-    assert!(
-        commits[1]
-            .windows(b"precommit-seq-5".len())
-            .any(|w| w == b"precommit-seq-5")
+    let default_cfg = SpannerClientConfig::new("projects/p/instances/i/databases/d");
+    assert_eq!(
+        SpannerClient::new(default_cfg)
+            .expect("client")
+            .effective_admin_endpoint()
+            .expect("admin endpoint"),
+        "https://spanner.googleapis.com"
     );
-    assert!(
-        commits[1]
-            .windows(b"audit_log".len())
-            .any(|w| w == b"audit_log")
+
+    let mut emulator = SpannerClientConfig::new("projects/p/instances/i/databases/d");
+    emulator.endpoint = "http://localhost:9010".into();
+    assert_eq!(
+        SpannerClient::new(emulator)
+            .expect("client")
+            .effective_admin_endpoint()
+            .expect("admin endpoint"),
+        "http://localhost:9020"
     );
-    assert!(
-        commits[2]
-            .windows(b"precommit-retry-99".len())
-            .any(|w| w == b"precommit-retry-99")
-    );
-    assert!(
-        !commits[2]
-            .windows(b"audit_log".len())
-            .any(|w| w == b"audit_log"),
-        "MultiplexedSessionRetry replay CommitRequest must omit already-buffered mutations"
-    );
+
+    let mut unknown = SpannerClientConfig::new("projects/p/instances/i/databases/d");
+    unknown.endpoint = "http://localhost:7000".into();
+    assert!(matches!(
+        SpannerClient::new(unknown)
+            .expect("client")
+            .effective_admin_endpoint(),
+        Err(SpannerError::InvalidArgument(_))
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires Spanner emulator: set SPANNER_EMULATOR_HOST and VERTEBRA_SPANNER_EMULATOR_DATABASE"]
+async fn update_database_ddl_against_emulator() {
+    let host = std::env::var("SPANNER_EMULATOR_HOST").expect("SPANNER_EMULATOR_HOST");
+    let database = std::env::var("VERTEBRA_SPANNER_EMULATOR_DATABASE")
+        .expect("VERTEBRA_SPANNER_EMULATOR_DATABASE");
+    let mut cfg = SpannerClientConfig::new(database);
+    cfg.endpoint = format!("http://{host}");
+    let client = SpannerClient::new(cfg).expect("client");
+    let unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("unix time")
+        .as_millis();
+    let ddl = format!("CREATE TABLE vtb_ddl_probe_{unix_ms} (id INT64) PRIMARY KEY (id)");
+    let op_name = client.update_database_ddl(&[ddl]).await.expect("ddl");
+    assert!(!op_name.is_empty());
 }

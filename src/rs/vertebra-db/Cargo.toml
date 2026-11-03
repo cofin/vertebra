@@ -49,6 +49,9 @@ webpki-root-certs = { workspace = true }
 zstd = { workspace = true }
 
 [dev-dependencies]
+google-cloud-longrunning = { workspace = true }
+google-cloud-rpc = { workspace = true }
+google-cloud-spanner-admin-database-v1 = { workspace = true }
 proptest = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
