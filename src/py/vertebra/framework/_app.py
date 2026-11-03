@@ -6,6 +6,7 @@ sub-application mounting, handler ID indexing, and startup/shutdown lifecycle ho
 
 import functools
 import inspect
+import os
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
@@ -21,6 +22,7 @@ from vertebra.framework._router import (
     _normalize_path,
     _normalize_prefix,
 )
+from vertebra.framework._welcome import WelcomePageRenderer
 from vertebra.framework.di import Container, DependencyGraph
 from vertebra.framework.openapi import OpenAPIConfig, OpenAPISpecBuilder
 from vertebra.framework.procedures import Procedure, ProcedureRouter
@@ -47,6 +49,7 @@ class App:
         "_container",
         "_controllers",
         "_databases",
+        "_debug",
         "_dependencies",
         "_guards",
         "_handler_index",
@@ -60,6 +63,7 @@ class App:
         "_routes",
         "_shutdown_hooks",
         "_startup_hooks",
+        "_welcome_route_active",
     )
 
     def __init__(
@@ -69,8 +73,11 @@ class App:
         dependencies: Mapping[str, Any] | None = None,
         guards: Sequence[Callable[..., Any]] | None = None,
         container: Container | None = None,
+        debug: bool = False,
     ) -> None:
-        """Initialize an App with optional route_handlers, dependencies, guards, and DI container."""
+        """Initialize an App with optional route_handlers, dependencies, guards, DI container, and debug flag."""
+        self._debug: bool = bool(debug)
+        self._welcome_route_active: bool = False
         self._routers: list[Router] = []
         self._controllers: list[type[Controller] | Controller] = []
         self._routes: list[Route] = []
@@ -161,6 +168,11 @@ class App:
         """Return all registered application plugins."""
         return tuple(self._plugins)
 
+    @property
+    def debug(self) -> bool:
+        """Return whether debug/development mode is enabled on this App instance."""
+        return self._debug
+
     def add_route(self, route: Route) -> None:
         """Append a single Route definition, bind its DI context, and index its handler."""
         effective_route = (
@@ -168,6 +180,11 @@ class App:
             if (self._dependencies or self._guards)
             else route
         )
+        if effective_route.path == "/" and self._welcome_route_active:
+            welcome_id = _make_handler_id("GET", "/")
+            self._handler_index.pop(welcome_id, None)
+            self._handlers.pop(welcome_id, None)
+            self._welcome_route_active = False
         self._routes.append(effective_route)
         handler_id = _make_handler_id(effective_route.method, effective_route.path)
         info = HandlerInfo(
@@ -390,7 +407,45 @@ class App:
 
     def mount(self, prefix: str, sub_app: Any, *, protocol: str = "auto") -> None:
         """Mount a WSGI or ASGI sub-application under a path prefix."""
-        self._mounts.append((_normalize_prefix(prefix), sub_app, protocol))
+        norm_prefix = _normalize_prefix(prefix)
+        if norm_prefix in {"", "/"} and self._welcome_route_active:
+            welcome_id = _make_handler_id("GET", "/")
+            self._handler_index.pop(welcome_id, None)
+            self._handlers.pop(welcome_id, None)
+            self._welcome_route_active = False
+        self._mounts.append((norm_prefix, sub_app, protocol))
+
+    def ensure_dev_welcome_route(self, *, force_dev: bool = False) -> bool:
+        """Register the development welcome route on unclaimed ``GET /`` when debug or ``VERTEBRA_DEV`` is active."""
+        dev_env = os.environ.get("VERTEBRA_DEV", "").strip().lower() in {"1", "true", "yes", "on"}
+        is_dev = bool(force_dev or self._debug or dev_env)
+        has_user_root_route = any(route.path == "/" for route in self._routes)
+        has_root_mount = any(prefix in {"", "/"} for prefix, _, _ in self._mounts)
+        welcome_id = _make_handler_id("GET", "/")
+
+        if not is_dev or has_user_root_route or has_root_mount:
+            if self._welcome_route_active:
+                has_user_get_root = any(route.path == "/" and route.method.upper() == "GET" for route in self._routes)
+                if not has_user_get_root:
+                    self._handler_index.pop(welcome_id, None)
+                    self._handlers.pop(welcome_id, None)
+                self._welcome_route_active = False
+            return False
+
+        if self._welcome_route_active and welcome_id in self._handlers:
+            return True
+
+        welcome_handler = WelcomePageRenderer.make_handler(self)
+        self._handler_index[welcome_id] = HandlerInfo(
+            handler_id=welcome_id,
+            method="GET",
+            path="/",
+            handler_name="WelcomePageRenderer.handle_welcome",
+            sync_to_thread=False,
+        )
+        self._handlers[welcome_id] = welcome_handler
+        self._welcome_route_active = True
+        return True
 
     def enable_docs(self, config: Any = None) -> Any:
         """Enable OpenAPI schema and configured interactive documentation portals."""
@@ -403,15 +458,33 @@ class App:
         def _openapi_schema() -> dict[str, Any]:
             return builder.build()
 
+        _openapi_schema.__name__ = "openapi_schema"
+        _openapi_schema.__qualname__ = "App.openapi_schema"
+        schema_id = _make_handler_id("GET", cfg.schema_path)
+        if schema_id in self._handler_index:
+            prev = self._handler_index[schema_id]
+            self._handler_index[schema_id] = HandlerInfo(
+                handler_id=prev.handler_id,
+                method=prev.method,
+                path=prev.path,
+                handler_name="App.openapi_schema",
+                sync_to_thread=prev.sync_to_thread,
+            )
+
         for docs_path, docs_html in cfg.render_docs_routes().items():
 
-            def _make_docs_handler(html_payload: str) -> Callable[[], str]:
-                def _docs_handler() -> str:
-                    return html_payload
+            def _make_docs_handler(html_payload: str, route_label: str) -> Callable[[], Response]:
+                html_bytes = html_payload.encode("utf-8")
 
+                def _docs_handler() -> Response:
+                    return Response(200, html_bytes, [("content-type", "text/html; charset=utf-8")])
+
+                slug = route_label.strip("/").replace("/", "_") or "docs"
+                _docs_handler.__name__ = f"docs_{slug}"
+                _docs_handler.__qualname__ = f"App.docs_{slug}"
                 return _docs_handler
 
-            self.get(docs_path)(_make_docs_handler(docs_html))
+            self.get(docs_path)(_make_docs_handler(docs_html, docs_path))
 
         return builder
 

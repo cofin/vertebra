@@ -70,6 +70,10 @@ fn build_route_table_from_app(py: Python<'_>, app: &Bound<'_, PyAny>) -> PyResul
         app.clone()
     };
 
+    if let Ok(ensure_fn) = app_obj.getattr("ensure_dev_welcome_route") {
+        let _ = ensure_fn.call0()?;
+    }
+
     let handler_index = app_obj.getattr("handler_index")?;
     let dict = handler_index.cast::<PyDict>()?;
 
@@ -266,6 +270,10 @@ fn spawn_python_workers(
         } else {
             app
         };
+
+        if let Ok(ensure_fn) = app_obj.getattr("ensure_dev_welcome_route") {
+            let _ = ensure_fn.call0()?;
+        }
 
         native_mod
             .getattr("init_transport")?

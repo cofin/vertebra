@@ -34,6 +34,11 @@ if TYPE_CHECKING:
         post,
         put,
     )
+    from vertebra.framework._welcome import (
+        WelcomePageRenderer,
+        WelcomeRouteItem,
+        WelcomeSnapshot,
+    )
     from vertebra.framework.di import Container, DependencyGraph, Inject, Provide
     from vertebra.framework.procedures import (
         Procedure,
@@ -54,6 +59,9 @@ __all__ = (
     "Provide",
     "Route",
     "Router",
+    "WelcomePageRenderer",
+    "WelcomeRouteItem",
+    "WelcomeSnapshot",
     "asyncapi",
     "autowire",
     "channels",
@@ -81,6 +89,7 @@ __all__ = (
 __lazy_modules__ = [
     "vertebra.framework._app",
     "vertebra.framework._router",
+    "vertebra.framework._welcome",
     "vertebra.framework.asyncapi",
     "vertebra.framework.autowire",
     "vertebra.framework.channels",
@@ -108,6 +117,9 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "Provide": ("vertebra.framework.di", "Provide"),
     "Route": ("vertebra.framework._router", "Route"),
     "Router": ("vertebra.framework._router", "Router"),
+    "WelcomePageRenderer": ("vertebra.framework._welcome", "WelcomePageRenderer"),
+    "WelcomeRouteItem": ("vertebra.framework._welcome", "WelcomeRouteItem"),
+    "WelcomeSnapshot": ("vertebra.framework._welcome", "WelcomeSnapshot"),
     "delete": ("vertebra.framework._router", "delete"),
     "get": ("vertebra.framework._router", "get"),
     "mutation": ("vertebra.framework.procedures", "mutation"),

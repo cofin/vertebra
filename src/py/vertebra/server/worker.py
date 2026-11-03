@@ -271,6 +271,9 @@ class Worker:
     ) -> None:
         if hasattr(handlers, "_handlers") and not isinstance(handlers, Mapping):
             app_obj = handlers
+            ensure_fn = getattr(app_obj, "ensure_dev_welcome_route", None)
+            if callable(ensure_fn):
+                ensure_fn()
             self._handlers: Mapping[int, Callable[..., Any]] = getattr(app_obj, "_handlers", {})
             if mounts is None:
                 raw_mounts = getattr(app_obj, "mounts", None)

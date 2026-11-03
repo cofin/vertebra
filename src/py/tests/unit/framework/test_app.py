@@ -9,6 +9,7 @@ import pytest
 
 import vertebra
 import vertebra.framework as vtb_framework
+from vertebra._vertebra import Response
 from vertebra.build.codegen._metadata import RouteCollector
 from vertebra.framework._app import App, HandlerInfo, _make_handler_id
 from vertebra.framework._router import Controller, Route, Router, get, handler_id, post
@@ -318,3 +319,147 @@ def test_autowire_loader_registers_discovered_services_and_controllers(monkeypat
     assert services == (OrderService,)
     assert any(r.path == "/orders" for r in app.routes)
     assert app.container.resolve_sync(OrderService).label() == "orders-ready"
+
+
+def test_app_debug_flag_and_ensure_dev_welcome_route_unclaimed_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify App(debug=True) and VERTEBRA_DEV=1 register the GET / welcome route without mutating app.routes."""
+    monkeypatch.delenv("VERTEBRA_DEV", raising=False)
+    prod_app = App()
+    assert prod_app.debug is False
+    assert prod_app.ensure_dev_welcome_route() is False
+    assert _make_handler_id("GET", "/") not in prod_app.handler_index
+
+    dev_app = App(debug=True)
+
+    @dev_app.get("/health")
+    def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    assert dev_app.debug is True
+    assert dev_app.ensure_dev_welcome_route() is True
+    assert dev_app.ensure_dev_welcome_route() is True
+    assert len(dev_app.routes) == 1
+    assert dev_app.routes[0].path == "/health"
+
+    root_id = _make_handler_id("GET", "/")
+    assert root_id in dev_app.handler_index
+    assert dev_app.handler_index[root_id].path == "/"
+    assert root_id in dev_app._handlers
+
+    resp = dev_app._handlers[root_id]()
+    assert isinstance(resp, Response)
+    assert resp.status == 200
+    assert (b"content-type", b"text/html; charset=utf-8") in resp.headers
+    html_text = bytes(resp.body).decode("utf-8")
+    assert "<!DOCTYPE html>" in html_text
+    assert "VERTEBRA" in html_text
+    assert "#EDB641" in html_text
+    assert "Litestar" in html_text
+    assert "/health" in html_text
+    assert "data-endpoint-tester" in html_text
+    assert "data-theme-toggle" in html_text
+
+    env_app = App()
+    monkeypatch.setenv("VERTEBRA_DEV", "1")
+    assert env_app.ensure_dev_welcome_route() is True
+    assert root_id in env_app.handler_index
+
+
+def test_app_ensure_dev_welcome_route_respects_user_root_route_and_mount(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify user '/' routes and root mounts preempt or evict the synthetic dev welcome route."""
+    monkeypatch.delenv("VERTEBRA_DEV", raising=False)
+    root_id = _make_handler_id("GET", "/")
+
+    app_with_root = App(debug=True)
+
+    @app_with_root.get("/")
+    def custom_index() -> str:
+        return "custom-home"
+
+    assert app_with_root.ensure_dev_welcome_route() is False
+    assert app_with_root._handlers[root_id]() == "custom-home"
+
+    app_with_mount = App(debug=True)
+    app_with_mount.mount("/", lambda *_args: None)
+    assert app_with_mount.ensure_dev_welcome_route() is False
+    assert root_id not in app_with_mount.handler_index
+
+    app_late_route = App(debug=True)
+    assert app_late_route.ensure_dev_welcome_route() is True
+    assert root_id in app_late_route._handlers
+
+    @app_late_route.get("/")
+    def late_index() -> str:
+        return "late-home"
+
+    assert app_late_route._handlers[root_id]() == "late-home"
+    assert app_late_route.ensure_dev_welcome_route() is False
+
+    app_late_post = App(debug=True)
+    assert app_late_post.ensure_dev_welcome_route() is True
+
+    @app_late_post.post("/")
+    def late_post() -> str:
+        return "posted"
+
+    assert root_id not in app_late_post._handlers
+    assert _make_handler_id("POST", "/") in app_late_post._handlers
+
+    app_late_mount = App(debug=True)
+    assert app_late_mount.ensure_dev_welcome_route() is True
+    app_late_mount.mount("/", lambda *_args: None)
+    assert root_id not in app_late_mount._handlers
+    assert root_id not in app_late_mount.handler_index
+
+
+def test_welcome_page_renderer_snapshot_and_html_escaping(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify WelcomePageRenderer.collect_snapshot and HTML escaping across routes, procedures, mounts, and docs."""
+    monkeypatch.setenv("VERTEBRA_TOPOLOGY", "shm")
+    monkeypatch.setenv("VERTEBRA_LOOP", "uvloop")
+    monkeypatch.setenv("VERTEBRA_WORKERS", "4")
+    monkeypatch.setenv("VERTEBRA_DEV", "1")
+
+    welcome_cls = vtb_framework.WelcomePageRenderer
+    app = App(debug=True)
+
+    @app.get("/items", tags=("<script>alert(1)</script>", "core"))
+    def list_items() -> list[str]:
+        return ["a"]
+
+    @query()
+    async def fetch_status() -> str:
+        return "ready"
+
+    app.register(fetch_status)
+    app.mount("/sub", lambda *_args: None, protocol="asgi")
+    app.enable_docs()
+
+    for docs_path in ("/docs", "/swagger"):
+        docs_id = _make_handler_id("GET", docs_path)
+        docs_resp = app._handlers[docs_id]()
+        assert isinstance(docs_resp, Response)
+        assert docs_resp.status == 200
+        assert (b"content-type", b"text/html; charset=utf-8") in docs_resp.headers
+        assert b"<!doctype html>" in bytes(docs_resp.body).lower()
+
+    snapshot = welcome_cls.collect_snapshot(app)
+    assert isinstance(snapshot, vtb_framework.WelcomeSnapshot)
+    assert snapshot.topology == "SHM"
+    assert snapshot.loop_backend == "uvloop"
+    assert snapshot.workers == 4
+    assert snapshot.openapi_enabled is True
+    assert snapshot.docs_url == "/docs"
+    assert snapshot.schema_url == "/openapi.json"
+    assert "fetch_status" in snapshot.procedures
+    assert "/sub (asgi)" in snapshot.mounts
+    assert any(isinstance(r, vtb_framework.WelcomeRouteItem) and r.path == "/items" for r in snapshot.routes)
+
+    rendered = welcome_cls.render_html(app)
+    assert "<script>alert(1)</script>" not in rendered
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in rendered
+    assert "fetch_status" in rendered
+    assert "/sub (asgi)" in rendered
+    assert '<link rel="stylesheet"' not in rendered.lower()
+    assert '<script src="http' not in rendered.lower()
+    assert '<img src="http' not in rendered.lower()
+    assert "@import" not in rendered.lower()

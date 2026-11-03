@@ -9,6 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from vertebra import App
+from vertebra._vertebra import Response
 from vertebra.build.packaging.standalone import StandaloneBuilder
 from vertebra.build.packaging.targets import BuildTarget
 from vertebra.cli import cli
@@ -17,6 +18,8 @@ from vertebra.cli._launch import ServerLaunchEnv
 from vertebra.cli.banner.renderer import render_banner
 from vertebra.cli.errors import CLIError
 from vertebra.cli.theme import Console
+from vertebra.framework._app import _make_handler_id
+from vertebra.server.worker import Worker
 from vertebra.supervisor import _supervisor as supervisor_mod
 from vertebra.supervisor import _worker as supervisor_worker
 
@@ -255,3 +258,82 @@ def test_find_server_binary_honors_cargo_target_dir_and_newest_release(
     monkeypatch.setattr(supervisor_mod, "find_repo_root", lambda _start: fake_repo)
     monkeypatch.setenv("CARGO_TARGET_DIR", str(cargo_target))
     assert supervisor_mod.find_server_binary() == str(fresh_bin)
+
+
+def test_resolve_worker_targets_registers_dev_welcome_route_when_vertebra_dev_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify resolve_worker_targets finalizes the GET / welcome route when VERTEBRA_DEV=1."""
+    monkeypatch.setenv("VERTEBRA_DEV", "1")
+    app = App()
+
+    @app.get("/health")
+    def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    handlers, mounts = supervisor_worker.resolve_worker_targets(app, native=True)
+    root_id = _make_handler_id("GET", "/")
+    assert root_id in handlers
+    assert mounts == []
+    resp = handlers[root_id]()
+    assert isinstance(resp, Response)
+    assert resp.status == 200
+    assert (b"content-type", b"text/html; charset=utf-8") in resp.headers
+    assert b"/health" in bytes(resp.body)
+
+
+def test_resolve_worker_targets_omits_dev_welcome_route_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify resolve_worker_targets omits the GET / welcome route when debug=False and VERTEBRA_DEV is unset."""
+    monkeypatch.delenv("VERTEBRA_DEV", raising=False)
+    app = App(debug=False)
+
+    @app.get("/health")
+    def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    handlers, _ = supervisor_worker.resolve_worker_targets(app, native=True)
+    assert _make_handler_id("GET", "/") not in handlers
+
+
+@pytest.mark.anyio
+async def test_resolve_worker_targets_asgi_fallback_serves_dev_welcome_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify resolve_worker_targets(native=False) ASGI fallback serves GET / in dev mode."""
+    monkeypatch.setenv("VERTEBRA_DEV", "1")
+    app = App()
+
+    @app.get("/health")
+    def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    _, mounts = supervisor_worker.resolve_worker_targets(app, native=False)
+    assert len(mounts) == 1
+    asgi_adapter = mounts[0][1]
+
+    sent: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(msg: dict[str, Any]) -> None:
+        sent.append(msg)
+
+    await asgi_adapter({"type": "http", "method": "GET", "path": "/"}, receive, send)
+    start_msg = next(m for m in sent if m["type"] == "http.response.start")
+    body_msg = next(m for m in sent if m["type"] == "http.response.body")
+    assert start_msg["status"] == 200
+    assert (b"content-type", b"text/html; charset=utf-8") in start_msg["headers"]
+    assert b"VERTEBRA" in body_msg["body"]
+
+
+def test_worker_init_finalizes_dev_welcome_route_on_app_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify Worker(app) calls ensure_dev_welcome_route on App instances."""
+    monkeypatch.delenv("VERTEBRA_DEV", raising=False)
+    app = App(debug=True)
+    worker = Worker(app)
+    assert _make_handler_id("GET", "/") in worker._handlers

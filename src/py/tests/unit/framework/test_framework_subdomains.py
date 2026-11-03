@@ -10,8 +10,9 @@ from typing import Annotated, Any, cast
 import msgspec
 import pytest
 
+from vertebra._vertebra import Response
 from vertebra.extensions.litestar import LitestarConfig, LitestarPlugin
-from vertebra.framework._app import App
+from vertebra.framework._app import App, _make_handler_id
 from vertebra.framework.asyncapi import AsyncAPISpecBuilder, AsyncChannelDef
 from vertebra.framework.channels import ChannelBus
 from vertebra.framework.di import Container, DependencyGraph, Inject, Provide
@@ -358,6 +359,14 @@ def test_openapi_spec_builder_from_app_and_enable_docs() -> None:
     route_paths = [r.path for r in app.routes]
     assert "/custom-openapi.json" in route_paths
     assert "/docs" in route_paths
+
+    for docs_path in ("/docs", "/swagger"):
+        docs_id = _make_handler_id("GET", docs_path)
+        docs_resp = app._handlers[docs_id]()
+        assert isinstance(docs_resp, Response)
+        assert docs_resp.status == 200
+        assert (b"content-type", b"text/html; charset=utf-8") in docs_resp.headers
+        assert b"<!DOCTYPE html>" in bytes(docs_resp.body) or b"<!doctype html>" in bytes(docs_resp.body).lower()
 
 
 def test_asyncapi_spec_builder_from_channels() -> None:

@@ -23,7 +23,7 @@ from collections.abc import Callable
 from typing import Any
 
 from vertebra._vertebra import Response
-from vertebra.framework._app import App
+from vertebra.framework._app import App, _make_handler_id
 from vertebra.server._dispatch import _coerce_response
 from vertebra.server._gil_audit import GilAuditReport
 from vertebra.server._protocol import InterfaceMode, detect_interface
@@ -50,6 +50,7 @@ def resolve_worker_targets(
     else:
         normalized_interface = "auto"
     if isinstance(app, App):
+        app.ensure_dev_welcome_route()
         if native:
             return dict(app._handlers), list(app.mounts)
         if not app._handlers and app.mounts and not callable(app):
@@ -101,6 +102,9 @@ def _build_app_asgi_adapter(app: App) -> Callable[..., Any]:
     route_map: dict[tuple[str, str], Callable[..., Any]] = {
         (route.method.upper(), route.path): route.handler for route in app.routes
     }
+    welcome_id = _make_handler_id("GET", "/")
+    if ("GET", "/") not in route_map and welcome_id in app._handlers:
+        route_map[("GET", "/")] = app._handlers[welcome_id]
 
     async def _asgi_adapter(scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
@@ -134,7 +138,13 @@ def _build_app_asgi_adapter(app: App) -> Callable[..., Any]:
         if inspect.isawaitable(result):
             result = await result
         coerced = _coerce_response(result, 0, Response)
-        raw_headers = [(k.encode("latin-1"), v.encode("latin-1")) for k, v in coerced.headers]
+        raw_headers = [
+            (
+                k if isinstance(k, bytes) else k.encode("latin-1"),
+                v if isinstance(v, bytes) else v.encode("latin-1"),
+            )
+            for k, v in coerced.headers
+        ]
         await send(
             {
                 "type": "http.response.start",
