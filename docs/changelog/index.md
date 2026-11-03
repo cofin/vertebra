@@ -23,6 +23,7 @@ Release introducing shared-memory vector embeddings, zero-copy PEP 3118 vector v
   - Co-located `WorkerRunner` execution in `vtb run` and `vtb dev` (`--with-workers`, `--queues`, `--lane-concurrency`, `[tool.vertebra.workers]`) and `--oneshot` / `--payload` in `vtb workers run` ([PR #64](https://github.com/cofin/vertebra/pull/64)).
   - Automatic default `AgentInterface` synthesis on `AgentCard` and dynamic request-origin URL resolution (`Forwarded`, `X-Forwarded-Proto`, `X-Forwarded-Host`, `Host` with `Vary` headers) in `A2AHttpHandler` and `A2AService` ([PR #64](https://github.com/cofin/vertebra/pull/64)).
 - `EmbeddingError` in `vertebra.embeddings` for providers that return no usable vector.
+- `BackendFactory` in `vertebra.embeddings` and `FastEmbedder.build_backend` for importable embedding backends.
 
 ### Changed
 
@@ -44,6 +45,7 @@ Release introducing shared-memory vector embeddings, zero-copy PEP 3118 vector v
 - The governed GCP database MCP tools (`register_gcp_database_tools`) validate `bigquery_object_table_inspect` table names, reject SQL with more than one statement, and require confirmation for `EXECUTE`, `CALL`, `GRANT`, `REVOKE`, `EXPORT DATA`, and `LOAD DATA` (`is_mutating_sql`).
 - `KeyValueStore.delete_all`, Litestar `MemoryStore.delete_all`, and Starlette `CacheStore.delete_all` delete only their prefix with `SCAN` + `UNLINK` instead of `FLUSHDB`; sub-second expiries are sent as `PX` milliseconds; `expires_in` returns `None` for keys without expiry. `SyncRedisDriver` / `AsyncRedisDriver` gain `scan`, `unlink`, and `set(px=...)`.
 - `SpannerEmbedder` propagates driver errors and raises `EmbeddingError` on missing rows instead of returning hash vectors; `BigQueryEmbedder` raises `EmbeddingError` on short or vector-less results; both order generated embeddings by input offset; `OracleEmbedder` raises `EmbeddingError` on empty results; `BigQueryEmbedder` and `SpannerEmbedder` SQL builders validate model, table, column, and distance values.
+- `EmbeddingBroker` runs the configured model in the free-threaded sidecar instead of a hash backend, requires `backend_fn` or `backend_factory`, and `FastEmbedder` no longer builds a discarded `TextEmbedding` at construction.
 
 ## 0.2.0
 

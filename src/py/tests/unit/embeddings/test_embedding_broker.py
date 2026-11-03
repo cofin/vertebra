@@ -5,12 +5,16 @@ from __future__ import annotations
 import asyncio
 import math
 import sys
+import types
+from typing import Any
 
 import pytest
 
 from vertebra._vertebra import VectorBatchView
 from vertebra.embeddings import (
     MODEL_CATALOG,
+    BackendFactory,
+    BackendInferenceCallable,
     EmbeddingBroker,
     EmbeddingBrokerConfig,
     FastEmbedder,
@@ -20,7 +24,19 @@ from vertebra.embeddings import (
     get_model_spec,
     list_model_specs,
 )
-from vertebra.typing import MissingDependencyError
+from vertebra.typing import ImproperConfigurationError, MissingDependencyError
+
+_LENGTH_BACKEND_TARGET = "tests.unit.embeddings.test_embedding_broker:build_length_backend"
+_FASTEMBED_BACKEND_TARGET = "vertebra.embeddings._local:FastEmbedder.build_backend"
+
+
+def build_length_backend(scale: float = 1.0) -> BackendInferenceCallable:
+    """Return a backend that encodes each text as ``[len(text) * scale, 1.0, 0.0, 0.0]``."""
+
+    def _infer(texts: list[str], dims: int) -> list[list[float]]:
+        return [[float(len(text)) * scale, 1.0, 0.0, 0.0][:dims] for text in texts]
+
+    return _infer
 
 
 def test_model_catalog_and_gemma2_fp16_guard() -> None:
@@ -196,12 +212,9 @@ async def test_subprocess_quarantine_shm_slab_exchange_and_fastembed_optional_gu
 ) -> None:
     """Verify EmbeddingBroker subprocess quarantine exchanges VectorSlab in /dev/shm and FastEmbedder guards import."""
     broker = EmbeddingBroker(
-        backend_fn=None,
         dimensions=4,
-        config=EmbeddingBrokerConfig(
-            isolate_gil_subprocess=True,
-            coalesce_window_ms=0.0,
-        ),
+        config=EmbeddingBrokerConfig(isolate_gil_subprocess=True, coalesce_window_ms=0.0),
+        backend_factory=BackendFactory(target=_LENGTH_BACKEND_TARGET),
     )
     try:
         sub_batch = await broker.submit_batch_in_subprocess(["alpha", "beta", "gamma"])
@@ -220,7 +233,6 @@ async def test_subprocess_quarantine_shm_slab_exchange_and_fastembed_optional_gu
     assert "embeddings" in exc_info.value.install_package
 
     monkeypatch.setattr("vertebra.embeddings._broker.is_free_threaded", lambda: True)
-    monkeypatch.setattr("vertebra.embeddings._local.is_free_threaded", lambda: True)
 
     seen_ft_prompts: list[str] = []
     ft_custom_gemma = GemmaEmbedder(
@@ -234,10 +246,80 @@ async def test_subprocess_quarantine_shm_slab_exchange_and_fastembed_optional_gu
     assert ft_q.dimensions == 4
     assert any("free threaded custom backend" in p for p in seen_ft_prompts)
 
-    ft_quarantined_gemma = GemmaEmbedder("embeddinggemma-2-270m", dimensions=4, precision="int8")
+    ft_quarantined_gemma = GemmaEmbedder(
+        "embeddinggemma-2-270m", dimensions=4, precision="int8", source="/models/gemma"
+    )
     assert ft_quarantined_gemma.broker.should_quarantine_subprocess() is True
+    assert ft_quarantined_gemma.broker.backend_factory == BackendFactory(
+        target=_FASTEMBED_BACKEND_TARGET,
+        options={"model_name": "embeddinggemma-2-270m", "specific_model_path": "/models/gemma"},
+    )
+
+
+@pytest.mark.anyio
+async def test_sidecar_runs_configured_backend_factory() -> None:
+    """The quarantined sidecar builds and runs the configured backend factory."""
+    broker = EmbeddingBroker(
+        dimensions=4,
+        config=EmbeddingBrokerConfig(isolate_gil_subprocess=True, coalesce_window_ms=0.0),
+        backend_factory=BackendFactory(target=_LENGTH_BACKEND_TARGET, options={"scale": 2.0}),
+    )
     try:
-        ft_sub_vec = await ft_quarantined_gemma.embed_query("free threaded subprocess quarantine")
-        assert ft_sub_vec.dimensions == 4
+        batch = await broker.submit_batch_in_subprocess(["ab", "abcd"])
+        assert batch.to_list() == [
+            pytest.approx([0.9701425, 0.2425356, 0.0, 0.0], rel=1e-5),
+            pytest.approx([0.9922779, 0.1240347, 0.0, 0.0], rel=1e-5),
+        ]
     finally:
-        await ft_quarantined_gemma.broker.close()
+        await broker.close()
+
+
+def test_embedding_broker_requires_backend() -> None:
+    """A broker without a backend callable or factory is a configuration error."""
+    with pytest.raises(ImproperConfigurationError, match="backend_fn or backend_factory"):
+        EmbeddingBroker(dimensions=4)
+
+
+@pytest.mark.anyio
+async def test_fast_embedder_runs_fastembed_backend_in_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FastEmbedder runs fastembed.TextEmbedding in-process with the configured options."""
+    init_calls: list[dict[str, Any]] = []
+
+    class FakeTextEmbedding:
+        def __init__(self, **kwargs: Any) -> None:
+            init_calls.append(kwargs)
+
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            return [[3.0, 4.0] if text == "a" else [0.0, 2.0] for text in texts]
+
+    fake_module = types.ModuleType("fastembed")
+    monkeypatch.setattr(fake_module, "TextEmbedding", FakeTextEmbedding, raising=False)
+    monkeypatch.setitem(sys.modules, "fastembed", fake_module)
+
+    embedder = FastEmbedder(
+        "BAAI/bge-small-en-v1.5",
+        dimensions=2,
+        threads=2,
+        broker_config=EmbeddingBrokerConfig(isolate_gil_subprocess=False, coalesce_window_ms=0.0),
+    )
+    assert init_calls == []
+    batch = await embedder.embed_many(["a", "bb"])
+    assert batch.to_list() == [pytest.approx([0.6, 0.8]), pytest.approx([0.0, 1.0])]
+    assert init_calls == [{"model_name": "BAAI/bge-small-en-v1.5", "threads": 2}]
+
+
+def test_local_embedders_configure_fastembed_backend_factory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FastEmbedder hands its broker the fastembed factory, which the free-threaded sidecar runs."""
+    monkeypatch.setitem(sys.modules, "fastembed", types.ModuleType("fastembed"))
+    monkeypatch.setattr("vertebra.embeddings._broker.is_free_threaded", lambda: True)
+    embedder = FastEmbedder("BAAI/bge-small-en-v1.5", dimensions=4, cache_dir="/tmp/fe-cache")
+    assert embedder.broker.should_quarantine_subprocess() is True
+    assert embedder.broker.backend_factory == BackendFactory(
+        target=_FASTEMBED_BACKEND_TARGET,
+        options={
+            "model_name": "BAAI/bge-small-en-v1.5",
+            "cache_dir": "/tmp/fe-cache",
+            "specific_model_path": None,
+            "threads": None,
+        },
+    )

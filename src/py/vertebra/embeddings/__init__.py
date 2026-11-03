@@ -14,6 +14,7 @@ from vertebra.embeddings._base import (
 )
 from vertebra.embeddings._bigquery import BigQueryEmbedder
 from vertebra.embeddings._broker import (
+    BackendFactory,
     BackendInferenceCallable,
     EmbeddingBroker,
     EmbeddingBrokerConfig,
@@ -47,6 +48,7 @@ from vertebra.embeddings._spanner import SpannerEmbedder
 __all__ = (
     "MODEL_CATALOG",
     "AlloyDbEmbedder",
+    "BackendFactory",
     "BackendInferenceCallable",
     "BigQueryEmbedder",
     "Embedder",

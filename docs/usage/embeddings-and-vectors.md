@@ -107,6 +107,8 @@ static_emb = StaticEmbedder(dimensions=256)
 !!! warning "`EmbeddingGemma` Precision"
     `EmbeddingGemma` activations overflow IEEE 754 `fp16`. `GemmaEmbedder` enforces `precision` in `{"int8", "q4", "bf16", "fp32"}` and raises `ValueError` if `precision="fp16"` is requested.
 
+On free-threaded Python (`3.14t`/`3.15t`) the broker runs the configured model in a quarantined subprocess. Custom brokers pass either `backend_fn` (in-process callable) or `BackendFactory(target="package.module:callable", options={...})`, which the subprocess imports and runs.
+
 ## Zero-Copy `VectorView`, Matryoshka Truncation & Binary Wire Codecs
 
 `VectorView` (1D) and `VectorBatchView` (2D) implement PEP 3118 (`memoryview`, `np.asarray`), SIMD Matryoshka `.truncate(dims)` with L2 re-normalization, scalar `.quantize_int8()`, bit-packed `.quantize_binary()`, and binary database wire encoders:

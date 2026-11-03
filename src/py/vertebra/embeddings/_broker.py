@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import os
 import sys
 import uuid
 from collections.abc import Callable, Sequence
+from typing import Any, cast
 
 import msgspec
 
 from vertebra._vertebra import VectorBatchView, VectorView
 from vertebra.server._gil_audit import is_free_threaded
+from vertebra.typing import ImproperConfigurationError
+from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_json, encode_json
 
 __all__ = (
+    "BackendFactory",
     "BackendInferenceCallable",
     "EmbeddingBroker",
     "EmbeddingBrokerConfig",
@@ -35,6 +38,37 @@ class EmbeddingBrokerConfig(msgspec.Struct, frozen=True, gc=False):
     outlier_length_ratio: float = 4.0
 
 
+class BackendFactory(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+    """Importable factory that builds an embedding inference callable.
+
+    The quarantined sidecar receives this value over its JSON pipe and imports ``target`` itself,
+    so the factory must be importable in a fresh interpreter.
+
+    Attributes:
+        target: ``"package.module:qualname"`` of a callable returning a ``BackendInferenceCallable``.
+        options: Keyword arguments passed to the target callable.
+    """
+
+    target: str
+    options: dict[str, Any] = msgspec.field(default_factory=dict)
+
+    def build(self) -> BackendInferenceCallable:
+        """Import ``target`` and call it with ``options``.
+
+        Raises:
+            ImproperConfigurationError: When ``target`` is not ``module:qualname``.
+            MissingDependencyError: When the target module cannot be imported.
+        """
+        module_name, _, qualname = self.target.partition(":")
+        if not module_name or not qualname:
+            msg = f"BackendFactory target must be 'module:qualname', got {self.target!r}"
+            raise ImproperConfigurationError(msg)
+        resolved: Any = ensure_module(module_name)
+        for attr in qualname.split("."):
+            resolved = getattr(resolved, attr)
+        return cast("BackendInferenceCallable", resolved(**self.options))
+
+
 class _QueuedBrokerRequest(msgspec.Struct, gc=False):
     """Pending singular embedding request queued in `EmbeddingBroker`."""
 
@@ -49,6 +83,7 @@ class _SubprocessRpcRequest(msgspec.Struct, frozen=True, gc=False):
     shm_name: str
     texts: list[str]
     dimensions: int
+    factory: BackendFactory
 
 
 class _SubprocessRpcResponse(msgspec.Struct, frozen=True, gc=False):
@@ -65,14 +100,29 @@ class EmbeddingBroker:
 
     def __init__(
         self,
-        backend_fn: BackendInferenceCallable | None,
+        backend_fn: BackendInferenceCallable | None = None,
         *,
         dimensions: int = 768,
         config: EmbeddingBrokerConfig | None = None,
+        backend_factory: BackendFactory | None = None,
     ) -> None:
-        """Initialize the embedding broker with a backend callable, dimensions, and batching config."""
+        """Initialize the embedding broker with a backend callable or factory, dimensions, and batching config.
+
+        Args:
+            backend_fn: In-process inference callable ``(texts, dimensions) -> rows``.
+            dimensions: Output embedding dimensionality.
+            config: Micro-batching and subprocess quarantine settings.
+            backend_factory: Importable factory used to build the backend in-process or in the sidecar.
+
+        Raises:
+            ImproperConfigurationError: When neither ``backend_fn`` nor ``backend_factory`` is provided.
+        """
+        if backend_fn is None and backend_factory is None:
+            msg = "EmbeddingBroker requires backend_fn or backend_factory"
+            raise ImproperConfigurationError(msg)
         self._has_custom_backend = backend_fn is not None
-        self._backend_fn = backend_fn or self._deterministic_hash_backend
+        self._backend_fn: BackendInferenceCallable | None = backend_fn
+        self._backend_factory = backend_factory
         self._dimensions = dimensions
         self._config = config or EmbeddingBrokerConfig()
         self._pending: list[_QueuedBrokerRequest] = []
@@ -89,6 +139,11 @@ class EmbeddingBroker:
     def config(self) -> EmbeddingBrokerConfig:
         """Return the broker's `EmbeddingBrokerConfig`."""
         return self._config
+
+    @property
+    def backend_factory(self) -> BackendFactory | None:
+        """Return the factory used for in-process and sidecar inference."""
+        return self._backend_factory
 
     def should_quarantine_subprocess(self) -> bool:
         """Return True when running on free-threaded 3.14t/3.15t with subprocess GIL quarantine enabled."""
@@ -142,10 +197,19 @@ class EmbeddingBroker:
         return VectorBatchView.from_f32_rows(all_rows, normalize=True)
 
     async def submit_batch_in_subprocess(self, texts: Sequence[str]) -> VectorBatchView:
-        """Execute batch inference in a quarantined subprocess and return a zero-copy SHM `VectorBatchView`."""
+        """Execute batch inference in a quarantined subprocess and return a zero-copy SHM `VectorBatchView`.
+
+        Raises:
+            ValueError: When ``texts`` is empty.
+            ImproperConfigurationError: When no ``backend_factory`` is configured.
+            RuntimeError: When the sidecar terminates unexpectedly or reports an error.
+        """
         text_list = list(texts)
         if not text_list:
             raise ValueError("texts must not be empty")
+        if self._backend_factory is None:
+            msg = "Subprocess inference requires a backend_factory"
+            raise ImproperConfigurationError(msg)
         async with self._subprocess_lock:
             proc = await self._ensure_subprocess()
             shm_name = f"/vtb-qvec-{os.getpid()}-{uuid.uuid4().hex[:10]}"
@@ -153,6 +217,7 @@ class EmbeddingBroker:
                 shm_name=shm_name,
                 texts=text_list,
                 dimensions=self._dimensions,
+                factory=self._backend_factory,
             )
             assert proc.stdin is not None
             assert proc.stdout is not None
@@ -215,7 +280,7 @@ class EmbeddingBroker:
         """Sort texts by token count, split length outliers into sub-batches, and scatter back to caller order."""
         n = len(texts)
         if n == 1:
-            return self._backend_fn(texts, self._dimensions)
+            return self._resolve_backend()(texts, self._dimensions)
 
         token_lengths = [max(1, len(t) // 4) for t in texts]
         sorted_indices = sorted(range(n), key=lambda i: token_lengths[i])
@@ -255,7 +320,7 @@ class EmbeddingBroker:
     ) -> None:
         """Execute backend inference on a length-homogeneous sub-batch and scatter outputs."""
         sub_texts = [all_texts[i] for i in sub_indices]
-        sub_outputs = self._backend_fn(sub_texts, self._dimensions)
+        sub_outputs = self._resolve_backend()(sub_texts, self._dimensions)
         for out_pos, orig_idx in enumerate(sub_indices):
             scattered_rows[orig_idx] = sub_outputs[out_pos]
 
@@ -272,28 +337,28 @@ class EmbeddingBroker:
         )
         return self._subprocess
 
-    @staticmethod
-    def _deterministic_hash_backend(texts: list[str], dimensions: int) -> list[list[float]]:
-        """Deterministic pure-Python/Rust fallback embedding generator used in subprocess quarantine tests."""
-        rows: list[list[float]] = []
-        for text in texts:
-            digest = hashlib.sha256(text.encode("utf-8")).digest()
-            row = [((digest[i % len(digest)] / 127.5) - 1.0) for i in range(dimensions)]
-            if all(abs(v) < 1e-6 for v in row):
-                row[0] = 1.0
-            rows.append(row)
-        return rows
+    def _resolve_backend(self) -> BackendInferenceCallable:
+        """Return the in-process backend, building it from ``backend_factory`` on first use."""
+        if self._backend_fn is None:
+            self._backend_fn = cast("BackendFactory", self._backend_factory).build()
+        return self._backend_fn
 
 
 def _run_sidecar_worker_main() -> None:
     """Entrypoint for the quarantined subprocess worker reading JSON requests and writing SHM VectorSlabs."""
+    backends: dict[tuple[str, str], BackendInferenceCallable] = {}
     for raw_line in sys.stdin:
         stripped = raw_line.strip()
         if not stripped:
             continue
         try:
             req = decode_json(stripped.encode("utf-8"), type=_SubprocessRpcRequest)
-            rows = EmbeddingBroker._deterministic_hash_backend(req.texts, req.dimensions)
+            cache_key = (req.factory.target, encode_json(req.factory.options))
+            backend = backends.get(cache_key)
+            if backend is None:
+                backend = req.factory.build()
+                backends[cache_key] = backend
+            rows = backend(req.texts, req.dimensions)
             batch = VectorBatchView.create_shm(req.shm_name, rows, normalize=True)
             resp = _SubprocessRpcResponse(
                 shm_name=batch.shm_name or req.shm_name,

@@ -31,8 +31,8 @@ last_verified_at: 2026-11-03T17:01:41Z
 last_verified_commit: 78ffdf6
 verification_evidence: "RED: 3 collection ImportErrors (then 12 failed, 18 passed); GREEN: 41 passed in 3.18s; ruff check/format and mypy passed on 9 source files"
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T17:01:41Z
-commit: null
+updated_at: 2026-11-03T17:02:50Z
+commit: b2bfa30
 tags: [bugfix, embeddings, spanner, oracle, bigquery]
 ---
 

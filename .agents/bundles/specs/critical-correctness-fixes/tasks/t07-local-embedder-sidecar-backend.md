@@ -2,7 +2,7 @@
 type: Task
 id: critical-correctness-fixes:t07
 title: Local embedders run the configured model on free-threaded builds
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on: []
@@ -17,17 +17,17 @@ tests:
   - src/py/tests/unit/embeddings/test_embedding_broker.py
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-03T17:05:55Z
+last_verified_commit: b2bfa30
+verification_evidence: "RED: 1 collection ImportError; GREEN: 22 passed in 0.62s; ruff check/format and mypy passed on 9 source files"
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T16:00:00Z
+updated_at: 2026-11-03T17:05:55Z
 commit: null
 tags: [bugfix, embeddings, free-threaded, broker]
 ---
@@ -372,11 +372,12 @@ In `src/py/tests/unit/embeddings/test_embedding_broker.py`:
 
 ## Acceptance Criteria
 
-- [ ] R11: No hash backend remains in `_broker.py`; a broker without `backend_fn` or `backend_factory` raises `ImproperConfigurationError`.
-- [ ] R11: The sidecar builds and caches the configured `BackendFactory`; vectors match the factory output.
-- [ ] R11: `FastEmbedder` and `GemmaEmbedder` pass the fastembed `BackendFactory`; `FastEmbedder` builds `TextEmbedding` lazily on first inference.
-- [ ] Docs, knowledge, and changelog updated; targeted checks pass; one signed commit.
+- [x] R11: No hash backend remains in `_broker.py`; a broker without `backend_fn` or `backend_factory` raises `ImproperConfigurationError`.
+- [x] R11: The sidecar builds and caches the configured `BackendFactory`; vectors match the factory output.
+- [x] R11: `FastEmbedder` and `GemmaEmbedder` pass the fastembed `BackendFactory`; `FastEmbedder` builds `TextEmbedding` lazily on first inference.
+- [x] Docs, knowledge, and changelog updated; targeted checks pass; one signed commit.
 
 ## Notes & Discoveries
 
 - [2026-11-03 15:30] Planning: the existing quarantine test only passed because the sidecar ran the hash backend; `fastembed` is absent from the dev venv.
+- [2026-11-03 17:05] Verified RED (`1 error in 0.17s` at collection) and GREEN (`22 passed in 0.62s`, `ruff check`, `ruff format --check`, and `mypy` passed on 9 source files).
