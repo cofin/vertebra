@@ -1315,6 +1315,8 @@ class GcpTokenCache:
 
 @final
 class BigQueryClient:
+    """``ca_pem`` applies to the REST API client; the Storage Read/Write API clients use the system trust store and ignore it."""
+
     def __new__(
         cls,
         project_id: str,

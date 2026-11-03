@@ -2,7 +2,7 @@
 type: Task
 id: gcp-wire-protocol-correctness:t04
 title: BigQuery Storage Read on the official client
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on: [gcp-wire-protocol-correctness:t01]
@@ -15,17 +15,17 @@ tests:
   - src/rs/vertebra-db/tests/bigquery_wire_tests.rs
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: executor
+claimed_at: 2026-11-03T19:14:15Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-03T19:23:19Z
+last_verified_commit: a75507c
+verification_evidence: "cargo test -p vertebra-db --test bigquery_wire_tests (4 passed), clippy, fmt, pytest test_bigquery.py (9 passed), mypy.stubtest"
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T16:10:00Z
+updated_at: 2026-11-03T19:23:19Z
 commit: null
 tags: [rust, gcp, bigquery, arrow, bugfix]
 ---
@@ -114,7 +114,9 @@ tags: [rust, gcp, bigquery, arrow, bugfix]
 
 ## Acceptance Criteria
 
-- [ ] R8: request fields asserted by name; VTBARROW holds the schema then batches in stream order; row count is the sum of `row_count`.
-- [ ] R12 (BigQuery): `ca_pem` documented as REST-only in Rust, Python config, and the stub.
+- [x] R8: request fields asserted by name; VTBARROW holds the schema then batches in stream order; row count is the sum of `row_count`.
+- [x] R12 (BigQuery): `ca_pem` documented as REST-only in Rust, Python config, and the stub.
 
 ## Notes & Discoveries
+
+- `ArrowRecordBatch::set_row_count` is deprecated in the generated `google_cloud_bigquery::model` types because `ReadRowsResponse.row_count` carries the batch row count at the top level.

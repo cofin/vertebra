@@ -107,7 +107,7 @@ class BigQueryConfig(BaseDatabaseConfig, frozen=True, gc=False):
     """Maximum parallel `ReadRows` streams requested in `CreateReadSession`."""
 
     ca_pem: bytes | None = None
-    """Optional PEM-encoded root certificate bundle for custom TLS verification."""
+    """PEM root certificates added to the REST API client. The Storage Read/Write API clients use the system trust store and ignore this value."""
 
     broker: Any = None
     """Optional shared-memory `LeaseBroker` instance."""

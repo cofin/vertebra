@@ -15,12 +15,16 @@ use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, mpsc};
 
+use google_cloud_bigquery::client::Read;
+use google_cloud_bigquery::model;
+use google_cloud_gax::options::RequestOptions;
+use google_cloud_gax::response::Response as GaxResponse;
+use google_cloud_gax::streaming::ResponseStream;
 use vertebra_db::arrow_shm::{ARROW_IPC_EOS_MARKER, ShmArrowFrameHeader};
 use vertebra_db::bigquery::{
     BigQueryArrowCompression, BigQueryCellValue, BigQueryClient, BigQueryClientConfig,
     BigQueryError, BigQueryParamValue, BigQueryQueryOptions, BigQueryQueryParameter,
     DEFAULT_BIGQUERY_STORAGE_ENDPOINT, decode_append_rows_request,
-    encode_create_read_session_request,
 };
 use vertebra_db::grpc::{
     GrpcCode, LpmFrameDecoder, ProtoReader, ProtoWriter, WireType, encode_lpm_frame,
@@ -474,170 +478,117 @@ async fn test_bigquery_poll_pagination_dry_run_and_sessions() {
     assert_eq!(begin_res.session_id.as_deref(), Some("bq-session-abc-123"));
 }
 
-#[tokio::test]
-async fn test_bigquery_storage_read_multi_stream_offset_recovery_and_shm_arrow() {
-    let stream0_attempts = Arc::new(AtomicUsize::new(0));
-    let stream0_attempts_clone = Arc::clone(&stream0_attempts);
-    let recorded_routing: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let routing_clone = Arc::clone(&recorded_routing);
+#[derive(Clone, Debug, Default)]
+struct RecordingRead {
+    sessions: Arc<std::sync::Mutex<Vec<model::CreateReadSessionRequest>>>,
+}
 
-    let mock_ipc = build_mock_arrow_ipc_stream(
-        b"MOCK_ARROW_SCHEMA_BYTES_12345678",
-        &[(b"BATCH_PART_A_123", 3), (b"BATCH_PART_B_456", 2)],
-    );
-    let (schema_frame, batch_frames) =
-        vertebra_db::bigquery::split_arrow_ipc_stream(&mock_ipc, 9 * 1024 * 1024).unwrap();
-    let batch_a = batch_frames[0].0.clone();
+impl google_cloud_bigquery::stub::Read for RecordingRead {
+    async fn create_read_session(
+        &self,
+        req: model::CreateReadSessionRequest,
+        _options: RequestOptions,
+    ) -> google_cloud_bigquery::Result<GaxResponse<model::ReadSession>> {
+        self.sessions.lock().unwrap().push(req);
+        let session = model::ReadSession::new()
+            .set_name("projects/p1/locations/US/sessions/s1")
+            .set_arrow_schema(
+                model::ArrowSchema::new().set_serialized_schema(Bytes::from_static(b"SCHEMA00")),
+            )
+            .set_streams(vec![
+                model::ReadStream::new().set_name("projects/p1/locations/US/sessions/s1/streams/0"),
+                model::ReadStream::new().set_name("projects/p1/locations/US/sessions/s1/streams/1"),
+            ]);
+        Ok(GaxResponse::from(session))
+    }
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("addr");
-
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let s0_attempts = Arc::clone(&stream0_attempts_clone);
-            let routing_log = Arc::clone(&routing_clone);
-            let schema_bytes = schema_frame.clone();
-            let batch_bytes = batch_a.clone();
-
-            tokio::spawn(async move {
-                let io = TokioIo::new(stream);
-                let svc = service_fn(move |req: Request<Incoming>| {
-                    let s0_attempts = Arc::clone(&s0_attempts);
-                    let routing_log = Arc::clone(&routing_log);
-                    let schema_bytes = schema_bytes.clone();
-                    let batch_bytes = batch_bytes.clone();
-
-                    async move {
-                        let path = req.uri().path().to_string();
-                        if let Some(rp) = req.headers().get("x-goog-request-params") {
-                            routing_log
-                                .lock()
-                                .await
-                                .push(rp.to_str().unwrap_or("").to_string());
-                        }
-                        let raw_body = req.into_body().collect().await.unwrap().to_bytes();
-                        let mut dec = LpmFrameDecoder::new(64 * 1024 * 1024);
-                        dec.push_chunk(&raw_body);
-                        let msg = dec.next_frame().unwrap().unwrap_or_default();
-
-                        if path.ends_with("/CreateReadSession") {
-                            let mut w = ProtoWriter::new();
-                            w.write_str(1, "projects/p1/locations/US/sessions/s1");
-                            w.write_nested(4, |s| {
-                                s.write_bytes(1, &schema_bytes);
-                            });
-                            w.write_nested(6, |st| {
-                                st.write_str(1, "projects/p1/locations/US/sessions/s1/streams/0");
-                            });
-                            w.write_nested(6, |st| {
-                                st.write_str(1, "projects/p1/locations/US/sessions/s1/streams/1");
-                            });
-                            Ok::<_, Infallible>(make_grpc_response(
-                                vec![w.finish()],
-                                GrpcCode::Ok,
-                                "",
-                            ))
-                        } else if path.ends_with("/ReadRows") {
-                            let mut reader = ProtoReader::new(&msg);
-                            let mut stream_name = String::new();
-                            let mut offset = 0i64;
-                            while let Some((f, wt)) = reader.next_tag().unwrap() {
-                                match (f, wt) {
-                                    (1, WireType::LengthDelimited) => {
-                                        stream_name = reader.read_str().unwrap().to_string();
-                                    }
-                                    (2, WireType::Varint) => {
-                                        offset = reader.read_i64().unwrap();
-                                    }
-                                    (_, wt) => reader.skip_field(wt).unwrap(),
-                                }
-                            }
-
-                            let mut frame1 = ProtoWriter::new();
-                            frame1.write_nested(3, |b| {
-                                b.write_bytes(1, &batch_bytes);
-                                b.write_i64(2, 3);
-                            });
-                            frame1.write_i64(6, 3);
-                            let frame1_bytes = frame1.finish();
-
-                            if stream_name.ends_with("/streams/0") {
-                                let attempt = s0_attempts.fetch_add(1, Ordering::SeqCst);
-                                if attempt == 0 {
-                                    assert_eq!(offset, 0);
-                                    Ok::<_, Infallible>(make_grpc_response(
-                                        vec![frame1_bytes],
-                                        GrpcCode::Unavailable,
-                                        "simulated transient stream reset",
-                                    ))
-                                } else {
-                                    assert_eq!(offset, 3);
-                                    Ok::<_, Infallible>(make_grpc_response(
-                                        vec![frame1_bytes],
-                                        GrpcCode::Ok,
-                                        "",
-                                    ))
-                                }
-                            } else {
-                                assert_eq!(offset, 0);
-                                Ok::<_, Infallible>(make_grpc_response(
-                                    vec![frame1_bytes],
-                                    GrpcCode::Ok,
-                                    "",
-                                ))
-                            }
-                        } else {
-                            Ok::<_, Infallible>(make_grpc_response(
-                                vec![],
-                                GrpcCode::Unimplemented,
-                                "unknown method",
-                            ))
-                        }
-                    }
-                });
-                let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
-                    .serve_connection(io, svc)
-                    .await;
-            });
+    async fn read_rows(
+        &self,
+        req: model::ReadRowsRequest,
+        _options: RequestOptions,
+    ) -> google_cloud_bigquery::Result<ResponseStream<model::ReadRowsResponse>> {
+        let (tx, rx) = mpsc::channel(4);
+        if req.read_stream.ends_with("/streams/0") {
+            let r0 = model::ReadRowsResponse::new()
+                .set_row_count(3)
+                .set_arrow_record_batch(
+                    model::ArrowRecordBatch::new()
+                        .set_serialized_record_batch(Bytes::from_static(b"BATCH-A0")),
+                );
+            let r1 = model::ReadRowsResponse::new()
+                .set_row_count(2)
+                .set_arrow_record_batch(
+                    model::ArrowRecordBatch::new()
+                        .set_serialized_record_batch(Bytes::from_static(b"BATCH-A1")),
+                );
+            let _ = tx.try_send(Ok(r0));
+            let _ = tx.try_send(Ok(r1));
+        } else {
+            let r0 = model::ReadRowsResponse::new()
+                .set_row_count(4)
+                .set_arrow_record_batch(
+                    model::ArrowRecordBatch::new()
+                        .set_serialized_record_batch(Bytes::from_static(b"BATCH-B0")),
+                );
+            let _ = tx.try_send(Ok(r0));
         }
-    });
+        drop(tx);
+        Ok(ResponseStream::from(rx))
+    }
+}
 
-    let encoded_req = encode_create_read_session_request(
-        "projects/p1",
-        "projects/p1/datasets/d1/tables/t1",
-        &["id".to_string(), "name".to_string()],
-        "id > 10",
-        4,
-        BigQueryArrowCompression::Lz4Frame,
-    );
-    assert!(!encoded_req.is_empty());
-
+#[tokio::test]
+async fn read_table_writes_schema_then_stream_batches_in_order() {
+    let stub = RecordingRead::default();
     let mut cfg = BigQueryClientConfig::new("p1");
-    cfg.dataset_id = Some("d1".to_string());
-    cfg.location = Some("US".to_string());
-    cfg.storage_endpoint = format!("http://{addr}");
-    let client = BigQueryClient::new(cfg).expect("client");
-
-    let (shm_name, byte_len, row_count, region) = client
-        .read_table_to_shm_arrow("p1", "d1", "t1", &["id".to_string()], Some("id > 0"), 2)
+    cfg.dataset_id = Some("d1".into());
+    let client =
+        BigQueryClient::with_read_client(cfg, Read::from_stub(stub.clone())).expect("client");
+    let (shm_name, byte_len, rows, region) = client
+        .read_table_to_shm_arrow_with_compression(
+            "p1",
+            "d1",
+            "t1",
+            &["id".into(), "name".into()],
+            Some("id > 10"),
+            2,
+            BigQueryArrowCompression::Zstd,
+        )
         .await
-        .expect("read_table_to_shm_arrow succeeds");
-
-    assert!(shm_name.starts_with('/'));
-    assert!(byte_len > 0);
-    assert_eq!(row_count, 9);
-    assert!(stream0_attempts.load(Ordering::SeqCst) >= 2);
-
-    let slice = unsafe { region.as_slice() };
-    let header = ShmArrowFrameHeader::from_slice(slice).expect("valid VTBARROW header");
-    assert_eq!(header.byte_len as usize, byte_len);
-
-    let routing = recorded_routing.lock().await;
-    assert!(
-        routing
-            .iter()
-            .any(|r| r == "read_session.table=projects/p1/datasets/d1/tables/t1")
+        .expect("read");
+    assert_eq!(rows, 9);
+    let req = stub.sessions.lock().unwrap()[0].clone();
+    assert_eq!(req.parent, "projects/p1");
+    assert_eq!(req.max_stream_count, 2);
+    let session = req.read_session.expect("read_session");
+    assert_eq!(session.table, "projects/p1/datasets/d1/tables/t1");
+    assert_eq!(session.data_format, model::DataFormat::Arrow);
+    let opts = session.read_options.expect("read_options");
+    assert_eq!(
+        opts.selected_fields,
+        vec!["id".to_string(), "name".to_string()]
     );
+    assert_eq!(opts.row_restriction, "id > 10");
+    assert_eq!(
+        opts.arrow_serialization_options()
+            .map(|o| o.buffer_compression.clone()),
+        Some(model::arrow_serialization_options::CompressionCodec::Zstd)
+    );
+    // SAFETY: `region` is the live mapping returned by the reader and nothing writes to it concurrently.
+    let slice = unsafe { region.as_slice() };
+    let header = ShmArrowFrameHeader::from_slice(slice).expect("header");
+    assert_eq!(header.byte_len as usize, byte_len);
+    let payload = &slice[ShmArrowFrameHeader::SIZE..ShmArrowFrameHeader::SIZE + byte_len];
+    let expected: Vec<u8> = [
+        b"SCHEMA00".as_slice(),
+        b"BATCH-A0",
+        b"BATCH-A1",
+        b"BATCH-B0",
+        &ARROW_IPC_EOS_MARKER,
+    ]
+    .concat();
+    assert_eq!(payload, expected.as_slice());
+    assert!(shm_name.starts_with('/'));
 }
 
 #[tokio::test]
