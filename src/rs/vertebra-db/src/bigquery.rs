@@ -55,7 +55,12 @@ pub enum BigQueryError {
     #[error("BigQuery HTTP transport error: {0}")]
     Http(String),
     #[error("BigQuery REST API error (HTTP {status}): {message}")]
-    Api { status: u16, message: String },
+    Api {
+        status: u16,
+        message: String,
+        reason: Option<String>,
+        canonical_status: Option<String>,
+    },
     #[error("BigQuery client error: {0}")]
     Client(#[from] google_cloud_bigquery::Error),
     #[error("BigQuery shared-memory Arrow error: {0}")]
@@ -1354,7 +1359,7 @@ impl BigQueryClient {
             return decode_single_query_response(&resp);
         };
 
-        let query_results_url = self.build_get_query_results_url(jid, location.as_deref(), None);
+        let query_results_url = self.build_get_query_results_url(jid, location.as_deref(), None)?;
         match self
             .send_rest_json(reqwest::Method::GET, &query_results_url, None)
             .await
@@ -1394,7 +1399,7 @@ impl BigQueryClient {
                         .to_string(),
                 )
             })?;
-            let poll_url = self.build_get_query_results_url(jid, location.as_deref(), None);
+            let poll_url = self.build_get_query_results_url(jid, location.as_deref(), None)?;
             current = self
                 .send_rest_json(reqwest::Method::GET, &poll_url, None)
                 .await?;
@@ -1438,7 +1443,7 @@ impl BigQueryClient {
                     )
                 })?;
             let page_url =
-                self.build_get_query_results_url(jid, location.as_deref(), Some(token.as_str()));
+                self.build_get_query_results_url(jid, location.as_deref(), Some(token.as_str()))?;
             let page_resp = self
                 .send_rest_json(reqwest::Method::GET, &page_url, None)
                 .await?;
@@ -1478,20 +1483,33 @@ impl BigQueryClient {
         job_id: &str,
         location: Option<&str>,
         page_token: Option<&str>,
-    ) -> String {
-        let mut url = format!(
-            "{}/bigquery/v2/projects/{}/queries/{}?formatOptions.useInt64Timestamp=true",
-            self.config.effective_rest_endpoint(),
-            self.config.project_id,
-            job_id
-        );
-        if let Some(loc) = location.filter(|s| !s.is_empty()) {
-            url.push_str(&format!("&location={loc}"));
+    ) -> Result<String, BigQueryError> {
+        let mut url = url::Url::parse(&self.config.effective_rest_endpoint()).map_err(|e| {
+            BigQueryError::InvalidArgument(format!("invalid BigQuery REST endpoint: {e}"))
+        })?;
+        url.path_segments_mut()
+            .map_err(|()| {
+                BigQueryError::InvalidArgument("REST endpoint cannot be a base URL".to_string())
+            })?
+            .extend([
+                "bigquery",
+                "v2",
+                "projects",
+                self.config.project_id.as_str(),
+                "queries",
+                job_id,
+            ]);
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs.append_pair("formatOptions.useInt64Timestamp", "true");
+            if let Some(loc) = location.filter(|s| !s.is_empty()) {
+                pairs.append_pair("location", loc);
+            }
+            if let Some(tok) = page_token.filter(|s| !s.is_empty()) {
+                pairs.append_pair("pageToken", tok);
+            }
         }
-        if let Some(tok) = page_token.filter(|s| !s.is_empty()) {
-            url.push_str(&format!("&pageToken={tok}"));
-        }
-        url
+        Ok(url.into())
     }
 
     fn build_fastpath_query_payload(
@@ -1742,18 +1760,20 @@ impl BigQueryClient {
             .map_err(|e| BigQueryError::Http(e.to_string()))?;
 
         if !status.is_success() {
-            let message = serde_json::from_str::<Value>(&text)
-                .ok()
-                .and_then(|v| {
-                    v.get("error")
-                        .and_then(|e| e.get("message"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
+            let parsed = serde_json::from_str::<Value>(&text).ok();
+            let err_obj = parsed.as_ref().and_then(|v| v.get("error"));
+            let message = err_obj
+                .and_then(|e| e.get("message"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
                 .unwrap_or_else(|| text.clone());
+            let (canonical_status, reason) =
+                err_obj.map(rest_error_details).unwrap_or((None, None));
             return Err(BigQueryError::Api {
                 status: status.as_u16(),
                 message,
+                reason,
+                canonical_status,
             });
         }
 
@@ -1838,6 +1858,23 @@ pub fn split_bigquery_table_parts(raw: &str) -> Vec<String> {
         .collect()
 }
 
+fn rest_error_details(error: &Value) -> (Option<String>, Option<String>) {
+    let canonical_status = error
+        .get("status")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let reason = error
+        .get("errors")
+        .and_then(Value::as_array)
+        .and_then(|arr| arr.first())
+        .and_then(|first| first.get("reason"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    (canonical_status, reason)
+}
+
 fn check_rest_error(resp: &Value) -> Result<(), BigQueryError> {
     if let Some(err) = resp.get("error") {
         let code = err.get("code").and_then(Value::as_u64).unwrap_or(500) as u16;
@@ -1846,9 +1883,12 @@ fn check_rest_error(resp: &Value) -> Result<(), BigQueryError> {
             .and_then(Value::as_str)
             .unwrap_or("unknown BigQuery error")
             .to_string();
+        let (canonical_status, reason) = rest_error_details(err);
         return Err(BigQueryError::Api {
             status: code,
             message: msg,
+            reason,
+            canonical_status,
         });
     }
     if let Some(status) = resp.get("status")
@@ -1859,22 +1899,16 @@ fn check_rest_error(resp: &Value) -> Result<(), BigQueryError> {
             .and_then(Value::as_str)
             .unwrap_or("BigQuery job failed")
             .to_string();
-        return Err(BigQueryError::Api {
-            status: 400,
-            message: msg,
-        });
-    }
-    if let Some(errors) = resp.get("errors").and_then(Value::as_array)
-        && let Some(first) = errors.first()
-    {
-        let msg = first
-            .get("message")
+        let reason = err_res
+            .get("reason")
             .and_then(Value::as_str)
-            .unwrap_or("BigQuery query error")
-            .to_string();
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         return Err(BigQueryError::Api {
             status: 400,
             message: msg,
+            reason,
+            canonical_status: None,
         });
     }
     Ok(())

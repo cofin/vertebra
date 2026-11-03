@@ -2,7 +2,7 @@
 type: Task
 id: gcp-driver-resilience:t03
 title: BigQuery REST warnings and URL encoding
-state: in_progress
+state: completed
 priority: P2
 verification_strategy: regression_tdd
 depends_on: [gcp-driver-resilience:t02]
@@ -12,17 +12,17 @@ tests:
   - src/rs/vertebra-db/tests/bigquery_wire_tests.rs
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 1
+state_revision: 2
 claimed_by: executor
 claimed_at: 2026-11-03T20:29:36Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-03T20:36:30Z
+last_verified_commit: 0ec5f3b
+verification_evidence: "cargo test -p vertebra-db --test bigquery_wire_tests (10 passed), cargo clippy -p vertebra-db -p vertebra-py --all-targets -- -D warnings, cargo fmt --check, pytest src/py/tests/unit/db/test_bigquery.py (9 passed)"
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T16:10:00Z
+updated_at: 2026-11-03T20:36:30Z
 commit: null
 tags: [rust, gcp, bigquery, rest, bugfix]
 ---
@@ -71,7 +71,9 @@ tags: [rust, gcp, bigquery, rest, bugfix]
 
 ## Acceptance Criteria
 
-- [ ] R6: warnings no longer fail queries; `error` and `status.errorResult` fail with reason and canonical status.
-- [ ] R7: job id, location, and page token are percent-encoded.
+- [x] R6: warnings no longer fail queries; `error` and `status.errorResult` fail with reason and canonical status.
+- [x] R7: job id, location, and page token are percent-encoded.
 
 ## Notes & Discoveries
+
+- `BigQueryError::Api` now captures optional `reason` and `canonical_status` fields from REST `error` and `status.errorResult` payloads while ignoring informational `errors[]` warnings.

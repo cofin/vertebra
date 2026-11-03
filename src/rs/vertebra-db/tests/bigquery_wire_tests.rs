@@ -644,3 +644,257 @@ fn append_plan_rejects_malformed_streams() {
         0
     );
 }
+
+async fn serve_json_routes(
+    routes: Vec<(&'static str, &'static str, u16, Value)>,
+) -> (std::net::SocketAddr, Arc<std::sync::Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let queue = Arc::new(std::sync::Mutex::new(routes));
+    let recorded = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let queue_srv = Arc::clone(&queue);
+    let recorded_srv = Arc::clone(&recorded);
+
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let queue = Arc::clone(&queue_srv);
+            let recorded = Arc::clone(&recorded_srv);
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let svc = service_fn(move |req: Request<Incoming>| {
+                    let queue = Arc::clone(&queue);
+                    let recorded = Arc::clone(&recorded);
+                    async move {
+                        let method = req.method().as_str().to_string();
+                        let target = req
+                            .uri()
+                            .path_and_query()
+                            .map(|pq| pq.as_str().to_string())
+                            .unwrap_or_else(|| req.uri().path().to_string());
+                        let _ = req.into_body().collect().await;
+                        recorded.lock().expect("lock").push(target.clone());
+
+                        let matched = {
+                            let mut guard = queue.lock().expect("lock");
+                            if let Some(idx) = guard.iter().position(|(m, prefix, _, _)| {
+                                *m == method && target.starts_with(prefix)
+                            }) {
+                                let (_, _, status, body) = guard.remove(idx);
+                                (status, body)
+                            } else {
+                                (
+                                    404,
+                                    json!({"error": {"code": 404, "message": "unmatched route"}}),
+                                )
+                            }
+                        };
+
+                        Ok::<_, Infallible>(
+                            Response::builder()
+                                .status(
+                                    StatusCode::from_u16(matched.0)
+                                        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                                )
+                                .header("content-type", "application/json")
+                                .body(Full::new(Bytes::from(matched.1.to_string())))
+                                .unwrap(),
+                        )
+                    }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(io, svc)
+                    .await;
+            });
+        }
+    });
+
+    (addr, recorded)
+}
+
+#[tokio::test]
+async fn query_ignores_errors_warnings_without_error_result() {
+    let (addr, _) = serve_json_routes(vec![(
+        "POST",
+        "/bigquery/v2/projects/p1/queries",
+        200,
+        json!({
+            "jobComplete": true,
+            "jobReference": {"jobId": "j1", "location": "US"},
+            "schema": {"fields": [{"name": "n", "type": "INT64", "mode": "NULLABLE"}]},
+            "rows": [{"f": [{"v": "1"}]}],
+            "totalRows": "1",
+            "errors": [{"reason": "warning", "message": "slot contention"}]
+        }),
+    )])
+    .await;
+
+    let mut cfg = BigQueryClientConfig::new("p1");
+    cfg.rest_endpoint = format!("http://{addr}");
+    let client = BigQueryClient::new(cfg).expect("client");
+
+    let res = client
+        .query_with_options("SELECT 1", &[], &BigQueryQueryOptions::default())
+        .await
+        .expect("warning in errors[] should not fail query");
+    assert_eq!(res.rows, vec![vec![BigQueryCellValue::Int64(1)]]);
+}
+
+#[tokio::test]
+async fn query_fails_on_status_error_result() {
+    let (addr, _) = serve_json_routes(vec![(
+        "POST",
+        "/bigquery/v2/projects/p1/jobs",
+        200,
+        json!({
+            "status": {
+                "state": "DONE",
+                "errorResult": {
+                    "reason": "invalidQuery",
+                    "message": "Syntax error at [1:1]"
+                }
+            }
+        }),
+    )])
+    .await;
+
+    let mut cfg = BigQueryClientConfig::new("p1");
+    cfg.rest_endpoint = format!("http://{addr}");
+    let client = BigQueryClient::new(cfg).expect("client");
+
+    let opts = BigQueryQueryOptions {
+        destination_table: Some("d1.t2".into()),
+        ..Default::default()
+    };
+    let err = client
+        .query_with_options("SELECT * FROM", &[], &opts)
+        .await
+        .expect_err("status.errorResult should fail query");
+
+    match err {
+        BigQueryError::Api {
+            status,
+            message,
+            reason,
+            canonical_status,
+        } => {
+            assert_eq!(status, 400);
+            assert_eq!(message, "Syntax error at [1:1]");
+            assert_eq!(reason.as_deref(), Some("invalidQuery"));
+            assert!(canonical_status.is_none());
+        }
+        other => panic!("expected BigQueryError::Api, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn query_maps_http_error_status_and_reason() {
+    let (addr, _) = serve_json_routes(vec![(
+        "POST",
+        "/bigquery/v2/projects/p1/queries",
+        403,
+        json!({
+            "error": {
+                "code": 403,
+                "message": "Access Denied",
+                "status": "PERMISSION_DENIED",
+                "errors": [
+                    {"reason": "accessDenied", "message": "Access Denied"}
+                ]
+            }
+        }),
+    )])
+    .await;
+
+    let mut cfg = BigQueryClientConfig::new("p1");
+    cfg.rest_endpoint = format!("http://{addr}");
+    let client = BigQueryClient::new(cfg).expect("client");
+
+    let err = client
+        .query_with_options("SELECT 1", &[], &BigQueryQueryOptions::default())
+        .await
+        .expect_err("HTTP 403 should fail query");
+
+    match err {
+        BigQueryError::Api {
+            status,
+            message,
+            reason,
+            canonical_status,
+        } => {
+            assert_eq!(status, 403);
+            assert_eq!(message, "Access Denied");
+            assert_eq!(reason.as_deref(), Some("accessDenied"));
+            assert_eq!(canonical_status.as_deref(), Some("PERMISSION_DENIED"));
+        }
+        other => panic!("expected BigQueryError::Api, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn get_query_results_url_encodes_job_location_and_page_token() {
+    let (addr, recorded) = serve_json_routes(vec![
+        (
+            "POST",
+            "/bigquery/v2/projects/p1/queries",
+            200,
+            json!({
+                "jobComplete": false,
+                "jobReference": {"jobId": "job/1", "location": "asia northeast1"}
+            }),
+        ),
+        (
+            "GET",
+            "/bigquery/v2/projects/p1/queries/",
+            200,
+            json!({
+                "jobComplete": true,
+                "jobReference": {"jobId": "job/1", "location": "asia northeast1"},
+                "schema": {"fields": [{"name": "n", "type": "INT64", "mode": "NULLABLE"}]},
+                "rows": [{"f": [{"v": "1"}]}],
+                "pageToken": "a+b/c=="
+            }),
+        ),
+        (
+            "GET",
+            "/bigquery/v2/projects/p1/queries/",
+            200,
+            json!({
+                "jobComplete": true,
+                "jobReference": {"jobId": "job/1", "location": "asia northeast1"},
+                "schema": {"fields": [{"name": "n", "type": "INT64", "mode": "NULLABLE"}]},
+                "rows": [{"f": [{"v": "2"}]}]
+            }),
+        ),
+    ])
+    .await;
+
+    let mut cfg = BigQueryClientConfig::new("p1");
+    cfg.rest_endpoint = format!("http://{addr}");
+    let client = BigQueryClient::new(cfg).expect("client");
+
+    let res = client
+        .query_with_options("SELECT n FROM t", &[], &BigQueryQueryOptions::default())
+        .await
+        .expect("paged query succeeds");
+    assert_eq!(
+        res.rows,
+        vec![
+            vec![BigQueryCellValue::Int64(1)],
+            vec![BigQueryCellValue::Int64(2)],
+        ]
+    );
+
+    let targets = recorded.lock().expect("lock").clone();
+    assert!(
+        targets
+            .iter()
+            .any(|t| t == "/bigquery/v2/projects/p1/queries/job%2F1?formatOptions.useInt64Timestamp=true&location=asia+northeast1"),
+        "missing encoded poll target in {targets:?}"
+    );
+    assert!(
+        targets
+            .iter()
+            .any(|t| t.contains("pageToken=a%2Bb%2Fc%3D%3D")),
+        "missing encoded pageToken target in {targets:?}"
+    );
+}
