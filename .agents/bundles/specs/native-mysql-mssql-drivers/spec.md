@@ -19,6 +19,18 @@ tags: [rust, mysql, mssql, driver]
 
 # Flow Charter: Rust MySQL and MSSQL Clients
 
+## Approach
+
+See [crate research](../native-data-platform/research/rust-driver-crates_20261103.md).
+
+- **MySQL.** `mysql_async` 0.37.1 (`default-features = false`, `default-rustls-ring`), the only mature Tokio-native client.
+  - Vertebra adds binary-protocol row → Arrow decoding (check raw row access in `mysql_common`), Cloud SQL IAM, and MariaDB conformance.
+  - The classic MySQL protocol has no pipelining.
+- **MSSQL.** `tiberius` 0.13.0 (`default-features = false`, `tds80`, `rustls`, `chrono`, `rust_decimal`).
+  - Vertebra adds token stream → Arrow decoding and ATTENTION cancellation (unverified in tiberius). Entra ID stays in the backlog (#68).
+  - Microsoft's `mssql-tds` 0.3.0 (`microsoft/mssql-rs`) stays on a watch list: it forces OpenSSL on Linux, is pre-1.0, and is closed to external PRs.
+- **Packaging.** Both are optional, behind the `mysql`/`mssql` Cargo features and Python extras.
+
 ## Scope
 
 1. **MySQL connection.** Handshake v10, `caching_sha2_password` (existing scramble) and `mysql_native_password`, TLS, capability flags, and Cloud SQL connector/IAM through `dialer.rs`.

@@ -19,6 +19,15 @@ tags: [rust, sqlite, duckdb, redis, valkey]
 
 # Flow Charter: SQLite, DuckDB, and Redis/Valkey in Rust
 
+## Approach
+
+See [crate research](../native-data-platform/research/rust-driver-crates_20261103.md).
+
+- **SQLite.** `rusqlite` 0.41.1 (`bundled`, `hooks`, `serialize`, `blob`, `column_decltype`), one dedicated thread per connection. Vertebra builds the async bridge and Arrow column building.
+- **DuckDB.** `duckdb` 1.20000.1 (`bundled`, `appender-arrow`), behind the existing `duckdb` Cargo feature. It carries a hard arrow ^60 dependency and a C++ build. Vertebra runs it on blocking threads and exports `RecordBatch` to VTBARROW through the Arrow FFI.
+- **Redis/Valkey.** `redis` 1.8.1 (`default-features = false`, `tokio-rustls-comp`, `cluster-async`, `connection-manager`, `cache-aio`, `streams`, `script`, `acl`). `fred` is stale (last release 2025-02) and `glide-core` is not meant for direct use. Vertebra benchmarks its `resp3.rs` decoding against the crate's and builds the SHM pub/sub fan-out.
+- **Packaging.** All are optional Cargo features and Python extras. The default build stays lean.
+
 ## Scope
 
 1. **SQLite.** A Rust SQLite engine (bundled `rusqlite`) behind `db/adapters/sqlite/driver.py`. It covers WAL, busy timeout, prepared statement cache, `execute_many`, Arrow export/import, and a thread-offloaded async form. The existing `vertebra-db/src/sqlite.rs` lease/statement pieces are reused.

@@ -7,6 +7,7 @@ state: planned
 parent_prd: null
 research:
   - research/gap-analysis_20261103.md
+  - research/rust-driver-crates_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 1
 plan_commit: null
@@ -115,12 +116,25 @@ The global constraints from [integration-remediation](../integration-remediation
 
 ## Open Questions
 
-- **Resolved Q5 approach** *(user, 2026-11-03)*: build each native driver on the official or best-in-class Rust client for its engine, extending it as needed, and require it as an optional dependency (a Cargo feature plus a Python extra). The per-engine crate choices come from the crate research brief, added under `research/` once it lands.
-- **Q5 detail (pending research)**
-  - Oracle now builds on Oracle's official pure-Rust thin `oracledb` crate instead of a from-scratch TTC client.
-  - The same approach is available elsewhere: `tokio-postgres`/`postgres-protocol` (Postgres, automatic pipelining), `mysql_async` (MySQL), `tiberius` (MSSQL TDS), `rusqlite` (SQLite), `duckdb` (DuckDB), and `redis-rs`/`fred` (Redis/Valkey).
-  - Recommended: wrap a crate behind the Vertebra `Connection` trait and driver contract wherever it meets the requirements (async on Tokio, zero-copy result paths into VTBARROW, pipelining, cancellation). Keep the existing Vertebra codecs (JSONB, pgvector, OSON, VECTOR, pgcopy) where they are faster, and hand-roll only the protocol pieces a crate lacks.
-  - Each driver chapter verifies its crate against the conformance suite and `make bench-check` before adopting it.
+- **Resolved Q5 approach** *(user, 2026-11-03)*: build each native driver on the official or best-in-class Rust client for its engine, extending it as needed, and require it as an optional dependency (a Cargo feature plus a Python extra).
+- **Q5 detail.** Per-engine choices are in the [crate research](research/rust-driver-crates_20261103.md):
+
+  | Engine | Crate |
+  | --- | --- |
+  | Postgres | `postgres-protocol` 0.6.12 + Vertebra connection (tokio-postgres as test oracle) |
+  | MySQL | `mysql_async` 0.37.1 |
+  | Oracle | `oracledb` =26.0.0-beta.5 (sync; pipelining/async extension pending) |
+  | MSSQL | `tiberius` 0.13.0 (rustls) |
+  | SQLite | `rusqlite` 0.41.1 |
+  | DuckDB | `duckdb` 1.20000.1 |
+  | Redis/Valkey | `redis` 1.8.1 |
+  | BigQuery/Spanner | keep the hand-written clients; revisit `google-cloud-rust` at 1.0 |
+
+  Cross-cutting rules:
+  - Disable default features everywhere and standardize on rustls + `ring`, to avoid aws-lc-rs, OpenSSL, and native-tls.
+  - oracledb (arrow 59) and duckdb (arrow 60) stay behind features and bridge to VTBARROW through the Arrow C Data Interface.
+  - `make bench-check` gates each adoption.
+- **Q6 — Oracle pipelining and async (open).** The official `oracledb` crate is synchronous and lists 26ai pipelining as unsupported. Recommended: extend it with TTC pipelining and an async transport (offered upstream) rather than shipping sequential-only pipelining. See [native-oracle-driver](../native-oracle-driver/spec.md).
 
 ## Implementation Plan
 

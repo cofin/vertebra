@@ -21,15 +21,21 @@ tags: [rust, oracle, driver, pipeline]
 
 ## Approach
 
-- Build on Oracle's official pure-Rust thin driver: the `oracledb` crate from `oracle/rust-oracledb`, a Thin-mode TNS/TTC implementation with no Instant Client. Reported features: pooling, DRCP, statement caching, native network encryption, JSON/VECTOR/LOB types, and optional Arrow.
+- Build on Oracle's official pure-Rust thin driver: `oracledb` pinned `=26.0.0-beta.5`, with the `arrow` feature. Details are in the [crate research](../native-data-platform/research/rust-driver-crates_20261103.md).
+  - It is maintained by Oracle, licensed UPL-1.0 OR Apache-2.0, and needs no Instant Client.
+  - Tested on 19c, 21c, and 26ai.
+  - Supports DRCP, statement caching, array DML, JSON/VECTOR/LOBs, and `query_arrow` on arrow 59.
+- **Verified gaps** (docs Appendix A):
+  - The API is synchronous, with no Tokio dependency.
+  - Unsupported: 26ai pipelining, token auth, AQ/TxEventQ, CQN, direct path loads, Application Continuity, TPC, implicit results.
+  - v1 runs each broker-owned connection on a dedicated blocking thread (`tokio::task::spawn_blocking`) and bridges Arrow 59 to VTBARROW through the C Data Interface.
+  - The pipelining decision is open; see below.
 - Wrap it behind the Vertebra `Connection` trait and driver contract instead of writing the protocol from scratch.
-- Before the plan is locked, verify against the crate source:
-  - async/Tokio support;
-  - 23ai pipelining;
-  - Arrow output that can feed VTBARROW zero-copy;
-  - license compatibility;
-  - release maturity (reported as a 26.0.0 beta).
-- Contribute or patch only the gaps.
+- **Open decision: 23ai pipelining and native async.** The crate has neither. Options:
+  - (a) Implement TTC pipelining and an async transport in a Vertebra extension of the crate and offer it upstream to `oracle/rust-oracledb`.
+  - (b) Ship v1 with sequential pipeline execution and add true pipelining once upstream supports it.
+  - Recommended: (a). It is the only way to meet the user requirement that Oracle supports pipelining, and Vertebra's existing `oracle.rs` TTC encoders are the starting point.
+- The scope items below that the crate lacks (AQ/TxEventQ, token auth, implicit results) are built on top of it.
 - Rejected: `oracle` (rust-oracle) on ODPI-C and `sibyl` on OCI both need Oracle Instant Client at runtime. The community `oracle-rs` crate is a fallback if the official crate lacks async.
 - Vertebra's existing `oracle.rs`/`tns.rs` codecs (OSON, VECTOR, TTC piggyback, tnsnames/wallet parsing) are kept only where the crate does not already cover them.
 

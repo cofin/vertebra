@@ -19,6 +19,16 @@ tags: [rust, postgres, driver, pipeline]
 
 # Flow Charter: Rust Postgres Client
 
+## Approach
+
+See [crate research](../native-data-platform/research/rust-driver-crates_20261103.md).
+
+- **Base.** `postgres-protocol` 0.6.12 supplies the frontend/backend codecs and SASL, including SCRAM-SHA-256-PLUS. On top of it sits a Vertebra-owned connection state machine that reuses the existing Parse/Bind/Execute/Sync encoders and `PostgresPool`.
+- **TLS.** `tokio-postgres-rustls` 0.14 (`ring`).
+- **Test oracle.** `tokio-postgres` 0.7.18 is a dev-dependency used as the reference implementation.
+- **Why not wrap `tokio-postgres`.** Its `Client` sends one `Sync` per request and blocks raw frame injection, so it cannot do the required single-`Sync` batch pipeline.
+- **Packaging.** Optional, behind the `postgres` Cargo feature and Python extra.
+
 ## Scope
 
 1. **Connection.**
