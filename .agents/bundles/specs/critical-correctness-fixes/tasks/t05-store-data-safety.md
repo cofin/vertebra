@@ -2,7 +2,7 @@
 type: Task
 id: critical-correctness-fixes:t05
 title: Store prefix-scoped delete, millisecond TTLs, expires_in contract, and Litestar swap defaults
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on: []
@@ -23,17 +23,17 @@ tests:
   - src/py/tests/unit/extensions/test_starlette_plugin.py
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: executor
+claimed_at: 2026-11-03T16:50:15Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
+last_verified_at: 2026-11-03T16:56:00Z
 last_verified_commit: null
-verification_evidence: null
+verification_evidence: "RED: 19 failed in 1.35s; GREEN: 76 passed in 1.46s, ruff check/format and mypy passed"
 created_at: 2026-11-03T15:30:00Z
-updated_at: 2026-11-03T16:00:00Z
+updated_at: 2026-11-03T16:56:00Z
 commit: null
 tags: [bugfix, data-loss, stores, redis, litestar]
 ---
@@ -407,11 +407,11 @@ tags: [bugfix, data-loss, stores, redis, litestar]
 
 ## Acceptance Criteria
 
-- [ ] R8: `delete_all` removes only `<key_prefix>:*` in all three stores; foreign keys survive; no `flushdb` call remains in `framework/stores.py`, `extensions/litestar/store.py`, or `extensions/starlette/store.py`.
-- [ ] R8: Sub-second TTLs reach the driver as `PX`; non-positive TTLs raise `ValueError`; `expires_in` returns `None` for missing and non-expiring keys.
-- [ ] R8: Driver `scan`, `unlink`, and `set(px=...)` work in `memory://` and network modes; `ex` with `px` raises.
-- [ ] R9: Default `LitestarConfig` leaves `MemoryChannelsBackend` and the response cache `MemoryStore` in place.
-- [ ] Docs, knowledge chapters, and changelog updated; targeted checks pass; one signed commit.
+- [x] R8: `delete_all` removes only `<key_prefix>:*` in all three stores; foreign keys survive; no `flushdb` call remains in `framework/stores.py`, `extensions/litestar/store.py`, or `extensions/starlette/store.py`.
+- [x] R8: Sub-second TTLs reach the driver as `PX`; non-positive TTLs raise `ValueError`; `expires_in` returns `None` for missing and non-expiring keys.
+- [x] R8: Driver `scan`, `unlink`, and `set(px=...)` work in `memory://` and network modes; `ex` with `px` raises.
+- [x] R9: Default `LitestarConfig` leaves `MemoryChannelsBackend` and the response cache `MemoryStore` in place.
+- [x] Docs, knowledge chapters, and changelog updated; targeted checks pass; one signed commit.
 
 ## Notes & Discoveries
 

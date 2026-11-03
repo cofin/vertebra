@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from datetime import timedelta
+from typing import Any
 
 import pytest
 
@@ -262,8 +264,8 @@ async def test_valkey_resp3_client_tracking_and_litestar_integration() -> None:
 
     vdriver = store.driver
     assert isinstance(vdriver, AsyncValkeyDriver)
-    vdriver.handle_invalidation_push(["k1"])
-    assert "k1" not in store._entries
+    vdriver.handle_invalidation_push(["vertebra:k1"])
+    assert "vertebra:k1" not in store._entries
 
     await store.delete_all()
     assert await store.get("k1") is None
@@ -439,3 +441,88 @@ async def test_resp3_loopback_server_pipeline_evalsha_and_valkey_push_invalidati
         w.close()
     server.close()
     await server.wait_closed()
+
+
+_STORE_CLASSES: list[type[Any]] = [KeyValueStore, MemoryStore]
+_STORE_IDS = ["framework", "litestar"]
+
+
+@pytest.mark.anyio
+async def test_redis_driver_scan_unlink_and_px_in_memory_mode() -> None:
+    """The memory:// driver supports PX TTLs, prefix SCAN, and UNLINK."""
+    driver = AsyncRedisDriver(RedisConfig(url="memory://"))
+    await driver.set("cache:a", b"1", px=250)
+    await driver.set("cache:b", b"2")
+    await driver.set("other:c", b"3")
+    assert 0 < await driver.pttl("cache:a") <= 250
+    cursor, keys = await driver.scan(0, match="cache:*")
+    assert cursor == 0
+    assert sorted(keys) == ["cache:a", "cache:b"]
+    assert await driver.unlink("cache:a", "cache:b") == 2
+    assert await driver.get("cache:a") is None
+    assert await driver.get("other:c") == b"3"
+    with pytest.raises(ValueError, match="ex or px"):
+        await driver.set("k", b"v", ex=1, px=1000)
+    await driver.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("store_cls", _STORE_CLASSES, ids=_STORE_IDS)
+async def test_store_delete_all_removes_only_its_prefix(store_cls: type[Any]) -> None:
+    """delete_all removes the store's prefixed keys and leaves other keys in the database."""
+    driver = AsyncRedisDriver(RedisConfig(url="memory://"))
+    await driver.set("other:keep", b"x")
+    store = store_cls(driver=driver)
+    await store.set("a", "1")
+    await store.set("b", "2", expires_in=60)
+    await store.delete_all()
+    assert await driver.get("other:keep") == b"x"
+    assert await driver.get("vertebra:a") is None
+    assert await store.get("a") is None
+    assert await store.get("b") is None
+    await driver.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("store_cls", _STORE_CLASSES, ids=_STORE_IDS)
+async def test_store_sends_sub_second_ttl_as_milliseconds(store_cls: type[Any]) -> None:
+    """A 250 ms expiry reaches the driver as a PX TTL instead of EX 0."""
+    driver = AsyncRedisDriver(RedisConfig(url="memory://"))
+    store = store_cls(driver=driver)
+    await store.set("short", "v", expires_in=timedelta(milliseconds=250))
+    assert 0 < await driver.pttl("vertebra:short") <= 250
+    assert await store.get("short") == b"v"
+    await driver.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("store_cls", _STORE_CLASSES, ids=_STORE_IDS)
+@pytest.mark.parametrize("backed", [False, True], ids=["local", "driver"])
+async def test_store_expires_in_returns_none_without_expiry(store_cls: type[Any], backed: bool) -> None:
+    """expires_in returns None for keys without expiry and for missing keys."""
+    driver = AsyncRedisDriver(RedisConfig(url="memory://")) if backed else None
+    writer = store_cls(driver=driver)
+    await writer.set("forever", "v")
+    reader = store_cls(driver=driver) if backed else writer
+    assert await reader.expires_in("forever") is None
+    assert await reader.expires_in("missing") is None
+    if driver is not None:
+        await driver.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("store_cls", _STORE_CLASSES, ids=_STORE_IDS)
+@pytest.mark.parametrize("expires_in", [0, -5, timedelta(0)], ids=["zero", "negative", "zero-delta"])
+async def test_store_rejects_non_positive_ttl(store_cls: type[Any], expires_in: int | timedelta) -> None:
+    """A zero or negative expiry raises before the key is written."""
+    store = store_cls()
+    with pytest.raises(ValueError, match="expires_in must be a positive duration"):
+        await store.set("k", "v", expires_in=expires_in)
+    assert await store.get("k") is None
+
+
+@pytest.mark.parametrize("store_cls", _STORE_CLASSES, ids=_STORE_IDS)
+def test_store_rejects_invalid_key_prefix(store_cls: type[Any]) -> None:
+    """Key prefixes containing glob characters are rejected."""
+    with pytest.raises(ValueError, match="key_prefix"):
+        store_cls(key_prefix="cache*")

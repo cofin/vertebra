@@ -76,11 +76,13 @@ bus = ChannelBus()
 
 Cache serialized responses or key-value state in `KeyValueStore` (`NamespacedStore`), and send transactional emails through `EmailService` across 6 backends (`MemoryEmailBackend`, `SmtpBackend`, `ResendBackend`, `SendGridBackend`, `MailgunBackend`, `SesBackend`):
 
+Stores backed by Redis or Valkey prefix every key with `key_prefix` (default `"vertebra"`), and `delete_all()` removes only keys under that prefix. Expiries are sent in milliseconds, and `expires_in()` returns `None` for keys without an expiry.
+
 ```python
 from vertebra.framework.email import EmailConfig, EmailMessage, EmailService
 from vertebra.framework.stores import KeyValueStore
 
-cache = KeyValueStore()
+cache = KeyValueStore(key_prefix="app-cache")
 email_service = EmailService.from_config(
     EmailConfig(backend="memory", default_from="noreply@example.com")
 )

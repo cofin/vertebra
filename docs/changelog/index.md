@@ -30,6 +30,7 @@ Release introducing shared-memory vector embeddings, zero-copy PEP 3118 vector v
 - Updated brand logo and icon assets (`docs/assets/`) to an isometric axial vertebrae mark (`#EDB641`), pinned persistent `VERTEBRA / <Current Page>` header context in `docs/stylesheets/extra.css`, and split usage documentation into 14 focused topic guides under `docs/usage/` ([PR #64](https://github.com/cofin/vertebra/pull/64)).
 - Updated `.github/dependabot.yml` to use native `bun` and `uv` package ecosystems with grouped minor/patch updates and `open-pull-requests-limit: 1`, gated CI test matrices on `lint` with `fail-fast: true` in `.github/workflows/ci.yml`, and upgraded workspace dependencies via `make upgrade` (`anyio`, `bump-my-version`, `platformdirs`, `pytest-databases`, `python-dateutil`, `sqlparse`, `crc32fast`) ([PR #64](https://github.com/cofin/vertebra/pull/64)).
 - WebMCP exposure is opt-in per tool: `mcp_tool(webmcp=...)` defaults to `False`, `build_webmcp_manifest` lists only tagged tools, and `WebMCPConfig` no longer exposes a global tagged-only toggle.
+- `LitestarConfig.swap_memory_channels` and `LitestarConfig.swap_memory_response_cache` default to `False`; `KeyValueStore`, the Litestar `MemoryStore`, and the Starlette `CacheStore` prefix Redis/Valkey keys with `key_prefix` (default `"vertebra"`).
 
 ### Fixed
 
@@ -40,6 +41,7 @@ Release introducing shared-memory vector embeddings, zero-copy PEP 3118 vector v
 - `MCPService` enforces `requires_confirmation` on `tools/call` through `ConfirmationGate` (`_meta["vertebra/confirmationToken"]`, JSON-RPC error `-32003`), binding approval to the tool, caller, and arguments; `ConfirmationGate.approve` / `reject` no longer record unknown or other-owner tokens; `AgentPlugin` shares the runtime gate with its MCP service.
 - `MCPHttpHandler.handle_request` rejects an `Mcp-Name` header when the body name is missing and rejects MCP routing headers on JSON-RPC batch bodies; `JSONRPCRouter` no longer unwraps nested `params` objects or retries handlers that raise `TypeError`.
 - The governed GCP database MCP tools (`register_gcp_database_tools`) validate `bigquery_object_table_inspect` table names, reject SQL with more than one statement, and require confirmation for `EXECUTE`, `CALL`, `GRANT`, `REVOKE`, `EXPORT DATA`, and `LOAD DATA` (`is_mutating_sql`).
+- `KeyValueStore.delete_all`, Litestar `MemoryStore.delete_all`, and Starlette `CacheStore.delete_all` delete only their prefix with `SCAN` + `UNLINK` instead of `FLUSHDB`; sub-second expiries are sent as `PX` milliseconds; `expires_in` returns `None` for keys without expiry. `SyncRedisDriver` / `AsyncRedisDriver` gain `scan`, `unlink`, and `set(px=...)`.
 
 ## 0.2.0
 

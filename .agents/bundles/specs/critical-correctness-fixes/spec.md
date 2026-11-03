@@ -9,11 +9,11 @@ research:
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
 plan_commit: 24e2931
-state_revision: 7
-current_task: null
-last_verified_checkpoint: null
+state_revision: 8
+current_task: t05
+last_verified_checkpoint: ddc4a3d
 created_at: 2026-11-03T03:30:00Z
-updated_at: 2026-11-03T16:47:08Z
+updated_at: 2026-11-03T16:50:15Z
 tags: [bugfix, security, regression-tdd]
 ---
 
@@ -284,7 +284,7 @@ Error modes:
 - [x] [0cdf54c] t01 — Tenant predicate raises, Spangres URL routing, and Spangres CDC positional params (tasks/t01-db-tenant-spangres-correctness.md)
 - [x] [3b819f4] t02 — WebMCP per-tool opt-in and MCP confirmation enforcement (tasks/t02-mcp-exposure-and-confirmation.md)
 - [x] [97dc3df] t03 — `Mcp-Name` binding and nested-params rejection (tasks/t03-mcp-name-binding.md)
-- [x] t04 — DB tool identifier validation and statement classification (tasks/t04-db-tool-sql-safety.md)
+- [x] [ddc4a3d] t04 — DB tool identifier validation and statement classification (tasks/t04-db-tool-sql-safety.md)
 - **Phase 1 Recovery Checkpoint**:
 
   ```bash
@@ -294,7 +294,7 @@ Error modes:
 
 ### Phase 2: Stores, Embeddings, and Server Shutdown
 
-- [ ] t05 — Store prefix-scoped delete, millisecond TTLs, `expires_in` contract, and Litestar swap defaults (tasks/t05-store-data-safety.md)
+- [~] t05 — Store prefix-scoped delete, millisecond TTLs, `expires_in` contract, and Litestar swap defaults (tasks/t05-store-data-safety.md)
 - [ ] t06 — Remote embedder error propagation and identifier validation (tasks/t06-remote-embedder-errors.md)
 - [ ] t07 — Local embedders run the configured model on free-threaded builds (tasks/t07-local-embedder-sidecar-backend.md)
 - [ ] t08 — `EventLoopPool.stop` drain and configurable ASGI mount timeout (tasks/t08-loop-shutdown-and-mount-timeout.md)

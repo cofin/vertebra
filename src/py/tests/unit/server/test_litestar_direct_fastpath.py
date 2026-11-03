@@ -24,6 +24,7 @@ from vertebra.extensions.litestar.fastpath import (
     dispatch_handler_direct,
     preseed_scope_body,
 )
+from vertebra.extensions.litestar.plugin import LitestarPlugin
 from vertebra.extensions.litestar.router import extract_routes
 from vertebra.extensions.litestar.store import (
     MemoryStore,
@@ -733,6 +734,21 @@ async def test_swap_channels_backend_and_response_cache_store() -> None:
         assert ttl is not None and ttl > 0
         await swapped_store.delete("k1")
         assert await swapped_store.get("k1") is None
+
+
+def test_litestar_plugin_keeps_memory_channels_and_response_cache_by_default() -> None:
+    """The default LitestarConfig leaves Litestar's channels backend and response cache store in place."""
+    channels_plugin = ChannelsPlugin(backend=MemoryChannelsBackend(history=10), channels=["alerts"])
+    plugin = LitestarPlugin()
+    app = Litestar(
+        route_handlers=[],
+        plugins=[channels_plugin, plugin],
+        response_cache_config=ResponseCacheConfig(store="response_cache"),
+        stores={"response_cache": LitestarMemoryStore()},
+    )
+    plugin.ensure_finalized(app)
+    assert type(channels_plugin._backend) is MemoryChannelsBackend
+    assert type(app.stores.get("response_cache")) is LitestarMemoryStore
 
 
 @pytest.mark.anyio

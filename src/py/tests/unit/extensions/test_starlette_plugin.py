@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -11,6 +12,7 @@ import pytest
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope
 from vertebra.agent.mcp.controllers import mcp_tool
+from vertebra.db.redis import AsyncRedisDriver, RedisConfig
 from vertebra.extensions.starlette import (
     CacheStore,
     ChannelsBackend,
@@ -266,3 +268,17 @@ async def test_starlette_fastpath_inline_sync_and_send_raw_response() -> None:
     assert raw_calls == [200]
     assert observed_tids == [caller_tid]
     assert msgspec.json.decode(proto.take_response().body) == {"pong": "inline"}
+
+
+@pytest.mark.anyio
+async def test_cache_store_delete_all_removes_only_its_prefix() -> None:
+    """Starlette CacheStore.delete_all removes its prefixed keys and leaves other keys in place."""
+    driver = AsyncRedisDriver(RedisConfig(url="memory://"))
+    await driver.set("other:keep", b"x")
+    cache = CacheStore(async_driver=driver)
+    await cache.set("a", "1", expires_in=timedelta(milliseconds=250))
+    assert 0 < await driver.pttl("vertebra:a") <= 250
+    await cache.delete_all()
+    assert await driver.get("other:keep") == b"x"
+    assert await driver.get("vertebra:a") is None
+    await driver.close()

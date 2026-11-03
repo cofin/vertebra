@@ -22,6 +22,8 @@ app = Litestar(
 )
 ```
 
+`LitestarConfig(swap_memory_channels=True, swap_memory_response_cache=True)` opts into replacing Litestar's in-memory channels backend and response cache store with Vertebra's implementations. Both are off by default.
+
 ### Fast-Path Dispatch & Native Middleware Offload
 
 - **Route Compiler**: `RouteCompiler` extracts Litestar routes into an optimized route table matched by the native HTTP router.

@@ -271,21 +271,36 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
             self._cache_put(key, out)
         return out
 
-    def set(self, key: str, value: bytes | str, *, ex: int | None = None) -> None:
-        """Set a key value and update local bounded LRU client-side cache state."""
+    def set(self, key: str, value: bytes | str, *, ex: int | None = None, px: int | None = None) -> None:
+        """Set a key value with an optional TTL and update the client-side cache.
+
+        Args:
+            key: Key to write.
+            value: Value bytes or text.
+            ex: Expiry in whole seconds.
+            px: Expiry in milliseconds.
+
+        Raises:
+            ValueError: When both ``ex`` and ``px`` are given.
+        """
+        if ex is not None and px is not None:
+            raise ValueError("set() accepts ex or px, not both")
         raw = value.encode("utf-8") if isinstance(value, str) else bytes(value)
+        ttl_seconds = float(ex) if ex is not None else (px / 1000.0 if px is not None else None)
         if self.config.effective_tracking_enabled:
-            self._cache_put(key, raw, ttl_seconds=float(ex) if ex is not None else None)
+            self._cache_put(key, raw, ttl_seconds=ttl_seconds)
         if self.config.url.startswith("memory://"):
             with self._lock:
                 self._kv[key] = raw
-                if ex is not None:
-                    self._ttls[key] = time.monotonic() + ex
+                if ttl_seconds is not None:
+                    self._ttls[key] = time.monotonic() + ttl_seconds
                 else:
                     self._ttls.pop(key, None)
             return
         if ex is not None:
             self.execute_command("SET", key, raw, "EX", ex)
+        elif px is not None:
+            self.execute_command("SET", key, raw, "PX", px)
         else:
             self.execute_command("SET", key, raw)
 
@@ -298,6 +313,39 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
                 return self._kv.pop(key, None) is not None
         res = self.execute_command("DEL", key)
         return bool(res and res > 0)
+
+    def scan(self, cursor: int = 0, *, match: str | None = None, count: int = 500) -> tuple[int, list[str]]:
+        """Run one ``SCAN`` step and return the next cursor and the matching keys.
+
+        In ``memory://`` mode all matching keys are returned with cursor ``0``.
+        """
+        if self.config.url.startswith("memory://"):
+            with self._lock:
+                keys = [k for k in self._kv if match is None or fnmatch.fnmatchcase(k, match)]
+            return 0, keys
+        parts: list[str | int] = ["SCAN", cursor]
+        if match is not None:
+            parts.extend(["MATCH", match])
+        parts.extend(["COUNT", count])
+        reply = self.execute_command(*parts)
+        return int(RedisCore.decode_part(reply[0])), [RedisCore.decode_part(k) for k in reply[1]]
+
+    def unlink(self, *keys: str) -> int:
+        """Remove ``keys`` with ``UNLINK`` and evict them from the client-side cache."""
+        if not keys:
+            return 0
+        for key in keys:
+            self._client_cache.pop(key, None)
+        if self.config.url.startswith("memory://"):
+            removed = 0
+            with self._lock:
+                for key in keys:
+                    self._ttls.pop(key, None)
+                    if self._kv.pop(key, None) is not None:
+                        removed += 1
+            return removed
+        res = self.execute_command("UNLINK", *keys)
+        return int(res) if isinstance(res, int) else 0
 
     def pttl(self, key: str) -> int:
         """Return the remaining time to live of a key in milliseconds."""
@@ -957,7 +1005,8 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
             ex = None
             if len(parts) >= 5 and RedisCore.decode_part(parts[3]).upper() == "EX":
                 ex = int(parts[4])
-            self.set(k, v, ex=ex)
+            px = int(parts[4]) if len(parts) >= 5 and RedisCore.decode_part(parts[3]).upper() == "PX" else None
+            self.set(k, v, ex=ex, px=px)
             return "OK"
         if cmd == "DEL":
             count = 0
@@ -1129,16 +1178,31 @@ class AsyncRedisDriver(CommonDriverMixin[RedisConfig]):
             self._sync._cache_put(key, out)
         return out
 
-    async def set(self, key: str, value: bytes | str, *, ex: int | None = None) -> None:
-        """Asynchronously set a key value and update bounded LRU client cache."""
+    async def set(self, key: str, value: bytes | str, *, ex: int | None = None, px: int | None = None) -> None:
+        """Asynchronously set a key value with an optional TTL and update the client-side cache.
+
+        Args:
+            key: Key to write.
+            value: Value bytes or text.
+            ex: Expiry in whole seconds.
+            px: Expiry in milliseconds.
+
+        Raises:
+            ValueError: When both ``ex`` and ``px`` are given.
+        """
+        if ex is not None and px is not None:
+            raise ValueError("set() accepts ex or px, not both")
         raw = value.encode("utf-8") if isinstance(value, str) else bytes(value)
+        ttl_seconds = float(ex) if ex is not None else (px / 1000.0 if px is not None else None)
         if self.config.effective_tracking_enabled:
-            self._sync._cache_put(key, raw, ttl_seconds=float(ex) if ex is not None else None)
+            self._sync._cache_put(key, raw, ttl_seconds=ttl_seconds)
         if self.config.url.startswith("memory://"):
-            self._sync.set(key, raw, ex=ex)
+            self._sync.set(key, raw, ex=ex, px=px)
             return
         if ex is not None:
             await self.execute_command("SET", key, raw, "EX", ex)
+        elif px is not None:
+            await self.execute_command("SET", key, raw, "PX", px)
         else:
             await self.execute_command("SET", key, raw)
 
@@ -1149,6 +1213,31 @@ class AsyncRedisDriver(CommonDriverMixin[RedisConfig]):
             return self._sync.delete(key)
         res = await self.execute_command("DEL", key)
         return bool(res and res > 0)
+
+    async def scan(self, cursor: int = 0, *, match: str | None = None, count: int = 500) -> tuple[int, list[str]]:
+        """Run one ``SCAN`` step and return the next cursor and the matching keys.
+
+        In ``memory://`` mode all matching keys are returned with cursor ``0``.
+        """
+        if self.config.url.startswith("memory://"):
+            return self._sync.scan(cursor, match=match, count=count)
+        parts: list[str | int] = ["SCAN", cursor]
+        if match is not None:
+            parts.extend(["MATCH", match])
+        parts.extend(["COUNT", count])
+        reply = await self.execute_command(*parts)
+        return int(RedisCore.decode_part(reply[0])), [RedisCore.decode_part(k) for k in reply[1]]
+
+    async def unlink(self, *keys: str) -> int:
+        """Remove ``keys`` with ``UNLINK`` and evict them from the client-side cache."""
+        if not keys:
+            return 0
+        for key in keys:
+            self._client_cache.pop(key, None)
+        if self.config.url.startswith("memory://"):
+            return self._sync.unlink(*keys)
+        res = await self.execute_command("UNLINK", *keys)
+        return int(res) if isinstance(res, int) else 0
 
     async def pttl(self, key: str) -> int:
         """Return remaining TTL of key in milliseconds."""

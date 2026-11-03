@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
@@ -9,6 +10,7 @@ from typing import Any, Self
 
 from vertebra.db.redis import AsyncRedisDriver, RedisConfig
 from vertebra.db.valkey import AsyncValkeyDriver, ValkeyConfig
+from vertebra.utils.text import validate_identifier
 
 __all__ = (
     "KeyValueStore",
@@ -20,31 +22,50 @@ __all__ = (
 class KeyValueStore:
     """Lock-free monotonic TTL store with optional Valkey/Redis backing and RESP3 invalidation."""
 
-    __slots__ = ("_driver", "_entries")
+    __slots__ = ("_driver", "_entries", "_key_prefix")
 
-    def __init__(self, *, driver: AsyncValkeyDriver | AsyncRedisDriver | None = None) -> None:
-        """Initialize store with optional Valkey or Redis backing driver."""
+    def __init__(
+        self,
+        *,
+        driver: AsyncValkeyDriver | AsyncRedisDriver | None = None,
+        key_prefix: str = "vertebra",
+    ) -> None:
+        """Initialize store with optional Valkey or Redis backing driver.
+
+        Args:
+            driver: Optional Valkey or Redis driver.
+            key_prefix: Namespace prepended to every key as ``<key_prefix>:<key>``; ``delete_all`` removes only keys under it.
+
+        Raises:
+            ValueError: When ``key_prefix`` is not a valid identifier.
+        """
+        self._key_prefix = validate_identifier(key_prefix, "key_prefix", allow_hyphens=True)
         self._entries: dict[str, tuple[bytes, float | None]] = {}
         self._driver = driver
         if isinstance(driver, AsyncValkeyDriver):
             driver.add_invalidation_listener(self._on_driver_invalidate)
 
     @classmethod
-    def from_valkey(cls, config_or_url: ValkeyConfig | str) -> Self:
+    def from_valkey(cls, config_or_url: ValkeyConfig | str, *, key_prefix: str = "vertebra") -> Self:
         """Create a Store backed by Valkey with RESP3 client-side cache tracking."""
         cfg = ValkeyConfig(url=config_or_url) if isinstance(config_or_url, str) else config_or_url
-        return cls(driver=AsyncValkeyDriver(cfg))
+        return cls(driver=AsyncValkeyDriver(cfg), key_prefix=key_prefix)
 
     @classmethod
-    def from_redis(cls, config_or_url: RedisConfig | str) -> Self:
+    def from_redis(cls, config_or_url: RedisConfig | str, *, key_prefix: str = "vertebra") -> Self:
         """Create a Store backed by Redis."""
         cfg = RedisConfig(url=config_or_url) if isinstance(config_or_url, str) else config_or_url
-        return cls(driver=AsyncRedisDriver(cfg))
+        return cls(driver=AsyncRedisDriver(cfg), key_prefix=key_prefix)
 
     @property
     def driver(self) -> AsyncValkeyDriver | AsyncRedisDriver | None:
         """Return the underlying Valkey or Redis driver when configured."""
         return self._driver
+
+    @property
+    def key_prefix(self) -> str:
+        """Return the namespace prepended to every stored key."""
+        return self._key_prefix
 
     async def __aenter__(self) -> Self:
         """Enter the async context manager and return the store instance."""
@@ -64,19 +85,20 @@ class KeyValueStore:
 
     async def get(self, key: str, renew_for: int | timedelta | None = None) -> bytes | None:
         """Retrieve bytes for key if present and unexpired, optionally renewing TTL."""
-        entry = self._entries.get(key)
+        full_key = self._make_key(key)
+        entry = self._entries.get(full_key)
         if entry is None:
             if self._driver is not None:
-                return await self._driver.get(key)
+                return await self._driver.get(full_key)
             return None
         value, expires_at = entry
         now = time.monotonic()
         if expires_at is not None and now >= expires_at:
-            self._entries.pop(key, None)
+            self._entries.pop(full_key, None)
             return None
         if renew_for is not None:
             ttl_s = renew_for.total_seconds() if isinstance(renew_for, timedelta) else float(renew_for)
-            self._entries[key] = (value, now + ttl_s)
+            self._entries[full_key] = (value, now + ttl_s)
         return value
 
     async def set(
@@ -87,51 +109,55 @@ class KeyValueStore:
     ) -> None:
         """Store value under key with an optional expiration duration."""
         raw = value.encode("utf-8") if isinstance(value, str) else bytes(value)
-        if expires_in is None:
-            expires_at = None
-            ttl_int = None
-        else:
-            ttl_s = expires_in.total_seconds() if isinstance(expires_in, timedelta) else float(expires_in)
-            expires_at = time.monotonic() + ttl_s
-            ttl_int = int(ttl_s)
-        self._entries[key] = (raw, expires_at)
+        full_key = self._make_key(key)
+        ttl_ms = self._ttl_milliseconds(expires_in)
+        expires_at = None if ttl_ms is None else time.monotonic() + ttl_ms / 1000.0
+        self._entries[full_key] = (raw, expires_at)
         if self._driver is not None:
-            await self._driver.set(key, raw, ex=ttl_int)
+            await self._driver.set(full_key, raw, px=ttl_ms)
 
     async def delete(self, key: str) -> None:
         """Delete key from the store if present."""
-        self._entries.pop(key, None)
+        full_key = self._make_key(key)
+        self._entries.pop(full_key, None)
         if self._driver is not None:
-            await self._driver.delete(key)
+            await self._driver.delete(full_key)
 
     async def delete_all(self) -> None:
-        """Clear all entries from the store."""
+        """Delete every key under this store's ``key_prefix`` with ``SCAN`` + ``UNLINK``."""
         self._entries.clear()
-        if self._driver is not None:
-            await self._driver.flushdb()
+        if self._driver is None:
+            return
+        pattern = f"{self._key_prefix}:*"
+        cursor = 0
+        while True:
+            cursor, keys = await self._driver.scan(cursor, match=pattern, count=500)
+            if keys:
+                await self._driver.unlink(*keys)
+            if cursor == 0:
+                break
 
     async def exists(self, key: str) -> bool:
         """Return True if key exists and has not expired."""
         return (await self.get(key)) is not None
 
     async def expires_in(self, key: str) -> int | None:
-        """Return remaining TTL in seconds for key, or None if unset or expired."""
-        entry = self._entries.get(key)
+        """Return remaining TTL in seconds, or None when the key is missing, expired, or has no expiry."""
+        full_key = self._make_key(key)
+        entry = self._entries.get(full_key)
         if entry is not None:
             _value, expires_at = entry
             if expires_at is None:
-                return -1
+                return None
             remaining = expires_at - time.monotonic()
             if remaining <= 0:
-                self._entries.pop(key, None)
+                self._entries.pop(full_key, None)
                 return None
             return int(remaining)
         if self._driver is not None:
-            pttl_ms = await self._driver.pttl(key)
-            if pttl_ms == -2:
+            pttl_ms = await self._driver.pttl(full_key)
+            if pttl_ms in (-2, -1):
                 return None
-            if pttl_ms == -1:
-                return -1
             return max(0, pttl_ms // 1000)
         return None
 
@@ -159,6 +185,24 @@ class KeyValueStore:
         """Close the underlying Valkey or Redis driver when configured."""
         if self._driver is not None:
             await self._driver.close()
+
+    def _make_key(self, key: str) -> str:
+        """Return the driver key ``<key_prefix>:<key>``."""
+        return f"{self._key_prefix}:{key}"
+
+    @staticmethod
+    def _ttl_milliseconds(expires_in: int | timedelta | None) -> int | None:
+        """Convert ``expires_in`` to whole milliseconds, rounding up.
+
+        Raises:
+            ValueError: When ``expires_in`` is zero or negative.
+        """
+        if expires_in is None:
+            return None
+        seconds = expires_in.total_seconds() if isinstance(expires_in, timedelta) else float(expires_in)
+        if seconds <= 0:
+            raise ValueError("expires_in must be a positive duration")
+        return math.ceil(seconds * 1000)
 
     def _on_driver_invalidate(self, keys: Any) -> None:
         """Evict local cache entries matching invalidated keys."""
