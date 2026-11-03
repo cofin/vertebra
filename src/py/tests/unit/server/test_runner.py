@@ -1291,3 +1291,36 @@ def test_asgi_mount_batch_timeout_rejects_invalid_values(monkeypatch: pytest.Mon
             _instantiate_mount_runners([("/api", _ok_asgi, "asgi")], pool)
     finally:
         pool.stop()
+
+
+def test_dispatch_batch_buffered_async_native_times_out_with_504_and_cancels_task() -> None:
+    """Buffered dispatch_batch(async_mode=False) returns 504 and cancels timed-out async_native tasks."""
+    pool = EventLoopPool(size=2)
+    cancelled = threading.Event()
+
+    async def slow_handler() -> bytes:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return b"never"
+
+    handlers = {1: slow_handler}
+    batch = [MockRequest(handler_id=1, request_id=19, path="/slow-native")]
+    try:
+        plan = partition_batch(batch, handlers, [])
+        results = dispatch_batch(
+            plan,
+            handlers,
+            [],
+            MockResponse,
+            pool,
+            async_mode=False,
+            batch_timeout=0.05,
+        )
+        assert results is not None
+        assert [(r.status, r.body, r.request_id) for r in results] == [(504, b"Gateway Timeout", 19)]
+        assert cancelled.wait(timeout=2.0)
+    finally:
+        pool.stop()

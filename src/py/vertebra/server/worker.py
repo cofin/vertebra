@@ -34,9 +34,11 @@ from vertebra.extensions.litestar.plugin import enter_litestar_server_lifespan
 from vertebra.server._asgi._queues import AsgiResponse
 from vertebra.server._asgi._runner import AsgiLifespan, AsgiRunner
 from vertebra.server._dispatch import (
+    _DEFAULT_ASGI_BATCH_TIMEOUT_SECONDS,
     _JSON_CONTENT_TYPE_COMPACT,
     _RAW_BUFFER_TYPES,
     HandlerSpec,
+    _resolve_asgi_batch_timeout,
     build_error_response,
     compile_handler_table,
     dispatch_batch,
@@ -59,7 +61,6 @@ from vertebra.server.platform import (
     SHMAllocationPolicy,
     ZPagesRegistry,
 )
-from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import encode_json_bytes
 
 __all__ = (
@@ -72,7 +73,6 @@ __all__ = (
 
 logger = logging.getLogger(__name__)
 _INLINE_DRAIN_BUDGET = 16
-_DEFAULT_ASGI_BATCH_TIMEOUT_SECONDS: float = 30.0
 
 
 class _AsgiMountRunner:
@@ -757,27 +757,3 @@ def _resolve_configured_interface() -> InterfaceMode:
     if raw == "wsgi":
         return "wsgi"
     return "auto"
-
-
-def _resolve_asgi_batch_timeout() -> float | None:
-    """Resolve ``VERTEBRA_ASGI_BATCH_TIMEOUT`` (seconds) for buffered sharded ASGI mount batches.
-
-    Unset or empty means the 30 second default. ``0`` or ``none`` (any case) disables the
-    timeout. Any other value must be a positive number of seconds.
-
-    Raises:
-        ImproperConfigurationError: When the value is negative or not a number.
-    """
-    raw = os.environ.get("VERTEBRA_ASGI_BATCH_TIMEOUT", "").strip()
-    if not raw:
-        return _DEFAULT_ASGI_BATCH_TIMEOUT_SECONDS
-    if raw.lower() == "none":
-        return None
-    msg = f"VERTEBRA_ASGI_BATCH_TIMEOUT must be a non-negative number of seconds or 'none', got {raw!r}"
-    try:
-        timeout = float(raw)
-    except ValueError as exc:
-        raise ImproperConfigurationError(msg) from exc
-    if timeout < 0:
-        raise ImproperConfigurationError(msg)
-    return None if timeout == 0 else timeout
