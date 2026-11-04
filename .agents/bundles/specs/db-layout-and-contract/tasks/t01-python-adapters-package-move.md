@@ -3,7 +3,7 @@ type: Task
 id: db-layout-and-contract:t01
 title: Relocate Python engine packages to vertebra/db/adapters/<engine> and remove DataFusion SQLite fallback
 description: "Move all eleven Python database, cache, and federated query adapters under `src/py/vertebra/db/adapters/<engine>/`, rename `_arrow.py` to `arrow.py` and `_registry.py` to `registry.py`, convert `vertebra/db/__init__.py` to curated lazy exports over engine-agnostic names only, remove the `sqlite3` fallback from `DataFusionEngine`, and update all in-tree imports, doc Python code fences, and OKF Python `sources:` entries in lockstep."
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -112,18 +112,18 @@ tests:
   - src/py/tests/unit/storage/test_gcs_token_refresh.py
 plan_revision: 4
 plan_commit: "f741701"
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-04T14:34:26Z"
+last_verified_commit: "8675187"
+verification_evidence: "uv run pytest src/py/tests/unit (1555 passed, 1 skipped); make lint-all (exit 0); make docs (exit 0)"
 created_at: 2026-11-03T21:40:00Z
-updated_at: 2026-11-04T01:05:00Z
-commit: null
+updated_at: "2026-11-04T14:34:26Z"
+commit: "8675187"
 tags: [db, layout, adapters, datafusion, clean-break]
 ---
 
@@ -175,10 +175,13 @@ Move all eleven Python database, cache, and federated query adapters under `src/
 
 ## Acceptance Criteria
 
-- [ ] R1: All eleven engine packages live under `src/py/vertebra/db/adapters/<engine>/`, `arrow.py` and `registry.py` replace `_arrow.py` and `_registry.py`, `vertebra/db/__init__.py` uses `lazy_exports` for engine-agnostic symbols only, and legacy `vertebra.db.<engine>` paths raise `ModuleNotFoundError`.
-- [ ] R2: `DataFusionEngine` contains zero `sqlite3` imports or fallbacks, calls `ensure_module("datafusion", package="datafusion")`, and propagates `MissingDependencyError` / DataFusion errors directly.
-- [ ] All unit tests (including `test_examples.py`), `make lint-all` (including `make review-check`), and `make docs` pass with exit code `0`.
+- [x] R1: All eleven engine packages live under `src/py/vertebra/db/adapters/<engine>/`, `arrow.py` and `registry.py` replace `_arrow.py` and `_registry.py`, `vertebra/db/__init__.py` uses `lazy_exports` for engine-agnostic symbols only, and legacy `vertebra.db.<engine>` paths raise `ModuleNotFoundError`.
+- [x] R2: `DataFusionEngine` contains zero `sqlite3` imports or fallbacks, calls `ensure_module("datafusion", package="datafusion")`, and propagates `MissingDependencyError` / DataFusion errors directly.
+- [x] All unit tests (including `test_examples.py`), `make lint-all` (including `make review-check`), and `make docs` pass with exit code `0`.
 
 ## Notes & Discoveries
 
 <!-- Append timestamped implementation findings here: - [YYYY-MM-DD HH:MM] ... -->
+- [2026-11-04 06:16] `datafusion` is not installed in the default `.venv` while `pyarrow` is installed; `DataFusionEngine.__init__` resolves `import_optional("datafusion")` lazily when `ctx is None` and `_ensure_context()` calls `ensure_module("datafusion", package="datafusion")` at query execution so `MissingDependencyError` is raised deterministically unless an explicit `ctx=` `SessionContext` is injected.
+- [2026-11-04 06:16] Replaced `_load_fake_spanner_client()`'s fragile `lines[41:598]` `exec` slice in `test_sqlspec_spanner.py` and `test_gcp_adapters_and_sqlalchemy.py` with `from tests.unit.db.test_spanner import FakeSpannerClient`.
+- [2026-11-04 06:16] `src/py/tests/unit/docs/test_examples.py` required zero edits because it dynamically validates `docs/examples/storage_and_db.py` and all updated `docs/usage/*.md` Python code fences.

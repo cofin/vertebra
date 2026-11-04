@@ -3,7 +3,7 @@ type: Task
 id: db-layout-and-contract:t05
 title: Define runtime-checkable Sync/Async engine capability protocols and msgspec records
 description: "Create `src/py/vertebra/db/driver/capabilities.py` defining the `@runtime_checkable` engine capability protocols (`SyncPipelineCapable`, `AsyncPipelineCapable`, `SyncPipeline`, `AsyncPipeline`, `NotificationSource`, `SyncChangeSource`, `AsyncChangeSource`, `QueueStore`, `EmbeddingPushdown`) with complete typed signatures and `msgspec.Struct(..., frozen=True, gc=False)` value objects (`NotificationEvent`, `ClaimedJob`), re-exporting them from `vertebra.db.driver` and `vertebra.db`."
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -16,18 +16,18 @@ tests:
   - src/py/tests/unit/db/test_native_db_drivers.py
 plan_revision: 4
 plan_commit: "f741701"
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-04T18:56:00Z"
+last_verified_commit: "2c0d365"
+verification_evidence: "RED: ModuleNotFoundError; GREEN: uv run pytest src/py/tests/unit/db/test_native_db_drivers.py (74 passed); make lint-all && make docs (exit 0)"
 created_at: 2026-11-03T21:40:00Z
-updated_at: 2026-11-04T01:08:00Z
-commit: null
+updated_at: "2026-11-04T18:56:41Z"
+commit: "2c0d365"
 tags: [db, capabilities, protocols, msgspec]
 ---
 
@@ -81,9 +81,11 @@ Create `src/py/vertebra/db/driver/capabilities.py` defining the `@runtime_checka
 
 ## Acceptance Criteria
 
-- [ ] R7: `SyncPipelineCapable`, `AsyncPipelineCapable`, `SyncPipeline`, `AsyncPipeline`, `NotificationSource`, `NotificationEvent`, `SyncChangeSource`, `AsyncChangeSource`, `QueueStore`, `ClaimedJob`, and `EmbeddingPushdown` are implemented with complete typed signatures in `src/py/vertebra/db/driver/capabilities.py`, exported from `vertebra.db.driver` and `vertebra.db`, and have zero upward imports into `vertebra.embeddings` or `vertebra.framework`.
-- [ ] `NotificationEvent` and `ClaimedJob` omit cyclic GC tracking (`gc.is_tracked(...) is False`) and pass docstring scanning.
+- [x] R7: `SyncPipelineCapable`, `AsyncPipelineCapable`, `SyncPipeline`, `AsyncPipeline`, `NotificationSource`, `NotificationEvent`, `SyncChangeSource`, `AsyncChangeSource`, `QueueStore`, `ClaimedJob`, and `EmbeddingPushdown` are implemented with complete typed signatures in `src/py/vertebra/db/driver/capabilities.py`, exported from `vertebra.db.driver` and `vertebra.db`, and have zero upward imports into `vertebra.embeddings` or `vertebra.framework`.
+- [x] `NotificationEvent` and `ClaimedJob` omit cyclic GC tracking (`gc.is_tracked(...) is False`) and pass docstring scanning.
 
 ## Notes & Discoveries
 
-<!-- Append timestamped implementation findings here: - [YYYY-MM-DD HH:MM] ... -->
+- [2026-11-04 18:45] RED baseline (`uv run --no-sync pytest src/py/tests/unit/db/test_native_db_drivers.py -k capability -q`) exited `2` with `ModuleNotFoundError: No module named 'vertebra.db.driver.capabilities'`.
+- [2026-11-04 18:45] Implemented `src/py/vertebra/db/driver/capabilities.py` with `NotificationEvent` and `ClaimedJob` inheriting `FrozenBaseStruct` (`frozen=True, gc=False`) and inline PEP 257 field docstrings, plus `@runtime_checkable` protocols `SyncPipeline`, `AsyncPipeline`, `SyncPipelineCapable`, `AsyncPipelineCapable`, `NotificationSource`, `SyncChangeSource`, `AsyncChangeSource`, `QueueStore`, and `EmbeddingPushdown`. Kept `VectorBatchView`/`VectorView` (`vertebra._vertebra`) and `ChangeEvent` (`vertebra.db.cdc`) inside `if TYPE_CHECKING:` so `vertebra.db.driver.capabilities` executes zero upward or sibling CDC/embedding imports at runtime.
+- [2026-11-04 18:45] Re-exported all 11 capability symbols on `vertebra.db.driver` and lazily via `_EXPORT_MAP` on `vertebra.db`, updated `_EXPECTED_DB_EXPORTS`, and fixed two adjacent `_FakeSslCtx` `arg-type` annotations in `test_native_db_drivers.py` so the entire test module passes `mypy --strict` (`412 source files`, exit `0`).

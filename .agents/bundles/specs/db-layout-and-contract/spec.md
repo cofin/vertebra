@@ -3,7 +3,7 @@ type: Spec
 flow_id: db-layout-and-contract
 title: Adapter Package Layout, GCP Wheel Extraction, Driver Contract, and Conformance Suite
 description: Relocate engine packages under vertebra/db/adapters/<engine> and vertebra-db/src/<engine>, extract standalone vertebra-bigquery and vertebra-spanner PyO3 wheels, unify the Sync/Async Python driver contract and typed DatabaseError hierarchy, define Sync/Async engine capability protocols, make DatabaseRegistry polymorphic, enforce the vertebra/db upward-import boundary, and establish the cross-engine conformance suite.
-state: planned
+state: active
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/gap-analysis_20261103.md
@@ -11,11 +11,11 @@ research:
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 4
 plan_commit: "f741701"
-state_revision: 0
-current_task: null
-last_verified_checkpoint: null
+state_revision: 6
+current_task: "db-layout-and-contract:t06"
+last_verified_checkpoint: "95afe7a"
 created_at: 2026-11-03T04:05:00Z
-updated_at: 2026-11-04T01:05:00Z
+updated_at: "2026-11-04T18:57:00Z"
 tags: [db, layout, wheels, contract, registry, conformance]
 ---
 
@@ -377,16 +377,16 @@ class EmbeddingPushdown(Protocol):
 
 ### Phase 1: Package Layout, Shared Rust Core, Error Hierarchy & GCP Wheel Extraction
 
-- [ ] t01 — Relocate Python engine packages to `vertebra/db/adapters/<engine>` and remove DataFusion SQLite fallback (tasks/t01-python-adapters-package-move.md)
-- [ ] t02 — Reorganize `vertebra-db` shared core, add `connection.rs` + `py_async.rs` + `ShmCapsule`, and register `DatabaseError` hierarchy (tasks/t02-rust-db-layout-and-connector.md)
-- [ ] t03 — Extract `vertebra-bigquery` and `vertebra-spanner` standalone PyO3 wheels and optional install extras (tasks/t03-extract-gcp-driver-wheels.md)
+- [x] [8675187] t01 — Relocate Python engine packages to `vertebra/db/adapters/<engine>` and remove DataFusion SQLite fallback (tasks/t01-python-adapters-package-move.md)
+- [x] [2fa781f] t02 — Reorganize `vertebra-db` shared core, add `connection.rs` + `py_async.rs` + `ShmCapsule`, and register `DatabaseError` hierarchy (tasks/t02-rust-db-layout-and-connector.md)
+- [x] [95afe7a] t03 — Extract `vertebra-bigquery` and `vertebra-spanner` standalone PyO3 wheels and optional install extras (tasks/t03-extract-gcp-driver-wheels.md)
 - **Phase 1 Recovery Checkpoint**: `make dev && make lint-all && cargo test -p vertebra-db -p vertebra-py -p vertebra-bigquery -p vertebra-spanner && uv run pytest src/py/tests/unit`
 
 ### Phase 2: Unified Driver Contract, Capability Protocols & Polymorphic Registry
 
-- [ ] t04 — Unify `SyncDatabaseDriver` / `AsyncDatabaseDriver` method signatures and eliminate `# type: ignore[override]` (tasks/t04-driver-contract-and-signatures.md)
-- [ ] t05 — Define runtime-checkable `Sync*` / `Async*` engine capability protocols and `msgspec` records (tasks/t05-capability-protocols.md)
-- [ ] t06 — Make `DatabaseRegistry` polymorphic, add `provide_driver`, and enforce the `vertebra/db` upward-import gate (tasks/t06-polymorphic-registry-and-import-gate.md)
+- [x] [c031fc9] t04 — Unify `SyncDatabaseDriver` / `AsyncDatabaseDriver` method signatures and eliminate `# type: ignore[override]` (tasks/t04-driver-contract-and-signatures.md)
+- [x] [2c0d365] t05 — Define runtime-checkable `Sync*` / `Async*` engine capability protocols and `msgspec` records (tasks/t05-capability-protocols.md)
+- [~] t06 — Make `DatabaseRegistry` polymorphic, add `provide_driver`, and enforce the `vertebra/db` upward-import gate (tasks/t06-polymorphic-registry-and-import-gate.md)
 - **Phase 2 Recovery Checkpoint**: `make lint-all && uv run pytest src/py/tests/unit`
 
 ### Phase 3: Cross-Engine Conformance Suite & Documentation
@@ -396,9 +396,9 @@ class EmbeddingPushdown(Protocol):
 
 ## 5. Continuity Snapshot
 
-- **Flow ID**: `db-layout-and-contract` (`state: planned`, `plan_revision: 4`, `plan_commit: "f741701"`)
-- **Current Task**: `null`
-- **Last Verified Checkpoint**: `null`
+- **Flow ID**: `db-layout-and-contract` (`state: active`, `plan_revision: 4`, `plan_commit: "f741701"`)
+- **Current Task**: `db-layout-and-contract:t06`
+- **Last Verified Checkpoint**: `95afe7a`
 - **Key Decisions**:
   - Engine adapters live under `vertebra.db.adapters.<engine>` (`postgres`, `mysql`, `sqlite`, `oracle`, `mssql`, `duckdb`, `bigquery`, `spanner`, `redis`, `valkey`, `datafusion`); engine-agnostic modules stay directly under `vertebra.db.{driver,registry,arrow,cdc,rls,dialer}`.
   - Every database engine compiles as its own optional PyO3 extension crate `src/rs/vertebra-<engine>` (`vertebra._<engine>` + `[project.optional-dependencies].<engine>`); `t03` extracts `vertebra-bigquery` and `vertebra-spanner` immediately so `vertebra._vertebra` and default `vertebra-db` are free of `google-cloud-*` / `tonic`.

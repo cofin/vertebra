@@ -3,7 +3,7 @@ type: Task
 id: db-layout-and-contract:t03
 title: Extract vertebra-bigquery and vertebra-spanner standalone PyO3 wheels and optional install extras
 description: "Extract BigQuery (`SyncBigQueryClient`, `AsyncBigQueryClient`) and Spanner (`SyncSpannerClient`, `AsyncSpannerClient`) Rust clients and PyO3 bindings out of `vertebra-db` and `vertebra-py` into standalone optional PyO3 extension crates `src/rs/vertebra-bigquery` (`vertebra._bigquery`) and `src/rs/vertebra-spanner` (`vertebra._spanner`), gate `vertebra_db::gcp` behind optional Cargo feature `gcp`, remove all `google-cloud-*` and `tonic` dependencies from `vertebra-py/Cargo.toml` and default `vertebra-db/Cargo.toml`, and wire `[bigquery]`, `[spanner]`, and `[storage]` install extras, `Makefile` build/stubtest targets, `areas.toml`, and `docs/reference/native-stubs.md`."
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -20,9 +20,13 @@ files:
   - src/rs/vertebra-db/Cargo.toml
   - src/rs/vertebra-db/src/lib.rs
   - src/rs/vertebra-db/src/gcp.rs
+  - src/rs/vertebra-db/src/bigquery/mod.rs
+  - src/rs/vertebra-db/src/spanner/mod.rs
   - src/rs/vertebra-py/Cargo.toml
+  - src/rs/vertebra-py/src/bigquery.rs
   - src/rs/vertebra-py/src/errors.rs
   - src/rs/vertebra-py/src/lib.rs
+  - src/rs/vertebra-py/src/spanner.rs
   - src/rs/vertebra-bigquery/Cargo.toml
   - src/rs/vertebra-bigquery/build.rs
   - src/rs/vertebra-bigquery/pyproject.toml
@@ -38,30 +42,37 @@ files:
   - src/py/vertebra/_vertebra.pyi
   - src/py/vertebra/_bigquery.pyi
   - src/py/vertebra/_spanner.pyi
+  - src/py/vertebra/db/adapters/bigquery/core.py
   - src/py/vertebra/db/adapters/bigquery/driver.py
+  - src/py/vertebra/db/adapters/spanner/core.py
   - src/py/vertebra/db/adapters/spanner/driver.py
 tests:
+  - src/rs/vertebra-db/tests/gcp_credentials_tests.rs
+  - src/rs/vertebra-db/tests/bigquery_wire_tests.rs
+  - src/rs/vertebra-db/tests/spanner_wire_tests.rs
   - src/rs/vertebra-bigquery/src/client.rs
   - src/rs/vertebra-bigquery/src/errors.rs
+  - src/rs/vertebra-bigquery/tests/bigquery_wire_tests.rs
   - src/rs/vertebra-spanner/src/client.rs
   - src/rs/vertebra-spanner/src/errors.rs
+  - src/rs/vertebra-spanner/tests/spanner_wire_tests.rs
   - src/py/tests/unit/db/test_bigquery.py
   - src/py/tests/unit/db/test_spanner.py
   - src/py/tests/unit/db/test_native_db_drivers.py
 plan_revision: 4
 plan_commit: "f741701"
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-04T17:30:00Z"
+last_verified_commit: "95afe7a"
+verification_evidence: "make dev (exit 0); cargo test -p vertebra-db && cargo test -p vertebra-db --features gcp,pyo3 -p vertebra-py -p vertebra-bigquery -p vertebra-spanner (exit 0); mypy.stubtest 5 modules (exit 0); uv run pytest src/py/tests/unit (1573 passed, 1 skipped); make lint-all && make docs && make review-check (exit 0)"
 created_at: 2026-11-04T01:05:00Z
-updated_at: 2026-11-04T01:05:00Z
-commit: null
+updated_at: "2026-11-04T17:31:08Z"
+commit: "95afe7a"
 tags: [rust, pyo3, wheels, bigquery, spanner, packaging]
 ---
 
@@ -111,8 +122,11 @@ Extract BigQuery (`SyncBigQueryClient`, `AsyncBigQueryClient`) and Spanner (`Syn
 
 ## Acceptance Criteria
 
-- [ ] R5: `vertebra-bigquery` (`vertebra._bigquery`) and `vertebra-spanner` (`vertebra._spanner`) compile as standalone `gil_used = false` PyO3 wheels with `[bigquery]`, `[spanner]`, and `[storage]` extras in `pyproject.toml` (`uv.lock` synced), `vertebra._vertebra` and default `vertebra-db` have zero `google-cloud-*` or `tonic` dependencies, `BigQuery` zero-copy `read_table_arrow` returns `vertebra._vertebra.ArrowCursor`, and `mypy.stubtest` passes across all 5 native extensions.
+- [x] R5: `vertebra-bigquery` (`vertebra._bigquery`) and `vertebra-spanner` (`vertebra._spanner`) compile as standalone `gil_used = false` PyO3 wheels with `[bigquery]`, `[spanner]`, and `[storage]` extras in `pyproject.toml` (`uv.lock` synced), `vertebra._vertebra` and default `vertebra-db` have zero `google-cloud-*` or `tonic` dependencies, `BigQuery` zero-copy `read_table_arrow` returns `vertebra._vertebra.ArrowCursor`, and `mypy.stubtest` passes across all 5 native extensions.
 
 ## Notes & Discoveries
 
-<!-- Append timestamped implementation findings here: - [YYYY-MM-DD HH:MM] ... -->
+- [2026-11-04 16:37] Both `bigquery/core.py` (`BigQueryCore.create_{sync,async}_rust_client`) and `spanner/core.py` (`SpannerCore.create_{sync,async}_rust_client`) previously imported native client classes eagerly from `vertebra._vertebra` at module import time alongside `driver.py`; moving those imports under `if TYPE_CHECKING:` and guarding both `_ensure_client` and `create_{sync,async}_rust_client` with `ensure_module("vertebra._bigquery", package="vertebra-core[bigquery]", extra="bigquery")` and `ensure_module("vertebra._spanner", package="vertebra-core[spanner]", extra="spanner")` keeps adapter imports lazy when optional wheels are absent.
+- [2026-11-04 16:37] Gated `src/rs/vertebra-db/tests/gcp_credentials_tests.rs` via `[[test]] name = "gcp_credentials_tests" required-features = ["gcp"]` in `src/rs/vertebra-db/Cargo.toml` so default `cargo test -p vertebra-db` compiles with zero `google-cloud-*` or `tonic` dependencies, while `Makefile` (`rs-test`, `lint`, `lint-all`) passes `--features tls,compression,gcp` so `gcp_credentials_tests` runs in workspace suites.
+- [2026-11-04 16:37] In `Makefile` (`lint` and `lint-all`), `importlib.util.find_spec(m) is not None` cleanly distinguishes compiled `.so` extensions from `.pyi`-only stubs so `mypy.stubtest` runs against every installed native module without failing in CI environments where optional `.so` wheels are not built.
+- [2026-11-04 17:29] Kept `docs/reference/native-stubs.md` within `verify_docs_artifacts` budgets (`<= 120_000` reference HTML bytes and `<= 14` secondary TOC items) by combining `_bigquery` and `_spanner` under one `h2` section and rendering `Sync*` twins at `heading_level: 4` with `members: false` alongside full `Async*` member tables.

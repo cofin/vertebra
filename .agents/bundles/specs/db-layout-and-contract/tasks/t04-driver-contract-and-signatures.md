@@ -3,7 +3,7 @@ type: Task
 id: db-layout-and-contract:t04
 title: Unify SyncDatabaseDriver / AsyncDatabaseDriver method signatures and eliminate type-ignore overrides
 description: "Standardize `SyncDatabaseDriver`, `AsyncDatabaseDriver`, `ThreadOffloadAsyncDatabaseDriver`, all eight SQL/analytical adapter drivers (`postgres`, `mysql`, `sqlite`, `oracle`, `mssql`, `duckdb`, `bigquery`, `spanner`), and Spanner snapshot/transaction handles (`SyncSpannerSnapshot`, `AsyncSpannerSnapshot`, `SyncSpannerTransaction`, `AsyncSpannerTransaction`) on one method, parameter-name, transaction, error-mapping, and return-type contract with zero `# type: ignore[override]` annotations and zero legacy alias methods, updating PEP 249 `SyncDBAPIConnection` / `AsyncDBAPICursor`, GCP SQLSpec callers, and `docs/examples/storage_and_db.py` accordingly."
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -41,18 +41,18 @@ tests:
   - src/py/tests/unit/extensions/test_sqlspec_spanner.py
 plan_revision: 4
 plan_commit: "f741701"
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-04T18:34:00Z"
+last_verified_commit: "c031fc9"
+verification_evidence: "RED: 12 failed, 48 passed; GREEN: uv run pytest src/py/tests/unit (1585 passed, 1 skipped); make lint-all (exit 0)"
 created_at: 2026-11-03T21:40:00Z
-updated_at: 2026-11-04T01:08:00Z
-commit: null
+updated_at: "2026-11-04T18:34:29Z"
+commit: "c031fc9"
 tags: [db, driver, contract, typing, dbapi]
 ---
 
@@ -112,10 +112,13 @@ Standardize `SyncDatabaseDriver`, `AsyncDatabaseDriver`, `ThreadOffloadAsyncData
 
 ## Acceptance Criteria
 
-- [ ] R6: All eight SQL/analytical sync and async drivers (plus `SyncSpannerSnapshot`/`AsyncSpannerSnapshot` and `SyncSpannerTransaction`/`AsyncSpannerTransaction`) implement identical method signatures, parameter names (`parameters`, `threshold_rows`), and return types (`execute -> int`, `execute_with_description -> (rows, col_names)`, `select_one -> NotFoundError`, `select_value -> NotFoundError on 0 rows / None on SQL NULL`, `select_to_arrow -> ArrowCursor`, `stream_arrow_batches`, `transaction()`, `cancel()`, `close()`).
-- [ ] Zero `# type: ignore[override]` comments remain in `src/py/vertebra/db/`.
-- [ ] SQLAlchemy PEP 249 `SyncDBAPICursor.description` / `AsyncDBAPICursor.description` and BigQuery/Spanner SQLSpec drivers pass all unit tests cleanly.
+- [x] R6: All eight SQL/analytical sync and async drivers (plus `SyncSpannerSnapshot`/`AsyncSpannerSnapshot` and `SyncSpannerTransaction`/`AsyncSpannerTransaction`) implement identical method signatures, parameter names (`parameters`, `threshold_rows`), and return types (`execute -> int`, `execute_with_description -> (rows, col_names)`, `select_one -> NotFoundError`, `select_value -> NotFoundError on 0 rows / None on SQL NULL`, `select_to_arrow -> ArrowCursor`, `stream_arrow_batches`, `transaction()`, `cancel()`, `close()`).
+- [x] Zero `# type: ignore[override]` comments remain in `src/py/vertebra/db/`.
+- [x] SQLAlchemy PEP 249 `SyncDBAPICursor.description` / `AsyncDBAPICursor.description` and BigQuery/Spanner SQLSpec drivers pass all unit tests cleanly.
 
 ## Notes & Discoveries
 
-<!-- Append timestamped implementation findings here: - [YYYY-MM-DD HH:MM] ... -->
+- [2026-11-04 18:24] RED baseline (`uv run --no-sync pytest src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py -q`) failed with `12 failed, 48 passed` across parameterized signature/alias conformance, `select_one`/`select_value` `NotFoundError` vs `SQL NULL` handling, SQLite `DatabaseError` translation and bind normalization, Spanner snapshot/transaction `NotFoundError` semantics, `transaction()` rollback, `# type: ignore[override]` elimination, and 7-element PEP 249 cursor descriptions.
+- [2026-11-04 18:24] Retained `_normalize_driver_params` in `src/py/vertebra/db/driver/{_common,__init__}.py` because `src/py/vertebra/db/adapters/postgres/__init__.py` re-exports it on its package surface, while all eight adapter `driver.py` modules now accept `parameters: Sequence[Any] | Mapping[str, Any] | None = None` directly without variadic `*params`.
+- [2026-11-04 18:24] Unified `transaction()` (`begin`/`commit`/`rollback`) across all eight adapters: `_in_transaction` gating in `sqlite`/`oracle`/`mssql`/`duckdb`, pooled `_tx_conn` pinning plus in-memory row snapshot/restore in `postgres`/`mysql`, session-pinned `BEGIN`/`COMMIT`/`ROLLBACK TRANSACTION` in `bigquery`, and buffered `_tx_dml_buffer` (`execute_batch_dml`) + `_tx_mutation_buffer` (`apply_mutations`) atomic flush/discard in `spanner`.
+- [2026-11-04 18:24] Note on Mypy CLI invocation: `pyproject.toml` `[tool.mypy].files` scopes strict type checking to `src/py/vertebra`, `tools/scripts`, `tools/pgo`, `tools/docs`, and `docs/examples` (`Makefile` line 243) because `tools/benchmarks` imports optional `[bench]` packages (`spikard`, `duckdb`). GREEN verification passed cleanly across `pytest src/py/tests/unit -q` (`1585 passed, 1 skipped`), `mypy src/py/vertebra tools/scripts tools/pgo tools/docs docs/examples` (`410 source files`), `mypy.stubtest` (`5 modules`), `ruff check` & `ruff format --check`, `scan_public_docstrings`, and `review_setup validate` with zero `# type: ignore[override]` in `src/py/vertebra/db/` and zero `#` comments in `src/py/`.

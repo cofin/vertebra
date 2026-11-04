@@ -3,7 +3,7 @@ type: Task
 id: db-layout-and-contract:t02
 title: Reorganize vertebra-db shared core, add connection.rs + py_async.rs + ShmCapsule, and register DatabaseError hierarchy
 description: "Reorganize `src/rs/vertebra-db/src/` into `<engine>/mod.rs` subdirectories with explicit `lib.rs` exports, implement the shared Rust transport/TLS/dialer connection core in `connection.rs`, add optional `pyo3`-gated `py_async.rs` (`spawn_rust_db_task_with_attr`) and `#[repr(C)] ShmCapsule` (`ArrowCursor._from_shm_capsule`) so per-driver `.so` wheels share completion rings and zero-copy `ArrowCursor` handoff cleanly, and register the unified `DatabaseError` exception hierarchy on `vertebra._vertebra`, `vertebra.db.driver`, and `vertebra.db`."
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -13,6 +13,7 @@ files:
   - .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
   - src/rs/vertebra-core/src/shm.rs
   - src/rs/vertebra-db/Cargo.toml
+  - src/rs/vertebra-db/build.rs
   - src/rs/vertebra-db/src/lib.rs
   - src/rs/vertebra-db/src/arrow_shm.rs
   - src/rs/vertebra-db/src/connection.rs
@@ -44,18 +45,18 @@ tests:
   - src/py/tests/unit/db/test_native_db_drivers.py
 plan_revision: 4
 plan_commit: "f741701"
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-04T15:59:10Z"
+last_verified_commit: "2fa781f"
+verification_evidence: "make dev (exit 0); cargo test -p vertebra-core -p vertebra-db --features pyo3 -p vertebra-py (exit 0); pytest test_native_db_drivers/test_spanner/test_bigquery (88 passed); make lint-all (exit 0)"
 created_at: 2026-11-03T21:40:00Z
-updated_at: 2026-11-04T01:05:00Z
-commit: null
+updated_at: "2026-11-04T15:59:10Z"
+commit: "2fa781f"
 tags: [rust, vertebra-db, pyo3, connection, errors]
 ---
 
@@ -104,9 +105,14 @@ Reorganize `src/rs/vertebra-db/src/` into `<engine>/mod.rs` subdirectories with 
 
 ## Acceptance Criteria
 
-- [ ] R3: `src/rs/vertebra-db/src/` uses `<engine>/mod.rs` (`oracle/tns.rs`), `lib.rs` contains zero wildcard `pub use *` items or `tns` compat re-exports, `areas.toml` routes `src/rs/vertebra-db/**`, `connection.rs` passes TCP/Unix/`tokio-rustls`/AlloyDB tests, and `py_async.rs` + `ShmCapsule` pass multi-drainer and zero-copy `ArrowCursor` tests.
-- [ ] R4: All `DatabaseError` subclasses are registered in `vertebra._vertebra`, `NotFoundError` inherits `(DataError, ValueError)`, `SpannerError`/`BigQueryError` satisfy both `GoogleCloudError` and `DatabaseError`, and `mypy.stubtest` passes cleanly.
+- [x] R3: `src/rs/vertebra-db/src/` uses `<engine>/mod.rs` (`oracle/tns.rs`), `lib.rs` contains zero wildcard `pub use *` items or `tns` compat re-exports, `areas.toml` routes `src/rs/vertebra-db/**`, `connection.rs` passes TCP/Unix/`tokio-rustls`/AlloyDB tests, and `py_async.rs` + `ShmCapsule` pass multi-drainer and zero-copy `ArrowCursor` tests.
+- [x] R4: All `DatabaseError` subclasses are registered in `vertebra._vertebra`, `NotFoundError` inherits `(DataError, ValueError)`, `SpannerError`/`BigQueryError` satisfy both `GoogleCloudError` and `DatabaseError`, and `mypy.stubtest` passes cleanly.
 
 ## Notes & Discoveries
 
 <!-- Append timestamped implementation findings here: - [YYYY-MM-DD HH:MM] ... -->
+
+- [2026-11-04 14:42] Observed expected RED failure via `uv run --no-sync pytest src/py/tests/unit/db/test_native_db_drivers.py -q` (`exit code 1`: `16 failed, 21 passed`) before implementing `DatabaseError` subclasses and `ArrowCursor._from_shm_capsule`.
+- [2026-11-04 15:08] Added `src/rs/vertebra-db/build.rs` (`CARGO_FEATURE_PYO3`-gated `pyo3_build_config::use_pyo3_cfgs()` and `-Wl,-rpath,{lib_dir}`, matching `vertebra-http/build.rs`) and `Python::initialize()` in `py_async::tests` so standalone `vertebra-db` builds without `--features pyo3` link zero Python symbols while `--features pyo3` test binaries locate standalone `uv` `libpython` cleanly.
+- [2026-11-04 15:10] Implemented cross-`.so` `PyCapsule` (`c"vertebra.ShmCapsule"`) ownership transfer in `vertebra_db::py_async::wrap_shm_region_capsule` with `shm_pycapsule_destructor` so `Box<ShmCapsule>` and `Arc<ShmRegion>` (`drop_fn`) always deallocate inside the producing `.so`'s allocator, while `ArrowCursor._from_shm_capsule` atomically zeroes `cap_ref.ctx` to reject double consumption.
+- [2026-11-04 15:15] Subagent sandbox permission checks blocked unsandboxed `git mv` and `cargo test`; verified all in-sandbox Python/OKF gates (`ruff check`, `ruff format --check`, `mypy`, `scan_public_docstrings --check-leaks --check-overloads --check-typeddicts`, `review_setup validate` -> all exit `0`). Parent orchestrator completion sequence: (a) run `git mv` for `{postgres,mysql,sqlite,oracle,mssql,duckdb,resp3,bigquery,spanner}.rs` -> `<engine>/mod.rs` and `tns.rs` -> `oracle/tns.rs`, (b) move `pub mod tns;` from `src/rs/vertebra-db/src/lib.rs` into `src/rs/vertebra-db/src/oracle/mod.rs` and switch `use vertebra_db::tns::` to `use vertebra_db::oracle::tns::` in `src/rs/vertebra-py/src/db.rs`, (c) update the moved `<engine>/mod.rs` and `oracle/tns.rs` resource paths in `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md`, and (d) run `make dev`, `cargo test`, `mypy.stubtest`, `pytest`, `make lint-all`, `make review-check`, and `git commit`.
