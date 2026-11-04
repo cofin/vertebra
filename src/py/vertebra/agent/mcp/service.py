@@ -33,32 +33,20 @@ from vertebra.agent.mcp.models import (
 )
 from vertebra.agent.mcp.registry import MCPRegistry
 from vertebra.agent.mcp.tasks import MCPTaskStore, TaskLookupError, TaskRecord, TaskStateError
+from vertebra.agent.runtime import ConfirmationGate
 from vertebra.agent.telemetry import AgentTelemetryRecorder
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 logger = logging.getLogger(__name__)
 
+__all__ = [
+    "CONFIRMATION_REQUIRED",
+    "CONFIRMATION_TOKEN_META_KEY",
+    "MCPService",
+]
 
-def _task_to_dict(task: TaskRecord) -> dict[str, Any]:
-    """Convert a TaskRecord into an MCP-compliant JSON dictionary."""
-    data: dict[str, Any] = {
-        "taskId": task.task_id,
-        "status": task.status,
-        "createdAt": task.created_at_iso,
-        "lastUpdatedAt": task.last_updated_at_iso,
-        "ttl": task.ttl_ms,
-        "pollInterval": task.poll_interval_ms,
-        "isTerminal": task.is_terminal,
-    }
-    if task.status_message is not None:
-        data["statusMessage"] = task.status_message
-    if task.input_requests is not None:
-        data["inputRequests"] = task.input_requests
-    if task.result is not None:
-        data["result"] = task.result
-    if task.error is not None:
-        data["error"] = task.error
-    return data
+CONFIRMATION_REQUIRED: int = -32003
+CONFIRMATION_TOKEN_META_KEY: str = "vertebra/confirmationToken"
 
 
 class MCPService:
@@ -72,6 +60,7 @@ class MCPService:
         stream_broker: SseStreamBroker | None = None,
         task_store: MCPTaskStore | None = None,
         skill_catalog: Any | None = None,
+        confirmation_gate: ConfirmationGate | None = None,
     ) -> None:
         self.config = config if config is not None else MCPConfig()
         self.registry = registry if registry is not None else MCPRegistry()
@@ -79,10 +68,51 @@ class MCPService:
         self.stream_broker = stream_broker if stream_broker is not None else SseStreamBroker()
         self.task_store = task_store if task_store is not None else MCPTaskStore(stream_broker=self.stream_broker)
         self.skill_catalog = skill_catalog
+        self.confirmation_gate = confirmation_gate if confirmation_gate is not None else ConfirmationGate()
         self.router = JSONRPCRouter()
         self._resource_subscriptions: dict[str, set[str]] = {}
 
         self._register_handlers()
+
+    async def handle_tool_call(self, params: Any = None, context: Any = None) -> dict[str, Any]:
+        """Execute a tool invocation with parameter validation and structured outputs."""
+        return await self._handle_tools_call(params, context=context)
+
+    def notify_resource_updated(self, uri: str) -> int:
+        """Push a notifications/resources/updated SSE frame to all subscribed sessions."""
+        sessions = self._resource_subscriptions.get(uri, set())
+        if not sessions:
+            return 0
+
+        payload = {"jsonrpc": "2.0", "method": "notifications/resources/updated", "params": {"uri": uri}}
+        frame = SseFrame(event="message", data=encode_json_bytes(payload).decode("utf-8"))
+        return self.stream_broker.broadcast(frame, list(sessions))
+
+    async def handle_payload(self, raw_bytes: bytes, context: Any = None) -> bytes | None:
+        """Dispatch a raw JSON-RPC payload byte sequence through the router."""
+        return await self.router.dispatch_payload(raw_bytes, context)
+
+    @staticmethod
+    def _task_to_dict(task: TaskRecord) -> dict[str, Any]:
+        """Convert a TaskRecord into an MCP-compliant JSON dictionary."""
+        data: dict[str, Any] = {
+            "taskId": task.task_id,
+            "status": task.status,
+            "createdAt": task.created_at_iso,
+            "lastUpdatedAt": task.last_updated_at_iso,
+            "ttl": task.ttl_ms,
+            "pollInterval": task.poll_interval_ms,
+            "isTerminal": task.is_terminal,
+        }
+        if task.status_message is not None:
+            data["statusMessage"] = task.status_message
+        if task.input_requests is not None:
+            data["inputRequests"] = task.input_requests
+        if task.result is not None:
+            data["result"] = task.result
+        if task.error is not None:
+            data["error"] = task.error
+        return data
 
     def _register_handlers(self) -> None:
         """Register all MCP 2026-07-28 protocol handlers on the JSON-RPC router."""
@@ -173,10 +203,6 @@ class MCPService:
             res["nextCursor"] = page.next_cursor
         return res
 
-    async def handle_tool_call(self, params: Any = None, context: Any = None) -> dict[str, Any]:
-        """Execute a tool invocation with parameter validation and structured outputs."""
-        return await self._handle_tools_call(params, context=context)
-
     async def _handle_tools_call(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Execute a tool invocation with parameter validation and structured outputs."""
         if not isinstance(params, Mapping) or "name" not in params:
@@ -194,6 +220,10 @@ class MCPService:
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
 
         meta = params.get("_meta", {})
+        call_id = str(params.get("callId", "call_0"))
+        if target_tool.requires_confirmation:
+            self._require_confirmation(tool_name, call_id, arguments, meta, context)
+
         if isinstance(meta, dict) and meta.get("io.modelcontextprotocol/task") and self.task_store is not None:
             owner_id = context.identity.owner_key() if context and getattr(context, "identity", None) else None
             task = self.task_store.create(tool_name=tool_name, owner_id=owner_id)
@@ -208,8 +238,6 @@ class MCPService:
 
             asyncio.create_task(_run_async_tool())
             return {"task": {"taskId": task.task_id, "status": task.status, "pollInterval": task.poll_interval_ms}}
-
-        call_id = str(params.get("callId", "call_0"))
 
         with self.telemetry.span_tool(tool_name, call_id):
             try:
@@ -408,16 +436,6 @@ class MCPService:
             self._resource_subscriptions[uri].discard(session_id)
         return {}
 
-    def notify_resource_updated(self, uri: str) -> int:
-        """Push a notifications/resources/updated SSE frame to all subscribed sessions."""
-        sessions = self._resource_subscriptions.get(uri, set())
-        if not sessions:
-            return 0
-
-        payload = {"jsonrpc": "2.0", "method": "notifications/resources/updated", "params": {"uri": uri}}
-        frame = SseFrame(event="message", data=encode_json_bytes(payload).decode("utf-8"))
-        return self.stream_broker.broadcast(frame, list(sessions))
-
     async def _handle_prompts_list(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """List registered prompt templates with cursor pagination."""
         cursor = params.get("cursor") if isinstance(params, Mapping) else None
@@ -538,6 +556,51 @@ class MCPService:
             return str(key) if key is not None else None
         return None
 
+    def _require_confirmation(
+        self,
+        tool_name: str,
+        call_id: str,
+        arguments: dict[str, Any],
+        meta: Any,
+        context: Any,
+    ) -> None:
+        """Raise unless the call carries a ticket approved for this tool, caller, and arguments.
+
+        The token is read from ``_meta["vertebra/confirmationToken"]``. It must name an existing
+        ticket with ``status == "approved"``, issued for ``tool_name`` with identical
+        ``arguments``, and owned by the caller (or by no owner).
+
+        Raises:
+            JSONRPCErrorException: With code ``CONFIRMATION_REQUIRED`` and a newly issued ticket
+                token in ``data`` when the token is missing, unknown, unapproved, owned by another
+                caller, or issued for another tool or other arguments.
+        """
+        owner_id = self._caller_owner(context)
+        token = meta.get(CONFIRMATION_TOKEN_META_KEY) if isinstance(meta, Mapping) else None
+        ticket = self.confirmation_gate.get_ticket(token) if isinstance(token, str) else None
+        if (
+            ticket is not None
+            and ticket.status == "approved"
+            and (ticket.owner_id is None or ticket.owner_id == owner_id)
+            and ticket.tool_name == tool_name
+            and ticket.arguments == arguments
+        ):
+            return
+        issued = self.confirmation_gate.request_confirmation(
+            tool_name,
+            call_id,
+            dict(arguments),
+            owner_id=owner_id,
+            reason=f"Tool '{tool_name}' requires confirmation.",
+        )
+        raise JSONRPCErrorException(
+            JSONRPCError(
+                code=CONFIRMATION_REQUIRED,
+                message=f"Tool '{tool_name}' requires confirmation",
+                data={"confirmationToken": issued.token, "tool": tool_name},
+            )
+        )
+
     async def _handle_tasks_get(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Retrieve task execution record by task ID."""
         if not isinstance(params, Mapping):
@@ -547,7 +610,7 @@ class MCPService:
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId'"))
         try:
             task = self.task_store.get(str(task_id), self._caller_owner(context))
-            return {"task": _task_to_dict(task)}
+            return {"task": self._task_to_dict(task)}
         except TaskLookupError as exc:
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
 
@@ -561,7 +624,7 @@ class MCPService:
         timeout = float(params.get("timeoutSeconds", 30.0))
         try:
             task = await self.task_store.wait_for_result(str(task_id), self._caller_owner(context), timeout_s=timeout)
-            return {"task": _task_to_dict(task)}
+            return {"task": self._task_to_dict(task)}
         except TaskLookupError as exc:
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
 
@@ -575,7 +638,7 @@ class MCPService:
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId'"))
         try:
             task = self.task_store.submit_input(str(task_id), self._caller_owner(context), inputs)
-            return {"task": _task_to_dict(task)}
+            return {"task": self._task_to_dict(task)}
         except (TaskLookupError, TaskStateError) as exc:
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
 
@@ -589,7 +652,7 @@ class MCPService:
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId'"))
         try:
             task = self.task_store.cancel(str(task_id), self._caller_owner(context), reason)
-            return {"task": _task_to_dict(task)}
+            return {"task": self._task_to_dict(task)}
         except TaskLookupError as exc:
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
 
@@ -598,7 +661,7 @@ class MCPService:
         cursor = params.get("cursor") if isinstance(params, Mapping) else None
         limit = int(params.get("limit", 50)) if isinstance(params, Mapping) else 50
         tasks, next_cursor = self.task_store.list_for_owner(self._caller_owner(context), cursor=cursor, limit=limit)
-        res: dict[str, Any] = {"tasks": [_task_to_dict(t) for t in tasks]}
+        res: dict[str, Any] = {"tasks": [self._task_to_dict(t) for t in tasks]}
         if next_cursor is not None:
             res["nextCursor"] = next_cursor
         return res
@@ -610,12 +673,3 @@ class MCPService:
     async def _handle_set_level(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Handle logging/setLevel configuration."""
         return {}
-
-    async def handle_payload(self, raw_bytes: bytes, context: Any = None) -> bytes | None:
-        """Dispatch a raw JSON-RPC payload byte sequence through the router."""
-        return await self.router.dispatch_payload(raw_bytes, context)
-
-
-__all__ = [
-    "MCPService",
-]

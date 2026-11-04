@@ -3,6 +3,7 @@
 import asyncio
 import concurrent.futures
 import itertools
+import logging
 import os
 import sys
 import threading
@@ -23,6 +24,10 @@ __all__ = (
     "resolve_loop_backend",
     "resolve_loop_shards",
 )
+
+logger = logging.getLogger(__name__)
+_SHARD_START_TIMEOUT_SECONDS: float = 5.0
+_STOP_TIMEOUT_SECONDS: float = 5.0
 
 
 class LoopBackend(StrEnum):
@@ -234,7 +239,10 @@ class EventLoopPool:
             )
             self._threads.append(thread)
             thread.start()
-            ready.wait(timeout=5.0)
+            if not ready.wait(timeout=_SHARD_START_TIMEOUT_SECONDS):
+                self.stop()
+                msg = f"Event loop shard {shard_idx} did not start within {_SHARD_START_TIMEOUT_SECONDS}s"
+                raise RuntimeError(msg)
 
     @property
     def size(self) -> int:
@@ -392,6 +400,9 @@ class EventLoopPool:
             ) -> None:
                 discard = target_tasks.discard
                 for c, f in shard_entries:
+                    if f.cancelled():
+                        c.close()
+                        continue
                     try:
                         task = target_loop.create_task(c)
                     except Exception as exc:
@@ -416,12 +427,27 @@ class EventLoopPool:
 
                     task.add_done_callback(_on_done)
 
+                    def _cancel_task(
+                        done: concurrent.futures.Future[T],
+                        target_task: asyncio.Task[T] = task,
+                        owner_loop: asyncio.AbstractEventLoop = target_loop,
+                    ) -> None:
+                        if done.cancelled() and not owner_loop.is_closed():
+                            owner_loop.call_soon_threadsafe(target_task.cancel)
+
+                    f.add_done_callback(_cancel_task)
+
             loop.call_soon_threadsafe(_schedule_shard)
 
         return futures
 
     def stop(self) -> None:
-        """Stop all event loop shards and join their background threads."""
+        """Drain and stop every loop shard, closing each loop only after its thread exits.
+
+        Each running shard cancels its pending tasks, waits for the cancellations, and runs
+        ``shutdown_asyncgens`` before the loop stops. A loop whose thread is still alive after the
+        join timeout is logged and left open rather than closed under a running thread.
+        """
         if self._stopped:
             return
         self._stopped = True
@@ -431,31 +457,43 @@ class EventLoopPool:
             if loop.is_running():
                 loop.call_soon_threadsafe(loop.stop)
             elif not loop.is_closed():
+                try:
+                    loop.run_until_complete(asyncio.wait_for(self._drain_loop(), _STOP_TIMEOUT_SECONDS))
+                except TimeoutError:
+                    logger.warning("Inline event loop did not drain within %.1fs", _STOP_TIMEOUT_SECONDS)
                 loop.close()
             return
 
         for idx, loop in enumerate(self._loops):
             if not loop.is_running():
                 continue
-            tasks = self._task_sets[idx]
-
-            def _shutdown(
-                target_loop: asyncio.AbstractEventLoop = loop,
-                target_tasks: set[asyncio.Task[Any]] = tasks,
-            ) -> None:
-                for t in list(target_tasks):
-                    if not t.done():
-                        t.cancel()
-                target_loop.stop()
-
-            loop.call_soon_threadsafe(_shutdown)
+            drain = asyncio.run_coroutine_threadsafe(self._drain_loop(), loop)
+            try:
+                drain.result(timeout=_STOP_TIMEOUT_SECONDS)
+            except TimeoutError:
+                logger.warning("Event loop shard %d did not drain within %.1fs", idx, _STOP_TIMEOUT_SECONDS)
+            loop.call_soon_threadsafe(loop.stop)
 
         for thread in self._threads:
-            thread.join(timeout=2.0)
+            thread.join(timeout=_STOP_TIMEOUT_SECONDS)
 
-        for loop in self._loops:
+        for loop, thread in zip(self._loops, self._threads, strict=True):
+            if thread.is_alive():
+                logger.warning("Event loop thread %s is still running; leaving its loop open", thread.name)
+                continue
             if not loop.is_closed():
                 loop.close()
+
+    @staticmethod
+    async def _drain_loop() -> None:
+        """Cancel every other task on the running loop, await the cancellations, and finalize async generators."""
+        current = asyncio.current_task()
+        pending = [task for task in asyncio.all_tasks() if task is not current]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        await asyncio.get_running_loop().shutdown_asyncgens()
 
     @staticmethod
     def _run_loop_shard(loop: asyncio.AbstractEventLoop, ready: threading.Event) -> None:

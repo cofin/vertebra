@@ -11,9 +11,8 @@ import msgspec
 
 from vertebra.agent.a2a.service import A2AConfig, A2AService
 from vertebra.agent.controller import AgentChatController
-from vertebra.agent.core.schema import Tool
 from vertebra.agent.mcp.controllers import PromptController, SkillController
-from vertebra.agent.mcp.models import MCPConfig, PromptEntry, ResourceEntry
+from vertebra.agent.mcp.models import MCPConfig
 from vertebra.agent.mcp.registry import MCPRegistry
 from vertebra.agent.mcp.service import MCPService
 from vertebra.agent.runtime import AgentRuntime
@@ -49,12 +48,14 @@ class AgentPlugin:
         self.config = config or AgentPluginConfig()
         self.observability = self.config.observability or AgentTelemetryRecorder()
         recorder = getattr(self.observability, "recorder", self.observability)
+        self.runtime = self.config.runtime or AgentRuntime(telemetry=recorder)
         self.mcp_registry = MCPRegistry()
         self.mcp_service = (
             MCPService(
                 registry=self.mcp_registry,
                 config=self.config.mcp,
                 telemetry=recorder,
+                confirmation_gate=self.runtime.confirmation_gate,
             )
             if self.config.mcp is not None
             else None
@@ -67,7 +68,6 @@ class AgentPlugin:
             if self.config.a2a is not None
             else None
         )
-        self.runtime = self.config.runtime or AgentRuntime(telemetry=recorder)
         self.chat_controller = AgentChatController(
             runtime=self.runtime,
             session_store=self.config.session_store,
@@ -171,28 +171,18 @@ class AgentPlugin:
     def _inspect_item(self, item: Any) -> None:
         """Inspect an individual handler, controller, or router."""
         opt = getattr(item, "opt", None) or {}
-        if "mcp_tool" in opt:
-            tool_name = opt["mcp_tool"]
-            name = tool_name if isinstance(tool_name, str) else getattr(item, "__name__", "tool")
-            fn = getattr(item, "fn", item)
-            self.mcp_registry.register_tool(
-                Tool(
-                    name=name,
-                    description=getattr(fn, "__doc__", "") or "",
-                    fn=fn,
-                    input_schema={},
-                )
-            )
-
-        if "mcp_resource" in opt:
-            uri = opt["mcp_resource"]
-            fn = getattr(item, "fn", item)
-            self.mcp_registry.register_resource(ResourceEntry(uri=uri, name=uri, reader=fn))
-
-        if "mcp_prompt" in opt:
-            prompt_name = opt["mcp_prompt"]
-            fn = getattr(item, "fn", item)
-            self.mcp_registry.register_prompt(PromptEntry(name=prompt_name, getter=fn))
+        fn = getattr(item, "fn", item)
+        if (
+            "mcp_tool" in opt
+            or "mcp_resource" in opt
+            or "mcp_resource_template" in opt
+            or "mcp_prompt" in opt
+            or hasattr(fn, "_mcp_tool_meta")
+            or hasattr(fn, "_mcp_resource")
+            or hasattr(fn, "_mcp_resource_template")
+            or hasattr(fn, "_mcp_prompt")
+        ):
+            self.mcp_registry.register_route_handler(item, opt=opt)
 
         if isinstance(item, type):
             if issubclass(item, SkillController):

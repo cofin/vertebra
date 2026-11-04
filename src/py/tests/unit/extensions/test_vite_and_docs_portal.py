@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from vertebra.agent.core.guards import GuardProtocol
+from vertebra.agent.core.schema import Tool, tool
 from vertebra.agent.mcp import (
     MCPRegistry,
     SkillController,
@@ -248,7 +250,7 @@ def test_configurable_docs_portal_and_route_annotated_webmcp() -> None:
         skill_id = "workspace_tools"
         skill_name = "Workspace Tools"
 
-        @mcp_tool(name="archive_workspace", description="Archive a workspace by ID")
+        @mcp_tool(name="archive_workspace", description="Archive a workspace by ID", webmcp=True)
         async def archive(self, workspace_id: str) -> dict[str, str]:
             return {"archived": workspace_id}
 
@@ -291,6 +293,59 @@ def test_configurable_docs_portal_and_route_annotated_webmcp() -> None:
     webmcp_json = render_webmcp_manifest_json(registry, WebMCPConfig(mcp_endpoint="/mcp"))
     webmcp_data = decode_json(webmcp_json)
     assert webmcp_data["mcpEndpoint"] == "/mcp"
-    assert [t["name"] for t in webmcp_data["tools"]] == ["archive_workspace", "create_ticket"]
+    assert [t["name"] for t in webmcp_data["tools"]] == ["archive_workspace"]
     manifest_obj = build_webmcp_manifest(registry)
-    assert len(manifest_obj.tools) == 2
+    assert [t.name for t in manifest_obj.tools] == ["archive_workspace"]
+
+
+def test_webmcp_manifest_lists_only_tagged_tools() -> None:
+    """build_webmcp_manifest lists @mcp_tool(webmcp=True), opt['mcp_tool'] with webmcp=True, and guarded controller tools, omitting untagged tools."""
+
+    class _AllowGuard(GuardProtocol):
+        async def check(self, context: object) -> None:
+            _ = context
+
+    class GuardedSkillController(SkillController):
+        guards = (_AllowGuard(),)
+
+        @mcp_tool(name="guarded_browser_action", description="Guarded browser action", webmcp=True)
+        def guarded_browser(self, item: str) -> str:
+            return item
+
+        @tool(name="guarded_server_action", description="Guarded server action")
+        def guarded_server(self, item: str) -> str:
+            return item
+
+    @mcp_tool(name="browser_search", description="Search from the browser", webmcp=True)
+    def browser_search(query: str) -> list[str]:
+        return [query]
+
+    @mcp_tool(name="server_only", description="Server-side only tool")
+    def server_only(query: str) -> list[str]:
+        return [query]
+
+    def opt_browser_ping(message: str) -> str:
+        """Echo a message from an opt-configured route."""
+        return message
+
+    def opt_server_only(message: str) -> str:
+        return message
+
+    def bigquery_query(sql: str) -> dict[str, str]:
+        return {"sql": sql}
+
+    registry = MCPRegistry()
+    registry.register_route_handler(browser_search)
+    registry.register_route_handler(server_only)
+    registry.register_route_handler(
+        opt_browser_ping,
+        opt={"mcp_tool": "opt_browser_ping", "webmcp": True, "mcp_annotations": {"readOnlyHint": True}},
+    )
+    registry.register_route_handler(opt_server_only, opt={"mcp_tool": "opt_server_only"})
+    registry.register_controller(GuardedSkillController())
+    registry.register_tool(Tool(bigquery_query, name="bigquery_query", description="Run a governed query"))
+
+    manifest = build_webmcp_manifest(registry, WebMCPConfig())
+    assert [t.name for t in manifest.tools] == ["browser_search", "guarded_browser_action", "opt_browser_ping"]
+    tools_by_name = {t.name: t for t in manifest.tools}
+    assert tools_by_name["opt_browser_ping"].annotations == {"readOnlyHint": True}

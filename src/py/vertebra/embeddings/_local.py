@@ -15,12 +15,12 @@ from vertebra._vertebra import (
 )
 from vertebra.embeddings._base import Embedder
 from vertebra.embeddings._broker import (
+    BackendFactory,
     BackendInferenceCallable,
     EmbeddingBroker,
     EmbeddingBrokerConfig,
 )
 from vertebra.embeddings._models import get_model_spec
-from vertebra.server._gil_audit import is_free_threaded
 from vertebra.utils.module_loader import ensure_module
 
 __all__ = (
@@ -28,6 +28,8 @@ __all__ = (
     "GemmaEmbedder",
     "StaticEmbedder",
 )
+
+_FASTEMBED_BACKEND_TARGET = "vertebra.embeddings._local:FastEmbedder.build_backend"
 
 
 class GemmaEmbedder(Embedder):
@@ -56,14 +58,14 @@ class GemmaEmbedder(Embedder):
         super().__init__(model=model, dimensions=dimensions, cache=cache)
         self._precision = norm_prec
         self._source = str(source) if source is not None else None
-        quarantine_default = (broker_config is None or broker_config.isolate_gil_subprocess) and is_free_threaded()
-        resolved_backend = (
-            backend_fn if backend_fn is not None else (None if quarantine_default else self._build_default_backend())
-        )
         self._broker = broker or EmbeddingBroker(
-            backend_fn=resolved_backend,
+            backend_fn=backend_fn,
             dimensions=dimensions,
             config=broker_config,
+            backend_factory=BackendFactory(
+                target=_FASTEMBED_BACKEND_TARGET,
+                options={"model_name": model, "specific_model_path": self._source},
+            ),
         )
 
     @property
@@ -105,26 +107,6 @@ class GemmaEmbedder(Embedder):
         formatted_texts = [format_gemma_prompt(task, txt, title=resolved_titles[idx]) for idx, txt in enumerate(texts)]
         return await self._broker.submit_batch(formatted_texts)
 
-    def _build_default_backend(self) -> BackendInferenceCallable:
-        """Create the local ONNX / fastembed inference callable or deterministic fallback."""
-        model_name = self._model
-        source_dir = self._source
-        cached_model: Any = None
-
-        def _infer(texts: list[str], dims: int) -> list[list[float]]:
-            nonlocal cached_model
-            if cached_model is None:
-                fe_mod = ensure_module("fastembed", extra="embeddings")
-                text_emb_cls = fe_mod.TextEmbedding
-                kwargs: dict[str, Any] = {}
-                if source_dir:
-                    kwargs["specific_model_path"] = source_dir
-                cached_model = text_emb_cls(model_name=model_name, **kwargs)
-            embeddings = list(cached_model.embed(texts))
-            return [[float(x) for x in vec[:dims]] for vec in embeddings]
-
-        return _infer
-
 
 class FastEmbedder(Embedder):
     """Local ONNX `fastembed.TextEmbedding` embedder pooled through `EmbeddingBroker`."""
@@ -149,35 +131,56 @@ class FastEmbedder(Embedder):
         self._threads = threads
 
         if backend_fn is None:
-            fe_mod = ensure_module("fastembed", extra="embeddings")
-            init_kwargs: dict[str, Any] = {"model_name": model}
-            if self._cache_dir is not None:
-                init_kwargs["cache_dir"] = self._cache_dir
-            if self._specific_model_path is not None:
-                init_kwargs["specific_model_path"] = self._specific_model_path
-            if self._threads is not None:
-                init_kwargs["threads"] = self._threads
-            fe_instance = fe_mod.TextEmbedding(**init_kwargs)
-
-            def _fe_backend(texts: list[str], dims: int) -> list[list[float]]:
-                raw_vecs = list(fe_instance.embed(texts))
-                return [[float(v) for v in row[:dims]] for row in raw_vecs]
-
-            quarantine_default = (broker_config is None or broker_config.isolate_gil_subprocess) and is_free_threaded()
-            resolved_backend: BackendInferenceCallable | None = None if quarantine_default else _fe_backend
-        else:
-            resolved_backend = backend_fn
-
+            ensure_module("fastembed", extra="embeddings")
         self._broker = broker or EmbeddingBroker(
-            backend_fn=resolved_backend,
+            backend_fn=backend_fn,
             dimensions=dimensions,
             config=broker_config,
+            backend_factory=BackendFactory(
+                target=_FASTEMBED_BACKEND_TARGET,
+                options={
+                    "model_name": model,
+                    "cache_dir": self._cache_dir,
+                    "specific_model_path": self._specific_model_path,
+                    "threads": self._threads,
+                },
+            ),
         )
 
     @property
     def broker(self) -> EmbeddingBroker:
         """Return the underlying `EmbeddingBroker`."""
         return self._broker
+
+    @staticmethod
+    def build_backend(
+        model_name: str,
+        *,
+        cache_dir: str | None = None,
+        specific_model_path: str | None = None,
+        threads: int | None = None,
+    ) -> BackendInferenceCallable:
+        """Return an inference callable that lazily loads ``fastembed.TextEmbedding``.
+
+        The model loads on the first call, so building the callable never downloads weights.
+        Only options that are not ``None`` are passed to ``TextEmbedding``.
+        """
+        init_kwargs: dict[str, Any] = {"model_name": model_name}
+        if cache_dir is not None:
+            init_kwargs["cache_dir"] = cache_dir
+        if specific_model_path is not None:
+            init_kwargs["specific_model_path"] = specific_model_path
+        if threads is not None:
+            init_kwargs["threads"] = threads
+        loaded: list[Any] = []
+
+        def _infer(texts: list[str], dims: int) -> list[list[float]]:
+            if not loaded:
+                fe_mod = ensure_module("fastembed", extra="embeddings")
+                loaded.append(fe_mod.TextEmbedding(**init_kwargs))
+            return [[float(v) for v in row[:dims]] for row in loaded[0].embed(texts)]
+
+        return _infer
 
     async def _embed_single_impl(
         self,

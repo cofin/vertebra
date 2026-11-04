@@ -41,7 +41,7 @@ a2a = A2AService(A2AConfig(path="/a2a", agent_card=card))
 
 ## Browser WebMCP (`@vertebra/client/webmcp`) & Bidirectional Bridges
 
-- **Browser WebMCP (`@vertebra/client/webmcp`)**: Register client-side browser tools on `navigator.modelContext` (`WebMcpBridge`, `registerWebMcpTools`) so browser agents and page assistants can invoke typed frontend actions directly.
+- **Browser WebMCP (`@vertebra/client/webmcp`)**: Register client-side browser tools on `navigator.modelContext` (`WebMcpBridge`, `registerWebMcpTools`) so browser agents and page assistants can invoke typed frontend actions directly. Server manifests (`build_webmcp_manifest`, `/.well-known/webmcp.json`) list only tools decorated with `@mcp_tool(webmcp=True)`; untagged tools are never browser-exposed.
 - **Bidirectional MCP / A2A Bridges (`vertebra.agent.bridges`)**: Bridge MCP tools and A2A agents in either direction using `McpToolBridge`, `A2aAgentBridge`, `a2a_card_to_mcp_tools`, and `mcp_service_to_a2a`.
 
 ## `SpecTree` Planning & DAG Workflows (`vertebra.agent.spec`, `vertebra.agent.workflow`)
@@ -84,3 +84,5 @@ engine = WorkflowEngine()
 ## Agent Runtime, Confirmation Gates & Sessions
 
 Combine `AgentPlugin`, `AgentRuntime`, `GoogleGenAIProvider`, `GuardChain`, `TurnBudget`, and human-in-the-loop `ConfirmationGate` (`ConfirmationTicket`, `ConfirmationDecisionRequest`) with pluggable session stores (`MemorySessionStore`, `CacheSessionStore`, `SQLSpecSessionStore`, `AlchemySessionStore`, `ObjectStoreSessionStore`).
+
+MCP `tools/call` enforces `requires_confirmation`: an unconfirmed call returns JSON-RPC error `-32003` with `data.confirmationToken`. Approve the token (for example through `/agent/confirmations/{token}` when using `AgentPlugin`) and repeat the same call, with the same arguments, setting `_meta["vertebra/confirmationToken"]` to that token.

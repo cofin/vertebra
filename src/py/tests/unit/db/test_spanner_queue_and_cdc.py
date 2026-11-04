@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 
 import pytest
 
 from tests.unit.db.test_spanner import FakeSpannerClient
 from vertebra.db import (
     DatabaseChannelBackend,
+    SpannerChangeStreamSource,
     SpannerConfig,
     SyncSpannerDriver,
 )
@@ -199,3 +201,51 @@ async def test_spanner_change_stream_source_partitions_and_object_store_spill() 
     history = await channel_backend.get_history("orders_cdc")
     assert len(history) == 2
     driver.close()
+
+
+_START = "2026-11-02T00:00:00Z"
+_END = "2026-11-02T01:00:00Z"
+
+
+class _RecordingSpannerDriver:
+    """Spanner driver stand-in that records select calls and returns no rows."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Any]] = []
+
+    def select(self, sql: str, parameters: Any = None) -> list[dict[str, Any]]:
+        self.calls.append((sql, parameters))
+        return []
+
+
+class _AsyncRecordingSpannerDriver:
+    """Async Spanner driver stand-in that records select calls and returns no rows."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Any]] = []
+
+    async def select(self, sql: str, parameters: Any = None) -> list[dict[str, Any]]:
+        self.calls.append((sql, parameters))
+        return []
+
+
+_EXPECTED_READ_PARAMS: dict[str, Any] = {
+    "spangres": [_START, _END, "tok-1", 10_000],
+    "googlesql": {"start_ts": _START, "end_ts": _END, "token": "tok-1", "heartbeat_ms": 10_000},
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("dialect", ["spangres", "googlesql"])
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_spanner_change_stream_poll_binds_params_for_dialect(dialect: str, mode: str) -> None:
+    """Spangres polls bind positional $1..$4 values; GoogleSQL polls bind named parameters."""
+    driver: Any = _RecordingSpannerDriver() if mode == "sync" else _AsyncRecordingSpannerDriver()
+    source = SpannerChangeStreamSource(driver, "orders_stream", dialect=dialect)
+    if mode == "sync":
+        events = source.poll_partition_sync("tok-1", start_timestamp=_START, end_timestamp=_END)
+    else:
+        events = await source.poll_partition_async("tok-1", start_timestamp=_START, end_timestamp=_END)
+    assert events == []
+    assert driver.calls == [(source.build_read_query(), _EXPECTED_READ_PARAMS[dialect])]
+    assert "tok-1" in source.completed_partitions

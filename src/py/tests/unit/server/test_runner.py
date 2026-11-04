@@ -34,7 +34,8 @@ from vertebra.server._dispatch import (
 )
 from vertebra.server._gil_audit import is_free_threaded
 from vertebra.server._loops import EventLoopPool
-from vertebra.server.worker import Worker, run_worker
+from vertebra.server.worker import Worker, _AsgiMountRunner, _instantiate_mount_runners, run_worker
+from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import decode_json, encode_json_bytes, encode_msgpack_bytes
 
 
@@ -1181,3 +1182,145 @@ def test_native_dispatch_typed_params_json_msgpack_di_guards_and_generator_teard
         ]
     finally:
         loop.close()
+
+
+def test_event_loop_pool_stop_drains_tasks_and_async_generators() -> None:
+    """stop() delivers task cancellation, finalizes async generators, and closes loops after threads exit."""
+    pool = EventLoopPool(size=2)
+    started = threading.Event()
+    cancelled = threading.Event()
+    finalized = threading.Event()
+    generators: list[AsyncIterator[int]] = []
+
+    async def wait_forever() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    async def ticker() -> AsyncIterator[int]:
+        try:
+            yield 1
+            yield 2
+        finally:
+            finalized.set()
+
+    async def start_generator() -> None:
+        gen = ticker()
+        generators.append(gen)
+        await anext(gen)
+
+    pool.spawn(wait_forever(), worker_index=0)
+    pool.schedule(start_generator(), worker_index=1).result(timeout=2.0)
+    assert started.wait(timeout=2.0)
+    pool.stop()
+    assert cancelled.is_set()
+    assert finalized.is_set()
+    assert all(loop.is_closed() for loop in pool.loops)
+
+
+def test_event_loop_pool_raises_when_shard_does_not_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A shard thread that never signals readiness makes the constructor raise."""
+    monkeypatch.setattr("vertebra.server._loops._SHARD_START_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(EventLoopPool, "_run_loop_shard", staticmethod(lambda loop, ready: None))
+    with pytest.raises(RuntimeError, match="did not start"):
+        EventLoopPool(size=2)
+
+
+def test_asgi_mount_runner_times_out_and_cancels_task() -> None:
+    """A request past batch_timeout returns 504 and its asyncio task is cancelled."""
+    pool = EventLoopPool(size=2)
+    cancelled = threading.Event()
+
+    async def never_responds(scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    try:
+        runner = _AsgiMountRunner(never_responds, pool, batch_timeout=0.05)
+        responses = runner([MockRequest(handler_id=99, request_id=7, path="/slow")])
+        assert [(r.status, r.body, r.request_id) for r in responses] == [(504, b"Gateway Timeout", 7)]
+        assert cancelled.wait(timeout=2.0)
+    finally:
+        pool.stop()
+
+
+async def _ok_asgi(scope: Any, receive: Any, send: Any) -> None:
+    """Minimal ASGI app answering 200."""
+    await send({"type": "http.response.start", "status": 200, "headers": []})
+    await send({"type": "http.response.body", "body": b"ok"})
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(None, 30.0), ("", 30.0), ("2.5", 2.5), ("0", None), ("none", None), ("NONE", None)],
+    ids=["unset", "empty", "seconds", "zero-disables", "none-disables", "none-uppercase"],
+)
+def test_asgi_mount_runner_reads_batch_timeout_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str | None,
+    expected: float | None,
+) -> None:
+    """VERTEBRA_ASGI_BATCH_TIMEOUT sets the buffered mount timeout; 0 or none disables it; unset means 30 s."""
+    if raw is None:
+        monkeypatch.delenv("VERTEBRA_ASGI_BATCH_TIMEOUT", raising=False)
+    else:
+        monkeypatch.setenv("VERTEBRA_ASGI_BATCH_TIMEOUT", raw)
+    pool = EventLoopPool(size=2)
+    try:
+        mounts = _instantiate_mount_runners([("/api", _ok_asgi, "asgi")], pool)
+        runner = mounts[0][1]
+        assert isinstance(runner, _AsgiMountRunner)
+        assert runner.batch_timeout == expected
+    finally:
+        pool.stop()
+
+
+@pytest.mark.parametrize("raw", ["abc", "-1"])
+def test_asgi_mount_batch_timeout_rejects_invalid_values(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    """Non-numeric or negative VERTEBRA_ASGI_BATCH_TIMEOUT values are configuration errors."""
+    monkeypatch.setenv("VERTEBRA_ASGI_BATCH_TIMEOUT", raw)
+    pool = EventLoopPool(size=2)
+    try:
+        with pytest.raises(ImproperConfigurationError, match="VERTEBRA_ASGI_BATCH_TIMEOUT"):
+            _instantiate_mount_runners([("/api", _ok_asgi, "asgi")], pool)
+    finally:
+        pool.stop()
+
+
+def test_dispatch_batch_buffered_async_native_times_out_with_504_and_cancels_task() -> None:
+    """Buffered dispatch_batch(async_mode=False) returns 504 and cancels timed-out async_native tasks."""
+    pool = EventLoopPool(size=2)
+    cancelled = threading.Event()
+
+    async def slow_handler() -> bytes:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return b"never"
+
+    handlers = {1: slow_handler}
+    batch = [MockRequest(handler_id=1, request_id=19, path="/slow-native")]
+    try:
+        plan = partition_batch(batch, handlers, [])
+        results = dispatch_batch(
+            plan,
+            handlers,
+            [],
+            MockResponse,
+            pool,
+            async_mode=False,
+            batch_timeout=0.05,
+        )
+        assert results is not None
+        assert [(r.status, r.body, r.request_id) for r in results] == [(504, b"Gateway Timeout", 19)]
+        assert cancelled.wait(timeout=2.0)
+    finally:
+        pool.stop()

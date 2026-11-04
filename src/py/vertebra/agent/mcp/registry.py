@@ -162,19 +162,57 @@ class MCPRegistry:
 
         tool_meta = getattr(fn, "_mcp_tool_meta", None)
         opt_tool = options.get("mcp_tool")
-        if tool_meta is not None:
+        if tool_meta is not None or opt_tool:
+            meta_dict = tool_meta if isinstance(tool_meta, dict) else {}
+            opt_tool_dict = opt_tool if isinstance(opt_tool, dict) else {}
+            resolved_name = (
+                (opt_tool if isinstance(opt_tool, str) else opt_tool_dict.get("name"))
+                or meta_dict.get("name")
+                or getattr(fn, "__name__", "tool")
+            )
+            resolved_description = (
+                options.get("mcp_description")
+                or opt_tool_dict.get("description")
+                or meta_dict.get("description")
+                or getattr(fn, "__doc__", "")
+                or ""
+            )
+            resolved_confirmation = bool(
+                options.get(
+                    "mcp_requires_confirmation",
+                    opt_tool_dict.get(
+                        "requires_confirmation",
+                        meta_dict.get("requires_confirmation", False),
+                    ),
+                )
+            )
+            resolved_timeout = options.get(
+                "mcp_timeout_seconds",
+                opt_tool_dict.get("timeout_seconds", meta_dict.get("timeout_seconds")),
+            )
+            resolved_webmcp = bool(
+                options.get(
+                    "webmcp",
+                    options.get(
+                        "mcp_webmcp",
+                        opt_tool_dict.get("webmcp", meta_dict.get("webmcp", False)),
+                    ),
+                )
+            )
+            raw_annotations = (
+                options.get("mcp_annotations") or opt_tool_dict.get("annotations") or meta_dict.get("annotations") or {}
+            )
             self.register_tool(
                 Tool(
                     fn,
-                    name=tool_meta.get("name") or getattr(fn, "__name__", "tool"),
-                    description=tool_meta.get("description") or "",
-                    requires_confirmation=bool(tool_meta.get("requires_confirmation", False)),
-                    timeout_seconds=tool_meta.get("timeout_seconds"),
+                    name=resolved_name,
+                    description=resolved_description,
+                    requires_confirmation=resolved_confirmation,
+                    timeout_seconds=resolved_timeout,
+                    webmcp=resolved_webmcp,
+                    annotations=dict(raw_annotations),
                 )
             )
-        elif opt_tool:
-            tool_name = opt_tool if isinstance(opt_tool, str) else getattr(fn, "__name__", "tool")
-            self.register_tool(Tool(fn, name=tool_name))
 
         res_meta = getattr(fn, "_mcp_resource", None)
         opt_res = options.get("mcp_resource")

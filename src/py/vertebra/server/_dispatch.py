@@ -7,11 +7,12 @@ import concurrent.futures
 import dataclasses
 import inspect
 import logging
+import os
 from collections.abc import Callable, Coroutine, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Any, get_args, get_origin
+from typing import Any, cast, get_args, get_origin
 from urllib.parse import parse_qsl
 from uuid import UUID
 
@@ -42,6 +43,7 @@ from vertebra.framework.security import (
     SecurityContext,
 )
 from vertebra.server._fastpath import serialize_fastpath_special_result
+from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import (
     ZeroCopyCodecRegistry,
     decode_json,
@@ -52,12 +54,14 @@ from vertebra.utils.serializers import (
 __all__ = (
     "BatchDispatchPlan",
     "HandlerSpec",
+    "_DEFAULT_ASGI_BATCH_TIMEOUT_SECONDS",
     "_JSON_CONTENT_TYPE_COMPACT",
     "_MOUNT_HANDLER_MASK",
     "_MOUNT_INDEX_MASK",
     "_RAW_BUFFER_TYPES",
     "_call_handler",
     "_handler_meta",
+    "_resolve_asgi_batch_timeout",
     "_resolve_handler_args",
     "build_error_response",
     "compile_handler_spec",
@@ -68,6 +72,8 @@ __all__ = (
 
 log = logging.getLogger(__name__)
 
+_DEFAULT_ASGI_BATCH_TIMEOUT_SECONDS: float = 30.0
+_UNSET_BATCH_TIMEOUT = object()
 _REQUEST_PARAMS = frozenset({"request", "req"})
 _JSON_CONTENT_TYPE_COMPACT = b"\x0ccontent-type\x10\x00application/json"
 _RAW_BUFFER_TYPES = (bytes, bytearray, memoryview)
@@ -754,6 +760,7 @@ def dispatch_batch(
     submit_raw: Callable[..., None] | None = None,
     error_handler: Callable[..., Any] | None = None,
     executor: ThreadPoolExecutor | None = None,
+    batch_timeout: float | None | object = _UNSET_BATCH_TIMEOUT,
 ) -> list[Any] | None:
     """Dispatch a partitioned batch to native handlers and mounts."""
     _ = handlers
@@ -785,13 +792,25 @@ def dispatch_batch(
                 for _idx, request, spec in partitioned.async_native
             ]
             if hasattr(scheduler, "schedule_batch"):
+                resolved_batch_timeout: float | None = (
+                    _resolve_asgi_batch_timeout()
+                    if batch_timeout is _UNSET_BATCH_TIMEOUT
+                    else cast("float | None", batch_timeout)
+                )
                 futures = scheduler.schedule_batch(coros)
-                done, not_done = concurrent.futures.wait(futures, timeout=10.0)
+                _done, not_done = concurrent.futures.wait(futures, timeout=resolved_batch_timeout)
                 for fut in not_done:
                     fut.cancel()
                 for (idx, _request, _spec), fut in zip(partitioned.async_native, futures, strict=True):
+                    if fut in not_done:
+                        results[idx] = vr_cls(
+                            status=504,
+                            body=b"Gateway Timeout",
+                            request_id=getattr(_request, "request_id", 0),
+                        )
+                        continue
                     try:
-                        results[idx] = fut.result(timeout=1.0)
+                        results[idx] = fut.result()
                     except Exception as exc:
                         results[idx] = build_error_response(exc, _request, error_handler, vr_cls)
             elif isinstance(loop, asyncio.AbstractEventLoop):
@@ -1424,3 +1443,27 @@ async def _enforce_guards_async(
             guard_name = getattr(guard, "__name__", repr(guard))
             msg = f"Guard {guard_name} rejected request"
             raise PermissionDeniedError(msg)
+
+
+def _resolve_asgi_batch_timeout() -> float | None:
+    """Resolve ``VERTEBRA_ASGI_BATCH_TIMEOUT`` (seconds) for buffered sharded batches.
+
+    Unset or empty means the 30 second default. ``0`` or ``none`` (any case) disables the
+    timeout. Any other value must be a positive number of seconds.
+
+    Raises:
+        ImproperConfigurationError: When the value is negative or not a number.
+    """
+    raw = os.environ.get("VERTEBRA_ASGI_BATCH_TIMEOUT", "").strip()
+    if not raw:
+        return _DEFAULT_ASGI_BATCH_TIMEOUT_SECONDS
+    if raw.lower() == "none":
+        return None
+    msg = f"VERTEBRA_ASGI_BATCH_TIMEOUT must be a non-negative number of seconds or 'none', got {raw!r}"
+    try:
+        timeout = float(raw)
+    except ValueError as exc:
+        raise ImproperConfigurationError(msg) from exc
+    if timeout < 0:
+        raise ImproperConfigurationError(msg)
+    return None if timeout == 0 else timeout

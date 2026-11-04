@@ -5,8 +5,10 @@ from typing import Any
 
 import pytest
 
+from vertebra.agent.controller import ConfirmationDecisionRequest
 from vertebra.agent.core.context import AgentContext, CallerIdentity
 from vertebra.agent.core.guards import GuardProtocol, PermissionDeniedError
+from vertebra.agent.core.jsonrpc import JSONRPCErrorException
 from vertebra.agent.core.schema import tool
 from vertebra.agent.mcp import (
     HEADER_MISMATCH,
@@ -28,13 +30,19 @@ from vertebra.agent.mcp import (
     SkillIntegrityError,
     TaskLookupError,
     TextContent,
+    WebMCPConfig,
+    build_webmcp_manifest,
     decode_mcp_header_value,
     encode_mcp_header_value,
+    mcp_tool,
     prompt,
     resource,
 )
+from vertebra.agent.mcp.service import CONFIRMATION_REQUIRED, CONFIRMATION_TOKEN_META_KEY
+from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
+from vertebra.agent.runtime import ConfirmationGate
 from vertebra.typing import FrozenBaseStruct
-from vertebra.utils.serializers import decode_json
+from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
 @pytest.mark.anyio
@@ -381,3 +389,243 @@ async def test_mcp_tasks_store_and_async_promotion() -> None:
     assert "task" in promoted_res
     async_task_id = promoted_res["task"]["taskId"]
     assert async_task_id.startswith("task_")
+
+
+@pytest.mark.anyio
+async def test_mcp_tool_call_requires_approved_confirmation_token() -> None:
+    """A confirmation-gated tool runs only with an approved ticket issued for that tool."""
+    gate = ConfirmationGate()
+    service = MCPService(confirmation_gate=gate)
+    calls: list[str] = []
+
+    @tool(name="drop_workspace", description="Drop a workspace", requires_confirmation=True)
+    def drop_workspace(workspace_id: str) -> str:
+        calls.append(workspace_id)
+        return f"dropped:{workspace_id}"
+
+    @tool(name="archive_workspace", description="Archive a workspace", requires_confirmation=True)
+    def archive_workspace(workspace_id: str) -> str:
+        calls.append(f"archive:{workspace_id}")
+        return f"archived:{workspace_id}"
+
+    service.registry.register_tool(drop_workspace)
+    service.registry.register_tool(archive_workspace)
+
+    with pytest.raises(JSONRPCErrorException) as first:
+        await service.handle_tool_call({"name": "drop_workspace", "arguments": {"workspace_id": "w1"}})
+    assert first.value.error.code == CONFIRMATION_REQUIRED
+    assert first.value.error.data["tool"] == "drop_workspace"
+    token = first.value.error.data["confirmationToken"]
+    assert calls == []
+
+    with pytest.raises(JSONRPCErrorException) as unapproved:
+        await service.handle_tool_call(
+            {
+                "name": "drop_workspace",
+                "arguments": {"workspace_id": "w1"},
+                "_meta": {CONFIRMATION_TOKEN_META_KEY: token},
+            }
+        )
+    assert unapproved.value.error.code == CONFIRMATION_REQUIRED
+    assert calls == []
+
+    assert gate.approve(token) is True
+    with pytest.raises(JSONRPCErrorException) as wrong_tool:
+        await service.handle_tool_call(
+            {
+                "name": "archive_workspace",
+                "arguments": {"workspace_id": "w1"},
+                "_meta": {CONFIRMATION_TOKEN_META_KEY: token},
+            }
+        )
+    assert wrong_tool.value.error.code == CONFIRMATION_REQUIRED
+    assert calls == []
+
+    with pytest.raises(JSONRPCErrorException) as wrong_arguments:
+        await service.handle_tool_call(
+            {
+                "name": "drop_workspace",
+                "arguments": {"workspace_id": "w2"},
+                "_meta": {CONFIRMATION_TOKEN_META_KEY: token},
+            }
+        )
+    assert wrong_arguments.value.error.code == CONFIRMATION_REQUIRED
+    assert calls == []
+
+    result = await service.handle_tool_call(
+        {"name": "drop_workspace", "arguments": {"workspace_id": "w1"}, "_meta": {CONFIRMATION_TOKEN_META_KEY: token}}
+    )
+    assert result["content"][0]["text"] == "dropped:w1"
+    assert calls == ["w1"]
+
+
+@pytest.mark.anyio
+async def test_mcp_confirmation_rejects_approval_by_another_owner() -> None:
+    """A failed approval by another owner changes no gate state and leaves the call blocked."""
+    gate = ConfirmationGate()
+    service = MCPService(confirmation_gate=gate)
+    calls: list[str] = []
+
+    @tool(name="drop_workspace", description="Drop a workspace", requires_confirmation=True)
+    def drop_workspace(workspace_id: str) -> str:
+        calls.append(workspace_id)
+        return f"dropped:{workspace_id}"
+
+    service.registry.register_tool(drop_workspace)
+    alice = AgentContext(identity=CallerIdentity(user_id="alice"))
+    call = {"name": "drop_workspace", "arguments": {"workspace_id": "w1"}}
+
+    with pytest.raises(JSONRPCErrorException) as first:
+        await service.handle_tool_call(call, context=alice)
+    token = first.value.error.data["confirmationToken"]
+    ticket = gate.get_ticket(token)
+    assert ticket is not None
+    assert ticket.owner_id == "default:alice"
+
+    assert gate.approve(token, owner_id="default:mallory") is False
+    ticket_after = gate.get_ticket(token)
+    assert ticket_after is not None
+    assert ticket_after.status == "pending"
+    assert gate.is_approved(token, owner_id="default:alice") is False
+
+    with pytest.raises(JSONRPCErrorException) as blocked:
+        await service.handle_tool_call({**call, "_meta": {CONFIRMATION_TOKEN_META_KEY: token}}, context=alice)
+    assert blocked.value.error.code == CONFIRMATION_REQUIRED
+    assert calls == []
+
+
+def test_confirmation_gate_rejects_unknown_tokens() -> None:
+    """Approving or rejecting an unknown token fails without recording the token."""
+    gate = ConfirmationGate()
+    assert gate.approve("unknown-token") is False
+    assert gate.is_approved("unknown-token") is False
+    assert gate.reject("unknown-token") is False
+    assert gate.get_ticket("unknown-token") is None
+
+
+@pytest.mark.anyio
+async def test_agent_plugin_mcp_confirmation_uses_runtime_gate() -> None:
+    """AgentPlugin approvals through the chat controller unlock MCP confirmation tickets."""
+    plugin = AgentPlugin(AgentPluginConfig(mcp=MCPConfig(server_name="confirm-mcp")))
+    assert plugin.mcp_service is not None
+
+    @tool(name="purge_cache", description="Purge the cache", requires_confirmation=True)
+    def purge_cache() -> str:
+        return "purged"
+
+    plugin.mcp_service.registry.register_tool(purge_cache)
+    with pytest.raises(JSONRPCErrorException) as exc_info:
+        await plugin.mcp_service.handle_tool_call({"name": "purge_cache", "arguments": {}})
+    token = exc_info.value.error.data["confirmationToken"]
+
+    decision = await plugin.chat_controller.decide_confirmation(token, ConfirmationDecisionRequest(decision="approve"))
+    assert decision == {"status": "ok", "decision": "approve", "token": token}
+
+    result = await plugin.mcp_service.handle_tool_call(
+        {"name": "purge_cache", "arguments": {}, "_meta": {CONFIRMATION_TOKEN_META_KEY: token}}
+    )
+    assert result["content"][0]["text"] == "purged"
+
+
+_CALC_ADD_CALL = {
+    "jsonrpc": "2.0",
+    "id": 7,
+    "method": "tools/call",
+    "params": {"name": "calc_add", "arguments": {"a": 1, "b": 2}},
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {"params": {"name": "calc_add", "arguments": {"a": 1, "b": 2}}},
+        },
+        {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"arguments": {"a": 1, "b": 2}}},
+        [_CALC_ADD_CALL],
+    ],
+    ids=["nested-params", "missing-name", "batch-body"],
+)
+async def test_mcp_http_handler_rejects_mcp_name_without_body_name(payload: object) -> None:
+    """An Mcp-Name header with no matching body name, or on a batch body, is rejected before the tool runs."""
+    service = MCPService()
+    calls: list[tuple[int, int]] = []
+
+    @tool(name="calc_add", description="Add two integers")
+    def add(a: int, b: int) -> int:
+        calls.append((a, b))
+        return a + b
+
+    service.registry.register_tool(add)
+    handler = MCPHttpHandler(service)
+    status, _, raw = await handler.handle_request(
+        "POST",
+        "/mcp",
+        {"Mcp-Method": "tools/call", "Mcp-Name": "other"},
+        encode_json_bytes(payload),
+    )
+    assert status == 200
+    decoded = decode_json(raw)
+    assert decoded["error"]["code"] == HEADER_MISMATCH
+    assert calls == []
+
+
+@pytest.mark.anyio
+async def test_guarded_skill_controller_and_agent_plugin_preserve_webmcp_and_guards() -> None:
+    """SkillController guards wrap @mcp_tool methods while preserving webmcp, and AgentPlugin route opt['mcp_tool'] preserves schema and webmcp."""
+
+    class RequireAuthGuard(GuardProtocol):
+        async def check(self, context: Any) -> None:
+            if context is None or not getattr(getattr(context, "identity", None), "user_id", None):
+                raise PermissionDeniedError("Authentication required")
+
+    class GuardedOps(SkillController):
+        guards = (RequireAuthGuard(),)
+
+        @mcp_tool(
+            name="guarded_web_ping",
+            description="Guarded browser ping",
+            webmcp=True,
+            requires_confirmation=True,
+            annotations={"readOnlyHint": True},
+        )
+        def guarded_web_ping(self, target: str) -> str:
+            return f"pong:{target}"
+
+    class _OptRoute:
+        opt = {"mcp_tool": "opt_route_echo", "webmcp": True, "mcp_requires_confirmation": True}
+
+        @staticmethod
+        def fn(text: str, count: int = 1) -> str:
+            """Repeat text count times."""
+            return text * count
+
+    class _FakeAppConfig:
+        route_handlers = [_OptRoute()]
+
+    plugin = AgentPlugin(AgentPluginConfig())
+    plugin.mcp_registry.register_controller(GuardedOps())
+    plugin.on_app_init(_FakeAppConfig())
+
+    manifest = build_webmcp_manifest(plugin.mcp_registry, WebMCPConfig())
+    assert [t.name for t in manifest.tools] == ["guarded_web_ping", "opt_route_echo"]
+
+    echo_tool = plugin.mcp_registry.get_tool("opt_route_echo")
+    assert echo_tool.webmcp is True
+    assert echo_tool.requires_confirmation is True
+    assert "text" in echo_tool.input_schema.get("properties", {})
+
+    ping_tool = plugin.mcp_registry.get_tool("guarded_web_ping")
+    assert ping_tool.webmcp is True
+    assert ping_tool.requires_confirmation is True
+    assert ping_tool.annotations == {"readOnlyHint": True}
+
+    with pytest.raises(PermissionDeniedError, match="Authentication required"):
+        await ping_tool.invoke({"target": "edge"})
+
+    authed_ctx = AgentContext(identity=CallerIdentity(user_id="alice", tenant_id="t1"))
+    assert await ping_tool.invoke({"target": "edge"}, context=authed_ctx) == "pong:edge"

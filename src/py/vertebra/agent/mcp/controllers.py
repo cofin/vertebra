@@ -9,7 +9,6 @@ import inspect
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from vertebra.agent.core.context import AgentContext
 from vertebra.agent.core.guards import GuardChain, GuardProtocol
 from vertebra.agent.core.schema import Tool
 from vertebra.agent.mcp.models import (
@@ -29,9 +28,19 @@ def mcp_tool(
     requires_confirmation: bool = False,
     timeout_seconds: float | None = None,
     annotations: dict[str, Any] | None = None,
-    webmcp: bool = True,
+    webmcp: bool = False,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Decorator marking a route handler or function as an explicit MCP tool without wrapping its type."""
+    """Decorator marking a route handler or function as an explicit MCP tool without wrapping its type.
+
+    Args:
+        name: Optional override for the MCP tool name.
+        description: Optional override for the MCP tool description.
+        requires_confirmation: Require a human confirmation ticket before invoking the tool.
+        timeout_seconds: Optional execution timeout in seconds.
+        annotations: Optional metadata dictionary attached to the tool descriptor.
+        webmcp: List the tool in the browser WebMCP manifest. Defaults to `False`; browser
+            exposure is opt-in per tool.
+    """
 
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
         target_fn: Any = fn
@@ -212,35 +221,35 @@ class SkillController(PromptController):
                 bound_tool = getattr(self, attr_name)
                 if isinstance(bound_tool, Tool):
                     if self.guards:
-                        chain = self.get_guard_chain()
-                        orig_fn = bound_tool.fn
-
-                        async def _guarded_fn(
-                            *args: Any,
-                            _fn: Callable[..., Any] = orig_fn,
-                            _chain: GuardChain = chain,
-                            **kwargs: Any,
-                        ) -> Any:
-                            ctx = kwargs.get("context")
-                            if isinstance(ctx, AgentContext):
-                                await _chain.execute(ctx)
-                            res = _fn(*args, **kwargs)
-                            if inspect.isawaitable(res):
-                                return await res
-                            return res
-
                         bound_tool = Tool(
-                            _guarded_fn,
+                            bound_tool.fn,
                             name=bound_tool.name,
                             description=bound_tool.description,
                             input_schema=bound_tool.input_schema,
                             requires_confirmation=bound_tool.requires_confirmation,
                             timeout_seconds=bound_tool.timeout_seconds,
+                            webmcp=bound_tool.webmcp,
+                            annotations=bound_tool.annotations,
+                            guards=(*self.guards, *bound_tool.guards),
+                            instance=bound_tool._instance,
                         )
                     tools.append(bound_tool)
             elif callable(val) and (hasattr(val, "_tool_meta") or hasattr(val, "_mcp_tool_meta")):
                 bound_tool = getattr(self, attr_name)
                 if isinstance(bound_tool, Tool):
+                    if self.guards:
+                        bound_tool = Tool(
+                            bound_tool.fn,
+                            name=bound_tool.name,
+                            description=bound_tool.description,
+                            input_schema=bound_tool.input_schema,
+                            requires_confirmation=bound_tool.requires_confirmation,
+                            timeout_seconds=bound_tool.timeout_seconds,
+                            webmcp=bound_tool.webmcp,
+                            annotations=bound_tool.annotations,
+                            guards=(*self.guards, *bound_tool.guards),
+                            instance=bound_tool._instance,
+                        )
                     tools.append(bound_tool)
                 elif callable(bound_tool):
                     meta = getattr(val, "_mcp_tool_meta", {})
@@ -251,6 +260,9 @@ class SkillController(PromptController):
                             description=meta.get("description") or inspect.getdoc(bound_tool) or "",
                             requires_confirmation=bool(meta.get("requires_confirmation", False)),
                             timeout_seconds=meta.get("timeout_seconds"),
+                            webmcp=bool(meta.get("webmcp", False)),
+                            annotations=dict(meta.get("annotations", {})),
+                            guards=tuple(self.guards),
                         )
                     )
         return tools

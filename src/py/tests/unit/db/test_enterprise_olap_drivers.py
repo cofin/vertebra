@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import sqlite3
 import struct
 import zipfile
 from typing import TYPE_CHECKING
@@ -102,6 +103,7 @@ from vertebra.extensions.sqlspec.adapters import (
     PostgreSQLSyncConfig,
     SQLiteAsyncConfig,
     SQLiteSyncConfig,
+    TenantPredicate,
 )
 from vertebra.typing import ImproperConfigurationError, VertebraError
 
@@ -712,3 +714,27 @@ def test_unified_db_arrow_cursor_identity_and_native_delegation() -> None:
             {"k": 20, "v": "y"},
             {"k": 30, "v": "z"},
         ]
+
+
+def test_sync_tenant_predicate_raises_when_guc_set_fails() -> None:
+    """A failing tenant GUC SET propagates instead of returning an unenforced predicate."""
+    config = SQLiteSyncConfig(path=":memory:")
+    predicate = TenantPredicate(table_alias="t", tenant_value="acme")
+    try:
+        with config.provide_session() as session, pytest.raises(sqlite3.OperationalError, match="set_config"):
+            session.apply_tenant_predicate(predicate)
+    finally:
+        config.close()
+
+
+@pytest.mark.anyio
+async def test_async_tenant_predicate_raises_when_guc_set_fails() -> None:
+    """The async driver propagates a failing tenant GUC SET."""
+    config = SQLiteAsyncConfig(path=":memory:")
+    predicate = TenantPredicate(table_alias="t", tenant_value="acme")
+    try:
+        async with config.provide_session() as session:
+            with pytest.raises(sqlite3.OperationalError, match="set_config"):
+                await session.apply_tenant_predicate(predicate)
+    finally:
+        await config.close()

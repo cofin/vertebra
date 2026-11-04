@@ -22,6 +22,8 @@ Release introducing shared-memory vector embeddings, zero-copy PEP 3118 vector v
   - `vtb ai models list|pull|stage|warm` and `vtb ai mcp serve|bridge` in `vertebra.cli.ai` ([PR #64](https://github.com/cofin/vertebra/pull/64)).
   - Co-located `WorkerRunner` execution in `vtb run` and `vtb dev` (`--with-workers`, `--queues`, `--lane-concurrency`, `[tool.vertebra.workers]`) and `--oneshot` / `--payload` in `vtb workers run` ([PR #64](https://github.com/cofin/vertebra/pull/64)).
   - Automatic default `AgentInterface` synthesis on `AgentCard` and dynamic request-origin URL resolution (`Forwarded`, `X-Forwarded-Proto`, `X-Forwarded-Host`, `Host` with `Vary` headers) in `A2AHttpHandler` and `A2AService` ([PR #64](https://github.com/cofin/vertebra/pull/64)).
+- `EmbeddingError` in `vertebra.embeddings` for providers that return no usable vector.
+- `BackendFactory` in `vertebra.embeddings` and `FastEmbedder.build_backend` for importable embedding backends.
 
 ### Changed
 
@@ -29,11 +31,22 @@ Release introducing shared-memory vector embeddings, zero-copy PEP 3118 vector v
 - Replaced top-level `vtb mcp` CLI command group with `vtb ai mcp` (`serve` and `bridge`) ([PR #64](https://github.com/cofin/vertebra/pull/64)).
 - Updated brand logo and icon assets (`docs/assets/`) to an isometric axial vertebrae mark (`#EDB641`), pinned persistent `VERTEBRA / <Current Page>` header context in `docs/stylesheets/extra.css`, and split usage documentation into 14 focused topic guides under `docs/usage/` ([PR #64](https://github.com/cofin/vertebra/pull/64)).
 - Updated `.github/dependabot.yml` to use native `bun` and `uv` package ecosystems with grouped minor/patch updates and `open-pull-requests-limit: 1`, gated CI test matrices on `lint` with `fail-fast: true` in `.github/workflows/ci.yml`, and upgraded workspace dependencies via `make upgrade` (`anyio`, `bump-my-version`, `platformdirs`, `pytest-databases`, `python-dateutil`, `sqlparse`, `crc32fast`) ([PR #64](https://github.com/cofin/vertebra/pull/64)).
+- WebMCP exposure is opt-in per tool: `mcp_tool(webmcp=...)` and `Tool(webmcp=...)` default to `False`, `build_webmcp_manifest` lists only tagged tools (including route `opt={"mcp_tool": ..., "webmcp": True}` and guarded `SkillController` tools), and `WebMCPConfig` no longer exposes a global tagged-only toggle.
+- `LitestarConfig.swap_memory_channels` and `LitestarConfig.swap_memory_response_cache` default to `False`; `KeyValueStore`, the Litestar `MemoryStore`, and the Starlette `CacheStore` prefix Redis/Valkey keys with `key_prefix` (default `"vertebra"`), and `SQLAlchemyCacheBackend` prefixes Redis/Valkey keys with `key_prefix` (default `"vtb:aa:"`).
 
 ### Fixed
 
 - Fixed `dorny/paths-filter@v4` shallow-clone `git fetch` failure on `push` events to `main` by setting `fetch-depth: 2` in `.github/workflows/ci.yml`, and removed failing `git push` commit step from `.github/workflows/benchmark.yml` ([PR #64](https://github.com/cofin/vertebra/pull/64)).
 - Scoped `[tool.bumpversion.files]` search/replace in `pyproject.toml` to `version = "{current_version}"` so `make release` does not rewrite dependency version floors, and automated `uv.lock` and `Cargo.lock` synchronization in `Makefile` `release`/`pre-release` targets ([PR #64](https://github.com/cofin/vertebra/pull/64)).
+- `BaseSyncDriver.apply_tenant_predicate` and `BaseAsyncDriver.apply_tenant_predicate` in `vertebra.extensions.sqlspec` now raise when the tenant GUC `SET` fails instead of returning an unenforced predicate.
+- `DatabaseRegistry.parse_url` accepts `spangres://` URLs, and `SpannerChangeStreamSource.poll_partition_sync` / `poll_partition_async` bind positional `$1..$4` parameters in Spangres mode.
+- `MCPService` enforces `requires_confirmation` on `tools/call` through `ConfirmationGate` (`_meta["vertebra/confirmationToken"]`, JSON-RPC error `-32003`), binding approval to the tool, caller, and arguments; `ConfirmationGate.approve` / `reject` no longer record unknown or other-owner tokens; `AgentPlugin` shares the runtime gate with its MCP service.
+- `MCPHttpHandler.handle_request` rejects an `Mcp-Name` header when the body name is missing and rejects MCP routing headers on JSON-RPC batch bodies; `JSONRPCRouter` no longer unwraps nested `params` objects or retries handlers that raise `TypeError`.
+- The governed GCP database MCP tools (`register_gcp_database_tools`) validate `bigquery_object_table_inspect` table names, reject SQL with more than one statement, and require confirmation for `EXECUTE`, `CALL`, `GRANT`, `REVOKE`, `EXPORT DATA`, and `LOAD DATA` (`is_mutating_sql`).
+- `KeyValueStore.delete_all`, Litestar `MemoryStore.delete_all`, Starlette `CacheStore.delete_all`, and `SQLAlchemyCacheBackend.clear` / `clear_async` delete only their prefix with `SCAN` + `UNLINK` instead of `FLUSHDB`; sub-second expiries are sent as `PX` milliseconds; `expires_in` returns `None` for keys without expiry. `SyncRedisDriver` / `AsyncRedisDriver` gain `scan`, `unlink`, and `set(px=...)`.
+- `SpannerEmbedder` propagates driver errors and raises `EmbeddingError` on missing rows instead of returning hash vectors; `BigQueryEmbedder` raises `EmbeddingError` on short or vector-less results; both order generated embeddings by input offset; `OracleEmbedder` raises `EmbeddingError` on empty results; `BigQueryEmbedder` and `SpannerEmbedder` SQL builders validate model, table, column, and distance values.
+- `EmbeddingBroker` runs the configured model in the free-threaded sidecar instead of a hash backend, requires `backend_fn` or `backend_factory`, and `FastEmbedder` no longer builds a discarded `TextEmbedding` at construction.
+- `EventLoopPool.stop` delivers task cancellation, runs `shutdown_asyncgens`, and closes loops only after their threads exit; `EventLoopPool` raises when a shard fails to start; the buffered sharded ASGI mount and `dispatch_batch(async_mode=False)` `async_native` paths read their timeout from `VERTEBRA_ASGI_BATCH_TIMEOUT` (default 30 s, `0`/`none` disables) instead of a fixed 10 s, return `504 Gateway Timeout`, and cancel timed-out request tasks.
 
 ## 0.2.0
 

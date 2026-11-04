@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import Integer, String, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from vertebra.db.redis import AsyncRedisDriver, RedisConfig, SyncRedisDriver
 from vertebra.extensions.alchemy import (
     AsyncCacheManager,
     CacheEntry,
@@ -214,3 +215,74 @@ async def test_async_cache_manager_sync_async_and_zero_copy_schema_projection() 
 
     sync_cfg = create_sync_alchemy_config("sqlite:///:memory:", cache_config=SQLAlchemyCacheBackend(capacity=64))
     assert isinstance(sync_cfg.cache_manager, AsyncCacheManager)
+
+
+@pytest.mark.anyio
+async def test_alchemy_cache_clear_removes_only_its_prefix() -> None:
+    """SQLAlchemyCacheBackend.clear and clear_async remove only keys under the backend's key_prefix."""
+    sync_driver = SyncRedisDriver(RedisConfig(url="memory://"))
+    async_driver = AsyncRedisDriver(RedisConfig(url="memory://"))
+    sync_driver.set("other:keep", b"1")
+    await async_driver.set("other:keep", b"1")
+
+    backend_a = SQLAlchemyCacheBackend(
+        sync_driver=sync_driver,
+        async_driver=async_driver,
+        key_prefix="vtb:aa:",
+    )
+    backend_b = SQLAlchemyCacheBackend(
+        sync_driver=sync_driver,
+        async_driver=async_driver,
+        key_prefix="vtb:other:",
+    )
+
+    backend_a.set("user:1", {"id": 1})
+    backend_a.set("vtb:aa:user:2", {"id": 2})
+    backend_b.set("user:9", {"id": 9})
+
+    assert sync_driver.get("vtb:aa:user:1") is not None
+    assert sync_driver.get("vtb:aa:user:2") is not None
+    assert sync_driver.get("vtb:other:user:9") is not None
+
+    backend_a.clear()
+    assert sync_driver.get("other:keep") == b"1"
+    assert sync_driver.get("vtb:aa:user:1") is None
+    assert sync_driver.get("vtb:aa:user:2") is None
+    assert sync_driver.get("vtb:other:user:9") is not None
+    assert backend_b.get("user:9") == {"id": 9}
+
+    await backend_a.set_async("user:1", {"id": 1})
+    await backend_a.set_async("vtb:aa:user:2", {"id": 2})
+    await backend_b.set_async("user:9", {"id": 9})
+
+    await backend_a.clear_async()
+    assert await async_driver.get("other:keep") == b"1"
+    assert await async_driver.get("vtb:aa:user:1") is None
+    assert await async_driver.get("vtb:aa:user:2") is None
+    assert await async_driver.get("vtb:other:user:9") is not None
+    assert await backend_b.get_async("user:9") == {"id": 9}
+
+
+@pytest.mark.anyio
+async def test_alchemy_cache_sends_sub_second_ttl_as_milliseconds() -> None:
+    """Sub-second TTLs are sent to the Redis/Valkey driver as millisecond PX expiries."""
+    sync_driver = SyncRedisDriver(RedisConfig(url="memory://"))
+    async_driver = AsyncRedisDriver(RedisConfig(url="memory://"))
+    backend = SQLAlchemyCacheBackend(
+        sync_driver=sync_driver,
+        async_driver=async_driver,
+        key_prefix="vtb:aa:",
+    )
+
+    backend.set("ephemeral", {"ok": True}, ttl=0.25)
+    assert 1 <= sync_driver.pttl("vtb:aa:ephemeral") <= 250
+
+    await backend.set_async("ephemeral_async", {"ok": True}, ttl=timedelta(milliseconds=250))
+    assert 1 <= await async_driver.pttl("vtb:aa:ephemeral_async") <= 250
+
+
+@pytest.mark.parametrize("bad_prefix", ["", "bad*", "bad?key", "bad[0]"])
+def test_alchemy_cache_rejects_invalid_key_prefix(bad_prefix: str) -> None:
+    """Empty or glob-containing key_prefix values raise ValueError."""
+    with pytest.raises(ValueError, match="key_prefix"):
+        SQLAlchemyCacheBackend(key_prefix=bad_prefix)

@@ -359,14 +359,17 @@ class BaseSyncDriver(SyncDriverAdapterBase):
         return tuple(results)
 
     def apply_tenant_predicate(self, predicate: TenantPredicate) -> str:
-        """Apply transaction-local tenant session GUC setting and return SQL filter fragment."""
+        """Apply the transaction-local tenant GUC and return the SQL filter fragment.
+
+        Raises:
+            Exception: Any error raised by the driver while executing the GUC statement.
+        """
         sql, params = TenantPredicate.build_session_guc_sql(
             str(predicate.tenant_value),
             predicate.config,
             is_local=True,
         )
-        with suppress(Exception):
-            self.execute(sql, params)
+        self.execute(sql, params)
         return predicate.to_sql_fragment()
 
     def dispatch_execute(self, cursor: Any, statement: Any) -> Any:
@@ -677,14 +680,17 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
         return tuple(results)
 
     async def apply_tenant_predicate(self, predicate: TenantPredicate) -> str:
-        """Apply transaction-local tenant session GUC setting and return SQL filter fragment."""
+        """Apply the transaction-local tenant GUC and return the SQL filter fragment.
+
+        Raises:
+            Exception: Any error raised by the driver while executing the GUC statement.
+        """
         sql, params = TenantPredicate.build_session_guc_sql(
             str(predicate.tenant_value),
             predicate.config,
             is_local=True,
         )
-        with suppress(Exception):
-            await self.execute(sql, params)
+        await self.execute(sql, params)
         return predicate.to_sql_fragment()
 
     async def dispatch_execute(self, cursor: Any, statement: Any) -> Any:

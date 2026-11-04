@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import math
-from typing import TYPE_CHECKING, Any, Literal, cast
+from collections.abc import Mapping, Sequence
+from typing import Any, Literal, cast
 
-from vertebra.embeddings._base import Embedder, VectorBatchView, VectorCache, VectorView
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
+from vertebra.embeddings._base import Embedder, EmbeddingError, VectorBatchView, VectorCache, VectorView
+from vertebra.utils.text import validate_identifier
 
 __all__ = ("SpannerEmbedder",)
+
+_DISTANCE_FUNCTIONS: dict[bool, dict[str, str]] = {
+    True: {
+        "COSINE": "APPROX_COSINE_DISTANCE",
+        "EUCLIDEAN": "APPROX_EUCLIDEAN_DISTANCE",
+        "DOT_PRODUCT": "APPROX_DOT_PRODUCT",
+    },
+    False: {"COSINE": "COSINE_DISTANCE", "EUCLIDEAN": "EUCLIDEAN_DISTANCE", "DOT_PRODUCT": "DOT_PRODUCT"},
+}
 
 
 class SpannerEmbedder(Embedder):
@@ -72,17 +78,18 @@ class SpannerEmbedder(Embedder):
         return self._model_endpoint
 
     def build_generate_embedding_sql(self) -> str:
-        """Construct the Spanner SQL query for batch embedding generation."""
-        if self._use_ai_function:
-            return (
-                "SELECT embeddings.values AS embedding "
-                f"FROM AI.GENERATE_EMBEDDING(MODEL {self._model_endpoint}, "
-                "(SELECT content FROM UNNEST(@texts) AS content WITH OFFSET AS idx ORDER BY idx))"
-            )
+        """Construct the Spanner SQL query for batch embedding generation.
+
+        Raises:
+            ValueError: When ``model_endpoint`` is not a valid SQL identifier.
+        """
+        model_endpoint = validate_identifier(self._model_endpoint, "model_endpoint")
+        fn_name = "AI.GENERATE_EMBEDDING" if self._use_ai_function else "ML.PREDICT"
         return (
-            "SELECT embeddings.values AS embedding "
-            f"FROM ML.PREDICT(MODEL {self._model_endpoint}, "
-            "(SELECT content FROM UNNEST(@texts) AS content WITH OFFSET AS idx ORDER BY idx))"
+            "SELECT embeddings.values AS embedding, idx "
+            f"FROM {fn_name}(MODEL {model_endpoint}, "
+            "(SELECT content, idx FROM UNNEST(@texts) AS content WITH OFFSET AS idx)) "
+            "ORDER BY idx"
         )
 
     def build_vector_search_sql(
@@ -94,29 +101,23 @@ class SpannerEmbedder(Embedder):
         approximate: bool = True,
         num_leaves_to_search: int | None = None,
     ) -> str:
-        """Construct a Spanner vector similarity search SQL query."""
-        normalized_distance = distance_type.upper()
-        if approximate:
-            fn_map = {
-                "COSINE": "APPROX_COSINE_DISTANCE",
-                "EUCLIDEAN": "APPROX_EUCLIDEAN_DISTANCE",
-                "DOT_PRODUCT": "APPROX_DOT_PRODUCT",
-            }
-            distance_fn = fn_map.get(normalized_distance, "APPROX_COSINE_DISTANCE")
-            options_clause = (
-                f", options => JSON '{{\"num_leaves_to_search\": {int(num_leaves_to_search)}}}'"
-                if num_leaves_to_search is not None
-                else ""
-            )
-            distance_expr = f"{distance_fn}({embedding_column}, @query_vector{options_clause})"
-        else:
-            fn_map = {
-                "COSINE": "COSINE_DISTANCE",
-                "EUCLIDEAN": "EUCLIDEAN_DISTANCE",
-                "DOT_PRODUCT": "DOT_PRODUCT",
-            }
-            distance_fn = fn_map.get(normalized_distance, "COSINE_DISTANCE")
-            distance_expr = f"{distance_fn}({embedding_column}, @query_vector)"
+        """Construct a Spanner vector similarity search SQL query.
+
+        Raises:
+            ValueError: When ``base_table``, ``embedding_column``, or ``distance_type`` is invalid.
+        """
+        validate_identifier(base_table, "base_table")
+        validate_identifier(embedding_column, "embedding_column", allow_dots=False)
+        distance_fn = _DISTANCE_FUNCTIONS[approximate].get(distance_type.upper())
+        if distance_fn is None:
+            msg = f"Unsupported distance_type {distance_type!r}; expected COSINE, EUCLIDEAN, or DOT_PRODUCT"
+            raise ValueError(msg)
+        options_clause = (
+            f", options => JSON '{{\"num_leaves_to_search\": {int(num_leaves_to_search)}}}'"
+            if approximate and num_leaves_to_search is not None
+            else ""
+        )
+        distance_expr = f"{distance_fn}({embedding_column}, @query_vector{options_clause})"
         return (
             f"SELECT *, {distance_expr} AS distance "
             f"FROM {base_table} "
@@ -238,60 +239,35 @@ class SpannerEmbedder(Embedder):
         task: str = "document",
         titles: Sequence[str | None] | None = None,
     ) -> VectorBatchView:
-        """Generate embeddings via Spanner SQL and pack them into a ``VectorBatchView``."""
+        """Generate embeddings via Spanner SQL and pack them into a ``VectorBatchView``.
+
+        Raises:
+            EmbeddingError: When the row count differs from the text count or a row has no vector.
+        """
         del task, titles
         sql = self.build_generate_embedding_sql()
-        params = {"texts": list(texts)}
-        rows: list[dict[str, Any]] = []
-        try:
-            select_fn = getattr(self._driver, "select", None)
-            if callable(select_fn):
-                res = select_fn(sql, params)
-                rows = list(await res) if asyncio.iscoroutine(res) else list(res)
-        except Exception:
-            rows = []
-
-        dim = self._dimensions
-        vectors: list[list[float]] = []
-        for idx, text in enumerate(texts):
-            row = rows[idx] if idx < len(rows) else None
-            vec = self._extract_vector(row, fallback_text=text, dimensions=dim)
-            vectors.append(vec)
+        result = self._driver.select(sql, {"texts": list(texts)})
+        rows = list(await result) if asyncio.iscoroutine(result) else list(result)
+        if len(rows) != len(texts):
+            msg = f"Spanner returned {len(rows)} embedding rows for {len(texts)} texts"
+            raise EmbeddingError(msg)
+        vectors = [self._extract_vector(row, index=idx, dimensions=self._dimensions) for idx, row in enumerate(rows)]
         return VectorBatchView.from_f32_rows(vectors, normalize=self._normalize)
 
     @staticmethod
-    def _extract_vector(
-        row: dict[str, Any] | None,
-        *,
-        fallback_text: str,
-        dimensions: int,
-    ) -> list[float]:
-        """Extract an embedding vector from a Spanner row or synthesize a deterministic vector."""
-        if row is not None:
-            for key in ("embedding", "ml_generate_embedding_result", "values"):
-                candidate = row.get(key)
-                if isinstance(candidate, dict) and "values" in candidate:
-                    candidate = candidate["values"]
-                if isinstance(candidate, (list, tuple)) and candidate:
-                    floats = [float(v) for v in candidate[:dimensions]]
-                    if len(floats) < dimensions:
-                        floats.extend([0.0] * (dimensions - len(floats)))
-                    return floats
-        return SpannerEmbedder._deterministic_vector(fallback_text, dimensions)
+    def _extract_vector(row: Mapping[str, Any], *, index: int, dimensions: int) -> list[float]:
+        """Extract an embedding vector from a Spanner result row, zero-padded to ``dimensions``.
 
-    @staticmethod
-    def _deterministic_vector(text: str, dimensions: int) -> list[float]:
-        """Produce a deterministic unit vector from text when running against mock drivers."""
-        seed = hashlib.sha256(text.encode("utf-8")).digest()
-        values: list[float] = []
-        block_index = 0
-        while len(values) < dimensions:
-            block = hashlib.sha256(seed + block_index.to_bytes(4, "little")).digest()
-            block_index += 1
-            for i in range(0, len(block), 2):
-                if len(values) >= dimensions:
-                    break
-                raw = int.from_bytes(block[i : i + 2], "little", signed=True)
-                values.append(raw / 32768.0)
-        norm = math.sqrt(sum(v * v for v in values)) or 1.0
-        return [v / norm for v in values]
+        Raises:
+            EmbeddingError: When the row has no non-empty vector column.
+        """
+        for key in ("embedding", "ml_generate_embedding_result", "values"):
+            candidate = row.get(key)
+            if isinstance(candidate, Mapping) and "values" in candidate:
+                candidate = candidate["values"]
+            if isinstance(candidate, (list, tuple)) and candidate:
+                floats = [float(v) for v in candidate[:dimensions]]
+                floats.extend([0.0] * (dimensions - len(floats)))
+                return floats
+        msg = f"Spanner embedding row {index} has no vector column ('embedding', 'ml_generate_embedding_result', or 'values')"
+        raise EmbeddingError(msg)

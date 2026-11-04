@@ -22,6 +22,7 @@ from vertebra._vertebra import (
 from vertebra.embeddings import (
     AlloyDbEmbedder,
     Embedder,
+    EmbeddingError,
     GeminiEmbedder,
     MultimodalPart,
     OracleEmbedder,
@@ -322,3 +323,27 @@ async def test_remote_embedder_and_grpc_service_roundtrip() -> None:
     assert batch.dimensions == 4
     matches = remote.similarity_search(q_vec, batch, top_k=2)
     assert len(matches) == 2
+
+
+@pytest.mark.anyio
+async def test_oracle_embedder_raises_embedding_error_on_empty_result() -> None:
+    """An empty DBMS_VECTOR result raises EmbeddingError instead of IndexError."""
+
+    class EmptyOracleDriver:
+        async def execute(self, sql: str, params: Any = None) -> None:
+            return None
+
+        async def fetch_all(self, sql: str, params: Any = None) -> list[tuple[bytes]]:
+            return []
+
+    token_cache: Any = _FakeTokenCache(prefix="mock-ora-vertex-token", quota_project=None)
+    embedder = OracleEmbedder(
+        driver=EmptyOracleDriver(),
+        model="gemini-embedding-001",
+        dimensions=4,
+        provider="vertexai",
+        project_number="123456789012",
+        token_cache=token_cache,
+    )
+    with pytest.raises(EmbeddingError, match="no embedding row"):
+        await embedder.embed_query("empty result")

@@ -328,13 +328,23 @@ class Tool:
         input_schema: dict[str, Any] | None = None,
         requires_confirmation: bool = False,
         timeout_seconds: float | None = None,
+        webmcp: bool | None = None,
+        annotations: dict[str, Any] | None = None,
+        guards: Sequence[Any] = (),
         instance: Any = None,
     ) -> None:
+        meta = getattr(fn, "_mcp_tool_meta", None)
+        meta_dict = meta if isinstance(meta, dict) else {}
         self.fn = fn
-        self.name = name or fn.__name__
-        self.description = description or inspect.getdoc(fn) or ""
-        self.requires_confirmation = requires_confirmation
-        self.timeout_seconds = timeout_seconds
+        self.name = name or meta_dict.get("name") or fn.__name__
+        self.description = description or meta_dict.get("description") or inspect.getdoc(fn) or ""
+        self.requires_confirmation = bool(requires_confirmation or meta_dict.get("requires_confirmation", False))
+        self.timeout_seconds = timeout_seconds if timeout_seconds is not None else meta_dict.get("timeout_seconds")
+        self.webmcp: bool = bool(meta_dict.get("webmcp", False)) if webmcp is None else bool(webmcp)
+        self.annotations: dict[str, Any] = (
+            dict(meta_dict.get("annotations", {})) if annotations is None else dict(annotations)
+        )
+        self.guards: tuple[Any, ...] = tuple(guards)
         self._instance = instance
 
         if input_schema is None:
@@ -354,6 +364,9 @@ class Tool:
             input_schema=self.input_schema,
             requires_confirmation=self.requires_confirmation,
             timeout_seconds=self.timeout_seconds,
+            webmcp=self.webmcp,
+            annotations=self.annotations,
+            guards=self.guards,
             instance=instance,
         )
 
@@ -388,6 +401,14 @@ class Tool:
         context: Any = None,
     ) -> Any:
         """Invoke the tool with validated arguments and context injection."""
+        if self.guards:
+            for guard in self.guards:
+                check_fn = getattr(guard, "check", None)
+                target = check_fn if callable(check_fn) else guard
+                guard_res = target(context)
+                if inspect.isawaitable(guard_res):
+                    await guard_res
+
         sig = inspect.signature(self.fn)
         call_kwargs: dict[str, Any] = {}
         has_var_keyword = False
@@ -445,6 +466,8 @@ def tool(
     *,
     requires_confirmation: bool = False,
     timeout_seconds: float | None = None,
+    webmcp: bool | None = None,
+    annotations: dict[str, Any] | None = None,
 ) -> Callable[[Callable[..., Any]], Tool]:
     """Decorator converting a function or method into a Tool descriptor."""
 
@@ -455,6 +478,8 @@ def tool(
             description=description,
             requires_confirmation=requires_confirmation,
             timeout_seconds=timeout_seconds,
+            webmcp=webmcp,
+            annotations=annotations,
         )
 
     return decorator

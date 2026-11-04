@@ -8,13 +8,17 @@ from typing import Any, Literal
 
 from vertebra.embeddings._base import (
     Embedder,
+    EmbeddingError,
     VectorBatchView,
     VectorCache,
     VectorView,
 )
 from vertebra.utils.serializers import decode_json
+from vertebra.utils.text import validate_identifier
 
 __all__ = ("BigQueryEmbedder",)
+
+_DISTANCE_TYPES: frozenset[str] = frozenset({"COSINE", "EUCLIDEAN", "DOT_PRODUCT"})
 
 _TASK_TO_VERTEX_TASK_TYPE: dict[str, str] = {
     "query": "RETRIEVAL_QUERY",
@@ -66,16 +70,21 @@ class BigQueryEmbedder(Embedder):
         return self._model_endpoint
 
     def build_generate_embedding_sql(self) -> str:
-        """Build the parameterized GoogleSQL ``ML.GENERATE_EMBEDDING`` or ``AI.GENERATE_EMBEDDING`` query."""
+        """Build the parameterized GoogleSQL ``ML.GENERATE_EMBEDDING`` or ``AI.GENERATE_EMBEDDING`` query.
+
+        Raises:
+            ValueError: When ``model_endpoint`` is not a valid SQL identifier.
+        """
+        model_endpoint = validate_identifier(self._model_endpoint, "model_endpoint", allow_hyphens=True)
         fn_name = "AI.GENERATE_EMBEDDING" if self._use_ai_function else "ML.GENERATE_EMBEDDING"
         result_col = "embedding" if self._use_ai_function else "ml_generate_embedding_result"
         return (
-            f"SELECT {result_col} AS embedding "
+            f"SELECT {result_col} AS embedding, idx "
             f"FROM {fn_name}("
-            f"MODEL `{self._model_endpoint}`, "
-            "(SELECT content FROM UNNEST(@texts) AS content WITH OFFSET AS idx ORDER BY idx), "
+            f"MODEL `{model_endpoint}`, "
+            "(SELECT content, idx FROM UNNEST(@texts) AS content WITH OFFSET AS idx), "
             "STRUCT(TRUE AS flatten_json_output, @task_type AS task_type, @output_dimensionality AS output_dimensionality)"
-            ")"
+            ") ORDER BY idx"
         )
 
     def build_vector_search_sql(
@@ -85,8 +94,17 @@ class BigQueryEmbedder(Embedder):
         *,
         distance_type: Literal["COSINE", "EUCLIDEAN", "DOT_PRODUCT"] = "COSINE",
     ) -> str:
-        """Build a GoogleSQL ``VECTOR_SEARCH`` query against ``base_table``."""
+        """Build a GoogleSQL ``VECTOR_SEARCH`` query against ``base_table``.
+
+        Raises:
+            ValueError: When ``base_table``, ``embedding_column``, or ``distance_type`` is invalid.
+        """
+        validate_identifier(base_table, "base_table", allow_hyphens=True)
+        validate_identifier(embedding_column, "embedding_column", allow_dots=False)
         dist = distance_type.upper()
+        if dist not in _DISTANCE_TYPES:
+            msg = f"Unsupported distance_type {distance_type!r}; expected COSINE, EUCLIDEAN, or DOT_PRODUCT"
+            raise ValueError(msg)
         return (
             "SELECT base.*, distance "
             f"FROM VECTOR_SEARCH("
@@ -154,6 +172,11 @@ class BigQueryEmbedder(Embedder):
         task: str = "document",
         titles: list[str | None] | None = None,
     ) -> VectorBatchView:
+        """Generate embeddings via BigQuery SQL and pack them into a ``VectorBatchView``.
+
+        Raises:
+            EmbeddingError: When the row count differs from the text count or a row has no vector.
+        """
         sql = self.build_generate_embedding_sql()
         vertex_task = _TASK_TO_VERTEX_TASK_TYPE.get(task.lower(), "RETRIEVAL_DOCUMENT")
         params: dict[str, Any] = {
@@ -162,9 +185,15 @@ class BigQueryEmbedder(Embedder):
             "output_dimensionality": int(self._dimensions),
         }
         rows = await self._execute_driver_rows(sql, params)
+        if len(rows) != len(texts):
+            msg = f"BigQuery returned {len(rows)} embedding rows for {len(texts)} texts"
+            raise EmbeddingError(msg)
         vectors: list[list[float]] = []
-        for row in rows:
+        for idx, row in enumerate(rows):
             raw_vec = _extract_embedding_from_row(row)
+            if not raw_vec:
+                msg = f"BigQuery embedding row {idx} has no vector"
+                raise EmbeddingError(msg)
             vectors.append(raw_vec[: self._dimensions])
         return VectorBatchView.from_f32_rows(vectors, normalize=self._normalize)
 

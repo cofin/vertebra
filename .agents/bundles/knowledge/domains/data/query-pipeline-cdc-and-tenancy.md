@@ -39,7 +39,7 @@ Behavior of `compile()`:
 |---|---|
 | [`TenantScopeConfig`](../../../../../src/py/vertebra/db/rls.py) | `guc_name="app.tenant_id"`, `tenant_column="tenant_id"`, `parameter_cast="uuid"`. Validated in `__post_init__` via `SqlIdentifier.validate`. |
 | `TenantPredicate` | `to_sql_fragment(param_index)` validates `table_alias`, `tenant_column`, and `parameter_cast` via `SqlIdentifier.validate` and renders `alias.tenant_id = $N::uuid`. The cast goes on the parameter, never the column, so the planner can still use an index on `tenant_id`. An empty `table_alias` drops the prefix. |
-| `TenantPredicate.build_session_guc_sql` (static) | Returns `("SELECT set_config($1, $2, $3)", (guc_name, tenant_id, is_local))` for a transaction-local GUC that RLS policies can read. |
+| `TenantPredicate.build_session_guc_sql` (static) | Returns `("SELECT set_config($1, $2, $3)", (guc_name, tenant_id, is_local))` for a transaction-local GUC that RLS policies can read. The sqlspec adapter drivers run it in `apply_tenant_predicate` and propagate any driver error. |
 
 The intended layering is an explicit predicate for plan quality plus a session GUC for row-level-security policies. Both pieces are SQL fragments only. Nothing in the codebase installs RLS policies.
 
@@ -53,7 +53,7 @@ The intended layering is an explicit predicate for plan quality plus a session G
 | `ChangeFeed.hydrate_notification(envelope)` | Decodes with `decode_json` and restores spilled payloads by `event_id`. An unknown spilled id yields an empty payload. |
 | `ChangeFeed.replay_since(last_event_id)` | Returns buffered events newer than the id. |
 | `ChangeFeed.build_emit_message_sql` (static) | Returns `SELECT pg_logical_emit_message($1, $2, $3)` with `(transactional, prefix, bytes)`, which emits to the WAL without writing a table. |
-| [`SpannerChangeStreamSource`](../../../../../src/py/vertebra/db/cdc.py) / `SpannerPartitionRecord` | Queries `READ_json_<stream_name>` (GoogleSQL) or `spanner.read_json_<stream_name>` (Spangres), parses `DataChangeRecord`, `HeartbeatRecord`, and `ChildPartitionsRecord` payloads, fans out child partition readers respecting parent watermark progression, and forwards data changes into `ChangeFeed.publish_event()`. |
+| [`SpannerChangeStreamSource`](../../../../../src/py/vertebra/db/cdc.py) / `SpannerPartitionRecord` | Queries `READ_json_<stream_name>` (GoogleSQL) or `spanner.read_json_<stream_name>` (Spangres), parses `DataChangeRecord`, `HeartbeatRecord`, and `ChildPartitionsRecord` payloads, fans out child partition readers respecting parent watermark progression, and forwards data changes into `ChangeFeed.publish_event()`. Spangres polls bind `[start_timestamp, end_timestamp, partition_token, heartbeat_milliseconds]` positionally (`$1..$4` → `p1..p4`); GoogleSQL polls bind `@start_ts`, `@end_ts`, `@token`, and `@heartbeat_ms`. |
 
 Spill storage and history live in process memory and grow without bound. `spill_table`, `replication_slot_name`, `publication_name`, and `max_slot_wal_keep_size_mb` are configuration fields that no code reads.
 

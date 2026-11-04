@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from vertebra.embeddings._base import (
     Embedder,
+    EmbeddingError,
     EmbeddingTask,
     MultimodalPart,
     SimilarityMatch,
@@ -13,6 +14,7 @@ from vertebra.embeddings._base import (
 )
 from vertebra.embeddings._bigquery import BigQueryEmbedder
 from vertebra.embeddings._broker import (
+    BackendFactory,
     BackendInferenceCallable,
     EmbeddingBroker,
     EmbeddingBrokerConfig,
@@ -46,11 +48,13 @@ from vertebra.embeddings._spanner import SpannerEmbedder
 __all__ = (
     "MODEL_CATALOG",
     "AlloyDbEmbedder",
+    "BackendFactory",
     "BackendInferenceCallable",
     "BigQueryEmbedder",
     "Embedder",
     "EmbeddingBroker",
     "EmbeddingBrokerConfig",
+    "EmbeddingError",
     "EmbeddingTask",
     "FastEmbedder",
     "GeminiEmbedder",
