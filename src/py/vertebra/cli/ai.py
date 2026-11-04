@@ -20,7 +20,7 @@ from vertebra.agent.mcp.client import mcp_request_headers
 from vertebra.agent.mcp.service import MCPService
 from vertebra.agent.mcp.stdio import run_stdio_server
 from vertebra.embeddings._models import ModelSpec, get_model_spec, list_model_specs
-from vertebra.storage import ObjectStore
+from vertebra.storage import SyncObjectStore
 from vertebra.utils.serializers import decode_json, encode_json_bytes, format_json
 
 __all__ = (
@@ -344,23 +344,23 @@ def _resolve_quantization(spec: ModelSpec, requested: str | None) -> str:
     return quant
 
 
-def _open_uri_store(uri: str) -> tuple[ObjectStore, str]:
-    """Open an ObjectStore and relative key prefix for a cloud or local URI."""
+def _open_uri_store(uri: str) -> tuple[SyncObjectStore, str]:
+    """Open a SyncObjectStore and relative key prefix for a cloud or local URI."""
     if "://" not in uri:
-        return ObjectStore.from_local(Path(uri).expanduser().resolve()), ""
+        return SyncObjectStore.from_local(Path(uri).expanduser().resolve()), ""
     parsed = urlparse(uri)
     scheme = parsed.scheme.lower()
     if scheme == "file":
         root = Path(parsed.netloc + parsed.path if parsed.netloc else parsed.path)
-        return ObjectStore.from_local(root), ""
+        return SyncObjectStore.from_local(root), ""
     if scheme in {"gs", "gcs"}:
-        return ObjectStore.from_gcs(parsed.netloc), parsed.path.strip("/")
+        return SyncObjectStore.from_gcs(parsed.netloc), parsed.path.strip("/")
     if scheme == "s3":
-        return ObjectStore.from_s3(parsed.netloc), parsed.path.strip("/")
+        return SyncObjectStore.from_s3(parsed.netloc), parsed.path.strip("/")
     if scheme in {"http", "https"}:
-        return ObjectStore.from_http(uri), ""
+        return SyncObjectStore.from_http(uri), ""
     base_url = f"{scheme}://{parsed.netloc}" if parsed.netloc else uri
-    return ObjectStore(base_url), parsed.path.strip("/")
+    return SyncObjectStore(base_url), parsed.path.strip("/")
 
 
 def _join_store_key(prefix: str, rel_path: str) -> str:

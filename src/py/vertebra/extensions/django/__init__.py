@@ -6,13 +6,13 @@ from typing import TYPE_CHECKING
 
 from vertebra.utils.module_loader import lazy_exports
 
-default_app_config = "vertebra.extensions.django.apps.DjangoAppConfig"
+default_app_config = "vertebra.extensions.django.apps.VertebraAppConfig"
 
 if TYPE_CHECKING:
-    from vertebra.extensions.django.apps import DjangoAppConfig
+    from vertebra.extensions.django.apps import VertebraAppConfig
     from vertebra.extensions.django.cache import CacheBackend
     from vertebra.extensions.django.channels import ChannelLayer
-    from vertebra.extensions.django.config import DjangoConfig
+    from vertebra.extensions.django.config import VertebraConfig
     from vertebra.extensions.django.db import (
         ArrowManager,
         ArrowModel,
@@ -62,7 +62,7 @@ if TYPE_CHECKING:
         models_to_structs,
         rows_to_structs,
     )
-    from vertebra.extensions.django.plugin import DjangoPlugin
+    from vertebra.extensions.django.plugin import VertebraPlugin
     from vertebra.extensions.django.queues import QueuesBackend, TaskEnvelope
     from vertebra.extensions.django.router import (
         RouteCompiler,
@@ -71,13 +71,15 @@ if TYPE_CHECKING:
     )
     from vertebra.extensions.django.security import JWTAuthGuard, RateLimitGuard, SecurityBridge
     from vertebra.extensions.django.storage import (
+        AsyncObjectStore,
+        AsyncStorageRegistry,
         DjangoStorage,
         GCSConfig,
         LocalConfig,
         MemoryConfig,
-        ObjectStore,
         S3Config,
-        StorageRegistry,
+        SyncObjectStore,
+        SyncStorageRegistry,
     )
     from vertebra.extensions.django.templates import TemplateBridge
     from vertebra.extensions.django.vite import ViteBridge, ViteConfig, attach_vite
@@ -88,14 +90,13 @@ __all__ = (
     "ArrowQuerySet",
     "ArrowQuerySetMixin",
     "AsyncAPIDocsConfig",
+    "AsyncObjectStore",
+    "AsyncStorageRegistry",
     "BackendPoolerConfig",
     "CacheBackend",
     "ChannelLayer",
     "CompiledRoute",
     "DatabaseWrapperMixin",
-    "DjangoAppConfig",
-    "DjangoConfig",
-    "DjangoPlugin",
     "DjangoStorage",
     "EmailBackend",
     "FastPath",
@@ -107,7 +108,6 @@ __all__ = (
     "MemoryConfig",
     "MsgspecView",
     "ORMBridge",
-    "ObjectStore",
     "OpenAPIConfig",
     "PromptController",
     "QueuesBackend",
@@ -119,10 +119,14 @@ __all__ = (
     "ScalarSpecSource",
     "SecurityBridge",
     "SkillController",
-    "StorageRegistry",
     "SwaggerDocsConfig",
+    "SyncObjectStore",
+    "SyncStorageRegistry",
     "TaskEnvelope",
     "TemplateBridge",
+    "VertebraAppConfig",
+    "VertebraConfig",
+    "VertebraPlugin",
     "ViteBridge",
     "ViteConfig",
     "WebMCPConfig",
@@ -155,14 +159,13 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "ArrowQuerySet": ("vertebra.extensions.django.db", "ArrowQuerySet"),
     "ArrowQuerySetMixin": ("vertebra.extensions.django.db", "ArrowQuerySetMixin"),
     "AsyncAPIDocsConfig": ("vertebra.extensions.django.openapi", "AsyncAPIDocsConfig"),
+    "AsyncObjectStore": ("vertebra.extensions.django.storage", "AsyncObjectStore"),
+    "AsyncStorageRegistry": ("vertebra.extensions.django.storage", "AsyncStorageRegistry"),
     "BackendPoolerConfig": ("vertebra.extensions.django.db", "BackendPoolerConfig"),
     "CacheBackend": ("vertebra.extensions.django.cache", "CacheBackend"),
     "ChannelLayer": ("vertebra.extensions.django.channels", "ChannelLayer"),
     "CompiledRoute": ("vertebra.extensions.django.fastpath", "CompiledRoute"),
     "DatabaseWrapperMixin": ("vertebra.extensions.django.db", "DatabaseWrapperMixin"),
-    "DjangoAppConfig": ("vertebra.extensions.django.apps", "DjangoAppConfig"),
-    "DjangoConfig": ("vertebra.extensions.django.config", "DjangoConfig"),
-    "DjangoPlugin": ("vertebra.extensions.django.plugin", "DjangoPlugin"),
     "DjangoStorage": ("vertebra.extensions.django.storage", "DjangoStorage"),
     "EmailBackend": ("vertebra.extensions.django.mail", "EmailBackend"),
     "FastPath": ("vertebra.extensions.django.fastpath", "FastPath"),
@@ -174,7 +177,6 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "MemoryConfig": ("vertebra.extensions.django.storage", "MemoryConfig"),
     "MsgspecView": ("vertebra.extensions.django.fastpath", "MsgspecView"),
     "ORMBridge": ("vertebra.extensions.django.orm", "ORMBridge"),
-    "ObjectStore": ("vertebra.extensions.django.storage", "ObjectStore"),
     "OpenAPIConfig": ("vertebra.extensions.django.openapi", "OpenAPIConfig"),
     "PromptController": ("vertebra.extensions.django.mcp", "PromptController"),
     "QueuesBackend": ("vertebra.extensions.django.queues", "QueuesBackend"),
@@ -186,10 +188,14 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "ScalarSpecSource": ("vertebra.extensions.django.openapi", "ScalarSpecSource"),
     "SecurityBridge": ("vertebra.extensions.django.security", "SecurityBridge"),
     "SkillController": ("vertebra.extensions.django.mcp", "SkillController"),
-    "StorageRegistry": ("vertebra.extensions.django.storage", "StorageRegistry"),
     "SwaggerDocsConfig": ("vertebra.extensions.django.openapi", "SwaggerDocsConfig"),
+    "SyncObjectStore": ("vertebra.extensions.django.storage", "SyncObjectStore"),
+    "SyncStorageRegistry": ("vertebra.extensions.django.storage", "SyncStorageRegistry"),
     "TaskEnvelope": ("vertebra.extensions.django.queues", "TaskEnvelope"),
     "TemplateBridge": ("vertebra.extensions.django.templates", "TemplateBridge"),
+    "VertebraAppConfig": ("vertebra.extensions.django.apps", "VertebraAppConfig"),
+    "VertebraConfig": ("vertebra.extensions.django.config", "VertebraConfig"),
+    "VertebraPlugin": ("vertebra.extensions.django.plugin", "VertebraPlugin"),
     "ViteBridge": ("vertebra.extensions.django.vite", "ViteBridge"),
     "ViteConfig": ("vertebra.extensions.django.vite", "ViteConfig"),
     "WebMCPConfig": ("vertebra.extensions.django.mcp", "WebMCPConfig"),

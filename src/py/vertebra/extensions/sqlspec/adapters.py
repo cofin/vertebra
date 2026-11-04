@@ -12,13 +12,13 @@ from vertebra.db._arrow import (
     ArrowCursor,
 )
 from vertebra.db._registry import DatabaseRegistry
-from vertebra.db.dialer.alloydb import AlloyDBDialer
-from vertebra.db.dialer.cloudsql import CloudSQLDialer
+from vertebra.db.dialer.alloydb import AsyncAlloyDBDialer, SyncAlloyDBDialer
+from vertebra.db.dialer.cloudsql import AsyncCloudSQLDialer, SyncCloudSQLDialer
 from vertebra.db.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
 from vertebra.db.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLDriver
 from vertebra.db.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
 from vertebra.db.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
-from vertebra.db.pipeline import PipelineDialect, QueryPipeline
+from vertebra.db.pipeline import AsyncQueryPipeline, PipelineDialect, SyncQueryPipeline
 from vertebra.db.postgres import (
     AsyncPostgreSQLDriver,
     PostgreSQLConfig,
@@ -40,10 +40,11 @@ except ImportError as exc:
     raise MissingDependencyError("sqlspec", install_package="sqlspec", extra="sqlspec") from exc
 
 __all__ = (
-    "AlloyDBDialer",
+    "AsyncAlloyDBDialer",
+    "AsyncCloudSQLDialer",
+    "AsyncQueryPipeline",
     "ArrowCursor",
     "AsyncAdapterConfig",
-    "CloudSQLDialer",
     "DuckDBAsyncConfig",
     "DuckDBAsyncDriver",
     "DuckDBSyncConfig",
@@ -64,7 +65,9 @@ __all__ = (
     "PostgreSQLAsyncDriver",
     "PostgreSQLSyncConfig",
     "PostgreSQLSyncDriver",
-    "QueryPipeline",
+    "SyncAlloyDBDialer",
+    "SyncCloudSQLDialer",
+    "SyncQueryPipeline",
     "SQLiteAsyncConfig",
     "SQLiteAsyncDriver",
     "SQLiteSyncConfig",
@@ -318,7 +321,7 @@ class BaseSyncDriver(SyncDriverAdapterBase):
         return ArrowResult(statement=SQL(sql), data=table, rows_affected=num_rows)
 
     def execute_stack(self, stack: StatementStack, *, continue_on_error: bool = False) -> tuple[StackResult, ...]:
-        """Execute a StatementStack using QueryPipeline CTE compilation when applicable or sequential execution."""
+        """Execute a StatementStack using SyncQueryPipeline CTE compilation when applicable or sequential execution."""
         operations = getattr(stack, "operations", ())
         all_read = bool(operations)
         for op in operations:
@@ -331,7 +334,7 @@ class BaseSyncDriver(SyncDriverAdapterBase):
             pipeline_dialect: PipelineDialect = (
                 "googlesql" if self.dialect in {"bigquery", "spanner", "googlesql"} else "postgres"
             )
-            pipeline = QueryPipeline(dialect=pipeline_dialect)
+            pipeline = SyncQueryPipeline(dialect=pipeline_dialect)
             for idx, op in enumerate(operations):
                 stmt_sql = str(getattr(op, "statement", ""))
                 args = getattr(op, "arguments", ())
@@ -639,7 +642,7 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
         *,
         continue_on_error: bool = False,
     ) -> tuple[StackResult, ...]:
-        """Execute a StatementStack asynchronously using QueryPipeline or sequential execution."""
+        """Execute a StatementStack asynchronously using AsyncQueryPipeline or sequential execution."""
         operations = getattr(stack, "operations", ())
         all_read = bool(operations)
         for op in operations:
@@ -652,7 +655,7 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
             pipeline_dialect: PipelineDialect = (
                 "googlesql" if self.dialect in {"bigquery", "spanner", "googlesql"} else "postgres"
             )
-            pipeline = QueryPipeline(dialect=pipeline_dialect)
+            pipeline = AsyncQueryPipeline(dialect=pipeline_dialect)
             for idx, op in enumerate(operations):
                 stmt_sql = str(getattr(op, "statement", ""))
                 args = getattr(op, "arguments", ())
@@ -887,14 +890,6 @@ class SyncAdapterConfig[ConfigT, DriverT: SyncDriverAdapterBase](SyncDatabaseCon
             statement_config=statement_config or StatementConfig(dialect=self.dialect),
         )
 
-    def _create_pool(self) -> Any:
-        """Return the instantiated driver as pool."""
-        return self.create_driver()
-
-    def _close_pool(self) -> None:
-        """Close the cached driver instance."""
-        self.close()
-
     def create_driver(self) -> DriverT:
         """Instantiate or return the cached synchronous Vertebra database driver adapter."""
         if self._driver_instance is None:
@@ -925,6 +920,14 @@ class SyncAdapterConfig[ConfigT, DriverT: SyncDriverAdapterBase](SyncDatabaseCon
         if self._driver_instance is not None and hasattr(self._driver_instance, "close"):
             self._driver_instance.close()
             self._driver_instance = None
+
+    def _create_pool(self) -> Any:
+        """Return the instantiated driver as pool."""
+        return self.create_driver()
+
+    def _close_pool(self) -> None:
+        """Close the cached driver instance."""
+        self.close()
 
 
 class AsyncAdapterConfig[ConfigT, DriverT: AsyncDriverAdapterBase](AsyncDatabaseConfig[Any, Any, DriverT]):
@@ -972,14 +975,6 @@ class AsyncAdapterConfig[ConfigT, DriverT: AsyncDriverAdapterBase](AsyncDatabase
             statement_config=statement_config or StatementConfig(dialect=self.dialect),
         )
 
-    def _create_pool(self) -> Any:
-        """Return the instantiated driver as pool."""
-        return self.create_driver()
-
-    async def _close_pool(self) -> None:
-        """Close the cached driver instance asynchronously."""
-        await self.close()
-
     def create_driver(self) -> DriverT:
         """Instantiate or return the cached asynchronous Vertebra database driver adapter."""
         if self._driver_instance is None:
@@ -1012,6 +1007,14 @@ class AsyncAdapterConfig[ConfigT, DriverT: AsyncDriverAdapterBase](AsyncDatabase
             if hasattr(res, "__await__"):
                 await res
             self._driver_instance = None
+
+    def _create_pool(self) -> Any:
+        """Return the instantiated driver as pool."""
+        return self.create_driver()
+
+    async def _close_pool(self) -> None:
+        """Close the cached driver instance asynchronously."""
+        await self.close()
 
 
 class PostgreSQLSyncConfig(SyncAdapterConfig[PostgreSQLConfig, PostgreSQLSyncDriver]):

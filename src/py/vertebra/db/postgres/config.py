@@ -72,7 +72,7 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
     session_gucs: Mapping[str, str] = msgspec.field(default_factory=dict)
     """Additional PostgreSQL session GUC key-value pairs applied on connection startup."""
     broker: Any = None
-    """Optional shared-memory `DatabaseBroker` or `SHMBrokerTransport` for cross-worker connection leasing."""
+    """Optional shared-memory `DatabaseBroker`, `SyncSHMBrokerTransport`, or `AsyncSHMBrokerTransport` for cross-worker connection leasing."""
 
     def __post_init__(self) -> None:
         if self.min_size < 0 or self.max_size < 1 or self.min_size > self.max_size:
@@ -119,7 +119,7 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
         return PostgreSQLConfig(**base)
 
     def resolve_iam_password_sync(self, *, force_refresh: bool = False) -> str | None:
-        """Resolve a short-lived Google Cloud IAM OAuth2 access token via `GcpTokenCache` when `enable_iam_auth=True`."""
+        """Resolve a short-lived Google Cloud IAM OAuth2 access token via `SyncGcpTokenCache` when `enable_iam_auth=True`."""
         if not self.enable_iam_auth:
             return None
         opts = dict(self.iam_auth_options)
@@ -130,7 +130,7 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
             "https://www.googleapis.com/auth/sqlservice.login,https://www.googleapis.com/auth/cloud-platform",
         )
         native_mod = import_optional("vertebra._vertebra")
-        token_cache_cls = getattr(native_mod, "GcpTokenCache", None) if native_mod is not None else None
+        token_cache_cls = getattr(native_mod, "SyncGcpTokenCache", None) if native_mod is not None else None
         if token_cache_cls is None:
             return opts.get("access_token") or opts.get("bearer_token")
         cache = token_cache_cls(opts)
@@ -138,7 +138,7 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
         return str(snap.access_token)
 
     async def resolve_iam_password_async(self, *, force_refresh: bool = False) -> str | None:
-        """Asynchronously resolve a short-lived Google Cloud IAM OAuth2 access token via `GcpTokenCache` when `enable_iam_auth=True`."""
+        """Asynchronously resolve a short-lived Google Cloud IAM OAuth2 access token via `AsyncGcpTokenCache` when `enable_iam_auth=True`."""
         if not self.enable_iam_auth:
             return None
         opts = dict(self.iam_auth_options)
@@ -149,11 +149,11 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
             "https://www.googleapis.com/auth/sqlservice.login,https://www.googleapis.com/auth/cloud-platform",
         )
         native_mod = import_optional("vertebra._vertebra")
-        token_cache_cls = getattr(native_mod, "GcpTokenCache", None) if native_mod is not None else None
+        token_cache_cls = getattr(native_mod, "AsyncGcpTokenCache", None) if native_mod is not None else None
         if token_cache_cls is None:
             return opts.get("access_token") or opts.get("bearer_token")
         cache = token_cache_cls(opts)
-        snap = await cache.get_token_async(force_refresh=force_refresh)
+        snap = await cache.get_token(force_refresh=force_refresh)
         return str(snap.access_token)
 
     @staticmethod

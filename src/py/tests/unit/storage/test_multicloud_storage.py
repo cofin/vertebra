@@ -1,4 +1,4 @@
-"""Unit tests for multi-cloud StorageConfig providers, GCP ADC auth/signing, OCI/Azure/R2 signing, and ReadableFile."""
+"""Unit tests for multi-cloud StorageConfig providers, GCP ADC auth/signing, OCI/Azure/R2 signing, and SyncReadableFile."""
 
 from __future__ import annotations
 
@@ -18,12 +18,12 @@ from vertebra.storage import (
     HTTPConfig,
     LocalConfig,
     MemoryConfig,
-    ObjectStore,
     OCIConfig,
     R2Config,
-    ReadableFile,
     S3Config,
     SigningConfig,
+    SyncObjectStore,
+    SyncReadableFile,
 )
 from vertebra.utils.serializers import encode_json_bytes
 
@@ -222,13 +222,13 @@ def test_gcs_adc_authorized_user_and_impersonation_flow(
 
 
 def test_gcs_v4_local_rsa_presigning_without_network() -> None:
-    """ObjectStore signs GCS V4 URLs locally via RSA-SHA256 when private_key_pem is provided."""
+    """SyncObjectStore signs GCS V4 URLs locally via RSA-SHA256 when private_key_pem is provided."""
     pem_key = subprocess.check_output(
         ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"],
         stderr=subprocess.DEVNULL,
         text=True,
     )
-    store = ObjectStore(
+    store = SyncObjectStore(
         "gs://ml-artifacts",
         signing=SigningConfig(
             provider="gcs",
@@ -249,7 +249,7 @@ def test_gcs_v4_local_rsa_presigning_without_network() -> None:
 
 def test_verify_presigned_url_gcs_raises_not_implemented() -> None:
     """Verifying a GCS presigned URL offline raises NotImplementedError."""
-    store = ObjectStore(
+    store = SyncObjectStore(
         "gs://ml-artifacts",
         signing=SigningConfig(
             provider="gcs",
@@ -286,7 +286,7 @@ def test_azure_sas_and_r2_uniform_chunking() -> None:
     assert "sp=cw" in signed_url
     assert "sig=" in signed_url
 
-    az_store = ObjectStore(
+    az_store = SyncObjectStore(
         "az://mycontainer",
         signing=SigningConfig(
             provider="azure",
@@ -304,12 +304,12 @@ def test_azure_sas_and_r2_uniform_chunking() -> None:
 
 
 def test_vertebra_readable_file_seek_slice_and_readinto() -> None:
-    """ReadableFile supports random-access range reads and zero-copy readinto buffers."""
-    store = ObjectStore.from_memory("arrow-test")
+    """SyncReadableFile supports random-access range reads and zero-copy readinto buffers."""
+    store = SyncObjectStore.from_memory("arrow-test")
     data = b"PAR1-column-chunk-0123456789-footer-PAR1"
     store.put("table.parquet", data)
 
-    with ReadableFile(store, "table.parquet") as f:
+    with SyncReadableFile(store, "table.parquet") as f:
         assert f.size == len(data)
         assert f.read(4) == b"PAR1"
         assert f.tell() == 4

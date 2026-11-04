@@ -44,12 +44,12 @@ from vertebra.server._loops import EventLoopPool
 from vertebra.server._rsgi._adapter import RsgiAdapter
 from vertebra.server.platform import SHMAllocationPolicy
 from vertebra.server.worker import _AsgiMountRunner, _instantiate_mount_runners
-from vertebra.storage import ObjectStore
+from vertebra.storage import AsyncObjectStore
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.portal import PortalProvider
 from vertebra.utils.sync_tools import (
     CapacityLimiter,
-    LoopShardedResource,
+    SyncLoopShardedResource,
     SyncPool,
     async_,
     run_,
@@ -108,14 +108,14 @@ async def test_storage_and_alchemy_zero_to_thread(tmp_path: Path) -> None:
     assert "to_thread" not in inspect.getsource(store_mod)
     assert "to_thread" not in inspect.getsource(alchemy_storage_mod)
 
-    store = ObjectStore("memory://")
+    store = AsyncObjectStore("memory://")
     sample_file = tmp_path / "sample.bin"
     sample_file.write_bytes(b"zero-copy-payload-12345")
 
-    put_res = await store.put_file_async("uploads/sample.bin", sample_file)
+    put_res = await store.put_file("uploads/sample.bin", sample_file)
     assert put_res.size == 23
 
-    view = await store.get_view_async("uploads/sample.bin")
+    view = await store.get_view("uploads/sample.bin")
     assert isinstance(view, memoryview)
     assert bytes(view) == b"zero-copy-payload-12345"
 
@@ -139,7 +139,7 @@ def test_portal_and_sync_tools_loop_sharding() -> None:
     sync_fn = run_(lambda x: asyncio.sleep(0, result=x + 10))
     assert sync_fn(5) == 15
 
-    sharded: LoopShardedResource[list[int]] = LoopShardedResource(lambda: [1, 2, 3])
+    sharded: SyncLoopShardedResource[list[int]] = SyncLoopShardedResource(lambda: [1, 2, 3])
     limiter = CapacityLimiter(4)
 
     async def _check_loop_affinity(expected_len: int) -> int:

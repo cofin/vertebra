@@ -22,8 +22,9 @@ if TYPE_CHECKING:
     from types import TracebackType
 
 __all__ = (
+    "AsyncLoopShardedResource",
     "CapacityLimiter",
-    "LoopShardedResource",
+    "SyncLoopShardedResource",
     "SyncPool",
     "async_",
     "run_",
@@ -37,22 +38,13 @@ def _is_gil_disabled() -> bool:
     return False
 
 
-class LoopShardedResource[T]:
-    """Lazily construct and cache one loop-affine resource instance per asyncio event loop."""
+class SyncLoopShardedResource[T]:
+    """Lazily construct and cache one loop-affine synchronous resource instance per asyncio event loop."""
 
-    __slots__ = ("_async_factory", "_by_loop", "_factory", "_lock")
+    __slots__ = ("_by_loop", "_factory", "_lock")
 
-    def __init__(
-        self,
-        factory: Callable[[], T] | None = None,
-        *,
-        async_factory: Callable[[], Awaitable[T]] | None = None,
-    ) -> None:
-        if factory is None and async_factory is None:
-            msg = "LoopShardedResource requires either factory or async_factory"
-            raise ValueError(msg)
+    def __init__(self, factory: Callable[[], T]) -> None:
         self._factory = factory
-        self._async_factory = async_factory
         self._by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, T] = weakref.WeakKeyDictionary()
         self._lock = threading.Lock()
 
@@ -68,9 +60,6 @@ class LoopShardedResource[T]:
         existing = self._by_loop.get(target_loop)
         if existing is not None:
             return existing
-        if self._factory is None:
-            msg = "LoopShardedResource configured with async_factory must be accessed via await get_async()"
-            raise RuntimeError(msg)
         with self._lock:
             existing = self._by_loop.get(target_loop)
             if existing is None:
@@ -78,21 +67,41 @@ class LoopShardedResource[T]:
                 self._by_loop[target_loop] = existing
             return existing
 
-    async def get_async(self, loop: asyncio.AbstractEventLoop | None = None) -> T:
-        """Return the resource bound to the current or specified event loop, awaiting async_factory if needed."""
+    def clear(self) -> None:
+        """Remove all cached loop shards."""
+        with self._lock:
+            self._by_loop.clear()
+
+
+class AsyncLoopShardedResource[T]:
+    """Lazily construct and cache one loop-affine asynchronous resource instance per asyncio event loop."""
+
+    __slots__ = ("_async_factory", "_by_loop", "_lock")
+
+    def __init__(self, factory: Callable[[], Awaitable[T]]) -> None:
+        self._async_factory = factory
+        self._by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, T] = weakref.WeakKeyDictionary()
+        self._lock = threading.Lock()
+
+    @property
+    def shard_count(self) -> int:
+        """Return the number of active event-loop shards holding an initialized resource."""
+        with self._lock:
+            return len(self._by_loop)
+
+    async def get(self, loop: asyncio.AbstractEventLoop | None = None) -> T:
+        """Return the resource bound to the current or specified event loop, awaiting factory if needed."""
         target_loop = loop or asyncio.get_running_loop()
         existing = self._by_loop.get(target_loop)
         if existing is not None:
             return existing
-        if self._async_factory is not None:
-            created = await self._async_factory()
-            with self._lock:
-                existing = self._by_loop.get(target_loop)
-                if existing is None:
-                    self._by_loop[target_loop] = created
-                    return created
-                return existing
-        return self.get(target_loop)
+        created = await self._async_factory()
+        with self._lock:
+            existing = self._by_loop.get(target_loop)
+            if existing is None:
+                self._by_loop[target_loop] = created
+                return created
+            return existing
 
     def clear(self) -> None:
         """Remove all cached loop shards."""
@@ -100,7 +109,7 @@ class LoopShardedResource[T]:
             self._by_loop.clear()
 
 
-class _LoopCompletionQueue:
+class _AsyncCompletionQueue:
     """Per-event-loop completion queue coalescing worker-thread wakeups into a single callback."""
 
     __slots__ = ("_items", "_lock", "_loop_ref", "_wake_armed")
@@ -156,7 +165,7 @@ class SyncPool:
         self._max_workers = max(1, max_workers if max_workers is not None else cpu_count * 2)
         self._executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._pid: int | None = None
-        self._loop_queues: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _LoopCompletionQueue] = (
+        self._loop_queues: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _AsyncCompletionQueue] = (
             weakref.WeakKeyDictionary()
         )
         self._loop_queues_lock = threading.Lock()
@@ -212,14 +221,14 @@ class SyncPool:
             self._executor = None
             self._pid = None
 
-    def _get_loop_queue(self, loop: asyncio.AbstractEventLoop) -> _LoopCompletionQueue:
+    def _get_loop_queue(self, loop: asyncio.AbstractEventLoop) -> _AsyncCompletionQueue:
         queue = self._loop_queues.get(loop)
         if queue is not None:
             return queue
         with self._loop_queues_lock:
             queue = self._loop_queues.get(loop)
             if queue is None:
-                queue = _LoopCompletionQueue(loop)
+                queue = _AsyncCompletionQueue(loop)
                 self._loop_queues[loop] = queue
             return queue
 

@@ -17,6 +17,7 @@ from vertebra.cli import run as cli_run_mod
 from vertebra.cli._launch import ServerLaunchEnv
 from vertebra.cli.banner.renderer import render_banner
 from vertebra.cli.errors import CLIError
+from vertebra.cli.plugin_registry import ensure_vertebra_integration
 from vertebra.cli.theme import Console
 from vertebra.framework._app import _make_handler_id
 from vertebra.server.worker import Worker
@@ -337,3 +338,91 @@ def test_worker_init_finalizes_dev_welcome_route_on_app_instance(
     app = App(debug=True)
     worker = Worker(app)
     assert _make_handler_id("GET", "/") in worker._handlers
+
+
+def test_vertebra_extension_group_plugin_cli_and_auto_integration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify `vtb --app ...` loads CLIPlugin commands with injected app/env, supports optional APP on `vtb run`, and auto-attaches VertebraPlugin."""
+    app_module = tmp_path / "custom_cli_app.py"
+    app_module.write_text(
+        "import click\n"
+        "from vertebra import App\n"
+        "from vertebra.cli.plugin_registry import CLIPlugin, VertebraEnv\n\n"
+        "class SeedPlugin(CLIPlugin):\n"
+        "    def on_cli_init(self, cli: click.Group) -> None:\n"
+        "        @cli.command('seed-data')\n"
+        "        def seed_data(app: App, env: VertebraEnv) -> None:\n"
+        "            click.echo(f'seeded:{type(app).__name__}:{env.app_path}')\n\n"
+        "app = App(plugins=[SeedPlugin()])\n"
+        "@app.get('/ok')\n"
+        "def ok() -> dict[str, str]:\n"
+        "    return {'ok': 'yes'}\n",
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    plugin_res = runner.invoke(
+        cli,
+        ["--app-dir", str(tmp_path), "--app", "custom_cli_app:app", "seed-data"],
+    )
+    assert plugin_res.exit_code == 0, plugin_res.output
+    assert "seeded:App:custom_cli_app:app" in plugin_res.output
+
+    captured: dict[str, Any] = {}
+
+    def fake_build_cmd() -> list[str]:
+        return ["/bin/true"]
+
+    def fake_supervisor(*, server_cmd: list[str], env: dict[str, str], **_kwargs: Any) -> int:
+        captured["cmd"] = server_cmd
+        captured["env"] = dict(env)
+        return 0
+
+    monkeypatch.setattr(cli_run_mod, "build_server_command", fake_build_cmd)
+    monkeypatch.setattr(cli_run_mod, "run_supervisor", fake_supervisor)
+
+    run_res = runner.invoke(
+        cli,
+        ["--app-dir", str(tmp_path), "--app", "custom_cli_app:app", "run", "--no-banner"],
+    )
+    assert run_res.exit_code == 0, run_res.output
+    assert captured["env"]["VERTEBRA_APP"] == "custom_cli_app:app"
+
+    litestar_app_mod = tmp_path / "unmodified_ls.py"
+    litestar_app_mod.write_text(
+        "from litestar import Litestar, get\n"
+        "from litestar.config.compression import CompressionConfig\n\n"
+        "@get('/auto', sync_to_thread=False)\n"
+        "def auto_route() -> dict[str, str]:\n"
+        "    return {'auto': 'attached'}\n\n"
+        "app = Litestar(\n"
+        "    route_handlers=[auto_route],\n"
+        "    compression_config=CompressionConfig(backend='gzip', minimum_size=128),\n"
+        ")\n",
+        encoding="utf-8",
+    )
+
+    ls_run_res = runner.invoke(
+        cli,
+        ["--app-dir", str(tmp_path), "--app", "unmodified_ls:app", "run", "--no-banner"],
+    )
+    assert ls_run_res.exit_code == 0, ls_run_res.output
+    assert captured["env"]["VERTEBRA_APP"] == "unmodified_ls:app"
+    assert "VERTEBRA_OFFLOAD_CONFIG" in captured["env"]
+
+    class _FakeStarletteApp:
+        def __init__(self) -> None:
+            self.routes: list[Any] = []
+            self.user_middleware: list[Any] = []
+            self.exception_handlers: dict[Any, Any] = {}
+            self.state = type("State", (), {})()
+            self.router = type("Router", (), {"routes": self.routes})()
+
+        async def __call__(self, _scope: Any, _receive: Any, _send: Any) -> None:
+            return None
+
+    fake_st = _FakeStarletteApp()
+    ensure_vertebra_integration(fake_st, native=True)
+    assert getattr(fake_st, "__vertebra_fastpath__", None) is not None

@@ -1,4 +1,4 @@
-"""Configuration for StarlettePlugin integration."""
+"""Configuration for VertebraPlugin integration in Starlette."""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ from typing import Any
 
 import msgspec
 
-__all__ = ("StarletteConfig",)
+__all__ = ("VertebraConfig",)
 
 
-class StarletteConfig(msgspec.Struct, frozen=True, gc=False):
+class VertebraConfig(msgspec.Struct, frozen=True, gc=False):
     """Configuration controlling Starlette Rust accelerations, fastpath dispatch, and ecosystem bridges."""
 
     offload_compression: bool = True

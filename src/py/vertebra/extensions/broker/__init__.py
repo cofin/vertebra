@@ -4,22 +4,28 @@ from __future__ import annotations
 
 from vertebra.extensions.broker.plugin import BrokerPlugin
 from vertebra.extensions.broker.transport import (
+    AsyncConnectionLease,
+    AsyncInMemoryBrokerTransport,
+    AsyncSHMBrokerTransport,
     BrokerConfig,
     BrokerMetrics,
     ChannelMessage,
-    ConnectionLease,
-    InMemoryBrokerTransport,
-    SHMBrokerTransport,
     StatementPlan,
+    SyncConnectionLease,
+    SyncInMemoryBrokerTransport,
+    SyncSHMBrokerTransport,
 )
 
 __all__ = (
+    "AsyncConnectionLease",
+    "AsyncInMemoryBrokerTransport",
+    "AsyncSHMBrokerTransport",
     "BrokerConfig",
     "BrokerMetrics",
     "BrokerPlugin",
     "ChannelMessage",
-    "ConnectionLease",
-    "InMemoryBrokerTransport",
-    "SHMBrokerTransport",
     "StatementPlan",
+    "SyncConnectionLease",
+    "SyncInMemoryBrokerTransport",
+    "SyncSHMBrokerTransport",
 )

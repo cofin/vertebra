@@ -4,10 +4,11 @@ Provides routing, Controller and ProcedureRouter registration, hierarchical DI,
 sub-application mounting, handler ID indexing, and startup/shutdown lifecycle hooks.
 """
 
+import contextlib
 import functools
 import inspect
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, cast
 
 import msgspec
@@ -72,10 +73,11 @@ class App:
         route_handlers: Sequence[Any] = (),
         dependencies: Mapping[str, Any] | None = None,
         guards: Sequence[Callable[..., Any]] | None = None,
+        plugins: Sequence[Any] = (),
         container: Container | None = None,
         debug: bool = False,
     ) -> None:
-        """Initialize an App with optional route_handlers, dependencies, guards, DI container, and debug flag."""
+        """Initialize an App with optional route_handlers, dependencies, guards, plugins, DI container, and debug flag."""
         self._debug: bool = bool(debug)
         self._welcome_route_active: bool = False
         self._routers: list[Router] = []
@@ -107,6 +109,8 @@ class App:
         )
         for item in route_handlers:
             self.register(item)
+        for plugin in plugins:
+            self.register(plugin)
 
     @property
     def routes(self) -> tuple[Route, ...]:
@@ -289,12 +293,29 @@ class App:
                 self._container.graph.register(conn_key, target.provide_connection)
             return target
 
-        if hasattr(target, "on_app_init") or hasattr(target, "server_lifespan"):
-            self._plugins.append(target)
+        if hasattr(target, "on_app_init") or hasattr(target, "on_cli_init") or hasattr(target, "server_lifespan"):
+            if target not in self._plugins:
+                self._plugins.append(target)
+            on_init = getattr(target, "on_app_init", None)
+            if callable(on_init):
+                with contextlib.suppress(TypeError, AttributeError):
+                    on_init(self)
             return target
 
-        msg = "register expects a Router, Controller, ProcedureRouter, Procedure, Route, or decorated handler"
+        msg = "register expects a Router, Controller, ProcedureRouter, Procedure, Route, plugin, or decorated handler"
         raise TypeError(msg)
+
+    @contextlib.contextmanager
+    def lifespan(self) -> Iterator[None]:
+        """Enter server_lifespan context managers for all registered CLI/server plugins."""
+        with contextlib.ExitStack() as stack:
+            for plugin in self._plugins:
+                lifespan_fn = getattr(plugin, "server_lifespan", None)
+                if callable(lifespan_fn):
+                    cm = lifespan_fn(self)
+                    if hasattr(cm, "__enter__"):
+                        stack.enter_context(cm)
+            yield
 
     async def call_procedure(self, name: str, payload: Any = None, *, request: Any = None) -> Any:
         """Invoke a registered RPC Procedure by name using the application's DI container."""

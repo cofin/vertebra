@@ -26,14 +26,19 @@ from vertebra.utils.serializers import decode_json, encode_json
 from vertebra.utils.sync_tools import SyncPool
 
 __all__ = (
-    "EmbeddedSSRClient",
-    "SSRClient",
+    "AsyncEmbeddedSSRClient",
+    "AsyncSSRClient",
+    "AsyncSidecarSSRClient",
     "SSRConfig",
     "SSRFrame",
+    "SSRRenderTimeoutError",
     "SSRResult",
-    "SidecarSSRClient",
-    "SsrRenderTimeoutError",
+    "SyncEmbeddedSSRClient",
+    "SyncSSRClient",
+    "SyncSidecarSSRClient",
+    "create_async_ssr_client",
     "create_ssr_client",
+    "create_sync_ssr_client",
     "prerender_routes",
     "render_page_shell",
 )
@@ -43,7 +48,7 @@ logger = logging.getLogger(__name__)
 _bundler = import_optional("vertebra._bundler")
 
 
-class SsrRenderTimeoutError(TimeoutError):
+class SSRRenderTimeoutError(TimeoutError):
     """Raised when a native QuickJS or sidecar SSR render exceeds its configured deadline."""
 
 
@@ -93,18 +98,17 @@ class SSRResult(msgspec.Struct, frozen=True, gc=False):
     fallback_csr: bool = False
 
 
-class SSRClient(Protocol):
-    """Unified SSR client protocol implemented by native and sidecar engines."""
+class SyncSSRClient(Protocol):
+    """Synchronous SSR client protocol implemented by native and sidecar engines."""
 
     def render(self, page: dict[str, Any]) -> SSRResult: ...
-    async def render_async(self, page: dict[str, Any]) -> SSRResult: ...
     def invalidate(self, paths: list[str] | None = None) -> None: ...
     def stop(self) -> None: ...
 
     @staticmethod
-    def from_config(config: SSRConfig) -> SSRClient | None:
-        """Instantiate an SSRClient from an SSRConfig."""
-        return create_ssr_client(
+    def from_config(config: SSRConfig) -> SyncSSRClient | None:
+        """Instantiate a SyncSSRClient from an SSRConfig."""
+        return create_sync_ssr_client(
             mode=config.mode,
             entry=config.entry or config.bundle_path,
             pool_size=config.pool_size,
@@ -112,21 +116,42 @@ class SSRClient(Protocol):
         )
 
 
-class EmbeddedSSRClient:
-    """Embedded QuickJS isolate pool in the vertebra-bundler Rust extension."""
+class AsyncSSRClient(Protocol):
+    """Asynchronous SSR client protocol implemented by native and sidecar engines."""
+
+    async def render(self, page: dict[str, Any]) -> SSRResult: ...
+    def invalidate(self, paths: list[str] | None = None) -> None: ...
+    def stop(self) -> None: ...
+
+    @staticmethod
+    def from_config(config: SSRConfig) -> AsyncSSRClient | None:
+        """Instantiate an AsyncSSRClient from an SSRConfig."""
+        return create_async_ssr_client(
+            mode=config.mode,
+            entry=config.entry or config.bundle_path,
+            pool_size=config.pool_size,
+            sidecar_port=config.sidecar_port,
+        )
+
+
+class SyncEmbeddedSSRClient:
+    """Embedded QuickJS isolate pool in the vertebra-bundler Rust extension (sync)."""
 
     __slots__ = ("_pool",)
 
-    @staticmethod
-    def from_config(config: SSRConfig) -> SSRClient | None:
-        """Instantiate an SSRClient from an SSRConfig."""
-        return SSRClient.from_config(config)
-
     def __init__(self, bundle_path: str, pool_size: int = 4, timeout_ms: int = 1000) -> None:
         if _bundler is None:
-            msg = "vertebra._bundler native extension is required for EmbeddedSSRClient"
+            msg = "vertebra._bundler native extension is required for SyncEmbeddedSSRClient"
             raise ImportError(msg)
         self._pool = _bundler.SSRPool(bundle_path, pool_size, timeout_ms)
+
+    @staticmethod
+    def from_config(config: SSRConfig) -> SyncEmbeddedSSRClient | None:
+        """Instantiate a SyncEmbeddedSSRClient from an SSRConfig."""
+        entry = config.entry or config.bundle_path
+        if not entry:
+            return None
+        return SyncEmbeddedSSRClient(entry, pool_size=config.pool_size, timeout_ms=config.timeout_ms)
 
     def render(self, page: dict[str, Any]) -> SSRResult:
         """Render an Inertia page object via the native QuickJS pool."""
@@ -137,7 +162,7 @@ class EmbeddedSSRClient:
             )
         except Exception as exc:
             if "timed out" in str(exc).lower():
-                raise SsrRenderTimeoutError(str(exc)) from exc
+                raise SSRRenderTimeoutError(str(exc)) from exc
             raise
         return SSRResult(
             html=result.body,
@@ -146,10 +171,6 @@ class EmbeddedSSRClient:
             status=200,
             fallback_csr=False,
         )
-
-    async def render_async(self, page: dict[str, Any]) -> SSRResult:
-        """Render an Inertia page object asynchronously via the native QuickJS pool."""
-        return await SyncPool.default().submit_async(self.render, page)
 
     def invalidate(self, paths: list[str] | None = None) -> None:
         """Invalidate cached modules in the QuickJS pool."""
@@ -161,18 +182,42 @@ class EmbeddedSSRClient:
         self._pool.shutdown()
 
 
-class SidecarSSRClient:
-    """Inertia SSR server managed as an external Node.js or Bun subprocess."""
+class AsyncEmbeddedSSRClient:
+    """Embedded QuickJS isolate pool in the vertebra-bundler Rust extension (async)."""
+
+    __slots__ = ("_sync_client",)
+
+    def __init__(self, bundle_path: str, pool_size: int = 4, timeout_ms: int = 1000) -> None:
+        self._sync_client = SyncEmbeddedSSRClient(bundle_path, pool_size=pool_size, timeout_ms=timeout_ms)
+
+    @staticmethod
+    def from_config(config: SSRConfig) -> AsyncEmbeddedSSRClient | None:
+        """Instantiate an AsyncEmbeddedSSRClient from an SSRConfig."""
+        entry = config.entry or config.bundle_path
+        if not entry:
+            return None
+        return AsyncEmbeddedSSRClient(entry, pool_size=config.pool_size, timeout_ms=config.timeout_ms)
+
+    async def render(self, page: dict[str, Any]) -> SSRResult:
+        """Render an Inertia page object asynchronously via the native QuickJS pool."""
+        return await SyncPool.default().submit_async(self._sync_client.render, page)
+
+    def invalidate(self, paths: list[str] | None = None) -> None:
+        """Invalidate cached modules in the QuickJS pool."""
+        self._sync_client.invalidate(paths)
+
+    def stop(self) -> None:
+        """Shut down the QuickJS isolate pool."""
+        self._sync_client.stop()
+
+
+class _BaseSidecarSSRClient:
+    """Base class for Inertia SSR server managed as an external Node.js or Bun subprocess."""
 
     __slots__ = ("_entry", "_port", "_process")
 
     _STARTUP_TIMEOUT: float = 30.0
     _SHUTDOWN_TIMEOUT: float = 5.0
-
-    @staticmethod
-    def from_config(config: SSRConfig) -> SSRClient | None:
-        """Instantiate an SSRClient from an SSRConfig."""
-        return SSRClient.from_config(config)
 
     def __init__(self, entry: str, port: int = 13714) -> None:
         self._entry = entry
@@ -183,34 +228,6 @@ class SidecarSSRClient:
     @property
     def _base_url(self) -> str:
         return f"http://127.0.0.1:{self._port}"
-
-    def render(self, page: dict[str, Any]) -> SSRResult:
-        """Render an Inertia page object via HTTP POST to the sidecar /render endpoint."""
-        data = encode_json(page, as_bytes=True)
-        req = urllib.request.Request(
-            f"{self._base_url}/render",
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                result = decode_json(resp.read())
-                body_content = result.get("body", "")
-                return SSRResult(
-                    html=body_content,
-                    head=result.get("head", []),
-                    body=body_content,
-                    status=200,
-                    fallback_csr=False,
-                )
-        except Exception as exc:
-            msg = f"SSR sidecar render failed: {exc}"
-            raise RuntimeError(msg) from exc
-
-    async def render_async(self, page: dict[str, Any]) -> SSRResult:
-        """Render an Inertia page object asynchronously via HTTP POST to the sidecar."""
-        return await SyncPool.default().submit_async(self.render, page)
 
     def invalidate(self, paths: list[str] | None = None) -> None:
         """Invalidate cached modules in sidecar mode."""
@@ -237,6 +254,30 @@ class SidecarSSRClient:
             else:
                 process.terminate()
             process.wait(timeout=self._SHUTDOWN_TIMEOUT)
+
+    def _render_sync(self, page: dict[str, Any]) -> SSRResult:
+        """Render an Inertia page object synchronously via HTTP POST to the sidecar."""
+        data = encode_json(page, as_bytes=True)
+        req = urllib.request.Request(
+            f"{self._base_url}/render",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                result = decode_json(resp.read())
+                body_content = result.get("body", "")
+                return SSRResult(
+                    html=body_content,
+                    head=result.get("head", []),
+                    body=body_content,
+                    status=200,
+                    fallback_csr=False,
+                )
+        except Exception as exc:
+            msg = f"SSR sidecar render failed: {exc}"
+            raise RuntimeError(msg) from exc
 
     def _start(self) -> None:
         runtime = shutil.which("bun") or shutil.which("node")
@@ -281,28 +322,108 @@ class SidecarSSRClient:
         return False
 
 
+class SyncSidecarSSRClient(_BaseSidecarSSRClient):
+    """Inertia SSR server managed as an external Node.js or Bun subprocess (sync)."""
+
+    @staticmethod
+    def from_config(config: SSRConfig) -> SyncSidecarSSRClient | None:
+        """Instantiate a SyncSidecarSSRClient from an SSRConfig."""
+        entry = config.entry or config.bundle_path
+        if not entry:
+            return None
+        return SyncSidecarSSRClient(entry, port=config.sidecar_port)
+
+    def render(self, page: dict[str, Any]) -> SSRResult:
+        """Render an Inertia page object via HTTP POST to the sidecar /render endpoint."""
+        return self._render_sync(page)
+
+
+class AsyncSidecarSSRClient(_BaseSidecarSSRClient):
+    """Inertia SSR server managed as an external Node.js or Bun subprocess (async)."""
+
+    @staticmethod
+    def from_config(config: SSRConfig) -> AsyncSidecarSSRClient | None:
+        """Instantiate an AsyncSidecarSSRClient from an SSRConfig."""
+        entry = config.entry or config.bundle_path
+        if not entry:
+            return None
+        return AsyncSidecarSSRClient(entry, port=config.sidecar_port)
+
+    async def render(self, page: dict[str, Any]) -> SSRResult:
+        """Render an Inertia page object asynchronously via HTTP POST to the sidecar."""
+        return await SyncPool.default().submit_async(self._render_sync, page)
+
+
+def create_sync_ssr_client(
+    *,
+    mode: str = "native",
+    entry: str | None = None,
+    pool_size: int = 4,
+    sidecar_port: int = 13714,
+) -> SyncSSRClient | None:
+    """Create the appropriate synchronous SSR client based on mode."""
+    if not entry:
+        return None
+
+    if mode == "native":
+        try:
+            return SyncEmbeddedSSRClient(entry, pool_size)
+        except ImportError:
+            logger.warning("Native SSR (vertebra._bundler) unavailable. Falling back to sidecar mode.")
+            return SyncSidecarSSRClient(entry, sidecar_port)
+        except Exception:
+            logger.exception("Native SSR init failed, falling back to sidecar")
+            return SyncSidecarSSRClient(entry, sidecar_port)
+
+    return SyncSidecarSSRClient(entry, sidecar_port)
+
+
+def create_async_ssr_client(
+    *,
+    mode: str = "native",
+    entry: str | None = None,
+    pool_size: int = 4,
+    sidecar_port: int = 13714,
+) -> AsyncSSRClient | None:
+    """Create the appropriate asynchronous SSR client based on mode."""
+    if not entry:
+        return None
+
+    if mode == "native":
+        try:
+            return AsyncEmbeddedSSRClient(entry, pool_size)
+        except ImportError:
+            logger.warning("Native SSR (vertebra._bundler) unavailable. Falling back to sidecar mode.")
+            return AsyncSidecarSSRClient(entry, sidecar_port)
+        except Exception:
+            logger.exception("Native SSR init failed, falling back to sidecar")
+            return AsyncSidecarSSRClient(entry, sidecar_port)
+
+    return AsyncSidecarSSRClient(entry, sidecar_port)
+
+
 def create_ssr_client(
     *,
     mode: str = "native",
     entry: str | None = None,
     pool_size: int = 4,
     sidecar_port: int = 13714,
-) -> SSRClient | None:
-    """Create the appropriate SSR client based on mode, falling back to sidecar if needed."""
-    if not entry:
-        return None
-
-    if mode == "native":
-        try:
-            return EmbeddedSSRClient(entry, pool_size)
-        except ImportError:
-            logger.warning("Native SSR (vertebra._bundler) unavailable. Falling back to sidecar mode.")
-            return SidecarSSRClient(entry, sidecar_port)
-        except Exception:
-            logger.exception("Native SSR init failed, falling back to sidecar")
-            return SidecarSSRClient(entry, sidecar_port)
-
-    return SidecarSSRClient(entry, sidecar_port)
+    async_mode: bool = False,
+) -> SyncSSRClient | AsyncSSRClient | None:
+    """Create the appropriate SSR client based on mode and concurrency model."""
+    if async_mode:
+        return create_async_ssr_client(
+            mode=mode,
+            entry=entry,
+            pool_size=pool_size,
+            sidecar_port=sidecar_port,
+        )
+    return create_sync_ssr_client(
+        mode=mode,
+        entry=entry,
+        pool_size=pool_size,
+        sidecar_port=sidecar_port,
+    )
 
 
 def render_page_shell(
@@ -364,7 +485,7 @@ def render_page_shell(
 
 def prerender_routes(
     *,
-    ssr_client: SSRClient,
+    ssr_client: SyncSSRClient,
     routes: list[dict[str, Any]],
     outdir: Path,
     version: str = "prerendered",

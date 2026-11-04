@@ -1,36 +1,45 @@
 # `vertebra.db` — Database Drivers, Analytics Engines & Cloud Dialers
 
-Native database configurations, synchronous and asynchronous drivers, single-RTT CTE query pipelines (`QueryPipeline`, `RelOverlay`), Apache Arrow shared-memory cursors (`ArrowCursor`), DataFusion federated analytics (`DataFusionEngine`), Change Data Capture (`ChangeFeed`), planner-unfenced Row-Level Security (`TenantPredicate`), and zero-sidecar Cloud SQL / AlloyDB dialers. See the [Databases & Analytics Usage Guide](../usage/databases.md) for architectural patterns and examples.
+Native database configurations, synchronous and asynchronous drivers, single-RTT CTE query pipelines (`SyncQueryPipeline`, `AsyncQueryPipeline`, `RelOverlay`), Apache Arrow shared-memory cursors (`ArrowCursor`), DataFusion federated analytics (`DataFusionEngine`), Change Data Capture (`ChangeFeed`), planner-unfenced Row-Level Security (`TenantPredicate`), and zero-sidecar Cloud SQL / AlloyDB dialers. See the [Databases & Analytics Usage Guide](../usage/databases.md) for architectural patterns and examples.
 
 | Category | Classes | Highlights |
 | --- | --- | --- |
 | **SQLSpec Adapters (Litestar)** | `PostgreSQLAsyncConfig`, `MySQLAsyncConfig`, `SQLiteAsyncConfig`, `OracleAsyncConfig`, `MSSQLAsyncConfig`, `DuckDBAsyncConfig`, `BigQueryAsyncConfig`, `SpannerAsyncConfig` | Canonical Litestar adapter configurations (`vertebra.extensions.sqlspec`) backed by native Rust drivers and connection leasing |
-| **Registry & CTE Pipelines** | `DatabaseRegistry`, `QueryPipeline`, `CTEStep`, `RelOverlay`, `ArrowCursor` | Named driver management, single-RTT read-your-own-writes CTE compilation (`postgresql` and `googlesql`), and zero-copy Arrow IPC cursors |
+| **Registry & CTE Pipelines** | `DatabaseRegistry`, `SyncQueryPipeline`, `AsyncQueryPipeline`, `CTEStep`, `RelOverlay`, `ArrowCursor` | Named driver management, single-RTT read-your-own-writes CTE compilation (`postgresql` and `googlesql`), and zero-copy Arrow IPC cursors |
 | **Relational & OLAP Configs** | `PostgreSQLConfig`, `MySQLConfig`, `SQLiteConfig`, `OracleConfig`, `MSSQLConfig`, `DuckDBConfig`, `BigQueryConfig`, `SpannerConfig` | Pooler-aware statement caching, WAL/mmap pragmas, Oracle 26ai `VECTOR`/`OSON` & Cloud Wallets, TDS 7.4 `@P1` rewriting, DuckDB Arrow streaming, BigQuery Storage Read/Write v1 + Object Tables, and Cloud Spanner Multiplexed Sessions + `BatchWrite` |
 | **RESP3 & Federated SQL** | `RedisConfig`, `ValkeyConfig`, `DataFusionEngine` | RESP3 `HELLO 3` client-side cache invalidation, Cluster/Sentinel routing, and cross-engine SQL federation |
-| **Cloud Dialers, CDC & RLS** | `AlloyDBConfig`, `AlloyDBDialer`, `CloudSQLConfig`, `CloudSQLDialer`, `ChangeFeed`, `SpannerChangeStreamSource`, `TenantScopeConfig`, `TenantPredicate` | Direct TCP/TLS IAM OAuth2 token password resolution (`:5432`, `:3306`), zero-sidecar `:5433` AlloyDB and `:3307` Cloud SQL mTLS connectors, logical replication / Spanner change-stream streaming, and index-friendly tenant isolation |
+| **Cloud Dialers, CDC & RLS** | `AlloyDBConfig`, `SyncAlloyDBDialer`, `AsyncAlloyDBDialer`, `CloudSQLConfig`, `SyncCloudSQLDialer`, `AsyncCloudSQLDialer`, `ChangeFeed`, `SyncSpannerChangeStreamSource`, `AsyncSpannerChangeStreamSource`, `TenantScopeConfig`, `TenantPredicate` | Direct TCP/TLS IAM OAuth2 token password resolution (`:5432`, `:3306`), zero-sidecar `:5433` AlloyDB and `:3307` Cloud SQL mTLS connectors, logical replication / Spanner change-stream streaming, and index-friendly tenant isolation |
 
 ## Database Registry & Query Pipeline
 
-`DatabaseRegistry` manages named driver configurations across an application, while `QueryPipeline` and `RelOverlay` compile multi-step reads and mutations into a single PostgreSQL round-trip.
+`DatabaseRegistry` manages named driver configurations across an application, while `SyncQueryPipeline` / `AsyncQueryPipeline` and `RelOverlay` compile multi-step reads and mutations into a single PostgreSQL round-trip.
 
 ::: vertebra.db._registry.DatabaseRegistry
     options:
       heading_level: 3
       members:
         - register
-        - get
+        - get_sync_driver
+        - get_async_driver
         - close_all
 
-::: vertebra.db.pipeline.QueryPipeline
+::: vertebra.db.pipeline.SyncQueryPipeline
     options:
       heading_level: 3
       members:
-        - add_cte
+        - add_step
         - add_overlay
         - compile
         - execute
-        - execute_async
+
+::: vertebra.db.pipeline.AsyncQueryPipeline
+    options:
+      heading_level: 3
+      members:
+        - add_step
+        - add_overlay
+        - compile
+        - execute
 
 ::: vertebra._vertebra.ArrowCursor
     options:

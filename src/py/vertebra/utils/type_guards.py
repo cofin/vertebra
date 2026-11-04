@@ -27,8 +27,8 @@ if TYPE_CHECKING:
 __all__ = (
     "AsyncReadable",
     "DictProtocol",
-    "Readable",
     "SupportsClose",
+    "SyncReadable",
     "dataclass_to_dict",
     "extract_dataclass_fields",
     "extract_dataclass_items",
@@ -62,7 +62,7 @@ class DictProtocol(Protocol):
 
 
 @runtime_checkable
-class Readable(Protocol):
+class SyncReadable(Protocol):
     """Protocol for synchronous readable file-like streams."""
 
     def read(self, size: int = -1, /) -> Any:
@@ -162,7 +162,7 @@ def is_iterable_parameters(obj: Any) -> TypeGuard[Iterable[Any]]:
     return isinstance(obj, Iterable)
 
 
-def is_readable(obj: Any) -> TypeGuard[Readable]:
+def is_readable(obj: Any) -> TypeGuard[SyncReadable]:
     """Check if ``obj`` has a synchronous callable ``read`` method."""
     read_attr = getattr(obj, "read", None)
     return callable(read_attr) and not inspect.iscoroutinefunction(read_attr)

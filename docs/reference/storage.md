@@ -1,18 +1,18 @@
 # `vertebra.storage` — Multi-Cloud & Local Object Storage
 
-Typed object storage configurations, GIL-free `ObjectStore` operations, HMAC and cloud-native URL presigning (`SigningConfig`), and random-access range readers (`ReadableFile`) backed by `vertebra-storage`. See the [Object Storage Usage Guide](../usage/storage.md) for backend selection and examples.
+Typed object storage configurations, GIL-free `SyncObjectStore` and `AsyncObjectStore` operations, HMAC and cloud-native URL presigning (`SigningConfig`), and random-access range readers (`SyncReadableFile` and `AsyncReadableFile`) backed by `vertebra-storage`. See the [Object Storage Usage Guide](../usage/storage.md) for backend selection and examples.
 
 | Component | Classes | Purpose |
 | --- | --- | --- |
-| **Store** | `ObjectStore`, `SyncStore`, `AsyncStore` | Synchronous and asynchronous object I/O (`put`, `get`, `head`, `delete`, `list`, `copy`) |
-| **Backend Configs** | `S3Config`, `GCSConfig`, `AzureConfig`, `R2Config`, `OCIConfig`, `LocalConfig`, `MemoryConfig`, `HttpConfig` | Frozen `msgspec.Struct` backend configurations for AWS S3, GCS (with ADC), Azure Blob, Cloudflare R2, native OCI REST v2, local disk, in-memory, and HTTP/WebDAV |
-| **Signing & Range Reads** | `ObjectMeta`, `SigningConfig`, `ReadableFile` | Presigned URLs (HMAC, SigV4, GCS V4, Azure SAS, OCI Cavage) and PyArrow seekable range readers |
+| **Store** | `SyncObjectStore`, `AsyncObjectStore` | Synchronous and asynchronous object I/O (`put`, `get`, `head`, `delete`, `list`, `copy`) |
+| **Backend Configs** | `S3Config`, `GCSConfig`, `AzureConfig`, `R2Config`, `OCIConfig`, `LocalConfig`, `MemoryConfig`, `HTTPConfig` | Frozen `msgspec.Struct` backend configurations for AWS S3, GCS (with ADC), Azure Blob, Cloudflare R2, native OCI REST v2, local disk, in-memory, and HTTP/WebDAV |
+| **Signing & Range Reads** | `ObjectMeta`, `SigningConfig`, `SyncReadableFile`, `AsyncReadableFile` | Presigned URLs (HMAC, SigV4, GCS V4, Azure SAS, OCI Cavage) and PyArrow seekable range readers |
 
 ## Object Store
 
-`ObjectStore` wraps the Rust `object_store` runtime with zero-copy `Buffer` support.
+`SyncObjectStore` and `AsyncObjectStore` wrap the Rust `object_store` runtime with zero-copy `Buffer` support.
 
-::: vertebra.storage._store.ObjectStore
+::: vertebra.storage._store.SyncObjectStore
     options:
       heading_level: 3
       members:
@@ -23,8 +23,24 @@ Typed object storage configurations, GIL-free `ObjectStore` operations, HMAC and
         - delete
         - list
         - copy
-        - presign
-        - open_readable
+        - presign_get
+        - presign_put
+        - open_reader
+
+::: vertebra.storage._store.AsyncObjectStore
+    options:
+      heading_level: 3
+      members:
+        - from_url
+        - put
+        - get
+        - head
+        - delete
+        - list
+        - copy
+        - presign_get
+        - presign_put
+        - open_reader
 
 ## Cloud & Local Backend Configurations
 
@@ -80,7 +96,12 @@ Typed object storage configurations, GIL-free `ObjectStore` operations, HMAC and
       heading_level: 4
       members: false
 
-::: vertebra.storage._store.ReadableFile
+::: vertebra.storage._store.SyncReadableFile
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.storage._store.AsyncReadableFile
     options:
       heading_level: 4
       members: false

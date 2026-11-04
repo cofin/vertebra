@@ -14,32 +14,33 @@ import starlette.requests
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope, Request
 from vertebra.extensions.django import (
-    DjangoPlugin,
-)
-from vertebra.extensions.django import (
     MsgspecView as DjangoMsgspecView,
 )
+from vertebra.extensions.django import (
+    VertebraPlugin as DjangoVertebraPlugin,
+)
 from vertebra.extensions.fastapi import (
-    FastAPIConfig,
-    FastAPIPlugin,
     FastPath,
     MsgspecJSONResponse,
     OpenAPIConfig,
     RouteCompiler,
     SwaggerDocsConfig,
+    VertebraConfig,
+    VertebraPlugin,
     WebMCPConfig,
     compile_dependant_plan,
     execute_dependant_plan,
     mcp_tool,
     offload_middlewares,
 )
-from vertebra.extensions.flask import FlaskPlugin, vertebra_route
+from vertebra.extensions.flask import VertebraPlugin as FlaskVertebraPlugin
+from vertebra.extensions.flask import vertebra_route
 from vertebra.extensions.litestar.fastpath import (
     FastPath as LitestarFastPath,
 )
 from vertebra.extensions.litestar.router import ExtractedRoute as LitestarExtractedRoute
 from vertebra.extensions.litestar.router import RouterTable as LitestarRouterTable
-from vertebra.extensions.starlette import StarlettePlugin
+from vertebra.extensions.starlette import VertebraPlugin as StarletteVertebraPlugin
 from vertebra.framework._app import App
 from vertebra.server._fastpath import attach_framework_fastpath
 from vertebra.server.worker import _instantiate_mount_runners
@@ -119,11 +120,11 @@ def _make_mock_fastapi_app() -> tuple[Any, Any]:
 
 @pytest.mark.anyio
 async def test_fastapi_plugin_compiled_dependant_and_zero_copy_fastpath() -> None:
-    """Verify FastAPIPlugin flattens Depends() DAG, caches sub-dependencies, and decodes msgspec zero-copy."""
+    """Verify VertebraPlugin flattens Depends() DAG, caches sub-dependencies, and decodes msgspec zero-copy."""
     app, call_counter = _make_mock_fastapi_app()
-    plugin = FastAPIPlugin(
+    plugin = VertebraPlugin(
         app,
-        config=FastAPIConfig(
+        config=VertebraConfig(
             enable_health_endpoint=True,
             openapi_config=OpenAPIConfig(swagger=SwaggerDocsConfig(path="/swagger")),
             webmcp_config=WebMCPConfig(enabled=True),
@@ -266,7 +267,7 @@ async def test_fastapi_fastpath_lazy_request_inline_sync_and_send_raw_response(
         state=SimpleNamespace(),
         router=SimpleNamespace(routes=routes, default_response_class=None),
     )
-    plugin = FastAPIPlugin(app)
+    plugin = VertebraPlugin(app)
     fastpath: FastPath = app.__vertebra_fastpath__
 
     inline_route = next(r for r in plugin.compiled_routes.values() if r.path_template == "/inline/{item_id:int}")
@@ -350,7 +351,7 @@ async def test_multi_framework_stacked_app_mount_auto_attaches_fastpath() -> Non
     cast("Any", litestar_app).__vertebra_fastpath__ = LitestarFastPath(ls_table)
 
     fastapi_app, _ = _make_mock_fastapi_app()
-    FastAPIPlugin(fastapi_app)
+    VertebraPlugin(fastapi_app)
 
     async def st_item(request: Any) -> dict[str, Any]:
         return {"fw": "starlette", "id": int(request.path_params["item_id"])}
@@ -376,7 +377,7 @@ async def test_multi_framework_stacked_app_mount_auto_attaches_fastpath() -> Non
             raise AssertionError("Starlette fallback must not be called")
 
     starlette_app = _StarletteApp()
-    StarlettePlugin(starlette_app)
+    StarletteVertebraPlugin(starlette_app)
 
     @vertebra_route(status_code=200)
     def fl_item(item_id: int) -> dict[str, Any]:
@@ -408,7 +409,7 @@ async def test_multi_framework_stacked_app_mount_auto_attaches_fastpath() -> Non
             return self.wsgi_app(environ, start_response)
 
     flask_app = _FlaskApp()
-    FlaskPlugin(flask_app)
+    FlaskVertebraPlugin(flask_app)
 
     class _DjangoItemView(DjangoMsgspecView):
         def get(self, request: Request, item_id: int) -> dict[str, Any]:
@@ -421,7 +422,7 @@ async def test_multi_framework_stacked_app_mount_auto_attaches_fastpath() -> Non
             self.callback = _DjangoItemView.as_view()
             self.name = "dj_item"
 
-    dj_plugin = DjangoPlugin(urlpatterns=[_DjangoPattern()])
+    dj_plugin = DjangoVertebraPlugin(urlpatterns=[_DjangoPattern()])
 
     root_app = App()
     root_app.mount("/litestar", litestar_app)

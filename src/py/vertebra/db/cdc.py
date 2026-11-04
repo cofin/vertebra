@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import collections
-from collections.abc import Iterable, Mapping
+import inspect
+from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 from typing import TYPE_CHECKING, Any, Literal
 
 import msgspec
@@ -15,15 +15,16 @@ from vertebra.utils.serializers import decode_json, encode_json, encode_json_byt
 from vertebra.utils.text import validate_identifier
 
 if TYPE_CHECKING:
-    from vertebra.storage import ObjectStore, PutResult
+    from vertebra.storage import PutResult, SyncObjectStore
 
 __all__ = (
+    "AsyncSpannerChangeStreamSource",
     "CDCConfig",
     "ChangeEvent",
     "ChangeFeed",
     "SpannerChangeStreamRecord",
-    "SpannerChangeStreamSource",
     "SpannerChildPartition",
+    "SyncSpannerChangeStreamSource",
 )
 
 
@@ -83,7 +84,7 @@ class ChangeFeed:
         self,
         config: CDCConfig | None = None,
         *,
-        store: ObjectStore | None = None,
+        store: SyncObjectStore | None = None,
     ) -> None:
         self._config = config or CDCConfig()
         self._store = store
@@ -92,19 +93,19 @@ class ChangeFeed:
         self._listeners: list[Any] = []
         self._next_id: int = 1
 
-    def add_listener(self, callback: Any) -> None:
-        """Register a listener callback invoked with each published ChangeEvent."""
-        self._listeners.append(callback)
-
     @property
     def config(self) -> CDCConfig:
         """Return the ``CDCConfig``."""
         return self._config
 
     @property
-    def store(self) -> ObjectStore | None:
-        """Return the attached ObjectStore when configured."""
+    def store(self) -> SyncObjectStore | None:
+        """Return the attached SyncObjectStore when configured."""
         return self._store
+
+    def add_listener(self, callback: Any) -> None:
+        """Register a listener callback invoked with each published ChangeEvent."""
+        self._listeners.append(callback)
 
     @staticmethod
     def build_emit_message_sql(
@@ -279,8 +280,8 @@ class SpannerChangeStreamRecord(FrozenBaseStruct, frozen=True, gc=False):
     """Child partitions emitted during split or merge topology changes."""
 
 
-class SpannerChangeStreamSource:
-    """Cloud Spanner Change Stream reader with dynamic child-partition scheduling and ``ObjectStore`` spill."""
+class _BaseSpannerChangeStreamSource:
+    """Cloud Spanner Change Stream reader base with dynamic child-partition scheduling and ``ObjectStore`` spill."""
 
     __slots__ = (
         "_active_partitions",
@@ -302,7 +303,7 @@ class SpannerChangeStreamSource:
         *,
         dialect: Literal["googlesql", "spangres"] | None = None,
         change_feed: ChangeFeed | None = None,
-        store: ObjectStore | None = None,
+        store: SyncObjectStore | None = None,
         channel: str = "spanner_cdc",
         heartbeat_milliseconds: int = 10_000,
         spill_threshold_bytes: int = 7500,
@@ -442,6 +443,46 @@ class SpannerChangeStreamSource:
 
         return self._parse_mapping(row, partition_token=partition_token)
 
+    def ingest_records(
+        self,
+        records: Iterable[SpannerChangeStreamRecord],
+        *,
+        partition_token: str | None = None,
+    ) -> list[ChangeEvent]:
+        """Process parsed change stream records, updating watermarks, scheduling children, and publishing ``ChangeEvent`` items."""
+        emitted: list[ChangeEvent] = []
+        for rec in records:
+            effective_token = rec.partition_token if rec.partition_token is not None else partition_token
+            if rec.record_type == "data_change":
+                payload = {
+                    "stream_name": self._stream_name,
+                    "table_name": rec.table_name,
+                    "mod_type": rec.mod_type,
+                    "commit_timestamp": rec.commit_timestamp,
+                    "record_sequence": rec.record_sequence,
+                    "server_transaction_id": rec.server_transaction_id,
+                    "value_capture_type": rec.value_capture_type,
+                    "partition_token": effective_token,
+                    "mods": list(rec.mods),
+                }
+                _, evt = self._change_feed.publish_event(rec.mod_type or "CHANGE", payload)
+                emitted.append(evt)
+                if effective_token and rec.commit_timestamp:
+                    self._watermarks[effective_token] = rec.commit_timestamp
+            elif rec.record_type == "heartbeat":
+                if effective_token and rec.watermark_timestamp:
+                    self._watermarks[effective_token] = rec.watermark_timestamp
+            elif rec.record_type == "child_partitions":
+                if effective_token and rec.watermark_timestamp:
+                    self._watermarks[effective_token] = rec.watermark_timestamp
+                for child in rec.child_partitions:
+                    parents_done = all(p in self._completed_partitions for p in child.parent_partition_tokens)
+                    if not child.parent_partition_tokens or parents_done:
+                        self.schedule_partition(child.token, child.start_timestamp)
+                    else:
+                        self._pending_children.append(child)
+        return emitted
+
     def _parse_mapping(
         self,
         data: Mapping[str, Any],
@@ -541,85 +582,6 @@ class SpannerChangeStreamSource:
 
         return records
 
-    def ingest_records(
-        self,
-        records: Iterable[SpannerChangeStreamRecord],
-        *,
-        partition_token: str | None = None,
-    ) -> list[ChangeEvent]:
-        """Process parsed change stream records, updating watermarks, scheduling children, and publishing ``ChangeEvent`` items."""
-        emitted: list[ChangeEvent] = []
-        for rec in records:
-            effective_token = rec.partition_token if rec.partition_token is not None else partition_token
-            if rec.record_type == "data_change":
-                payload = {
-                    "stream_name": self._stream_name,
-                    "table_name": rec.table_name,
-                    "mod_type": rec.mod_type,
-                    "commit_timestamp": rec.commit_timestamp,
-                    "record_sequence": rec.record_sequence,
-                    "server_transaction_id": rec.server_transaction_id,
-                    "value_capture_type": rec.value_capture_type,
-                    "partition_token": effective_token,
-                    "mods": list(rec.mods),
-                }
-                _, evt = self._change_feed.publish_event(rec.mod_type or "CHANGE", payload)
-                emitted.append(evt)
-                if effective_token and rec.commit_timestamp:
-                    self._watermarks[effective_token] = rec.commit_timestamp
-            elif rec.record_type == "heartbeat":
-                if effective_token and rec.watermark_timestamp:
-                    self._watermarks[effective_token] = rec.watermark_timestamp
-            elif rec.record_type == "child_partitions":
-                if effective_token and rec.watermark_timestamp:
-                    self._watermarks[effective_token] = rec.watermark_timestamp
-                for child in rec.child_partitions:
-                    parents_done = all(p in self._completed_partitions for p in child.parent_partition_tokens)
-                    if not child.parent_partition_tokens or parents_done:
-                        self.schedule_partition(child.token, child.start_timestamp)
-                    else:
-                        self._pending_children.append(child)
-        return emitted
-
-    def poll_partition_sync(
-        self,
-        partition_token: str | None,
-        *,
-        start_timestamp: str,
-        end_timestamp: str | None = None,
-    ) -> list[ChangeEvent]:
-        """Synchronously query a single partition token and publish resulting ``ChangeEvent`` items."""
-        sql = self.build_read_query()
-        params = self._build_read_params(partition_token, start_timestamp, end_timestamp)
-        rows = self._driver.select(sql, params)
-        parsed: list[SpannerChangeStreamRecord] = []
-        for row in rows:
-            parsed.extend(self.parse_raw_row(row, partition_token=partition_token))
-        events = self.ingest_records(parsed, partition_token=partition_token)
-        if partition_token is not None:
-            self.complete_partition(partition_token)
-        return events
-
-    async def poll_partition_async(
-        self,
-        partition_token: str | None,
-        *,
-        start_timestamp: str,
-        end_timestamp: str | None = None,
-    ) -> list[ChangeEvent]:
-        """Asynchronously query a single partition token and publish resulting ``ChangeEvent`` items."""
-        sql = self.build_read_query()
-        params = self._build_read_params(partition_token, start_timestamp, end_timestamp)
-        res = self._driver.select(sql, params)
-        rows = await res if asyncio.iscoroutine(res) else res
-        parsed: list[SpannerChangeStreamRecord] = []
-        for row in rows:
-            parsed.extend(self.parse_raw_row(row, partition_token=partition_token))
-        events = self.ingest_records(parsed, partition_token=partition_token)
-        if partition_token is not None:
-            self.complete_partition(partition_token)
-        return events
-
     def _build_read_params(
         self,
         partition_token: str | None,
@@ -640,3 +602,83 @@ class SpannerChangeStreamSource:
             "token": partition_token,
             "heartbeat_ms": self._heartbeat_milliseconds,
         }
+
+
+class SyncSpannerChangeStreamSource(_BaseSpannerChangeStreamSource):
+    """Synchronous Cloud Spanner Change Stream reader with dynamic child-partition scheduling."""
+
+    def poll_partition(
+        self,
+        partition_token: str | None,
+        *,
+        start_timestamp: str,
+        end_timestamp: str | None = None,
+    ) -> list[ChangeEvent]:
+        """Synchronously query a single partition token and publish resulting ``ChangeEvent`` items."""
+        sql = self.build_read_query()
+        params = self._build_read_params(partition_token, start_timestamp, end_timestamp)
+        rows = self._driver.select(sql, params)
+        parsed: list[SpannerChangeStreamRecord] = []
+        for row in rows:
+            parsed.extend(self.parse_raw_row(row, partition_token=partition_token))
+        events = self.ingest_records(parsed, partition_token=partition_token)
+        if partition_token is not None:
+            self.complete_partition(partition_token)
+        return events
+
+    def stream(
+        self,
+        *,
+        start_timestamp: str,
+        end_timestamp: str | None = None,
+        initial_partitions: Iterable[str] = ("",),
+    ) -> Iterator[ChangeEvent]:
+        """Synchronously stream change events across active and child partitions."""
+        for token in initial_partitions:
+            self.schedule_partition(token, start_timestamp)
+        while self._active_partitions:
+            token = self._active_partitions[0]
+            start_ts = self._partition_start_timestamps.get(token, start_timestamp)
+            events = self.poll_partition(token, start_timestamp=start_ts, end_timestamp=end_timestamp)
+            yield from events
+
+
+class AsyncSpannerChangeStreamSource(_BaseSpannerChangeStreamSource):
+    """Asynchronous Cloud Spanner Change Stream reader with dynamic child-partition scheduling."""
+
+    async def poll_partition(
+        self,
+        partition_token: str | None,
+        *,
+        start_timestamp: str,
+        end_timestamp: str | None = None,
+    ) -> list[ChangeEvent]:
+        """Asynchronously query a single partition token and publish resulting ``ChangeEvent`` items."""
+        sql = self.build_read_query()
+        params = self._build_read_params(partition_token, start_timestamp, end_timestamp)
+        res = self._driver.select(sql, params)
+        rows = await res if inspect.isawaitable(res) else res
+        parsed: list[SpannerChangeStreamRecord] = []
+        for row in rows:
+            parsed.extend(self.parse_raw_row(row, partition_token=partition_token))
+        events = self.ingest_records(parsed, partition_token=partition_token)
+        if partition_token is not None:
+            self.complete_partition(partition_token)
+        return events
+
+    async def stream(
+        self,
+        *,
+        start_timestamp: str,
+        end_timestamp: str | None = None,
+        initial_partitions: Iterable[str] = ("",),
+    ) -> AsyncIterator[ChangeEvent]:
+        """Asynchronously stream change events across active and child partitions."""
+        for token in initial_partitions:
+            self.schedule_partition(token, start_timestamp)
+        while self._active_partitions:
+            token = self._active_partitions[0]
+            start_ts = self._partition_start_timestamps.get(token, start_timestamp)
+            events = await self.poll_partition(token, start_timestamp=start_ts, end_timestamp=end_timestamp)
+            for evt in events:
+                yield evt

@@ -14,10 +14,10 @@ from vertebra.storage import (
     GCSConfig,
     LocalConfig,
     MemoryConfig,
-    ObjectStore,
     OCIConfig,
     R2Config,
     S3Config,
+    SyncObjectStore,
 )
 
 if TYPE_CHECKING:
@@ -50,9 +50,9 @@ def rustfs_s3_config(rustfs_service: RustFSService, rustfs_default_bucket_name: 
 
 
 @pytest.fixture
-def rustfs_object_store(rustfs_s3_config: S3Config) -> ObjectStore:
+def rustfs_object_store(rustfs_s3_config: S3Config) -> SyncObjectStore:
     """Return an ObjectStore backed by the pytest-databases RustFS container."""
-    return ObjectStore.from_config(rustfs_s3_config)
+    return SyncObjectStore.from_config(rustfs_s3_config)
 
 
 @pytest.fixture
@@ -69,9 +69,9 @@ def minio_s3_config(minio_service: MinioService, minio_default_bucket_name: str)
 
 
 @pytest.fixture
-def minio_object_store(minio_s3_config: S3Config) -> ObjectStore:
+def minio_object_store(minio_s3_config: S3Config) -> SyncObjectStore:
     """Return an ObjectStore backed by the pytest-databases MinIO container."""
-    return ObjectStore.from_config(minio_s3_config)
+    return SyncObjectStore.from_config(minio_s3_config)
 
 
 @pytest.fixture
@@ -88,9 +88,9 @@ def floci_container_s3_config(floci_service: FlociService, floci_default_bucket_
 
 
 @pytest.fixture
-def floci_object_store(floci_container_s3_config: S3Config) -> ObjectStore:
+def floci_object_store(floci_container_s3_config: S3Config) -> SyncObjectStore:
     """Return an ObjectStore backed by the pytest-databases Floci container."""
-    return ObjectStore.from_config(floci_container_s3_config)
+    return SyncObjectStore.from_config(floci_container_s3_config)
 
 
 @pytest.fixture
@@ -106,9 +106,9 @@ def azurite_azure_config(azure_blob_service: AzureBlobService, azure_blob_defaul
 
 
 @pytest.fixture
-def azurite_object_store(azurite_azure_config: AzureConfig) -> ObjectStore:
+def azurite_object_store(azurite_azure_config: AzureConfig) -> SyncObjectStore:
     """Return an ObjectStore backed by the pytest-databases Azurite Azure Blob container."""
-    return ObjectStore.from_config(azurite_azure_config)
+    return SyncObjectStore.from_config(azurite_azure_config)
 
 
 @pytest.fixture
@@ -187,12 +187,12 @@ def floci_available() -> dict[str, bool]:
 
 
 @pytest.fixture
-def local_object_store(tmp_path: Path) -> ObjectStore:
+def local_object_store(tmp_path: Path) -> SyncObjectStore:
     """Return a local filesystem ObjectStore for integration tests."""
-    return ObjectStore.from_config(LocalConfig(root=tmp_path))
+    return SyncObjectStore.from_config(LocalConfig(root=tmp_path))
 
 
 @pytest.fixture
-def memory_object_store() -> ObjectStore:
+def memory_object_store() -> SyncObjectStore:
     """Return an in-memory ObjectStore for integration tests."""
-    return ObjectStore.from_config(MemoryConfig(namespace="integration"))
+    return SyncObjectStore.from_config(MemoryConfig(namespace="integration"))

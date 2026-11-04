@@ -17,10 +17,23 @@ from urllib.parse import parse_qs
 import pytest
 
 import vertebra.embeddings._google as google_embeddings_mod
-from vertebra._vertebra import GcpTokenCache as CoreGcpTokenCache
+from vertebra._vertebra import (
+    AsyncGcpTokenCache as CoreAsyncGcpTokenCache,
+)
+from vertebra._vertebra import (
+    SyncGcpTokenCache as CoreSyncGcpTokenCache,
+)
 from vertebra.db.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
 from vertebra.embeddings import VertexEmbedder
-from vertebra.storage import GcpTokenCache, GcpTokenSnapshot, GCSConfig, ObjectStore, SigningConfig
+from vertebra.storage import (
+    AsyncGcpTokenCache,
+    AsyncObjectStore,
+    GcpTokenSnapshot,
+    GCSConfig,
+    SigningConfig,
+    SyncGcpTokenCache,
+    SyncObjectStore,
+)
 
 
 class _MockTokenServer:
@@ -181,7 +194,7 @@ def test_gcp_token_cache_authorized_user_and_proactive_skew(
         application_credentials=str(adc_path),
         refresh_skew_seconds=300,
     )
-    cache = GcpTokenCache.from_gcs_config(cfg)
+    cache = SyncGcpTokenCache.from_gcs_config(cfg)
 
     snap1 = cache.get_token()
     assert isinstance(snap1, GcpTokenSnapshot)
@@ -231,7 +244,7 @@ def test_gcp_token_cache_single_flight_deduplication_and_invalidation(
     )
 
     cfg = GCSConfig(bucket="test-bucket", application_credentials=str(adc_path))
-    cache = GcpTokenCache.from_gcs_config(cfg)
+    cache = SyncGcpTokenCache.from_gcs_config(cfg)
 
     with ThreadPoolExecutor(max_workers=16) as pool:
         results = list(pool.map(lambda _: cache.get_token(), range(16)))
@@ -266,7 +279,7 @@ def test_gcp_token_cache_impersonation_and_metadata_server(
         target_service_account="runner@test-proj.iam.gserviceaccount.com",
         iam_endpoint=token_server.base_url,
     )
-    cache = GcpTokenCache.from_gcs_config(cfg, allow_ambient_adc=False)
+    cache = SyncGcpTokenCache.from_gcs_config(cfg, allow_ambient_adc=False)
 
     snap = cache.get_token()
     assert snap.access_token == "mock-oauth-token-impersonated-1"
@@ -302,7 +315,7 @@ def test_rust_object_store_refreshing_gcp_credential_provider(
         allow_http=True,
         refresh_skew_seconds=300,
     )
-    store = ObjectStore(cfg)
+    store = SyncObjectStore(cfg)
 
     data1 = store.get("model.bin")
     assert data1 == b"gcs-object-payload"
@@ -335,7 +348,7 @@ def test_duckdb_multi_session_token_generation_secret_rotation(
         encoding="utf-8",
     )
     gcs_cfg = GCSConfig(bucket="test-bucket", application_credentials=str(adc_path))
-    cache = GcpTokenCache.from_gcs_config(gcs_cfg)
+    cache = SyncGcpTokenCache.from_gcs_config(gcs_cfg)
 
     db_cfg = DuckDBConfig(gcs_token_cache=cache)
     driver_a = SyncDuckDBDriver(db_cfg)
@@ -368,7 +381,7 @@ def test_async_duckdb_driver_token_generation_rotation(
     token_server: _MockTokenServer,
     tmp_path: Path,
 ) -> None:
-    """Verify AsyncDuckDBDriver rotates GCS secrets when GcpTokenCache generation advances."""
+    """Verify AsyncDuckDBDriver rotates GCS secrets when SyncGcpTokenCache generation advances."""
     adc_path = tmp_path / "adc.json"
     adc_path.write_text(
         json.dumps(
@@ -382,7 +395,8 @@ def test_async_duckdb_driver_token_generation_rotation(
         ),
         encoding="utf-8",
     )
-    cache = GcpTokenCache.from_gcs_config(GCSConfig(bucket="b", application_credentials=str(adc_path)))
+    cache = SyncGcpTokenCache.from_gcs_config(GCSConfig(bucket="b", application_credentials=str(adc_path)))
+    async_cache = AsyncGcpTokenCache.from_gcs_config(GCSConfig(bucket="b", application_credentials=str(adc_path)))
 
     async def _run() -> None:
         drv = AsyncDuckDBDriver(DuckDBConfig(gcs_token_cache=cache))
@@ -390,11 +404,22 @@ def test_async_duckdb_driver_token_generation_rotation(
             res = await drv.select("SELECT 1 AS ok")
             assert res == [{"ok": 1}]
             assert drv.applied_token_generation == 1
-            await cache.get_token_async(force_refresh=True)
+            cache.get_token(force_refresh=True)
             await drv.select("SELECT 1 AS ok")
             assert drv.applied_token_generation == 2
         finally:
             await drv.close()
+
+        async_drv = AsyncDuckDBDriver(DuckDBConfig(gcs_token_cache=async_cache))
+        try:
+            res_async = await async_drv.select("SELECT 1 AS ok")
+            assert res_async == [{"ok": 1}]
+            assert async_drv.applied_token_generation == 1
+            await async_cache.get_token(force_refresh=True)
+            await async_drv.select("SELECT 1 AS ok")
+            assert async_drv.applied_token_generation == 2
+        finally:
+            await async_drv.close()
 
     asyncio.run(_run())
 
@@ -418,8 +443,8 @@ def test_high_concurrency_async_storage_and_token_refresh_no_gil_blocking(
         encoding="utf-8",
     )
     cfg = GCSConfig(bucket="test-bucket", application_credentials=str(adc_path))
-    cache = GcpTokenCache.from_gcs_config(cfg)
-    local_store = ObjectStore(
+    cache = AsyncGcpTokenCache.from_gcs_config(cfg)
+    local_store = AsyncObjectStore(
         f"file://{tmp_path / 'bucket'}",
         signing=SigningConfig(
             provider="gcs",
@@ -453,15 +478,15 @@ def test_high_concurrency_async_storage_and_token_refresh_no_gil_blocking(
 
             async def _worker(idx: int) -> None:
                 key = f"shard/obj-{idx}.bin"
-                snap = await cache.get_token_async(force_refresh=(idx == 0))
+                snap = await cache.get_token(force_refresh=(idx == 0))
                 assert snap.access_token.startswith("mock-oauth-token-user-")
-                meta = await local_store.put_async(key, payload)
+                meta = await local_store.put(key, payload)
                 assert meta.size == len(payload)
-                raw = await local_store.get_async(key)
+                raw = await local_store.get(key)
                 assert len(raw) == len(payload)
-                view = await local_store.get_view_async(key)
+                view = await local_store.get_view(key)
                 assert len(memoryview(view)) == len(payload)
-                presigned = await local_store.presign_get_async(key, expires_in_secs=300)
+                presigned = await local_store.presign_get(key, expires_in_secs=300)
                 assert key in presigned
 
             await asyncio.gather(*(_worker(i) for i in range(200)))
@@ -475,8 +500,8 @@ def test_high_concurrency_async_storage_and_token_refresh_no_gil_blocking(
 
 
 def test_storage_completion_ring_eventfd_coalesced_wakeup(tmp_path: Path) -> None:
-    """Verify ObjectStore async operations use per-loop Notifier (eventfd/kqueue) + completion ring instead of per-task call_soon_threadsafe."""
-    store = ObjectStore(f"file://{tmp_path / 'ring_bucket'}")
+    """Verify AsyncObjectStore async operations use per-loop Notifier (eventfd/kqueue) + completion ring."""
+    store = AsyncObjectStore(f"file://{tmp_path / 'ring_bucket'}")
     payload = b"completion-ring-payload" * 64
 
     async def _run() -> None:
@@ -492,11 +517,11 @@ def test_storage_completion_ring_eventfd_coalesced_wakeup(tmp_path: Path) -> Non
         csts_attr = "call_soon_threadsafe"
         setattr(loop, csts_attr, tracked_csts)
         try:
-            metas = await asyncio.gather(*(store.put_async(f"k-{i}.bin", payload) for i in range(64)))
+            metas = await asyncio.gather(*(store.put(f"k-{i}.bin", payload) for i in range(64)))
             assert len(metas) == 64
             assert all(m.size == len(payload) for m in metas)
 
-            blobs = await asyncio.gather(*(store.get_async(f"k-{i}.bin") for i in range(64)))
+            blobs = await asyncio.gather(*(store.get(f"k-{i}.bin") for i in range(64)))
             assert len(blobs) == 64
             assert all(b == payload for b in blobs)
         finally:
@@ -510,7 +535,7 @@ def test_storage_completion_ring_eventfd_coalesced_wakeup(tmp_path: Path) -> Non
 def test_vertebra_core_gcp_token_cache_service_account_and_audience_jwt(
     token_server: _MockTokenServer,
 ) -> None:
-    """Verify vertebra._vertebra.GcpTokenCache exchanges Service Account RS256 assertions and signs audience JWTs."""
+    """Verify vertebra._vertebra.SyncGcpTokenCache and AsyncGcpTokenCache exchange Service Account RS256 assertions."""
     pem_key = subprocess.check_output(
         ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"],
         stderr=subprocess.DEVNULL,
@@ -526,17 +551,17 @@ def test_vertebra_core_gcp_token_cache_service_account_and_audience_jwt(
             "token_uri": f"{token_server.base_url}/token",
         }
     )
-    cache = CoreGcpTokenCache(
+    sync_cache = CoreSyncGcpTokenCache(
         {
             "service_account_key": sa_json,
             "scopes": "https://www.googleapis.com/auth/bigquery,https://www.googleapis.com/auth/spanner.data",
             "quota_project_id": "custom-quota-proj",
         }
     )
-    assert cache.has_service_account_key is True
-    assert cache.service_account_email == "bq-worker@test-gcp-proj.iam.gserviceaccount.com"
+    assert sync_cache.has_service_account_key is True
+    assert sync_cache.service_account_email == "bq-worker@test-gcp-proj.iam.gserviceaccount.com"
 
-    snap1 = cache.get_token()
+    snap1 = sync_cache.get_token()
     assert snap1.access_token == "mock-oauth-token-user-1"
     assert snap1.generation == 1
     assert snap1.quota_project_id == "custom-quota-proj"
@@ -547,7 +572,7 @@ def test_vertebra_core_gcp_token_cache_service_account_and_audience_jwt(
     assertion_parts = form["assertion"][0].split(".")
     assert len(assertion_parts) == 3
 
-    aud_jwt = cache.sign_jwt_for_audience("https://bigquery.googleapis.com/")
+    aud_jwt = sync_cache.sign_jwt_for_audience("https://bigquery.googleapis.com/")
     jwt_parts = aud_jwt.split(".")
     assert len(jwt_parts) == 3
     claims_padded = jwt_parts[1] + "=" * ((4 - len(jwt_parts[1]) % 4) % 4)
@@ -556,21 +581,38 @@ def test_vertebra_core_gcp_token_cache_service_account_and_audience_jwt(
     assert claims["sub"] == "bq-worker@test-gcp-proj.iam.gserviceaccount.com"
     assert claims["aud"] == "https://bigquery.googleapis.com/"
 
-    cache.invalidate(1)
+    sync_cache.invalidate(1)
+    snap2 = sync_cache.get_token()
+    assert snap2.access_token == "mock-oauth-token-user-2"
+    assert snap2.generation == 2
+    assert token_server.oauth_calls == 2
+
+    async_cache = CoreAsyncGcpTokenCache(
+        {
+            "service_account_key": sa_json,
+            "scopes": "https://www.googleapis.com/auth/bigquery,https://www.googleapis.com/auth/spanner.data",
+            "quota_project_id": "custom-quota-proj",
+        }
+    )
 
     async def _run_async() -> None:
-        snap2 = await cache.get_token_async()
-        assert snap2.access_token == "mock-oauth-token-user-2"
-        assert snap2.generation == 2
+        snap3 = await async_cache.get_token()
+        assert snap3.access_token == "mock-oauth-token-user-3"
+        assert snap3.generation == 1
+
+        async_cache.invalidate(1)
+        snap4 = await async_cache.get_token()
+        assert snap4.access_token == "mock-oauth-token-user-4"
+        assert snap4.generation == 2
 
     asyncio.run(_run_async())
-    assert token_server.oauth_calls == 2
+    assert token_server.oauth_calls == 4
 
 
 def test_google_embedder_uses_vertebra_gcp_token_cache_without_storage_import(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify vertebra.embeddings._google imports GcpTokenCache from vertebra._vertebra and handles TypeError stub."""
+    """Verify vertebra.embeddings._google imports AsyncGcpTokenCache from vertebra._vertebra and handles TypeError stub."""
     source_path = Path(google_embeddings_mod.__file__)
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
     imported_modules = [
@@ -579,8 +621,8 @@ def test_google_embedder_uses_vertebra_gcp_token_cache_without_storage_import(
     assert "vertebra.storage" not in imported_modules
     assert "vertebra._vertebra" in imported_modules
 
-    dummy_stub = type("GcpTokenCache", (), {})
-    monkeypatch.setattr(google_embeddings_mod, "GcpTokenCache", dummy_stub)
+    dummy_stub = type("AsyncGcpTokenCache", (), {})
+    monkeypatch.setattr(google_embeddings_mod, "AsyncGcpTokenCache", dummy_stub)
     embedder = VertexEmbedder("gemini-embedding-001", project="test-proj")
-    resolved_cache = embedder._ensure_token_cache()
-    assert isinstance(resolved_cache, GcpTokenCache)
+    resolved_cache = embedder._ensure_token_cache(async_mode=True)
+    assert isinstance(resolved_cache, AsyncGcpTokenCache)

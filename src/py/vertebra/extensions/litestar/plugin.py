@@ -2,13 +2,24 @@
 
 import contextlib
 import os
+import sys
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import click
+
 from vertebra.agent.plugin import AgentPlugin
+from vertebra.cli._launch import (
+    ServerLaunchEnv,
+    load_workers_pyproject_config,
+    parse_lane_concurrency_map,
+)
+from vertebra.cli.banner import render_banner
+from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
 from vertebra.extensions.litestar.channels import swap_channels_backend
-from vertebra.extensions.litestar.config import LitestarConfig
+from vertebra.extensions.litestar.config import VertebraConfig
 from vertebra.extensions.litestar.fastpath import (
     CompiledRoute,
     FastPath,
@@ -21,30 +32,31 @@ from vertebra.extensions.litestar.offload import (
 )
 from vertebra.extensions.litestar.router import extract_routes
 from vertebra.extensions.litestar.store import swap_response_cache_store
+from vertebra.supervisor._supervisor import build_server_command, run_supervisor
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import import_optional
 
 __all__ = (
-    "LitestarPlugin",
+    "VertebraPlugin",
     "enter_litestar_server_lifespan",
 )
 
 
-class LitestarPlugin:
+class VertebraPlugin:
     """Litestar plugin enabling zero-GIL Rust offload, direct handler dispatch, and CLI lifespans."""
 
     __slots__ = ("_compiled_routes", "_config", "_finalized_app", "_offload_plan", "_router_table")
 
-    def __init__(self, config: LitestarConfig | None = None) -> None:
-        self._config = config or LitestarConfig()
+    def __init__(self, config: VertebraConfig | None = None) -> None:
+        self._config = config or VertebraConfig()
         self._offload_plan: OffloadPlan | None = None
         self._compiled_routes: dict[int, CompiledRoute] = {}
         self._router_table: Any = None
         self._finalized_app: Any = None
 
     @property
-    def config(self) -> LitestarConfig:
-        """Return the active LitestarConfig."""
+    def config(self) -> VertebraConfig:
+        """Return the active VertebraConfig."""
         return self._config
 
     @property
@@ -166,8 +178,12 @@ class LitestarPlugin:
         self._finalize_app_acceleration(app)
 
     def on_cli_init(self, cli: Any) -> None:
-        """Satisfy Litestar CLIPluginProtocol CLI group registration hook."""
-        _ = cli
+        """Override Litestar's default ``run`` command so ``litestar run`` launches the Vertebra supervisor."""
+        if getattr(cli, "_is_vertebra_cli", False) or getattr(cli, "name", None) in {"vtb", "cli"}:
+            return
+        add_cmd = getattr(cli, "add_command", None)
+        if callable(add_cmd):
+            add_cmd(_build_litestar_run_command(self), name="run")
 
     @contextlib.contextmanager
     def server_lifespan(self, app: Any) -> Iterator[None]:
@@ -237,6 +253,7 @@ def enter_litestar_server_lifespan(app: Any, *, app_path: str | None = None) -> 
     """Export LITESTAR_APP and enter all registered CLIPlugin.server_lifespan context managers."""
     if app_path:
         os.environ["LITESTAR_APP"] = app_path
+        os.environ["VERTEBRA_APP"] = app_path
 
     plugins = getattr(app, "plugins", None)
     cli_plugins: list[Any] = []
@@ -255,12 +272,246 @@ def enter_litestar_server_lifespan(app: Any, *, app_path: str | None = None) -> 
                 seen.add(id(p))
                 cli_plugins.append(p)
 
+    state = getattr(app, "state", None)
+    if state is not None and hasattr(state, "get"):
+        state_plugin = state.get("vertebra_plugin")
+        if state_plugin is not None and id(state_plugin) not in seen and hasattr(state_plugin, "server_lifespan"):
+            seen.add(id(state_plugin))
+            cli_plugins.append(state_plugin)
+
     with contextlib.ExitStack() as stack:
         for plugin in cli_plugins:
             lifespan_fn = getattr(plugin, "server_lifespan", None)
             if callable(lifespan_fn):
                 stack.enter_context(lifespan_fn(app))
+        if state is not None and hasattr(state, "get"):
+            offload_json = state.get("vertebra_offload_config_json")
+            if isinstance(offload_json, str) and offload_json:
+                os.environ["VERTEBRA_OFFLOAD_CONFIG"] = offload_json
         yield
+
+
+def _build_litestar_run_command(plugin: VertebraPlugin) -> click.Command:
+    @click.command(name="run", context_settings={"auto_envvar_prefix": "LITESTAR"})
+    @click.option("-r", "--reload", help="Reload server on changes", default=False, is_flag=True)
+    @click.option("-p", "--port", help="Serve under this port", type=int, default=8000, show_default=True)
+    @click.option(
+        "-W",
+        "--wc",
+        "--web-concurrency",
+        "--workers",
+        "wc",
+        help="The number of worker processes",
+        type=click.IntRange(min=1),
+        default=None,
+    )
+    @click.option("-H", "--host", help="Server under this host", default="127.0.0.1", show_default=True)
+    @click.option(
+        "-F",
+        "--fd",
+        "--file-descriptor",
+        "fd",
+        help="Bind to a socket from this file descriptor",
+        type=int,
+        default=None,
+    )
+    @click.option(
+        "-U",
+        "--uds",
+        "--unix-domain-socket",
+        "uds",
+        help="Bind to a UNIX domain socket",
+        default=None,
+    )
+    @click.option("-d", "--debug", help="Run app in debug mode", is_flag=True, default=False)
+    @click.option("-P", "--pdb", "--use-pdb", "pdb", help="Drop into PDB on an exception", is_flag=True, default=False)
+    @click.option("-R", "--reload-dir", help="Directories to watch for file changes", multiple=True, default=())
+    @click.option("-I", "--reload-include", help="Glob patterns to include in reload watch", multiple=True, default=())
+    @click.option(
+        "-E", "--reload-exclude", help="Glob patterns to exclude from reload watch", multiple=True, default=()
+    )
+    @click.option(
+        "--ssl-certfile",
+        type=click.Path(file_okay=True, exists=True, dir_okay=False, readable=True),
+        help="SSL certificate file path",
+        default=None,
+    )
+    @click.option(
+        "--ssl-keyfile",
+        type=click.Path(file_okay=True, exists=True, dir_okay=False, readable=True),
+        help="SSL key file path",
+        default=None,
+    )
+    @click.option(
+        "--create-self-signed-cert",
+        help="If certificate and key are not found at specified locations, create a self-signed certificate",
+        is_flag=True,
+        default=False,
+    )
+    @click.option(
+        "--topology",
+        type=click.Choice(["auto", "embedded", "shm"], case_sensitive=False),
+        default=None,
+        help="Vertebra runtime topology (auto, embedded, or shm)",
+    )
+    @click.option("--threads", type=int, default=None, help="Number of worker threads per process")
+    @click.option("--jit/--no-jit", default=None, help="Enable or disable CPython experimental JIT")
+    @click.option(
+        "--loop",
+        type=click.Choice(["auto", "uvloop", "winloop", "rloop", "asyncio"], case_sensitive=False),
+        default="auto",
+        help="Event loop backend",
+    )
+    @click.option("--asgi", is_flag=True, default=False, help="Run in pure ASGI mode without native fastpath")
+    @click.option("--log-level", default="info", help="Server log level")
+    @click.option("--drain-timeout", type=int, default=5000, help="Graceful drain timeout in milliseconds")
+    @click.option("--shutdown-timeout", type=int, default=30000, help="Hard shutdown timeout in milliseconds")
+    @click.option(
+        "--with-workers/--no-workers",
+        default=None,
+        help="Co-locate background WorkerRunner lanes inside the server process",
+    )
+    @click.option("--queues", "worker_queues", default=None, help="Comma-separated queue lane names")
+    @click.option("--lane-concurrency", "lane_concurrency", default=None, help="Comma-separated lane=limit assignments")
+    @click.option("--no-banner", is_flag=True, default=False, help="Disable startup banner")
+    def run_command(
+        reload: bool,
+        port: int,
+        wc: int | None,
+        host: str,
+        fd: int | None,
+        uds: str | None,
+        debug: bool,
+        pdb: bool,
+        reload_dir: tuple[str, ...],
+        reload_include: tuple[str, ...],
+        reload_exclude: tuple[str, ...],
+        ssl_certfile: str | None,
+        ssl_keyfile: str | None,
+        create_self_signed_cert: bool,
+        topology: str | None,
+        threads: int | None,
+        jit: bool | None,
+        loop: str,
+        asgi: bool,
+        log_level: str,
+        drain_timeout: int,
+        shutdown_timeout: int,
+        with_workers: bool | None,
+        worker_queues: str | None,
+        lane_concurrency: str | None,
+        no_banner: bool,
+        ctx: click.Context | None = None,
+    ) -> None:
+        """Run a Litestar app on the supervised Vertebra Rust runtime."""
+        active_ctx = ctx or click.get_current_context(silent=True)
+        raw_env = active_ctx.obj if active_ctx is not None else None
+        if callable(raw_env):
+            raw_env = raw_env()
+            if active_ctx is not None:
+                active_ctx.obj = raw_env
+
+        app = getattr(raw_env, "app", None) or plugin._finalized_app
+        app_path = (
+            getattr(raw_env, "app_path", None)
+            or os.environ.get("LITESTAR_APP")
+            or os.environ.get("VERTEBRA_APP")
+            or "app:app"
+        )
+
+        if (debug or getattr(raw_env, "debug", False)) and app is not None:
+            with contextlib.suppress(AttributeError, TypeError):
+                app.debug = True
+            os.environ["LITESTAR_DEBUG"] = "1"
+        if (pdb or getattr(raw_env, "pdb", False)) and app is not None:
+            with contextlib.suppress(AttributeError, TypeError):
+                app.pdb_on_exception = True
+            os.environ["LITESTAR_PDB"] = "1"
+
+        os.environ["LITESTAR_PORT"] = str(port)
+        os.environ["LITESTAR_HOST"] = host
+        os.environ["LITESTAR_APP"] = str(app_path)
+        os.environ["VERTEBRA_APP"] = str(app_path)
+
+        cfg_enabled, cfg_queues, cfg_lanes = load_workers_pyproject_config(Path.cwd())
+        effective_with_workers = cfg_enabled if with_workers is None else with_workers
+        effective_queues = (
+            tuple(q.strip() for q in worker_queues.split(",") if q.strip()) if worker_queues else cfg_queues
+        )
+        effective_lanes = dict(cfg_lanes)
+        if lane_concurrency:
+            effective_lanes.update(parse_lane_concurrency_map(lane_concurrency))
+
+        is_dev = bool(reload or debug or getattr(raw_env, "debug", False))
+        launch_env = ServerLaunchEnv(
+            app_path=str(app_path),
+            host=host,
+            port=port,
+            workers=wc,
+            log_level=log_level,
+            dev=is_dev,
+            native=not asgi,
+            topology=topology,
+            threads=threads,
+            jit=jit,
+            loop=loop,
+            with_workers=effective_with_workers,
+            worker_queues=effective_queues or ("default",),
+            worker_lane_concurrency=effective_lanes,
+        )
+        env = launch_env.to_environ()
+        if reload:
+            env["VERTEBRA_RELOAD"] = "1"
+        if reload_dir:
+            env["VERTEBRA_RELOAD_DIRS"] = os.pathsep.join(reload_dir)
+        if reload_include:
+            env["VERTEBRA_RELOAD_INCLUDES"] = ",".join(reload_include)
+        if reload_exclude:
+            env["VERTEBRA_RELOAD_EXCLUDES"] = ",".join(reload_exclude)
+        if fd is not None:
+            env["VERTEBRA_FD"] = str(fd)
+        if uds is not None:
+            env["VERTEBRA_UDS"] = str(uds)
+        if ssl_certfile and ssl_keyfile:
+            env["VERTEBRA_TLS_CERT"] = str(Path(ssl_certfile).resolve())
+            env["VERTEBRA_TLS_KEY"] = str(Path(ssl_keyfile).resolve())
+        if create_self_signed_cert:
+            env["VERTEBRA_SELF_SIGNED_CERT"] = "1"
+
+        try:
+            server_cmd = build_server_command()
+        except SystemExit as exc:
+            raise CLIError(
+                str(exc),
+                hint="Ensure vertebra-server binary is available/built.",
+                exit_code=EXIT_CONFIG_ERROR,
+            ) from exc
+
+        if not no_banner:
+            render_banner(
+                mode="dev" if is_dev else "serve",
+                host=host,
+                port=port,
+                workers=wc or 1,
+            )
+
+        with enter_litestar_server_lifespan(app, app_path=str(app_path)):
+            state = getattr(app, "state", None)
+            offload_json = (
+                state.get("vertebra_offload_config_json") if state is not None and hasattr(state, "get") else None
+            )
+            if isinstance(offload_json, str) and offload_json:
+                env["VERTEBRA_OFFLOAD_CONFIG"] = offload_json
+            exit_code = run_supervisor(
+                server_cmd=server_cmd,
+                env=env,
+                drain_timeout_ms=drain_timeout,
+                shutdown_timeout_ms=shutdown_timeout,
+            )
+        if exit_code != 0:
+            sys.exit(exit_code)
+
+    return run_command
 
 
 def _load_litestar_get() -> Callable[..., Callable[[Callable[..., Any]], Any]]:
@@ -272,7 +523,7 @@ def _load_litestar_get() -> Callable[..., Callable[[Callable[..., Any]], Any]]:
             reg = getattr(proto, "register", None)
             if callable(reg):
                 with contextlib.suppress(TypeError):
-                    reg(LitestarPlugin)
+                    reg(VertebraPlugin)
         get_fn: Callable[..., Callable[[Callable[..., Any]], Any]] = mod.get
         return get_fn
 

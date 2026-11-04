@@ -11,10 +11,10 @@ if TYPE_CHECKING:
     from vertebra.extensions.flask.openapi import OpenAPIConfig
     from vertebra.extensions.flask.vite import ViteConfig
 
-__all__ = ("FlaskConfig",)
+__all__ = ("VertebraConfig",)
 
 
-class FlaskConfig(msgspec.Struct, frozen=True, gc=False):
+class VertebraConfig(msgspec.Struct, frozen=True, gc=False):
     """Configuration for the Vertebra Flask extension."""
 
     compile_routes: bool = True

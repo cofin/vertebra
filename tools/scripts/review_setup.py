@@ -1845,7 +1845,15 @@ class ReviewSetupValidator:
             "src/py/vertebra/utils/module_loader.py",
             "src/py/vertebra/build/packaging/_onefile_extract.py",
         }
-        allowed_vertebra_classes = {"VertebraError"}
+        allowed_vertebra_classes = {
+            "VertebraAppConfig",
+            "VertebraConfig",
+            "VertebraEnv",
+            "VertebraError",
+            "VertebraExtensionGroup",
+            "VertebraGroup",
+            "VertebraPlugin",
+        }
 
         py_files = sorted(list(py_root.rglob("*.py")) + list(py_root.rglob("*.pyi")))
         for py_file in py_files:

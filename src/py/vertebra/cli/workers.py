@@ -10,7 +10,7 @@ from typing import Any
 import click
 import msgspec
 
-from vertebra.extensions.litestar.plugin import enter_litestar_server_lifespan
+from vertebra.cli.plugin_registry import enter_app_server_lifespan, resolve_cli_app_path
 from vertebra.server.lanes import WorkerRunner
 from vertebra.server.platform import LameDuckController
 from vertebra.utils.module_loader import import_app
@@ -34,7 +34,7 @@ def execute_worker_cli(
     os.environ["VERTEBRA_APP"] = app_path
     app = import_app(app_path)
     if oneshot_job:
-        with enter_litestar_server_lifespan(app, app_path=app_path):
+        with enter_app_server_lifespan(app, app_path=app_path):
             return asyncio.run(WorkerRunner.run_oneshot(app, oneshot_job, payload=payload))
 
     lanes = WorkerRunner.parse_lanes(queues, concurrency, drain_timeout_s=drain_timeout_s)
@@ -44,7 +44,7 @@ def execute_worker_cli(
     if isinstance(state, dict):
         state["vertebra_worker_runner"] = runner
         state["vertebra_lame_duck"] = lame_duck
-    with enter_litestar_server_lifespan(app, app_path=app_path):
+    with enter_app_server_lifespan(app, app_path=app_path):
         try:
             if run_until_stopped:
                 asyncio.run(runner.run(install_signal_handlers=True))
@@ -61,7 +61,7 @@ def workers() -> None:
 
 
 @workers.command("run")
-@click.argument("app")
+@click.argument("app", required=False, default=None)
 @click.option("--queues", default="default", help="Comma-separated queue lane names (e.g. default,etl)")
 @click.option(
     "--concurrency",
@@ -88,7 +88,7 @@ def workers() -> None:
     help="Optional JSON payload passed to --oneshot job",
 )
 def run_workers(
-    app: str,
+    app: str | None,
     queues: str,
     concurrency: str,
     drain_timeout_s: float,
@@ -96,6 +96,7 @@ def run_workers(
     payload_json: str | None,
 ) -> None:
     """Run admission-controlled background worker lanes or a single --oneshot job for APP."""
+    resolved_app = resolve_cli_app_path(app)
     parsed_payload: Any = None
     if payload_json is not None:
         try:
@@ -105,7 +106,7 @@ def run_workers(
             raise click.ClickException(msg) from exc
 
     exit_code = execute_worker_cli(
-        app,
+        resolved_app,
         queues=queues,
         concurrency=concurrency,
         drain_timeout_s=drain_timeout_s,

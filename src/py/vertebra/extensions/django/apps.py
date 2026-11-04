@@ -6,10 +6,10 @@ from typing import Any
 
 from vertebra.utils.module_loader import import_optional
 
-__all__ = ("DjangoAppConfig",)
+__all__ = ("VertebraAppConfig",)
 
 
-class DjangoAppConfig:
+class VertebraAppConfig:
     """Django ``AppConfig`` that registers Vertebra's routing, fastpath, and template bridges."""
 
     name: str = "vertebra.extensions.django"
@@ -22,7 +22,7 @@ class DjangoAppConfig:
         self.module = app_module if app_module is not None else import_optional(app_name)
 
     def ready(self) -> None:
-        """Initialize ``DjangoPlugin`` from ``django.conf.settings`` when Django starts."""
+        """Initialize ``VertebraPlugin`` from ``django.conf.settings`` when Django starts."""
         django_conf = import_optional("django.conf")
         if django_conf is None:
             return
@@ -31,8 +31,8 @@ class DjangoAppConfig:
             return
         raw_cfg = getattr(settings, "VERTEBRA", None)
         if raw_cfg is not None:
-            from vertebra.extensions.django.config import DjangoConfig
-            from vertebra.extensions.django.plugin import DjangoPlugin
+            from vertebra.extensions.django.config import VertebraConfig
+            from vertebra.extensions.django.plugin import VertebraPlugin
 
-            cfg = raw_cfg if isinstance(raw_cfg, DjangoConfig) else DjangoConfig(**dict(raw_cfg))
-            DjangoPlugin(settings=settings, config=cfg)
+            cfg = raw_cfg if isinstance(raw_cfg, VertebraConfig) else VertebraConfig(**dict(raw_cfg))
+            VertebraPlugin(settings=settings, config=cfg)

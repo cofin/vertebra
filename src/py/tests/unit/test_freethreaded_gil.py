@@ -100,7 +100,8 @@ def test_native_pyclasses_enforce_immutable_type() -> None:
         bundler_mod.Bundler,
         bundler_mod.BundleConfig,
         getattr(bundler_mod, "SSRPool", None),
-        storage_mod.ObjectStore,
+        storage_mod.SyncObjectStore,
+        storage_mod.AsyncObjectStore,
         storage_mod.StorageBuffer,
         storage_mod.ObjectMeta,
     ]

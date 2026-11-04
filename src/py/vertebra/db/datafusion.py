@@ -11,7 +11,7 @@ import msgspec
 from vertebra.utils.module_loader import ensure_module, import_optional
 
 if TYPE_CHECKING:
-    from vertebra.storage import ObjectStore
+    from vertebra.storage import SyncObjectStore
 
 __all__ = (
     "ARROW_STREAM_MEDIA_TYPE",
@@ -123,7 +123,7 @@ class DataFusionEngine:
     def register_parquet_from_store(
         self,
         name: str,
-        store: ObjectStore,
+        store: SyncObjectStore,
         key: str,
     ) -> TableRegistration:
         """Register a Parquet dataset located in an ObjectStore."""

@@ -120,7 +120,7 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
         return self._slot_map
 
     def attach_broker(self, broker: Any) -> None:
-        """Attach a SHMBrokerTransport or DatabaseBroker for push event forwarding."""
+        """Attach a `SyncSHMBrokerTransport`, `AsyncSHMBrokerTransport`, or `DatabaseBroker` for push event forwarding."""
         self._broker = broker
 
     @staticmethod
@@ -205,42 +205,6 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
             finally:
                 if sock is not None:
                     self._close_socket(sock)
-        msg = f"Unable to resolve Sentinel master {master_name!r} from {candidates}"
-        if last_err is not None:
-            raise VertebraError(msg) from last_err
-        raise VertebraError(msg)
-
-    async def discover_sentinel_master_async(self) -> tuple[str, int]:
-        """Asynchronously query configured Sentinel nodes for the active primary (host, port)."""
-        master_name = self.config.effective_sentinel_master_name
-        if not master_name:
-            msg = "sentinel_master_name or sentinel_service_name must be set for Sentinel discovery"
-            raise ImproperConfigurationError(msg)
-        candidates = self._get_sentinel_candidates()
-        last_err: Exception | None = None
-        for s_host, s_port in candidates:
-            writer: asyncio.StreamWriter | None = None
-            try:
-                ssl_ctx = ssl.create_default_context() if self.config.uses_tls else None
-                reader, writer = await asyncio.open_connection(s_host, s_port, ssl=ssl_ctx)
-                writer.write(self.encode_command("SENTINEL", "get-master-addr-by-name", master_name))
-                await writer.drain()
-                buf = bytearray()
-                reply = await self._read_stream_reply_once(reader, buf)
-                if isinstance(reply, dict):
-                    reply = await self._read_stream_reply_once(reader, buf)
-                if isinstance(reply, (list, tuple)) and len(reply) >= 2:
-                    m_host = RedisCore.decode_part(reply[0])
-                    m_port = int(RedisCore.decode_part(reply[1]))
-                    self._master_address = (m_host, m_port)
-                    return self._master_address
-            except Exception as err:
-                last_err = err
-            finally:
-                if writer is not None:
-                    with contextlib.suppress(Exception):
-                        writer.close()
-                        await asyncio.wait_for(writer.wait_closed(), timeout=0.05)
         msg = f"Unable to resolve Sentinel master {master_name!r} from {candidates}"
         if last_err is not None:
             raise VertebraError(msg) from last_err
@@ -1130,7 +1094,7 @@ class AsyncRedisDriver(CommonDriverMixin[RedisConfig]):
         return self._slot_map
 
     def attach_broker(self, broker: Any) -> None:
-        """Attach a SHMBrokerTransport or DatabaseBroker for push event forwarding."""
+        """Attach a `SyncSHMBrokerTransport`, `AsyncSHMBrokerTransport`, or `DatabaseBroker` for push event forwarding."""
         self._broker = broker
         self._sync.attach_broker(broker)
 
@@ -1155,13 +1119,39 @@ class AsyncRedisDriver(CommonDriverMixin[RedisConfig]):
 
     async def discover_sentinel_master(self) -> tuple[str, int]:
         """Query configured Sentinel nodes asynchronously for the active primary (host, port)."""
-        addr = await self._sync.discover_sentinel_master_async()
-        self._master_address = addr
-        return addr
-
-    async def discover_sentinel_master_async(self) -> tuple[str, int]:
-        """Query configured Sentinel nodes asynchronously for the active primary (host, port)."""
-        return await self.discover_sentinel_master()
+        master_name = self.config.effective_sentinel_master_name
+        if not master_name:
+            msg = "sentinel_master_name or sentinel_service_name must be set for Sentinel discovery"
+            raise ImproperConfigurationError(msg)
+        candidates = self._sync._get_sentinel_candidates()
+        last_err: Exception | None = None
+        for s_host, s_port in candidates:
+            writer: asyncio.StreamWriter | None = None
+            try:
+                ssl_ctx = ssl.create_default_context() if self.config.uses_tls else None
+                reader, writer = await asyncio.open_connection(s_host, s_port, ssl=ssl_ctx)
+                writer.write(SyncRedisDriver.encode_command("SENTINEL", "get-master-addr-by-name", master_name))
+                await writer.drain()
+                buf = bytearray()
+                reply = await SyncRedisDriver._read_stream_reply_once(reader, buf)
+                if isinstance(reply, dict):
+                    reply = await SyncRedisDriver._read_stream_reply_once(reader, buf)
+                if isinstance(reply, (list, tuple)) and len(reply) >= 2:
+                    m_host = RedisCore.decode_part(reply[0])
+                    m_port = int(RedisCore.decode_part(reply[1]))
+                    self._master_address = (m_host, m_port)
+                    return self._master_address
+            except Exception as err:
+                last_err = err
+            finally:
+                if writer is not None:
+                    with contextlib.suppress(Exception):
+                        writer.close()
+                        await asyncio.wait_for(writer.wait_closed(), timeout=0.05)
+        msg = f"Unable to resolve Sentinel master {master_name!r} from {candidates}"
+        if last_err is not None:
+            raise VertebraError(msg) from last_err
+        raise VertebraError(msg)
 
     async def get(self, key: str) -> bytes | None:
         """Asynchronously fetch a key value, consulting the bounded LRU client cache when enabled."""

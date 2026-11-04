@@ -3,21 +3,27 @@
 from __future__ import annotations
 
 from vertebra.extensions.starlette.storage import (
+    AsyncObjectStore,
+    AsyncStorageRegistry,
     GCSConfig,
     LocalConfig,
     MemoryConfig,
-    ObjectStore,
     S3Config,
-    StorageRegistry,
+    StorageConfig,
+    SyncObjectStore,
+    SyncStorageRegistry,
     attach_storage,
 )
 
 __all__ = (
+    "AsyncObjectStore",
+    "AsyncStorageRegistry",
     "GCSConfig",
     "LocalConfig",
     "MemoryConfig",
-    "ObjectStore",
     "S3Config",
-    "StorageRegistry",
+    "StorageConfig",
+    "SyncObjectStore",
+    "SyncStorageRegistry",
     "attach_storage",
 )

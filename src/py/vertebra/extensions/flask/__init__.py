@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from vertebra.db._registry import provide_bigquery_driver, provide_spanner_driver
     from vertebra.extensions.flask.cache import CacheBackend, FlaskCachingBackend
     from vertebra.extensions.flask.channels import ChannelMessage, ChannelsBackend
-    from vertebra.extensions.flask.config import FlaskConfig
+    from vertebra.extensions.flask.config import VertebraConfig
     from vertebra.extensions.flask.fastpath import (
         CompiledRoute,
         FastPath,
@@ -44,17 +44,19 @@ if TYPE_CHECKING:
         attach_openapi_docs,
         extract_openapi_schema,
     )
-    from vertebra.extensions.flask.plugin import FlaskPlugin
+    from vertebra.extensions.flask.plugin import VertebraPlugin
     from vertebra.extensions.flask.queues import QueueBackend, TaskEnvelope
     from vertebra.extensions.flask.router import RouteCompiler, RouteEntry, convert_werkzeug_rule
     from vertebra.extensions.flask.security import JWTAuthGuard, RateLimitGuard
     from vertebra.extensions.flask.storage import (
+        AsyncObjectStore,
+        AsyncStorageRegistry,
         GCSConfig,
         LocalConfig,
         MemoryConfig,
-        ObjectStore,
         S3Config,
-        StorageRegistry,
+        SyncObjectStore,
+        SyncStorageRegistry,
         attach_storage,
         send_storage_file,
     )
@@ -62,14 +64,14 @@ if TYPE_CHECKING:
 
 __all__ = (
     "AsyncAPIDocsConfig",
+    "AsyncObjectStore",
+    "AsyncStorageRegistry",
     "CacheBackend",
     "ChannelMessage",
     "ChannelsBackend",
     "CompiledRoute",
     "FastPath",
     "FlaskCachingBackend",
-    "FlaskConfig",
-    "FlaskPlugin",
     "GCSConfig",
     "JWTAuthGuard",
     "LocalConfig",
@@ -79,7 +81,6 @@ __all__ = (
     "MailConfig",
     "MailMessage",
     "MemoryConfig",
-    "ObjectStore",
     "OpenAPIConfig",
     "PromptController",
     "QueueBackend",
@@ -90,9 +91,12 @@ __all__ = (
     "ScalarDocsConfig",
     "ScalarSpecSource",
     "SkillController",
-    "StorageRegistry",
     "SwaggerDocsConfig",
+    "SyncObjectStore",
+    "SyncStorageRegistry",
     "TaskEnvelope",
+    "VertebraConfig",
+    "VertebraPlugin",
     "ViteAssetBridge",
     "ViteConfig",
     "WebMCPConfig",
@@ -120,14 +124,14 @@ __all__ = (
 
 _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "AsyncAPIDocsConfig": ("vertebra.extensions.flask.openapi", "AsyncAPIDocsConfig"),
+    "AsyncObjectStore": ("vertebra.extensions.flask.storage", "AsyncObjectStore"),
+    "AsyncStorageRegistry": ("vertebra.extensions.flask.storage", "AsyncStorageRegistry"),
     "CacheBackend": ("vertebra.extensions.flask.cache", "CacheBackend"),
     "ChannelMessage": ("vertebra.extensions.flask.channels", "ChannelMessage"),
     "ChannelsBackend": ("vertebra.extensions.flask.channels", "ChannelsBackend"),
     "CompiledRoute": ("vertebra.extensions.flask.fastpath", "CompiledRoute"),
     "FastPath": ("vertebra.extensions.flask.fastpath", "FastPath"),
     "FlaskCachingBackend": ("vertebra.extensions.flask.cache", "FlaskCachingBackend"),
-    "FlaskConfig": ("vertebra.extensions.flask.config", "FlaskConfig"),
-    "FlaskPlugin": ("vertebra.extensions.flask.plugin", "FlaskPlugin"),
     "GCSConfig": ("vertebra.extensions.flask.storage", "GCSConfig"),
     "JWTAuthGuard": ("vertebra.extensions.flask.security", "JWTAuthGuard"),
     "LocalConfig": ("vertebra.extensions.flask.storage", "LocalConfig"),
@@ -137,7 +141,6 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "MailConfig": ("vertebra.extensions.flask.mail", "MailConfig"),
     "MailMessage": ("vertebra.extensions.flask.mail", "MailMessage"),
     "MemoryConfig": ("vertebra.extensions.flask.storage", "MemoryConfig"),
-    "ObjectStore": ("vertebra.extensions.flask.storage", "ObjectStore"),
     "OpenAPIConfig": ("vertebra.extensions.flask.openapi", "OpenAPIConfig"),
     "PromptController": ("vertebra.extensions.flask.mcp", "PromptController"),
     "QueueBackend": ("vertebra.extensions.flask.queues", "QueueBackend"),
@@ -148,9 +151,12 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "ScalarDocsConfig": ("vertebra.extensions.flask.openapi", "ScalarDocsConfig"),
     "ScalarSpecSource": ("vertebra.extensions.flask.openapi", "ScalarSpecSource"),
     "SkillController": ("vertebra.extensions.flask.mcp", "SkillController"),
-    "StorageRegistry": ("vertebra.extensions.flask.storage", "StorageRegistry"),
     "SwaggerDocsConfig": ("vertebra.extensions.flask.openapi", "SwaggerDocsConfig"),
+    "SyncObjectStore": ("vertebra.extensions.flask.storage", "SyncObjectStore"),
+    "SyncStorageRegistry": ("vertebra.extensions.flask.storage", "SyncStorageRegistry"),
     "TaskEnvelope": ("vertebra.extensions.flask.queues", "TaskEnvelope"),
+    "VertebraConfig": ("vertebra.extensions.flask.config", "VertebraConfig"),
+    "VertebraPlugin": ("vertebra.extensions.flask.plugin", "VertebraPlugin"),
     "ViteAssetBridge": ("vertebra.extensions.flask.vite", "ViteAssetBridge"),
     "ViteConfig": ("vertebra.extensions.flask.vite", "ViteConfig"),
     "WebMCPConfig": ("vertebra.extensions.flask.mcp", "WebMCPConfig"),

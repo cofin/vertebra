@@ -1,10 +1,10 @@
 # GCS, Active ADC Credential Refresh & Presigning
 
-Vertebra provides active Google Cloud Application Default Credentials (ADC) caching (`RefreshingGcpCredentialProvider`, `GcpTokenCache`) and multicloud URL/header presigning (`SigningConfig`, `PresignedUrlSigner`).
+Vertebra provides active Google Cloud Application Default Credentials (ADC) caching (`RefreshingGcpCredentialProvider`, `SyncGcpTokenCache`, `AsyncGcpTokenCache`) and multicloud URL/header presigning (`SigningConfig`, `PresignedUrlSigner`).
 
 ```mermaid
 flowchart LR
-    Store["ObjectStore / DuckDB httpfs"] --> Cache["ArcSwap GcpTokenCache"]
+    Store["SyncObjectStore / AsyncObjectStore / DuckDB httpfs"] --> Cache["ArcSwap SyncGcpTokenCache / AsyncGcpTokenCache"]
     Cache --> Skew["300s Proactive Refresh Skew"]
     Skew --> Source["ADC Source (Metadata / User / Impersonated)"]
     Store --> Signer["PresignedUrlSigner (HMAC / SigV4 / GCS / SAS / OCI)"]
@@ -16,25 +16,25 @@ When `service_account_path` and `service_account_key` are omitted on `GCSConfig`
 
 ```python
 import os
-from vertebra.storage import GCSConfig, ObjectStore
+from vertebra.storage import GCSConfig, SyncObjectStore
 
-store = ObjectStore.from_config(GCSConfig(bucket="app-assets-production"))
+store = SyncObjectStore.from_config(GCSConfig(bucket="app-assets-production"))
 
-sa_store = ObjectStore.from_config(
+sa_store = SyncObjectStore.from_config(
     GCSConfig(
         bucket="app-assets-production",
         service_account_path="/var/secrets/google/key.json",
     )
 )
 
-json_store = ObjectStore.from_config(
+json_store = SyncObjectStore.from_config(
     GCSConfig(
         bucket="app-assets-production",
         service_account_key=os.environ["GCS_SERVICE_ACCOUNT_JSON"],
     )
 )
 
-signing_store = ObjectStore.from_config(
+signing_store = SyncObjectStore.from_config(
     GCSConfig(
         bucket="app-assets-production",
         service_account_email="backend@my-project.iam.gserviceaccount.com",
@@ -44,7 +44,7 @@ signing_store = ObjectStore.from_config(
 
 - **Proactive Refresh & Generation Invalidation**: Expired or `401`-rejected tokens trigger `invalidate_if_generation(observed_gen)` so concurrent tasks coalesce into a single refresh call.
 - **Keyless V4 Presigning**: Pass `service_account_email` to sign upload and download URLs via Google Cloud IAM's `signBlob` API without storing long-lived private keys in containers.
-- **Per-Client OAuth Scopes**: Each client requests its own default OAuth scopes when refreshing credentials or impersonating a service account (`https://www.googleapis.com/auth/spanner.data` and `spanner.admin` for Spanner, `https://www.googleapis.com/auth/bigquery` for BigQuery, `https://www.googleapis.com/auth/devstorage.full_control` for GCS, and `https://www.googleapis.com/auth/cloud-platform` for `GcpTokenCache`), overridable via the `scopes` auth option.
+- **Per-Client OAuth Scopes**: Each client requests its own default OAuth scopes when refreshing credentials or impersonating a service account (`https://www.googleapis.com/auth/spanner.data` and `spanner.admin` for Spanner, `https://www.googleapis.com/auth/bigquery` for BigQuery, `https://www.googleapis.com/auth/devstorage.full_control` for GCS, and `https://www.googleapis.com/auth/cloud-platform` for `SyncGcpTokenCache` / `AsyncGcpTokenCache`), overridable via the `scopes` auth option.
 - **Proxy & `gcloud` CLI Behavior**: Token exchange and IAM impersonation requests honor `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, and `NO_PROXY` environment variables, whereas GCE/GKE metadata-server requests (`169.254.169.254`) always connect directly without a proxy. When falling back to the `gcloud` CLI (`gcloud auth print-access-token`), Vertebra spawns an async subprocess using the binary path in `GCLOUD_BIN` (default `gcloud`) with a 30-second timeout.
 
 ## Presigned URLs (`SigningConfig`)
@@ -52,9 +52,9 @@ signing_store = ObjectStore.from_config(
 Offload large client uploads and downloads directly to your storage origin using `SigningConfig` (`presign_get`, `presign_put`, `verify_presigned_url`), or compute Azure Blob SAS URLs (`SigningConfig.sign_azure_sas`) and OCI RSA-SHA256 request headers (`SigningConfig.sign_oci_headers`):
 
 ```python
-from vertebra.storage import ObjectStore, SigningConfig
+from vertebra.storage import SigningConfig, SyncObjectStore
 
-store = ObjectStore.from_memory(
+store = SyncObjectStore.from_memory(
     namespace="uploads",
     signing=SigningConfig(
         provider="hmac",

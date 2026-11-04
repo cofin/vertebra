@@ -1,4 +1,4 @@
-"""Configuration for FastAPIPlugin integration."""
+"""Configuration for VertebraPlugin integration in FastAPI."""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ from typing import Any
 
 import msgspec
 
-__all__ = ("FastAPIConfig",)
+__all__ = ("VertebraConfig",)
 
 
-class FastAPIConfig(msgspec.Struct, frozen=True, gc=False):
+class VertebraConfig(msgspec.Struct, frozen=True, gc=False):
     """Configuration controlling FastAPI Rust accelerations, dependency compilation, and docs portal."""
 
     offload_compression: bool = True

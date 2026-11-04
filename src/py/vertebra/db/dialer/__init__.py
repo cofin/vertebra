@@ -4,13 +4,15 @@ from vertebra.db.dialer.alloydb import (
     AlloyDBAuthType,
     AlloyDBClusterURI,
     AlloyDBConfig,
-    AlloyDBDialer,
+    AsyncAlloyDBDialer,
+    SyncAlloyDBDialer,
 )
 from vertebra.db.dialer.cloudsql import (
+    AsyncCloudSQLDialer,
     CloudSQLConfig,
-    CloudSQLDialer,
     CloudSQLInstanceURI,
     EphemeralCertBundle,
+    SyncCloudSQLDialer,
     generate_ephemeral_keypair,
 )
 
@@ -18,10 +20,12 @@ __all__ = (
     "AlloyDBAuthType",
     "AlloyDBClusterURI",
     "AlloyDBConfig",
-    "AlloyDBDialer",
+    "AsyncAlloyDBDialer",
+    "AsyncCloudSQLDialer",
     "CloudSQLConfig",
-    "CloudSQLDialer",
     "CloudSQLInstanceURI",
     "EphemeralCertBundle",
+    "SyncAlloyDBDialer",
+    "SyncCloudSQLDialer",
     "generate_ephemeral_keypair",
 )

@@ -1,6 +1,6 @@
 # Testing
 
-Test Vertebra applications in `pytest` without opening network sockets using in-process route and controller dispatch, `Container` / `Provide` dependency overrides, in-memory `ObjectStore` namespaces, `:memory:` SQLite drivers, and `MemoryQueueBackend`.
+Test Vertebra applications in `pytest` without opening network sockets using in-process route and controller dispatch, `Container` / `Provide` dependency overrides, in-memory `SyncObjectStore` / `AsyncObjectStore` namespaces, `:memory:` SQLite drivers, and `MemoryQueueBackend`.
 
 ## Route, Controller & Dependency Override Testing
 
@@ -37,17 +37,17 @@ def test_controller_and_params() -> None:
 
 ## Asynchronous Queue & Storage Testing
 
-Use `pytest` and `anyio` when testing async handlers, `QueueService` with `memory://`, and `ObjectStore.from_memory()`:
+Use `pytest` and `anyio` when testing async handlers, `QueueService` with `memory://`, and `SyncObjectStore.from_memory()`:
 
 ```python
 import pytest
 from vertebra.framework.queues import QueueConfig, QueueService
-from vertebra.storage import ObjectStore
+from vertebra.storage import SyncObjectStore
 
 
 @pytest.mark.anyio
 async def test_memory_queue_and_storage() -> None:
-    store = ObjectStore.from_memory(namespace="test-uploads")
+    store = SyncObjectStore.from_memory(namespace="test-uploads")
     store.put("items/7.json", b'{"item_id": 7}')
     assert store.get("items/7.json") == b'{"item_id": 7}'
 
@@ -59,5 +59,5 @@ async def test_memory_queue_and_storage() -> None:
 ## In-Memory Subsystems for Fast Tests
 
 - **Dependency Overrides**: Pass overridden `Provide(...)` entries on `App(dependencies=...)` or `container.create_child({...})` so handlers receive test doubles.
-- **In-Memory Object Storage**: Call `ObjectStore.from_memory()` or pass `MemoryConfig()` to `ObjectStore.from_config()` for zero-disk storage tests.
+- **In-Memory Object Storage**: Call `SyncObjectStore.from_memory()` (or `AsyncObjectStore.from_memory()`) or pass `MemoryConfig()` to `SyncObjectStore.from_config()` for zero-disk storage tests.
 - **In-Memory SQLite Drivers**: Use `SyncSqliteDriver(SqliteConfig(path=":memory:"))` for fast SQL schema and query tests.

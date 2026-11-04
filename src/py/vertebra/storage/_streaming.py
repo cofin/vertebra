@@ -6,10 +6,11 @@ from typing import TYPE_CHECKING
 
 import msgspec
 
+from vertebra.storage._store import AsyncObjectStore, SyncObjectStore
+from vertebra.typing import ImproperConfigurationError
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
-
-    from vertebra.storage._store import ObjectStore
 
 __all__ = ("StreamingStorageResponse",)
 
@@ -17,8 +18,8 @@ __all__ = ("StreamingStorageResponse",)
 class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
     """Zero-copy chunked HTTP response descriptor backed by ObjectStore."""
 
-    store: ObjectStore | None = None
-    """Underlying `ObjectStore` instance holding the target object."""
+    store: SyncObjectStore | AsyncObjectStore | None = None
+    """Underlying object store instance holding the target object."""
     key: str = ""
     """Object key path within `store`."""
     total_size: int = 0
@@ -55,6 +56,9 @@ class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
             return
         if self.store is None:
             return
+        if isinstance(self.store, AsyncObjectStore):
+            msg = "AsyncObjectStore cannot be used with synchronous iter_chunks; use aiter_chunks or SyncObjectStore"
+            raise ImproperConfigurationError(msg)
         view = self.store.get_view(self.key)
         if self.range_start is not None or self.range_end is not None:
             start = max(0, int(self.range_start or 0))
@@ -72,7 +76,10 @@ class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
             return
         if self.store is None:
             return
-        view = await self.store.get_view_async(self.key)
+        if isinstance(self.store, AsyncObjectStore):
+            view = await self.store.get_view(self.key)
+        else:
+            view = self.store.get_view(self.key)
         if self.range_start is not None or self.range_end is not None:
             start = max(0, int(self.range_start or 0))
             end = int(self.range_end) + 1 if self.range_end is not None else len(view)
@@ -82,6 +89,12 @@ class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
 
     def to_fastpath_tuple(self) -> tuple[int, list[tuple[bytes, bytes]], bytes]:
         """Serialize into a `(status_code, headers, body)` tuple for FastPath dispatch."""
+        if self.store is not None and isinstance(self.store, AsyncObjectStore) and self.data is None and self.key:
+            msg = (
+                "AsyncObjectStore cannot be used with synchronous to_fastpath_tuple; "
+                "use SyncObjectStore or pre-load response data"
+            )
+            raise ImproperConfigurationError(msg)
         resolved_ct = self.content_type or self.media_type or "application/octet-stream"
         encoded_headers: list[tuple[bytes, bytes]] = [
             (b"content-type", resolved_ct.encode("latin-1")),
@@ -91,7 +104,7 @@ class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
         resolved_range = self.content_range
         if self.data is not None:
             payload = self.data
-        elif self.store is not None and self.key:
+        elif isinstance(self.store, SyncObjectStore) and self.key:
             view = self.store.get_view(self.key)
             total_len = self.total_size or len(view)
             if self.range_start is not None or self.range_end is not None:

@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
+import os
 import socket
 import ssl
 import struct
+import tempfile
 import time
 import urllib.request
 from collections.abc import Callable
 from enum import IntEnum
+from pathlib import Path
 from typing import Any
 
 from vertebra.db.dialer.cloudsql import (
-    CloudSQLConfig,
-    CloudSQLDialer,
     EphemeralCertBundle,
     generate_ephemeral_keypair,
 )
@@ -27,7 +29,8 @@ __all__ = (
     "AlloyDBAuthType",
     "AlloyDBClusterURI",
     "AlloyDBConfig",
-    "AlloyDBDialer",
+    "AsyncAlloyDBDialer",
+    "SyncAlloyDBDialer",
 )
 
 
@@ -93,20 +96,35 @@ class AlloyDBConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """User-agent string sent during the `MetadataExchangeRequest` protobuf handshake."""
 
 
-class AlloyDBDialer:
-    """Zero-sidecar AlloyDB mTLS dialer performing the MetadataExchange handshake on port 5433."""
+class _BaseAlloyDBDialer:
+    """Base zero-sidecar AlloyDB mTLS dialer foundation."""
 
-    __slots__ = ("_config", "_native_dialer", "_uri")
+    __slots__ = (
+        "_cached_cert_bundle",
+        "_cached_expiry",
+        "_cached_token",
+        "_config",
+        "_native_dialer",
+        "_uri",
+    )
 
     def __init__(self, config: AlloyDBConfig) -> None:
         self._config = config
         self._uri = AlloyDBClusterURI.parse(config.instance_uri)
+        self._cached_token: str | None = None
+        self._cached_expiry: float = 0.0
+        self._cached_cert_bundle: EphemeralCertBundle | None = None
         self._native_dialer: Any = None
         native_mod = import_optional("vertebra._vertebra")
-        native_cls = getattr(native_mod, "AlloyDBDialer", None) if native_mod is not None else None
+        native_cls = getattr(native_mod, "AlloyDBDialer", None)
         if native_cls is not None:
             with contextlib.suppress(TypeError, ValueError, RuntimeError):
                 self._native_dialer = native_cls(config.instance_uri)
+
+    @property
+    def config(self) -> AlloyDBConfig:
+        """Return the configuration for this AlloyDB dialer."""
+        return self._config
 
     @property
     def uri(self) -> AlloyDBClusterURI:
@@ -155,14 +173,14 @@ class AlloyDBDialer:
         if user_agent:
             ua_bytes = user_agent.encode("utf-8")
             body.append(0x0A)
-            body.extend(AlloyDBDialer._encode_varint(len(ua_bytes)))
+            body.extend(_BaseAlloyDBDialer._encode_varint(len(ua_bytes)))
             body.extend(ua_bytes)
         body.append(0x10)
-        body.extend(AlloyDBDialer._encode_varint(int(auth_type)))
+        body.extend(_BaseAlloyDBDialer._encode_varint(int(auth_type)))
         if oauth2_token:
             tok_bytes = oauth2_token.encode("utf-8")
             body.append(0x1A)
-            body.extend(AlloyDBDialer._encode_varint(len(tok_bytes)))
+            body.extend(_BaseAlloyDBDialer._encode_varint(len(tok_bytes)))
             body.extend(tok_bytes)
         return struct.pack(">I", len(body)) + bytes(body)
 
@@ -228,22 +246,17 @@ class AlloyDBDialer:
         """Encode a 4-byte length-prefixed AlloyDB MetadataExchangeResponse protobuf frame."""
         body = bytearray()
         body.append(0x08)
-        body.extend(AlloyDBDialer._encode_varint(code))
+        body.extend(_BaseAlloyDBDialer._encode_varint(code))
         if error_message:
             msg_bytes = error_message.encode("utf-8")
             body.append(0x12)
-            body.extend(AlloyDBDialer._encode_varint(len(msg_bytes)))
+            body.extend(_BaseAlloyDBDialer._encode_varint(len(msg_bytes)))
             body.extend(msg_bytes)
         return struct.pack(">I", len(body)) + bytes(body)
 
     @staticmethod
     def decode_metadata_exchange_response(frame: bytes) -> tuple[int, str]:
-        """Decode a 4-byte length-prefixed AlloyDB MetadataExchangeResponse protobuf frame.
-
-        Protobuf wire encoding:
-        field 1: int32 response_code (1 = OK, 2 = ERROR) (tag: 0x08)
-        field 2: string error_message (tag: 0x12)
-        """
+        """Decode a 4-byte length-prefixed AlloyDB MetadataExchangeResponse protobuf frame."""
         if len(frame) < 4:
             msg = "Frame too short for length prefix"
             raise ValueError(msg)
@@ -303,22 +316,33 @@ class AlloyDBDialer:
         client_key_pem: str | None = None,
     ) -> ssl.SSLContext:
         """Build a TLS 1.3 SSLContext for AlloyDB port 5433."""
-        dummy_csql = CloudSQLDialer(CloudSQLConfig(instance_connection_name="dummy:dummy:dummy"))
-        return dummy_csql.build_tls_context(
-            ca_pem=ca_pem,
-            client_cert_pem=client_cert_pem,
-            client_key_pem=client_key_pem,
-        )
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+        ctx.check_hostname = False
+        if ca_pem:
+            ctx.verify_mode = ssl.CERT_REQUIRED
+            ctx.load_verify_locations(cadata=ca_pem)
+        else:
+            ctx.verify_mode = ssl.CERT_NONE
+        if client_cert_pem and client_key_pem:
+            with tempfile.TemporaryDirectory(prefix="vtb-adb-tls-") as tmpdir:
+                os.chmod(tmpdir, 0o700)
+                cert_file = Path(tmpdir) / "cert.pem"
+                key_file = Path(tmpdir) / "key.pem"
+                cert_file.write_text(client_cert_pem, encoding="utf-8")
+                key_file.write_text(client_key_pem, encoding="utf-8")
+                os.chmod(cert_file, 0o600)
+                os.chmod(key_file, 0o600)
+                ctx.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
+        return ctx
 
-    def refresh_client_cert(
+    def _execute_client_cert_http(
         self,
-        *,
         public_key_pem: str,
-        private_key_pem: str,
         access_token: str,
         http_transport: Callable[[str, bytes, dict[str, str]], bytes] | None = None,
+        private_key_pem: str = "",
     ) -> EphemeralCertBundle:
-        """Exchange an ephemeral client RSA/ECDSA public key for an AlloyDB client certificate."""
         url = self._uri.generate_client_cert_url()
         payload = encode_json_bytes({"pem_csr": public_key_pem, "access_token": access_token})
         headers = {
@@ -345,20 +369,99 @@ class AlloyDBDialer:
             expiration_ts=time.time() + 3600,
         )
 
-    def connect_sync(
+    @staticmethod
+    def _encode_varint(value: int) -> bytes:
+        out = bytearray()
+        val = value
+        while val >= 0x80:
+            out.append((val & 0x7F) | 0x80)
+            val >>= 7
+        out.append(val)
+        return bytes(out)
+
+    @staticmethod
+    def _unwrap_access_token(raw: Any) -> str:
+        if raw is None:
+            return ""
+        if hasattr(raw, "access_token"):
+            return str(raw.access_token or "")
+        return str(raw or "")
+
+
+class SyncAlloyDBDialer(_BaseAlloyDBDialer):
+    """Synchronous zero-sidecar AlloyDB mTLS dialer with MetadataExchange handshake on port 5433."""
+
+    __slots__ = ("_token_cache",)
+
+    def __init__(self, config: AlloyDBConfig, *, token_cache: Any = None) -> None:
+        super().__init__(config)
+        self._token_cache = token_cache
+        if self._token_cache is None:
+            native_mod = import_optional("vertebra._vertebra")
+            cache_cls = getattr(native_mod, "SyncGcpTokenCache", None) if native_mod is not None else None
+            if cache_cls is not None:
+                with contextlib.suppress(Exception):
+                    self._token_cache = cache_cls()
+
+    def refresh_client_cert(
+        self,
+        *,
+        public_key_pem: str | None = None,
+        private_key_pem: str | None = None,
+        access_token: str | None = None,
+        http_transport: Callable[[str, bytes, dict[str, str]], bytes] | None = None,
+    ) -> EphemeralCertBundle:
+        """Exchange an ephemeral client RSA/ECDSA public key for an AlloyDB client certificate."""
+        resolved_token = self._unwrap_access_token(access_token) if access_token is not None else ""
+        if access_token is None:
+            if self._token_cache is not None and hasattr(self._token_cache, "get_token"):
+                with contextlib.suppress(Exception):
+                    resolved_token = self._unwrap_access_token(self._token_cache.get_token())
+            if not resolved_token and self._cached_token:
+                resolved_token = self._cached_token
+        if resolved_token:
+            self._cached_token = resolved_token
+        resolved_pub = public_key_pem
+        resolved_priv = private_key_pem
+        if resolved_pub is None or resolved_priv is None:
+            gen_pub, gen_priv = self.generate_ephemeral_keypair()
+            resolved_pub = resolved_pub or gen_pub
+            resolved_priv = resolved_priv or gen_priv
+        bundle = self._execute_client_cert_http(
+            resolved_pub,
+            resolved_token,
+            http_transport=http_transport,
+            private_key_pem=resolved_priv,
+        )
+        self._cached_cert_bundle = bundle
+        return bundle
+
+    def connect(
         self,
         host: str,
         *,
-        oauth2_token: str = "",
+        oauth2_token: str | None = None,
         ssl_context: ssl.SSLContext | None = None,
         timeout: float = 10.0,
     ) -> ssl.SSLSocket:
         """Establish a synchronous TLS 1.3 mTLS connection to AlloyDB and perform MetadataExchange."""
+        resolved_token = self._unwrap_access_token(oauth2_token) if oauth2_token is not None else ""
+        if oauth2_token is None:
+            if self._config.enable_iam_auth:
+                if self._token_cache is not None and hasattr(self._token_cache, "get_token"):
+                    with contextlib.suppress(Exception):
+                        resolved_token = self._unwrap_access_token(self._token_cache.get_token())
+                if not resolved_token and self._cached_token:
+                    resolved_token = self._cached_token
+                if resolved_token:
+                    self._cached_token = resolved_token
+        elif resolved_token:
+            self._cached_token = resolved_token
         ctx = ssl_context or self.build_tls_context()
         raw_sock = socket.create_connection((host, self.port), timeout=timeout)
         try:
             tls_sock = ctx.wrap_socket(raw_sock)
-            req_frame = self.build_handshake_frame(oauth2_token)
+            req_frame = self.build_handshake_frame(resolved_token)
             tls_sock.sendall(req_frame)
             header = tls_sock.recv(4)
             if len(header) < 4:
@@ -377,29 +480,11 @@ class AlloyDBDialer:
             raw_sock.close()
             raise
 
-    async def connect_async(
-        self,
-        host: str,
-        *,
-        oauth2_token: str = "",
-        ssl_context: ssl.SSLContext | None = None,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Establish an asynchronous TLS 1.3 mTLS connection to AlloyDB and perform MetadataExchange."""
-        ctx = ssl_context or self.build_tls_context()
-        reader, writer = await asyncio.open_connection(host, self.port, ssl=ctx)
-        try:
-            req_frame = self.build_handshake_frame(oauth2_token)
-            writer.write(req_frame)
-            await writer.drain()
-            header = await reader.readexactly(4)
-            (body_len,) = struct.unpack(">I", header)
-            body = await reader.readexactly(body_len)
-            self.decode_metadata_exchange_response(header + body)
-            return reader, writer
-        except Exception:
-            writer.close()
-            await writer.wait_closed()
-            raise
+    def close(self) -> None:
+        """Clear cached tokens and certificates."""
+        self._cached_token = None
+        self._cached_cert_bundle = None
+        self._cached_expiry = 0.0
 
     def __call__(
         self,
@@ -410,31 +495,7 @@ class AlloyDBDialer:
         timeout: float = 10.0,
     ) -> ssl.SSLSocket:
         """Callable dialer entrypoint returning a synchronous TLS 1.3 mTLS socket after MetadataExchange."""
-        return self.connect_sync(host, oauth2_token=oauth2_token, ssl_context=ssl_context, timeout=timeout)
-
-    def create_asyncpg_connect_func(
-        self,
-        host: str = "127.0.0.1",
-        *,
-        oauth2_token: str = "",
-        ssl_context: ssl.SSLContext | None = None,
-    ) -> Callable[..., Any]:
-        """Return an asyncpg-compatible `connect` coroutine function dialing AlloyDB port 5433."""
-        ctx = ssl_context or self.build_tls_context()
-
-        async def _connect(*args: Any, **kwargs: Any) -> Any:
-            asyncpg_mod = import_optional("asyncpg")
-            if asyncpg_mod is None:
-                return await self.connect_async(host, oauth2_token=oauth2_token, ssl_context=ctx)
-            kw = dict(kwargs)
-            kw.setdefault("host", host)
-            kw.setdefault("port", self.port)
-            kw["ssl"] = ctx
-            if self._config.enable_iam_auth and oauth2_token:
-                kw["password"] = oauth2_token
-            return await asyncpg_mod.connect(*args, **kw)
-
-        return _connect
+        return self.connect(host, oauth2_token=oauth2_token, ssl_context=ssl_context, timeout=timeout)
 
     def create_psycopg_connect_func(
         self,
@@ -449,7 +510,7 @@ class AlloyDBDialer:
         def _connect(*args: Any, **kwargs: Any) -> Any:
             psycopg_mod = import_optional("psycopg")
             if psycopg_mod is None:
-                return self.connect_sync(host, oauth2_token=oauth2_token, ssl_context=ctx)
+                return self.connect(host, oauth2_token=oauth2_token, ssl_context=ctx)
             kw = dict(kwargs)
             kw.setdefault("host", host)
             kw.setdefault("port", self.port)
@@ -459,12 +520,122 @@ class AlloyDBDialer:
 
         return _connect
 
-    @staticmethod
-    def _encode_varint(value: int) -> bytes:
-        out = bytearray()
-        val = value
-        while val >= 0x80:
-            out.append((val & 0x7F) | 0x80)
-            val >>= 7
-        out.append(val)
-        return bytes(out)
+
+class AsyncAlloyDBDialer(_BaseAlloyDBDialer):
+    """Asynchronous zero-sidecar AlloyDB mTLS dialer with MetadataExchange handshake on port 5433."""
+
+    __slots__ = ("_token_cache",)
+
+    def __init__(self, config: AlloyDBConfig, *, token_cache: Any = None) -> None:
+        super().__init__(config)
+        self._token_cache = token_cache
+        if self._token_cache is None:
+            native_mod = import_optional("vertebra._vertebra")
+            cache_cls = getattr(native_mod, "AsyncGcpTokenCache", None) if native_mod is not None else None
+            if cache_cls is not None:
+                with contextlib.suppress(Exception):
+                    self._token_cache = cache_cls()
+
+    async def refresh_client_cert(
+        self,
+        *,
+        public_key_pem: str | None = None,
+        private_key_pem: str | None = None,
+        access_token: str | None = None,
+        http_transport: Callable[[str, bytes, dict[str, str]], bytes] | None = None,
+    ) -> EphemeralCertBundle:
+        """Asynchronously exchange an ephemeral client public key for an AlloyDB client certificate."""
+        resolved_token = self._unwrap_access_token(access_token) if access_token is not None else ""
+        if access_token is None:
+            if self._token_cache is not None and hasattr(self._token_cache, "get_token"):
+                with contextlib.suppress(Exception):
+                    res = self._token_cache.get_token()
+                    raw_token = await res if inspect.isawaitable(res) else res
+                    resolved_token = self._unwrap_access_token(raw_token)
+            if not resolved_token and self._cached_token:
+                resolved_token = self._cached_token
+        if resolved_token:
+            self._cached_token = resolved_token
+        resolved_pub = public_key_pem
+        resolved_priv = private_key_pem
+        if resolved_pub is None or resolved_priv is None:
+            gen_pub, gen_priv = self.generate_ephemeral_keypair()
+            resolved_pub = resolved_pub or gen_pub
+            resolved_priv = resolved_priv or gen_priv
+        bundle = await asyncio.to_thread(
+            self._execute_client_cert_http,
+            resolved_pub,
+            resolved_token,
+            http_transport,
+            resolved_priv,
+        )
+        self._cached_cert_bundle = bundle
+        return bundle
+
+    async def connect(
+        self,
+        host: str,
+        *,
+        oauth2_token: str | None = None,
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """Establish an asynchronous TLS 1.3 mTLS connection to AlloyDB and perform MetadataExchange."""
+        resolved_token = self._unwrap_access_token(oauth2_token) if oauth2_token is not None else ""
+        if oauth2_token is None:
+            if self._config.enable_iam_auth:
+                if self._token_cache is not None and hasattr(self._token_cache, "get_token"):
+                    with contextlib.suppress(Exception):
+                        res = self._token_cache.get_token()
+                        raw_token = await res if inspect.isawaitable(res) else res
+                        resolved_token = self._unwrap_access_token(raw_token)
+                if not resolved_token and self._cached_token:
+                    resolved_token = self._cached_token
+                if resolved_token:
+                    self._cached_token = resolved_token
+        elif resolved_token:
+            self._cached_token = resolved_token
+        ctx = ssl_context or self.build_tls_context()
+        reader, writer = await asyncio.open_connection(host, self.port, ssl=ctx)
+        try:
+            req_frame = self.build_handshake_frame(resolved_token)
+            writer.write(req_frame)
+            await writer.drain()
+            header = await reader.readexactly(4)
+            (body_len,) = struct.unpack(">I", header)
+            body = await reader.readexactly(body_len)
+            self.decode_metadata_exchange_response(header + body)
+            return reader, writer
+        except Exception:
+            writer.close()
+            await writer.wait_closed()
+            raise
+
+    async def close(self) -> None:
+        """Clear cached tokens and certificates."""
+        self._cached_token = None
+        self._cached_cert_bundle = None
+        self._cached_expiry = 0.0
+
+    def create_asyncpg_connect_func(
+        self,
+        host: str = "127.0.0.1",
+        *,
+        oauth2_token: str = "",
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> Callable[..., Any]:
+        """Return an asyncpg-compatible `connect` coroutine function dialing AlloyDB port 5433."""
+        ctx = ssl_context or self.build_tls_context()
+
+        async def _connect(*args: Any, **kwargs: Any) -> Any:
+            asyncpg_mod = import_optional("asyncpg")
+            if asyncpg_mod is None:
+                return await self.connect(host, oauth2_token=oauth2_token, ssl_context=ctx)
+            kw = dict(kwargs)
+            kw.setdefault("host", host)
+            kw.setdefault("port", self.port)
+            kw["ssl"] = ctx
+            if self._config.enable_iam_auth and oauth2_token:
+                kw["password"] = oauth2_token
+            return await asyncpg_mod.connect(*args, **kw)
+
+        return _connect

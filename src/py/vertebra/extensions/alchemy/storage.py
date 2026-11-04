@@ -1,4 +1,4 @@
-"""Advanced Alchemy StorageBackend implementation backed by ObjectStore."""
+"""Advanced Alchemy StorageBackend implementation backed by SyncObjectStore and AsyncObjectStore."""
 
 from __future__ import annotations
 
@@ -11,7 +11,20 @@ from collections.abc import Buffer, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from vertebra.storage import ObjectMeta, ObjectStore
+from vertebra.storage import (
+    AsyncObjectStore,
+    AzureConfig,
+    GCSConfig,
+    HTTPConfig,
+    LocalConfig,
+    MemoryConfig,
+    ObjectMeta,
+    OCIConfig,
+    R2Config,
+    S3Config,
+    StorageConfig,
+    SyncObjectStore,
+)
 from vertebra.typing import MissingDependencyError
 
 try:
@@ -38,18 +51,20 @@ __all__ = (
     "register_storage_backend",
 )
 
+_STORAGE_CONFIGS = (LocalConfig, S3Config, GCSConfig, AzureConfig, OCIConfig, R2Config, HTTPConfig, MemoryConfig)
+
 
 class ObjectStoreBackend(StorageBackend):
-    """Advanced Alchemy StorageBackend delegating zero-copy and async I/O to ObjectStore."""
+    """Advanced Alchemy StorageBackend delegating zero-copy and async I/O to ObjectStore instances."""
 
     driver = "vertebra"
 
     def __init__(
         self,
         key: str = "default",
-        fs: ObjectStore | str | None = None,
+        fs: SyncObjectStore | AsyncObjectStore | str | StorageConfig | None = None,
         *,
-        store: ObjectStore | None = None,
+        store: SyncObjectStore | AsyncObjectStore | str | StorageConfig | None = None,
         prefix: str = "",
         **kwargs: Any,
     ) -> None:
@@ -60,32 +75,56 @@ class ObjectStoreBackend(StorageBackend):
             fs: Either an `ObjectStore` instance or a storage URI string (`memory://`, `file://`, `s3://`, `gs://`, `az://`, `oci://`, `r2://`).
             store: Explicit `ObjectStore` keyword alias when constructing directly.
             prefix: Optional key namespace prefix prepended to all stored object paths.
-            **kwargs: Optional `ObjectStore` string options or `signing` configuration when `fs` is a URI string.
+            **kwargs: Optional string options or signing configuration when fs is a URI string.
         """
         signing = kwargs.pop("signing", None)
         string_options: dict[str, str] = {
             str(k): str(v) for k, v in kwargs.items() if isinstance(v, (str, int, float, bool))
         }
         target = store if store is not None else fs
-        if isinstance(target, ObjectStore):
-            resolved_store = target
+
+        sync_store: SyncObjectStore
+        async_store: AsyncObjectStore
+
+        if isinstance(target, SyncObjectStore):
+            sync_store = target
+            async_store = target.to_async()
+        elif isinstance(target, AsyncObjectStore):
+            async_store = target
+            sync_store = target.to_sync()
+        elif isinstance(target, _STORAGE_CONFIGS):
+            sync_store = SyncObjectStore.from_config(target)
+            async_store = AsyncObjectStore.from_config(target)
         elif isinstance(target, str):
-            resolved_store = ObjectStore(target, options=string_options or None, signing=signing)
+            sync_store = SyncObjectStore(target, options=string_options or None, signing=signing)
+            async_store = AsyncObjectStore(target, options=string_options or None, signing=signing)
         elif target is None:
-            resolved_store = ObjectStore("memory://", options=string_options or None, signing=signing)
+            sync_store = SyncObjectStore("memory://", options=string_options or None, signing=signing)
+            async_store = AsyncObjectStore("memory://", options=string_options or None, signing=signing)
         else:
-            msg = f"Expected ObjectStore or URI string, got {type(target)!r}"
+            msg = f"Expected SyncObjectStore, AsyncObjectStore, or URI string, got {type(target)!r}"
             raise TypeError(msg)
 
-        super().__init__(key=key, fs=resolved_store, **kwargs)
-        self._store = resolved_store
+        super().__init__(key=key, fs=sync_store, **kwargs)
+        self._sync_store = sync_store
+        self._async_store = async_store
         self._prefix = prefix.strip("/")
-        self.protocol = self._normalize_protocol(resolved_store.scheme)
+        self.protocol = self._normalize_protocol(sync_store.scheme)
 
     @property
-    def store(self) -> ObjectStore:
-        """Return the underlying ObjectStore instance."""
-        return self._store
+    def store(self) -> SyncObjectStore:
+        """Return the underlying SyncObjectStore instance."""
+        return self._sync_store
+
+    @property
+    def sync_store(self) -> SyncObjectStore:
+        """Return the underlying SyncObjectStore instance."""
+        return self._sync_store
+
+    @property
+    def async_store(self) -> AsyncObjectStore:
+        """Return the underlying AsyncObjectStore instance."""
+        return self._async_store
 
     @property
     def prefix(self) -> str:
@@ -95,38 +134,38 @@ class ObjectStoreBackend(StorageBackend):
     def get_content(self, path: PathLike, *, options: dict[str, Any] | None = None) -> bytes:
         """Read full object bytes synchronously."""
         _ = options
-        return self._store.get(self._qualify(path))
+        return self._sync_store.get(self._qualify(path))
 
     async def get_content_async(self, path: PathLike, *, options: dict[str, Any] | None = None) -> bytes:
         """Read full object bytes asynchronously."""
         _ = options
-        return await self._store.get_async(self._qualify(path))
+        return await self._async_store.get(self._qualify(path))
 
     def get_range(self, path: PathLike, start: int, end: int) -> bytes:
-        """Read a byte range `[start, end)` synchronously."""
+        """Read a byte range [start, end) synchronously."""
         length = max(0, end - start)
-        return self._store.get_range(self._qualify(path), start, length)
+        return self._sync_store.get_range(self._qualify(path), start, length)
 
     async def get_range_async(self, path: PathLike, start: int, end: int) -> bytes:
-        """Read a byte range `[start, end)` asynchronously."""
+        """Read a byte range [start, end) asynchronously."""
         length = max(0, end - start)
-        return await self._store.get_range_async(self._qualify(path), start, length)
+        return await self._async_store.get_range(self._qualify(path), start, length)
 
     def get_metadata(self, path: PathLike) -> ObjectMeta:
         """Read stored object metadata synchronously."""
-        return self._store.head(self._qualify(path))
+        return self._sync_store.head(self._qualify(path))
 
     async def get_metadata_async(self, path: PathLike) -> ObjectMeta:
         """Read stored object metadata asynchronously."""
-        return await self._store.head_async(self._qualify(path))
+        return await self._async_store.head(self._qualify(path))
 
     def exists(self, path: PathLike) -> bool:
         """Return True if the object path exists synchronously."""
-        return self._store.exists(self._qualify(path))
+        return self._sync_store.exists(self._qualify(path))
 
     async def exists_async(self, path: PathLike) -> bool:
         """Return True if the object path exists asynchronously."""
-        return await self._store.exists_async(self._qualify(path))
+        return await self._async_store.exists(self._qualify(path))
 
     def save_object(
         self,
@@ -141,15 +180,15 @@ class ObjectStoreBackend(StorageBackend):
         _ = max_concurrency
         qualified = self._qualify(file_object.path)
         if isinstance(data, Path):
-            put_res = self._store.put_file(qualified, data)
+            put_res = self._sync_store.put_file(qualified, data)
         else:
             raw = self._resolve_sync_data(data)
             view = memoryview(raw).cast("B")
             if use_multipart and chunk_size > 0:
                 parts = [view[idx : idx + chunk_size] for idx in range(0, len(view), chunk_size)] or [memoryview(b"")]
-                put_res = self._store.put_multipart(qualified, parts)
+                put_res = self._sync_store.put_multipart(qualified, parts)
             else:
-                put_res = self._store.put(qualified, view)
+                put_res = self._sync_store.put(qualified, view)
         self._apply_put_metadata(file_object, put_res.size, put_res.etag)
         return file_object
 
@@ -166,47 +205,47 @@ class ObjectStoreBackend(StorageBackend):
         _ = max_concurrency
         qualified = self._qualify(file_object.path)
         if isinstance(data, Path):
-            put_res = await self._store.put_file_async(qualified, data)
+            put_res = await self._async_store.put_file(qualified, data)
         else:
             raw = await self._resolve_async_data(data)
             view = memoryview(raw).cast("B")
             if use_multipart and chunk_size > 0:
                 parts = [view[idx : idx + chunk_size] for idx in range(0, len(view), chunk_size)] or [memoryview(b"")]
-                put_res = await self._store.put_multipart_async(qualified, parts)
+                put_res = await self._async_store.put_multipart(qualified, parts)
             else:
-                put_res = await self._store.put_async(qualified, view)
+                put_res = await self._async_store.put(qualified, view)
         self._apply_put_metadata(file_object, put_res.size, put_res.etag)
         return file_object
 
     def copy_object(self, src: PathLike, dst: PathLike) -> None:
         """Copy an object synchronously within the storage backend."""
-        self._store.copy(self._qualify(src), self._qualify(dst))
+        self._sync_store.copy(self._qualify(src), self._qualify(dst))
 
     async def copy_object_async(self, src: PathLike, dst: PathLike) -> None:
         """Copy an object asynchronously within the storage backend."""
-        await self._store.copy_async(self._qualify(src), self._qualify(dst))
+        await self._async_store.copy(self._qualify(src), self._qualify(dst))
 
     def list_objects(self, prefix: PathLike = "") -> builtins.list[ObjectMeta]:
         """List stored object metadata under the given prefix synchronously."""
         qualified_prefix = self._qualify(prefix) if prefix else self._prefix
-        return self._store.list(qualified_prefix)
+        return self._sync_store.list(qualified_prefix)
 
     async def list_objects_async(self, prefix: PathLike = "") -> builtins.list[ObjectMeta]:
         """List stored object metadata under the given prefix asynchronously."""
         qualified_prefix = self._qualify(prefix) if prefix else self._prefix
-        return await self._store.list_async(qualified_prefix)
+        return await self._async_store.list(qualified_prefix)
 
     def delete_object(self, paths: PathLike | Sequence[PathLike]) -> None:
         """Delete one or more stored objects synchronously."""
         items: list[PathLike] = [paths] if isinstance(paths, (str, Path, os.PathLike)) else list(paths)
         for item in items:
-            self._store.delete(self._qualify(item))
+            self._sync_store.delete(self._qualify(item))
 
     async def delete_object_async(self, paths: PathLike | Sequence[PathLike]) -> None:
         """Delete one or more stored objects asynchronously."""
         items: list[PathLike] = [paths] if isinstance(paths, (str, Path, os.PathLike)) else list(paths)
         for item in items:
-            await self._store.delete_async(self._qualify(item))
+            await self._async_store.delete(self._qualify(item))
 
     def sign(
         self,
@@ -229,15 +268,31 @@ class ObjectStoreBackend(StorageBackend):
         for_upload: bool = False,
     ) -> str | list[str]:
         """Generate presigned GET or PUT URLs asynchronously."""
-        return self.sign(paths, expires_in=expires_in, for_upload=for_upload)
+        ttl = 3600 if expires_in is None else expires_in
+        if isinstance(paths, (str, Path, os.PathLike)):
+            return await self._sign_one_async(paths, expires_in=ttl, for_upload=for_upload)
+        return [await self._sign_one_async(item, expires_in=ttl, for_upload=for_upload) for item in paths]
 
     def _sign_one(self, path: PathLike, *, expires_in: int, for_upload: bool) -> str:
-        """Sign a single path using the underlying ObjectStore presigner."""
+        """Sign a single path using the underlying SyncObjectStore presigner."""
         qualified = self._qualify(path)
         try:
             if for_upload:
-                return self._store.presign_put(qualified, expires_in_secs=expires_in)
-            return self._store.presign_get(qualified, expires_in_secs=expires_in)
+                return self._sync_store.presign_put(qualified, expires_in_secs=expires_in)
+            return self._sync_store.presign_get(qualified, expires_in_secs=expires_in)
+        except (RuntimeError, ValueError) as exc:
+            msg = f"URL signing is not configured for backend {self.key!r}: {exc}"
+            raise NotImplementedError(msg) from exc
+
+    async def _sign_one_async(self, path: PathLike, *, expires_in: int, for_upload: bool) -> str:
+        """Sign a single path using the underlying AsyncObjectStore presigner."""
+        qualified = self._qualify(path)
+        try:
+            if for_upload:
+                res = self._async_store.presign_put(qualified, expires_in_secs=expires_in)
+            else:
+                res = self._async_store.presign_get(qualified, expires_in_secs=expires_in)
+            return await res if inspect.isawaitable(res) else res
         except (RuntimeError, ValueError) as exc:
             msg = f"URL signing is not configured for backend {self.key!r}: {exc}"
             raise NotImplementedError(msg) from exc
@@ -318,9 +373,9 @@ class ObjectStoreBackend(StorageBackend):
 
 
 def register_storage_backend(
-    store_or_key: ObjectStore | str,
+    store_or_key: SyncObjectStore | AsyncObjectStore | str,
     *,
-    store: ObjectStore | str | None = None,
+    store: SyncObjectStore | AsyncObjectStore | str | None = None,
     key: str = "default",
     prefix: str = "",
     set_default: bool = False,
@@ -329,12 +384,12 @@ def register_storage_backend(
     """Register an ObjectStoreBackend into Advanced Alchemy's `storages` registry.
 
     Args:
-        store_or_key: Either a configured `ObjectStore`, storage URI string, or backend key name.
-        store: Optional explicit `ObjectStore` or storage URI string when first argument is key name.
+        store_or_key: Either a configured ObjectStore, storage URI string, or backend key name.
+        store: Optional explicit ObjectStore or storage URI string when first argument is key name.
         key: Backend key referenced by `FileObject(backend=key)` and `StoredObject(backend=key)`.
         prefix: Optional object key prefix applied to all operations on this backend.
         set_default: When True, configure `ObjectStoreBackend` as the registry's default URI backend class.
-        registry: Optional custom `StorageRegistry` instance (defaults to `advanced_alchemy.types.file_object.storages`).
+        registry: Optional custom StorageRegistry instance (defaults to advanced_alchemy.types.file_object.storages).
 
     Returns:
         The registered `ObjectStoreBackend` instance.

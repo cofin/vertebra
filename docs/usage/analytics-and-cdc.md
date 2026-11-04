@@ -46,5 +46,5 @@ engine = DataFusionEngine(DataFusionConfig(target_partitions=4))
 ```
 
 - **`ArrowCursor`**: Exposes a zero-copy `memoryview` over the shared-memory `ShmRegion` (`buffer_view()`), materializes `pyarrow.Table` or `polars.DataFrame` without copying (`to_arrow()`, `to_polars()`), and unlinks the `ShmRegion` deterministically on context-manager exit.
-- **DuckDB `httpfs` Active ADC Rotation**: When querying `gs://` Parquet datasets in DuckDB, each pooled session tracks `applied_token_generation` against `GcpTokenCache` and executes `CREATE OR REPLACE SECRET vtb_gcs_adc (TYPE GCS, BEARER_TOKEN '...')` automatically whenever the Google Cloud ADC token refreshes.
+- **DuckDB `httpfs` Active ADC Rotation**: When querying `gs://` Parquet datasets in DuckDB, each pooled session tracks `applied_token_generation` against `SyncGcpTokenCache` / `AsyncGcpTokenCache` and executes `CREATE OR REPLACE SECRET vtb_gcs_adc (TYPE GCS, BEARER_TOKEN '...')` automatically whenever the Google Cloud ADC token refreshes.
 - **Vector Columns to Arrow SHM**: Convert `VectorBatchView` embeddings directly into an `ArrowCursor` (`FixedSizeListArray(Float32, dims)`) via `batch.to_arrow_shm()` or `await embedder.embed_arrow(cursor, text_column="body")`.

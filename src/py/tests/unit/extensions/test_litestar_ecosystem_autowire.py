@@ -11,7 +11,7 @@ from vertebra.extensions.litestar.autowire import (
     create_autowire_plugin,
     ensure_autowire_before_route_compiler,
 )
-from vertebra.extensions.litestar.plugin import LitestarPlugin
+from vertebra.extensions.litestar.plugin import VertebraPlugin
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import ensure_module
 
@@ -28,16 +28,16 @@ def test_autowire_bridge_integration_name_and_on_autowire() -> None:
 
 
 def test_ensure_autowire_before_route_compiler_reordering() -> None:
-    """Verify ensure_autowire_before_route_compiler places AutowirePlugin before LitestarPlugin."""
+    """Verify ensure_autowire_before_route_compiler places AutowirePlugin before VertebraPlugin."""
     app_config = MagicMock()
     autowire_plugin = create_autowire_plugin(domain_packages="app.domain")
-    litestar_plugin = LitestarPlugin()
+    vertebra_plugin = VertebraPlugin()
 
-    app_config.plugins = [litestar_plugin, autowire_plugin]
+    app_config.plugins = [vertebra_plugin, autowire_plugin]
     reordered = ensure_autowire_before_route_compiler(app_config)
 
     assert reordered.plugins[0] is autowire_plugin
-    assert reordered.plugins[1] is litestar_plugin
+    assert reordered.plugins[1] is vertebra_plugin
 
 
 def test_create_autowire_plugin_defaults() -> None:

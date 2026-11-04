@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import os
 import sqlite3
 import threading
@@ -41,6 +42,7 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         self._writer_lock = threading.RLock()
         self.applied_token_generation: int = 0
         self.last_gcs_secret_sql: str = ""
+        self._cached_gcs_snapshot: Any = None
         self.executed_bootstrap_statements: tuple[str, ...] = tuple(self.config.bootstrap_statements())
 
         duckdb_mod = import_optional("duckdb")
@@ -216,13 +218,30 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         cache = self.config.gcs_token_cache
         if cache is None:
             return
+        cache_gen = int(getattr(cache, "generation", 0) or 0)
         if (
             self.applied_token_generation == 0
-            or cache.needs_refresh()
-            or cache.generation != self.applied_token_generation
+            or (hasattr(cache, "needs_refresh") and cache.needs_refresh())
+            or cache_gen != self.applied_token_generation
         ):
-            snapshot = cache.get_token()
-            if int(snapshot.generation) != self.applied_token_generation:
+            snapshot: Any = None
+            if (
+                self._cached_gcs_snapshot is not None
+                and hasattr(self._cached_gcs_snapshot, "generation")
+                and int(self._cached_gcs_snapshot.generation) != self.applied_token_generation
+            ):
+                snapshot = self._cached_gcs_snapshot
+            else:
+                res = cache.get_token()
+                if inspect.isawaitable(res):
+                    close_fn = getattr(res, "close", None)
+                    if callable(close_fn):
+                        close_fn()
+                    snapshot = self._cached_gcs_snapshot
+                else:
+                    snapshot = res
+                    self._cached_gcs_snapshot = snapshot
+            if snapshot is not None and int(snapshot.generation) != self.applied_token_generation:
                 escaped_token = str(snapshot.access_token).replace("'", "''")
                 secret_sql = f"CREATE OR REPLACE SECRET vertebra_gcs_adc (TYPE GCS, BEARER_TOKEN '{escaped_token}')"
                 self.last_gcs_secret_sql = secret_sql
@@ -378,5 +397,18 @@ class AsyncDuckDBDriver(ThreadOffloadAsyncDatabaseDriver[DuckDBConfig, SyncDuckD
     async def _ensure_gcs_token_async(self) -> None:
         """Pre-refresh the GCS ADC token on the Rust Tokio runtime before dispatching DuckDB work."""
         cache = self.config.gcs_token_cache
-        if cache is not None and cache.needs_refresh() and hasattr(cache, "get_token_async"):
-            await cache.get_token_async()
+        if cache is None:
+            return
+        needs_refresh = bool(hasattr(cache, "needs_refresh") and cache.needs_refresh())
+        cache_gen = int(getattr(cache, "generation", 0) or 0)
+        if (
+            self._sync.applied_token_generation == 0
+            or needs_refresh
+            or cache_gen != self._sync.applied_token_generation
+            or self._sync._cached_gcs_snapshot is None
+        ):
+            get_fn = getattr(cache, "get_token", None) or getattr(cache, "get_token_async", None)
+            if callable(get_fn):
+                res = get_fn()
+                snapshot = await res if inspect.isawaitable(res) else res
+                self._sync._cached_gcs_snapshot = snapshot

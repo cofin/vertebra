@@ -30,7 +30,7 @@ The frontend surface spans the [`_bundler`](../../../../../src/rs/vertebra-bundl
 | --- | --- | --- |
 | `Bundler`, `BundleConfig`, `DevConfig`, `BuildResult`, `OutputFile` | `vertebra._bundler` | Single-entry Oxc transform with optional minify, dev watcher control, and SSR pool ownership. |
 | `SourceWatcher` (`PySourceWatcher`), `HmrEvent` | `_bundler` only | Debounced file watcher; Python drains changed paths with `poll_events()`. |
-| `SsrPool`, `SsrResult` | `_bundler` only | QuickJS slot pool, fixed 60 s render cache, generation-based reload, `PoolExhausted` when all slots are busy. |
+| `SSRPool`, `SSRResult` | `_bundler` only | QuickJS slot pool, fixed 60 s render cache, generation-based reload, `PoolExhausted` when all slots are busy. |
 | `IsolatedDeclarationsGenerator`, `minify_css`, `encode_ssr_worker_frame` | `_bundler` only | `.d.ts` emission, CSS minification, 4-byte length-prefixed SSR frames. |
 | `BundlerError` | raised as `RuntimeError` | `Io`, `Parse`, `Transform`, `Watcher`, `Ssr`, `PoolExhausted`. |
 

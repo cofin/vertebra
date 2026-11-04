@@ -9,6 +9,7 @@ and redirect fixup.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import logging
 from collections.abc import Callable
 from pathlib import Path
@@ -17,31 +18,34 @@ from typing import Any
 import msgspec
 
 from vertebra.build._assets import AssetManifest, EarlyHintsSpec, ResolvedAssetTags
-from vertebra.framework.ssr import SSRClient, SSRConfig, SSRResult, render_page_shell
+from vertebra.framework.ssr import (
+    AsyncSSRClient,
+    SSRConfig,
+    SSRResult,
+    SyncSSRClient,
+    render_page_shell,
+)
 from vertebra.utils.serializers import encode_json
 
 __all__ = (
+    "AsyncInertiaMiddleware",
+    "AsyncSSRClient",
     "DeepMergeProp",
     "DeferredProp",
     "InertiaConfig",
     "InertiaHttpResponse",
-    "InertiaMiddleware",
     "InertiaResponse",
     "MergeProp",
     "OnceProp",
     "OptionalProp",
-    "SSRClient",
     "SSRResult",
     "ScrollProp",
+    "SyncInertiaMiddleware",
+    "SyncSSRClient",
     "inertia",
 )
 
 logger = logging.getLogger("vertebra.inertia")
-
-
-def _parse_csv_header(value: str) -> list[str]:
-    """Parse comma-separated values from a header string."""
-    return [field.strip() for field in value.split(",") if field.strip()]
 
 
 class InertiaConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -144,12 +148,16 @@ def inertia(
     )
 
 
-class InertiaMiddleware:
-    """Inertia.js v3 protocol handler for Vertebra native handlers."""
+class _BaseInertiaMiddleware:
+    """Shared Inertia.js v3 protocol configuration, prop resolution, and HTML shell rendering."""
 
     __slots__ = ("_config", "_ssr", "_version")
 
-    def __init__(self, config: InertiaConfig | None = None, ssr_client: SSRClient | None = None) -> None:
+    def __init__(
+        self,
+        config: InertiaConfig | None = None,
+        ssr_client: SyncSSRClient | AsyncSSRClient | None = None,
+    ) -> None:
         self._config = config or InertiaConfig()
         self._ssr = ssr_client
         self._version: str | None = self._config.version
@@ -187,9 +195,9 @@ class InertiaMiddleware:
 
         headers = request.headers
         reset_str = headers.get("X-Inertia-Reset", "") if hasattr(headers, "get") else ""
-        reset_fields = _parse_csv_header(str(reset_str)) if reset_str else []
+        reset_fields = self._parse_csv_header(str(reset_str)) if reset_str else []
         except_once_str = headers.get("X-Inertia-Except-Once-Props", "") if hasattr(headers, "get") else ""
-        except_once = _parse_csv_header(str(except_once_str)) if except_once_str else []
+        except_once = self._parse_csv_header(str(except_once_str)) if except_once_str else []
 
         resolved: dict[str, Any] = {}
         deferred: dict[str, list[str]] = {}
@@ -298,48 +306,18 @@ class InertiaMiddleware:
         page.update(metadata)
         return page
 
-    def should_redirect_303(self, method: str, status_code: int) -> bool:
+    @staticmethod
+    def should_redirect_303(method: str, status_code: int) -> bool:
         """Return True when a 301/302 redirect after PUT/PATCH/DELETE should become 303."""
         return method.upper() in ("PUT", "PATCH", "DELETE") and status_code in (301, 302)
 
-    def process(self, request: Any, response: InertiaResponse) -> InertiaHttpResponse:
-        """Process an Inertia response into a full HTTP response."""
-        is_inertia = self.is_inertia_request(request)
-
-        req_method = getattr(request, "method", "GET")
-        req_path = getattr(request, "path", "/")
-
-        if is_inertia and req_method.upper() == "GET":
-            conflict_version = self.check_version(request)
-            if conflict_version is not None:
-                return InertiaHttpResponse(
-                    status=409,
-                    headers={"X-Inertia-Location": req_path},
-                    body=b"",
-                )
-
-        page = self.build_page_object(request, response)
-
-        if is_inertia:
-            body = encode_json(page, as_bytes=True)
-            return InertiaHttpResponse(
-                status=200,
-                headers={
-                    "Content-Type": "application/json",
-                    "X-Inertia": "true",
-                    "Vary": "X-Inertia",
-                },
-                body=body,
-            )
-
-        ssr_result: SSRResult | None = None
-        if self._config.ssr_enabled and self._ssr is not None:
-            try:
-                ssr_result = self._ssr.render(page)
-            except Exception:
-                logger.warning("SSR render failed, falling back to CSR", exc_info=True)
-                ssr_result = None
-
+    def _render_html_response(
+        self,
+        request: Any,
+        page: dict[str, Any],
+        ssr_result: SSRResult | None,
+    ) -> InertiaHttpResponse:
+        """Render the HTML page shell with resolved asset tags, early hints, and CSP nonce."""
         headers = getattr(request, "headers", None)
         csp_nonce: str | None = None
         if headers is not None and hasattr(headers, "get"):
@@ -394,6 +372,132 @@ class InertiaMiddleware:
         exclude_str = headers.get("X-Inertia-Partial-Except", "") if hasattr(headers, "get") else ""
         return (
             component,
-            _parse_csv_header(str(include_str)) if include_str else [],
-            _parse_csv_header(str(exclude_str)) if exclude_str else [],
+            self._parse_csv_header(str(include_str)) if include_str else [],
+            self._parse_csv_header(str(exclude_str)) if exclude_str else [],
         )
+
+    @staticmethod
+    def _parse_csv_header(value: str) -> list[str]:
+        """Parse comma-separated values from a header string."""
+        return [field.strip() for field in value.split(",") if field.strip()]
+
+
+class SyncInertiaMiddleware(_BaseInertiaMiddleware):
+    """Synchronous Inertia.js v3 protocol handler for Vertebra native handlers."""
+
+    __slots__ = ()
+
+    def __init__(
+        self,
+        config: InertiaConfig | None = None,
+        ssr_client: SyncSSRClient | None = None,
+    ) -> None:
+        super().__init__(config=config, ssr_client=ssr_client)
+
+    def process(self, request: Any, response: InertiaResponse) -> InertiaHttpResponse:
+        """Process an Inertia response into a full HTTP response synchronously."""
+        is_inertia = self.is_inertia_request(request)
+
+        req_method = getattr(request, "method", "GET")
+        req_path = getattr(request, "path", "/")
+
+        if is_inertia and req_method.upper() == "GET":
+            conflict_version = self.check_version(request)
+            if conflict_version is not None:
+                return InertiaHttpResponse(
+                    status=409,
+                    headers={"X-Inertia-Location": req_path},
+                    body=b"",
+                )
+
+        page = self.build_page_object(request, response)
+
+        if is_inertia:
+            body = encode_json(page, as_bytes=True)
+            return InertiaHttpResponse(
+                status=200,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Inertia": "true",
+                    "Vary": "X-Inertia",
+                },
+                body=body,
+            )
+
+        ssr_result: SSRResult | None = None
+        if self._config.ssr_enabled and self._ssr is not None:
+            try:
+                render_fn = self._ssr.render
+                if inspect.iscoroutinefunction(render_fn):
+                    logger.warning("AsyncSSRClient passed to synchronous process(); falling back to CSR")
+                    ssr_result = None
+                else:
+                    res = render_fn(page)
+                    if isinstance(res, SSRResult):
+                        ssr_result = res
+            except Exception:
+                logger.warning("SSR render failed, falling back to CSR", exc_info=True)
+                ssr_result = None
+
+        return self._render_html_response(request, page, ssr_result)
+
+
+class AsyncInertiaMiddleware(_BaseInertiaMiddleware):
+    """Asynchronous Inertia.js v3 protocol handler for Vertebra native handlers."""
+
+    __slots__ = ()
+
+    def __init__(
+        self,
+        config: InertiaConfig | None = None,
+        ssr_client: AsyncSSRClient | None = None,
+    ) -> None:
+        super().__init__(config=config, ssr_client=ssr_client)
+
+    async def process(self, request: Any, response: InertiaResponse) -> InertiaHttpResponse:
+        """Process an Inertia response into a full HTTP response asynchronously."""
+        is_inertia = self.is_inertia_request(request)
+
+        req_method = getattr(request, "method", "GET")
+        req_path = getattr(request, "path", "/")
+
+        if is_inertia and req_method.upper() == "GET":
+            conflict_version = self.check_version(request)
+            if conflict_version is not None:
+                return InertiaHttpResponse(
+                    status=409,
+                    headers={"X-Inertia-Location": req_path},
+                    body=b"",
+                )
+
+        page = self.build_page_object(request, response)
+
+        if is_inertia:
+            body = encode_json(page, as_bytes=True)
+            return InertiaHttpResponse(
+                status=200,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Inertia": "true",
+                    "Vary": "X-Inertia",
+                },
+                body=body,
+            )
+
+        ssr_result: SSRResult | None = None
+        if self._config.ssr_enabled and self._ssr is not None:
+            try:
+                render_fn = self._ssr.render
+                if inspect.iscoroutinefunction(render_fn):
+                    ssr_result = await render_fn(page)
+                else:
+                    res = render_fn(page)
+                    if inspect.isawaitable(res):
+                        ssr_result = await res
+                    elif isinstance(res, SSRResult):
+                        ssr_result = res
+            except Exception:
+                logger.warning("SSR render failed, falling back to CSR", exc_info=True)
+                ssr_result = None
+
+        return self._render_html_response(request, page, ssr_result)

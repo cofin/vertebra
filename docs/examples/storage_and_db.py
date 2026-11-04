@@ -4,7 +4,7 @@ from advanced_alchemy.types.file_object import FileObject
 
 from vertebra.db.sqlite import SQLiteConfig, SyncSQLiteDriver
 from vertebra.extensions.alchemy.storage import ObjectStoreBackend
-from vertebra.storage import ObjectStore
+from vertebra.storage import SyncObjectStore
 
 __all__ = ("main",)
 
@@ -12,7 +12,7 @@ __all__ = ("main",)
 # --8<-- [start:example]
 def main() -> None:
     """Save model file attachments and execute SQLite queries."""
-    store = ObjectStore("memory://")
+    store = SyncObjectStore("memory://")
     backend = ObjectStoreBackend(store=store, prefix="reports")
 
     file_obj = FileObject(backend=backend, filename="q1.json")

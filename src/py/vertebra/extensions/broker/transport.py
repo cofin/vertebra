@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import threading
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 
 import msgspec
 
@@ -21,13 +22,16 @@ if TYPE_CHECKING:
     from types import TracebackType
 
 __all__ = (
+    "AsyncConnectionLease",
+    "AsyncInMemoryBrokerTransport",
+    "AsyncSHMBrokerTransport",
     "BrokerConfig",
     "BrokerMetrics",
     "ChannelMessage",
-    "ConnectionLease",
-    "InMemoryBrokerTransport",
-    "SHMBrokerTransport",
     "StatementPlan",
+    "SyncConnectionLease",
+    "SyncInMemoryBrokerTransport",
+    "SyncSHMBrokerTransport",
 )
 
 
@@ -81,8 +85,8 @@ class StatementPlan(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     param_names: tuple[str, ...]
 
 
-class ConnectionLease:
-    """Connection lease context manager."""
+class _BaseConnectionLease:
+    """Shared base representation for connection leases."""
 
     __slots__ = (
         "_released",
@@ -120,19 +124,27 @@ class ConnectionLease:
         self._transport = transport
         self._released: bool = False
 
-    def release(self) -> None:
-        """Release the connection lease."""
-        if not self._released:
-            self._released = True
-            if self._transport is not None:
-                self._transport.release(self.lease_id)
-
     @property
     def is_released(self) -> bool:
         """Whether the lease has been released."""
         return self._released
 
-    def __enter__(self) -> ConnectionLease:
+
+class SyncConnectionLease(_BaseConnectionLease):
+    """Synchronous connection lease context manager."""
+
+    def release(self) -> None:
+        """Release the connection lease."""
+        if not self._released:
+            self._released = True
+            if self._transport is not None:
+                release_sync_fn = getattr(self._transport, "_release_sync", None)
+                if callable(release_sync_fn):
+                    release_sync_fn(self.lease_id)
+                else:
+                    self._transport.release(self.lease_id)
+
+    def __enter__(self) -> SyncConnectionLease:
         return self
 
     def __exit__(
@@ -143,7 +155,20 @@ class ConnectionLease:
     ) -> None:
         self.release()
 
-    async def __aenter__(self) -> ConnectionLease:
+
+class AsyncConnectionLease(_BaseConnectionLease):
+    """Asynchronous connection lease context manager."""
+
+    async def release(self) -> None:
+        """Release the connection lease asynchronously."""
+        if not self._released:
+            self._released = True
+            if self._transport is not None:
+                res = self._transport.release(self.lease_id)
+                if inspect.isawaitable(res):
+                    await res
+
+    async def __aenter__(self) -> AsyncConnectionLease:
         return self
 
     async def __aexit__(
@@ -152,11 +177,11 @@ class ConnectionLease:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        self.release()
+        await self.release()
 
 
-class InMemoryBrokerTransport:
-    """In-process thread-safe connection broker transport for tests and single-worker setups."""
+class _BaseInMemoryBrokerTransport:
+    """Shared state and storage logic for in-memory broker transports."""
 
     def __init__(self, config: BrokerConfig | None = None) -> None:
         raw_cfg = config or BrokerConfig()
@@ -173,84 +198,13 @@ class InMemoryBrokerTransport:
         self._config = msgspec.structs.replace(raw_cfg, acquire_timeout_ms=acq_ms, lease_ttl_ms=ttl_ms)
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
-        self._active_leases: dict[str, ConnectionLease] = {}
+        self._active_leases: dict[str, _BaseConnectionLease] = {}
         self._channels: dict[str, list[ChannelMessage]] = {}
         self._waiters: int = 0
         self._total_acquired: int = 0
         self._total_released: int = 0
         self._total_timeouts: int = 0
         self._stmt_cache: dict[tuple[str, str], StatementPlan] = {}
-
-    def acquire(
-        self,
-        worker_id: int | None = None,
-        timeout_ms: int | None = None,
-        bind_key: str = "default",
-        timeout: float | None = None,
-    ) -> ConnectionLease:
-        """Acquire a connection lease synchronously."""
-        worker = worker_id if worker_id is not None else os.getpid()
-        eff_timeout_ms = (
-            int(timeout * 1000)
-            if timeout is not None
-            else (timeout_ms if timeout_ms is not None else self._config.acquire_timeout_ms)
-        )
-        effective_timeout = eff_timeout_ms / 1000.0
-        deadline = time.monotonic() + effective_timeout
-        total_cap = self._config.pool_size + self._config.max_overflow
-
-        with self._lock:
-            while len(self._active_leases) >= total_cap:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    self._total_timeouts += 1
-                    raise TimeoutError("Connection broker pool exhausted")
-                self._waiters += 1
-                try:
-                    self._cond.wait(timeout=remaining)
-                finally:
-                    self._waiters -= 1
-
-            slot = len(self._active_leases)
-            gen = self._total_acquired + 1
-            lease_id = f"{slot}:{gen}"
-            now_ns = time.time_ns()
-            ttl_ns = self._config.lease_ttl_ms * 1_000_000
-            is_overflow = slot >= self._config.pool_size
-
-            lease = ConnectionLease(
-                lease_id=lease_id,
-                worker_id=worker,
-                acquired_at_ns=now_ns,
-                ttl_ns=ttl_ns,
-                bind_key=bind_key,
-                is_overflow=is_overflow,
-                slot_index=slot,
-                generation=gen,
-                transport=self,
-            )
-            self._active_leases[lease_id] = lease
-            self._total_acquired += 1
-            return lease
-
-    async def acquire_async(
-        self,
-        worker_id: int | None = None,
-        timeout_ms: int | None = None,
-        bind_key: str = "default",
-    ) -> ConnectionLease:
-        """Acquire a connection lease asynchronously."""
-        return await SyncPool.default().submit_async(self.acquire, worker_id, timeout_ms, bind_key)
-
-    def release(self, lease_id: str) -> bool:
-        """Release an acquired connection lease."""
-        with self._lock:
-            if lease_id in self._active_leases:
-                del self._active_leases[lease_id]
-                self._total_released += 1
-                self._cond.notify()
-                return True
-            return False
 
     def reclaim_worker(self, worker_pid: int) -> int:
         """Reclaim all leases held by a terminated worker process."""
@@ -266,7 +220,7 @@ class InMemoryBrokerTransport:
             return reclaimed
 
     def active_leases_for_worker(self, worker_pid: int) -> list[tuple[int, int, int]]:
-        """Return active `(pool_id, slot_index, generation)` tuples for `worker_pid`."""
+        """Return active (pool_id, slot_index, generation) tuples for worker_pid."""
         with self._lock:
             return [
                 (
@@ -328,19 +282,105 @@ class InMemoryBrokerTransport:
                 statement_cache_misses=len(self._stmt_cache),
             )
 
-    def publish(self, channel: str, payload: bytes, lease_id: str | None = None) -> ChannelMessage:
+    def _acquire_slot(
+        self,
+        worker_id: int | None = None,
+        timeout_ms: int | None = None,
+        bind_key: str = "default",
+        timeout: float | None = None,
+    ) -> tuple[str, int, int, int, str, bool, int, int]:
+        worker = worker_id if worker_id is not None else os.getpid()
+        eff_timeout_ms = (
+            int(timeout * 1000)
+            if timeout is not None
+            else (timeout_ms if timeout_ms is not None else self._config.acquire_timeout_ms)
+        )
+        effective_timeout = eff_timeout_ms / 1000.0
+        deadline = time.monotonic() + effective_timeout
+        total_cap = self._config.pool_size + self._config.max_overflow
+
+        with self._lock:
+            while len(self._active_leases) >= total_cap:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._total_timeouts += 1
+                    raise TimeoutError("Connection broker pool exhausted")
+                self._waiters += 1
+                try:
+                    self._cond.wait(timeout=remaining)
+                finally:
+                    self._waiters -= 1
+
+            slot = len(self._active_leases)
+            gen = self._total_acquired + 1
+            lease_id = f"{slot}:{gen}"
+            now_ns = time.time_ns()
+            ttl_ns = self._config.lease_ttl_ms * 1_000_000
+            is_overflow = slot >= self._config.pool_size
+            self._total_acquired += 1
+            return lease_id, worker, now_ns, ttl_ns, bind_key, is_overflow, slot, gen
+
+    def _acquire_sync(
+        self,
+        pool_name: str = "default",
+        worker_pid: int | None = None,
+        *,
+        worker_id: int | None = None,
+        timeout_ms: int | None = None,
+        bind_key: str | None = None,
+        timeout: float | None = None,
+    ) -> SyncConnectionLease:
+        """Acquire a connection lease synchronously."""
+        resolved_worker = worker_pid if worker_pid is not None else worker_id
+        resolved_bind_key = bind_key if bind_key is not None else pool_name
+        lease_id, worker, now_ns, ttl_ns, resolved_key, is_overflow, slot, gen = self._acquire_slot(
+            worker_id=resolved_worker,
+            timeout_ms=timeout_ms,
+            bind_key=resolved_bind_key,
+            timeout=timeout,
+        )
+        lease = SyncConnectionLease(
+            lease_id=lease_id,
+            worker_id=worker,
+            acquired_at_ns=now_ns,
+            ttl_ns=ttl_ns,
+            bind_key=resolved_key,
+            is_overflow=is_overflow,
+            slot_index=slot,
+            generation=gen,
+            transport=self,
+        )
+        with self._lock:
+            self._active_leases[lease_id] = lease
+        return lease
+
+    def _release_sync(self, lease_id: str) -> bool:
+        """Release an acquired connection lease synchronously."""
+        return self._release_impl(lease_id)
+
+    def _release_impl(self, lease_id: str) -> bool:
+        """Release an acquired connection lease."""
+        with self._lock:
+            if lease_id in self._active_leases:
+                del self._active_leases[lease_id]
+                self._total_released += 1
+                self._cond.notify()
+                return True
+            return False
+
+    def _publish_impl(self, channel: str, payload: bytes, lease_id: str | None = None) -> ChannelMessage:
         """Publish a message to a named channel."""
         msg = ChannelMessage(channel=channel, payload=payload, timestamp_ns=time.time_ns(), lease_id=lease_id)
         with self._lock:
             self._channels.setdefault(channel, []).append(msg)
         return msg
 
-    def drain_channel(self, channel: str) -> list[ChannelMessage]:
+    def _drain_channel_impl(self, channel: str) -> list[ChannelMessage]:
         """Drain buffered messages from a named channel."""
         with self._lock:
             return self._channels.pop(channel, [])
 
-    def drain_all_channels(self) -> list[ChannelMessage]:
+    def _drain_all_channels_impl(self) -> list[ChannelMessage]:
         """Drain buffered messages across all channels."""
         with self._lock:
             out: list[ChannelMessage] = []
@@ -349,13 +389,106 @@ class InMemoryBrokerTransport:
             self._channels.clear()
             return out
 
-    def close(self) -> None:
+    def _close_impl(self) -> None:
         """Release broker resources."""
         pass
 
 
-class SHMBrokerTransport:
-    """Production shared-memory connection broker and statement cache transport."""
+class SyncInMemoryBrokerTransport(_BaseInMemoryBrokerTransport):
+    """In-process synchronous thread-safe connection broker transport."""
+
+    def acquire(
+        self,
+        worker_id: int | None = None,
+        timeout_ms: int | None = None,
+        bind_key: str = "default",
+        timeout: float | None = None,
+    ) -> SyncConnectionLease:
+        """Acquire a connection lease synchronously."""
+        return self._acquire_sync(
+            worker_id=worker_id,
+            timeout_ms=timeout_ms,
+            bind_key=bind_key,
+            timeout=timeout,
+        )
+
+    def release(self, lease_id: str) -> bool:
+        """Release an acquired connection lease synchronously."""
+        return self._release_sync(lease_id)
+
+    def publish(self, channel: str, payload: bytes, lease_id: str | None = None) -> ChannelMessage:
+        """Publish a message to a named channel."""
+        return self._publish_impl(channel, payload, lease_id)
+
+    def drain_channel(self, channel: str) -> list[ChannelMessage]:
+        """Drain buffered messages from a named channel."""
+        return self._drain_channel_impl(channel)
+
+    def drain_all_channels(self) -> list[ChannelMessage]:
+        """Drain buffered messages across all channels."""
+        return self._drain_all_channels_impl()
+
+    def close(self) -> None:
+        """Release broker resources."""
+        self._close_impl()
+
+
+class AsyncInMemoryBrokerTransport(_BaseInMemoryBrokerTransport):
+    """In-process asynchronous connection broker transport."""
+
+    async def acquire(
+        self,
+        worker_id: int | None = None,
+        timeout_ms: int | None = None,
+        bind_key: str = "default",
+        timeout: float | None = None,
+    ) -> AsyncConnectionLease:
+        """Acquire a connection lease asynchronously without blocking the event loop."""
+        lease_id, worker, now_ns, ttl_ns, resolved_key, is_overflow, slot, gen = await SyncPool.default().submit_async(
+            self._acquire_slot,
+            worker_id,
+            timeout_ms,
+            bind_key,
+            timeout,
+        )
+        lease = AsyncConnectionLease(
+            lease_id=lease_id,
+            worker_id=worker,
+            acquired_at_ns=now_ns,
+            ttl_ns=ttl_ns,
+            bind_key=resolved_key,
+            is_overflow=is_overflow,
+            slot_index=slot,
+            generation=gen,
+            transport=self,
+        )
+        with self._lock:
+            self._active_leases[lease_id] = lease
+        return lease
+
+    async def release(self, lease_id: str) -> bool:
+        """Release an acquired connection lease asynchronously."""
+        return self._release_impl(lease_id)
+
+    async def publish(self, channel: str, payload: bytes, lease_id: str | None = None) -> ChannelMessage:
+        """Publish a message to a named channel asynchronously."""
+        return self._publish_impl(channel, payload, lease_id)
+
+    async def drain_channel(self, channel: str) -> list[ChannelMessage]:
+        """Drain buffered messages from a named channel asynchronously."""
+        return self._drain_channel_impl(channel)
+
+    async def drain_all_channels(self) -> list[ChannelMessage]:
+        """Drain buffered messages across all channels asynchronously."""
+        return self._drain_all_channels_impl()
+
+    async def close(self) -> None:
+        """Release broker resources asynchronously."""
+        self._close_impl()
+
+
+class _BaseSHMBrokerTransport:
+    """Shared base for shared-memory connection broker transports."""
 
     _DIALECT_TAGS = {
         "postgresql": 1,
@@ -423,20 +556,8 @@ class SHMBrokerTransport:
         self._stmt_cache = (
             colocated_cache if colocated_cache is not None else StatementCache(self._config.statement_cache_capacity)
         )
-        self._active_leases: dict[str, ConnectionLease] = {}
+        self._active_leases: dict[str, _BaseConnectionLease] = {}
         self._lock = threading.Lock()
-
-    @classmethod
-    def from_fd(
-        cls,
-        fd: int,
-        size: int = 0,
-        config: BrokerConfig | None = None,
-    ) -> SHMBrokerTransport:
-        """Attach a broker transport to an inherited shared-memory file descriptor."""
-        cfg = config or BrokerConfig()
-        native = LeaseBroker.from_fd(fd, size)
-        return cls(config=cfg, native=native)
 
     @property
     def shm_fd(self) -> int | None:
@@ -458,97 +579,17 @@ class SHMBrokerTransport:
         """Return slot capacity of the co-located statement cache."""
         return self._native.stmt_capacity
 
-    def acquire(
-        self,
-        worker_id: int | None = None,
-        timeout_ms: int | None = None,
-        bind_key: str = "default",
-        timeout: float | None = None,
-    ) -> ConnectionLease:
-        """Acquire a connection lease synchronously, detaching GIL during wait."""
-        worker = worker_id if worker_id is not None else os.getpid()
-        effective_timeout = (
-            int(timeout * 1000)
-            if timeout is not None
-            else (timeout_ms if timeout_ms is not None else self._config.acquire_timeout_ms)
-        )
-        ttl_ns = self._config.lease_ttl_ms * 1_000_000
-        bind_hash = hash(bind_key) & 0xFFFF_FFFF_FFFF_FFFF
-
-        grant = self._native.acquire(
-            worker_pid=worker,
-            ttl_ns=ttl_ns,
-            timeout_ms=effective_timeout,
-            bind_key_hash=bind_hash,
-        )
-        if grant is None:
-            raise TimeoutError("Connection broker pool exhausted")
-
-        lease_id = f"{grant.slot_index}:{grant.generation}"
-        lease = ConnectionLease(
-            lease_id=lease_id,
-            worker_id=worker,
-            acquired_at_ns=grant.acquired_ns,
-            ttl_ns=grant.expiry_ns - grant.acquired_ns if grant.expiry_ns > 0 else 0,
-            bind_key=bind_key,
-            is_overflow=grant.is_overflow,
-            slot_index=grant.slot_index,
-            generation=grant.generation,
-            transport=self,
-        )
-        with self._lock:
-            self._active_leases[lease_id] = lease
-        return lease
-
-    async def acquire_async(
-        self,
-        worker_id: int | None = None,
-        timeout_ms: int | None = None,
-        bind_key: str = "default",
-    ) -> ConnectionLease:
-        """Acquire a connection lease asynchronously without event loop blocking."""
-        worker = worker_id if worker_id is not None else os.getpid()
-        ttl_ns = self._config.lease_ttl_ms * 1_000_000
-        bind_hash = hash(bind_key) & 0xFFFF_FFFF_FFFF_FFFF
-
-        grant = self._native.try_acquire(worker_pid=worker, ttl_ns=ttl_ns, bind_key_hash=bind_hash)
-        if grant is not None:
-            lease_id = f"{grant.slot_index}:{grant.generation}"
-            lease = ConnectionLease(
-                lease_id=lease_id,
-                worker_id=worker,
-                acquired_at_ns=grant.acquired_ns,
-                ttl_ns=grant.expiry_ns - grant.acquired_ns if grant.expiry_ns > 0 else 0,
-                bind_key=bind_key,
-                is_overflow=grant.is_overflow,
-                slot_index=grant.slot_index,
-                generation=grant.generation,
-                transport=self,
-            )
-            with self._lock:
-                self._active_leases[lease_id] = lease
-            return lease
-
-        effective_timeout = timeout_ms if timeout_ms is not None else self._config.acquire_timeout_ms
-        return await SyncPool.default().submit_async(self.acquire, worker, effective_timeout, bind_key)
-
-    def release(self, lease_id: str) -> bool:
-        """Release an acquired connection lease."""
-        with self._lock:
-            lease = self._active_leases.pop(lease_id, None)
-
-        if lease is not None:
-            return self._native.release(lease.slot_index, lease.generation)
-
-        try:
-            parts = lease_id.split(":")
-            if len(parts) == 2:
-                slot_idx = int(parts[0])
-                gen = int(parts[1])
-                return self._native.release(slot_idx, gen)
-        except (ValueError, TypeError):
-            pass
-        return False
+    @classmethod
+    def from_fd(
+        cls,
+        fd: int,
+        size: int = 0,
+        config: BrokerConfig | None = None,
+    ) -> Self:
+        """Attach a broker transport to an inherited shared-memory file descriptor."""
+        cfg = config or BrokerConfig()
+        native = LeaseBroker.from_fd(fd, size)
+        return cls(config=cfg, native=native)
 
     def reclaim_worker(self, worker_pid: int) -> int:
         """Reclaim all leases held by a dead worker process."""
@@ -559,7 +600,7 @@ class SHMBrokerTransport:
         return self._native.reclaim_worker(worker_pid)
 
     def active_leases_for_worker(self, worker_pid: int) -> list[tuple[int, int, int]]:
-        """Return active `(pool_id, slot_index, generation)` tuples for `worker_pid`."""
+        """Return active (pool_id, slot_index, generation) tuples for worker_pid."""
         return list(self._native.active_leases_for_worker(worker_pid))
 
     def invalidate_statements(self) -> None:
@@ -624,7 +665,76 @@ class SHMBrokerTransport:
             statement_cache_evictions=stmt_stats.evictions,
         )
 
-    def publish(self, channel: str, payload: bytes, lease_id: str | None = None) -> ChannelMessage:
+    def _acquire_sync(
+        self,
+        pool_name: str = "default",
+        worker_pid: int | None = None,
+        *,
+        worker_id: int | None = None,
+        timeout_ms: int | None = None,
+        bind_key: str | None = None,
+        timeout: float | None = None,
+    ) -> SyncConnectionLease:
+        """Acquire a connection lease synchronously, detaching GIL during wait."""
+        resolved_worker = worker_pid if worker_pid is not None else worker_id
+        worker = resolved_worker if resolved_worker is not None else os.getpid()
+        resolved_bind_key = bind_key if bind_key is not None else pool_name
+        effective_timeout = (
+            int(timeout * 1000)
+            if timeout is not None
+            else (timeout_ms if timeout_ms is not None else self._config.acquire_timeout_ms)
+        )
+        ttl_ns = self._config.lease_ttl_ms * 1_000_000
+        bind_hash = hash(resolved_bind_key) & 0xFFFF_FFFF_FFFF_FFFF
+
+        grant = self._native.acquire(
+            worker_pid=worker,
+            ttl_ns=ttl_ns,
+            timeout_ms=effective_timeout,
+            bind_key_hash=bind_hash,
+        )
+        if grant is None:
+            raise TimeoutError("Connection broker pool exhausted")
+
+        lease_id = f"{grant.slot_index}:{grant.generation}"
+        lease = SyncConnectionLease(
+            lease_id=lease_id,
+            worker_id=worker,
+            acquired_at_ns=grant.acquired_ns,
+            ttl_ns=grant.expiry_ns - grant.acquired_ns if grant.expiry_ns > 0 else 0,
+            bind_key=resolved_bind_key,
+            is_overflow=grant.is_overflow,
+            slot_index=grant.slot_index,
+            generation=grant.generation,
+            transport=self,
+        )
+        with self._lock:
+            self._active_leases[lease_id] = lease
+        return lease
+
+    def _release_sync(self, lease_id: str) -> bool:
+        """Release an acquired connection lease synchronously."""
+        return self._release_impl(lease_id)
+
+    def _release_impl(self, lease_id: str) -> bool:
+        """Release an acquired connection lease."""
+        with self._lock:
+            lease = self._active_leases.pop(lease_id, None)
+
+        if lease is not None:
+            return self._native.release(lease.slot_index, lease.generation)
+
+        try:
+            parts = lease_id.split(":")
+            if len(parts) == 2:
+                slot_idx = int(parts[0])
+                gen = int(parts[1])
+                return self._native.release(slot_idx, gen)
+        except (ValueError, TypeError):
+            pass
+        return False
+
+    def _publish_impl(self, channel: str, payload: bytes, lease_id: str | None = None) -> ChannelMessage:
         """Publish a message to a named shared-memory channel."""
         ts_ns = time.time_ns()
         self._native.publish_channel(channel, payload, ts_ns, lease_id)
@@ -635,8 +745,8 @@ class SHMBrokerTransport:
             lease_id=lease_id,
         )
 
-    def drain_channel(self, channel: str) -> list[ChannelMessage]:
-        """Drain buffered messages for `channel` from the shared-memory channel ring."""
+    def _drain_channel_impl(self, channel: str) -> list[ChannelMessage]:
+        """Drain buffered messages for channel from the shared-memory channel ring."""
         frames = self._native.drain_channel(channel)
         return [
             ChannelMessage(
@@ -648,7 +758,7 @@ class SHMBrokerTransport:
             for ch, data, ts_ns, lid in frames
         ]
 
-    def drain_all_channels(self) -> list[ChannelMessage]:
+    def _drain_all_channels_impl(self) -> list[ChannelMessage]:
         """Drain buffered messages across all channels from the shared-memory channel ring."""
         frames = self._native.drain_all_channels()
         return [
@@ -661,6 +771,130 @@ class SHMBrokerTransport:
             for ch, data, ts_ns, lid in frames
         ]
 
-    def close(self) -> None:
+    def _close_impl(self) -> None:
         """Release broker resources."""
         pass
+
+
+class SyncSHMBrokerTransport(_BaseSHMBrokerTransport):
+    """Production synchronous shared-memory connection broker and statement cache transport."""
+
+    def acquire(
+        self,
+        worker_id: int | None = None,
+        timeout_ms: int | None = None,
+        bind_key: str = "default",
+        timeout: float | None = None,
+    ) -> SyncConnectionLease:
+        """Acquire a connection lease synchronously, detaching GIL during wait."""
+        return self._acquire_sync(
+            worker_id=worker_id,
+            timeout_ms=timeout_ms,
+            bind_key=bind_key,
+            timeout=timeout,
+        )
+
+    def release(self, lease_id: str) -> bool:
+        """Release an acquired connection lease synchronously."""
+        return self._release_sync(lease_id)
+
+    def publish(self, channel: str, payload: bytes, lease_id: str | None = None) -> ChannelMessage:
+        """Publish a message to a named shared-memory channel."""
+        return self._publish_impl(channel, payload, lease_id)
+
+    def drain_channel(self, channel: str) -> list[ChannelMessage]:
+        """Drain buffered messages for channel from the shared-memory channel ring."""
+        return self._drain_channel_impl(channel)
+
+    def drain_all_channels(self) -> list[ChannelMessage]:
+        """Drain buffered messages across all channels from the shared-memory channel ring."""
+        return self._drain_all_channels_impl()
+
+    def close(self) -> None:
+        """Release broker resources."""
+        self._close_impl()
+
+
+class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
+    """Production asynchronous shared-memory connection broker and statement cache transport."""
+
+    async def acquire(
+        self,
+        worker_id: int | None = None,
+        timeout_ms: int | None = None,
+        bind_key: str = "default",
+        timeout: float | None = None,
+    ) -> AsyncConnectionLease:
+        """Acquire a connection lease asynchronously without event loop blocking."""
+        worker = worker_id if worker_id is not None else os.getpid()
+        ttl_ns = self._config.lease_ttl_ms * 1_000_000
+        bind_hash = hash(bind_key) & 0xFFFF_FFFF_FFFF_FFFF
+
+        grant = self._native.try_acquire(worker_pid=worker, ttl_ns=ttl_ns, bind_key_hash=bind_hash)
+        if grant is not None:
+            lease_id = f"{grant.slot_index}:{grant.generation}"
+            lease = AsyncConnectionLease(
+                lease_id=lease_id,
+                worker_id=worker,
+                acquired_at_ns=grant.acquired_ns,
+                ttl_ns=grant.expiry_ns - grant.acquired_ns if grant.expiry_ns > 0 else 0,
+                bind_key=bind_key,
+                is_overflow=grant.is_overflow,
+                slot_index=grant.slot_index,
+                generation=grant.generation,
+                transport=self,
+            )
+            with self._lock:
+                self._active_leases[lease_id] = lease
+            return lease
+
+        effective_timeout = (
+            int(timeout * 1000)
+            if timeout is not None
+            else (timeout_ms if timeout_ms is not None else self._config.acquire_timeout_ms)
+        )
+        blocking_grant = await SyncPool.default().submit_async(
+            self._native.acquire,
+            worker,
+            ttl_ns,
+            effective_timeout,
+            bind_hash,
+        )
+        if blocking_grant is None:
+            raise TimeoutError("Connection broker pool exhausted")
+
+        lease_id = f"{blocking_grant.slot_index}:{blocking_grant.generation}"
+        lease = AsyncConnectionLease(
+            lease_id=lease_id,
+            worker_id=worker,
+            acquired_at_ns=blocking_grant.acquired_ns,
+            ttl_ns=blocking_grant.expiry_ns - blocking_grant.acquired_ns if blocking_grant.expiry_ns > 0 else 0,
+            bind_key=bind_key,
+            is_overflow=blocking_grant.is_overflow,
+            slot_index=blocking_grant.slot_index,
+            generation=blocking_grant.generation,
+            transport=self,
+        )
+        with self._lock:
+            self._active_leases[lease_id] = lease
+        return lease
+
+    async def release(self, lease_id: str) -> bool:
+        """Release an acquired connection lease asynchronously."""
+        return self._release_impl(lease_id)
+
+    async def publish(self, channel: str, payload: bytes, lease_id: str | None = None) -> ChannelMessage:
+        """Publish a message to a named shared-memory channel asynchronously."""
+        return self._publish_impl(channel, payload, lease_id)
+
+    async def drain_channel(self, channel: str) -> list[ChannelMessage]:
+        """Drain buffered messages for channel asynchronously."""
+        return self._drain_channel_impl(channel)
+
+    async def drain_all_channels(self) -> list[ChannelMessage]:
+        """Drain buffered messages across all channels asynchronously."""
+        return self._drain_all_channels_impl()
+
+    async def close(self) -> None:
+        """Release broker resources asynchronously."""
+        self._close_impl()

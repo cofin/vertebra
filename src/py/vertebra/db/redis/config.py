@@ -75,7 +75,7 @@ class RedisConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
     max_connections: int = 32
     """Maximum pooled sockets maintained per target node."""
     broker: Any = None
-    """Optional shared-memory `DatabaseBroker` or `SHMBrokerTransport` for cross-worker push fan-out."""
+    """Optional shared-memory `DatabaseBroker`, `SyncSHMBrokerTransport`, or `AsyncSHMBrokerTransport` for cross-worker push fan-out."""
 
     @property
     def uses_tls(self) -> bool:

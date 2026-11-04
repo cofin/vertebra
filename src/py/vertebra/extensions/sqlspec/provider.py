@@ -32,12 +32,13 @@ __all__ = (
     "BrokerRpcResponse",
     "SharedArrowBuffer",
     "SharedArrowTable",
-    "SQLSpecProvider",
+    "SQLSpecAsyncProvider",
+    "SQLSpecSyncProvider",
 )
 
 
 class BrokerRpcRequest(msgspec.Struct, frozen=True, gc=False):
-    """RPC request frame dispatched from a worker proxy driver to SQLSpecProvider."""
+    """RPC request frame dispatched from a worker proxy driver to SQLSpecSyncProvider or SQLSpecAsyncProvider."""
 
     request_id: int = 0
     op: str = "execute"
@@ -53,7 +54,7 @@ class BrokerRpcRequest(msgspec.Struct, frozen=True, gc=False):
 
 
 class BrokerRpcResponse(msgspec.Struct, frozen=True, gc=False):
-    """RPC response frame returned from SQLSpecProvider to a worker proxy driver."""
+    """RPC response frame returned from SQLSpecSyncProvider or SQLSpecAsyncProvider to a worker proxy driver."""
 
     request_id: int = 0
     ok: bool = True
@@ -216,15 +217,6 @@ class SharedArrowBuffer:
         return cls._resolve_shm_path(shm_name, shm_dir=shm_dir).exists()
 
     @classmethod
-    def _resolve_shm_path(cls, shm_name: str, shm_dir: Path | None = None) -> Path:
-        """Resolve the filesystem path for a shared-memory segment name."""
-        clean_name = Path(shm_name).name
-        if not clean_name or clean_name in {".", ".."}:
-            raise ImproperConfigurationError(f"Invalid shared memory segment name: {shm_name!r}")
-        base = shm_dir if shm_dir is not None else cls._DEFAULT_SHM_DIR
-        return base / clean_name
-
-    @classmethod
     def coerce_table(
         cls,
         table: Any,
@@ -237,6 +229,15 @@ class SharedArrowBuffer:
             return cls._coerce_arrow_table(pa, table, columns=columns)
         rows, cols = cls._coerce_fallback_rows(table, columns=columns)
         return SharedArrowTable(rows, cols)
+
+    @classmethod
+    def _resolve_shm_path(cls, shm_name: str, shm_dir: Path | None = None) -> Path:
+        """Resolve the filesystem path for a shared-memory segment name."""
+        clean_name = Path(shm_name).name
+        if not clean_name or clean_name in {".", ".."}:
+            raise ImproperConfigurationError(f"Invalid shared memory segment name: {shm_name!r}")
+        base = shm_dir if shm_dir is not None else cls._DEFAULT_SHM_DIR
+        return base / clean_name
 
     @classmethod
     def _coerce_fallback_rows(
@@ -313,8 +314,8 @@ class SharedArrowBuffer:
         return pa.Table.from_pylist(list(table))
 
 
-class SQLSpecProvider:
-    """Host provider executing SQLSpec driver operations over pinned broker leases and Arrow SHM."""
+class _BaseSQLSpecProvider:
+    """Host provider base executing SQLSpec driver operations over pinned broker leases and Arrow SHM."""
 
     __slots__ = (
         "_active_arrow_buffers",
@@ -340,7 +341,7 @@ class SQLSpecProvider:
         arrow_threshold_rows: int = 256,
         arrow_threshold_bytes: int = 65_536,
     ) -> None:
-        """Initialize SQLSpecProvider with an upstream config/driver/factory and optional broker."""
+        """Initialize provider with an upstream config/driver/factory and optional broker."""
         self.default_pool_name = pool_name
         self.broker = broker
         self.arrow_threshold_rows = arrow_threshold_rows
@@ -390,7 +391,7 @@ class SQLSpecProvider:
         with self._lock:
             return self._leased_sessions.get((slot_idx, generation))
 
-    def handle_request(self, request: BrokerRpcRequest) -> BrokerRpcResponse:
+    def _handle_request_sync(self, request: BrokerRpcRequest) -> BrokerRpcResponse:
         """Execute a synchronous BrokerRpcRequest and return a BrokerRpcResponse."""
         op = request.op
         key = (request.slot_idx, request.generation)
@@ -548,7 +549,7 @@ class SQLSpecProvider:
                 error_message=str(exc),
             )
 
-    async def handle_request_async(self, request: BrokerRpcRequest) -> BrokerRpcResponse:
+    async def _handle_request_async_impl(self, request: BrokerRpcRequest) -> BrokerRpcResponse:
         """Execute an asynchronous BrokerRpcRequest and return a BrokerRpcResponse."""
         op = request.op
         key = (request.slot_idx, request.generation)
@@ -706,33 +707,37 @@ class SQLSpecProvider:
                 error_message=str(exc),
             )
 
-    def handle_raw_frame(self, payload: bytes | bytearray | memoryview) -> bytes:
+    async def _handle_request_async(self, request: BrokerRpcRequest) -> BrokerRpcResponse:
+        """Execute an asynchronous BrokerRpcRequest."""
+        return await self._handle_request_async_impl(request)
+
+    def _handle_raw_frame_sync(self, payload: bytes | bytearray | memoryview) -> bytes:
         """Decode a serialized RPC request frame (MessagePack or JSON), execute it, and encode the response."""
         raw_bytes = bytes(payload)
         is_json = raw_bytes.lstrip().startswith(b"{")
         if is_json:
             decoded_dict = decode_json(raw_bytes)
             req = msgspec.convert(decoded_dict, type=BrokerRpcRequest)
-            resp = self.handle_request(req)
+            resp = self._handle_request_sync(req)
             return encode_json_bytes(resp)
         req = decode_msgpack(raw_bytes, type=BrokerRpcRequest)
-        resp = self.handle_request(req)
+        resp = self._handle_request_sync(req)
         return encode_msgpack_bytes(resp)
 
-    async def handle_raw_frame_async(self, payload: bytes | bytearray | memoryview) -> bytes:
+    async def _handle_raw_frame_async(self, payload: bytes | bytearray | memoryview) -> bytes:
         """Decode a serialized RPC request frame asynchronously, execute it, and encode the response."""
         raw_bytes = bytes(payload)
         is_json = raw_bytes.lstrip().startswith(b"{")
         if is_json:
             decoded_dict = decode_json(raw_bytes)
             req = msgspec.convert(decoded_dict, type=BrokerRpcRequest)
-            resp = await self.handle_request_async(req)
+            resp = await self._handle_request_async(req)
             return encode_json_bytes(resp)
         req = decode_msgpack(raw_bytes, type=BrokerRpcRequest)
-        resp = await self.handle_request_async(req)
+        resp = await self._handle_request_async(req)
         return encode_msgpack_bytes(resp)
 
-    def close(self) -> None:
+    def _close_sync(self) -> None:
         """Release all leased sessions and unlink any remaining shared-memory Arrow buffers."""
         with self._lock:
             keys = list(self._leased_sessions.keys())
@@ -743,7 +748,7 @@ class SQLSpecProvider:
         for name in arrow_names:
             SharedArrowBuffer.unlink(name)
 
-    async def close_async(self) -> None:
+    async def _close_async(self) -> None:
         """Asynchronously release all leased sessions and unlink remaining Arrow buffers."""
         with self._lock:
             keys = list(self._leased_sessions.keys())
@@ -811,7 +816,7 @@ class SQLSpecProvider:
     async def _acquire_from_broker_async(self, pool_name: str, worker_pid: int) -> Any:
         """Acquire a lease from self.broker asynchronously."""
         target = getattr(self.broker, "transport", self.broker)
-        for attr in ("acquire_lease_async", "acquire_async", "acquire_lease", "acquire"):
+        for attr in ("acquire_lease", "acquire"):
             fn = getattr(self.broker, attr, None) or getattr(target, attr, None)
             if callable(fn):
                 res = self._call_broker_acquire(fn, pool_name, worker_pid)
@@ -956,7 +961,7 @@ class SQLSpecProvider:
                     ctx_mgr.__exit__(None, None, None)
 
         if lease is not None:
-            self._release_broker_lease(lease, key, in_tx=False)
+            await self._release_broker_lease_async(lease, key, in_tx=False)
 
     def _release_broker_lease(self, lease: Any, key: tuple[int, int], *, in_tx: bool = False) -> None:
         """Release a broker lease back to self.broker."""
@@ -976,6 +981,31 @@ class SQLSpecProvider:
         if callable(release_fn):
             with contextlib.suppress(Exception):
                 release_fn(f"{key[0]}:{key[1]}")
+
+    async def _release_broker_lease_async(self, lease: Any, key: tuple[int, int], *, in_tx: bool = False) -> None:
+        """Release a broker lease back to self.broker asynchronously."""
+        if hasattr(lease, "release") and callable(lease.release):
+            with contextlib.suppress(Exception):
+                res = lease.release()
+                if inspect.isawaitable(res):
+                    await res
+            return
+        if self.broker is None:
+            return
+        release_lease_fn = getattr(self.broker, "release_lease", None)
+        if callable(release_lease_fn):
+            with contextlib.suppress(Exception):
+                res = release_lease_fn(key[0], key[1], in_tx=in_tx)
+                if inspect.isawaitable(res):
+                    await res
+            return
+        target = getattr(self.broker, "transport", self.broker)
+        release_fn = getattr(target, "release", None)
+        if callable(release_fn):
+            with contextlib.suppress(Exception):
+                res = release_fn(f"{key[0]}:{key[1]}")
+                if inspect.isawaitable(res):
+                    await res
 
     def _exec_begin_sync(self, session: Any, key: tuple[int, int]) -> None:
         """Begin a transaction on session synchronously and mark key as in-transaction."""
@@ -1465,3 +1495,35 @@ class SQLSpecProvider:
         if isinstance(first, (tuple, list)):
             return first[0] if first else None
         return first
+
+
+class SQLSpecSyncProvider(_BaseSQLSpecProvider):
+    """Synchronous host provider executing SQLSpec driver operations over pinned broker leases and Arrow SHM."""
+
+    def handle_request(self, request: BrokerRpcRequest) -> BrokerRpcResponse:
+        """Execute a synchronous BrokerRpcRequest and return a BrokerRpcResponse."""
+        return self._handle_request_sync(request)
+
+    def handle_raw_frame(self, frame: bytes | bytearray | memoryview) -> bytes:
+        """Decode a msgpack BrokerRpcRequest frame, execute synchronously, and return encoded response."""
+        return self._handle_raw_frame_sync(frame)
+
+    def close(self) -> None:
+        """Release all leased sessions and unlink any remaining shared-memory Arrow buffers."""
+        self._close_sync()
+
+
+class SQLSpecAsyncProvider(_BaseSQLSpecProvider):
+    """Asynchronous host provider executing SQLSpec driver operations over pinned broker leases and Arrow SHM."""
+
+    async def handle_request(self, request: BrokerRpcRequest) -> BrokerRpcResponse:
+        """Execute an asynchronous BrokerRpcRequest without event-loop thread blocking."""
+        return await self._handle_request_async(request)
+
+    async def handle_raw_frame(self, frame: bytes | bytearray | memoryview) -> bytes:
+        """Decode a msgpack BrokerRpcRequest frame, execute asynchronously, and return encoded response."""
+        return await self._handle_raw_frame_async(frame)
+
+    async def close(self) -> None:
+        """Asynchronously release all leased sessions and unlink remaining Arrow buffers."""
+        await self._close_async()

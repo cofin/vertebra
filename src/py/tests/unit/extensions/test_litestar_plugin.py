@@ -1,4 +1,4 @@
-"""Unit tests for LitestarPlugin, anyio-compatible AsgiRunner, and BuildOrchestrator ecosystem export."""
+"""Unit tests for VertebraPlugin, anyio-compatible AsgiRunner, and BuildOrchestrator ecosystem export."""
 
 import asyncio
 import contextlib
@@ -10,15 +10,18 @@ from types import SimpleNamespace
 from typing import Any
 
 import anyio
+import click
 import msgspec
 import pytest
+from click.testing import CliRunner
 
 from vertebra.build import BuildOrchestrator
 from vertebra.extensions.litestar import (
-    LitestarConfig,
-    LitestarPlugin,
+    VertebraConfig,
+    VertebraPlugin,
     enter_litestar_server_lifespan,
 )
+from vertebra.extensions.litestar import plugin as litestar_plugin_mod
 from vertebra.server._asgi._runner import AsgiRunner
 from vertebra.server._dispatch import _schedule_coros
 from vertebra.utils.module_loader import import_optional
@@ -237,12 +240,12 @@ class _LifecycleTrackerPlugin:
 
 
 def test_litestar_plugin_on_app_init_and_server_lifespan(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify LitestarPlugin preserves standalone Python compression and strips it only when vertebra-server is active."""
+    """Verify VertebraPlugin preserves standalone Python compression and strips it only when vertebra-server is active."""
     monkeypatch.delenv("LITESTAR_APP", raising=False)
     monkeypatch.delenv("VERTEBRA_SERVER_ACTIVE", raising=False)
     monkeypatch.delenv("VERTEBRA_RUST_OFFLOAD", raising=False)
     tracker = _LifecycleTrackerPlugin()
-    vtb_plugin = LitestarPlugin(LitestarConfig(enable_health_endpoint=True, health_path="/_vtb/healthz"))
+    vtb_plugin = VertebraPlugin(VertebraConfig(enable_health_endpoint=True, health_path="/_vtb/healthz"))
 
     @get("/ping", sync_to_thread=False)
     def ping() -> dict[str, str]:
@@ -270,7 +273,7 @@ def test_litestar_plugin_on_app_init_and_server_lifespan(monkeypatch: pytest.Mon
     assert tracker.exited is True
 
     monkeypatch.setenv("VERTEBRA_SERVER_ACTIVE", "1")
-    active_plugin = LitestarPlugin(LitestarConfig(enable_health_endpoint=True, health_path="/_vtb/healthz"))
+    active_plugin = VertebraPlugin(VertebraConfig(enable_health_endpoint=True, health_path="/_vtb/healthz"))
     active_app = Litestar(
         route_handlers=[ping],
         plugins=[active_plugin],
@@ -283,8 +286,8 @@ def test_litestar_plugin_on_app_init_and_server_lifespan(monkeypatch: pytest.Mon
     assert exported_cfg["compression"]["backend"] == "zstd"
     assert exported_cfg["cors"]["allow_origins"] == ["https://console.example.com"]
 
-    disabled_plugin = LitestarPlugin(
-        LitestarConfig(
+    disabled_plugin = VertebraPlugin(
+        VertebraConfig(
             offload_compression=False,
             offload_cors=False,
             offload_static_files=False,
@@ -309,7 +312,7 @@ def test_litestar_plugin_on_app_init_and_server_lifespan(monkeypatch: pytest.Mon
 def test_asgi_runner_invokes_attached_vertebra_fastpath(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify AsgiRunner invokes __vertebra_fastpath__ directly for eligible routes and falls back for unmatched paths."""
     monkeypatch.delenv("VERTEBRA_SERVER_ACTIVE", raising=False)
-    vtb_plugin = LitestarPlugin()
+    vtb_plugin = VertebraPlugin()
 
     @get("/accelerated", sync_to_thread=False)
     def accelerated() -> dict[str, str]:
@@ -448,9 +451,9 @@ def test_build_orchestrator_exports_litestar_vite_and_asyncapi(tmp_path: Path) -
 def test_litestar_plugin_ensure_finalized_populates_openapi_and_binds_asgi_runner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify AsgiRunner finalizes LitestarPlugin lazily so __vertebra_fastpath__ and OpenAPI offload bind cleanly."""
+    """Verify AsgiRunner finalizes VertebraPlugin lazily so __vertebra_fastpath__ and OpenAPI offload bind cleanly."""
     monkeypatch.setenv("VERTEBRA_SERVER_ACTIVE", "1")
-    plugin = LitestarPlugin()
+    plugin = VertebraPlugin()
 
     @get("/ready-fast", sync_to_thread=False)
     def ready_fast() -> dict[str, str]:
@@ -473,3 +476,85 @@ def test_litestar_plugin_ensure_finalized_populates_openapi_and_binds_asgi_runne
         assert runner.dispatch_app is not app
     finally:
         runner.close()
+
+
+def test_vertebra_plugin_overrides_litestar_cli_run_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify VertebraPlugin.on_cli_init overrides `litestar run` to launch the Vertebra supervisor."""
+    captured: dict[str, Any] = {}
+
+    def fake_build_cmd() -> list[str]:
+        return ["/bin/true"]
+
+    def fake_supervisor(*, server_cmd: list[str], env: dict[str, str], **_kwargs: Any) -> int:
+        captured["cmd"] = server_cmd
+        captured["env"] = dict(env)
+        return 0
+
+    monkeypatch.setattr(litestar_plugin_mod, "build_server_command", fake_build_cmd)
+    monkeypatch.setattr(litestar_plugin_mod, "run_supervisor", fake_supervisor)
+
+    app_file = tmp_path / "ls_cli_app.py"
+    app_file.write_text(
+        "from litestar import Litestar, get\n"
+        "from litestar.config.compression import CompressionConfig\n"
+        "from vertebra.extensions.litestar import VertebraConfig, VertebraPlugin\n\n"
+        "@get('/hello', sync_to_thread=False)\n"
+        "def hello() -> dict[str, str]:\n"
+        "    return {'hello': 'world'}\n\n"
+        "app = Litestar(\n"
+        "    route_handlers=[hello],\n"
+        "    plugins=[VertebraPlugin(VertebraConfig())],\n"
+        "    compression_config=CompressionConfig(backend='zstd', minimum_size=256),\n"
+        ")\n",
+        encoding="utf-8",
+    )
+
+    litestar_cli_mod = import_optional("litestar.cli.main")
+    runner = CliRunner()
+    if litestar_cli_mod is not None:
+        litestar_group = litestar_cli_mod.litestar_group
+        original_run = litestar_group.commands.get("run")
+        try:
+            help_res = runner.invoke(
+                litestar_group,
+                ["--app-dir", str(tmp_path), "--app", "ls_cli_app:app", "run", "--help"],
+            )
+            assert help_res.exit_code == 0, help_res.output
+            assert "--topology" in help_res.output
+            assert "--drain-timeout" in help_res.output
+
+            run_res = runner.invoke(
+                litestar_group,
+                [
+                    "--app-dir",
+                    str(tmp_path),
+                    "--app",
+                    "ls_cli_app:app",
+                    "run",
+                    "--port",
+                    "8123",
+                    "--workers",
+                    "2",
+                    "--topology",
+                    "shm",
+                    "--no-banner",
+                ],
+            )
+            assert run_res.exit_code == 0, run_res.output
+            assert captured["env"]["VERTEBRA_APP"] == "ls_cli_app:app"
+            assert captured["env"]["VERTEBRA_PORT"] == "8123"
+            assert captured["env"]["VERTEBRA_WORKERS"] == "2"
+            assert captured["env"]["VERTEBRA_TOPOLOGY"] == "shm"
+            assert "VERTEBRA_OFFLOAD_CONFIG" in captured["env"]
+            offload = decode_json(captured["env"]["VERTEBRA_OFFLOAD_CONFIG"])
+            assert offload["compression"]["backend"] == "zstd"
+        finally:
+            if original_run is not None:
+                litestar_group.commands["run"] = original_run
+    else:
+        group = click.Group("litestar")
+        VertebraPlugin().on_cli_init(group)
+        assert "run" in group.commands

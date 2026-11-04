@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from tests.unit.db.test_spanner import FakeSpannerClient
 from vertebra._vertebra import ArrowCursor as RustArrowCursor
 from vertebra._vertebra import Request, Response
 from vertebra.agent.runtime import ConfirmationGate
@@ -82,16 +82,16 @@ from vertebra.extensions.litestar.fastpath import (
 from vertebra.extensions.sqlalchemy import (
     ALL_DIALECT_SCHEMES,
     DIALECT_DESCRIPTORS,
+    AsyncBigQueryDialect,
+    AsyncSpangresDialect,
+    AsyncSpannerDialect,
     BigQueryAlembicImpl,
-    BigQueryAsyncDialect,
-    BigQueryDialect,
     BinaryJSON,
     CreateVectorIndexOp,
-    SpangresAsyncDialect,
-    SpangresDialect,
     SpannerAlembicImpl,
-    SpannerAsyncDialect,
-    SpannerDialect,
+    SyncBigQueryDialect,
+    SyncSpangresDialect,
+    SyncSpannerDialect,
     Vector,
 )
 from vertebra.extensions.starlette import (
@@ -112,7 +112,33 @@ from vertebra.server._fastpath import (
     ARROW_STREAM_MEDIA_TYPE,
     serialize_fastpath_special_result,
 )
-from vertebra.storage import ObjectStore, StreamingStorageResponse
+from vertebra.storage import StreamingStorageResponse, SyncObjectStore
+
+
+def _load_fake_spanner_client() -> type[Any]:
+    """Load FakeSpannerClient from test_spanner source without importing module-level dependencies."""
+    spanner_test_path = Path(__file__).resolve().parents[1] / "db" / "test_spanner.py"
+    with open(spanner_test_path, encoding="utf-8") as f:
+        lines = f.readlines()
+    cls_code = "".join(lines[41:598])
+    scope: dict[str, Any] = {
+        "sqlite3": __import__("sqlite3"),
+        "threading": __import__("threading"),
+        "_time": __import__("time"),
+        "re": __import__("re"),
+        "contextlib": __import__("contextlib"),
+        "Any": object,
+        "Sequence": list,
+        "Mapping": dict,
+        "encode_json": lambda x: __import__("json").dumps(x),
+        "decode_json": lambda x: __import__("json").loads(x),
+        "FrozenBaseStruct": __import__("msgspec").Struct,
+    }
+    exec(cls_code, scope)
+    return scope["FakeSpannerClient"]
+
+
+FakeSpannerClient = _load_fake_spanner_client()
 
 
 @pytest.mark.anyio
@@ -171,7 +197,7 @@ async def test_fastpath_zero_copy_arrow_cursor_and_streaming_storage() -> None:
         b"https://storage.googleapis.com/bucket/object?X-Goog-Signature=abc",
     ) in signed_tuple[1]
 
-    mem_store = ObjectStore.from_memory()
+    mem_store = SyncObjectStore.from_memory()
     mem_store.put("reports/q1.bin", b"0123456789abcdef")
     store_resp = StreamingStorageResponse(
         store=mem_store,
@@ -641,9 +667,9 @@ def test_sqlalchemy_vtb_dialects_types_and_alembic_batching() -> None:
         assert scheme in ALL_DIALECT_SCHEMES
         assert scheme in DIALECT_DESCRIPTORS
 
-    assert BigQueryDialect.paramstyle == "named"
-    assert BigQueryAsyncDialect.is_async is True
-    merge_sql = BigQueryDialect.compile_merge_upsert(
+    assert SyncBigQueryDialect.paramstyle == "named"
+    assert AsyncBigQueryDialect.is_async is True
+    merge_sql = SyncBigQueryDialect.compile_merge_upsert(
         "analytics.events",
         "analytics.staging_events",
         on_keys=("event_id",),
@@ -653,9 +679,9 @@ def test_sqlalchemy_vtb_dialects_types_and_alembic_batching() -> None:
     assert "T.event_id = S.event_id" in merge_sql
     assert "WHEN MATCHED THEN UPDATE SET T.payload = S.payload" in merge_sql
 
-    assert SpannerDialect.paramstyle == "named"
-    assert SpannerAsyncDialect.is_async is True
-    upsert_sql = SpannerDialect.compile_insert_or_update(
+    assert SyncSpannerDialect.paramstyle == "named"
+    assert AsyncSpannerDialect.is_async is True
+    upsert_sql = SyncSpannerDialect.compile_insert_or_update(
         "Singers",
         ("SingerId", "FirstName", "LastName"),
     )
@@ -663,14 +689,14 @@ def test_sqlalchemy_vtb_dialects_types_and_alembic_batching() -> None:
         upsert_sql
         == "INSERT OR UPDATE INTO Singers (SingerId, FirstName, LastName) VALUES (@SingerId, @FirstName, @LastName)"
     )
-    interleave_sql = SpannerDialect.compile_interleave_clause(
+    interleave_sql = SyncSpannerDialect.compile_interleave_clause(
         "Singers",
         on_delete="CASCADE",
     )
     assert interleave_sql == ", INTERLEAVE IN PARENT Singers ON DELETE CASCADE"
 
-    assert SpangresDialect.paramstyle == "pyformat"
-    assert SpangresAsyncDialect.is_async is True
+    assert SyncSpangresDialect.paramstyle == "pyformat"
+    assert AsyncSpangresDialect.is_async is True
 
     vec32 = Vector(dimensions=768, precision="float32", column_name="embedding")
     vec64 = Vector(dimensions=768, precision="float64", column_name="embedding")
@@ -742,7 +768,7 @@ def test_sqlalchemy_vtb_dialects_types_and_alembic_batching() -> None:
         ),
         client=FakeSpannerClient(),
     )
-    lro_result = sp_alembic.flush_ddl_batch(sp_driver)
+    lro_result = sp_alembic.flush_ddl_batch_sync(sp_driver)
     assert isinstance(lro_result, str)
     assert lro_result
     assert sp_alembic.buffered_ddl == ()

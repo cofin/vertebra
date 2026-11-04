@@ -1,7 +1,7 @@
 //! Shared Tokio completion ring and awaitables for `vertebra._vertebra`.
 //!
 //! Bridges pure-Rust background Tokio tasks to Python `asyncio.Future` instances
-//! via [`vertebra_core::notify::CompletionQueue`] and `loop.add_reader()` without
+//! via [`vertebra_core::notify::AsyncCompletionQueue`] and `loop.add_reader()` without
 //! calling `Python::attach` on Tokio worker threads when platform `Notifier` is active.
 //!
 //! # Panic and Cancellation Semantics
@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use pyo3::prelude::*;
 use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::task::AbortHandle;
-use vertebra_core::notify::{CompletionQueue, Notifier};
+use vertebra_core::notify::{AsyncCompletionQueue, Notifier};
 
 pyo3::create_exception!(
     vertebra._vertebra,
@@ -90,7 +90,7 @@ pub fn block_on_db<F: Future>(fut: F) -> F::Output {
 }
 
 struct DbCompletionRing {
-    completion: CompletionQueue<CompletedDbTask>,
+    completion: AsyncCompletionQueue<CompletedDbTask>,
     fallback_wakeup: Mutex<Option<(Py<PyAny>, Py<PyAny>)>>,
 }
 
@@ -170,7 +170,7 @@ fn ensure_db_completion_ring(
     if let Ok(notifier) = Notifier::new() {
         let fd = notifier.as_raw_fd();
         let temp_ring = Arc::new(DbCompletionRing {
-            completion: CompletionQueue::new(Some(notifier)),
+            completion: AsyncCompletionQueue::new(Some(notifier)),
             fallback_wakeup: Mutex::new(None),
         });
         let drainer_py = Py::new(
@@ -189,7 +189,7 @@ fn ensure_db_completion_ring(
     }
 
     let ring = Arc::new(DbCompletionRing {
-        completion: CompletionQueue::new(None),
+        completion: AsyncCompletionQueue::new(None),
         fallback_wakeup: Mutex::new(None),
     });
     let drainer_py = Py::new(
@@ -223,7 +223,7 @@ impl RustDbTaskAwaitable {
     }
 }
 
-/// Spawn a background Tokio task and resolve its Python `asyncio.Future` via `CompletionQueue`.
+/// Spawn a background Tokio task and resolve its Python `asyncio.Future` via `AsyncCompletionQueue`.
 pub fn spawn_rust_db_task<F, T, E, M, EMap>(
     py: Python<'_>,
     fut: F,

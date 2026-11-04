@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import os
 import socket
 import ssl
@@ -19,10 +20,11 @@ from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 __all__ = (
+    "AsyncCloudSQLDialer",
     "CloudSQLConfig",
-    "CloudSQLDialer",
     "CloudSQLInstanceURI",
     "EphemeralCertBundle",
+    "SyncCloudSQLDialer",
     "generate_ephemeral_keypair",
 )
 
@@ -92,22 +94,35 @@ class CloudSQLConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """Cloud SQL Auth Proxy secure mTLS server port (default `3307`)."""
 
 
-class CloudSQLDialer:
-    """Zero-sidecar Cloud SQL TLS 1.3 dialer with proactive IAM token and ephemeral cert caching."""
+class _BaseCloudSQLDialer:
+    """Base zero-sidecar Cloud SQL TLS 1.3 dialer foundation."""
 
-    __slots__ = ("_cached_expiry", "_cached_token", "_config", "_native_dialer", "_uri")
+    __slots__ = (
+        "_cached_cert_bundle",
+        "_cached_expiry",
+        "_cached_token",
+        "_config",
+        "_native_dialer",
+        "_uri",
+    )
 
     def __init__(self, config: CloudSQLConfig) -> None:
         self._config = config
         self._uri = CloudSQLInstanceURI.parse(config.instance_connection_name)
         self._cached_token: str | None = None
         self._cached_expiry: float = 0.0
+        self._cached_cert_bundle: EphemeralCertBundle | None = None
         self._native_dialer: Any = None
         native_mod = import_optional("vertebra._vertebra")
-        native_cls = getattr(native_mod, "CloudSQLDialer", None) if native_mod is not None else None
+        native_cls = getattr(native_mod, "CloudSQLDialer", None)
         if native_cls is not None:
             with contextlib.suppress(TypeError, ValueError, RuntimeError):
                 self._native_dialer = native_cls(config.instance_connection_name)
+
+    @property
+    def config(self) -> CloudSQLConfig:
+        """Return the configuration for this Cloud SQL dialer."""
+        return self._config
 
     @property
     def uri(self) -> CloudSQLInstanceURI:
@@ -181,12 +196,7 @@ class CloudSQLDialer:
         client_cert_pem: str | None = None,
         client_key_pem: str | None = None,
     ) -> ssl.SSLContext:
-        """Build a TLS 1.3 SSLContext for Cloud SQL port 3307.
-
-        Cloud SQL instance certificates use `project:instance` in the Subject CN rather
-        than a DNS hostname, so `check_hostname` is disabled while certificate chain
-        verification remains enforced when `ca_pem` is provided.
-        """
+        """Build a TLS 1.3 SSLContext for Cloud SQL port 3307."""
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_3
         ctx.check_hostname = False
@@ -207,15 +217,13 @@ class CloudSQLDialer:
                 ctx.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
         return ctx
 
-    def refresh_ephemeral_cert(
+    def _execute_ephemeral_cert_http(
         self,
-        *,
         public_key_pem: str,
-        private_key_pem: str,
         access_token: str,
         http_transport: Callable[[str, bytes, dict[str, str]], bytes] | None = None,
+        private_key_pem: str = "",
     ) -> EphemeralCertBundle:
-        """Exchange an ephemeral client RSA/ECDSA public key for a signed Cloud SQL client certificate."""
         url = self._uri.generate_ephemeral_cert_url(self._config.admin_api_endpoint)
         payload = encode_json_bytes({"public_key": public_key_pem, "access_token": access_token})
         headers = {
@@ -254,7 +262,64 @@ class CloudSQLDialer:
             expiration_ts=time.time() + 3600,
         )
 
-    def connect_sync(
+    @staticmethod
+    def _unwrap_access_token(raw: Any) -> str:
+        if raw is None:
+            return ""
+        if hasattr(raw, "access_token"):
+            return str(raw.access_token or "")
+        return str(raw or "")
+
+
+class SyncCloudSQLDialer(_BaseCloudSQLDialer):
+    """Synchronous zero-sidecar Cloud SQL TLS 1.3 dialer with proactive IAM token and ephemeral cert caching."""
+
+    __slots__ = ("_token_cache",)
+
+    def __init__(self, config: CloudSQLConfig, *, token_cache: Any = None) -> None:
+        super().__init__(config)
+        self._token_cache = token_cache
+        if self._token_cache is None:
+            native_mod = import_optional("vertebra._vertebra")
+            cache_cls = getattr(native_mod, "SyncGcpTokenCache", None) if native_mod is not None else None
+            if cache_cls is not None:
+                with contextlib.suppress(Exception):
+                    self._token_cache = cache_cls()
+
+    def refresh_certificate(
+        self,
+        *,
+        public_key_pem: str | None = None,
+        private_key_pem: str | None = None,
+        access_token: str | None = None,
+        http_transport: Callable[[str, bytes, dict[str, str]], bytes] | None = None,
+    ) -> EphemeralCertBundle:
+        """Exchange an ephemeral client RSA/ECDSA public key for a signed Cloud SQL client certificate."""
+        resolved_token = self._unwrap_access_token(access_token) if access_token is not None else ""
+        if access_token is None:
+            if self._token_cache is not None and hasattr(self._token_cache, "get_token"):
+                with contextlib.suppress(Exception):
+                    resolved_token = self._unwrap_access_token(self._token_cache.get_token())
+            if not resolved_token and self._cached_token:
+                resolved_token = self._cached_token
+        if resolved_token:
+            self._cached_token = resolved_token
+        resolved_pub = public_key_pem
+        resolved_priv = private_key_pem
+        if resolved_pub is None or resolved_priv is None:
+            gen_pub, gen_priv = self.generate_ephemeral_keypair()
+            resolved_pub = resolved_pub or gen_pub
+            resolved_priv = resolved_priv or gen_priv
+        bundle = self._execute_ephemeral_cert_http(
+            resolved_pub,
+            resolved_token,
+            http_transport=http_transport,
+            private_key_pem=resolved_priv,
+        )
+        self._cached_cert_bundle = bundle
+        return bundle
+
+    def connect(
         self,
         host: str | None = None,
         *,
@@ -271,7 +336,97 @@ class CloudSQLDialer:
             raw_sock.close()
             raise
 
-    async def connect_async(
+    def close(self) -> None:
+        """Clear cached tokens and ephemeral certificates."""
+        self._cached_token = None
+        self._cached_cert_bundle = None
+        self._cached_expiry = 0.0
+
+    def __call__(
+        self,
+        host: str | None = None,
+        *,
+        ssl_context: ssl.SSLContext | None = None,
+        timeout: float = 10.0,
+    ) -> ssl.SSLSocket:
+        """Callable dialer entrypoint returning a synchronous TLS 1.3 mTLS socket."""
+        return self.connect(host, ssl_context=ssl_context, timeout=timeout)
+
+    def create_psycopg_connect_func(
+        self,
+        host: str = "127.0.0.1",
+        *,
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> Callable[..., Any]:
+        """Return a psycopg-compatible `connect` function dialing port 3307."""
+        ctx = ssl_context or self.build_tls_context()
+
+        def _connect(*args: Any, **kwargs: Any) -> Any:
+            psycopg_mod = import_optional("psycopg")
+            if psycopg_mod is None:
+                return self.connect(host, ssl_context=ctx)
+            kw = dict(kwargs)
+            kw.setdefault("host", host)
+            kw.setdefault("port", self.port)
+            if self._config.enable_iam_auth and self._cached_token:
+                kw["password"] = self._cached_token
+            return psycopg_mod.connect(*args, **kw)
+
+        return _connect
+
+
+class AsyncCloudSQLDialer(_BaseCloudSQLDialer):
+    """Asynchronous zero-sidecar Cloud SQL TLS 1.3 dialer with proactive IAM token and ephemeral cert caching."""
+
+    __slots__ = ("_token_cache",)
+
+    def __init__(self, config: CloudSQLConfig, *, token_cache: Any = None) -> None:
+        super().__init__(config)
+        self._token_cache = token_cache
+        if self._token_cache is None:
+            native_mod = import_optional("vertebra._vertebra")
+            cache_cls = getattr(native_mod, "AsyncGcpTokenCache", None) if native_mod is not None else None
+            if cache_cls is not None:
+                with contextlib.suppress(Exception):
+                    self._token_cache = cache_cls()
+
+    async def refresh_certificate(
+        self,
+        *,
+        public_key_pem: str | None = None,
+        private_key_pem: str | None = None,
+        access_token: str | None = None,
+        http_transport: Callable[[str, bytes, dict[str, str]], bytes] | None = None,
+    ) -> EphemeralCertBundle:
+        """Asynchronously exchange an ephemeral client public key for a signed Cloud SQL client certificate."""
+        resolved_token = self._unwrap_access_token(access_token) if access_token is not None else ""
+        if access_token is None:
+            if self._token_cache is not None and hasattr(self._token_cache, "get_token"):
+                with contextlib.suppress(Exception):
+                    res = self._token_cache.get_token()
+                    raw_token = await res if inspect.isawaitable(res) else res
+                    resolved_token = self._unwrap_access_token(raw_token)
+            if not resolved_token and self._cached_token:
+                resolved_token = self._cached_token
+        if resolved_token:
+            self._cached_token = resolved_token
+        resolved_pub = public_key_pem
+        resolved_priv = private_key_pem
+        if resolved_pub is None or resolved_priv is None:
+            gen_pub, gen_priv = self.generate_ephemeral_keypair()
+            resolved_pub = resolved_pub or gen_pub
+            resolved_priv = resolved_priv or gen_priv
+        bundle = await asyncio.to_thread(
+            self._execute_ephemeral_cert_http,
+            resolved_pub,
+            resolved_token,
+            http_transport,
+            resolved_priv,
+        )
+        self._cached_cert_bundle = bundle
+        return bundle
+
+    async def connect(
         self,
         host: str | None = None,
         *,
@@ -287,15 +442,11 @@ class CloudSQLDialer:
             server_hostname=self._uri.expected_server_cn,
         )
 
-    def __call__(
-        self,
-        host: str | None = None,
-        *,
-        ssl_context: ssl.SSLContext | None = None,
-        timeout: float = 10.0,
-    ) -> ssl.SSLSocket:
-        """Callable dialer entrypoint returning a synchronous TLS 1.3 mTLS socket."""
-        return self.connect_sync(host, ssl_context=ssl_context, timeout=timeout)
+    async def close(self) -> None:
+        """Clear cached tokens and ephemeral certificates."""
+        self._cached_token = None
+        self._cached_cert_bundle = None
+        self._cached_expiry = 0.0
 
     def create_asyncpg_connect_func(
         self,
@@ -309,7 +460,7 @@ class CloudSQLDialer:
         async def _connect(*args: Any, **kwargs: Any) -> Any:
             asyncpg_mod = import_optional("asyncpg")
             if asyncpg_mod is None:
-                return await self.connect_async(host, ssl_context=ctx)
+                return await self.connect(host, ssl_context=ctx)
             kw = dict(kwargs)
             kw.setdefault("host", host)
             kw.setdefault("port", self.port)
@@ -317,28 +468,6 @@ class CloudSQLDialer:
             if self._config.enable_iam_auth and self._cached_token:
                 kw["password"] = self._cached_token
             return await asyncpg_mod.connect(*args, **kw)
-
-        return _connect
-
-    def create_psycopg_connect_func(
-        self,
-        host: str = "127.0.0.1",
-        *,
-        ssl_context: ssl.SSLContext | None = None,
-    ) -> Callable[..., Any]:
-        """Return a psycopg-compatible `connect` function dialing port 3307."""
-        ctx = ssl_context or self.build_tls_context()
-
-        def _connect(*args: Any, **kwargs: Any) -> Any:
-            psycopg_mod = import_optional("psycopg")
-            if psycopg_mod is None:
-                return self.connect_sync(host, ssl_context=ctx)
-            kw = dict(kwargs)
-            kw.setdefault("host", host)
-            kw.setdefault("port", self.port)
-            if self._config.enable_iam_auth and self._cached_token:
-                kw["password"] = self._cached_token
-            return psycopg_mod.connect(*args, **kw)
 
         return _connect
 
@@ -354,7 +483,7 @@ class CloudSQLDialer:
         async def _creator(*args: Any, **kwargs: Any) -> Any:
             asyncmy_mod = import_optional("asyncmy")
             if asyncmy_mod is None:
-                return await self.connect_async(host, ssl_context=ctx)
+                return await self.connect(host, ssl_context=ctx)
             kw = dict(kwargs)
             kw.setdefault("host", host)
             kw.setdefault("port", self.port)
@@ -368,4 +497,4 @@ class CloudSQLDialer:
 
 def generate_ephemeral_keypair(bits: int = 2048) -> tuple[str, str]:
     """Generate an ephemeral client public/private keypair in PEM format."""
-    return CloudSQLDialer.generate_ephemeral_keypair(bits)
+    return _BaseCloudSQLDialer.generate_ephemeral_keypair(bits)

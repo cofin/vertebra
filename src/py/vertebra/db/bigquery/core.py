@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import inspect
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -12,11 +13,14 @@ from urllib.parse import urlparse
 import msgspec
 
 from vertebra._vertebra import (
-    BigQueryClient as _RustBigQueryClient,
+    AsyncBigQueryClient as _RustAsyncBigQueryClient,
 )
 from vertebra._vertebra import (
     BigQueryError,
     hydrate_rows_vectorcall,
+)
+from vertebra._vertebra import (
+    SyncBigQueryClient as _RustSyncBigQueryClient,
 )
 from vertebra.db._arrow import ArrowCursor, write_arrow_shm
 from vertebra.db.bigquery.config import BigQueryConfig, BigQueryDryRunResult, ObjectTableConfig
@@ -47,14 +51,37 @@ class BigQueryCore:
     }
 
     @classmethod
-    def create_rust_client(cls, config: BigQueryConfig) -> _RustBigQueryClient:
-        """Instantiate the native Rust `BigQueryClient` from `config`."""
+    def create_sync_rust_client(cls, config: BigQueryConfig) -> _RustSyncBigQueryClient:
+        """Instantiate the native Rust `SyncBigQueryClient` from `config`."""
         project_id = config.effective_project_id()
         dataset_id = config.effective_dataset_id()
         sanitized_labels = cls.sanitize_labels(config.labels, None)
         auth_options = config.build_auth_options()
 
-        return _RustBigQueryClient(
+        return _RustSyncBigQueryClient(
+            project_id=project_id,
+            dataset_id=dataset_id,
+            location=config.location,
+            rest_endpoint=config.rest_endpoint,
+            storage_endpoint=config.storage_endpoint,
+            maximum_bytes_billed=config.maximum_bytes_billed,
+            job_timeout_ms=config.job_timeout_ms,
+            priority=config.priority,
+            labels=sanitized_labels or None,
+            auth_options=auth_options or None,
+            pool_size=max(1, config.pool_size),
+            ca_pem=config.ca_pem,
+        )
+
+    @classmethod
+    def create_async_rust_client(cls, config: BigQueryConfig) -> _RustAsyncBigQueryClient:
+        """Instantiate the native Rust `AsyncBigQueryClient` from `config`."""
+        project_id = config.effective_project_id()
+        dataset_id = config.effective_dataset_id()
+        sanitized_labels = cls.sanitize_labels(config.labels, None)
+        auth_options = config.build_auth_options()
+
+        return _RustAsyncBigQueryClient(
             project_id=project_id,
             dataset_id=dataset_id,
             location=config.location,
@@ -415,13 +442,11 @@ class BigQueryCore:
             )
         object_key = ObjectTableConfig._extract_object_key_from_uri(destination_uri)
         payload = cls._serialize_cursor_for_object_store(cursor, format=format, compression=compression)
-        put_async = getattr(store, "put_async", None)
-        if callable(put_async):
-            await put_async(object_key, payload)
-            return
         put_fn = getattr(store, "put", None)
         if callable(put_fn):
-            put_fn(object_key, payload)
+            res = put_fn(object_key, payload)
+            if inspect.isawaitable(res):
+                await res
             return
         raise ImproperConfigurationError(f"Unsupported ObjectStore {type(store).__name__!r}")
 
@@ -473,13 +498,12 @@ class BigQueryCore:
                 "Non-GCS load_from_object_store requires an ObjectStore instance or ObjectStoreBackend"
             )
         object_key = ObjectTableConfig._extract_object_key_from_uri(uri)
-        get_async = getattr(store, "get_async", None)
-        if callable(get_async):
-            raw = bytes(await get_async(object_key))
-            return cls._deserialize_bytes_from_object_store(raw, format=format)
         get_fn = getattr(store, "get", None)
         if callable(get_fn):
-            raw = bytes(get_fn(object_key))
+            res = get_fn(object_key)
+            if inspect.isawaitable(res):
+                res = await res
+            raw = bytes(res)
             return cls._deserialize_bytes_from_object_store(raw, format=format)
         raise ImproperConfigurationError(f"Unsupported ObjectStore {type(store).__name__!r}")
 
@@ -520,21 +544,21 @@ class BigQueryCore:
     ) -> list[dict[str, Any]]:
         """Asynchronously list objects directly from `store` when the Object Table catalog query is unavailable."""
         rows: list[dict[str, Any]] = []
-        list_async = getattr(store, "list_async", None)
+        list_fn = getattr(store, "list", None)
         list_backend_async = getattr(store, "list_objects_async", None)
-        list_sync = getattr(store, "list", None)
         list_backend_sync = getattr(store, "list_objects_sync", None)
         for pattern in config.uris:
             scheme = urlparse(pattern).scheme or "gs"
             bucket, prefix = cls._extract_bucket_prefix_from_uri(pattern)
-            if callable(list_async):
-                items = await list_async(prefix or None)
-            elif callable(list_backend_async):
+            if callable(list_backend_async):
                 items = await list_backend_async(prefix=prefix)
-            elif callable(list_sync):
-                items = list_sync(prefix or None)
             elif callable(list_backend_sync):
                 items = list_backend_sync(prefix=prefix)
+            elif callable(list_fn):
+                res = list_fn(prefix or None)
+                if inspect.isawaitable(res):
+                    res = await res
+                items = res
             else:
                 items = []
             for item in items:

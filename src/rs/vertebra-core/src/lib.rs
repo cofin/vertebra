@@ -37,6 +37,6 @@ pub use broker::{
 };
 pub use channel::{MpmcSlotView, SlotView};
 pub use layout::CacheLine;
-pub use notify::{CompletionQueue, Notifier};
+pub use notify::{AsyncCompletionQueue, Notifier, SyncCompletionQueue};
 pub use transport::ring_pair::{RingPair, TieredRingSet};
 pub use transport::{BatchSnapshot, InProcessRequest, TransportError, TransportNode};

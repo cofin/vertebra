@@ -20,7 +20,7 @@ from vertebra.db.postgres import PostgreSQLConfig
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
-    from vertebra.extensions.sqlalchemy.dialects import DBAPIConnection
+    from vertebra.extensions.sqlalchemy.dialects import SyncDBAPIConnection
 
 __all__ = (
     "AlembicImpl",
@@ -256,7 +256,7 @@ class SpannerAlembicImpl(DefaultImpl):
             if stmt:
                 self._ddl_buffer.append(stmt)
 
-    def flush_ddl_batch(self, driver: Any) -> Any:
+    def flush_ddl_batch_sync(self, driver: Any) -> Any:
         """Flush all buffered DDL statements in a single `driver.update_ddl(statements)` LRO call."""
         if not self._ddl_buffer:
             return None
@@ -397,7 +397,7 @@ class AlembicImpl(DefaultImpl):
 
     @staticmethod
     def execute_ddl(
-        connection: DBAPIConnection | Any,
+        connection: SyncDBAPIConnection | Any,
         op: CreateViewOp | DropViewOp | CreateVectorIndexOp | DropVectorIndexOp,
         *,
         dialect_name: str = "postgresql",

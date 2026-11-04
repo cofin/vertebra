@@ -17,12 +17,13 @@ __all__ = [
     "AsgiProtocol",
     "AsgiScope",
     "AsgiScopeIterator",
-    "BigQueryClient",
+    "AsyncBigQueryClient",
+    "AsyncGcpTokenCache",
+    "AsyncSpannerClient",
     "BigQueryError",
     "BigQueryRowError",
     "BrokerStats",
     "CloudSQLDialer",
-    "GcpTokenCache",
     "GcpTokenSnapshot",
     "GoogleCloudAuthError",
     "GoogleCloudError",
@@ -46,12 +47,14 @@ __all__ = [
     "SchemaDigestCache",
     "SimilarityMatch",
     "SpannerAbortedError",
-    "SpannerClient",
     "SpannerError",
     "StatementCache",
     "StatementCacheStats",
     "StatementPlan",
     "StaticEmbedderCore",
+    "SyncBigQueryClient",
+    "SyncGcpTokenCache",
+    "SyncSpannerClient",
     "TaskPanicError",
     "VectorBatchView",
     "VectorCache",
@@ -1335,8 +1338,12 @@ class GcpTokenSnapshot:
     def __repr__(self) -> str: ...
 
 @final
-class GcpTokenCache:
-    def __new__(cls, options: dict[str, str]) -> GcpTokenCache: ...
+class SyncGcpTokenCache:
+    def __new__(
+        cls,
+        options: dict[str, str] | None = None,
+        scopes: Sequence[str] | None = None,
+    ) -> SyncGcpTokenCache: ...
     @property
     def generation(self) -> int: ...
     @property
@@ -1349,10 +1356,29 @@ class GcpTokenCache:
     def invalidate(self, failed_generation: int) -> None: ...
     def sign_jwt_for_audience(self, audience: str) -> str: ...
     def get_token(self, *, force_refresh: bool = False) -> GcpTokenSnapshot: ...
-    def get_token_async(self, *, force_refresh: bool = False) -> RustDbTaskAwaitable: ...
 
 @final
-class BigQueryClient:
+class AsyncGcpTokenCache:
+    def __new__(
+        cls,
+        options: dict[str, str] | None = None,
+        scopes: Sequence[str] | None = None,
+    ) -> AsyncGcpTokenCache: ...
+    @property
+    def generation(self) -> int: ...
+    @property
+    def refresh_skew_ms(self) -> int: ...
+    @property
+    def has_service_account_key(self) -> bool: ...
+    @property
+    def service_account_email(self) -> str | None: ...
+    def needs_refresh(self, *, now_unix_ms: int | None = None) -> bool: ...
+    def invalidate(self, failed_generation: int) -> None: ...
+    def sign_jwt_for_audience(self, audience: str) -> str: ...
+    def get_token(self, *, force_refresh: bool = False) -> RustDbTaskAwaitable: ...
+
+@final
+class SyncBigQueryClient:
     """``ca_pem`` applies to the REST API client; the Storage Read/Write API clients use the system trust store and ignore it."""
 
     def __new__(
@@ -1369,7 +1395,7 @@ class BigQueryClient:
         auth_options: dict[str, str] | None = None,
         pool_size: int = 4,
         ca_pem: bytes | None = None,
-    ) -> BigQueryClient: ...
+    ) -> SyncBigQueryClient: ...
     @property
     def project_id(self) -> str: ...
     @property
@@ -1401,7 +1427,67 @@ class BigQueryClient:
         priority: str | None = None,
         labels: dict[str, str] | None = None,
     ) -> dict[str, Any]: ...
-    def query_async(
+    def dry_run(
+        self,
+        sql: str,
+        params_json: str | None = None,
+    ) -> dict[str, Any]: ...
+    def read_table_arrow(
+        self,
+        project_id: str,
+        dataset_id: str,
+        table_id: str,
+        selected_fields: Sequence[str] | None = None,
+        row_restriction: str | None = None,
+        max_streams: int = 4,
+        compression: str = "LZ4_FRAME",
+    ) -> ArrowCursor: ...
+    def append_arrow(
+        self,
+        parent_table: str,
+        arrow_ipc_bytes: bytes,
+        mode: str = "_default",
+    ) -> dict[str, Any]: ...
+    def close(self) -> None: ...
+
+@final
+class AsyncBigQueryClient:
+    """``ca_pem`` applies to the REST API client; the Storage Read/Write API clients use the system trust store and ignore it."""
+
+    def __new__(
+        cls,
+        project_id: str,
+        dataset_id: str | None = None,
+        location: str | None = None,
+        rest_endpoint: str | None = None,
+        storage_endpoint: str | None = None,
+        maximum_bytes_billed: int | None = None,
+        job_timeout_ms: int | None = None,
+        priority: str | None = None,
+        labels: dict[str, str] | None = None,
+        auth_options: dict[str, str] | None = None,
+        pool_size: int = 4,
+        ca_pem: bytes | None = None,
+    ) -> AsyncBigQueryClient: ...
+    @property
+    def project_id(self) -> str: ...
+    @property
+    def dataset_id(self) -> str | None: ...
+    @property
+    def location(self) -> str | None: ...
+    @property
+    def rest_endpoint(self) -> str: ...
+    @property
+    def storage_endpoint(self) -> str: ...
+    @property
+    def maximum_bytes_billed(self) -> int | None: ...
+    @property
+    def job_timeout_ms(self) -> int | None: ...
+    @property
+    def priority(self) -> str | None: ...
+    @property
+    def pool_size(self) -> int: ...
+    def query(
         self,
         sql: str,
         params_json: str | None = None,
@@ -1418,23 +1504,8 @@ class BigQueryClient:
         self,
         sql: str,
         params_json: str | None = None,
-    ) -> dict[str, Any]: ...
-    def dry_run_async(
-        self,
-        sql: str,
-        params_json: str | None = None,
     ) -> RustDbTaskAwaitable: ...
     def read_table_arrow(
-        self,
-        project_id: str,
-        dataset_id: str,
-        table_id: str,
-        selected_fields: Sequence[str] | None = None,
-        row_restriction: str | None = None,
-        max_streams: int = 4,
-        compression: str = "LZ4_FRAME",
-    ) -> ArrowCursor: ...
-    def read_table_arrow_async(
         self,
         project_id: str,
         dataset_id: str,
@@ -1449,16 +1520,11 @@ class BigQueryClient:
         parent_table: str,
         arrow_ipc_bytes: bytes,
         mode: str = "_default",
-    ) -> dict[str, Any]: ...
-    def append_arrow_async(
-        self,
-        parent_table: str,
-        arrow_ipc_bytes: bytes,
-        mode: str = "_default",
     ) -> RustDbTaskAwaitable: ...
+    def close(self) -> None: ...
 
 @final
-class SpannerClient:
+class SyncSpannerClient:
     """Google Cloud Spanner client built on the official Rust client. ``query`` and ``partitioned_query`` return ``columns``, ``schema``, ``rows``, ``row_count_exact``, and ``row_count_lower_bound``. ``ca_pem`` is accepted only for non-googleapis ``https://`` endpoints (Spanner Omni or private test servers)."""
 
     def __new__(
@@ -1473,7 +1539,7 @@ class SpannerClient:
         auth_options: dict[str, str] | None = None,
         admin_endpoint: str | None = None,
         ca_pem: bytes | None = None,
-    ) -> SpannerClient: ...
+    ) -> SyncSpannerClient: ...
     @property
     def database(self) -> str: ...
     @property
@@ -1497,7 +1563,85 @@ class SpannerClient:
         staleness_mode: str = "strong",
         staleness_ms: int = 0,
     ) -> dict[str, Any]: ...
-    def query_async(
+    def execute_dml(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+    ) -> int: ...
+    def execute_batch_dml(
+        self,
+        statements_json: str,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+    ) -> list[int]: ...
+    def execute_partitioned_dml(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        exclude_txn_from_change_streams: bool = False,
+    ) -> int: ...
+    def apply_mutations(
+        self,
+        mutations_json: str,
+        transaction_tag: str | None = None,
+        exclude_txn_from_change_streams: bool = False,
+    ) -> dict[str, Any]: ...
+    def batch_write(
+        self,
+        mutation_groups_json: str,
+        exclude_txn_from_change_streams: bool = False,
+    ) -> list[dict[str, Any]]: ...
+    def update_ddl(
+        self,
+        statements: Sequence[str],
+    ) -> str: ...
+    def partitioned_query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        max_partitions: int = 4,
+        data_boost_enabled: bool = False,
+        staleness_mode: str = "strong",
+        staleness_ms: int = 0,
+    ) -> dict[str, Any]: ...
+    def close(self) -> None: ...
+
+@final
+class AsyncSpannerClient:
+    """Google Cloud Spanner client built on the official Rust client. ``query`` and ``partitioned_query`` return ``columns``, ``schema``, ``rows``, ``row_count_exact``, and ``row_count_lower_bound``. ``ca_pem`` is accepted only for non-googleapis ``https://`` endpoints (Spanner Omni or private test servers)."""
+
+    def __new__(
+        cls,
+        database: str,
+        database_role: str | None = None,
+        endpoint: str | None = None,
+        dialect: str = "googlesql",
+        pool_size: int = 4,
+        route_to_leader_enabled: bool = True,
+        max_commit_delay_ms: int | None = None,
+        auth_options: dict[str, str] | None = None,
+        admin_endpoint: str | None = None,
+        ca_pem: bytes | None = None,
+    ) -> AsyncSpannerClient: ...
+    @property
+    def database(self) -> str: ...
+    @property
+    def database_role(self) -> str | None: ...
+    @property
+    def endpoint(self) -> str: ...
+    @property
+    def admin_endpoint(self) -> str | None: ...
+    @property
+    def dialect(self) -> str: ...
+    @property
+    def pool_size(self) -> int: ...
+    @property
+    def route_to_leader_enabled(self) -> bool: ...
+    @property
+    def max_commit_delay_ms(self) -> int | None: ...
+    def query(
         self,
         sql: str,
         params_json: str | None = None,
@@ -1510,21 +1654,8 @@ class SpannerClient:
         params_json: str | None = None,
         request_tag: str | None = None,
         transaction_tag: str | None = None,
-    ) -> int: ...
-    def execute_dml_async(
-        self,
-        sql: str,
-        params_json: str | None = None,
-        request_tag: str | None = None,
-        transaction_tag: str | None = None,
     ) -> RustDbTaskAwaitable: ...
     def execute_batch_dml(
-        self,
-        statements_json: str,
-        request_tag: str | None = None,
-        transaction_tag: str | None = None,
-    ) -> list[int]: ...
-    def execute_batch_dml_async(
         self,
         statements_json: str,
         request_tag: str | None = None,
@@ -1535,20 +1666,8 @@ class SpannerClient:
         sql: str,
         params_json: str | None = None,
         exclude_txn_from_change_streams: bool = False,
-    ) -> int: ...
-    def execute_partitioned_dml_async(
-        self,
-        sql: str,
-        params_json: str | None = None,
-        exclude_txn_from_change_streams: bool = False,
     ) -> RustDbTaskAwaitable: ...
     def apply_mutations(
-        self,
-        mutations_json: str,
-        transaction_tag: str | None = None,
-        exclude_txn_from_change_streams: bool = False,
-    ) -> dict[str, Any]: ...
-    def apply_mutations_async(
         self,
         mutations_json: str,
         transaction_tag: str | None = None,
@@ -1558,17 +1677,8 @@ class SpannerClient:
         self,
         mutation_groups_json: str,
         exclude_txn_from_change_streams: bool = False,
-    ) -> list[dict[str, Any]]: ...
-    def batch_write_async(
-        self,
-        mutation_groups_json: str,
-        exclude_txn_from_change_streams: bool = False,
     ) -> RustDbTaskAwaitable: ...
     def update_ddl(
-        self,
-        statements: Sequence[str],
-    ) -> str: ...
-    def update_ddl_async(
         self,
         statements: Sequence[str],
     ) -> RustDbTaskAwaitable: ...
@@ -1580,13 +1690,5 @@ class SpannerClient:
         data_boost_enabled: bool = False,
         staleness_mode: str = "strong",
         staleness_ms: int = 0,
-    ) -> dict[str, Any]: ...
-    def partitioned_query_async(
-        self,
-        sql: str,
-        params_json: str | None = None,
-        max_partitions: int = 4,
-        data_boost_enabled: bool = False,
-        staleness_mode: str = "strong",
-        staleness_ms: int = 0,
     ) -> RustDbTaskAwaitable: ...
+    def close(self) -> None: ...

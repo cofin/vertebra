@@ -25,25 +25,25 @@ from vertebra.extensions.sqlalchemy import (
     BinaryJSON,
     CreateVectorIndexOp,
     CreateViewOp,
-    DBAPIConnection,
-    DBAPIModule,
     DeleteUsingClause,
     DropVectorIndexOp,
     InsertSentinelSpec,
     MySQLAlembicImpl,
-    MySQLDialect,
     OracleAlembicImpl,
-    OracleDialect,
     ParameterizedSQL,
     PostgreSQLAlembicImpl,
-    PostgreSQLDialect,
     SelectInLoadSpec,
     SQLiteAlembicImpl,
-    SQLiteDialect,
+    SyncDBAPIConnection,
+    SyncDBAPIModule,
     SyncEngineAdapter,
+    SyncMySQLDialect,
+    SyncOracleDialect,
+    SyncPostgreSQLDialect,
+    SyncSQLiteDialect,
     Vector,
 )
-from vertebra.storage import ObjectStore
+from vertebra.storage import SyncObjectStore
 
 
 class BaseTestModel(DeclarativeBase):
@@ -169,10 +169,11 @@ def test_vector_and_binary_json_types_across_dialects() -> None:
 @pytest.mark.anyio
 async def test_advanced_alchemy_audit_and_stored_object_lifecycle() -> None:
     """Verify real UUIDAuditBase, SQLAlchemyAsyncRepositoryService CRUD, and StoredObject rollback cleanup."""
-    object_store = ObjectStore("memory://")
+    object_store = SyncObjectStore("memory://")
+    async_store = object_store.to_async()
     config = create_async_alchemy_config(
         "sqlite+vtb_async:///:memory:",
-        storage_backend=object_store,
+        storage_backend=async_store,
         storage_key="docs_store",
         enable_file_object_listener=True,
     )
@@ -193,7 +194,7 @@ async def test_advanced_alchemy_audit_and_stored_object_lifecycle() -> None:
         assert doc.id is not None
         assert doc.file.path == "arch.txt"
 
-        stored_bytes = await object_store.get_async("arch.txt")
+        stored_bytes = await async_store.get("arch.txt")
         assert stored_bytes == file_payload
 
         loaded = await service.get(doc.id)
@@ -209,7 +210,7 @@ async def test_advanced_alchemy_audit_and_stored_object_lifecycle() -> None:
         await session.rollback()
 
         with pytest.raises(FileNotFoundError):
-            await object_store.get_async(temp_path)
+            await async_store.get(temp_path)
 
     await engine.dispose()
 
@@ -225,7 +226,7 @@ def test_sqlalchemy_dialects_dbapi_and_alembic_integration() -> None:
     assert issubclass(OracleAlembicImpl, AlembicImpl.__bases__[0])
     assert issubclass(MySQLAlembicImpl, AlembicImpl.__bases__[0])
 
-    dbapi = DBAPIModule()
+    dbapi = SyncDBAPIModule()
     conn = dbapi.connect("sqlite+vtb:///:memory:")
     cur = conn.cursor()
     cur.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
@@ -264,7 +265,7 @@ def test_sqlalchemy_dialects_dbapi_and_alembic_integration() -> None:
     assert AlembicImpl.resolve_migration_url(pg_cfg) == "postgresql://u:p@pg-primary:5432/app"
 
     sentinel_spec = InsertSentinelSpec.create(table_name="orders", sentinel_column="_insert_sentinel")
-    rendered_insert = OracleDialect.compile_insert_returning_sentinel(
+    rendered_insert = SyncOracleDialect.compile_insert_returning_sentinel(
         "orders",
         ("id", "total"),
         sentinel_spec,
@@ -293,19 +294,19 @@ def test_sqlalchemy_dialects_dbapi_and_alembic_integration() -> None:
     assert drop_op.to_sql("oracle+vtb") == "DROP INDEX idx_items_vec"
     assert drop_op.to_sql("postgresql+vtb") == "DROP INDEX IF EXISTS idx_items_vec"
 
-    ddl_conn = DBAPIConnection("sqlite+vtb:///:memory:")
+    ddl_conn = SyncDBAPIConnection("sqlite+vtb:///:memory:")
     AlembicImpl.execute_ddl(ddl_conn, view_op, dialect_name="sqlite+vtb")
     ddl_conn.close()
 
 
 def test_postgres_vtb_dialect_dbapi_and_compiler_features() -> None:
-    """Verify PostgreSQLDialect, DBAPIModule paramstyles, compiler hooks, and cursor descriptions."""
-    pg_dbapi = PostgreSQLDialect.dbapi()
+    """Verify SyncPostgreSQLDialect, SyncDBAPIModule paramstyles, compiler hooks, and cursor descriptions."""
+    pg_dbapi = SyncPostgreSQLDialect.dbapi()
     assert pg_dbapi.paramstyle == "pyformat"
-    assert PostgreSQLDialect.import_dbapi().paramstyle == "pyformat"
-    assert SQLiteDialect.dbapi().paramstyle == "qmark"
-    assert MySQLDialect.dbapi().paramstyle == "format"
-    assert OracleDialect.dbapi().paramstyle == "named"
+    assert SyncPostgreSQLDialect.import_dbapi().paramstyle == "pyformat"
+    assert SyncSQLiteDialect.dbapi().paramstyle == "qmark"
+    assert SyncMySQLDialect.dbapi().paramstyle == "format"
+    assert SyncOracleDialect.dbapi().paramstyle == "named"
 
     driver = SyncPostgreSQLDriver(PostgreSQLConfig(dsn="memory://"))
     driver._in_memory_rows = [(1, "item1"), (2, "item2")]
@@ -322,7 +323,7 @@ def test_postgres_vtb_dialect_dbapi_and_compiler_features() -> None:
     assert conn.closed is True
 
     sentinel_spec = InsertSentinelSpec.create(table_name="orders", sentinel_column="_vtb_sentinel")
-    rendered_insert = PostgreSQLDialect.compile_insert_returning_sentinel(
+    rendered_insert = SyncPostgreSQLDialect.compile_insert_returning_sentinel(
         "orders",
         ["id", "name"],
         sentinel_spec,
@@ -335,14 +336,14 @@ def test_postgres_vtb_dialect_dbapi_and_compiler_features() -> None:
         "archived_customers",
         where_sql="orders.customer_id = archived_customers.id",
     )
-    assert PostgreSQLDialect.compile_delete_using(del_clause) == (
+    assert SyncPostgreSQLDialect.compile_delete_using(del_clause) == (
         "DELETE FROM orders USING archived_customers WHERE orders.customer_id = archived_customers.id"
     )
 
     vec = Vector(768)
     bjson = BinaryJSON()
-    assert PostgreSQLDialect.type_descriptor(vec) is vec
-    assert PostgreSQLDialect.type_descriptor(bjson) is bjson
+    assert SyncPostgreSQLDialect.type_descriptor(vec) is vec
+    assert SyncPostgreSQLDialect.type_descriptor(bjson) is bjson
 
 
 @pytest.mark.anyio
@@ -380,7 +381,7 @@ async def test_sqlalchemy_21_orm_optimizations_and_sync_engine_adapter() -> None
 
 def test_alchemy_sync_config_factory() -> None:
     """Verify create_sync_alchemy_config and storage backend integration."""
-    store = ObjectStore("memory://")
+    store = SyncObjectStore("memory://")
     backend = ObjectStoreBackend(store=store, key="sync_docs")
     assert backend.store is store
 

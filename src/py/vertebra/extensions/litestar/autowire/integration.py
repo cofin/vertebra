@@ -58,7 +58,7 @@ def ensure_autowire_before_route_compiler(app_config: AppConfig) -> AppConfig:
         name = type(p).__name__
         if name == "AutowirePlugin":
             autowire_idx = i
-        elif name == "LitestarPlugin":
+        elif name == "VertebraPlugin":
             litestar_idx = i
 
     if autowire_idx != -1 and litestar_idx != -1 and autowire_idx > litestar_idx:

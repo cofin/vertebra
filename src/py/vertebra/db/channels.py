@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 from collections import deque
 from typing import TYPE_CHECKING, Any, Self
 
-from vertebra.db.cdc import CDCConfig, ChangeFeed, SpannerChangeStreamSource
+from vertebra.db.cdc import (
+    AsyncSpannerChangeStreamSource,
+    CDCConfig,
+    ChangeFeed,
+    SyncSpannerChangeStreamSource,
+)
 from vertebra.db.oracle import AsyncOracleDriver, OracleConfig
 from vertebra.db.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig
 from vertebra.db.redis import AsyncRedisDriver, RedisConfig
@@ -17,7 +23,7 @@ from vertebra.utils.serializers import decode_json, encode_json_bytes
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable
 
-    from vertebra.storage import ObjectStore
+    from vertebra.storage import SyncObjectStore
 
 __all__ = ("DatabaseChannelBackend",)
 
@@ -128,8 +134,8 @@ class DatabaseChannelBackend:
         config_or_driver: PostgreSQLConfig | AsyncPostgreSQLDriver | str,
         *,
         history: int = 0,
-        spill_store: ObjectStore | None = None,
-        object_store: ObjectStore | None = None,
+        spill_store: SyncObjectStore | None = None,
+        object_store: SyncObjectStore | None = None,
         spill_threshold_bytes: int = 7500,
     ) -> Self:
         """Create a channel backend backed by PostgreSQL LISTEN/NOTIFY with direct-DSN pooler bypass and ObjectStore spill."""
@@ -183,12 +189,12 @@ class DatabaseChannelBackend:
         *,
         channel: str = "spanner_cdc",
         history: int = 0,
-        spill_store: ObjectStore | None = None,
-        object_store: ObjectStore | None = None,
+        spill_store: SyncObjectStore | None = None,
+        object_store: SyncObjectStore | None = None,
         spill_threshold_bytes: int = 7500,
         heartbeat_milliseconds: int = 10_000,
-    ) -> tuple[Self, SpannerChangeStreamSource]:
-        """Create a channel backend and ``SpannerChangeStreamSource`` wired through a ``ChangeFeed``."""
+    ) -> tuple[Self, SyncSpannerChangeStreamSource | AsyncSpannerChangeStreamSource]:
+        """Create a channel backend and Spanner change stream source wired through a ``ChangeFeed``."""
         resolved_store = spill_store if spill_store is not None else object_store
         feed = ChangeFeed(
             CDCConfig(
@@ -199,7 +205,12 @@ class DatabaseChannelBackend:
             ),
             store=resolved_store,
         )
-        source = SpannerChangeStreamSource(
+        source_cls = (
+            AsyncSpannerChangeStreamSource
+            if hasattr(driver, "query") and inspect.iscoroutinefunction(driver.query)
+            else SyncSpannerChangeStreamSource
+        )
+        source = source_cls(
             driver,
             stream_name,
             change_feed=feed,

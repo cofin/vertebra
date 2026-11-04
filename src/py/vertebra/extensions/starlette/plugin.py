@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 from typing import TYPE_CHECKING, Any
 
-from vertebra.extensions.starlette.config import StarletteConfig
+from vertebra.extensions.starlette.config import VertebraConfig
 from vertebra.extensions.starlette.fastpath import (
     CompiledRoute,
     FastPath,
@@ -24,12 +24,12 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 __all__ = (
-    "StarlettePlugin",
+    "VertebraPlugin",
     "enter_starlette_server_lifespan",
 )
 
 
-class StarlettePlugin:
+class VertebraPlugin:
     """Starlette plugin enabling Rust middleware offload, matchit route compilation, and C-API fastpath."""
 
     __slots__ = ("_compiled_routes", "_config", "_finalized_app", "_offload_plan", "_router_table")
@@ -38,9 +38,9 @@ class StarlettePlugin:
         self,
         app: Any = None,
         *,
-        config: StarletteConfig | None = None,
+        config: VertebraConfig | None = None,
     ) -> None:
-        self._config = config or StarletteConfig()
+        self._config = config or VertebraConfig()
         self._offload_plan: OffloadPlan | None = None
         self._compiled_routes: dict[int, CompiledRoute] = {}
         self._router_table: RouterTable | None = None
@@ -49,8 +49,8 @@ class StarlettePlugin:
             self.init_app(app)
 
     @property
-    def config(self) -> StarletteConfig:
-        """Return the active StarletteConfig."""
+    def config(self) -> VertebraConfig:
+        """Return the active VertebraConfig."""
         return self._config
 
     @property
@@ -127,10 +127,10 @@ class StarlettePlugin:
 
 @contextlib.contextmanager
 def enter_starlette_server_lifespan(app: Any) -> Iterator[None]:
-    """Finalize any registered StarlettePlugin on ``app`` before serving requests."""
+    """Finalize any registered VertebraPlugin on ``app`` before serving requests."""
     state = getattr(app, "state", None)
     plugin = _get_state_item(state, "vertebra_plugin")
-    if isinstance(plugin, StarlettePlugin):
+    if isinstance(plugin, VertebraPlugin):
         with plugin.server_lifespan(app):
             yield
         return

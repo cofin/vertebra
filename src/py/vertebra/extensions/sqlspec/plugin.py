@@ -8,18 +8,24 @@ import logging
 from typing import Any, ClassVar, cast
 
 from vertebra.extensions.broker import (
+    AsyncInMemoryBrokerTransport,
+    AsyncSHMBrokerTransport,
     BrokerPlugin,
     ChannelMessage,
-    InMemoryBrokerTransport,
-    SHMBrokerTransport,
+    SyncInMemoryBrokerTransport,
+    SyncSHMBrokerTransport,
 )
-from vertebra.extensions.sqlspec.provider import SQLSpecProvider
+from vertebra.extensions.sqlspec.provider import (
+    SQLSpecAsyncProvider,
+    SQLSpecSyncProvider,
+    _BaseSQLSpecProvider,
+)
 from vertebra.extensions.sqlspec.proxy import (
     ProxyAsyncSessionContext,
     ProxySyncSessionContext,
 )
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
-from vertebra.storage import ObjectStore as BaseObjectStore
+from vertebra.storage import AsyncObjectStore, SyncObjectStore
 from vertebra.typing import MissingDependencyError
 
 try:
@@ -30,7 +36,8 @@ try:
 except ImportError as exc:
     raise MissingDependencyError("sqlspec", install_package="sqlspec", extra="sqlspec") from exc
 
-type BrokerTransport = SHMBrokerTransport | InMemoryBrokerTransport | Any
+type SyncBrokerTransport = SyncSHMBrokerTransport | SyncInMemoryBrokerTransport | Any
+type AsyncBrokerTransport = AsyncSHMBrokerTransport | AsyncInMemoryBrokerTransport | Any
 
 logger = logging.getLogger(__name__)
 
@@ -51,75 +58,17 @@ SQLSPEC_PLUGIN_PRIORITY: int = -5800
 SQLSPEC_STATE_KEY: str = "sqlspec"
 
 
-class ProxySyncConfig[SyncConfigT](SyncDatabaseConfig[Any, Any, Any]):
-    """Generic synchronous SQLSpec proxy configuration preserving inner SyncConfigT types."""
+class _BaseProxyConfig:
+    """Shared Litestar extension key normalization and forwarding properties for SQLSpec proxy configurations."""
 
-    __slots__ = ("_statement_cache", "broker", "config", "provider")
-    is_async: ClassVar[bool] = False
-    supports_connection_pooling: ClassVar[bool] = True
-
-    def __init__(
-        self,
-        config: SyncConfigT,
-        *,
-        broker: BrokerTransport | SQLSpecProvider | None = None,
-        provider: SQLSpecProvider | None = None,
-        statement_config: Any = None,
-        bind_key: str | None = None,
-        **kwargs: Any,
-    ) -> None:
-        """Initialize ProxySyncConfig wrapping a synchronous database configuration."""
-        _inject_sqlspec_pool_defaults(config)
-        self.config: SyncConfigT = config
-        if isinstance(broker, SQLSpecProvider):
-            self.provider: SQLSpecProvider | None = provider or broker
-            self.broker: Any = broker.broker
-        else:
-            self.provider = provider
-            self.broker = broker
-
-        resolved_bind_key = bind_key or getattr(config, "bind_key", "default")
-        stmt_cfg = statement_config or getattr(config, "statement_config", None)
-        driver_feats = getattr(config, "driver_features", None)
-        super().__init__(
-            bind_key=resolved_bind_key,
-            statement_config=stmt_cfg,
-            driver_features=driver_feats,
-            **kwargs,
-        )
-        ext_cfg = dict(getattr(config, "extension_config", {}))
-        litestar_cfg = dict(ext_cfg.get("litestar", {}))
-        if "connection_key" not in litestar_cfg:
-            conn_k = getattr(config, "connection_key", None)
-            if conn_k:
-                litestar_cfg["connection_key"] = str(conn_k)
-            elif resolved_bind_key and resolved_bind_key not in ("default", "primary"):
-                litestar_cfg["connection_key"] = f"{resolved_bind_key}_connection"
-            else:
-                litestar_cfg["connection_key"] = "db_connection"
-        if "session_key" not in litestar_cfg:
-            sess_k = getattr(config, "session_key", None)
-            if sess_k:
-                litestar_cfg["session_key"] = str(sess_k)
-            elif resolved_bind_key and resolved_bind_key not in ("default", "primary"):
-                litestar_cfg["session_key"] = f"{resolved_bind_key}_session"
-            else:
-                litestar_cfg["session_key"] = "db_session"
-        if "pool_key" not in litestar_cfg:
-            p_k = getattr(config, "pool_key", None)
-            if p_k:
-                litestar_cfg["pool_key"] = str(p_k)
-            elif resolved_bind_key and resolved_bind_key not in ("default", "primary"):
-                litestar_cfg["pool_key"] = f"{resolved_bind_key}_pool"
-            else:
-                litestar_cfg["pool_key"] = "db_pool"
-        ext_cfg["litestar"] = litestar_cfg
-        self.extension_config = ext_cfg
+    _DEFAULT_DSN: ClassVar[str] = "sqlite:///:memory:"
+    config: Any
+    extension_config: dict[str, Any]
 
     @property
     def dsn(self) -> str:
         """Return configured DSN."""
-        return str(getattr(self.config, "dsn", "sqlite:///:memory:"))
+        return str(getattr(self.config, "dsn", self._DEFAULT_DSN))
 
     @property
     def session_key(self) -> str:
@@ -168,22 +117,103 @@ class ProxySyncConfig[SyncConfigT](SyncDatabaseConfig[Any, Any, Any]):
         """Return pool configuration dictionary."""
         return getattr(self.config, "pool_config", {})
 
+    def provide_connection(self, *args: Any, **kwargs: Any) -> Any:
+        """Delegate connection provision to the wrapped configuration."""
+        _ = (args, kwargs)
+        fn = getattr(self.config, "provide_connection", None)
+        return fn() if callable(fn) else None
+
+    def create_pool(self) -> Any:
+        """Delegate pool creation to the wrapped configuration."""
+        fn = getattr(self.config, "create_pool", None)
+        return fn() if callable(fn) else None
+
+    def __getattr__(self, name: str) -> Any:
+        """Forward attribute lookups to the underlying configuration instance."""
+        return getattr(self.config, name)
+
+    def _configure_litestar_extension_keys(self, config: Any, resolved_bind_key: str | None) -> None:
+        """Populate default Litestar DI keys on self.extension_config."""
+        ext_cfg = dict(getattr(config, "extension_config", {}))
+        litestar_cfg = dict(ext_cfg.get("litestar", {}))
+        if "connection_key" not in litestar_cfg:
+            conn_k = getattr(config, "connection_key", None)
+            if conn_k:
+                litestar_cfg["connection_key"] = str(conn_k)
+            elif resolved_bind_key and resolved_bind_key not in ("default", "primary"):
+                litestar_cfg["connection_key"] = f"{resolved_bind_key}_connection"
+            else:
+                litestar_cfg["connection_key"] = "db_connection"
+        if "session_key" not in litestar_cfg:
+            sess_k = getattr(config, "session_key", None)
+            if sess_k:
+                litestar_cfg["session_key"] = str(sess_k)
+            elif resolved_bind_key and resolved_bind_key not in ("default", "primary"):
+                litestar_cfg["session_key"] = f"{resolved_bind_key}_session"
+            else:
+                litestar_cfg["session_key"] = "db_session"
+        if "pool_key" not in litestar_cfg:
+            p_k = getattr(config, "pool_key", None)
+            if p_k:
+                litestar_cfg["pool_key"] = str(p_k)
+            elif resolved_bind_key and resolved_bind_key not in ("default", "primary"):
+                litestar_cfg["pool_key"] = f"{resolved_bind_key}_pool"
+            else:
+                litestar_cfg["pool_key"] = "db_pool"
+        ext_cfg["litestar"] = litestar_cfg
+        self.extension_config = ext_cfg
+
     def _create_pool(self) -> Any:
         """Delegate pool creation to wrapped configuration."""
         fn = getattr(self.config, "_create_pool", None) or getattr(self.config, "create_pool", None)
         return fn() if callable(fn) else None
 
-    def _close_pool(self) -> None:
-        """Delegate pool close to wrapped configuration."""
-        fn = getattr(self.config, "_close_pool", None) or getattr(self.config, "close_pool", None)
-        if callable(fn):
-            fn()
+
+class ProxySyncConfig[SyncConfigT](_BaseProxyConfig, SyncDatabaseConfig[Any, Any, Any]):
+    """Generic synchronous SQLSpec proxy configuration preserving inner SyncConfigT types."""
+
+    __slots__ = ("_statement_cache", "broker", "config", "provider")
+    _DEFAULT_DSN: ClassVar[str] = "sqlite:///:memory:"
+    is_async: ClassVar[bool] = False
+    supports_connection_pooling: ClassVar[bool] = True
+
+    def __init__(
+        self,
+        config: SyncConfigT,
+        *,
+        broker: SyncBrokerTransport | SQLSpecSyncProvider | None = None,
+        provider: SQLSpecSyncProvider | None = None,
+        statement_config: Any = None,
+        bind_key: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Initialize ProxySyncConfig wrapping a synchronous database configuration."""
+        _inject_sqlspec_pool_defaults(config)
+        self.config: SyncConfigT = config
+        self.provider: SQLSpecSyncProvider | None
+        if isinstance(broker, _BaseSQLSpecProvider):
+            self.provider = provider or cast(SQLSpecSyncProvider, broker)
+            self.broker: Any = broker.broker
+        else:
+            self.provider = provider
+            self.broker = broker
+
+        resolved_bind_key = bind_key or getattr(config, "bind_key", "default")
+        stmt_cfg = statement_config or getattr(config, "statement_config", None)
+        driver_feats = getattr(config, "driver_features", None)
+        super().__init__(
+            bind_key=resolved_bind_key,
+            statement_config=stmt_cfg,
+            driver_features=driver_feats,
+            **kwargs,
+        )
+        self._configure_litestar_extension_keys(config, resolved_bind_key)
 
     def provide_proxied_session(self, *, worker_pid: int | None = None) -> ProxySyncSessionContext:
-        """Return a synchronous session context manager backed by SQLSpecProvider and SHM leases."""
+        """Return a synchronous session context manager backed by SQLSpecSyncProvider and SHM leases."""
         resolved_bind_key = self.bind_key or "default"
         if self.provider is None:
-            self.provider = SQLSpecProvider(
+            self.provider = SQLSpecSyncProvider(
                 self.config,
                 broker=self.broker,
                 pool_name=resolved_bind_key,
@@ -208,17 +238,6 @@ class ProxySyncConfig[SyncConfigT](SyncDatabaseConfig[Any, Any, Any]):
         fn = getattr(self.config, "provide_session", None)
         return fn() if callable(fn) else None
 
-    def provide_connection(self, *args: Any, **kwargs: Any) -> Any:
-        """Delegate connection provision to the wrapped SyncConfigT."""
-        _ = (args, kwargs)
-        fn = getattr(self.config, "provide_connection", None)
-        return fn() if callable(fn) else None
-
-    def create_pool(self) -> Any:
-        """Delegate pool creation to the wrapped SyncConfigT."""
-        fn = getattr(self.config, "create_pool", None)
-        return fn() if callable(fn) else None
-
     def derive_pool(self, **overrides: Any) -> ProxySyncConfig[SyncConfigT]:
         """Delegate per-pool configuration cloning to the wrapped SyncConfigT."""
         fn = getattr(self.config, "derive_pool", None)
@@ -241,15 +260,18 @@ class ProxySyncConfig[SyncConfigT](SyncDatabaseConfig[Any, Any, Any]):
             )
         return self
 
-    def __getattr__(self, name: str) -> Any:
-        """Forward attribute lookups to the underlying SyncConfigT instance."""
-        return getattr(self.config, name)
+    def _close_pool(self) -> None:
+        """Delegate pool close to wrapped configuration."""
+        fn = getattr(self.config, "_close_pool", None) or getattr(self.config, "close_pool", None)
+        if callable(fn):
+            fn()
 
 
-class ProxyAsyncConfig[AsyncConfigT](AsyncDatabaseConfig[Any, Any, Any]):
+class ProxyAsyncConfig[AsyncConfigT](_BaseProxyConfig, AsyncDatabaseConfig[Any, Any, Any]):
     """Generic asynchronous SQLSpec proxy configuration preserving inner AsyncConfigT types."""
 
     __slots__ = ("_statement_cache", "broker", "config", "provider")
+    _DEFAULT_DSN: ClassVar[str] = "sqlite+aiosqlite:///:memory:"
     is_async: ClassVar[bool] = True
     supports_connection_pooling: ClassVar[bool] = True
 
@@ -257,8 +279,8 @@ class ProxyAsyncConfig[AsyncConfigT](AsyncDatabaseConfig[Any, Any, Any]):
         self,
         config: AsyncConfigT,
         *,
-        broker: BrokerTransport | SQLSpecProvider | None = None,
-        provider: SQLSpecProvider | None = None,
+        broker: AsyncBrokerTransport | SQLSpecAsyncProvider | None = None,
+        provider: SQLSpecAsyncProvider | None = None,
         statement_config: Any = None,
         bind_key: str | None = None,
         **kwargs: Any,
@@ -266,8 +288,9 @@ class ProxyAsyncConfig[AsyncConfigT](AsyncDatabaseConfig[Any, Any, Any]):
         """Initialize ProxyAsyncConfig wrapping an asynchronous database configuration."""
         _inject_sqlspec_pool_defaults(config)
         self.config: AsyncConfigT = config
-        if isinstance(broker, SQLSpecProvider):
-            self.provider: SQLSpecProvider | None = provider or broker
+        self.provider: SQLSpecAsyncProvider | None
+        if isinstance(broker, _BaseSQLSpecProvider):
+            self.provider = provider or cast(SQLSpecAsyncProvider, broker)
             self.broker: Any = broker.broker
         else:
             self.provider = provider
@@ -282,105 +305,13 @@ class ProxyAsyncConfig[AsyncConfigT](AsyncDatabaseConfig[Any, Any, Any]):
             driver_features=driver_feats,
             **kwargs,
         )
-        ext_cfg = dict(getattr(config, "extension_config", {}))
-        litestar_cfg = dict(ext_cfg.get("litestar", {}))
-        if "connection_key" not in litestar_cfg:
-            conn_k = getattr(config, "connection_key", None)
-            if conn_k:
-                litestar_cfg["connection_key"] = str(conn_k)
-            elif resolved_bind_key and resolved_bind_key not in ("default", "primary"):
-                litestar_cfg["connection_key"] = f"{resolved_bind_key}_connection"
-            else:
-                litestar_cfg["connection_key"] = "db_connection"
-        if "session_key" not in litestar_cfg:
-            sess_k = getattr(config, "session_key", None)
-            if sess_k:
-                litestar_cfg["session_key"] = str(sess_k)
-            elif resolved_bind_key and resolved_bind_key not in ("default", "primary"):
-                litestar_cfg["session_key"] = f"{resolved_bind_key}_session"
-            else:
-                litestar_cfg["session_key"] = "db_session"
-        if "pool_key" not in litestar_cfg:
-            p_k = getattr(config, "pool_key", None)
-            if p_k:
-                litestar_cfg["pool_key"] = str(p_k)
-            elif resolved_bind_key and resolved_bind_key not in ("default", "primary"):
-                litestar_cfg["pool_key"] = f"{resolved_bind_key}_pool"
-            else:
-                litestar_cfg["pool_key"] = "db_pool"
-        ext_cfg["litestar"] = litestar_cfg
-        self.extension_config = ext_cfg
-
-    @property
-    def dsn(self) -> str:
-        """Return configured DSN."""
-        return str(getattr(self.config, "dsn", "sqlite+aiosqlite:///:memory:"))
-
-    @property
-    def session_key(self) -> str:
-        """Return configured session key."""
-        return str(
-            self.extension_config.get("litestar", {}).get(
-                "session_key",
-                getattr(self.config, "session_key", "db_session"),
-            )
-        )
-
-    @property
-    def connection_key(self) -> str:
-        """Return configured connection key."""
-        return str(
-            self.extension_config.get("litestar", {}).get(
-                "connection_key",
-                getattr(self.config, "connection_key", "db_connection"),
-            )
-        )
-
-    @property
-    def connection_type(self) -> type[Any]:
-        """Return connection type annotation for DI registration."""
-        return getattr(self.config, "connection_type", Any)
-
-    @connection_type.setter
-    def connection_type(self, value: type[Any]) -> None:
-        """Set connection type annotation."""
-        with contextlib.suppress(AttributeError):
-            setattr(self.config, _CONN_TYPE_ATTR, value)
-
-    @property
-    def driver_type(self) -> type[Any]:
-        """Return driver type annotation for DI registration."""
-        return getattr(self.config, "driver_type", Any)
-
-    @driver_type.setter
-    def driver_type(self, value: type[Any]) -> None:
-        """Set driver type annotation."""
-        with contextlib.suppress(AttributeError):
-            setattr(self.config, _DRIVER_TYPE_ATTR, value)
-
-    @property
-    def pool_config(self) -> dict[str, Any]:
-        """Return pool configuration dictionary."""
-        return getattr(self.config, "pool_config", {})
-
-    def _create_pool(self) -> Any:
-        """Delegate pool creation to wrapped configuration."""
-        fn = getattr(self.config, "_create_pool", None) or getattr(self.config, "create_pool", None)
-        return fn() if callable(fn) else None
-
-    async def _close_pool(self) -> None:
-        """Delegate pool close to wrapped configuration asynchronously."""
-        fn = getattr(self.config, "_close_pool", None) or getattr(self.config, "close_pool", None)
-        if callable(fn):
-            res = fn()
-            if inspect.isawaitable(res):
-                await res
+        self._configure_litestar_extension_keys(config, resolved_bind_key)
 
     def provide_proxied_session(self, *, worker_pid: int | None = None) -> ProxyAsyncSessionContext:
-        """Return an asynchronous session context manager backed by SQLSpecProvider and SHM leases."""
+        """Return an asynchronous session context manager backed by SQLSpecAsyncProvider and SHM leases."""
         resolved_bind_key = self.bind_key or "default"
         if self.provider is None:
-            self.provider = SQLSpecProvider(
+            self.provider = SQLSpecAsyncProvider(
                 self.config,
                 broker=self.broker,
                 pool_name=resolved_bind_key,
@@ -405,17 +336,6 @@ class ProxyAsyncConfig[AsyncConfigT](AsyncDatabaseConfig[Any, Any, Any]):
         fn = getattr(self.config, "provide_session", None)
         return fn() if callable(fn) else None
 
-    def provide_connection(self, *args: Any, **kwargs: Any) -> Any:
-        """Delegate connection provision to the wrapped AsyncConfigT."""
-        _ = (args, kwargs)
-        fn = getattr(self.config, "provide_connection", None)
-        return fn() if callable(fn) else None
-
-    def create_pool(self) -> Any:
-        """Delegate pool creation to the wrapped AsyncConfigT."""
-        fn = getattr(self.config, "create_pool", None)
-        return fn() if callable(fn) else None
-
     def derive_pool(self, **overrides: Any) -> ProxyAsyncConfig[AsyncConfigT]:
         """Delegate per-pool configuration cloning to the wrapped AsyncConfigT."""
         fn = getattr(self.config, "derive_pool", None)
@@ -438,15 +358,19 @@ class ProxyAsyncConfig[AsyncConfigT](AsyncDatabaseConfig[Any, Any, Any]):
             )
         return self
 
-    def __getattr__(self, name: str) -> Any:
-        """Forward attribute lookups to the underlying AsyncConfigT instance."""
-        return getattr(self.config, name)
+    async def _close_pool(self) -> None:
+        """Delegate pool close to wrapped configuration asynchronously."""
+        fn = getattr(self.config, "_close_pool", None) or getattr(self.config, "close_pool", None)
+        if callable(fn):
+            res = fn()
+            if inspect.isawaitable(res):
+                await res
 
 
 def create_sqlspec_plugin(
     *configs: Any,
     config: Any = None,
-    store: BaseObjectStore | None = None,
+    store: SyncObjectStore | AsyncObjectStore | None = None,
     storage_alias: str = "vertebra",
     storage_base_path: str = "",
     loader: Any = None,

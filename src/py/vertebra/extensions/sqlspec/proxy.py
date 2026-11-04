@@ -13,7 +13,9 @@ from vertebra.extensions.sqlspec.provider import (
     BrokerRpcRequest,
     BrokerRpcResponse,
     SharedArrowBuffer,
-    SQLSpecProvider,
+    SQLSpecAsyncProvider,
+    SQLSpecSyncProvider,
+    _BaseSQLSpecProvider,
 )
 from vertebra.typing import ImproperConfigurationError, VertebraError
 from vertebra.utils.serializers import (
@@ -35,7 +37,7 @@ __all__ = (
 
 
 class ProxySyncDriver:
-    """Synchronous SQLSpec proxy driver executing queries through SQLSpecProvider and SHM leases."""
+    """Synchronous SQLSpec proxy driver executing queries through SQLSpecSyncProvider and SHM leases."""
 
     __slots__ = (
         "_broker_lease",
@@ -55,7 +57,7 @@ class ProxySyncDriver:
 
     def __init__(
         self,
-        provider: SQLSpecProvider | Callable[[BrokerRpcRequest], BrokerRpcResponse] | Callable[[bytes], bytes],
+        provider: SQLSpecSyncProvider | Callable[[BrokerRpcRequest], BrokerRpcResponse] | Callable[[bytes], bytes],
         broker: Any = None,
         *,
         pool_name: str = "default",
@@ -63,9 +65,9 @@ class ProxySyncDriver:
         slot_idx: int = 0,
         generation: int = 0,
     ) -> None:
-        """Initialize ProxySyncDriver with a SQLSpecProvider or RPC transport callable."""
-        if isinstance(provider, SQLSpecProvider):
-            self.provider: SQLSpecProvider | None = provider
+        """Initialize ProxySyncDriver with a SQLSpecSyncProvider or RPC transport callable."""
+        if isinstance(provider, _BaseSQLSpecProvider):
+            self.provider: SQLSpecSyncProvider | None = provider
             self._transport_fn: Callable[[Any], Any] = provider.handle_request
             resolved_broker = broker if broker is not None else provider.broker
         elif callable(provider):
@@ -73,7 +75,7 @@ class ProxySyncDriver:
             self._transport_fn = provider
             resolved_broker = broker
         else:
-            raise ImproperConfigurationError("ProxySyncDriver requires a SQLSpecProvider or callable RPC transport")
+            raise ImproperConfigurationError("ProxySyncDriver requires a SQLSpecSyncProvider or callable RPC transport")
 
         self.broker = resolved_broker
         self.pool_name = pool_name
@@ -98,7 +100,7 @@ class ProxySyncDriver:
         return self._leased
 
     def acquire_lease(self) -> tuple[int, int]:
-        """Acquire a connection lease and pin an upstream session in SQLSpecProvider."""
+        """Acquire a connection lease and pin an upstream session in SQLSpecSyncProvider."""
         if self._leased:
             return self.slot_idx, self.generation
 
@@ -556,11 +558,11 @@ class ProxySyncDriver:
             return None
         acquire_lease_fn = getattr(self.broker, "acquire_lease", None)
         if callable(acquire_lease_fn):
-            return SQLSpecProvider._call_broker_acquire(acquire_lease_fn, self.pool_name, self.worker_pid)
+            return _BaseSQLSpecProvider._call_broker_acquire(acquire_lease_fn, self.pool_name, self.worker_pid)
         target = getattr(self.broker, "transport", self.broker)
         acquire_fn = getattr(target, "acquire", None)
         if callable(acquire_fn):
-            return SQLSpecProvider._call_broker_acquire(acquire_fn, self.pool_name, self.worker_pid)
+            return _BaseSQLSpecProvider._call_broker_acquire(acquire_fn, self.pool_name, self.worker_pid)
         return None
 
     def _release_broker_lease(self, lease: Any) -> None:
@@ -661,7 +663,7 @@ class ProxySyncDriver:
 
 
 class ProxyAsyncDriver:
-    """Asynchronous SQLSpec proxy driver executing queries through SQLSpecProvider and SHM leases."""
+    """Asynchronous SQLSpec proxy driver executing queries through SQLSpecAsyncProvider and SHM leases."""
 
     __slots__ = (
         "_broker_lease",
@@ -681,7 +683,7 @@ class ProxyAsyncDriver:
 
     def __init__(
         self,
-        provider: SQLSpecProvider | Callable[[BrokerRpcRequest], Any] | Callable[[bytes], Any],
+        provider: SQLSpecAsyncProvider | Callable[[BrokerRpcRequest], Any] | Callable[[bytes], Any],
         broker: Any = None,
         *,
         pool_name: str = "default",
@@ -689,17 +691,19 @@ class ProxyAsyncDriver:
         slot_idx: int = 0,
         generation: int = 0,
     ) -> None:
-        """Initialize ProxyAsyncDriver with a SQLSpecProvider or async RPC transport callable."""
-        if isinstance(provider, SQLSpecProvider):
-            self.provider: SQLSpecProvider | None = provider
-            self._transport_fn: Callable[[Any], Any] = provider.handle_request_async
+        """Initialize ProxyAsyncDriver with a SQLSpecAsyncProvider or async RPC transport callable."""
+        if isinstance(provider, _BaseSQLSpecProvider):
+            self.provider: SQLSpecAsyncProvider | None = provider
+            self._transport_fn: Callable[[Any], Any] = provider.handle_request
             resolved_broker = broker if broker is not None else provider.broker
         elif callable(provider):
             self.provider = None
             self._transport_fn = provider
             resolved_broker = broker
         else:
-            raise ImproperConfigurationError("ProxyAsyncDriver requires a SQLSpecProvider or callable RPC transport")
+            raise ImproperConfigurationError(
+                "ProxyAsyncDriver requires a SQLSpecAsyncProvider or callable RPC transport"
+            )
 
         self.broker = resolved_broker
         self.pool_name = pool_name
@@ -791,7 +795,7 @@ class ProxyAsyncDriver:
                     record_last=False,
                 )
         finally:
-            self._release_broker_lease(lease)
+            await self._release_broker_lease_async(lease)
 
     async def close(self) -> None:
         """Close the async proxy driver and release its held lease."""
@@ -1207,33 +1211,39 @@ class ProxyAsyncDriver:
         if self.provider is not None and self.broker is self.provider.broker:
             return None
         target = getattr(self.broker, "transport", self.broker)
-        for attr in ("acquire_lease_async", "acquire_async", "acquire_lease", "acquire"):
+        for attr in ("acquire_lease", "acquire"):
             fn = getattr(self.broker, attr, None) or getattr(target, attr, None)
             if callable(fn):
-                res = SQLSpecProvider._call_broker_acquire(fn, self.pool_name, self.worker_pid)
+                res = _BaseSQLSpecProvider._call_broker_acquire(fn, self.pool_name, self.worker_pid)
                 if inspect.isawaitable(res):
                     return await res
                 return res
         return None
 
-    def _release_broker_lease(self, lease: Any) -> None:
-        """Release a directly acquired broker lease."""
+    async def _release_broker_lease_async(self, lease: Any) -> None:
+        """Release a directly acquired broker lease asynchronously."""
         if lease is None:
             return
         if hasattr(lease, "release") and callable(lease.release):
             with contextlib.suppress(Exception):
-                lease.release()
+                res = lease.release()
+                if inspect.isawaitable(res):
+                    await res
             return
         release_lease_fn = getattr(self.broker, "release_lease", None)
         if callable(release_lease_fn):
             with contextlib.suppress(Exception):
-                release_lease_fn(self.slot_idx, self.generation, in_tx=False)
+                res = release_lease_fn(self.slot_idx, self.generation, in_tx=False)
+                if inspect.isawaitable(res):
+                    await res
             return
         target = getattr(self.broker, "transport", self.broker)
         release_fn = getattr(target, "release", None)
         if callable(release_fn):
             with contextlib.suppress(Exception):
-                release_fn(f"{self.slot_idx}:{self.generation}")
+                res = release_fn(f"{self.slot_idx}:{self.generation}")
+                if inspect.isawaitable(res):
+                    await res
 
 
 class ProxySyncSessionContext:
@@ -1243,7 +1253,7 @@ class ProxySyncSessionContext:
 
     def __init__(
         self,
-        provider: SQLSpecProvider | Callable[[BrokerRpcRequest], BrokerRpcResponse],
+        provider: SQLSpecSyncProvider | Callable[[BrokerRpcRequest], BrokerRpcResponse],
         broker: Any = None,
         *,
         pool_name: str = "default",
@@ -1287,7 +1297,7 @@ class ProxyAsyncSessionContext:
 
     def __init__(
         self,
-        provider: SQLSpecProvider | Callable[[BrokerRpcRequest], Any],
+        provider: SQLSpecAsyncProvider | Callable[[BrokerRpcRequest], Any],
         broker: Any = None,
         *,
         pool_name: str = "default",

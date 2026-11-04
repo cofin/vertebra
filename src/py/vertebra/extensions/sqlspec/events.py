@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from vertebra.db.cdc import CDCConfig, ChangeEvent, ChangeFeed
-from vertebra.storage import ObjectStore
+from vertebra.storage import AsyncObjectStore, SyncObjectStore
 from vertebra.typing import MissingDependencyError
 
 try:
@@ -40,7 +40,7 @@ class ChangeFeedSyncEventBackend(SyncEventBackendProtocol):
         feed: ChangeFeed | None = None,
         *,
         config: CDCConfig | None = None,
-        store: ObjectStore | None = None,
+        store: SyncObjectStore | None = None,
     ) -> None:
         """Initialize backend with a ChangeFeed or CDCConfig and optional ObjectStore."""
         self._feed = feed or ChangeFeed(config=config, store=store)
@@ -136,10 +136,11 @@ class ChangeFeedAsyncEventBackend(AsyncEventBackendProtocol):
         feed: ChangeFeed | None = None,
         *,
         config: CDCConfig | None = None,
-        store: ObjectStore | None = None,
+        store: AsyncObjectStore | SyncObjectStore | None = None,
     ) -> None:
         """Initialize async backend with a ChangeFeed or CDCConfig and optional ObjectStore."""
-        self._feed = feed or ChangeFeed(config=config, store=store)
+        sync_store = store.to_sync() if isinstance(store, AsyncObjectStore) else store
+        self._feed = feed or ChangeFeed(config=config, store=sync_store)
         self._queues: dict[str, collections.deque[str]] = {}
         self._unacked: dict[str, tuple[str, str]] = {}
 

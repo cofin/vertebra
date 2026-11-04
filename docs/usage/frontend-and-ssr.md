@@ -1,6 +1,6 @@
 # Bundler, Inertia v3, QuickJS SSR & HTMX
 
-Vertebra includes a built-in Rust JavaScript bundler (`vertebra-bundler`), an in-process QuickJS server-side rendering pool (`EmbeddedSSRClient`), and Inertia v3 and HTMX server helpers. See [TypeScript SDK & Framework Adapters](typescript-sdk.md) for `@vertebra/client` usage.
+Vertebra includes a built-in Rust JavaScript bundler (`vertebra-bundler`), an in-process QuickJS server-side rendering pool (`SyncEmbeddedSSRClient` / `AsyncEmbeddedSSRClient`), and Inertia v3 and HTMX server helpers. See [TypeScript SDK & Framework Adapters](typescript-sdk.md) for `@vertebra/client` usage.
 
 ## Embedded JavaScript Bundler (`vertebra._bundler`)
 
@@ -70,13 +70,13 @@ page = InertiaResponse(
 
 ## QuickJS Server-Side Rendering & Prerendering (`vertebra.framework.ssr`)
 
-Render JavaScript and TypeScript page components on the server using the embedded QuickJS worker pool (`EmbeddedSSRClient.from_config`), an external HTTP runtime (`SidecarSSRClient`), or static build-time prerendering (`prerender_routes`):
+Render JavaScript and TypeScript page components on the server using the embedded QuickJS worker pool (`SyncEmbeddedSSRClient.from_config` / `AsyncEmbeddedSSRClient.from_config`) or an external HTTP runtime (`SyncSidecarSSRClient` / `AsyncSidecarSSRClient`):
 
 ```python
-from vertebra.framework.ssr import EmbeddedSSRClient, SSRConfig
+from vertebra.framework.ssr import SSRConfig, SyncEmbeddedSSRClient
 
-ssr = EmbeddedSSRClient.from_config(
-    SSRConfig(bundle_path="static/ssr/ssr.js", workers=4)
+ssr = SyncEmbeddedSSRClient.from_config(
+    SSRConfig(bundle_path="static/ssr/ssr.js", pool_size=4)
 )
 rendered = ssr.render(
     {

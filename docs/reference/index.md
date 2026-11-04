@@ -23,14 +23,14 @@ Complete reference documentation for Vertebra's Python packages (`vertebra.*`), 
 
 | Module / Page | Summary |
 | --- | --- |
-| **[Database Drivers & Pools](db.md)** | Single-RTT `QueryPipeline` / `RelOverlay`, native Rust-backed database drivers and connection configs across PostgreSQL, MySQL, SQLite, Oracle 26ai, SQL Server, DuckDB, DataFusion, Redis, Valkey, and Cloud SQL / AlloyDB dialers. |
-| **[SQLSpec, Alchemy & Extensions](extensions.md)** | Integrations for Litestar (`LitestarPlugin`), SQLSpec (`create_sqlspec_plugin`), SQLAlchemy / Advanced Alchemy (`create_alchemy_plugin`), Oracle APEX (`ApexGateway`), gRPC (`GrpcServiceRegistry`), and SHM session brokers (`BrokerPlugin`). |
+| **[Database Drivers & Pools](db.md)** | Single-RTT `SyncQueryPipeline` / `AsyncQueryPipeline` / `RelOverlay`, native Rust-backed database drivers and connection configs across PostgreSQL, MySQL, SQLite, Oracle 26ai, SQL Server, DuckDB, DataFusion, Redis, Valkey, and Cloud SQL / AlloyDB dialers. |
+| **[SQLSpec, Alchemy & Extensions](extensions.md)** | Integrations for Litestar (`VertebraPlugin`), SQLSpec (`create_sqlspec_plugin`), SQLAlchemy / Advanced Alchemy (`create_alchemy_plugin`), Oracle APEX (`ApexGateway`), gRPC (`GrpcServiceRegistry`), and SHM session brokers (`BrokerPlugin`). |
 
 ## Object Storage
 
 | Module / Page | Summary |
 | --- | --- |
-| **[Object Storage](storage.md)** | Multicloud and local object storage (`ObjectStore`, `LocalConfig`, `S3Config`, `GcsConfig`, `AzureConfig`, `R2Config`, `OciConfig`, `MemoryConfig`), presigning (`SigningConfig`), and random-access `ReadableFile`. |
+| **[Object Storage](storage.md)** | Multicloud and local object storage (`SyncObjectStore`, `AsyncObjectStore`, `LocalConfig`, `S3Config`, `GcsConfig`, `AzureConfig`, `R2Config`, `OciConfig`, `MemoryConfig`), presigning (`SigningConfig`), and random-access `SyncReadableFile` / `AsyncReadableFile`. |
 
 ## Frontend & Client SDK
 

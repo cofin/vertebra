@@ -1,4 +1,4 @@
-"""Unit tests for SyncPool, run_, async_, LoopShardedResource, CapacityLimiter, and format_json."""
+"""Unit tests for SyncPool, run_, async_, loop-sharded resources, CapacityLimiter, and format_json."""
 
 from __future__ import annotations
 
@@ -10,8 +10,9 @@ import pytest
 from vertebra.utils.portal import PortalProvider
 from vertebra.utils.serializers import decode_json, format_json
 from vertebra.utils.sync_tools import (
+    AsyncLoopShardedResource,
     CapacityLimiter,
-    LoopShardedResource,
+    SyncLoopShardedResource,
     SyncPool,
     async_,
     run_,
@@ -55,14 +56,19 @@ def test_sync_pool_and_run_and_async_wrappers(sync_pool: SyncPool) -> None:
 
 
 def test_loop_sharded_resource_and_capacity_limiter() -> None:
-    """Verify LoopShardedResource isolates state per loop and CapacityLimiter bounds concurrency."""
-    resource: LoopShardedResource[list[str]] = LoopShardedResource(lambda: ["init"])
+    """Verify SyncLoopShardedResource and AsyncLoopShardedResource isolate state per loop and CapacityLimiter bounds concurrency."""
+    sync_resource: SyncLoopShardedResource[list[str]] = SyncLoopShardedResource(lambda: ["init"])
+    async_resource: AsyncLoopShardedResource[list[str]] = AsyncLoopShardedResource(
+        lambda: asyncio.sleep(0, result=["async_init"])
+    )
     limiter = CapacityLimiter(2)
 
     async def _append_and_count(item: str) -> int:
         async with limiter:
-            bucket = resource.get()
+            bucket = sync_resource.get()
             bucket.append(item)
+            async_bucket = await async_resource.get()
+            async_bucket.append(item)
             return len(bucket)
 
     assert asyncio.run(_append_and_count("a")) == 2

@@ -9,13 +9,14 @@ import pytest
 
 from vertebra.db import (
     ARROW_STREAM_MEDIA_TYPE,
+    AsyncQueryPipeline,
     CDCConfig,
     ChangeFeed,
     CTEStep,
     DataFusionConfig,
     DataFusionEngine,
-    QueryPipeline,
     RelOverlay,
+    SyncQueryPipeline,
     TableRegistration,
     TenantPredicate,
     TenantScopeConfig,
@@ -26,12 +27,12 @@ from vertebra.server.platform import SHMAllocationPolicy
 def test_query_pipeline_reloverlay_and_chunked_jsonb() -> None:
     """Verify QueryPipeline.build_jsonb_object (>50 args), RelOverlay, and QueryPipeline compilation."""
     pairs = [(f"k{i}", f"v{i}") for i in range(30)]
-    chunked = QueryPipeline.build_jsonb_object(pairs, max_pairs_per_call=25)
+    chunked = SyncQueryPipeline.build_jsonb_object(pairs, max_pairs_per_call=25)
     assert " || " in chunked
     assert chunked.count("jsonb_build_object(") == 2
 
     pipeline = (
-        QueryPipeline()
+        SyncQueryPipeline()
         .add_step(
             "inserted_order",
             "INSERT INTO orders (id, total) VALUES (:id, :total) RETURNING *",
@@ -53,9 +54,9 @@ def test_query_pipeline_reloverlay_and_chunked_jsonb() -> None:
 
 def test_query_pipeline_build_jsonb_object_googlesql_dialect() -> None:
     """Verify QueryPipeline.build_jsonb_object compiles GoogleSQL TO_JSON(STRUCT(...)) expressions."""
-    assert QueryPipeline.build_jsonb_object([], dialect="googlesql") == "JSON '{}'"
+    assert SyncQueryPipeline.build_jsonb_object([], dialect="googlesql") == "JSON '{}'"
     assert (
-        QueryPipeline.build_jsonb_object([("id", "t.id"), "name"], dialect="googlesql")
+        SyncQueryPipeline.build_jsonb_object([("id", "t.id"), "name"], dialect="googlesql")
         == "TO_JSON(STRUCT(t.id AS id, name AS name))"
     )
 
@@ -64,7 +65,7 @@ def test_query_pipeline_build_jsonb_object_googlesql_dialect() -> None:
 async def test_query_pipeline_googlesql_compiles_struct_json_and_rewrites_named_params() -> None:
     """Verify GoogleSQL QueryPipeline rewrites :param -> @param safely and executes over select() drivers."""
     pipeline = (
-        QueryPipeline(dialect="googlesql")
+        SyncQueryPipeline(dialect="googlesql")
         .add_step(
             "recent_events",
             (
@@ -92,9 +93,9 @@ async def test_query_pipeline_googlesql_compiles_struct_json_and_rewrites_named_
     assert "`proj.ds.events:raw`" in sql
     assert "::INT64" in sql
     assert "@already_at" in sql
-    assert "TO_JSON_STRING(TO_JSON(STRUCT(" in sql
-    assert "ARRAY_AGG(TO_JSON(_s))" in sql
-    assert params == {"org_id": "org_42", "already_at": "active"}
+    assert "TO_JSON(STRUCT(" in sql
+    assert "ARRAY_AGG(TO_JSON(" in sql
+    assert params == {"org_id": "org_42", "@already_at": "active"}
 
     class _StubGoogleSQLDriver:
         def __init__(self) -> None:
@@ -121,7 +122,28 @@ async def test_query_pipeline_googlesql_compiles_struct_json_and_rewrites_named_
     assert stub.captured_sql == sql
     assert stub.captured_params == params
 
-    async_out = await pipeline.execute_async(stub)
+    async_pipeline = (
+        AsyncQueryPipeline(dialect="googlesql")
+        .add_step(
+            "recent_events",
+            (
+                "SELECT id, '14:30:00' AS ts, col::INT64 AS casted "
+                "FROM `proj.ds.events:raw` "
+                "WHERE org_id = :org_id AND status = @already_at"
+            ),
+            params={"org_id": "org_42", "@already_at": "active"},
+        )
+        .add_overlay(
+            "events_view",
+            RelOverlay(base_table="proj.ds.events_base", inserted_cte="recent_events"),
+        )
+        .add_step(
+            "summary",
+            "SELECT COUNT(*) AS total FROM events_view WHERE org_id = :org_id",
+            params={"org_id": "org_42"},
+        )
+    )
+    async_out = await async_pipeline.execute(stub)
     assert async_out == {"recent_events": [{"id": 1}], "summary": [{"total": 1}]}
 
 

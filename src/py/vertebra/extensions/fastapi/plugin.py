@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 from typing import TYPE_CHECKING, Any
 
-from vertebra.extensions.fastapi.config import FastAPIConfig
+from vertebra.extensions.fastapi.config import VertebraConfig
 from vertebra.extensions.fastapi.fastpath import (
     CompiledRoute,
     FastPath,
@@ -29,12 +29,12 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 __all__ = (
-    "FastAPIPlugin",
+    "VertebraPlugin",
     "enter_fastapi_server_lifespan",
 )
 
 
-class FastAPIPlugin:
+class VertebraPlugin:
     """FastAPI plugin enabling Rust offload, CompiledDependantPlan fastpath, and Scalar/Swagger/MCP docs."""
 
     __slots__ = ("_compiled_routes", "_config", "_finalized_app", "_offload_plan", "_router_table")
@@ -43,9 +43,9 @@ class FastAPIPlugin:
         self,
         app: Any = None,
         *,
-        config: FastAPIConfig | None = None,
+        config: VertebraConfig | None = None,
     ) -> None:
-        self._config = config or FastAPIConfig()
+        self._config = config or VertebraConfig()
         self._offload_plan: OffloadPlan | None = None
         self._compiled_routes: dict[int, CompiledRoute] = {}
         self._router_table: RouterTable | None = None
@@ -54,8 +54,8 @@ class FastAPIPlugin:
             self.init_app(app)
 
     @property
-    def config(self) -> FastAPIConfig:
-        """Return the active FastAPIConfig."""
+    def config(self) -> VertebraConfig:
+        """Return the active VertebraConfig."""
         return self._config
 
     @property
@@ -136,10 +136,10 @@ class FastAPIPlugin:
 
 @contextlib.contextmanager
 def enter_fastapi_server_lifespan(app: Any) -> Iterator[None]:
-    """Finalize any registered FastAPIPlugin on ``app`` before serving requests."""
+    """Finalize any registered VertebraPlugin on ``app`` before serving requests."""
     state = getattr(app, "state", None)
     plugin = _get_state_item(state, "vertebra_plugin")
-    if isinstance(plugin, FastAPIPlugin):
+    if isinstance(plugin, VertebraPlugin):
         with plugin.server_lifespan(app):
             yield
         return

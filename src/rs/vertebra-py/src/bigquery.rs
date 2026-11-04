@@ -110,20 +110,64 @@ fn append_result_to_py(py: Python<'_>, res: BigQueryAppendResult) -> PyResult<Py
     Ok(dict.into_any().unbind())
 }
 
-/// Pure-Rust Google Cloud BigQuery client exposed to Python (`vertebra._vertebra.BigQueryClient`).
+#[allow(clippy::too_many_arguments)]
+fn build_bigquery_config(
+    project_id: String,
+    dataset_id: Option<String>,
+    location: Option<String>,
+    rest_endpoint: Option<String>,
+    storage_endpoint: Option<String>,
+    maximum_bytes_billed: Option<i64>,
+    job_timeout_ms: Option<u64>,
+    priority: Option<String>,
+    labels: Option<HashMap<String, String>>,
+    auth_options: Option<HashMap<String, String>>,
+    pool_size: usize,
+    ca_pem: Option<Vec<u8>>,
+) -> BigQueryClientConfig {
+    let mut cfg = BigQueryClientConfig::new(project_id);
+    cfg.dataset_id = dataset_id.filter(|s| !s.trim().is_empty());
+    cfg.location = location.filter(|s| !s.trim().is_empty());
+    if let Some(ep) = rest_endpoint.filter(|s| !s.trim().is_empty()) {
+        cfg.rest_endpoint = ep;
+    }
+    if let Some(sep) = storage_endpoint.filter(|s| !s.trim().is_empty()) {
+        cfg.storage_endpoint = sep;
+    }
+    cfg.maximum_bytes_billed = maximum_bytes_billed;
+    cfg.job_timeout_ms = job_timeout_ms;
+    cfg.priority = priority.filter(|s| !s.trim().is_empty());
+    if let Some(lbls) = labels {
+        cfg.labels = lbls;
+    }
+    if let Some(auth) = auth_options {
+        cfg.auth_options = auth;
+    }
+    cfg.pool_size = pool_size.max(1);
+    cfg.ca_pem = ca_pem;
+    cfg
+}
+
+/// Synchronous pure-Rust Google Cloud BigQuery client exposed to Python (`vertebra._vertebra.SyncBigQueryClient`).
 /// `ca_pem` applies to the REST API client; the Storage Read/Write API clients use the system trust store and ignore it.
 #[pyclass(
-    name = "BigQueryClient",
+    name = "SyncBigQueryClient",
     module = "vertebra._vertebra",
     frozen,
     immutable_type
 )]
-pub struct PyBigQueryClient {
+pub struct PySyncBigQueryClient {
     inner: Arc<NativeBigQueryClient>,
 }
 
+impl PySyncBigQueryClient {
+    pub fn inner(&self) -> &Arc<NativeBigQueryClient> {
+        &self.inner
+    }
+}
+
 #[pymethods]
-impl PyBigQueryClient {
+impl PySyncBigQueryClient {
     #[new]
     #[pyo3(signature = (
         project_id,
@@ -155,27 +199,20 @@ impl PyBigQueryClient {
         pool_size: usize,
         ca_pem: Option<Vec<u8>>,
     ) -> PyResult<Self> {
-        let mut cfg = BigQueryClientConfig::new(project_id);
-        cfg.dataset_id = dataset_id.filter(|s| !s.trim().is_empty());
-        cfg.location = location.filter(|s| !s.trim().is_empty());
-        if let Some(ep) = rest_endpoint.filter(|s| !s.trim().is_empty()) {
-            cfg.rest_endpoint = ep;
-        }
-        if let Some(sep) = storage_endpoint.filter(|s| !s.trim().is_empty()) {
-            cfg.storage_endpoint = sep;
-        }
-        cfg.maximum_bytes_billed = maximum_bytes_billed;
-        cfg.job_timeout_ms = job_timeout_ms;
-        cfg.priority = priority.filter(|s| !s.trim().is_empty());
-        if let Some(lbls) = labels {
-            cfg.labels = lbls;
-        }
-        if let Some(auth) = auth_options {
-            cfg.auth_options = auth;
-        }
-        cfg.pool_size = pool_size.max(1);
-        cfg.ca_pem = ca_pem;
-
+        let cfg = build_bigquery_config(
+            project_id,
+            dataset_id,
+            location,
+            rest_endpoint,
+            storage_endpoint,
+            maximum_bytes_billed,
+            job_timeout_ms,
+            priority,
+            labels,
+            auth_options,
+            pool_size,
+            ca_pem,
+        );
         let client = py
             .detach(|| NativeBigQueryClient::new(cfg))
             .map_err(|e| bigquery_error_to_py(py, e))?;
@@ -228,6 +265,8 @@ impl PyBigQueryClient {
     fn pool_size(&self) -> usize {
         self.inner.config().pool_size
     }
+
+    fn close(&self) {}
 
     #[pyo3(signature = (
         sql,
@@ -282,56 +321,6 @@ impl PyBigQueryClient {
         query_result_to_py(py, res)
     }
 
-    #[pyo3(signature = (
-        sql,
-        params_json=None,
-        session_id=None,
-        create_session=false,
-        destination_table=None,
-        write_disposition=None,
-        maximum_bytes_billed=None,
-        job_timeout_ms=None,
-        priority=None,
-        labels=None
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    fn query_async(
-        &self,
-        py: Python<'_>,
-        sql: String,
-        params_json: Option<String>,
-        session_id: Option<String>,
-        create_session: bool,
-        destination_table: Option<String>,
-        write_disposition: Option<String>,
-        maximum_bytes_billed: Option<i64>,
-        job_timeout_ms: Option<u64>,
-        priority: Option<String>,
-        labels: Option<HashMap<String, String>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let params = parse_query_parameters_json(params_json.as_deref())
-            .map_err(|e| bigquery_error_to_py(py, e))?;
-        let opts = BigQueryQueryOptions {
-            session_id,
-            create_session,
-            dry_run: false,
-            destination_table,
-            write_disposition,
-            maximum_bytes_billed,
-            job_timeout_ms,
-            max_results: None,
-            priority,
-            labels: labels.unwrap_or_default(),
-        };
-        let client = Arc::clone(&self.inner);
-        spawn_rust_db_task(
-            py,
-            async move { client.query_with_options(&sql, &params, &opts).await },
-            query_result_to_py,
-            bigquery_error_to_py,
-        )
-    }
-
     #[pyo3(signature = (sql, params_json=None))]
     fn dry_run(&self, py: Python<'_>, sql: &str, params_json: Option<&str>) -> PyResult<Py<PyAny>> {
         let params =
@@ -342,24 +331,6 @@ impl PyBigQueryClient {
             .detach(|| block_on_db(async move { client.dry_run(&sql_owned, &params).await }))
             .map_err(|e| bigquery_error_to_py(py, e))?;
         dry_run_result_to_py(py, res)
-    }
-
-    #[pyo3(signature = (sql, params_json=None))]
-    fn dry_run_async(
-        &self,
-        py: Python<'_>,
-        sql: String,
-        params_json: Option<String>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let params = parse_query_parameters_json(params_json.as_deref())
-            .map_err(|e| bigquery_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
-        spawn_rust_db_task(
-            py,
-            async move { client.dry_run(&sql, &params).await },
-            dry_run_result_to_py,
-            bigquery_error_to_py,
-        )
     }
 
     #[pyo3(signature = (
@@ -411,6 +382,219 @@ impl PyBigQueryClient {
         ))
     }
 
+    #[pyo3(signature = (parent_table, arrow_ipc_bytes, mode="_default"))]
+    fn append_arrow(
+        &self,
+        py: Python<'_>,
+        parent_table: &str,
+        arrow_ipc_bytes: &[u8],
+        mode: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let client = Arc::clone(&self.inner);
+        let table = parent_table.to_string();
+        let payload = arrow_ipc_bytes.to_vec();
+        let mode_owned = mode.to_string();
+        let res = py
+            .detach(|| {
+                block_on_db(async move {
+                    client
+                        .append_arrow_stream(&table, &payload, &mode_owned)
+                        .await
+                })
+            })
+            .map_err(|e| bigquery_error_to_py(py, e))?;
+        append_result_to_py(py, res)
+    }
+}
+
+/// Asynchronous pure-Rust Google Cloud BigQuery client exposed to Python (`vertebra._vertebra.AsyncBigQueryClient`).
+/// `ca_pem` applies to the REST API client; the Storage Read/Write API clients use the system trust store and ignore it.
+#[pyclass(
+    name = "AsyncBigQueryClient",
+    module = "vertebra._vertebra",
+    frozen,
+    immutable_type
+)]
+pub struct PyAsyncBigQueryClient {
+    inner: Arc<NativeBigQueryClient>,
+}
+
+impl PyAsyncBigQueryClient {
+    pub fn inner(&self) -> &Arc<NativeBigQueryClient> {
+        &self.inner
+    }
+}
+
+#[pymethods]
+impl PyAsyncBigQueryClient {
+    #[new]
+    #[pyo3(signature = (
+        project_id,
+        dataset_id=None,
+        location=None,
+        rest_endpoint=None,
+        storage_endpoint=None,
+        maximum_bytes_billed=None,
+        job_timeout_ms=None,
+        priority=None,
+        labels=None,
+        auth_options=None,
+        pool_size=4,
+        ca_pem=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        py: Python<'_>,
+        project_id: String,
+        dataset_id: Option<String>,
+        location: Option<String>,
+        rest_endpoint: Option<String>,
+        storage_endpoint: Option<String>,
+        maximum_bytes_billed: Option<i64>,
+        job_timeout_ms: Option<u64>,
+        priority: Option<String>,
+        labels: Option<HashMap<String, String>>,
+        auth_options: Option<HashMap<String, String>>,
+        pool_size: usize,
+        ca_pem: Option<Vec<u8>>,
+    ) -> PyResult<Self> {
+        let cfg = build_bigquery_config(
+            project_id,
+            dataset_id,
+            location,
+            rest_endpoint,
+            storage_endpoint,
+            maximum_bytes_billed,
+            job_timeout_ms,
+            priority,
+            labels,
+            auth_options,
+            pool_size,
+            ca_pem,
+        );
+        let client = py
+            .detach(|| NativeBigQueryClient::new(cfg))
+            .map_err(|e| bigquery_error_to_py(py, e))?;
+        Ok(Self {
+            inner: Arc::new(client),
+        })
+    }
+
+    #[getter]
+    fn project_id(&self) -> &str {
+        &self.inner.config().project_id
+    }
+
+    #[getter]
+    fn dataset_id(&self) -> Option<&str> {
+        self.inner.config().dataset_id.as_deref()
+    }
+
+    #[getter]
+    fn location(&self) -> Option<&str> {
+        self.inner.config().location.as_deref()
+    }
+
+    #[getter]
+    fn rest_endpoint(&self) -> String {
+        self.inner.config().effective_rest_endpoint()
+    }
+
+    #[getter]
+    fn storage_endpoint(&self) -> String {
+        self.inner.config().effective_storage_endpoint()
+    }
+
+    #[getter]
+    fn maximum_bytes_billed(&self) -> Option<i64> {
+        self.inner.config().maximum_bytes_billed
+    }
+
+    #[getter]
+    fn job_timeout_ms(&self) -> Option<u64> {
+        self.inner.config().job_timeout_ms
+    }
+
+    #[getter]
+    fn priority(&self) -> Option<&str> {
+        self.inner.config().priority.as_deref()
+    }
+
+    #[getter]
+    fn pool_size(&self) -> usize {
+        self.inner.config().pool_size
+    }
+
+    fn close(&self) {}
+
+    #[pyo3(signature = (
+        sql,
+        params_json=None,
+        session_id=None,
+        create_session=false,
+        destination_table=None,
+        write_disposition=None,
+        maximum_bytes_billed=None,
+        job_timeout_ms=None,
+        priority=None,
+        labels=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn query(
+        &self,
+        py: Python<'_>,
+        sql: String,
+        params_json: Option<String>,
+        session_id: Option<String>,
+        create_session: bool,
+        destination_table: Option<String>,
+        write_disposition: Option<String>,
+        maximum_bytes_billed: Option<i64>,
+        job_timeout_ms: Option<u64>,
+        priority: Option<String>,
+        labels: Option<HashMap<String, String>>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let params = parse_query_parameters_json(params_json.as_deref())
+            .map_err(|e| bigquery_error_to_py(py, e))?;
+        let opts = BigQueryQueryOptions {
+            session_id,
+            create_session,
+            dry_run: false,
+            destination_table,
+            write_disposition,
+            maximum_bytes_billed,
+            job_timeout_ms,
+            max_results: None,
+            priority,
+            labels: labels.unwrap_or_default(),
+        };
+        let client = Arc::clone(&self.inner);
+        spawn_rust_db_task(
+            py,
+            async move { client.query_with_options(&sql, &params, &opts).await },
+            query_result_to_py,
+            bigquery_error_to_py,
+        )
+    }
+
+    #[pyo3(signature = (sql, params_json=None))]
+    fn dry_run(
+        &self,
+        py: Python<'_>,
+        sql: String,
+        params_json: Option<String>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let params = parse_query_parameters_json(params_json.as_deref())
+            .map_err(|e| bigquery_error_to_py(py, e))?;
+        let client = Arc::clone(&self.inner);
+        spawn_rust_db_task(
+            py,
+            async move { client.dry_run(&sql, &params).await },
+            dry_run_result_to_py,
+            bigquery_error_to_py,
+        )
+    }
+
     #[pyo3(signature = (
         project_id,
         dataset_id,
@@ -421,7 +605,7 @@ impl PyBigQueryClient {
         compression="LZ4_FRAME"
     ))]
     #[allow(clippy::too_many_arguments)]
-    fn read_table_arrow_async(
+    fn read_table_arrow(
         &self,
         py: Python<'_>,
         project_id: String,
@@ -462,30 +646,6 @@ impl PyBigQueryClient {
     fn append_arrow(
         &self,
         py: Python<'_>,
-        parent_table: &str,
-        arrow_ipc_bytes: &[u8],
-        mode: &str,
-    ) -> PyResult<Py<PyAny>> {
-        let client = Arc::clone(&self.inner);
-        let table = parent_table.to_string();
-        let payload = arrow_ipc_bytes.to_vec();
-        let mode_owned = mode.to_string();
-        let res = py
-            .detach(|| {
-                block_on_db(async move {
-                    client
-                        .append_arrow_stream(&table, &payload, &mode_owned)
-                        .await
-                })
-            })
-            .map_err(|e| bigquery_error_to_py(py, e))?;
-        append_result_to_py(py, res)
-    }
-
-    #[pyo3(signature = (parent_table, arrow_ipc_bytes, mode="_default"))]
-    fn append_arrow_async(
-        &self,
-        py: Python<'_>,
         parent_table: String,
         arrow_ipc_bytes: Vec<u8>,
         mode: &str,
@@ -506,6 +666,7 @@ impl PyBigQueryClient {
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyBigQueryClient>()?;
+    m.add_class::<PySyncBigQueryClient>()?;
+    m.add_class::<PyAsyncBigQueryClient>()?;
     Ok(())
 }

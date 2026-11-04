@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, Final, Literal, Self
@@ -278,7 +279,7 @@ class ObjectRef(FrozenBaseStruct, frozen=True, gc=False):
     """Last-modified timestamp string or microsecond epoch representation."""
 
     signed_url: str | None = None
-    """Zero-RTT presigned `GET` URL generated via `vertebra._storage.ObjectStore`."""
+    """Zero-RTT presigned `GET` URL generated via `vertebra._storage.SyncObjectStore`."""
 
 
 class ObjectTableConfig(FrozenBaseStruct, frozen=True, gc=False):
@@ -366,19 +367,19 @@ class ObjectTableConfig(FrozenBaseStruct, frozen=True, gc=False):
             signed_url: str | None = None
             if store is not None and uri:
                 object_key = self._extract_object_key_from_uri(uri)
-                presign_async = getattr(store, "presign_get_async", None)
-                presign_sync = getattr(store, "presign_get", None)
-                sign_async_fn = getattr(store, "sign_async", None)
-                sign_sync_fn = getattr(store, "sign_sync", None)
+                presign_fn = getattr(store, "presign_get", None)
+                sign_fn = getattr(store, "sign_async", None) or getattr(store, "sign_sync", None)
                 try:
-                    if callable(presign_async):
-                        signed_url = str(await presign_async(object_key, expires_in_secs=expires_in_secs))
-                    elif callable(sign_async_fn):
-                        signed_url = str(await sign_async_fn(object_key, expires_in=expires_in_secs))
-                    elif callable(presign_sync):
-                        signed_url = str(presign_sync(object_key, expires_in_secs=expires_in_secs))
-                    elif callable(sign_sync_fn):
-                        signed_url = str(sign_sync_fn(object_key, expires_in=expires_in_secs))
+                    if callable(presign_fn):
+                        res = presign_fn(object_key, expires_in_secs=expires_in_secs)
+                        if inspect.isawaitable(res):
+                            res = await res
+                        signed_url = str(res)
+                    elif callable(sign_fn):
+                        res = sign_fn(object_key, expires_in=expires_in_secs)
+                        if inspect.isawaitable(res):
+                            res = await res
+                        signed_url = str(res)
                 except Exception:
                     signed_url = None
             if signed_url is None and fallback_to_authenticated_url and uri.startswith("gs://"):

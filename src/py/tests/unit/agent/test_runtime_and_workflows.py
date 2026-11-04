@@ -54,7 +54,7 @@ from vertebra.agent.mcp.controllers import SkillController
 from vertebra.agent.mcp.service import MCPConfig
 from vertebra.framework._app import App
 from vertebra.framework.live import LiveStateRoom
-from vertebra.framework.stores import MemoryStore
+from vertebra.framework.stores import KeyValueStore
 from vertebra.telemetry.genai import GenAiUsage
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
@@ -360,7 +360,7 @@ async def test_all_five_session_stores() -> None:
     await mem_store.delete("alice", "s1")
     assert await mem_store.load("alice", "s1") is None
 
-    backing_mem = MemoryStore()
+    backing_mem = KeyValueStore()
     cache_store = CacheSessionStore(backing_mem, ttl_seconds=60)
     await cache_store.save("charlie", "s2", msgs)
     loaded_cache = await cache_store.load("charlie", "s2")

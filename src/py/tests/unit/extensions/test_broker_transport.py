@@ -1,18 +1,22 @@
-"""Tests for SHMBrokerTransport, InMemoryBrokerTransport, and SHMSessionBroker."""
+"""Tests for SyncSHMBrokerTransport, SyncInMemoryBrokerTransport, and SyncSHMSessionBroker."""
 
 from __future__ import annotations
 
 import os
+import threading
 import time
+import warnings
 
 import pytest
 
-from vertebra.extensions.alchemy.broker import SHMSessionBroker
+from vertebra.extensions.alchemy.broker import AsyncSHMSessionBroker, SyncSHMSessionBroker
 from vertebra.extensions.broker import (
+    AsyncInMemoryBrokerTransport,
+    AsyncSHMBrokerTransport,
     BrokerConfig,
     BrokerPlugin,
-    InMemoryBrokerTransport,
-    SHMBrokerTransport,
+    SyncInMemoryBrokerTransport,
+    SyncSHMBrokerTransport,
 )
 from vertebra.server.platform import ZPagesRegistry
 from vertebra.telemetry.otel import DbPoolRecorder
@@ -22,7 +26,7 @@ from vertebra.utils.serializers import decode_json
 def test_in_memory_broker_transport_lifecycle() -> None:
     """Verify in-memory transport acquire, release, and statement caching."""
     cfg = BrokerConfig(pool_size=2, max_overflow=1)
-    transport = InMemoryBrokerTransport(cfg)
+    transport = SyncInMemoryBrokerTransport(cfg)
 
     l1 = transport.acquire(worker_id=101, bind_key="test")
     assert l1.worker_id == 101
@@ -57,16 +61,16 @@ async def test_shm_broker_transport_async_and_cache() -> None:
     """Verify SHMBrokerTransport async acquire, release, and prepared statement caching."""
     name = f"/vtb-test-shm-trans-{os.getpid()}-{int(time.time())}"
     cfg = BrokerConfig(pool_size=3, max_overflow=1, shm_name=name)
-    transport = SHMBrokerTransport(cfg)
+    transport = AsyncSHMBrokerTransport(cfg)
 
-    lease = await transport.acquire_async(worker_id=os.getpid(), bind_key="app")
+    lease = await transport.acquire(worker_id=os.getpid(), bind_key="app")
     assert lease.worker_id == os.getpid()
     assert not lease.is_overflow
 
     m = transport.metrics()
     assert m.active_leases == 1
 
-    assert transport.release(lease.lease_id) is True
+    assert await transport.release(lease.lease_id) is True
     assert transport.metrics().active_leases == 0
 
     compiler_calls = 0
@@ -91,8 +95,8 @@ def test_shm_session_broker_checkout_checkin() -> None:
     """Verify SHMSessionBroker checkout and checkin hook lifecycle."""
     name = f"/vtb-test-session-{os.getpid()}-{int(time.time())}"
     cfg = BrokerConfig(pool_size=2, max_overflow=1, shm_name=name)
-    transport = SHMBrokerTransport(cfg)
-    session_broker = SHMSessionBroker(transport=transport)
+    transport = SyncSHMBrokerTransport(cfg)
+    session_broker = SyncSHMSessionBroker(transport=transport)
 
     class FakeConn:
         pass
@@ -132,9 +136,23 @@ def test_broker_plugin_zpages_integration() -> None:
     assert data["brokers"]["default"]["active_leases"] == 0
 
 
-def test_broker_dialect_tags_cover_all_nine_sql_dialects() -> None:
-    """Verify SHMBrokerTransport._DIALECT_TAGS maps all 9 SQL dialects and aliases to distinct tags 1..9."""
-    tags = SHMBrokerTransport._DIALECT_TAGS
+@pytest.mark.parametrize(
+    "dialect",
+    [
+        "postgresql",
+        "mysql",
+        "sqlite",
+        "oracle",
+        "mssql",
+        "duckdb",
+        "bigquery",
+        "spanner",
+        "spangres",
+    ],
+)
+def test_broker_dialect_tags_cover_all_nine_sql_dialects(dialect: str) -> None:
+    """Verify SyncSHMBrokerTransport._DIALECT_TAGS maps all 9 SQL dialects and aliases to distinct tags 1..9."""
+    tags = SyncSHMBrokerTransport._DIALECT_TAGS
     assert tags["postgresql"] == 1
     assert tags["postgres"] == 1
     assert tags["mysql"] == 2
@@ -148,19 +166,8 @@ def test_broker_dialect_tags_cover_all_nine_sql_dialects() -> None:
     assert tags["spanner"] == 8
     assert tags["spangres"] == 9
 
-    transport = SHMBrokerTransport(BrokerConfig())
+    transport = SyncSHMBrokerTransport(BrokerConfig())
     sql = "SELECT * FROM events WHERE tenant_id = :tenant_id"
-    canonical_dialects = (
-        "postgresql",
-        "mysql",
-        "sqlite",
-        "oracle",
-        "mssql",
-        "duckdb",
-        "bigquery",
-        "spanner",
-        "spangres",
-    )
     compiled_count = 0
 
     def _compile_for(target_dialect: str):
@@ -171,14 +178,65 @@ def test_broker_dialect_tags_cover_all_nine_sql_dialects() -> None:
 
         return _inner
 
-    for dialect in canonical_dialects:
-        plan = transport.get_or_compile_statement(dialect, sql, _compile_for(dialect))
-        assert plan.compiled_sql == f"compiled_{dialect}"
-        assert plan.dialect == dialect
+    plan = transport.get_or_compile_statement(dialect, sql, _compile_for(dialect))
+    assert plan.compiled_sql == f"compiled_{dialect}"
+    assert plan.dialect == dialect
+    assert compiled_count == 1
 
-    assert compiled_count == 9
-    for dialect in canonical_dialects:
-        cached_plan = transport.get_or_compile_statement(dialect, sql, _compile_for("unexpected"))
-        assert cached_plan.compiled_sql == f"compiled_{dialect}"
-    assert compiled_count == 9
+    cached_plan = transport.get_or_compile_statement(dialect, sql, _compile_for("unexpected"))
+    assert cached_plan.compiled_sql == f"compiled_{dialect}"
+    assert compiled_count == 1
     transport.close()
+
+
+def test_async_shm_session_broker_int_transport_and_sync_checkout_checkin() -> None:
+    """Verify AsyncSHMSessionBroker(int) creates AsyncSHMBrokerTransport and sync checkout/checkin works without unawaited coroutines."""
+    broker = AsyncSHMSessionBroker(2)
+    assert isinstance(broker.transport, AsyncSHMBrokerTransport)
+    assert broker.capacity == 2
+
+    in_mem_async = AsyncInMemoryBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0))
+    mem_broker = AsyncSHMSessionBroker(transport=in_mem_async, capacity=1)
+
+    class FakeConn:
+        pass
+
+    conn = FakeConn()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        mem_broker.on_checkout(conn)
+        assert in_mem_async.metrics().active_leases == 1
+        mem_broker.on_checkin(conn)
+        assert in_mem_async.metrics().active_leases == 0
+        assert in_mem_async.metrics().total_released == 1
+
+    runtime_warnings = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+    assert runtime_warnings == []
+    broker.transport._close_sync() if hasattr(broker.transport, "_close_sync") else None
+
+
+def test_sync_shm_session_broker_multithreaded_contention() -> None:
+    """Verify SyncSHMSessionBroker wakes contended threads cleanly via threading.Condition."""
+    broker = SyncSHMSessionBroker(capacity=1)
+    assert broker.acquire(timeout=1.0) is True
+    assert broker.in_use == 1
+
+    ready = threading.Event()
+    acquired_in_worker: list[bool] = []
+
+    def _worker() -> None:
+        ready.set()
+        ok = broker.acquire(timeout=2.0)
+        acquired_in_worker.append(ok)
+        if ok:
+            broker.release()
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+    assert ready.wait(timeout=1.0) is True
+    time.sleep(0.02)
+    broker.release()
+    worker.join(timeout=2.0)
+
+    assert acquired_in_worker == [True]
+    assert broker.in_use == 0

@@ -8,7 +8,13 @@ from typing import Any
 
 import pytest
 
-from vertebra.db import AlloyDBDialer, CloudSQLDialer, DatabaseRegistry
+from vertebra.db import (
+    AsyncAlloyDBDialer,
+    AsyncCloudSQLDialer,
+    DatabaseRegistry,
+    SyncAlloyDBDialer,
+    SyncCloudSQLDialer,
+)
 from vertebra.db.postgres import (
     PGCOPY_BINARY_SIGNATURE,
     AsyncPostgreSQLDriver,
@@ -261,18 +267,18 @@ def test_database_registry_attaches_cloudsql_and_alloydb_dialers_to_postgres_dri
 
     csql_async = registry.get_driver("csql_pg")
     assert isinstance(csql_async, AsyncPostgreSQLDriver)
-    assert isinstance(csql_async.dialer, CloudSQLDialer)
+    assert isinstance(csql_async.dialer, AsyncCloudSQLDialer)
 
     csql_sync = registry.get_sync_driver("csql_pg")
     assert isinstance(csql_sync, SyncPostgreSQLDriver)
-    assert isinstance(csql_sync.dialer, CloudSQLDialer)
+    assert isinstance(csql_sync.dialer, SyncCloudSQLDialer)
 
     alloy_async = registry.get_driver("alloy_pg")
     assert isinstance(alloy_async, AsyncPostgreSQLDriver)
-    assert isinstance(alloy_async.dialer, AlloyDBDialer)
+    assert isinstance(alloy_async.dialer, AsyncAlloyDBDialer)
     assert alloy_async.config.build_session_gucs().get("alloydb.enable_columnar_engine") == "on"
 
     alloy_sync = registry.get_sync_driver("alloy_pg")
     assert isinstance(alloy_sync, SyncPostgreSQLDriver)
-    assert isinstance(alloy_sync.dialer, AlloyDBDialer)
+    assert isinstance(alloy_sync.dialer, SyncAlloyDBDialer)
     assert alloy_sync.config.build_session_gucs().get("alloydb.enable_columnar_engine") == "on"

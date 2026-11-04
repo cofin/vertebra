@@ -20,7 +20,7 @@ from vertebra.cli._launch import (
 from vertebra.cli._logging import configure_logging
 from vertebra.cli.banner import render_banner
 from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
-from vertebra.extensions.litestar.plugin import enter_litestar_server_lifespan
+from vertebra.cli.plugin_registry import enter_app_server_lifespan, resolve_cli_app_path
 from vertebra.framework.queues import WorkerRunner
 from vertebra.supervisor._supervisor import build_server_command, run_supervisor
 from vertebra.utils.config_tools import get_env
@@ -33,7 +33,7 @@ logger = logging.getLogger("vertebra.cli.run")
 
 
 @click.command()
-@click.argument("app")
+@click.argument("app", required=False, default=None)
 @click.option("--host", default="127.0.0.1", help="Host to bind to")
 @click.option("--port", type=int, default=8000, help="Port to bind to")
 @click.option("--workers", type=int, default=None, help="Number of worker processes")
@@ -98,7 +98,7 @@ logger = logging.getLogger("vertebra.cli.run")
 )
 @click.option("--no-banner", is_flag=True, help="Disable startup banner")
 def run(
-    app: str,
+    app: str | None,
     host: str,
     port: int,
     workers: int | None,
@@ -123,9 +123,10 @@ def run(
 ) -> None:
     """Run the Vertebra server."""
     configure_logging(level=log_level, mode="prod")
+    resolved_app = resolve_cli_app_path(app)
 
     if oneshot_job:
-        sys.exit(_execute_oneshot_cli(app, oneshot_job))
+        sys.exit(_execute_oneshot_cli(resolved_app, oneshot_job))
 
     resolved_jit = _resolve_jit_setting(jit)
     cfg_enabled, cfg_queues, cfg_lanes = load_workers_pyproject_config(Path.cwd())
@@ -136,7 +137,7 @@ def run(
         effective_lanes.update(parse_lane_concurrency_map(lane_concurrency))
 
     launch_env = ServerLaunchEnv(
-        app_path=app,
+        app_path=resolved_app,
         host=host,
         port=port,
         workers=workers,
@@ -186,12 +187,15 @@ def run(
         banner_workers = _parse_positive_int(env.get("VERTEBRA_WORKERS"), default=1)
         render_banner(mode="serve", host=host, port=port, workers=banner_workers)
 
-    exit_code = run_supervisor(
-        server_cmd=server_cmd,
-        env=env,
-        drain_timeout_ms=drain_timeout,
-        shutdown_timeout_ms=shutdown_timeout,
-    )
+    with enter_app_server_lifespan(resolved_app, app_path=resolved_app, native=not asgi) as offload_json:
+        if offload_json:
+            env["VERTEBRA_OFFLOAD_CONFIG"] = offload_json
+        exit_code = run_supervisor(
+            server_cmd=server_cmd,
+            env=env,
+            drain_timeout_ms=drain_timeout,
+            shutdown_timeout_ms=shutdown_timeout,
+        )
     sys.exit(exit_code)
 
 
@@ -241,7 +245,7 @@ def _execute_oneshot_cli(app_path: str, job_name: str) -> int:
     os.environ["LITESTAR_APP"] = app_path
     os.environ["VERTEBRA_APP"] = app_path
     target_app = import_app(app_path)
-    with enter_litestar_server_lifespan(target_app, app_path=app_path):
+    with enter_app_server_lifespan(target_app, app_path=app_path):
         return asyncio.run(WorkerRunner.run_oneshot(target_app, job_name))
 
 
