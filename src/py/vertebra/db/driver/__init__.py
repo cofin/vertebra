@@ -1,7 +1,22 @@
-"""Base configuration and driver classes for Vertebra database drivers."""
+"""Base configuration, typed database exceptions, and driver classes for Vertebra database drivers."""
 
 from __future__ import annotations
 
+from vertebra._vertebra import (
+    ConnectionFailure,
+    DatabaseError,
+    DataError,
+    IntegrityError,
+    InterfaceError,
+    InternalError,
+    NotFoundError,
+    NotSupportedError,
+    OperationalError,
+    PoolExhaustedError,
+    ProgrammingError,
+    QueryCancelledError,
+    SerializationFailure,
+)
 from vertebra.db.driver._async import (
     AsyncDatabaseDriver,
     ThreadOffloadAsyncDatabaseDriver,
@@ -17,6 +32,19 @@ __all__ = (
     "AsyncDatabaseDriver",
     "BaseDatabaseConfig",
     "CommonDriverMixin",
+    "ConnectionFailure",
+    "DataError",
+    "DatabaseError",
+    "IntegrityError",
+    "InterfaceError",
+    "InternalError",
+    "NotFoundError",
+    "NotSupportedError",
+    "OperationalError",
+    "PoolExhaustedError",
+    "ProgrammingError",
+    "QueryCancelledError",
+    "SerializationFailure",
     "SyncDatabaseDriver",
     "ThreadOffloadAsyncDatabaseDriver",
     "_normalize_driver_params",

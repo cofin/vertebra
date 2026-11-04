@@ -24,17 +24,29 @@ __all__ = [
     "BigQueryRowError",
     "BrokerStats",
     "CloudSQLDialer",
+    "ConnectionFailure",
+    "DataError",
+    "DatabaseError",
     "GcpTokenSnapshot",
     "GoogleCloudAuthError",
     "GoogleCloudError",
     "Headers",
     "HeadersIterator",
+    "IntegrityError",
+    "InterfaceError",
+    "InternalError",
     "JWTGuard",
     "LeaseBroker",
     "LeaseGrant",
     "LogSink",
+    "NotFoundError",
+    "NotSupportedError",
+    "OperationalError",
+    "PoolExhaustedError",
+    "ProgrammingError",
     "PyEmptyAwaitable",
     "PyValueAwaitable",
+    "QueryCancelledError",
     "RateLimiter",
     "Request",
     "RequestBatch",
@@ -45,6 +57,7 @@ __all__ = [
     "RsgiTransport",
     "RustDbTaskAwaitable",
     "SchemaDigestCache",
+    "SerializationFailure",
     "SimilarityMatch",
     "SpannerAbortedError",
     "SpannerError",
@@ -991,6 +1004,15 @@ class ArrowCursor:
     @staticmethod
     def write_ipc_to_shm(shm_name: str, payload: bytes, row_count: int = 0) -> ArrowCursor: ...
     @staticmethod
+    def _allocate_shm_capsule(shm_name: str, payload: bytes) -> tuple[str, int, Any]: ...
+    @staticmethod
+    def _from_shm_capsule(
+        shm_name: str,
+        byte_len: int,
+        row_count: int,
+        capsule: Any,
+    ) -> ArrowCursor: ...
+    @staticmethod
     def read_ipc_from_shm(shm_name: str) -> bytes: ...
     def read_bytes(self) -> bytes: ...
     def buffer_view(self) -> memoryview: ...
@@ -1286,32 +1308,85 @@ def nanoid_generate(size: int = 21) -> str: ...
 class TaskPanicError(RuntimeError):
     """Raised when a Rust background task panics before producing a result."""
 
+class DatabaseError(VertebraError):
+    """Base error raised for database driver, wire-protocol, or query execution failures."""
+
+    sqlstate: str | None
+    """Canonical five-character SQLSTATE code when reported by the engine or transport."""
+    vendor_code: int | None
+    """Engine-specific numeric error code when reported by the backend."""
+    is_transient: bool
+    """Whether retrying the failed operation or transaction on a fresh connection may succeed."""
+
+class InterfaceError(DatabaseError):
+    """Raised when a driver interface, configuration, or connection handle is misused locally."""
+
+class DataError(DatabaseError):
+    """Raised for value range, division-by-zero, encoding, or scalar cardinality errors."""
+
+class NotFoundError(DataError, ValueError):
+    """Raised by `select_one` or `select_value` when a query returns zero rows."""
+
+class OperationalError(DatabaseError):
+    """Raised for database operational failures outside direct application control."""
+
+class ConnectionFailure(OperationalError):
+    """Transient transport, socket, TLS dial, or lost-connection error."""
+
+class PoolExhaustedError(OperationalError):
+    """Transient error raised when a connection or lease pool times out acquiring a slot."""
+
+class QueryCancelledError(OperationalError):
+    """Raised when an active statement is cancelled by user request or statement timeout (`57014`)."""
+
+class SerializationFailure(OperationalError):
+    """Transient serialization or deadlock failure (`40001`); retry the whole transaction."""
+
+class IntegrityError(DatabaseError):
+    """Raised when a relational integrity constraint (unique, foreign-key, check, not-null) fails."""
+
+class InternalError(DatabaseError):
+    """Raised when the database engine reports an internal state or cursor synchronization error."""
+
+class ProgrammingError(DatabaseError):
+    """Raised for SQL syntax errors, missing tables/columns, or invalid parameter bindings."""
+
+class NotSupportedError(DatabaseError):
+    """Raised when a requested capability or SQL feature is not supported by the database engine."""
+
 class GoogleCloudError(VertebraError):
     """Error returned by a Google Cloud client; carries the canonical gRPC status in `code`, `code_name`, `message`, `http_status`, `retry_delay_ms`, and `reason`."""
 
     code: int
+    """Canonical gRPC status code (`0..=16`)."""
     code_name: str
+    """Uppercase canonical gRPC status name."""
     message: str
+    """Human-readable error message returned by the Google Cloud service or transport."""
     http_status: int | None
+    """HTTP status code when the error originated from a REST endpoint."""
     retry_delay_ms: int | None
+    """Server-advised backoff delay in milliseconds extracted from `google.rpc.RetryInfo`."""
     reason: str | None
+    """Structured machine-readable reason extracted from `google.rpc.ErrorInfo`."""
 
 class GoogleCloudAuthError(GoogleCloudError):
     """Credentials could not be obtained or were rejected."""
 
-class SpannerError(GoogleCloudError):
+class SpannerError(GoogleCloudError, DatabaseError):
     """Error returned by a Cloud Spanner operation."""
 
-class SpannerAbortedError(SpannerError):
+class SpannerAbortedError(SpannerError, SerializationFailure):
     """Spanner aborted the transaction; the whole transaction can be retried."""
 
-class BigQueryError(GoogleCloudError):
+class BigQueryError(GoogleCloudError, DatabaseError):
     """Error returned by a BigQuery operation."""
 
-class BigQueryRowError(BigQueryError):
+class BigQueryRowError(BigQueryError, DataError):
     """BigQuery Storage Write rejected rows; see `row_errors`."""
 
     row_errors: list[tuple[int, int, str]]
+    """Rejected `(row_index, code, message)` tuples reported by BigQuery Storage Write."""
 
 @final
 class RustDbTaskAwaitable:

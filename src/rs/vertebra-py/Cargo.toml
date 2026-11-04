@@ -9,7 +9,7 @@ description = "PyO3 bindings for Vertebra native extension"
 
 [dependencies]
 vertebra-core = { path = "../vertebra-core" }
-vertebra-db = { path = "../vertebra-db" }
+vertebra-db = { path = "../vertebra-db", features = ["pyo3"] }
 bytes = { workspace = true }
 google-cloud-gax = { workspace = true }
 google-cloud-rpc = { workspace = true }

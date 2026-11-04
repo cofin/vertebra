@@ -95,9 +95,12 @@ fn allocate_shm_region(norm_name: &str, alloc_size: usize) -> Result<ShmRegion, 
     }
 }
 
-/// Write an Arrow IPC byte stream into a shared-memory `ShmRegion`, returning
-/// `(normalized_shm_name, payload_len, Arc<ShmRegion>)`.
-pub fn write_shm_arrow_region(
+/// Write an Arrow IPC byte stream into a shared-memory `ShmRegion` without inserting it into
+/// [`ACTIVE_ARROW_SHM_REGIONS`], returning `(normalized_shm_name, payload_len, Arc<ShmRegion>)`.
+///
+/// Used when ownership of the `Arc<ShmRegion>` is handed directly across extension boundaries
+/// via [`vertebra_core::shm::ShmCapsule`].
+pub fn write_shm_arrow_region_unregistered(
     shm_name: &str,
     ipc_bytes: &[u8],
 ) -> Result<(String, usize, Arc<ShmRegion>), String> {
@@ -114,7 +117,7 @@ pub fn write_shm_arrow_region(
     };
     let hdr_bytes = header.to_bytes();
 
-    // SAFETY: We exclusively own `region` during initialization before publishing to ACTIVE_ARROW_SHM_REGIONS.
+    // SAFETY: We exclusively own `region` during initialization before wrapping in `Arc`.
     unsafe {
         let slice = region.as_mut_slice();
         slice[0..ShmArrowFrameHeader::SIZE].copy_from_slice(&hdr_bytes);
@@ -122,9 +125,18 @@ pub fn write_shm_arrow_region(
             .copy_from_slice(ipc_bytes);
     }
 
-    let arc_region = Arc::new(region);
+    Ok((name, ipc_bytes.len(), Arc::new(region)))
+}
+
+/// Write an Arrow IPC byte stream into a shared-memory `ShmRegion`, returning
+/// `(normalized_shm_name, payload_len, Arc<ShmRegion>)`.
+pub fn write_shm_arrow_region(
+    shm_name: &str,
+    ipc_bytes: &[u8],
+) -> Result<(String, usize, Arc<ShmRegion>), String> {
+    let (name, len, arc_region) = write_shm_arrow_region_unregistered(shm_name, ipc_bytes)?;
     ACTIVE_ARROW_SHM_REGIONS.insert(name.clone(), Arc::clone(&arc_region));
-    Ok((name, ipc_bytes.len(), arc_region))
+    Ok((name, len, arc_region))
 }
 
 /// Write an Arrow IPC byte stream into a shared-memory `ShmRegion`, returning `(normalized_shm_name, payload_len)`.
@@ -190,7 +202,15 @@ pub fn read_shm_arrow_frame(shm_name: &str) -> Result<Vec<u8>, String> {
 /// Release an active shared-memory Arrow IPC `ShmRegion` from the process-local registry.
 pub fn release_shm_arrow_frame(shm_name: &str) -> bool {
     let name = normalize_shm_name(shm_name);
-    ACTIVE_ARROW_SHM_REGIONS.remove(&name).is_some()
+    if let Some((_, region)) = ACTIVE_ARROW_SHM_REGIONS.remove(&name) {
+        #[cfg(unix)]
+        let _ = region.unlink_now();
+        #[cfg(not(unix))]
+        let _ = region;
+        true
+    } else {
+        false
+    }
 }
 
 /// Single-owner incremental stream writer that concatenates Arrow IPC frames into a
@@ -346,10 +366,10 @@ impl ShmArrowStreamWriter {
         Ok(())
     }
 
-    /// Finalize the stream by appending the 8-byte Arrow IPC EOS marker, stamping the 16-byte
-    /// `ShmArrowFrameHeader` at offset `0..16`, and publishing `Arc<ShmRegion>` in
-    /// [`ACTIVE_ARROW_SHM_REGIONS`].
-    pub fn finish(mut self) -> Result<(String, usize, Arc<ShmRegion>), String> {
+    /// Finalize the stream by appending the 8-byte Arrow IPC EOS marker and stamping the 16-byte
+    /// `ShmArrowFrameHeader` at offset `0..16`, returning `Arc<ShmRegion>` without inserting it
+    /// into [`ACTIVE_ARROW_SHM_REGIONS`].
+    pub fn finish_unregistered(mut self) -> Result<(String, usize, Arc<ShmRegion>), String> {
         self.ensure_capacity(0)?;
         // SAFETY: `ensure_capacity(0)` reserves space for `ARROW_IPC_EOS_MARKER` (`8` bytes).
         unsafe {
@@ -364,12 +384,20 @@ impl ShmArrowStreamWriter {
             byte_len: byte_len as u64,
         };
         let hdr_bytes = header.to_bytes();
+        // SAFETY: `self.region` has at least `ShmArrowFrameHeader::SIZE` bytes and is exclusively owned.
         unsafe {
             let dst = self.region.as_mut_slice();
             dst[0..ShmArrowFrameHeader::SIZE].copy_from_slice(&hdr_bytes);
         }
-        let arc_region = Arc::new(self.region);
-        ACTIVE_ARROW_SHM_REGIONS.insert(self.shm_name.clone(), Arc::clone(&arc_region));
-        Ok((self.shm_name, byte_len, arc_region))
+        Ok((self.shm_name, byte_len, Arc::new(self.region)))
+    }
+
+    /// Finalize the stream by appending the 8-byte Arrow IPC EOS marker, stamping the 16-byte
+    /// `ShmArrowFrameHeader` at offset `0..16`, and publishing `Arc<ShmRegion>` in
+    /// [`ACTIVE_ARROW_SHM_REGIONS`].
+    pub fn finish(self) -> Result<(String, usize, Arc<ShmRegion>), String> {
+        let (shm_name, byte_len, arc_region) = self.finish_unregistered()?;
+        ACTIVE_ARROW_SHM_REGIONS.insert(shm_name.clone(), Arc::clone(&arc_region));
+        Ok((shm_name, byte_len, arc_region))
     }
 }

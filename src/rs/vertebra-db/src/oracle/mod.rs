@@ -1,5 +1,7 @@
 //! Pure-Rust Oracle Thin TNS/TTC wire protocol, 26ai `VECTOR`/`OSON` binary codecs, and SHM pool.
 
+pub mod tns;
+
 use std::sync::Arc;
 use std::time::Duration;
 

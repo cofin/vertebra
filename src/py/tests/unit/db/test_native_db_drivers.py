@@ -6,12 +6,15 @@ import asyncio
 import importlib
 import sys
 import time
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
 import vertebra
+import vertebra._vertebra as native_vertebra
 import vertebra.db as vertebra_db
+import vertebra.db.driver as vertebra_db_driver
 from vertebra.db import (
     AlloyDBAuthType,
     AlloyDBClusterURI,
@@ -35,7 +38,7 @@ from vertebra.db.adapters.valkey import AsyncValkeyDriver, SyncValkeyDriver, Val
 from vertebra.db.channels import DatabaseChannelBackend
 from vertebra.extensions.litestar import ChannelsBackend, MemoryStore
 from vertebra.storage import GcpTokenSnapshot, SyncObjectStore
-from vertebra.typing import MissingDependencyError
+from vertebra.typing import MissingDependencyError, VertebraError
 from vertebra.utils.sync_tools import SyncPool
 
 _ADAPTER_ENGINES: tuple[str, ...] = (
@@ -50,6 +53,22 @@ _ADAPTER_ENGINES: tuple[str, ...] = (
     "redis",
     "valkey",
     "datafusion",
+)
+
+_EXPECTED_DB_ERROR_DEFAULTS: tuple[tuple[str, str | None, int | None, bool], ...] = (
+    ("DatabaseError", None, None, False),
+    ("InterfaceError", None, None, False),
+    ("DataError", None, None, False),
+    ("NotFoundError", None, None, False),
+    ("OperationalError", None, None, False),
+    ("ConnectionFailure", None, None, True),
+    ("PoolExhaustedError", None, None, True),
+    ("QueryCancelledError", "57014", None, False),
+    ("SerializationFailure", "40001", None, True),
+    ("IntegrityError", None, None, False),
+    ("InternalError", None, None, False),
+    ("ProgrammingError", None, None, False),
+    ("NotSupportedError", None, None, False),
 )
 
 _EXPECTED_DB_EXPORTS: frozenset[str] = frozenset(
@@ -69,7 +88,20 @@ _EXPECTED_DB_EXPORTS: frozenset[str] = frozenset(
         "CloudSQLConfig",
         "CloudSQLInstanceURI",
         "CommonDriverMixin",
+        "ConnectionFailure",
+        "DataError",
+        "DatabaseError",
         "DatabaseRegistry",
+        "IntegrityError",
+        "InterfaceError",
+        "InternalError",
+        "NotFoundError",
+        "NotSupportedError",
+        "OperationalError",
+        "PoolExhaustedError",
+        "ProgrammingError",
+        "QueryCancelledError",
+        "SerializationFailure",
         "SyncAlloyDBDialer",
         "SyncCloudSQLDialer",
         "SyncDatabaseDriver",
@@ -462,3 +494,100 @@ async def test_sync_pool_submit_async_coalesced_loop_wakeups() -> None:
         pool.shutdown()
 
     assert csts_calls < 32
+
+
+@pytest.mark.parametrize(
+    ("cls_name", "expected_sqlstate", "expected_vendor_code", "expected_transient"),
+    _EXPECTED_DB_ERROR_DEFAULTS,
+)
+def test_database_error_exports_and_defaults(
+    cls_name: str,
+    expected_sqlstate: str | None,
+    expected_vendor_code: int | None,
+    expected_transient: bool,
+) -> None:
+    """Verify every DatabaseError class is exported on _vertebra, db.driver, and db with exact defaults."""
+    native_cls = getattr(native_vertebra, cls_name)
+    driver_cls = getattr(vertebra_db_driver, cls_name)
+    db_cls = getattr(vertebra_db, cls_name)
+
+    assert native_cls is driver_cls
+    assert native_cls is db_cls
+    assert issubclass(native_cls, native_vertebra.DatabaseError)
+    assert issubclass(native_cls, VertebraError)
+    assert native_cls.sqlstate == expected_sqlstate
+    assert native_cls.vendor_code == expected_vendor_code
+    assert native_cls.is_transient is expected_transient
+
+    instance = native_cls("failure")
+    assert str(instance) == "failure"
+    assert instance.sqlstate == expected_sqlstate
+    assert instance.vendor_code == expected_vendor_code
+    assert instance.is_transient is expected_transient
+
+
+def test_database_error_multi_inheritance_with_value_error_and_gcp_errors() -> None:
+    """Verify NotFoundError, SpannerError, SpannerAbortedError, BigQueryError, and BigQueryRowError MRO."""
+    db_err = native_vertebra.DatabaseError
+    data_err = native_vertebra.DataError
+    not_found = native_vertebra.NotFoundError
+    serialization_err = native_vertebra.SerializationFailure
+    gc_err = native_vertebra.GoogleCloudError
+    spanner_err = native_vertebra.SpannerError
+    spanner_aborted = native_vertebra.SpannerAbortedError
+    bq_err = native_vertebra.BigQueryError
+    bq_row_err = native_vertebra.BigQueryRowError
+
+    assert issubclass(not_found, data_err)
+    assert issubclass(not_found, db_err)
+    assert issubclass(not_found, VertebraError)
+    assert issubclass(not_found, ValueError)
+    with pytest.raises(ValueError, match="missing row"):
+        raise not_found("missing row")
+    with pytest.raises(db_err, match="missing row"):
+        raise not_found("missing row")
+
+    assert issubclass(spanner_err, gc_err)
+    assert issubclass(spanner_err, db_err)
+    assert issubclass(spanner_aborted, spanner_err)
+    assert issubclass(spanner_aborted, serialization_err)
+    assert spanner_aborted.code == 10
+    assert spanner_aborted.code_name == "ABORTED"
+    assert spanner_aborted.sqlstate == "40001"
+    assert spanner_aborted.is_transient is True
+
+    assert issubclass(bq_err, gc_err)
+    assert issubclass(bq_err, db_err)
+    assert issubclass(bq_row_err, bq_err)
+    assert issubclass(bq_row_err, data_err)
+    assert bq_row_err.code == 3
+    assert bq_row_err.code_name == "INVALID_ARGUMENT"
+
+
+def test_arrow_cursor_from_shm_capsule_zero_copy_and_unlink_on_release() -> None:
+    """Verify ArrowCursor._from_shm_capsule transfers zero-copy SHM ownership and unlinks on release."""
+    payload = b"VTBARROW-CAPSULE-IPC-PAYLOAD-0123456789"
+    shm_raw_name = f"/vtb-cap-test-{int(time.time_ns() % 1_000_000_000)}"
+    norm_name, byte_len, capsule = native_vertebra.ArrowCursor._allocate_shm_capsule(
+        shm_raw_name,
+        payload,
+    )
+    assert byte_len == len(payload)
+    cursor = native_vertebra.ArrowCursor._from_shm_capsule(norm_name, byte_len, 3, capsule)
+    assert cursor.shm_name == norm_name
+    assert cursor.byte_len == len(payload)
+    assert cursor.row_count == 3
+
+    with pytest.raises(ValueError, match="consumed"):
+        native_vertebra.ArrowCursor._from_shm_capsule(norm_name, byte_len, 3, capsule)
+
+    mv = memoryview(cursor)
+    assert mv.readonly is True
+    assert bytes(mv) == payload
+
+    assert cursor.release() is True
+    if sys.platform.startswith("linux") and not norm_name.startswith("/tmp/"):
+        assert not Path(f"/dev/shm{norm_name}").exists()
+    assert bytes(mv) == payload
+    assert cursor.release() is False
+    mv.release()

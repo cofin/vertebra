@@ -9,7 +9,7 @@
 //!   codecs (`mysql`).
 //! - Native SQLite 3.45+ WAL / `mmap_size` / `busy_timeout` initialization pragmas and single-writer /
 //!   multi-reader SHM pool (`sqlite`).
-//! - Pure-Rust Oracle `tnsnames.ora` / `sqlnet.ora` / Autonomous Database Wallet parser (`tns`) and
+//! - Pure-Rust Oracle `tnsnames.ora` / `sqlnet.ora` / Autonomous Database Wallet parser (`oracle::tns`) and
 //!   TNS/TTC wire framing, zero-RTT piggybacked session attributes, 26ai `VECTOR` (`FLOAT32`, `FLOAT64`,
 //!   `INT8`, `BINARY`), and `OSON` binary codecs (`oracle`).
 //! - Pure-Rust SQL Server Tabular Data Stream (TDS 7.4) packet/batch framing and single-pass `@P1`
@@ -22,6 +22,7 @@
 
 pub mod arrow_shm;
 pub mod bigquery;
+pub mod connection;
 pub mod dialer;
 pub mod duckdb;
 pub mod gcp;
@@ -29,13 +30,31 @@ pub mod mssql;
 pub mod mysql;
 pub mod oracle;
 pub mod postgres;
+#[cfg(feature = "pyo3")]
+pub mod py_async;
 pub mod resp3;
 pub mod spanner;
 pub mod sqlite;
-pub mod tns;
 
-pub use arrow_shm::*;
-pub use bigquery::*;
+pub use arrow_shm::{
+    ACTIVE_ARROW_SHM_REGIONS, ARROW_IPC_EOS_MARKER, SHM_ARROW_MAGIC, ShmArrowFrameHeader,
+    ShmArrowStreamWriter, normalize_shm_name, open_shm_arrow_region, read_shm_arrow_frame,
+    read_shm_arrow_frame_with, release_shm_arrow_frame, write_shm_arrow_frame,
+    write_shm_arrow_region, write_shm_arrow_region_unregistered,
+};
+pub use bigquery::{
+    ArrowAppendPlan, ArrowAppendRequest, BIGQUERY_OAUTH_SCOPES, BigQueryAppendResult,
+    BigQueryArrowCompression, BigQueryCellValue, BigQueryClient, BigQueryClientConfig,
+    BigQueryDryRunResult, BigQueryError, BigQueryFieldSchema, BigQueryParamValue,
+    BigQueryQueryOptions, BigQueryQueryParameter, BigQueryQueryResult, BigQueryRowError,
+    BigQueryWriteMode, DEFAULT_BIGQUERY_REST_ENDPOINT, DEFAULT_BIGQUERY_STORAGE_ENDPOINT,
+    MAX_APPEND_ROWS_CHUNK_BYTES, parse_query_parameters_json, requires_jobs_insert_sql,
+    split_bigquery_table_parts,
+};
+pub use connection::{
+    BoxFuture, CancelHandle, ConnectOptions, Connection, EndpointTarget, TlsMode, TransportError,
+    TransportStream, install_rustls_ring_provider,
+};
 pub use dialer::{
     AlloyDbClusterUri, AlloyDbDialer, AuthType, CloudSqlDialer, CloudSqlInstanceUri, IpType,
     decode_alloydb_metadata_response, encode_alloydb_metadata_exchange,
@@ -69,8 +88,12 @@ pub use resp3::{
     encode_resp_command, encode_sentinel_get_master_cmd, extract_invalidation_keys,
     parse_cluster_redirect, parse_resp3_frame, redis_hash_slot,
 };
-pub use spanner::*;
-pub use sqlite::{SqliteConfig, SqlitePool};
-pub use tns::{
-    OracleConnectDescriptor, OracleWalletMaterial, parse_tnsnames_ora, resolve_tns_alias,
+pub use spanner::{
+    DEFAULT_DDL_TIMEOUT, DEFAULT_SPANNER_ADMIN_ENDPOINT, DEFAULT_SPANNER_ENDPOINT,
+    MAX_MUTATION_CELLS_PER_BATCH, ProtobufValue, SPANNER_OAUTH_SCOPES, SpannerBatchDmlStatement,
+    SpannerBatchWriteResult, SpannerClient, SpannerClientConfig, SpannerCommitResult,
+    SpannerDialect, SpannerError, SpannerMutation, SpannerMutationGroup, SpannerQueryParameter,
+    SpannerQueryResult, SpannerStaleness, SpannerStructField, SpannerType, SpannerTypeAnnotation,
+    SpannerTypeCode, SpannerValue, parse_spanner_parameters_json, rewrite_spangres_placeholders,
 };
+pub use sqlite::{SqliteConfig, SqlitePool};

@@ -3,16 +3,17 @@
 use std::collections::HashMap;
 use std::ffi::{c_int, c_void};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyBufferError, PyRuntimeError, PyValueError};
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
-use vertebra_core::shm::ShmRegion;
+use vertebra_core::shm::{ShmCapsule, ShmRegion};
 use vertebra_db::arrow_shm::{
     ShmArrowFrameHeader, open_shm_arrow_region, read_shm_arrow_frame_with, release_shm_arrow_frame,
-    write_shm_arrow_region,
+    write_shm_arrow_region, write_shm_arrow_region_unregistered,
 };
 use vertebra_db::dialer::{
     AlloyDbDialer as RsAlloyDbDialer, AuthType, CloudSqlDialer as RsCloudSqlDialer, IpType,
@@ -43,17 +44,18 @@ use vertebra_db::postgres::{
     encode_pgvector_f16 as rs_encode_pgvector_f16, encode_pgvector_f32 as rs_encode_pgvector_f32,
     strip_pg_jsonb_header as rs_strip_pg_jsonb_header,
 };
+use vertebra_db::py_async::{SHM_CAPSULE_NAME, wrap_shm_region_capsule};
 
 use crate::vector::VectorView;
+use vertebra_db::oracle::tns::{
+    parse_tnsnames_ora as rs_parse_tnsnames_ora, resolve_tns_alias as rs_resolve_tns_alias,
+};
 use vertebra_db::resp3::{
     crc16_xmodem as rs_crc16_xmodem, encode_hello3_handshake as rs_encode_hello3_handshake,
     encode_resp_command as rs_encode_resp_command,
     parse_cluster_redirect as rs_parse_cluster_redirect, redis_hash_slot as rs_redis_hash_slot,
 };
 use vertebra_db::sqlite::SqliteConfig;
-use vertebra_db::tns::{
-    parse_tnsnames_ora as rs_parse_tnsnames_ora, resolve_tns_alias as rs_resolve_tns_alias,
-};
 
 /// Zero-sidecar Google Cloud SQL (`:3307`) mTLS dialer.
 #[pyclass(name = "CloudSQLDialer", frozen, immutable_type, from_py_object)]
@@ -183,6 +185,40 @@ impl AlloyDBDialer {
     }
 }
 
+#[derive(Debug)]
+struct CapsuleBacking {
+    capsule: ShmCapsule,
+    unlinked: AtomicBool,
+}
+
+impl Drop for CapsuleBacking {
+    fn drop(&mut self) {
+        if !self.capsule.ctx.is_null() {
+            // SAFETY: `CapsuleBacking` exclusively owns `self.capsule.ctx` after `_from_shm_capsule`
+            // atomically clears the `PyCapsule` slot, and drops it once when the last `Arc` drops.
+            unsafe {
+                (self.capsule.drop_fn)(self.capsule.ctx);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum ArrowBacking {
+    Region(Arc<ShmRegion>),
+    Capsule(Arc<CapsuleBacking>),
+}
+
+impl ArrowBacking {
+    #[inline]
+    fn as_ptr_and_len(&self) -> (*mut u8, usize) {
+        match self {
+            Self::Region(r) => (r.as_ptr(), r.len()),
+            Self::Capsule(c) => (c.capsule.ptr, c.capsule.len),
+        }
+    }
+}
+
 /// Shared-memory Arrow IPC cursor backed by `vertebra_core::shm::ShmRegion`.
 #[pyclass(frozen, immutable_type, from_py_object)]
 #[derive(Clone, Debug)]
@@ -193,7 +229,7 @@ pub struct ArrowCursor {
     pub byte_len: usize,
     #[pyo3(get)]
     pub row_count: usize,
-    region: Option<Arc<ShmRegion>>,
+    backing: Option<ArrowBacking>,
 }
 
 impl ArrowCursor {
@@ -207,7 +243,7 @@ impl ArrowCursor {
             shm_name,
             byte_len,
             row_count,
-            region: Some(region),
+            backing: Some(ArrowBacking::Region(region)),
         }
     }
 }
@@ -217,12 +253,14 @@ impl ArrowCursor {
     #[new]
     #[pyo3(signature = (shm_name, byte_len, row_count=0))]
     pub fn new(shm_name: String, byte_len: usize, row_count: usize) -> Self {
-        let region = open_shm_arrow_region(&shm_name).ok().map(|(r, _)| r);
+        let backing = open_shm_arrow_region(&shm_name)
+            .ok()
+            .map(|(r, _)| ArrowBacking::Region(r));
         Self {
             shm_name,
             byte_len,
             row_count,
-            region,
+            backing,
         }
     }
 
@@ -241,7 +279,68 @@ impl ArrowCursor {
             shm_name: norm_name,
             byte_len: len,
             row_count,
-            region: Some(region),
+            backing: Some(ArrowBacking::Region(region)),
+        })
+    }
+
+    #[staticmethod]
+    pub fn _allocate_shm_capsule<'py>(
+        py: Python<'py>,
+        shm_name: &str,
+        payload: &[u8],
+    ) -> PyResult<(String, usize, Bound<'py, PyAny>)> {
+        let (norm_name, len, region) = py
+            .detach(|| write_shm_arrow_region_unregistered(shm_name, payload))
+            .map_err(PyRuntimeError::new_err)?;
+        let capsule = wrap_shm_region_capsule(py, region)?;
+        Ok((norm_name, len, capsule))
+    }
+
+    #[staticmethod]
+    pub fn _from_shm_capsule(
+        py: Python<'_>,
+        shm_name: String,
+        byte_len: usize,
+        row_count: usize,
+        capsule: &Bound<'_, PyAny>,
+    ) -> PyResult<Self> {
+        // SAFETY: `capsule.as_ptr()` is a valid borrowed `PyObject*` and `SHM_CAPSULE_NAME` is a
+        // static NUL-terminated C string; CPython checks exact `PyCapsule` type and name.
+        let raw = unsafe { ffi::PyCapsule_GetPointer(capsule.as_ptr(), SHM_CAPSULE_NAME.as_ptr()) }
+            .cast::<ShmCapsule>();
+        if raw.is_null() {
+            return Err(PyErr::fetch(py));
+        }
+        // SAFETY: `raw` points to a valid `ShmCapsule` allocated by `wrap_shm_region_capsule`.
+        let taken = unsafe {
+            let cap_ref = &mut *raw;
+            if cap_ref.ctx.is_null() || cap_ref.ptr.is_null() {
+                return Err(PyValueError::new_err(
+                    "ShmCapsule has already been consumed",
+                ));
+            }
+            let end = ShmArrowFrameHeader::SIZE.saturating_add(byte_len);
+            if cap_ref.len < end {
+                return Err(PyValueError::new_err(
+                    "ShmCapsule mapping smaller than declared VTBARROW frame length",
+                ));
+            }
+            let ctx = core::mem::replace(&mut cap_ref.ctx, core::ptr::null_mut());
+            ShmCapsule {
+                ptr: cap_ref.ptr,
+                len: cap_ref.len,
+                ctx,
+                drop_fn: cap_ref.drop_fn,
+            }
+        };
+        Ok(Self {
+            shm_name,
+            byte_len,
+            row_count,
+            backing: Some(ArrowBacking::Capsule(Arc::new(CapsuleBacking {
+                capsule: taken,
+                unlinked: AtomicBool::new(false),
+            }))),
         })
     }
 
@@ -260,10 +359,12 @@ impl ArrowCursor {
     }
 
     pub fn read_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        if let Some(ref region) = self.region {
-            let slice = unsafe { region.as_slice() };
+        if let Some(ref backing) = self.backing {
+            let (ptr, len) = backing.as_ptr_and_len();
             let end = ShmArrowFrameHeader::SIZE.saturating_add(self.byte_len);
-            if slice.len() >= end {
+            if !ptr.is_null() && len >= end {
+                // SAFETY: `ptr` is valid for `len` initialized immutable bytes anchored by `self.backing`.
+                let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
                 let payload = &slice[ShmArrowFrameHeader::SIZE..end];
                 return PyBytes::new_with(py, payload.len(), |buf| {
                     buf.copy_from_slice(payload);
@@ -281,6 +382,7 @@ impl ArrowCursor {
         if ptr.is_null() {
             return Err(PyErr::fetch(py));
         }
+        // SAFETY: `ptr` is a non-null owned `PyObject*` returned by `PyMemoryView_FromObject`.
         Ok(unsafe { Bound::from_owned_ptr(py, ptr) })
     }
 
@@ -306,7 +408,31 @@ impl ArrowCursor {
 
     pub fn release(&self, py: Python<'_>) -> bool {
         let name = self.shm_name.clone();
-        py.detach(move || release_shm_arrow_frame(&name))
+        let backing = self.backing.clone();
+        py.detach(move || {
+            let removed = release_shm_arrow_frame(&name);
+            match backing {
+                Some(ArrowBacking::Region(region)) => {
+                    #[cfg(unix)]
+                    let unlinked = region.unlink_now();
+                    #[cfg(not(unix))]
+                    let unlinked = {
+                        let _ = region;
+                        false
+                    };
+                    removed || unlinked
+                }
+                Some(ArrowBacking::Capsule(cap)) => {
+                    let first_release = !cap.unlinked.swap(true, Ordering::AcqRel);
+                    if first_release {
+                        #[cfg(unix)]
+                        let _ = vertebra_core::shm::shm_unlink_named(&name);
+                    }
+                    removed || first_release
+                }
+                None => removed,
+            }
+        })
     }
 
     pub fn close(&self, py: Python<'_>) -> bool {
@@ -340,21 +466,19 @@ impl ArrowCursor {
             return Err(PyBufferError::new_err("ArrowCursor buffer is read-only"));
         }
         let this = slf.get();
-        let region_ref = match this.region {
-            Some(ref r) => r,
-            None => {
-                return Err(PyBufferError::new_err(
-                    "ArrowCursor has no anchored ShmRegion",
-                ));
-            }
+        let Some(ref backing) = this.backing else {
+            return Err(PyBufferError::new_err(
+                "ArrowCursor has no anchored ShmRegion",
+            ));
         };
+        let (base_ptr, region_len) = backing.as_ptr_and_len();
         let end = ShmArrowFrameHeader::SIZE.saturating_add(this.byte_len);
-        if region_ref.len() < end {
+        if base_ptr.is_null() || region_len < end {
             return Err(PyBufferError::new_err(
                 "ArrowCursor ShmRegion smaller than declared byte_len",
             ));
         }
-        let ptr = region_ref.as_ptr().add(ShmArrowFrameHeader::SIZE) as *mut c_void;
+        let ptr = base_ptr.add(ShmArrowFrameHeader::SIZE) as *mut c_void;
         let ret = ffi::PyBuffer_FillInfo(
             view,
             slf.as_ptr(),
@@ -947,4 +1071,63 @@ pub fn register_db_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[allow(non_snake_case)]
 pub fn register_db_Bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     register_db_bindings(m)
+}
+
+#[cfg(test)]
+mod tests {
+    use pyo3::prelude::*;
+
+    use super::ArrowCursor;
+
+    #[test]
+    fn arrow_cursor_from_shm_capsule_exposes_zero_copy_view_and_unlinks_on_release() {
+        Python::attach(|py| {
+            let payload = b"VTBARROW-RUST-CAPSULE-TEST-PAYLOAD";
+            let raw_name = format!("/vtb-py-cap-{}", std::process::id());
+            let (norm_name, byte_len, capsule) =
+                ArrowCursor::_allocate_shm_capsule(py, &raw_name, payload).expect("alloc capsule");
+            assert_eq!(byte_len, payload.len());
+
+            let cursor =
+                ArrowCursor::_from_shm_capsule(py, norm_name.clone(), byte_len, 5, &capsule)
+                    .expect("from capsule");
+            assert_eq!(cursor.row_count, 5);
+            assert!(
+                ArrowCursor::_from_shm_capsule(py, norm_name.clone(), byte_len, 5, &capsule)
+                    .is_err()
+            );
+
+            let py_cursor = Bound::new(py, cursor).expect("bound cursor");
+            let mv = ArrowCursor::buffer_view(py_cursor.clone()).expect("buffer view");
+            let view_bytes: Vec<u8> = py
+                .import("builtins")
+                .unwrap()
+                .getattr("bytes")
+                .unwrap()
+                .call1((&mv,))
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(view_bytes, payload);
+
+            assert!(py_cursor.borrow().release(py));
+            #[cfg(target_os = "linux")]
+            if !norm_name.starts_with("/tmp/") {
+                let shm_path = format!("/dev/shm{norm_name}");
+                assert!(!std::path::Path::new(&shm_path).exists());
+            }
+
+            let still_readable: Vec<u8> = py
+                .import("builtins")
+                .unwrap()
+                .getattr("bytes")
+                .unwrap()
+                .call1((&mv,))
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(still_readable, payload);
+            assert!(!py_cursor.borrow().release(py));
+        });
+    }
 }

@@ -12,10 +12,7 @@ use vertebra_core::gcp_auth::GcpTokenCache;
 
 const QUOTA_PROJECT_HEADER: HeaderName = HeaderName::from_static("x-goog-user-project");
 
-/// Install rustls' ring `CryptoProvider` as the process default; later calls leave the installed provider in place.
-pub fn install_rustls_ring_provider() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-}
+pub use crate::connection::install_rustls_ring_provider;
 
 /// `google-cloud-auth` credentials backed by one shared [`GcpTokenCache`].
 #[derive(Clone, Debug)]

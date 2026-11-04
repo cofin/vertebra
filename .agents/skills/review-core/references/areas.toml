@@ -80,6 +80,7 @@ prefix = "RT"
 title = "Rust runtime and IPC"
 paths = [
   "src/rs/vertebra-core/**",
+  "src/rs/vertebra-db/**",
   "src/rs/vertebra-storage/**",
   "src/rs/*"
 ]

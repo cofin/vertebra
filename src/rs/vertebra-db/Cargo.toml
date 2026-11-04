@@ -30,19 +30,26 @@ http-body-util = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 lz4_flex = { workspace = true }
+pyo3 = { workspace = true, optional = true }
 rcgen = { workspace = true }
 reqwest = { workspace = true }
 rmp-serde = { workspace = true }
 rsa = { version = "0.9", features = ["sha2"] }
 rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-rustls = { workspace = true }
 tonic = { workspace = true }
 url = { workspace = true }
+webpki-root-certs = { workspace = true }
 zstd = { workspace = true }
+
+[build-dependencies]
+pyo3-build-config = { workspace = true }
 
 [dev-dependencies]
 google-cloud-longrunning = { workspace = true }
@@ -56,3 +63,4 @@ tempfile = "3"
 [features]
 default = []
 duckdb = []
+pyo3 = ["dep:pyo3"]
