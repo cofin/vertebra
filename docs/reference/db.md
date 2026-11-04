@@ -1,27 +1,57 @@
 # `vertebra.db` — Database Drivers, Analytics Engines & Cloud Dialers
 
-Native database configurations, synchronous and asynchronous drivers, single-RTT CTE query pipelines (`SyncQueryPipeline`, `AsyncQueryPipeline`, `RelOverlay`), Apache Arrow shared-memory cursors (`ArrowCursor`), DataFusion federated analytics (`DataFusionEngine`), Change Data Capture (`ChangeFeed`), planner-unfenced Row-Level Security (`TenantPredicate`), and zero-sidecar Cloud SQL / AlloyDB dialers. See the [Databases & Analytics Usage Guide](../usage/databases.md) for architectural patterns and examples.
+Native database configurations, synchronous and asynchronous drivers (`SyncDatabaseDriver`, `AsyncDatabaseDriver`), capability protocols (`SyncPipelineCapable`, `AsyncPipelineCapable`, `NotificationSource`, `SyncChangeSource`, `AsyncChangeSource`, `QueueStore`, `EmbeddingPushdown`), typed `DatabaseError` / `NotFoundError` exceptions, single-RTT CTE query pipelines (`SyncQueryPipeline`, `AsyncQueryPipeline`, `RelOverlay`), Apache Arrow shared-memory cursors (`ArrowCursor`), DataFusion federated analytics (`DataFusionConfig`, `DataFusionEngine`), Change Data Capture (`ChangeFeed`), planner-unfenced Row-Level Security (`TenantPredicate`), and zero-sidecar Cloud SQL / AlloyDB dialers. See the [Databases & Native Drivers Usage Guide](../usage/databases.md) for architectural patterns and examples.
 
 | Category | Classes | Highlights |
 | --- | --- | --- |
 | **SQLSpec Adapters (Litestar)** | `PostgreSQLAsyncConfig`, `MySQLAsyncConfig`, `SQLiteAsyncConfig`, `OracleAsyncConfig`, `MSSQLAsyncConfig`, `DuckDBAsyncConfig`, `BigQueryAsyncConfig`, `SpannerAsyncConfig` | Canonical Litestar adapter configurations (`vertebra.extensions.sqlspec`) backed by native Rust drivers and connection leasing |
-| **Registry & CTE Pipelines** | `DatabaseRegistry`, `SyncQueryPipeline`, `AsyncQueryPipeline`, `CTEStep`, `RelOverlay`, `ArrowCursor` | Named driver management, single-RTT read-your-own-writes CTE compilation (`postgresql` and `googlesql`), and zero-copy Arrow IPC cursors |
+| **Registry, Contracts & CTE Pipelines** | `DatabaseRegistry`, `provide_driver`, `BaseDatabaseConfig`, `SyncDatabaseDriver`, `AsyncDatabaseDriver`, `DatabaseError`, `NotFoundError`, `SyncQueryPipeline`, `AsyncQueryPipeline`, `CTEStep`, `RelOverlay`, `ArrowCursor` | Polymorphic URL scheme resolution, shared endpoint pool keys, uniform sync/async execution contracts, single-RTT CTE compilation (`postgresql` and `googlesql`), and zero-copy Arrow IPC cursors |
+| **Capability Protocols** | `SyncPipelineCapable`, `AsyncPipelineCapable`, `NotificationSource`, `SyncChangeSource`, `AsyncChangeSource`, `QueueStore`, `EmbeddingPushdown` | `@runtime_checkable` structural protocols for query pipelining, pub/sub notifications, CDC streams, `SKIP LOCKED` job queues, and in-database embedding pushdown |
 | **Relational & OLAP Configs** | `PostgreSQLConfig`, `MySQLConfig`, `SQLiteConfig`, `OracleConfig`, `MSSQLConfig`, `DuckDBConfig`, `BigQueryConfig`, `SpannerConfig` | Pooler-aware statement caching, WAL/mmap pragmas, Oracle 26ai `VECTOR`/`OSON` & Cloud Wallets, TDS 7.4 `@P1` rewriting, DuckDB Arrow streaming, BigQuery Storage Read/Write v1 + Object Tables, and Cloud Spanner Multiplexed Sessions + `BatchWrite` |
-| **RESP3 & Federated SQL** | `RedisConfig`, `ValkeyConfig`, `DataFusionEngine` | RESP3 `HELLO 3` client-side cache invalidation, Cluster/Sentinel routing, and cross-engine SQL federation |
+| **RESP3 & Federated SQL** | `RedisConfig`, `ValkeyConfig`, `DataFusionConfig`, `DataFusionEngine` | RESP3 `HELLO 3` client-side cache invalidation, Cluster/Sentinel routing, and cross-engine SQL federation |
 | **Cloud Dialers, CDC & RLS** | `AlloyDBConfig`, `SyncAlloyDBDialer`, `AsyncAlloyDBDialer`, `CloudSQLConfig`, `SyncCloudSQLDialer`, `AsyncCloudSQLDialer`, `ChangeFeed`, `SyncSpannerChangeStreamSource`, `AsyncSpannerChangeStreamSource`, `TenantScopeConfig`, `TenantPredicate` | Direct TCP/TLS IAM OAuth2 token password resolution (`:5432`, `:3306`), zero-sidecar `:5433` AlloyDB and `:3307` Cloud SQL mTLS connectors, logical replication / Spanner change-stream streaming, and index-friendly tenant isolation |
 
-## Database Registry & Query Pipeline
+## Database Registry, Driver Contracts & Query Pipeline
 
-`DatabaseRegistry` manages named driver configurations across an application, while `SyncQueryPipeline` / `AsyncQueryPipeline` and `RelOverlay` compile multi-step reads and mutations into a single PostgreSQL round-trip.
+`DatabaseRegistry` and `provide_driver` resolve polymorphic configurations and shared drivers from URL schemes, while `SyncDatabaseDriver` / `AsyncDatabaseDriver` define the uniform execution contract and `SyncQueryPipeline` / `AsyncQueryPipeline` compile multi-step reads and mutations into a single round-trip.
 
 ::: vertebra.db.registry.DatabaseRegistry
     options:
       heading_level: 3
       members:
         - register
+        - parse_url
+        - get_driver
         - get_sync_driver
-        - get_async_driver
-        - close_all
+        - get_dialer
+
+::: vertebra.db.registry.provide_driver
+    options:
+      heading_level: 4
+
+::: vertebra.db.driver.BaseDatabaseConfig
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.driver.SyncDatabaseDriver
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.driver.AsyncDatabaseDriver
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.driver.DatabaseError
+    options:
+      heading_level: 4
+      members: false
+      summary: false
 
 ::: vertebra.db.pipeline.SyncQueryPipeline
     options:
@@ -41,10 +71,11 @@ Native database configurations, synchronous and asynchronous drivers, single-RTT
         - compile
         - execute
 
-::: vertebra._vertebra.ArrowCursor
+::: vertebra.db.arrow.ArrowCursor
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ## Relational, Cloud & Analytical Drivers (`vertebra.db.adapters`)
 
@@ -94,8 +125,15 @@ Native database configurations, synchronous and asynchronous drivers, single-RTT
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ::: vertebra.db.adapters.valkey.ValkeyConfig
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.adapters.datafusion.DataFusionConfig
     options:
       heading_level: 4
       members: false
@@ -116,11 +154,13 @@ Native database configurations, synchronous and asynchronous drivers, single-RTT
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ::: vertebra.db.dialer.cloudsql.CloudSQLConfig
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ::: vertebra.db.cdc.ChangeFeed
     options:
@@ -134,3 +174,4 @@ Native database configurations, synchronous and asynchronous drivers, single-RTT
     options:
       heading_level: 4
       members: false
+      summary: false

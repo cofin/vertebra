@@ -33,6 +33,12 @@ sources:
   - id: src-db-init-py
     resource: src/py/vertebra/db/__init__.py
     title: "Python implementation module (src/py/vertebra/db/__init__.py)"
+  - id: src-db-registry-py
+    resource: src/py/vertebra/db/registry.py
+    title: "Python implementation module (src/py/vertebra/db/registry.py)"
+  - id: src-db-driver-capabilities-py
+    resource: src/py/vertebra/db/driver/capabilities.py
+    title: "Python implementation module (src/py/vertebra/db/driver/capabilities.py)"
   - id: src-tests-unit-db-test-pg-dataplane-and-datafusion-py
     resource: src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
     title: "Python implementation module (src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py)"
@@ -83,7 +89,7 @@ The intended layering is an explicit predicate for plan quality plus a session G
 | `ChangeFeed.hydrate_notification(envelope)` | Decodes with `decode_json` and restores spilled payloads by `event_id`. An unknown spilled id yields an empty payload. |
 | `ChangeFeed.replay_since(last_event_id)` | Returns buffered events newer than the id. |
 | `ChangeFeed.build_emit_message_sql` (static) | Returns `SELECT pg_logical_emit_message($1, $2, $3)` with `(transactional, prefix, bytes)`, which emits to the WAL without writing a table. |
-| [`SyncSpannerChangeStreamSource` / `AsyncSpannerChangeStreamSource`](../../../../../src/py/vertebra/db/cdc.py) / `SpannerPartitionRecord` | Queries `READ_json_<stream_name>` (GoogleSQL) or `spanner.read_json_<stream_name>` (Spangres), parses `DataChangeRecord`, `HeartbeatRecord`, and `ChildPartitionsRecord` payloads, fans out child partition readers respecting parent watermark progression, and forwards data changes into `ChangeFeed.publish_event()`. Spangres polls bind `[start_timestamp, end_timestamp, partition_token, heartbeat_milliseconds]` positionally (`$1..$4` → `p1..p4`); GoogleSQL polls bind `@start_ts`, `@end_ts`, `@token`, and `@heartbeat_ms`. |
+| [`SyncSpannerChangeStreamSource` / `AsyncSpannerChangeStreamSource`](../../../../../src/py/vertebra/db/cdc.py) / `SpannerPartitionRecord` | Implements the [`SyncChangeSource` / `AsyncChangeSource`](../../../../../src/py/vertebra/db/driver/capabilities.py)[^src-db-driver-capabilities-py] capability protocols (`stream`), querying `READ_json_<stream_name>` (GoogleSQL) or `spanner.read_json_<stream_name>` (Spangres), parsing `DataChangeRecord`, `HeartbeatRecord`, and `ChildPartitionsRecord` payloads, fanning out child partition readers respecting parent watermark progression, and forwarding data changes into `ChangeFeed.publish_event()`. Spangres polls bind `[start_timestamp, end_timestamp, partition_token, heartbeat_milliseconds]` positionally (`$1..$4` → `p1..p4`); GoogleSQL polls bind `@start_ts`, `@end_ts`, `@token`, and `@heartbeat_ms`. |
 
 Spill storage and history live in process memory and grow without bound. `spill_table`, `replication_slot_name`, `publication_name`, and `max_slot_wal_keep_size_mb` are configuration fields that no code reads.
 
@@ -94,8 +100,8 @@ Spill storage and history live in process memory and grow without bound. `spill_
 | `ARROW_STREAM_MEDIA_TYPE` | `"application/vnd.apache.arrow.stream"`, also exposed as `DataFusionEngine.ARROW_STREAM_MEDIA_TYPE`. |
 | `DataFusionMode` | `Literal["in_process", "pgwire_fdw"]`. |
 | [`TableRegistration`](../../../../../src/py/vertebra/db/adapters/datafusion/config.py)[^src-db-datafusion-config-py] | `name`, `uri`, `format` (`parquet`, `vortex`, `arrow`, `csv`, `ndjson`, `duckdb`, `postgres`, `oracle`, `bigquery`, `spanner`). |
-| `DataFusionConfig` | `mode`, `target_partitions`, `memory_limit_mb`, `pgwire_host`, `pgwire_port=5434`, `require_mtls_for_pgwire`. |
-| [`DataFusionEngine`](../../../../../src/py/vertebra/db/adapters/datafusion/driver.py)[^src-db-datafusion-driver-py] | Accepts `(config: DataFusionConfig \| None = None, *, ctx: Any = None)`, normalizes `ArrowCursor` / PyArrow inputs into `pyarrow.Table`, resolves `SessionContext` via `ensure_module("datafusion", package="datafusion")` without any SQLite fallback, and propagates `MissingDependencyError` and `SessionContext.sql(...)` errors directly. |
+| `DataFusionConfig` | `BaseDatabaseConfig` subclass (`url_schemes = ("datafusion",)`, `from_url`, `pool_key`, `build_sync_driver`, `build_async_driver`) resolved polymorphically via [`DatabaseRegistry`](../../../../../src/py/vertebra/db/registry.py)[^src-db-registry-py] and `provide_driver`. Configures `mode`, `target_partitions`, `memory_limit_mb`, `pgwire_host`, `pgwire_port=5434`, and `require_mtls_for_pgwire`. |
+| [`DataFusionEngine`](../../../../../src/py/vertebra/db/adapters/datafusion/driver.py)[^src-db-datafusion-driver-py] | Accepts `(config: DataFusionConfig \| None = None, *, ctx: Any = None)`, fetches BigQuery and Cloud Spanner datasets via `driver.select_to_arrow(...)`, normalizes `ArrowCursor` / PyArrow inputs into `pyarrow.Table`, resolves `SessionContext` via `ensure_module("datafusion", package="datafusion")` without any SQLite fallback, and propagates `MissingDependencyError` and `SessionContext.sql(...)` errors directly. |
 
 Provenance sources: [^src-tests-unit-db-test-pg-dataplane-and-datafusion-py].
 
@@ -106,4 +112,6 @@ Provenance sources: [^src-tests-unit-db-test-pg-dataplane-and-datafusion-py].
 [^src-db-datafusion-config-py]: `src/py/vertebra/db/adapters/datafusion/config.py` — Python implementation module (src/py/vertebra/db/adapters/datafusion/config.py).
 [^src-db-datafusion-driver-py]: `src/py/vertebra/db/adapters/datafusion/driver.py` — Python implementation module (src/py/vertebra/db/adapters/datafusion/driver.py).
 [^src-db-init-py]: `src/py/vertebra/db/__init__.py` — Python implementation module (src/py/vertebra/db/__init__.py).
+[^src-db-registry-py]: `src/py/vertebra/db/registry.py` — Python implementation module (src/py/vertebra/db/registry.py).
+[^src-db-driver-capabilities-py]: `src/py/vertebra/db/driver/capabilities.py` — Python implementation module (src/py/vertebra/db/driver/capabilities.py).
 [^src-tests-unit-db-test-pg-dataplane-and-datafusion-py]: `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py` — Python implementation module (src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py).
