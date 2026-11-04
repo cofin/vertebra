@@ -21,8 +21,8 @@ use vertebra_core::gcp_auth::GcpTokenCache;
 use vertebra_core::id::uuid4_str;
 use vertebra_core::shm::ShmRegion;
 
-use crate::arrow_shm::{ARROW_IPC_EOS_MARKER, ShmArrowStreamWriter};
-use crate::gcp::{install_rustls_ring_provider, official_credentials};
+use vertebra_db::arrow_shm::{ARROW_IPC_EOS_MARKER, ShmArrowStreamWriter};
+use vertebra_db::gcp::{install_rustls_ring_provider, official_credentials};
 
 /// Default BigQuery REST v2 endpoint.
 pub const DEFAULT_BIGQUERY_REST_ENDPOINT: &str = "https://bigquery.googleapis.com";
@@ -1143,7 +1143,8 @@ impl BigQueryClient {
         }
 
         let total_rows = writer.row_count();
-        let (final_shm_name, byte_len, region) = writer.finish().map_err(BigQueryError::Shm)?;
+        let (final_shm_name, byte_len, region) =
+            writer.finish_unregistered().map_err(BigQueryError::Shm)?;
         Ok((final_shm_name, byte_len, total_rows, region))
     }
 

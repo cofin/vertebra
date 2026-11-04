@@ -5,14 +5,12 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager, suppress
-from typing import Any, ClassVar, Literal, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 
 import msgspec
 
 from vertebra._vertebra import (
-    AsyncBigQueryClient,
     LeaseBroker,
-    SyncBigQueryClient,
 )
 from vertebra._vertebra import (
     StatementCache as _RustStatementCache,
@@ -29,7 +27,11 @@ from vertebra.db.arrow import ARROW_SHM_THRESHOLD_ROWS, ArrowCursor
 from vertebra.db.driver._async import AsyncDatabaseDriver
 from vertebra.db.driver._sync import SyncDatabaseDriver
 from vertebra.telemetry.db_propagation import SqlTracePropagator
+from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.schema import to_value_type
+
+if TYPE_CHECKING:
+    from vertebra._bigquery import AsyncBigQueryClient, SyncBigQueryClient
 
 __all__ = (
     "AsyncBigQueryDriver",
@@ -493,6 +495,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
 
     def _ensure_client(self) -> SyncBigQueryClient:
         if self._client is None:
+            ensure_module("vertebra._bigquery", package="vertebra-core[bigquery]", extra="bigquery")
             self._client = BigQueryCore.create_sync_rust_client(self.config)
         return self._client
 
@@ -1046,6 +1049,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
 
     def _ensure_client(self) -> AsyncBigQueryClient:
         if self._client is None:
+            ensure_module("vertebra._bigquery", package="vertebra-core[bigquery]", extra="bigquery")
             self._client = BigQueryCore.create_async_rust_client(self.config)
         return self._client
 

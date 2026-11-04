@@ -26,7 +26,7 @@ use tokio::sync::OnceCell;
 use url::Url;
 use vertebra_core::gcp_auth::GcpTokenCache;
 
-use crate::gcp::{install_rustls_ring_provider, official_credentials};
+use vertebra_db::gcp::{install_rustls_ring_provider, official_credentials};
 
 /// Default Cloud Spanner gRPC endpoint.
 pub const DEFAULT_SPANNER_ENDPOINT: &str = "https://spanner.googleapis.com";

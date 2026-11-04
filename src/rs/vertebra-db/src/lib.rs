@@ -21,10 +21,10 @@
 //! - Shared credential and TLS wiring for the official Google Cloud Rust clients (`gcp`).
 
 pub mod arrow_shm;
-pub mod bigquery;
 pub mod connection;
 pub mod dialer;
 pub mod duckdb;
+#[cfg(feature = "gcp")]
 pub mod gcp;
 pub mod mssql;
 pub mod mysql;
@@ -33,7 +33,6 @@ pub mod postgres;
 #[cfg(feature = "pyo3")]
 pub mod py_async;
 pub mod resp3;
-pub mod spanner;
 pub mod sqlite;
 
 pub use arrow_shm::{
@@ -41,15 +40,6 @@ pub use arrow_shm::{
     ShmArrowStreamWriter, normalize_shm_name, open_shm_arrow_region, read_shm_arrow_frame,
     read_shm_arrow_frame_with, release_shm_arrow_frame, write_shm_arrow_frame,
     write_shm_arrow_region, write_shm_arrow_region_unregistered,
-};
-pub use bigquery::{
-    ArrowAppendPlan, ArrowAppendRequest, BIGQUERY_OAUTH_SCOPES, BigQueryAppendResult,
-    BigQueryArrowCompression, BigQueryCellValue, BigQueryClient, BigQueryClientConfig,
-    BigQueryDryRunResult, BigQueryError, BigQueryFieldSchema, BigQueryParamValue,
-    BigQueryQueryOptions, BigQueryQueryParameter, BigQueryQueryResult, BigQueryRowError,
-    BigQueryWriteMode, DEFAULT_BIGQUERY_REST_ENDPOINT, DEFAULT_BIGQUERY_STORAGE_ENDPOINT,
-    MAX_APPEND_ROWS_CHUNK_BYTES, parse_query_parameters_json, requires_jobs_insert_sql,
-    split_bigquery_table_parts,
 };
 pub use connection::{
     BoxFuture, CancelHandle, ConnectOptions, Connection, EndpointTarget, TlsMode, TransportError,
@@ -62,6 +52,11 @@ pub use dialer::{
     generate_ephemeral_keypair_pem,
 };
 pub use duckdb::{DuckdbBrokerPool, DuckdbConfig};
+#[cfg(feature = "gcp")]
+pub use gcp::{
+    GcpErrorInfo, GcpTokenCredentials, code_name, code_number, gax_error_info, http_code,
+    official_credentials,
+};
 pub use mssql::{
     MssqlPool, TdsPacketType, decode_tds_packet, encode_tds_packet, encode_tds_sql_batch,
     rewrite_mssql_placeholders,
@@ -87,13 +82,5 @@ pub use resp3::{
     ClusterRedirect, RedirectKind, Resp3Frame, crc16_xmodem, encode_hello3_handshake,
     encode_resp_command, encode_sentinel_get_master_cmd, extract_invalidation_keys,
     parse_cluster_redirect, parse_resp3_frame, redis_hash_slot,
-};
-pub use spanner::{
-    DEFAULT_DDL_TIMEOUT, DEFAULT_SPANNER_ADMIN_ENDPOINT, DEFAULT_SPANNER_ENDPOINT,
-    MAX_MUTATION_CELLS_PER_BATCH, ProtobufValue, SPANNER_OAUTH_SCOPES, SpannerBatchDmlStatement,
-    SpannerBatchWriteResult, SpannerClient, SpannerClientConfig, SpannerCommitResult,
-    SpannerDialect, SpannerError, SpannerMutation, SpannerMutationGroup, SpannerQueryParameter,
-    SpannerQueryResult, SpannerStaleness, SpannerStructField, SpannerType, SpannerTypeAnnotation,
-    SpannerTypeCode, SpannerValue, parse_spanner_parameters_json, rewrite_spangres_placeholders,
 };
 pub use sqlite::{SqliteConfig, SqlitePool};

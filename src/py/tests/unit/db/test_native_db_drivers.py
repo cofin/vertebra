@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import sys
 import time
+import tomllib
 from pathlib import Path
 from typing import Any, cast
 
@@ -29,16 +30,18 @@ from vertebra.db import (
     SyncAlloyDBDialer,
     SyncCloudSQLDialer,
 )
+from vertebra.db.adapters.bigquery import AsyncBigQueryDriver, SyncBigQueryDriver
 from vertebra.db.adapters.mysql import SyncMySQLDriver
 from vertebra.db.adapters.oracle import OracleConfig
 from vertebra.db.adapters.postgres import PostgreSQLConfig, SyncPostgreSQLDriver
 from vertebra.db.adapters.redis import RedisConfig, SyncRedisDriver
+from vertebra.db.adapters.spanner import AsyncSpannerDriver, SyncSpannerDriver
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
 from vertebra.db.adapters.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
 from vertebra.db.channels import DatabaseChannelBackend
 from vertebra.extensions.litestar import ChannelsBackend, MemoryStore
 from vertebra.storage import GcpTokenSnapshot, SyncObjectStore
-from vertebra.typing import MissingDependencyError, VertebraError
+from vertebra.typing import MissingDependencyError, VertebraError, reset_dependency_cache
 from vertebra.utils.sync_tools import SyncPool
 
 _ADAPTER_ENGINES: tuple[str, ...] = (
@@ -591,3 +594,70 @@ def test_arrow_cursor_from_shm_capsule_zero_copy_and_unlink_on_release() -> None
     assert bytes(mv) == payload
     assert cursor.release() is False
     mv.release()
+
+
+def test_standalone_gcp_driver_modules_and_vertebra_clean_break() -> None:
+    """Verify vertebra._bigquery and vertebra._spanner expose native clients and _vertebra omits them."""
+    bq_mod = importlib.import_module("vertebra._bigquery")
+    spanner_mod = importlib.import_module("vertebra._spanner")
+
+    assert bq_mod.GIL_USED is False
+    assert hasattr(bq_mod, "SyncBigQueryClient")
+    assert hasattr(bq_mod, "AsyncBigQueryClient")
+    assert not hasattr(native_vertebra, "SyncBigQueryClient")
+    assert not hasattr(native_vertebra, "AsyncBigQueryClient")
+
+    assert spanner_mod.GIL_USED is False
+    assert hasattr(spanner_mod, "SyncSpannerClient")
+    assert hasattr(spanner_mod, "AsyncSpannerClient")
+    assert not hasattr(native_vertebra, "SyncSpannerClient")
+    assert not hasattr(native_vertebra, "AsyncSpannerClient")
+
+
+def test_bigquery_and_spanner_drivers_raise_missing_dependency_when_wheel_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify Sync/Async BigQuery and Spanner drivers raise MissingDependencyError naming extras when wheel absent."""
+    monkeypatch.setitem(sys.modules, "vertebra._bigquery", None)
+    monkeypatch.setitem(sys.modules, "vertebra._spanner", None)
+    reset_dependency_cache("vertebra._bigquery")
+    reset_dependency_cache("vertebra._spanner")
+    try:
+        sync_bq = SyncBigQueryDriver(project_id="test-proj")
+        async_bq = AsyncBigQueryDriver(project_id="test-proj")
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[bigquery\]"):
+            sync_bq._ensure_client()
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[bigquery\]"):
+            async_bq._ensure_client()
+
+        sync_spanner = SyncSpannerDriver(project_id="test-proj", instance_id="test-inst", database_id="test-db")
+        async_spanner = AsyncSpannerDriver(project_id="test-proj", instance_id="test-inst", database_id="test-db")
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[spanner\]"):
+            sync_spanner._ensure_client()
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[spanner\]"):
+            async_spanner._ensure_client()
+    finally:
+        reset_dependency_cache("vertebra._bigquery")
+        reset_dependency_cache("vertebra._spanner")
+
+
+def test_cargo_manifests_exclude_unconditional_gcp_and_tonic_dependencies() -> None:
+    """Verify vertebra-py and default vertebra-db Cargo manifests do not enable google-cloud-* or tonic."""
+    repo_root = Path(__file__).resolve().parents[5]
+    py_manifest = tomllib.loads((repo_root / "src/rs/vertebra-py/Cargo.toml").read_text(encoding="utf-8"))
+    db_manifest = tomllib.loads((repo_root / "src/rs/vertebra-db/Cargo.toml").read_text(encoding="utf-8"))
+
+    py_deps = py_manifest.get("dependencies", {})
+    assert not any(name.startswith("google-cloud-") or name == "tonic" for name in py_deps)
+
+    db_features = db_manifest.get("features", {})
+    assert db_features.get("default", []) == []
+    assert "gcp" in db_features
+
+    db_deps = db_manifest.get("dependencies", {})
+    assert "google-cloud-bigquery" not in db_deps
+    assert "google-cloud-spanner" not in db_deps
+    assert "tonic" not in db_deps
+    for name, spec in db_deps.items():
+        if name.startswith("google-cloud-"):
+            assert isinstance(spec, dict) and spec.get("optional") is True

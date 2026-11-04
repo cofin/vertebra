@@ -13,18 +13,18 @@ use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, mpsc};
 
+use _bigquery::client::{
+    ArrowAppendPlan, BigQueryArrowCompression, BigQueryCellValue, BigQueryClient,
+    BigQueryClientConfig, BigQueryError, BigQueryParamValue, BigQueryQueryOptions,
+    BigQueryQueryParameter, BigQueryWriteMode, DEFAULT_BIGQUERY_STORAGE_ENDPOINT,
+    MAX_APPEND_ROWS_CHUNK_BYTES,
+};
 use google_cloud_bigquery::client::Read;
 use google_cloud_bigquery::model;
 use google_cloud_gax::options::RequestOptions;
 use google_cloud_gax::response::Response as GaxResponse;
 use google_cloud_gax::streaming::ResponseStream;
 use vertebra_db::arrow_shm::{ARROW_IPC_EOS_MARKER, ShmArrowFrameHeader};
-use vertebra_db::bigquery::{
-    ArrowAppendPlan, BigQueryArrowCompression, BigQueryCellValue, BigQueryClient,
-    BigQueryClientConfig, BigQueryError, BigQueryParamValue, BigQueryQueryOptions,
-    BigQueryQueryParameter, BigQueryWriteMode, DEFAULT_BIGQUERY_STORAGE_ENDPOINT,
-    MAX_APPEND_ROWS_CHUNK_BYTES,
-};
 
 fn build_mock_arrow_ipc_stream(schema_payload: &[u8], batch_payloads: &[(&[u8], i64)]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -537,6 +537,7 @@ async fn read_table_writes_schema_then_stream_batches_in_order() {
     .concat();
     assert_eq!(payload, expected.as_slice());
     assert!(shm_name.starts_with('/'));
+    assert!(!vertebra_db::arrow_shm::release_shm_arrow_frame(&shm_name));
 }
 
 #[test]

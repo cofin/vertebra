@@ -6,20 +6,14 @@ import base64
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import urlparse
 
 import msgspec
 
 from vertebra._vertebra import (
-    AsyncSpannerClient as _RustAsyncSpannerClient,
-)
-from vertebra._vertebra import (
     SpannerError,
     hydrate_rows_vectorcall,
-)
-from vertebra._vertebra import (
-    SyncSpannerClient as _RustSyncSpannerClient,
 )
 from vertebra.db.adapters.spanner.config import (
     Mutation,
@@ -30,11 +24,19 @@ from vertebra.db.arrow import ArrowCursor, write_arrow_shm
 from vertebra.telemetry.db_propagation import SqlTracePropagator
 from vertebra.telemetry.otel import TraceContext
 from vertebra.typing import ImproperConfigurationError
-from vertebra.utils.module_loader import import_optional
+from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.schema import to_schema
 from vertebra.utils.serializers import decode_json, encode_json
 from vertebra.utils.type_converters import time_iso_convert
 from vertebra.utils.type_guards import get_msgspec_rename_config
+
+if TYPE_CHECKING:
+    from vertebra._spanner import (
+        AsyncSpannerClient as _RustAsyncSpannerClient,
+    )
+    from vertebra._spanner import (
+        SyncSpannerClient as _RustSyncSpannerClient,
+    )
 
 __all__ = ("SpannerCore",)
 
@@ -48,7 +50,8 @@ class SpannerCore:
     @staticmethod
     def create_sync_rust_client(config: SpannerConfig) -> _RustSyncSpannerClient:
         """Instantiate the native Rust `SyncSpannerClient` from `config`."""
-        return _RustSyncSpannerClient(
+        spanner_mod = ensure_module("vertebra._spanner", package="vertebra-core[spanner]", extra="spanner")
+        client: _RustSyncSpannerClient = spanner_mod.SyncSpannerClient(
             database=config.database_uri,
             database_role=config.database_role,
             endpoint=config.endpoint,
@@ -60,11 +63,13 @@ class SpannerCore:
             admin_endpoint=config.admin_endpoint,
             ca_pem=config.ca_pem,
         )
+        return client
 
     @staticmethod
     def create_async_rust_client(config: SpannerConfig) -> _RustAsyncSpannerClient:
         """Instantiate the native Rust `AsyncSpannerClient` from `config`."""
-        return _RustAsyncSpannerClient(
+        spanner_mod = ensure_module("vertebra._spanner", package="vertebra-core[spanner]", extra="spanner")
+        client: _RustAsyncSpannerClient = spanner_mod.AsyncSpannerClient(
             database=config.database_uri,
             database_role=config.database_role,
             endpoint=config.endpoint,
@@ -76,6 +81,7 @@ class SpannerCore:
             admin_endpoint=config.admin_endpoint,
             ca_pem=config.ca_pem,
         )
+        return client
 
     @staticmethod
     def is_ddl_statement(sql: str) -> bool:

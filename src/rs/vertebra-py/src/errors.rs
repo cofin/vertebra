@@ -3,73 +3,13 @@
 //! Registers the unified `DatabaseError(VertebraError)` PEP 249 / transient hierarchy alongside
 //! `GoogleCloudError(VertebraError)` and multi-inheritance subclasses (`NotFoundError`,
 //! `SpannerError`, `SpannerAbortedError`, `BigQueryError`, `BigQueryRowError`) using safe
-//! `PyType` construction (zero `unsafe`).
+//! `PyType` construction (zero `unsafe` and zero `google-cloud-*` dependencies).
 
-use google_cloud_gax::error::rpc::StatusDetails;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyList, PyTuple, PyType};
-use vertebra_db::bigquery::BigQueryError as BigQueryClientError;
 use vertebra_db::connection::TransportError;
-use vertebra_db::spanner::SpannerError as SpannerClientError;
-
-const CODE_NAMES: [&str; 17] = [
-    "OK",
-    "CANCELLED",
-    "UNKNOWN",
-    "INVALID_ARGUMENT",
-    "DEADLINE_EXCEEDED",
-    "NOT_FOUND",
-    "ALREADY_EXISTS",
-    "PERMISSION_DENIED",
-    "RESOURCE_EXHAUSTED",
-    "FAILED_PRECONDITION",
-    "ABORTED",
-    "OUT_OF_RANGE",
-    "UNIMPLEMENTED",
-    "INTERNAL",
-    "UNAVAILABLE",
-    "DATA_LOSS",
-    "UNAUTHENTICATED",
-];
-
-fn code_name(code: i32) -> &'static str {
-    if (0..=16).contains(&code) {
-        CODE_NAMES[code as usize]
-    } else {
-        "UNKNOWN"
-    }
-}
-
-fn code_number(name: &str) -> i32 {
-    let trimmed = name.trim();
-    for (idx, candidate) in CODE_NAMES.iter().enumerate() {
-        if candidate.eq_ignore_ascii_case(trimmed) {
-            return idx as i32;
-        }
-    }
-    2
-}
-
-fn http_code(status: u16) -> i32 {
-    match status {
-        400 => 3,
-        401 => 16,
-        403 => 7,
-        404 => 5,
-        409 => 10,
-        412 => 9,
-        416 => 11,
-        429 => 8,
-        499 => 1,
-        500 => 13,
-        501 => 12,
-        503 => 14,
-        504 => 4,
-        _ => 2,
-    }
-}
 
 /// Cached Python exception type objects for the `DatabaseError` hierarchy.
 pub struct DbExceptionTypes {
@@ -218,7 +158,7 @@ fn build_all_exception_types(
             ("is_transient", true_val.clone()),
         ],
     )?;
-    let ser_bound = serialization_failure.bind(py);
+    let serialization_bound = serialization_failure.bind(py);
 
     let integrity = new_exception_class(
         py,
@@ -291,7 +231,7 @@ fn build_all_exception_types(
     let spanner_aborted = new_exception_class(
         py,
         "SpannerAbortedError",
-        &PyTuple::new(py, [spanner_bound, ser_bound])?,
+        &PyTuple::new(py, [spanner_bound, serialization_bound])?,
         "Spanner aborted the transaction; the whole transaction can be retried.",
         &[
             ("code", 10i32.into_pyobject(py)?.into_any()),
@@ -470,202 +410,20 @@ pub fn transport_error_to_py(py: Python<'_>, err: &TransportError) -> PyErr {
     }
 }
 
-struct GcpErrorInfo {
-    code: i32,
-    message: String,
-    http_status: Option<u16>,
-    retry_delay_ms: Option<u64>,
-    reason: Option<String>,
-}
-
-impl GcpErrorInfo {
-    fn new(code: i32, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-            http_status: None,
-            retry_delay_ms: None,
-            reason: None,
-        }
-    }
-}
-
-fn gax_error_info(err: &google_cloud_gax::error::Error) -> GcpErrorInfo {
-    let http_status = err.http_status_code();
-    if let Some(status) = err.status() {
-        let code = code_number(status.code.name());
-        let message = if status.message.is_empty() {
-            err.to_string()
-        } else {
-            status.message.clone()
-        };
-        let mut retry_delay_ms = None;
-        let mut reason = None;
-        for detail in &status.details {
-            match detail {
-                StatusDetails::RetryInfo(retry) if retry_delay_ms.is_none() => {
-                    if let Some(delay) = &retry.retry_delay {
-                        let secs = delay.seconds().max(0) as u64;
-                        let nanos = delay.nanos().max(0) as u64;
-                        retry_delay_ms = Some(secs * 1000 + nanos / 1_000_000);
-                    }
-                }
-                StatusDetails::ErrorInfo(info) if reason.is_none() && !info.reason.is_empty() => {
-                    reason = Some(info.reason.clone());
-                }
-                _ => {}
-            }
-        }
-        GcpErrorInfo {
-            code,
-            message,
-            http_status,
-            retry_delay_ms,
-            reason,
-        }
-    } else {
-        let code = if err.is_authentication() {
-            16
-        } else if err.is_timeout() {
-            4
-        } else if err.is_transport() || err.is_io() || err.is_connect() {
-            14
-        } else if let Some(http) = http_status {
-            http_code(http)
-        } else {
-            2
-        };
-        GcpErrorInfo {
-            code,
-            message: err.to_string(),
-            http_status,
-            retry_delay_ms: None,
-            reason: None,
-        }
-    }
-}
-
-fn raise(py: Python<'_>, ty: &Py<PyType>, info: GcpErrorInfo) -> PyErr {
-    let name = code_name(info.code);
-    let err = PyErr::from_type(ty.bind(py).clone(), (info.message.clone(),));
+fn auth_error_with(py: Python<'_>, types: &GcpExceptionTypes, message: String) -> PyErr {
+    let err = PyErr::from_type(types.auth.bind(py).clone(), (message.clone(),));
     let val = err.value(py);
     if let Err(e) = val
-        .setattr("code", info.code)
-        .and_then(|()| val.setattr("code_name", name))
-        .and_then(|()| val.setattr("message", info.message))
-        .and_then(|()| val.setattr("http_status", info.http_status))
-        .and_then(|()| val.setattr("retry_delay_ms", info.retry_delay_ms))
-        .and_then(|()| val.setattr("reason", info.reason))
+        .setattr("code", 16i32)
+        .and_then(|()| val.setattr("code_name", "UNAUTHENTICATED"))
+        .and_then(|()| val.setattr("message", message))
+        .and_then(|()| val.setattr("http_status", Option::<u16>::None))
+        .and_then(|()| val.setattr("retry_delay_ms", Option::<u64>::None))
+        .and_then(|()| val.setattr("reason", Option::<String>::None))
     {
         return e;
     }
     err
-}
-
-fn spanner_error_with(py: Python<'_>, types: &GcpExceptionTypes, err: SpannerClientError) -> PyErr {
-    match err {
-        SpannerClientError::InvalidArgument(msg) => {
-            raise(py, &types.spanner, GcpErrorInfo::new(3, msg))
-        }
-        SpannerClientError::Auth(msg) => raise(py, &types.auth, GcpErrorInfo::new(16, msg)),
-        SpannerClientError::Client(gax_err) => {
-            let info = gax_error_info(&gax_err);
-            let ty = if info.code == 10 {
-                &types.spanner_aborted
-            } else {
-                &types.spanner
-            };
-            raise(py, ty, info)
-        }
-        SpannerClientError::Protocol(msg) => raise(py, &types.spanner, GcpErrorInfo::new(13, msg)),
-        SpannerClientError::Ddl {
-            operation,
-            code,
-            message,
-        } => raise(
-            py,
-            &types.spanner,
-            GcpErrorInfo::new(code, format!("{operation}: {message}")),
-        ),
-        other @ SpannerClientError::DdlTimeout { .. } => {
-            raise(py, &types.spanner, GcpErrorInfo::new(4, other.to_string()))
-        }
-    }
-}
-
-/// Convert a Rust `vertebra_db::spanner::SpannerError` into a typed Python `PyErr`.
-pub fn spanner_error_to_py(py: Python<'_>, err: SpannerClientError) -> PyErr {
-    match exception_types(py) {
-        Ok(types) => spanner_error_with(py, types, err),
-        Err(e) => e,
-    }
-}
-
-fn bigquery_error_with(
-    py: Python<'_>,
-    types: &GcpExceptionTypes,
-    err: BigQueryClientError,
-) -> PyErr {
-    match err {
-        BigQueryClientError::Auth(msg) => raise(py, &types.auth, GcpErrorInfo::new(16, msg)),
-        BigQueryClientError::Http(msg) => raise(py, &types.bigquery, GcpErrorInfo::new(14, msg)),
-        BigQueryClientError::Api {
-            status,
-            message,
-            reason,
-            canonical_status,
-        } => {
-            let code = canonical_status
-                .as_deref()
-                .map(code_number)
-                .unwrap_or_else(|| http_code(status));
-            raise(
-                py,
-                &types.bigquery,
-                GcpErrorInfo {
-                    code,
-                    message,
-                    http_status: Some(status),
-                    retry_delay_ms: None,
-                    reason,
-                },
-            )
-        }
-        BigQueryClientError::Client(gax_err) => {
-            let info = gax_error_info(&gax_err);
-            raise(py, &types.bigquery, info)
-        }
-        BigQueryClientError::Shm(msg) | BigQueryClientError::AppendVerification(msg) => {
-            raise(py, &types.bigquery, GcpErrorInfo::new(13, msg))
-        }
-        BigQueryClientError::InvalidArgument(msg) => {
-            raise(py, &types.bigquery, GcpErrorInfo::new(3, msg))
-        }
-        BigQueryClientError::RowErrors(rows) => {
-            let message = format!("BigQuery Storage Write rejected {} row(s)", rows.len());
-            let row_tuples: Vec<(i64, i32, String)> = rows
-                .into_iter()
-                .map(|r| (r.index, r.code, r.message))
-                .collect();
-            let err = raise(py, &types.bigquery_row, GcpErrorInfo::new(3, message));
-            if let Err(e) = err.value(py).setattr("row_errors", row_tuples) {
-                return e;
-            }
-            err
-        }
-    }
-}
-
-/// Convert a Rust `vertebra_db::bigquery::BigQueryError` into a typed Python `PyErr`.
-pub fn bigquery_error_to_py(py: Python<'_>, err: BigQueryClientError) -> PyErr {
-    match exception_types(py) {
-        Ok(types) => bigquery_error_with(py, types, err),
-        Err(e) => e,
-    }
-}
-
-fn auth_error_with(py: Python<'_>, types: &GcpExceptionTypes, message: String) -> PyErr {
-    raise(py, &types.auth, GcpErrorInfo::new(16, message))
 }
 
 /// Convert a `GcpTokenCache` refresh error message into a Python `GoogleCloudAuthError`.
@@ -708,17 +466,14 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use google_cloud_gax::error::rpc::{Code, Status, StatusDetails};
     use pyo3::exceptions::PyValueError;
     use pyo3::prelude::*;
     use pyo3::types::{PyTuple, PyType};
-    use vertebra_db::bigquery::{BigQueryError as BigQueryClientError, BigQueryRowError};
     use vertebra_db::connection::TransportError;
-    use vertebra_db::spanner::SpannerError as SpannerClientError;
 
     use super::{
-        AllExceptionTypes, bigquery_error_with, build_all_exception_types, db_error_with,
-        new_exception_class, spanner_error_with, transport_error_with,
+        AllExceptionTypes, auth_error_with, build_all_exception_types, db_error_with,
+        new_exception_class, transport_error_with,
     };
 
     fn stand_in_types(py: Python<'_>) -> (Bound<'_, PyType>, AllExceptionTypes) {
@@ -841,6 +596,18 @@ mod tests {
                     .extract::<bool>()
                     .unwrap()
             );
+
+            let auth_err = auth_error_with(py, &all.gcp, "bad token".into());
+            assert!(auth_err.is_instance(py, all.gcp.auth.bind(py)));
+            assert_eq!(
+                auth_err
+                    .value(py)
+                    .getattr("code")
+                    .unwrap()
+                    .extract::<i32>()
+                    .unwrap(),
+                16
+            );
         });
     }
 
@@ -877,176 +644,6 @@ mod tests {
                     .unwrap()
                     .as_deref(),
                 Some("57014")
-            );
-        });
-    }
-
-    #[test]
-    fn aborted_status_maps_to_spanner_aborted_error() {
-        Python::attach(|py| {
-            let (_base, all) = stand_in_types(py);
-            let status = Status::default()
-                .set_code(Code::Aborted)
-                .set_message("txn aborted")
-                .set_details([StatusDetails::RetryInfo(
-                    google_cloud_rpc::model::RetryInfo::new().set_retry_delay(
-                        google_cloud_wkt::Duration::new(0, 250_000_000).expect("duration"),
-                    ),
-                )]);
-            let err = spanner_error_with(
-                py,
-                &all.gcp,
-                SpannerClientError::Client(google_cloud_gax::error::Error::service(status)),
-            );
-            assert!(err.is_instance(py, all.gcp.spanner_aborted.bind(py)));
-            assert!(err.is_instance(py, all.db.serialization_failure.bind(py)));
-            let val = err.value(py);
-            assert_eq!(
-                val.getattr("code")
-                    .expect("code")
-                    .extract::<i32>()
-                    .expect("i32"),
-                10
-            );
-            assert_eq!(
-                val.getattr("code_name")
-                    .expect("code_name")
-                    .extract::<String>()
-                    .expect("str"),
-                "ABORTED"
-            );
-            assert_eq!(
-                val.getattr("retry_delay_ms")
-                    .expect("retry_delay_ms")
-                    .extract::<Option<u64>>()
-                    .expect("u64"),
-                Some(250)
-            );
-        });
-    }
-
-    #[test]
-    fn rest_api_error_prefers_canonical_status() {
-        Python::attach(|py| {
-            let (_base, all) = stand_in_types(py);
-            let err = bigquery_error_with(
-                py,
-                &all.gcp,
-                BigQueryClientError::Api {
-                    status: 400,
-                    message: "m".into(),
-                    reason: Some("notFound".into()),
-                    canonical_status: Some("NOT_FOUND".into()),
-                },
-            );
-            let val = err.value(py);
-            assert_eq!(
-                val.getattr("code")
-                    .expect("code")
-                    .extract::<i32>()
-                    .expect("i32"),
-                5
-            );
-            assert_eq!(
-                val.getattr("http_status")
-                    .expect("http_status")
-                    .extract::<Option<u16>>()
-                    .expect("u16"),
-                Some(400)
-            );
-            assert_eq!(
-                val.getattr("reason")
-                    .expect("reason")
-                    .extract::<Option<String>>()
-                    .expect("str"),
-                Some("notFound".to_string())
-            );
-        });
-    }
-
-    #[test]
-    fn rest_api_error_maps_http_status() {
-        Python::attach(|py| {
-            let (_base, all) = stand_in_types(py);
-            let err = bigquery_error_with(
-                py,
-                &all.gcp,
-                BigQueryClientError::Api {
-                    status: 429,
-                    message: "rateLimitExceeded".into(),
-                    reason: Some("rateLimitExceeded".into()),
-                    canonical_status: None,
-                },
-            );
-            let val = err.value(py);
-            assert_eq!(
-                val.getattr("code")
-                    .expect("code")
-                    .extract::<i32>()
-                    .expect("i32"),
-                8
-            );
-            assert_eq!(
-                val.getattr("code_name")
-                    .expect("code_name")
-                    .extract::<String>()
-                    .expect("str"),
-                "RESOURCE_EXHAUSTED"
-            );
-        });
-    }
-
-    #[test]
-    fn row_errors_map_to_bigquery_row_error() {
-        Python::attach(|py| {
-            let (_base, all) = stand_in_types(py);
-            let err = bigquery_error_with(
-                py,
-                &all.gcp,
-                BigQueryClientError::RowErrors(vec![BigQueryRowError {
-                    index: 0,
-                    code: 1,
-                    message: "bad field".into(),
-                }]),
-            );
-            assert!(err.is_instance(py, all.gcp.bigquery_row.bind(py)));
-            assert!(err.is_instance(py, all.db.data.bind(py)));
-            let val = err.value(py);
-            let rows: Vec<(i64, i32, String)> = val
-                .getattr("row_errors")
-                .expect("row_errors")
-                .extract()
-                .expect("extract");
-            assert_eq!(rows, vec![(0, 1, "bad field".to_string())]);
-        });
-    }
-
-    #[test]
-    fn ddl_timeout_maps_to_deadline_exceeded() {
-        Python::attach(|py| {
-            let (_base, all) = stand_in_types(py);
-            let err = spanner_error_with(
-                py,
-                &all.gcp,
-                SpannerClientError::DdlTimeout {
-                    operation: "operations/op1".into(),
-                    timeout_ms: 120_000,
-                },
-            );
-            let val = err.value(py);
-            assert_eq!(
-                val.getattr("code")
-                    .expect("code")
-                    .extract::<i32>()
-                    .expect("i32"),
-                4
-            );
-            assert_eq!(
-                val.getattr("code_name")
-                    .expect("code_name")
-                    .extract::<String>()
-                    .expect("str"),
-                "DEADLINE_EXCEEDED"
             );
         });
     }

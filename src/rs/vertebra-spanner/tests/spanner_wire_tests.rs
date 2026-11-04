@@ -1,4 +1,4 @@
-//! Integration tests for `vertebra_db::spanner` backed by the official
+//! Integration tests for `_spanner::client` backed by the official
 //! `google-cloud-spanner` client and stub seams.
 
 use std::collections::HashMap;
@@ -6,6 +6,11 @@ use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use _spanner::client::{
+    ProtobufValue, SpannerBatchDmlStatement, SpannerClient, SpannerClientConfig, SpannerError,
+    SpannerMutation, SpannerMutationGroup, SpannerQueryParameter, SpannerStaleness, SpannerValue,
+    rewrite_spangres_placeholders,
+};
 use bytes::Bytes;
 use google_cloud_auth::credentials::anonymous::Builder as Anonymous;
 use google_cloud_gax::error::Error as GaxError;
@@ -29,11 +34,6 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use prost::Message as _;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use vertebra_db::spanner::{
-    ProtobufValue, SpannerBatchDmlStatement, SpannerClient, SpannerClientConfig, SpannerError,
-    SpannerMutation, SpannerMutationGroup, SpannerQueryParameter, SpannerStaleness, SpannerValue,
-    rewrite_spangres_placeholders,
-};
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct ProstSession {

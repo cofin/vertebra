@@ -12,15 +12,17 @@ from typing import Any
 
 import pytest
 
-from vertebra._vertebra import (
+from vertebra._spanner import (
     AsyncSpannerClient,
+    SyncSpannerClient,
+)
+from vertebra._vertebra import (
     BigQueryError,
     BigQueryRowError,
     GoogleCloudAuthError,
     GoogleCloudError,
     SpannerAbortedError,
     SpannerError,
-    SyncSpannerClient,
 )
 from vertebra.db import DatabaseRegistry
 from vertebra.db.adapters.datafusion import DataFusionEngine

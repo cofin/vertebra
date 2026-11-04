@@ -13,11 +13,11 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
 
-from vertebra._vertebra import (
+from vertebra._bigquery import (
     AsyncBigQueryClient,
-    BigQueryError,
     SyncBigQueryClient,
 )
+from vertebra._vertebra import BigQueryError
 from vertebra.db import (
     ArrowCursor,
     DatabaseRegistry,

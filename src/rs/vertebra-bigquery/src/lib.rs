@@ -1,20 +1,31 @@
-//! PyO3 bindings for `vertebra_db::bigquery` (`BigQueryClient`, REST v2 query/dry-run, and
-//! Storage Read/Write API v1 zero-copy `ArrowCursor` pipelines).
+//! `vertebra-bigquery` crate and `vertebra._bigquery` PyO3 extension module.
+
+pub mod client;
+pub mod errors;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
-use vertebra_db::bigquery::{
+use vertebra_db::py_async::{
+    RustDbTaskAwaitable, block_on_db, construct_py_arrow_cursor, spawn_rust_db_task_with_attr,
+};
+
+use crate::client::{
     BigQueryAppendResult, BigQueryArrowCompression, BigQueryCellValue,
     BigQueryClient as NativeBigQueryClient, BigQueryClientConfig, BigQueryDryRunResult,
     BigQueryFieldSchema, BigQueryQueryOptions, BigQueryQueryResult, parse_query_parameters_json,
 };
-
-use crate::completion::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task};
-use crate::db::ArrowCursor;
 use crate::errors::bigquery_error_to_py;
+
+const BIGQUERY_COMPLETION_DRAINER_ATTR: &str = "_vertebra_bigquery_completion_drainer";
+
+/// Whether this build targets free-threaded Python (3.14t+).
+#[cfg(Py_GIL_DISABLED)]
+pub const FREE_THREADED: bool = true;
+#[cfg(not(Py_GIL_DISABLED))]
+pub const FREE_THREADED: bool = false;
 
 fn cell_to_py(py: Python<'_>, cell: &BigQueryCellValue) -> PyResult<Py<PyAny>> {
     match cell {
@@ -148,11 +159,10 @@ fn build_bigquery_config(
     cfg
 }
 
-/// Synchronous pure-Rust Google Cloud BigQuery client exposed to Python (`vertebra._vertebra.SyncBigQueryClient`).
-/// `ca_pem` applies to the REST API client; the Storage Read/Write API clients use the system trust store and ignore it.
+/// Synchronous pure-Rust Google Cloud BigQuery client exposed to Python (`vertebra._bigquery.SyncBigQueryClient`).
 #[pyclass(
     name = "SyncBigQueryClient",
-    module = "vertebra._vertebra",
+    module = "vertebra._bigquery",
     frozen,
     immutable_type
 )]
@@ -353,7 +363,7 @@ impl PySyncBigQueryClient {
         row_restriction: Option<String>,
         max_streams: i32,
         compression: &str,
-    ) -> PyResult<ArrowCursor> {
+    ) -> PyResult<Py<PyAny>> {
         let codec = BigQueryArrowCompression::from_str_opt(Some(compression));
         let fields = selected_fields.unwrap_or_default();
         let client = Arc::clone(&self.inner);
@@ -377,9 +387,7 @@ impl PySyncBigQueryClient {
                 })
             })
             .map_err(|e| bigquery_error_to_py(py, e))?;
-        Ok(ArrowCursor::from_shm_region(
-            shm_name, byte_len, row_count, region,
-        ))
+        construct_py_arrow_cursor(py, &shm_name, byte_len, row_count, region)
     }
 
     #[pyo3(signature = (parent_table, arrow_ipc_bytes, mode="_default"))]
@@ -407,11 +415,10 @@ impl PySyncBigQueryClient {
     }
 }
 
-/// Asynchronous pure-Rust Google Cloud BigQuery client exposed to Python (`vertebra._vertebra.AsyncBigQueryClient`).
-/// `ca_pem` applies to the REST API client; the Storage Read/Write API clients use the system trust store and ignore it.
+/// Asynchronous pure-Rust Google Cloud BigQuery client exposed to Python (`vertebra._bigquery.AsyncBigQueryClient`).
 #[pyclass(
     name = "AsyncBigQueryClient",
-    module = "vertebra._vertebra",
+    module = "vertebra._bigquery",
     frozen,
     immutable_type
 )]
@@ -569,11 +576,12 @@ impl PyAsyncBigQueryClient {
             labels: labels.unwrap_or_default(),
         };
         let client = Arc::clone(&self.inner);
-        spawn_rust_db_task(
+        spawn_rust_db_task_with_attr(
             py,
             async move { client.query_with_options(&sql, &params, &opts).await },
             query_result_to_py,
             bigquery_error_to_py,
+            BIGQUERY_COMPLETION_DRAINER_ATTR,
         )
     }
 
@@ -587,11 +595,12 @@ impl PyAsyncBigQueryClient {
         let params = parse_query_parameters_json(params_json.as_deref())
             .map_err(|e| bigquery_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
-        spawn_rust_db_task(
+        spawn_rust_db_task_with_attr(
             py,
             async move { client.dry_run(&sql, &params).await },
             dry_run_result_to_py,
             bigquery_error_to_py,
+            BIGQUERY_COMPLETION_DRAINER_ATTR,
         )
     }
 
@@ -619,7 +628,7 @@ impl PyAsyncBigQueryClient {
         let codec = BigQueryArrowCompression::from_str_opt(Some(compression));
         let fields = selected_fields.unwrap_or_default();
         let client = Arc::clone(&self.inner);
-        spawn_rust_db_task(
+        spawn_rust_db_task_with_attr(
             py,
             async move {
                 client
@@ -635,10 +644,10 @@ impl PyAsyncBigQueryClient {
                     .await
             },
             |py, (shm_name, byte_len, row_count, region)| {
-                let cursor = ArrowCursor::from_shm_region(shm_name, byte_len, row_count, region);
-                Ok(Py::new(py, cursor)?.into_any())
+                construct_py_arrow_cursor(py, &shm_name, byte_len, row_count, region)
             },
             bigquery_error_to_py,
+            BIGQUERY_COMPLETION_DRAINER_ATTR,
         )
     }
 
@@ -652,7 +661,7 @@ impl PyAsyncBigQueryClient {
     ) -> PyResult<RustDbTaskAwaitable> {
         let client = Arc::clone(&self.inner);
         let mode_owned = mode.to_string();
-        spawn_rust_db_task(
+        spawn_rust_db_task_with_attr(
             py,
             async move {
                 client
@@ -661,11 +670,16 @@ impl PyAsyncBigQueryClient {
             },
             append_result_to_py,
             bigquery_error_to_py,
+            BIGQUERY_COMPLETION_DRAINER_ATTR,
         )
     }
 }
 
-pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+#[pymodule(gil_used = false)]
+pub fn _bigquery(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add("FREE_THREADED", FREE_THREADED)?;
+    m.add("GIL_USED", false)?;
     m.add_class::<PySyncBigQueryClient>()?;
     m.add_class::<PyAsyncBigQueryClient>()?;
     Ok(())

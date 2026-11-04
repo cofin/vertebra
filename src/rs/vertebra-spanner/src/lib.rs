@@ -1,22 +1,30 @@
-//! PyO3 bindings for `vertebra_db::spanner` (`SpannerClient`, `ReadOnly` staleness queries,
-//! `ReadWrite` transactions with `ExecuteSql` and `ExecuteBatchDml`, `PartitionedDml`,
-//! write-only mutations, `BatchWrite`, `UpdateDatabaseDdl`, and parallel `PartitionQuery`
-//! + Data Boost queries).
+//! `vertebra-spanner` crate and `vertebra._spanner` PyO3 extension module.
+
+pub mod client;
+pub mod errors;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
-use vertebra_db::spanner::{
+use vertebra_db::py_async::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task_with_attr};
+
+use crate::client::{
     ProtobufValue, SpannerBatchDmlStatement, SpannerBatchWriteResult,
     SpannerClient as NativeSpannerClient, SpannerClientConfig, SpannerCommitResult, SpannerDialect,
     SpannerError, SpannerMutation, SpannerMutationGroup, SpannerQueryResult, SpannerStaleness,
     SpannerStructField, SpannerValue, parse_spanner_parameters_json,
 };
-
-use crate::completion::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task};
 use crate::errors::spanner_error_to_py;
+
+const SPANNER_COMPLETION_DRAINER_ATTR: &str = "_vertebra_spanner_completion_drainer";
+
+/// Whether this build targets free-threaded Python (3.14t+).
+#[cfg(Py_GIL_DISABLED)]
+pub const FREE_THREADED: bool = true;
+#[cfg(not(Py_GIL_DISABLED))]
+pub const FREE_THREADED: bool = false;
 
 fn parse_staleness(mode: &str, ms_or_micros: i64) -> SpannerStaleness {
     match mode.trim().to_ascii_lowercase().as_str() {
@@ -159,7 +167,11 @@ fn parse_mutation_value(item: &serde_json::Value) -> Result<SpannerMutation, Spa
         ));
     }
     if op == "delete" {
-        let all = item.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
+        let all = item
+            .get("all")
+            .or_else(|| item.get("all_rows"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let keys = item
             .get("keys")
             .and_then(|v| v.as_array())
@@ -303,10 +315,10 @@ fn build_spanner_config(
     cfg
 }
 
-/// Synchronous pure-Rust Google Cloud Spanner v1 client exposed to Python (`vertebra._vertebra.SyncSpannerClient`).
+/// Synchronous pure-Rust Google Cloud Spanner v1 client exposed to Python (`vertebra._spanner.SyncSpannerClient`).
 #[pyclass(
     name = "SyncSpannerClient",
-    module = "vertebra._vertebra",
+    module = "vertebra._spanner",
     frozen,
     immutable_type
 )]
@@ -602,10 +614,10 @@ impl PySyncSpannerClient {
     }
 }
 
-/// Asynchronous pure-Rust Google Cloud Spanner v1 client exposed to Python (`vertebra._vertebra.AsyncSpannerClient`).
+/// Asynchronous pure-Rust Google Cloud Spanner v1 client exposed to Python (`vertebra._spanner.AsyncSpannerClient`).
 #[pyclass(
     name = "AsyncSpannerClient",
-    module = "vertebra._vertebra",
+    module = "vertebra._spanner",
     frozen,
     immutable_type
 )]
@@ -723,11 +735,12 @@ impl PyAsyncSpannerClient {
             .map_err(|e| spanner_error_to_py(py, e))?;
         let staleness = parse_staleness(staleness_mode, staleness_ms);
         let client = Arc::clone(&self.inner);
-        spawn_rust_db_task(
+        spawn_rust_db_task_with_attr(
             py,
             async move { client.query(&sql, &params, staleness).await },
             query_result_to_py,
             spanner_error_to_py,
+            SPANNER_COMPLETION_DRAINER_ATTR,
         )
     }
 
@@ -743,7 +756,7 @@ impl PyAsyncSpannerClient {
         let params = parse_spanner_parameters_json(params_json.as_deref())
             .map_err(|e| spanner_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
-        spawn_rust_db_task(
+        spawn_rust_db_task_with_attr(
             py,
             async move {
                 client
@@ -757,6 +770,7 @@ impl PyAsyncSpannerClient {
             },
             |py, count| Ok(count.into_pyobject(py)?.into_any().unbind()),
             spanner_error_to_py,
+            SPANNER_COMPLETION_DRAINER_ATTR,
         )
     }
 
@@ -771,7 +785,7 @@ impl PyAsyncSpannerClient {
         let stmts = parse_batch_dml_statements_json(&statements_json)
             .map_err(|e| spanner_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
-        spawn_rust_db_task(
+        spawn_rust_db_task_with_attr(
             py,
             async move {
                 client
@@ -780,6 +794,7 @@ impl PyAsyncSpannerClient {
             },
             |py, counts| Ok(counts.into_pyobject(py)?.into_any().unbind()),
             spanner_error_to_py,
+            SPANNER_COMPLETION_DRAINER_ATTR,
         )
     }
 
@@ -794,7 +809,7 @@ impl PyAsyncSpannerClient {
         let params = parse_spanner_parameters_json(params_json.as_deref())
             .map_err(|e| spanner_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
-        spawn_rust_db_task(
+        spawn_rust_db_task_with_attr(
             py,
             async move {
                 client
@@ -803,6 +818,7 @@ impl PyAsyncSpannerClient {
             },
             |py, count| Ok(count.into_pyobject(py)?.into_any().unbind()),
             spanner_error_to_py,
+            SPANNER_COMPLETION_DRAINER_ATTR,
         )
     }
 
@@ -817,7 +833,7 @@ impl PyAsyncSpannerClient {
         let mutations =
             parse_mutations_json(&mutations_json).map_err(|e| spanner_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
-        spawn_rust_db_task(
+        spawn_rust_db_task_with_attr(
             py,
             async move {
                 client
@@ -830,6 +846,7 @@ impl PyAsyncSpannerClient {
             },
             commit_result_to_py,
             spanner_error_to_py,
+            SPANNER_COMPLETION_DRAINER_ATTR,
         )
     }
 
@@ -843,7 +860,7 @@ impl PyAsyncSpannerClient {
         let groups = parse_mutation_groups_json(&mutation_groups_json)
             .map_err(|e| spanner_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
-        spawn_rust_db_task(
+        spawn_rust_db_task_with_attr(
             py,
             async move {
                 client
@@ -852,16 +869,18 @@ impl PyAsyncSpannerClient {
             },
             batch_write_results_to_py,
             spanner_error_to_py,
+            SPANNER_COMPLETION_DRAINER_ATTR,
         )
     }
 
     fn update_ddl(&self, py: Python<'_>, statements: Vec<String>) -> PyResult<RustDbTaskAwaitable> {
         let client = Arc::clone(&self.inner);
-        spawn_rust_db_task(
+        spawn_rust_db_task_with_attr(
             py,
             async move { client.update_database_ddl(&statements).await },
             |py, op_name| Ok(op_name.into_pyobject(py)?.into_any().unbind()),
             spanner_error_to_py,
+            SPANNER_COMPLETION_DRAINER_ATTR,
         )
     }
 
@@ -888,7 +907,7 @@ impl PyAsyncSpannerClient {
             .map_err(|e| spanner_error_to_py(py, e))?;
         let staleness = parse_staleness(staleness_mode, staleness_ms);
         let client = Arc::clone(&self.inner);
-        spawn_rust_db_task(
+        spawn_rust_db_task_with_attr(
             py,
             async move {
                 client
@@ -897,11 +916,16 @@ impl PyAsyncSpannerClient {
             },
             query_result_to_py,
             spanner_error_to_py,
+            SPANNER_COMPLETION_DRAINER_ATTR,
         )
     }
 }
 
-pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+#[pymodule(gil_used = false)]
+pub fn _spanner(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add("FREE_THREADED", FREE_THREADED)?;
+    m.add("GIL_USED", false)?;
     m.add_class::<PySyncSpannerClient>()?;
     m.add_class::<PyAsyncSpannerClient>()?;
     Ok(())

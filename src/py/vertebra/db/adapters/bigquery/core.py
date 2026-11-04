@@ -7,32 +7,34 @@ import inspect
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Any, ClassVar, Final
+from typing import TYPE_CHECKING, Any, ClassVar, Final
 from urllib.parse import urlparse
 
 import msgspec
 
 from vertebra._vertebra import (
-    AsyncBigQueryClient as _RustAsyncBigQueryClient,
-)
-from vertebra._vertebra import (
     BigQueryError,
     hydrate_rows_vectorcall,
-)
-from vertebra._vertebra import (
-    SyncBigQueryClient as _RustSyncBigQueryClient,
 )
 from vertebra.db.adapters.bigquery.config import BigQueryConfig, BigQueryDryRunResult, ObjectTableConfig
 from vertebra.db.arrow import ArrowCursor, write_arrow_shm
 from vertebra.telemetry.db_propagation import SqlTracePropagator
 from vertebra.telemetry.otel import TraceContext
 from vertebra.typing import ImproperConfigurationError
-from vertebra.utils.module_loader import import_optional
+from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.schema import to_schema
 from vertebra.utils.serializers import decode_json, encode_json
 from vertebra.utils.text import split_qualified_identifier
 from vertebra.utils.type_converters import time_iso_convert
 from vertebra.utils.type_guards import get_msgspec_rename_config
+
+if TYPE_CHECKING:
+    from vertebra._bigquery import (
+        AsyncBigQueryClient as _RustAsyncBigQueryClient,
+    )
+    from vertebra._bigquery import (
+        SyncBigQueryClient as _RustSyncBigQueryClient,
+    )
 
 __all__ = ("BigQueryCore",)
 
@@ -53,12 +55,13 @@ class BigQueryCore:
     @classmethod
     def create_sync_rust_client(cls, config: BigQueryConfig) -> _RustSyncBigQueryClient:
         """Instantiate the native Rust `SyncBigQueryClient` from `config`."""
+        bq_mod = ensure_module("vertebra._bigquery", package="vertebra-core[bigquery]", extra="bigquery")
         project_id = config.effective_project_id()
         dataset_id = config.effective_dataset_id()
         sanitized_labels = cls.sanitize_labels(config.labels, None)
         auth_options = config.build_auth_options()
 
-        return _RustSyncBigQueryClient(
+        client: _RustSyncBigQueryClient = bq_mod.SyncBigQueryClient(
             project_id=project_id,
             dataset_id=dataset_id,
             location=config.location,
@@ -72,16 +75,18 @@ class BigQueryCore:
             pool_size=max(1, config.pool_size),
             ca_pem=config.ca_pem,
         )
+        return client
 
     @classmethod
     def create_async_rust_client(cls, config: BigQueryConfig) -> _RustAsyncBigQueryClient:
         """Instantiate the native Rust `AsyncBigQueryClient` from `config`."""
+        bq_mod = ensure_module("vertebra._bigquery", package="vertebra-core[bigquery]", extra="bigquery")
         project_id = config.effective_project_id()
         dataset_id = config.effective_dataset_id()
         sanitized_labels = cls.sanitize_labels(config.labels, None)
         auth_options = config.build_auth_options()
 
-        return _RustAsyncBigQueryClient(
+        client: _RustAsyncBigQueryClient = bq_mod.AsyncBigQueryClient(
             project_id=project_id,
             dataset_id=dataset_id,
             location=config.location,
@@ -95,6 +100,7 @@ class BigQueryCore:
             pool_size=max(1, config.pool_size),
             ca_pem=config.ca_pem,
         )
+        return client
 
     @classmethod
     def encode_parameters_json(
