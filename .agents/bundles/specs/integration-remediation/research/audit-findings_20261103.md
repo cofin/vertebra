@@ -135,7 +135,7 @@ Each finding names its owning child flow in brackets. Confidence is high unless 
 - `expires_in` returns -1 where Litestar expects `None`.
 - About 100 lines are copy-pasted between `KeyValueStore` and `MemoryStore`.
 - `extensions/litestar/channels.py::swap_channels_backend` monkeypatches `plugin._backend` and `stores._stores`.
-- `LitestarConfig` defaults `swap_memory_channels=True` and `swap_memory_response_cache=True`.
+- `VertebraConfig` defaults `swap_memory_channels=True` and `swap_memory_response_cache=True`.
 
 ### 3.3 Embeddings [critical-correctness-fixes for bugs, db-driver-foundation for relocation, runtime-structure-and-throughput for transport]
 - `embeddings/_spanner.py::SpannerEmbedder._embed_batch_impl` uses `except Exception: rows = []`, then substitutes `_deterministic_vector` (SHA-256 noise). Rows are matched to texts by index with no length check.

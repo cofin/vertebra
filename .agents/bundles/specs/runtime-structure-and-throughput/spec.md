@@ -2,7 +2,7 @@
 type: Spec
 flow_id: runtime-structure-and-throughput
 title: Fastpath, Rust Module, and Helper Cleanup
-description: Unify per-framework fastpaths behind a shared core and provider registry, make loop backend selection table-driven, split the Rust GCP modules with shared proto/status/retry/auth helpers, remove hot-path copies, give VertexEmbedder a real HTTP/2 transport, and remove Python fallbacks behind the public utils helpers.
+description: Unify per-framework fastpaths behind a shared core and provider registry, make loop backend selection table-driven, split large Rust GCP crates into focused submodules with shared protobuf wire helpers, remove hot-path copies, give VertexEmbedder a Rust HTTP/2 transport, and remove Python fallbacks behind mandatory Rust utils helpers.
 state: draft
 parent_prd: integration-remediation
 research:
@@ -13,7 +13,7 @@ state_revision: 0
 current_task: null
 last_verified_checkpoint: null
 created_at: 2026-11-03T03:30:00Z
-updated_at: 2026-11-03T03:30:00Z
+updated_at: 2026-11-04T01:17:00Z
 tags: [fastpath, rust, performance, utils, embeddings]
 ---
 
@@ -21,86 +21,63 @@ tags: [fastpath, rust, performance, utils, embeddings]
 
 ## Charter
 
-This flow removes structural duplication and hot-path waste left by the merged range, without changing public behavior. The `vertebra.utils.*` helpers are public user API: their names and behavior are preserved, and only the internal Python fallbacks behind mandatory Rust are removed. This charter may split into two flows (Python runtime and Rust GCP structure) at `/flow:plan` time if it exceeds 8 tasks.
+This flow removes structural duplication and hot-path allocation waste across the Python server fastpaths, Rust crates, embeddings transport, and `vertebra.utils` helpers without changing public behavior. `vertebra.utils.*` helpers remain public user API: their names and semantics stay intact while internal `_py_*` fallbacks shadowing mandatory Rust bindings are removed. This charter may split into two flows (Python runtime fastpath/utils and Rust/embeddings throughput) at `/flow:plan` time if task count exceeds 8.
 
 ## Scope
 
 1. **Fastpath core.**
-   - New `server/_fastpath_core.py` holds a shared `CompiledRoute`, `DirectPlan`, parameter coercion, scalar query converters, `step_coro_sync`, and an exception-serializer hook.
-   - A `FastPathProvider` protocol (`detect(app)`, `build(app, prefix)`) is registered by each `extensions/<fw>/fastpath.py`. This replaces class-name sniffing in `attach_framework_fastpath`.
-   - The fastpath attribute aliases collapse to one.
-   - `litestar/fastpath.py::FastPath` binds explicitly through `from_app`.
-   - The duplicated type guards move to `utils.type_guards`.
+   - Create `src/py/vertebra/server/_fastpath_core.py` holding shared `CompiledRoute`, `DirectPlan`, parameter coercion, scalar query converters, `step_coro_sync`, and an exception-serializer hook.
+   - Define `FastPathProvider` (`detect(app)`, `build(app, prefix)`) registered by each `extensions/<fw>/fastpath.py`, replacing class-name sniffing in `attach_framework_fastpath`.
+   - Collapse fastpath attribute aliases to one canonical attribute, bind `extensions/litestar/fastpath.py::FastPath` explicitly via `from_app`, and consolidate duplicated type guards in `vertebra.utils.type_guards`.
 2. **Hot path.**
-   - `extract_scope_body_fast` enforces a body-size cap.
-   - `wrap_asgi_fastpath` calls the body accessor once.
-   - `serialize_fastpath_special_result` dispatches on type and passes Arrow buffers zero-copy.
-   - `_AsgiSend.send_raw_response` keeps bytes headers.
-3. **Loops.**
-   - `server/_loops.py::resolve_loop_backend` becomes table-driven, and its quarantine check considers only loop modules.
-   - The repeated "bucket and call_soon_threadsafe" blocks collapse into one helper.
-   - `framework/_app.py::add_route` evicts the welcome route only for `GET /`.
-   - `_welcome.py` HTML/CSS moves to package data.
-4. **Rust GCP structure.**
-   - `vertebra-core/src/proto.rs`: wire reader/writer, varint, and well-known types. It replaces the varint copies in `dialer.rs` and `vector.rs`.
-   - `vertebra-db/src/grpc/{status,framing,channel,retry,auth}.rs`: one `google.rpc.Status` decoder, one LPM framer shared with `vertebra-http`/`vertebra-py`, one retry policy with backoff that honors RetryInfo, and shared Google metadata.
-   - `vertebra-db/src/spanner/` and `bigquery/` submodule splits, plus an `arrow_ipc.rs` for the IPC helpers.
-   - `completion.rs` is renamed to `async_bridge`.
-   - The Spanner request id moves to `extra_headers`.
-   - `GrpcPoolConfig` window settings are made effective.
-   - Glob re-exports and the empty `duckdb` feature are removed.
-   - `json_cell_to_protobuf_value` is deduplicated.
-   - `percent-encoding`, `url`, and the `getrandom` crate (with a fork guard) are adopted.
-   - Dead code is removed (`SpannerTypeCode::Unspecified` no-op, `generate_request_uuid_v4`, the public test-only `decode_append_rows_request`).
-   - SAFETY comments are added on the `arrow_shm.rs` unsafe blocks, and `allocate_shm_region` errors instead of falling back to anonymous memory.
-   - Python honors `max_commit_delay_ms`.
+   - Enforce a payload size cap in `extract_scope_body_fast`.
+   - Call the body accessor once in `wrap_asgi_fastpath`.
+   - Dispatch `serialize_fastpath_special_result` by type and pass Arrow buffers zero-copy.
+   - Preserve `bytes` headers in `_AsgiSend.send_raw_response`.
+3. **Loops and welcome route.**
+   - Make `server/_loops.py::resolve_loop_backend` table-driven and scope its free-threaded quarantine check strictly to loop modules (`AsyncLoopShardedResource` / `SyncLoopShardedResource`).
+   - Consolidate repeated loop bucket + `call_soon_threadsafe` dispatch blocks into one helper.
+   - Evict the welcome route in `framework/_app.py::add_route` only when `GET /` is registered, and move `_welcome.py` HTML/CSS to package data.
+4. **Rust module structure and GCP polish.**
+   - Add `vertebra-core/src/proto.rs` (minimal protobuf wire reader/writer and varint helpers) deduplicating varint codecs in `vertebra-db/src/dialer.rs`, `vertebra-core/src/vector.rs`, and `vertebra-py/src/vector.rs`.
+   - Split `src/rs/vertebra-spanner/src/` and `src/rs/vertebra-bigquery/src/` into focused submodules (`client.rs`, `codec.rs`, `arrow_ipc.rs`), rename `src/rs/vertebra-py/src/completion.rs` to `src/rs/vertebra-py/src/async_bridge.rs` (delegating to `vertebra_db::py_async` while `SyncCompletionQueue`, `AsyncCompletionQueue`, and `Notifier` remain in `src/rs/vertebra-core/src/notify.rs`), add `// SAFETY:` comments on `src/rs/vertebra-db/src/arrow_shm.rs` `unsafe` blocks, deduplicate `json_cell_to_protobuf_value`, adopt `getrandom` where non-GCP hand-rolled PRNG helpers remain, and wire Python `SpannerConfig.max_commit_delay_ms` through to Rust `SyncSpannerClient` / `AsyncSpannerClient` commit options.
 5. **Rust throughput.**
-   - `append_arrow_stream` uses `PyBackedBytes` + `Bytes::slice` with in-place frame headers and streaming encode.
-   - `read_table_to_shm_arrow_with_compression` writes in stream order.
-   - `GrpcFrameStream` takes a zero-copy path for complete frames.
-   - `GrpcChannelPool::acquire_sender` uses `ArcSwap` and does not lock while dialling.
-   - Spanner per-RPC allocations are removed (cached metadata/URI/bearer, no param clones, a `VecDeque` in `PartialResultSetAssembler`).
-6. **Embeddings transport.**
-   - `embeddings/_google.py::VertexEmbedder` uses the Rust HTTP/2 client with trailers and the correct Vertex service. The micro-batcher is loop-local.
-   - `Embedder._run_sync` reuses one portal.
-   - `EmbeddingBroker` offloads inference with `to_thread` and fixes the queue data structure.
-   - `GeminiEmbedder.embed_multimodal` sends the media.
-   - `OracleEmbedder` batches through `UTL_TO_EMBEDDINGS`.
-   - `Embedder.__new__` no longer double-initializes.
-   - `embeddings/__init__.py` stops eagerly importing the engine embedders.
-7. **Utils (public helpers kept).**
-   - Remove the `_py_*` fallbacks and `_LATIN_FOLD_MAP` from `utils/text.py` and `utils/humanize.py`, binding the public functions directly to Rust.
-   - Stop `humanize.py` importing text privates.
-   - Remove the test hook and redundant tiers from `utils/uuids.py`, keeping whichever of Rust and stdlib benchmarks faster.
-   - `module_loader.py::import_optional` uses `sys.modules` and caches misses.
-   - Every public helper gets a docs entry and a public-seam test.
+   - Refactor `vertebra-bigquery` `append_arrow_stream` to slice `PyBackedBytes` + `Bytes::slice` zero-copy with in-place frame headers instead of copying entire IPC payloads.
+   - Eliminate avoidable per-RPC parameter and metadata clones in `src/rs/vertebra-spanner` and `src/rs/vertebra-bigquery`.
+6. **Embeddings transport and broker.**
+   - Wire `embeddings/_google.py::VertexEmbedder` (`SyncGcpTokenCache` / `AsyncGcpTokenCache`) onto a Rust HTTP/2 client with gRPC trailers and Vertex `Predict` endpoint framing, keeping its micro-batcher loop-local.
+   - Reuse one background portal in `Embedder._run_sync`, offload `EmbeddingBroker` model inference via `asyncio.to_thread` with a bounded queue structure, send media bytes in `GeminiEmbedder.embed_multimodal`, avoid double initialization in `Embedder.__new__`, and upgrade `vertebra/db/adapters/oracle/embeddings.py::OracleEmbeddingPushdown` batch embedding to `DBMS_VECTOR.UTL_TO_EMBEDDINGS`.
+7. **Utils (public helpers preserved).**
+   - Remove `_py_*` fallbacks and `_LATIN_FOLD_MAP` from `utils/text.py` and `utils/humanize.py`, binding public helpers directly to `vertebra._vertebra`.
+   - Remove private cross-imports from `humanize.py` into `text.py` privates.
+   - Remove the test hook and redundant fallback tiers in `utils/uuids.py`, keeping whichever of Rust or stdlib benchmarks faster.
+   - Verify `utils/module_loader.py::import_optional` fast-paths `sys.modules` hits alongside cached negative lookups, and ensure every public `vertebra.utils.*` helper has documentation and public-seam unit tests.
 
 ## Out of Scope
 
-- Wire correctness (Chapter 2) and MCP (Chapter 7).
+- Spanner/BigQuery official crate migration and `grpc.rs` removal (completed in `gcp-wire-protocol-correctness`), GCP task panic/cancel and typed error hierarchy (completed in `gcp-driver-resilience`), `Sync*`/`Async*` class splits (completed on `refactor/sync-async-names`), `vertebra-bigquery`/`vertebra-spanner` wheel extraction (`db-layout-and-contract`), `embeddings/__init__.py` lazy exports and pushdown relocation (`db-engine-primitives`), `allocate_shm_region` explicit errors (`storage-completeness`), and MCP core (`mcp-webmcp-core`).
 
 ## Public Seams
 
-`FastPathProvider`, the unchanged `vertebra.utils.*` public names, and `_vertebra.pyi` (renamed bridge types).
+`FastPathProvider`, unchanged `vertebra.utils.*` public functions, and `vertebra._vertebra` (`async_bridge` symbols).
 
 ## Dependencies
 
-Chapters 2 and 3.
+`gcp-wire-protocol-correctness` (completed), `gcp-driver-resilience` (completed), `refactor/sync-async-names` (`08ac03a`), `native-data-platform/db-layout-and-contract`, and `db-engine-primitives`.
 
 ## Acceptance Boundary
 
-- `make bench-check` shows no regression.
-- `make rs-bench` improves on the append/read paths.
-- The fastpath per-framework conformance tests pass.
-- `make lint-all`, `make rs-test`, `make py-test`, and `make ts-test` pass.
+- `make bench-check` shows no regression and `make rs-bench` improves on Arrow append/read paths.
+- Per-framework fastpath conformance tests pass across Litestar, Starlette, FastAPI, Flask, Django, and `App`.
+- `make lint-all`, `make rs-test`, `make py-test`, `make ts-test`, and `make docs` pass.
 
 ## Draft Task Outline
 
-- t01 Fastpath core + provider registry.
-- t02 Hot-path fixes.
-- t03 Loops/welcome cleanup.
-- t04 Rust proto/grpc shared modules.
-- t05 Rust Spanner/BigQuery module splits + dead code.
-- t06 Rust throughput.
-- t07 Embeddings transport/broker.
-- t08 Utils fallback removal + docs.
+- t01 Fastpath core + `FastPathProvider` registry.
+- t02 Hot-path body cap, zero-copy Arrow response, and raw header bytes.
+- t03 Table-driven loop backend + welcome route package data.
+- t04 `vertebra-core::proto` + `vertebra-py/src/async_bridge.rs` rename + `vertebra-db/src/arrow_shm.rs` SAFETY comments.
+- t05 `vertebra-spanner` / `vertebra-bigquery` submodule split + `max_commit_delay_ms`.
+- t06 Zero-copy `append_arrow_stream` + Spanner/BigQuery allocation trimming.
+- t07 `VertexEmbedder` HTTP/2 transport, `EmbeddingBroker` offload, and `OracleEmbeddingPushdown` batch `UTL_TO_EMBEDDINGS`.
+- t08 `vertebra.utils` fallback removal, docs, and public-seam tests.
