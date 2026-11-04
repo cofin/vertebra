@@ -3,6 +3,8 @@
 from collections.abc import Awaitable, Buffer, Sequence
 from typing import Any, Self, final
 
+from vertebra.typing import VertebraError
+
 __version__: str
 FREE_THREADED: bool
 GIL_USED: bool
@@ -16,10 +18,14 @@ __all__ = [
     "AsgiScope",
     "AsgiScopeIterator",
     "BigQueryClient",
+    "BigQueryError",
+    "BigQueryRowError",
     "BrokerStats",
     "CloudSQLDialer",
     "GcpTokenCache",
     "GcpTokenSnapshot",
+    "GoogleCloudAuthError",
+    "GoogleCloudError",
     "Headers",
     "HeadersIterator",
     "JWTGuard",
@@ -39,11 +45,14 @@ __all__ = [
     "RustDbTaskAwaitable",
     "SchemaDigestCache",
     "SimilarityMatch",
+    "SpannerAbortedError",
     "SpannerClient",
+    "SpannerError",
     "StatementCache",
     "StatementCacheStats",
     "StatementPlan",
     "StaticEmbedderCore",
+    "TaskPanicError",
     "VectorBatchView",
     "VectorCache",
     "VectorView",
@@ -1271,9 +1280,38 @@ def uuid7_u128() -> int: ...
 def uuid7_str() -> str: ...
 def nanoid_generate(size: int = 21) -> str: ...
 
+class TaskPanicError(RuntimeError):
+    """Raised when a Rust background task panics before producing a result."""
+
+class GoogleCloudError(VertebraError):
+    """Error returned by a Google Cloud client; carries the canonical gRPC status in `code`, `code_name`, `message`, `http_status`, `retry_delay_ms`, and `reason`."""
+
+    code: int
+    code_name: str
+    message: str
+    http_status: int | None
+    retry_delay_ms: int | None
+    reason: str | None
+
+class GoogleCloudAuthError(GoogleCloudError):
+    """Credentials could not be obtained or were rejected."""
+
+class SpannerError(GoogleCloudError):
+    """Error returned by a Cloud Spanner operation."""
+
+class SpannerAbortedError(SpannerError):
+    """Spanner aborted the transaction; the whole transaction can be retried."""
+
+class BigQueryError(GoogleCloudError):
+    """Error returned by a BigQuery operation."""
+
+class BigQueryRowError(BigQueryError):
+    """BigQuery Storage Write rejected rows; see `row_errors`."""
+
+    row_errors: list[tuple[int, int, str]]
+
 @final
 class RustDbTaskAwaitable:
-    def __new__(cls) -> RustDbTaskAwaitable: ...
     def __await__(self) -> Any: ...
 
 @final

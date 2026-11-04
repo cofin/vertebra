@@ -339,7 +339,9 @@ impl PyGcpTokenCache {
     #[pyo3(signature = (options))]
     fn new(py: Python<'_>, options: HashMap<String, String>) -> PyResult<Self> {
         let inner = py
-            .detach(|| NativeGcpTokenCache::from_gcs_options(&options))
+            .detach(|| {
+                NativeGcpTokenCache::from_options(&options, crate::gcp_auth::GCS_OAUTH_SCOPES)
+            })
             .ok_or_else(|| {
                 PyValueError::new_err("unable to configure GcpTokenCache from options")
             })?;

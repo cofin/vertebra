@@ -10,6 +10,7 @@ pub mod bigquery;
 pub mod broker;
 pub mod completion;
 pub mod db;
+pub mod errors;
 pub mod file_io;
 pub mod gcp_auth;
 pub mod headers;
@@ -34,7 +35,7 @@ pub use bigquery::PyBigQueryClient;
 pub use broker::{
     BrokerStats, LeaseBroker, LeaseGrant, StatementCache, StatementCacheStats, StatementPlan,
 };
-pub use completion::RustDbTaskAwaitable;
+pub use completion::{RustDbTaskAwaitable, TaskPanicError};
 pub use db::{AlloyDBDialer, ArrowCursor, CloudSQLDialer};
 pub use gcp_auth::{PyGcpTokenCache, PyGcpTokenSnapshot};
 pub use headers::{Headers, HeadersIterator};
@@ -147,6 +148,7 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Native database dialers, wire codecs, and SHM Arrow IPC cursors
     completion::register(m)?;
+    errors::register(m)?;
     gcp_auth::register(m)?;
     bigquery::register(m)?;
     spanner::register(m)?;

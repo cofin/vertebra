@@ -34,6 +34,12 @@ pub const DEFAULT_SPANNER_ENDPOINT: &str = "https://spanner.googleapis.com";
 /// Default Cloud Spanner DatabaseAdmin REST endpoint.
 pub const DEFAULT_SPANNER_ADMIN_ENDPOINT: &str = "https://spanner.googleapis.com";
 
+/// Default OAuth2 scopes for Cloud Spanner data-plane and platform authentication.
+pub const SPANNER_OAUTH_SCOPES: &[&str] = &[
+    "https://www.googleapis.com/auth/spanner.data",
+    "https://www.googleapis.com/auth/cloud-platform",
+];
+
 /// Default deadline (`600 s`) for `UpdateDatabaseDdl` long-running operation polling.
 pub const DEFAULT_DDL_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -748,9 +754,10 @@ fn json_to_protobuf_value(val: &serde_json::Value, code: SpannerTypeCode) -> Pro
     }
 }
 
-/// Rewrite Spangres `$1..$N` positional placeholders into `@p1..@pN` outside string
-/// literals, quoted identifiers, dollar-quoted strings, and SQL comments, returning
-/// `(rewritten_sql, parameter_names_p1_to_pn)`.
+/// Rewrite Spangres-style `$1..$N` positional placeholders into GoogleSQL `@p1..@pN`
+/// outside GoogleSQL string/bytes literals (including triple-quoted and raw forms),
+/// backtick identifiers, and `--`, `#`, and `/* */` comments, returning
+/// `(rewritten_sql, ["p1", .., "pN"])`.
 pub fn rewrite_spangres_placeholders(sql: &str) -> (String, Vec<String>) {
     let bytes = sql.as_bytes();
     let len = bytes.len();
@@ -760,87 +767,42 @@ pub fn rewrite_spangres_placeholders(sql: &str) -> (String, Vec<String>) {
 
     while i < len {
         let b = bytes[i];
-        if b == b'\'' {
-            out.push('\'');
-            i += 1;
-            while i < len {
-                let c = bytes[i];
-                out.push(c as char);
-                i += 1;
-                if c == b'\'' {
-                    if i < len && bytes[i] == b'\'' {
-                        out.push('\'');
-                        i += 1;
-                    } else {
-                        break;
-                    }
-                }
-            }
+        if (b == b'\'' || b == b'"') && i + 2 < len && bytes[i + 1] == b && bytes[i + 2] == b {
+            let end = skip_triple_quoted(sql, i, b);
+            out.push_str(&sql[i..end]);
+            i = end;
             continue;
         }
-        if b == b'"' {
-            out.push('"');
-            i += 1;
-            while i < len {
-                let c = bytes[i];
-                out.push(c as char);
-                i += 1;
-                if c == b'"' {
-                    break;
-                }
-            }
+        if b == b'\'' || b == b'"' || b == b'`' {
+            let end = skip_quoted(sql, i, b);
+            out.push_str(&sql[i..end]);
+            i = end;
             continue;
         }
-        if b == b'-' && i + 1 < len && bytes[i + 1] == b'-' {
-            while i < len && bytes[i] != b'\n' {
-                out.push(bytes[i] as char);
-                i += 1;
-            }
+        if b == b'#' || (b == b'-' && i + 1 < len && bytes[i + 1] == b'-') {
+            let end = skip_line_comment(sql, i);
+            out.push_str(&sql[i..end]);
+            i = end;
             continue;
         }
         if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
-            out.push('/');
-            out.push('*');
-            i += 2;
-            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                out.push(bytes[i] as char);
-                i += 1;
-            }
-            if i + 1 < len {
-                out.push('*');
-                out.push('/');
-                i += 2;
-            }
+            let end = skip_block_comment(sql, i);
+            out.push_str(&sql[i..end]);
+            i = end;
             continue;
         }
-        if b == b'$' {
-            if i + 1 < len && bytes[i + 1].is_ascii_digit() && bytes[i + 1] != b'0' {
-                let start = i + 1;
-                let mut end = start;
-                while end < len && bytes[end].is_ascii_digit() {
-                    end += 1;
+        if b == b'$' && i + 1 < len && bytes[i + 1].is_ascii_digit() && bytes[i + 1] != b'0' {
+            let start = i + 1;
+            let mut end = start;
+            while end < len && bytes[end].is_ascii_digit() {
+                end += 1;
+            }
+            if let Ok(ord) = sql[start..end].parse::<usize>() {
+                if ord > max_ordinal {
+                    max_ordinal = ord;
                 }
-                if let Ok(ord) = sql[start..end].parse::<usize>() {
-                    if ord > max_ordinal {
-                        max_ordinal = ord;
-                    }
-                    out.push_str(&format!("@p{ord}"));
-                    i = end;
-                    continue;
-                }
-            } else if i + 1 < len && bytes[i + 1] == b'$' {
-                out.push('$');
-                out.push('$');
-                i += 2;
-                while i + 1 < len && !(bytes[i] == b'$' && bytes[i + 1] == b'$') {
-                    out.push(bytes[i] as char);
-                    i += 1;
-                }
-                if i + 1 < len {
-                    out.push('$');
-                    out.push('$');
-                    i += 2;
-                }
+                out.push_str(&format!("@p{ord}"));
+                i = end;
                 continue;
             }
         }
@@ -851,6 +813,71 @@ pub fn rewrite_spangres_placeholders(sql: &str) -> (String, Vec<String>) {
 
     let names = (1..=max_ordinal).map(|n| format!("p{n}")).collect();
     (out, names)
+}
+
+fn skip_quoted(sql: &str, start: usize, quote: u8) -> usize {
+    let bytes = sql.as_bytes();
+    let len = bytes.len();
+    let mut i = start + 1;
+    while i < len {
+        if bytes[i] == b'\\' {
+            i += 1;
+            if i < len {
+                let ch = sql[i..].chars().next().unwrap_or('\0');
+                i += ch.len_utf8().max(1);
+            }
+            continue;
+        }
+        if bytes[i] == quote {
+            return i + 1;
+        }
+        let ch = sql[i..].chars().next().unwrap_or('\0');
+        i += ch.len_utf8().max(1);
+    }
+    len
+}
+
+fn skip_triple_quoted(sql: &str, start: usize, quote: u8) -> usize {
+    let bytes = sql.as_bytes();
+    let len = bytes.len();
+    let mut i = start + 3;
+    while i < len {
+        if bytes[i] == b'\\' {
+            i += 1;
+            if i < len {
+                let ch = sql[i..].chars().next().unwrap_or('\0');
+                i += ch.len_utf8().max(1);
+            }
+            continue;
+        }
+        if i + 2 < len && bytes[i] == quote && bytes[i + 1] == quote && bytes[i + 2] == quote {
+            return i + 3;
+        }
+        let ch = sql[i..].chars().next().unwrap_or('\0');
+        i += ch.len_utf8().max(1);
+    }
+    len
+}
+
+fn skip_line_comment(sql: &str, start: usize) -> usize {
+    let bytes = sql.as_bytes();
+    let mut i = start;
+    while i < bytes.len() && bytes[i] != b'\n' {
+        i += 1;
+    }
+    i
+}
+
+fn skip_block_comment(sql: &str, start: usize) -> usize {
+    let bytes = sql.as_bytes();
+    let mut i = start + 2;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+            return i + 2;
+        }
+        i += 1;
+    }
+    bytes.len()
 }
 
 /// Read-only staleness bound (`google.spanner.v1.TransactionOptions.ReadOnly`).
@@ -1358,11 +1385,7 @@ impl SpannerClient {
         let token_cache = if config.is_cleartext() && config.auth_options.is_empty() {
             None
         } else {
-            let mut opts = config.auth_options.clone();
-            opts.entry("scopes".to_string()).or_insert_with(|| {
-                "https://www.googleapis.com/auth/spanner.data,https://www.googleapis.com/auth/spanner.admin,https://www.googleapis.com/auth/cloud-platform".to_string()
-            });
-            GcpTokenCache::from_options(&opts)
+            GcpTokenCache::from_options(&config.auth_options, SPANNER_OAUTH_SCOPES)
         };
         Ok(Self {
             config,

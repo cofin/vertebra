@@ -1084,6 +1084,71 @@ fn admin_endpoint_rule() {
     ));
 }
 
+#[test]
+fn spangres_placeholder_rewriter_lexes_googlesql_literals_and_comments() {
+    let cases: [(&str, &str, &str, usize); 8] = [
+        (
+            "non-ascii literal",
+            "SELECT 'é$1ü', $1",
+            "SELECT 'é$1ü', @p1",
+            1,
+        ),
+        (
+            "backslash escape",
+            r"SELECT 'it\'s $1', $2",
+            r"SELECT 'it\'s $1', @p2",
+            2,
+        ),
+        (
+            "double-quoted string",
+            r#"SELECT "a\"$1", $3"#,
+            r#"SELECT "a\"$1", @p3"#,
+            3,
+        ),
+        (
+            "backtick identifier",
+            "SELECT `col$1` FROM t WHERE x = $1",
+            "SELECT `col$1` FROM t WHERE x = @p1",
+            1,
+        ),
+        (
+            "triple quoted",
+            "SELECT '''line $1\n'still' $2''', $4",
+            "SELECT '''line $1\n'still' $2''', @p4",
+            4,
+        ),
+        (
+            "raw and bytes",
+            r"SELECT r'\$1', b'$2', rb'$3', $5",
+            r"SELECT r'\$1', b'$2', rb'$3', @p5",
+            5,
+        ),
+        (
+            "hash and dash comments",
+            "SELECT 1 # $1 ☃\n, 2 -- $2\nWHERE a = $6",
+            "SELECT 1 # $1 ☃\n, 2 -- $2\nWHERE a = @p6",
+            6,
+        ),
+        (
+            "dollar zero and unterminated",
+            "SELECT $0, '$1",
+            "SELECT $0, '$1",
+            0,
+        ),
+    ];
+    for (label, sql, expected_sql, max_ordinal) in cases {
+        let (rewritten, names) = rewrite_spangres_placeholders(sql);
+        assert_eq!(rewritten, expected_sql, "{label}");
+        assert_eq!(
+            names,
+            (1..=max_ordinal)
+                .map(|n| format!("p{n}"))
+                .collect::<Vec<_>>(),
+            "{label}"
+        );
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires Spanner emulator: set SPANNER_EMULATOR_HOST and VERTEBRA_SPANNER_EMULATOR_DATABASE"]
 async fn update_database_ddl_against_emulator() {

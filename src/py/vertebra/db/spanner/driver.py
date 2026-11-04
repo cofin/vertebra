@@ -12,6 +12,7 @@ import msgspec
 
 from vertebra._vertebra import (
     LeaseBroker,
+    SpannerAbortedError,
 )
 from vertebra._vertebra import (
     StatementCache as _RustStatementCache,
@@ -872,8 +873,8 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
                         exclude_txn_from_change_streams=exclude_txn_from_change_streams,
                     )
                 return result
-            except Exception as exc:
-                if attempt >= attempts or "aborted" not in str(exc).lower():
+            except SpannerAbortedError:
+                if attempt >= attempts:
                     raise
                 _time.sleep(0.01 * attempt)
         return None
@@ -1034,7 +1035,7 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
                 bound.effective_value(),
             )
         except Exception as exc:
-            if not SpannerCore.is_partitioned_arrow_fallback_error(exc):
+            if not SpannerCore.is_partitioned_query_fallback_error(exc):
                 raise
             raw = self._run_query_sync(sql, parameters, staleness=bound)
         return ArrowCursor.from_rows(
@@ -1527,8 +1528,8 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
                         exclude_txn_from_change_streams=exclude_txn_from_change_streams,
                     )
                 return result
-            except Exception as exc:
-                if attempt >= attempts or "aborted" not in str(exc).lower():
+            except SpannerAbortedError:
+                if attempt >= attempts:
                     raise
         return None
 
@@ -1690,7 +1691,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
                 bound.effective_value(),
             )
         except Exception as exc:
-            if not SpannerCore.is_partitioned_arrow_fallback_error(exc):
+            if not SpannerCore.is_partitioned_query_fallback_error(exc):
                 raise
             raw = await self._run_query_async(sql, parameters, staleness=bound)
         return ArrowCursor.from_rows(

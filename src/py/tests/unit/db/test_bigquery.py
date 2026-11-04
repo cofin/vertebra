@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from vertebra._vertebra import BigQueryClient, BigQueryError
 from vertebra.db import (
     ArrowCursor,
     AsyncBigQueryDriver,
@@ -20,10 +21,11 @@ from vertebra.db import (
     ObjectTableConfig,
     SyncBigQueryDriver,
 )
+from vertebra.db.bigquery.core import BigQueryCore
 from vertebra.embeddings import BigQueryEmbedder, EmbeddingError
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
 from vertebra.storage import ObjectStore, SigningConfig
-from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
+from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError, VertebraError
 
 
 class MetricRow(FrozenBaseStruct, frozen=True, gc=False):
@@ -494,3 +496,38 @@ async def test_bigquery_embedder_rejects_incomplete_results(rows: list[dict[str,
     )
     with pytest.raises(EmbeddingError):
         await embedder.embed_many(["alpha", "beta"])
+
+
+def test_bigquery_client_invalid_params_raise_typed_error() -> None:
+    """Sync BigQuery binding raises BigQueryError with INVALID_ARGUMENT for malformed parameters."""
+    client = BigQueryClient(project_id="p1", rest_endpoint="http://127.0.0.1:9")
+    with pytest.raises(BigQueryError) as excinfo:
+        client.query("SELECT 1", "not json")
+    assert excinfo.value.code == 3
+    assert excinfo.value.code_name == "INVALID_ARGUMENT"
+    assert isinstance(excinfo.value, VertebraError)
+
+
+@pytest.mark.anyio
+async def test_bigquery_client_invalid_params_raise_typed_error_async() -> None:
+    """Async BigQuery binding raises the same BigQueryError as the sync binding."""
+    client = BigQueryClient(project_id="p1", rest_endpoint="http://127.0.0.1:9")
+    with pytest.raises(BigQueryError) as excinfo:
+        await client.query_async("SELECT 1", "not json")
+    assert excinfo.value.code == 3
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [(7, True), (9, True), (12, True), (14, True), (5, False), (3, False)],
+)
+def test_storage_api_fallback_uses_status_codes(code: int, expected: bool) -> None:
+    """BigQuery Storage API fallback decisions use canonical codes, not message text."""
+    err = BigQueryError("storage read failure")
+    err.code = code
+    assert BigQueryCore.is_storage_api_fallback_error(err) is expected
+
+
+def test_storage_api_fallback_ignores_untyped_errors() -> None:
+    """A RuntimeError mentioning HTTP 403 is not a Storage API fallback signal."""
+    assert BigQueryCore.is_storage_api_fallback_error(RuntimeError("status 403")) is False

@@ -31,7 +31,7 @@ zstd = { workspace = true, optional = true }
 [features]
 default = ["compression", "gcp-auth"]
 compression = ["dep:lz4_flex", "dep:zstd"]
-gcp-auth = ["dep:reqwest", "dep:url", "dep:chrono"]
+gcp-auth = ["dep:reqwest", "dep:url", "dep:chrono", "tokio/process", "tokio/time"]
 macos-ulock = []
 
 [target.'cfg(unix)'.dependencies]
@@ -43,7 +43,9 @@ windows-sys = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 proptest = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros"] }
+reqwest = { workspace = true }
+tempfile = "3"
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
 
 [[bench]]
 name = "spsc"

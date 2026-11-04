@@ -15,6 +15,7 @@ from vertebra._vertebra import (
     SpannerClient as _RustSpannerClient,
 )
 from vertebra._vertebra import (
+    SpannerError,
     hydrate_rows_vectorcall,
 )
 from vertebra.db._arrow import ArrowCursor, write_arrow_shm
@@ -35,6 +36,7 @@ from vertebra.utils.type_guards import get_msgspec_rename_config
 __all__ = ("SpannerCore",)
 
 _MAX_MUTATION_CELLS_PER_BATCH: Final[int] = 80_000
+_PARTITIONED_QUERY_FALLBACK_CODES: Final[frozenset[int]] = frozenset({3, 7, 9, 12, 14})
 
 
 class SpannerCore:
@@ -72,26 +74,15 @@ class SpannerCore:
         return f"SELECT * FROM {stripped}"
 
     @staticmethod
-    def is_partitioned_arrow_fallback_error(exc: BaseException) -> bool:
-        """Return whether a `PartitionQuery` or Data Boost error should fall back to `ExecuteStreamingSql`."""
-        msg = str(exc).lower()
-        return any(
-            token in msg
-            for token in (
-                "databoost",
-                "data_boost",
-                "usedataboost",
-                "partitionquery",
-                "not partitionable",
-                "root partitionable",
-                "permission_denied",
-                "unimplemented",
-                "failed_precondition",
-                "invalid_argument",
-                "connection refused",
-                "connect error",
-            )
-        )
+    def is_partitioned_query_fallback_error(exc: BaseException) -> bool:
+        """Return whether a `PartitionQuery` error should fall back to `ExecuteStreamingSql`.
+
+        Matches canonical gRPC status codes on `SpannerError`: `3` (`INVALID_ARGUMENT`,
+        non-partitionable query), `7` (`PERMISSION_DENIED`, Data Boost not permitted),
+        `9` (`FAILED_PRECONDITION`, failed precondition), `12` (`UNIMPLEMENTED`,
+        `PartitionQuery` unimplemented), and `14` (`UNAVAILABLE`, endpoint unavailable).
+        """
+        return isinstance(exc, SpannerError) and getattr(exc, "code", None) in _PARTITIONED_QUERY_FALLBACK_CODES
 
     @staticmethod
     def coerce_mutation(item: Mutation | Mapping[str, Any]) -> Mutation:

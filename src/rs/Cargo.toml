@@ -34,6 +34,7 @@ google-cloud-longrunning = { version = "1.14", default-features = false }
 google-cloud-rpc = { version = "1.6", default-features = false }
 google-cloud-spanner = { version = "=0.34.8-preview", default-features = false }
 google-cloud-spanner-admin-database-v1 = { version = "1.15", default-features = false }
+google-cloud-wkt = { version = "1", default-features = false }
 hex = "0.4"
 hmac = "0.12"
 http = "1.2"

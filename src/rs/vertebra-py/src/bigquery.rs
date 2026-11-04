@@ -4,25 +4,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use vertebra_db::bigquery::{
     BigQueryAppendResult, BigQueryArrowCompression, BigQueryCellValue,
     BigQueryClient as NativeBigQueryClient, BigQueryClientConfig, BigQueryDryRunResult,
-    BigQueryError, BigQueryFieldSchema, BigQueryQueryOptions, BigQueryQueryResult,
-    parse_query_parameters_json,
+    BigQueryFieldSchema, BigQueryQueryOptions, BigQueryQueryResult, parse_query_parameters_json,
 };
 
 use crate::completion::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task};
 use crate::db::ArrowCursor;
-
-fn bq_err_to_py(err: BigQueryError) -> PyErr {
-    match err {
-        BigQueryError::InvalidArgument(msg) => PyValueError::new_err(msg),
-        other => PyRuntimeError::new_err(other.to_string()),
-    }
-}
+use crate::errors::bigquery_error_to_py;
 
 fn cell_to_py(py: Python<'_>, cell: &BigQueryCellValue) -> PyResult<Py<PyAny>> {
     match cell {
@@ -186,7 +178,7 @@ impl PyBigQueryClient {
 
         let client = py
             .detach(|| NativeBigQueryClient::new(cfg))
-            .map_err(bq_err_to_py)?;
+            .map_err(|e| bigquery_error_to_py(py, e))?;
         Ok(Self {
             inner: Arc::new(client),
         })
@@ -264,7 +256,8 @@ impl PyBigQueryClient {
         priority: Option<String>,
         labels: Option<HashMap<String, String>>,
     ) -> PyResult<Py<PyAny>> {
-        let params = parse_query_parameters_json(params_json).map_err(bq_err_to_py)?;
+        let params =
+            parse_query_parameters_json(params_json).map_err(|e| bigquery_error_to_py(py, e))?;
         let opts = BigQueryQueryOptions {
             session_id,
             create_session,
@@ -281,14 +274,11 @@ impl PyBigQueryClient {
         let sql_owned = sql.to_string();
         let res = py
             .detach(|| {
-                block_on_db(async move {
-                    client
-                        .query_with_options(&sql_owned, &params, &opts)
-                        .await
-                        .map_err(|e| e.to_string())
-                })
+                block_on_db(
+                    async move { client.query_with_options(&sql_owned, &params, &opts).await },
+                )
             })
-            .map_err(PyRuntimeError::new_err)?;
+            .map_err(|e| bigquery_error_to_py(py, e))?;
         query_result_to_py(py, res)
     }
 
@@ -319,7 +309,8 @@ impl PyBigQueryClient {
         priority: Option<String>,
         labels: Option<HashMap<String, String>>,
     ) -> PyResult<RustDbTaskAwaitable> {
-        let params = parse_query_parameters_json(params_json.as_deref()).map_err(bq_err_to_py)?;
+        let params = parse_query_parameters_json(params_json.as_deref())
+            .map_err(|e| bigquery_error_to_py(py, e))?;
         let opts = BigQueryQueryOptions {
             session_id,
             create_session,
@@ -337,25 +328,19 @@ impl PyBigQueryClient {
             py,
             async move { client.query_with_options(&sql, &params, &opts).await },
             query_result_to_py,
-            bq_err_to_py,
+            bigquery_error_to_py,
         )
     }
 
     #[pyo3(signature = (sql, params_json=None))]
     fn dry_run(&self, py: Python<'_>, sql: &str, params_json: Option<&str>) -> PyResult<Py<PyAny>> {
-        let params = parse_query_parameters_json(params_json).map_err(bq_err_to_py)?;
+        let params =
+            parse_query_parameters_json(params_json).map_err(|e| bigquery_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
         let sql_owned = sql.to_string();
         let res = py
-            .detach(|| {
-                block_on_db(async move {
-                    client
-                        .dry_run(&sql_owned, &params)
-                        .await
-                        .map_err(|e| e.to_string())
-                })
-            })
-            .map_err(PyRuntimeError::new_err)?;
+            .detach(|| block_on_db(async move { client.dry_run(&sql_owned, &params).await }))
+            .map_err(|e| bigquery_error_to_py(py, e))?;
         dry_run_result_to_py(py, res)
     }
 
@@ -366,13 +351,14 @@ impl PyBigQueryClient {
         sql: String,
         params_json: Option<String>,
     ) -> PyResult<RustDbTaskAwaitable> {
-        let params = parse_query_parameters_json(params_json.as_deref()).map_err(bq_err_to_py)?;
+        let params = parse_query_parameters_json(params_json.as_deref())
+            .map_err(|e| bigquery_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task(
             py,
             async move { client.dry_run(&sql, &params).await },
             dry_run_result_to_py,
-            bq_err_to_py,
+            bigquery_error_to_py,
         )
     }
 
@@ -417,10 +403,9 @@ impl PyBigQueryClient {
                             codec,
                         )
                         .await
-                        .map_err(|e| e.to_string())
                 })
             })
-            .map_err(PyRuntimeError::new_err)?;
+            .map_err(|e| bigquery_error_to_py(py, e))?;
         Ok(ArrowCursor::from_shm_region(
             shm_name, byte_len, row_count, region,
         ))
@@ -469,7 +454,7 @@ impl PyBigQueryClient {
                 let cursor = ArrowCursor::from_shm_region(shm_name, byte_len, row_count, region);
                 Ok(Py::new(py, cursor)?.into_any())
             },
-            bq_err_to_py,
+            bigquery_error_to_py,
         )
     }
 
@@ -491,10 +476,9 @@ impl PyBigQueryClient {
                     client
                         .append_arrow_stream(&table, &payload, &mode_owned)
                         .await
-                        .map_err(|e| e.to_string())
                 })
             })
-            .map_err(PyRuntimeError::new_err)?;
+            .map_err(|e| bigquery_error_to_py(py, e))?;
         append_result_to_py(py, res)
     }
 
@@ -516,7 +500,7 @@ impl PyBigQueryClient {
                     .await
             },
             append_result_to_py,
-            bq_err_to_py,
+            bigquery_error_to_py,
         )
     }
 }

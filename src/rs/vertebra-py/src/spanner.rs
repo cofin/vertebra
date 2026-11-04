@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use vertebra_db::spanner::{
@@ -17,13 +16,7 @@ use vertebra_db::spanner::{
 };
 
 use crate::completion::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task};
-
-fn spanner_err_to_py(err: SpannerError) -> PyErr {
-    match err {
-        SpannerError::InvalidArgument(msg) => PyValueError::new_err(msg),
-        other => PyRuntimeError::new_err(other.to_string()),
-    }
-}
+use crate::errors::spanner_error_to_py;
 
 fn parse_staleness(mode: &str, ms_or_micros: i64) -> SpannerStaleness {
     match mode.trim().to_ascii_lowercase().as_str() {
@@ -337,7 +330,7 @@ impl PySpannerClient {
 
         let client = py
             .detach(|| NativeSpannerClient::new(cfg))
-            .map_err(spanner_err_to_py)?;
+            .map_err(|e| spanner_error_to_py(py, e))?;
         Ok(Self {
             inner: Arc::new(client),
         })
@@ -392,20 +385,16 @@ impl PySpannerClient {
         staleness_mode: &str,
         staleness_ms: i64,
     ) -> PyResult<Py<PyAny>> {
-        let params = parse_spanner_parameters_json(params_json).map_err(spanner_err_to_py)?;
+        let params =
+            parse_spanner_parameters_json(params_json).map_err(|e| spanner_error_to_py(py, e))?;
         let staleness = parse_staleness(staleness_mode, staleness_ms);
         let client = Arc::clone(&self.inner);
         let sql_owned = sql.to_string();
         let res = py
             .detach(|| {
-                block_on_db(async move {
-                    client
-                        .query(&sql_owned, &params, staleness)
-                        .await
-                        .map_err(|e| e.to_string())
-                })
+                block_on_db(async move { client.query(&sql_owned, &params, staleness).await })
             })
-            .map_err(PyRuntimeError::new_err)?;
+            .map_err(|e| spanner_error_to_py(py, e))?;
         query_result_to_py(py, res)
     }
 
@@ -418,15 +407,15 @@ impl PySpannerClient {
         staleness_mode: &str,
         staleness_ms: i64,
     ) -> PyResult<RustDbTaskAwaitable> {
-        let params =
-            parse_spanner_parameters_json(params_json.as_deref()).map_err(spanner_err_to_py)?;
+        let params = parse_spanner_parameters_json(params_json.as_deref())
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let staleness = parse_staleness(staleness_mode, staleness_ms);
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task(
             py,
             async move { client.query(&sql, &params, staleness).await },
             query_result_to_py,
-            spanner_err_to_py,
+            spanner_error_to_py,
         )
     }
 
@@ -439,7 +428,8 @@ impl PySpannerClient {
         request_tag: Option<String>,
         transaction_tag: Option<String>,
     ) -> PyResult<i64> {
-        let params = parse_spanner_parameters_json(params_json).map_err(spanner_err_to_py)?;
+        let params =
+            parse_spanner_parameters_json(params_json).map_err(|e| spanner_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
         let sql_owned = sql.to_string();
         py.detach(|| {
@@ -452,10 +442,9 @@ impl PySpannerClient {
                         transaction_tag.as_deref(),
                     )
                     .await
-                    .map_err(|e| e.to_string())
             })
         })
-        .map_err(PyRuntimeError::new_err)
+        .map_err(|e| spanner_error_to_py(py, e))
     }
 
     #[pyo3(signature = (sql, params_json=None, request_tag=None, transaction_tag=None))]
@@ -467,8 +456,8 @@ impl PySpannerClient {
         request_tag: Option<String>,
         transaction_tag: Option<String>,
     ) -> PyResult<RustDbTaskAwaitable> {
-        let params =
-            parse_spanner_parameters_json(params_json.as_deref()).map_err(spanner_err_to_py)?;
+        let params = parse_spanner_parameters_json(params_json.as_deref())
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task(
             py,
@@ -483,7 +472,7 @@ impl PySpannerClient {
                     .await
             },
             |py, count| Ok(count.into_pyobject(py)?.into_any().unbind()),
-            spanner_err_to_py,
+            spanner_error_to_py,
         )
     }
 
@@ -495,17 +484,17 @@ impl PySpannerClient {
         request_tag: Option<String>,
         transaction_tag: Option<String>,
     ) -> PyResult<Vec<i64>> {
-        let stmts = parse_batch_dml_statements_json(statements_json).map_err(spanner_err_to_py)?;
+        let stmts = parse_batch_dml_statements_json(statements_json)
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
         py.detach(|| {
             block_on_db(async move {
                 client
                     .execute_batch_dml(&stmts, request_tag.as_deref(), transaction_tag.as_deref())
                     .await
-                    .map_err(|e| e.to_string())
             })
         })
-        .map_err(PyRuntimeError::new_err)
+        .map_err(|e| spanner_error_to_py(py, e))
     }
 
     #[pyo3(signature = (statements_json, request_tag=None, transaction_tag=None))]
@@ -516,7 +505,8 @@ impl PySpannerClient {
         request_tag: Option<String>,
         transaction_tag: Option<String>,
     ) -> PyResult<RustDbTaskAwaitable> {
-        let stmts = parse_batch_dml_statements_json(&statements_json).map_err(spanner_err_to_py)?;
+        let stmts = parse_batch_dml_statements_json(&statements_json)
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task(
             py,
@@ -526,7 +516,7 @@ impl PySpannerClient {
                     .await
             },
             |py, counts| Ok(counts.into_pyobject(py)?.into_any().unbind()),
-            spanner_err_to_py,
+            spanner_error_to_py,
         )
     }
 
@@ -538,7 +528,8 @@ impl PySpannerClient {
         params_json: Option<&str>,
         exclude_txn_from_change_streams: bool,
     ) -> PyResult<i64> {
-        let params = parse_spanner_parameters_json(params_json).map_err(spanner_err_to_py)?;
+        let params =
+            parse_spanner_parameters_json(params_json).map_err(|e| spanner_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
         let sql_owned = sql.to_string();
         py.detach(|| {
@@ -546,10 +537,9 @@ impl PySpannerClient {
                 client
                     .execute_partitioned_dml(&sql_owned, &params, exclude_txn_from_change_streams)
                     .await
-                    .map_err(|e| e.to_string())
             })
         })
-        .map_err(PyRuntimeError::new_err)
+        .map_err(|e| spanner_error_to_py(py, e))
     }
 
     #[pyo3(signature = (sql, params_json=None, exclude_txn_from_change_streams=false))]
@@ -560,8 +550,8 @@ impl PySpannerClient {
         params_json: Option<String>,
         exclude_txn_from_change_streams: bool,
     ) -> PyResult<RustDbTaskAwaitable> {
-        let params =
-            parse_spanner_parameters_json(params_json.as_deref()).map_err(spanner_err_to_py)?;
+        let params = parse_spanner_parameters_json(params_json.as_deref())
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task(
             py,
@@ -571,7 +561,7 @@ impl PySpannerClient {
                     .await
             },
             |py, count| Ok(count.into_pyobject(py)?.into_any().unbind()),
-            spanner_err_to_py,
+            spanner_error_to_py,
         )
     }
 
@@ -583,7 +573,8 @@ impl PySpannerClient {
         transaction_tag: Option<String>,
         exclude_txn_from_change_streams: bool,
     ) -> PyResult<Py<PyAny>> {
-        let mutations = parse_mutations_json(mutations_json).map_err(spanner_err_to_py)?;
+        let mutations =
+            parse_mutations_json(mutations_json).map_err(|e| spanner_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
         let res = py
             .detach(|| {
@@ -595,10 +586,9 @@ impl PySpannerClient {
                             exclude_txn_from_change_streams,
                         )
                         .await
-                        .map_err(|e| e.to_string())
                 })
             })
-            .map_err(PyRuntimeError::new_err)?;
+            .map_err(|e| spanner_error_to_py(py, e))?;
         commit_result_to_py(py, res)
     }
 
@@ -610,7 +600,8 @@ impl PySpannerClient {
         transaction_tag: Option<String>,
         exclude_txn_from_change_streams: bool,
     ) -> PyResult<RustDbTaskAwaitable> {
-        let mutations = parse_mutations_json(&mutations_json).map_err(spanner_err_to_py)?;
+        let mutations =
+            parse_mutations_json(&mutations_json).map_err(|e| spanner_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task(
             py,
@@ -624,7 +615,7 @@ impl PySpannerClient {
                     .await
             },
             commit_result_to_py,
-            spanner_err_to_py,
+            spanner_error_to_py,
         )
     }
 
@@ -635,7 +626,8 @@ impl PySpannerClient {
         mutation_groups_json: &str,
         exclude_txn_from_change_streams: bool,
     ) -> PyResult<Py<PyAny>> {
-        let groups = parse_mutation_groups_json(mutation_groups_json).map_err(spanner_err_to_py)?;
+        let groups = parse_mutation_groups_json(mutation_groups_json)
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
         let res = py
             .detach(|| {
@@ -643,10 +635,9 @@ impl PySpannerClient {
                     client
                         .batch_write(&groups, exclude_txn_from_change_streams)
                         .await
-                        .map_err(|e| e.to_string())
                 })
             })
-            .map_err(PyRuntimeError::new_err)?;
+            .map_err(|e| spanner_error_to_py(py, e))?;
         batch_write_results_to_py(py, res)
     }
 
@@ -657,8 +648,8 @@ impl PySpannerClient {
         mutation_groups_json: String,
         exclude_txn_from_change_streams: bool,
     ) -> PyResult<RustDbTaskAwaitable> {
-        let groups =
-            parse_mutation_groups_json(&mutation_groups_json).map_err(spanner_err_to_py)?;
+        let groups = parse_mutation_groups_json(&mutation_groups_json)
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task(
             py,
@@ -668,21 +659,14 @@ impl PySpannerClient {
                     .await
             },
             batch_write_results_to_py,
-            spanner_err_to_py,
+            spanner_error_to_py,
         )
     }
 
     fn update_ddl(&self, py: Python<'_>, statements: Vec<String>) -> PyResult<String> {
         let client = Arc::clone(&self.inner);
-        py.detach(|| {
-            block_on_db(async move {
-                client
-                    .update_database_ddl(&statements)
-                    .await
-                    .map_err(|e| e.to_string())
-            })
-        })
-        .map_err(PyRuntimeError::new_err)
+        py.detach(|| block_on_db(async move { client.update_database_ddl(&statements).await }))
+            .map_err(|e| spanner_error_to_py(py, e))
     }
 
     fn update_ddl_async(
@@ -695,7 +679,7 @@ impl PySpannerClient {
             py,
             async move { client.update_database_ddl(&statements).await },
             |py, op_name| Ok(op_name.into_pyobject(py)?.into_any().unbind()),
-            spanner_err_to_py,
+            spanner_error_to_py,
         )
     }
 
@@ -718,7 +702,8 @@ impl PySpannerClient {
         staleness_mode: &str,
         staleness_ms: i64,
     ) -> PyResult<Py<PyAny>> {
-        let params = parse_spanner_parameters_json(params_json).map_err(spanner_err_to_py)?;
+        let params =
+            parse_spanner_parameters_json(params_json).map_err(|e| spanner_error_to_py(py, e))?;
         let staleness = parse_staleness(staleness_mode, staleness_ms);
         let client = Arc::clone(&self.inner);
         let sql_owned = sql.to_string();
@@ -734,10 +719,9 @@ impl PySpannerClient {
                             staleness,
                         )
                         .await
-                        .map_err(|e| e.to_string())
                 })
             })
-            .map_err(PyRuntimeError::new_err)?;
+            .map_err(|e| spanner_error_to_py(py, e))?;
         query_result_to_py(py, res)
     }
 
@@ -760,8 +744,8 @@ impl PySpannerClient {
         staleness_mode: &str,
         staleness_ms: i64,
     ) -> PyResult<RustDbTaskAwaitable> {
-        let params =
-            parse_spanner_parameters_json(params_json.as_deref()).map_err(spanner_err_to_py)?;
+        let params = parse_spanner_parameters_json(params_json.as_deref())
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let staleness = parse_staleness(staleness_mode, staleness_ms);
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task(
@@ -772,7 +756,7 @@ impl PySpannerClient {
                     .await
             },
             query_result_to_py,
-            spanner_err_to_py,
+            spanner_error_to_py,
         )
     }
 }

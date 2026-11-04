@@ -7,11 +7,20 @@ import re
 import sqlite3
 import threading
 import time as _time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import pytest
 
+from vertebra._vertebra import (
+    BigQueryError,
+    BigQueryRowError,
+    GoogleCloudAuthError,
+    GoogleCloudError,
+    SpannerAbortedError,
+    SpannerClient,
+    SpannerError,
+)
 from vertebra.db import (
     AsyncSpannerDriver,
     DatabaseRegistry,
@@ -26,7 +35,7 @@ from vertebra.db import (
 from vertebra.db.spanner.core import SpannerCore
 from vertebra.embeddings import EmbeddingError, SpannerEmbedder
 from vertebra.storage import ObjectStore
-from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
+from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError, VertebraError
 from vertebra.utils.serializers import decode_json, encode_json
 
 
@@ -695,7 +704,7 @@ def test_sync_spanner_driver_crud_transactions_and_mutations() -> None:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            raise RuntimeError("Transaction ABORTED by Spanner")
+            raise SpannerAbortedError("Transaction ABORTED by Spanner")
         assert isinstance(tx, SpannerTransaction)
         tx.execute("UPDATE singers SET name = @name WHERE singer_id = @id", {"name": "Bobby", "id": 2})
         tx.insert_or_update("singers", ("singer_id", "name", "active"), [(4, "Dave", 1)])
@@ -915,3 +924,80 @@ def test_spanner_config_passes_admin_endpoint() -> None:
     )
     client = SpannerCore.create_rust_client(cfg)
     assert client.admin_endpoint == "http://localhost:9020"
+
+
+@pytest.mark.parametrize(
+    ("child", "parent"),
+    [
+        (GoogleCloudError, VertebraError),
+        (GoogleCloudAuthError, GoogleCloudError),
+        (SpannerError, GoogleCloudError),
+        (SpannerAbortedError, SpannerError),
+        (BigQueryError, GoogleCloudError),
+        (BigQueryRowError, BigQueryError),
+    ],
+)
+def test_google_cloud_error_hierarchy_derives_from_vertebra_error(
+    child: type[Exception], parent: type[Exception]
+) -> None:
+    """Every Google Cloud exception class sits under VertebraError in the documented order."""
+    assert issubclass(child, parent)
+    assert isinstance(child("m"), VertebraError)
+
+
+def test_spanner_client_invalid_params_raise_typed_error() -> None:
+    """Sync binding raises SpannerError with INVALID_ARGUMENT for malformed parameters."""
+    client = SpannerClient(database="projects/p/instances/i/databases/d", endpoint="http://127.0.0.1:9")
+    with pytest.raises(SpannerError) as excinfo:
+        client.query("SELECT 1", "not json")
+    assert excinfo.value.code == 3
+    assert excinfo.value.code_name == "INVALID_ARGUMENT"
+    assert isinstance(excinfo.value, VertebraError)
+
+
+@pytest.mark.anyio
+async def test_spanner_client_invalid_params_raise_typed_error_async() -> None:
+    """Async binding raises the same SpannerError as the sync binding."""
+    client = SpannerClient(database="projects/p/instances/i/databases/d", endpoint="http://127.0.0.1:9")
+    with pytest.raises(SpannerError) as excinfo:
+        await client.query_async("SELECT 1", "not json")
+    assert excinfo.value.code == 3
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [(3, True), (7, True), (9, True), (12, True), (14, True), (5, False), (10, False)],
+)
+def test_partitioned_query_fallback_uses_status_codes(code: int, expected: bool) -> None:
+    """Fallback decisions use canonical codes, not message text."""
+    err = SpannerError("partition failure")
+    err.code = code
+    assert SpannerCore.is_partitioned_query_fallback_error(err) is expected
+
+
+def test_partitioned_query_fallback_ignores_untyped_errors() -> None:
+    """A RuntimeError mentioning a status name is not a fallback signal."""
+    assert SpannerCore.is_partitioned_query_fallback_error(RuntimeError("PERMISSION_DENIED")) is False
+
+
+@pytest.mark.parametrize(
+    ("error_factory", "expected_calls"),
+    [(lambda: SpannerAbortedError("aborted"), 2), (lambda: RuntimeError("aborted"), 1)],
+)
+def test_run_in_transaction_retries_only_aborted(error_factory: Callable[[], Exception], expected_calls: int) -> None:
+    """Only SpannerAbortedError triggers a retry."""
+    driver = SyncSpannerDriver(SpannerConfig(), client=FakeSpannerClient())
+    calls: list[int] = []
+
+    def work(tx: object) -> str:
+        calls.append(1)
+        if len(calls) == 1:
+            raise error_factory()
+        return "ok"
+
+    if expected_calls == 2:
+        assert driver.run_in_transaction(work, max_attempts=3) == "ok"
+    else:
+        with pytest.raises(RuntimeError):
+            driver.run_in_transaction(work, max_attempts=3)
+    assert len(calls) == expected_calls
