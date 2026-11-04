@@ -1,6 +1,6 @@
 # Query Pipelines & CTE Statement Stacking
 
-Network round-trips dominate handler latency when code issues sequential reads and writes. `QueryPipeline`, `CteStep`, and `RelOverlay` (`vertebra.db.pipeline`) compile multi-step mutations and dependent queries into a single parameterized PostgreSQL CTE statement executed in one round-trip.
+Network round-trips dominate handler latency when code issues sequential reads and writes. `SyncQueryPipeline`, `AsyncQueryPipeline`, `CTEStep`, and `RelOverlay` (`vertebra.db.pipeline`) compile multi-step mutations and dependent queries into a single parameterized PostgreSQL CTE statement executed in one round-trip.
 
 ```mermaid
 flowchart LR
@@ -9,15 +9,15 @@ flowchart LR
     Step2 --> Wire["Single Parameterized SQL Round-Trip"]
 ```
 
-## Composing a `QueryPipeline`
+## Composing a Query Pipeline
 
 Stack multiple read and write steps into one statement with intra-statement read-your-own-writes over uncommitted CTE inserts and deletes:
 
 ```python
-from vertebra.db import QueryPipeline, RelOverlay
+from vertebra.db import RelOverlay, SyncQueryPipeline
 
 pipeline = (
-    QueryPipeline()
+    SyncQueryPipeline()
     .add_step(
         "inserted_order",
         "INSERT INTO orders (id, customer_id, total_cents) "
@@ -46,6 +46,6 @@ sql, params = pipeline.compile()
 ## Key Primitives
 
 - **`RelOverlay`**: Generates a `UNION ALL` / `NOT IN` CTE view over a physical `base_table` and earlier `INSERT ... RETURNING *` or `DELETE ... RETURNING id` steps so subsequent CTE steps in the same statement observe uncommitted mutations immediately.
-- **`QueryPipeline.build_jsonb_object`**: Automatically chunks wide column projections into concatenated `jsonb_build_object(...) || jsonb_build_object(...)` expressions so queries never trip PostgreSQL's 100-argument function limit (`max_pairs_per_call=50`).
+- **`SyncQueryPipeline.build_jsonb_object` / `AsyncQueryPipeline.build_jsonb_object`**: Automatically chunks wide column projections into concatenated `jsonb_build_object(...) || jsonb_build_object(...)` expressions so queries never trip PostgreSQL's 100-argument function limit (`max_pairs_per_call=50`).
 - **SQLSpec Statement Stacking**: When using [`SQLSpecPlugin`](extensions.md) (`vertebra.extensions.sqlspec`), SQLSpec `StatementStack` pipelines and `execute_many` batches run over shared-memory leases and cached prepared statement plans (`StatementCache`).
-- **Pooler-Safe Statement Caching (`PostgresConfig`)**: Behind transaction-mode poolers (`PgBouncer`, `PgCat`, `pgdog`), `PostgresConfig.effective_statement_cache_size` disables connection-pinned prepared statements unless `protocol_level_pooler_cache=True` is set.
+- **Pooler-Safe Statement Caching (`PostgreSQLConfig`)**: Behind transaction-mode poolers (`PgBouncer`, `PgCat`, `pgdog`), `PostgreSQLConfig.effective_statement_cache_size` disables connection-pinned prepared statements unless `protocol_level_pooler_cache=True` is set.

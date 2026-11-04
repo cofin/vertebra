@@ -1,7 +1,7 @@
 ---
 type: Guide
 title: "Route Codegen Targets & Inertia v3 Middleware"
-description: "How vertebra.build.codegen turns App routes into TypeNode IR and TypeScript, Zod, Valibot, OpenAPI, Protobuf, and procedure client output, and how InertiaMiddleware builds Inertia v3 responses."
+description: "How vertebra.build.codegen turns App routes into TypeNode IR and TypeScript, Zod, Valibot, OpenAPI, Protobuf, and procedure client output, and how SyncInertiaMiddleware / AsyncInertiaMiddleware build Inertia v3 responses."
 status: stable
 tags: [architecture, frontend, codegen, typescript, inertia]
 sources:
@@ -72,7 +72,7 @@ flowchart LR
 
 ## Inertia v3 (`framework/inertia/__init__.py`)
 
-[`InertiaMiddleware(config=None, ssr_client=None)`](../../../../../src/py/vertebra/framework/inertia/__init__.py) turns an `InertiaResponse(component, props, encrypt_history, clear_history)` (helper `inertia()`) into a pure-Python `vertebra.framework._router.Response`.
+[`SyncInertiaMiddleware(config=None, ssr_client=None)` and `AsyncInertiaMiddleware(config=None, ssr_client=None)`](../../../../../src/py/vertebra/framework/inertia/__init__.py) turn an `InertiaResponse(component, props, encrypt_history, clear_history)` (helper `inertia()`) into a pure-Python `vertebra.framework._router.Response`.
 
 - **Version**: `get_version()` returns `InertiaConfig.version`, else the first 8 hex chars of the MD5 of `manifest_path` (`dist/.vite/manifest.json`), else `"dev"`.
 - **Conflict**: an `X-Inertia: true` `GET` whose `X-Inertia-Version` differs returns `409` with `X-Inertia-Location: <request.path>`.

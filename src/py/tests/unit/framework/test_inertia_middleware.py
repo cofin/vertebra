@@ -3,15 +3,16 @@
 import pytest
 
 from vertebra.framework.inertia import (
+    AsyncInertiaMiddleware,
     DeepMergeProp,
     DeferredProp,
     InertiaConfig,
-    InertiaMiddleware,
     InertiaResponse,
     MergeProp,
     OnceProp,
     OptionalProp,
     ScrollProp,
+    SyncInertiaMiddleware,
     inertia,
 )
 from vertebra.framework.ssr import SSRConfig, SSRResult
@@ -144,13 +145,13 @@ def test_prop_type_helpers_inertia_convenience() -> None:
     ids=["header-present", "header-absent", "case-insensitive-value"],
 )
 def test_is_inertia_request(headers: "dict[str, str]", expected: bool) -> None:
-    mw = InertiaMiddleware()
+    mw = SyncInertiaMiddleware()
     req = _make_request(headers=headers)
     assert mw.is_inertia_request(req) is expected
 
 
 def test_build_page_object_basic() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request()
     resp = InertiaResponse(component="Pages/Dashboard", props={"count": 42})
     page = mw.build_page_object(req, resp)
@@ -161,7 +162,7 @@ def test_build_page_object_basic() -> None:
 
 
 def test_build_page_object_encrypt_history_included_when_true() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request()
     resp = InertiaResponse(component="Pages/Secret", encrypt_history=True)
     page = mw.build_page_object(req, resp)
@@ -169,7 +170,7 @@ def test_build_page_object_encrypt_history_included_when_true() -> None:
 
 
 def test_build_page_object_clear_history_included_when_true() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request()
     resp = InertiaResponse(component="Pages/Logout", clear_history=True)
     page = mw.build_page_object(req, resp)
@@ -177,7 +178,7 @@ def test_build_page_object_clear_history_included_when_true() -> None:
 
 
 def test_build_page_object_optional_fields_omitted_when_false() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request()
     resp = InertiaResponse(component="Pages/Home")
     page = mw.build_page_object(req, resp)
@@ -187,7 +188,7 @@ def test_build_page_object_optional_fields_omitted_when_false() -> None:
 
 def test_build_page_object_shared_data_merged_into_props() -> None:
     cfg = InertiaConfig(version="v1", shared_data={"app_name": "Vertebra", "locale": "en"})
-    mw = InertiaMiddleware(cfg)
+    mw = SyncInertiaMiddleware(cfg)
     req = _make_request()
     resp = InertiaResponse(component="Pages/Home", props={"title": "Home"})
     page = mw.build_page_object(req, resp)
@@ -198,7 +199,7 @@ def test_build_page_object_shared_data_merged_into_props() -> None:
 
 def test_build_page_object_request_props_override_shared_data() -> None:
     cfg = InertiaConfig(version="v1", shared_data={"locale": "en"})
-    mw = InertiaMiddleware(cfg)
+    mw = SyncInertiaMiddleware(cfg)
     req = _make_request()
     resp = InertiaResponse(component="Pages/Home", props={"locale": "fr"})
     page = mw.build_page_object(req, resp)
@@ -206,7 +207,7 @@ def test_build_page_object_request_props_override_shared_data() -> None:
 
 
 def test_partial_reloads_includes_only_requested_props() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request(
         headers={
             "X-Inertia": "true",
@@ -224,7 +225,7 @@ def test_partial_reloads_includes_only_requested_props() -> None:
 
 
 def test_partial_reloads_exclude_removes_props() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request(
         headers={
             "X-Inertia": "true",
@@ -242,7 +243,7 @@ def test_partial_reloads_exclude_removes_props() -> None:
 
 
 def test_partial_reloads_wrong_component_includes_all() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request(
         headers={
             "X-Inertia": "true",
@@ -260,7 +261,7 @@ def test_partial_reloads_wrong_component_includes_all() -> None:
 
 
 def test_deferred_props_excluded_from_initial_response() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request()
     resp = InertiaResponse(
         component="Pages/Dashboard",
@@ -275,7 +276,7 @@ def test_deferred_props_excluded_from_initial_response() -> None:
 
 
 def test_deferred_props_resolved_during_partial_reload() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request(
         headers={
             "X-Inertia": "true",
@@ -295,7 +296,7 @@ def test_deferred_props_resolved_during_partial_reload() -> None:
 
 
 def test_merge_props_metadata_in_page_object() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request()
     resp = InertiaResponse(
         component="Pages/Feed",
@@ -307,7 +308,7 @@ def test_merge_props_metadata_in_page_object() -> None:
 
 
 def test_merge_props_prepend_metadata() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request()
     resp = InertiaResponse(
         component="Pages/Feed",
@@ -318,7 +319,7 @@ def test_merge_props_prepend_metadata() -> None:
 
 
 def test_merge_props_deep_merge_metadata() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request()
     resp = InertiaResponse(
         component="Pages/Settings",
@@ -330,7 +331,7 @@ def test_merge_props_deep_merge_metadata() -> None:
 
 
 def test_once_props_included_initially() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request()
     resp = InertiaResponse(
         component="Pages/Home",
@@ -343,7 +344,7 @@ def test_once_props_included_initially() -> None:
 
 
 def test_once_props_skipped_when_cached() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request(
         headers={
             "X-Inertia-Except-Once-Props": "token",
@@ -359,7 +360,7 @@ def test_once_props_skipped_when_cached() -> None:
 
 
 def test_scroll_props_in_page_object() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request()
     resp = InertiaResponse(
         component="Pages/Feed",
@@ -379,7 +380,7 @@ def test_scroll_props_in_page_object() -> None:
 
 
 def test_optional_props_excluded_on_initial_load() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request()
     resp = InertiaResponse(
         component="Pages/Home",
@@ -391,7 +392,7 @@ def test_optional_props_excluded_on_initial_load() -> None:
 
 
 def test_optional_props_resolved_during_partial_reload() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request(
         headers={
             "X-Inertia": "true",
@@ -408,7 +409,7 @@ def test_optional_props_resolved_during_partial_reload() -> None:
 
 
 def test_version_conflict_mismatch_returns_409() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v2"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v2"))
     req = _make_request(
         headers={
             "X-Inertia": "true",
@@ -422,7 +423,7 @@ def test_version_conflict_mismatch_returns_409() -> None:
 
 
 def test_version_conflict_match_no_conflict() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request(
         headers={
             "X-Inertia": "true",
@@ -435,7 +436,7 @@ def test_version_conflict_match_no_conflict() -> None:
 
 
 def test_version_conflict_only_on_get() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v2"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v2"))
     req = _make_request(
         method="POST",
         headers={
@@ -466,12 +467,12 @@ def test_version_conflict_only_on_get() -> None:
     ],
 )
 def test_redirect_fixup(method: str, status: int, expected: bool) -> None:
-    mw = InertiaMiddleware()
+    mw = SyncInertiaMiddleware()
     assert mw.should_redirect_303(method, status) is expected
 
 
 def test_json_response_inertia_request_returns_json() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request(headers={"X-Inertia": "true", "X-Inertia-Version": "v1"})
     resp = InertiaResponse(component="Pages/Home", props={"title": "Home"})
     result = mw.process(req, resp)
@@ -486,7 +487,7 @@ def test_json_response_inertia_request_returns_json() -> None:
 
 
 def test_html_response_initial_load_returns_html() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request()
     resp = InertiaResponse(component="Pages/Home", props={"title": "Home"})
     result = mw.process(req, resp)
@@ -498,7 +499,7 @@ def test_html_response_initial_load_returns_html() -> None:
 
 
 def test_html_response_contains_v3_script_tag() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request()
     resp = InertiaResponse(component="Pages/Home")
     result = mw.process(req, resp)
@@ -510,7 +511,7 @@ def test_html_response_contains_v3_script_tag() -> None:
 def test_ssr_integration_renders_head_and_body() -> None:
     client = _make_mock_ssr_client()
     cfg = InertiaConfig(version="v1", ssr=SSRConfig())
-    mw = InertiaMiddleware(cfg, ssr_client=client)
+    mw = SyncInertiaMiddleware(cfg, ssr_client=client)
     req = _make_request()
     resp = InertiaResponse(component="Pages/Home")
     result = mw.process(req, resp)
@@ -523,7 +524,7 @@ def test_ssr_integration_renders_head_and_body() -> None:
 def test_ssr_integration_csr_fallback_on_failure() -> None:
     client = _make_mock_ssr_client(fail=True)
     cfg = InertiaConfig(version="v1", ssr=SSRConfig())
-    mw = InertiaMiddleware(cfg, ssr_client=client)
+    mw = SyncInertiaMiddleware(cfg, ssr_client=client)
     req = _make_request()
     resp = InertiaResponse(component="Pages/Home")
     result = mw.process(req, resp)
@@ -536,7 +537,7 @@ def test_ssr_integration_csr_fallback_on_failure() -> None:
 def test_ssr_integration_not_used_for_inertia_xhr() -> None:
     client = _make_mock_ssr_client()
     cfg = InertiaConfig(version="v1", ssr=SSRConfig())
-    mw = InertiaMiddleware(cfg, ssr_client=client)
+    mw = SyncInertiaMiddleware(cfg, ssr_client=client)
     req = _make_request(headers={"X-Inertia": "true", "X-Inertia-Version": "v1"})
     resp = InertiaResponse(component="Pages/Home")
     result = mw.process(req, resp)
@@ -546,7 +547,7 @@ def test_ssr_integration_not_used_for_inertia_xhr() -> None:
 
 def test_error_bag_header_passed_through() -> None:
     """The error bag header is read by resolve_props (via request headers)."""
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request(headers={"X-Inertia-Error-Bag": "login"})
     resp = InertiaResponse(
         component="Pages/Login",
@@ -557,17 +558,17 @@ def test_error_bag_header_passed_through() -> None:
 
 
 def test_version_auto_detect_dev_version_when_no_manifest() -> None:
-    mw = InertiaMiddleware(InertiaConfig(manifest_path="/nonexistent/manifest.json"))
+    mw = SyncInertiaMiddleware(InertiaConfig(manifest_path="/nonexistent/manifest.json"))
     assert mw.get_version() == "dev"
 
 
 def test_version_auto_detect_explicit_version_takes_precedence() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="abc123"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="abc123"))
     assert mw.get_version() == "abc123"
 
 
 def test_callable_props_resolved() -> None:
-    mw = InertiaMiddleware(InertiaConfig(version="v1"))
+    mw = SyncInertiaMiddleware(InertiaConfig(version="v1"))
     req = _make_request()
     resp = InertiaResponse(
         component="Pages/Home",
@@ -575,3 +576,51 @@ def test_callable_props_resolved() -> None:
     )
     page = mw.build_page_object(req, resp)
     assert page["props"]["timestamp"] == 1234567890
+
+
+@pytest.mark.anyio
+async def test_async_inertia_middleware_process() -> None:
+    class _AsyncMockSSRClient:
+        def __init__(self, *, fail: bool = False) -> None:
+            self.fail = fail
+            self.last_page: dict | None = None
+
+        async def render(self, page: dict) -> SSRResult:
+            self.last_page = page
+            if self.fail:
+                raise ConnectionError("Async SSR server down")
+            return SSRResult(
+                head=["<title>Async SSR Page</title>"],
+                body='<div id="app">Async SSR Content</div>',
+            )
+
+        def invalidate(self, paths: list[str] | None = None) -> None:
+            _ = paths
+
+        def stop(self) -> None:
+            return None
+
+    client = _AsyncMockSSRClient()
+    cfg = InertiaConfig(version="v1", ssr=SSRConfig())
+    mw = AsyncInertiaMiddleware(cfg, ssr_client=client)
+
+    conflict_req = _make_request(headers={"X-Inertia": "true", "X-Inertia-Version": "v0"})
+    conflict_res = await mw.process(conflict_req, InertiaResponse(component="Pages/Home"))
+    assert conflict_res.status == 409
+
+    json_req = _make_request(headers={"X-Inertia": "true", "X-Inertia-Version": "v1"})
+    json_res = await mw.process(json_req, InertiaResponse(component="Pages/Home", props={"title": "Async"}))
+    assert json_res.status == 200
+    assert decode_json(json_res.body)["props"]["title"] == "Async"
+    assert client.last_page is None
+
+    html_res = await mw.process(_make_request(), InertiaResponse(component="Pages/Home"))
+    html_text = html_res.body.decode("utf-8")
+    assert "<title>Async SSR Page</title>" in html_text
+    assert "Async SSR Content" in html_text
+    assert client.last_page is not None
+
+    fail_mw = AsyncInertiaMiddleware(cfg, ssr_client=_AsyncMockSSRClient(fail=True))
+    fallback_res = await fail_mw.process(_make_request(), InertiaResponse(component="Pages/Home"))
+    assert fallback_res.status == 200
+    assert "<title>Async SSR Page</title>" not in fallback_res.body.decode("utf-8")

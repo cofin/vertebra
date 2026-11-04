@@ -11,8 +11,10 @@ from typing import Any, ClassVar, Literal, Self
 import msgspec
 
 from vertebra._vertebra import (
+    AsyncSpannerClient,
     LeaseBroker,
     SpannerAbortedError,
+    SyncSpannerClient,
 )
 from vertebra._vertebra import (
     StatementCache as _RustStatementCache,
@@ -37,13 +39,13 @@ __all__ = (
     "AsyncSpannerDriver",
     "AsyncSpannerSnapshot",
     "AsyncSpannerTransaction",
-    "SpannerSnapshot",
-    "SpannerTransaction",
     "SyncSpannerDriver",
+    "SyncSpannerSnapshot",
+    "SyncSpannerTransaction",
 )
 
 
-class SpannerSnapshot:
+class SyncSpannerSnapshot:
     """Synchronous `ReadOnly` snapshot context bound to a `StalenessBound`."""
 
     __slots__ = ("_driver", "_staleness")
@@ -243,7 +245,7 @@ class AsyncSpannerSnapshot:
         )
 
 
-class SpannerTransaction:
+class SyncSpannerTransaction:
     """Transactional context passed to `SyncSpannerDriver.run_in_transaction(fn)`."""
 
     __slots__ = ("_driver", "_mutations", "_transaction_tag")
@@ -580,7 +582,7 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         broker: LeaseBroker | None = None,
         statement_cache: _RustStatementCache | None = None,
         propagator: SqlTracePropagator | None = None,
-        client: Any | None = None,
+        client: SyncSpannerClient | None = None,
         **overrides: Any,
     ) -> None:
         if isinstance(config, str):
@@ -606,7 +608,7 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
             else (_RustStatementCache(max(16, resolved.statement_cache_capacity)) if resolved.use_shm_cache else None)
         )
         self._propagator: SqlTracePropagator = propagator or SqlTracePropagator()
-        self._client: Any | None = client
+        self._client: SyncSpannerClient | None = client
         self._last_commit_stats: dict[str, Any] = {}
 
     @property
@@ -643,9 +645,9 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         self.close()
 
     def connect(self) -> Self:
-        """Initialize the underlying Rust `SpannerClient` channel pool."""
+        """Initialize the underlying Rust `SyncSpannerClient` channel pool."""
         if self._client is None:
-            self._client = SpannerCore.create_rust_client(self.config)
+            self._client = SpannerCore.create_sync_rust_client(self.config)
         self._closed = False
         return self
 
@@ -659,10 +661,10 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         staleness: StalenessBound | None = None,
         *,
         multi_use: bool = True,
-    ) -> SpannerSnapshot:
-        """Create a lock-free `ReadOnly` `SpannerSnapshot` bound to `staleness`."""
+    ) -> SyncSpannerSnapshot:
+        """Create a lock-free `ReadOnly` `SyncSpannerSnapshot` bound to `staleness`."""
         _ = multi_use
-        return SpannerSnapshot(self, staleness or StalenessBound.strong())
+        return SyncSpannerSnapshot(self, staleness or StalenessBound.strong())
 
     def execute(
         self,
@@ -850,7 +852,7 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
 
     def run_in_transaction(
         self,
-        fn: Callable[[SpannerTransaction], Any],
+        fn: Callable[[SyncSpannerTransaction], Any],
         *,
         max_attempts: int = 5,
         transaction_tag: str | None = None,
@@ -863,7 +865,7 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         effective_tag = transaction_tag or (tag if tag else None)
         attempts = max(1, int(max_attempts))
         for attempt in range(1, attempts + 1):
-            tx = SpannerTransaction(self, transaction_tag=effective_tag)
+            tx = SyncSpannerTransaction(self, transaction_tag=effective_tag)
             try:
                 result = fn(tx)
                 if tx.mutations:
@@ -1154,9 +1156,9 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
             total += self.insert_arrow(table, cursor, upsert=upsert)
         return total
 
-    def _ensure_client(self) -> Any:
+    def _ensure_client(self) -> SyncSpannerClient:
         if self._client is None:
-            self._client = SpannerCore.create_rust_client(self.config)
+            self._client = SpannerCore.create_sync_rust_client(self.config)
         return self._client
 
     def _acquire_pid_lease(self) -> Any:
@@ -1238,7 +1240,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         broker: LeaseBroker | None = None,
         statement_cache: _RustStatementCache | None = None,
         propagator: SqlTracePropagator | None = None,
-        client: Any | None = None,
+        client: AsyncSpannerClient | None = None,
         **overrides: Any,
     ) -> None:
         if isinstance(config, str):
@@ -1264,7 +1266,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
             else (_RustStatementCache(max(16, resolved.statement_cache_capacity)) if resolved.use_shm_cache else None)
         )
         self._propagator: SqlTracePropagator = propagator or SqlTracePropagator()
-        self._client: Any | None = client
+        self._client: AsyncSpannerClient | None = client
         self._last_commit_stats: dict[str, Any] = {}
 
     @property
@@ -1301,9 +1303,9 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         await self.close()
 
     async def connect(self) -> Self:
-        """Initialize the underlying Rust `SpannerClient` channel pool."""
+        """Initialize the underlying Rust `AsyncSpannerClient` channel pool."""
         if self._client is None:
-            self._client = SpannerCore.create_rust_client(self.config)
+            self._client = SpannerCore.create_async_rust_client(self.config)
         self._closed = False
         return self
 
@@ -1343,7 +1345,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         annotated_sql = SpannerCore.annotate_sql_with_trace(rewritten_sql, self._propagator)
         lease = self._acquire_pid_lease()
         try:
-            res = await client.execute_dml_async(
+            res = await client.execute_dml(
                 annotated_sql,
                 params_json,
                 request_tag,
@@ -1391,7 +1393,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         batch_json = SpannerCore.encode_batch_dml_json(statements, dialect=self.dialect)
         lease = self._acquire_pid_lease()
         try:
-            res = await client.execute_batch_dml_async(
+            res = await client.execute_batch_dml(
                 batch_json,
                 request_tag,
                 effective_tx_tag,
@@ -1411,7 +1413,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         client = self._ensure_client()
         rewritten_sql, params_json = self._prepare_sql_and_params(sql, parameters)
         annotated_sql = SpannerCore.annotate_sql_with_trace(rewritten_sql, self._propagator)
-        res = await client.execute_partitioned_dml_async(
+        res = await client.execute_partitioned_dml(
             annotated_sql,
             params_json,
             exclude_txn_from_change_streams,
@@ -1555,7 +1557,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         }
         for chunk in SpannerCore.chunk_mutations_by_cell_limit(normalized):
             mutations_json = encode_json([m.to_dict() for m in chunk])
-            res = await client.apply_mutations_async(
+            res = await client.apply_mutations(
                 mutations_json,
                 transaction_tag,
                 exclude_txn_from_change_streams,
@@ -1650,7 +1652,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         groups = [SpannerCore.coerce_mutation_group(g) for g in mutation_groups]
         client = self._ensure_client()
         groups_json = encode_json([g.to_dict() for g in groups])
-        res = await client.batch_write_async(groups_json, exclude_txn_from_change_streams)
+        res = await client.batch_write(groups_json, exclude_txn_from_change_streams)
         return list(res)
 
     async def update_ddl(self, statements: Sequence[str] | str) -> str:
@@ -1659,7 +1661,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         if not stmt_list:
             return ""
         client = self._ensure_client()
-        res = await client.update_ddl_async(stmt_list)
+        res = await client.update_ddl(stmt_list)
         return str(res)
 
     async def fetch_arrow(
@@ -1682,7 +1684,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         partitions = max_partitions if max_partitions is not None else self.config.max_partitions
         boost = data_boost_enabled if data_boost_enabled is not None else self.config.data_boost_enabled
         try:
-            raw = await client.partitioned_query_async(
+            raw = await client.partitioned_query(
                 rewritten_sql,
                 params_json,
                 max(1, int(partitions)),
@@ -1810,9 +1812,9 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
             total += await self.insert_arrow(table, cursor, upsert=upsert)
         return total
 
-    def _ensure_client(self) -> Any:
+    def _ensure_client(self) -> AsyncSpannerClient:
         if self._client is None:
-            self._client = SpannerCore.create_rust_client(self.config)
+            self._client = SpannerCore.create_async_rust_client(self.config)
         return self._client
 
     def _acquire_pid_lease(self) -> Any:
@@ -1864,7 +1866,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         bound = staleness or StalenessBound.strong()
         rewritten_sql, params_json = self._prepare_sql_and_params(sql, parameters)
         annotated_sql = SpannerCore.annotate_sql_with_trace(rewritten_sql, self._propagator)
-        raw = await client.query_async(
+        raw = await client.query(
             annotated_sql,
             params_json,
             bound.mode,

@@ -6,7 +6,7 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
 | --- | --- | --- |
 | **`vertebra._vertebra`** | `Request`, `Headers`, `Response`, `RequestBatch`, `AsgiScope`, `RsgiScope`, `WsgiEnviron` | `vertebra-py`, `vertebra-core`, `vertebra-http`, `vertebra-db` |
 | **`vertebra._bundler`** | `BundleConfig`, `BuildResult`, `Bundler`, `SSRPool`, `IsolatedDeclarationsGenerator` | `vertebra-bundler` (Oxc, Rolldown, QuickJS) |
-| **`vertebra._storage`** | `StorageBuffer`, `ObjectMeta`, `ObjectStore` | `vertebra-storage` (Rust `object_store` + Tokio) |
+| **`vertebra._storage`** | `StorageBuffer`, `ObjectMeta`, `SyncObjectStore`, `AsyncObjectStore` | `vertebra-storage` (Rust `object_store` + Tokio) |
 
 ## `vertebra._vertebra` — HTTP/IPC Transport, Request Batches & Protocol Drivers
 
@@ -67,14 +67,27 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
 
 ::: vertebra._storage.StorageBuffer
     options:
-      heading_level: 3
+      heading_level: 4
 
 ::: vertebra._storage.ObjectMeta
     options:
       heading_level: 4
       members: false
 
-::: vertebra._storage.ObjectStore
+::: vertebra._storage.SyncObjectStore
+    options:
+      heading_level: 3
+      members:
+        - put
+        - get
+        - head
+        - delete
+        - list
+        - copy
+        - presign_get
+        - presign_put
+
+::: vertebra._storage.AsyncObjectStore
     options:
       heading_level: 3
       members:

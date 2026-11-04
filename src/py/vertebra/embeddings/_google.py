@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import os
 import urllib.request
 from collections.abc import Awaitable, Callable, Sequence
@@ -12,7 +13,8 @@ from typing import Any
 import msgspec
 
 from vertebra._vertebra import (
-    GcpTokenCache,
+    AsyncGcpTokenCache,
+    SyncGcpTokenCache,
     VectorBatchView,
     VectorCache,
     VectorView,
@@ -60,7 +62,7 @@ class VertexEmbedder(Embedder):
         project: str | None = None,
         location: str = "us-central1",
         endpoint: str | None = None,
-        token_cache: GcpTokenCache | None = None,
+        token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
         target_service_account: str | None = None,
         quota_project_id: str | None = None,
         cache: VectorCache | None = None,
@@ -191,13 +193,15 @@ class VertexEmbedder(Embedder):
 
     async def _dispatch_with_auth_retry(self, url: str, body: bytes) -> bytes:
         """Send a gRPC request with active ADC headers and single-flight retry on HTTP 401."""
-        cache = self._ensure_token_cache()
-        snap = await cache.get_token_async()
+        cache = self._ensure_token_cache(async_mode=True)
+        raw_snap = cache.get_token()
+        snap = await raw_snap if inspect.isawaitable(raw_snap) else raw_snap
         headers = self._build_headers(snap.access_token, snap.quota_project_id)
         status, resp_headers, resp_body = await self._transport(url, headers, body)
         if status == 401:
             cache.invalidate(snap.generation)
-            snap2 = await cache.get_token_async()
+            raw_snap2 = cache.get_token()
+            snap2 = await raw_snap2 if inspect.isawaitable(raw_snap2) else raw_snap2
             headers = self._build_headers(snap2.access_token, snap2.quota_project_id)
             status, resp_headers, resp_body = await self._transport(url, headers, body)
         if status != 200:
@@ -208,21 +212,22 @@ class VertexEmbedder(Embedder):
             raise RuntimeError(f"Vertex/Gemini embedding gRPC status {grpc_status}: {msg}")
         return resp_body
 
-    def _ensure_token_cache(self) -> Any:
-        """Lazily initialize the default `GcpTokenCache` when not explicitly injected."""
+    def _ensure_token_cache(self, *, async_mode: bool = True) -> SyncGcpTokenCache | AsyncGcpTokenCache:
+        """Lazily initialize the default token cache when not explicitly injected."""
         if self._token_cache is None:
             opts: dict[str, str] = {"use_metadata_server": "true"}
             if self._target_service_account:
                 opts["target_service_account"] = self._target_service_account
             if self._quota_project_id:
                 opts["quota_project_id"] = self._quota_project_id
+            target_cls = AsyncGcpTokenCache if async_mode else SyncGcpTokenCache
             try:
-                self._token_cache = GcpTokenCache(opts)
+                self._token_cache = target_cls(opts)
             except TypeError:
                 fallback_mod = import_optional("vertebra.storage._store")
                 if fallback_mod is None:
                     raise
-                self._token_cache = fallback_mod.GcpTokenCache(opts)
+                self._token_cache = getattr(fallback_mod, target_cls.__name__)(opts)
         return self._token_cache
 
     def _build_headers(self, token: str, quota_project: str | None) -> dict[str, str]:
@@ -264,7 +269,7 @@ class GeminiEmbedder(VertexEmbedder):
         dimensions: int = 768,
         api_key: str | None = None,
         endpoint: str = "https://generativelanguage.googleapis.com",
-        token_cache: GcpTokenCache | None = None,
+        token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
         cache: VectorCache | None = None,
         max_batch_size: int = 64,
         max_batch_tokens: int = 16_384,
@@ -384,7 +389,7 @@ class OracleEmbedder(Embedder):
         location: str = "us-central1",
         credential_name: str = "VERTEX_CRED",
         endpoint_url: str | None = None,
-        token_cache: GcpTokenCache | None = None,
+        token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
         cache: VectorCache | None = None,
     ) -> None:
         """Initialize the Oracle 26ai SQL pushdown embedder with `:predict` and 128-char URL guards."""
@@ -426,25 +431,26 @@ class OracleEmbedder(Embedder):
 
     @property
     def applied_token_generation(self) -> int:
-        """Return the last `GcpTokenCache` generation rotated into `DBMS_VECTOR.CREATE_CREDENTIAL`."""
+        """Return the last token cache generation rotated into `DBMS_VECTOR.CREATE_CREDENTIAL`."""
         return self._applied_token_generation
 
     async def _ensure_oracle_credential_fresh(self) -> None:
-        """Rotate `DBMS_VECTOR.CREATE_CREDENTIAL` when `GcpTokenCache` advances to a new generation."""
+        """Rotate `DBMS_VECTOR.CREATE_CREDENTIAL` when the token cache advances to a new generation."""
         if self._token_cache is None and self._provider == "vertexai":
             opts = {"use_metadata_server": "true"}
             try:
-                self._token_cache = GcpTokenCache(opts)
+                self._token_cache = AsyncGcpTokenCache(opts)
             except TypeError:
                 fallback_mod = import_optional("vertebra.storage._store")
                 if fallback_mod is None:
                     return
-                self._token_cache = fallback_mod.GcpTokenCache(opts)
+                self._token_cache = fallback_mod.AsyncGcpTokenCache(opts)
             except ValueError:
                 return
         if self._token_cache is None:
             return
-        snap = await self._token_cache.get_token_async()
+        raw_snap = self._token_cache.get_token()
+        snap = await raw_snap if inspect.isawaitable(raw_snap) else raw_snap
         gen = int(snap.generation)
         if gen == self._applied_token_generation:
             return

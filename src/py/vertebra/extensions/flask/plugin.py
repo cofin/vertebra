@@ -1,11 +1,11 @@
-"""FlaskPlugin: unifies Rust route compilation, WSGI C-API fastpath, and ecosystem bridges."""
+"""VertebraPlugin: unifies Rust route compilation, WSGI C-API fastpath, and ecosystem bridges."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
 from vertebra._vertebra import Request, Response, WsgiEnviron, run_wsgi_callable
-from vertebra.extensions.flask.config import FlaskConfig
+from vertebra.extensions.flask.config import VertebraConfig
 from vertebra.extensions.flask.fastpath import FastPath
 from vertebra.extensions.flask.mcp import MCPRegistry, attach_mcp_routes
 from vertebra.extensions.flask.offload import offload_middlewares
@@ -19,10 +19,10 @@ if TYPE_CHECKING:
     from vertebra.extensions.flask.offload import OffloadPlan
     from vertebra.extensions.flask.router import CompiledRouter
 
-__all__ = ("FlaskPlugin",)
+__all__ = ("VertebraPlugin",)
 
 
-class FlaskPlugin:
+class VertebraPlugin:
     """First-class Vertebra integration plugin for Flask applications."""
 
     __slots__ = (
@@ -40,9 +40,9 @@ class FlaskPlugin:
     def __init__(
         self,
         app: Any = None,
-        config: FlaskConfig | None = None,
+        config: VertebraConfig | None = None,
     ) -> None:
-        self._config = config or FlaskConfig()
+        self._config = config or VertebraConfig()
         self._app: Any = None
         self._compiler: RouteCompiler | None = None
         self._fastpath: FastPath | None = None
@@ -55,8 +55,8 @@ class FlaskPlugin:
             self.init_app(app)
 
     @property
-    def config(self) -> FlaskConfig:
-        """Return the ``FlaskConfig``."""
+    def config(self) -> VertebraConfig:
+        """Return the ``VertebraConfig``."""
         return self._config
 
     @property
@@ -94,8 +94,8 @@ class FlaskPlugin:
         """Return the ``ViteAssetBridge`` if Vite is configured."""
         return self._vite_bridge
 
-    def init_app(self, app: Any) -> FlaskPlugin:
-        """Bind this ``FlaskPlugin`` to a Flask application and compile routes and fastpaths."""
+    def init_app(self, app: Any) -> VertebraPlugin:
+        """Bind this ``VertebraPlugin`` to a Flask application and compile routes and fastpaths."""
         self._app = app
         if self._config.vite is not None:
             self._vite_bridge = attach_vite(app, self._config.vite)

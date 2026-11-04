@@ -36,7 +36,7 @@ Run actions on a `LiveState` component and build an `InertiaResponse` page paylo
 
 ## Transactional Object Storage & SQLite
 
-Save model file attachments and execute SQLite transactions using `ObjectStore` and Advanced Alchemy's `ObjectStoreBackend`:
+Save model file attachments and execute SQLite transactions using `SyncObjectStore` and Advanced Alchemy's `ObjectStoreBackend`:
 
 ```python title="docs/examples/storage_and_db.py"
 --8<-- "docs/examples/storage_and_db.py:example"

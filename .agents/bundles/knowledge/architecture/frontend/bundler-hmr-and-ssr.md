@@ -22,7 +22,7 @@ sources:
 
 # Oxc Bundler, HMR Watcher & QuickJS SSR Pool
 
-[`vertebra-bundler`](../../../../../src/rs/vertebra-bundler/src/lib.rs) builds the `_bundler` PyO3 module (`crate-type = ["cdylib", "rlib"]`, `#[pymodule(gil_used = false)]`, module constant `GIL_USED = False`). [`vertebra/_bundler.pyi`](../../../../../src/py/vertebra/_bundler.pyi) declares the stub types for `Bundler`, `BundleConfig`, `DevConfig`, `BuildResult`, `OutputFile`, `SourceWatcher`, `SsrPool`, `SsrResult`, `IsolatedDeclarationsGenerator`, `minify_css`, `encode_ssr_worker_frame`, and `GIL_USED` as `vertebra._bundler`. When the native `_bundler` extension is not compiled, `AssetBundler` raises `UnsupportedBackendError` rather than emitting stub bundle files.
+[`vertebra-bundler`](../../../../../src/rs/vertebra-bundler/src/lib.rs) builds the `_bundler` PyO3 module (`crate-type = ["cdylib", "rlib"]`, `#[pymodule(gil_used = false)]`, module constant `GIL_USED = False`). [`vertebra/_bundler.pyi`](../../../../../src/py/vertebra/_bundler.pyi) declares the stub types for `Bundler`, `BundleConfig`, `DevConfig`, `BuildResult`, `OutputFile`, `SourceWatcher`, `SSRPool`, `SSRResult`, `IsolatedDeclarationsGenerator`, `minify_css`, `encode_ssr_worker_frame`, and `GIL_USED` as `vertebra._bundler`. When the native `_bundler` extension is not compiled, `AssetBundler` raises `UnsupportedBackendError` rather than emitting stub bundle files.
 
 ## Single-entry transform (`bundler.rs`, `config.rs`)
 
@@ -44,20 +44,20 @@ The Python class (`PySourceWatcher`, exported as `SourceWatcher`) takes `(watch_
 
 ## SSR pool (`ssr.rs`)
 
-`SsrPool::new(bundle_path, pool_size)` builds `pool_size.max(1)` slots (Python default `4`). Each slot is a `Mutex<Option<SlotEngine>>` holding its own `rquickjs::Runtime` + `Context::full`, a `console.log` shim, and the evaluated bundle.
+`SSRPool::new(bundle_path, pool_size)` builds `pool_size.max(1)` slots (Python default `4`). Each slot is a `Mutex<Option<SlotEngine>>` holding its own `rquickjs::Runtime` + `Context::full`, a `console.log` shim, and the evaluated bundle.
 
 - **Slot leasing**: `available: ArrayQueue<usize>` holds free slot indices. `render` pops one and returns `BundlerError::PoolExhausted` immediately when none is free; it does not wait.
 - **Render contract**: the bundle must set `globalThis.__ssr_render(component, props)` returning `{ head: string[], body: string }`. The component name is a call argument; props are parsed in-engine with `JSON.parse(page_json)`.
 - **Cache**: always on. Key is FNV-1a 64 over `component + ":" + page_json`; a hit requires the same pool `generation` and age under a fixed 60 s TTL. Entries are never evicted individually and the map has no size bound.
 - **Reload**: `invalidate()` re-reads the bundle, increments `generation`, and clears the cache; stale slots rebuild on next checkout. `shutdown()` clears slots and cache.
 
-`SsrPool.render` and `Bundler.ssr_render(component, page_json)` release the GIL. `Bundler.init_ssr(bundle_path, pool_size)`, `ssr_invalidate(paths)` (clears everything; `paths` is ignored), and `ssr_shutdown()` manage a pool owned by the `Bundler`. [`EmbeddedSsrClient`](../../../../../src/py/vertebra/framework/ssr/__init__.py) wraps these methods.
+`SSRPool.render` and `Bundler.ssr_render(component, page_json)` release the GIL. `Bundler.init_ssr(bundle_path, pool_size)`, `ssr_invalidate(paths)` (clears everything; `paths` is ignored), and `ssr_shutdown()` manage a pool owned by the `Bundler`. [`SyncEmbeddedSSRClient` and `AsyncEmbeddedSSRClient`](../../../../../src/py/vertebra/framework/ssr/__init__.py) wrap these methods.
 
 ## Declarations, CSS, and SSR framing (`declarations.rs`)
 
 - `IsolatedDeclarationsGenerator(strip_internal=True).emit_dts(filename, source_text)` emits `.d.ts` text from an Oxc parse.
 - `minify_css(css_source)` strips comments and collapses whitespace outside strings.
-- `encode_ssr_worker_frame(component, props_json)` returns a 4-byte big-endian length prefix plus JSON, the same framing as Python `SsrFrame.to_wire_bytes()`.
+- `encode_ssr_worker_frame(component, props_json)` returns a 4-byte big-endian length prefix plus JSON, the same framing as Python `SSRFrame.to_wire_bytes()`.
 
 ## Build orchestration (`build/_orchestrator.py`)
 

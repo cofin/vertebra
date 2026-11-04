@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import inspect
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 import msgspec
 
@@ -14,10 +14,11 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 __all__ = (
+    "AsyncQueryPipeline",
     "CTEStep",
     "PipelineDialect",
-    "QueryPipeline",
     "RelOverlay",
+    "SyncQueryPipeline",
 )
 
 type PipelineDialect = Literal["postgres", "googlesql"]
@@ -60,7 +61,7 @@ class RelOverlay(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
 
 class CTEStep(msgspec.Struct, frozen=True, gc=False, kw_only=True):
-    """Single named CTE step within a single-RTT ``QueryPipeline``."""
+    """Single named CTE step within a single-RTT query pipeline."""
 
     name: str
     """SQL identifier for the common table expression (`WITH <name> AS (...)`)."""
@@ -76,8 +77,8 @@ class CTEStep(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         validate_identifier(self.name, "name")
 
 
-class QueryPipeline:
-    """Composes multiple read and write steps into a single-RTT PostgreSQL or GoogleSQL CTE statement."""
+class _BaseQueryPipeline:
+    """Base query pipeline composing multiple read and write steps into a single CTE statement."""
 
     __slots__ = ("_dialect", "_overlays", "_steps")
 
@@ -104,7 +105,7 @@ class QueryPipeline:
         dialect: PipelineDialect = "postgres",
     ) -> str:
         """Build a PostgreSQL ``jsonb_build_object(...)`` or GoogleSQL ``TO_JSON(STRUCT(...))`` expression."""
-        resolved_dialect = QueryPipeline._validate_pipeline_dialect(dialect)
+        resolved_dialect = _BaseQueryPipeline._validate_pipeline_dialect(dialect)
         normalized: list[tuple[str, str]] = [item if isinstance(item, tuple) else (item, item) for item in columns]
         if resolved_dialect == "googlesql":
             if not normalized:
@@ -131,12 +132,12 @@ class QueryPipeline:
         *,
         params: dict[str, Any] | None = None,
         return_json_agg: bool = True,
-    ) -> QueryPipeline:
+    ) -> Self:
         """Append a named CTE step to the pipeline."""
         self._steps.append(CTEStep(name=name, sql=sql, params=dict(params or {}), return_json_agg=return_json_agg))
         return self
 
-    def add_overlay(self, overlay_name: str, overlay: RelOverlay) -> QueryPipeline:
+    def add_overlay(self, overlay_name: str, overlay: RelOverlay) -> Self:
         """Register an intra-statement ``RelOverlay`` CTE."""
         validate_identifier(overlay_name, "overlay_name")
         self._overlays.append((overlay_name, overlay))
@@ -154,99 +155,75 @@ class QueryPipeline:
             step_sql = self._rewrite_googlesql_params(step.sql) if resolved_dialect == "googlesql" else step.sql
             cte_parts.append(f"{step.name} AS ({step_sql})")
             for k, v in step.params.items():
-                clean_k = k.lstrip("@:")
-                if clean_k in merged_params and merged_params[clean_k] != v:
-                    msg = f"Conflicting query pipeline parameter: {clean_k!r}"
+                if k in merged_params and merged_params[k] != v:
+                    msg = f"Conflicting values for parameter {k!r} across pipeline steps"
                     raise ValueError(msg)
-                merged_params[clean_k] = v
+                merged_params[k] = v
+
         for ov_name, overlay in self._overlays:
             cte_parts.append(overlay.to_cte_sql(ov_name))
 
+        with_body = ",\n".join(cte_parts)
+        agg_steps = [s for s in self._steps if s.return_json_agg]
         if resolved_dialect == "googlesql":
-            struct_fields = [
-                f"COALESCE((SELECT ARRAY_AGG(TO_JSON(_s)) FROM {step.name} AS _s), ARRAY<JSON>[]) AS {step.name}"
-                for step in self._steps
-                if step.return_json_agg
-            ]
-            envelope_expr = f"TO_JSON_STRING(TO_JSON(STRUCT({', '.join(struct_fields)})))" if struct_fields else "'{}'"
-            full_sql = f"WITH {', '.join(cte_parts)} SELECT {envelope_expr} AS payload"
-            return full_sql, merged_params
+            payload_expr = self._build_googlesql_outer_select(agg_steps)
+        else:
+            payload_expr = self._build_postgres_outer_select(agg_steps)
 
-        result_pairs: list[tuple[str, str]] = [
-            (
-                step.name,
-                f"COALESCE((SELECT jsonb_agg(row_to_json({step.name})) FROM {step.name}), '[]'::jsonb)",
-            )
-            for step in self._steps
-            if step.return_json_agg
-        ]
-        envelope_expr = self.build_jsonb_object(result_pairs, max_pairs_per_call=25, dialect="postgres")
-        full_sql = f"WITH {', '.join(cte_parts)} SELECT {envelope_expr} AS payload"
-        return full_sql, merged_params
+        compiled_sql = f"WITH {with_body}\nSELECT {payload_expr} AS payload;"
+        return compiled_sql, merged_params
 
     @staticmethod
     def _validate_pipeline_dialect(dialect: str) -> PipelineDialect:
-        """Validate that the requested pipeline dialect is supported."""
-        if dialect not in _VALID_PIPELINE_DIALECTS:
-            msg = f"Unsupported QueryPipeline dialect: {dialect!r}"
+        lowered = dialect.lower().strip()
+        if lowered not in _VALID_PIPELINE_DIALECTS:
+            msg = f"Unsupported QueryPipeline dialect: {dialect!r}; expected 'postgres' or 'googlesql'"
             raise ValueError(msg)
-        return "googlesql" if dialect == "googlesql" else "postgres"
+        return "googlesql" if lowered == "googlesql" else "postgres"
+
+    @staticmethod
+    def _build_postgres_outer_select(agg_steps: list[CTEStep]) -> str:
+        if not agg_steps:
+            return "'{}'::jsonb"
+        pairs = [
+            f"'{s.name}', COALESCE((SELECT jsonb_agg(to_jsonb({s.name})) FROM {s.name}), '[]'::jsonb)"
+            for s in agg_steps
+        ]
+        return f"jsonb_build_object({', '.join(pairs)})"
+
+    @staticmethod
+    def _build_googlesql_outer_select(agg_steps: list[CTEStep]) -> str:
+        if not agg_steps:
+            return "JSON '{}'"
+        fields = [f"COALESCE((SELECT ARRAY_AGG(TO_JSON({s.name})) FROM {s.name}), []) AS {s.name}" for s in agg_steps]
+        return f"TO_JSON(STRUCT({', '.join(fields)}))"
 
     @staticmethod
     def _rewrite_googlesql_params(sql: str) -> str:
-        """Rewrite `:param` bind placeholders to `@param` outside string literals and `::` casts."""
+        if ":" not in sql:
+            return sql
+        return _BaseQueryPipeline._transform_colons_to_at(sql)
+
+    @staticmethod
+    def _transform_colons_to_at(sql: str) -> str:
         out: list[str] = []
         i = 0
         n = len(sql)
         in_single = False
         in_double = False
-        in_backtick = False
-
         while i < n:
             ch = sql[i]
-            if in_single:
-                out.append(ch)
-                if ch == "\\" and i + 1 < n:
-                    out.append(sql[i + 1])
-                    i += 2
-                    continue
-                if ch == "'":
-                    if i + 1 < n and sql[i + 1] == "'":
-                        out.append("'")
-                        i += 2
-                        continue
-                    in_single = False
-                i += 1
-                continue
-            if in_double:
-                out.append(ch)
-                if ch == "\\" and i + 1 < n:
-                    out.append(sql[i + 1])
-                    i += 2
-                    continue
-                if ch == '"':
-                    in_double = False
-                i += 1
-                continue
-            if in_backtick:
-                out.append(ch)
-                if ch == "`":
-                    in_backtick = False
-                i += 1
-                continue
-
-            if ch == "'":
-                in_single = True
+            if ch == "'" and not in_double:
+                in_single = not in_single
                 out.append(ch)
                 i += 1
                 continue
-            if ch == '"':
-                in_double = True
+            if ch == '"' and not in_single:
+                in_double = not in_double
                 out.append(ch)
                 i += 1
                 continue
-            if ch == "`":
-                in_backtick = True
+            if in_single or in_double:
                 out.append(ch)
                 i += 1
                 continue
@@ -288,6 +265,10 @@ class QueryPipeline:
             return dict(payload)
         return dict(payload)
 
+
+class SyncQueryPipeline(_BaseQueryPipeline):
+    """Synchronous pipelined and CTE-batched query compiler and executor."""
+
     def execute(self, driver: Any) -> dict[str, Any]:
         """Execute compiled CTE query synchronously and unpack the result JSON payload."""
         sql, params = self.compile()
@@ -310,10 +291,14 @@ class QueryPipeline:
             first = rows[0]
             payload = first.get("payload") if isinstance(first, dict) else (first[0] if first else None)
             return self._unpack_payload_value(payload)
-        msg = f"Unsupported synchronous driver for QueryPipeline.execute: {type(driver)!r}"
+        msg = f"Unsupported synchronous driver for SyncQueryPipeline.execute: {type(driver)!r}"
         raise TypeError(msg)
 
-    async def execute_async(self, driver: Any) -> dict[str, Any]:
+
+class AsyncQueryPipeline(_BaseQueryPipeline):
+    """Asynchronous pipelined and CTE-batched query compiler and executor."""
+
+    async def execute(self, driver: Any) -> dict[str, Any]:
         """Execute compiled CTE query asynchronously and unpack the result JSON payload."""
         sql, params = self.compile()
         if hasattr(driver, "execute_with_description"):
@@ -337,5 +322,5 @@ class QueryPipeline:
             first = rows[0]
             payload = first.get("payload") if isinstance(first, dict) else (first[0] if first else None)
             return self._unpack_payload_value(payload)
-        msg = f"Unsupported asynchronous driver for QueryPipeline.execute_async: {type(driver)!r}"
+        msg = f"Unsupported asynchronous driver for AsyncQueryPipeline.execute: {type(driver)!r}"
         raise TypeError(msg)

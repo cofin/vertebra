@@ -1,7 +1,7 @@
 ---
 type: Guide
 title: "Query Pipelines, Change Feeds, Tenant Predicates & DataFusion"
-description: "The PostgreSQL SQL builders in `vertebra.db` (`QueryPipeline`, `RelOverlay`, `TenantPredicate`, `ChangeFeed`) and the `DataFusionEngine` table catalog."
+description: "The PostgreSQL SQL builders in `vertebra.db` (`SyncQueryPipeline` / `AsyncQueryPipeline`, `RelOverlay`, `TenantPredicate`, `ChangeFeed`) and the `DataFusionEngine` table catalog."
 status: stable
 tags: [domains, database, postgres, cdc, tenancy]
 sources:
@@ -21,10 +21,10 @@ The `pipeline`, `rls`, `cdc`, and `datafusion` modules in [`vertebra.db`](../../
 
 | Symbol | Responsibility |
 |---|---|
-| [`CteStep`](../../../../../src/py/vertebra/db/pipeline.py) | Frozen struct: `name`, `sql`, `params`, `return_json_agg` (default `True`). |
+| [`CTEStep`](../../../../../src/py/vertebra/db/pipeline.py) | Frozen struct: `name`, `sql`, `params`, `return_json_agg` (default `True`). |
 | `RelOverlay` | Read-your-own-writes view inside one statement. `to_cte_sql(name)` validates `name`, `base_table`, `inserted_cte`, `deleted_ids_cte`, and `id_column` via `SqlIdentifier.validate`, then renders `SELECT * FROM base` and excludes `id_column` values in `deleted_ids_cte`, appending `UNION ALL SELECT * FROM inserted_cte`. |
-| `QueryPipeline` | Fluent builder (`dialect: Literal["postgresql", "googlesql"] = "postgresql"`): `add_step(name, sql, *, params, return_json_agg)` and `add_overlay(name, overlay)` validate CTE names via `SqlIdentifier.validate` and return `self`. `compile()` returns `(sql, params)`. |
-| `QueryPipeline.build_jsonb_object` (static) | Validates column names via `SqlIdentifier.validate` and builds `jsonb_build_object(...)` on `postgresql` or `JSON_OBJECT(...)` on `googlesql`. Pairs are chunked at `max_pairs_per_call` (1–50, default `chunk_size=50`) and joined with `\|\|`, so wide objects stay under PostgreSQL's 100-argument function limit. An empty column list returns `'{}'::jsonb` (`postgresql`) or `JSON '{}'` (`googlesql`). |
+| `SyncQueryPipeline` / `AsyncQueryPipeline` | Fluent builder (`dialect: Literal["postgres", "googlesql"] = "postgres"`): `add_step(name, sql, *, params, return_json_agg)` and `add_overlay(name, overlay)` validate CTE names via `SqlIdentifier.validate` and return `self`. `compile()` returns `(sql, params)`. |
+| `SyncQueryPipeline.build_jsonb_object` / `AsyncQueryPipeline.build_jsonb_object` (static) | Validates column names via `SqlIdentifier.validate` and builds `jsonb_build_object(...)` on `postgres` or `TO_JSON(STRUCT(...))` on `googlesql`. Pairs are chunked at `max_pairs_per_call` (1–50, default `50`) and joined with `\|\|`, so wide objects stay under PostgreSQL's 100-argument function limit. An empty column list returns `'{}'::jsonb` (`postgres`) or `JSON '{}'` (`googlesql`). |
 
 Behavior of `compile()`:
 
@@ -53,7 +53,7 @@ The intended layering is an explicit predicate for plan quality plus a session G
 | `ChangeFeed.hydrate_notification(envelope)` | Decodes with `decode_json` and restores spilled payloads by `event_id`. An unknown spilled id yields an empty payload. |
 | `ChangeFeed.replay_since(last_event_id)` | Returns buffered events newer than the id. |
 | `ChangeFeed.build_emit_message_sql` (static) | Returns `SELECT pg_logical_emit_message($1, $2, $3)` with `(transactional, prefix, bytes)`, which emits to the WAL without writing a table. |
-| [`SpannerChangeStreamSource`](../../../../../src/py/vertebra/db/cdc.py) / `SpannerPartitionRecord` | Queries `READ_json_<stream_name>` (GoogleSQL) or `spanner.read_json_<stream_name>` (Spangres), parses `DataChangeRecord`, `HeartbeatRecord`, and `ChildPartitionsRecord` payloads, fans out child partition readers respecting parent watermark progression, and forwards data changes into `ChangeFeed.publish_event()`. Spangres polls bind `[start_timestamp, end_timestamp, partition_token, heartbeat_milliseconds]` positionally (`$1..$4` → `p1..p4`); GoogleSQL polls bind `@start_ts`, `@end_ts`, `@token`, and `@heartbeat_ms`. |
+| [`SyncSpannerChangeStreamSource` / `AsyncSpannerChangeStreamSource`](../../../../../src/py/vertebra/db/cdc.py) / `SpannerPartitionRecord` | Queries `READ_json_<stream_name>` (GoogleSQL) or `spanner.read_json_<stream_name>` (Spangres), parses `DataChangeRecord`, `HeartbeatRecord`, and `ChildPartitionsRecord` payloads, fans out child partition readers respecting parent watermark progression, and forwards data changes into `ChangeFeed.publish_event()`. Spangres polls bind `[start_timestamp, end_timestamp, partition_token, heartbeat_milliseconds]` positionally (`$1..$4` → `p1..p4`); GoogleSQL polls bind `@start_ts`, `@end_ts`, `@token`, and `@heartbeat_ms`. |
 
 Spill storage and history live in process memory and grow without bound. `spill_table`, `replication_slot_name`, `publication_name`, and `max_slot_wal_keep_size_mb` are configuration fields that no code reads.
 

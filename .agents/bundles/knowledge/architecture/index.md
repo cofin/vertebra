@@ -16,7 +16,7 @@ tags:
 
 - [Runtime Topologies & Python Embedding](runtime/topologies-and-embedding.md) — `Topology::{Auto, Embedded, Shm}`, explicit `tokio::runtime::Builder`, `EmbeddedSupervisor` `SO_REUSEPORT` multi-process supervision, `BatchBridge`, `RingFactory`, and Free-Threaded Python `3.14t`/`3.15t` execution modes (`#[pymodule(gil_used = false)]` across `_vertebra`, `_bundler`, and `_storage`).
 - [SHM Worker Spawn, Shutdown & Recovery Hooks](runtime/shm-supervision-and-recovery.md) — `RingFactory` FD inheritance (`VERTEBRA_*_FD`), `shutdown_workers` (`SIGTERM` then `SIGKILL`), and library-level recovery primitives (`WorkerLifecycle` with `pidfd_open` + `Child::try_wait` and 1 s–32 s exponential backoff, `RingPair::reclaim`, `cleanup_stale_shm`).
-- [Server Platform & Process Lifecycle](runtime/platform-and-lifecycle.md) — `run_supervisor` binary launcher, `find_server_binary`, `EventLoopPool` (`uvloop` + inline `add_reader`), `GilAuditReport`, `LoopShardedResource`, `SyncPool`, `ShmAllocationPolicy`, and container platform primitives (`CgroupQuota`, `LameDuckController`, `ZPagesRegistry`).
+- [Server Platform & Process Lifecycle](runtime/platform-and-lifecycle.md) — `run_supervisor` binary launcher, `find_server_binary`, `EventLoopPool` (`uvloop` + inline `add_reader`), `GilAuditReport`, `SyncLoopShardedResource` / `AsyncLoopShardedResource`, `SyncPool`, `ShmAllocationPolicy`, and container platform primitives (`CgroupQuota`, `LameDuckController`, `ZPagesRegistry`).
 
 ## IPC & Shared Memory (`ipc/`)
 
@@ -32,9 +32,9 @@ tags:
 ## Python Worker & Protocols (`worker/`)
 
 - [PyO3 FFI & Vectorized Batch Dispatch](worker/pyo3-ffi-and-batch-dispatch.md) — `vertebra._vertebra` zero-copy `BatchSnapshot`-backed `Request` (`body_view` buffer protocol)/`Headers`/`Response`/`RequestBatch`, Python 3.15/3.15t `immutable_type` and conditional `freelist`, inline vectorized sync dispatch (`sync_to_thread`), `O(1)` mount routing, and `EventLoopPool` wakeups.
-- [ASGI, RSGI & WSGI Runners](worker/asgi-and-wsgi-runners.md) — `AsgiRunner` + Rust `AsgiProtocol` / `PyEmptyAwaitable` / `drive_asgi_batch` (`PyIter_Send` + `_SteppedCoroutine`), `LitestarFastPathBypass`, 20-slot `AsgiScope`, RSGI 1.6 (`RsgiAdapter`, lazy `RsgiScope`, direct-submitting `RsgiHttpProtocol`, `drive_rsgi_batch`), and `WsgiAdapter` (`WsgiEnviron`).
+- [ASGI, RSGI & WSGI Runners](worker/asgi-and-wsgi-runners.md) — `AsgiRunner` + Rust `AsgiProtocol` / `PyEmptyAwaitable` / `drive_asgi_batch` (`PyIter_Send` + `_SteppedCoroutine`), `FastPath`, 20-slot `AsgiScope`, RSGI 1.6 (`RsgiAdapter`, lazy `RsgiScope`, direct-submitting `RsgiHttpProtocol`, `drive_rsgi_batch`), and `WsgiAdapter` (`WsgiEnviron`).
 
 ## Frontend, SSR & Codegen (`frontend/`)
 
-- [Oxc Bundler, HMR Watcher & QuickJS SSR Pool](frontend/bundler-hmr-and-ssr.md) — Oxc `Bundler` (`vertebra._bundler`), `rolldown-notify-debouncer-mini` `SourceWatcher` (`HmrEvent`), `rquickjs` `SsrPool` with `ArrayQueue` slot leasing and `DashMap` 60 s TTL cache, and `BuildOrchestrator`.
-- [Route Codegen Targets & Inertia v3 Middleware](frontend/codegen-and-inertia.md) — `RouteCollector` and `TypeExtractor` (`TypeNode` IR), `TypeScriptGenerator`, `ZodGenerator`, `ValibotGenerator`, `OpenApiGenerator`, `ProtobufSchemaGenerator`, `ProceduresGenerator`, `ManifestGenerator`, import maps, and `InertiaMiddleware`.
+- [Oxc Bundler, HMR Watcher & QuickJS SSR Pool](frontend/bundler-hmr-and-ssr.md) — Oxc `Bundler` (`vertebra._bundler`), `rolldown-notify-debouncer-mini` `SourceWatcher` (`HmrEvent`), `rquickjs` `SSRPool` with `ArrayQueue` slot leasing and `DashMap` 60 s TTL cache, and `BuildOrchestrator`.
+- [Route Codegen Targets & Inertia v3 Middleware](frontend/codegen-and-inertia.md) — `RouteCollector` and `TypeExtractor` (`TypeNode` IR), `TypeScriptGenerator`, `ZodGenerator`, `ValibotGenerator`, `OpenAPIGenerator`, `ProtobufGenerator`, `ProcedureClientGenerator`, `ManifestGenerator`, import maps, and `SyncInertiaMiddleware` / `AsyncInertiaMiddleware`.

@@ -1,13 +1,13 @@
-"""Configuration for LitestarPlugin integration."""
+"""Configuration for VertebraPlugin integration in Litestar."""
 
 from typing import Any
 
 import msgspec
 
-__all__ = ("LitestarConfig",)
+__all__ = ("VertebraConfig",)
 
 
-class LitestarConfig(msgspec.Struct, frozen=True, gc=False):
+class VertebraConfig(msgspec.Struct, frozen=True, gc=False):
     """Configuration controlling zero-code-change Litestar accelerations and runtime hooks."""
 
     offload_compression: bool = True

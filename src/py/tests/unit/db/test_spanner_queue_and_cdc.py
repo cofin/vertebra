@@ -9,9 +9,10 @@ import pytest
 
 from tests.unit.db.test_spanner import FakeSpannerClient
 from vertebra.db import (
+    AsyncSpannerChangeStreamSource,
     DatabaseChannelBackend,
-    SpannerChangeStreamSource,
     SpannerConfig,
+    SyncSpannerChangeStreamSource,
     SyncSpannerDriver,
 )
 from vertebra.framework.queues import (
@@ -22,7 +23,7 @@ from vertebra.framework.queues import (
     task,
 )
 from vertebra.framework.queues.backends import SpannerQueueBackend as ExportedSpannerQueueBackend
-from vertebra.storage import ObjectStore
+from vertebra.storage import SyncObjectStore
 
 
 @pytest.mark.anyio
@@ -113,7 +114,7 @@ async def test_spanner_queue_backend_lifecycle_dlq_and_leases() -> None:
 async def test_spanner_change_stream_source_partitions_and_object_store_spill() -> None:
     """Verify SpannerChangeStreamSource GoogleSQL/Spangres queries, child partition scheduling, and ObjectStore spill."""
     driver = SyncSpannerDriver(SpannerConfig(), client=FakeSpannerClient())
-    store = ObjectStore("memory://")
+    store = SyncObjectStore("memory://")
     channel_backend, source = DatabaseChannelBackend.from_spanner_change_stream(
         driver,
         "orders_stream",
@@ -241,11 +242,12 @@ _EXPECTED_READ_PARAMS: dict[str, Any] = {
 async def test_spanner_change_stream_poll_binds_params_for_dialect(dialect: str, mode: str) -> None:
     """Spangres polls bind positional $1..$4 values; GoogleSQL polls bind named parameters."""
     driver: Any = _RecordingSpannerDriver() if mode == "sync" else _AsyncRecordingSpannerDriver()
-    source = SpannerChangeStreamSource(driver, "orders_stream", dialect=dialect)
     if mode == "sync":
-        events = source.poll_partition_sync("tok-1", start_timestamp=_START, end_timestamp=_END)
+        source: Any = SyncSpannerChangeStreamSource(driver, "orders_stream", dialect=dialect)
+        events = source.poll_partition("tok-1", start_timestamp=_START, end_timestamp=_END)
     else:
-        events = await source.poll_partition_async("tok-1", start_timestamp=_START, end_timestamp=_END)
+        source = AsyncSpannerChangeStreamSource(driver, "orders_stream", dialect=dialect)
+        events = await source.poll_partition("tok-1", start_timestamp=_START, end_timestamp=_END)
     assert events == []
     assert driver.calls == [(source.build_read_query(), _EXPECTED_READ_PARAMS[dialect])]
     assert "tok-1" in source.completed_partitions

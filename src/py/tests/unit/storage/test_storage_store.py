@@ -1,4 +1,4 @@
-"""Unit tests for vertebra.storage (ObjectStore, zero-copy memoryview, and V4 presigning)."""
+"""Unit tests for vertebra.storage (SyncObjectStore, AsyncObjectStore, zero-copy memoryview, and V4 presigning)."""
 
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -7,13 +7,19 @@ from pathlib import Path
 import pytest
 
 import vertebra.storage as storage
-from vertebra.storage import ObjectMeta, ObjectStore, PutResult, SigningConfig
-from vertebra.storage._store import ReadableFile
+from vertebra.storage import (
+    AsyncObjectStore,
+    ObjectMeta,
+    PutResult,
+    SigningConfig,
+    SyncObjectStore,
+    SyncReadableFile,
+)
 
 
 def test_memory_store_sync_crud_and_zero_copy_memoryview() -> None:
     """Verify synchronous CRUD, range reads, and zero-copy memoryview inputs/outputs on memory://."""
-    store = ObjectStore("memory://")
+    store = SyncObjectStore("memory://")
     payload = memoryview(b"abcdefghijklmnopqrstuvwxyz")
     result = store.put("alpha/alphabet.bin", payload)
     assert isinstance(result, PutResult)
@@ -45,7 +51,7 @@ def test_memory_store_sync_crud_and_zero_copy_memoryview() -> None:
 
 def test_local_file_store_and_multipart(tmp_path: Path) -> None:
     """Verify file:// backend persistence and multipart uploads."""
-    store = ObjectStore(f"file://{tmp_path}")
+    store = SyncObjectStore(f"file://{tmp_path}")
     meta = store.put_multipart("chunks/combined.bin", [b"chunk-01:", b"chunk-02:", memoryview(b"chunk-03")])
     assert meta.size == 26
     assert store.get("chunks/combined.bin") == b"chunk-01:chunk-02:chunk-03"
@@ -53,30 +59,30 @@ def test_local_file_store_and_multipart(tmp_path: Path) -> None:
 
 @pytest.mark.anyio
 async def test_async_store_operations() -> None:
-    """Verify asyncio-compatible put_async, get_async, get_range_async, head_async, list_async, delete_async."""
-    store = ObjectStore("memory://")
-    await store.put_async("async/item.json", b'{"ok":true}')
-    assert await store.exists_async("async/item.json")
+    """Verify asyncio-compatible put, get, get_range, head, list, delete on AsyncObjectStore."""
+    store = AsyncObjectStore("memory://")
+    await store.put("async/item.json", b'{"ok":true}')
+    assert await store.exists("async/item.json")
 
-    body = await store.get_async("async/item.json")
+    body = await store.get("async/item.json")
     assert body == b'{"ok":true}'
 
-    partial = await store.get_range_async("async/item.json", 1, 4)
+    partial = await store.get_range("async/item.json", 1, 4)
     assert partial == b'"ok"'
 
-    meta = await store.head_async("async/item.json")
+    meta = await store.head("async/item.json")
     assert meta.size == 11
 
-    listed = await store.list_async("async")
+    listed = await store.list("async")
     assert len(listed) == 1
 
-    await store.delete_async("async/item.json")
-    assert not await store.exists_async("async/item.json")
+    await store.delete("async/item.json")
+    assert not await store.exists("async/item.json")
 
 
 def test_hmac_and_s3_v4_presigning_and_verification() -> None:
     """Verify HMAC-SHA256 and S3 Signature V4 URL signing and verification."""
-    store = ObjectStore(
+    store = SyncObjectStore(
         "s3://media-bucket",
         signing=SigningConfig(
             provider="s3",
@@ -92,7 +98,7 @@ def test_hmac_and_s3_v4_presigning_and_verification() -> None:
     assert store.verify_presigned_url(signed_get, method="GET", timestamp=1_700_000_100)
     assert not store.verify_presigned_url(signed_get, method="GET", timestamp=1_700_003_000)
 
-    hmac_store = ObjectStore(
+    hmac_store = SyncObjectStore(
         "memory://",
         signing=SigningConfig(
             provider="hmac",
@@ -123,13 +129,13 @@ class _MockIamHandler(BaseHTTPRequestHandler):
 
 
 def test_gcs_v4_keyless_iam_presigning_via_object_store() -> None:
-    """Verify ObjectStore supports provider='gcs' keyless IAM signBlob V4 presigning."""
+    """Verify SyncObjectStore supports provider='gcs' keyless IAM signBlob V4 presigning."""
     server = HTTPServer(("127.0.0.1", 0), _MockIamHandler)
     port = server.server_address[1]
     thread = threading.Thread(target=server.handle_request, daemon=True)
     thread.start()
 
-    gcs_store = ObjectStore(
+    gcs_store = SyncObjectStore(
         "gs://ml-artifacts",
         signing=SigningConfig(
             provider="gcs",
@@ -148,17 +154,17 @@ def test_gcs_v4_keyless_iam_presigning_via_object_store() -> None:
 
 
 def test_object_store_open_readable_file(tmp_path: Path) -> None:
-    """ObjectStore.open_readable_file returns a seekable ReadableFile and wrappers are removed."""
+    """SyncObjectStore.open_readable_file returns a seekable SyncReadableFile and wrappers are removed."""
     assert not hasattr(storage, "SyncStore")
     assert not hasattr(storage, "AsyncStore")
     assert not hasattr(storage, "StorageRegistry")
     assert not hasattr(storage, "UploadTracker")
 
-    store = ObjectStore.from_local(tmp_path)
+    store = SyncObjectStore.from_local(tmp_path)
     store.put("data.parquet", b"PAR1-parquet-content-PAR1")
 
     with store.open_readable_file("data.parquet") as f:
-        assert isinstance(f, ReadableFile)
+        assert isinstance(f, SyncReadableFile)
         assert f.size == 25
         assert f.read(4) == b"PAR1"
         assert f.tell() == 4

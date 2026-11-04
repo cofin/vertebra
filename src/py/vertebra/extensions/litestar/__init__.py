@@ -15,7 +15,7 @@ if TYPE_CHECKING:
         ensure_autowire_before_route_compiler,
     )
     from vertebra.extensions.litestar.channels import ChannelsBackend, swap_channels_backend
-    from vertebra.extensions.litestar.config import LitestarConfig
+    from vertebra.extensions.litestar.config import VertebraConfig
     from vertebra.extensions.litestar.email import SESEmailBackend, SESEmailConfig
     from vertebra.extensions.litestar.fastpath import (
         CompiledRoute,
@@ -44,7 +44,7 @@ if TYPE_CHECKING:
         offload_middlewares,
     )
     from vertebra.extensions.litestar.plugin import (
-        LitestarPlugin,
+        VertebraPlugin,
         enter_litestar_server_lifespan,
     )
     from vertebra.extensions.litestar.queues import (
@@ -106,8 +106,6 @@ __all__ = (
     "JWTAuthenticationMechanism",
     "JWTAuthenticator",
     "JWTIdentityResolver",
-    "LitestarConfig",
-    "LitestarPlugin",
     "MemoryStore",
     "ObjectStoreSkillSource",
     "OffloadPlan",
@@ -121,6 +119,8 @@ __all__ = (
     "SHMExecutionBackend",
     "SHMQueueBackend",
     "StaticMountOffloadSpec",
+    "VertebraConfig",
+    "VertebraPlugin",
     "WellKnownAgentCardOffload",
     "asyncapi",
     "autowire",
@@ -182,8 +182,6 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "JWTAuthenticationMechanism": ("vertebra.extensions.litestar.security", "JWTAuthenticationMechanism"),
     "JWTAuthenticator": ("vertebra.extensions.litestar.security", "JWTAuthenticator"),
     "JWTIdentityResolver": ("vertebra.extensions.litestar.security", "JWTIdentityResolver"),
-    "LitestarConfig": ("vertebra.extensions.litestar.config", "LitestarConfig"),
-    "LitestarPlugin": ("vertebra.extensions.litestar.plugin", "LitestarPlugin"),
     "MemoryStore": ("vertebra.extensions.litestar.store", "MemoryStore"),
     "ObjectStoreSkillSource": ("vertebra.extensions.litestar.mcp", "ObjectStoreSkillSource"),
     "OffloadPlan": ("vertebra.extensions.litestar.offload", "OffloadPlan"),
@@ -197,6 +195,8 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "SHMExecutionBackend": ("vertebra.extensions.litestar.queues", "SHMExecutionBackend"),
     "SHMQueueBackend": ("vertebra.extensions.litestar.queues", "SHMQueueBackend"),
     "StaticMountOffloadSpec": ("vertebra.extensions.litestar.offload", "StaticMountOffloadSpec"),
+    "VertebraConfig": ("vertebra.extensions.litestar.config", "VertebraConfig"),
+    "VertebraPlugin": ("vertebra.extensions.litestar.plugin", "VertebraPlugin"),
     "WellKnownAgentCardOffload": ("vertebra.extensions.litestar.mcp", "WellKnownAgentCardOffload"),
     "asyncapi": ("vertebra.extensions.litestar.asyncapi", ""),
     "autowire": ("vertebra.extensions.litestar.autowire", ""),

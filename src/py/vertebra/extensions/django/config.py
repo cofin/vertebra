@@ -11,10 +11,10 @@ if TYPE_CHECKING:
     from vertebra.extensions.django.openapi import OpenAPIConfig
     from vertebra.extensions.django.vite import ViteConfig
 
-__all__ = ("DjangoConfig",)
+__all__ = ("VertebraConfig",)
 
 
-class DjangoConfig(msgspec.Struct, frozen=True, gc=False):
+class VertebraConfig(msgspec.Struct, frozen=True, gc=False):
     """Configuration for the Vertebra Django extension."""
 
     root_urlconf: str | None = None

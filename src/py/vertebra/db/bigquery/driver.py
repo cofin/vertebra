@@ -10,10 +10,9 @@ from typing import Any, ClassVar, Literal, Self
 import msgspec
 
 from vertebra._vertebra import (
-    BigQueryClient as _RustBigQueryClient,
-)
-from vertebra._vertebra import (
+    AsyncBigQueryClient,
     LeaseBroker,
+    SyncBigQueryClient,
 )
 from vertebra._vertebra import (
     StatementCache as _RustStatementCache,
@@ -60,7 +59,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         broker: LeaseBroker | None = None,
         statement_cache: _RustStatementCache | None = None,
         propagator: SqlTracePropagator | None = None,
-        client: Any | None = None,
+        client: SyncBigQueryClient | None = None,
         **overrides: Any,
     ) -> None:
         if isinstance(config, str):
@@ -82,7 +81,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
             else (_RustStatementCache(max(16, resolved.statement_cache_capacity)) if resolved.use_shm_cache else None)
         )
         self._propagator: SqlTracePropagator = propagator or SqlTracePropagator()
-        self._client: Any | None = client
+        self._client: SyncBigQueryClient | None = client
         self._session_id: str | None = None
         self._in_transaction: bool = False
         self._last_query_metadata: dict[str, Any] = {}
@@ -124,9 +123,9 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         self.close()
 
     def connect(self) -> Self:
-        """Initialize the underlying Rust `BigQueryClient` channel pool."""
+        """Initialize the underlying Rust `SyncBigQueryClient` channel pool."""
         if self._client is None:
-            self._client = BigQueryCore.create_rust_client(self.config)
+            self._client = BigQueryCore.create_sync_rust_client(self.config)
         self._closed = False
         return self
 
@@ -492,9 +491,9 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
             expires_in_secs=expires_in_secs,
         )
 
-    def _ensure_client(self) -> _RustBigQueryClient:
+    def _ensure_client(self) -> SyncBigQueryClient:
         if self._client is None:
-            self._client = BigQueryCore.create_rust_client(self.config)
+            self._client = BigQueryCore.create_sync_rust_client(self.config)
         return self._client
 
     def _acquire_pid_lease(self) -> Any:
@@ -613,7 +612,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
         broker: LeaseBroker | None = None,
         statement_cache: _RustStatementCache | None = None,
         propagator: SqlTracePropagator | None = None,
-        client: Any | None = None,
+        client: AsyncBigQueryClient | None = None,
         **overrides: Any,
     ) -> None:
         if isinstance(config, str):
@@ -635,7 +634,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
             else (_RustStatementCache(max(16, resolved.statement_cache_capacity)) if resolved.use_shm_cache else None)
         )
         self._propagator: SqlTracePropagator = propagator or SqlTracePropagator()
-        self._client: Any | None = client
+        self._client: AsyncBigQueryClient | None = client
         self._session_id: str | None = None
         self._in_transaction: bool = False
         self._last_query_metadata: dict[str, Any] = {}
@@ -677,9 +676,9 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
         await self.close()
 
     async def connect(self) -> Self:
-        """Initialize the underlying Rust `BigQueryClient` channel pool."""
+        """Initialize the underlying Rust `AsyncBigQueryClient` channel pool."""
         if self._client is None:
-            self._client = BigQueryCore.create_rust_client(self.config)
+            self._client = BigQueryCore.create_async_rust_client(self.config)
         self._closed = False
         return self
 
@@ -794,7 +793,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
         """Validate `sql` via `jobs.insert(dryRun=True)` and return byte and cost estimates."""
         client = self._ensure_client()
         rewritten_sql, params_json = self._prepare_sql_and_params(sql, parameters)
-        raw = await client.dry_run_async(rewritten_sql, params_json)
+        raw = await client.dry_run(rewritten_sql, params_json)
         return BigQueryCore.build_dry_run_result(raw)
 
     async def fetch_arrow(
@@ -821,7 +820,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
             project_id, dataset_id, table_id = table_parts
             lease = self._acquire_pid_lease()
             try:
-                raw_cursor = await client.read_table_arrow_async(
+                raw_cursor = await client.read_table_arrow(
                     project_id,
                     dataset_id,
                     table_id,
@@ -878,7 +877,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
         )
         lease = self._acquire_pid_lease()
         try:
-            res = await client.append_arrow_async(parent_table, ipc_bytes, mode)
+            res = await client.append_arrow(parent_table, ipc_bytes, mode)
             return int(res.get("appended_rows", 0))
         except Exception as exc:
             if BigQueryCore.is_storage_api_fallback_error(exc):
@@ -903,7 +902,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
         """Start a BigQuery multi-statement transaction session and return its `session_id`."""
         client = self._ensure_client()
         create_session = self._session_id is None
-        res = await client.query_async(
+        res = await client.query(
             "BEGIN TRANSACTION",
             None,
             self._session_id,
@@ -921,7 +920,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
             return
         client = self._ensure_client()
         try:
-            await client.query_async("COMMIT TRANSACTION", None, self._session_id, False)
+            await client.query("COMMIT TRANSACTION", None, self._session_id, False)
         finally:
             self._in_transaction = False
 
@@ -931,7 +930,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
             return
         client = self._ensure_client()
         try:
-            await client.query_async("ROLLBACK TRANSACTION", None, self._session_id, False)
+            await client.query("ROLLBACK TRANSACTION", None, self._session_id, False)
         finally:
             self._in_transaction = False
 
@@ -1045,9 +1044,9 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
             expires_in_secs=expires_in_secs,
         )
 
-    def _ensure_client(self) -> _RustBigQueryClient:
+    def _ensure_client(self) -> AsyncBigQueryClient:
         if self._client is None:
-            self._client = BigQueryCore.create_rust_client(self.config)
+            self._client = BigQueryCore.create_async_rust_client(self.config)
         return self._client
 
     def _acquire_pid_lease(self) -> Any:
@@ -1102,7 +1101,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
         rewritten_sql, params_json = self._prepare_sql_and_params(sql, parameters)
         annotated_sql = BigQueryCore.annotate_sql_with_trace(rewritten_sql, self._propagator)
         merged_labels = BigQueryCore.sanitize_labels(self.config.labels, job_labels)
-        raw = await client.query_async(
+        raw = await client.query(
             annotated_sql,
             params_json,
             self._session_id,

@@ -14,16 +14,16 @@ import pytest
 
 from vertebra.db.cdc import CDCConfig, ChangeFeed
 from vertebra.db.datafusion import DataFusionConfig, DataFusionEngine
-from vertebra.db.pipeline import CTEStep, QueryPipeline, RelOverlay
+from vertebra.db.pipeline import AsyncQueryPipeline, CTEStep, RelOverlay, SyncQueryPipeline
 from vertebra.db.postgres import AsyncPostgreSQLDriver, SyncPostgreSQLDriver
 from vertebra.db.rls import TenantPredicate, TenantScopeConfig
-from vertebra.storage import ObjectStore
+from vertebra.storage import SyncObjectStore
 from vertebra.typing import MissingDependencyError, reset_dependency_cache
 
 
 def test_changefeed_bounded_history_and_spill_to_object_store(monkeypatch: pytest.MonkeyPatch) -> None:
     """ChangeFeed must bound in-memory history, spill >7500B payloads to ObjectStore, and flush Parquet."""
-    store = ObjectStore("memory://")
+    store = SyncObjectStore("memory://")
     config = CDCConfig(max_history_size=2, spill_threshold_bytes=100, spill_prefix="cdc/spill")
     feed = ChangeFeed(config, store=store)
 
@@ -93,28 +93,28 @@ def test_sql_identifier_validation_in_reloverlay_and_ctestep() -> None:
 
 def test_query_pipeline_build_jsonb_object_and_parameter_collision() -> None:
     """QueryPipeline must enforce max_pairs_per_call limit and detect conflicting step parameter keys."""
-    jsonb_sql = QueryPipeline.build_jsonb_object([("k1", "v1"), ("k2", "v2")], max_pairs_per_call=1)
+    jsonb_sql = SyncQueryPipeline.build_jsonb_object([("k1", "v1"), ("k2", "v2")], max_pairs_per_call=1)
     assert "jsonb_build_object('k1', v1)" in jsonb_sql
     assert "jsonb_build_object('k2', v2)" in jsonb_sql
     assert " || " in jsonb_sql
 
     with pytest.raises(ValueError, match="max_pairs_per_call must be between 1 and 50"):
-        QueryPipeline.build_jsonb_object([("k", "v")], max_pairs_per_call=0)
+        SyncQueryPipeline.build_jsonb_object([("k", "v")], max_pairs_per_call=0)
 
     with pytest.raises(ValueError, match="max_pairs_per_call must be between 1 and 50"):
-        QueryPipeline.build_jsonb_object([("k", "v")], max_pairs_per_call=51)
+        SyncQueryPipeline.build_jsonb_object([("k", "v")], max_pairs_per_call=51)
 
-    pipeline = QueryPipeline()
+    pipeline = SyncQueryPipeline()
     pipeline.add_step("step1", "SELECT :x AS col", params={"x": 10})
     pipeline.add_step("step2", "SELECT :x AS other", params={"x": 20})
 
-    with pytest.raises(ValueError, match="Conflicting query pipeline parameter"):
+    with pytest.raises(ValueError, match="Conflicting values for parameter 'x' across pipeline steps"):
         pipeline.compile()
 
 
 def test_query_pipeline_execution_sync_and_async() -> None:
     """QueryPipeline.execute and execute_async must execute compiled CTE statements against drivers."""
-    pipeline = QueryPipeline()
+    pipeline = SyncQueryPipeline()
     pipeline.add_step("step1", "SELECT 1 AS num", return_json_agg=True)
 
     mock_sync_driver = MagicMock(spec=SyncPostgreSQLDriver)
@@ -136,7 +136,9 @@ def test_query_pipeline_execution_sync_and_async() -> None:
     mock_async_driver.execute_with_description.side_effect = _async_exec
 
     async def _run_async() -> dict[str, Any]:
-        return await pipeline.execute_async(mock_async_driver)
+        async_pipeline = AsyncQueryPipeline()
+        async_pipeline.add_step("step1", "SELECT 1 AS num", return_json_agg=True)
+        return await async_pipeline.execute(mock_async_driver)
 
     result_async = anyio.run(_run_async)
     assert result_async == {"step1": [{"num": 1}]}
@@ -145,7 +147,7 @@ def test_query_pipeline_execution_sync_and_async() -> None:
 def test_datafusion_engine_table_registration_and_execution() -> None:
     """DataFusionEngine must register tables and execute SQL queries returning dicts, arrow, and IPC."""
     engine = DataFusionEngine(DataFusionConfig())
-    store = ObjectStore("memory://")
+    store = SyncObjectStore("memory://")
     metrics_sink = pa.BufferOutputStream()
     pq.write_table(pa.Table.from_pylist([{"id": 1, "val": 100}]), metrics_sink)
     store.put("data/metrics.parquet", metrics_sink.getvalue().to_pybytes())
@@ -171,7 +173,7 @@ def test_datafusion_engine_table_registration_and_execution() -> None:
 
 def test_cdc_changefeed_parquet_spill_to_object_store_and_datafusion_arrow_query() -> None:
     """ChangeFeed Parquet spill and DataFusion query execution composition with KeyError refusal."""
-    store = ObjectStore("memory://")
+    store = SyncObjectStore("memory://")
     feed = ChangeFeed(CDCConfig(spill_threshold_bytes=100), store=store)
 
     feed.publish_event("INSERT", {"account_id": 10, "amount": 50})
@@ -220,17 +222,17 @@ def test_query_pipeline_and_rls_identifier_refusal_and_single_rtt_execution() ->
     with pytest.raises(ValueError, match="Invalid SQL identifier"):
         TenantPredicate(table_alias="t; DROP TABLE users", tenant_value=1)
 
-    pipe_collision = QueryPipeline()
+    pipe_collision = SyncQueryPipeline()
     pipe_collision.add_step("s1", "SELECT 1", params={"p": 1})
     pipe_collision.add_step("s2", "SELECT 2", params={"p": 2})
-    with pytest.raises(ValueError, match="Conflicting query pipeline parameter"):
+    with pytest.raises(ValueError, match="Conflicting values for parameter 'p' across pipeline steps"):
         pipe_collision.compile()
 
     tenant = TenantPredicate(table_alias="a", tenant_value="tenant-abc")
     sql_frag = tenant.to_sql_fragment(1)
     assert sql_frag == "a.tenant_id = $1::uuid"
 
-    pipeline = QueryPipeline()
+    pipeline = SyncQueryPipeline()
     pipeline.add_step("orders", f"SELECT * FROM orders a WHERE {sql_frag}")
     pipeline.add_overlay("clean_orders", RelOverlay(base_table="orders", id_column="id"))
 

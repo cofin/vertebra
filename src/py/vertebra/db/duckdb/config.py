@@ -79,7 +79,7 @@ class DuckDBConfig(BaseDatabaseConfig, frozen=True, gc=False):
     broker: Any = None
     """Optional shared-memory `DatabaseBroker` coordinating single-writer/multi-reader leases."""
     gcs_token_cache: Any = None
-    """Optional `GcpTokenCache` used to rotate session-local GCS `BEARER_TOKEN` secrets on token refresh."""
+    """Optional `SyncGcpTokenCache` or `AsyncGcpTokenCache` used to rotate session-local GCS `BEARER_TOKEN` secrets on token refresh."""
 
     def resolved_path(self) -> str:
         """Resolve the effective database path from `path` or `database`."""

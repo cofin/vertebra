@@ -10,8 +10,16 @@ from urllib.parse import parse_qsl, urlparse
 
 from vertebra._vertebra import LeaseBroker
 from vertebra.db.bigquery import AsyncBigQueryDriver, BigQueryConfig, SyncBigQueryDriver
-from vertebra.db.dialer.alloydb import AlloyDBConfig, AlloyDBDialer
-from vertebra.db.dialer.cloudsql import CloudSQLConfig, CloudSQLDialer
+from vertebra.db.dialer.alloydb import (
+    AlloyDBConfig,
+    AsyncAlloyDBDialer,
+    SyncAlloyDBDialer,
+)
+from vertebra.db.dialer.cloudsql import (
+    AsyncCloudSQLDialer,
+    CloudSQLConfig,
+    SyncCloudSQLDialer,
+)
 from vertebra.db.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
 from vertebra.db.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLDriver
 from vertebra.db.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
@@ -57,8 +65,8 @@ type AnyDatabaseDriver = (
     | AsyncSpannerDriver
     | AsyncRedisDriver
     | AsyncValkeyDriver
-    | CloudSQLDialer
-    | AlloyDBDialer
+    | AsyncCloudSQLDialer
+    | AsyncAlloyDBDialer
 )
 
 type AnySyncDatabaseDriver = (
@@ -72,8 +80,8 @@ type AnySyncDatabaseDriver = (
     | SyncSpannerDriver
     | SyncRedisDriver
     | SyncValkeyDriver
-    | CloudSQLDialer
-    | AlloyDBDialer
+    | SyncCloudSQLDialer
+    | SyncAlloyDBDialer
 )
 
 
@@ -99,7 +107,10 @@ class DatabaseRegistry:
         self._sync_drivers: dict[str, AnySyncDatabaseDriver] = {}
         self._shared_sync_drivers: dict[tuple[Any, ...], AnySyncDatabaseDriver] = {}
         self._shared_async_drivers: dict[tuple[Any, ...], AnyDatabaseDriver] = {}
-        self._shared_dialers: dict[tuple[str, str], CloudSQLDialer | AlloyDBDialer] = {}
+        self._shared_dialers: dict[
+            tuple[str, str],
+            SyncCloudSQLDialer | AsyncCloudSQLDialer | SyncAlloyDBDialer | AsyncAlloyDBDialer,
+        ] = {}
         self._broker = broker
 
     @classmethod
@@ -333,18 +344,20 @@ class DatabaseRegistry:
         self._shared_sync_drivers[key] = driver
         return driver
 
-    def _get_or_create_dialer(self, dialer_cfg: CloudSQLConfig | AlloyDBConfig) -> CloudSQLDialer | AlloyDBDialer:
+    def _get_or_create_dialer(
+        self, dialer_cfg: CloudSQLConfig | AlloyDBConfig, *, is_async: bool = False
+    ) -> SyncCloudSQLDialer | AsyncCloudSQLDialer | SyncAlloyDBDialer | AsyncAlloyDBDialer:
         if isinstance(dialer_cfg, CloudSQLConfig):
-            key = ("cloudsql", dialer_cfg.instance_connection_name)
+            key = ("cloudsql_async" if is_async else "cloudsql_sync", dialer_cfg.instance_connection_name)
             existing = self._shared_dialers.get(key)
             if existing is None:
-                existing = CloudSQLDialer(dialer_cfg)
+                existing = AsyncCloudSQLDialer(dialer_cfg) if is_async else SyncCloudSQLDialer(dialer_cfg)
                 self._shared_dialers[key] = existing
             return existing
-        key = ("alloydb", dialer_cfg.instance_uri)
+        key = ("alloydb_async" if is_async else "alloydb_sync", dialer_cfg.instance_uri)
         existing = self._shared_dialers.get(key)
         if existing is None:
-            existing = AlloyDBDialer(dialer_cfg)
+            existing = AsyncAlloyDBDialer(dialer_cfg) if is_async else SyncAlloyDBDialer(dialer_cfg)
             self._shared_dialers[key] = existing
         return existing
 
@@ -355,12 +368,12 @@ class DatabaseRegistry:
         if isinstance(config, PostgreSQLConfig):
             dialer: object = None
             if (dialer_cfg := config.to_cloud_dialer_config()) is not None:
-                dialer = self._get_or_create_dialer(dialer_cfg)
+                dialer = self._get_or_create_dialer(dialer_cfg, is_async=True)
             return AsyncPostgreSQLDriver(config, dialer=dialer, broker=broker)
         if isinstance(config, MySQLConfig):
-            mysql_dialer: CloudSQLDialer | None = None
+            mysql_dialer: AsyncCloudSQLDialer | None = None
             if (csql_cfg := config.to_cloud_dialer_config()) is not None:
-                mysql_dialer = cast("CloudSQLDialer", self._get_or_create_dialer(csql_cfg))
+                mysql_dialer = cast("AsyncCloudSQLDialer", self._get_or_create_dialer(csql_cfg, is_async=True))
             return AsyncMySQLDriver(config, dialer=mysql_dialer, broker=broker)
         if isinstance(config, SQLiteConfig):
             return AsyncSQLiteDriver(config, broker=broker)
@@ -379,9 +392,9 @@ class DatabaseRegistry:
         if isinstance(config, RedisConfig):
             return AsyncRedisDriver(config)
         if isinstance(config, CloudSQLConfig):
-            return self._get_or_create_dialer(config)
+            return cast("AsyncCloudSQLDialer", self._get_or_create_dialer(config, is_async=True))
         if isinstance(config, AlloyDBConfig):
-            return self._get_or_create_dialer(config)
+            return cast("AsyncAlloyDBDialer", self._get_or_create_dialer(config, is_async=True))
         msg = f"Unsupported config type: {type(config)!r}"
         raise TypeError(msg)
 
@@ -392,12 +405,12 @@ class DatabaseRegistry:
         if isinstance(config, PostgreSQLConfig):
             dialer: object = None
             if (dialer_cfg := config.to_cloud_dialer_config()) is not None:
-                dialer = self._get_or_create_dialer(dialer_cfg)
+                dialer = self._get_or_create_dialer(dialer_cfg, is_async=False)
             return SyncPostgreSQLDriver(config, dialer=dialer, broker=broker)
         if isinstance(config, MySQLConfig):
-            mysql_sync_dialer: CloudSQLDialer | None = None
+            mysql_sync_dialer: SyncCloudSQLDialer | None = None
             if (csql_cfg := config.to_cloud_dialer_config()) is not None:
-                mysql_sync_dialer = cast("CloudSQLDialer", self._get_or_create_dialer(csql_cfg))
+                mysql_sync_dialer = cast("SyncCloudSQLDialer", self._get_or_create_dialer(csql_cfg, is_async=False))
             return SyncMySQLDriver(config, dialer=mysql_sync_dialer, broker=broker)
         if isinstance(config, SQLiteConfig):
             return SyncSQLiteDriver(config, broker=broker)
@@ -416,9 +429,9 @@ class DatabaseRegistry:
         if isinstance(config, RedisConfig):
             return SyncRedisDriver(config)
         if isinstance(config, CloudSQLConfig):
-            return self._get_or_create_dialer(config)
+            return cast("SyncCloudSQLDialer", self._get_or_create_dialer(config, is_async=False))
         if isinstance(config, AlloyDBConfig):
-            return self._get_or_create_dialer(config)
+            return cast("SyncAlloyDBDialer", self._get_or_create_dialer(config, is_async=False))
         msg = f"Unsupported config type: {type(config)!r}"
         raise TypeError(msg)
 

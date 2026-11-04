@@ -5,11 +5,16 @@ from __future__ import annotations
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from vertebra._vertebra import BigQueryClient, BigQueryError
+from vertebra._vertebra import (
+    AsyncBigQueryClient,
+    BigQueryError,
+    SyncBigQueryClient,
+)
 from vertebra.db import (
     ArrowCursor,
     AsyncBigQueryDriver,
@@ -24,7 +29,7 @@ from vertebra.db import (
 from vertebra.db.bigquery.core import BigQueryCore
 from vertebra.embeddings import BigQueryEmbedder, EmbeddingError
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
-from vertebra.storage import ObjectStore, SigningConfig
+from vertebra.storage import SigningConfig, SyncObjectStore
 from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError, VertebraError
 
 
@@ -276,7 +281,7 @@ def test_bigquery_config_dsn_and_registry() -> None:
     assert sync_drv.dataset_id == "events_ds"
 
 
-def test_sync_bigquery_driver_queries_dry_run_and_transactions() -> None:
+def test_sync_bigquery_driver_queries_dry_run_and_transactions(tmp_path: Path) -> None:
     """Verify SyncBigQueryDriver over the pure-Rust BigQuery REST v2 wire engine."""
     server = _MockBigQueryRestServer()
     try:
@@ -286,12 +291,30 @@ def test_sync_bigquery_driver_queries_dry_run_and_transactions() -> None:
             rest_endpoint=f"http://{server.host_port}",
             labels={"Env Name!": "Prod-01"},
         )
+        store = SyncObjectStore(f"file://{tmp_path}")
+        backend = ObjectStoreBackend(f"file://{tmp_path}/warehouse", store=store)
         with SyncBigQueryDriver(cfg) as driver:
             rows = driver.select("SELECT id, name, score FROM metrics WHERE id >= @min_id", {"min_id": 1})
             assert rows == [
                 {"id": 1, "name": "alpha", "score": 9.5},
                 {"id": 2, "name": "beta", "score": 4.25},
             ]
+
+            exported_sync = driver.export_to_object_store(
+                "SELECT id, name, score FROM metrics",
+                f"file://{tmp_path}/warehouse/exports/sync_metrics.parquet",
+                store=backend,
+                format="parquet",
+            )
+            assert exported_sync == 2
+
+            loaded_sync = driver.load_from_object_store(
+                "analytics.metrics",
+                f"file://{tmp_path}/warehouse/exports/sync_metrics.parquet",
+                store=backend,
+                format="parquet",
+            )
+            assert loaded_sync == 2
 
             typed_rows = driver.select("SELECT id, name, score FROM metrics", schema_type=MetricRow)
             assert len(typed_rows) == 2
@@ -323,7 +346,7 @@ def test_sync_bigquery_driver_queries_dry_run_and_transactions() -> None:
 
 
 @pytest.mark.anyio
-async def test_async_bigquery_driver_arrow_object_store_and_object_tables() -> None:
+async def test_async_bigquery_driver_arrow_object_store_and_object_tables(tmp_path: Path) -> None:
     """Verify AsyncBigQueryDriver, ArrowCursor, multicloud ObjectStore stage/load, and ObjectRef presigning."""
     server = _MockBigQueryRestServer()
     try:
@@ -332,15 +355,15 @@ async def test_async_bigquery_driver_arrow_object_store_and_object_tables() -> N
             dataset_id="analytics",
             rest_endpoint=f"http://{server.host_port}",
         )
-        store = ObjectStore(
-            "memory://",
+        store = SyncObjectStore(
+            f"file://{tmp_path}",
             signing=SigningConfig(
                 provider="hmac",
                 hmac_secret="test-bq-signing-secret",
                 endpoint="https://storage.example.com",
             ),
         )
-        backend = ObjectStoreBackend("memory://warehouse", store=store)
+        backend = ObjectStoreBackend(f"file://{tmp_path}/warehouse", store=store)
 
         async with AsyncBigQueryDriver(cfg) as driver:
             cursor = await driver.fetch_arrow("SELECT id, name, score FROM metrics")
@@ -353,7 +376,7 @@ async def test_async_bigquery_driver_arrow_object_store_and_object_tables() -> N
 
             exported_count = await driver.export_to_object_store(
                 "SELECT id, name, score FROM metrics",
-                "memory://warehouse/exports/metrics.parquet",
+                f"file://{tmp_path}/warehouse/exports/metrics.parquet",
                 store=backend,
                 format="parquet",
             )
@@ -361,7 +384,7 @@ async def test_async_bigquery_driver_arrow_object_store_and_object_tables() -> N
 
             loaded_count = await driver.load_from_object_store(
                 "analytics.metrics",
-                "memory://warehouse/exports/metrics.parquet",
+                f"file://{tmp_path}/warehouse/exports/metrics.parquet",
                 store=backend,
                 format="parquet",
             )
@@ -500,7 +523,7 @@ async def test_bigquery_embedder_rejects_incomplete_results(rows: list[dict[str,
 
 def test_bigquery_client_invalid_params_raise_typed_error() -> None:
     """Sync BigQuery binding raises BigQueryError with INVALID_ARGUMENT for malformed parameters."""
-    client = BigQueryClient(project_id="p1", rest_endpoint="http://127.0.0.1:9")
+    client = SyncBigQueryClient(project_id="p1", rest_endpoint="http://127.0.0.1:9")
     with pytest.raises(BigQueryError) as excinfo:
         client.query("SELECT 1", "not json")
     assert excinfo.value.code == 3
@@ -511,9 +534,9 @@ def test_bigquery_client_invalid_params_raise_typed_error() -> None:
 @pytest.mark.anyio
 async def test_bigquery_client_invalid_params_raise_typed_error_async() -> None:
     """Async BigQuery binding raises the same BigQueryError as the sync binding."""
-    client = BigQueryClient(project_id="p1", rest_endpoint="http://127.0.0.1:9")
+    client = AsyncBigQueryClient(project_id="p1", rest_endpoint="http://127.0.0.1:9")
     with pytest.raises(BigQueryError) as excinfo:
-        await client.query_async("SELECT 1", "not json")
+        await client.query("SELECT 1", "not json")
     assert excinfo.value.code == 3
 
 

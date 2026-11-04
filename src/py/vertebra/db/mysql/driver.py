@@ -13,7 +13,7 @@ from vertebra.db._arrow import (
     _hydrate_rows_with_schema,
     _table_to_rows_and_cols,
 )
-from vertebra.db.dialer.cloudsql import CloudSQLDialer
+from vertebra.db.dialer.cloudsql import AsyncCloudSQLDialer, SyncCloudSQLDialer
 from vertebra.db.driver import (
     AsyncDatabaseDriver,
     SyncDatabaseDriver,
@@ -43,7 +43,7 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
         self,
         config: MySQLConfig | None = None,
         *,
-        dialer: CloudSQLDialer | None = None,
+        dialer: SyncCloudSQLDialer | None = None,
         broker: Any = None,
         connect_factory: Any = None,
     ) -> None:
@@ -53,7 +53,7 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
         if self._dialer is None:
             csql_cfg = self.config.to_cloud_dialer_config()
             if csql_cfg is not None:
-                self._dialer = CloudSQLDialer(csql_cfg)
+                self._dialer = SyncCloudSQLDialer(csql_cfg)
         self._connect_factory = connect_factory
         self._idle_conns: collections.deque[Any] = collections.deque(maxlen=self.config.max_size)
         self._in_memory_rows: list[tuple[Any, ...]] = []
@@ -64,7 +64,7 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
         return self.config
 
     @property
-    def dialer(self) -> CloudSQLDialer | None:
+    def dialer(self) -> SyncCloudSQLDialer | None:
         """Return the attached CloudSQLDialer if configured."""
         return self._dialer
 
@@ -258,7 +258,7 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
         params = self.config.parse_dsn_params()
         tls_sock: ssl.SSLSocket | None = None
         if self._dialer is not None:
-            tls_sock = self._dialer.connect_sync(host=params["host"])
+            tls_sock = self._dialer.connect(host=params["host"])
 
         if self._connect_factory is not None:
             if tls_sock is not None:
@@ -313,7 +313,7 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         self,
         config: MySQLConfig | None = None,
         *,
-        dialer: CloudSQLDialer | None = None,
+        dialer: AsyncCloudSQLDialer | None = None,
         broker: Any = None,
         pool: Any = None,
     ) -> None:
@@ -323,7 +323,7 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         if self._dialer is None:
             csql_cfg = self.config.to_cloud_dialer_config()
             if csql_cfg is not None:
-                self._dialer = CloudSQLDialer(csql_cfg)
+                self._dialer = AsyncCloudSQLDialer(csql_cfg)
         self._pool = pool
         self._in_memory_rows: list[tuple[Any, ...]] = []
 
@@ -333,7 +333,7 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         return self.config
 
     @property
-    def dialer(self) -> CloudSQLDialer | None:
+    def dialer(self) -> AsyncCloudSQLDialer | None:
         """Return the attached CloudSQLDialer if configured."""
         return self._dialer
 

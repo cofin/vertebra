@@ -43,37 +43,37 @@ __all__ = (
     "AsyncDBAPIConnection",
     "AsyncDBAPICursor",
     "AsyncDBAPIModule",
-    "BigQueryAsyncDialect",
-    "BigQueryDialect",
-    "DBAPIConnection",
-    "DBAPICursor",
-    "DBAPIModule",
+    "AsyncBigQueryDialect",
+    "SyncBigQueryDialect",
+    "SyncDBAPIConnection",
+    "SyncDBAPICursor",
+    "SyncDBAPIModule",
     "DataError",
     "DatabaseError",
-    "DuckDBAsyncDialect",
-    "DuckDBDialect",
+    "AsyncDuckDBDialect",
+    "SyncDuckDBDialect",
     "Error",
     "IntegrityError",
     "InterfaceError",
     "InternalError",
-    "MSSQLAsyncDialect",
-    "MSSQLDialect",
-    "MySQLAsyncDialect",
-    "MySQLDialect",
+    "AsyncMSSQLDialect",
+    "SyncMSSQLDialect",
+    "AsyncMySQLDialect",
+    "SyncMySQLDialect",
     "NotSupportedError",
     "NullPool",
     "OperationalError",
-    "OracleAsyncDialect",
-    "OracleDialect",
-    "PostgreSQLAsyncDialect",
-    "PostgreSQLDialect",
+    "AsyncOracleDialect",
+    "SyncOracleDialect",
+    "AsyncPostgreSQLDialect",
+    "SyncPostgreSQLDialect",
     "ProgrammingError",
-    "SQLiteAsyncDialect",
-    "SQLiteDialect",
-    "SpangresAsyncDialect",
-    "SpangresDialect",
-    "SpannerAsyncDialect",
-    "SpannerDialect",
+    "AsyncSQLiteDialect",
+    "SyncSQLiteDialect",
+    "AsyncSpangresDialect",
+    "SyncSpangresDialect",
+    "AsyncSpannerDialect",
+    "SyncSpannerDialect",
     "SyncEngineAdapter",
     "Warning",
     "attach_serverless_disconnect_guard",
@@ -100,10 +100,22 @@ DIALECT_SCHEMES: tuple[str, ...] = (
 
 ALL_DIALECT_SCHEMES: tuple[str, ...] = (
     *DIALECT_SCHEMES,
+    "postgresql+vertebra_async",
+    "postgresql+vtb_async",
+    "oracle+vertebra_async",
+    "oracle+vtb_async",
+    "mysql+vertebra_async",
+    "mysql+vtb_async",
+    "sqlite+vertebra_async",
+    "sqlite+vtb_async",
     "mssql+vertebra",
     "mssql+vtb",
+    "mssql+vertebra_async",
+    "mssql+vtb_async",
     "duckdb+vertebra",
     "duckdb+vtb",
+    "duckdb+vertebra_async",
+    "duckdb+vtb_async",
     "bigquery+vertebra",
     "bigquery+vtb",
     "bigquery+vertebra_async",
@@ -166,12 +178,12 @@ class NotSupportedError(DatabaseError):
 Binary = bytes
 
 
-class DBAPICursor:
+class SyncDBAPICursor:
     """PEP 249 DBAPI 2.0 cursor returning plain Python tuples for SQLAlchemy 2.1 ORM loaders."""
 
     __slots__ = ("_conn", "_pos", "_raw_cursor", "_rows", "arraysize", "description", "lastrowid", "rowcount")
 
-    def __init__(self, connection: DBAPIConnection, raw_cursor: Any = None) -> None:
+    def __init__(self, connection: SyncDBAPIConnection, raw_cursor: Any = None) -> None:
         """Initialize PEP 249 cursor with connection and optional underlying DBAPI cursor."""
         self._conn = connection
         self._raw_cursor = raw_cursor
@@ -182,7 +194,7 @@ class DBAPICursor:
         self.lastrowid: int | None = None
         self.arraysize: int = 1
 
-    def execute(self, operation: str, parameters: Sequence[Any] | dict[str, Any] = ()) -> DBAPICursor:
+    def execute(self, operation: str, parameters: Sequence[Any] | dict[str, Any] = ()) -> SyncDBAPICursor:
         """Execute a SQL statement and buffer plain-tuple rows."""
         if self._raw_cursor is not None:
             self._raw_cursor.execute(operation, parameters)
@@ -196,7 +208,9 @@ class DBAPICursor:
         self.rowcount = len(self._rows)
         return self
 
-    def executemany(self, operation: str, seq_of_parameters: Sequence[Sequence[Any] | dict[str, Any]]) -> DBAPICursor:
+    def executemany(
+        self, operation: str, seq_of_parameters: Sequence[Sequence[Any] | dict[str, Any]]
+    ) -> SyncDBAPICursor:
         """Execute a parameterized SQL statement across a sequence of parameter sets."""
         if self._raw_cursor is not None:
             self._raw_cursor.executemany(operation, seq_of_parameters)
@@ -257,7 +271,7 @@ class DBAPICursor:
         self._pos = 0
 
 
-class DBAPIConnection:
+class SyncDBAPIConnection:
     """PEP 249 DBAPI 2.0 connection backed by Vertebra native drivers or sqlite3."""
 
     __slots__ = ("_autocommit", "_broker", "_config", "_driver", "_share_pool", "_sqlite_conn", "_url", "closed")
@@ -356,11 +370,11 @@ class DBAPIConnection:
         if self._sqlite_conn is not None:
             self._sqlite_conn.autocommit = value
 
-    def cursor(self) -> DBAPICursor:
+    def cursor(self) -> SyncDBAPICursor:
         """Create a new plain-tuple DBAPI cursor."""
         if self._sqlite_conn is not None:
-            return DBAPICursor(self, raw_cursor=self._sqlite_conn.cursor())
-        return DBAPICursor(self)
+            return SyncDBAPICursor(self, raw_cursor=self._sqlite_conn.cursor())
+        return SyncDBAPICursor(self)
 
     def execute_with_description(
         self,
@@ -433,7 +447,7 @@ class DBAPIConnection:
             self.closed = True
 
 
-class DBAPIModule:
+class SyncDBAPIModule:
     """PEP 249 DBAPI 2.0 module descriptor exposed by Vertebra SQLAlchemy dialects."""
 
     apilevel: str = "2.0"
@@ -463,14 +477,14 @@ class DBAPIModule:
         msg = f"{type(self).__name__!r} object has no attribute {key!r}"
         raise AttributeError(msg)
 
-    def connect(self, *args: Any, **kwargs: Any) -> DBAPIConnection:
+    def connect(self, *args: Any, **kwargs: Any) -> SyncDBAPIConnection:
         """Open a PEP 249 connection."""
         url_arg = "sqlite+vtb:///:memory:"
         if args and isinstance(args[0], str):
             url_arg = args[0]
         elif "url" in kwargs:
             url_arg = kwargs.pop("url")
-        return DBAPIConnection(url_arg, **kwargs)
+        return SyncDBAPIConnection(url_arg, **kwargs)
 
 
 class AsyncDBAPICursor:
@@ -748,7 +762,7 @@ class AsyncDBAPIModule:
         return AsyncAdapt_dbapi_connection(self, async_conn)
 
 
-class PostgreSQLDialect(PGDialect):
+class SyncPostgreSQLDialect(PGDialect):
     """SQLAlchemy 2.1 synchronous dialect for PostgreSQL (+vtb / +vertebra)."""
 
     driver = "vtb"
@@ -758,7 +772,7 @@ class PostgreSQLDialect(PGDialect):
     insert_executemany_returning = True
     supports_native_jsonb = True
 
-    dbapi: Any = classmethod(lambda cls: DBAPIModule(paramstyle="pyformat"))
+    dbapi: Any = classmethod(lambda cls: SyncDBAPIModule(paramstyle="pyformat"))
 
     @classmethod
     def import_dbapi(cls) -> Any:
@@ -799,7 +813,7 @@ class PostgreSQLDialect(PGDialect):
         return col_type
 
 
-class PostgreSQLAsyncDialect(PGDialect):
+class AsyncPostgreSQLDialect(PGDialect):
     """SQLAlchemy 2.1 asynchronous dialect for PostgreSQL (+vtb_async / +vertebra_async)."""
 
     driver = "vtb_async"
@@ -822,13 +836,13 @@ class PostgreSQLAsyncDialect(PGDialect):
         return AsyncAdaptedQueuePool
 
 
-class SQLiteDialect(BaseSQLiteDialect):
+class SyncSQLiteDialect(BaseSQLiteDialect):
     """SQLAlchemy 2.1 synchronous dialect for SQLite (+vtb / +vertebra)."""
 
     driver = "vtb"
     supports_statement_cache = True
 
-    dbapi: Any = classmethod(lambda cls: DBAPIModule(paramstyle="qmark"))
+    dbapi: Any = classmethod(lambda cls: SyncDBAPIModule(paramstyle="qmark"))
 
     @classmethod
     def import_dbapi(cls) -> Any:
@@ -846,7 +860,7 @@ class SQLiteDialect(BaseSQLiteDialect):
         return QueuePool
 
 
-class SQLiteAsyncDialect(BaseSQLiteDialect):
+class AsyncSQLiteDialect(BaseSQLiteDialect):
     """SQLAlchemy 2.1 asynchronous dialect for SQLite (+vtb_async / +vertebra_async)."""
 
     driver = "vtb_async"
@@ -871,7 +885,7 @@ class SQLiteAsyncDialect(BaseSQLiteDialect):
         return AsyncAdaptedQueuePool
 
 
-class MySQLDialect(BaseMySQLDialect):
+class SyncMySQLDialect(BaseMySQLDialect):
     """SQLAlchemy 2.1 synchronous dialect for MySQL (+vtb / +vertebra)."""
 
     driver = "vtb"
@@ -881,7 +895,7 @@ class MySQLDialect(BaseMySQLDialect):
     insert_executemany_returning = False
     supports_native_jsonb = False
 
-    dbapi: Any = classmethod(lambda cls: DBAPIModule(paramstyle="format"))
+    dbapi: Any = classmethod(lambda cls: SyncDBAPIModule(paramstyle="format"))
 
     @classmethod
     def import_dbapi(cls) -> Any:
@@ -904,7 +918,7 @@ class MySQLDialect(BaseMySQLDialect):
         return col_type
 
 
-class MySQLAsyncDialect(BaseMySQLDialect):
+class AsyncMySQLDialect(BaseMySQLDialect):
     """SQLAlchemy 2.1 asynchronous dialect for MySQL (+vtb_async / +vertebra_async)."""
 
     driver = "vtb_async"
@@ -927,13 +941,13 @@ class MySQLAsyncDialect(BaseMySQLDialect):
         return AsyncAdaptedQueuePool
 
 
-class OracleDialect(BaseOracleDialect):
+class SyncOracleDialect(BaseOracleDialect):
     """SQLAlchemy 2.1 synchronous dialect for Oracle (+vtb / +vertebra)."""
 
     driver = "vtb"
     supports_statement_cache = True
 
-    dbapi: Any = classmethod(lambda cls: DBAPIModule(paramstyle="named"))
+    dbapi: Any = classmethod(lambda cls: SyncDBAPIModule(paramstyle="named"))
 
     @classmethod
     def import_dbapi(cls) -> Any:
@@ -974,7 +988,7 @@ class OracleDialect(BaseOracleDialect):
         return col_type
 
 
-class OracleAsyncDialect(BaseOracleDialect):
+class AsyncOracleDialect(BaseOracleDialect):
     """SQLAlchemy 2.1 asynchronous dialect for Oracle (+vtb_async / +vertebra_async)."""
 
     driver = "vtb_async"
@@ -997,13 +1011,13 @@ class OracleAsyncDialect(BaseOracleDialect):
         return AsyncAdaptedQueuePool
 
 
-class MSSQLDialect(MSDialect):
+class SyncMSSQLDialect(MSDialect):
     """SQLAlchemy 2.1 synchronous dialect for Microsoft SQL Server (+vtb / +vertebra)."""
 
     driver = "vtb"
     supports_statement_cache = True
 
-    dbapi: Any = classmethod(lambda cls: DBAPIModule(paramstyle="qmark"))
+    dbapi: Any = classmethod(lambda cls: SyncDBAPIModule(paramstyle="qmark"))
 
     @classmethod
     def import_dbapi(cls) -> Any:
@@ -1019,7 +1033,7 @@ class MSSQLDialect(MSDialect):
         return QueuePool
 
 
-class MSSQLAsyncDialect(MSDialect):
+class AsyncMSSQLDialect(MSDialect):
     """SQLAlchemy 2.1 asynchronous dialect for Microsoft SQL Server (+vtb_async / +vertebra_async)."""
 
     driver = "vtb_async"
@@ -1042,14 +1056,14 @@ class MSSQLAsyncDialect(MSDialect):
         return AsyncAdaptedQueuePool
 
 
-class DuckDBDialect(DefaultDialect):
+class SyncDuckDBDialect(DefaultDialect):
     """SQLAlchemy 2.1 synchronous dialect for DuckDB (+vtb / +vertebra)."""
 
     name = "duckdb"
     driver = "vtb"
     supports_statement_cache = True
 
-    dbapi: Any = classmethod(lambda cls: DBAPIModule(paramstyle="qmark"))
+    dbapi: Any = classmethod(lambda cls: SyncDBAPIModule(paramstyle="qmark"))
 
     @classmethod
     def import_dbapi(cls) -> Any:
@@ -1065,7 +1079,7 @@ class DuckDBDialect(DefaultDialect):
         return QueuePool
 
 
-class DuckDBAsyncDialect(DefaultDialect):
+class AsyncDuckDBDialect(DefaultDialect):
     """SQLAlchemy 2.1 asynchronous dialect for DuckDB (+vtb_async / +vertebra_async)."""
 
     name = "duckdb"
@@ -1089,7 +1103,7 @@ class DuckDBAsyncDialect(DefaultDialect):
         return AsyncAdaptedQueuePool
 
 
-class BigQueryDialect(DefaultDialect):
+class SyncBigQueryDialect(DefaultDialect):
     """SQLAlchemy 2.1 synchronous dialect for Google BigQuery (+vtb / +vertebra)."""
 
     name = "bigquery"
@@ -1100,7 +1114,7 @@ class BigQueryDialect(DefaultDialect):
     supports_native_jsonb = False
     positional = False
 
-    dbapi: Any = classmethod(lambda cls: DBAPIModule(paramstyle="named"))
+    dbapi: Any = classmethod(lambda cls: SyncDBAPIModule(paramstyle="named"))
 
     @classmethod
     def import_dbapi(cls) -> Any:
@@ -1140,7 +1154,7 @@ class BigQueryDialect(DefaultDialect):
         )
 
 
-class BigQueryAsyncDialect(BigQueryDialect):
+class AsyncBigQueryDialect(SyncBigQueryDialect):
     """SQLAlchemy 2.1 asynchronous dialect for Google BigQuery (+vtb_async / +vertebra_async)."""
 
     driver = "vtb_async"
@@ -1150,7 +1164,7 @@ class BigQueryAsyncDialect(BigQueryDialect):
     dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="named"))
 
 
-class SpannerDialect(DefaultDialect):
+class SyncSpannerDialect(DefaultDialect):
     """SQLAlchemy 2.1 synchronous dialect for Cloud Spanner GoogleSQL (+vtb / +vertebra)."""
 
     name = "spanner"
@@ -1161,7 +1175,7 @@ class SpannerDialect(DefaultDialect):
     supports_native_jsonb = False
     positional = False
 
-    dbapi: Any = classmethod(lambda cls: DBAPIModule(paramstyle="named"))
+    dbapi: Any = classmethod(lambda cls: SyncDBAPIModule(paramstyle="named"))
 
     @classmethod
     def import_dbapi(cls) -> Any:
@@ -1213,7 +1227,7 @@ class SpannerDialect(DefaultDialect):
         return f", INTERLEAVE IN PARENT {parent_table} ON DELETE {norm_delete}"
 
 
-class SpannerAsyncDialect(SpannerDialect):
+class AsyncSpannerDialect(SyncSpannerDialect):
     """SQLAlchemy 2.1 asynchronous dialect for Cloud Spanner GoogleSQL (+vtb_async / +vertebra_async)."""
 
     driver = "vtb_async"
@@ -1223,7 +1237,7 @@ class SpannerAsyncDialect(SpannerDialect):
     dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="named"))
 
 
-class SpangresDialect(PGDialect):
+class SyncSpangresDialect(PGDialect):
     """SQLAlchemy 2.1 synchronous dialect for Cloud Spanner Spangres (+vtb / +vertebra)."""
 
     name = "spangres"
@@ -1232,7 +1246,7 @@ class SpangresDialect(PGDialect):
     supports_statement_cache = True
     supports_native_jsonb = True
 
-    dbapi: Any = classmethod(lambda cls: DBAPIModule(paramstyle="pyformat"))
+    dbapi: Any = classmethod(lambda cls: SyncDBAPIModule(paramstyle="pyformat"))
 
     @classmethod
     def import_dbapi(cls) -> Any:
@@ -1246,7 +1260,7 @@ class SpangresDialect(PGDialect):
         return NullPool
 
 
-class SpangresAsyncDialect(SpangresDialect):
+class AsyncSpangresDialect(SyncSpangresDialect):
     """SQLAlchemy 2.1 asynchronous dialect for Cloud Spanner Spangres (+vtb_async / +vertebra_async)."""
 
     driver = "vtb_async"
@@ -1296,81 +1310,81 @@ def attach_serverless_disconnect_guard(engine: Any) -> None:
 
 
 DIALECT_DESCRIPTORS: dict[str, type[DefaultDialect]] = {
-    "postgresql+vtb": PostgreSQLDialect,
-    "postgresql+vertebra": PostgreSQLDialect,
-    "postgresql+vtb_async": PostgreSQLAsyncDialect,
-    "postgresql+vertebra_async": PostgreSQLAsyncDialect,
-    "mysql+vtb": MySQLDialect,
-    "mysql+vertebra": MySQLDialect,
-    "mysql+vtb_async": MySQLAsyncDialect,
-    "mysql+vertebra_async": MySQLAsyncDialect,
-    "sqlite+vtb": SQLiteDialect,
-    "sqlite+vertebra": SQLiteDialect,
-    "sqlite+vtb_async": SQLiteAsyncDialect,
-    "sqlite+vertebra_async": SQLiteAsyncDialect,
-    "oracle+vtb": OracleDialect,
-    "oracle+vertebra": OracleDialect,
-    "oracle+vtb_async": OracleAsyncDialect,
-    "oracle+vertebra_async": OracleAsyncDialect,
-    "mssql+vtb": MSSQLDialect,
-    "mssql+vertebra": MSSQLDialect,
-    "mssql+vtb_async": MSSQLAsyncDialect,
-    "mssql+vertebra_async": MSSQLAsyncDialect,
-    "duckdb+vtb": DuckDBDialect,
-    "duckdb+vertebra": DuckDBDialect,
-    "duckdb+vtb_async": DuckDBAsyncDialect,
-    "duckdb+vertebra_async": DuckDBAsyncDialect,
-    "bigquery+vtb": BigQueryDialect,
-    "bigquery+vertebra": BigQueryDialect,
-    "bigquery+vtb_async": BigQueryAsyncDialect,
-    "bigquery+vertebra_async": BigQueryAsyncDialect,
-    "spanner+vtb": SpannerDialect,
-    "spanner+vertebra": SpannerDialect,
-    "spanner+vtb_async": SpannerAsyncDialect,
-    "spanner+vertebra_async": SpannerAsyncDialect,
-    "spangres+vtb": SpangresDialect,
-    "spangres+vertebra": SpangresDialect,
-    "spangres+vtb_async": SpangresAsyncDialect,
-    "spangres+vertebra_async": SpangresAsyncDialect,
+    "postgresql+vtb": SyncPostgreSQLDialect,
+    "postgresql+vertebra": SyncPostgreSQLDialect,
+    "postgresql+vtb_async": AsyncPostgreSQLDialect,
+    "postgresql+vertebra_async": AsyncPostgreSQLDialect,
+    "mysql+vtb": SyncMySQLDialect,
+    "mysql+vertebra": SyncMySQLDialect,
+    "mysql+vtb_async": AsyncMySQLDialect,
+    "mysql+vertebra_async": AsyncMySQLDialect,
+    "sqlite+vtb": SyncSQLiteDialect,
+    "sqlite+vertebra": SyncSQLiteDialect,
+    "sqlite+vtb_async": AsyncSQLiteDialect,
+    "sqlite+vertebra_async": AsyncSQLiteDialect,
+    "oracle+vtb": SyncOracleDialect,
+    "oracle+vertebra": SyncOracleDialect,
+    "oracle+vtb_async": AsyncOracleDialect,
+    "oracle+vertebra_async": AsyncOracleDialect,
+    "mssql+vtb": SyncMSSQLDialect,
+    "mssql+vertebra": SyncMSSQLDialect,
+    "mssql+vtb_async": AsyncMSSQLDialect,
+    "mssql+vertebra_async": AsyncMSSQLDialect,
+    "duckdb+vtb": SyncDuckDBDialect,
+    "duckdb+vertebra": SyncDuckDBDialect,
+    "duckdb+vtb_async": AsyncDuckDBDialect,
+    "duckdb+vertebra_async": AsyncDuckDBDialect,
+    "bigquery+vtb": SyncBigQueryDialect,
+    "bigquery+vertebra": SyncBigQueryDialect,
+    "bigquery+vtb_async": AsyncBigQueryDialect,
+    "bigquery+vertebra_async": AsyncBigQueryDialect,
+    "spanner+vtb": SyncSpannerDialect,
+    "spanner+vertebra": SyncSpannerDialect,
+    "spanner+vtb_async": AsyncSpannerDialect,
+    "spanner+vertebra_async": AsyncSpannerDialect,
+    "spangres+vtb": SyncSpangresDialect,
+    "spangres+vertebra": SyncSpangresDialect,
+    "spangres+vtb_async": AsyncSpangresDialect,
+    "spangres+vertebra_async": AsyncSpangresDialect,
 }
 
 _DIALECT_REGISTRATIONS: tuple[tuple[str, str, str], ...] = (
-    ("postgresql.vtb", "vertebra.extensions.sqlalchemy.dialects", "PostgreSQLDialect"),
-    ("postgresql.vertebra", "vertebra.extensions.sqlalchemy.dialects", "PostgreSQLDialect"),
-    ("postgresql.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "PostgreSQLAsyncDialect"),
-    ("postgresql.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "PostgreSQLAsyncDialect"),
-    ("mysql.vtb", "vertebra.extensions.sqlalchemy.dialects", "MySQLDialect"),
-    ("mysql.vertebra", "vertebra.extensions.sqlalchemy.dialects", "MySQLDialect"),
-    ("mysql.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "MySQLAsyncDialect"),
-    ("mysql.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "MySQLAsyncDialect"),
-    ("sqlite.vtb", "vertebra.extensions.sqlalchemy.dialects", "SQLiteDialect"),
-    ("sqlite.vertebra", "vertebra.extensions.sqlalchemy.dialects", "SQLiteDialect"),
-    ("sqlite.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "SQLiteAsyncDialect"),
-    ("sqlite.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "SQLiteAsyncDialect"),
-    ("oracle.vtb", "vertebra.extensions.sqlalchemy.dialects", "OracleDialect"),
-    ("oracle.vertebra", "vertebra.extensions.sqlalchemy.dialects", "OracleDialect"),
-    ("oracle.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "OracleAsyncDialect"),
-    ("oracle.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "OracleAsyncDialect"),
-    ("mssql.vtb", "vertebra.extensions.sqlalchemy.dialects", "MSSQLDialect"),
-    ("mssql.vertebra", "vertebra.extensions.sqlalchemy.dialects", "MSSQLDialect"),
-    ("mssql.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "MSSQLAsyncDialect"),
-    ("mssql.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "MSSQLAsyncDialect"),
-    ("duckdb.vtb", "vertebra.extensions.sqlalchemy.dialects", "DuckDBDialect"),
-    ("duckdb.vertebra", "vertebra.extensions.sqlalchemy.dialects", "DuckDBDialect"),
-    ("duckdb.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "DuckDBAsyncDialect"),
-    ("duckdb.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "DuckDBAsyncDialect"),
-    ("bigquery.vtb", "vertebra.extensions.sqlalchemy.dialects", "BigQueryDialect"),
-    ("bigquery.vertebra", "vertebra.extensions.sqlalchemy.dialects", "BigQueryDialect"),
-    ("bigquery.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "BigQueryAsyncDialect"),
-    ("bigquery.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "BigQueryAsyncDialect"),
-    ("spanner.vtb", "vertebra.extensions.sqlalchemy.dialects", "SpannerDialect"),
-    ("spanner.vertebra", "vertebra.extensions.sqlalchemy.dialects", "SpannerDialect"),
-    ("spanner.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "SpannerAsyncDialect"),
-    ("spanner.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "SpannerAsyncDialect"),
-    ("spangres.vtb", "vertebra.extensions.sqlalchemy.dialects", "SpangresDialect"),
-    ("spangres.vertebra", "vertebra.extensions.sqlalchemy.dialects", "SpangresDialect"),
-    ("spangres.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "SpangresAsyncDialect"),
-    ("spangres.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "SpangresAsyncDialect"),
+    ("postgresql.vtb", "vertebra.extensions.sqlalchemy.dialects", "SyncPostgreSQLDialect"),
+    ("postgresql.vertebra", "vertebra.extensions.sqlalchemy.dialects", "SyncPostgreSQLDialect"),
+    ("postgresql.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "AsyncPostgreSQLDialect"),
+    ("postgresql.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "AsyncPostgreSQLDialect"),
+    ("mysql.vtb", "vertebra.extensions.sqlalchemy.dialects", "SyncMySQLDialect"),
+    ("mysql.vertebra", "vertebra.extensions.sqlalchemy.dialects", "SyncMySQLDialect"),
+    ("mysql.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "AsyncMySQLDialect"),
+    ("mysql.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "AsyncMySQLDialect"),
+    ("sqlite.vtb", "vertebra.extensions.sqlalchemy.dialects", "SyncSQLiteDialect"),
+    ("sqlite.vertebra", "vertebra.extensions.sqlalchemy.dialects", "SyncSQLiteDialect"),
+    ("sqlite.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "AsyncSQLiteDialect"),
+    ("sqlite.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "AsyncSQLiteDialect"),
+    ("oracle.vtb", "vertebra.extensions.sqlalchemy.dialects", "SyncOracleDialect"),
+    ("oracle.vertebra", "vertebra.extensions.sqlalchemy.dialects", "SyncOracleDialect"),
+    ("oracle.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "AsyncOracleDialect"),
+    ("oracle.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "AsyncOracleDialect"),
+    ("mssql.vtb", "vertebra.extensions.sqlalchemy.dialects", "SyncMSSQLDialect"),
+    ("mssql.vertebra", "vertebra.extensions.sqlalchemy.dialects", "SyncMSSQLDialect"),
+    ("mssql.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "AsyncMSSQLDialect"),
+    ("mssql.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "AsyncMSSQLDialect"),
+    ("duckdb.vtb", "vertebra.extensions.sqlalchemy.dialects", "SyncDuckDBDialect"),
+    ("duckdb.vertebra", "vertebra.extensions.sqlalchemy.dialects", "SyncDuckDBDialect"),
+    ("duckdb.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "AsyncDuckDBDialect"),
+    ("duckdb.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "AsyncDuckDBDialect"),
+    ("bigquery.vtb", "vertebra.extensions.sqlalchemy.dialects", "SyncBigQueryDialect"),
+    ("bigquery.vertebra", "vertebra.extensions.sqlalchemy.dialects", "SyncBigQueryDialect"),
+    ("bigquery.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "AsyncBigQueryDialect"),
+    ("bigquery.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "AsyncBigQueryDialect"),
+    ("spanner.vtb", "vertebra.extensions.sqlalchemy.dialects", "SyncSpannerDialect"),
+    ("spanner.vertebra", "vertebra.extensions.sqlalchemy.dialects", "SyncSpannerDialect"),
+    ("spanner.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "AsyncSpannerDialect"),
+    ("spanner.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "AsyncSpannerDialect"),
+    ("spangres.vtb", "vertebra.extensions.sqlalchemy.dialects", "SyncSpangresDialect"),
+    ("spangres.vertebra", "vertebra.extensions.sqlalchemy.dialects", "SyncSpangresDialect"),
+    ("spangres.vtb_async", "vertebra.extensions.sqlalchemy.dialects", "AsyncSpangresDialect"),
+    ("spangres.vertebra_async", "vertebra.extensions.sqlalchemy.dialects", "AsyncSpangresDialect"),
 )
 
 for _name, _mod, _cls_name in _DIALECT_REGISTRATIONS:

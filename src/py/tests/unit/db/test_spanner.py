@@ -13,13 +13,14 @@ from typing import Any
 import pytest
 
 from vertebra._vertebra import (
+    AsyncSpannerClient,
     BigQueryError,
     BigQueryRowError,
     GoogleCloudAuthError,
     GoogleCloudError,
     SpannerAbortedError,
-    SpannerClient,
     SpannerError,
+    SyncSpannerClient,
 )
 from vertebra.db import (
     AsyncSpannerDriver,
@@ -28,13 +29,13 @@ from vertebra.db import (
     Mutation,
     MutationGroup,
     SpannerConfig,
-    SpannerTransaction,
     StalenessBound,
     SyncSpannerDriver,
+    SyncSpannerTransaction,
 )
 from vertebra.db.spanner.core import SpannerCore
 from vertebra.embeddings import EmbeddingError, SpannerEmbedder
-from vertebra.storage import ObjectStore
+from vertebra.storage import SyncObjectStore
 from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError, VertebraError
 from vertebra.utils.serializers import decode_json, encode_json
 
@@ -75,16 +76,6 @@ class FakeSpannerClient:
                 "read_timestamp_micros": int(_time.time() * 1_000_000),
             }
 
-    async def query_async(
-        self,
-        sql: str,
-        params_json: str | None = None,
-        staleness_mode: str = "strong",
-        staleness_ms: int = 0,
-    ) -> dict[str, Any]:
-        """Execute an asynchronous query against the test double."""
-        return self.query(sql, params_json, staleness_mode, staleness_ms)
-
     def execute_dml(
         self,
         sql: str,
@@ -99,16 +90,6 @@ class FakeSpannerClient:
             cur = self._conn.execute(adapted, args)
             self._conn.commit()
             return max(0, int(cur.rowcount or 0))
-
-    async def execute_dml_async(
-        self,
-        sql: str,
-        params_json: str | None = None,
-        request_tag: str | None = None,
-        transaction_tag: str | None = None,
-    ) -> int:
-        """Execute an asynchronous DML statement against the test double."""
-        return self.execute_dml(sql, params_json, request_tag, transaction_tag)
 
     def execute_batch_dml(
         self,
@@ -128,15 +109,6 @@ class FakeSpannerClient:
                 counts.append(self.execute_dml(stmt_sql, params_str))
         return counts
 
-    async def execute_batch_dml_async(
-        self,
-        statements_json: str,
-        request_tag: str | None = None,
-        transaction_tag: str | None = None,
-    ) -> list[int]:
-        """Execute an asynchronous batch of DML statements against the test double."""
-        return self.execute_batch_dml(statements_json, request_tag, transaction_tag)
-
     def execute_partitioned_dml(
         self,
         sql: str,
@@ -146,15 +118,6 @@ class FakeSpannerClient:
         """Execute Partitioned DML against the test double."""
         _ = exclude_txn_from_change_streams
         return self.execute_dml(sql, params_json)
-
-    async def execute_partitioned_dml_async(
-        self,
-        sql: str,
-        params_json: str | None = None,
-        exclude_txn_from_change_streams: bool = False,
-    ) -> int:
-        """Execute asynchronous Partitioned DML against the test double."""
-        return self.execute_partitioned_dml(sql, params_json, exclude_txn_from_change_streams)
 
     def apply_mutations(
         self,
@@ -221,15 +184,6 @@ class FakeSpannerClient:
                 "retry_count": 0,
             }
 
-    async def apply_mutations_async(
-        self,
-        mutations_json: str,
-        transaction_tag: str | None = None,
-        exclude_txn_from_change_streams: bool = False,
-    ) -> dict[str, Any]:
-        """Apply mutations asynchronously against the test double."""
-        return self.apply_mutations(mutations_json, transaction_tag, exclude_txn_from_change_streams)
-
     def batch_write(
         self,
         mutation_groups_json: str,
@@ -251,14 +205,6 @@ class FakeSpannerClient:
                 }
             )
         return out
-
-    async def batch_write_async(
-        self,
-        mutation_groups_json: str,
-        exclude_txn_from_change_streams: bool = False,
-    ) -> list[dict[str, Any]]:
-        """Execute `BatchWrite` mutation groups asynchronously against the test double."""
-        return self.batch_write(mutation_groups_json, exclude_txn_from_change_streams)
 
     def update_ddl(self, statements: Sequence[str]) -> str:
         """Apply Spanner DDL statements against the test double."""
@@ -282,10 +228,6 @@ class FakeSpannerClient:
             self._conn.commit()
         return f"operations/ddl-{len(self.ddl_history)}"
 
-    async def update_ddl_async(self, statements: Sequence[str]) -> str:
-        """Apply Spanner DDL statements asynchronously against the test double."""
-        return self.update_ddl(statements)
-
     def partitioned_query(
         self,
         sql: str,
@@ -298,25 +240,6 @@ class FakeSpannerClient:
         """Execute a partitioned query against the test double."""
         _ = (max_partitions, data_boost_enabled)
         return self.query(sql, params_json, staleness_mode, staleness_ms)
-
-    async def partitioned_query_async(
-        self,
-        sql: str,
-        params_json: str | None = None,
-        max_partitions: int = 8,
-        data_boost_enabled: bool = True,
-        staleness_mode: str = "strong",
-        staleness_ms: int = 0,
-    ) -> dict[str, Any]:
-        """Execute an asynchronous partitioned query against the test double."""
-        return self.partitioned_query(
-            sql,
-            params_json,
-            max_partitions,
-            data_boost_enabled,
-            staleness_mode,
-            staleness_ms,
-        )
 
     def _try_information_schema(self, sql: str, params_json: str | None) -> dict[str, Any] | None:
         upper = sql.upper()
@@ -564,6 +487,98 @@ class FakeSpannerClient:
         return s.strip()
 
 
+class FakeAsyncSpannerClient:
+    """Test-only in-memory Spanner wire client double for unit testing `AsyncSpannerDriver`."""
+
+    __slots__ = ("_sync_client",)
+
+    def __init__(self, sync_client: FakeSpannerClient | None = None) -> None:
+        self._sync_client = sync_client if sync_client is not None else FakeSpannerClient()
+
+    @property
+    def ddl_history(self) -> list[str]:
+        """Return the DDL statement history from the backing sync client."""
+        return self._sync_client.ddl_history
+
+    async def query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        staleness_mode: str = "strong",
+        staleness_ms: int = 0,
+    ) -> dict[str, Any]:
+        """Execute a query asynchronously against the backing sync client."""
+        return self._sync_client.query(sql, params_json, staleness_mode, staleness_ms)
+
+    async def execute_dml(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+    ) -> int:
+        """Execute a DML statement asynchronously against the backing sync client."""
+        return self._sync_client.execute_dml(sql, params_json, request_tag, transaction_tag)
+
+    async def execute_batch_dml(
+        self,
+        statements_json: str,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+    ) -> list[int]:
+        """Execute a batch of DML statements asynchronously against the backing sync client."""
+        return self._sync_client.execute_batch_dml(statements_json, request_tag, transaction_tag)
+
+    async def execute_partitioned_dml(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        exclude_txn_from_change_streams: bool = False,
+    ) -> int:
+        """Execute Partitioned DML asynchronously against the backing sync client."""
+        return self._sync_client.execute_partitioned_dml(sql, params_json, exclude_txn_from_change_streams)
+
+    async def apply_mutations(
+        self,
+        mutations_json: str,
+        transaction_tag: str | None = None,
+        exclude_txn_from_change_streams: bool = False,
+    ) -> dict[str, Any]:
+        """Apply mutations asynchronously against the backing sync client."""
+        return self._sync_client.apply_mutations(mutations_json, transaction_tag, exclude_txn_from_change_streams)
+
+    async def batch_write(
+        self,
+        mutation_groups_json: str,
+        exclude_txn_from_change_streams: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Execute BatchWrite mutation groups asynchronously against the backing sync client."""
+        return self._sync_client.batch_write(mutation_groups_json, exclude_txn_from_change_streams)
+
+    async def update_ddl(self, statements: Sequence[str]) -> str:
+        """Apply Spanner DDL statements asynchronously against the backing sync client."""
+        return self._sync_client.update_ddl(statements)
+
+    async def partitioned_query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        max_partitions: int = 8,
+        data_boost_enabled: bool = True,
+        staleness_mode: str = "strong",
+        staleness_ms: int = 0,
+    ) -> dict[str, Any]:
+        """Execute a partitioned query asynchronously against the backing sync client."""
+        return self._sync_client.partitioned_query(
+            sql,
+            params_json,
+            max_partitions,
+            data_boost_enabled,
+            staleness_mode,
+            staleness_ms,
+        )
+
+
 def _replace_named_pg(
     match: re.Match[str],
     params_map: Mapping[str, Any],
@@ -705,7 +720,7 @@ def test_sync_spanner_driver_crud_transactions_and_mutations() -> None:
         attempts += 1
         if attempts == 1:
             raise SpannerAbortedError("Transaction ABORTED by Spanner")
-        assert isinstance(tx, SpannerTransaction)
+        assert isinstance(tx, SyncSpannerTransaction)
         tx.execute("UPDATE singers SET name = @name WHERE singer_id = @id", {"name": "Bobby", "id": 2})
         tx.insert_or_update("singers", ("singer_id", "name", "active"), [(4, "Dave", 1)])
         return "committed"
@@ -764,7 +779,7 @@ def test_sync_spanner_arrow_and_object_store_roundtrip() -> None:
     assert len(cursor) == 2
     assert cursor.to_pylist()[0]["label"] == "cpu"
 
-    store = ObjectStore("memory://")
+    store = SyncObjectStore("memory://")
     export_meta = driver.export_to_object_store(
         "SELECT metric_id, label FROM metrics ORDER BY metric_id ASC",
         store,
@@ -799,7 +814,8 @@ async def test_async_spanner_driver_and_embedder_and_datafusion() -> None:
         instance_id="test-inst",
         database_id="async-db",
     )
-    fake_client = FakeSpannerClient()
+    fake_sync = FakeSpannerClient()
+    fake_client = FakeAsyncSpannerClient(fake_sync)
     driver = AsyncSpannerDriver(cfg, client=fake_client)
     await driver.update_ddl(
         [
@@ -827,7 +843,7 @@ async def test_async_spanner_driver_and_embedder_and_datafusion() -> None:
     assert "APPROX_COSINE_DISTANCE" in search_sql
     assert "num_leaves_to_search" in search_sql
 
-    sync_driver = SyncSpannerDriver(cfg, client=fake_client)
+    sync_driver = SyncSpannerDriver(cfg, client=fake_sync)
     sync_driver.execute("INSERT INTO docs (doc_id, title) VALUES ('d2', 'DataBoost')", None)
     engine = DataFusionEngine()
     reg_table = engine.register_spanner_table("df_docs", sync_driver, "docs", data_boost_enabled=True)
@@ -922,7 +938,7 @@ def test_spanner_config_passes_admin_endpoint() -> None:
         endpoint="http://localhost:9010",
         admin_endpoint="http://localhost:9020",
     )
-    client = SpannerCore.create_rust_client(cfg)
+    client = SpannerCore.create_sync_rust_client(cfg)
     assert client.admin_endpoint == "http://localhost:9020"
 
 
@@ -947,7 +963,7 @@ def test_google_cloud_error_hierarchy_derives_from_vertebra_error(
 
 def test_spanner_client_invalid_params_raise_typed_error() -> None:
     """Sync binding raises SpannerError with INVALID_ARGUMENT for malformed parameters."""
-    client = SpannerClient(database="projects/p/instances/i/databases/d", endpoint="http://127.0.0.1:9")
+    client = SyncSpannerClient(database="projects/p/instances/i/databases/d", endpoint="http://127.0.0.1:9")
     with pytest.raises(SpannerError) as excinfo:
         client.query("SELECT 1", "not json")
     assert excinfo.value.code == 3
@@ -958,9 +974,9 @@ def test_spanner_client_invalid_params_raise_typed_error() -> None:
 @pytest.mark.anyio
 async def test_spanner_client_invalid_params_raise_typed_error_async() -> None:
     """Async binding raises the same SpannerError as the sync binding."""
-    client = SpannerClient(database="projects/p/instances/i/databases/d", endpoint="http://127.0.0.1:9")
+    client = AsyncSpannerClient(database="projects/p/instances/i/databases/d", endpoint="http://127.0.0.1:9")
     with pytest.raises(SpannerError) as excinfo:
-        await client.query_async("SELECT 1", "not json")
+        await client.query("SELECT 1", "not json")
     assert excinfo.value.code == 3
 
 

@@ -14,6 +14,7 @@ from vertebra._vertebra import AsgiProtocol, AsgiScope
 from vertebra.agent.mcp.controllers import mcp_tool
 from vertebra.db.redis import AsyncRedisDriver, RedisConfig
 from vertebra.extensions.starlette import (
+    AsyncStorageRegistry,
     CacheStore,
     ChannelsBackend,
     FastPath,
@@ -21,10 +22,10 @@ from vertebra.extensions.starlette import (
     OpenAPIConfig,
     RateLimitGuard,
     RouteCompiler,
-    StarletteConfig,
-    StarlettePlugin,
-    StorageRegistry,
     SwaggerDocsConfig,
+    SyncStorageRegistry,
+    VertebraConfig,
+    VertebraPlugin,
     WebMCPConfig,
     attach_cache_store,
     attach_channels,
@@ -126,12 +127,12 @@ def test_asgi_scope_24_slots_and_preseed_request_body() -> None:
 
 @pytest.mark.anyio
 async def test_starlette_plugin_route_compiler_and_fastpath(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify StarlettePlugin compiles routes, offloads middleware, and dispatches fastpath."""
+    """Verify VertebraPlugin compiles routes, offloads middleware, and dispatches fastpath."""
     monkeypatch.setenv("VERTEBRA_SERVER_ACTIVE", "1")
     app = _make_mock_starlette_app()
-    plugin = StarlettePlugin(
+    plugin = VertebraPlugin(
         app,
-        config=StarletteConfig(
+        config=VertebraConfig(
             enable_health_endpoint=True,
             openapi_config=OpenAPIConfig(swagger=SwaggerDocsConfig(path="/swagger")),
             webmcp_config=WebMCPConfig(enabled=True),
@@ -199,10 +200,16 @@ async def test_starlette_ecosystem_bridges() -> None:
     assert cache.get_sync("k1") is None
 
     storage = attach_storage(app)
-    assert isinstance(storage, StorageRegistry)
+    assert isinstance(storage, SyncStorageRegistry)
     store = storage.get()
     store.put("hello.txt", b"world")
     assert store.get("hello.txt") == b"world"
+
+    async_storage = attach_storage(app, async_mode=True)
+    assert isinstance(async_storage, AsyncStorageRegistry)
+    async_store = async_storage.get()
+    await async_store.put("async_hello.txt", b"async_world")
+    assert bytes(await async_store.get("async_hello.txt")) == b"async_world"
 
     channels = attach_channels(app)
     assert isinstance(channels, ChannelsBackend)
@@ -239,7 +246,7 @@ async def test_starlette_fastpath_inline_sync_and_send_raw_response() -> None:
         exception_handlers={},
         state=SimpleNamespace(),
     )
-    StarlettePlugin(app)
+    VertebraPlugin(app)
     fastpath: FastPath = app.__vertebra_fastpath__
 
     async def fallback_app(_scope: Any, _receive: Any, _send: Any) -> None:

@@ -12,13 +12,13 @@ from vertebra.db import (
     AlloyDBAuthType,
     AlloyDBClusterURI,
     AlloyDBConfig,
-    AlloyDBDialer,
+    AsyncAlloyDBDialer,
+    AsyncCloudSQLDialer,
     AsyncSQLiteDriver,
     AsyncValkeyDriver,
     CDCConfig,
     ChangeFeed,
     CloudSQLConfig,
-    CloudSQLDialer,
     CloudSQLInstanceURI,
     DatabaseChannelBackend,
     DatabaseRegistry,
@@ -26,6 +26,8 @@ from vertebra.db import (
     PostgreSQLConfig,
     RedisConfig,
     SQLiteConfig,
+    SyncAlloyDBDialer,
+    SyncCloudSQLDialer,
     SyncMySQLDriver,
     SyncPostgreSQLDriver,
     SyncRedisDriver,
@@ -34,7 +36,7 @@ from vertebra.db import (
     ValkeyConfig,
 )
 from vertebra.extensions.litestar import ChannelsBackend, MemoryStore
-from vertebra.storage import ObjectStore
+from vertebra.storage import GcpTokenSnapshot, SyncObjectStore
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.sync_tools import SyncPool
 
@@ -48,7 +50,7 @@ def test_cloudsql_and_alloydb_dialers() -> None:
     assert csql_uri.expected_server_cn == "my-proj:my-pg"
     assert "generateEphemeralCert" in csql_uri.generate_ephemeral_cert_url()
 
-    csql_dialer = CloudSQLDialer(
+    csql_dialer = SyncCloudSQLDialer(
         CloudSQLConfig(
             instance_connection_name="my-proj:us-central1:my-pg",
             enable_iam_auth=True,
@@ -66,14 +68,137 @@ def test_cloudsql_and_alloydb_dialers() -> None:
     assert alloy_uri.project == "p1"
     assert alloy_uri.instance == "i1"
 
-    frame = AlloyDBDialer.encode_metadata_exchange("vertebra-db/0.1", AlloyDBAuthType.IAM, "oauth-tok")
+    frame = SyncAlloyDBDialer.encode_metadata_exchange("vertebra-db/0.1", AlloyDBAuthType.IAM, "oauth-tok")
     assert len(frame) > 4
     assert int.from_bytes(frame[:4], "big") == len(frame) - 4
 
-    alloy_dialer = AlloyDBDialer(
+    alloy_dialer = SyncAlloyDBDialer(
         AlloyDBConfig(instance_uri="projects/p1/locations/us-central1/clusters/c1/instances/i1")
     )
     assert alloy_dialer.port == 5433
+
+
+@pytest.mark.anyio
+async def test_cloudsql_and_alloydb_dialers_unwrap_gcp_token_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify Sync/Async CloudSQL and AlloyDB dialers unwrap GcpTokenSnapshot access_token and cache it."""
+    snapshot = GcpTokenSnapshot(
+        access_token="snap-oauth-token-xyz",
+        expires_at_unix_ms=int((time.time() + 3600) * 1000),
+        generation=1,
+    )
+
+    class _SyncFakeTokenCache:
+        def get_token(self) -> GcpTokenSnapshot:
+            return snapshot
+
+    class _AsyncFakeTokenCache:
+        async def get_token(self) -> GcpTokenSnapshot:
+            return snapshot
+
+    captured_auth_headers: list[str] = []
+
+    def _fake_csql_http(_url: str, _payload: bytes, headers: dict[str, str]) -> bytes:
+        captured_auth_headers.append(headers["Authorization"])
+        return b'{"ephemeralCert":{"cert":"CERT"},"serverCaCert":{"cert":"CA"},"ipAddress":"10.0.0.1"}'
+
+    def _fake_alloy_http(_url: str, _payload: bytes, headers: dict[str, str]) -> bytes:
+        captured_auth_headers.append(headers["Authorization"])
+        return b'{"clientCert":"CERT","caCert":"CA"}'
+
+    csql_cfg = CloudSQLConfig(instance_connection_name="my-proj:us-central1:my-pg")
+    sync_csql = SyncCloudSQLDialer(csql_cfg, token_cache=_SyncFakeTokenCache())
+    bundle_sync_csql = sync_csql.refresh_certificate(
+        public_key_pem="PUB",
+        private_key_pem="PRIV",
+        http_transport=_fake_csql_http,
+    )
+    assert bundle_sync_csql.server_ip == "10.0.0.1"
+    assert sync_csql._cached_token == "snap-oauth-token-xyz"
+
+    async_csql = AsyncCloudSQLDialer(csql_cfg, token_cache=_AsyncFakeTokenCache())
+    bundle_async_csql = await async_csql.refresh_certificate(
+        public_key_pem="PUB",
+        private_key_pem="PRIV",
+        http_transport=_fake_csql_http,
+    )
+    assert bundle_async_csql.server_ip == "10.0.0.1"
+    assert async_csql._cached_token == "snap-oauth-token-xyz"
+
+    alloy_cfg = AlloyDBConfig(instance_uri="projects/p1/locations/us-central1/clusters/c1/instances/i1")
+    sync_alloy = SyncAlloyDBDialer(alloy_cfg, token_cache=_SyncFakeTokenCache())
+    bundle_sync_alloy = sync_alloy.refresh_client_cert(
+        public_key_pem="PUB",
+        private_key_pem="PRIV",
+        http_transport=_fake_alloy_http,
+    )
+    assert bundle_sync_alloy.client_cert_pem == "CERT"
+    assert sync_alloy._cached_token == "snap-oauth-token-xyz"
+
+    async_alloy = AsyncAlloyDBDialer(alloy_cfg, token_cache=_AsyncFakeTokenCache())
+    bundle_async_alloy = await async_alloy.refresh_client_cert(
+        public_key_pem="PUB",
+        private_key_pem="PRIV",
+        http_transport=_fake_alloy_http,
+    )
+    assert bundle_async_alloy.client_cert_pem == "CERT"
+    assert async_alloy._cached_token == "snap-oauth-token-xyz"
+
+    assert captured_auth_headers == [
+        "Bearer snap-oauth-token-xyz",
+        "Bearer snap-oauth-token-xyz",
+        "Bearer snap-oauth-token-xyz",
+        "Bearer snap-oauth-token-xyz",
+    ]
+
+    sent_frames: list[bytes] = []
+
+    class _FakeTlsSock:
+        def sendall(self, data: bytes) -> None:
+            sent_frames.append(data)
+
+        def recv(self, n: int) -> bytes:
+            resp = SyncAlloyDBDialer.encode_metadata_exchange_response(1)
+            return resp[:4] if n == 4 else resp[4:]
+
+        def close(self) -> None:
+            pass
+
+    class _FakeSslCtx:
+        def wrap_socket(self, _sock: object) -> _FakeTlsSock:
+            return _FakeTlsSock()
+
+    monkeypatch.setattr("socket.create_connection", lambda *_a, **_kw: _FakeTlsSock())
+    sync_alloy_connect = SyncAlloyDBDialer(alloy_cfg, token_cache=_SyncFakeTokenCache())
+    sync_alloy_connect.connect("127.0.0.1", ssl_context=_FakeSslCtx())
+    assert sync_alloy_connect._cached_token == "snap-oauth-token-xyz"
+    assert SyncAlloyDBDialer.decode_metadata_exchange(sent_frames[-1])["oauth2_token"] == "snap-oauth-token-xyz"
+
+    class _FakeReader:
+        async def readexactly(self, n: int) -> bytes:
+            resp = AsyncAlloyDBDialer.encode_metadata_exchange_response(1)
+            return resp[:4] if n == 4 else resp[4:]
+
+    class _FakeWriter:
+        def write(self, data: bytes) -> None:
+            sent_frames.append(data)
+
+        async def drain(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    async def _fake_open_connection(*_a: object, **_kw: object) -> tuple[_FakeReader, _FakeWriter]:
+        return _FakeReader(), _FakeWriter()
+
+    monkeypatch.setattr("asyncio.open_connection", _fake_open_connection)
+    async_alloy_connect = AsyncAlloyDBDialer(alloy_cfg, token_cache=_AsyncFakeTokenCache())
+    await async_alloy_connect.connect("127.0.0.1", ssl_context=_FakeSslCtx())
+    assert async_alloy_connect._cached_token == "snap-oauth-token-xyz"
+    assert AsyncAlloyDBDialer.decode_metadata_exchange(sent_frames[-1])["oauth2_token"] == "snap-oauth-token-xyz"
 
 
 def test_postgres_pooler_modes_and_jsonb_strip() -> None:
@@ -185,7 +310,7 @@ async def test_database_channel_backend_multi_engine_and_object_store_spill() ->
         direct_dsn="postgresql://app:secret@pg-primary:5432/prod",
         pooler_mode="transaction",
     )
-    store = ObjectStore("memory://")
+    store = SyncObjectStore("memory://")
     pg_bus = DatabaseChannelBackend.from_postgres(pg_cfg, history=10, object_store=store)
     assert pg_bus.postgres_driver is not None
     assert pg_bus.postgres_driver.config.pooler_mode == "session"

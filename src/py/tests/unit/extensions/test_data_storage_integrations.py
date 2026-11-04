@@ -15,6 +15,7 @@ from sqlspec.storage.registry import StorageRegistry as SQLSpecStorageRegistry
 
 import vertebra.extensions.alchemy.storage as alchemy_storage_mod
 import vertebra.extensions.sqlspec.storage as sqlspec_storage_mod
+from vertebra.db._arrow import ArrowCursor
 from vertebra.extensions.alchemy.storage import ObjectStoreBackend as AlchemyObjectStoreBackend
 from vertebra.extensions.alchemy.storage import register_storage_backend
 from vertebra.extensions.sqlspec.storage import (
@@ -24,7 +25,16 @@ from vertebra.extensions.sqlspec.storage import (
     register_storage_alias,
 )
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend as SQLSpecObjectStoreBackend
-from vertebra.storage import GCSConfig, ObjectStore, SigningConfig
+from vertebra.storage import (
+    AsyncGcpTokenCache,
+    GCSConfig,
+    SigningConfig,
+    SyncGcpTokenCache,
+    SyncObjectStore,
+)
+from vertebra.storage import (
+    StreamingStorageResponse as StorageStreamingStorageResponse,
+)
 from vertebra.utils.serializers import decode_json
 
 
@@ -38,7 +48,7 @@ def test_duplicated_storage_shims_removed_from_extension_modules() -> None:
 
 def test_sqlspec_object_store_backend_protocol_arrow_and_sync_pipeline() -> None:
     """SQLSpec ObjectStoreBackend satisfies ObjectStoreProtocol and drives SyncStoragePipeline + PyArrow."""
-    store = ObjectStore(
+    store = SyncObjectStore(
         "memory://",
         signing=SigningConfig(
             provider="hmac",
@@ -114,7 +124,7 @@ def test_sqlspec_object_store_backend_protocol_arrow_and_sync_pipeline() -> None
 @pytest.mark.anyio
 async def test_sqlspec_object_store_backend_async_pipeline_and_arrow_streaming(tmp_path: Path) -> None:
     """AsyncStoragePipeline streams bytes, Arrow tables, and copy/move/delete over ObjectStoreBackend."""
-    local_store = ObjectStore.from_local(tmp_path)
+    local_store = SyncObjectStore.from_local(tmp_path)
     registry = SQLSpecStorageRegistry()
     register_storage_alias("async_lake", local_store, registry=registry, base_path="stage")
     pipeline = AsyncStoragePipeline(registry=registry)
@@ -173,7 +183,7 @@ def test_duckdb_gcs_secret_sql_builder() -> None:
 @pytest.mark.anyio
 async def test_alchemy_storage_backend_file_object_and_session_tracker_rollback(tmp_path: Path) -> None:
     """ObjectStoreBackend integrates with Advanced Alchemy FileObject, StoredObject, and FileObjectSessionTracker."""
-    store = ObjectStore(
+    store = SyncObjectStore(
         f"file://{tmp_path}",
         signing=SigningConfig(
             provider="hmac",
@@ -264,7 +274,7 @@ async def test_alchemy_storage_backend_file_object_and_session_tracker_rollback(
     rollback_tracker = FileObjectSessionTracker(raise_on_error=True)
     rollback_tracker._saved_in_transaction.add(staged_obj)
     await rollback_tracker.rollback_async()
-    assert not await store.exists_async("uploads/users/42/tx_orphan.bin")
+    assert not store.exists("uploads/users/42/tx_orphan.bin")
 
     backend.delete_object("users/42/avatar.png")
     await backend.delete_object_async(
@@ -282,15 +292,10 @@ async def test_alchemy_storage_backend_file_object_and_session_tracker_rollback(
 @pytest.mark.anyio
 async def test_streaming_storage_response_exported_from_vertebra_storage() -> None:
     """Verify StreamingStorageResponse is canonically exported from vertebra.storage and re-exported in sqlspec."""
-    from vertebra.extensions.sqlspec.storage import (
-        StreamingStorageResponse as SqlSpecStreamingStorageResponse,
-    )
-    from vertebra.storage import ObjectStore, StreamingStorageResponse
-
-    assert StreamingStorageResponse is SqlSpecStreamingStorageResponse
-    store = ObjectStore.from_memory("streaming-export-test")
+    assert StorageStreamingStorageResponse is StreamingStorageResponse
+    store = SyncObjectStore.from_memory("streaming-export-test")
     store.put("blobs/sample.bin", b"abcdefghij")
-    resp = StreamingStorageResponse(store=store, key="blobs/sample.bin", total_size=10, chunk_size=4)
+    resp = StorageStreamingStorageResponse(store=store, key="blobs/sample.bin", total_size=10, chunk_size=4)
     sync_chunks = [bytes(c) for c in resp.iter_chunks()]
     async_chunks = [bytes(c) async for c in resp.aiter_chunks()]
     assert sync_chunks == [b"abcd", b"efgh", b"ij"]
@@ -298,12 +303,8 @@ async def test_streaming_storage_response_exported_from_vertebra_storage() -> No
 
 
 @pytest.mark.anyio
-async def test_object_store_backend_write_arrow_cursor_and_uri_qualified_globs() -> None:
+async def test_object_store_backend_write_arrow_cursor_and_uri_qualified_globs(tmp_path: Path) -> None:
     """Verify ObjectStoreBackend write_arrow_cursor_[sync|async], URI-qualified globs, and token_cache handoff."""
-    from vertebra.db._arrow import ArrowCursor
-    from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
-    from vertebra.storage import GcpTokenCache, ObjectStore
-
     cursor_part_0 = ArrowCursor.from_rows(
         [{"id": 1, "region": "us"}, {"id": 2, "region": "eu"}],
         threshold_rows=1,
@@ -313,19 +314,21 @@ async def test_object_store_backend_write_arrow_cursor_and_uri_qualified_globs()
         threshold_rows=1,
     )
 
-    mem_backend = ObjectStoreBackend("memory://", base_path="warehouse")
+    mem_backend = SQLSpecObjectStoreBackend("memory://", base_path="warehouse")
     mem_backend.write_arrow_cursor_sync("snapshots/batch.ipc", cursor_part_0)
     ipc_table = mem_backend.read_arrow_sync("snapshots/batch.ipc")
     assert ipc_table.to_pylist() == [{"id": 1, "region": "us"}, {"id": 2, "region": "eu"}]
 
-    token_cache = GcpTokenCache({"access_token": "initial-token"}, allow_ambient_adc=False)
-    gcs_sim_store = ObjectStore.from_memory("gcs-sim")
-    gcs_backend = ObjectStoreBackend(
+    token_cache = SyncGcpTokenCache({"access_token": "initial-token"}, allow_ambient_adc=False)
+    gcs_sim_store = SyncObjectStore.from_local(tmp_path / "gcs-sim")
+    gcs_backend = SQLSpecObjectStoreBackend(
         "gs://analytics-bucket",
         store=gcs_sim_store,
         token_cache=token_cache,
     )
     assert gcs_backend.store.token_cache is token_cache
+    assert gcs_backend.async_store.token_cache is not None
+    assert isinstance(gcs_backend.async_store.token_cache, AsyncGcpTokenCache)
 
     gcs_backend.write_arrow_cursor_sync(
         "gs://analytics-bucket/events/dt=2026-11-01/part-0.parquet",

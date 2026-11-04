@@ -64,33 +64,45 @@ impl PyGcpTokenSnapshot {
     }
 }
 
-/// Lock-free Google Cloud OAuth2 token cache with single-flight refresh and audience JWT signing.
-#[pyclass(name = "GcpTokenCache", frozen, immutable_type)]
-pub struct PyGcpTokenCache {
+fn build_token_cache(
+    py: Python<'_>,
+    options: Option<HashMap<String, String>>,
+    scopes: Option<Vec<String>>,
+) -> PyResult<Arc<NativeGcpTokenCache>> {
+    let default_options = HashMap::new();
+    let opts = options.as_ref().unwrap_or(&default_options);
+    let scopes_vec: Option<Vec<&str>> = scopes
+        .as_ref()
+        .map(|s| s.iter().map(|x| x.as_str()).collect());
+    let effective_scopes: &[&str] = scopes_vec
+        .as_deref()
+        .unwrap_or(vertebra_core::gcp_auth::DEFAULT_GCP_SCOPES);
+    py.detach(|| NativeGcpTokenCache::from_options(opts, effective_scopes))
+        .ok_or_else(|| PyValueError::new_err("unable to configure GcpTokenCache from options"))
+}
+
+/// Synchronous lock-free Google Cloud OAuth2 token cache with single-flight refresh.
+#[pyclass(name = "SyncGcpTokenCache", frozen, immutable_type)]
+pub struct PySyncGcpTokenCache {
     inner: Arc<NativeGcpTokenCache>,
 }
 
-impl PyGcpTokenCache {
+impl PySyncGcpTokenCache {
     pub fn inner(&self) -> &Arc<NativeGcpTokenCache> {
         &self.inner
     }
 }
 
 #[pymethods]
-impl PyGcpTokenCache {
+impl PySyncGcpTokenCache {
     #[new]
-    #[pyo3(signature = (options))]
-    fn new(py: Python<'_>, options: HashMap<String, String>) -> PyResult<Self> {
-        let inner = py
-            .detach(|| {
-                NativeGcpTokenCache::from_options(
-                    &options,
-                    vertebra_core::gcp_auth::DEFAULT_GCP_SCOPES,
-                )
-            })
-            .ok_or_else(|| {
-                PyValueError::new_err("unable to configure GcpTokenCache from options")
-            })?;
+    #[pyo3(signature = (options=None, scopes=None))]
+    fn new(
+        py: Python<'_>,
+        options: Option<HashMap<String, String>>,
+        scopes: Option<Vec<String>>,
+    ) -> PyResult<Self> {
+        let inner = build_token_cache(py, options, scopes)?;
         Ok(Self { inner })
     }
 
@@ -144,13 +156,72 @@ impl PyGcpTokenCache {
             .map_err(|e| auth_error_to_py(py, e))?;
         Ok(PyGcpTokenSnapshot::from(snap.as_ref()))
     }
+}
+
+/// Asynchronous lock-free Google Cloud OAuth2 token cache returning `RustDbTaskAwaitable`.
+#[pyclass(name = "AsyncGcpTokenCache", frozen, immutable_type)]
+pub struct PyAsyncGcpTokenCache {
+    inner: Arc<NativeGcpTokenCache>,
+}
+
+impl PyAsyncGcpTokenCache {
+    pub fn inner(&self) -> &Arc<NativeGcpTokenCache> {
+        &self.inner
+    }
+}
+
+#[pymethods]
+impl PyAsyncGcpTokenCache {
+    #[new]
+    #[pyo3(signature = (options=None, scopes=None))]
+    fn new(
+        py: Python<'_>,
+        options: Option<HashMap<String, String>>,
+        scopes: Option<Vec<String>>,
+    ) -> PyResult<Self> {
+        let inner = build_token_cache(py, options, scopes)?;
+        Ok(Self { inner })
+    }
+
+    #[getter]
+    fn generation(&self) -> u64 {
+        self.inner.generation()
+    }
+
+    #[getter]
+    fn refresh_skew_ms(&self) -> u64 {
+        self.inner.refresh_skew_ms()
+    }
+
+    #[getter]
+    fn has_service_account_key(&self) -> bool {
+        self.inner.service_account_key().is_some()
+    }
+
+    #[getter]
+    fn service_account_email(&self) -> Option<String> {
+        self.inner
+            .service_account_key()
+            .map(|k| k.client_email.clone())
+    }
+
+    #[pyo3(signature = (*, now_unix_ms=None))]
+    fn needs_refresh(&self, now_unix_ms: Option<u64>) -> bool {
+        self.inner
+            .needs_refresh(now_unix_ms.unwrap_or_else(current_unix_ms))
+    }
+
+    fn invalidate(&self, failed_generation: u64) {
+        self.inner.invalidate(failed_generation);
+    }
+
+    fn sign_jwt_for_audience(&self, py: Python<'_>, audience: &str) -> PyResult<String> {
+        py.detach(|| self.inner.sign_jwt_for_audience(audience))
+            .map_err(PyValueError::new_err)
+    }
 
     #[pyo3(signature = (*, force_refresh=false))]
-    fn get_token_async(
-        &self,
-        py: Python<'_>,
-        force_refresh: bool,
-    ) -> PyResult<RustDbTaskAwaitable> {
+    fn get_token(&self, py: Python<'_>, force_refresh: bool) -> PyResult<RustDbTaskAwaitable> {
         let cache = Arc::clone(&self.inner);
         spawn_rust_db_task(
             py,
@@ -163,6 +234,7 @@ impl PyGcpTokenCache {
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGcpTokenSnapshot>()?;
-    m.add_class::<PyGcpTokenCache>()?;
+    m.add_class::<PySyncGcpTokenCache>()?;
+    m.add_class::<PyAsyncGcpTokenCache>()?;
     Ok(())
 }

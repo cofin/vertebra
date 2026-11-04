@@ -12,11 +12,14 @@ from urllib.parse import urlparse
 import msgspec
 
 from vertebra._vertebra import (
-    SpannerClient as _RustSpannerClient,
+    AsyncSpannerClient as _RustAsyncSpannerClient,
 )
 from vertebra._vertebra import (
     SpannerError,
     hydrate_rows_vectorcall,
+)
+from vertebra._vertebra import (
+    SyncSpannerClient as _RustSyncSpannerClient,
 )
 from vertebra.db._arrow import ArrowCursor, write_arrow_shm
 from vertebra.db.spanner.config import (
@@ -43,9 +46,25 @@ class SpannerCore:
     """Stateless protocol encoding, mutation chunking, and Arrow/ObjectStore helpers for Cloud Spanner."""
 
     @staticmethod
-    def create_rust_client(config: SpannerConfig) -> _RustSpannerClient:
-        """Instantiate the native Rust `SpannerClient` from `config`."""
-        return _RustSpannerClient(
+    def create_sync_rust_client(config: SpannerConfig) -> _RustSyncSpannerClient:
+        """Instantiate the native Rust `SyncSpannerClient` from `config`."""
+        return _RustSyncSpannerClient(
+            database=config.database_uri,
+            database_role=config.database_role,
+            endpoint=config.endpoint,
+            dialect=config.dialect,
+            pool_size=max(1, config.pool_size),
+            route_to_leader_enabled=config.route_to_leader_enabled,
+            max_commit_delay_ms=config.max_commit_delay_ms,
+            auth_options=config.build_auth_options() or None,
+            admin_endpoint=config.admin_endpoint,
+            ca_pem=config.ca_pem,
+        )
+
+    @staticmethod
+    def create_async_rust_client(config: SpannerConfig) -> _RustAsyncSpannerClient:
+        """Instantiate the native Rust `AsyncSpannerClient` from `config`."""
+        return _RustAsyncSpannerClient(
             database=config.database_uri,
             database_role=config.database_role,
             endpoint=config.endpoint,

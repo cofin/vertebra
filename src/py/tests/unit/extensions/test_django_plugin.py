@@ -16,11 +16,10 @@ from vertebra.extensions.django import (
     ArrowManager,
     ArrowQuerySet,
     AsyncAPIDocsConfig,
+    AsyncObjectStore,
+    AsyncStorageRegistry,
     CacheBackend,
     ChannelLayer,
-    DjangoAppConfig,
-    DjangoConfig,
-    DjangoPlugin,
     DjangoStorage,
     EmailBackend,
     FastPath,
@@ -33,7 +32,12 @@ from vertebra.extensions.django import (
     RouteCompiler,
     SecurityBridge,
     SwaggerDocsConfig,
+    SyncObjectStore,
+    SyncStorageRegistry,
     TemplateBridge,
+    VertebraAppConfig,
+    VertebraConfig,
+    VertebraPlugin,
     ViteConfig,
     attach_vite,
     convert_django_pattern,
@@ -51,7 +55,7 @@ from vertebra.extensions.django.db.backends.sqlite3 import (
     DatabaseWrapper as SQLiteDatabaseWrapper,
 )
 from vertebra.extensions.django.templatetags.vertebra_vite import vite_asset, vite_hmr_client
-from vertebra.extensions.sqlalchemy.dialects import DBAPIConnection
+from vertebra.extensions.sqlalchemy.dialects import SyncDBAPIConnection
 from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncConfig, SQLiteSyncConfig
 from vertebra.utils.serializers import decode_json
 
@@ -186,10 +190,10 @@ def test_django_route_compiler_fastpath_openapi_and_mcp(tmp_path: Any) -> None:
     static_dir.mkdir()
     settings = _MockDjangoSettings(str(static_dir))
 
-    plugin = DjangoPlugin(
+    plugin = VertebraPlugin(
         urlpatterns=urlpatterns,
         settings=settings,
-        config=DjangoConfig(
+        config=VertebraConfig(
             openapi=OpenAPIConfig(
                 title="Django Orders API",
                 version="2.0.0",
@@ -202,7 +206,7 @@ def test_django_route_compiler_fastpath_openapi_and_mcp(tmp_path: Any) -> None:
         ),
     )
 
-    app_cfg = DjangoAppConfig()
+    app_cfg = VertebraAppConfig()
     assert app_cfg.ready() is None
 
     post_req = Request.from_parts(
@@ -378,6 +382,8 @@ async def test_django_cache_storage_mail_channels_queues_security_and_templates(
     assert await cache.adecr("counter", delta=2) == 3
 
     storage = DjangoStorage(MemoryConfig(), base_url="/media/")
+    assert isinstance(storage.store, SyncObjectStore)
+    assert isinstance(storage.async_store, AsyncObjectStore)
     saved_name = storage.save("avatars/a.txt", b"avatar-bytes")
     assert storage.exists(saved_name) is True
     assert storage.open(saved_name) == b"avatar-bytes"
@@ -386,8 +392,15 @@ async def test_django_cache_storage_mail_channels_queues_security_and_templates(
     await storage.asave("avatars/b.txt", b"async-avatar")
     assert await storage.aopen("avatars/b.txt") == b"async-avatar"
     assert await storage.aexists("avatars/b.txt") is True
+    assert await storage.asize("avatars/b.txt") == 12
+    assert await storage.aurl("avatars/b.txt") == "/media/avatars/b.txt"
     await storage.adelete("avatars/b.txt")
     assert await storage.aexists("avatars/b.txt") is False
+
+    sync_reg = SyncStorageRegistry({"default": storage.store})
+    assert sync_reg.get("default") is storage.store
+    async_reg = AsyncStorageRegistry({"default": storage.async_store})
+    assert async_reg.get("default") is storage.async_store
 
     email_backend = EmailBackend(suppress_send=True)
     assert email_backend.send_messages([{"subject": "S1"}]) == 1
@@ -560,7 +573,7 @@ def test_cross_framework_shared_native_pool_and_lease_broker(tmp_path: Any) -> N
         pooler_mode="transaction",
         alloydb_instance_uri=alloy_uri,
     )
-    sa_pg = DBAPIConnection(
+    sa_pg = SyncDBAPIConnection(
         f"postgresql+vtb://postgres@10.0.0.5:6432/appdb?pgbouncer=true&pooler_mode=transaction&alloydb_instance_uri={alloy_uri}"
     )
 
@@ -573,7 +586,7 @@ def test_cross_framework_shared_native_pool_and_lease_broker(tmp_path: Any) -> N
     db_file = tmp_path / "shared_cross_fw.db"
     dj_sqlite = SQLiteDatabaseWrapper({"NAME": str(db_file)})
     sqlspec_sqlite = SQLiteSyncConfig(path=str(db_file))
-    sa_sqlite = DBAPIConnection(f"sqlite+vtb:///{db_file}")
+    sa_sqlite = SyncDBAPIConnection(f"sqlite+vtb:///{db_file}")
 
     assert dj_sqlite.native_driver is sqlspec_sqlite.create_driver().native_driver
     assert dj_sqlite.native_driver is sa_sqlite.driver
@@ -586,7 +599,7 @@ def test_cross_framework_shared_native_pool_and_lease_broker(tmp_path: Any) -> N
         }
     )
     isolated_sqlspec = SQLiteSyncConfig(path=str(db_file), share_pool=False)
-    isolated_sa = DBAPIConnection(f"sqlite+vtb:///{db_file}", share_pool=False)
+    isolated_sa = SyncDBAPIConnection(f"sqlite+vtb:///{db_file}", share_pool=False)
 
     assert isolated_dj.native_driver is not dj_sqlite.native_driver
     assert isolated_dj.broker is not DatabaseRegistry.default_broker()

@@ -33,7 +33,7 @@ from vertebra.embeddings import (
 
 
 class _FakeTokenCache:
-    """In-memory fake GcpTokenCache returning GcpTokenSnapshot with generation rotation."""
+    """In-memory fake AsyncGcpTokenCache returning GcpTokenSnapshot with generation rotation."""
 
     def __init__(self, prefix: str = "mock-vertex-token", quota_project: str | None = "quota-proj-123") -> None:
         self._prefix = prefix
@@ -45,7 +45,7 @@ class _FakeTokenCache:
         if failed_generation >= self._invalidated_up_to:
             self._invalidated_up_to = failed_generation
 
-    async def get_token_async(self, *, force_refresh: bool = False) -> GcpTokenSnapshot:
+    async def get_token(self, *, force_refresh: bool = False) -> GcpTokenSnapshot:
         if force_refresh or self._generation == 0 or self._generation <= self._invalidated_up_to:
             self._generation += 1
         return GcpTokenSnapshot(

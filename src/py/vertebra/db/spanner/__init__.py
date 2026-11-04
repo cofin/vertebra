@@ -16,9 +16,9 @@ from vertebra.db.spanner.driver import (
     AsyncSpannerDriver,
     AsyncSpannerSnapshot,
     AsyncSpannerTransaction,
-    SpannerSnapshot,
-    SpannerTransaction,
     SyncSpannerDriver,
+    SyncSpannerSnapshot,
+    SyncSpannerTransaction,
 )
 
 __all__ = (
@@ -32,8 +32,8 @@ __all__ = (
     "MutationGroup",
     "SpannerConfig",
     "SpannerCore",
-    "SpannerSnapshot",
-    "SpannerTransaction",
     "StalenessBound",
     "SyncSpannerDriver",
+    "SyncSpannerSnapshot",
+    "SyncSpannerTransaction",
 )

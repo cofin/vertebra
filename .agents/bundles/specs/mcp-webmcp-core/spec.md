@@ -2,7 +2,7 @@
 type: Spec
 flow_id: mcp-webmcp-core
 title: MCP 2026-07-28 Core and WebMCP Bridge
-description: Introduce one ToolSpec/ToolRegistry with msgspec-derived schemas, a transport-agnostic MCPCore with ASGI/WSGI/native adapters, litestar-mcp delegation for Litestar apps, a WebMCP manifest projection, and a current document.modelContext TypeScript bridge.
+description: Introduce one frozen msgspec ToolSpec/ToolRegistry/ToolProvider model, a transport-agnostic MCPCore with thin ASGI/WSGI/native adapters, litestar-mcp delegation for Litestar apps, a WebMCP manifest projection, and a document.modelContext TypeScript bridge.
 state: draft
 parent_prd: integration-remediation
 research:
@@ -13,7 +13,7 @@ state_revision: 0
 current_task: null
 last_verified_checkpoint: null
 created_at: 2026-11-03T03:30:00Z
-updated_at: 2026-11-03T03:30:00Z
+updated_at: 2026-11-03T21:54:00Z
 tags: [mcp, webmcp, agent, typescript]
 ---
 
@@ -21,63 +21,52 @@ tags: [mcp, webmcp, agent, typescript]
 
 ## Charter
 
-Each tool is defined once and reaches standard MCP clients and browser agents through one registry, one schema derivation, and one protocol core. Exposure and confirmation are explicit per tool. Litestar apps use litestar-mcp.
+Every tool is defined once and exposed to MCP `2026-07-28` clients, A2A skills, and opt-in browser WebMCP agents through one `ToolSpec`, one `msgspec` schema pipeline, and one transport-agnostic `MCPCore`. Litestar applications delegate directly to `litestar-mcp`.
 
 ## Scope
 
-1. **`ToolSpec` and registry.**
-   - `agent/core/schema.py` gains `ToolSpec` (frozen msgspec Struct) with: name, title, description, input/output schema, annotations (`read_only`, `destructive`, `idempotent`, `open_world`, `consequential`), `exposure: frozenset[Literal["mcp", "webmcp", "a2a"]]`, `requires_confirmation`, and guards.
-   - A `ToolRegistry` is fed by `ToolProvider` implementations: controllers, route discovery, and the BigQuery/Spanner DB tool providers relocated by `db-engine-primitives`.
-   - The four discovery paths are replaced: `MCPRegistry.discover_app_routes`, `AgentPlugin._inspect_item`, `SkillController`, and `db/mcp_tools.py`.
-2. **Schemas.** Built once with `get_type_hints(include_extras=True)` → `msgspec.defstruct` → `msgspec.json.schema_components`. Invocation uses `msgspec.convert`. This replaces the `SchemaBuilder` string-annotation path and the `eval` in `_convert_argument`, so PEP 563 modules produce correct schemas. Signatures are cached.
+1. **`ToolSpec`, `ToolProvider`, and `ToolRegistry`.**
+   - Add `ToolSpec(FrozenBaseStruct, frozen=True, gc=False)` in `vertebra/agent/core/schema.py` carrying `name`, `title`, `description`, `input_schema`, `output_schema`, `annotations` (`read_only`, `destructive`, `idempotent`, `open_world`, `consequential`), `exposure: frozenset[Literal["mcp", "webmcp", "a2a"]]`, `requires_confirmation`, and `guards`.
+   - Build `ToolRegistry` fed by `ToolProvider` implementations: `@tool` functions, `SkillController`s, route discovery, and `vertebra/agent/tools/{bigquery,spanner}.py` (relocated from `vertebra.db` in `db-engine-primitives:t05`), replacing the four divergent discovery paths (`MCPRegistry.discover_app_routes`, `AgentPlugin._inspect_item`, `SkillController`, and ad-hoc tool builders).
+2. **`msgspec` schema derivation & argument conversion.**
+   - Derive input/output JSON Schemas once via `typing.get_type_hints(fn, include_extras=True)` -> `msgspec.defstruct` -> `msgspec.json.schema_components` and coerce tool call arguments with `msgspec.convert`, removing string-annotation heuristics and `eval()` in `SchemaBuilder` so `from __future__ import annotations` modules resolve cleanly and signatures are cached.
 3. **`MCPCore.handle(McpHttpRequest) -> McpHttpResponse`.**
-   - Covers 2026-07-28: `_meta` protocol version, header validation (400), Origin same-origin by default (403), unknown method 404/-32601, GET 405, notification 202, no batching, `server/discover`, `resultType`, `ttlMs`/`cacheScope`, a correct ETag, typed per-method params, and the removed methods dropped (`initialize`, `ping`, `logging/setLevel`, `resources/subscribe|unsubscribe`, `tasks/result`, `tasks/list` outside the tasks extension).
-   - Includes an `authorize(ctx, spec)` hook and confirmation surfaced as an `input_required` result.
-   - Background tasks are kept referenced.
-4. **Adapters.**
-   - One ASGI app and one WSGI app (anyio portal, no `asyncio.run`) replace the Flask/Django `_dispatch_jsonrpc` copies and their local `MCPConfig`.
-   - Starlette/FastAPI mount `/mcp`.
-   - The native vertebra adapter routes `AgentPlugin` through the core.
-   - Litestar apps delegate to litestar-mcp, without double registration of `opt["mcp_tool"]`.
-   - `/.well-known/mcp.json` has one shape.
-5. **WebMCP.**
-   - The manifest is a projection of `ToolSpec`s with `"webmcp" in exposure`. `requires_confirmation` maps to `consequentialHint`, and title and outputSchema are included.
-   - `src/ts/vertebra-client/src/webmcp.ts`:
-     - Feature-detects `document.modelContext ?? navigator.modelContext`.
-     - Uses `registerTool(tool, {signal})` and returns a dispose handle.
-     - Isolates per-tool registration failures.
-     - Is idempotent across HMR/SPA navigation.
-     - Honors `execute(input, {signal})`.
-     - No `provideContext`.
-   - `src/ts/vertebra-client/src/agent/` sends `Accept: application/json, text/event-stream` and `_meta`, parses SSE, and fixes `encodeMcpHeaderValue` edge cases.
-   - `build/_import_map.py::_CLIENT_SUBPATHS` derives from `package.json` exports.
-6. **Docs.** Rewrite `domains/agent/mcp-and-a2a-protocol-harness.md` and the MCP usage docs.
+   - Enforce MCP `2026-07-28` HTTP semantics: `_meta` protocol version negotiation, header validation (`400`), default same-origin `Origin` validation (`403`), unknown method `-32601` (`404` where specified), `GET` `405`, notification `202`, batch rejection (`400`), `server/discover`, `resultType`, `ttlMs`/`cacheScope`, deterministic `ETag`, typed per-method params, `authorize(ctx, spec)` guard execution, `ConfirmationGate` `input_required` responses (preserving Chapter 1 `_meta["vertebra/confirmationToken"]` binding), referenced background tasks, and removal of deprecated `2024-11-05` methods (`initialize`, `ping`, `logging/setLevel`, `resources/subscribe|unsubscribe`, `tasks/result`, and `tasks/list` outside the tasks extension).
+4. **Thin framework adapters & `litestar-mcp` delegation.**
+   - Replace duplicated Flask/Django `_dispatch_jsonrpc` routers and local `MCPConfig` classes with one shared ASGI MCP app and one WSGI MCP app (using a persistent `anyio` blocking portal instead of per-request `asyncio.run`).
+   - Mount `/mcp` cleanly on Starlette/FastAPI and route native `AgentPlugin` through `MCPCore`.
+   - Delegate Litestar apps to `litestar-mcp` without double-registering `opt["mcp_tool"]` routes, and unify `/.well-known/mcp.json` on one canonical schema.
+5. **WebMCP projection & `@vertebra/client` bridge.**
+   - Project `/.well-known/webmcp.json` (or configured manifest route) strictly from `ToolSpec`s with `"webmcp" in exposure` (default excluded per Chapter 1), mapping `requires_confirmation` to `consequentialHint` and including `title` and `outputSchema`.
+   - Update `src/ts/vertebra-client/src/webmcp.ts` to feature-detect `document.modelContext ?? navigator.modelContext`, call `registerTool(tool, { signal })` returning a dispose handle, isolate per-tool registration errors, remain idempotent across HMR/SPA navigation, honor `execute(input, { signal })`, and drop legacy `provideContext`.
+   - Update `src/ts/vertebra-client/src/agent/` to send `Accept: application/json, text/event-stream` and `_meta`, parse SSE responses, and fix `encodeMcpHeaderValue` edge cases; derive `build/_import_map.py::_CLIENT_SUBPATHS` directly from `src/ts/vertebra-client/package.json` `exports`.
+6. **Docs & OKF.** Update `docs/usage/agent-protocols.md`, `docs/usage/a2a-and-workflows.md`, `docs/reference/agent.md`, and `.agents/bundles/knowledge/domains/agent/mcp-and-a2a-protocol-harness.md`.
 
 ## Out of Scope
 
-- A2A protocol changes beyond sharing `ToolSpec`.
+- A2A `1.0` wire changes beyond consuming `ToolSpec`.
 
 ## Public Seams
 
-`ToolSpec`, `ToolRegistry`, `ToolProvider`, `MCPCore`, the ASGI/WSGI MCP apps, `registerWebMCPTools`, and `McpClient`.
+`ToolSpec`, `ToolRegistry`, `ToolProvider`, `MCPCore`, ASGI/WSGI MCP apps, `registerWebMCPTools`, and `McpClient`.
 
 ## Dependencies
 
-Chapter 1 (security fixes land first) and `db-engine-primitives` (DB tool relocation).
+`critical-correctness-fixes` (completed), `refactor/sync-async-names` (`08ac03a`), and `db-engine-primitives` (`vertebra.agent.tools` relocation).
 
 ## Acceptance Boundary
 
-- litestar-mcp's `tools/ci/run_mcp_conformance.py` passes against a vertebra Starlette app and a Flask app.
-- Vitest covers a fake `document.modelContext` that rejects duplicates.
-- `make lint-all`, `make py-test`, and `make ts-test` pass.
+- `litestar-mcp` MCP `2026-07-28` conformance checks pass against Vertebra Starlette, Flask, and native `App` mounts.
+- Vitest covers `document.modelContext` registration, `AbortSignal` disposal, HMR idempotency, and per-tool error isolation.
+- `make lint-all`, `make py-test`, `make ts-test`, and `make docs` pass.
 
 ## Draft Task Outline
 
-- t01 `ToolSpec` + msgspec schema derivation.
-- t02 `ToolRegistry`/`ToolProvider` + discovery consolidation.
-- t03 `MCPCore` protocol handling.
-- t04 ASGI/WSGI adapters replacing the Flask/Django dispatchers.
-- t05 Native adapter + litestar-mcp delegation.
-- t06 WebMCP manifest projection.
-- t07 TS WebMCP bridge.
-- t08 TS MCP client + import map + docs.
+- t01 `ToolSpec` + `msgspec.defstruct`/`schema_components` schema builder and `msgspec.convert` invocation.
+- t02 `ToolProvider` + `ToolRegistry` consolidating route/controller/`vertebra.agent.tools` discovery.
+- t03 Transport-agnostic `MCPCore` `2026-07-28` protocol engine.
+- t04 Shared ASGI and WSGI MCP adapters replacing Flask/Django JSON-RPC copies.
+- t05 Native `AgentPlugin` adapter + `litestar-mcp` delegation + unified `/.well-known/mcp.json`.
+- t06 WebMCP manifest projection from `ToolSpec`.
+- t07 TypeScript `webmcp.ts` `document.modelContext.registerTool` bridge.
+- t08 TypeScript `McpClient` SSE/`_meta` updates, `package.json`-derived import map, and docs/OKF.

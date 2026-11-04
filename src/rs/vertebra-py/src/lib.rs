@@ -31,13 +31,13 @@ pub use asgi::{
     AsgiProtocol, AsgiScope, AsgiScopeIterator, PyEmptyAwaitable, PyValueAwaitable,
     drive_asgi_batch, drive_native_batch,
 };
-pub use bigquery::PyBigQueryClient;
+pub use bigquery::{PyAsyncBigQueryClient, PySyncBigQueryClient};
 pub use broker::{
     BrokerStats, LeaseBroker, LeaseGrant, StatementCache, StatementCacheStats, StatementPlan,
 };
 pub use completion::{RustDbTaskAwaitable, TaskPanicError};
 pub use db::{AlloyDBDialer, ArrowCursor, CloudSQLDialer};
-pub use gcp_auth::{PyGcpTokenCache, PyGcpTokenSnapshot};
+pub use gcp_auth::{PyAsyncGcpTokenCache, PyGcpTokenSnapshot, PySyncGcpTokenCache};
 pub use headers::{Headers, HeadersIterator};
 pub use msgspec_bridge::{
     call_vectorcall, hydrate_one_vectorcall, hydrate_rows_vectorcall,
@@ -46,7 +46,7 @@ pub use msgspec_bridge::{
 pub use request::{Request, RequestBatch, RequestBatchIterator};
 pub use response::Response;
 pub use rsgi::{RsgiHttpProtocol, RsgiScope, RsgiTransport, drive_rsgi_batch};
-pub use spanner::PySpannerClient;
+pub use spanner::{PyAsyncSpannerClient, PySyncSpannerClient};
 pub use telemetry::{
     JWTGuard, LogSink, RateLimiter, format_traceparent, parse_traceparent, sanitize_sql,
 };

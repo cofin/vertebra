@@ -5,9 +5,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from vertebra.extensions.broker.transport import (
+    AsyncInMemoryBrokerTransport,
+    AsyncSHMBrokerTransport,
     BrokerConfig,
-    InMemoryBrokerTransport,
-    SHMBrokerTransport,
+    SyncInMemoryBrokerTransport,
+    SyncSHMBrokerTransport,
 )
 from vertebra.telemetry.otel import DbPoolMetricSample
 
@@ -26,31 +28,48 @@ class BrokerPlugin:
         zpages: ZPagesRegistry | None = None,
         otel_recorder: DbPoolRecorder | None = None,
         name: str = "default",
+        async_mode: bool = False,
     ) -> None:
         self.config = config or BrokerConfig()
         self.use_shm = use_shm
         self.name = name
         self.zpages = zpages
         self.otel_recorder = otel_recorder
+        self.async_mode = async_mode
 
-        self._transport: SHMBrokerTransport | InMemoryBrokerTransport
+        self._transport: (
+            SyncSHMBrokerTransport
+            | AsyncSHMBrokerTransport
+            | SyncInMemoryBrokerTransport
+            | AsyncInMemoryBrokerTransport
+        )
         if self.use_shm:
-            self._transport = SHMBrokerTransport(self.config)
+            self._transport = (
+                AsyncSHMBrokerTransport(self.config) if self.async_mode else SyncSHMBrokerTransport(self.config)
+            )
         else:
-            self._transport = InMemoryBrokerTransport(self.config)
+            self._transport = (
+                AsyncInMemoryBrokerTransport(self.config)
+                if self.async_mode
+                else SyncInMemoryBrokerTransport(self.config)
+            )
 
         if self.zpages is not None:
             self._register_zpages(self.zpages)
 
-    def install_state(self, state_mapping: dict[str, Any]) -> SHMBrokerTransport | InMemoryBrokerTransport:
+    @property
+    def transport(
+        self,
+    ) -> SyncSHMBrokerTransport | AsyncSHMBrokerTransport | SyncInMemoryBrokerTransport | AsyncInMemoryBrokerTransport:
+        """Return the active broker transport."""
+        return self._transport
+
+    def install_state(
+        self, state_mapping: dict[str, Any]
+    ) -> SyncSHMBrokerTransport | AsyncSHMBrokerTransport | SyncInMemoryBrokerTransport | AsyncInMemoryBrokerTransport:
         """Register the broker transport and metrics snapshot in state_mapping."""
         state_mapping[self.config.state_key] = self._transport
         state_mapping[self.config.metrics_state_key] = self._transport.metrics()
-        return self._transport
-
-    @property
-    def transport(self) -> SHMBrokerTransport | InMemoryBrokerTransport:
-        """Return the active broker transport."""
         return self._transport
 
     def snapshot_metrics(self) -> DbPoolMetricSample:
@@ -71,6 +90,33 @@ class BrokerPlugin:
         if self.otel_recorder is not None:
             self.otel_recorder.record_sample(sample)
         return sample
+
+    def on_app_init(self, app: Any) -> None:
+        """Hook called during application initialization."""
+        target_state = getattr(app, "state", None)
+        if isinstance(target_state, dict):
+            target_state["db_broker"] = self._transport
+            target_state["db_broker_plugin"] = self
+        elif target_state is not None:
+            target_state.db_broker = self._transport
+            target_state.db_broker_plugin = self
+            if self.zpages is None and hasattr(target_state, "zpages"):
+                zpages = getattr(target_state, "zpages", None)
+                if zpages is not None:
+                    self._register_zpages(zpages)
+
+        dependencies = getattr(app, "dependencies", None)
+        if isinstance(dependencies, dict):
+            transport = self._transport
+
+            def provide_broker() -> Any:
+                return transport
+
+            def provide_broker_metrics() -> Any:
+                return transport.metrics()
+
+            dependencies.setdefault(self.config.state_key, provide_broker)
+            dependencies.setdefault(self.config.metrics_state_key, provide_broker_metrics)
 
     def _register_zpages(self, zpages: ZPagesRegistry) -> None:
         """Register broker telemetry snapshot provider with ZPagesRegistry."""
@@ -101,30 +147,3 @@ class BrokerPlugin:
             }
 
         zpages.register_broker(self.name, provider)
-
-    def on_app_init(self, app: Any) -> None:
-        """Hook called during application initialization."""
-        target_state = getattr(app, "state", None)
-        if isinstance(target_state, dict):
-            target_state["db_broker"] = self._transport
-            target_state["db_broker_plugin"] = self
-        elif target_state is not None:
-            target_state.db_broker = self._transport
-            target_state.db_broker_plugin = self
-            if self.zpages is None and hasattr(target_state, "zpages"):
-                zpages = getattr(target_state, "zpages", None)
-                if zpages is not None:
-                    self._register_zpages(zpages)
-
-        dependencies = getattr(app, "dependencies", None)
-        if isinstance(dependencies, dict):
-            transport = self._transport
-
-            def provide_broker() -> Any:
-                return transport
-
-            def provide_broker_metrics() -> Any:
-                return transport.metrics()
-
-            dependencies.setdefault(self.config.state_key, provide_broker)
-            dependencies.setdefault(self.config.metrics_state_key, provide_broker_metrics)

@@ -15,7 +15,7 @@ from vertebra.extensions.litestar.channels import (
     ChannelsBackend,
     swap_channels_backend,
 )
-from vertebra.extensions.litestar.config import LitestarConfig
+from vertebra.extensions.litestar.config import VertebraConfig
 from vertebra.extensions.litestar.fastpath import (
     FastPath,
     ScopeState,
@@ -24,7 +24,7 @@ from vertebra.extensions.litestar.fastpath import (
     dispatch_handler_direct,
     preseed_scope_body,
 )
-from vertebra.extensions.litestar.plugin import LitestarPlugin
+from vertebra.extensions.litestar.plugin import VertebraPlugin
 from vertebra.extensions.litestar.router import extract_routes
 from vertebra.extensions.litestar.store import (
     MemoryStore,
@@ -737,9 +737,9 @@ async def test_swap_channels_backend_and_response_cache_store() -> None:
 
 
 def test_litestar_plugin_keeps_memory_channels_and_response_cache_by_default() -> None:
-    """The default LitestarConfig leaves Litestar's channels backend and response cache store in place."""
+    """The default VertebraConfig leaves Litestar's channels backend and response cache store in place."""
     channels_plugin = ChannelsPlugin(backend=MemoryChannelsBackend(history=10), channels=["alerts"])
-    plugin = LitestarPlugin()
+    plugin = VertebraPlugin()
     app = Litestar(
         route_handlers=[],
         plugins=[channels_plugin, plugin],
@@ -1081,7 +1081,7 @@ async def test_v2_ownership_layers_hooks_metadata_and_unoffloaded_middleware_dis
         route_handlers=[hello_active],
         cors_config=CORSConfig(allow_origins=["https://example.com"]),
     )
-    py_cors_app.state["vertebra_config"] = LitestarConfig(offload_cors=False)
+    py_cors_app.state["vertebra_config"] = VertebraConfig(offload_cors=False)
     py_cors_bypass = FastPath.from_app(py_cors_app)
     assert (
         await py_cors_bypass.dispatch(
@@ -1092,7 +1092,7 @@ async def test_v2_ownership_layers_hooks_metadata_and_unoffloaded_middleware_dis
         is None
     )
 
-    py_cors_app.state["vertebra_config"] = LitestarConfig(offload_cors=True)
+    py_cors_app.state["vertebra_config"] = VertebraConfig(offload_cors=True)
     rust_cors_bypass = FastPath.from_app(py_cors_app)
     rust_cors_res = await rust_cors_bypass.dispatch(
         AsgiScope.from_parts(method="GET", path="/hello-active"),

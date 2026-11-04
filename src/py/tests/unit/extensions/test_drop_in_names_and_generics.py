@@ -15,8 +15,12 @@ from litestar.config.app import AppConfig
 
 import vertebra
 import vertebra.extensions.alchemy as alchemy_ext
+import vertebra.extensions.django as django_ext
+import vertebra.extensions.fastapi as fastapi_ext
+import vertebra.extensions.flask as flask_ext
 import vertebra.extensions.litestar as litestar_ext
 import vertebra.extensions.sqlspec as sqlspec_ext
+import vertebra.extensions.starlette as starlette_ext
 import vertebra.framework as vtb_framework
 import vertebra.framework.procedures as vtb_procedures
 from vertebra.build.codegen import CodegenConfig, CodegenPlugin
@@ -26,13 +30,14 @@ from vertebra.cli.plugin_registry import (
     register_app_cli_plugins,
 )
 from vertebra.extensions.alchemy import (
+    AsyncSHMBrokerTransport,
+    AsyncSHMSessionBroker,
     BrokerConfig,
     ChannelMessage,
-    InMemoryBrokerTransport,
     ObjectStoreBackend,
-    SHMBrokerTransport,
-    SHMSessionBroker,
     StatementCache,
+    SyncInMemoryBrokerTransport,
+    SyncSHMSessionBroker,
     create_alchemy_plugin,
     create_async_alchemy_config,
     create_sync_alchemy_config,
@@ -41,20 +46,21 @@ from vertebra.extensions.alchemy.storage import register_storage_backend
 from vertebra.extensions.litestar import (
     ChannelsBackend,
     FastPath,
-    LitestarConfig,
-    LitestarPlugin,
     MemoryStore,
     OffloadPlan,
     RouteCompiler,
     RouterTable,
+    VertebraConfig,
+    VertebraPlugin,
 )
+from vertebra.extensions.sqlalchemy.dialects import ALL_DIALECT_SCHEMES, DIALECT_DESCRIPTORS
 from vertebra.extensions.sqlspec import (
     ProxyAsyncConfig,
     ProxySyncConfig,
     SQLSpecPlugin,
     create_sqlspec_plugin,
 )
-from vertebra.storage import ObjectStore
+from vertebra.storage import SyncObjectStore
 
 
 class _DummySyncDriver:
@@ -82,8 +88,28 @@ def test_canonical_extension_exports() -> None:
     assert not hasattr(vtb_procedures, "procedure_mutation")
     assert not hasattr(vtb_procedures, "procedure_subscription")
     assert not hasattr(litestar_ext, "ServerConfig")
-    assert not hasattr(litestar_ext, "VertebraConfig")
-    assert not hasattr(litestar_ext, "VertebraPlugin")
+    assert not hasattr(litestar_ext, "LitestarConfig")
+    assert not hasattr(litestar_ext, "LitestarPlugin")
+    assert hasattr(litestar_ext, "VertebraConfig")
+    assert hasattr(litestar_ext, "VertebraPlugin")
+    assert not hasattr(starlette_ext, "StarletteConfig")
+    assert not hasattr(starlette_ext, "StarlettePlugin")
+    assert hasattr(starlette_ext, "VertebraConfig")
+    assert hasattr(starlette_ext, "VertebraPlugin")
+    assert not hasattr(fastapi_ext, "FastAPIConfig")
+    assert not hasattr(fastapi_ext, "FastAPIPlugin")
+    assert hasattr(fastapi_ext, "VertebraConfig")
+    assert hasattr(fastapi_ext, "VertebraPlugin")
+    assert not hasattr(flask_ext, "FlaskConfig")
+    assert not hasattr(flask_ext, "FlaskPlugin")
+    assert hasattr(flask_ext, "VertebraConfig")
+    assert hasattr(flask_ext, "VertebraPlugin")
+    assert not hasattr(django_ext, "DjangoConfig")
+    assert not hasattr(django_ext, "DjangoPlugin")
+    assert not hasattr(django_ext, "DjangoAppConfig")
+    assert hasattr(django_ext, "VertebraConfig")
+    assert hasattr(django_ext, "VertebraPlugin")
+    assert hasattr(django_ext, "VertebraAppConfig")
     assert not hasattr(alchemy_ext, "AdvancedAlchemy")
     assert not hasattr(alchemy_ext, "AlchemyPlugin")
     assert not hasattr(alchemy_ext, "AlchemyStore")
@@ -96,7 +122,7 @@ def test_canonical_extension_exports() -> None:
     assert hasattr(sqlspec_ext, "create_sqlspec_plugin")
     assert hasattr(sqlspec_ext, "SQLSpecPlugin")
 
-    plugin = LitestarPlugin(LitestarConfig(enable_health_endpoint=True))
+    plugin = VertebraPlugin(VertebraConfig(enable_health_endpoint=True))
     assert plugin.config.enable_health_endpoint is True
     assert isinstance(ChannelsBackend(history=4), ChannelsBackend)
     assert isinstance(MemoryStore(), MemoryStore)
@@ -106,6 +132,8 @@ def test_canonical_extension_exports() -> None:
     assert FastPath is not None
     assert OffloadPlan is not None
     assert ObjectStoreBackend is not None
+    assert set(ALL_DIALECT_SCHEMES) == set(DIALECT_DESCRIPTORS)
+    assert len(ALL_DIALECT_SCHEMES) == 36
 
 
 def test_sqlspec_generic_configs_and_pool_defaults() -> None:
@@ -166,7 +194,7 @@ def test_alchemy_generic_configs_and_attachment_storage() -> None:
     )
     assert sync_mem_cfg.engine_config.pool_pre_ping is not True
 
-    store = ObjectStore("memory://")
+    store = SyncObjectStore("memory://")
     plugin = create_alchemy_plugin(
         async_cfg,
         storage_backend=store,
@@ -188,13 +216,15 @@ def test_alchemy_generic_configs_and_attachment_storage() -> None:
 
 
 def test_broker_transport_leasing_and_channel_message() -> None:
-    """Verify InMemoryBrokerTransport, SHMBrokerTransport, lease TTL expiration, and ChannelMessage."""
+    """Verify SyncInMemoryBrokerTransport, AsyncSHMBrokerTransport, lease TTL expiration, and ChannelMessage."""
     msg = ChannelMessage(channel="events", payload=b"123", timestamp_ns=42)
     encoded = msgspec.msgpack.encode(msg)
     decoded = msgspec.msgpack.decode(encoded, type=ChannelMessage)
     assert decoded == msg
 
-    transport = InMemoryBrokerTransport(BrokerConfig(pool_size=1, max_overflow=1, acquire_timeout=0.05, lease_ttl=0.05))
+    transport = SyncInMemoryBrokerTransport(
+        BrokerConfig(pool_size=1, max_overflow=1, acquire_timeout=0.05, lease_ttl=0.05)
+    )
     with transport.acquire() as lease1:
         assert lease1.is_overflow is False
         lease2 = transport.acquire()
@@ -210,22 +240,22 @@ def test_broker_transport_leasing_and_channel_message() -> None:
     assert metrics.total_timeouts == 1
 
     async def _run_async_broker() -> None:
-        shm_broker = SHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))
-        async with await shm_broker.acquire_async() as async_lease:
+        shm_broker = AsyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))
+        async with await shm_broker.acquire() as async_lease:
             assert not async_lease.is_released
         assert async_lease.is_released
-        shm_broker.publish("Invalidations", b"key:1")
-        drained = shm_broker.drain_channel("Invalidations")
+        await shm_broker.publish("Invalidations", b"key:1")
+        drained = await shm_broker.drain_channel("Invalidations")
         assert len(drained) == 1
         assert drained[0].payload == b"key:1"
-        shm_broker.close()
+        await shm_broker.close()
 
     asyncio.run(_run_async_broker())
 
 
 def test_storage_registry_alias_and_uri_resolution() -> None:
     """Verify ObjectStoreBackend registration in Advanced Alchemy storages registry."""
-    mem_store = ObjectStore("memory://")
+    mem_store = SyncObjectStore("memory://")
     mem_store.put("seed.txt", b"seeded")
     backend = register_storage_backend("primary_test_dropin", store=mem_store)
     assert (
@@ -276,28 +306,50 @@ def test_pluggable_cli_discovery_and_app_plugin_hooks(monkeypatch: pytest.Monkey
 
 @pytest.mark.anyio
 async def test_shm_session_broker_concurrency_and_lock_safety() -> None:
-    """Verify SHMSessionBroker lock safety, non-underflowing in_use, and O(1) cancelled waiter skip."""
-    broker = SHMSessionBroker(capacity=2)
-    assert broker.capacity == 2
-    assert broker.in_use == 0
+    """Verify SyncSHMSessionBroker and AsyncSHMSessionBroker lock safety, non-underflowing in_use, and O(1) cancelled waiter skip."""
+    sync_broker = SyncSHMSessionBroker(capacity=2)
+    assert sync_broker.capacity == 2
+    assert sync_broker.in_use == 0
 
-    assert broker.acquire() is True
-    assert broker.in_use == 1
+    assert sync_broker.acquire() is True
+    assert sync_broker.in_use == 1
 
-    assert await broker.acquire_async() is True
-    assert broker.in_use == 2
+    assert sync_broker.acquire() is True
+    assert sync_broker.in_use == 2
 
-    assert await broker.acquire_async(timeout=0.01) is False
-    assert broker.in_use == 2
+    assert sync_broker.acquire(timeout=0.01) is False
+    assert sync_broker.in_use == 2
 
-    broker.release()
-    assert broker.in_use == 1
+    sync_broker.release()
+    assert sync_broker.in_use == 1
 
-    await broker.release_async()
-    assert broker.in_use == 0
+    sync_broker.release()
+    assert sync_broker.in_use == 0
 
-    broker.release()
-    assert broker.in_use == 0
+    sync_broker.release()
+    assert sync_broker.in_use == 0
+
+    async_broker = AsyncSHMSessionBroker(capacity=2)
+    assert async_broker.capacity == 2
+    assert async_broker.in_use == 0
+
+    assert await async_broker.acquire() is True
+    assert async_broker.in_use == 1
+
+    assert await async_broker.acquire() is True
+    assert async_broker.in_use == 2
+
+    assert await async_broker.acquire(timeout=0.01) is False
+    assert async_broker.in_use == 2
+
+    await async_broker.release()
+    assert async_broker.in_use == 1
+
+    await async_broker.release()
+    assert async_broker.in_use == 0
+
+    await async_broker.release()
+    assert async_broker.in_use == 0
 
 
 def test_statement_cache_compilation() -> None:
@@ -327,7 +379,7 @@ def test_statement_cache_compilation() -> None:
 @pytest.mark.anyio
 async def test_database_service_and_stored_object_delegation() -> None:
     """Verify ObjectStoreBackend async delegation and alchemy engine configuration."""
-    mem_store = ObjectStore("memory://")
+    mem_store = SyncObjectStore("memory://")
     backend = ObjectStoreBackend(store=mem_store, prefix="reports")
     file_obj = FileObject(backend=backend, filename="summary.csv")
     await backend.save_object_async(file_obj, b"col1,col2\n1,2\n")

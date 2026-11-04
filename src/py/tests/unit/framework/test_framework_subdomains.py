@@ -11,7 +11,7 @@ import msgspec
 import pytest
 
 from vertebra._vertebra import Response
-from vertebra.extensions.litestar import LitestarConfig, LitestarPlugin
+from vertebra.extensions.litestar import VertebraConfig, VertebraPlugin
 from vertebra.framework._app import App, _make_handler_id
 from vertebra.framework.asyncapi import AsyncAPISpecBuilder, AsyncChannelDef
 from vertebra.framework.channels import ChannelBus
@@ -36,7 +36,7 @@ from vertebra.framework.security import (
     requires_tenant,
 )
 from vertebra.framework.ssr import SSRFrame
-from vertebra.framework.stores import MemoryStore, NamespacedStore
+from vertebra.framework.stores import KeyValueStore, NamespacedStore
 from vertebra.typing import MissingDependencyError, UnsupportedBackendError
 from vertebra.wasm import WASM_MAGIC_HEADER, WASMModuleConfig, WASMSandboxPolicy
 
@@ -202,7 +202,7 @@ async def test_queues_channels_stores_email_and_procedures() -> None:
     assert await bus.get_history("orders") == [b"evt"]
     await bus.on_shutdown()
 
-    kv = MemoryStore()
+    kv = KeyValueStore()
     ns = NamespacedStore(kv, "tenant-a")
     await ns.set("token", b"xyz")
     assert await ns.get("token") == b"xyz"
@@ -278,7 +278,7 @@ def test_wasm_module_config_and_litestar_mcp_a2a_delegation(monkeypatch: pytest.
         bad_cfg.load_and_validate()
 
     monkeypatch.setattr("vertebra.extensions.litestar.plugin.import_optional", lambda _mod: None)
-    plugin = LitestarPlugin(LitestarConfig(mcp_config={"name": "demo"}))
+    plugin = VertebraPlugin(VertebraConfig(mcp_config={"name": "demo"}))
     fake_app_config = SimpleNamespace(
         state={},
         compression_config=None,
@@ -296,7 +296,7 @@ def test_wasm_module_config_and_litestar_mcp_a2a_delegation(monkeypatch: pytest.
         LitestarA2A=lambda cfg_obj: ("LitestarA2A", cfg_obj),
     )
     monkeypatch.setattr("vertebra.extensions.litestar.plugin.import_optional", lambda _mod: fake_mcp_mod)
-    plugin_ok = LitestarPlugin(LitestarConfig(mcp_config={"name": "demo"}, a2a_config={"agent": "orders"}))
+    plugin_ok = VertebraPlugin(VertebraConfig(mcp_config={"name": "demo"}, a2a_config={"agent": "orders"}))
     plugin_ok.on_app_init(fake_app_config)
     assert fake_app_config.state["litestar_mcp_plugin"] == ("LitestarMCP", {"name": "demo"})
     assert fake_app_config.state["litestar_a2a_plugin"] == ("LitestarA2A", {"agent": "orders"})

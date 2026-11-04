@@ -1,18 +1,18 @@
 # Range Reads, Parquet & ORM Attachments
 
-Vertebra's `ObjectStore` integrates with Apache Arrow / Polars via random-access HTTP `Range` reads (`ReadableFile`) and with Advanced Alchemy / SQLSpec via `ObjectStoreBackend`.
+Vertebra's `SyncObjectStore` and `AsyncObjectStore` integrate with Apache Arrow / Polars via random-access HTTP `Range` reads (`SyncReadableFile` / `AsyncReadableFile`) and with Advanced Alchemy / SQLSpec via `ObjectStoreBackend`.
 
-## Random-Access Range Reads (`ReadableFile`) & PyArrow
+## Random-Access Range Reads (`SyncReadableFile` / `AsyncReadableFile`) & PyArrow
 
-`store.open_readable(key)` returns a seekable `ReadableFile` supporting `read_at(offset, length)` and `read_at_async(offset, length)` (`Range: bytes=start-end`). Pass `ReadableFile` directly to PyArrow or Polars Parquet readers to inspect metadata footers and row groups without downloading entire multi-gigabyte objects:
+`store.open_reader(key)` returns a seekable `SyncReadableFile` (or `AsyncReadableFile`) supporting `read_at(offset, length)` (`Range: bytes=start-end`). Pass `SyncReadableFile` directly to PyArrow or Polars Parquet readers to inspect metadata footers and row groups without downloading entire multi-gigabyte objects:
 
 ```python
-from vertebra.storage import ObjectStore
+from vertebra.storage import SyncObjectStore
 
-store = ObjectStore.from_memory(namespace="analytics")
+store = SyncObjectStore.from_memory(namespace="analytics")
 store.put("events/2026-10.parquet", b"PAR1...footer...PAR1")
 
-with store.open_readable("events/2026-10.parquet") as reader:
+with store.open_reader("events/2026-10.parquet") as reader:
     magic_header = reader.read_at(0, 4)
     magic_footer = reader.read_at(reader.size - 4, 4)
 ```
@@ -27,9 +27,9 @@ from vertebra.extensions.alchemy.storage import (
     ObjectStoreBackend,
     register_storage_backend,
 )
-from vertebra.storage import ObjectStore
+from vertebra.storage import SyncObjectStore
 
-store = ObjectStore("memory://")
+store = SyncObjectStore("memory://")
 backend = register_storage_backend("documents", store=store)
 
 file_obj = FileObject(backend=backend, filename="contract.pdf")

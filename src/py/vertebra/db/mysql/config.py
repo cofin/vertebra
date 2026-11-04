@@ -49,7 +49,7 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
         msgspec.structs.force_setattr(self, "iam_auth_options", dict(self.iam_auth_options))
 
     def resolve_iam_password_sync(self, *, force_refresh: bool = False) -> str | None:
-        """Resolve a short-lived Google Cloud IAM OAuth2 access token via `GcpTokenCache` when `enable_iam_auth=True`."""
+        """Resolve a short-lived Google Cloud IAM OAuth2 access token via `SyncGcpTokenCache` when `enable_iam_auth=True`."""
         if not self.enable_iam_auth:
             return None
         opts = dict(self.iam_auth_options)
@@ -60,7 +60,7 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
             "https://www.googleapis.com/auth/sqlservice.login,https://www.googleapis.com/auth/cloud-platform",
         )
         native_mod = import_optional("vertebra._vertebra")
-        token_cache_cls = getattr(native_mod, "GcpTokenCache", None) if native_mod is not None else None
+        token_cache_cls = getattr(native_mod, "SyncGcpTokenCache", None) if native_mod is not None else None
         if token_cache_cls is None:
             return opts.get("access_token") or opts.get("bearer_token")
         cache = token_cache_cls(opts)
@@ -68,7 +68,7 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
         return str(snap.access_token)
 
     async def resolve_iam_password_async(self, *, force_refresh: bool = False) -> str | None:
-        """Asynchronously resolve a short-lived Google Cloud IAM OAuth2 access token via `GcpTokenCache` when `enable_iam_auth=True`."""
+        """Asynchronously resolve a short-lived Google Cloud IAM OAuth2 access token via `AsyncGcpTokenCache` when `enable_iam_auth=True`."""
         if not self.enable_iam_auth:
             return None
         opts = dict(self.iam_auth_options)
@@ -79,11 +79,11 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
             "https://www.googleapis.com/auth/sqlservice.login,https://www.googleapis.com/auth/cloud-platform",
         )
         native_mod = import_optional("vertebra._vertebra")
-        token_cache_cls = getattr(native_mod, "GcpTokenCache", None) if native_mod is not None else None
+        token_cache_cls = getattr(native_mod, "AsyncGcpTokenCache", None) if native_mod is not None else None
         if token_cache_cls is None:
             return opts.get("access_token") or opts.get("bearer_token")
         cache = token_cache_cls(opts)
-        snap = await cache.get_token_async(force_refresh=force_refresh)
+        snap = await cache.get_token(force_refresh=force_refresh)
         return str(snap.access_token)
 
     def to_cloud_dialer_config(self) -> CloudSQLConfig | None:

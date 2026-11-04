@@ -430,7 +430,7 @@ async def test_sentinel_master_discovery_and_failover() -> None:
     )
     async_driver = AsyncRedisDriver(cfg)
     try:
-        discovered = await async_driver.discover_sentinel_master_async()
+        discovered = await async_driver.discover_sentinel_master()
         assert discovered == ("127.0.0.1", master_port)
         assert await async_driver.get("status") == b"master-active"
     finally:

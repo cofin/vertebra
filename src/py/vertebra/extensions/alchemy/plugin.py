@@ -14,7 +14,7 @@ from vertebra.extensions.alchemy.cache import (
     setup_cache_listeners,
 )
 from vertebra.extensions.alchemy.storage import ObjectStoreBackend, register_storage_backend
-from vertebra.storage import ObjectStore
+from vertebra.storage import AsyncObjectStore, SyncObjectStore
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import import_optional
 
@@ -35,7 +35,12 @@ except ImportError as exc:
     ) from exc
 
 if TYPE_CHECKING:
-    from vertebra.extensions.alchemy.broker import BrokerTransport, SHMSessionBroker
+    from vertebra.extensions.alchemy.broker import (
+        AsyncBrokerTransport,
+        AsyncSHMSessionBroker,
+        SyncBrokerTransport,
+        SyncSHMSessionBroker,
+    )
 
 __all__ = (
     "create_alchemy_plugin",
@@ -66,7 +71,7 @@ def normalize_alchemy_url(connection_string: str, *, is_async: bool = True) -> s
 
 def _prepare_engine_config(
     connection_string: str,
-    broker: SHMSessionBroker | BrokerTransport | None,
+    broker: (SyncSHMSessionBroker | AsyncSHMSessionBroker | SyncBrokerTransport | AsyncBrokerTransport | None),
     kwargs: dict[str, Any],
     engine_config_cls: type[Any] = EngineConfig,
 ) -> None:
@@ -122,7 +127,7 @@ def _prepare_cache_config(
 
 
 def _register_storage_if_provided(
-    storage_backend: ObjectStoreBackend | ObjectStore | str | None,
+    storage_backend: ObjectStoreBackend | SyncObjectStore | AsyncObjectStore | str | None,
     storage_key: str,
 ) -> None:
     """Register `storage_backend` in Advanced Alchemy's `storages` registry when provided."""
@@ -137,8 +142,8 @@ def _register_storage_if_provided(
 def create_async_alchemy_config(
     connection_string: str,
     *,
-    broker: SHMSessionBroker | BrokerTransport | None = None,
-    storage_backend: ObjectStoreBackend | ObjectStore | str | None = None,
+    broker: (SyncSHMSessionBroker | AsyncSHMSessionBroker | SyncBrokerTransport | AsyncBrokerTransport | None) = None,
+    storage_backend: ObjectStoreBackend | SyncObjectStore | AsyncObjectStore | str | None = None,
     storage_key: str = "default",
     cache_config: CacheConfig | SQLAlchemyCacheBackend | str | None = None,
     config_cls: type[Any] = SQLAlchemyAsyncConfig,
@@ -155,8 +160,8 @@ def create_async_alchemy_config(
 def create_sync_alchemy_config(
     connection_string: str,
     *,
-    broker: SHMSessionBroker | BrokerTransport | None = None,
-    storage_backend: ObjectStoreBackend | ObjectStore | str | None = None,
+    broker: (SyncSHMSessionBroker | AsyncSHMSessionBroker | SyncBrokerTransport | AsyncBrokerTransport | None) = None,
+    storage_backend: ObjectStoreBackend | SyncObjectStore | AsyncObjectStore | str | None = None,
     storage_key: str = "default",
     cache_config: CacheConfig | SQLAlchemyCacheBackend | str | None = None,
     config_cls: type[Any] = SQLAlchemySyncConfig,
@@ -172,7 +177,7 @@ def create_sync_alchemy_config(
 
 def create_alchemy_plugin(
     *configs: SQLAlchemyAsyncConfig | SQLAlchemySyncConfig,
-    storage_backend: ObjectStoreBackend | ObjectStore | str | None = None,
+    storage_backend: ObjectStoreBackend | SyncObjectStore | AsyncObjectStore | str | None = None,
     storage_key: str = "default",
     **kwargs: Any,
 ) -> SQLAlchemyPlugin:
@@ -190,7 +195,7 @@ def create_alchemy_plugin(
 def create_fastapi_alchemy(
     *configs: Any,
     app: Any = None,
-    storage_backend: ObjectStoreBackend | ObjectStore | str | None = None,
+    storage_backend: ObjectStoreBackend | SyncObjectStore | AsyncObjectStore | str | None = None,
     storage_key: str = "default",
 ) -> Any:
     """Create an Advanced Alchemy FastAPI extension instance with lazy framework import."""
@@ -208,7 +213,7 @@ def create_fastapi_alchemy(
 def create_starlette_alchemy(
     *configs: Any,
     app: Any = None,
-    storage_backend: ObjectStoreBackend | ObjectStore | str | None = None,
+    storage_backend: ObjectStoreBackend | SyncObjectStore | AsyncObjectStore | str | None = None,
     storage_key: str = "default",
 ) -> Any:
     """Create an Advanced Alchemy Starlette extension instance with lazy framework import."""
@@ -226,7 +231,7 @@ def create_starlette_alchemy(
 def create_flask_alchemy(
     *configs: Any,
     app: Any = None,
-    storage_backend: ObjectStoreBackend | ObjectStore | str | None = None,
+    storage_backend: ObjectStoreBackend | SyncObjectStore | AsyncObjectStore | str | None = None,
     storage_key: str = "default",
     **kwargs: Any,
 ) -> Any:

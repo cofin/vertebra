@@ -9,7 +9,7 @@ from vertebra.utils.module_loader import lazy_exports
 if TYPE_CHECKING:
     from vertebra.db._registry import provide_bigquery_driver, provide_spanner_driver
     from vertebra.extensions.fastapi.channels import ChannelsBackend, attach_channels
-    from vertebra.extensions.fastapi.config import FastAPIConfig
+    from vertebra.extensions.fastapi.config import VertebraConfig
     from vertebra.extensions.fastapi.dependencies import (
         CompiledDependantNode,
         CompiledDependantPlan,
@@ -60,7 +60,7 @@ if TYPE_CHECKING:
         mount_docs_routes,
     )
     from vertebra.extensions.fastapi.plugin import (
-        FastAPIPlugin,
+        VertebraPlugin,
         enter_fastapi_server_lifespan,
     )
     from vertebra.extensions.fastapi.queues import (
@@ -85,12 +85,14 @@ if TYPE_CHECKING:
         RateLimitGuard,
     )
     from vertebra.extensions.fastapi.storage import (
+        AsyncObjectStore,
+        AsyncStorageRegistry,
         GCSConfig,
         LocalConfig,
         MemoryConfig,
-        ObjectStore,
         S3Config,
-        StorageRegistry,
+        SyncObjectStore,
+        SyncStorageRegistry,
         attach_storage,
     )
     from vertebra.extensions.fastapi.store import CacheStore, attach_cache_store
@@ -108,6 +110,8 @@ if TYPE_CHECKING:
 __all__ = (
     "AssetManifest",
     "AsyncAPIDocsConfig",
+    "AsyncObjectStore",
+    "AsyncStorageRegistry",
     "AuthenticatedPrincipal",
     "CacheStore",
     "ChannelsBackend",
@@ -120,8 +124,6 @@ __all__ = (
     "EarlyHintsSpec",
     "ElementsDocsConfig",
     "ExtractedRoute",
-    "FastAPIConfig",
-    "FastAPIPlugin",
     "FastPath",
     "GCSConfig",
     "InertiaConfig",
@@ -131,7 +133,6 @@ __all__ = (
     "MCPRegistry",
     "MemoryConfig",
     "MsgspecJSONResponse",
-    "ObjectStore",
     "OffloadPlan",
     "OpenAPIConfig",
     "OpenApiOffloadSpec",
@@ -148,8 +149,11 @@ __all__ = (
     "ScalarSpecSource",
     "SkillController",
     "StaticMountOffloadSpec",
-    "StorageRegistry",
     "SwaggerDocsConfig",
+    "SyncObjectStore",
+    "SyncStorageRegistry",
+    "VertebraConfig",
+    "VertebraPlugin",
     "ViteExtension",
     "WebMCPConfig",
     "WebMCPManifest",
@@ -189,6 +193,8 @@ __all__ = (
 _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "AssetManifest": ("vertebra.extensions.fastapi.vite", "AssetManifest"),
     "AsyncAPIDocsConfig": ("vertebra.extensions.fastapi.openapi", "AsyncAPIDocsConfig"),
+    "AsyncObjectStore": ("vertebra.extensions.fastapi.storage", "AsyncObjectStore"),
+    "AsyncStorageRegistry": ("vertebra.extensions.fastapi.storage", "AsyncStorageRegistry"),
     "AuthenticatedPrincipal": ("vertebra.extensions.fastapi.security", "AuthenticatedPrincipal"),
     "CacheStore": ("vertebra.extensions.fastapi.store", "CacheStore"),
     "ChannelsBackend": ("vertebra.extensions.fastapi.channels", "ChannelsBackend"),
@@ -201,8 +207,6 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "EarlyHintsSpec": ("vertebra.extensions.fastapi.vite", "EarlyHintsSpec"),
     "ElementsDocsConfig": ("vertebra.extensions.fastapi.openapi", "ElementsDocsConfig"),
     "ExtractedRoute": ("vertebra.extensions.fastapi.router", "ExtractedRoute"),
-    "FastAPIConfig": ("vertebra.extensions.fastapi.config", "FastAPIConfig"),
-    "FastAPIPlugin": ("vertebra.extensions.fastapi.plugin", "FastAPIPlugin"),
     "FastPath": ("vertebra.extensions.fastapi.fastpath", "FastPath"),
     "GCSConfig": ("vertebra.extensions.fastapi.storage", "GCSConfig"),
     "InertiaConfig": ("vertebra.extensions.fastapi.vite", "InertiaConfig"),
@@ -212,7 +216,6 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "MCPRegistry": ("vertebra.extensions.fastapi.mcp", "MCPRegistry"),
     "MemoryConfig": ("vertebra.extensions.fastapi.storage", "MemoryConfig"),
     "MsgspecJSONResponse": ("vertebra.extensions.fastapi.responses", "MsgspecJSONResponse"),
-    "ObjectStore": ("vertebra.extensions.fastapi.storage", "ObjectStore"),
     "OffloadPlan": ("vertebra.extensions.fastapi.offload", "OffloadPlan"),
     "OpenAPIConfig": ("vertebra.extensions.fastapi.openapi", "OpenAPIConfig"),
     "OpenApiOffloadSpec": ("vertebra.extensions.fastapi.offload", "OpenApiOffloadSpec"),
@@ -229,8 +232,11 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "ScalarSpecSource": ("vertebra.extensions.fastapi.openapi", "ScalarSpecSource"),
     "SkillController": ("vertebra.extensions.fastapi.mcp", "SkillController"),
     "StaticMountOffloadSpec": ("vertebra.extensions.fastapi.offload", "StaticMountOffloadSpec"),
-    "StorageRegistry": ("vertebra.extensions.fastapi.storage", "StorageRegistry"),
     "SwaggerDocsConfig": ("vertebra.extensions.fastapi.openapi", "SwaggerDocsConfig"),
+    "SyncObjectStore": ("vertebra.extensions.fastapi.storage", "SyncObjectStore"),
+    "SyncStorageRegistry": ("vertebra.extensions.fastapi.storage", "SyncStorageRegistry"),
+    "VertebraConfig": ("vertebra.extensions.fastapi.config", "VertebraConfig"),
+    "VertebraPlugin": ("vertebra.extensions.fastapi.plugin", "VertebraPlugin"),
     "ViteExtension": ("vertebra.extensions.fastapi.vite", "ViteExtension"),
     "WebMCPConfig": ("vertebra.extensions.fastapi.mcp", "WebMCPConfig"),
     "WebMCPManifest": ("vertebra.extensions.fastapi.mcp", "WebMCPManifest"),

@@ -18,6 +18,8 @@ Python-first architecture with Rust IPC primitives.
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
+| `--app` | `text` | - | Application import path in MODULE:ATTR format |
+| `--app-dir` | `directory` | - | Directory added to sys.path for application discovery |
 | `--version` | `flag` | `False` | Show the version and exit. |
 
 ## Application Lifecycle & Packaging
@@ -27,12 +29,12 @@ Python-first architecture with Rust IPC primitives.
 Run the Vertebra server.
 
 ```bash
-vtb run [OPTIONS] <APP>
+vtb run [OPTIONS] [APP]
 ```
 
 | Argument | Type | Required | Default |
 | --- | --- | --- | --- |
-| `app` | `text` | Yes | - |
+| `app` | `text` | No | - |
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -67,12 +69,12 @@ Single worker, auto-reload enabled, frontend HMR active.
 APP is the application import string (e.g., myapp:app).
 
 ```bash
-vtb dev [OPTIONS] <APP>
+vtb dev [OPTIONS] [APP]
 ```
 
 | Argument | Type | Required | Default |
 | --- | --- | --- | --- |
-| `app` | `text` | Yes | - |
+| `app` | `text` | No | - |
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -312,12 +314,12 @@ vtb ai mcp serve [OPTIONS]
 Run admission-controlled background worker lanes or a single --oneshot job for APP.
 
 ```bash
-vtb workers run [OPTIONS] <APP>
+vtb workers run [OPTIONS] [APP]
 ```
 
 | Argument | Type | Required | Default |
 | --- | --- | --- | --- |
-| `app` | `text` | Yes | - |
+| `app` | `text` | No | - |
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |

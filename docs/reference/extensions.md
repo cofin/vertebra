@@ -1,10 +1,10 @@
 # `vertebra.extensions` — Litestar, SQLSpec, SQLAlchemy, APEX, gRPC & Broker
 
-First-party framework extensions connecting Vertebra's native HTTP/IPC runtime to Litestar (`LitestarPlugin`), SQLSpec (`create_sqlspec_plugin`), SQLAlchemy / Advanced Alchemy (`create_alchemy_plugin`), Oracle APEX (`ApexGateway`), gRPC services (`GrpcServiceRegistry`), and shared-memory database session brokers (`BrokerPlugin`). See [Framework Extensions](../usage/extensions.md) for integration guides.
+First-party framework extensions connecting Vertebra's native HTTP/IPC runtime to Litestar (`VertebraPlugin`), Starlette, FastAPI, Flask, Django (`VertebraPlugin` / `VertebraConfig` / `VertebraAppConfig`), SQLSpec (`create_sqlspec_plugin`), SQLAlchemy / Advanced Alchemy (`create_alchemy_plugin`), Oracle APEX (`ApexGateway`), gRPC services (`GrpcServiceRegistry`), and shared-memory database session brokers (`BrokerPlugin`). See [Framework Extensions](../usage/extensions.md) for integration guides.
 
 | Extension | Key Objects | Purpose |
 | --- | --- | --- |
-| **Litestar** | `LitestarConfig`, `LitestarPlugin`, `RouteCompiler` | Mount Litestar applications on Vertebra and compile static Litestar routes directly into the native router |
+| **Litestar** | `VertebraConfig`, `VertebraPlugin`, `RouteCompiler` | Mount Litestar applications on Vertebra, override `litestar run`, and compile static Litestar routes directly into the native router |
 | **Litestar Ecosystem** | `queues`, `security`, `autowire`, `email`, `mcp`, `vite` | First-party decoupled plugins under `vertebra.extensions.litestar.*` |
 | **SQLSpec** | `create_sqlspec_plugin`, `ProxySyncConfig`, `ProxyAsyncConfig` | Bind SQLSpec database sessions, `StatementStack` pipelines, and shared-memory statement caches to request lifecycles |
 | **SQLAlchemy & Alchemy** | `create_alchemy_plugin`, `ObjectStoreBackend` | Manage SQLAlchemy async/sync engines (`+vtb` dialects), request-scoped sessions, and transactional file attachments |
@@ -13,12 +13,12 @@ First-party framework extensions connecting Vertebra's native HTTP/IPC runtime t
 
 ## Litestar Integration (`vertebra.extensions.litestar`)
 
-::: vertebra.extensions.litestar.config.LitestarConfig
+::: vertebra.extensions.litestar.config.VertebraConfig
     options:
       heading_level: 4
       members: false
 
-::: vertebra.extensions.litestar.plugin.LitestarPlugin
+::: vertebra.extensions.litestar.plugin.VertebraPlugin
     options:
       heading_level: 3
 
@@ -38,7 +38,12 @@ First-party framework extensions connecting Vertebra's native HTTP/IPC runtime t
       heading_level: 4
       members: false
 
-::: vertebra.extensions.sqlspec.provider.SQLSpecProvider
+::: vertebra.extensions.sqlspec.provider.SQLSpecSyncProvider
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.extensions.sqlspec.provider.SQLSpecAsyncProvider
     options:
       heading_level: 3
 

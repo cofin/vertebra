@@ -16,13 +16,13 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from vertebra.storage import ObjectStore, SigningConfig
+from vertebra.storage import AsyncObjectStore, SigningConfig, SyncObjectStore
 
 
 def test_signing_functions_default_to_current_utc_timestamp() -> None:
     """Verify signing functions default to current UTC timestamp rather than a static epoch."""
     before_ts = int(time.time())
-    native_mod = ObjectStore._get_native_module()
+    native_mod = SyncObjectStore._get_native_module()
 
     if native_mod is not None:
         hmac_url = native_mod.py_sign_hmac_url(
@@ -68,7 +68,7 @@ def test_signing_functions_default_to_current_utc_timestamp() -> None:
         sas_expiry_ts = int(calendar.timegm(time.strptime(sas_params["se"][0], "%Y-%m-%dT%H:%M:%SZ")))
         assert sas_expiry_ts >= before_ts + 1198
 
-    store = ObjectStore(
+    store = SyncObjectStore(
         "memory://",
         signing=SigningConfig(
             provider="hmac",
@@ -86,7 +86,7 @@ def test_gcs_from_gcs_ambient_service_account_adc_presigns_zero_rtt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify ObjectStore.from_gcs auto-extracts ambient service_account ADC keys for zero-RTT local RSA signing."""
+    """Verify SyncObjectStore.from_gcs and AsyncObjectStore.from_gcs auto-extract ambient service_account ADC keys."""
     pem_key = subprocess.check_output(
         ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"],
         stderr=subprocess.DEVNULL,
@@ -107,15 +107,17 @@ def test_gcs_from_gcs_ambient_service_account_adc_presigns_zero_rtt(
         encoding="utf-8",
     )
     monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(sa_file))
-    store = ObjectStore.from_gcs("test-bucket", iam_endpoint="http://127.0.0.1:9")
+    store = SyncObjectStore.from_gcs("test-bucket", iam_endpoint="http://127.0.0.1:9")
     assert store.supports_signing is True
 
     sync_url = store.presign_get("dir/file.parquet", expires_in_secs=600, timestamp=1_700_000_000)
     assert "X-Goog-Algorithm=GOOG4-RSA-SHA256" in sync_url
     assert "ambient-sa%40test-gcp-proj.iam.gserviceaccount.com" in sync_url
 
+    async_store = AsyncObjectStore.from_gcs("test-bucket", iam_endpoint="http://127.0.0.1:9")
+
     async def _run_async() -> str:
-        return await store.presign_get_async("dir/file.parquet", expires_in_secs=600, timestamp=1_700_000_000)
+        return await async_store.presign_get("dir/file.parquet", expires_in_secs=600, timestamp=1_700_000_000)
 
     async_url = asyncio.run(_run_async())
     assert async_url == sync_url
@@ -124,7 +126,7 @@ def test_gcs_from_gcs_ambient_service_account_adc_presigns_zero_rtt(
 def test_gcs_keyless_presign_reuses_object_store_token_cache(
     tmp_path: Path,
 ) -> None:
-    """Verify keyless ObjectStore.from_gcs reuses self._gcp_token_cache and retries IAM signBlob once on HTTP 401."""
+    """Verify keyless SyncObjectStore and AsyncObjectStore reuse token cache and retry IAM signBlob on HTTP 401."""
     oauth_calls = 0
     sign_blob_calls = 0
     seen_auth_headers: list[str] = []
@@ -198,7 +200,7 @@ def test_gcs_keyless_presign_reuses_object_store_token_cache(
             ),
             encoding="utf-8",
         )
-        store = ObjectStore.from_gcs(
+        store = SyncObjectStore.from_gcs(
             "test-bucket",
             application_credentials=str(adc_file),
             target_service_account="signer@proj.iam.gserviceaccount.com",
@@ -214,10 +216,7 @@ def test_gcs_keyless_presign_reuses_object_store_token_cache(
         assert oauth_calls == 2
         assert sign_blob_calls == 3
 
-        async def _presign_third() -> str:
-            return await store.presign_get_async("dir/c.parquet", expires_in_secs=600, timestamp=1_700_000_000)
-
-        url3 = asyncio.run(_presign_third())
+        url3 = store.presign_get("dir/c.parquet", expires_in_secs=600, timestamp=1_700_000_000)
         assert "X-Goog-Signature=" in url3
         assert oauth_calls == 2
         assert sign_blob_calls == 4

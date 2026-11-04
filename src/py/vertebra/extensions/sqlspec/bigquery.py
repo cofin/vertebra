@@ -28,7 +28,6 @@ from vertebra.extensions.sqlspec.adapters import (
     AsyncAdapterConfig,
     BaseAsyncDriver,
     BaseSyncDriver,
-    QueryPipeline,
     SyncAdapterConfig,
     TenantPredicate,
 )
@@ -48,7 +47,8 @@ __all__ = (
     "BigQueryAsyncStore",
     "BigQueryConnectionQueryJob",
     "BigQueryConnectionShim",
-    "BigQueryDataDictionary",
+    "BigQueryAsyncDataDictionary",
+    "BigQuerySyncDataDictionary",
     "BigQuerySyncADKArtifactStore",
     "BigQuerySyncADKMemoryStore",
     "BigQuerySyncADKStore",
@@ -176,8 +176,8 @@ class BigQueryConnectionShim:
         self.close()
 
 
-class BigQueryDataDictionary:
-    """BigQuery ``INFORMATION_SCHEMA`` metadata introspection helper for sync and async drivers."""
+class _BaseBigQueryDataDictionary:
+    """Base helper for BigQuery ``INFORMATION_SCHEMA`` metadata queries."""
 
     def __init__(
         self,
@@ -187,6 +187,18 @@ class BigQueryDataDictionary:
     ) -> None:
         self._driver = driver
         self._default_dataset = default_dataset or getattr(driver, "dataset_id", None)
+
+    def _resolve_dataset(self, dataset_id: str | None) -> str:
+        resolved = dataset_id or self._default_dataset or getattr(self._driver, "dataset_id", None)
+        if not resolved:
+            raise ImproperConfigurationError(
+                "BigQuerySyncDataDictionary / BigQueryAsyncDataDictionary requires a dataset_id argument or default BigQueryConfig.dataset_id"
+            )
+        return str(resolved).strip().strip("`")
+
+
+class BigQuerySyncDataDictionary(_BaseBigQueryDataDictionary):
+    """Synchronous BigQuery ``INFORMATION_SCHEMA`` metadata introspection helper."""
 
     def get_tables(self, dataset_id: str | None = None) -> list[dict[str, Any]]:
         """Query ``INFORMATION_SCHEMA.TABLES`` synchronously for ``dataset_id``."""
@@ -228,7 +240,16 @@ class BigQueryDataDictionary:
         res: list[dict[str, Any]] = sync_driver.select(sql, {"table_name": table_name})
         return res
 
-    async def get_tables_async(self, dataset_id: str | None = None) -> list[dict[str, Any]]:
+    def _require_sync_driver(self) -> Any:
+        if isinstance(self._driver, _CoreSyncBigQueryDriver) or hasattr(self._driver, "select"):
+            return self._driver
+        raise ImproperConfigurationError("Synchronous BigQuerySyncDataDictionary methods require SyncBigQueryDriver")
+
+
+class BigQueryAsyncDataDictionary(_BaseBigQueryDataDictionary):
+    """Asynchronous BigQuery ``INFORMATION_SCHEMA`` metadata introspection helper."""
+
+    async def get_tables(self, dataset_id: str | None = None) -> list[dict[str, Any]]:
         """Query ``INFORMATION_SCHEMA.TABLES`` asynchronously for ``dataset_id``."""
         async_driver = self._require_async_driver()
         ds = self._resolve_dataset(dataset_id)
@@ -240,7 +261,7 @@ class BigQueryDataDictionary:
         res: list[dict[str, Any]] = await async_driver.select(sql)
         return res
 
-    async def get_columns_async(self, table_name: str, dataset_id: str | None = None) -> list[dict[str, Any]]:
+    async def get_columns(self, table_name: str, dataset_id: str | None = None) -> list[dict[str, Any]]:
         """Query ``INFORMATION_SCHEMA.COLUMNS`` asynchronously for ``table_name``."""
         async_driver = self._require_async_driver()
         ds = self._resolve_dataset(dataset_id)
@@ -254,7 +275,7 @@ class BigQueryDataDictionary:
         res: list[dict[str, Any]] = await async_driver.select(sql, {"table_name": table_name})
         return res
 
-    async def get_partitions_async(self, table_name: str, dataset_id: str | None = None) -> list[dict[str, Any]]:
+    async def get_partitions(self, table_name: str, dataset_id: str | None = None) -> list[dict[str, Any]]:
         """Query ``INFORMATION_SCHEMA.PARTITIONS`` asynchronously for ``table_name``."""
         async_driver = self._require_async_driver()
         ds = self._resolve_dataset(dataset_id)
@@ -268,23 +289,10 @@ class BigQueryDataDictionary:
         res: list[dict[str, Any]] = await async_driver.select(sql, {"table_name": table_name})
         return res
 
-    def _resolve_dataset(self, dataset_id: str | None) -> str:
-        resolved = dataset_id or self._default_dataset or getattr(self._driver, "dataset_id", None)
-        if not resolved:
-            raise ImproperConfigurationError(
-                "BigQueryDataDictionary requires a dataset_id argument or default BigQueryConfig.dataset_id"
-            )
-        return str(resolved).strip().strip("`")
-
-    def _require_sync_driver(self) -> Any:
-        if isinstance(self._driver, _CoreSyncBigQueryDriver) or hasattr(self._driver, "select"):
-            return self._driver
-        raise ImproperConfigurationError("Synchronous BigQueryDataDictionary methods require SyncBigQueryDriver")
-
     def _require_async_driver(self) -> Any:
         if isinstance(self._driver, _CoreAsyncBigQueryDriver) or hasattr(self._driver, "select"):
             return self._driver
-        raise ImproperConfigurationError("Asynchronous BigQueryDataDictionary methods require AsyncBigQueryDriver")
+        raise ImproperConfigurationError("Asynchronous BigQueryAsyncDataDictionary methods require AsyncBigQueryDriver")
 
 
 class BigQuerySyncDriver(BaseSyncDriver):
@@ -315,15 +323,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
         self._stmt_cache_capacity: int = statement_cache_size
         self._enable_sqlcommenter: bool = enable_sqlcommenter
         self._tenant_predicate: TenantPredicate | None = tenant_predicate
-        self._pipeline = QueryPipeline(dialect="googlesql")
-        self._data_dictionary = BigQueryDataDictionary(core_driver)
-
-    def _prepare_sql(self, sql: str, *, tenant_id: str | None = None) -> str:
-        if self._tenant_predicate is not None and tenant_id is not None:
-            apply_fn = getattr(self._tenant_predicate, "apply", None)
-            if callable(apply_fn):
-                return str(apply_fn(sql, tenant_id))
-        return sql
+        self._data_dictionary = BigQuerySyncDataDictionary(core_driver)
 
     @property
     def core_driver(self) -> Any:
@@ -332,7 +332,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
 
     @property
     def data_dictionary(self) -> Any:
-        """Return the ``BigQueryDataDictionary`` metadata helper."""
+        """Return the ``BigQuerySyncDataDictionary`` metadata helper."""
         return self._data_dictionary
 
     @property
@@ -627,6 +627,13 @@ class BigQuerySyncDriver(BaseSyncDriver):
         """Close the underlying ``SyncBigQueryDriver``."""
         self._core.close()
 
+    def _prepare_sql(self, sql: str, *, tenant_id: str | None = None) -> str:
+        if self._tenant_predicate is not None and tenant_id is not None:
+            apply_fn = getattr(self._tenant_predicate, "apply", None)
+            if callable(apply_fn):
+                return str(apply_fn(sql, tenant_id))
+        return sql
+
     def _execute_stack_item(
         self,
         item: str | tuple[str, Mapping[str, Any] | Sequence[Any] | None],
@@ -679,15 +686,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         self._stmt_cache_capacity: int = statement_cache_size
         self._enable_sqlcommenter: bool = enable_sqlcommenter
         self._tenant_predicate: TenantPredicate | None = tenant_predicate
-        self._pipeline = QueryPipeline(dialect="googlesql")
-        self._data_dictionary = BigQueryDataDictionary(core_driver)
-
-    def _prepare_sql(self, sql: str, *, tenant_id: str | None = None) -> str:
-        if self._tenant_predicate is not None and tenant_id is not None:
-            apply_fn = getattr(self._tenant_predicate, "apply", None)
-            if callable(apply_fn):
-                return str(apply_fn(sql, tenant_id))
-        return sql
+        self._data_dictionary = BigQueryAsyncDataDictionary(core_driver)
 
     @property
     def core_driver(self) -> Any:
@@ -696,7 +695,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
 
     @property
     def data_dictionary(self) -> Any:
-        """Return the ``BigQueryDataDictionary`` metadata helper."""
+        """Return the ``BigQueryAsyncDataDictionary`` metadata helper."""
         return self._data_dictionary
 
     @property
@@ -990,6 +989,13 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
     async def close(self) -> None:
         """Close the underlying ``AsyncBigQueryDriver``."""
         await self._core.close()
+
+    def _prepare_sql(self, sql: str, *, tenant_id: str | None = None) -> str:
+        if self._tenant_predicate is not None and tenant_id is not None:
+            apply_fn = getattr(self._tenant_predicate, "apply", None)
+            if callable(apply_fn):
+                return str(apply_fn(sql, tenant_id))
+        return sql
 
     async def _execute_stack_item_async(
         self,

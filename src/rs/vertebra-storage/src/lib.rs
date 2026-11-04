@@ -15,7 +15,7 @@ use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyFileNotFoundError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
-use vertebra_core::notify::{CompletionQueue, Notifier};
+use vertebra_core::notify::{AsyncCompletionQueue, Notifier};
 
 use crate::gcp_auth::{
     GcpTokenCache as NativeGcpTokenCache, GcpTokenSnapshot as NativeGcpTokenSnapshot,
@@ -117,7 +117,7 @@ struct CompletedStorageTask {
 }
 
 struct RustCompletionRing {
-    completion: CompletionQueue<CompletedStorageTask>,
+    completion: AsyncCompletionQueue<CompletedStorageTask>,
     fallback_wakeup: Mutex<Option<(Py<PyAny>, Py<PyAny>)>>,
 }
 
@@ -193,7 +193,7 @@ fn ensure_loop_completion_ring(
     if let Ok(notifier) = Notifier::new() {
         let fd = notifier.as_raw_fd();
         let temp_ring = Arc::new(RustCompletionRing {
-            completion: CompletionQueue::new(Some(notifier)),
+            completion: AsyncCompletionQueue::new(Some(notifier)),
             fallback_wakeup: Mutex::new(None),
         });
         let drainer_py = Py::new(
@@ -212,7 +212,7 @@ fn ensure_loop_completion_ring(
     }
 
     let ring = Arc::new(RustCompletionRing {
-        completion: CompletionQueue::new(None),
+        completion: AsyncCompletionQueue::new(None),
         fallback_wakeup: Mutex::new(None),
     });
     let drainer_py = Py::new(
@@ -328,13 +328,13 @@ impl PyGcpTokenSnapshot {
     }
 }
 
-#[pyclass(name = "GcpTokenCache", frozen, immutable_type)]
-pub struct PyGcpTokenCache {
+#[pyclass(name = "SyncGcpTokenCache", frozen, immutable_type)]
+pub struct PySyncGcpTokenCache {
     inner: Arc<NativeGcpTokenCache>,
 }
 
 #[pymethods]
-impl PyGcpTokenCache {
+impl PySyncGcpTokenCache {
     #[new]
     #[pyo3(signature = (options))]
     fn new(py: Python<'_>, options: HashMap<String, String>) -> PyResult<Self> {
@@ -400,9 +400,67 @@ impl PyGcpTokenCache {
             .map_err(PyRuntimeError::new_err)?;
         Ok(PyGcpTokenSnapshot::from(snap.as_ref()))
     }
+}
+
+#[pyclass(name = "AsyncGcpTokenCache", frozen, immutable_type)]
+pub struct PyAsyncGcpTokenCache {
+    inner: Arc<NativeGcpTokenCache>,
+}
+
+#[pymethods]
+impl PyAsyncGcpTokenCache {
+    #[new]
+    #[pyo3(signature = (options))]
+    fn new(py: Python<'_>, options: HashMap<String, String>) -> PyResult<Self> {
+        let inner = py
+            .detach(|| {
+                NativeGcpTokenCache::from_options(&options, crate::gcp_auth::GCS_OAUTH_SCOPES)
+            })
+            .ok_or_else(|| {
+                PyValueError::new_err("unable to configure GcpTokenCache from options")
+            })?;
+        Ok(Self { inner })
+    }
+
+    #[getter]
+    fn generation(&self) -> u64 {
+        self.inner.generation()
+    }
+
+    #[getter]
+    fn refresh_skew_ms(&self) -> u64 {
+        self.inner.refresh_skew_ms()
+    }
+
+    #[getter]
+    fn has_service_account_key(&self) -> bool {
+        self.inner.service_account_key().is_some()
+    }
+
+    #[getter]
+    fn service_account_email(&self) -> Option<String> {
+        self.inner
+            .service_account_key()
+            .map(|k| k.client_email.clone())
+    }
+
+    #[pyo3(signature = (*, now_unix_ms=None))]
+    fn needs_refresh(&self, now_unix_ms: Option<u64>) -> bool {
+        self.inner
+            .needs_refresh(now_unix_ms.unwrap_or_else(current_unix_ms))
+    }
+
+    fn invalidate(&self, failed_generation: u64) {
+        self.inner.invalidate(failed_generation);
+    }
+
+    fn sign_jwt_for_audience(&self, py: Python<'_>, audience: &str) -> PyResult<String> {
+        py.detach(|| self.inner.sign_jwt_for_audience(audience))
+            .map_err(PyValueError::new_err)
+    }
 
     #[pyo3(signature = (*, force_refresh=false))]
-    fn get_token_async(&self, py: Python<'_>, force_refresh: bool) -> PyResult<RustTaskAwaitable> {
+    fn get_token(&self, py: Python<'_>, force_refresh: bool) -> PyResult<RustTaskAwaitable> {
         let cache = Arc::clone(&self.inner);
         spawn_rust_task(
             py,
@@ -451,13 +509,13 @@ impl ObjectMeta {
     }
 }
 
-#[pyclass(frozen, immutable_type)]
-pub struct ObjectStore {
+#[pyclass(name = "SyncObjectStore", frozen, immutable_type)]
+pub struct SyncObjectStore {
     engine: ObjectStoreEngine,
 }
 
 #[pymethods]
-impl ObjectStore {
+impl SyncObjectStore {
     #[new]
     #[pyo3(signature = (url, options=None))]
     fn new(py: Python<'_>, url: &str, options: Option<HashMap<String, String>>) -> PyResult<Self> {
@@ -481,41 +539,12 @@ impl ObjectStore {
         Ok(ObjectMeta::from(meta))
     }
 
-    fn put_async(
-        &self,
-        py: Python<'_>,
-        path: String,
-        data: &Bound<'_, PyAny>,
-    ) -> PyResult<RustTaskAwaitable> {
-        let payload = extract_buffer_bytes(py, data)?;
-        let engine = self.engine.clone();
-        spawn_rust_task(
-            py,
-            async move { engine.put(&path, payload).await },
-            |py, meta| Ok(Py::new(py, ObjectMeta::from(meta))?.into_any()),
-        )
-    }
-
     fn put_file(&self, py: Python<'_>, path: &str, file_path: &str) -> PyResult<ObjectMeta> {
         let engine = self.engine.clone();
         let meta = py
             .detach(|| block_on_storage(async move { engine.put_file(path, file_path).await }))
             .map_err(to_py_err)?;
         Ok(ObjectMeta::from(meta))
-    }
-
-    fn put_file_async(
-        &self,
-        py: Python<'_>,
-        path: String,
-        file_path: String,
-    ) -> PyResult<RustTaskAwaitable> {
-        let engine = self.engine.clone();
-        spawn_rust_task(
-            py,
-            async move { engine.put_file(&path, &file_path).await },
-            |py, meta| Ok(Py::new(py, ObjectMeta::from(meta))?.into_any()),
-        )
     }
 
     fn put_multipart(
@@ -535,24 +564,6 @@ impl ObjectStore {
         Ok(ObjectMeta::from(meta))
     }
 
-    fn put_multipart_async(
-        &self,
-        py: Python<'_>,
-        path: String,
-        parts: Vec<Bound<'_, PyAny>>,
-    ) -> PyResult<RustTaskAwaitable> {
-        let mut chunks = Vec::with_capacity(parts.len());
-        for part in &parts {
-            chunks.push(extract_buffer_bytes(py, part)?);
-        }
-        let engine = self.engine.clone();
-        spawn_rust_task(
-            py,
-            async move { engine.put_multipart(&path, chunks).await },
-            |py, meta| Ok(Py::new(py, ObjectMeta::from(meta))?.into_any()),
-        )
-    }
-
     fn get<'py>(&self, py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyBytes>> {
         let engine = self.engine.clone();
         let data = py
@@ -567,20 +578,6 @@ impl ObjectStore {
             .detach(|| block_on_storage(async move { engine.get(path).await }))
             .map_err(to_py_err)?;
         Ok(StorageBuffer { data })
-    }
-
-    fn get_async(&self, py: Python<'_>, path: String) -> PyResult<RustTaskAwaitable> {
-        let engine = self.engine.clone();
-        spawn_rust_task(py, async move { engine.get(&path).await }, |py, data| {
-            Ok(PyBytes::new(py, &data).into_any().unbind())
-        })
-    }
-
-    fn get_buffer_async(&self, py: Python<'_>, path: String) -> PyResult<RustTaskAwaitable> {
-        let engine = self.engine.clone();
-        spawn_rust_task(py, async move { engine.get(&path).await }, |py, data| {
-            Ok(Py::new(py, StorageBuffer { data })?.into_any())
-        })
     }
 
     fn get_range<'py>(
@@ -599,7 +596,125 @@ impl ObjectStore {
         Ok(PyBytes::new(py, &data))
     }
 
-    fn get_range_async(
+    fn head(&self, py: Python<'_>, path: &str) -> PyResult<ObjectMeta> {
+        let engine = self.engine.clone();
+        let meta = py
+            .detach(|| block_on_storage(async move { engine.head(path).await }))
+            .map_err(to_py_err)?;
+        Ok(ObjectMeta::from(meta))
+    }
+
+    fn exists(&self, py: Python<'_>, path: &str) -> PyResult<bool> {
+        let engine = self.engine.clone();
+        py.detach(|| block_on_storage(async move { engine.exists(path).await }))
+            .map_err(to_py_err)
+    }
+
+    fn delete(&self, py: Python<'_>, path: &str) -> PyResult<()> {
+        let engine = self.engine.clone();
+        py.detach(|| block_on_storage(async move { engine.delete(path).await }))
+            .map_err(to_py_err)
+    }
+
+    fn copy(&self, py: Python<'_>, src: &str, dst: &str) -> PyResult<()> {
+        let engine = self.engine.clone();
+        py.detach(|| block_on_storage(async move { engine.copy(src, dst).await }))
+            .map_err(to_py_err)
+    }
+
+    #[pyo3(signature = (prefix=None))]
+    fn list(&self, py: Python<'_>, prefix: Option<&str>) -> PyResult<Vec<ObjectMeta>> {
+        let engine = self.engine.clone();
+        let items = py
+            .detach(|| block_on_storage(async move { engine.list(prefix).await }))
+            .map_err(to_py_err)?;
+        Ok(items.into_iter().map(ObjectMeta::from).collect())
+    }
+}
+
+#[pyclass(name = "AsyncObjectStore", frozen, immutable_type)]
+pub struct AsyncObjectStore {
+    engine: ObjectStoreEngine,
+}
+
+#[pymethods]
+impl AsyncObjectStore {
+    #[new]
+    #[pyo3(signature = (url, options=None))]
+    fn new(py: Python<'_>, url: &str, options: Option<HashMap<String, String>>) -> PyResult<Self> {
+        let engine = py
+            .detach(|| ObjectStoreEngine::from_url(url, options.as_ref()))
+            .map_err(to_py_err)?;
+        Ok(Self { engine })
+    }
+
+    #[getter]
+    fn scheme(&self) -> &str {
+        self.engine.scheme()
+    }
+
+    fn put(
+        &self,
+        py: Python<'_>,
+        path: String,
+        data: &Bound<'_, PyAny>,
+    ) -> PyResult<RustTaskAwaitable> {
+        let payload = extract_buffer_bytes(py, data)?;
+        let engine = self.engine.clone();
+        spawn_rust_task(
+            py,
+            async move { engine.put(&path, payload).await },
+            |py, meta| Ok(Py::new(py, ObjectMeta::from(meta))?.into_any()),
+        )
+    }
+
+    fn put_file(
+        &self,
+        py: Python<'_>,
+        path: String,
+        file_path: String,
+    ) -> PyResult<RustTaskAwaitable> {
+        let engine = self.engine.clone();
+        spawn_rust_task(
+            py,
+            async move { engine.put_file(&path, &file_path).await },
+            |py, meta| Ok(Py::new(py, ObjectMeta::from(meta))?.into_any()),
+        )
+    }
+
+    fn put_multipart(
+        &self,
+        py: Python<'_>,
+        path: String,
+        parts: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<RustTaskAwaitable> {
+        let mut chunks = Vec::with_capacity(parts.len());
+        for part in &parts {
+            chunks.push(extract_buffer_bytes(py, part)?);
+        }
+        let engine = self.engine.clone();
+        spawn_rust_task(
+            py,
+            async move { engine.put_multipart(&path, chunks).await },
+            |py, meta| Ok(Py::new(py, ObjectMeta::from(meta))?.into_any()),
+        )
+    }
+
+    fn get(&self, py: Python<'_>, path: String) -> PyResult<RustTaskAwaitable> {
+        let engine = self.engine.clone();
+        spawn_rust_task(py, async move { engine.get(&path).await }, |py, data| {
+            Ok(PyBytes::new(py, &data).into_any().unbind())
+        })
+    }
+
+    fn get_buffer(&self, py: Python<'_>, path: String) -> PyResult<RustTaskAwaitable> {
+        let engine = self.engine.clone();
+        spawn_rust_task(py, async move { engine.get(&path).await }, |py, data| {
+            Ok(Py::new(py, StorageBuffer { data })?.into_any())
+        })
+    }
+
+    fn get_range(
         &self,
         py: Python<'_>,
         path: String,
@@ -614,28 +729,14 @@ impl ObjectStore {
         )
     }
 
-    fn head(&self, py: Python<'_>, path: &str) -> PyResult<ObjectMeta> {
-        let engine = self.engine.clone();
-        let meta = py
-            .detach(|| block_on_storage(async move { engine.head(path).await }))
-            .map_err(to_py_err)?;
-        Ok(ObjectMeta::from(meta))
-    }
-
-    fn head_async(&self, py: Python<'_>, path: String) -> PyResult<RustTaskAwaitable> {
+    fn head(&self, py: Python<'_>, path: String) -> PyResult<RustTaskAwaitable> {
         let engine = self.engine.clone();
         spawn_rust_task(py, async move { engine.head(&path).await }, |py, meta| {
             Ok(Py::new(py, ObjectMeta::from(meta))?.into_any())
         })
     }
 
-    fn exists(&self, py: Python<'_>, path: &str) -> PyResult<bool> {
-        let engine = self.engine.clone();
-        py.detach(|| block_on_storage(async move { engine.exists(path).await }))
-            .map_err(to_py_err)
-    }
-
-    fn exists_async(&self, py: Python<'_>, path: String) -> PyResult<RustTaskAwaitable> {
+    fn exists(&self, py: Python<'_>, path: String) -> PyResult<RustTaskAwaitable> {
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
@@ -644,26 +745,14 @@ impl ObjectStore {
         )
     }
 
-    fn delete(&self, py: Python<'_>, path: &str) -> PyResult<()> {
-        let engine = self.engine.clone();
-        py.detach(|| block_on_storage(async move { engine.delete(path).await }))
-            .map_err(to_py_err)
-    }
-
-    fn delete_async(&self, py: Python<'_>, path: String) -> PyResult<RustTaskAwaitable> {
+    fn delete(&self, py: Python<'_>, path: String) -> PyResult<RustTaskAwaitable> {
         let engine = self.engine.clone();
         spawn_rust_task(py, async move { engine.delete(&path).await }, |py, ()| {
             Ok(py.None())
         })
     }
 
-    fn copy(&self, py: Python<'_>, src: &str, dst: &str) -> PyResult<()> {
-        let engine = self.engine.clone();
-        py.detach(|| block_on_storage(async move { engine.copy(src, dst).await }))
-            .map_err(to_py_err)
-    }
-
-    fn copy_async(&self, py: Python<'_>, src: String, dst: String) -> PyResult<RustTaskAwaitable> {
+    fn copy(&self, py: Python<'_>, src: String, dst: String) -> PyResult<RustTaskAwaitable> {
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
@@ -673,16 +762,7 @@ impl ObjectStore {
     }
 
     #[pyo3(signature = (prefix=None))]
-    fn list(&self, py: Python<'_>, prefix: Option<&str>) -> PyResult<Vec<ObjectMeta>> {
-        let engine = self.engine.clone();
-        let items = py
-            .detach(|| block_on_storage(async move { engine.list(prefix).await }))
-            .map_err(to_py_err)?;
-        Ok(items.into_iter().map(ObjectMeta::from).collect())
-    }
-
-    #[pyo3(signature = (prefix=None))]
-    fn list_async(&self, py: Python<'_>, prefix: Option<String>) -> PyResult<RustTaskAwaitable> {
+    fn list(&self, py: Python<'_>, prefix: Option<String>) -> PyResult<RustTaskAwaitable> {
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
@@ -973,12 +1053,14 @@ fn py_sign_gcs_v4_iam_url_async(
 
 #[pymodule(gil_used = false)]
 pub fn _storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<ObjectStore>()?;
+    m.add_class::<SyncObjectStore>()?;
+    m.add_class::<AsyncObjectStore>()?;
     m.add_class::<ObjectMeta>()?;
     m.add_class::<RustTaskAwaitable>()?;
     m.add_class::<StorageBuffer>()?;
     m.add_class::<PyGcpTokenSnapshot>()?;
-    m.add_class::<PyGcpTokenCache>()?;
+    m.add_class::<PySyncGcpTokenCache>()?;
+    m.add_class::<PyAsyncGcpTokenCache>()?;
     m.add_function(wrap_pyfunction!(py_sign_hmac_url, m)?)?;
     m.add_function(wrap_pyfunction!(py_verify_hmac_url, m)?)?;
     m.add_function(wrap_pyfunction!(py_sign_s3_v4_url, m)?)?;

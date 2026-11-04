@@ -27,7 +27,7 @@ from vertebra.extensions.sqlspec import (
     BigQuerySyncStore,
     ObjectStoreBackend,
 )
-from vertebra.storage import ObjectStore, SigningConfig
+from vertebra.storage import SigningConfig, SyncObjectStore
 
 
 class _InMemoryBigQueryEngine:
@@ -567,7 +567,7 @@ def test_bigquery_sync_adk_memory_artifact_litestar_and_event_stores() -> None:
     """Verify synchronous ADK, Memory, Artifact, Litestar KV, and EventQueue stores on BigQuery."""
     engine = _InMemoryBigQueryEngine()
     core_sync = _SimulatedSyncCoreDriver(engine)
-    store = ObjectStore(
+    store = SyncObjectStore(
         "memory://",
         signing=SigningConfig(
             provider="hmac",
@@ -666,7 +666,7 @@ async def test_bigquery_async_config_driver_and_async_stores() -> None:
     """Verify BigQueryAsyncConfig, BigQueryAsyncDriver, and all async sub-extension stores."""
     engine = _InMemoryBigQueryEngine()
     core_async = _SimulatedAsyncCoreDriver(engine)
-    store = ObjectStore(
+    store = SyncObjectStore(
         "memory://",
         signing=SigningConfig(
             provider="hmac",
@@ -684,7 +684,7 @@ async def test_bigquery_async_config_driver_and_async_stores() -> None:
     )
     async with cfg.provide_session() as driver:
         assert isinstance(driver, BigQueryAsyncDriver)
-        tables = await driver.data_dictionary.get_tables_async()
+        tables = await driver.data_dictionary.get_tables()
         assert tables[0]["table_name"] == "metrics"
 
         adk = BigQueryAsyncADKStore(driver)

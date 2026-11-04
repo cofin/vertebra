@@ -15,13 +15,13 @@ from vertebra.db.dialer.alloydb import (
     AlloyDBAuthType,
     AlloyDBClusterURI,
     AlloyDBConfig,
-    AlloyDBDialer,
+    SyncAlloyDBDialer,
 )
 from vertebra.db.dialer.cloudsql import (
     CloudSQLConfig,
-    CloudSQLDialer,
     CloudSQLInstanceURI,
     EphemeralCertBundle,
+    SyncCloudSQLDialer,
 )
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
@@ -66,7 +66,7 @@ def test_cloudsql_config_and_uri_parsing() -> None:
     )
     assert cfg.refresh_lead_seconds == 300
 
-    dialer = CloudSQLDialer(cfg)
+    dialer = SyncCloudSQLDialer(cfg)
     assert dialer.needs_refresh(now_ts=1000.0) is True
     dialer.cache_iam_token("mock-token", expires_in_seconds=500, now_ts=1000.0)
     assert dialer.needs_refresh(now_ts=1100.0) is False
@@ -77,7 +77,7 @@ def test_cloudsql_dialer_build_tls_context_with_client_pem() -> None:
     """Verify TLS 1.3 client PEM loading and context configuration."""
     cert_pem, key_pem = _generate_test_tls_credentials()
     cfg = CloudSQLConfig(instance_connection_name="my-proj:us-central1:my-pg")
-    dialer = CloudSQLDialer(cfg)
+    dialer = SyncCloudSQLDialer(cfg)
 
     ctx = dialer.build_tls_context(
         ca_pem=cert_pem,
@@ -92,7 +92,7 @@ def test_cloudsql_dialer_build_tls_context_with_client_pem() -> None:
 def test_cloudsql_refresh_ephemeral_cert() -> None:
     """Verify exchanging client public key for signed ephemeral cert bundle."""
     cfg = CloudSQLConfig(instance_connection_name="my-proj:us-central1:my-pg")
-    dialer = CloudSQLDialer(cfg)
+    dialer = SyncCloudSQLDialer(cfg)
 
     recorded_url: list[str] = []
 
@@ -108,7 +108,7 @@ def test_cloudsql_refresh_ephemeral_cert() -> None:
         }
         return encode_json_bytes(resp)
 
-    bundle = dialer.refresh_ephemeral_cert(
+    bundle = dialer.refresh_certificate(
         public_key_pem="PUBLIC_KEY_PEM",
         private_key_pem="PRIVATE_KEY_PEM",
         access_token="mock-oauth-token",
@@ -127,33 +127,33 @@ def test_alloydb_metadata_exchange_codec() -> None:
     assert uri.project == "p1"
     assert uri.instance == "i1"
 
-    req_frame = AlloyDBDialer.encode_metadata_exchange(
+    req_frame = SyncAlloyDBDialer.encode_metadata_exchange(
         "vertebra/0.1",
         AlloyDBAuthType.IAM,
         "mock-oauth-token",
     )
     assert len(req_frame) > 4
 
-    ok_resp = AlloyDBDialer.encode_metadata_exchange_response(code=1, error_message="")
-    code, msg = AlloyDBDialer.decode_metadata_exchange_response(ok_resp)
+    ok_resp = SyncAlloyDBDialer.encode_metadata_exchange_response(code=1, error_message="")
+    code, msg = SyncAlloyDBDialer.decode_metadata_exchange_response(ok_resp)
     assert code == 1
     assert msg == ""
 
-    err_resp = AlloyDBDialer.encode_metadata_exchange_response(
+    err_resp = SyncAlloyDBDialer.encode_metadata_exchange_response(
         code=2,
         error_message="IAM token expired",
     )
     with pytest.raises(PermissionError, match="AlloyDB MetadataExchange failed \\(code=2\\): IAM token expired"):
-        AlloyDBDialer.decode_metadata_exchange_response(err_resp)
+        SyncAlloyDBDialer.decode_metadata_exchange_response(err_resp)
 
     with pytest.raises(ValueError, match="Frame too short"):
-        AlloyDBDialer.decode_metadata_exchange_response(b"\x00\x00")
+        SyncAlloyDBDialer.decode_metadata_exchange_response(b"\x00\x00")
 
 
 def test_alloydb_refresh_client_cert() -> None:
     """Verify AlloyDB client certificate exchange with Admin API mock transport."""
     cfg = AlloyDBConfig(instance_uri="projects/p1/locations/us-central1/clusters/c1/instances/i1")
-    dialer = AlloyDBDialer(cfg)
+    dialer = SyncAlloyDBDialer(cfg)
 
     def mock_http(url: str, payload: bytes, headers: dict[str, str]) -> bytes:
         assert "generateClientCertificate" in url
@@ -204,12 +204,12 @@ def test_end_to_end_mtls_loopback_handshake_for_cloudsql_and_alloydb() -> None:
                 req_len = int.from_bytes(req_header, "big")
                 _ = tls_conn.recv(req_len)
                 if reject:
-                    resp_frame = AlloyDBDialer.encode_metadata_exchange_response(
+                    resp_frame = SyncAlloyDBDialer.encode_metadata_exchange_response(
                         code=2,
                         error_message="unauthorized token",
                     )
                 else:
-                    resp_frame = AlloyDBDialer.encode_metadata_exchange_response(
+                    resp_frame = SyncAlloyDBDialer.encode_metadata_exchange_response(
                         code=1,
                         error_message="",
                     )
@@ -226,13 +226,13 @@ def test_end_to_end_mtls_loopback_handshake_for_cloudsql_and_alloydb() -> None:
         instance_connection_name="my-proj:us-central1:my-pg",
         port=port,
     )
-    csql_dialer = CloudSQLDialer(csql_cfg)
+    csql_dialer = SyncCloudSQLDialer(csql_cfg)
     client_ctx = csql_dialer.build_tls_context(
         ca_pem=cert_pem,
         client_cert_pem=cert_pem,
         client_key_pem=key_pem,
     )
-    sock = csql_dialer.connect_sync("127.0.0.1", ssl_context=client_ctx)
+    sock = csql_dialer.connect("127.0.0.1", ssl_context=client_ctx)
     data = sock.recv(7)
     assert data == b"OK_CSQL"
     sock.close()
@@ -245,13 +245,13 @@ def test_end_to_end_mtls_loopback_handshake_for_cloudsql_and_alloydb() -> None:
         instance_uri="projects/p1/locations/us-central1/clusters/c1/instances/i1",
         port=port,
     )
-    alloy_dialer = AlloyDBDialer(alloy_cfg)
+    alloy_dialer = SyncAlloyDBDialer(alloy_cfg)
     alloy_ctx = alloy_dialer.build_tls_context(
         ca_pem=cert_pem,
         client_cert_pem=cert_pem,
         client_key_pem=key_pem,
     )
-    alloy_sock = alloy_dialer.connect_sync(
+    alloy_sock = alloy_dialer.connect(
         "127.0.0.1",
         oauth2_token="mock-oauth-token",
         ssl_context=alloy_ctx,
@@ -264,7 +264,7 @@ def test_end_to_end_mtls_loopback_handshake_for_cloudsql_and_alloydb() -> None:
     srv_thread3.start()
 
     with pytest.raises(PermissionError, match="AlloyDB MetadataExchange failed \\(code=2\\): unauthorized token"):
-        alloy_dialer.connect_sync(
+        alloy_dialer.connect(
             "127.0.0.1",
             oauth2_token="invalid-token",
             ssl_context=alloy_ctx,

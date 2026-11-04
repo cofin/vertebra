@@ -143,8 +143,9 @@ def main(argv: list[str] | None = None) -> int:
 def _make_stub_getattr(
     fallback_none_attrs: frozenset[str] = frozenset(
         {
-            "ObjectStore",
+            "AsyncObjectStore",
             "SchemaDigestCache",
+            "SyncObjectStore",
             "camelize",
             "field_id",
             "handler_id",

@@ -1,11 +1,11 @@
-"""DjangoPlugin: unifies Rust route compilation, WSGI/ASGI C-API fastpath, and ecosystem bridges."""
+"""VertebraPlugin: unifies Rust route compilation, WSGI/ASGI C-API fastpath, and ecosystem bridges."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
 from vertebra._vertebra import Request, Response, WsgiEnviron, run_wsgi_callable
-from vertebra.extensions.django.config import DjangoConfig
+from vertebra.extensions.django.config import VertebraConfig
 from vertebra.extensions.django.fastpath import FastPath, dispatch_django_direct
 from vertebra.extensions.django.mcp import MCPRegistry, attach_mcp_routes, dispatch_mcp_request
 from vertebra.extensions.django.offload import offload_middlewares
@@ -19,10 +19,10 @@ if TYPE_CHECKING:
     from vertebra.extensions.django.offload import OffloadPlan
     from vertebra.extensions.django.router import CompiledRouter
 
-__all__ = ("DjangoPlugin",)
+__all__ = ("VertebraPlugin",)
 
 
-class DjangoPlugin:
+class VertebraPlugin:
     """First-class Vertebra integration plugin for Django applications."""
 
     __slots__ = (
@@ -42,12 +42,12 @@ class DjangoPlugin:
     def __init__(
         self,
         urlpatterns: list[Any] | None = None,
-        config: DjangoConfig | None = None,
+        config: VertebraConfig | None = None,
         *,
         settings: Any = None,
         wsgi_app: Callable[..., Iterable[bytes]] | None = None,
     ) -> None:
-        self._config = config or DjangoConfig()
+        self._config = config or VertebraConfig()
         self._urlpatterns = urlpatterns
         self._settings = settings
         self._wsgi_app = wsgi_app
@@ -62,8 +62,8 @@ class DjangoPlugin:
             self.setup(urlpatterns=urlpatterns, settings=settings, wsgi_app=wsgi_app)
 
     @property
-    def config(self) -> DjangoConfig:
-        """Return the ``DjangoConfig``."""
+    def config(self) -> VertebraConfig:
+        """Return the ``VertebraConfig``."""
         return self._config
 
     @property
@@ -107,7 +107,7 @@ class DjangoPlugin:
         *,
         settings: Any = None,
         wsgi_app: Callable[..., Iterable[bytes]] | None = None,
-    ) -> DjangoPlugin:
+    ) -> VertebraPlugin:
         """Compile Django ``urlpatterns``, configure OpenAPI/MCP/Vite, and extract middleware offloads."""
         if urlpatterns is not None:
             self._urlpatterns = urlpatterns

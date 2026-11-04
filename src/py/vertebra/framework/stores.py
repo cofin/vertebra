@@ -14,7 +14,6 @@ from vertebra.utils.text import validate_identifier
 
 __all__ = (
     "KeyValueStore",
-    "MemoryStore",
     "NamespacedStore",
 )
 
@@ -45,6 +44,16 @@ class KeyValueStore:
         if isinstance(driver, AsyncValkeyDriver):
             driver.add_invalidation_listener(self._on_driver_invalidate)
 
+    @property
+    def driver(self) -> AsyncValkeyDriver | AsyncRedisDriver | None:
+        """Return the underlying Valkey or Redis driver when configured."""
+        return self._driver
+
+    @property
+    def key_prefix(self) -> str:
+        """Return the namespace prepended to every stored key."""
+        return self._key_prefix
+
     @classmethod
     def from_valkey(cls, config_or_url: ValkeyConfig | str, *, key_prefix: str = "vertebra") -> Self:
         """Create a Store backed by Valkey with RESP3 client-side cache tracking."""
@@ -56,16 +65,6 @@ class KeyValueStore:
         """Create a Store backed by Redis."""
         cfg = RedisConfig(url=config_or_url) if isinstance(config_or_url, str) else config_or_url
         return cls(driver=AsyncRedisDriver(cfg), key_prefix=key_prefix)
-
-    @property
-    def driver(self) -> AsyncValkeyDriver | AsyncRedisDriver | None:
-        """Return the underlying Valkey or Redis driver when configured."""
-        return self._driver
-
-    @property
-    def key_prefix(self) -> str:
-        """Return the namespace prepended to every stored key."""
-        return self._key_prefix
 
     async def __aenter__(self) -> Self:
         """Enter the async context manager and return the store instance."""
@@ -236,6 +235,3 @@ class NamespacedStore:
     async def delete(self, key: str) -> None:
         """Delete the namespaced key."""
         await self._store.delete(f"{self._namespace}:{key}")
-
-
-MemoryStore = KeyValueStore

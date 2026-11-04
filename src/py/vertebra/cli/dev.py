@@ -16,6 +16,7 @@ from vertebra.cli._launch import (
 from vertebra.cli._logging import configure_logging
 from vertebra.cli.banner.renderer import render_banner
 from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
+from vertebra.cli.plugin_registry import enter_app_server_lifespan, resolve_cli_app_path
 from vertebra.supervisor._supervisor import build_server_command, run_supervisor
 
 __all__ = ("dev",)
@@ -24,7 +25,7 @@ logger = logging.getLogger("vertebra.cli.dev")
 
 
 @click.command()
-@click.argument("app")
+@click.argument("app", required=False, default=None)
 @click.option("--host", default="127.0.0.1", help="Bind host")
 @click.option("--port", default=8000, type=int, help="Bind port")
 @click.option("--log-level", default="info", help="Log level")
@@ -63,7 +64,7 @@ logger = logging.getLogger("vertebra.cli.dev")
     help="Comma-separated lane=limit assignments (e.g. default=4,embeddings=1)",
 )
 def dev(
-    app: str,
+    app: str | None,
     host: str,
     port: int,
     log_level: str,
@@ -85,6 +86,7 @@ def dev(
     APP is the application import string (e.g., myapp:app).
     """
     configure_logging(level=log_level, mode="dev", tracebacks_show_locals=verbose)
+    resolved_app = resolve_cli_app_path(app)
     cfg_enabled, cfg_queues, cfg_lanes = load_workers_pyproject_config(Path.cwd())
     effective_with_workers = cfg_enabled if with_workers is None else with_workers
     effective_queues = tuple(q.strip() for q in worker_queues.split(",") if q.strip()) if worker_queues else cfg_queues
@@ -93,7 +95,7 @@ def dev(
         effective_lanes.update(parse_lane_concurrency_map(lane_concurrency))
 
     launch_env = ServerLaunchEnv(
-        app_path=app,
+        app_path=resolved_app,
         host=host,
         port=port,
         workers=1,
@@ -112,7 +114,7 @@ def dev(
     if not no_reload:
         env["VERTEBRA_RELOAD"] = "1"
 
-    frontend_orch, _ = _start_frontend_dev(Path.cwd(), app)
+    frontend_orch, _ = _start_frontend_dev(Path.cwd(), resolved_app)
 
     try:
         server_cmd = build_server_command()
@@ -128,13 +130,16 @@ def dev(
 
     use_tui = sys.stderr.isatty() and not no_tui
 
-    exit_code = run_supervisor(
-        server_cmd=server_cmd,
-        env=env,
-        drain_timeout_ms=2000,
-        shutdown_timeout_ms=5000,
-        tui=use_tui,
-    )
+    with enter_app_server_lifespan(resolved_app, app_path=resolved_app, native=not asgi) as offload_json:
+        if offload_json:
+            env["VERTEBRA_OFFLOAD_CONFIG"] = offload_json
+        exit_code = run_supervisor(
+            server_cmd=server_cmd,
+            env=env,
+            drain_timeout_ms=2000,
+            shutdown_timeout_ms=5000,
+            tui=use_tui,
+        )
     if frontend_orch is not None:
         frontend_orch.stop()
     sys.exit(exit_code)

@@ -23,6 +23,7 @@ from collections.abc import Callable
 from typing import Any
 
 from vertebra._vertebra import Response
+from vertebra.cli.plugin_registry import ensure_vertebra_integration
 from vertebra.framework._app import App, _make_handler_id
 from vertebra.server._dispatch import _coerce_response
 from vertebra.server._gil_audit import GilAuditReport
@@ -49,6 +50,7 @@ def resolve_worker_targets(
         normalized_interface = "wsgi"
     else:
         normalized_interface = "auto"
+    ensure_vertebra_integration(app, native=native)
     if isinstance(app, App):
         app.ensure_dev_welcome_route()
         if native:

@@ -38,7 +38,7 @@ This chapter covers the Python code that launches the Rust binary and runs insid
 
 1. Installs `SIGTERM`/`SIGINT` handlers (main thread only) that stop the `Worker` cleanly at the next batch boundary.
 2. Initializes the transport (`init_transport(mode="shm")` when `VERTEBRA_TRANSPORT_MODE=shm`; otherwise `init_transport()`, a no-op when the bridge already exists).
-3. Compiles handler dispatch specs (`sync_inline` by default, `sync_thread` when `sync_to_thread=True`, or `async_native`) and `MOUNT_HANDLER_BASE | mount_idx` (`0xFFFF_0000_0000_0000 | idx`) mount bindings, entering any Litestar CLI-plugin `server_lifespan` contexts (`LitestarPlugin.ensure_finalized`) and starting `AsgiLifespan` (`lifespan.startup`) for mounted ASGI apps (`scope["state"]`).
+3. Compiles handler dispatch specs (`sync_inline` by default, `sync_thread` when `sync_to_thread=True`, or `async_native`) and `MOUNT_HANDLER_BASE | mount_idx` (`0xFFFF_0000_0000_0000 | idx`) mount bindings, entering any Litestar CLI-plugin `server_lifespan` contexts (`VertebraPlugin.ensure_finalized`) and starting `AsgiLifespan` (`lifespan.startup`) for mounted ASGI apps (`scope["state"]`).
 4. Calls `configure_worker_affinity(VERTEBRA_WORKER_ID, enable_pinning=VERTEBRA_CPU_AFFINITY in {1,true,TRUE})`, which pins to `worker_index % os.cpu_count()` via `os.sched_setaffinity` on Linux.
 5. Calls `GilAuditReport.audit()`.
 6. Selects the execution loop: when `scheduler.size == 1` and a request `notify_fd` is available (`RingPair` in `shm` or single-consumer `BatchBridge` in `embedded` with async/ASGI/RSGI routes), `_run_inline_event_loop` creates a single `uvloop` (or `asyncio`) loop on the worker thread and registers `loop.add_reader(notify_fd, ...)` with Dekker `prepare_request_sleep()` / `cancel_request_sleep()`. Multi-loop free-threaded pools use `EventLoopPool(size=pool_size)` with single-wakeup `spawn_batch`; pure-sync embedded native and single-root WSGI (`single_root_wsgi` -> `drive_wsgi_batch`) workers poll `get_batch` in a tight vector loop and flush via `submit_batch_raw`.
@@ -55,7 +55,7 @@ This chapter covers the Python code that launches the Rust binary and runs insid
 ## Sync Pools & Loop-Affine Resources (`utils/sync_tools.py`)
 
 - **`SyncPool`**: a lazily created `ThreadPoolExecutor` (default `2 × cpu_count` workers) that copies `contextvars` into each call and recreates itself after `fork` (PID check). `SyncPool.default()` is process-wide. `async_()` wrappers (`_AsyncWrapper`) use it instead of `asyncio.to_thread` when the GIL is disabled; the SQLAlchemy dialect adapter (`extensions/sqlalchemy/dialects.py`) owns its own instance.
-- **`LoopShardedResource[T]`**: caches one resource per event loop in a `WeakKeyDictionary`, built by `factory` or awaited from `async_factory` (`get` / `get_async` / `clear`).
+- **`SyncLoopShardedResource[T]` / `AsyncLoopShardedResource[T]`**: caches one resource per event loop in a `WeakKeyDictionary`, built synchronously by `factory` or awaited asynchronously via `async def get` (`clear`).
 
 ## Platform Helpers (`platform.py`)
 

@@ -20,18 +20,19 @@ from vertebra.db.spanner import (
     Mutation,
     MutationGroup,
     SpannerConfig,
-    SpannerSnapshot,
     StalenessBound,
+    SyncSpannerSnapshot,
 )
 from vertebra.db.spanner import (
     SyncSpannerDriver as _CoreSyncSpannerDriver,
 )
 from vertebra.extensions.sqlspec.adapters import (
     AsyncAdapterConfig,
+    AsyncQueryPipeline,
     BaseAsyncDriver,
     BaseSyncDriver,
-    QueryPipeline,
     SyncAdapterConfig,
+    SyncQueryPipeline,
     TenantPredicate,
 )
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
@@ -49,7 +50,8 @@ __all__ = (
     "SpannerAsyncStore",
     "SpannerConnectionBatch",
     "SpannerConnectionShim",
-    "SpannerDataDictionary",
+    "SpannerAsyncDataDictionary",
+    "SpannerSyncDataDictionary",
     "SpannerSyncADKArtifactStore",
     "SpannerSyncADKMemoryStore",
     "SpannerSyncADKStore",
@@ -170,8 +172,8 @@ class SpannerConnectionShim:
         staleness: StalenessBound | None = None,
         *,
         multi_use: bool = True,
-    ) -> SpannerSnapshot:
-        """Create a lock-free ReadOnly ``SpannerSnapshot``."""
+    ) -> SyncSpannerSnapshot:
+        """Create a lock-free ReadOnly ``SyncSpannerSnapshot``."""
         return self._driver.snapshot(staleness, multi_use=multi_use)
 
     def batch(self) -> SpannerConnectionBatch:
@@ -210,7 +212,7 @@ class SpannerConnectionShim:
         self._driver.close()
 
 
-class SpannerDataDictionary:
+class _BaseSpannerDataDictionary:
     """Introspects Spanner ``INFORMATION_SCHEMA`` across GoogleSQL and Spangres dialects.
 
     Includes interleaved parent-child table hierarchy metadata
@@ -219,7 +221,7 @@ class SpannerDataDictionary:
 
     def __init__(
         self,
-        driver: SpannerSyncDriver | SpannerAsyncDriver | _CoreSyncSpannerDriver | _CoreAsyncSpannerDriver,
+        driver: Any,
         *,
         dialect: Literal["googlesql", "spangres"] | None = None,
     ) -> None:
@@ -323,8 +325,8 @@ class SpannerDataDictionary:
         if self._dialect == "spangres":
             target_schema = schema or "public"
             sql = (
-                "SELECT table_name, index_name, index_type, parent_table_name, "
-                "is_unique, is_null_filtered, index_state "
+                "SELECT index_name, table_name, is_unique, is_null_filtered, "
+                "index_state, spanner_is_managed "
                 "FROM information_schema.indexes "
                 "WHERE table_schema = $1 AND table_name = $2 "
                 "ORDER BY index_name"
@@ -332,10 +334,9 @@ class SpannerDataDictionary:
             return sql, {"p1": target_schema, "p2": table_name}
         target_schema = schema if schema is not None else ""
         sql = (
-            "SELECT TABLE_NAME AS table_name, INDEX_NAME AS index_name, "
-            "INDEX_TYPE AS index_type, PARENT_TABLE_NAME AS parent_table_name, "
+            "SELECT INDEX_NAME AS index_name, TABLE_NAME AS table_name, "
             "IS_UNIQUE AS is_unique, IS_NULL_FILTERED AS is_null_filtered, "
-            "INDEX_STATE AS index_state "
+            "INDEX_STATE AS index_state, SPANNER_IS_MANAGED AS spanner_is_managed "
             "FROM INFORMATION_SCHEMA.INDEXES "
             "WHERE TABLE_SCHEMA = @schema AND TABLE_NAME = @table_name "
             "ORDER BY INDEX_NAME"
@@ -363,19 +364,15 @@ class SpannerDataDictionary:
         )
         return sql, {"schema": target_schema, "table_name": table_name}
 
+
+class SpannerSyncDataDictionary(_BaseSpannerDataDictionary):
+    """Synchronous Spanner ``INFORMATION_SCHEMA`` metadata introspection helper."""
+
     def get_tables(self, schema: str | None = None) -> list[dict[str, Any]]:
         """Return table metadata rows including ``parent_table_name`` and ``on_delete_action``."""
         sql, params = self.build_tables_sql(schema)
         res = self._driver.select(sql, params)
         return list(res) if isinstance(res, list) else []
-
-    async def get_tables_async(self, schema: str | None = None) -> list[dict[str, Any]]:
-        """Asynchronously return table metadata rows."""
-        sql, params = self.build_tables_sql(schema)
-        res = self._driver.select(sql, params)
-        if isinstance(res, list):
-            return res
-        return list(await res)
 
     def get_interleaved_tables(self, parent_table: str | None = None) -> list[dict[str, Any]]:
         """Return interleaved child tables and their ``on_delete_action``."""
@@ -383,27 +380,11 @@ class SpannerDataDictionary:
         res = self._driver.select(sql, params)
         return list(res) if isinstance(res, list) else []
 
-    async def get_interleaved_tables_async(self, parent_table: str | None = None) -> list[dict[str, Any]]:
-        """Asynchronously return interleaved child tables and their ``on_delete_action``."""
-        sql, params = self.build_interleaved_tables_sql(parent_table)
-        res = self._driver.select(sql, params)
-        if isinstance(res, list):
-            return res
-        return list(await res)
-
     def get_columns(self, table_name: str, schema: str | None = None) -> list[dict[str, Any]]:
         """Return column metadata rows for ``table_name``."""
         sql, params = self.build_columns_sql(table_name, schema)
         res = self._driver.select(sql, params)
         return list(res) if isinstance(res, list) else []
-
-    async def get_columns_async(self, table_name: str, schema: str | None = None) -> list[dict[str, Any]]:
-        """Asynchronously return column metadata rows for ``table_name``."""
-        sql, params = self.build_columns_sql(table_name, schema)
-        res = self._driver.select(sql, params)
-        if isinstance(res, list):
-            return res
-        return list(await res)
 
     def get_indexes(self, table_name: str, schema: str | None = None) -> list[dict[str, Any]]:
         """Return index metadata rows for ``table_name``."""
@@ -411,7 +392,41 @@ class SpannerDataDictionary:
         res = self._driver.select(sql, params)
         return list(res) if isinstance(res, list) else []
 
-    async def get_indexes_async(self, table_name: str, schema: str | None = None) -> list[dict[str, Any]]:
+    def get_table_constraints(self, table_name: str, schema: str | None = None) -> list[dict[str, Any]]:
+        """Return table constraint metadata rows for ``table_name``."""
+        sql, params = self.build_table_constraints_sql(table_name, schema)
+        res = self._driver.select(sql, params)
+        return list(res) if isinstance(res, list) else []
+
+
+class SpannerAsyncDataDictionary(_BaseSpannerDataDictionary):
+    """Asynchronous Spanner ``INFORMATION_SCHEMA`` metadata introspection helper."""
+
+    async def get_tables(self, schema: str | None = None) -> list[dict[str, Any]]:
+        """Asynchronously return table metadata rows."""
+        sql, params = self.build_tables_sql(schema)
+        res = self._driver.select(sql, params)
+        if isinstance(res, list):
+            return res
+        return list(await res)
+
+    async def get_interleaved_tables(self, parent_table: str | None = None) -> list[dict[str, Any]]:
+        """Asynchronously return interleaved child tables and their ``on_delete_action``."""
+        sql, params = self.build_interleaved_tables_sql(parent_table)
+        res = self._driver.select(sql, params)
+        if isinstance(res, list):
+            return res
+        return list(await res)
+
+    async def get_columns(self, table_name: str, schema: str | None = None) -> list[dict[str, Any]]:
+        """Asynchronously return column metadata rows for ``table_name``."""
+        sql, params = self.build_columns_sql(table_name, schema)
+        res = self._driver.select(sql, params)
+        if isinstance(res, list):
+            return res
+        return list(await res)
+
+    async def get_indexes(self, table_name: str, schema: str | None = None) -> list[dict[str, Any]]:
         """Asynchronously return index metadata rows for ``table_name``."""
         sql, params = self.build_indexes_sql(table_name, schema)
         res = self._driver.select(sql, params)
@@ -419,13 +434,7 @@ class SpannerDataDictionary:
             return res
         return list(await res)
 
-    def get_table_constraints(self, table_name: str, schema: str | None = None) -> list[dict[str, Any]]:
-        """Return table constraint metadata rows for ``table_name``."""
-        sql, params = self.build_table_constraints_sql(table_name, schema)
-        res = self._driver.select(sql, params)
-        return list(res) if isinstance(res, list) else []
-
-    async def get_table_constraints_async(self, table_name: str, schema: str | None = None) -> list[dict[str, Any]]:
+    async def get_table_constraints(self, table_name: str, schema: str | None = None) -> list[dict[str, Any]]:
         """Asynchronously return table constraint metadata rows for ``table_name``."""
         sql, params = self.build_table_constraints_sql(table_name, schema)
         res = self._driver.select(sql, params)
@@ -453,7 +462,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         read_only: bool = False,
         in_transaction: bool = False,
         staleness: StalenessBound | None = None,
-        active_snapshot: SpannerSnapshot | None = None,
+        active_snapshot: SyncSpannerSnapshot | None = None,
     ) -> None:
         super().__init__(
             core,
@@ -471,20 +480,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         self._in_transaction = in_transaction
         self._staleness = staleness
         self._active_snapshot = active_snapshot
-        self._data_dictionary: SpannerDataDictionary | None = None
-
-    def _prepare(self, sql: str) -> str:
-        if self._tenant_predicate is not None:
-            apply_fn = getattr(self._tenant_predicate, "apply", None)
-            if callable(apply_fn):
-                return str(apply_fn(sql))
-        return sql
-
-    def _require_storage(self, override: ObjectStoreBackend | None = None) -> ObjectStoreBackend:
-        backend = override or self._storage_backend
-        if backend is None:
-            raise ImproperConfigurationError("Spanner storage operation requires a configured ObjectStoreBackend")
-        return backend
+        self._data_dictionary: SpannerSyncDataDictionary | None = None
 
     @property
     def core_driver(self) -> _CoreSyncSpannerDriver:
@@ -508,9 +504,9 @@ class SpannerSyncDriver(BaseSyncDriver):
 
     @property
     def data_dictionary(self) -> Any:
-        """Return the ``SpannerDataDictionary`` for ``INFORMATION_SCHEMA`` introspection."""
+        """Return the ``SpannerSyncDataDictionary`` for ``INFORMATION_SCHEMA`` introspection."""
         if self._data_dictionary is None:
-            self._data_dictionary = SpannerDataDictionary(self._core, dialect=self._core.config.dialect)
+            self._data_dictionary = SpannerSyncDataDictionary(self._core, dialect=self._core.config.dialect)
         return self._data_dictionary
 
     def execute(
@@ -581,7 +577,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         continue_on_error: bool = False,
         in_transaction: bool = False,
     ) -> Any:
-        """Execute a multi-statement stack using ``QueryPipeline`` for reads or ``execute_batch_dml`` for DML."""
+        """Execute a multi-statement stack using ``SyncQueryPipeline`` for reads or ``execute_batch_dml`` for DML."""
         if hasattr(statements, "operations"):
             return super().execute_stack(statements, continue_on_error=continue_on_error)
         normalized: list[tuple[str, Mapping[str, Any] | Sequence[Any] | None]] = [
@@ -597,14 +593,14 @@ class SpannerSyncDriver(BaseSyncDriver):
             pipeline_dialect: Literal["postgres", "googlesql"] = (
                 "postgres" if self._core.config.dialect == "spangres" else "googlesql"
             )
-            pipe = QueryPipeline(dialect=pipeline_dialect)
+            pipe = SyncQueryPipeline(dialect=pipeline_dialect)
             for idx, (sql, _) in enumerate(normalized[:-1]):
                 pipe.add_step(f"step_{idx}", sql, return_json_agg=False)
             if any(f"step_{idx}" in normalized[-1][0] for idx in range(len(normalized) - 1)):
                 cte_clauses = ", ".join(f"{s.name} AS ({s.sql})" for s in pipe.steps)
                 compiled_sql = f"WITH {cte_clauses} {normalized[-1][0]}"
                 return [self.select(compiled_sql)]
-            full_pipe = QueryPipeline(dialect=pipeline_dialect)
+            full_pipe = SyncQueryPipeline(dialect=pipeline_dialect)
             for idx, (sql, _) in enumerate(normalized):
                 full_pipe.add_step(f"step_{idx}", sql)
             return [self.select(sql, params) for sql, params in normalized]
@@ -701,8 +697,8 @@ class SpannerSyncDriver(BaseSyncDriver):
         staleness: StalenessBound | None = None,
         *,
         multi_use: bool = True,
-    ) -> SpannerSnapshot:
-        """Open a lock-free ReadOnly ``SpannerSnapshot``."""
+    ) -> SyncSpannerSnapshot:
+        """Open a lock-free ReadOnly ``SyncSpannerSnapshot``."""
         return self._core.snapshot(staleness, multi_use=multi_use)
 
     def run_in_transaction(
@@ -809,7 +805,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         normalized_fmt: Literal["parquet", "arrow", "jsonl"] = "jsonl" if format == "csv" else format
         return self._core.export_to_object_store(
             sql,
-            backend.store,
+            backend,
             str(destination_path),
             params=params,
             format=normalized_fmt,
@@ -836,11 +832,24 @@ class SpannerSyncDriver(BaseSyncDriver):
         )
         return self._core.load_from_object_store(
             table,
-            backend.store,
+            backend,
             str(source),
             format=normalized_fmt,
             upsert=upsert,
         )
+
+    def _prepare(self, sql: str) -> str:
+        if self._tenant_predicate is not None:
+            apply_fn = getattr(self._tenant_predicate, "apply", None)
+            if callable(apply_fn):
+                return str(apply_fn(sql))
+        return sql
+
+    def _require_storage(self, override: ObjectStoreBackend | None = None) -> ObjectStoreBackend:
+        backend = override or self._storage_backend
+        if backend is None:
+            raise ImproperConfigurationError("Spanner storage operation requires a configured ObjectStoreBackend")
+        return backend
 
 
 class SpannerAsyncDriver(BaseAsyncDriver):
@@ -878,20 +887,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         self._read_only = read_only
         self._in_transaction = in_transaction
         self._staleness = staleness
-        self._data_dictionary: SpannerDataDictionary | None = None
-
-    def _prepare(self, sql: str) -> str:
-        if self._tenant_predicate is not None:
-            apply_fn = getattr(self._tenant_predicate, "apply", None)
-            if callable(apply_fn):
-                return str(apply_fn(sql))
-        return sql
-
-    def _require_storage(self, override: ObjectStoreBackend | None = None) -> ObjectStoreBackend:
-        backend = override or self._storage_backend
-        if backend is None:
-            raise ImproperConfigurationError("Spanner storage operation requires a configured ObjectStoreBackend")
-        return backend
+        self._data_dictionary: SpannerAsyncDataDictionary | None = None
 
     @property
     def core_driver(self) -> _CoreAsyncSpannerDriver:
@@ -915,9 +911,9 @@ class SpannerAsyncDriver(BaseAsyncDriver):
 
     @property
     def data_dictionary(self) -> Any:
-        """Return the ``SpannerDataDictionary`` for ``INFORMATION_SCHEMA`` introspection."""
+        """Return the ``SpannerAsyncDataDictionary`` for ``INFORMATION_SCHEMA`` introspection."""
         if self._data_dictionary is None:
-            self._data_dictionary = SpannerDataDictionary(self._core, dialect=self._core.config.dialect)
+            self._data_dictionary = SpannerAsyncDataDictionary(self._core, dialect=self._core.config.dialect)
         return self._data_dictionary
 
     async def execute(
@@ -988,7 +984,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         continue_on_error: bool = False,
         in_transaction: bool = False,
     ) -> Any:
-        """Asynchronously execute a multi-statement stack using ``QueryPipeline`` or ``execute_batch_dml``."""
+        """Asynchronously execute a multi-statement stack using ``AsyncQueryPipeline`` or ``execute_batch_dml``."""
         if hasattr(statements, "operations"):
             return await super().execute_stack(statements, continue_on_error=continue_on_error)
         normalized: list[tuple[str, Mapping[str, Any] | Sequence[Any] | None]] = [
@@ -1004,14 +1000,14 @@ class SpannerAsyncDriver(BaseAsyncDriver):
             pipeline_dialect: Literal["postgres", "googlesql"] = (
                 "postgres" if self._core.config.dialect == "spangres" else "googlesql"
             )
-            pipe = QueryPipeline(dialect=pipeline_dialect)
+            pipe = AsyncQueryPipeline(dialect=pipeline_dialect)
             for idx, (sql, _) in enumerate(normalized[:-1]):
                 pipe.add_step(f"step_{idx}", sql, return_json_agg=False)
             if any(f"step_{idx}" in normalized[-1][0] for idx in range(len(normalized) - 1)):
                 cte_clauses = ", ".join(f"{s.name} AS ({s.sql})" for s in pipe.steps)
                 compiled_sql = f"WITH {cte_clauses} {normalized[-1][0]}"
                 return [await self.select(compiled_sql)]
-            full_pipe = QueryPipeline(dialect=pipeline_dialect)
+            full_pipe = AsyncQueryPipeline(dialect=pipeline_dialect)
             for idx, (sql, _) in enumerate(normalized):
                 full_pipe.add_step(f"step_{idx}", sql)
             return [await self.select(sql, params) for sql, params in normalized]
@@ -1212,7 +1208,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         normalized_fmt: Literal["parquet", "arrow", "jsonl"] = "jsonl" if format == "csv" else format
         return await self._core.export_to_object_store(
             sql,
-            backend.store,
+            backend,
             str(destination_path),
             params=params,
             format=normalized_fmt,
@@ -1239,11 +1235,24 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         )
         return await self._core.load_from_object_store(
             table,
-            backend.store,
+            backend,
             str(source),
             format=normalized_fmt,
             upsert=upsert,
         )
+
+    def _prepare(self, sql: str) -> str:
+        if self._tenant_predicate is not None:
+            apply_fn = getattr(self._tenant_predicate, "apply", None)
+            if callable(apply_fn):
+                return str(apply_fn(sql))
+        return sql
+
+    def _require_storage(self, override: ObjectStoreBackend | None = None) -> ObjectStoreBackend:
+        backend = override or self._storage_backend
+        if backend is None:
+            raise ImproperConfigurationError("Spanner storage operation requires a configured ObjectStoreBackend")
+        return backend
 
 
 def _resolve_spanner_config(
@@ -1394,15 +1403,6 @@ class SpannerSyncConfig(SyncAdapterConfig[SpannerConfig, SpannerSyncDriver]):
         """Resolve the configured ``ObjectStoreBackend`` instance, if any."""
         return _resolve_storage_backend(self.storage_backend)
 
-    def _resolve_core_driver(self) -> _CoreSyncSpannerDriver:
-        if isinstance(self.connection_instance, _CoreSyncSpannerDriver):
-            return self.connection_instance
-        if isinstance(self.connection_instance, SpannerConnectionShim):
-            return self.connection_instance.driver
-        if self._cached_core is None:
-            self._cached_core = _CoreSyncSpannerDriver(self.resolve_spanner_config())
-        return self._cached_core
-
     def create_driver(self) -> SpannerSyncDriver:
         """Instantiate a ``SpannerSyncDriver``."""
         core = self._resolve_core_driver()
@@ -1476,6 +1476,15 @@ class SpannerSyncConfig(SyncAdapterConfig[SpannerConfig, SpannerSyncDriver]):
                 read_only=False,
                 in_transaction=True,
             )
+
+    def _resolve_core_driver(self) -> _CoreSyncSpannerDriver:
+        if isinstance(self.connection_instance, _CoreSyncSpannerDriver):
+            return self.connection_instance
+        if isinstance(self.connection_instance, SpannerConnectionShim):
+            return self.connection_instance.driver
+        if self._cached_core is None:
+            self._cached_core = _CoreSyncSpannerDriver(self.resolve_spanner_config())
+        return self._cached_core
 
 
 class SpannerAsyncConfig(AsyncAdapterConfig[SpannerConfig, SpannerAsyncDriver]):
@@ -1576,36 +1585,6 @@ class SpannerAsyncConfig(AsyncAdapterConfig[SpannerConfig, SpannerAsyncDriver]):
         """Resolve the configured ``ObjectStoreBackend`` instance, if any."""
         return _resolve_storage_backend(self.storage_backend)
 
-    def _resolve_core_driver(self) -> _CoreAsyncSpannerDriver:
-        if isinstance(self.connection_instance, _CoreAsyncSpannerDriver):
-            return self.connection_instance
-        if isinstance(self.connection_instance, _CoreSyncSpannerDriver):
-            if self._cached_core is None:
-                self._cached_core = _CoreAsyncSpannerDriver(
-                    self.resolve_spanner_config(),
-                    client=self.connection_instance._client,
-                )
-            return self._cached_core
-        if self._cached_core is None:
-            self._cached_core = _CoreAsyncSpannerDriver(self.resolve_spanner_config())
-        return self._cached_core
-
-    def _resolve_sync_core_driver(self) -> _CoreSyncSpannerDriver:
-        if isinstance(self.connection_instance, _CoreSyncSpannerDriver):
-            return self.connection_instance
-        if isinstance(self.connection_instance, _CoreAsyncSpannerDriver):
-            if self._cached_sync_core is None:
-                self._cached_sync_core = _CoreSyncSpannerDriver(
-                    self.resolve_spanner_config(),
-                    client=self.connection_instance._client,
-                )
-            return self._cached_sync_core
-        if isinstance(self.connection_instance, SpannerConnectionShim):
-            return self.connection_instance.driver
-        if self._cached_sync_core is None:
-            self._cached_sync_core = _CoreSyncSpannerDriver(self.resolve_spanner_config())
-        return self._cached_sync_core
-
     def create_driver(self) -> SpannerAsyncDriver:
         """Instantiate a ``SpannerAsyncDriver``."""
         core = self._resolve_core_driver()
@@ -1669,6 +1648,30 @@ class SpannerAsyncConfig(AsyncAdapterConfig[SpannerConfig, SpannerAsyncDriver]):
                 read_only=False,
                 in_transaction=True,
             )
+
+    def _resolve_core_driver(self) -> _CoreAsyncSpannerDriver:
+        if isinstance(self.connection_instance, _CoreAsyncSpannerDriver):
+            return self.connection_instance
+        if isinstance(self.connection_instance, _CoreSyncSpannerDriver):
+            if self._cached_core is None:
+                self._cached_core = _CoreAsyncSpannerDriver(self.resolve_spanner_config())
+            return self._cached_core
+        if self._cached_core is None:
+            self._cached_core = _CoreAsyncSpannerDriver(self.resolve_spanner_config())
+        return self._cached_core
+
+    def _resolve_sync_core_driver(self) -> _CoreSyncSpannerDriver:
+        if isinstance(self.connection_instance, _CoreSyncSpannerDriver):
+            return self.connection_instance
+        if isinstance(self.connection_instance, _CoreAsyncSpannerDriver):
+            if self._cached_sync_core is None:
+                self._cached_sync_core = _CoreSyncSpannerDriver(self.resolve_spanner_config())
+            return self._cached_sync_core
+        if isinstance(self.connection_instance, SpannerConnectionShim):
+            return self.connection_instance.driver
+        if self._cached_sync_core is None:
+            self._cached_sync_core = _CoreSyncSpannerDriver(self.resolve_spanner_config())
+        return self._cached_sync_core
 
 
 class SpannerSyncADKStore:

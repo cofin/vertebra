@@ -2,7 +2,7 @@
 
 import asyncio
 
-from vertebra.framework.inertia import InertiaConfig, InertiaMiddleware, inertia
+from vertebra.framework.inertia import InertiaConfig, SyncInertiaMiddleware, inertia
 from vertebra.framework.live import LiveState, LiveStateRoom, live_action
 
 __all__ = (
@@ -39,7 +39,7 @@ async def run_live_and_inertia_demo() -> None:
     snap = state.snapshot()
     assert snap["count"] == 2 and snap["step"] == 2
 
-    middleware = InertiaMiddleware(InertiaConfig(enabled=True, version="1.0.0"))
+    middleware = SyncInertiaMiddleware(InertiaConfig(enabled=True, version="1.0.0"))
     response = inertia("Dashboard/Overview", {"count": state.count})
 
     class DummyRequest:

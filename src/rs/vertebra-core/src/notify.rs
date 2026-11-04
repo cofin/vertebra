@@ -13,11 +13,11 @@
 #[cfg(windows)]
 use core::sync::atomic::AtomicU32;
 use core::sync::atomic::{AtomicBool, Ordering};
+use std::collections::VecDeque;
 use std::io;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::sync::Mutex;
-#[cfg(windows)]
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 /// Platform-independent notification handle for async signaling.
@@ -379,15 +379,15 @@ impl AsRawFd for Notifier {
 ///
 /// Multiple background tasks can push completed items concurrently without acquiring
 /// the Python GIL. Only the transition from `wake_armed == false` to `wake_armed == true`
-/// returns `true` from [`CompletionQueue::push`] (and signals the optional [`Notifier`]),
+/// returns `true` from [`AsyncCompletionQueue::push`] (and signals the optional [`Notifier`]),
 /// coalescing burst completions into a single event-loop wakeup.
-pub struct CompletionQueue<T> {
+pub struct AsyncCompletionQueue<T> {
     queue: Mutex<Vec<T>>,
     wake_armed: AtomicBool,
     notifier: Option<Notifier>,
 }
 
-impl<T> CompletionQueue<T> {
+impl<T> AsyncCompletionQueue<T> {
     /// Create a completion queue with an optional platform [`Notifier`].
     pub fn new(notifier: Option<Notifier>) -> Self {
         Self {
@@ -446,6 +446,141 @@ impl<T> CompletionQueue<T> {
         out.clear();
         std::mem::swap(&mut *guard, out);
         true
+    }
+}
+
+/// Synchronous blocking completion queue with condition variable and optional [`Notifier`].
+///
+/// Designed for synchronous callers that wait on tasks without an async event loop,
+/// supporting blocking pop, timed pop, and bulk draining.
+pub struct SyncCompletionQueue<T> {
+    queue: Mutex<VecDeque<T>>,
+    cvar: Condvar,
+    notifier: Option<Arc<Notifier>>,
+}
+
+impl<T> SyncCompletionQueue<T> {
+    /// Create a new synchronous completion queue without a notifier.
+    pub fn new() -> Self {
+        Self {
+            queue: Mutex::new(VecDeque::new()),
+            cvar: Condvar::new(),
+            notifier: None,
+        }
+    }
+
+    /// Create a synchronous completion queue with a shared platform [`Notifier`].
+    pub fn with_notifier(notifier: Arc<Notifier>) -> Self {
+        Self {
+            queue: Mutex::new(VecDeque::new()),
+            cvar: Condvar::new(),
+            notifier: Some(notifier),
+        }
+    }
+
+    /// Create a synchronous completion queue backed by a newly initialized [`Notifier`].
+    pub fn with_platform_notifier() -> io::Result<Self> {
+        let notifier = Arc::new(Notifier::new()?);
+        Ok(Self::with_notifier(notifier))
+    }
+
+    /// Borrow the underlying [`Notifier`], if configured.
+    pub fn notifier(&self) -> Option<&Arc<Notifier>> {
+        self.notifier.as_ref()
+    }
+
+    /// Return the number of queued items.
+    pub fn len(&self) -> usize {
+        self.queue.lock().expect("lock sync completion queue").len()
+    }
+
+    /// Return `true` if the queue contains no items.
+    pub fn is_empty(&self) -> bool {
+        self.queue
+            .lock()
+            .expect("lock sync completion queue")
+            .is_empty()
+    }
+
+    /// Push an item onto the back of the queue, waking one waiting thread and signaling the notifier.
+    pub fn push(&self, item: T) {
+        {
+            let mut guard = self.queue.lock().expect("lock sync completion queue");
+            guard.push_back(item);
+            self.cvar.notify_one();
+        }
+        if let Some(ref notifier) = self.notifier {
+            let _ = notifier.notify();
+        }
+    }
+
+    /// Try to pop an item from the front of the queue without blocking.
+    pub fn try_pop(&self) -> Option<T> {
+        let mut guard = self.queue.lock().expect("lock sync completion queue");
+        guard.pop_front()
+    }
+
+    /// Pop an item from the front of the queue, blocking until an item is available.
+    pub fn pop_blocking(&self) -> T {
+        let mut guard = self.queue.lock().expect("lock sync completion queue");
+        loop {
+            if let Some(item) = guard.pop_front() {
+                return item;
+            }
+            guard = self
+                .cvar
+                .wait(guard)
+                .expect("wait on sync completion queue");
+        }
+    }
+
+    /// Pop an item from the front of the queue, blocking up to `timeout`.
+    ///
+    /// Returns `Some(item)` if an item became available within `timeout`, or `None` on timeout.
+    pub fn pop_timeout(&self, timeout: Duration) -> Option<T> {
+        let mut guard = self.queue.lock().expect("lock sync completion queue");
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(item) = guard.pop_front() {
+                return Some(item);
+            }
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return None;
+            }
+            let remaining = timeout - elapsed;
+            let (new_guard, wait_res) = self
+                .cvar
+                .wait_timeout(guard, remaining)
+                .expect("wait on sync completion queue");
+            guard = new_guard;
+            if let Some(item) = guard.pop_front() {
+                return Some(item);
+            }
+            if wait_res.timed_out() {
+                return None;
+            }
+        }
+    }
+
+    /// Drain all queued items into `out`.
+    ///
+    /// Clears `out` and moves all items currently in the queue into `out`.
+    /// Clears any pending readiness on the underlying [`Notifier`].
+    pub fn drain_into(&self, out: &mut Vec<T>) {
+        let mut guard = self.queue.lock().expect("lock sync completion queue");
+        out.clear();
+        out.reserve(guard.len());
+        out.extend(guard.drain(..));
+        if let Some(ref notifier) = self.notifier {
+            let _ = notifier.clear();
+        }
+    }
+}
+
+impl<T> Default for SyncCompletionQueue<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -570,8 +705,8 @@ mod tests {
     }
 
     #[test]
-    fn completion_queue_arms_once_per_burst_and_rearms_after_drain() {
-        let queue = Arc::new(CompletionQueue::<u32>::with_platform_notifier());
+    fn async_completion_queue_arms_once_per_burst_and_rearms_after_drain() {
+        let queue = Arc::new(AsyncCompletionQueue::<u32>::with_platform_notifier());
         if let Some(notifier) = queue.notifier() {
             assert!(!notifier.has_pending());
         }
@@ -619,8 +754,8 @@ mod tests {
     }
 
     #[test]
-    fn completion_queue_coalesces_wake_signal_until_drained() {
-        let queue = CompletionQueue::<u32>::with_platform_notifier();
+    fn async_completion_queue_coalesces_wake_signal_until_drained() {
+        let queue = AsyncCompletionQueue::<u32>::with_platform_notifier();
         assert!(queue.push(10));
         assert!(!queue.push(20));
         assert!(!queue.push(30));
@@ -632,5 +767,84 @@ mod tests {
         }
         assert_eq!(total, vec![10, 20, 30]);
         assert!(queue.push(40));
+    }
+
+    #[test]
+    fn sync_completion_queue_multi_producer_blocking_pop() {
+        let queue = Arc::new(SyncCompletionQueue::<u32>::new());
+        assert!(queue.is_empty());
+        assert_eq!(queue.len(), 0);
+
+        let mut handles = Vec::with_capacity(4);
+        for i in 0..4u32 {
+            let q = Arc::clone(&queue);
+            handles.push(thread::spawn(move || {
+                for j in 0..25u32 {
+                    q.push(i * 100 + j);
+                }
+            }));
+        }
+
+        let mut received = Vec::with_capacity(100);
+        for _ in 0..100 {
+            received.push(queue.pop_blocking());
+        }
+
+        for h in handles {
+            h.join().expect("producer failed");
+        }
+
+        assert_eq!(received.len(), 100);
+        assert!(queue.is_empty());
+        assert_eq!(queue.len(), 0);
+        assert_eq!(queue.try_pop(), None);
+    }
+
+    #[test]
+    fn sync_completion_queue_timeout() {
+        let queue = Arc::new(SyncCompletionQueue::<u32>::new());
+
+        let timeout = Duration::from_millis(15);
+        let start = std::time::Instant::now();
+        assert_eq!(queue.pop_timeout(timeout), None);
+        assert!(start.elapsed() >= Duration::from_millis(10));
+
+        let q = Arc::clone(&queue);
+        let handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            q.push(42);
+        });
+
+        assert_eq!(queue.pop_timeout(Duration::from_millis(100)), Some(42));
+        handle.join().expect("thread join");
+    }
+
+    #[test]
+    fn sync_completion_queue_notifier_wakeup_and_drain_into() {
+        let queue =
+            SyncCompletionQueue::<u32>::with_platform_notifier().expect("create notifier queue");
+        if let Some(notifier) = queue.notifier() {
+            assert!(!notifier.has_pending());
+        }
+
+        queue.push(1);
+        queue.push(2);
+        queue.push(3);
+        assert_eq!(queue.len(), 3);
+        assert!(!queue.is_empty());
+
+        if let Some(notifier) = queue.notifier() {
+            assert!(notifier.has_pending());
+        }
+
+        let mut drained = Vec::new();
+        queue.drain_into(&mut drained);
+        assert_eq!(drained, vec![1, 2, 3]);
+        assert!(queue.is_empty());
+        assert_eq!(queue.len(), 0);
+
+        if let Some(notifier) = queue.notifier() {
+            assert!(!notifier.has_pending());
+        }
     }
 }

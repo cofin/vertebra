@@ -9,7 +9,7 @@ from vertebra.utils.module_loader import lazy_exports
 if TYPE_CHECKING:
     from vertebra.db._registry import provide_bigquery_driver, provide_spanner_driver
     from vertebra.extensions.starlette.channels import ChannelsBackend, attach_channels
-    from vertebra.extensions.starlette.config import StarletteConfig
+    from vertebra.extensions.starlette.config import VertebraConfig
     from vertebra.extensions.starlette.fastpath import (
         CompiledRoute,
         FastPath,
@@ -55,7 +55,7 @@ if TYPE_CHECKING:
         mount_docs_routes,
     )
     from vertebra.extensions.starlette.plugin import (
-        StarlettePlugin,
+        VertebraPlugin,
         enter_starlette_server_lifespan,
     )
     from vertebra.extensions.starlette.queues import (
@@ -79,12 +79,14 @@ if TYPE_CHECKING:
         RateLimitGuard,
     )
     from vertebra.extensions.starlette.storage import (
+        AsyncObjectStore,
+        AsyncStorageRegistry,
         GCSConfig,
         LocalConfig,
         MemoryConfig,
-        ObjectStore,
         S3Config,
-        StorageRegistry,
+        SyncObjectStore,
+        SyncStorageRegistry,
         attach_storage,
     )
     from vertebra.extensions.starlette.store import CacheStore, attach_cache_store
@@ -102,6 +104,8 @@ if TYPE_CHECKING:
 __all__ = (
     "AssetManifest",
     "AsyncAPIDocsConfig",
+    "AsyncObjectStore",
+    "AsyncStorageRegistry",
     "AuthenticatedPrincipal",
     "CacheStore",
     "ChannelsBackend",
@@ -120,7 +124,6 @@ __all__ = (
     "LocalConfig",
     "MCPRegistry",
     "MemoryConfig",
-    "ObjectStore",
     "OffloadPlan",
     "OpenAPIConfig",
     "OpenApiOffloadSpec",
@@ -136,11 +139,12 @@ __all__ = (
     "ScalarDocsConfig",
     "ScalarSpecSource",
     "SkillController",
-    "StarletteConfig",
-    "StarlettePlugin",
     "StaticMountOffloadSpec",
-    "StorageRegistry",
     "SwaggerDocsConfig",
+    "SyncObjectStore",
+    "SyncStorageRegistry",
+    "VertebraConfig",
+    "VertebraPlugin",
     "ViteExtension",
     "WebMCPConfig",
     "WebMCPManifest",
@@ -179,6 +183,8 @@ __all__ = (
 _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "AssetManifest": ("vertebra.extensions.starlette.vite", "AssetManifest"),
     "AsyncAPIDocsConfig": ("vertebra.extensions.starlette.openapi", "AsyncAPIDocsConfig"),
+    "AsyncObjectStore": ("vertebra.extensions.starlette.storage", "AsyncObjectStore"),
+    "AsyncStorageRegistry": ("vertebra.extensions.starlette.storage", "AsyncStorageRegistry"),
     "AuthenticatedPrincipal": ("vertebra.extensions.starlette.security", "AuthenticatedPrincipal"),
     "CacheStore": ("vertebra.extensions.starlette.store", "CacheStore"),
     "ChannelsBackend": ("vertebra.extensions.starlette.channels", "ChannelsBackend"),
@@ -197,7 +203,6 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "LocalConfig": ("vertebra.extensions.starlette.storage", "LocalConfig"),
     "MCPRegistry": ("vertebra.extensions.starlette.mcp", "MCPRegistry"),
     "MemoryConfig": ("vertebra.extensions.starlette.storage", "MemoryConfig"),
-    "ObjectStore": ("vertebra.extensions.starlette.storage", "ObjectStore"),
     "OffloadPlan": ("vertebra.extensions.starlette.offload", "OffloadPlan"),
     "OpenAPIConfig": ("vertebra.extensions.starlette.openapi", "OpenAPIConfig"),
     "OpenApiOffloadSpec": ("vertebra.extensions.starlette.offload", "OpenApiOffloadSpec"),
@@ -213,11 +218,12 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "ScalarDocsConfig": ("vertebra.extensions.starlette.openapi", "ScalarDocsConfig"),
     "ScalarSpecSource": ("vertebra.extensions.starlette.openapi", "ScalarSpecSource"),
     "SkillController": ("vertebra.extensions.starlette.mcp", "SkillController"),
-    "StarletteConfig": ("vertebra.extensions.starlette.config", "StarletteConfig"),
-    "StarlettePlugin": ("vertebra.extensions.starlette.plugin", "StarlettePlugin"),
     "StaticMountOffloadSpec": ("vertebra.extensions.starlette.offload", "StaticMountOffloadSpec"),
-    "StorageRegistry": ("vertebra.extensions.starlette.storage", "StorageRegistry"),
     "SwaggerDocsConfig": ("vertebra.extensions.starlette.openapi", "SwaggerDocsConfig"),
+    "SyncObjectStore": ("vertebra.extensions.starlette.storage", "SyncObjectStore"),
+    "SyncStorageRegistry": ("vertebra.extensions.starlette.storage", "SyncStorageRegistry"),
+    "VertebraConfig": ("vertebra.extensions.starlette.config", "VertebraConfig"),
+    "VertebraPlugin": ("vertebra.extensions.starlette.plugin", "VertebraPlugin"),
     "ViteExtension": ("vertebra.extensions.starlette.vite", "ViteExtension"),
     "WebMCPConfig": ("vertebra.extensions.starlette.mcp", "WebMCPConfig"),
     "WebMCPManifest": ("vertebra.extensions.starlette.mcp", "WebMCPManifest"),

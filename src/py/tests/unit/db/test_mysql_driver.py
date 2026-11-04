@@ -6,11 +6,11 @@ from typing import Any
 
 import pytest
 
-from vertebra.db.dialer.cloudsql import CloudSQLConfig, CloudSQLDialer
+from vertebra.db.dialer.cloudsql import CloudSQLConfig, SyncCloudSQLDialer
 from vertebra.db.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
 from vertebra.extensions.sqlalchemy import (
-    DBAPIConnection,
-    MySQLDialect,
+    SyncDBAPIConnection,
+    SyncMySQLDialect,
     Vector,
 )
 from vertebra.typing import MissingDependencyError
@@ -214,8 +214,8 @@ def test_sync_mysql_driver_cloudsql_socket_injection() -> None:
 
     mock_sock = object()
 
-    class FakeDialer(CloudSQLDialer):
-        def connect_sync(self, host: str | None = None, *, ssl_context: Any = None, timeout: float = 10.0) -> Any:
+    class FakeDialer(SyncCloudSQLDialer):
+        def connect(self, host: str | None = None, *, ssl_context: Any = None, timeout: float = 10.0) -> Any:
             _ = (host, ssl_context, timeout)
             return mock_sock
 
@@ -278,7 +278,7 @@ def test_dbapi_connection_routes_mysql_and_dialect_compilation() -> None:
     mock_conn = FakeSyncConnection()
     driver = SyncMySQLDriver(MySQLConfig(), connect_factory=lambda **k: mock_conn)
 
-    conn = DBAPIConnection("mysql+vtb://root:pw@localhost:3306/app", driver=driver)
+    conn = SyncDBAPIConnection("mysql+vtb://root:pw@localhost:3306/app", driver=driver)
     cur = conn.cursor()
     cur.execute("SELECT id, name FROM users WHERE id = %s", (1,))
     rows = cur.fetchall()
@@ -295,15 +295,15 @@ def test_dbapi_connection_routes_mysql_and_dialect_compilation() -> None:
     conn.close()
     assert mock_conn.closed is True
 
-    assert MySQLDialect.paramstyle == "format"
-    assert MySQLDialect.use_insertmanyvalues is True
-    assert MySQLDialect.insert_executemany_returning is False
-    assert MySQLDialect.supports_native_jsonb is False
+    assert SyncMySQLDialect.paramstyle == "format"
+    assert SyncMySQLDialect.use_insertmanyvalues is True
+    assert SyncMySQLDialect.insert_executemany_returning is False
+    assert SyncMySQLDialect.supports_native_jsonb is False
 
     vec = Vector(512)
     assert vec.get_col_spec("mysql+vtb") == "VECTOR(512)"
     dist_expr = vec.cosine_distance([0.1, 0.2], param_name="q")
     assert dist_expr.compile_sql("mysql+vtb") == "DISTANCE_COSINE(embedding, :q)"
 
-    adapted = MySQLDialect.type_descriptor(vec)
+    adapted = SyncMySQLDialect.type_descriptor(vec)
     assert adapted is vec

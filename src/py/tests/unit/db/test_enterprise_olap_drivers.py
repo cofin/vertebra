@@ -18,7 +18,6 @@ from vertebra.db import (
     ARROW_SHM_THRESHOLD_ROWS,
     AlloyDBAuthType,
     AlloyDBConfig,
-    AlloyDBDialer,
     ArrowCursor,
     AsyncDuckDBDriver,
     AsyncMSSQLDriver,
@@ -27,7 +26,6 @@ from vertebra.db import (
     AsyncPostgreSQLDriver,
     AsyncSQLiteDriver,
     CloudSQLConfig,
-    CloudSQLDialer,
     DatabaseRegistry,
     DuckDBConfig,
     DuckDBSecretConfig,
@@ -40,6 +38,8 @@ from vertebra.db import (
     OracleWallet,
     PostgreSQLConfig,
     SQLiteConfig,
+    SyncAlloyDBDialer,
+    SyncCloudSQLDialer,
     SyncDuckDBDriver,
     SyncMSSQLDriver,
     SyncOracleDriver,
@@ -84,11 +84,11 @@ from vertebra.db.postgres import (
 )
 from vertebra.extensions.sqlalchemy.dialects import (
     ALL_DIALECT_SCHEMES,
-    DBAPIConnection,
-    DBAPICursor,
-    DuckDBDialect,
-    MSSQLDialect,
     NullPool,
+    SyncDBAPIConnection,
+    SyncDBAPICursor,
+    SyncDuckDBDialect,
+    SyncMSSQLDialect,
 )
 from vertebra.extensions.sqlspec.adapters import (
     DuckDBAsyncConfig,
@@ -232,7 +232,7 @@ def test_cloudsql_and_alloydb_dialers_and_ephemeral_keys() -> None:
         instance_connection_name="my-proj:us-central1:my-inst",
         enable_iam_auth=True,
     )
-    csql_dialer = CloudSQLDialer(csql_cfg)
+    csql_dialer = SyncCloudSQLDialer(csql_cfg)
     assert csql_dialer.uri.project == "my-proj"
     assert csql_dialer.uri.region == "us-central1"
     assert csql_dialer.uri.instance == "my-inst"
@@ -244,7 +244,7 @@ def test_cloudsql_and_alloydb_dialers_and_ephemeral_keys() -> None:
         instance_uri="projects/p1/locations/us-east1/clusters/c1/instances/i1",
         enable_iam_auth=True,
     )
-    alloy_dialer = AlloyDBDialer(alloy_cfg)
+    alloy_dialer = SyncAlloyDBDialer(alloy_cfg)
     wire = alloy_dialer.encode_metadata_exchange("Vertebra/1.0", AlloyDBAuthType.IAM, "tok-123")
     total_len = struct.unpack(">I", wire[:4])[0]
     assert total_len == len(wire) - 4
@@ -510,7 +510,7 @@ async def test_sqlspec_adapters_and_async_drivers() -> None:
 
 def test_sqlalchemy_vtb_dialects_nullpool_and_dbapi_broker_forwarding() -> None:
     """Verify all SQLAlchemy +vtb dialects use NullPool and forward DBAPI operations through the SHM broker."""
-    assert len(ALL_DIALECT_SCHEMES) == 24
+    assert len(ALL_DIALECT_SCHEMES) == 36
     for dialect_name in (
         "postgresql.vtb",
         "mysql.vtb",
@@ -523,8 +523,8 @@ def test_sqlalchemy_vtb_dialects_nullpool_and_dbapi_broker_forwarding() -> None:
         broker_url = URL.create(dialect_name.replace(".", "+"), host="localhost", query={"shm_broker": "true"})
         assert dialect_cls.get_pool_class(broker_url) is NullPool
 
-    assert registry.load("mssql.vtb") is MSSQLDialect
-    assert registry.load("duckdb.vtb") is DuckDBDialect
+    assert registry.load("mssql.vtb") is SyncMSSQLDialect
+    assert registry.load("duckdb.vtb") is SyncDuckDBDialect
 
     broker = _MockBroker()
     for url in (
@@ -533,9 +533,9 @@ def test_sqlalchemy_vtb_dialects_nullpool_and_dbapi_broker_forwarding() -> None:
         "mssql+vtb://localhost:1433/master",
         "duckdb+vtb:///:memory:",
     ):
-        conn = DBAPIConnection(url, broker=broker)
+        conn = SyncDBAPIConnection(url, broker=broker)
         cur = conn.cursor()
-        assert isinstance(cur, DBAPICursor)
+        assert isinstance(cur, SyncDBAPICursor)
         cur.execute("CREATE TABLE items (id INTEGER, name TEXT)")
         cur.execute("INSERT INTO items VALUES (1, 'vtb')")
         cur.execute("SELECT id, name FROM items")

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import builtins
 import calendar
 import datetime
 import hashlib
@@ -27,22 +26,25 @@ from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 __all__ = (
+    "AsyncGcpTokenCache",
+    "AsyncObjectStore",
+    "AsyncReadableFile",
     "AzureConfig",
     "GCSConfig",
-    "GcpTokenCache",
     "GcpTokenSnapshot",
     "HTTPConfig",
     "LocalConfig",
     "MemoryConfig",
     "OCIConfig",
     "ObjectMeta",
-    "ObjectStore",
     "PutResult",
     "R2Config",
-    "ReadableFile",
     "S3Config",
     "SigningConfig",
     "StorageConfig",
+    "SyncGcpTokenCache",
+    "SyncObjectStore",
+    "SyncReadableFile",
 )
 
 
@@ -494,8 +496,8 @@ class GcpTokenSnapshot(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Optional Google Cloud quota project ID associated with the credential."""
 
 
-class GcpTokenCache:
-    """Thread-safe and async-aware Google Cloud ADC token cache backed by Rust Tokio off-GIL refresh."""
+class _BaseGcpTokenCache:
+    """Shared Google Cloud ADC token cache state, configuration normalization, and JWT signing."""
 
     __slots__ = (
         "_allow_ambient_adc",
@@ -507,6 +509,7 @@ class GcpTokenCache:
         "_scopes",
         "_snapshot",
     )
+    _native_class_name: ClassVar[str] = "SyncGcpTokenCache"
 
     def __init__(
         self,
@@ -514,6 +517,7 @@ class GcpTokenCache:
         *,
         allow_ambient_adc: bool = True,
         scopes: Sequence[str] | None = None,
+        refresh_skew_secs: int | None = None,
     ) -> None:
         raw_opts: dict[str, str] | None = None
         if isinstance(config, Mapping):
@@ -535,6 +539,8 @@ class GcpTokenCache:
             resolved_config = GCSConfig(bucket="")
         else:
             resolved_config = config
+        if refresh_skew_secs is not None:
+            resolved_config = msgspec.structs.replace(resolved_config, refresh_skew_seconds=int(refresh_skew_secs))
         self._config = resolved_config
         self._allow_ambient_adc = allow_ambient_adc
         self._scopes: tuple[str, ...] | None = tuple(scopes) if scopes is not None else None
@@ -545,6 +551,8 @@ class GcpTokenCache:
         self._native: Any = None
         if raw_opts is not None:
             opts = dict(raw_opts)
+            if refresh_skew_secs is not None:
+                opts["refresh_skew_ms"] = str(max(0, int(refresh_skew_secs * 1000)))
             if self._scopes:
                 opts["scopes"] = ",".join(self._scopes)
         else:
@@ -574,8 +582,8 @@ class GcpTokenCache:
                 or resolved_config.access_token
             ):
                 opts["use_metadata_server"] = "true"
-        for candidate_mod in (import_optional("vertebra._vertebra"), ObjectStore._get_native_module()):
-            native_cls = getattr(candidate_mod, "GcpTokenCache", None) if candidate_mod is not None else None
+        for candidate_mod in (import_optional("vertebra._vertebra"), _BaseObjectStore._get_native_module()):
+            native_cls = getattr(candidate_mod, self._native_class_name, None) if candidate_mod is not None else None
             if native_cls is None:
                 continue
             try:
@@ -623,8 +631,8 @@ class GcpTokenCache:
         *,
         allow_ambient_adc: bool = True,
         scopes: Sequence[str] | None = None,
-    ) -> GcpTokenCache:
-        """Construct a `GcpTokenCache` bound to a `GCSConfig`."""
+    ) -> Self:
+        """Construct a token cache bound to a `GCSConfig`."""
         return cls(config, allow_ambient_adc=allow_ambient_adc, scopes=scopes)
 
     def needs_refresh(self, *, now_unix_ms: int | None = None) -> bool:
@@ -650,8 +658,24 @@ class GcpTokenCache:
         """Sign a self-issued RS256 JWT assertion for the given target audience URI."""
         if self._native is not None and hasattr(self._native, "sign_jwt_for_audience"):
             return str(self._native.sign_jwt_for_audience(audience))
-        msg = "GcpTokenCache requires native RSA support and a service_account key for sign_jwt_for_audience"
+        msg = f"{type(self).__name__} requires native RSA support and a service_account key for sign_jwt_for_audience"
         raise ValueError(msg)
+
+
+class SyncGcpTokenCache(_BaseGcpTokenCache):
+    """Thread-safe synchronous Google Cloud ADC token cache backed by native Rust off-GIL refresh."""
+
+    __slots__ = ()
+    _native_class_name: ClassVar[str] = "SyncGcpTokenCache"
+
+    def to_async(self) -> AsyncGcpTokenCache:
+        """Return an equivalent `AsyncGcpTokenCache` sharing the same configuration."""
+        return AsyncGcpTokenCache(
+            self._config,
+            allow_ambient_adc=self._allow_ambient_adc,
+            scopes=self._scopes,
+            refresh_skew_secs=self._config.refresh_skew_seconds,
+        )
 
     def get_token(self, *, force_refresh: bool = False) -> GcpTokenSnapshot:
         """Return a valid `GcpTokenSnapshot`, refreshing off-GIL under a single-flight lock when needed."""
@@ -694,10 +718,26 @@ class GcpTokenCache:
                 self._snapshot = snapshot
                 return snapshot
 
-    async def get_token_async(self, *, force_refresh: bool = False) -> GcpTokenSnapshot:
+
+class AsyncGcpTokenCache(_BaseGcpTokenCache):
+    """Thread-safe and async-aware Google Cloud ADC token cache backed by Rust Tokio off-GIL refresh."""
+
+    __slots__ = ()
+    _native_class_name: ClassVar[str] = "AsyncGcpTokenCache"
+
+    def to_sync(self) -> SyncGcpTokenCache:
+        """Return an equivalent `SyncGcpTokenCache` sharing the same configuration."""
+        return SyncGcpTokenCache(
+            self._config,
+            allow_ambient_adc=self._allow_ambient_adc,
+            scopes=self._scopes,
+            refresh_skew_secs=self._config.refresh_skew_seconds,
+        )
+
+    async def get_token(self, *, force_refresh: bool = False) -> GcpTokenSnapshot:
         """Asynchronously return a valid `GcpTokenSnapshot` via Rust Tokio awaitable without blocking the GIL."""
         if self._native is not None:
-            raw_snap = await self._native.get_token_async(force_refresh=force_refresh)
+            raw_snap = await self._native.get_token(force_refresh=force_refresh)
             return GcpTokenSnapshot(
                 access_token=str(raw_snap.access_token),
                 expires_at_unix_ms=int(raw_snap.expires_at_unix_ms),
@@ -708,7 +748,31 @@ class GcpTokenCache:
             with self._lock:
                 if self._snapshot is not None:
                     return self._snapshot
-        return self.get_token(force_refresh=force_refresh)
+
+        with self._refresh_lock:
+            if not force_refresh and not self.needs_refresh():
+                with self._lock:
+                    if self._snapshot is not None:
+                        return self._snapshot
+
+            fetch_kwargs: dict[str, Any] = {"allow_ambient_adc": self._allow_ambient_adc}
+            if self._scopes is not None:
+                fetch_kwargs["scopes"] = self._scopes
+            token, expires_at_ms, quota_project = self._config._fetch_adc_token_with_expiry(**fetch_kwargs)
+            if not token:
+                msg = f"Failed to resolve Google Cloud ADC access token for bucket '{self._config.bucket}'"
+                raise RuntimeError(msg)
+
+            with self._lock:
+                self._generation += 1
+                snapshot = GcpTokenSnapshot(
+                    access_token=token,
+                    expires_at_unix_ms=expires_at_ms,
+                    generation=self._generation,
+                    quota_project_id=quota_project,
+                )
+                self._snapshot = snapshot
+                return snapshot
 
 
 class AzureConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -821,7 +885,7 @@ class R2Config(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     def chunk_uniform_parts(data: Buffer, part_size: int = 8 * 1024 * 1024) -> list[bytes]:
         """Split a payload into uniform-sized parts for Cloudflare R2 multipart uploads."""
         raw = memoryview(data).cast("B").tobytes()
-        native_mod = ObjectStore._get_native_module()
+        native_mod = _BaseObjectStore._get_native_module()
         if native_mod is not None and hasattr(native_mod, "py_chunk_r2_uniform_parts"):
             return [bytes(part) for part in native_mod.py_chunk_r2_uniform_parts(raw, part_size)]
         size = max(part_size, 5 * 1024 * 1024)
@@ -957,7 +1021,7 @@ class SigningConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         timestamp: int = 1_700_000_000,
     ) -> dict[str, str]:
         """Compute OCI draft-cavage-http-signatures-08 RSA-SHA256 signed headers."""
-        native_mod = ObjectStore._get_native_module()
+        native_mod = _BaseObjectStore._get_native_module()
         if native_mod is not None and hasattr(native_mod, "py_sign_oci_cavage_headers"):
             return dict(
                 native_mod.py_sign_oci_cavage_headers(
@@ -989,7 +1053,7 @@ class SigningConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     ) -> str:
         """Compute an Azure Blob Service SAS URL (HMAC-SHA256)."""
         resolved_ts = int(time.time()) if now_ts is None else now_ts
-        native_mod = ObjectStore._get_native_module()
+        native_mod = _BaseObjectStore._get_native_module()
         if native_mod is not None and hasattr(native_mod, "py_sign_azure_sas_url"):
             return str(
                 native_mod.py_sign_azure_sas_url(
@@ -1020,8 +1084,8 @@ class SigningConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         return f"{base_url}/{container}/{blob_name.lstrip('/')}?{qs}"
 
 
-class ObjectStore:
-    """Unified object store supporting zero-copy memoryview buffers, sync/async I/O, and V4 presigning."""
+class _BaseObjectStore:
+    """Base class providing shared URL parsing, memory store, and V4/HMAC signing helpers."""
 
     _native_module: ClassVar[Any] = None
     _native_loaded: ClassVar[bool] = False
@@ -1033,6 +1097,8 @@ class ObjectStore:
         "_options",
         "_scheme",
         "_signing",
+        "_source_config_or_uri",
+        "_source_options",
         "_url",
     )
 
@@ -1042,8 +1108,10 @@ class ObjectStore:
         *,
         options: dict[str, str] | None = None,
         signing: SigningConfig | None = None,
-        token_cache: GcpTokenCache | None = None,
+        token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
     ) -> None:
+        self._source_config_or_uri = url
+        self._source_options = dict(options) if options is not None else None
         if not isinstance(url, str):
             if isinstance(url, GCSConfig):
                 resolved_url, cfg_opts = url.to_url_and_options(eager_impersonation=False)
@@ -1067,28 +1135,7 @@ class ObjectStore:
             root_path = Path(parsed.netloc + parsed.path if parsed.netloc else parsed.path)
             root_path.mkdir(parents=True, exist_ok=True)
             self._local_root = root_path
-
-        native_mod = self._get_native_module()
-        self._native: Any = None
-        if native_mod is not None and self._scheme in {
-            "memory",
-            "file",
-            "s3",
-            "gs",
-            "gcs",
-            "az",
-            "azure",
-            "abfs",
-            "oci",
-            "http",
-            "https",
-            "r2",
-            "b2",
-        }:
-            try:
-                self._native = native_mod.ObjectStore(url, self._options or None)
-            except (RuntimeError, OSError, ValueError):
-                self._native = None
+        self._native = None
 
     @property
     def url(self) -> str:
@@ -1106,9 +1153,37 @@ class ObjectStore:
         return dict(self._options)
 
     @property
-    def token_cache(self) -> GcpTokenCache | None:
+    def token_cache(self) -> SyncGcpTokenCache | AsyncGcpTokenCache | None:
         """Return the active Google Cloud OAuth2 token cache bound to this store, if any."""
         return self._gcp_token_cache
+
+    @property
+    def supports_signing(self) -> bool:
+        """Return True if a SigningConfig is attached to this ObjectStore."""
+        return self._signing is not None
+
+    def close(self) -> None:
+        """Close the object store handle and release resources."""
+        self._native = None
+
+    def verify_presigned_url(
+        self,
+        signed_url: str,
+        *,
+        method: str = "GET",
+        timestamp: int | None = None,
+    ) -> bool:
+        """Verify an HMAC-SHA256 or S3 SigV4 presigned URL signature and expiration."""
+        if self._signing is None:
+            msg = "SigningConfig is required to verify presigned URLs"
+            raise RuntimeError(msg)
+        now_ts = int(time.time()) if timestamp is None else timestamp
+        if self._signing.provider in {"gcs", "azure"}:
+            msg = f"{self._signing.provider.upper()} presigned URL verification is not supported offline"
+            raise NotImplementedError(msg)
+        if self._signing.provider == "s3":
+            return self._verify_s3_v4(signed_url, method=method, now_ts=now_ts)
+        return self._verify_hmac(signed_url, method=method, now_ts=now_ts)
 
     @classmethod
     def from_config(
@@ -1116,8 +1191,8 @@ class ObjectStore:
         config: StorageConfig,
         *,
         signing: SigningConfig | None = None,
-        token_cache: GcpTokenCache | None = None,
-    ) -> ObjectStore:
+        token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
+    ) -> Self:
         """Construct an ObjectStore from any provider StorageConfig."""
         if isinstance(config, GCSConfig):
             url, options = config.to_url_and_options(eager_impersonation=False)
@@ -1127,7 +1202,7 @@ class ObjectStore:
         return cls(url, options=options, signing=resolved_signing, token_cache=token_cache)
 
     @classmethod
-    def from_local(cls, root: str | Path, *, create_dirs: bool = True) -> ObjectStore:
+    def from_local(cls, root: str | Path, *, create_dirs: bool = True) -> Self:
         """Construct an ObjectStore backed by a local filesystem directory."""
         return cls.from_config(LocalConfig(root=root, create_dirs=create_dirs))
 
@@ -1144,7 +1219,7 @@ class ObjectStore:
         virtual_hosted_style: bool = False,
         allow_http: bool = False,
         signing: SigningConfig | None = None,
-    ) -> ObjectStore:
+    ) -> Self:
         """Construct an ObjectStore backed by AWS S3 or an S3-compatible endpoint."""
         cfg = S3Config(
             bucket=bucket,
@@ -1174,8 +1249,8 @@ class ObjectStore:
         allow_http: bool = False,
         skip_signature: bool = False,
         signing: SigningConfig | None = None,
-        token_cache: GcpTokenCache | None = None,
-    ) -> ObjectStore:
+        token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
+    ) -> Self:
         """Construct an ObjectStore backed by Google Cloud Storage."""
         cfg = GCSConfig(
             bucket=bucket,
@@ -1206,22 +1281,20 @@ class ObjectStore:
         endpoint: str | None = None,
         use_emulator: bool = False,
         signing: SigningConfig | None = None,
-    ) -> ObjectStore:
+    ) -> Self:
         """Construct an ObjectStore backed by Azure Blob Storage or ADLS Gen2."""
-        return cls.from_config(
-            AzureConfig(
-                container=container,
-                account=account,
-                access_key=access_key,
-                sas_token=sas_token,
-                tenant_id=tenant_id,
-                client_id=client_id,
-                client_secret=client_secret,
-                endpoint=endpoint,
-                use_emulator=use_emulator,
-            ),
-            signing=signing,
+        cfg = AzureConfig(
+            container=container,
+            account=account,
+            access_key=access_key,
+            sas_token=sas_token,
+            tenant_id=tenant_id,
+            client_id=client_id,
+            client_secret=client_secret,
+            endpoint=endpoint,
+            use_emulator=use_emulator,
         )
+        return cls.from_config(cfg, signing=signing)
 
     @classmethod
     def from_oci(
@@ -1234,9 +1307,9 @@ class ObjectStore:
         user_ocid: str | None = None,
         fingerprint: str | None = None,
         private_key_pem: str | None = None,
-        private_key_path: str | Path | None = None,
+        private_key_path: str | None = None,
         endpoint: str | None = None,
-    ) -> ObjectStore:
+    ) -> Self:
         """Construct an ObjectStore backed by native OCI Object Storage REST v2."""
         return cls.from_config(
             OCIConfig(
@@ -1265,7 +1338,7 @@ class ObjectStore:
         endpoint: str | None = None,
         allow_http: bool = False,
         signing: SigningConfig | None = None,
-    ) -> ObjectStore:
+    ) -> Self:
         """Construct an ObjectStore backed by Cloudflare R2."""
         cfg = R2Config(
             bucket=bucket,
@@ -1280,396 +1353,14 @@ class ObjectStore:
         return cls.from_config(cfg, signing=signing)
 
     @classmethod
-    def from_http(cls, url: str, *, headers: dict[str, str] | None = None) -> ObjectStore:
+    def from_http(cls, url: str, *, headers: dict[str, str] | None = None) -> Self:
         """Construct an ObjectStore backed by HTTP/WebDAV."""
         return cls.from_config(HTTPConfig(url=url, headers=headers))
 
     @classmethod
-    def from_memory(cls, namespace: str = "default") -> ObjectStore:
+    def from_memory(cls, namespace: str = "default") -> Self:
         """Construct an in-memory ObjectStore."""
         return cls.from_config(MemoryConfig(namespace=namespace))
-
-    def put(self, path: str, data: Buffer) -> PutResult:
-        """Write any Buffer (bytes, bytearray, memoryview) to the given object key."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
-        view = memoryview(data).cast("B")
-        if self._native is not None:
-            native_meta = self._native.put(key, view)
-            fallback_etag = "" if getattr(native_meta, "etag", None) else f"{view.nbytes:016x}"
-            return self._native_to_put_result(native_meta, fallback_etag)
-        digest = hashlib.sha256(view).hexdigest()[:16]
-        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        if self._local_root is not None:
-            target = self._resolve_local(key)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with target.open("wb") as handle:
-                handle.write(view)
-            return PutResult(path=key, size=view.nbytes, etag=digest)
-        raw = view.tobytes()
-        meta = ObjectMeta(path=key, size=len(raw), last_modified=timestamp, etag=digest)
-        self._memory[key] = (raw, meta)
-        return PutResult(path=key, size=len(raw), etag=digest)
-
-    def put_file(self, path: str, file_path: str | Path) -> PutResult:
-        """Read a local file and upload it to the given object key."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
-        resolved_src = Path(file_path)
-        if not resolved_src.exists():
-            msg = f"Source file not found: {resolved_src}"
-            raise FileNotFoundError(msg)
-        if self._native is not None and hasattr(self._native, "put_file"):
-            native_meta = self._native.put_file(key, str(resolved_src))
-            return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
-        return self.put(path, resolved_src.read_bytes())
-
-    def put_multipart(self, path: str, parts: Sequence[Buffer]) -> PutResult:
-        """Concatenate and upload multiple buffer parts atomically."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
-        if self._native is not None:
-            views = [memoryview(part).cast("B") for part in parts]
-            native_meta = self._native.put_multipart(key, views)
-            etag = native_meta.etag or f"{int(native_meta.size):016x}"
-            return PutResult(
-                path=str(native_meta.path),
-                size=int(native_meta.size),
-                etag=str(etag),
-                version=native_meta.version,
-            )
-        combined = bytearray()
-        for part in parts:
-            combined.extend(memoryview(part).cast("B"))
-        return self.put(path, memoryview(combined))
-
-    def get(self, path: str) -> bytes:
-        """Read full object bytes for the given key."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
-        if self._native is not None:
-            return bytes(self._native.get(key))
-        if self._local_root is not None:
-            target = self._resolve_local(key)
-            if not target.exists():
-                msg = f"Object not found: {key}"
-                raise FileNotFoundError(msg)
-            return target.read_bytes()
-        entry = self._memory.get(key)
-        if entry is None:
-            msg = f"Object not found: {key}"
-            raise FileNotFoundError(msg)
-        return entry[0]
-
-    def get_view(self, path: str) -> memoryview:
-        """Return a zero-copy memoryview over the object payload."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
-        if self._native is not None and hasattr(self._native, "get_buffer"):
-            return memoryview(self._native.get_buffer(key))
-        return memoryview(self.get(path))
-
-    def get_range(self, path: str, offset: int, length: int) -> bytes:
-        """Read a byte slice of length bytes starting at offset."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
-        if self._native is not None:
-            return bytes(self._native.get_range(key, offset, length))
-        view = self.get_view(path)
-        return bytes(view[offset : offset + length])
-
-    def head(self, path: str) -> ObjectMeta:
-        """Return object metadata without transferring the full payload."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
-        if self._native is not None:
-            native_meta = self._native.head(key)
-            return self._native_to_object_meta(native_meta)
-        if self._local_root is not None:
-            target = self._resolve_local(key)
-            if not target.exists():
-                msg = f"Object not found: {key}"
-                raise FileNotFoundError(msg)
-            stat = target.stat()
-            timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime))
-            return ObjectMeta(path=key, size=stat.st_size, last_modified=timestamp)
-        entry = self._memory.get(key)
-        if entry is None:
-            msg = f"Object not found: {key}"
-            raise FileNotFoundError(msg)
-        return entry[1]
-
-    def exists(self, path: str) -> bool:
-        """Return True if the object key exists."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
-        if self._native is not None:
-            return bool(self._native.exists(key))
-        if self._local_root is not None:
-            return self._resolve_local(key).exists()
-        return key in self._memory
-
-    def delete(self, path: str) -> None:
-        """Delete the object at the given key."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
-        if self._native is not None:
-            try:
-                self._native.delete(key)
-            except FileNotFoundError:
-                return
-            return
-        if self._local_root is not None:
-            target = self._resolve_local(key)
-            if target.exists():
-                target.unlink()
-            return
-        self._memory.pop(key, None)
-
-    def copy(self, src: str, dst: str) -> None:
-        """Copy an object within the store from src to dst."""
-        src_key = self._normalize_key(src)
-        dst_key = self._normalize_key(dst)
-        if self._local_root is not None:
-            self._resolve_local(src_key)
-            self._resolve_local(dst_key)
-        if self._native is not None:
-            self._native.copy(src_key, dst_key)
-            return
-        if self._local_root is not None:
-            src_path = self._resolve_local(src_key)
-            dst_path = self._resolve_local(dst_key)
-            dst_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src_path, dst_path)
-            return
-        payload = self.get(src_key)
-        self.put(dst_key, payload)
-
-    def list(self, prefix: str = "") -> builtins.list[ObjectMeta]:
-        """List all objects under the given key prefix sorted by path."""
-        norm_prefix = self._normalize_key(prefix) if prefix else ""
-        if self._native is not None:
-            items = self._native.list(norm_prefix or None)
-            return [
-                self._native_to_object_meta(item)
-                for item in items
-                if not norm_prefix or str(item.path).startswith(norm_prefix)
-            ]
-        if self._local_root is not None:
-            results: builtins.list[ObjectMeta] = []
-            for file_path in sorted(self._local_root.rglob("*")):
-                if not file_path.is_file():
-                    continue
-                rel = file_path.relative_to(self._local_root).as_posix()
-                if not norm_prefix or rel.startswith(norm_prefix):
-                    results.append(self.head(rel))
-            return results
-        return [
-            meta for key, (_, meta) in sorted(self._memory.items()) if not norm_prefix or key.startswith(norm_prefix)
-        ]
-
-    async def put_async(self, path: str, data: Buffer) -> PutResult:
-        """Asynchronously write a buffer to the store via Rust Tokio awaitable."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
-        view = memoryview(data).cast("B")
-        if self._native is not None and hasattr(self._native, "put_async"):
-            native_meta = await self._native.put_async(key, view)
-            fallback_etag = "" if getattr(native_meta, "etag", None) else f"{view.nbytes:016x}"
-            return self._native_to_put_result(native_meta, fallback_etag)
-        return self.put(path, data)
-
-    async def put_file_async(self, path: str, file_path: str | Path) -> PutResult:
-        """Asynchronously stream a local file into the store via Rust Tokio awaitable."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
-        resolved_src = Path(file_path)
-        if not resolved_src.exists():
-            msg = f"Source file not found: {resolved_src}"
-            raise FileNotFoundError(msg)
-        if self._native is not None and hasattr(self._native, "put_file_async"):
-            native_meta = await self._native.put_file_async(key, str(resolved_src))
-            return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
-        return self.put_file(path, resolved_src)
-
-    async def put_multipart_async(self, path: str, parts: Sequence[Buffer]) -> PutResult:
-        """Asynchronously upload multiple buffer parts atomically."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
-        if self._native is not None and hasattr(self._native, "put_multipart_async"):
-            views = [memoryview(part).cast("B") for part in parts]
-            native_meta = await self._native.put_multipart_async(key, views)
-            etag = native_meta.etag or f"{int(native_meta.size):016x}"
-            return PutResult(
-                path=str(native_meta.path),
-                size=int(native_meta.size),
-                etag=str(etag),
-                version=native_meta.version,
-            )
-        return self.put_multipart(path, parts)
-
-    async def get_async(self, path: str) -> bytes:
-        """Asynchronously read an object from the store via Rust Tokio awaitable."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
-        if self._native is not None and hasattr(self._native, "get_async"):
-            return bytes(await self._native.get_async(key))
-        return self.get(path)
-
-    async def get_view_async(self, path: str) -> memoryview:
-        """Asynchronously read a zero-copy memoryview over an object payload."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
-        if self._native is not None and hasattr(self._native, "get_buffer_async"):
-            return memoryview(await self._native.get_buffer_async(key))
-        return memoryview(await self.get_async(path))
-
-    async def get_range_async(self, path: str, offset: int, length: int) -> bytes:
-        """Asynchronously read a byte range from the store via Rust Tokio awaitable."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
-        if self._native is not None and hasattr(self._native, "get_range_async"):
-            return bytes(await self._native.get_range_async(key, offset, length))
-        return self.get_range(path, offset, length)
-
-    async def head_async(self, path: str) -> ObjectMeta:
-        """Asynchronously read object metadata via Rust Tokio awaitable."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
-        if self._native is not None and hasattr(self._native, "head_async"):
-            native_meta = await self._native.head_async(key)
-            return self._native_to_object_meta(native_meta)
-        return self.head(path)
-
-    async def exists_async(self, path: str) -> bool:
-        """Asynchronously check whether an object exists via Rust Tokio awaitable."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
-        if self._native is not None and hasattr(self._native, "exists_async"):
-            return bool(await self._native.exists_async(key))
-        return self.exists(path)
-
-    async def delete_async(self, path: str) -> None:
-        """Asynchronously delete an object via Rust Tokio awaitable."""
-        key = self._normalize_key(path)
-        if self._local_root is not None:
-            self._resolve_local(key)
-        if self._native is not None and hasattr(self._native, "delete_async"):
-            try:
-                await self._native.delete_async(key)
-            except FileNotFoundError:
-                return
-            return
-        self.delete(path)
-
-    async def copy_async(self, src: str, dst: str) -> None:
-        """Asynchronously copy an object within the store via Rust Tokio awaitable."""
-        src_key = self._normalize_key(src)
-        dst_key = self._normalize_key(dst)
-        if self._local_root is not None:
-            self._resolve_local(src_key)
-            self._resolve_local(dst_key)
-        if self._native is not None and hasattr(self._native, "copy_async"):
-            await self._native.copy_async(src_key, dst_key)
-            return
-        self.copy(src, dst)
-
-    async def list_async(self, prefix: str = "") -> builtins.list[ObjectMeta]:
-        """Asynchronously list objects matching prefix via Rust Tokio awaitable."""
-        norm_prefix = self._normalize_key(prefix) if prefix else ""
-        if self._native is not None and hasattr(self._native, "list_async"):
-            items = await self._native.list_async(norm_prefix or None)
-            return [
-                self._native_to_object_meta(item)
-                for item in items
-                if not norm_prefix or str(item.path).startswith(norm_prefix)
-            ]
-        return self.list(prefix)
-
-    def open_readable_file(self, path: str, *, size: int | None = None) -> ReadableFile:
-        """Open a seekable read-only ReadableFile stream over the given object key."""
-        return ReadableFile(self, path, size=size)
-
-    def presign_get(
-        self,
-        path: str,
-        *,
-        expires_in_secs: int = 3600,
-        timestamp: int | None = None,
-    ) -> str:
-        """Generate a presigned GET URL for the given object key."""
-        return self._presign(path, method="GET", expires_in_secs=expires_in_secs, timestamp=timestamp)
-
-    async def presign_get_async(
-        self,
-        path: str,
-        *,
-        expires_in_secs: int = 3600,
-        timestamp: int | None = None,
-    ) -> str:
-        """Asynchronously generate a presigned GET URL via Rust Tokio awaitable without blocking the GIL."""
-        return await self._presign_async(path, method="GET", expires_in_secs=expires_in_secs, timestamp=timestamp)
-
-    def presign_put(
-        self,
-        path: str,
-        *,
-        expires_in_secs: int = 3600,
-        timestamp: int | None = None,
-    ) -> str:
-        """Generate a presigned PUT URL for the given object key."""
-        return self._presign(path, method="PUT", expires_in_secs=expires_in_secs, timestamp=timestamp)
-
-    async def presign_put_async(
-        self,
-        path: str,
-        *,
-        expires_in_secs: int = 3600,
-        timestamp: int | None = None,
-    ) -> str:
-        """Asynchronously generate a presigned PUT URL via Rust Tokio awaitable without blocking the GIL."""
-        return await self._presign_async(path, method="PUT", expires_in_secs=expires_in_secs, timestamp=timestamp)
-
-    def verify_presigned_url(
-        self,
-        signed_url: str,
-        *,
-        method: str = "GET",
-        timestamp: int | None = None,
-    ) -> bool:
-        """Verify an HMAC-SHA256 or S3 SigV4 presigned URL signature and expiration."""
-        if self._signing is None:
-            msg = "SigningConfig is required to verify presigned URLs"
-            raise RuntimeError(msg)
-        now_ts = int(time.time()) if timestamp is None else timestamp
-        if self._signing.provider in {"gcs", "azure"}:
-            msg = f"{self._signing.provider.upper()} presigned URL verification is not supported offline"
-            raise NotImplementedError(msg)
-        if self._signing.provider == "s3":
-            return self._verify_s3_v4(signed_url, method=method, now_ts=now_ts)
-        return self._verify_hmac(signed_url, method=method, now_ts=now_ts)
-
-    @property
-    def supports_signing(self) -> bool:
-        """Return True if a SigningConfig is attached to this ObjectStore."""
-        return self._signing is not None
 
     @staticmethod
     def _derive_signing_from_config(config: StorageConfig) -> SigningConfig | None:
@@ -1943,9 +1634,28 @@ class ObjectStore:
         expected_sig = parse_qs(urlparse(expected_url).query)["X-Amz-Signature"][0]
         return hmac.compare_digest(signature, expected_sig)
 
-    def _ensure_gcs_token_cache(self, effective_email: str) -> GcpTokenCache:
-        """Lazily initialize and return the store-scoped `GcpTokenCache` for keyless GCS IAM signing."""
-        if self._gcp_token_cache is None:
+    def _ensure_gcs_token_cache(
+        self,
+        effective_email: str,
+        *,
+        async_mode: bool = False,
+    ) -> SyncGcpTokenCache | AsyncGcpTokenCache:
+        """Lazily initialize and return the store-scoped token cache for keyless GCS IAM signing."""
+        if async_mode:
+            if self._gcp_token_cache is None or not isinstance(self._gcp_token_cache, AsyncGcpTokenCache):
+                assert self._signing is not None
+                adc_helper = GCSConfig(
+                    bucket=self._signing.bucket,
+                    service_account_path=self._options.get("service_account_path"),
+                    service_account_key=self._options.get("service_account_key"),
+                    application_credentials=self._options.get("application_credentials_path"),
+                    service_account_email=effective_email,
+                    iam_endpoint=self._signing.iam_endpoint,
+                )
+                self._gcp_token_cache = AsyncGcpTokenCache.from_gcs_config(adc_helper)
+            return self._gcp_token_cache
+
+        if self._gcp_token_cache is None or not isinstance(self._gcp_token_cache, SyncGcpTokenCache):
             assert self._signing is not None
             adc_helper = GCSConfig(
                 bucket=self._signing.bucket,
@@ -1955,7 +1665,7 @@ class ObjectStore:
                 service_account_email=effective_email,
                 iam_endpoint=self._signing.iam_endpoint,
             )
-            self._gcp_token_cache = GcpTokenCache.from_gcs_config(adc_helper)
+            self._gcp_token_cache = SyncGcpTokenCache.from_gcs_config(adc_helper)
         return self._gcp_token_cache
 
     @staticmethod
@@ -2008,30 +1718,47 @@ class ObjectStore:
             f"{method.upper()}\n{canonical_uri}\n{canonical_qs}\nhost:storage.googleapis.com\n\nhost\nUNSIGNED-PAYLOAD"
         )
         string_to_sign = f"GOOG4-RSA-SHA256\n{goog_date}\n{scope}\n{hashlib.sha256(canonical_req.encode()).hexdigest()}"
-        iam_url = f"{self._signing.iam_endpoint.rstrip('/')}/v1/projects/-/serviceAccounts/{effective_email}:signBlob"
-        if not iam_url.startswith(("http:", "https:")):
-            msg = f"Unsupported IAM endpoint scheme: {iam_url!r}"
-            raise ValueError(msg)
-        parsed_iam = urlparse(iam_url)
-        body_bytes = bytes(encode_json_bytes({"payload": base64.b64encode(string_to_sign.encode()).decode("ascii")}))
-        headers = {"Content-Type": "application/json"}
-        if access_token:
-            headers["Authorization"] = f"Bearer {access_token}"
-        req = urllib.request.Request(iam_url, data=body_bytes, headers=headers, method="POST")
-        opener = (
-            urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            if parsed_iam.hostname in {"127.0.0.1", "localhost", "::1"}
-            else urllib.request.build_opener()
-        )
-        with opener.open(req, timeout=10) as resp:
-            resp_data = decode_json(resp.read())
-        signed_blob_str = str(resp_data["signedBlob"])
+
+        if private_key_pem is not None:
+            cryptography_hazmat = import_optional("cryptography.hazmat.primitives.serialization")
+            cryptography_hashes = import_optional("cryptography.hazmat.primitives.hashes")
+            cryptography_padding = import_optional("cryptography.hazmat.primitives.asymmetric.padding")
+            if cryptography_hazmat is not None and cryptography_hashes is not None and cryptography_padding is not None:
+                private_key = cryptography_hazmat.load_pem_private_key(private_key_pem.encode(), password=None)
+                signature_bytes = private_key.sign(
+                    string_to_sign.encode(),
+                    cryptography_padding.PKCS1v15(),
+                    cryptography_hashes.SHA256(),
+                )
+                sig_hex = binascii.hexlify(signature_bytes).decode("ascii")
+                base_ep = (self._signing.endpoint or "https://storage.googleapis.com").rstrip("/")
+                return f"{base_ep}{canonical_uri}?{canonical_qs}&X-Goog-Signature={sig_hex}"
+
+        iam_ep = (self._signing.iam_endpoint or "https://iamcredentials.googleapis.com").rstrip("/")
+        encoded_email = urllib.parse.quote(effective_email, safe="")
+        sign_url = f"{iam_ep}/v1/projects/-/serviceAccounts/{encoded_email}:signBlob"
+        b64_payload = base64.b64encode(string_to_sign.encode("utf-8")).decode("ascii")
+        body_bytes = encode_json_bytes({"payload": b64_payload})
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {access_token}",
+        }
+        req = urllib.request.Request(sign_url, data=body_bytes, headers=headers, method="POST")
         try:
-            raw_sig = base64.b64decode(signed_blob_str, validate=True)
-        except (ValueError, binascii.Error):
-            raw_sig = signed_blob_str.encode("utf-8")
-        hex_sig = raw_sig.hex()
-        return f"https://storage.googleapis.com{canonical_uri}?{canonical_qs}&X-Goog-Signature={hex_sig}"
+            with urllib.request.urlopen(req) as resp:
+                resp_data = decode_json(resp.read())
+        except urllib.error.HTTPError as exc:
+            err_body = exc.read().decode("utf-8", errors="replace")
+            msg = f"GCS IAM signBlob failed with HTTP {exc.code}: {err_body}"
+            raise RuntimeError(msg) from exc
+        signed_b64 = resp_data.get("signedBlob")
+        if not signed_b64:
+            msg = f"GCS IAM signBlob response missing 'signedBlob': {resp_data}"
+            raise RuntimeError(msg)
+        sig_bytes = base64.b64decode(signed_b64)
+        sig_hex = binascii.hexlify(sig_bytes).decode("ascii")
+        base_ep = (self._signing.endpoint or "https://storage.googleapis.com").rstrip("/")
+        return f"{base_ep}{canonical_uri}?{canonical_qs}&X-Goog-Signature={sig_hex}"
 
     def _sign_gcs_v4_iam(
         self,
@@ -2050,7 +1777,10 @@ class ObjectStore:
         access_token = self._signing.access_token
         token_generation: int | None = None
         if access_token is None and private_key_pem is None:
-            cache = self._ensure_gcs_token_cache(effective_email)
+            cache = self._ensure_gcs_token_cache(effective_email, async_mode=False)
+            if isinstance(cache, AsyncGcpTokenCache):
+                cache = cache.to_sync()
+                self._gcp_token_cache = cache
             snap = cache.get_token()
             access_token = snap.access_token
             token_generation = snap.generation
@@ -2068,7 +1798,10 @@ class ObjectStore:
         except (RuntimeError, urllib.error.HTTPError) as exc:
             if token_generation is None or not self._is_iam_unauthorized_error(exc):
                 raise
-            cache = self._ensure_gcs_token_cache(effective_email)
+            cache = self._ensure_gcs_token_cache(effective_email, async_mode=False)
+            if isinstance(cache, AsyncGcpTokenCache):
+                cache = cache.to_sync()
+                self._gcp_token_cache = cache
             cache.invalidate(token_generation)
             refreshed = cache.get_token()
             return self._execute_gcs_v4_iam_sign(
@@ -2098,8 +1831,11 @@ class ObjectStore:
         access_token = self._signing.access_token
         token_generation: int | None = None
         if access_token is None and private_key_pem is None:
-            cache = self._ensure_gcs_token_cache(effective_email)
-            snap = await cache.get_token_async()
+            cache = self._ensure_gcs_token_cache(effective_email, async_mode=True)
+            if isinstance(cache, SyncGcpTokenCache):
+                cache = cache.to_async()
+                self._gcp_token_cache = cache
+            snap = await cache.get_token()
             access_token = snap.access_token
             token_generation = snap.generation
 
@@ -2122,9 +1858,12 @@ class ObjectStore:
             except RuntimeError as exc:
                 if token_generation is None or not self._is_iam_unauthorized_error(exc):
                     raise
-                cache = self._ensure_gcs_token_cache(effective_email)
+                cache = self._ensure_gcs_token_cache(effective_email, async_mode=True)
+                if isinstance(cache, SyncGcpTokenCache):
+                    cache = cache.to_async()
+                    self._gcp_token_cache = cache
                 cache.invalidate(token_generation)
-                refreshed = await cache.get_token_async()
+                refreshed = await cache.get_token()
                 return str(
                     await native_mod.py_sign_gcs_v4_iam_url_async(
                         self._signing.bucket,
@@ -2170,8 +1909,592 @@ class ObjectStore:
         return cleaned
 
 
-class ReadableFile(io.RawIOBase):
-    """Seekable read-only file-like object backed by ObjectStore range reads (`get_range`).
+class SyncObjectStore(_BaseObjectStore):
+    """Synchronous object store supporting zero-copy buffers, blocking I/O, and V4 presigning."""
+
+    __slots__ = ()
+
+    def __init__(
+        self,
+        url: str | StorageConfig = "memory://",
+        *,
+        options: dict[str, str] | None = None,
+        signing: SigningConfig | None = None,
+        token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
+    ) -> None:
+        resolved_cache = token_cache.to_sync() if isinstance(token_cache, AsyncGcpTokenCache) else token_cache
+        super().__init__(url, options=options, signing=signing, token_cache=resolved_cache)
+        native_mod = self._get_native_module()
+        if native_mod is not None and self._scheme in {
+            "memory",
+            "file",
+            "s3",
+            "gs",
+            "gcs",
+            "az",
+            "azure",
+            "abfs",
+            "oci",
+            "http",
+            "https",
+            "r2",
+            "b2",
+        }:
+            try:
+                native_cls = getattr(native_mod, "SyncObjectStore", None)
+                if native_cls is not None:
+                    self._native = native_cls(self._url, self._options or None)
+            except (RuntimeError, OSError, ValueError):
+                self._native = None
+
+    def __enter__(self) -> Self:
+        """Enter the context manager and return self."""
+        return self
+
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        """Close the object store when exiting the context manager."""
+        _ = (exc_type, exc_val, exc_tb)
+        self.close()
+
+    def to_async(self) -> AsyncObjectStore:
+        """Return an equivalent AsyncObjectStore instance targeting the same storage configuration."""
+        async_token_cache: AsyncGcpTokenCache | None = None
+        if self._gcp_token_cache is not None:
+            if isinstance(self._gcp_token_cache, AsyncGcpTokenCache):
+                async_token_cache = self._gcp_token_cache
+            else:
+                async_token_cache = self._gcp_token_cache.to_async()
+        converted = AsyncObjectStore(
+            self._source_config_or_uri,
+            options=self._source_options,
+            signing=self._signing,
+            token_cache=async_token_cache,
+        )
+        if self._scheme == "memory":
+            converted._memory = self._memory
+        return converted
+
+    def put(self, path: str, data: Buffer) -> PutResult:
+        """Write any Buffer (bytes, bytearray, memoryview) to the given object key."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        view = memoryview(data).cast("B")
+        if self._native is not None:
+            native_meta = self._native.put(key, view)
+            fallback_etag = "" if getattr(native_meta, "etag", None) else f"{view.nbytes:016x}"
+            return self._native_to_put_result(native_meta, fallback_etag)
+        digest = hashlib.sha256(view).hexdigest()[:16]
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        if self._local_root is not None:
+            target = self._resolve_local(key)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("wb") as handle:
+                handle.write(view)
+            return PutResult(path=key, size=view.nbytes, etag=digest)
+        raw = view.tobytes()
+        meta = ObjectMeta(path=key, size=len(raw), last_modified=timestamp, etag=digest)
+        self._memory[key] = (raw, meta)
+        return PutResult(path=key, size=len(raw), etag=digest)
+
+    def put_file(self, path: str, file_path: str | Path) -> PutResult:
+        """Read a local file and upload it to the given object key."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        resolved_src = Path(file_path)
+        if not resolved_src.exists():
+            msg = f"Source file not found: {resolved_src}"
+            raise FileNotFoundError(msg)
+        if self._native is not None and hasattr(self._native, "put_file"):
+            native_meta = self._native.put_file(key, str(resolved_src))
+            return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
+        return self.put(path, resolved_src.read_bytes())
+
+    def put_multipart(self, path: str, parts: Sequence[Buffer]) -> PutResult:
+        """Concatenate and upload multiple buffer parts atomically."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None:
+            views = [memoryview(part).cast("B") for part in parts]
+            native_meta = self._native.put_multipart(key, views)
+            etag = native_meta.etag or f"{int(native_meta.size):016x}"
+            return PutResult(
+                path=str(native_meta.path),
+                size=int(native_meta.size),
+                etag=str(etag),
+                version=native_meta.version,
+            )
+        combined = bytearray()
+        for part in parts:
+            combined.extend(memoryview(part).cast("B"))
+        return self.put(path, memoryview(combined))
+
+    def get(self, path: str) -> bytes:
+        """Read full object bytes for the given key."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None:
+            return bytes(self._native.get(key))
+        if self._local_root is not None:
+            target = self._resolve_local(key)
+            if not target.exists():
+                msg = f"Object not found: {key}"
+                raise FileNotFoundError(msg)
+            return target.read_bytes()
+        entry = self._memory.get(key)
+        if entry is None:
+            msg = f"Object not found: {key}"
+            raise FileNotFoundError(msg)
+        return entry[0]
+
+    def get_view(self, path: str) -> memoryview:
+        """Return a zero-copy memoryview over the object payload."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None and hasattr(self._native, "get_buffer"):
+            return memoryview(self._native.get_buffer(key))
+        return memoryview(self.get(path))
+
+    def get_range(self, path: str, offset: int, length: int) -> bytes:
+        """Read a byte slice of length bytes starting at offset."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None:
+            return bytes(self._native.get_range(key, offset, length))
+        view = self.get_view(path)
+        return bytes(view[offset : offset + length])
+
+    def head(self, path: str) -> ObjectMeta:
+        """Return object metadata without transferring the full payload."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None:
+            native_meta = self._native.head(key)
+            return self._native_to_object_meta(native_meta)
+        if self._local_root is not None:
+            target = self._resolve_local(key)
+            if not target.exists():
+                msg = f"Object not found: {key}"
+                raise FileNotFoundError(msg)
+            stat = target.stat()
+            timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime))
+            return ObjectMeta(path=key, size=stat.st_size, last_modified=timestamp)
+        entry = self._memory.get(key)
+        if entry is None:
+            msg = f"Object not found: {key}"
+            raise FileNotFoundError(msg)
+        return entry[1]
+
+    def exists(self, path: str) -> bool:
+        """Return True if the object key exists."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None:
+            return bool(self._native.exists(key))
+        if self._local_root is not None:
+            return self._resolve_local(key).exists()
+        return key in self._memory
+
+    def delete(self, path: str) -> None:
+        """Delete the object at the given key."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None:
+            try:
+                self._native.delete(key)
+            except FileNotFoundError:
+                return
+            return
+        if self._local_root is not None:
+            target = self._resolve_local(key)
+            if target.exists():
+                target.unlink()
+            return
+        self._memory.pop(key, None)
+
+    def copy(self, src: str, dst: str) -> None:
+        """Copy an object within the store from src to dst."""
+        src_key = self._normalize_key(src)
+        dst_key = self._normalize_key(dst)
+        if self._local_root is not None:
+            self._resolve_local(src_key)
+            self._resolve_local(dst_key)
+        if self._native is not None:
+            self._native.copy(src_key, dst_key)
+            return
+        if self._local_root is not None:
+            src_path = self._resolve_local(src_key)
+            dst_path = self._resolve_local(dst_key)
+            if not src_path.exists():
+                msg = f"Source object not found: {src_key}"
+                raise FileNotFoundError(msg)
+            dst_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_path, dst_path)
+            return
+        entry = self._memory.get(src_key)
+        if entry is None:
+            msg = f"Source object not found: {src_key}"
+            raise FileNotFoundError(msg)
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        meta = ObjectMeta(path=dst_key, size=entry[1].size, last_modified=timestamp, etag=entry[1].etag)
+        self._memory[dst_key] = (entry[0], meta)
+
+    def list(self, prefix: str = "") -> list[ObjectMeta]:
+        """List objects matching prefix."""
+        norm_prefix = self._normalize_key(prefix) if prefix else ""
+        if self._native is not None:
+            items = self._native.list(norm_prefix or None)
+            return [
+                self._native_to_object_meta(item)
+                for item in items
+                if not norm_prefix or str(item.path).startswith(norm_prefix)
+            ]
+        if self._local_root is not None:
+            results: list[ObjectMeta] = []
+            for root, _, files in os.walk(self._local_root):
+                for file_name in files:
+                    file_path = Path(root) / file_name
+                    rel_key = file_path.relative_to(self._local_root).as_posix()
+                    if norm_prefix and not rel_key.startswith(norm_prefix):
+                        continue
+                    stat = file_path.stat()
+                    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime))
+                    results.append(ObjectMeta(path=rel_key, size=stat.st_size, last_modified=timestamp))
+            return sorted(results, key=lambda m: m.path)
+        results = [meta for key, (_, meta) in self._memory.items() if not norm_prefix or key.startswith(norm_prefix)]
+        return sorted(results, key=lambda m: m.path)
+
+    def open_reader(self, path: str, *, size: int | None = None) -> SyncReadableFile:
+        """Open a seekable read-only SyncReadableFile stream over the given object key."""
+        return SyncReadableFile(self, path, size=size)
+
+    def open_readable_file(self, path: str, *, size: int | None = None) -> SyncReadableFile:
+        """Open a seekable read-only SyncReadableFile stream over the given object key."""
+        return SyncReadableFile(self, path, size=size)
+
+    def presign_get(
+        self,
+        path: str,
+        *,
+        expires_in_secs: int = 3600,
+        timestamp: int | None = None,
+    ) -> str:
+        """Generate a presigned GET URL for the given object key."""
+        return self._presign(path, method="GET", expires_in_secs=expires_in_secs, timestamp=timestamp)
+
+    def presign_put(
+        self,
+        path: str,
+        *,
+        expires_in_secs: int = 3600,
+        timestamp: int | None = None,
+    ) -> str:
+        """Generate a presigned PUT URL for the given object key."""
+        return self._presign(path, method="PUT", expires_in_secs=expires_in_secs, timestamp=timestamp)
+
+
+class AsyncObjectStore(_BaseObjectStore):
+    """Asynchronous object store supporting zero-copy buffers, Tokio awaitables, and V4 presigning."""
+
+    __slots__ = ()
+
+    def __init__(
+        self,
+        url: str | StorageConfig = "memory://",
+        *,
+        options: dict[str, str] | None = None,
+        signing: SigningConfig | None = None,
+        token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
+    ) -> None:
+        resolved_cache = token_cache.to_async() if isinstance(token_cache, SyncGcpTokenCache) else token_cache
+        super().__init__(url, options=options, signing=signing, token_cache=resolved_cache)
+        native_mod = self._get_native_module()
+        if native_mod is not None and self._scheme in {
+            "memory",
+            "file",
+            "s3",
+            "gs",
+            "gcs",
+            "az",
+            "azure",
+            "abfs",
+            "oci",
+            "http",
+            "https",
+            "r2",
+            "b2",
+        }:
+            try:
+                native_cls = getattr(native_mod, "AsyncObjectStore", None)
+                if native_cls is not None:
+                    self._native = native_cls(self._url, self._options or None)
+            except (RuntimeError, OSError, ValueError):
+                self._native = None
+
+    async def __aenter__(self) -> Self:
+        """Enter the async context manager and return self."""
+        return self
+
+    async def __aexit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        """Close the object store when exiting the async context manager."""
+        _ = (exc_type, exc_val, exc_tb)
+        self.close()
+
+    def to_sync(self) -> SyncObjectStore:
+        """Return an equivalent SyncObjectStore instance targeting the same storage configuration."""
+        sync_token_cache: SyncGcpTokenCache | None = None
+        if self._gcp_token_cache is not None:
+            if isinstance(self._gcp_token_cache, SyncGcpTokenCache):
+                sync_token_cache = self._gcp_token_cache
+            else:
+                sync_token_cache = self._gcp_token_cache.to_sync()
+        converted = SyncObjectStore(
+            self._source_config_or_uri,
+            options=self._source_options,
+            signing=self._signing,
+            token_cache=sync_token_cache,
+        )
+        if self._scheme == "memory":
+            converted._memory = self._memory
+        return converted
+
+    async def put(self, path: str, data: Buffer) -> PutResult:
+        """Asynchronously write any Buffer to the given object key."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        view = memoryview(data).cast("B")
+        if self._native is not None:
+            native_meta = await self._native.put(key, view)
+            fallback_etag = "" if getattr(native_meta, "etag", None) else f"{view.nbytes:016x}"
+            return self._native_to_put_result(native_meta, fallback_etag)
+        digest = hashlib.sha256(view).hexdigest()[:16]
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        if self._local_root is not None:
+            target = self._resolve_local(key)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("wb") as handle:
+                handle.write(view)
+            return PutResult(path=key, size=view.nbytes, etag=digest)
+        raw = view.tobytes()
+        meta = ObjectMeta(path=key, size=len(raw), last_modified=timestamp, etag=digest)
+        self._memory[key] = (raw, meta)
+        return PutResult(path=key, size=len(raw), etag=digest)
+
+    async def put_file(self, path: str, file_path: str | Path) -> PutResult:
+        """Asynchronously read a local file and upload it to the given object key."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        resolved_src = Path(file_path)
+        if not resolved_src.exists():
+            msg = f"Source file not found: {resolved_src}"
+            raise FileNotFoundError(msg)
+        if self._native is not None and hasattr(self._native, "put_file"):
+            native_meta = await self._native.put_file(key, str(resolved_src))
+            return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
+        return await self.put(path, resolved_src.read_bytes())
+
+    async def put_multipart(self, path: str, parts: Sequence[Buffer]) -> PutResult:
+        """Asynchronously upload multiple buffer parts atomically."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None:
+            views = [memoryview(part).cast("B") for part in parts]
+            native_meta = await self._native.put_multipart(key, views)
+            etag = native_meta.etag or f"{int(native_meta.size):016x}"
+            return PutResult(
+                path=str(native_meta.path),
+                size=int(native_meta.size),
+                etag=str(etag),
+                version=native_meta.version,
+            )
+        combined = bytearray()
+        for part in parts:
+            combined.extend(memoryview(part).cast("B"))
+        return await self.put(path, memoryview(combined))
+
+    async def get(self, path: str) -> bytes:
+        """Asynchronously read an object from the store via Rust Tokio awaitable."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None:
+            return bytes(await self._native.get(key))
+        if self._local_root is not None:
+            target = self._resolve_local(key)
+            if not target.exists():
+                msg = f"Object not found: {key}"
+                raise FileNotFoundError(msg)
+            return target.read_bytes()
+        entry = self._memory.get(key)
+        if entry is None:
+            msg = f"Object not found: {key}"
+            raise FileNotFoundError(msg)
+        return entry[0]
+
+    async def get_view(self, path: str) -> memoryview:
+        """Asynchronously read a zero-copy memoryview over an object payload."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None and hasattr(self._native, "get_buffer"):
+            return memoryview(await self._native.get_buffer(key))
+        return memoryview(await self.get(path))
+
+    async def get_range(self, path: str, offset: int, length: int) -> bytes:
+        """Asynchronously read a byte range from the store via Rust Tokio awaitable."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None:
+            return bytes(await self._native.get_range(key, offset, length))
+        view = await self.get_view(path)
+        return bytes(view[offset : offset + length])
+
+    async def head(self, path: str) -> ObjectMeta:
+        """Asynchronously read object metadata via Rust Tokio awaitable."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None:
+            native_meta = await self._native.head(key)
+            return self._native_to_object_meta(native_meta)
+        if self._local_root is not None:
+            target = self._resolve_local(key)
+            if not target.exists():
+                msg = f"Object not found: {key}"
+                raise FileNotFoundError(msg)
+            stat = target.stat()
+            timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime))
+            return ObjectMeta(path=key, size=stat.st_size, last_modified=timestamp)
+        entry = self._memory.get(key)
+        if entry is None:
+            msg = f"Object not found: {key}"
+            raise FileNotFoundError(msg)
+        return entry[1]
+
+    async def exists(self, path: str) -> bool:
+        """Asynchronously check whether an object exists via Rust Tokio awaitable."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None:
+            return bool(await self._native.exists(key))
+        if self._local_root is not None:
+            return self._resolve_local(key).exists()
+        return key in self._memory
+
+    async def delete(self, path: str) -> None:
+        """Asynchronously delete an object via Rust Tokio awaitable."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if self._native is not None:
+            try:
+                await self._native.delete(key)
+            except FileNotFoundError:
+                return
+            return
+        if self._local_root is not None:
+            target = self._resolve_local(key)
+            if target.exists():
+                target.unlink()
+            return
+        self._memory.pop(key, None)
+
+    async def copy(self, src: str, dst: str) -> None:
+        """Asynchronously copy an object within the store via Rust Tokio awaitable."""
+        src_key = self._normalize_key(src)
+        dst_key = self._normalize_key(dst)
+        if self._local_root is not None:
+            self._resolve_local(src_key)
+            self._resolve_local(dst_key)
+        if self._native is not None:
+            await self._native.copy(src_key, dst_key)
+            return
+        if self._local_root is not None:
+            src_path = self._resolve_local(src_key)
+            dst_path = self._resolve_local(dst_key)
+            if not src_path.exists():
+                msg = f"Source object not found: {src_key}"
+                raise FileNotFoundError(msg)
+            dst_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_path, dst_path)
+            return
+        entry = self._memory.get(src_key)
+        if entry is None:
+            msg = f"Source object not found: {src_key}"
+            raise FileNotFoundError(msg)
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        meta = ObjectMeta(path=dst_key, size=entry[1].size, last_modified=timestamp, etag=entry[1].etag)
+        self._memory[dst_key] = (entry[0], meta)
+
+    async def list(self, prefix: str = "") -> list[ObjectMeta]:
+        """Asynchronously list objects matching prefix via Rust Tokio awaitable."""
+        norm_prefix = self._normalize_key(prefix) if prefix else ""
+        if self._native is not None:
+            items = await self._native.list(norm_prefix or None)
+            return [
+                self._native_to_object_meta(item)
+                for item in items
+                if not norm_prefix or str(item.path).startswith(norm_prefix)
+            ]
+        if self._local_root is not None:
+            results: list[ObjectMeta] = []
+            for root, _, files in os.walk(self._local_root):
+                for file_name in files:
+                    file_path = Path(root) / file_name
+                    rel_key = file_path.relative_to(self._local_root).as_posix()
+                    if norm_prefix and not rel_key.startswith(norm_prefix):
+                        continue
+                    stat = file_path.stat()
+                    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime))
+                    results.append(ObjectMeta(path=rel_key, size=stat.st_size, last_modified=timestamp))
+            return sorted(results, key=lambda m: m.path)
+        results = [meta for key, (_, meta) in self._memory.items() if not norm_prefix or key.startswith(norm_prefix)]
+        return sorted(results, key=lambda m: m.path)
+
+    def open_reader(self, path: str, *, size: int | None = None) -> AsyncReadableFile:
+        """Open a seekable read-only AsyncReadableFile stream over the given object key."""
+        return AsyncReadableFile(self, path, size=size)
+
+    def open_readable_file(self, path: str, *, size: int | None = None) -> AsyncReadableFile:
+        """Open a seekable read-only AsyncReadableFile stream over the given object key."""
+        return AsyncReadableFile(self, path, size=size)
+
+    async def presign_get(
+        self,
+        path: str,
+        *,
+        expires_in_secs: int = 3600,
+        timestamp: int | None = None,
+    ) -> str:
+        """Asynchronously generate a presigned GET URL via Rust Tokio awaitable without blocking the GIL."""
+        return await self._presign_async(path, method="GET", expires_in_secs=expires_in_secs, timestamp=timestamp)
+
+    async def presign_put(
+        self,
+        path: str,
+        *,
+        expires_in_secs: int = 3600,
+        timestamp: int | None = None,
+    ) -> str:
+        """Asynchronously generate a presigned PUT URL via Rust Tokio awaitable without blocking the GIL."""
+        return await self._presign_async(path, method="PUT", expires_in_secs=expires_in_secs, timestamp=timestamp)
+
+
+class SyncReadableFile(io.RawIOBase):
+    """Seekable synchronous read-only file-like object backed by SyncObjectStore range reads (`get_range`).
 
     Enables PyArrow, Polars, and DataFusion to inspect Parquet footer metadata and read
     targeted row-group byte slices without downloading full multi-gigabyte blobs.
@@ -2179,7 +2502,7 @@ class ReadableFile(io.RawIOBase):
 
     __slots__ = ("_closed", "_key", "_pos", "_size", "_store")
 
-    def __init__(self, store: ObjectStore, key: str, *, size: int | None = None) -> None:
+    def __init__(self, store: SyncObjectStore, key: str, *, size: int | None = None) -> None:
         super().__init__()
         self._store = store
         self._key = key
@@ -2274,17 +2597,6 @@ class ReadableFile(io.RawIOBase):
         bounded_len = min(length, self._size - offset)
         return self._store.get_range(self._key, offset, bounded_len)
 
-    async def read_at_async(self, offset: int, length: int) -> bytes:
-        """Asynchronously read length bytes at offset without mutating the stream cursor."""
-        self._ensure_open()
-        if offset < 0 or length < 0:
-            msg = "offset and length must be non-negative"
-            raise ValueError(msg)
-        if offset >= self._size or length == 0:
-            return b""
-        bounded_len = min(length, self._size - offset)
-        return await self._store.get_range_async(self._key, offset, bounded_len)
-
     def close(self) -> None:
         """Mark the file handle as closed."""
         self._closed = True
@@ -2292,5 +2604,119 @@ class ReadableFile(io.RawIOBase):
 
     def _ensure_open(self) -> None:
         if self._closed:
-            msg = "I/O operation on closed ReadableFile"
+            msg = "I/O operation on closed SyncReadableFile"
             raise ValueError(msg)
+
+
+class AsyncReadableFile:
+    """Seekable asynchronous read-only stream backed by AsyncObjectStore range reads (`get_range`)."""
+
+    __slots__ = ("_closed", "_key", "_pos", "_size", "_store")
+
+    def __init__(self, store: AsyncObjectStore, key: str, *, size: int | None = None) -> None:
+        self._store = store
+        self._key = key
+        self._size = size
+        self._pos = 0
+        self._closed = False
+
+    @property
+    def size(self) -> int | None:
+        """Return total object byte size when resolved."""
+        return self._size
+
+    @property
+    def closed(self) -> bool:
+        """Return True if the file handle has been closed."""
+        return self._closed
+
+    async def __aenter__(self) -> Self:
+        """Enter the async context manager and return self."""
+        return self
+
+    async def __aexit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        """Close the handle when exiting the async context manager."""
+        _ = (exc_type, exc_val, exc_tb)
+        self.close()
+
+    def readable(self) -> bool:
+        """Return True indicating this stream supports reading."""
+        return True
+
+    def seekable(self) -> bool:
+        """Return True indicating this stream supports random access seeking."""
+        return True
+
+    def writable(self) -> bool:
+        """Return False indicating this stream is read-only."""
+        return False
+
+    def tell(self) -> int:
+        """Return the current cursor byte offset."""
+        self._ensure_open()
+        return self._pos
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        """Move the read cursor to a new byte offset and return the updated position."""
+        self._ensure_open()
+        if whence == io.SEEK_SET:
+            target = offset
+        elif whence == io.SEEK_CUR:
+            target = self._pos + offset
+        elif whence == io.SEEK_END:
+            if self._size is None:
+                msg = "Seeking relative to SEEK_END on AsyncReadableFile requires known size"
+                raise ValueError(msg)
+            target = self._size + offset
+        else:
+            msg = f"Invalid whence value: {whence}"
+            raise ValueError(msg)
+        if target < 0:
+            msg = f"Negative seek position: {target}"
+            raise ValueError(msg)
+        if self._size is not None:
+            self._pos = min(target, self._size)
+        else:
+            self._pos = target
+        return self._pos
+
+    async def read(self, size: int = -1) -> bytes:
+        """Asynchronously read up to size bytes starting at the current cursor position."""
+        self._ensure_open()
+        total_size = await self._ensure_size()
+        if self._pos >= total_size:
+            return b""
+        remaining = total_size - self._pos
+        length = remaining if size < 0 else min(size, remaining)
+        if length <= 0:
+            return b""
+        data = await self._store.get_range(self._key, self._pos, length)
+        self._pos += len(data)
+        return data
+
+    async def read_at(self, offset: int, length: int) -> bytes:
+        """Asynchronously read length bytes at offset without mutating the stream cursor."""
+        self._ensure_open()
+        if offset < 0 or length < 0:
+            msg = "offset and length must be non-negative"
+            raise ValueError(msg)
+        total_size = await self._ensure_size()
+        if offset >= total_size or length == 0:
+            return b""
+        bounded_len = min(length, total_size - offset)
+        return await self._store.get_range(self._key, offset, bounded_len)
+
+    def close(self) -> None:
+        """Mark the file handle as closed."""
+        self._closed = True
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            msg = "I/O operation on closed AsyncReadableFile"
+            raise ValueError(msg)
+
+    async def _ensure_size(self) -> int:
+        if self._size is None:
+            meta = await self._store.head(self._key)
+            self._size = meta.size
+        return self._size

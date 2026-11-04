@@ -30,7 +30,7 @@ from vertebra.extensions.litestar.vite import (
     _StaticBeforeRequestHook,
 )
 from vertebra.framework import App
-from vertebra.framework.inertia import InertiaConfig, InertiaMiddleware, inertia
+from vertebra.framework.inertia import AsyncInertiaMiddleware, InertiaConfig, SyncInertiaMiddleware, inertia
 from vertebra.framework.openapi import (
     AsyncAPIDocsConfig,
     ElementsDocsConfig,
@@ -41,7 +41,7 @@ from vertebra.framework.openapi import (
     ScalarSpecSource,
     SwaggerDocsConfig,
 )
-from vertebra.framework.ssr import EmbeddedSSRClient, SsrRenderTimeoutError, render_page_shell
+from vertebra.framework.ssr import SSRRenderTimeoutError, SyncEmbeddedSSRClient, render_page_shell
 from vertebra.utils.serializers import decode_json
 
 
@@ -131,7 +131,7 @@ def test_escape_html_json_and_inertia_early_hints_and_static_hooks() -> None:
             }
         }
     )
-    mw = InertiaMiddleware(
+    mw = SyncInertiaMiddleware(
         InertiaConfig(
             enabled=True,
             asset_manifest=manifest,
@@ -140,6 +140,7 @@ def test_escape_html_json_and_inertia_early_hints_and_static_hooks() -> None:
             static_props={"appTitle": "Vertebra"},
         )
     )
+    assert AsyncInertiaMiddleware is not None
 
     class _FakeReq:
         method = "GET"
@@ -196,13 +197,13 @@ def test_quickjs_esm_module_and_timeout_recovery(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    client = EmbeddedSSRClient(str(esm_bundle), pool_size=1, timeout_ms=50)
+    client = SyncEmbeddedSSRClient(str(esm_bundle), pool_size=1, timeout_ms=50)
     try:
         res = client.render({"component": "Home", "props": {"greeting": "Hello ESM"}})
         assert res.head == ["<title>ESM: Home</title>"]
         assert "Hello ESM" in res.body
 
-        with pytest.raises(SsrRenderTimeoutError):
+        with pytest.raises(SSRRenderTimeoutError):
             client.render({"component": "InfiniteLoop", "props": {}})
 
         recovered = client.render({"component": "Recovered", "props": {"greeting": "After Timeout"}})

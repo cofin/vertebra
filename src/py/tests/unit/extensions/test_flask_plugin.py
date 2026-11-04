@@ -12,22 +12,25 @@ import pytest
 from vertebra._vertebra import AsgiProtocol, AsgiScope, Request, WsgiEnviron, run_wsgi_callable
 from vertebra.extensions.flask import (
     AsyncAPIDocsConfig,
+    AsyncObjectStore,
+    AsyncStorageRegistry,
     FastPath,
     FlaskCachingBackend,
-    FlaskConfig,
-    FlaskPlugin,
     JWTAuthGuard,
     MailBackend,
     MailConfig,
     MailMessage,
     MCPConfig,
     MemoryConfig,
-    ObjectStore,
     OpenAPIConfig,
     QueueBackend,
     RateLimitGuard,
     RouteCompiler,
     SwaggerDocsConfig,
+    SyncObjectStore,
+    SyncStorageRegistry,
+    VertebraConfig,
+    VertebraPlugin,
     ViteConfig,
     attach_storage,
     convert_werkzeug_rule,
@@ -142,9 +145,9 @@ def test_convert_werkzeug_rule_and_flask_fastpath(tmp_path: Any) -> None:
         methods=["POST"],
     )
 
-    plugin = FlaskPlugin(
+    plugin = VertebraPlugin(
         app,
-        config=FlaskConfig(
+        config=VertebraConfig(
             openapi=OpenAPIConfig(
                 title="Orders Flask API",
                 version="1.2.0",
@@ -225,9 +228,10 @@ async def test_flask_ecosystem_bridges() -> None:
     assert compute(5) == 10
     assert calls == 1
 
-    store = ObjectStore.from_config(MemoryConfig())
+    store = SyncObjectStore.from_config(MemoryConfig())
     store.put("reports/q1.txt", b"quarter-1")
     reg = attach_storage(app, store)
+    assert isinstance(reg, SyncStorageRegistry)
     file_resp = send_storage_file(reg.get("default"), "reports/q1.txt", as_attachment=True, download_name="q1.txt")
     assert file_resp.status == 200
     assert bytes(file_resp.body) == b"quarter-1"
@@ -236,6 +240,12 @@ async def test_flask_ecosystem_bridges() -> None:
         and (b'filename="q1.txt"' in v if isinstance(v, bytes) else 'filename="q1.txt"' in v)
         for k, v in file_resp.headers
     )
+
+    async_store = AsyncObjectStore.from_config(MemoryConfig())
+    await async_store.put("reports/q2.txt", b"quarter-2")
+    async_reg = attach_storage(app, async_store, attribute="async_storage")
+    assert isinstance(async_reg, AsyncStorageRegistry)
+    assert bytes(await async_reg.get("default").get("reports/q2.txt")) == b"quarter-2"
 
     mail = MailBackend(MailConfig(suppress_send=True))
     mail.init_app(app)

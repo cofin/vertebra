@@ -2,7 +2,7 @@
 type: Spec
 flow_id: queues-tasks-and-channels
 title: Native Queues, Tasks, Channels, and Stores
-description: Build native Vertebra queue backends for Postgres and Oracle on the Rust drivers, plug them into first-party QueueService, litestar-queues, and Django tasks with settings-driven selection and DI, unify cron parsing, provide per-engine Litestar channel backends, and replace duplicated key-value stores.
+description: Build native Vertebra QueueStore backends for PostgreSQL and Oracle on the standalone Rust driver wheels, plug them into first-party QueueService, litestar-queues, and Django tasks with settings-driven selection and DI, unify cron parsing, provide distributed Litestar/Starlette channel backends, and consolidate ValkeyStore.
 state: draft
 parent_prd: integration-remediation
 research:
@@ -13,7 +13,7 @@ state_revision: 0
 current_task: null
 last_verified_checkpoint: null
 created_at: 2026-11-03T03:30:00Z
-updated_at: 2026-11-03T04:05:00Z
+updated_at: 2026-11-04T01:19:00Z
 tags: [queues, tasks, django, litestar, channels, stores, di]
 ---
 
@@ -21,67 +21,53 @@ tags: [queues, tasks, django, litestar, channels, stores, di]
 
 ## Charter
 
-Vertebra does the work with its own components and plugs into the other frameworks *(user direction)*. This flow builds native queue backends for **Postgres and Oracle** on the Rust drivers. The same backends serve the first-party `QueueService`, litestar-queues, and Django's native tasks, and all three resolve dependencies through Vertebra DI. Other engines build on this later.
+Vertebra executes durable queuing and pub/sub on its own Rust-backed adapter primitives and plugs cleanly into framework contracts. This flow builds native `QueueStore` implementations for **PostgreSQL and Oracle**, wires them into first-party `QueueService`, `litestar-queues`, and Django `django.tasks` with DI-resolved task dependencies, provides distributed Litestar/Starlette channel backends over `NotificationSource`, and consolidates `ValkeyStore`.
 
 ## Scope
 
-1. **Native queue stores.** `db/adapters/postgres/queue.py::PostgresQueueStore` and `db/adapters/oracle/queue.py::OracleQueueStore` implement the `QueueStore` protocol from `db-layout-and-contract`:
-   - enqueue and bulk enqueue
-   - `FOR UPDATE SKIP LOCKED` claim with visibility leases and fenced completion on `status` + `attempt`
-   - heartbeats, retry with backoff, DLQ, and scheduled promotion
-   - wakeup: Postgres LISTEN/NOTIFY through the native `NotificationSource`; Oracle TxEventQ or polling
-   - idempotent DDL
-2. **First-party service.**
-   - `framework/queues/base.py::QueueService._build_backend` becomes a backend registry keyed by config type.
-   - Settings select the backend: `QueueBackendSettings(kind="postgres" | "oracle" | "memory", ...)`.
-   - Delete the fake engine modules `framework/queues/{postgres,oracle,spanner,redis}.py`, their in-memory executors, and the `_InMemoryRedisStreamClient` fallback.
-   - Keep `MemoryQueueBackend` for tests and single-process use.
-   - Keep one cron parser (`framework/queues/scheduler.py::CronExpression`) and delete `base.py::_cron_matches`/`_cron_matches_field`.
-3. **litestar-queues.**
-   - `extensions/litestar/queues/backend.py` gains native `VertebraPostgresQueueBackend`/`VertebraOracleQueueBackend` implementing litestar-queues `BaseQueueBackend`. They cover claim fencing, heartbeats, maintenance leases, execution refs, and statistics, with the native queue stores underneath.
-   - `SHMQueueBackend` stays for single-host use.
-   - Settings select the backend.
-   - SQLSpec-config delegation through litestar-queues' SQLSpec backend is optional once [litestar-queues#186](https://github.com/cofin/litestar-queues/issues/186) ships.
-4. **Django tasks.**
-   - `extensions/django/tasks.py::VertebraTaskBackend` implements `django.tasks.backends.base.BaseTaskBackend` on `QueueService`.
-   - A management command runs the worker.
-   - `extensions/django/queues.py` is folded in.
-5. **DI.** Task parameters resolve through `framework/di.py::Container` with a per-task scope in all three integrations.
-6. **Channels.**
-   - Litestar `ChannelsBackend` implementations for Postgres (LISTEN/NOTIFY) and Oracle (TxEventQ) on the native `NotificationSource`s, plus Redis/Valkey once `native-embedded-and-cache-drivers` lands.
-   - `framework/channels.py::ChannelBus` is rebuilt on `NotificationSource`.
-   - The `extensions/litestar/channels.py::swap_channels_backend` monkeypatching is removed.
-7. **Stores.**
-   - One `ValkeyStore(litestar.stores.base.Store)` in `db/adapters/valkey/` with RESP3 client-cache invalidation.
-   - It replaces `framework/stores.py::KeyValueStore` and the duplicated parts of `extensions/litestar/store.py::MemoryStore`.
-8. **Docs.** Correct `domains/framework/distributed-queues-and-email.md` and the queue usage docs.
+1. **Native queue stores.** `vertebra/db/adapters/postgres/queue.py::PostgresQueueStore` (`vertebra-postgres`) and `vertebra/db/adapters/oracle/queue.py::OracleQueueStore` (`vertebra-oracle`) implement `QueueStore` (`db-layout-and-contract`):
+   - Single and bulk `enqueue`, `FOR UPDATE SKIP LOCKED` `claim` with visibility leases, fenced `complete`/`fail` on `(job_id, attempt)`, `heartbeat`, exponential retry backoff, dead-letter queue transition, `promote_scheduled`, idempotent DDL (`ensure_schema`), and `NotificationSource` wakeups (`PostgresNotificationSource` `LISTEN`/`NOTIFY` and Oracle TxEventQ / polling fallback).
+2. **First-party `QueueService`.**
+   - Convert `framework/queues/base.py::QueueService._build_backend` to a config-keyed backend registry driven by `QueueBackendSettings(kind="postgres" | "oracle" | "memory", ...)`.
+   - Delete the in-memory fake engine modules `framework/queues/{postgres,oracle,spanner,redis}.py` and `_InMemoryRedisStreamClient`, keeping `MemoryQueueBackend` strictly for explicit `kind="memory"` single-process/test use.
+   - Keep one cron parser (`framework/queues/scheduler.py::CronExpression`) and delete `base.py::_cron_matches` / `_cron_matches_field`.
+3. **`litestar-queues` integration.**
+   - Add `PostgresQueueBackend` and `OracleQueueBackend` in `extensions/litestar/queues/backend.py` implementing `litestar_queues` `BaseQueueBackend` (claim fencing, heartbeats, maintenance leases, execution refs, and statistics) over `PostgresQueueStore` and `OracleQueueStore`, selected by settings alongside `SHMQueueBackend` for single-host deployments.
+4. **Django `django.tasks` integration.**
+   - Implement `extensions/django/tasks.py::TaskBackend` (`django.tasks.backends.base.BaseTaskBackend`) backed by `QueueService`, add a Django management command to run workers, and fold `extensions/django/queues.py` into `tasks.py`.
+5. **Dependency injection.**
+   - Resolve task handler parameters through `framework/di.py::Container` within a per-task lifecycle scope across `QueueService`, `litestar-queues`, and Django tasks.
+6. **Distributed channels.**
+   - Building on `ChannelBus` (decoupled from `DatabaseChannelBackend` in `db-engine-primitives:t03`), provide Litestar and Starlette `ChannelsBackend` implementations backed by `PostgresNotificationSource`, `OracleNotificationSource`, and `RedisNotificationSource`, and remove `extensions/litestar/channels.py::swap_channels_backend` monkeypatching.
+7. **Key-value stores.**
+   - Implement `ValkeyStore(litestar.stores.base.Store)` in `extensions/litestar/store.py` (consuming `vertebra.db.adapters.valkey` / `vertebra._redis` with RESP3 client-side tracking invalidation), replacing `framework/stores.py::KeyValueStore` duplication and aligning `extensions/starlette/store.py`.
+8. **Docs & OKF.** Update `docs/usage/queues-and-realtime.md`, `docs/reference/queues.md`, and `.agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md`.
 
 ## Out of Scope
 
-Spanner and Redis queue backends (backlog).
+Spanner and Redis/Valkey native `QueueStore` backends (deferred to PRD backlog).
 
 ## Public Seams
 
-`QueueService`, `QueueBackend`, `QueueBackendSettings`, `VertebraPostgresQueueBackend`, `VertebraOracleQueueBackend`, `VertebraTaskBackend`, the channel backends, and `ValkeyStore`.
+`PostgresQueueStore`, `OracleQueueStore`, `QueueService`, `QueueBackend`, `QueueBackendSettings`, `PostgresQueueBackend`, `OracleQueueBackend`, `TaskBackend`, distributed `ChannelsBackend`s, and `ValkeyStore`.
 
 ## Dependencies
 
-native-data-platform `native-postgres-driver` and `native-oracle-driver`. integration-remediation `sqlspec-adapter-parity`, for DI wiring parity.
+`native-data-platform` `native-postgres-driver`, `native-oracle-driver`, and `native-embedded-and-cache-drivers` (`refactor/sync-async-names @ 08ac03a`); `integration-remediation` `db-engine-primitives` and `sqlspec-adapter-parity`.
 
 ## Acceptance Boundary
 
-- Cross-process delivery integration tests pass on Postgres and Oracle 23ai.
-- A litestar-queues app runs tasks on `VertebraPostgresQueueBackend`.
-- Django `enqueue()` runs through the worker with DI-resolved dependencies.
-- `make lint-all` and `make py-test` pass.
+- Multi-process worker delivery, lease expiration recovery, and fenced completion integration tests pass against PostgreSQL and Oracle 23ai/26ai Free via `pytest-databases`.
+- A `litestar-queues` application executes tasks end-to-end on `PostgresQueueBackend`, and Django `task.enqueue()` executes via the worker command with DI-injected dependencies.
+- `make lint-all`, `make py-test`, and `make docs` pass.
 
 ## Draft Task Outline
 
-- t01 `PostgresQueueStore`.
-- t02 `OracleQueueStore`.
-- t03 `QueueService` registry + settings + fake module deletion + single cron parser.
-- t04 litestar-queues native Postgres backend.
-- t05 litestar-queues native Oracle backend.
-- t06 Django tasks backend + worker command + DI.
-- t07 Channel backends + `ChannelBus`.
-- t08 `ValkeyStore` + docs.
+- t01 `PostgresQueueStore` (`FOR UPDATE SKIP LOCKED`, leases, wakeups).
+- t02 `OracleQueueStore` (`FOR UPDATE SKIP LOCKED`, leases, TxEventQ wakeups).
+- t03 `QueueService` registry, `QueueBackendSettings`, fake queue module removal, and single `CronExpression` parser.
+- t04 `litestar-queues` native PostgreSQL backend.
+- t05 `litestar-queues` native Oracle backend.
+- t06 Django `django.tasks` backend, worker management command, and per-task DI scope.
+- t07 Distributed Litestar/Starlette `ChannelsBackend`s over `NotificationSource` + `swap_channels_backend` removal.
+- t08 `ValkeyStore` consolidation + docs & OKF update.
