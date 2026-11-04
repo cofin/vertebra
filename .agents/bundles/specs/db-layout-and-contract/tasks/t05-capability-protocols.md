@@ -14,7 +14,7 @@ files:
 tests:
   - src/py/tests/unit/db/test_native_db_drivers.py
 plan_revision: 4
-plan_commit: null
+plan_commit: "679a981"
 state_revision: 0
 claimed_by: null
 claimed_at: null

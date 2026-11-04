@@ -10,7 +10,7 @@ research:
   - research/rust-driver-crates_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 4
-plan_commit: null
+plan_commit: "679a981"
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null

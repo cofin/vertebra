@@ -110,7 +110,7 @@ tests:
   - src/py/tests/unit/framework/test_distributed_queues.py
   - src/py/tests/unit/storage/test_gcs_token_refresh.py
 plan_revision: 4
-plan_commit: null
+plan_commit: "679a981"
 state_revision: 0
 claimed_by: null
 claimed_at: null

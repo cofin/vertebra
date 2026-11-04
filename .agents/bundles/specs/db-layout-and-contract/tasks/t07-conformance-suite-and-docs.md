@@ -22,7 +22,7 @@ tests:
   - src/py/tests/integration/db/test_driver_conformance.py
   - src/py/tests/unit/docs/test_examples.py
 plan_revision: 4
-plan_commit: null
+plan_commit: "679a981"
 state_revision: 0
 claimed_by: null
 claimed_at: null
