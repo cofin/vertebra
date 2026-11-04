@@ -49,7 +49,7 @@ app = Litestar(
 
 ## Native Database Drivers & Adapters Matrix
 
-`vertebra.db` and `vertebra.extensions.sqlspec.adapters` provide synchronous and asynchronous drivers across 11 relational, analytical, cloud-native, and key-value engines:
+`vertebra.db.adapters` and `vertebra.extensions.sqlspec.adapters` provide synchronous and asynchronous drivers across 11 relational, analytical, cloud-native, and key-value engines:
 
 | Engine | SQLSpec Adapter Config | Native Config Class | Sync / Async Drivers | Key Capabilities |
 | --- | --- | --- | --- | --- |
@@ -77,7 +77,7 @@ The native Spanner and BigQuery drivers delegate gRPC Data, Database Admin, Stor
 - **GoogleSQL Positional Placeholders**: In GoogleSQL mode (`dialect="googlesql"`), positional `$1..$N` placeholders outside single-, double-, triple-quoted, raw, or bytes literals, backtick identifiers, and `--`, `#`, or `/* */` comments are rewritten to `@p1..@pN`.
 
 ```python
-from vertebra.db.spanner import SpannerConfig, SyncSpannerDriver
+from vertebra.db.adapters.spanner import SpannerConfig, SyncSpannerDriver
 
 emulator_config = SpannerConfig(
     project_id="local-project",

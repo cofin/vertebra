@@ -12,7 +12,7 @@ import pytest
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope
 from vertebra.agent.mcp.controllers import mcp_tool
-from vertebra.db.redis import AsyncRedisDriver, RedisConfig
+from vertebra.db.adapters.redis import AsyncRedisDriver, RedisConfig
 from vertebra.extensions.starlette import (
     AsyncStorageRegistry,
     CacheStore,

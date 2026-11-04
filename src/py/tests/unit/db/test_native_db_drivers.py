@@ -3,42 +3,132 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
+import sys
 import time
 from typing import Any, cast
 
 import pytest
 
+import vertebra
+import vertebra.db as vertebra_db
 from vertebra.db import (
     AlloyDBAuthType,
     AlloyDBClusterURI,
     AlloyDBConfig,
     AsyncAlloyDBDialer,
     AsyncCloudSQLDialer,
-    AsyncSQLiteDriver,
-    AsyncValkeyDriver,
     CDCConfig,
     ChangeFeed,
     CloudSQLConfig,
     CloudSQLInstanceURI,
-    DatabaseChannelBackend,
     DatabaseRegistry,
-    OracleConfig,
-    PostgreSQLConfig,
-    RedisConfig,
-    SQLiteConfig,
     SyncAlloyDBDialer,
     SyncCloudSQLDialer,
-    SyncMySQLDriver,
-    SyncPostgreSQLDriver,
-    SyncRedisDriver,
-    SyncSQLiteDriver,
-    SyncValkeyDriver,
-    ValkeyConfig,
 )
+from vertebra.db.adapters.mysql import SyncMySQLDriver
+from vertebra.db.adapters.oracle import OracleConfig
+from vertebra.db.adapters.postgres import PostgreSQLConfig, SyncPostgreSQLDriver
+from vertebra.db.adapters.redis import RedisConfig, SyncRedisDriver
+from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
+from vertebra.db.adapters.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
+from vertebra.db.channels import DatabaseChannelBackend
 from vertebra.extensions.litestar import ChannelsBackend, MemoryStore
 from vertebra.storage import GcpTokenSnapshot, SyncObjectStore
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.sync_tools import SyncPool
+
+_ADAPTER_ENGINES: tuple[str, ...] = (
+    "postgres",
+    "mysql",
+    "sqlite",
+    "oracle",
+    "mssql",
+    "duckdb",
+    "bigquery",
+    "spanner",
+    "redis",
+    "valkey",
+    "datafusion",
+)
+
+_EXPECTED_DB_EXPORTS: frozenset[str] = frozenset(
+    {
+        "ARROW_SHM_THRESHOLD_ROWS",
+        "AlloyDBAuthType",
+        "AlloyDBClusterURI",
+        "AlloyDBConfig",
+        "ArrowCursor",
+        "AsyncAlloyDBDialer",
+        "AsyncCloudSQLDialer",
+        "AsyncDatabaseDriver",
+        "BaseDatabaseConfig",
+        "CDCConfig",
+        "ChangeEvent",
+        "ChangeFeed",
+        "CloudSQLConfig",
+        "CloudSQLInstanceURI",
+        "CommonDriverMixin",
+        "DatabaseRegistry",
+        "SyncAlloyDBDialer",
+        "SyncCloudSQLDialer",
+        "SyncDatabaseDriver",
+        "TenantPredicate",
+        "TenantScopeConfig",
+        "ThreadOffloadAsyncDatabaseDriver",
+        "provide_bigquery_driver",
+        "provide_spanner_driver",
+    }
+)
+
+
+@pytest.mark.parametrize("engine", _ADAPTER_ENGINES)
+def test_adapter_package_imports_and_legacy_db_paths_removed(engine: str) -> None:
+    """Verify each engine lives under vertebra.db.adapters.<engine> and legacy vertebra.db.<engine> raises."""
+    adapter_mod = importlib.import_module(f"vertebra.db.adapters.{engine}")
+    assert adapter_mod.__all__
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module(f"vertebra.db.{engine}")
+
+
+@pytest.mark.parametrize("legacy_module", ["vertebra.db._arrow", "vertebra.db._registry"])
+def test_private_arrow_and_registry_modules_renamed(legacy_module: str) -> None:
+    """Verify vertebra.db.arrow and vertebra.db.registry replace underscored module names cleanly."""
+    assert importlib.import_module("vertebra.db.arrow") is not None
+    assert importlib.import_module("vertebra.db.registry") is not None
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module(legacy_module)
+
+
+def test_vertebra_db_lazy_exports_and_curated_engine_agnostic_all() -> None:
+    """Verify vertebra.db exposes only engine-agnostic exports and loads zero adapters at import time."""
+    assert frozenset(vertebra_db.__all__) == _EXPECTED_DB_EXPORTS
+
+    saved = {
+        name: sys.modules.pop(name)
+        for name in list(sys.modules)
+        if name == "vertebra.db" or name.startswith("vertebra.db.")
+    }
+    try:
+        fresh_db = importlib.import_module("vertebra.db")
+        assert frozenset(fresh_db.__all__) == _EXPECTED_DB_EXPORTS
+        loaded_adapters = [
+            name for name in sys.modules if name == "vertebra.db.adapters" or name.startswith("vertebra.db.adapters.")
+        ]
+        assert loaded_adapters == []
+        assert fresh_db.BaseDatabaseConfig is not None
+        assert fresh_db.ArrowCursor is not None
+        loaded_after_agnostic = [
+            name for name in sys.modules if name == "vertebra.db.adapters" or name.startswith("vertebra.db.adapters.")
+        ]
+        assert loaded_after_agnostic == []
+    finally:
+        for name in list(sys.modules):
+            if name == "vertebra.db" or name.startswith("vertebra.db."):
+                sys.modules.pop(name, None)
+        sys.modules.update(saved)
+        if "vertebra.db" in saved:
+            vertebra.__dict__["db"] = saved["vertebra.db"]
 
 
 def test_cloudsql_and_alloydb_dialers() -> None:

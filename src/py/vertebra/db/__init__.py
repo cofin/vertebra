@@ -1,269 +1,110 @@
-"""Native database drivers, Cloud SQL / AlloyDB dialers, Valkey/Redis, and DataFusion subsystem."""
+"""Database drivers, Cloud SQL and AlloyDB dialers, CDC, RLS, and Arrow IPC cursors."""
 
 from __future__ import annotations
 
-from vertebra.db._arrow import (
-    ARROW_SHM_THRESHOLD_ROWS,
-    ArrowCursor,
-)
-from vertebra.db._registry import (
-    DatabaseRegistry,
-    provide_bigquery_driver,
-    provide_spanner_driver,
-)
-from vertebra.db.bigquery import (
-    BIGQUERY_DIALECT_TAG,
-    AsyncBigQueryDriver,
-    BigQueryConfig,
-    BigQueryCore,
-    BigQueryDryRunResult,
-    ObjectRef,
-    ObjectTableConfig,
-    SyncBigQueryDriver,
-)
-from vertebra.db.cdc import (
-    AsyncSpannerChangeStreamSource,
-    CDCConfig,
-    ChangeEvent,
-    ChangeFeed,
-    SpannerChangeStreamRecord,
-    SpannerChildPartition,
-    SyncSpannerChangeStreamSource,
-)
-from vertebra.db.channels import DatabaseChannelBackend
-from vertebra.db.datafusion import (
-    ARROW_STREAM_MEDIA_TYPE,
-    DataFusionConfig,
-    DataFusionEngine,
-    DataFusionMode,
-    TableRegistration,
-)
-from vertebra.db.dialer import (
-    AlloyDBAuthType,
-    AlloyDBClusterURI,
-    AlloyDBConfig,
-    AsyncAlloyDBDialer,
-    AsyncCloudSQLDialer,
-    CloudSQLConfig,
-    CloudSQLInstanceURI,
-    SyncAlloyDBDialer,
-    SyncCloudSQLDialer,
-)
-from vertebra.db.driver import (
-    AsyncDatabaseDriver,
-    BaseDatabaseConfig,
-    CommonDriverMixin,
-    SyncDatabaseDriver,
-    ThreadOffloadAsyncDatabaseDriver,
-)
-from vertebra.db.duckdb import (
-    AsyncDuckDBDriver,
-    DuckDBConfig,
-    DuckDBCore,
-    DuckDBSecretConfig,
-    SyncDuckDBDriver,
-    duckdb_bootstrap_statements,
-)
-from vertebra.db.mcp_tools import (
-    GCPDatabaseToolPolicy,
-    is_mutating_sql,
-    register_gcp_database_tools,
-)
-from vertebra.db.mssql import (
-    AsyncMSSQLDriver,
-    MSSQLConfig,
-    MSSQLCore,
-    SyncMSSQLDriver,
-    encode_tds_sql_batch,
-    rewrite_mssql_placeholders,
-)
-from vertebra.db.mysql import AsyncMySQLDriver, MySQLConfig, MySQLCore, SyncMySQLDriver
-from vertebra.db.oracle import (
-    AsyncOracleDriver,
-    OracleConfig,
-    OracleConnectDescriptor,
-    OracleCore,
-    OracleDriverFeatures,
-    OracleSessionAttrs,
-    OracleTopologyConfig,
-    OracleWallet,
-    SyncOracleDriver,
-    decode_oson,
-    decode_vector_binary,
-    decode_vector_f32,
-    decode_vector_f64,
-    decode_vector_i8,
-    encode_oson,
-    encode_ttc_session_attrs,
-    encode_vector_binary,
-    encode_vector_f32,
-    encode_vector_f64,
-    encode_vector_i8,
-    parse_tnsnames_ora,
-    resolve_tns_alias,
-)
-from vertebra.db.pipeline import (
-    AsyncQueryPipeline,
-    CTEStep,
-    RelOverlay,
-    SyncQueryPipeline,
-)
-from vertebra.db.postgres import (
-    AsyncPostgreSQLDriver,
-    PoolerMode,
-    PostgreSQLConfig,
-    PostgreSQLCore,
-    SyncPostgreSQLDriver,
-)
-from vertebra.db.redis import (
-    AsyncRedisDriver,
-    RedisConfig,
-    RedisCore,
-    SyncRedisDriver,
-)
-from vertebra.db.rls import (
-    TenantPredicate,
-    TenantScopeConfig,
-)
-from vertebra.db.spanner import (
-    SPANGRES_DIALECT_TAG,
-    SPANNER_GOOGLESQL_DIALECT_TAG,
-    AsyncSpannerDriver,
-    AsyncSpannerSnapshot,
-    AsyncSpannerTransaction,
-    Mutation,
-    MutationGroup,
-    SpannerConfig,
-    SpannerCore,
-    StalenessBound,
-    SyncSpannerDriver,
-    SyncSpannerSnapshot,
-    SyncSpannerTransaction,
-)
-from vertebra.db.sqlite import AsyncSQLiteDriver, SQLiteConfig, SQLiteCore, SyncSQLiteDriver
-from vertebra.db.valkey import (
-    AsyncValkeyDriver,
-    SyncValkeyDriver,
-    ValkeyConfig,
-    ValkeyCore,
-)
+from typing import TYPE_CHECKING
+
+from vertebra.utils.module_loader import lazy_exports
+
+if TYPE_CHECKING:
+    from vertebra.db.arrow import (
+        ARROW_SHM_THRESHOLD_ROWS,
+        ArrowCursor,
+    )
+    from vertebra.db.cdc import (
+        CDCConfig,
+        ChangeEvent,
+        ChangeFeed,
+    )
+    from vertebra.db.dialer import (
+        AlloyDBAuthType,
+        AlloyDBClusterURI,
+        AlloyDBConfig,
+        AsyncAlloyDBDialer,
+        AsyncCloudSQLDialer,
+        CloudSQLConfig,
+        CloudSQLInstanceURI,
+        SyncAlloyDBDialer,
+        SyncCloudSQLDialer,
+    )
+    from vertebra.db.driver import (
+        AsyncDatabaseDriver,
+        BaseDatabaseConfig,
+        CommonDriverMixin,
+        SyncDatabaseDriver,
+        ThreadOffloadAsyncDatabaseDriver,
+    )
+    from vertebra.db.registry import (
+        DatabaseRegistry,
+        provide_bigquery_driver,
+        provide_spanner_driver,
+    )
+    from vertebra.db.rls import (
+        TenantPredicate,
+        TenantScopeConfig,
+    )
 
 __all__ = (
     "ARROW_SHM_THRESHOLD_ROWS",
-    "ARROW_STREAM_MEDIA_TYPE",
     "AlloyDBAuthType",
     "AlloyDBClusterURI",
     "AlloyDBConfig",
     "ArrowCursor",
     "AsyncAlloyDBDialer",
-    "AsyncBigQueryDriver",
     "AsyncCloudSQLDialer",
     "AsyncDatabaseDriver",
-    "AsyncDuckDBDriver",
-    "AsyncMSSQLDriver",
-    "AsyncMySQLDriver",
-    "AsyncOracleDriver",
-    "AsyncPostgreSQLDriver",
-    "AsyncQueryPipeline",
-    "AsyncRedisDriver",
-    "AsyncSQLiteDriver",
-    "AsyncSpannerChangeStreamSource",
-    "AsyncSpannerDriver",
-    "AsyncSpannerSnapshot",
-    "AsyncSpannerTransaction",
-    "AsyncValkeyDriver",
-    "BIGQUERY_DIALECT_TAG",
     "BaseDatabaseConfig",
-    "BigQueryConfig",
-    "BigQueryCore",
-    "BigQueryDryRunResult",
     "CDCConfig",
-    "CTEStep",
     "ChangeEvent",
     "ChangeFeed",
     "CloudSQLConfig",
     "CloudSQLInstanceURI",
     "CommonDriverMixin",
-    "DataFusionConfig",
-    "DataFusionEngine",
-    "DataFusionMode",
-    "DatabaseChannelBackend",
     "DatabaseRegistry",
-    "DuckDBConfig",
-    "DuckDBCore",
-    "DuckDBSecretConfig",
-    "GCPDatabaseToolPolicy",
-    "MSSQLConfig",
-    "MSSQLCore",
-    "Mutation",
-    "MutationGroup",
-    "MySQLConfig",
-    "MySQLCore",
-    "ObjectRef",
-    "ObjectTableConfig",
-    "OracleConfig",
-    "OracleConnectDescriptor",
-    "OracleCore",
-    "OracleDriverFeatures",
-    "OracleSessionAttrs",
-    "OracleTopologyConfig",
-    "OracleWallet",
-    "PoolerMode",
-    "PostgreSQLConfig",
-    "PostgreSQLCore",
-    "RedisConfig",
-    "RedisCore",
-    "RelOverlay",
-    "SPANGRES_DIALECT_TAG",
-    "SPANNER_GOOGLESQL_DIALECT_TAG",
-    "SQLiteConfig",
-    "SQLiteCore",
-    "SpannerChangeStreamRecord",
-    "SpannerChildPartition",
-    "SpannerConfig",
-    "SpannerCore",
-    "StalenessBound",
     "SyncAlloyDBDialer",
-    "SyncBigQueryDriver",
     "SyncCloudSQLDialer",
     "SyncDatabaseDriver",
-    "SyncDuckDBDriver",
-    "SyncMSSQLDriver",
-    "SyncMySQLDriver",
-    "SyncOracleDriver",
-    "SyncPostgreSQLDriver",
-    "SyncQueryPipeline",
-    "SyncRedisDriver",
-    "SyncSQLiteDriver",
-    "SyncSpannerChangeStreamSource",
-    "SyncSpannerDriver",
-    "SyncSpannerSnapshot",
-    "SyncSpannerTransaction",
-    "SyncValkeyDriver",
-    "TableRegistration",
     "TenantPredicate",
     "TenantScopeConfig",
     "ThreadOffloadAsyncDatabaseDriver",
-    "ValkeyConfig",
-    "ValkeyCore",
-    "decode_oson",
-    "decode_vector_binary",
-    "decode_vector_f32",
-    "decode_vector_f64",
-    "decode_vector_i8",
-    "duckdb_bootstrap_statements",
-    "encode_oson",
-    "encode_tds_sql_batch",
-    "encode_ttc_session_attrs",
-    "encode_vector_binary",
-    "encode_vector_f32",
-    "encode_vector_f64",
-    "encode_vector_i8",
-    "is_mutating_sql",
-    "parse_tnsnames_ora",
     "provide_bigquery_driver",
     "provide_spanner_driver",
-    "register_gcp_database_tools",
-    "resolve_tns_alias",
-    "rewrite_mssql_placeholders",
 )
+
+__lazy_modules__ = [
+    "vertebra.db.arrow",
+    "vertebra.db.cdc",
+    "vertebra.db.dialer",
+    "vertebra.db.driver",
+    "vertebra.db.registry",
+    "vertebra.db.rls",
+]
+
+_EXPORT_MAP: dict[str, tuple[str, str]] = {
+    "ARROW_SHM_THRESHOLD_ROWS": ("vertebra.db.arrow", "ARROW_SHM_THRESHOLD_ROWS"),
+    "AlloyDBAuthType": ("vertebra.db.dialer", "AlloyDBAuthType"),
+    "AlloyDBClusterURI": ("vertebra.db.dialer", "AlloyDBClusterURI"),
+    "AlloyDBConfig": ("vertebra.db.dialer", "AlloyDBConfig"),
+    "ArrowCursor": ("vertebra.db.arrow", "ArrowCursor"),
+    "AsyncAlloyDBDialer": ("vertebra.db.dialer", "AsyncAlloyDBDialer"),
+    "AsyncCloudSQLDialer": ("vertebra.db.dialer", "AsyncCloudSQLDialer"),
+    "AsyncDatabaseDriver": ("vertebra.db.driver", "AsyncDatabaseDriver"),
+    "BaseDatabaseConfig": ("vertebra.db.driver", "BaseDatabaseConfig"),
+    "CDCConfig": ("vertebra.db.cdc", "CDCConfig"),
+    "ChangeEvent": ("vertebra.db.cdc", "ChangeEvent"),
+    "ChangeFeed": ("vertebra.db.cdc", "ChangeFeed"),
+    "CloudSQLConfig": ("vertebra.db.dialer", "CloudSQLConfig"),
+    "CloudSQLInstanceURI": ("vertebra.db.dialer", "CloudSQLInstanceURI"),
+    "CommonDriverMixin": ("vertebra.db.driver", "CommonDriverMixin"),
+    "DatabaseRegistry": ("vertebra.db.registry", "DatabaseRegistry"),
+    "SyncAlloyDBDialer": ("vertebra.db.dialer", "SyncAlloyDBDialer"),
+    "SyncCloudSQLDialer": ("vertebra.db.dialer", "SyncCloudSQLDialer"),
+    "SyncDatabaseDriver": ("vertebra.db.driver", "SyncDatabaseDriver"),
+    "TenantPredicate": ("vertebra.db.rls", "TenantPredicate"),
+    "TenantScopeConfig": ("vertebra.db.rls", "TenantScopeConfig"),
+    "ThreadOffloadAsyncDatabaseDriver": ("vertebra.db.driver", "ThreadOffloadAsyncDatabaseDriver"),
+    "provide_bigquery_driver": ("vertebra.db.registry", "provide_bigquery_driver"),
+    "provide_spanner_driver": ("vertebra.db.registry", "provide_spanner_driver"),
+}
+
+__getattr__, __dir__ = lazy_exports(__name__, __all__, _EXPORT_MAP)

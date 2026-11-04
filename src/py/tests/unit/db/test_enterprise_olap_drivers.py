@@ -19,39 +19,52 @@ from vertebra.db import (
     AlloyDBAuthType,
     AlloyDBConfig,
     ArrowCursor,
-    AsyncDuckDBDriver,
-    AsyncMSSQLDriver,
-    AsyncMySQLDriver,
-    AsyncOracleDriver,
-    AsyncPostgreSQLDriver,
-    AsyncSQLiteDriver,
     CloudSQLConfig,
     DatabaseRegistry,
+    SyncAlloyDBDialer,
+    SyncCloudSQLDialer,
+)
+from vertebra.db.adapters.duckdb import (
+    AsyncDuckDBDriver,
     DuckDBConfig,
     DuckDBSecretConfig,
+    SyncDuckDBDriver,
+    duckdb_bootstrap_statements,
+)
+from vertebra.db.adapters.mssql import (
+    TDS_PKT_PRE_LOGIN,
+    TDS_PKT_SQL_BATCH,
+    AsyncMSSQLDriver,
     MSSQLConfig,
+    SyncMSSQLDriver,
+    decode_tds_packet,
+    encode_tds_packet,
+    encode_tds_sql_batch,
+    rewrite_mssql_placeholders,
+)
+from vertebra.db.adapters.mysql import (
+    AsyncMySQLDriver,
     MySQLConfig,
+)
+from vertebra.db.adapters.oracle import (
+    OSON_MAGIC,
+    AsyncOracleDriver,
     OracleConfig,
     OracleConnectDescriptor,
     OracleDriverFeatures,
     OracleTopologyConfig,
     OracleWallet,
-    PostgreSQLConfig,
-    SQLiteConfig,
-    SyncAlloyDBDialer,
-    SyncCloudSQLDialer,
-    SyncDuckDBDriver,
-    SyncMSSQLDriver,
     SyncOracleDriver,
-    SyncSQLiteDriver,
     decode_oson,
+    decode_tns_packet,
+    decode_ttc_session_attrs,
     decode_vector_binary,
     decode_vector_f32,
     decode_vector_f64,
     decode_vector_i8,
-    duckdb_bootstrap_statements,
     encode_oson,
-    encode_tds_sql_batch,
+    encode_tns_connect_packet,
+    encode_tns_data_packet,
     encode_ttc_session_attrs,
     encode_vector_binary,
     encode_vector_f32,
@@ -59,28 +72,21 @@ from vertebra.db import (
     encode_vector_i8,
     parse_tnsnames_ora,
     resolve_tns_alias,
-    rewrite_mssql_placeholders,
 )
-from vertebra.db.mssql import (
-    TDS_PKT_PRE_LOGIN,
-    TDS_PKT_SQL_BATCH,
-    decode_tds_packet,
-    encode_tds_packet,
-)
-from vertebra.db.oracle import (
-    OSON_MAGIC,
-    decode_tns_packet,
-    decode_ttc_session_attrs,
-    encode_tns_connect_packet,
-    encode_tns_data_packet,
-)
-from vertebra.db.postgres import (
+from vertebra.db.adapters.postgres import (
+    AsyncPostgreSQLDriver,
+    PostgreSQLConfig,
     decode_pgcopy_rows,
     encode_pg_jsonb,
     encode_pgcopy_rows,
     read_arrow_shm,
     strip_pg_jsonb_header,
     write_arrow_shm,
+)
+from vertebra.db.adapters.sqlite import (
+    AsyncSQLiteDriver,
+    SQLiteConfig,
+    SyncSQLiteDriver,
 )
 from vertebra.extensions.sqlalchemy.dialects import (
     ALL_DIALECT_SCHEMES,
@@ -678,13 +684,13 @@ def test_unified_db_arrow_cursor_identity_and_native_delegation() -> None:
     import pyarrow as pa
 
     import vertebra.db as db_pkg
-    import vertebra.db._arrow as db_arrow_mod
-    import vertebra.db.duckdb as db_duckdb_mod
-    import vertebra.db.mssql as db_mssql_mod
-    import vertebra.db.mysql as db_mysql_mod
-    import vertebra.db.oracle as db_oracle_mod
-    import vertebra.db.postgres as db_postgres_mod
-    import vertebra.db.sqlite as db_sqlite_mod
+    import vertebra.db.adapters.duckdb as db_duckdb_mod
+    import vertebra.db.adapters.mssql as db_mssql_mod
+    import vertebra.db.adapters.mysql as db_mysql_mod
+    import vertebra.db.adapters.oracle as db_oracle_mod
+    import vertebra.db.adapters.postgres as db_postgres_mod
+    import vertebra.db.adapters.sqlite as db_sqlite_mod
+    import vertebra.db.arrow as db_arrow_mod
     from vertebra._vertebra import ArrowCursor as NativeArrowCursor
 
     assert db_pkg.ArrowCursor is db_arrow_mod.ArrowCursor

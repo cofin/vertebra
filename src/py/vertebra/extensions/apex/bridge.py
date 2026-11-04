@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 import msgspec
 
-from vertebra.db.datafusion import DataFusionEngine, TableRegistration
+from vertebra.db.adapters.datafusion import DataFusionEngine, TableRegistration
 from vertebra.extensions.apex.session import (
     ApexSessionContext,
     OraclePoolLike,

@@ -13,7 +13,7 @@ from sqlalchemy import String, create_engine, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from vertebra.db import PostgreSQLConfig, SyncPostgreSQLDriver
+from vertebra.db.adapters.postgres import PostgreSQLConfig, SyncPostgreSQLDriver
 from vertebra.extensions.alchemy import (
     ObjectStoreBackend,
     create_alchemy_plugin,

@@ -35,7 +35,8 @@ feed = ChangeFeed(
 Result sets exceeding `ARROW_SHM_THRESHOLD_ROWS` (`256` rows or `64 KiB`) bypass per-row Python tuple allocation and stream directly as Apache Arrow IPC buffers inside POSIX shared memory (`ArrowCursor`):
 
 ```python
-from vertebra.db import DataFusionConfig, DataFusionEngine, DuckDBConfig
+from vertebra.db.adapters.datafusion import DataFusionConfig, DataFusionEngine
+from vertebra.db.adapters.duckdb import DuckDBConfig
 
 duck_cfg = DuckDBConfig(
     database=":memory:",

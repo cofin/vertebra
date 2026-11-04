@@ -11,19 +11,19 @@ from typing import Any, ClassVar, Final, Literal, Self
 
 from vertebra._vertebra import LeaseBroker
 from vertebra._vertebra import StatementCache as _RustStatementCache
-from vertebra.db._arrow import ArrowCursor
-from vertebra.db.bigquery import (
+from vertebra.db.adapters.bigquery import (
     AsyncBigQueryDriver as _CoreAsyncBigQueryDriver,
 )
-from vertebra.db.bigquery import (
+from vertebra.db.adapters.bigquery import (
     BigQueryConfig,
     BigQueryDryRunResult,
     ObjectRef,
     ObjectTableConfig,
 )
-from vertebra.db.bigquery import (
+from vertebra.db.adapters.bigquery import (
     SyncBigQueryDriver as _CoreSyncBigQueryDriver,
 )
+from vertebra.db.arrow import ArrowCursor
 from vertebra.extensions.sqlspec.adapters import (
     AsyncAdapterConfig,
     BaseAsyncDriver,

@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
+from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
 from vertebra.db.dialer.cloudsql import CloudSQLConfig, SyncCloudSQLDialer
-from vertebra.db.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
 from vertebra.extensions.sqlalchemy import (
     SyncDBAPIConnection,
     SyncMySQLDialect,

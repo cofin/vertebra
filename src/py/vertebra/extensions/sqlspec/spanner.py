@@ -12,18 +12,18 @@ from typing import Any, ClassVar, Final, Literal, Self, cast
 
 from vertebra._vertebra import LeaseBroker
 from vertebra._vertebra import StatementCache as _RustStatementCache
-from vertebra.db.bigquery import ObjectRef
-from vertebra.db.spanner import (
+from vertebra.db.adapters.bigquery import ObjectRef
+from vertebra.db.adapters.spanner import (
     AsyncSpannerDriver as _CoreAsyncSpannerDriver,
 )
-from vertebra.db.spanner import (
+from vertebra.db.adapters.spanner import (
     Mutation,
     MutationGroup,
     SpannerConfig,
     StalenessBound,
     SyncSpannerSnapshot,
 )
-from vertebra.db.spanner import (
+from vertebra.db.adapters.spanner import (
     SyncSpannerDriver as _CoreSyncSpannerDriver,
 )
 from vertebra.extensions.sqlspec.adapters import (

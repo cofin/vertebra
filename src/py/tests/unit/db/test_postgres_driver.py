@@ -15,7 +15,7 @@ from vertebra.db import (
     SyncAlloyDBDialer,
     SyncCloudSQLDialer,
 )
-from vertebra.db.postgres import (
+from vertebra.db.adapters.postgres import (
     PGCOPY_BINARY_SIGNATURE,
     AsyncPostgreSQLDriver,
     PostgreSQLConfig,

@@ -14,7 +14,7 @@ Native database configurations, synchronous and asynchronous drivers, single-RTT
 
 `DatabaseRegistry` manages named driver configurations across an application, while `SyncQueryPipeline` / `AsyncQueryPipeline` and `RelOverlay` compile multi-step reads and mutations into a single PostgreSQL round-trip.
 
-::: vertebra.db._registry.DatabaseRegistry
+::: vertebra.db.registry.DatabaseRegistry
     options:
       heading_level: 3
       members:
@@ -46,62 +46,62 @@ Native database configurations, synchronous and asynchronous drivers, single-RTT
       heading_level: 4
       members: false
 
-## Relational, Cloud & Analytical Drivers (`postgres`, `mysql`, `sqlite`, `oracle`, `mssql`, `duckdb`, `bigquery`, `spanner`)
+## Relational, Cloud & Analytical Drivers (`vertebra.db.adapters`)
 
-::: vertebra.db.postgres.PostgreSQLConfig
+::: vertebra.db.adapters.postgres.PostgreSQLConfig
     options:
       heading_level: 4
       members: false
 
-::: vertebra.db.mysql.MySQLConfig
+::: vertebra.db.adapters.mysql.MySQLConfig
     options:
       heading_level: 4
       members: false
 
-::: vertebra.db.sqlite.SQLiteConfig
+::: vertebra.db.adapters.sqlite.SQLiteConfig
     options:
       heading_level: 4
       members: false
 
-::: vertebra.db.oracle.OracleConfig
+::: vertebra.db.adapters.oracle.OracleConfig
     options:
       heading_level: 4
       members: false
 
-::: vertebra.db.mssql.MSSQLConfig
+::: vertebra.db.adapters.mssql.MSSQLConfig
     options:
       heading_level: 4
       members: false
 
-::: vertebra.db.duckdb.DuckDBConfig
+::: vertebra.db.adapters.duckdb.DuckDBConfig
     options:
       heading_level: 4
       members: false
 
-::: vertebra.db.bigquery.BigQueryConfig
+::: vertebra.db.adapters.bigquery.BigQueryConfig
     options:
       heading_level: 4
       members: false
 
-::: vertebra.db.spanner.SpannerConfig
+::: vertebra.db.adapters.spanner.SpannerConfig
     options:
       heading_level: 4
       members: false
 
 ## RESP3 Key-Value Stores & DataFusion (`redis`, `valkey`, `datafusion`)
 
-::: vertebra.db.redis.RedisConfig
+::: vertebra.db.adapters.redis.RedisConfig
     options:
       heading_level: 4
       members: false
 
-::: vertebra.db.valkey.ValkeyConfig
+::: vertebra.db.adapters.valkey.ValkeyConfig
     options:
       heading_level: 4
       members: false
       summary: false
 
-::: vertebra.db.datafusion.DataFusionEngine
+::: vertebra.db.adapters.datafusion.DataFusionEngine
     options:
       heading_level: 3
       members:

@@ -23,7 +23,7 @@ from vertebra.utils.serializers import decode_json, encode_json_bytes
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from vertebra.db.postgres import PostgreSQLConfig
+    from vertebra.db.adapters.postgres import PostgreSQLConfig
 
 __all__ = (
     "CLAIM_POSTGRES_JOBS_SQL",

@@ -2,7 +2,7 @@
 
 from advanced_alchemy.types.file_object import FileObject
 
-from vertebra.db.sqlite import SQLiteConfig, SyncSQLiteDriver
+from vertebra.db.adapters.sqlite import SQLiteConfig, SyncSQLiteDriver
 from vertebra.extensions.alchemy.storage import ObjectStoreBackend
 from vertebra.storage import SyncObjectStore
 

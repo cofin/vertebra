@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
+import pyarrow.compute as pc
 import pytest
 
 from vertebra._vertebra import (
@@ -17,20 +20,71 @@ from vertebra._vertebra import (
 )
 from vertebra.db import (
     ArrowCursor,
+    DatabaseRegistry,
+)
+from vertebra.db.adapters.bigquery import (
     AsyncBigQueryDriver,
     BigQueryConfig,
+    BigQueryCore,
     BigQueryDryRunResult,
-    DatabaseRegistry,
-    DataFusionEngine,
     ObjectRef,
     ObjectTableConfig,
     SyncBigQueryDriver,
 )
-from vertebra.db.bigquery.core import BigQueryCore
+from vertebra.db.adapters.datafusion import DataFusionEngine
 from vertebra.embeddings import BigQueryEmbedder, EmbeddingError
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
 from vertebra.storage import SigningConfig, SyncObjectStore
-from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError, VertebraError
+from vertebra.typing import (
+    FrozenBaseStruct,
+    ImproperConfigurationError,
+    MissingDependencyError,
+    VertebraError,
+    reset_dependency_cache,
+)
+from vertebra.utils.module_loader import import_optional
+
+
+class _BigQueryDataFrame:
+    """In-memory Arrow DataFrame stand-in for BigQuery DataFusion federation tests."""
+
+    __slots__ = ("_table",)
+
+    def __init__(self, table: pa.Table) -> None:
+        self._table = table
+
+    def to_arrow_table(self) -> pa.Table:
+        """Return the underlying normalized PyArrow table."""
+        return self._table
+
+
+class _BigQuerySessionContext:
+    """Deterministic PyArrow-backed SessionContext double for BigQuery federation tests."""
+
+    __slots__ = ("tables",)
+
+    def __init__(self) -> None:
+        self.tables: dict[str, pa.Table] = {}
+
+    def register_table(self, name: str, table: Any) -> None:
+        """Require a normalized pyarrow.Table from ArrowCursor registration."""
+        if not isinstance(table, pa.Table):
+            msg = f"Expected pyarrow.Table, got {type(table)!r}"
+            raise TypeError(msg)
+        self.tables[name] = table
+
+    def sql(self, query: str) -> _BigQueryDataFrame:
+        """Execute filtered projections over registered BigQuery PyArrow tables or raise."""
+        normalized = " ".join(query.strip().split())
+        if normalized == "SELECT id, name FROM bq_metrics WHERE id = 1":
+            if "bq_metrics" not in self.tables:
+                msg = "Table 'bq_metrics' is not registered"
+                raise RuntimeError(msg)
+            tbl = self.tables["bq_metrics"]
+            filtered = tbl.filter(pc.equal(tbl["id"], 1)).select(["id", "name"])
+            return _BigQueryDataFrame(filtered)
+        msg = f"Invalid DataFusion SQL: {query}"
+        raise RuntimeError(msg)
 
 
 class MetricRow(FrozenBaseStruct, frozen=True, gc=False):
@@ -428,7 +482,7 @@ async def test_async_bigquery_driver_arrow_object_store_and_object_tables(tmp_pa
 
 
 @pytest.mark.anyio
-async def test_bigquery_embedder_and_datafusion_registration() -> None:
+async def test_bigquery_embedder_and_datafusion_registration(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify BigQueryEmbedder ML.GENERATE_EMBEDDING and DataFusionEngine.register_bigquery_query."""
     server = _MockBigQueryRestServer()
     try:
@@ -459,7 +513,8 @@ async def test_bigquery_embedder_and_datafusion_registration() -> None:
         assert len(vecs.to_list()) == 2
         assert vecs.to_list()[0] == [0.25, 0.5, 0.75]
 
-        engine = DataFusionEngine()
+        ctx = None if import_optional("datafusion") is not None else _BigQuerySessionContext()
+        engine = DataFusionEngine(ctx=ctx)
         engine.register_bigquery_query(
             "bq_metrics",
             sync_driver,
@@ -467,6 +522,16 @@ async def test_bigquery_embedder_and_datafusion_registration() -> None:
         )
         rows = engine.execute_dicts("SELECT id, name FROM bq_metrics WHERE id = 1")
         assert rows == [{"id": 1, "name": "alpha"}]
+        with pytest.raises(Exception, match="missing_bq_table"):
+            engine.execute_dicts("SELECT * FROM missing_bq_table")
+
+        monkeypatch.setitem(sys.modules, "datafusion", None)
+        reset_dependency_cache("datafusion")
+        try:
+            with pytest.raises(MissingDependencyError):
+                DataFusionEngine().execute_dicts("SELECT 1")
+        finally:
+            reset_dependency_cache("datafusion")
     finally:
         server.close()
 

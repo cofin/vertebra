@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from vertebra.utils.module_loader import lazy_exports
 
 if TYPE_CHECKING:
-    from vertebra.db._registry import provide_bigquery_driver, provide_spanner_driver
+    from vertebra.db.registry import provide_bigquery_driver, provide_spanner_driver
     from vertebra.extensions.litestar.asyncapi import create_asyncapi_plugin
     from vertebra.extensions.litestar.autowire import (
         AutowireBridgeIntegration,
@@ -243,8 +243,8 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     ),
     "offload_middlewares": ("vertebra.extensions.litestar.offload", "offload_middlewares"),
     "preseed_scope_body": ("vertebra.extensions.litestar.fastpath", "preseed_scope_body"),
-    "provide_bigquery_driver": ("vertebra.db._registry", "provide_bigquery_driver"),
-    "provide_spanner_driver": ("vertebra.db._registry", "provide_spanner_driver"),
+    "provide_bigquery_driver": ("vertebra.db.registry", "provide_bigquery_driver"),
+    "provide_spanner_driver": ("vertebra.db.registry", "provide_spanner_driver"),
     "queues": ("vertebra.extensions.litestar.queues", ""),
     "saq": ("vertebra.extensions.litestar.saq", ""),
     "security": ("vertebra.extensions.litestar.security", ""),

@@ -2,30 +2,31 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import pytest
 
+from tests.unit.db.test_spanner import FakeSpannerClient
 from vertebra._vertebra import ArrowCursor as RustArrowCursor
 from vertebra._vertebra import Request, Response
 from vertebra.agent.runtime import ConfirmationGate
 from vertebra.db import (
     ArrowCursor,
-    BigQueryConfig,
-    BigQueryDryRunResult,
     DatabaseRegistry,
-    GCPDatabaseToolPolicy,
-    MySQLConfig,
-    PostgreSQLConfig,
-    SpannerConfig,
-    SyncBigQueryDriver,
-    SyncMySQLDriver,
-    SyncPostgreSQLDriver,
-    SyncSpannerDriver,
-    is_mutating_sql,
     provide_bigquery_driver,
     provide_spanner_driver,
+)
+from vertebra.db.adapters.bigquery import (
+    BigQueryConfig,
+    BigQueryDryRunResult,
+    SyncBigQueryDriver,
+)
+from vertebra.db.adapters.mysql import MySQLConfig, SyncMySQLDriver
+from vertebra.db.adapters.postgres import PostgreSQLConfig, SyncPostgreSQLDriver
+from vertebra.db.adapters.spanner import SpannerConfig, SyncSpannerDriver
+from vertebra.db.mcp_tools import (
+    GCPDatabaseToolPolicy,
+    is_mutating_sql,
     register_gcp_database_tools,
 )
 from vertebra.extensions.alchemy import (
@@ -113,32 +114,6 @@ from vertebra.server._fastpath import (
     serialize_fastpath_special_result,
 )
 from vertebra.storage import StreamingStorageResponse, SyncObjectStore
-
-
-def _load_fake_spanner_client() -> type[Any]:
-    """Load FakeSpannerClient from test_spanner source without importing module-level dependencies."""
-    spanner_test_path = Path(__file__).resolve().parents[1] / "db" / "test_spanner.py"
-    with open(spanner_test_path, encoding="utf-8") as f:
-        lines = f.readlines()
-    cls_code = "".join(lines[41:598])
-    scope: dict[str, Any] = {
-        "sqlite3": __import__("sqlite3"),
-        "threading": __import__("threading"),
-        "_time": __import__("time"),
-        "re": __import__("re"),
-        "contextlib": __import__("contextlib"),
-        "Any": object,
-        "Sequence": list,
-        "Mapping": dict,
-        "encode_json": lambda x: __import__("json").dumps(x),
-        "decode_json": lambda x: __import__("json").loads(x),
-        "FrozenBaseStruct": __import__("msgspec").Struct,
-    }
-    exec(cls_code, scope)
-    return scope["FakeSpannerClient"]
-
-
-FakeSpannerClient = _load_fake_spanner_client()
 
 
 @pytest.mark.anyio

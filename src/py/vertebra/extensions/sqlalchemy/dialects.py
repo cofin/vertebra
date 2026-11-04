@@ -18,15 +18,15 @@ from sqlalchemy.engine.default import DefaultDialect
 from sqlalchemy.engine.url import URL
 from sqlalchemy.pool import AsyncAdaptedQueuePool, NullPool, Pool, QueuePool, StaticPool
 
-from vertebra.db._registry import DatabaseRegistry
-from vertebra.db.bigquery import AsyncBigQueryDriver, BigQueryConfig, SyncBigQueryDriver
-from vertebra.db.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
-from vertebra.db.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLDriver
-from vertebra.db.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
-from vertebra.db.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
-from vertebra.db.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
-from vertebra.db.spanner import AsyncSpannerDriver, SpannerConfig, SyncSpannerDriver
-from vertebra.db.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
+from vertebra.db.adapters.bigquery import AsyncBigQueryDriver, BigQueryConfig, SyncBigQueryDriver
+from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
+from vertebra.db.adapters.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLDriver
+from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
+from vertebra.db.adapters.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
+from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
+from vertebra.db.adapters.spanner import AsyncSpannerDriver, SpannerConfig, SyncSpannerDriver
+from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
+from vertebra.db.registry import DatabaseRegistry
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.sync_tools import SyncPool
 

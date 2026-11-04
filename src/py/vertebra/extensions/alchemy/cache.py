@@ -19,8 +19,8 @@ from typing import TYPE_CHECKING, Any, Literal, Self, TypeVar, cast
 import msgspec
 from sqlalchemy import inspect as sa_inspect
 
-from vertebra.db.redis import AsyncRedisDriver, RedisConfig, SyncRedisDriver
-from vertebra.db.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
+from vertebra.db.adapters.redis import AsyncRedisDriver, RedisConfig, SyncRedisDriver
+from vertebra.db.adapters.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.serializers import (
     ZeroCopyCodecRegistry,

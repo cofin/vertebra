@@ -8,7 +8,8 @@ from typing import Any
 
 import pytest
 
-from vertebra.db import ArrowCursor, BigQueryConfig, BigQueryDryRunResult, ObjectTableConfig
+from vertebra.db import ArrowCursor
+from vertebra.db.adapters.bigquery import BigQueryConfig, BigQueryDryRunResult, ObjectTableConfig
 from vertebra.extensions.sqlspec import (
     BigQueryAsyncADKArtifactStore,
     BigQueryAsyncADKMemoryStore,

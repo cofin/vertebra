@@ -7,7 +7,7 @@ import zlib
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, TypeVar
 
-from vertebra.db._arrow import (
+from vertebra.db.arrow import (
     _hydrate_rows_with_schema,
     write_arrow_shm,
 )

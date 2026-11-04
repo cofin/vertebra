@@ -22,8 +22,14 @@ sources:
     resource: src/py/vertebra/db/rls.py
     title: "Python implementation module (src/py/vertebra/db/rls.py)"
   - id: src-db-datafusion-py
-    resource: src/py/vertebra/db/datafusion.py
-    title: "Python implementation module (src/py/vertebra/db/datafusion.py)"
+    resource: src/py/vertebra/db/adapters/datafusion/__init__.py
+    title: "Python implementation module (src/py/vertebra/db/adapters/datafusion/__init__.py)"
+  - id: src-db-datafusion-config-py
+    resource: src/py/vertebra/db/adapters/datafusion/config.py
+    title: "Python implementation module (src/py/vertebra/db/adapters/datafusion/config.py)"
+  - id: src-db-datafusion-driver-py
+    resource: src/py/vertebra/db/adapters/datafusion/driver.py
+    title: "Python implementation module (src/py/vertebra/db/adapters/datafusion/driver.py)"
   - id: src-db-init-py
     resource: src/py/vertebra/db/__init__.py
     title: "Python implementation module (src/py/vertebra/db/__init__.py)"
@@ -36,10 +42,10 @@ sources:
 
 <!-- truth: start -->
 - `ChangeFeed`, `SyncSpannerChangeStreamSource` / `AsyncSpannerChangeStreamSource`, and `TenantPredicate` provide CDC streaming and fail-loud row-level security session scoping across `vertebra.db`.
-- `DataFusionEngine` registers Arrow and BigQuery tables for SQL federation, and all SQL builders validate identifiers via `validate_identifier`.
+- `DataFusionEngine` (`vertebra.db.adapters.datafusion`) registers normalized PyArrow, BigQuery, and Spanner tables on a fail-closed `SessionContext` (`ensure_module("datafusion", package="datafusion")`), and all SQL builders validate identifiers via `validate_identifier`.
 <!-- truth: end -->
 
-The `pipeline`, `rls`, `cdc`, and `datafusion` modules in [`vertebra.db`](../../../../../src/py/vertebra/db/__init__.py)[^src-db-init-py] generate PostgreSQL SQL text and bind tuples, or keep in-process state. Identifiers interpolated into generated SQL are validated against `^[A-Za-z_][A-Za-z0-9_]*$` (`_validate_identifier`). Drivers and connection configs are covered in [database-drivers-and-dialers](database-drivers-and-dialers.md).
+The `pipeline`, `rls`, and `cdc` modules in [`vertebra.db`](../../../../../src/py/vertebra/db/__init__.py)[^src-db-init-py] and the [`vertebra.db.adapters.datafusion`](../../../../../src/py/vertebra/db/adapters/datafusion/__init__.py)[^src-db-datafusion-py] adapter generate PostgreSQL SQL text and bind tuples, or maintain federated analytical session state. Identifiers interpolated into generated SQL are validated against `^[A-Za-z_][A-Za-z0-9_]*$` (`_validate_identifier`). Drivers and connection configs are covered in [database-drivers-and-dialers](database-drivers-and-dialers.md).
 
 ## 1. Single-Round-Trip CTE Pipelines (`pipeline.py`)
 
@@ -81,21 +87,23 @@ The intended layering is an explicit predicate for plan quality plus a session G
 
 Spill storage and history live in process memory and grow without bound. `spill_table`, `replication_slot_name`, `publication_name`, and `max_slot_wal_keep_size_mb` are configuration fields that no code reads.
 
-## 4. DataFusion Catalog (`datafusion.py`)
+## 4. DataFusion Federation Adapter (`adapters/datafusion/`)
 
 | Symbol | Responsibility |
 |---|---|
 | `ARROW_STREAM_MEDIA_TYPE` | `"application/vnd.apache.arrow.stream"`, also exposed as `DataFusionEngine.ARROW_STREAM_MEDIA_TYPE`. |
 | `DataFusionMode` | `Literal["in_process", "pgwire_fdw"]`. |
-| [`TableRegistration`](../../../../../src/py/vertebra/db/datafusion.py)[^src-db-datafusion-py] | `name`, `uri`, `format` (`parquet`, `vortex`, `arrow`, `postgres`, `oracle`, `bigquery`, `spanner`). |
+| [`TableRegistration`](../../../../../src/py/vertebra/db/adapters/datafusion/config.py)[^src-db-datafusion-config-py] | `name`, `uri`, `format` (`parquet`, `vortex`, `arrow`, `csv`, `ndjson`, `duckdb`, `postgres`, `oracle`, `bigquery`, `spanner`). |
 | `DataFusionConfig` | `mode`, `target_partitions`, `memory_limit_mb`, `pgwire_host`, `pgwire_port=5434`, `require_mtls_for_pgwire`. |
-| `DataFusionEngine` | `register_table`, `register_bigquery_table`, `register_spanner_table`, `tables`, `supports_cloud_run_ingress` (true for `in_process`). `explain_plan(sql)` returns a dict with mode, media type, and the registered table names that appear as substrings of `sql`. `execute_arrow(sql)` streams registered BigQuery/Spanner tables into zero-copy `ArrowCursor` segments. |
+| [`DataFusionEngine`](../../../../../src/py/vertebra/db/adapters/datafusion/driver.py)[^src-db-datafusion-driver-py] | Accepts `(config: DataFusionConfig \| None = None, *, ctx: Any = None)`, normalizes `ArrowCursor` / PyArrow inputs into `pyarrow.Table`, resolves `SessionContext` via `ensure_module("datafusion", package="datafusion")` without any SQLite fallback, and propagates `MissingDependencyError` and `SessionContext.sql(...)` errors directly. |
 
 Provenance sources: [^src-tests-unit-db-test-pg-dataplane-and-datafusion-py].
 
 [^src-db-pipeline-py]: `src/py/vertebra/db/pipeline.py` — Python implementation module (src/py/vertebra/db/pipeline.py).
 [^src-db-cdc-py]: `src/py/vertebra/db/cdc.py` — Python implementation module (src/py/vertebra/db/cdc.py).
 [^src-db-rls-py]: `src/py/vertebra/db/rls.py` — Python implementation module (src/py/vertebra/db/rls.py).
-[^src-db-datafusion-py]: `src/py/vertebra/db/datafusion.py` — Python implementation module (src/py/vertebra/db/datafusion.py).
+[^src-db-datafusion-py]: `src/py/vertebra/db/adapters/datafusion/__init__.py` — Python implementation module (src/py/vertebra/db/adapters/datafusion/__init__.py).
+[^src-db-datafusion-config-py]: `src/py/vertebra/db/adapters/datafusion/config.py` — Python implementation module (src/py/vertebra/db/adapters/datafusion/config.py).
+[^src-db-datafusion-driver-py]: `src/py/vertebra/db/adapters/datafusion/driver.py` — Python implementation module (src/py/vertebra/db/adapters/datafusion/driver.py).
 [^src-db-init-py]: `src/py/vertebra/db/__init__.py` — Python implementation module (src/py/vertebra/db/__init__.py).
 [^src-tests-unit-db-test-pg-dataplane-and-datafusion-py]: `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py` — Python implementation module (src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py).

@@ -7,25 +7,25 @@ from typing import Any, ClassVar, Self, cast
 
 import msgspec
 
-from vertebra.db._arrow import (
-    ARROW_SHM_THRESHOLD_ROWS,
-    ArrowCursor,
-)
-from vertebra.db._registry import DatabaseRegistry
-from vertebra.db.dialer.alloydb import AsyncAlloyDBDialer, SyncAlloyDBDialer
-from vertebra.db.dialer.cloudsql import AsyncCloudSQLDialer, SyncCloudSQLDialer
-from vertebra.db.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
-from vertebra.db.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLDriver
-from vertebra.db.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
-from vertebra.db.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
-from vertebra.db.pipeline import AsyncQueryPipeline, PipelineDialect, SyncQueryPipeline
-from vertebra.db.postgres import (
+from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
+from vertebra.db.adapters.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLDriver
+from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
+from vertebra.db.adapters.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
+from vertebra.db.adapters.postgres import (
     AsyncPostgreSQLDriver,
     PostgreSQLConfig,
     SyncPostgreSQLDriver,
 )
+from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
+from vertebra.db.arrow import (
+    ARROW_SHM_THRESHOLD_ROWS,
+    ArrowCursor,
+)
+from vertebra.db.dialer.alloydb import AsyncAlloyDBDialer, SyncAlloyDBDialer
+from vertebra.db.dialer.cloudsql import AsyncCloudSQLDialer, SyncCloudSQLDialer
+from vertebra.db.pipeline import AsyncQueryPipeline, PipelineDialect, SyncQueryPipeline
+from vertebra.db.registry import DatabaseRegistry
 from vertebra.db.rls import TenantPredicate
-from vertebra.db.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import ZeroCopyCodecRegistry
@@ -774,73 +774,73 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
 
 
 class SQLiteSyncDriver(BaseSyncDriver):
-    """Synchronous SQLite driver adapter wrapping vertebra.db.sqlite.SyncSQLiteDriver."""
+    """Synchronous SQLite driver adapter wrapping vertebra.db.adapters.sqlite.SyncSQLiteDriver."""
 
     dialect: str = "sqlite"
 
 
 class SQLiteAsyncDriver(BaseAsyncDriver):
-    """Asynchronous SQLite driver adapter wrapping vertebra.db.sqlite.AsyncSQLiteDriver."""
+    """Asynchronous SQLite driver adapter wrapping vertebra.db.adapters.sqlite.AsyncSQLiteDriver."""
 
     dialect: str = "sqlite"
 
 
 class PostgreSQLSyncDriver(BaseSyncDriver):
-    """Synchronous PostgreSQL driver adapter wrapping vertebra.db.postgres.SyncPostgreSQLDriver."""
+    """Synchronous PostgreSQL driver adapter wrapping vertebra.db.adapters.postgres.SyncPostgreSQLDriver."""
 
     dialect: str = "postgres"
 
 
 class PostgreSQLAsyncDriver(BaseAsyncDriver):
-    """Asynchronous PostgreSQL driver adapter wrapping vertebra.db.postgres.AsyncPostgreSQLDriver."""
+    """Asynchronous PostgreSQL driver adapter wrapping vertebra.db.adapters.postgres.AsyncPostgreSQLDriver."""
 
     dialect: str = "postgres"
 
 
 class MySQLSyncDriver(BaseSyncDriver):
-    """Synchronous MySQL driver adapter wrapping vertebra.db.mysql.SyncMySQLDriver."""
+    """Synchronous MySQL driver adapter wrapping vertebra.db.adapters.mysql.SyncMySQLDriver."""
 
     dialect: str = "mysql"
 
 
 class MySQLAsyncDriver(BaseAsyncDriver):
-    """Asynchronous MySQL driver adapter wrapping vertebra.db.mysql.AsyncMySQLDriver."""
+    """Asynchronous MySQL driver adapter wrapping vertebra.db.adapters.mysql.AsyncMySQLDriver."""
 
     dialect: str = "mysql"
 
 
 class OracleSyncDriver(BaseSyncDriver):
-    """Synchronous Oracle Thin driver adapter wrapping vertebra.db.oracle.SyncOracleDriver."""
+    """Synchronous Oracle Thin driver adapter wrapping vertebra.db.adapters.oracle.SyncOracleDriver."""
 
     dialect: str = "oracle"
 
 
 class OracleAsyncDriver(BaseAsyncDriver):
-    """Asynchronous Oracle Thin driver adapter wrapping vertebra.db.oracle.AsyncOracleDriver."""
+    """Asynchronous Oracle Thin driver adapter wrapping vertebra.db.adapters.oracle.AsyncOracleDriver."""
 
     dialect: str = "oracle"
 
 
 class MSSQLSyncDriver(BaseSyncDriver):
-    """Synchronous MSSQL driver adapter wrapping vertebra.db.mssql.SyncMSSQLDriver."""
+    """Synchronous MSSQL driver adapter wrapping vertebra.db.adapters.mssql.SyncMSSQLDriver."""
 
     dialect: str = "mssql"
 
 
 class MSSQLAsyncDriver(BaseAsyncDriver):
-    """Asynchronous MSSQL driver adapter wrapping vertebra.db.mssql.AsyncMSSQLDriver."""
+    """Asynchronous MSSQL driver adapter wrapping vertebra.db.adapters.mssql.AsyncMSSQLDriver."""
 
     dialect: str = "mssql"
 
 
 class DuckDBSyncDriver(BaseSyncDriver):
-    """Synchronous DuckDB driver adapter wrapping vertebra.db.duckdb.SyncDuckDBDriver."""
+    """Synchronous DuckDB driver adapter wrapping vertebra.db.adapters.duckdb.SyncDuckDBDriver."""
 
     dialect: str = "duckdb"
 
 
 class DuckDBAsyncDriver(BaseAsyncDriver):
-    """Asynchronous DuckDB driver adapter wrapping vertebra.db.duckdb.AsyncDuckDBDriver."""
+    """Asynchronous DuckDB driver adapter wrapping vertebra.db.adapters.duckdb.AsyncDuckDBDriver."""
 
     dialect: str = "duckdb"
 

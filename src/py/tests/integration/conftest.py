@@ -6,20 +6,12 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from vertebra.db import (
-    MSSQLConfig,
-    MySQLConfig,
-    OracleConfig,
-    PostgreSQLConfig,
-    RedisConfig,
-    SyncMSSQLDriver,
-    SyncMySQLDriver,
-    SyncOracleDriver,
-    SyncPostgreSQLDriver,
-    SyncRedisDriver,
-    SyncValkeyDriver,
-    ValkeyConfig,
-)
+from vertebra.db.adapters.mssql import MSSQLConfig, SyncMSSQLDriver
+from vertebra.db.adapters.mysql import MySQLConfig, SyncMySQLDriver
+from vertebra.db.adapters.oracle import OracleConfig, SyncOracleDriver
+from vertebra.db.adapters.postgres import PostgreSQLConfig, SyncPostgreSQLDriver
+from vertebra.db.adapters.redis import RedisConfig, SyncRedisDriver
+from vertebra.db.adapters.valkey import SyncValkeyDriver, ValkeyConfig
 
 if TYPE_CHECKING:
     from pytest_databases.docker.mariadb import MariaDBService

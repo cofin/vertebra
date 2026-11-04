@@ -3,25 +3,80 @@
 from __future__ import annotations
 
 import os
+import re
 import socket
+import sys
+from typing import Any
 
+import pyarrow as pa
 import pytest
 
 from vertebra.db import (
-    ARROW_STREAM_MEDIA_TYPE,
-    AsyncQueryPipeline,
+    ArrowCursor,
     CDCConfig,
     ChangeFeed,
-    CTEStep,
-    DataFusionConfig,
-    DataFusionEngine,
-    RelOverlay,
-    SyncQueryPipeline,
-    TableRegistration,
     TenantPredicate,
     TenantScopeConfig,
 )
+from vertebra.db.adapters.datafusion import (
+    ARROW_STREAM_MEDIA_TYPE,
+    DataFusionConfig,
+    DataFusionEngine,
+    TableRegistration,
+)
+from vertebra.db.pipeline import (
+    AsyncQueryPipeline,
+    CTEStep,
+    RelOverlay,
+    SyncQueryPipeline,
+)
 from vertebra.server.platform import SHMAllocationPolicy
+from vertebra.typing import MissingDependencyError, reset_dependency_cache
+from vertebra.utils.module_loader import import_optional
+
+
+class _DeterministicDataFrame:
+    """In-memory Arrow DataFrame stand-in for SessionContext contract tests."""
+
+    __slots__ = ("_table",)
+
+    def __init__(self, table: pa.Table) -> None:
+        self._table = table
+
+    def to_arrow_table(self) -> pa.Table:
+        """Return the underlying normalized PyArrow table."""
+        return self._table
+
+
+class _DeterministicSessionContext:
+    """Deterministic PyArrow-backed SessionContext double that fails closed on invalid SQL."""
+
+    __slots__ = ("tables",)
+
+    def __init__(self) -> None:
+        self.tables: dict[str, pa.Table] = {}
+
+    def register_table(self, name: str, table: Any) -> None:
+        """Require a normalized pyarrow.Table during registration."""
+        if not isinstance(table, pa.Table):
+            msg = f"Expected pyarrow.Table, got {type(table)!r}"
+            raise TypeError(msg)
+        self.tables[name] = table
+
+    def sql(self, query: str) -> _DeterministicDataFrame:
+        """Evaluate supported test projections against registered PyArrow tables or raise."""
+        normalized = " ".join(query.strip().split())
+        if normalized.upper() == "SELECT 1 AS OK":
+            return _DeterministicDataFrame(pa.Table.from_pylist([{"ok": 1}]))
+        select_all = re.fullmatch(r"SELECT \* FROM ([A-Za-z_][A-Za-z0-9_]*)", normalized, flags=re.IGNORECASE)
+        if select_all is not None:
+            tbl_name = select_all.group(1)
+            if tbl_name not in self.tables:
+                msg = f"Table {tbl_name!r} not found in SessionContext"
+                raise RuntimeError(msg)
+            return _DeterministicDataFrame(self.tables[tbl_name])
+        msg = f"Invalid or unsupported DataFusion SQL: {query}"
+        raise RuntimeError(msg)
 
 
 def test_query_pipeline_reloverlay_and_chunked_jsonb() -> None:
@@ -186,15 +241,32 @@ def test_cdc_listen_notify_spill_and_logical_emit() -> None:
     assert len(bridge.replay_since(1)) == 1
 
 
-def test_embedded_datafusion_and_memfd_scm_rights() -> None:
-    """Verify DataFusionEngine Cloud Run / GKE modes and anonymous memfd + SCM_RIGHTS passing."""
-    engine = DataFusionEngine(DataFusionConfig(mode="in_process"))
+def test_embedded_datafusion_and_memfd_scm_rights(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify DataFusionEngine fail-closed execution, ctx injection, and anonymous memfd + SCM_RIGHTS."""
+    ctx = None if import_optional("datafusion") is not None else _DeterministicSessionContext()
+    engine = DataFusionEngine(DataFusionConfig(mode="in_process"), ctx=ctx)
     assert engine.supports_cloud_run_ingress is True
     engine.register_table(TableRegistration(name="events_archive", uri="gs://bucket/events.parquet"))
     plan = engine.explain_plan("SELECT * FROM events_archive")
     assert plan["media_type"] == ARROW_STREAM_MEDIA_TYPE
     assert plan["referenced_tables"] == ["events_archive"]
     assert engine.execute_sql("SELECT 1 AS ok") == [{"ok": 1}]
+
+    cursor = ArrowCursor.from_rows([{"id": 10, "label": "ok"}])
+    engine.register_arrow_table("cursor_tbl", cursor)
+    assert engine.execute_dicts("SELECT * FROM cursor_tbl") == [{"id": 10, "label": "ok"}]
+    with pytest.raises(Exception, match="missing_datafusion_table"):
+        engine.execute_dicts("SELECT * FROM missing_datafusion_table")
+
+    monkeypatch.setitem(sys.modules, "datafusion", None)
+    reset_dependency_cache("datafusion")
+    try:
+        with pytest.raises(MissingDependencyError):
+            DataFusionEngine().execute_dicts("SELECT 1")
+        with pytest.raises(MissingDependencyError):
+            DataFusionEngine().execute_arrow("SELECT 1")
+    finally:
+        reset_dependency_cache("datafusion")
 
     fd, _backend = SHMAllocationPolicy.allocate_fd("ring-test", 4096)
     try:

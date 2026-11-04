@@ -15,7 +15,7 @@ from sqlspec.storage.registry import StorageRegistry as SQLSpecStorageRegistry
 
 import vertebra.extensions.alchemy.storage as alchemy_storage_mod
 import vertebra.extensions.sqlspec.storage as sqlspec_storage_mod
-from vertebra.db._arrow import ArrowCursor
+from vertebra.db.arrow import ArrowCursor
 from vertebra.extensions.alchemy.storage import ObjectStoreBackend as AlchemyObjectStoreBackend
 from vertebra.extensions.alchemy.storage import register_storage_backend
 from vertebra.extensions.sqlspec.storage import (

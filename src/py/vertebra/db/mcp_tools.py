@@ -8,9 +8,9 @@ from typing import TYPE_CHECKING, Any
 
 from vertebra.agent.core.schema import Tool
 from vertebra.agent.runtime import ConfirmationGate
-from vertebra.db._registry import provide_bigquery_driver, provide_spanner_driver
-from vertebra.db.bigquery import AsyncBigQueryDriver, BigQueryConfig, ObjectTableConfig, SyncBigQueryDriver
-from vertebra.db.spanner import AsyncSpannerDriver, SpannerConfig, StalenessBound, SyncSpannerDriver
+from vertebra.db.adapters.bigquery import AsyncBigQueryDriver, BigQueryConfig, ObjectTableConfig, SyncBigQueryDriver
+from vertebra.db.adapters.spanner import AsyncSpannerDriver, SpannerConfig, StalenessBound, SyncSpannerDriver
+from vertebra.db.registry import provide_bigquery_driver, provide_spanner_driver
 from vertebra.framework.security import PermissionDeniedError
 from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.text import validate_identifier

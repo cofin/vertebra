@@ -22,18 +22,18 @@ from vertebra._vertebra import (
     SpannerError,
     SyncSpannerClient,
 )
-from vertebra.db import (
+from vertebra.db import DatabaseRegistry
+from vertebra.db.adapters.datafusion import DataFusionEngine
+from vertebra.db.adapters.spanner import (
     AsyncSpannerDriver,
-    DatabaseRegistry,
-    DataFusionEngine,
     Mutation,
     MutationGroup,
     SpannerConfig,
+    SpannerCore,
     StalenessBound,
     SyncSpannerDriver,
     SyncSpannerTransaction,
 )
-from vertebra.db.spanner.core import SpannerCore
 from vertebra.embeddings import EmbeddingError, SpannerEmbedder
 from vertebra.storage import SyncObjectStore
 from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError, VertebraError

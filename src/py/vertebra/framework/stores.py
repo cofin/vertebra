@@ -8,8 +8,8 @@ from collections.abc import Mapping, Sequence
 from datetime import timedelta
 from typing import Any, Self
 
-from vertebra.db.redis import AsyncRedisDriver, RedisConfig
-from vertebra.db.valkey import AsyncValkeyDriver, ValkeyConfig
+from vertebra.db.adapters.redis import AsyncRedisDriver, RedisConfig
+from vertebra.db.adapters.valkey import AsyncValkeyDriver, ValkeyConfig
 from vertebra.utils.text import validate_identifier
 
 __all__ = (

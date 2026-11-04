@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
-
 import pytest
 
-from vertebra.db.spanner import SpannerConfig, StalenessBound, SyncSpannerDriver
+from tests.unit.db.test_spanner import FakeSpannerClient
+from vertebra.db.adapters.spanner import SpannerConfig, StalenessBound, SyncSpannerDriver
 from vertebra.extensions.sqlspec.spanner import (
     SpannerAsyncADKArtifactStore,
     SpannerAsyncADKMemoryStore,
@@ -23,32 +21,6 @@ from vertebra.extensions.sqlspec.spanner import (
     SpannerSyncStore,
 )
 from vertebra.typing import ImproperConfigurationError
-
-
-def _load_fake_spanner_client() -> type[Any]:
-    """Load FakeSpannerClient from test_spanner source without importing module-level dependencies."""
-    spanner_test_path = Path(__file__).resolve().parents[1] / "db" / "test_spanner.py"
-    with open(spanner_test_path, encoding="utf-8") as f:
-        lines = f.readlines()
-    cls_code = "".join(lines[41:598])
-    scope: dict[str, Any] = {
-        "sqlite3": __import__("sqlite3"),
-        "threading": __import__("threading"),
-        "_time": __import__("time"),
-        "re": __import__("re"),
-        "contextlib": __import__("contextlib"),
-        "Any": object,
-        "Sequence": list,
-        "Mapping": dict,
-        "encode_json": lambda x: __import__("json").dumps(x),
-        "decode_json": lambda x: __import__("json").loads(x),
-        "FrozenBaseStruct": __import__("msgspec").Struct,
-    }
-    exec(cls_code, scope)
-    return scope["FakeSpannerClient"]
-
-
-FakeSpannerClient = _load_fake_spanner_client()
 
 
 def test_spanner_sync_config_sessions_connection_shim_and_data_dictionary() -> None:
