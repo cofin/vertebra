@@ -24,6 +24,7 @@ Release introducing shared-memory vector embeddings, zero-copy PEP 3118 vector v
   - Automatic default `AgentInterface` synthesis on `AgentCard` and dynamic request-origin URL resolution (`Forwarded`, `X-Forwarded-Proto`, `X-Forwarded-Host`, `Host` with `Vary` headers) in `A2AHttpHandler` and `A2AService` ([PR #64](https://github.com/cofin/vertebra/pull/64)).
 - `EmbeddingError` in `vertebra.embeddings` for providers that return no usable vector.
 - `BackendFactory` in `vertebra.embeddings` and `FastEmbedder.build_backend` for importable embedding backends.
+- `SpannerConfig.admin_endpoint` and `SpannerClient(admin_endpoint=...)` select the REST endpoint for DDL.
 
 ### Changed
 
@@ -33,6 +34,9 @@ Release introducing shared-memory vector embeddings, zero-copy PEP 3118 vector v
 - Updated `.github/dependabot.yml` to use native `bun` and `uv` package ecosystems with grouped minor/patch updates and `open-pull-requests-limit: 1`, gated CI test matrices on `lint` with `fail-fast: true` in `.github/workflows/ci.yml`, and upgraded workspace dependencies via `make upgrade` (`anyio`, `bump-my-version`, `platformdirs`, `pytest-databases`, `python-dateutil`, `sqlparse`, `crc32fast`) ([PR #64](https://github.com/cofin/vertebra/pull/64)).
 - WebMCP exposure is opt-in per tool: `mcp_tool(webmcp=...)` and `Tool(webmcp=...)` default to `False`, `build_webmcp_manifest` lists only tagged tools (including route `opt={"mcp_tool": ..., "webmcp": True}` and guarded `SkillController` tools), and `WebMCPConfig` no longer exposes a global tagged-only toggle.
 - `LitestarConfig.swap_memory_channels` and `LitestarConfig.swap_memory_response_cache` default to `False`; `KeyValueStore`, the Litestar `MemoryStore`, and the Starlette `CacheStore` prefix Redis/Valkey keys with `key_prefix` (default `"vertebra"`), and `SQLAlchemyCacheBackend` prefixes Redis/Valkey keys with `key_prefix` (default `"vtb:aa:"`).
+- `vertebra-db` Spanner and BigQuery Storage clients run on the official `google-cloud-spanner` and `google-cloud-bigquery` crates; the hand-written gRPC transport is removed.
+- `SpannerClient.execute_partitioned_arrow` and `SpannerClient.execute_partitioned_arrow_async` are replaced by `SpannerClient.partitioned_query` and `SpannerClient.partitioned_query_async`, which return rows; `SyncSpannerDriver.fetch_arrow` and `AsyncSpannerDriver.fetch_arrow` build the `ArrowCursor`.
+- Spanner query results no longer include `transaction_id` or `read_timestamp_micros`.
 
 ### Fixed
 
@@ -47,6 +51,7 @@ Release introducing shared-memory vector embeddings, zero-copy PEP 3118 vector v
 - `SpannerEmbedder` propagates driver errors and raises `EmbeddingError` on missing rows instead of returning hash vectors; `BigQueryEmbedder` raises `EmbeddingError` on short or vector-less results; both order generated embeddings by input offset; `OracleEmbedder` raises `EmbeddingError` on empty results; `BigQueryEmbedder` and `SpannerEmbedder` SQL builders validate model, table, column, and distance values.
 - `EmbeddingBroker` runs the configured model in the free-threaded sidecar instead of a hash backend, requires `backend_fn` or `backend_factory`, and `FastEmbedder` no longer builds a discarded `TextEmbedding` at construction.
 - `EventLoopPool.stop` delivers task cancellation, runs `shutdown_asyncgens`, and closes loops only after their threads exit; `EventLoopPool` raises when a shard fails to start; the buffered sharded ASGI mount and `dispatch_batch(async_mode=False)` `async_native` paths read their timeout from `VERTEBRA_ASGI_BATCH_TIMEOUT` (default 30 s, `0`/`none` disables) instead of a fixed 10 s, return `504 Gateway Timeout`, and cancel timed-out request tasks.
+- Spanner commits without a commit timestamp, DDL operations that are still running, and BigQuery Storage Write appends with missing or mismatched responses now raise errors instead of reporting success; malformed Arrow input to `BigQueryClient.append_arrow` raises an error instead of panicking; Spanner and BigQuery Storage requests use the official protobuf field numbers.
 
 ## 0.2.0
 

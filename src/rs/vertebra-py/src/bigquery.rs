@@ -119,6 +119,7 @@ fn append_result_to_py(py: Python<'_>, res: BigQueryAppendResult) -> PyResult<Py
 }
 
 /// Pure-Rust Google Cloud BigQuery client exposed to Python (`vertebra._vertebra.BigQueryClient`).
+/// `ca_pem` applies to the REST API client; the Storage Read/Write API clients use the system trust store and ignore it.
 #[pyclass(
     name = "BigQueryClient",
     module = "vertebra._vertebra",

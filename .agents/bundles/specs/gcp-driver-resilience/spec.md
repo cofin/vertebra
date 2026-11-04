@@ -6,7 +6,7 @@ description: Make the PyO3 completion bridge panic-safe and cancellable, raise o
 state: planned
 parent_prd: integration-remediation
 research:
-  - ../gcp-wire-protocol-correctness/research/google-cloud-rust_20261103.md
+  - ../integration-remediation/research/google-cloud-rust_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
 plan_commit: 24e2931
@@ -24,7 +24,7 @@ tags: [rust, gcp, pyo3, python, exceptions, auth, bugfix]
 
 ### 1.1 Problem Statement & Objectives
 
-After [gcp-wire-protocol-correctness](../gcp-wire-protocol-correctness/spec.md) moves Spanner and BigQuery Storage onto the official crates, these defects remain in code Vertebra owns (audit sections 4.2, 4.3, 4.6):
+After `gcp-wire-protocol-correctness` moves Spanner and BigQuery Storage onto the official crates, these defects remain in code Vertebra owns (audit sections 4.2, 4.3, 4.6):
 
 - `vertebra-py/src/completion.rs::spawn_rust_db_task` does not catch panics, so the Python future never resolves; it has no cancellation, so a cancelled awaitable still runs its Rust task. `_vertebra.pyi` declares `RustDbTaskAwaitable.__new__` without a Rust `#[new]`.
 - Sync bindings raise `RuntimeError(str(e))`, async bindings may raise `ValueError`, no gRPC code reaches Python, and the Python drivers detect errors by substring (`SpannerCore.is_partitioned_arrow_fallback_error`, `"aborted" in str(exc)` in `db/spanner/driver.py`, `BigQueryCore.is_storage_api_fallback_error`).

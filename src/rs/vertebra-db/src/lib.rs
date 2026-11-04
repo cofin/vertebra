@@ -18,12 +18,13 @@
 //!   and `ShmRegion` Arrow IPC framing (`duckdb`).
 //! - Pure-Rust Redis 7.2+/8.0+ and Valkey 8.0+/9.0+ RESP3 wire framing, recursive parser, `invalidate`
 //!   push frame extractor, Sentinel master discovery, and Cluster CRC16-XMODEM slot routing (`resp3`).
+//! - Shared credential and TLS wiring for the official Google Cloud Rust clients (`gcp`).
 
 pub mod arrow_shm;
 pub mod bigquery;
 pub mod dialer;
 pub mod duckdb;
-pub mod grpc;
+pub mod gcp;
 pub mod mssql;
 pub mod mysql;
 pub mod oracle;

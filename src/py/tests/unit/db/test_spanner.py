@@ -13,7 +13,6 @@ from typing import Any
 import pytest
 
 from vertebra.db import (
-    ArrowCursor,
     AsyncSpannerDriver,
     DatabaseRegistry,
     DataFusionEngine,
@@ -24,6 +23,7 @@ from vertebra.db import (
     StalenessBound,
     SyncSpannerDriver,
 )
+from vertebra.db.spanner.core import SpannerCore
 from vertebra.embeddings import EmbeddingError, SpannerEmbedder
 from vertebra.storage import ObjectStore
 from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
@@ -277,7 +277,7 @@ class FakeSpannerClient:
         """Apply Spanner DDL statements asynchronously against the test double."""
         return self.update_ddl(statements)
 
-    def execute_partitioned_arrow(
+    def partitioned_query(
         self,
         sql: str,
         params_json: str | None = None,
@@ -285,17 +285,12 @@ class FakeSpannerClient:
         data_boost_enabled: bool = True,
         staleness_mode: str = "strong",
         staleness_ms: int = 0,
-    ) -> ArrowCursor:
-        """Execute a partitioned Arrow read against the test double."""
+    ) -> dict[str, Any]:
+        """Execute a partitioned query against the test double."""
         _ = (max_partitions, data_boost_enabled)
-        res = self.query(sql, params_json, staleness_mode, staleness_ms)
-        return ArrowCursor.from_rows(
-            res.get("rows", ()),
-            columns=[str(c) for c in res.get("columns", ())],
-            threshold_rows=1,
-        )
+        return self.query(sql, params_json, staleness_mode, staleness_ms)
 
-    async def execute_partitioned_arrow_async(
+    async def partitioned_query_async(
         self,
         sql: str,
         params_json: str | None = None,
@@ -303,9 +298,9 @@ class FakeSpannerClient:
         data_boost_enabled: bool = True,
         staleness_mode: str = "strong",
         staleness_ms: int = 0,
-    ) -> ArrowCursor:
-        """Execute an asynchronous partitioned Arrow read against the test double."""
-        return self.execute_partitioned_arrow(
+    ) -> dict[str, Any]:
+        """Execute an asynchronous partitioned query against the test double."""
+        return self.partitioned_query(
             sql,
             params_json,
             max_partitions,
@@ -907,3 +902,16 @@ def test_spanner_embedder_generate_sql_orders_rows_by_input_index(use_ai_functio
     assert sql.startswith("SELECT embeddings.values AS embedding, idx FROM ")
     assert "(SELECT content, idx FROM UNNEST(@texts) AS content WITH OFFSET AS idx)" in sql
     assert sql.endswith(") ORDER BY idx")
+
+
+def test_spanner_config_passes_admin_endpoint() -> None:
+    """SpannerCore.create_rust_client forwards admin_endpoint to the Rust SpannerClient."""
+    cfg = SpannerConfig(
+        project_id="p",
+        instance_id="i",
+        database_id="d",
+        endpoint="http://localhost:9010",
+        admin_endpoint="http://localhost:9020",
+    )
+    client = SpannerCore.create_rust_client(cfg)
+    assert client.admin_endpoint == "http://localhost:9020"

@@ -1315,6 +1315,8 @@ class GcpTokenCache:
 
 @final
 class BigQueryClient:
+    """``ca_pem`` applies to the REST API client; the Storage Read/Write API clients use the system trust store and ignore it."""
+
     def __new__(
         cls,
         project_id: str,
@@ -1419,7 +1421,7 @@ class BigQueryClient:
 
 @final
 class SpannerClient:
-    """Pure-Rust Google Cloud Spanner v1 gRPC client with Multiplexed Sessions, ReadWrite transactions, and Data Boost Arrow."""
+    """Google Cloud Spanner client built on the official Rust client. ``query`` and ``partitioned_query`` return ``columns``, ``schema``, ``rows``, ``row_count_exact``, and ``row_count_lower_bound``. ``ca_pem`` is accepted only for non-googleapis ``https://`` endpoints (Spanner Omni or private test servers)."""
 
     def __new__(
         cls,
@@ -1431,6 +1433,7 @@ class SpannerClient:
         route_to_leader_enabled: bool = True,
         max_commit_delay_ms: int | None = None,
         auth_options: dict[str, str] | None = None,
+        admin_endpoint: str | None = None,
         ca_pem: bytes | None = None,
     ) -> SpannerClient: ...
     @property
@@ -1439,6 +1442,8 @@ class SpannerClient:
     def database_role(self) -> str | None: ...
     @property
     def endpoint(self) -> str: ...
+    @property
+    def admin_endpoint(self) -> str | None: ...
     @property
     def dialect(self) -> str: ...
     @property
@@ -1529,7 +1534,7 @@ class SpannerClient:
         self,
         statements: Sequence[str],
     ) -> RustDbTaskAwaitable: ...
-    def execute_partitioned_arrow(
+    def partitioned_query(
         self,
         sql: str,
         params_json: str | None = None,
@@ -1537,8 +1542,8 @@ class SpannerClient:
         data_boost_enabled: bool = False,
         staleness_mode: str = "strong",
         staleness_ms: int = 0,
-    ) -> ArrowCursor: ...
-    def execute_partitioned_arrow_async(
+    ) -> dict[str, Any]: ...
+    def partitioned_query_async(
         self,
         sql: str,
         params_json: str | None = None,

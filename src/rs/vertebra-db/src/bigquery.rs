@@ -8,18 +8,21 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD as BASE64_STD, STANDARD_NO_PAD as BASE64_NO_PAD};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
+use google_cloud_bigquery::client::{Read, Write};
+use google_cloud_bigquery::error::{AppendError, CommitError, WriterBuilderError};
+use google_cloud_bigquery::model as bq_model;
+use google_cloud_bigquery::write::retry_policy::RetryableErrors as WriteRetryableErrors;
+use google_cloud_bigquery::write::stream_type::{BufferedStream, CommittedStream, PendingStream};
+use google_cloud_gax::retry_policy::RetryPolicyExt as _;
 use serde_json::{Map, Value, json};
 use thiserror::Error;
-use tokio::sync::mpsc;
 use vertebra_core::gcp_auth::GcpTokenCache;
+use vertebra_core::id::uuid4_str;
 use vertebra_core::shm::ShmRegion;
 
 use crate::arrow_shm::{ARROW_IPC_EOS_MARKER, ShmArrowStreamWriter};
-use crate::grpc::{
-    GrpcChannelPool, GrpcCode, GrpcPoolConfig, GrpcRequestMetadata, GrpcStatus, ProtoError,
-    ProtoReader, ProtoWriter, WireType, generate_request_uuid_v4,
-};
+use crate::gcp::{install_rustls_ring_provider, official_credentials};
 
 /// Default BigQuery REST v2 endpoint.
 pub const DEFAULT_BIGQUERY_REST_ENDPOINT: &str = "https://bigquery.googleapis.com";
@@ -47,14 +50,14 @@ pub enum BigQueryError {
     Http(String),
     #[error("BigQuery REST API error (HTTP {status}): {message}")]
     Api { status: u16, message: String },
-    #[error("BigQuery gRPC error: {0}")]
-    Grpc(#[from] GrpcStatus),
-    #[error("BigQuery protobuf wire error: {0}")]
-    Proto(#[from] ProtoError),
+    #[error("BigQuery client error: {0}")]
+    Client(#[from] google_cloud_bigquery::Error),
     #[error("BigQuery shared-memory Arrow error: {0}")]
     Shm(String),
     #[error("BigQuery Storage Write row errors: {0:?}")]
     RowErrors(Vec<BigQueryRowError>),
+    #[error("BigQuery Storage Write verification failed: {0}")]
+    AppendVerification(String),
     #[error("BigQuery invalid argument: {0}")]
     InvalidArgument(String),
 }
@@ -73,6 +76,7 @@ pub struct BigQueryClientConfig {
     pub labels: HashMap<String, String>,
     pub auth_options: HashMap<String, String>,
     pub pool_size: usize,
+    /// PEM roots added to the REST (`jobs.query`/`jobs.insert`) client. The Storage Read/Write gRPC clients use the system trust store plus bundled roots and ignore this value.
     pub ca_pem: Option<Vec<u8>>,
 }
 
@@ -783,7 +787,9 @@ pub struct BigQueryClient {
     config: BigQueryClientConfig,
     http_client: reqwest::Client,
     token_cache: Option<Arc<GcpTokenCache>>,
-    grpc_pool: tokio::sync::OnceCell<Arc<GrpcChannelPool>>,
+    injected_read: Option<Read>,
+    read_client: tokio::sync::OnceCell<Read>,
+    write_client: tokio::sync::OnceCell<Write>,
 }
 
 impl BigQueryClient {
@@ -829,8 +835,55 @@ impl BigQueryClient {
             config,
             http_client,
             token_cache,
-            grpc_pool: tokio::sync::OnceCell::new(),
+            injected_read: None,
+            read_client: tokio::sync::OnceCell::new(),
+            write_client: tokio::sync::OnceCell::new(),
         })
+    }
+
+    /// Construct a [`BigQueryClient`] with an injected Storage [`Read`] client (for stub testing).
+    pub fn with_read_client(
+        config: BigQueryClientConfig,
+        read: Read,
+    ) -> Result<Self, BigQueryError> {
+        let mut client = Self::new(config)?;
+        client.injected_read = Some(read);
+        Ok(client)
+    }
+
+    async fn storage_read(&self) -> Result<&Read, BigQueryError> {
+        if let Some(ref read) = self.injected_read {
+            return Ok(read);
+        }
+        self.read_client
+            .get_or_try_init(|| async {
+                install_rustls_ring_provider();
+                Read::builder()
+                    .with_endpoint(self.config.effective_storage_endpoint())
+                    .with_credentials(official_credentials(self.token_cache.clone()))
+                    .build()
+                    .await
+                    .map_err(|e| {
+                        BigQueryError::Http(format!("failed to build BigQuery Read client: {e}"))
+                    })
+            })
+            .await
+    }
+
+    async fn storage_write(&self) -> Result<&Write, BigQueryError> {
+        self.write_client
+            .get_or_try_init(|| async {
+                install_rustls_ring_provider();
+                Write::builder()
+                    .with_endpoint(self.config.effective_storage_endpoint())
+                    .with_credentials(official_credentials(self.token_cache.clone()))
+                    .build()
+                    .await
+                    .map_err(|e| {
+                        BigQueryError::Http(format!("failed to build BigQuery Write client: {e}"))
+                    })
+            })
+            .await
     }
 
     /// Return a reference to the client configuration.
@@ -979,7 +1032,7 @@ impl BigQueryClient {
         max_streams: i32,
         compression: BigQueryArrowCompression,
     ) -> Result<(String, usize, usize, Arc<ShmRegion>), BigQueryError> {
-        let pool = self.get_or_init_grpc_pool().await?;
+        let read = self.storage_read().await?;
         let eff_project = if project_id.trim().is_empty() {
             &self.config.project_id
         } else {
@@ -989,52 +1042,89 @@ impl BigQueryClient {
             format!("projects/{eff_project}/datasets/{dataset_id}/tables/{table_id}");
         let parent = format!("projects/{eff_project}");
 
-        let req_bytes = encode_create_read_session_request(
-            &parent,
-            &table_resource,
-            selected_fields,
-            row_restriction.unwrap_or(""),
-            max_streams.max(1),
-            compression,
-        );
+        let mut read_opts = bq_model::read_session::TableReadOptions::new();
+        let mut has_read_opts = false;
+        if !selected_fields.is_empty() {
+            read_opts = read_opts.set_selected_fields(selected_fields.to_vec());
+            has_read_opts = true;
+        }
+        if let Some(filter) = row_restriction.filter(|s| !s.is_empty()) {
+            read_opts = read_opts.set_row_restriction(filter);
+            has_read_opts = true;
+        }
+        let codec = match compression {
+            BigQueryArrowCompression::Unspecified => None,
+            BigQueryArrowCompression::Lz4Frame => {
+                Some(bq_model::arrow_serialization_options::CompressionCodec::Lz4Frame)
+            }
+            BigQueryArrowCompression::Zstd => {
+                Some(bq_model::arrow_serialization_options::CompressionCodec::Zstd)
+            }
+        };
+        if let Some(c) = codec {
+            read_opts = read_opts.set_arrow_serialization_options(
+                bq_model::ArrowSerializationOptions::new().set_buffer_compression(c),
+            );
+            has_read_opts = true;
+        }
 
-        let routing = format!("read_session.table={table_resource}");
-        let meta = self.build_grpc_metadata(Some(routing)).await?;
-        let (resp_bytes, _) = pool
-            .unary(
-                "/google.cloud.bigquery.storage.v1.BigQueryRead/CreateReadSession",
-                req_bytes,
-                &meta,
-            )
+        let mut req_session = bq_model::ReadSession::new()
+            .set_table(table_resource)
+            .set_data_format(bq_model::DataFormat::Arrow);
+        if has_read_opts {
+            req_session = req_session.set_read_options(read_opts);
+        }
+
+        let session = read
+            .create_read_session()
+            .set_parent(parent)
+            .set_read_session(req_session)
+            .set_max_stream_count(max_streams.max(1))
+            .send()
             .await?;
 
-        let session = decode_read_session_response(&resp_bytes)?;
+        let schema_bytes = session
+            .arrow_schema()
+            .map(|s| s.serialized_schema.clone())
+            .filter(|b| !b.is_empty())
+            .ok_or_else(|| {
+                BigQueryError::InvalidArgument(
+                    "CreateReadSession returned no Arrow schema".to_string(),
+                )
+            })?;
+
         let shm_name = next_bigquery_shm_name();
-        let mut writer =
-            ShmArrowStreamWriter::create(&shm_name, 64 * 1024, &session.arrow_schema_bytes)
-                .map_err(BigQueryError::Shm)?;
+        let mut writer = ShmArrowStreamWriter::create(&shm_name, 64 * 1024, &schema_bytes)
+            .map_err(BigQueryError::Shm)?;
 
         let mut join_set = tokio::task::JoinSet::new();
-        for (stream_idx, stream_name) in session.stream_names.into_iter().enumerate() {
-            let pool_clone = Arc::clone(&pool);
-            let token_cache = self.token_cache.clone();
-            let quota_project = self.config.auth_options.get("quota_project_id").cloned();
+        for (stream_idx, stream) in session.streams.into_iter().enumerate() {
+            let read_clone = read.clone();
+            let stream_name = stream.name;
             join_set.spawn(async move {
-                let batches = read_single_storage_stream_with_retry(
-                    pool_clone,
-                    token_cache,
-                    quota_project,
-                    stream_name,
-                )
-                .await?;
+                let mut reader = read_clone
+                    .read_rows()
+                    .set_read_stream(stream_name)
+                    .set_offset(0)
+                    .into_reader();
+                let mut batches = Vec::new();
+                while let Some(resp) = reader.next().await {
+                    let resp = resp?;
+                    if let Some(batch) = resp.arrow_record_batch()
+                        && !batch.serialized_record_batch.is_empty()
+                    {
+                        let rows = resp.row_count.max(0) as usize;
+                        batches.push((batch.serialized_record_batch.clone(), rows));
+                    }
+                }
                 Ok::<(usize, Vec<(Bytes, usize)>), BigQueryError>((stream_idx, batches))
             });
         }
 
         let mut results_by_stream = Vec::with_capacity(join_set.len());
         while let Some(joined) = join_set.join_next().await {
-            let pair = joined
-                .map_err(|e| BigQueryError::Http(format!("ReadRows task panicked: {e}")))??;
+            let pair =
+                joined.map_err(|e| BigQueryError::Http(format!("ReadRows task failed: {e}")))??;
             results_by_stream.push(pair);
         }
         results_by_stream.sort_by_key(|(idx, _)| *idx);
@@ -1061,157 +1151,128 @@ impl BigQueryClient {
         mode: &str,
     ) -> Result<BigQueryAppendResult, BigQueryError> {
         let write_mode = BigQueryWriteMode::from_str_mode(mode)?;
-        let pool = self.get_or_init_grpc_pool().await?;
-        let normalized_table = self.normalize_table_resource(parent_table)?;
-
-        let (schema_bytes, chunks) =
-            split_arrow_ipc_stream(arrow_ipc_bytes, MAX_APPEND_ROWS_CHUNK_BYTES)?;
-        if chunks.is_empty() {
-            let default_stream = format!("{normalized_table}/streams/_default");
+        let table = self.normalize_table_resource(parent_table)?;
+        let plan = ArrowAppendPlan::build(arrow_ipc_bytes, write_mode)?;
+        if plan.requests.is_empty() {
             return Ok(BigQueryAppendResult {
                 appended_rows: 0,
-                write_stream: default_stream,
+                write_stream: format!("{table}/streams/_default"),
             });
         }
 
-        let write_stream_name = match write_mode {
-            BigQueryWriteMode::Default => format!("{normalized_table}/streams/_default"),
-            BigQueryWriteMode::Committed => {
-                self.create_write_stream(&pool, &normalized_table, 1)
-                    .await?
-            }
-            BigQueryWriteMode::Pending => {
-                self.create_write_stream(&pool, &normalized_table, 2)
-                    .await?
-            }
-            BigQueryWriteMode::Buffered => {
-                self.create_write_stream(&pool, &normalized_table, 3)
-                    .await?
-            }
-        };
-
-        let (tx, rx) = mpsc::channel::<Bytes>(chunks.len().max(1));
-        let mut cumulative_rows: i64 = 0;
-        for (idx, (chunk_bytes, chunk_rows)) in chunks.iter().enumerate() {
-            let offset = match write_mode {
-                BigQueryWriteMode::Default => None,
-                BigQueryWriteMode::Committed
-                | BigQueryWriteMode::Pending
-                | BigQueryWriteMode::Buffered => Some(cumulative_rows),
-            };
-            cumulative_rows += *chunk_rows;
-            let req = encode_append_rows_request(
-                if idx == 0 { &write_stream_name } else { "" },
-                offset,
-                if idx == 0 {
-                    Some(schema_bytes.as_ref())
-                } else {
-                    None
-                },
-                chunk_bytes,
-                *chunk_rows,
-            );
-            tx.send(req).await.map_err(|e| {
-                BigQueryError::Http(format!("failed to enqueue AppendRows chunk: {e}"))
-            })?;
-        }
-        drop(tx);
-
-        let routing = format!("write_stream={write_stream_name}");
-        let meta = self.build_grpc_metadata(Some(routing)).await?;
-        let mut resp_stream = pool
-            .bidi_streaming(
-                "/google.cloud.bigquery.storage.v1.BigQueryWrite/AppendRows",
-                rx,
-                &meta,
-            )
-            .await?;
-
-        while let Some(frame) = resp_stream.next_message().await? {
-            let decoded = decode_append_rows_response(&frame)?;
-            if !decoded.row_errors.is_empty() {
-                return Err(BigQueryError::RowErrors(decoded.row_errors));
-            }
-            if let Some(status) = decoded.error
-                && status.code != GrpcCode::Ok
-            {
-                return Err(BigQueryError::Grpc(status));
-            }
-        }
+        let write = self.storage_write().await?;
+        let schema = bq_model::ArrowSchema::new().set_serialized_schema(plan.schema.clone());
 
         match write_mode {
-            BigQueryWriteMode::Default | BigQueryWriteMode::Committed => {}
-            BigQueryWriteMode::Buffered => {
-                let flush_req = encode_flush_rows_request(
-                    &write_stream_name,
-                    cumulative_rows.saturating_sub(1),
-                );
-                let flush_meta = self
-                    .build_grpc_metadata(Some(format!("write_stream={write_stream_name}")))
-                    .await?;
-                let _ = pool
-                    .unary(
-                        "/google.cloud.bigquery.storage.v1.BigQueryWrite/FlushRows",
-                        flush_req,
-                        &flush_meta,
-                    )
-                    .await?;
+            BigQueryWriteMode::Default => {
+                let writer = write
+                    .open_default_stream(&table)
+                    .with_retry_policy(WriteRetryableErrors.with_attempt_limit(3))
+                    .build_arrow(schema)
+                    .await
+                    .map_err(map_writer_builder_error)?;
+                let mut pending = Vec::with_capacity(plan.requests.len());
+                for req in &plan.requests {
+                    pending.push(writer.append(build_arrow_record_batch(req)).send());
+                }
+                let mut offsets = Vec::with_capacity(pending.len());
+                for fut in pending {
+                    let resp = fut.await.map_err(map_append_error)?;
+                    offsets.push(resp.offset);
+                }
+                let appended_rows = plan.verify_responses(&offsets)?;
+                Ok(BigQueryAppendResult {
+                    appended_rows,
+                    write_stream: format!("{table}/streams/_default"),
+                })
+            }
+            BigQueryWriteMode::Committed => {
+                let writer = write
+                    .create_stream::<CommittedStream>(&table)
+                    .build_arrow(schema)
+                    .await
+                    .map_err(map_writer_builder_error)?;
+                let write_stream = writer.write_stream().to_string();
+                let mut pending = Vec::with_capacity(plan.requests.len());
+                for req in &plan.requests {
+                    pending.push(
+                        writer
+                            .append(build_arrow_record_batch(req))
+                            .set_offset(req.offset.unwrap_or(0))
+                            .send(),
+                    );
+                }
+                let mut offsets = Vec::with_capacity(pending.len());
+                for fut in pending {
+                    let resp = fut.await.map_err(map_append_error)?;
+                    offsets.push(resp.offset);
+                }
+                let appended_rows = plan.verify_responses(&offsets)?;
+                Ok(BigQueryAppendResult {
+                    appended_rows,
+                    write_stream,
+                })
             }
             BigQueryWriteMode::Pending => {
-                let fin_req = encode_finalize_write_stream_request(&write_stream_name);
-                let fin_meta = self
-                    .build_grpc_metadata(Some(format!("name={write_stream_name}")))
-                    .await?;
-                let _ = pool
-                    .unary(
-                        "/google.cloud.bigquery.storage.v1.BigQueryWrite/FinalizeWriteStream",
-                        fin_req,
-                        &fin_meta,
-                    )
-                    .await?;
-
-                let commit_req = encode_batch_commit_write_streams_request(
-                    &normalized_table,
-                    std::slice::from_ref(&write_stream_name),
-                );
-                let commit_meta = self
-                    .build_grpc_metadata(Some(format!("parent={normalized_table}")))
-                    .await?;
-                let (commit_resp, _) = pool
-                    .unary(
-                        "/google.cloud.bigquery.storage.v1.BigQueryWrite/BatchCommitWriteStreams",
-                        commit_req,
-                        &commit_meta,
-                    )
-                    .await?;
-                check_batch_commit_response(&commit_resp)?;
+                let writer = write
+                    .create_stream::<PendingStream>(&table)
+                    .build_arrow(schema)
+                    .await
+                    .map_err(map_writer_builder_error)?;
+                let write_stream = writer.write_stream().to_string();
+                let mut pending = Vec::with_capacity(plan.requests.len());
+                for req in &plan.requests {
+                    pending.push(
+                        writer
+                            .append(build_arrow_record_batch(req))
+                            .set_offset(req.offset.unwrap_or(0))
+                            .send(),
+                    );
+                }
+                let mut offsets = Vec::with_capacity(pending.len());
+                for fut in pending {
+                    let resp = fut.await.map_err(map_append_error)?;
+                    offsets.push(resp.offset);
+                }
+                let appended_rows = plan.verify_responses(&offsets)?;
+                writer.finalize().await?;
+                writer.commit().await.map_err(map_commit_error)?;
+                Ok(BigQueryAppendResult {
+                    appended_rows,
+                    write_stream,
+                })
+            }
+            BigQueryWriteMode::Buffered => {
+                let writer = write
+                    .create_stream::<BufferedStream>(&table)
+                    .build_arrow(schema)
+                    .await
+                    .map_err(map_writer_builder_error)?;
+                let write_stream = writer.write_stream().to_string();
+                let mut pending = Vec::with_capacity(plan.requests.len());
+                for req in &plan.requests {
+                    pending.push(
+                        writer
+                            .append(build_arrow_record_batch(req))
+                            .set_offset(req.offset.unwrap_or(0))
+                            .send(),
+                    );
+                }
+                let mut offsets = Vec::with_capacity(pending.len());
+                for fut in pending {
+                    let resp = fut.await.map_err(map_append_error)?;
+                    offsets.push(resp.offset);
+                }
+                let appended_rows = plan.verify_responses(&offsets)?;
+                if plan.total_rows() > 0 {
+                    writer.flush(plan.total_rows() - 1).await?;
+                }
+                Ok(BigQueryAppendResult {
+                    appended_rows,
+                    write_stream,
+                })
             }
         }
-
-        Ok(BigQueryAppendResult {
-            appended_rows: cumulative_rows.max(0) as u64,
-            write_stream: write_stream_name,
-        })
-    }
-
-    async fn create_write_stream(
-        &self,
-        pool: &GrpcChannelPool,
-        parent_table: &str,
-        stream_type: i32,
-    ) -> Result<String, BigQueryError> {
-        let req = encode_create_write_stream_request(parent_table, stream_type);
-        let meta = self
-            .build_grpc_metadata(Some(format!("parent={parent_table}")))
-            .await?;
-        let (resp, _) = pool
-            .unary(
-                "/google.cloud.bigquery.storage.v1.BigQueryWrite/CreateWriteStream",
-                req,
-                &meta,
-            )
-            .await?;
-        decode_write_stream_name(&resp)
     }
 
     fn normalize_table_resource(&self, table: &str) -> Result<String, BigQueryError> {
@@ -1241,43 +1302,6 @@ impl BigQueryClient {
                 "invalid BigQuery table identifier: `{table}`"
             ))),
         }
-    }
-
-    async fn get_or_init_grpc_pool(&self) -> Result<Arc<GrpcChannelPool>, BigQueryError> {
-        let pool = self
-            .grpc_pool
-            .get_or_try_init(|| async {
-                let mut pool_cfg = GrpcPoolConfig::new(self.config.effective_storage_endpoint());
-                pool_cfg.pool_size = self.config.pool_size.max(1);
-                if let Some(ref pem) = self.config.ca_pem {
-                    pool_cfg.ca_pem = Some(pem.clone());
-                }
-                let created = GrpcChannelPool::new(pool_cfg)?;
-                Ok::<Arc<GrpcChannelPool>, BigQueryError>(Arc::new(created))
-            })
-            .await?;
-        Ok(Arc::clone(pool))
-    }
-
-    async fn build_grpc_metadata(
-        &self,
-        routing_params: Option<String>,
-    ) -> Result<GrpcRequestMetadata, BigQueryError> {
-        let mut meta = GrpcRequestMetadata {
-            routing_params,
-            ..GrpcRequestMetadata::default()
-        };
-        if let Some(ref cache) = self.token_cache {
-            let snap = cache.get_or_refresh().await.map_err(BigQueryError::Auth)?;
-            meta.bearer_token = Some(snap.access_token.clone());
-            meta.quota_project = snap
-                .quota_project_id
-                .clone()
-                .or_else(|| self.config.auth_options.get("quota_project_id").cloned());
-        } else if let Some(qp) = self.config.auth_options.get("quota_project_id") {
-            meta.quota_project = Some(qp.clone());
-        }
-        Ok(meta)
     }
 
     async fn execute_fastpath_query(
@@ -1487,10 +1511,7 @@ impl BigQueryClient {
             "formatOptions".to_string(),
             json!({ "useInt64Timestamp": true }),
         );
-        body.insert(
-            "requestId".to_string(),
-            Value::String(generate_request_uuid_v4()),
-        );
+        body.insert("requestId".to_string(), Value::String(uuid4_str()));
 
         if let Some(ref ds) = self.config.dataset_id
             && !ds.is_empty()
@@ -1676,10 +1697,7 @@ impl BigQueryClient {
             "projectId".to_string(),
             Value::String(self.config.project_id.clone()),
         );
-        job_ref.insert(
-            "jobId".to_string(),
-            Value::String(generate_request_uuid_v4()),
-        );
+        job_ref.insert("jobId".to_string(), Value::String(uuid4_str()));
         if let Some(ref loc) = self.config.location
             && !loc.is_empty()
         {
@@ -2140,732 +2158,393 @@ fn strip_leading_sql_comments(mut s: &str) -> &str {
     }
 }
 
-/// Decoded `ReadSession` message from `BigQueryRead.CreateReadSession`.
-#[derive(Debug, Clone)]
-pub struct DecodedReadSession {
-    pub name: String,
-    pub arrow_schema_bytes: Bytes,
-    pub stream_names: Vec<String>,
+#[allow(deprecated)]
+fn build_arrow_record_batch(req: &ArrowAppendRequest) -> bq_model::ArrowRecordBatch {
+    bq_model::ArrowRecordBatch::new()
+        .set_serialized_record_batch(req.record_batch.clone())
+        .set_row_count(req.row_count)
 }
 
-/// Encode a `google.cloud.bigquery.storage.v1.CreateReadSessionRequest` protobuf message.
-pub fn encode_create_read_session_request(
-    parent: &str,
-    table_resource: &str,
-    selected_fields: &[String],
-    row_restriction: &str,
-    max_stream_count: i32,
-    compression: BigQueryArrowCompression,
-) -> Bytes {
-    let has_read_opts = !selected_fields.is_empty()
-        || !row_restriction.is_empty()
-        || compression != BigQueryArrowCompression::Unspecified;
+fn map_writer_builder_error(err: WriterBuilderError) -> BigQueryError {
+    BigQueryError::AppendVerification(err.to_string())
+}
 
-    let mut req = ProtoWriter::new();
-    req.write_str(1, parent);
-    req.write_nested(2, |read_session| {
-        read_session.write_i32(1, 2);
-        read_session.write_str(2, table_resource);
-        if has_read_opts {
-            read_session.write_nested(5, |read_opts| {
-                for field in selected_fields {
-                    read_opts.write_str(1, field);
+fn map_append_error(err: AppendError) -> BigQueryError {
+    match err {
+        AppendError::RowErrors { row_errors, .. } => BigQueryError::RowErrors(
+            row_errors
+                .into_iter()
+                .map(|e| BigQueryRowError {
+                    index: e.index,
+                    code: e.code.value().unwrap_or(0),
+                    message: e.message,
+                })
+                .collect(),
+        ),
+        AppendError::Rpc { source, .. } => BigQueryError::Client(source),
+        other => BigQueryError::AppendVerification(other.to_string()),
+    }
+}
+
+fn map_commit_error(err: CommitError) -> BigQueryError {
+    match err {
+        CommitError::Rpc { source, .. } => BigQueryError::Client(source),
+        CommitError::FailedTransaction { stream_errors, .. } => {
+            if let Some(first) = stream_errors.first() {
+                BigQueryError::AppendVerification(format!(
+                    "BatchCommitWriteStreams rejected stream {}: {}",
+                    first.entity, first.error_message
+                ))
+            } else {
+                BigQueryError::AppendVerification(
+                    "BatchCommitWriteStreams rejected transaction".to_string(),
+                )
+            }
+        }
+        other => BigQueryError::AppendVerification(other.to_string()),
+    }
+}
+
+/// One `AppendRowsRequest` worth of Arrow data: a single encapsulated record-batch message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArrowAppendRequest {
+    pub record_batch: Bytes,
+    pub row_count: i64,
+    pub offset: Option<i64>,
+}
+
+/// Ordered Storage Write requests derived from one Arrow IPC stream.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ArrowAppendPlan {
+    pub schema: Bytes,
+    pub requests: Vec<ArrowAppendRequest>,
+}
+
+impl ArrowAppendPlan {
+    /// Parse an Arrow IPC stream into its schema message and one [`ArrowAppendRequest`] per record batch.
+    pub fn build(stream: &[u8], mode: BigQueryWriteMode) -> Result<Self, BigQueryError> {
+        if stream.is_empty() {
+            return Ok(Self::default());
+        }
+
+        let mut pos = 0usize;
+        let mut schema: Option<Bytes> = None;
+        let mut requests = Vec::new();
+        let mut running_rows = 0i64;
+
+        while pos < stream.len() {
+            if stream[pos..].starts_with(&ARROW_IPC_EOS_MARKER) {
+                break;
+            }
+            if stream.len() - pos < 8 {
+                return Err(BigQueryError::InvalidArgument(format!(
+                    "truncated Arrow IPC message header at byte {pos}"
+                )));
+            }
+            if stream[pos..pos + 4] != [0xFF, 0xFF, 0xFF, 0xFF] {
+                return Err(BigQueryError::InvalidArgument(format!(
+                    "Arrow IPC message at byte {pos} lacks the 0xFFFFFFFF continuation marker"
+                )));
+            }
+            let meta_size = u32::from_le_bytes([
+                stream[pos + 4],
+                stream[pos + 5],
+                stream[pos + 6],
+                stream[pos + 7],
+            ]) as usize;
+            if meta_size == 0 {
+                break;
+            }
+            let padded_meta = meta_size.checked_add(7).map(|n| n & !7).ok_or_else(|| {
+                BigQueryError::InvalidArgument(format!("truncated Arrow IPC message at byte {pos}"))
+            })?;
+            let meta_start = pos + 8;
+            let meta_end = meta_start
+                .checked_add(padded_meta)
+                .filter(|&end| end <= stream.len())
+                .ok_or_else(|| {
+                    BigQueryError::InvalidArgument(format!(
+                        "truncated Arrow IPC message at byte {pos}"
+                    ))
+                })?;
+
+            let fb = &stream[meta_start..meta_start + meta_size];
+            let header = ArrowMessageHeader::parse(fb)?;
+            let padded_body = header
+                .body_len
+                .checked_add(7)
+                .map(|n| n & !7)
+                .ok_or_else(|| {
+                    BigQueryError::InvalidArgument(format!(
+                        "truncated Arrow IPC message at byte {pos}"
+                    ))
+                })?;
+            let frame_end = meta_end
+                .checked_add(padded_body)
+                .filter(|&end| end <= stream.len())
+                .ok_or_else(|| {
+                    BigQueryError::InvalidArgument(format!(
+                        "truncated Arrow IPC message at byte {pos}"
+                    ))
+                })?;
+
+            let frame_bytes = Bytes::copy_from_slice(&stream[pos..frame_end]);
+            match header.header_type {
+                1 => {
+                    if schema.is_some() {
+                        return Err(BigQueryError::InvalidArgument(
+                            "Arrow IPC stream contains more than one Schema message".to_string(),
+                        ));
+                    }
+                    schema = Some(frame_bytes);
                 }
-                if !row_restriction.is_empty() {
-                    read_opts.write_str(2, row_restriction);
+                2 => {
+                    return Err(BigQueryError::InvalidArgument(
+                        "dictionary-encoded Arrow columns are not supported by AppendRows; cast dictionary columns to their value type before appending".to_string(),
+                    ));
                 }
-                if compression != BigQueryArrowCompression::Unspecified {
-                    read_opts.write_nested(3, |arrow_opts| {
-                        arrow_opts.write_i32(2, compression as i32);
+                3 => {
+                    if schema.is_none() {
+                        return Err(BigQueryError::InvalidArgument(
+                            "Arrow IPC stream must start with a Schema message".to_string(),
+                        ));
+                    }
+                    let index = requests.len();
+                    let len = frame_bytes.len();
+                    if len > MAX_APPEND_ROWS_CHUNK_BYTES {
+                        return Err(BigQueryError::InvalidArgument(format!(
+                            "Arrow record batch {index} is {len} bytes; AppendRows accepts at most {MAX_APPEND_ROWS_CHUNK_BYTES} bytes per request; split the batch"
+                        )));
+                    }
+                    let offset = match mode {
+                        BigQueryWriteMode::Default => None,
+                        BigQueryWriteMode::Committed
+                        | BigQueryWriteMode::Pending
+                        | BigQueryWriteMode::Buffered => Some(running_rows),
+                    };
+                    running_rows += header.row_count;
+                    requests.push(ArrowAppendRequest {
+                        record_batch: frame_bytes,
+                        row_count: header.row_count,
+                        offset,
                     });
                 }
-            });
+                t => {
+                    return Err(BigQueryError::InvalidArgument(format!(
+                        "unsupported Arrow IPC message type {t}"
+                    )));
+                }
+            }
+            pos = frame_end;
         }
-    });
-    if max_stream_count > 0 {
-        req.write_i32(3, max_stream_count);
-    }
-    req.finish()
-}
 
-/// Decode a `google.cloud.bigquery.storage.v1.ReadSession` protobuf message.
-pub fn decode_read_session_response(buf: &[u8]) -> Result<DecodedReadSession, ProtoError> {
-    let mut reader = ProtoReader::new(buf);
-    let mut name = String::new();
-    let mut arrow_schema_bytes = Bytes::new();
-    let mut stream_names = Vec::new();
-
-    while let Some((field_no, wire_type)) = reader.next_tag()? {
-        match (field_no, wire_type) {
-            (1, WireType::LengthDelimited) => {
-                name = reader.read_str()?.to_string();
-            }
-            (4, WireType::LengthDelimited) => {
-                let mut schema_reader = reader.read_nested()?;
-                while let Some((sf, sw)) = schema_reader.next_tag()? {
-                    if sf == 1 && sw == WireType::LengthDelimited {
-                        arrow_schema_bytes = Bytes::copy_from_slice(schema_reader.read_bytes()?);
-                    } else {
-                        schema_reader.skip_field(sw)?;
-                    }
-                }
-            }
-            (6, WireType::LengthDelimited) => {
-                let mut stream_reader = reader.read_nested()?;
-                while let Some((stf, stw)) = stream_reader.next_tag()? {
-                    if stf == 1 && stw == WireType::LengthDelimited {
-                        stream_names.push(stream_reader.read_str()?.to_string());
-                    } else {
-                        stream_reader.skip_field(stw)?;
-                    }
-                }
-            }
-            (_, wt) => reader.skip_field(wt)?,
-        }
-    }
-
-    Ok(DecodedReadSession {
-        name,
-        arrow_schema_bytes,
-        stream_names,
-    })
-}
-
-/// Encode a `google.cloud.bigquery.storage.v1.ReadRowsRequest` protobuf message.
-pub fn encode_read_rows_request(read_stream: &str, offset: i64) -> Bytes {
-    let mut req = ProtoWriter::new();
-    req.write_str(1, read_stream);
-    if offset != 0 {
-        req.write_i64(2, offset);
-    }
-    req.finish()
-}
-
-/// Decoded `ReadRowsResponse` frame from `BigQueryRead.ReadRows`.
-#[derive(Debug, Clone)]
-pub struct DecodedReadRowsResponse {
-    pub serialized_record_batch: Bytes,
-    pub row_count: i64,
-    pub serialized_schema: Option<Bytes>,
-}
-
-/// Decode a `google.cloud.bigquery.storage.v1.ReadRowsResponse` protobuf message.
-pub fn decode_read_rows_response(buf: &[u8]) -> Result<DecodedReadRowsResponse, ProtoError> {
-    let mut reader = ProtoReader::new(buf);
-    let mut serialized_record_batch = Bytes::new();
-    let mut batch_row_count: Option<i64> = None;
-    let mut top_row_count: Option<i64> = None;
-    let mut serialized_schema = None;
-
-    while let Some((field_no, wire_type)) = reader.next_tag()? {
-        match (field_no, wire_type) {
-            (3, WireType::LengthDelimited) => {
-                let mut batch_reader = reader.read_nested()?;
-                while let Some((bf, bw)) = batch_reader.next_tag()? {
-                    match (bf, bw) {
-                        (1, WireType::LengthDelimited) => {
-                            serialized_record_batch =
-                                Bytes::copy_from_slice(batch_reader.read_bytes()?);
-                        }
-                        (2, WireType::Varint) => {
-                            batch_row_count = Some(batch_reader.read_i64()?);
-                        }
-                        (_, wt) => batch_reader.skip_field(wt)?,
-                    }
-                }
-            }
-            (6, WireType::Varint) => {
-                top_row_count = Some(reader.read_i64()?);
-            }
-            (7, WireType::LengthDelimited) => {
-                let mut schema_reader = reader.read_nested()?;
-                while let Some((sf, sw)) = schema_reader.next_tag()? {
-                    if sf == 1 && sw == WireType::LengthDelimited {
-                        serialized_schema =
-                            Some(Bytes::copy_from_slice(schema_reader.read_bytes()?));
-                    } else {
-                        schema_reader.skip_field(sw)?;
-                    }
-                }
-            }
-            (_, wt) => reader.skip_field(wt)?,
-        }
-    }
-
-    let row_count = batch_row_count.or(top_row_count).unwrap_or(0);
-    Ok(DecodedReadRowsResponse {
-        serialized_record_batch,
-        row_count,
-        serialized_schema,
-    })
-}
-
-async fn read_single_storage_stream_with_retry(
-    pool: Arc<GrpcChannelPool>,
-    token_cache: Option<Arc<GcpTokenCache>>,
-    quota_project: Option<String>,
-    stream_name: String,
-) -> Result<Vec<(Bytes, usize)>, BigQueryError> {
-    let mut consumed_rows: i64 = 0;
-    let mut batches: Vec<(Bytes, usize)> = Vec::new();
-    let mut retries = 0usize;
-    const MAX_RETRIES: usize = 3;
-
-    loop {
-        let mut meta = GrpcRequestMetadata {
-            routing_params: Some(format!("read_stream={stream_name}")),
-            ..GrpcRequestMetadata::default()
+        let Some(schema) = schema else {
+            return Ok(Self::default());
         };
-        if let Some(ref cache) = token_cache {
-            let snap = cache.get_or_refresh().await.map_err(BigQueryError::Auth)?;
-            meta.bearer_token = Some(snap.access_token.clone());
-            meta.quota_project = snap
-                .quota_project_id
-                .clone()
-                .or_else(|| quota_project.clone());
-        } else {
-            meta.quota_project = quota_project.clone();
-        }
-
-        let req_bytes = encode_read_rows_request(&stream_name, consumed_rows);
-        let mut stream = match pool
-            .server_streaming(
-                "/google.cloud.bigquery.storage.v1.BigQueryRead/ReadRows",
-                req_bytes,
-                &meta,
-            )
-            .await
-        {
-            Ok(s) => s,
-            Err(e) if retries < MAX_RETRIES && is_transient_grpc_error(&e) => {
-                retries += 1;
-                continue;
-            }
-            Err(e) => return Err(BigQueryError::Grpc(e)),
-        };
-
-        let drop_err: GrpcStatus = loop {
-            match stream.next_message().await {
-                Ok(Some(frame)) => {
-                    let decoded = decode_read_rows_response(&frame)?;
-                    let rows = decoded.row_count.max(0) as usize;
-                    consumed_rows += decoded.row_count.max(0);
-                    if !decoded.serialized_record_batch.is_empty() {
-                        batches.push((decoded.serialized_record_batch, rows));
-                    }
-                }
-                Ok(None) => return Ok(batches),
-                Err(e) => break e,
-            }
-        };
-
-        if retries < MAX_RETRIES && is_transient_grpc_error(&drop_err) {
-            retries += 1;
-            continue;
-        }
-        return Err(BigQueryError::Grpc(drop_err));
-    }
-}
-
-fn is_transient_grpc_error(err: &GrpcStatus) -> bool {
-    matches!(
-        err.code,
-        GrpcCode::Unavailable
-            | GrpcCode::Internal
-            | GrpcCode::Aborted
-            | GrpcCode::DeadlineExceeded
-            | GrpcCode::ResourceExhausted
-    )
-}
-
-/// Encode a `CreateWriteStreamRequest` protobuf message (`COMMITTED = 1`, `PENDING = 2`, `BUFFERED = 3`).
-pub fn encode_create_write_stream_request(parent: &str, stream_type: i32) -> Bytes {
-    let mut req = ProtoWriter::new();
-    req.write_str(1, parent);
-    req.write_nested(2, |ws| {
-        ws.write_i32(2, stream_type);
-    });
-    req.finish()
-}
-
-/// Decode a `WriteStream` protobuf message and return its `name` (`field 1`).
-pub fn decode_write_stream_name(buf: &[u8]) -> Result<String, BigQueryError> {
-    let mut reader = ProtoReader::new(buf);
-    while let Some((field_no, wire_type)) = reader.next_tag()? {
-        if field_no == 1 && wire_type == WireType::LengthDelimited {
-            return Ok(reader.read_str()?.to_string());
-        }
-        reader.skip_field(wire_type)?;
-    }
-    Err(BigQueryError::InvalidArgument(
-        "CreateWriteStream response missing WriteStream.name".to_string(),
-    ))
-}
-
-/// Encode an `AppendRowsRequest` protobuf message for `BigQueryWrite.AppendRows`.
-pub fn encode_append_rows_request(
-    write_stream: &str,
-    offset: Option<i64>,
-    writer_schema_ipc: Option<&[u8]>,
-    record_batch_ipc: &[u8],
-    row_count: i64,
-) -> Bytes {
-    let mut req = ProtoWriter::with_capacity(record_batch_ipc.len() + 128);
-    if !write_stream.is_empty() {
-        req.write_str(1, write_stream);
-    }
-    if let Some(off) = offset {
-        req.write_nested(2, |off_msg| {
-            off_msg.write_i64(1, off);
-        });
-    }
-    req.write_nested(4, |arrow_data| {
-        if let Some(schema_bytes) = writer_schema_ipc
-            && !schema_bytes.is_empty()
-        {
-            arrow_data.write_nested(1, |schema_msg| {
-                schema_msg.write_bytes(1, schema_bytes);
-            });
-        }
-        arrow_data.write_nested(2, |batch_msg| {
-            batch_msg.write_bytes(1, record_batch_ipc);
-            if row_count != 0 {
-                batch_msg.write_i64(2, row_count);
-            }
-        });
-    });
-    req.finish()
-}
-
-/// Decoded `AppendRowsRequest` message for wire testing and inspection.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DecodedAppendRowsRequest {
-    pub write_stream: String,
-    pub offset: Option<i64>,
-    pub writer_schema: Option<Bytes>,
-    pub serialized_record_batch: Bytes,
-    pub row_count: i64,
-}
-
-/// Decode an `AppendRowsRequest` protobuf message (accepting `arrow_rows` on field `4` or `5`).
-pub fn decode_append_rows_request(buf: &[u8]) -> Result<DecodedAppendRowsRequest, ProtoError> {
-    let mut reader = ProtoReader::new(buf);
-    let mut write_stream = String::new();
-    let mut offset = None;
-    let mut writer_schema = None;
-    let mut serialized_record_batch = Bytes::new();
-    let mut row_count = 0i64;
-
-    while let Some((field_no, wire_type)) = reader.next_tag()? {
-        match (field_no, wire_type) {
-            (1, WireType::LengthDelimited) => {
-                write_stream = reader.read_str()?.to_string();
-            }
-            (2, WireType::LengthDelimited) => {
-                let mut off_reader = reader.read_nested()?;
-                let mut off_val = 0i64;
-                while let Some((of, ow)) = off_reader.next_tag()? {
-                    if of == 1 && ow == WireType::Varint {
-                        off_val = off_reader.read_i64()?;
-                    } else {
-                        off_reader.skip_field(ow)?;
-                    }
-                }
-                offset = Some(off_val);
-            }
-            (2, WireType::Varint) => {
-                offset = Some(reader.read_i64()?);
-            }
-            (4 | 5, WireType::LengthDelimited) => {
-                let mut arrow_reader = reader.read_nested()?;
-                while let Some((af, aw)) = arrow_reader.next_tag()? {
-                    match (af, aw) {
-                        (1, WireType::LengthDelimited) => {
-                            let mut sreader = arrow_reader.read_nested()?;
-                            while let Some((sf, sw)) = sreader.next_tag()? {
-                                if sf == 1 && sw == WireType::LengthDelimited {
-                                    writer_schema =
-                                        Some(Bytes::copy_from_slice(sreader.read_bytes()?));
-                                } else {
-                                    sreader.skip_field(sw)?;
-                                }
-                            }
-                        }
-                        (2, WireType::LengthDelimited) => {
-                            let mut breader = arrow_reader.read_nested()?;
-                            while let Some((bf, bw)) = breader.next_tag()? {
-                                match (bf, bw) {
-                                    (1, WireType::LengthDelimited) => {
-                                        serialized_record_batch =
-                                            Bytes::copy_from_slice(breader.read_bytes()?);
-                                    }
-                                    (2, WireType::Varint) => {
-                                        row_count = breader.read_i64()?;
-                                    }
-                                    (_, wt) => breader.skip_field(wt)?,
-                                }
-                            }
-                        }
-                        (_, wt) => arrow_reader.skip_field(wt)?,
-                    }
-                }
-            }
-            (_, wt) => reader.skip_field(wt)?,
-        }
+        Ok(Self { schema, requests })
     }
 
-    Ok(DecodedAppendRowsRequest {
-        write_stream,
-        offset,
-        writer_schema,
-        serialized_record_batch,
-        row_count,
-    })
-}
-
-/// Decoded `AppendRowsResponse` protobuf message.
-#[derive(Debug, Clone)]
-pub struct DecodedAppendRowsResponse {
-    pub appended_offset: Option<i64>,
-    pub error: Option<GrpcStatus>,
-    pub row_errors: Vec<BigQueryRowError>,
-}
-
-/// Decode an `AppendRowsResponse` protobuf message.
-pub fn decode_append_rows_response(buf: &[u8]) -> Result<DecodedAppendRowsResponse, ProtoError> {
-    let mut reader = ProtoReader::new(buf);
-    let mut appended_offset = None;
-    let mut error = None;
-    let mut row_errors = Vec::new();
-
-    while let Some((field_no, wire_type)) = reader.next_tag()? {
-        match (field_no, wire_type) {
-            (1, WireType::LengthDelimited) => {
-                let mut res_reader = reader.read_nested()?;
-                while let Some((rf, rw)) = res_reader.next_tag()? {
-                    if rf == 1 && rw == WireType::LengthDelimited {
-                        let mut off_reader = res_reader.read_nested()?;
-                        let mut val = 0i64;
-                        while let Some((of, ow)) = off_reader.next_tag()? {
-                            if of == 1 && ow == WireType::Varint {
-                                val = off_reader.read_i64()?;
-                            } else {
-                                off_reader.skip_field(ow)?;
-                            }
-                        }
-                        appended_offset = Some(val);
-                    } else if rf == 1 && rw == WireType::Varint {
-                        appended_offset = Some(res_reader.read_i64()?);
-                    } else {
-                        res_reader.skip_field(rw)?;
-                    }
-                }
-            }
-            (2, WireType::LengthDelimited) => {
-                let mut status_reader = reader.read_nested()?;
-                let mut code = 0i32;
-                let mut message = String::new();
-                while let Some((sf, sw)) = status_reader.next_tag()? {
-                    match (sf, sw) {
-                        (1, WireType::Varint) => code = status_reader.read_i32()?,
-                        (2, WireType::LengthDelimited) => {
-                            message = status_reader.read_str()?.to_string();
-                        }
-                        (_, wt) => status_reader.skip_field(wt)?,
-                    }
-                }
-                error = Some(GrpcStatus {
-                    code: GrpcCode::from_i32(code),
-                    raw_code: code,
-                    message,
-                    details: Vec::new(),
-                });
-            }
-            (4 | 5, WireType::LengthDelimited) => {
-                let mut err_reader = reader.read_nested()?;
-                let mut index = 0i64;
-                let mut code = 0i32;
-                let mut message = String::new();
-                while let Some((ef, ew)) = err_reader.next_tag()? {
-                    match (ef, ew) {
-                        (1, WireType::Varint) => index = err_reader.read_i64()?,
-                        (2, WireType::Varint) => code = err_reader.read_i32()?,
-                        (3, WireType::LengthDelimited) => {
-                            message = err_reader.read_str()?.to_string();
-                        }
-                        (_, wt) => err_reader.skip_field(wt)?,
-                    }
-                }
-                row_errors.push(BigQueryRowError {
-                    index,
-                    code,
-                    message,
-                });
-            }
-            (_, wt) => reader.skip_field(wt)?,
-        }
+    /// Return the total number of rows across all planned record-batch requests.
+    pub fn total_rows(&self) -> i64 {
+        self.requests.iter().map(|r| r.row_count).sum()
     }
 
-    Ok(DecodedAppendRowsResponse {
-        appended_offset,
-        error,
-        row_errors,
-    })
-}
-
-/// Encode a `FinalizeWriteStreamRequest` protobuf message.
-pub fn encode_finalize_write_stream_request(name: &str) -> Bytes {
-    let mut req = ProtoWriter::new();
-    req.write_str(1, name);
-    req.finish()
-}
-
-/// Encode a `BatchCommitWriteStreamsRequest` protobuf message.
-pub fn encode_batch_commit_write_streams_request(parent: &str, write_streams: &[String]) -> Bytes {
-    let mut req = ProtoWriter::new();
-    req.write_str(1, parent);
-    for ws in write_streams {
-        req.write_str(2, ws);
-    }
-    req.finish()
-}
-
-/// Encode a `FlushRowsRequest` protobuf message.
-pub fn encode_flush_rows_request(write_stream: &str, offset: i64) -> Bytes {
-    let mut req = ProtoWriter::new();
-    req.write_str(1, write_stream);
-    req.write_nested(2, |off_msg| {
-        off_msg.write_i64(1, offset);
-    });
-    req.finish()
-}
-
-fn check_batch_commit_response(buf: &[u8]) -> Result<(), BigQueryError> {
-    let mut reader = ProtoReader::new(buf);
-    while let Some((field_no, wire_type)) = reader.next_tag()? {
-        if field_no == 2 && wire_type == WireType::LengthDelimited {
-            let mut err_reader = reader.read_nested()?;
-            let mut stream = String::new();
-            let mut message = String::new();
-            while let Some((ef, ew)) = err_reader.next_tag()? {
-                match (ef, ew) {
-                    (1, WireType::LengthDelimited) => stream = err_reader.read_str()?.to_string(),
-                    (3, WireType::LengthDelimited) => message = err_reader.read_str()?.to_string(),
-                    (_, wt) => err_reader.skip_field(wt)?,
-                }
-            }
-            return Err(BigQueryError::InvalidArgument(format!(
-                "BatchCommitWriteStreams failed on stream `{stream}`: {message}"
+    /// Verify that `AppendRows` returned one response per request with matching offsets.
+    pub fn verify_responses(&self, offsets: &[Option<i64>]) -> Result<u64, BigQueryError> {
+        let got = offsets.len();
+        let expected = self.requests.len();
+        if got != expected {
+            return Err(BigQueryError::AppendVerification(format!(
+                "AppendRows returned {got} responses for {expected} requests"
             )));
         }
-        reader.skip_field(wire_type)?;
-    }
-    Ok(())
-}
-
-/// Split an Arrow IPC stream into its encapsulated `Schema` frame and `<= max_chunk_bytes`
-/// `RecordBatch` frames `(batch_bytes, row_count)`.
-pub fn split_arrow_ipc_stream(
-    stream_bytes: &[u8],
-    max_chunk_bytes: usize,
-) -> Result<(Bytes, Vec<(Bytes, i64)>), BigQueryError> {
-    if stream_bytes.is_empty() {
-        return Ok((Bytes::new(), Vec::new()));
-    }
-    let effective_limit = max_chunk_bytes.max(1024);
-
-    if let Some((schema, batches)) = try_parse_encapsulated_arrow_stream(stream_bytes) {
-        let mut chunked = Vec::new();
-        let mut accum = BytesMut::new();
-        let mut accum_rows = 0i64;
-
-        for (batch_bytes, rows) in batches {
-            if !accum.is_empty() && accum.len() + batch_bytes.len() > effective_limit {
-                chunked.push((accum.split().freeze(), accum_rows));
-                accum_rows = 0;
-            }
-            accum.put_slice(&batch_bytes);
-            accum_rows += rows;
-            if accum.len() >= effective_limit {
-                chunked.push((accum.split().freeze(), accum_rows));
-                accum_rows = 0;
+        for (i, (req, got_off)) in self.requests.iter().zip(offsets.iter()).enumerate() {
+            if let Some(expected_off) = req.offset
+                && *got_off != Some(expected_off)
+            {
+                return Err(BigQueryError::AppendVerification(format!(
+                    "AppendRows response {i} reported offset {got_off:?}; expected {expected_off}"
+                )));
             }
         }
-        if !accum.is_empty() {
-            chunked.push((accum.freeze(), accum_rows));
-        }
-        return Ok((schema, chunked));
+        Ok(self.total_rows().max(0) as u64)
     }
-
-    let stripped = if stream_bytes.len() >= ARROW_IPC_EOS_MARKER.len()
-        && stream_bytes[stream_bytes.len() - ARROW_IPC_EOS_MARKER.len()..] == ARROW_IPC_EOS_MARKER
-    {
-        &stream_bytes[..stream_bytes.len() - ARROW_IPC_EOS_MARKER.len()]
-    } else {
-        stream_bytes
-    };
-    if stripped.is_empty() {
-        return Ok((Bytes::new(), Vec::new()));
-    }
-
-    let mut chunks = Vec::new();
-    for slice in stripped.chunks(effective_limit) {
-        chunks.push((Bytes::copy_from_slice(slice), 1));
-    }
-    Ok((
-        Bytes::copy_from_slice(&stripped[..stripped.len().min(64)]),
-        chunks,
-    ))
 }
 
-fn try_parse_encapsulated_arrow_stream(buf: &[u8]) -> Option<(Bytes, Vec<(Bytes, i64)>)> {
-    if buf.len() < 8 || buf[0..4] != [0xFF, 0xFF, 0xFF, 0xFF] {
-        return None;
-    }
+struct ArrowMessageHeader {
+    header_type: u8,
+    body_len: usize,
+    row_count: i64,
+}
 
-    let mut pos = 0usize;
-    let mut schema_frame: Option<Bytes> = None;
-    let mut batches: Vec<(Bytes, i64)> = Vec::new();
-
-    while pos + 8 <= buf.len() {
-        if buf[pos..pos + 4] != [0xFF, 0xFF, 0xFF, 0xFF] {
-            break;
+impl ArrowMessageHeader {
+    fn parse(fb: &[u8]) -> Result<Self, BigQueryError> {
+        let root_offset = read_u32_le(fb, 0)? as usize;
+        let vtable_rel = read_i32_le(fb, root_offset)? as i64;
+        let vtable_pos_i64 = (root_offset as i64) - vtable_rel;
+        if vtable_pos_i64 < 0 || (vtable_pos_i64 as usize) >= fb.len() {
+            return Err(BigQueryError::InvalidArgument(
+                "malformed Arrow flatbuffer: vtable offset out of range".to_string(),
+            ));
         }
-        let meta_size =
-            u32::from_le_bytes([buf[pos + 4], buf[pos + 5], buf[pos + 6], buf[pos + 7]]) as usize;
-        if meta_size == 0 {
-            break;
-        }
-        let padded_meta = (meta_size + 7) & !7;
-        let meta_start = pos + 8;
-        let meta_end = meta_start.checked_add(padded_meta)?;
-        if meta_end > buf.len() {
-            return None;
-        }
-
-        let fb = &buf[meta_start..meta_start + meta_size];
-        let (header_type, body_len, row_count) = inspect_arrow_message_flatbuffer(fb)?;
-        let padded_body = (body_len + 7) & !7;
-        let frame_end = meta_end.checked_add(padded_body)?;
-        if frame_end > buf.len() {
-            return None;
+        let vtable_pos = vtable_pos_i64 as usize;
+        let vtable_len = read_u16_le(fb, vtable_pos)? as usize;
+        if vtable_len < 4
+            || vtable_pos
+                .checked_add(vtable_len)
+                .is_none_or(|end| end > fb.len())
+        {
+            return Err(BigQueryError::InvalidArgument(
+                "malformed Arrow flatbuffer: vtable length out of range".to_string(),
+            ));
         }
 
-        let frame_bytes = Bytes::copy_from_slice(&buf[pos..frame_end]);
-        if header_type == 1 && schema_frame.is_none() {
-            schema_frame = Some(frame_bytes);
+        let read_vtable_slot = |slot_offset: usize| -> Result<usize, BigQueryError> {
+            if slot_offset + 2 > vtable_len {
+                return Ok(0);
+            }
+            Ok(read_u16_le(fb, vtable_pos + slot_offset)? as usize)
+        };
+
+        let header_type_off = read_vtable_slot(6)?;
+        if header_type_off == 0 {
+            return Err(BigQueryError::InvalidArgument(
+                "malformed Arrow flatbuffer: header_type slot unset".to_string(),
+            ));
+        }
+        let header_type_pos = root_offset.checked_add(header_type_off).ok_or_else(|| {
+            BigQueryError::InvalidArgument(
+                "malformed Arrow flatbuffer: header_type offset overflow".to_string(),
+            )
+        })?;
+        let header_type = *fb.get(header_type_pos).ok_or_else(|| {
+            BigQueryError::InvalidArgument(format!(
+                "malformed Arrow flatbuffer: offset {header_type_pos} out of range"
+            ))
+        })?;
+
+        let body_len_off = read_vtable_slot(10)?;
+        let body_len_i64 = if body_len_off == 0 {
+            0
         } else {
-            batches.push((frame_bytes, row_count.max(1)));
+            let p = root_offset.checked_add(body_len_off).ok_or_else(|| {
+                BigQueryError::InvalidArgument(
+                    "malformed Arrow flatbuffer: bodyLength offset overflow".to_string(),
+                )
+            })?;
+            read_i64_le(fb, p)?
+        };
+        if body_len_i64 < 0 {
+            return Err(BigQueryError::InvalidArgument(format!(
+                "malformed Arrow flatbuffer: negative bodyLength {body_len_i64}"
+            )));
         }
-        pos = frame_end;
-    }
+        let body_len = usize::try_from(body_len_i64).map_err(|_| {
+            BigQueryError::InvalidArgument(
+                "malformed Arrow flatbuffer: bodyLength overflows usize".to_string(),
+            )
+        })?;
 
-    let schema = schema_frame?;
-    Some((schema, batches))
-}
-
-fn inspect_arrow_message_flatbuffer(fb: &[u8]) -> Option<(u8, usize, i64)> {
-    if fb.len() < 12 {
-        return None;
-    }
-    let root_offset = u32::from_le_bytes([fb[0], fb[1], fb[2], fb[3]]) as usize;
-    if root_offset + 4 > fb.len() {
-        return None;
-    }
-    let vtable_rel = i32::from_le_bytes([
-        fb[root_offset],
-        fb[root_offset + 1],
-        fb[root_offset + 2],
-        fb[root_offset + 3],
-    ]);
-    let vtable_pos = (root_offset as isize).checked_sub(vtable_rel as isize)? as usize;
-    if vtable_pos + 4 > fb.len() {
-        return None;
-    }
-    let vtable_len = u16::from_le_bytes([fb[vtable_pos], fb[vtable_pos + 1]]) as usize;
-    if vtable_len < 6 || vtable_pos + vtable_len > fb.len() {
-        return None;
-    }
-
-    let read_vtable_slot = |slot_offset: usize| -> Option<usize> {
-        if slot_offset + 2 > vtable_len {
-            return Some(0);
-        }
-        let field_off = u16::from_le_bytes([
-            fb[vtable_pos + slot_offset],
-            fb[vtable_pos + slot_offset + 1],
-        ]) as usize;
-        Some(field_off)
-    };
-
-    let header_type_off = read_vtable_slot(6)?;
-    let header_type = if header_type_off > 0 && root_offset + header_type_off < fb.len() {
-        fb[root_offset + header_type_off]
-    } else {
-        0
-    };
-    if !(1..=3).contains(&header_type) {
-        return None;
-    }
-
-    let body_len_off = read_vtable_slot(10)?;
-    let body_len = if body_len_off > 0 && root_offset + body_len_off + 8 <= fb.len() {
-        let p = root_offset + body_len_off;
-        i64::from_le_bytes([
-            fb[p],
-            fb[p + 1],
-            fb[p + 2],
-            fb[p + 3],
-            fb[p + 4],
-            fb[p + 5],
-            fb[p + 6],
-            fb[p + 7],
-        ])
-        .max(0) as usize
-    } else {
-        0
-    };
-
-    let mut row_count = 0i64;
-    if header_type == 3 {
-        let header_off = read_vtable_slot(8)?;
-        if header_off > 0 && root_offset + header_off + 4 <= fb.len() {
-            let union_loc = root_offset + header_off;
-            let rel = u32::from_le_bytes([
-                fb[union_loc],
-                fb[union_loc + 1],
-                fb[union_loc + 2],
-                fb[union_loc + 3],
-            ]) as usize;
-            let rb_table = union_loc.checked_add(rel)?;
-            if rb_table + 4 <= fb.len() {
-                let rb_vtable_rel = i32::from_le_bytes([
-                    fb[rb_table],
-                    fb[rb_table + 1],
-                    fb[rb_table + 2],
-                    fb[rb_table + 3],
-                ]);
-                let rb_vtable = (rb_table as isize).checked_sub(rb_vtable_rel as isize)? as usize;
-                if rb_vtable + 6 <= fb.len() {
-                    let len_off =
-                        u16::from_le_bytes([fb[rb_vtable + 4], fb[rb_vtable + 5]]) as usize;
-                    if len_off > 0 && rb_table + len_off + 8 <= fb.len() {
-                        let lp = rb_table + len_off;
-                        row_count = i64::from_le_bytes([
-                            fb[lp],
-                            fb[lp + 1],
-                            fb[lp + 2],
-                            fb[lp + 3],
-                            fb[lp + 4],
-                            fb[lp + 5],
-                            fb[lp + 6],
-                            fb[lp + 7],
-                        ]);
+        let mut row_count = 0i64;
+        if header_type == 3 {
+            let header_off = read_vtable_slot(8)?;
+            if header_off > 0 {
+                let union_loc = root_offset.checked_add(header_off).ok_or_else(|| {
+                    BigQueryError::InvalidArgument(
+                        "malformed Arrow flatbuffer: header offset overflow".to_string(),
+                    )
+                })?;
+                let rel = read_u32_le(fb, union_loc)? as i64;
+                let rb_table_i64 = (union_loc as i64) + rel;
+                if rb_table_i64 < 0 || (rb_table_i64 as usize) >= fb.len() {
+                    return Err(BigQueryError::InvalidArgument(
+                        "malformed Arrow flatbuffer: RecordBatch table offset out of range"
+                            .to_string(),
+                    ));
+                }
+                let rb_table = rb_table_i64 as usize;
+                let rb_vtable_rel = read_i32_le(fb, rb_table)? as i64;
+                let rb_vtable_i64 = (rb_table as i64) - rb_vtable_rel;
+                if rb_vtable_i64 < 0 || (rb_vtable_i64 as usize) >= fb.len() {
+                    return Err(BigQueryError::InvalidArgument(
+                        "malformed Arrow flatbuffer: RecordBatch vtable offset out of range"
+                            .to_string(),
+                    ));
+                }
+                let rb_vtable = rb_vtable_i64 as usize;
+                let rb_vtable_len = read_u16_le(fb, rb_vtable)? as usize;
+                if rb_vtable_len < 4
+                    || rb_vtable
+                        .checked_add(rb_vtable_len)
+                        .is_none_or(|end| end > fb.len())
+                {
+                    return Err(BigQueryError::InvalidArgument(
+                        "malformed Arrow flatbuffer: RecordBatch vtable length out of range"
+                            .to_string(),
+                    ));
+                }
+                if 6 <= rb_vtable_len {
+                    let len_off = read_u16_le(fb, rb_vtable + 4)? as usize;
+                    if len_off > 0 {
+                        let lp = rb_table.checked_add(len_off).ok_or_else(|| {
+                            BigQueryError::InvalidArgument(
+                                "malformed Arrow flatbuffer: RecordBatch.length offset overflow"
+                                    .to_string(),
+                            )
+                        })?;
+                        row_count = read_i64_le(fb, lp)?;
                     }
                 }
             }
+            if row_count < 0 {
+                return Err(BigQueryError::InvalidArgument(format!(
+                    "malformed Arrow flatbuffer: negative RecordBatch length {row_count}"
+                )));
+            }
         }
-    }
 
-    Some((header_type, body_len, row_count))
+        Ok(Self {
+            header_type,
+            body_len,
+            row_count,
+        })
+    }
+}
+
+fn read_u16_le(fb: &[u8], at: usize) -> Result<u16, BigQueryError> {
+    let slice = fb.get(at..at + 2).ok_or_else(|| {
+        BigQueryError::InvalidArgument(format!(
+            "malformed Arrow flatbuffer: offset {at} out of range"
+        ))
+    })?;
+    Ok(u16::from_le_bytes([slice[0], slice[1]]))
+}
+
+fn read_u32_le(fb: &[u8], at: usize) -> Result<u32, BigQueryError> {
+    let slice = fb.get(at..at + 4).ok_or_else(|| {
+        BigQueryError::InvalidArgument(format!(
+            "malformed Arrow flatbuffer: offset {at} out of range"
+        ))
+    })?;
+    Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+fn read_i32_le(fb: &[u8], at: usize) -> Result<i32, BigQueryError> {
+    let slice = fb.get(at..at + 4).ok_or_else(|| {
+        BigQueryError::InvalidArgument(format!(
+            "malformed Arrow flatbuffer: offset {at} out of range"
+        ))
+    })?;
+    Ok(i32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+fn read_i64_le(fb: &[u8], at: usize) -> Result<i64, BigQueryError> {
+    let slice = fb.get(at..at + 8).ok_or_else(|| {
+        BigQueryError::InvalidArgument(format!(
+            "malformed Arrow flatbuffer: offset {at} out of range"
+        ))
+    })?;
+    Ok(i64::from_le_bytes([
+        slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7],
+    ]))
 }

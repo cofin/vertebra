@@ -1,7 +1,7 @@
-//! PyO3 bindings for `vertebra_db::spanner` (`SpannerClient`, multiplexed session management,
-//! `ReadOnly` staleness queries, multiplexed `ReadWrite` transactions with `ExecuteBatchDml` and
-//! `MultiplexedSessionPrecommitToken` tracking, `PartitionedDml`, `BatchWrite`, `UpdateDatabaseDdl`,
-//! and parallel `PartitionQuery` + Data Boost into `VTBARROW` shared-memory `ArrowCursor`).
+//! PyO3 bindings for `vertebra_db::spanner` (`SpannerClient`, `ReadOnly` staleness queries,
+//! `ReadWrite` transactions with `ExecuteSql` and `ExecuteBatchDml`, `PartitionedDml`,
+//! write-only mutations, `BatchWrite`, `UpdateDatabaseDdl`, and parallel `PartitionQuery`
+//! + Data Boost queries).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,11 +13,10 @@ use vertebra_db::spanner::{
     ProtobufValue, SpannerBatchDmlStatement, SpannerBatchWriteResult,
     SpannerClient as NativeSpannerClient, SpannerClientConfig, SpannerCommitResult, SpannerDialect,
     SpannerError, SpannerMutation, SpannerMutationGroup, SpannerQueryResult, SpannerStaleness,
-    SpannerStructField, SpannerTypeCode, SpannerValue, parse_spanner_parameters_json,
+    SpannerStructField, SpannerValue, parse_spanner_parameters_json,
 };
 
 use crate::completion::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task};
-use crate::db::ArrowCursor;
 
 fn spanner_err_to_py(err: SpannerError) -> PyErr {
     match err {
@@ -100,11 +99,6 @@ fn query_result_to_py(py: Python<'_>, res: SpannerQueryResult) -> PyResult<Py<Py
         rows_list.append(row_list)?;
     }
     dict.set_item("rows", rows_list)?;
-    dict.set_item(
-        "transaction_id",
-        res.transaction_id.as_deref().map(|b| PyBytes::new(py, b)),
-    )?;
-    dict.set_item("read_timestamp_micros", res.read_timestamp_micros)?;
     dict.set_item("row_count_exact", res.row_count_exact)?;
     dict.set_item("row_count_lower_bound", res.row_count_lower_bound)?;
     Ok(dict.into_any().unbind())
@@ -281,7 +275,6 @@ fn parse_batch_dml_statements_json(
             .to_string();
         let params_raw = item.get("params").map(serde_json::Value::to_string);
         let params = parse_spanner_parameters_json(params_raw.as_deref())?;
-        let _ = SpannerTypeCode::Unspecified;
         out.push(SpannerBatchDmlStatement { sql, params });
     }
     Ok(out)
@@ -310,6 +303,7 @@ impl PySpannerClient {
         route_to_leader_enabled=true,
         max_commit_delay_ms=None,
         auth_options=None,
+        admin_endpoint=None,
         ca_pem=None
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -323,6 +317,7 @@ impl PySpannerClient {
         route_to_leader_enabled: bool,
         max_commit_delay_ms: Option<u64>,
         auth_options: Option<HashMap<String, String>>,
+        admin_endpoint: Option<String>,
         ca_pem: Option<Vec<u8>>,
     ) -> PyResult<Self> {
         let mut cfg = SpannerClientConfig::new(database);
@@ -337,6 +332,7 @@ impl PySpannerClient {
         if let Some(auth) = auth_options {
             cfg.auth_options = auth;
         }
+        cfg.admin_endpoint = admin_endpoint.filter(|s| !s.trim().is_empty());
         cfg.ca_pem = ca_pem;
 
         let client = py
@@ -360,6 +356,11 @@ impl PySpannerClient {
     #[getter]
     fn endpoint(&self) -> String {
         self.inner.config().effective_endpoint()
+    }
+
+    #[getter]
+    fn admin_endpoint(&self) -> Option<&str> {
+        self.inner.config().admin_endpoint.as_deref()
     }
 
     #[getter]
@@ -399,7 +400,7 @@ impl PySpannerClient {
             .detach(|| {
                 block_on_db(async move {
                     client
-                        .query_read_only(&sql_owned, &params, staleness)
+                        .query(&sql_owned, &params, staleness)
                         .await
                         .map_err(|e| e.to_string())
                 })
@@ -423,7 +424,7 @@ impl PySpannerClient {
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task(
             py,
-            async move { client.query_read_only(&sql, &params, staleness).await },
+            async move { client.query(&sql, &params, staleness).await },
             query_result_to_py,
             spanner_err_to_py,
         )
@@ -443,29 +444,15 @@ impl PySpannerClient {
         let sql_owned = sql.to_string();
         py.detach(|| {
             block_on_db(async move {
-                let c_inner = Arc::clone(&client);
-                let (count, _) = client
-                    .run_in_read_write_transaction(5, move |mut tx| {
-                        let c = Arc::clone(&c_inner);
-                        let s = sql_owned.clone();
-                        let p = params.clone();
-                        let rtag = request_tag.clone();
-                        tx.transaction_tag = transaction_tag.clone();
-                        async move {
-                            let res = c
-                                .execute_in_read_write_tx(&mut tx, &s, &p, rtag.as_deref())
-                                .await
-                                .map_err(|e| (e, tx.transaction_id.clone()))?;
-                            let affected = res
-                                .row_count_exact
-                                .or(res.row_count_lower_bound)
-                                .unwrap_or(0);
-                            Ok((affected, tx))
-                        }
-                    })
+                client
+                    .execute_dml(
+                        &sql_owned,
+                        &params,
+                        request_tag.as_deref(),
+                        transaction_tag.as_deref(),
+                    )
                     .await
-                    .map_err(|e| e.to_string())?;
-                Ok::<i64, String>(count)
+                    .map_err(|e| e.to_string())
             })
         })
         .map_err(PyRuntimeError::new_err)
@@ -486,28 +473,14 @@ impl PySpannerClient {
         spawn_rust_db_task(
             py,
             async move {
-                let c_inner = Arc::clone(&client);
-                let (count, _) = client
-                    .run_in_read_write_transaction(5, move |mut tx| {
-                        let c = Arc::clone(&c_inner);
-                        let s = sql.clone();
-                        let p = params.clone();
-                        let rtag = request_tag.clone();
-                        tx.transaction_tag = transaction_tag.clone();
-                        async move {
-                            let res = c
-                                .execute_in_read_write_tx(&mut tx, &s, &p, rtag.as_deref())
-                                .await
-                                .map_err(|e| (e, tx.transaction_id.clone()))?;
-                            let affected = res
-                                .row_count_exact
-                                .or(res.row_count_lower_bound)
-                                .unwrap_or(0);
-                            Ok((affected, tx))
-                        }
-                    })
-                    .await?;
-                Ok(count)
+                client
+                    .execute_dml(
+                        &sql,
+                        &params,
+                        request_tag.as_deref(),
+                        transaction_tag.as_deref(),
+                    )
+                    .await
             },
             |py, count| Ok(count.into_pyobject(py)?.into_any().unbind()),
             spanner_err_to_py,
@@ -526,24 +499,10 @@ impl PySpannerClient {
         let client = Arc::clone(&self.inner);
         py.detach(|| {
             block_on_db(async move {
-                let c_inner = Arc::clone(&client);
-                let (counts, _) = client
-                    .run_in_read_write_transaction(5, move |mut tx| {
-                        let c = Arc::clone(&c_inner);
-                        let s = stmts.clone();
-                        let rtag = request_tag.clone();
-                        tx.transaction_tag = transaction_tag.clone();
-                        async move {
-                            let res = c
-                                .execute_batch_dml(&mut tx, &s, rtag.as_deref())
-                                .await
-                                .map_err(|e| (e, tx.transaction_id.clone()))?;
-                            Ok((res.row_counts, tx))
-                        }
-                    })
+                client
+                    .execute_batch_dml(&stmts, request_tag.as_deref(), transaction_tag.as_deref())
                     .await
-                    .map_err(|e| e.to_string())?;
-                Ok::<Vec<i64>, String>(counts)
+                    .map_err(|e| e.to_string())
             })
         })
         .map_err(PyRuntimeError::new_err)
@@ -562,23 +521,9 @@ impl PySpannerClient {
         spawn_rust_db_task(
             py,
             async move {
-                let c_inner = Arc::clone(&client);
-                let (counts, _) = client
-                    .run_in_read_write_transaction(5, move |mut tx| {
-                        let c = Arc::clone(&c_inner);
-                        let s = stmts.clone();
-                        let rtag = request_tag.clone();
-                        tx.transaction_tag = transaction_tag.clone();
-                        async move {
-                            let res = c
-                                .execute_batch_dml(&mut tx, &s, rtag.as_deref())
-                                .await
-                                .map_err(|e| (e, tx.transaction_id.clone()))?;
-                            Ok((res.row_counts, tx))
-                        }
-                    })
-                    .await?;
-                Ok(counts)
+                client
+                    .execute_batch_dml(&stmts, request_tag.as_deref(), transaction_tag.as_deref())
+                    .await
             },
             |py, counts| Ok(counts.into_pyobject(py)?.into_any().unbind()),
             spanner_err_to_py,
@@ -643,16 +588,14 @@ impl PySpannerClient {
         let res = py
             .detach(|| {
                 block_on_db(async move {
-                    let (_, commit_res) = client
-                        .run_in_read_write_transaction(5, move |mut tx| {
-                            tx.mutations = mutations.clone();
-                            tx.transaction_tag = transaction_tag.clone();
-                            tx.exclude_txn_from_change_streams = exclude_txn_from_change_streams;
-                            async move { Ok(((), tx)) }
-                        })
+                    client
+                        .apply_mutations(
+                            &mutations,
+                            transaction_tag.as_deref(),
+                            exclude_txn_from_change_streams,
+                        )
                         .await
-                        .map_err(|e| e.to_string())?;
-                    Ok::<SpannerCommitResult, String>(commit_res)
+                        .map_err(|e| e.to_string())
                 })
             })
             .map_err(PyRuntimeError::new_err)?;
@@ -672,15 +615,13 @@ impl PySpannerClient {
         spawn_rust_db_task(
             py,
             async move {
-                let (_, commit_res) = client
-                    .run_in_read_write_transaction(5, move |mut tx| {
-                        tx.mutations = mutations.clone();
-                        tx.transaction_tag = transaction_tag.clone();
-                        tx.exclude_txn_from_change_streams = exclude_txn_from_change_streams;
-                        async move { Ok(((), tx)) }
-                    })
-                    .await?;
-                Ok(commit_res)
+                client
+                    .apply_mutations(
+                        &mutations,
+                        transaction_tag.as_deref(),
+                        exclude_txn_from_change_streams,
+                    )
+                    .await
             },
             commit_result_to_py,
             spanner_err_to_py,
@@ -767,7 +708,7 @@ impl PySpannerClient {
         staleness_ms=0
     ))]
     #[allow(clippy::too_many_arguments)]
-    fn execute_partitioned_arrow(
+    fn partitioned_query(
         &self,
         py: Python<'_>,
         sql: &str,
@@ -776,16 +717,16 @@ impl PySpannerClient {
         data_boost_enabled: bool,
         staleness_mode: &str,
         staleness_ms: i64,
-    ) -> PyResult<ArrowCursor> {
+    ) -> PyResult<Py<PyAny>> {
         let params = parse_spanner_parameters_json(params_json).map_err(spanner_err_to_py)?;
         let staleness = parse_staleness(staleness_mode, staleness_ms);
         let client = Arc::clone(&self.inner);
         let sql_owned = sql.to_string();
-        let (shm_name, byte_len, row_count, region) = py
+        let res = py
             .detach(|| {
                 block_on_db(async move {
                     client
-                        .execute_partitioned_arrow(
+                        .partitioned_query(
                             &sql_owned,
                             &params,
                             max_partitions,
@@ -797,9 +738,7 @@ impl PySpannerClient {
                 })
             })
             .map_err(PyRuntimeError::new_err)?;
-        Ok(ArrowCursor::from_shm_region(
-            shm_name, byte_len, row_count, region,
-        ))
+        query_result_to_py(py, res)
     }
 
     #[pyo3(signature = (
@@ -811,7 +750,7 @@ impl PySpannerClient {
         staleness_ms=0
     ))]
     #[allow(clippy::too_many_arguments)]
-    fn execute_partitioned_arrow_async(
+    fn partitioned_query_async(
         &self,
         py: Python<'_>,
         sql: String,
@@ -829,19 +768,10 @@ impl PySpannerClient {
             py,
             async move {
                 client
-                    .execute_partitioned_arrow(
-                        &sql,
-                        &params,
-                        max_partitions,
-                        data_boost_enabled,
-                        staleness,
-                    )
+                    .partitioned_query(&sql, &params, max_partitions, data_boost_enabled, staleness)
                     .await
             },
-            |py, (shm_name, byte_len, row_count, region)| {
-                let cursor = ArrowCursor::from_shm_region(shm_name, byte_len, row_count, region);
-                Ok(Py::new(py, cursor)?.into_any())
-            },
+            query_result_to_py,
             spanner_err_to_py,
         )
     }
