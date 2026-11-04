@@ -1,7 +1,6 @@
 ---
 title: "Architectural Decision Records Index"
 description: "Index of Architectural Decision Records (ADRs) capturing durable cross-boundary choices in Vertebra."
-status: stable
 tags:
   - decisions
   - adr

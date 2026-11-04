@@ -10,7 +10,7 @@ research:
   - ../native-data-platform/research/rust-driver-crates_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 4
-plan_commit: "679a981"
+plan_commit: "f741701"
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
@@ -43,7 +43,7 @@ This flow establishes the structural, packaging, and behavioral foundation that 
 
 ### 1.2 Upstream Execution Baseline
 
-- **Branch baseline**: `refactor/sync-async-names @ 08ac03a` (incorporating completed flows `critical-correctness-fixes`, `gcp-wire-protocol-correctness`, `gcp-driver-resilience`, and the codebase-wide `Sync*` / `Async*` class split).
+- **Branch baseline**: `main @ f741701` (incorporating completed flows `critical-correctness-fixes`, `gcp-wire-protocol-correctness`, `gcp-driver-resilience`, and the codebase-wide `Sync*` / `Async*` class split).
 - **Parent PRD**: [`native-data-platform`](../native-data-platform/spec.md) (Chapter 1), co-consumed by [`integration-remediation`](../integration-remediation/spec.md).
 
 ### 1.3 Code Analysis & Seam Summary
@@ -396,7 +396,7 @@ class EmbeddingPushdown(Protocol):
 
 ## 5. Continuity Snapshot
 
-- **Flow ID**: `db-layout-and-contract` (`state: planned`, `plan_revision: 4`, `plan_commit: null`)
+- **Flow ID**: `db-layout-and-contract` (`state: planned`, `plan_revision: 4`, `plan_commit: "f741701"`)
 - **Current Task**: `null`
 - **Last Verified Checkpoint**: `null`
 - **Key Decisions**:
@@ -405,5 +405,5 @@ class EmbeddingPushdown(Protocol):
   - `NotFoundError(DataError, ValueError)` unifies empty `select_one()` / `select_value()` errors across all drivers while returning `None` for 1-row `SQL NULL` scalars in `select_value()`, and `SpannerError` / `BigQueryError` inherit from both `GoogleCloudError` and `DatabaseError` on `vertebra._vertebra`.
   - Capability protocols split dual-mode capabilities into `SyncPipelineCapable` / `AsyncPipelineCapable` and `SyncChangeSource` / `AsyncChangeSource`, and `DatabaseRegistry.get_dialer(config, *, sync=False)` caches `Sync*` and `Async*` dialers separately.
 - **Recent Discoveries**:
-  - Separate `cdylib` `.so` extensions each have distinct PyO3 `PyTypeObject` statics and private `rlib` globals: `vertebra-db/src/py_async.rs` keys event-loop completion drainers uniquely per extension (`attr_name: &'static str`), and `vertebra_core::shm::ShmCapsule` transfers `Arc<ShmRegion>` ownership into `vertebra._vertebra.ArrowCursor` with zero copies and zero `DashMap` leaks.
+  - Separate `cdylib` `.so` extensions each have distinct PyO3 `PyTypeObject` static instances and private `rlib` globals: `vertebra-db/src/py_async.rs` keys event-loop completion drainers uniquely per extension (`attr_name: &'static str`), and `vertebra_core::shm::ShmCapsule` transfers `Arc<ShmRegion>` ownership into `vertebra._vertebra.ArrowCursor` with zero copies and zero `DashMap` leaks.
   - `.github/workflows/ci.yml` runs `uv sync --frozen` in `build-docs` and runs `make lint-all` without building optional `.so` extensions first, so `t03` updates `uv.lock` via `uv lock --offline` and guards optional extension `stubtest` imports in `Makefile`.

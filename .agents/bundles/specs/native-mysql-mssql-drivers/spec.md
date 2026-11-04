@@ -46,7 +46,7 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 
 ## Dependencies
 
-`db-layout-and-contract` (`refactor/sync-async-names @ 08ac03a`) and `integration-remediation/db-engine-primitives`.
+`db-layout-and-contract` (`main @ f741701`) and `integration-remediation/db-engine-primitives`.
 
 ## Acceptance Boundary
 

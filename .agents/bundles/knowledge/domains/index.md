@@ -1,7 +1,6 @@
 ---
 title: "Domain Vocabulary Index"
 description: "Index of Vertebra's nested domain vocabulary and bounded-context chapters across Python, Rust, and TypeScript."
-status: stable
 tags:
   - domains
   - index
@@ -40,7 +39,7 @@ Vertebra uses one domain naming model across Python, Rust, and TypeScript: each 
 
 - [Frontend Bundler, Codegen & Client SDK Domain](frontend/bundler-and-client-sdk.md) — `Bundler`, `SourceWatcher`, `SSRPool`, `BuildOrchestrator`, `DevServerProcess`, `TypeExtractor`, `HttpClient`, `QueryCache`, `SseClient`, `WebSocketClient`, `SessionStore`, `HotReloadClient`, and `Console`.
 - [Standalone & Onefile Packaging and PGO Tooling](frontend/packaging-and-pgo.md) — `BuildTarget`, `StandaloneBuilder`, `OnefileBuilder` (`ONEFILE_MAGIC = b"VTB1FILE"`), `RustPgoConfig` (`tools/pgo/rust_pgo.py`), and `PythonBuildInfo` (`tools/pgo/python_pgo.py`).
-- [WASM Plugin Host & Browser Bridge](frontend/wasm.md) — `WasmPluginHost`, `WasmSandboxPolicy`, `WasmModuleConfig`, `WasmExecutionError`, `UnsupportedBackendError`, and `@vertebra/client/wasm` `WasmClient`.
+- [WASM Plugin Host & Browser Bridge](frontend/wasm.md) — `WASMPluginHost`, `WASMSandboxPolicy`, `WASMModuleConfig`, `WASMExecutionError`, `UnsupportedBackendError`, and `@vertebra/client/wasm` `WASMClient`.
 
 ## Storage, Data, Telemetry & Extensions (`storage/`, `data/`, `telemetry/`, `extensions/`)
 

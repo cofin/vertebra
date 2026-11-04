@@ -4,20 +4,48 @@ title: "Tiered Rings & In-Process Batch Bridge"
 description: "RingPair request/response framing, TieredRingSet size classes, ResponseSlot streaming frames, and the in-process BatchBridge batch transport."
 status: stable
 tags: [architecture, ipc, tiered-rings, batch-bridge, rust]
+generated:
+  by: flow/0.26.0
+  at: "2026-11-04T04:33:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-04T04:33:00Z"
+    commit: f741701
 sources:
-  - resource: src/rs/vertebra-core/src/transport/mod.rs
-  - resource: src/rs/vertebra-core/src/transport/ring_pair.rs
-  - resource: src/rs/vertebra-core/src/tiered_ring.rs
-  - resource: src/rs/vertebra-core/src/bridge.rs
-  - resource: src/rs/vertebra-core/src/ipc.rs
-  - resource: src/rs/vertebra-core/src/protocol/codec.rs
-  - resource: src/rs/vertebra-py/src/transport.rs
-  - resource: src/rs/vertebra-http/src/dispatcher/shm_reader.rs
+  - id: src-vertebra-core-src-transport-mod-rs
+    resource: src/rs/vertebra-core/src/transport/mod.rs
+    title: "Rust implementation module (src/rs/vertebra-core/src/transport/mod.rs)"
+  - id: src-vertebra-core-src-transport-ring-pair-rs
+    resource: src/rs/vertebra-core/src/transport/ring_pair.rs
+    title: "Rust implementation module (src/rs/vertebra-core/src/transport/ring_pair.rs)"
+  - id: src-vertebra-core-src-tiered-ring-rs
+    resource: src/rs/vertebra-core/src/tiered_ring.rs
+    title: "Rust implementation module (src/rs/vertebra-core/src/tiered_ring.rs)"
+  - id: src-vertebra-core-src-bridge-rs
+    resource: src/rs/vertebra-core/src/bridge.rs
+    title: "Rust implementation module (src/rs/vertebra-core/src/bridge.rs)"
+  - id: src-vertebra-core-src-ipc-rs
+    resource: src/rs/vertebra-core/src/ipc.rs
+    title: "Rust implementation module (src/rs/vertebra-core/src/ipc.rs)"
+  - id: src-vertebra-core-src-protocol-codec-rs
+    resource: src/rs/vertebra-core/src/protocol/codec.rs
+    title: "Rust implementation module (src/rs/vertebra-core/src/protocol/codec.rs)"
+  - id: src-vertebra-py-src-transport-rs
+    resource: src/rs/vertebra-py/src/transport.rs
+    title: "Rust implementation module (src/rs/vertebra-py/src/transport.rs)"
+  - id: src-vertebra-http-src-dispatcher-shm-reader-rs
+    resource: src/rs/vertebra-http/src/dispatcher/shm_reader.rs
+    title: "Rust implementation module (src/rs/vertebra-http/src/dispatcher/shm_reader.rs)"
 ---
 
 # Tiered Rings & In-Process Batch Bridge
 
-Both topologies move requests as `BatchSnapshot`s. Embedded mode hands zero-copy `InProcessRequest` snapshots across threads through [`BatchBridge`](../../../../../src/rs/vertebra-core/src/bridge.rs) and completes responses directly through a registered `ResponseSink`. Shm mode serializes batches directly into a per-worker [`RingPair`](../../../../../src/rs/vertebra-core/src/transport/ring_pair.rs) and borrows the slot zero-copy on the Python side (`MpmcSlotView` / `SlotView`). [`Transport`](../../../../../src/rs/vertebra-core/src/transport/mod.rs) wraps either backend cleanly.
+<!-- truth: start -->
+- `BatchSnapshot` unifies zero-copy request backing across in-process `Vec<InProcessRequest>`, borrowed SHM ring slots (`MpmcSlotView` / `SlotView`), and file-backed `VQOV`/`VROV` overflow segments.
+- `TieredRingSet` routes worker responses across small, medium, large, and xlarge `SpscRing` size classes, setting `active_flags` (`Ordering::SeqCst`) before notifying the Tokio response reader.
+<!-- truth: end -->
+
+Both topologies move requests as `BatchSnapshot`s. Embedded mode hands zero-copy `InProcessRequest` snapshots across threads through [`BatchBridge`](../../../../../src/rs/vertebra-core/src/bridge.rs)[^src-vertebra-core-src-bridge-rs] and completes responses directly through a registered `ResponseSink`. Shm mode serializes batches directly into a per-worker [`RingPair`](../../../../../src/rs/vertebra-core/src/transport/ring_pair.rs)[^src-vertebra-core-src-transport-ring-pair-rs] and borrows the slot zero-copy on the Python side (`MpmcSlotView` / `SlotView`). [`Transport`](../../../../../src/rs/vertebra-core/src/transport/mod.rs)[^src-vertebra-core-src-transport-mod-rs] wraps either backend cleanly.
 
 ## Request Batches (`transport/mod.rs`)
 
@@ -40,7 +68,7 @@ Both topologies move requests as `BatchSnapshot`s. Embedded mode hands zero-copy
 
 ### Response Tiers
 
-`TieredRingSet` (in `ring_pair.rs`) holds one `SpscRing` per size class from [`TieredRingConfig`](../../../../../src/rs/vertebra-core/src/tiered_ring.rs):
+`TieredRingSet` (in `ring_pair.rs`) holds one `SpscRing` per size class from [`TieredRingConfig`](../../../../../src/rs/vertebra-core/src/tiered_ring.rs)[^src-vertebra-core-src-tiered-ring-rs]:
 
 | Tier | Slot size | Slots |
 |---|---|---|
@@ -57,8 +85,19 @@ Both topologies move requests as `BatchSnapshot`s. Embedded mode hands zero-copy
 
 ## `ResponseSlot` Streaming Frames (`ipc.rs`)
 
-[`ResponseSlot`](../../../../../src/rs/vertebra-core/src/ipc.rs) provides the unified response framing with a 16-byte header `[request_id u64][status u16][flags u16][header_count u16][reserved u16]`, length-prefixed headers, a `u32` body length, and the body. Flags are `u16`: `FLAG_STREAMING`, `FLAG_FINAL`, `FLAG_ERROR`, `FLAG_COMPRESSED`, `FLAG_HEADERS_SENT`, `FLAG_TRAILERS` (bits 0-5).
+[`ResponseSlot`](../../../../../src/rs/vertebra-core/src/ipc.rs)[^src-vertebra-core-src-ipc-rs] provides the unified response framing with a 16-byte header `[request_id u64][status u16][flags u16][header_count u16][reserved u16]`, length-prefixed headers, a `u32` body length, and the body. Flags are `u16`: `FLAG_STREAMING`, `FLAG_FINAL`, `FLAG_ERROR`, `FLAG_COMPRESSED`, `FLAG_HEADERS_SENT`, `FLAG_TRAILERS` (bits 0-5).
 
 - `ResponseSlot::encode_raw_parts_into(request_id, status, flags, headers, body, dst)` encodes borrowed parts into a caller buffer without building a `ResponseSlot`.
-- `submit_raw_response` ([`transport.rs`](../../../../../src/rs/vertebra-py/src/transport.rs)) reads the body through `PyBuffer`, splits it at `slot_capacity` (default 16384) into `STREAMING | HEADERS_SENT` → `STREAMING` → `STREAMING | FINAL` frames (one `Vec<u8>` each), and returns the frames. In SHM mode it also writes them with `send_response_bytes`.
-- `ShmDispatcher::handle_raw_response_slot` and [`shm_reader::PendingRequests`](../../../../../src/rs/vertebra-http/src/dispatcher/shm_reader.rs) decode and route streaming `ResponseSlot` frames.
+- `submit_raw_response` ([`transport.rs`](../../../../../src/rs/vertebra-py/src/transport.rs)[^src-vertebra-py-src-transport-rs]) reads the body through `PyBuffer`, splits it at `slot_capacity` (default 16384) into `STREAMING | HEADERS_SENT` → `STREAMING` → `STREAMING | FINAL` frames (one `Vec<u8>` each), and returns the frames. In SHM mode it also writes them with `send_response_bytes`.
+- `ShmDispatcher::handle_raw_response_slot` and [`shm_reader::PendingRequests`](../../../../../src/rs/vertebra-http/src/dispatcher/shm_reader.rs)[^src-vertebra-http-src-dispatcher-shm-reader-rs] decode and route streaming `ResponseSlot` frames.
+
+Provenance sources: [^src-vertebra-core-src-protocol-codec-rs].
+
+[^src-vertebra-core-src-transport-mod-rs]: `src/rs/vertebra-core/src/transport/mod.rs` — Rust implementation module (src/rs/vertebra-core/src/transport/mod.rs).
+[^src-vertebra-core-src-transport-ring-pair-rs]: `src/rs/vertebra-core/src/transport/ring_pair.rs` — Rust implementation module (src/rs/vertebra-core/src/transport/ring_pair.rs).
+[^src-vertebra-core-src-tiered-ring-rs]: `src/rs/vertebra-core/src/tiered_ring.rs` — Rust implementation module (src/rs/vertebra-core/src/tiered_ring.rs).
+[^src-vertebra-core-src-bridge-rs]: `src/rs/vertebra-core/src/bridge.rs` — Rust implementation module (src/rs/vertebra-core/src/bridge.rs).
+[^src-vertebra-core-src-ipc-rs]: `src/rs/vertebra-core/src/ipc.rs` — Rust implementation module (src/rs/vertebra-core/src/ipc.rs).
+[^src-vertebra-core-src-protocol-codec-rs]: `src/rs/vertebra-core/src/protocol/codec.rs` — Rust implementation module (src/rs/vertebra-core/src/protocol/codec.rs).
+[^src-vertebra-py-src-transport-rs]: `src/rs/vertebra-py/src/transport.rs` — Rust implementation module (src/rs/vertebra-py/src/transport.rs).
+[^src-vertebra-http-src-dispatcher-shm-reader-rs]: `src/rs/vertebra-http/src/dispatcher/shm_reader.rs` — Rust implementation module (src/rs/vertebra-http/src/dispatcher/shm_reader.rs).

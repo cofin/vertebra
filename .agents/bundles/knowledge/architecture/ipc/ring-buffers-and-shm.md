@@ -4,24 +4,52 @@ title: "Lock-Free Ring Buffers & Shared Memory"
 description: "ShmRegion allocation, the ShmHeader layout, SpscRing and MpmcRing slot protocols, blocking waits, and platform wake primitives in vertebra-core."
 status: stable
 tags: [architecture, ipc, shared-memory, ring-buffer, rust]
+generated:
+  by: flow/0.26.0
+  at: "2026-11-04T04:33:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-04T04:33:00Z"
+    commit: f741701
 sources:
-  - resource: src/rs/vertebra-core/src/shm.rs
-  - resource: src/rs/vertebra-core/src/buffer.rs
-  - resource: src/rs/vertebra-core/src/channel.rs
-  - resource: src/rs/vertebra-core/src/notify.rs
-  - resource: src/rs/vertebra-core/src/sync.rs
-  - resource: src/rs/vertebra-core/src/platform/linux.rs
-  - resource: src/rs/vertebra-core/src/platform/macos.rs
-  - resource: src/rs/vertebra-core/src/platform/windows.rs
+  - id: src-vertebra-core-src-shm-rs
+    resource: src/rs/vertebra-core/src/shm.rs
+    title: "Rust implementation module (src/rs/vertebra-core/src/shm.rs)"
+  - id: src-vertebra-core-src-buffer-rs
+    resource: src/rs/vertebra-core/src/buffer.rs
+    title: "Rust implementation module (src/rs/vertebra-core/src/buffer.rs)"
+  - id: src-vertebra-core-src-channel-rs
+    resource: src/rs/vertebra-core/src/channel.rs
+    title: "Rust implementation module (src/rs/vertebra-core/src/channel.rs)"
+  - id: src-vertebra-core-src-notify-rs
+    resource: src/rs/vertebra-core/src/notify.rs
+    title: "Rust implementation module (src/rs/vertebra-core/src/notify.rs)"
+  - id: src-vertebra-core-src-sync-rs
+    resource: src/rs/vertebra-core/src/sync.rs
+    title: "Rust implementation module (src/rs/vertebra-core/src/sync.rs)"
+  - id: src-vertebra-core-src-platform-linux-rs
+    resource: src/rs/vertebra-core/src/platform/linux.rs
+    title: "Rust implementation module (src/rs/vertebra-core/src/platform/linux.rs)"
+  - id: src-vertebra-core-src-platform-macos-rs
+    resource: src/rs/vertebra-core/src/platform/macos.rs
+    title: "Rust implementation module (src/rs/vertebra-core/src/platform/macos.rs)"
+  - id: src-vertebra-core-src-platform-windows-rs
+    resource: src/rs/vertebra-core/src/platform/windows.rs
+    title: "Rust implementation module (src/rs/vertebra-core/src/platform/windows.rs)"
 ---
 
 # Lock-Free Ring Buffers & Shared Memory
+
+<!-- truth: start -->
+- `ShmRegion` maps page-aligned shared memory via sealed `memfd_create` on Linux, `shm_open` on POSIX fallbacks, and pagefile-backed sections on Windows, initialized with `ShmHeader` (`ABI_VERSION = 3`).
+- `SpscRing` and `MpmcRing` exchange frames via cache-line-padded sequence cursors, zero-copy `SlotView` borrows, and Dekker `Ordering::SeqCst` sleep/wake handshakes over `futex`, `ulock`, or pipes.
+<!-- truth: end -->
 
 [`vertebra-core`](../../../../../src/rs/vertebra-core/src/lib.rs) maps fixed-slot ring buffers into shared memory. Each ring region is one mapping: a `ShmHeader`, an optional sequence array (MPMC only), then the slot area.
 
 ## Region Allocation (`shm.rs`)
 
-`ShmRegion::create(size)` ([`shm.rs`](../../../../../src/rs/vertebra-core/src/shm.rs)) page-aligns the size and tries, in order:
+`ShmRegion::create(size)` ([`shm.rs`](../../../../../src/rs/vertebra-core/src/shm.rs)[^src-vertebra-core-src-shm-rs]) page-aligns the size and tries, in order:
 
 1. **Linux**: `memfd_create` with `MFD_CLOEXEC | MFD_ALLOW_SEALING`, then `F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL`.
 2. **Unix fallback** (macOS, or Linux when memfd fails): `shm_open` with a generated name `/vtb-{pid:x}-{seq:x}-{attempt:x}` from a process-wide `AtomicU64` counter.
@@ -31,7 +59,7 @@ sources:
 
 ## `ShmHeader` Layout (`buffer.rs`)
 
-[`ShmHeader`](../../../../../src/rs/vertebra-core/src/buffer.rs) is `#[repr(C)]`. Hot atomics are wrapped in `CacheLine<T>`, which is `repr(align(64))`, or `repr(align(128))` on aarch64 macOS (`CACHELINE_BYTES`).
+[`ShmHeader`](../../../../../src/rs/vertebra-core/src/buffer.rs)[^src-vertebra-core-src-buffer-rs] is `#[repr(C)]`. Hot atomics are wrapped in `CacheLine<T>`, which is `repr(align(64))`, or `repr(align(128))` on aarch64 macOS (`CACHELINE_BYTES`).
 
 | Group | Fields |
 |---|---|
@@ -44,7 +72,7 @@ sources:
 
 ## `SpscRing` & `SlotView` (`channel.rs`)
 
-[`SpscRing`](../../../../../src/rs/vertebra-core/src/channel.rs) uses masked cursors (`index & mask`), so one slot always stays empty and usable capacity is `slots - 1`, and caches remote cursors (`cached_read_head` / `cached_write_head` as generation-synchronized `CacheLine<AtomicU64>` snapshots) so producers only reload `read_head` (`Acquire`) when `next == cached_read_head` and consumers reuse `cached_write_head`.
+[`SpscRing`](../../../../../src/rs/vertebra-core/src/channel.rs)[^src-vertebra-core-src-channel-rs] uses masked cursors (`index & mask`), so one slot always stays empty and usable capacity is `slots - 1`, and caches remote cursors (`cached_read_head` / `cached_write_head` as generation-synchronized `CacheLine<AtomicU64>` snapshots) so producers only reload `read_head` (`Acquire`) when `next == cached_read_head` and consumers reuse `cached_write_head`.
 
 - **Send** (`try_send`, `try_send_with(len, flags, writer)`): rejects `len > payload_capacity()` with `PayloadTooLarge`; checks cached `read_head` before reloading `header.read_head` (`Acquire`); returns `Full` when `(write_head + 1) & mask == read_head`. `try_send_with` lets the closure write directly into the slot, stores `write_head` (`Release`), and only executes the `wait_write` `SeqCst` `fetch_add` + futex wake when `recv_waiters > 0`. Blocking `send_with` spins up to 32 `Backoff` steps before entering `park_send`.
 - **Zero-copy receive** (`try_recv_view`, `recv_view`, `recv_view_timeout`, `drain_with`): `try_recv_view` checks `head == tail` **before** attempting `slot_borrowed.compare_exchange`, avoiding RMW cache-line dirties on empty tiers, and returns a `SlotView` holding `Arc<SpscRing>`, the slot index, and a bounds-clamped slice. `SlotView::release()` (also run on `Drop`) advances `read_head` (`Release`), clears the borrow flag, and wakes a parked sender when `send_waiters > 0`. `drain_with(max_items, f)` visits up to `max_items` slots zero-copy and advances `read_head` once per drained batch.
@@ -60,18 +88,27 @@ sources:
 
 ## Blocking Waits (`sync.rs`, `platform/`)
 
-`SpscRing` blocking paths (`send`, `send_with`, `send_timeout`, `recv`, `recv_timeout`, `recv_view`) increment `send_waiters` / `recv_waiters`, re-check the cursor, and sleep on the matching wait word through [`sync.rs`](../../../../../src/rs/vertebra-core/src/sync.rs): `wait_on_address`, `wait_on_address_timeout`, `wake_one`, `wake_all`. `MpmcRing` blocking paths (`send`, `recv`, `recv_timeout`, `recv_timeout_with`) spin with `crossbeam_utils::Backoff::snooze` instead and never touch the wait words.
+`SpscRing` blocking paths (`send`, `send_with`, `send_timeout`, `recv`, `recv_timeout`, `recv_view`) increment `send_waiters` / `recv_waiters`, re-check the cursor, and sleep on the matching wait word through [`sync.rs`](../../../../../src/rs/vertebra-core/src/sync.rs)[^src-vertebra-core-src-sync-rs]: `wait_on_address`, `wait_on_address_timeout`, `wake_one`, `wake_all`. `MpmcRing` blocking paths (`send`, `recv`, `recv_timeout`, `recv_timeout_with`) spin with `crossbeam_utils::Backoff::snooze` instead and never touch the wait words.
 
 | Platform | Implementation |
 |---|---|
-| Linux ([`linux.rs`](../../../../../src/rs/vertebra-core/src/platform/linux.rs)) | `SYS_futex` `FUTEX_WAIT` / `FUTEX_WAKE`; also `pidfd_open(pid)` (flags `0`) |
-| macOS ([`macos.rs`](../../../../../src/rs/vertebra-core/src/platform/macos.rs)) | default: 1024 spin iterations, then 1 ms `nanosleep`; with the `macos-ulock` feature, `__ulock_wait` / `__ulock_wake` using `UL_COMPARE_AND_WAIT | ULF_NO_ERRNO` |
-| Windows ([`windows.rs`](../../../../../src/rs/vertebra-core/src/platform/windows.rs)) | `WaitOnAddress`, `WakeByAddressSingle`, `WakeByAddressAll` |
+| Linux ([`linux.rs`](../../../../../src/rs/vertebra-core/src/platform/linux.rs)[^src-vertebra-core-src-platform-linux-rs]) | `SYS_futex` `FUTEX_WAIT` / `FUTEX_WAKE`; also `pidfd_open(pid)` (flags `0`) |
+| macOS ([`macos.rs`](../../../../../src/rs/vertebra-core/src/platform/macos.rs)[^src-vertebra-core-src-platform-macos-rs]) | default: 1024 spin iterations, then 1 ms `nanosleep`; with the `macos-ulock` feature, `__ulock_wait` / `__ulock_wake` using `UL_COMPARE_AND_WAIT | ULF_NO_ERRNO` |
+| Windows ([`windows.rs`](../../../../../src/rs/vertebra-core/src/platform/windows.rs)[^src-vertebra-core-src-platform-windows-rs]) | `WaitOnAddress`, `WakeByAddressSingle`, `WakeByAddressAll` |
 
 `sync.rs` also defines `WaitWord`, `SharedMutex<T>`, `SharedRwLock<T>`, and `SharedCondvar` for cross-process locking. No production code uses them.
 
 ## Cross-Process Wakeup FDs (`notify.rs`)
 
-[`Notifier`](../../../../../src/rs/vertebra-core/src/notify.rs) is the FD that asyncio watches with `add_reader`. On Linux it is `eventfd(0, EFD_NONBLOCK)`; elsewhere a non-blocking `pipe(2)`. Neither sets `CLOEXEC`, so children inherit them. API: `new`, `notify`, `clear`, `as_raw_fd`, `from_raw_fd` (Linux), `from_raw_fds(read, write)` and `write_fd` (non-Linux).
+[`Notifier`](../../../../../src/rs/vertebra-core/src/notify.rs)[^src-vertebra-core-src-notify-rs] is the FD that asyncio watches with `add_reader`. On Linux it is `eventfd(0, EFD_NONBLOCK)`; elsewhere a non-blocking `pipe(2)`. Neither sets `CLOEXEC`, so children inherit them. API: `new`, `notify`, `clear`, `as_raw_fd`, `from_raw_fd` (Linux), `from_raw_fds(read, write)` and `write_fd` (non-Linux).
 
 Batch-level LZ4/Zstd compression is applied by `BatchBridge`, not by the rings; see [Tiered Rings & Batch Bridge](tiered-rings-and-batch-bridge.md).
+
+[^src-vertebra-core-src-shm-rs]: `src/rs/vertebra-core/src/shm.rs` — Rust implementation module (src/rs/vertebra-core/src/shm.rs).
+[^src-vertebra-core-src-buffer-rs]: `src/rs/vertebra-core/src/buffer.rs` — Rust implementation module (src/rs/vertebra-core/src/buffer.rs).
+[^src-vertebra-core-src-channel-rs]: `src/rs/vertebra-core/src/channel.rs` — Rust implementation module (src/rs/vertebra-core/src/channel.rs).
+[^src-vertebra-core-src-notify-rs]: `src/rs/vertebra-core/src/notify.rs` — Rust implementation module (src/rs/vertebra-core/src/notify.rs).
+[^src-vertebra-core-src-sync-rs]: `src/rs/vertebra-core/src/sync.rs` — Rust implementation module (src/rs/vertebra-core/src/sync.rs).
+[^src-vertebra-core-src-platform-linux-rs]: `src/rs/vertebra-core/src/platform/linux.rs` — Rust implementation module (src/rs/vertebra-core/src/platform/linux.rs).
+[^src-vertebra-core-src-platform-macos-rs]: `src/rs/vertebra-core/src/platform/macos.rs` — Rust implementation module (src/rs/vertebra-core/src/platform/macos.rs).
+[^src-vertebra-core-src-platform-windows-rs]: `src/rs/vertebra-core/src/platform/windows.rs` — Rust implementation module (src/rs/vertebra-core/src/platform/windows.rs).

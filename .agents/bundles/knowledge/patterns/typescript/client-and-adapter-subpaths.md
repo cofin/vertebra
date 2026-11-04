@@ -4,24 +4,55 @@ title: "Client SDK Root Exports, Subpaths & Build Entries"
 description: "Rules for the @vertebra/client root entry, package.json subpath exports, tsup build entries, optional peers, and codegen parity."
 status: stable
 tags: [patterns, typescript, client-sdk, packaging]
+generated:
+  by: flow/0.26.0
+  at: "2026-11-04T04:33:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-04T04:33:00Z"
+    commit: f741701
 sources:
-  - resource: src/ts/vertebra-client/package.json
-  - resource: src/ts/vertebra-client/tsup.config.ts
-  - resource: src/ts/vertebra-client/tsconfig.json
-  - resource: src/ts/vertebra-client/biome.json
-  - resource: src/ts/vertebra-client/src/index.ts
-  - resource: src/ts/vertebra-client/src/router.ts
-  - resource: src/ts/vertebra-client/src/webmcp.ts
-  - resource: src/ts/vertebra-client/src/react/index.tsx
-  - resource: src/ts/vertebra-client/src/svelte/index.ts
-  - resource: src/ts/vertebra-client/src/vue/index.ts
-  - resource: src/ts/vertebra-client/src/angular/index.ts
-  - resource: Makefile
+  - id: src-package-json
+    resource: src/ts/vertebra-client/package.json
+    title: "TypeScript package manifest (src/ts/vertebra-client/package.json)"
+  - id: src-tsup-config-ts
+    resource: src/ts/vertebra-client/tsup.config.ts
+    title: "TypeScript client module (src/ts/vertebra-client/tsup.config.ts)"
+  - id: src-tsconfig-json
+    resource: src/ts/vertebra-client/tsconfig.json
+    title: "TypeScript client module (src/ts/vertebra-client/tsconfig.json)"
+  - id: src-biome-json
+    resource: src/ts/vertebra-client/biome.json
+    title: "TypeScript client module (src/ts/vertebra-client/biome.json)"
+  - id: src-src-index-ts
+    resource: src/ts/vertebra-client/src/index.ts
+    title: "TypeScript client module (src/ts/vertebra-client/src/index.ts)"
+  - id: src-src-router-ts
+    resource: src/ts/vertebra-client/src/router.ts
+    title: "TypeScript client module (src/ts/vertebra-client/src/router.ts)"
+  - id: src-src-webmcp-ts
+    resource: src/ts/vertebra-client/src/webmcp.ts
+    title: "TypeScript client module (src/ts/vertebra-client/src/webmcp.ts)"
+  - id: src-src-react-index-tsx
+    resource: src/ts/vertebra-client/src/react/index.tsx
+    title: "TypeScript client module (src/ts/vertebra-client/src/react/index.tsx)"
+  - id: src-src-svelte-index-ts
+    resource: src/ts/vertebra-client/src/svelte/index.ts
+    title: "TypeScript client module (src/ts/vertebra-client/src/svelte/index.ts)"
+  - id: src-src-vue-index-ts
+    resource: src/ts/vertebra-client/src/vue/index.ts
+    title: "TypeScript client module (src/ts/vertebra-client/src/vue/index.ts)"
+  - id: src-src-angular-index-ts
+    resource: src/ts/vertebra-client/src/angular/index.ts
+    title: "TypeScript client module (src/ts/vertebra-client/src/angular/index.ts)"
+  - id: src-makefile
+    resource: Makefile
+    title: "Canonical polyglot build, test, lint, docs, and benchmark targets"
 ---
 
 # Client SDK Root Exports, Subpaths & Build Entries
 
-[`@vertebra/client`](../../../../../src/ts/vertebra-client/package.json) is an ESM-only package (`"type": "module"`) with no runtime `dependencies`. Optional peers are `react ^19.0.0`, `vue ^3.5.0`, `@angular/core ^22.0.0`, and `vite ^8.0.0`; Svelte is a devDependency only and HTMX is not a dependency.
+[`@vertebra/client`](../../../../../src/ts/vertebra-client/package.json)[^src-package-json] is an ESM-only package (`"type": "module"`) with no runtime `dependencies`. Optional peers are `react ^19.0.0`, `vue ^3.5.0`, `@angular/core ^22.0.0`, and `vite ^8.0.0`; Svelte is a devDependency only and HTMX is not a dependency.
 
 ## Root entry (`src/index.ts`)
 
@@ -119,7 +150,7 @@ export {
 
 ## Subpath exports vs tsup entries
 
-`package.json` declares 17 export keys; [`tsup.config.ts`](../../../../../src/ts/vertebra-client/tsup.config.ts) builds every exported entry.
+`package.json` declares 17 export keys; [`tsup.config.ts`](../../../../../src/ts/vertebra-client/tsup.config.ts)[^src-tsup-config-ts] builds every exported entry.
 
 | Export | Source | Contents | tsup entry |
 | --- | --- | --- | --- |
@@ -147,7 +178,22 @@ export {
 
 - **Add a subpath in three places**: the source module, a `package.json` `exports` key (`types` + `import`), and a tsup `entry` with the exact filename. Re-export it from `src/index.ts` only when root consumers need it.
 - **Keep adapters out of the root**: framework adapters import their peer (`react`, `vue`, `svelte`, `@angular/core`, `vite`), all of which tsup marks `external`.
-- **TypeScript settings** ([`tsconfig.json`](../../../../../src/ts/vertebra-client/tsconfig.json)): `strict`, `target: "ES2022"`, `module: "ESNext"`, `moduleResolution: "Bundler"`, `jsx: "react-jsx"`, `lib: ES2022 + DOM`, declarations, declaration maps, and source maps.
+- **TypeScript settings** ([`tsconfig.json`](../../../../../src/ts/vertebra-client/tsconfig.json)[^src-tsconfig-json]): `strict`, `target: "ES2022"`, `module: "ESNext"`, `moduleResolution: "Bundler"`, `jsx: "react-jsx"`, `lib: ES2022 + DOM`, declarations, declaration maps, and source maps.
 - **Lint**: Biome via `make ts-lint` (`bunx biome check --write --unsafe .`) and `make lint-all` (`bunx biome check .`). Tests run with `make ts-test` (Vitest over `tests/unit/` and the top-level `tests/*.test.ts` suites).
 - **Codegen parity**: client route contracts (`RouteResponse`, `HttpClient.call` path interpolation) must stay aligned with [`_typescript.py`](../../../../../src/py/vertebra/build/codegen/_typescript.py), [`_manifest.py`](../../../../../src/py/vertebra/build/codegen/_manifest.py), and [`zod.py`](../../../../../src/py/vertebra/build/codegen/zod.py).
 - **Cross-language ids**: `fnv1aStateId` (FNV-1a 64, `bigint`) and `fnv1aFieldId` (FNV-1a 32) must match Python `LiveState.compute_state_id` / `compute_field_id` and Rust `state_id` / `field_id` (see [Live State](../../domains/framework/live-state.md)).
+
+Provenance sources: [^src-biome-json], [^src-src-index-ts], [^src-src-router-ts], [^src-src-webmcp-ts], [^src-src-react-index-tsx], [^src-src-svelte-index-ts], [^src-src-vue-index-ts], [^src-src-angular-index-ts], [^src-makefile].
+
+[^src-package-json]: `src/ts/vertebra-client/package.json` — TypeScript package manifest (src/ts/vertebra-client/package.json).
+[^src-tsup-config-ts]: `src/ts/vertebra-client/tsup.config.ts` — TypeScript client module (src/ts/vertebra-client/tsup.config.ts).
+[^src-tsconfig-json]: `src/ts/vertebra-client/tsconfig.json` — TypeScript client module (src/ts/vertebra-client/tsconfig.json).
+[^src-biome-json]: `src/ts/vertebra-client/biome.json` — TypeScript client module (src/ts/vertebra-client/biome.json).
+[^src-src-index-ts]: `src/ts/vertebra-client/src/index.ts` — TypeScript client module (src/ts/vertebra-client/src/index.ts).
+[^src-src-router-ts]: `src/ts/vertebra-client/src/router.ts` — TypeScript client module (src/ts/vertebra-client/src/router.ts).
+[^src-src-webmcp-ts]: `src/ts/vertebra-client/src/webmcp.ts` — TypeScript client module (src/ts/vertebra-client/src/webmcp.ts).
+[^src-src-react-index-tsx]: `src/ts/vertebra-client/src/react/index.tsx` — TypeScript client module (src/ts/vertebra-client/src/react/index.tsx).
+[^src-src-svelte-index-ts]: `src/ts/vertebra-client/src/svelte/index.ts` — TypeScript client module (src/ts/vertebra-client/src/svelte/index.ts).
+[^src-src-vue-index-ts]: `src/ts/vertebra-client/src/vue/index.ts` — TypeScript client module (src/ts/vertebra-client/src/vue/index.ts).
+[^src-src-angular-index-ts]: `src/ts/vertebra-client/src/angular/index.ts` — TypeScript client module (src/ts/vertebra-client/src/angular/index.ts).
+[^src-makefile]: `Makefile` — Canonical polyglot build, test, lint, docs, and benchmark targets.

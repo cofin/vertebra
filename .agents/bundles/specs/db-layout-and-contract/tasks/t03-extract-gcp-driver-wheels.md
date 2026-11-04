@@ -2,6 +2,7 @@
 type: Task
 id: db-layout-and-contract:t03
 title: Extract vertebra-bigquery and vertebra-spanner standalone PyO3 wheels and optional install extras
+description: "Extract BigQuery (`SyncBigQueryClient`, `AsyncBigQueryClient`) and Spanner (`SyncSpannerClient`, `AsyncSpannerClient`) Rust clients and PyO3 bindings out of `vertebra-db` and `vertebra-py` into standalone optional PyO3 extension crates `src/rs/vertebra-bigquery` (`vertebra._bigquery`) and `src/rs/vertebra-spanner` (`vertebra._spanner`), gate `vertebra_db::gcp` behind optional Cargo feature `gcp`, remove all `google-cloud-*` and `tonic` dependencies from `vertebra-py/Cargo.toml` and default `vertebra-db/Cargo.toml`, and wire `[bigquery]`, `[spanner]`, and `[storage]` install extras, `Makefile` build/stubtest targets, `areas.toml`, and `docs/reference/native-stubs.md`."
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -48,7 +49,7 @@ tests:
   - src/py/tests/unit/db/test_spanner.py
   - src/py/tests/unit/db/test_native_db_drivers.py
 plan_revision: 4
-plan_commit: "679a981"
+plan_commit: "f741701"
 state_revision: 0
 claimed_by: null
 claimed_at: null

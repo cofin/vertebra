@@ -2,6 +2,7 @@
 type: Task
 id: db-layout-and-contract:t04
 title: Unify SyncDatabaseDriver / AsyncDatabaseDriver method signatures and eliminate type-ignore overrides
+description: "Standardize `SyncDatabaseDriver`, `AsyncDatabaseDriver`, `ThreadOffloadAsyncDatabaseDriver`, all eight SQL/analytical adapter drivers (`postgres`, `mysql`, `sqlite`, `oracle`, `mssql`, `duckdb`, `bigquery`, `spanner`), and Spanner snapshot/transaction handles (`SyncSpannerSnapshot`, `AsyncSpannerSnapshot`, `SyncSpannerTransaction`, `AsyncSpannerTransaction`) on one method, parameter-name, transaction, error-mapping, and return-type contract with zero `# type: ignore[override]` annotations and zero legacy alias methods, updating PEP 249 `SyncDBAPIConnection` / `AsyncDBAPICursor`, GCP SQLSpec callers, and `docs/examples/storage_and_db.py` accordingly."
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -39,7 +40,7 @@ tests:
   - src/py/tests/unit/extensions/test_sqlspec_bigquery.py
   - src/py/tests/unit/extensions/test_sqlspec_spanner.py
 plan_revision: 4
-plan_commit: "679a981"
+plan_commit: "f741701"
 state_revision: 0
 claimed_by: null
 claimed_at: null

@@ -2,6 +2,7 @@
 type: Task
 id: db-layout-and-contract:t06
 title: Make DatabaseRegistry polymorphic, add provide_driver, and enforce the vertebra/db upward-import gate
+description: "Add `url_schemes`, lazy `driver_module`/`sync_driver_name`/`async_driver_name` descriptors, `from_url`, `pool_key`, and `build_sync_driver`/`build_async_driver` hooks to `BaseDatabaseConfig` and every adapter config (plus `url_schemes`/`from_url`/`pool_key` on `CloudSQLConfig` and `AlloyDBConfig`), replace `isinstance` chains in `DatabaseRegistry` with table-driven dispatch and `@overload`ed `get_dialer(config, *, sync=False)`, replace `provide_bigquery_driver` and `provide_spanner_driver` with `provide_driver`, and add an AST upward-import gate for `src/py/vertebra/db/`."
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -36,7 +37,7 @@ tests:
   - src/py/tests/unit/db/test_native_db_drivers.py
   - src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
 plan_revision: 4
-plan_commit: "679a981"
+plan_commit: "f741701"
 state_revision: 0
 claimed_by: null
 claimed_at: null

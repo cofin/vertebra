@@ -4,20 +4,53 @@ title: Vertebra Product Definition
 description: Product purpose, runtime topologies, and the capabilities that exist in the Python, Rust, and TypeScript packages of the Vertebra application backbone.
 status: stable
 tags: [product, runtime, python, rust, typescript]
+generated:
+  by: flow/0.26.0
+  at: "2026-11-04T04:33:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-04T04:33:00Z"
+    commit: f741701
 sources:
-  - resource: README.md
-  - resource: pyproject.toml
-  - resource: src/py/vertebra/__init__.py
-  - resource: src/py/vertebra/framework/__init__.py
-  - resource: src/py/vertebra/storage/__init__.py
-  - resource: src/py/vertebra/db/__init__.py
-  - resource: src/py/vertebra/telemetry/__init__.py
-  - resource: src/py/vertebra/server/platform.py
-  - resource: src/py/vertebra/wasm/__init__.py
-  - resource: src/py/vertebra/cli/__init__.py
-  - resource: src/rs/Cargo.toml
-  - resource: src/ts/vertebra-client/package.json
-  - resource: src/ts/vertebra-client/src/index.ts
+  - id: src-readme-md
+    resource: README.md
+    title: "Repository overview and quickstart documentation"
+  - id: src-pyproject-toml
+    resource: pyproject.toml
+    title: "Python package metadata, dependencies, and tool configuration"
+  - id: src-init-py
+    resource: src/py/vertebra/__init__.py
+    title: "Python implementation module (src/py/vertebra/__init__.py)"
+  - id: src-framework-init-py
+    resource: src/py/vertebra/framework/__init__.py
+    title: "Python implementation module (src/py/vertebra/framework/__init__.py)"
+  - id: src-storage-init-py
+    resource: src/py/vertebra/storage/__init__.py
+    title: "Python implementation module (src/py/vertebra/storage/__init__.py)"
+  - id: src-db-init-py
+    resource: src/py/vertebra/db/__init__.py
+    title: "Python implementation module (src/py/vertebra/db/__init__.py)"
+  - id: src-telemetry-init-py
+    resource: src/py/vertebra/telemetry/__init__.py
+    title: "Python implementation module (src/py/vertebra/telemetry/__init__.py)"
+  - id: src-server-platform-py
+    resource: src/py/vertebra/server/platform.py
+    title: "Python implementation module (src/py/vertebra/server/platform.py)"
+  - id: src-wasm-init-py
+    resource: src/py/vertebra/wasm/__init__.py
+    title: "Python implementation module (src/py/vertebra/wasm/__init__.py)"
+  - id: src-cli-init-py
+    resource: src/py/vertebra/cli/__init__.py
+    title: "Python implementation module (src/py/vertebra/cli/__init__.py)"
+  - id: src-cargo-toml
+    resource: src/rs/Cargo.toml
+    title: "Rust crate manifest (src/rs/Cargo.toml)"
+  - id: src-package-json
+    resource: src/ts/vertebra-client/package.json
+    title: "TypeScript package manifest (src/ts/vertebra-client/package.json)"
+  - id: src-src-index-ts
+    resource: src/ts/vertebra-client/src/index.ts
+    title: "TypeScript client module (src/ts/vertebra-client/src/index.ts)"
 ---
 
 # Vertebra Product Definition
@@ -27,7 +60,7 @@ sources:
 
 Vertebra is one unified runtime for Python and TypeScript — backend, frontend, web, gRPC, workers, and standalone apps. A native HTTP ingress and IPC runtime hosts Python handlers (native, ASGI, RSGI, WSGI) either in one process or across shared-memory worker processes. Around that runtime sit a high-performance object-storage extension, Python packages for data access, telemetry, platform integration, live state, and framework extensions, a `vtb` CLI, and the `@vertebra/client` TypeScript SDK.
 
-[`vertebra/__init__.py`](../../../src/py/vertebra/__init__.py) and [`vertebra/framework/__init__.py`](../../../src/py/vertebra/framework/__init__.py) declare PEP 810 `__lazy_modules__` alongside PEP 562 `__getattr__`, so `import vertebra` loads the framework, server, and native extension modules only on first attribute access across Python `3.12`–`3.15`. CI runs on Linux and macOS; `vertebra-core` also carries a Windows platform module ([`platform/windows.rs`](../../../src/rs/vertebra-core/src/platform/windows.rs)).
+[`vertebra/__init__.py`](../../../src/py/vertebra/__init__.py)[^src-init-py] and [`vertebra/framework/__init__.py`](../../../src/py/vertebra/framework/__init__.py)[^src-framework-init-py] declare PEP 810 `__lazy_modules__` alongside PEP 562 `__getattr__`, so `import vertebra` loads the framework, server, and native extension modules only on first attribute access across Python `3.12`–`3.15`. CI runs on Linux and macOS; `vertebra-core` also carries a Windows platform module ([`platform/windows.rs`](../../../src/rs/vertebra-core/src/platform/windows.rs)).
 
 ## Core Product Capabilities
 
@@ -43,11 +76,11 @@ Vertebra is one unified runtime for Python and TypeScript — backend, frontend,
 - **Object Storage (`vertebra-storage`, `vertebra.storage`)**: the `_storage` extension (`SyncObjectStore`, `AsyncObjectStore`, `StorageBuffer`, `RustStorageAwaitable`) wraps `object_store` (S3, GCS with zero-config ADC, Azure, HTTP) and adds OCI request signing ([`oci.rs`](../../../src/rs/vertebra-storage/src/oci.rs)) and S3/GCS/Azure SAS presigning ([`signing.rs`](../../../src/rs/vertebra-storage/src/signing.rs)). Python exposes [`SyncObjectStore`, `AsyncObjectStore`](../../../src/py/vertebra/storage/_store.py) with `LocalConfig`, `S3Config`, `GCSConfig`, `AzureConfig`, `OCIConfig`, `R2Config`, `HTTPConfig`, `MemoryConfig`, and `SigningConfig`, plus the Arrow `SyncReadableFile` / `AsyncReadableFile` bridge.
 - **Data Access (`vertebra.db`, `vertebra-db`)**: two-tier shared-memory database and cache plane across PostgreSQL, MySQL, SQLite, Oracle (Thin TNS/TTC + Autonomous Database Wallet + 26ai `VECTOR`/`OSON`), SQL Server / MSSQL (TDS + `@P1` parameter rewriting), DuckDB (single-writer SHM broker host with Arrow IPC), Google BigQuery (REST v2 + Storage Read/Write v1 `VTBARROW` + `ObjectTableConfig`), Google Cloud Spanner (GoogleSQL + `Spangres`, cached `multiplexed = true` sessions, wound-wait `Aborted` retry, `BatchWrite`, Data Boost `PartitionQuery` `VTBARROW`), Redis, and Valkey (RESP3 + `CLIENT TRACKING` + Sentinel + Cluster CRC16 slot routing); direct TCP/TLS (`:5432`, `:3306`) IAM OAuth2 token password resolution plus opt-in `SyncCloudSQLDialer` / `AsyncCloudSQLDialer` (`:3307`) and `SyncAlloyDBDialer` / `AsyncAlloyDBDialer` (`:5433` `MetadataExchangeRequest`); zero-copy `ArrowCursor` over `ShmRegion` Arrow IPC; `ChannelBus` (`Memory`, `SHM`, `Redis`, `Valkey`, `PostgreSQL`, `Oracle`, `Spanner`); `SyncQueryPipeline` / `AsyncQueryPipeline` (pipelined/CTE-batched queries for `postgresql` and `googlesql`), `ChangeFeed` & `SyncSpannerChangeStreamSource` / `AsyncSpannerChangeStreamSource` (CDC), `TenantPredicate` (row-level security), `DataFusionEngine`, governed MCP/A2A `register_gcp_database_tools`, and `DatabaseRegistry`.
 - **Telemetry (`vertebra.telemetry`)**: `LogSink`, `LogHandler`, `LoggingConfig`, `TraceContext`, `SpanExporter`, `GenAiRecorder`, and `SqlTracePropagator`. `vertebra-core` provides `AsyncLogCore` ([`logger.rs`](../../../src/rs/vertebra-core/src/logger.rs)), `W3cTraceContext`, and `sanitize_sql_statement` ([`telemetry.rs`](../../../src/rs/vertebra-core/src/telemetry.rs)).
-- **Platform Runtime (`vertebra.server`)**: [`platform.py`](../../../src/py/vertebra/server/platform.py) (`CgroupQuota` cgroup v2 sizing, `LameDuckController` drain, `ZPagesRegistry`, `PlatformAdapter`), `GilAuditReport` (free-threaded GIL re-enablement audit), `ShmAllocationPolicy` (`memfd_create` and `SCM_RIGHTS` fallback for constrained `/dev/shm`), and `EventLoopPool`.
+- **Platform Runtime (`vertebra.server`)**: [`platform.py`](../../../src/py/vertebra/server/platform.py)[^src-server-platform-py] (`CgroupQuota` cgroup v2 sizing, `LameDuckController` drain, `ZPagesRegistry`, `PlatformAdapter`), `GilAuditReport` (free-threaded GIL re-enablement audit), `ShmAllocationPolicy` (`memfd_create` and `SCM_RIGHTS` fallback for constrained `/dev/shm`), and `EventLoopPool`.
 - **Live State (`vertebra.framework.live`)**: `LiveState`, `LiveStateRoom`, `StateDeltaFrame`, and `HybridLogicalClock` sync MessagePack deltas with last-write-wins ordering ([`live.py`](../../../src/py/vertebra/framework/live.py)).
-- **WebAssembly Plugins (`vertebra.wasm`)**: `WasmPluginHost`, `WasmModuleConfig`, and `WasmSandboxPolicy` validate Wasm binary headers, register modules, and enforce a fuel budget before calling host-registered exports. No Wasm engine is bundled.
+- **WebAssembly Plugins (`vertebra.wasm`)**: `WASMPluginHost`, `WASMModuleConfig`, and `WASMSandboxPolicy` validate Wasm binary headers, register modules, and enforce a fuel budget before calling host-registered exports. No Wasm engine is bundled.
 - **Framework Extensions (`vertebra.extensions`)**: `litestar` (`VertebraPlugin`, `VertebraConfig`, `RouteCompiler`, `OffloadPlan`, `offload_middlewares`, `FastPath`, `ChannelsBackend`, `MemoryStore`, and optional ecosystem integrations `queues`, `security`, `autowire`, `email`, `mcp`, `vite`, `asyncapi`, `htmx`, `saq`), `starlette` (`VertebraPlugin`, `VertebraConfig`, fastpath route compiler), `fastapi` (`VertebraPlugin`, `VertebraConfig`, topological `DependencyPlan` compiler), `flask` (`VertebraPlugin`, `VertebraConfig`, zero-copy WSGI batch bridge), `django` (`VertebraPlugin`, `VertebraConfig`, `VertebraAppConfig`, `@vertebra_view`, `MsgspecView`, `ArrowQuerySet`, and 8 native `vertebra.extensions.django.db.backends.{postgresql,mysql,sqlite3,oracle,mssql,duckdb,bigquery,spanner}` engines), `sqlspec` (`create_sqlspec_plugin`, `ProxySyncConfig`, `ProxyAsyncConfig`, `SQLSpecSyncProvider`, `SQLSpecAsyncProvider`, `SyncAdapterConfig`, `AsyncAdapterConfig`, `{PostgreSQL,MySQL,SQLite,Oracle,MSSQL,DuckDB,BigQuery,Spanner}{Sync,Async}Config`, `ObjectStoreBackend`), `alchemy` (`create_alchemy_plugin`, `normalize_alchemy_url`, `AsyncCacheManager`, `SQLAlchemyCacheBackend`, `ZeroCopyServiceMixin`, `ObjectStoreBackend`), `sqlalchemy` (`+vertebra`/`+vtb` dialects `Sync{PostgreSQL,MySQL,SQLite,Oracle,MSSQL,DuckDB,BigQuery,Spanner,Spangres}Dialect` / `Async{PostgreSQL,MySQL,SQLite,Oracle,MSSQL,DuckDB,BigQuery,Spanner,Spangres}Dialect`, `AlembicImpl`, `BigQueryAlembicImpl`, `SpannerAlembicImpl`, `Vector`, `BinaryJSON`), `grpc` (`GrpcServiceRegistry`, `ProtobufSchemaGenerator`), `apex` (Oracle APEX sessions, auth handoff, reactive islands, offline HLC sync, federated queries, ORDS/26ai Duality Views, and `ApexGateway`), and `worker` (`WorkerRunner`, `LaneConfig`).
-- **CLI (`vtb`)**: `run`, `dev`, `init`, `js`, `build`, `ai models`, `ai mcp`, and `workers run`, plus pluggable commands registered through `VertebraExtensionGroup`, `CLIPluginProtocol` (`on_cli_init`), `VertebraEnv`, and package entry points ([`cli/__init__.py`](../../../src/py/vertebra/cli/__init__.py), [`cli/plugin_registry.py`](../../../src/py/vertebra/cli/plugin_registry.py)).
+- **CLI (`vtb`)**: `run`, `dev`, `init`, `js`, `build`, `ai models`, `ai mcp`, and `workers run`, plus pluggable commands registered through `VertebraExtensionGroup`, `CLIPluginProtocol` (`on_cli_init`), `VertebraEnv`, and package entry points ([`cli/__init__.py`](../../../src/py/vertebra/cli/__init__.py)[^src-cli-init-py], [`cli/plugin_registry.py`](../../../src/py/vertebra/cli/plugin_registry.py)).
 - **TypeScript Client (`@vertebra/client`)**: [`HttpClient`](../../../src/ts/vertebra-client/src/client/client.ts) with retry/backoff, [`WebSocketClient`](../../../src/ts/vertebra-client/src/websocket.ts), `RealtimeChannel`, `SseClient`, [`SessionStore`](../../../src/ts/vertebra-client/src/store/index.ts), [`HotReloadClient`](../../../src/ts/vertebra-client/src/hmr/index.ts), `LiveStateClient`, `ArrowStreamClient`, `WASMClient`, `ApexRegion`, `TraceContext`, `routeUrl`/`wsUrl` (`/router`), `registerWebMCPTools` (`/webmcp`), and `McpClient`/`A2aClient` (`/agent`), with subpath adapters for React, Vue, Svelte, Angular, HTMX, and Vite.
 <!-- truth: end -->
 
@@ -56,18 +89,34 @@ Vertebra is one unified runtime for Python and TypeScript — backend, frontend,
 | Layer | Package / Crate | Primary Responsibility |
 | --- | --- | --- |
 | Python Framework & Server | [`src/py/vertebra/`](../../../src/py/vertebra/__init__.py) | `App`, `Controller`, `Router`, `Route`, `Procedure`, `Provide`/`Inject`, framework subdomains, `BuildOrchestrator`, `AsgiRunner`, `RsgiAdapter`, `WsgiAdapter`, `EventLoopPool`, `BatchDispatchPlan`, `vtb` CLI, and the `run_supervisor` launcher |
-| Python Data, Storage & Telemetry | [`src/py/vertebra/storage/`](../../../src/py/vertebra/storage/__init__.py), [`db/`](../../../src/py/vertebra/db/__init__.py), [`telemetry/`](../../../src/py/vertebra/telemetry/__init__.py) | `SyncObjectStore` / `AsyncObjectStore`, database configs/dialers/drivers, `ArrowCursor`, `ChannelBus`, `SyncQueryPipeline` / `AsyncQueryPipeline`, `ChangeFeed`, `LogSink`, `TraceContext` |
+| Python Data, Storage & Telemetry | [`src/py/vertebra/storage/`](../../../src/py/vertebra/storage/__init__.py)[^src-storage-init-py], [`db/`](../../../src/py/vertebra/db/__init__.py)[^src-db-init-py], [`telemetry/`](../../../src/py/vertebra/telemetry/__init__.py)[^src-telemetry-init-py] | `SyncObjectStore` / `AsyncObjectStore`, database configs/dialers/drivers, `ArrowCursor`, `ChannelBus`, `SyncQueryPipeline` / `AsyncQueryPipeline`, `ChangeFeed`, `LogSink`, `TraceContext` |
 | Python Extensions | [`src/py/vertebra/extensions/`](../../../src/py/vertebra/extensions/__init__.py) | Litestar, Starlette, FastAPI, Flask, Django (plus 8 native DB backends), SQLSpec (`SQLSpecSyncProvider`, `SQLSpecAsyncProvider`, `Proxy*Config`, `{PostgreSQL,MySQL,SQLite,Oracle,MSSQL,DuckDB,BigQuery,Spanner}{Sync,Async}Config`), Advanced Alchemy, SQLAlchemy `+vtb` dialects, gRPC, Oracle APEX, and worker lanes |
 | Rust Core IPC & Wire Protocol | [`src/rs/vertebra-core/`](../../../src/rs/vertebra-core/src/lib.rs) | `ShmRegion`, `SpscRing` (`SlotView`), `MpmcRing`, `BatchBridge`, `RingPair`, `TieredRingSet`, `ShmLeaseTable` + co-located `ShmStatementCache` + `ShmChannelSlot`, `CompressionCodec` (LZ4/Zstd), OS wakeups (`eventfd`, `ulock`, pipes), plus `AsyncLogCore`, `W3cTraceContext`, `validate_jwt`/`RateLimiter`, and `SharedMutex`/`SharedRwLock`/`SharedCondvar` |
 | Rust HTTP Ingress & Dispatch | [`src/rs/vertebra-http/`](../../../src/rs/vertebra-http/src/lib.rs) | `run_with_listener` accept loop (`ServerState`), `Router` (`matchit 0.9`), `RouteTable`, `RequestBatcher` shards (`BatchLimit`), `Dispatcher`, `ShmDispatcher` with sharded `InFlightRequests`, `BackpressureController`, `RingFactory`, and the `vertebra-server` binary |
-| Rust Python FFI Extension | [`src/rs/vertebra-py/`](../../../src/rs/vertebra-py/src/lib.rs) | PyO3 `vertebra._vertebra` classes (`Request`, `Response`, `Headers`, `RequestBatch`, `AsgiScope`, `AsgiProtocol`, `PyEmptyAwaitable`, `PyValueAwaitable`, `RsgiScope`, `RsgiHttpProtocol`, `WsgiEnviron`, `WsgiInput`, `_WsgiStartResponse`, `LeaseBroker`, `StatementCache`, `CloudSQLDialer`, `AlloyDBDialer`, `SyncBigQueryClient`, `AsyncBigQueryClient`, `SyncSpannerClient`, `AsyncSpannerClient`, `SyncGcpTokenCache`, `AsyncGcpTokenCache`, `ArrowCursor`, `LogSink`, `JwtGuard`, `RateLimiter`), C-API `msgspec_bridge` (`decode_msgspec`, `decode_pydantic_json`, `hydrate_rows_vectorcall`, `orm_to_struct_vectorcall`), and batch API (`init_transport`, `get_batch`, `try_get_batch`, `prepare_request_sleep`, `cancel_request_sleep`, `drive_asgi_batch`, `drive_rsgi_batch`, `drive_wsgi_batch`, `submit_response_raw`, `submit_batch_raw`) |
+| Rust Python FFI Extension | [`src/rs/vertebra-py/`](../../../src/rs/vertebra-py/src/lib.rs) | PyO3 `vertebra._vertebra` classes (`Request`, `Response`, `Headers`, `RequestBatch`, `AsgiScope`, `AsgiProtocol`, `PyEmptyAwaitable`, `PyValueAwaitable`, `RsgiScope`, `RsgiHttpProtocol`, `WsgiEnviron`, `WsgiInput`, `_WsgiStartResponse`, `LeaseBroker`, `StatementCache`, `CloudSQLDialer`, `AlloyDBDialer`, `SyncBigQueryClient`, `AsyncBigQueryClient`, `SyncSpannerClient`, `AsyncSpannerClient`, `SyncGcpTokenCache`, `AsyncGcpTokenCache`, `ArrowCursor`, `LogSink`, `JWTGuard`, `RateLimiter`), C-API `msgspec_bridge` (`decode_msgspec`, `decode_pydantic_json`, `hydrate_rows_vectorcall`, `orm_to_struct_vectorcall`), and batch API (`init_transport`, `get_batch`, `try_get_batch`, `prepare_request_sleep`, `cancel_request_sleep`, `drive_asgi_batch`, `drive_native_batch`, `drive_rsgi_batch`, `drive_wsgi_batch`, `submit_response_raw`, `submit_batch_raw`) |
 | Rust Native Bundler & SSR | [`src/rs/vertebra-bundler/`](../../../src/rs/vertebra-bundler/src/lib.rs) | PyO3 `vertebra._bundler`: Oxc transforms, `SourceWatcher`, `SSRPool` |
 | Rust Object Storage | [`src/rs/vertebra-storage/`](../../../src/rs/vertebra-storage/src/lib.rs) | PyO3 `vertebra._storage`: `SyncObjectStore`, `AsyncObjectStore`, `StorageBuffer`, `RustStorageAwaitable`, `ObjectStoreEngine`, OCI signing, S3/GCS/Azure presigning |
 | Rust Database & Wire Engine | [`src/rs/vertebra-db/`](../../../src/rs/vertebra-db/src/lib.rs) | `CloudSQLInstanceURI`, `AlloyDBClusterURI`, `PoolerMode`/`compute_worker_pool_budget`, `parse_pgcopy_binary`, `encode_com_stmt_execute`, `SQLitePragmaPlan`, `parse_tnsnames_ora`, `OracleConnectDescriptor`, `extract_wallet_files`, `encode_oracle_vector`, `rewrite_tds_positional_params`, `DuckDBPragmaPlan`, `parse_resp3_frame`, `crc16_redis_slot`, `ShmRowBatch`, `ArrowShmDescriptor` |
-| TypeScript Client SDK | [`src/ts/vertebra-client/`](../../../src/ts/vertebra-client/src/index.ts) | `@vertebra/client` multi-entry package and framework adapters |
+| TypeScript Client SDK | [`src/ts/vertebra-client/`](../../../src/ts/vertebra-client/src/index.ts)[^src-src-index-ts] | `@vertebra/client` multi-entry package and framework adapters |
 
 ## Related Context
 
 - [Product Guidelines](product-guidelines.md)
 - [Tech Stack](tech-stack.md)
 - [Knowledge Index](../knowledge/index.md)
+
+Provenance sources: [^src-readme-md], [^src-pyproject-toml], [^src-wasm-init-py], [^src-cargo-toml], [^src-package-json].
+
+[^src-readme-md]: `README.md` — Repository overview and quickstart documentation.
+[^src-pyproject-toml]: `pyproject.toml` — Python package metadata, dependencies, and tool configuration.
+[^src-init-py]: `src/py/vertebra/__init__.py` — Python implementation module (src/py/vertebra/__init__.py).
+[^src-framework-init-py]: `src/py/vertebra/framework/__init__.py` — Python implementation module (src/py/vertebra/framework/__init__.py).
+[^src-storage-init-py]: `src/py/vertebra/storage/__init__.py` — Python implementation module (src/py/vertebra/storage/__init__.py).
+[^src-db-init-py]: `src/py/vertebra/db/__init__.py` — Python implementation module (src/py/vertebra/db/__init__.py).
+[^src-telemetry-init-py]: `src/py/vertebra/telemetry/__init__.py` — Python implementation module (src/py/vertebra/telemetry/__init__.py).
+[^src-server-platform-py]: `src/py/vertebra/server/platform.py` — Python implementation module (src/py/vertebra/server/platform.py).
+[^src-wasm-init-py]: `src/py/vertebra/wasm/__init__.py` — Python implementation module (src/py/vertebra/wasm/__init__.py).
+[^src-cli-init-py]: `src/py/vertebra/cli/__init__.py` — Python implementation module (src/py/vertebra/cli/__init__.py).
+[^src-cargo-toml]: `src/rs/Cargo.toml` — Rust crate manifest (src/rs/Cargo.toml).
+[^src-package-json]: `src/ts/vertebra-client/package.json` — TypeScript package manifest (src/ts/vertebra-client/package.json).
+[^src-src-index-ts]: `src/ts/vertebra-client/src/index.ts` — TypeScript client module (src/ts/vertebra-client/src/index.ts).

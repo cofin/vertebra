@@ -2,6 +2,7 @@
 type: Task
 id: db-layout-and-contract:t07
 title: Add parameterized pytest-databases driver conformance suite and update docs and OKF chapters
+description: "Create the cross-engine driver conformance suite `src/py/tests/integration/db/test_driver_conformance.py` parameterized across all adapters via `@pytest.mark.parametrize` and `pytest-databases` (fixing `MySQLConfig`, `RedisConfig`, and `ValkeyConfig` fixture constructors in `src/py/tests/integration/conftest.py`), and synchronize `docs/` and `.agents/bundles/knowledge/domains/data/{database-drivers-and-dialers,broker-and-shm-leases,query-pipeline-cdc-and-tenancy}.md` with the new `vertebra.db.adapters.<engine>` layout, `vertebra._bigquery` / `vertebra._spanner` optional wheels, driver contract, `DatabaseError` hierarchy, `Sync*`/`Async*` capability protocols, and `provide_driver`."
 state: pending
 priority: P2
 verification_strategy: integration_acceptance
@@ -22,7 +23,7 @@ tests:
   - src/py/tests/integration/db/test_driver_conformance.py
   - src/py/tests/unit/docs/test_examples.py
 plan_revision: 4
-plan_commit: "679a981"
+plan_commit: "f741701"
 state_revision: 0
 claimed_by: null
 claimed_at: null

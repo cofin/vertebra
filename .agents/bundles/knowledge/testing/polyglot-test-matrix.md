@@ -4,23 +4,49 @@ title: "Polyglot Test Matrix & Environment Setup"
 description: "Rust, Python, and TypeScript test suites, their Makefile and CI entry points, registry auto-setup, extension rebuilds, and /dev/shm cleanup."
 status: stable
 tags: [testing, verification, python, rust, typescript]
+generated:
+  by: flow/0.26.0
+  at: "2026-11-04T04:33:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-04T04:33:00Z"
+    commit: f741701
 sources:
-  - resource: Makefile
-  - resource: tools/scripts/setup-env.sh
-  - resource: pyproject.toml
-  - resource: src/rs/Cargo.toml
-  - resource: src/py/tests/conftest.py
-  - resource: src/ts/vertebra-client/package.json
-  - resource: .github/workflows/ci.yml
+  - id: src-makefile
+    resource: Makefile
+    title: "Canonical polyglot build, test, lint, docs, and benchmark targets"
+  - id: src-tools-scripts-setup-env-sh
+    resource: tools/scripts/setup-env.sh
+    title: "Repository tooling module (tools/scripts/setup-env.sh)"
+  - id: src-pyproject-toml
+    resource: pyproject.toml
+    title: "Python package metadata, dependencies, and tool configuration"
+  - id: src-cargo-toml
+    resource: src/rs/Cargo.toml
+    title: "Rust crate manifest (src/rs/Cargo.toml)"
+  - id: src-tests-conftest-py
+    resource: src/py/tests/conftest.py
+    title: "Python implementation module (src/py/tests/conftest.py)"
+  - id: src-package-json
+    resource: src/ts/vertebra-client/package.json
+    title: "TypeScript package manifest (src/ts/vertebra-client/package.json)"
+  - id: src-ci-yml
+    resource: .github/workflows/ci.yml
+    title: "GitHub Actions workflow (ci.yml)"
 ---
 
 # Polyglot Test Matrix & Environment Setup
 
-Vertebra runs verification gates in three languages: Rust (`cargo test`), Python (`pytest` with the AnyIO plugin), and TypeScript (`vitest`). The [`Makefile`](../../../../Makefile) drives all three locally and in CI.
+<!-- truth: start -->
+- Verify polyglot changes with `make rs-test`, `make py-test`, `make ts-test`, `make lint-all`, and `make review-check`, running `make dev` after any Rust edit before invoking `pytest`.
+- Purge `/dev/shm/test-*`, `/dev/shm/*vertebra*`, and `/dev/shm/vtb-*` segments between test runs and exercise real local SHM/SQLite/in-memory backends instead of synthetic mocks.
+<!-- truth: end -->
+
+Vertebra runs verification gates in three languages: Rust (`cargo test`), Python (`pytest` with the AnyIO plugin), and TypeScript (`vitest`). The [`Makefile`](../../../../Makefile)[^src-makefile] drives all three locally and in CI.
 
 ## 1. Registry Setup (`make setup-env`)
 
-[`tools/scripts/setup-env.sh`](../../../../tools/scripts/setup-env.sh) runs from `make setup-env`, `make install`, and `make upgrade`:
+[`tools/scripts/setup-env.sh`](../../../../tools/scripts/setup-env.sh)[^src-tools-scripts-setup-env-sh] runs from `make setup-env`, `make install`, and `make upgrade`:
 
 - On every run it deletes `uv.toml` and `src/rs/.cargo/config.toml` if present. Existing `.npmrc` files are never removed.
 - On internal corporate Linux workstations whose package mirrors replace the public registries (detected by an `/etc/os-release` match in the script), it writes `uv.toml` (`[[index]] url = "https://pypi.org/simple"`, `default = true`), appends `registry=https://registry.npmjs.org` to `.npmrc` and `src/ts/vertebra-client/.npmrc`, and writes `src/rs/.cargo/config.toml` (`[registries.crates-io] protocol = "sparse"`, `[net] git-fetch-with-cli = true`).
@@ -34,7 +60,7 @@ The `Makefile` applies the same host check and exports `NPM_CONFIG_REGISTRY`, `P
 |---|---|---|
 | `make dev` | `cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage` + `uv run maturin develop --uv` for `vertebra-py`, `vertebra-bundler`, and `vertebra-storage` | Builds and installs debug `vertebra._vertebra`, `vertebra._bundler`, and `vertebra._storage` into `.venv`. Required after a Rust edit before running `pytest`. |
 | `make rs-test` | `rm -rf /dev/shm/test-* /dev/shm/*vertebra*` + `cd src/rs && cargo test --workspace --features tls,compression` | Unit and integration tests across every workspace crate. |
-| `make py-test` | `make dev` + `uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage` + `uv run pytest src/py/tests -v` | `.pyi` stub parity against compiled extensions plus Python suites under [`src/py/tests/`](../../../../src/py/tests/conftest.py). |
+| `make py-test` | `make dev` + `uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage` + `uv run pytest src/py/tests -v` | `.pyi` stub parity against compiled extensions plus Python suites under [`src/py/tests/`](../../../../src/py/tests/conftest.py)[^src-tests-conftest-py]. |
 | `make ts-test` | `cd src/ts/vertebra-client && NODE_OPTIONS="--localstorage-file=${TMPDIR:-/tmp}/vertebra-vitest-localstorage" bun run test` | Every Vitest suite under `src/ts/vertebra-client/tests/`. |
 | `make test` | `rs-test` + `py-test` + `ts-test` | All three languages. |
 | `make lint-all` | `bunx biome check .` + `ruff check` & `ruff format --check` (`src/py/vertebra src/py/tests tools/scripts tools/pgo tools/docs docs/examples`) + `mypy src/py/vertebra tools/scripts tools/pgo tools/docs docs/examples` + `mypy.stubtest` + `cargo fmt --all -- --check` + `cargo clippy --workspace --all-targets --features tls,compression -- -D warnings` + `make review-check` | Read-only lint, type, stub, and review-manifest gate. |
@@ -72,3 +98,13 @@ CI runs on pushes to `main` and on every pull request. A `changes` job (`dorny/p
 [`src/py/tests/conftest.py`](../../../../src/py/tests/conftest.py) pins the `anyio_backend` fixture to `asyncio`; mark async tests with `@pytest.mark.anyio`. Its `shm_name` fixture returns `test-<uuid8>` names, and the autouse `_cleanup_shm` fixture unlinks `/dev/shm/test-*` and `/dev/shm/*vertebra*` after every test. `make rs-test` removes the same globs before `cargo test`.
 
 Runtime segments are named `/vtb-{pid:x}-{seq:x}-{attempt:x}` and match neither glob. Remove leftovers from interrupted server or worker runs with `rm -f /dev/shm/vtb-*`. On Linux most regions are anonymous `memfd_create` descriptors and leave nothing in `/dev/shm`; `shm_open` names apply on macOS and other Unix hosts.
+
+Provenance sources: [^src-pyproject-toml], [^src-cargo-toml], [^src-package-json], [^src-ci-yml].
+
+[^src-makefile]: `Makefile` — Canonical polyglot build, test, lint, docs, and benchmark targets.
+[^src-tools-scripts-setup-env-sh]: `tools/scripts/setup-env.sh` — Repository tooling module (tools/scripts/setup-env.sh).
+[^src-pyproject-toml]: `pyproject.toml` — Python package metadata, dependencies, and tool configuration.
+[^src-cargo-toml]: `src/rs/Cargo.toml` — Rust crate manifest (src/rs/Cargo.toml).
+[^src-tests-conftest-py]: `src/py/tests/conftest.py` — Python implementation module (src/py/tests/conftest.py).
+[^src-package-json]: `src/ts/vertebra-client/package.json` — TypeScript package manifest (src/ts/vertebra-client/package.json).
+[^src-ci-yml]: `.github/workflows/ci.yml` — GitHub Actions workflow (ci.yml).

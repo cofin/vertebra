@@ -9,7 +9,7 @@ research:
   - ../integration-remediation/research/audit-findings_20261103.md
   - ../native-data-platform/research/gap-analysis_20261103.md
 plan_revision: 4
-plan_commit: "679a981"
+plan_commit: "f741701"
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
@@ -42,7 +42,7 @@ This flow eliminates every engine leak from `vertebra/db/*` (outside `vertebra/d
 
 ### 1.2 Upstream Execution Baseline
 
-- **Branch baseline**: `refactor/sync-async-names @ 08ac03a` + [`db-layout-and-contract`](../db-layout-and-contract/spec.md) (`t01`–`t07`).
+- **Branch baseline**: `main @ f741701` + [`db-layout-and-contract`](../db-layout-and-contract/spec.md) (`t01`–`t07`).
 - **Parent PRD**: [`integration-remediation`](../integration-remediation/spec.md) (Chapter 3), unlocked directly after [`db-layout-and-contract`](../db-layout-and-contract/spec.md) without waiting for `native-postgres-driver` because `execute_stack` dispatches on `isinstance(self.native_driver, SyncPipelineCapable)` (sync) and `isinstance(self.native_driver, AsyncPipelineCapable)` (async).
 
 ### 1.3 Code Analysis & Seam Summary

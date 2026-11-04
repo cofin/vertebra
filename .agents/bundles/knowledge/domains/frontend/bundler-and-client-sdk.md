@@ -4,25 +4,63 @@ title: "Frontend Bundler, Codegen & Client SDK Domain"
 description: "Domain vocabulary for the _bundler extension, the vertebra.build AssetBundler and codegen types, the dev HMR channels, and the @vertebra/client classes."
 status: stable
 tags: [domains, frontend, bundler, codegen, typescript]
+generated:
+  by: flow/0.26.0
+  at: "2026-11-04T04:33:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-04T04:33:00Z"
+    commit: f741701
 sources:
-  - resource: src/rs/vertebra-bundler/src/lib.rs
-  - resource: src/py/vertebra/_bundler.pyi
-  - resource: src/py/vertebra/build/__init__.py
-  - resource: src/py/vertebra/build/_orchestrator.py
-  - resource: src/py/vertebra/framework/dev.py
-  - resource: src/py/vertebra/build/codegen/_extractor.py
-  - resource: src/py/vertebra/build/codegen/plugin.py
-  - resource: src/rs/vertebra-http/src/hmr.rs
-  - resource: src/ts/vertebra-client/src/index.ts
-  - resource: src/ts/vertebra-client/src/client/client.ts
-  - resource: src/ts/vertebra-client/src/client/retry.ts
-  - resource: src/ts/vertebra-client/src/react/cache.ts
-  - resource: src/ts/vertebra-client/src/hmr/index.ts
+  - id: src-vertebra-bundler-src-lib-rs
+    resource: src/rs/vertebra-bundler/src/lib.rs
+    title: "Rust implementation module (src/rs/vertebra-bundler/src/lib.rs)"
+  - id: src-bundler-pyi
+    resource: src/py/vertebra/_bundler.pyi
+    title: "Python implementation module (src/py/vertebra/_bundler.pyi)"
+  - id: src-build-init-py
+    resource: src/py/vertebra/build/__init__.py
+    title: "Python implementation module (src/py/vertebra/build/__init__.py)"
+  - id: src-build-orchestrator-py
+    resource: src/py/vertebra/build/_orchestrator.py
+    title: "Python implementation module (src/py/vertebra/build/_orchestrator.py)"
+  - id: src-framework-dev-py
+    resource: src/py/vertebra/framework/dev.py
+    title: "Python implementation module (src/py/vertebra/framework/dev.py)"
+  - id: src-build-codegen-extractor-py
+    resource: src/py/vertebra/build/codegen/_extractor.py
+    title: "Python implementation module (src/py/vertebra/build/codegen/_extractor.py)"
+  - id: src-build-codegen-plugin-py
+    resource: src/py/vertebra/build/codegen/plugin.py
+    title: "Python implementation module (src/py/vertebra/build/codegen/plugin.py)"
+  - id: src-vertebra-http-src-hmr-rs
+    resource: src/rs/vertebra-http/src/hmr.rs
+    title: "Rust implementation module (src/rs/vertebra-http/src/hmr.rs)"
+  - id: src-src-index-ts
+    resource: src/ts/vertebra-client/src/index.ts
+    title: "TypeScript client module (src/ts/vertebra-client/src/index.ts)"
+  - id: src-src-client-client-ts
+    resource: src/ts/vertebra-client/src/client/client.ts
+    title: "TypeScript client module (src/ts/vertebra-client/src/client/client.ts)"
+  - id: src-src-client-retry-ts
+    resource: src/ts/vertebra-client/src/client/retry.ts
+    title: "TypeScript client module (src/ts/vertebra-client/src/client/retry.ts)"
+  - id: src-src-react-cache-ts
+    resource: src/ts/vertebra-client/src/react/cache.ts
+    title: "TypeScript client module (src/ts/vertebra-client/src/react/cache.ts)"
+  - id: src-src-hmr-index-ts
+    resource: src/ts/vertebra-client/src/hmr/index.ts
+    title: "TypeScript client module (src/ts/vertebra-client/src/hmr/index.ts)"
 ---
 
 # Frontend Bundler, Codegen & Client SDK Domain
 
-The frontend surface spans the [`_bundler`](../../../../../src/rs/vertebra-bundler/src/lib.rs) PyO3 extension, the [`vertebra.build`](../../../../../src/py/vertebra/build/__init__.py) package, and the [`@vertebra/client`](../../../../../src/ts/vertebra-client/src/index.ts) TypeScript package. Mechanics live in [Bundler, HMR & SSR](../../architecture/frontend/bundler-hmr-and-ssr.md) and [Codegen & Inertia](../../architecture/frontend/codegen-and-inertia.md); packaging rules for the TS package live in [Client SDK Subpaths](../../patterns/typescript/client-and-adapter-subpaths.md).
+<!-- truth: start -->
+- `vertebra._bundler` (`Bundler`, `SourceWatcher`, `SSRPool`), `vertebra.build`, and `@vertebra/client` (`17` subpath exports) form Vertebra's integrated frontend transform, HMR, SSR, and typed client SDK surface.
+- `tsup.config.ts` stages built `@vertebra/client` bundles into `src/py/vertebra/server/_js/bundle/` for wheel distribution, with `DevMiddleware` falling back to `src/ts/vertebra-client/` in source checkouts.
+<!-- truth: end -->
+
+The frontend surface spans the [`_bundler`](../../../../../src/rs/vertebra-bundler/src/lib.rs)[^src-vertebra-bundler-src-lib-rs] PyO3 extension, the [`vertebra.build`](../../../../../src/py/vertebra/build/__init__.py)[^src-build-init-py] package, and the [`@vertebra/client`](../../../../../src/ts/vertebra-client/src/index.ts)[^src-src-index-ts] TypeScript package. Mechanics live in [Bundler, HMR & SSR](../../architecture/frontend/bundler-hmr-and-ssr.md) and [Codegen & Inertia](../../architecture/frontend/codegen-and-inertia.md); packaging rules for the TS package live in [Client SDK Subpaths](../../patterns/typescript/client-and-adapter-subpaths.md).
 
 ## Rust bundler extension (`_bundler`)
 
@@ -49,9 +87,9 @@ The frontend surface spans the [`_bundler`](../../../../../src/rs/vertebra-bundl
 
 ## Dev HMR channels
 
-- **Rust endpoint (active)**: when `VERTEBRA_DEV=1` (set by `vtb dev`), `vertebra-http` [`hmr.rs`](../../../../../src/rs/vertebra-http/src/hmr.rs) serves `GET /__vertebra/hmr` (WebSocket upgrade or JSON status) and `POST /__vertebra/hmr/signal`. Events carry both `type` and `event` fields (`full-reload`, `types-update`). `HmrNotifier` posts to the signal path.
-- **Browser client**: `HotReloadClient` (`src/hmr/index.ts`) defaults to `/__vertebra/hmr`, reconnects with [`computeBackoffDelay`](../../../../../src/ts/vertebra-client/src/client/retry.ts) (up to 20 attempts, 1 s base, 30 s cap), times out pings at 45 s, handles `connected`, `update`, `css-update`, `full-reload`, `ping` (replies `pong`), `types-update`, and `vertebra:types-changed`, and renders `#__vertebra_error_overlay`.
-- **Python ASGI path**: [`DevMiddleware(app, type_bridge)`](../../../../../src/py/vertebra/framework/dev.py) serves `/__vertebra/types.d.ts`, `/types/version`, `/schemas.zod.ts`, `/routes.ts`, `/manifest.json`, `/client/hmr.js`, and a `/__vertebra/ws` socket fed by `broadcast_hmr_event`; it injects the HMR script into HTML responses. [`TypeBridge`](../../../../../src/py/vertebra/framework/dev.py) caches the generated files and versions them with a 12-char SHA-256.
+- **Rust endpoint (active)**: when `VERTEBRA_DEV=1` (set by `vtb dev`), `vertebra-http` [`hmr.rs`](../../../../../src/rs/vertebra-http/src/hmr.rs)[^src-vertebra-http-src-hmr-rs] serves `GET /__vertebra/hmr` (WebSocket upgrade or JSON status) and `POST /__vertebra/hmr/signal`. Events carry both `type` and `event` fields (`full-reload`, `types-update`). `HmrNotifier` posts to the signal path.
+- **Browser client**: `HotReloadClient` (`src/hmr/index.ts`) defaults to `/__vertebra/hmr`, reconnects with [`computeBackoffDelay`](../../../../../src/ts/vertebra-client/src/client/retry.ts)[^src-src-client-retry-ts] (up to 20 attempts, 1 s base, 30 s cap), times out pings at 45 s, handles `connected`, `update`, `css-update`, `full-reload`, `ping` (replies `pong`), `types-update`, and `vertebra:types-changed`, and renders `#__vertebra_error_overlay`.
+- **Python ASGI path**: [`DevMiddleware(app, type_bridge)`](../../../../../src/py/vertebra/framework/dev.py)[^src-framework-dev-py] serves `/__vertebra/types.d.ts`, `/types/version`, `/schemas.zod.ts`, `/routes.ts`, `/manifest.json`, `/client/hmr.js`, and a `/__vertebra/ws` socket fed by `broadcast_hmr_event`; it injects the HMR script into HTML responses. [`TypeBridge`](../../../../../src/py/vertebra/framework/dev.py) caches the generated files and versions them with a 12-char SHA-256.
 
 ## TypeScript SDK (`@vertebra/client`)
 
@@ -67,8 +105,24 @@ The frontend surface spans the [`_bundler`](../../../../../src/rs/vertebra-bundl
 | `HotReloadClient` | `hmr/index.ts` | See above. |
 | `LiveStateClient`, `HybridLogicalClock`, `OfflineDeltaQueue` | `live/index.ts` | See [Live State](../framework/live-state.md). |
 | `ArrowStreamClient` | `arrow.ts` | Holds an endpoint plus `Accept: application/vnd.apache.arrow.stream`; `hasIpcHeader(bytes)` detects Arrow stream/file headers. |
-| `WasmClient` | `wasm.ts` | See [WASM](wasm.md). |
+| `WASMClient` | `wasm.ts` | See [WASM](wasm.md). |
 | `ApexRegion` | `apex/index.ts` | Oracle APEX region bridge (`readPageItem`, `writePageItem`, `triggerRegionEvent`). |
 | `TraceContext` | `telemetry.ts` | W3C `traceparent` parse/format with random trace and span ids. |
 
 The CLI `Console` and command set are covered in [CLI](../framework/cli.md).
+
+Provenance sources: [^src-bundler-pyi], [^src-build-orchestrator-py], [^src-build-codegen-extractor-py], [^src-build-codegen-plugin-py], [^src-src-client-client-ts], [^src-src-react-cache-ts], [^src-src-hmr-index-ts].
+
+[^src-vertebra-bundler-src-lib-rs]: `src/rs/vertebra-bundler/src/lib.rs` — Rust implementation module (src/rs/vertebra-bundler/src/lib.rs).
+[^src-bundler-pyi]: `src/py/vertebra/_bundler.pyi` — Python implementation module (src/py/vertebra/_bundler.pyi).
+[^src-build-init-py]: `src/py/vertebra/build/__init__.py` — Python implementation module (src/py/vertebra/build/__init__.py).
+[^src-build-orchestrator-py]: `src/py/vertebra/build/_orchestrator.py` — Python implementation module (src/py/vertebra/build/_orchestrator.py).
+[^src-framework-dev-py]: `src/py/vertebra/framework/dev.py` — Python implementation module (src/py/vertebra/framework/dev.py).
+[^src-build-codegen-extractor-py]: `src/py/vertebra/build/codegen/_extractor.py` — Python implementation module (src/py/vertebra/build/codegen/_extractor.py).
+[^src-build-codegen-plugin-py]: `src/py/vertebra/build/codegen/plugin.py` — Python implementation module (src/py/vertebra/build/codegen/plugin.py).
+[^src-vertebra-http-src-hmr-rs]: `src/rs/vertebra-http/src/hmr.rs` — Rust implementation module (src/rs/vertebra-http/src/hmr.rs).
+[^src-src-index-ts]: `src/ts/vertebra-client/src/index.ts` — TypeScript client module (src/ts/vertebra-client/src/index.ts).
+[^src-src-client-client-ts]: `src/ts/vertebra-client/src/client/client.ts` — TypeScript client module (src/ts/vertebra-client/src/client/client.ts).
+[^src-src-client-retry-ts]: `src/ts/vertebra-client/src/client/retry.ts` — TypeScript client module (src/ts/vertebra-client/src/client/retry.ts).
+[^src-src-react-cache-ts]: `src/ts/vertebra-client/src/react/cache.ts` — TypeScript client module (src/ts/vertebra-client/src/react/cache.ts).
+[^src-src-hmr-index-ts]: `src/ts/vertebra-client/src/hmr/index.ts` — TypeScript client module (src/ts/vertebra-client/src/hmr/index.ts).

@@ -1,14 +1,11 @@
----
-title: "Vertebra Bundle Activity Log"
-description: "Chronological record of OKF v0.2 bundle initialization, knowledge syntheses, and completed Flow archives."
-status: stable
-tags:
-  - okf
-  - log
-  - history
----
-
 # Bundle Activity Log
+
+## [2026-11-04] flow-setup | Cleaned Pre-OKF Legacy Artifacts and Aligned OKF v0.2 Bundle on `feat/db-updates`
+
+- Executed `/flow:setup` brownfield alignment (`Align & True-Up`, `shared` Git tracking policy) on `feat/db-updates` (`main @ f741701`):
+  - **Legacy Artifact & Beads Cleanup**: Audited and removed obsolete `.beads/` (`262` historical issues superseded on `main`), `.agents/skills/flow-memory-keeper/`, and legacy top-level `.agents/{archive,knowledge,research,specs,wisps,*.md,beads.json}` artifacts; cleaned `.git/info/exclude`, removed stale `merge.beads` / `beads` / `core.hooksPath` entries from `.git/config`, installed repository `pre-commit` hooks, and merged `.claude/settings.local.json` (`plansDirectory: ".agents/bundles/specs"`, backup at `.claude/settings.local.json.bak`).
+  - **OKF v0.2 Bundle, Truth Blocks & Provenance**: Added `bundle: "vertebra"` to `.agents/bundles/index.md`, created `.agents/bundles/specs/index.md`, stripped concept-only keys from reserved `index.md` and `log.md` files, added bounded `<= 40`-line `<!-- truth: start -->` blocks across all 35 remaining `knowledge/**` chapters, added `generated`, `verified`, and `sources` (`{id, resource, title}`) with matching `[^id]:` body footnotes across all 53 `product/**` and `knowledge/**` chapters, and synchronized `product/{product,product-guidelines,tech-stack}.md` (`0.3.0`, `JWTGuard`, `WASM*`, `MCP*`, `drive_native_batch`) and `okf-frontmatter.md`.
+  - **Active Spec & Research Continuity**: Re-anchored `plan_commit` (`f741701`) across `native-data-platform`, `integration-remediation`, `db-layout-and-contract` (`t01`–`t07`), and `db-engine-primitives` (`t01`–`t07`), updated squash-merged checkpoint SHAs (`364c7cb`, `984ce73`, `abd33ab`) in `integration-remediation/spec.md`, and marked all 4 spec-scoped research briefs `state: promoted`.
 
 ## [2026-11-03] flow-archive | Completed and Archived GCP Driver Resilience and Typed Errors (`gcp-driver-resilience`)
 

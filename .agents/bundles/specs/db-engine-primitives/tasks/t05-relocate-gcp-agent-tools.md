@@ -2,6 +2,7 @@
 type: Task
 id: db-engine-primitives:t05
 title: Relocate GCP database MCP tools to vertebra/agent/tools/ and empty the vertebra/db upward-import allowlist
+description: "Move `src/py/vertebra/db/mcp_tools.py` into `src/py/vertebra/agent/tools/{__init__,bigquery,spanner}.py` using `provide_driver`, lazy-export the tool builders on `vertebra.agent` with `if TYPE_CHECKING:` parity, delete `src/py/vertebra/db/mcp_tools.py`, and empty `_TEMPORARY_UPWARD_IMPORT_ALLOWLIST` in `src/py/tests/unit/db/test_native_db_drivers.py`."
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -21,7 +22,7 @@ tests:
   - src/py/tests/unit/db/test_native_db_drivers.py
   - src/py/tests/unit/docs/test_examples.py
 plan_revision: 4
-plan_commit: "679a981"
+plan_commit: "f741701"
 state_revision: 0
 claimed_by: null
 claimed_at: null

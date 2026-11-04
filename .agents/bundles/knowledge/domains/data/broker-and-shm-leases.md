@@ -4,20 +4,48 @@ title: "Shared-Memory Connection Broker & Statement Cache"
 description: "The cross-process SHM connection lease broker (`ShmLeaseTable` and `ShmStatementCache` in `vertebra-core/src/broker.rs`), the native PyO3 bindings (`LeaseBroker`, `StatementCache`), and Python broker transports (`SyncSHMBrokerTransport`, `AsyncSHMBrokerTransport`, `SyncInMemoryBrokerTransport`, `AsyncInMemoryBrokerTransport`, `BrokerPlugin`, `SyncPool`, `SyncLoopShardedResource`, `AsyncLoopShardedResource`)."
 status: stable
 tags: [domains, data, broker, shm, ipc, database]
+generated:
+  by: flow/0.26.0
+  at: "2026-11-04T04:33:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-04T04:33:00Z"
+    commit: f741701
 sources:
-  - resource: src/rs/vertebra-core/src/broker.rs
-  - resource: src/rs/vertebra-py/src/lib.rs
-  - resource: src/py/vertebra/extensions/broker/transport.py
-  - resource: src/py/vertebra/extensions/broker/plugin.py
-  - resource: src/py/vertebra/extensions/alchemy/broker.py
-  - resource: src/py/vertebra/db/_registry.py
-  - resource: src/py/vertebra/utils/sync_tools.py
-  - resource: src/py/tests/unit/db/test_native_db_drivers.py
+  - id: src-vertebra-core-src-broker-rs
+    resource: src/rs/vertebra-core/src/broker.rs
+    title: "Rust implementation module (src/rs/vertebra-core/src/broker.rs)"
+  - id: src-vertebra-py-src-lib-rs
+    resource: src/rs/vertebra-py/src/lib.rs
+    title: "Rust implementation module (src/rs/vertebra-py/src/lib.rs)"
+  - id: src-extensions-broker-transport-py
+    resource: src/py/vertebra/extensions/broker/transport.py
+    title: "Python implementation module (src/py/vertebra/extensions/broker/transport.py)"
+  - id: src-extensions-broker-plugin-py
+    resource: src/py/vertebra/extensions/broker/plugin.py
+    title: "Python implementation module (src/py/vertebra/extensions/broker/plugin.py)"
+  - id: src-extensions-alchemy-broker-py
+    resource: src/py/vertebra/extensions/alchemy/broker.py
+    title: "Python implementation module (src/py/vertebra/extensions/alchemy/broker.py)"
+  - id: src-db-registry-py
+    resource: src/py/vertebra/db/_registry.py
+    title: "Python implementation module (src/py/vertebra/db/_registry.py)"
+  - id: src-utils-sync-tools-py
+    resource: src/py/vertebra/utils/sync_tools.py
+    title: "Python implementation module (src/py/vertebra/utils/sync_tools.py)"
+  - id: src-tests-unit-db-test-native-db-drivers-py
+    resource: src/py/tests/unit/db/test_native_db_drivers.py
+    title: "Python implementation module (src/py/tests/unit/db/test_native_db_drivers.py)"
 ---
 
 # Shared-Memory Connection Broker & Statement Cache
 
-Vertebra provides cross-process shared-memory database connection management and statement caching via [`src/rs/vertebra-core/src/broker.rs`](../../../../../src/rs/vertebra-core/src/broker.rs) and [`src/py/vertebra/extensions/broker/transport.py`](../../../../../src/py/vertebra/extensions/broker/transport.py).
+<!-- truth: start -->
+- `ShmLeaseTable` co-locates lock-free CAS connection lease slots, a seqlock `ShmStatementCache`, and a cross-worker `ShmChannelSlot` pub/sub ring inside a single shared-memory region.
+- Expired or crashed worker leases are reclaimed via monotonic `expiry_ns` deadlines and PID-tagged `reclaim_worker` sweeps without global locks.
+<!-- truth: end -->
+
+Vertebra provides cross-process shared-memory database connection management and statement caching via [`src/rs/vertebra-core/src/broker.rs`](../../../../../src/rs/vertebra-core/src/broker.rs)[^src-vertebra-core-src-broker-rs] and [`src/py/vertebra/extensions/broker/transport.py`](../../../../../src/py/vertebra/extensions/broker/transport.py)[^src-extensions-broker-transport-py].
 
 ## 1. Rust SHM Lease Table (`broker.rs`)
 
@@ -40,9 +68,20 @@ Vertebra provides cross-process shared-memory database connection management and
 
 ## 3. Python Broker Layer (`vertebra.extensions.broker`)
 
-[`vertebra.extensions.broker.transport`](../../../../../src/py/vertebra/extensions/broker/transport.py) and [`vertebra.extensions.broker.plugin`](../../../../../src/py/vertebra/extensions/broker/plugin.py) integrate the native SHM tables into Python runtimes:
+[`vertebra.extensions.broker.transport`](../../../../../src/py/vertebra/extensions/broker/transport.py) and [`vertebra.extensions.broker.plugin`](../../../../../src/py/vertebra/extensions/broker/plugin.py)[^src-extensions-broker-plugin-py] integrate the native SHM tables into Python runtimes:
 
 - **`SyncSHMBrokerTransport` / `AsyncSHMBrokerTransport` & `SyncInMemoryBrokerTransport` / `AsyncInMemoryBrokerTransport`**: Coordinate lease requests and statement plan caching across workers via `LeaseBroker` and `StatementCache`, with an in-process thread-safe fallback.
-- **`BrokerPlugin` & `SyncSHMSessionBroker` / `AsyncSHMSessionBroker`**: Install broker state, DI providers, ZPages diagnostics, OpenTelemetry `DbPoolRecorder` metrics, and SQLAlchemy `checkout`/`checkin` pool event listeners.
-- **`DatabaseRegistry.default()` & Cross-Framework Shared Pools** ([`vertebra.db._registry`](../../../../../src/py/vertebra/db/_registry.py)): `DatabaseRegistry.default()`, `DatabaseRegistry.default_broker()`, and `DatabaseRegistry.pool_fingerprint(config_or_url)` normalize `(vendor, host_or_path, port, database, user, pooler_mode, cloud_sql_instance, alloydb_instance_uri)` so native database adapters declared independently across stacked `Django` (`DatabaseWrapperMixin`), `Litestar` (`SQLSpec` `SyncAdapterConfig` / `AsyncAdapterConfig`), `SQLAlchemy` (`+vtb` `SyncDBAPIConnection` / `AsyncDBAPIConnection`), and `Vertebra Native` apps reuse the exact same underlying connection pool, `SyncCloudSQLDialer` / `AsyncCloudSQLDialer` / `SyncAlloyDBDialer` / `AsyncAlloyDBDialer`, and process-wide SHM `LeaseBroker` (unless `share_pool=False` is set).
-- **`SyncPool` & `SyncLoopShardedResource` / `AsyncLoopShardedResource`** ([`vertebra.utils.sync_tools`](../../../../../src/py/vertebra/utils/sync_tools.py)): `SyncPool` right-sizes its thread pool (`max(4, min(32, cpu_count * 2))` on GIL builds, `cpu_count * 4` on `3.14t`/`3.15t`) and coalesces `submit_async` completion wakeups per event loop via `_LoopCompletionQueue` (`0 -> 1` transition triggers a single `loop.call_soon_threadsafe(_drain_completions)` wakeup per burst). `SyncLoopShardedResource[T]` / `AsyncLoopShardedResource[T]` shards non-thread-safe async primitives per event-loop thread.
+- **`BrokerPlugin` & `SyncSHMSessionBroker` / `AsyncSHMSessionBroker`**: Install broker state, DI providers, ZPages diagnostics, OpenTelemetry `DbPoolRecorder` metrics, and SQLAlchemy check-out/check-in pool event listeners.
+- **`DatabaseRegistry.default()` & Cross-Framework Shared Pools** ([`vertebra.db._registry`](../../../../../src/py/vertebra/db/_registry.py)[^src-db-registry-py]): `DatabaseRegistry.default()`, `DatabaseRegistry.default_broker()`, and `DatabaseRegistry.pool_fingerprint(config_or_url)` normalize `(vendor, host_or_path, port, database, user, pooler_mode, cloud_sql_instance, alloydb_instance_uri)` so native database adapters declared independently across stacked `Django` (`DatabaseWrapperMixin`), `Litestar` (`SQLSpec` `SyncAdapterConfig` / `AsyncAdapterConfig`), `SQLAlchemy` (`+vtb` `SyncDBAPIConnection` / `AsyncDBAPIConnection`), and `Vertebra Native` apps reuse the exact same underlying connection pool, `SyncCloudSQLDialer` / `AsyncCloudSQLDialer` / `SyncAlloyDBDialer` / `AsyncAlloyDBDialer`, and process-wide SHM `LeaseBroker` (unless `share_pool=False` is set).
+- **`SyncPool` & `SyncLoopShardedResource` / `AsyncLoopShardedResource`** ([`vertebra.utils.sync_tools`](../../../../../src/py/vertebra/utils/sync_tools.py)[^src-utils-sync-tools-py]): `SyncPool` right-sizes its thread pool (`max(4, min(32, cpu_count * 2))` on GIL builds, `cpu_count * 4` on `3.14t`/`3.15t`) and coalesces `submit_async` completion wakeups per event loop via `_LoopCompletionQueue` (`0 -> 1` transition triggers a single `loop.call_soon_threadsafe(_drain_completions)` wakeup per burst). `SyncLoopShardedResource[T]` / `AsyncLoopShardedResource[T]` shards non-thread-safe async primitives per event-loop thread.
+
+Provenance sources: [^src-vertebra-py-src-lib-rs], [^src-extensions-alchemy-broker-py], [^src-tests-unit-db-test-native-db-drivers-py].
+
+[^src-vertebra-core-src-broker-rs]: `src/rs/vertebra-core/src/broker.rs` — Rust implementation module (src/rs/vertebra-core/src/broker.rs).
+[^src-vertebra-py-src-lib-rs]: `src/rs/vertebra-py/src/lib.rs` — Rust implementation module (src/rs/vertebra-py/src/lib.rs).
+[^src-extensions-broker-transport-py]: `src/py/vertebra/extensions/broker/transport.py` — Python implementation module (src/py/vertebra/extensions/broker/transport.py).
+[^src-extensions-broker-plugin-py]: `src/py/vertebra/extensions/broker/plugin.py` — Python implementation module (src/py/vertebra/extensions/broker/plugin.py).
+[^src-extensions-alchemy-broker-py]: `src/py/vertebra/extensions/alchemy/broker.py` — Python implementation module (src/py/vertebra/extensions/alchemy/broker.py).
+[^src-db-registry-py]: `src/py/vertebra/db/_registry.py` — Python implementation module (src/py/vertebra/db/_registry.py).
+[^src-utils-sync-tools-py]: `src/py/vertebra/utils/sync_tools.py` — Python implementation module (src/py/vertebra/utils/sync_tools.py).
+[^src-tests-unit-db-test-native-db-drivers-py]: `src/py/tests/unit/db/test_native_db_drivers.py` — Python implementation module (src/py/tests/unit/db/test_native_db_drivers.py).

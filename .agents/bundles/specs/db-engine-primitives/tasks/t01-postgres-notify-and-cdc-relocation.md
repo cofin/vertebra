@@ -2,6 +2,7 @@
 type: Task
 id: db-engine-primitives:t01
 title: Extract PostgreSQL logical message and NOTIFY primitives to vertebra/db/adapters/postgres/notify.py and bound ChangeFeed
+description: "Keep `src/py/vertebra/db/cdc.py` engine-neutral (`CDCConfig`, `ChangeEvent`, `ChangeFeed`) with preserved default values, normalized `spill_prefix` object keys, bounded in-memory spill LRU eviction, and fail-loud `SyncObjectStore.get()` hydration, remove `build_emit_message_sql` from `ChangeFeed` and `extensions/sqlspec/events.py`, and extract PostgreSQL logical replication / `NOTIFY` primitives into `src/py/vertebra/db/adapters/postgres/notify.py` (`PostgresNotifyConfig`, `PostgresNotificationSource(NotificationSource)`)."
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -18,7 +19,7 @@ tests:
   - src/py/tests/unit/extensions/test_data_storage_integrations.py
   - src/py/tests/unit/docs/test_examples.py
 plan_revision: 4
-plan_commit: "679a981"
+plan_commit: "f741701"
 state_revision: 0
 claimed_by: null
 claimed_at: null

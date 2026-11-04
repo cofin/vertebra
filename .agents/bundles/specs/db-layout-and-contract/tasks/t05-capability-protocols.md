@@ -2,6 +2,7 @@
 type: Task
 id: db-layout-and-contract:t05
 title: Define runtime-checkable Sync/Async engine capability protocols and msgspec records
+description: "Create `src/py/vertebra/db/driver/capabilities.py` defining the `@runtime_checkable` engine capability protocols (`SyncPipelineCapable`, `AsyncPipelineCapable`, `SyncPipeline`, `AsyncPipeline`, `NotificationSource`, `SyncChangeSource`, `AsyncChangeSource`, `QueueStore`, `EmbeddingPushdown`) with complete typed signatures and `msgspec.Struct(..., frozen=True, gc=False)` value objects (`NotificationEvent`, `ClaimedJob`), re-exporting them from `vertebra.db.driver` and `vertebra.db`."
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -14,7 +15,7 @@ files:
 tests:
   - src/py/tests/unit/db/test_native_db_drivers.py
 plan_revision: 4
-plan_commit: "679a981"
+plan_commit: "f741701"
 state_revision: 0
 claimed_by: null
 claimed_at: null

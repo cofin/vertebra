@@ -52,7 +52,7 @@ tags: [storage, object-store, sqlspec, advanced-alchemy, django, litestar]
 
 ## Dependencies
 
-`db-layout-and-contract` (`refactor/sync-async-names @ 08ac03a`) and `integration-remediation/db-engine-primitives`.
+`db-layout-and-contract` (`main @ f741701`) and `integration-remediation/db-engine-primitives`.
 
 ## Acceptance Boundary
 

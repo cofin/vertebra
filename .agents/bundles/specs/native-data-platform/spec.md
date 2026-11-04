@@ -10,7 +10,7 @@ research:
   - research/rust-driver-crates_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 4
-plan_commit: "679a981"
+plan_commit: "f741701"
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
@@ -21,7 +21,7 @@ tags: [prd, drivers, rust, broker, storage, postgres, oracle, mysql, mssql]
 
 # Master PRD: Native Data Platform
 
-Baseline: `refactor/sync-async-names @ 08ac03a` (incorporating completed flows `critical-correctness-fixes`, `gcp-wire-protocol-correctness`, `gcp-driver-resilience`, and the codebase-wide `Sync*` / `Async*` class split). Sibling PRD: [integration-remediation](../integration-remediation/spec.md), which consumes this platform.
+Baseline: `main @ f741701` (incorporating completed flows `critical-correctness-fixes`, `gcp-wire-protocol-correctness`, `gcp-driver-resilience`, and the codebase-wide `Sync*` / `Async*` class split). Sibling PRD: [integration-remediation](../integration-remediation/spec.md), which consumes this platform.
 
 ## 1. North Star Goal & Problem Framing
 
@@ -149,7 +149,7 @@ The global constraints from [integration-remediation](../integration-remediation
 
 ## Continuity Snapshot
 
-- **Flow ID:** `native-data-platform` (`state: planned`, `plan_revision: 4`, `plan_commit: null`)
+- **Flow ID:** `native-data-platform` (`state: planned`, `plan_revision: 4`, `plan_commit: "f741701"`)
 - **Active Focus:** Chapter 1 (`db-layout-and-contract`, `t01`–`t07`) planned on `refactor/sync-async-names` and awaiting user review before implementation.
 - **Key decisions** *(user, 2026-11-03 – 2026-11-04)*:
   - Shared broker pools for any Advanced Alchemy / SQLSpec config and Vertebra's own Rust drivers across all engines are required and feature complete.

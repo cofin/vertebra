@@ -1,7 +1,6 @@
 ---
 title: "Vertebra Knowledge Base Index"
 description: "Curated map of Vertebra's nested architecture, domain taxonomy, implementation patterns, verification gates, and platform gotchas."
-status: stable
 tags:
   - knowledge
   - index

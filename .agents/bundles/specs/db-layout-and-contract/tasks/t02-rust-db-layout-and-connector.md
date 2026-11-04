@@ -2,6 +2,7 @@
 type: Task
 id: db-layout-and-contract:t02
 title: Reorganize vertebra-db shared core, add connection.rs + py_async.rs + ShmCapsule, and register DatabaseError hierarchy
+description: "Reorganize `src/rs/vertebra-db/src/` into `<engine>/mod.rs` subdirectories with explicit `lib.rs` exports, implement the shared Rust transport/TLS/dialer connection core in `connection.rs`, add optional `pyo3`-gated `py_async.rs` (`spawn_rust_db_task_with_attr`) and `#[repr(C)] ShmCapsule` (`ArrowCursor._from_shm_capsule`) so per-driver `.so` wheels share completion rings and zero-copy `ArrowCursor` handoff cleanly, and register the unified `DatabaseError` exception hierarchy on `vertebra._vertebra`, `vertebra.db.driver`, and `vertebra.db`."
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -42,7 +43,7 @@ tests:
   - src/rs/vertebra-py/src/errors.rs
   - src/py/tests/unit/db/test_native_db_drivers.py
 plan_revision: 4
-plan_commit: "679a981"
+plan_commit: "f741701"
 state_revision: 0
 claimed_by: null
 claimed_at: null

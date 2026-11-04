@@ -9,7 +9,7 @@ research:
   - research/audit-findings_20261103.md
   - research/google-cloud-rust_20261103.md
 plan_revision: 4
-plan_commit: "679a981"
+plan_commit: "f741701"
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
@@ -20,7 +20,7 @@ tags: [prd, remediation, integrations, drivers, sqlspec, queues, mcp]
 
 # Master PRD: Vertebra Integration and Quality Remediation
 
-Baseline: `refactor/sync-async-names @ 08ac03a` (Chapters 1 `critical-correctness-fixes`, 2 `gcp-wire-protocol-correctness`, and 9 `gcp-driver-resilience` completed and archived onto `main @ 142cc49`, followed by the codebase-wide `Sync*` / `Async*` class split). Verified audit findings live in [research/audit-findings_20261103.md](research/audit-findings_20261103.md).
+Baseline: `main @ f741701` (Chapters 1 `critical-correctness-fixes`, 2 `gcp-wire-protocol-correctness`, and 9 `gcp-driver-resilience` completed and archived onto `main @ 142cc49`, followed by the codebase-wide `Sync*` / `Async*` class split). Verified audit findings live in [research/audit-findings_20261103.md](research/audit-findings_20261103.md).
 
 ## 1. North Star Goal & Problem Framing
 
@@ -156,9 +156,9 @@ flowchart LR
 
 ## Implementation Plan
 
-- [x] [b61726a] critical-correctness-fixes — Silent failure and security fixes (archived in `log.md`)
-- [x] [260ae8d] gcp-wire-protocol-correctness — Official Google Cloud Rust clients for Spanner and BigQuery Storage (archived in `log.md`)
-- [x] [cf0b0e5] gcp-driver-resilience — GCP driver resilience and typed errors (archived in `log.md`)
+- [x] [364c7cb] critical-correctness-fixes — Silent failure and security fixes (archived in `log.md`)
+- [x] [984ce73] gcp-wire-protocol-correctness — Official Google Cloud Rust clients for Spanner and BigQuery Storage (archived in `log.md`)
+- [x] [abd33ab] gcp-driver-resilience — GCP driver resilience and typed errors (archived in `log.md`)
 - [ ] db-engine-primitives — Engine primitives relocation and SyncQueryPipeline / AsyncQueryPipeline removal (../db-engine-primitives/spec.md)
 - [ ] sqlspec-adapter-parity — Feature-complete SQLSpec adapters (../sqlspec-adapter-parity/spec.md)
 - [ ] queues-tasks-and-channels — Working queues, tasks, channels, stores (../queues-tasks-and-channels/spec.md)
@@ -168,9 +168,9 @@ flowchart LR
 
 ## Continuity Snapshot
 
-- **Flow ID:** `integration-remediation` (`state: planned`, `plan_revision: 4`, `plan_commit: null`)
+- **Flow ID:** `integration-remediation` (`state: planned`, `plan_revision: 4`, `plan_commit: "f741701"`)
 - **Active Focus:** Chapter 3 (`db-engine-primitives`, `t01`–`t07`) planned alongside `native-data-platform` Chapter 1 (`db-layout-and-contract`, `t01`–`t07`) on `refactor/sync-async-names` and awaiting user review.
-- **Completed Checkpoints:** `critical-correctness-fixes` (`b61726a`), `gcp-wire-protocol-correctness` (`260ae8d`), and `gcp-driver-resilience` (`cf0b0e5`).
+- **Completed Checkpoints:** `critical-correctness-fixes` (`364c7cb`), `gcp-wire-protocol-correctness` (`984ce73`), and `gcp-driver-resilience` (`abd33ab`).
 - **Key decisions:**
   - Engine adapters and local primitives live under `vertebra/db/adapters/<engine>/` backed by per-engine PyO3 wheels `src/rs/vertebra-<engine>` (`vertebra._<engine>`); framework and agent integrations live under `vertebra.extensions.*`, `vertebra.framework.*`, and `vertebra.agent.tools`.
   - `db-engine-primitives` dispatches `execute_stack` on `SyncPipelineCapable` / `AsyncPipelineCapable`, unlocking immediate execution right after `db-layout-and-contract`.
