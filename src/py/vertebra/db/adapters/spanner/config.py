@@ -30,6 +30,27 @@ __all__ = (
 SPANNER_GOOGLESQL_DIALECT_TAG: Final[int] = 8
 SPANGRES_DIALECT_TAG: Final[int] = 9
 DEFAULT_SPANNER_ENDPOINT: Final[str] = "https://spanner.googleapis.com"
+_ACCEPTED_SPANNER_GOOGLESQL_SCHEMES: Final[frozenset[str]] = frozenset(
+    {
+        "spanner",
+        "spanner+googlesql",
+        "spanner+vtb",
+        "spanner+vertebra",
+        "spanner+vtb_async",
+        "spanner+vertebra_async",
+    }
+)
+_ACCEPTED_SPANGRES_SCHEMES: Final[frozenset[str]] = frozenset(
+    {
+        "spangres",
+        "spanner+spangres",
+        "spangres+vtb",
+        "spangres+vertebra",
+        "spangres+vtb_async",
+        "spangres+vertebra_async",
+    }
+)
+_ACCEPTED_SPANNER_SCHEMES: Final[frozenset[str]] = _ACCEPTED_SPANNER_GOOGLESQL_SCHEMES | _ACCEPTED_SPANGRES_SCHEMES
 
 
 class StalenessBound(FrozenBaseStruct, frozen=True, gc=False):
@@ -239,6 +260,10 @@ class SpannerConfig(BaseDatabaseConfig, frozen=True, gc=False):
     """Configuration for `SyncSpannerDriver` and `AsyncSpannerDriver`."""
 
     dialect_tag: ClassVar[int] = SPANNER_GOOGLESQL_DIALECT_TAG
+    url_schemes: ClassVar[tuple[str, ...]] = ("spanner", "spangres", "spanner+googlesql", "spanner+spangres")
+    driver_module: ClassVar[str] = "vertebra.db.adapters.spanner.driver"
+    sync_driver_name: ClassVar[str] = "SyncSpannerDriver"
+    async_driver_name: ClassVar[str] = "AsyncSpannerDriver"
 
     project_id: str = ""
     """Google Cloud project identifier owning the Spanner instance."""
@@ -321,18 +346,11 @@ class SpannerConfig(BaseDatabaseConfig, frozen=True, gc=False):
         """Construct a `SpannerConfig` from a `spanner://` or `spangres://` URI."""
         parsed = urlparse(dsn)
         scheme = parsed.scheme.lower()
-        if scheme not in {
-            "spanner",
-            "spanner+googlesql",
-            "spangres",
-            "spanner+spangres",
-        }:
+        if scheme not in _ACCEPTED_SPANNER_SCHEMES:
             msg = f"Unsupported Spanner DSN scheme {parsed.scheme!r}; expected 'spanner://' or 'spangres://'"
             raise ImproperConfigurationError(msg)
 
-        dialect: Literal["googlesql", "spangres"] = (
-            "spangres" if scheme in {"spangres", "spanner+spangres"} else "googlesql"
-        )
+        dialect: Literal["googlesql", "spangres"] = "spangres" if scheme in _ACCEPTED_SPANGRES_SCHEMES else "googlesql"
 
         raw_segments = [seg for seg in [parsed.netloc.strip(), *parsed.path.split("/")] if seg]
         project_id = ""
@@ -425,6 +443,21 @@ class SpannerConfig(BaseDatabaseConfig, frozen=True, gc=False):
 
         kwargs.update(overrides)
         return cls(**kwargs)
+
+    @classmethod
+    def from_url(cls, url: str, **overrides: Any) -> Self:
+        """Construct a `SpannerConfig` from a `spanner://` or `spangres://` URI."""
+        return cls.from_dsn(url, **overrides)
+
+    def pool_key(self) -> tuple[Any, ...]:
+        """Return the canonical shared-pool fingerprint tuple."""
+        return (
+            "spanner",
+            self.database_uri,
+            self.database_role or "",
+            self.dialect,
+            self.endpoint,
+        )
 
     @property
     def database_uri(self) -> str:

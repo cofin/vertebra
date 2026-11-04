@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from vertebra.utils.module_loader import lazy_exports
 
 if TYPE_CHECKING:
-    from vertebra.db.registry import provide_bigquery_driver, provide_spanner_driver
+    from vertebra.db.registry import provide_driver
     from vertebra.extensions.fastapi.channels import ChannelsBackend, attach_channels
     from vertebra.extensions.fastapi.config import VertebraConfig
     from vertebra.extensions.fastapi.dependencies import (
@@ -184,8 +184,7 @@ __all__ = (
     "mount_mcp_routes",
     "normalize_path_for_matchit",
     "offload_middlewares",
-    "provide_bigquery_driver",
-    "provide_spanner_driver",
+    "provide_driver",
     "render_page_shell",
     "render_webmcp_manifest_json",
 )
@@ -267,8 +266,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "mount_mcp_routes": ("vertebra.extensions.fastapi.mcp", "mount_mcp_routes"),
     "normalize_path_for_matchit": ("vertebra.extensions.fastapi.router", "normalize_path_for_matchit"),
     "offload_middlewares": ("vertebra.extensions.fastapi.offload", "offload_middlewares"),
-    "provide_bigquery_driver": ("vertebra.db.registry", "provide_bigquery_driver"),
-    "provide_spanner_driver": ("vertebra.db.registry", "provide_spanner_driver"),
+    "provide_driver": ("vertebra.db.registry", "provide_driver"),
     "render_page_shell": ("vertebra.extensions.fastapi.vite", "render_page_shell"),
     "render_webmcp_manifest_json": ("vertebra.extensions.fastapi.mcp", "render_webmcp_manifest_json"),
 }

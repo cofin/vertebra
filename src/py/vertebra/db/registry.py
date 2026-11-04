@@ -4,21 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
-from typing import Any, ClassVar, cast
-from urllib.parse import parse_qsl, urlparse
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast, overload
+from urllib.parse import urlparse
 
 from vertebra._vertebra import LeaseBroker
-from vertebra.db.adapters.bigquery import AsyncBigQueryDriver, BigQueryConfig, SyncBigQueryDriver
-from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
-from vertebra.db.adapters.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLDriver
-from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
-from vertebra.db.adapters.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
-from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
-from vertebra.db.adapters.redis import AsyncRedisDriver, RedisConfig, SyncRedisDriver
-from vertebra.db.adapters.spanner import AsyncSpannerDriver, SpannerConfig, SyncSpannerDriver
-from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
-from vertebra.db.adapters.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
+from vertebra.db.adapters.bigquery.config import BigQueryConfig
+from vertebra.db.adapters.datafusion.config import DataFusionConfig
+from vertebra.db.adapters.duckdb.config import DuckDBConfig
+from vertebra.db.adapters.mssql.config import MSSQLConfig
+from vertebra.db.adapters.mysql.config import MySQLConfig
+from vertebra.db.adapters.oracle.config import OracleConfig
+from vertebra.db.adapters.postgres.config import PostgreSQLConfig
+from vertebra.db.adapters.redis.config import RedisConfig
+from vertebra.db.adapters.spanner.config import SpannerConfig
+from vertebra.db.adapters.sqlite.config import SQLiteConfig
+from vertebra.db.adapters.valkey.config import ValkeyConfig
 from vertebra.db.dialer.alloydb import (
     AlloyDBConfig,
     AsyncAlloyDBDialer,
@@ -29,14 +29,29 @@ from vertebra.db.dialer.cloudsql import (
     CloudSQLConfig,
     SyncCloudSQLDialer,
 )
+from vertebra.db.driver._common import BaseDatabaseConfig
+
+if TYPE_CHECKING:
+    from vertebra.db.adapters.bigquery.driver import AsyncBigQueryDriver, SyncBigQueryDriver
+    from vertebra.db.adapters.datafusion.driver import DataFusionEngine
+    from vertebra.db.adapters.duckdb.driver import AsyncDuckDBDriver, SyncDuckDBDriver
+    from vertebra.db.adapters.mssql.driver import AsyncMSSQLDriver, SyncMSSQLDriver
+    from vertebra.db.adapters.mysql.driver import AsyncMySQLDriver, SyncMySQLDriver
+    from vertebra.db.adapters.oracle.driver import AsyncOracleDriver, SyncOracleDriver
+    from vertebra.db.adapters.postgres.driver import AsyncPostgreSQLDriver, SyncPostgreSQLDriver
+    from vertebra.db.adapters.redis.driver import AsyncRedisDriver, SyncRedisDriver
+    from vertebra.db.adapters.spanner.driver import AsyncSpannerDriver, SyncSpannerDriver
+    from vertebra.db.adapters.sqlite.driver import AsyncSQLiteDriver, SyncSQLiteDriver
+    from vertebra.db.adapters.valkey.driver import AsyncValkeyDriver, SyncValkeyDriver
 
 __all__ = (
+    "REGISTERED_CONFIG_TYPES",
+    "SCHEME_REGISTRY",
     "AnyDatabaseConfig",
     "AnyDatabaseDriver",
     "AnySyncDatabaseDriver",
     "DatabaseRegistry",
-    "provide_bigquery_driver",
-    "provide_spanner_driver",
+    "provide_driver",
 )
 
 type AnyDatabaseConfig = (
@@ -50,6 +65,7 @@ type AnyDatabaseConfig = (
     | SpannerConfig
     | RedisConfig
     | ValkeyConfig
+    | DataFusionConfig
     | CloudSQLConfig
     | AlloyDBConfig
 )
@@ -65,6 +81,7 @@ type AnyDatabaseDriver = (
     | AsyncSpannerDriver
     | AsyncRedisDriver
     | AsyncValkeyDriver
+    | DataFusionEngine
     | AsyncCloudSQLDialer
     | AsyncAlloyDBDialer
 )
@@ -80,13 +97,34 @@ type AnySyncDatabaseDriver = (
     | SyncSpannerDriver
     | SyncRedisDriver
     | SyncValkeyDriver
+    | DataFusionEngine
     | SyncCloudSQLDialer
     | SyncAlloyDBDialer
 )
 
+REGISTERED_CONFIG_TYPES: tuple[type[AnyDatabaseConfig], ...] = (
+    PostgreSQLConfig,
+    MySQLConfig,
+    SQLiteConfig,
+    OracleConfig,
+    MSSQLConfig,
+    DuckDBConfig,
+    BigQueryConfig,
+    SpannerConfig,
+    RedisConfig,
+    ValkeyConfig,
+    DataFusionConfig,
+    CloudSQLConfig,
+    AlloyDBConfig,
+)
+
+SCHEME_REGISTRY: dict[str, type[AnyDatabaseConfig]] = {
+    scheme: cfg_cls for cfg_cls in REGISTERED_CONFIG_TYPES for scheme in cfg_cls.url_schemes
+}
+
 
 class DatabaseRegistry:
-    """Named registry of configured database, cache, and cloud dialer instances."""
+    """Named registry of configured database, cache, analytics, and cloud dialer instances."""
 
     _DEFAULT_REGISTRY: ClassVar[DatabaseRegistry | None] = None
     _DEFAULT_BROKER: ClassVar[Any] = None
@@ -102,13 +140,13 @@ class DatabaseRegistry:
     )
 
     def __init__(self, *, broker: Any = None) -> None:
-        self._configs: dict[str, AnyDatabaseConfig] = {}
+        self._configs: dict[str, AnyDatabaseConfig | BaseDatabaseConfig] = {}
         self._drivers: dict[str, AnyDatabaseDriver] = {}
         self._sync_drivers: dict[str, AnySyncDatabaseDriver] = {}
         self._shared_sync_drivers: dict[tuple[Any, ...], AnySyncDatabaseDriver] = {}
         self._shared_async_drivers: dict[tuple[Any, ...], AnyDatabaseDriver] = {}
         self._shared_dialers: dict[
-            tuple[str, str],
+            tuple[Any, ...],
             SyncCloudSQLDialer | AsyncCloudSQLDialer | SyncAlloyDBDialer | AsyncAlloyDBDialer,
         ] = {}
         self._broker = broker
@@ -131,83 +169,10 @@ class DatabaseRegistry:
         return cls._DEFAULT_REGISTRY
 
     @classmethod
-    def pool_fingerprint(cls, config_or_url: AnyDatabaseConfig | str) -> tuple[Any, ...]:
+    def pool_fingerprint(cls, config_or_url: AnyDatabaseConfig | BaseDatabaseConfig | str) -> tuple[Any, ...] | None:
         """Compute a canonical endpoint fingerprint for cross-framework native pool sharing."""
         config = cls.parse_url(config_or_url) if isinstance(config_or_url, str) else config_or_url
-        if isinstance(config, PostgreSQLConfig):
-            parsed = urlparse(config.dsn)
-            host = (parsed.hostname or "localhost").lower()
-            port = int(parsed.port or 5432)
-            user = parsed.username or ""
-            database = parsed.path.lstrip("/") if parsed.path else "postgres"
-            pooler_mode = (
-                "transaction"
-                if (config.pgbouncer or config.pgbouncer_mode or config.pooler_mode == "transaction")
-                else str(config.pooler_mode)
-            )
-            return (
-                "postgresql",
-                host,
-                port,
-                database,
-                user,
-                pooler_mode,
-                config.cloud_sql_instance or "",
-                config.alloydb_instance_uri or "",
-            )
-        if isinstance(config, MySQLConfig):
-            parsed = urlparse(config.dsn)
-            host = (parsed.hostname or "localhost").lower()
-            port = int(parsed.port or 3306)
-            user = parsed.username or ""
-            database = parsed.path.lstrip("/") if parsed.path else ""
-            return ("mysql", host, port, database, user, config.cloud_sql_instance or "")
-        if isinstance(config, SQLiteConfig):
-            raw_path = str(config.path or config.database or ":memory:")
-            norm_path = raw_path if (raw_path == ":memory:" or "mode=memory" in raw_path) else os.path.abspath(raw_path)
-            return ("sqlite", norm_path, bool(config.wal_mode))
-        if isinstance(config, OracleConfig):
-            desc = config.connect_descriptor()
-            return ("oracle", desc.host.lower(), int(desc.port), desc.service_name or desc.sid or "", config.user)
-        if isinstance(config, MSSQLConfig):
-            return (
-                "mssql",
-                config.host.lower(),
-                int(config.port),
-                config.database,
-                config.user,
-                config.cloudsql_instance or "",
-            )
-        if isinstance(config, DuckDBConfig):
-            raw_duck = str(config.path if config.path != ":memory:" else (config.database or ":memory:"))
-            norm_duck = raw_duck if raw_duck == ":memory:" else os.path.abspath(raw_duck)
-            return ("duckdb", norm_duck, bool(config.read_only))
-        if isinstance(config, BigQueryConfig):
-            return (
-                "bigquery",
-                config.effective_project_id(),
-                config.effective_dataset_id() or "",
-                config.location,
-                config.rest_endpoint,
-                config.storage_endpoint,
-            )
-        if isinstance(config, SpannerConfig):
-            return (
-                "spanner",
-                config.database_uri,
-                config.database_role or "",
-                config.dialect,
-                config.endpoint,
-            )
-        if isinstance(config, ValkeyConfig):
-            return ("valkey", config.url)
-        if isinstance(config, RedisConfig):
-            return ("redis", config.url)
-        if isinstance(config, CloudSQLConfig):
-            return ("cloudsql", config.instance_connection_name)
-        if isinstance(config, AlloyDBConfig):
-            return ("alloydb", config.instance_uri)
-        return ("unknown", repr(config))
+        return config.pool_key()
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -216,69 +181,20 @@ class DatabaseRegistry:
 
     @classmethod
     def parse_url(cls, url: str, **overrides: Any) -> AnyDatabaseConfig:
-        """Parse a database or cache URL into its strongly typed configuration struct."""
+        """Parse a database, cache, analytics, or dialer URL into its typed configuration struct."""
         parsed = urlparse(url)
         scheme = parsed.scheme.lower()
-        base_scheme = scheme.split("+", 1)[0]
-        query_params = dict(parse_qsl(parsed.query)) if parsed.query else {}
+        config_cls = SCHEME_REGISTRY.get(scheme) or SCHEME_REGISTRY.get(scheme.split("+", 1)[0])
+        if config_cls is None:
+            msg = f"Unsupported database URL scheme: {scheme!r}"
+            raise ValueError(msg)
+        return config_cls.from_url(url, **overrides)
 
-        if base_scheme in ("postgres", "postgresql"):
-            if "pgbouncer" in query_params and "pgbouncer" not in overrides:
-                overrides["pgbouncer"] = query_params["pgbouncer"].lower() in {"1", "true", "yes"}
-            if "pooler_mode" in query_params and "pooler_mode" not in overrides:
-                overrides["pooler_mode"] = query_params["pooler_mode"]
-            if "cloud_sql_instance" in query_params and "cloud_sql_instance" not in overrides:
-                overrides["cloud_sql_instance"] = query_params["cloud_sql_instance"]
-            if "alloydb_instance_uri" in query_params and "alloydb_instance_uri" not in overrides:
-                overrides["alloydb_instance_uri"] = query_params["alloydb_instance_uri"]
-            if "direct_dsn" in query_params and "direct_dsn" not in overrides:
-                overrides["direct_dsn"] = query_params["direct_dsn"]
-            return PostgreSQLConfig(dsn=url, **overrides)
-        if base_scheme in ("mysql", "mariadb"):
-            if "cloud_sql_instance" in query_params and "cloud_sql_instance" not in overrides:
-                overrides["cloud_sql_instance"] = query_params["cloud_sql_instance"]
-            return MySQLConfig(dsn=url, **overrides)
-        if base_scheme == "sqlite":
-            if parsed.path in ("", "/", "/:memory:", ":memory:"):
-                db_path = ":memory:"
-            elif parsed.path.startswith("//"):
-                db_path = parsed.path[1:]
-            elif os.path.isabs(parsed.path) and os.path.exists(os.path.dirname(parsed.path)):
-                db_path = parsed.path
-            else:
-                db_path = parsed.path.lstrip("/")
-            return SQLiteConfig(path=db_path, database=db_path, **overrides)
-        if base_scheme == "oracle":
-            return OracleConfig(dsn=url, **overrides)
-        if base_scheme in ("mssql", "sqlserver"):
-            return MSSQLConfig(dsn=url, **overrides)
-        if base_scheme == "duckdb":
-            if parsed.path in ("", "/", "/:memory:", ":memory:"):
-                duck_path = ":memory:"
-            elif parsed.path.startswith("//"):
-                duck_path = parsed.path[1:]
-            else:
-                duck_path = parsed.path.lstrip("/")
-            return DuckDBConfig(path=duck_path, database=duck_path, **overrides)
-        if base_scheme in ("redis", "rediss", "memory"):
-            return RedisConfig(url=url, **overrides)
-        if base_scheme in ("valkey", "valkeys"):
-            return ValkeyConfig(url=url, **overrides)
-        if base_scheme == "cloudsql":
-            instance_uri = f"{parsed.netloc}{parsed.path}"
-            return CloudSQLConfig(instance_connection_name=instance_uri, **overrides)
-        if base_scheme == "alloydb":
-            instance_uri = parsed.path if parsed.path.startswith("/projects/") else f"/{parsed.netloc}{parsed.path}"
-            return AlloyDBConfig(instance_uri=instance_uri, **overrides)
-        if base_scheme in ("bigquery", "bq"):
-            return BigQueryConfig.from_dsn(url, **overrides)
-        if base_scheme in ("spanner", "spangres"):
-            return SpannerConfig.from_dsn(url, **overrides)
-
-        msg = f"Unsupported database URL scheme: {scheme!r}"
-        raise ValueError(msg)
-
-    def register(self, name: str, config_or_url: AnyDatabaseConfig | str) -> AnyDatabaseConfig:
+    def register(
+        self,
+        name: str,
+        config_or_url: AnyDatabaseConfig | BaseDatabaseConfig | str,
+    ) -> AnyDatabaseConfig | BaseDatabaseConfig:
         """Register a database alias from a typed config or URL."""
         config = self.parse_url(config_or_url) if isinstance(config_or_url, str) else config_or_url
         self._configs[name] = config
@@ -286,7 +202,7 @@ class DatabaseRegistry:
         self._sync_drivers.pop(name, None)
         return config
 
-    def get_config(self, name: str = "default") -> AnyDatabaseConfig:
+    def get_config(self, name: str = "default") -> AnyDatabaseConfig | BaseDatabaseConfig:
         """Retrieve a registered configuration by alias."""
         if name not in self._configs:
             msg = f"Database alias {name!r} is not registered"
@@ -311,17 +227,54 @@ class DatabaseRegistry:
         self._sync_drivers[name] = driver
         return driver
 
-    def get_shared_driver(self, config_or_url: AnyDatabaseConfig | str) -> AnyDatabaseDriver:
+    @overload
+    def get_dialer(
+        self,
+        config: CloudSQLConfig | AlloyDBConfig,
+        *,
+        sync: Literal[False] = False,
+    ) -> AsyncCloudSQLDialer | AsyncAlloyDBDialer: ...
+
+    @overload
+    def get_dialer(
+        self,
+        config: CloudSQLConfig | AlloyDBConfig,
+        *,
+        sync: Literal[True],
+    ) -> SyncCloudSQLDialer | SyncAlloyDBDialer: ...
+
+    def get_dialer(
+        self,
+        config: CloudSQLConfig | AlloyDBConfig,
+        *,
+        sync: bool = False,
+    ) -> SyncCloudSQLDialer | AsyncCloudSQLDialer | SyncAlloyDBDialer | AsyncAlloyDBDialer:
+        """Return a cached Cloud SQL or AlloyDB dialer for `config` and `sync` mode."""
+        key = (*config.pool_key(), bool(sync))
+        existing = self._shared_dialers.get(key)
+        if existing is not None:
+            return existing
+        if isinstance(config, CloudSQLConfig):
+            created: SyncCloudSQLDialer | AsyncCloudSQLDialer | SyncAlloyDBDialer | AsyncAlloyDBDialer = (
+                SyncCloudSQLDialer(config) if sync else AsyncCloudSQLDialer(config)
+            )
+        else:
+            created = SyncAlloyDBDialer(config) if sync else AsyncAlloyDBDialer(config)
+        self._shared_dialers[key] = created
+        return created
+
+    def get_shared_driver(self, config_or_url: AnyDatabaseConfig | BaseDatabaseConfig | str) -> AnyDatabaseDriver:
         """Return a loop-sharded shared asynchronous driver keyed by canonical endpoint fingerprint."""
         config = self.parse_url(config_or_url) if isinstance(config_or_url, str) else config_or_url
-        if isinstance(config, SQLiteConfig) and str(config.path or config.database or ":memory:") == ":memory:":
-            return self._build_async_driver(config)
-        if isinstance(config, DuckDBConfig) and config.resolved_path() == ":memory:":
+        if isinstance(config, (CloudSQLConfig, AlloyDBConfig)):
+            return self.get_dialer(config, sync=False)
+        base_key = config.pool_key()
+        if base_key is None:
             return self._build_async_driver(config)
         loop_id = 0
         with contextlib.suppress(RuntimeError):
             loop_id = id(asyncio.get_running_loop())
-        key = (*self.pool_fingerprint(config), loop_id)
+        key = (*base_key, loop_id)
         cached = self._shared_async_drivers.get(key)
         if cached is not None and not getattr(cached, "_closed", False) and not getattr(cached, "closed", False):
             return cached
@@ -329,14 +282,17 @@ class DatabaseRegistry:
         self._shared_async_drivers[key] = driver
         return driver
 
-    def get_shared_sync_driver(self, config_or_url: AnyDatabaseConfig | str) -> AnySyncDatabaseDriver:
+    def get_shared_sync_driver(
+        self,
+        config_or_url: AnyDatabaseConfig | BaseDatabaseConfig | str,
+    ) -> AnySyncDatabaseDriver:
         """Return a shared synchronous driver keyed by canonical endpoint fingerprint."""
         config = self.parse_url(config_or_url) if isinstance(config_or_url, str) else config_or_url
-        if isinstance(config, SQLiteConfig) and str(config.path or config.database or ":memory:") == ":memory:":
+        if isinstance(config, (CloudSQLConfig, AlloyDBConfig)):
+            return self.get_dialer(config, sync=True)
+        key = config.pool_key()
+        if key is None:
             return self._build_sync_driver(config)
-        if isinstance(config, DuckDBConfig) and config.resolved_path() == ":memory:":
-            return self._build_sync_driver(config)
-        key = self.pool_fingerprint(config)
         cached = self._shared_sync_drivers.get(key)
         if cached is not None and not getattr(cached, "_closed", False) and not getattr(cached, "closed", False):
             return cached
@@ -344,133 +300,74 @@ class DatabaseRegistry:
         self._shared_sync_drivers[key] = driver
         return driver
 
-    def _get_or_create_dialer(
-        self, dialer_cfg: CloudSQLConfig | AlloyDBConfig, *, is_async: bool = False
-    ) -> SyncCloudSQLDialer | AsyncCloudSQLDialer | SyncAlloyDBDialer | AsyncAlloyDBDialer:
-        if isinstance(dialer_cfg, CloudSQLConfig):
-            key = ("cloudsql_async" if is_async else "cloudsql_sync", dialer_cfg.instance_connection_name)
-            existing = self._shared_dialers.get(key)
-            if existing is None:
-                existing = AsyncCloudSQLDialer(dialer_cfg) if is_async else SyncCloudSQLDialer(dialer_cfg)
-                self._shared_dialers[key] = existing
-            return existing
-        key = ("alloydb_async" if is_async else "alloydb_sync", dialer_cfg.instance_uri)
-        existing = self._shared_dialers.get(key)
-        if existing is None:
-            existing = AsyncAlloyDBDialer(dialer_cfg) if is_async else SyncAlloyDBDialer(dialer_cfg)
-            self._shared_dialers[key] = existing
-        return existing
-
-    def _build_async_driver(self, config: AnyDatabaseConfig) -> AnyDatabaseDriver:
-        broker = getattr(config, "broker", None)
-        if broker is None:
-            broker = self._broker
-        if isinstance(config, PostgreSQLConfig):
-            dialer: object = None
-            if (dialer_cfg := config.to_cloud_dialer_config()) is not None:
-                dialer = self._get_or_create_dialer(dialer_cfg, is_async=True)
-            return AsyncPostgreSQLDriver(config, dialer=dialer, broker=broker)
-        if isinstance(config, MySQLConfig):
-            mysql_dialer: AsyncCloudSQLDialer | None = None
-            if (csql_cfg := config.to_cloud_dialer_config()) is not None:
-                mysql_dialer = cast("AsyncCloudSQLDialer", self._get_or_create_dialer(csql_cfg, is_async=True))
-            return AsyncMySQLDriver(config, dialer=mysql_dialer, broker=broker)
-        if isinstance(config, SQLiteConfig):
-            return AsyncSQLiteDriver(config, broker=broker)
-        if isinstance(config, OracleConfig):
-            return AsyncOracleDriver(config, broker=broker)
-        if isinstance(config, MSSQLConfig):
-            return AsyncMSSQLDriver(config, broker=broker)
-        if isinstance(config, DuckDBConfig):
-            return AsyncDuckDBDriver(config, broker=broker)
-        if isinstance(config, BigQueryConfig):
-            return AsyncBigQueryDriver(config, broker=broker)
-        if isinstance(config, SpannerConfig):
-            return AsyncSpannerDriver(config, broker=broker)
-        if isinstance(config, ValkeyConfig):
-            return AsyncValkeyDriver(config)
-        if isinstance(config, RedisConfig):
-            return AsyncRedisDriver(config)
-        if isinstance(config, CloudSQLConfig):
-            return cast("AsyncCloudSQLDialer", self._get_or_create_dialer(config, is_async=True))
-        if isinstance(config, AlloyDBConfig):
-            return cast("AsyncAlloyDBDialer", self._get_or_create_dialer(config, is_async=True))
+    def _build_async_driver(self, config: AnyDatabaseConfig | BaseDatabaseConfig) -> AnyDatabaseDriver:
+        if isinstance(config, (CloudSQLConfig, AlloyDBConfig)):
+            return self.get_dialer(config, sync=False)
+        if isinstance(config, BaseDatabaseConfig):
+            return cast("AnyDatabaseDriver", config.build_async_driver(self))
         msg = f"Unsupported config type: {type(config)!r}"
         raise TypeError(msg)
 
-    def _build_sync_driver(self, config: AnyDatabaseConfig) -> AnySyncDatabaseDriver:
-        broker = getattr(config, "broker", None)
-        if broker is None:
-            broker = self._broker
-        if isinstance(config, PostgreSQLConfig):
-            dialer: object = None
-            if (dialer_cfg := config.to_cloud_dialer_config()) is not None:
-                dialer = self._get_or_create_dialer(dialer_cfg, is_async=False)
-            return SyncPostgreSQLDriver(config, dialer=dialer, broker=broker)
-        if isinstance(config, MySQLConfig):
-            mysql_sync_dialer: SyncCloudSQLDialer | None = None
-            if (csql_cfg := config.to_cloud_dialer_config()) is not None:
-                mysql_sync_dialer = cast("SyncCloudSQLDialer", self._get_or_create_dialer(csql_cfg, is_async=False))
-            return SyncMySQLDriver(config, dialer=mysql_sync_dialer, broker=broker)
-        if isinstance(config, SQLiteConfig):
-            return SyncSQLiteDriver(config, broker=broker)
-        if isinstance(config, OracleConfig):
-            return SyncOracleDriver(config, broker=broker)
-        if isinstance(config, MSSQLConfig):
-            return SyncMSSQLDriver(config, broker=broker)
-        if isinstance(config, DuckDBConfig):
-            return SyncDuckDBDriver(config, broker=broker)
-        if isinstance(config, BigQueryConfig):
-            return SyncBigQueryDriver(config, broker=broker)
-        if isinstance(config, SpannerConfig):
-            return SyncSpannerDriver(config, broker=broker)
-        if isinstance(config, ValkeyConfig):
-            return SyncValkeyDriver(config)
-        if isinstance(config, RedisConfig):
-            return SyncRedisDriver(config)
-        if isinstance(config, CloudSQLConfig):
-            return cast("SyncCloudSQLDialer", self._get_or_create_dialer(config, is_async=False))
-        if isinstance(config, AlloyDBConfig):
-            return cast("SyncAlloyDBDialer", self._get_or_create_dialer(config, is_async=False))
+    def _build_sync_driver(self, config: AnyDatabaseConfig | BaseDatabaseConfig) -> AnySyncDatabaseDriver:
+        if isinstance(config, (CloudSQLConfig, AlloyDBConfig)):
+            return self.get_dialer(config, sync=True)
+        if isinstance(config, BaseDatabaseConfig):
+            return cast("AnySyncDatabaseDriver", config.build_sync_driver(self))
         msg = f"Unsupported config type: {type(config)!r}"
         raise TypeError(msg)
 
 
-def provide_bigquery_driver(
-    config_or_url: BigQueryConfig | str = "default",
+@overload
+def provide_driver(
+    name_or_config: str | BaseDatabaseConfig = "default",
+    *,
+    sync: Literal[False] = False,
+    registry: DatabaseRegistry | None = None,
+) -> Any: ...
+
+
+@overload
+def provide_driver(
+    name_or_config: str | BaseDatabaseConfig = "default",
+    *,
+    sync: Literal[True],
+    registry: DatabaseRegistry | None = None,
+) -> Any: ...
+
+
+def provide_driver(
+    name_or_config: str | BaseDatabaseConfig = "default",
     *,
     sync: bool = False,
     registry: DatabaseRegistry | None = None,
-) -> AsyncBigQueryDriver | SyncBigQueryDriver:
-    """Resolve a shared BigQuery driver from `DatabaseRegistry.default()` for framework DI."""
+) -> Any:
+    """Resolve a database, cache, or analytics driver from `DatabaseRegistry` for framework DI."""
+    if isinstance(name_or_config, (CloudSQLConfig, AlloyDBConfig)):
+        msg = (
+            "CloudSQLConfig and AlloyDBConfig are transport dialers, not database drivers; "
+            "use DatabaseRegistry.get_dialer() or attach cloud_sql_instance/alloydb_instance_uri to a database config"
+        )
+        raise TypeError(msg)
     reg = registry if registry is not None else DatabaseRegistry.default()
-    resolved_cfg: AnyDatabaseConfig | str = (
-        reg.get_config(config_or_url)
-        if (isinstance(config_or_url, str) and "://" not in config_or_url and config_or_url in reg._configs)
-        else config_or_url
-    )
-    if isinstance(resolved_cfg, str) and "://" not in resolved_cfg:
-        driver = reg.get_sync_driver(resolved_cfg) if sync else reg.get_driver(resolved_cfg)
-    else:
-        driver = reg.get_shared_sync_driver(resolved_cfg) if sync else reg.get_shared_driver(resolved_cfg)
-    return cast("AsyncBigQueryDriver | SyncBigQueryDriver", driver)
-
-
-def provide_spanner_driver(
-    config_or_url: SpannerConfig | str = "default",
-    *,
-    sync: bool = False,
-    registry: DatabaseRegistry | None = None,
-) -> AsyncSpannerDriver | SyncSpannerDriver:
-    """Resolve a shared Cloud Spanner driver from `DatabaseRegistry.default()` for framework DI."""
-    reg = registry if registry is not None else DatabaseRegistry.default()
-    resolved_cfg: AnyDatabaseConfig | str = (
-        reg.get_config(config_or_url)
-        if (isinstance(config_or_url, str) and "://" not in config_or_url and config_or_url in reg._configs)
-        else config_or_url
-    )
-    if isinstance(resolved_cfg, str) and "://" not in resolved_cfg:
-        driver = reg.get_sync_driver(resolved_cfg) if sync else reg.get_driver(resolved_cfg)
-    else:
-        driver = reg.get_shared_sync_driver(resolved_cfg) if sync else reg.get_shared_driver(resolved_cfg)
-    return cast("AsyncSpannerDriver | SyncSpannerDriver", driver)
+    if isinstance(name_or_config, str):
+        if "://" not in name_or_config:
+            cfg = reg.get_config(name_or_config)
+            if isinstance(cfg, (CloudSQLConfig, AlloyDBConfig)):
+                msg = (
+                    f"Registered alias {name_or_config!r} points to a transport dialer; "
+                    "use DatabaseRegistry.get_dialer() or register a database config"
+                )
+                raise TypeError(msg)
+            return reg.get_sync_driver(name_or_config) if sync else reg.get_driver(name_or_config)
+        parsed = reg.parse_url(name_or_config)
+        if isinstance(parsed, (CloudSQLConfig, AlloyDBConfig)):
+            msg = (
+                f"URL {name_or_config!r} resolves to a transport dialer; "
+                "use DatabaseRegistry.get_dialer() or attach cloud_sql_instance/alloydb_instance_uri to a database config"
+            )
+            raise TypeError(msg)
+        return reg.get_shared_sync_driver(parsed) if sync else reg.get_shared_driver(parsed)
+    if isinstance(name_or_config, BaseDatabaseConfig):
+        return reg.get_shared_sync_driver(name_or_config) if sync else reg.get_shared_driver(name_or_config)
+    msg = f"Unsupported driver target: {type(name_or_config)!r}"
+    raise TypeError(msg)

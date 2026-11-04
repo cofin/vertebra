@@ -60,8 +60,7 @@ if TYPE_CHECKING:
     )
     from vertebra.db.registry import (
         DatabaseRegistry,
-        provide_bigquery_driver,
-        provide_spanner_driver,
+        provide_driver,
     )
     from vertebra.db.rls import (
         TenantPredicate,
@@ -115,8 +114,7 @@ __all__ = (
     "TenantPredicate",
     "TenantScopeConfig",
     "ThreadOffloadAsyncDatabaseDriver",
-    "provide_bigquery_driver",
-    "provide_spanner_driver",
+    "provide_driver",
 )
 
 __lazy_modules__ = [
@@ -175,8 +173,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "TenantPredicate": ("vertebra.db.rls", "TenantPredicate"),
     "TenantScopeConfig": ("vertebra.db.rls", "TenantScopeConfig"),
     "ThreadOffloadAsyncDatabaseDriver": ("vertebra.db.driver", "ThreadOffloadAsyncDatabaseDriver"),
-    "provide_bigquery_driver": ("vertebra.db.registry", "provide_bigquery_driver"),
-    "provide_spanner_driver": ("vertebra.db.registry", "provide_spanner_driver"),
+    "provide_driver": ("vertebra.db.registry", "provide_driver"),
 }
 
 __getattr__, __dir__ = lazy_exports(__name__, __all__, _EXPORT_MAP)

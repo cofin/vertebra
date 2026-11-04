@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Self
+from urllib.parse import urlparse
 
 import msgspec
 
 from vertebra.db.adapters.sqlite.core import VALID_SQLITE_SYNCHRONOUS, SQLiteCore
-from vertebra.db.driver import BaseDatabaseConfig
+from vertebra.db.driver._common import BaseDatabaseConfig
 
 __all__ = ("SQLiteConfig",)
 
@@ -18,6 +20,10 @@ class SQLiteConfig(BaseDatabaseConfig, frozen=True, gc=False):
 
     dialect: ClassVar[str] = "sqlite"
     dialect_tag: ClassVar[int] = 3
+    url_schemes: ClassVar[tuple[str, ...]] = ("sqlite",)
+    driver_module: ClassVar[str] = "vertebra.db.adapters.sqlite.driver"
+    sync_driver_name: ClassVar[str] = "SyncSQLiteDriver"
+    async_driver_name: ClassVar[str] = "AsyncSQLiteDriver"
 
     path: str = ":memory:"
     """Filesystem path to the SQLite database file or `":memory:"`."""
@@ -73,3 +79,30 @@ class SQLiteConfig(BaseDatabaseConfig, frozen=True, gc=False):
     def startup_pragmas(self) -> list[str]:
         """Return startup PRAGMA statements for connection initialization."""
         return self.initialization_pragmas()
+
+    @classmethod
+    def from_url(cls, url: str, **overrides: Any) -> Self:
+        """Construct a `SQLiteConfig` from a `sqlite://` URI."""
+        parsed = urlparse(url)
+        if parsed.path in ("", "/", "/:memory:", ":memory:"):
+            db_path = ":memory:"
+        elif parsed.path.startswith("//"):
+            db_path = parsed.path[1:]
+        elif os.path.isabs(parsed.path) and os.path.exists(os.path.dirname(parsed.path)):
+            db_path = parsed.path
+        else:
+            db_path = parsed.path.lstrip("/")
+        if parsed.query and (
+            db_path.startswith("file:") or "mode=memory" in parsed.query or "cache=shared" in parsed.query
+        ):
+            prefix = db_path if db_path.startswith("file:") else f"file:{db_path}"
+            db_path = f"{prefix}?{parsed.query}"
+        return cls(path=db_path, database=db_path, **overrides)
+
+    def pool_key(self) -> tuple[Any, ...] | None:
+        """Return a deterministic shared-pool fingerprint, or `None` for isolated `:memory:` DBs."""
+        raw_path = str(self.path or self.database or ":memory:")
+        if self.is_in_memory and "cache=shared" not in raw_path:
+            return None
+        norm_path = raw_path if (raw_path == ":memory:" or "mode=memory" in raw_path) else os.path.abspath(raw_path)
+        return ("sqlite", norm_path, bool(self.wal_mode))

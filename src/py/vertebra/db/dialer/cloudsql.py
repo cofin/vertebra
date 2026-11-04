@@ -13,7 +13,8 @@ import time
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar, Self
+from urllib.parse import urlparse
 
 from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.module_loader import import_optional
@@ -80,6 +81,8 @@ class CloudSQLInstanceURI(FrozenBaseStruct, frozen=True, gc=False, kw_only=True,
 class CloudSQLConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """Configuration for zero-sidecar Cloud SQL connections on port 3307."""
 
+    url_schemes: ClassVar[tuple[str, ...]] = ("cloudsql",)
+
     instance_connection_name: str
     """Full Cloud SQL instance connection name (`project:region:instance`)."""
     enable_iam_auth: bool = True
@@ -92,6 +95,17 @@ class CloudSQLConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """Lead time in seconds before certificate expiry at which background renewal triggers."""
     port: int = 3307
     """Cloud SQL Auth Proxy secure mTLS server port (default `3307`)."""
+
+    @classmethod
+    def from_url(cls, url: str, **overrides: Any) -> Self:
+        """Construct a `CloudSQLConfig` from a `cloudsql://project:region:instance` URI."""
+        parsed = urlparse(url)
+        instance_uri = f"{parsed.netloc}{parsed.path}"
+        return cls(instance_connection_name=instance_uri, **overrides)
+
+    def pool_key(self) -> tuple[Any, ...]:
+        """Return the canonical shared-dialer fingerprint tuple."""
+        return ("cloudsql", self.instance_connection_name)
 
 
 class _BaseCloudSQLDialer:

@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
-from vertebra.db.adapters.bigquery.config import (
-    BIGQUERY_DIALECT_TAG,
-    DEFAULT_BIGQUERY_REST_ENDPOINT,
-    DEFAULT_BIGQUERY_STORAGE_ENDPOINT,
-    BigQueryConfig,
-    BigQueryDryRunResult,
-    ObjectRef,
-    ObjectTableConfig,
-)
-from vertebra.db.adapters.bigquery.core import BigQueryCore
-from vertebra.db.adapters.bigquery.driver import (
-    AsyncBigQueryDriver,
-    SyncBigQueryDriver,
-)
+from typing import TYPE_CHECKING
+
+from vertebra.utils.module_loader import lazy_exports
+
+if TYPE_CHECKING:
+    from vertebra.db.adapters.bigquery.config import (
+        BIGQUERY_DIALECT_TAG,
+        DEFAULT_BIGQUERY_REST_ENDPOINT,
+        DEFAULT_BIGQUERY_STORAGE_ENDPOINT,
+        BigQueryConfig,
+        BigQueryDryRunResult,
+        ObjectRef,
+        ObjectTableConfig,
+    )
+    from vertebra.db.adapters.bigquery.core import BigQueryCore
+    from vertebra.db.adapters.bigquery.driver import (
+        AsyncBigQueryDriver,
+        SyncBigQueryDriver,
+    )
 
 __all__ = (
     "BIGQUERY_DIALECT_TAG",
@@ -29,3 +34,27 @@ __all__ = (
     "ObjectTableConfig",
     "SyncBigQueryDriver",
 )
+
+__lazy_modules__ = [
+    "vertebra.db.adapters.bigquery.config",
+    "vertebra.db.adapters.bigquery.core",
+    "vertebra.db.adapters.bigquery.driver",
+]
+
+_EXPORT_MAP: dict[str, tuple[str, str]] = {
+    "BIGQUERY_DIALECT_TAG": ("vertebra.db.adapters.bigquery.config", "BIGQUERY_DIALECT_TAG"),
+    "DEFAULT_BIGQUERY_REST_ENDPOINT": ("vertebra.db.adapters.bigquery.config", "DEFAULT_BIGQUERY_REST_ENDPOINT"),
+    "DEFAULT_BIGQUERY_STORAGE_ENDPOINT": (
+        "vertebra.db.adapters.bigquery.config",
+        "DEFAULT_BIGQUERY_STORAGE_ENDPOINT",
+    ),
+    "AsyncBigQueryDriver": ("vertebra.db.adapters.bigquery.driver", "AsyncBigQueryDriver"),
+    "BigQueryConfig": ("vertebra.db.adapters.bigquery.config", "BigQueryConfig"),
+    "BigQueryCore": ("vertebra.db.adapters.bigquery.core", "BigQueryCore"),
+    "BigQueryDryRunResult": ("vertebra.db.adapters.bigquery.config", "BigQueryDryRunResult"),
+    "ObjectRef": ("vertebra.db.adapters.bigquery.config", "ObjectRef"),
+    "ObjectTableConfig": ("vertebra.db.adapters.bigquery.config", "ObjectTableConfig"),
+    "SyncBigQueryDriver": ("vertebra.db.adapters.bigquery.driver", "SyncBigQueryDriver"),
+}
+
+__getattr__, __dir__ = lazy_exports(__name__, __all__, _EXPORT_MAP)

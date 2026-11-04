@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 import zipfile
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Self
 
 import msgspec
 
@@ -13,7 +13,7 @@ from vertebra.db.adapters.oracle.core import (
     ORACLE_DIALECT_TAG,
     OracleCore,
 )
-from vertebra.db.driver import BaseDatabaseConfig
+from vertebra.db.driver._common import BaseDatabaseConfig
 from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
 
 __all__ = (
@@ -264,6 +264,10 @@ class OracleConfig(BaseDatabaseConfig, frozen=True, gc=False):
 
     dialect: ClassVar[str] = "oracle"
     dialect_tag: ClassVar[int] = ORACLE_DIALECT_TAG
+    url_schemes: ClassVar[tuple[str, ...]] = ("oracle",)
+    driver_module: ClassVar[str] = "vertebra.db.adapters.oracle.driver"
+    sync_driver_name: ClassVar[str] = "SyncOracleDriver"
+    async_driver_name: ClassVar[str] = "AsyncOracleDriver"
 
     dsn: str = "oracle://localhost:1521/FREEPDB1"
     """Easy Connect string, TNS `(DESCRIPTION=...)` descriptor, or `oracle://` URI."""
@@ -358,3 +362,13 @@ class OracleConfig(BaseDatabaseConfig, frozen=True, gc=False):
             action=self.action,
             ecid=self.ecid,
         )
+
+    @classmethod
+    def from_url(cls, url: str, **overrides: Any) -> Self:
+        """Construct an `OracleConfig` from an `oracle://` URI."""
+        return cls(dsn=url, **overrides)
+
+    def pool_key(self) -> tuple[Any, ...]:
+        """Return the canonical shared-pool fingerprint tuple."""
+        desc = self.connect_descriptor()
+        return ("oracle", desc.host.lower(), int(desc.port), desc.service_name or desc.sid or "", self.user)

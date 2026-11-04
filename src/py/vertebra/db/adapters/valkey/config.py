@@ -14,6 +14,10 @@ class ValkeyConfig(RedisConfig, frozen=True, gc=False, kw_only=True):
 
     dialect: ClassVar[str] = "valkey"
     dialect_tag: ClassVar[int] = 8
+    url_schemes: ClassVar[tuple[str, ...]] = ("valkey", "valkeys")
+    driver_module: ClassVar[str] = "vertebra.db.adapters.valkey.driver"
+    sync_driver_name: ClassVar[str] = "SyncValkeyDriver"
+    async_driver_name: ClassVar[str] = "AsyncValkeyDriver"
 
     url: str = "valkey://localhost:6379/0"
     """Valkey connection URI (`valkey://`, `valkeys://`, `redis://`, `rediss://`, or `memory://`)."""

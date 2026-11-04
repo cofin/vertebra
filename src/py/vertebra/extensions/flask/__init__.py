@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from vertebra.utils.module_loader import lazy_exports
 
 if TYPE_CHECKING:
-    from vertebra.db.registry import provide_bigquery_driver, provide_spanner_driver
+    from vertebra.db.registry import provide_driver
     from vertebra.extensions.flask.cache import CacheBackend, FlaskCachingBackend
     from vertebra.extensions.flask.channels import ChannelMessage, ChannelsBackend
     from vertebra.extensions.flask.config import VertebraConfig
@@ -115,8 +115,7 @@ __all__ = (
     "mcp_resource",
     "mcp_tool",
     "offload_middlewares",
-    "provide_bigquery_driver",
-    "provide_spanner_driver",
+    "provide_driver",
     "render_webmcp_manifest_json",
     "send_storage_file",
     "vertebra_route",
@@ -175,8 +174,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "mcp_resource": ("vertebra.extensions.flask.mcp", "mcp_resource"),
     "mcp_tool": ("vertebra.extensions.flask.mcp", "mcp_tool"),
     "offload_middlewares": ("vertebra.extensions.flask.offload", "offload_middlewares"),
-    "provide_bigquery_driver": ("vertebra.db.registry", "provide_bigquery_driver"),
-    "provide_spanner_driver": ("vertebra.db.registry", "provide_spanner_driver"),
+    "provide_driver": ("vertebra.db.registry", "provide_driver"),
     "render_webmcp_manifest_json": ("vertebra.extensions.flask.mcp", "render_webmcp_manifest_json"),
     "send_storage_file": ("vertebra.extensions.flask.storage", "send_storage_file"),
     "vertebra_route": ("vertebra.extensions.flask.fastpath", "vertebra_route"),

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+import os
+from typing import Any, ClassVar, Self
+from urllib.parse import urlparse
 
 from vertebra.db.driver._common import BaseDatabaseConfig
 from vertebra.typing import FrozenBaseStruct
@@ -51,6 +53,10 @@ class DuckDBConfig(BaseDatabaseConfig, frozen=True, gc=False):
 
     dialect: ClassVar[str] = "duckdb"
     dialect_tag: ClassVar[int] = 6
+    url_schemes: ClassVar[tuple[str, ...]] = ("duckdb",)
+    driver_module: ClassVar[str] = "vertebra.db.adapters.duckdb.driver"
+    sync_driver_name: ClassVar[str] = "SyncDuckDBDriver"
+    async_driver_name: ClassVar[str] = "AsyncDuckDBDriver"
 
     path: str = ":memory:"
     """Filesystem path to the DuckDB database file or `":memory:"`."""
@@ -114,6 +120,25 @@ class DuckDBConfig(BaseDatabaseConfig, frozen=True, gc=False):
         for secret in self.secrets:
             stmts.append(secret.to_create_secret_sql())
         return stmts
+
+    @classmethod
+    def from_url(cls, url: str, **overrides: Any) -> Self:
+        """Construct a `DuckDBConfig` from a `duckdb://` URI."""
+        parsed = urlparse(url)
+        if parsed.path in ("", "/", "/:memory:", ":memory:"):
+            duck_path = ":memory:"
+        elif parsed.path.startswith("//"):
+            duck_path = parsed.path[1:]
+        else:
+            duck_path = parsed.path.lstrip("/")
+        return cls(path=duck_path, database=duck_path, **overrides)
+
+    def pool_key(self) -> tuple[Any, ...] | None:
+        """Return a deterministic shared-pool fingerprint, or `None` for `:memory:` DBs."""
+        resolved = self.resolved_path()
+        if resolved == ":memory:":
+            return None
+        return ("duckdb", os.path.abspath(resolved), bool(self.read_only))
 
 
 def duckdb_bootstrap_statements(config: DuckDBConfig | None = None) -> list[str]:

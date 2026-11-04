@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 from urllib.parse import urlparse
 
 from vertebra.db.adapters.redis.core import (
@@ -10,7 +10,7 @@ from vertebra.db.adapters.redis.core import (
     PubSubMessage,
     RedisCore,
 )
-from vertebra.db.driver import BaseDatabaseConfig
+from vertebra.db.driver._common import BaseDatabaseConfig
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -27,6 +27,10 @@ class RedisConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
 
     dialect: ClassVar[str] = "redis"
     dialect_tag: ClassVar[int] = 7
+    url_schemes: ClassVar[tuple[str, ...]] = ("redis", "rediss", "memory")
+    driver_module: ClassVar[str] = "vertebra.db.adapters.redis.driver"
+    sync_driver_name: ClassVar[str] = "SyncRedisDriver"
+    async_driver_name: ClassVar[str] = "AsyncRedisDriver"
 
     url: str = "redis://localhost:6379/0"
     """Redis connection URI (`redis://`, `rediss://`, or `memory://`)."""
@@ -154,3 +158,24 @@ class RedisConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
             tracking_cmd.append("BCAST")
             cmds.append(RedisCore.encode_resp_command(*tracking_cmd))
         return cmds
+
+    @classmethod
+    def from_url(cls, url: str, **overrides: Any) -> Self:
+        """Construct a `RedisConfig` from a `redis://`, `rediss://`, or `memory://` URI."""
+        return cls(url=url, **overrides)
+
+    def pool_key(self) -> tuple[Any, ...]:
+        """Return the canonical shared-pool fingerprint tuple."""
+        return (self.dialect, self.url)
+
+    def build_sync_driver(self, registry: Any) -> Any:
+        """Instantiate the synchronous RESP3 driver for this configuration."""
+        _ = registry
+        sync_cls, _ = self.resolve_driver_classes()
+        return sync_cls(self)
+
+    def build_async_driver(self, registry: Any) -> Any:
+        """Instantiate the asynchronous RESP3 driver for this configuration."""
+        _ = registry
+        _, async_cls = self.resolve_driver_classes()
+        return async_cls(self)

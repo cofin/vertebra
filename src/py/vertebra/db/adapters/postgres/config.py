@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, Self
+from urllib.parse import parse_qsl, urlparse
 
 import msgspec
 
 from vertebra.db.dialer.alloydb import AlloyDBConfig
 from vertebra.db.dialer.cloudsql import CloudSQLConfig
-from vertebra.db.driver import BaseDatabaseConfig
+from vertebra.db.driver._common import BaseDatabaseConfig
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import import_optional
 
@@ -26,6 +27,10 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
 
     dialect: ClassVar[str] = "postgres"
     dialect_tag: ClassVar[int] = 1
+    url_schemes: ClassVar[tuple[str, ...]] = ("postgresql", "postgres")
+    driver_module: ClassVar[str] = "vertebra.db.adapters.postgres.driver"
+    sync_driver_name: ClassVar[str] = "SyncPostgreSQLDriver"
+    async_driver_name: ClassVar[str] = "AsyncPostgreSQLDriver"
 
     dsn: str = "postgresql://localhost:5432/postgres"
     """Primary PostgreSQL connection URI (may point to a PgBouncer, PgCat, or pgdog pooler)."""
@@ -198,3 +203,66 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
                 enable_iam_auth=self.enable_iam_auth,
             )
         return None
+
+    @classmethod
+    def from_url(cls, url: str, **overrides: Any) -> Self:
+        """Construct a `PostgreSQLConfig` from a `postgresql://` or `postgres://` URI."""
+        parsed = urlparse(url)
+        query_params = dict(parse_qsl(parsed.query)) if parsed.query else {}
+        kwargs = dict(overrides)
+        if "pgbouncer" in query_params and "pgbouncer" not in kwargs:
+            kwargs["pgbouncer"] = query_params["pgbouncer"].lower() in {"1", "true", "yes"}
+        if "pooler_mode" in query_params and "pooler_mode" not in kwargs:
+            kwargs["pooler_mode"] = query_params["pooler_mode"]
+        if "cloud_sql_instance" in query_params and "cloud_sql_instance" not in kwargs:
+            kwargs["cloud_sql_instance"] = query_params["cloud_sql_instance"]
+        if "alloydb_instance_uri" in query_params and "alloydb_instance_uri" not in kwargs:
+            kwargs["alloydb_instance_uri"] = query_params["alloydb_instance_uri"]
+        if "direct_dsn" in query_params and "direct_dsn" not in kwargs:
+            kwargs["direct_dsn"] = query_params["direct_dsn"]
+        return cls(dsn=url, **kwargs)
+
+    def pool_key(self) -> tuple[Any, ...]:
+        """Return the canonical shared-pool fingerprint tuple."""
+        parsed = urlparse(self.dsn)
+        host = (parsed.hostname or "localhost").lower()
+        port = int(parsed.port or 5432)
+        user = parsed.username or ""
+        database = parsed.path.lstrip("/") if parsed.path else "postgres"
+        pooler_mode = (
+            "transaction"
+            if (self.pgbouncer or self.pgbouncer_mode or self.pooler_mode == "transaction")
+            else str(self.pooler_mode)
+        )
+        return (
+            "postgresql",
+            host,
+            port,
+            database,
+            user,
+            pooler_mode,
+            self.cloud_sql_instance or "",
+            self.alloydb_instance_uri or "",
+        )
+
+    def build_sync_driver(self, registry: Any) -> Any:
+        """Instantiate `SyncPostgreSQLDriver` with shared `LeaseBroker` and optional cloud dialer."""
+        sync_cls, _ = self.resolve_driver_classes()
+        broker = self.broker if self.broker is not None else getattr(registry, "_broker", None)
+        dialer = (
+            registry.get_dialer(dialer_cfg, sync=True)
+            if registry is not None and (dialer_cfg := self.to_cloud_dialer_config()) is not None
+            else None
+        )
+        return sync_cls(self, dialer=dialer, broker=broker)
+
+    def build_async_driver(self, registry: Any) -> Any:
+        """Instantiate `AsyncPostgreSQLDriver` with shared `LeaseBroker` and optional cloud dialer."""
+        _, async_cls = self.resolve_driver_classes()
+        broker = self.broker if self.broker is not None else getattr(registry, "_broker", None)
+        dialer = (
+            registry.get_dialer(dialer_cfg, sync=False)
+            if registry is not None and (dialer_cfg := self.to_cloud_dialer_config()) is not None
+            else None
+        )
+        return async_cls(self, dialer=dialer, broker=broker)

@@ -23,6 +23,8 @@ from vertebra.db.driver import SyncDatabaseDriver, ThreadOffloadAsyncDatabaseDri
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from vertebra.db.dialer.cloudsql import AsyncCloudSQLDialer, SyncCloudSQLDialer
+
 __all__ = (
     "AsyncMSSQLDriver",
     "SyncMSSQLDriver",
@@ -35,14 +37,26 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
     dialect: ClassVar[str] = "mssql"
     dialect_tag: ClassVar[int] = MSSQL_DIALECT_TAG
 
-    def __init__(self, config: MSSQLConfig | None = None, *, broker: Any = None) -> None:
+    def __init__(
+        self,
+        config: MSSQLConfig | None = None,
+        *,
+        dialer: SyncCloudSQLDialer | None = None,
+        broker: Any = None,
+    ) -> None:
         resolved = config or MSSQLConfig()
         super().__init__(resolved, broker=broker)
+        self._dialer = dialer
         self._conn = sqlite3.connect(":memory:", check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._in_transaction: bool = False
         self._last_rewritten_sql: str = ""
         self._last_tds_batch: bytes = b""
+
+    @property
+    def dialer(self) -> SyncCloudSQLDialer | None:
+        """Return the attached Cloud SQL dialer if present."""
+        return self._dialer
 
     @property
     def last_rewritten_sql(self) -> str:
@@ -256,10 +270,22 @@ class AsyncMSSQLDriver(ThreadOffloadAsyncDatabaseDriver[MSSQLConfig, SyncMSSQLDr
     dialect: ClassVar[str] = "mssql"
     dialect_tag: ClassVar[int] = MSSQL_DIALECT_TAG
 
-    def __init__(self, config: MSSQLConfig | None = None, *, broker: Any = None) -> None:
+    def __init__(
+        self,
+        config: MSSQLConfig | None = None,
+        *,
+        dialer: AsyncCloudSQLDialer | None = None,
+        broker: Any = None,
+    ) -> None:
         resolved = config or MSSQLConfig()
         sync_driver = SyncMSSQLDriver(resolved, broker=broker)
         super().__init__(resolved, sync_driver, broker=sync_driver.broker)
+        self._dialer = dialer
+
+    @property
+    def dialer(self) -> AsyncCloudSQLDialer | None:
+        """Return the attached asynchronous Cloud SQL dialer if present."""
+        return self._dialer
 
     @property
     def last_rewritten_sql(self) -> str:

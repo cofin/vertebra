@@ -30,6 +30,20 @@ __all__ = (
 BIGQUERY_DIALECT_TAG: Final[int] = 7
 DEFAULT_BIGQUERY_REST_ENDPOINT: Final[str] = "https://bigquery.googleapis.com"
 DEFAULT_BIGQUERY_STORAGE_ENDPOINT: Final[str] = "https://bigquerystorage.googleapis.com:443"
+_ACCEPTED_BIGQUERY_SCHEMES: Final[frozenset[str]] = frozenset(
+    {
+        "bigquery",
+        "bq",
+        "bigquery+vtb",
+        "bigquery+vertebra",
+        "bigquery+vtb_async",
+        "bigquery+vertebra_async",
+        "bq+vtb",
+        "bq+vertebra",
+        "bq+vtb_async",
+        "bq+vertebra_async",
+    }
+)
 
 
 class BigQueryConfig(BaseDatabaseConfig, frozen=True, gc=False):
@@ -37,6 +51,10 @@ class BigQueryConfig(BaseDatabaseConfig, frozen=True, gc=False):
 
     dialect: ClassVar[str] = "bigquery"
     dialect_tag: ClassVar[int] = BIGQUERY_DIALECT_TAG
+    url_schemes: ClassVar[tuple[str, ...]] = ("bigquery", "bq")
+    driver_module: ClassVar[str] = "vertebra.db.adapters.bigquery.driver"
+    sync_driver_name: ClassVar[str] = "SyncBigQueryDriver"
+    async_driver_name: ClassVar[str] = "AsyncBigQueryDriver"
 
     project_id: str = ""
     """Google Cloud project identifier owning BigQuery jobs and default datasets."""
@@ -118,7 +136,7 @@ class BigQueryConfig(BaseDatabaseConfig, frozen=True, gc=False):
         """Construct a `BigQueryConfig` from a `bigquery://` DSN URI and keyword overrides."""
         parsed = urlparse(dsn)
         scheme = parsed.scheme.lower()
-        if scheme not in {"bigquery", "bq"}:
+        if scheme not in _ACCEPTED_BIGQUERY_SCHEMES:
             msg = f"Unsupported BigQuery DSN scheme {parsed.scheme!r}; expected 'bigquery://'"
             raise ImproperConfigurationError(msg)
 
@@ -173,6 +191,22 @@ class BigQueryConfig(BaseDatabaseConfig, frozen=True, gc=False):
 
         kwargs.update(overrides)
         return cls(**kwargs)
+
+    @classmethod
+    def from_url(cls, url: str, **overrides: Any) -> Self:
+        """Construct a `BigQueryConfig` from a `bigquery://` or `bq://` URI."""
+        return cls.from_dsn(url, **overrides)
+
+    def pool_key(self) -> tuple[Any, ...]:
+        """Return the canonical shared-pool fingerprint tuple."""
+        return (
+            "bigquery",
+            self.effective_project_id(),
+            self.effective_dataset_id() or "",
+            self.location,
+            self.rest_endpoint,
+            self.storage_endpoint,
+        )
 
     def effective_project_id(self) -> str:
         """Resolve the effective Google Cloud project ID from config, DSN, or environment."""

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Self
+from urllib.parse import parse_qsl, urlparse
 
 import msgspec
 
 from vertebra.db.adapters.mysql.core import MySQLCore
 from vertebra.db.dialer.cloudsql import CloudSQLConfig
-from vertebra.db.driver import BaseDatabaseConfig
+from vertebra.db.driver._common import BaseDatabaseConfig
 from vertebra.utils.module_loader import import_optional
 
 __all__ = ("MySQLConfig",)
@@ -20,6 +21,10 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
 
     dialect: ClassVar[str] = "mysql"
     dialect_tag: ClassVar[int] = 2
+    url_schemes: ClassVar[tuple[str, ...]] = ("mysql", "mariadb")
+    driver_module: ClassVar[str] = "vertebra.db.adapters.mysql.driver"
+    sync_driver_name: ClassVar[str] = "SyncMySQLDriver"
+    async_driver_name: ClassVar[str] = "AsyncMySQLDriver"
 
     dsn: str = "mysql://localhost:3306/mysql"
     """MySQL or MariaDB connection URI."""
@@ -106,3 +111,44 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
             default_autocommit=self.autocommit,
             iam_password=iam_password,
         )
+
+    @classmethod
+    def from_url(cls, url: str, **overrides: Any) -> Self:
+        """Construct a `MySQLConfig` from a `mysql://` or `mariadb://` URI."""
+        parsed = urlparse(url)
+        query_params = dict(parse_qsl(parsed.query)) if parsed.query else {}
+        kwargs = dict(overrides)
+        if "cloud_sql_instance" in query_params and "cloud_sql_instance" not in kwargs:
+            kwargs["cloud_sql_instance"] = query_params["cloud_sql_instance"]
+        return cls(dsn=url, **kwargs)
+
+    def pool_key(self) -> tuple[Any, ...]:
+        """Return the canonical shared-pool fingerprint tuple."""
+        parsed = urlparse(self.dsn)
+        host = (parsed.hostname or "localhost").lower()
+        port = int(parsed.port or 3306)
+        user = parsed.username or ""
+        database = parsed.path.lstrip("/") if parsed.path else ""
+        return ("mysql", host, port, database, user, self.cloud_sql_instance or "")
+
+    def build_sync_driver(self, registry: Any) -> Any:
+        """Instantiate `SyncMySQLDriver` with shared `LeaseBroker` and optional Cloud SQL dialer."""
+        sync_cls, _ = self.resolve_driver_classes()
+        broker = self.broker if self.broker is not None else getattr(registry, "_broker", None)
+        dialer = (
+            registry.get_dialer(dialer_cfg, sync=True)
+            if registry is not None and (dialer_cfg := self.to_cloud_dialer_config()) is not None
+            else None
+        )
+        return sync_cls(self, dialer=dialer, broker=broker)
+
+    def build_async_driver(self, registry: Any) -> Any:
+        """Instantiate `AsyncMySQLDriver` with shared `LeaseBroker` and optional Cloud SQL dialer."""
+        _, async_cls = self.resolve_driver_classes()
+        broker = self.broker if self.broker is not None else getattr(registry, "_broker", None)
+        dialer = (
+            registry.get_dialer(dialer_cfg, sync=False)
+            if registry is not None and (dialer_cfg := self.to_cloud_dialer_config()) is not None
+            else None
+        )
+        return async_cls(self, dialer=dialer, broker=broker)

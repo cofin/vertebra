@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Self
+from urllib.parse import parse_qsl, urlparse
 
 from vertebra.db.adapters.mssql.core import (
     MSSQL_DIALECT_TAG,
     MSSQLCore,
 )
 from vertebra.db.dialer.cloudsql import CloudSQLConfig
-from vertebra.db.driver import BaseDatabaseConfig
+from vertebra.db.driver._common import BaseDatabaseConfig
 
 __all__ = ("MSSQLConfig",)
 
@@ -19,6 +20,10 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
 
     dialect: ClassVar[str] = "mssql"
     dialect_tag: ClassVar[int] = MSSQL_DIALECT_TAG
+    url_schemes: ClassVar[tuple[str, ...]] = ("mssql", "sqlserver")
+    driver_module: ClassVar[str] = "vertebra.db.adapters.mssql.driver"
+    sync_driver_name: ClassVar[str] = "SyncMSSQLDriver"
+    async_driver_name: ClassVar[str] = "AsyncMSSQLDriver"
 
     dsn: str = "mssql://127.0.0.1:1433/master"
     """SQL Server connection URI (`mssql://host:port/database`)."""
@@ -60,3 +65,60 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
         if self.cloudsql_instance:
             return CloudSQLConfig(instance_connection_name=self.cloudsql_instance)
         return None
+
+    @classmethod
+    def from_url(cls, url: str, **overrides: Any) -> Self:
+        """Construct an `MSSQLConfig` from an `mssql://` or `sqlserver://` URI."""
+        parsed = urlparse(url)
+        query_params = dict(parse_qsl(parsed.query)) if parsed.query else {}
+        kwargs: dict[str, Any] = {"dsn": url}
+        if parsed.hostname:
+            kwargs["host"] = parsed.hostname
+        if parsed.port is not None:
+            kwargs["port"] = int(parsed.port)
+        db_name = parsed.path.lstrip("/") if parsed.path else ""
+        if db_name:
+            kwargs["database"] = db_name
+        if parsed.username:
+            kwargs["user"] = parsed.username
+        if parsed.password is not None:
+            kwargs["password"] = parsed.password
+        if "cloudsql_instance" in query_params:
+            kwargs["cloudsql_instance"] = query_params["cloudsql_instance"]
+        elif "cloud_sql_instance" in query_params:
+            kwargs["cloudsql_instance"] = query_params["cloud_sql_instance"]
+        kwargs.update(overrides)
+        return cls(**kwargs)
+
+    def pool_key(self) -> tuple[Any, ...]:
+        """Return the canonical shared-pool fingerprint tuple."""
+        return (
+            "mssql",
+            self.host.lower(),
+            int(self.port),
+            self.database,
+            self.user,
+            self.cloudsql_instance or "",
+        )
+
+    def build_sync_driver(self, registry: Any) -> Any:
+        """Instantiate `SyncMSSQLDriver` with shared `LeaseBroker` and optional Cloud SQL dialer."""
+        sync_cls, _ = self.resolve_driver_classes()
+        broker = self.broker if self.broker is not None else getattr(registry, "_broker", None)
+        dialer = (
+            registry.get_dialer(dialer_cfg, sync=True)
+            if registry is not None and (dialer_cfg := self.to_cloud_dialer_config()) is not None
+            else None
+        )
+        return sync_cls(self, dialer=dialer, broker=broker)
+
+    def build_async_driver(self, registry: Any) -> Any:
+        """Instantiate `AsyncMSSQLDriver` with shared `LeaseBroker` and optional Cloud SQL dialer."""
+        _, async_cls = self.resolve_driver_classes()
+        broker = self.broker if self.broker is not None else getattr(registry, "_broker", None)
+        dialer = (
+            registry.get_dialer(dialer_cfg, sync=False)
+            if registry is not None and (dialer_cfg := self.to_cloud_dialer_config()) is not None
+            else None
+        )
+        return async_cls(self, dialer=dialer, broker=broker)

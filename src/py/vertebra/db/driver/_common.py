@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import zlib
 from collections.abc import Mapping, Sequence
-from typing import Any, ClassVar, TypeVar
+from typing import Any, ClassVar, Self, TypeVar
 
 from vertebra.db.arrow import (
     _hydrate_rows_with_schema,
@@ -13,6 +13,7 @@ from vertebra.db.arrow import (
 )
 from vertebra.telemetry.otel import TraceContext
 from vertebra.typing import FrozenBaseStruct
+from vertebra.utils.module_loader import ensure_module
 
 __all__ = (
     "BaseDatabaseConfig",
@@ -42,6 +43,46 @@ class BaseDatabaseConfig(FrozenBaseStruct, frozen=True, gc=False):
     """Base configuration struct for built-in Vertebra database and cache drivers."""
 
     dialect_tag: ClassVar[int] = 0
+    url_schemes: ClassVar[tuple[str, ...]] = ()
+    driver_module: ClassVar[str] = ""
+    sync_driver_name: ClassVar[str] = ""
+    async_driver_name: ClassVar[str] = ""
+
+    @classmethod
+    def from_url(cls, url: str, **overrides: Any) -> Self:
+        """Parse a connection URL and keyword overrides into this configuration struct."""
+        _ = (url, overrides)
+        msg = f"{cls.__name__} does not implement from_url()"
+        raise NotImplementedError(msg)
+
+    def pool_key(self) -> tuple[Any, ...] | None:
+        """Return a deterministic shared-pool fingerprint tuple, or `None` when unshareable."""
+        msg = f"{type(self).__name__} does not implement pool_key()"
+        raise NotImplementedError(msg)
+
+    def resolve_driver_classes(self) -> tuple[type[Any], type[Any]]:
+        """Lazily import `driver_module` and return `(sync_driver_cls, async_driver_cls)`."""
+        if not self.driver_module or not self.sync_driver_name or not self.async_driver_name:
+            msg = f"{type(self).__name__} does not declare driver_module, sync_driver_name, and async_driver_name"
+            raise NotImplementedError(msg)
+        mod = ensure_module(self.driver_module)
+        return getattr(mod, self.sync_driver_name), getattr(mod, self.async_driver_name)
+
+    def build_sync_driver(self, registry: Any) -> Any:
+        """Instantiate the synchronous driver for this configuration."""
+        sync_cls, _ = self.resolve_driver_classes()
+        broker = getattr(self, "broker", None)
+        if broker is None and registry is not None:
+            broker = getattr(registry, "_broker", None)
+        return sync_cls(self, broker=broker)
+
+    def build_async_driver(self, registry: Any) -> Any:
+        """Instantiate the asynchronous driver for this configuration."""
+        _, async_cls = self.resolve_driver_classes()
+        broker = getattr(self, "broker", None)
+        if broker is None and registry is not None:
+            broker = getattr(registry, "_broker", None)
+        return async_cls(self, broker=broker)
 
 
 class CommonDriverMixin[ConfigT: BaseDatabaseConfig]:

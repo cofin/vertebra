@@ -48,8 +48,10 @@ from vertebra.db import (
     SyncAlloyDBDialer,
     SyncCloudSQLDialer,
     SyncDatabaseDriver,
+    provide_driver,
 )
 from vertebra.db.adapters.bigquery import AsyncBigQueryDriver, BigQueryConfig, SyncBigQueryDriver
+from vertebra.db.adapters.datafusion import DataFusionConfig, DataFusionEngine
 from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
 from vertebra.db.adapters.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLDriver
 from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
@@ -170,8 +172,7 @@ _EXPECTED_DB_EXPORTS: frozenset[str] = frozenset(
         "TenantPredicate",
         "TenantScopeConfig",
         "ThreadOffloadAsyncDatabaseDriver",
-        "provide_bigquery_driver",
-        "provide_spanner_driver",
+        "provide_driver",
     }
 )
 
@@ -1922,3 +1923,293 @@ def test_capability_exports_on_driver_and_lazy_db_root_with_zero_upward_imports(
         sys.modules.update(saved)
         if "vertebra.db" in saved:
             vertebra.__dict__["db"] = saved["vertebra.db"]
+
+
+_TEMPORARY_UPWARD_IMPORT_ALLOWLIST: frozenset[str] = frozenset({"vertebra.db.mcp_tools"})
+
+
+@pytest.mark.parametrize(
+    ("url", "expected_cls"),
+    [
+        ("postgresql://localhost:5432/appdb", PostgreSQLConfig),
+        ("postgres://localhost:5432/appdb", PostgreSQLConfig),
+        ("postgresql+vtb://localhost:5432/appdb", PostgreSQLConfig),
+        ("mysql://localhost:3306/appdb", MySQLConfig),
+        ("mariadb://localhost:3306/appdb", MySQLConfig),
+        ("sqlite:///tmp.db", SQLiteConfig),
+        ("oracle://scott:tiger@localhost:1521/FREEPDB1", OracleConfig),
+        ("mssql://sa:secret@localhost:1433/master", MSSQLConfig),
+        ("sqlserver://sa:secret@localhost:1433/master", MSSQLConfig),
+        ("duckdb:///tmp.duckdb", DuckDBConfig),
+        ("bigquery://proj/ds", BigQueryConfig),
+        ("bq://proj/ds", BigQueryConfig),
+        ("bigquery+vtb://proj/ds", BigQueryConfig),
+        ("spanner://projects/p/instances/i/databases/d", SpannerConfig),
+        ("spangres://projects/p/instances/i/databases/d", SpannerConfig),
+        ("spanner+googlesql://projects/p/instances/i/databases/d", SpannerConfig),
+        ("spanner+spangres://projects/p/instances/i/databases/d", SpannerConfig),
+        ("spanner+vtb://projects/p/instances/i/databases/d", SpannerConfig),
+        ("spangres+vertebra://projects/p/instances/i/databases/d", SpannerConfig),
+        ("redis://localhost:6379/0", RedisConfig),
+        ("rediss://localhost:6379/0", RedisConfig),
+        ("memory://", RedisConfig),
+        ("valkey://localhost:6379/0", ValkeyConfig),
+        ("valkeys://localhost:6379/0", ValkeyConfig),
+        ("datafusion://embedded?target_partitions=4", DataFusionConfig),
+        ("cloudsql://proj:us-central1:inst", CloudSQLConfig),
+        ("alloydb:///projects/p/locations/l/clusters/c/instances/i", AlloyDBConfig),
+    ],
+)
+def test_polymorphic_registry_parse_url_roundtrip(url: str, expected_cls: type[Any]) -> None:
+    """Verify every supported database, cache, analytics, and dialer URL scheme round-trips via from_url."""
+    parsed = DatabaseRegistry.parse_url(url)
+    assert isinstance(parsed, expected_cls)
+    assert parsed == expected_cls.from_url(url)
+
+
+def test_registry_parse_url_executes_zero_eager_driver_imports() -> None:
+    """Verify importing DatabaseRegistry and calling parse_url imports zero adapter driver modules."""
+    sample_urls = (
+        "postgresql://localhost:5432/appdb",
+        "mysql://localhost:3306/appdb",
+        "sqlite:///tmp.db",
+        "oracle://scott:tiger@localhost:1521/FREEPDB1",
+        "mssql://sa:secret@localhost:1433/master",
+        "duckdb:///tmp.duckdb",
+        "bigquery://proj/ds",
+        "spanner://projects/p/instances/i/databases/d",
+        "redis://localhost:6379/0",
+        "valkey://localhost:6379/0",
+        "datafusion://embedded",
+        "cloudsql://proj:us-central1:inst",
+        "alloydb:///projects/p/locations/l/clusters/c/instances/i",
+    )
+    saved = {
+        name: sys.modules.pop(name)
+        for name in list(sys.modules)
+        if name == "vertebra.db" or name.startswith("vertebra.db.")
+    }
+    reset_dependency_cache()
+    try:
+        reg_mod = importlib.import_module("vertebra.db.registry")
+        driver_mods_on_import = [
+            name for name in sys.modules if name.startswith("vertebra.db.adapters.") and name.endswith(".driver")
+        ]
+        assert driver_mods_on_import == []
+
+        parsed_configs = [reg_mod.DatabaseRegistry.parse_url(u) for u in sample_urls]
+        driver_mods_after_parse = [
+            name for name in sys.modules if name.startswith("vertebra.db.adapters.") and name.endswith(".driver")
+        ]
+        assert driver_mods_after_parse == []
+
+        sqlite_cfg = parsed_configs[2]
+        sync_cls, async_cls = sqlite_cfg.resolve_driver_classes()
+        assert sync_cls.__name__ == "SyncSQLiteDriver"
+        assert async_cls.__name__ == "AsyncSQLiteDriver"
+        assert "vertebra.db.adapters.sqlite.driver" in sys.modules
+        assert "vertebra.db.adapters.postgres.driver" not in sys.modules
+        assert "vertebra.db.adapters.bigquery.driver" not in sys.modules
+    finally:
+        for name in list(sys.modules):
+            if name == "vertebra.db" or name.startswith("vertebra.db."):
+                sys.modules.pop(name, None)
+        sys.modules.update(saved)
+        if "vertebra.db" in saved:
+            vertebra.__dict__["db"] = saved["vertebra.db"]
+        reset_dependency_cache()
+
+
+@pytest.mark.anyio
+async def test_pool_key_memory_isolation_and_provide_driver_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify pool_key returns None for isolated memory DBs and provide_driver replaces GCP-only helpers."""
+    monkeypatch.chdir(tmp_path)
+    assert SQLiteConfig(path=":memory:").pool_key() is None
+    assert SQLiteConfig(path="file:memdb1?mode=memory").pool_key() is None
+    assert SQLiteConfig(path="file:memdb1?mode=memory&cache=shared").pool_key() is not None
+    file_db = tmp_path / "shared_pool.db"
+    assert SQLiteConfig(path=str(file_db)).pool_key() is not None
+
+    assert DuckDBConfig(database=":memory:").pool_key() is None
+    assert DuckDBConfig(path="/tmp/x.duckdb").pool_key() == ("duckdb", "/tmp/x.duckdb", False)
+
+    assert RedisConfig(url="redis://localhost:6379/0").pool_key() == ("redis", "redis://localhost:6379/0")
+    assert ValkeyConfig(url="valkey://localhost:6379/0").pool_key() == ("valkey", "valkey://localhost:6379/0")
+    assert DataFusionConfig(target_partitions=2).pool_key() is not None
+    assert CloudSQLConfig(instance_connection_name="p:r:i").pool_key() == ("cloudsql", "p:r:i")
+    assert AlloyDBConfig(instance_uri="/projects/p/locations/l/clusters/c/instances/i").pool_key() == (
+        "alloydb",
+        "/projects/p/locations/l/clusters/c/instances/i",
+    )
+
+    assert DatabaseRegistry.pool_fingerprint("sqlite:///:memory:") is None
+    assert DatabaseRegistry.pool_fingerprint("duckdb:///:memory:") is None
+
+    reg = DatabaseRegistry()
+    m1 = provide_driver("sqlite:///:memory:", sync=True, registry=reg)
+    m2 = provide_driver("sqlite:///:memory:", sync=True, registry=reg)
+    assert isinstance(m1, SyncSQLiteDriver)
+    assert isinstance(m2, SyncSQLiteDriver)
+    assert m1 is not m2
+    m1.execute("CREATE TABLE iso_check (id INTEGER PRIMARY KEY)")
+    with pytest.raises(OperationalError):
+        m2.select("SELECT id FROM iso_check")
+
+    am1 = provide_driver("sqlite:///:memory:", sync=False, registry=reg)
+    am2 = provide_driver("sqlite:///:memory:", sync=False, registry=reg)
+    assert isinstance(am1, AsyncSQLiteDriver)
+    assert isinstance(am2, AsyncSQLiteDriver)
+    assert am1 is not am2
+
+    s1 = provide_driver(SQLiteConfig(path=str(file_db)), sync=True, registry=reg)
+    s2 = provide_driver(SQLiteConfig(path=str(file_db)), sync=True, registry=reg)
+    assert s1 is s2
+
+    shared_mem_cfg = SQLiteConfig(path="file:memdb_shared_t06?mode=memory&cache=shared")
+    sm1 = provide_driver(shared_mem_cfg, sync=True, registry=reg)
+    sm2 = provide_driver(shared_mem_cfg, sync=True, registry=reg)
+    assert sm1 is sm2
+
+    reg.register("sqlite_named", SQLiteConfig(path=str(tmp_path / "named.db")))
+    named_sync = provide_driver("sqlite_named", sync=True, registry=reg)
+    named_async = provide_driver("sqlite_named", sync=False, registry=reg)
+    assert isinstance(named_sync, SyncSQLiteDriver)
+    assert isinstance(named_async, AsyncSQLiteDriver)
+    assert provide_driver("sqlite_named", sync=True, registry=reg) is named_sync
+    assert provide_driver("sqlite_named", sync=False, registry=reg) is named_async
+
+    df_cfg = DataFusionConfig(target_partitions=2)
+    df_sync = provide_driver(df_cfg, sync=True, registry=reg)
+    df_async = provide_driver(df_cfg, sync=False, registry=reg)
+    assert isinstance(df_sync, DataFusionEngine)
+    assert isinstance(df_async, DataFusionEngine)
+    assert provide_driver("datafusion://embedded?target_partitions=2", sync=True, registry=reg) is df_sync
+
+    vk_sync = provide_driver("valkey://localhost:6379/0", sync=True, registry=reg)
+    vk_async = provide_driver("valkey://localhost:6379/0", sync=False, registry=reg)
+    assert isinstance(vk_sync, SyncValkeyDriver)
+    assert isinstance(vk_async, AsyncValkeyDriver)
+
+    reg_mod = importlib.import_module("vertebra.db.registry")
+    assert not hasattr(vertebra_db, "provide_bigquery_driver")
+    assert not hasattr(vertebra_db, "provide_spanner_driver")
+    assert not hasattr(reg_mod, "provide_bigquery_driver")
+    assert not hasattr(reg_mod, "provide_spanner_driver")
+
+
+def test_registry_get_dialer_sync_async_caching_mssql_wiring_and_provide_driver_type_error() -> None:
+    """Verify get_dialer caches sync/async dialers separately, wires PG/MySQL/MSSQL, and provide_driver rejects dialers."""
+    reg = DatabaseRegistry()
+    csql_cfg = CloudSQLConfig(instance_connection_name="proj:us-central1:inst")
+    alloy_cfg = AlloyDBConfig(instance_uri="/projects/p/locations/us-central1/clusters/c/instances/i")
+
+    sync_csql = reg.get_dialer(csql_cfg, sync=True)
+    async_csql = reg.get_dialer(csql_cfg, sync=False)
+    assert isinstance(sync_csql, SyncCloudSQLDialer)
+    assert isinstance(async_csql, AsyncCloudSQLDialer)
+    assert reg.get_dialer(csql_cfg, sync=True) is sync_csql
+    assert reg.get_dialer(csql_cfg) is async_csql
+    assert cast("object", sync_csql) is not cast("object", async_csql)
+
+    sync_alloy = reg.get_dialer(alloy_cfg, sync=True)
+    async_alloy = reg.get_dialer(alloy_cfg, sync=False)
+    assert isinstance(sync_alloy, SyncAlloyDBDialer)
+    assert isinstance(async_alloy, AsyncAlloyDBDialer)
+    assert reg.get_dialer(alloy_cfg, sync=True) is sync_alloy
+    assert reg.get_dialer(alloy_cfg) is async_alloy
+    assert cast("object", sync_alloy) is not cast("object", async_alloy)
+
+    assert reg.get_shared_driver(csql_cfg) is async_csql
+    assert reg.get_shared_sync_driver(csql_cfg) is sync_csql
+    assert reg.get_shared_driver(alloy_cfg) is async_alloy
+    assert reg.get_shared_sync_driver(alloy_cfg) is sync_alloy
+
+    pg_cfg = PostgreSQLConfig(dsn="postgresql://localhost:5432/appdb", cloud_sql_instance="proj:us-central1:inst")
+    my_cfg = MySQLConfig(dsn="mysql://localhost:3306/appdb", cloud_sql_instance="proj:us-central1:inst")
+    ms_cfg = MSSQLConfig(host="localhost", port=1433, database="master", cloudsql_instance="proj:us-central1:inst")
+
+    pg_sync = cast("SyncPostgreSQLDriver", reg.get_shared_sync_driver(pg_cfg))
+    pg_async = cast("AsyncPostgreSQLDriver", reg.get_shared_driver(pg_cfg))
+    my_sync = cast("SyncMySQLDriver", reg.get_shared_sync_driver(my_cfg))
+    my_async = cast("AsyncMySQLDriver", reg.get_shared_driver(my_cfg))
+    ms_sync = cast("SyncMSSQLDriver", reg.get_shared_sync_driver(ms_cfg))
+    ms_async = cast("AsyncMSSQLDriver", reg.get_shared_driver(ms_cfg))
+
+    assert pg_sync.dialer is sync_csql
+    assert pg_async.dialer is async_csql
+    assert my_sync.dialer is sync_csql
+    assert my_async.dialer is async_csql
+    assert ms_sync.dialer is sync_csql
+    assert ms_async.dialer is async_csql
+
+    reg.register("dialer_only", csql_cfg)
+    bad_targets: tuple[Any, ...] = (
+        csql_cfg,
+        alloy_cfg,
+        "cloudsql://proj:us-central1:inst",
+        "alloydb:///projects/p/locations/us-central1/clusters/c/instances/i",
+        "dialer_only",
+    )
+    for bad_target in bad_targets:
+        with pytest.raises(TypeError, match="get_dialer"):
+            provide_driver(bad_target, sync=False, registry=reg)
+        with pytest.raises(TypeError, match="get_dialer"):
+            provide_driver(bad_target, sync=True, registry=reg)
+
+
+def test_vertebra_db_ast_upward_import_boundary_gate() -> None:
+    """Enforce zero upward imports from vertebra.db into agent, framework, extensions, server, or embeddings."""
+    db_root = Path(vertebra_db.__file__).resolve().parent
+    src_root = db_root.parent.parent
+    forbidden_prefixes = (
+        "vertebra.agent",
+        "vertebra.framework",
+        "vertebra.extensions",
+        "vertebra.server",
+        "vertebra.embeddings",
+    )
+    upward_imports_by_module: dict[str, list[str]] = {}
+
+    for py_file in sorted(db_root.rglob("*.py")):
+        rel_parts = list(py_file.relative_to(src_root).with_suffix("").parts)
+        if rel_parts[-1] == "__init__":
+            pkg_parts = rel_parts[:-1]
+            module_name = ".".join(pkg_parts)
+        else:
+            pkg_parts = rel_parts[:-1]
+            module_name = ".".join(rel_parts)
+
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        violations: list[str] = []
+        for node in ast.walk(tree):
+            targets: list[str] = []
+            if isinstance(node, ast.Import):
+                targets.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.level == 0 and node.module:
+                    targets.append(node.module)
+                elif node.level > 0:
+                    anchor = pkg_parts[: len(pkg_parts) - (node.level - 1)]
+                    base_mod = ".".join([*anchor, node.module] if node.module else anchor)
+                    targets.append(base_mod)
+                    for alias in node.names:
+                        if alias.name != "*":
+                            targets.append(f"{base_mod}.{alias.name}" if base_mod else alias.name)
+            for target in targets:
+                if any(target == prefix or target.startswith(f"{prefix}.") for prefix in forbidden_prefixes):
+                    violations.append(target)
+        if violations:
+            upward_imports_by_module[module_name] = sorted(set(violations))
+
+    unexpected = {
+        mod: imports
+        for mod, imports in upward_imports_by_module.items()
+        if mod not in _TEMPORARY_UPWARD_IMPORT_ALLOWLIST
+    }
+    assert unexpected == {}
+
+    stale_allowlist = _TEMPORARY_UPWARD_IMPORT_ALLOWLIST - set(upward_imports_by_module)
+    assert stale_allowlist == set()

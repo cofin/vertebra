@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import inspect
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from vertebra.agent.core.schema import Tool
 from vertebra.agent.runtime import ConfirmationGate
 from vertebra.db.adapters.bigquery import AsyncBigQueryDriver, BigQueryConfig, ObjectTableConfig, SyncBigQueryDriver
 from vertebra.db.adapters.spanner import AsyncSpannerDriver, SpannerConfig, StalenessBound, SyncSpannerDriver
-from vertebra.db.registry import provide_bigquery_driver, provide_spanner_driver
+from vertebra.db.registry import provide_driver
 from vertebra.framework.security import PermissionDeniedError
 from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.text import validate_identifier
@@ -120,12 +120,12 @@ def register_gcp_database_tools(
     def _resolve_bq() -> AsyncBigQueryDriver | SyncBigQueryDriver:
         if bigquery_driver is not None:
             return bigquery_driver
-        return provide_bigquery_driver(bigquery_config or "default")
+        return cast("AsyncBigQueryDriver | SyncBigQueryDriver", provide_driver(bigquery_config or "default"))
 
     def _resolve_spanner() -> AsyncSpannerDriver | SyncSpannerDriver:
         if spanner_driver is not None:
             return spanner_driver
-        return provide_spanner_driver(spanner_config or "default")
+        return cast("AsyncSpannerDriver | SyncSpannerDriver", provide_driver(spanner_config or "default"))
 
     def _require_confirmation(
         tool_name: str,
