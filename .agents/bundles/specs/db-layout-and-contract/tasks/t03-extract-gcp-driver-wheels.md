@@ -59,8 +59,8 @@ tests:
   - src/py/tests/unit/db/test_bigquery.py
   - src/py/tests/unit/db/test_spanner.py
   - src/py/tests/unit/db/test_native_db_drivers.py
-plan_revision: 4
-plan_commit: "f741701"
+plan_revision: 5
+plan_commit: "2c0d365"
 state_revision: 2
 claimed_by: null
 claimed_at: null

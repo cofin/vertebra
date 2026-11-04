@@ -39,8 +39,8 @@ tests:
   - src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
   - src/py/tests/unit/extensions/test_sqlspec_bigquery.py
   - src/py/tests/unit/extensions/test_sqlspec_spanner.py
-plan_revision: 4
-plan_commit: "f741701"
+plan_revision: 5
+plan_commit: "2c0d365"
 state_revision: 2
 claimed_by: null
 claimed_at: null

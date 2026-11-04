@@ -1,5 +1,13 @@
 # Bundle Activity Log
 
+## [2026-11-04] flow-implement | Completed `db-layout-and-contract` (`t01`–`t07`, checkpoint `a5dbea6`)
+
+- Completed all 7 tasks and Phase 1–3 Recovery Checkpoints on `feat/db-updates`: `t01` (`8675187`, `vertebra.db.adapters.<engine>` move and fail-closed `DataFusionEngine`), `t02` (`2fa781f`, `vertebra-db` `connection.rs`/`py_async.rs`, `ShmCapsule`, and `DatabaseError` hierarchy), `t03` (`95afe7a`, standalone `vertebra-bigquery` and `vertebra-spanner` PyO3 wheels and optional extras), `t04` (`c031fc9`, unified `SyncDatabaseDriver`/`AsyncDatabaseDriver` contract), `t05` (`2c0d365`, runtime-checkable `Sync*`/`Async*` capability protocols), `t06` (`144ef8b`, polymorphic `DatabaseRegistry`, `provide_driver`, and upward-import AST gate), and `t07` (`a5dbea6`, parameterized cross-engine conformance suite, `docs/`, and OKF data chapters).
+
+## [2026-11-04] flow-revise | Revised `db-layout-and-contract` (`plan_revision: 5`, `plan_commit: 2c0d365`)
+
+- Added all eleven `src/py/vertebra/db/adapters/<engine>/__init__.py` barrels (`lazy_exports`) to `db-layout-and-contract:t06` so `DatabaseRegistry.parse_url` imports `<Engine>Config` without eagerly importing `driver.py`, specified `+vtb`/`+vertebra` URL scheme fallback and `pool_fingerprint -> tuple[Any, ...] | None`, and aligned `t07` `conftest.py` and `docs/` targets (`0` review findings).
+
 ## [2026-11-04] flow-setup | Cleaned Pre-OKF Legacy Artifacts and Aligned OKF v0.2 Bundle on `feat/db-updates`
 
 - Executed `/flow:setup` brownfield alignment (`Align & True-Up`, `shared` Git tracking policy) on `feat/db-updates` (`main @ f741701`):

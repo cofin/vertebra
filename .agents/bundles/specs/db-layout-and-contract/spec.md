@@ -9,13 +9,13 @@ research:
   - ../native-data-platform/research/gap-analysis_20261103.md
   - ../native-data-platform/research/rust-driver-crates_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
-plan_revision: 4
-plan_commit: "f741701"
-state_revision: 6
-current_task: "db-layout-and-contract:t06"
-last_verified_checkpoint: "95afe7a"
+plan_revision: 5
+plan_commit: "2c0d365"
+state_revision: 10
+current_task: null
+last_verified_checkpoint: "a5dbea6"
 created_at: 2026-11-03T04:05:00Z
-updated_at: "2026-11-04T18:57:00Z"
+updated_at: "2026-11-04T21:17:00Z"
 tags: [db, layout, wheels, contract, registry, conformance]
 ---
 
@@ -55,7 +55,7 @@ This flow establishes the structural, packaging, and behavioral foundation that 
 | Per-driver GCP PyO3 wheels | `src/rs/vertebra-bigquery/{Cargo,pyproject}.toml`, `src/rs/vertebra-spanner/{Cargo,pyproject}.toml`, `src/py/vertebra/_{bigquery,spanner}.pyi`, `pyproject.toml`, `Makefile` | **Extension packaging seam**: Extracts `SyncBigQueryClient` / `AsyncBigQueryClient` into `vertebra._bigquery` (`[bigquery]` extra) and `SyncSpannerClient` / `AsyncSpannerClient` into `vertebra._spanner` (`[spanner]` extra, plus `[storage]` extra for `vertebra-storage`), removing `google-cloud-*` and `tonic` from `vertebra-py` and default `vertebra-db`. |
 | Driver base contract | `src/py/vertebra/db/driver/{_common,_sync,_async}.py`, `src/py/vertebra/extensions/sqlalchemy/dialects.py::{SyncDBAPIConnection,AsyncDBAPICursor}`, `src/py/vertebra/extensions/sqlspec/{bigquery,spanner}.py` | **Local-substitutable**: Aligns sync/async signatures (`parameters`, `execute -> int`, `execute_with_description -> (rows, col_names)`, `select_one -> raises NotFoundError`, `select_value -> NotFoundError on 0 rows / None on SQL NULL`, `select_to_arrow(..., threshold_rows=...) -> ArrowCursor`, `stream_arrow_batches`, `transaction()`, `cancel()`, `close()`) with zero `# type: ignore[override]`. |
 | Engine capability protocols | `src/py/vertebra/db/driver/capabilities.py` | **Ports & Adapters**: Runtime-checkable `SyncPipelineCapable` (`SyncPipeline`), `AsyncPipelineCapable` (`AsyncPipeline`), `NotificationSource` (`NotificationEvent`), `SyncChangeSource`, `AsyncChangeSource`, `QueueStore` (`ClaimedJob`), and `EmbeddingPushdown` protocols plus frozen `msgspec.Struct` records. |
-| Polymorphic registry & DI | `src/py/vertebra/db/registry.py::DatabaseRegistry`, `src/py/vertebra/extensions/{litestar,fastapi,starlette,flask}/__init__.py` | **In-process**: Table-driven `parse_url`, `pool_fingerprint`, `@overload`ed `get_dialer(config, *, sync=False)`, and lazy driver builders via `BaseDatabaseConfig.{url_schemes,driver_module,sync_driver_name,async_driver_name,from_url,pool_key,build_sync_driver,build_async_driver}`, plus `provide_driver`. |
+| Polymorphic registry & DI | `src/py/vertebra/db/registry.py::DatabaseRegistry`, `src/py/vertebra/db/adapters/*/__init__.py`, `src/py/vertebra/extensions/{litestar,fastapi,starlette,flask}/__init__.py` | **In-process**: Converts `src/py/vertebra/db/adapters/<engine>/__init__.py` barrels to `lazy_exports` so `config.py` imports never load `driver.py`, and provides table-driven `parse_url`, `pool_fingerprint`, `@overload`ed `get_dialer(config, *, sync=False)`, lazy driver builders via `BaseDatabaseConfig.{url_schemes,driver_module,sync_driver_name,async_driver_name,from_url,pool_key,build_sync_driver,build_async_driver}`, and `provide_driver`. |
 | Cross-engine conformance | `src/py/tests/integration/db/test_driver_conformance.py`, `src/py/tests/integration/conftest.py` | **Local-substitutable & External DB boundary**: Parameterized `pytest-databases` conformance suite running `sqlite` and `datafusion`/`redis`/`valkey` config contracts natively now and marking pending native SQL engines `xfail(strict=True)`. |
 
 ### 1.4 Relevant Patterns, Domain Terms & Knowledge Chapters
@@ -79,7 +79,7 @@ This flow establishes the structural, packaging, and behavioral foundation that 
 - **R5 (Standalone `vertebra-bigquery` & `vertebra-spanner` PyO3 Wheels & Optional Extras)**: Extract BigQuery (`SyncBigQueryClient`, `AsyncBigQueryClient`) and Spanner (`SyncSpannerClient`, `AsyncSpannerClient`) Rust clients and PyO3 bindings out of `vertebra-db` and `vertebra-py` into workspace crates `src/rs/vertebra-bigquery` (`vertebra._bigquery`, `src/py/vertebra/_bigquery.pyi`) and `src/rs/vertebra-spanner` (`vertebra._spanner`, `src/py/vertebra/_spanner.pyi`) using `#[pymodule(gil_used = false)]` and `vertebra-db` (`features = ["gcp", "pyo3"]`); gate `vertebra_db::gcp` behind optional feature `gcp` and remove `google-cloud-*` and `tonic` from `vertebra-py/Cargo.toml` and default `vertebra-db/Cargo.toml`; declare `[project.optional-dependencies]` `bigquery`, `spanner`, and `storage` + `[tool.uv.sources]` + `[[tool.bumpversion.files]]` in `pyproject.toml`; update `Makefile` (`dev`, `build`, `py-test`, `lint`, `lint-all`), `areas.toml`, and `docs/reference/native-stubs.md`; and load `vertebra._bigquery` / `vertebra._spanner` via `ensure_module(..., package="vertebra-core[<engine>]", extra="<engine>")` in `db/adapters/{bigquery,spanner}/driver.py`.
 - **R6 (Unified Sync & Async Driver Contract)**: Standardize `SyncDatabaseDriver`, `AsyncDatabaseDriver`, `ThreadOffloadAsyncDatabaseDriver`, all eight SQL/analytical adapter drivers, and `SyncSpannerTransaction`/`AsyncSpannerTransaction`/`SyncSpannerSnapshot`/`AsyncSpannerSnapshot` on one method, parameter-name, and return-type contract with zero `# type: ignore[override]` annotations, updating `SyncDBAPIConnection` / `AsyncDBAPICursor` (`extensions/sqlalchemy/dialects.py`), `DataFusionEngine.register_{bigquery,spanner}_{table,query}` (`db/adapters/datafusion/driver.py`), and `extensions/sqlspec/{bigquery,spanner}.py` accordingly.
 - **R7 (Engine Capability Protocols)**: Define `@runtime_checkable` protocols `SyncPipelineCapable` (`SyncPipeline`), `AsyncPipelineCapable` (`AsyncPipeline`), `NotificationSource` (`NotificationEvent`), `SyncChangeSource`, `AsyncChangeSource`, `QueueStore` (`ClaimedJob`), and `EmbeddingPushdown` in `src/py/vertebra/db/driver/capabilities.py` with full typed `def` / `async def` signatures and `msgspec.Struct(..., frozen=True, gc=False)` value objects.
-- **R8 (Polymorphic `DatabaseRegistry` & `provide_driver`)**: Add `url_schemes`, lazy `driver_module`/`sync_driver_name`/`async_driver_name`, `from_url`, `pool_key`, and `build_sync_driver`/`build_async_driver` to `BaseDatabaseConfig` and every adapter config (preserving `"memory"` on `RedisConfig` and `"bq"` on `BigQueryConfig`, plus `url_schemes`/`from_url`/`pool_key` on `CloudSQLConfig` and `AlloyDBConfig`), replace `isinstance` / scheme `if` chains in `DatabaseRegistry` with table lookups (including `@overload`ed `get_dialer(config, *, sync=False)` returning `SyncCloudSQLDialer | SyncAlloyDBDialer` or `AsyncCloudSQLDialer | AsyncAlloyDBDialer`, and skipping shared caching when `pool_key()` is `None`), and replace `provide_bigquery_driver` / `provide_spanner_driver` with `provide_driver(name_or_config, *, sync=False, registry=None)` across `vertebra.db` and `vertebra.extensions.{litestar,fastapi,starlette,flask}`.
+- **R8 (Polymorphic `DatabaseRegistry` & `provide_driver`)**: Convert all eleven `src/py/vertebra/db/adapters/<engine>/__init__.py` barrels to `lazy_exports` so importing `vertebra.db.adapters.<engine>.config` never eagerly loads `driver.py`; add `url_schemes`, lazy `driver_module`/`sync_driver_name`/`async_driver_name`, `from_url`, `pool_key`, and `build_sync_driver`/`build_async_driver` to `BaseDatabaseConfig` and every adapter config (preserving `"memory"` on `RedisConfig` and `"bq"` on `BigQueryConfig`, plus `url_schemes`/`from_url`/`pool_key` on `CloudSQLConfig` and `AlloyDBConfig`); replace `isinstance` / scheme `if` chains in `DatabaseRegistry` with table lookups (including `@overload`ed `get_dialer(config, *, sync=False)` returning `SyncCloudSQLDialer | SyncAlloyDBDialer` or `AsyncCloudSQLDialer | AsyncAlloyDBDialer`, and skipping shared caching when `pool_key()` is `None`); and replace `provide_bigquery_driver` / `provide_spanner_driver` with `provide_driver(name_or_config, *, sync=False, registry=None)` across `vertebra.db` and `vertebra.extensions.{litestar,fastapi,starlette,flask}`.
 - **R9 (Upward-Import Gate & Cross-Engine Conformance Suite)**: Add an AST import-boundary test in `src/py/tests/unit/db/test_native_db_drivers.py` blocking `vertebra/db/**` imports from `vertebra.{agent,framework,extensions,server,embeddings}` (with sole temporary allowlist `{"vertebra.db.mcp_tools"}` removed in `db-engine-primitives:t05`), add the parameterized conformance suite `src/py/tests/integration/db/test_driver_conformance.py`, and update `docs/` and OKF data chapters.
 
 ### 2.2 Public Interfaces, Deep Modules & Seam Contracts
@@ -386,19 +386,19 @@ class EmbeddingPushdown(Protocol):
 
 - [x] [c031fc9] t04 — Unify `SyncDatabaseDriver` / `AsyncDatabaseDriver` method signatures and eliminate `# type: ignore[override]` (tasks/t04-driver-contract-and-signatures.md)
 - [x] [2c0d365] t05 — Define runtime-checkable `Sync*` / `Async*` engine capability protocols and `msgspec` records (tasks/t05-capability-protocols.md)
-- [~] t06 — Make `DatabaseRegistry` polymorphic, add `provide_driver`, and enforce the `vertebra/db` upward-import gate (tasks/t06-polymorphic-registry-and-import-gate.md)
+- [x] [144ef8b] t06 — Make `DatabaseRegistry` polymorphic, add `provide_driver`, and enforce the `vertebra/db` upward-import gate (tasks/t06-polymorphic-registry-and-import-gate.md)
 - **Phase 2 Recovery Checkpoint**: `make lint-all && uv run pytest src/py/tests/unit`
 
 ### Phase 3: Cross-Engine Conformance Suite & Documentation
 
-- [ ] t07 — Add parameterized `pytest-databases` driver conformance suite and update docs and OKF chapters (tasks/t07-conformance-suite-and-docs.md)
+- [x] [a5dbea6] t07 — Add parameterized `pytest-databases` driver conformance suite and update docs and OKF chapters (tasks/t07-conformance-suite-and-docs.md)
 - **Phase 3 Recovery Checkpoint**: `make lint-all && make rs-test && make py-test && uv run pytest src/py/tests/integration/db/test_driver_conformance.py && make docs && make review-check`
 
 ## 5. Continuity Snapshot
 
-- **Flow ID**: `db-layout-and-contract` (`state: active`, `plan_revision: 4`, `plan_commit: "f741701"`)
-- **Current Task**: `db-layout-and-contract:t06`
-- **Last Verified Checkpoint**: `95afe7a`
+- **Flow ID**: `db-layout-and-contract` (`state: active`, `plan_revision: 5`, `plan_commit: "2c0d365"`)
+- **Current Task**: `null`
+- **Last Verified Checkpoint**: `a5dbea6`
 - **Key Decisions**:
   - Engine adapters live under `vertebra.db.adapters.<engine>` (`postgres`, `mysql`, `sqlite`, `oracle`, `mssql`, `duckdb`, `bigquery`, `spanner`, `redis`, `valkey`, `datafusion`); engine-agnostic modules stay directly under `vertebra.db.{driver,registry,arrow,cdc,rls,dialer}`.
   - Every database engine compiles as its own optional PyO3 extension crate `src/rs/vertebra-<engine>` (`vertebra._<engine>` + `[project.optional-dependencies].<engine>`); `t03` extracts `vertebra-bigquery` and `vertebra-spanner` immediately so `vertebra._vertebra` and default `vertebra-db` are free of `google-cloud-*` / `tonic`.
@@ -407,3 +407,4 @@ class EmbeddingPushdown(Protocol):
 - **Recent Discoveries**:
   - Separate `cdylib` `.so` extensions each have distinct PyO3 `PyTypeObject` static instances and private `rlib` globals: `vertebra-db/src/py_async.rs` keys event-loop completion drainers uniquely per extension (`attr_name: &'static str`), and `vertebra_core::shm::ShmCapsule` transfers `Arc<ShmRegion>` ownership into `vertebra._vertebra.ArrowCursor` with zero copies and zero `DashMap` leaks.
   - `.github/workflows/ci.yml` runs `uv sync --frozen` in `build-docs` and runs `make lint-all` without building optional `.so` extensions first, so `t03` updates `uv.lock` via `uv lock --offline` and guards optional extension `stubtest` imports in `Makefile`.
+  - Importing `vertebra.db.adapters.<engine>.config` in Python always executes parent package `vertebra/db/adapters/<engine>/__init__.py` first, so `t06` converts all eleven adapter `__init__.py` barrels to `lazy_exports` alongside `DatabaseRegistry` table dispatch.

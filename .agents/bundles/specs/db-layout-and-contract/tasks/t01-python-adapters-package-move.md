@@ -110,8 +110,8 @@ tests:
   - src/py/tests/unit/extensions/test_starlette_plugin.py
   - src/py/tests/unit/framework/test_distributed_queues.py
   - src/py/tests/unit/storage/test_gcs_token_refresh.py
-plan_revision: 4
-plan_commit: "f741701"
+plan_revision: 5
+plan_commit: "2c0d365"
 state_revision: 2
 claimed_by: null
 claimed_at: null
