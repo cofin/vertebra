@@ -663,8 +663,57 @@ impl SpannerQueryParameter {
     }
 }
 
-/// Parse a JSON-serialized array of query parameters (`[{"name": "p1", "type": "INT64", "value": "42"}, ...]`)
-/// into [`SpannerQueryParameter`] items.
+fn parse_typed_spanner_param(name: String, item: &serde_json::Value) -> SpannerQueryParameter {
+    let type_str = item
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("STRING");
+    let code = SpannerTypeCode::from_type_str(type_str);
+    let elem_type_str = item.get("array_type").and_then(|v| v.as_str());
+    let param_type = if code == SpannerTypeCode::Array {
+        let elem_code = SpannerTypeCode::from_type_str(elem_type_str.unwrap_or("STRING"));
+        SpannerType::array(SpannerType::scalar(elem_code))
+    } else {
+        let mut ty = SpannerType::scalar(code);
+        if type_str.eq_ignore_ascii_case("PG_JSONB") {
+            ty.type_annotation = SpannerTypeAnnotation::PgJsonb;
+        } else if type_str.eq_ignore_ascii_case("PG_NUMERIC") {
+            ty.type_annotation = SpannerTypeAnnotation::PgNumeric;
+        }
+        ty
+    };
+    let value = json_to_protobuf_value(item.get("value").unwrap_or(&serde_json::Value::Null), code);
+    SpannerQueryParameter {
+        name,
+        value,
+        param_type,
+    }
+}
+
+fn inferred_json_to_spanner_value(val: &serde_json::Value) -> SpannerValue {
+    match val {
+        serde_json::Value::Null => SpannerValue::Null,
+        serde_json::Value::Bool(b) => SpannerValue::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                SpannerValue::Int64(i)
+            } else {
+                SpannerValue::Float64(n.as_f64().unwrap_or(0.0))
+            }
+        }
+        serde_json::Value::String(s) => SpannerValue::String(s.clone()),
+        serde_json::Value::Array(items) => {
+            SpannerValue::Array(items.iter().map(inferred_json_to_spanner_value).collect())
+        }
+        serde_json::Value::Object(map) => {
+            SpannerValue::Json(serde_json::Value::Object(map.clone()).to_string())
+        }
+    }
+}
+
+/// Parse a JSON-serialized array (`[{"name": "p1", "type": "INT64", "value": "42"}, ...]`) or
+/// object (`{"p1": 42, "p2": {"type": "INT64", "value": null}}`) of query parameters into
+/// [`SpannerQueryParameter`] items.
 pub fn parse_spanner_parameters_json(
     params_json: Option<&str>,
 ) -> Result<Vec<SpannerQueryParameter>, SpannerError> {
@@ -673,48 +722,48 @@ pub fn parse_spanner_parameters_json(
     };
     let parsed: serde_json::Value = serde_json::from_str(raw)
         .map_err(|e| SpannerError::InvalidArgument(format!("invalid params_json: {e}")))?;
-    let Some(arr) = parsed.as_array() else {
-        return Err(SpannerError::InvalidArgument(
-            "params_json must be a JSON array".to_string(),
-        ));
-    };
-    let mut out = Vec::with_capacity(arr.len());
-    for item in arr {
-        let name = item
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let type_str = item
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("STRING");
-        let code = SpannerTypeCode::from_type_str(type_str);
-        let elem_type_str = item.get("array_type").and_then(|v| v.as_str());
-        let param_type = if code == SpannerTypeCode::Array {
-            let elem_code = SpannerTypeCode::from_type_str(elem_type_str.unwrap_or("STRING"));
-            SpannerType::array(SpannerType::scalar(elem_code))
-        } else {
-            let mut ty = SpannerType::scalar(code);
-            if type_str.eq_ignore_ascii_case("PG_JSONB") {
-                ty.type_annotation = SpannerTypeAnnotation::PgJsonb;
-            } else if type_str.eq_ignore_ascii_case("PG_NUMERIC") {
-                ty.type_annotation = SpannerTypeAnnotation::PgNumeric;
+    match &parsed {
+        serde_json::Value::Array(arr) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for item in arr {
+                let name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                out.push(parse_typed_spanner_param(name, item));
             }
-            ty
-        };
-        let value =
-            json_to_protobuf_value(item.get("value").unwrap_or(&serde_json::Value::Null), code);
-        out.push(SpannerQueryParameter {
-            name,
-            value,
-            param_type,
-        });
+            Ok(out)
+        }
+        serde_json::Value::Object(map) => {
+            let mut out = Vec::with_capacity(map.len());
+            for (key, entry) in map {
+                let name = key.trim_start_matches(['@', '$']).to_string();
+                if entry.is_object() && entry.get("type").and_then(|v| v.as_str()).is_some() {
+                    out.push(parse_typed_spanner_param(name, entry));
+                } else {
+                    let sv = inferred_json_to_spanner_value(entry);
+                    out.push(SpannerQueryParameter::from_value(name, &sv));
+                }
+            }
+            Ok(out)
+        }
+        _ => Err(SpannerError::InvalidArgument(
+            "params_json must be a JSON array or object".to_string(),
+        )),
     }
-    Ok(out)
 }
 
 fn json_to_protobuf_value(val: &serde_json::Value, code: SpannerTypeCode) -> ProtobufValue {
+    if val.is_null() {
+        return ProtobufValue::Null;
+    }
+    if code == SpannerTypeCode::Json {
+        return match val {
+            serde_json::Value::String(s) => ProtobufValue::String(s.clone()),
+            other => ProtobufValue::String(other.to_string()),
+        };
+    }
     match val {
         serde_json::Value::Null => ProtobufValue::Null,
         serde_json::Value::Bool(b) => ProtobufValue::Bool(*b),
@@ -735,22 +784,16 @@ fn json_to_protobuf_value(val: &serde_json::Value, code: SpannerTypeCode) -> Pro
                 .map(|elem| json_to_protobuf_value(elem, SpannerTypeCode::String))
                 .collect(),
         ),
-        serde_json::Value::Object(map) => {
-            if code == SpannerTypeCode::Json {
-                ProtobufValue::String(serde_json::Value::Object(map.clone()).to_string())
-            } else {
-                ProtobufValue::Struct(
-                    map.iter()
-                        .map(|(k, v)| {
-                            (
-                                k.clone(),
-                                json_to_protobuf_value(v, SpannerTypeCode::String),
-                            )
-                        })
-                        .collect(),
-                )
-            }
-        }
+        serde_json::Value::Object(map) => ProtobufValue::Struct(
+            map.iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        json_to_protobuf_value(v, SpannerTypeCode::String),
+                    )
+                })
+                .collect(),
+        ),
     }
 }
 
@@ -1864,5 +1907,42 @@ impl SpannerClient {
                     SpannerError::Protocol(format!("GetOperation({op_name}) failed: {e}"))
                 })?;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_spanner_parameters_json_accepts_object_descriptors_typed_null_and_json_arrays() {
+        let raw = r#"{
+            "p1": 42,
+            "p2": {"type": "INT64", "value": null},
+            "p3": {"type": "JSON", "value": ["alpha", 42, {"ok": true}]},
+            "p4": {"type": "NUMERIC", "value": "12345.6789"}
+        }"#;
+        let params = parse_spanner_parameters_json(Some(raw)).expect("valid object params");
+        assert_eq!(params.len(), 4);
+
+        let by_name: HashMap<String, SpannerQueryParameter> =
+            params.into_iter().map(|p| (p.name.clone(), p)).collect();
+        assert_eq!(by_name["p1"].param_type.code, SpannerTypeCode::Int64);
+        assert_eq!(by_name["p1"].value, ProtobufValue::String("42".to_string()));
+
+        assert_eq!(by_name["p2"].param_type.code, SpannerTypeCode::Int64);
+        assert_eq!(by_name["p2"].value, ProtobufValue::Null);
+
+        assert_eq!(by_name["p3"].param_type.code, SpannerTypeCode::Json);
+        assert_eq!(
+            by_name["p3"].value,
+            ProtobufValue::String(r#"["alpha",42,{"ok":true}]"#.to_string())
+        );
+
+        assert_eq!(by_name["p4"].param_type.code, SpannerTypeCode::Numeric);
+        assert_eq!(
+            by_name["p4"].value,
+            ProtobufValue::String("12345.6789".to_string())
+        );
     }
 }

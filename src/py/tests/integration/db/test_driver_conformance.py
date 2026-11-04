@@ -14,6 +14,7 @@ import pyarrow.ipc as pa_ipc
 import pytest
 
 import vertebra.db.adapters.datafusion.driver as datafusion_driver_mod
+from vertebra._vertebra import BigQueryError, SpannerError
 from vertebra.db import (
     ArrowCursor,
     AsyncDatabaseDriver,
@@ -32,6 +33,7 @@ from vertebra.db import (
 from vertebra.db.adapters.bigquery import (
     AsyncBigQueryDriver,
     BigQueryConfig,
+    BigQueryCore,
     SyncBigQueryDriver,
 )
 from vertebra.db.adapters.datafusion import (
@@ -72,6 +74,7 @@ from vertebra.db.adapters.redis import (
 from vertebra.db.adapters.spanner import (
     AsyncSpannerDriver,
     SpannerConfig,
+    SpannerCore,
     SyncSpannerDriver,
 )
 from vertebra.db.adapters.sqlite import (
@@ -86,7 +89,7 @@ from vertebra.db.adapters.valkey import (
 )
 from vertebra.typing import FrozenBaseStruct, MissingDependencyError
 from vertebra.utils.module_loader import ensure_module
-from vertebra.utils.serializers import decode_json
+from vertebra.utils.serializers import decode_json, encode_json
 
 
 class _RollbackSentinelError(RuntimeError):
@@ -179,7 +182,11 @@ class EngineConformanceSpec(FrozenBaseStruct, frozen=True, gc=False):
     supports_pipeline: bool = False
     """Whether the driver pair implements `SyncPipelineCapable` and `AsyncPipelineCapable`."""
     duplicate_or_constraint_sql: tuple[str, tuple[Any, ...]] | None = None
-    """Optional `(sql, params)` statement triggering `IntegrityError` when primary keys are unenforced."""
+    """Optional `(sql, params)` statement triggering a constraint error when primary keys are unenforced."""
+    constraint_error_types: tuple[type[DatabaseError], ...] = (IntegrityError,)
+    """Typed `DatabaseError` subclasses expected on primary-key or `NOT NULL` constraint violations."""
+    invalid_sql_error_types: tuple[type[DatabaseError], ...] = (ProgrammingError, OperationalError)
+    """Typed `DatabaseError` subclasses expected when querying a nonexistent relation."""
     native_extension_module: str | None = None
     """Compiled native Rust PyO3 extension module required for live wire execution, if any."""
     pending_flow_id: str | None = None
@@ -188,6 +195,18 @@ class EngineConformanceSpec(FrozenBaseStruct, frozen=True, gc=False):
     """Environment variable names providing live external or emulator DSNs."""
     container_fixture: str | None = None
     """Optional `pytest-databases` configuration fixture in `conftest.py` used when `VERTEBRA_CONFORMANCE_DOCKER=1`."""
+
+    def bind_scalar_case(self, type_case: ScalarTypeCase) -> Any:
+        """Encode `type_case.input_value` for engines requiring explicit `JSON` parameter descriptors."""
+        if self.engine in {"bigquery", "spanner"} and type_case.comparison_kind == "json":
+            return {"type": "JSON", "value": encode_json(type_case.input_value)}
+        return type_case.input_value
+
+    def typed_null_int64(self) -> Any:
+        """Return an engine-appropriate `NULL` parameter value targeting a nullable `INT64` / `BIGINT` column."""
+        if self.engine in {"bigquery", "spanner"}:
+            return {"type": "INT64", "value": None}
+        return None
 
     def format_sql(self, sql: str) -> str:
         """Rewrite `?` placeholders outside quoted literals into this engine's `placeholder_style`."""
@@ -379,6 +398,8 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
             "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
             (1, None, 20),
         ),
+        constraint_error_types=(BigQueryError,),
+        invalid_sql_error_types=(BigQueryError,),
         native_extension_module="vertebra._bigquery",
         env_dsn_vars=("VERTEBRA_CONFORMANCE_BIGQUERY_DSN",),
     ),
@@ -391,6 +412,8 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         placeholder_style="at_p",
         items_ddl=_SPANNER_ITEMS_DDL,
         types_ddl=_SPANNER_TYPES_DDL,
+        constraint_error_types=(SpannerError,),
+        invalid_sql_error_types=(SpannerError,),
         native_extension_module="vertebra._spanner",
         env_dsn_vars=("VERTEBRA_CONFORMANCE_SPANNER_DSN", "SPANNER_EMULATOR_HOST"),
     ),
@@ -622,10 +645,20 @@ def sync_sql_driver(
     driver.connect()
     try:
         assert driver.select_value(spec.probe_sql, value_type=int) == 1
-        driver.execute("DROP TABLE IF EXISTS vtb_conformance_items")
-        driver.execute("DROP TABLE IF EXISTS vtb_conformance_types")
-        driver.execute(spec.items_ddl)
-        driver.execute(spec.types_ddl)
+        if isinstance(driver, SyncSpannerDriver):
+            driver.update_ddl(
+                [
+                    "DROP TABLE IF EXISTS vtb_conformance_items",
+                    "DROP TABLE IF EXISTS vtb_conformance_types",
+                    spec.items_ddl,
+                    spec.types_ddl,
+                ]
+            )
+        else:
+            driver.execute("DROP TABLE IF EXISTS vtb_conformance_items")
+            driver.execute("DROP TABLE IF EXISTS vtb_conformance_types")
+            driver.execute(spec.items_ddl)
+            driver.execute(spec.types_ddl)
         yield spec, driver
     finally:
         driver.close()
@@ -645,10 +678,20 @@ async def async_sql_driver(
     await driver.connect()
     try:
         assert await driver.select_value(spec.probe_sql, value_type=int) == 1
-        await driver.execute("DROP TABLE IF EXISTS vtb_conformance_items")
-        await driver.execute("DROP TABLE IF EXISTS vtb_conformance_types")
-        await driver.execute(spec.items_ddl)
-        await driver.execute(spec.types_ddl)
+        if isinstance(driver, AsyncSpannerDriver):
+            await driver.update_ddl(
+                [
+                    "DROP TABLE IF EXISTS vtb_conformance_items",
+                    "DROP TABLE IF EXISTS vtb_conformance_types",
+                    spec.items_ddl,
+                    spec.types_ddl,
+                ]
+            )
+        else:
+            await driver.execute("DROP TABLE IF EXISTS vtb_conformance_items")
+            await driver.execute("DROP TABLE IF EXISTS vtb_conformance_types")
+            await driver.execute(spec.items_ddl)
+            await driver.execute(spec.types_ddl)
         yield spec, driver
     finally:
         await driver.close()
@@ -706,7 +749,7 @@ def test_sync_scalar_and_structured_types(
     spec, driver = sync_sql_driver
     inserted = driver.execute(
         spec.format_sql(f"INSERT INTO vtb_conformance_types (id, {type_case.column}) VALUES (?, ?)"),
-        (1, type_case.input_value),
+        (1, spec.bind_scalar_case(type_case)),
     )
     assert inserted == 1
     actual = driver.select_value(
@@ -727,7 +770,7 @@ async def test_async_scalar_and_structured_types(
     spec, driver = async_sql_driver
     inserted = await driver.execute(
         spec.format_sql(f"INSERT INTO vtb_conformance_types (id, {type_case.column}) VALUES (?, ?)"),
-        (1, type_case.input_value),
+        (1, spec.bind_scalar_case(type_case)),
     )
     assert inserted == 1
     actual = await driver.select_value(
@@ -753,7 +796,7 @@ def test_sync_execution_contract(
 
     batch_count = driver.execute_many(
         insert_sql,
-        [(2, "beta", 20), (3, "gamma", None)],
+        [(2, "beta", 20), (3, "gamma", spec.typed_null_int64())],
     )
     assert isinstance(batch_count, int)
     assert batch_count == 2
@@ -827,7 +870,7 @@ async def test_async_execution_contract(
 
     batch_count = await driver.execute_many(
         insert_sql,
-        [(2, "beta", 20), (3, "gamma", None)],
+        [(2, "beta", 20), (3, "gamma", spec.typed_null_int64())],
     )
     assert isinstance(batch_count, int)
     assert batch_count == 2
@@ -958,15 +1001,15 @@ def test_sync_typed_database_errors(
         "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
         (1, "duplicate", 20),
     )
-    with pytest.raises(IntegrityError) as dup_exc:
+    with pytest.raises(spec.constraint_error_types) as dup_exc:
         driver.execute(
             spec.format_sql(constraint_sql),
             constraint_params,
         )
     assert isinstance(dup_exc.value, DatabaseError)
 
-    with pytest.raises((ProgrammingError, OperationalError)) as bad_sql_exc:
-        driver.execute("SELECT * FROM vtb_nonexistent_table_for_error_conformance")
+    with pytest.raises(spec.invalid_sql_error_types) as bad_sql_exc:
+        driver.select("SELECT * FROM vtb_nonexistent_table_for_error_conformance")
     assert isinstance(bad_sql_exc.value, DatabaseError)
 
 
@@ -985,15 +1028,15 @@ async def test_async_typed_database_errors(
         "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
         (1, "duplicate", 20),
     )
-    with pytest.raises(IntegrityError) as dup_exc:
+    with pytest.raises(spec.constraint_error_types) as dup_exc:
         await driver.execute(
             spec.format_sql(constraint_sql),
             constraint_params,
         )
     assert isinstance(dup_exc.value, DatabaseError)
 
-    with pytest.raises((ProgrammingError, OperationalError)) as bad_sql_exc:
-        await driver.execute("SELECT * FROM vtb_nonexistent_table_for_error_conformance")
+    with pytest.raises(spec.invalid_sql_error_types) as bad_sql_exc:
+        await driver.select("SELECT * FROM vtb_nonexistent_table_for_error_conformance")
     assert isinstance(bad_sql_exc.value, DatabaseError)
 
 
@@ -1330,3 +1373,48 @@ async def test_async_cache_memory_roundtrip_and_pipeline(
         await driver.delete("vtb:gamma")
     finally:
         await driver.close()
+
+
+def test_gcp_conformance_specs_encode_typed_null_json_and_error_contracts() -> None:
+    """BigQuery and Spanner conformance specs produce valid typed NULL, JSON scalar, and DatabaseError contracts."""
+    by_engine = {spec.engine: spec for spec in ENGINE_SPECS}
+    bq_spec = by_engine["bigquery"]
+    sp_spec = by_engine["spanner"]
+    json_cases = {case.name: case for case in SCALAR_TYPE_CASES if case.comparison_kind == "json"}
+
+    for spec in ENGINE_SPECS:
+        assert all(issubclass(err_cls, DatabaseError) for err_cls in spec.constraint_error_types)
+        assert all(issubclass(err_cls, DatabaseError) for err_cls in spec.invalid_sql_error_types)
+
+    assert bq_spec.constraint_error_types == (BigQueryError,)
+    assert sp_spec.constraint_error_types == (SpannerError,)
+
+    bq_params = decode_json(
+        BigQueryCore.encode_parameters_json(
+            (
+                1,
+                bq_spec.bind_scalar_case(json_cases["json_dict"]),
+                bq_spec.bind_scalar_case(json_cases["json_list"]),
+                bq_spec.typed_null_int64(),
+            )
+        )
+        or "[]"
+    )
+    assert bq_params[1] == {"type": "JSON", "value": encode_json(json_cases["json_dict"].input_value)}
+    assert bq_params[2] == {"type": "JSON", "value": encode_json(json_cases["json_list"].input_value)}
+    assert bq_params[3] == {"type": "INT64", "value": None}
+
+    sp_params = decode_json(
+        SpannerCore.encode_parameters_json(
+            (
+                1,
+                sp_spec.bind_scalar_case(json_cases["json_dict"]),
+                sp_spec.bind_scalar_case(json_cases["json_list"]),
+                sp_spec.typed_null_int64(),
+            )
+        )
+        or "{}"
+    )
+    assert sp_params["p2"] == {"type": "JSON", "value": encode_json(json_cases["json_dict"].input_value)}
+    assert sp_params["p3"] == {"type": "JSON", "value": encode_json(json_cases["json_list"].input_value)}
+    assert sp_params["p4"] == {"type": "INT64", "value": None}

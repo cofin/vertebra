@@ -68,7 +68,9 @@ from vertebra.db.adapters.spanner import (
 )
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
 from vertebra.db.adapters.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
+from vertebra.db.cdc import AsyncSpannerChangeStreamSource, SyncSpannerChangeStreamSource
 from vertebra.db.channels import DatabaseChannelBackend
+from vertebra.db.driver._common import SPANGRES_DIALECT_TAG
 from vertebra.db.driver.capabilities import (
     AsyncChangeSource,
     AsyncPipeline,
@@ -82,6 +84,7 @@ from vertebra.db.driver.capabilities import (
     SyncPipeline,
     SyncPipelineCapable,
 )
+from vertebra.db.registry import REGISTERED_CONFIG_TYPES
 from vertebra.extensions.litestar import ChannelsBackend, MemoryStore
 from vertebra.storage import GcpTokenSnapshot, SyncObjectStore
 from vertebra.typing import MissingDependencyError, VertebraError, reset_dependency_cache
@@ -2291,10 +2294,6 @@ def test_vertebra_db_ast_upward_import_boundary_gate() -> None:
 @pytest.mark.anyio
 async def test_dialect_tag_uniqueness_deterministic_file_urls_and_spanner_cdc_protocol() -> None:
     """Verify non-overlapping dialect_tag values, deterministic SQLite/DuckDB from_url paths, and Spanner CDC protocols."""
-    from vertebra.db.cdc import AsyncSpannerChangeStreamSource, SyncSpannerChangeStreamSource
-    from vertebra.db.driver._common import SPANGRES_DIALECT_TAG
-    from vertebra.db.registry import REGISTERED_CONFIG_TYPES
-
     tags = [tag for cfg_cls in REGISTERED_CONFIG_TYPES if (tag := getattr(cfg_cls, "dialect_tag", 0)) != 0]
     tags.append(SPANGRES_DIALECT_TAG)
     assert len(tags) == 12
