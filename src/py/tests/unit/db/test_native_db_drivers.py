@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import datetime
 import decimal
+import gc
 import importlib
 import re
 import sqlite3
@@ -12,10 +14,10 @@ import sys
 import time
 import tomllib
 import uuid
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Self, cast
 
 import pytest
 
@@ -23,6 +25,7 @@ import vertebra
 import vertebra._vertebra as native_vertebra
 import vertebra.db as vertebra_db
 import vertebra.db.driver as vertebra_db_driver
+from vertebra._vertebra import VectorBatchView, VectorView
 from vertebra.db import (
     AlloyDBAuthType,
     AlloyDBClusterURI,
@@ -32,6 +35,7 @@ from vertebra.db import (
     AsyncCloudSQLDialer,
     AsyncDatabaseDriver,
     CDCConfig,
+    ChangeEvent,
     ChangeFeed,
     CloudSQLConfig,
     CloudSQLInstanceURI,
@@ -63,10 +67,29 @@ from vertebra.db.adapters.spanner import (
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
 from vertebra.db.adapters.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
 from vertebra.db.channels import DatabaseChannelBackend
+from vertebra.db.driver.capabilities import (
+    AsyncChangeSource,
+    AsyncPipeline,
+    AsyncPipelineCapable,
+    ClaimedJob,
+    EmbeddingPushdown,
+    NotificationEvent,
+    NotificationSource,
+    QueueStore,
+    SyncChangeSource,
+    SyncPipeline,
+    SyncPipelineCapable,
+)
 from vertebra.extensions.litestar import ChannelsBackend, MemoryStore
 from vertebra.storage import GcpTokenSnapshot, SyncObjectStore
 from vertebra.typing import MissingDependencyError, VertebraError, reset_dependency_cache
-from vertebra.utils.serializers import decode_json, encode_json
+from vertebra.utils.serializers import (
+    decode_json,
+    decode_msgpack,
+    encode_json,
+    encode_json_bytes,
+    encode_msgpack_bytes,
+)
 from vertebra.utils.sync_tools import SyncPool
 
 _ADAPTER_ENGINES: tuple[str, ...] = (
@@ -107,12 +130,16 @@ _EXPECTED_DB_EXPORTS: frozenset[str] = frozenset(
         "AlloyDBConfig",
         "ArrowCursor",
         "AsyncAlloyDBDialer",
+        "AsyncChangeSource",
         "AsyncCloudSQLDialer",
         "AsyncDatabaseDriver",
+        "AsyncPipeline",
+        "AsyncPipelineCapable",
         "BaseDatabaseConfig",
         "CDCConfig",
         "ChangeEvent",
         "ChangeFeed",
+        "ClaimedJob",
         "CloudSQLConfig",
         "CloudSQLInstanceURI",
         "CommonDriverMixin",
@@ -120,19 +147,26 @@ _EXPECTED_DB_EXPORTS: frozenset[str] = frozenset(
         "DataError",
         "DatabaseError",
         "DatabaseRegistry",
+        "EmbeddingPushdown",
         "IntegrityError",
         "InterfaceError",
         "InternalError",
         "NotFoundError",
         "NotSupportedError",
+        "NotificationEvent",
+        "NotificationSource",
         "OperationalError",
         "PoolExhaustedError",
         "ProgrammingError",
         "QueryCancelledError",
+        "QueueStore",
         "SerializationFailure",
         "SyncAlloyDBDialer",
+        "SyncChangeSource",
         "SyncCloudSQLDialer",
         "SyncDatabaseDriver",
+        "SyncPipeline",
+        "SyncPipelineCapable",
         "TenantPredicate",
         "TenantScopeConfig",
         "ThreadOffloadAsyncDatabaseDriver",
@@ -319,7 +353,7 @@ async def test_cloudsql_and_alloydb_dialers_unwrap_gcp_token_snapshot(monkeypatc
 
     monkeypatch.setattr("socket.create_connection", lambda *_a, **_kw: _FakeTlsSock())
     sync_alloy_connect = SyncAlloyDBDialer(alloy_cfg, token_cache=_SyncFakeTokenCache())
-    sync_alloy_connect.connect("127.0.0.1", ssl_context=_FakeSslCtx())
+    sync_alloy_connect.connect("127.0.0.1", ssl_context=cast("Any", _FakeSslCtx()))
     assert sync_alloy_connect._cached_token == "snap-oauth-token-xyz"
     assert SyncAlloyDBDialer.decode_metadata_exchange(sent_frames[-1])["oauth2_token"] == "snap-oauth-token-xyz"
 
@@ -346,7 +380,7 @@ async def test_cloudsql_and_alloydb_dialers_unwrap_gcp_token_snapshot(monkeypatc
 
     monkeypatch.setattr("asyncio.open_connection", _fake_open_connection)
     async_alloy_connect = AsyncAlloyDBDialer(alloy_cfg, token_cache=_AsyncFakeTokenCache())
-    await async_alloy_connect.connect("127.0.0.1", ssl_context=_FakeSslCtx())
+    await async_alloy_connect.connect("127.0.0.1", ssl_context=cast("Any", _FakeSslCtx()))
     assert async_alloy_connect._cached_token == "snap-oauth-token-xyz"
     assert AsyncAlloyDBDialer.decode_metadata_exchange(sent_frames[-1])["oauth2_token"] == "snap-oauth-token-xyz"
 
@@ -1398,3 +1432,493 @@ def test_zero_type_ignore_override_annotations_in_db_drivers() -> None:
     assert targets
     offenders = [str(path.relative_to(repo_root)) for path in targets if forbidden in path.read_text(encoding="utf-8")]
     assert offenders == []
+
+
+_CAPABILITY_EXPORT_NAMES: tuple[str, ...] = (
+    "AsyncChangeSource",
+    "AsyncPipeline",
+    "AsyncPipelineCapable",
+    "ClaimedJob",
+    "EmbeddingPushdown",
+    "NotificationEvent",
+    "NotificationSource",
+    "QueueStore",
+    "SyncChangeSource",
+    "SyncPipeline",
+    "SyncPipelineCapable",
+)
+
+
+class _ConformingSyncPipeline:
+    """Minimal conforming stand-in for `SyncPipeline`."""
+
+    __slots__ = ("_ops",)
+
+    def __init__(self) -> None:
+        self._ops: list[tuple[str, str, Any]] = []
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        return None
+
+    def execute(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> None:
+        self._ops.append(("execute", sql, parameters))
+
+    def select(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> None:
+        self._ops.append(("select", sql, parameters))
+
+    def results(self) -> list[Any]:
+        return list(self._ops)
+
+
+class _ConformingAsyncPipeline:
+    """Minimal conforming stand-in for `AsyncPipeline`."""
+
+    __slots__ = ("_ops",)
+
+    def __init__(self) -> None:
+        self._ops: list[tuple[str, str, Any]] = []
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        return None
+
+    def execute(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> None:
+        self._ops.append(("execute", sql, parameters))
+
+    def select(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> None:
+        self._ops.append(("select", sql, parameters))
+
+    async def results(self) -> list[Any]:
+        return list(self._ops)
+
+
+class _ConformingSyncPipelineDriver:
+    """Minimal conforming stand-in for `SyncPipelineCapable`."""
+
+    def pipeline(self) -> SyncPipeline:
+        return _ConformingSyncPipeline()
+
+
+class _ConformingAsyncPipelineDriver:
+    """Minimal conforming stand-in for `AsyncPipelineCapable`."""
+
+    def pipeline(self) -> AsyncPipeline:
+        return _ConformingAsyncPipeline()
+
+
+class _ConformingNotificationSource:
+    """Minimal conforming stand-in for `NotificationSource`."""
+
+    __slots__ = ("_events", "_subscribed")
+
+    def __init__(self) -> None:
+        self._subscribed: set[str] = set()
+        self._events: list[NotificationEvent] = []
+
+    async def publish(self, channel: str, payload: bytes | str) -> None:
+        raw = payload.encode("utf-8") if isinstance(payload, str) else payload
+        if channel in self._subscribed:
+            self._events.append(NotificationEvent(channel=channel, payload=raw, sender_id="standin"))
+
+    async def subscribe(self, channels: Sequence[str]) -> None:
+        self._subscribed.update(channels)
+
+    async def unsubscribe(self, channels: Sequence[str]) -> None:
+        self._subscribed.difference_update(channels)
+
+    async def listen(self) -> AsyncIterator[NotificationEvent]:
+        for event in tuple(self._events):
+            yield event
+
+
+class _ConformingSyncChangeSource:
+    """Minimal conforming stand-in for `SyncChangeSource`."""
+
+    def stream(self) -> Iterator[ChangeEvent]:
+        yield ChangeEvent(event_id=1, channel="orders", operation="INSERT", payload={"id": 1})
+
+
+class _ConformingAsyncChangeSource:
+    """Minimal conforming stand-in for `AsyncChangeSource`."""
+
+    async def stream(self) -> AsyncIterator[ChangeEvent]:
+        yield ChangeEvent(event_id=2, channel="orders", operation="UPDATE", payload={"id": 1})
+
+
+class _ConformingQueueStore:
+    """Minimal conforming stand-in for `QueueStore`."""
+
+    __slots__ = ("_jobs", "_ready")
+
+    def __init__(self) -> None:
+        self._ready = False
+        self._jobs: dict[str, ClaimedJob] = {}
+
+    async def ensure_schema(self) -> None:
+        self._ready = True
+
+    async def enqueue(
+        self,
+        queue: str,
+        task_name: str,
+        payload: bytes,
+        *,
+        job_id: str | None = None,
+        scheduled_at_ms: int | None = None,
+        max_attempts: int = 3,
+        headers: Mapping[str, str] | None = None,
+    ) -> str:
+        _ = scheduled_at_ms
+        jid = job_id or f"job-{len(self._jobs) + 1}"
+        self._jobs[jid] = ClaimedJob(
+            job_id=jid,
+            queue=queue,
+            task_name=task_name,
+            payload=payload,
+            attempt=1,
+            max_attempts=max_attempts,
+            lease_until_ms=0,
+            headers=dict(headers) if headers is not None else {},
+        )
+        return jid
+
+    async def enqueue_many(
+        self,
+        queue: str,
+        items: Sequence[tuple[str, bytes]],
+        *,
+        scheduled_at_ms: int | None = None,
+        max_attempts: int = 3,
+    ) -> list[str]:
+        ids: list[str] = []
+        for task_name, payload in items:
+            ids.append(
+                await self.enqueue(
+                    queue,
+                    task_name,
+                    payload,
+                    scheduled_at_ms=scheduled_at_ms,
+                    max_attempts=max_attempts,
+                )
+            )
+        return ids
+
+    async def claim(
+        self,
+        queue: str,
+        *,
+        limit: int = 1,
+        lease_ms: int = 30_000,
+        worker_id: str = "",
+    ) -> list[ClaimedJob]:
+        _ = worker_id
+        claimed: list[ClaimedJob] = []
+        for jid, job in list(self._jobs.items()):
+            if job.queue == queue and len(claimed) < limit:
+                leased = ClaimedJob(
+                    job_id=job.job_id,
+                    queue=job.queue,
+                    task_name=job.task_name,
+                    payload=job.payload,
+                    attempt=job.attempt,
+                    max_attempts=job.max_attempts,
+                    lease_until_ms=lease_ms,
+                    headers=dict(job.headers),
+                )
+                self._jobs[jid] = leased
+                claimed.append(leased)
+        return claimed
+
+    async def heartbeat(self, job_id: str, attempt: int, *, extend_ms: int = 30_000) -> bool:
+        _ = extend_ms
+        job = self._jobs.get(job_id)
+        return job is not None and job.attempt == attempt
+
+    async def complete(self, job_id: str, attempt: int) -> bool:
+        job = self._jobs.get(job_id)
+        if job is None or job.attempt != attempt:
+            return False
+        self._jobs.pop(job_id, None)
+        return True
+
+    async def fail(self, job_id: str, attempt: int, *, error: str, retry_delay_ms: int | None = None) -> None:
+        _ = (attempt, error, retry_delay_ms)
+        self._jobs.pop(job_id, None)
+
+    async def promote_scheduled(self, queue: str | None = None, *, now_ms: int | None = None, limit: int = 100) -> int:
+        _ = (queue, now_ms, limit)
+        return 0
+
+
+class _ConformingEmbeddingPushdown:
+    """Minimal conforming stand-in for `EmbeddingPushdown`."""
+
+    async def embed_documents(
+        self,
+        texts: Sequence[str],
+        *,
+        task: str = "document",
+        dimensions: int | None = None,
+        normalize: bool = True,
+    ) -> VectorBatchView:
+        _ = task
+        dim = dimensions or 3
+        rows = [[float(idx + 1)] * dim for idx, _ in enumerate(texts)]
+        return VectorBatchView.from_f32_rows(rows, normalize=normalize)
+
+    async def embed_query(
+        self,
+        text: str,
+        *,
+        dimensions: int | None = None,
+        normalize: bool = True,
+    ) -> VectorView:
+        _ = text
+        dim = dimensions or 3
+        return VectorView.from_f32([1.0] * dim, normalize=normalize)
+
+    async def similarity_search(
+        self,
+        query_vector: VectorView | Sequence[float],
+        *,
+        table: str,
+        embedding_column: str = "embedding",
+        top_k: int = 10,
+        metric: str = "cosine",
+    ) -> list[dict[str, Any]]:
+        vec_len = len(query_vector)
+        return [
+            {
+                "table": table,
+                "column": embedding_column,
+                "top_k": top_k,
+                "metric": metric,
+                "dimensions": vec_len,
+            }
+        ]
+
+
+@pytest.mark.parametrize(
+    ("record_cls", "default_kwargs", "full_kwargs", "mutate_attr", "mutate_val", "dict_attr"),
+    [
+        (
+            NotificationEvent,
+            {"channel": "orders", "payload": b"\x00\x01notify"},
+            {
+                "channel": "orders",
+                "payload": b"\x00\x01notify",
+                "sender_id": "pg-backend-42",
+                "metadata": {"lsn": "0/16B3748", "attempt": 1},
+            },
+            "channel",
+            "mutated",
+            "metadata",
+        ),
+        (
+            ClaimedJob,
+            {
+                "job_id": "job-101",
+                "queue": "emails",
+                "task_name": "send_receipt",
+                "payload": b"\x80\x02payload",
+                "attempt": 1,
+                "max_attempts": 5,
+                "lease_until_ms": 1_700_000_030_000,
+            },
+            {
+                "job_id": "job-101",
+                "queue": "emails",
+                "task_name": "send_receipt",
+                "payload": b"\x80\x02payload",
+                "attempt": 2,
+                "max_attempts": 5,
+                "lease_until_ms": 1_700_000_060_000,
+                "headers": {"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"},
+            },
+            "attempt",
+            99,
+            "headers",
+        ),
+    ],
+)
+def test_capability_records_frozen_gc_untracked_and_serializer_roundtrip(
+    record_cls: type[Any],
+    default_kwargs: dict[str, Any],
+    full_kwargs: dict[str, Any],
+    mutate_attr: str,
+    mutate_val: Any,
+    dict_attr: str,
+) -> None:
+    """Verify NotificationEvent and ClaimedJob are frozen, GC-untracked, isolated on defaults, and round-trip."""
+    first = record_cls(**default_kwargs)
+    second = record_cls(**default_kwargs)
+    populated = record_cls(**full_kwargs)
+
+    assert not gc.is_tracked(first)
+    assert not gc.is_tracked(populated)
+    assert getattr(first, dict_attr) == {}
+    assert getattr(first, dict_attr) is not getattr(second, dict_attr)
+    if record_cls is NotificationEvent:
+        assert first.sender_id is None
+
+    with pytest.raises(AttributeError):
+        setattr(populated, mutate_attr, mutate_val)
+
+    json_roundtrip = decode_json(encode_json_bytes(populated), type=record_cls)
+    assert json_roundtrip == populated
+    assert not gc.is_tracked(json_roundtrip)
+
+    msgpack_roundtrip = decode_msgpack(encode_msgpack_bytes(populated), type=record_cls)
+    assert msgpack_roundtrip == populated
+    assert not gc.is_tracked(msgpack_roundtrip)
+
+
+@pytest.mark.parametrize(
+    ("standin_factory", "expected_protocol"),
+    [
+        (_ConformingSyncPipeline, SyncPipeline),
+        (_ConformingAsyncPipeline, AsyncPipeline),
+        (_ConformingSyncPipelineDriver, SyncPipelineCapable),
+        (_ConformingAsyncPipelineDriver, AsyncPipelineCapable),
+        (_ConformingNotificationSource, NotificationSource),
+        (_ConformingSyncChangeSource, SyncChangeSource),
+        (_ConformingAsyncChangeSource, AsyncChangeSource),
+        (_ConformingQueueStore, QueueStore),
+        (_ConformingEmbeddingPushdown, EmbeddingPushdown),
+    ],
+)
+def test_capability_protocols_runtime_isinstance_and_sqlite_negative_checks(
+    standin_factory: Any,
+    expected_protocol: Any,
+) -> None:
+    """Verify conforming stand-ins satisfy runtime isinstance while SQLite drivers evaluate False."""
+    instance = standin_factory()
+    assert isinstance(instance, expected_protocol)
+    assert not isinstance(object(), expected_protocol)
+
+    sqlite_sync = SyncSQLiteDriver(SQLiteConfig(database=":memory:"))
+    sqlite_async = AsyncSQLiteDriver(SQLiteConfig(database=":memory:"))
+    try:
+        assert isinstance(sqlite_sync, SyncPipelineCapable) is False
+        assert isinstance(sqlite_sync, AsyncPipelineCapable) is False
+        assert isinstance(sqlite_sync, expected_protocol) is False
+        assert isinstance(sqlite_async, SyncPipelineCapable) is False
+        assert isinstance(sqlite_async, AsyncPipelineCapable) is False
+        assert isinstance(sqlite_async, expected_protocol) is False
+    finally:
+        sqlite_sync.close()
+
+
+@pytest.mark.anyio
+async def test_capability_protocols_static_subtyping_and_end_to_end_behavior() -> None:
+    """Verify static structural typing and end-to-end execution across all capability protocols."""
+    sync_capable: SyncPipelineCapable = _ConformingSyncPipelineDriver()
+    async_capable: AsyncPipelineCapable = _ConformingAsyncPipelineDriver()
+    notif_source: NotificationSource = _ConformingNotificationSource()
+    sync_cdc: SyncChangeSource = _ConformingSyncChangeSource()
+    async_cdc: AsyncChangeSource = _ConformingAsyncChangeSource()
+    queue_store: QueueStore = _ConformingQueueStore()
+    pushdown: EmbeddingPushdown = _ConformingEmbeddingPushdown()
+
+    raw_sync_pipe = sync_capable.pipeline()
+    assert isinstance(raw_sync_pipe, SyncPipeline)
+    assert not isinstance(raw_sync_pipe, AsyncPipeline)
+    with raw_sync_pipe as sync_pipe:
+        sync_pipe.execute("INSERT INTO items VALUES (1)")
+        sync_pipe.select("SELECT 1")
+        assert len(sync_pipe.results()) == 2
+
+    raw_async_pipe = async_capable.pipeline()
+    assert isinstance(raw_async_pipe, AsyncPipeline)
+    assert not isinstance(raw_async_pipe, SyncPipeline)
+    async with raw_async_pipe as async_pipe:
+        async_pipe.execute("INSERT INTO items VALUES (2)")
+        async_pipe.select("SELECT 2")
+        assert len(await async_pipe.results()) == 2
+
+    await notif_source.subscribe(["events"])
+    await notif_source.publish("events", "hello")
+    received = [evt async for evt in notif_source.listen()]
+    assert received == [NotificationEvent(channel="events", payload=b"hello", sender_id="standin")]
+    await notif_source.unsubscribe(["events"])
+
+    sync_events = list(sync_cdc.stream())
+    assert len(sync_events) == 1 and sync_events[0].operation == "INSERT"
+    async_events = [evt async for evt in async_cdc.stream()]
+    assert len(async_events) == 1 and async_events[0].operation == "UPDATE"
+
+    await queue_store.ensure_schema()
+    jid = await queue_store.enqueue("default", "work", b"body", headers={"k": "v"})
+    bulk_ids = await queue_store.enqueue_many("default", [("work2", b"b2")])
+    assert len(bulk_ids) == 1
+    claimed = await queue_store.claim("default", limit=2, lease_ms=15_000, worker_id="w1")
+    assert len(claimed) == 2 and claimed[0].job_id == jid
+    assert await queue_store.heartbeat(jid, 1, extend_ms=30_000) is True
+    assert await queue_store.complete(jid, 1) is True
+    await queue_store.fail(bulk_ids[0], 1, error="boom", retry_delay_ms=500)
+    assert await queue_store.promote_scheduled("default", now_ms=1_000, limit=10) == 0
+
+    batch_vec = await pushdown.embed_documents(["doc-a", "doc-b"], dimensions=4)
+    assert batch_vec.count == 2 and batch_vec.dimensions == 4
+    query_vec = await pushdown.embed_query("find docs", dimensions=4)
+    assert query_vec.dimensions == 4
+    hits = await pushdown.similarity_search(query_vec, table="docs", top_k=5)
+    assert hits[0]["table"] == "docs" and hits[0]["dimensions"] == 4
+
+
+@pytest.mark.parametrize("symbol_name", _CAPABILITY_EXPORT_NAMES)
+def test_capability_exports_on_driver_and_lazy_db_root_with_zero_upward_imports(symbol_name: str) -> None:
+    """Verify capability symbols export on db.driver and lazy db root without upward imports."""
+    cap_mod = importlib.import_module("vertebra.db.driver.capabilities")
+    assert symbol_name in cap_mod.__all__
+    assert symbol_name in vertebra_db_driver.__all__
+    assert symbol_name in vertebra_db.__all__
+    assert getattr(vertebra_db_driver, symbol_name) is getattr(cap_mod, symbol_name)
+    assert getattr(vertebra_db, symbol_name) is getattr(cap_mod, symbol_name)
+
+    repo_root = Path(__file__).resolve().parents[5]
+    cap_path = repo_root / "src/py/vertebra/db/driver/capabilities.py"
+    tree = ast.parse(cap_path.read_text(encoding="utf-8"), filename=str(cap_path))
+    imported_targets: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_targets.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported_targets.append(node.module)
+    forbidden_prefixes = ("vertebra.embeddings", "vertebra.framework", "vertebra.agent", "vertebra.server")
+    assert not any(
+        mod == prefix or mod.startswith(f"{prefix}.") for mod in imported_targets for prefix in forbidden_prefixes
+    )
+
+    saved = {
+        name: sys.modules.pop(name)
+        for name in list(sys.modules)
+        if name == "vertebra.db"
+        or name.startswith("vertebra.db.")
+        or name == "vertebra.embeddings"
+        or name.startswith("vertebra.embeddings.")
+    }
+    try:
+        fresh_db = importlib.import_module("vertebra.db")
+        assert "vertebra.db.driver.capabilities" not in sys.modules
+        resolved = getattr(fresh_db, symbol_name)
+        assert resolved is not None
+        assert "vertebra.db.driver.capabilities" in sys.modules
+        assert not any(name == "vertebra.embeddings" or name.startswith("vertebra.embeddings.") for name in sys.modules)
+    finally:
+        for name in list(sys.modules):
+            if (
+                name == "vertebra.db"
+                or name.startswith("vertebra.db.")
+                or name == "vertebra.embeddings"
+                or name.startswith("vertebra.embeddings.")
+            ):
+                sys.modules.pop(name, None)
+        sys.modules.update(saved)
+        if "vertebra.db" in saved:
+            vertebra.__dict__["db"] = saved["vertebra.db"]
