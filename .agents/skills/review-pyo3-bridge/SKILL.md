@@ -1,14 +1,16 @@
 ---
 name: review-pyo3-bridge
-description: Use when reviewing PyO3 native extension modules, GIL release discipline, free-threaded Python 3.14t/3.15t safety, and FFI view lifetimes across vertebra-py and vertebra-bundler.
+description: Use when reviewing PyO3 native extension modules, GIL release discipline, free-threaded Python 3.14t/3.15t safety, and FFI view lifetimes across vertebra-py, vertebra-bundler, vertebra-storage, vertebra-bigquery, and vertebra-spanner.
 ---
 
 <!-- truth: start -->
+- **Crates & Stubs**: `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, `vertebra-spanner`, and `src/py/vertebra/{_vertebra,_bundler,_storage,_bigquery,_spanner}.pyi`.
 - **GIL**: Every `#[pymodule]` declares `gil_used = false` (`FFI-01`).
 - **Detach**: Blocking I/O, waits, and transforms run inside `py.detach(...)` without Python references (`FFI-02`, `FFI-03`).
 - **Lifetimes**: Zero-copy views (`PyBuffer`, `body_view`) never outlive their backing SHM slot (`FFI-04`).
 - **Free-threaded**: Shared mutable state uses atomics or `Mutex`; no `static mut` (`FFI-05`).
 - **Errors**: No `unwrap()` on caller-controlled input; map to typed `PyErr` (`FFI-06`).
+- **Stubs**: `{_vertebra,_bundler,_storage,_bigquery,_spanner}.pyi` signatures match Rust `#[pyfunction]` and `#[pymethods]` exports (`FFI-09`).
 - **Suppressions**: Respect `FP-FFI-01`..`FP-FFI-02` in the shared catalog.
 <!-- truth: end -->
 
@@ -33,7 +35,7 @@ description: Use when reviewing PyO3 native extension modules, GIL release disci
 2. **Boundary isolation**: Verify no Python object reference crosses into `py.detach` closures (`FFI-03`).
 3. **Buffer lifetimes**: Audit SHM memoryview exposures to ensure release cannot cause use-after-free (`FFI-04`).
 4. **Thread safety**: Check that `#[pyclass]` instances are safe under concurrent multi-threaded access without the GIL (`FFI-05`).
-5. **Stub parity**: Verify that `_vertebra.pyi` and `_bundler.pyi` signatures match Rust implementations (`FFI-09`).
+5. **Stub parity**: Verify that `{_vertebra,_bundler,_storage,_bigquery,_spanner}.pyi` signatures match Rust implementations across `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, and `vertebra-spanner` (`FFI-09`).
 6. **Interning**: Verify hot headers and dictionary keys use `intern!` (`FFI-08`).
 
 ## Suppressions Index

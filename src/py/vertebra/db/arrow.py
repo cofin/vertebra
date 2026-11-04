@@ -32,15 +32,6 @@ _SHM_SEQ_LOCK = threading.Lock()
 _SHM_SEQ_COUNTER = 0
 
 
-def _next_shm_segment_name() -> str:
-    """Return a unique POSIX shared-memory segment name for `VTBARROW` frames."""
-    global _SHM_SEQ_COUNTER
-    with _SHM_SEQ_LOCK:
-        _SHM_SEQ_COUNTER += 1
-        seq = _SHM_SEQ_COUNTER
-    return f"/vtb-arrow-{os.getpid()}-{seq}"
-
-
 class ArrowCursor:
     """Zero-copy shared-memory Arrow IPC cursor for bulk analytical result sets."""
 
@@ -243,7 +234,7 @@ class ArrowCursor:
             if native_arrow_cls is not None and hasattr(native_arrow_cls, "write_ipc_to_shm"):
                 with contextlib.suppress(TypeError, ValueError, OSError, RuntimeError):
                     shm_cursor_obj = native_arrow_cls.write_ipc_to_shm(
-                        _next_shm_segment_name(),
+                        cls._next_shm_segment_name(),
                         ipc_bytes,
                         len(tuple_rows),
                     )
@@ -263,6 +254,15 @@ class ArrowCursor:
             mmap_obj=mmap_region,
             shm_cursor=shm_cursor_obj,
         )
+
+    @staticmethod
+    def _next_shm_segment_name() -> str:
+        """Return a unique POSIX shared-memory segment name for `VTBARROW` frames."""
+        global _SHM_SEQ_COUNTER
+        with _SHM_SEQ_LOCK:
+            _SHM_SEQ_COUNTER += 1
+            seq = _SHM_SEQ_COUNTER
+        return f"/vtb-arrow-{os.getpid()}-{seq}"
 
 
 def write_arrow_shm(table: Any) -> memoryview:

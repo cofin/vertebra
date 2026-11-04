@@ -39,7 +39,7 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
     """SQL Server login password."""
     trust_server_certificate: bool = False
     """When True, skip X.509 hostname and CA chain verification during TDS Pre-Login TLS negotiation."""
-    cloudsql_instance: str | None = None
+    cloud_sql_instance: str | None = None
     """Optional Google Cloud SQL for SQL Server instance connection name (`project:region:instance`)."""
     pool_min_size: int = 1
     """Minimum number of pooled TDS sessions per worker."""
@@ -61,9 +61,9 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
         return MSSQLCore.encode_tds_sql_batch(sql, transaction_descriptor)
 
     def to_cloud_dialer_config(self) -> CloudSQLConfig | None:
-        """Return `CloudSQLConfig` when `cloudsql_instance` is set."""
-        if self.cloudsql_instance:
-            return CloudSQLConfig(instance_connection_name=self.cloudsql_instance)
+        """Return `CloudSQLConfig` when `cloud_sql_instance` is set."""
+        if self.cloud_sql_instance:
+            return CloudSQLConfig(instance_connection_name=self.cloud_sql_instance)
         return None
 
     @classmethod
@@ -83,10 +83,10 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
             kwargs["user"] = parsed.username
         if parsed.password is not None:
             kwargs["password"] = parsed.password
-        if "cloudsql_instance" in query_params:
-            kwargs["cloudsql_instance"] = query_params["cloudsql_instance"]
-        elif "cloud_sql_instance" in query_params:
-            kwargs["cloudsql_instance"] = query_params["cloud_sql_instance"]
+        if "cloud_sql_instance" in query_params:
+            kwargs["cloud_sql_instance"] = query_params["cloud_sql_instance"]
+        elif "cloudsql_instance" in query_params:
+            kwargs["cloud_sql_instance"] = query_params["cloudsql_instance"]
         kwargs.update(overrides)
         return cls(**kwargs)
 
@@ -98,7 +98,7 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
             int(self.port),
             self.database,
             self.user,
-            self.cloudsql_instance or "",
+            self.cloud_sql_instance or "",
         )
 
     def build_sync_driver(self, registry: Any) -> Any:

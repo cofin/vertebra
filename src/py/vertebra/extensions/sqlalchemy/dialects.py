@@ -18,14 +18,7 @@ from sqlalchemy.engine.default import DefaultDialect
 from sqlalchemy.engine.url import URL
 from sqlalchemy.pool import AsyncAdaptedQueuePool, NullPool, Pool, QueuePool, StaticPool
 
-from vertebra.db.adapters.bigquery import AsyncBigQueryDriver, BigQueryConfig, SyncBigQueryDriver
-from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
-from vertebra.db.adapters.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLDriver
-from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
-from vertebra.db.adapters.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
-from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
-from vertebra.db.adapters.spanner import AsyncSpannerDriver, SpannerConfig, SyncSpannerDriver
-from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
+from vertebra.db.adapters.sqlite.config import SQLiteConfig
 from vertebra.db.registry import DatabaseRegistry
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.sync_tools import SyncPool
@@ -203,6 +196,14 @@ class SyncDBAPICursor:
             self.lastrowid = getattr(self._raw_cursor, "lastrowid", None)
             return self
 
+        if not _is_row_returning_sql(operation):
+            affected = self._conn.execute_dml(operation, parameters)
+            self._rows = []
+            self.description = None
+            self._pos = 0
+            self.rowcount = affected
+            return self
+
         self._rows, self.description = self._conn.execute_with_description(operation, parameters)
         self._pos = 0
         self.rowcount = len(self._rows)
@@ -217,6 +218,14 @@ class SyncDBAPICursor:
             self.description = getattr(self._raw_cursor, "description", None)
             self.rowcount = getattr(self._raw_cursor, "rowcount", -1)
             self.lastrowid = getattr(self._raw_cursor, "lastrowid", None)
+            return self
+
+        if not _is_row_returning_sql(operation):
+            affected = self._conn.execute_many_dml(operation, seq_of_parameters)
+            self._rows = []
+            self.description = None
+            self._pos = 0
+            self.rowcount = affected
             return self
 
         total = 0
@@ -317,26 +326,13 @@ class SyncDBAPIConnection:
                 if db_target.startswith("sqlite+"):
                     db_target = db_target.split(":///", 1)[-1] if ":///" in db_target else ":memory:"
                 self._sqlite_conn = sqlite3.connect(db_target, check_same_thread=False)
-                if self._share_pool and broker is None:
-                    self._driver = DatabaseRegistry.default().get_shared_sync_driver(self._config)
-                else:
-                    self._driver = SyncSQLiteDriver(self._config, broker=self._broker)
-            elif self._share_pool and broker is None:
+            if self._share_pool and broker is None:
                 self._driver = DatabaseRegistry.default().get_shared_sync_driver(self._config)
-            elif isinstance(self._config, PostgreSQLConfig):
-                self._driver = SyncPostgreSQLDriver(self._config, broker=self._broker)
-            elif isinstance(self._config, MySQLConfig):
-                self._driver = SyncMySQLDriver(self._config, broker=self._broker)
-            elif isinstance(self._config, OracleConfig):
-                self._driver = SyncOracleDriver(self._config, broker=self._broker)
-            elif isinstance(self._config, MSSQLConfig):
-                self._driver = SyncMSSQLDriver(self._config, broker=self._broker)
-            elif isinstance(self._config, DuckDBConfig):
-                self._driver = SyncDuckDBDriver(self._config, broker=self._broker)
-            elif isinstance(self._config, BigQueryConfig):
-                self._driver = SyncBigQueryDriver(self._config, broker=self._broker)
-            elif isinstance(self._config, SpannerConfig):
-                self._driver = SyncSpannerDriver(self._config, broker=self._broker)
+            else:
+                target_registry = (
+                    DatabaseRegistry.default() if self._broker is not None else DatabaseRegistry(broker=None)
+                )
+                self._driver = self._config.build_sync_driver(target_registry)
 
     @property
     def url(self) -> str:
@@ -422,6 +418,43 @@ class SyncDBAPIConnection:
                 rows = [tuple(r.get(k) for k in keys) for r in dict_rows]
                 return rows, desc
         return [], None
+
+    def execute_dml(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | dict[str, Any] = (),
+    ) -> int:
+        """Execute a non-row-returning SQL statement and return the affected row count."""
+        if self._sqlite_conn is not None:
+            cur = self._sqlite_conn.cursor()
+            cur.execute(sql, parameters)
+            return cur.rowcount
+        if self._driver is not None:
+            if hasattr(self._driver, "execute"):
+                return int(self._driver.execute(sql, parameters))
+            rows, _ = self.execute_with_description(sql, parameters)
+            return len(rows)
+        return -1
+
+    def execute_many_dml(
+        self,
+        sql: str,
+        seq_of_parameters: Sequence[Sequence[Any] | dict[str, Any]],
+    ) -> int:
+        """Execute a non-row-returning SQL statement across multiple parameter sets and return affected rows."""
+        if not seq_of_parameters:
+            return 0
+        if self._sqlite_conn is not None:
+            cur = self._sqlite_conn.cursor()
+            cur.executemany(sql, seq_of_parameters)
+            return cur.rowcount
+        if self._driver is not None:
+            if hasattr(self._driver, "execute_many"):
+                return int(self._driver.execute_many(sql, seq_of_parameters))
+            if hasattr(self._driver, "execute"):
+                return sum(int(self._driver.execute(sql, params)) for params in seq_of_parameters)
+            return sum(len(self.execute_with_description(sql, params)[0]) for params in seq_of_parameters)
+        return -1
 
     def execute_raw_tuples(
         self,
@@ -534,7 +567,12 @@ class AsyncDBAPICursor:
     ) -> AsyncDBAPICursor:
         """Execute a SQL statement asynchronously."""
         params = () if parameters is None else parameters
-        if self._driver is not None and hasattr(self._driver, "execute_with_description"):
+        if not _is_row_returning_sql(operation) and self._driver is not None and hasattr(self._driver, "execute"):
+            affected = await self._driver.execute(operation, params)
+            self._rows = []
+            self.description = None
+            self.rowcount = int(affected)
+        elif self._driver is not None and hasattr(self._driver, "execute_with_description"):
             raw_res = await self._driver.execute_with_description(operation, params)
             if isinstance(raw_res, tuple) and len(raw_res) >= 2:
                 self._rows = raw_res[0]
@@ -595,6 +633,19 @@ class AsyncDBAPICursor:
         seq_of_parameters: Sequence[Sequence[Any] | dict[str, Any]],
     ) -> AsyncDBAPICursor:
         """Execute parameterized SQL across multiple parameter sets asynchronously."""
+        if not seq_of_parameters:
+            self._rows = []
+            self.description = None
+            self._pos = 0
+            self.rowcount = 0
+            return self
+        if not _is_row_returning_sql(operation) and self._driver is not None and hasattr(self._driver, "execute_many"):
+            affected = await self._driver.execute_many(operation, seq_of_parameters)
+            self._rows = []
+            self.description = None
+            self._pos = 0
+            self.rowcount = int(affected)
+            return self
         total = 0
         last_rows: list[tuple[Any, ...]] = []
         last_desc: tuple[tuple[str, Any, None, None, None, None, None], ...] | None = None
@@ -677,22 +728,11 @@ class AsyncDBAPIConnection:
         if self._driver is None:
             if self._share_pool and broker is None:
                 self._driver = DatabaseRegistry.default().get_shared_driver(self._config)
-            elif isinstance(self._config, SQLiteConfig):
-                self._driver = AsyncSQLiteDriver(self._config, broker=self._broker)
-            elif isinstance(self._config, PostgreSQLConfig):
-                self._driver = AsyncPostgreSQLDriver(self._config, broker=self._broker)
-            elif isinstance(self._config, MySQLConfig):
-                self._driver = AsyncMySQLDriver(self._config, broker=self._broker)
-            elif isinstance(self._config, OracleConfig):
-                self._driver = AsyncOracleDriver(self._config, broker=self._broker)
-            elif isinstance(self._config, MSSQLConfig):
-                self._driver = AsyncMSSQLDriver(self._config, broker=self._broker)
-            elif isinstance(self._config, DuckDBConfig):
-                self._driver = AsyncDuckDBDriver(self._config, broker=self._broker)
-            elif isinstance(self._config, BigQueryConfig):
-                self._driver = AsyncBigQueryDriver(self._config, broker=self._broker)
-            elif isinstance(self._config, SpannerConfig):
-                self._driver = AsyncSpannerDriver(self._config, broker=self._broker)
+            else:
+                target_registry = (
+                    DatabaseRegistry.default() if self._broker is not None else DatabaseRegistry(broker=None)
+                )
+                self._driver = self._config.build_async_driver(target_registry)
 
     @property
     def driver(self) -> Any:
@@ -719,6 +759,11 @@ class AsyncDBAPIConnection:
         """Create a new asynchronous DBAPI cursor."""
         _ = (args, kwargs)
         return AsyncDBAPICursor(self)
+
+    async def begin(self) -> None:
+        """Begin an explicit asynchronous transaction on the underlying driver."""
+        if self._driver is not None and hasattr(self._driver, "begin"):
+            await self._driver.begin()
 
     async def commit(self) -> None:
         """Commit the active asynchronous transaction."""
@@ -900,6 +945,11 @@ class AsyncSQLiteDialect(BaseSQLiteDialect):
         if not url.database or url.database in {":memory:", "memory://", ""}:
             return StaticPool
         return AsyncAdaptedQueuePool
+
+    def do_begin(self, dbapi_connection: Any) -> None:
+        """Begin an explicit transaction on the underlying asynchronous SQLite driver."""
+        if hasattr(dbapi_connection, "run_async"):
+            dbapi_connection.run_async(lambda conn: conn.begin())
 
 
 class SyncMySQLDialect(BaseMySQLDialect):
@@ -1406,3 +1456,70 @@ _DIALECT_REGISTRATIONS: tuple[tuple[str, str, str], ...] = (
 
 for _name, _mod, _cls_name in _DIALECT_REGISTRATIONS:
     registry.register(_name, _mod, _cls_name)
+
+
+_ROW_RETURNING_LEADING_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "SELECT",
+        "WITH",
+        "PRAGMA",
+        "SHOW",
+        "DESCRIBE",
+        "DESC",
+        "EXPLAIN",
+        "VALUES",
+    }
+)
+
+
+def _is_row_returning_sql(operation: str) -> bool:
+    """Return True when `operation` starts with a query keyword or contains a standalone `RETURNING` clause."""
+    length = len(operation)
+    idx = 0
+    first_keyword: str | None = None
+    while idx < length:
+        ch = operation[idx]
+        if ch.isspace():
+            idx += 1
+            continue
+        if ch == "-" and idx + 1 < length and operation[idx + 1] == "-":
+            newline = operation.find("\n", idx + 2)
+            idx = length if newline < 0 else newline + 1
+            continue
+        if ch == "/" and idx + 1 < length and operation[idx + 1] == "*":
+            end_comment = operation.find("*/", idx + 2)
+            idx = length if end_comment < 0 else end_comment + 2
+            continue
+        if ch in {"'", '"', "`"}:
+            quote = ch
+            idx += 1
+            while idx < length:
+                cur = operation[idx]
+                if cur == quote:
+                    if idx + 1 < length and operation[idx + 1] == quote:
+                        idx += 2
+                        continue
+                    idx += 1
+                    break
+                if cur == "\\" and quote == "'":
+                    idx += 2
+                    continue
+                idx += 1
+            continue
+        if ch.isalpha() or ch == "_":
+            start = idx
+            idx += 1
+            while idx < length and (operation[idx].isalnum() or operation[idx] == "_"):
+                idx += 1
+            if start > 0 and operation[start - 1] in {":", "@", "$"}:
+                continue
+            token = operation[start:idx].upper()
+            if first_keyword is None:
+                first_keyword = token
+                if first_keyword in _ROW_RETURNING_LEADING_KEYWORDS:
+                    return True
+            elif token == "RETURNING":
+                return True
+            continue
+        idx += 1
+    return False

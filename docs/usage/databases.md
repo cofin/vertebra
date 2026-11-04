@@ -136,8 +136,8 @@ All relational, analytical, and cloud drivers raise typed exceptions rooted at `
 - **Core SQL Exceptions (`vertebra.db`)**: `DatabaseError`, `InterfaceError`, `DataError`, `NotFoundError(DataError, ValueError)`, `OperationalError`, `ConnectionFailure`, `PoolExhaustedError`, `QueryCancelledError`, `SerializationFailure`, `IntegrityError`, `InternalError`, `ProgrammingError`, and `NotSupportedError`.
 - **Multi-Base Google Cloud Exceptions (`vertebra._vertebra`)**:
   - `GoogleCloudError(VertebraError)` and `GoogleCloudAuthError(GoogleCloudError)` carry `code` (`int`, canonical gRPC status `0..16`), `code_name`, `message`, `http_status`, `retry_delay_ms`, and `reason`.
-  - `SpannerError(GoogleCloudError, DatabaseError)` and `SpannerAbortedError(SpannerError, SerializationFailure)` (`code == 10`, `ABORTED`) integrate seamlessly with both `except GoogleCloudError:` and `except DatabaseError:` handlers.
-  - `BigQueryError(GoogleCloudError, DatabaseError)` and `BigQueryRowError(BigQueryError, DataError)` expose `row_errors` (`list[tuple[int, int, str]]`) on streaming write failures.
+  - `SpannerError(GoogleCloudError, DatabaseError)` and `SpannerAbortedError(SpannerError, SerializationFailure)` (`code == 10`, `ABORTED`) match both `except GoogleCloudError:` and `except DatabaseError:` handlers.
+  - `BigQueryError(GoogleCloudError, DatabaseError)` and `BigQueryRowError(BigQueryError, DataError)` expose `row_errors` (`list[dict[str, Any]]`, each shaped `{"index": int, "code": int, "message": str}`) on streaming write failures.
 
 ```python
 from vertebra._vertebra import SpannerAbortedError, SpannerError

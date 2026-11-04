@@ -33,6 +33,18 @@ sources:
   - id: src-vertebra-pyi
     resource: src/py/vertebra/_vertebra.pyi
     title: "Python implementation module (src/py/vertebra/_vertebra.pyi)"
+  - id: src-bundler-pyi
+    resource: src/py/vertebra/_bundler.pyi
+    title: "Python implementation module (src/py/vertebra/_bundler.pyi)"
+  - id: src-storage-pyi
+    resource: src/py/vertebra/_storage.pyi
+    title: "Python implementation module (src/py/vertebra/_storage.pyi)"
+  - id: src-bigquery-pyi
+    resource: src/py/vertebra/_bigquery.pyi
+    title: "Python implementation module (src/py/vertebra/_bigquery.pyi)"
+  - id: src-spanner-pyi
+    resource: src/py/vertebra/_spanner.pyi
+    title: "Python implementation module (src/py/vertebra/_spanner.pyi)"
   - id: src-server-worker-py
     resource: src/py/vertebra/server/worker.py
     title: "Python implementation module (src/py/vertebra/server/worker.py)"
@@ -50,11 +62,12 @@ sources:
 # PyO3 FFI & Vectorized Batch Dispatch
 
 <!-- truth: start -->
+- Vertebra ships five `#[pymodule(gil_used = false)]` PyO3 extensions (`vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, `vertebra-spanner`) typed in `src/py/vertebra/{_vertebra,_bundler,_storage,_bigquery,_spanner}.pyi`.
 - `vertebra._vertebra` (`#[pymodule(gil_used = false)]`) anchors `Request`, `Headers`, `Response`, and `RequestBatch` to `Arc<BatchSnapshot>` with PEP 688 zero-copy `memoryview` buffer access.
 - `Worker` pre-compiles routes into `BatchDispatchPlan` and `HandlerSpec` tables, flushes inline sync handlers via `submit_batch_raw`, and routes single-root ASGI/WSGI mounts directly to Rust batch drivers.
 <!-- truth: end -->
 
-[`vertebra-py`](../../../../../src/rs/vertebra-py/src/lib.rs)[^src-vertebra-py-src-lib-rs] builds the `vertebra._vertebra` extension (`#[pymodule(gil_used = false)]`, typed in [`_vertebra.pyi`](../../../../../src/py/vertebra/_vertebra.pyi)[^src-vertebra-pyi]), alongside `_bundler` (`vertebra-bundler`) and `_storage` (`vertebra-storage`). [`Worker`](../../../../../src/py/vertebra/server/worker.py)[^src-server-worker-py] (`run_worker`) pulls `RequestBatch` snapshots across FFI, executes inline vectorized sync, WSGI (`drive_wsgi_batch`), and single-thread `uvloop`/`winloop`/`rloop` async/ASGI/RSGI batches (`drive_native_batch`, `drive_asgi_batch`, `drive_rsgi_batch`), and flushes raw responses back to Rust.
+[`vertebra-py`](../../../../../src/rs/vertebra-py/src/lib.rs)[^src-vertebra-py-src-lib-rs] builds the `vertebra._vertebra` extension (`#[pymodule(gil_used = false)]`, typed in [`_vertebra.pyi`](../../../../../src/py/vertebra/_vertebra.pyi)[^src-vertebra-pyi]), alongside `_bundler` (`vertebra-bundler`, [`_bundler.pyi`](../../../../../src/py/vertebra/_bundler.pyi)[^src-bundler-pyi]), `_storage` (`vertebra-storage`, [`_storage.pyi`](../../../../../src/py/vertebra/_storage.pyi)[^src-storage-pyi]), `_bigquery` (`vertebra-bigquery`, [`_bigquery.pyi`](../../../../../src/py/vertebra/_bigquery.pyi)[^src-bigquery-pyi]), and `_spanner` (`vertebra-spanner`, [`_spanner.pyi`](../../../../../src/py/vertebra/_spanner.pyi)[^src-spanner-pyi]). [`Worker`](../../../../../src/py/vertebra/server/worker.py)[^src-server-worker-py] (`run_worker`) pulls `RequestBatch` snapshots across FFI, executes inline vectorized sync, WSGI (`drive_wsgi_batch`), and single-thread `uvloop`/`winloop`/`rloop` async/ASGI/RSGI batches (`drive_native_batch`, `drive_asgi_batch`, `drive_rsgi_batch`), and flushes raw responses back to Rust.
 
 ## Module surface (`lib.rs`, `transport.rs`)
 
@@ -96,6 +109,10 @@ Provenance sources: [^src-vertebra-py-src-transport-rs].
 [^src-vertebra-py-src-response-rs]: `src/rs/vertebra-py/src/response.rs` — Rust implementation module (src/rs/vertebra-py/src/response.rs).
 [^src-vertebra-py-src-msgspec-bridge-rs]: `src/rs/vertebra-py/src/msgspec_bridge.rs` — Rust implementation module (src/rs/vertebra-py/src/msgspec_bridge.rs).
 [^src-vertebra-pyi]: `src/py/vertebra/_vertebra.pyi` — Python implementation module (src/py/vertebra/_vertebra.pyi).
+[^src-bundler-pyi]: `src/py/vertebra/_bundler.pyi` — Python implementation module (src/py/vertebra/_bundler.pyi).
+[^src-storage-pyi]: `src/py/vertebra/_storage.pyi` — Python implementation module (src/py/vertebra/_storage.pyi).
+[^src-bigquery-pyi]: `src/py/vertebra/_bigquery.pyi` — Python implementation module (src/py/vertebra/_bigquery.pyi).
+[^src-spanner-pyi]: `src/py/vertebra/_spanner.pyi` — Python implementation module (src/py/vertebra/_spanner.pyi).
 [^src-server-worker-py]: `src/py/vertebra/server/worker.py` — Python implementation module (src/py/vertebra/server/worker.py).
 [^src-server-dispatch-py]: `src/py/vertebra/server/_dispatch.py` — Python implementation module (src/py/vertebra/server/_dispatch.py).
 [^src-server-loops-py]: `src/py/vertebra/server/_loops.py` — Python implementation module (src/py/vertebra/server/_loops.py).

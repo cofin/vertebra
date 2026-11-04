@@ -10,7 +10,7 @@ from vertebra.db.adapters.redis.core import (
     PubSubMessage,
     RedisCore,
 )
-from vertebra.db.driver._common import BaseDatabaseConfig
+from vertebra.db.driver._common import REDIS_DIALECT_TAG, BaseDatabaseConfig
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -26,7 +26,7 @@ class RedisConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
     """Configuration for Redis 7.2+ / 8.0+ standalone, Sentinel, and Cluster connections."""
 
     dialect: ClassVar[str] = "redis"
-    dialect_tag: ClassVar[int] = 7
+    dialect_tag: ClassVar[int] = REDIS_DIALECT_TAG
     url_schemes: ClassVar[tuple[str, ...]] = ("redis", "rediss", "memory")
     driver_module: ClassVar[str] = "vertebra.db.adapters.redis.driver"
     sync_driver_name: ClassVar[str] = "SyncRedisDriver"

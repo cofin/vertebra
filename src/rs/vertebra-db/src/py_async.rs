@@ -11,13 +11,14 @@ use std::any::Any;
 use std::ffi::{CStr, c_void};
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::ffi;
 use pyo3::prelude::*;
-use pyo3::types::PyType;
-use tokio::runtime::{Builder, Handle, Runtime};
+use pyo3::types::{PyType, PyWeakref, PyWeakrefMethods, PyWeakrefReference};
+use tokio::runtime::{Builder, Handle, Runtime, RuntimeFlavor};
 use tokio::task::AbortHandle;
 use vertebra_core::notify::{AsyncCompletionQueue, Notifier};
 use vertebra_core::shm::{ShmCapsule, ShmRegion};
@@ -86,9 +87,21 @@ pub fn db_runtime_handle() -> &'static Handle {
 }
 
 /// Drive a Rust future synchronously on the Tokio database runtime.
-pub fn block_on_db<F: Future>(fut: F) -> F::Output {
+pub fn block_on_db<F>(fut: F) -> F::Output
+where
+    F: Future + Send,
+    F::Output: Send,
+{
     if let Ok(handle) = Handle::try_current() {
-        tokio::task::block_in_place(|| handle.block_on(fut))
+        if handle.runtime_flavor() == RuntimeFlavor::MultiThread {
+            tokio::task::block_in_place(|| handle.block_on(fut))
+        } else {
+            std::thread::scope(|s| {
+                s.spawn(|| db_runtime_handle().block_on(fut))
+                    .join()
+                    .expect("db runtime thread panicked")
+            })
+        }
     } else {
         db_runtime_handle().block_on(fut)
     }
@@ -96,7 +109,7 @@ pub fn block_on_db<F: Future>(fut: F) -> F::Output {
 
 struct DbCompletionRing {
     completion: AsyncCompletionQueue<CompletedDbTask>,
-    fallback_wakeup: Mutex<Option<(Py<PyAny>, Py<PyAny>)>>,
+    fallback_wakeup: Mutex<Option<(Py<PyWeakref>, &'static str)>>,
 }
 
 impl DbCompletionRing {
@@ -104,21 +117,29 @@ impl DbCompletionRing {
         if self.completion.notifier().is_some() {
             return;
         }
-        let pair = self
-            .fallback_wakeup
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(|(loop_ref, drainer_ref)| {
-                Python::attach(|py| (loop_ref.clone_ref(py), drainer_ref.clone_ref(py)))
-            });
-        if let Some((loop_ref, drainer_ref)) = pair {
-            Python::attach(|py| {
-                let _ = loop_ref
-                    .bind(py)
-                    .call_method1("call_soon_threadsafe", (&drainer_ref,));
-            });
-        }
+        Python::attach(|py| {
+            let target = {
+                let mut guard = self
+                    .fallback_wakeup
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                match guard.as_ref() {
+                    Some((weak_loop, attr_name)) => match weak_loop.bind(py).upgrade() {
+                        Some(loop_bound) => Some((loop_bound, *attr_name)),
+                        None => {
+                            *guard = None;
+                            None
+                        }
+                    },
+                    None => None,
+                }
+            };
+            if let Some((loop_bound, attr_name)) = target
+                && let Ok(drainer) = loop_bound.getattr(attr_name)
+            {
+                let _ = loop_bound.call_method1("call_soon_threadsafe", (drainer,));
+            }
+        });
     }
 }
 
@@ -193,9 +214,13 @@ fn ensure_db_completion_ring(
         }
     }
 
+    let weak_loop = PyWeakrefReference::new(loop_obj)?
+        .into_any()
+        .cast_into::<PyWeakref>()?
+        .unbind();
     let ring = Arc::new(DbCompletionRing {
         completion: AsyncCompletionQueue::new(None),
-        fallback_wakeup: Mutex::new(None),
+        fallback_wakeup: Mutex::new(Some((weak_loop, attr_name))),
     });
     let drainer_py = Py::new(
         py,
@@ -203,13 +228,6 @@ fn ensure_db_completion_ring(
             ring: Arc::clone(&ring),
         },
     )?;
-    *ring
-        .fallback_wakeup
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = Some((
-        loop_obj.clone().unbind(),
-        drainer_py.clone_ref(py).into_any(),
-    ));
     let _ = loop_obj.setattr(attr_name, drainer_py.bind(py));
     Ok(ring)
 }
@@ -289,6 +307,33 @@ where
     })
 }
 
+unsafe extern "C" fn drop_shm_region_arc(ctx: *mut c_void) {
+    if !ctx.is_null() {
+        // SAFETY: `ctx` was produced via `Arc::into_raw` on an `Arc<ShmRegion>` in
+        // `wrap_shm_region_capsule` and ownership is claimed at most once via atomic swap.
+        unsafe {
+            drop(Arc::from_raw(ctx.cast::<ShmRegion>()));
+        }
+    }
+}
+
+unsafe extern "C" fn unlink_shm_region_arc(ctx: *mut c_void) -> bool {
+    if ctx.is_null() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: `ctx` points to a live `ShmRegion` inside an `Arc<ShmRegion>` whose strong
+        // count remains non-zero while the caller holds ownership of `ctx`.
+        let region = unsafe { &*(ctx as *const ShmRegion) };
+        region.unlink_now()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 unsafe extern "C" fn shm_pycapsule_destructor(capsule_obj: *mut ffi::PyObject) {
     // SAFETY: `capsule_obj` is a valid `PyCapsule` being finalized by CPython.
     let raw = unsafe { ffi::PyCapsule_GetPointer(capsule_obj, SHM_CAPSULE_NAME.as_ptr()) }
@@ -300,13 +345,24 @@ unsafe extern "C" fn shm_pycapsule_destructor(capsule_obj: *mut ffi::PyObject) {
         }
         return;
     }
-    // SAFETY: `raw` was allocated via `Box::into_raw` in this module in `wrap_shm_region_capsule`.
-    let cap = unsafe { Box::from_raw(raw) };
-    if !cap.ctx.is_null() {
-        // SAFETY: `cap.ctx` was not consumed by `_from_shm_capsule`, so release the `Arc<ShmRegion>`.
+    // SAFETY: `raw` was allocated via `Box::into_raw` in `wrap_shm_region_capsule` and is
+    // dereferenced immutably to atomically claim `ctx` before reclaiming the `Box`.
+    let (ctx, drop_fn) = unsafe {
+        let cap_ref = &*(raw as *const ShmCapsule);
+        let ctx = cap_ref.ctx.swap(core::ptr::null_mut(), Ordering::AcqRel);
+        (ctx, cap_ref.drop_fn)
+    };
+    if !ctx.is_null() {
+        // SAFETY: `ctx` was atomically claimed once via `AcqRel` swap and was not consumed by
+        // `ArrowCursor::_from_shm_capsule`.
         unsafe {
-            (cap.drop_fn)(cap.ctx);
+            (drop_fn)(ctx);
         }
+    }
+    // SAFETY: CPython invokes the `PyCapsule` destructor once at zero refcount; reclaim the
+    // `Box<ShmCapsule>` allocation in this crate's allocator.
+    unsafe {
+        drop(Box::from_raw(raw));
     }
 }
 
@@ -316,7 +372,15 @@ pub fn wrap_shm_region_capsule(
     py: Python<'_>,
     region: Arc<ShmRegion>,
 ) -> PyResult<Bound<'_, PyAny>> {
-    let boxed = Box::new(ShmCapsule::from_arc(region));
+    let ptr = region.as_ptr();
+    let len = region.len();
+    let boxed = Box::new(ShmCapsule {
+        ptr,
+        len,
+        ctx: AtomicPtr::new(Arc::into_raw(region) as *mut c_void),
+        drop_fn: drop_shm_region_arc,
+        unlink_fn: Some(unlink_shm_region_arc),
+    });
     let raw = Box::into_raw(boxed).cast::<c_void>();
     // SAFETY: `raw` is non-null, `SHM_CAPSULE_NAME` is a static NUL-terminated C string, and
     // `shm_pycapsule_destructor` reclaims `raw` (and `ctx` if unconsumed) in this crate's allocator.
@@ -330,10 +394,11 @@ pub fn wrap_shm_region_capsule(
     if cap_ptr.is_null() {
         // SAFETY: `PyCapsule_New` failed before taking ownership of `raw`, so reclaim the `Box` and `Arc`.
         let cap = unsafe { Box::from_raw(raw.cast::<ShmCapsule>()) };
-        if !cap.ctx.is_null() {
-            // SAFETY: `cap.ctx` came from `ShmCapsule::from_arc`.
+        let ctx = cap.ctx.swap(core::ptr::null_mut(), Ordering::AcqRel);
+        if !ctx.is_null() {
+            // SAFETY: `ctx` came from `Arc::into_raw(region)` above and was not transferred.
             unsafe {
-                (cap.drop_fn)(cap.ctx);
+                (cap.drop_fn)(ctx);
             }
         }
         return Err(PyErr::fetch(py));
@@ -372,7 +437,10 @@ mod tests {
     use pyo3::types::{PyCFunction, PyDict, PyTuple};
     use vertebra_core::shm::ShmRegion;
 
-    use super::{spawn_rust_db_task_with_attr, wrap_shm_region_capsule};
+    use super::{
+        block_on_db, ensure_db_completion_ring, spawn_rust_db_task_with_attr,
+        wrap_shm_region_capsule,
+    };
 
     struct DropFlag(Arc<AtomicBool>);
 
@@ -538,5 +606,65 @@ mod tests {
             drop(cap);
         });
         assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn block_on_db_succeeds_inside_current_thread_tokio_runtime() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let out = rt.block_on(async {
+            block_on_db(async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                42_u64
+            })
+        });
+        assert_eq!(out, 42);
+    }
+
+    #[test]
+    fn fallback_wakeup_uses_weakref_and_clears_when_loop_collected() {
+        Python::initialize();
+        Python::attach(|py| {
+            let globals = PyDict::new(py);
+            let script = CString::new(concat!(
+                "import weakref\n",
+                "class StubLoop:\n",
+                "    def __init__(self):\n",
+                "        self.scheduled = 0\n",
+                "    def add_reader(self, fd, cb):\n",
+                "        raise NotImplementedError('no selector')\n",
+                "    def call_soon_threadsafe(self, cb):\n",
+                "        self.scheduled += 1\n",
+                "stub_loop = StubLoop()\n",
+                "stub_weak = weakref.ref(stub_loop)\n",
+            ))
+            .unwrap();
+            py.run(&script, Some(&globals), None).unwrap();
+
+            let ring = {
+                let loop_obj = globals.get_item("stub_loop").unwrap().unwrap();
+                let ring =
+                    ensure_db_completion_ring(py, &loop_obj, "_test_fallback_drainer").unwrap();
+                ring.signal_fallback();
+                let scheduled: usize = loop_obj.getattr("scheduled").unwrap().extract().unwrap();
+                assert_eq!(scheduled, 1);
+                ring
+            };
+
+            globals.del_item("stub_loop").unwrap();
+            let weak_alive: bool = globals
+                .get_item("stub_weak")
+                .unwrap()
+                .unwrap()
+                .call0()
+                .unwrap()
+                .is_none();
+            assert!(weak_alive);
+
+            ring.signal_fallback();
+            assert!(ring.fallback_wakeup.lock().unwrap().is_none());
+        });
     }
 }

@@ -10,7 +10,11 @@ from decimal import Decimal
 from typing import Any, ClassVar, Final, Literal, Self
 from urllib.parse import parse_qs, urlparse
 
-from vertebra.db.driver._common import BaseDatabaseConfig
+from vertebra.db.driver._common import (
+    SPANGRES_DIALECT_TAG,
+    SPANNER_GOOGLESQL_DIALECT_TAG,
+    BaseDatabaseConfig,
+)
 from vertebra.typing import (
     FrozenBaseStruct,
     ImproperConfigurationError,
@@ -27,8 +31,6 @@ __all__ = (
     "StalenessBound",
 )
 
-SPANNER_GOOGLESQL_DIALECT_TAG: Final[int] = 8
-SPANGRES_DIALECT_TAG: Final[int] = 9
 DEFAULT_SPANNER_ENDPOINT: Final[str] = "https://spanner.googleapis.com"
 _ACCEPTED_SPANNER_GOOGLESQL_SCHEMES: Final[frozenset[str]] = frozenset(
     {

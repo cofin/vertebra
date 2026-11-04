@@ -10,7 +10,7 @@ import msgspec
 
 from vertebra.db.dialer.alloydb import AlloyDBConfig
 from vertebra.db.dialer.cloudsql import CloudSQLConfig
-from vertebra.db.driver._common import BaseDatabaseConfig
+from vertebra.db.driver._common import POSTGRES_DIALECT_TAG, BaseDatabaseConfig
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import import_optional
 
@@ -26,7 +26,7 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
     """PostgreSQL configuration supporting Cloud SQL, AlloyDB, and PgBouncer/PgCat/pgdog poolers."""
 
     dialect: ClassVar[str] = "postgres"
-    dialect_tag: ClassVar[int] = 1
+    dialect_tag: ClassVar[int] = POSTGRES_DIALECT_TAG
     url_schemes: ClassVar[tuple[str, ...]] = ("postgresql", "postgres")
     driver_module: ClassVar[str] = "vertebra.db.adapters.postgres.driver"
     sync_driver_name: ClassVar[str] = "SyncPostgreSQLDriver"

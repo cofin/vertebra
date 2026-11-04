@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlparse
 
 import msgspec
 
-from vertebra.db.driver._common import BaseDatabaseConfig
+from vertebra.db.driver._common import BIGQUERY_DIALECT_TAG, BaseDatabaseConfig
 from vertebra.typing import (
     FrozenBaseStruct,
     ImproperConfigurationError,
@@ -27,7 +27,6 @@ __all__ = (
     "ObjectTableConfig",
 )
 
-BIGQUERY_DIALECT_TAG: Final[int] = 7
 DEFAULT_BIGQUERY_REST_ENDPOINT: Final[str] = "https://bigquery.googleapis.com"
 DEFAULT_BIGQUERY_STORAGE_ENDPOINT: Final[str] = "https://bigquerystorage.googleapis.com:443"
 _ACCEPTED_BIGQUERY_SCHEMES: Final[frozenset[str]] = frozenset(

@@ -15,6 +15,7 @@ from vertebra.db.arrow import (
     _table_to_rows_and_cols,
 )
 from vertebra.db.driver import (
+    POSTGRES_DIALECT_TAG,
     AsyncDatabaseDriver,
     SyncDatabaseDriver,
 )
@@ -26,18 +27,11 @@ __all__ = (
 )
 
 
-def _extract_column_names(raw_description: Any) -> tuple[str, ...]:
-    """Normalize a DB-API cursor `description` or string sequence into `tuple[str, ...]`."""
-    if not raw_description:
-        return ()
-    return tuple(col[0] if isinstance(col, tuple) else str(col) for col in raw_description)
-
-
 class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
     """Synchronous PostgreSQL driver facade supporting plain-tuple, zero-copy JSONB, and COPY streaming."""
 
     dialect: ClassVar[str] = "postgres"
-    dialect_tag: ClassVar[int] = 1
+    dialect_tag: ClassVar[int] = POSTGRES_DIALECT_TAG
 
     __slots__ = (
         "_dialer",
@@ -309,7 +303,7 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
             raw_desc = getattr(cur, "description", None)
             if raw_desc:
                 rows = [tuple(r) for r in (cur.fetchall() if hasattr(cur, "fetchall") else ())]
-                cols = _extract_column_names(raw_desc)
+                cols = self._extract_column_names(raw_desc)
                 return rows, cols, len(rows)
             if auto_commit_dml and not self._in_transaction and hasattr(active_conn, "commit"):
                 active_conn.commit()
@@ -364,13 +358,13 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
                 if hasattr(pool, "execute_with_description"):
                     raw_rows, raw_desc = pool.execute_with_description(sql, params_arg)
                     tuple_rows = [tuple(r) for r in raw_rows]
-                    return tuple_rows, _extract_column_names(raw_desc), len(tuple_rows)
+                    return tuple_rows, self._extract_column_names(raw_desc), len(tuple_rows)
                 if hasattr(pool, "execute"):
                     exec_res = pool.execute(sql, params_arg)
                     raw_rows = exec_res.fetchall() if hasattr(exec_res, "fetchall") else list(exec_res)
                     tuple_rows = [tuple(r) for r in raw_rows]
                     raw_desc = getattr(exec_res, "description", None)
-                    return tuple_rows, _extract_column_names(raw_desc), len(tuple_rows)
+                    return tuple_rows, self._extract_column_names(raw_desc), len(tuple_rows)
 
             _ = (sql, params_arg)
             cols = tuple(f"col_{i}" for i in range(len(self._in_memory_rows[0]))) if self._in_memory_rows else ()
@@ -436,7 +430,7 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
     """Asynchronous PostgreSQL driver facade supporting plain-tuple, zero-copy JSONB, and COPY streaming."""
 
     dialect: ClassVar[str] = "postgres"
-    dialect_tag: ClassVar[int] = 1
+    dialect_tag: ClassVar[int] = POSTGRES_DIALECT_TAG
 
     __slots__ = (
         "_async_executor",
@@ -696,7 +690,7 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
                 if raw_desc:
                     fetched = await cur.fetchall() if hasattr(cur, "fetchall") else []
                     rows = [tuple(r) for r in fetched]
-                    return rows, _extract_column_names(raw_desc), len(rows)
+                    return rows, self._extract_column_names(raw_desc), len(rows)
                 if auto_commit_dml and not self._in_transaction and hasattr(conn, "commit"):
                     commit_res = conn.commit()
                     if inspect.isawaitable(commit_res):
@@ -749,7 +743,7 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
                     res = self._pool.execute_with_description(sql, params_arg)
                     raw_rows, raw_desc = await res if inspect.iscoroutine(res) else res
                     tuple_rows = [tuple(r) for r in raw_rows]
-                    return tuple_rows, _extract_column_names(raw_desc), len(tuple_rows)
+                    return tuple_rows, self._extract_column_names(raw_desc), len(tuple_rows)
                 if hasattr(self._pool, "execute_tuples"):
                     res_tuples = self._pool.execute_tuples(sql, params_arg)
                     tuple_rows = await res_tuples if inspect.iscoroutine(res_tuples) else res_tuples

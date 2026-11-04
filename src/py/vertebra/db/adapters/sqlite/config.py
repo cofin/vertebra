@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 import msgspec
 
 from vertebra.db.adapters.sqlite.core import VALID_SQLITE_SYNCHRONOUS, SQLiteCore
-from vertebra.db.driver._common import BaseDatabaseConfig
+from vertebra.db.driver._common import SQLITE_DIALECT_TAG, BaseDatabaseConfig
 
 __all__ = ("SQLiteConfig",)
 
@@ -19,7 +19,7 @@ class SQLiteConfig(BaseDatabaseConfig, frozen=True, gc=False):
     """Configuration for SQLite 3.45+ with WAL mode, memory-mapped I/O, and SHM broker leasing."""
 
     dialect: ClassVar[str] = "sqlite"
-    dialect_tag: ClassVar[int] = 3
+    dialect_tag: ClassVar[int] = SQLITE_DIALECT_TAG
     url_schemes: ClassVar[tuple[str, ...]] = ("sqlite",)
     driver_module: ClassVar[str] = "vertebra.db.adapters.sqlite.driver"
     sync_driver_name: ClassVar[str] = "SyncSQLiteDriver"
@@ -84,12 +84,12 @@ class SQLiteConfig(BaseDatabaseConfig, frozen=True, gc=False):
     def from_url(cls, url: str, **overrides: Any) -> Self:
         """Construct a `SQLiteConfig` from a `sqlite://` URI."""
         parsed = urlparse(url)
-        if parsed.path in ("", "/", "/:memory:", ":memory:"):
+        if parsed.netloc == ":memory:" or (not parsed.netloc and parsed.path in ("", "/", "/:memory:", ":memory:")):
             db_path = ":memory:"
+        elif parsed.netloc:
+            db_path = f"{parsed.netloc}{parsed.path}"
         elif parsed.path.startswith("//"):
             db_path = parsed.path[1:]
-        elif os.path.isabs(parsed.path) and os.path.exists(os.path.dirname(parsed.path)):
-            db_path = parsed.path
         else:
             db_path = parsed.path.lstrip("/")
         if parsed.query and (
@@ -97,7 +97,12 @@ class SQLiteConfig(BaseDatabaseConfig, frozen=True, gc=False):
         ):
             prefix = db_path if db_path.startswith("file:") else f"file:{db_path}"
             db_path = f"{prefix}?{parsed.query}"
-        return cls(path=db_path, database=db_path, **overrides)
+        kwargs: dict[str, Any] = {"path": db_path, "database": db_path, **overrides}
+        if "path" in overrides and "database" not in overrides:
+            kwargs["database"] = overrides["path"]
+        elif "database" in overrides and "path" not in overrides and overrides["database"] is not None:
+            kwargs["path"] = str(overrides["database"])
+        return cls(**kwargs)
 
     def pool_key(self) -> tuple[Any, ...] | None:
         """Return a deterministic shared-pool fingerprint, or `None` for isolated `:memory:` DBs."""

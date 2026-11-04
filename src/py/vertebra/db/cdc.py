@@ -5,6 +5,7 @@ from __future__ import annotations
 import collections
 import inspect
 from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 import msgspec
@@ -629,16 +630,19 @@ class SyncSpannerChangeStreamSource(_BaseSpannerChangeStreamSource):
     def stream(
         self,
         *,
-        start_timestamp: str,
+        start_timestamp: str | None = None,
         end_timestamp: str | None = None,
         initial_partitions: Iterable[str] = ("",),
     ) -> Iterator[ChangeEvent]:
         """Synchronously stream change events across active and child partitions."""
+        resolved_start = (
+            start_timestamp if start_timestamp is not None else datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        )
         for token in initial_partitions:
-            self.schedule_partition(token, start_timestamp)
+            self.schedule_partition(token, resolved_start)
         while self._active_partitions:
             token = self._active_partitions[0]
-            start_ts = self._partition_start_timestamps.get(token, start_timestamp)
+            start_ts = self._partition_start_timestamps.get(token, resolved_start)
             events = self.poll_partition(token, start_timestamp=start_ts, end_timestamp=end_timestamp)
             yield from events
 
@@ -669,16 +673,19 @@ class AsyncSpannerChangeStreamSource(_BaseSpannerChangeStreamSource):
     async def stream(
         self,
         *,
-        start_timestamp: str,
+        start_timestamp: str | None = None,
         end_timestamp: str | None = None,
         initial_partitions: Iterable[str] = ("",),
     ) -> AsyncIterator[ChangeEvent]:
         """Asynchronously stream change events across active and child partitions."""
+        resolved_start = (
+            start_timestamp if start_timestamp is not None else datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        )
         for token in initial_partitions:
-            self.schedule_partition(token, start_timestamp)
+            self.schedule_partition(token, resolved_start)
         while self._active_partitions:
             token = self._active_partitions[0]
-            start_ts = self._partition_start_timestamps.get(token, start_timestamp)
+            start_ts = self._partition_start_timestamps.get(token, resolved_start)
             events = await self.poll_partition(token, start_timestamp=start_ts, end_timestamp=end_timestamp)
             for evt in events:
                 yield evt

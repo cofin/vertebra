@@ -1,5 +1,7 @@
 """First-class SQLSpec adapter configurations and drivers backed by Vertebra Rust-native SHM drivers."""
 
+from __future__ import annotations
+
 from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import asynccontextmanager, contextmanager, suppress
 from types import TracebackType

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from vertebra.db.adapters.redis.driver import AsyncRedisDriver, SyncRedisDriver
 from vertebra.db.adapters.valkey.config import ValkeyConfig
+from vertebra.db.driver import VALKEY_DIALECT_TAG
 
 if TYPE_CHECKING:
     import socket
@@ -21,7 +22,7 @@ class SyncValkeyDriver(SyncRedisDriver):
     """Synchronous Valkey 8.0+/9.0+ driver with RESP3 client-side cache tracking and topology routing."""
 
     dialect: ClassVar[str] = "valkey"
-    dialect_tag: ClassVar[int] = 8
+    dialect_tag: ClassVar[int] = VALKEY_DIALECT_TAG
 
     __slots__ = ("_valkey_config",)
 
@@ -45,7 +46,7 @@ class AsyncValkeyDriver(AsyncRedisDriver):
     """Asynchronous Valkey 8.0+/9.0+ RESP3 driver with client-side cache tracking and topology routing."""
 
     dialect: ClassVar[str] = "valkey"
-    dialect_tag: ClassVar[int] = 8
+    dialect_tag: ClassVar[int] = VALKEY_DIALECT_TAG
 
     __slots__ = ("_valkey_config",)
 

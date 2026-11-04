@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import sys
+import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -24,13 +27,23 @@ from vertebra._vertebra import (
 
 
 def test_native_modules_declare_gil_used_false() -> None:
-    """Verify _vertebra and _bundler declare gil_used = false and do not re-enable the GIL."""
+    """Verify native PyO3 extension modules declare gil_used = false and do not re-enable the GIL."""
     checker = getattr(sys, "_is_gil_enabled", None)
     was_disabled = bool(checker is not None and not checker())
 
     assert getattr(_vertebra, "GIL_USED", None) is False
-    bundler_mod = pytest.importorskip("vertebra._bundler")
-    assert getattr(bundler_mod, "GIL_USED", None) is False
+    for mod_name in (
+        "vertebra._bundler",
+        "vertebra._bigquery",
+        "vertebra._spanner",
+    ):
+        ext_mod = pytest.importorskip(mod_name)
+        assert getattr(ext_mod, "GIL_USED", None) is False
+
+    storage_mod = pytest.importorskip("vertebra._storage")
+    assert hasattr(storage_mod, "SyncObjectStore")
+    if hasattr(storage_mod, "GIL_USED"):
+        assert storage_mod.GIL_USED is False
 
     if was_disabled and checker is not None:
         assert checker() is False
@@ -84,8 +97,10 @@ def test_native_pyclasses_enforce_immutable_type() -> None:
     """Verify non-subclassed native PyO3 types enforce Py_TPFLAGS_IMMUTABLETYPE."""
     bundler_mod = pytest.importorskip("vertebra._bundler")
     storage_mod = pytest.importorskip("vertebra._storage")
+    bigquery_mod = pytest.importorskip("vertebra._bigquery")
+    spanner_mod = pytest.importorskip("vertebra._spanner")
 
-    classes: list[type[object]] = [
+    raw_classes: list[object] = [
         Request,
         Headers,
         Response,
@@ -104,8 +119,35 @@ def test_native_pyclasses_enforce_immutable_type() -> None:
         storage_mod.AsyncObjectStore,
         storage_mod.StorageBuffer,
         storage_mod.ObjectMeta,
+        bigquery_mod.SyncBigQueryClient,
+        bigquery_mod.AsyncBigQueryClient,
+        spanner_mod.SyncSpannerClient,
+        spanner_mod.AsyncSpannerClient,
     ]
+    classes: list[type[object]] = [cls for cls in raw_classes if isinstance(cls, type)]
     attr_name = "_mutated_type_attr"
     for cls in classes:
         with pytest.raises(TypeError):
             setattr(cls, attr_name, 1)
+
+
+def test_arrow_cursor_from_shm_capsule_concurrent_single_winner() -> None:
+    """Verify ArrowCursor._from_shm_capsule atomically consumes a single capsule across 8 concurrent threads."""
+    seg_hint = f"/vtb-cap-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    seg_name, byte_len, capsule = ArrowCursor._allocate_shm_capsule(seg_hint, b"VTBARROW-CAPSULE-TEST")
+    barrier = threading.Barrier(8)
+
+    def _consume(_worker_id: int) -> str:
+        barrier.wait(timeout=5.0)
+        try:
+            cursor = ArrowCursor._from_shm_capsule(seg_name, byte_len, 1, capsule)
+        except ValueError:
+            return "value_error"
+        cursor.release()
+        return "winner"
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        outcomes = list(pool.map(_consume, range(8)))
+
+    assert outcomes.count("winner") == 1
+    assert outcomes.count("value_error") == 7

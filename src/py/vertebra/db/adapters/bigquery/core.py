@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import base64
+import csv
 import inspect
+import io
+import os
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -17,7 +20,8 @@ from vertebra._vertebra import (
     hydrate_rows_vectorcall,
 )
 from vertebra.db.adapters.bigquery.config import BigQueryConfig, BigQueryDryRunResult, ObjectTableConfig
-from vertebra.db.arrow import ArrowCursor, write_arrow_shm
+from vertebra.db.arrow import ARROW_SHM_THRESHOLD_ROWS, ArrowCursor, write_arrow_shm
+from vertebra.storage import AsyncObjectStore, SyncObjectStore
 from vertebra.telemetry.db_propagation import SqlTracePropagator
 from vertebra.telemetry.otel import TraceContext
 from vertebra.typing import ImproperConfigurationError
@@ -312,11 +316,15 @@ class BigQueryCore:
         return f"SELECT {cols} FROM {stripped}{where_clause}"
 
     @staticmethod
-    def query_result_to_arrow_cursor(raw: Mapping[str, Any]) -> ArrowCursor:
+    def query_result_to_arrow_cursor(
+        raw: Mapping[str, Any],
+        *,
+        threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
+    ) -> ArrowCursor:
         """Convert a REST `jobs.query` response dictionary into an `ArrowCursor`."""
         columns = [str(c) for c in raw.get("columns", ())]
         rows = list(raw.get("rows", ()))
-        return ArrowCursor.from_rows(rows, columns=columns, threshold_rows=1)
+        return ArrowCursor.from_rows(rows, columns=columns, threshold_rows=threshold_rows)
 
     @staticmethod
     def coerce_arrow_ipc_bytes(data: ArrowCursor | bytes | Any) -> bytes:
@@ -402,26 +410,20 @@ class BigQueryCore:
         format: str,
         compression: str,
     ) -> None:
-        """Write an `ArrowCursor` into a multicloud `ObjectStore` or `ObjectStoreBackend`."""
-        backend = cls._resolve_object_store_backend(store, destination_uri)
-        if backend is not None:
+        """Write an `ArrowCursor` into a multicloud `ObjectStore` or structural storage backend."""
+        if store is not None and hasattr(store, "write_arrow_cursor_sync"):
             object_key = ObjectTableConfig._extract_object_key_from_uri(destination_uri)
-            if hasattr(backend, "write_arrow_cursor_sync"):
-                file_fmt = cls._normalize_backend_file_format(format)
-                comp = None if compression.upper() in {"NONE", "UNCOMPRESSED"} else compression.upper()
-                backend.write_arrow_cursor_sync(object_key, cursor, file_format=file_fmt, compression=comp)
-                return
-        if store is None:
-            raise ImproperConfigurationError(
-                "Non-GCS export_to_object_store requires an ObjectStore instance or ObjectStoreBackend"
-            )
-        object_key = ObjectTableConfig._extract_object_key_from_uri(destination_uri)
+            file_fmt = cls._normalize_backend_file_format(format)
+            comp = None if compression.upper() in {"NONE", "UNCOMPRESSED"} else compression.upper()
+            store.write_arrow_cursor_sync(object_key, cursor, file_format=file_fmt, compression=comp)
+            return
+        resolved_store, object_key = cls._resolve_sync_store_and_key(store, destination_uri)
         payload = cls._serialize_cursor_for_object_store(cursor, format=format, compression=compression)
-        put_fn = getattr(store, "put", None)
+        put_fn = getattr(resolved_store, "put", None)
         if callable(put_fn):
             put_fn(object_key, payload)
             return
-        raise ImproperConfigurationError(f"Unsupported ObjectStore {type(store).__name__!r}")
+        raise ImproperConfigurationError(f"Unsupported ObjectStore {type(resolved_store).__name__!r}")
 
     @classmethod
     async def write_arrow_cursor_to_object_store_async(
@@ -433,28 +435,22 @@ class BigQueryCore:
         format: str,
         compression: str,
     ) -> None:
-        """Asynchronously write an `ArrowCursor` into a multicloud `ObjectStore` or `ObjectStoreBackend`."""
-        backend = cls._resolve_object_store_backend(store, destination_uri)
-        if backend is not None:
+        """Asynchronously write an `ArrowCursor` into a multicloud `ObjectStore` or structural storage backend."""
+        if store is not None and hasattr(store, "write_arrow_cursor_async"):
             object_key = ObjectTableConfig._extract_object_key_from_uri(destination_uri)
-            if hasattr(backend, "write_arrow_cursor_async"):
-                file_fmt = cls._normalize_backend_file_format(format)
-                comp = None if compression.upper() in {"NONE", "UNCOMPRESSED"} else compression.upper()
-                await backend.write_arrow_cursor_async(object_key, cursor, file_format=file_fmt, compression=comp)
-                return
-        if store is None:
-            raise ImproperConfigurationError(
-                "Non-GCS export_to_object_store requires an ObjectStore instance or ObjectStoreBackend"
-            )
-        object_key = ObjectTableConfig._extract_object_key_from_uri(destination_uri)
+            file_fmt = cls._normalize_backend_file_format(format)
+            comp = None if compression.upper() in {"NONE", "UNCOMPRESSED"} else compression.upper()
+            await store.write_arrow_cursor_async(object_key, cursor, file_format=file_fmt, compression=comp)
+            return
+        resolved_store, object_key = cls._resolve_async_store_and_key(store, destination_uri)
         payload = cls._serialize_cursor_for_object_store(cursor, format=format, compression=compression)
-        put_fn = getattr(store, "put", None)
+        put_fn = getattr(resolved_store, "put", None)
         if callable(put_fn):
             res = put_fn(object_key, payload)
             if inspect.isawaitable(res):
                 await res
             return
-        raise ImproperConfigurationError(f"Unsupported ObjectStore {type(store).__name__!r}")
+        raise ImproperConfigurationError(f"Unsupported ObjectStore {type(resolved_store).__name__!r}")
 
     @classmethod
     def read_arrow_cursor_from_object_store_sync(
@@ -464,24 +460,18 @@ class BigQueryCore:
         store: Any | None,
         format: str,
     ) -> ArrowCursor:
-        """Read an `ArrowCursor` from a multicloud `ObjectStore` or `ObjectStoreBackend`."""
-        backend = cls._resolve_object_store_backend(store, uri)
-        if backend is not None:
+        """Read an `ArrowCursor` from a multicloud `ObjectStore` or structural storage backend."""
+        if store is not None and hasattr(store, "read_arrow_sync"):
             object_key = ObjectTableConfig._extract_object_key_from_uri(uri)
-            if hasattr(backend, "read_arrow_sync"):
-                file_fmt = cls._normalize_backend_file_format(format)
-                res = backend.read_arrow_sync(object_key, file_format=file_fmt)
-                return cls._coerce_read_arrow_result(res, format=format)
-        if store is None:
-            raise ImproperConfigurationError(
-                "Non-GCS load_from_object_store requires an ObjectStore instance or ObjectStoreBackend"
-            )
-        object_key = ObjectTableConfig._extract_object_key_from_uri(uri)
-        get_fn = getattr(store, "get", None)
+            file_fmt = cls._normalize_backend_file_format(format)
+            res = store.read_arrow_sync(object_key, file_format=file_fmt)
+            return cls._coerce_read_arrow_result(res, format=format)
+        resolved_store, object_key = cls._resolve_sync_store_and_key(store, uri)
+        get_fn = getattr(resolved_store, "get_bytes", None) or getattr(resolved_store, "get", None)
         if callable(get_fn):
             raw = bytes(get_fn(object_key))
             return cls._deserialize_bytes_from_object_store(raw, format=format)
-        raise ImproperConfigurationError(f"Unsupported ObjectStore {type(store).__name__!r}")
+        raise ImproperConfigurationError(f"Unsupported ObjectStore {type(resolved_store).__name__!r}")
 
     @classmethod
     async def read_arrow_cursor_from_object_store_async(
@@ -491,27 +481,21 @@ class BigQueryCore:
         store: Any | None,
         format: str,
     ) -> ArrowCursor:
-        """Asynchronously read an `ArrowCursor` from a multicloud `ObjectStore` or `ObjectStoreBackend`."""
-        backend = cls._resolve_object_store_backend(store, uri)
-        if backend is not None:
+        """Asynchronously read an `ArrowCursor` from a multicloud `ObjectStore` or structural storage backend."""
+        if store is not None and hasattr(store, "read_arrow_async"):
             object_key = ObjectTableConfig._extract_object_key_from_uri(uri)
-            if hasattr(backend, "read_arrow_async"):
-                file_fmt = cls._normalize_backend_file_format(format)
-                res = await backend.read_arrow_async(object_key, file_format=file_fmt)
-                return cls._coerce_read_arrow_result(res, format=format)
-        if store is None:
-            raise ImproperConfigurationError(
-                "Non-GCS load_from_object_store requires an ObjectStore instance or ObjectStoreBackend"
-            )
-        object_key = ObjectTableConfig._extract_object_key_from_uri(uri)
-        get_fn = getattr(store, "get", None)
+            file_fmt = cls._normalize_backend_file_format(format)
+            res = await store.read_arrow_async(object_key, file_format=file_fmt)
+            return cls._coerce_read_arrow_result(res, format=format)
+        resolved_store, object_key = cls._resolve_async_store_and_key(store, uri)
+        get_fn = getattr(resolved_store, "get_bytes", None) or getattr(resolved_store, "get", None)
         if callable(get_fn):
             res = get_fn(object_key)
             if inspect.isawaitable(res):
                 res = await res
             raw = bytes(res)
             return cls._deserialize_bytes_from_object_store(raw, format=format)
-        raise ImproperConfigurationError(f"Unsupported ObjectStore {type(store).__name__!r}")
+        raise ImproperConfigurationError(f"Unsupported ObjectStore {type(resolved_store).__name__!r}")
 
     @classmethod
     def list_objects_from_store_fallback_sync(
@@ -702,10 +686,11 @@ class BigQueryCore:
             if not rows:
                 return b""
             cols = list(rows[0].keys())
-            lines = [",".join(cols)]
-            for r in rows:
-                lines.append(",".join("" if r.get(c) is None else str(r.get(c)) for c in cols))
-            return ("\n".join(lines) + "\n").encode("utf-8")
+            buf = io.StringIO()
+            writer = csv.DictWriter(buf, fieldnames=cols, lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(rows)
+            return buf.getvalue().encode("utf-8")
         rows = cursor.to_pylist()
         return ("\n".join(encode_json(r) for r in rows) + ("\n" if rows else "")).encode("utf-8")
 
@@ -716,7 +701,7 @@ class BigQueryCore:
         format: str,
     ) -> ArrowCursor:
         fmt = format.strip().lower()
-        if fmt in {"arrow", "ipc"}:
+        if fmt in {"arrow", "ipc", "arrow-ipc"}:
             return ArrowCursor(payload)
         if fmt == "parquet":
             pa = import_optional("pyarrow")
@@ -725,27 +710,92 @@ class BigQueryCore:
                 tbl = pq.read_table(pa.py_buffer(payload))
                 ipc_view = write_arrow_shm(tbl)
                 return ArrowCursor(bytes(ipc_view))
-        if fmt in {"json", "ndjson"}:
+        if fmt in {"json", "jsonl", "ndjson"}:
             lines = [ln.strip() for ln in payload.decode("utf-8", errors="replace").splitlines() if ln.strip()]
             rows = [decode_json(ln) for ln in lines]
-            return ArrowCursor.from_rows(rows, threshold_rows=1)
+            return ArrowCursor.from_rows(rows)
+        if fmt == "csv":
+            text = payload.decode("utf-8", errors="replace")
+            if not text.strip():
+                return ArrowCursor.from_rows([])
+            reader = csv.DictReader(io.StringIO(text))
+            rows = list(reader)
+            return ArrowCursor.from_rows(rows, columns=list(reader.fieldnames or ()))
         return ArrowCursor(payload)
 
-    @staticmethod
-    def _resolve_object_store_backend(store: Any | None, uri: str) -> Any | None:
-        storage_mod = import_optional("vertebra.extensions.sqlspec.storage")
-        if storage_mod is None or not hasattr(storage_mod, "ObjectStoreBackend"):
-            return None
-        backend_cls = storage_mod.ObjectStoreBackend
-        if isinstance(store, backend_cls):
-            return store
+    @classmethod
+    def _resolve_sync_store_and_key(cls, store: Any | None, uri: str) -> tuple[Any, str]:
+        if isinstance(store, SyncObjectStore):
+            return store, cls._resolve_store_key(store, uri)
+        if isinstance(store, AsyncObjectStore):
+            sync_store = store.to_sync()
+            return sync_store, cls._resolve_store_key(sync_store, uri)
         if isinstance(store, str):
-            return backend_cls(store)
+            sync_store = SyncObjectStore(store)
+            return sync_store, cls._resolve_store_key(sync_store, uri)
         if store is not None:
-            return backend_cls(uri, store=store)
+            if hasattr(store, "to_url_and_options"):
+                sync_store = SyncObjectStore.from_config(store)
+                return sync_store, cls._resolve_store_key(sync_store, uri)
+            return store, cls._resolve_store_key(store, uri)
         if "://" in uri:
-            return backend_cls(uri)
-        return None
+            parsed = urlparse(uri)
+            if parsed.scheme == "file":
+                parent_dir = os.path.dirname(parsed.path) or "/"
+                return SyncObjectStore.from_local(parent_dir, create_dirs=True), os.path.basename(parsed.path)
+            if parsed.scheme == "memory":
+                key = f"{parsed.netloc}/{parsed.path.lstrip('/')}".strip("/")
+                return SyncObjectStore("memory://"), key
+            base_url = f"{parsed.scheme}://{parsed.netloc}"
+            return SyncObjectStore(base_url), parsed.path.lstrip("/")
+        raise ImproperConfigurationError(
+            "Non-GCS object store operations require an ObjectStore instance or scheme-qualified URI"
+        )
+
+    @classmethod
+    def _resolve_async_store_and_key(cls, store: Any | None, uri: str) -> tuple[Any, str]:
+        if isinstance(store, AsyncObjectStore):
+            return store, cls._resolve_store_key(store, uri)
+        if isinstance(store, SyncObjectStore):
+            if getattr(store, "scheme", "") == "memory":
+                return store, cls._resolve_store_key(store, uri)
+            async_store = store.to_async()
+            return async_store, cls._resolve_store_key(async_store, uri)
+        if isinstance(store, str):
+            async_store = AsyncObjectStore(store)
+            return async_store, cls._resolve_store_key(async_store, uri)
+        if store is not None:
+            if hasattr(store, "to_url_and_options"):
+                async_store = AsyncObjectStore.from_config(store)
+                return async_store, cls._resolve_store_key(async_store, uri)
+            return store, cls._resolve_store_key(store, uri)
+        if "://" in uri:
+            parsed = urlparse(uri)
+            if parsed.scheme == "file":
+                parent_dir = os.path.dirname(parsed.path) or "/"
+                return AsyncObjectStore.from_local(parent_dir, create_dirs=True), os.path.basename(parsed.path)
+            if parsed.scheme == "memory":
+                key = f"{parsed.netloc}/{parsed.path.lstrip('/')}".strip("/")
+                return AsyncObjectStore("memory://"), key
+            base_url = f"{parsed.scheme}://{parsed.netloc}"
+            return AsyncObjectStore(base_url), parsed.path.lstrip("/")
+        raise ImproperConfigurationError(
+            "Non-GCS object store operations require an ObjectStore instance or scheme-qualified URI"
+        )
+
+    @staticmethod
+    def _resolve_store_key(store: Any, uri: str) -> str:
+        if "://" not in uri:
+            return uri.lstrip("/")
+        store_url = getattr(store, "url", None)
+        if isinstance(store_url, str) and store_url:
+            prefix = store_url.rstrip("/") + "/"
+            if uri.startswith(prefix):
+                return uri[len(prefix) :].lstrip("/")
+        parsed = urlparse(uri)
+        if parsed.scheme == "memory":
+            return f"{parsed.netloc}/{parsed.path.lstrip('/')}".strip("/")
+        return parsed.path.lstrip("/")
 
     @classmethod
     def _coerce_read_arrow_result(cls, res: Any, *, format: str) -> ArrowCursor:

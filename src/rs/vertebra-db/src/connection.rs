@@ -766,33 +766,7 @@ fn read_der_length(buf: &[u8], pos: usize) -> Option<(usize, usize)> {
 }
 
 fn extract_der_common_name(der: &[u8]) -> Option<String> {
-    const OID_COMMON_NAME: [u8; 5] = [0x06, 0x03, 0x55, 0x04, 0x03];
-    // Walk to Subject RDNSequence inside TBSCertificate:
-    // Certificate ::= SEQUENCE { tbsCertificate TBSCertificate, ... }
-    // TBSCertificate ::= SEQUENCE { [0] version OPTIONAL, serialNumber, signature, issuer, validity, subject, ... }
-    if let Some(subject_slice) = extract_tbs_subject_slice(der)
-        && let Some(cn) = scan_last_cn_in_rdn(subject_slice)
-    {
-        return Some(cn);
-    }
-    let mut last_cn = None;
-    let mut i = 0;
-    while i + 7 < der.len() {
-        if der[i..i + 5] == OID_COMMON_NAME {
-            let str_tag = der[i + 5];
-            if matches!(str_tag, 0x0C | 0x13 | 0x16)
-                && let Some((str_len, val_pos)) = read_der_length(der, i + 6)
-                && val_pos + str_len <= der.len()
-                && let Ok(cn) = std::str::from_utf8(&der[val_pos..val_pos + str_len])
-            {
-                last_cn = Some(cn.to_string());
-                i = val_pos + str_len;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    last_cn
+    extract_tbs_subject_slice(der).and_then(scan_last_cn_in_rdn)
 }
 
 fn read_der_tlv(buf: &[u8], pos: usize) -> Option<(u8, &[u8], usize)> {
@@ -806,8 +780,8 @@ fn read_der_tlv(buf: &[u8], pos: usize) -> Option<(u8, &[u8], usize)> {
 }
 
 fn extract_tbs_subject_slice(der: &[u8]) -> Option<&[u8]> {
-    let (cert_tag, cert_body, _) = read_der_tlv(der, 0)?;
-    if cert_tag != 0x30 {
+    let (cert_tag, cert_body, cert_end) = read_der_tlv(der, 0)?;
+    if cert_tag != 0x30 || cert_end != der.len() {
         return None;
     }
     let (tbs_tag, tbs_body, _) = read_der_tlv(cert_body, 0)?;
@@ -832,23 +806,41 @@ fn extract_tbs_subject_slice(der: &[u8]) -> Option<&[u8]> {
 }
 
 fn scan_last_cn_in_rdn(rdn_seq: &[u8]) -> Option<String> {
-    const OID_COMMON_NAME: [u8; 5] = [0x06, 0x03, 0x55, 0x04, 0x03];
+    const OID_COMMON_NAME_BODY: [u8; 3] = [0x55, 0x04, 0x03];
+
     let mut last_cn = None;
-    let mut i = 0;
-    while i + 7 <= rdn_seq.len() {
-        if rdn_seq[i..i + 5] == OID_COMMON_NAME {
-            let str_tag = *rdn_seq.get(i + 5)?;
-            if matches!(str_tag, 0x0C | 0x13 | 0x16)
-                && let Some((str_len, val_pos)) = read_der_length(rdn_seq, i + 6)
-                && val_pos + str_len <= rdn_seq.len()
-                && let Ok(cn) = std::str::from_utf8(&rdn_seq[val_pos..val_pos + str_len])
-            {
+    let mut rdn_pos = 0usize;
+    while rdn_pos < rdn_seq.len() {
+        let (set_tag, set_body, next_rdn_pos) = read_der_tlv(rdn_seq, rdn_pos)?;
+        if set_tag != 0x31 || set_body.is_empty() {
+            return None;
+        }
+        rdn_pos = next_rdn_pos;
+
+        let mut atv_pos = 0usize;
+        while atv_pos < set_body.len() {
+            let (seq_tag, seq_body, next_atv_pos) = read_der_tlv(set_body, atv_pos)?;
+            if seq_tag != 0x30 {
+                return None;
+            }
+            atv_pos = next_atv_pos;
+
+            let (oid_tag, oid_bytes, val_tlv_pos) = read_der_tlv(seq_body, 0)?;
+            if oid_tag != 0x06 {
+                return None;
+            }
+            let (val_tag, val_bytes, atv_end) = read_der_tlv(seq_body, val_tlv_pos)?;
+            if atv_end != seq_body.len() {
+                return None;
+            }
+            if oid_bytes == OID_COMMON_NAME_BODY {
+                if !matches!(val_tag, 0x0C | 0x13 | 0x16) {
+                    return None;
+                }
+                let cn = std::str::from_utf8(val_bytes).ok()?;
                 last_cn = Some(cn.to_string());
-                i = val_pos + str_len;
-                continue;
             }
         }
-        i += 1;
     }
     last_cn
 }
@@ -1223,5 +1215,136 @@ mod tests {
         alloy_stream.read_exact(&mut ready).await.unwrap();
         assert_eq!(&ready, b"READY");
         alloy_srv.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn subject_cn_parser_rejects_issuer_cn_fallback_and_ou_oid_spoofing() {
+        use rcgen::{DistinguishedName, DnValue};
+
+        let expected_cn = "proj-a:inst-1";
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, expected_cn);
+        let ca_key = KeyPair::generate().unwrap();
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+        let ca_issuer = Issuer::new(ca_params, ca_key);
+
+        let mut cli_params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        cli_params
+            .distinguished_name
+            .push(DnType::CommonName, "vertebra-test-client");
+        let cli_key = KeyPair::generate().unwrap();
+        let cli_cert = cli_params.signed_by(&cli_key, &ca_issuer).unwrap();
+
+        let mut empty_subj_params = CertificateParams::new(vec!["127.0.0.1".to_string()]).unwrap();
+        empty_subj_params.distinguished_name = DistinguishedName::new();
+        let empty_subj_key = KeyPair::generate().unwrap();
+        let empty_subj_cert = empty_subj_params
+            .signed_by(&empty_subj_key, &ca_issuer)
+            .unwrap();
+        assert_eq!(extract_der_common_name(empty_subj_cert.der()), None);
+
+        let mut wrong_subj_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        wrong_subj_params.distinguished_name = DistinguishedName::new();
+        wrong_subj_params
+            .distinguished_name
+            .push(DnType::CommonName, "wrong:inst");
+        let wrong_subj_key = KeyPair::generate().unwrap();
+        let wrong_subj_cert = wrong_subj_params
+            .signed_by(&wrong_subj_key, &ca_issuer)
+            .unwrap();
+        assert_eq!(
+            extract_der_common_name(wrong_subj_cert.der()).as_deref(),
+            Some("wrong:inst")
+        );
+
+        let spoof_ou = "\x06\x03\x55\x04\x03\x0c\x0dproj-a:inst-1";
+        let mut ou_spoof_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ou_spoof_params.distinguished_name = DistinguishedName::new();
+        ou_spoof_params.distinguished_name.push(
+            DnType::OrganizationalUnitName,
+            DnValue::Utf8String(spoof_ou.to_string()),
+        );
+        let ou_spoof_key = KeyPair::generate().unwrap();
+        let ou_spoof_cert = ou_spoof_params
+            .signed_by(&ou_spoof_key, &ca_issuer)
+            .unwrap();
+        assert_eq!(extract_der_common_name(ou_spoof_cert.der()), None);
+
+        let mut ou_plus_wrong_cn_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ou_plus_wrong_cn_params.distinguished_name = DistinguishedName::new();
+        ou_plus_wrong_cn_params
+            .distinguished_name
+            .push(DnType::CommonName, "wrong:inst");
+        ou_plus_wrong_cn_params.distinguished_name.push(
+            DnType::OrganizationalUnitName,
+            DnValue::Utf8String(spoof_ou.to_string()),
+        );
+        let ou_plus_wrong_cn_key = KeyPair::generate().unwrap();
+        let ou_plus_wrong_cn_cert = ou_plus_wrong_cn_params
+            .signed_by(&ou_plus_wrong_cn_key, &ca_issuer)
+            .unwrap();
+        assert_eq!(
+            extract_der_common_name(ou_plus_wrong_cn_cert.der()).as_deref(),
+            Some("wrong:inst")
+        );
+
+        let bmp_cn_rdn = [
+            0x31, 0x0D, 0x30, 0x0B, 0x06, 0x03, 0x55, 0x04, 0x03, 0x1E, 0x04, 0x00, b'A', 0x00,
+            b'B',
+        ];
+        assert_eq!(scan_last_cn_in_rdn(&bmp_cn_rdn), None);
+        assert_eq!(scan_last_cn_in_rdn(&[0x31, 0x05, 0x30, 0x08]), None);
+
+        for (srv_cert_pem, srv_key_pem) in [
+            (
+                empty_subj_cert.pem().into_bytes(),
+                empty_subj_key.serialize_pem().into_bytes(),
+            ),
+            (
+                ou_spoof_cert.pem().into_bytes(),
+                ou_spoof_key.serialize_pem().into_bytes(),
+            ),
+        ] {
+            let pki = TestPki {
+                ca_pem: ca_cert.pem().into_bytes(),
+                server_cert_pem: srv_cert_pem,
+                server_key_pem: srv_key_pem,
+                client_cert_pem: cli_cert.pem().into_bytes(),
+                client_key_pem: cli_key.serialize_pem().into_bytes(),
+            };
+            let acceptor = pki.server_acceptor(true);
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let srv = tokio::spawn(async move {
+                let (sock, _) = listener.accept().await.unwrap();
+                let _ = acceptor.accept(sock).await;
+            });
+            let opts = ConnectOptions {
+                target: EndpointTarget::CloudSql {
+                    instance: CloudSqlInstanceUri::parse("proj-a:us-central1:inst-1").unwrap(),
+                    addr,
+                    server_ca_pem: pki.ca_pem,
+                    client_cert_pem: pki.client_cert_pem,
+                    client_key_pem: pki.client_key_pem,
+                },
+                tls_mode: TlsMode::VerifyFull,
+                ca_pem: None,
+                client_cert_pem: None,
+                client_key_pem: None,
+                server_name: None,
+                connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+                tcp_nodelay: true,
+                application_name: None,
+            };
+            assert!(matches!(
+                TransportStream::connect(&opts).await.unwrap_err(),
+                TransportError::Tls(_)
+            ));
+            srv.await.unwrap();
+        }
     }
 }

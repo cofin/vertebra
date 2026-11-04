@@ -2049,55 +2049,73 @@ async def test_pool_key_memory_isolation_and_provide_driver_resolution(
     assert DatabaseRegistry.pool_fingerprint("duckdb:///:memory:") is None
 
     reg = DatabaseRegistry()
-    m1 = provide_driver("sqlite:///:memory:", sync=True, registry=reg)
-    m2 = provide_driver("sqlite:///:memory:", sync=True, registry=reg)
-    assert isinstance(m1, SyncSQLiteDriver)
-    assert isinstance(m2, SyncSQLiteDriver)
-    assert m1 is not m2
-    m1.execute("CREATE TABLE iso_check (id INTEGER PRIMARY KEY)")
-    with pytest.raises(OperationalError):
-        m2.select("SELECT id FROM iso_check")
+    m1: SyncSQLiteDriver | None = None
+    m2: SyncSQLiteDriver | None = None
+    am1: AsyncSQLiteDriver | None = None
+    am2: AsyncSQLiteDriver | None = None
+    s1: SyncSQLiteDriver | None = None
+    sm1: SyncSQLiteDriver | None = None
+    named_sync: SyncSQLiteDriver | None = None
+    named_async: AsyncSQLiteDriver | None = None
+    vk_sync: SyncValkeyDriver | None = None
+    vk_async: AsyncValkeyDriver | None = None
+    try:
+        m1 = provide_driver("sqlite:///:memory:", sync=True, registry=reg)
+        m2 = provide_driver("sqlite:///:memory:", sync=True, registry=reg)
+        assert isinstance(m1, SyncSQLiteDriver)
+        assert isinstance(m2, SyncSQLiteDriver)
+        assert m1 is not m2
+        m1.execute("CREATE TABLE iso_check (id INTEGER PRIMARY KEY)")
+        with pytest.raises(OperationalError):
+            m2.select("SELECT id FROM iso_check")
 
-    am1 = provide_driver("sqlite:///:memory:", sync=False, registry=reg)
-    am2 = provide_driver("sqlite:///:memory:", sync=False, registry=reg)
-    assert isinstance(am1, AsyncSQLiteDriver)
-    assert isinstance(am2, AsyncSQLiteDriver)
-    assert am1 is not am2
+        am1 = provide_driver("sqlite:///:memory:", sync=False, registry=reg)
+        am2 = provide_driver("sqlite:///:memory:", sync=False, registry=reg)
+        assert isinstance(am1, AsyncSQLiteDriver)
+        assert isinstance(am2, AsyncSQLiteDriver)
+        assert am1 is not am2
 
-    s1 = provide_driver(SQLiteConfig(path=str(file_db)), sync=True, registry=reg)
-    s2 = provide_driver(SQLiteConfig(path=str(file_db)), sync=True, registry=reg)
-    assert s1 is s2
+        s1 = provide_driver(SQLiteConfig(path=str(file_db)), sync=True, registry=reg)
+        s2 = provide_driver(SQLiteConfig(path=str(file_db)), sync=True, registry=reg)
+        assert s1 is s2
 
-    shared_mem_cfg = SQLiteConfig(path="file:memdb_shared_t06?mode=memory&cache=shared")
-    sm1 = provide_driver(shared_mem_cfg, sync=True, registry=reg)
-    sm2 = provide_driver(shared_mem_cfg, sync=True, registry=reg)
-    assert sm1 is sm2
+        shared_mem_cfg = SQLiteConfig(path="file:memdb_shared_t06?mode=memory&cache=shared")
+        sm1 = provide_driver(shared_mem_cfg, sync=True, registry=reg)
+        sm2 = provide_driver(shared_mem_cfg, sync=True, registry=reg)
+        assert sm1 is sm2
 
-    reg.register("sqlite_named", SQLiteConfig(path=str(tmp_path / "named.db")))
-    named_sync = provide_driver("sqlite_named", sync=True, registry=reg)
-    named_async = provide_driver("sqlite_named", sync=False, registry=reg)
-    assert isinstance(named_sync, SyncSQLiteDriver)
-    assert isinstance(named_async, AsyncSQLiteDriver)
-    assert provide_driver("sqlite_named", sync=True, registry=reg) is named_sync
-    assert provide_driver("sqlite_named", sync=False, registry=reg) is named_async
+        reg.register("sqlite_named", SQLiteConfig(path=str(tmp_path / "named.db")))
+        named_sync = provide_driver("sqlite_named", sync=True, registry=reg)
+        named_async = provide_driver("sqlite_named", sync=False, registry=reg)
+        assert isinstance(named_sync, SyncSQLiteDriver)
+        assert isinstance(named_async, AsyncSQLiteDriver)
+        assert provide_driver("sqlite_named", sync=True, registry=reg) is named_sync
+        assert provide_driver("sqlite_named", sync=False, registry=reg) is named_async
 
-    df_cfg = DataFusionConfig(target_partitions=2)
-    df_sync = provide_driver(df_cfg, sync=True, registry=reg)
-    df_async = provide_driver(df_cfg, sync=False, registry=reg)
-    assert isinstance(df_sync, DataFusionEngine)
-    assert isinstance(df_async, DataFusionEngine)
-    assert provide_driver("datafusion://embedded?target_partitions=2", sync=True, registry=reg) is df_sync
+        df_cfg = DataFusionConfig(target_partitions=2)
+        df_sync = provide_driver(df_cfg, sync=True, registry=reg)
+        df_async = provide_driver(df_cfg, sync=False, registry=reg)
+        assert isinstance(df_sync, DataFusionEngine)
+        assert isinstance(df_async, DataFusionEngine)
+        assert provide_driver("datafusion://embedded?target_partitions=2", sync=True, registry=reg) is df_sync
 
-    vk_sync = provide_driver("valkey://localhost:6379/0", sync=True, registry=reg)
-    vk_async = provide_driver("valkey://localhost:6379/0", sync=False, registry=reg)
-    assert isinstance(vk_sync, SyncValkeyDriver)
-    assert isinstance(vk_async, AsyncValkeyDriver)
+        vk_sync = provide_driver("valkey://localhost:6379/0", sync=True, registry=reg)
+        vk_async = provide_driver("valkey://localhost:6379/0", sync=False, registry=reg)
+        assert isinstance(vk_sync, SyncValkeyDriver)
+        assert isinstance(vk_async, AsyncValkeyDriver)
 
-    reg_mod = importlib.import_module("vertebra.db.registry")
-    assert not hasattr(vertebra_db, "provide_bigquery_driver")
-    assert not hasattr(vertebra_db, "provide_spanner_driver")
-    assert not hasattr(reg_mod, "provide_bigquery_driver")
-    assert not hasattr(reg_mod, "provide_spanner_driver")
+        reg_mod = importlib.import_module("vertebra.db.registry")
+        assert not hasattr(vertebra_db, "provide_bigquery_driver")
+        assert not hasattr(vertebra_db, "provide_spanner_driver")
+        assert not hasattr(reg_mod, "provide_bigquery_driver")
+        assert not hasattr(reg_mod, "provide_spanner_driver")
+    finally:
+        for sync_drv in (m1, m2, s1, sm1, named_sync, vk_sync):
+            if sync_drv is not None:
+                sync_drv.close()
+        for async_drv in (am1, am2, named_async, vk_async):
+            if async_drv is not None:
+                await async_drv.close()
 
 
 def test_registry_get_dialer_sync_async_caching_mssql_wiring_and_provide_driver_type_error() -> None:
@@ -2129,7 +2147,17 @@ def test_registry_get_dialer_sync_async_caching_mssql_wiring_and_provide_driver_
 
     pg_cfg = PostgreSQLConfig(dsn="postgresql://localhost:5432/appdb", cloud_sql_instance="proj:us-central1:inst")
     my_cfg = MySQLConfig(dsn="mysql://localhost:3306/appdb", cloud_sql_instance="proj:us-central1:inst")
-    ms_cfg = MSSQLConfig(host="localhost", port=1433, database="master", cloudsql_instance="proj:us-central1:inst")
+    ms_cfg = MSSQLConfig(host="localhost", port=1433, database="master", cloud_sql_instance="proj:us-central1:inst")
+    assert (
+        MSSQLConfig.from_url(
+            "mssql://localhost:1433/master?cloud_sql_instance=proj:us-central1:inst"
+        ).cloud_sql_instance
+        == "proj:us-central1:inst"
+    )
+    assert (
+        MSSQLConfig.from_url("mssql://localhost:1433/master?cloudsql_instance=proj:us-central1:inst").cloud_sql_instance
+        == "proj:us-central1:inst"
+    )
 
     pg_sync = cast("SyncPostgreSQLDriver", reg.get_shared_sync_driver(pg_cfg))
     pg_async = cast("AsyncPostgreSQLDriver", reg.get_shared_driver(pg_cfg))
@@ -2160,6 +2188,57 @@ def test_registry_get_dialer_sync_async_caching_mssql_wiring_and_provide_driver_
             provide_driver(bad_target, sync=True, registry=reg)
 
 
+def _collect_ast_upward_import_violations(
+    tree: ast.AST,
+    pkg_parts: list[str],
+    forbidden_prefixes: tuple[str, ...],
+) -> list[str]:
+    """Collect static and dynamic upward module targets inside `tree` matching `forbidden_prefixes`."""
+    dynamic_import_callees = frozenset({"import_optional", "ensure_module", "import_string", "import_module"})
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        targets: list[str] = []
+        if isinstance(node, ast.Import):
+            targets.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0 and node.module:
+                targets.append(node.module)
+            elif node.level > 0:
+                anchor = pkg_parts[: len(pkg_parts) - (node.level - 1)]
+                base_mod = ".".join([*anchor, node.module] if node.module else anchor)
+                targets.append(base_mod)
+                for alias in node.names:
+                    if alias.name != "*":
+                        targets.append(f"{base_mod}.{alias.name}" if base_mod else alias.name)
+        elif isinstance(node, ast.Call):
+            callee = (
+                node.func.id
+                if isinstance(node.func, ast.Name)
+                else (node.func.attr if isinstance(node.func, ast.Attribute) else "")
+            )
+            if callee in dynamic_import_callees:
+                arg_expr: ast.expr | None = node.args[0] if node.args else None
+                if arg_expr is None:
+                    for kw in node.keywords:
+                        if kw.arg in {"module_name", "name"}:
+                            arg_expr = kw.value
+                            break
+                if isinstance(arg_expr, ast.Constant) and isinstance(arg_expr.value, str):
+                    raw_target = arg_expr.value
+                    if raw_target.startswith("vertebra."):
+                        targets.append(raw_target)
+                    elif raw_target.startswith("."):
+                        dots = len(raw_target) - len(raw_target.lstrip("."))
+                        rest = raw_target.lstrip(".")
+                        anchor = pkg_parts[: max(0, len(pkg_parts) - (dots - 1))]
+                        resolved = ".".join([*anchor, rest] if rest else anchor)
+                        targets.append(resolved)
+        for target in targets:
+            if any(target == prefix or target.startswith(f"{prefix}.") for prefix in forbidden_prefixes):
+                violations.append(target)
+    return sorted(set(violations))
+
+
 def test_vertebra_db_ast_upward_import_boundary_gate() -> None:
     """Enforce zero upward imports from vertebra.db into agent, framework, extensions, server, or embeddings."""
     db_root = Path(vertebra_db.__file__).resolve().parent
@@ -2171,6 +2250,17 @@ def test_vertebra_db_ast_upward_import_boundary_gate() -> None:
         "vertebra.server",
         "vertebra.embeddings",
     )
+    assert _collect_ast_upward_import_violations(
+        ast.parse('import_optional("vertebra.extensions.foo")'),
+        ["vertebra", "db"],
+        forbidden_prefixes,
+    ) == ["vertebra.extensions.foo"]
+    assert _collect_ast_upward_import_violations(
+        ast.parse('ensure_module(module_name="vertebra.server.app")'),
+        ["vertebra", "db"],
+        forbidden_prefixes,
+    ) == ["vertebra.server.app"]
+
     upward_imports_by_module: dict[str, list[str]] = {}
 
     for py_file in sorted(db_root.rglob("*.py")):
@@ -2183,26 +2273,9 @@ def test_vertebra_db_ast_upward_import_boundary_gate() -> None:
             module_name = ".".join(rel_parts)
 
         tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
-        violations: list[str] = []
-        for node in ast.walk(tree):
-            targets: list[str] = []
-            if isinstance(node, ast.Import):
-                targets.extend(alias.name for alias in node.names)
-            elif isinstance(node, ast.ImportFrom):
-                if node.level == 0 and node.module:
-                    targets.append(node.module)
-                elif node.level > 0:
-                    anchor = pkg_parts[: len(pkg_parts) - (node.level - 1)]
-                    base_mod = ".".join([*anchor, node.module] if node.module else anchor)
-                    targets.append(base_mod)
-                    for alias in node.names:
-                        if alias.name != "*":
-                            targets.append(f"{base_mod}.{alias.name}" if base_mod else alias.name)
-            for target in targets:
-                if any(target == prefix or target.startswith(f"{prefix}.") for prefix in forbidden_prefixes):
-                    violations.append(target)
+        violations = _collect_ast_upward_import_violations(tree, pkg_parts, forbidden_prefixes)
         if violations:
-            upward_imports_by_module[module_name] = sorted(set(violations))
+            upward_imports_by_module[module_name] = violations
 
     unexpected = {
         mod: imports
@@ -2213,3 +2286,50 @@ def test_vertebra_db_ast_upward_import_boundary_gate() -> None:
 
     stale_allowlist = _TEMPORARY_UPWARD_IMPORT_ALLOWLIST - set(upward_imports_by_module)
     assert stale_allowlist == set()
+
+
+@pytest.mark.anyio
+async def test_dialect_tag_uniqueness_deterministic_file_urls_and_spanner_cdc_protocol() -> None:
+    """Verify non-overlapping dialect_tag values, deterministic SQLite/DuckDB from_url paths, and Spanner CDC protocols."""
+    from vertebra.db.cdc import AsyncSpannerChangeStreamSource, SyncSpannerChangeStreamSource
+    from vertebra.db.driver._common import SPANGRES_DIALECT_TAG
+    from vertebra.db.registry import REGISTERED_CONFIG_TYPES
+
+    tags = [tag for cfg_cls in REGISTERED_CONFIG_TYPES if (tag := getattr(cfg_cls, "dialect_tag", 0)) != 0]
+    tags.append(SPANGRES_DIALECT_TAG)
+    assert len(tags) == 12
+    assert len(set(tags)) == 12
+    assert set(tags) == set(range(1, 13))
+
+    assert SQLiteConfig.from_url("sqlite:///tmp.db").path == "tmp.db"
+    assert SQLiteConfig.from_url("sqlite:////tmp/abs.db").path == "/tmp/abs.db"
+    assert SQLiteConfig.from_url("sqlite://rel.db").path == "rel.db"
+    assert SQLiteConfig.from_url("sqlite:///:memory:").path == ":memory:"
+    assert SQLiteConfig.from_url("sqlite:///tmp.db", path="/override.db").path == "/override.db"
+
+    assert DuckDBConfig.from_url("duckdb:///tmp.duckdb").path == "tmp.duckdb"
+    assert DuckDBConfig.from_url("duckdb:////tmp/abs.duckdb").path == "/tmp/abs.duckdb"
+    assert DuckDBConfig.from_url("duckdb://rel.duckdb").path == "rel.duckdb"
+    assert DuckDBConfig.from_url("duckdb:///:memory:").path == ":memory:"
+    assert DuckDBConfig.from_url("duckdb:///tmp.duckdb", path="/override.duckdb").path == "/override.duckdb"
+
+    class _EmptySyncSpannerCDCDriver:
+        dialect = "googlesql"
+
+        def select(self, sql: str, parameters: Any = None) -> list[dict[str, Any]]:
+            _ = (sql, parameters)
+            return []
+
+    class _EmptyAsyncSpannerCDCDriver:
+        dialect = "googlesql"
+
+        async def select(self, sql: str, parameters: Any = None) -> list[dict[str, Any]]:
+            _ = (sql, parameters)
+            return []
+
+    sync_source = SyncSpannerChangeStreamSource(_EmptySyncSpannerCDCDriver(), "orders_stream")
+    async_source = AsyncSpannerChangeStreamSource(_EmptyAsyncSpannerCDCDriver(), "orders_stream")
+    assert isinstance(sync_source, SyncChangeSource)
+    assert isinstance(async_source, AsyncChangeSource)
+    assert list(sync_source.stream()) == []
+    assert [ev async for ev in async_source.stream()] == []

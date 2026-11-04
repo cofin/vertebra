@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 from vertebra.db.adapters.redis.config import RedisConfig
+from vertebra.db.driver._common import VALKEY_DIALECT_TAG
 
 __all__ = ("ValkeyConfig",)
 
@@ -13,7 +14,7 @@ class ValkeyConfig(RedisConfig, frozen=True, gc=False, kw_only=True):
     """Configuration for Valkey 8.0+ / 9.0+ standalone, Sentinel, Cluster, and GCP Memorystore."""
 
     dialect: ClassVar[str] = "valkey"
-    dialect_tag: ClassVar[int] = 8
+    dialect_tag: ClassVar[int] = VALKEY_DIALECT_TAG
     url_schemes: ClassVar[tuple[str, ...]] = ("valkey", "valkeys")
     driver_module: ClassVar[str] = "vertebra.db.adapters.valkey.driver"
     sync_driver_name: ClassVar[str] = "SyncValkeyDriver"

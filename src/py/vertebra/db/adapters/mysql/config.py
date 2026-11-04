@@ -10,7 +10,7 @@ import msgspec
 
 from vertebra.db.adapters.mysql.core import MySQLCore
 from vertebra.db.dialer.cloudsql import CloudSQLConfig
-from vertebra.db.driver._common import BaseDatabaseConfig
+from vertebra.db.driver._common import MYSQL_DIALECT_TAG, BaseDatabaseConfig
 from vertebra.utils.module_loader import import_optional
 
 __all__ = ("MySQLConfig",)
@@ -20,7 +20,7 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
     """Configuration for MySQL 8.0+/9.0+ and MariaDB connections."""
 
     dialect: ClassVar[str] = "mysql"
-    dialect_tag: ClassVar[int] = 2
+    dialect_tag: ClassVar[int] = MYSQL_DIALECT_TAG
     url_schemes: ClassVar[tuple[str, ...]] = ("mysql", "mariadb")
     driver_module: ClassVar[str] = "vertebra.db.adapters.mysql.driver"
     sync_driver_name: ClassVar[str] = "SyncMySQLDriver"

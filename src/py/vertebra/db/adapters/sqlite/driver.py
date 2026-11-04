@@ -18,6 +18,7 @@ from vertebra.db.arrow import (
     _table_to_rows_and_cols,
 )
 from vertebra.db.driver import (
+    SQLITE_DIALECT_TAG,
     DatabaseError,
     DataError,
     IntegrityError,
@@ -37,55 +38,11 @@ __all__ = (
 )
 
 
-def _translate_sqlite_error(exc: sqlite3.Error) -> DatabaseError:
-    """Translate a `sqlite3.Error` into the matching `vertebra.db.driver.DatabaseError` subclass."""
-    msg = str(exc)
-    if isinstance(exc, sqlite3.IntegrityError):
-        return IntegrityError(msg)
-    if isinstance(exc, sqlite3.ProgrammingError):
-        return ProgrammingError(msg)
-    if isinstance(exc, sqlite3.DataError):
-        return DataError(msg)
-    if isinstance(exc, sqlite3.OperationalError):
-        return OperationalError(msg)
-    if isinstance(exc, sqlite3.InterfaceError):
-        return InterfaceError(msg)
-    if isinstance(exc, sqlite3.NotSupportedError):
-        return NotSupportedError(msg)
-    if isinstance(exc, sqlite3.InternalError):
-        return InternalError(msg)
-    return DatabaseError(msg)
-
-
-def _normalize_sqlite_param(value: Any) -> Any:
-    """Normalize rich Python bind values into SQLite-compatible scalar types."""
-    if isinstance(value, Decimal):
-        return str(value)
-    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
-        return value.isoformat()
-    if isinstance(value, UUID):
-        return str(value)
-    if isinstance(value, (dict, list)):
-        return encode_json(value)
-    return value
-
-
-def _normalize_sqlite_parameters(
-    parameters: Sequence[Any] | Mapping[str, Any] | None,
-) -> tuple[Any, ...] | dict[str, Any]:
-    """Normalize positional or named bind parameters for `sqlite3.Connection`."""
-    if parameters is None:
-        return ()
-    if isinstance(parameters, Mapping):
-        return {str(key): _normalize_sqlite_param(val) for key, val in parameters.items()}
-    return tuple(_normalize_sqlite_param(val) for val in parameters)
-
-
 class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
     """Synchronous SQLite driver returning plain Python tuples with SHM broker and Arrow IPC support."""
 
     dialect: ClassVar[str] = "sqlite"
-    dialect_tag: ClassVar[int] = 3
+    dialect_tag: ClassVar[int] = SQLITE_DIALECT_TAG
 
     __slots__ = ("_conn", "_in_transaction")
 
@@ -266,11 +223,11 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
             if sc is not None and hasattr(sc, "lookup") and hasattr(sc, "insert"):
                 sql_bytes = sql.encode("utf-8")
                 try:
-                    if sc.lookup(3, sql) is None:
-                        sc.insert(3, sql, 0, sql_bytes, b"")
+                    if sc.lookup(SQLITE_DIALECT_TAG, sql) is None:
+                        sc.insert(SQLITE_DIALECT_TAG, sql, 0, sql_bytes, b"")
                 except TypeError:
-                    if sc.lookup(3, sql_bytes) is None:
-                        sc.insert(3, sql_bytes, 0, sql_bytes, b"")
+                    if sc.lookup(SQLITE_DIALECT_TAG, sql_bytes) is None:
+                        sc.insert(SQLITE_DIALECT_TAG, sql_bytes, 0, sql_bytes, b"")
         if hasattr(self._broker, "lease_table") and self._broker.lease_table is not None:
             return self._broker.lease_table.acquire(os.getpid())
         if hasattr(self._broker, "acquire"):
@@ -296,7 +253,7 @@ class AsyncSQLiteDriver(ThreadOffloadAsyncDatabaseDriver[SQLiteConfig, SyncSQLit
     """Asynchronous SQLite driver facade compatible with Python 3.12+ and free-threaded 3.14t."""
 
     dialect: ClassVar[str] = "sqlite"
-    dialect_tag: ClassVar[int] = 3
+    dialect_tag: ClassVar[int] = SQLITE_DIALECT_TAG
 
     __slots__ = ()
 
@@ -309,3 +266,47 @@ class AsyncSQLiteDriver(ThreadOffloadAsyncDatabaseDriver[SQLiteConfig, SyncSQLit
     def closed(self) -> bool:
         """Return True when the SQLite connection has been closed."""
         return self._sync.closed
+
+
+def _translate_sqlite_error(exc: sqlite3.Error) -> DatabaseError:
+    """Translate a `sqlite3.Error` into the matching `vertebra.db.driver.DatabaseError` subclass."""
+    msg = str(exc)
+    if isinstance(exc, sqlite3.IntegrityError):
+        return IntegrityError(msg)
+    if isinstance(exc, sqlite3.ProgrammingError):
+        return ProgrammingError(msg)
+    if isinstance(exc, sqlite3.DataError):
+        return DataError(msg)
+    if isinstance(exc, sqlite3.OperationalError):
+        return OperationalError(msg)
+    if isinstance(exc, sqlite3.InterfaceError):
+        return InterfaceError(msg)
+    if isinstance(exc, sqlite3.NotSupportedError):
+        return NotSupportedError(msg)
+    if isinstance(exc, sqlite3.InternalError):
+        return InternalError(msg)
+    return DatabaseError(msg)
+
+
+def _normalize_sqlite_param(value: Any) -> Any:
+    """Normalize rich Python bind values into SQLite-compatible scalar types."""
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
+        return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, (dict, list)):
+        return encode_json(value)
+    return value
+
+
+def _normalize_sqlite_parameters(
+    parameters: Sequence[Any] | Mapping[str, Any] | None,
+) -> tuple[Any, ...] | dict[str, Any]:
+    """Normalize positional or named bind parameters for `sqlite3.Connection`."""
+    if parameters is None:
+        return ()
+    if isinstance(parameters, Mapping):
+        return {str(key): _normalize_sqlite_param(val) for key, val in parameters.items()}
+    return tuple(_normalize_sqlite_param(val) for val in parameters)

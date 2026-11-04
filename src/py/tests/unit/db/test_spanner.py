@@ -24,7 +24,7 @@ from vertebra._vertebra import (
     SpannerAbortedError,
     SpannerError,
 )
-from vertebra.db import DatabaseRegistry
+from vertebra.db import DatabaseRegistry, NotSupportedError
 from vertebra.db.adapters.datafusion import DataFusionEngine
 from vertebra.db.adapters.spanner import (
     AsyncSpannerDriver,
@@ -1021,3 +1021,29 @@ def test_run_in_transaction_retries_only_aborted(error_factory: Callable[[], Exc
         with pytest.raises(RuntimeError):
             driver.run_in_transaction(work, max_attempts=3)
     assert len(calls) == expected_calls
+
+
+@pytest.mark.anyio
+async def test_spanner_commit_rejects_mixed_buffered_dml_and_mutations_atomically() -> None:
+    """Verify SyncSpannerDriver.commit and AsyncSpannerDriver.commit reject mixed DML and mutations before issuing RPCs."""
+    sync_client = FakeSpannerClient()
+    sync_client.update_ddl(["CREATE TABLE items (id INT64 NOT NULL, name STRING(64) NOT NULL) PRIMARY KEY (id)"])
+    sync_driver = SyncSpannerDriver(SpannerConfig(), client=sync_client)
+    sync_driver.begin()
+    sync_driver.execute("INSERT INTO items (id, name) VALUES (@id, @name)", {"id": 1, "name": "dml_row"})
+    sync_driver.apply_mutations([Mutation.insert("items", ("id", "name"), [(2, "mut_row")])])
+    with pytest.raises(NotSupportedError, match="Cannot mix SQL DML and key-value mutations"):
+        sync_driver.commit()
+    assert sync_driver.select("SELECT id, name FROM items") == []
+    sync_driver.close()
+
+    async_backing = FakeSpannerClient()
+    async_backing.update_ddl(["CREATE TABLE items (id INT64 NOT NULL, name STRING(64) NOT NULL) PRIMARY KEY (id)"])
+    async_driver = AsyncSpannerDriver(SpannerConfig(), client=FakeAsyncSpannerClient(async_backing))
+    await async_driver.begin()
+    await async_driver.execute("INSERT INTO items (id, name) VALUES (@id, @name)", {"id": 10, "name": "dml_row"})
+    await async_driver.apply_mutations([Mutation.insert("items", ("id", "name"), [(20, "mut_row")])])
+    with pytest.raises(NotSupportedError, match="Cannot mix SQL DML and key-value mutations"):
+        await async_driver.commit()
+    assert await async_driver.select("SELECT id, name FROM items") == []
+    await async_driver.close()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
-from typing import Any, Self, TypeVar
+from typing import Any, Self
 
 from vertebra._vertebra import NotFoundError
 from vertebra.db.arrow import (
@@ -21,8 +21,6 @@ __all__ = (
     "AsyncDatabaseDriver",
     "ThreadOffloadAsyncDatabaseDriver",
 )
-
-SyncDriverT = TypeVar("SyncDriverT", bound=SyncDatabaseDriver[Any])
 
 
 class AsyncDatabaseDriver[ConfigT: BaseDatabaseConfig](CommonDriverMixin[ConfigT]):

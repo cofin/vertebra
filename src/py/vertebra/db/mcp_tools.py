@@ -253,10 +253,10 @@ def register_gcp_database_tools(
             verb = _extract_leading_verb(sql)
             _require_confirmation("spanner_query", sql, confirmation_token)
             if verb in _DDL_VERBS:
-                op_Meta = await _maybe_await(drv.update_ddl([sql]))
+                op_meta = await _maybe_await(drv.update_ddl([sql]))
                 return {
                     "mode": "ddl",
-                    "operation": op_Meta,
+                    "operation": op_meta,
                 }
             dml_fn = getattr(drv, "execute_dml", getattr(drv, "execute", None))
             affected = await _maybe_await(dml_fn(sql, params)) if callable(dml_fn) else 0

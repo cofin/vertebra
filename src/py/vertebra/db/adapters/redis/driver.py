@@ -27,7 +27,7 @@ from vertebra.db.adapters.redis.core import (
     hash_slot,
     parse_cluster_redirect,
 )
-from vertebra.db.driver import CommonDriverMixin
+from vertebra.db.driver import REDIS_DIALECT_TAG, CommonDriverMixin
 from vertebra.typing import ImproperConfigurationError, VertebraError
 
 if TYPE_CHECKING:
@@ -43,7 +43,7 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
     """Synchronous Redis RESP3 driver with topology routing, client cache, and pub/sub."""
 
     dialect: ClassVar[str] = "redis"
-    dialect_tag: ClassVar[int] = 7
+    dialect_tag: ClassVar[int] = REDIS_DIALECT_TAG
 
     __slots__ = (
         "_client_cache",
@@ -1033,7 +1033,7 @@ class AsyncRedisDriver(CommonDriverMixin[RedisConfig]):
     """Asynchronous Redis RESP3 driver with topology routing, client cache, and pub/sub."""
 
     dialect: ClassVar[str] = "redis"
-    dialect_tag: ClassVar[int] = 7
+    dialect_tag: ClassVar[int] = REDIS_DIALECT_TAG
 
     __slots__ = (
         "_client_cache",

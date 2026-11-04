@@ -160,7 +160,7 @@ class DatabaseWrapperMixin:
                 database=db_name,
                 user=user or "sa",
                 password=password,
-                cloudsql_instance=self.pooler_config.cloud_sql_instance,
+                cloud_sql_instance=self.pooler_config.cloud_sql_instance,
                 broker=self._broker,
             )
         if self.vendor == "duckdb":

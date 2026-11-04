@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import os
 import time as _time
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import suppress
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 
 import msgspec
@@ -13,6 +11,7 @@ import msgspec
 from vertebra._vertebra import (
     LeaseBroker,
     NotFoundError,
+    NotSupportedError,
     SpannerAbortedError,
 )
 from vertebra._vertebra import (
@@ -701,15 +700,6 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         """Return commit timestamp and mutation count from the last write operation."""
         return dict(self._last_commit_stats)
 
-    def __enter__(self) -> Self:
-        """Connect and enter the synchronous driver context."""
-        return self.connect()
-
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        """Close the driver upon exiting the context."""
-        _ = (exc_type, exc_val, exc_tb)
-        self.close()
-
     def connect(self) -> Self:
         """Initialize the underlying Rust `SyncSpannerClient` channel pool."""
         if self._client is None:
@@ -739,6 +729,12 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         self._tx_dml_buffer.clear()
         self._tx_mutation_buffer.clear()
         self._in_transaction = False
+        if dml_batch and mutation_batch:
+            msg = (
+                "Cannot mix SQL DML and key-value mutations in a single buffered Spanner transaction; "
+                "commit DML and mutations separately or use run_in_transaction"
+            )
+            raise NotSupportedError(msg)
         if dml_batch:
             self.execute_batch_dml(dml_batch)
         if mutation_batch:
@@ -1270,21 +1266,6 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
             self._client = SpannerCore.create_sync_rust_client(self.config)
         return self._client
 
-    def _acquire_pid_lease(self) -> Any:
-        acquire_fn = getattr(self._broker, "acquire", None)
-        if callable(acquire_fn):
-            with suppress(Exception):
-                return acquire_fn(os.getpid(), timeout_ms=5000)
-        return None
-
-    def _release_pid_lease(self, lease: Any) -> None:
-        if lease is None or self._broker is None:
-            return
-        release_fn = getattr(self._broker, "release", None)
-        if callable(release_fn):
-            with suppress(Exception):
-                release_fn(lease.slot_index, lease.generation)
-
     def _prepare_sql_and_params(
         self,
         sql: str,
@@ -1409,15 +1390,6 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         """Return commit timestamp and mutation count from the last write operation."""
         return dict(self._last_commit_stats)
 
-    async def __aenter__(self) -> Self:
-        """Connect and enter the asynchronous driver context."""
-        return await self.connect()
-
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        """Close the driver upon exiting the context."""
-        _ = (exc_type, exc_val, exc_tb)
-        await self.close()
-
     async def connect(self) -> Self:
         """Initialize the underlying Rust `AsyncSpannerClient` channel pool."""
         if self._client is None:
@@ -1447,6 +1419,12 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         self._tx_dml_buffer.clear()
         self._tx_mutation_buffer.clear()
         self._in_transaction = False
+        if dml_batch and mutation_batch:
+            msg = (
+                "Cannot mix SQL DML and key-value mutations in a single buffered Spanner transaction; "
+                "commit DML and mutations separately or use run_in_transaction"
+            )
+            raise NotSupportedError(msg)
         if dml_batch:
             await self.execute_batch_dml(dml_batch)
         if mutation_batch:
@@ -1975,21 +1953,6 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
             ensure_module("vertebra._spanner", package="vertebra-core[spanner]", extra="spanner")
             self._client = SpannerCore.create_async_rust_client(self.config)
         return self._client
-
-    def _acquire_pid_lease(self) -> Any:
-        acquire_fn = getattr(self._broker, "acquire", None)
-        if callable(acquire_fn):
-            with suppress(Exception):
-                return acquire_fn(os.getpid(), timeout_ms=5000)
-        return None
-
-    def _release_pid_lease(self, lease: Any) -> None:
-        if lease is None or self._broker is None:
-            return
-        release_fn = getattr(self._broker, "release", None)
-        if callable(release_fn):
-            with suppress(Exception):
-                release_fn(lease.slot_index, lease.generation)
 
     def _prepare_sql_and_params(
         self,

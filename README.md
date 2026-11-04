@@ -14,7 +14,7 @@ Vertebra is one unified runtime for Python and TypeScript across backend, fronte
 - **Python Framework & Server**: Type-safe APIs (`App`, `Controller`, `Router`, `Route`, `Procedure`, `ProcedureRouter`, `Provide`, `Inject`, `QueueService`, Inertia v3, SSR, and MCP/A2A agent protocols) plus native, ASGI, WSGI, and RSGI support.
 - **Worker Runtime (`vertebra-core`, `vertebra-py`)**: Runs Python in-process or across multiple worker processes over shared memory.
 - **HTTP Server & Bundler (`vertebra-http`, `vertebra-bundler`)**: HTTP/1.1, HTTP/2, HTTP/3, gRPC, WebSockets, SSE, TLS, compression, static files, JavaScript bundling, and QuickJS SSR.
-- **Storage, Databases & TypeScript Client (`vertebra-storage`, `vertebra-db`, `@vertebra/client`)**: Multicloud object storage (S3, GCS, Azure, R2, OCI, HTTP, local), database drivers (Postgres, MySQL, SQLite, Oracle 26ai, SQL Server, DuckDB, Redis, Valkey, DataFusion), CTE statement stacking (`SyncQueryPipeline`, `AsyncQueryPipeline`), Cloud SQL/AlloyDB dialers, and a typed TypeScript client for React, Vue, Svelte, Angular, HTMX, and Vite.
+- **Storage, Databases & TypeScript Client (`vertebra-storage`, `vertebra-db`, `vertebra-bigquery`, `vertebra-spanner`, `@vertebra/client`)**: Multicloud object storage (S3, GCS, Azure, R2, OCI, HTTP, local), database drivers (Postgres, MySQL, SQLite, Oracle 26ai, SQL Server, DuckDB, Google BigQuery, Google Cloud Spanner, Redis, Valkey, DataFusion), CTE statement stacking (`SyncQueryPipeline`, `AsyncQueryPipeline`), Cloud SQL/AlloyDB dialers, and a typed TypeScript client for React, Vue, Svelte, Angular, HTMX, and Vite.
 
 ## Quickstart
 
@@ -39,7 +39,7 @@ vtb build --standalone
 make dev         # Build Rust crates and install debug Python extensions
 make build       # Build TS client, release Rust binaries, and wheel
 make test        # Run all tests (Rust + Python + TypeScript)
-make rs-test     # Run Rust workspace tests (tls + compression features)
+make rs-test     # Run Rust workspace tests (tls, compression, and gcp features)
 make py-test     # Run Python test suite
 make ts-test     # Run TypeScript client tests (Vitest)
 make lint        # Format and lint Python, Rust, and TypeScript
@@ -60,9 +60,11 @@ src/
     vertebra-core/     # Shared-memory rings and worker IPC
     vertebra-py/       # PyO3 native extension (_vertebra)
     vertebra-http/     # HTTP/1.1, HTTP/2, HTTP/3, gRPC, WebSocket, and TLS server
-    vertebra-bundler/  # JavaScript bundler and QuickJS SSR
+    vertebra-bundler/  # JavaScript bundler and QuickJS SSR (_bundler)
     vertebra-storage/  # Cloud and local object storage (_storage)
-    vertebra-db/       # Postgres, MySQL, and SQLite connection pools
+    vertebra-db/       # DB wire codecs, cloud dialers, and Arrow SHM framing
+    vertebra-bigquery/ # BigQuery REST v2 and Storage Read/Write (_bigquery)
+    vertebra-spanner/  # Spanner v1 gRPC and DatabaseAdmin (_spanner)
   ts/
     vertebra-client/   # @vertebra/client TypeScript SDK
 ```

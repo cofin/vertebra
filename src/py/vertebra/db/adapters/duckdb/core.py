@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from vertebra.db.driver._common import DUCKDB_DIALECT_TAG
+
 __all__ = (
     "DUCKDB_DIALECT_TAG",
     "DuckDBCore",
 )
-
-DUCKDB_DIALECT_TAG = 6
 
 
 class DuckDBCore:

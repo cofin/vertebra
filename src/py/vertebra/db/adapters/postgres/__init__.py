@@ -25,7 +25,6 @@ if TYPE_CHECKING:
         read_arrow_shm,
         write_arrow_shm,
     )
-    from vertebra.db.driver import _normalize_driver_params
 
 __all__ = (
     "ARROW_SHM_THRESHOLD_ROWS",
@@ -37,7 +36,6 @@ __all__ = (
     "PostgreSQLCore",
     "SyncPostgreSQLDriver",
     "_hydrate_rows_with_schema",
-    "_normalize_driver_params",
     "_table_to_rows_and_cols",
     "decode_pgcopy_rows",
     "encode_pg_jsonb",
@@ -52,7 +50,6 @@ __lazy_modules__ = [
     "vertebra.db.adapters.postgres.core",
     "vertebra.db.adapters.postgres.driver",
     "vertebra.db.arrow",
-    "vertebra.db.driver",
 ]
 
 _EXPORT_MAP: dict[str, tuple[str, str]] = {
@@ -65,7 +62,6 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "PostgreSQLCore": ("vertebra.db.adapters.postgres.core", "PostgreSQLCore"),
     "SyncPostgreSQLDriver": ("vertebra.db.adapters.postgres.driver", "SyncPostgreSQLDriver"),
     "_hydrate_rows_with_schema": ("vertebra.db.arrow", "_hydrate_rows_with_schema"),
-    "_normalize_driver_params": ("vertebra.db.driver", "_normalize_driver_params"),
     "_table_to_rows_and_cols": ("vertebra.db.arrow", "_table_to_rows_and_cols"),
     "decode_pgcopy_rows": ("vertebra.db.adapters.postgres.core", "decode_pgcopy_rows"),
     "encode_pg_jsonb": ("vertebra.db.adapters.postgres.core", "encode_pg_jsonb"),

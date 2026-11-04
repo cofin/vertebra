@@ -619,3 +619,55 @@ def test_storage_api_fallback_uses_status_codes(code: int, expected: bool) -> No
 def test_storage_api_fallback_ignores_untyped_errors() -> None:
     """A RuntimeError mentioning HTTP 403 is not a Storage API fallback signal."""
     assert BigQueryCore.is_storage_api_fallback_error(RuntimeError("status 403")) is False
+
+
+@pytest.mark.anyio
+async def test_bigquery_select_to_arrow_keeps_small_rest_fallback_in_memory_and_direct_object_store() -> None:
+    """Verify 1-row REST fallback cursors remain in-memory by default and ObjectStore export/load works directly."""
+    server = _MockBigQueryRestServer()
+    try:
+        cfg = BigQueryConfig(
+            project_id="test-proj",
+            dataset_id="analytics",
+            rest_endpoint=f"http://{server.host_port}",
+        )
+        mem_store = SyncObjectStore("memory://")
+        with SyncBigQueryDriver(cfg) as sync_driver:
+            with sync_driver.select_to_arrow("SELECT uri, size FROM object_table_docs") as sync_cursor:
+                assert sync_cursor.row_count == 1
+                assert not sync_cursor.used_shm
+            exported = sync_driver.export_to_object_store(
+                "SELECT id, name, score FROM metrics",
+                "memory://warehouse/one_metric.parquet",
+                store=mem_store,
+                format="parquet",
+            )
+            assert exported == 2
+            loaded = sync_driver.load_from_object_store(
+                "analytics.metrics",
+                "memory://warehouse/one_metric.parquet",
+                store=mem_store,
+                format="parquet",
+            )
+            assert loaded == 2
+
+        async with AsyncBigQueryDriver(cfg) as async_driver:
+            with await async_driver.select_to_arrow("SELECT uri, size FROM object_table_docs") as async_cursor:
+                assert async_cursor.row_count == 1
+                assert not async_cursor.used_shm
+            exported_async = await async_driver.export_to_object_store(
+                "SELECT id, name, score FROM metrics",
+                "memory://warehouse/async_one_metric.parquet",
+                store=mem_store,
+                format="parquet",
+            )
+            assert exported_async == 2
+            loaded_async = await async_driver.load_from_object_store(
+                "analytics.metrics",
+                "memory://warehouse/async_one_metric.parquet",
+                store=mem_store,
+                format="parquet",
+            )
+            assert loaded_async == 2
+    finally:
+        server.close()

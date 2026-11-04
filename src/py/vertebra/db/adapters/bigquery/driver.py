@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import os
-from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
-from contextlib import asynccontextmanager, contextmanager, suppress
+from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 
 import msgspec
@@ -114,17 +113,6 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         """Return execution statistics from the most recent query job."""
         return dict(self._last_query_metadata)
 
-    def __enter__(self) -> Self:
-        """Connect and enter the synchronous driver context."""
-        return self.connect()
-
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        """Roll back any active transaction and close the driver upon exiting the context."""
-        if self._in_transaction:
-            with suppress(Exception):
-                self.rollback()
-        self.close()
-
     def connect(self) -> Self:
         """Initialize the underlying Rust `SyncBigQueryClient` channel pool."""
         if self._client is None:
@@ -133,7 +121,10 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         return self
 
     def close(self) -> None:
-        """Release the active session and Rust client handle."""
+        """Roll back any active transaction and release the session and Rust client handle."""
+        if self._in_transaction:
+            with suppress(Exception):
+                self.rollback()
         self._session_id = None
         self._in_transaction = False
         self._client = None
@@ -203,33 +194,6 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
             raw.get("rows", ()),
             schema_type=schema_type,
         )
-
-    def select_one(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        schema_type: type[Any] | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        """Execute a query and return the first row, raising `NotFoundError` when 0 rows match."""
-        rows = self.select(sql, parameters, schema_type=schema_type, **kwargs)
-        if not rows:
-            msg = "Query returned no rows"
-            raise NotFoundError(msg)
-        return rows[0]
-
-    def select_one_or_none(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        schema_type: type[Any] | None = None,
-        **kwargs: Any,
-    ) -> Any | None:
-        """Execute a query and return the first row or `None` when empty."""
-        rows = self.select(sql, parameters, schema_type=schema_type, **kwargs)
-        return rows[0] if rows else None
 
     def select_value(
         self,
@@ -310,11 +274,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
             row_restriction=row_restriction,
         )
         raw = self._run_query_sync(select_sql, parameters)
-        if threshold_rows != ARROW_SHM_THRESHOLD_ROWS:
-            cols = [str(c) for c in raw.get("columns", ())]
-            rows = list(raw.get("rows", ()))
-            return ArrowCursor.from_rows(rows, columns=cols, threshold_rows=threshold_rows)
-        return BigQueryCore.query_result_to_arrow_cursor(raw)
+        return BigQueryCore.query_result_to_arrow_cursor(raw, threshold_rows=threshold_rows)
 
     def load_from_arrow(
         self,
@@ -383,18 +343,6 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
             client.query("ROLLBACK TRANSACTION", None, self._session_id, False)
         finally:
             self._in_transaction = False
-
-    @contextmanager
-    def transaction(self) -> Iterator[Self]:
-        """Context manager executing statements inside a BigQuery `BEGIN ... COMMIT` session."""
-        self.begin()
-        try:
-            yield self
-        except Exception:
-            self.rollback()
-            raise
-        else:
-            self.commit()
 
     def export_to_object_store(
         self,
@@ -499,21 +447,6 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
             ensure_module("vertebra._bigquery", package="vertebra-core[bigquery]", extra="bigquery")
             self._client = BigQueryCore.create_sync_rust_client(self.config)
         return self._client
-
-    def _acquire_pid_lease(self) -> Any:
-        acquire_fn = getattr(self._broker, "acquire", None)
-        if callable(acquire_fn):
-            with suppress(Exception):
-                return acquire_fn(os.getpid(), timeout_ms=5000)
-        return None
-
-    def _release_pid_lease(self, lease: Any) -> None:
-        if lease is None or self._broker is None:
-            return
-        release_fn = getattr(self._broker, "release", None)
-        if callable(release_fn):
-            with suppress(Exception):
-                release_fn(lease.slot_index, lease.generation)
 
     def _prepare_sql_and_params(
         self,
@@ -668,17 +601,6 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
         """Return execution statistics from the most recent query job."""
         return dict(self._last_query_metadata)
 
-    async def __aenter__(self) -> Self:
-        """Connect and enter the asynchronous driver context."""
-        return await self.connect()
-
-    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        """Roll back any active transaction and close the driver upon exiting the context."""
-        if self._in_transaction:
-            with suppress(Exception):
-                await self.rollback()
-        await self.close()
-
     async def connect(self) -> Self:
         """Initialize the underlying Rust `AsyncBigQueryClient` channel pool."""
         if self._client is None:
@@ -687,7 +609,10 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
         return self
 
     async def close(self) -> None:
-        """Release the active session and Rust client handle."""
+        """Roll back any active transaction and release the session and Rust client handle."""
+        if self._in_transaction:
+            with suppress(Exception):
+                await self.rollback()
         self._session_id = None
         self._in_transaction = False
         self._client = None
@@ -757,33 +682,6 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
             raw.get("rows", ()),
             schema_type=schema_type,
         )
-
-    async def select_one(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        schema_type: type[Any] | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        """Execute a query and return the first row, raising `NotFoundError` when 0 rows match."""
-        rows = await self.select(sql, parameters, schema_type=schema_type, **kwargs)
-        if not rows:
-            msg = "Query returned no rows"
-            raise NotFoundError(msg)
-        return rows[0]
-
-    async def select_one_or_none(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        schema_type: type[Any] | None = None,
-        **kwargs: Any,
-    ) -> Any | None:
-        """Execute a query and return the first row or `None` when empty."""
-        rows = await self.select(sql, parameters, schema_type=schema_type, **kwargs)
-        return rows[0] if rows else None
 
     async def select_value(
         self,
@@ -864,11 +762,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
             row_restriction=row_restriction,
         )
         raw = await self._run_query_async(select_sql, parameters)
-        if threshold_rows != ARROW_SHM_THRESHOLD_ROWS:
-            cols = [str(c) for c in raw.get("columns", ())]
-            rows = list(raw.get("rows", ()))
-            return ArrowCursor.from_rows(rows, columns=cols, threshold_rows=threshold_rows)
-        return BigQueryCore.query_result_to_arrow_cursor(raw)
+        return BigQueryCore.query_result_to_arrow_cursor(raw, threshold_rows=threshold_rows)
 
     async def load_from_arrow(
         self,
@@ -937,18 +831,6 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
             await client.query("ROLLBACK TRANSACTION", None, self._session_id, False)
         finally:
             self._in_transaction = False
-
-    @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[Self]:
-        """Async context manager executing statements inside a BigQuery `BEGIN ... COMMIT` session."""
-        await self.begin()
-        try:
-            yield self
-        except Exception:
-            await self.rollback()
-            raise
-        else:
-            await self.commit()
 
     async def export_to_object_store(
         self,
@@ -1053,21 +935,6 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
             ensure_module("vertebra._bigquery", package="vertebra-core[bigquery]", extra="bigquery")
             self._client = BigQueryCore.create_async_rust_client(self.config)
         return self._client
-
-    def _acquire_pid_lease(self) -> Any:
-        acquire_fn = getattr(self._broker, "acquire", None)
-        if callable(acquire_fn):
-            with suppress(Exception):
-                return acquire_fn(os.getpid(), timeout_ms=5000)
-        return None
-
-    def _release_pid_lease(self, lease: Any) -> None:
-        if lease is None or self._broker is None:
-            return
-        release_fn = getattr(self._broker, "release", None)
-        if callable(release_fn):
-            with suppress(Exception):
-                release_fn(lease.slot_index, lease.generation)
 
     def _prepare_sql_and_params(
         self,

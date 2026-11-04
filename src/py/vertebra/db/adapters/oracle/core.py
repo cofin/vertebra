@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 
+from vertebra.db.driver._common import ORACLE_DIALECT_TAG
 from vertebra.typing import VertebraError
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
@@ -44,7 +45,6 @@ __all__ = (
     "encode_vector_i8",
 )
 
-ORACLE_DIALECT_TAG = 4
 ORACLE_VECTOR_MAGIC = 0xDB
 ORACLE_VECTOR_VERSION = 0x01
 ORACLE_VECTOR_FMT_F32 = 2

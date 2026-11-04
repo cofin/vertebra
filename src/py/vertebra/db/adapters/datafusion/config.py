@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, ClassVar, Literal, Self
 from urllib.parse import parse_qsl, urlparse
 
-from vertebra.db.driver._common import BaseDatabaseConfig
+from vertebra.db.driver._common import DATAFUSION_DIALECT_TAG, BaseDatabaseConfig
 from vertebra.typing import FrozenBaseStruct
 
 __all__ = (
@@ -51,7 +51,7 @@ class DataFusionConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
     """
 
     dialect: ClassVar[str] = "datafusion"
-    dialect_tag: ClassVar[int] = 10
+    dialect_tag: ClassVar[int] = DATAFUSION_DIALECT_TAG
     url_schemes: ClassVar[tuple[str, ...]] = ("datafusion",)
     driver_module: ClassVar[str] = "vertebra.db.adapters.datafusion.driver"
     sync_driver_name: ClassVar[str] = "DataFusionEngine"

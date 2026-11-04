@@ -104,6 +104,57 @@ class ConformanceItemRow(FrozenBaseStruct, frozen=True, gc=False):
     """Optional integer quantity."""
 
 
+_ITEMS_DDL = "CREATE TABLE vtb_conformance_items (id BIGINT PRIMARY KEY, label TEXT NOT NULL, amount BIGINT)"
+
+_TYPES_DDL = (
+    "CREATE TABLE vtb_conformance_types ("
+    "id BIGINT PRIMARY KEY, "
+    "val_int BIGINT, "
+    "val_float DOUBLE PRECISION, "
+    "val_decimal TEXT, "
+    "val_bool INTEGER, "
+    "val_text TEXT, "
+    "val_bytes BLOB, "
+    "val_ts TEXT, "
+    "val_json TEXT"
+    ")"
+)
+
+_BIGQUERY_ITEMS_DDL = "CREATE TABLE vtb_conformance_items (id INT64, label STRING NOT NULL, amount INT64)"
+
+_BIGQUERY_TYPES_DDL = (
+    "CREATE TABLE vtb_conformance_types ("
+    "id INT64, "
+    "val_int INT64, "
+    "val_float FLOAT64, "
+    "val_decimal NUMERIC, "
+    "val_bool BOOL, "
+    "val_text STRING, "
+    "val_bytes BYTES, "
+    "val_ts TIMESTAMP, "
+    "val_json JSON"
+    ")"
+)
+
+_SPANNER_ITEMS_DDL = (
+    "CREATE TABLE vtb_conformance_items (id INT64 NOT NULL, label STRING(MAX) NOT NULL, amount INT64) PRIMARY KEY (id)"
+)
+
+_SPANNER_TYPES_DDL = (
+    "CREATE TABLE vtb_conformance_types ("
+    "id INT64 NOT NULL, "
+    "val_int INT64, "
+    "val_float FLOAT64, "
+    "val_decimal NUMERIC, "
+    "val_bool BOOL, "
+    "val_text STRING(MAX), "
+    "val_bytes BYTES(MAX), "
+    "val_ts TIMESTAMP, "
+    "val_json JSON"
+    ") PRIMARY KEY (id)"
+)
+
+
 class EngineConformanceSpec(FrozenBaseStruct, frozen=True, gc=False):
     """Declarative specification for a synchronous/asynchronous SQL or analytical adapter pair."""
 
@@ -119,6 +170,16 @@ class EngineConformanceSpec(FrozenBaseStruct, frozen=True, gc=False):
     """Canonical DSN URL parsed by `DatabaseRegistry.parse_url` and `config_cls.from_url`."""
     probe_sql: str = "SELECT 1"
     """Connectivity probe statement returning integer `1`."""
+    placeholder_style: str = "qmark"
+    """Positional placeholder syntax (`qmark`, `dollar`, `colon`, `at_p`, `at_upper_p`)."""
+    items_ddl: str = _ITEMS_DDL
+    """Engine-specific DDL statement provisioning `vtb_conformance_items`."""
+    types_ddl: str = _TYPES_DDL
+    """Engine-specific DDL statement provisioning `vtb_conformance_types`."""
+    supports_pipeline: bool = False
+    """Whether the driver pair implements `SyncPipelineCapable` and `AsyncPipelineCapable`."""
+    duplicate_or_constraint_sql: tuple[str, tuple[Any, ...]] | None = None
+    """Optional `(sql, params)` statement triggering `IntegrityError` when primary keys are unenforced."""
     native_extension_module: str | None = None
     """Compiled native Rust PyO3 extension module required for live wire execution, if any."""
     pending_flow_id: str | None = None
@@ -127,6 +188,51 @@ class EngineConformanceSpec(FrozenBaseStruct, frozen=True, gc=False):
     """Environment variable names providing live external or emulator DSNs."""
     container_fixture: str | None = None
     """Optional `pytest-databases` configuration fixture in `conftest.py` used when `VERTEBRA_CONFORMANCE_DOCKER=1`."""
+
+    def format_sql(self, sql: str) -> str:
+        """Rewrite `?` placeholders outside quoted literals into this engine's `placeholder_style`."""
+        if self.placeholder_style == "qmark":
+            return sql
+        out: list[str] = []
+        param_index = 0
+        idx = 0
+        length = len(sql)
+        while idx < length:
+            ch = sql[idx]
+            if ch in {"'", '"'}:
+                quote = ch
+                out.append(ch)
+                idx += 1
+                while idx < length:
+                    cur = sql[idx]
+                    out.append(cur)
+                    if cur == quote:
+                        if idx + 1 < length and sql[idx + 1] == quote:
+                            out.append(sql[idx + 1])
+                            idx += 2
+                            continue
+                        idx += 1
+                        break
+                    idx += 1
+                continue
+            if ch == "?":
+                param_index += 1
+                if self.placeholder_style == "dollar":
+                    out.append(f"${param_index}")
+                elif self.placeholder_style == "colon":
+                    out.append(f":{param_index}")
+                elif self.placeholder_style == "at_p":
+                    out.append(f"@p{param_index}")
+                elif self.placeholder_style == "at_upper_p":
+                    out.append(f"@P{param_index}")
+                else:
+                    msg = f"Unsupported placeholder_style: {self.placeholder_style!r}"
+                    raise ValueError(msg)
+                idx += 1
+                continue
+            out.append(ch)
+            idx += 1
+        return "".join(out)
 
 
 class ScalarTypeCase(FrozenBaseStruct, frozen=True, gc=False):
@@ -197,7 +303,8 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         config_cls=SQLiteConfig,
         sync_driver_cls=SyncSQLiteDriver,
         async_driver_cls=AsyncSQLiteDriver,
-        sample_url="sqlite:///tmp/vtb_conformance_sample.sqlite3",
+        sample_url="sqlite:////tmp/vtb_conformance_sample.sqlite3",
+        placeholder_style="qmark",
     ),
     EngineConformanceSpec(
         engine="postgres",
@@ -205,6 +312,7 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         sync_driver_cls=SyncPostgreSQLDriver,
         async_driver_cls=AsyncPostgreSQLDriver,
         sample_url="postgresql://vtb:secret@127.0.0.1:5432/vtb",
+        placeholder_style="dollar",
         native_extension_module="vertebra._postgres",
         pending_flow_id="native-postgres-driver",
         env_dsn_vars=("VERTEBRA_CONFORMANCE_POSTGRES_DSN",),
@@ -217,6 +325,7 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         async_driver_cls=AsyncOracleDriver,
         sample_url="oracle://system:secret@127.0.0.1:1521/FREEPDB1",
         probe_sql="SELECT 1 FROM DUAL",
+        placeholder_style="colon",
         native_extension_module="vertebra._oracle",
         pending_flow_id="native-oracle-driver",
         env_dsn_vars=("VERTEBRA_CONFORMANCE_ORACLE_DSN",),
@@ -228,6 +337,7 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         sync_driver_cls=SyncMySQLDriver,
         async_driver_cls=AsyncMySQLDriver,
         sample_url="mysql://vtb:secret@127.0.0.1:3306/vtb",
+        placeholder_style="qmark",
         native_extension_module="vertebra._mysql",
         pending_flow_id="native-mysql-mssql-drivers",
         env_dsn_vars=("VERTEBRA_CONFORMANCE_MYSQL_DSN",),
@@ -239,6 +349,7 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         sync_driver_cls=SyncMSSQLDriver,
         async_driver_cls=AsyncMSSQLDriver,
         sample_url="mssql://sa:secret@127.0.0.1:1433/master",
+        placeholder_style="at_upper_p",
         native_extension_module="vertebra._mssql",
         pending_flow_id="native-mysql-mssql-drivers",
         env_dsn_vars=("VERTEBRA_CONFORMANCE_MSSQL_DSN",),
@@ -249,7 +360,8 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         config_cls=DuckDBConfig,
         sync_driver_cls=SyncDuckDBDriver,
         async_driver_cls=AsyncDuckDBDriver,
-        sample_url="duckdb:///tmp/vtb_conformance_sample.duckdb",
+        sample_url="duckdb:////tmp/vtb_conformance_sample.duckdb",
+        placeholder_style="qmark",
         native_extension_module="vertebra._duckdb",
         pending_flow_id="native-embedded-and-cache-drivers",
         env_dsn_vars=("VERTEBRA_CONFORMANCE_DUCKDB_DSN",),
@@ -260,6 +372,13 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         sync_driver_cls=SyncBigQueryDriver,
         async_driver_cls=AsyncBigQueryDriver,
         sample_url="bigquery://test-project/test_dataset?location=US",
+        placeholder_style="qmark",
+        items_ddl=_BIGQUERY_ITEMS_DDL,
+        types_ddl=_BIGQUERY_TYPES_DDL,
+        duplicate_or_constraint_sql=(
+            "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
+            (1, None, 20),
+        ),
         native_extension_module="vertebra._bigquery",
         env_dsn_vars=("VERTEBRA_CONFORMANCE_BIGQUERY_DSN",),
     ),
@@ -269,6 +388,9 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         sync_driver_cls=SyncSpannerDriver,
         async_driver_cls=AsyncSpannerDriver,
         sample_url="spanner://projects/test-project/instances/test-instance/databases/test-db",
+        placeholder_style="at_p",
+        items_ddl=_SPANNER_ITEMS_DDL,
+        types_ddl=_SPANNER_TYPES_DDL,
         native_extension_module="vertebra._spanner",
         env_dsn_vars=("VERTEBRA_CONFORMANCE_SPANNER_DSN", "SPANNER_EMULATOR_HOST"),
     ),
@@ -371,22 +493,6 @@ CACHE_ENGINE_SPECS: tuple[CacheConformanceSpec, ...] = (
         tcp_url="valkey://127.0.0.1:6379/2",
         container_fixture="vtb_valkey_config",
     ),
-)
-
-_ITEMS_DDL = "CREATE TABLE vtb_conformance_items (id BIGINT PRIMARY KEY, label TEXT NOT NULL, amount BIGINT)"
-
-_TYPES_DDL = (
-    "CREATE TABLE vtb_conformance_types ("
-    "id BIGINT PRIMARY KEY, "
-    "val_int BIGINT, "
-    "val_float DOUBLE PRECISION, "
-    "val_decimal TEXT, "
-    "val_bool INTEGER, "
-    "val_text TEXT, "
-    "val_bytes BLOB, "
-    "val_ts TEXT, "
-    "val_json TEXT"
-    ")"
 )
 
 
@@ -518,8 +624,8 @@ def sync_sql_driver(
         assert driver.select_value(spec.probe_sql, value_type=int) == 1
         driver.execute("DROP TABLE IF EXISTS vtb_conformance_items")
         driver.execute("DROP TABLE IF EXISTS vtb_conformance_types")
-        driver.execute(_ITEMS_DDL)
-        driver.execute(_TYPES_DDL)
+        driver.execute(spec.items_ddl)
+        driver.execute(spec.types_ddl)
         yield spec, driver
     finally:
         driver.close()
@@ -541,8 +647,8 @@ async def async_sql_driver(
         assert await driver.select_value(spec.probe_sql, value_type=int) == 1
         await driver.execute("DROP TABLE IF EXISTS vtb_conformance_items")
         await driver.execute("DROP TABLE IF EXISTS vtb_conformance_types")
-        await driver.execute(_ITEMS_DDL)
-        await driver.execute(_TYPES_DDL)
+        await driver.execute(spec.items_ddl)
+        await driver.execute(spec.types_ddl)
         yield spec, driver
     finally:
         await driver.close()
@@ -597,14 +703,14 @@ def test_sync_scalar_and_structured_types(
     type_case: ScalarTypeCase,
 ) -> None:
     """Synchronous drivers round-trip all mandatory scalar and structured Python values."""
-    _, driver = sync_sql_driver
+    spec, driver = sync_sql_driver
     inserted = driver.execute(
-        f"INSERT INTO vtb_conformance_types (id, {type_case.column}) VALUES (?, ?)",
+        spec.format_sql(f"INSERT INTO vtb_conformance_types (id, {type_case.column}) VALUES (?, ?)"),
         (1, type_case.input_value),
     )
     assert inserted == 1
     actual = driver.select_value(
-        f"SELECT {type_case.column} FROM vtb_conformance_types WHERE id = ?",
+        spec.format_sql(f"SELECT {type_case.column} FROM vtb_conformance_types WHERE id = ?"),
         (1,),
         value_type=type_case.value_type,
     )
@@ -618,14 +724,14 @@ async def test_async_scalar_and_structured_types(
     type_case: ScalarTypeCase,
 ) -> None:
     """Asynchronous drivers round-trip all mandatory scalar and structured Python values."""
-    _, driver = async_sql_driver
+    spec, driver = async_sql_driver
     inserted = await driver.execute(
-        f"INSERT INTO vtb_conformance_types (id, {type_case.column}) VALUES (?, ?)",
+        spec.format_sql(f"INSERT INTO vtb_conformance_types (id, {type_case.column}) VALUES (?, ?)"),
         (1, type_case.input_value),
     )
     assert inserted == 1
     actual = await driver.select_value(
-        f"SELECT {type_case.column} FROM vtb_conformance_types WHERE id = ?",
+        spec.format_sql(f"SELECT {type_case.column} FROM vtb_conformance_types WHERE id = ?"),
         (1,),
         value_type=type_case.value_type,
     )
@@ -636,16 +742,17 @@ def test_sync_execution_contract(
     sync_sql_driver: tuple[EngineConformanceSpec, SyncDatabaseDriver[Any]],
 ) -> None:
     """Synchronous drivers satisfy `execute*` and `select*` return shapes and `NotFoundError` semantics."""
-    _, driver = sync_sql_driver
+    spec, driver = sync_sql_driver
+    insert_sql = spec.format_sql("INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)")
     single_count = driver.execute(
-        "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
+        insert_sql,
         (1, "alpha", 10),
     )
     assert isinstance(single_count, int)
     assert single_count == 1
 
     batch_count = driver.execute_many(
-        "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
+        insert_sql,
         [(2, "beta", 20), (3, "gamma", None)],
     )
     assert isinstance(batch_count, int)
@@ -654,27 +761,23 @@ def test_sync_execution_contract(
     tuples = driver.execute_tuples("SELECT id, label FROM vtb_conformance_items ORDER BY id")
     assert tuples == [(1, "alpha"), (2, "beta"), (3, "gamma")]
 
-    described = driver.execute_with_description(
-        "SELECT id, label FROM vtb_conformance_items WHERE id = ?",
-        (1,),
-    )
+    by_id_sql = spec.format_sql("SELECT id, label FROM vtb_conformance_items WHERE id = ?")
+    described = driver.execute_with_description(by_id_sql, (1,))
     assert isinstance(described, tuple)
     assert len(described) == 2
     rows, cols = described
     assert rows == [(1, "alpha")]
     assert _lowercase_columns(cols) == ("id", "label")
 
-    dict_rows = driver.select(
-        "SELECT id, label, amount FROM vtb_conformance_items WHERE id <= ? ORDER BY id",
-        (2,),
-    )
+    le_sql = spec.format_sql("SELECT id, label, amount FROM vtb_conformance_items WHERE id <= ? ORDER BY id")
+    dict_rows = driver.select(le_sql, (2,))
     assert dict_rows == [
         {"id": 1, "label": "alpha", "amount": 10},
         {"id": 2, "label": "beta", "amount": 20},
     ]
 
     struct_rows = driver.select(
-        "SELECT id, label, amount FROM vtb_conformance_items WHERE id <= ? ORDER BY id",
+        le_sql,
         (2,),
         schema_type=ConformanceItemRow,
     )
@@ -684,27 +787,28 @@ def test_sync_execution_contract(
     ]
 
     found = driver.select_one(
-        "SELECT id, label, amount FROM vtb_conformance_items WHERE id = ?",
+        spec.format_sql("SELECT id, label, amount FROM vtb_conformance_items WHERE id = ?"),
         (1,),
         schema_type=ConformanceItemRow,
     )
     assert found == ConformanceItemRow(id=1, label="alpha", amount=10)
 
     with pytest.raises(NotFoundError) as missing_one_exc:
-        driver.select_one("SELECT id, label FROM vtb_conformance_items WHERE id = ?", (999,))
+        driver.select_one(by_id_sql, (999,))
     assert isinstance(missing_one_exc.value, DatabaseError)
     assert isinstance(missing_one_exc.value, ValueError)
 
-    assert driver.select_one_or_none("SELECT id, label FROM vtb_conformance_items WHERE id = ?", (999,)) is None
-    assert driver.select_one_or_none("SELECT id, label FROM vtb_conformance_items WHERE id = ?", (2,)) == {
+    assert driver.select_one_or_none(by_id_sql, (999,)) is None
+    assert driver.select_one_or_none(by_id_sql, (2,)) == {
         "id": 2,
         "label": "beta",
     }
 
-    assert driver.select_value("SELECT amount FROM vtb_conformance_items WHERE id = ?", (2,)) == 20
-    assert driver.select_value("SELECT amount FROM vtb_conformance_items WHERE id = ?", (3,)) is None
+    amount_sql = spec.format_sql("SELECT amount FROM vtb_conformance_items WHERE id = ?")
+    assert driver.select_value(amount_sql, (2,)) == 20
+    assert driver.select_value(amount_sql, (3,)) is None
     with pytest.raises(NotFoundError):
-        driver.select_value("SELECT amount FROM vtb_conformance_items WHERE id = ?", (999,))
+        driver.select_value(amount_sql, (999,))
 
 
 @pytest.mark.anyio
@@ -712,16 +816,17 @@ async def test_async_execution_contract(
     async_sql_driver: tuple[EngineConformanceSpec, AsyncDatabaseDriver[Any]],
 ) -> None:
     """Asynchronous drivers satisfy `execute*` and `select*` return shapes and `NotFoundError` semantics."""
-    _, driver = async_sql_driver
+    spec, driver = async_sql_driver
+    insert_sql = spec.format_sql("INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)")
     single_count = await driver.execute(
-        "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
+        insert_sql,
         (1, "alpha", 10),
     )
     assert isinstance(single_count, int)
     assert single_count == 1
 
     batch_count = await driver.execute_many(
-        "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
+        insert_sql,
         [(2, "beta", 20), (3, "gamma", None)],
     )
     assert isinstance(batch_count, int)
@@ -730,27 +835,23 @@ async def test_async_execution_contract(
     tuples = await driver.execute_tuples("SELECT id, label FROM vtb_conformance_items ORDER BY id")
     assert tuples == [(1, "alpha"), (2, "beta"), (3, "gamma")]
 
-    described = await driver.execute_with_description(
-        "SELECT id, label FROM vtb_conformance_items WHERE id = ?",
-        (1,),
-    )
+    by_id_sql = spec.format_sql("SELECT id, label FROM vtb_conformance_items WHERE id = ?")
+    described = await driver.execute_with_description(by_id_sql, (1,))
     assert isinstance(described, tuple)
     assert len(described) == 2
     rows, cols = described
     assert rows == [(1, "alpha")]
     assert _lowercase_columns(cols) == ("id", "label")
 
-    dict_rows = await driver.select(
-        "SELECT id, label, amount FROM vtb_conformance_items WHERE id <= ? ORDER BY id",
-        (2,),
-    )
+    le_sql = spec.format_sql("SELECT id, label, amount FROM vtb_conformance_items WHERE id <= ? ORDER BY id")
+    dict_rows = await driver.select(le_sql, (2,))
     assert dict_rows == [
         {"id": 1, "label": "alpha", "amount": 10},
         {"id": 2, "label": "beta", "amount": 20},
     ]
 
     struct_rows = await driver.select(
-        "SELECT id, label, amount FROM vtb_conformance_items WHERE id <= ? ORDER BY id",
+        le_sql,
         (2,),
         schema_type=ConformanceItemRow,
     )
@@ -760,49 +861,56 @@ async def test_async_execution_contract(
     ]
 
     found = await driver.select_one(
-        "SELECT id, label, amount FROM vtb_conformance_items WHERE id = ?",
+        spec.format_sql("SELECT id, label, amount FROM vtb_conformance_items WHERE id = ?"),
         (1,),
         schema_type=ConformanceItemRow,
     )
     assert found == ConformanceItemRow(id=1, label="alpha", amount=10)
 
     with pytest.raises(NotFoundError) as missing_one_exc:
-        await driver.select_one("SELECT id, label FROM vtb_conformance_items WHERE id = ?", (999,))
+        await driver.select_one(by_id_sql, (999,))
     assert isinstance(missing_one_exc.value, DatabaseError)
     assert isinstance(missing_one_exc.value, ValueError)
 
-    assert await driver.select_one_or_none("SELECT id, label FROM vtb_conformance_items WHERE id = ?", (999,)) is None
-    assert await driver.select_one_or_none("SELECT id, label FROM vtb_conformance_items WHERE id = ?", (2,)) == {
+    assert await driver.select_one_or_none(by_id_sql, (999,)) is None
+    assert await driver.select_one_or_none(by_id_sql, (2,)) == {
         "id": 2,
         "label": "beta",
     }
 
-    assert await driver.select_value("SELECT amount FROM vtb_conformance_items WHERE id = ?", (2,)) == 20
-    assert await driver.select_value("SELECT amount FROM vtb_conformance_items WHERE id = ?", (3,)) is None
+    amount_sql = spec.format_sql("SELECT amount FROM vtb_conformance_items WHERE id = ?")
+    assert await driver.select_value(amount_sql, (2,)) == 20
+    assert await driver.select_value(amount_sql, (3,)) is None
     with pytest.raises(NotFoundError):
-        await driver.select_value("SELECT amount FROM vtb_conformance_items WHERE id = ?", (999,))
+        await driver.select_value(amount_sql, (999,))
 
 
 def test_sync_transaction_commit_and_rollback(
     sync_sql_driver: tuple[EngineConformanceSpec, SyncDatabaseDriver[Any]],
 ) -> None:
     """Synchronous `with driver.transaction():` commits clean blocks and rolls back on exception."""
-    _, driver = sync_sql_driver
+    spec, driver = sync_sql_driver
+    insert_sql = spec.format_sql("INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)")
     with driver.transaction():
         driver.execute(
-            "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
+            insert_sql,
             (10, "committed", 100),
         )
-    assert driver.select_value("SELECT label FROM vtb_conformance_items WHERE id = ?", (10,)) == "committed"
+    assert (
+        driver.select_value(spec.format_sql("SELECT label FROM vtb_conformance_items WHERE id = ?"), (10,))
+        == "committed"
+    )
 
     with pytest.raises(_RollbackSentinelError), driver.transaction():
         driver.execute(
-            "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
+            insert_sql,
             (11, "rolled_back", 200),
         )
         raise _RollbackSentinelError("abort transaction")
 
-    assert driver.select_one_or_none("SELECT id FROM vtb_conformance_items WHERE id = ?", (11,)) is None
+    assert (
+        driver.select_one_or_none(spec.format_sql("SELECT id FROM vtb_conformance_items WHERE id = ?"), (11,)) is None
+    )
 
 
 @pytest.mark.anyio
@@ -810,38 +918,50 @@ async def test_async_transaction_commit_and_rollback(
     async_sql_driver: tuple[EngineConformanceSpec, AsyncDatabaseDriver[Any]],
 ) -> None:
     """Asynchronous `async with driver.transaction():` commits clean blocks and rolls back on exception."""
-    _, driver = async_sql_driver
+    spec, driver = async_sql_driver
+    insert_sql = spec.format_sql("INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)")
     async with driver.transaction():
         await driver.execute(
-            "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
+            insert_sql,
             (10, "committed", 100),
         )
-    assert await driver.select_value("SELECT label FROM vtb_conformance_items WHERE id = ?", (10,)) == "committed"
+    assert (
+        await driver.select_value(spec.format_sql("SELECT label FROM vtb_conformance_items WHERE id = ?"), (10,))
+        == "committed"
+    )
 
     with pytest.raises(_RollbackSentinelError):
         async with driver.transaction():
             await driver.execute(
-                "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
+                insert_sql,
                 (11, "rolled_back", 200),
             )
             raise _RollbackSentinelError("abort transaction")
 
-    assert await driver.select_one_or_none("SELECT id FROM vtb_conformance_items WHERE id = ?", (11,)) is None
+    assert (
+        await driver.select_one_or_none(spec.format_sql("SELECT id FROM vtb_conformance_items WHERE id = ?"), (11,))
+        is None
+    )
 
 
 def test_sync_typed_database_errors(
     sync_sql_driver: tuple[EngineConformanceSpec, SyncDatabaseDriver[Any]],
 ) -> None:
     """Synchronous drivers map constraint violations and invalid SQL to `DatabaseError` subclasses."""
-    _, driver = sync_sql_driver
+    spec, driver = sync_sql_driver
+    insert_sql = spec.format_sql("INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)")
     driver.execute(
-        "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
+        insert_sql,
         (1, "primary", 10),
+    )
+    constraint_sql, constraint_params = spec.duplicate_or_constraint_sql or (
+        "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
+        (1, "duplicate", 20),
     )
     with pytest.raises(IntegrityError) as dup_exc:
         driver.execute(
-            "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
-            (1, "duplicate", 20),
+            spec.format_sql(constraint_sql),
+            constraint_params,
         )
     assert isinstance(dup_exc.value, DatabaseError)
 
@@ -855,15 +975,20 @@ async def test_async_typed_database_errors(
     async_sql_driver: tuple[EngineConformanceSpec, AsyncDatabaseDriver[Any]],
 ) -> None:
     """Asynchronous drivers map constraint violations and invalid SQL to `DatabaseError` subclasses."""
-    _, driver = async_sql_driver
+    spec, driver = async_sql_driver
+    insert_sql = spec.format_sql("INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)")
     await driver.execute(
-        "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
+        insert_sql,
         (1, "primary", 10),
+    )
+    constraint_sql, constraint_params = spec.duplicate_or_constraint_sql or (
+        "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
+        (1, "duplicate", 20),
     )
     with pytest.raises(IntegrityError) as dup_exc:
         await driver.execute(
-            "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
-            (1, "duplicate", 20),
+            spec.format_sql(constraint_sql),
+            constraint_params,
         )
     assert isinstance(dup_exc.value, DatabaseError)
 
@@ -898,7 +1023,7 @@ def test_sync_arrow_data_plane_roundtrip(
             {"id": 2, "label": "arrow_b", "amount": 22},
             {"id": 3, "label": "arrow_c", "amount": 33},
         ]
-        driver.execute("DELETE FROM vtb_conformance_items")
+        driver.execute("DELETE FROM vtb_conformance_items WHERE 1=1")
         reloaded = driver.load_from_arrow("vtb_conformance_items", cursor)
         assert reloaded == 3
 
@@ -939,7 +1064,7 @@ async def test_async_arrow_data_plane_roundtrip(
             {"id": 2, "label": "arrow_b", "amount": 22},
             {"id": 3, "label": "arrow_c", "amount": 33},
         ]
-        await driver.execute("DELETE FROM vtb_conformance_items")
+        await driver.execute("DELETE FROM vtb_conformance_items WHERE 1=1")
         reloaded = await driver.load_from_arrow("vtb_conformance_items", cursor)
         assert reloaded == 3
 
@@ -979,17 +1104,14 @@ def test_sync_pipeline_capability(
 ) -> None:
     """Drivers advertising `SyncPipelineCapable` execute queued commands in order on `results()`."""
     spec, driver = sync_sql_driver
-    if not isinstance(driver, SyncPipelineCapable):
-        pytest.skip(f"{spec.engine} does not implement SyncPipelineCapable")
+    if not spec.supports_pipeline:
+        assert not isinstance(driver, SyncPipelineCapable)
+        return
+    assert isinstance(driver, SyncPipelineCapable)
+    insert_sql = spec.format_sql("INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)")
     with driver.pipeline() as pipe:
-        pipe.execute(
-            "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
-            (1, "piped_a", 5),
-        )
-        pipe.execute(
-            "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
-            (2, "piped_b", 6),
-        )
+        pipe.execute(insert_sql, (1, "piped_a", 5))
+        pipe.execute(insert_sql, (2, "piped_b", 6))
         pipe.select("SELECT id, label FROM vtb_conformance_items ORDER BY id")
         results = pipe.results()
     assert len(results) == 3
@@ -1002,17 +1124,14 @@ async def test_async_pipeline_capability(
 ) -> None:
     """Drivers advertising `AsyncPipelineCapable` execute queued commands in order on `results()`."""
     spec, driver = async_sql_driver
-    if not isinstance(driver, AsyncPipelineCapable):
-        pytest.skip(f"{spec.engine} does not implement AsyncPipelineCapable")
+    if not spec.supports_pipeline:
+        assert not isinstance(driver, AsyncPipelineCapable)
+        return
+    assert isinstance(driver, AsyncPipelineCapable)
+    insert_sql = spec.format_sql("INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)")
     async with driver.pipeline() as pipe:
-        pipe.execute(
-            "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
-            (1, "piped_a", 5),
-        )
-        pipe.execute(
-            "INSERT INTO vtb_conformance_items (id, label, amount) VALUES (?, ?, ?)",
-            (2, "piped_b", 6),
-        )
+        pipe.execute(insert_sql, (1, "piped_a", 5))
+        pipe.execute(insert_sql, (2, "piped_b", 6))
         pipe.select("SELECT id, label FROM vtb_conformance_items ORDER BY id")
         results = await pipe.results()
     assert len(results) == 3

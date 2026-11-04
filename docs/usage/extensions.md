@@ -73,10 +73,10 @@ app = Litestar(
 
 ## SQLSpec Integration, Statement Stacks & SHM Proxy (`vertebra.extensions.sqlspec`)
 
-Vertebra provides first-class support for `sqlspec` (`>=0.68.0`) across 6 database engines, CTE statement stacking, and shared-memory connection pooling:
+Vertebra provides first-class support for `sqlspec` (`>=0.69.0`) across 8 database engines, CTE statement stacking, and shared-memory connection pooling:
 
-- **Tier-1 Native Drivers**: Typed sync and async database configs (`PostgreSQLSyncConfig`, `PostgreSQLAsyncConfig`, `MySQLSyncConfig`, `MySQLAsyncConfig`, `SQLiteSyncConfig`, `SQLiteAsyncConfig`, `OracleSyncConfig`, `OracleAsyncConfig`, `MSSQLSyncConfig`, `MSSQLAsyncConfig`, `DuckDBSyncConfig`, `DuckDBAsyncConfig`).
-- **Tier-2 Shared-Memory Proxy**: `ProxySyncConfig` and `ProxyAsyncConfig` (`ProxySyncDriver`, `ProxyAsyncDriver`) lease pooled connections over shared memory from the parent process so multi-worker deployments never multiply connection counts.
+- **Native Drivers**: Typed sync and async database configs across relational, analytical, and cloud-native engines (`PostgreSQLSyncConfig`, `PostgreSQLAsyncConfig`, `MySQLSyncConfig`, `MySQLAsyncConfig`, `SQLiteSyncConfig`, `SQLiteAsyncConfig`, `OracleSyncConfig`, `OracleAsyncConfig`, `MSSQLSyncConfig`, `MSSQLAsyncConfig`, `DuckDBSyncConfig`, `DuckDBAsyncConfig`, `BigQuerySyncConfig`, `BigQueryAsyncConfig`, `SpannerSyncConfig`, `SpannerAsyncConfig`).
+- **Shared-Memory Proxy**: `ProxySyncConfig` and `ProxyAsyncConfig` (`ProxySyncDriver`, `ProxyAsyncDriver`) lease pooled connections over shared memory from the parent process so multi-worker deployments never multiply connection counts.
 - **CTE Statement Pipelining**: Execute stacked queries via `SyncQueryPipeline / AsyncQueryPipeline` in a single round-trip.
 - **Change Feed & CDC**: `ChangeFeedSyncEventBackend` and `ChangeFeedAsyncEventBackend` implement `sqlspec.extensions.events` protocols over PostgreSQL logical replication (`pg_logical_emit_message`) with automatic Parquet spillover for payloads exceeding 7,500 bytes.
 - **Object Storage & Arrow Export**: `ObjectStoreBackend` integrates with `sqlspec.storage.storage_registry` and provides PyArrow IPC and Parquet dataset streaming.
@@ -98,7 +98,7 @@ sqlspec_plugin = create_sqlspec_plugin(config)
 
 `vertebra.extensions.alchemy` and `vertebra.extensions.sqlalchemy` provide drop-in SQLAlchemy 2.1 and Advanced Alchemy 1.12 support backed by Vertebra's native drivers and connection leasing:
 
-- **Dialects**: Registers `+vertebra` and `+vtb` URL schemes (`postgresql+vtb://`, `postgresql+vtb_async://`, `mysql+vtb://`, `sqlite+vtb://`, `oracle+vtb://`, `mssql+vtb://`, `duckdb+vtb://`) with automatic `NullPool` wiring and Cloud SQL / AlloyDB dialers.
+- **Dialects**: Registers `+vertebra`, `+vtb`, `+vertebra_async`, and `+vtb_async` URL schemes across all 8 engines (`postgresql+vtb://`, `postgresql+vtb_async://`, `mysql+vtb://`, `sqlite+vtb://`, `oracle+vtb://`, `mssql+vtb://`, `duckdb+vtb://`, `bigquery+vtb://`, `spanner+vtb://`, `spangres+vtb://`) with automatic `NullPool` wiring and Cloud SQL / AlloyDB dialers.
 - **Type System**: Native `Vector(dimensions)` for vector embeddings and `BinaryJSON` for PostgreSQL `JSONB` and Oracle `OSON`.
 - **Object Storage Attachments**: `ObjectStoreBackend` implements Advanced Alchemy's `advanced_alchemy.types.file_object.StorageBackend`, enabling transactional file attachments on models via `FileObject` and `StoredObject`.
 - **Alembic Custom Operations**: Autogenerates vector index and view DDL operations (`CreateVectorIndexOp`, `CreateViewOp`, `DropViewOp`).

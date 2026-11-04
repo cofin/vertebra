@@ -151,6 +151,11 @@ class DatabaseRegistry:
         ] = {}
         self._broker = broker
 
+    @property
+    def names(self) -> tuple[str, ...]:
+        """Return registered database aliases."""
+        return tuple(self._configs.keys())
+
     @classmethod
     def default_broker(cls, *, pool_size: int = 32, max_overflow: int = 16) -> Any:
         """Return the process-wide shared Rust SHM LeaseBroker."""
@@ -173,11 +178,6 @@ class DatabaseRegistry:
         """Compute a canonical endpoint fingerprint for cross-framework native pool sharing."""
         config = cls.parse_url(config_or_url) if isinstance(config_or_url, str) else config_or_url
         return config.pool_key()
-
-    @property
-    def names(self) -> tuple[str, ...]:
-        """Return registered database aliases."""
-        return tuple(self._configs.keys())
 
     @classmethod
     def parse_url(cls, url: str, **overrides: Any) -> AnyDatabaseConfig:

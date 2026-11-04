@@ -6,6 +6,7 @@ import re
 import struct
 from typing import TYPE_CHECKING, Any
 
+from vertebra.db.driver._common import MSSQL_DIALECT_TAG
 from vertebra.typing import VertebraError
 from vertebra.utils.module_loader import import_optional
 
@@ -28,8 +29,6 @@ __all__ = (
     "encode_tds_sql_batch",
     "rewrite_mssql_placeholders",
 )
-
-MSSQL_DIALECT_TAG = 5
 
 TDS_PKT_SQL_BATCH = 0x01
 TDS_PKT_RPC = 0x03

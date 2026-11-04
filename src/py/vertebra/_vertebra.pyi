@@ -1,6 +1,6 @@
 """Type stubs for the vertebra._vertebra native extension module."""
 
-from collections.abc import Awaitable, Buffer, Sequence
+from collections.abc import Awaitable, Buffer, Generator, Sequence
 from typing import Any, Self, final
 
 from vertebra.typing import VertebraError
@@ -1003,7 +1003,7 @@ class ArrowCursor:
     def _allocate_shm_capsule(shm_name: str, payload: bytes) -> tuple[str, int, Any]: ...
     @staticmethod
     def _from_shm_capsule(
-        shm_name: str,
+        shm_name: str | None,
         byte_len: int,
         row_count: int,
         capsule: Any,
@@ -1381,12 +1381,12 @@ class BigQueryError(GoogleCloudError, DatabaseError):
 class BigQueryRowError(BigQueryError, DataError):
     """BigQuery Storage Write rejected rows; see `row_errors`."""
 
-    row_errors: list[tuple[int, int, str]]
-    """Rejected `(row_index, code, message)` tuples reported by BigQuery Storage Write."""
+    row_errors: list[dict[str, Any]]
+    """Rejected {"index": int, "code": int, "message": str} row error dictionaries reported by BigQuery Storage Write."""
 
 @final
-class RustDbTaskAwaitable:
-    def __await__(self) -> Any: ...
+class RustDbTaskAwaitable[T]:
+    def __await__(self) -> Generator[Any, None, T]: ...
 
 @final
 class GcpTokenSnapshot:
@@ -1446,4 +1446,4 @@ class AsyncGcpTokenCache:
     def needs_refresh(self, *, now_unix_ms: int | None = None) -> bool: ...
     def invalidate(self, failed_generation: int) -> None: ...
     def sign_jwt_for_audience(self, audience: str) -> str: ...
-    def get_token(self, *, force_refresh: bool = False) -> RustDbTaskAwaitable: ...
+    def get_token(self, *, force_refresh: bool = False) -> RustDbTaskAwaitable[GcpTokenSnapshot]: ...

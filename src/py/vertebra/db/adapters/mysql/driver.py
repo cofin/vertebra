@@ -16,6 +16,7 @@ from vertebra.db.arrow import (
 )
 from vertebra.db.dialer.cloudsql import AsyncCloudSQLDialer, SyncCloudSQLDialer
 from vertebra.db.driver import (
+    MYSQL_DIALECT_TAG,
     AsyncDatabaseDriver,
     SyncDatabaseDriver,
 )
@@ -30,18 +31,11 @@ __all__ = (
 )
 
 
-def _extract_column_names(raw_description: Any) -> tuple[str, ...]:
-    """Normalize a DB-API cursor `description` or string sequence into `tuple[str, ...]`."""
-    if not raw_description:
-        return ()
-    return tuple(col[0] if isinstance(col, tuple) else str(col) for col in raw_description)
-
-
 class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
     """Synchronous MySQL driver facade with bounded connection pooling and SHM broker integration."""
 
     dialect: ClassVar[str] = "mysql"
-    dialect_tag: ClassVar[int] = 2
+    dialect_tag: ClassVar[int] = MYSQL_DIALECT_TAG
 
     __slots__ = (
         "_connect_factory",
@@ -244,7 +238,7 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
                 if hasattr(conn, "execute_with_description"):
                     raw_rows, raw_desc = conn.execute_with_description(sql, parameters or ())
                     tuple_rows = [tuple(r) for r in raw_rows]
-                    return tuple_rows, _extract_column_names(raw_desc), len(tuple_rows)
+                    return tuple_rows, self._extract_column_names(raw_desc), len(tuple_rows)
                 if hasattr(conn, "cursor"):
                     cur = conn.cursor()
                     try:
@@ -252,7 +246,7 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
                         raw_desc = getattr(cur, "description", None)
                         if raw_desc:
                             rows = [tuple(r) for r in (cur.fetchall() if hasattr(cur, "fetchall") else ())]
-                            return rows, _extract_column_names(raw_desc), len(rows)
+                            return rows, self._extract_column_names(raw_desc), len(rows)
                         if auto_commit_dml and not self._in_transaction and hasattr(conn, "commit"):
                             conn.commit()
                         rowcount = getattr(cur, "rowcount", 0)
@@ -265,7 +259,7 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
                     raw_desc = getattr(exec_res, "description", None)
                     raw_rows = exec_res.fetchall() if hasattr(exec_res, "fetchall") else list(exec_res)
                     tuple_rows = [tuple(r) for r in raw_rows]
-                    return tuple_rows, _extract_column_names(raw_desc), len(tuple_rows)
+                    return tuple_rows, self._extract_column_names(raw_desc), len(tuple_rows)
                 return [], (), 0
             finally:
                 if not pinned:
@@ -326,7 +320,7 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
     """Asynchronous MySQL driver facade backed by asyncmy and SHM broker leasing."""
 
     dialect: ClassVar[str] = "mysql"
-    dialect_tag: ClassVar[int] = 2
+    dialect_tag: ClassVar[int] = MYSQL_DIALECT_TAG
 
     __slots__ = (
         "_dialer",
@@ -516,7 +510,7 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
             if raw_desc:
                 fetched = await cur.fetchall() if hasattr(cur, "fetchall") else []
                 rows = [tuple(r) for r in fetched]
-                return rows, _extract_column_names(raw_desc), len(rows)
+                return rows, self._extract_column_names(raw_desc), len(rows)
             if auto_commit_dml and not self._in_transaction and hasattr(active_conn, "commit"):
                 commit_res = active_conn.commit()
                 if inspect.isawaitable(commit_res):
@@ -564,7 +558,7 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
                     raw_res = await raw_res
                 raw_rows, raw_desc = raw_res
                 tuple_rows = [tuple(r) for r in raw_rows]
-                return tuple_rows, _extract_column_names(raw_desc), len(tuple_rows)
+                return tuple_rows, self._extract_column_names(raw_desc), len(tuple_rows)
             if hasattr(pool, "acquire"):
                 async with pool.acquire() as conn:
                     return await self._execute_on_async_connection(

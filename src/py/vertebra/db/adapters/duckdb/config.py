@@ -6,7 +6,7 @@ import os
 from typing import Any, ClassVar, Self
 from urllib.parse import urlparse
 
-from vertebra.db.driver._common import BaseDatabaseConfig
+from vertebra.db.driver._common import DUCKDB_DIALECT_TAG, BaseDatabaseConfig
 from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.module_loader import import_optional
 
@@ -52,7 +52,7 @@ class DuckDBConfig(BaseDatabaseConfig, frozen=True, gc=False):
     """Configuration for the embedded DuckDB analytical engine."""
 
     dialect: ClassVar[str] = "duckdb"
-    dialect_tag: ClassVar[int] = 6
+    dialect_tag: ClassVar[int] = DUCKDB_DIALECT_TAG
     url_schemes: ClassVar[tuple[str, ...]] = ("duckdb",)
     driver_module: ClassVar[str] = "vertebra.db.adapters.duckdb.driver"
     sync_driver_name: ClassVar[str] = "SyncDuckDBDriver"
@@ -125,13 +125,20 @@ class DuckDBConfig(BaseDatabaseConfig, frozen=True, gc=False):
     def from_url(cls, url: str, **overrides: Any) -> Self:
         """Construct a `DuckDBConfig` from a `duckdb://` URI."""
         parsed = urlparse(url)
-        if parsed.path in ("", "/", "/:memory:", ":memory:"):
-            duck_path = ":memory:"
+        if parsed.netloc == ":memory:" or (not parsed.netloc and parsed.path in ("", "/", "/:memory:", ":memory:")):
+            db_path = ":memory:"
+        elif parsed.netloc:
+            db_path = f"{parsed.netloc}{parsed.path}"
         elif parsed.path.startswith("//"):
-            duck_path = parsed.path[1:]
+            db_path = parsed.path[1:]
         else:
-            duck_path = parsed.path.lstrip("/")
-        return cls(path=duck_path, database=duck_path, **overrides)
+            db_path = parsed.path.lstrip("/")
+        kwargs: dict[str, Any] = {"path": db_path, "database": db_path, **overrides}
+        if "path" in overrides and "database" not in overrides:
+            kwargs["database"] = overrides["path"]
+        elif "database" in overrides and "path" not in overrides and overrides["database"] is not None:
+            kwargs["path"] = str(overrides["database"])
+        return cls(**kwargs)
 
     def pool_key(self) -> tuple[Any, ...] | None:
         """Return a deterministic shared-pool fingerprint, or `None` for `:memory:` DBs."""
