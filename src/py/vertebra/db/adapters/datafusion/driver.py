@@ -85,7 +85,7 @@ class DataFusionEngine:
         row_restriction: str | None = None,
     ) -> TableRegistration:
         """Fetch a BigQuery table via zero-copy ``ArrowCursor`` and register it in DataFusion."""
-        cursor = driver.fetch_arrow(
+        cursor = driver.select_to_arrow(
             table,
             selected_fields=selected_fields,
             row_restriction=row_restriction,
@@ -110,7 +110,7 @@ class DataFusionEngine:
         parameters: Any = None,
     ) -> TableRegistration:
         """Execute a BigQuery query into a zero-copy ``ArrowCursor`` and register it in DataFusion."""
-        cursor = driver.fetch_arrow(sql, parameters)
+        cursor = driver.select_to_arrow(sql, parameters)
         arrow_table = self._coerce_arrow_table(cursor)
         self._arrow_tables[name] = arrow_table
         if self._ctx is not None:
@@ -133,7 +133,7 @@ class DataFusionEngine:
         data_boost_enabled: bool | None = None,
     ) -> TableRegistration:
         """Fetch a Cloud Spanner table via zero-copy ``ArrowCursor`` and register it in DataFusion."""
-        cursor = driver.fetch_arrow(
+        cursor = driver.select_to_arrow(
             table,
             max_partitions=max_partitions,
             data_boost_enabled=data_boost_enabled,
@@ -161,7 +161,7 @@ class DataFusionEngine:
         data_boost_enabled: bool | None = None,
     ) -> TableRegistration:
         """Execute a partitioned Cloud Spanner query into an ``ArrowCursor`` and register it in DataFusion."""
-        cursor = driver.fetch_arrow(
+        cursor = driver.select_to_arrow(
             sql,
             parameters,
             max_partitions=max_partitions,

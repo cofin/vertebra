@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import collections
+import inspect
 import os
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -11,14 +12,12 @@ from vertebra.db.adapters.mysql.config import MySQLConfig
 from vertebra.db.arrow import (
     ARROW_SHM_THRESHOLD_ROWS,
     ArrowCursor,
-    _hydrate_rows_with_schema,
     _table_to_rows_and_cols,
 )
 from vertebra.db.dialer.cloudsql import AsyncCloudSQLDialer, SyncCloudSQLDialer
 from vertebra.db.driver import (
     AsyncDatabaseDriver,
     SyncDatabaseDriver,
-    _normalize_driver_params,
 )
 from vertebra.utils.module_loader import ensure_module
 
@@ -31,13 +30,28 @@ __all__ = (
 )
 
 
+def _extract_column_names(raw_description: Any) -> tuple[str, ...]:
+    """Normalize a DB-API cursor `description` or string sequence into `tuple[str, ...]`."""
+    if not raw_description:
+        return ()
+    return tuple(col[0] if isinstance(col, tuple) else str(col) for col in raw_description)
+
+
 class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
     """Synchronous MySQL driver facade with bounded connection pooling and SHM broker integration."""
 
     dialect: ClassVar[str] = "mysql"
     dialect_tag: ClassVar[int] = 2
 
-    __slots__ = ("_connect_factory", "_dialer", "_idle_conns", "_in_memory_rows")
+    __slots__ = (
+        "_connect_factory",
+        "_dialer",
+        "_idle_conns",
+        "_in_memory_rows",
+        "_in_transaction",
+        "_tx_conn",
+        "_tx_snapshot",
+    )
 
     def __init__(
         self,
@@ -57,6 +71,9 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
         self._connect_factory = connect_factory
         self._idle_conns: collections.deque[Any] = collections.deque(maxlen=self.config.max_size)
         self._in_memory_rows: list[tuple[Any, ...]] = []
+        self._in_transaction: bool = False
+        self._tx_conn: Any = None
+        self._tx_snapshot: list[tuple[Any, ...]] | None = None
 
     @property
     def _config(self) -> MySQLConfig:
@@ -68,12 +85,138 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
         """Return the attached CloudSQLDialer if configured."""
         return self._dialer
 
-    def execute_with_description(  # type: ignore[override]
+    def begin(self) -> None:
+        """Begin an explicit MySQL transaction and pin a pooled connection."""
+        if self._closed:
+            msg = "SyncMySQLDriver is closed"
+            raise RuntimeError(msg)
+        self._in_transaction = True
+        self._tx_snapshot = list(self._in_memory_rows)
+        if self._tx_conn is None and not (self.config.dsn.startswith("memory://") and self._connect_factory is None):
+            self._tx_conn = self._acquire()
+            if hasattr(self._tx_conn, "begin"):
+                self._tx_conn.begin()
+
+    def commit(self) -> None:
+        """Commit the active transaction across active or pooled connections."""
+        try:
+            if self._tx_conn is not None:
+                if hasattr(self._tx_conn, "commit"):
+                    self._tx_conn.commit()
+            else:
+                for conn in list(self._idle_conns):
+                    if hasattr(conn, "commit"):
+                        conn.commit()
+                if hasattr(self._connect_factory, "commit"):
+                    self._connect_factory.commit()
+        finally:
+            tx_conn = self._tx_conn
+            self._tx_conn = None
+            self._tx_snapshot = None
+            self._in_transaction = False
+            if tx_conn is not None:
+                self._release(tx_conn)
+
+    def rollback(self) -> None:
+        """Roll back the active transaction across active or pooled connections."""
+        try:
+            if self._tx_snapshot is not None:
+                self._in_memory_rows = list(self._tx_snapshot)
+            if self._tx_conn is not None:
+                if hasattr(self._tx_conn, "rollback"):
+                    self._tx_conn.rollback()
+            else:
+                for conn in list(self._idle_conns):
+                    if hasattr(conn, "rollback"):
+                        conn.rollback()
+                if hasattr(self._connect_factory, "rollback"):
+                    self._connect_factory.rollback()
+        finally:
+            tx_conn = self._tx_conn
+            self._tx_conn = None
+            self._tx_snapshot = None
+            self._in_transaction = False
+            if tx_conn is not None:
+                self._release(tx_conn)
+
+    def close(self) -> None:
+        """Close the driver and release all pooled connections."""
+        self._closed = True
+        tx_conn = self._tx_conn
+        self._tx_conn = None
+        self._tx_snapshot = None
+        self._in_transaction = False
+        if tx_conn is not None and hasattr(tx_conn, "close"):
+            tx_conn.close()
+        while self._idle_conns:
+            conn = self._idle_conns.pop()
+            if hasattr(conn, "close"):
+                conn.close()
+        if hasattr(self._connect_factory, "close"):
+            self._connect_factory.close()
+
+    def execute(
         self,
         sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] = (),
-    ) -> tuple[list[tuple[Any, ...]], tuple[tuple[str, Any, None, None, None, None, None], ...] | None]:
-        """Execute a SQL statement and return plain tuples and column description."""
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> int:
+        """Execute a DML or DDL statement and return affected row count."""
+        _ = kwargs
+        _, _, rowcount = self._run_sync_query(sql, parameters, auto_commit_dml=True)
+        return rowcount
+
+    def execute_with_description(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Execute a SQL statement and return plain tuple rows and column names."""
+        _ = kwargs
+        rows, cols, _ = self._run_sync_query(sql, parameters, auto_commit_dml=False)
+        return rows, cols
+
+    def select_to_arrow(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
+        **kwargs: Any,
+    ) -> ArrowCursor:
+        """Execute a query and return an `ArrowCursor` backed by ShmRegion Arrow IPC."""
+        rows, cols = self.execute_with_description(sql, parameters, **kwargs)
+        col_list = list(cols) if cols else [f"col_{i}" for i in range(len(rows[0]) if rows else 0)]
+        return ArrowCursor.from_rows(rows, col_list, threshold_rows=threshold_rows)
+
+    def load_from_arrow(
+        self,
+        table_name: str,
+        data: Any,
+        *,
+        columns: Sequence[str] | None = None,
+        **kwargs: Any,
+    ) -> int:
+        """Bulk-ingest an Arrow Table, `ArrowCursor`, or row sequence into `table_name`."""
+        _ = kwargs
+        rows, cols = _table_to_rows_and_cols(data, columns)
+        if not rows or not cols:
+            return 0
+        placeholders = ", ".join("%s" for _ in cols)
+        col_list = ", ".join(cols)
+        sql = f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders})"
+        for row in rows:
+            self.execute(sql, row)
+        return len(rows)
+
+    def _run_sync_query(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None,
+        *,
+        auto_commit_dml: bool,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...], int]:
         if self._closed:
             msg = "SyncMySQLDriver is closed"
             raise RuntimeError(msg)
@@ -92,166 +235,44 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
 
         try:
             if self.config.dsn.startswith("memory://") and self._connect_factory is None:
-                desc = (
-                    tuple((f"col_{i}", None, None, None, None, None, None) for i in range(len(self._in_memory_rows[0])))
-                    if self._in_memory_rows
-                    else None
-                )
-                return list(self._in_memory_rows), desc
+                cols = tuple(f"col_{i}" for i in range(len(self._in_memory_rows[0]))) if self._in_memory_rows else ()
+                return list(self._in_memory_rows), cols, len(self._in_memory_rows)
 
-            conn = self._acquire()
+            pinned = self._tx_conn is not None
+            conn = self._tx_conn if pinned else self._acquire()
             try:
                 if hasattr(conn, "execute_with_description"):
-                    res: tuple[
-                        list[tuple[Any, ...]],
-                        tuple[tuple[str, Any, None, None, None, None, None], ...] | None,
-                    ] = conn.execute_with_description(sql, parameters)
-                    return res
+                    raw_rows, raw_desc = conn.execute_with_description(sql, parameters or ())
+                    tuple_rows = [tuple(r) for r in raw_rows]
+                    return tuple_rows, _extract_column_names(raw_desc), len(tuple_rows)
                 if hasattr(conn, "cursor"):
                     cur = conn.cursor()
                     try:
                         cur.execute(sql, parameters if parameters else None)
-                        rows = cur.fetchall() if hasattr(cur, "fetchall") else []
-                        desc = (
-                            tuple((d[0], d[1], None, None, None, None, None) for d in cur.description)
-                            if getattr(cur, "description", None)
-                            else None
-                        )
-                        return [tuple(r) for r in rows], desc
+                        raw_desc = getattr(cur, "description", None)
+                        if raw_desc:
+                            rows = [tuple(r) for r in (cur.fetchall() if hasattr(cur, "fetchall") else ())]
+                            return rows, _extract_column_names(raw_desc), len(rows)
+                        if auto_commit_dml and not self._in_transaction and hasattr(conn, "commit"):
+                            conn.commit()
+                        rowcount = getattr(cur, "rowcount", 0)
+                        return [], (), max(int(rowcount or 0), 0)
                     finally:
                         if hasattr(cur, "close"):
                             cur.close()
                 if hasattr(conn, "execute"):
                     exec_res = conn.execute(sql, parameters if parameters else None)
-                    rows = exec_res.fetchall() if hasattr(exec_res, "fetchall") else list(exec_res)
-                    desc = (
-                        tuple((d[0], d[1], None, None, None, None, None) for d in exec_res.description)
-                        if getattr(exec_res, "description", None)
-                        else None
-                    )
-                    return [tuple(r) for r in rows], desc
-                return [], None
+                    raw_desc = getattr(exec_res, "description", None)
+                    raw_rows = exec_res.fetchall() if hasattr(exec_res, "fetchall") else list(exec_res)
+                    tuple_rows = [tuple(r) for r in raw_rows]
+                    return tuple_rows, _extract_column_names(raw_desc), len(tuple_rows)
+                return [], (), 0
             finally:
-                self._release(conn)
+                if not pinned:
+                    self._release(conn)
         finally:
             if lease is not None and hasattr(lease, "release"):
                 lease.release()
-
-    def execute_tuples(  # type: ignore[override]
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] = (),
-    ) -> list[tuple[Any, ...]]:
-        """Execute a SQL statement and return plain Python tuples."""
-        rows, _ = self.execute_with_description(sql, parameters)
-        return rows
-
-    def execute(  # type: ignore[override]
-        self,
-        sql: str,
-        *params: Any,
-        parameters: Sequence[Any] | Mapping[str, Any] = (),
-    ) -> list[tuple[Any, ...]]:
-        """Execute a SQL statement with variadic or sequence parameters."""
-        resolved = _normalize_driver_params(params, parameters)
-        return self.execute_tuples(sql, resolved)
-
-    def select(  # type: ignore[override]
-        self,
-        sql: str,
-        *params: Any,
-        parameters: Sequence[Any] | Mapping[str, Any] = (),
-        schema_type: type[Any] | None = None,
-    ) -> list[Any]:
-        """Execute a SELECT statement and return rows as dictionaries or hydrated `schema_type` instances."""
-        resolved = _normalize_driver_params(params, parameters)
-        rows, desc = self.execute_with_description(sql, resolved)
-        if not rows:
-            return []
-        cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]))]
-        return _hydrate_rows_with_schema(rows, cols, schema_type)
-
-    def select_one(  # type: ignore[override]
-        self,
-        sql: str,
-        *params: Any,
-        parameters: Sequence[Any] | Mapping[str, Any] = (),
-        schema_type: type[Any] | None = None,
-    ) -> Any:
-        """Execute a SELECT statement and return the first row or raise `ValueError`."""
-        rows = self.select(sql, *params, parameters=parameters, schema_type=schema_type)
-        if not rows:
-            msg = "No row found for select_one"
-            raise ValueError(msg)
-        return rows[0]
-
-    def select_one_or_none(  # type: ignore[override]
-        self,
-        sql: str,
-        *params: Any,
-        parameters: Sequence[Any] | Mapping[str, Any] = (),
-        schema_type: type[Any] | None = None,
-    ) -> Any | None:
-        """Execute a SELECT statement and return the first row or `None`."""
-        rows = self.select(sql, *params, parameters=parameters, schema_type=schema_type)
-        return rows[0] if rows else None
-
-    def load_from_arrow(  # type: ignore[override]
-        self,
-        table_name: str,
-        data: Any,
-        *,
-        columns: Sequence[str] | None = None,
-    ) -> int:
-        """Bulk-ingest an Arrow Table, `ArrowCursor`, or row sequence into `table_name`."""
-        rows, cols = _table_to_rows_and_cols(data, columns)
-        if not rows or not cols:
-            return 0
-        placeholders = ", ".join("%s" for _ in cols)
-        col_list = ", ".join(cols)
-        sql = f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders})"
-        for row in rows:
-            self.execute_tuples(sql, row)
-        return len(rows)
-
-    def select_to_arrow(  # type: ignore[override]
-        self,
-        sql: str,
-        *params: Any,
-        parameters: Sequence[Any] | Mapping[str, Any] = (),
-    ) -> Any:
-        """Execute a query and return a PyArrow Table backed by ShmRegion Arrow IPC when >= 256 rows."""
-        resolved = _normalize_driver_params(params, parameters)
-        rows, desc = self.execute_with_description(sql, resolved)
-        cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]) if rows else 0)]
-        cursor = ArrowCursor.from_rows(rows, cols, threshold_rows=ARROW_SHM_THRESHOLD_ROWS)
-        return cursor.to_arrow_table()
-
-    def commit(self) -> None:
-        """Commit the active transaction across active connections."""
-        for conn in list(self._idle_conns):
-            if hasattr(conn, "commit"):
-                conn.commit()
-        if hasattr(self._connect_factory, "commit"):
-            self._connect_factory.commit()
-
-    def rollback(self) -> None:
-        """Roll back the active transaction across active connections."""
-        for conn in list(self._idle_conns):
-            if hasattr(conn, "rollback"):
-                conn.rollback()
-        if hasattr(self._connect_factory, "rollback"):
-            self._connect_factory.rollback()
-
-    def close(self) -> None:
-        """Close the driver and release all pooled connections."""
-        self._closed = True
-        while self._idle_conns:
-            conn = self._idle_conns.pop()
-            if hasattr(conn, "close"):
-                conn.close()
-        if hasattr(self._connect_factory, "close"):
-            self._connect_factory.close()
 
     def _create_connection(self) -> Any:
         """Create a new database connection or raise MissingDependencyError."""
@@ -307,7 +328,15 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
     dialect: ClassVar[str] = "mysql"
     dialect_tag: ClassVar[int] = 2
 
-    __slots__ = ("_dialer", "_in_memory_rows", "_pool")
+    __slots__ = (
+        "_dialer",
+        "_in_memory_rows",
+        "_in_transaction",
+        "_pool",
+        "_tx_conn",
+        "_tx_conn_ctx",
+        "_tx_snapshot",
+    )
 
     def __init__(
         self,
@@ -326,6 +355,10 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
                 self._dialer = AsyncCloudSQLDialer(csql_cfg)
         self._pool = pool
         self._in_memory_rows: list[tuple[Any, ...]] = []
+        self._in_transaction: bool = False
+        self._tx_conn: Any = None
+        self._tx_conn_ctx: Any = None
+        self._tx_snapshot: list[tuple[Any, ...]] | None = None
 
     @property
     def _config(self) -> MySQLConfig:
@@ -337,12 +370,167 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         """Return the attached CloudSQLDialer if configured."""
         return self._dialer
 
-    async def execute_with_description(  # type: ignore[override]
+    async def begin(self) -> None:
+        """Begin an explicit async MySQL transaction and pin a pooled connection."""
+        if self._closed:
+            msg = "AsyncMySQLDriver is closed"
+            raise RuntimeError(msg)
+        self._in_transaction = True
+        self._tx_snapshot = list(self._in_memory_rows)
+        if self._tx_conn is not None or (self.config.dsn.startswith("memory://") and self._pool is None):
+            return
+        pool = await self._ensure_pool()
+        if hasattr(pool, "acquire"):
+            ctx = pool.acquire()
+            self._tx_conn_ctx = ctx
+            self._tx_conn = await ctx.__aenter__()
+        elif hasattr(pool, "connection"):
+            conn_obj = pool.connection()
+            if hasattr(conn_obj, "__aenter__"):
+                self._tx_conn_ctx = conn_obj
+                self._tx_conn = await conn_obj.__aenter__()
+            else:
+                self._tx_conn = conn_obj
+        if self._tx_conn is not None and hasattr(self._tx_conn, "begin"):
+            res = self._tx_conn.begin()
+            if inspect.isawaitable(res):
+                await res
+
+    async def commit(self) -> None:
+        """Commit the active async MySQL transaction."""
+        try:
+            if self._tx_conn is not None and hasattr(self._tx_conn, "commit"):
+                res = self._tx_conn.commit()
+                if inspect.isawaitable(res):
+                    await res
+            elif self._pool is not None and hasattr(self._pool, "commit"):
+                res = self._pool.commit()
+                if inspect.isawaitable(res):
+                    await res
+        finally:
+            await self._release_tx_conn()
+
+    async def rollback(self) -> None:
+        """Roll back the active async MySQL transaction."""
+        try:
+            if self._tx_snapshot is not None:
+                self._in_memory_rows = list(self._tx_snapshot)
+            if self._tx_conn is not None and hasattr(self._tx_conn, "rollback"):
+                res = self._tx_conn.rollback()
+                if inspect.isawaitable(res):
+                    await res
+            elif self._pool is not None and hasattr(self._pool, "rollback"):
+                res = self._pool.rollback()
+                if inspect.isawaitable(res):
+                    await res
+        finally:
+            await self._release_tx_conn()
+
+    async def close(self) -> None:
+        """Close the async driver pool."""
+        self._closed = True
+        await self._release_tx_conn()
+        if self._pool is not None:
+            if hasattr(self._pool, "close"):
+                res = self._pool.close()
+                if hasattr(res, "__await__"):
+                    await res
+            if hasattr(self._pool, "wait_closed"):
+                await self._pool.wait_closed()
+
+    async def execute(
         self,
         sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] = (),
-    ) -> tuple[list[tuple[Any, ...]], tuple[tuple[str, Any, None, None, None, None, None], ...] | None]:
-        """Asynchronously execute a SQL statement and return rows and column descriptions."""
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> int:
+        """Asynchronously execute a DML or DDL statement and return affected row count."""
+        _ = kwargs
+        _, _, rowcount = await self._run_async_query(sql, parameters, auto_commit_dml=True)
+        return rowcount
+
+    async def execute_with_description(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Asynchronously execute a SQL statement and return tuple rows and column names."""
+        _ = kwargs
+        rows, cols, _ = await self._run_async_query(sql, parameters, auto_commit_dml=False)
+        return rows, cols
+
+    async def select_to_arrow(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
+        **kwargs: Any,
+    ) -> ArrowCursor:
+        """Asynchronously execute a query and return an `ArrowCursor` over ShmRegion Arrow IPC."""
+        rows, cols = await self.execute_with_description(sql, parameters, **kwargs)
+        col_list = list(cols) if cols else [f"col_{i}" for i in range(len(rows[0]) if rows else 0)]
+        return ArrowCursor.from_rows(rows, col_list, threshold_rows=threshold_rows)
+
+    async def load_from_arrow(
+        self,
+        table_name: str,
+        data: Any,
+        *,
+        columns: Sequence[str] | None = None,
+        **kwargs: Any,
+    ) -> int:
+        """Asynchronously bulk-ingest an Arrow Table, `ArrowCursor`, or row sequence into `table_name`."""
+        _ = kwargs
+        rows, cols = _table_to_rows_and_cols(data, columns)
+        if not rows or not cols:
+            return 0
+        placeholders = ", ".join("%s" for _ in cols)
+        col_list = ", ".join(cols)
+        sql = f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders})"
+        for row in rows:
+            await self.execute(sql, row)
+        return len(rows)
+
+    async def _release_tx_conn(self) -> None:
+        ctx = self._tx_conn_ctx
+        self._tx_conn = None
+        self._tx_conn_ctx = None
+        self._tx_snapshot = None
+        self._in_transaction = False
+        if ctx is not None:
+            await ctx.__aexit__(None, None, None)
+
+    async def _execute_on_async_connection(
+        self,
+        active_conn: Any,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None,
+        *,
+        auto_commit_dml: bool,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...], int]:
+        async with active_conn.cursor() as cur:
+            await cur.execute(sql, parameters if parameters else None)
+            raw_desc = getattr(cur, "description", None)
+            if raw_desc:
+                fetched = await cur.fetchall() if hasattr(cur, "fetchall") else []
+                rows = [tuple(r) for r in fetched]
+                return rows, _extract_column_names(raw_desc), len(rows)
+            if auto_commit_dml and not self._in_transaction and hasattr(active_conn, "commit"):
+                commit_res = active_conn.commit()
+                if inspect.isawaitable(commit_res):
+                    await commit_res
+            rowcount = getattr(cur, "rowcount", 0)
+            return [], (), max(int(rowcount or 0), 0)
+
+    async def _run_async_query(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None,
+        *,
+        auto_commit_dml: bool,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...], int]:
         if self._closed:
             msg = "AsyncMySQLDriver is closed"
             raise RuntimeError(msg)
@@ -358,150 +546,47 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
 
         try:
             if self.config.dsn.startswith("memory://") and self._pool is None:
-                desc = (
-                    tuple((f"col_{i}", None, None, None, None, None, None) for i in range(len(self._in_memory_rows[0])))
-                    if self._in_memory_rows
-                    else None
+                cols = tuple(f"col_{i}" for i in range(len(self._in_memory_rows[0]))) if self._in_memory_rows else ()
+                return list(self._in_memory_rows), cols, len(self._in_memory_rows)
+
+            if self._tx_conn is not None:
+                return await self._execute_on_async_connection(
+                    self._tx_conn,
+                    sql,
+                    parameters,
+                    auto_commit_dml=False,
                 )
-                return list(self._in_memory_rows), desc
 
             pool = await self._ensure_pool()
             if hasattr(pool, "execute_with_description"):
-                raw_res = pool.execute_with_description(sql, parameters)
+                raw_res = pool.execute_with_description(sql, parameters or ())
                 if hasattr(raw_res, "__await__"):
                     raw_res = await raw_res
-                res: tuple[
-                    list[tuple[Any, ...]],
-                    tuple[tuple[str, Any, None, None, None, None, None], ...] | None,
-                ] = raw_res
-                return res
+                raw_rows, raw_desc = raw_res
+                tuple_rows = [tuple(r) for r in raw_rows]
+                return tuple_rows, _extract_column_names(raw_desc), len(tuple_rows)
             if hasattr(pool, "acquire"):
-                async with pool.acquire() as conn, conn.cursor() as cur:
-                    await cur.execute(sql, parameters if parameters else None)
-                    rows = await cur.fetchall() if hasattr(cur, "fetchall") else []
-                    desc = (
-                        tuple((d[0], d[1], None, None, None, None, None) for d in cur.description)
-                        if getattr(cur, "description", None)
-                        else None
+                async with pool.acquire() as conn:
+                    return await self._execute_on_async_connection(
+                        conn,
+                        sql,
+                        parameters,
+                        auto_commit_dml=auto_commit_dml,
                     )
-                    return [tuple(r) for r in rows], desc
             if hasattr(pool, "connection"):
                 conn = pool.connection()
                 if hasattr(conn, "__aenter__"):
-                    async with conn as active_conn, active_conn.cursor() as cur:
-                        await cur.execute(sql, parameters if parameters else None)
-                        rows = await cur.fetchall() if hasattr(cur, "fetchall") else []
-                        desc = (
-                            tuple((d[0], d[1], None, None, None, None, None) for d in cur.description)
-                            if getattr(cur, "description", None)
-                            else None
+                    async with conn as active_conn:
+                        return await self._execute_on_async_connection(
+                            active_conn,
+                            sql,
+                            parameters,
+                            auto_commit_dml=auto_commit_dml,
                         )
-                        return [tuple(r) for r in rows], desc
-            return [], None
+            return [], (), 0
         finally:
             if lease is not None and hasattr(lease, "release"):
                 lease.release()
-
-    async def execute_tuples(  # type: ignore[override]
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] = (),
-    ) -> list[tuple[Any, ...]]:
-        """Asynchronously execute a SQL statement and return plain Python tuples."""
-        rows, _ = await self.execute_with_description(sql, parameters)
-        return rows
-
-    async def execute(  # type: ignore[override]
-        self,
-        sql: str,
-        *params: Any,
-        parameters: Sequence[Any] | Mapping[str, Any] = (),
-    ) -> list[tuple[Any, ...]]:
-        """Asynchronously execute a SQL statement."""
-        resolved = _normalize_driver_params(params, parameters)
-        return await self.execute_tuples(sql, resolved)
-
-    async def select(  # type: ignore[override]
-        self,
-        sql: str,
-        *params: Any,
-        parameters: Sequence[Any] | Mapping[str, Any] = (),
-        schema_type: type[Any] | None = None,
-    ) -> list[Any]:
-        """Asynchronously execute a SELECT statement and return rows as dictionaries or `schema_type` instances."""
-        resolved = _normalize_driver_params(params, parameters)
-        rows, desc = await self.execute_with_description(sql, resolved)
-        if not rows:
-            return []
-        cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]))]
-        return _hydrate_rows_with_schema(rows, cols, schema_type)
-
-    async def select_one(  # type: ignore[override]
-        self,
-        sql: str,
-        *params: Any,
-        parameters: Sequence[Any] | Mapping[str, Any] = (),
-        schema_type: type[Any] | None = None,
-    ) -> Any:
-        """Asynchronously execute a SELECT statement and return the first row or raise `ValueError`."""
-        rows = await self.select(sql, *params, parameters=parameters, schema_type=schema_type)
-        if not rows:
-            msg = "No row found for select_one"
-            raise ValueError(msg)
-        return rows[0]
-
-    async def select_one_or_none(  # type: ignore[override]
-        self,
-        sql: str,
-        *params: Any,
-        parameters: Sequence[Any] | Mapping[str, Any] = (),
-        schema_type: type[Any] | None = None,
-    ) -> Any | None:
-        """Asynchronously execute a SELECT statement and return the first row or `None`."""
-        rows = await self.select(sql, *params, parameters=parameters, schema_type=schema_type)
-        return rows[0] if rows else None
-
-    async def load_from_arrow(  # type: ignore[override]
-        self,
-        table_name: str,
-        data: Any,
-        *,
-        columns: Sequence[str] | None = None,
-    ) -> int:
-        """Asynchronously bulk-ingest an Arrow Table, `ArrowCursor`, or row sequence into `table_name`."""
-        rows, cols = _table_to_rows_and_cols(data, columns)
-        if not rows or not cols:
-            return 0
-        placeholders = ", ".join("%s" for _ in cols)
-        col_list = ", ".join(cols)
-        sql = f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders})"
-        for row in rows:
-            await self.execute_tuples(sql, row)
-        return len(rows)
-
-    async def select_to_arrow(  # type: ignore[override]
-        self,
-        sql: str,
-        *params: Any,
-        parameters: Sequence[Any] | Mapping[str, Any] = (),
-    ) -> Any:
-        """Asynchronously execute a query and return a PyArrow Table over ShmRegion Arrow IPC."""
-        resolved = _normalize_driver_params(params, parameters)
-        rows, desc = await self.execute_with_description(sql, resolved)
-        cols = [d[0] for d in desc] if desc else [f"col_{i}" for i in range(len(rows[0]) if rows else 0)]
-        cursor = ArrowCursor.from_rows(rows, cols, threshold_rows=ARROW_SHM_THRESHOLD_ROWS)
-        return cursor.to_arrow_table()
-
-    async def close(self) -> None:
-        """Close the async driver pool."""
-        self._closed = True
-        if self._pool is not None:
-            if hasattr(self._pool, "close"):
-                res = self._pool.close()
-                if hasattr(res, "__await__"):
-                    await res
-            if hasattr(self._pool, "wait_closed"):
-                await self._pool.wait_closed()
 
     async def _ensure_pool(self) -> Any:
         """Ensure connection pool is initialized or raise MissingDependencyError."""

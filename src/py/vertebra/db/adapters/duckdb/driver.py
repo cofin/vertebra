@@ -22,7 +22,7 @@ from vertebra.db.driver import SyncDatabaseDriver, ThreadOffloadAsyncDatabaseDri
 from vertebra.utils.module_loader import import_optional
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import AsyncIterator, Mapping, Sequence
 
 __all__ = (
     "AsyncDuckDBDriver",
@@ -40,6 +40,7 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         resolved = config or DuckDBConfig()
         super().__init__(resolved, broker=broker)
         self._writer_lock = threading.RLock()
+        self._in_transaction: bool = False
         self.applied_token_generation: int = 0
         self.last_gcs_secret_sql: str = ""
         self._cached_gcs_snapshot: Any = None
@@ -59,46 +60,157 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
             self._conn = sqlite3.connect(db_path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
 
-    def execute(  # type: ignore[override]
+    def begin(self) -> None:
+        """Begin an explicit DuckDB transaction."""
+        with self._writer_lock:
+            if self._using_native_duckdb:
+                self._conn.execute("BEGIN TRANSACTION")
+            elif not self._conn.in_transaction:
+                self._conn.execute("BEGIN")
+            self._in_transaction = True
+
+    def commit(self) -> None:
+        """Commit the active DuckDB transaction."""
+        with self._writer_lock:
+            try:
+                if self._using_native_duckdb and not self._in_transaction:
+                    return
+                self._conn.commit()
+            finally:
+                self._in_transaction = False
+
+    def rollback(self) -> None:
+        """Roll back the active DuckDB transaction."""
+        with self._writer_lock:
+            try:
+                if self._using_native_duckdb and not self._in_transaction:
+                    return
+                self._conn.rollback()
+            finally:
+                self._in_transaction = False
+
+    def cancel(self) -> None:
+        """Interrupt an active DuckDB query when supported, or act as an idempotent no-op."""
+        interrupt_fn = getattr(self._conn, "interrupt", None)
+        if not self._closed and callable(interrupt_fn):
+            interrupt_fn()
+
+    def close(self) -> None:
+        """Close the underlying DuckDB connection."""
+        self._closed = True
+        self._in_transaction = False
+        self._conn.close()
+
+    def execute(
         self,
         sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
     ) -> int:
         """Execute a DDL or DML statement under single-writer coordination."""
+        _ = kwargs
         self._sync_gcs_token_secret()
-        bound = tuple(params) if isinstance(params, (list, tuple)) else (params or ())
+        bound = tuple(parameters) if isinstance(parameters, (list, tuple)) else (parameters or ())
         grant = self._acquire_duckdb_lease(sql, len(bound) if isinstance(bound, tuple) else 0)
         try:
             with self._writer_lock:
                 cur = self._conn.execute(sql, bound) if bound else self._conn.execute(sql)
-                if not self._using_native_duckdb:
+                if not self._using_native_duckdb and not self._in_transaction:
                     self._conn.commit()
                 rowcount = getattr(cur, "rowcount", 0)
                 return max(int(rowcount or 0), 0)
         finally:
             self._release_duckdb_lease(grant)
 
-    def select(  # type: ignore[override]
+    def execute_many(
         self,
         sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        parameter_sets: Sequence[Sequence[Any] | Mapping[str, Any]],
+        **kwargs: Any,
+    ) -> int:
+        """Execute a statement across multiple parameter sets under single-writer coordination."""
+        _ = kwargs
+        if not parameter_sets:
+            return 0
+        self._sync_gcs_token_secret()
+        grant = self._acquire_duckdb_lease(sql, len(parameter_sets[0]))
+        try:
+            with self._writer_lock:
+                self._conn.executemany(sql, list(parameter_sets))
+                if not self._using_native_duckdb and not self._in_transaction:
+                    self._conn.commit()
+                return len(parameter_sets)
+        finally:
+            self._release_duckdb_lease(grant)
+
+    def execute_tuples(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> list[tuple[Any, ...]]:
+        """Execute a query and return positional tuples."""
+        _ = kwargs
+        self._sync_gcs_token_secret()
+        bound = tuple(parameters) if isinstance(parameters, (list, tuple)) else (parameters or ())
+        grant = self._acquire_duckdb_lease(sql, len(bound) if isinstance(bound, tuple) else 0)
+        try:
+            with self._writer_lock:
+                cur = self._conn.execute(sql, bound) if bound else self._conn.execute(sql)
+                rows = [tuple(row) for row in cur.fetchall()]
+                if not self._using_native_duckdb and not self._in_transaction and cur.description is None:
+                    self._conn.commit()
+                return rows
+        finally:
+            self._release_duckdb_lease(grant)
+
+    def execute_with_description(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Execute SQL and return `(rows, column_names)`."""
+        _ = kwargs
+        self._sync_gcs_token_secret()
+        bound = tuple(parameters) if isinstance(parameters, (list, tuple)) else (parameters or ())
+        grant = self._acquire_duckdb_lease(sql, len(bound) if isinstance(bound, tuple) else 0)
+        try:
+            with self._writer_lock:
+                cur = self._conn.execute(sql, bound) if bound else self._conn.execute(sql)
+                if cur.description is not None:
+                    rows = [tuple(row) for row in cur.fetchall()]
+                    cols = tuple(str(col[0]) for col in cur.description)
+                    return rows, cols
+                if not self._using_native_duckdb and not self._in_transaction:
+                    self._conn.commit()
+                return [], ()
+        finally:
+            self._release_duckdb_lease(grant)
+
+    def select(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
+        **kwargs: Any,
     ) -> list[Any]:
         """Execute an analytical `SELECT` query and return rows as dictionaries or `schema_type` instances."""
+        _ = kwargs
         self._sync_gcs_token_secret()
-        bound = tuple(params) if isinstance(params, (list, tuple)) else (params or ())
+        bound = tuple(parameters) if isinstance(parameters, (list, tuple)) else (parameters or ())
         grant = self._acquire_duckdb_lease(sql, len(bound) if isinstance(bound, tuple) else 0)
         try:
             if DuckDBCore.is_write_statement(sql):
                 with self._writer_lock:
                     cur = self._conn.execute(sql, bound) if bound else self._conn.execute(sql)
                     rows = cur.fetchall()
-                    cols = [col[0] for col in (cur.description or ())]
+                    cols = [str(col[0]) for col in (cur.description or ())]
             else:
                 cur = self._conn.execute(sql, bound) if bound else self._conn.execute(sql)
                 rows = cur.fetchall()
-                cols = [col[0] for col in (cur.description or ())]
+                cols = [str(col[0]) for col in (cur.description or ())]
             if not rows:
                 return []
             tuple_rows = [tuple(row) for row in rows]
@@ -106,39 +218,28 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         finally:
             self._release_duckdb_lease(grant)
 
-    def select_one(  # type: ignore[override]
+    def select_to_arrow(
         self,
         sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
-        schema_type: type[Any] | None = None,
-    ) -> Any:
-        """Execute a `SELECT` query and return the first row or raise `ValueError`."""
-        rows = self.select(sql, params, schema_type=schema_type)
-        if not rows:
-            msg = "No row found for select_one"
-            raise ValueError(msg)
-        return rows[0]
+        threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
+        **kwargs: Any,
+    ) -> ArrowCursor:
+        """Stream analytical query results into a zero-copy `ShmRegion`-backed `ArrowCursor`."""
+        rows, cols = self.execute_with_description(sql, parameters, **kwargs)
+        return ArrowCursor.from_rows(rows, cols, threshold_rows=threshold_rows)
 
-    def select_one_or_none(  # type: ignore[override]
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        schema_type: type[Any] | None = None,
-    ) -> Any | None:
-        """Execute a `SELECT` query and return the first row or `None`."""
-        rows = self.select(sql, params, schema_type=schema_type)
-        return rows[0] if rows else None
-
-    def load_from_arrow(  # type: ignore[override]
+    def load_from_arrow(
         self,
         table_name: str,
         data: Any,
         *,
         columns: Sequence[str] | None = None,
+        **kwargs: Any,
     ) -> int:
         """Bulk-ingest an Arrow Table, `ArrowCursor`, or row sequence into `table_name`."""
+        _ = kwargs
         self._sync_gcs_token_secret()
         rows, cols = _table_to_rows_and_cols(data, columns)
         if not rows or not cols:
@@ -150,68 +251,11 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         try:
             with self._writer_lock:
                 self._conn.executemany(sql, rows)
-                if not self._using_native_duckdb:
+                if not self._using_native_duckdb and not self._in_transaction:
                     self._conn.commit()
                 return len(rows)
         finally:
             self._release_duckdb_lease(grant)
-
-    def execute_tuples(  # type: ignore[override]
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> list[tuple[Any, ...]]:
-        """Execute a query and return positional tuples."""
-        self._sync_gcs_token_secret()
-        bound = tuple(params) if isinstance(params, (list, tuple)) else (params or ())
-        grant = self._acquire_duckdb_lease(sql, len(bound) if isinstance(bound, tuple) else 0)
-        try:
-            with self._writer_lock:
-                cur = self._conn.execute(sql, bound) if bound else self._conn.execute(sql)
-                rows = [tuple(row) for row in cur.fetchall()]
-                if not self._using_native_duckdb:
-                    self._conn.commit()
-                return rows
-        finally:
-            self._release_duckdb_lease(grant)
-
-    def execute_with_description(  # type: ignore[override]
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> tuple[list[tuple[Any, ...]], tuple[tuple[Any, ...], ...] | None, int]:
-        """Execute SQL and return `(rows, description, rowcount)` for DBAPI compatibility."""
-        self._sync_gcs_token_secret()
-        bound = tuple(params) if isinstance(params, (list, tuple)) else (params or ())
-        grant = self._acquire_duckdb_lease(sql, len(bound) if isinstance(bound, tuple) else 0)
-        try:
-            with self._writer_lock:
-                cur = self._conn.execute(sql, bound) if bound else self._conn.execute(sql)
-                if cur.description is not None:
-                    rows = [tuple(row) for row in cur.fetchall()]
-                    desc = tuple((col[0], None, None, None, None, None, None) for col in cur.description)
-                    return rows, desc, len(rows)
-                if not self._using_native_duckdb:
-                    self._conn.commit()
-                return [], None, max(int(getattr(cur, "rowcount", 0) or 0), 0)
-        finally:
-            self._release_duckdb_lease(grant)
-
-    def select_to_arrow(  # type: ignore[override]
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        shm_threshold_rows: int = 1,
-    ) -> ArrowCursor:
-        """Stream analytical query results into a zero-copy `ShmRegion`-backed `ArrowCursor`."""
-        rows = self.select(sql, params)
-        return ArrowCursor.from_rows(rows, threshold_rows=shm_threshold_rows)
-
-    def close(self) -> None:
-        """Close the underlying DuckDB connection."""
-        self._closed = True
-        self._conn.close()
 
     def _sync_gcs_token_secret(self) -> None:
         """Ensure this DuckDB session's GCS `BEARER_TOKEN` secret matches the latest `GcpTokenCache` generation."""
@@ -321,78 +365,135 @@ class AsyncDuckDBDriver(ThreadOffloadAsyncDatabaseDriver[DuckDBConfig, SyncDuckD
         """Return the last `CREATE OR REPLACE SECRET` SQL statement applied for GCS ADC auth."""
         return self._sync.last_gcs_secret_sql
 
-    async def execute(  # type: ignore[override]
+    async def execute(
         self,
         sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
     ) -> int:
         """Execute a DDL or DML statement asynchronously."""
         await self._ensure_gcs_token_async()
-        return await asyncio.to_thread(self._sync.execute, sql, params)
+        return await super().execute(sql, parameters, **kwargs)
 
-    async def select(  # type: ignore[override]
+    async def execute_many(
         self,
         sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        parameter_sets: Sequence[Sequence[Any] | Mapping[str, Any]],
+        **kwargs: Any,
+    ) -> int:
+        """Execute a batch statement asynchronously."""
+        await self._ensure_gcs_token_async()
+        return await super().execute_many(sql, parameter_sets, **kwargs)
+
+    async def execute_tuples(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> list[tuple[Any, ...]]:
+        """Execute a query returning tuple rows asynchronously."""
+        await self._ensure_gcs_token_async()
+        return await super().execute_tuples(sql, parameters, **kwargs)
+
+    async def execute_with_description(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Execute SQL and return `(rows, column_names)` asynchronously."""
+        await self._ensure_gcs_token_async()
+        return await super().execute_with_description(sql, parameters, **kwargs)
+
+    async def select(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
+        **kwargs: Any,
     ) -> list[Any]:
         """Execute an analytical `SELECT` query asynchronously."""
         await self._ensure_gcs_token_async()
-        return await asyncio.to_thread(self._sync.select, sql, params, schema_type=schema_type)
+        return await super().select(sql, parameters, schema_type=schema_type, **kwargs)
 
-    async def select_one(  # type: ignore[override]
+    async def select_one(
         self,
         sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
+        **kwargs: Any,
     ) -> Any:
-        """Execute a `SELECT` query asynchronously and return the first row or raise `ValueError`."""
+        """Execute a `SELECT` query asynchronously and return the first row or raise `NotFoundError`."""
         await self._ensure_gcs_token_async()
-        return await asyncio.to_thread(self._sync.select_one, sql, params, schema_type=schema_type)
+        return await super().select_one(sql, parameters, schema_type=schema_type, **kwargs)
 
-    async def select_one_or_none(  # type: ignore[override]
+    async def select_one_or_none(
         self,
         sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
+        **kwargs: Any,
     ) -> Any | None:
         """Execute a `SELECT` query asynchronously and return the first row or `None`."""
         await self._ensure_gcs_token_async()
-        return await asyncio.to_thread(self._sync.select_one_or_none, sql, params, schema_type=schema_type)
+        return await super().select_one_or_none(sql, parameters, schema_type=schema_type, **kwargs)
 
-    async def load_from_arrow(  # type: ignore[override]
+    async def select_value(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        value_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a `SELECT` query asynchronously and return the first scalar column."""
+        await self._ensure_gcs_token_async()
+        return await super().select_value(sql, parameters, value_type=value_type, **kwargs)
+
+    async def select_to_arrow(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
+        **kwargs: Any,
+    ) -> ArrowCursor:
+        """Execute a query asynchronously and return a zero-copy `ArrowCursor`."""
+        await self._ensure_gcs_token_async()
+        return await super().select_to_arrow(sql, parameters, threshold_rows=threshold_rows, **kwargs)
+
+    async def stream_arrow_batches(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        batch_size: int = 65_536,
+        **kwargs: Any,
+    ) -> AsyncIterator[Any]:
+        """Stream Arrow record batches asynchronously."""
+        await self._ensure_gcs_token_async()
+        async for batch in super().stream_arrow_batches(sql, parameters, batch_size=batch_size, **kwargs):
+            yield batch
+
+    async def load_from_arrow(
         self,
         table_name: str,
         data: Any,
         *,
         columns: Sequence[str] | None = None,
+        **kwargs: Any,
     ) -> int:
         """Asynchronously bulk-ingest an Arrow Table or `ArrowCursor` into `table_name`."""
         await self._ensure_gcs_token_async()
-        return await asyncio.to_thread(self._sync.load_from_arrow, table_name, data, columns=columns)
-
-    async def select_to_arrow(  # type: ignore[override]
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        shm_threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
-    ) -> ArrowCursor:
-        """Execute a query asynchronously and return a zero-copy `ArrowCursor`."""
-        await self._ensure_gcs_token_async()
-        return await asyncio.to_thread(
-            self._sync.select_to_arrow,
-            sql,
-            params,
-            shm_threshold_rows=shm_threshold_rows,
-        )
+        return await super().load_from_arrow(table_name, data, columns=columns, **kwargs)
 
     async def close(self) -> None:
         """Close the underlying DuckDB connection."""
         await asyncio.to_thread(self._sync.close)
+        self._closed = True
 
     async def _ensure_gcs_token_async(self) -> None:
         """Pre-refresh the GCS ADC token on the Rust Tokio runtime before dispatching DuckDB work."""

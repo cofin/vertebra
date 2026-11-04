@@ -11,6 +11,7 @@ import msgspec
 
 from vertebra._vertebra import (
     LeaseBroker,
+    NotFoundError,
 )
 from vertebra._vertebra import (
     StatementCache as _RustStatementCache,
@@ -141,7 +142,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
     def execute(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         job_labels: Mapping[str, str] | None = None,
         destination_table: str | None = None,
@@ -180,7 +181,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
     def execute_script(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Execute a GoogleSQL procedural script or multi-statement batch."""
         raw = self._run_query_sync(sql, parameters)
@@ -189,7 +190,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
     def select(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
         **kwargs: Any,
@@ -206,28 +207,46 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
     def select_one(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a query and return the first row, raising `NotFoundError` when 0 rows match."""
+        rows = self.select(sql, parameters, schema_type=schema_type, **kwargs)
+        if not rows:
+            msg = "Query returned no rows"
+            raise NotFoundError(msg)
+        return rows[0]
+
+    def select_one_or_none(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
         **kwargs: Any,
     ) -> Any | None:
-        """Execute a query and return the first row or `None`."""
+        """Execute a query and return the first row or `None` when empty."""
         rows = self.select(sql, parameters, schema_type=schema_type, **kwargs)
         return rows[0] if rows else None
 
     def select_value(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         value_type: type[Any] | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Execute a query and return the first scalar column of the first row."""
+        """Execute a query and return the first scalar column, raising `NotFoundError` when 0 rows match."""
         _ = kwargs
         raw = self._run_query_sync(sql, parameters)
         rows = raw.get("rows", ())
-        if not rows or not rows[0]:
+        if not rows:
+            msg = "Query returned no rows"
+            raise NotFoundError(msg)
+        if not rows[0]:
             return None
         val = rows[0][0]
         if value_type is not None and val is not None:
@@ -237,7 +256,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
     def dry_run(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
     ) -> BigQueryDryRunResult:
         """Validate `sql` via `jobs.insert(dryRun=True)` and return byte and cost estimates."""
         client = self._ensure_client()
@@ -245,27 +264,27 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         raw = client.dry_run(rewritten_sql, params_json)
         return BigQueryCore.build_dry_run_result(raw)
 
-    def fetch_arrow(
+    def select_to_arrow(
         self,
-        sql_or_table: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
+        threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
         selected_fields: Sequence[str] | None = None,
         row_restriction: str | None = None,
         max_streams: int | None = None,
-        threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
         **kwargs: Any,
     ) -> ArrowCursor:
         """Read a table or query into a zero-copy `VTBARROW` shared-memory `ArrowCursor`."""
-        _ = (threshold_rows, kwargs)
+        _ = kwargs
         client = self._ensure_client()
         streams = max_streams or self.config.max_read_streams
         table_parts = BigQueryCore.try_parse_table_reference(
-            sql_or_table,
+            sql,
             default_project=self.project_id,
             default_dataset=self.dataset_id,
         )
-        if table_parts is not None and not parameters:
+        if table_parts is not None and not parameters and hasattr(client, "read_table_arrow"):
             project_id, dataset_id, table_id = table_parts
             lease = self._acquire_pid_lease()
             try:
@@ -286,39 +305,34 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
                 self._release_pid_lease(lease)
 
         select_sql = BigQueryCore.build_table_or_query_sql(
-            sql_or_table,
+            sql,
             selected_fields=selected_fields,
             row_restriction=row_restriction,
         )
         raw = self._run_query_sync(select_sql, parameters)
+        if threshold_rows != ARROW_SHM_THRESHOLD_ROWS:
+            cols = [str(c) for c in raw.get("columns", ())]
+            rows = list(raw.get("rows", ()))
+            return ArrowCursor.from_rows(rows, columns=cols, threshold_rows=threshold_rows)
         return BigQueryCore.query_result_to_arrow_cursor(raw)
 
-    def select_to_arrow(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
-        **kwargs: Any,
-    ) -> ArrowCursor:
-        """Execute a query or table read and return a zero-copy `ArrowCursor`."""
-        return self.fetch_arrow(sql, parameters, threshold_rows=threshold_rows, **kwargs)
-
-    def insert_arrow(
+    def load_from_arrow(
         self,
         table_name: str,
-        data: ArrowCursor | bytes | Any,
+        data: Any,
         *,
         columns: Sequence[str] | None = None,
         mode: Literal["_default", "COMMITTED", "PENDING", "BUFFERED"] = "_default",
         **kwargs: Any,
     ) -> int:
-        """Append an Arrow IPC stream, `ArrowCursor`, or `pyarrow` table via Storage Write API v1."""
+        """Bulk-load an Arrow IPC stream, `ArrowCursor`, or `pyarrow` table via Storage Write API v1."""
         _ = (columns, kwargs)
         client = self._ensure_client()
         ipc_bytes = BigQueryCore.coerce_arrow_ipc_bytes(data)
         if not ipc_bytes:
             return 0
+        if not hasattr(client, "append_arrow"):
+            return self._fallback_insert_arrow_via_rest(table_name, ipc_bytes)
         parent_table = BigQueryCore.qualify_table_resource(
             table_name,
             default_project=self.project_id,
@@ -335,20 +349,8 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         finally:
             self._release_pid_lease(lease)
 
-    def load_from_arrow(
-        self,
-        table_name: str,
-        data: Any,
-        *,
-        columns: Sequence[str] | None = None,
-        mode: Literal["_default", "COMMITTED", "PENDING", "BUFFERED"] = "_default",
-        **kwargs: Any,
-    ) -> int:
-        """Bulk-load an Arrow payload into `table_name` via BigQuery Storage Write API v1."""
-        return self.insert_arrow(table_name, data, columns=columns, mode=mode, **kwargs)
-
-    def begin(self) -> str:
-        """Start a BigQuery multi-statement transaction session and return its `session_id`."""
+    def begin(self) -> None:
+        """Start a BigQuery multi-statement transaction session."""
         client = self._ensure_client()
         create_session = self._session_id is None
         res = client.query(
@@ -361,7 +363,6 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         if sid:
             self._session_id = str(sid)
         self._in_transaction = True
-        return self._session_id or ""
 
     def commit(self) -> None:
         """Commit the active BigQuery session transaction."""
@@ -416,7 +417,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
             )
             return self.execute(export_sql)
 
-        cursor = self.fetch_arrow(sql_or_table)
+        cursor = self.select_to_arrow(sql_or_table)
         BigQueryCore.write_arrow_cursor_to_object_store_sync(
             cursor,
             destination_uri=destination_uri,
@@ -455,7 +456,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
                 store=store,
                 format=format,
             )
-            total_rows += self.insert_arrow(table, cursor)
+            total_rows += self.load_from_arrow(table, cursor)
         return total_rows
 
     def create_object_table(
@@ -517,7 +518,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
     def _prepare_sql_and_params(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None,
     ) -> tuple[str, str | None]:
         rewritten = sql
         if self._statement_cache is not None:
@@ -540,7 +541,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
     def _run_query_sync(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         job_labels: Mapping[str, str] | None = None,
         destination_table: str | None = None,
@@ -695,7 +696,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
     async def execute(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         job_labels: Mapping[str, str] | None = None,
         destination_table: str | None = None,
@@ -734,7 +735,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
     async def execute_script(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Execute a GoogleSQL procedural script or multi-statement batch."""
         raw = await self._run_query_async(sql, parameters)
@@ -743,7 +744,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
     async def select(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
         **kwargs: Any,
@@ -760,28 +761,46 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
     async def select_one(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a query and return the first row, raising `NotFoundError` when 0 rows match."""
+        rows = await self.select(sql, parameters, schema_type=schema_type, **kwargs)
+        if not rows:
+            msg = "Query returned no rows"
+            raise NotFoundError(msg)
+        return rows[0]
+
+    async def select_one_or_none(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
         **kwargs: Any,
     ) -> Any | None:
-        """Execute a query and return the first row or `None`."""
+        """Execute a query and return the first row or `None` when empty."""
         rows = await self.select(sql, parameters, schema_type=schema_type, **kwargs)
         return rows[0] if rows else None
 
     async def select_value(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         value_type: type[Any] | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Execute a query and return the first scalar column of the first row."""
+        """Execute a query and return the first scalar column, raising `NotFoundError` when 0 rows match."""
         _ = kwargs
         raw = await self._run_query_async(sql, parameters)
         rows = raw.get("rows", ())
-        if not rows or not rows[0]:
+        if not rows:
+            msg = "Query returned no rows"
+            raise NotFoundError(msg)
+        if not rows[0]:
             return None
         val = rows[0][0]
         if value_type is not None and val is not None:
@@ -791,7 +810,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
     async def dry_run(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
     ) -> BigQueryDryRunResult:
         """Validate `sql` via `jobs.insert(dryRun=True)` and return byte and cost estimates."""
         client = self._ensure_client()
@@ -799,27 +818,27 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
         raw = await client.dry_run(rewritten_sql, params_json)
         return BigQueryCore.build_dry_run_result(raw)
 
-    async def fetch_arrow(
+    async def select_to_arrow(
         self,
-        sql_or_table: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
+        threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
         selected_fields: Sequence[str] | None = None,
         row_restriction: str | None = None,
         max_streams: int | None = None,
-        threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
         **kwargs: Any,
     ) -> ArrowCursor:
         """Asynchronously read a table or query into a zero-copy `VTBARROW` `ArrowCursor`."""
-        _ = (threshold_rows, kwargs)
+        _ = kwargs
         client = self._ensure_client()
         streams = max_streams or self.config.max_read_streams
         table_parts = BigQueryCore.try_parse_table_reference(
-            sql_or_table,
+            sql,
             default_project=self.project_id,
             default_dataset=self.dataset_id,
         )
-        if table_parts is not None and not parameters:
+        if table_parts is not None and not parameters and hasattr(client, "read_table_arrow"):
             project_id, dataset_id, table_id = table_parts
             lease = self._acquire_pid_lease()
             try:
@@ -840,39 +859,34 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
                 self._release_pid_lease(lease)
 
         select_sql = BigQueryCore.build_table_or_query_sql(
-            sql_or_table,
+            sql,
             selected_fields=selected_fields,
             row_restriction=row_restriction,
         )
         raw = await self._run_query_async(select_sql, parameters)
+        if threshold_rows != ARROW_SHM_THRESHOLD_ROWS:
+            cols = [str(c) for c in raw.get("columns", ())]
+            rows = list(raw.get("rows", ()))
+            return ArrowCursor.from_rows(rows, columns=cols, threshold_rows=threshold_rows)
         return BigQueryCore.query_result_to_arrow_cursor(raw)
 
-    async def select_to_arrow(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
-        **kwargs: Any,
-    ) -> ArrowCursor:
-        """Execute a query or table read and return a zero-copy `ArrowCursor`."""
-        return await self.fetch_arrow(sql, parameters, threshold_rows=threshold_rows, **kwargs)
-
-    async def insert_arrow(
+    async def load_from_arrow(
         self,
         table_name: str,
-        data: ArrowCursor | bytes | Any,
+        data: Any,
         *,
         columns: Sequence[str] | None = None,
         mode: Literal["_default", "COMMITTED", "PENDING", "BUFFERED"] = "_default",
         **kwargs: Any,
     ) -> int:
-        """Asynchronously append an Arrow IPC stream, `ArrowCursor`, or `pyarrow` table."""
+        """Asynchronously bulk-load an Arrow IPC stream, `ArrowCursor`, or `pyarrow` table."""
         _ = (columns, kwargs)
         client = self._ensure_client()
         ipc_bytes = BigQueryCore.coerce_arrow_ipc_bytes(data)
         if not ipc_bytes:
             return 0
+        if not hasattr(client, "append_arrow"):
+            return await self._fallback_insert_arrow_via_rest(table_name, ipc_bytes)
         parent_table = BigQueryCore.qualify_table_resource(
             table_name,
             default_project=self.project_id,
@@ -889,20 +903,8 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
         finally:
             self._release_pid_lease(lease)
 
-    async def load_from_arrow(
-        self,
-        table_name: str,
-        data: Any,
-        *,
-        columns: Sequence[str] | None = None,
-        mode: Literal["_default", "COMMITTED", "PENDING", "BUFFERED"] = "_default",
-        **kwargs: Any,
-    ) -> int:
-        """Asynchronously bulk-load an Arrow payload into `table_name`."""
-        return await self.insert_arrow(table_name, data, columns=columns, mode=mode, **kwargs)
-
-    async def begin(self) -> str:
-        """Start a BigQuery multi-statement transaction session and return its `session_id`."""
+    async def begin(self) -> None:
+        """Start a BigQuery multi-statement transaction session."""
         client = self._ensure_client()
         create_session = self._session_id is None
         res = await client.query(
@@ -915,7 +917,6 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
         if sid:
             self._session_id = str(sid)
         self._in_transaction = True
-        return self._session_id or ""
 
     async def commit(self) -> None:
         """Commit the active BigQuery session transaction."""
@@ -970,7 +971,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
             )
             return await self.execute(export_sql)
 
-        cursor = await self.fetch_arrow(sql_or_table)
+        cursor = await self.select_to_arrow(sql_or_table)
         await BigQueryCore.write_arrow_cursor_to_object_store_async(
             cursor,
             destination_uri=destination_uri,
@@ -1009,7 +1010,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
                 store=store,
                 format=format,
             )
-            total_rows += await self.insert_arrow(table, cursor)
+            total_rows += await self.load_from_arrow(table, cursor)
         return total_rows
 
     async def create_object_table(
@@ -1071,7 +1072,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
     def _prepare_sql_and_params(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None,
     ) -> tuple[str, str | None]:
         rewritten = sql
         if self._statement_cache is not None:
@@ -1094,7 +1095,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
     async def _run_query_async(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         job_labels: Mapping[str, str] | None = None,
         destination_table: str | None = None,

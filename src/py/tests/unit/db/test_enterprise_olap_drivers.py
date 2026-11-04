@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import os
-import sqlite3
 import struct
 import zipfile
 from typing import TYPE_CHECKING
@@ -21,6 +20,7 @@ from vertebra.db import (
     ArrowCursor,
     CloudSQLConfig,
     DatabaseRegistry,
+    OperationalError,
     SyncAlloyDBDialer,
     SyncCloudSQLDialer,
 )
@@ -226,7 +226,7 @@ def test_sqlite_initialization_pragmas_and_broker_coordination(tmp_path: Path) -
     assert broker.lease_table.acquired == 4
     assert broker.lease_table.released == 4
 
-    arrow_cur = driver.select_to_arrow("SELECT id, label FROM items ORDER BY id", shm_threshold_rows=1)
+    arrow_cur = driver.select_to_arrow("SELECT id, label FROM items ORDER BY id", threshold_rows=1)
     assert arrow_cur.shm_region is not None
     assert arrow_cur.to_pylist() == rows
     driver.close()
@@ -446,7 +446,7 @@ def test_duckdb_post_init_bootstrap_and_arrow_shm_streaming() -> None:
     assert "SET parquet_metadata_cache = true" in driver.executed_bootstrap_statements
     driver.execute("CREATE TABLE metrics (id INTEGER, score DOUBLE)")
     driver.execute("INSERT INTO metrics VALUES (1, 98.5), (2, 87.25)")
-    arrow_cur = driver.select_to_arrow("SELECT id, score FROM metrics ORDER BY id")
+    arrow_cur = driver.select_to_arrow("SELECT id, score FROM metrics ORDER BY id", threshold_rows=1)
     assert arrow_cur.shm_region is not None
     assert arrow_cur.to_pylist() == [{"id": 1, "score": 98.5}, {"id": 2, "score": 87.25}]
     driver.close()
@@ -499,7 +499,7 @@ async def test_sqlspec_adapters_and_async_drivers() -> None:
         await asession.execute("CREATE TABLE t_async (k INTEGER, v TEXT)")
         await asession.execute("INSERT INTO t_async VALUES (42, 'answer')")
         assert await asession.select_value("SELECT v FROM t_async WHERE k = 42") == "answer"
-        arrow_res = await asession.select_to_arrow("SELECT k, v FROM t_async", shm_threshold_rows=1)
+        arrow_res = await asession.select_to_arrow("SELECT k, v FROM t_async", threshold_rows=1)
         assert arrow_res.data.to_pylist() == [{"k": 42, "v": "answer"}]
     await duck_async.close()
 
@@ -727,7 +727,7 @@ def test_sync_tenant_predicate_raises_when_guc_set_fails() -> None:
     config = SQLiteSyncConfig(path=":memory:")
     predicate = TenantPredicate(table_alias="t", tenant_value="acme")
     try:
-        with config.provide_session() as session, pytest.raises(sqlite3.OperationalError, match="set_config"):
+        with config.provide_session() as session, pytest.raises(OperationalError, match="set_config"):
             session.apply_tenant_predicate(predicate)
     finally:
         config.close()
@@ -740,7 +740,7 @@ async def test_async_tenant_predicate_raises_when_guc_set_fails() -> None:
     predicate = TenantPredicate(table_alias="t", tenant_value="acme")
     try:
         async with config.provide_session() as session:
-            with pytest.raises(sqlite3.OperationalError, match="set_config"):
+            with pytest.raises(OperationalError, match="set_config"):
                 await session.apply_tenant_predicate(predicate)
     finally:
         await config.close()

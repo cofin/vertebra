@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from tests.unit.db.test_spanner import FakeSpannerClient
+from vertebra.db import NotFoundError
 from vertebra.db.adapters.spanner import SpannerConfig, StalenessBound, SyncSpannerDriver
 from vertebra.extensions.sqlspec.spanner import (
     SpannerAsyncADKArtifactStore,
@@ -80,6 +81,18 @@ def test_spanner_sync_config_sessions_connection_shim_and_data_dictionary() -> N
             {"uid": "u1"},
         )
         assert fetched["total"] == 100
+        with pytest.raises(NotFoundError):
+            ro_session.select_one(
+                "SELECT order_id, total FROM child_orders WHERE user_id = @uid",
+                {"uid": "missing-user"},
+            )
+        assert (
+            ro_session.select_one_or_none(
+                "SELECT order_id, total FROM child_orders WHERE user_id = @uid",
+                {"uid": "missing-user"},
+            )
+            is None
+        )
         with pytest.raises(ImproperConfigurationError):
             ro_session.execute("DELETE FROM child_orders WHERE user_id = 'u1'")
 

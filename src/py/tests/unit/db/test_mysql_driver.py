@@ -181,9 +181,7 @@ def test_sync_mysql_driver_lifecycle_and_pool() -> None:
 
     rows, desc = driver.execute_with_description("SELECT id, name FROM items WHERE id > %s", (0,))
     assert rows == [(1, "alpha"), (2, "beta")]
-    assert desc is not None
-    assert desc[0][0] == "id"
-    assert desc[1][0] == "name"
+    assert desc == ("id", "name")
 
     tuples = driver.execute_tuples("SELECT id, name FROM items")
     assert tuples == [(1, "alpha"), (2, "beta")]
@@ -253,8 +251,7 @@ async def test_async_mysql_driver_lifecycle() -> None:
 
     rows, desc = await driver.execute_with_description("SELECT id, name FROM async_items")
     assert rows == [(10, "async_one"), (20, "async_two")]
-    assert desc is not None
-    assert desc[0][0] == "id"
+    assert desc == ("id", "name")
 
     tuples = await driver.execute_tuples("SELECT id, name FROM async_items")
     assert tuples == [(10, "async_one"), (20, "async_two")]

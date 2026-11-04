@@ -753,7 +753,7 @@ def test_sync_spanner_driver_crud_transactions_and_mutations() -> None:
 
 
 def test_sync_spanner_arrow_and_object_store_roundtrip() -> None:
-    """Verify SyncSpannerDriver fetch_arrow with data_boost=True and ObjectStore export/load."""
+    """Verify SyncSpannerDriver select_to_arrow with data_boost=True and ObjectStore export/load."""
     cfg = SpannerConfig(
         project_id="test-proj",
         instance_id="test-inst",
@@ -770,14 +770,16 @@ def test_sync_spanner_arrow_and_object_store_roundtrip() -> None:
             """
         ]
     )
-    driver.insert_arrow(
+    driver.load_from_arrow(
         "metrics",
         [
             {"metric_id": 10, "label": "cpu"},
             {"metric_id": 20, "label": "mem"},
         ],
     )
-    cursor = driver.fetch_arrow("SELECT metric_id, label FROM metrics ORDER BY metric_id ASC", data_boost_enabled=True)
+    cursor = driver.select_to_arrow(
+        "SELECT metric_id, label FROM metrics ORDER BY metric_id ASC", data_boost_enabled=True
+    )
     assert len(cursor) == 2
     assert cursor.to_pylist()[0]["label"] == "cpu"
 

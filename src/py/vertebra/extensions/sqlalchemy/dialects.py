@@ -393,7 +393,16 @@ class SyncDBAPIConnection:
             if hasattr(self._driver, "execute_with_description"):
                 raw_res = self._driver.execute_with_description(sql, parameters)
                 if isinstance(raw_res, tuple) and len(raw_res) >= 2:
-                    return raw_res[0], raw_res[1]
+                    col_names = raw_res[1]
+                    desc = (
+                        tuple(
+                            (col[0] if isinstance(col, tuple) else str(col), None, None, None, None, None, None)
+                            for col in col_names
+                        )
+                        if col_names
+                        else None
+                    )
+                    return raw_res[0], desc
                 return [], None
             if hasattr(self._driver, "execute_tuples"):
                 rows = self._driver.execute_tuples(sql, parameters)
@@ -529,7 +538,15 @@ class AsyncDBAPICursor:
             raw_res = await self._driver.execute_with_description(operation, params)
             if isinstance(raw_res, tuple) and len(raw_res) >= 2:
                 self._rows = raw_res[0]
-                self.description = raw_res[1]
+                col_names = raw_res[1]
+                self.description = (
+                    tuple(
+                        (col[0] if isinstance(col, tuple) else str(col), None, None, None, None, None, None)
+                        for col in col_names
+                    )
+                    if col_names
+                    else None
+                )
                 self.rowcount = len(self._rows)
             else:
                 self._rows = []

@@ -420,7 +420,7 @@ async def test_async_bigquery_driver_arrow_object_store_and_object_tables(tmp_pa
         backend = ObjectStoreBackend(f"file://{tmp_path}/warehouse", store=store)
 
         async with AsyncBigQueryDriver(cfg) as driver:
-            cursor = await driver.fetch_arrow("SELECT id, name, score FROM metrics")
+            cursor = await driver.select_to_arrow("SELECT id, name, score FROM metrics")
             assert isinstance(cursor, ArrowCursor)
             assert cursor.row_count == 2
             assert cursor.to_pylist() == [

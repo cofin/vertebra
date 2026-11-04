@@ -37,6 +37,7 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         super().__init__(resolved, broker=broker)
         self._conn = sqlite3.connect(":memory:", check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._in_transaction: bool = False
         self._pending_session_attrs: OracleSessionAttrs | None = self.config.session_attrs()
         self._last_piggyback_frame: bytes = b""
 
@@ -61,31 +62,110 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
             ecid=ecid,
         )
 
-    def execute(  # type: ignore[override]
+    def begin(self) -> None:
+        """Begin an explicit Oracle transaction."""
+        if not self._conn.in_transaction:
+            self._conn.execute("BEGIN")
+        self._in_transaction = True
+
+    def commit(self) -> None:
+        """Commit the active Oracle transaction."""
+        try:
+            self._conn.commit()
+        finally:
+            self._in_transaction = False
+
+    def rollback(self) -> None:
+        """Roll back the active Oracle transaction."""
+        try:
+            self._conn.rollback()
+        finally:
+            self._in_transaction = False
+
+    def cancel(self) -> None:
+        """Interrupt an in-flight query when supported, or act as an idempotent no-op."""
+        if not self._closed:
+            self._conn.interrupt()
+
+    def close(self) -> None:
+        """Close the underlying driver resources."""
+        self._closed = True
+        self._in_transaction = False
+        self._conn.close()
+
+    def execute(
         self,
         sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
     ) -> int:
         """Execute a DML or DDL statement and return affected row count."""
-        norm_sql, bound = OracleCore.normalize_sql(sql, params)
+        _ = kwargs
+        norm_sql, bound = OracleCore.normalize_sql(sql, parameters)
         grant = self._acquire_oracle_broker_lease(sql, len(bound))
         try:
             self._consume_piggyback()
             cur = self._conn.execute(norm_sql, bound)
-            self._conn.commit()
+            if not self._in_transaction:
+                self._conn.commit()
             return max(cur.rowcount, 0)
         finally:
             self._release_oracle_broker_lease(grant)
 
-    def select(  # type: ignore[override]
+    def execute_tuples(
         self,
         sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> list[tuple[Any, ...]]:
+        """Execute a query and return positional tuples."""
+        _ = kwargs
+        norm_sql, bound = OracleCore.normalize_sql(sql, parameters)
+        grant = self._acquire_oracle_broker_lease(sql, len(bound))
+        try:
+            self._consume_piggyback()
+            cur = self._conn.execute(norm_sql, bound)
+            rows = [tuple(row) for row in cur.fetchall()]
+            if not self._in_transaction and cur.description is None:
+                self._conn.commit()
+            return rows
+        finally:
+            self._release_oracle_broker_lease(grant)
+
+    def execute_with_description(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Execute SQL and return `(rows, column_names)`."""
+        _ = kwargs
+        norm_sql, bound = OracleCore.normalize_sql(sql, parameters)
+        grant = self._acquire_oracle_broker_lease(sql, len(bound))
+        try:
+            self._consume_piggyback()
+            cur = self._conn.execute(norm_sql, bound)
+            if cur.description is not None:
+                rows = [tuple(row) for row in cur.fetchall()]
+                cols = tuple(str(col[0]) for col in cur.description)
+                return rows, cols
+            if not self._in_transaction:
+                self._conn.commit()
+            return [], ()
+        finally:
+            self._release_oracle_broker_lease(grant)
+
+    def select(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
+        **kwargs: Any,
     ) -> list[Any]:
         """Execute a `SELECT` query and return rows as dictionaries or hydrated `schema_type` instances."""
-        norm_sql, bound = OracleCore.normalize_sql(sql, params)
+        _ = kwargs
+        norm_sql, bound = OracleCore.normalize_sql(sql, parameters)
         grant = self._acquire_oracle_broker_lease(sql, len(bound))
         try:
             self._consume_piggyback()
@@ -94,7 +174,7 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
             if not rows:
                 return []
             cols = [
-                col[0].lower() if self.config.driver_features.enable_lowercase_column_names else col[0]
+                col[0].lower() if self.config.driver_features.enable_lowercase_column_names else str(col[0])
                 for col in (cur.description or ())
             ]
             tuple_rows = [tuple(row) for row in rows]
@@ -102,41 +182,30 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         finally:
             self._release_oracle_broker_lease(grant)
 
-    def select_one(  # type: ignore[override]
+    def select_to_arrow(
         self,
         sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
-        schema_type: type[Any] | None = None,
-    ) -> Any:
-        """Execute a `SELECT` query and return the first row or raise `ValueError`."""
-        rows = self.select(sql, params, schema_type=schema_type)
-        if not rows:
-            msg = "No row found for select_one"
-            raise ValueError(msg)
-        return rows[0]
+        threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
+        **kwargs: Any,
+    ) -> ArrowCursor:
+        """Execute a query and materialize the result set as a zero-copy Arrow cursor."""
+        rows, raw_cols = self.execute_with_description(sql, parameters, **kwargs)
+        cols = [col.lower() if self.config.driver_features.enable_lowercase_column_names else col for col in raw_cols]
+        return ArrowCursor.from_rows(rows, cols, threshold_rows=threshold_rows)
 
-    def select_one_or_none(  # type: ignore[override]
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        schema_type: type[Any] | None = None,
-    ) -> Any | None:
-        """Execute a `SELECT` query and return the first row or `None`."""
-        rows = self.select(sql, params, schema_type=schema_type)
-        return rows[0] if rows else None
-
-    def load_from_arrow(  # type: ignore[override]
+    def load_from_arrow(
         self,
         table_name: str,
         data: Any,
         *,
         columns: Sequence[str] | None = None,
         direct_path: bool | None = None,
+        **kwargs: Any,
     ) -> int:
         """Bulk-ingest an Arrow Table, `ArrowCursor`, or row sequence into `table_name`."""
-        _ = direct_path
+        _ = (direct_path, kwargs)
         rows, cols = _table_to_rows_and_cols(data, columns)
         if not rows or not cols:
             return 0
@@ -148,63 +217,11 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         try:
             self._consume_piggyback()
             self._conn.executemany(norm_sql, rows)
-            self._conn.commit()
+            if not self._in_transaction:
+                self._conn.commit()
             return len(rows)
         finally:
             self._release_oracle_broker_lease(grant)
-
-    def execute_tuples(  # type: ignore[override]
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> list[tuple[Any, ...]]:
-        """Execute a query and return positional tuples."""
-        norm_sql, bound = OracleCore.normalize_sql(sql, params)
-        grant = self._acquire_oracle_broker_lease(sql, len(bound))
-        try:
-            self._consume_piggyback()
-            cur = self._conn.execute(norm_sql, bound)
-            rows = [tuple(row) for row in cur.fetchall()]
-            self._conn.commit()
-            return rows
-        finally:
-            self._release_oracle_broker_lease(grant)
-
-    def execute_with_description(  # type: ignore[override]
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> tuple[list[tuple[Any, ...]], tuple[tuple[Any, ...], ...] | None, int]:
-        """Execute SQL and return `(rows, description, rowcount)` for DBAPI compatibility."""
-        norm_sql, bound = OracleCore.normalize_sql(sql, params)
-        grant = self._acquire_oracle_broker_lease(sql, len(bound))
-        try:
-            self._consume_piggyback()
-            cur = self._conn.execute(norm_sql, bound)
-            if cur.description is not None:
-                rows = [tuple(row) for row in cur.fetchall()]
-                desc = tuple((col[0], None, None, None, None, None, None) for col in cur.description)
-                return rows, desc, len(rows)
-            self._conn.commit()
-            return [], None, max(cur.rowcount, 0)
-        finally:
-            self._release_oracle_broker_lease(grant)
-
-    def select_to_arrow(  # type: ignore[override]
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        shm_threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
-    ) -> ArrowCursor:
-        """Execute a query and materialize the result set as a zero-copy Arrow cursor."""
-        rows = self.select(sql, params)
-        return ArrowCursor.from_rows(rows, threshold_rows=shm_threshold_rows)
-
-    def close(self) -> None:
-        """Close the underlying driver resources."""
-        self._closed = True
-        self._conn.close()
 
     def _acquire_oracle_broker_lease(self, sql: str, param_count: int) -> Any:
         if self._broker is None:
@@ -290,51 +307,14 @@ class AsyncOracleDriver(ThreadOffloadAsyncDatabaseDriver[OracleConfig, SyncOracl
             ecid=ecid,
         )
 
-    async def execute(  # type: ignore[override]
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> int:
-        """Execute a DML or DDL statement asynchronously."""
-        return await asyncio.to_thread(self._sync.execute, sql, params)
-
-    async def select(  # type: ignore[override]
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        schema_type: type[Any] | None = None,
-    ) -> list[Any]:
-        """Execute a `SELECT` query asynchronously and return dictionaries or `schema_type` instances."""
-        return await asyncio.to_thread(self._sync.select, sql, params, schema_type=schema_type)
-
-    async def select_one(  # type: ignore[override]
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        schema_type: type[Any] | None = None,
-    ) -> Any:
-        """Execute a `SELECT` query asynchronously and return the first row or raise `ValueError`."""
-        return await asyncio.to_thread(self._sync.select_one, sql, params, schema_type=schema_type)
-
-    async def select_one_or_none(  # type: ignore[override]
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        schema_type: type[Any] | None = None,
-    ) -> Any | None:
-        """Execute a `SELECT` query asynchronously and return the first row or `None`."""
-        return await asyncio.to_thread(self._sync.select_one_or_none, sql, params, schema_type=schema_type)
-
-    async def load_from_arrow(  # type: ignore[override]
+    async def load_from_arrow(
         self,
         table_name: str,
         data: Any,
         *,
         columns: Sequence[str] | None = None,
         direct_path: bool | None = None,
+        **kwargs: Any,
     ) -> int:
         """Asynchronously bulk-ingest an Arrow Table or `ArrowCursor` into `table_name`."""
         return await asyncio.to_thread(
@@ -343,19 +323,5 @@ class AsyncOracleDriver(ThreadOffloadAsyncDatabaseDriver[OracleConfig, SyncOracl
             data,
             columns=columns,
             direct_path=direct_path,
-        )
-
-    async def select_to_arrow(  # type: ignore[override]
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        shm_threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
-    ) -> ArrowCursor:
-        """Execute a query asynchronously and return a zero-copy `ArrowCursor`."""
-        return await asyncio.to_thread(
-            self._sync.select_to_arrow,
-            sql,
-            params,
-            shm_threshold_rows=shm_threshold_rows,
+            **kwargs,
         )

@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
+import decimal
 import importlib
+import re
+import sqlite3
 import sys
 import time
 import tomllib
+import uuid
+from collections.abc import AsyncIterator, Iterator, Sequence
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any, cast
 
@@ -20,28 +27,46 @@ from vertebra.db import (
     AlloyDBAuthType,
     AlloyDBClusterURI,
     AlloyDBConfig,
+    ArrowCursor,
     AsyncAlloyDBDialer,
     AsyncCloudSQLDialer,
+    AsyncDatabaseDriver,
     CDCConfig,
     ChangeFeed,
     CloudSQLConfig,
     CloudSQLInstanceURI,
+    DatabaseError,
     DatabaseRegistry,
+    IntegrityError,
+    NotFoundError,
+    OperationalError,
+    ProgrammingError,
     SyncAlloyDBDialer,
     SyncCloudSQLDialer,
+    SyncDatabaseDriver,
 )
-from vertebra.db.adapters.bigquery import AsyncBigQueryDriver, SyncBigQueryDriver
-from vertebra.db.adapters.mysql import SyncMySQLDriver
-from vertebra.db.adapters.oracle import OracleConfig
-from vertebra.db.adapters.postgres import PostgreSQLConfig, SyncPostgreSQLDriver
+from vertebra.db.adapters.bigquery import AsyncBigQueryDriver, BigQueryConfig, SyncBigQueryDriver
+from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
+from vertebra.db.adapters.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLDriver
+from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
+from vertebra.db.adapters.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
+from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
 from vertebra.db.adapters.redis import RedisConfig, SyncRedisDriver
-from vertebra.db.adapters.spanner import AsyncSpannerDriver, SyncSpannerDriver
+from vertebra.db.adapters.spanner import (
+    AsyncSpannerDriver,
+    AsyncSpannerTransaction,
+    Mutation,
+    SpannerConfig,
+    SyncSpannerDriver,
+    SyncSpannerTransaction,
+)
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
 from vertebra.db.adapters.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
 from vertebra.db.channels import DatabaseChannelBackend
 from vertebra.extensions.litestar import ChannelsBackend, MemoryStore
 from vertebra.storage import GcpTokenSnapshot, SyncObjectStore
 from vertebra.typing import MissingDependencyError, VertebraError, reset_dependency_cache
+from vertebra.utils.serializers import decode_json, encode_json
 from vertebra.utils.sync_tools import SyncPool
 
 _ADAPTER_ENGINES: tuple[str, ...] = (
@@ -661,3 +686,715 @@ def test_cargo_manifests_exclude_unconditional_gcp_and_tonic_dependencies() -> N
     for name, spec in db_deps.items():
         if name.startswith("google-cloud-"):
             assert isinstance(spec, dict) and spec.get("optional") is True
+
+
+_SQL_CONTRACT_ENGINES: tuple[str, ...] = (
+    "sqlite",
+    "duckdb",
+    "oracle",
+    "mssql",
+    "postgres",
+    "mysql",
+    "bigquery",
+    "spanner",
+)
+
+_LEGACY_DRIVER_ALIASES: tuple[str, ...] = (
+    "executemany",
+    "fetch",
+    "fetchrow",
+    "fetchval",
+    "fetch_arrow",
+    "insert_arrow",
+)
+
+
+class _ContractDBAPICursor:
+    """SQLite-backed DB-API cursor double for PostgreSQL and MySQL contract tests."""
+
+    __slots__ = ("_conn", "_rows", "description", "rowcount")
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+        self._rows: list[tuple[Any, ...]] = []
+        self.description: tuple[tuple[Any, ...], ...] | None = None
+        self.rowcount: int = 0
+
+    def _run(self, sql: str, params: Any = None) -> None:
+        rewritten = sql.replace("%s", "?")
+        bound: Any = () if params is None else params
+        cur = self._conn.execute(rewritten, bound)
+        self.rowcount = max(0, int(cur.rowcount or 0))
+        if cur.description:
+            self.description = tuple((d[0], None, None, None, None, None, None) for d in cur.description)
+            self._rows = [tuple(r) for r in cur.fetchall()]
+        else:
+            self.description = None
+            self._rows = []
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self._run(sql, params)
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return list(self._rows)
+
+    def close(self) -> None:
+        return None
+
+    def __enter__(self) -> _ContractDBAPICursor:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        return None
+
+
+class _ContractAsyncDBAPICursor:
+    """Async SQLite-backed DB-API cursor double for PostgreSQL and MySQL contract tests."""
+
+    __slots__ = ("_sync", "description", "rowcount")
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._sync = _ContractDBAPICursor(conn)
+        self.description: tuple[tuple[Any, ...], ...] | None = None
+        self.rowcount: int = 0
+
+    async def execute(self, sql: str, params: Any = None) -> None:
+        self._sync.execute(sql, params)
+        self.description = self._sync.description
+        self.rowcount = self._sync.rowcount
+
+    async def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._sync.fetchall()
+
+    async def close(self) -> None:
+        return None
+
+    async def __aenter__(self) -> _ContractAsyncDBAPICursor:
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        return None
+
+
+class _ContractDBAPIConnection:
+    """Sync/Async DB-API connection double wrapping an in-memory SQLite connection."""
+
+    __slots__ = ("_async_mode", "_conn")
+
+    def __init__(self, conn: sqlite3.Connection, *, async_mode: bool = False) -> None:
+        self._conn = conn
+        self._async_mode = async_mode
+
+    def cursor(self) -> Any:
+        if self._async_mode:
+            return _ContractAsyncDBAPICursor(self._conn)
+        return _ContractDBAPICursor(self._conn)
+
+    def commit(self) -> Any:
+        self._conn.commit()
+        if self._async_mode:
+
+            async def _noop() -> None:
+                return None
+
+            return _noop()
+        return None
+
+    def rollback(self) -> Any:
+        self._conn.rollback()
+        if self._async_mode:
+
+            async def _noop() -> None:
+                return None
+
+            return _noop()
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def __enter__(self) -> _ContractDBAPIConnection:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        return None
+
+    async def __aenter__(self) -> _ContractDBAPIConnection:
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        return None
+
+
+class _ContractDBAPIPool:
+    """Connection pool double exposing sync `.connection()` and async `.acquire()`."""
+
+    __slots__ = ("_async_conn", "_conn", "_sync_conn")
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+        self._sync_conn = _ContractDBAPIConnection(conn, async_mode=False)
+        self._async_conn = _ContractDBAPIConnection(conn, async_mode=True)
+
+    @contextmanager
+    def connection(self) -> Iterator[_ContractDBAPIConnection]:
+        yield self._sync_conn
+
+    @asynccontextmanager
+    async def acquire(self) -> AsyncIterator[_ContractDBAPIConnection]:
+        yield self._async_conn
+
+    def close(self) -> None:
+        return None
+
+
+class _ContractBigQueryClient:
+    """In-memory SQLite-backed BigQuery client double supporting sync and async wire calls."""
+
+    __slots__ = ("_async_mode", "_conn", "_in_tx")
+
+    def __init__(self, conn: sqlite3.Connection, *, async_mode: bool = False) -> None:
+        self._conn = conn
+        self._async_mode = async_mode
+        self._in_tx = False
+
+    @staticmethod
+    def _strip_leading_trace_comment(sql: str) -> str:
+        stripped = sql.lstrip()
+        while stripped.startswith("/*"):
+            end_idx = stripped.find("*/")
+            if end_idx == -1:
+                break
+            stripped = stripped[end_idx + 2 :].lstrip()
+        return stripped
+
+    def _decode_bq_params(self, sql: str, params_json: str | None) -> tuple[str, Any]:
+        clean_sql = self._strip_leading_trace_comment(sql)
+        if not params_json:
+            return clean_sql, ()
+        parsed = decode_json(params_json)
+        if not isinstance(parsed, list):
+            return clean_sql, ()
+        named_values: dict[str, Any] = {}
+        positional_values: list[Any] = []
+        for entry in parsed:
+            if "value" in entry:
+                raw_val = entry.get("value")
+                param_type = entry.get("type", "STRING")
+            else:
+                raw_val = entry.get("parameterValue", {}).get("value")
+                param_type = entry.get("parameterType", {}).get("type", "STRING")
+            val: Any = int(raw_val) if (param_type == "INT64" and raw_val is not None) else raw_val
+            name = entry.get("name")
+            if name:
+                named_values[str(name)] = val
+            else:
+                positional_values.append(val)
+        if named_values:
+            rewritten = re.sub(r"@([A-Za-z_][A-Za-z0-9_]*)", r":\1", clean_sql)
+            return rewritten, named_values
+        return clean_sql, tuple(positional_values)
+
+    def _query_sync(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        session_id: str | None = None,
+        create_session: bool = False,
+        *_extra: Any,
+    ) -> dict[str, Any]:
+        adapted, bound = self._decode_bq_params(sql, params_json)
+        upper = adapted.strip().upper()
+        sid = session_id or ("bq-contract-sess" if create_session else None)
+        if upper.startswith("BEGIN"):
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN")
+            self._in_tx = True
+            return {"columns": [], "rows": [], "total_rows": 0, "session_id": sid}
+        if upper.startswith("COMMIT"):
+            self._conn.commit()
+            self._in_tx = False
+            return {"columns": [], "rows": [], "total_rows": 0, "session_id": sid}
+        if upper.startswith("ROLLBACK"):
+            self._conn.rollback()
+            self._in_tx = False
+            return {"columns": [], "rows": [], "total_rows": 0, "session_id": sid}
+        cur = self._conn.execute(adapted, bound)
+        if cur.description:
+            cols = [str(d[0]) for d in cur.description]
+            rows = [list(r) for r in cur.fetchall()]
+            return {
+                "columns": cols,
+                "rows": rows,
+                "total_rows": len(rows),
+                "session_id": sid,
+            }
+        affected = max(0, int(cur.rowcount or 0))
+        if not self._in_tx:
+            self._conn.commit()
+        return {
+            "columns": [],
+            "rows": [],
+            "total_rows": 0,
+            "num_dml_affected_rows": affected,
+            "session_id": sid,
+        }
+
+    def query(self, sql: str, *args: Any) -> Any:
+        result = self._query_sync(sql, *args)
+        if self._async_mode:
+
+            async def _coro() -> dict[str, Any]:
+                return result
+
+            return _coro()
+        return result
+
+
+class _ContractSpannerClient:
+    """In-memory SQLite-backed Spanner client double supporting sync and async wire calls."""
+
+    __slots__ = ("_async_mode", "_conn")
+
+    def __init__(self, conn: sqlite3.Connection, *, async_mode: bool = False) -> None:
+        self._conn = conn
+        self._async_mode = async_mode
+
+    @staticmethod
+    def _adapt_sql(sql: str, params_json: str | None) -> tuple[str, Any]:
+        stripped = _ContractBigQueryClient._strip_leading_trace_comment(sql)
+        if not params_json:
+            return stripped, ()
+        decoded = decode_json(params_json)
+        if isinstance(decoded, dict):
+            values = decoded.get("values", decoded)
+            if isinstance(values, dict):
+                rewritten = re.sub(r"@([A-Za-z_][A-Za-z0-9_]*)", r":\1", stripped)
+                coerced = {k: (int(v) if isinstance(v, str) and v.isdigit() else v) for k, v in values.items()}
+                return rewritten, coerced
+        return stripped, ()
+
+    def _wrap(self, value: Any) -> Any:
+        if self._async_mode:
+
+            async def _coro() -> Any:
+                return value
+
+            return _coro()
+        return value
+
+    def query(self, sql: str, params_json: str | None = None, *_extra: Any) -> Any:
+        adapted, bound = self._adapt_sql(sql, params_json)
+        cur = self._conn.execute(adapted, bound)
+        cols = [str(d[0]) for d in (cur.description or ())]
+        rows = [list(r) for r in cur.fetchall()]
+        return self._wrap({"columns": cols, "rows": rows, "read_timestamp_micros": 1_700_000_000_000_000})
+
+    def execute_dml(self, sql: str, params_json: str | None = None, *_extra: Any) -> Any:
+        adapted, bound = self._adapt_sql(sql, params_json)
+        cur = self._conn.execute(adapted, bound)
+        self._conn.commit()
+        return self._wrap(max(0, int(cur.rowcount or 0)))
+
+    def execute_batch_dml(self, batch_json: str, *_extra: Any) -> Any:
+        decoded = decode_json(batch_json) if batch_json else []
+        counts: list[int] = []
+        for entry in decoded:
+            stmt_sql = str(entry.get("sql", ""))
+            stmt_params = entry.get("params")
+            params_str = encode_json({"values": stmt_params}) if isinstance(stmt_params, dict) else None
+            adapted, bound = self._adapt_sql(stmt_sql, params_str)
+            cur = self._conn.execute(adapted, bound)
+            counts.append(max(0, int(cur.rowcount or 0)))
+        self._conn.commit()
+        return self._wrap(counts)
+
+    def apply_mutations(self, mutations_json: str, *_extra: Any) -> Any:
+        decoded = decode_json(mutations_json) if mutations_json else []
+        count = 0
+        for item in decoded:
+            table = str(item.get("table", ""))
+            cols = [str(c) for c in item.get("columns", ())]
+            vals = item.get("values", ())
+            placeholders = ", ".join("?" for _ in cols)
+            col_list = ", ".join(cols)
+            for row in vals:
+                self._conn.execute(f"INSERT OR REPLACE INTO {table} ({col_list}) VALUES ({placeholders})", list(row))
+                count += 1
+        self._conn.commit()
+        return self._wrap({"commit_timestamp_micros": 1_700_000_000_000_000, "mutation_count": count})
+
+    def update_ddl(self, statements: Sequence[str]) -> Any:
+        for stmt in statements:
+            self._conn.execute(stmt)
+        self._conn.commit()
+        return self._wrap("op-ddl-1")
+
+    def read_arrow(self, *_args: Any) -> Any:
+        msg = "UNIMPLEMENTED: fallback to query"
+        raise RuntimeError(msg)
+
+
+def _make_contract_driver_pair(engine: str) -> tuple[Any, Any, str, Any, str, Any]:
+    """Create a seeded `(sync_driver, async_driver, insert_sql, insert_fn, by_id_sql, by_id_fn)` tuple."""
+    ddl = "CREATE TABLE contract_items (id INTEGER PRIMARY KEY, name TEXT, note TEXT)"
+    if engine == "sqlite":
+        sync_drv = SyncSQLiteDriver(SQLiteConfig(database=":memory:"))
+        async_drv = AsyncSQLiteDriver(SQLiteConfig(database=":memory:"))
+        sync_drv.execute(ddl)
+        sync_drv.execute("INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)", (1, "seed", None))
+        async_drv._sync.execute(ddl)
+        async_drv._sync.execute("INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)", (1, "seed", None))
+        return (
+            sync_drv,
+            async_drv,
+            "INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)",
+            lambda row_id, name: (row_id, name, None),
+            "SELECT id, name FROM contract_items WHERE id = ?",
+            lambda row_id: (row_id,),
+        )
+    if engine == "duckdb":
+        sync_dd = SyncDuckDBDriver(DuckDBConfig(database=":memory:"))
+        async_dd = AsyncDuckDBDriver(DuckDBConfig(database=":memory:"))
+        sync_dd.execute(ddl)
+        sync_dd.execute("INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)", [1, "seed", None])
+        async_dd._sync.execute(ddl)
+        async_dd._sync.execute("INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)", [1, "seed", None])
+        return (
+            sync_dd,
+            async_dd,
+            "INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)",
+            lambda row_id, name: [row_id, name, None],
+            "SELECT id, name FROM contract_items WHERE id = ?",
+            lambda row_id: [row_id],
+        )
+    if engine == "oracle":
+        sync_ora = SyncOracleDriver(OracleConfig(dsn=":memory:"))
+        async_ora = AsyncOracleDriver(OracleConfig(dsn=":memory:"))
+        sync_ora.execute(ddl)
+        sync_ora.execute(
+            "INSERT INTO contract_items (id, name, note) VALUES (:id, :name, :note)",
+            {"id": 1, "name": "seed", "note": None},
+        )
+        async_ora._sync.execute(ddl)
+        async_ora._sync.execute(
+            "INSERT INTO contract_items (id, name, note) VALUES (:id, :name, :note)",
+            {"id": 1, "name": "seed", "note": None},
+        )
+        return (
+            sync_ora,
+            async_ora,
+            "INSERT INTO contract_items (id, name, note) VALUES (:id, :name, :note)",
+            lambda row_id, name: {"id": row_id, "name": name, "note": None},
+            "SELECT id, name FROM contract_items WHERE id = :id",
+            lambda row_id: {"id": row_id},
+        )
+    if engine == "mssql":
+        sync_ms = SyncMSSQLDriver(MSSQLConfig(dsn=":memory:"))
+        async_ms = AsyncMSSQLDriver(MSSQLConfig(dsn=":memory:"))
+        sync_ms.execute(ddl)
+        sync_ms.execute("INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)", (1, "seed", None))
+        async_ms._sync.execute(ddl)
+        async_ms._sync.execute("INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)", (1, "seed", None))
+        return (
+            sync_ms,
+            async_ms,
+            "INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)",
+            lambda row_id, name: (row_id, name, None),
+            "SELECT id, name FROM contract_items WHERE id = ?",
+            lambda row_id: (row_id,),
+        )
+    if engine == "postgres":
+        sync_conn = sqlite3.connect(":memory:", check_same_thread=False)
+        sync_conn.execute(ddl)
+        sync_conn.execute("INSERT INTO contract_items (id, name, note) VALUES (1, 'seed', NULL)")
+        sync_conn.commit()
+        async_conn = sqlite3.connect(":memory:", check_same_thread=False)
+        async_conn.execute(ddl)
+        async_conn.execute("INSERT INTO contract_items (id, name, note) VALUES (1, 'seed', NULL)")
+        async_conn.commit()
+        sync_pg = SyncPostgreSQLDriver(
+            PostgreSQLConfig(dsn="postgresql://localhost/test"), pool=_ContractDBAPIPool(sync_conn)
+        )
+        async_pg = AsyncPostgreSQLDriver(
+            PostgreSQLConfig(dsn="postgresql://localhost/test"), pool=_ContractDBAPIPool(async_conn)
+        )
+        return (
+            sync_pg,
+            async_pg,
+            "INSERT INTO contract_items (id, name, note) VALUES (%s, %s, %s)",
+            lambda row_id, name: (row_id, name, None),
+            "SELECT id, name FROM contract_items WHERE id = %s",
+            lambda row_id: (row_id,),
+        )
+    if engine == "mysql":
+        sync_my_conn = sqlite3.connect(":memory:", check_same_thread=False)
+        sync_my_conn.execute(ddl)
+        sync_my_conn.execute("INSERT INTO contract_items (id, name, note) VALUES (1, 'seed', NULL)")
+        sync_my_conn.commit()
+        async_my_conn = sqlite3.connect(":memory:", check_same_thread=False)
+        async_my_conn.execute(ddl)
+        async_my_conn.execute("INSERT INTO contract_items (id, name, note) VALUES (1, 'seed', NULL)")
+        async_my_conn.commit()
+        sync_wrapped = _ContractDBAPIConnection(sync_my_conn, async_mode=False)
+        sync_my = SyncMySQLDriver(MySQLConfig(dsn="mysql://localhost/test"), connect_factory=lambda **_kw: sync_wrapped)
+        async_my = AsyncMySQLDriver(MySQLConfig(dsn="mysql://localhost/test"), pool=_ContractDBAPIPool(async_my_conn))
+        return (
+            sync_my,
+            async_my,
+            "INSERT INTO contract_items (id, name, note) VALUES (%s, %s, %s)",
+            lambda row_id, name: (row_id, name, None),
+            "SELECT id, name FROM contract_items WHERE id = %s",
+            lambda row_id: (row_id,),
+        )
+    if engine == "bigquery":
+        sync_bq_conn = sqlite3.connect(":memory:", check_same_thread=False)
+        sync_bq_conn.execute(ddl)
+        sync_bq_conn.execute("INSERT INTO contract_items (id, name, note) VALUES (1, 'seed', NULL)")
+        sync_bq_conn.commit()
+        async_bq_conn = sqlite3.connect(":memory:", check_same_thread=False)
+        async_bq_conn.execute(ddl)
+        async_bq_conn.execute("INSERT INTO contract_items (id, name, note) VALUES (1, 'seed', NULL)")
+        async_bq_conn.commit()
+        bq_cfg = BigQueryConfig(project_id="test-proj", dataset_id="test_ds")
+        sync_bq = SyncBigQueryDriver(
+            bq_cfg, client=cast("Any", _ContractBigQueryClient(sync_bq_conn, async_mode=False))
+        )
+        async_bq = AsyncBigQueryDriver(
+            bq_cfg, client=cast("Any", _ContractBigQueryClient(async_bq_conn, async_mode=True))
+        )
+        return (
+            sync_bq,
+            async_bq,
+            "INSERT INTO contract_items (id, name, note) VALUES (@id, @name, @note)",
+            lambda row_id, name: {"id": row_id, "name": name, "note": None},
+            "SELECT id, name FROM contract_items WHERE id = @id",
+            lambda row_id: {"id": row_id},
+        )
+    if engine == "spanner":
+        sync_sp_conn = sqlite3.connect(":memory:", check_same_thread=False)
+        sync_sp_conn.execute(ddl)
+        sync_sp_conn.execute("INSERT INTO contract_items (id, name, note) VALUES (1, 'seed', NULL)")
+        sync_sp_conn.commit()
+        async_sp_conn = sqlite3.connect(":memory:", check_same_thread=False)
+        async_sp_conn.execute(ddl)
+        async_sp_conn.execute("INSERT INTO contract_items (id, name, note) VALUES (1, 'seed', NULL)")
+        async_sp_conn.commit()
+        sp_cfg = SpannerConfig(project_id="test-proj", instance_id="test-inst", database_id="test-db")
+        sync_sp = SyncSpannerDriver(sp_cfg, client=cast("Any", _ContractSpannerClient(sync_sp_conn, async_mode=False)))
+        async_sp = AsyncSpannerDriver(
+            sp_cfg, client=cast("Any", _ContractSpannerClient(async_sp_conn, async_mode=True))
+        )
+        return (
+            sync_sp,
+            async_sp,
+            "INSERT INTO contract_items (id, name, note) VALUES (@id, @name, @note)",
+            lambda row_id, name: {"id": row_id, "name": name, "note": None},
+            "SELECT id, name FROM contract_items WHERE id = @id",
+            lambda row_id: {"id": row_id},
+        )
+    msg = f"Unsupported engine {engine}"
+    raise ValueError(msg)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("engine", _SQL_CONTRACT_ENGINES)
+async def test_unified_driver_contract_across_all_eight_engines(engine: str) -> None:
+    """Verify R6 unified signatures, return types, NotFoundError, Arrow, transactions, and alias removal."""
+    for alias in _LEGACY_DRIVER_ALIASES:
+        assert not hasattr(SyncDatabaseDriver, alias)
+        assert not hasattr(AsyncDatabaseDriver, alias)
+
+    sync_drv, async_drv, insert_sql, insert_params, by_id_sql, by_id_params = _make_contract_driver_pair(engine)
+    try:
+        for alias in _LEGACY_DRIVER_ALIASES:
+            assert not hasattr(sync_drv, alias), f"{engine} sync driver still exposes {alias}"
+            assert not hasattr(async_drv, alias), f"{engine} async driver still exposes {alias}"
+
+        affected_sync = sync_drv.execute(insert_sql, parameters=insert_params(2, "two"))
+        assert type(affected_sync) is int
+        assert affected_sync == 1
+
+        affected_async = await async_drv.execute(insert_sql, parameters=insert_params(2, "two"))
+        assert type(affected_async) is int
+        assert affected_async == 1
+
+        desc_res_sync = sync_drv.execute_with_description(by_id_sql, parameters=by_id_params(1))
+        assert isinstance(desc_res_sync, tuple) and len(desc_res_sync) == 2
+        rows_sync, cols_sync = desc_res_sync
+        assert rows_sync == [(1, "seed")]
+        assert cols_sync == ("id", "name")
+
+        desc_res_async = await async_drv.execute_with_description(by_id_sql, parameters=by_id_params(1))
+        assert isinstance(desc_res_async, tuple) and len(desc_res_async) == 2
+        rows_async, cols_async = desc_res_async
+        assert rows_async == [(1, "seed")]
+        assert cols_async == ("id", "name")
+
+        arrow_sync = sync_drv.select_to_arrow(by_id_sql, parameters=by_id_params(1), threshold_rows=512)
+        assert isinstance(arrow_sync, ArrowCursor)
+        assert arrow_sync.row_count == 1
+
+        arrow_async = await async_drv.select_to_arrow(by_id_sql, parameters=by_id_params(1), threshold_rows=512)
+        assert isinstance(arrow_async, ArrowCursor)
+        assert arrow_async.row_count == 1
+
+        with pytest.raises(NotFoundError) as sync_one_exc:
+            sync_drv.select_one(by_id_sql, parameters=by_id_params(999))
+        assert isinstance(sync_one_exc.value, (DatabaseError, ValueError))
+
+        with pytest.raises(NotFoundError) as async_one_exc:
+            await async_drv.select_one(by_id_sql, parameters=by_id_params(999))
+        assert isinstance(async_one_exc.value, (DatabaseError, ValueError))
+
+        assert sync_drv.select_one_or_none(by_id_sql, parameters=by_id_params(999)) is None
+        assert await async_drv.select_one_or_none(by_id_sql, parameters=by_id_params(999)) is None
+
+        with pytest.raises(NotFoundError):
+            sync_drv.select_value(by_id_sql, parameters=by_id_params(999))
+        with pytest.raises(NotFoundError):
+            await async_drv.select_value(by_id_sql, parameters=by_id_params(999))
+
+        null_sql = "SELECT note FROM contract_items WHERE id = 1"
+        assert sync_drv.select_value(null_sql) is None
+        assert await async_drv.select_value(null_sql) is None
+
+        with sync_drv.transaction():
+            sync_drv.execute(insert_sql, parameters=insert_params(10, "tx_committed"))
+        assert sync_drv.select_one(by_id_sql, parameters=by_id_params(10))["name"] == "tx_committed"
+
+        with pytest.raises(RuntimeError, match="abort_sync_tx"), sync_drv.transaction():
+            sync_drv.execute(insert_sql, parameters=insert_params(11, "tx_rolled_back"))
+            raise RuntimeError("abort_sync_tx")
+        assert sync_drv.select_one_or_none(by_id_sql, parameters=by_id_params(11)) is None
+
+        async with async_drv.transaction():
+            await async_drv.execute(insert_sql, parameters=insert_params(10, "tx_committed"))
+        assert (await async_drv.select_one(by_id_sql, parameters=by_id_params(10)))["name"] == "tx_committed"
+
+        with pytest.raises(RuntimeError, match="abort_async_tx"):
+            async with async_drv.transaction():
+                await async_drv.execute(insert_sql, parameters=insert_params(11, "tx_rolled_back"))
+                raise RuntimeError("abort_async_tx")
+        assert await async_drv.select_one_or_none(by_id_sql, parameters=by_id_params(11)) is None
+
+        sync_batches = list(sync_drv.stream_arrow_batches("SELECT id, name FROM contract_items", batch_size=2))
+        assert len(sync_batches) >= 1
+        assert sum(len(b) for b in sync_batches) == 3
+
+        async_batches = [
+            batch async for batch in async_drv.stream_arrow_batches("SELECT id, name FROM contract_items", batch_size=2)
+        ]
+        assert len(async_batches) >= 1
+        assert sum(len(b) for b in async_batches) == 3
+
+        assert sync_drv.cancel() is None
+        assert await async_drv.cancel() is None
+    finally:
+        sync_drv.close()
+        await async_drv.close()
+
+
+def test_sqlite_driver_error_translation_and_parameter_normalization() -> None:
+    """Verify SyncSQLiteDriver maps sqlite3 errors to DatabaseError and normalizes rich bind types."""
+    driver = SyncSQLiteDriver(SQLiteConfig(database=":memory:"))
+    try:
+        driver.execute(
+            "CREATE TABLE typed_items (id INTEGER PRIMARY KEY, price TEXT, created_at TEXT, ref_id TEXT, meta TEXT, tags TEXT)"
+        )
+        ts = datetime.datetime(2026, 11, 4, 17, 30, tzinfo=datetime.UTC)
+        ref = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        inserted = driver.execute(
+            "INSERT INTO typed_items (id, price, created_at, ref_id, meta, tags) VALUES (?, ?, ?, ?, ?, ?)",
+            (1, decimal.Decimal("42.75"), ts, ref, {"tier": "gold"}, ["a", "b"]),
+        )
+        assert inserted == 1
+
+        row = driver.select_one("SELECT price, created_at, ref_id, meta, tags FROM typed_items WHERE id = ?", (1,))
+        assert row["price"] == "42.75"
+        assert row["created_at"] == ts.isoformat()
+        assert row["ref_id"] == str(ref)
+        assert decode_json(row["meta"]) == {"tier": "gold"}
+        assert decode_json(row["tags"]) == ["a", "b"]
+
+        with pytest.raises(IntegrityError) as dup_exc:
+            driver.execute(
+                "INSERT INTO typed_items (id, price, created_at, ref_id, meta, tags) VALUES (?, ?, ?, ?, ?, ?)",
+                (1, decimal.Decimal("1.00"), ts, ref, {}, []),
+            )
+        assert isinstance(dup_exc.value, DatabaseError)
+
+        with pytest.raises((OperationalError, ProgrammingError)) as sql_exc:
+            driver.execute("SELECT * FROM missing_table_xyz")
+        assert isinstance(sql_exc.value, DatabaseError)
+    finally:
+        driver.close()
+
+
+@pytest.mark.anyio
+async def test_spanner_snapshots_and_transactions_not_found_and_buffered_mutations() -> None:
+    """Verify Spanner snapshot/transaction NotFoundError, select_one_or_none, select_to_arrow, and mutation buffering."""
+    sync_drv, async_drv, _, _, by_id_sql, by_id_params = _make_contract_driver_pair("spanner")
+    try:
+        with sync_drv.snapshot() as sync_snap:
+            assert not hasattr(sync_snap, "fetch_arrow")
+            snap_cursor = sync_snap.select_to_arrow(by_id_sql, by_id_params(1), threshold_rows=256)
+            assert isinstance(snap_cursor, ArrowCursor)
+            assert snap_cursor.row_count == 1
+            assert sync_snap.select_one_or_none(by_id_sql, by_id_params(999)) is None
+            with pytest.raises(NotFoundError):
+                sync_snap.select_one(by_id_sql, by_id_params(999))
+            with pytest.raises(NotFoundError):
+                sync_snap.query_one(by_id_sql, by_id_params(999))
+
+        async with async_drv.snapshot() as async_snap:
+            assert not hasattr(async_snap, "fetch_arrow")
+            async_cursor = await async_snap.select_to_arrow(by_id_sql, by_id_params(1), threshold_rows=256)
+            assert isinstance(async_cursor, ArrowCursor)
+            assert async_cursor.row_count == 1
+            assert await async_snap.select_one_or_none(by_id_sql, by_id_params(999)) is None
+            with pytest.raises(NotFoundError):
+                await async_snap.select_one(by_id_sql, by_id_params(999))
+            with pytest.raises(NotFoundError):
+                await async_snap.query_one(by_id_sql, by_id_params(999))
+
+        sync_tx = SyncSpannerTransaction(sync_drv)
+        assert sync_tx.select_one_or_none(by_id_sql, by_id_params(999)) is None
+        with pytest.raises(NotFoundError):
+            sync_tx.select_one(by_id_sql, by_id_params(999))
+        with pytest.raises(NotFoundError):
+            sync_tx.query_one(by_id_sql, by_id_params(999))
+
+        async_tx = AsyncSpannerTransaction(async_drv)
+        assert await async_tx.select_one_or_none(by_id_sql, by_id_params(999)) is None
+        with pytest.raises(NotFoundError):
+            await async_tx.select_one(by_id_sql, by_id_params(999))
+        with pytest.raises(NotFoundError):
+            await async_tx.query_one(by_id_sql, by_id_params(999))
+
+        with sync_drv.transaction():
+            sync_drv.apply_mutations(
+                [Mutation.insert_or_update("contract_items", ("id", "name", "note"), [(50, "mut_ok", None)])]
+            )
+        assert sync_drv.select_one(by_id_sql, by_id_params(50))["name"] == "mut_ok"
+
+        with pytest.raises(RuntimeError, match="abort_mut"), sync_drv.transaction():
+            sync_drv.apply_mutations(
+                [Mutation.insert_or_update("contract_items", ("id", "name", "note"), [(51, "mut_abort", None)])]
+            )
+            raise RuntimeError("abort_mut")
+        assert sync_drv.select_one_or_none(by_id_sql, by_id_params(51)) is None
+    finally:
+        sync_drv.close()
+        await async_drv.close()
+
+
+def test_zero_type_ignore_override_annotations_in_db_drivers() -> None:
+    """Verify zero `# type: ignore[override]` annotations remain in vertebra/db/driver and adapters."""
+    repo_root = Path(__file__).resolve().parents[5]
+    db_root = repo_root / "src/py/vertebra/db"
+    forbidden = f"{chr(35)} type: ignore[override]"
+    targets = [*sorted((db_root / "driver").glob("*.py")), *sorted((db_root / "adapters").glob("*/driver.py"))]
+    assert targets
+    offenders = [str(path.relative_to(repo_root)) for path in targets if forbidden in path.read_text(encoding="utf-8")]
+    assert offenders == []

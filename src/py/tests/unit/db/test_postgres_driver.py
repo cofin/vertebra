@@ -165,9 +165,7 @@ def test_sync_postgres_driver_pool_gucs_and_prepared_statements() -> None:
     driver = SyncPostgreSQLDriver(cfg, pool=mock_pool)
     rows, desc = driver.execute_with_description("SELECT id, name FROM items WHERE id > %s", (0,))
     assert rows == [(1, "alpha"), (2, "beta")]
-    assert desc is not None
-    assert desc[0][0] == "id"
-    assert desc[1][0] == "name"
+    assert desc == ("id", "name")
 
     driver.commit()
     assert mock_pool._conn.committed is True
@@ -229,13 +227,14 @@ async def test_async_postgres_driver_and_arrow_copy_streaming() -> None:
     tuples = await async_driver.execute_tuples("SELECT id, name FROM tbl")
     assert tuples == [(1, "x"), (2, "y")]
 
-    batches = list(
-        await async_driver.stream_arrow_batches(
+    batches = [
+        batch
+        async for batch in async_driver.stream_arrow_batches(
             "SELECT k, v FROM kv",
             columns=["k", "v"],
             batch_size=2,
         )
-    )
+    ]
     assert len(batches) == 2
     assert len(batches[0]) == 2
     assert len(batches[1]) == 1

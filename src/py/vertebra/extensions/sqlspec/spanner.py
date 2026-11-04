@@ -17,6 +17,7 @@ from vertebra.db.adapters.spanner import (
     AsyncSpannerDriver as _CoreAsyncSpannerDriver,
 )
 from vertebra.db.adapters.spanner import (
+    AsyncSpannerSnapshot,
     Mutation,
     MutationGroup,
     SpannerConfig,
@@ -765,7 +766,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         raw_str = sql_or_table.sql if hasattr(sql_or_table, "sql") else str(sql_or_table)
         sql = self._prepare(raw_str) if " " in raw_str.strip() else self._prepare(f"SELECT * FROM {raw_str}")
         params = self._normalize_params(parameters)
-        return self._core.fetch_arrow(
+        return self._core.select_to_arrow(
             sql,
             params,
             data_boost_enabled=data_boost,
@@ -783,7 +784,7 @@ class SpannerSyncDriver(BaseSyncDriver):
     ) -> Any:
         """Ingest an ``ArrowCursor``, PyArrow ``Table``, or row list into ``table`` via Spanner mutations."""
         _ = kwargs
-        return self._core.insert_arrow(table, source, upsert=upsert)
+        return self._core.load_from_arrow(table, source, upsert=upsert)
 
     def select_to_storage(
         self,
@@ -871,6 +872,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         read_only: bool = False,
         in_transaction: bool = False,
         staleness: StalenessBound | None = None,
+        active_snapshot: AsyncSpannerSnapshot | None = None,
     ) -> None:
         super().__init__(
             core,
@@ -887,6 +889,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         self._read_only = read_only
         self._in_transaction = in_transaction
         self._staleness = staleness
+        self._active_snapshot = active_snapshot
         self._data_dictionary: SpannerAsyncDataDictionary | None = None
 
     @property
@@ -1052,6 +1055,8 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
         prepared = self._prepare(sql_str)
         params = BaseSyncDriver._normalize_params(parameters)
+        if self._active_snapshot is not None:
+            return await self._active_snapshot.query(prepared, params, schema_type=schema_type)
         return await self._core.select(prepared, params, schema_type=schema_type)
 
     async def select_one(
@@ -1067,6 +1072,8 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
         prepared = self._prepare(sql_str)
         params = BaseSyncDriver._normalize_params(parameters)
+        if self._active_snapshot is not None:
+            return await self._active_snapshot.query_one(prepared, params, schema_type=schema_type)
         return await self._core.select_one(prepared, params, schema_type=schema_type)
 
     async def select_one_or_none(
@@ -1168,7 +1175,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         raw_str = sql_or_table.sql if hasattr(sql_or_table, "sql") else str(sql_or_table)
         sql = self._prepare(raw_str) if " " in raw_str.strip() else self._prepare(f"SELECT * FROM {raw_str}")
         params = BaseSyncDriver._normalize_params(parameters)
-        return await self._core.fetch_arrow(
+        return await self._core.select_to_arrow(
             sql,
             params,
             data_boost_enabled=data_boost,
@@ -1186,7 +1193,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
     ) -> Any:
         """Asynchronously ingest an ``ArrowCursor`` or PyArrow ``Table`` into ``table``."""
         _ = kwargs
-        return await self._core.insert_arrow(table, source, upsert=upsert)
+        return await self._core.load_from_arrow(table, source, upsert=upsert)
 
     async def select_to_storage(
         self,
@@ -1625,7 +1632,7 @@ class SpannerAsyncConfig(AsyncAdapterConfig[SpannerConfig, SpannerAsyncDriver]):
         cache = _RustStatementCache(self.statement_cache_size) if self.statement_cache_size > 0 else None
         storage = self.resolve_storage_backend()
         if not transaction:
-            async with core.snapshot(staleness, multi_use=True):
+            async with core.snapshot(staleness, multi_use=True) as snap:
                 yield SpannerAsyncDriver(
                     core=core,
                     statement_cache=cache,
@@ -1636,6 +1643,7 @@ class SpannerAsyncConfig(AsyncAdapterConfig[SpannerConfig, SpannerAsyncDriver]):
                     read_only=True,
                     in_transaction=False,
                     staleness=staleness,
+                    active_snapshot=snap,
                 )
         else:
             yield SpannerAsyncDriver(

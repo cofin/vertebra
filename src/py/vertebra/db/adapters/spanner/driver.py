@@ -12,6 +12,7 @@ import msgspec
 
 from vertebra._vertebra import (
     LeaseBroker,
+    NotFoundError,
     SpannerAbortedError,
 )
 from vertebra._vertebra import (
@@ -71,7 +72,7 @@ class SyncSpannerSnapshot:
     def select(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
     ) -> list[Any]:
@@ -86,7 +87,7 @@ class SyncSpannerSnapshot:
     def query(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
     ) -> list[Any]:
@@ -96,28 +97,42 @@ class SyncSpannerSnapshot:
     def select_one(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+    ) -> Any:
+        """Execute a `ReadOnly` query and return the first row, raising `NotFoundError` when empty."""
+        rows = self.select(sql, parameters, schema_type=schema_type)
+        if not rows:
+            msg = "Spanner snapshot query returned no rows"
+            raise NotFoundError(msg)
+        return rows[0]
+
+    def select_one_or_none(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
     ) -> Any | None:
-        """Execute a `ReadOnly` query and return the first row or `None`."""
+        """Execute a `ReadOnly` query and return the first row or `None` when empty."""
         rows = self.select(sql, parameters, schema_type=schema_type)
         return rows[0] if rows else None
 
     def query_one(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
-    ) -> Any | None:
-        """Execute a `ReadOnly` query and return the first row or `None`."""
+    ) -> Any:
+        """Execute a `ReadOnly` query and return the first row, raising `NotFoundError` when empty."""
         return self.select_one(sql, parameters, schema_type=schema_type)
 
     def select_value(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         value_type: type[Any] | None = None,
     ) -> Any:
@@ -129,21 +144,25 @@ class SyncSpannerSnapshot:
             staleness=self._staleness,
         )
 
-    def fetch_arrow(
+    def select_to_arrow(
         self,
-        sql_or_table: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
+        threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
         max_partitions: int | None = None,
         data_boost_enabled: bool | None = None,
+        **kwargs: Any,
     ) -> ArrowCursor:
         """Read partitioned Arrow batches at this snapshot's staleness bound."""
-        return self._driver.fetch_arrow(
-            sql_or_table,
+        return self._driver.select_to_arrow(
+            sql,
             parameters,
+            threshold_rows=threshold_rows,
             max_partitions=max_partitions,
             data_boost_enabled=data_boost_enabled,
             staleness=self._staleness,
+            **kwargs,
         )
 
 
@@ -171,7 +190,7 @@ class AsyncSpannerSnapshot:
     async def select(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
     ) -> list[Any]:
@@ -186,7 +205,7 @@ class AsyncSpannerSnapshot:
     async def query(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
     ) -> list[Any]:
@@ -196,28 +215,42 @@ class AsyncSpannerSnapshot:
     async def select_one(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+    ) -> Any:
+        """Execute an async `ReadOnly` query and return the first row, raising `NotFoundError` when empty."""
+        rows = await self.select(sql, parameters, schema_type=schema_type)
+        if not rows:
+            msg = "Spanner snapshot query returned no rows"
+            raise NotFoundError(msg)
+        return rows[0]
+
+    async def select_one_or_none(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
     ) -> Any | None:
-        """Execute an async `ReadOnly` query and return the first row or `None`."""
+        """Execute an async `ReadOnly` query and return the first row or `None` when empty."""
         rows = await self.select(sql, parameters, schema_type=schema_type)
         return rows[0] if rows else None
 
     async def query_one(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
-    ) -> Any | None:
-        """Execute an async `ReadOnly` query and return the first row or `None`."""
+    ) -> Any:
+        """Execute an async `ReadOnly` query and return the first row, raising `NotFoundError` when empty."""
         return await self.select_one(sql, parameters, schema_type=schema_type)
 
     async def select_value(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         value_type: type[Any] | None = None,
     ) -> Any:
@@ -229,21 +262,25 @@ class AsyncSpannerSnapshot:
             staleness=self._staleness,
         )
 
-    async def fetch_arrow(
+    async def select_to_arrow(
         self,
-        sql_or_table: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
+        threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
         max_partitions: int | None = None,
         data_boost_enabled: bool | None = None,
+        **kwargs: Any,
     ) -> ArrowCursor:
         """Read partitioned Arrow batches asynchronously at this snapshot's staleness bound."""
-        return await self._driver.fetch_arrow(
-            sql_or_table,
+        return await self._driver.select_to_arrow(
+            sql,
             parameters,
+            threshold_rows=threshold_rows,
             max_partitions=max_partitions,
             data_boost_enabled=data_boost_enabled,
             staleness=self._staleness,
+            **kwargs,
         )
 
 
@@ -298,7 +335,7 @@ class SyncSpannerTransaction:
     def select(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
     ) -> list[Any]:
@@ -308,7 +345,7 @@ class SyncSpannerTransaction:
     def query(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
     ) -> list[Any]:
@@ -318,27 +355,37 @@ class SyncSpannerTransaction:
     def select_one(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+    ) -> Any:
+        """Return the first row of `sql`, raising `NotFoundError` when empty."""
+        return self._driver.select_one(sql, parameters, schema_type=schema_type)
+
+    def select_one_or_none(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
     ) -> Any | None:
-        """Return the first row of `sql` or `None`."""
-        return self._driver.select_one(sql, parameters, schema_type=schema_type)
+        """Return the first row of `sql` or `None` when empty."""
+        return self._driver.select_one_or_none(sql, parameters, schema_type=schema_type)
 
     def query_one(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
-    ) -> Any | None:
-        """Return the first row of `sql` or `None`."""
+    ) -> Any:
+        """Return the first row of `sql`, raising `NotFoundError` when empty."""
         return self.select_one(sql, parameters, schema_type=schema_type)
 
     def select_value(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         value_type: type[Any] | None = None,
     ) -> Any:
@@ -456,7 +503,7 @@ class AsyncSpannerTransaction:
     async def select(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
     ) -> list[Any]:
@@ -466,7 +513,7 @@ class AsyncSpannerTransaction:
     async def query(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
     ) -> list[Any]:
@@ -476,27 +523,37 @@ class AsyncSpannerTransaction:
     async def select_one(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+    ) -> Any:
+        """Return the first row of `sql`, raising `NotFoundError` when empty."""
+        return await self._driver.select_one(sql, parameters, schema_type=schema_type)
+
+    async def select_one_or_none(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
     ) -> Any | None:
-        """Return the first row of `sql` or `None`."""
-        return await self._driver.select_one(sql, parameters, schema_type=schema_type)
+        """Return the first row of `sql` or `None` when empty."""
+        return await self._driver.select_one_or_none(sql, parameters, schema_type=schema_type)
 
     async def query_one(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
-    ) -> Any | None:
-        """Return the first row of `sql` or `None`."""
+    ) -> Any:
+        """Return the first row of `sql`, raising `NotFoundError` when empty."""
         return await self.select_one(sql, parameters, schema_type=schema_type)
 
     async def select_value(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         value_type: type[Any] | None = None,
     ) -> Any:
@@ -571,9 +628,12 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
     __slots__ = (
         "_client",
         "_dialect_tag",
+        "_in_transaction",
         "_last_commit_stats",
         "_propagator",
         "_statement_cache",
+        "_tx_dml_buffer",
+        "_tx_mutation_buffer",
         "dialect",
     )
 
@@ -612,6 +672,9 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         self._propagator: SqlTracePropagator = propagator or SqlTracePropagator()
         self._client: SyncSpannerClient | None = client
         self._last_commit_stats: dict[str, Any] = {}
+        self._in_transaction: bool = False
+        self._tx_dml_buffer: list[tuple[str, Sequence[Any] | Mapping[str, Any] | None]] = []
+        self._tx_mutation_buffer: list[Mutation] = []
 
     @property
     def project_id(self) -> str:
@@ -642,8 +705,9 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         """Connect and enter the synchronous driver context."""
         return self.connect()
 
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Close the driver upon exiting the context."""
+        _ = (exc_type, exc_val, exc_tb)
         self.close()
 
     def connect(self) -> Self:
@@ -655,8 +719,36 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
 
     def close(self) -> None:
         """Release the underlying Rust client reference."""
+        if self._in_transaction:
+            self.rollback()
         self._client = None
         self._closed = True
+
+    def begin(self) -> None:
+        """Begin a buffered Spanner DML and mutation transaction scope."""
+        self._in_transaction = True
+        self._tx_dml_buffer.clear()
+        self._tx_mutation_buffer.clear()
+
+    def commit(self) -> None:
+        """Flush buffered DML via `ExecuteBatchDml` and buffered mutations via `apply_mutations`."""
+        if not self._in_transaction:
+            return
+        dml_batch = list(self._tx_dml_buffer)
+        mutation_batch = list(self._tx_mutation_buffer)
+        self._tx_dml_buffer.clear()
+        self._tx_mutation_buffer.clear()
+        self._in_transaction = False
+        if dml_batch:
+            self.execute_batch_dml(dml_batch)
+        if mutation_batch:
+            self.apply_mutations(mutation_batch)
+
+    def rollback(self) -> None:
+        """Discard buffered DML and mutation entries without issuing RPCs."""
+        self._tx_dml_buffer.clear()
+        self._tx_mutation_buffer.clear()
+        self._in_transaction = False
 
     def snapshot(
         self,
@@ -671,7 +763,7 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
     def execute(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         request_tag: str | None = None,
         transaction_tag: str | None = None,
@@ -682,6 +774,9 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         stripped = sql.strip()
         if SpannerCore.is_ddl_statement(stripped):
             self.update_ddl([stripped])
+            return 0
+        if self._in_transaction:
+            self._tx_dml_buffer.append((stripped, parameters))
             return 0
 
         client = self._ensure_client()
@@ -703,7 +798,7 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
     def execute_many(
         self,
         sql: str,
-        parameter_sets: Sequence[Mapping[str, Any] | Sequence[Any]],
+        parameter_sets: Sequence[Sequence[Any] | Mapping[str, Any]],
         *,
         request_tag: str | None = None,
         transaction_tag: str | None = None,
@@ -712,6 +807,11 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         """Execute `sql` across multiple parameter sets via `ExecuteBatchDml`."""
         _ = kwargs
         if not parameter_sets:
+            return 0
+        if self._in_transaction:
+            stripped = sql.strip()
+            for params in parameter_sets:
+                self._tx_dml_buffer.append((stripped, params))
             return 0
         statements = [(sql, params) for params in parameter_sets]
         counts = self.execute_batch_dml(
@@ -804,7 +904,7 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
     def select(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
         staleness: StalenessBound | None = None,
@@ -822,30 +922,49 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
     def select_one(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+        staleness: StalenessBound | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a query and return the first row, raising `NotFoundError` when 0 rows match."""
+        rows = self.select(sql, parameters, schema_type=schema_type, staleness=staleness, **kwargs)
+        if not rows:
+            msg = "Spanner query returned no rows"
+            raise NotFoundError(msg)
+        return rows[0]
+
+    def select_one_or_none(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
         staleness: StalenessBound | None = None,
         **kwargs: Any,
     ) -> Any | None:
-        """Execute a query and return the first row or `None`."""
+        """Execute a query and return the first row or `None` when empty."""
         rows = self.select(sql, parameters, schema_type=schema_type, staleness=staleness, **kwargs)
         return rows[0] if rows else None
 
     def select_value(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         value_type: type[Any] | None = None,
         staleness: StalenessBound | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Execute a query and return the first scalar column of the first row."""
+        """Execute a query and return the first scalar column, raising `NotFoundError` when 0 rows match."""
         _ = kwargs
         raw = self._run_query_sync(sql, parameters, staleness=staleness)
         rows = raw.get("rows", ())
-        if not rows or not rows[0]:
+        if not rows:
+            msg = "Spanner query returned no rows"
+            raise NotFoundError(msg)
+        if not rows[0]:
             return None
         val = rows[0][0]
         if value_type is not None and val is not None:
@@ -896,6 +1015,13 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         if not mutations:
             return {"commit_timestamp_micros": 0, "mutation_count": 0, "retry_count": 0}
         normalized = [SpannerCore.coerce_mutation(m) for m in mutations]
+        if self._in_transaction:
+            self._tx_mutation_buffer.extend(normalized)
+            return {
+                "commit_timestamp_micros": None,
+                "mutation_count": len(normalized),
+                "retry_count": 0,
+            }
 
         client = self._ensure_client()
         total_stats: dict[str, Any] = {
@@ -1010,76 +1136,46 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         client = self._ensure_client()
         return str(client.update_ddl(stmt_list))
 
-    def fetch_arrow(
-        self,
-        sql_or_table: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
-        *,
-        max_partitions: int | None = None,
-        data_boost_enabled: bool | None = None,
-        staleness: StalenessBound | None = None,
-        threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
-        **kwargs: Any,
-    ) -> ArrowCursor:
-        """Execute a parallel `PartitionQuery` + Data Boost read into a `VTBARROW` `ArrowCursor`."""
-        _ = kwargs
-        sql = SpannerCore.build_select_sql_if_table(sql_or_table)
-        bound = staleness or StalenessBound.strong()
-        client = self._ensure_client()
-        rewritten_sql, params_json = self._prepare_sql_and_params(sql, parameters)
-        partitions = max_partitions if max_partitions is not None else self.config.max_partitions
-        boost = data_boost_enabled if data_boost_enabled is not None else self.config.data_boost_enabled
-        try:
-            raw = client.partitioned_query(
-                rewritten_sql,
-                params_json,
-                max(1, int(partitions)),
-                bool(boost),
-                bound.mode,
-                bound.effective_value(),
-            )
-        except Exception as exc:
-            if not SpannerCore.is_partitioned_query_fallback_error(exc):
-                raise
-            raw = self._run_query_sync(sql, parameters, staleness=bound)
-        return ArrowCursor.from_rows(
-            raw.get("rows", ()),
-            columns=[str(c) for c in raw.get("columns", ())],
-            threshold_rows=threshold_rows,
-        )
-
     def select_to_arrow(
         self,
         sql: str,
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
+        max_partitions: int | None = None,
+        data_boost_enabled: bool | None = None,
+        staleness: StalenessBound | None = None,
         **kwargs: Any,
     ) -> ArrowCursor:
-        """Execute a query or table read and return a zero-copy `ArrowCursor`."""
-        return self.fetch_arrow(sql, parameters, threshold_rows=threshold_rows, **kwargs)
-
-    def insert_arrow(
-        self,
-        table_name: str,
-        data: ArrowCursor | bytes | Any,
-        *,
-        columns: Sequence[str] | None = None,
-        upsert: bool = True,
-        **kwargs: Any,
-    ) -> int:
-        """Write an `ArrowCursor`, Arrow IPC buffer, or `pyarrow` table into `table_name` via chunked mutations."""
-        _ = (columns, kwargs)
-        rows = SpannerCore.coerce_arrow_to_dicts(data)
-        if not rows:
-            return 0
-        cols = list(rows[0].keys())
-        values = [[r.get(c) for c in cols] for r in rows]
-        mutation = (
-            Mutation.insert_or_update(table_name, cols, values) if upsert else Mutation.insert(table_name, cols, values)
+        """Execute a parallel `PartitionQuery` + Data Boost read into a `VTBARROW` `ArrowCursor`."""
+        _ = kwargs
+        query_sql = SpannerCore.build_select_sql_if_table(sql)
+        bound = staleness or StalenessBound.strong()
+        client = self._ensure_client()
+        rewritten_sql, params_json = self._prepare_sql_and_params(query_sql, parameters)
+        partitions = max_partitions if max_partitions is not None else self.config.max_partitions
+        boost = data_boost_enabled if data_boost_enabled is not None else self.config.data_boost_enabled
+        if hasattr(client, "partitioned_query"):
+            try:
+                raw = client.partitioned_query(
+                    rewritten_sql,
+                    params_json,
+                    max(1, int(partitions)),
+                    bool(boost),
+                    bound.mode,
+                    bound.effective_value(),
+                )
+            except Exception as exc:
+                if not SpannerCore.is_partitioned_query_fallback_error(exc):
+                    raise
+                raw = self._run_query_sync(query_sql, parameters, staleness=bound)
+        else:
+            raw = self._run_query_sync(query_sql, parameters, staleness=bound)
+        return ArrowCursor.from_rows(
+            raw.get("rows", ()),
+            columns=[str(c) for c in raw.get("columns", ())],
+            threshold_rows=threshold_rows,
         )
-        self.apply_mutations([mutation])
-        return len(rows)
 
     def load_from_arrow(
         self,
@@ -1090,8 +1186,18 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         upsert: bool = True,
         **kwargs: Any,
     ) -> int:
-        """Bulk-load an Arrow payload into `table_name` via chunked mutations."""
-        return self.insert_arrow(table_name, data, columns=columns, upsert=upsert, **kwargs)
+        """Bulk-load an `ArrowCursor`, Arrow IPC buffer, or `pyarrow` table into `table_name` via chunked mutations."""
+        _ = kwargs
+        rows = SpannerCore.coerce_arrow_to_dicts(data)
+        if not rows:
+            return 0
+        cols = list(columns) if columns is not None else list(rows[0].keys())
+        values = [[r.get(c) for c in cols] for r in rows]
+        mutation = (
+            Mutation.insert_or_update(table_name, cols, values) if upsert else Mutation.insert(table_name, cols, values)
+        )
+        self.apply_mutations([mutation])
+        return len(rows)
 
     def export_to_object_store(
         self,
@@ -1113,7 +1219,7 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         else:
             target_store = store_or_uri if store is None else store
             target_uri = destination_uri or ""
-        cursor = self.fetch_arrow(
+        cursor = self.select_to_arrow(
             sql_or_table,
             params,
             data_boost_enabled=data_boost_enabled,
@@ -1155,7 +1261,7 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         total = 0
         for uri in uris:
             cursor = SpannerCore.read_cursor_from_object_store_sync(uri, store=target_store, format=format)
-            total += self.insert_arrow(table, cursor, upsert=upsert)
+            total += self.load_from_arrow(table, cursor, upsert=upsert)
         return total
 
     def _ensure_client(self) -> SyncSpannerClient:
@@ -1230,9 +1336,12 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
     __slots__ = (
         "_client",
         "_dialect_tag",
+        "_in_transaction",
         "_last_commit_stats",
         "_propagator",
         "_statement_cache",
+        "_tx_dml_buffer",
+        "_tx_mutation_buffer",
         "dialect",
     )
 
@@ -1271,6 +1380,9 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         self._propagator: SqlTracePropagator = propagator or SqlTracePropagator()
         self._client: AsyncSpannerClient | None = client
         self._last_commit_stats: dict[str, Any] = {}
+        self._in_transaction: bool = False
+        self._tx_dml_buffer: list[tuple[str, Sequence[Any] | Mapping[str, Any] | None]] = []
+        self._tx_mutation_buffer: list[Mutation] = []
 
     @property
     def project_id(self) -> str:
@@ -1301,8 +1413,9 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         """Connect and enter the asynchronous driver context."""
         return await self.connect()
 
-    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Close the driver upon exiting the context."""
+        _ = (exc_type, exc_val, exc_tb)
         await self.close()
 
     async def connect(self) -> Self:
@@ -1314,8 +1427,36 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
 
     async def close(self) -> None:
         """Release the underlying Rust client reference."""
+        if self._in_transaction:
+            await self.rollback()
         self._client = None
         self._closed = True
+
+    async def begin(self) -> None:
+        """Begin an async buffered Spanner DML and mutation transaction scope."""
+        self._in_transaction = True
+        self._tx_dml_buffer.clear()
+        self._tx_mutation_buffer.clear()
+
+    async def commit(self) -> None:
+        """Flush buffered DML via `ExecuteBatchDml` and buffered mutations via `apply_mutations`."""
+        if not self._in_transaction:
+            return
+        dml_batch = list(self._tx_dml_buffer)
+        mutation_batch = list(self._tx_mutation_buffer)
+        self._tx_dml_buffer.clear()
+        self._tx_mutation_buffer.clear()
+        self._in_transaction = False
+        if dml_batch:
+            await self.execute_batch_dml(dml_batch)
+        if mutation_batch:
+            await self.apply_mutations(mutation_batch)
+
+    async def rollback(self) -> None:
+        """Discard buffered DML and mutation entries without issuing RPCs."""
+        self._tx_dml_buffer.clear()
+        self._tx_mutation_buffer.clear()
+        self._in_transaction = False
 
     def snapshot(
         self,
@@ -1330,7 +1471,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
     async def execute(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         request_tag: str | None = None,
         transaction_tag: str | None = None,
@@ -1341,6 +1482,9 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         stripped = sql.strip()
         if SpannerCore.is_ddl_statement(stripped):
             await self.update_ddl([stripped])
+            return 0
+        if self._in_transaction:
+            self._tx_dml_buffer.append((stripped, parameters))
             return 0
 
         client = self._ensure_client()
@@ -1361,7 +1505,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
     async def execute_many(
         self,
         sql: str,
-        parameter_sets: Sequence[Mapping[str, Any] | Sequence[Any]],
+        parameter_sets: Sequence[Sequence[Any] | Mapping[str, Any]],
         *,
         request_tag: str | None = None,
         transaction_tag: str | None = None,
@@ -1370,6 +1514,11 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         """Execute `sql` across multiple parameter sets asynchronously via `ExecuteBatchDml`."""
         _ = kwargs
         if not parameter_sets:
+            return 0
+        if self._in_transaction:
+            stripped = sql.strip()
+            for params in parameter_sets:
+                self._tx_dml_buffer.append((stripped, params))
             return 0
         statements = [(sql, params) for params in parameter_sets]
         counts = await self.execute_batch_dml(
@@ -1459,7 +1608,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
     async def select(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
         staleness: StalenessBound | None = None,
@@ -1477,30 +1626,49 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
     async def select_one(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+        staleness: StalenessBound | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a query asynchronously and return the first row, raising `NotFoundError` when 0 rows match."""
+        rows = await self.select(sql, parameters, schema_type=schema_type, staleness=staleness, **kwargs)
+        if not rows:
+            msg = "Spanner query returned no rows"
+            raise NotFoundError(msg)
+        return rows[0]
+
+    async def select_one_or_none(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
         staleness: StalenessBound | None = None,
         **kwargs: Any,
     ) -> Any | None:
-        """Execute a query asynchronously and return the first row or `None`."""
+        """Execute a query asynchronously and return the first row or `None` when empty."""
         rows = await self.select(sql, parameters, schema_type=schema_type, staleness=staleness, **kwargs)
         return rows[0] if rows else None
 
     async def select_value(
         self,
         sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         value_type: type[Any] | None = None,
         staleness: StalenessBound | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Execute a query asynchronously and return the first scalar column."""
+        """Execute a query asynchronously and return the first scalar column, raising `NotFoundError` when 0 rows match."""
         _ = kwargs
         raw = await self._run_query_async(sql, parameters, staleness=staleness)
         rows = raw.get("rows", ())
-        if not rows or not rows[0]:
+        if not rows:
+            msg = "Spanner query returned no rows"
+            raise NotFoundError(msg)
+        if not rows[0]:
             return None
         val = rows[0][0]
         if value_type is not None and val is not None:
@@ -1551,6 +1719,13 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         if not mutations:
             return {"commit_timestamp_micros": 0, "mutation_count": 0, "retry_count": 0}
         normalized = [SpannerCore.coerce_mutation(m) for m in mutations]
+        if self._in_transaction:
+            self._tx_mutation_buffer.extend(normalized)
+            return {
+                "commit_timestamp_micros": None,
+                "mutation_count": len(normalized),
+                "retry_count": 0,
+            }
 
         client = self._ensure_client()
         total_stats: dict[str, Any] = {
@@ -1667,76 +1842,46 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         res = await client.update_ddl(stmt_list)
         return str(res)
 
-    async def fetch_arrow(
-        self,
-        sql_or_table: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
-        *,
-        max_partitions: int | None = None,
-        data_boost_enabled: bool | None = None,
-        staleness: StalenessBound | None = None,
-        threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
-        **kwargs: Any,
-    ) -> ArrowCursor:
-        """Execute an async parallel `PartitionQuery` + Data Boost read into an `ArrowCursor`."""
-        _ = kwargs
-        sql = SpannerCore.build_select_sql_if_table(sql_or_table)
-        bound = staleness or StalenessBound.strong()
-        client = self._ensure_client()
-        rewritten_sql, params_json = self._prepare_sql_and_params(sql, parameters)
-        partitions = max_partitions if max_partitions is not None else self.config.max_partitions
-        boost = data_boost_enabled if data_boost_enabled is not None else self.config.data_boost_enabled
-        try:
-            raw = await client.partitioned_query(
-                rewritten_sql,
-                params_json,
-                max(1, int(partitions)),
-                bool(boost),
-                bound.mode,
-                bound.effective_value(),
-            )
-        except Exception as exc:
-            if not SpannerCore.is_partitioned_query_fallback_error(exc):
-                raise
-            raw = await self._run_query_async(sql, parameters, staleness=bound)
-        return ArrowCursor.from_rows(
-            raw.get("rows", ()),
-            columns=[str(c) for c in raw.get("columns", ())],
-            threshold_rows=threshold_rows,
-        )
-
     async def select_to_arrow(
         self,
         sql: str,
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
+        max_partitions: int | None = None,
+        data_boost_enabled: bool | None = None,
+        staleness: StalenessBound | None = None,
         **kwargs: Any,
     ) -> ArrowCursor:
-        """Execute a query or table read asynchronously and return a zero-copy `ArrowCursor`."""
-        return await self.fetch_arrow(sql, parameters, threshold_rows=threshold_rows, **kwargs)
-
-    async def insert_arrow(
-        self,
-        table_name: str,
-        data: ArrowCursor | bytes | Any,
-        *,
-        columns: Sequence[str] | None = None,
-        upsert: bool = True,
-        **kwargs: Any,
-    ) -> int:
-        """Write an `ArrowCursor`, Arrow IPC buffer, or `pyarrow` table asynchronously."""
-        _ = (columns, kwargs)
-        rows = SpannerCore.coerce_arrow_to_dicts(data)
-        if not rows:
-            return 0
-        cols = list(rows[0].keys())
-        values = [[r.get(c) for c in cols] for r in rows]
-        mutation = (
-            Mutation.insert_or_update(table_name, cols, values) if upsert else Mutation.insert(table_name, cols, values)
+        """Execute an async parallel `PartitionQuery` + Data Boost read into an `ArrowCursor`."""
+        _ = kwargs
+        query_sql = SpannerCore.build_select_sql_if_table(sql)
+        bound = staleness or StalenessBound.strong()
+        client = self._ensure_client()
+        rewritten_sql, params_json = self._prepare_sql_and_params(query_sql, parameters)
+        partitions = max_partitions if max_partitions is not None else self.config.max_partitions
+        boost = data_boost_enabled if data_boost_enabled is not None else self.config.data_boost_enabled
+        if hasattr(client, "partitioned_query"):
+            try:
+                raw = await client.partitioned_query(
+                    rewritten_sql,
+                    params_json,
+                    max(1, int(partitions)),
+                    bool(boost),
+                    bound.mode,
+                    bound.effective_value(),
+                )
+            except Exception as exc:
+                if not SpannerCore.is_partitioned_query_fallback_error(exc):
+                    raise
+                raw = await self._run_query_async(query_sql, parameters, staleness=bound)
+        else:
+            raw = await self._run_query_async(query_sql, parameters, staleness=bound)
+        return ArrowCursor.from_rows(
+            raw.get("rows", ()),
+            columns=[str(c) for c in raw.get("columns", ())],
+            threshold_rows=threshold_rows,
         )
-        await self.apply_mutations([mutation])
-        return len(rows)
 
     async def load_from_arrow(
         self,
@@ -1747,8 +1892,18 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         upsert: bool = True,
         **kwargs: Any,
     ) -> int:
-        """Asynchronously bulk-load an Arrow payload into `table_name`."""
-        return await self.insert_arrow(table_name, data, columns=columns, upsert=upsert, **kwargs)
+        """Asynchronously bulk-load an `ArrowCursor`, Arrow IPC buffer, or `pyarrow` table into `table_name`."""
+        _ = kwargs
+        rows = SpannerCore.coerce_arrow_to_dicts(data)
+        if not rows:
+            return 0
+        cols = list(columns) if columns is not None else list(rows[0].keys())
+        values = [[r.get(c) for c in cols] for r in rows]
+        mutation = (
+            Mutation.insert_or_update(table_name, cols, values) if upsert else Mutation.insert(table_name, cols, values)
+        )
+        await self.apply_mutations([mutation])
+        return len(rows)
 
     async def export_to_object_store(
         self,
@@ -1770,7 +1925,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         else:
             target_store = store_or_uri if store is None else store
             target_uri = destination_uri or ""
-        cursor = await self.fetch_arrow(
+        cursor = await self.select_to_arrow(
             sql_or_table,
             params,
             data_boost_enabled=data_boost_enabled,
@@ -1812,7 +1967,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         total = 0
         for uri in uris:
             cursor = await SpannerCore.read_cursor_from_object_store_async(uri, store=target_store, format=format)
-            total += await self.insert_arrow(table, cursor, upsert=upsert)
+            total += await self.load_from_arrow(table, cursor, upsert=upsert)
         return total
 
     def _ensure_client(self) -> AsyncSpannerClient:

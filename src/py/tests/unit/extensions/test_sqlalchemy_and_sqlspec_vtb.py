@@ -22,6 +22,7 @@ from vertebra.extensions.alchemy import (
 )
 from vertebra.extensions.sqlalchemy import (
     AlembicImpl,
+    AsyncDBAPIConnection,
     BinaryJSON,
     CreateVectorIndexOp,
     CreateViewOp,
@@ -391,3 +392,62 @@ def test_alchemy_sync_config_factory() -> None:
         storage_key="sync_docs",
     )
     assert sync_cfg.connection_string == "sqlite+vtb:///:memory:"
+
+
+@pytest.mark.anyio
+async def test_pep249_sync_and_async_dbapi_cursor_seven_element_descriptions() -> None:
+    """Verify SyncDBAPICursor and AsyncDBAPICursor synthesize 7-item PEP 249 descriptions from column names."""
+
+    class _TupleColSyncDriver:
+        def execute_with_description(
+            self, sql: str, parameters: object = None
+        ) -> tuple[list[tuple[object, ...]], tuple[str, ...]]:
+            _ = (sql, parameters)
+            return [(1, "alpha")], ("id", "name")
+
+        def commit(self) -> None:
+            return None
+
+        def rollback(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class _TupleColAsyncDriver:
+        async def execute_with_description(
+            self,
+            sql: str,
+            parameters: object = None,
+        ) -> tuple[list[tuple[object, ...]], tuple[str, ...]]:
+            _ = (sql, parameters)
+            return [(2, "beta")], ("id", "name")
+
+        async def commit(self) -> None:
+            return None
+
+        async def rollback(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    sync_conn = SyncDBAPIConnection("sqlite+vtb:///:memory:", driver=_TupleColSyncDriver())
+    sync_cur = sync_conn.cursor()
+    sync_cur.execute("SELECT id, name FROM items")
+    assert sync_cur.description == (
+        ("id", None, None, None, None, None, None),
+        ("name", None, None, None, None, None, None),
+    )
+    assert sync_cur.fetchall() == [(1, "alpha")]
+    sync_conn.close()
+
+    async_conn = AsyncDBAPIConnection("sqlite+vtb_async:///:memory:", driver=_TupleColAsyncDriver())
+    async_cur = async_conn.cursor()
+    await async_cur.execute("SELECT id, name FROM items")
+    assert async_cur.description == (
+        ("id", None, None, None, None, None, None),
+        ("name", None, None, None, None, None, None),
+    )
+    assert await async_cur.fetchall() == [(2, "beta")]
+    await async_conn.close()

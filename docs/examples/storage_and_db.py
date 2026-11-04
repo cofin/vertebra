@@ -25,7 +25,7 @@ def main() -> None:
         db.execute("CREATE TABLE reports (id INTEGER PRIMARY KEY, key TEXT NOT NULL)")
         file_obj2 = FileObject(backend=backend, filename="q2.json")
         backend.save_object(file_obj2, b'{"quarter": "Q2"}')
-        db.execute("INSERT INTO reports (key) VALUES (?)", "reports/q2.json")
+        db.execute("INSERT INTO reports (key) VALUES (?)", ("reports/q2.json",))
         db.commit()
         rows = db.select("SELECT key FROM reports")
         assert rows == [{"key": "reports/q2.json"}]
