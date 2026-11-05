@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
 from functools import wraps
 from typing import Any, get_type_hints
+
+import msgspec
 
 from vertebra.agent.core import AgentContext, PermissionDeniedError, Tool
 from vertebra.agent.runtime import ConfirmationGate
@@ -75,7 +78,7 @@ def _build_tool(
                     ticket is not None
                     and ticket.status == "approved"
                     and ticket.tool_name == name
-                    and ticket.arguments == canonical
+                    and _arguments_equal(ticket.arguments, canonical)
                     and (ticket.owner_id is None or ticket.owner_id == owner)
                 ):
                     pending = gate.request_confirmation(
@@ -94,3 +97,37 @@ def _build_tool(
 
     invoke.__dict__["__signature__"] = signature.replace(parameters=parameters)
     return Tool(invoke, name=name)
+
+
+def _arguments_equal(left: Any, right: Any) -> bool:
+    """Compare approved values recursively without Python's cross-type scalar equality."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, Mapping):
+        if len(left) != len(right):
+            return False
+        right_keys = {key: key for key in right}
+        return all(
+            key in right_keys
+            and _arguments_equal(key, right_keys[key])
+            and _arguments_equal(value, right[right_keys[key]])
+            for key, value in left.items()
+        )
+    if isinstance(left, (list, tuple)):
+        return len(left) == len(right) and all(_arguments_equal(a, b) for a, b in zip(left, right, strict=True))
+    if isinstance(left, (set, frozenset)):
+        right_items = {item: item for item in right}
+        return len(left) == len(right) and all(
+            item in right_items and _arguments_equal(item, right_items[item]) for item in left
+        )
+    if isinstance(left, msgspec.Struct):
+        return all(
+            _arguments_equal(getattr(left, field.name), getattr(right, field.name))
+            for field in msgspec.structs.fields(left)
+        )
+    if dataclasses.is_dataclass(left) and not isinstance(left, type):
+        return all(
+            _arguments_equal(getattr(left, field.name), getattr(right, field.name))
+            for field in dataclasses.fields(left)
+        )
+    return bool(left == right)

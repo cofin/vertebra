@@ -10,6 +10,7 @@ Tests cover:
 """
 
 import asyncio
+import dataclasses
 import sqlite3
 from collections.abc import AsyncIterator, Mapping, Sequence
 from types import SimpleNamespace
@@ -734,3 +735,113 @@ async def test_provider_execution_uses_isolated_approved_arguments() -> None:
     ticket = gate.get_ticket(token)
     assert ticket is not None
     assert ticket.arguments["params"] == {"ids": [1]}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("approved,replacement", [(1, True), (True, 1), (1, 1.0), (1.0, 1)])
+async def test_provider_confirmation_distinguishes_nested_scalar_types(approved: Any, replacement: Any) -> None:
+    """Equal Python scalars with different native bind types require separate approval."""
+    provider = _ConfirmedToolProvider()
+    gate = ConfirmationGate()
+    tool = build_tools(provider, confirmation_gate=gate)["query"]
+    original = {"sql": "UPDATE t", "params": {"group": [{"value": approved}], "other": 2}}
+    with pytest.raises(PermissionDeniedError) as exc:
+        await tool.invoke(original)
+    token = str(exc.value).split("ticket=", 1)[1].rstrip(")")
+    gate.approve(token)
+    with pytest.raises(PermissionDeniedError):
+        await tool.invoke(
+            {"sql": "UPDATE t", "params": {"other": 2, "group": [{"value": replacement}]}, "confirmation_token": token}
+        )
+    assert provider.calls == []
+    equivalent = await tool.invoke(
+        {
+            "sql": "UPDATE t",
+            "params": {"other": 2, "group": [{"value": approved}]},
+            "limit": 10,
+            "confirmation_token": token,
+        }
+    )
+    assert type(equivalent["params"]["group"][0]["value"]) is type(approved)
+    assert len(provider.calls) == 1
+
+
+class _ApprovalStruct(msgspec.Struct, frozen=True, gc=False):
+    values: dict[str, Any]
+
+
+@dataclasses.dataclass(frozen=True)
+class _ApprovalDataclass:
+    values: dict[str, Any]
+
+
+class _RecordConfirmedProvider(_ConfirmedToolProvider):
+    """Provider accepting records converted by the public tool pipeline."""
+
+    def __init__(self, record_type: str) -> None:
+        super().__init__()
+        self.record_type = record_type
+
+    def operations(self) -> dict[str, Any]:
+        return {"query": self.struct_query if self.record_type == "struct" else self.dataclass_query}
+
+    async def struct_query(self, sql: str, record: _ApprovalStruct) -> Any:
+        self.calls.append({"sql": sql, "record": record})
+        return record
+
+    async def dataclass_query(self, sql: str, record: _ApprovalDataclass) -> Any:
+        self.calls.append({"sql": sql, "record": record})
+        return record
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("record_type", ["struct", "dataclass"])
+@pytest.mark.parametrize("approved,replacement", [(1, True), (1, 1.0)])
+async def test_provider_confirmation_compares_converted_record_fields(
+    record_type: str, approved: Any, replacement: Any
+) -> None:
+    """Converted records retain recursive field types when binding approval."""
+    provider = _RecordConfirmedProvider(record_type)
+    gate = ConfirmationGate()
+    tool = build_tools(provider, confirmation_gate=gate)["query"]
+    original = {"sql": "UPDATE t", "record": {"values": {"items": [{"value": approved}], "other": 2}}}
+    with pytest.raises(PermissionDeniedError) as exc:
+        await tool.invoke(original)
+    token = str(exc.value).split("ticket=", 1)[1].rstrip(")")
+    gate.approve(token)
+    with pytest.raises(PermissionDeniedError):
+        await tool.invoke(
+            {
+                "sql": "UPDATE t",
+                "record": {"values": {"other": 2, "items": [{"value": replacement}]}},
+                "confirmation_token": token,
+            }
+        )
+    assert provider.calls == []
+    result = await tool.invoke({**original, "confirmation_token": token})
+    assert type(result.values["items"][0]["value"]) is type(approved)
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("container", [tuple, set, frozenset])
+@pytest.mark.parametrize("replacement", [True, 1.0])
+async def test_provider_confirmation_compares_container_element_types(container: Any, replacement: Any) -> None:
+    """Approval distinguishes scalar types inside ordered and unordered containers."""
+    provider = _ConfirmedToolProvider()
+    gate = ConfirmationGate()
+    tool = build_tools(provider, confirmation_gate=gate)["query"]
+    with pytest.raises(PermissionDeniedError) as exc:
+        await tool.invoke({"sql": "UPDATE t", "params": {"values": container([1, 2])}})
+    token = str(exc.value).split("ticket=", 1)[1].rstrip(")")
+    gate.approve(token)
+    with pytest.raises(PermissionDeniedError):
+        await tool.invoke(
+            {"sql": "UPDATE t", "params": {"values": container([replacement, 2])}, "confirmation_token": token}
+        )
+    assert provider.calls == []
+    result = await tool.invoke(
+        {"sql": "UPDATE t", "params": {"values": container([1, 2])}, "confirmation_token": token}
+    )
+    assert result["params"]["values"] == container([1, 2])
+    assert len(provider.calls) == 1
