@@ -13,11 +13,13 @@ from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuc
 from vertebra.db.adapters.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLDriver
 from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
 from vertebra.db.adapters.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
+from vertebra.db.adapters.oracle.core import OracleCore
 from vertebra.db.adapters.postgres import (
     AsyncPostgreSQLDriver,
     PostgreSQLConfig,
     SyncPostgreSQLDriver,
 )
+from vertebra.db.adapters.postgres.core import PostgreSQLCore
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
 from vertebra.db.arrow import (
     ARROW_SHM_THRESHOLD_ROWS,
@@ -25,6 +27,7 @@ from vertebra.db.arrow import (
 )
 from vertebra.db.dialer.alloydb import AsyncAlloyDBDialer, SyncAlloyDBDialer
 from vertebra.db.dialer.cloudsql import AsyncCloudSQLDialer, SyncCloudSQLDialer
+from vertebra.db.driver import NotSupportedError
 from vertebra.db.driver.capabilities import AsyncPipelineCapable, SyncPipelineCapable
 from vertebra.db.registry import DatabaseRegistry
 from vertebra.db.rls import TenantPredicate
@@ -35,7 +38,7 @@ from vertebra.utils.serializers import ZeroCopyCodecRegistry
 try:
     from sqlspec import SQLResult, StackResult, StatementStack
     from sqlspec.config import AsyncDatabaseConfig, SyncDatabaseConfig
-    from sqlspec.core.parameters import ParameterStyle, ParameterStyleConfig
+    from sqlspec.core.parameters import ParameterStyle, ParameterStyleConfig, TypedParameter
     from sqlspec.core.result._base import ArrowResult
     from sqlspec.core.statement import SQL, StatementConfig
     from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
@@ -455,18 +458,9 @@ class BaseSyncDriver(SyncDriverAdapterBase):
         return tuple(results)
 
     def apply_tenant_predicate(self, predicate: TenantPredicate) -> str:
-        """Apply the transaction-local tenant GUC and return the SQL filter fragment.
-
-        Raises:
-            Exception: Any error raised by the driver while executing the GUC statement.
-        """
-        sql, params = TenantPredicate.build_session_guc_sql(
-            str(predicate.tenant_value),
-            predicate.config,
-            is_local=True,
-        )
-        self.execute(sql, params)
-        return predicate.to_sql_fragment()
+        """Refuse unsupported session-level tenant enforcement."""
+        msg = f"Tenant session enforcement is unsupported for {self.dialect}"
+        raise NotSupportedError(msg)
 
     def dispatch_execute(self, cursor: Any, statement: Any) -> Any:
         """Execute a single SQL statement on the cursor."""
@@ -868,18 +862,9 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
         return tuple(results)
 
     async def apply_tenant_predicate(self, predicate: TenantPredicate) -> str:
-        """Apply the transaction-local tenant GUC and return the SQL filter fragment.
-
-        Raises:
-            Exception: Any error raised by the driver while executing the GUC statement.
-        """
-        sql, params = TenantPredicate.build_session_guc_sql(
-            str(predicate.tenant_value),
-            predicate.config,
-            is_local=True,
-        )
-        await self.execute(sql, params)
-        return predicate.to_sql_fragment()
+        """Refuse unsupported asynchronous session-level tenant enforcement."""
+        msg = f"Tenant session enforcement is unsupported for {self.dialect}"
+        raise NotSupportedError(msg)
 
     async def dispatch_execute(self, cursor: Any, statement: Any) -> Any:
         """Execute a single SQL statement asynchronously on the cursor."""
@@ -982,6 +967,12 @@ class PostgreSQLSyncDriver(BaseSyncDriver):
 
     _execution_parameter_style = ParameterStyle.POSITIONAL_PYFORMAT
 
+    def apply_tenant_predicate(self, predicate: TenantPredicate) -> str:
+        """Set the owning engine's tenant session value and return its predicate."""
+        sql, parameters = _prepare_postgres_tenant_session(self, predicate)
+        self.execute(sql, parameters)
+        return PostgreSQLCore.build_tenant_predicate_sql(predicate, param_index=1)
+
 
 class PostgreSQLAsyncDriver(BaseAsyncDriver):
     """Asynchronous PostgreSQL driver adapter wrapping vertebra.db.adapters.postgres.AsyncPostgreSQLDriver."""
@@ -989,6 +980,12 @@ class PostgreSQLAsyncDriver(BaseAsyncDriver):
     dialect: str = "postgres"
 
     _execution_parameter_style = ParameterStyle.NUMERIC
+
+    async def apply_tenant_predicate(self, predicate: TenantPredicate) -> str:
+        """Set the owning engine's tenant session value and return its predicate."""
+        sql, parameters = _prepare_postgres_tenant_session(self, predicate)
+        await self.execute(sql, parameters)
+        return PostgreSQLCore.build_tenant_predicate_sql(predicate, param_index=1)
 
 
 class MySQLSyncDriver(BaseSyncDriver):
@@ -1012,11 +1009,23 @@ class OracleSyncDriver(BaseSyncDriver):
 
     dialect: str = "oracle"
 
+    def apply_tenant_predicate(self, predicate: TenantPredicate) -> str:
+        """Set the owning engine's tenant session value and return its predicate."""
+        sql, params = OracleCore.build_session_context_sql(str(predicate.tenant_value), predicate.config)
+        self.execute(sql, params)
+        return predicate.to_sql_fragment(":tenant_id")
+
 
 class OracleAsyncDriver(BaseAsyncDriver):
     """Asynchronous Oracle Thin driver adapter wrapping vertebra.db.adapters.oracle.AsyncOracleDriver."""
 
     dialect: str = "oracle"
+
+    async def apply_tenant_predicate(self, predicate: TenantPredicate) -> str:
+        """Set the owning engine's tenant session value and return its predicate."""
+        sql, params = OracleCore.build_session_context_sql(str(predicate.tenant_value), predicate.config)
+        await self.execute(sql, params)
+        return predicate.to_sql_fragment(":tenant_id")
 
 
 class MSSQLSyncDriver(BaseSyncDriver):
@@ -1343,6 +1352,21 @@ class DuckDBAsyncConfig(AsyncAdapterConfig[DuckDBConfig, DuckDBAsyncDriver]):
     _config_cls: ClassVar[type[DuckDBConfig]] = DuckDBConfig
     _driver_cls: ClassVar[type[AsyncDuckDBDriver]] = AsyncDuckDBDriver
     driver_type: ClassVar[type[DuckDBAsyncDriver]] = DuckDBAsyncDriver
+
+
+def _prepare_postgres_tenant_session(
+    driver: BaseSyncDriver | BaseAsyncDriver, predicate: TenantPredicate
+) -> tuple[str, Any]:
+    """Compile session SQL through its transport profile and unwrap typed bind values."""
+    sql, parameters = PostgreSQLCore.build_session_guc_sql(str(predicate.tenant_value), predicate.config)
+    statement = driver.prepare_statement(sql, parameters)
+    sql, bound = statement.compile()
+    bound = driver.prepare_driver_parameters(bound, statement.statement_config, prepared_statement=statement)
+    if isinstance(bound, dict):
+        return sql, {key: value.value if isinstance(value, TypedParameter) else value for key, value in bound.items()}
+    return sql, tuple(
+        value.value if isinstance(value, TypedParameter) else value for value in cast("Sequence[Any]", bound)
+    )
 
 
 def _native_statement_config(dialect: str, execution_style: ParameterStyle | None) -> StatementConfig:

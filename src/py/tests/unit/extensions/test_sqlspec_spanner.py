@@ -470,3 +470,46 @@ async def test_spanner_async_native_driver_stack_results_and_batch_dml(
         assert client.arrow_requests == [(2, False, bound.mode, bound.effective_value())]
     finally:
         await core.close()
+
+
+@pytest.mark.parametrize("kind", ["sync-driver", "async-driver", "sync-config", "async-config"])
+def test_configured_tenant_predicate_rejected_before_constructor_effects(
+    kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unsupported isolation fails before base, core, resolver, broker, or native access."""
+    from vertebra.db import NotSupportedError
+    from vertebra.db.rls import TenantPredicate
+    from vertebra.extensions.sqlspec.adapters import (
+        AsyncAdapterConfig,
+        BaseAsyncDriver,
+        BaseSyncDriver,
+        SyncAdapterConfig,
+    )
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("Constructor performed a side effect before rejecting tenant isolation")
+
+    class ForbiddenCore:
+        def __getattribute__(self, name: str) -> Any:
+            forbidden(name)
+
+    for base in (BaseSyncDriver, BaseAsyncDriver, SyncAdapterConfig, AsyncAdapterConfig):
+        monkeypatch.setattr(base, "__init__", forbidden)
+    predicate = TenantPredicate(table_alias="t", tenant_value="tenant")
+    constructors = {
+        "sync-driver": lambda: SQLSpecSyncSpannerDriver(ForbiddenCore(), tenant_predicate=predicate),
+        "async-driver": lambda: SQLSpecAsyncSpannerDriver(ForbiddenCore(), tenant_predicate=predicate),
+        "sync-config": lambda: SpannerSyncConfig(tenant_predicate=predicate),
+        "async-config": lambda: SpannerAsyncConfig(tenant_predicate=predicate),
+    }
+    for config_type in (SpannerSyncConfig, SpannerAsyncConfig):
+        monkeypatch.setattr(config_type, "resolve_spanner_config", forbidden)
+    for constructor_type in (
+        SQLSpecSyncSpannerDriver,
+        SQLSpecAsyncSpannerDriver,
+        SpannerSyncConfig,
+        SpannerAsyncConfig,
+    ):
+        monkeypatch.setattr(constructor_type, "__setattr__", forbidden)
+    with pytest.raises(NotSupportedError):
+        constructors[kind]()

@@ -940,3 +940,41 @@ async def test_bigquery_async_arrow_stack_preserves_native_storage_options() -> 
         ]
     finally:
         await core.close()
+
+
+@pytest.mark.parametrize("kind", ["sync-driver", "async-driver", "sync-config", "async-config"])
+def test_configured_tenant_predicate_rejected_before_constructor_effects(
+    kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unsupported isolation fails before base, core, resolver, broker, or native access."""
+    from vertebra.db import NotSupportedError
+    from vertebra.db.rls import TenantPredicate
+    from vertebra.extensions.sqlspec.adapters import (
+        AsyncAdapterConfig,
+        BaseAsyncDriver,
+        BaseSyncDriver,
+        SyncAdapterConfig,
+    )
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("Constructor performed a side effect before rejecting tenant isolation")
+
+    class ForbiddenCore:
+        def __getattribute__(self, name: str) -> Any:
+            forbidden(name)
+
+    for base in (BaseSyncDriver, BaseAsyncDriver, SyncAdapterConfig, AsyncAdapterConfig):
+        monkeypatch.setattr(base, "__init__", forbidden)
+    predicate = TenantPredicate(table_alias="t", tenant_value="tenant")
+    constructors = {
+        "sync-driver": lambda: BigQuerySyncDriver(ForbiddenCore(), tenant_predicate=predicate),
+        "async-driver": lambda: BigQueryAsyncDriver(ForbiddenCore(), tenant_predicate=predicate),
+        "sync-config": lambda: BigQuerySyncConfig(tenant_predicate=predicate),
+        "async-config": lambda: BigQueryAsyncConfig(tenant_predicate=predicate),
+    }
+    for config_type in (BigQuerySyncConfig, BigQueryAsyncConfig):
+        monkeypatch.setattr(config_type, "resolve_bigquery_config", forbidden)
+    for constructor_type in (BigQuerySyncDriver, BigQueryAsyncDriver, BigQuerySyncConfig, BigQueryAsyncConfig):
+        monkeypatch.setattr(constructor_type, "__setattr__", forbidden)
+    with pytest.raises(NotSupportedError):
+        constructors[kind]()

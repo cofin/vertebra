@@ -1,6 +1,6 @@
 # `vertebra.db` — Database Drivers, Analytics Engines & Cloud Dialers
 
-Native database configurations, synchronous and asynchronous drivers (`SyncDatabaseDriver`, `AsyncDatabaseDriver`), capability protocols (`SyncPipelineCapable`, `AsyncPipelineCapable`, `NotificationSource`, `SyncChangeSource`, `AsyncChangeSource`, `QueueStore`, `EmbeddingPushdown`), typed `DatabaseError` / `NotFoundError` exceptions, Apache Arrow shared-memory cursors (`ArrowCursor`), DataFusion federated analytics (`DataFusionConfig`, `DataFusionEngine`), Change Data Capture (`ChangeFeed`), planner-unfenced Row-Level Security (`TenantPredicate`), and zero-sidecar Cloud SQL / AlloyDB dialers. See the [Databases & Native Drivers Usage Guide](../usage/databases.md) for architectural patterns and examples.
+Native database configurations, synchronous and asynchronous drivers (`SyncDatabaseDriver`, `AsyncDatabaseDriver`), capability protocols (`SyncPipelineCapable`, `AsyncPipelineCapable`, `NotificationSource`, `SyncChangeSource`, `AsyncChangeSource`, `QueueStore`, `EmbeddingPushdown`), typed `DatabaseError` / `NotFoundError` exceptions, Apache Arrow shared-memory cursors (`ArrowCursor`), DataFusion federated analytics (`DataFusionConfig`, `DataFusionEngine`), Change Data Capture (`ChangeFeed`), dialect-agnostic tenant predicates (`TenantPredicate`), and zero-sidecar Cloud SQL / AlloyDB dialers. See the [Databases & Native Drivers Usage Guide](../usage/databases.md) for architectural patterns and examples.
 
 | Category | Classes | Highlights |
 | --- | --- | --- |
@@ -9,7 +9,7 @@ Native database configurations, synchronous and asynchronous drivers (`SyncDatab
 | **Capability Protocols** | `SyncPipelineCapable`, `AsyncPipelineCapable`, `NotificationSource`, `SyncChangeSource`, `AsyncChangeSource`, `QueueStore`, `EmbeddingPushdown` | `@runtime_checkable` structural protocols for query pipelining, pub/sub notifications, CDC streams, `SKIP LOCKED` job queues, and in-database embedding pushdown |
 | **Relational & OLAP Configs** | `PostgreSQLConfig`, `MySQLConfig`, `SQLiteConfig`, `OracleConfig`, `MSSQLConfig`, `DuckDBConfig`, `BigQueryConfig`, `SpannerConfig` | Pooler-aware statement caching, WAL/mmap pragmas, Oracle 26ai `VECTOR`/`OSON` & Cloud Wallets, TDS 7.4 `@P1` rewriting, DuckDB Arrow streaming, BigQuery Storage Read/Write v1 + Object Tables, and Cloud Spanner Multiplexed Sessions + `BatchWrite` |
 | **RESP3 & Federated SQL** | `RedisConfig`, `ValkeyConfig`, `DataFusionConfig`, `DataFusionEngine` | RESP3 `HELLO 3` client-side cache invalidation, Cluster/Sentinel routing, and cross-engine SQL federation |
-| **Cloud Dialers, CDC & RLS** | `AlloyDBConfig`, `SyncAlloyDBDialer`, `AsyncAlloyDBDialer`, `CloudSQLConfig`, `SyncCloudSQLDialer`, `AsyncCloudSQLDialer`, `ChangeFeed`, `SyncSpannerChangeStreamSource`, `AsyncSpannerChangeStreamSource`, `TenantScopeConfig`, `TenantPredicate` | Direct TCP/TLS IAM OAuth2 token password resolution (`:5432`, `:3306`), zero-sidecar `:5433` AlloyDB and `:3307` Cloud SQL mTLS connectors, logical replication / Spanner change-stream streaming, and index-friendly tenant isolation |
+| **Cloud Dialers, CDC & RLS** | `AlloyDBConfig`, `SyncAlloyDBDialer`, `AsyncAlloyDBDialer`, `CloudSQLConfig`, `SyncCloudSQLDialer`, `AsyncCloudSQLDialer`, `CDCConfig`, `ChangeFeed`, `PostgresNotifyConfig`, `PostgresNotificationSource`, `SyncSpannerChangeStreamSource`, `AsyncSpannerChangeStreamSource`, `TenantScopeConfig`, `TenantPredicate` | Direct TCP/TLS IAM OAuth2 token password resolution (`:5432`, `:3306`), zero-sidecar `:5433` AlloyDB and `:3307` Cloud SQL mTLS connectors, logical replication / Spanner change-stream streaming, and index-friendly tenant isolation |
 
 ## Database Registry, Driver Contracts & Native Pipelines
 
@@ -169,3 +169,14 @@ Native database configurations, synchronous and asynchronous drivers (`SyncDatab
       heading_level: 4
       members: false
       summary: false
+
+
+`TenantScopeConfig.setting_name` is adapter-neutral. `TenantPredicate` renders ANSI
+placeholders and optional `CAST`, while PostgreSQL and Oracle cores own session
+SQL. SQLSpec supports the declared PostgreSQL/Oracle setters and refuses other
+engines. BigQuery/Spanner constructors reject non-None `tenant_predicate` before
+initialization. Oracle context behavior currently has helper/stand-in acceptance;
+trusted-package and live-session acceptance remain separate driver work.
+
+See [Database Capabilities](database-capabilities.md) for notification, change-stream,
+tenant-scope, and tool-provider APIs.

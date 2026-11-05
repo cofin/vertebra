@@ -294,4 +294,19 @@ def test_rls_identifier_validation_and_predicate() -> None:
     with pytest.raises(ValueError, match="Invalid SQL identifier"):
         TenantScopeConfig(tenant_column="col; bad")
     tenant = TenantPredicate(table_alias="a", tenant_value="tenant-abc")
-    assert tenant.to_sql_fragment(1) == "a.tenant_id = $1::uuid"
+    assert tenant.to_sql_fragment() == "a.tenant_id = ?"
+
+
+def test_oracle_tenant_context_builder_binds_values_and_validates_identifiers() -> None:
+    """Oracle context names are validated while the tenant stays a bind value."""
+    from vertebra.db.adapters.oracle.core import OracleCore
+
+    scope = TenantScopeConfig(setting_name="app.tenant_id")
+    assert OracleCore.build_session_context_sql("tenant'; DROP", scope) == (
+        "BEGIN DBMS_SESSION.SET_CONTEXT(:namespace, :attribute, :value); END;",
+        {"namespace": "VERTEBRA_CTX", "attribute": "tenant_id", "value": "tenant'; DROP"},
+    )
+    with pytest.raises(ValueError, match="namespace"):
+        OracleCore.build_session_context_sql("t1", scope, namespace="CTX.BAD")
+    with pytest.raises(ValueError, match="attribute"):
+        OracleCore.build_session_context_sql("t1", TenantScopeConfig(setting_name="app.bad;name"))

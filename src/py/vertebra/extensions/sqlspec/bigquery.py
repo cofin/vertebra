@@ -27,6 +27,7 @@ from vertebra.db.adapters.bigquery import (
     SyncBigQueryDriver as _CoreSyncBigQueryDriver,
 )
 from vertebra.db.arrow import ArrowCursor
+from vertebra.db.driver import NotSupportedError
 from vertebra.extensions.sqlspec.adapters import (
     AsyncAdapterConfig,
     BaseAsyncDriver,
@@ -322,6 +323,9 @@ class BigQuerySyncDriver(BaseSyncDriver):
         enable_sqlcommenter: bool = True,
         tenant_predicate: TenantPredicate | None = None,
     ) -> None:
+        if tenant_predicate is not None:
+            msg = "Tenant session enforcement is unsupported for BigQuery"
+            raise NotSupportedError(msg)
         super().__init__(
             core_driver,
             statement_config=statement_config or _bigquery_statement_config(),
@@ -332,7 +336,6 @@ class BigQuerySyncDriver(BaseSyncDriver):
         self._storage_backend: ObjectStoreBackend | None = storage_backend
         self._stmt_cache_capacity: int = statement_cache_size
         self._enable_sqlcommenter: bool = enable_sqlcommenter
-        self._tenant_predicate: TenantPredicate | None = tenant_predicate
         self._data_dictionary = BigQuerySyncDataDictionary(core_driver)
 
     @property
@@ -638,10 +641,6 @@ class BigQuerySyncDriver(BaseSyncDriver):
         self._core.close()
 
     def _prepare_sql(self, sql: str, *, tenant_id: str | None = None) -> str:
-        if self._tenant_predicate is not None and tenant_id is not None:
-            apply_fn = getattr(self._tenant_predicate, "apply", None)
-            if callable(apply_fn):
-                return str(apply_fn(sql, tenant_id))
         return sql
 
     def _execute_stack_item(
@@ -692,6 +691,9 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         enable_sqlcommenter: bool = True,
         tenant_predicate: TenantPredicate | None = None,
     ) -> None:
+        if tenant_predicate is not None:
+            msg = "Tenant session enforcement is unsupported for BigQuery"
+            raise NotSupportedError(msg)
         super().__init__(
             core_driver,
             statement_config=statement_config or _bigquery_statement_config(),
@@ -702,7 +704,6 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         self._storage_backend: ObjectStoreBackend | None = storage_backend
         self._stmt_cache_capacity: int = statement_cache_size
         self._enable_sqlcommenter: bool = enable_sqlcommenter
-        self._tenant_predicate: TenantPredicate | None = tenant_predicate
         self._data_dictionary = BigQueryAsyncDataDictionary(core_driver)
 
     @property
@@ -1008,10 +1009,6 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         await self._core.close()
 
     def _prepare_sql(self, sql: str, *, tenant_id: str | None = None) -> str:
-        if self._tenant_predicate is not None and tenant_id is not None:
-            apply_fn = getattr(self._tenant_predicate, "apply", None)
-            if callable(apply_fn):
-                return str(apply_fn(sql, tenant_id))
         return sql
 
     async def _execute_stack_item_async(
@@ -1077,6 +1074,9 @@ class BigQuerySyncConfig(SyncAdapterConfig[BigQueryConfig, BigQuerySyncDriver]):
         share_pool: bool = False,
         statement_config: Any | None = None,
     ) -> None:
+        if tenant_predicate is not None:
+            msg = "Tenant session enforcement is unsupported for BigQuery"
+            raise NotSupportedError(msg)
         self.dsn = dsn
         self.project_id = project_id
         self.dataset_id = dataset_id
@@ -1261,6 +1261,9 @@ class BigQueryAsyncConfig(AsyncAdapterConfig[BigQueryConfig, BigQueryAsyncDriver
         share_pool: bool = False,
         statement_config: Any | None = None,
     ) -> None:
+        if tenant_predicate is not None:
+            msg = "Tenant session enforcement is unsupported for BigQuery"
+            raise NotSupportedError(msg)
         self.dsn = dsn
         self.project_id = project_id
         self.dataset_id = dataset_id

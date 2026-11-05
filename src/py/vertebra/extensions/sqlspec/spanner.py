@@ -30,6 +30,7 @@ from vertebra.db.adapters.spanner import (
 from vertebra.db.adapters.spanner import (
     SyncSpannerDriver as _CoreSyncSpannerDriver,
 )
+from vertebra.db.driver import NotSupportedError
 from vertebra.extensions.sqlspec.adapters import (
     AsyncAdapterConfig,
     BaseAsyncDriver,
@@ -473,6 +474,9 @@ class SpannerSyncDriver(BaseSyncDriver):
         staleness: StalenessBound | None = None,
         active_snapshot: SyncSpannerSnapshot | None = None,
     ) -> None:
+        if tenant_predicate is not None:
+            msg = "Tenant session enforcement is unsupported for Spanner"
+            raise NotSupportedError(msg)
         super().__init__(
             core,
             statement_config=statement_config or _spanner_statement_config(core.config.dialect),
@@ -482,7 +486,6 @@ class SpannerSyncDriver(BaseSyncDriver):
         self._core: _CoreSyncSpannerDriver = core
         self._rust_statement_cache = statement_cache
         self._enable_sqlcommenter = enable_sqlcommenter
-        self._tenant_predicate = tenant_predicate
         self._storage_backend = storage_backend
         self.dialect = "spangres" if core.config.dialect == "spangres" else "googlesql"
         self._read_only = read_only
@@ -829,10 +832,6 @@ class SpannerSyncDriver(BaseSyncDriver):
         )
 
     def _prepare(self, sql: str) -> str:
-        if self._tenant_predicate is not None:
-            apply_fn = getattr(self._tenant_predicate, "apply", None)
-            if callable(apply_fn):
-                return str(apply_fn(sql))
         return sql
 
     def _require_storage(self, override: ObjectStoreBackend | None = None) -> ObjectStoreBackend:
@@ -870,6 +869,9 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         staleness: StalenessBound | None = None,
         active_snapshot: AsyncSpannerSnapshot | None = None,
     ) -> None:
+        if tenant_predicate is not None:
+            msg = "Tenant session enforcement is unsupported for Spanner"
+            raise NotSupportedError(msg)
         super().__init__(
             core,
             statement_config=statement_config or _spanner_statement_config(core.config.dialect),
@@ -879,7 +881,6 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         self._core: _CoreAsyncSpannerDriver = core
         self._rust_statement_cache = statement_cache
         self._enable_sqlcommenter = enable_sqlcommenter
-        self._tenant_predicate = tenant_predicate
         self._storage_backend = storage_backend
         self.dialect = "spangres" if core.config.dialect == "spangres" else "googlesql"
         self._read_only = read_only
@@ -1226,10 +1227,6 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         )
 
     def _prepare(self, sql: str) -> str:
-        if self._tenant_predicate is not None:
-            apply_fn = getattr(self._tenant_predicate, "apply", None)
-            if callable(apply_fn):
-                return str(apply_fn(sql))
         return sql
 
     def _require_storage(self, override: ObjectStoreBackend | None = None) -> ObjectStoreBackend:
@@ -1328,6 +1325,9 @@ class SpannerSyncConfig(SyncAdapterConfig[SpannerConfig, SpannerSyncDriver]):
         share_pool: bool = True,
         statement_config: Any | None = None,
     ) -> None:
+        if tenant_predicate is not None:
+            msg = "Tenant session enforcement is unsupported for Spanner"
+            raise NotSupportedError(msg)
         self.config = config
         self.dsn = dsn
         self.project_id = project_id
@@ -1509,6 +1509,9 @@ class SpannerAsyncConfig(AsyncAdapterConfig[SpannerConfig, SpannerAsyncDriver]):
         share_pool: bool = True,
         statement_config: Any | None = None,
     ) -> None:
+        if tenant_predicate is not None:
+            msg = "Tenant session enforcement is unsupported for Spanner"
+            raise NotSupportedError(msg)
         self.config = config
         self.dsn = dsn
         self.project_id = project_id

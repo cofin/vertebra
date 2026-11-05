@@ -77,6 +77,7 @@ nav = [
     ] },
     { "Databases" = [
       { "Database Drivers & Pools" = "reference/db.md" },
+      { "Database Capabilities" = "reference/database-capabilities.md" },
       { "SQLSpec, Alchemy & Extensions" = "reference/extensions.md" },
     ] },
     { "Object Storage" = [

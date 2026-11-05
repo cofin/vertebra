@@ -2687,3 +2687,183 @@ async def test_dialect_tag_uniqueness_deterministic_file_urls_and_spanner_cdc_pr
     assert isinstance(async_source, AsyncChangeSource)
     assert list(sync_source.stream()) == []
     assert [ev async for ev in async_source.stream()] == []
+
+
+def _engine_purity_violations(source: str, *, registry: bool = False) -> list[str]:
+    """Find adapter-bound execution and engine SQL outside declared generic seams."""
+    tree = ast.parse(source)
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    registered: set[str] = set()
+    allowed_nodes: set[ast.AST] = set()
+    annotations: set[ast.AST] = set()
+    checking: set[ast.AST] = set()
+    docstrings: set[ast.AST] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+        ):
+            docstrings.add(node.body[0].value)
+        if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING":
+            checking.update(child for statement in node.body for child in ast.walk(statement))
+        annotation = None
+        if isinstance(node, (ast.AnnAssign, ast.arg)):
+            annotation = node.annotation
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            annotation = node.returns
+        elif isinstance(node, ast.TypeAlias):
+            annotation = node.value
+        if annotation is not None:
+            annotations.update(ast.walk(annotation))
+        if node in tree.body and isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(
+                isinstance(target, ast.Name) and target.id == "REGISTERED_CONFIG_TYPES" for target in targets
+            ) and isinstance(node.value, ast.Tuple):
+                for item in node.value.elts:
+                    if isinstance(item, ast.Name):
+                        registered.add(item.id)
+                        allowed_nodes.add(item)
+    violations: list[str] = []
+    bindings: set[str] = set()
+    sql_functions = re.compile(
+        r"\b(?:pg_notify|pg_logical_emit_message|set_config)\s*\("
+        r"|\b(?:DBMS_AQ|DBMS_SESSION|DBMS_VECTOR)\s*\."
+        r"|\bML\s*\.\s*(?:GENERATE_EMBEDDING|PREDICT)\s*\(",
+        re.IGNORECASE,
+    )
+    for node in ast.walk(tree):
+        module = node.module if isinstance(node, ast.ImportFrom) else None
+        if isinstance(node, ast.ImportFrom) and node.level and module and module.split(".")[0] == "adapters":
+            module = f"vertebra.db.{module}"
+        if isinstance(node, ast.ImportFrom) and module and module.startswith("vertebra.db.adapters"):
+            for imported in node.names:
+                name = imported.asname or imported.name
+                bindings.add(name)
+                config_registration = (
+                    registry
+                    and re.fullmatch(r"vertebra\.db\.adapters\.[^.]+\.config", module)
+                    and parents.get(node) is tree
+                    and name in registered
+                )
+                driver_annotation = (
+                    registry and re.fullmatch(r"vertebra\.db\.adapters\.[^.]+\.driver", module) and node in checking
+                )
+                if not (config_registration or driver_annotation):
+                    violations.append(f"line {node.lineno}: forbidden adapter import {node.module}.{imported.name}")
+        elif isinstance(node, ast.Import):
+            for imported in node.names:
+                if imported.name.startswith("vertebra.db.adapters"):
+                    violations.append(f"line {node.lineno}: forbidden adapter import {imported.name}")
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node not in docstrings
+            and node not in annotations
+        ):
+            if sql_functions.search(node.value):
+                violations.append(f"line {node.lineno}: engine SQL construction")
+        elif isinstance(node, ast.Call):
+            function = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+            if function in {"import_module", "__import__", "ensure_module", "import_optional"}:
+                arguments = [*node.args, *(keyword.value for keyword in node.keywords)]
+                if any(
+                    isinstance(argument, ast.Constant)
+                    and isinstance(argument.value, str)
+                    and argument.value.startswith("vertebra.db.adapters")
+                    for argument in arguments
+                ):
+                    violations.append(f"line {node.lineno}: runtime adapter loading")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in bindings:
+            parent = parents.get(node)
+            construction = isinstance(parent, ast.Call) and parent.func is node
+            if construction or (node not in annotations and node not in allowed_nodes):
+                violations.append(f"line {node.lineno}: executable adapter binding {node.id}")
+    return violations
+
+
+def test_generic_db_engine_purity() -> None:
+    """Generic database modules retain declarative registration and protocol-only execution."""
+    root = Path(vertebra_db.__file__).parent
+    failures = {
+        str(path.relative_to(root)): issues
+        for path in [*root.glob("*.py"), *(root / "driver").glob("*.py")]
+        if (issues := _engine_purity_violations(path.read_text(), registry=path.name == "registry.py"))
+    }
+    assert failures == {}
+
+
+@pytest.mark.parametrize(
+    "source,registry",
+    [
+        ("from vertebra.db.adapters.postgres.driver import SyncPostgreSQLDriver", True),
+        ("from vertebra.db.adapters.postgres.config import PostgreSQLConfig", False),
+        ("from vertebra.db.adapters.postgres.config import PostgreSQLConfig\nREGISTERED_CONFIG_TYPES = ()", True),
+        (
+            "from vertebra.db.adapters.postgres.config import PostgreSQLConfig as Pg\nREGISTERED_CONFIG_TYPES = (Pg,)\nif isinstance(config, Pg):\n    pass",
+            True,
+        ),
+        (
+            "from vertebra.db.adapters.postgres.config import PostgreSQLConfig as Pg\nREGISTERED_CONFIG_TYPES = (Pg,)\nif type(config) is Pg:\n    pass",
+            True,
+        ),
+        (
+            "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    from vertebra.db.adapters.postgres.driver import SyncPostgreSQLDriver as Pg\ndef make():\n    return Pg()",
+            True,
+        ),
+        ('def build():\n    return "SELECT set_config($1, $2, $3)"', False),
+        ('def load():\n    return ensure_module("vertebra.db.adapters.postgres.driver")', False),
+    ],
+)
+def test_engine_purity_rejects_adapter_execution(source: str, registry: bool) -> None:
+    """Representative import, alias, dispatch, construction, and SQL leaks are rejected."""
+    assert _engine_purity_violations(source, registry=registry)
+
+
+def test_engine_purity_accepts_annotations_metadata_and_polymorphic_loading() -> None:
+    """Annotations, broker metadata, docstrings, and polymorphic config loaders remain valid."""
+    assert not _engine_purity_violations(
+        '''
+"""Engine SQL documentation mentions set_config(value)."""
+from typing import TYPE_CHECKING
+from vertebra.db.adapters.postgres.config import PostgreSQLConfig as Pg
+if TYPE_CHECKING:
+    from vertebra.db.adapters.postgres.driver import SyncPostgreSQLDriver as Driver
+type Config = Pg
+type Native = Driver
+REGISTERED_CONFIG_TYPES = (Pg,)
+SCHEME_REGISTRY = {scheme: config for config in REGISTERED_CONFIG_TYPES for scheme in config.url_schemes}
+POSTGRES_DIALECT_TAG = 1
+def create(config: Pg) -> Driver:
+    return config.build_sync_driver()
+def load(self):
+    return ensure_module(self.driver_module)
+''',
+        registry=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT pg_notify($1, $2)",
+        "SELECT pg_logical_emit_message($1, $2, $3)",
+        "SELECT set_config($1, $2, $3)",
+        "BEGIN DBMS_AQ.ENQUEUE(...); END;",
+        "BEGIN DBMS_SESSION.SET_CONTEXT(...); END;",
+        "SELECT DBMS_VECTOR.UTL_TO_EMBEDDING(:value) FROM DUAL",
+        "SELECT ML.GENERATE_EMBEDDING(MODEL endpoint)",
+        "SELECT ML.PREDICT(MODEL endpoint)",
+    ],
+)
+def test_engine_purity_rejects_engine_sql_construction(sql: str) -> None:
+    """Every banned engine SQL family is rejected from executable string construction."""
+    assert _engine_purity_violations(f"def build():\n    return {sql!r}")
+
+
+def test_engine_purity_rejects_relative_adapter_import() -> None:
+    """Relative imports cannot bypass the same generic-database boundary."""
+    assert _engine_purity_violations("from .adapters.postgres.config import PostgreSQLConfig")

@@ -80,21 +80,33 @@ class _DeterministicSessionContext:
 
 
 def test_rls_planner_unfenced_predicate_and_session_guc() -> None:
-    """Verify TenantPredicate and TenantPredicate.build_session_guc_sql."""
-    guc_sql, guc_params = TenantPredicate.build_session_guc_sql("tenant-123")
-    assert guc_sql == "SELECT set_config($1, $2, $3)"
-    assert guc_params == ("app.tenant_id", "tenant-123", True)
+    """Tenant fragments use ANSI casts while PostgreSQL owns session SQL."""
+    from vertebra.db.adapters.postgres.core import PostgreSQLCore
 
-    pred = TenantPredicate(
-        table_alias="o",
-        tenant_value="tenant-123",
-        config=TenantScopeConfig(tenant_column="org_id", parameter_cast="uuid"),
+    scope = TenantScopeConfig(setting_name="app.tenant_id", tenant_column="org_id", parameter_cast="UUID")
+    predicate = TenantPredicate(table_alias="o", tenant_value="tenant-123", config=scope)
+    assert predicate.column_reference() == "o.org_id"
+    assert predicate.to_sql_fragment() == "o.org_id = CAST(? AS UUID)"
+    assert PostgreSQLCore.build_tenant_predicate_sql(predicate, param_index=2) == "o.org_id = $2::UUID"
+    assert PostgreSQLCore.build_session_guc_sql("tenant-123", scope) == (
+        "SELECT set_config($1, $2, $3)",
+        ("app.tenant_id", "tenant-123", True),
     )
-    assert pred.to_sql_fragment(2) == "o.org_id = $2::uuid"
-    with pytest.raises(ValueError, match="table_alias"):
-        TenantPredicate(table_alias="o; DROP", tenant_value="t1")
-    with pytest.raises(ValueError, match="tenant_column"):
-        TenantScopeConfig(tenant_column="org_id; --")
+    plain = TenantPredicate(tenant_value="t1")
+    assert plain.column_reference() == "tenant_id"
+    assert plain.to_sql_fragment(":tenant_id") == "tenant_id = :tenant_id"
+    assert PostgreSQLCore.build_tenant_predicate_sql(plain) == "tenant_id = $1"
+    assert not hasattr(TenantPredicate, "build_session_guc_sql")
+    with pytest.raises(TypeError):
+        TenantScopeConfig(guc_name="app.tenant_id")
+    for bad in ("o; DROP", "a.b", ""):
+        if bad:
+            with pytest.raises(ValueError):
+                TenantPredicate(table_alias=bad, tenant_value="t1")
+        with pytest.raises(ValueError):
+            TenantScopeConfig(tenant_column=bad)
+        with pytest.raises(ValueError):
+            TenantScopeConfig(parameter_cast=bad)
 
 
 def test_cdc_listen_notify_spill_and_logical_emit() -> None:
@@ -270,6 +282,7 @@ class _PsycopgConnectionPort:
         self.description = tuple((column,) for column in columns)
         self.rows = rows
         self.calls: list[tuple[str, Any]] = []
+        self.failure: RuntimeError | None = None
 
     def connection(self) -> _PsycopgConnectionPort:
         return self
@@ -281,6 +294,8 @@ class _PsycopgConnectionPort:
         query = self.query_type(self.transformer_type())
         query.convert(sql, parameters)
         self.calls.append((sql, parameters))
+        if self.failure is not None:
+            raise self.failure
 
     def fetchall(self) -> list[tuple[Any, ...]]:
         return self.rows
@@ -290,7 +305,7 @@ class _PsycopgConnectionPort:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("operation", ["notify", "embedding", "search"])
+@pytest.mark.parametrize("operation", ["notify", "embedding", "search", "rls", "rls-failure"])
 async def test_postgres_sync_primitives_bind_with_real_psycopg_converter(operation: str) -> None:
     """Public sync primitives generate SQL accepted by the installed psycopg converter."""
     queries = pytest.importorskip("psycopg._queries")
@@ -300,7 +315,22 @@ async def test_postgres_sync_primitives_bind_with_real_psycopg_converter(operati
     connection = _PsycopgConnectionPort(queries.PostgresQuery, adapt.Transformer, columns, rows)
     driver = SyncPostgreSQLDriver(pool=connection)
     try:
-        if operation == "notify":
+        if operation in {"rls", "rls-failure"}:
+            from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncDriver
+
+            adapter = PostgreSQLSyncDriver(driver)
+            predicate = TenantPredicate(tenant_value="tenant-1")
+            if operation == "rls-failure":
+                connection.failure = RuntimeError("external session setter refused")
+                with pytest.raises(RuntimeError) as raised:
+                    adapter.apply_tenant_predicate(predicate)
+                assert raised.value is connection.failure
+            else:
+                assert adapter.apply_tenant_predicate(predicate) == "tenant_id = $1"
+            sql, parameters = connection.calls[0]
+            assert sql.casefold() == "select set_config(%s, %s, %s)"
+            assert tuple(parameters) == ("app.tenant_id", "tenant-1", True)
+        elif operation == "notify":
             await PostgresNotificationSource(driver).publish("orders", "quote ' and % payload")
             assert connection.calls == [("SELECT pg_notify(%s, %s)", ("orders", "quote ' and % payload"))]
         else:

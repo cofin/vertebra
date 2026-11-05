@@ -24,6 +24,7 @@ Complete reference documentation for Vertebra's Python packages (`vertebra.*`), 
 | Module / Page | Summary |
 | --- | --- |
 | **[Database Drivers & Pools](db.md)** | Native `SyncPipelineCapable` / `AsyncPipelineCapable` batching, native Rust-backed database drivers and connection configs across PostgreSQL, MySQL, SQLite, Oracle 26ai, SQL Server, DuckDB, DataFusion, Redis, Valkey, and Cloud SQL / AlloyDB dialers. |
+| **[Database Capabilities](database-capabilities.md)** | Adapter-owned BigQuery and Spanner operations consumed through the generic agent tool bridge. |
 | **[SQLSpec, Alchemy & Extensions](extensions.md)** | Integrations for Litestar (`VertebraPlugin`), SQLSpec (`create_sqlspec_plugin`), SQLAlchemy / Advanced Alchemy (`create_alchemy_plugin`), Oracle APEX (`ApexGateway`), gRPC (`GrpcServiceRegistry`), and SHM session brokers (`BrokerPlugin`). |
 
 ## Object Storage

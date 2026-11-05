@@ -12,6 +12,18 @@ verified:
     at: "2026-11-04T04:33:00Z"
     commit: f741701
 sources:
+  - id: src-postgres-tenant-core
+    resource: src/py/vertebra/db/adapters/postgres/core.py
+    title: "PostgreSQL tenant and session SQL builders"
+  - id: src-oracle-tenant-core
+    resource: src/py/vertebra/db/adapters/oracle/core.py
+    title: "Oracle context SQL builder"
+  - id: src-tenant-native-tests
+    resource: src/py/tests/unit/db/test_native_db_drivers.py
+    title: "Generic engine-purity positive and negative probes"
+  - id: src-tenant-enterprise-tests
+    resource: src/py/tests/unit/db/test_enterprise_olap_drivers.py
+    title: "Session bind and failure identity acceptance"
   - id: src-extensions-sqlspec-bigquery-py
     resource: src/py/vertebra/extensions/sqlspec/bigquery.py
     title: "BigQuery SQLSpec native statement defaults and session execution"
@@ -93,11 +105,22 @@ Single-operation stacks, non-pipeline drivers, stacks containing `execute_many`,
 
 | Symbol | Responsibility |
 |---|---|
-| [`TenantScopeConfig`](../../../../../src/py/vertebra/db/rls.py)[^src-db-rls-py] | `guc_name="app.tenant_id"`, `tenant_column="tenant_id"`, `parameter_cast="uuid"`. Validated in `__post_init__` via `SqlIdentifier.validate`. |
-| `TenantPredicate` | `to_sql_fragment(param_index)` validates `table_alias`, `tenant_column`, and `parameter_cast` via `SqlIdentifier.validate` and renders `alias.tenant_id = $N::uuid`. The cast goes on the parameter, never the column, so the planner can still use an index on `tenant_id`. An empty `table_alias` drops the prefix. |
-| `TenantPredicate.build_session_guc_sql` (static) | Returns `("SELECT set_config($1, $2, $3)", (guc_name, tenant_id, is_local))` for a transaction-local GUC that RLS policies can read. The sqlspec adapter drivers run it in `apply_tenant_predicate` and propagate any driver error. |
+| [`TenantScopeConfig`](../../../../../src/py/vertebra/db/rls.py)[^src-db-rls-py] | Frozen engine-neutral configuration: `setting_name="app.tenant_id"`, `tenant_column="tenant_id"`, `parameter_cast=None`. Column and cast names are validated as single identifiers. |
+| `TenantPredicate` | Frozen predicate with optional `table_alias=""`, bound `tenant_value`, `column_reference()`, and ANSI `to_sql_fragment(placeholder="?")`. Optional casts render `CAST(<placeholder> AS <type>)` on the parameter, preserving the indexed column. `guc_name` and generic session SQL builders are removed. |
+| [`PostgreSQLCore`](../../../../../src/py/vertebra/db/adapters/postgres/core.py)[^src-postgres-tenant-core] | `build_session_guc_sql` binds the setting name, tenant string, and local flag in `SELECT set_config($1, $2, $3)`. `build_tenant_predicate_sql` renders `$N` with an optional PostgreSQL `::<type>` cast. |
+| [`OracleCore`](../../../../../src/py/vertebra/db/adapters/oracle/core.py)[^src-oracle-tenant-core] | `build_session_context_sql` extracts the final segment of `setting_name`, validates namespace and attribute, and returns `BEGIN DBMS_SESSION.SET_CONTEXT(:namespace, :attribute, :value); END;` with named binds. |
 
-The intended layering is an explicit predicate for plan quality plus a session GUC for row-level-security policies. Both pieces are SQL fragments only. Nothing in the codebase installs RLS policies.
+`BaseSyncDriver.apply_tenant_predicate` and its async counterpart refuse unsupported engines with native `NotSupportedError`. PostgreSQL adapters compile through their existing statement profiles: sync uses psycopg `%s`, async uses asyncpg `$N`; typed SQLSpec parameters are unwrapped before native transport. Oracle adapters bind the context setter and return a named predicate. Original setter exceptions propagate unchanged.
+
+BigQuery and Spanner's eight SQLSpec config/driver constructors reject a non-None `tenant_predicate` as their first executable statement, before base initialization, core access, config resolution, broker allocation, or native side effects. Unsupported isolation sessions cannot be constructed. Unconfigured sessions retain query, script, Arrow, batch, and snapshot behavior; dead predicate `.apply` dispatch is removed.
+
+The current Oracle driver records context values in its SQLite stand-in. This verifies helper and emulation behavior only. Oracle requires a trusted package associated with `CREATE CONTEXT` in the call stack for live `DBMS_SESSION.SET_CONTEXT`; trusted-package provisioning, session reset, and live Oracle acceptance remain native Oracle driver work. No helper provisions RLS or VPD policies. [Oracle DBMS_SESSION reference](https://docs.oracle.com/en/database/oracle/oracle-database/26/arpls/DBMS_SESSION.html).
+
+### Generic Database Engine Purity
+
+The AST gate scans `db/*.py` and `db/driver/*.py` for adapter imports, executable adapter-class use, literal adapter loading, and engine-specific SQL construction. It excludes docstrings, annotations, and engine metadata. The registry permits only module-level adapter config imports directly listed in `REGISTERED_CONFIG_TYPES`, their declarative tuple and annotation/type-alias uses, and guarded `TYPE_CHECKING` driver imports used in annotations/type aliases. `SCHEME_REGISTRY` derives URL schemes from that tuple. Runtime driver imports, engine-class branches, identity dispatch, and direct construction remain forbidden.
+
+Cloud SQL and AlloyDB remain transport dialers from `db.dialer`, so their existing registry branches stay valid. Polymorphic `config_cls.from_url`, `config.build_sync_driver`, `config.build_async_driver`, and `ensure_module(self.driver_module)` retain configuration-owned driver resolution. Stable broker dialect IDs remain valid metadata. [^src-db-registry-py][^src-tenant-native-tests]
 
 ## 3. Change Feed (`cdc.py`)
 
@@ -151,3 +174,11 @@ Provenance sources: [^src-tests-unit-db-test-pg-dataplane-and-datafusion-py], [^
 
 [^src-extensions-sqlspec-bigquery-py]: `src/py/vertebra/extensions/sqlspec/bigquery.py` — BigQuery SQLSpec native statement defaults and session execution.
 [^src-extensions-sqlspec-spanner-py]: `src/py/vertebra/extensions/sqlspec/spanner.py` — Spanner SQLSpec parser and native parameter defaults.
+
+[^src-postgres-tenant-core]: `src/py/vertebra/db/adapters/postgres/core.py` — PostgreSQL tenant and session SQL builders.
+
+[^src-oracle-tenant-core]: `src/py/vertebra/db/adapters/oracle/core.py` — Oracle context SQL builder.
+
+[^src-tenant-native-tests]: `src/py/tests/unit/db/test_native_db_drivers.py` — Generic engine-purity positive and negative probes.
+
+[^src-tenant-enterprise-tests]: `src/py/tests/unit/db/test_enterprise_olap_drivers.py` — Session bind and failure identity acceptance.

@@ -12,6 +12,21 @@ verified:
     at: "2026-11-04T04:33:00Z"
     commit: f741701
 sources:
+  - id: src-tenant-rls-py
+    resource: src/py/vertebra/db/rls.py
+    title: "Engine-neutral tenant configuration and ANSI predicates"
+  - id: src-tenant-sqlspec-py
+    resource: src/py/vertebra/extensions/sqlspec/adapters.py
+    title: "Engine-owned session enforcement and unsupported-adapter refusal"
+  - id: src-bigquery-tools-py
+    resource: src/py/vertebra/db/adapters/bigquery/tools.py
+    title: "Adapter-owned BigQuery tool provider"
+  - id: src-spanner-tools-py
+    resource: src/py/vertebra/db/adapters/spanner/tools.py
+    title: "Adapter-owned Spanner tool provider"
+  - id: src-agent-tools-py
+    resource: src/py/vertebra/agent/tools/__init__.py
+    title: "Generic tool-provider bridge"
   - id: src-readme-md
     resource: README.md
     title: "Repository overview and quickstart documentation"
@@ -74,7 +89,7 @@ Vertebra is one unified runtime for Python and TypeScript — backend, frontend,
 - **Native HTTP (`vertebra-http`)**: Hyper HTTP/1.1 (`max_buf_size(65536)`, `pipeline_flush(false)`) and HTTP/2, opt-in h2c detection, `rustls` TLS with ALPN and mTLS (`tls` feature), optional HTTP/3 over QUIC (`http3` feature), lock-free atomic [`BackpressureController`](../../../src/rs/vertebra-http/src/backpressure.rs), cached `HealthEndpoint`, offloaded CORS, response compression, static asset mounts, OpenAPI cache, and HMR WebSockets, plus gRPC framing (`application/grpc`, `+json`, `+msgpack`), an SSE hub, WebSocket mounts, a shared-memory pub/sub broker, access logs, multipart parsing, `.well-known` discovery (`/.well-known/mcp.json`, `/.well-known/agent-card.json`), and an MCP stdio bridge.
 - **Bundling & SSR (`vertebra-bundler`)**: Oxc TS/JSX transforms ([`Bundler`](../../../src/rs/vertebra-bundler/src/bundler.rs)), `rolldown-notify` `SourceWatcher` for HMR, and QuickJS SSR context pooling ([`SSRPool`](../../../src/rs/vertebra-bundler/src/ssr.rs)).
 - **Object Storage (`vertebra-storage`, `vertebra.storage`)**: the `_storage` extension (`SyncObjectStore`, `AsyncObjectStore`, `StorageBuffer`, `RustStorageAwaitable`) wraps `object_store` (S3, GCS with zero-config ADC, Azure, HTTP) and adds OCI request signing ([`oci.rs`](../../../src/rs/vertebra-storage/src/oci.rs)) and S3/GCS/Azure SAS presigning ([`signing.rs`](../../../src/rs/vertebra-storage/src/signing.rs)). Python exposes [`SyncObjectStore`, `AsyncObjectStore`](../../../src/py/vertebra/storage/_store.py) with `LocalConfig`, `S3Config`, `GCSConfig`, `AzureConfig`, `OCIConfig`, `R2Config`, `HTTPConfig`, `MemoryConfig`, and `SigningConfig`, plus the Arrow `SyncReadableFile` / `AsyncReadableFile` bridge.
-- **Data Access (`vertebra.db`, `vertebra-db`)**: two-tier shared-memory database and cache plane across PostgreSQL, MySQL, SQLite, Oracle (Thin TNS/TTC + Autonomous Database Wallet + 26ai `VECTOR`/`OSON`), SQL Server / MSSQL (TDS + `@P1` parameter rewriting), DuckDB (single-writer SHM broker host with Arrow IPC), Google BigQuery (REST v2 + Storage Read/Write v1 `VTBARROW` + `ObjectTableConfig`), Google Cloud Spanner (GoogleSQL + `Spangres`, cached `multiplexed = true` sessions, wound-wait `Aborted` retry, `BatchWrite`, Data Boost `PartitionQuery` `VTBARROW`), Redis, and Valkey (RESP3 + `CLIENT TRACKING` + Sentinel + Cluster CRC16 slot routing); direct TCP/TLS (`:5432`, `:3306`) IAM OAuth2 token password resolution plus opt-in `SyncCloudSQLDialer` / `AsyncCloudSQLDialer` (`:3307`) and `SyncAlloyDBDialer` / `AsyncAlloyDBDialer` (`:5433` `MetadataExchangeRequest`); zero-copy `ArrowCursor` over `ShmRegion` Arrow IPC; `vertebra.server._channels.ChannelBus` (re-exported from `vertebra.framework.channels`); `SyncPipelineCapable` / `AsyncPipelineCapable` (`driver.pipeline()` native batching and ordered results), `ChangeFeed` & `SyncSpannerChangeStreamSource` / `AsyncSpannerChangeStreamSource` (CDC), `TenantPredicate` (row-level security), `DataFusionEngine`, governed MCP/A2A `vertebra.agent.tools.register_gcp_database_tools`, and `DatabaseRegistry`.
+- **Data Access (`vertebra.db`, `vertebra-db`)**: two-tier shared-memory database and cache plane across PostgreSQL, MySQL, SQLite, Oracle (Thin TNS/TTC + Autonomous Database Wallet + 26ai `VECTOR`/`OSON`), SQL Server / MSSQL (TDS + `@P1` parameter rewriting), DuckDB (single-writer SHM broker host with Arrow IPC), Google BigQuery (REST v2 + Storage Read/Write v1 `VTBARROW` + `ObjectTableConfig`), Google Cloud Spanner (GoogleSQL + `Spangres`, cached `multiplexed = true` sessions, wound-wait `Aborted` retry, `BatchWrite`, Data Boost `PartitionQuery` `VTBARROW`), Redis, and Valkey (RESP3 + `CLIENT TRACKING` + Sentinel + Cluster CRC16 slot routing); direct TCP/TLS (`:5432`, `:3306`) IAM OAuth2 token password resolution plus opt-in `SyncCloudSQLDialer` / `AsyncCloudSQLDialer` (`:3307`) and `SyncAlloyDBDialer` / `AsyncAlloyDBDialer` (`:5433` `MetadataExchangeRequest`); zero-copy `ArrowCursor` over `ShmRegion` Arrow IPC; `vertebra.server._channels.ChannelBus` (re-exported from `vertebra.framework.channels`); `SyncPipelineCapable` / `AsyncPipelineCapable` (`driver.pipeline()` native batching and ordered results), `ChangeFeed` & `SyncSpannerChangeStreamSource` / `AsyncSpannerChangeStreamSource` (CDC), `TenantPredicate` (ANSI tenant filtering with adapter-owned session builders), `DataFusionEngine`, adapter-owned `BigQueryToolProvider` / `SpannerToolProvider` descriptors consumed by generic `vertebra.agent.build_tools`, and `DatabaseRegistry`.
 - **Telemetry (`vertebra.telemetry`)**: `LogSink`, `LogHandler`, `LoggingConfig`, `TraceContext`, `SpanExporter`, `GenAiRecorder`, and `SqlTracePropagator`. `vertebra-core` provides `AsyncLogCore` ([`logger.rs`](../../../src/rs/vertebra-core/src/logger.rs)), `W3cTraceContext`, and `sanitize_sql_statement` ([`telemetry.rs`](../../../src/rs/vertebra-core/src/telemetry.rs)).
 - **Platform Runtime (`vertebra.server`)**: [`platform.py`](../../../src/py/vertebra/server/platform.py)[^src-server-platform-py] (`CgroupQuota` cgroup v2 sizing, `LameDuckController` drain, `ZPagesRegistry`, `PlatformAdapter`), `GilAuditReport` (free-threaded GIL re-enablement audit), `ShmAllocationPolicy` (`memfd_create` and `SCM_RIGHTS` fallback for constrained `/dev/shm`), and `EventLoopPool`.
 - **Live State (`vertebra.framework.live`)**: `LiveState`, `LiveStateRoom`, `StateDeltaFrame`, and `HybridLogicalClock` sync MessagePack deltas with last-write-wins ordering ([`live.py`](../../../src/py/vertebra/framework/live.py)).
@@ -83,6 +98,8 @@ Vertebra is one unified runtime for Python and TypeScript — backend, frontend,
 - **CLI (`vtb`)**: `run`, `dev`, `init`, `js`, `build`, `ai models`, `ai mcp`, and `workers run`, plus pluggable commands registered through `VertebraExtensionGroup`, `CLIPluginProtocol` (`on_cli_init`), `VertebraEnv`, and package entry points ([`cli/__init__.py`](../../../src/py/vertebra/cli/__init__.py)[^src-cli-init-py], [`cli/plugin_registry.py`](../../../src/py/vertebra/cli/plugin_registry.py)).
 - **TypeScript Client (`@vertebra/client`)**: [`HttpClient`](../../../src/ts/vertebra-client/src/client/client.ts) with retry/backoff, [`WebSocketClient`](../../../src/ts/vertebra-client/src/websocket.ts), `RealtimeChannel`, `SseClient`, [`SessionStore`](../../../src/ts/vertebra-client/src/store/index.ts), [`HotReloadClient`](../../../src/ts/vertebra-client/src/hmr/index.ts), `LiveStateClient`, `ArrowStreamClient`, `WASMClient`, `ApexRegion`, `TraceContext`, `routeUrl`/`wsUrl` (`/router`), `registerWebMCPTools` (`/webmcp`), and `McpClient`/`A2aClient` (`/agent`), with subpath adapters for React, Vue, Svelte, Angular, HTMX, and Vite.
 <!-- truth: end -->
+
+Tenant configuration is engine-neutral (`setting_name`, optional parameter cast, caller-selected placeholder). PostgreSQL/Oracle cores own session SQL; unsupported SQLSpec adapters refuse session enforcement, and BigQuery/Spanner reject configured predicates before initialization. Oracle context support currently has helper/SQLite-stand-in acceptance; trusted-package provisioning, session reset, and live Oracle acceptance belong to native Oracle driver work.
 
 ## Architectural Overview
 
@@ -120,3 +137,13 @@ Provenance sources: [^src-readme-md], [^src-pyproject-toml], [^src-wasm-init-py]
 [^src-cargo-toml]: `src/rs/Cargo.toml` — Rust crate manifest (src/rs/Cargo.toml).
 [^src-package-json]: `src/ts/vertebra-client/package.json` — TypeScript package manifest (src/ts/vertebra-client/package.json).
 [^src-src-index-ts]: `src/ts/vertebra-client/src/index.ts` — TypeScript client module (src/ts/vertebra-client/src/index.ts).
+
+[^src-tenant-rls-py]: `src/py/vertebra/db/rls.py` — Engine-neutral tenant configuration and ANSI predicates.
+
+[^src-tenant-sqlspec-py]: `src/py/vertebra/extensions/sqlspec/adapters.py` — Engine-owned session enforcement and unsupported-adapter refusal.
+
+[^src-bigquery-tools-py]: `src/py/vertebra/db/adapters/bigquery/tools.py` — Adapter-owned BigQuery tool provider.
+
+[^src-spanner-tools-py]: `src/py/vertebra/db/adapters/spanner/tools.py` — Adapter-owned Spanner tool provider.
+
+[^src-agent-tools-py]: `src/py/vertebra/agent/tools/__init__.py` — Generic tool-provider bridge.

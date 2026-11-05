@@ -161,6 +161,8 @@ flowchart LR
 | [`StaticEmbedder`](../../../../../src/py/vertebra/embeddings/_local.py) | `potion-base-8M` (`512` dims) | Pure-Rust `StaticEmbedderCore` mmap lookup table with zero ML dependencies. |
 | [`RemoteEmbedder`](../../../../../src/py/vertebra/embeddings/_remote.py)[^src-embeddings-remote-py] | `embeddinggemma-2-270m` (`768` dims) | Rust HTTP/2 gRPC `/vertebra.EmbeddingService/BatchEmbed` client and server (`create_embedding_grpc_service`). |
 
+SQL embedding execution remains adapter-owned. PostgreSQL inference and similarity search prepare `%s` for sync psycopg and `$N` for async transport, retaining model/text/vector binds. The generic `EmbeddingPushdown` protocol and `PushdownEmbedder` do not construct engine SQL or import concrete adapters; the engine-purity gate rejects engine SQL construction inside generic database modules. [^src-adapters-postgres-embeddings-py][^src-embeddings-pushdown-py]
+
 ---
 
 ## 5. `EmbeddingBroker` & Free-Threaded `3.14t`/`3.15t` Quarantine (`_broker.py`)
