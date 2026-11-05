@@ -1,62 +1,77 @@
 ---
 type: Concept
-title: "Framework Extensions: Litestar, Starlette, FastAPI, Flask, and Django"
-description: "First-class framework plugins, matchit 0.9 RouteCompiler, Rust middleware offload specs, zero-copy C-API FastPath dispatch, and ecosystem bridges across Litestar, Starlette, FastAPI, Flask, and Django."
+title: 'Framework Extensions: Litestar, Starlette, FastAPI, Flask, and Django'
+description: First-class framework plugins, matchit 0.9 RouteCompiler, Rust middleware
+  offload specs, zero-copy C-API FastPath dispatch, and ecosystem bridges across Litestar,
+  Starlette, FastAPI, Flask, and Django.
 status: stable
-tags: [domains, extensions, litestar, starlette, fastapi, flask, django, asgi, wsgi, fastpath]
+tags:
+- domains
+- extensions
+- litestar
+- starlette
+- fastapi
+- flask
+- django
+- asgi
+- wsgi
+- fastpath
 generated:
   by: flow/0.26.0
-  at: "2026-11-04T04:33:00Z"
+  at: '2026-11-04T04:33:00Z'
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+- by: agent:codex
+  at: '2026-11-05T06:09:26Z'
+  commit: 5ad85a1b406f5b3ed01ce8d1f536e02383bc89e1
+- by: agent:flow-setup
+  at: '2026-11-04T04:33:00Z'
+  commit: f741701
 sources:
-  - id: src-extensions-litestar-init-py
-    resource: src/py/vertebra/extensions/litestar/__init__.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/__init__.py)"
-  - id: src-extensions-litestar-config-py
-    resource: src/py/vertebra/extensions/litestar/config.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/config.py)"
-  - id: src-extensions-litestar-plugin-py
-    resource: src/py/vertebra/extensions/litestar/plugin.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/plugin.py)"
-  - id: src-extensions-litestar-router-py
-    resource: src/py/vertebra/extensions/litestar/router.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/router.py)"
-  - id: src-extensions-litestar-offload-py
-    resource: src/py/vertebra/extensions/litestar/offload.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/offload.py)"
-  - id: src-extensions-litestar-fastpath-py
-    resource: src/py/vertebra/extensions/litestar/fastpath.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/fastpath.py)"
-  - id: src-extensions-litestar-channels-py
-    resource: src/py/vertebra/extensions/litestar/channels.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/channels.py)"
-  - id: src-extensions-litestar-store-py
-    resource: src/py/vertebra/extensions/litestar/store.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/store.py)"
-  - id: src-extensions-starlette-init-py
-    resource: src/py/vertebra/extensions/starlette/__init__.py
-    title: "Python implementation module (src/py/vertebra/extensions/starlette/__init__.py)"
-  - id: src-extensions-fastapi-init-py
-    resource: src/py/vertebra/extensions/fastapi/__init__.py
-    title: "Python implementation module (src/py/vertebra/extensions/fastapi/__init__.py)"
-  - id: src-extensions-flask-init-py
-    resource: src/py/vertebra/extensions/flask/__init__.py
-    title: "Python implementation module (src/py/vertebra/extensions/flask/__init__.py)"
-  - id: src-extensions-django-init-py
-    resource: src/py/vertebra/extensions/django/__init__.py
-    title: "Python implementation module (src/py/vertebra/extensions/django/__init__.py)"
-  - id: src-server-channels-py
-    resource: src/py/vertebra/server/_channels.py
-    title: "Engine-neutral channel fan-out and capability bridges"
-  - id: src-server-routing-py
-    resource: src/py/vertebra/server/_routing.py
-    title: "Python implementation module (src/py/vertebra/server/_routing.py)"
-  - id: src-server-fastpath-py
-    resource: src/py/vertebra/server/_fastpath.py
-    title: "Python implementation module (src/py/vertebra/server/_fastpath.py)"
+- id: src-extensions-litestar-init-py
+  resource: src/py/vertebra/extensions/litestar/__init__.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/__init__.py)
+- id: src-extensions-litestar-config-py
+  resource: src/py/vertebra/extensions/litestar/config.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/config.py)
+- id: src-extensions-litestar-plugin-py
+  resource: src/py/vertebra/extensions/litestar/plugin.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/plugin.py)
+- id: src-extensions-litestar-router-py
+  resource: src/py/vertebra/extensions/litestar/router.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/router.py)
+- id: src-extensions-litestar-offload-py
+  resource: src/py/vertebra/extensions/litestar/offload.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/offload.py)
+- id: src-extensions-litestar-fastpath-py
+  resource: src/py/vertebra/extensions/litestar/fastpath.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/fastpath.py)
+- id: src-extensions-litestar-channels-py
+  resource: src/py/vertebra/extensions/litestar/channels.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/channels.py)
+- id: src-extensions-litestar-store-py
+  resource: src/py/vertebra/extensions/litestar/store.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/store.py)
+- id: src-extensions-starlette-init-py
+  resource: src/py/vertebra/extensions/starlette/__init__.py
+  title: Python implementation module (src/py/vertebra/extensions/starlette/__init__.py)
+- id: src-extensions-fastapi-init-py
+  resource: src/py/vertebra/extensions/fastapi/__init__.py
+  title: Python implementation module (src/py/vertebra/extensions/fastapi/__init__.py)
+- id: src-extensions-flask-init-py
+  resource: src/py/vertebra/extensions/flask/__init__.py
+  title: Python implementation module (src/py/vertebra/extensions/flask/__init__.py)
+- id: src-extensions-django-init-py
+  resource: src/py/vertebra/extensions/django/__init__.py
+  title: Python implementation module (src/py/vertebra/extensions/django/__init__.py)
+- id: src-server-channels-py
+  resource: src/py/vertebra/server/_channels.py
+  title: Engine-neutral channel fan-out and capability bridges
+- id: src-server-routing-py
+  resource: src/py/vertebra/server/_routing.py
+  title: Python implementation module (src/py/vertebra/server/_routing.py)
+- id: src-server-fastpath-py
+  resource: src/py/vertebra/server/_fastpath.py
+  title: Python implementation module (src/py/vertebra/server/_fastpath.py)
 ---
 
 # Framework Extensions: Litestar, Starlette, FastAPI, Flask, and Django

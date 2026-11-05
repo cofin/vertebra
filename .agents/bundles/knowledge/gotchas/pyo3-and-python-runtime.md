@@ -1,98 +1,142 @@
 ---
 type: Guide
-title: "PyO3 FFI, Embedded Globals & Python Runtime Gotchas"
-description: "Footguns in Embedded PyO3 module initialization, gil_used = false and conditional freelist on 3.14t/3.15t, PyBuffer_FillInfo refcounting, C-API ASGI/RSGI stepping, and Litestar v2/v3 parity."
+title: PyO3 FFI, Embedded Globals & Python Runtime Gotchas
+description: Footguns in Embedded PyO3 module initialization, gil_used = false and
+  conditional freelist on 3.14t/3.15t, PyBuffer_FillInfo refcounting, C-API ASGI/RSGI
+  stepping, and Litestar v2/v3 parity.
 status: stable
-tags: [gotchas, pyo3, asgi, python, free-threaded, litestar]
+tags:
+- gotchas
+- pyo3
+- asgi
+- python
+- free-threaded
+- litestar
 generated:
   by: flow/0.26.0
-  at: "2026-11-04T04:33:00Z"
+  at: '2026-11-04T04:33:00Z'
 verified:
-  - by: agent:flow-review
-    at: "2026-11-05T00:35:59Z"
-    commit: 4ce057e5aff909fcda2488cc0f6c4882ad0d38f0
+- by: agent:codex
+  at: '2026-11-05T06:09:26Z'
+  commit: 5ad85a1b406f5b3ed01ce8d1f536e02383bc89e1
+- by: agent:flow-review
+  at: '2026-11-05T00:35:59Z'
+  commit: 4ce057e5aff909fcda2488cc0f6c4882ad0d38f0
 sources:
-  - id: src-vertebra-py-src-lib-rs
-    resource: src/rs/vertebra-py/src/lib.rs
-    title: "Rust implementation module (src/rs/vertebra-py/src/lib.rs)"
-  - id: src-vertebra-py-src-transport-rs
-    resource: src/rs/vertebra-py/src/transport.rs
-    title: "Rust implementation module (src/rs/vertebra-py/src/transport.rs)"
-  - id: src-vertebra-py-src-request-rs
-    resource: src/rs/vertebra-py/src/request.rs
-    title: "Rust implementation module (src/rs/vertebra-py/src/request.rs)"
-  - id: src-vertebra-py-src-rsgi-http-rs
-    resource: src/rs/vertebra-py/src/rsgi/http.rs
-    title: "Rust implementation module (src/rs/vertebra-py/src/rsgi/http.rs)"
-  - id: src-vertebra-py-src-wsgi-runner-rs
-    resource: src/rs/vertebra-py/src/wsgi/runner.rs
-    title: "Rust implementation module (src/rs/vertebra-py/src/wsgi/runner.rs)"
-  - id: src-vertebra-bundler-src-lib-rs
-    resource: src/rs/vertebra-bundler/src/lib.rs
-    title: "Rust implementation module (src/rs/vertebra-bundler/src/lib.rs)"
-  - id: src-vertebra-storage-src-lib-rs
-    resource: src/rs/vertebra-storage/src/lib.rs
-    title: "Rust implementation module (src/rs/vertebra-storage/src/lib.rs)"
-  - id: src-vertebra-http-src-main-rs
-    resource: src/rs/vertebra-http/src/main.rs
-    title: "Rust implementation module (src/rs/vertebra-http/src/main.rs)"
-  - id: src-server-worker-py
-    resource: src/py/vertebra/server/worker.py
-    title: "Python implementation module (src/py/vertebra/server/worker.py)"
-  - id: src-server-asgi-runner-py
-    resource: src/py/vertebra/server/_asgi/_runner.py
-    title: "Python implementation module (src/py/vertebra/server/_asgi/_runner.py)"
-  - id: src-server-asgi-wire-py
-    resource: src/py/vertebra/server/_asgi/_wire.py
-    title: "Python implementation module (src/py/vertebra/server/_asgi/_wire.py)"
-  - id: src-server-wsgi-adapter-py
-    resource: src/py/vertebra/server/_wsgi/_adapter.py
-    title: "Python implementation module (src/py/vertebra/server/_wsgi/_adapter.py)"
-  - id: src-server-gil-audit-py
-    resource: src/py/vertebra/server/_gil_audit.py
-    title: "Python implementation module (src/py/vertebra/server/_gil_audit.py)"
-  - id: src-supervisor-supervisor-py
-    resource: src/py/vertebra/supervisor/_supervisor.py
-    title: "Python implementation module (src/py/vertebra/supervisor/_supervisor.py)"
-  - id: src-extensions-litestar-plugin-py
-    resource: src/py/vertebra/extensions/litestar/plugin.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/plugin.py)"
-  - id: src-extensions-litestar-offload-py
-    resource: src/py/vertebra/extensions/litestar/offload.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/offload.py)"
-  - id: src-extensions-litestar-fastpath-py
-    resource: src/py/vertebra/extensions/litestar/fastpath.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/fastpath.py)"
-  - id: src-extensions-litestar-store-py
-    resource: src/py/vertebra/extensions/litestar/store.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/store.py)"
-  - id: src-utils-serializers-zero-copy-py
-    resource: src/py/vertebra/utils/serializers/_zero_copy.py
-    title: "Python implementation module (src/py/vertebra/utils/serializers/_zero_copy.py)"
-  - id: src-utils-text-py
-    resource: src/py/vertebra/utils/text.py
-    title: "Python implementation module (src/py/vertebra/utils/text.py)"
-  - id: src-utils-init-py
-    resource: src/py/vertebra/utils/__init__.py
-    title: "Python implementation module (src/py/vertebra/utils/__init__.py)"
-  - id: src-tools-docs-generate-cli-docs-py
-    resource: tools/docs/generate_cli_docs.py
-    title: "Repository tooling module (tools/docs/generate_cli_docs.py)"
-  - id: src-pyproject-toml
-    resource: pyproject.toml
-    title: "Python package metadata, dependencies, and tool configuration"
-  - id: src-db-arrow-shm
-    resource: src/rs/vertebra-db/src/arrow_shm.rs
-    title: "Registered and unregistered Arrow SHM writers"
-  - id: src-db-py-async
-    resource: src/rs/vertebra-db/src/py_async.rs
-    title: "Capsule destructor and per-extension completion queues"
-  - id: src-core-shm-capsule
-    resource: src/rs/vertebra-core/src/shm.rs
-    title: "SHM capsule and unlink versus mapping lifetime"
-  - id: src-py-arrow-cursor
-    resource: src/rs/vertebra-py/src/db.rs
-    title: "Single-consumer capsule adoption and cursor release"
+- id: src-stack-implementation
+  resource: src/py/vertebra/extensions/sqlspec/adapters.py
+  title: Prepared SQLSpec result construction and native bind execution
+- id: src-stack-tests
+  resource: src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
+  title: Native bind, classification, Arrow and batched execution regressions
+- id: src-converter-tests
+  resource: src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
+  title: Optional psycopg query and parameter converter tests
+- id: src-channel-implementation
+  resource: src/py/vertebra/server/_channels.py
+  title: Non-null shared-feed identity and independent output channels
+- id: src-channel-regressions
+  resource: src/py/tests/unit/db/test_native_db_drivers.py
+  title: Shared-feed, absent-feed and per-output duplicate suppression tests
+- id: src-provider-bridge
+  resource: src/py/vertebra/agent/tools/__init__.py
+  title: Generic typed invocation and caller-bound provider confirmation
+- id: src-provider-contracts
+  resource: src/py/vertebra/_typing.py
+  title: Agent-neutral provider and policy error contracts
+- id: src-provider-snapshot-tests
+  resource: src/py/tests/unit/agent/test_runtime_and_workflows.py
+  title: Owned invocation and approval snapshots under caller mutation
+- id: src-bigquery-bind-types
+  resource: src/py/vertebra/db/adapters/bigquery/core.py
+  title: Type-sensitive native BOOL, INT64 and FLOAT64 parameter encoding
+- id: src-gcp-tenant-bigquery
+  resource: src/py/vertebra/extensions/sqlspec/bigquery.py
+  title: Early unsupported tenant enforcement in BigQuery constructors
+- id: src-gcp-tenant-spanner
+  resource: src/py/vertebra/extensions/sqlspec/spanner.py
+  title: Early unsupported tenant enforcement in Spanner constructors
+- id: src-vertebra-py-src-lib-rs
+  resource: src/rs/vertebra-py/src/lib.rs
+  title: Rust implementation module (src/rs/vertebra-py/src/lib.rs)
+- id: src-vertebra-py-src-transport-rs
+  resource: src/rs/vertebra-py/src/transport.rs
+  title: Rust implementation module (src/rs/vertebra-py/src/transport.rs)
+- id: src-vertebra-py-src-request-rs
+  resource: src/rs/vertebra-py/src/request.rs
+  title: Rust implementation module (src/rs/vertebra-py/src/request.rs)
+- id: src-vertebra-py-src-rsgi-http-rs
+  resource: src/rs/vertebra-py/src/rsgi/http.rs
+  title: Rust implementation module (src/rs/vertebra-py/src/rsgi/http.rs)
+- id: src-vertebra-py-src-wsgi-runner-rs
+  resource: src/rs/vertebra-py/src/wsgi/runner.rs
+  title: Rust implementation module (src/rs/vertebra-py/src/wsgi/runner.rs)
+- id: src-vertebra-bundler-src-lib-rs
+  resource: src/rs/vertebra-bundler/src/lib.rs
+  title: Rust implementation module (src/rs/vertebra-bundler/src/lib.rs)
+- id: src-vertebra-storage-src-lib-rs
+  resource: src/rs/vertebra-storage/src/lib.rs
+  title: Rust implementation module (src/rs/vertebra-storage/src/lib.rs)
+- id: src-vertebra-http-src-main-rs
+  resource: src/rs/vertebra-http/src/main.rs
+  title: Rust implementation module (src/rs/vertebra-http/src/main.rs)
+- id: src-server-worker-py
+  resource: src/py/vertebra/server/worker.py
+  title: Python implementation module (src/py/vertebra/server/worker.py)
+- id: src-server-asgi-runner-py
+  resource: src/py/vertebra/server/_asgi/_runner.py
+  title: Python implementation module (src/py/vertebra/server/_asgi/_runner.py)
+- id: src-server-asgi-wire-py
+  resource: src/py/vertebra/server/_asgi/_wire.py
+  title: Python implementation module (src/py/vertebra/server/_asgi/_wire.py)
+- id: src-server-wsgi-adapter-py
+  resource: src/py/vertebra/server/_wsgi/_adapter.py
+  title: Python implementation module (src/py/vertebra/server/_wsgi/_adapter.py)
+- id: src-server-gil-audit-py
+  resource: src/py/vertebra/server/_gil_audit.py
+  title: Python implementation module (src/py/vertebra/server/_gil_audit.py)
+- id: src-supervisor-supervisor-py
+  resource: src/py/vertebra/supervisor/_supervisor.py
+  title: Python implementation module (src/py/vertebra/supervisor/_supervisor.py)
+- id: src-extensions-litestar-plugin-py
+  resource: src/py/vertebra/extensions/litestar/plugin.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/plugin.py)
+- id: src-extensions-litestar-offload-py
+  resource: src/py/vertebra/extensions/litestar/offload.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/offload.py)
+- id: src-extensions-litestar-fastpath-py
+  resource: src/py/vertebra/extensions/litestar/fastpath.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/fastpath.py)
+- id: src-extensions-litestar-store-py
+  resource: src/py/vertebra/extensions/litestar/store.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/store.py)
+- id: src-utils-serializers-zero-copy-py
+  resource: src/py/vertebra/utils/serializers/_zero_copy.py
+  title: Python implementation module (src/py/vertebra/utils/serializers/_zero_copy.py)
+- id: src-utils-text-py
+  resource: src/py/vertebra/utils/text.py
+  title: Python implementation module (src/py/vertebra/utils/text.py)
+- id: src-utils-init-py
+  resource: src/py/vertebra/utils/__init__.py
+  title: Python implementation module (src/py/vertebra/utils/__init__.py)
+- id: src-tools-docs-generate-cli-docs-py
+  resource: tools/docs/generate_cli_docs.py
+  title: Repository tooling module (tools/docs/generate_cli_docs.py)
+- id: src-pyproject-toml
+  resource: pyproject.toml
+  title: Python package metadata, dependencies, and tool configuration
+- id: src-db-arrow-shm
+  resource: src/rs/vertebra-db/src/arrow_shm.rs
+  title: Registered and unregistered Arrow SHM writers
+- id: src-db-py-async
+  resource: src/rs/vertebra-db/src/py_async.rs
+  title: Capsule destructor and per-extension completion queues
+- id: src-core-shm-capsule
+  resource: src/rs/vertebra-core/src/shm.rs
+  title: SHM capsule and unlink versus mapping lifetime
+- id: src-py-arrow-cursor
+  resource: src/rs/vertebra-py/src/db.rs
+  title: Single-consumer capsule adoption and cursor release
 ---
 
 # PyO3 FFI, Embedded Globals & Python Runtime Gotchas
@@ -154,6 +198,16 @@ sources:
 - **`msgspec.Struct` Per-Field Docstrings in `scan_public_docstrings`**: `tools.docs.scan_public_docstrings::scan_undocumented_typeddicts` flags `Attributes:` sections in public `msgspec.Struct` class docstrings (`has_duplicate_class_attributes=True`). Document `msgspec.Struct` fields using inline per-field docstrings immediately below each field definition rather than a class-level `Attributes:` block.
 - **`GuardProtocol` Subclass Invocation (`agent/core/guards.py`)**: `GuardProtocol` is a `typing.Protocol` defining `async def __call__(self, ctx: AgentContext) -> None: ...`. Any guard class that subclasses `GuardProtocol` and implements `async def check(self, context: Any) -> None:` still has `callable(guard) is True` because it inherits the no-op `Protocol.__call__` stub. Always check `check_fn = getattr(guard, "check", None)` before falling back to `guard(ctx)` in `Tool.invoke` and `GuardChain.execute`.
 
+## SQLSpec Preparation, Native Binds and Optional Evidence
+
+- **A generic callable wrapper needs the original signature and an owned invocation**: `build_tools` supports named parameters, rejects positional-only/variadic or reserved declarations, and exposes resolved types to `Tool.invoke`; an input schema alone around `**kwargs` does not preserve conversion. Defaults are materialized and bound arguments deep-copied before policy, approval and suspension. Execution uses that same snapshot, while the ticket owns an independent copy; never validate one object and execute later from mutable caller data. Native `ToolPolicyError` becomes an agent permission error only in the generic bridge.[^src-provider-bridge][^src-provider-contracts][^src-provider-snapshot-tests]
+- **Python equality does not identify an approved native bind**: `True == 1 == 1.0`, but BigQuery assigns distinct `BOOL`/`INT64`/`FLOAT64` types. The provider bridge compares converted types and values recursively, including container contents and Struct/dataclass fields; a scalar type change requires new approval even inside a nested record. Keep this check alongside the owned invocation snapshot.[^src-provider-bridge][^src-provider-snapshot-tests][^src-bigquery-bind-types]
+- **Reject unsupported tenant sessions before constructing them**: BigQuery/Spanner sync/async config and driver constructors reject non-null tenant enforcement before base/core/config/broker access. Per-method rejection misses alternate script/Arrow/batch/snapshot routes and can already have caused side effects.[^src-gcp-tenant-bigquery][^src-gcp-tenant-spanner]
+- **Prepared metadata is part of the result contract**: `StatementStack` row-producing operations still use the `execute` method. Use the prepared statement's `returns_rows()` and supported `SQLResult`/`StackResult` factories; a leading SQL keyword or a synthetic `rows=` result constructor does not preserve the installed upstream contract.[^src-stack-implementation][^src-stack-tests]
+- **Valid parser output can still be invalid native input**: Check emitted placeholders and parameter shape at the real native driver's external-client boundary. PostgreSQL sync pyformat, async numeric, MySQL pyformat, BigQuery/GoogleSQL Spanner named-at and Spangres numeric defaults are wrapper-owned; preserve explicit caller config and the same prepared statement's classification. Arrow options are execution settings, not bind names, and batched sets need `is_many=True` preparation.[^src-stack-implementation][^src-stack-tests]
+- **A skipped converter is no bind acceptance**: PostgreSQL primitive tests use `pytest.importorskip` for psycopg's actual query/parameter converter. A converter-enabled run is separate evidence from a suite where those cases skip; temporary cached-package paths belong in run evidence, never production imports or maintained documentation.[^src-converter-tests]
+- **Absent feeds are not a shared feed**: `None is None` must not suppress local channel delivery. Shared-feed duplicate suppression requires non-null object identity; a different explicit output topic adds a delivery there while preserving the original feed observation. Do not generalize this local rule to distributed exactly-once semantics.[^src-channel-implementation][^src-channel-regressions]
+
 ## Cross-extension Arrow capsules and release
 
 - **Independent globals**: A region registered in an optional extension's private `ACTIVE_ARROW_SHM_REGIONS` map cannot be released through the core extension's copy of that map. Use `write_shm_arrow_region_unregistered` or `ShmArrowStreamWriter::finish_unregistered` for capsule transfer.[^src-db-arrow-shm]
@@ -196,3 +250,15 @@ Provenance sources: [^src-vertebra-py-src-transport-rs].
 [^src-core-shm-capsule]: `src/rs/vertebra-core/src/shm.rs` — SHM capsule and unlink versus mapping lifetime.
 
 [^src-py-arrow-cursor]: `src/rs/vertebra-py/src/db.rs` — Single-consumer capsule adoption and cursor release.
+
+[^src-stack-implementation]: `src/py/vertebra/extensions/sqlspec/adapters.py` — Prepared SQLSpec result construction and native bind execution.
+[^src-stack-tests]: `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py` — Native bind, classification, Arrow and batched execution regressions.
+[^src-converter-tests]: `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py` — Optional psycopg query and parameter converter tests.
+[^src-channel-implementation]: `src/py/vertebra/server/_channels.py` — Non-null shared-feed identity and independent output channels.
+[^src-channel-regressions]: `src/py/tests/unit/db/test_native_db_drivers.py` — Shared-feed, absent-feed and per-output duplicate suppression tests.
+[^src-provider-bridge]: `src/py/vertebra/agent/tools/__init__.py` — Generic typed invocation and caller-bound provider confirmation.
+[^src-provider-contracts]: `src/py/vertebra/_typing.py` — Agent-neutral provider and policy error contracts.
+[^src-provider-snapshot-tests]: `src/py/tests/unit/agent/test_runtime_and_workflows.py` — Owned invocation and approval snapshots under caller mutation.
+[^src-bigquery-bind-types]: `src/py/vertebra/db/adapters/bigquery/core.py` — Type-sensitive native BOOL, INT64 and FLOAT64 parameter encoding.
+[^src-gcp-tenant-bigquery]: `src/py/vertebra/extensions/sqlspec/bigquery.py` — Early unsupported tenant enforcement in BigQuery constructors.
+[^src-gcp-tenant-spanner]: `src/py/vertebra/extensions/sqlspec/spanner.py` — Early unsupported tenant enforcement in Spanner constructors.

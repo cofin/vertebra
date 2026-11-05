@@ -1,62 +1,75 @@
 ---
 type: Guide
-title: "SQLSpec, Advanced Alchemy & SQLAlchemy Dialect Extensions"
-description: "The `vertebra.extensions.sqlspec`, `vertebra.extensions.alchemy`, and `vertebra.extensions.sqlalchemy` packages: Tier-1 native SHM adapters (`SyncAdapterConfig`, `AsyncAdapterConfig`), Tier-2 universal SHM broker proxy (`ProxySyncConfig`, `ProxyAsyncConfig`), real `+vtb` dialect implementations, column types, and CDC event backends."
+title: SQLSpec, Advanced Alchemy & SQLAlchemy Dialect Extensions
+description: 'The `vertebra.extensions.sqlspec`, `vertebra.extensions.alchemy`, and
+  `vertebra.extensions.sqlalchemy` packages: Tier-1 native SHM adapters (`SyncAdapterConfig`,
+  `AsyncAdapterConfig`), Tier-2 universal SHM broker proxy (`ProxySyncConfig`, `ProxyAsyncConfig`),
+  real `+vtb` dialect implementations, column types, and CDC event backends.'
 status: stable
-tags: [domains, extensions, sqlspec, sqlalchemy, alembic, shm, arrow]
+tags:
+- domains
+- extensions
+- sqlspec
+- sqlalchemy
+- alembic
+- shm
+- arrow
 generated:
   by: flow/0.26.0
-  at: "2026-11-04T04:33:00Z"
+  at: '2026-11-04T04:33:00Z'
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+- by: agent:codex
+  at: '2026-11-05T06:09:26Z'
+  commit: 5ad85a1b406f5b3ed01ce8d1f536e02383bc89e1
+- by: agent:flow-setup
+  at: '2026-11-04T04:33:00Z'
+  commit: f741701
 sources:
-  - id: src-extensions-sqlspec-init-py
-    resource: src/py/vertebra/extensions/sqlspec/__init__.py
-    title: "Python implementation module (src/py/vertebra/extensions/sqlspec/__init__.py)"
-  - id: src-extensions-sqlspec-plugin-py
-    resource: src/py/vertebra/extensions/sqlspec/plugin.py
-    title: "Python implementation module (src/py/vertebra/extensions/sqlspec/plugin.py)"
-  - id: src-extensions-sqlspec-adapters-py
-    resource: src/py/vertebra/extensions/sqlspec/adapters.py
-    title: "Python implementation module (src/py/vertebra/extensions/sqlspec/adapters.py)"
-  - id: src-extensions-sqlspec-proxy-py
-    resource: src/py/vertebra/extensions/sqlspec/proxy.py
-    title: "Python implementation module (src/py/vertebra/extensions/sqlspec/proxy.py)"
-  - id: src-extensions-sqlspec-provider-py
-    resource: src/py/vertebra/extensions/sqlspec/provider.py
-    title: "Python implementation module (src/py/vertebra/extensions/sqlspec/provider.py)"
-  - id: src-extensions-sqlspec-storage-py
-    resource: src/py/vertebra/extensions/sqlspec/storage.py
-    title: "Python implementation module (src/py/vertebra/extensions/sqlspec/storage.py)"
-  - id: src-extensions-sqlspec-events-py
-    resource: src/py/vertebra/extensions/sqlspec/events.py
-    title: "Python implementation module (src/py/vertebra/extensions/sqlspec/events.py)"
-  - id: src-extensions-alchemy-init-py
-    resource: src/py/vertebra/extensions/alchemy/__init__.py
-    title: "Python implementation module (src/py/vertebra/extensions/alchemy/__init__.py)"
-  - id: src-extensions-alchemy-plugin-py
-    resource: src/py/vertebra/extensions/alchemy/plugin.py
-    title: "Python implementation module (src/py/vertebra/extensions/alchemy/plugin.py)"
-  - id: src-extensions-alchemy-broker-py
-    resource: src/py/vertebra/extensions/alchemy/broker.py
-    title: "Python implementation module (src/py/vertebra/extensions/alchemy/broker.py)"
-  - id: src-extensions-alchemy-storage-py
-    resource: src/py/vertebra/extensions/alchemy/storage.py
-    title: "Python implementation module (src/py/vertebra/extensions/alchemy/storage.py)"
-  - id: src-extensions-sqlalchemy-dialects-py
-    resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
-    title: "Python implementation module (src/py/vertebra/extensions/sqlalchemy/dialects.py)"
-  - id: src-extensions-sqlalchemy-types-py
-    resource: src/py/vertebra/extensions/sqlalchemy/types.py
-    title: "Python implementation module (src/py/vertebra/extensions/sqlalchemy/types.py)"
-  - id: src-extensions-sqlalchemy-alembic-py
-    resource: src/py/vertebra/extensions/sqlalchemy/alembic.py
-    title: "Python implementation module (src/py/vertebra/extensions/sqlalchemy/alembic.py)"
-  - id: src-pyproject-toml
-    resource: pyproject.toml
-    title: "Python package metadata, dependencies, and tool configuration"
+- id: src-extensions-sqlspec-init-py
+  resource: src/py/vertebra/extensions/sqlspec/__init__.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlspec/__init__.py)
+- id: src-extensions-sqlspec-plugin-py
+  resource: src/py/vertebra/extensions/sqlspec/plugin.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlspec/plugin.py)
+- id: src-extensions-sqlspec-adapters-py
+  resource: src/py/vertebra/extensions/sqlspec/adapters.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlspec/adapters.py)
+- id: src-extensions-sqlspec-proxy-py
+  resource: src/py/vertebra/extensions/sqlspec/proxy.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlspec/proxy.py)
+- id: src-extensions-sqlspec-provider-py
+  resource: src/py/vertebra/extensions/sqlspec/provider.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlspec/provider.py)
+- id: src-extensions-sqlspec-storage-py
+  resource: src/py/vertebra/extensions/sqlspec/storage.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlspec/storage.py)
+- id: src-extensions-sqlspec-events-py
+  resource: src/py/vertebra/extensions/sqlspec/events.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlspec/events.py)
+- id: src-extensions-alchemy-init-py
+  resource: src/py/vertebra/extensions/alchemy/__init__.py
+  title: Python implementation module (src/py/vertebra/extensions/alchemy/__init__.py)
+- id: src-extensions-alchemy-plugin-py
+  resource: src/py/vertebra/extensions/alchemy/plugin.py
+  title: Python implementation module (src/py/vertebra/extensions/alchemy/plugin.py)
+- id: src-extensions-alchemy-broker-py
+  resource: src/py/vertebra/extensions/alchemy/broker.py
+  title: Python implementation module (src/py/vertebra/extensions/alchemy/broker.py)
+- id: src-extensions-alchemy-storage-py
+  resource: src/py/vertebra/extensions/alchemy/storage.py
+  title: Python implementation module (src/py/vertebra/extensions/alchemy/storage.py)
+- id: src-extensions-sqlalchemy-dialects-py
+  resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlalchemy/dialects.py)
+- id: src-extensions-sqlalchemy-types-py
+  resource: src/py/vertebra/extensions/sqlalchemy/types.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlalchemy/types.py)
+- id: src-extensions-sqlalchemy-alembic-py
+  resource: src/py/vertebra/extensions/sqlalchemy/alembic.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlalchemy/alembic.py)
+- id: src-pyproject-toml
+  resource: pyproject.toml
+  title: Python package metadata, dependencies, and tool configuration
 ---
 
 # SQLSpec, Advanced Alchemy & SQLAlchemy Dialect Extensions

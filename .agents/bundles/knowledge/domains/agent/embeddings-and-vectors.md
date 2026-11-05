@@ -1,74 +1,88 @@
 ---
 type: Concept
-title: "Shared-Memory Vector Slabs, Zero-Weight Cloud & SQL Embeddings, and Local Broker"
-description: "The `vertebra-core::vector`, `vertebra-py::vector`, and `vertebra.embeddings` stack: POSIX shared-memory `VectorSlab` and `VectorCache`, PEP 3118 `VectorView` and `VectorBatchView`, SIMD MRL truncation and quantization, native HTTP/2 gRPC Vertex AI and Gemini embedders, AlloyDB and Oracle 26ai in-database SQL pushdown, and `1x` RAM `EmbeddingBroker` with free-threaded 3.14t/3.15t GIL quarantine."
+title: Shared-Memory Vector Slabs, Zero-Weight Cloud & SQL Embeddings, and Local Broker
+description: 'The `vertebra-core::vector`, `vertebra-py::vector`, and `vertebra.embeddings`
+  stack: POSIX shared-memory `VectorSlab` and `VectorCache`, PEP 3118 `VectorView`
+  and `VectorBatchView`, SIMD MRL truncation and quantization, native HTTP/2 gRPC
+  Vertex AI and Gemini embedders, AlloyDB and Oracle 26ai in-database SQL pushdown,
+  and `1x` RAM `EmbeddingBroker` with free-threaded 3.14t/3.15t GIL quarantine.'
 status: stable
-tags: [domains, agent, embeddings, vector, shm, grpc, simd]
+tags:
+- domains
+- agent
+- embeddings
+- vector
+- shm
+- grpc
+- simd
 generated:
   by: flow/0.26.0
-  at: "2026-11-04T04:33:00Z"
+  at: '2026-11-04T04:33:00Z'
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+- by: agent:codex
+  at: '2026-11-05T06:09:26Z'
+  commit: 5ad85a1b406f5b3ed01ce8d1f536e02383bc89e1
+- by: agent:flow-setup
+  at: '2026-11-04T04:33:00Z'
+  commit: f741701
 sources:
-  - id: src-adapters-oracle-embeddings-py
-    resource: src/py/vertebra/db/adapters/oracle/embeddings.py
-    title: "SQL embedding capability and facade"
-  - id: src-adapters-postgres-embeddings-py
-    resource: src/py/vertebra/db/adapters/postgres/embeddings.py
-    title: "SQL embedding capability and facade"
-  - id: src-adapters-spanner-embeddings-py
-    resource: src/py/vertebra/db/adapters/spanner/embeddings.py
-    title: "SQL embedding capability and facade"
-  - id: src-adapters-bigquery-embeddings-py
-    resource: src/py/vertebra/db/adapters/bigquery/embeddings.py
-    title: "SQL embedding capability and facade"
-  - id: src-embeddings-pushdown-py
-    resource: src/py/vertebra/embeddings/_pushdown.py
-    title: "SQL embedding capability and facade"
-  - id: src-vertebra-core-src-vector-rs
-    resource: src/rs/vertebra-core/src/vector.rs
-    title: "Rust implementation module (src/rs/vertebra-core/src/vector.rs)"
-  - id: src-vertebra-py-src-vector-rs
-    resource: src/rs/vertebra-py/src/vector.rs
-    title: "Rust implementation module (src/rs/vertebra-py/src/vector.rs)"
-  - id: src-vertebra-http-src-grpc-rs
-    resource: src/rs/vertebra-http/src/grpc.rs
-    title: "Rust implementation module (src/rs/vertebra-http/src/grpc.rs)"
-  - id: src-embeddings-init-py
-    resource: src/py/vertebra/embeddings/__init__.py
-    title: "Python implementation module (src/py/vertebra/embeddings/__init__.py)"
-  - id: src-embeddings-base-py
-    resource: src/py/vertebra/embeddings/_base.py
-    title: "Python implementation module (src/py/vertebra/embeddings/_base.py)"
-  - id: src-embeddings-google-py
-    resource: src/py/vertebra/embeddings/_google.py
-    title: "Python implementation module (src/py/vertebra/embeddings/_google.py)"
-  - id: src-embeddings-remote-py
-    resource: src/py/vertebra/embeddings/_remote.py
-    title: "Python implementation module (src/py/vertebra/embeddings/_remote.py)"
-  - id: src-embeddings-models-py
-    resource: src/py/vertebra/embeddings/_models.py
-    title: "Python implementation module (src/py/vertebra/embeddings/_models.py)"
-  - id: src-embeddings-broker-py
-    resource: src/py/vertebra/embeddings/_broker.py
-    title: "Python implementation module (src/py/vertebra/embeddings/_broker.py)"
-  - id: src-embeddings-local-py
-    resource: src/py/vertebra/embeddings/_local.py
-    title: "Python implementation module (src/py/vertebra/embeddings/_local.py)"
-  - id: src-cli-ai-py
-    resource: src/py/vertebra/cli/ai.py
-    title: "Python implementation module (src/py/vertebra/cli/ai.py)"
-  - id: src-tests-unit-embeddings-test-vector-views-py
-    resource: src/py/tests/unit/embeddings/test_vector_views.py
-    title: "Python implementation module (src/py/tests/unit/embeddings/test_vector_views.py)"
-  - id: src-tests-unit-embeddings-test-google-embedders-py
-    resource: src/py/tests/unit/embeddings/test_google_embedders.py
-    title: "Python implementation module (src/py/tests/unit/embeddings/test_google_embedders.py)"
-  - id: src-tests-unit-embeddings-test-embedding-broker-py
-    resource: src/py/tests/unit/embeddings/test_embedding_broker.py
-    title: "Python implementation module (src/py/tests/unit/embeddings/test_embedding_broker.py)"
+- id: src-adapters-oracle-embeddings-py
+  resource: src/py/vertebra/db/adapters/oracle/embeddings.py
+  title: SQL embedding capability and facade
+- id: src-adapters-postgres-embeddings-py
+  resource: src/py/vertebra/db/adapters/postgres/embeddings.py
+  title: SQL embedding capability and facade
+- id: src-adapters-spanner-embeddings-py
+  resource: src/py/vertebra/db/adapters/spanner/embeddings.py
+  title: SQL embedding capability and facade
+- id: src-adapters-bigquery-embeddings-py
+  resource: src/py/vertebra/db/adapters/bigquery/embeddings.py
+  title: SQL embedding capability and facade
+- id: src-embeddings-pushdown-py
+  resource: src/py/vertebra/embeddings/_pushdown.py
+  title: SQL embedding capability and facade
+- id: src-vertebra-core-src-vector-rs
+  resource: src/rs/vertebra-core/src/vector.rs
+  title: Rust implementation module (src/rs/vertebra-core/src/vector.rs)
+- id: src-vertebra-py-src-vector-rs
+  resource: src/rs/vertebra-py/src/vector.rs
+  title: Rust implementation module (src/rs/vertebra-py/src/vector.rs)
+- id: src-vertebra-http-src-grpc-rs
+  resource: src/rs/vertebra-http/src/grpc.rs
+  title: Rust implementation module (src/rs/vertebra-http/src/grpc.rs)
+- id: src-embeddings-init-py
+  resource: src/py/vertebra/embeddings/__init__.py
+  title: Python implementation module (src/py/vertebra/embeddings/__init__.py)
+- id: src-embeddings-base-py
+  resource: src/py/vertebra/embeddings/_base.py
+  title: Python implementation module (src/py/vertebra/embeddings/_base.py)
+- id: src-embeddings-google-py
+  resource: src/py/vertebra/embeddings/_google.py
+  title: Python implementation module (src/py/vertebra/embeddings/_google.py)
+- id: src-embeddings-remote-py
+  resource: src/py/vertebra/embeddings/_remote.py
+  title: Python implementation module (src/py/vertebra/embeddings/_remote.py)
+- id: src-embeddings-models-py
+  resource: src/py/vertebra/embeddings/_models.py
+  title: Python implementation module (src/py/vertebra/embeddings/_models.py)
+- id: src-embeddings-broker-py
+  resource: src/py/vertebra/embeddings/_broker.py
+  title: Python implementation module (src/py/vertebra/embeddings/_broker.py)
+- id: src-embeddings-local-py
+  resource: src/py/vertebra/embeddings/_local.py
+  title: Python implementation module (src/py/vertebra/embeddings/_local.py)
+- id: src-cli-ai-py
+  resource: src/py/vertebra/cli/ai.py
+  title: Python implementation module (src/py/vertebra/cli/ai.py)
+- id: src-tests-unit-embeddings-test-vector-views-py
+  resource: src/py/tests/unit/embeddings/test_vector_views.py
+  title: Python implementation module (src/py/tests/unit/embeddings/test_vector_views.py)
+- id: src-tests-unit-embeddings-test-google-embedders-py
+  resource: src/py/tests/unit/embeddings/test_google_embedders.py
+  title: Python implementation module (src/py/tests/unit/embeddings/test_google_embedders.py)
+- id: src-tests-unit-embeddings-test-embedding-broker-py
+  resource: src/py/tests/unit/embeddings/test_embedding_broker.py
+  title: Python implementation module (src/py/tests/unit/embeddings/test_embedding_broker.py)
 ---
 
 # Shared-Memory Vector Slabs, Zero-Weight Cloud & SQL Embeddings, and Local Broker

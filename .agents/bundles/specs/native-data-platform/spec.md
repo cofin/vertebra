@@ -15,7 +15,7 @@ state_revision: 1
 current_task: null
 last_verified_checkpoint: null
 created_at: 2026-11-03T04:05:00Z
-updated_at: "2026-11-05T01:03:53Z"
+updated_at: "2026-11-05T06:09:26Z"
 tags: [prd, drivers, rust, broker, storage, postgres, oracle, mysql, mssql]
 ---
 
@@ -100,7 +100,7 @@ Two product commitments, both feature complete:
 
 ### Cross-PRD execution order
 1. **Completed**: `integration-remediation` `critical-correctness-fixes`, `gcp-wire-protocol-correctness`, `gcp-driver-resilience`, and the codebase-wide `Sync*` / `Async*` split on `refactor/sync-async-names`.
-2. **Next**: `integration-remediation/db-engine-primitives` -> `native-postgres-driver` (Ch2) -> `broker-pool-sharing` (Ch3). The shared layout, driver contract, and conformance foundation are complete.
+2. **Next**: `native-postgres-driver` (Ch2) -> `broker-pool-sharing` (Ch3). `db-engine-primitives` is complete at `5ad85a1b`. The shared layout, driver contract, and conformance foundation are complete.
 3. **Subsequent waves**: `native-oracle-driver` (Ch4), `native-mysql-mssql-drivers` (Ch5), `native-embedded-and-cache-drivers` (Ch6), and `storage-completeness` (Ch7) after Ch1 + `db-engine-primitives`; `mcp-webmcp-core` after `db-engine-primitives`; `runtime-structure-and-throughput` after Ch1 + `db-engine-primitives`; `sqlspec-adapter-parity` after Ch1–Ch6 + `db-engine-primitives`; `sqlalchemy-and-django-integration` after Ch3 + Ch7 + `db-engine-primitives`; and `queues-tasks-and-channels` after Ch2 + Ch4 + Ch6 + `sqlspec-adapter-parity`.
 
 ## 4. Global Constraints
@@ -150,7 +150,7 @@ The global constraints from [integration-remediation](../integration-remediation
 ## Continuity Snapshot
 
 - **Flow ID:** `native-data-platform` (`state: planned`, `plan_revision: 4`, `plan_commit: "f741701"`)
-- **Active Focus:** The database foundation is complete. `integration-remediation/db-engine-primitives` is the next planned flow; native engine cutovers and shared broker pools remain unfinished.
+- **Active Focus:** The database foundation and engine-primitives flow are complete. Refine `native-postgres-driver` next, followed by broker pool sharing.
 - **Key decisions** *(user, 2026-11-03 – 2026-11-04)*:
   - Shared broker pools for Advanced Alchemy / SQLSpec configs and native Rust drivers across all engines remain required acceptance targets for their owning child flows.
   - Layout: `vertebra/db/adapters/<engine>/` for Python engine code, `vertebra/db/*` for engine-agnostic code, shared `vertebra-db` (`rlib`) for Rust primitives/codecs, and standalone PyO3 extension crates `src/rs/vertebra-<engine>` (`vertebra._<engine>`) + `[project.optional-dependencies].<engine>` per database engine.

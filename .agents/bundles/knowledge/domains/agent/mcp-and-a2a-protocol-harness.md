@@ -1,86 +1,98 @@
 ---
 type: Concept
-title: "Agentic Harness, MCP 2026-07-28 & A2A 1.0 Protocols"
-description: "The `vertebra.agent` protocol harness: Model Context Protocol (MCP 2026-07-28) SSE and Stdio transports, Agent-to-Agent (A2A 1.0) JCS/RFC 8785 Ed25519/ECDSA signed agent cards, durable DAG workflows, SpecTree execution, Rust PyO3 cryptographic fastpaths, and GenAI telemetry."
+title: Agentic Harness, MCP 2026-07-28 & A2A 1.0 Protocols
+description: 'The `vertebra.agent` protocol harness: Model Context Protocol (MCP 2026-07-28)
+  SSE and Stdio transports, Agent-to-Agent (A2A 1.0) JCS/RFC 8785 Ed25519/ECDSA signed
+  agent cards, durable DAG workflows, SpecTree execution, Rust PyO3 cryptographic
+  fastpaths, and GenAI telemetry.'
 status: stable
-tags: [domains, agent, mcp, a2a, workflow, telemetry]
+tags:
+- domains
+- agent
+- mcp
+- a2a
+- workflow
+- telemetry
 generated:
   by: flow/0.26.0
-  at: "2026-11-04T04:33:00Z"
+  at: '2026-11-04T04:33:00Z'
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+- by: agent:codex
+  at: '2026-11-05T06:09:26Z'
+  commit: 5ad85a1b406f5b3ed01ce8d1f536e02383bc89e1
+- by: agent:flow-setup
+  at: '2026-11-04T04:33:00Z'
+  commit: f741701
 sources:
-  - id: src-typing-public-py
-    resource: src/py/vertebra/typing.py
-    title: "Public neutral ToolProvider and ToolPolicyError exports"
-  - id: src-typing-internal-py
-    resource: src/py/vertebra/_typing.py
-    title: "Shared neutral callable-map contract and policy exception"
-  - id: src-db-bigquery-tools-py
-    resource: src/py/vertebra/db/adapters/bigquery/tools.py
-    title: "Adapter-owned BigQuery operations and billing policies"
-  - id: src-db-spanner-tools-py
-    resource: src/py/vertebra/db/adapters/spanner/tools.py
-    title: "Adapter-owned Spanner operations and snapshot policies"
-  - id: src-agent-init-py
-    resource: src/py/vertebra/agent/__init__.py
-    title: "Python implementation module (src/py/vertebra/agent/__init__.py)"
-  - id: src-agent-tools-init-py
-    resource: src/py/vertebra/agent/tools/__init__.py
-    title: "Generic provider adaptation and caller-bound confirmation"
-  - id: src-tests-unit-extensions-test-gcp-adapters-and-sqlalchemy-py
-    resource: src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
-    title: "GCP adapter and agent tool behavior tests"
-  - id: src-agent-mcp-service-py
-    resource: src/py/vertebra/agent/mcp/service.py
-    title: "Python implementation module (src/py/vertebra/agent/mcp/service.py)"
-  - id: src-agent-mcp-routes-py
-    resource: src/py/vertebra/agent/mcp/routes.py
-    title: "Python implementation module (src/py/vertebra/agent/mcp/routes.py)"
-  - id: src-agent-mcp-stdio-py
-    resource: src/py/vertebra/agent/mcp/stdio.py
-    title: "Python implementation module (src/py/vertebra/agent/mcp/stdio.py)"
-  - id: src-agent-a2a-service-py
-    resource: src/py/vertebra/agent/a2a/service.py
-    title: "Python implementation module (src/py/vertebra/agent/a2a/service.py)"
-  - id: src-agent-a2a-signing-py
-    resource: src/py/vertebra/agent/a2a/signing.py
-    title: "Python implementation module (src/py/vertebra/agent/a2a/signing.py)"
-  - id: src-agent-workflow-py
-    resource: src/py/vertebra/agent/workflow.py
-    title: "Python implementation module (src/py/vertebra/agent/workflow.py)"
-  - id: src-agent-spec-py
-    resource: src/py/vertebra/agent/spec.py
-    title: "Python implementation module (src/py/vertebra/agent/spec.py)"
-  - id: src-agent-runtime-py
-    resource: src/py/vertebra/agent/runtime.py
-    title: "Python implementation module (src/py/vertebra/agent/runtime.py)"
-  - id: src-telemetry-genai-py
-    resource: src/py/vertebra/telemetry/genai.py
-    title: "Python implementation module (src/py/vertebra/telemetry/genai.py)"
-  - id: src-vertebra-py-src-agent-rs
-    resource: src/rs/vertebra-py/src/agent.rs
-    title: "Rust implementation module (src/rs/vertebra-py/src/agent.rs)"
-  - id: src-vertebra-http-src-discovery-rs
-    resource: src/rs/vertebra-http/src/discovery.rs
-    title: "Rust implementation module (src/rs/vertebra-http/src/discovery.rs)"
-  - id: src-src-agent-index-ts
-    resource: src/ts/vertebra-client/src/agent/index.ts
-    title: "TypeScript client module (src/ts/vertebra-client/src/agent/index.ts)"
-  - id: src-tests-unit-agent-test-mcp-conformance-py
-    resource: src/py/tests/unit/agent/test_mcp_conformance.py
-    title: "Python implementation module (src/py/tests/unit/agent/test_mcp_conformance.py)"
-  - id: src-tests-unit-agent-test-a2a-protocol-py
-    resource: src/py/tests/unit/agent/test_a2a_protocol.py
-    title: "Python implementation module (src/py/tests/unit/agent/test_a2a_protocol.py)"
-  - id: src-tests-unit-agent-test-runtime-and-workflows-py
-    resource: src/py/tests/unit/agent/test_runtime_and_workflows.py
-    title: "Python implementation module (src/py/tests/unit/agent/test_runtime_and_workflows.py)"
-  - id: src-tests-unit-agent-test-core-and-observability-py
-    resource: src/py/tests/unit/agent/test_core_and_observability.py
-    title: "Python implementation module (src/py/tests/unit/agent/test_core_and_observability.py)"
+- id: src-typing-public-py
+  resource: src/py/vertebra/typing.py
+  title: Public neutral ToolProvider and ToolPolicyError exports
+- id: src-typing-internal-py
+  resource: src/py/vertebra/_typing.py
+  title: Shared neutral callable-map contract and policy exception
+- id: src-db-bigquery-tools-py
+  resource: src/py/vertebra/db/adapters/bigquery/tools.py
+  title: Adapter-owned BigQuery operations and billing policies
+- id: src-db-spanner-tools-py
+  resource: src/py/vertebra/db/adapters/spanner/tools.py
+  title: Adapter-owned Spanner operations and snapshot policies
+- id: src-agent-init-py
+  resource: src/py/vertebra/agent/__init__.py
+  title: Python implementation module (src/py/vertebra/agent/__init__.py)
+- id: src-agent-tools-init-py
+  resource: src/py/vertebra/agent/tools/__init__.py
+  title: Generic provider adaptation and caller-bound confirmation
+- id: src-tests-unit-extensions-test-gcp-adapters-and-sqlalchemy-py
+  resource: src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
+  title: GCP adapter and agent tool behavior tests
+- id: src-agent-mcp-service-py
+  resource: src/py/vertebra/agent/mcp/service.py
+  title: Python implementation module (src/py/vertebra/agent/mcp/service.py)
+- id: src-agent-mcp-routes-py
+  resource: src/py/vertebra/agent/mcp/routes.py
+  title: Python implementation module (src/py/vertebra/agent/mcp/routes.py)
+- id: src-agent-mcp-stdio-py
+  resource: src/py/vertebra/agent/mcp/stdio.py
+  title: Python implementation module (src/py/vertebra/agent/mcp/stdio.py)
+- id: src-agent-a2a-service-py
+  resource: src/py/vertebra/agent/a2a/service.py
+  title: Python implementation module (src/py/vertebra/agent/a2a/service.py)
+- id: src-agent-a2a-signing-py
+  resource: src/py/vertebra/agent/a2a/signing.py
+  title: Python implementation module (src/py/vertebra/agent/a2a/signing.py)
+- id: src-agent-workflow-py
+  resource: src/py/vertebra/agent/workflow.py
+  title: Python implementation module (src/py/vertebra/agent/workflow.py)
+- id: src-agent-spec-py
+  resource: src/py/vertebra/agent/spec.py
+  title: Python implementation module (src/py/vertebra/agent/spec.py)
+- id: src-agent-runtime-py
+  resource: src/py/vertebra/agent/runtime.py
+  title: Python implementation module (src/py/vertebra/agent/runtime.py)
+- id: src-telemetry-genai-py
+  resource: src/py/vertebra/telemetry/genai.py
+  title: Python implementation module (src/py/vertebra/telemetry/genai.py)
+- id: src-vertebra-py-src-agent-rs
+  resource: src/rs/vertebra-py/src/agent.rs
+  title: Rust implementation module (src/rs/vertebra-py/src/agent.rs)
+- id: src-vertebra-http-src-discovery-rs
+  resource: src/rs/vertebra-http/src/discovery.rs
+  title: Rust implementation module (src/rs/vertebra-http/src/discovery.rs)
+- id: src-src-agent-index-ts
+  resource: src/ts/vertebra-client/src/agent/index.ts
+  title: TypeScript client module (src/ts/vertebra-client/src/agent/index.ts)
+- id: src-tests-unit-agent-test-mcp-conformance-py
+  resource: src/py/tests/unit/agent/test_mcp_conformance.py
+  title: Python implementation module (src/py/tests/unit/agent/test_mcp_conformance.py)
+- id: src-tests-unit-agent-test-a2a-protocol-py
+  resource: src/py/tests/unit/agent/test_a2a_protocol.py
+  title: Python implementation module (src/py/tests/unit/agent/test_a2a_protocol.py)
+- id: src-tests-unit-agent-test-runtime-and-workflows-py
+  resource: src/py/tests/unit/agent/test_runtime_and_workflows.py
+  title: Python implementation module (src/py/tests/unit/agent/test_runtime_and_workflows.py)
+- id: src-tests-unit-agent-test-core-and-observability-py
+  resource: src/py/tests/unit/agent/test_core_and_observability.py
+  title: Python implementation module (src/py/tests/unit/agent/test_core_and_observability.py)
 ---
 
 # Agentic Harness, MCP 2026-07-28 & A2A 1.0 Protocols

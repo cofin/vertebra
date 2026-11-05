@@ -1,44 +1,88 @@
 ---
 type: Pattern
-title: "Hot-Path Caching & Single-Wake Async Dispatch"
-description: "Hot-path request dispatch patterns: startup signature caching, inline vectorized sync batches, uvloop Dekker polling, Rust ASGI/RSGI drivers, and zero-copy response coercion."
+title: Hot-Path Caching & Single-Wake Async Dispatch
+description: 'Hot-path request dispatch patterns: startup signature caching, inline
+  vectorized sync batches, uvloop Dekker polling, Rust ASGI/RSGI drivers, and zero-copy
+  response coercion.'
 status: stable
-tags: [patterns, python, performance, batch-dispatch, async]
+tags:
+- patterns
+- python
+- performance
+- batch-dispatch
+- async
 generated:
   by: flow/0.26.0
-  at: "2026-11-04T04:33:00Z"
+  at: '2026-11-04T04:33:00Z'
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+- by: agent:codex
+  at: '2026-11-05T06:09:26Z'
+  commit: 5ad85a1b406f5b3ed01ce8d1f536e02383bc89e1
+- by: agent:flow-setup
+  at: '2026-11-04T04:33:00Z'
+  commit: f741701
 sources:
-  - id: src-server-worker-py
-    resource: src/py/vertebra/server/worker.py
-    title: "Python implementation module (src/py/vertebra/server/worker.py)"
-  - id: src-server-dispatch-py
-    resource: src/py/vertebra/server/_dispatch.py
-    title: "Python implementation module (src/py/vertebra/server/_dispatch.py)"
-  - id: src-server-loops-py
-    resource: src/py/vertebra/server/_loops.py
-    title: "Python implementation module (src/py/vertebra/server/_loops.py)"
-  - id: src-server-fastpath-py
-    resource: src/py/vertebra/server/_fastpath.py
-    title: "Python implementation module (src/py/vertebra/server/_fastpath.py)"
-  - id: src-server-asgi-runner-py
-    resource: src/py/vertebra/server/_asgi/_runner.py
-    title: "Python implementation module (src/py/vertebra/server/_asgi/_runner.py)"
-  - id: src-server-rsgi-adapter-py
-    resource: src/py/vertebra/server/_rsgi/_adapter.py
-    title: "Python implementation module (src/py/vertebra/server/_rsgi/_adapter.py)"
-  - id: src-server-wsgi-adapter-py
-    resource: src/py/vertebra/server/_wsgi/_adapter.py
-    title: "Python implementation module (src/py/vertebra/server/_wsgi/_adapter.py)"
-  - id: src-utils-sync-tools-py
-    resource: src/py/vertebra/utils/sync_tools.py
-    title: "Python implementation module (src/py/vertebra/utils/sync_tools.py)"
-  - id: src-extensions-litestar-fastpath-py
-    resource: src/py/vertebra/extensions/litestar/fastpath.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/fastpath.py)"
+- id: src-sqlspec-stack
+  resource: src/py/vertebra/extensions/sqlspec/adapters.py
+  title: Prepared stack execution and native bind defaults
+- id: src-sqlspec-bigquery
+  resource: src/py/vertebra/extensions/sqlspec/bigquery.py
+  title: BigQuery-owned parser and named-at bind defaults
+- id: src-sqlspec-spanner
+  resource: src/py/vertebra/extensions/sqlspec/spanner.py
+  title: Spanner GoogleSQL and Spangres parser and bind defaults
+- id: src-sqlspec-stack-tests
+  resource: src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
+  title: Ordered results, native binds, Arrow and batched stack regressions
+- id: src-tool-bridge
+  resource: src/py/vertebra/agent/tools/__init__.py
+  title: Generic provider signature, conversion and confirmation adaptation
+- id: src-tool-schema-tests
+  resource: src/py/tests/unit/agent/test_core_and_observability.py
+  title: Typed provider schemas and validation before policy
+- id: src-tool-snapshot-tests
+  resource: src/py/tests/unit/agent/test_runtime_and_workflows.py
+  title: Owned invocation snapshots, defaults and caller-bound approval across awaits
+- id: src-bigquery-bind-types
+  resource: src/py/vertebra/db/adapters/bigquery/core.py
+  title: Distinct boolean, integer and floating-point native parameter descriptors
+- id: src-pg-notify
+  resource: src/py/vertebra/db/adapters/postgres/notify.py
+  title: Mode-correct native notification parameters
+- id: src-pg-embeddings
+  resource: src/py/vertebra/db/adapters/postgres/embeddings.py
+  title: Mode-correct embedding and vector-search parameters
+- id: src-pg-primitive-tests
+  resource: src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
+  title: Real optional psycopg conversion for notification, embedding and tenant-session
+    primitives
+- id: src-server-worker-py
+  resource: src/py/vertebra/server/worker.py
+  title: Python implementation module (src/py/vertebra/server/worker.py)
+- id: src-server-dispatch-py
+  resource: src/py/vertebra/server/_dispatch.py
+  title: Python implementation module (src/py/vertebra/server/_dispatch.py)
+- id: src-server-loops-py
+  resource: src/py/vertebra/server/_loops.py
+  title: Python implementation module (src/py/vertebra/server/_loops.py)
+- id: src-server-fastpath-py
+  resource: src/py/vertebra/server/_fastpath.py
+  title: Python implementation module (src/py/vertebra/server/_fastpath.py)
+- id: src-server-asgi-runner-py
+  resource: src/py/vertebra/server/_asgi/_runner.py
+  title: Python implementation module (src/py/vertebra/server/_asgi/_runner.py)
+- id: src-server-rsgi-adapter-py
+  resource: src/py/vertebra/server/_rsgi/_adapter.py
+  title: Python implementation module (src/py/vertebra/server/_rsgi/_adapter.py)
+- id: src-server-wsgi-adapter-py
+  resource: src/py/vertebra/server/_wsgi/_adapter.py
+  title: Python implementation module (src/py/vertebra/server/_wsgi/_adapter.py)
+- id: src-utils-sync-tools-py
+  resource: src/py/vertebra/utils/sync_tools.py
+  title: Python implementation module (src/py/vertebra/utils/sync_tools.py)
+- id: src-extensions-litestar-fastpath-py
+  resource: src/py/vertebra/extensions/litestar/fastpath.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/fastpath.py)
 ---
 
 # Hot-Path Caching & Single-Wake Async Dispatch
@@ -79,6 +123,22 @@ def compile_handler_table(handlers: Mapping[int, Callable[..., Any]]) -> dict[in
 - **Unpinning `BatchSnapshot` Across `await`**: Before awaiting an `async_native` handler coroutine, `_dispatch_async_item` extracts `request_id`, `method`, and `path` into a lightweight `_AsyncErrorStub` and drops the `Request` reference so suspended I/O tasks never pin `Arc<BatchSnapshot>` slabs in `BufferPool`.
 - **Loop-Local & Fused Fast Paths**: Use [`SyncLoopShardedResource[T]` / `AsyncLoopShardedResource[T]`](../../../../../src/py/vertebra/utils/sync_tools.py) to shard non-thread-safe primitives across `EventLoopPool` loops on free-threaded Python `3.14t`/`3.15t`, and [`LitestarFastPathBypass`](../../../../../src/py/vertebra/extensions/litestar/fastpath.py)[^src-extensions-litestar-fastpath-py] for fused Litestar direct dispatch.
 
+## 4. Retain Prepared Database Operations
+
+SQLSpec `execute_stack` retains each prepared `SQL` object beside its compiled SQL and native parameters. `returns_rows()` on that object selects row versus affected-count handling, including leading comments, CTE DML and `RETURNING`; reconstructing SQL or guessing from a prefix loses upstream classification. Row results retain the prepared statement through `SQLResult` and supported `StackResult` factories. Eligible multi-operation `execute` stacks use the advertised sync/async native pipeline capability; transactional/sequential fallback preserves order, rollback and continue-on-error behavior.[^src-sqlspec-stack][^src-sqlspec-stack-tests]
+
+Native execution defaults belong to concrete wrapper classes and are shared by direct and config-created sessions. PostgreSQL sync and MySQL use positional pyformat output, PostgreSQL async uses numeric output, and the BigQuery/Spanner wrappers own their supported parser/bind configuration. An explicit caller `StatementConfig` stays authoritative. This is a native execution boundary: parser metadata and emitted binds must agree without splitting raw execution SQL from a separately parsed metadata query.[^src-sqlspec-stack][^src-sqlspec-bigquery][^src-sqlspec-spanner][^src-sqlspec-stack-tests]
+
+Fallback operations also preserve preparation. `execute_arrow` separates Arrow execution options from SQL bind values and attaches the retained prepared statement to the Arrow result. `execute_many` uses SQLSpec's `is_many=True` contract for parameter sets and applies filters before compilation. A common single-execute path alone does not establish these contracts.[^src-sqlspec-stack][^src-sqlspec-stack-tests]
+
+Neutral tool providers return their original typed bound operations without resolving drivers. The generic agent bridge resolves annotations and retains that signature for schema generation and conversion. Parameters must be addressable by name: ordinary and keyword-only declarations work, while positional-only/variadic declarations and reserved token/context names fail at registration. An untyped `**kwargs` wrapper alone loses this conversion boundary.[^src-tool-bridge][^src-tool-schema-tests]
+
+After validation and default materialization, the bridge owns a deep copy of the bound business arguments. Provider policy, approval matching and actual operation execution use that same bound invocation; an independently copied ticket preserves its approved arguments. Caller changes to nested values while an operation awaits cannot alter the authorized execution. Token/context controls stay outside business arguments.[^src-tool-bridge][^src-tool-snapshot-tests]
+
+Approval matching also preserves converted value types recursively through mapping keys/values, ordered and unordered containers, `msgspec.Struct` fields and dataclass fields. Python considers `True`, `1` and `1.0` equal, while BigQuery encodes them as `BOOL`, `INT64` and `FLOAT64`; ordinary equality could authorize a different native bind. Reordered mappings with the same typed content still match.[^src-tool-bridge][^src-tool-snapshot-tests][^src-bigquery-bind-types]
+
+PostgreSQL notification and embedding primitives emit sync `%s` or async `$N` binds at their owning adapter boundary. SQLSpec prepares PostgreSQL tenant-session SQL through the same native execution profile while retaining original session values and failure identity. This primitive preparation is not a generic rewrite of arbitrary caller SQL.[^src-pg-notify][^src-pg-embeddings][^src-sqlspec-stack][^src-pg-primitive-tests]
+
 Provenance sources: [^src-server-rsgi-adapter-py], [^src-server-wsgi-adapter-py], [^src-utils-sync-tools-py].
 
 [^src-server-worker-py]: `src/py/vertebra/server/worker.py` — Python implementation module (src/py/vertebra/server/worker.py).
@@ -90,3 +150,15 @@ Provenance sources: [^src-server-rsgi-adapter-py], [^src-server-wsgi-adapter-py]
 [^src-server-wsgi-adapter-py]: `src/py/vertebra/server/_wsgi/_adapter.py` — Python implementation module (src/py/vertebra/server/_wsgi/_adapter.py).
 [^src-utils-sync-tools-py]: `src/py/vertebra/utils/sync_tools.py` — Python implementation module (src/py/vertebra/utils/sync_tools.py).
 [^src-extensions-litestar-fastpath-py]: `src/py/vertebra/extensions/litestar/fastpath.py` — Python implementation module (src/py/vertebra/extensions/litestar/fastpath.py).
+
+[^src-sqlspec-stack]: `src/py/vertebra/extensions/sqlspec/adapters.py` — Prepared stack execution and native bind defaults.
+[^src-sqlspec-bigquery]: `src/py/vertebra/extensions/sqlspec/bigquery.py` — BigQuery-owned parser and named-at bind defaults.
+[^src-sqlspec-spanner]: `src/py/vertebra/extensions/sqlspec/spanner.py` — Spanner GoogleSQL and Spangres parser and bind defaults.
+[^src-sqlspec-stack-tests]: `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py` — Ordered results, native binds, Arrow and batched stack regressions.
+[^src-tool-bridge]: `src/py/vertebra/agent/tools/__init__.py` — Generic provider signature, conversion and confirmation adaptation.
+[^src-tool-schema-tests]: `src/py/tests/unit/agent/test_core_and_observability.py` — Typed provider schemas and validation before policy.
+[^src-tool-snapshot-tests]: `src/py/tests/unit/agent/test_runtime_and_workflows.py` — Owned invocation snapshots, defaults and caller-bound approval across awaits.
+[^src-bigquery-bind-types]: `src/py/vertebra/db/adapters/bigquery/core.py` — Distinct boolean, integer and floating-point native parameter descriptors.
+[^src-pg-notify]: `src/py/vertebra/db/adapters/postgres/notify.py` — Mode-correct native notification parameters.
+[^src-pg-embeddings]: `src/py/vertebra/db/adapters/postgres/embeddings.py` — Mode-correct embedding and vector-search parameters.
+[^src-pg-primitive-tests]: `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py` — Real optional psycopg conversion for notification, embedding and tenant-session primitives.

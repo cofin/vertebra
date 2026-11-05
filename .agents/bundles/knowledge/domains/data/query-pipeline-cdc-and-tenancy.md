@@ -1,80 +1,90 @@
 ---
 type: Guide
-title: "Native Pipelines, Change Feeds, Tenant Predicates & DataFusion"
-description: "Native pipeline capabilities, engine-neutral change feeds, adapter-owned PostgreSQL notifications and Spanner change streams, tenant predicates, and the DataFusionEngine table catalog."
+title: Native Pipelines, Change Feeds, Tenant Predicates & DataFusion
+description: Native pipeline capabilities, engine-neutral change feeds, adapter-owned
+  PostgreSQL notifications and Spanner change streams, tenant predicates, and the
+  DataFusionEngine table catalog.
 status: stable
-tags: [domains, database, postgres, cdc, tenancy]
+tags:
+- domains
+- database
+- postgres
+- cdc
+- tenancy
 generated:
   by: flow/0.26.0
-  at: "2026-11-04T04:33:00Z"
+  at: '2026-11-04T04:33:00Z'
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+- by: agent:codex
+  at: '2026-11-05T06:09:26Z'
+  commit: 5ad85a1b406f5b3ed01ce8d1f536e02383bc89e1
+- by: agent:flow-setup
+  at: '2026-11-04T04:33:00Z'
+  commit: f741701
 sources:
-  - id: src-postgres-tenant-core
-    resource: src/py/vertebra/db/adapters/postgres/core.py
-    title: "PostgreSQL tenant and session SQL builders"
-  - id: src-oracle-tenant-core
-    resource: src/py/vertebra/db/adapters/oracle/core.py
-    title: "Oracle context SQL builder"
-  - id: src-tenant-native-tests
-    resource: src/py/tests/unit/db/test_native_db_drivers.py
-    title: "Generic engine-purity positive and negative probes"
-  - id: src-tenant-enterprise-tests
-    resource: src/py/tests/unit/db/test_enterprise_olap_drivers.py
-    title: "Session bind and failure identity acceptance"
-  - id: src-extensions-sqlspec-bigquery-py
-    resource: src/py/vertebra/extensions/sqlspec/bigquery.py
-    title: "BigQuery SQLSpec native statement defaults and session execution"
-  - id: src-extensions-sqlspec-spanner-py
-    resource: src/py/vertebra/extensions/sqlspec/spanner.py
-    title: "Spanner SQLSpec parser and native parameter defaults"
-  - id: src-extensions-sqlspec-adapters-py
-    resource: src/py/vertebra/extensions/sqlspec/adapters.py
-    title: "SQLSpec native pipeline dispatch and sequential stack execution"
-  - id: src-db-cdc-py
-    resource: src/py/vertebra/db/cdc.py
-    title: "Python implementation module (src/py/vertebra/db/cdc.py)"
-  - id: src-db-spanner-change-stream-py
-    resource: src/py/vertebra/db/adapters/spanner/change_stream.py
-    title: "Spanner change-stream readers and partition record types"
-  - id: src-db-postgres-notify-py
-    resource: src/py/vertebra/db/adapters/postgres/notify.py
-    title: "PostgreSQL notification transport and logical message builders"
-  - id: src-extensions-sqlspec-events-py
-    resource: src/py/vertebra/extensions/sqlspec/events.py
-    title: "Engine-neutral SQLSpec change-feed event backends"
-  - id: src-tests-unit-db-test-pg-gateway-py
-    resource: src/py/tests/unit/db/test_pg_gateway.py
-    title: "CDC spill bounds, key normalization, and storage error coverage"
-  - id: src-tests-unit-extensions-test-data-storage-integrations-py
-    resource: src/py/tests/unit/extensions/test_data_storage_integrations.py
-    title: "SQLSpec event backend lifecycle and spill hydration coverage"
-  - id: src-db-rls-py
-    resource: src/py/vertebra/db/rls.py
-    title: "Python implementation module (src/py/vertebra/db/rls.py)"
-  - id: src-db-datafusion-py
-    resource: src/py/vertebra/db/adapters/datafusion/__init__.py
-    title: "Python implementation module (src/py/vertebra/db/adapters/datafusion/__init__.py)"
-  - id: src-db-datafusion-config-py
-    resource: src/py/vertebra/db/adapters/datafusion/config.py
-    title: "Python implementation module (src/py/vertebra/db/adapters/datafusion/config.py)"
-  - id: src-db-datafusion-driver-py
-    resource: src/py/vertebra/db/adapters/datafusion/driver.py
-    title: "Python implementation module (src/py/vertebra/db/adapters/datafusion/driver.py)"
-  - id: src-db-init-py
-    resource: src/py/vertebra/db/__init__.py
-    title: "Python implementation module (src/py/vertebra/db/__init__.py)"
-  - id: src-db-registry-py
-    resource: src/py/vertebra/db/registry.py
-    title: "Python implementation module (src/py/vertebra/db/registry.py)"
-  - id: src-db-driver-capabilities-py
-    resource: src/py/vertebra/db/driver/capabilities.py
-    title: "Python implementation module (src/py/vertebra/db/driver/capabilities.py)"
-  - id: src-tests-unit-db-test-pg-dataplane-and-datafusion-py
-    resource: src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
-    title: "Python implementation module (src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py)"
+- id: src-postgres-tenant-core
+  resource: src/py/vertebra/db/adapters/postgres/core.py
+  title: PostgreSQL tenant and session SQL builders
+- id: src-oracle-tenant-core
+  resource: src/py/vertebra/db/adapters/oracle/core.py
+  title: Oracle context SQL builder
+- id: src-tenant-native-tests
+  resource: src/py/tests/unit/db/test_native_db_drivers.py
+  title: Generic engine-purity positive and negative probes
+- id: src-tenant-enterprise-tests
+  resource: src/py/tests/unit/db/test_enterprise_olap_drivers.py
+  title: Session bind and failure identity acceptance
+- id: src-extensions-sqlspec-bigquery-py
+  resource: src/py/vertebra/extensions/sqlspec/bigquery.py
+  title: BigQuery SQLSpec native statement defaults and session execution
+- id: src-extensions-sqlspec-spanner-py
+  resource: src/py/vertebra/extensions/sqlspec/spanner.py
+  title: Spanner SQLSpec parser and native parameter defaults
+- id: src-extensions-sqlspec-adapters-py
+  resource: src/py/vertebra/extensions/sqlspec/adapters.py
+  title: SQLSpec native pipeline dispatch and sequential stack execution
+- id: src-db-cdc-py
+  resource: src/py/vertebra/db/cdc.py
+  title: Python implementation module (src/py/vertebra/db/cdc.py)
+- id: src-db-spanner-change-stream-py
+  resource: src/py/vertebra/db/adapters/spanner/change_stream.py
+  title: Spanner change-stream readers and partition record types
+- id: src-db-postgres-notify-py
+  resource: src/py/vertebra/db/adapters/postgres/notify.py
+  title: PostgreSQL notification transport and logical message builders
+- id: src-extensions-sqlspec-events-py
+  resource: src/py/vertebra/extensions/sqlspec/events.py
+  title: Engine-neutral SQLSpec change-feed event backends
+- id: src-tests-unit-db-test-pg-gateway-py
+  resource: src/py/tests/unit/db/test_pg_gateway.py
+  title: CDC spill bounds, key normalization, and storage error coverage
+- id: src-tests-unit-extensions-test-data-storage-integrations-py
+  resource: src/py/tests/unit/extensions/test_data_storage_integrations.py
+  title: SQLSpec event backend lifecycle and spill hydration coverage
+- id: src-db-rls-py
+  resource: src/py/vertebra/db/rls.py
+  title: Python implementation module (src/py/vertebra/db/rls.py)
+- id: src-db-datafusion-py
+  resource: src/py/vertebra/db/adapters/datafusion/__init__.py
+  title: Python implementation module (src/py/vertebra/db/adapters/datafusion/__init__.py)
+- id: src-db-datafusion-config-py
+  resource: src/py/vertebra/db/adapters/datafusion/config.py
+  title: Python implementation module (src/py/vertebra/db/adapters/datafusion/config.py)
+- id: src-db-datafusion-driver-py
+  resource: src/py/vertebra/db/adapters/datafusion/driver.py
+  title: Python implementation module (src/py/vertebra/db/adapters/datafusion/driver.py)
+- id: src-db-init-py
+  resource: src/py/vertebra/db/__init__.py
+  title: Python implementation module (src/py/vertebra/db/__init__.py)
+- id: src-db-registry-py
+  resource: src/py/vertebra/db/registry.py
+  title: Python implementation module (src/py/vertebra/db/registry.py)
+- id: src-db-driver-capabilities-py
+  resource: src/py/vertebra/db/driver/capabilities.py
+  title: Python implementation module (src/py/vertebra/db/driver/capabilities.py)
+- id: src-tests-unit-db-test-pg-dataplane-and-datafusion-py
+  resource: src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
+  title: Python implementation module (src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py)
 ---
 
 # Native Pipelines, Change Feeds, Tenant Predicates & DataFusion
