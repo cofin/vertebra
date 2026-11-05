@@ -1,5 +1,12 @@
 # Bundle Activity Log
 
+## [2026-11-05] flow-revise | Align follow-up driver ownership
+
+- Broker pool sharing extracts PEP 249 code directly into neutral `db/dbapi`; SQLAlchemy keeps its async/greenlet and pool integration, and Django consumes the neutral facade. Downstream integration hardens the established surfaces rather than moving them again.
+- SQLSpec wrappers remain extension-owned per-engine packages. Shared artifact metadata belongs to storage; BigQuery Object Table values retain engine ownership. Native placeholder/profile and prepared-result parity require actual native acceptance, with explicit configuration preserved.
+- MCP consumes the neutral ToolProvider already established by adapter-owned classes. Oracle native tenancy requires trusted-context invocation, pool reset/failed-cleanup eviction, and live VPD acceptance. Remaining native adapter organization is recorded as bounded follow-up planning.
+- Independent plan review approves these ownership amendments. Child charters remain drafts; these revisions establish no runtime acceptance and perform no future implementation or hosted writes.
+
 ## [2026-11-05] flow-archive | Completed `db-engine-primitives`
 
 - Completed all seven worksheets on `feat/db-engine-primitives`; reviewed source range `954998de..5ad85a1b`. Adapter-owned notification, CDC, embedding and tool implementations consume neutral contracts; the generic agent preserves typed validation, isolated invocation arguments, and caller-bound approval. Native stack dispatch replaces the CTE compiler, and engine-specific session SQL leaves generic RLS.

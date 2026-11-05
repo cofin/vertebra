@@ -2,18 +2,18 @@
 type: Spec
 flow_id: mcp-webmcp-core
 title: MCP 2026-07-28 Core and WebMCP Bridge
-description: Introduce the agent-owned ToolSpec/ToolRegistry model consuming the existing neutral ToolProvider contract, a transport-agnostic MCPCore with thin ASGI/WSGI/native adapters, litestar-mcp delegation for Litestar apps, a WebMCP manifest projection, and a document.modelContext TypeScript bridge.
+description: Build an agent-owned ToolSpec and ToolRegistry over the shared ToolProvider contract, a transport-agnostic MCPCore, framework adapters, and a WebMCP projection and TypeScript bridge.
 state: draft
 parent_prd: integration-remediation
 research:
   - ../integration-remediation/research/audit-findings_20261103.md
-plan_revision: 0
+plan_revision: 1
 plan_commit: null
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
 created_at: 2026-11-03T03:30:00Z
-updated_at: 2026-11-03T21:54:00Z
+updated_at: "2026-11-05T06:20:28Z"
 tags: [mcp, webmcp, agent, typescript]
 ---
 
