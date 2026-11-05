@@ -3,7 +3,7 @@ type: Task
 id: db-engine-primitives:t06
 title: Delete vertebra/db/pipeline.py, route SQLSpec execute_stack via SyncPipelineCapable and AsyncPipelineCapable, and update documentation
 description: "Delete `src/py/vertebra/db/pipeline.py` (`SyncQueryPipeline`, `AsyncQueryPipeline`, `CTEStep`, `RelOverlay`, `PipelineDialect`), update `execute_stack` in `vertebra.extensions.sqlspec.{adapters,bigquery,spanner}` to dispatch via `isinstance(self.native_driver, SyncPipelineCapable)` (sync) and `isinstance(self.native_driver, AsyncPipelineCapable)` (async) when supported and sequential/transactional execution otherwise, delete `docs/usage/query-pipelines.md` with a redirect in `zensical.toml`, and synchronize `README.md`, `docs/`, and OKF `sources:`."
-state: "in_progress"
+state: "completed"
 priority: P1
 verification_strategy: integration_acceptance
 depends_on:
@@ -37,18 +37,18 @@ tests:
   - src/py/tests/unit/docs/test_examples.py
 plan_revision: 8
 plan_commit: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
-state_revision: 1
-claimed_by: "/root/db_t06"
-claimed_at: "2026-11-05T02:38:31Z"
+state_revision: 2
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-05T04:22:41Z"
+last_verified_commit: "cb9abcb719e58bf69f5e44092140f1d2e18ac56e"
+verification_evidence: "Baseline117 and final175 focused cases; Phase2 full Python1981 passed69 skipped170 xfailed; lint, docs and review-check exit0; scoped correctness findings resolved."
 created_at: 2026-11-03T21:49:00Z
-updated_at: "2026-11-05T02:59:14Z"
-commit: null
+updated_at: "2026-11-05T04:22:41Z"
+commit: "cb9abcb719e58bf69f5e44092140f1d2e18ac56e"
 tags: [db, pipeline, sqlspec, docs, clean-break]
 ---
 

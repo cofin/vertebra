@@ -176,13 +176,19 @@ class ChannelBus:
                 self._fan_in_local(channel, payload)
 
     async def pump_change_source(self, source: AsyncChangeSource | None = None, *, channel: str | None = None) -> None:
-        """Consume asynchronous CDC frames with an optional output channel override."""
+        """Consume CDC frames while preserving independent shared-feed observation.
+
+        A shared feed already delivers on the event topic. A different channel
+        override adds one delivery there; an equal override avoids a duplicate.
+        """
         resolved = source if source is not None else self._change_source
         if resolved is None:
             return
+        shared_feed = self._change_feed is not None and getattr(resolved, "change_feed", None) is self._change_feed
         async for event in resolved.stream():
             topic, payload = self._decode_change_event(event)
-            self._fan_in_local(channel if channel is not None else topic, payload)
+            if not shared_feed or (channel is not None and channel != topic):
+                self._fan_in_local(channel if channel is not None else topic, payload)
 
     def _register_stream_queue(self) -> asyncio.Queue[tuple[str, bytes] | None]:
         """Attach a stream queue to all subscribed topics."""

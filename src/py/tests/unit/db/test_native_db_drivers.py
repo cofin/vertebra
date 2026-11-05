@@ -680,6 +680,68 @@ async def test_channel_bus_change_feed_and_async_source() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("channel", [None, "orders", "override"])
+@pytest.mark.parametrize("shared_feed", [False, True], ids=["independent-feed", "shared-feed"])
+async def test_channel_bus_spanner_source_delivers_once_per_output_channel(
+    channel: str | None, shared_feed: bool
+) -> None:
+    """Real Spanner CDC preserves feed observation and routes each output once."""
+
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str | None]] = []
+
+        async def query(
+            self, sql: str, params_json: str | None, staleness_mode: str, staleness_ms: int
+        ) -> dict[str, Any]:
+            self.calls.append((sql, params_json))
+            return {
+                "columns": ["data_change_record"],
+                "rows": [
+                    [
+                        [
+                            {
+                                "table_name": "orders",
+                                "mod_type": "INSERT",
+                                "mods": [{"keys": {"id": 1}}],
+                            }
+                        ]
+                    ]
+                ],
+            }
+
+    client = Client()
+    driver = AsyncSpannerDriver(SpannerConfig(), client=cast(Any, client))
+    feed = ChangeFeed(CDCConfig(channel="orders"))
+    source = AsyncSpannerChangeStreamSource(
+        driver, "orders_stream", change_feed=feed, start_timestamp="2026-11-02T00:00:00Z"
+    )
+    bus = ChannelBus(change_source=source, change_feed=feed if shared_feed else None, history=5)
+    try:
+        await bus.pump_change_source(channel=channel)
+        assert len(client.calls) == 1
+        assert "READ_orders_stream" in client.calls[0][0]
+        assert decode_json(client.calls[0][1])["start_ts"] == "2026-11-02T00:00:00Z"
+        event = feed.replay_since(0)[0]
+        output = encode_json_bytes(event)
+        expected_original = shared_feed or channel in (None, "orders")
+        assert await bus.get_history("orders") == ([output] if expected_original else [])
+        assert await bus.get_history("override") == ([output] if channel == "override" else [])
+    finally:
+        await driver.close()
+
+
+@pytest.mark.anyio
+async def test_channel_bus_change_source_without_feeds_keeps_local_delivery() -> None:
+    """A source without a feed still forwards events when the bus also has no feed."""
+    bus = ChannelBus(change_source=_ConformingAsyncChangeSource(), history=5)
+    await bus.pump_change_source()
+    history = await bus.get_history("orders")
+    assert len(history) == 1
+    assert decode_json(history[0])["operation"] == "UPDATE"
+
+
+@pytest.mark.anyio
 async def test_channel_bus_pumps_decode_binary_and_preserve_raw_payloads() -> None:
     """Notification and CDC pumps decode wrappers without treating plain JSON as a feed."""
     source = _ConformingNotificationSource()

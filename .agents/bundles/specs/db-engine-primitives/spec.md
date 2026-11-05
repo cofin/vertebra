@@ -10,11 +10,11 @@ research:
   - ../native-data-platform/research/gap-analysis_20261103.md
 plan_revision: 8
 plan_commit: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
-state_revision: 9
-current_task: "db-engine-primitives:t06"
+state_revision: 10
+current_task: null
 last_verified_checkpoint: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
 created_at: 2026-11-03T03:30:00Z
-updated_at: "2026-11-05T02:59:14Z"
+updated_at: "2026-11-05T04:22:41Z"
 tags: [db, layering, cdc, embeddings, agent-tools, pipeline, rls]
 ---
 
@@ -602,7 +602,7 @@ flowchart TD
 ### Phase 2: Embeddings, Agent Tools & Pipeline Removal (`t04`–`t06`)
 - [x] [b41aae46] `db-engine-primitives:t04` — Relocate SQL embedding pushdown builders to `vertebra/db/adapters/<engine>/embeddings.py` and add `PushdownEmbedder` (`behavior_tdd`, `depends_on: [t02]`) -> [`tasks/t04-embedding-pushdown-relocation.md`](tasks/t04-embedding-pushdown-relocation.md)
 - [!] `db-engine-primitives:t05` — Relocate GCP database MCP tools to `vertebra/agent/tools/` and empty the `vertebra/db` upward-import allowlist (`behavior_tdd`, `depends_on: [t03, t04]`) -> [`tasks/t05-relocate-gcp-agent-tools.md`](tasks/t05-relocate-gcp-agent-tools.md)
-- [~] `db-engine-primitives:t06` — Delete `vertebra/db/pipeline.py`, route SQLSpec `execute_stack` via `SyncPipelineCapable` / `AsyncPipelineCapable`, and update documentation (`integration_acceptance`, `depends_on: [t03, t04]`) -> [`tasks/t06-delete-query-pipeline.md`](tasks/t06-delete-query-pipeline.md)
+- [x] [cb9abcb7] `db-engine-primitives:t06` — Delete `vertebra/db/pipeline.py`, route SQLSpec `execute_stack` via `SyncPipelineCapable` / `AsyncPipelineCapable`, and update documentation (`integration_acceptance`, `depends_on: [t03, t04]`) -> [`tasks/t06-delete-query-pipeline.md`](tasks/t06-delete-query-pipeline.md)
 
 Default preparation retains native bind formats through class-owned defaults and supported GCP parser configuration; explicit caller configuration remains authoritative.
 
@@ -615,7 +615,7 @@ Default preparation retains native bind formats through class-owned defaults and
 
 ## 5. Continuity Snapshot
 
-- **Active Focus**: Verify and commit `db-engine-primitives:t06`; revise adapter-owned tool provider ownership for blocked `t05`.
+- **Active Focus**: All claimed worksheets are committed; select the next ready task or review handoff.
 - **Completed Checkpoints**: Phase 1 at `b41aae46` (237 focused cases, lint, and docs pass).
 - **Key Decisions**:
   - `ChannelBus` lives in `src/py/vertebra/server/_channels.py` (re-exported from `vertebra.framework.channels`) so `vertebra.extensions.{litestar,starlette,fastapi,flask}.channels` share the engine-neutral pub/sub substrate without importing `vertebra.framework.*` or `vertebra.db.channels`.
