@@ -5,7 +5,6 @@ from vertebra.extensions.sqlspec.adapters import (
     AsyncAdapterConfig,
     AsyncAlloyDBDialer,
     AsyncCloudSQLDialer,
-    AsyncQueryPipeline,
     DuckDBAsyncConfig,
     DuckDBAsyncDriver,
     DuckDBSyncConfig,
@@ -33,7 +32,6 @@ from vertebra.extensions.sqlspec.adapters import (
     SyncAdapterConfig,
     SyncAlloyDBDialer,
     SyncCloudSQLDialer,
-    SyncQueryPipeline,
     TenantPredicate,
 )
 from vertebra.extensions.sqlspec.bigquery import (
@@ -117,7 +115,6 @@ from vertebra.extensions.sqlspec.storage import (
 __all__ = (
     "AsyncAlloyDBDialer",
     "AsyncCloudSQLDialer",
-    "AsyncQueryPipeline",
     "ArrowCursor",
     "ArrowFlightSerializer",
     "AsyncAdapterConfig",
@@ -205,7 +202,6 @@ __all__ = (
     "StreamingStorageResponse",
     "SyncAlloyDBDialer",
     "SyncCloudSQLDialer",
-    "SyncQueryPipeline",
     "SyncAdapterConfig",
     "SyncDriverAdapterBase",
     "TenantPredicate",

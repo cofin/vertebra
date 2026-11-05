@@ -3,7 +3,7 @@ type: Task
 id: db-engine-primitives:t05
 title: Relocate GCP database MCP tools to vertebra/agent/tools/ and empty the vertebra/db upward-import allowlist
 description: "Move `src/py/vertebra/db/mcp_tools.py` into `src/py/vertebra/agent/tools/{__init__,bigquery,spanner}.py` using `provide_driver`, lazy-export the tool builders on `vertebra.agent` with `if TYPE_CHECKING:` parity, delete `src/py/vertebra/db/mcp_tools.py`, and empty `_TEMPORARY_UPWARD_IMPORT_ALLOWLIST` in `src/py/tests/unit/db/test_native_db_drivers.py`."
-state: "in_progress"
+state: "blocked"
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -24,11 +24,11 @@ tests:
 plan_revision: 8
 plan_commit: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
 state_revision: 1
-claimed_by: "/root/db_t05"
-claimed_at: "2026-11-05T02:38:31Z"
-blocked_reason: null
-unblock_condition: null
-next_step: null
+claimed_by: null
+claimed_at: null
+blocked_reason: "User requests adapter-owned provider implementations instead of vendor modules in core agent; the current worksheet targets contradict that ownership."
+unblock_condition: "Refine and review the neutral provider contract and generic consumer before further t05 production edits."
+next_step: "/flow:revise db-engine-primitives"
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
@@ -92,3 +92,5 @@ Move `src/py/vertebra/db/mcp_tools.py` into `src/py/vertebra/agent/tools/{__init
 - [2026-11-05] Public tool and import-gate RED observed before relocation. GREEN173 focused cases; root full Python checkpoint1963 passed69 skipped170 xfailed, lint and review validation pass. Agent API prose is shortened to meet the existing documentation artifact size limit; documentation build passes.
 
 - [2026-11-05] Final Phase2 aggregate exits0: make py-test1981 passed69 skipped170 xfailed, make lint-all, make docs and make review-check. All adopted scoped correctness findings reverified clean.
+
+- [2026-11-05] Local signed checkpoint adeade96558de5a48bed1e889a45f92f9ef45ee7 preserves the initially verified relocation. User steering requires adapter-owned provider implementations and a generic agent consumer; revise the ownership before closing this task. No changes have been delivered externally.

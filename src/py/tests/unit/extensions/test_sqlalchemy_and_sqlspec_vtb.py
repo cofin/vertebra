@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import array
+import importlib
 import sqlite3
+from typing import Any
 
+import pyarrow as pa
 import pytest
 from advanced_alchemy.base import UUIDAuditBase
 from advanced_alchemy.repository import SQLAlchemyAsyncRepository
@@ -14,9 +17,13 @@ from sqlalchemy import String, create_engine, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.util.concurrency import greenlet_spawn
+from sqlspec import SQL, StatementStack
+from sqlspec.core.filters import NullFilter
+from sqlspec.core.statement import StatementConfig
 
-from vertebra.db.adapters.mysql import MySQLConfig, SyncMySQLDriver
-from vertebra.db.adapters.postgres import PostgreSQLConfig, SyncPostgreSQLDriver
+import vertebra.extensions.sqlspec as sqlspec_extension
+from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
+from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SyncSQLiteDriver
 from vertebra.extensions.alchemy import (
     ObjectStoreBackend,
@@ -48,6 +55,26 @@ from vertebra.extensions.sqlalchemy import (
     SyncSQLiteDialect,
     Vector,
     dialects,
+)
+from vertebra.extensions.sqlspec.adapters import (
+    MySQLAsyncConfig,
+    MySQLSyncConfig,
+    PostgreSQLAsyncConfig,
+    PostgreSQLSyncConfig,
+    SQLiteAsyncDriver,
+    SQLiteSyncDriver,
+)
+from vertebra.extensions.sqlspec.adapters import (
+    MySQLAsyncDriver as SQLSpecMySQLAsyncDriver,
+)
+from vertebra.extensions.sqlspec.adapters import (
+    MySQLSyncDriver as SQLSpecMySQLSyncDriver,
+)
+from vertebra.extensions.sqlspec.adapters import (
+    PostgreSQLAsyncDriver as SQLSpecPostgreSQLAsyncDriver,
+)
+from vertebra.extensions.sqlspec.adapters import (
+    PostgreSQLSyncDriver as SQLSpecPostgreSQLSyncDriver,
 )
 from vertebra.storage import SyncObjectStore
 
@@ -646,3 +673,700 @@ async def test_pep249_sync_and_async_dbapi_dml_rowcount_routing() -> None:
     assert drv_async_cur.rowcount == 2
     assert len(async_drv.executed) == 3
     await drv_async_conn.close()
+
+
+class _SyncPipelinePort(SyncSQLiteDriver):
+    """SQLite database port exposing the native pipeline protocol and queued operations."""
+
+    def __init__(self, *, result_count: int | None = None) -> None:
+        super().__init__()
+        self.pipeline_calls = 0
+        self.result_count = result_count
+        self.queued: list[tuple[str, str, object]] = []
+
+    def pipeline(self) -> Any:
+        self.pipeline_calls += 1
+        port = self
+
+        class Pipeline:
+            def __enter__(self) -> Any:
+                port.begin()
+                return self
+
+            def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+                if exc_type:
+                    port.rollback()
+                else:
+                    port.commit()
+
+            def select(self, sql: str, parameters: Any = None) -> None:
+                port.queued.append(("select", sql, parameters))
+
+            def execute(self, sql: str, parameters: Any = None) -> None:
+                port.queued.append(("execute", sql, parameters))
+
+            def results(self) -> list[Any]:
+                results = [getattr(port, method)(sql, params) for method, sql, params in port.queued]
+                return results[: port.result_count]
+
+        return Pipeline()
+
+
+class _AsyncPipelinePort(AsyncSQLiteDriver):
+    """Async SQLite database port exposing native pipeline ordering and transactions."""
+
+    def __init__(self, *, result_count: int | None = None) -> None:
+        super().__init__()
+        self.pipeline_calls = 0
+        self.result_count = result_count
+        self.queued: list[tuple[str, str, object]] = []
+
+    def pipeline(self) -> Any:
+        self.pipeline_calls += 1
+        port = self
+
+        class Pipeline:
+            async def __aenter__(self) -> Any:
+                await port.begin()
+                return self
+
+            async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+                if exc_type:
+                    await port.rollback()
+                else:
+                    await port.commit()
+
+            def select(self, sql: str, parameters: Any = None) -> None:
+                port.queued.append(("select", sql, parameters))
+
+            def execute(self, sql: str, parameters: Any = None) -> None:
+                port.queued.append(("execute", sql, parameters))
+
+            async def results(self) -> list[Any]:
+                results = [await getattr(port, method)(sql, params) for method, sql, params in port.queued]
+                return results[: port.result_count]
+
+        return Pipeline()
+
+
+@pytest.mark.parametrize("pipeline_capable", [False, True])
+def test_sqlspec_stack_ordered_results_and_binds(pipeline_capable: bool) -> None:
+    """The SQLSpec adapter preserves independent rows, DML counts, and SQL-bound parameters."""
+    native = _SyncPipelinePort() if pipeline_capable else SyncSQLiteDriver()
+    native.execute("CREATE TABLE stack_items (id INTEGER)")
+    driver = SQLiteSyncDriver(native)
+    try:
+        result = driver.execute_stack(
+            StatementStack()
+            .push_execute("INSERT INTO stack_items VALUES (:id)", id=7)
+            .push_execute(SQL("SELECT id FROM stack_items WHERE id = :id", id=7))
+            .push_execute("WITH total AS (SELECT COUNT(*) AS n FROM stack_items) SELECT n FROM total")
+        )
+        assert [item.rows_affected for item in result] == [1, 1, 1]
+        assert result[1].get_result().get_data() == [{"id": 7}]
+        assert result[2].get_result().get_data() == [{"n": 1}]
+        if pipeline_capable:
+            assert native.pipeline_calls == 1
+            assert [item[0] for item in native.queued] == ["execute", "select", "select"]
+    finally:
+        native.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("pipeline_capable", [False, True])
+async def test_sqlspec_async_stack_ordered_results_and_binds(pipeline_capable: bool) -> None:
+    """Async SQLSpec stack results retain every row set and bound SQL value in order."""
+    native = _AsyncPipelinePort() if pipeline_capable else AsyncSQLiteDriver()
+    await native.execute("CREATE TABLE stack_items (id INTEGER)")
+    driver = SQLiteAsyncDriver(native)
+    try:
+        result = await driver.execute_stack(
+            StatementStack()
+            .push_execute("INSERT INTO stack_items VALUES (:id)", id=7)
+            .push_execute(SQL("SELECT id FROM stack_items WHERE id = :id", id=7))
+            .push_execute("WITH total AS (SELECT COUNT(*) AS n FROM stack_items) SELECT n FROM total")
+        )
+        assert [item.rows_affected for item in result] == [1, 1, 1]
+        assert result[1].get_result().get_data() == [{"id": 7}]
+        assert result[2].get_result().get_data() == [{"n": 1}]
+        if pipeline_capable:
+            assert native.pipeline_calls == 1
+            assert [item[0] for item in native.queued] == ["execute", "select", "select"]
+    finally:
+        await native.close()
+
+
+@pytest.mark.parametrize("pipeline_capable", [False, True])
+@pytest.mark.parametrize("continue_on_error", [False, True])
+def test_sqlspec_stack_errors_roll_back_or_continue(continue_on_error: bool, pipeline_capable: bool) -> None:
+    """Failed statements roll back fail-fast work or preserve subsequent independent operations."""
+    native = _SyncPipelinePort() if pipeline_capable else SyncSQLiteDriver()
+    native.execute("CREATE TABLE stack_items (id INTEGER)")
+    driver = SQLiteSyncDriver(native)
+    stack = (
+        StatementStack()
+        .push_execute("INSERT INTO stack_items VALUES (1)")
+        .push_execute("INSERT INTO missing_table VALUES (2)")
+        .push_execute("INSERT INTO stack_items VALUES (3)")
+    )
+    try:
+        if continue_on_error:
+            result = driver.execute_stack(stack, continue_on_error=True)
+            assert len(result) == 3
+            assert result[1].is_error()
+            assert result[0].rows_affected == result[2].rows_affected == 1
+            assert native.select("SELECT id FROM stack_items ORDER BY id") == [{"id": 1}, {"id": 3}]
+            if pipeline_capable:
+                assert native.pipeline_calls == 0
+        else:
+            with pytest.raises(Exception, match="missing_table"):
+                driver.execute_stack(stack)
+            assert native.select("SELECT id FROM stack_items") == []
+            if pipeline_capable:
+                assert native.pipeline_calls == 1
+    finally:
+        native.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("pipeline_capable", [False, True])
+@pytest.mark.parametrize("continue_on_error", [False, True])
+async def test_sqlspec_async_stack_errors_roll_back_or_continue(
+    continue_on_error: bool, pipeline_capable: bool
+) -> None:
+    """Async failures propagate or occupy their ordered error slot while later work completes."""
+    native = _AsyncPipelinePort() if pipeline_capable else AsyncSQLiteDriver()
+    await native.execute("CREATE TABLE stack_items (id INTEGER)")
+    driver = SQLiteAsyncDriver(native)
+    stack = (
+        StatementStack()
+        .push_execute("INSERT INTO stack_items VALUES (1)")
+        .push_execute("INSERT INTO missing_table VALUES (2)")
+        .push_execute("INSERT INTO stack_items VALUES (3)")
+    )
+    try:
+        if continue_on_error:
+            result = await driver.execute_stack(stack, continue_on_error=True)
+            assert len(result) == 3
+            assert result[1].is_error()
+            assert result[0].rows_affected == result[2].rows_affected == 1
+            assert await native.select("SELECT id FROM stack_items ORDER BY id") == [{"id": 1}, {"id": 3}]
+            if pipeline_capable:
+                assert native.pipeline_calls == 0
+        else:
+            with pytest.raises(Exception, match="missing_table"):
+                await driver.execute_stack(stack)
+            assert await native.select("SELECT id FROM stack_items") == []
+            if pipeline_capable:
+                assert native.pipeline_calls == 1
+    finally:
+        await native.close()
+
+
+def test_query_pipeline_public_surface_removed() -> None:
+    """The removed CTE compiler has no import path or SQLSpec re-export."""
+    with pytest.raises(ModuleNotFoundError, match="vertebra.db.pipeline"):
+        importlib.import_module("vertebra.db.pipeline")
+    assert not hasattr(sqlspec_extension, "SyncQueryPipeline")
+    assert not hasattr(sqlspec_extension, "AsyncQueryPipeline")
+
+
+@pytest.mark.parametrize("pipeline_capable", [False, True])
+def test_sqlspec_stack_uses_processed_row_metadata(pipeline_capable: bool) -> None:
+    """Comments, WITH DML, and RETURNING retain upstream row-producing classification."""
+    native = _SyncPipelinePort() if pipeline_capable else SyncSQLiteDriver()
+    native.execute("CREATE TABLE stack_items (id INTEGER)")
+    driver = SQLiteSyncDriver(native)
+    try:
+        result = driver.execute_stack(
+            StatementStack()
+            .push_execute("/* insert result */ INSERT INTO stack_items VALUES (7) RETURNING id")
+            .push_execute("WITH x AS (SELECT 1) UPDATE stack_items SET id = 9")
+            .push_execute("/* independent read */ SELECT id FROM stack_items")
+        )
+        assert result[0].get_result().get_data() == [{"id": 7}]
+        assert result[0].result_type == "INSERT"
+        assert result[0].get_result().statement.operation_type == "INSERT"
+        assert result[1].rows_affected == 0
+        assert result[2].get_result().get_data() == [{"id": 9}]
+        assert result[2].result_type == "SELECT"
+        assert result[2].get_result().statement.operation_type == "SELECT"
+        if pipeline_capable:
+            assert [item[0] for item in native.queued] == ["select", "execute", "select"]
+    finally:
+        native.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("pipeline_capable", [False, True])
+async def test_sqlspec_async_stack_uses_processed_row_metadata(pipeline_capable: bool) -> None:
+    """Async dispatch follows SQLSpec row metadata through comments and mutations."""
+    native = _AsyncPipelinePort() if pipeline_capable else AsyncSQLiteDriver()
+    await native.execute("CREATE TABLE stack_items (id INTEGER)")
+    driver = SQLiteAsyncDriver(native)
+    try:
+        result = await driver.execute_stack(
+            StatementStack()
+            .push_execute("/* insert result */ INSERT INTO stack_items VALUES (7) RETURNING id")
+            .push_execute("WITH x AS (SELECT 1) UPDATE stack_items SET id = 9")
+            .push_execute("/* independent read */ SELECT id FROM stack_items")
+        )
+        assert result[0].get_result().get_data() == [{"id": 7}]
+        assert result[0].result_type == "INSERT"
+        assert result[0].get_result().statement.operation_type == "INSERT"
+        assert result[1].rows_affected == 0
+        assert result[2].get_result().get_data() == [{"id": 9}]
+        assert result[2].result_type == "SELECT"
+        assert result[2].get_result().statement.operation_type == "SELECT"
+        if pipeline_capable:
+            assert [item[0] for item in native.queued] == ["select", "execute", "select"]
+    finally:
+        await native.close()
+
+
+def test_sqlspec_stack_non_execute_methods_use_sequential_fallback() -> None:
+    """Batch, script, Arrow, and single-operation stacks retain their adapter result types."""
+    native = _SyncPipelinePort()
+    native.execute("CREATE TABLE stack_items (id INTEGER)")
+    driver = SQLiteSyncDriver(native)
+    try:
+        result = driver.execute_stack(
+            StatementStack()
+            .push_execute_many("INSERT INTO stack_items VALUES (?)", [(1,), (2,)])
+            .push_execute_script("INSERT INTO stack_items VALUES (3); INSERT INTO stack_items VALUES (4)")
+            .push_execute_arrow("SELECT id FROM stack_items ORDER BY id")
+        )
+        assert result[0].rows_affected == 2
+        assert result[1].result_type == "SCRIPT"
+        assert result[2].is_arrow_result()
+        assert result[2].get_result().data.to_pylist() == [{"id": i} for i in range(1, 5)]
+        single = driver.execute_stack(StatementStack().push_execute("SELECT COUNT(*) AS n FROM stack_items"))
+        assert single[0].get_result().get_data() == [{"n": 4}]
+        assert native.pipeline_calls == 0
+    finally:
+        native.close()
+
+
+@pytest.mark.anyio
+async def test_sqlspec_async_stack_non_execute_methods_use_sequential_fallback() -> None:
+    """Async batch, script, Arrow, and single-operation stacks bypass native pipelines."""
+    native = _AsyncPipelinePort()
+    await native.execute("CREATE TABLE stack_items (id INTEGER)")
+    driver = SQLiteAsyncDriver(native)
+    try:
+        result = await driver.execute_stack(
+            StatementStack()
+            .push_execute_many("INSERT INTO stack_items VALUES (?)", [(1,), (2,)])
+            .push_execute_script("INSERT INTO stack_items VALUES (3); INSERT INTO stack_items VALUES (4)")
+            .push_execute_arrow("SELECT id FROM stack_items ORDER BY id")
+        )
+        assert result[0].rows_affected == 2
+        assert result[1].result_type == "SCRIPT"
+        assert result[2].is_arrow_result()
+        assert result[2].get_result().data.to_pylist() == [{"id": i} for i in range(1, 5)]
+        single = await driver.execute_stack(StatementStack().push_execute("SELECT COUNT(*) AS n FROM stack_items"))
+        assert single[0].get_result().get_data() == [{"n": 4}]
+        assert native.pipeline_calls == 0
+    finally:
+        await native.close()
+
+
+def test_sqlspec_pipeline_result_count_mismatch_rolls_back() -> None:
+    """Missing native results propagate before the pipeline transaction commits."""
+    native = _SyncPipelinePort(result_count=1)
+    native.execute("CREATE TABLE stack_items (id INTEGER)")
+    driver = SQLiteSyncDriver(native)
+    try:
+        with pytest.raises(ValueError, match="zip"):
+            driver.execute_stack(
+                StatementStack()
+                .push_execute("INSERT INTO stack_items VALUES (1)")
+                .push_execute("SELECT id FROM stack_items")
+            )
+        assert native.select("SELECT id FROM stack_items") == []
+    finally:
+        native.close()
+
+
+@pytest.mark.anyio
+async def test_sqlspec_async_pipeline_result_count_mismatch_rolls_back() -> None:
+    """Async native result omissions propagate and roll back queued writes."""
+    native = _AsyncPipelinePort(result_count=1)
+    await native.execute("CREATE TABLE stack_items (id INTEGER)")
+    driver = SQLiteAsyncDriver(native)
+    try:
+        with pytest.raises(ValueError, match="zip"):
+            await driver.execute_stack(
+                StatementStack()
+                .push_execute("INSERT INTO stack_items VALUES (1)")
+                .push_execute("SELECT id FROM stack_items")
+            )
+        assert await native.select("SELECT id FROM stack_items") == []
+    finally:
+        await native.close()
+
+
+class _NativeBindConnection:
+    """DBAPI database port recording native placeholders before SQLite adaptation."""
+
+    def __init__(self) -> None:
+        self.raw = sqlite3.connect(":memory:")
+        self.raw.execute("CREATE TABLE stack_items (id INTEGER)")
+        self.calls: list[tuple[str, Any]] = []
+
+    def connection(self) -> Any:
+        return self
+
+    def cursor(self) -> Any:
+        port = self
+        cursor = self.raw.cursor()
+
+        class Cursor:
+            @property
+            def description(self) -> Any:
+                return cursor.description
+
+            @property
+            def rowcount(self) -> int:
+                return cursor.rowcount
+
+            def execute(self, sql: str, params: Any = None) -> None:
+                port.calls.append((sql, params))
+                bound = (
+                    {str(index): value for index, value in enumerate(params, 1)}
+                    if "$1" in sql and params is not None
+                    else params or ()
+                )
+                cursor.execute(sql.replace("%s", "?"), bound)
+
+            def fetchall(self) -> list[Any]:
+                return cursor.fetchall()
+
+            def close(self) -> None:
+                cursor.close()
+
+        return Cursor()
+
+    def commit(self) -> None:
+        self.raw.commit()
+
+    def rollback(self) -> None:
+        self.raw.rollback()
+
+    def close(self) -> None:
+        self.raw.close()
+
+    def __enter__(self) -> Any:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        return None
+
+
+class _AsyncNativeBindConnection(_NativeBindConnection):
+    """Async DBAPI port retaining actual SQL and bind observations."""
+
+    def acquire(self) -> Any:
+        return self
+
+    def cursor(self) -> Any:
+        cursor = super().cursor()
+
+        class Cursor:
+            @property
+            def description(self) -> Any:
+                return cursor.description
+
+            @property
+            def rowcount(self) -> int:
+                return cursor.rowcount
+
+            async def execute(self, sql: str, params: Any = None) -> None:
+                cursor.execute(sql, params)
+
+            async def fetchall(self) -> list[Any]:
+                return cursor.fetchall()
+
+            async def close(self) -> None:
+                cursor.close()
+
+            async def __aenter__(self) -> Any:
+                return self
+
+            async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+                cursor.close()
+
+        return Cursor()
+
+    async def commit(self) -> None:
+        self.raw.commit()
+
+    async def rollback(self) -> None:
+        self.raw.rollback()
+
+    async def close(self) -> None:
+        self.raw.close()
+
+    async def __aenter__(self) -> Any:
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        return None
+
+
+@pytest.mark.parametrize("engine", ["postgres", "mysql"])
+@pytest.mark.parametrize("config_defaults", [False, True])
+def test_sqlspec_stack_preserves_native_dbapi_binds_and_rows(engine: str, config_defaults: bool) -> None:
+    """Native DBAPI execution retains placeholders, binds, row counts, and independent reads."""
+    port = _NativeBindConnection()
+    if engine == "postgres":
+        native = SyncPostgreSQLDriver(PostgreSQLConfig(dsn="postgresql://localhost/db"), pool=port)
+        config = PostgreSQLSyncConfig(native.config)
+        driver = SQLSpecPostgreSQLSyncDriver(
+            native, statement_config=config.statement_config if config_defaults else None
+        )
+    else:
+        native = SyncMySQLDriver(MySQLConfig(dsn="mysql://localhost/db"), connect_factory=lambda: port)
+        config = MySQLSyncConfig(native.config)
+        driver = SQLSpecMySQLSyncDriver(native, statement_config=config.statement_config if config_defaults else None)
+    try:
+        result = driver.execute_stack(
+            StatementStack()
+            .push_execute("INSERT INTO stack_items VALUES (%s)", 7)
+            .push_execute("UPDATE stack_items SET id = %s WHERE id = %s", 9, 7)
+            .push_execute("SELECT id FROM stack_items WHERE id = %s", 9)
+        )
+        assert [item.rows_affected for item in result] == [1, 1, 1]
+        assert result[2].get_result().get_data() == [{"id": 9}]
+        assert port.calls == [
+            ("INSERT INTO stack_items VALUES (%s)", [7]),
+            ("UPDATE stack_items SET id = %s WHERE id = %s", [9, 7]),
+            ("SELECT id FROM stack_items WHERE id = %s", [9]),
+        ]
+        assert port.raw.execute("SELECT id FROM stack_items").fetchall() == [(9,)]
+    finally:
+        native.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("engine", ["postgres", "mysql"])
+@pytest.mark.parametrize("config_defaults", [False, True])
+async def test_sqlspec_async_stack_preserves_native_dbapi_binds_and_rows(engine: str, config_defaults: bool) -> None:
+    """Async native client ports observe engine placeholder syntax and complete ordered results."""
+    port = _AsyncNativeBindConnection()
+    if engine == "postgres":
+        native = AsyncPostgreSQLDriver(PostgreSQLConfig(dsn="postgresql://localhost/db"), pool=port)
+        config = PostgreSQLAsyncConfig(native.config)
+        driver = SQLSpecPostgreSQLAsyncDriver(
+            native, statement_config=config.statement_config if config_defaults else None
+        )
+        marker = "$"
+        insert_sql = "INSERT INTO stack_items VALUES ($1)"
+        update_sql = "UPDATE stack_items SET id = $1 WHERE id = $2"
+        select_sql = "SELECT id FROM stack_items WHERE id = $1"
+    else:
+        native = AsyncMySQLDriver(MySQLConfig(dsn="mysql://localhost/db"), pool=port)
+        config = MySQLAsyncConfig(native.config)
+        driver = SQLSpecMySQLAsyncDriver(native, statement_config=config.statement_config if config_defaults else None)
+        marker = "%s"
+        insert_sql = "INSERT INTO stack_items VALUES (%s)"
+        update_sql = "UPDATE stack_items SET id = %s WHERE id = %s"
+        select_sql = "SELECT id FROM stack_items WHERE id = %s"
+    try:
+        result = await driver.execute_stack(
+            StatementStack().push_execute(insert_sql, 7).push_execute(update_sql, 9, 7).push_execute(select_sql, 9)
+        )
+        assert [item.rows_affected for item in result] == [1, 1, 1]
+        assert result[2].get_result().get_data() == [{"id": 9}]
+        assert [sql for sql, _ in port.calls] == [insert_sql, update_sql, select_sql]
+        assert [list(params) for _, params in port.calls] == [[7], [9, 7], [9]]
+        assert all(marker in sql for sql, _ in port.calls)
+        assert port.raw.execute("SELECT id FROM stack_items").fetchall() == [(9,)]
+    finally:
+        await native.close()
+
+
+def test_sqlspec_explicit_statement_config_remains_authoritative() -> None:
+    """Caller-owned statement configuration controls compilation and retains object identity."""
+    port = _NativeBindConnection()
+    native = SyncPostgreSQLDriver(PostgreSQLConfig(dsn="postgresql://localhost/db"), pool=port)
+    statement_config = SQL("SELECT 1").statement_config
+    config = PostgreSQLSyncConfig(native.config, statement_config=statement_config)
+    driver = SQLSpecPostgreSQLSyncDriver(native, statement_config=config.statement_config)
+    try:
+        result = driver.execute_stack(StatementStack().push_execute("INSERT INTO stack_items VALUES (:id)", id=7))
+        assert config.statement_config is statement_config
+        assert driver.statement_config is statement_config
+        assert result[0].rows_affected == 1
+        assert port.calls[0][0] == "INSERT INTO stack_items VALUES (?)"
+        assert list(port.calls[0][1]) == [7]
+    finally:
+        native.close()
+
+
+@pytest.mark.anyio
+async def test_sqlspec_async_explicit_statement_config_remains_authoritative() -> None:
+    """Async native defaults yield to the caller's SQLSpec parameter configuration."""
+    port = _AsyncNativeBindConnection()
+    native = AsyncPostgreSQLDriver(PostgreSQLConfig(dsn="postgresql://localhost/db"), pool=port)
+    statement_config = SQL("SELECT 1").statement_config
+    config = PostgreSQLAsyncConfig(native.config, statement_config=statement_config)
+    driver = SQLSpecPostgreSQLAsyncDriver(native, statement_config=config.statement_config)
+    try:
+        result = await driver.execute_stack(StatementStack().push_execute("INSERT INTO stack_items VALUES (:id)", id=7))
+        assert config.statement_config is statement_config
+        assert driver.statement_config is statement_config
+        assert result[0].rows_affected == 1
+        assert port.calls[0][0] == "INSERT INTO stack_items VALUES (?)"
+        assert list(port.calls[0][1]) == [7]
+    finally:
+        await native.close()
+
+
+@pytest.mark.parametrize("prebound", [False, True])
+@pytest.mark.parametrize("override_config", [False, True])
+def test_sqlspec_arrow_stack_prepares_binds_and_retains_statement(prebound: bool, override_config: bool) -> None:
+    """Arrow stack binds use prepared SQL and keep execution options out of named parameters."""
+    native = _SyncPipelinePort()
+    driver = SQLiteSyncDriver(native)
+    statement = SQL("SELECT :value AS value", value=7) if prebound else "SELECT :value AS value"
+    options = {
+        "return_format": "table",
+        "native_only": True,
+        "batch_size": 1,
+        "arrow_schema": pa.schema([("value", pa.int64())]),
+    }
+    if override_config:
+        options["statement_config"] = StatementConfig(dialect="sqlite")
+    if not prebound:
+        options["value"] = 7
+    try:
+        result = driver.execute_stack(StatementStack().push_execute_arrow(statement, **options))[0]
+        assert result.is_arrow_result()
+        assert result.get_result().data.to_pylist() == [{"value": 7}]
+        prepared = result.get_result().statement
+        assert prepared.named_parameters == {"value": 7}
+        assert prepared.operation_type == "SELECT"
+        if override_config:
+            assert prepared.statement_config is options["statement_config"]
+        assert native.pipeline_calls == 0
+    finally:
+        native.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("prebound", [False, True])
+@pytest.mark.parametrize("override_config", [False, True])
+async def test_sqlspec_async_arrow_stack_prepares_binds_and_retains_statement(
+    prebound: bool, override_config: bool
+) -> None:
+    """Async Arrow stack execution retains prebound and keyword values with prepared metadata."""
+    native = _AsyncPipelinePort()
+    driver = SQLiteAsyncDriver(native)
+    statement = SQL("SELECT :value AS value", value=7) if prebound else "SELECT :value AS value"
+    options = {
+        "return_format": "table",
+        "native_only": True,
+        "batch_size": 1,
+        "arrow_schema": pa.schema([("value", pa.int64())]),
+    }
+    if override_config:
+        options["statement_config"] = StatementConfig(dialect="sqlite")
+    if not prebound:
+        options["value"] = 7
+    try:
+        result = (await driver.execute_stack(StatementStack().push_execute_arrow(statement, **options)))[0]
+        assert result.is_arrow_result()
+        assert result.get_result().data.to_pylist() == [{"value": 7}]
+        prepared = result.get_result().statement
+        assert prepared.named_parameters == {"value": 7}
+        assert prepared.operation_type == "SELECT"
+        if override_config:
+            assert prepared.statement_config is options["statement_config"]
+        assert native.pipeline_calls == 0
+    finally:
+        await native.close()
+
+
+@pytest.mark.parametrize("override_config", [False, True])
+def test_sqlspec_batch_stack_compiles_native_binds(override_config: bool) -> None:
+    """Batch stack processing applies the same native parameter profile as single execution."""
+    port = _NativeBindConnection()
+    native = SyncPostgreSQLDriver(PostgreSQLConfig(dsn="postgresql://localhost/db"), pool=port)
+    driver = SQLSpecPostgreSQLSyncDriver(native)
+    config = StatementConfig(dialect="postgres") if override_config else None
+    try:
+        result = driver.execute_stack(
+            StatementStack().push_execute_many(
+                "INSERT INTO stack_items VALUES (?)", [(7,), (9,)], statement_config=config
+            )
+        )
+        assert result[0].rows_affected == 2
+        assert [sql for sql, _ in port.calls] == [
+            "INSERT INTO stack_items VALUES (?)" if override_config else "INSERT INTO stack_items VALUES (%s)"
+        ] * 2
+        assert [list(params) for _, params in port.calls] == [[7], [9]]
+        assert port.raw.execute("SELECT id FROM stack_items ORDER BY id").fetchall() == [(7,), (9,)]
+    finally:
+        native.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("override_config", [False, True])
+async def test_sqlspec_async_batch_stack_compiles_native_binds(override_config: bool) -> None:
+    """Async batch stack parameters compile to native numeric binds or the explicit override."""
+    port = _AsyncNativeBindConnection()
+    native = AsyncPostgreSQLDriver(PostgreSQLConfig(dsn="postgresql://localhost/db"), pool=port)
+    driver = SQLSpecPostgreSQLAsyncDriver(native)
+    config = StatementConfig(dialect="postgres") if override_config else None
+    try:
+        result = await driver.execute_stack(
+            StatementStack().push_execute_many(
+                "INSERT INTO stack_items VALUES (?)", [(7,), (9,)], statement_config=config
+            )
+        )
+        assert result[0].rows_affected == 2
+        assert [sql for sql, _ in port.calls] == [
+            "INSERT INTO stack_items VALUES (?)" if override_config else "INSERT INTO stack_items VALUES ($1)"
+        ] * 2
+        assert [list(params) for _, params in port.calls] == [[7], [9]]
+        assert port.raw.execute("SELECT id FROM stack_items ORDER BY id").fetchall() == [(7,), (9,)]
+    finally:
+        await native.close()
+
+
+@pytest.mark.parametrize("sql_object", [False, True])
+def test_sqlspec_batch_stack_applies_filters(sql_object: bool) -> None:
+    """Batch filters constrain actual database updates for strings and existing SQL objects."""
+    native = _SyncPipelinePort()
+    native.execute("CREATE TABLE stack_items (id INTEGER)")
+    native.execute_many("INSERT INTO stack_items VALUES (?)", [(None,), (1,)])
+    driver = SQLiteSyncDriver(native)
+    statement = SQL("UPDATE stack_items SET id = ?") if sql_object else "UPDATE stack_items SET id = ?"
+    try:
+        result = driver.execute_stack(StatementStack().push_execute_many(statement, [(7,), (9,)], NullFilter("id")))
+        assert result[0].rows_affected == 1
+        assert native.select("SELECT id FROM stack_items ORDER BY id") == [{"id": 1}, {"id": 7}]
+        assert native.pipeline_calls == 0
+    finally:
+        native.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("sql_object", [False, True])
+async def test_sqlspec_async_batch_stack_applies_filters(sql_object: bool) -> None:
+    """Async batch filters preserve row scope when normalizing batched parameters."""
+    native = _AsyncPipelinePort()
+    await native.execute("CREATE TABLE stack_items (id INTEGER)")
+    await native.execute_many("INSERT INTO stack_items VALUES (?)", [(None,), (1,)])
+    driver = SQLiteAsyncDriver(native)
+    statement = SQL("UPDATE stack_items SET id = ?") if sql_object else "UPDATE stack_items SET id = ?"
+    try:
+        result = await driver.execute_stack(
+            StatementStack().push_execute_many(statement, [(7,), (9,)], NullFilter("id"))
+        )
+        assert result[0].rows_affected == 1
+        assert await native.select("SELECT id FROM stack_items ORDER BY id") == [{"id": 1}, {"id": 7}]
+        assert native.pipeline_calls == 0
+    finally:
+        await native.close()

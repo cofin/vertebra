@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator, Sequence
-from contextlib import asynccontextmanager, contextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager
 from types import TracebackType
 from typing import Any, ClassVar, Self, cast
 
@@ -25,7 +25,7 @@ from vertebra.db.arrow import (
 )
 from vertebra.db.dialer.alloydb import AsyncAlloyDBDialer, SyncAlloyDBDialer
 from vertebra.db.dialer.cloudsql import AsyncCloudSQLDialer, SyncCloudSQLDialer
-from vertebra.db.pipeline import AsyncQueryPipeline, PipelineDialect, SyncQueryPipeline
+from vertebra.db.driver.capabilities import AsyncPipelineCapable, SyncPipelineCapable
 from vertebra.db.registry import DatabaseRegistry
 from vertebra.db.rls import TenantPredicate
 from vertebra.typing import MissingDependencyError
@@ -33,8 +33,9 @@ from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import ZeroCopyCodecRegistry
 
 try:
-    from sqlspec import StackResult, StatementStack
+    from sqlspec import SQLResult, StackResult, StatementStack
     from sqlspec.config import AsyncDatabaseConfig, SyncDatabaseConfig
+    from sqlspec.core.parameters import ParameterStyle, ParameterStyleConfig
     from sqlspec.core.result._base import ArrowResult
     from sqlspec.core.statement import SQL, StatementConfig
     from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
@@ -44,7 +45,6 @@ except ImportError as exc:
 __all__ = (
     "AsyncAlloyDBDialer",
     "AsyncCloudSQLDialer",
-    "AsyncQueryPipeline",
     "ArrowCursor",
     "AsyncAdapterConfig",
     "DuckDBAsyncConfig",
@@ -69,7 +69,6 @@ __all__ = (
     "PostgreSQLSyncDriver",
     "SyncAlloyDBDialer",
     "SyncCloudSQLDialer",
-    "SyncQueryPipeline",
     "SQLiteAsyncConfig",
     "SQLiteAsyncDriver",
     "SQLiteSyncConfig",
@@ -147,6 +146,13 @@ class BaseSyncDriver(SyncDriverAdapterBase):
     """Base synchronous driver adapter implementing standard SQLSpec execution methods."""
 
     dialect: str = "generic"
+    _execution_parameter_style: ClassVar[ParameterStyle | None] = None
+    _arrow_execution_options: ClassVar[tuple[str, ...]] = (
+        "return_format",
+        "native_only",
+        "batch_size",
+        "arrow_schema",
+    )
 
     def __init__(
         self,
@@ -156,7 +162,7 @@ class BaseSyncDriver(SyncDriverAdapterBase):
         observability: Any = None,
     ) -> None:
         """Initialize driver with native connection and statement configuration."""
-        stmt_cfg = statement_config or StatementConfig(dialect=self.dialect)
+        stmt_cfg = statement_config or self._default_statement_config()
         super().__init__(connection, stmt_cfg, driver_features, observability)
         self.native_driver: Any = connection
 
@@ -322,45 +328,130 @@ class BaseSyncDriver(SyncDriverAdapterBase):
         num_rows = len(table) if hasattr(table, "__len__") else getattr(table, "num_rows", 0)
         return ArrowResult(statement=SQL(sql), data=table, rows_affected=num_rows)
 
-    def execute_stack(self, stack: StatementStack, *, continue_on_error: bool = False) -> tuple[StackResult, ...]:
-        """Execute a StatementStack using SyncQueryPipeline CTE compilation when applicable or sequential execution."""
-        operations = getattr(stack, "operations", ())
-        all_read = bool(operations)
-        for op in operations:
-            stmt_raw = str(getattr(op, "statement", "")).strip().upper()
-            if not (stmt_raw.startswith("SELECT") or stmt_raw.startswith("WITH")):
-                all_read = False
-                break
-
-        if all_read and len(operations) > 1:
-            pipeline_dialect: PipelineDialect = (
-                "googlesql" if self.dialect in {"bigquery", "spanner", "googlesql"} else "postgres"
-            )
-            pipeline = SyncQueryPipeline(dialect=pipeline_dialect)
-            for idx, op in enumerate(operations):
-                stmt_sql = str(getattr(op, "statement", ""))
-                args = getattr(op, "arguments", ())
-                p = dict(args[0]) if args and isinstance(args[0], dict) else {}
-                pipeline.add_step(f"step_{idx}", stmt_sql, params=p)
-            with suppress(Exception):
-                compiled_sql, merged_params = pipeline.compile()
-                rows = self.select(compiled_sql, merged_params)
-                return tuple(StackResult(rows_affected=len(rows)) for _ in operations)
+    def execute_stack(
+        self,
+        stack: StatementStack,
+        *,
+        continue_on_error: bool = False,
+    ) -> tuple[StackResult, ...]:
+        """Execute ordered operations through a native pipeline or transactional primitives."""
+        if not isinstance(stack, StatementStack):
+            raise TypeError("execute_stack expects a StatementStack instance")
+        if not stack:
+            raise ValueError("Cannot execute an empty StatementStack")
+        operations = stack.operations
+        if (
+            isinstance(self.native_driver, SyncPipelineCapable)
+            and not continue_on_error
+            and len(operations) > 1
+            and all(op.method == "execute" for op in operations)
+        ):
+            prepared = []
+            for op in operations:
+                kwargs = dict(op.keyword_arguments or {})
+                statement = self.prepare_statement(
+                    op.statement,
+                    op.arguments,
+                    statement_config=kwargs.pop("statement_config", None),
+                    kwargs=kwargs,
+                )
+                sql, params = statement.compile()
+                prepared.append((statement, sql, params))
+            with self.native_driver.pipeline() as pipe:
+                for statement, sql, params in prepared:
+                    if statement.returns_rows():
+                        pipe.select(sql, params)
+                    else:
+                        pipe.execute(sql, params)
+                raw_results = pipe.results()
+                return tuple(
+                    StackResult.from_sql_result(
+                        SQLResult(
+                            statement=statement,
+                            data=result,
+                            rows_affected=len(result),
+                            operation_type=statement.operation_type,
+                        )
+                    )
+                    if isinstance(result, list)
+                    else StackResult(rows_affected=int(result))
+                    for (statement, _, _), result in zip(prepared, raw_results, strict=True)
+                )
 
         results: list[StackResult] = []
-        self.begin()
+        if not continue_on_error:
+            self.begin()
         try:
             for op in operations:
-                stmt = getattr(op, "statement", "")
-                args = getattr(op, "arguments", ())
-                rc = self.execute(str(stmt), *args)
-                results.append(StackResult(rows_affected=rc))
-            self.commit()
-        except Exception as exc:
-            self.rollback()
+                if continue_on_error:
+                    self.begin()
+                try:
+                    kwargs = dict(op.keyword_arguments or {})
+                    if op.method == "execute":
+                        statement = self.prepare_statement(
+                            op.statement,
+                            op.arguments,
+                            statement_config=kwargs.pop("statement_config", None),
+                            kwargs=kwargs,
+                        )
+                        sql, params = statement.compile()
+                        args = (params,) if params is not None else ()
+                        if statement.returns_rows():
+                            rows = self.select(sql, *args)
+                            result = StackResult.from_sql_result(
+                                SQLResult(
+                                    statement=statement,
+                                    data=rows,
+                                    rows_affected=len(rows),
+                                    operation_type=statement.operation_type,
+                                )
+                            )
+                        else:
+                            result = StackResult(rows_affected=self.execute(sql, *args))
+                    elif op.method == "execute_many":
+                        statement = _prepare_stack_many(self, op, kwargs)
+                        sql, parameter_sets = statement.compile()
+                        result = StackResult(rows_affected=self.execute_many(sql, parameter_sets))
+                    elif op.method == "execute_script":
+                        script_result = self.execute_script(op.statement, *op.arguments, **kwargs)
+                        result = (
+                            StackResult.from_sql_result(script_result)
+                            if isinstance(script_result, SQLResult)
+                            else StackResult(rows_affected=int(script_result))
+                        )
+                    else:
+                        arrow_options = {key: kwargs.pop(key) for key in self._arrow_execution_options if key in kwargs}
+                        statement = self.prepare_statement(
+                            op.statement,
+                            op.arguments,
+                            statement_config=kwargs.pop("statement_config", None),
+                            kwargs=kwargs,
+                        )
+                        sql, params = statement.compile()
+                        args = (params,) if params is not None else ()
+                        arrow_result = self.select_to_arrow(sql, *args, **arrow_options)
+                        if isinstance(arrow_result, ArrowCursor):
+                            arrow_result = ArrowResult(
+                                statement=statement,
+                                data=arrow_result.to_arrow_table(),
+                                rows_affected=arrow_result.row_count,
+                            )
+                        else:
+                            arrow_result.statement = statement
+                        result = StackResult.from_arrow_result(arrow_result)
+                    if continue_on_error:
+                        self.commit()
+                except Exception as exc:
+                    if not continue_on_error:
+                        raise
+                    self.rollback()
+                    result = StackResult.from_error(exc)
+                results.append(result)
             if not continue_on_error:
-                raise
-            results.append(StackResult.from_error(exc))
+                self.commit()
+        except BaseException:
+            self.rollback()
+            raise
         return tuple(results)
 
     def apply_tenant_predicate(self, predicate: TenantPredicate) -> str:
@@ -437,6 +528,11 @@ class BaseSyncDriver(SyncDriverAdapterBase):
         if callable(close_fn):
             close_fn()
 
+    @classmethod
+    def _default_statement_config(cls) -> StatementConfig:
+        """Build the owning driver's default statement-processing configuration."""
+        return _native_statement_config(cls.dialect, cls._execution_parameter_style)
+
     @staticmethod
     def _normalize_params(parameters: tuple[Any, ...]) -> Any:
         """Normalize parameter tuple into positional or keyword parameter structures."""
@@ -451,6 +547,13 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
     """Base asynchronous driver adapter implementing standard SQLSpec execution methods."""
 
     dialect: str = "generic"
+    _execution_parameter_style: ClassVar[ParameterStyle | None] = None
+    _arrow_execution_options: ClassVar[tuple[str, ...]] = (
+        "return_format",
+        "native_only",
+        "batch_size",
+        "arrow_schema",
+    )
 
     def __init__(
         self,
@@ -460,7 +563,7 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
         observability: Any = None,
     ) -> None:
         """Initialize driver with native connection and statement configuration."""
-        stmt_cfg = statement_config or StatementConfig(dialect=self.dialect)
+        stmt_cfg = statement_config or self._default_statement_config()
         super().__init__(connection, stmt_cfg, driver_features, observability)
         self.native_driver: Any = connection
 
@@ -644,44 +747,124 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
         *,
         continue_on_error: bool = False,
     ) -> tuple[StackResult, ...]:
-        """Execute a StatementStack asynchronously using AsyncQueryPipeline or sequential execution."""
-        operations = getattr(stack, "operations", ())
-        all_read = bool(operations)
-        for op in operations:
-            stmt_raw = str(getattr(op, "statement", "")).strip().upper()
-            if not (stmt_raw.startswith("SELECT") or stmt_raw.startswith("WITH")):
-                all_read = False
-                break
-
-        if all_read and len(operations) > 1:
-            pipeline_dialect: PipelineDialect = (
-                "googlesql" if self.dialect in {"bigquery", "spanner", "googlesql"} else "postgres"
-            )
-            pipeline = AsyncQueryPipeline(dialect=pipeline_dialect)
-            for idx, op in enumerate(operations):
-                stmt_sql = str(getattr(op, "statement", ""))
-                args = getattr(op, "arguments", ())
-                p = dict(args[0]) if args and isinstance(args[0], dict) else {}
-                pipeline.add_step(f"step_{idx}", stmt_sql, params=p)
-            with suppress(Exception):
-                compiled_sql, merged_params = pipeline.compile()
-                rows = await self.select(compiled_sql, merged_params)
-                return tuple(StackResult(rows_affected=len(rows)) for _ in operations)
+        """Execute ordered operations through a native pipeline or transactional primitives."""
+        if not isinstance(stack, StatementStack):
+            raise TypeError("execute_stack expects a StatementStack instance")
+        if not stack:
+            raise ValueError("Cannot execute an empty StatementStack")
+        operations = stack.operations
+        if (
+            isinstance(self.native_driver, AsyncPipelineCapable)
+            and not continue_on_error
+            and len(operations) > 1
+            and all(op.method == "execute" for op in operations)
+        ):
+            prepared = []
+            for op in operations:
+                kwargs = dict(op.keyword_arguments or {})
+                statement = self.prepare_statement(
+                    op.statement,
+                    op.arguments,
+                    statement_config=kwargs.pop("statement_config", None),
+                    kwargs=kwargs,
+                )
+                sql, params = statement.compile()
+                prepared.append((statement, sql, params))
+            async with self.native_driver.pipeline() as pipe:
+                for statement, sql, params in prepared:
+                    if statement.returns_rows():
+                        pipe.select(sql, params)
+                    else:
+                        pipe.execute(sql, params)
+                raw_results = await pipe.results()
+                return tuple(
+                    StackResult.from_sql_result(
+                        SQLResult(
+                            statement=statement,
+                            data=result,
+                            rows_affected=len(result),
+                            operation_type=statement.operation_type,
+                        )
+                    )
+                    if isinstance(result, list)
+                    else StackResult(rows_affected=int(result))
+                    for (statement, _, _), result in zip(prepared, raw_results, strict=True)
+                )
 
         results: list[StackResult] = []
-        await self.begin()
+        if not continue_on_error:
+            await self.begin()
         try:
             for op in operations:
-                stmt = getattr(op, "statement", "")
-                args = getattr(op, "arguments", ())
-                rc = await self.execute(str(stmt), *args)
-                results.append(StackResult(rows_affected=rc))
-            await self.commit()
-        except Exception as exc:
-            await self.rollback()
+                if continue_on_error:
+                    await self.begin()
+                try:
+                    kwargs = dict(op.keyword_arguments or {})
+                    if op.method == "execute":
+                        statement = self.prepare_statement(
+                            op.statement,
+                            op.arguments,
+                            statement_config=kwargs.pop("statement_config", None),
+                            kwargs=kwargs,
+                        )
+                        sql, params = statement.compile()
+                        args = (params,) if params is not None else ()
+                        if statement.returns_rows():
+                            rows = await self.select(sql, *args)
+                            result = StackResult.from_sql_result(
+                                SQLResult(
+                                    statement=statement,
+                                    data=rows,
+                                    rows_affected=len(rows),
+                                    operation_type=statement.operation_type,
+                                )
+                            )
+                        else:
+                            result = StackResult(rows_affected=await self.execute(sql, *args))
+                    elif op.method == "execute_many":
+                        statement = _prepare_stack_many(self, op, kwargs)
+                        sql, parameter_sets = statement.compile()
+                        result = StackResult(rows_affected=await self.execute_many(sql, parameter_sets))
+                    elif op.method == "execute_script":
+                        script_result = await self.execute_script(op.statement, *op.arguments, **kwargs)
+                        result = (
+                            StackResult.from_sql_result(script_result)
+                            if isinstance(script_result, SQLResult)
+                            else StackResult(rows_affected=int(script_result))
+                        )
+                    else:
+                        arrow_options = {key: kwargs.pop(key) for key in self._arrow_execution_options if key in kwargs}
+                        statement = self.prepare_statement(
+                            op.statement,
+                            op.arguments,
+                            statement_config=kwargs.pop("statement_config", None),
+                            kwargs=kwargs,
+                        )
+                        sql, params = statement.compile()
+                        args = (params,) if params is not None else ()
+                        arrow_result = await self.select_to_arrow(sql, *args, **arrow_options)
+                        if isinstance(arrow_result, ArrowCursor):
+                            arrow_result = ArrowResult(
+                                statement=statement,
+                                data=arrow_result.to_arrow_table(),
+                                rows_affected=arrow_result.row_count,
+                            )
+                        else:
+                            arrow_result.statement = statement
+                        result = StackResult.from_arrow_result(arrow_result)
+                    if continue_on_error:
+                        await self.commit()
+                except Exception as exc:
+                    if not continue_on_error:
+                        raise
+                    await self.rollback()
+                    result = StackResult.from_error(exc)
+                results.append(result)
             if not continue_on_error:
-                raise
-            results.append(StackResult.from_error(exc))
+                await self.commit()
+        except BaseException:
+            await self.rollback()
+            raise
         return tuple(results)
 
     async def apply_tenant_predicate(self, predicate: TenantPredicate) -> str:
@@ -774,6 +957,11 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
             if hasattr(res, "__await__"):
                 await res
 
+    @classmethod
+    def _default_statement_config(cls) -> StatementConfig:
+        """Build the owning driver's default statement-processing configuration."""
+        return _native_statement_config(cls.dialect, cls._execution_parameter_style)
+
 
 class SQLiteSyncDriver(BaseSyncDriver):
     """Synchronous SQLite driver adapter wrapping vertebra.db.adapters.sqlite.SyncSQLiteDriver."""
@@ -792,11 +980,15 @@ class PostgreSQLSyncDriver(BaseSyncDriver):
 
     dialect: str = "postgres"
 
+    _execution_parameter_style = ParameterStyle.POSITIONAL_PYFORMAT
+
 
 class PostgreSQLAsyncDriver(BaseAsyncDriver):
     """Asynchronous PostgreSQL driver adapter wrapping vertebra.db.adapters.postgres.AsyncPostgreSQLDriver."""
 
     dialect: str = "postgres"
+
+    _execution_parameter_style = ParameterStyle.NUMERIC
 
 
 class MySQLSyncDriver(BaseSyncDriver):
@@ -804,11 +996,15 @@ class MySQLSyncDriver(BaseSyncDriver):
 
     dialect: str = "mysql"
 
+    _execution_parameter_style = ParameterStyle.POSITIONAL_PYFORMAT
+
 
 class MySQLAsyncDriver(BaseAsyncDriver):
     """Asynchronous MySQL driver adapter wrapping vertebra.db.adapters.mysql.AsyncMySQLDriver."""
 
     dialect: str = "mysql"
+
+    _execution_parameter_style = ParameterStyle.POSITIONAL_PYFORMAT
 
 
 class OracleSyncDriver(BaseSyncDriver):
@@ -889,7 +1085,7 @@ class SyncAdapterConfig[ConfigT, DriverT: SyncDriverAdapterBase](SyncDatabaseCon
         self._driver_instance: DriverT | None = None
         super().__init__(
             bind_key=bind_key,
-            statement_config=statement_config or StatementConfig(dialect=self.dialect),
+            statement_config=statement_config or self.driver_type._default_statement_config(),
         )
 
     def create_driver(self) -> DriverT:
@@ -974,7 +1170,7 @@ class AsyncAdapterConfig[ConfigT, DriverT: AsyncDriverAdapterBase](AsyncDatabase
         self._driver_instance: DriverT | None = None
         super().__init__(
             bind_key=bind_key,
-            statement_config=statement_config or StatementConfig(dialect=self.dialect),
+            statement_config=statement_config or self.driver_type._default_statement_config(),
         )
 
     def create_driver(self) -> DriverT:
@@ -1147,3 +1343,33 @@ class DuckDBAsyncConfig(AsyncAdapterConfig[DuckDBConfig, DuckDBAsyncDriver]):
     _config_cls: ClassVar[type[DuckDBConfig]] = DuckDBConfig
     _driver_cls: ClassVar[type[AsyncDuckDBDriver]] = AsyncDuckDBDriver
     driver_type: ClassVar[type[DuckDBAsyncDriver]] = DuckDBAsyncDriver
+
+
+def _native_statement_config(dialect: str, execution_style: ParameterStyle | None) -> StatementConfig:
+    """Prepare native SQL with the owning driver's execution parameter format."""
+    styles = tuple(ParameterStyle)
+    return StatementConfig(
+        dialect=dialect,
+        parameter_config=ParameterStyleConfig(
+            default_parameter_style=ParameterStyle.QMARK,
+            supported_parameter_styles={ParameterStyle.QMARK} if execution_style is not None else styles,
+            default_execution_parameter_style=execution_style,
+            supported_execution_parameter_styles={execution_style} if execution_style is not None else styles,
+            preserve_parameter_format=True,
+        ),
+    )
+
+
+def _prepare_stack_many(driver: Any, operation: Any, kwargs: dict[str, Any]) -> SQL:
+    """Prepare batched stack binds through SQLSpec's execute-many statement contract."""
+    config = kwargs.pop("statement_config", None) or driver.statement_config
+    parameter_sets = operation.arguments[0]
+    filters = operation.arguments[1:]
+    if isinstance(operation.statement, str) and not filters and not kwargs:
+        return SQL(operation.statement, parameter_sets, statement_config=config, is_many=True)
+    if isinstance(operation.statement, SQL) and not filters:
+        seed = operation.statement.raw_expression or operation.statement.raw_sql
+    else:
+        prepared = driver.prepare_statement(operation.statement, filters, statement_config=config, kwargs=kwargs)
+        seed = prepared.raw_expression or prepared.raw_sql
+    return SQL(seed, parameter_sets, statement_config=config, is_many=True, **kwargs)

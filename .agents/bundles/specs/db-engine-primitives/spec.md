@@ -11,7 +11,7 @@ research:
 plan_revision: 8
 plan_commit: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
 state_revision: 9
-current_task: "db-engine-primitives:t05"
+current_task: "db-engine-primitives:t06"
 last_verified_checkpoint: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
 created_at: 2026-11-03T03:30:00Z
 updated_at: "2026-11-05T02:59:14Z"
@@ -601,7 +601,7 @@ flowchart TD
 
 ### Phase 2: Embeddings, Agent Tools & Pipeline Removal (`t04`–`t06`)
 - [x] [b41aae46] `db-engine-primitives:t04` — Relocate SQL embedding pushdown builders to `vertebra/db/adapters/<engine>/embeddings.py` and add `PushdownEmbedder` (`behavior_tdd`, `depends_on: [t02]`) -> [`tasks/t04-embedding-pushdown-relocation.md`](tasks/t04-embedding-pushdown-relocation.md)
-- [~] `db-engine-primitives:t05` — Relocate GCP database MCP tools to `vertebra/agent/tools/` and empty the `vertebra/db` upward-import allowlist (`behavior_tdd`, `depends_on: [t03, t04]`) -> [`tasks/t05-relocate-gcp-agent-tools.md`](tasks/t05-relocate-gcp-agent-tools.md)
+- [!] `db-engine-primitives:t05` — Relocate GCP database MCP tools to `vertebra/agent/tools/` and empty the `vertebra/db` upward-import allowlist (`behavior_tdd`, `depends_on: [t03, t04]`) -> [`tasks/t05-relocate-gcp-agent-tools.md`](tasks/t05-relocate-gcp-agent-tools.md)
 - [~] `db-engine-primitives:t06` — Delete `vertebra/db/pipeline.py`, route SQLSpec `execute_stack` via `SyncPipelineCapable` / `AsyncPipelineCapable`, and update documentation (`integration_acceptance`, `depends_on: [t03, t04]`) -> [`tasks/t06-delete-query-pipeline.md`](tasks/t06-delete-query-pipeline.md)
 
 Default preparation retains native bind formats through class-owned defaults and supported GCP parser configuration; explicit caller configuration remains authoritative.
@@ -615,13 +615,13 @@ Default preparation retains native bind formats through class-owned defaults and
 
 ## 5. Continuity Snapshot
 
-- **Active Focus**: Executing `db-engine-primitives:t05`, `db-engine-primitives:t06`.
+- **Active Focus**: Verify and commit `db-engine-primitives:t06`; revise adapter-owned tool provider ownership for blocked `t05`.
 - **Completed Checkpoints**: Phase 1 at `b41aae46` (237 focused cases, lint, and docs pass).
 - **Key Decisions**:
   - `ChannelBus` lives in `src/py/vertebra/server/_channels.py` (re-exported from `vertebra.framework.channels`) so `vertebra.extensions.{litestar,starlette,fastapi,flask}.channels` share the engine-neutral pub/sub substrate without importing `vertebra.framework.*` or `vertebra.db.channels`.
   - `db/mcp_tools.py` moves to `src/py/vertebra/agent/tools/{__init__,bigquery,spanner}.py` (re-exported lazily on `vertebra.agent` with `if TYPE_CHECKING:` parity) using `provide_driver`.
   - `embeddings/_bigquery.py`, `embeddings/_spanner.py`, and `AlloyDbEmbedder`/`OracleEmbedder` in `embeddings/_google.py` are deleted cleanly without wrapper aliases; `PushdownEmbedder` overrides `Embedder.__new__` and delegates `_embed_batch_impl` and `vector_search` to `EmbeddingPushdown` implementations under `vertebra/db/adapters/{bigquery,spanner,postgres,oracle}/embeddings.py`.
   - `DatabaseChannelBackend` (`db/channels.py`) and `SyncQueryPipeline` / `AsyncQueryPipeline` (`db/pipeline.py`) are deleted cleanly without compatibility shims.
-- **Open Blockers**: None. Execution is approved against `b41aae46`; each worksheet passes preflight before claim.
+- **Open Blockers**: `t05` requires provider-contract refinement following user steering; independent pipeline verification passes.
 
 - [2026-11-05T02:38:31Z] Verified checkpoint `b41aae46213761f36af0709c0a3ce6d26b2793e0`: Phase1 canonical recovery selection237 passed; make lint-all and make docs exit0; t03 local/remote protocol behavior and t04 independent155-case slice verified.

@@ -1,4 +1,4 @@
-"""Unit tests for PostgreSQL CTE query pipeline, RLS tenant predicates, CDC spill bridge, DataFusion, and memfd SHM."""
+"""Unit tests for PostgreSQL RLS tenant predicates, CDC spill bridge, DataFusion, and memfd SHM."""
 
 from __future__ import annotations
 
@@ -29,12 +29,6 @@ from vertebra.db.adapters.datafusion import (
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, SyncPostgreSQLDriver
 from vertebra.db.adapters.postgres.notify import PostgresNotificationSource, PostgresNotifyConfig
 from vertebra.db.driver import NotificationEvent, NotificationSource, NotSupportedError
-from vertebra.db.pipeline import (
-    AsyncQueryPipeline,
-    CTEStep,
-    RelOverlay,
-    SyncQueryPipeline,
-)
 from vertebra.server.platform import SHMAllocationPolicy
 from vertebra.typing import MissingDependencyError, reset_dependency_cache
 from vertebra.utils.module_loader import import_optional
@@ -83,129 +77,6 @@ class _DeterministicSessionContext:
             return _DeterministicDataFrame(self.tables[tbl_name])
         msg = f"Invalid or unsupported DataFusion SQL: {query}"
         raise RuntimeError(msg)
-
-
-def test_query_pipeline_reloverlay_and_chunked_jsonb() -> None:
-    """Verify QueryPipeline.build_jsonb_object (>50 args), RelOverlay, and QueryPipeline compilation."""
-    pairs = [(f"k{i}", f"v{i}") for i in range(30)]
-    chunked = SyncQueryPipeline.build_jsonb_object(pairs, max_pairs_per_call=25)
-    assert " || " in chunked
-    assert chunked.count("jsonb_build_object(") == 2
-
-    pipeline = (
-        SyncQueryPipeline()
-        .add_step(
-            "inserted_order",
-            "INSERT INTO orders (id, total) VALUES (:id, :total) RETURNING *",
-            params={"id": 1, "total": 99},
-        )
-        .add_overlay("orders_view", RelOverlay(base_table="orders", inserted_cte="inserted_order"))
-        .add_step("summary", "SELECT count(*) AS cnt FROM orders_view")
-    )
-    sql, params = pipeline.compile()
-    assert "WITH inserted_order AS" in sql
-    assert "orders_view AS (SELECT * FROM orders UNION ALL SELECT * FROM inserted_order)" in sql
-    assert params == {"id": 1, "total": 99}
-
-    with pytest.raises(ValueError, match="Invalid SQL identifier"):
-        CTEStep(name="bad;name", sql="SELECT 1")
-    with pytest.raises(ValueError, match="Invalid SQL identifier"):
-        RelOverlay(base_table="orders; DROP TABLE users")
-
-
-def test_query_pipeline_build_jsonb_object_googlesql_dialect() -> None:
-    """Verify QueryPipeline.build_jsonb_object compiles GoogleSQL TO_JSON(STRUCT(...)) expressions."""
-    assert SyncQueryPipeline.build_jsonb_object([], dialect="googlesql") == "JSON '{}'"
-    assert (
-        SyncQueryPipeline.build_jsonb_object([("id", "t.id"), "name"], dialect="googlesql")
-        == "TO_JSON(STRUCT(t.id AS id, name AS name))"
-    )
-
-
-@pytest.mark.anyio
-async def test_query_pipeline_googlesql_compiles_struct_json_and_rewrites_named_params() -> None:
-    """Verify GoogleSQL QueryPipeline rewrites :param -> @param safely and executes over select() drivers."""
-    pipeline = (
-        SyncQueryPipeline(dialect="googlesql")
-        .add_step(
-            "recent_events",
-            (
-                "SELECT id, '14:30:00' AS ts, col::INT64 AS casted "
-                "FROM `proj.ds.events:raw` "
-                "WHERE org_id = :org_id AND status = @already_at"
-            ),
-            params={"org_id": "org_42", "@already_at": "active"},
-        )
-        .add_overlay(
-            "events_view",
-            RelOverlay(base_table="proj.ds.events_base", inserted_cte="recent_events"),
-        )
-        .add_step(
-            "summary",
-            "SELECT COUNT(*) AS total FROM events_view WHERE org_id = :org_id",
-            params={"org_id": "org_42"},
-        )
-    )
-    assert pipeline.dialect == "googlesql"
-    sql, params = pipeline.compile()
-    assert "@org_id" in sql
-    assert ":org_id" not in sql
-    assert "'14:30:00'" in sql
-    assert "`proj.ds.events:raw`" in sql
-    assert "::INT64" in sql
-    assert "@already_at" in sql
-    assert "TO_JSON(STRUCT(" in sql
-    assert "ARRAY_AGG(TO_JSON(" in sql
-    assert params == {"org_id": "org_42", "@already_at": "active"}
-
-    class _StubGoogleSQLDriver:
-        def __init__(self) -> None:
-            self.captured_sql = ""
-            self.captured_params: dict[str, object] = {}
-
-        def select(self, query: str, bind_params: dict[str, object]) -> list[dict[str, str]]:
-            self.captured_sql = query
-            self.captured_params = dict(bind_params)
-            return [{"payload": '{"recent_events":[{"id":1}],"summary":[{"total":1}]}'}]
-
-        async def execute_with_description(
-            self,
-            query: str,
-            bind_params: dict[str, object],
-        ) -> tuple[list[dict[str, str]], tuple[str, ...]]:
-            self.captured_sql = query
-            self.captured_params = dict(bind_params)
-            return ([{"payload": '{"recent_events":[{"id":1}],"summary":[{"total":1}]}'}], ("payload",))
-
-    stub = _StubGoogleSQLDriver()
-    sync_out = pipeline.execute(stub)
-    assert sync_out == {"recent_events": [{"id": 1}], "summary": [{"total": 1}]}
-    assert stub.captured_sql == sql
-    assert stub.captured_params == params
-
-    async_pipeline = (
-        AsyncQueryPipeline(dialect="googlesql")
-        .add_step(
-            "recent_events",
-            (
-                "SELECT id, '14:30:00' AS ts, col::INT64 AS casted "
-                "FROM `proj.ds.events:raw` "
-                "WHERE org_id = :org_id AND status = @already_at"
-            ),
-            params={"org_id": "org_42", "@already_at": "active"},
-        )
-        .add_overlay(
-            "events_view",
-            RelOverlay(base_table="proj.ds.events_base", inserted_cte="recent_events"),
-        )
-        .add_step(
-            "summary",
-            "SELECT COUNT(*) AS total FROM events_view WHERE org_id = :org_id",
-            params={"org_id": "org_42"},
-        )
-    )
-    async_out = await async_pipeline.execute(stub)
-    assert async_out == {"recent_events": [{"id": 1}], "summary": [{"total": 1}]}
 
 
 def test_rls_planner_unfenced_predicate_and_session_guc() -> None:

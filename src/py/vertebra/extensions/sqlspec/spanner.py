@@ -10,6 +10,9 @@ from contextlib import asynccontextmanager, contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar, Final, Literal, Self, cast
 
+from sqlspec.core.parameters import ParameterStyle, ParameterStyleConfig
+from sqlspec.core.statement import StatementConfig
+
 from vertebra._vertebra import LeaseBroker
 from vertebra._vertebra import StatementCache as _RustStatementCache
 from vertebra.db.adapters.bigquery import ObjectRef
@@ -29,11 +32,9 @@ from vertebra.db.adapters.spanner import (
 )
 from vertebra.extensions.sqlspec.adapters import (
     AsyncAdapterConfig,
-    AsyncQueryPipeline,
     BaseAsyncDriver,
     BaseSyncDriver,
     SyncAdapterConfig,
-    SyncQueryPipeline,
     TenantPredicate,
 )
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
@@ -449,6 +450,13 @@ class SpannerSyncDriver(BaseSyncDriver):
 
     dialect: str = "googlesql"
 
+    _arrow_execution_options = (
+        *BaseSyncDriver._arrow_execution_options,
+        "data_boost",
+        "max_partitions",
+        "staleness",
+    )
+
     def __init__(
         self,
         core: _CoreSyncSpannerDriver,
@@ -467,7 +475,7 @@ class SpannerSyncDriver(BaseSyncDriver):
     ) -> None:
         super().__init__(
             core,
-            statement_config=statement_config,
+            statement_config=statement_config or _spanner_statement_config(core.config.dialect),
             driver_features=driver_features,
             observability=observability,
         )
@@ -578,7 +586,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         continue_on_error: bool = False,
         in_transaction: bool = False,
     ) -> Any:
-        """Execute a multi-statement stack using ``SyncQueryPipeline`` for reads or ``execute_batch_dml`` for DML."""
+        """Execute a multi-statement stack with independent reads or native ``execute_batch_dml`` for DML."""
         if hasattr(statements, "operations"):
             return super().execute_stack(statements, continue_on_error=continue_on_error)
         normalized: list[tuple[str, Mapping[str, Any] | Sequence[Any] | None]] = [
@@ -586,25 +594,6 @@ class SpannerSyncDriver(BaseSyncDriver):
         ]
         if not normalized:
             return []
-
-        all_selects = all(
-            sql.strip().upper().startswith("SELECT") and (params is None or not params) for sql, params in normalized
-        )
-        if all_selects and len(normalized) > 1:
-            pipeline_dialect: Literal["postgres", "googlesql"] = (
-                "postgres" if self._core.config.dialect == "spangres" else "googlesql"
-            )
-            pipe = SyncQueryPipeline(dialect=pipeline_dialect)
-            for idx, (sql, _) in enumerate(normalized[:-1]):
-                pipe.add_step(f"step_{idx}", sql, return_json_agg=False)
-            if any(f"step_{idx}" in normalized[-1][0] for idx in range(len(normalized) - 1)):
-                cte_clauses = ", ".join(f"{s.name} AS ({s.sql})" for s in pipe.steps)
-                compiled_sql = f"WITH {cte_clauses} {normalized[-1][0]}"
-                return [self.select(compiled_sql)]
-            full_pipe = SyncQueryPipeline(dialect=pipeline_dialect)
-            for idx, (sql, _) in enumerate(normalized):
-                full_pipe.add_step(f"step_{idx}", sql)
-            return [self.select(sql, params) for sql, params in normalized]
 
         all_dml = all(sql.strip().upper().startswith(("INSERT", "UPDATE", "DELETE")) for sql, _ in normalized)
         if all_dml and not self._read_only:
@@ -858,6 +847,13 @@ class SpannerAsyncDriver(BaseAsyncDriver):
 
     dialect: str = "googlesql"
 
+    _arrow_execution_options = (
+        *BaseAsyncDriver._arrow_execution_options,
+        "data_boost",
+        "max_partitions",
+        "staleness",
+    )
+
     def __init__(
         self,
         core: _CoreAsyncSpannerDriver,
@@ -876,7 +872,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
     ) -> None:
         super().__init__(
             core,
-            statement_config=statement_config,
+            statement_config=statement_config or _spanner_statement_config(core.config.dialect),
             driver_features=driver_features,
             observability=observability,
         )
@@ -987,7 +983,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         continue_on_error: bool = False,
         in_transaction: bool = False,
     ) -> Any:
-        """Asynchronously execute a multi-statement stack using ``AsyncQueryPipeline`` or ``execute_batch_dml``."""
+        """Asynchronously execute a multi-statement stack with independent reads or native ``execute_batch_dml``."""
         if hasattr(statements, "operations"):
             return await super().execute_stack(statements, continue_on_error=continue_on_error)
         normalized: list[tuple[str, Mapping[str, Any] | Sequence[Any] | None]] = [
@@ -995,25 +991,6 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         ]
         if not normalized:
             return []
-
-        all_selects = all(
-            sql.strip().upper().startswith("SELECT") and (params is None or not params) for sql, params in normalized
-        )
-        if all_selects and len(normalized) > 1:
-            pipeline_dialect: Literal["postgres", "googlesql"] = (
-                "postgres" if self._core.config.dialect == "spangres" else "googlesql"
-            )
-            pipe = AsyncQueryPipeline(dialect=pipeline_dialect)
-            for idx, (sql, _) in enumerate(normalized[:-1]):
-                pipe.add_step(f"step_{idx}", sql, return_json_agg=False)
-            if any(f"step_{idx}" in normalized[-1][0] for idx in range(len(normalized) - 1)):
-                cte_clauses = ", ".join(f"{s.name} AS ({s.sql})" for s in pipe.steps)
-                compiled_sql = f"WITH {cte_clauses} {normalized[-1][0]}"
-                return [await self.select(compiled_sql)]
-            full_pipe = AsyncQueryPipeline(dialect=pipeline_dialect)
-            for idx, (sql, _) in enumerate(normalized):
-                full_pipe.add_step(f"step_{idx}", sql)
-            return [await self.select(sql, params) for sql, params in normalized]
 
         all_dml = all(sql.strip().upper().startswith(("INSERT", "UPDATE", "DELETE")) for sql, _ in normalized)
         if all_dml and not self._read_only:
@@ -1379,7 +1356,7 @@ class SpannerSyncConfig(SyncAdapterConfig[SpannerConfig, SpannerSyncDriver]):
             bind_key=bind_key,
             broker=broker,
             share_pool=share_pool,
-            statement_config=statement_config,
+            statement_config=statement_config or _spanner_statement_config(resolved_cfg.dialect),
         )
         self.connection_instance = connection_instance
         self._cached_core: _CoreSyncSpannerDriver | None = None
@@ -1560,7 +1537,7 @@ class SpannerAsyncConfig(AsyncAdapterConfig[SpannerConfig, SpannerAsyncDriver]):
             bind_key=bind_key,
             broker=broker,
             share_pool=share_pool,
-            statement_config=statement_config,
+            statement_config=statement_config or _spanner_statement_config(resolved_cfg.dialect),
         )
         self.connection_instance = connection_instance
         self._cached_core: _CoreAsyncSpannerDriver | None = None
@@ -3007,3 +2984,16 @@ class SpannerAsyncEventQueueStore:
     async def ack(self, event_id: str) -> bool:
         """Asynchronously acknowledge ``event_id``."""
         return self._sync.ack(event_id)
+
+
+def _spanner_statement_config(dialect: Literal["googlesql", "spangres"]) -> StatementConfig:
+    """Use supported Spanner parsing while retaining native named binds."""
+    style = ParameterStyle.NUMERIC if dialect == "spangres" else ParameterStyle.NAMED_AT
+    return StatementConfig(
+        dialect="spangres" if dialect == "spangres" else "spanner",
+        parameter_config=ParameterStyleConfig(
+            default_parameter_style=style,
+            supported_parameter_styles={style},
+            supported_execution_parameter_styles={style},
+        ),
+    )

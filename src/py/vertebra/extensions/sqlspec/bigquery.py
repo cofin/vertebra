@@ -9,6 +9,9 @@ from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar, Final, Literal, Self
 
+from sqlspec.core.parameters import ParameterStyle, ParameterStyleConfig
+from sqlspec.core.statement import StatementConfig
+
 from vertebra._vertebra import LeaseBroker
 from vertebra._vertebra import StatementCache as _RustStatementCache
 from vertebra.db.adapters.bigquery import (
@@ -300,6 +303,13 @@ class BigQuerySyncDriver(BaseSyncDriver):
 
     dialect: str = "bigquery"
 
+    _arrow_execution_options = (
+        *BaseSyncDriver._arrow_execution_options,
+        "selected_fields",
+        "row_restriction",
+        "max_streams",
+    )
+
     def __init__(
         self,
         core_driver: Any,
@@ -314,7 +324,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
     ) -> None:
         super().__init__(
             core_driver,
-            statement_config=statement_config,
+            statement_config=statement_config or _bigquery_statement_config(),
             driver_features=driver_features,
             observability=observability,
         )
@@ -663,6 +673,13 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
 
     dialect: str = "bigquery"
 
+    _arrow_execution_options = (
+        *BaseAsyncDriver._arrow_execution_options,
+        "selected_fields",
+        "row_restriction",
+        "max_streams",
+    )
+
     def __init__(
         self,
         core_driver: Any,
@@ -677,7 +694,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
     ) -> None:
         super().__init__(
             core_driver,
-            statement_config=statement_config,
+            statement_config=statement_config or _bigquery_statement_config(),
             driver_features=driver_features,
             observability=observability,
         )
@@ -1086,7 +1103,7 @@ class BigQuerySyncConfig(SyncAdapterConfig[BigQueryConfig, BigQuerySyncDriver]):
             bind_key=bind_key,
             broker=broker,
             share_pool=share_pool,
-            statement_config=statement_config,
+            statement_config=statement_config or _bigquery_statement_config(),
         )
         self.connection_instance = connection_instance
 
@@ -1270,7 +1287,7 @@ class BigQueryAsyncConfig(AsyncAdapterConfig[BigQueryConfig, BigQueryAsyncDriver
             bind_key=bind_key,
             broker=broker,
             share_pool=share_pool,
-            statement_config=statement_config,
+            statement_config=statement_config or _bigquery_statement_config(),
         )
         self.connection_instance = connection_instance
 
@@ -2982,3 +2999,15 @@ def _coerce_stored_bytes(raw: Any) -> bytes | None:
     if isinstance(raw, str):
         return raw.encode("utf-8")
     return bytes(raw)
+
+
+def _bigquery_statement_config() -> StatementConfig:
+    """Preserve BigQuery named binds through upstream SQLSpec statement processing."""
+    return StatementConfig(
+        dialect="bigquery",
+        parameter_config=ParameterStyleConfig(
+            default_parameter_style=ParameterStyle.NAMED_AT,
+            supported_parameter_styles={ParameterStyle.NAMED_AT},
+            supported_execution_parameter_styles={ParameterStyle.NAMED_AT},
+        ),
+    )

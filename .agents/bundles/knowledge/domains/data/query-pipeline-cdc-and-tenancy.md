@@ -1,7 +1,7 @@
 ---
 type: Guide
-title: "Query Pipelines, Change Feeds, Tenant Predicates & DataFusion"
-description: "PostgreSQL query and tenant SQL builders, engine-neutral change feeds, adapter-owned PostgreSQL notifications, Spanner change streams, and the DataFusionEngine table catalog."
+title: "Native Pipelines, Change Feeds, Tenant Predicates & DataFusion"
+description: "Native pipeline capabilities, engine-neutral change feeds, adapter-owned PostgreSQL notifications and Spanner change streams, tenant predicates, and the DataFusionEngine table catalog."
 status: stable
 tags: [domains, database, postgres, cdc, tenancy]
 generated:
@@ -12,9 +12,15 @@ verified:
     at: "2026-11-04T04:33:00Z"
     commit: f741701
 sources:
-  - id: src-db-pipeline-py
-    resource: src/py/vertebra/db/pipeline.py
-    title: "Python implementation module (src/py/vertebra/db/pipeline.py)"
+  - id: src-extensions-sqlspec-bigquery-py
+    resource: src/py/vertebra/extensions/sqlspec/bigquery.py
+    title: "BigQuery SQLSpec native statement defaults and session execution"
+  - id: src-extensions-sqlspec-spanner-py
+    resource: src/py/vertebra/extensions/sqlspec/spanner.py
+    title: "Spanner SQLSpec parser and native parameter defaults"
+  - id: src-extensions-sqlspec-adapters-py
+    resource: src/py/vertebra/extensions/sqlspec/adapters.py
+    title: "SQLSpec native pipeline dispatch and sequential stack execution"
   - id: src-db-cdc-py
     resource: src/py/vertebra/db/cdc.py
     title: "Python implementation module (src/py/vertebra/db/cdc.py)"
@@ -59,7 +65,7 @@ sources:
     title: "Python implementation module (src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py)"
 ---
 
-# Query Pipelines, Change Feeds, Tenant Predicates & DataFusion
+# Native Pipelines, Change Feeds, Tenant Predicates & DataFusion
 
 <!-- truth: start -->
 - `ChangeFeed` provides engine-neutral event envelopes, bounded spill hydration, replay, and Parquet archival; PostgreSQL notification SQL lives in `vertebra.db.adapters.postgres.notify`.
@@ -67,23 +73,21 @@ sources:
 - `DataFusionEngine` (`vertebra.db.adapters.datafusion`) registers normalized PyArrow, BigQuery, and Spanner tables on a fail-closed `SessionContext` (`ensure_module("datafusion", package="datafusion")`), and all SQL builders validate identifiers via `validate_identifier`.
 <!-- truth: end -->
 
-The `pipeline` and `rls` modules in [`vertebra.db`](../../../../../src/py/vertebra/db/__init__.py)[^src-db-init-py] generate PostgreSQL SQL text and bind tuples. The `cdc` module manages engine-neutral change-feed envelopes, [`spanner.change_stream`](../../../../../src/py/vertebra/db/adapters/spanner/change_stream.py)[^src-db-spanner-change-stream-py] owns Spanner change streams, [`postgres.notify`](../../../../../src/py/vertebra/db/adapters/postgres/notify.py)[^src-db-postgres-notify-py] owns PostgreSQL notification SQL, and the [`vertebra.db.adapters.datafusion`](../../../../../src/py/vertebra/db/adapters/datafusion/__init__.py)[^src-db-datafusion-py] adapter maintains federated analytical session state. Identifiers interpolated into generated SQL are validated against `^[A-Za-z_][A-Za-z0-9_]*$` (`_validate_identifier`). Drivers and connection configs are covered in [database-drivers-and-dialers](database-drivers-and-dialers.md).
+The native pipeline capability protocols and tenant predicates in [`vertebra.db`](../../../../../src/py/vertebra/db/__init__.py)[^src-db-init-py] provide engine batching contracts and PostgreSQL tenant SQL text with bind tuples. The `cdc` module manages engine-neutral change-feed envelopes, [`spanner.change_stream`](../../../../../src/py/vertebra/db/adapters/spanner/change_stream.py)[^src-db-spanner-change-stream-py] owns Spanner change streams, [`postgres.notify`](../../../../../src/py/vertebra/db/adapters/postgres/notify.py)[^src-db-postgres-notify-py] owns PostgreSQL notification SQL, and the [`vertebra.db.adapters.datafusion`](../../../../../src/py/vertebra/db/adapters/datafusion/__init__.py)[^src-db-datafusion-py] adapter maintains federated analytical session state. Identifiers interpolated into generated SQL are validated against `^[A-Za-z_][A-Za-z0-9_]*$` (`_validate_identifier`). Drivers and connection configs are covered in [database-drivers-and-dialers](database-drivers-and-dialers.md).
 
-## 1. Single-Round-Trip CTE Pipelines (`pipeline.py`)
+## 1. Native Pipeline Capabilities
 
-| Symbol | Responsibility |
-|---|---|
-| [`CTEStep`](../../../../../src/py/vertebra/db/pipeline.py)[^src-db-pipeline-py] | Frozen struct: `name`, `sql`, `params`, `return_json_agg` (default `True`). |
-| `RelOverlay` | Read-your-own-writes view inside one statement. `to_cte_sql(name)` validates `name`, `base_table`, `inserted_cte`, `deleted_ids_cte`, and `id_column` via `SqlIdentifier.validate`, then renders `SELECT * FROM base` and excludes `id_column` values in `deleted_ids_cte`, appending `UNION ALL SELECT * FROM inserted_cte`. |
-| `SyncQueryPipeline` / `AsyncQueryPipeline` | Fluent builder (`dialect: Literal["postgres", "googlesql"] = "postgres"`): `add_step(name, sql, *, params, return_json_agg)` and `add_overlay(name, overlay)` validate CTE names via `SqlIdentifier.validate` and return `self`. `compile()` returns `(sql, params)`. |
-| `SyncQueryPipeline.build_jsonb_object` / `AsyncQueryPipeline.build_jsonb_object` (static) | Validates column names via `SqlIdentifier.validate` and builds `jsonb_build_object(...)` on `postgres` or `TO_JSON(STRUCT(...))` on `googlesql`. Pairs are chunked at `max_pairs_per_call` (1–50, default `50`) and joined with `\|\|`, so wide objects stay under PostgreSQL's 100-argument function limit. An empty column list returns `'{}'::jsonb` (`postgres`) or `JSON '{}'` (`googlesql`). |
+[`SyncPipelineCapable` / `AsyncPipelineCapable`](../../../../../src/py/vertebra/db/driver/capabilities.py)[^src-db-driver-capabilities-py] expose `driver.pipeline()` as a sync or async context manager. Queue row-returning statements with `pipe.select(sql, params)` and count-returning statements with `pipe.execute(sql, params)`. `pipe.results()` (awaited for async) flushes queued work and returns results in queue order.
 
-Behavior of `compile()`:
+[`BaseSyncDriver.execute_stack` / `BaseAsyncDriver.execute_stack`](../../../../../src/py/vertebra/extensions/sqlspec/adapters.py)[^src-extensions-sqlspec-adapters-py] use the native capability for more than one `execute` operation when `continue_on_error=False`. SQLSpec prepares SQL and binds through upstream statement processing and uses processed row metadata for dispatch. Each operation retains its own rows or affected count in an ordered `StackResult`. Row results retain the prepared statement's operation type, including `INSERT` for `INSERT ... RETURNING`; driver and preparation errors propagate.
 
-- It raises `ValueError` when there are no steps or when any CTE/column identifier fails `SqlIdentifier.validate`.
-- It emits `WITH step AS (...), ..., overlay AS (...) SELECT <envelope> AS payload`. On `postgresql`, each value is `COALESCE((SELECT jsonb_agg(row_to_json(step)) FROM step), '[]'::jsonb)` inside chunked `jsonb_build_object` calls; on `googlesql` (BigQuery and Cloud Spanner), each value is `COALESCE((SELECT TO_JSON(ARRAY_AGG( step)) FROM step), JSON '[]')` inside `TO_JSON_STRING(JSON_OBJECT(...))`.
-- Steps with `return_json_agg=False` still run as CTEs but are left out of the envelope.
-- Step parameter dicts are merged in order, so a later step silently overwrites an earlier step's value for the same key.
+Driver-owned default statement configuration preserves native execution syntax: PostgreSQL sync uses positional pyformat and async uses numeric binds; MySQL sync and async use positional pyformat. The private default hook is shared by direct driver construction and SQLSpec adapter configs. Explicit caller configurations retain identity and control processing. BigQuery owns its `bigquery` parser and named-at parameters; Spanner owns its supported `spanner` parser and named-at parameters for GoogleSQL, with `spangres` parsing and numeric parameters for the resolved Spangres configuration. These defaults preserve SQLSpec row metadata and native client binds without importing optional upstream adapter SDKs. [^src-extensions-sqlspec-bigquery-py][^src-extensions-sqlspec-spanner-py]
+
+Batch stack operations compile batched parameters through SQLSpec's `is_many` processing before native execution, retaining statement-config overrides and filters. Arrow stack operations prepare keyword or prebound SQL parameters through the same statement pipeline, keep standard Arrow options separate from bind values, and retain prepared statement metadata. Native BigQuery and Spanner `ArrowCursor` results are materialized through `to_arrow_table()` into SQLSpec `ArrowResult` at the stack boundary. Standalone Arrow option semantics remain owned by each adapter.
+
+Arrow stack execution separates the owning driver's public execution options from bind values before SQLSpec preparation. BigQuery retains `selected_fields`, `row_restriction`, and `max_streams`; Spanner retains `data_boost`, `max_partitions`, and `staleness`, alongside the standard Arrow options. These private class-owned declarations preserve native calls without engine-name dispatch or per-operation reflection.
+
+Single-operation stacks, non-pipeline drivers, stacks containing `execute_many`, `execute_script`, or `execute_arrow`, and `continue_on_error=True` use adapter primitives sequentially. Fail-fast execution uses one transaction and rolls back on failure. Continue-on-error execution commits or rolls back each operation, retains an error result at the failed operation's position, and continues. Raw Spanner all-DML stacks retain `execute_batch_dml`, and raw BigQuery stacks retain session transactions.
 
 ## 2. Tenant Isolation (`rls.py`)
 
@@ -127,7 +131,7 @@ Store keys use `spill_prefix.rstrip("/")`: a non-empty normalized prefix yields 
 
 Provenance sources: [^src-tests-unit-db-test-pg-dataplane-and-datafusion-py], [^src-tests-unit-db-test-pg-gateway-py], [^src-tests-unit-extensions-test-data-storage-integrations-py].
 
-[^src-db-pipeline-py]: `src/py/vertebra/db/pipeline.py` — Python implementation module (src/py/vertebra/db/pipeline.py).
+[^src-extensions-sqlspec-adapters-py]: `src/py/vertebra/extensions/sqlspec/adapters.py` — SQLSpec native pipeline dispatch and sequential stack execution.
 [^src-db-cdc-py]: `src/py/vertebra/db/cdc.py` — Python implementation module (src/py/vertebra/db/cdc.py).
 [^src-db-rls-py]: `src/py/vertebra/db/rls.py` — Python implementation module (src/py/vertebra/db/rls.py).
 [^src-db-datafusion-py]: `src/py/vertebra/db/adapters/datafusion/__init__.py` — Python implementation module (src/py/vertebra/db/adapters/datafusion/__init__.py).
@@ -144,3 +148,6 @@ Provenance sources: [^src-tests-unit-db-test-pg-dataplane-and-datafusion-py], [^
 [^src-tests-unit-extensions-test-data-storage-integrations-py]: `src/py/tests/unit/extensions/test_data_storage_integrations.py` — SQLSpec event backend lifecycle and spill hydration coverage.
 
 [^src-db-spanner-change-stream-py]: `src/py/vertebra/db/adapters/spanner/change_stream.py` — Spanner readers, constructor-bound stream defaults, record parsing, and child-partition scheduling.
+
+[^src-extensions-sqlspec-bigquery-py]: `src/py/vertebra/extensions/sqlspec/bigquery.py` — BigQuery SQLSpec native statement defaults and session execution.
+[^src-extensions-sqlspec-spanner-py]: `src/py/vertebra/extensions/sqlspec/spanner.py` — Spanner SQLSpec parser and native parameter defaults.

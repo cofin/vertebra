@@ -36,7 +36,6 @@ nav = [
     ] },
     { "Databases" = [
       { "Overview & Drivers" = "usage/databases.md" },
-      { "Query Pipelines & CTE Stacking" = "usage/query-pipelines.md" },
       { "Cloud Dialers (Cloud SQL & AlloyDB)" = "usage/cloud-dialers.md" },
       { "RLS, CDC & Arrow Analytics" = "usage/analytics-and-cdc.md" },
       { "SQLSpec, SQLAlchemy & Extensions" = "usage/extensions.md" },
@@ -135,6 +134,7 @@ generator = false
 [project.plugins.search]
 
 [project.plugins.redirects.redirect_maps]
+"usage/query-pipelines.md" = "usage/databases.md"
 "backpressure.md" = "architecture/http-ingress.md"
 "parallelism.md" = "architecture/pyo3-and-workers.md"
 "usage/databases-and-storage.md" = "usage/databases.md"
