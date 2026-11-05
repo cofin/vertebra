@@ -558,3 +558,63 @@ def test_vertebra_plugin_overrides_litestar_cli_run_command(
         group = click.Group("litestar")
         VertebraPlugin().on_cli_init(group)
         assert "run" in group.commands
+
+
+def test_channels_backend_accepts_engine_neutral_bus() -> None:
+    """Litestar can swap its memory backend for the shared bus directly."""
+    from vertebra.extensions.litestar.channels import ChannelsBackend, swap_channels_backend
+    from vertebra.server._channels import ChannelBus
+
+    class MemoryChannelsBackend:
+        history = 3
+
+    class ChannelsPlugin:
+        def __init__(self) -> None:
+            self._backend: Any = MemoryChannelsBackend()
+
+    plugin = ChannelsPlugin()
+    app = SimpleNamespace(plugins=[plugin])
+    assert issubclass(ChannelsBackend, ChannelBus)
+    replacement = swap_channels_backend(app)
+    assert isinstance(replacement, ChannelsBackend)
+    bus = ChannelBus(history=2)
+    assert swap_channels_backend(app, bus) is bus
+    assert swap_channels_backend(app) is bus
+    assert plugin._backend is bus
+
+
+@pytest.mark.anyio
+async def test_channels_stream_disconnect_releases_queue() -> None:
+    """Cancelled Litestar consumers release queues through the protected cleanup hook."""
+    from vertebra.extensions.litestar.channels import ChannelsBackend
+
+    class TrackedBackend(ChannelsBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.active: set[asyncio.Queue[tuple[str, bytes] | None]] = set()
+
+        def _register_stream_queue(self) -> asyncio.Queue[tuple[str, bytes] | None]:
+            queue = super()._register_stream_queue()
+            self.active.add(queue)
+            return queue
+
+        def _unregister_stream_queue(self, queue: asyncio.Queue[tuple[str, bytes] | None]) -> None:
+            super()._unregister_stream_queue(queue)
+            self.active.discard(queue)
+
+    backend = TrackedBackend()
+    await backend.on_startup()
+    await backend.subscribe(["orders"])
+    stream = backend.stream_events()
+    pending = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+    assert len(backend.active) == 1
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert not backend.active
+    with anyio.CancelScope() as scope:
+        scope.cancel()
+        await backend.unsubscribe(["orders"])
+        await backend.on_shutdown()
+    assert backend.channels == ()

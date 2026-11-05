@@ -35,7 +35,7 @@ tests:
   - src/py/tests/unit/extensions/test_sqlspec_bigquery.py
   - src/py/tests/unit/extensions/test_sqlspec_spanner.py
   - src/py/tests/unit/docs/test_examples.py
-plan_revision: 5
+plan_revision: 6
 plan_commit: "954998dea5866f52bc3730db642e8f028d4e72bf"
 state_revision: 0
 claimed_by: null
@@ -47,7 +47,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: 2026-11-03T21:49:00Z
-updated_at: "2026-11-05T01:49:53Z"
+updated_at: "2026-11-05T02:19:48Z"
 commit: null
 tags: [db, pipeline, sqlspec, docs, clean-break]
 ---

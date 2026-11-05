@@ -34,7 +34,7 @@ app = Litestar(
 
 - **Route Compiler**: `RouteCompiler` extracts Litestar routes into an optimized route table matched by the native HTTP router.
 - **Fast-Path Dispatch**: `FastPath` dispatches simple handlers directly, bypassing ASGI middleware layers when routes have no custom guards or intermediate transforms.
-- **Realtime Channels**: `ChannelsBackend` integrates with Litestar Channels over shared-memory and multi-engine pub/sub (`DatabaseChannelBackend`), wrapping client disconnection and cleanup in cancellation-shielded scopes to prevent resource leaks.
+- **Realtime Channels**: `ChannelsBackend` integrates with Litestar Channels through the engine-neutral `ChannelBus` in `vertebra.server._channels` (also available from `vertebra.framework.channels`). It provides local fan-out, bounded history, and optional `NotificationSource`, `AsyncChangeSource`, and `ChangeFeed` bridges. Client disconnection and cleanup use cancellation-shielded scopes.
 - **Response Caching**: `ResponseCacheStore` backs Litestar's `ResponseCacheConfig` using Vertebra's in-memory / SHM cache store.
 
 ### Litestar Ecosystem Plugins (`vertebra.extensions.litestar.*`)

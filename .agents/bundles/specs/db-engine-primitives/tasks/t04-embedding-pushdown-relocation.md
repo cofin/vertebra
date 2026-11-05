@@ -3,7 +3,7 @@ type: Task
 id: db-engine-primitives:t04
 title: Relocate SQL embedding pushdown builders to vertebra/db/adapters/<engine>/embeddings.py and add PushdownEmbedder
 description: "Move all database SQL embedding pushdown builders out of `src/py/vertebra/embeddings/` into `src/py/vertebra/db/adapters/{bigquery,spanner,postgres,oracle}/embeddings.py` implementing `EmbeddingPushdown`, add `PushdownEmbedder(Embedder)` in `src/py/vertebra/embeddings/_pushdown.py`, delete `embeddings/_bigquery.py`, `embeddings/_spanner.py`, and `AlloyDbEmbedder`/`OracleEmbedder` in `embeddings/_google.py`, convert `src/py/vertebra/embeddings/__init__.py` to `lazy_exports`, and update embedding documentation and OKF `sources:`."
-state: pending
+state: "in_progress"
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -32,11 +32,11 @@ tests:
   - src/py/tests/unit/db/test_bigquery.py
   - src/py/tests/unit/db/test_spanner.py
   - src/py/tests/unit/docs/test_examples.py
-plan_revision: 5
+plan_revision: 6
 plan_commit: "954998dea5866f52bc3730db642e8f028d4e72bf"
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: "/root/db_t04"
+claimed_at: "2026-11-05T02:10:09Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -44,7 +44,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: 2026-11-03T21:47:00Z
-updated_at: "2026-11-05T01:49:53Z"
+updated_at: "2026-11-05T02:19:48Z"
 commit: null
 tags: [db, embeddings, pushdown, bigquery, spanner, postgres, oracle]
 ---

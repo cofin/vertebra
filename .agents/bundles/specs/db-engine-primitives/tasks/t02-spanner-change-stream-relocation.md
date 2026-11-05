@@ -3,7 +3,7 @@ type: Task
 id: db-engine-primitives:t02
 title: Relocate Spanner change stream readers to vertebra/db/adapters/spanner/change_stream.py with SyncChangeSource and AsyncChangeSource conformance
 description: "Move `SpannerChildPartition`, `SpannerChangeStreamRecord`, `SyncSpannerChangeStreamSource`, and `AsyncSpannerChangeStreamSource` out of `src/py/vertebra/db/cdc.py` into `src/py/vertebra/db/adapters/spanner/change_stream.py`, bind stream defaults on construction so `SyncSpannerChangeStreamSource.stream()` conforms statically and at runtime to `SyncChangeSource` and `AsyncSpannerChangeStreamSource.stream()` conforms to `AsyncChangeSource`, and eliminate `inspect.isawaitable` / `asyncio.iscoroutine` duck-typing."
-state: "in_progress"
+state: "completed"
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -17,20 +17,20 @@ files:
 tests:
   - src/py/tests/unit/db/test_spanner_queue_and_cdc.py
   - src/py/tests/unit/db/test_native_db_drivers.py
-plan_revision: 5
+plan_revision: 6
 plan_commit: "954998dea5866f52bc3730db642e8f028d4e72bf"
-state_revision: 1
-claimed_by: "/root/db_t02"
-claimed_at: "2026-11-05T01:51:01Z"
+state_revision: 2
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-05T02:10:08Z"
+last_verified_commit: "7cdad03ff452de7bd8b898ff8ea0bafc965e6dec"
+verification_evidence: "Behavior TDD RED collection failure; Spanner file 23 passed; native Spanner protocol case 1 passed; Ruff/format/Mypy and make lint-all exit 0; adapter-owned knowledge synchronized."
 created_at: 2026-11-03T21:47:00Z
-updated_at: "2026-11-05T01:51:01Z"
-commit: null
+updated_at: "2026-11-05T02:19:48Z"
+commit: "7cdad03ff452de7bd8b898ff8ea0bafc965e6dec"
 tags: [db, spanner, cdc, change-stream, async]
 ---
 

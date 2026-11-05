@@ -3,7 +3,7 @@ type: Task
 id: db-engine-primitives:t03
 title: Delete vertebra/db/channels.py and move engine-neutral pub/sub fan-out into vertebra/server/_channels.py::ChannelBus
 description: "Delete `src/py/vertebra/db/channels.py` (`DatabaseChannelBackend`), implement the engine-neutral `ChannelBus` pub/sub substrate in `src/py/vertebra/server/_channels.py` (re-exported in `src/py/vertebra/framework/channels.py`), and subclass `ChannelBus` in `src/py/vertebra/extensions/{litestar,starlette}/channels.py` with zero `vertebra.framework.*` or `vertebra.db.adapters.*` imports."
-state: pending
+state: "in_progress"
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -17,6 +17,7 @@ files:
   - docs/usage/extensions.md
   - .agents/bundles/knowledge/domains/extensions/litestar.md
 tests:
+  - src/py/tests/unit/db/test_redis_valkey_driver.py
   - src/py/tests/unit/db/test_native_db_drivers.py
   - src/py/tests/unit/db/test_spanner_queue_and_cdc.py
   - src/py/tests/unit/extensions/test_litestar_plugin.py
@@ -24,11 +25,11 @@ tests:
   - src/py/tests/unit/extensions/test_fastapi_plugin.py
   - src/py/tests/unit/extensions/test_flask_plugin.py
   - src/py/tests/unit/docs/test_examples.py
-plan_revision: 5
+plan_revision: 6
 plan_commit: "954998dea5866f52bc3730db642e8f028d4e72bf"
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: "/root/db_t03"
+claimed_at: "2026-11-05T02:10:09Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -36,7 +37,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: 2026-11-03T21:47:00Z
-updated_at: "2026-11-05T01:49:53Z"
+updated_at: "2026-11-05T02:19:48Z"
 commit: null
 tags: [db, channels, server, framework, litestar, starlette, clean-break]
 ---
@@ -60,6 +61,7 @@ Delete `src/py/vertebra/db/channels.py` (`DatabaseChannelBackend`), implement th
      - Assert `importlib.import_module("vertebra.db.channels")` raises `ModuleNotFoundError` and `hasattr(vertebra.db, "DatabaseChannelBackend") is False`.
      - Replace `DatabaseChannelBackend` tests with `ChannelBus` tests (`from vertebra.framework.channels import ChannelBus` and `from vertebra.server._channels import ChannelBus`, asserting identity `is`) verifying `on_startup`/`on_shutdown`, bounded `history` replay (`get_history`), multi-subscriber fan-out (`publish`, `subscribe`, `unsubscribe`, `stream_events`), `NotificationSource` forwarding (`await source.publish(channel, payload)` and `pump_notifications`), `AsyncChangeSource` pump (`pump_change_source`), `ChangeFeed` oversized payload hydration (`"PUBLISH"` `data_b64` envelope), and single-delivery deduplication when `ChannelBus` and `PostgresNotificationSource` share the same `ChangeFeed` instance.
      - Verify a `NotificationSource` without a `ChangeFeed` still delivers each publication exactly once to local subscribers; two absent feeds do not suppress local fan-out.
+   - Update `src/py/tests/unit/db/test_redis_valkey_driver.py` callers of removed engine-specific channel factories and `ChannelsBackend(driver=...)`: retain key/value-store assertions, keep generic channel fan-out coverage in canonical channel tests, and verify actual Redis/Valkey publish-subscribe behavior directly through the existing driver and loopback RESP3 server. Use explicit synchronization for subscription readiness; do not replace network assertions with local fan-out.
    - In `src/py/tests/unit/extensions/test_litestar_plugin.py` and `src/py/tests/unit/extensions/test_starlette_plugin.py`:
      - Assert `issubclass(ChannelsBackend, ChannelBus)` is `True`, `swap_channels_backend` and `attach_channels` accept `ChannelsBackend | ChannelBus | None`, and neither `litestar/channels.py` nor `starlette/channels.py` imports `vertebra.framework` or `vertebra.db.channels`.
 
@@ -71,20 +73,26 @@ Delete `src/py/vertebra/db/channels.py` (`DatabaseChannelBackend`), implement th
    - Update `docs/usage/extensions.md` (replacing `DatabaseChannelBackend` with `ChannelBus` / `ChannelsBackend`) and `.agents/bundles/knowledge/domains/extensions/litestar.md` (updating `sources:` and prose from `vertebra.db.channels` to `vertebra.server._channels.ChannelBus`).
 
 3. **Refactor & verify**:
-   - Run `uv run pytest src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_spanner_queue_and_cdc.py src/py/tests/unit/extensions/test_litestar_plugin.py src/py/tests/unit/extensions/test_starlette_plugin.py src/py/tests/unit/extensions/test_fastapi_plugin.py src/py/tests/unit/extensions/test_flask_plugin.py src/py/tests/unit/docs/test_examples.py` and `make lint-all`.
+   - Run `uv run pytest src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_spanner_queue_and_cdc.py src/py/tests/unit/db/test_redis_valkey_driver.py src/py/tests/unit/extensions/test_litestar_plugin.py src/py/tests/unit/extensions/test_starlette_plugin.py src/py/tests/unit/extensions/test_fastapi_plugin.py src/py/tests/unit/extensions/test_flask_plugin.py src/py/tests/unit/docs/test_examples.py` and `make lint-all`.
 
 ## Verification
 
 - **Initial (RED)**:
   - `uv run pytest src/py/tests/unit/db/test_native_db_drivers.py -k channel` -> fails while `vertebra.db.channels` still exists.
 - **Final (GREEN)**:
-  - `uv run pytest src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_spanner_queue_and_cdc.py src/py/tests/unit/extensions/test_litestar_plugin.py src/py/tests/unit/extensions/test_starlette_plugin.py src/py/tests/unit/extensions/test_fastapi_plugin.py src/py/tests/unit/extensions/test_flask_plugin.py src/py/tests/unit/docs/test_examples.py` -> exits `0`.
+  - `uv run pytest src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_spanner_queue_and_cdc.py src/py/tests/unit/db/test_redis_valkey_driver.py src/py/tests/unit/extensions/test_litestar_plugin.py src/py/tests/unit/extensions/test_starlette_plugin.py src/py/tests/unit/extensions/test_fastapi_plugin.py src/py/tests/unit/extensions/test_flask_plugin.py src/py/tests/unit/docs/test_examples.py` -> exits `0`.
   - `make lint-all` -> exits `0`.
 
 ## Acceptance Criteria
 
-- [ ] R3: `src/py/vertebra/db/channels.py` is deleted (`import vertebra.db.channels` raises `ModuleNotFoundError`), `ChannelBus` lives in `src/py/vertebra/server/_channels.py` (re-exported in `vertebra.framework.channels`), `vertebra.extensions.{litestar,starlette,fastapi,flask}.channels` pass all unit tests with zero `vertebra.framework.*` or `vertebra.db.adapters.*` imports, and `make lint-all` (`make review-check`) exits `0`.
+- [x] R3: Redis/Valkey consumer tests use the clean-break channel boundary and retain direct native-driver memory/loopback pub/sub coverage; generic ChannelBus contains no engine-specific convenience factories or driver dispatch.
+
+- [x] R3: `src/py/vertebra/db/channels.py` is deleted (`import vertebra.db.channels` raises `ModuleNotFoundError`), `ChannelBus` lives in `src/py/vertebra/server/_channels.py` (re-exported in `vertebra.framework.channels`), `vertebra.extensions.{litestar,starlette,fastapi,flask}.channels` pass all unit tests with zero `vertebra.framework.*` or `vertebra.db.adapters.*` imports, and `make lint-all` (`make review-check`) exits `0`.
 
 ## Notes & Discoveries
 
 <!-- Append timestamped implementation findings here: - [YYYY-MM-DD HH:MM] ... -->
+
+- [2026-11-05] Revised caller targets include the existing Redis/Valkey suite, which still invokes removed engine-specific channel factories and wrapper driver injection. Native transport behavior remains adapter-owned; this adds consumer/test migration coverage without introducing a distributed backend or new driver API.
+
+- [2026-11-05T02:32:18+00:00] RED: missing channel substrate/protocol parameters and two obsolete Redis caller APIs. GREEN: complete revision6 task slice 206 passed; Phase1 recovery selection 237 passed; make lint-all and documentation build exit0. Real memory/RESP3 pubsub coverage uses subscription readiness synchronization and recorded wire publications; no distributed backend API is added.

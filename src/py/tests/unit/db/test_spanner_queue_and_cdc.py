@@ -17,8 +17,9 @@ from vertebra.db.adapters.spanner.change_stream import (
     SpannerChildPartition,
     SyncSpannerChangeStreamSource,
 )
-from vertebra.db.channels import DatabaseChannelBackend
+from vertebra.db.cdc import CDCConfig, ChangeFeed
 from vertebra.db.driver.capabilities import AsyncChangeSource, SyncChangeSource
+from vertebra.framework.channels import ChannelBus
 from vertebra.framework.queues import (
     QueueConfig,
     QueueService,
@@ -120,13 +121,15 @@ async def test_spanner_change_stream_source_partitions_and_object_store_spill() 
     """Verify SpannerChangeStreamSource GoogleSQL/Spangres queries, child partition scheduling, and ObjectStore spill."""
     driver = SyncSpannerDriver(SpannerConfig(), client=FakeSpannerClient())
     store = SyncObjectStore("memory://")
-    channel_backend, source = DatabaseChannelBackend.from_spanner_change_stream(
+    feed = ChangeFeed(CDCConfig(channel="orders_cdc", spill_threshold_bytes=400), store=store)
+    channel_backend = ChannelBus(change_feed=feed, history=16)
+    source = SyncSpannerChangeStreamSource(
         driver,
         "orders_stream",
         channel="orders_cdc",
-        spill_store=store,
+        change_feed=feed,
+        store=store,
         spill_threshold_bytes=400,
-        history=16,
     )
 
     assert "READ_orders_stream" in source.build_read_query("googlesql")

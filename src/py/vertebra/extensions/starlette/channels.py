@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from vertebra.db.channels import DatabaseChannelBackend
+from vertebra.server._channels import ChannelBus
 
 __all__ = (
     "ChannelsBackend",
@@ -12,16 +12,16 @@ __all__ = (
 )
 
 
-class ChannelsBackend(DatabaseChannelBackend):
-    """Starlette pub/sub channel backend backed by Valkey, Redis, PostgreSQL, Oracle, or SHM."""
+class ChannelsBackend(ChannelBus):
+    """Starlette pub/sub channel backend with local fan-out and capability bridges."""
 
     __slots__ = ()
 
 
 def attach_channels(
     app: Any,
-    backend: ChannelsBackend | DatabaseChannelBackend | None = None,
-) -> ChannelsBackend | DatabaseChannelBackend:
+    backend: ChannelsBackend | ChannelBus | None = None,
+) -> ChannelsBackend | ChannelBus:
     """Attach a ChannelsBackend instance to ``app.state.channels``."""
     resolved = backend if backend is not None else ChannelsBackend()
     state = getattr(app, "state", None)

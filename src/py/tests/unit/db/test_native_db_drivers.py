@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import base64
 import datetime
 import decimal
 import gc
@@ -60,6 +61,7 @@ from vertebra.db.adapters.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLD
 from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
 from vertebra.db.adapters.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
+from vertebra.db.adapters.postgres.notify import PostgresNotificationSource
 from vertebra.db.adapters.redis import RedisConfig, SyncRedisDriver
 from vertebra.db.adapters.spanner import (
     AsyncSpannerDriver,
@@ -72,7 +74,6 @@ from vertebra.db.adapters.spanner import (
 from vertebra.db.adapters.spanner.change_stream import AsyncSpannerChangeStreamSource, SyncSpannerChangeStreamSource
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
 from vertebra.db.adapters.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
-from vertebra.db.channels import DatabaseChannelBackend
 from vertebra.db.driver._common import SPANGRES_DIALECT_TAG
 from vertebra.db.driver.capabilities import (
     AsyncChangeSource,
@@ -90,7 +91,8 @@ from vertebra.db.driver.capabilities import (
 from vertebra.db.registry import REGISTERED_CONFIG_TYPES
 from vertebra.extensions.litestar import ChannelsBackend, MemoryStore
 from vertebra.extensions.sqlalchemy import dialects
-from vertebra.storage import GcpTokenSnapshot, SyncObjectStore
+from vertebra.framework.channels import ChannelBus
+from vertebra.storage import GcpTokenSnapshot
 from vertebra.typing import MissingDependencyError, VertebraError, reset_dependency_cache
 from vertebra.utils.serializers import (
     decode_json,
@@ -532,7 +534,7 @@ async def test_valkey_resp3_client_tracking_and_litestar_integration() -> None:
     await store.set("k1", "v1", expires_in=60)
     assert await store.get("k1") == b"v1"
 
-    channels = ChannelsBackend.from_valkey("memory://", history=5)
+    channels = ChannelsBackend(history=5)
     await channels.on_startup()
     await channels.publish(b"hello", ["topic-a"])
     assert await channels.get_history("topic-a") == [b"hello"]
@@ -555,46 +557,201 @@ def test_database_registry_url_schemes() -> None:
     sync_sqlite.close()
 
 
+def test_channel_bus_clean_break_imports() -> None:
+    """Framework and server expose one bus and remove the database backend."""
+    from vertebra.server._channels import ChannelBus as ServerChannelBus
+
+    assert ServerChannelBus is ChannelBus
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("vertebra.db.channels")
+    assert not hasattr(vertebra_db, "DatabaseChannelBackend")
+
+
 @pytest.mark.anyio
-async def test_database_channel_backend_multi_engine_and_object_store_spill() -> None:
-    """Verify DatabaseChannelBackend supports PostgreSQL LISTEN/NOTIFY, Oracle AQ, CDC, and ObjectStore spill."""
-    pg_cfg = PostgreSQLConfig(
-        dsn="postgresql://app:secret@pgbouncer:6432/prod",
-        direct_dsn="postgresql://app:secret@pg-primary:5432/prod",
-        pooler_mode="transaction",
-    )
-    store = SyncObjectStore("memory://")
-    pg_bus = DatabaseChannelBackend.from_postgres(pg_cfg, history=10, object_store=store)
-    assert pg_bus.postgres_driver is not None
-    assert pg_bus.postgres_driver.config.pooler_mode == "session"
-    assert pg_bus.postgres_driver.config.dsn == "postgresql://app:secret@pg-primary:5432/prod"
+async def test_channel_bus_fanout_history_and_lifecycle() -> None:
+    """Subscriptions fan out bytes, bound replay, detach topics, and stop on shutdown."""
+    bus = ChannelBus(history=2)
+    assert bus.backend is bus
+    await bus.subscribe(iter(["orders"]))
+    await bus.on_startup()
+    streams = [bus.stream_events(), bus.stream_events()]
+    pending = [asyncio.create_task(anext(stream)) for stream in streams]
+    await asyncio.sleep(0)
+    await bus.publish("first", ["orders"])
+    assert await asyncio.gather(*pending) == [("orders", b"first")] * 2
+    await bus.unsubscribe(iter(["orders"]))
+    await bus.publish(b"ignored", ["orders"])
+    await bus.subscribe(["orders", "other"])
+    pending = [asyncio.create_task(anext(stream)) for stream in streams]
+    await asyncio.sleep(0)
+    await bus.publish(b"last", ["orders"])
+    assert await asyncio.gather(*pending) == [("orders", b"last")] * 2
+    assert await bus.get_history("orders") == [b"ignored", b"last"]
+    assert await bus.get_history("orders", limit=1) == [b"last"]
+    assert await bus.get_history("missing") == []
+    assert bus.channels == ("orders", "other")
+    pending = [asyncio.create_task(anext(stream)) for stream in streams]
+    await asyncio.sleep(0)
+    await bus.on_shutdown()
+    results = await asyncio.gather(*pending, return_exceptions=True)
+    assert all(isinstance(result, StopAsyncIteration) for result in results)
+    await bus.on_startup()
+    await bus.subscribe(["orders"])
+    stream = bus.stream_events()
+    next_event = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+    await bus.publish(b"restart", ["orders"])
+    assert await next_event == ("orders", b"restart")
+    await stream.aclose()
+    await bus.on_shutdown()
 
-    await pg_bus.on_startup()
-    await pg_bus.subscribe(["orders"])
 
-    large_payload = b"X" * 8000
-    await pg_bus.publish(large_payload, ["orders"])
-    assert await pg_bus.get_history("orders") == [large_payload]
+@pytest.mark.anyio
+async def test_channel_bus_notification_without_feed_keeps_local_fanout() -> None:
+    """Absent feeds do not suppress local publications and protocols receive subscriptions."""
+    source = _ConformingNotificationSource()
+    bus = ChannelBus(notification_source=source, history=4)
+    await bus.on_startup()
+    await bus.subscribe(iter(["orders"]))
+    assert bus.notification_source is source
+    stream = bus.stream_events()
+    next_event = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+    await bus.publish(b"local", ["orders"])
+    assert await asyncio.wait_for(next_event, 1) == ("orders", b"local")
+    assert await bus.get_history("orders") == [b"local"]
+    assert [event.payload async for event in source.listen()] == [b"local"]
+    await bus.unsubscribe(iter(["orders"]))
+    await source.publish("orders", b"unsubscribed")
+    assert [event.payload async for event in source.listen()] == [b"local"]
+    await stream.aclose()
+    await bus.on_shutdown()
 
-    pg_bus.ingest_pg_notification("orders", "direct-pg-event")
-    assert await pg_bus.get_history("orders", limit=1) == [b"direct-pg-event"]
-    await pg_bus.on_shutdown()
 
-    ora_bus = DatabaseChannelBackend.from_oracle(OracleConfig(dsn="localhost:1521/FREEPDB1"), history=5)
-    assert ora_bus.oracle_driver is not None
+@pytest.mark.anyio
+async def test_channel_bus_shared_feed_publish_and_notification_hydration() -> None:
+    """Shared PostgreSQL feeds deliver local bytes once and hydrate remote spill envelopes."""
 
-    feed = ChangeFeed(CDCConfig(channel="cdc:orders"), store=store)
-    cdc_bus = DatabaseChannelBackend.from_changefeed(feed, history=5)
-    await cdc_bus.on_startup()
-    await cdc_bus.subscribe(["cdc:orders"])
-    feed.publish_event(
-        "INSERT",
-        {"id": 1, "status": "paid"},
-    )
-    history = await cdc_bus.get_history("cdc:orders")
-    assert len(history) == 1
-    assert b'"operation":"INSERT"' in history[0]
-    await cdc_bus.on_shutdown()
+    class Driver:
+        def __init__(self) -> None:
+            self.parameters: Any = None
+
+        def execute(self, sql: str, parameters: Any) -> None:
+            self.parameters = parameters
+
+    driver = Driver()
+    feed = ChangeFeed(CDCConfig(spill_threshold_bytes=16))
+    source = PostgresNotificationSource(cast(Any, driver), change_feed=feed)
+    bus = ChannelBus(notification_source=source, change_feed=feed, history=4)
+    payload = b"\x00\xff" * 5000
+    await bus.on_startup()
+    await bus.subscribe(["orders"])
+    await bus.publish(payload, ["orders"])
+    assert await bus.get_history("orders") == [payload]
+    assert bus.change_feed is feed
+    remote = _ConformingNotificationSource()
+    await remote.subscribe(["orders"])
+    await remote.publish("orders", driver.parameters[1])
+    await bus.pump_notifications(remote)
+    assert await bus.get_history("orders") == [payload, payload]
+    remote = _ConformingNotificationSource()
+    await remote.subscribe(["orders"])
+    await remote.publish("orders", b"b64:" + base64.b64encode(b"\xffbinary"))
+    await bus.pump_notifications(remote)
+    assert await bus.get_history("orders", 1) == [b"\xffbinary"]
+    await bus.on_shutdown()
+
+
+@pytest.mark.anyio
+async def test_channel_bus_change_feed_and_async_source() -> None:
+    """Feed listeners and async source pumps preserve serialized CDC and PUBLISH bytes."""
+    feed = ChangeFeed(CDCConfig(channel="orders"))
+    source = _ConformingAsyncChangeSource()
+    bus = ChannelBus(change_source=source, change_feed=feed, history=5)
+    assert bus.change_source is source
+    await bus.on_startup()
+    await bus.pump_change_source(channel="override")
+    assert decode_json((await bus.get_history("override"))[0])["operation"] == "UPDATE"
+    await bus.publish(b"feed-local", ["orders"])
+    assert await bus.get_history("orders") == [b"feed-local"]
+    feed.publish_event("PUBLISH", {"channel": "orders", "data_b64": base64.b64encode(b"feed").decode()})
+    assert await bus.get_history("orders") == [b"feed-local", b"feed"]
+    await bus.on_shutdown()
+
+
+@pytest.mark.anyio
+async def test_channel_bus_pumps_decode_binary_and_preserve_raw_payloads() -> None:
+    """Notification and CDC pumps decode wrappers without treating plain JSON as a feed."""
+    source = _ConformingNotificationSource()
+    bus = ChannelBus(notification_source=source, history=8)
+    await bus.subscribe(["orders"])
+    await source.publish("orders", b"b64:" + base64.b64encode(b"\x00\xff"))
+    await source.publish("orders", b"raw")
+    await bus.pump_notifications()
+    assert await bus.get_history("orders") == [b"\x00\xff", b"raw"]
+    feed_bus = ChannelBus(change_feed=ChangeFeed(), history=8)
+    remote = _ConformingNotificationSource()
+    await remote.subscribe(["orders"])
+    await remote.publish("orders", b'{"id":1}')
+    await remote.publish("orders", b"{raw")
+    await feed_bus.pump_notifications(remote)
+    assert await feed_bus.get_history("orders") == [b'{"id":1}', b"{raw"]
+
+    class PublishSource:
+        async def stream(self) -> AsyncIterator[ChangeEvent]:
+            yield ChangeEvent(
+                event_id=1,
+                channel="cdc",
+                operation="PUBLISH",
+                payload={"channel": "orders", "data_b64": base64.b64encode(b"\xffcdc").decode()},
+            )
+
+    await bus.pump_change_source(PublishSource())
+    assert await bus.get_history("orders", 1) == [b"\xffcdc"]
+
+
+@pytest.mark.anyio
+async def test_channel_bus_pumps_propagate_failure_and_cancellation() -> None:
+    """Explicit pumps expose transport failures and release cancelled source generators."""
+
+    class FailingSource(_ConformingNotificationSource):
+        async def listen(self) -> AsyncIterator[NotificationEvent]:
+            raise RuntimeError("notification reader failed")
+            yield
+
+    class BlockingSource:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.closed = asyncio.Event()
+
+        async def stream(self) -> AsyncIterator[ChangeEvent]:
+            try:
+                self.started.set()
+                await asyncio.Event().wait()
+                yield ChangeEvent(event_id=1, channel="orders", operation="INSERT", payload={})
+            finally:
+                self.closed.set()
+
+    bus = ChannelBus()
+    with pytest.raises(RuntimeError, match="notification reader failed"):
+        await bus.pump_notifications(FailingSource())
+    source = BlockingSource()
+    pending = asyncio.create_task(bus.pump_change_source(source))
+    await asyncio.wait_for(source.started.wait(), 1)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert source.closed.is_set()
+    feed = ChangeFeed(CDCConfig(spill_threshold_bytes=1, max_memory_spills=1))
+    wire, _ = feed.publish_event("PUBLISH", {"channel": "orders", "data_b64": "YQ=="})
+    feed.publish_event("PUBLISH", {"channel": "orders", "data_b64": "Yg=="})
+    remote = _ConformingNotificationSource()
+    await remote.subscribe(["orders"])
+    await remote.publish("orders", wire)
+    with pytest.raises(KeyError, match="Evicted or unknown"):
+        await ChannelBus(change_feed=feed).pump_notifications(remote)
+    await bus.pump_notifications()
+    await bus.pump_change_source()
 
 
 @pytest.mark.anyio
