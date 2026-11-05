@@ -139,10 +139,10 @@ pub fn gax_error_info(err: &google_cloud_gax::error::Error) -> GcpErrorInfo {
             16
         } else if err.is_timeout() {
             4
-        } else if err.is_transport() || err.is_io() || err.is_connect() {
-            14
         } else if let Some(http) = http_status {
             http_code(http)
+        } else if err.is_transport() || err.is_io() || err.is_connect() {
+            14
         } else {
             2
         };
@@ -228,6 +228,20 @@ mod tests {
         assert_eq!(http_code(429), 8);
         assert_eq!(http_code(503), 14);
         assert_eq!(http_code(418), 2);
+    }
+
+    #[test]
+    fn raw_http_errors_preserve_status_classification() {
+        for status in [400, 401, 403, 404, 409, 429, 500, 503, 504] {
+            let error = google_cloud_gax::error::Error::http(
+                status,
+                http::HeaderMap::new(),
+                bytes::Bytes::from_static(b"request failed"),
+            );
+            let info = gax_error_info(&error);
+            assert_eq!(info.code, http_code(status), "HTTP {status}");
+            assert_eq!(info.http_status, Some(status));
+        }
     }
 
     #[test]
