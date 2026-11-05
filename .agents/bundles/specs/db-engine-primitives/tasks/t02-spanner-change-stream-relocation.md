@@ -3,7 +3,7 @@ type: Task
 id: db-engine-primitives:t02
 title: Relocate Spanner change stream readers to vertebra/db/adapters/spanner/change_stream.py with SyncChangeSource and AsyncChangeSource conformance
 description: "Move `SpannerChildPartition`, `SpannerChangeStreamRecord`, `SyncSpannerChangeStreamSource`, and `AsyncSpannerChangeStreamSource` out of `src/py/vertebra/db/cdc.py` into `src/py/vertebra/db/adapters/spanner/change_stream.py`, bind stream defaults on construction so `SyncSpannerChangeStreamSource.stream()` conforms statically and at runtime to `SyncChangeSource` and `AsyncSpannerChangeStreamSource.stream()` conforms to `AsyncChangeSource`, and eliminate `inspect.isawaitable` / `asyncio.iscoroutine` duck-typing."
-state: pending
+state: "in_progress"
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -19,9 +19,9 @@ tests:
   - src/py/tests/unit/db/test_native_db_drivers.py
 plan_revision: 5
 plan_commit: "954998dea5866f52bc3730db642e8f028d4e72bf"
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: "/root/db_t02"
+claimed_at: "2026-11-05T01:51:01Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -29,7 +29,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: 2026-11-03T21:47:00Z
-updated_at: "2026-11-05T01:49:53Z"
+updated_at: "2026-11-05T01:51:01Z"
 commit: null
 tags: [db, spanner, cdc, change-stream, async]
 ---
@@ -81,9 +81,11 @@ Move `SpannerChildPartition`, `SpannerChangeStreamRecord`, `SyncSpannerChangeStr
 
 ## Acceptance Criteria
 
-- [ ] R2: `SpannerChildPartition`, `SpannerChangeStreamRecord`, `SyncSpannerChangeStreamSource`, and `AsyncSpannerChangeStreamSource` live in `src/py/vertebra/db/adapters/spanner/change_stream.py`, `SyncSpannerChangeStreamSource` satisfies `SyncChangeSource` and `AsyncSpannerChangeStreamSource` satisfies `AsyncChangeSource` both statically (`Mypy`) and via `isinstance(...)` with zero-argument `stream()` and zero `inspect.isawaitable` branching, and `src/py/vertebra/db/cdc.py` contains zero Spanner symbols.
-- [ ] R2: The native-driver capability regression imports both Spanner readers from the adapter module and passes, and the data knowledge chapter identifies the adapter-owned reader location and constructor-bound stream defaults.
+- [x] R2: `SpannerChildPartition`, `SpannerChangeStreamRecord`, `SyncSpannerChangeStreamSource`, and `AsyncSpannerChangeStreamSource` live in `src/py/vertebra/db/adapters/spanner/change_stream.py`, `SyncSpannerChangeStreamSource` satisfies `SyncChangeSource` and `AsyncSpannerChangeStreamSource` satisfies `AsyncChangeSource` both statically (`Mypy`) and via `isinstance(...)` with zero-argument `stream()` and zero `inspect.isawaitable` branching, and `src/py/vertebra/db/cdc.py` contains zero Spanner symbols.
+- [x] R2: The native-driver capability regression imports both Spanner readers from the adapter module and passes, and the data knowledge chapter identifies the adapter-owned reader location and constructor-bound stream defaults.
 
 ## Notes & Discoveries
 
 <!-- Append timestamped implementation findings here: - [YYYY-MM-DD HH:MM] ... -->
+
+- [2026-11-05T02:08:45+00:00] Behavior-TDD RED: adapter change-stream module missing at collection. GREEN: Spanner suite 23 passed, focused native-driver capability case 1 passed; touched Ruff/format/Mypy, real-driver structural compatibility probe, and make lint-all exit 0. Constructor defaults and explicit overrides retain sync/async protocol conformance; knowledge locations move with the readers.

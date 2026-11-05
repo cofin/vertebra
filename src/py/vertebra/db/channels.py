@@ -11,13 +11,9 @@ from typing import TYPE_CHECKING, Any, Self
 from vertebra.db.adapters.oracle import AsyncOracleDriver, OracleConfig
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig
 from vertebra.db.adapters.redis import AsyncRedisDriver, RedisConfig
+from vertebra.db.adapters.spanner.change_stream import AsyncSpannerChangeStreamSource, SyncSpannerChangeStreamSource
 from vertebra.db.adapters.valkey import AsyncValkeyDriver, ValkeyConfig
-from vertebra.db.cdc import (
-    AsyncSpannerChangeStreamSource,
-    CDCConfig,
-    ChangeFeed,
-    SyncSpannerChangeStreamSource,
-)
+from vertebra.db.cdc import CDCConfig, ChangeFeed
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 if TYPE_CHECKING:

@@ -18,6 +18,9 @@ sources:
   - id: src-db-cdc-py
     resource: src/py/vertebra/db/cdc.py
     title: "Python implementation module (src/py/vertebra/db/cdc.py)"
+  - id: src-db-spanner-change-stream-py
+    resource: src/py/vertebra/db/adapters/spanner/change_stream.py
+    title: "Spanner change-stream readers and partition record types"
   - id: src-db-postgres-notify-py
     resource: src/py/vertebra/db/adapters/postgres/notify.py
     title: "PostgreSQL notification transport and logical message builders"
@@ -60,11 +63,11 @@ sources:
 
 <!-- truth: start -->
 - `ChangeFeed` provides engine-neutral event envelopes, bounded spill hydration, replay, and Parquet archival; PostgreSQL notification SQL lives in `vertebra.db.adapters.postgres.notify`.
-- `SyncSpannerChangeStreamSource` / `AsyncSpannerChangeStreamSource` remain in `vertebra.db.cdc`; `TenantPredicate` provides fail-loud row-level security session scoping.
+- `SyncSpannerChangeStreamSource` / `AsyncSpannerChangeStreamSource` live in `vertebra.db.adapters.spanner.change_stream` with constructor-bound defaults and zero-argument capability streams; `TenantPredicate` provides fail-loud row-level security session scoping.
 - `DataFusionEngine` (`vertebra.db.adapters.datafusion`) registers normalized PyArrow, BigQuery, and Spanner tables on a fail-closed `SessionContext` (`ensure_module("datafusion", package="datafusion")`), and all SQL builders validate identifiers via `validate_identifier`.
 <!-- truth: end -->
 
-The `pipeline` and `rls` modules in [`vertebra.db`](../../../../../src/py/vertebra/db/__init__.py)[^src-db-init-py] generate PostgreSQL SQL text and bind tuples. The `cdc` module manages change-feed envelopes and Spanner change streams, [`postgres.notify`](../../../../../src/py/vertebra/db/adapters/postgres/notify.py)[^src-db-postgres-notify-py] owns PostgreSQL notification SQL, and the [`vertebra.db.adapters.datafusion`](../../../../../src/py/vertebra/db/adapters/datafusion/__init__.py)[^src-db-datafusion-py] adapter maintains federated analytical session state. Identifiers interpolated into generated SQL are validated against `^[A-Za-z_][A-Za-z0-9_]*$` (`_validate_identifier`). Drivers and connection configs are covered in [database-drivers-and-dialers](database-drivers-and-dialers.md).
+The `pipeline` and `rls` modules in [`vertebra.db`](../../../../../src/py/vertebra/db/__init__.py)[^src-db-init-py] generate PostgreSQL SQL text and bind tuples. The `cdc` module manages engine-neutral change-feed envelopes, [`spanner.change_stream`](../../../../../src/py/vertebra/db/adapters/spanner/change_stream.py)[^src-db-spanner-change-stream-py] owns Spanner change streams, [`postgres.notify`](../../../../../src/py/vertebra/db/adapters/postgres/notify.py)[^src-db-postgres-notify-py] owns PostgreSQL notification SQL, and the [`vertebra.db.adapters.datafusion`](../../../../../src/py/vertebra/db/adapters/datafusion/__init__.py)[^src-db-datafusion-py] adapter maintains federated analytical session state. Identifiers interpolated into generated SQL are validated against `^[A-Za-z_][A-Za-z0-9_]*$` (`_validate_identifier`). Drivers and connection configs are covered in [database-drivers-and-dialers](database-drivers-and-dialers.md).
 
 ## 1. Single-Round-Trip CTE Pipelines (`pipeline.py`)
 
@@ -106,7 +109,7 @@ The intended layering is an explicit predicate for plan quality plus a session G
 | `PostgresNotificationSource.build_emit_message_sql` (static) | Returns `("SELECT pg_logical_emit_message($1, $2, $3)", (transactional, prefix, payload_bytes))` for logical WAL messages. `ChangeFeed` and the SQLSpec event backends expose no logical message SQL builder. |
 | `PostgresNotificationSource.build_notify_sql` (static) | Validates the channel and returns `("SELECT pg_notify($1, $2)", (channel, payload))` with bound values. |
 | [`ChangeFeedSyncEventBackend` / `ChangeFeedAsyncEventBackend`](../../../../../src/py/vertebra/extensions/sqlspec/events.py)[^src-extensions-sqlspec-events-py] | Engine-neutral SQLSpec event backends support `publish`, `publish_many`, spill-hydrating `dequeue`, `ack`, `nack` redelivery, and `shutdown`. |
-| [`SyncSpannerChangeStreamSource` / `AsyncSpannerChangeStreamSource`](../../../../../src/py/vertebra/db/cdc.py) / `SpannerChildPartition` / `SpannerChangeStreamRecord` | Implements the [`SyncChangeSource` / `AsyncChangeSource`](../../../../../src/py/vertebra/db/driver/capabilities.py)[^src-db-driver-capabilities-py] capability protocols (`stream`), querying `READ_<stream_name>` in GoogleSQL (`spanner.read_json_<stream_name>` is Spangres-only), parsing `DataChangeRecord`, `HeartbeatRecord`, and `ChildPartitionsRecord` payloads into `SpannerChangeStreamRecord` and `SpannerChildPartition` structs, fanning out child partition readers respecting parent watermark progression, and forwarding data changes into `ChangeFeed.publish_event()`. Spangres polls bind `[start_timestamp, end_timestamp, partition_token, heartbeat_milliseconds]` positionally (`$1..$4` → `p1..p4`); GoogleSQL polls bind `@start_ts`, `@end_ts`, `@token`, and `@heartbeat_ms`. |
+| [`SyncSpannerChangeStreamSource` / `AsyncSpannerChangeStreamSource`](../../../../../src/py/vertebra/db/adapters/spanner/change_stream.py)[^src-db-spanner-change-stream-py] / [`SpannerChildPartition` / `SpannerChangeStreamRecord`](../../../../../src/py/vertebra/db/adapters/spanner/change_stream.py) | Implements the [`SyncChangeSource` / `AsyncChangeSource`](../../../../../src/py/vertebra/db/driver/capabilities.py)[^src-db-driver-capabilities-py] capability protocols with zero-argument `stream()` calls. Constructors bind `start_timestamp`, `end_timestamp`, `partition_token`, and `heartbeat_milliseconds`; the async constructor also binds `poll_interval_seconds`. Calls may override stream defaults; absent start timestamps resolve to the current UTC time. Sync readers select rows directly and async readers await selection directly without awaitable inspection, querying `READ_<stream_name>` in GoogleSQL (`spanner.read_json_<stream_name>` is Spangres-only), parsing `DataChangeRecord`, `HeartbeatRecord`, and `ChildPartitionsRecord` payloads into `SpannerChangeStreamRecord` and `SpannerChildPartition` structs, fanning out child partition readers respecting parent watermark progression, and forwarding data changes into `ChangeFeed.publish_event()`. Spangres polls bind `[start_timestamp, end_timestamp, partition_token, heartbeat_milliseconds]` positionally (`$1..$4` → `p1..p4`); GoogleSQL polls bind `@start_ts`, `@end_ts`, `@token`, and `@heartbeat_ms`. |
 
 Replay history retains at most `max_history_size` events. Without an object store, spill payloads use an LRU cache bounded by `max_memory_spills`; publication evicts the least recently used spill when the bound is exceeded. Hydration refreshes recency, and an evicted envelope fails explicitly instead of returning an empty payload.
 
@@ -139,3 +142,5 @@ Provenance sources: [^src-tests-unit-db-test-pg-dataplane-and-datafusion-py], [^
 [^src-extensions-sqlspec-events-py]: `src/py/vertebra/extensions/sqlspec/events.py` — Engine-neutral SQLSpec change-feed event backends.
 [^src-tests-unit-db-test-pg-gateway-py]: `src/py/tests/unit/db/test_pg_gateway.py` — CDC spill bounds, key normalization, and storage error coverage.
 [^src-tests-unit-extensions-test-data-storage-integrations-py]: `src/py/tests/unit/extensions/test_data_storage_integrations.py` — SQLSpec event backend lifecycle and spill hydration coverage.
+
+[^src-db-spanner-change-stream-py]: `src/py/vertebra/db/adapters/spanner/change_stream.py` — Spanner readers, constructor-bound stream defaults, record parsing, and child-partition scheduling.

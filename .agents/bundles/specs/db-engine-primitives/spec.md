@@ -11,10 +11,10 @@ research:
 plan_revision: 5
 plan_commit: "954998dea5866f52bc3730db642e8f028d4e72bf"
 state_revision: 2
-current_task: "db-engine-primitives:t01"
+current_task: "db-engine-primitives:t02"
 last_verified_checkpoint: null
 created_at: 2026-11-03T03:30:00Z
-updated_at: "2026-11-05T01:49:53Z"
+updated_at: "2026-11-05T01:51:01Z"
 tags: [db, layering, cdc, embeddings, agent-tools, pipeline, rls]
 ---
 
@@ -593,8 +593,8 @@ flowchart TD
 ## 4. Implementation Plan
 
 ### Phase 1: CDC, Notification & Channel Decoupling (`t01`–`t03`)
-- [~] `db-engine-primitives:t01` — Extract PostgreSQL logical message and `NOTIFY` primitives to `vertebra/db/adapters/postgres/notify.py` and bound `ChangeFeed` (`behavior_tdd`, `depends_on: []`) -> [`tasks/t01-postgres-notify-and-cdc-relocation.md`](tasks/t01-postgres-notify-and-cdc-relocation.md)
-- [ ] `db-engine-primitives:t02` — Relocate Spanner change stream readers to `vertebra/db/adapters/spanner/change_stream.py` with `SyncChangeSource` and `AsyncChangeSource` classes (`behavior_tdd`, `depends_on: [t01]`) -> [`tasks/t02-spanner-change-stream-relocation.md`](tasks/t02-spanner-change-stream-relocation.md)
+- [x] [6c07c8fe] `db-engine-primitives:t01` — Extract PostgreSQL logical message and `NOTIFY` primitives to `vertebra/db/adapters/postgres/notify.py` and bound `ChangeFeed` (`behavior_tdd`, `depends_on: []`) -> [`tasks/t01-postgres-notify-and-cdc-relocation.md`](tasks/t01-postgres-notify-and-cdc-relocation.md)
+- [~] `db-engine-primitives:t02` — Relocate Spanner change stream readers to `vertebra/db/adapters/spanner/change_stream.py` with `SyncChangeSource` and `AsyncChangeSource` classes (`behavior_tdd`, `depends_on: [t01]`) -> [`tasks/t02-spanner-change-stream-relocation.md`](tasks/t02-spanner-change-stream-relocation.md)
 - [ ] `db-engine-primitives:t03` — Delete `vertebra/db/channels.py` and move engine-neutral pub/sub fan-out into `vertebra/server/_channels.py::ChannelBus` (`behavior_tdd`, `depends_on: [t02]`) -> [`tasks/t03-channel-bus-decoupling.md`](tasks/t03-channel-bus-decoupling.md)
 
 **Phase 1 Recovery Checkpoint**: `uv run pytest src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py src/py/tests/unit/db/test_spanner_queue_and_cdc.py src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/extensions/test_data_storage_integrations.py src/py/tests/unit/extensions/test_litestar_plugin.py src/py/tests/unit/extensions/test_starlette_plugin.py && make lint-all` exits `0`.
@@ -613,7 +613,7 @@ flowchart TD
 
 ## 5. Continuity Snapshot
 
-- **Active Focus**: `t01` extracts PostgreSQL notifications and bounds engine-neutral CDC spill hydration on `feat/db-engine-primitives`, based on PR #76 at `954998de`.
+- **Active Focus**: `t02` relocates Spanner change-stream readers into the Spanner adapter; `t01` is complete at `6c07c8fe`.
 - **Completed Checkpoints**: None (`state: active`).
 - **Key Decisions**:
   - `ChannelBus` lives in `src/py/vertebra/server/_channels.py` (re-exported from `vertebra.framework.channels`) so `vertebra.extensions.{litestar,starlette,fastapi,flask}.channels` share the engine-neutral pub/sub substrate without importing `vertebra.framework.*` or `vertebra.db.channels`.

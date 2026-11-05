@@ -3,7 +3,7 @@ type: Task
 id: db-engine-primitives:t01
 title: Extract PostgreSQL logical message and NOTIFY primitives to vertebra/db/adapters/postgres/notify.py and bound ChangeFeed
 description: "Keep `src/py/vertebra/db/cdc.py` engine-neutral (`CDCConfig`, `ChangeEvent`, `ChangeFeed`) with preserved default values, normalized `spill_prefix` object keys, bounded in-memory spill LRU eviction, and fail-loud `SyncObjectStore.get()` hydration, remove `build_emit_message_sql` from `ChangeFeed` and `extensions/sqlspec/events.py`, and extract PostgreSQL logical replication / `NOTIFY` primitives into `src/py/vertebra/db/adapters/postgres/notify.py` (`PostgresNotifyConfig`, `PostgresNotificationSource(NotificationSource)`)."
-state: "in_progress"
+state: "completed"
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -21,18 +21,18 @@ tests:
   - src/py/tests/unit/docs/test_examples.py
 plan_revision: 5
 plan_commit: "954998dea5866f52bc3730db642e8f028d4e72bf"
-state_revision: 1
-claimed_by: "/root/db_t01"
-claimed_at: "2026-11-05T01:35:36Z"
+state_revision: 2
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-05T01:51:01Z"
+last_verified_commit: "6c07c8fe1d072d8096dea60c8df87f3b8eb1860b"
+verification_evidence: "Behavior TDD RED observed; canonical t01 files: 93 passed; Ruff/format/Mypy and make lint-all exit 0; contemporaneous CDC knowledge validated."
 created_at: 2026-11-03T21:47:00Z
-updated_at: "2026-11-05T01:49:53Z"
-commit: null
+updated_at: "2026-11-05T01:51:01Z"
+commit: "6c07c8fe1d072d8096dea60c8df87f3b8eb1860b"
 tags: [db, cdc, postgres, notify, spill]
 ---
 

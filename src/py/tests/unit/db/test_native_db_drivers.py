@@ -69,9 +69,9 @@ from vertebra.db.adapters.spanner import (
     SyncSpannerDriver,
     SyncSpannerTransaction,
 )
+from vertebra.db.adapters.spanner.change_stream import AsyncSpannerChangeStreamSource, SyncSpannerChangeStreamSource
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
 from vertebra.db.adapters.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
-from vertebra.db.cdc import AsyncSpannerChangeStreamSource, SyncSpannerChangeStreamSource
 from vertebra.db.channels import DatabaseChannelBackend
 from vertebra.db.driver._common import SPANGRES_DIALECT_TAG
 from vertebra.db.driver.capabilities import (
