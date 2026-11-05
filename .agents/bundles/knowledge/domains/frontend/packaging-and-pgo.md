@@ -8,10 +8,19 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+  - by: agent:flow-review
+    at: "2026-11-05T00:35:59Z"
+    commit: 4ce057e5aff909fcda2488cc0f6c4882ad0d38f0
 sources:
+  - id: src-storage-wheel-manifest
+    resource: src/rs/vertebra-storage/pyproject.toml
+    title: "Storage wheel source ownership"
+  - id: src-spanner-wheel-manifest
+    resource: src/rs/vertebra-spanner/pyproject.toml
+    title: "Spanner wheel source ownership"
+  - id: src-bigquery-wheel-manifest
+    resource: src/rs/vertebra-bigquery/pyproject.toml
+    title: "BigQuery wheel source ownership"
   - id: src-build-packaging-init-py
     resource: src/py/vertebra/build/packaging/__init__.py
     title: "Python implementation module (src/py/vertebra/build/packaging/__init__.py)"
@@ -75,6 +84,13 @@ sources:
 - **Two-Phase Rust PGO Pipeline ([`build/packaging/pgo.py`](../../../../../src/py/vertebra/build/packaging/pgo.py)[^src-build-packaging-pgo-py], [`tools/pgo/rust_pgo.py`](../../../../../tools/pgo/rust_pgo.py), `make build-pgo`)**: [`tools/pgo/rust_pgo.py`](../../../../../tools/pgo/rust_pgo.py) re-exports the canonical Rust PGO implementation from [`vertebra.build.packaging.pgo`](../../../../../src/py/vertebra/build/packaging/pgo.py) and exposes `python -m tools.pgo.rust_pgo` (`--profile-dir`, `--profdata`, `--baseline-profdata`, `--workload-cmd`, `--llvm-profdata`, `--no-extensions`, `--use-existing`). [`run_pgo_pipeline`](../../../../../src/py/vertebra/build/packaging/pgo.py) (`PgoPipelineResult`) resolves `CARGO_TARGET_DIR` via `resolve_cargo_release_dir`, compiles `vertebra-http` (`build_instrumented`) and all three PyO3 extensions in `EXTENSION_MANIFESTS` (`build_instrumented_extensions`: `vertebra-py` via root `pyproject.toml`, `vertebra-bundler` and `vertebra-storage` via `-m`), runs `run_default_pgo_workload` (or a custom workload), merges and validates `.profraw` counters via `merge_profiles` / `weighted_merge_profiles` + single-pass `validate_profdata`, and recompiles with `-Cprofile-use` (`build_optimized`, `build_optimized_extensions`), falling back cleanly to a standard release build when `.profdata` is missing or corrupt. `make build-pgo` runs the full two-phase pipeline (or reuses an existing profile via `PROFDATA=<path> make build-pgo`).
 - **CPython PGO/LTO/BOLT & 3.14/3.15 Runtime Detection ([`build/packaging/pgo.py`](../../../../../src/py/vertebra/build/packaging/pgo.py), [`tools/pgo/python_pgo.py`](../../../../../tools/pgo/python_pgo.py)[^src-tools-pgo-python-pgo-py])**: [`detect_python_build`](../../../../../src/py/vertebra/build/packaging/pgo.py) and `check_pgo_availability` inspect `sysconfig` and `sys._jit` into [`PythonBuildInfo`](../../../../../src/py/vertebra/build/packaging/pgo.py), reporting `--enable-optimizations` (PGO), `--with-lto`, `--enable-bolt`, `is_tail_call_interp` (`--with-tail-call-interp`), `is_jit_available` / `is_jit_enabled` (`sys._jit`), `is_free_threaded` (`Py_GIL_DISABLED`), and `has_frame_pointers` (`-fno-omit-frame-pointer` / `-mno-omit-leaf-frame-pointer` for `sys.monitoring` / Tachyon profiling).
 
+
+## Optional extension distributions
+
+The release workflow builds `vertebra-core`, `vertebra-bigquery`, `vertebra-spanner`, and `vertebra-storage` wheels and source distributions. Each companion wheel owns its native module and matching stub; its Maturin include/exclude rules also prevent a source-distribution build from copying core-owned Python files. Publication depends on a fresh environment installing the built core and its optional extras together.
+
+Verify direct wheels and wheels rebuilt from source distributions outside the checkout. Inspect their file ownership, test each extension independently, then test combined installation. Removing an optional wheel must preserve the core package and sibling extensions. A local Linux build verifies these contracts; platform-matrix acceptance comes from the hosted release workflow. [^src-release-yaml][^src-bigquery-wheel-manifest][^src-spanner-wheel-manifest][^src-storage-wheel-manifest]
+
 Provenance sources: [^src-cli-build-py], [^src-tools-pgo-init-py], [^src-makefile].
 
 [^src-build-packaging-init-py]: `src/py/vertebra/build/packaging/__init__.py` — Python implementation module (src/py/vertebra/build/packaging/__init__.py).
@@ -89,3 +105,9 @@ Provenance sources: [^src-cli-build-py], [^src-tools-pgo-init-py], [^src-makefil
 [^src-makefile]: `Makefile` — Canonical polyglot build, test, lint, docs, and benchmark targets.
 [^src-cargo-toml]: `src/rs/Cargo.toml` — Rust crate manifest (src/rs/Cargo.toml).
 [^src-release-yaml]: `.github/workflows/release.yaml` — GitHub Actions workflow (release.yaml).
+
+[^src-bigquery-wheel-manifest]: `src/rs/vertebra-bigquery/pyproject.toml` — BigQuery wheel source ownership.
+
+[^src-spanner-wheel-manifest]: `src/rs/vertebra-spanner/pyproject.toml` — Spanner wheel source ownership.
+
+[^src-storage-wheel-manifest]: `src/rs/vertebra-storage/pyproject.toml` — Storage wheel source ownership.

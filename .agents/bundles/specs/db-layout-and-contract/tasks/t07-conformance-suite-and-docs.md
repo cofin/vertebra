@@ -30,11 +30,11 @@ claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: "2026-11-04T21:17:00Z"
-last_verified_commit: "a5dbea6"
-verification_evidence: "make lint-all && make rs-test && GOOGLE_API_USE_CLIENT_CERTIFICATE=false make py-test && make docs && make review-check (exit 0; 1698 passed, 71 skipped, 170 xfailed)"
+last_verified_at: "2026-11-05T00:35:59Z"
+last_verified_commit: "4ce057e5aff909fcda2488cc0f6c4882ad0d38f0"
+verification_evidence: "make py-test (1738 passed, 69 skipped, 170 xfailed); make rs-test (473 passed, 1 ignored); make ts-test; make lint-all; make docs; isolated wheel and sdist rebuild/install/uninstall probes (exit 0). CARGO_TARGET_DIR and TMPDIR use disk-backed paths to avoid host temporary-filesystem quota."
 created_at: 2026-11-03T21:40:00Z
-updated_at: "2026-11-04T21:17:00Z"
+updated_at: "2026-11-05T00:35:59Z"
 commit: "a5dbea6"
 tags: [db, conformance, integration, docs, okf]
 ---
@@ -89,3 +89,5 @@ Create the cross-engine driver conformance suite `src/py/tests/integration/db/te
 
 <!-- Append timestamped implementation findings here: - [YYYY-MM-DD HH:MM] ... -->
 - [2026-11-04 21:02] implementation: Added parameterized cross-engine conformance suite `src/py/tests/integration/db/test_driver_conformance.py` (`59 passed, 70 skipped, 170 xfailed`, `0 XPASS`) using `@pytest.fixture(params=...)`, `@pytest.mark.parametrize`, and `@pytest.mark.anyio` with zero `for` loops in test functions; gated `sync_sql_driver` / `async_sql_driver` on `ensure_module(spec.native_extension_module, ...)` for pending native Rust chapters (`postgres`, `oracle`, `mysql`, `mssql`, `duckdb`) so Python SQLite stand-in fallbacks cannot cause `XPASS(strict)` before their Rust extensions exist, while `sqlite`, `DataFusionEngine`, `Redis`, and `Valkey` run live end-to-end and `bigquery`/`spanner` skip cleanly unless `VERTEBRA_CONFORMANCE_BIGQUERY_DSN` / `VERTEBRA_CONFORMANCE_SPANNER_DSN` (or `SPANNER_EMULATOR_HOST`) are configured. Updated `src/py/tests/integration/conftest.py` (`MySQLConfig.from_url`, `RedisConfig.from_url`, `ValkeyConfig.from_url`, `PostgreSQLAsyncConfig`, `OracleAsyncConfig`), `docs/{examples/storage_and_db.py,reference/db.md,usage/analytics-and-cdc.md,usage/databases.md}` (keeping `site/reference/db/index.html` within the `120,000`-byte and `<= 14` TOC budget via `heading_level: 4` + `summary: false`), and all three OKF data domain chapters (`<= 40`-line truth blocks, verified `make docs` and `review_setup validate` exit `0`).
+
+- [2026-11-05T00:35:59Z] Review checkpoint `4ce057e`: current source passes aggregate verification; installed-wheel checks cover direct and source-distribution builds. Correctness findings are resolved. Fresh quality review precedes completion.

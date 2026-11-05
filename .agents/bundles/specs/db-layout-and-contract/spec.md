@@ -13,9 +13,9 @@ plan_revision: 5
 plan_commit: "2c0d365"
 state_revision: 10
 current_task: null
-last_verified_checkpoint: "a5dbea6"
+last_verified_checkpoint: "4ce057e5aff909fcda2488cc0f6c4882ad0d38f0"
 created_at: 2026-11-03T04:05:00Z
-updated_at: "2026-11-04T21:17:00Z"
+updated_at: "2026-11-05T00:35:59Z"
 tags: [db, layout, wheels, contract, registry, conformance]
 ---
 
@@ -398,7 +398,7 @@ class EmbeddingPushdown(Protocol):
 
 - **Flow ID**: `db-layout-and-contract` (`state: active`, `plan_revision: 5`, `plan_commit: "2c0d365"`)
 - **Current Task**: `null`
-- **Last Verified Checkpoint**: `a5dbea6`
+- **Last Verified Checkpoint**: `4ce057e`
 - **Key Decisions**:
   - Engine adapters live under `vertebra.db.adapters.<engine>` (`postgres`, `mysql`, `sqlite`, `oracle`, `mssql`, `duckdb`, `bigquery`, `spanner`, `redis`, `valkey`, `datafusion`); engine-agnostic modules stay directly under `vertebra.db.{driver,registry,arrow,cdc,rls,dialer}`.
   - Every database engine compiles as its own optional PyO3 extension crate `src/rs/vertebra-<engine>` (`vertebra._<engine>` + `[project.optional-dependencies].<engine>`); `t03` extracts `vertebra-bigquery` and `vertebra-spanner` immediately so `vertebra._vertebra` and default `vertebra-db` are free of `google-cloud-*` / `tonic`.

@@ -8,9 +8,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+  - by: agent:flow-review
+    at: "2026-11-05T00:35:59Z"
+    commit: 4ce057e5aff909fcda2488cc0f6c4882ad0d38f0
 sources:
   - id: src-vertebra-py-src-lib-rs
     resource: src/rs/vertebra-py/src/lib.rs
@@ -57,6 +57,15 @@ sources:
   - id: src-server-fastpath-py
     resource: src/py/vertebra/server/_fastpath.py
     title: "Python implementation module (src/py/vertebra/server/_fastpath.py)"
+  - id: src-db-py-async
+    resource: src/rs/vertebra-db/src/py_async.rs
+    title: "Per-extension completion queues and SHM capsule construction"
+  - id: src-core-shm-capsule
+    resource: src/rs/vertebra-core/src/shm.rs
+    title: "C ABI capsule and shared-memory mapping ownership"
+  - id: src-py-arrow-cursor
+    resource: src/rs/vertebra-py/src/db.rs
+    title: "ArrowCursor capsule adoption and release"
 ---
 
 # PyO3 FFI & Vectorized Batch Dispatch
@@ -100,6 +109,16 @@ sources:
 - **`O(1)` mount resolution & auto-attached `FastPath` stacking**: `vertebra-http` stamps mounted requests with `MOUNT_HANDLER_BASE | mount_idx` (`0xFFFF_0000_0000_0000 | idx`), allowing `Worker._process_batch` and `partition_batch` to index directly into `mounts[mount_idx]` in `O(1)` without decoding `req.path`. `_instantiate_mount_runners` calls [`attach_framework_fastpath`](../../../../../src/py/vertebra/server/_fastpath.py)[^src-server-fastpath-py] on every mounted `Litestar`, `FastAPI`, `Starlette`, `Flask`, or `Django` sub-application so stacked `app.mount("/prefix", sub_app)` trees automatically execute through each framework's C-API `FastPath` with `mount_prefix` / `root_path` stripping.
 - **Unified `LoopBackend` (`auto`, `uvloop`, `winloop`, `rloop`, `asyncio`) & same-thread `add_reader` polling**: [`_loops.py`](../../../../../src/py/vertebra/server/_loops.py)[^src-server-loops-py] exposes `LoopBackend(StrEnum)` and `resolve_loop_backend`, selecting `uvloop` (`>=0.23.0`) on POSIX, `winloop` (`>=0.8.1`) on Windows, opt-in `rloop` (`>=0.5.0`), or stdlib `asyncio` via `create_event_loop` without deprecated `asyncio.AbstractEventLoopPolicy` APIs, and honoring `--loop` / `VERTEBRA_LOOP` and `GilAuditReport` `quarantined_modules`. When `loop_shards == 1` and a request notify FD is active, `Worker._run_inline_event_loop` registers `loop.add_reader(notify_fd, ...)` with Dekker `prepare_request_sleep()` / `cancel_request_sleep()` so polling and coroutine execution share one OS thread with **zero** cross-thread `call_soon_threadsafe` wakeups.
 
+## Database extension boundary
+
+`vertebra._vertebra` owns the canonical Python database exception classes and `ArrowCursor`. The optional `_bigquery` and `_spanner` modules import those classes at runtime and share Rust helpers through `vertebra-db`; they do not link against the core extension's Python class static variables.[^src-db-py-async]
+
+Each extension attaches its own completion drainer to the running event loop through `spawn_rust_db_task_with_attr`. Distinct attribute names keep the separately linked completion queues and PyO3 classes independent when several engines use one loop. Python future cancellation invokes the worker's Tokio abort handle, and the completion path maps worker panics to `TaskPanicError`.[^src-db-py-async]
+
+Arrow-producing extensions use an unregistered SHM region and pass a named `vertebra.ShmCapsule` to the core `ArrowCursor._from_shm_capsule`. The capsule carries a data pointer, length, atomic ownership context, and producer-owned release callbacks. The core cursor validates the capsule and atomically claims its context once; its backing invokes the producer callback when the last owner drops. This keeps the Arrow data in place across extension boundaries.[^src-core-shm-capsule][^src-py-arrow-cursor]
+
+See [ADR-004](../../decisions/adr-004-optional-driver-wheels-and-shm-ownership.md) for the packaging and ownership trade-offs.
+
 Provenance sources: [^src-vertebra-py-src-transport-rs].
 
 [^src-vertebra-py-src-lib-rs]: `src/rs/vertebra-py/src/lib.rs` — Rust implementation module (src/rs/vertebra-py/src/lib.rs).
@@ -117,3 +136,9 @@ Provenance sources: [^src-vertebra-py-src-transport-rs].
 [^src-server-dispatch-py]: `src/py/vertebra/server/_dispatch.py` — Python implementation module (src/py/vertebra/server/_dispatch.py).
 [^src-server-loops-py]: `src/py/vertebra/server/_loops.py` — Python implementation module (src/py/vertebra/server/_loops.py).
 [^src-server-fastpath-py]: `src/py/vertebra/server/_fastpath.py` — Python implementation module (src/py/vertebra/server/_fastpath.py).
+
+[^src-db-py-async]: `src/rs/vertebra-db/src/py_async.rs` — Per-extension completion queues and SHM capsule construction.
+
+[^src-core-shm-capsule]: `src/rs/vertebra-core/src/shm.rs` — C ABI capsule and shared-memory mapping ownership.
+
+[^src-py-arrow-cursor]: `src/rs/vertebra-py/src/db.rs` — ArrowCursor capsule adoption and release.

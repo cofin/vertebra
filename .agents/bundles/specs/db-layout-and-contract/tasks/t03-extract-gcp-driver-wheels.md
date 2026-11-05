@@ -67,11 +67,11 @@ claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: "2026-11-04T17:30:00Z"
-last_verified_commit: "95afe7a"
-verification_evidence: "make dev (exit 0); cargo test -p vertebra-db && cargo test -p vertebra-db --features gcp,pyo3 -p vertebra-py -p vertebra-bigquery -p vertebra-spanner (exit 0); mypy.stubtest 5 modules (exit 0); uv run pytest src/py/tests/unit (1573 passed, 1 skipped); make lint-all && make docs && make review-check (exit 0)"
+last_verified_at: "2026-11-05T00:35:59Z"
+last_verified_commit: "4ce057e5aff909fcda2488cc0f6c4882ad0d38f0"
+verification_evidence: "make py-test (1738 passed, 69 skipped, 170 xfailed); make rs-test (473 passed, 1 ignored); make ts-test; make lint-all; make docs; isolated wheel and sdist rebuild/install/uninstall probes (exit 0). CARGO_TARGET_DIR and TMPDIR use disk-backed paths to avoid host temporary-filesystem quota."
 created_at: 2026-11-04T01:05:00Z
-updated_at: "2026-11-04T17:31:08Z"
+updated_at: "2026-11-05T00:35:59Z"
 commit: "95afe7a"
 tags: [rust, pyo3, wheels, bigquery, spanner, packaging]
 ---
@@ -130,3 +130,5 @@ Extract BigQuery (`SyncBigQueryClient`, `AsyncBigQueryClient`) and Spanner (`Syn
 - [2026-11-04 16:37] Gated `src/rs/vertebra-db/tests/gcp_credentials_tests.rs` via `[[test]] name = "gcp_credentials_tests" required-features = ["gcp"]` in `src/rs/vertebra-db/Cargo.toml` so default `cargo test -p vertebra-db` compiles with zero `google-cloud-*` or `tonic` dependencies, while `Makefile` (`rs-test`, `lint`, `lint-all`) passes `--features tls,compression,gcp` so `gcp_credentials_tests` runs in workspace suites.
 - [2026-11-04 16:37] In `Makefile` (`lint` and `lint-all`), `importlib.util.find_spec(m) is not None` cleanly distinguishes compiled `.so` extensions from `.pyi`-only stubs so `mypy.stubtest` runs against every installed native module without failing in CI environments where optional `.so` wheels are not built.
 - [2026-11-04 17:29] Kept `docs/reference/native-stubs.md` within `verify_docs_artifacts` budgets (`<= 120_000` reference HTML bytes and `<= 14` secondary TOC items) by combining `_bigquery` and `_spanner` under one `h2` section and rendering `Sync*` twins at `heading_level: 4` with `members: false` alongside full `Async*` member tables.
+
+- [2026-11-05T00:35:59Z] Review checkpoint `4ce057e`: current source passes aggregate verification; installed-wheel checks cover direct and source-distribution builds. Correctness findings are resolved. Fresh quality review precedes completion.

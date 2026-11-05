@@ -8,10 +8,19 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+  - by: agent:flow-review
+    at: "2026-11-05T00:35:59Z"
+    commit: 4ce057e5aff909fcda2488cc0f6c4882ad0d38f0
 sources:
+  - id: src-native-driver-tests
+    resource: src/py/tests/unit/db/test_native_db_drivers.py
+    title: "Cancellation and cloud DBAPI regression coverage"
+  - id: src-sqlite-returning-tests
+    resource: src/py/tests/unit/db/test_sqlite_driver.py
+    title: "SQLite statement completion and transaction regressions"
+  - id: src-postgres-transaction-tests
+    resource: src/py/tests/unit/db/test_postgres_driver.py
+    title: "Asyncpg transaction and affected-count regressions"
   - id: src-makefile
     resource: Makefile
     title: "Canonical polyglot build, test, lint, docs, and benchmark targets"
@@ -33,6 +42,9 @@ sources:
   - id: src-ci-yml
     resource: .github/workflows/ci.yml
     title: "GitHub Actions workflow (ci.yml)"
+  - id: src-db-conformance
+    resource: src/py/tests/integration/db/test_driver_conformance.py
+    title: "Parameterized database contract and environment readiness gates"
 ---
 
 # Polyglot Test Matrix & Environment Setup
@@ -100,6 +112,21 @@ CI runs on pushes to `main` and on every pull request. A `changes` job (`dorny/p
 
 Runtime segments are named `/vtb-{pid:x}-{seq:x}-{attempt:x}` and match neither glob. Remove leftovers from interrupted server or worker runs with `rm -f /dev/shm/vtb-*`. On Linux most regions are anonymous `memfd_create` descriptors and leave nothing in `/dev/shm`; `shm_open` names apply on macOS and other Unix hosts.
 
+## Database driver conformance
+
+`src/py/tests/integration/db/test_driver_conformance.py` parameterizes the shared sync and async SQL contract across eight adapters. It checks scalar conversion, execution return values, empty results versus SQL `NULL`, transaction commit and rollback, typed errors, Arrow round trips, and idle cancellation. Optional pipelining assertions follow the advertised sync or async capability.[^src-db-conformance]
+
+SQLite runs locally. PostgreSQL, Oracle, MySQL, MSSQL, and DuckDB retain strict expected failures for their pending native extension cutovers. These fixtures require the named native extension before exercising SQL, so an expected failure caused by a missing extension does not establish server behavior. BigQuery requires `VERTEBRA_CONFORMANCE_BIGQUERY_DSN`; Spanner requires `VERTEBRA_CONFORMANCE_SPANNER_DSN` or `SPANNER_EMULATOR_HOST`. Without that configuration the cloud cases skip.[^src-db-conformance]
+
+Redis and Valkey default to `memory://` behavioral checks; `VERTEBRA_CONFORMANCE_DOCKER=1` selects their `pytest-databases` fixtures. DataFusion cases cover registry resolution, Arrow normalization with an injected context, and missing-dependency refusal. Report passed, skipped, and expected-failure cases separately, and require live engine evidence when accepting a native cutover.[^src-db-conformance]
+
+For extracted wheels, verify an installed artifact outside the source tree as well as an editable build. Inspect wheel contents for ownership of the extension and its stub, install the core and selected engine from the built distributions, and check that removing an optional engine leaves the core Python package intact. Reason: editable imports do not prove distribution isolation.
+
+
+## Driver regression boundaries
+
+Transaction tests exercise synchronous interruption, actual asyncio task cancellation, and AnyIO cancellation scopes against observable database state. Asyncpg interface tests use a local port with real SQLite autocommit behavior and verify transaction ownership, command counts, and connection release. Cloud DBAPI tests pass actual BigQuery, Spanner, and Spangres drivers through local service ports, including a BigQuery port that rejects permanent DDL inside transactions. SQLite `RETURNING` tests check counts, cross-connection visibility, commit, rollback, and reuse. These local ports verify integration contracts; they do not establish live PostgreSQL or GCP service acceptance. [^src-postgres-transaction-tests][^src-sqlite-returning-tests][^src-native-driver-tests]
+
 Provenance sources: [^src-pyproject-toml], [^src-cargo-toml], [^src-package-json], [^src-ci-yml].
 
 [^src-makefile]: `Makefile` — Canonical polyglot build, test, lint, docs, and benchmark targets.
@@ -109,3 +136,11 @@ Provenance sources: [^src-pyproject-toml], [^src-cargo-toml], [^src-package-json
 [^src-tests-conftest-py]: `src/py/tests/conftest.py` — Python implementation module (src/py/tests/conftest.py).
 [^src-package-json]: `src/ts/vertebra-client/package.json` — TypeScript package manifest (src/ts/vertebra-client/package.json).
 [^src-ci-yml]: `.github/workflows/ci.yml` — GitHub Actions workflow (ci.yml).
+
+[^src-db-conformance]: `src/py/tests/integration/db/test_driver_conformance.py` — Parameterized database contract and environment readiness gates.
+
+[^src-postgres-transaction-tests]: `src/py/tests/unit/db/test_postgres_driver.py` — Asyncpg transaction and affected-count regressions.
+
+[^src-sqlite-returning-tests]: `src/py/tests/unit/db/test_sqlite_driver.py` — SQLite statement completion and transaction regressions.
+
+[^src-native-driver-tests]: `src/py/tests/unit/db/test_native_db_drivers.py` — Cancellation and cloud DBAPI regression coverage.

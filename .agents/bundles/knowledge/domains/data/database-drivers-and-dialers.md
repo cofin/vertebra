@@ -8,10 +8,13 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+  - by: agent:flow-review
+    at: "2026-11-05T00:35:59Z"
+    commit: 4ce057e5aff909fcda2488cc0f6c4882ad0d38f0
 sources:
+  - id: src-sqlalchemy-dialects
+    resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
+    title: "SQLAlchemy DBAPI transaction policy"
   - id: src-vertebra-core-src-shm-rs
     resource: src/rs/vertebra-core/src/shm.rs
     title: "Rust implementation module (src/rs/vertebra-core/src/shm.rs)"
@@ -188,7 +191,7 @@ sources:
 - **Standalone Optional Google Cloud Driver Wheels (`vertebra-bigquery`, `vertebra-spanner`, `vertebra-db/src/gcp.rs`, `vertebra-core/src/gcp_auth.rs`)**: `vertebra-bigquery` (`vertebra._bigquery`, `[bigquery]`) and `vertebra-spanner` (`vertebra._spanner`, `[spanner]`) compile as standalone `gil_used = false` PyO3 wheels delegating to `google-cloud-bigquery` (`=0.19.0`) and `google-cloud-spanner` (`=0.34.8-preview`) over optional `vertebra_db::gcp` (`feature = "gcp"`, keeping default `vertebra-db` and `vertebra-py` free of `google-cloud-*` and `tonic`). Spanner DDL executes over REST (`DatabaseAdmin`) with `admin_endpoint` resolution and LRO polling; `SpannerConfig.ca_pem` configures Spanner Omni TLS for non-`*.googleapis.com` HTTPS endpoints, while `BigQueryConfig.ca_pem` applies to REST v2 calls. `ArrowAppendPlan::build` splits Arrow IPC streams into one record batch per `ArrowAppendRequest` and verifies response offsets. `GcpTokenCache::from_options(raw_opts, default_scopes)` requires explicit default OAuth scopes, honors `ProxyPolicy` on token/IAM calls while keeping metadata-server calls direct, and runs `GcpAuthSource::GcloudCli` with `kill_on_drop(true)` and `GCLOUD_CLI_TIMEOUT` (`30s`).
 <!-- truth: end -->
 
-[`src/rs/vertebra-db`](../../../../../src/rs/vertebra-db/src/lib.rs)[^src-vertebra-db-src-lib-rs] and [`vertebra.db`](../../../../../src/py/vertebra/db/__init__.py)[^src-db-init-py] implement Vertebra's native shared-memory database and cache drivers, the [`vertebra.db.driver`](../../../../../src/py/vertebra/db/driver/__init__.py)[^src-db-driver-init-py] base hierarchy (`BaseDatabaseConfig`, `CommonDriverMixin`, `SyncDatabaseDriver`, `AsyncDatabaseDriver`, `ThreadOffloadAsyncDatabaseDriver`), optional `@runtime_checkable` capability protocols ([`capabilities.py`](../../../../../src/py/vertebra/db/driver/capabilities.py)[^src-db-driver-capabilities-py]), zero-copy `ShmRegion` Arrow IPC cursors, and Cloud SQL / AlloyDB mTLS and IAM token dialers. Cross-engine contract parity is enforced by [`test_driver_conformance.py`](../../../../../src/py/tests/integration/db/test_driver_conformance.py)[^src-tests-integration-db-conformance-py]. Query composition, CDC, and tenancy in the same package are covered in [query-pipeline-cdc-and-tenancy](query-pipeline-cdc-and-tenancy.md).
+[`src/rs/vertebra-db`](../../../../../src/rs/vertebra-db/src/lib.rs)[^src-vertebra-db-src-lib-rs] and [`vertebra.db`](../../../../../src/py/vertebra/db/__init__.py)[^src-db-init-py] implement Vertebra's native shared-memory database and cache drivers, the [`vertebra.db.driver`](../../../../../src/py/vertebra/db/driver/__init__.py)[^src-db-driver-init-py] base hierarchy (`BaseDatabaseConfig`, `CommonDriverMixin`, `SyncDatabaseDriver`, `AsyncDatabaseDriver`, `ThreadOffloadAsyncDatabaseDriver`), optional `@runtime_checkable` capability protocols ([`capabilities.py`](../../../../../src/py/vertebra/db/driver/capabilities.py)[^src-db-driver-capabilities-py]), zero-copy `ShmRegion` Arrow IPC cursors, and Cloud SQL / AlloyDB mTLS and IAM token dialers. The shared acceptance contract lives in [`test_driver_conformance.py`](../../../../../src/py/tests/integration/db/test_driver_conformance.py)[^src-tests-integration-db-conformance-py]; the [test matrix](../../testing/polyglot-test-matrix.md#database-driver-conformance) distinguishes live execution from expected failures and environment skips. Native engine cutovers and broker-owned connections remain separate roadmap work. [ADR-004](../../decisions/adr-004-optional-driver-wheels-and-shm-ownership.md) records the wheel and mapping ownership boundary. Query composition, CDC, and tenancy in the same package are covered in [query-pipeline-cdc-and-tenancy](query-pipeline-cdc-and-tenancy.md).
 
 ## 1. Polymorphic Registry & Driver Contracts (`registry.py`, `driver/`)
 
@@ -247,6 +250,13 @@ sources:
 | [`AlloyDBClusterURI`](../../../../../src/py/vertebra/db/dialer/alloydb.py)[^src-db-dialer-alloydb-py] | Parses `projects/<p>/locations/<l>/clusters/<c>/instances/<i>`. `generate_client_cert_url` builds the `v1beta ...:generateClientCertificate` URL. |
 | `AlloyDBConfig` / `SyncAlloyDBDialer` & `AsyncAlloyDBDialer` / `AlloyDBAuthType` | Port 5433. `encode_metadata_exchange` (and Rust `vertebra_db::dialer::AlloyDBDialer::encode_metadata_exchange`) writes a 4-byte big-endian length followed by protobuf-style fields: user agent (tag `0x0A`), auth type (`0x10`, `BUILT_IN=1` / `IAM=2`), token (`0x1A`). `build_handshake_frame` picks IAM or built-in auth from `enable_iam_auth`. |
 
+
+## Transaction ownership and statement completion
+
+Driver transaction scopes roll back on `BaseException`, including cancellation. Async rollback is shielded from AnyIO cancellation scopes. Pooled asyncpg drivers retain both the acquired connection and its transaction object until commit or rollback; DML affected counts come from command status. SQLite completes and closes `RETURNING` statements before reading affected counts and committing. DuckDB batch counts sum affected rows across statements.
+
+SQLAlchemy DBAPI connections begin native transactions for transactional engines. BigQuery, Spanner, and Spangres DBAPI connections use statement autocommit and reject `autocommit=False`; their native driver transaction scopes remain separate. Shared GCP error normalization maps an available HTTP status before the generic transport fallback, retaining authentication, permission, and quota classifications. [^src-db-driver-async-py][^src-sqlalchemy-dialects][^src-vertebra-db-src-gcp-rs]
+
 Provenance sources: [^src-vertebra-core-src-shm-rs], [^src-vertebra-db-src-arrow-shm-rs], [^src-vertebra-db-src-connection-rs], [^src-vertebra-db-src-py-async-rs], [^src-vertebra-db-src-tns-rs], [^src-vertebra-db-src-gcp-rs], [^src-vertebra-bigquery-src-lib-rs], [^src-vertebra-bigquery-src-errors-rs], [^src-vertebra-spanner-src-lib-rs], [^src-vertebra-spanner-src-errors-rs], [^src-vertebra-db-src-dialer-rs], [^src-vertebra-py-src-completion-rs], [^src-vertebra-py-src-db-rs], [^src-vertebra-py-src-errors-rs], [^src-vertebra-db-tests-gcp-credentials-tests-rs], [^src-vertebra-spanner-tests-spanner-wire-tests-rs], [^src-vertebra-bigquery-tests-bigquery-wire-tests-rs], [^src-db-driver-common-py], [^src-db-driver-sync-py], [^src-db-driver-async-py], [^src-tests-unit-db-test-native-db-drivers-py], [^src-tests-unit-db-test-enterprise-olap-drivers-py], [^src-tests-unit-db-test-redis-valkey-resp3-py], [^src-tests-unit-db-test-bigquery-py], [^src-tests-unit-db-test-spanner-py].
 
 [^src-vertebra-core-src-shm-rs]: `src/rs/vertebra-core/src/shm.rs` — Rust implementation module (src/rs/vertebra-core/src/shm.rs).
@@ -303,3 +313,5 @@ Provenance sources: [^src-vertebra-core-src-shm-rs], [^src-vertebra-db-src-arrow
 [^src-tests-unit-db-test-redis-valkey-resp3-py]: `src/py/tests/unit/db/test_redis_valkey_resp3.py` — Python implementation module (src/py/tests/unit/db/test_redis_valkey_resp3.py).
 [^src-tests-unit-db-test-bigquery-py]: `src/py/tests/unit/db/test_bigquery.py` — Python implementation module (src/py/tests/unit/db/test_bigquery.py).
 [^src-tests-unit-db-test-spanner-py]: `src/py/tests/unit/db/test_spanner.py` — Python implementation module (src/py/tests/unit/db/test_spanner.py).
+
+[^src-sqlalchemy-dialects]: `src/py/vertebra/extensions/sqlalchemy/dialects.py` — SQLAlchemy DBAPI transaction policy.

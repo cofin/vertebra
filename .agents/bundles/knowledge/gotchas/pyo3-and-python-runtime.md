@@ -8,9 +8,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+  - by: agent:flow-review
+    at: "2026-11-05T00:35:59Z"
+    commit: 4ce057e5aff909fcda2488cc0f6c4882ad0d38f0
 sources:
   - id: src-vertebra-py-src-lib-rs
     resource: src/rs/vertebra-py/src/lib.rs
@@ -81,6 +81,18 @@ sources:
   - id: src-pyproject-toml
     resource: pyproject.toml
     title: "Python package metadata, dependencies, and tool configuration"
+  - id: src-db-arrow-shm
+    resource: src/rs/vertebra-db/src/arrow_shm.rs
+    title: "Registered and unregistered Arrow SHM writers"
+  - id: src-db-py-async
+    resource: src/rs/vertebra-db/src/py_async.rs
+    title: "Capsule destructor and per-extension completion queues"
+  - id: src-core-shm-capsule
+    resource: src/rs/vertebra-core/src/shm.rs
+    title: "SHM capsule and unlink versus mapping lifetime"
+  - id: src-py-arrow-cursor
+    resource: src/rs/vertebra-py/src/db.rs
+    title: "Single-consumer capsule adoption and cursor release"
 ---
 
 # PyO3 FFI, Embedded Globals & Python Runtime Gotchas
@@ -142,6 +154,15 @@ sources:
 - **`msgspec.Struct` Per-Field Docstrings in `scan_public_docstrings`**: `tools.docs.scan_public_docstrings::scan_undocumented_typeddicts` flags `Attributes:` sections in public `msgspec.Struct` class docstrings (`has_duplicate_class_attributes=True`). Document `msgspec.Struct` fields using inline per-field docstrings immediately below each field definition rather than a class-level `Attributes:` block.
 - **`GuardProtocol` Subclass Invocation (`agent/core/guards.py`)**: `GuardProtocol` is a `typing.Protocol` defining `async def __call__(self, ctx: AgentContext) -> None: ...`. Any guard class that subclasses `GuardProtocol` and implements `async def check(self, context: Any) -> None:` still has `callable(guard) is True` because it inherits the no-op `Protocol.__call__` stub. Always check `check_fn = getattr(guard, "check", None)` before falling back to `guard(ctx)` in `Tool.invoke` and `GuardChain.execute`.
 
+## Cross-extension Arrow capsules and release
+
+- **Independent globals**: A region registered in an optional extension's private `ACTIVE_ARROW_SHM_REGIONS` map cannot be released through the core extension's copy of that map. Use `write_shm_arrow_region_unregistered` or `ShmArrowStreamWriter::finish_unregistered` for capsule transfer.[^src-db-arrow-shm]
+- **Single ownership claim**: `ArrowCursor._from_shm_capsule` validates the capsule name, pointer, and declared size before atomically taking `ctx`. A second adoption raises `ValueError`. Keep failed construction and unconsumed-capsule cleanup in the producer's destructor.[^src-db-py-async][^src-py-arrow-cursor]
+- **Unlink and unmap differ**: `release()` and `close()` unlink the Unix SHM name while retained cursor backing keeps the mapping readable. The producer's `drop_fn` releases its mapping ownership when the last backing owner drops. Tests must distinguish name removal from memory lifetime.[^src-core-shm-capsule][^src-py-arrow-cursor]
+- **Completion drainer identity**: Give every extension a distinct event-loop drainer attribute. Reusing another extension's attribute crosses separately linked PyO3 classes and completion queues.[^src-db-py-async]
+
+The [architecture chapter](../architecture/worker/pyo3-ffi-and-batch-dispatch.md#database-extension-boundary) describes the handoff, and [ADR-004](../decisions/adr-004-optional-driver-wheels-and-shm-ownership.md) records its rationale.
+
 Provenance sources: [^src-vertebra-py-src-transport-rs].
 
 [^src-vertebra-py-src-lib-rs]: `src/rs/vertebra-py/src/lib.rs` — Rust implementation module (src/rs/vertebra-py/src/lib.rs).
@@ -167,3 +188,11 @@ Provenance sources: [^src-vertebra-py-src-transport-rs].
 [^src-utils-init-py]: `src/py/vertebra/utils/__init__.py` — Python implementation module (src/py/vertebra/utils/__init__.py).
 [^src-tools-docs-generate-cli-docs-py]: `tools/docs/generate_cli_docs.py` — Repository tooling module (tools/docs/generate_cli_docs.py).
 [^src-pyproject-toml]: `pyproject.toml` — Python package metadata, dependencies, and tool configuration.
+
+[^src-db-arrow-shm]: `src/rs/vertebra-db/src/arrow_shm.rs` — Registered and unregistered Arrow SHM writers.
+
+[^src-db-py-async]: `src/rs/vertebra-db/src/py_async.rs` — Capsule destructor and per-extension completion queues.
+
+[^src-core-shm-capsule]: `src/rs/vertebra-core/src/shm.rs` — SHM capsule and unlink versus mapping lifetime.
+
+[^src-py-arrow-cursor]: `src/rs/vertebra-py/src/db.rs` — Single-consumer capsule adoption and cursor release.

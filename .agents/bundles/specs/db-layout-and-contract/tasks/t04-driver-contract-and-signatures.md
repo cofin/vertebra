@@ -47,11 +47,11 @@ claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: "2026-11-04T18:34:00Z"
-last_verified_commit: "c031fc9"
-verification_evidence: "RED: 12 failed, 48 passed; GREEN: uv run pytest src/py/tests/unit (1585 passed, 1 skipped); make lint-all (exit 0)"
+last_verified_at: "2026-11-05T00:35:59Z"
+last_verified_commit: "4ce057e5aff909fcda2488cc0f6c4882ad0d38f0"
+verification_evidence: "make py-test (1738 passed, 69 skipped, 170 xfailed); make rs-test (473 passed, 1 ignored); make ts-test; make lint-all; make docs; isolated wheel and sdist rebuild/install/uninstall probes (exit 0). CARGO_TARGET_DIR and TMPDIR use disk-backed paths to avoid host temporary-filesystem quota."
 created_at: 2026-11-03T21:40:00Z
-updated_at: "2026-11-04T18:34:29Z"
+updated_at: "2026-11-05T00:35:59Z"
 commit: "c031fc9"
 tags: [db, driver, contract, typing, dbapi]
 ---
@@ -122,3 +122,5 @@ Standardize `SyncDatabaseDriver`, `AsyncDatabaseDriver`, `ThreadOffloadAsyncData
 - [2026-11-04 18:24] Retained `_normalize_driver_params` in `src/py/vertebra/db/driver/{_common,__init__}.py` because `src/py/vertebra/db/adapters/postgres/__init__.py` re-exports it on its package surface, while all eight adapter `driver.py` modules now accept `parameters: Sequence[Any] | Mapping[str, Any] | None = None` directly without variadic `*params`.
 - [2026-11-04 18:24] Unified `transaction()` (`begin`/`commit`/`rollback`) across all eight adapters: `_in_transaction` gating in `sqlite`/`oracle`/`mssql`/`duckdb`, pooled `_tx_conn` pinning plus in-memory row snapshot/restore in `postgres`/`mysql`, session-pinned `BEGIN`/`COMMIT`/`ROLLBACK TRANSACTION` in `bigquery`, and buffered `_tx_dml_buffer` (`execute_batch_dml`) + `_tx_mutation_buffer` (`apply_mutations`) atomic flush/discard in `spanner`.
 - [2026-11-04 18:24] Note on Mypy CLI invocation: `pyproject.toml` `[tool.mypy].files` scopes strict type checking to `src/py/vertebra`, `tools/scripts`, `tools/pgo`, `tools/docs`, and `docs/examples` (`Makefile` line 243) because `tools/benchmarks` imports optional `[bench]` packages (`spikard`, `duckdb`). GREEN verification passed cleanly across `pytest src/py/tests/unit -q` (`1585 passed, 1 skipped`), `mypy src/py/vertebra tools/scripts tools/pgo tools/docs docs/examples` (`410 source files`), `mypy.stubtest` (`5 modules`), `ruff check` & `ruff format --check`, `scan_public_docstrings`, and `review_setup validate` with zero `# type: ignore[override]` in `src/py/vertebra/db/` and zero `#` comments in `src/py/`.
+
+- [2026-11-05T00:35:59Z] Review checkpoint `4ce057e`: current source passes aggregate verification; installed-wheel checks cover direct and source-distribution builds. Correctness findings are resolved. Fresh quality review precedes completion.
