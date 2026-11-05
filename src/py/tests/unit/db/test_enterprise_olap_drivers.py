@@ -117,6 +117,31 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+@pytest.mark.anyio
+async def test_duckdb_execute_many_reports_affected_rows() -> None:
+    """Batch counts reflect matching rows for sync and async UPDATE and DELETE."""
+    sync_driver = SyncDuckDBDriver()
+    async_driver = AsyncDuckDBDriver()
+    try:
+        for driver in (sync_driver, async_driver.sync_driver):
+            driver.execute("CREATE TABLE affected_rows (value INTEGER)")
+            driver.execute_many("INSERT INTO affected_rows VALUES (?)", [(1,), (2,), (3,)])
+        assert (
+            sync_driver.execute_many("UPDATE affected_rows SET value = value + 1 WHERE value >= ?", [(0,), (0,)]) == 6
+        )
+        assert (
+            await async_driver.execute_many("UPDATE affected_rows SET value = value + 1 WHERE value >= ?", [(0,), (0,)])
+            == 6
+        )
+        assert sync_driver.execute_many("DELETE FROM affected_rows WHERE value >= ?", [(99,)]) == 0
+        assert await async_driver.execute_many("DELETE FROM affected_rows WHERE value >= ?", [(99,)]) == 0
+        assert sync_driver.execute_many("DELETE FROM affected_rows WHERE value >= ?", [(0,), (0,)]) == 3
+        assert await async_driver.execute_many("DELETE FROM affected_rows WHERE value >= ?", [(0,), (0,)]) == 3
+    finally:
+        sync_driver.close()
+        await async_driver.close()
+
+
 class _MockLeaseGrant:
     __slots__ = ("generation", "slot_index")
 

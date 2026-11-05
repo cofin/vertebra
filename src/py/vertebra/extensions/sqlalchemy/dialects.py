@@ -283,7 +283,17 @@ class SyncDBAPICursor:
 class SyncDBAPIConnection:
     """PEP 249 DBAPI 2.0 connection backed by Vertebra native drivers or sqlite3."""
 
-    __slots__ = ("_autocommit", "_broker", "_config", "_driver", "_share_pool", "_sqlite_conn", "_url", "closed")
+    __slots__ = (
+        "_autocommit",
+        "_broker",
+        "_config",
+        "_driver",
+        "_in_transaction",
+        "_share_pool",
+        "_sqlite_conn",
+        "_url",
+        "closed",
+    )
 
     def __init__(
         self,
@@ -305,6 +315,7 @@ class SyncDBAPIConnection:
             broker if broker is not None else (DatabaseRegistry.default_broker() if self._share_pool else None)
         )
         self._autocommit = False
+        self._in_transaction = False
         self.closed: bool = False
 
         self._config: Any = None
@@ -362,6 +373,8 @@ class SyncDBAPIConnection:
     @autocommit.setter
     def autocommit(self, value: bool) -> None:
         """Set connection autocommit state."""
+        if value and self._in_transaction:
+            self.commit()
         self._autocommit = value
         if self._sqlite_conn is not None:
             self._sqlite_conn.autocommit = value
@@ -385,6 +398,7 @@ class SyncDBAPIConnection:
             desc = cur.description
             return rows, desc
 
+        self.begin()
         if self._driver is not None:
             if hasattr(self._driver, "execute_with_description"):
                 raw_res = self._driver.execute_with_description(sql, parameters)
@@ -398,6 +412,8 @@ class SyncDBAPIConnection:
                         if col_names
                         else None
                     )
+                    if self._autocommit:
+                        self.commit()
                     return raw_res[0], desc
                 return [], None
             if hasattr(self._driver, "execute_tuples"):
@@ -407,6 +423,8 @@ class SyncDBAPIConnection:
                     if rows
                     else None
                 )
+                if self._autocommit:
+                    self.commit()
                 return rows, desc
             if hasattr(self._driver, "select"):
                 dict_params = parameters if isinstance(parameters, dict) else None
@@ -416,6 +434,8 @@ class SyncDBAPIConnection:
                 keys = tuple(dict_rows[0].keys())
                 desc = tuple((str(k), None, None, None, None, None, None) for k in keys)
                 rows = [tuple(r.get(k) for k in keys) for r in dict_rows]
+                if self._autocommit:
+                    self.commit()
                 return rows, desc
         return [], None
 
@@ -429,9 +449,13 @@ class SyncDBAPIConnection:
             cur = self._sqlite_conn.cursor()
             cur.execute(sql, parameters)
             return cur.rowcount
+        self.begin()
         if self._driver is not None:
             if hasattr(self._driver, "execute"):
-                return int(self._driver.execute(sql, parameters))
+                affected = int(self._driver.execute(sql, parameters))
+                if self._autocommit:
+                    self.commit()
+                return affected
             rows, _ = self.execute_with_description(sql, parameters)
             return len(rows)
         return -1
@@ -448,11 +472,15 @@ class SyncDBAPIConnection:
             cur = self._sqlite_conn.cursor()
             cur.executemany(sql, seq_of_parameters)
             return cur.rowcount
+        self.begin()
         if self._driver is not None:
             if hasattr(self._driver, "execute_many"):
-                return int(self._driver.execute_many(sql, seq_of_parameters))
+                affected = int(self._driver.execute_many(sql, seq_of_parameters))
+                if self._autocommit:
+                    self.commit()
+                return affected
             if hasattr(self._driver, "execute"):
-                return sum(int(self._driver.execute(sql, params)) for params in seq_of_parameters)
+                return sum(self.execute_dml(sql, params) for params in seq_of_parameters)
             return sum(len(self.execute_with_description(sql, params)[0]) for params in seq_of_parameters)
         return -1
 
@@ -465,8 +493,17 @@ class SyncDBAPIConnection:
         rows, _ = self.execute_with_description(sql, parameters)
         return rows
 
+    def begin(self) -> None:
+        """Begin a native transaction when implicit commit is disabled."""
+        if self._autocommit or self._in_transaction or self._sqlite_conn is not None:
+            return
+        if self._driver is not None and hasattr(self._driver, "begin"):
+            self._driver.begin()
+            self._in_transaction = True
+
     def commit(self) -> None:
         """Commit the active transaction."""
+        self._in_transaction = False
         if self._sqlite_conn is not None:
             self._sqlite_conn.commit()
         elif self._driver is not None and hasattr(self._driver, "commit"):
@@ -474,6 +511,7 @@ class SyncDBAPIConnection:
 
     def rollback(self) -> None:
         """Roll back the active transaction."""
+        self._in_transaction = False
         if self._sqlite_conn is not None:
             self._sqlite_conn.rollback()
         elif self._driver is not None and hasattr(self._driver, "rollback"):
@@ -567,6 +605,7 @@ class AsyncDBAPICursor:
     ) -> AsyncDBAPICursor:
         """Execute a SQL statement asynchronously."""
         params = () if parameters is None else parameters
+        await self._conn.begin()
         if not _is_row_returning_sql(operation) and self._driver is not None and hasattr(self._driver, "execute"):
             affected = await self._driver.execute(operation, params)
             self._rows = []
@@ -625,6 +664,8 @@ class AsyncDBAPICursor:
                 row = cur.fetchone()
                 if row:
                     self.lastrowid = row[0]
+        if self._conn.autocommit:
+            await self._conn.commit()
         return self
 
     async def executemany(
@@ -639,12 +680,15 @@ class AsyncDBAPICursor:
             self._pos = 0
             self.rowcount = 0
             return self
+        await self._conn.begin()
         if not _is_row_returning_sql(operation) and self._driver is not None and hasattr(self._driver, "execute_many"):
             affected = await self._driver.execute_many(operation, seq_of_parameters)
             self._rows = []
             self.description = None
             self._pos = 0
             self.rowcount = int(affected)
+            if self._conn.autocommit:
+                await self._conn.commit()
             return self
         total = 0
         last_rows: list[tuple[Any, ...]] = []
@@ -690,7 +734,7 @@ class AsyncDBAPICursor:
 class AsyncDBAPIConnection:
     """Asynchronous DBAPI connection adapting Vertebra async drivers."""
 
-    __slots__ = ("_autocommit", "_broker", "_config", "_driver", "_share_pool", "_url", "closed")
+    __slots__ = ("_autocommit", "_broker", "_config", "_driver", "_in_transaction", "_share_pool", "_url", "closed")
 
     def __init__(
         self,
@@ -712,6 +756,7 @@ class AsyncDBAPIConnection:
             broker if broker is not None else (DatabaseRegistry.default_broker() if self._share_pool else None)
         )
         self._autocommit = False
+        self._in_transaction = False
         self.closed: bool = False
 
         self._config: Any = None
@@ -761,17 +806,24 @@ class AsyncDBAPIConnection:
         return AsyncDBAPICursor(self)
 
     async def begin(self) -> None:
-        """Begin an explicit asynchronous transaction on the underlying driver."""
-        if self._driver is not None and hasattr(self._driver, "begin"):
+        """Begin a native transaction when implicit commit is disabled."""
+        if self._autocommit:
+            if self._in_transaction:
+                await self.commit()
+            return
+        if not self._in_transaction and self._driver is not None and hasattr(self._driver, "begin"):
             await self._driver.begin()
+            self._in_transaction = True
 
     async def commit(self) -> None:
         """Commit the active asynchronous transaction."""
+        self._in_transaction = False
         if self._driver is not None and hasattr(self._driver, "commit"):
             await self._driver.commit()
 
     async def rollback(self) -> None:
         """Roll back the active asynchronous transaction."""
+        self._in_transaction = False
         if self._driver is not None and hasattr(self._driver, "rollback"):
             await self._driver.rollback()
 
@@ -824,7 +876,20 @@ class AsyncDBAPIModule:
         return AsyncAdapt_dbapi_connection(self, async_conn)
 
 
-class SyncPostgreSQLDialect(PGDialect):
+class _NativeTransactionDialect:
+    """Forward SQLAlchemy transaction begin to the owning DBAPI connection."""
+
+    __slots__ = ()
+
+    def do_begin(self, dbapi_connection: Any) -> None:
+        """Begin through the sync connection or SQLAlchemy's async adaptation."""
+        if hasattr(dbapi_connection, "run_async"):
+            dbapi_connection.run_async(lambda conn: conn.begin())
+        else:
+            dbapi_connection.begin()
+
+
+class SyncPostgreSQLDialect(_NativeTransactionDialect, PGDialect):
     """SQLAlchemy 2.1 synchronous dialect for PostgreSQL (+vtb / +vertebra)."""
 
     driver = "vtb"
@@ -875,7 +940,7 @@ class SyncPostgreSQLDialect(PGDialect):
         return col_type
 
 
-class AsyncPostgreSQLDialect(PGDialect):
+class AsyncPostgreSQLDialect(_NativeTransactionDialect, PGDialect):
     """SQLAlchemy 2.1 asynchronous dialect for PostgreSQL (+vtb_async / +vertebra_async)."""
 
     driver = "vtb_async"
@@ -898,7 +963,7 @@ class AsyncPostgreSQLDialect(PGDialect):
         return AsyncAdaptedQueuePool
 
 
-class SyncSQLiteDialect(BaseSQLiteDialect):
+class SyncSQLiteDialect(_NativeTransactionDialect, BaseSQLiteDialect):
     """SQLAlchemy 2.1 synchronous dialect for SQLite (+vtb / +vertebra)."""
 
     driver = "vtb"
@@ -922,7 +987,7 @@ class SyncSQLiteDialect(BaseSQLiteDialect):
         return QueuePool
 
 
-class AsyncSQLiteDialect(BaseSQLiteDialect):
+class AsyncSQLiteDialect(_NativeTransactionDialect, BaseSQLiteDialect):
     """SQLAlchemy 2.1 asynchronous dialect for SQLite (+vtb_async / +vertebra_async)."""
 
     driver = "vtb_async"
@@ -946,13 +1011,8 @@ class AsyncSQLiteDialect(BaseSQLiteDialect):
             return StaticPool
         return AsyncAdaptedQueuePool
 
-    def do_begin(self, dbapi_connection: Any) -> None:
-        """Begin an explicit transaction on the underlying asynchronous SQLite driver."""
-        if hasattr(dbapi_connection, "run_async"):
-            dbapi_connection.run_async(lambda conn: conn.begin())
 
-
-class SyncMySQLDialect(BaseMySQLDialect):
+class SyncMySQLDialect(_NativeTransactionDialect, BaseMySQLDialect):
     """SQLAlchemy 2.1 synchronous dialect for MySQL (+vtb / +vertebra)."""
 
     driver = "vtb"
@@ -985,7 +1045,7 @@ class SyncMySQLDialect(BaseMySQLDialect):
         return col_type
 
 
-class AsyncMySQLDialect(BaseMySQLDialect):
+class AsyncMySQLDialect(_NativeTransactionDialect, BaseMySQLDialect):
     """SQLAlchemy 2.1 asynchronous dialect for MySQL (+vtb_async / +vertebra_async)."""
 
     driver = "vtb_async"
@@ -1008,7 +1068,7 @@ class AsyncMySQLDialect(BaseMySQLDialect):
         return AsyncAdaptedQueuePool
 
 
-class SyncOracleDialect(BaseOracleDialect):
+class SyncOracleDialect(_NativeTransactionDialect, BaseOracleDialect):
     """SQLAlchemy 2.1 synchronous dialect for Oracle (+vtb / +vertebra)."""
 
     driver = "vtb"
@@ -1055,7 +1115,7 @@ class SyncOracleDialect(BaseOracleDialect):
         return col_type
 
 
-class AsyncOracleDialect(BaseOracleDialect):
+class AsyncOracleDialect(_NativeTransactionDialect, BaseOracleDialect):
     """SQLAlchemy 2.1 asynchronous dialect for Oracle (+vtb_async / +vertebra_async)."""
 
     driver = "vtb_async"
@@ -1078,7 +1138,7 @@ class AsyncOracleDialect(BaseOracleDialect):
         return AsyncAdaptedQueuePool
 
 
-class SyncMSSQLDialect(MSDialect):
+class SyncMSSQLDialect(_NativeTransactionDialect, MSDialect):
     """SQLAlchemy 2.1 synchronous dialect for Microsoft SQL Server (+vtb / +vertebra)."""
 
     driver = "vtb"
@@ -1100,7 +1160,7 @@ class SyncMSSQLDialect(MSDialect):
         return QueuePool
 
 
-class AsyncMSSQLDialect(MSDialect):
+class AsyncMSSQLDialect(_NativeTransactionDialect, MSDialect):
     """SQLAlchemy 2.1 asynchronous dialect for Microsoft SQL Server (+vtb_async / +vertebra_async)."""
 
     driver = "vtb_async"
@@ -1123,7 +1183,7 @@ class AsyncMSSQLDialect(MSDialect):
         return AsyncAdaptedQueuePool
 
 
-class SyncDuckDBDialect(DefaultDialect):
+class SyncDuckDBDialect(_NativeTransactionDialect, DefaultDialect):
     """SQLAlchemy 2.1 synchronous dialect for DuckDB (+vtb / +vertebra)."""
 
     name = "duckdb"
@@ -1146,7 +1206,7 @@ class SyncDuckDBDialect(DefaultDialect):
         return QueuePool
 
 
-class AsyncDuckDBDialect(DefaultDialect):
+class AsyncDuckDBDialect(_NativeTransactionDialect, DefaultDialect):
     """SQLAlchemy 2.1 asynchronous dialect for DuckDB (+vtb_async / +vertebra_async)."""
 
     name = "duckdb"
@@ -1170,7 +1230,7 @@ class AsyncDuckDBDialect(DefaultDialect):
         return AsyncAdaptedQueuePool
 
 
-class SyncBigQueryDialect(DefaultDialect):
+class SyncBigQueryDialect(_NativeTransactionDialect, DefaultDialect):
     """SQLAlchemy 2.1 synchronous dialect for Google BigQuery (+vtb / +vertebra)."""
 
     name = "bigquery"
@@ -1231,7 +1291,7 @@ class AsyncBigQueryDialect(SyncBigQueryDialect):
     dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="named"))
 
 
-class SyncSpannerDialect(DefaultDialect):
+class SyncSpannerDialect(_NativeTransactionDialect, DefaultDialect):
     """SQLAlchemy 2.1 synchronous dialect for Cloud Spanner GoogleSQL (+vtb / +vertebra)."""
 
     name = "spanner"
@@ -1304,7 +1364,7 @@ class AsyncSpannerDialect(SyncSpannerDialect):
     dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="named"))
 
 
-class SyncSpangresDialect(PGDialect):
+class SyncSpangresDialect(_NativeTransactionDialect, PGDialect):
     """SQLAlchemy 2.1 synchronous dialect for Cloud Spanner Spangres (+vtb / +vertebra)."""
 
     name = "spangres"

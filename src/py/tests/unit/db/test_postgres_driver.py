@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import sqlite3
 import struct
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
@@ -22,6 +25,143 @@ from vertebra.db.adapters.postgres import (
     SyncPostgreSQLDriver,
 )
 from vertebra.typing import MissingDependencyError
+
+
+@pytest.mark.anyio
+async def test_asyncpg_pool_transaction_and_affected_rows() -> None:
+    """Asyncpg transactions own the acquired connection and report command status counts."""
+    pool = _SQLiteAsyncPGPool()
+    driver = AsyncPostgreSQLDriver(PostgreSQLConfig(), pool=pool)
+    try:
+        assert await driver.execute("CREATE TABLE affected_rows (value INTEGER)") == 0
+        async with driver.transaction():
+            assert await driver.execute("INSERT INTO affected_rows VALUES (?)", (1,)) == 1
+            assert await driver.execute_many("INSERT INTO affected_rows VALUES (?)", [(2,), (3,)]) == 2
+        assert await driver.execute("UPDATE affected_rows SET value = value + 1 WHERE value >= ?", (0,)) == 3
+        assert await driver.execute("DELETE FROM affected_rows WHERE value >= ?", (99,)) == 0
+        assert await driver.execute_tuples("SELECT value FROM affected_rows ORDER BY value") == [(2,), (3,), (4,)]
+        assert pool.connection.transaction_starts == 1
+        assert pool.acquired == pool.released
+    finally:
+        await driver.close()
+
+
+@pytest.mark.anyio
+async def test_asyncpg_pool_rollback_and_cancel_release_connection() -> None:
+    """Aborted and cancelled transactions discard writes before releasing their connection."""
+    pool = _SQLiteAsyncPGPool()
+    driver = AsyncPostgreSQLDriver(PostgreSQLConfig(), pool=pool)
+    try:
+        await driver.execute("CREATE TABLE affected_rows (value INTEGER)")
+        with pytest.raises(ValueError, match="abort"):
+            async with driver.transaction():
+                await driver.execute("INSERT INTO affected_rows VALUES (?)", (1,))
+                raise ValueError("abort")
+        assert await driver.select_value("SELECT COUNT(*) FROM affected_rows") == 0
+        inserted = asyncio.Event()
+
+        async def insert_until_cancelled() -> None:
+            async with driver.transaction():
+                await driver.execute("INSERT INTO affected_rows VALUES (?)", (2,))
+                inserted.set()
+                await asyncio.Event().wait()
+
+        task = asyncio.create_task(insert_until_cancelled())
+        await inserted.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await driver.select_value("SELECT COUNT(*) FROM affected_rows") == 0
+        assert pool.acquired == pool.released
+        assert pool.connection.transaction_starts == 2
+        async with driver.transaction():
+            await driver.execute("INSERT INTO affected_rows VALUES (?)", (3,))
+        assert await driver.execute_tuples("SELECT value FROM affected_rows") == [(3,)]
+    finally:
+        await driver.close()
+
+
+@pytest.mark.anyio
+async def test_asyncpg_pool_failed_begin_releases_connection() -> None:
+    """A failed transaction start releases the pool context and permits a retry."""
+    pool = _SQLiteAsyncPGPool()
+    driver = AsyncPostgreSQLDriver(PostgreSQLConfig(), pool=pool)
+    pool.connection.fail_start = True
+    try:
+        with pytest.raises(RuntimeError, match="begin failed"):
+            await driver.begin()
+        assert pool.acquired == pool.released == 1
+        pool.connection.fail_start = False
+        async with driver.transaction():
+            assert await driver.select_value("SELECT 1") == 1
+    finally:
+        await driver.close()
+
+
+class _SQLiteAsyncPGTransaction:
+    """Asyncpg transaction port backed by real SQLite transaction semantics."""
+
+    def __init__(self, connection: _SQLiteAsyncPGConnection) -> None:
+        self.connection = connection
+
+    async def start(self) -> None:
+        if self.connection.fail_start:
+            raise RuntimeError("begin failed")
+        self.connection.raw.execute("BEGIN")
+        self.connection.transaction_starts += 1
+
+    async def commit(self) -> None:
+        self.connection.raw.commit()
+
+    async def rollback(self) -> None:
+        self.connection.raw.rollback()
+
+
+class _SQLiteAsyncPGConnection:
+    """Asyncpg connection port whose default mode commits each statement."""
+
+    def __init__(self) -> None:
+        self.raw = sqlite3.connect(":memory:", isolation_level=None)
+        self.transaction_starts = 0
+        self.fail_start = False
+
+    def transaction(self) -> _SQLiteAsyncPGTransaction:
+        return _SQLiteAsyncPGTransaction(self)
+
+    async def fetch(self, sql: str, *parameters: Any) -> list[dict[str, Any]]:
+        cursor = self.raw.execute(sql, parameters)
+        columns = [column[0] for column in cursor.description or ()]
+        return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+
+    async def execute(self, sql: str, *parameters: Any) -> str:
+        cursor = self.raw.execute(sql, parameters)
+        cursor.fetchall()
+        verb = sql.split(maxsplit=1)[0].upper()
+        if verb == "INSERT":
+            return f"INSERT 0 {max(0, cursor.rowcount)}"
+        if verb in {"UPDATE", "DELETE"}:
+            return f"{verb} {max(0, cursor.rowcount)}"
+        return "CREATE TABLE"
+
+
+class _SQLiteAsyncPGPool:
+    """Pool port observing balanced acquisition and release around SQLite connections."""
+
+    def __init__(self) -> None:
+        self.connection = _SQLiteAsyncPGConnection()
+        self.acquired = 0
+        self.released = 0
+
+    @asynccontextmanager
+    async def acquire(self) -> AsyncIterator[_SQLiteAsyncPGConnection]:
+        self.acquired += 1
+        try:
+            yield self.connection
+        finally:
+            self.released += 1
+
+    async def close(self) -> None:
+        self.connection.raw.close()
 
 
 def _build_test_pgcopy_payload(

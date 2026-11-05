@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Self, cast
 
 import pytest
+from anyio import Event, create_task_group
 
 import vertebra
 import vertebra._vertebra as native_vertebra
@@ -96,6 +97,67 @@ from vertebra.utils.serializers import (
     encode_msgpack_bytes,
 )
 from vertebra.utils.sync_tools import SyncPool
+
+
+def test_sync_transaction_rolls_back_base_exception() -> None:
+    """An interrupted transaction discards its writes and permits the next transaction."""
+    with SyncSQLiteDriver() as driver:
+        driver.execute("CREATE TABLE interrupted (value INTEGER)")
+        with pytest.raises(KeyboardInterrupt), driver.transaction():
+            driver.execute("INSERT INTO interrupted VALUES (?)", (1,))
+            raise KeyboardInterrupt
+        assert driver.select_value("SELECT COUNT(*) FROM interrupted") == 0
+        with driver.transaction():
+            driver.execute("INSERT INTO interrupted VALUES (?)", (2,))
+        assert driver.execute_tuples("SELECT value FROM interrupted") == [(2,)]
+
+
+@pytest.mark.anyio
+async def test_async_transaction_rolls_back_cancelled_task() -> None:
+    """Cancelling a task rolls back its transaction before another task reuses the driver."""
+    async with AsyncSQLiteDriver() as driver:
+        await driver.execute("CREATE TABLE interrupted (value INTEGER)")
+        inserted = asyncio.Event()
+
+        async def insert_until_cancelled() -> None:
+            async with driver.transaction():
+                await driver.execute("INSERT INTO interrupted VALUES (?)", (1,))
+                inserted.set()
+                await asyncio.Event().wait()
+
+        task = asyncio.create_task(insert_until_cancelled())
+        await inserted.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await driver.select_value("SELECT COUNT(*) FROM interrupted") == 0
+        async with driver.transaction():
+            await driver.execute("INSERT INTO interrupted VALUES (?)", (2,))
+        assert await driver.execute_tuples("SELECT value FROM interrupted") == [(2,)]
+
+
+@pytest.mark.anyio
+async def test_async_transaction_rolls_back_anyio_cancel_scope() -> None:
+    """Level cancellation cannot interrupt rollback before another transaction starts."""
+    async with AsyncSQLiteDriver() as driver:
+        await driver.execute("CREATE TABLE interrupted (value INTEGER)")
+        inserted = Event()
+
+        async def insert_until_cancelled() -> None:
+            async with driver.transaction():
+                await driver.execute("INSERT INTO interrupted VALUES (?)", (1,))
+                inserted.set()
+                await Event().wait()
+
+        async with create_task_group() as group:
+            group.start_soon(insert_until_cancelled)
+            await inserted.wait()
+            group.cancel_scope.cancel()
+        assert await driver.select_value("SELECT COUNT(*) FROM interrupted") == 0
+        async with driver.transaction():
+            await driver.execute("INSERT INTO interrupted VALUES (?)", (2,))
+        assert await driver.execute_tuples("SELECT value FROM interrupted") == [(2,)]
+
 
 _ADAPTER_ENGINES: tuple[str, ...] = (
     "postgres",

@@ -7,6 +7,8 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, Self
 
+from anyio import CancelScope
+
 from vertebra._vertebra import NotFoundError
 from vertebra.db.arrow import (
     ARROW_SHM_THRESHOLD_ROWS,
@@ -61,8 +63,9 @@ class AsyncDatabaseDriver[ConfigT: BaseDatabaseConfig](CommonDriverMixin[ConfigT
         await self.begin()
         try:
             yield self
-        except Exception:
-            await self.rollback()
+        except BaseException:
+            with CancelScope(shield=True):
+                await self.rollback()
             raise
         else:
             await self.commit()

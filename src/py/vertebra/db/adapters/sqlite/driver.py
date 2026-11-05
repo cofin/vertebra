@@ -6,6 +6,7 @@ import datetime
 import os
 import sqlite3
 from collections.abc import Mapping, Sequence
+from contextlib import closing
 from decimal import Decimal
 from typing import Any, ClassVar
 from uuid import UUID
@@ -119,10 +120,14 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
         bound = _normalize_sqlite_parameters(parameters)
         lease = self._acquire_sqlite_broker_lease(sql)
         try:
-            cur = self._conn.execute(sql, bound)
+            with closing(self._conn.execute(sql, bound)) as cur:
+                if cur.description is not None:
+                    for _ in cur:
+                        pass
+                rowcount = max(cur.rowcount, 0)
             if not self._in_transaction:
                 self._conn.commit()
-            return max(cur.rowcount, 0)
+            return rowcount
         except sqlite3.Error as exc:
             raise _translate_sqlite_error(exc) from exc
         finally:

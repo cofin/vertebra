@@ -117,6 +117,9 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
                 cur = self._conn.execute(sql, bound) if bound else self._conn.execute(sql)
                 if not self._using_native_duckdb and not self._in_transaction:
                     self._conn.commit()
+                if self._using_native_duckdb and cur.description and cur.description[0][0] == "Count":
+                    count = cur.fetchone()
+                    return int(count[0]) if count else 0
                 rowcount = getattr(cur, "rowcount", 0)
                 return max(int(rowcount or 0), 0)
         finally:
@@ -136,10 +139,18 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         grant = self._acquire_duckdb_lease(sql, len(parameter_sets[0]))
         try:
             with self._writer_lock:
-                self._conn.executemany(sql, list(parameter_sets))
-                if not self._using_native_duckdb and not self._in_transaction:
+                if self._using_native_duckdb:
+                    affected = 0
+                    for parameters in parameter_sets:
+                        cur = self._conn.execute(sql, parameters)
+                        if cur.description and cur.description[0][0] == "Count":
+                            count = cur.fetchone()
+                            affected += int(count[0]) if count else 0
+                    return affected
+                cur = self._conn.executemany(sql, list(parameter_sets))
+                if not self._in_transaction:
                     self._conn.commit()
-                return len(parameter_sets)
+                return max(int(cur.rowcount or 0), 0)
         finally:
             self._release_duckdb_lease(grant)
 

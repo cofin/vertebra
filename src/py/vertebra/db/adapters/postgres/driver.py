@@ -7,6 +7,8 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Buffer, Callable, Iterator, Mapping, Sequence
 from typing import Any, ClassVar
 
+from anyio import CancelScope
+
 from vertebra.db.adapters.postgres.config import PostgreSQLConfig
 from vertebra.db.adapters.postgres.core import PostgreSQLCore
 from vertebra.db.arrow import (
@@ -440,6 +442,7 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
         "_sync",
         "_tx_conn",
         "_tx_conn_ctx",
+        "_tx_transaction",
     )
 
     def __init__(
@@ -460,9 +463,10 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
         self._in_transaction: bool = False
         self._tx_conn: Any = None
         self._tx_conn_ctx: Any = None
+        self._tx_transaction: Any = None
         self._sync = SyncPostgreSQLDriver(
             self.config,
-            pool=pool,
+            pool=None if hasattr(pool, "acquire") else pool,
             dialer=dialer,
             broker=self._broker,
             executor=executor,
@@ -490,15 +494,25 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
             return
         if self._pool is not None and hasattr(self._pool, "acquire"):
             ctx = self._pool.acquire()
-            self._tx_conn_ctx = ctx
-            self._tx_conn = await ctx.__aenter__()
+            try:
+                self._tx_conn = await ctx.__aenter__()
+                self._tx_conn_ctx = ctx
+                if hasattr(self._tx_conn, "fetch") and hasattr(self._tx_conn, "transaction"):
+                    self._tx_transaction = self._tx_conn.transaction()
+                    await self._tx_transaction.start()
+            except BaseException:
+                with CancelScope(shield=True):
+                    await self._release_tx_conn()
+                raise
         else:
             self._sync.begin()
 
     async def commit(self) -> None:
         """Commit the active transaction."""
         try:
-            if self._tx_conn is not None and hasattr(self._tx_conn, "commit"):
+            if self._tx_transaction is not None:
+                await self._tx_transaction.commit()
+            elif self._tx_conn is not None and hasattr(self._tx_conn, "commit"):
                 res = self._tx_conn.commit()
                 if inspect.isawaitable(res):
                     await res
@@ -514,7 +528,9 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
     async def rollback(self) -> None:
         """Roll back the active transaction."""
         try:
-            if self._tx_conn is not None and hasattr(self._tx_conn, "rollback"):
+            if self._tx_transaction is not None:
+                await self._tx_transaction.rollback()
+            elif self._tx_conn is not None and hasattr(self._tx_conn, "rollback"):
                 res = self._tx_conn.rollback()
                 if inspect.isawaitable(res):
                     await res
@@ -530,7 +546,10 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
     async def close(self) -> None:
         """Close the driver and underlying resources."""
         self._closed = True
-        await self._release_tx_conn()
+        if self._in_transaction:
+            await self.rollback()
+        else:
+            await self._release_tx_conn()
         if self._pool is not None and hasattr(self._pool, "close"):
             res = self._pool.close()
             if inspect.iscoroutine(res):
@@ -663,6 +682,7 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
         ctx = self._tx_conn_ctx
         self._tx_conn = None
         self._tx_conn_ctx = None
+        self._tx_transaction = None
         self._in_transaction = False
         if ctx is not None:
             await ctx.__aexit__(None, None, None)
@@ -678,6 +698,10 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
         params_arg: Any = () if parameters is None else parameters
         if hasattr(conn, "fetch"):
             seq_params = tuple(parameters) if isinstance(parameters, Sequence) else ()
+            if auto_commit_dml and hasattr(conn, "execute"):
+                status = await conn.execute(sql, *seq_params)
+                count = (status or "").rsplit(" ", 1)[-1]
+                return [], (), int(count) if count.isdecimal() else 0
             records = await conn.fetch(sql, *seq_params)
             keys_fn = getattr(records[0], "keys", None) if records else None
             cols = tuple(str(k) for k in keys_fn()) if callable(keys_fn) else ()
@@ -727,7 +751,7 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
                     self._tx_conn,
                     sql,
                     parameters,
-                    auto_commit_dml=False,
+                    auto_commit_dml=auto_commit_dml,
                 )
 
             if self._pool is not None:

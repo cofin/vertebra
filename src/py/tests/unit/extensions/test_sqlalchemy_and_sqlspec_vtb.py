@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import array
+import sqlite3
 
 import pytest
 from advanced_alchemy.base import UUIDAuditBase
@@ -12,8 +13,11 @@ from advanced_alchemy.types.file_object import FileObject, StoredObject
 from sqlalchemy import String, create_engine, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.util.concurrency import greenlet_spawn
 
+from vertebra.db.adapters.mysql import MySQLConfig, SyncMySQLDriver
 from vertebra.db.adapters.postgres import PostgreSQLConfig, SyncPostgreSQLDriver
+from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SyncSQLiteDriver
 from vertebra.extensions.alchemy import (
     ObjectStoreBackend,
     create_alchemy_plugin,
@@ -43,8 +47,100 @@ from vertebra.extensions.sqlalchemy import (
     SyncPostgreSQLDialect,
     SyncSQLiteDialect,
     Vector,
+    dialects,
 )
 from vertebra.storage import SyncObjectStore
+
+
+@pytest.mark.parametrize(
+    "dialect_name", ["PostgreSQL", "SQLite", "MySQL", "Oracle", "MSSQL", "DuckDB", "BigQuery", "Spanner", "Spangres"]
+)
+def test_sync_dialect_begins_native_transaction(dialect_name: str) -> None:
+    """Dialect begin reaches the native driver before writes and permits rollback."""
+    driver = SyncSQLiteDriver()
+    driver.execute("CREATE TABLE transaction_items (id INTEGER)")
+    conn = SyncDBAPIConnection(driver=driver, share_pool=False)
+    try:
+        getattr(dialects, f"Sync{dialect_name}Dialect")().do_begin(conn)
+        conn.cursor().execute("INSERT INTO transaction_items VALUES (?)", (1,))
+        conn.rollback()
+        assert driver.select_value("SELECT COUNT(*) FROM transaction_items") == 0
+    finally:
+        conn.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "dialect_name", ["PostgreSQL", "SQLite", "MySQL", "Oracle", "MSSQL", "DuckDB", "BigQuery", "Spanner", "Spangres"]
+)
+async def test_async_dialect_begins_native_transaction(dialect_name: str) -> None:
+    """Async dialect begin forwards through SQLAlchemy's real adapted DBAPI connection."""
+    driver = AsyncSQLiteDriver()
+    await driver.execute("CREATE TABLE transaction_items (id INTEGER)")
+    module = dialects.AsyncDBAPIModule()
+    adapted = await greenlet_spawn(module.connect, driver=driver, share_pool=False)
+    try:
+        await greenlet_spawn(getattr(dialects, f"Async{dialect_name}Dialect")().do_begin, adapted)
+        cursor = adapted.driver_connection.cursor()
+        await cursor.execute("INSERT INTO transaction_items VALUES (?)", (1,))
+        await adapted.driver_connection.rollback()
+        assert await driver.select_value("SELECT COUNT(*) FROM transaction_items") == 0
+    finally:
+        await adapted.driver_connection.close()
+
+
+@pytest.mark.parametrize("autocommit", [False, True])
+def test_sync_dbapi_native_dml_transaction_ownership(autocommit: bool) -> None:
+    """DBAPI cursors pin MySQL connections and respect commit, rollback, and autocommit."""
+    raw = sqlite3.connect(":memory:")
+    raw.execute("CREATE TABLE transaction_items (id INTEGER)")
+    driver = SyncMySQLDriver(MySQLConfig(dsn="mysql://localhost/db"), connect_factory=lambda: raw)
+    conn = SyncDBAPIConnection("mysql+vtb://localhost/db", driver=driver, share_pool=False)
+    conn.autocommit = autocommit
+    try:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO transaction_items VALUES (?)", (1,))
+        conn.commit()
+        cursor.executemany("INSERT INTO transaction_items VALUES (?)", [(2,), (3,)])
+        conn.rollback()
+        assert raw.execute("SELECT id FROM transaction_items ORDER BY id").fetchall() == (
+            [(1,), (2,), (3,)] if autocommit else [(1,)]
+        )
+        cursor.execute("INSERT INTO transaction_items VALUES (?) RETURNING id", (4,))
+        assert cursor.fetchall() == [(4,)]
+        conn.rollback()
+        assert raw.execute("SELECT COUNT(*) FROM transaction_items WHERE id = 4").fetchone() == (
+            (1,) if autocommit else (0,)
+        )
+    finally:
+        conn.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("autocommit", [False, True])
+async def test_async_dbapi_native_dml_transaction_ownership(autocommit: bool) -> None:
+    """Async cursors honor implicit transaction boundaries for single and batched DML."""
+    driver = AsyncSQLiteDriver()
+    await driver.execute("CREATE TABLE transaction_items (id INTEGER)")
+    conn = AsyncDBAPIConnection(driver=driver, share_pool=False)
+    conn.autocommit = autocommit
+    try:
+        cursor = conn.cursor()
+        await cursor.execute("INSERT INTO transaction_items VALUES (?)", (1,))
+        await conn.commit()
+        await cursor.executemany("INSERT INTO transaction_items VALUES (?)", [(2,), (3,)])
+        await conn.rollback()
+        assert await driver.execute_tuples("SELECT id FROM transaction_items ORDER BY id") == (
+            [(1,), (2,), (3,)] if autocommit else [(1,)]
+        )
+        await cursor.execute("INSERT INTO transaction_items VALUES (?) RETURNING id", (4,))
+        assert await cursor.fetchall() == [(4,)]
+        await conn.rollback()
+        assert await driver.select_value("SELECT COUNT(*) FROM transaction_items WHERE id = 4") == (
+            1 if autocommit else 0
+        )
+    finally:
+        await conn.close()
 
 
 class BaseTestModel(DeclarativeBase):

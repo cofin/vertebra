@@ -56,7 +56,7 @@ class SyncDatabaseDriver[ConfigT: BaseDatabaseConfig](CommonDriverMixin[ConfigT]
         self.begin()
         try:
             yield self
-        except Exception:
+        except BaseException:
             self.rollback()
             raise
         else:
