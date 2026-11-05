@@ -103,6 +103,13 @@ sqlspec_plugin = create_sqlspec_plugin(config)
 - **Object Storage Attachments**: `ObjectStoreBackend` implements Advanced Alchemy's `advanced_alchemy.types.file_object.StorageBackend`, enabling transactional file attachments on models via `FileObject` and `StoredObject`.
 - **Alembic Custom Operations**: Autogenerates vector index and view DDL operations (`CreateVectorIndexOp`, `CreateViewOp`, `DropViewOp`).
 
+BigQuery, Spanner, and Spangres DBAPI connections use statement autocommit. Their
+`commit()` and `rollback()` calls do not group or undo completed statements;
+setting `autocommit=False` raises `NotSupportedError`. Reason: BigQuery permanent
+DDL cannot run inside a transaction, and the Spanner driver's explicit scope
+buffers writes until commit. Use the native driver's transaction or batching API
+for its engine-specific scope, separately from the SQLAlchemy connection.
+
 ```python
 from advanced_alchemy.types.file_object import FileObject
 from vertebra.extensions.alchemy import (

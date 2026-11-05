@@ -21,6 +21,8 @@ from typing import Any, Self, cast
 
 import pytest
 from anyio import Event, create_task_group
+from sqlalchemy.connectors.asyncio import AsyncAdapt_dbapi_connection
+from sqlalchemy.util.concurrency import greenlet_spawn
 
 import vertebra
 import vertebra._vertebra as native_vertebra
@@ -87,6 +89,7 @@ from vertebra.db.driver.capabilities import (
 )
 from vertebra.db.registry import REGISTERED_CONFIG_TYPES
 from vertebra.extensions.litestar import ChannelsBackend, MemoryStore
+from vertebra.extensions.sqlalchemy import dialects
 from vertebra.storage import GcpTokenSnapshot, SyncObjectStore
 from vertebra.typing import MissingDependencyError, VertebraError, reset_dependency_cache
 from vertebra.utils.serializers import (
@@ -1005,6 +1008,8 @@ class _ContractBigQueryClient:
     ) -> dict[str, Any]:
         adapted, bound = self._decode_bq_params(sql, params_json)
         upper = adapted.strip().upper()
+        if self._in_tx and upper.startswith("CREATE TABLE"):
+            raise RuntimeError("BigQuery does not support permanent DDL in transactions")
         sid = session_id or ("bq-contract-sess" if create_session else None)
         if upper.startswith("BEGIN"):
             if not self._conn.in_transaction:
@@ -1133,6 +1138,74 @@ class _ContractSpannerClient:
     def read_arrow(self, *_args: Any) -> Any:
         msg = "UNIMPLEMENTED: fallback to query"
         raise RuntimeError(msg)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("engine", ["bigquery", "spanner", "spangres"])
+async def test_cloud_dbapi_preserves_statement_autocommit(engine: str) -> None:
+    """Cloud DBAPI statements retain DDL support, immediate counts, and read-your-writes."""
+    raw_sync = sqlite3.connect(":memory:")
+    raw_async = sqlite3.connect(":memory:")
+    if engine == "bigquery":
+        config = BigQueryConfig(project_id="test-proj", dataset_id="test_ds")
+        sync_driver: Any = SyncBigQueryDriver(
+            config, client=cast("Any", _ContractBigQueryClient(raw_sync)), broker=object()
+        )
+        async_driver: Any = AsyncBigQueryDriver(
+            config, client=cast("Any", _ContractBigQueryClient(raw_async, async_mode=True)), broker=object()
+        )
+        url = "bigquery://test-proj/test_ds"
+        dialect_name = "BigQuery"
+    else:
+        spanner_config = SpannerConfig(
+            project_id="test-proj",
+            instance_id="test-inst",
+            database_id="test-db",
+            dialect="spangres" if engine == "spangres" else "googlesql",
+            use_shm_cache=False,
+        )
+        sync_driver = SyncSpannerDriver(
+            spanner_config, client=cast("Any", _ContractSpannerClient(raw_sync)), broker=object()
+        )
+        async_driver = AsyncSpannerDriver(
+            spanner_config, client=cast("Any", _ContractSpannerClient(raw_async, async_mode=True)), broker=object()
+        )
+        url = f"{engine}://projects/test-proj/instances/test-inst/databases/test-db"
+        dialect_name = "Spangres" if engine == "spangres" else "Spanner"
+    sync_conn = dialects.SyncDBAPIConnection(url, driver=sync_driver, broker=object(), share_pool=False)
+    async_conn = dialects.AsyncDBAPIConnection(url, driver=async_driver, broker=object(), share_pool=False)
+    try:
+        getattr(dialects, f"Sync{dialect_name}Dialect")().do_begin(sync_conn)
+        adapted = AsyncAdapt_dbapi_connection(dialects.AsyncDBAPIModule(), async_conn)
+        await greenlet_spawn(getattr(dialects, f"Async{dialect_name}Dialect")().do_begin, adapted)
+        sync_cursor = sync_conn.cursor()
+        async_cursor = async_conn.cursor()
+        sync_cursor.execute("CREATE TABLE cloud_items (id INTEGER PRIMARY KEY)")
+        await async_cursor.execute("CREATE TABLE cloud_items (id INTEGER PRIMARY KEY)")
+        sync_cursor.execute("INSERT INTO cloud_items VALUES (@id)", {"id": 1})
+        await async_cursor.execute("INSERT INTO cloud_items VALUES (@id)", {"id": 1})
+        assert sync_cursor.rowcount == async_cursor.rowcount == 1
+        sync_cursor.executemany("INSERT INTO cloud_items VALUES (@id)", [{"id": 2}, {"id": 3}])
+        await async_cursor.executemany("INSERT INTO cloud_items VALUES (@id)", [{"id": 2}, {"id": 3}])
+        assert sync_cursor.rowcount == async_cursor.rowcount == 2
+        sync_cursor.execute("SELECT id FROM cloud_items ORDER BY id")
+        await async_cursor.execute("SELECT id FROM cloud_items ORDER BY id")
+        assert sync_cursor.fetchall() == await async_cursor.fetchall() == [(1,), (2,), (3,)]
+        sync_conn.rollback()
+        await async_conn.rollback()
+        assert sync_driver.select_value("SELECT COUNT(*) FROM cloud_items") == 3
+        assert await async_driver.select_value("SELECT COUNT(*) FROM cloud_items") == 3
+        assert sync_conn.autocommit is async_conn.autocommit is True
+        with pytest.raises(dialects.NotSupportedError, match="autocommit"):
+            sync_conn.autocommit = False
+        with pytest.raises(dialects.NotSupportedError, match="autocommit"):
+            async_conn.autocommit = False
+        assert sync_conn.autocommit is async_conn.autocommit is True
+    finally:
+        sync_conn.close()
+        await async_conn.close()
+        raw_sync.close()
+        raw_async.close()
 
 
 def _make_contract_driver_pair(engine: str) -> tuple[Any, Any, str, Any, str, Any]:

@@ -52,9 +52,7 @@ from vertebra.extensions.sqlalchemy import (
 from vertebra.storage import SyncObjectStore
 
 
-@pytest.mark.parametrize(
-    "dialect_name", ["PostgreSQL", "SQLite", "MySQL", "Oracle", "MSSQL", "DuckDB", "BigQuery", "Spanner", "Spangres"]
-)
+@pytest.mark.parametrize("dialect_name", ["PostgreSQL", "SQLite", "MySQL", "Oracle", "MSSQL", "DuckDB"])
 def test_sync_dialect_begins_native_transaction(dialect_name: str) -> None:
     """Dialect begin reaches the native driver before writes and permits rollback."""
     driver = SyncSQLiteDriver()
@@ -70,9 +68,7 @@ def test_sync_dialect_begins_native_transaction(dialect_name: str) -> None:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    "dialect_name", ["PostgreSQL", "SQLite", "MySQL", "Oracle", "MSSQL", "DuckDB", "BigQuery", "Spanner", "Spangres"]
-)
+@pytest.mark.parametrize("dialect_name", ["PostgreSQL", "SQLite", "MySQL", "Oracle", "MSSQL", "DuckDB"])
 async def test_async_dialect_begins_native_transaction(dialect_name: str) -> None:
     """Async dialect begin forwards through SQLAlchemy's real adapted DBAPI connection."""
     driver = AsyncSQLiteDriver()

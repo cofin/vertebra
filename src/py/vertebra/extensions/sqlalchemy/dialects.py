@@ -18,6 +18,8 @@ from sqlalchemy.engine.default import DefaultDialect
 from sqlalchemy.engine.url import URL
 from sqlalchemy.pool import AsyncAdaptedQueuePool, NullPool, Pool, QueuePool, StaticPool
 
+from vertebra.db.adapters.bigquery.config import BigQueryConfig
+from vertebra.db.adapters.spanner.config import SpannerConfig
 from vertebra.db.adapters.sqlite.config import SQLiteConfig
 from vertebra.db.registry import DatabaseRegistry
 from vertebra.utils.module_loader import import_optional
@@ -281,7 +283,12 @@ class SyncDBAPICursor:
 
 
 class SyncDBAPIConnection:
-    """PEP 249 DBAPI 2.0 connection backed by Vertebra native drivers or sqlite3."""
+    """PEP 249 connection backed by Vertebra native drivers or sqlite3.
+
+    BigQuery, Spanner, and Spangres use statement autocommit and reject
+    ``autocommit=False``. Use their native driver APIs for explicit transaction
+    or batching scopes.
+    """
 
     __slots__ = (
         "_autocommit",
@@ -314,7 +321,6 @@ class SyncDBAPIConnection:
         self._broker = (
             broker if broker is not None else (DatabaseRegistry.default_broker() if self._share_pool else None)
         )
-        self._autocommit = False
         self._in_transaction = False
         self.closed: bool = False
 
@@ -328,6 +334,7 @@ class SyncDBAPIConnection:
         except Exception:
             self._config = SQLiteConfig(database=database or ":memory:", broker=self._broker)
 
+        self._autocommit = isinstance(self._config, (BigQueryConfig, SpannerConfig))
         self._driver = driver
         self._sqlite_conn: sqlite3.Connection | None = None
 
@@ -372,7 +379,10 @@ class SyncDBAPIConnection:
 
     @autocommit.setter
     def autocommit(self, value: bool) -> None:
-        """Set connection autocommit state."""
+        """Set autocommit, rejecting transactional DBAPI mode for cloud backends."""
+        if not value and isinstance(self._config, (BigQueryConfig, SpannerConfig)):
+            msg = "BigQuery, Spanner, and Spangres DBAPI connections require autocommit; use the native driver transaction API"
+            raise NotSupportedError(msg)
         if value and self._in_transaction:
             self.commit()
         self._autocommit = value
@@ -732,7 +742,12 @@ class AsyncDBAPICursor:
 
 
 class AsyncDBAPIConnection:
-    """Asynchronous DBAPI connection adapting Vertebra async drivers."""
+    """Asynchronous DBAPI connection adapting Vertebra async drivers.
+
+    BigQuery, Spanner, and Spangres use statement autocommit and reject
+    ``autocommit=False``. Use their native driver APIs for explicit transaction
+    or batching scopes.
+    """
 
     __slots__ = ("_autocommit", "_broker", "_config", "_driver", "_in_transaction", "_share_pool", "_url", "closed")
 
@@ -755,7 +770,6 @@ class AsyncDBAPIConnection:
         self._broker = (
             broker if broker is not None else (DatabaseRegistry.default_broker() if self._share_pool else None)
         )
-        self._autocommit = False
         self._in_transaction = False
         self.closed: bool = False
 
@@ -769,6 +783,7 @@ class AsyncDBAPIConnection:
         except Exception:
             self._config = SQLiteConfig(database=database or ":memory:", broker=self._broker)
 
+        self._autocommit = isinstance(self._config, (BigQueryConfig, SpannerConfig))
         self._driver = driver
         if self._driver is None:
             if self._share_pool and broker is None:
@@ -791,7 +806,10 @@ class AsyncDBAPIConnection:
 
     @autocommit.setter
     def autocommit(self, value: bool) -> None:
-        """Set connection autocommit state."""
+        """Set autocommit, rejecting transactional DBAPI mode for cloud backends."""
+        if not value and isinstance(self._config, (BigQueryConfig, SpannerConfig)):
+            msg = "BigQuery, Spanner, and Spangres DBAPI connections require autocommit; use the native driver transaction API"
+            raise NotSupportedError(msg)
         self._autocommit = value
 
     def __getattr__(self, name: str) -> Any:
