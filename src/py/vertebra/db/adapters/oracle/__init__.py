@@ -46,9 +46,11 @@ if TYPE_CHECKING:
         encode_vector_i8,
     )
     from vertebra.db.adapters.oracle.driver import AsyncOracleDriver, SyncOracleDriver
+    from vertebra.db.adapters.oracle.embeddings import OracleEmbeddingPushdown
     from vertebra.db.arrow import ArrowCursor
 
 __all__ = (
+    "OracleEmbeddingPushdown",
     "ORACLE_DIALECT_TAG",
     "ORACLE_VECTOR_FMT_BINARY",
     "ORACLE_VECTOR_FMT_F32",
@@ -89,6 +91,7 @@ __all__ = (
 )
 
 __lazy_modules__ = [
+    "vertebra.db.adapters.oracle.embeddings",
     "vertebra.db.adapters.oracle.config",
     "vertebra.db.adapters.oracle.core",
     "vertebra.db.adapters.oracle.driver",
@@ -96,6 +99,7 @@ __lazy_modules__ = [
 ]
 
 _EXPORT_MAP: dict[str, tuple[str, str]] = {
+    "OracleEmbeddingPushdown": ("vertebra.db.adapters.oracle.embeddings", "OracleEmbeddingPushdown"),
     "ORACLE_DIALECT_TAG": ("vertebra.db.adapters.oracle.core", "ORACLE_DIALECT_TAG"),
     "ORACLE_VECTOR_FMT_BINARY": ("vertebra.db.adapters.oracle.core", "ORACLE_VECTOR_FMT_BINARY"),
     "ORACLE_VECTOR_FMT_F32": ("vertebra.db.adapters.oracle.core", "ORACLE_VECTOR_FMT_F32"),

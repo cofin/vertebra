@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import math
+import subprocess
+import sys
+import threading
 from typing import Any
 
 import pytest
@@ -19,13 +22,17 @@ from vertebra._vertebra import (
     encode_oracle_vector_f32,
     encode_pgvector_f32,
 )
+from vertebra.db.adapters.bigquery import BigQueryEmbeddingPushdown
+from vertebra.db.adapters.oracle import OracleEmbeddingPushdown
+from vertebra.db.adapters.postgres import PostgresEmbeddingPushdown
+from vertebra.db.adapters.spanner import SpannerEmbeddingPushdown
+from vertebra.db.driver import AsyncDatabaseDriver, DataError, EmbeddingPushdown
 from vertebra.embeddings import (
-    AlloyDbEmbedder,
     Embedder,
     EmbeddingError,
     GeminiEmbedder,
     MultimodalPart,
-    OracleEmbedder,
+    PushdownEmbedder,
     RemoteEmbedder,
     VertexEmbedder,
     create_embedding_grpc_service,
@@ -167,93 +174,6 @@ async def test_gemini_embedder_api_key_multimodal_and_embed_arrow() -> None:
 
 
 @pytest.mark.anyio
-async def test_alloydb_embedder_sql_pushdown_and_binary_pgvector_decode() -> None:
-    """Verify AlloyDbEmbedder generates unnest WITH ORDINALITY SQL and decodes binary pgvector frames."""
-    executed_queries: list[tuple[str, tuple[Any, ...]]] = []
-
-    class FakeAlloyDbDriver:
-        async def fetch_all(self, sql: str, params: tuple[Any, ...] = ()) -> list[tuple[bytes]]:
-            executed_queries.append((sql, params))
-            texts = params[1] if len(params) > 1 and isinstance(params[1], list) else [params[1]]
-            return [(encode_pgvector_f32([float(i + 1), 2.0, 3.0, 4.0]),) for i in range(len(texts))]
-
-    driver = FakeAlloyDbDriver()
-    embedder = AlloyDbEmbedder(
-        driver=driver,
-        model="gemini-embedding-001",
-        dimensions=4,
-    )
-
-    expr = embedder.sql_expr("content_col")
-    assert expr == "embedding('gemini-embedding-001', content_col)::vector"
-
-    batch = await embedder.embed_many(["doc a", "doc b"])
-    assert len(executed_queries) == 1
-    sql, params = executed_queries[0]
-    assert "unnest($2::text[]) WITH ORDINALITY" in sql
-    assert "ORDER BY t.ord" in sql
-    assert params == ("gemini-embedding-001", ["doc a", "doc b"])
-    assert batch.count == 2
-    assert batch.dimensions == 4
-
-
-@pytest.mark.anyio
-async def test_oracle_embedder_predict_suffix_128_char_url_guard_and_credential_rotation() -> None:
-    """Verify OracleEmbedder suffixes :predict, enforces <= 128-char URL, rotates credentials, and decodes 0xDB."""
-    token_cache: Any = _FakeTokenCache(prefix="mock-ora-vertex-token", quota_project=None)
-    executed_sql: list[tuple[str, Any]] = []
-
-    class FakeOracleDriver:
-        async def execute(self, sql: str, params: Any = None) -> None:
-            executed_sql.append((sql, params))
-
-        async def fetch_all(self, sql: str, params: Any = None) -> list[tuple[bytes]]:
-            executed_sql.append((sql, params))
-            return [(encode_oracle_vector_f32([0.6, 0.8, 0.0, 0.0]),)]
-
-    with pytest.raises(ValueError, match="128"):
-        OracleEmbedder(
-            driver=FakeOracleDriver(),
-            model="gemini-embedding-001",
-            dimensions=4,
-            provider="vertexai",
-            project="extremely-long-enterprise-google-cloud-project-identifier-exceeding-limit",
-            location="australia-southeast2",
-        )
-
-    driver = FakeOracleDriver()
-    embedder = OracleEmbedder(
-        driver=driver,
-        model="gemini-embedding-001",
-        dimensions=4,
-        provider="vertexai",
-        project_number="123456789012",
-        location="us-central1",
-        credential_name="VERTEX_CRED",
-        token_cache=token_cache,
-    )
-    assert embedder.resolved_model_parameter == "gemini-embedding-001:predict"
-    assert len(embedder.endpoint_url) <= 128
-
-    vec1 = await embedder.embed_query("oracle vector test")
-    assert vec1.dimensions == 4
-    assert vec1.to_list() == pytest.approx([0.6, 0.8, 0.0, 0.0], rel=1e-6)
-    assert embedder.applied_token_generation == 1
-    assert any("DBMS_VECTOR.CREATE_CREDENTIAL" in s for s, _ in executed_sql)
-
-    vec2 = await embedder.embed_query("second query same token")
-    assert vec2.dimensions == 4
-    cred_calls_before = sum(1 for s, _ in executed_sql if "DBMS_VECTOR.CREATE_CREDENTIAL" in s)
-    assert cred_calls_before == 1
-
-    token_cache.invalidate(1)
-    await embedder.embed_query("third query after token rotation")
-    cred_calls_after = sum(1 for s, _ in executed_sql if "DBMS_VECTOR.CREATE_CREDENTIAL" in s)
-    assert cred_calls_after == 2
-    assert embedder.applied_token_generation == 2
-
-
-@pytest.mark.anyio
 async def test_remote_embedder_and_grpc_service_roundtrip() -> None:
     """Verify RemoteEmbedder roundtrips embed_query and embed_many through create_embedding_grpc_service."""
 
@@ -325,25 +245,248 @@ async def test_remote_embedder_and_grpc_service_roundtrip() -> None:
     assert len(matches) == 2
 
 
+class _SelectPort:
+    """External database port with observable calls and configured row responses."""
+
+    def __init__(self, rows: Any) -> None:
+        self.rows = rows
+        self.calls: list[tuple[str, Any, int]] = []
+
+    def select(self, sql: str, parameters: Any = None) -> Any:
+        self.calls.append((sql, parameters, threading.get_ident()))
+        return self.rows
+
+    def execute(self, sql: str, parameters: Any = None) -> None:
+        self.calls.append((sql, parameters, threading.get_ident()))
+
+
+class _AsyncSelectPort(AsyncDatabaseDriver[Any], _SelectPort):
+    """Async database port implementing the real driver dispatch boundary."""
+
+    def __init__(self, rows: Any) -> None:
+        _SelectPort.__init__(self, rows)
+
+    async def select(self, sql: str, parameters: Any = None, **kwargs: Any) -> Any:
+        return _SelectPort.select(self, sql, parameters)
+
+    async def execute(self, sql: str, parameters: Any = None, **kwargs: Any) -> Any:
+        return _SelectPort.execute(self, sql, parameters)
+
+
+_PROVIDERS = (BigQueryEmbeddingPushdown, SpannerEmbeddingPushdown, PostgresEmbeddingPushdown, OracleEmbeddingPushdown)
+
+
 @pytest.mark.anyio
-async def test_oracle_embedder_raises_embedding_error_on_empty_result() -> None:
-    """An empty DBMS_VECTOR result raises EmbeddingError instead of IndexError."""
-
-    class EmptyOracleDriver:
-        async def execute(self, sql: str, params: Any = None) -> None:
-            return None
-
-        async def fetch_all(self, sql: str, params: Any = None) -> list[tuple[bytes]]:
-            return []
-
-    token_cache: Any = _FakeTokenCache(prefix="mock-ora-vertex-token", quota_project=None)
-    embedder = OracleEmbedder(
-        driver=EmptyOracleDriver(),
-        model="gemini-embedding-001",
-        dimensions=4,
-        provider="vertexai",
-        project_number="123456789012",
-        token_cache=token_cache,
+@pytest.mark.parametrize("provider", _PROVIDERS)
+@pytest.mark.parametrize("port_type", [_SelectPort, _AsyncSelectPort])
+async def test_pushdown_capability_dispatch_and_order(provider: Any, port_type: Any) -> None:
+    """Every provider returns typed vectors through select with sync offloading."""
+    port = port_type([{"embedding": [3.0, 4.0, 0.0, 0.0]}])
+    options = {"provider": "local"} if provider is OracleEmbeddingPushdown else {}
+    pushdown = provider(port, dimensions=4, **options)
+    assert isinstance(pushdown, EmbeddingPushdown)
+    assert pushdown.driver is port
+    vector = await pushdown.embed_query("query", normalize=False)
+    assert vector.to_list() == [3.0, 4.0, 0.0, 0.0]
+    batch = await pushdown.embed_documents(["document"], dimensions=2, normalize=True)
+    assert batch.to_list() == [pytest.approx([0.6, 0.8])]
+    assert all(
+        (thread_id == threading.get_ident()) == (port_type is _AsyncSelectPort) for _, _, thread_id in port.calls
     )
-    with pytest.raises(EmbeddingError, match="no embedding row"):
-        await embedder.embed_query("empty result")
+    if provider is not OracleEmbeddingPushdown:
+        assert "ORDER BY" in port.calls[0][0]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("provider", _PROVIDERS)
+@pytest.mark.parametrize(
+    "rows",
+    [[], [{"embedding": []}], [{"embedding": ["bad"]}], [{"other": 1}], [{"embedding": None}], [{"embedding": [1.0]}]],
+)
+async def test_pushdown_rejects_invalid_vectors(provider: Any, rows: Any) -> None:
+    """Database data failures remain DataError at the capability boundary."""
+    options = {"provider": "local"} if provider is OracleEmbeddingPushdown else {}
+    pushdown = provider(_SelectPort(rows), dimensions=4, **options)
+    with pytest.raises(DataError):
+        await pushdown.embed_query("bad")
+    with pytest.raises(EmbeddingError):
+        await PushdownEmbedder(pushdown, dimensions=4).embed_query("bad")
+    with pytest.raises(EmbeddingError):
+        await PushdownEmbedder(pushdown, dimensions=4).embed_document("bad")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("provider", _PROVIDERS)
+@pytest.mark.parametrize("metric", ["cosine", "euclidean", "dot"])
+async def test_pushdown_search_parameters_and_validation(provider: Any, metric: str) -> None:
+    """Search binds vectors and limits and rejects unsafe identifiers and metrics."""
+    rows = [{"id": 42, "distance": 0.25}]
+    port = _SelectPort(rows)
+    options = {"provider": "local"} if provider is OracleEmbeddingPushdown else {}
+    pushdown = provider(port, **options)
+    assert await pushdown.similarity_search([1.0, 2.0], table="docs", top_k=3, metric=metric) == rows
+    sql, params, _ = port.calls[-1]
+    assert "docs" in sql and 3 in params.values() if isinstance(params, dict) else 3 in params
+    if provider is PostgresEmbeddingPushdown:
+        assert {"cosine": "<=>", "euclidean": "<->", "dot": "<#>"}[metric] in sql
+    for kwargs in (
+        {"table": "docs; DROP TABLE docs"},
+        {"table": "docs", "embedding_column": "x.y"},
+        {"table": "docs", "metric": "invalid"},
+    ):
+        with pytest.raises(ValueError):
+            await pushdown.similarity_search([1.0], **kwargs)
+
+
+@pytest.mark.anyio
+async def test_pushdown_embedder_inherited_surfaces_and_cache() -> None:
+    """The facade preserves query/document dispatch, cache, Arrow, and SIMD search."""
+    port = _SelectPort([{"embedding": [3.0, 4.0, 0.0, 0.0]}])
+    pushdown = BigQueryEmbeddingPushdown(port, dimensions=4)
+    cache = VectorCache(dimensions=4, capacity=32)
+    embedder = PushdownEmbedder(pushdown, model="gemini-embedding-001", dimensions=4, cache=cache)
+    assert embedder.pushdown is pushdown and embedder.normalize is True
+    assert isinstance(embedder, Embedder)
+    vector = await embedder.embed_query("query")
+    assert port.calls[-1][1]["task_type"] == "RETRIEVAL_QUERY"
+    assert embedder.embed_query_sync("query").to_list() == vector.to_list()
+    assert len(port.calls) == 1 and embedder.last_usage is not None
+    assert (await embedder.embed_document("doc", title="Title")).dimensions == 4
+    assert port.calls[-1][1]["task_type"] == "RETRIEVAL_DOCUMENT"
+    assert embedder.embed_document_sync("sync").dimensions == 4
+    assert (await embedder.embed_many(["many"])).count == 1
+    assert embedder.embed_many_sync(["sync-many"]).count == 1
+    assert isinstance(await embedder.embed_arrow([{"text": "arrow"}]), ArrowCursor)
+    candidates = VectorBatchView.from_f32_rows([[0.6, 0.8, 0, 0]], normalize=False)
+    assert len(embedder.similarity_search(vector, candidates, top_k=1)) == 1
+    port.rows = [{"id": 7}]
+    assert await embedder.vector_search(vector, table="docs") == [{"id": 7}]
+    assert await embedder.vector_search("query", table="docs") == [{"id": 7}]
+
+
+def test_postgres_sql_expression_model_binding_and_clean_break() -> None:
+    """Model strings are SQL values; only column identifiers are interpolated."""
+    pushdown = PostgresEmbeddingPushdown(_SelectPort([]), model="gemini's-model")
+    assert pushdown.sql_expr("content") == "embedding('gemini''s-model', content)::vector"
+    with pytest.raises(ValueError):
+        pushdown.sql_expr("content); DROP TABLE docs")
+    with pytest.raises(ValueError):
+        PostgresEmbeddingPushdown(_SelectPort([]), model="")
+    for name in ("BigQueryEmbedder", "SpannerEmbedder", "AlloyDbEmbedder", "OracleEmbedder"):
+        assert not hasattr(vertebra.embeddings, name)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import vertebra.embeddings as e; assert not any(k.startswith('vertebra.embeddings._') for k in sys.modules); assert e.PushdownEmbedder.__name__ == 'PushdownEmbedder'",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("port_type", [_SelectPort, _AsyncSelectPort])
+@pytest.mark.parametrize("async_cache", [False, True])
+async def test_oracle_url_bytes_and_token_rotation(port_type: Any, async_cache: bool) -> None:
+    """Oracle credentials rotate across both driver and token cache dispatch modes."""
+
+    class SyncTokenPort:
+        def __init__(self) -> None:
+            self.generation = 1
+
+        def get_token(self) -> GcpTokenSnapshot:
+            return GcpTokenSnapshot(
+                access_token=f"token-{self.generation}",
+                expires_at_unix_ms=4102444800000,
+                generation=self.generation,
+                quota_project_id=None,
+            )
+
+    class AsyncTokenPort(SyncTokenPort):
+        async def get_token(self) -> GcpTokenSnapshot:
+            return super().get_token()
+
+    token_cache: Any = AsyncTokenPort() if async_cache else SyncTokenPort()
+    port = port_type([{"embedding": encode_oracle_vector_f32([3, 4, 0, 0])}])
+    pushdown = OracleEmbeddingPushdown(port, project_number="123", dimensions=4, token_cache=token_cache)
+    assert pushdown.resolved_model_parameter == "gemini-embedding-001:predict"
+    await pushdown.embed_query("first")
+    await pushdown.embed_query("second")
+    assert sum("CREATE_CREDENTIAL" in sql for sql, _, _ in port.calls) == 1
+    token_cache.generation = 2
+    await pushdown.embed_query("third")
+    assert pushdown.applied_token_generation == 2
+    assert sum("CREATE_CREDENTIAL" in sql for sql, _, _ in port.calls) == 2
+    assert sum("DROP_CREDENTIAL" in sql for sql, _, _ in port.calls) == 2
+    with pytest.raises(ValueError, match="128"):
+        OracleEmbeddingPushdown(port, endpoint_url="https://" + "é" * 61)
+    with pytest.raises(ValueError):
+        OracleEmbeddingPushdown(port, credential_name="bad.name")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("provider", "cell"),
+    [
+        (BigQueryEmbeddingPushdown, "[3, 4, 0, 0]"),
+        (BigQueryEmbeddingPushdown, [3, 4, 0, 0]),
+        (SpannerEmbeddingPushdown, {"values": [3, 4, 0, 0]}),
+        (SpannerEmbeddingPushdown, [3, 4, 0, 0]),
+        (PostgresEmbeddingPushdown, "[3, 4, 0, 0]"),
+        (PostgresEmbeddingPushdown, encode_pgvector_f32([3, 4, 0, 0])),
+        (OracleEmbeddingPushdown, "[3, 4, 0, 0]"),
+        (OracleEmbeddingPushdown, encode_oracle_vector_f32([3, 4, 0, 0])),
+    ],
+)
+@pytest.mark.parametrize("row_shape", ["mapping", "tuple"])
+async def test_pushdown_decodes_supported_vector_cells(provider: Any, cell: Any, row_shape: str) -> None:
+    """Each engine decodes its public row and vector formats into native views."""
+    options = {"provider": "local"} if provider is OracleEmbeddingPushdown else {}
+    port = _SelectPort([{"embedding": cell} if row_shape == "mapping" else (cell,)])
+    adapter = provider(port, dimensions=4, **options)
+    assert (await adapter.embed_query("decode", normalize=False)).to_list() == [3, 4, 0, 0]
+    if provider is PostgresEmbeddingPushdown:
+        assert port.calls[0][1] == ("gemini-embedding-001", ["decode"])
+        assert "embedding($1, t.txt)::vector" in port.calls[0][0]
+        assert port.calls[0][0].endswith("ORDER BY t.idx")
+
+
+class _CapabilityPort:
+    """External capability port recording the facade's query and document calls."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Any, dict[str, Any]]] = []
+
+    async def embed_query(self, text: str, **kwargs: Any) -> VectorView:
+        self.calls.append(("query", text, kwargs))
+        return VectorView.from_f32([1, 0, 0, 0])
+
+    async def embed_documents(self, texts: Any, **kwargs: Any) -> VectorBatchView:
+        self.calls.append(("documents", texts, kwargs))
+        return VectorBatchView.from_f32_rows([[1, 0, 0, 0] for _ in texts], normalize=False)
+
+    async def similarity_search(self, query_vector: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        self.calls.append(("search", query_vector, kwargs))
+        return [{"id": 9}]
+
+
+@pytest.mark.anyio
+async def test_facade_dispatches_query_and_document_capability_methods() -> None:
+    """Query and document APIs use the declared capability with caller options."""
+    capability = _CapabilityPort()
+    embedder = PushdownEmbedder(capability, dimensions=4, normalize=False)
+    await embedder.embed_query("q")
+    embedder.embed_query_sync("qs")
+    await embedder.embed_document("d", title="T")
+    embedder.embed_document_sync("ds")
+    await embedder.embed_many(["m"])
+    embedder.embed_many_sync(["ms"])
+    await embedder.embed_arrow([{"text": "a"}])
+    assert [kind for kind, _, _ in capability.calls] == ["query", "query"] + ["documents"] * 5
+    assert all(kwargs["dimensions"] == 4 and kwargs["normalize"] is False for _, _, kwargs in capability.calls)
+    assert all(kwargs["task"] == "document" for kind, _, kwargs in capability.calls if kind == "documents")
+    assert await embedder.vector_search("s", table="docs", top_k=2, metric="dot") == [{"id": 9}]
+    assert capability.calls[-1][2] == {"table": "docs", "embedding_column": "embedding", "top_k": 2, "metric": "dot"}

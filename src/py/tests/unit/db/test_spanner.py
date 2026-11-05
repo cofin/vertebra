@@ -1,4 +1,4 @@
-"""Unit tests for Google Cloud Spanner drivers, mutations, Arrow scans, ObjectStore offload, SpannerEmbedder, and DataFusion."""
+"""Unit tests for Google Cloud Spanner drivers, mutations, Arrow scans, ObjectStore offload, SpannerEmbeddingPushdown, and DataFusion."""
 
 from __future__ import annotations
 
@@ -32,11 +32,12 @@ from vertebra.db.adapters.spanner import (
     MutationGroup,
     SpannerConfig,
     SpannerCore,
+    SpannerEmbeddingPushdown,
     StalenessBound,
     SyncSpannerDriver,
     SyncSpannerTransaction,
 )
-from vertebra.embeddings import EmbeddingError, SpannerEmbedder
+from vertebra.db.driver import DataError
 from vertebra.storage import SyncObjectStore
 from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError, VertebraError
 from vertebra.utils.serializers import decode_json, encode_json
@@ -812,7 +813,7 @@ def test_sync_spanner_arrow_and_object_store_roundtrip() -> None:
 
 @pytest.mark.anyio
 async def test_async_spanner_driver_and_embedder_and_datafusion() -> None:
-    """Verify AsyncSpannerDriver, SpannerEmbedder SQL/slab pushdown, and DataFusionEngine registration."""
+    """Verify AsyncSpannerDriver, SpannerEmbeddingPushdown SQL/slab pushdown, and DataFusionEngine registration."""
     cfg = SpannerConfig(
         project_id="test-proj",
         instance_id="test-inst",
@@ -839,9 +840,9 @@ async def test_async_spanner_driver_and_embedder_and_datafusion() -> None:
         row = await snap.query_one("SELECT doc_id, title FROM docs WHERE doc_id = @id", {"id": "d1"})
         assert row["title"] == "Spanner TrueTime"
 
-    embedder = SpannerEmbedder(driver, model="gemini-embedding-001", dimensions=16)
+    embedder = SpannerEmbeddingPushdown(driver, model="gemini-embedding-001", dimensions=16)
     assert "ML.PREDICT" in embedder.build_generate_embedding_sql()
-    ai_embedder = SpannerEmbedder(driver, model="gemini-embedding-001", dimensions=16, use_ai_function=True)
+    ai_embedder = SpannerEmbeddingPushdown(driver, model="gemini-embedding-001", dimensions=16, use_ai_function=True)
     assert "AI.GENERATE_EMBEDDING" in ai_embedder.build_generate_embedding_sql()
     search_sql = embedder.build_vector_search_sql("docs", approximate=True, num_leaves_to_search=20)
     assert "APPROX_COSINE_DISTANCE" in search_sql
@@ -882,9 +883,9 @@ class _StubSpannerSelectDriver:
 async def test_spanner_embedder_propagates_driver_errors() -> None:
     """Driver failures surface to the caller instead of becoming synthetic vectors."""
     driver = _StubSpannerSelectDriver(error=RuntimeError("model endpoint unavailable"))
-    embedder = SpannerEmbedder(driver, dimensions=2, normalize=False)
+    embedder = SpannerEmbeddingPushdown(driver, dimensions=2, normalize=False)
     with pytest.raises(RuntimeError, match="model endpoint unavailable"):
-        await embedder.embed_many(["alpha", "beta"])
+        await embedder.embed_documents(["alpha", "beta"])
 
 
 @pytest.mark.anyio
@@ -894,18 +895,18 @@ async def test_spanner_embedder_propagates_driver_errors() -> None:
     ids=["missing-row", "row-without-vector"],
 )
 async def test_spanner_embedder_rejects_row_count_mismatch(rows: list[dict[str, Any]]) -> None:
-    """Missing rows or rows without a vector raise EmbeddingError."""
-    embedder = SpannerEmbedder(_StubSpannerSelectDriver(rows=rows), dimensions=2, normalize=False)
-    with pytest.raises(EmbeddingError):
-        await embedder.embed_many(["alpha", "beta"])
+    """Missing rows or rows without a vector raise DataError."""
+    embedder = SpannerEmbeddingPushdown(_StubSpannerSelectDriver(rows=rows), dimensions=2, normalize=False)
+    with pytest.raises(DataError):
+        await embedder.embed_documents(["alpha", "beta"])
 
 
 @pytest.mark.anyio
 async def test_spanner_embedder_returns_driver_vectors() -> None:
     """Rows map to texts in order, including the nested ``values`` shape."""
     driver = _StubSpannerSelectDriver(rows=[{"embedding": [0.6, 0.8]}, {"embedding": {"values": [0.0, 1.0]}}])
-    embedder = SpannerEmbedder(driver, dimensions=2, normalize=False)
-    batch = await embedder.embed_many(["alpha", "beta"])
+    embedder = SpannerEmbeddingPushdown(driver, dimensions=2, normalize=False)
+    batch = await embedder.embed_documents(["alpha", "beta"])
     assert batch.to_list() == [pytest.approx([0.6, 0.8]), pytest.approx([0.0, 1.0])]
     assert driver.calls[0][1] == {"texts": ["alpha", "beta"]}
 
@@ -914,8 +915,8 @@ def test_spanner_embedder_builders_reject_invalid_identifiers() -> None:
     """Spanner SQL builders reject model, table, column, and distance values that are not identifiers."""
     driver = _StubSpannerSelectDriver()
     with pytest.raises(ValueError, match="model_endpoint"):
-        SpannerEmbedder(driver, model_endpoint="m, (SELECT 1)) --").build_generate_embedding_sql()
-    embedder = SpannerEmbedder(driver)
+        SpannerEmbeddingPushdown(driver, model_endpoint="m, (SELECT 1)) --").build_generate_embedding_sql()
+    embedder = SpannerEmbeddingPushdown(driver)
     with pytest.raises(ValueError, match="base_table"):
         embedder.build_vector_search_sql("docs; DROP TABLE docs")
     with pytest.raises(ValueError, match="embedding_column"):
@@ -927,7 +928,9 @@ def test_spanner_embedder_builders_reject_invalid_identifiers() -> None:
 @pytest.mark.parametrize("use_ai_function", [False, True], ids=["ml-predict", "ai-generate"])
 def test_spanner_embedder_generate_sql_orders_rows_by_input_index(use_ai_function: bool) -> None:
     """The generated SQL carries the input offset through the model and orders the output by it."""
-    sql = SpannerEmbedder(_StubSpannerSelectDriver(), use_ai_function=use_ai_function).build_generate_embedding_sql()
+    sql = SpannerEmbeddingPushdown(
+        _StubSpannerSelectDriver(), use_ai_function=use_ai_function
+    ).build_generate_embedding_sql()
     assert sql.startswith("SELECT embeddings.values AS embedding, idx FROM ")
     assert "(SELECT content, idx FROM UNNEST(@texts) AS content WITH OFFSET AS idx)" in sql
     assert sql.endswith(") ORDER BY idx")

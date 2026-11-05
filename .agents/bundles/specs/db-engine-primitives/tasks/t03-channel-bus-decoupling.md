@@ -3,7 +3,7 @@ type: Task
 id: db-engine-primitives:t03
 title: Delete vertebra/db/channels.py and move engine-neutral pub/sub fan-out into vertebra/server/_channels.py::ChannelBus
 description: "Delete `src/py/vertebra/db/channels.py` (`DatabaseChannelBackend`), implement the engine-neutral `ChannelBus` pub/sub substrate in `src/py/vertebra/server/_channels.py` (re-exported in `src/py/vertebra/framework/channels.py`), and subclass `ChannelBus` in `src/py/vertebra/extensions/{litestar,starlette}/channels.py` with zero `vertebra.framework.*` or `vertebra.db.adapters.*` imports."
-state: "in_progress"
+state: "completed"
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -27,18 +27,18 @@ tests:
   - src/py/tests/unit/docs/test_examples.py
 plan_revision: 6
 plan_commit: "954998dea5866f52bc3730db642e8f028d4e72bf"
-state_revision: 1
-claimed_by: "/root/db_t03"
-claimed_at: "2026-11-05T02:10:09Z"
+state_revision: 2
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-05T02:33:23Z"
+last_verified_commit: "254149af384654e82ff438c5fd759380457ab97b"
+verification_evidence: "RED channel substrate and obsolete Redis caller failures; full t03 slice206 passed, phase1 selection237 passed; make lint-all and docs exit0; protocol/real Redis traffic/lifecycle coverage preserved."
 created_at: 2026-11-03T21:47:00Z
-updated_at: "2026-11-05T02:19:48Z"
-commit: null
+updated_at: "2026-11-05T02:33:23Z"
+commit: "254149af384654e82ff438c5fd759380457ab97b"
 tags: [db, channels, server, framework, litestar, starlette, clean-break]
 ---
 

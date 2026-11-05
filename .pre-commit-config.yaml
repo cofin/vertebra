@@ -28,6 +28,7 @@ repos:
     rev: v2.4.3
     hooks:
       - id: codespell
+        args: ['--ignore-regex', '"te":\s*"trailers"']
         exclude: "uv.lock|package.json|package-lock.json|bun.lock"
         additional_dependencies:
           - tomli

@@ -9,6 +9,7 @@ verification_strategy: behavior_tdd
 depends_on:
   - db-engine-primitives:t02
 files:
+  - .pre-commit-config.yaml
   - src/py/vertebra/db/adapters/bigquery/embeddings.py
   - src/py/vertebra/db/adapters/bigquery/__init__.py
   - src/py/vertebra/db/adapters/spanner/embeddings.py
@@ -99,9 +100,13 @@ Move all database SQL embedding pushdown builders out of `src/py/vertebra/embedd
 
 ## Acceptance Criteria
 
-- [ ] R4: `BigQueryEmbeddingPushdown`, `SpannerEmbeddingPushdown`, `PostgresEmbeddingPushdown`, and `OracleEmbeddingPushdown` satisfy `EmbeddingPushdown`, execute via `driver.select(...)`, validate identifiers via `validate_identifier`, and contain zero imports from `vertebra.embeddings`.
-- [ ] R4: `PushdownEmbedder` inherits `Embedder`'s `embed_*` / `embed_arrow` / `similarity_search` methods and exposes `vector_search`, `embeddings/{_bigquery,_spanner}.py` and `AlloyDbEmbedder`/`OracleEmbedder` are deleted with zero aliases, `vertebra.embeddings` uses `lazy_exports`, and `make lint-all` (`make review-check`) exits `0`.
+- [x] R4: `BigQueryEmbeddingPushdown`, `SpannerEmbeddingPushdown`, `PostgresEmbeddingPushdown`, and `OracleEmbeddingPushdown` satisfy `EmbeddingPushdown`, execute via `driver.select(...)`, validate identifiers via `validate_identifier`, and contain zero imports from `vertebra.embeddings`.
+- [x] R4: `PushdownEmbedder` inherits `Embedder`'s `embed_*` / `embed_arrow` / `similarity_search` methods and exposes `vector_search`, `embeddings/{_bigquery,_spanner}.py` and `AlloyDbEmbedder`/`OracleEmbedder` are deleted with zero aliases, `vertebra.embeddings` uses `lazy_exports`, and `make lint-all` (`make review-check`) exits `0`.
 
 ## Notes & Discoveries
 
 <!-- Append timestamped implementation findings here: - [YYYY-MM-DD HH:MM] ... -->
+
+- [2026-11-05T02:33:23+00:00] Behavior-TDD RED: missing adapter-owned embedding capability. GREEN: embeddings/BQ/Spanner/docs selection155 passed; default Vertex factory and base class unchanged; mapping/tuple/vector validation covered; 12-module Mypy and focused Ruff clean. Combined make lint-all and make docs exit0.
+
+- [2026-11-05] Commit spelling validation flags the existing HTTP/2 `"te": "trailers"` header in the retained Vertex code. Add a narrowly matched spelling exception for that exact protocol header, preserving other spelling checks. An isolated valid-header probe passes and an unrelated spelling violation still fails. The protocol header and runtime behavior remain unchanged.

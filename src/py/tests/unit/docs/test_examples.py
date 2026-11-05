@@ -16,8 +16,10 @@ from types import ModuleType
 import pytest
 from tools.docs.generate_cli_docs import ensure_native_stub_module
 
-from vertebra.db.adapters.postgres import PostgresNotifyConfig
+from vertebra.db.adapters.postgres import PostgresEmbeddingPushdown, PostgresNotifyConfig
 from vertebra.db.cdc import ChangeFeed
+from vertebra.db.driver import EmbeddingPushdown
+from vertebra.embeddings import PushdownEmbedder
 from vertebra.typing import MissingDependencyError
 
 __all__ = (
@@ -402,3 +404,20 @@ def _load_example_module(path: Path) -> ModuleType:
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_sql_embedding_guide_constructs_engine_owned_capability() -> None:
+    """The guide constructs the public SQL facade with a caller-owned driver."""
+    guide = (REPO_ROOT / "docs" / "usage" / "embeddings-and-vectors.md").read_text(encoding="utf-8")
+    snippets = re.findall(r"```python\n(.*?)```", guide, flags=re.DOTALL)
+    snippet = next(block for block in snippets if "def create_sql_embedder(" in block)
+    namespace: dict[str, object] = {}
+    exec(compile(snippet, "embeddings-and-vectors.md", "exec"), namespace)
+    factory = namespace["create_sql_embedder"]
+    assert callable(factory)
+    driver = object()
+    embedder = factory(driver)
+    assert isinstance(embedder, PushdownEmbedder)
+    assert isinstance(embedder.pushdown, PostgresEmbeddingPushdown)
+    assert isinstance(embedder.pushdown, EmbeddingPushdown)
+    assert embedder.pushdown.driver is driver

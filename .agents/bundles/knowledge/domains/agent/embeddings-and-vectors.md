@@ -12,6 +12,21 @@ verified:
     at: "2026-11-04T04:33:00Z"
     commit: f741701
 sources:
+  - id: src-adapters-oracle-embeddings-py
+    resource: src/py/vertebra/db/adapters/oracle/embeddings.py
+    title: "SQL embedding capability and facade"
+  - id: src-adapters-postgres-embeddings-py
+    resource: src/py/vertebra/db/adapters/postgres/embeddings.py
+    title: "SQL embedding capability and facade"
+  - id: src-adapters-spanner-embeddings-py
+    resource: src/py/vertebra/db/adapters/spanner/embeddings.py
+    title: "SQL embedding capability and facade"
+  - id: src-adapters-bigquery-embeddings-py
+    resource: src/py/vertebra/db/adapters/bigquery/embeddings.py
+    title: "SQL embedding capability and facade"
+  - id: src-embeddings-pushdown-py
+    resource: src/py/vertebra/embeddings/_pushdown.py
+    title: "SQL embedding capability and facade"
   - id: src-vertebra-core-src-vector-rs
     resource: src/rs/vertebra-core/src/vector.rs
     title: "Rust implementation module (src/rs/vertebra-core/src/vector.rs)"
@@ -60,7 +75,8 @@ sources:
 
 <!-- truth: start -->
 - **Shared-Memory Vector Arena (`vertebra-core::vector`, `vertebra-py::vector`)**: [`VectorSlab`](../../../../../src/rs/vertebra-core/src/vector.rs)[^src-vertebra-core-src-vector-rs] (`VECTOR_SLAB_MAGIC = *b"VTBVSLAB"`) stores 64-byte-aligned dense vectors (`Float32`, `Float64`, `Float16`, `Int8`, `Binary`) in a POSIX shared-memory `ShmRegion` with a 64-byte [`VectorSlabHeader`](../../../../../src/rs/vertebra-core/src/vector.rs). [`VectorView`](../../../../../src/rs/vertebra-py/src/vector.rs)[^src-vertebra-py-src-vector-rs] (1D) and [`VectorBatchView`](../../../../../src/rs/vertebra-py/src/vector.rs) (2D) expose zero-copy PEP 3118 buffers (`memoryview`, `numpy.asarray`), Apache Arrow `FixedSizeListArray` streams (`to_arrow_shm`), and binary database wire frames (`to_pgvector_bytes`, `to_oracle_bytes`, `to_sqlite_blob`).
-- **Google-First Zero-Weight Cloud & SQL Pushdown (`_google.py`, `_remote.py`)**: [`Embedder`](../../../../../src/py/vertebra/embeddings/_base.py)[^src-embeddings-base-py] defaults to [`VertexEmbedder`](../../../../../src/py/vertebra/embeddings/_google.py)[^src-embeddings-google-py] (`gemini-embedding-001`, 768 dims) over native Rust HTTP/2 gRPC (`encode_batch_embed_grpc_request`, `decode_batch_embed_grpc_response_into_slab` in [`vertebra-core/src/vector.rs`](../../../../../src/rs/vertebra-core/src/vector.rs) and [`vertebra-http/src/grpc.rs`](../../../../../src/rs/vertebra-http/src/grpc.rs)[^src-vertebra-http-src-grpc-rs], exposed to Python via `encode_gemini_embed_grpc_frame`, `encode_gemini_embed_grpc_response_frame`, and `decode_gemini_embed_grpc_frame_to_batch` in [`vertebra-py/src/vector.rs`](../../../../../src/rs/vertebra-py/src/vector.rs)) with [`SyncGcpTokenCache` / `AsyncGcpTokenCache`](../../../../../src/rs/vertebra-storage/src/gcp_auth.rs) auth, decoding Protobuf v3 packed-`f32` (`wire_type = 2`) fields directly into `VectorSlab` off-GIL. [`AlloyDbEmbedder`](../../../../../src/py/vertebra/embeddings/_google.py) and [`OracleEmbedder`](../../../../../src/py/vertebra/embeddings/_google.py) push embedding generation into database SQL (`embedding()`, `DBMS_VECTOR.UTL_TO_EMBEDDING()`) and decode binary `pgvector` / Oracle `0xDB` wire payloads into `VectorBatchView`. SQL pushdown embedders (`SpannerEmbedder`, `OracleEmbedder`, `BigQueryEmbedder`) raise `EmbeddingError(VertebraError, RuntimeError)` for missing vectors or row-count mismatches, propagate driver errors, order generated embeddings by input offset (`ORDER BY idx`), and validate interpolated identifiers with `validate_identifier`.
+- **Cloud and SQL Embeddings**: `Embedder()` defaults to `VertexEmbedder` (`gemini-embedding-001`, 768 dimensions), retaining native Rust HTTP/2 gRPC, refreshable GCP credentials, and packed-float decoding. `PushdownEmbedder` wraps the engine-owned `EmbeddingPushdown` capability while inheriting cache, sync, Arrow, and SIMD search methods. Its query path calls `embed_query`; document and batch paths call `embed_documents`; `vector_search` calls the capability's `similarity_search`.
+- **Engine-Owned Pushdown**: `db/adapters/{bigquery,spanner,postgres,oracle}/embeddings.py` implements `EmbeddingPushdown` without importing `vertebra.embeddings`. Adapters use `select` on async drivers and thread offloading on sync drivers, validate interpolated identifiers, preserve batch ordering, and raise `DataError` for incomplete vectors. The facade translates inference `DataError` to `EmbeddingError`. PostgreSQL binds model values; Oracle validates 128-byte UTF-8 Vertex URLs and rotates credentials through sync or async token caches and drivers. The embeddings package lazily exports its public API and has no former SQL-provider aliases.
 - **Single-Copy `1x` RAM Local Model Broker (`_broker.py`, `_local.py`)**: [`EmbeddingBroker`](../../../../../src/py/vertebra/embeddings/_broker.py)[^src-embeddings-broker-py] loads local weights (`GemmaEmbedder`, `FastEmbedder`) once for an entire multi-worker deployment, dynamic-batches concurrent worker requests by token budget (`max_batch_tokens = 8192`) with length-sorted grouping, and isolates `onnxruntime` / `ctranslate2` inside a dedicated child process (`submit_batch_in_subprocess`) when running on free-threaded Python `3.14t`/`3.15t` (`sys._is_gil_enabled() is False`) so C-extension loads never re-enable the GIL in HTTP workers.
 <!-- truth: end -->
 
@@ -77,7 +93,7 @@ flowchart LR
 
     subgraph Backends["Embedding Execution Planes"]
         GGrpc["Rust HTTP/2 gRPC (VertexEmbedder / GeminiEmbedder / RemoteEmbedder)"]
-        SqlPush["In-DB SQL Pushdown (AlloyDbEmbedder / OracleEmbedder)"]
+        SqlPush["In-DB SQL Pushdown (PushdownEmbedder + engine-owned EmbeddingPushdown)"]
         Broker["EmbeddingBroker (1x RAM GemmaEmbedder / FastEmbedder)"]
         Static["Rust Mmap StaticEmbedderCore (StaticEmbedder)"]
     end
@@ -135,8 +151,11 @@ flowchart LR
 | [`Embedder`](../../../../../src/py/vertebra/embeddings/_base.py) | Delegates to `VertexEmbedder` | Unified facade with `embed_query()`, `embed_document()`, `embed_many()`, `embed_arrow()`, and `similarity_search()`. |
 | [`VertexEmbedder`](../../../../../src/py/vertebra/embeddings/_google.py) | `gemini-embedding-001` (`768` dims) | Rust HTTP/2 gRPC `PredictionService/EmbedContent` with `SyncGcpTokenCache` / `AsyncGcpTokenCache` Bearer token injection and packed-`f32` decoding into `VectorSlab`. |
 | [`GeminiEmbedder`](../../../../../src/py/vertebra/embeddings/_google.py) | `gemini-embedding-001` (`768` dims) | Rust HTTP/2 gRPC `GenerativeService/BatchEmbedContents` with `x-goog-api-key` or ADC Bearer auth. |
-| [`AlloyDbEmbedder`](../../../../../src/py/vertebra/embeddings/_google.py) | `gemini-embedding-001` (`768` dims) | Executes `SELECT embedding($1, t.txt)::vector` in AlloyDB `ai` / `google_ml_integration` and decodes binary `pgvector` into `VectorBatchView`. |
-| [`OracleEmbedder`](../../../../../src/py/vertebra/embeddings/_google.py) | `gemini-embedding-001` (`768` dims) | Executes `SELECT DBMS_VECTOR.UTL_TO_EMBEDDING(COLUMN_VALUE, JSON(:params))` in Oracle 26ai and decodes binary `0xDB` `VECTOR` frames into `VectorBatchView`. |
+| `PushdownEmbedder` | `gemini-embedding-001` (`768` dims) | Generic embedding facade over engine-owned capabilities. |
+| `BigQueryEmbeddingPushdown` | `gemini-embedding-001` | `ML.GENERATE_EMBEDDING` / `AI.GENERATE_EMBEDDING` and `VECTOR_SEARCH`. |
+| `SpannerEmbeddingPushdown` | `gemini-embedding-001` | `ML.PREDICT` / `AI.GENERATE_EMBEDDING` and exact or approximate vector distance. |
+| `PostgresEmbeddingPushdown` | `gemini-embedding-001` | AlloyDB `embedding()` inference and pgvector distance operators. |
+| `OracleEmbeddingPushdown` | `gemini-embedding-001` | `DBMS_VECTOR.UTL_TO_EMBEDDING`, credential rotation, and `VECTOR_DISTANCE`. |
 | [`GemmaEmbedder`](../../../../../src/py/vertebra/embeddings/_local.py)[^src-embeddings-local-py] | `embeddinggemma-2-270m` (`768` dims) | `EmbeddingBroker`-hosted `EmbeddingGemma` (`270M` / `300M`, `100+` languages, MRL `768`/`512`/`256`/`128`). Rejects `precision="fp16"` (`ValueError`) to prevent activation overflow; supports `int8` (default), `q4`, `bf16`, and `fp32`. |
 | [`FastEmbedder`](../../../../../src/py/vertebra/embeddings/_local.py) | `BAAI/bge-small-en-v1.5` (`384` dims) | `EmbeddingBroker`-hosted ONNX Runtime execution for BGE, Nomic, Arctic, Jina, and MiniLM models. |
 | [`StaticEmbedder`](../../../../../src/py/vertebra/embeddings/_local.py) | `potion-base-8M` (`512` dims) | Pure-Rust `StaticEmbedderCore` mmap lookup table with zero ML dependencies. |
@@ -150,7 +169,7 @@ flowchart LR
 - **Token-Budgeted Length-Sorted Dynamic Batching (`_flush_pending_batch`)**: Collects pending items across a `batch_window_ms = 2.0` window, estimates token length (`estimate_gemma_token_count`), sorts items by ascending token length to minimize right-padding waste across attention layers, splits batches at `max_batch_tokens = 8192` or `max_batch_items = 64`, and restores caller ordering in the output `VectorBatchView`.
 - **Free-Threaded `3.14t`/`3.15t` Subprocess Quarantine (`should_quarantine_subprocess`)**: When `is_free_threaded()` is `True`, `isolate_gil_subprocess` is enabled, and no in-process `backend_fn` was passed, `EmbeddingBroker` sends batches to a child process (`submit_batch_in_subprocess`) together with its `BackendFactory` (`target="module:qualname"`, `options`); the child imports the factory once, runs the real model, and returns a `/dev/shm` `VectorSlab`. `FastEmbedder` and `GemmaEmbedder` pass `FastEmbedder.build_backend`. A broker without `backend_fn` or `backend_factory` raises `ImproperConfigurationError`.
 
-Provenance sources: [^src-embeddings-init-py], [^src-embeddings-models-py], [^src-cli-ai-py], [^src-tests-unit-embeddings-test-vector-views-py], [^src-tests-unit-embeddings-test-google-embedders-py], [^src-tests-unit-embeddings-test-embedding-broker-py].
+Provenance sources: [^src-embeddings-pushdown-py], [^src-adapters-bigquery-embeddings-py], [^src-adapters-spanner-embeddings-py], [^src-adapters-postgres-embeddings-py], [^src-adapters-oracle-embeddings-py], [^src-embeddings-init-py], [^src-embeddings-models-py], [^src-cli-ai-py], [^src-tests-unit-embeddings-test-vector-views-py], [^src-tests-unit-embeddings-test-google-embedders-py], [^src-tests-unit-embeddings-test-embedding-broker-py].
 
 [^src-vertebra-core-src-vector-rs]: `src/rs/vertebra-core/src/vector.rs` — Rust implementation module (src/rs/vertebra-core/src/vector.rs).
 [^src-vertebra-py-src-vector-rs]: `src/rs/vertebra-py/src/vector.rs` — Rust implementation module (src/rs/vertebra-py/src/vector.rs).
@@ -166,3 +185,13 @@ Provenance sources: [^src-embeddings-init-py], [^src-embeddings-models-py], [^sr
 [^src-tests-unit-embeddings-test-vector-views-py]: `src/py/tests/unit/embeddings/test_vector_views.py` — Python implementation module (src/py/tests/unit/embeddings/test_vector_views.py).
 [^src-tests-unit-embeddings-test-google-embedders-py]: `src/py/tests/unit/embeddings/test_google_embedders.py` — Python implementation module (src/py/tests/unit/embeddings/test_google_embedders.py).
 [^src-tests-unit-embeddings-test-embedding-broker-py]: `src/py/tests/unit/embeddings/test_embedding_broker.py` — Python implementation module (src/py/tests/unit/embeddings/test_embedding_broker.py).
+
+[^src-embeddings-pushdown-py]: `src/py/vertebra/embeddings/_pushdown.py` — SQL embedding capability and facade.
+
+[^src-adapters-bigquery-embeddings-py]: `src/py/vertebra/db/adapters/bigquery/embeddings.py` — SQL embedding capability and facade.
+
+[^src-adapters-spanner-embeddings-py]: `src/py/vertebra/db/adapters/spanner/embeddings.py` — SQL embedding capability and facade.
+
+[^src-adapters-postgres-embeddings-py]: `src/py/vertebra/db/adapters/postgres/embeddings.py` — SQL embedding capability and facade.
+
+[^src-adapters-oracle-embeddings-py]: `src/py/vertebra/db/adapters/oracle/embeddings.py` — SQL embedding capability and facade.

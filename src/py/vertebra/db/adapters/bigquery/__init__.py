@@ -21,8 +21,10 @@ if TYPE_CHECKING:
         AsyncBigQueryDriver,
         SyncBigQueryDriver,
     )
+    from vertebra.db.adapters.bigquery.embeddings import BigQueryEmbeddingPushdown
 
 __all__ = (
+    "BigQueryEmbeddingPushdown",
     "BIGQUERY_DIALECT_TAG",
     "DEFAULT_BIGQUERY_REST_ENDPOINT",
     "DEFAULT_BIGQUERY_STORAGE_ENDPOINT",
@@ -36,12 +38,14 @@ __all__ = (
 )
 
 __lazy_modules__ = [
+    "vertebra.db.adapters.bigquery.embeddings",
     "vertebra.db.adapters.bigquery.config",
     "vertebra.db.adapters.bigquery.core",
     "vertebra.db.adapters.bigquery.driver",
 ]
 
 _EXPORT_MAP: dict[str, tuple[str, str]] = {
+    "BigQueryEmbeddingPushdown": ("vertebra.db.adapters.bigquery.embeddings", "BigQueryEmbeddingPushdown"),
     "BIGQUERY_DIALECT_TAG": ("vertebra.db.adapters.bigquery.config", "BIGQUERY_DIALECT_TAG"),
     "DEFAULT_BIGQUERY_REST_ENDPOINT": ("vertebra.db.adapters.bigquery.config", "DEFAULT_BIGQUERY_REST_ENDPOINT"),
     "DEFAULT_BIGQUERY_STORAGE_ENDPOINT": (
