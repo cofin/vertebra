@@ -3,7 +3,7 @@ type: Task
 id: db-engine-primitives:t05
 title: Relocate GCP database MCP tools to vertebra/agent/tools/ and empty the vertebra/db upward-import allowlist
 description: "Move `src/py/vertebra/db/mcp_tools.py` into `src/py/vertebra/agent/tools/{__init__,bigquery,spanner}.py` using `provide_driver`, lazy-export the tool builders on `vertebra.agent` with `if TYPE_CHECKING:` parity, delete `src/py/vertebra/db/mcp_tools.py`, and empty `_TEMPORARY_UPWARD_IMPORT_ALLOWLIST` in `src/py/tests/unit/db/test_native_db_drivers.py`."
-state: pending
+state: "in_progress"
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -21,11 +21,11 @@ tests:
   - src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
   - src/py/tests/unit/db/test_native_db_drivers.py
   - src/py/tests/unit/docs/test_examples.py
-plan_revision: 6
-plan_commit: "954998dea5866f52bc3730db642e8f028d4e72bf"
-state_revision: 0
-claimed_by: null
-claimed_at: null
+plan_revision: 8
+plan_commit: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
+state_revision: 1
+claimed_by: "/root/db_t05"
+claimed_at: "2026-11-05T02:38:31Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -33,7 +33,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: 2026-11-03T21:49:00Z
-updated_at: "2026-11-05T02:19:48Z"
+updated_at: "2026-11-05T02:59:14Z"
 commit: null
 tags: [db, agent, mcp, tools, layering, clean-break]
 ---
@@ -83,8 +83,12 @@ Move `src/py/vertebra/db/mcp_tools.py` into `src/py/vertebra/agent/tools/{__init
 
 ## Acceptance Criteria
 
-- [ ] R5: `src/py/vertebra/db/mcp_tools.py` is deleted, `vertebra.agent.tools` (`bigquery.py`, `spanner.py`, `__init__.py`) exposes `GCPDatabaseToolPolicy`, `is_mutating_sql`, `build_bigquery_tools`, `build_spanner_tools`, and `register_gcp_database_tools` (re-exported lazily with `if TYPE_CHECKING:` parity on `vertebra.agent`), and `_TEMPORARY_UPWARD_IMPORT_ALLOWLIST` is empty with zero upward imports from `src/py/vertebra/db/**/*.py`.
+- [x] R5: `src/py/vertebra/db/mcp_tools.py` is deleted, `vertebra.agent.tools` (`bigquery.py`, `spanner.py`, `__init__.py`) exposes `GCPDatabaseToolPolicy`, `is_mutating_sql`, `build_bigquery_tools`, `build_spanner_tools`, and `register_gcp_database_tools` (re-exported lazily with `if TYPE_CHECKING:` parity on `vertebra.agent`), and `_TEMPORARY_UPWARD_IMPORT_ALLOWLIST` is empty with zero upward imports from `src/py/vertebra/db/**/*.py`.
 
 ## Notes & Discoveries
 
 <!-- Append timestamped implementation findings here: - [YYYY-MM-DD HH:MM] ... -->
+
+- [2026-11-05] Public tool and import-gate RED observed before relocation. GREEN173 focused cases; root full Python checkpoint1963 passed69 skipped170 xfailed, lint and review validation pass. Agent API prose is shortened to meet the existing documentation artifact size limit; documentation build passes.
+
+- [2026-11-05] Final Phase2 aggregate exits0: make py-test1981 passed69 skipped170 xfailed, make lint-all, make docs and make review-check. All adopted scoped correctness findings reverified clean.

@@ -15,6 +15,18 @@ sources:
   - id: src-agent-init-py
     resource: src/py/vertebra/agent/__init__.py
     title: "Python implementation module (src/py/vertebra/agent/__init__.py)"
+  - id: src-agent-tools-init-py
+    resource: src/py/vertebra/agent/tools/__init__.py
+    title: "Governed GCP tool policy and registration"
+  - id: src-agent-tools-bigquery-py
+    resource: src/py/vertebra/agent/tools/bigquery.py
+    title: "Governed BigQuery agent tools"
+  - id: src-agent-tools-spanner-py
+    resource: src/py/vertebra/agent/tools/spanner.py
+    title: "Governed Spanner agent tools"
+  - id: src-tests-unit-extensions-test-gcp-adapters-and-sqlalchemy-py
+    resource: src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
+    title: "GCP adapter and agent tool behavior tests"
   - id: src-agent-mcp-service-py
     resource: src/py/vertebra/agent/mcp/service.py
     title: "Python implementation module (src/py/vertebra/agent/mcp/service.py)"
@@ -69,6 +81,7 @@ sources:
 
 <!-- truth: start -->
 - `MCPService` and `MCPHttpHandler` implement MCP `2026-07-28` JSON-RPC 2.0 over HTTP/SSE and stdio, enforcing `ConfirmationGate` tokens (`-32003`), opt-in `webmcp=True` manifests, and `Mcp-Name`/`Mcp-Method` header binding.
+- `vertebra.agent.tools` owns `GCPDatabaseToolPolicy`, `build_bigquery_tools`, `build_spanner_tools`, `is_mutating_sql`, and `register_gcp_database_tools`; `vertebra.agent` exposes them lazily with static type-checking parity. The removed `vertebra.db.mcp_tools` module has no compatibility export.
 - `vertebra.agent.a2a` implements A2A `1.0` task lifecycles, dynamic request-origin `AgentCard` URLs, RFC 8785 JCS Ed25519/ECDSA card signatures, and DAG/`SpecTree` workflow execution.
 <!-- truth: end -->
 
@@ -85,6 +98,30 @@ sources:
 | [`McpStdioServer`](../../../../../src/py/vertebra/agent/mcp/stdio.py)[^src-agent-mcp-stdio-py] | Provides local stdio communication for CLI agents and local developer tooling via standard input/output streams. |
 | [`ClientSessionStore`](../../../../../src/py/vertebra/agent/mcp/service.py) | Tracks active sessions, protocol version negotiation (`2026-07-28`), client capabilities, and roots. |
 | [`McpClient`](../../../../../src/ts/vertebra-client/src/agent/index.ts)[^src-src-agent-index-ts] | TypeScript client SDK connecting over SSE or WebSockets with automatic reconnection, tool dispatch, and streaming progress callbacks. |
+
+### Governed GCP database tools
+
+[`vertebra.agent.tools`](../../../../../src/py/vertebra/agent/tools/__init__.py)[^src-agent-tools-init-py]
+provides the shared policy, SQL mutation classifier, confirmation checks, and registration entry
+point. Agent tools use `PermissionDeniedError` from `vertebra.agent.core`; database adapters do
+not import the agent or framework layers.
+
+[`build_bigquery_tools`](../../../../../src/py/vertebra/agent/tools/bigquery.py)[^src-agent-tools-bigquery-py]
+builds `bigquery_dry_run`, `bigquery_query`, and `bigquery_object_table_inspect`.
+[`build_spanner_tools`](../../../../../src/py/vertebra/agent/tools/spanner.py)[^src-agent-tools-spanner-py]
+builds `spanner_query` and `spanner_schema_inspect`. Each builder accepts an explicit engine
+driver, a typed config, or a registry alias and resolves `provide_driver` at invocation time.
+Registration can supply a single engine without resolving an unconfigured default for the other.
+Synchronous driver operations run through `asyncio.to_thread`; asynchronous operations dispatch
+through `AsyncDatabaseDriver` without inspecting returned awaitables.
+
+BigQuery tools retain dry-run byte estimates and policy ceilings, Object Table metadata and DDL,
+and confirmation-gated mutations. Spanner reads use read-only snapshots with optional exact
+staleness; schema inspection queries only `information_schema.tables` and
+`information_schema.columns`, binding table names as parameters. The
+[tool behavior tests](../../../../../src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py)[^src-tests-unit-extensions-test-gcp-adapters-and-sqlalchemy-py]
+exercise real tools, registries, confirmation gates, and engine adapters through external client
+ports, including sync thread dispatch, async execution, rejected mutations, and driver errors.
 
 ## 2. Agent-to-Agent Protocol (A2A 1.0)
 
@@ -140,3 +177,8 @@ Provenance sources: [^src-agent-mcp-routes-py], [^src-agent-a2a-signing-py], [^s
 [^src-tests-unit-agent-test-a2a-protocol-py]: `src/py/tests/unit/agent/test_a2a_protocol.py` — Python implementation module (src/py/tests/unit/agent/test_a2a_protocol.py).
 [^src-tests-unit-agent-test-runtime-and-workflows-py]: `src/py/tests/unit/agent/test_runtime_and_workflows.py` — Python implementation module (src/py/tests/unit/agent/test_runtime_and_workflows.py).
 [^src-tests-unit-agent-test-core-and-observability-py]: `src/py/tests/unit/agent/test_core_and_observability.py` — Python implementation module (src/py/tests/unit/agent/test_core_and_observability.py).
+
+[^src-agent-tools-init-py]: `src/py/vertebra/agent/tools/__init__.py` — Shared GCP tool policy and registration.
+[^src-agent-tools-bigquery-py]: `src/py/vertebra/agent/tools/bigquery.py` — BigQuery agent tool builders.
+[^src-agent-tools-spanner-py]: `src/py/vertebra/agent/tools/spanner.py` — Spanner agent tool builders.
+[^src-tests-unit-extensions-test-gcp-adapters-and-sqlalchemy-py]: `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py` — GCP adapter and tool behavior tests.

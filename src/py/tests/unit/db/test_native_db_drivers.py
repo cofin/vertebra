@@ -2220,7 +2220,7 @@ def test_capability_exports_on_driver_and_lazy_db_root_with_zero_upward_imports(
             vertebra.__dict__["db"] = saved["vertebra.db"]
 
 
-_TEMPORARY_UPWARD_IMPORT_ALLOWLIST: frozenset[str] = frozenset({"vertebra.db.mcp_tools"})
+_TEMPORARY_UPWARD_IMPORT_ALLOWLIST: frozenset[str] = frozenset()
 
 
 @pytest.mark.parametrize(
@@ -2572,6 +2572,7 @@ def test_vertebra_db_ast_upward_import_boundary_gate() -> None:
         if violations:
             upward_imports_by_module[module_name] = violations
 
+    assert len(_TEMPORARY_UPWARD_IMPORT_ALLOWLIST) == 0
     unexpected = {
         mod: imports
         for mod, imports in upward_imports_by_module.items()

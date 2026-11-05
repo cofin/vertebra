@@ -19,8 +19,8 @@ tests:
   - src/py/tests/unit/db/test_pg_gateway.py
   - src/py/tests/unit/extensions/test_data_storage_integrations.py
   - src/py/tests/unit/docs/test_examples.py
-plan_revision: 6
-plan_commit: "954998dea5866f52bc3730db642e8f028d4e72bf"
+plan_revision: 8
+plan_commit: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
 state_revision: 2
 claimed_by: null
 claimed_at: null
@@ -31,7 +31,7 @@ last_verified_at: "2026-11-05T01:51:01Z"
 last_verified_commit: "6c07c8fe1d072d8096dea60c8df87f3b8eb1860b"
 verification_evidence: "Behavior TDD RED observed; canonical t01 files: 93 passed; Ruff/format/Mypy and make lint-all exit 0; contemporaneous CDC knowledge validated."
 created_at: 2026-11-03T21:47:00Z
-updated_at: "2026-11-05T02:19:48Z"
+updated_at: "2026-11-05T02:59:14Z"
 commit: "6c07c8fe1d072d8096dea60c8df87f3b8eb1860b"
 tags: [db, cdc, postgres, notify, spill]
 ---

@@ -29,8 +29,8 @@ tests:
   - src/py/tests/unit/db/test_enterprise_olap_drivers.py
   - src/py/tests/unit/db/test_native_db_drivers.py
   - src/py/tests/unit/docs/test_examples.py
-plan_revision: 6
-plan_commit: "954998dea5866f52bc3730db642e8f028d4e72bf"
+plan_revision: 8
+plan_commit: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -41,7 +41,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: 2026-11-03T21:49:00Z
-updated_at: "2026-11-05T02:19:48Z"
+updated_at: "2026-11-05T02:59:14Z"
 commit: null
 tags: [db, rls, postgres, oracle, layering, okf]
 ---
@@ -56,6 +56,7 @@ Refactor `src/py/vertebra/db/rls.py` (`TenantScopeConfig`, `TenantPredicate`) in
 - **Architectural invariants**:
   - `TenantScopeConfig` and `TenantPredicate` inherit `FrozenBaseStruct` (`frozen=True, gc=False, kw_only=True`) with inline PEP 257 field docstrings and contain zero PostgreSQL `set_config` or `::uuid` syntax.
   - Scope engine purity to AST import rules, engine-specific SQL construction, and executable engine dispatch. Stable broker dialect IDs are protocol-registration metadata; engine names and identifiers used as metadata do not constitute engine-execution leakage. Do not use vocabulary or engine-name scans.
+  - Preserve original session-setting failures through PostgreSQL/Oracle sync and async adapters; unsupported engines fail with `NotSupportedError`. Track adapter-import bindings and aliases in the gate, while preserving existing dialer branches and polymorphic `ensure_module(self.driver_module)` loading. Negative gate cases cover class identity, construction, aliases, and executable engine SQL while excluding docstrings and registration metadata.
   - Keep `<!-- truth: start -->` blocks in OKF knowledge chapters `<= 40` lines (`make review-check`).
 
 ## Steps
@@ -75,7 +76,7 @@ Refactor `src/py/vertebra/db/rls.py` (`TenantScopeConfig`, `TenantPredicate`) in
 
 2. **Refactor `rls.py`, `PostgreSQLCore`, `OracleCore`, `SyncOracleDriver`, `extensions/sqlspec/`, docs, and OKF chapters (GREEN)**:
    - Update `src/py/vertebra/db/rls.py` (`TenantScopeConfig` with `setting_name`, `tenant_column`, `parameter_cast: str | None = None`; `TenantPredicate` with `column_reference()` and ANSI `to_sql_fragment(placeholder: str = "?")`).
-   - Add `build_session_guc_sql` and `build_tenant_predicate_sql` static methods on `PostgreSQLCore` (`src/py/vertebra/db/adapters/postgres/core.py`) and `build_session_context_sql` on `OracleCore` (`src/py/vertebra/db/adapters/oracle/core.py`), and handle `BEGIN DBMS_SESSION.SET_CONTEXT(:namespace, :attribute, :value); END;` in `src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver.execute` (recording `self._session_context[(namespace, attribute)] = value` and returning `0`) while the pre-Rust `sqlite3` stand-in remains prior to `native-oracle-driver`.
+   - Add `build_session_guc_sql` and `build_tenant_predicate_sql` static methods on `PostgreSQLCore` (`src/py/vertebra/db/adapters/postgres/core.py`) and `build_session_context_sql` on `OracleCore` (`src/py/vertebra/db/adapters/oracle/core.py`), and handle `BEGIN DBMS_SESSION.SET_CONTEXT(:namespace, :attribute, :value); END;` in `src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver.execute` (initializing `_session_context` and recording `self._session_context[(namespace, attribute)] = value` before returning `0`) while the pre-Rust `sqlite3` stand-in remains prior to `native-oracle-driver`.
    - Update `apply_tenant_predicate` in `src/py/vertebra/extensions/sqlspec/adapters.py` (`BaseSyncDriver`/`BaseAsyncDriver` raising `NotSupportedError` by default; `PostgreSQLSyncDriver`/`PostgreSQLAsyncDriver` executing `PostgreSQLCore.build_session_guc_sql` and returning `PostgreSQLCore.build_tenant_predicate_sql(predicate, param_index=1)`; `OracleSyncDriver`/`OracleAsyncDriver` executing `OracleCore.build_session_context_sql` and returning `predicate.to_sql_fragment(":tenant_id")`), and remove the dead `getattr(self._tenant_predicate, "apply", None)` branches in `src/py/vertebra/extensions/sqlspec/bigquery.py` and `src/py/vertebra/extensions/sqlspec/spanner.py`.
    - Update `docs/usage/analytics-and-cdc.md` and `docs/reference/db.md` for `PostgresNotifyConfig`/`PostgresNotificationSource`, `SyncSpannerChangeStreamSource`/`AsyncSpannerChangeStreamSource`, engine-neutral `CDCConfig`/`ChangeFeed`, and dialect-agnostic `TenantScopeConfig`/`TenantPredicate`.
    - Update the tenant-isolation section of `.agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md` for `setting_name`, ANSI placeholders, adapter-owned PostgreSQL/Oracle session builders, and the narrow declarative-registration / annotation-only registry exceptions. Preserve the CDC, Spanner relocation, and native pipelining documentation completed by prerequisite tasks. Finalize `.agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md` (documenting `Base*Driver.apply_tenant_predicate` raising `NotSupportedError` and `PostgreSQL*Driver`/`Oracle*Driver` delegating to `PostgreSQLCore`/`OracleCore`), `.agents/bundles/knowledge/domains/agent/embeddings-and-vectors.md`, and `.agents/bundles/product/product.md` (`sources:`, `<= 40`-line `<!-- truth: start -->` blocks, and prose).

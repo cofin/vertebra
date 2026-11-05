@@ -25,8 +25,8 @@ tests:
   - src/py/tests/unit/extensions/test_fastapi_plugin.py
   - src/py/tests/unit/extensions/test_flask_plugin.py
   - src/py/tests/unit/docs/test_examples.py
-plan_revision: 6
-plan_commit: "954998dea5866f52bc3730db642e8f028d4e72bf"
+plan_revision: 8
+plan_commit: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
 state_revision: 2
 claimed_by: null
 claimed_at: null
@@ -37,7 +37,7 @@ last_verified_at: "2026-11-05T02:33:23Z"
 last_verified_commit: "254149af384654e82ff438c5fd759380457ab97b"
 verification_evidence: "RED channel substrate and obsolete Redis caller failures; full t03 slice206 passed, phase1 selection237 passed; make lint-all and docs exit0; protocol/real Redis traffic/lifecycle coverage preserved."
 created_at: 2026-11-03T21:47:00Z
-updated_at: "2026-11-05T02:33:23Z"
+updated_at: "2026-11-05T02:59:14Z"
 commit: "254149af384654e82ff438c5fd759380457ab97b"
 tags: [db, channels, server, framework, litestar, starlette, clean-break]
 ---
@@ -96,3 +96,5 @@ Delete `src/py/vertebra/db/channels.py` (`DatabaseChannelBackend`), implement th
 - [2026-11-05] Revised caller targets include the existing Redis/Valkey suite, which still invokes removed engine-specific channel factories and wrapper driver injection. Native transport behavior remains adapter-owned; this adds consumer/test migration coverage without introducing a distributed backend or new driver API.
 
 - [2026-11-05T02:32:18+00:00] RED: missing channel substrate/protocol parameters and two obsolete Redis caller APIs. GREEN: complete revision6 task slice 206 passed; Phase1 recovery selection 237 passed; make lint-all and documentation build exit0. Real memory/RESP3 pubsub coverage uses subscription readiness synchronization and recorded wire publications; no distributed backend API is added.
+
+- [2026-11-05] Correctness review reproduces shared Spanner feed duplication with the real source and native driver facade. The pump skips repeated feed-topic fan-in while preserving one explicit different-channel delivery. RED2 failed; GREEN7 new cases,148 native/CDC cases; Ruff and diff checks pass.

@@ -3,7 +3,7 @@ type: Task
 id: db-engine-primitives:t04
 title: Relocate SQL embedding pushdown builders to vertebra/db/adapters/<engine>/embeddings.py and add PushdownEmbedder
 description: "Move all database SQL embedding pushdown builders out of `src/py/vertebra/embeddings/` into `src/py/vertebra/db/adapters/{bigquery,spanner,postgres,oracle}/embeddings.py` implementing `EmbeddingPushdown`, add `PushdownEmbedder(Embedder)` in `src/py/vertebra/embeddings/_pushdown.py`, delete `embeddings/_bigquery.py`, `embeddings/_spanner.py`, and `AlloyDbEmbedder`/`OracleEmbedder` in `embeddings/_google.py`, convert `src/py/vertebra/embeddings/__init__.py` to `lazy_exports`, and update embedding documentation and OKF `sources:`."
-state: "in_progress"
+state: "completed"
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -33,20 +33,20 @@ tests:
   - src/py/tests/unit/db/test_bigquery.py
   - src/py/tests/unit/db/test_spanner.py
   - src/py/tests/unit/docs/test_examples.py
-plan_revision: 6
-plan_commit: "954998dea5866f52bc3730db642e8f028d4e72bf"
-state_revision: 1
-claimed_by: "/root/db_t04"
-claimed_at: "2026-11-05T02:10:09Z"
+plan_revision: 8
+plan_commit: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
+state_revision: 2
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-05T02:38:31Z"
+last_verified_commit: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
+verification_evidence: "Behavior TDD RED missing capability export; full embeddings/BQ/Spanner/docs slice155 passed; 12-module Mypy and Ruff pass; make lint-all and docs exit0; exact HTTP2 protocol spelling exception proved with isolated positive/negative cases."
 created_at: 2026-11-03T21:47:00Z
-updated_at: "2026-11-05T02:19:48Z"
-commit: null
+updated_at: "2026-11-05T02:59:14Z"
+commit: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
 tags: [db, embeddings, pushdown, bigquery, spanner, postgres, oracle]
 ---
 
@@ -110,3 +110,5 @@ Move all database SQL embedding pushdown builders out of `src/py/vertebra/embedd
 - [2026-11-05T02:33:23+00:00] Behavior-TDD RED: missing adapter-owned embedding capability. GREEN: embeddings/BQ/Spanner/docs selection155 passed; default Vertex factory and base class unchanged; mapping/tuple/vector validation covered; 12-module Mypy and focused Ruff clean. Combined make lint-all and make docs exit0.
 
 - [2026-11-05] Commit spelling validation flags the existing HTTP/2 `"te": "trailers"` header in the retained Vertex code. Add a narrowly matched spelling exception for that exact protocol header, preserving other spelling checks. An isolated valid-header probe passes and an unrelated spelling violation still fails. The protocol header and runtime behavior remain unchanged.
+
+- [2026-11-05] Real psycopg conversion proves sync notification/inference/search cannot consume asyncpg numeric placeholders. Engine-owned sync execution uses positional pyformat; async execution and builder APIs retain numeric placeholders. RED3 failed, GREEN155 including3 actual converter regressions with the optional pure psycopg implementation; Ruff and MyPy pass.

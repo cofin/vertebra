@@ -5,9 +5,19 @@ SpecTree task decomposition, DynamicWorkflow DAG orchestration, pluggable sessio
 streaming chat controllers, and GenAI telemetry.
 """
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vertebra.utils.module_loader import ensure_module
+
+if TYPE_CHECKING:
+    from vertebra.agent import tools
+    from vertebra.agent.tools import (
+        GCPDatabaseToolPolicy,
+        build_bigquery_tools,
+        build_spanner_tools,
+        is_mutating_sql,
+        register_gcp_database_tools,
+    )
 
 __all__ = (
     "A2AConfig",
@@ -41,6 +51,7 @@ __all__ = (
     "ConfirmationTicket",
     "CursorPage",
     "DynamicWorkflow",
+    "GCPDatabaseToolPolicy",
     "GoogleGenAIProvider",
     "GuardCallable",
     "GuardChain",
@@ -97,14 +108,29 @@ __all__ = (
     "a2a_card_to_mcp_tools",
     "bind_agent_context",
     "bridges",
+    "build_bigquery_tools",
+    "build_spanner_tools",
     "current_agent_context",
     "decode_cursor",
     "encode_cursor",
     "execute_tool_calls",
+    "is_mutating_sql",
     "mcp",
     "mcp_service_to_a2a",
     "paginate_sequence",
+    "register_gcp_database_tools",
     "tool",
+    "tools",
+)
+
+_TOOLS_EXPORTS = frozenset(
+    {
+        "GCPDatabaseToolPolicy",
+        "build_bigquery_tools",
+        "build_spanner_tools",
+        "is_mutating_sql",
+        "register_gcp_database_tools",
+    }
 )
 
 _CORE_EXPORTS = frozenset(
@@ -252,6 +278,17 @@ _PLUGIN_EXPORTS = frozenset(
 
 def __getattr__(name: str) -> Any:
     """Lazy-load agent package exports on first attribute access."""
+    if name == "tools":
+        mod = ensure_module("vertebra.agent.tools")
+        globals()["tools"] = mod
+        return mod
+
+    if name in _TOOLS_EXPORTS:
+        mod = ensure_module("vertebra.agent.tools")
+        val = getattr(mod, name)
+        globals()[name] = val
+        return val
+
     if name == "a2a":
         mod = ensure_module("vertebra.agent.a2a")
         globals()["a2a"] = mod

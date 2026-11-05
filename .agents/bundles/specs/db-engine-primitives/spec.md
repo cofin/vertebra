@@ -8,13 +8,13 @@ parent_prd: integration-remediation
 research:
   - ../integration-remediation/research/audit-findings_20261103.md
   - ../native-data-platform/research/gap-analysis_20261103.md
-plan_revision: 6
-plan_commit: "954998dea5866f52bc3730db642e8f028d4e72bf"
-state_revision: 6
-current_task: "db-engine-primitives:t04"
-last_verified_checkpoint: null
+plan_revision: 8
+plan_commit: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
+state_revision: 9
+current_task: "db-engine-primitives:t05"
+last_verified_checkpoint: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
 created_at: 2026-11-03T03:30:00Z
-updated_at: "2026-11-05T02:33:23Z"
+updated_at: "2026-11-05T02:59:14Z"
 tags: [db, layering, cdc, embeddings, agent-tools, pipeline, rls]
 ---
 
@@ -600,9 +600,11 @@ flowchart TD
 **Phase 1 Recovery Checkpoint**: `uv run pytest src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py src/py/tests/unit/db/test_spanner_queue_and_cdc.py src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_redis_valkey_driver.py src/py/tests/unit/extensions/test_data_storage_integrations.py src/py/tests/unit/extensions/test_litestar_plugin.py src/py/tests/unit/extensions/test_starlette_plugin.py && make lint-all` exits `0`.
 
 ### Phase 2: Embeddings, Agent Tools & Pipeline Removal (`t04`–`t06`)
-- [~] `db-engine-primitives:t04` — Relocate SQL embedding pushdown builders to `vertebra/db/adapters/<engine>/embeddings.py` and add `PushdownEmbedder` (`behavior_tdd`, `depends_on: [t02]`) -> [`tasks/t04-embedding-pushdown-relocation.md`](tasks/t04-embedding-pushdown-relocation.md)
-- [ ] `db-engine-primitives:t05` — Relocate GCP database MCP tools to `vertebra/agent/tools/` and empty the `vertebra/db` upward-import allowlist (`behavior_tdd`, `depends_on: [t03, t04]`) -> [`tasks/t05-relocate-gcp-agent-tools.md`](tasks/t05-relocate-gcp-agent-tools.md)
-- [ ] `db-engine-primitives:t06` — Delete `vertebra/db/pipeline.py`, route SQLSpec `execute_stack` via `SyncPipelineCapable` / `AsyncPipelineCapable`, and update documentation (`characterization`, `depends_on: [t03, t04]`) -> [`tasks/t06-delete-query-pipeline.md`](tasks/t06-delete-query-pipeline.md)
+- [x] [b41aae46] `db-engine-primitives:t04` — Relocate SQL embedding pushdown builders to `vertebra/db/adapters/<engine>/embeddings.py` and add `PushdownEmbedder` (`behavior_tdd`, `depends_on: [t02]`) -> [`tasks/t04-embedding-pushdown-relocation.md`](tasks/t04-embedding-pushdown-relocation.md)
+- [~] `db-engine-primitives:t05` — Relocate GCP database MCP tools to `vertebra/agent/tools/` and empty the `vertebra/db` upward-import allowlist (`behavior_tdd`, `depends_on: [t03, t04]`) -> [`tasks/t05-relocate-gcp-agent-tools.md`](tasks/t05-relocate-gcp-agent-tools.md)
+- [~] `db-engine-primitives:t06` — Delete `vertebra/db/pipeline.py`, route SQLSpec `execute_stack` via `SyncPipelineCapable` / `AsyncPipelineCapable`, and update documentation (`integration_acceptance`, `depends_on: [t03, t04]`) -> [`tasks/t06-delete-query-pipeline.md`](tasks/t06-delete-query-pipeline.md)
+
+Default preparation retains native bind formats through class-owned defaults and supported GCP parser configuration; explicit caller configuration remains authoritative.
 
 **Phase 2 Recovery Checkpoint**: `make py-test && make lint-all && make docs && make review-check` exits `0`, and `_TEMPORARY_UPWARD_IMPORT_ALLOWLIST` in `test_native_db_drivers.py` is empty.
 
@@ -613,11 +615,13 @@ flowchart TD
 
 ## 5. Continuity Snapshot
 
-- **Active Focus**: Executing `db-engine-primitives:t04`.
-- **Completed Checkpoints**: None (`state: active`).
+- **Active Focus**: Executing `db-engine-primitives:t05`, `db-engine-primitives:t06`.
+- **Completed Checkpoints**: Phase 1 at `b41aae46` (237 focused cases, lint, and docs pass).
 - **Key Decisions**:
   - `ChannelBus` lives in `src/py/vertebra/server/_channels.py` (re-exported from `vertebra.framework.channels`) so `vertebra.extensions.{litestar,starlette,fastapi,flask}.channels` share the engine-neutral pub/sub substrate without importing `vertebra.framework.*` or `vertebra.db.channels`.
   - `db/mcp_tools.py` moves to `src/py/vertebra/agent/tools/{__init__,bigquery,spanner}.py` (re-exported lazily on `vertebra.agent` with `if TYPE_CHECKING:` parity) using `provide_driver`.
   - `embeddings/_bigquery.py`, `embeddings/_spanner.py`, and `AlloyDbEmbedder`/`OracleEmbedder` in `embeddings/_google.py` are deleted cleanly without wrapper aliases; `PushdownEmbedder` overrides `Embedder.__new__` and delegates `_embed_batch_impl` and `vector_search` to `EmbeddingPushdown` implementations under `vertebra/db/adapters/{bigquery,spanner,postgres,oracle}/embeddings.py`.
   - `DatabaseChannelBackend` (`db/channels.py`) and `SyncQueryPipeline` / `AsyncQueryPipeline` (`db/pipeline.py`) are deleted cleanly without compatibility shims.
-- **Open Blockers**: None. Execution is approved against `954998de`; each worksheet passes preflight before claim.
+- **Open Blockers**: None. Execution is approved against `b41aae46`; each worksheet passes preflight before claim.
+
+- [2026-11-05T02:38:31Z] Verified checkpoint `b41aae46213761f36af0709c0a3ce6d26b2793e0`: Phase1 canonical recovery selection237 passed; make lint-all and make docs exit0; t03 local/remote protocol behavior and t04 independent155-case slice verified.

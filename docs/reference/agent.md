@@ -40,6 +40,37 @@ Agent runtime (`AgentRuntime`), Model Context Protocol (`MCPRegistry`, `MCPConfi
       members:
         - invoke
 
+## Governed GCP Database Tools (`vertebra.agent.tools`)
+
+`build_bigquery_tools` provides dry-run estimates, queries, and Object Table inspection.
+`build_spanner_tools` provides queries and read-only table/column schema inspection.
+Both accept a driver, typed config, or registry alias resolved at invocation.
+
+`register_gcp_database_tools` optionally registers both sets with MCP. BigQuery enforces
+its dry-run byte ceiling; mutations require `ConfirmationGate` approval. These APIs replace
+`vertebra.db.mcp_tools` and are also lazy exports from `vertebra.agent`.
+
+::: vertebra.agent.tools.GCPDatabaseToolPolicy
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.agent.tools.bigquery.build_bigquery_tools
+    options:
+      heading_level: 4
+
+::: vertebra.agent.tools.spanner.build_spanner_tools
+    options:
+      heading_level: 4
+
+::: vertebra.agent.tools.is_mutating_sql
+    options:
+      heading_level: 4
+
+::: vertebra.agent.tools.register_gcp_database_tools
+    options:
+      heading_level: 4
+
 ## Model Context Protocol (`vertebra.agent.mcp`)
 
 ::: vertebra.agent.mcp.models.MCPConfig
