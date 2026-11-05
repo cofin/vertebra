@@ -26,7 +26,7 @@ from vertebra.db.adapters.datafusion import (
     DataFusionEngine,
     TableRegistration,
 )
-from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, SyncPostgreSQLDriver
+from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgresEmbeddingPushdown, SyncPostgreSQLDriver
 from vertebra.db.adapters.postgres.notify import PostgresNotificationSource, PostgresNotifyConfig
 from vertebra.db.driver import NotificationEvent, NotificationSource, NotSupportedError
 from vertebra.server.platform import SHMAllocationPolicy
@@ -204,7 +204,7 @@ async def test_postgres_notify_publish(
     assert source.change_feed is feed
     await source.publish("orders", payload)
     sql, parameters = driver.execute.call_args.args
-    assert sql == "SELECT pg_notify($1, $2)"
+    assert sql == ("SELECT pg_notify($1, $2)" if driver_type is AsyncPostgreSQLDriver else "SELECT pg_notify(%s, %s)")
     assert parameters[0] == "orders"
     if feed is None:
         assert parameters[1] == expected
@@ -257,3 +257,62 @@ async def test_postgres_notify_listen_without_native_stream() -> None:
     source = PostgresNotificationSource(MagicMock(spec=SyncPostgreSQLDriver))
     with pytest.raises(NotSupportedError, match="Live PostgreSQL LISTEN streaming requires"):
         await anext(source.listen())
+
+
+class _PsycopgConnectionPort:
+    """External connection port using psycopg's real SQL parameter converter."""
+
+    def __init__(
+        self, query_type: Any, transformer_type: Any, columns: tuple[str, ...], rows: list[tuple[Any, ...]]
+    ) -> None:
+        self.query_type = query_type
+        self.transformer_type = transformer_type
+        self.description = tuple((column,) for column in columns)
+        self.rows = rows
+        self.calls: list[tuple[str, Any]] = []
+
+    def connection(self) -> _PsycopgConnectionPort:
+        return self
+
+    def cursor(self) -> _PsycopgConnectionPort:
+        return self
+
+    def execute(self, sql: str, parameters: Any = None) -> None:
+        query = self.query_type(self.transformer_type())
+        query.convert(sql, parameters)
+        self.calls.append((sql, parameters))
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self.rows
+
+    def close(self) -> None:
+        """Keep the externally owned connection port available for assertions."""
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("operation", ["notify", "embedding", "search"])
+async def test_postgres_sync_primitives_bind_with_real_psycopg_converter(operation: str) -> None:
+    """Public sync primitives generate SQL accepted by the installed psycopg converter."""
+    queries = pytest.importorskip("psycopg._queries")
+    adapt = pytest.importorskip("psycopg.adapt")
+    columns = ("id", "distance") if operation == "search" else ("embedding",)
+    rows: list[tuple[Any, ...]] = [(7, 0.25)] if operation == "search" else [([3.0, 4.0],)]
+    connection = _PsycopgConnectionPort(queries.PostgresQuery, adapt.Transformer, columns, rows)
+    driver = SyncPostgreSQLDriver(pool=connection)
+    try:
+        if operation == "notify":
+            await PostgresNotificationSource(driver).publish("orders", "quote ' and % payload")
+            assert connection.calls == [("SELECT pg_notify(%s, %s)", ("orders", "quote ' and % payload"))]
+        else:
+            pushdown = PostgresEmbeddingPushdown(driver, dimensions=2, normalize=False)
+            if operation == "embedding":
+                assert (await pushdown.embed_query("document")).to_list() == [3.0, 4.0]
+                assert connection.calls[0][1] == ("gemini-embedding-001", ["document"])
+            else:
+                assert await pushdown.similarity_search([3.0, 4.0], table="docs", top_k=2) == [
+                    {"id": 7, "distance": 0.25}
+                ]
+                assert connection.calls[0][1] == ([3.0, 4.0], 2)
+            assert connection.calls[0][0].count("%s") == 2
+    finally:
+        driver.close()

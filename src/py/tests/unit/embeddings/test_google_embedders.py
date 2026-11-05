@@ -442,15 +442,19 @@ async def test_oracle_url_bytes_and_token_rotation(port_type: Any, async_cache: 
     ],
 )
 @pytest.mark.parametrize("row_shape", ["mapping", "tuple"])
-async def test_pushdown_decodes_supported_vector_cells(provider: Any, cell: Any, row_shape: str) -> None:
+@pytest.mark.parametrize("port_type", [_SelectPort, _AsyncSelectPort])
+async def test_pushdown_decodes_supported_vector_cells(
+    provider: Any, cell: Any, row_shape: str, port_type: Any
+) -> None:
     """Each engine decodes its public row and vector formats into native views."""
     options = {"provider": "local"} if provider is OracleEmbeddingPushdown else {}
-    port = _SelectPort([{"embedding": cell} if row_shape == "mapping" else (cell,)])
+    port = port_type([{"embedding": cell} if row_shape == "mapping" else (cell,)])
     adapter = provider(port, dimensions=4, **options)
     assert (await adapter.embed_query("decode", normalize=False)).to_list() == [3, 4, 0, 0]
     if provider is PostgresEmbeddingPushdown:
         assert port.calls[0][1] == ("gemini-embedding-001", ["decode"])
-        assert "embedding($1, t.txt)::vector" in port.calls[0][0]
+        expected_model_parameter = "$1" if port_type is _AsyncSelectPort else "%s"
+        assert f"embedding({expected_model_parameter}, t.txt)::vector" in port.calls[0][0]
         assert port.calls[0][0].endswith("ORDER BY t.idx")
 
 

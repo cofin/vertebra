@@ -62,8 +62,12 @@ class PostgresEmbeddingPushdown:
         dims = self._dimensions if dimensions is None else dimensions
         if dims <= 0:
             raise ValueError("dimensions must be positive")
+        model_parameter, texts_parameter = (
+            ("$1", "$2") if isinstance(self._driver, AsyncDatabaseDriver) else ("%s", "%s")
+        )
         sql = (
-            "SELECT embedding($1, t.txt)::vector FROM unnest($2::text[]) WITH ORDINALITY AS t(txt, idx) ORDER BY t.idx"
+            f"SELECT embedding({model_parameter}, t.txt)::vector FROM unnest({texts_parameter}::text[]) "
+            "WITH ORDINALITY AS t(txt, idx) ORDER BY t.idx"
         )
         rows = await self._select(sql, (self._model, list(texts)))
         if len(rows) != len(texts):
@@ -91,7 +95,13 @@ class PostgresEmbeddingPushdown:
         if metric not in operators:
             raise ValueError(f"Unsupported metric {metric!r}")
         values = query_vector.to_list() if isinstance(query_vector, VectorView) else list(query_vector)
-        sql = f"SELECT *, {embedding_column} {operators[metric]} $1::vector AS distance FROM {table} ORDER BY distance ASC LIMIT $2"
+        vector_parameter, limit_parameter = (
+            ("$1", "$2") if isinstance(self._driver, AsyncDatabaseDriver) else ("%s", "%s")
+        )
+        sql = (
+            f"SELECT *, {embedding_column} {operators[metric]} {vector_parameter}::vector AS distance "
+            f"FROM {table} ORDER BY distance ASC LIMIT {limit_parameter}"
+        )
         return await self._select(sql, (values, top_k))
 
     async def _select(self, sql: str, params: Any) -> list[dict[str, Any]]:

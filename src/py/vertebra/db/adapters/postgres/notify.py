@@ -104,7 +104,7 @@ class PostgresNotificationSource(NotificationSource):
         if isinstance(self._driver, AsyncDatabaseDriver):
             await self._driver.execute(sql, parameters)
         else:
-            await asyncio.to_thread(self._driver.execute, sql, parameters)
+            await asyncio.to_thread(self._driver.execute, "SELECT pg_notify(%s, %s)", parameters)
 
     async def subscribe(self, channels: Sequence[str]) -> None:
         """Register validated channel identifiers for the next driver stream."""
