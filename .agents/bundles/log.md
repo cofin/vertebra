@@ -1,5 +1,12 @@
 # Bundle Activity Log
 
+## [2026-11-05] flow-archive | Completed `db-layout-and-contract`
+
+- Completed all seven worksheets on `feat/db-updates`; source checkpoint `4ce057e`, documentation checkpoint `1fc52474`, and reviewed range `f741701..1fc52474`. Correctness re-verification resolves PY-01 through PY-08, release/artifact ownership findings, and the adjacent pre-existing GCP HTTP-classification defect. Fresh quality/debloat review has no findings; its minor documentation observation is resolved.
+- Verification exits `0`: Python (`1738 passed, 69 skipped, 170 xfailed`), Rust (`473 passed, 1 ignored`), TypeScript, lint/type/stub checks, docs, and review validation. Direct and source-built companion wheels pass isolated imports, combined extras installation, dependency checks, and optional-wheel removal/reinstallation. Local artifacts use CPython 3.12 Linux debug builds; live PostgreSQL/GCP and the hosted release platform matrix remain unverified. Hosted CI run `41935822926` is green at antecedent `989ebbd`; remediation commits remain local.
+- Curated domain, architecture, FFI pattern, testing, gotcha, packaging, and ADR-004 chapters before deleting the completed spec. The [database foundation](knowledge/domains/data/database-drivers-and-dialers.md) and [optional-wheel ownership decision](knowledge/decisions/adr-004-optional-driver-wheels-and-shm-ownership.md) are durable entry points.
+- Native Data Platform Chapter 1 is complete. `db-engine-primitives` remains planned with all seven worksheets intact; its foundation prerequisite is satisfied.
+
 ## [2026-11-04] flow-implement | Completed `db-layout-and-contract` (`t01`–`t07`, checkpoint `a5dbea6`)
 
 - Completed all 7 tasks and Phase 1–3 Recovery Checkpoints on `feat/db-updates`: `t01` (`8675187`, `vertebra.db.adapters.<engine>` move and fail-closed `DataFusionEngine`), `t02` (`2fa781f`, `vertebra-db` `connection.rs`/`py_async.rs`, `ShmCapsule`, and `DatabaseError` hierarchy), `t03` (`95afe7a`, standalone `vertebra-bigquery` and `vertebra-spanner` PyO3 wheels and optional extras), `t04` (`c031fc9`, unified `SyncDatabaseDriver`/`AsyncDatabaseDriver` contract), `t05` (`2c0d365`, runtime-checkable `Sync*`/`Async*` capability protocols), `t06` (`144ef8b`, polymorphic `DatabaseRegistry`, `provide_driver`, and upward-import AST gate), and `t07` (`a5dbea6`, parameterized cross-engine conformance suite, `docs/`, and OKF data chapters).

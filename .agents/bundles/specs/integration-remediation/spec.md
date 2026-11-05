@@ -10,11 +10,11 @@ research:
   - research/google-cloud-rust_20261103.md
 plan_revision: 4
 plan_commit: "f741701"
-state_revision: 0
+state_revision: 1
 current_task: null
 last_verified_checkpoint: null
 created_at: 2026-11-03T03:30:00Z
-updated_at: 2026-11-04T01:05:00Z
+updated_at: "2026-11-05T01:03:53Z"
 tags: [prd, remediation, integrations, drivers, sqlspec, queues, mcp]
 ---
 
@@ -30,13 +30,12 @@ Vertebra's value is its Rust runtime and drivers. Users primarily reach them thr
 ### Remaining gaps on `refactor/sync-async-names`
 - **Drivers not yet cut over to native Rust I/O and per-driver wheels** (tracked in sibling PRD [native-data-platform](../native-data-platform/spec.md)):
   - Oracle and MSSQL Python drivers execute against `sqlite3.connect(":memory:")`.
-  - DuckDB and `DataFusionEngine` fall back to `sqlite3`, PostgreSQL/MySQL/Redis serve `memory://` rows or third-party Python clients (`psycopg_pool`, duck-typed `asyncpg`, `pymysql`), and BigQuery/Spanner native bindings still live inside `vertebra._vertebra` rather than standalone `vertebra-bigquery` / `vertebra-spanner` wheels (`db-layout-and-contract` extracts them).
+  - PostgreSQL/MySQL/Redis still retain legacy client or `memory://` paths, and native cutovers for relational and embedded engines remain unfinished. BigQuery and Spanner use standalone optional wheels; DataFusion execution fails closed when its dependency is unavailable.
 - **Pipelining vs. CTE compilation.**
   - Native protocol pipelining (`SyncPipelineCapable.pipeline()` / `AsyncPipelineCapable.pipeline()`) replaces `db/pipeline.py::{SyncQueryPipeline, AsyncQueryPipeline}`, which compile read steps into a CTE and suppress compilation exceptions in `extensions/sqlspec/adapters.py`.
 - **Engine code in generic modules.**
   - `db/cdc.py` mixes PostgreSQL logical replication settings, `pg_logical_emit_message`, unbounded in-memory spill storage, swallowed `SyncObjectStore.get` errors, and `SyncSpannerChangeStreamSource` / `AsyncSpannerChangeStreamSource` polling (`inspect.isawaitable` duck-typing in `AsyncSpannerChangeStreamSource.poll_partition`).
   - `db/channels.py::DatabaseChannelBackend` hardwires PostgreSQL `pg_notify` and Oracle `DBMS_AQ` into the generic channel bus.
-  - `db/_registry.py` dispatches through `isinstance` chains.
   - `db/mcp_tools.py` is GCP-only and imports `vertebra.agent`.
   - `embeddings/{_bigquery,_spanner,_google}.py` embed engine SQL directly inside `vertebra.embeddings`.
 - **SQLSpec adapters.**
@@ -98,7 +97,7 @@ flowchart LR
    - `driver.pipeline()` (`SyncPipelineCapable` / `AsyncPipelineCapable`) is implemented in `vertebra-postgres` (single-`Sync` extended-protocol batch) and sequentially in `vertebra-oracle` until upstream 26ai pipelining lands.
    - `db/pipeline.py::{SyncQueryPipeline, AsyncQueryPipeline}`, `RelOverlay`, and `CTEStep` are deleted in `db-engine-primitives`, and `execute_stack` dispatches via `isinstance(self.native_driver, SyncPipelineCapable)` / `isinstance(self.native_driver, AsyncPipelineCapable)`.
 5. **Registry polymorphism.**
-   - `BaseDatabaseConfig` declares `url_schemes`, `driver_module`, `sync_driver_name`, `async_driver_name`, `from_url`, `pool_key`, and `build_sync_driver`/`build_async_driver`; `DatabaseRegistry` becomes table-driven (including `@overload`ed `get_dialer(config, *, sync=False)`); `provide_driver(name_or_config, *, sync=False, registry=None)` replaces per-engine providers (`db-layout-and-contract`).
+   - `BaseDatabaseConfig` declares `url_schemes`, `driver_module`, `sync_driver_name`, `async_driver_name`, `from_url`, `pool_key`, and `build_sync_driver`/`build_async_driver`; `DatabaseRegistry` is table-driven (including `@overload`ed `get_dialer(config, *, sync=False)`); `provide_driver(name_or_config, *, sync=False, registry=None)` provides generic driver resolution ([database foundation](../../knowledge/domains/data/database-drivers-and-dialers.md)).
 6. **SQLSpec adapter parity**.
    - Layout: `extensions/sqlspec/adapters/<engine>/{config,driver,core,data_dictionary,adk/,events/,litestar/}.py`, subclassing upstream bases and schemas with `adapter_name: ClassVar[str]` and preserving upstream SQLSpec `<Engine>SyncConfig` / `<Engine>AsyncConfig` and `<Engine>SyncDriver` / `<Engine>AsyncDriver` infix naming inside `vertebra.extensions.sqlspec`.
 7. **Queues**.
@@ -169,8 +168,8 @@ flowchart LR
 ## Continuity Snapshot
 
 - **Flow ID:** `integration-remediation` (`state: planned`, `plan_revision: 4`, `plan_commit: "f741701"`)
-- **Active Focus:** Chapter 3 (`db-engine-primitives`, `t01`–`t07`) planned alongside `native-data-platform` Chapter 1 (`db-layout-and-contract`, `t01`–`t07`) on `refactor/sync-async-names` and awaiting user review.
+- **Active Focus:** Chapter 3 (`db-engine-primitives`, `t01`–`t07`) remains planned. Its database layout, capability, registry, and wheel prerequisites are complete; engine primitive relocation and pipeline removal remain unfinished.
 - **Completed Checkpoints:** `critical-correctness-fixes` (`364c7cb`), `gcp-wire-protocol-correctness` (`984ce73`), and `gcp-driver-resilience` (`abd33ab`).
 - **Key decisions:**
   - Engine adapters and local primitives live under `vertebra/db/adapters/<engine>/` backed by per-engine PyO3 wheels `src/rs/vertebra-<engine>` (`vertebra._<engine>`); framework and agent integrations live under `vertebra.extensions.*`, `vertebra.framework.*`, and `vertebra.agent.tools`.
-  - `db-engine-primitives` dispatches `execute_stack` on `SyncPipelineCapable` / `AsyncPipelineCapable`, unlocking immediate execution right after `db-layout-and-contract`.
+  - `db-engine-primitives` dispatches `execute_stack` on `SyncPipelineCapable` / `AsyncPipelineCapable`, using the existing protocols in the [database foundation](../../knowledge/domains/data/database-drivers-and-dialers.md).

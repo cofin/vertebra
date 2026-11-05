@@ -17,9 +17,10 @@ Active specifications and promoted research notes under `.agents/bundles/specs/`
 - [`native-data-platform`](native-data-platform/spec.md) — Shared connection pools across worker processes via the shared-memory ring broker and per-engine standalone Rust PyO3 driver wheels (`vertebra-<engine>`).
 - [`integration-remediation`](integration-remediation/spec.md) — Driver layering, SQLSpec adapter parity, SQLAlchemy/Advanced Alchemy/Django integration, native queues/channels/stores, MCP `2026-07-28` core, and runtime fastpath consolidation.
 
+The completed database foundation is documented in [driver contracts and adapter layout](../knowledge/domains/data/database-drivers-and-dialers.md) and [ADR-004](../knowledge/decisions/adr-004-optional-driver-wheels-and-shm-ownership.md).
+
 ## 2. Planned Feature Specifications (`state: planned`)
 
-- [`db-layout-and-contract`](db-layout-and-contract/spec.md) (`t01`–`t07`) — Adapter package layout (`vertebra/db/adapters/<engine>`), standalone `vertebra-bigquery` and `vertebra-spanner` wheels, unified `SyncDatabaseDriver` / `AsyncDatabaseDriver` contract and `DatabaseError` hierarchy, capability protocols, polymorphic `DatabaseRegistry`, upward-import gate, and `pytest-databases` conformance suite.
 - [`db-engine-primitives`](db-engine-primitives/spec.md) (`t01`–`t07`) — Engine primitives relocation (`notify.py`, `change_stream.py`, `embeddings.py`, `vertebra.agent.tools`), `ChannelBus` decoupling, `SyncQueryPipeline` / `AsyncQueryPipeline` removal in favor of `SyncPipelineCapable` / `AsyncPipelineCapable`, and dialect-agnostic `rls.py`.
 
 ## 3. Draft Child Flow Charters (`state: draft`)

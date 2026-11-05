@@ -11,11 +11,11 @@ research:
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 4
 plan_commit: "f741701"
-state_revision: 0
+state_revision: 1
 current_task: null
 last_verified_checkpoint: null
 created_at: 2026-11-03T04:05:00Z
-updated_at: 2026-11-04T01:05:00Z
+updated_at: "2026-11-05T01:03:53Z"
 tags: [prd, drivers, rust, broker, storage, postgres, oracle, mysql, mssql]
 ---
 
@@ -36,8 +36,8 @@ Two product commitments, both feature complete:
 - **MySQL.** `mysql.rs` has packet framing, the `caching_sha2` scramble, `COM_QUERY`/`COM_STMT_PREPARE` encoders, and `MysqlPool` leases. The Python driver uses `pymysql` and `memory://` rows.
 - **Oracle.** `oracle.rs` and `tns.rs` have TTC piggyback, OSON, VECTOR, and TNS descriptor codecs. The Python driver executes against `sqlite3.connect(":memory:")`.
 - **MSSQL.** `mssql.rs` has TDS packet/SQL-batch encoders and `MssqlPool` leases. The Python driver executes against `sqlite3.connect(":memory:")`.
-- **SQLite, DuckDB, and DataFusion.** SQLite and DuckDB use Python `sqlite3` and `duckdb` modules, and both DuckDB and `DataFusionEngine` fall back silently to `sqlite3` (`DataFusionEngine` fallback removed in Chapter 1 `db-layout-and-contract`; DuckDB cut over in Chapter 6).
-- **BigQuery and Spanner.** Migrated onto `google-cloud-spanner =0.34.8-preview` and `google-cloud-bigquery =0.19.0` (`rustls` + `ring`) alongside Vertebra's BigQuery REST client, `SyncGcpTokenCache` / `AsyncGcpTokenCache` (`GcpTokenCredentials`), `VTBARROW` SHM streaming, panic/cancel-safe async completion over `AsyncCompletionQueue`, and typed `GoogleCloudError` subclasses (`gcp-wire-protocol-correctness` and `gcp-driver-resilience`). Currently compiled directly into `vertebra-db` and `vertebra-py` (`vertebra._vertebra`); Chapter 1 extracts `src/rs/vertebra-bigquery` (`vertebra._bigquery`) and `src/rs/vertebra-spanner` (`vertebra._spanner`) into standalone optional wheels and aligns their Python driver contract and multi-base `DatabaseError` inheritance.
+- **SQLite, DuckDB, and DataFusion.** SQLite uses Python `sqlite3`. DuckDB and other embedded native cutovers remain Chapter 6 work. `DataFusionEngine` requires DataFusion for execution and propagates missing-dependency and query failures.
+- **BigQuery and Spanner.** `vertebra._bigquery` and `vertebra._spanner` provide standalone client bindings with official Google Cloud Rust SDKs, Arrow SHM transfer, panic/cancel-safe completion, and canonical `GoogleCloudError` / `DatabaseError` exceptions. The [database foundation](../../knowledge/domains/data/database-drivers-and-dialers.md) defines the shared contract, and [ADR-004](../../knowledge/decisions/adr-004-optional-driver-wheels-and-shm-ownership.md) records the wheel and ownership boundary.
 - **Redis/Valkey.** RESP3 wire codec in `resp3.rs`; the Python driver still uses Python sockets/parsers and has a `memory://` mode.
 - **Broker.** `vertebra-core/src/broker.rs`, `vertebra-py/src/broker.rs`, `extensions/broker/transport.py::{SyncSHMBrokerTransport, AsyncSHMBrokerTransport}`, and `extensions/sqlspec/plugin.py::{ProxySyncConfig, ProxyAsyncConfig}` perform slot admission without owning server connections or serving `BrokerRpcRequest` frames across workers (addressed in Chapter 3 `broker-pool-sharing`).
 
@@ -90,7 +90,7 @@ Two product commitments, both feature complete:
 
 | Ch | Flow ID | Title | Key Deliverables | Depends on | State |
 | --- | --- | --- | --- | --- | --- |
-| 1 | `db-layout-and-contract` | Adapter package layout, GCP wheel extraction, driver contract, and conformance suite | Package move (`db/adapters/<engine>`, `vertebra-db/src/<engine>`), `connection.rs` + `py_async.rs`, `DatabaseError` hierarchy on `_vertebra`, standalone `vertebra-bigquery` & `vertebra-spanner` wheels + `[bigquery]`/`[spanner]`/`[storage]` extras, unified `Sync*`/`Async*` driver contract & capability protocols, polymorphic `DatabaseRegistry` + `provide_driver`, import gate, conformance suite | integration-remediation Ch1, Ch2, Ch9 | planned |
+| 1 | `db-layout-and-contract` | Adapter package layout, GCP wheel extraction, driver contract, and conformance suite | Package move (`db/adapters/<engine>`, `vertebra-db/src/<engine>`), `connection.rs` + `py_async.rs`, `DatabaseError` hierarchy on `_vertebra`, standalone `vertebra-bigquery` & `vertebra-spanner` wheels + `[bigquery]`/`[spanner]`/`[storage]` extras, unified `Sync*`/`Async*` driver contract & capability protocols, polymorphic `DatabaseRegistry` + `provide_driver`, import gate, conformance suite | integration-remediation Ch1, Ch2, Ch9 | completed |
 | 2 | `native-postgres-driver` | Rust PostgreSQL client (`vertebra-postgres`) | `src/rs/vertebra-postgres` (`vertebra._postgres`, `[postgres]` extra): Startup/SCRAM-SHA-256/TLS/IAM, extended protocol, binary codecs, statement cache, `COPY`, live `LISTEN`/`NOTIFY` (`SyncPostgresNotificationSource`/`AsyncPostgresNotificationSource`), single-`Sync` `pipeline()`, `CancelRequest`, `VTBARROW`; `psycopg`/`asyncpg` removed | 1; integration-remediation `db-engine-primitives` | draft |
 | 3 | `broker-pool-sharing` | Shared pools for any SQLSpec, Advanced Alchemy, or SQLAlchemy config | Broker-owned pools, `dbrpc` SHM frames, session/transaction affinity, `VTBARROW` streaming, `ProxySync/AsyncConfig` for upstream configs, `extensions/sqlalchemy/{dbapi,pool}.py` (`SyncDBAPI*`/`AsyncDBAPI*`), crash reclamation | 1, 2; integration-remediation `db-engine-primitives` | draft |
 | 4 | `native-oracle-driver` | Rust Oracle thin client (`vertebra-oracle`) | `src/rs/vertebra-oracle` (`vertebra._oracle`, `[oracle]` extra): `oracledb =26.0.0-beta.5` on worker threads over `SyncCompletionQueue`/`AsyncCompletionQueue`, TNS/wallets/TLS, TTC binds/defines, LOBs, OSON/VECTOR, DRCP, sequential `pipeline()`, `arrow-ipc 59` -> `VTBARROW`, TxEventQ `NotificationSource`; `sqlite3` stand-in removed | 1; integration-remediation `db-engine-primitives` | draft |
@@ -100,7 +100,7 @@ Two product commitments, both feature complete:
 
 ### Cross-PRD execution order
 1. **Completed**: `integration-remediation` `critical-correctness-fixes`, `gcp-wire-protocol-correctness`, `gcp-driver-resilience`, and the codebase-wide `Sync*` / `Async*` split on `refactor/sync-async-names`.
-2. **Planned next**: `db-layout-and-contract` (Ch1) -> `integration-remediation/db-engine-primitives` -> `native-postgres-driver` (Ch2) -> `broker-pool-sharing` (Ch3).
+2. **Next**: `integration-remediation/db-engine-primitives` -> `native-postgres-driver` (Ch2) -> `broker-pool-sharing` (Ch3). The shared layout, driver contract, and conformance foundation are complete.
 3. **Subsequent waves**: `native-oracle-driver` (Ch4), `native-mysql-mssql-drivers` (Ch5), `native-embedded-and-cache-drivers` (Ch6), and `storage-completeness` (Ch7) after Ch1 + `db-engine-primitives`; `mcp-webmcp-core` after `db-engine-primitives`; `runtime-structure-and-throughput` after Ch1 + `db-engine-primitives`; `sqlspec-adapter-parity` after Ch1–Ch6 + `db-engine-primitives`; `sqlalchemy-and-django-integration` after Ch3 + Ch7 + `db-engine-primitives`; and `queues-tasks-and-channels` after Ch2 + Ch4 + Ch6 + `sqlspec-adapter-parity`.
 
 ## 4. Global Constraints
@@ -139,7 +139,7 @@ The global constraints from [integration-remediation](../integration-remediation
 
 ## Implementation Plan
 
-- [ ] db-layout-and-contract — Adapter package layout, GCP wheel extraction, driver contract, and conformance suite (../db-layout-and-contract/spec.md)
+- [x] [1fc52474] db-layout-and-contract — Adapter layout, standalone GCP wheels, unified contract, and conformance suite (archived in `log.md`).
 - [ ] native-postgres-driver — Rust PostgreSQL client (../native-postgres-driver/spec.md)
 - [ ] broker-pool-sharing — Shared pools for any SQLSpec, Advanced Alchemy, or SQLAlchemy config (../broker-pool-sharing/spec.md)
 - [ ] native-oracle-driver — Rust Oracle thin client (../native-oracle-driver/spec.md)
@@ -150,9 +150,9 @@ The global constraints from [integration-remediation](../integration-remediation
 ## Continuity Snapshot
 
 - **Flow ID:** `native-data-platform` (`state: planned`, `plan_revision: 4`, `plan_commit: "f741701"`)
-- **Active Focus:** Chapter 1 (`db-layout-and-contract`, `t01`–`t07`) planned on `refactor/sync-async-names` and awaiting user review before implementation.
+- **Active Focus:** The database foundation is complete. `integration-remediation/db-engine-primitives` is the next planned flow; native engine cutovers and shared broker pools remain unfinished.
 - **Key decisions** *(user, 2026-11-03 – 2026-11-04)*:
-  - Shared broker pools for any Advanced Alchemy / SQLSpec config and Vertebra's own Rust drivers across all engines are required and feature complete.
+  - Shared broker pools for Advanced Alchemy / SQLSpec configs and native Rust drivers across all engines remain required acceptance targets for their owning child flows.
   - Layout: `vertebra/db/adapters/<engine>/` for Python engine code, `vertebra/db/*` for engine-agnostic code, shared `vertebra-db` (`rlib`) for Rust primitives/codecs, and standalone PyO3 extension crates `src/rs/vertebra-<engine>` (`vertebra._<engine>`) + `[project.optional-dependencies].<engine>` per database engine.
   - Leading `Sync*` / `Async*` class split across Rust and Python with zero compatibility aliases.
 - **Research:** [gap-analysis_20261103.md](research/gap-analysis_20261103.md) and [rust-driver-crates_20261103.md](research/rust-driver-crates_20261103.md).
