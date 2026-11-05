@@ -21,7 +21,7 @@ uv add "vertebra-core[spanner]"
 
 ## Unified Driver Contract & `provide_driver`
 
-Every SQL and analytical adapter under `vertebra.db.adapters.<engine>` pairs a `BaseDatabaseConfig` struct (`url_schemes`, `from_url`, `pool_key`) with `SyncDatabaseDriver` and `AsyncDatabaseDriver` implementations sharing a uniform execution contract:
+The PostgreSQL, MySQL, SQLite, Oracle, MSSQL, DuckDB, BigQuery, and Spanner adapters pair a `BaseDatabaseConfig` struct (`url_schemes`, `from_url`, `pool_key`) with `SyncDatabaseDriver` and `AsyncDatabaseDriver` implementations sharing a uniform execution contract:
 
 - **DML & Tuple Execution**: `execute(sql, parameters) -> int`, `execute_many(sql, parameter_sets) -> int`, `execute_tuples(sql, parameters) -> list[tuple]`, and `execute_with_description(sql, parameters) -> tuple[list[tuple], tuple[str, ...]]`.
 - **Typed Row & Scalar Queries**: `select(sql, parameters, *, schema_type=None)`, `select_one(...)` (raises `NotFoundError` when `0` rows match), `select_one_or_none(...) -> Any | None`, and `select_value(sql, parameters, *, value_type=None)` (raises `NotFoundError` on `0` rows and returns `None` for a single-row SQL `NULL`).
