@@ -534,9 +534,8 @@ class SpannerSyncDriver(BaseSyncDriver):
         if self._read_only:
             raise ImproperConfigurationError("Cannot execute DML inside a read-only Spanner snapshot session")
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared = self._prepare(sql_str)
         params = self._normalize_params(parameters)
-        return self._core.execute(prepared, params)
+        return self._core.execute(sql_str, params)
 
     def execute_many(
         self,
@@ -552,8 +551,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         if self._read_only:
             raise ImproperConfigurationError("Cannot execute batch DML inside a read-only Spanner snapshot session")
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared = self._prepare(sql_str)
-        statements = [(prepared, p) for p in parameters]
+        statements = [(sql_str, p) for p in parameters]
         counts = self._core.execute_batch_dml(statements)
         return sum(counts)
 
@@ -600,19 +598,17 @@ class SpannerSyncDriver(BaseSyncDriver):
 
         all_dml = all(sql.strip().upper().startswith(("INSERT", "UPDATE", "DELETE")) for sql, _ in normalized)
         if all_dml and not self._read_only:
-            prepared_batch = [(self._prepare(sql), params) for sql, params in normalized]
-            return list(self._core.execute_batch_dml(prepared_batch))
+            return list(self._core.execute_batch_dml(normalized))
 
         if in_transaction and not self._read_only:
 
             def _run_stack(tx: Any) -> list[Any]:
                 results: list[Any] = []
                 for sql, params in normalized:
-                    prepared = self._prepare(sql)
-                    if prepared.strip().upper().startswith(("SELECT", "WITH", "GRAPH")):
-                        results.append(tx.query(prepared, params))
+                    if sql.strip().upper().startswith(("SELECT", "WITH", "GRAPH")):
+                        results.append(tx.query(sql, params))
                     else:
-                        results.append(tx.execute(prepared, params))
+                        results.append(tx.execute(sql, params))
                 return results
 
             return cast("list[Any]", self._core.run_in_transaction(_run_stack))
@@ -636,11 +632,10 @@ class SpannerSyncDriver(BaseSyncDriver):
         """Execute a ``SELECT`` query and hydrate rows as dictionaries or ``schema_type``."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared = self._prepare(sql_str)
         params = self._normalize_params(parameters)
         if self._active_snapshot is not None:
-            return self._active_snapshot.query(prepared, params, schema_type=schema_type)
-        return self._core.select(prepared, params, schema_type=schema_type)
+            return self._active_snapshot.query(sql_str, params, schema_type=schema_type)
+        return self._core.select(sql_str, params, schema_type=schema_type)
 
     def select_one(
         self,
@@ -653,11 +648,10 @@ class SpannerSyncDriver(BaseSyncDriver):
         """Execute a query and return the first row."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared = self._prepare(sql_str)
         params = self._normalize_params(parameters)
         if self._active_snapshot is not None:
-            return self._active_snapshot.query_one(prepared, params, schema_type=schema_type)
-        return self._core.select_one(prepared, params, schema_type=schema_type)
+            return self._active_snapshot.query_one(sql_str, params, schema_type=schema_type)
+        return self._core.select_one(sql_str, params, schema_type=schema_type)
 
     def select_one_or_none(
         self,
@@ -681,9 +675,8 @@ class SpannerSyncDriver(BaseSyncDriver):
         """Execute a query and return the first scalar column of the first row."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared = self._prepare(sql_str)
         params = self._normalize_params(parameters)
-        return self._core.select_value(prepared, params)
+        return self._core.select_value(sql_str, params)
 
     def snapshot(
         self,
@@ -719,7 +712,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         params: Mapping[str, Any] | Sequence[Any] | None = None,
     ) -> int:
         """Execute bulk Partitioned DML across database splits."""
-        return self._core.execute_partitioned_dml(self._prepare(sql), params)
+        return self._core.execute_partitioned_dml(sql, params)
 
     def apply_mutations(
         self,
@@ -756,7 +749,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         """Execute a parallel ``PartitionQuery`` scan (with ``data_boost``) into a zero-copy ``ArrowCursor``."""
         _ = kwargs
         raw_str = sql_or_table.sql if hasattr(sql_or_table, "sql") else str(sql_or_table)
-        sql = self._prepare(raw_str) if " " in raw_str.strip() else self._prepare(f"SELECT * FROM {raw_str}")
+        sql = raw_str if " " in raw_str.strip() else f"SELECT * FROM {raw_str}"
         params = self._normalize_params(parameters)
         return self._core.select_to_arrow(
             sql,
@@ -793,7 +786,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         _ = kwargs
         backend = self._require_storage(storage_backend)
         raw_str = sql_or_table.sql if hasattr(sql_or_table, "sql") else str(sql_or_table)
-        sql = self._prepare(raw_str) if " " in raw_str.strip() else self._prepare(f"SELECT * FROM {raw_str}")
+        sql = raw_str if " " in raw_str.strip() else f"SELECT * FROM {raw_str}"
         params = self._normalize_params(parameters)
         normalized_fmt: Literal["parquet", "arrow", "jsonl"] = "jsonl" if format == "csv" else format
         return self._core.export_to_object_store(
@@ -830,9 +823,6 @@ class SpannerSyncDriver(BaseSyncDriver):
             format=normalized_fmt,
             upsert=upsert,
         )
-
-    def _prepare(self, sql: str) -> str:
-        return sql
 
     def _require_storage(self, override: ObjectStoreBackend | None = None) -> ObjectStoreBackend:
         backend = override or self._storage_backend
@@ -929,9 +919,8 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         if self._read_only:
             raise ImproperConfigurationError("Cannot execute DML inside a read-only Spanner snapshot session")
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared = self._prepare(sql_str)
         params = BaseSyncDriver._normalize_params(parameters)
-        return await self._core.execute(prepared, params)
+        return await self._core.execute(sql_str, params)
 
     async def execute_many(
         self,
@@ -947,8 +936,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         if self._read_only:
             raise ImproperConfigurationError("Cannot execute batch DML inside a read-only Spanner snapshot session")
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared = self._prepare(sql_str)
-        statements = [(prepared, p) for p in parameters]
+        statements = [(sql_str, p) for p in parameters]
         counts = await self._core.execute_batch_dml(statements)
         return sum(counts)
 
@@ -995,19 +983,17 @@ class SpannerAsyncDriver(BaseAsyncDriver):
 
         all_dml = all(sql.strip().upper().startswith(("INSERT", "UPDATE", "DELETE")) for sql, _ in normalized)
         if all_dml and not self._read_only:
-            prepared_batch = [(self._prepare(sql), params) for sql, params in normalized]
-            return list(await self._core.execute_batch_dml(prepared_batch))
+            return list(await self._core.execute_batch_dml(normalized))
 
         if in_transaction and not self._read_only:
 
             async def _run_stack(tx: Any) -> list[Any]:
                 results: list[Any] = []
                 for sql, params in normalized:
-                    prepared = self._prepare(sql)
-                    if prepared.strip().upper().startswith(("SELECT", "WITH", "GRAPH")):
-                        results.append(await tx.query(prepared, params))
+                    if sql.strip().upper().startswith(("SELECT", "WITH", "GRAPH")):
+                        results.append(await tx.query(sql, params))
                     else:
-                        results.append(await tx.execute(prepared, params))
+                        results.append(await tx.execute(sql, params))
                 return results
 
             return cast("list[Any]", await self._core.run_in_transaction(_run_stack))
@@ -1031,11 +1017,10 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         """Asynchronously execute a ``SELECT`` query."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared = self._prepare(sql_str)
         params = BaseSyncDriver._normalize_params(parameters)
         if self._active_snapshot is not None:
-            return await self._active_snapshot.query(prepared, params, schema_type=schema_type)
-        return await self._core.select(prepared, params, schema_type=schema_type)
+            return await self._active_snapshot.query(sql_str, params, schema_type=schema_type)
+        return await self._core.select(sql_str, params, schema_type=schema_type)
 
     async def select_one(
         self,
@@ -1048,11 +1033,10 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         """Asynchronously execute a query and return the first row."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared = self._prepare(sql_str)
         params = BaseSyncDriver._normalize_params(parameters)
         if self._active_snapshot is not None:
-            return await self._active_snapshot.query_one(prepared, params, schema_type=schema_type)
-        return await self._core.select_one(prepared, params, schema_type=schema_type)
+            return await self._active_snapshot.query_one(sql_str, params, schema_type=schema_type)
+        return await self._core.select_one(sql_str, params, schema_type=schema_type)
 
     async def select_one_or_none(
         self,
@@ -1076,9 +1060,8 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         """Asynchronously execute a query and return the first scalar column of the first row."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared = self._prepare(sql_str)
         params = BaseSyncDriver._normalize_params(parameters)
-        return await self._core.select_value(prepared, params)
+        return await self._core.select_value(sql_str, params)
 
     def snapshot(
         self,
@@ -1114,7 +1097,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         params: Mapping[str, Any] | Sequence[Any] | None = None,
     ) -> int:
         """Asynchronously execute Partitioned DML."""
-        return await self._core.execute_partitioned_dml(self._prepare(sql), params)
+        return await self._core.execute_partitioned_dml(sql, params)
 
     async def apply_mutations(
         self,
@@ -1151,7 +1134,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         """Asynchronously execute a parallel ``PartitionQuery`` scan into a zero-copy ``ArrowCursor``."""
         _ = kwargs
         raw_str = sql_or_table.sql if hasattr(sql_or_table, "sql") else str(sql_or_table)
-        sql = self._prepare(raw_str) if " " in raw_str.strip() else self._prepare(f"SELECT * FROM {raw_str}")
+        sql = raw_str if " " in raw_str.strip() else f"SELECT * FROM {raw_str}"
         params = BaseSyncDriver._normalize_params(parameters)
         return await self._core.select_to_arrow(
             sql,
@@ -1188,7 +1171,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         _ = kwargs
         backend = self._require_storage(storage_backend)
         raw_str = sql_or_table.sql if hasattr(sql_or_table, "sql") else str(sql_or_table)
-        sql = self._prepare(raw_str) if " " in raw_str.strip() else self._prepare(f"SELECT * FROM {raw_str}")
+        sql = raw_str if " " in raw_str.strip() else f"SELECT * FROM {raw_str}"
         params = BaseSyncDriver._normalize_params(parameters)
         normalized_fmt: Literal["parquet", "arrow", "jsonl"] = "jsonl" if format == "csv" else format
         return await self._core.export_to_object_store(
@@ -1225,9 +1208,6 @@ class SpannerAsyncDriver(BaseAsyncDriver):
             format=normalized_fmt,
             upsert=upsert,
         )
-
-    def _prepare(self, sql: str) -> str:
-        return sql
 
     def _require_storage(self, override: ObjectStoreBackend | None = None) -> ObjectStoreBackend:
         backend = override or self._storage_backend

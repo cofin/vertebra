@@ -369,11 +369,10 @@ class BigQuerySyncDriver(BaseSyncDriver):
         """Execute a GoogleSQL statement and return affected or produced row count."""
         _ = (statement_config, kwargs)
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = self._normalize_params(parameters)
         return int(
             self._core.execute(
-                prepared_sql,
+                sql_str,
                 params,
                 job_labels=job_labels,
                 destination_table=destination_table,
@@ -395,8 +394,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
         """Execute ``sql`` across multiple parameter sets and return total affected rows."""
         _ = (filters, statement_config, kwargs)
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
-        return int(self._core.execute_many(prepared_sql, parameters))
+        return int(self._core.execute_many(sql_str, parameters))
 
     def execute_script(
         self,
@@ -444,9 +442,8 @@ class BigQuerySyncDriver(BaseSyncDriver):
         """Execute a ``SELECT`` query and hydrate rows into dictionaries or ``schema_type`` structs."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = self._normalize_params(parameters)
-        res: list[Any] = self._core.select(prepared_sql, params, schema_type=schema_type)
+        res: list[Any] = self._core.select(sql_str, params, schema_type=schema_type)
         return res
 
     def select_one(
@@ -461,9 +458,8 @@ class BigQuerySyncDriver(BaseSyncDriver):
         """Execute a ``SELECT`` query and return the first row, raising ``NotFoundError`` if empty."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = self._normalize_params(parameters)
-        return self._core.select_one(prepared_sql, params, schema_type=schema_type)
+        return self._core.select_one(sql_str, params, schema_type=schema_type)
 
     def select_one_or_none(
         self,
@@ -477,9 +473,8 @@ class BigQuerySyncDriver(BaseSyncDriver):
         """Execute a ``SELECT`` query and return the first row or ``None``."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = self._normalize_params(parameters)
-        return self._core.select_one_or_none(prepared_sql, params, schema_type=schema_type)
+        return self._core.select_one_or_none(sql_str, params, schema_type=schema_type)
 
     def select_value(
         self,
@@ -492,9 +487,8 @@ class BigQuerySyncDriver(BaseSyncDriver):
         """Execute a ``SELECT`` query and return the first scalar column of the first row."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = self._normalize_params(parameters)
-        return self._core.select_value(prepared_sql, params)
+        return self._core.select_value(sql_str, params)
 
     def dry_run(
         self,
@@ -504,8 +498,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
         tenant_id: str | None = None,
     ) -> BigQueryDryRunResult:
         """Validate ``sql`` via ``jobs.insert(dryRun=True)`` and return byte and USD cost estimates."""
-        prepared_sql = self._prepare_sql(sql, tenant_id=tenant_id)
-        res: BigQueryDryRunResult = self._core.dry_run(prepared_sql, parameters)
+        res: BigQueryDryRunResult = self._core.dry_run(sql, parameters)
         return res
 
     def select_to_arrow(
@@ -640,9 +633,6 @@ class BigQuerySyncDriver(BaseSyncDriver):
         """Close the underlying ``SyncBigQueryDriver``."""
         self._core.close()
 
-    def _prepare_sql(self, sql: str, *, tenant_id: str | None = None) -> str:
-        return sql
-
     def _execute_stack_item(
         self,
         item: str | tuple[str, Mapping[str, Any] | Sequence[Any] | None],
@@ -737,11 +727,10 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         """Asynchronously execute a GoogleSQL statement and return affected or produced row count."""
         _ = (statement_config, kwargs)
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = BaseSyncDriver._normalize_params(parameters)
         return int(
             await self._core.execute(
-                prepared_sql,
+                sql_str,
                 params,
                 job_labels=job_labels,
                 destination_table=destination_table,
@@ -763,8 +752,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         """Asynchronously execute ``sql`` across multiple parameter sets and return total affected rows."""
         _ = (filters, statement_config, kwargs)
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
-        return int(await self._core.execute_many(prepared_sql, parameters))
+        return int(await self._core.execute_many(sql_str, parameters))
 
     async def execute_script(
         self,
@@ -812,9 +800,8 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         """Asynchronously execute a ``SELECT`` query and hydrate rows."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = BaseSyncDriver._normalize_params(parameters)
-        res: list[Any] = await self._core.select(prepared_sql, params, schema_type=schema_type)
+        res: list[Any] = await self._core.select(sql_str, params, schema_type=schema_type)
         return res
 
     async def select_one(
@@ -829,9 +816,8 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         """Asynchronously execute a ``SELECT`` query and return the first row, raising ``NotFoundError`` if empty."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = BaseSyncDriver._normalize_params(parameters)
-        return await self._core.select_one(prepared_sql, params, schema_type=schema_type)
+        return await self._core.select_one(sql_str, params, schema_type=schema_type)
 
     async def select_one_or_none(
         self,
@@ -845,9 +831,8 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         """Asynchronously execute a ``SELECT`` query and return the first row or ``None``."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = BaseSyncDriver._normalize_params(parameters)
-        return await self._core.select_one_or_none(prepared_sql, params, schema_type=schema_type)
+        return await self._core.select_one_or_none(sql_str, params, schema_type=schema_type)
 
     async def select_value(
         self,
@@ -860,9 +845,8 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         """Asynchronously execute a ``SELECT`` query and return the first scalar value."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = BaseSyncDriver._normalize_params(parameters)
-        return await self._core.select_value(prepared_sql, params)
+        return await self._core.select_value(sql_str, params)
 
     async def dry_run(
         self,
@@ -872,8 +856,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         tenant_id: str | None = None,
     ) -> BigQueryDryRunResult:
         """Asynchronously validate ``sql`` via ``jobs.insert(dryRun=True)``."""
-        prepared_sql = self._prepare_sql(sql, tenant_id=tenant_id)
-        res: BigQueryDryRunResult = await self._core.dry_run(prepared_sql, parameters)
+        res: BigQueryDryRunResult = await self._core.dry_run(sql, parameters)
         return res
 
     async def select_to_arrow(
@@ -1007,9 +990,6 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
     async def close(self) -> None:
         """Close the underlying ``AsyncBigQueryDriver``."""
         await self._core.close()
-
-    def _prepare_sql(self, sql: str, *, tenant_id: str | None = None) -> str:
-        return sql
 
     async def _execute_stack_item_async(
         self,
