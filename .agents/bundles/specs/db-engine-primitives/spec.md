@@ -2,19 +2,19 @@
 type: Spec
 flow_id: db-engine-primitives
 title: Engine Primitives Relocation and SyncQueryPipeline / AsyncQueryPipeline Removal
-description: Relocate engine-specific CDC, notification, SQL embedding pushdown, row-level security session builders, and GCP database MCP tools out of generic vertebra/db and vertebra/embeddings modules into vertebra/db/adapters/<engine> and vertebra/agent/tools, decouple ChannelBus from DatabaseChannelBackend, and remove the CTE-based SyncQueryPipeline and AsyncQueryPipeline in favor of SyncPipelineCapable / AsyncPipelineCapable native driver pipelining.
+description: Relocate engine-specific CDC, notification, SQL embedding pushdown, row-level security session builders, and GCP database MCP tools out of generic vertebra/db and vertebra/embeddings modules into owning vertebra/db/adapters/<engine> modules, with neutral typed ToolProvider contracts and a generic vertebra/agent/tools consumer, decouple ChannelBus from DatabaseChannelBackend, and remove the CTE-based SyncQueryPipeline and AsyncQueryPipeline in favor of SyncPipelineCapable / AsyncPipelineCapable native driver pipelining.
 state: "active"
 parent_prd: integration-remediation
 research:
   - ../integration-remediation/research/audit-findings_20261103.md
   - ../native-data-platform/research/gap-analysis_20261103.md
-plan_revision: 8
-plan_commit: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
-state_revision: 10
-current_task: null
+plan_revision: 10
+plan_commit: "05bc06a5a53a1225d8c62495ac69162a15d935fc"
+state_revision: 12
+current_task: "db-engine-primitives:t05"
 last_verified_checkpoint: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
 created_at: 2026-11-03T03:30:00Z
-updated_at: "2026-11-05T04:22:41Z"
+updated_at: "2026-11-05T05:05:25Z"
 tags: [db, layering, cdc, embeddings, agent-tools, pipeline, rls]
 ---
 
@@ -29,18 +29,18 @@ The [database foundation](../../knowledge/domains/data/database-drivers-and-dial
 - `src/py/vertebra/db/cdc.py` bundles PostgreSQL logical replication settings (`replication_slot_name`, `publication_name`, `max_slot_wal_keep_size_mb`, `spill_table`), `pg_logical_emit_message($1, $2, $3)`, an unbounded `_spill_store: dict[int, dict[str, Any]]`, swallowed `SyncObjectStore.get` errors in `hydrate_notification()`, and Spanner change-stream polling (`SpannerChildPartition`, `SpannerChangeStreamRecord`, `SyncSpannerChangeStreamSource`, and `AsyncSpannerChangeStreamSource` using `inspect.isawaitable` duck-typing and required `start_timestamp` kwargs on `stream()`).
 - `src/py/vertebra/db/channels.py` (`DatabaseChannelBackend`) mixes an in-memory asyncio pub/sub fan-out bus with hardcoded PostgreSQL `pg_notify` and Oracle `DBMS_AQ.ENQUEUE` PL/SQL branches, forcing `vertebra.framework.channels.ChannelBus` and `vertebra.extensions.{litestar,starlette,fastapi,flask}.channels` to inherit a database module.
 - `src/py/vertebra/embeddings/{_bigquery,_spanner,_google}.py` embed BigQuery `ML.GENERATE_EMBEDDING`, Spanner `ML.PREDICT`, AlloyDB `embedding()`, and Oracle `DBMS_VECTOR.UTL_TO_EMBEDDING` SQL directly inside `vertebra.embeddings` (with `AlloyDbEmbedder` and `OracleEmbedder` calling a nonexistent `driver.fetch_all` method) rather than adapter-owned `EmbeddingPushdown` implementations consumed via a generic `PushdownEmbedder`.
-- `src/py/vertebra/db/mcp_tools.py` imports `vertebra.agent.core.schema.Tool`, `vertebra.agent.runtime.ConfirmationGate`, and `vertebra.framework.security.PermissionDeniedError`, requiring the sole `_TEMPORARY_UPWARD_IMPORT_ALLOWLIST` exemption in `test_native_db_drivers.py`.
+- Database tool operations require adapter ownership: `BigQueryToolProvider` and `SpannerToolProvider` reside beside their native drivers; shared typing supplies the callable-map `ToolProvider` and explicit `ToolPolicyError`; `vertebra.agent.tools.build_tools` supplies generic typed invocation and confirmation. Neither native providers nor generic DB modules import agent/framework code. `db/mcp_tools.py` remains absent, and vendor modules do not remain under `agent/tools/`.
 - `src/py/vertebra/db/pipeline.py` (`SyncQueryPipeline`, `AsyncQueryPipeline`, `CTEStep`, `RelOverlay`, `PipelineDialect`) compiles multi-statement reads into synthetic CTEs and swallows compilation errors with `with suppress(Exception):` inside `extensions/sqlspec/adapters.py`, whereas Vertebra's pipelining model is wire-level protocol batching via `SyncPipelineCapable.pipeline()` and `AsyncPipelineCapable.pipeline()`.
 - `src/py/vertebra/db/rls.py` (`TenantScopeConfig`, `TenantPredicate`) hardcodes PostgreSQL `guc_name`, `$1::uuid` parameter casts, and `SELECT set_config($1, $2, $3)`.
 
-This flow eliminates every engine leak from `vertebra/db/*` (outside `vertebra/db/adapters/` and the narrow `vertebra/db/registry.py` configuration-registration and annotation-only import exceptions specified in `t07`), deletes `DatabaseChannelBackend` and `SyncQueryPipeline` / `AsyncQueryPipeline`, relocates GCP database MCP tools to `vertebra.agent.tools`, and empties `_TEMPORARY_UPWARD_IMPORT_ALLOWLIST`.
+This flow eliminates every engine leak from `vertebra/db/*` (outside `vertebra/db/adapters/` and the narrow `vertebra/db/registry.py` configuration-registration and annotation-only import exceptions specified in `t07`), deletes `DatabaseChannelBackend` and `SyncQueryPipeline` / `AsyncQueryPipeline`, places native database tool operations on their owning adapters and consumes their neutral provider contract through generic `vertebra.agent.tools`, and empties `_TEMPORARY_UPWARD_IMPORT_ALLOWLIST`.
 
 Engine purity covers engine-specific SQL construction, runtime adapter imports, and executable engine dispatch. Stable broker dialect IDs and other engine identifiers used for protocol registration remain valid metadata. The gate does not use vocabulary or engine-name scans.
 
 **Explicit Non-Goals:**
 - Live Rust wire I/O for PostgreSQL `LISTEN`/`NOTIFY`, Oracle TxEventQ, or Redis/Valkey pub/sub (owned by `native-postgres-driver`, `native-oracle-driver`, and `native-embedded-and-cache-drivers`).
 - Litestar / Starlette distributed channel backends over `NotificationSource` and native `QueueStore` backends (owned by `queues-tasks-and-channels`).
-- `ToolProvider` protocol unification across `MCPCore` and WebMCP (owned by `mcp-webmcp-core`, which adopts `vertebra.agent.tools.{bigquery,spanner}` cleanly).
+- ToolSpec/ToolRegistry discovery consolidation, transport-level MCP/WebMCP projection, and the canonical MCP schema pipeline remain owned by `mcp-webmcp-core`. This flow defines only the neutral callable-map provider seam and the generic existing-Tool consumer required by t05; it adds no descriptor DTO, provider registry, auto config factory, or MCP-core rewrite.
 
 ### 1.2 Upstream Execution Baseline
 
@@ -55,7 +55,7 @@ Engine purity covers engine-specific SQL construction, runtime adapter imports, 
 | Spanner change streams | `src/py/vertebra/db/cdc.py::{SpannerChildPartition,SpannerChangeStreamRecord,SyncSpannerChangeStreamSource,AsyncSpannerChangeStreamSource}` | **Local-substitutable**: Moves to `src/py/vertebra/db/adapters/spanner/change_stream.py` with dedicated sync `SyncSpannerChangeStreamSource(SyncChangeSource)` and async `AsyncSpannerChangeStreamSource(AsyncChangeSource)` carrying constructor-bound defaults so `source.stream()` conforms statically and at runtime to `SyncChangeSource` / `AsyncChangeSource` with zero `inspect.isawaitable` branching. |
 | Channel bus substrate | `src/py/vertebra/db/channels.py::DatabaseChannelBackend`, `src/py/vertebra/server/_channels.py::ChannelBus`, `src/py/vertebra/framework/channels.py::ChannelBus`, `src/py/vertebra/extensions/{litestar,starlette,fastapi,flask}/channels.py` | **In-process**: Deletes `db/channels.py`; places the engine-neutral `ChannelBus` substrate in `vertebra.server._channels` (respecting the zero-`vertebra.framework` import rule for framework extensions), re-exports `ChannelBus` from `vertebra.framework.channels`, and subclasses `ChannelBus` in `vertebra.extensions.{litestar,starlette}.channels`. |
 | Embedding pushdown | `src/py/vertebra/embeddings/{__init__,_base,_bigquery,_spanner,_google}.py` | **Ports & Adapters**: `BigQueryEmbeddingPushdown`, `SpannerEmbeddingPushdown`, `PostgresEmbeddingPushdown`, and `OracleEmbeddingPushdown` in `db/adapters/<engine>/embeddings.py` implementing `EmbeddingPushdown` over `driver.select(...)`; `PushdownEmbedder(Embedder)` in `embeddings/_pushdown.py` overriding `Embedder.__new__` and `_embed_batch_impl`; `lazy_exports` in `embeddings/__init__.py`. |
-| GCP database agent tools | `src/py/vertebra/db/mcp_tools.py`, `src/py/vertebra/agent/__init__.py` | **In-process**: Relocates to `src/py/vertebra/agent/tools/{__init__,bigquery,spanner}.py` (`build_bigquery_tools`, `build_spanner_tools`, `register_gcp_database_tools`) using `provide_driver` and `PermissionDeniedError` from `vertebra.agent.core`, lazy-exported on `vertebra.agent` with `if TYPE_CHECKING:` parity, emptying `_TEMPORARY_UPWARD_IMPORT_ALLOWLIST`. |
+| GCP database tool providers | `src/py/vertebra/_typing.py`, `src/py/vertebra/typing.py`, `src/py/vertebra/db/adapters/{bigquery,spanner}/tools.py`, `src/py/vertebra/agent/tools/__init__.py`, `src/py/vertebra/agent/__init__.py` | **Ports & Adapters**: neutral callable-map `ToolProvider` and explicit `ToolPolicyError`; adapter-owned typed operation classes with lazy `provide_driver`; generic `build_tools` retains resolved method signatures, public `Tool.invoke` validation, canonical argument/owner-bound tickets, native errors, billing limits, and snapshots. Zero native upward imports and no agent vendor modules. |
 | Pipeline removal | `src/py/vertebra/db/pipeline.py`, `src/py/vertebra/extensions/sqlspec/{__init__,adapters,bigquery,spanner}.py`, `README.md`, `docs/usage/query-pipelines.md`, `zensical.toml` | **Clean-break removal**: Deletes `db/pipeline.py` (`SyncQueryPipeline`, `AsyncQueryPipeline`) and `docs/usage/query-pipelines.md` (with redirect to `usage/databases.md`), routes multi-operation `execute_stack` through `SyncPipelineCapable.pipeline()` / `AsyncPipelineCapable.pipeline()` when supported, and updates `README.md`, `docs/`, and OKF `sources:`. |
 | Dialect-agnostic RLS | `src/py/vertebra/db/rls.py`, `src/py/vertebra/db/adapters/{postgres,oracle}/core.py`, `src/py/vertebra/extensions/sqlspec/{adapters,bigquery,spanner}.py` | **In-process**: Keeps `TenantScopeConfig` and `TenantPredicate` ANSI-neutral in `db/rls.py`, moves PostgreSQL `set_config` / `$N::<cast>` builders to `PostgreSQLCore` and Oracle context builders to `OracleCore`, and removes dead `getattr(self._tenant_predicate, "apply", None)` branches. |
 
@@ -65,7 +65,7 @@ Engine purity covers engine-specific SQL construction, runtime adapter imports, 
 - [Framework Extensions: Litestar, Starlette, FastAPI, Flask, and Django](../../knowledge/domains/extensions/litestar.md) — Enforces zero `vertebra.framework.*` imports inside `vertebra.extensions.*`, sharing substrates through `vertebra.server._*` (`vertebra.server._channels.ChannelBus`).
 - [Query Pipelines, Change Feeds, Tenant Predicates & DataFusion](../../knowledge/domains/data/query-pipeline-cdc-and-tenancy.md) — Updated with each owning task: `t01` documents bounded engine-neutral CDC and PostgreSQL notification primitives, `t02` documents relocated Spanner readers, `t06` replaces all CTE compiler prose, links, and provenance with native pipeline capabilities, and `t07` documents dialect-agnostic tenancy and the precise registry import exceptions.
 - [Shared-Memory Vector Slabs, Zero-Weight Cloud & SQL Embeddings, and Local Broker](../../knowledge/domains/agent/embeddings-and-vectors.md) — Updated in `t04` and `t07` to document `EmbeddingPushdown` adapter implementations and `PushdownEmbedder`.
-- [Agentic Harness, MCP 2026-07-28 & A2A 1.0 Protocols](../../knowledge/domains/agent/mcp-and-a2a-protocol-harness.md) — `Tool`, `ConfirmationGate`, and `PermissionDeniedError` conventions consumed by `vertebra.agent.tools`.
+- [Agentic Harness, MCP 2026-07-28 & A2A 1.0 Protocols](../../knowledge/domains/agent/mcp-and-a2a-protocol-harness.md) — `ToolProvider`, `ToolPolicyError`, adapter-owned providers, generic `build_tools`, and token-free argument/owner-bound `Tool` / `ConfirmationGate` invocation.
 - Domain skills: [`python-framework`](../../../skills/python-framework/SKILL.md), [`pyo3-bridge`](../../../skills/pyo3-bridge/SKILL.md).
 
 ## 2. Requirements & Architecture
@@ -76,9 +76,9 @@ Engine purity covers engine-specific SQL construction, runtime adapter imports, 
 - **R2 (Spanner Change Stream Relocation & `SyncChangeSource` / `AsyncChangeSource` Conformance)**: Move `SpannerChildPartition`, `SpannerChangeStreamRecord`, `SyncSpannerChangeStreamSource`, and `AsyncSpannerChangeStreamSource` out of `src/py/vertebra/db/cdc.py` into `src/py/vertebra/db/adapters/spanner/change_stream.py` (re-exported on `vertebra.db.adapters.spanner`), with constructor-bound stream defaults on both `SyncSpannerChangeStreamSource(SyncChangeSource)` (`def stream(...) -> Iterator[ChangeEvent]`) and `AsyncSpannerChangeStreamSource(AsyncChangeSource)` (`def stream(...) -> AsyncIterator[ChangeEvent]`) so `source.stream()` accepts zero required arguments and executes with zero `inspect.isawaitable` / `asyncio.iscoroutine` inspection.
 - **R3 (`DatabaseChannelBackend` Deletion & `ChannelBus` Substrate)**: Delete `src/py/vertebra/db/channels.py`, implement engine-neutral bounded replay history, asyncio subscriber queues, `ChangeFeed` envelope hydration, and optional `NotificationSource` / `AsyncChangeSource` bridging in `src/py/vertebra/server/_channels.py::ChannelBus` with zero SQL or `vertebra.db.adapters.*` imports, re-export `ChannelBus` from `src/py/vertebra/framework/channels.py`, subclass `ChannelBus` in `vertebra.extensions.{litestar,starlette}.channels` via protected `_register_stream_queue` / `_unregister_stream_queue` hooks, and update `docs/usage/extensions.md` and `.agents/bundles/knowledge/domains/extensions/litestar.md`.
 - **R4 (Adapter `EmbeddingPushdown` Implementations & `PushdownEmbedder`)**: Create `src/py/vertebra/db/adapters/{bigquery,spanner,postgres,oracle}/embeddings.py` implementing `EmbeddingPushdown` (`BigQueryEmbeddingPushdown`, `SpannerEmbeddingPushdown`, `PostgresEmbeddingPushdown`, `OracleEmbeddingPushdown`) executing parameterized SQL via `driver.select(...)` (`isinstance(driver, AsyncDatabaseDriver)` vs `asyncio.to_thread(driver.select, ...)`) with dialect-scoped `validate_identifier` enforcement and zero imports from `vertebra.embeddings`; add `src/py/vertebra/embeddings/_pushdown.py::PushdownEmbedder(Embedder)` overriding `Embedder.__new__` (`object.__new__(cls)`), `_embed_single_impl` (delegating `task == "query"` when `title is None` directly to `self._pushdown.embed_query(...)`), `_embed_batch_impl`, and `vector_search`; delete `src/py/vertebra/embeddings/{_bigquery,_spanner}.py` and remove `AlloyDbEmbedder` and `OracleEmbedder` from `src/py/vertebra/embeddings/_google.py`; convert `src/py/vertebra/embeddings/__init__.py` to `lazy_exports`; and update `docs/` and OKF chapters.
-- **R5 (Relocate GCP Database Agent Tools & Empty Import Allowlist)**: Relocate `src/py/vertebra/db/mcp_tools.py` to `src/py/vertebra/agent/tools/{__init__,bigquery,spanner}.py` (`GCPDatabaseToolPolicy`, `is_mutating_sql`, `build_bigquery_tools`, `build_spanner_tools`, `register_gcp_database_tools`) using `provide_driver`, lazy-export them with `if TYPE_CHECKING:` parity on `vertebra.agent`, delete `src/py/vertebra/db/mcp_tools.py`, and empty `_TEMPORARY_UPWARD_IMPORT_ALLOWLIST` (established in `db-layout-and-contract:t06`) in `src/py/tests/unit/db/test_native_db_drivers.py`.
+- **R5 (Adapter-Owned Database Tool Providers & Generic Agent Consumption)**: Define runtime-checkable `ToolProvider.operations() -> Mapping[str, Callable[..., Awaitable[Any]]]` and `ToolProvider.confirmation_reason(operation_name, arguments) -> str | None`, plus explicit neutral `ToolPolicyError(VertebraError, PermissionError)`, in shared typing. Implement `BigQueryToolProvider` and `SpannerToolProvider` in `db/adapters/{bigquery,spanner}/tools.py` with owning adapter exports and lazy native driver resolution. Replace agent vendor modules and GCP builders/policy exports with generic `agent.tools.build_tools(provider, *, confirmation_gate=None) -> dict[str, Tool]`, retaining original resolved bound signatures, typed Tool.invoke conversion, canonical defaults, real AgentContext identity, and tickets bound to tool/token-free arguments/owner. Adapter policy owns conservative confirmation classification separately from native routing, minimum applicable BigQuery billing caps enforced in native requests, and Spanner snapshot/staleness behavior. Map only ToolPolicyError to agent PermissionDeniedError; native exceptions retain identity. Keep db.mcp_tools absent and the upward-import allowlist empty without shims, agent vendor dispatch, descriptor DTO, provider registry, or automatic config factory.
 - **R6 (`SyncQueryPipeline` / `AsyncQueryPipeline` Removal & `SyncPipelineCapable` / `AsyncPipelineCapable` Dispatch)**: Delete `src/py/vertebra/db/pipeline.py`, remove `SyncQueryPipeline`/`AsyncQueryPipeline`/`CTEStep`/`RelOverlay`/`PipelineDialect` exports and usages across `vertebra.db` and `vertebra.extensions.sqlspec`, update `execute_stack` in `extensions/sqlspec/{adapters,bigquery,spanner}.py` to batch multi-statement stacks via `self.native_driver.pipeline()` when `isinstance(self.native_driver, SyncPipelineCapable)` (sync) or `isinstance(self.native_driver, AsyncPipelineCapable)` (async) and `not continue_on_error`, delete `docs/usage/query-pipelines.md` (redirected in `zensical.toml` to `usage/databases.md`), and update `README.md`, `docs/`, and OKF `sources:`.
-- **R7 (Dialect-Agnostic `rls.py` & OKF Knowledge Alignment)**: Refactor `src/py/vertebra/db/rls.py` (`TenantScopeConfig`, `TenantPredicate`) to ANSI-neutral `setting_name`, `tenant_column`, `parameter_cast: str | None = None`, and `to_sql_fragment(placeholder: str = "?")`, move PostgreSQL `build_session_guc_sql` and `build_tenant_predicate_sql` onto `PostgreSQLCore` and Oracle `build_session_context_sql` onto `OracleCore`, update `extensions/sqlspec/{adapters,bigquery,spanner}.py` and `docs/usage/analytics-and-cdc.md`, enforce an AST/source test verifying zero engine leaks in `vertebra/db/*.py` and `vertebra/db/driver/*.py` (permitting only the narrow `registry.py` declarative configuration-registration and annotation-only driver imports specified in `t07`, while rejecting runtime adapter-driver imports and executable engine dispatch), and update OKF chapters.
+- **R7 (Dialect-Agnostic `rls.py` & OKF Knowledge Alignment)**: Refactor `src/py/vertebra/db/rls.py` (`TenantScopeConfig`, `TenantPredicate`) to ANSI-neutral `setting_name`, `tenant_column`, `parameter_cast: str | None = None`, and `to_sql_fragment(placeholder: str = "?")`, move PostgreSQL `build_session_guc_sql` and `build_tenant_predicate_sql` onto `PostgreSQLCore` and Oracle `build_session_context_sql` onto `OracleCore`, update `extensions/sqlspec/{adapters,bigquery,spanner}.py` and `docs/usage/analytics-and-cdc.md`, enforce an AST/source test verifying zero engine leaks in `vertebra/db/*.py` and `vertebra/db/driver/*.py` (permitting only the narrow `registry.py` declarative configuration-registration and annotation-only driver imports specified in `t07`, while rejecting runtime adapter-driver imports and executable engine dispatch), and update OKF chapters. All eight BigQuery/Spanner sync/async SQLSpec config and driver constructors reject non-None tenant_predicate with native NotSupportedError as their first executable statement, before base initialization, resolver/default-broker access, supplied-core access, or native I/O. Ordinary None-predicate sessions retain existing behavior; removing dead apply branches adds no scattered per-method guard policy.
 
 ### 2.2 Public Interfaces, Deep Modules & Seam Contracts
 
@@ -434,54 +434,84 @@ class PushdownEmbedder(Embedder):
 
 Note: `SpannerEmbeddingPushdown.driver` is typed strictly as `AsyncSpannerDriver | SyncSpannerDriver`. `PushdownEmbedder` inherits `embed_query`, `embed_query_sync`, `embed_document`, `embed_document_sync`, `embed_many`, `embed_many_sync`, `embed_arrow`, and in-memory SIMD `similarity_search` directly from `Embedder`, overriding `_embed_single_impl` to route `task == "query"` (when `title is None`) directly to `self._pushdown.embed_query(...)` and `_embed_batch_impl` to route batch calls to `self._pushdown.embed_documents(...)` (wrapping `DataError` into `EmbeddingError`).
 
-#### Governed GCP Database Agent Tools (`vertebra.agent.tools`)
+#### Adapter-Owned Database Tool Providers and Generic Agent Consumption
 
 ```python
-class GCPDatabaseToolPolicy(FrozenBaseStruct, frozen=True, gc=False):
-    """Governance policy for BigQuery and Cloud Spanner MCP and A2A tools."""
+@runtime_checkable
+class ToolProvider(Protocol):
+    def operations(self) -> Mapping[str, Callable[..., Awaitable[Any]]]: ...
 
-    maximum_bytes_billed: int = 10 * 1024 * 1024 * 1024
-    """Hard upper bound on bytes billed per BigQuery query execution (default 10 GiB)."""
-    enforce_dry_run_limit: bool = True
-    """Whether bigquery_query executes a dry_run preflight before running SELECT queries."""
-    read_only_staleness_seconds: float | None = None
-    """Optional exact staleness in seconds for lock-free Spanner ReadOnly snapshots."""
-    protocol_version: str = "2026-07-28"
-    """Target Model Context Protocol specification version."""
-    a2a_version: str = "1.0"
-    """Target Agent-to-Agent protocol specification version."""
+    def confirmation_reason(
+        self,
+        operation_name: str,
+        arguments: Mapping[str, Any],
+    ) -> str | None: ...
 
-def is_mutating_sql(sql: str) -> bool: ...
-def build_bigquery_tools(
+
+class ToolPolicyError(VertebraError, PermissionError):
+    """An adapter tool operation is denied by its explicit execution policy."""
+
+
+class BigQueryToolProvider:
+    def __init__(
+        self,
+        driver: AsyncBigQueryDriver | SyncBigQueryDriver | None = None,
+        *,
+        config: BigQueryConfig | str | None = None,
+        registry: DatabaseRegistry | None = None,
+        maximum_bytes_billed: int = 10 * 1024 * 1024 * 1024,
+        enforce_dry_run_limit: bool = True,
+    ) -> None: ...
+
+
+class SpannerToolProvider:
+    def __init__(
+        self,
+        driver: AsyncSpannerDriver | SyncSpannerDriver | None = None,
+        *,
+        config: SpannerConfig | str | None = None,
+        registry: DatabaseRegistry | None = None,
+        read_only_staleness_seconds: float | None = None,
+    ) -> None: ...
+
+
+def build_tools(
+    provider: ToolProvider,
     *,
-    driver: AsyncBigQueryDriver | SyncBigQueryDriver | None = None,
-    config: BigQueryConfig | str | None = None,
-    policy: GCPDatabaseToolPolicy | None = None,
     confirmation_gate: ConfirmationGate | None = None,
-    registry: DatabaseRegistry | None = None,
-) -> dict[str, Tool]: ...
-def build_spanner_tools(
-    *,
-    driver: AsyncSpannerDriver | SyncSpannerDriver | None = None,
-    config: SpannerConfig | str | None = None,
-    policy: GCPDatabaseToolPolicy | None = None,
-    confirmation_gate: ConfirmationGate | None = None,
-    registry: DatabaseRegistry | None = None,
-) -> dict[str, Tool]: ...
-def register_gcp_database_tools(
-    target: Any = None,
-    *,
-    bigquery_driver: AsyncBigQueryDriver | SyncBigQueryDriver | None = None,
-    spanner_driver: AsyncSpannerDriver | SyncSpannerDriver | None = None,
-    bigquery_config: BigQueryConfig | str | None = None,
-    spanner_config: SpannerConfig | str | None = None,
-    maximum_bytes_billed: int = 10 * 1024 * 1024 * 1024,
-    enforce_dry_run_limit: bool = True,
-    read_only_staleness_seconds: float | None = None,
-    confirmation_gate: ConfirmationGate | None = None,
-    registry: DatabaseRegistry | None = None,
 ) -> dict[str, Tool]: ...
 ```
+
+Providers return maps of existing public operation names to their original typed async bound methods. Those methods accept the existing engine parameters except `confirmation_token`, which belongs to the generic bridge: BigQuery exposes `bigquery_dry_run(sql, params=None)`, `bigquery_query(sql, params=None, max_bytes_billed=None)`, and `bigquery_object_table_inspect(table_name, connection_id="us.gcs-conn", object_uri_prefix=None, limit=50)`; Spanner exposes `spanner_query(sql, params=None, staleness_seconds=None)` and `spanner_schema_inspect(table_name=None)`. Retain their established dictionary output shapes, parameter types, descriptions, SQL identifier checks, and sync/async native dispatch. `confirmation_reason` is side-effect free: it resolves no driver, executes no SQL, and returns a reason or raises only an explicit policy denial.
+
+The bridge reserves `confirmation_token` and `context`; provider operations declaring those names fail registration with `ValueError`. It adds optional `confirmation_token: str | None = None` to each exposed input schema and injects context through the existing `Tool.invoke` mechanism. The injected signature parameter has the exact `AgentContext` annotation with default `None`; `AgentContext | None` is not used because the current schema stripper checks the annotation's type name. Providers and ticket arguments receive neither control value. Resolve signatures and type hints once at registration.
+
+```python
+from vertebra.agent import ConfirmationGate, build_tools
+from vertebra.db import DatabaseRegistry
+from vertebra.db.adapters.bigquery import BigQueryConfig, BigQueryToolProvider
+from vertebra.db.adapters.spanner import SpannerConfig, SpannerToolProvider
+
+gate = ConfirmationGate()
+registry = DatabaseRegistry()
+registry.register("analytics", BigQueryConfig(project_id="my-project", dataset_id="analytics"))
+registry.register(
+    "orders",
+    SpannerConfig(project_id="my-project", instance_id="app", database_id="orders"),
+)
+bq_tools = build_tools(
+    BigQueryToolProvider(config="analytics", registry=registry, maximum_bytes_billed=1_000_000),
+    confirmation_gate=gate,
+)
+spanner_tools = build_tools(
+    SpannerToolProvider(config="orders", registry=registry, read_only_staleness_seconds=2.5),
+    confirmation_gate=gate,
+)
+rows = await bq_tools["bigquery_query"].invoke({"sql": "SELECT @id AS id", "params": {"id": 1}})
+```
+
+Applications combine or register these ordinary `Tool` dictionaries using existing agent/MCP APIs. Constructing providers and calling `build_tools` opens no connection and requires no unrelated default engine registration.
+
 
 #### Dialect-Agnostic Row-Level Security (`vertebra.db.rls` & `PostgreSQLCore` / `OracleCore`)
 
@@ -536,7 +566,9 @@ class OracleCore:
 
 ```mermaid
 flowchart TD
-    Agent["vertebra.agent.tools.{bigquery,spanner}"] --> Registry["vertebra.db.provide_driver"]
+    Agent["vertebra.agent.tools.build_tools"] --> Provider["vertebra.typing.ToolProvider"]
+    EngineTools["db.adapters.{bigquery,spanner}.tools"] --> Provider
+    EngineTools --> Registry["vertebra.db.provide_driver"]
     Emb["vertebra.embeddings.PushdownEmbedder"] --> Proto["vertebra.db.driver.capabilities"]
     Bus["vertebra.server._channels.ChannelBus"] --> Proto
     Bus --> CDC["vertebra.db.cdc.ChangeFeed"]
@@ -551,6 +583,8 @@ flowchart TD
 3. **Identifier Validation Across SQL Builders**: `PostgresNotifyConfig`, `PostgresNotificationSource`, `SyncSpannerChangeStreamSource`, `AsyncSpannerChangeStreamSource`, `TenantScopeConfig`, `TenantPredicate`, and all four `*EmbeddingPushdown` classes validate every interpolated SQL identifier via `vertebra.utils.text.validate_identifier` (`channel`, `spill_table`, `replication_slot_name`, `publication_name`, `stream_name`, `tenant_column`, `parameter_cast`, `table_alias`, `embedding_column` with `allow_dots=False`; BigQuery `model_endpoint` and `table` with `allow_hyphens=True`; Spanner `model_endpoint` after `model.replace("-", "_")` and `table`; Postgres `table`, `embedding_column`, and `sql_expr(column)` while binding `model` as `$1` after non-empty `str` validation; Oracle `table`, `embedding_column`, and `credential_name`/`namespace`/`attribute` with `allow_dots=False` while passing `resolved_model_parameter` inside `JSON(:params)`).
 4. **Oracle 128-Byte Provider URL Guard & Token Refresh**: `OracleEmbeddingPushdown` preserves the 128-byte UTF-8 provider URL limit check (`DBMS_VECTOR` descriptor constraint) and `SyncGcpTokenCache` / `AsyncGcpTokenCache` bearer-token rotation without importing `vertebra.embeddings`.
 5. **Strict Layering & Extension Substrate Gate**: Zero files in `src/py/vertebra/db/**/*.py` import from `vertebra.{agent,framework,extensions,server,embeddings}`, `_TEMPORARY_UPWARD_IMPORT_ALLOWLIST` is `frozenset()`, zero files in `src/py/vertebra/extensions/**/*.py` import `vertebra.framework.*` (`ChannelBus` lives in `vertebra.server._channels`), and zero files in `src/py/vertebra/db/*.py` or `src/py/vertebra/db/driver/*.py` (apart from `t07`'s narrow registry configuration-registration and annotation-only driver import exceptions) perform runtime `vertebra.db.adapters.*` imports or executable engine-specific class dispatch.
+
+6. **Typed Provider Governance**: Registration/discovery/confirmation classification is pure and lazy. Original resolved bound signatures drive public Tool.invoke validation before driver resolution. Canonical arguments materialize original defaults, isolate nested caller parameters, and exclude token/context; approved tickets match the tool, arguments, and real caller owner. Established simple reads remain ungated; WITH/unknown executable forms require approval without being rerouted to count-only DML. BigQuery sends the minimum policy/caller/native-config cap to actual native requests. Only ToolPolicyError is remapped; native errors retain identity. DB providers contain zero upward imports and agent.tools contains zero vendor dispatch.
 
 ### 2.5 Acceptance Scenarios (Given / When / Then)
 
@@ -571,12 +605,19 @@ flowchart TD
    - **When** the AST boundary and engine-purity gates run in `test_native_db_drivers.py`
    - **Then** `_TEMPORARY_UPWARD_IMPORT_ALLOWLIST` is empty, `import vertebra.db.pipeline` and `import vertebra.db.channels` raise `ModuleNotFoundError`, and multi-statement `execute_stack` dispatches via `isinstance(self.native_driver, SyncPipelineCapable)` (sync) and `isinstance(self.native_driver, AsyncPipelineCapable)` (async).
 
+5. **Typed Adapter Provider Consumption**
+   - **Given** explicit native providers and an engine-free provider, building tools derives schemas without opening connections.
+   - **When** public Tool.invoke validates arguments and defaults, simple reads execute without approval; mutating/ambiguous calls issue a ticket for canonical arguments and the trusted caller owner.
+   - **Then** only a matching approved token authorizes execution; changing SQL, binds, tool, or owner invalidates approval. Actual BigQuery REST requests carry the effective minimum cap, Spanner uses its requested snapshot bound, and native failures remain the original exceptions.
+
 ### 2.6 Alternatives Considered
 
 1. **Keep thin wrapper classes (`BigQueryEmbedder`, `SpannerEmbedder`, `AlloyDbEmbedder`, `OracleEmbedder`) in `vertebra.embeddings` delegating to adapter pushdowns**: Rejected under Vertebra's clean-break guideline; one `PushdownEmbedder(pushdown)` avoids per-engine wrapper sprawl in `vertebra.embeddings` while inheriting `Embedder` caching, `embed_arrow`, and SIMD `similarity_search`.
 2. **Place `ChannelBus` in `vertebra.framework.channels` and import it from `vertebra.extensions.{litestar,starlette}`**: Rejected because `vertebra.extensions.*` must never import `vertebra.framework.*` (`.agents/bundles/knowledge/domains/extensions/litestar.md`); placing the engine-neutral substrate in `vertebra.server._channels.ChannelBus` matches `vertebra.server._routing` and `vertebra.server._fastpath` while letting `vertebra.framework.channels` re-export `ChannelBus`.
 3. **Block `db-engine-primitives` on `native-postgres-driver` before deleting `SyncQueryPipeline` / `AsyncQueryPipeline`**: Rejected because `db-layout-and-contract:t05` defines `@runtime_checkable` `SyncPipelineCapable` and `AsyncPipelineCapable`; branching `execute_stack` on those protocols removes `pipeline.py` immediately and activates single-`Sync` wire pipelining automatically when `native-postgres-driver` lands.
-4. **Place GCP MCP tools under `vertebra.extensions.agent.tools`**: Rejected because `vertebra.agent` is already a top-level package (`src/py/vertebra/agent/`); placing BigQuery and Spanner tool builders in `src/py/vertebra/agent/tools/{__init__,bigquery,spanner}.py` avoids inventing a redundant `vertebra.extensions.agent` namespace and plugs directly into `mcp-webmcp-core`'s `ToolProvider` registry.
+4. **Keep vendor modules under agent/tools or move them to another core namespace**: Rejected because native operation policy belongs to the owning adapter. Original typed bound methods plus the two-method neutral ToolProvider are sufficient; a generic consumer performs schema/confirmation adaptation without duplicating engine logic or introducing a descriptor/registry framework.
+
+The generic provider bridge registers only operations with named positional-or-keyword or keyword-only parameters; positional-only and variadic signatures fail at registration. It takes an owned deep copy of materialized invocation arguments before confirmation classification and retains that snapshot through awaited execution. Native provider signatures fit this supported subset.
 
 ## 3. Requirement-to-Task Traceability Matrix
 
@@ -586,9 +627,9 @@ flowchart TD
 | **R2** (Spanner change stream relocation & `SyncChangeSource` / `AsyncChangeSource`) | `t02` | `src/py/tests/unit/db/test_spanner_queue_and_cdc.py`, `src/py/tests/unit/db/test_native_db_drivers.py::test_dialect_tag_uniqueness_deterministic_file_urls_and_spanner_cdc_protocol` |
 | **R3** (`DatabaseChannelBackend` deletion & `server._channels.ChannelBus`) | `t03` | `src/py/tests/unit/db/test_native_db_drivers.py`, `src/py/tests/unit/db/test_spanner_queue_and_cdc.py`, `src/py/tests/unit/extensions/test_{litestar,starlette,fastapi,flask}_plugin.py` |
 | **R4** (`EmbeddingPushdown` adapters & `PushdownEmbedder`) | `t04` | `src/py/tests/unit/embeddings/test_google_embedders.py`, `src/py/tests/unit/db/test_bigquery.py`, `src/py/tests/unit/db/test_spanner.py`, `src/py/tests/unit/docs/test_examples.py` |
-| **R5** (`vertebra.agent.tools` relocation & empty import allowlist) | `t05` | `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py`, `src/py/tests/unit/db/test_native_db_drivers.py` |
+| **R5** (Adapter-owned ToolProviders, generic consumer, bound confirmation, billing requests, zero upward imports) | `t05` | `src/py/tests/unit/agent/test_core_and_observability.py`, `src/py/tests/unit/agent/test_runtime_and_workflows.py`, `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py`, `src/py/tests/unit/db/test_bigquery.py`, `src/py/tests/unit/db/test_native_db_drivers.py`, `src/py/tests/unit/framework/test_typing.py`, docs gates |
 | **R6** (`SyncQueryPipeline` / `AsyncQueryPipeline` deletion, `SyncPipelineCapable` / `AsyncPipelineCapable` stack dispatch & docs) | `t06` | `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py`, `src/py/tests/unit/extensions/test_{sqlalchemy_and_sqlspec_vtb,sqlspec_bigquery,sqlspec_spanner}.py`, `make docs`, `make review-check` |
-| **R7** (Dialect-agnostic `rls.py`, engine-purity gate & OKF chapters) | `t07` | `src/py/tests/unit/db/test_{pg_dataplane_and_datafusion,pg_gateway,enterprise_olap_drivers,native_db_drivers}.py`, `make review-check` |
+| **R7** (Dialect-agnostic `rls.py`, engine-purity gate & OKF chapters) | `t07` | `src/py/tests/unit/db/test_{pg_dataplane_and_datafusion,pg_gateway,enterprise_olap_drivers,native_db_drivers}.py`, `src/py/tests/unit/extensions/test_sqlspec_bigquery.py`, `src/py/tests/unit/extensions/test_sqlspec_spanner.py`, `make review-check` |
 
 ## 4. Implementation Plan
 
@@ -599,29 +640,28 @@ flowchart TD
 
 **Phase 1 Recovery Checkpoint**: `uv run pytest src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py src/py/tests/unit/db/test_spanner_queue_and_cdc.py src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_redis_valkey_driver.py src/py/tests/unit/extensions/test_data_storage_integrations.py src/py/tests/unit/extensions/test_litestar_plugin.py src/py/tests/unit/extensions/test_starlette_plugin.py && make lint-all` exits `0`.
 
-### Phase 2: Embeddings, Agent Tools & Pipeline Removal (`t04`–`t06`)
+### Phase 2: Embeddings, Providers, Pipelines & RLS (`t04`–`t07`)
 - [x] [b41aae46] `db-engine-primitives:t04` — Relocate SQL embedding pushdown builders to `vertebra/db/adapters/<engine>/embeddings.py` and add `PushdownEmbedder` (`behavior_tdd`, `depends_on: [t02]`) -> [`tasks/t04-embedding-pushdown-relocation.md`](tasks/t04-embedding-pushdown-relocation.md)
-- [!] `db-engine-primitives:t05` — Relocate GCP database MCP tools to `vertebra/agent/tools/` and empty the `vertebra/db` upward-import allowlist (`behavior_tdd`, `depends_on: [t03, t04]`) -> [`tasks/t05-relocate-gcp-agent-tools.md`](tasks/t05-relocate-gcp-agent-tools.md)
+- [~] `db-engine-primitives:t05` — Implement adapter-owned database ToolProviders and generic typed agent consumption with bound confirmation, native billing limits, and an empty DB upward-import allowlist (`behavior_tdd`, `depends_on: [t03, t04]`) -> [`tasks/t05-relocate-gcp-agent-tools.md`](tasks/t05-relocate-gcp-agent-tools.md)
 - [x] [cb9abcb7] `db-engine-primitives:t06` — Delete `vertebra/db/pipeline.py`, route SQLSpec `execute_stack` via `SyncPipelineCapable` / `AsyncPipelineCapable`, and update documentation (`integration_acceptance`, `depends_on: [t03, t04]`) -> [`tasks/t06-delete-query-pipeline.md`](tasks/t06-delete-query-pipeline.md)
 
 Default preparation retains native bind formats through class-owned defaults and supported GCP parser configuration; explicit caller configuration remains authoritative.
 
+- [~] `db-engine-primitives:t07` — Make `vertebra/db/rls.py` dialect-agnostic, move GUC/context SQL builders to `PostgreSQLCore`/`OracleCore`, enforce generic `vertebra/db` engine purity, and update OKF chapters (`behavior_tdd`, `depends_on: [t06]`) -> [`tasks/t07-dialect-agnostic-rls-and-okf.md`](tasks/t07-dialect-agnostic-rls-and-okf.md)
+
+t05 and t07 execute independently after their declared prerequisites. The db.mcp_tools deletion is already an ancestor at adeade96; revised providers are not an RLS prerequisite. t07 exclusively edits native-db tests and RLS/SQLSpec/PostgreSQL/Oracle sources. t05 runs existing native-db gates unchanged and keeps new tests in canonical agent/GCP/typing modules. Root applies knowledge cache diffs.
+
 **Phase 2 Recovery Checkpoint**: `make py-test && make lint-all && make docs && make review-check` exits `0`, and `_TEMPORARY_UPWARD_IMPORT_ALLOWLIST` in `test_native_db_drivers.py` is empty.
-
-### Phase 3: Dialect-Agnostic RLS, Engine-Purity Gate & OKF Knowledge (`t07`)
-- [ ] `db-engine-primitives:t07` — Make `vertebra/db/rls.py` dialect-agnostic, move GUC/context SQL builders to `PostgreSQLCore`/`OracleCore`, enforce generic `vertebra/db` engine purity, and update OKF chapters (`behavior_tdd`, `depends_on: [t05, t06]`) -> [`tasks/t07-dialect-agnostic-rls-and-okf.md`](tasks/t07-dialect-agnostic-rls-and-okf.md)
-
-**Phase 3 Recovery Checkpoint**: `make lint-all && make py-test && make docs && make review-check` exits `0`.
 
 ## 5. Continuity Snapshot
 
-- **Active Focus**: All claimed worksheets are committed; select the next ready task or review handoff.
+- **Active Focus**: Implementation is verified; fresh whole-flow correctness and quality reviews precede branch-local closure.
 - **Completed Checkpoints**: Phase 1 at `b41aae46` (237 focused cases, lint, and docs pass).
 - **Key Decisions**:
   - `ChannelBus` lives in `src/py/vertebra/server/_channels.py` (re-exported from `vertebra.framework.channels`) so `vertebra.extensions.{litestar,starlette,fastapi,flask}.channels` share the engine-neutral pub/sub substrate without importing `vertebra.framework.*` or `vertebra.db.channels`.
-  - `db/mcp_tools.py` moves to `src/py/vertebra/agent/tools/{__init__,bigquery,spanner}.py` (re-exported lazily on `vertebra.agent` with `if TYPE_CHECKING:` parity) using `provide_driver`.
+  - Native BigQueryToolProvider/SpannerToolProvider implement the neutral shared-typing callable map; generic agent.tools.build_tools preserves typed invocation and bound confirmation. db.mcp_tools remains absent; old agent vendor modules/builders are removed without shims.
   - `embeddings/_bigquery.py`, `embeddings/_spanner.py`, and `AlloyDbEmbedder`/`OracleEmbedder` in `embeddings/_google.py` are deleted cleanly without wrapper aliases; `PushdownEmbedder` overrides `Embedder.__new__` and delegates `_embed_batch_impl` and `vector_search` to `EmbeddingPushdown` implementations under `vertebra/db/adapters/{bigquery,spanner,postgres,oracle}/embeddings.py`.
   - `DatabaseChannelBackend` (`db/channels.py`) and `SyncQueryPipeline` / `AsyncQueryPipeline` (`db/pipeline.py`) are deleted cleanly without compatibility shims.
-- **Open Blockers**: `t05` requires provider-contract refinement following user steering; independent pipeline verification passes.
+- **Open Blockers**: None. Revision 9 provider and RLS worksheets pass independent review.
 
 - [2026-11-05T02:38:31Z] Verified checkpoint `b41aae46213761f36af0709c0a3ce6d26b2793e0`: Phase1 canonical recovery selection237 passed; make lint-all and make docs exit0; t03 local/remote protocol behavior and t04 independent155-case slice verified.

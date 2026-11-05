@@ -12,6 +12,18 @@ verified:
     at: "2026-11-05T00:35:59Z"
     commit: 4ce057e5aff909fcda2488cc0f6c4882ad0d38f0
 sources:
+  - id: src-typing-public-py
+    resource: src/py/vertebra/typing.py
+    title: "Public neutral ToolProvider and ToolPolicyError exports"
+  - id: src-typing-internal-py
+    resource: src/py/vertebra/_typing.py
+    title: "Shared neutral callable-map contract and policy exception"
+  - id: src-db-bigquery-tools-py
+    resource: src/py/vertebra/db/adapters/bigquery/tools.py
+    title: "Adapter-owned BigQuery operations and billing policies"
+  - id: src-db-spanner-tools-py
+    resource: src/py/vertebra/db/adapters/spanner/tools.py
+    title: "Adapter-owned Spanner operations and snapshot policies"
   - id: src-sqlalchemy-dialects
     resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
     title: "SQLAlchemy DBAPI transaction policy"
@@ -251,6 +263,28 @@ sources:
 | `AlloyDBConfig` / `SyncAlloyDBDialer` & `AsyncAlloyDBDialer` / `AlloyDBAuthType` | Port 5433. `encode_metadata_exchange` (and Rust `vertebra_db::dialer::AlloyDBDialer::encode_metadata_exchange`) writes a 4-byte big-endian length followed by protobuf-style fields: user agent (tag `0x0A`), auth type (`0x10`, `BUILT_IN=1` / `IAM=2`), token (`0x1A`). `build_handshake_frame` picks IAM or built-in auth from `enable_iam_auth`. |
 
 
+## Adapter tool providers
+
+The shared [`ToolProvider`](../../../../../src/py/vertebra/typing.py)[^src-typing-public-py]
+contract supplies named typed async callables and side-effect-free approval reasons. Its
+runtime-checkable protocol and explicit `ToolPolicyError` are defined in shared typing;
+providers import the public facade and no agent or framework layer. [^src-typing-internal-py]
+
+[`BigQueryToolProvider`](../../../../../src/py/vertebra/db/adapters/bigquery/tools.py)[^src-db-bigquery-tools-py]
+and [`SpannerToolProvider`](../../../../../src/py/vertebra/db/adapters/spanner/tools.py)[^src-db-spanner-tools-py]
+accept an explicit native driver, typed config, or registry alias. Construction and discovery
+are pure; invocation resolves only the owning driver through `provide_driver`. Async native
+calls are awaited and sync calls use `asyncio.to_thread`. Providers classify approval separately
+from execution routing: simple reads remain ungated; mutations and unclassified SQL including
+`WITH` require approval through the consumer. This adds no native SQL execution capability.
+
+BigQuery query and approved DML requests carry the minimum provider, per-call, and native
+configured billing cap. Non-positive effective caps are denied before query execution; optional
+dry-run estimates add an earlier over-budget refusal without replacing the actual request cap.
+Spanner reads retain strong or explicit/default-staleness snapshots. Schema inspection queries
+only `information_schema.tables` and `information_schema.columns`, binding supplied table names.
+Policy refusals use `ToolPolicyError`; native failures preserve their original exception.
+
 ## Transaction ownership and statement completion
 
 Driver transaction scopes roll back on `BaseException`, including cancellation. Async rollback is shielded from AnyIO cancellation scopes. Pooled asyncpg drivers retain both the acquired connection and its transaction object until commit or rollback; DML affected counts come from command status. SQLite completes and closes `RETURNING` statements before reading affected counts and committing. DuckDB batch counts sum affected rows across statements.
@@ -315,3 +349,11 @@ Provenance sources: [^src-vertebra-core-src-shm-rs], [^src-vertebra-db-src-arrow
 [^src-tests-unit-db-test-spanner-py]: `src/py/tests/unit/db/test_spanner.py` — Python implementation module (src/py/tests/unit/db/test_spanner.py).
 
 [^src-sqlalchemy-dialects]: `src/py/vertebra/extensions/sqlalchemy/dialects.py` — SQLAlchemy DBAPI transaction policy.
+
+[^src-typing-public-py]: `src/py/vertebra/typing.py` — Public neutral ToolProvider and ToolPolicyError exports.
+
+[^src-typing-internal-py]: `src/py/vertebra/_typing.py` — Shared neutral callable-map contract and policy exception.
+
+[^src-db-bigquery-tools-py]: `src/py/vertebra/db/adapters/bigquery/tools.py` — Adapter-owned BigQuery operations and billing policies.
+
+[^src-db-spanner-tools-py]: `src/py/vertebra/db/adapters/spanner/tools.py` — Adapter-owned Spanner operations and snapshot policies.

@@ -40,34 +40,38 @@ Agent runtime (`AgentRuntime`), Model Context Protocol (`MCPRegistry`, `MCPConfi
       members:
         - invoke
 
-## Governed GCP Database Tools (`vertebra.agent.tools`)
+## Provider Tools (`vertebra.agent.tools`)
 
-`build_bigquery_tools` provides dry-run estimates, queries, and Object Table inspection.
-`build_spanner_tools` provides queries and read-only table/column schema inspection.
-Both accept a driver, typed config, or registry alias resolved at invocation.
+`build_tools` adapts a `vertebra.typing.ToolProvider` into validated `Tool` objects.
+Native adapters own their operations and policies; construction resolves no connection.
+Operations use named parameters; positional-only and variadic signatures are rejected.
 
-`register_gcp_database_tools` optionally registers both sets with MCP. BigQuery enforces
-its dry-run byte ceiling; mutations require `ConfirmationGate` approval. These APIs replace
-`vertebra.db.mcp_tools` and are also lazy exports from `vertebra.agent`.
+```python
+from vertebra.agent import ConfirmationGate, build_tools
+from vertebra.db.adapters.bigquery import BigQueryConfig, BigQueryToolProvider
 
-::: vertebra.agent.tools.GCPDatabaseToolPolicy
-    options:
-      heading_level: 4
-      members: false
+gate = ConfirmationGate()
+tools = build_tools(
+    BigQueryToolProvider(
+        config=BigQueryConfig(project_id="my-project"),
+        maximum_bytes_billed=1_000_000,
+    ),
+    confirmation_gate=gate,
+)
+rows = await tools["bigquery_query"].invoke(
+    {"sql": "SELECT @id AS id", "params": {"id": 1}}
+)
+```
 
-::: vertebra.agent.tools.bigquery.build_bigquery_tools
-    options:
-      heading_level: 4
+Spanner's adapter exports `SpannerToolProvider` with optional read-only snapshot staleness.
+Each provider accepts a native driver, config, or registry alias resolved at invocation.
+Mutations and ambiguous SQL, including `WITH`, require approval; approval does not expand
+native SQL support. Retry with the approved `confirmation_token` input. Tickets bind to
+the operation, validated arguments including defaults, and injected caller identity.
+BigQuery sends the minimum provider, per-call, and configured billing cap to native
+execution, including when its optional dry-run guard is disabled.
 
-::: vertebra.agent.tools.spanner.build_spanner_tools
-    options:
-      heading_level: 4
-
-::: vertebra.agent.tools.is_mutating_sql
-    options:
-      heading_level: 4
-
-::: vertebra.agent.tools.register_gcp_database_tools
+::: vertebra.agent.tools.build_tools
     options:
       heading_level: 4
 

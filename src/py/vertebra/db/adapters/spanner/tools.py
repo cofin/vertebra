@@ -1,59 +1,83 @@
-"""Governed Spanner agent tools backed by the engine adapter."""
+"""Adapter-owned Spanner operations and execution policies for tool consumers."""
 
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, cast
+import re
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Any, cast
 
-from vertebra.agent.core import Tool
-from vertebra.agent.runtime import ConfirmationGate
-from vertebra.agent.tools import (
-    _DDL_VERBS,
-    GCPDatabaseToolPolicy,
-    _extract_leading_verb,
-    _require_confirmation,
-    is_mutating_sql,
-)
-from vertebra.db.adapters.spanner import AsyncSpannerDriver, SpannerConfig, StalenessBound, SyncSpannerDriver
+from vertebra.db.adapters.spanner.config import SpannerConfig, StalenessBound
+from vertebra.db.adapters.spanner.driver import AsyncSpannerDriver, SyncSpannerDriver
 from vertebra.db.driver import AsyncDatabaseDriver
-from vertebra.db.registry import provide_driver
+from vertebra.db.registry import DatabaseRegistry, provide_driver
+from vertebra.typing import ToolPolicyError, ToolProvider
 
-if TYPE_CHECKING:
-    from collections.abc import Mapping
+__all__ = ("SpannerToolProvider",)
 
-    from vertebra.db.registry import DatabaseRegistry
+_MUTATING_VERBS = frozenset(
+    {
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "MERGE",
+        "CREATE",
+        "ALTER",
+        "DROP",
+        "TRUNCATE",
+        "EXECUTE",
+        "CALL",
+        "GRANT",
+        "REVOKE",
+        "EXPORT",
+        "LOAD",
+    }
+)
+_DDL_VERBS = frozenset({"CREATE", "ALTER", "DROP", "TRUNCATE", "GRANT", "REVOKE"})
+_LEADING_COMMENT_RE = re.compile(r"^\s*(?:--[^\n]*\n|/\*.*?\*/\s*)+", re.DOTALL)
 
-__all__ = ("build_spanner_tools",)
 
+class SpannerToolProvider(ToolProvider):
+    """Expose typed native Spanner operations with lazy driver resolution."""
 
-def build_spanner_tools(
-    *,
-    driver: AsyncSpannerDriver | SyncSpannerDriver | None = None,
-    config: SpannerConfig | str | None = None,
-    policy: GCPDatabaseToolPolicy | None = None,
-    confirmation_gate: ConfirmationGate | None = None,
-    registry: DatabaseRegistry | None = None,
-) -> dict[str, Tool]:
-    """Build Spanner tools resolving a configured driver only when a tool is invoked."""
-    policy = policy if policy is not None else GCPDatabaseToolPolicy()
-    gate = confirmation_gate if confirmation_gate is not None else ConfirmationGate()
+    def __init__(
+        self,
+        driver: AsyncSpannerDriver | SyncSpannerDriver | None = None,
+        *,
+        config: SpannerConfig | str | None = None,
+        registry: DatabaseRegistry | None = None,
+        read_only_staleness_seconds: float | None = None,
+    ) -> None:
+        self._driver = driver
+        self._config = config
+        self._registry = registry
+        self._read_only_staleness_seconds = read_only_staleness_seconds
 
-    def _resolve_driver() -> AsyncSpannerDriver | SyncSpannerDriver:
-        if driver is not None:
-            return driver
-        return cast("AsyncSpannerDriver | SyncSpannerDriver", provide_driver(config or "default", registry=registry))
+    def operations(self) -> Mapping[str, Callable[..., Awaitable[Any]]]:
+        """Return original bound operations without creating a driver or connection."""
+        return {
+            "spanner_query": self.spanner_query,
+            "spanner_schema_inspect": self.spanner_schema_inspect,
+        }
+
+    def confirmation_reason(self, operation_name: str, arguments: Mapping[str, Any]) -> str | None:
+        """Require approval for mutations and ambiguous executable SQL without doing I/O."""
+        if operation_name == "spanner_query":
+            verb = self._leading_verb(arguments["sql"])
+            if verb != "SELECT":
+                return f"{verb or 'Unclassified'} statement requires human confirmation."
+        return None
 
     async def spanner_query(
+        self,
         sql: str,
         params: dict[str, Any] | None = None,
         staleness_seconds: float | None = None,
-        confirmation_token: str | None = None,
     ) -> dict[str, Any]:
         """Execute a governed Cloud Spanner query using lock-free ReadOnly snapshots for SELECTs."""
-        drv = _resolve_driver()
-        if is_mutating_sql(sql):
-            verb = _extract_leading_verb(sql)
-            _require_confirmation(gate, "spanner_query", sql, confirmation_token)
+        drv = self._resolve_driver()
+        if self._leading_verb(sql) in _MUTATING_VERBS:
+            verb = self._leading_verb(sql)
             if verb in _DDL_VERBS:
                 op_meta = (
                     await drv.update_ddl([sql])
@@ -74,7 +98,7 @@ def build_spanner_tools(
                 "affected_rows": int(affected),
             }
 
-        eff_staleness = staleness_seconds if staleness_seconds is not None else policy.read_only_staleness_seconds
+        eff_staleness = staleness_seconds if staleness_seconds is not None else self._read_only_staleness_seconds
         bound = (
             StalenessBound.exact_staleness(int(eff_staleness * 1000))
             if eff_staleness is not None
@@ -92,13 +116,14 @@ def build_spanner_tools(
         }
 
     async def spanner_schema_inspect(
+        self,
         table_name: str | None = None,
     ) -> dict[str, Any]:
         """Inspect Cloud Spanner `INFORMATION_SCHEMA` tables and columns using a lock-free ReadOnly snapshot."""
-        drv = _resolve_driver()
+        drv = self._resolve_driver()
         bound = (
-            StalenessBound.exact_staleness(int(policy.read_only_staleness_seconds * 1000))
-            if policy.read_only_staleness_seconds is not None
+            StalenessBound.exact_staleness(int(self._read_only_staleness_seconds * 1000))
+            if self._read_only_staleness_seconds is not None
             else StalenessBound.strong()
         )
         if table_name:
@@ -138,17 +163,20 @@ def build_spanner_tools(
             "columns": list(columns),
         }
 
-    return {
-        "spanner_query": Tool(
-            spanner_query,
-            name="spanner_query",
-            description="Execute a governed Cloud Spanner query using lock-free ReadOnly snapshots.",
-            requires_confirmation=False,
-        ),
-        "spanner_schema_inspect": Tool(
-            spanner_schema_inspect,
-            name="spanner_schema_inspect",
-            description="Inspect Cloud Spanner INFORMATION_SCHEMA tables and columns.",
-            requires_confirmation=False,
-        ),
-    }
+    def _resolve_driver(self) -> AsyncSpannerDriver | SyncSpannerDriver:
+        if self._driver is not None:
+            return self._driver
+        return cast(
+            "AsyncSpannerDriver | SyncSpannerDriver", provide_driver(self._config or "default", registry=self._registry)
+        )
+
+    @staticmethod
+    def _leading_verb(sql: str) -> str:
+        body = sql.rstrip().rstrip(";").rstrip()
+        if ";" in body:
+            raise ToolPolicyError(
+                "Multi-statement SQL is not allowed; submit one statement per call and pass values "
+                "containing ';' as query parameters"
+            )
+        cleaned = _LEADING_COMMENT_RE.sub("", body).lstrip(" (;\t\r\n")
+        return cleaned.split(None, 1)[0].rstrip(";(,").upper() if cleaned else ""

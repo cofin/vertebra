@@ -18,6 +18,7 @@ from vertebra._bigquery import (
     SyncBigQueryClient,
 )
 from vertebra._vertebra import BigQueryError
+from vertebra.agent import ConfirmationGate, PermissionDeniedError, build_tools
 from vertebra.db import (
     ArrowCursor,
     DatabaseRegistry,
@@ -28,6 +29,7 @@ from vertebra.db.adapters.bigquery import (
     BigQueryCore,
     BigQueryDryRunResult,
     BigQueryEmbeddingPushdown,
+    BigQueryToolProvider,
     ObjectRef,
     ObjectTableConfig,
     SyncBigQueryDriver,
@@ -672,4 +674,76 @@ async def test_bigquery_select_to_arrow_keeps_small_rest_fallback_in_memory_and_
             )
             assert loaded_async == 2
     finally:
+        server.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_bigquery_tool_provider_enforces_native_request_billing_caps(asynchronous: bool) -> None:
+    """Driver overrides and provider ceilings reach actual BigQuery REST requests."""
+    server = _MockBigQueryRestServer()
+    config = BigQueryConfig(
+        project_id="test-proj",
+        dataset_id="analytics",
+        rest_endpoint=f"http://{server.host_port}",
+        maximum_bytes_billed=700,
+    )
+    driver = AsyncBigQueryDriver(config) if asynchronous else SyncBigQueryDriver(config)
+    try:
+        if asynchronous:
+            await driver.select("SELECT id, name, score FROM metrics", maximum_bytes_billed=300)
+        else:
+            driver.select("SELECT id, name, score FROM metrics", maximum_bytes_billed=300)
+        assert server.requests[-1]["body"]["maximumBytesBilled"] == "300"
+        if asynchronous:
+            await driver.select("SELECT id, name, score FROM metrics")
+        else:
+            driver.select("SELECT id, name, score FROM metrics")
+        assert server.requests[-1]["body"]["maximumBytesBilled"] == "700"
+        for provider_cap, caller_cap, expected in ((1000, None, 700), (500, 900, 500), (500, 200, 200)):
+            gate = ConfirmationGate()
+            tool = build_tools(
+                BigQueryToolProvider(driver, maximum_bytes_billed=provider_cap, enforce_dry_run_limit=False),
+                confirmation_gate=gate,
+            )["bigquery_query"]
+            await tool.invoke({"sql": "SELECT id, name, score FROM metrics", "max_bytes_billed": caller_cap})
+            assert server.requests[-1]["body"]["maximumBytesBilled"] == str(expected)
+            sql = "INSERT INTO metrics (id, name, score) VALUES (3, 'gamma', 7.0)"
+            with pytest.raises(PermissionDeniedError) as exc:
+                await tool.invoke({"sql": sql, "max_bytes_billed": caller_cap})
+            token = str(exc.value).split("ticket=", 1)[1].rstrip(")")
+            gate.approve(token)
+            result = await tool.invoke({"sql": sql, "max_bytes_billed": caller_cap, "confirmation_token": token})
+            assert result["affected_rows"] == 1
+            assert server.requests[-1]["body"]["maximumBytesBilled"] == str(expected)
+        before = len(server.requests)
+        for cap in (0, -1):
+            with pytest.raises(PermissionDeniedError, match="positive"):
+                await tool.invoke({"sql": "SELECT 1", "max_bytes_billed": cap})
+        assert len(server.requests) == before
+        for provider_cap, native_cap in ((0, 700), (1000, 0), (1000, -1)):
+            refused_config = BigQueryConfig(
+                project_id="test-proj", rest_endpoint=f"http://{server.host_port}", maximum_bytes_billed=native_cap
+            )
+            refused_driver = AsyncBigQueryDriver(refused_config) if asynchronous else SyncBigQueryDriver(refused_config)
+            refused_tool = build_tools(
+                BigQueryToolProvider(refused_driver, maximum_bytes_billed=provider_cap, enforce_dry_run_limit=False)
+            )["bigquery_query"]
+            with pytest.raises(PermissionDeniedError, match="positive"):
+                await refused_tool.invoke({"sql": "SELECT 1"})
+            assert len(server.requests) == before
+            if asynchronous:
+                await refused_driver.close()
+            else:
+                refused_driver.close()
+        guarded = build_tools(BigQueryToolProvider(driver, maximum_bytes_billed=1000))["bigquery_query"]
+        with pytest.raises(PermissionDeniedError, match="exceeds"):
+            await guarded.invoke({"sql": "SELECT id FROM metrics"})
+        assert len(server.requests) == before + 1
+        assert server.requests[-1]["body"]["configuration"]["dryRun"] is True
+    finally:
+        if asynchronous:
+            await driver.close()
+        else:
+            driver.close()
         server.close()

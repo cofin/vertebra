@@ -1,6 +1,7 @@
 """Unit and property tests for agentic core, schema builder, guards, and telemetry."""
 
 import dataclasses
+from collections.abc import Mapping
 from typing import Annotated, Any, Literal, TypedDict
 
 import anyio
@@ -51,6 +52,7 @@ from vertebra.agent.core.sse import (
 from vertebra.agent.telemetry import (
     AgentTelemetryRecorder,
 )
+from vertebra.agent.tools import build_tools
 from vertebra.telemetry.genai import GenAiUsage
 from vertebra.telemetry.logger import LogSink
 from vertebra.telemetry.otel import SpanExporter
@@ -495,3 +497,120 @@ async def test_jsonrpc_router_does_not_retry_handler_type_errors() -> None:
     assert response is not None
     assert response["error"]["code"] == INTERNAL_ERROR
     assert attempts == [{"params": {"x": 1}}]
+
+
+class _TypedToolProvider:
+    """Engine-free operations with resolved method types and observable effects."""
+
+    def __init__(self) -> None:
+        self.policy_calls: list[dict[str, Any]] = []
+        self.calls: list[dict[str, Any]] = []
+
+    def operations(self) -> dict[str, Any]:
+        return {"records": self.records}
+
+    def confirmation_reason(self, operation_name: str, arguments: Mapping[str, Any]) -> None:
+        self.policy_calls.append(dict(arguments))
+
+    async def records(
+        self, sql: "str", params: "dict[str, list[int]] | None" = None, limit: "int" = 10
+    ) -> dict[str, Any]:
+        """Read typed records with a bounded default."""
+        result = {"sql": sql, "params": params, "limit": limit}
+        self.calls.append(result)
+        return result
+
+
+@pytest.mark.anyio
+async def test_provider_tools_resolve_schemas_and_validate_before_policy() -> None:
+    """Original bound method schemas drive public validation and canonical defaults."""
+    provider = _TypedToolProvider()
+    tool = build_tools(provider)["records"]
+    schema = tool.input_schema
+    assert schema["required"] == ["sql"]
+    assert set(schema["properties"]) == {"sql", "params", "limit", "confirmation_token"}
+    assert schema["properties"]["sql"] == {"type": "string"}
+    assert schema["properties"]["limit"]["type"] == "integer"
+    assert schema["properties"]["limit"]["default"] == 10
+    assert {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "integer"}}} in schema[
+        "properties"
+    ]["params"]["anyOf"]
+    for arguments, pointer in (
+        ({}, "/sql"),
+        ({"sql": 3}, "/sql"),
+        ({"sql": "SELECT 1", "params": {"ids": ["bad"]}}, "/params"),
+    ):
+        with pytest.raises(ToolArgumentError) as exc:
+            await tool.invoke(arguments)
+        assert exc.value.pointer == pointer
+    assert provider.policy_calls == []
+    assert provider.calls == []
+    assert await tool.invoke({"sql": "SELECT 1", "params": {"ids": (1, 2)}}) == {
+        "sql": "SELECT 1",
+        "params": {"ids": [1, 2]},
+        "limit": 10,
+    }
+    assert provider.policy_calls == provider.calls
+
+
+@pytest.mark.parametrize("reserved", ["context", "confirmation_token"])
+def test_provider_tools_reject_reserved_parameters(reserved: str) -> None:
+    """Provider control names cannot collide with bridge-owned arguments."""
+
+    class Provider(_TypedToolProvider):
+        def operations(self) -> dict[str, Any]:
+            return {"collision": context_operation if reserved == "context" else token_operation}
+
+    async def context_operation(context: str) -> str:
+        return context
+
+    async def token_operation(confirmation_token: str) -> str:
+        return confirmation_token
+
+    with pytest.raises(ValueError, match=reserved):
+        build_tools(Provider())
+
+
+@pytest.mark.parametrize("parameter_kind", ["positional-only", "var-positional", "var-keyword"])
+def test_provider_registration_rejects_unsupported_parameter_kinds(parameter_kind: str) -> None:
+    """Provider schemas require named fields that Tool.invoke can validate and inject safely."""
+
+    async def positional_only(sql: str, /) -> str:
+        return sql
+
+    async def var_positional(*values: str) -> str:
+        return ",".join(values)
+
+    async def var_keyword(sql: str, **options: Any) -> str:
+        return sql
+
+    class Provider(_TypedToolProvider):
+        def operations(self) -> dict[str, Any]:
+            return {
+                "unsupported": {
+                    "positional-only": positional_only,
+                    "var-positional": var_positional,
+                    "var-keyword": var_keyword,
+                }[parameter_kind]
+            }
+
+    with pytest.raises(ValueError, match="named parameters"):
+        build_tools(Provider())
+
+
+@pytest.mark.anyio
+async def test_provider_tools_preserve_keyword_only_defaults() -> None:
+    """Named keyword-only operation fields keep their defaults and validation."""
+
+    class Provider(_TypedToolProvider):
+        async def records(self, sql: str, *, limit: int = 10) -> dict[str, Any]:
+            return {"sql": sql, "limit": limit}
+
+    provider = Provider()
+    tool = build_tools(provider)["records"]
+    assert await tool.invoke({"sql": "SELECT 1"}) == {"sql": "SELECT 1", "limit": 10}
+    assert provider.policy_calls == [{"sql": "SELECT 1", "limit": 10}]
+    with pytest.raises(ToolArgumentError) as exc:
+        await tool.invoke({"sql": "SELECT 1", "limit": "invalid"})
+    assert exc.value.pointer == "/limit"
+    assert len(provider.policy_calls) == 1

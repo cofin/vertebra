@@ -11,13 +11,7 @@ from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
     from vertebra.agent import tools
-    from vertebra.agent.tools import (
-        GCPDatabaseToolPolicy,
-        build_bigquery_tools,
-        build_spanner_tools,
-        is_mutating_sql,
-        register_gcp_database_tools,
-    )
+    from vertebra.agent.tools import build_tools
 
 __all__ = (
     "A2AConfig",
@@ -51,7 +45,6 @@ __all__ = (
     "ConfirmationTicket",
     "CursorPage",
     "DynamicWorkflow",
-    "GCPDatabaseToolPolicy",
     "GoogleGenAIProvider",
     "GuardCallable",
     "GuardChain",
@@ -108,30 +101,19 @@ __all__ = (
     "a2a_card_to_mcp_tools",
     "bind_agent_context",
     "bridges",
-    "build_bigquery_tools",
-    "build_spanner_tools",
+    "build_tools",
     "current_agent_context",
     "decode_cursor",
     "encode_cursor",
     "execute_tool_calls",
-    "is_mutating_sql",
     "mcp",
     "mcp_service_to_a2a",
     "paginate_sequence",
-    "register_gcp_database_tools",
     "tool",
     "tools",
 )
 
-_TOOLS_EXPORTS = frozenset(
-    {
-        "GCPDatabaseToolPolicy",
-        "build_bigquery_tools",
-        "build_spanner_tools",
-        "is_mutating_sql",
-        "register_gcp_database_tools",
-    }
-)
+_TOOLS_EXPORTS = frozenset({"build_tools"})
 
 _CORE_EXPORTS = frozenset(
     {

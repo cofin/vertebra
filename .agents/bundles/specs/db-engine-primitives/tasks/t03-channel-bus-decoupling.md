@@ -25,8 +25,8 @@ tests:
   - src/py/tests/unit/extensions/test_fastapi_plugin.py
   - src/py/tests/unit/extensions/test_flask_plugin.py
   - src/py/tests/unit/docs/test_examples.py
-plan_revision: 8
-plan_commit: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
+plan_revision: 10
+plan_commit: "05bc06a5a53a1225d8c62495ac69162a15d935fc"
 state_revision: 2
 claimed_by: null
 claimed_at: null
@@ -37,7 +37,7 @@ last_verified_at: "2026-11-05T02:33:23Z"
 last_verified_commit: "254149af384654e82ff438c5fd759380457ab97b"
 verification_evidence: "RED channel substrate and obsolete Redis caller failures; full t03 slice206 passed, phase1 selection237 passed; make lint-all and docs exit0; protocol/real Redis traffic/lifecycle coverage preserved."
 created_at: 2026-11-03T21:47:00Z
-updated_at: "2026-11-05T02:59:14Z"
+updated_at: "2026-11-05T05:05:25Z"
 commit: "254149af384654e82ff438c5fd759380457ab97b"
 tags: [db, channels, server, framework, litestar, starlette, clean-break]
 ---

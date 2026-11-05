@@ -32,8 +32,10 @@ if TYPE_CHECKING:
         SyncSpannerTransaction,
     )
     from vertebra.db.adapters.spanner.embeddings import SpannerEmbeddingPushdown
+    from vertebra.db.adapters.spanner.tools import SpannerToolProvider
 
 __all__ = (
+    "SpannerToolProvider",
     "SpannerEmbeddingPushdown",
     "AsyncSpannerChangeStreamSource",
     "AsyncSpannerDriver",
@@ -56,6 +58,7 @@ __all__ = (
 )
 
 __lazy_modules__ = [
+    "vertebra.db.adapters.spanner.tools",
     "vertebra.db.adapters.spanner.embeddings",
     "vertebra.db.adapters.spanner.change_stream",
     "vertebra.db.adapters.spanner.config",
@@ -64,6 +67,7 @@ __lazy_modules__ = [
 ]
 
 _EXPORT_MAP: dict[str, tuple[str, str]] = {
+    "SpannerToolProvider": ("vertebra.db.adapters.spanner.tools", "SpannerToolProvider"),
     "SpannerEmbeddingPushdown": ("vertebra.db.adapters.spanner.embeddings", "SpannerEmbeddingPushdown"),
     "AsyncSpannerChangeStreamSource": ("vertebra.db.adapters.spanner.change_stream", "AsyncSpannerChangeStreamSource"),
     "AsyncSpannerDriver": ("vertebra.db.adapters.spanner.driver", "AsyncSpannerDriver"),

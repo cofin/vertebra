@@ -35,8 +35,8 @@ tests:
   - src/py/tests/unit/extensions/test_sqlspec_bigquery.py
   - src/py/tests/unit/extensions/test_sqlspec_spanner.py
   - src/py/tests/unit/docs/test_examples.py
-plan_revision: 8
-plan_commit: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
+plan_revision: 10
+plan_commit: "05bc06a5a53a1225d8c62495ac69162a15d935fc"
 state_revision: 2
 claimed_by: null
 claimed_at: null
@@ -47,7 +47,7 @@ last_verified_at: "2026-11-05T04:22:41Z"
 last_verified_commit: "cb9abcb719e58bf69f5e44092140f1d2e18ac56e"
 verification_evidence: "Baseline117 and final175 focused cases; Phase2 full Python1981 passed69 skipped170 xfailed; lint, docs and review-check exit0; scoped correctness findings resolved."
 created_at: 2026-11-03T21:49:00Z
-updated_at: "2026-11-05T04:22:41Z"
+updated_at: "2026-11-05T05:05:25Z"
 commit: "cb9abcb719e58bf69f5e44092140f1d2e18ac56e"
 tags: [db, pipeline, sqlspec, docs, clean-break]
 ---

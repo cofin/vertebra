@@ -33,8 +33,8 @@ tests:
   - src/py/tests/unit/db/test_bigquery.py
   - src/py/tests/unit/db/test_spanner.py
   - src/py/tests/unit/docs/test_examples.py
-plan_revision: 8
-plan_commit: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
+plan_revision: 10
+plan_commit: "05bc06a5a53a1225d8c62495ac69162a15d935fc"
 state_revision: 2
 claimed_by: null
 claimed_at: null
@@ -45,7 +45,7 @@ last_verified_at: "2026-11-05T02:38:31Z"
 last_verified_commit: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
 verification_evidence: "Behavior TDD RED missing capability export; full embeddings/BQ/Spanner/docs slice155 passed; 12-module Mypy and Ruff pass; make lint-all and docs exit0; exact HTTP2 protocol spelling exception proved with isolated positive/negative cases."
 created_at: 2026-11-03T21:47:00Z
-updated_at: "2026-11-05T02:59:14Z"
+updated_at: "2026-11-05T05:05:25Z"
 commit: "b41aae46213761f36af0709c0a3ce6d26b2793e0"
 tags: [db, embeddings, pushdown, bigquery, spanner, postgres, oracle]
 ---
