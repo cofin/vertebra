@@ -16,8 +16,10 @@ from sqlspec.storage.registry import StorageRegistry as SQLSpecStorageRegistry
 import vertebra.extensions.alchemy.storage as alchemy_storage_mod
 import vertebra.extensions.sqlspec.storage as sqlspec_storage_mod
 from vertebra.db.arrow import ArrowCursor
+from vertebra.db.cdc import CDCConfig
 from vertebra.extensions.alchemy.storage import ObjectStoreBackend as AlchemyObjectStoreBackend
 from vertebra.extensions.alchemy.storage import register_storage_backend
+from vertebra.extensions.sqlspec.events import ChangeFeedAsyncEventBackend, ChangeFeedSyncEventBackend
 from vertebra.extensions.sqlspec.storage import (
     ArrowFlightSerializer,
     StreamingStorageResponse,
@@ -362,3 +364,62 @@ async def test_object_store_backend_write_arrow_cursor_and_uri_qualified_globs(t
 
     cursor_part_0.close()
     cursor_part_1.close()
+
+
+def test_changefeed_sync_event_backend_lifecycle() -> None:
+    """SQLSpec events hydrate stored spills, redeliver nacks, and clear queued work on shutdown."""
+    store = SyncObjectStore("memory://")
+    backend = ChangeFeedSyncEventBackend(config=CDCConfig(spill_threshold_bytes=16), store=store)
+    assert not hasattr(backend, "build_emit_message_sql")
+    assert backend.dequeue("orders", 0) is None
+    first_id = backend.publish("orders", {"blob": "x" * 100})
+    assert store.get("cdc/spill/1.json")
+    second_ids = backend.publish_many([("orders", {"id": 2}, None), ("other", {"id": 3}, None)])
+    assert second_ids == ["2", "3"]
+    first = backend.dequeue("orders", 0)
+    assert first is not None
+    assert (first.event_id, first.channel, first.payload) == (first_id, "orders", {"blob": "x" * 100})
+    backend.nack(first_id)
+    redelivered = backend.dequeue("orders", 0)
+    assert redelivered is not None
+    assert (redelivered.event_id, redelivered.payload) == (first_id, first.payload)
+    backend.ack(first_id)
+    backend.nack(first_id)
+    second = backend.dequeue("orders", 0)
+    assert second is not None
+    assert (second.event_id, second.payload) == ("2", {"id": 2})
+    assert backend.dequeue("orders", 0) is None
+    backend.shutdown()
+    backend.nack("2")
+    assert backend.dequeue("orders", 0) is None
+    assert backend.dequeue("other", 0) is None
+
+
+@pytest.mark.anyio
+async def test_changefeed_async_event_backend_lifecycle() -> None:
+    """The async SQLSpec backend preserves spilled payloads and acknowledgement lifecycle."""
+    store = SyncObjectStore("memory://")
+    backend = ChangeFeedAsyncEventBackend(config=CDCConfig(spill_threshold_bytes=16), store=store)
+    assert not hasattr(backend, "build_emit_message_sql")
+    assert await backend.dequeue("orders", 0) is None
+    first_id = await backend.publish("orders", {"blob": "x" * 100})
+    assert store.get("cdc/spill/1.json")
+    second_ids = await backend.publish_many([("orders", {"id": 2}, None), ("other", {"id": 3}, None)])
+    assert second_ids == ["2", "3"]
+    first = await backend.dequeue("orders", 0)
+    assert first is not None
+    assert (first.event_id, first.channel, first.payload) == (first_id, "orders", {"blob": "x" * 100})
+    await backend.nack(first_id)
+    redelivered = await backend.dequeue("orders", 0)
+    assert redelivered is not None
+    assert (redelivered.event_id, redelivered.payload) == (first_id, first.payload)
+    await backend.ack(first_id)
+    await backend.nack(first_id)
+    second = await backend.dequeue("orders", 0)
+    assert second is not None
+    assert (second.event_id, second.payload) == ("2", {"id": 2})
+    assert await backend.dequeue("orders", 0) is None
+    await backend.shutdown()
+    await backend.nack("2")
+    assert await backend.dequeue("orders", 0) is None
+    assert await backend.dequeue("other", 0) is None

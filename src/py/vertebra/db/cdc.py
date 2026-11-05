@@ -1,4 +1,4 @@
-"""Database Change Data Capture (CDC): PostgreSQL LISTEN/NOTIFY spill feed and Cloud Spanner Change Streams."""
+"""Change-feed envelopes, bounded spill hydration, and Cloud Spanner Change Streams."""
 
 from __future__ import annotations
 
@@ -7,8 +7,6 @@ import inspect
 from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
-
-import msgspec
 
 from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.module_loader import ensure_module
@@ -29,8 +27,8 @@ __all__ = (
 )
 
 
-class ChangeEvent(msgspec.Struct, frozen=True, gc=False, kw_only=True):
-    """Change-feed event emitted via ``LISTEN``/``NOTIFY``, logical WAL, or Spanner Change Streams."""
+class ChangeEvent(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
+    """Immutable change-feed envelope carrying a decoded event payload."""
 
     event_id: int
     """Monotonically increasing event identifier."""
@@ -48,36 +46,32 @@ class ChangeEvent(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Whether the wire payload exceeded ``spill_threshold_bytes`` and spilled to ``ObjectStore``."""
 
 
-class CDCConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
-    """Configuration for database change-feed streaming, spill hydration, and WAL slot safety."""
+class CDCConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
+    """Engine-neutral change-feed history and spill hydration configuration."""
 
     channel: str = "vertebra_events"
     """Logical channel name for emitted CDC events."""
 
     spill_threshold_bytes: int = 7500
-    """Maximum inline payload size in bytes before spilling to ``ObjectStore``."""
-
-    spill_table: str = "vertebra_notify_spill"
-    """Fallback relational spill table name."""
+    """Maximum inline payload size in bytes before spilling to storage or bounded memory."""
 
     spill_prefix: str = "cdc/spill"
-    """Object key prefix in ``ObjectStore`` for spilled CDC payloads."""
+    """Object key prefix for spilled CDC payloads."""
 
     max_history_size: int = 1024
     """Maximum number of events retained in the in-memory replay buffer."""
 
-    replication_slot_name: str = "vertebra_cdc_slot"
-    """PostgreSQL logical replication slot identifier."""
+    max_memory_spills: int = 1024
+    """Maximum number of oversized payloads retained in the in-memory LRU cache."""
 
-    publication_name: str = "vertebra_pub"
-    """PostgreSQL publication identifier."""
-
-    max_slot_wal_keep_size_mb: int = 4096
-    """Maximum WAL retention size in megabytes for logical replication slots."""
+    def __post_init__(self) -> None:
+        if self.max_memory_spills < 1:
+            msg = "max_memory_spills must be at least 1"
+            raise ValueError(msg)
 
 
 class ChangeFeed:
-    """Manages PostgreSQL ``NOTIFY`` payloads, ``>7,500``-byte spill hydration, and logical WAL emission."""
+    """Publish change-feed envelopes with bounded history and spill storage."""
 
     __slots__ = ("_config", "_history", "_listeners", "_next_id", "_spill_store", "_store")
 
@@ -89,7 +83,7 @@ class ChangeFeed:
     ) -> None:
         self._config = config or CDCConfig()
         self._store = store
-        self._spill_store: dict[int, dict[str, Any]] = {}
+        self._spill_store: collections.OrderedDict[int, dict[str, Any]] = collections.OrderedDict()
         self._history: collections.deque[ChangeEvent] = collections.deque(maxlen=self._config.max_history_size)
         self._listeners: list[Any] = []
         self._next_id: int = 1
@@ -108,29 +102,21 @@ class ChangeFeed:
         """Register a listener callback invoked with each published ChangeEvent."""
         self._listeners.append(callback)
 
-    @staticmethod
-    def build_emit_message_sql(
-        prefix: str,
-        payload: bytes | str,
-        *,
-        transactional: bool = True,
-    ) -> tuple[str, tuple[bool, str, bytes]]:
-        """Build a zero-table-bloat ``pg_logical_emit_message`` SQL statement and bind tuple."""
-        raw = payload.encode("utf-8") if isinstance(payload, str) else bytes(payload)
-        return "SELECT pg_logical_emit_message($1, $2, $3)", (transactional, prefix, raw)
-
     def publish_event(self, operation: str, payload: dict[str, Any]) -> tuple[str, ChangeEvent]:
-        """Encode an event for ``pg_notify``, spilling to ``_spill_store`` when exceeding threshold."""
+        """Encode an event, spilling payloads that exceed the inline byte threshold."""
         event_id = self._next_id
         self._next_id += 1
         encoded = encode_json_bytes(payload)
         spilled = len(encoded) > self._config.spill_threshold_bytes
         if spilled:
-            spill_key = f"{self._config.spill_prefix}/{event_id}.json"
+            prefix = self._config.spill_prefix.rstrip("/")
+            spill_key = f"{prefix}/{event_id}.json" if prefix else f"{event_id}.json"
             if self._store is not None:
                 self._store.put(spill_key, encoded)
             else:
                 self._spill_store[event_id] = payload
+                if len(self._spill_store) > self._config.max_memory_spills:
+                    self._spill_store.popitem(last=False)
             wire_envelope = encode_json(
                 {
                     "event_id": event_id,
@@ -163,24 +149,22 @@ class ChangeFeed:
         return wire_envelope, evt
 
     def hydrate_notification(self, wire_envelope: str | bytes) -> ChangeEvent:
-        """Decode a ``NOTIFY`` wire envelope, hydrating spilled payloads from memory or ObjectStore."""
+        """Decode an envelope, hydrating spills and propagating backing-store failures."""
         decoded = decode_json(wire_envelope)
         event_id = int(decoded["event_id"])
         spilled = bool(decoded.get("spilled", False))
         if spilled:
-            payload: dict[str, Any] | None = None
             if self._store is not None:
-                spill_key = str(decoded.get("spill_key") or f"{self._config.spill_prefix}/{event_id}.json")
-                try:
-                    raw_bytes = self._store.get(spill_key)
-                    payload = dict(decode_json(raw_bytes))
-                except Exception:
-                    payload = None
-            if payload is None:
-                payload = self._spill_store.get(event_id)
-            if payload is None:
-                msg = f"Spilled CDC payload for event_id={event_id} is missing"
-                raise KeyError(msg)
+                prefix = self._config.spill_prefix.rstrip("/")
+                default_key = f"{prefix}/{event_id}.json" if prefix else f"{event_id}.json"
+                spill_key = str(decoded.get("spill_key") or default_key)
+                payload = dict(decode_json(self._store.get(spill_key)))
+            else:
+                if event_id not in self._spill_store:
+                    msg = f"Evicted or unknown in-memory CDC spill id: {event_id}"
+                    raise KeyError(msg)
+                payload = self._spill_store[event_id]
+                self._spill_store.move_to_end(event_id)
         else:
             payload = dict(decoded.get("payload") or {})
 

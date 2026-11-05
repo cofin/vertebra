@@ -21,8 +21,8 @@ tests:
   - src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
   - src/py/tests/unit/db/test_native_db_drivers.py
   - src/py/tests/unit/docs/test_examples.py
-plan_revision: 4
-plan_commit: "f741701"
+plan_revision: 5
+plan_commit: "954998dea5866f52bc3730db642e8f028d4e72bf"
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -33,7 +33,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: 2026-11-03T21:49:00Z
-updated_at: 2026-11-04T01:12:00Z
+updated_at: "2026-11-05T01:49:53Z"
 commit: null
 tags: [db, agent, mcp, tools, layering, clean-break]
 ---

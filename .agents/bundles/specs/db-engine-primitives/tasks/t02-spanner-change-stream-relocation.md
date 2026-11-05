@@ -13,10 +13,12 @@ files:
   - src/py/vertebra/db/channels.py
   - src/py/vertebra/db/adapters/spanner/change_stream.py
   - src/py/vertebra/db/adapters/spanner/__init__.py
+  - .agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md
 tests:
   - src/py/tests/unit/db/test_spanner_queue_and_cdc.py
-plan_revision: 4
-plan_commit: "f741701"
+  - src/py/tests/unit/db/test_native_db_drivers.py
+plan_revision: 5
+plan_commit: "954998dea5866f52bc3730db642e8f028d4e72bf"
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -27,7 +29,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: 2026-11-03T21:47:00Z
-updated_at: 2026-11-04T01:12:00Z
+updated_at: "2026-11-05T01:49:53Z"
 commit: null
 tags: [db, spanner, cdc, change-stream, async]
 ---
@@ -52,6 +54,7 @@ Move `SpannerChildPartition`, `SpannerChangeStreamRecord`, `SyncSpannerChangeStr
      - Assert `hasattr(vertebra.db.cdc, "SyncSpannerChangeStreamSource") is False`, `hasattr(vertebra.db.cdc, "AsyncSpannerChangeStreamSource") is False`, `hasattr(vertebra.db.cdc, "SpannerChangeStreamRecord") is False`, and `hasattr(vertebra.db.cdc, "SpannerChildPartition") is False`.
      - Add tests assigning `sync_source: SyncChangeSource = SyncSpannerChangeStreamSource(sync_driver, "orders_stream", start_timestamp="2026-11-03T00:00:00Z")`, verifying `isinstance(sync_source, SyncChangeSource) is True`, `sync_source.poll_partition(...)` and zero-argument `list(sync_source.stream())` execute synchronously across GoogleSQL and Spangres TVF dialects, and `validate_identifier` rejects invalid SQL `stream_name` strings (`@pytest.mark.parametrize`).
      - Add async tests assigning `source: AsyncChangeSource = AsyncSpannerChangeStreamSource(async_driver, "orders_stream", start_timestamp="2026-11-03T00:00:00Z")`, asserting `isinstance(source, AsyncChangeSource)` is `True`, `await source.poll_partition(...)` awaits `async_driver.select(...)` directly, and zero-argument `async for event in source.stream():` yields `ChangeEvent` records across root and promoted child partitions cleanly.
+   - In `src/py/tests/unit/db/test_native_db_drivers.py::test_dialect_tag_uniqueness_deterministic_file_urls_and_spanner_cdc_protocol`, import `SyncSpannerChangeStreamSource` and `AsyncSpannerChangeStreamSource` from `vertebra.db.adapters.spanner.change_stream` instead of `vertebra.db.cdc`; retain the existing sync/async protocol and zero-argument stream assertions.
 
 2. **Create `adapters/spanner/change_stream.py` and clean `cdc.py` (GREEN)**:
    - Create `src/py/vertebra/db/adapters/spanner/change_stream.py` containing:
@@ -62,9 +65,10 @@ Move `SpannerChildPartition`, `SpannerChangeStreamRecord`, `SyncSpannerChangeStr
      - `AsyncSpannerChangeStreamSource` implementing `AsyncChangeSource` (`async def poll_partition` awaiting `self._driver.select(...)` directly without `inspect.isawaitable` and `async def stream` with all optional parameters).
    - Re-export `AsyncSpannerChangeStreamSource`, `SpannerChangeStreamRecord`, `SpannerChildPartition`, and `SyncSpannerChangeStreamSource` in `src/py/vertebra/db/adapters/spanner/__init__.py`.
    - Remove `SpannerChildPartition`, `SpannerChangeStreamRecord`, `_BaseSpannerChangeStreamSource`, `SyncSpannerChangeStreamSource`, and `AsyncSpannerChangeStreamSource` (plus unused `inspect` / `Mapping` / `Literal` imports) from `src/py/vertebra/db/cdc.py`, and update `src/py/vertebra/db/channels.py`'s Spanner change-stream import to `vertebra.db.adapters.spanner.change_stream` until `t03` deletes `channels.py`.
+   - Update `.agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md::Change Feed` in the same task: link all four relocated Spanner symbols to `src/py/vertebra/db/adapters/spanner/change_stream.py`, document constructor-bound stream defaults and zero-argument sync/async capability conformance, and add the new source resource and provenance footnote. Keep `cdc.py` references for `CDCConfig`, `ChangeEvent`, and `ChangeFeed`.
 
 3. **Refactor & verify**:
-   - Run `uv run pytest src/py/tests/unit/db/test_spanner_queue_and_cdc.py` and `make lint-all`.
+   - Run `uv run pytest src/py/tests/unit/db/test_spanner_queue_and_cdc.py`, `uv run pytest src/py/tests/unit/db/test_native_db_drivers.py -k spanner_cdc_protocol`, and `make lint-all`.
 
 ## Verification
 
@@ -72,11 +76,13 @@ Move `SpannerChildPartition`, `SpannerChangeStreamRecord`, `SyncSpannerChangeStr
   - `uv run pytest src/py/tests/unit/db/test_spanner_queue_and_cdc.py` -> fails (`ModuleNotFoundError: No module named 'vertebra.db.adapters.spanner.change_stream'`).
 - **Final (GREEN)**:
   - `uv run pytest src/py/tests/unit/db/test_spanner_queue_and_cdc.py` -> exits `0`.
+  - `uv run pytest src/py/tests/unit/db/test_native_db_drivers.py -k spanner_cdc_protocol` -> exits `0`, including successful module collection after the import relocation.
   - `make lint-all` -> exits `0`.
 
 ## Acceptance Criteria
 
 - [ ] R2: `SpannerChildPartition`, `SpannerChangeStreamRecord`, `SyncSpannerChangeStreamSource`, and `AsyncSpannerChangeStreamSource` live in `src/py/vertebra/db/adapters/spanner/change_stream.py`, `SyncSpannerChangeStreamSource` satisfies `SyncChangeSource` and `AsyncSpannerChangeStreamSource` satisfies `AsyncChangeSource` both statically (`Mypy`) and via `isinstance(...)` with zero-argument `stream()` and zero `inspect.isawaitable` branching, and `src/py/vertebra/db/cdc.py` contains zero Spanner symbols.
+- [ ] R2: The native-driver capability regression imports both Spanner readers from the adapter module and passes, and the data knowledge chapter identifies the adapter-owned reader location and constructor-bound stream defaults.
 
 ## Notes & Discoveries
 

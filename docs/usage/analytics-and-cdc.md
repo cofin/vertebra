@@ -1,6 +1,6 @@
 # Row-Level Security, CDC & Arrow Analytics
 
-Vertebra combines multi-tenant PostgreSQL Row-Level Security (`vertebra.db.rls`), logical replication Change Data Capture (`vertebra.db.cdc`), and zero-copy shared-memory Apache Arrow / DuckDB / DataFusion analytics.
+Vertebra combines multi-tenant PostgreSQL Row-Level Security (`vertebra.db.rls`), engine-neutral Change Data Capture (`vertebra.db.cdc`), and zero-copy shared-memory Apache Arrow / DuckDB / DataFusion analytics.
 
 ## Multi-Tenant Row-Level Security (`vertebra.db.rls`)
 
@@ -25,18 +25,33 @@ where_clause = predicate.to_sql_fragment(param_index=1)
 
 ## Change Data Capture (`vertebra.db.cdc`)
 
-`ChangeFeed` (`CDCConfig`, `ChangeEvent`) and the `SyncChangeSource` / `AsyncChangeSource` capability protocols (`vertebra.db.driver`) stream logical replication and Cloud Spanner change-stream events with replay cursors (`replay_since()`) and Parquet archival (`flush_to_parquet()`):
+`ChangeFeed` (`CDCConfig`, `ChangeEvent`) and the `SyncChangeSource` / `AsyncChangeSource` capability protocols (`vertebra.db.driver`) provide event envelopes and change-stream capabilities with replay cursors (`replay_since()`) and Parquet archival (`flush_to_parquet()`):
 
 ```python
+from vertebra.db.adapters.postgres import PostgresNotifyConfig
 from vertebra.db.cdc import CDCConfig, ChangeFeed
 
 feed = ChangeFeed(
     CDCConfig(
-        replication_slot_name="vertebra_orders_cdc",
-        publication_name="orders_pub",
+        channel="orders",
+        spill_prefix="cdc/orders",
+        max_memory_spills=256,
     )
 )
+notify_config = PostgresNotifyConfig(
+    channel="orders",
+    replication_slot_name="vertebra_orders_cdc",
+    publication_name="orders_pub",
+)
 ```
+
+`PostgresNotificationSource(driver, notify_config, change_feed=feed)` publishes
+parameterized PostgreSQL notifications using the feed's spill envelopes. Its
+`build_emit_message_sql()` helper builds logical replication message SQL. Live
+`LISTEN` streaming requires a driver that implements `listen_notifications()`.
+In-memory spills use a bounded LRU cache; hydrating an evicted spill raises
+`KeyError`. Attach a `SyncObjectStore` for persistent spill hydration; storage
+errors propagate to the caller.
 
 ## Zero-Copy Arrow SHM (`ArrowCursor`), DuckDB & DataFusion
 

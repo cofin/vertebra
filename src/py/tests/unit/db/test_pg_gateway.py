@@ -21,6 +21,7 @@ from vertebra.db.rls import TenantPredicate, TenantScopeConfig
 from vertebra.storage import SyncObjectStore
 from vertebra.typing import MissingDependencyError, reset_dependency_cache
 from vertebra.utils.module_loader import import_optional
+from vertebra.utils.serializers import decode_json, encode_json, encode_json_bytes
 
 
 class _GatewayDataFrame:
@@ -105,7 +106,7 @@ def test_changefeed_bounded_history_and_spill_to_object_store(monkeypatch: pytes
     assert [row["event_id"] for row in decoded_table.to_pylist()] == [2, 3]
 
     store.delete("cdc/spill/2.json")
-    with pytest.raises(KeyError, match="Spilled CDC payload for event_id=2 is missing"):
+    with pytest.raises(FileNotFoundError, match="cdc/spill/2.json"):
         feed.hydrate_notification(env2)
 
     monkeypatch.setitem(sys.modules, "pyarrow", None)
@@ -239,7 +240,7 @@ def test_datafusion_engine_table_registration_and_execution(monkeypatch: pytest.
 
 
 def test_cdc_changefeed_parquet_spill_to_object_store_and_datafusion_arrow_query() -> None:
-    """ChangeFeed Parquet spill and DataFusion query execution composition with KeyError refusal."""
+    """ChangeFeed Parquet spill and DataFusion queries propagate missing-storage errors."""
     store = SyncObjectStore("memory://")
     feed = ChangeFeed(CDCConfig(spill_threshold_bytes=100), store=store)
 
@@ -275,7 +276,7 @@ def test_cdc_changefeed_parquet_spill_to_object_store_and_datafusion_arrow_query
     assert pa_ipc.open_stream(pa.BufferReader(ipc_data)).read_all().num_rows == 2
 
     store.delete("cdc/spill/2.json")
-    with pytest.raises(KeyError, match="Spilled CDC payload for event_id=2 is missing"):
+    with pytest.raises(FileNotFoundError, match="cdc/spill/2.json"):
         feed.hydrate_notification(env2)
 
 
@@ -316,3 +317,95 @@ def test_query_pipeline_and_rls_identifier_refusal_and_single_rtt_execution() ->
 
     result = pipeline.execute(mock_driver)
     assert result == {"orders": [{"id": 101, "item": "book"}]}
+
+
+def test_cdc_engine_neutral_defaults() -> None:
+    """CDC configuration keeps its neutral defaults and no SQL emission surface."""
+    config = CDCConfig()
+    assert config.to_dict() == {
+        "channel": "vertebra_events",
+        "spill_threshold_bytes": 7500,
+        "spill_prefix": "cdc/spill",
+        "max_history_size": 1024,
+        "max_memory_spills": 1024,
+    }
+    assert not hasattr(ChangeFeed(), "build_emit_message_sql")
+
+
+@pytest.mark.parametrize(
+    "field", ["replication_slot_name", "publication_name", "max_slot_wal_keep_size_mb", "spill_table"]
+)
+def test_cdc_rejects_postgres_configuration(field: str) -> None:
+    """Engine-specific options are excluded from CDCConfig's constructor."""
+    with pytest.raises(TypeError):
+        CDCConfig(**{field: "legacy"})
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_cdc_rejects_unbounded_memory_spills(limit: int) -> None:
+    """A spill cache must retain at least one entry."""
+    with pytest.raises(ValueError, match="max_memory_spills"):
+        CDCConfig(max_memory_spills=limit)
+
+
+@pytest.mark.parametrize(
+    "prefix,expected",
+    [("cdc/spill/", "cdc/spill/1.json"), ("cdc/spill///", "cdc/spill/1.json"), ("/", "1.json"), ("", "1.json")],
+)
+def test_cdc_spill_key_normalization(prefix: str, expected: str) -> None:
+    """Publication and hydration without an explicit key use the same normalized prefix."""
+    store = SyncObjectStore("memory://")
+    feed = ChangeFeed(CDCConfig(spill_threshold_bytes=16, spill_prefix=prefix), store=store)
+    payload = {"blob": "x" * 100}
+    wire, _ = feed.publish_event("UPDATE", payload)
+    envelope = decode_json(wire)
+    assert envelope.pop("spill_key") == expected
+    assert store.get(expected) == encode_json_bytes(payload)
+    assert feed.hydrate_notification(encode_json(envelope)).payload == payload
+
+
+@pytest.mark.parametrize("threshold,spilled", [(13, True), (14, False), (15, False)])
+def test_cdc_spill_threshold_boundary(threshold: int, spilled: bool) -> None:
+    """Only encoded payloads strictly larger than the byte threshold spill."""
+    feed = ChangeFeed(CDCConfig(spill_threshold_bytes=threshold))
+    wire, event = feed.publish_event("INSERT", {"value": "é"})
+    assert event.spilled is spilled
+    assert feed.hydrate_notification(wire).payload == {"value": "é"}
+
+
+def test_cdc_memory_spills_evict_oldest() -> None:
+    """Oversized payloads respect the configured cache bound through public hydration."""
+    feed = ChangeFeed(CDCConfig(spill_threshold_bytes=16, max_memory_spills=2))
+    first, _ = feed.publish_event("INSERT", {"blob": "a" * 100})
+    second, _ = feed.publish_event("INSERT", {"blob": "b" * 100})
+    third, _ = feed.publish_event("INSERT", {"blob": "c" * 100})
+    with pytest.raises(KeyError, match="Evicted or unknown in-memory CDC spill id: 1"):
+        feed.hydrate_notification(first)
+    assert feed.hydrate_notification(second).payload == {"blob": "b" * 100}
+    assert feed.hydrate_notification(third).payload == {"blob": "c" * 100}
+
+
+def test_cdc_memory_spills_refresh_recency_on_hydration() -> None:
+    """Reading a spill keeps it resident ahead of an unread older entry."""
+    feed = ChangeFeed(CDCConfig(spill_threshold_bytes=16, max_memory_spills=2))
+    first, _ = feed.publish_event("INSERT", {"blob": "a" * 100})
+    second, _ = feed.publish_event("INSERT", {"blob": "b" * 100})
+    feed.hydrate_notification(first)
+    third, _ = feed.publish_event("INSERT", {"blob": "c" * 100})
+    with pytest.raises(KeyError, match="spill id: 2"):
+        feed.hydrate_notification(second)
+    assert feed.hydrate_notification(first).payload == {"blob": "a" * 100}
+    assert feed.hydrate_notification(third).payload == {"blob": "c" * 100}
+
+
+def test_cdc_store_hydration_propagates_storage_error() -> None:
+    """A backing-store failure reaches the caller without fallback or error translation."""
+    store = MagicMock(spec=SyncObjectStore)
+    failure = RuntimeError("storage unavailable")
+    store.get.side_effect = failure
+    feed = ChangeFeed(CDCConfig(spill_threshold_bytes=16), store=store)
+    wire, _ = feed.publish_event("UPDATE", {"blob": "x" * 100})
+    with pytest.raises(RuntimeError, match="storage unavailable") as raised:
+        feed.hydrate_notification(wire)
+    assert raised.value is failure
+    store.get.assert_called_once_with("cdc/spill/1.json")

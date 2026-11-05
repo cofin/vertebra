@@ -6,7 +6,9 @@ import os
 import re
 import socket
 import sys
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
+from unittest.mock import MagicMock
 
 import pyarrow as pa
 import pytest
@@ -24,6 +26,9 @@ from vertebra.db.adapters.datafusion import (
     DataFusionEngine,
     TableRegistration,
 )
+from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, SyncPostgreSQLDriver
+from vertebra.db.adapters.postgres.notify import PostgresNotificationSource, PostgresNotifyConfig
+from vertebra.db.driver import NotificationEvent, NotificationSource, NotSupportedError
 from vertebra.db.pipeline import (
     AsyncQueryPipeline,
     CTEStep,
@@ -33,6 +38,7 @@ from vertebra.db.pipeline import (
 from vertebra.server.platform import SHMAllocationPolicy
 from vertebra.typing import MissingDependencyError, reset_dependency_cache
 from vertebra.utils.module_loader import import_optional
+from vertebra.utils.serializers import decode_json
 
 
 class _DeterministicDataFrame:
@@ -222,7 +228,7 @@ def test_rls_planner_unfenced_predicate_and_session_guc() -> None:
 
 def test_cdc_listen_notify_spill_and_logical_emit() -> None:
     """Verify ChangeFeed >7500-byte spill hydration, replay_since, bounded eviction, and logical emit SQL."""
-    sql, params = ChangeFeed.build_emit_message_sql("orders", '{"id":1}')
+    sql, params = PostgresNotificationSource.build_emit_message_sql("orders", '{"id":1}')
     assert "pg_logical_emit_message" in sql
     assert params == (True, "orders", b'{"id":1}')
 
@@ -285,3 +291,98 @@ def test_embedded_datafusion_and_memfd_scm_rights(monkeypatch: pytest.MonkeyPatc
             s2.close()
     finally:
         os.close(fd)
+
+
+@pytest.mark.parametrize("transactional", [True, False])
+@pytest.mark.parametrize("payload", ['{"id":1}', b'{"id":1}'])
+def test_postgres_notify_sql_builders(payload: str | bytes, transactional: bool) -> None:
+    """PostgreSQL SQL builders retain payloads as bound values."""
+    assert PostgresNotificationSource.build_emit_message_sql("orders", payload, transactional=transactional) == (
+        "SELECT pg_logical_emit_message($1, $2, $3)",
+        (transactional, "orders", b'{"id":1}'),
+    )
+    assert PostgresNotificationSource.build_notify_sql("orders", "'quoted'") == (
+        "SELECT pg_notify($1, $2)",
+        ("orders", "'quoted'"),
+    )
+
+
+@pytest.mark.parametrize("field", ["channel", "spill_table", "replication_slot_name", "publication_name"])
+@pytest.mark.parametrize("invalid", ["bad; DROP TABLE orders", "bad.name", "", "has space"])
+def test_postgres_notify_config_rejects_invalid_identifiers(field: str, invalid: str) -> None:
+    """PostgreSQL configuration accepts single SQL identifiers only."""
+    with pytest.raises(ValueError, match=field):
+        PostgresNotifyConfig(**{field: invalid})
+
+
+@pytest.mark.parametrize("driver_type", [SyncPostgreSQLDriver, AsyncPostgreSQLDriver])
+@pytest.mark.parametrize("payload,expected", [("hello", "hello"), (b"\x00\xff", "b64:AP8=")])
+@pytest.mark.parametrize("with_feed", [False, True])
+@pytest.mark.anyio
+async def test_postgres_notify_publish(
+    driver_type: type[SyncPostgreSQLDriver] | type[AsyncPostgreSQLDriver],
+    payload: str | bytes,
+    expected: str,
+    with_feed: bool,
+) -> None:
+    """Both driver variants publish raw payloads or hydratable canonical CDC envelopes."""
+    driver = MagicMock(spec=driver_type)
+    feed = ChangeFeed(CDCConfig(spill_threshold_bytes=16)) if with_feed else None
+    source = PostgresNotificationSource(driver, change_feed=feed)
+    assert isinstance(source, NotificationSource)
+    assert source.change_feed is feed
+    await source.publish("orders", payload)
+    sql, parameters = driver.execute.call_args.args
+    assert sql == "SELECT pg_notify($1, $2)"
+    assert parameters[0] == "orders"
+    if feed is None:
+        assert parameters[1] == expected
+    else:
+        event = feed.hydrate_notification(parameters[1])
+        assert event.operation == "PUBLISH"
+        assert event.payload == {"channel": "orders", "data_b64": "aGVsbG8=" if payload == "hello" else "AP8="}
+        assert decode_json(parameters[1])["spilled"] is True
+        assert feed.replay_since(0) == [event]
+    if driver_type is AsyncPostgreSQLDriver:
+        driver.execute.assert_awaited_once()
+
+
+@pytest.mark.parametrize("action", ["publish", "subscribe", "unsubscribe"])
+@pytest.mark.parametrize("channel", ["bad;sql", "bad.name", ""])
+@pytest.mark.anyio
+async def test_postgres_notify_rejects_invalid_channels(action: str, channel: str) -> None:
+    """Every notification entry point rejects invalid channels before driver I/O."""
+    driver = MagicMock(spec=SyncPostgreSQLDriver)
+    source = PostgresNotificationSource(driver)
+    with pytest.raises(ValueError, match="channel"):
+        if action == "publish":
+            await source.publish(channel, "data")
+        else:
+            await getattr(source, action)([channel])
+    driver.execute.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_postgres_notify_subscription_stream_delegates() -> None:
+    """Subscriptions are idempotent and listener frames pass through the driver boundary."""
+    driver = MagicMock(spec=SyncPostgreSQLDriver)
+    event = NotificationEvent(channel="orders", payload=b"hello")
+
+    async def frames(channels: Sequence[str]) -> AsyncIterator[NotificationEvent]:
+        assert tuple(channels) == ("orders",)
+        yield event
+
+    driver.listen_notifications = MagicMock(side_effect=frames)
+    source = PostgresNotificationSource(driver, PostgresNotifyConfig(channel="orders"))
+    await source.subscribe(["orders", "orders", "unused"])
+    await source.unsubscribe(["unused", "unknown"])
+    assert [frame async for frame in source.listen()] == [event]
+    driver.listen_notifications.assert_called_once_with(("orders",))
+
+
+@pytest.mark.anyio
+async def test_postgres_notify_listen_without_native_stream() -> None:
+    """Unimplemented native streaming fails explicitly on iteration."""
+    source = PostgresNotificationSource(MagicMock(spec=SyncPostgreSQLDriver))
+    with pytest.raises(NotSupportedError, match="Live PostgreSQL LISTEN streaming requires"):
+        await anext(source.listen())

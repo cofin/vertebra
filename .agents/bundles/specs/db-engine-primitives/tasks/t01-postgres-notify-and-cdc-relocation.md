@@ -3,7 +3,7 @@ type: Task
 id: db-engine-primitives:t01
 title: Extract PostgreSQL logical message and NOTIFY primitives to vertebra/db/adapters/postgres/notify.py and bound ChangeFeed
 description: "Keep `src/py/vertebra/db/cdc.py` engine-neutral (`CDCConfig`, `ChangeEvent`, `ChangeFeed`) with preserved default values, normalized `spill_prefix` object keys, bounded in-memory spill LRU eviction, and fail-loud `SyncObjectStore.get()` hydration, remove `build_emit_message_sql` from `ChangeFeed` and `extensions/sqlspec/events.py`, and extract PostgreSQL logical replication / `NOTIFY` primitives into `src/py/vertebra/db/adapters/postgres/notify.py` (`PostgresNotifyConfig`, `PostgresNotificationSource(NotificationSource)`)."
-state: pending
+state: "in_progress"
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -13,16 +13,17 @@ files:
   - src/py/vertebra/db/adapters/postgres/__init__.py
   - src/py/vertebra/extensions/sqlspec/events.py
   - docs/usage/analytics-and-cdc.md
+  - .agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md
 tests:
   - src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
   - src/py/tests/unit/db/test_pg_gateway.py
   - src/py/tests/unit/extensions/test_data_storage_integrations.py
   - src/py/tests/unit/docs/test_examples.py
-plan_revision: 4
-plan_commit: "f741701"
-state_revision: 0
-claimed_by: null
-claimed_at: null
+plan_revision: 5
+plan_commit: "954998dea5866f52bc3730db642e8f028d4e72bf"
+state_revision: 1
+claimed_by: "/root/db_t01"
+claimed_at: "2026-11-05T01:35:36Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -30,7 +31,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: 2026-11-03T21:47:00Z
-updated_at: 2026-11-04T01:12:00Z
+updated_at: "2026-11-05T01:49:53Z"
 commit: null
 tags: [db, cdc, postgres, notify, spill]
 ---
@@ -75,6 +76,7 @@ Keep `src/py/vertebra/db/cdc.py` engine-neutral (`CDCConfig`, `ChangeEvent`, `Ch
      - `listen(self) -> AsyncIterator[NotificationEvent]` delegating to `self._driver.listen_notifications(tuple(self._subscribed_channels))` when exposed and raising `NotSupportedError("Live PostgreSQL LISTEN streaming requires the native Rust PostgreSQL driver")` otherwise.
      - Re-export `PostgresNotifyConfig` and `PostgresNotificationSource` via `lazy_exports` / `__all__` in `src/py/vertebra/db/adapters/postgres/__init__.py`.
    - Update the `CDCConfig` / PostgreSQL notification example in `docs/usage/analytics-and-cdc.md` so `CDCConfig` uses only engine-neutral fields and PostgreSQL replication/notify fields use `PostgresNotifyConfig`.
+   - Update `.agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md::Change Feed` in the same task: document the five engine-neutral `CDCConfig` defaults, bounded `OrderedDict` spill eviction, normalized object keys, propagated object-store errors, and `KeyError` for evicted or unknown memory spills; replace the `ChangeFeed.build_emit_message_sql` row with adapter-owned `PostgresNotifyConfig` and `PostgresNotificationSource` rows; add the `adapters/postgres/notify.py` source resource and provenance footnote; and remove the claim that spill storage and history grow without bound. Keep the existing Spanner location accurate until `t02` moves the readers.
 
 3. **Refactor & verify**:
    - Run `uv run pytest src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py src/py/tests/unit/db/test_pg_gateway.py src/py/tests/unit/extensions/test_data_storage_integrations.py src/py/tests/unit/docs/test_examples.py` and `make lint-all`.
@@ -89,10 +91,12 @@ Keep `src/py/vertebra/db/cdc.py` engine-neutral (`CDCConfig`, `ChangeEvent`, `Ch
 
 ## Acceptance Criteria
 
-- [ ] R1: `CDCConfig` and `ChangeFeed` preserve existing defaults while containing zero PostgreSQL-specific fields or SQL strings, normalize `spill_prefix` keys, enforce `max_memory_spills` LRU eviction, and propagate `SyncObjectStore.get` errors.
-- [ ] R1: `ChangeFeedSyncEventBackend` and `ChangeFeedAsyncEventBackend` omit `build_emit_message_sql` and pass unit tests for `publish`, `publish_many`, `dequeue` (with `SyncObjectStore` spill hydration), `ack`, `nack`, and `shutdown`.
-- [ ] R1: `PostgresNotifyConfig` and `PostgresNotificationSource` live in `src/py/vertebra/db/adapters/postgres/notify.py`, satisfy `isinstance(..., NotificationSource)`, and validate SQL identifiers.
+- [x] R1: `CDCConfig` and `ChangeFeed` preserve existing defaults while containing zero PostgreSQL-specific fields or SQL strings, normalize `spill_prefix` keys, enforce `max_memory_spills` LRU eviction, and propagate `SyncObjectStore.get` errors.
+- [x] R1: `ChangeFeedSyncEventBackend` and `ChangeFeedAsyncEventBackend` omit `build_emit_message_sql` and pass unit tests for `publish`, `publish_many`, `dequeue` (with `SyncObjectStore` spill hydration), `ack`, `nack`, and `shutdown`.
+- [x] R1: `PostgresNotifyConfig` and `PostgresNotificationSource` live in `src/py/vertebra/db/adapters/postgres/notify.py`, satisfy `isinstance(..., NotificationSource)`, and validate SQL identifiers.
 
 ## Notes & Discoveries
 
 <!-- Append timestamped implementation findings here: - [YYYY-MM-DD HH:MM] ... -->
+
+- [2026-11-05T01:49:53Z] Behavior-TDD RED: missing `postgres.notify` import and failing CDC bounds/defaults/key/error/emitter behaviors before implementation. GREEN: four declared canonical test modules `93 passed`; focused Ruff/format/Mypy and `make lint-all` exit `0`. Spanner implementation remains unchanged for t02. Revised-surface plan review approves revision 5, including contemporaneous knowledge and precise future relocation/gate targets.
