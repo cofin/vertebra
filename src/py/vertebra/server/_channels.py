@@ -6,7 +6,6 @@ import asyncio
 import base64
 from collections import deque
 from collections.abc import AsyncGenerator, Iterable
-from contextlib import suppress
 from typing import Self
 
 from vertebra.db.cdc import ChangeEvent, ChangeFeed
@@ -26,7 +25,6 @@ class ChannelBus:
         "_max_history",
         "_notification_source",
         "_queues",
-        "_reader_task",
         "_running",
         "_subscribed_channels",
         "_subscribers",
@@ -57,7 +55,6 @@ class ChannelBus:
         self._subscribers: dict[str, set[asyncio.Queue[tuple[str, bytes] | None]]] = {}
         self._subscribed_channels: set[str] = set()
         self._queues: set[asyncio.Queue[tuple[str, bytes] | None]] = set()
-        self._reader_task: asyncio.Task[None] | None = None
         self._running = False
         if self._change_feed is not None:
             self._change_feed.add_listener(self._on_changefeed_event)
@@ -94,11 +91,6 @@ class ChannelBus:
     async def on_shutdown(self) -> None:
         """Stop streams and detach active subscriber queues."""
         self._running = False
-        if self._reader_task is not None:
-            self._reader_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._reader_task
-            self._reader_task = None
         for queue in tuple(self._queues):
             queue.put_nowait(None)
             self._unregister_stream_queue(queue)
