@@ -31,9 +31,17 @@ from vertebra.server._fastpath import (
     serialize_fastpath_special_result,
     wrap_asgi_fastpath,
 )
+from vertebra.server._fastpath_core import (
+    UNSET_DEFAULT,
+    DirectPlan,
+    QueryParamSpec,
+    resolve_scalar_query_converter,
+    serialize_litestar_http_exception,
+)
 from vertebra.typing import Empty
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
+from vertebra.utils.type_guards import is_coroutine_callable
 
 __all__ = (
     "CompiledRoute",
@@ -111,7 +119,7 @@ class FastPath:
         self._mount_prefix = mount_prefix
         self._router_table: RouterTable | None = None
         self._compiled_routes: dict[int, CompiledRoute] = {}
-        self._direct_plans: dict[int, _DirectSignaturePlan] = {}
+        self._direct_plans: dict[int, DirectPlan] = {}
         self.bind_app(resolved_app, router_table=resolved_table, compiled_routes=compiled_routes)
 
     @property
@@ -146,7 +154,7 @@ class FastPath:
         elif self._router_table is not None:
             self._compiled_routes = _compile_routes_from_table(self._router_table, self._app)
 
-        plans: dict[int, _DirectSignaturePlan] = {}
+        plans: dict[int, DirectPlan] = {}
         if self._router_table is not None:
             for handler_id, entry in self._router_table.routes.items():
                 compiled = self._compiled_routes.get(handler_id)
@@ -223,7 +231,7 @@ class FastPath:
                     body=body,
                 )
             except Exception as exc:
-                http_exc_resp = _serialize_http_exception(exc)
+                http_exc_resp = serialize_litestar_http_exception(exc)
                 if http_exc_resp is not None:
                     return http_exc_resp
                 raise
@@ -251,7 +259,7 @@ class FastPath:
                 send=send,
             )
         except Exception as exc:
-            http_exc_resp = _serialize_http_exception(exc)
+            http_exc_resp = serialize_litestar_http_exception(exc)
             if http_exc_resp is not None:
                 return http_exc_resp
             raise
@@ -356,33 +364,6 @@ _RESERVED_CONNECTION_KWARGS: frozenset[str] = frozenset(
 _CUSTOM_RESPONSE_RETURN_NAMES: frozenset[str] = frozenset(
     {"Response", "Redirect", "File", "Stream", "Template", "ServerSentEvent", "ASGIResponse"}
 )
-_BODYLESS_HTTP_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "DELETE", "OPTIONS"})
-_UNSET_DEFAULT: object = object()
-
-
-class _QueryParamSpec(msgspec.Struct, frozen=True, gc=False):
-    """Compiled scalar query parameter extraction spec for _DirectSignaturePlan."""
-
-    name: str
-    converter: Callable[[str], Any]
-    default: Any
-
-
-class _DirectSignaturePlan(msgspec.Struct, frozen=True, gc=False):
-    """Zero-allocation compiled signature execution plan for pure Litestar route handlers."""
-
-    fn: Callable[..., Any]
-    is_async: bool
-    status_code: int
-    media_type: str
-    path_param_names: tuple[str, ...]
-    query_params: tuple[_QueryParamSpec, ...]
-    body_param: str | None
-    body_type: Any
-    json_headers: list[tuple[bytes, bytes]]
-    text_headers: list[tuple[bytes, bytes]]
-    raw_bytes_headers: list[tuple[bytes, bytes]]
-    max_body_size: int | None = None
 
 
 class _FallbackScopeState:
@@ -565,28 +546,6 @@ def _compile_routes_from_table(
     return compiled
 
 
-def _parse_bool_query(raw: str) -> bool:
-    lowered = raw.strip().lower()
-    if lowered in {"1", "true", "t", "yes", "y", "on"}:
-        return True
-    if lowered in {"0", "false", "f", "no", "n", "off"}:
-        return False
-    msg = f"invalid boolean query parameter: {raw!r}"
-    raise ValueError(msg)
-
-
-def _resolve_scalar_query_converter(annotation: Any) -> Callable[[str], Any] | None:
-    if annotation is inspect.Parameter.empty or annotation is Any or annotation is str:
-        return str
-    if annotation is int:
-        return int
-    if annotation is float:
-        return float
-    if annotation is bool:
-        return _parse_bool_query
-    return None
-
-
 def _handler_has_dependencies_or_dto(handler: Any) -> bool:
     if _supports_v2_layer_resolution(handler):
         resolve_deps = getattr(handler, "resolve_dependencies", None)
@@ -702,7 +661,7 @@ def _unwrap_direct_param_annotation(ann: Any, expected_marker_cls: str) -> tuple
 def _compile_direct_signature_plan(
     entry: ExtractedRoute,
     compiled: CompiledRoute,
-) -> _DirectSignaturePlan | None:
+) -> DirectPlan | None:
     handler = compiled.route_handler
     if (
         compiled.after_response is not None
@@ -732,7 +691,7 @@ def _compile_direct_signature_plan(
         return None
 
     path_param_names: list[str] = []
-    query_specs: list[_QueryParamSpec] = []
+    query_specs: list[QueryParamSpec] = []
     body_param: str | None = None
     body_type: Any = Any
 
@@ -758,11 +717,11 @@ def _compile_direct_signature_plan(
             ok, ann = _unwrap_direct_param_annotation(raw_ann, "QueryParameter")
             if not ok:
                 return None
-            converter = _resolve_scalar_query_converter(ann)
+            converter = resolve_scalar_query_converter(ann)
             if converter is None:
                 return None
-            default_val = _UNSET_DEFAULT if param.default is inspect.Parameter.empty else param.default
-            query_specs.append(_QueryParamSpec(name=param.name, converter=converter, default=default_val))
+            default_val = UNSET_DEFAULT if param.default is inspect.Parameter.empty else param.default
+            query_specs.append(QueryParamSpec(name=param.name, converter=converter, default=default_val))
 
     raw_status = getattr(handler, "status_code", None)
     if isinstance(raw_status, enum.IntEnum):
@@ -787,9 +746,9 @@ def _compile_direct_signature_plan(
         media_type = "application/json"
 
     media_bytes = media_type.encode("latin-1")
-    return _DirectSignaturePlan(
+    return DirectPlan(
         fn=fn,
-        is_async=inspect.iscoroutinefunction(fn),
+        is_async=is_coroutine_callable(fn),
         status_code=status_code,
         media_type=media_type,
         path_param_names=tuple(path_param_names),
@@ -849,7 +808,7 @@ async def _resolve_request_body(
 
 
 async def _execute_direct_signature_plan(
-    plan: _DirectSignaturePlan,
+    plan: DirectPlan,
     *,
     scope: Any,
     path_params: dict[str, Any],
@@ -880,7 +839,7 @@ async def _execute_direct_signature_plan(
                     kwargs[qspec.name] = qspec.converter(parsed_qs[qspec.name])
                 except (ValueError, TypeError):
                     return None
-            elif qspec.default is not _UNSET_DEFAULT:
+            elif qspec.default is not UNSET_DEFAULT:
                 kwargs[qspec.name] = qspec.default
             else:
                 return None
@@ -913,38 +872,6 @@ async def _execute_direct_signature_plan(
     if isinstance(out, str) and plan.media_type.startswith("text/"):
         return (plan.status_code, list(plan.text_headers), out.encode("utf-8"))
     return (plan.status_code, list(plan.json_headers), encode_json_bytes(out))
-
-
-def _serialize_http_exception(exc: Exception) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
-    status_code = getattr(exc, "status_code", None)
-    if not isinstance(status_code, int) or isinstance(status_code, bool) or not (100 <= status_code <= 599):
-        return None
-    if not hasattr(exc, "detail"):
-        return None
-
-    detail = getattr(exc, "detail", "")
-    payload: dict[str, Any] = {
-        "status_code": status_code,
-        "detail": detail if detail else str(exc),
-    }
-    extra = getattr(exc, "extra", None)
-    if extra is not None:
-        payload["extra"] = extra
-
-    headers: list[tuple[bytes, bytes]] = [(b"content-type", b"application/json")]
-    exc_headers = getattr(exc, "headers", None)
-    if isinstance(exc_headers, dict):
-        for hk, hv in exc_headers.items():
-            headers.append((str(hk).lower().encode("latin-1"), str(hv).encode("latin-1")))
-    elif isinstance(exc_headers, list | tuple):
-        for pair in exc_headers:
-            if isinstance(pair, list | tuple) and len(pair) == 2:
-                k_raw, v_raw = pair
-                kb = k_raw.lower() if isinstance(k_raw, bytes) else str(k_raw).lower().encode("latin-1")
-                vb = v_raw if isinstance(v_raw, bytes) else str(v_raw).encode("latin-1")
-                headers.append((kb, vb))
-
-    return (status_code, headers, encode_json_bytes(payload))
 
 
 async def _close_scope_upload_files(scope: Any) -> None:

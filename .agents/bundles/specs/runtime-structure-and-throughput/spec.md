@@ -3,17 +3,17 @@ type: Spec
 flow_id: runtime-structure-and-throughput
 title: Fastpath, Rust Module, and Helper Cleanup
 description: Unify per-framework fastpaths behind a shared core and provider registry, make loop backend selection table-driven, split large Rust GCP crates into focused submodules with shared protobuf wire helpers, remove hot-path copies, give VertexEmbedder a Rust HTTP/2 transport, and remove Python fallbacks behind mandatory Rust utils helpers.
-state: planned
+state: in_progress
 parent_prd: integration-remediation
 research:
 - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 1
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
-state_revision: 0
-current_task: null
+plan_commit: "af319da17dec0148a18532952cb7ea2a91d1c9d7"
+state_revision: 2
+current_task: runtime-structure-and-throughput:t02
 last_verified_checkpoint: null
 created_at: '2026-11-03T03:30:00Z'
-updated_at: '2026-11-06T06:35:00Z'
+updated_at: '2026-11-06T15:22:00Z'
 tags:
 - fastpath
 - rust
@@ -107,7 +107,7 @@ Every worksheet executes as one atomic, GPG-signed conventional commit with disj
 
 ### Phase 1: Python Server Fastpath, Loops, and Rust Core Wire Helpers
 
-- [ ] t01 — Extract shared fastpath core and FastPathProvider registry (tasks/t01-fastpath-core-and-providers.md)
+- [x] t01 — Extract shared fastpath core and FastPathProvider registry (tasks/t01-fastpath-core-and-providers.md)
 - [ ] t02 — Enforce hot-path body size cap, zero-copy Arrow responses, and raw byte headers (tasks/t02-hotpath-body-cap-and-zero-copy.md)
 - [ ] t03 — Make loop backend selection table-driven and externalize welcome page assets (tasks/t03-loop-registry-and-welcome-assets.md)
 - [ ] t04 — Add vertebra-core protobuf wire helpers and rename vertebra-py async_bridge (tasks/t04-rust-proto-and-async-bridge.md)

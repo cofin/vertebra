@@ -299,7 +299,11 @@ async def test_flask_fastpath_async_views_wrap_asgi_and_wsgi_send_raw_response()
     )
 
     compiler = RouteCompiler(app)
-    fastpath = FastPath(compiler)
+    fastpath = FastPath.from_app(app)
+    wrapped_wsgi = fastpath.wrap_wsgi()
+    assert wrapped_wsgi.__vertebra_fastpath__ is fastpath
+    assert not hasattr(wrapped_wsgi, "_vertebra_fastpath")
+    assert len(compiler.entries) == len(fastpath.routes)
 
     req = Request.from_parts(
         method="POST",

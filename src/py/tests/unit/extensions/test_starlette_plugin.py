@@ -35,6 +35,8 @@ from vertebra.extensions.starlette import (
     offload_middlewares,
     preseed_request_body,
 )
+from vertebra.server._channels import ChannelBus
+from vertebra.server._fastpath import attach_framework_fastpath
 
 
 class _ItemPayload(msgspec.Struct, frozen=True, gc=False):
@@ -153,6 +155,12 @@ async def test_starlette_plugin_route_compiler_and_fastpath(monkeypatch: pytest.
     assert table.match("GET", "/.well-known/webmcp.json") is not None
 
     fastpath: FastPath = app.__vertebra_fastpath__
+    assert not hasattr(app, "_vertebra_fastpath")
+    unattached_app = _make_mock_starlette_app()
+    wrapped_starlette = attach_framework_fastpath(unattached_app, mount_prefix="/st")
+    assert isinstance(unattached_app.__vertebra_fastpath__, FastPath)
+    assert not hasattr(unattached_app, "_vertebra_fastpath")
+    assert not hasattr(wrapped_starlette, "_vertebra_fastpath")
     scope_get = AsgiScope.from_parts(method="GET", path="/items/42")
 
     async def noop_receive() -> dict[str, Any]:
@@ -293,8 +301,6 @@ async def test_cache_store_delete_all_removes_only_its_prefix() -> None:
 
 def test_channels_backend_accepts_engine_neutral_bus() -> None:
     """Starlette attachments accept both the adapter and the shared channel bus."""
-    from vertebra.server._channels import ChannelBus
-
     assert issubclass(ChannelsBackend, ChannelBus)
     app = SimpleNamespace(state=SimpleNamespace())
     bus = ChannelBus(history=2)

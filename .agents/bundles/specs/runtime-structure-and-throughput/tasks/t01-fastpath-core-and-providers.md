@@ -2,7 +2,7 @@
 type: Task
 id: runtime-structure-and-throughput:t01
 title: Extract shared fastpath core and FastPathProvider registry
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -12,6 +12,7 @@ files:
 - src/py/vertebra/extensions/litestar/fastpath.py
 - src/py/vertebra/extensions/starlette/fastpath.py
 - src/py/vertebra/extensions/fastapi/fastpath.py
+- src/py/vertebra/extensions/fastapi/dependencies.py
 - src/py/vertebra/extensions/flask/fastpath.py
 - src/py/vertebra/extensions/django/fastpath.py
 - src/py/vertebra/utils/type_guards.py
@@ -21,20 +22,21 @@ tests:
 - src/py/tests/unit/extensions/test_fastapi_plugin.py
 - src/py/tests/unit/extensions/test_flask_plugin.py
 - src/py/tests/unit/extensions/test_django_plugin.py
+- src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
 - src/py/tests/unit/utils/test_dispatch_schema_converters.py
 plan_revision: 1
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
-state_revision: 0
+plan_commit: "af319da17dec0148a18532952cb7ea2a91d1c9d7"
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-06T15:22:00Z'
+last_verified_commit: af319da17dec0148a18532952cb7ea2a91d1c9d7
+verification_evidence: 260 passed across fastpath, framework plugin, CLI, and type_guards unit suites; ruff + mypy + review_setup clean
 created_at: '2026-11-06T06:35:00Z'
-updated_at: '2026-11-06T06:35:00Z'
+updated_at: '2026-11-06T15:22:00Z'
 commit: null
 tags:
 - fastpath
@@ -71,10 +73,10 @@ uv run --no-sync mypy src/py/vertebra/server src/py/vertebra/extensions src/py/v
 
 ## Acceptance Criteria
 
-- [ ] R1: `FastPathProvider` registry replaces class-name string sniffing in `attach_framework_fastpath` and attaches only `__vertebra_fastpath__`.
-- [ ] Shared scalar coercion, `DirectPlan`, and `step_coro_sync` live in `src/py/vertebra/server/_fastpath_core.py` without framework regressions.
-- [ ] Zero inline `#` comments or function-scoped imports are introduced.
+- [x] R1: `FastPathProvider` registry replaces class-name string sniffing in `attach_framework_fastpath` and attaches only `__vertebra_fastpath__`.
+- [x] Shared scalar coercion, `DirectPlan`, and `step_coro_sync` live in `src/py/vertebra/server/_fastpath_core.py` without framework regressions.
+- [x] Zero inline `#` comments or function-scoped imports are introduced.
 
 ## Notes & Discoveries
 
-None.
+- Promoted `get_starlette_request_cls` to public API in `vertebra.extensions.starlette.fastpath` and routed `vertebra.extensions.fastapi.dependencies` through `_fastpath_core.scalar_query_converter` and `vertebra.utils.type_guards` so zero cross-module private `_...` imports remain across fastpath modules.

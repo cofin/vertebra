@@ -10,6 +10,13 @@ from typing import Any
 import anyio.to_thread
 import msgspec
 
+from vertebra.server._fastpath_core import scalar_query_converter
+from vertebra.utils.type_guards import (
+    is_async_generator_callable,
+    is_coroutine_callable,
+    is_generator_callable,
+)
+
 __all__ = (
     "CompiledDependantNode",
     "CompiledDependantPlan",
@@ -79,16 +86,12 @@ def compile_dependant_plan(dependant: Any, *, path_param_names: set[str] | None 
         if use_cache and cache_key in visited_keys:
             return cache_key
 
-        is_async_gen = inspect.isasyncgenfunction(call)
-        is_sync_gen = inspect.isgeneratorfunction(call)
+        is_async_gen = is_async_generator_callable(call)
+        is_sync_gen = is_generator_callable(call)
         if is_async_gen or is_sync_gen:
             has_generators = True
 
-        is_async = (
-            is_async_gen
-            or inspect.iscoroutinefunction(call)
-            or (callable(call) and inspect.iscoroutinefunction(type(call).__call__))
-        )
+        is_async = is_async_gen or is_coroutine_callable(call)
 
         req_param = getattr(dep, "request_param_name", None)
         dep_path_params: list[str] = []
@@ -107,7 +110,7 @@ def compile_dependant_plan(dependant: Any, *, path_param_names: set[str] | None 
                     dep_path_params.append(p_name)
                 elif param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
                     default_val = None if param.default is inspect.Parameter.empty else param.default
-                    converter = _scalar_converter(ann)
+                    converter = scalar_query_converter(ann)
                     dep_query_params.append((p_name, converter, default_val))
         except (TypeError, ValueError):
             pass
@@ -193,7 +196,7 @@ async def execute_dependant_plan(
                 raise RuntimeError(msg)
             sync_cm = contextlib.contextmanager(target_call)(**kwargs)
             val = exit_stack.enter_context(sync_cm)
-        elif node.is_async or inspect.iscoroutinefunction(target_call):
+        elif node.is_async or is_coroutine_callable(target_call):
             val = await target_call(**kwargs)
         elif getattr(target_call, "__vertebra_sync_to_thread__", False):
 
@@ -207,13 +210,3 @@ async def execute_dependant_plan(
         cache[node.cache_key] = val
 
     return {param_name: cache[cache_key] for param_name, cache_key in plan.root_dep_params}
-
-
-def _scalar_converter(annotation: Any) -> Callable[[str], Any]:
-    if annotation is int:
-        return int
-    if annotation is float:
-        return float
-    if annotation is bool:
-        return lambda s: s.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
-    return str

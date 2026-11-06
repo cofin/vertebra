@@ -80,7 +80,6 @@ from vertebra.extensions.litestar import (
     provide_driver as litestar_provide_driver,
 )
 from vertebra.extensions.litestar.fastpath import (
-    _DirectSignaturePlan,
     _execute_direct_signature_plan,
 )
 from vertebra.extensions.sqlalchemy import (
@@ -112,6 +111,7 @@ from vertebra.server._fastpath import (
     ARROW_STREAM_MEDIA_TYPE,
     serialize_fastpath_special_result,
 )
+from vertebra.server._fastpath_core import DirectPlan
 from vertebra.storage import StreamingStorageResponse, SyncObjectStore
 from vertebra.typing import ToolPolicyError, ToolProvider
 
@@ -188,7 +188,7 @@ async def test_fastpath_zero_copy_arrow_cursor_and_streaming_storage() -> None:
     assert store_tuple[0] == 206
     assert store_tuple[2] == b"0123"
 
-    ls_plan = _DirectSignaturePlan(
+    ls_plan = DirectPlan(
         fn=lambda: cursor,
         is_async=False,
         status_code=200,

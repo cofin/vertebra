@@ -23,17 +23,26 @@ from vertebra.extensions.fastapi.router import (
     extract_routes,
 )
 from vertebra.extensions.starlette.fastpath import (
-    _get_starlette_request_cls,
-    _resolve_request_body,
-    _serialize_starlette_http_exception,
+    get_starlette_request_cls,
     preseed_request_body,
 )
 from vertebra.server._fastpath import (
+    extract_scope_body_fast,
     resolve_relative_path,
     serialize_fastpath_special_result,
     wrap_asgi_fastpath,
 )
+from vertebra.server._fastpath_core import (
+    UNSET_DEFAULT,
+    scalar_query_converter,
+    serialize_starlette_http_exception,
+)
 from vertebra.utils.serializers import decode_json, encode_json_bytes
+from vertebra.utils.type_guards import (
+    is_coroutine_callable,
+    is_msgspec_struct_type,
+    is_pydantic_model_type,
+)
 
 __all__ = (
     "CompiledRoute",
@@ -41,8 +50,6 @@ __all__ = (
     "compile_fastpath_routes",
     "dispatch_handler_direct",
 )
-
-_UNSET: object = object()
 
 
 class CompiledRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -204,7 +211,7 @@ class FastPath:
         scope["endpoint"] = compiled.endpoint
         scope["route"] = compiled.route
 
-        resolved_body = await _resolve_request_body(scope, receive, body, method=method)
+        resolved_body = await extract_scope_body_fast(scope, receive, body, method=method)
         overrides: dict[Callable[..., Any], Callable[..., Any]] | None = getattr(
             self._app, "dependency_overrides", None
         )
@@ -220,7 +227,7 @@ class FastPath:
                 sync_to_thread=self._sync_to_thread,
             )
         except Exception as exc:
-            http_exc_resp = _serialize_starlette_http_exception(exc)
+            http_exc_resp = serialize_starlette_http_exception(exc)
             if http_exc_resp is not None:
                 return http_exc_resp
             raise
@@ -250,7 +257,7 @@ async def dispatch_handler_direct(
     """Execute a FastAPI APIRoute with zero-AsyncExitStack Depends() and zero-copy DTO decoding."""
     request: Any = None
     if compiled.needs_request:
-        req_cls = _get_starlette_request_cls()
+        req_cls = get_starlette_request_cls()
         request = req_cls(scope, receive=receive, send=send)
         preseed_request_body(scope, request, body)
 
@@ -273,7 +280,7 @@ async def dispatch_handler_direct(
     for q_name, converter, default_val in compiled.query_params:
         if q_name in query_map:
             kwargs[q_name] = converter(query_map[q_name])
-        elif default_val is not _UNSET:
+        elif default_val is not UNSET_DEFAULT:
             kwargs[q_name] = default_val
 
     if compiled.body_param_name is not None:
@@ -432,24 +439,6 @@ def _build_response_serializer(response_field: Any, return_annotation: Any) -> C
     return None
 
 
-def _is_msgspec_struct_type(tp: Any) -> bool:
-    return isinstance(tp, type) and issubclass(tp, msgspec.Struct)
-
-
-def _is_pydantic_model_type(tp: Any) -> bool:
-    return isinstance(tp, type) and hasattr(tp, "__pydantic_validator__")
-
-
-def _scalar_query_converter(annotation: Any) -> Callable[[str], Any]:
-    if annotation is int:
-        return int
-    if annotation is float:
-        return float
-    if annotation is bool:
-        return lambda s: s.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
-    return str
-
-
 def _has_custom_exception_handlers(app: Any) -> bool:
     exc_handlers = getattr(app, "exception_handlers", None)
     if not isinstance(exc_handlers, dict) or not exc_handlers:
@@ -471,9 +460,7 @@ def _compile_routes_from_table(
 
     for handler_id, entry in router_table.routes.items():
         endpoint = entry.endpoint
-        is_async = inspect.iscoroutinefunction(endpoint) or (
-            callable(endpoint) and inspect.iscoroutinefunction(type(endpoint).__call__)
-        )
+        is_async = is_coroutine_callable(endpoint)
         known_path_names = set(entry.param_types.keys())
         dep_plan = compile_dependant_plan(entry.dependant, path_param_names=known_path_names)
         dep_param_names = {name for name, _ in dep_plan.root_dep_params} if dep_plan is not None else set()
@@ -522,16 +509,16 @@ def _compile_routes_from_table(
                     path_param_names.append(p_name)
                 elif (
                     p_name == body_param_name
-                    or _is_msgspec_struct_type(ann)
-                    or _is_pydantic_model_type(ann)
+                    or is_msgspec_struct_type(ann)
+                    or is_pydantic_model_type(ann)
                     or p_name in {"body", "payload", "data"}
                     and entry.method in {"POST", "PUT", "PATCH"}
                 ):
                     body_param_name = p_name
                     body_type = ann
                 else:
-                    default_val = _UNSET if param.default is inspect.Parameter.empty else param.default
-                    query_params.append((p_name, _scalar_query_converter(ann), default_val))
+                    default_val = UNSET_DEFAULT if param.default is inspect.Parameter.empty else param.default
+                    query_params.append((p_name, scalar_query_converter(ann), default_val))
 
         ret_ann = hints.get("return", sig.return_annotation if sig is not None else Any)
         resp_serializer = _build_response_serializer(entry.response_field, ret_ann)
@@ -552,8 +539,8 @@ def _compile_routes_from_table(
             query_params=tuple(query_params),
             body_param_name=body_param_name,
             body_type=body_type,
-            body_is_msgspec=_is_msgspec_struct_type(body_type),
-            body_is_pydantic=_is_pydantic_model_type(body_type),
+            body_is_msgspec=is_msgspec_struct_type(body_type),
+            body_is_pydantic=is_pydantic_model_type(body_type),
             response_serializer=resp_serializer,
             sync_to_thread=bool(getattr(endpoint, "__vertebra_sync_to_thread__", False)),
         )

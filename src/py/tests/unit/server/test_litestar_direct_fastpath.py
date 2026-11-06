@@ -2,6 +2,7 @@
 
 import asyncio
 import inspect
+import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +30,19 @@ from vertebra.extensions.litestar.router import extract_routes
 from vertebra.extensions.litestar.store import (
     MemoryStore,
     swap_response_cache_store,
+)
+from vertebra.server._fastpath import attach_framework_fastpath, wrap_asgi_fastpath
+from vertebra.server._fastpath_core import (
+    DirectPlan,
+    FastPathProvider,
+    QueryParamSpec,
+    coerce_path_param,
+    get_fastpath_providers,
+    parse_bool_query,
+    register_fastpath_provider,
+    resolve_fastpath_provider,
+    step_coro_sync,
+    unregister_fastpath_provider,
 )
 from vertebra.typing import Empty
 from vertebra.utils.module_loader import import_optional
@@ -1159,3 +1173,105 @@ async def test_litestar_fastpath_wrap_asgi_uses_send_raw_response_and_mount_pref
     assert raw_calls[0][0] == 200
     assert decode_json(raw_calls[0][2]) == {"item_id": 99}
     assert proto.complete is True
+    assert getattr(wrapped, "__vertebra_fastpath__", None) is bypass
+    assert not hasattr(wrapped, "_vertebra_fastpath")
+
+
+@pytest.mark.anyio
+async def test_fastpath_core_provider_registry_and_shared_primitives() -> None:
+    """Verify FastPathProvider registration, __vertebra_fastpath__ attachment, DirectPlan, and step_coro_sync."""
+    assert tuple(p.name for p in get_fastpath_providers()) == (
+        "litestar",
+        "fastapi",
+        "starlette",
+        "flask",
+        "django",
+    )
+
+    class _CustomApp:
+        def __init__(self) -> None:
+            self.custom_marker = True
+
+        async def __call__(self, _scope: Any, _receive: Any, send: Any) -> None:
+            await send({"type": "http.response.start", "status": 404, "headers": []})
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    class _CustomBypass:
+        def __init__(self, mount_prefix: str) -> None:
+            self._mount_prefix = mount_prefix
+
+        async def dispatch(
+            self,
+            scope: Any,
+            _receive: Any,
+            _send: Any,
+        ) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
+            if scope.get("path") == f"{self._mount_prefix}/ping":
+                return (200, [(b"content-type", b"application/json")], b'{"custom":true}')
+            return None
+
+        def wrap_asgi(self, fallback_app: Callable[..., Any]) -> Callable[..., Any]:
+            return wrap_asgi_fastpath(self, fallback_app)
+
+    class _CustomProvider:
+        name = "custom-test"
+
+        def detect(self, app: Any) -> bool:
+            return bool(getattr(app, "custom_marker", False))
+
+        def build(self, app: Any, *, mount_prefix: str = "") -> Any:
+            _ = app
+            return _CustomBypass(mount_prefix)
+
+    provider = _CustomProvider()
+    assert isinstance(provider, FastPathProvider)
+    register_fastpath_provider(provider, prepend=True)
+    try:
+        custom_app = _CustomApp()
+        assert resolve_fastpath_provider(custom_app) is provider
+        wrapped_custom = attach_framework_fastpath(custom_app, mount_prefix="/ext")
+        assert getattr(custom_app, "__vertebra_fastpath__", None) is not None
+        assert not hasattr(custom_app, "_vertebra_fastpath")
+        assert not hasattr(wrapped_custom, "_vertebra_fastpath")
+
+        proto = AsgiProtocol(b"")
+        scope = AsgiScope.from_parts(method="GET", path="/ext/ping")
+        await wrapped_custom(scope, proto.receive, proto.send)
+        assert decode_json(proto.take_response().body) == {"custom": True}
+    finally:
+        unregister_fastpath_provider("custom-test")
+
+    @get("/core-check", sync_to_thread=False)
+    def core_check(flag: FromQuery[bool] = False) -> dict[str, bool]:
+        return {"flag": flag}
+
+    ls_app = Litestar(route_handlers=[core_check])
+    wrapped_ls = attach_framework_fastpath(ls_app)
+    ls_fp = getattr(ls_app, "__vertebra_fastpath__", None)
+    assert isinstance(ls_fp, FastPath)
+    assert not hasattr(ls_app, "_vertebra_fastpath")
+    assert not hasattr(wrapped_ls, "_vertebra_fastpath")
+    plan = next(iter(ls_fp._direct_plans.values()))
+    assert isinstance(plan, DirectPlan)
+    assert all(isinstance(qp, QueryParamSpec) for qp in plan.query_params)
+
+    assert parse_bool_query("yes") is True
+    assert parse_bool_query("off") is False
+    with pytest.raises(ValueError, match="invalid boolean"):
+        parse_bool_query("invalid")
+
+    sample_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+    assert coerce_path_param("42", "int") == 42
+    assert coerce_path_param("2.5", "float") == 2.5
+    assert coerce_path_param(str(sample_id), "uuid") == sample_id
+    assert coerce_path_param("raw", "string") == "raw"
+
+    async def _immediate_coro() -> str:
+        return "done"
+
+    async def _suspended_coro() -> str:
+        await asyncio.sleep(0)
+        return "later"
+
+    assert step_coro_sync(_immediate_coro()) == (True, "done")
+    assert step_coro_sync(_suspended_coro()) == (False, None)
