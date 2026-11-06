@@ -177,7 +177,7 @@ class FastPath:
         send: Any,
         *,
         body: bytes | None = None,
-    ) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
+    ) -> tuple[int, list[tuple[bytes, bytes]], bytes | memoryview] | None:
         """Attempt to dispatch the request directly via the compiled FastAPI fastpath."""
         table = self._router_table
         if table is None or not table.routes:
@@ -253,7 +253,7 @@ async def dispatch_handler_direct(
     send: Any,
     dependency_overrides: dict[Callable[..., Any], Callable[..., Any]] | None = None,
     sync_to_thread: bool = False,
-) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
+) -> tuple[int, list[tuple[bytes, bytes]], bytes | memoryview] | None:
     """Execute a FastAPI APIRoute with zero-AsyncExitStack Depends() and zero-copy DTO decoding."""
     request: Any = None
     if compiled.needs_request:
@@ -375,7 +375,7 @@ async def _serialize_fastapi_result(
     scope: Any,
     receive: Any,
     send: Any,
-) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
+) -> tuple[int, list[tuple[bytes, bytes]], bytes | memoryview] | None:
     if result is None:
         return compiled.status_code, [], b""
 

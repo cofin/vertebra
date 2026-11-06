@@ -176,7 +176,7 @@ class FastPath:
         send: Any,
         *,
         body: bytes | None = None,
-    ) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
+    ) -> tuple[int, list[tuple[bytes, bytes]], bytes | memoryview] | None:
         """Attempt to dispatch the request directly via the compiled fastpath routes."""
         if self._app is None and hasattr(scope, "get"):
             app_candidate = scope.get("litestar_app") or scope.get("app")
@@ -814,7 +814,7 @@ async def _execute_direct_signature_plan(
     path_params: dict[str, Any],
     receive: Any,
     body: bytes | None,
-) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
+) -> tuple[int, list[tuple[bytes, bytes]], bytes | memoryview] | None:
     kwargs: dict[str, Any] = {}
     for name in plan.path_param_names:
         if name not in path_params:

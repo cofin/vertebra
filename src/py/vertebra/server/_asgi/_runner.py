@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Awaitable, Buffer, Callable, Iterable, Mapping
-from typing import Any
+from typing import Any, cast
 
 import msgspec
 
@@ -37,7 +37,7 @@ from vertebra.server._asgi._queues import (
     AsgiStreamSend,
     ChunkCallback,
 )
-from vertebra.server._fastpath import attach_framework_fastpath
+from vertebra.server._fastpath import PayloadTooLargeError, attach_framework_fastpath
 from vertebra.server._loops import EventLoopPool
 
 __all__ = (
@@ -351,11 +351,14 @@ class AsgiRunner:
                 if direct is not None:
                     status_code, encoded_headers, raw_body = direct
                     decoded_headers = [(k.decode("latin-1"), v.decode("latin-1")) for k, v in encoded_headers]
+                    zc_buf = raw_body if isinstance(raw_body, memoryview) else None
                     return AsgiResponse(
                         status=status_code,
                         headers=decoded_headers,
                         body=raw_body,
                         request_id=request_id,
+                        zero_copy_buffer=zc_buf,
+                        raw_headers=encoded_headers,
                     )
                 if send.started:
                     resp = send.response
@@ -364,6 +367,16 @@ class AsgiRunner:
                     return resp
 
             await self._app(scope, receive, send)
+        except PayloadTooLargeError:
+            if not send.started:
+                return AsgiResponse(
+                    status=413,
+                    headers=[("content-type", "text/plain; charset=utf-8"), ("content-length", "17")],
+                    body=b"Payload Too Large",
+                    request_id=request_id,
+                    raw_headers=[(b"content-type", b"text/plain; charset=utf-8"), (b"content-length", b"17")],
+                )
+            return send.response
         except Exception:
             logger.exception("Unhandled exception in ASGI application for %s", getattr(request, "path", "/"))
             if not send.started:
@@ -674,28 +687,28 @@ class AsgiRunner:
 
     def _to_native_response(self, resp: AsgiResponse, request_id: int) -> _NativeResponse:
         """Convert an ``AsgiResponse`` to a Rust ``Response`` without extra body copies."""
-        hdr_pairs: list[tuple[str, str]] = list(resp.headers)
+        hdr_arg: Any = resp.raw_headers if resp.raw_headers else (list(resp.headers) or None)
         req_id = resp.request_id or request_id
         if resp.file_path is not None:
             try:
                 return _NativeResponse.from_file(
                     resp.file_path,
                     status=resp.status,
-                    headers=hdr_pairs or None,
+                    headers=cast("Any", hdr_arg),
                     request_id=req_id,
                 )
             except OSError:
-                return _NativeResponse(resp.status, bytes(resp.body), hdr_pairs or None, req_id)
+                return _NativeResponse(resp.status, bytes(resp.body), cast("Any", hdr_arg), req_id)
         if resp.zero_copy_buffer is not None:
             return _NativeResponse.from_buffer(
                 resp.status,
                 resp.zero_copy_buffer,
-                hdr_pairs or None,
+                cast("Any", hdr_arg),
                 req_id,
             )
         return _NativeResponse(
             resp.status,
             bytes(resp.body),
-            hdr_pairs or None,
+            cast("Any", hdr_arg),
             req_id,
         )

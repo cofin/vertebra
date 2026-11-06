@@ -141,7 +141,7 @@ class FastPath:
         send: Any,
         *,
         body: bytes | None = None,
-    ) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
+    ) -> tuple[int, list[tuple[bytes, bytes]], bytes | memoryview] | None:
         """Attempt to dispatch the request directly via the compiled Starlette fastpath."""
         table = self._router_table
         if table is None or not table.routes:
@@ -228,7 +228,7 @@ async def dispatch_handler_direct(
     receive: Any,
     send: Any,
     sync_to_thread: bool = False,
-) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
+) -> tuple[int, list[tuple[bytes, bytes]], bytes | memoryview] | None:
     """Execute a middleware-free Starlette endpoint with pre-seeded Request._body."""
     req_cls = get_starlette_request_cls()
     request = req_cls(scope, receive=receive, send=send)

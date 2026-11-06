@@ -338,7 +338,7 @@ def _serialize_flask_result(
     if special is not None:
         sp_status, sp_headers, sp_body = special
         str_headers = [(k.decode("latin-1"), v.decode("latin-1")) for k, v in sp_headers]
-        return Response(status=sp_status, body=sp_body, headers=str_headers, request_id=request_id)
+        return Response.from_buffer(sp_status, sp_body, str_headers, request_id)
 
     status = default_status
     headers: list[tuple[str, str]] = []

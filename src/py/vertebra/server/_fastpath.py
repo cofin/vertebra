@@ -7,11 +7,17 @@ from collections.abc import Callable
 from contextlib import suppress
 from typing import Any, cast
 
+from vertebra._vertebra import ArrowCursor as RustArrowCursor
+from vertebra.db.arrow import ArrowCursor
 from vertebra.server._fastpath_core import BODYLESS_HTTP_METHODS, resolve_fastpath_provider
+from vertebra.storage._streaming import StreamingStorageResponse
+from vertebra.typing import VertebraError
 from vertebra.utils.type_guards import is_coroutine_callable
 
 __all__ = (
     "ARROW_STREAM_MEDIA_TYPE",
+    "DEFAULT_MAX_BODY_SIZE",
+    "PayloadTooLargeError",
     "attach_framework_fastpath",
     "extract_scope_body_fast",
     "resolve_relative_path",
@@ -21,33 +27,44 @@ __all__ = (
 )
 
 ARROW_STREAM_MEDIA_TYPE: bytes = b"application/vnd.apache.arrow.stream"
+DEFAULT_MAX_BODY_SIZE: int = 10 * 1024 * 1024
+_PAYLOAD_TOO_LARGE_BODY: bytes = b"Payload Too Large"
+_PAYLOAD_TOO_LARGE_HEADERS: list[tuple[bytes, bytes]] = [
+    (b"content-type", b"text/plain; charset=utf-8"),
+    (b"content-length", b"17"),
+]
+
+
+class PayloadTooLargeError(VertebraError):
+    """Raised when an incoming request payload exceeds the configured byte limit."""
+
+    status_code: int = 413
+
+    def __init__(self, limit: int) -> None:
+        self.max_body_size = limit
+        super().__init__(f"Request payload exceeds limit of {limit} bytes")
 
 
 def serialize_fastpath_special_result(
     result: Any,
     *,
     default_status: int = 200,
-) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
+) -> tuple[int, list[tuple[bytes, bytes]], bytes | memoryview] | None:
     """Serialize `ArrowCursor` or `StreamingStorageResponse` directly without JSON encoding."""
     if result is None:
         return None
-    cls_name = type(result).__name__
-    if cls_name == "ArrowCursor":
-        buffer_view_fn = getattr(result, "buffer_view", None)
-        if callable(buffer_view_fn):
-            raw_arrow = bytes(buffer_view_fn())
-            return (
-                default_status,
-                [
-                    (b"content-type", ARROW_STREAM_MEDIA_TYPE),
-                    (b"content-length", str(len(raw_arrow)).encode("ascii")),
-                ],
-                raw_arrow,
-            )
-    if cls_name == "StreamingStorageResponse":
-        to_tuple_fn = getattr(result, "to_fastpath_tuple", None)
-        if callable(to_tuple_fn):
-            return cast("tuple[int, list[tuple[bytes, bytes]], bytes]", to_tuple_fn())
+    if isinstance(result, ArrowCursor | RustArrowCursor):
+        raw_arrow: memoryview = result.buffer_view()
+        return (
+            default_status,
+            [
+                (b"content-type", ARROW_STREAM_MEDIA_TYPE),
+                (b"content-length", str(len(raw_arrow)).encode("ascii")),
+            ],
+            raw_arrow,
+        )
+    if isinstance(result, StreamingStorageResponse):
+        return result.to_fastpath_tuple()
     return None
 
 
@@ -71,26 +88,48 @@ async def extract_scope_body_fast(
     body: bytes | None = None,
     *,
     method: str = "POST",
+    max_body_size: int | None = DEFAULT_MAX_BODY_SIZE,
 ) -> bytes:
     """Extract request body bytes synchronously from AsgiScope/AsgiProtocol before falling back to receive()."""
     if body is not None:
-        return body
+        return _enforce_body_limit(body, max_body_size)
     if method in BODYLESS_HTTP_METHODS:
         return b""
-    body_bytes_fn = getattr(scope, "body_bytes", None)
-    if callable(body_bytes_fn):
-        snap_bytes: bytes = body_bytes_fn()
-        if snap_bytes:
-            return snap_bytes
+
+    scope_checked = False
+    if hasattr(scope, "__contains__") and "_vertebra_body_bytes" in scope:
+        scope_checked = True
+        cached = scope["_vertebra_body_bytes"]
+        if callable(cached):
+            resolved_cached = bytes(cached())
+            _cache_scope_body(scope, resolved_cached)
+            return _enforce_body_limit(resolved_cached, max_body_size)
+        if isinstance(cached, bytes):
+            return _enforce_body_limit(cached, max_body_size)
+        if isinstance(cached, bytearray | memoryview):
+            resolved_buf = bytes(cached)
+            _cache_scope_body(scope, resolved_buf)
+            return _enforce_body_limit(resolved_buf, max_body_size)
+
+    if not scope_checked:
+        body_bytes_fn = getattr(scope, "body_bytes", None)
+        if callable(body_bytes_fn):
+            snap_bytes: bytes = body_bytes_fn()
+            if snap_bytes:
+                _cache_scope_body(scope, snap_bytes)
+                return _enforce_body_limit(snap_bytes, max_body_size)
+
     recv_owner = getattr(receive, "__self__", None)
     owner_body_fn = getattr(recv_owner, "body_bytes", None)
     if callable(owner_body_fn):
         owner_bytes: bytes = owner_body_fn()
-        return owner_bytes
+        _cache_scope_body(scope, owner_bytes)
+        return _enforce_body_limit(owner_bytes, max_body_size)
     if not callable(receive):
         return b""
 
     chunks: list[bytes] = []
+    total_bytes = 0
     while True:
         message = await receive()
         if not isinstance(message, dict):
@@ -99,17 +138,23 @@ async def extract_scope_body_fast(
             break
         chunk = message.get("body", b"")
         if chunk:
-            chunks.append(chunk if isinstance(chunk, bytes) else bytes(chunk))
+            chunk_bytes = chunk if isinstance(chunk, bytes) else bytes(chunk)
+            total_bytes += len(chunk_bytes)
+            if max_body_size is not None and total_bytes > max_body_size:
+                raise PayloadTooLargeError(max_body_size)
+            chunks.append(chunk_bytes)
         if not message.get("more_body", False):
             break
-    return b"" if not chunks else (chunks[0] if len(chunks) == 1 else b"".join(chunks))
+    assembled = b"" if not chunks else (chunks[0] if len(chunks) == 1 else b"".join(chunks))
+    _cache_scope_body(scope, assembled)
+    return assembled
 
 
 async def send_asgi_direct(
     send: Any,
     status_code: int,
     encoded_headers: list[tuple[bytes, bytes]],
-    raw_body: bytes,
+    raw_body: bytes | memoryview,
 ) -> None:
     """Emit an HTTP response via single-call send_raw_response when supported, or standard 2-dict ASGI send."""
     raw_send = getattr(send, "send_raw_response", None)
@@ -123,6 +168,7 @@ async def send_asgi_direct(
             await res
         return
 
+    body_payload = bytes(raw_body) if isinstance(raw_body, memoryview) else raw_body
     await send(
         {
             "type": "http.response.start",
@@ -133,29 +179,42 @@ async def send_asgi_direct(
     await send(
         {
             "type": "http.response.body",
-            "body": raw_body,
+            "body": body_payload,
             "more_body": False,
         }
     )
 
 
-def wrap_asgi_fastpath(bypass: Any, fallback_app: Callable[..., Any]) -> Callable[..., Any]:
+def wrap_asgi_fastpath(
+    bypass: Any,
+    fallback_app: Callable[..., Any],
+    *,
+    max_body_size: int | None = DEFAULT_MAX_BODY_SIZE,
+) -> Callable[..., Any]:
     """Wrap an ASGI 3.0 callable with zero-closure C-API fastpath dispatch and replay fallback."""
     dispatch_fn = getattr(bypass, "dispatch_async", None) or bypass.dispatch
 
     async def _fastpath_asgi_app(scope: Any, receive: Any, send: Any) -> None:
         send_owner = getattr(send, "__self__", None)
         has_native_send_state = hasattr(send, "started") or (send_owner is not None and hasattr(send_owner, "started"))
-        body_bytes_fn = getattr(scope, "body_bytes", None)
         method = str(scope.get("method", "GET") if hasattr(scope, "get") else "GET").upper()
-        has_prebuffered_body = callable(body_bytes_fn) and (
-            method in BODYLESS_HTTP_METHODS
-            or bool(body_bytes_fn())
-            or callable(getattr(getattr(receive, "__self__", None), "body_bytes", None))
-        )
+        try:
+            has_prebuffered_body = _probe_and_cache_prebuffered_body(
+                scope,
+                receive,
+                method=method,
+                max_body_size=max_body_size,
+            )
+        except PayloadTooLargeError:
+            await send_asgi_direct(send, 413, list(_PAYLOAD_TOO_LARGE_HEADERS), _PAYLOAD_TOO_LARGE_BODY)
+            return
 
         if has_native_send_state and has_prebuffered_body:
-            direct = await dispatch_fn(scope, receive, send)
+            try:
+                direct = await dispatch_fn(scope, receive, send)
+            except PayloadTooLargeError:
+                await send_asgi_direct(send, 413, list(_PAYLOAD_TOO_LARGE_HEADERS), _PAYLOAD_TOO_LARGE_BODY)
+                return
             if direct is not None:
                 status_code, encoded_headers, raw_body = direct
                 await send_asgi_direct(send, status_code, encoded_headers, raw_body)
@@ -170,14 +229,21 @@ def wrap_asgi_fastpath(bypass: Any, fallback_app: Callable[..., Any]) -> Callabl
 
         sent_via_callback = False
         buffered_messages: list[Any] = []
+        buffered_bytes = 0
         upstream_exhausted = False
 
         async def _buffering_receive() -> Any:
-            nonlocal upstream_exhausted
+            nonlocal buffered_bytes, upstream_exhausted
             msg = await receive()
+            if isinstance(msg, dict) and msg.get("type") == "http.request":
+                chunk = msg.get("body", b"")
+                if chunk:
+                    buffered_bytes += len(chunk)
+                    if max_body_size is not None and buffered_bytes > max_body_size:
+                        raise PayloadTooLargeError(max_body_size)
+                if not msg.get("more_body", False):
+                    upstream_exhausted = True
             buffered_messages.append(msg)
-            if isinstance(msg, dict) and msg.get("type") == "http.request" and not msg.get("more_body", False):
-                upstream_exhausted = True
             return msg
 
         async def _tracked_send(message: Any) -> None:
@@ -185,7 +251,12 @@ def wrap_asgi_fastpath(bypass: Any, fallback_app: Callable[..., Any]) -> Callabl
             sent_via_callback = True
             await send(message)
 
-        direct = await dispatch_fn(scope, _buffering_receive, _tracked_send)
+        try:
+            direct = await dispatch_fn(scope, _buffering_receive, _tracked_send)
+        except PayloadTooLargeError:
+            if not sent_via_callback:
+                await send_asgi_direct(send, 413, list(_PAYLOAD_TOO_LARGE_HEADERS), _PAYLOAD_TOO_LARGE_BODY)
+            return
         if direct is not None:
             status_code, encoded_headers, raw_body = direct
             await send_asgi_direct(send, status_code, encoded_headers, raw_body)
@@ -322,3 +393,70 @@ def attach_framework_fastpath(
         return existing_fp.wrap_asgi(fallback_asgi)
 
     return app
+
+
+def _enforce_body_limit(payload: bytes, max_body_size: int | None) -> bytes:
+    """Raise ``PayloadTooLargeError`` when ``payload`` exceeds ``max_body_size``."""
+    if max_body_size is not None and len(payload) > max_body_size:
+        raise PayloadTooLargeError(max_body_size)
+    return payload
+
+
+def _cache_scope_body(scope: Any, payload: bytes | None) -> None:
+    """Store resolved body bytes in ``scope['_vertebra_body_bytes']`` when ``scope`` is mutable."""
+    if hasattr(scope, "__setitem__"):
+        with suppress(TypeError, AttributeError):
+            scope["_vertebra_body_bytes"] = payload
+
+
+def _probe_and_cache_prebuffered_body(
+    scope: Any,
+    receive: Any,
+    *,
+    method: str,
+    max_body_size: int | None,
+) -> bool:
+    """Inspect and cache any prebuffered body on ``scope`` or ``receive`` at most once."""
+    body_bytes_fn = getattr(scope, "body_bytes", None)
+    owner_body_fn = getattr(getattr(receive, "__self__", None), "body_bytes", None)
+    if hasattr(scope, "__contains__") and "_vertebra_body_bytes" in scope:
+        cached = scope["_vertebra_body_bytes"]
+        if callable(cached):
+            resolved = bytes(cached())
+            _cache_scope_body(scope, resolved)
+            _enforce_body_limit(resolved, max_body_size)
+            return True
+        if isinstance(cached, bytes):
+            _enforce_body_limit(cached, max_body_size)
+            return True
+        if isinstance(cached, bytearray | memoryview):
+            resolved = bytes(cached)
+            _cache_scope_body(scope, resolved)
+            _enforce_body_limit(resolved, max_body_size)
+            return True
+        return False
+
+    if method in BODYLESS_HTTP_METHODS:
+        return callable(body_bytes_fn) or callable(owner_body_fn)
+
+    if callable(body_bytes_fn):
+        snap_bytes: bytes = body_bytes_fn()
+        if snap_bytes:
+            _cache_scope_body(scope, snap_bytes)
+            _enforce_body_limit(snap_bytes, max_body_size)
+            return True
+        if callable(owner_body_fn):
+            owner_bytes: bytes = owner_body_fn()
+            _cache_scope_body(scope, owner_bytes)
+            _enforce_body_limit(owner_bytes, max_body_size)
+            return True
+        _cache_scope_body(scope, None)
+        return False
+
+    if callable(owner_body_fn):
+        owner_bytes = owner_body_fn()
+        _cache_scope_body(scope, owner_bytes)
+        _enforce_body_limit(owner_bytes, max_body_size)
+        return True
+
+    return False

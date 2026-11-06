@@ -7,12 +7,20 @@ import gc
 import pytest
 
 from vertebra._vertebra import (
+    ArrowCursor as RustArrowCursor,
+)
+from vertebra._vertebra import (
     Request,
     Response,
     init_transport,
     submit_batch_raw,
     submit_raw_response,
     submit_response_raw,
+)
+from vertebra.db.arrow import ArrowCursor
+from vertebra.server._fastpath import (
+    ARROW_STREAM_MEDIA_TYPE,
+    serialize_fastpath_special_result,
 )
 
 
@@ -157,3 +165,29 @@ def test_submit_response_raw_and_batch_raw_accept_buffers() -> None:
             (1006, 202, req.body_view, memoryview(b"")),
         ]
     )
+
+
+def test_serialize_fastpath_special_result_returns_zero_copy_arrow_memoryview() -> None:
+    """Verify serialize_fastpath_special_result returns ArrowCursor buffer_view without bytes(...) copy."""
+    backing = bytearray(b"ARROW1\x00\x00zero-copy-ipc-stream")
+    py_cursor = ArrowCursor(backing, rows=[(1,)], columns=["id"])
+    serialized = serialize_fastpath_special_result(py_cursor)
+    assert serialized is not None
+    status, headers, raw_view = serialized
+    assert status == 200
+    assert (b"content-type", ARROW_STREAM_MEDIA_TYPE) in headers
+    assert (b"content-length", str(len(backing)).encode("ascii")) in headers
+    assert isinstance(raw_view, memoryview)
+    assert raw_view.obj is backing
+
+    shm_cursor = RustArrowCursor.write_ipc_to_shm("/vtb-test-zc-arrow", bytes(backing), 1)
+    shm_serialized = serialize_fastpath_special_result(shm_cursor)
+    assert shm_serialized is not None
+    assert isinstance(shm_serialized[2], memoryview)
+    assert bytes(shm_serialized[2]) == bytes(backing)
+
+    class ImpostorArrowCursor:
+        def buffer_view(self) -> memoryview:
+            return memoryview(b"impostor")
+
+    assert serialize_fastpath_special_result(ImpostorArrowCursor()) is None

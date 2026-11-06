@@ -388,7 +388,7 @@ def _serialize_django_result(result: Any, default_status: int, request_id: int) 
     if special is not None:
         sp_status, sp_headers, sp_body = special
         str_headers = [(k.decode("latin-1"), v.decode("latin-1")) for k, v in sp_headers]
-        return Response(status=sp_status, body=sp_body, headers=str_headers, request_id=request_id)
+        return Response.from_buffer(sp_status, sp_body, str_headers, request_id)
 
     if hasattr(result, "status_code") and hasattr(result, "content"):
         status = int(result.status_code)

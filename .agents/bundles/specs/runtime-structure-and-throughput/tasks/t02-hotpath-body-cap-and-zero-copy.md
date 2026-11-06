@@ -2,33 +2,39 @@
 type: Task
 id: runtime-structure-and-throughput:t02
 title: Enforce hot-path body size cap, zero-copy Arrow responses, and raw byte headers
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
 - runtime-structure-and-throughput:t01
 files:
 - src/py/vertebra/server/_fastpath.py
+- src/py/vertebra/server/_dispatch.py
 - src/py/vertebra/server/_asgi/_queues.py
 - src/py/vertebra/server/_asgi/_wire.py
 - src/py/vertebra/server/_asgi/_runner.py
+- src/py/vertebra/extensions/litestar/fastpath.py
+- src/py/vertebra/extensions/fastapi/fastpath.py
+- src/py/vertebra/extensions/starlette/fastpath.py
+- src/py/vertebra/extensions/flask/fastpath.py
+- src/py/vertebra/extensions/django/fastpath.py
 tests:
 - src/py/tests/unit/server/test_stage1_hotpath_and_314t.py
 - src/py/tests/unit/server/test_zero_copy_buffer.py
 - src/py/tests/unit/server/test_asgi.py
 plan_revision: 1
 plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: agent:agy
+claimed_at: '2026-11-06T15:33:00Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-06T15:42:25Z'
+last_verified_commit: "4a5512d426a536fda14168e6752c0533335eaae3"
+verification_evidence: "62 passed in test_stage1_hotpath_and_314t.py, test_zero_copy_buffer.py, and test_asgi.py; ruff and mypy exited 0 across 172 source files."
 created_at: '2026-11-06T06:35:00Z'
-updated_at: '2026-11-06T06:35:00Z'
+updated_at: '2026-11-06T15:42:25Z'
 commit: null
 tags:
 - fastpath
@@ -65,8 +71,8 @@ uv run --no-sync mypy src/py/vertebra/server
 
 ## Acceptance Criteria
 
-- [ ] R2: Oversized streaming bodies fail closed with HTTP `413` before unbounded concatenation.
-- [ ] `body_bytes_fn()` executes at most once per fastpath request, `ArrowCursor` responses avoid `bytes(...)` copies, and `bytes` headers are not decoded/re-encoded.
+- [x] R2: Oversized streaming bodies fail closed with HTTP `413` before unbounded concatenation.
+- [x] `body_bytes_fn()` executes at most once per fastpath request, `ArrowCursor` responses avoid `bytes(...)` copies, and `bytes` headers are not decoded/re-encoded.
 
 ## Notes & Discoveries
 

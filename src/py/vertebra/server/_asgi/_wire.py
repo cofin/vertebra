@@ -1,5 +1,6 @@
 """ASGI 3.0 wire-extension response helpers and route classification utilities."""
 
+import inspect
 import re
 from collections.abc import Buffer, Callable, Iterable
 from pathlib import Path
@@ -51,16 +52,15 @@ class ZeroCopySendResponse:
         if not any(k.lower() == b"content-length" for k, _ in hdrs):
             hdrs.append((b"content-length", str(mv.nbytes).encode("ascii")))
 
-        await send(
-            {
-                "type": "http.response.start",
-                "status": self._status,
-                "headers": hdrs,
-            }
-        )
-
         extensions = scope.get("extensions")
         if isinstance(extensions, dict) and "http.response.zerocopysend" in extensions:
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": self._status,
+                    "headers": hdrs,
+                }
+            )
             await send(
                 {
                     "type": "http.response.zerocopysend",
@@ -68,14 +68,33 @@ class ZeroCopySendResponse:
                     "more_body": False,
                 }
             )
-        else:
-            await send(
-                {
-                    "type": "http.response.body",
-                    "body": bytes(mv),
-                    "more_body": False,
-                }
-            )
+            return
+
+        raw_send = getattr(send, "send_raw_response", None) or getattr(
+            getattr(send, "__self__", None),
+            "send_raw_response",
+            None,
+        )
+        if callable(raw_send):
+            res = raw_send(self._status, hdrs, mv)
+            if inspect.isawaitable(res):
+                await res
+            return
+
+        await send(
+            {
+                "type": "http.response.start",
+                "status": self._status,
+                "headers": hdrs,
+            }
+        )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": bytes(mv),
+                "more_body": False,
+            }
+        )
 
 
 class PathSendResponse:

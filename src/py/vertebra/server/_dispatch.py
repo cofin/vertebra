@@ -529,6 +529,10 @@ def _coerce_response(raw: Any, request_id: int, vr_cls: Any, *, status_code: int
         special = serialize_fastpath_special_result(raw, default_status=status_code)
         if special is not None:
             sp_status, _sp_headers, sp_body = special
+            if isinstance(sp_body, memoryview):
+                if vr_cls is Response:
+                    return Response.from_buffer(sp_status, sp_body, None, request_id)
+                return vr_cls(status=sp_status, body=bytes(sp_body), request_id=request_id)
             return vr_cls(status=sp_status, body=sp_body, request_id=request_id)
         body = encode_json_bytes(raw)
     return vr_cls(status=status_code, body=body, request_id=request_id)
