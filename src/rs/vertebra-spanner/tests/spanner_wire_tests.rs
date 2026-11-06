@@ -1226,3 +1226,48 @@ async fn update_database_ddl_against_emulator() {
     let op_name = client.update_database_ddl(&[ddl]).await.expect("ddl");
     assert!(!op_name.is_empty());
 }
+
+#[test]
+fn spanner_client_precomputes_routing_metadata_and_decodes_owned_nested_values() {
+    use _spanner::client::{SpannerStructField, SpannerType, SpannerTypeCode};
+
+    let mut cfg =
+        SpannerClientConfig::new("projects/google.com:prod/instances/inst-1/databases/db-1");
+    cfg.endpoint = "http://127.0.0.1:9010/".to_string();
+    let client = SpannerClient::new(cfg).expect("client");
+
+    assert_eq!(client.effective_endpoint(), "http://127.0.0.1:9010");
+    assert_eq!(
+        client.routing_header_value(),
+        "database=projects%2Fgoogle.com%3Aprod%2Finstances%2Finst-1%2Fdatabases%2Fdb-1"
+    );
+
+    let nested_ty = SpannerType::array(SpannerType::struct_type(vec![
+        SpannerStructField {
+            name: "label".to_string(),
+            field_type: SpannerType::scalar(SpannerTypeCode::String),
+        },
+        SpannerStructField {
+            name: "payload".to_string(),
+            field_type: SpannerType::scalar(SpannerTypeCode::Json),
+        },
+    ]));
+    let raw = ProtobufValue::List(vec![ProtobufValue::List(vec![
+        ProtobufValue::String("item-1".to_string()),
+        ProtobufValue::String("{\"ok\":true}".to_string()),
+    ])]);
+    let decoded = SpannerValue::from_protobuf_value_owned(raw, &nested_ty).expect("decode owned");
+    assert_eq!(
+        decoded,
+        SpannerValue::Array(vec![SpannerValue::Struct(vec![
+            (
+                "label".to_string(),
+                SpannerValue::String("item-1".to_string())
+            ),
+            (
+                "payload".to_string(),
+                SpannerValue::Json("{\"ok\":true}".to_string()),
+            ),
+        ])])
+    );
+}

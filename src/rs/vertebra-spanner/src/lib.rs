@@ -238,8 +238,8 @@ impl PySyncSpannerClient {
     }
 
     #[getter]
-    fn endpoint(&self) -> String {
-        self.inner.config().effective_endpoint()
+    fn endpoint(&self) -> &str {
+        self.inner.effective_endpoint()
     }
 
     #[getter]
@@ -281,12 +281,8 @@ impl PySyncSpannerClient {
         let params =
             parse_spanner_parameters_json(params_json).map_err(|e| spanner_error_to_py(py, e))?;
         let staleness = parse_staleness(staleness_mode, staleness_ms);
-        let client = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
         let res = py
-            .detach(|| {
-                block_on_db(async move { client.query(&sql_owned, &params, staleness).await })
-            })
+            .detach(|| block_on_db(self.inner.query_owned(sql, params, staleness)))
             .map_err(|e| spanner_error_to_py(py, e))?;
         query_result_to_py(py, res)
     }
@@ -302,19 +298,13 @@ impl PySyncSpannerClient {
     ) -> PyResult<i64> {
         let params =
             parse_spanner_parameters_json(params_json).map_err(|e| spanner_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
         py.detach(|| {
-            block_on_db(async move {
-                client
-                    .execute_dml(
-                        &sql_owned,
-                        &params,
-                        request_tag.as_deref(),
-                        transaction_tag.as_deref(),
-                    )
-                    .await
-            })
+            block_on_db(self.inner.execute_dml_owned(
+                sql,
+                params,
+                request_tag.as_deref(),
+                transaction_tag.as_deref(),
+            ))
         })
         .map_err(|e| spanner_error_to_py(py, e))
     }
@@ -329,13 +319,12 @@ impl PySyncSpannerClient {
     ) -> PyResult<Vec<i64>> {
         let stmts = parse_batch_dml_statements_json(statements_json)
             .map_err(|e| spanner_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
         py.detach(|| {
-            block_on_db(async move {
-                client
-                    .execute_batch_dml(&stmts, request_tag.as_deref(), transaction_tag.as_deref())
-                    .await
-            })
+            block_on_db(self.inner.execute_batch_dml_owned(
+                stmts,
+                request_tag.as_deref(),
+                transaction_tag.as_deref(),
+            ))
         })
         .map_err(|e| spanner_error_to_py(py, e))
     }
@@ -350,14 +339,12 @@ impl PySyncSpannerClient {
     ) -> PyResult<i64> {
         let params =
             parse_spanner_parameters_json(params_json).map_err(|e| spanner_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
         py.detach(|| {
-            block_on_db(async move {
-                client
-                    .execute_partitioned_dml(&sql_owned, &params, exclude_txn_from_change_streams)
-                    .await
-            })
+            block_on_db(self.inner.execute_partitioned_dml_owned(
+                sql,
+                params,
+                exclude_txn_from_change_streams,
+            ))
         })
         .map_err(|e| spanner_error_to_py(py, e))
     }
@@ -378,19 +365,14 @@ impl PySyncSpannerClient {
     ) -> PyResult<Py<PyAny>> {
         let mutations =
             parse_mutations_json(mutations_json).map_err(|e| spanner_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
         let res = py
             .detach(|| {
-                block_on_db(async move {
-                    client
-                        .apply_mutations(
-                            &mutations,
-                            transaction_tag.as_deref(),
-                            exclude_txn_from_change_streams,
-                            max_commit_delay_ms,
-                        )
-                        .await
-                })
+                block_on_db(self.inner.apply_mutations_owned(
+                    mutations,
+                    transaction_tag.as_deref(),
+                    exclude_txn_from_change_streams,
+                    max_commit_delay_ms,
+                ))
             })
             .map_err(|e| spanner_error_to_py(py, e))?;
         commit_result_to_py(py, res)
@@ -405,22 +387,19 @@ impl PySyncSpannerClient {
     ) -> PyResult<Py<PyAny>> {
         let groups = parse_mutation_groups_json(mutation_groups_json)
             .map_err(|e| spanner_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
         let res = py
             .detach(|| {
-                block_on_db(async move {
-                    client
-                        .batch_write(&groups, exclude_txn_from_change_streams)
-                        .await
-                })
+                block_on_db(
+                    self.inner
+                        .batch_write_owned(groups, exclude_txn_from_change_streams),
+                )
             })
             .map_err(|e| spanner_error_to_py(py, e))?;
         batch_write_results_to_py(py, res)
     }
 
     fn update_ddl(&self, py: Python<'_>, statements: Vec<String>) -> PyResult<String> {
-        let client = Arc::clone(&self.inner);
-        py.detach(|| block_on_db(async move { client.update_database_ddl(&statements).await }))
+        py.detach(|| block_on_db(self.inner.update_database_ddl(&statements)))
             .map_err(|e| spanner_error_to_py(py, e))
     }
 
@@ -446,21 +425,15 @@ impl PySyncSpannerClient {
         let params =
             parse_spanner_parameters_json(params_json).map_err(|e| spanner_error_to_py(py, e))?;
         let staleness = parse_staleness(staleness_mode, staleness_ms);
-        let client = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
         let res = py
             .detach(|| {
-                block_on_db(async move {
-                    client
-                        .partitioned_query(
-                            &sql_owned,
-                            &params,
-                            max_partitions,
-                            data_boost_enabled,
-                            staleness,
-                        )
-                        .await
-                })
+                block_on_db(self.inner.partitioned_query_owned(
+                    sql,
+                    params,
+                    max_partitions,
+                    data_boost_enabled,
+                    staleness,
+                ))
             })
             .map_err(|e| spanner_error_to_py(py, e))?;
         query_result_to_py(py, res)
@@ -544,8 +517,8 @@ impl PyAsyncSpannerClient {
     }
 
     #[getter]
-    fn endpoint(&self) -> String {
-        self.inner.config().effective_endpoint()
+    fn endpoint(&self) -> &str {
+        self.inner.effective_endpoint()
     }
 
     #[getter]
@@ -590,7 +563,7 @@ impl PyAsyncSpannerClient {
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task_with_attr(
             py,
-            async move { client.query(&sql, &params, staleness).await },
+            async move { client.query_owned(&sql, params, staleness).await },
             query_result_to_py,
             spanner_error_to_py,
             SPANNER_COMPLETION_DRAINER_ATTR,
@@ -613,9 +586,9 @@ impl PyAsyncSpannerClient {
             py,
             async move {
                 client
-                    .execute_dml(
+                    .execute_dml_owned(
                         &sql,
-                        &params,
+                        params,
                         request_tag.as_deref(),
                         transaction_tag.as_deref(),
                     )
@@ -642,7 +615,11 @@ impl PyAsyncSpannerClient {
             py,
             async move {
                 client
-                    .execute_batch_dml(&stmts, request_tag.as_deref(), transaction_tag.as_deref())
+                    .execute_batch_dml_owned(
+                        stmts,
+                        request_tag.as_deref(),
+                        transaction_tag.as_deref(),
+                    )
                     .await
             },
             |py, counts| Ok(counts.into_pyobject(py)?.into_any().unbind()),
@@ -666,7 +643,7 @@ impl PyAsyncSpannerClient {
             py,
             async move {
                 client
-                    .execute_partitioned_dml(&sql, &params, exclude_txn_from_change_streams)
+                    .execute_partitioned_dml_owned(&sql, params, exclude_txn_from_change_streams)
                     .await
             },
             |py, count| Ok(count.into_pyobject(py)?.into_any().unbind()),
@@ -696,8 +673,8 @@ impl PyAsyncSpannerClient {
             py,
             async move {
                 client
-                    .apply_mutations(
-                        &mutations,
+                    .apply_mutations_owned(
+                        mutations,
                         transaction_tag.as_deref(),
                         exclude_txn_from_change_streams,
                         max_commit_delay_ms,
@@ -724,7 +701,7 @@ impl PyAsyncSpannerClient {
             py,
             async move {
                 client
-                    .batch_write(&groups, exclude_txn_from_change_streams)
+                    .batch_write_owned(groups, exclude_txn_from_change_streams)
                     .await
             },
             batch_write_results_to_py,
@@ -771,7 +748,13 @@ impl PyAsyncSpannerClient {
             py,
             async move {
                 client
-                    .partitioned_query(&sql, &params, max_partitions, data_boost_enabled, staleness)
+                    .partitioned_query_owned(
+                        &sql,
+                        params,
+                        max_partitions,
+                        data_boost_enabled,
+                        staleness,
+                    )
                     .await
             },
             query_result_to_py,

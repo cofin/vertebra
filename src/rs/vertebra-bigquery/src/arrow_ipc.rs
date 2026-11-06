@@ -69,37 +69,43 @@ pub struct ArrowAppendPlan {
 }
 
 impl ArrowAppendPlan {
-    /// Parse an Arrow IPC stream into its schema message and one [`ArrowAppendRequest`] per record batch.
+    /// Parse an Arrow IPC stream slice into its schema message and one [`ArrowAppendRequest`] per record batch.
     pub fn build(stream: &[u8], mode: BigQueryWriteMode) -> Result<Self, BigQueryError> {
         if stream.is_empty() {
             return Ok(Self::default());
         }
+        Self::build_bytes(Bytes::copy_from_slice(stream), mode)
+    }
 
+    /// Parse an owned [`Bytes`] Arrow IPC stream into zero-copy sliced schema and record-batch frames.
+    pub fn build_bytes(stream: Bytes, mode: BigQueryWriteMode) -> Result<Self, BigQueryError> {
+        if stream.is_empty() {
+            return Ok(Self::default());
+        }
+
+        let raw = stream.as_ref();
         let mut pos = 0usize;
         let mut schema: Option<Bytes> = None;
         let mut requests = Vec::new();
         let mut running_rows = 0i64;
 
-        while pos < stream.len() {
-            if stream[pos..].starts_with(&ARROW_IPC_EOS_MARKER) {
+        while pos < raw.len() {
+            if raw[pos..].starts_with(&ARROW_IPC_EOS_MARKER) {
                 break;
             }
-            if stream.len() - pos < 8 {
+            if raw.len() - pos < 8 {
                 return Err(BigQueryError::InvalidArgument(format!(
                     "truncated Arrow IPC message header at byte {pos}"
                 )));
             }
-            if stream[pos..pos + 4] != [0xFF, 0xFF, 0xFF, 0xFF] {
+            if raw[pos..pos + 4] != [0xFF, 0xFF, 0xFF, 0xFF] {
                 return Err(BigQueryError::InvalidArgument(format!(
                     "Arrow IPC message at byte {pos} lacks the 0xFFFFFFFF continuation marker"
                 )));
             }
-            let meta_size = u32::from_le_bytes([
-                stream[pos + 4],
-                stream[pos + 5],
-                stream[pos + 6],
-                stream[pos + 7],
-            ]) as usize;
+            let meta_size =
+                u32::from_le_bytes([raw[pos + 4], raw[pos + 5], raw[pos + 6], raw[pos + 7]])
+                    as usize;
             if meta_size == 0 {
                 break;
             }
@@ -109,14 +115,14 @@ impl ArrowAppendPlan {
             let meta_start = pos + 8;
             let meta_end = meta_start
                 .checked_add(padded_meta)
-                .filter(|&end| end <= stream.len())
+                .filter(|&end| end <= raw.len())
                 .ok_or_else(|| {
                     BigQueryError::InvalidArgument(format!(
                         "truncated Arrow IPC message at byte {pos}"
                     ))
                 })?;
 
-            let fb = &stream[meta_start..meta_start + meta_size];
+            let fb = &raw[meta_start..meta_start + meta_size];
             let header = ArrowMessageHeader::parse(fb)?;
             let padded_body = header
                 .body_len
@@ -129,14 +135,14 @@ impl ArrowAppendPlan {
                 })?;
             let frame_end = meta_end
                 .checked_add(padded_body)
-                .filter(|&end| end <= stream.len())
+                .filter(|&end| end <= raw.len())
                 .ok_or_else(|| {
                     BigQueryError::InvalidArgument(format!(
                         "truncated Arrow IPC message at byte {pos}"
                     ))
                 })?;
 
-            let frame_bytes = Bytes::copy_from_slice(&stream[pos..frame_end]);
+            let frame_bytes = stream.slice(pos..frame_end);
             match header.header_type {
                 1 => {
                     if schema.is_some() {

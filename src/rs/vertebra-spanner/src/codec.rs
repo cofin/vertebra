@@ -332,14 +332,14 @@ impl SpannerValue {
             },
             SpannerTypeCode::Array => match raw {
                 ProtobufValue::List(items) => {
+                    let default_elem = SpannerType::scalar(SpannerTypeCode::String);
                     let elem_type = col_type
                         .array_element_type
                         .as_deref()
-                        .cloned()
-                        .unwrap_or_else(|| SpannerType::scalar(SpannerTypeCode::String));
+                        .unwrap_or(&default_elem);
                     let mut out = Vec::with_capacity(items.len());
                     for item in items {
-                        out.push(Self::from_protobuf_value(item, &elem_type)?);
+                        out.push(Self::from_protobuf_value(item, elem_type)?);
                     }
                     Ok(Self::Array(out))
                 }
@@ -349,32 +349,28 @@ impl SpannerValue {
             },
             SpannerTypeCode::Struct => match raw {
                 ProtobufValue::List(items) => {
+                    let default_field_ty = SpannerType::scalar(SpannerTypeCode::String);
                     let mut fields = Vec::with_capacity(items.len());
                     for (idx, item) in items.iter().enumerate() {
-                        let (fname, ftype) = col_type
-                            .struct_fields
-                            .get(idx)
-                            .map(|f| (f.name.clone(), f.field_type.clone()))
-                            .unwrap_or_else(|| {
-                                (
-                                    format!("field_{idx}"),
-                                    SpannerType::scalar(SpannerTypeCode::String),
-                                )
-                            });
-                        fields.push((fname, Self::from_protobuf_value(item, &ftype)?));
+                        let (fname, ftype) = match col_type.struct_fields.get(idx) {
+                            Some(f) => (f.name.clone(), &f.field_type),
+                            None => (format!("field_{idx}"), &default_field_ty),
+                        };
+                        fields.push((fname, Self::from_protobuf_value(item, ftype)?));
                     }
                     Ok(Self::Struct(fields))
                 }
                 ProtobufValue::Struct(entries) => {
+                    let default_field_ty = SpannerType::scalar(SpannerTypeCode::String);
                     let mut fields = Vec::with_capacity(entries.len());
                     for (k, v) in entries {
                         let ftype = col_type
                             .struct_fields
                             .iter()
                             .find(|f| f.name == *k)
-                            .map(|f| f.field_type.clone())
-                            .unwrap_or_else(|| SpannerType::scalar(SpannerTypeCode::String));
-                        fields.push((k.clone(), Self::from_protobuf_value(v, &ftype)?));
+                            .map(|f| &f.field_type)
+                            .unwrap_or(&default_field_ty);
+                        fields.push((k.clone(), Self::from_protobuf_value(v, ftype)?));
                     }
                     Ok(Self::Struct(fields))
                 }
@@ -400,6 +396,164 @@ impl SpannerValue {
                         let mut out = Vec::with_capacity(entries.len());
                         for (k, v) in entries {
                             out.push((k.clone(), Self::from_protobuf_value(v, &elem)?));
+                        }
+                        Ok(Self::Struct(out))
+                    }
+                    ProtobufValue::Null => Ok(Self::Null),
+                }
+            }
+        }
+    }
+
+    /// Decode an owned [`ProtobufValue`] using its [`SpannerType`] schema without cloning inner strings.
+    pub fn from_protobuf_value_owned(
+        raw: ProtobufValue,
+        col_type: &SpannerType,
+    ) -> Result<Self, SpannerError> {
+        if matches!(raw, ProtobufValue::Null) {
+            return Ok(Self::Null);
+        }
+        match col_type.code {
+            SpannerTypeCode::Bool => match raw {
+                ProtobufValue::Bool(b) => Ok(Self::Bool(b)),
+                ProtobufValue::String(s) => Ok(Self::Bool(s.eq_ignore_ascii_case("true"))),
+                other => Err(SpannerError::Protocol(format!(
+                    "expected BOOL value, got {other:?}"
+                ))),
+            },
+            SpannerTypeCode::Int64 | SpannerTypeCode::Enum => match raw {
+                ProtobufValue::String(s) => s
+                    .parse::<i64>()
+                    .map(Self::Int64)
+                    .map_err(|e| SpannerError::Protocol(format!("invalid INT64 {s:?}: {e}"))),
+                ProtobufValue::Number(n) => Ok(Self::Int64(n as i64)),
+                other => Err(SpannerError::Protocol(format!(
+                    "expected INT64 StringValue, got {other:?}"
+                ))),
+            },
+            SpannerTypeCode::Float64 | SpannerTypeCode::Float32 => match raw {
+                ProtobufValue::Number(n) => Ok(Self::Float64(n)),
+                ProtobufValue::String(s) => {
+                    let parsed = match s.as_str() {
+                        "Infinity" | "+Infinity" | "inf" => f64::INFINITY,
+                        "-Infinity" | "-inf" => f64::NEG_INFINITY,
+                        "NaN" | "nan" => f64::NAN,
+                        other => other.parse::<f64>().map_err(|e| {
+                            SpannerError::Protocol(format!("invalid FLOAT {other:?}: {e}"))
+                        })?,
+                    };
+                    Ok(Self::Float64(parsed))
+                }
+                other => Err(SpannerError::Protocol(format!(
+                    "expected FLOAT NumberValue/StringValue, got {other:?}"
+                ))),
+            },
+            SpannerTypeCode::Bytes | SpannerTypeCode::Proto => match raw {
+                ProtobufValue::String(b64) => BASE64_STANDARD
+                    .decode(b64.as_bytes())
+                    .map(Self::Bytes)
+                    .map_err(|e| SpannerError::Protocol(format!("invalid base64 BYTES: {e}"))),
+                other => Err(SpannerError::Protocol(format!(
+                    "expected base64 StringValue for BYTES, got {other:?}"
+                ))),
+            },
+            SpannerTypeCode::Json => match raw {
+                ProtobufValue::String(s) => Ok(Self::Json(s)),
+                other => Err(SpannerError::Protocol(format!(
+                    "expected StringValue for JSON, got {other:?}"
+                ))),
+            },
+            SpannerTypeCode::Numeric => match raw {
+                ProtobufValue::String(s) => Ok(Self::Numeric(s)),
+                ProtobufValue::Number(n) => Ok(Self::Numeric(n.to_string())),
+                other => Err(SpannerError::Protocol(format!(
+                    "expected StringValue for NUMERIC, got {other:?}"
+                ))),
+            },
+            SpannerTypeCode::Timestamp => match raw {
+                ProtobufValue::String(s) => Ok(Self::Timestamp(s)),
+                other => Err(SpannerError::Protocol(format!(
+                    "expected StringValue for TIMESTAMP, got {other:?}"
+                ))),
+            },
+            SpannerTypeCode::Date => match raw {
+                ProtobufValue::String(s) => Ok(Self::Date(s)),
+                other => Err(SpannerError::Protocol(format!(
+                    "expected StringValue for DATE, got {other:?}"
+                ))),
+            },
+            SpannerTypeCode::Uuid => match raw {
+                ProtobufValue::String(s) => Ok(Self::Uuid(s)),
+                other => Err(SpannerError::Protocol(format!(
+                    "expected StringValue for UUID, got {other:?}"
+                ))),
+            },
+            SpannerTypeCode::Array => match raw {
+                ProtobufValue::List(items) => {
+                    let default_elem = SpannerType::scalar(SpannerTypeCode::String);
+                    let elem_type = col_type
+                        .array_element_type
+                        .as_deref()
+                        .unwrap_or(&default_elem);
+                    let mut out = Vec::with_capacity(items.len());
+                    for item in items {
+                        out.push(Self::from_protobuf_value_owned(item, elem_type)?);
+                    }
+                    Ok(Self::Array(out))
+                }
+                other => Err(SpannerError::Protocol(format!(
+                    "expected ListValue for ARRAY, got {other:?}"
+                ))),
+            },
+            SpannerTypeCode::Struct => match raw {
+                ProtobufValue::List(items) => {
+                    let default_field_ty = SpannerType::scalar(SpannerTypeCode::String);
+                    let mut fields = Vec::with_capacity(items.len());
+                    for (idx, item) in items.into_iter().enumerate() {
+                        let (fname, ftype) = match col_type.struct_fields.get(idx) {
+                            Some(f) => (f.name.clone(), &f.field_type),
+                            None => (format!("field_{idx}"), &default_field_ty),
+                        };
+                        fields.push((fname, Self::from_protobuf_value_owned(item, ftype)?));
+                    }
+                    Ok(Self::Struct(fields))
+                }
+                ProtobufValue::Struct(entries) => {
+                    let default_field_ty = SpannerType::scalar(SpannerTypeCode::String);
+                    let mut fields = Vec::with_capacity(entries.len());
+                    for (k, v) in entries {
+                        let ftype = col_type
+                            .struct_fields
+                            .iter()
+                            .find(|f| f.name == k)
+                            .map(|f| &f.field_type)
+                            .unwrap_or(&default_field_ty);
+                        fields.push((k, Self::from_protobuf_value_owned(v, ftype)?));
+                    }
+                    Ok(Self::Struct(fields))
+                }
+                other => Err(SpannerError::Protocol(format!(
+                    "expected ListValue/StructValue for STRUCT, got {other:?}"
+                ))),
+            },
+            SpannerTypeCode::String | SpannerTypeCode::Interval | SpannerTypeCode::Unspecified => {
+                match raw {
+                    ProtobufValue::String(s) => Ok(Self::String(s)),
+                    ProtobufValue::Bool(b) => Ok(Self::Bool(b)),
+                    ProtobufValue::Number(n) => Ok(Self::Float64(n)),
+                    ProtobufValue::List(items) => {
+                        let elem = SpannerType::scalar(SpannerTypeCode::String);
+                        let mut out = Vec::with_capacity(items.len());
+                        for item in items {
+                            out.push(Self::from_protobuf_value_owned(item, &elem)?);
+                        }
+                        Ok(Self::Array(out))
+                    }
+                    ProtobufValue::Struct(entries) => {
+                        let elem = SpannerType::scalar(SpannerTypeCode::String);
+                        let mut out = Vec::with_capacity(entries.len());
+                        for (k, v) in entries {
+                            out.push((k, Self::from_protobuf_value_owned(v, &elem)?));
                         }
                         Ok(Self::Struct(out))
                     }
@@ -1293,6 +1447,25 @@ pub(crate) fn official_value(value: &ProtobufValue) -> OfficialValue {
     }
 }
 
+pub(crate) fn official_value_owned(value: ProtobufValue) -> OfficialValue {
+    match value {
+        ProtobufValue::Null => OfficialValue::null(),
+        ProtobufValue::Bool(b) => b.into(),
+        ProtobufValue::Number(n) => n.into(),
+        ProtobufValue::String(s) => s.into(),
+        ProtobufValue::List(items) => items
+            .into_iter()
+            .map(official_value_owned)
+            .collect::<Vec<OfficialValue>>()
+            .into(),
+        ProtobufValue::Struct(entries) => entries
+            .into_iter()
+            .map(|(_, v)| official_value_owned(v))
+            .collect::<Vec<OfficialValue>>()
+            .into(),
+    }
+}
+
 pub(crate) fn official_type(ty: &SpannerType) -> OfficialType {
     let mut model = spanner_model::Type::new()
         .set_code(spanner_model::TypeCode::from(ty.code as i32))
@@ -1459,6 +1632,81 @@ pub(crate) fn official_mutation_rows(mutation: &SpannerMutation) -> Vec<Mutation
                 keys.iter()
                     .fold(KeySet::builder(), |builder, key_tuple| {
                         builder.add_key(Key::new(key_tuple.iter().map(official_value).collect()))
+                    })
+                    .build()
+            };
+            vec![Mutation::delete(table, key_set)]
+        }
+    }
+}
+
+pub(crate) fn official_mutation_rows_owned(mutation: SpannerMutation) -> Vec<Mutation> {
+    match mutation {
+        SpannerMutation::Insert {
+            table,
+            columns,
+            values,
+        } => values
+            .into_iter()
+            .map(|row| {
+                let mut builder = Mutation::new_insert_builder(&table);
+                for (col, cell) in columns.iter().zip(row) {
+                    builder = builder.set(col).to(official_value_owned(cell));
+                }
+                builder.build()
+            })
+            .collect(),
+        SpannerMutation::Update {
+            table,
+            columns,
+            values,
+        } => values
+            .into_iter()
+            .map(|row| {
+                let mut builder = Mutation::new_update_builder(&table);
+                for (col, cell) in columns.iter().zip(row) {
+                    builder = builder.set(col).to(official_value_owned(cell));
+                }
+                builder.build()
+            })
+            .collect(),
+        SpannerMutation::InsertOrUpdate {
+            table,
+            columns,
+            values,
+        } => values
+            .into_iter()
+            .map(|row| {
+                let mut builder = Mutation::new_insert_or_update_builder(&table);
+                for (col, cell) in columns.iter().zip(row) {
+                    builder = builder.set(col).to(official_value_owned(cell));
+                }
+                builder.build()
+            })
+            .collect(),
+        SpannerMutation::Replace {
+            table,
+            columns,
+            values,
+        } => values
+            .into_iter()
+            .map(|row| {
+                let mut builder = Mutation::new_replace_builder(&table);
+                for (col, cell) in columns.iter().zip(row) {
+                    builder = builder.set(col).to(official_value_owned(cell));
+                }
+                builder.build()
+            })
+            .collect(),
+        SpannerMutation::Delete { table, keys, all } => {
+            let key_set = if all {
+                KeySet::all()
+            } else {
+                keys.into_iter()
+                    .fold(KeySet::builder(), |builder, key_tuple| {
+                        builder.add_key(Key::new(
+                            key_tuple.into_iter().map(official_value_owned).collect(),
+                        ))
                     })
                     .build()
             };

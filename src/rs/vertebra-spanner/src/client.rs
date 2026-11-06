@@ -32,8 +32,8 @@ pub use crate::codec::{
     parse_spanner_parameters_value, rewrite_spangres_placeholders,
 };
 use crate::codec::{
-    commit_result, official_mutation_rows, official_type, official_value, protobuf_value,
-    spanner_type, timestamp_bound,
+    commit_result, official_mutation_rows, official_mutation_rows_owned, official_type,
+    official_value, official_value_owned, protobuf_value, spanner_type, timestamp_bound,
 };
 
 /// Default Cloud Spanner gRPC endpoint.
@@ -200,17 +200,17 @@ async fn collect_query_result(mut rs: ResultSet) -> Result<SpannerQueryResult, S
             field_type: spanner_type(ty),
         })
         .collect::<Vec<_>>();
+    let default_field_ty = SpannerType::scalar(SpannerTypeCode::String);
     let mut rows = Vec::with_capacity(raw_rows.len());
-    for raw_row in &raw_rows {
+    for raw_row in raw_rows {
         let mut decoded_row = Vec::with_capacity(raw_row.len());
-        for (idx, cell) in raw_row.iter().enumerate() {
-            let pb = protobuf_value(cell)?;
+        for (idx, cell) in raw_row.into_iter().enumerate() {
+            let pb = protobuf_value(&cell)?;
             let field_ty = schema
                 .get(idx)
                 .map(|f| &f.field_type)
-                .cloned()
-                .unwrap_or_else(|| SpannerType::scalar(SpannerTypeCode::String));
-            decoded_row.push(SpannerValue::from_protobuf_value(&pb, &field_ty)?);
+                .unwrap_or(&default_field_ty);
+            decoded_row.push(SpannerValue::from_protobuf_value_owned(pb, field_ty)?);
         }
         rows.push(decoded_row);
     }
@@ -225,9 +225,17 @@ async fn collect_query_result(mut rs: ResultSet) -> Result<SpannerQueryResult, S
     })
 }
 
+fn build_routing_header_value(database: &str) -> String {
+    let encoded: String =
+        url::form_urlencoded::byte_serialize(database.trim().as_bytes()).collect();
+    format!("database={encoded}")
+}
+
 /// Google Cloud Spanner v1 client.
 pub struct SpannerClient {
     config: SpannerClientConfig,
+    effective_endpoint: String,
+    routing_header_value: String,
     token_cache: Option<Arc<GcpTokenCache>>,
     injected_spanner: Option<Spanner>,
     injected_admin: Option<DatabaseAdmin>,
@@ -240,13 +248,18 @@ impl SpannerClient {
     /// Construct a new [`SpannerClient`].
     pub fn new(config: SpannerClientConfig) -> Result<Self, SpannerError> {
         validate_spanner_config(&config)?;
-        let token_cache = if config.is_cleartext() && config.auth_options.is_empty() {
-            None
-        } else {
-            GcpTokenCache::from_options(&config.auth_options, SPANNER_OAUTH_SCOPES)
-        };
+        let effective_endpoint = config.effective_endpoint();
+        let routing_header_value = build_routing_header_value(&config.database);
+        let token_cache =
+            if effective_endpoint.starts_with("http://") && config.auth_options.is_empty() {
+                None
+            } else {
+                GcpTokenCache::from_options(&config.auth_options, SPANNER_OAUTH_SCOPES)
+            };
         Ok(Self {
             config,
+            effective_endpoint,
+            routing_header_value,
             token_cache,
             injected_spanner: None,
             injected_admin: None,
@@ -263,8 +276,12 @@ impl SpannerClient {
         config: SpannerClientConfig,
     ) -> Result<Self, SpannerError> {
         validate_spanner_config(&config)?;
+        let effective_endpoint = config.effective_endpoint();
+        let routing_header_value = build_routing_header_value(&config.database);
         Ok(Self {
             config,
+            effective_endpoint,
+            routing_header_value,
             token_cache: None,
             injected_spanner: Some(spanner),
             injected_admin: admin,
@@ -280,6 +297,18 @@ impl SpannerClient {
         &self.config
     }
 
+    /// Precomputed effective gRPC endpoint URL.
+    #[inline]
+    pub fn effective_endpoint(&self) -> &str {
+        &self.effective_endpoint
+    }
+
+    /// Precomputed `x-goog-request-params` database routing header value.
+    #[inline]
+    pub fn routing_header_value(&self) -> &str {
+        &self.routing_header_value
+    }
+
     /// Resolve the effective DatabaseAdmin REST endpoint for `UpdateDatabaseDdl`.
     pub fn effective_admin_endpoint(&self) -> Result<String, SpannerError> {
         if let Some(ref explicit) = self.config.admin_endpoint {
@@ -288,11 +317,11 @@ impl SpannerClient {
                 return Ok(trimmed.to_string());
             }
         }
-        let endpoint = self.config.effective_endpoint();
-        if endpoint_is_googleapis(&endpoint) {
+        let endpoint = &self.effective_endpoint;
+        if endpoint_is_googleapis(endpoint) {
             return Ok(DEFAULT_SPANNER_ADMIN_ENDPOINT.to_string());
         }
-        if let Ok(mut parsed) = Url::parse(&endpoint)
+        if let Ok(mut parsed) = Url::parse(endpoint)
             && parsed.scheme() == "http"
             && parsed.port() == Some(9010)
         {
@@ -312,7 +341,7 @@ impl SpannerClient {
             .get_or_try_init(|| async {
                 install_rustls_ring_provider();
                 let mut builder = Spanner::builder()
-                    .with_endpoint(self.config.effective_endpoint())
+                    .with_endpoint(self.effective_endpoint.clone())
                     .with_credentials(official_credentials(self.token_cache.clone()))
                     .with_channel_pool(StaticChannelPoolConfig::new(self.config.pool_size.max(1)));
                 if let Some(ref pem) = self.config.ca_pem {
@@ -393,11 +422,59 @@ impl SpannerClient {
         builder.build()
     }
 
+    fn statement_owned(&self, sql: &str, params: Vec<SpannerQueryParameter>) -> Statement {
+        self.statement_owned_with_tag(sql, params, None)
+    }
+
+    fn statement_owned_with_tag(
+        &self,
+        sql: &str,
+        params: Vec<SpannerQueryParameter>,
+        request_tag: Option<&str>,
+    ) -> Statement {
+        let mut builder = if self.config.dialect == SpannerDialect::GoogleSql && sql.contains('$') {
+            Statement::builder(rewrite_spangres_placeholders(sql).0)
+        } else {
+            Statement::builder(sql)
+        };
+        for param in params {
+            builder = builder.add_typed_param(
+                param.name,
+                official_value_owned(param.value),
+                official_type(&param.param_type),
+            );
+        }
+        if let Some(tag) = request_tag.filter(|t| !t.is_empty()) {
+            builder = builder.set_request_tag(tag);
+        }
+        builder.build()
+    }
+
     /// Execute a single-use read-only query with the specified [`SpannerStaleness`] bound.
     pub async fn query(
         &self,
         sql: &str,
         params: &[SpannerQueryParameter],
+        staleness: SpannerStaleness,
+    ) -> Result<SpannerQueryResult, SpannerError> {
+        self.execute_statement_query(self.statement(sql, params), staleness)
+            .await
+    }
+
+    /// Execute a single-use read-only query consuming owned [`SpannerQueryParameter`] items.
+    pub async fn query_owned(
+        &self,
+        sql: &str,
+        params: Vec<SpannerQueryParameter>,
+        staleness: SpannerStaleness,
+    ) -> Result<SpannerQueryResult, SpannerError> {
+        self.execute_statement_query(self.statement_owned(sql, params), staleness)
+            .await
+    }
+
+    async fn execute_statement_query(
+        &self,
+        stmt: Statement,
         staleness: SpannerStaleness,
     ) -> Result<SpannerQueryResult, SpannerError> {
         let db = self.database_client().await?;
@@ -406,7 +483,7 @@ impl SpannerClient {
             .single_use()
             .set_timestamp_bound(bound)
             .build()
-            .execute_query(self.statement(sql, params))
+            .execute_query(stmt)
             .await?;
         collect_query_result(rs).await
     }
@@ -420,6 +497,40 @@ impl SpannerClient {
         data_boost_enabled: bool,
         staleness: SpannerStaleness,
     ) -> Result<SpannerQueryResult, SpannerError> {
+        self.execute_statement_partitioned_query(
+            self.statement(sql, params),
+            max_partitions,
+            data_boost_enabled,
+            staleness,
+        )
+        .await
+    }
+
+    /// Execute a batch read-only `PartitionQuery` consuming owned [`SpannerQueryParameter`] items.
+    pub async fn partitioned_query_owned(
+        &self,
+        sql: &str,
+        params: Vec<SpannerQueryParameter>,
+        max_partitions: i64,
+        data_boost_enabled: bool,
+        staleness: SpannerStaleness,
+    ) -> Result<SpannerQueryResult, SpannerError> {
+        self.execute_statement_partitioned_query(
+            self.statement_owned(sql, params),
+            max_partitions,
+            data_boost_enabled,
+            staleness,
+        )
+        .await
+    }
+
+    async fn execute_statement_partitioned_query(
+        &self,
+        stmt: Statement,
+        max_partitions: i64,
+        data_boost_enabled: bool,
+        staleness: SpannerStaleness,
+    ) -> Result<SpannerQueryResult, SpannerError> {
         let db = self.database_client().await?;
         let bound = timestamp_bound(staleness)?;
         let batch_tx = db
@@ -429,9 +540,7 @@ impl SpannerClient {
             .await?;
         let options =
             spanner_model::PartitionOptions::new().set_max_partitions(max_partitions.max(1));
-        let partitions = batch_tx
-            .partition_query(self.statement(sql, params), options)
-            .await?;
+        let partitions = batch_tx.partition_query(stmt, options).await?;
         let part_results = try_join_all(partitions.into_iter().map(|part| async move {
             let rs = part.set_data_boost(data_boost_enabled).execute(db).await?;
             collect_query_result(rs).await
@@ -473,8 +582,34 @@ impl SpannerClient {
         request_tag: Option<&str>,
         transaction_tag: Option<&str>,
     ) -> Result<i64, SpannerError> {
+        self.execute_statement_dml(
+            self.statement_with_tag(sql, params, request_tag),
+            transaction_tag,
+        )
+        .await
+    }
+
+    /// Execute a single DML statement consuming owned [`SpannerQueryParameter`] items.
+    pub async fn execute_dml_owned(
+        &self,
+        sql: &str,
+        params: Vec<SpannerQueryParameter>,
+        request_tag: Option<&str>,
+        transaction_tag: Option<&str>,
+    ) -> Result<i64, SpannerError> {
+        self.execute_statement_dml(
+            self.statement_owned_with_tag(sql, params, request_tag),
+            transaction_tag,
+        )
+        .await
+    }
+
+    async fn execute_statement_dml(
+        &self,
+        stmt: Statement,
+        transaction_tag: Option<&str>,
+    ) -> Result<i64, SpannerError> {
         let db = self.database_client().await?;
-        let stmt = self.statement_with_tag(sql, params, request_tag);
         let mut runner_builder = db.read_write_transaction();
         if let Some(tag) = transaction_tag.filter(|t| !t.is_empty()) {
             runner_builder = runner_builder.set_transaction_tag(tag);
@@ -505,7 +640,6 @@ impl SpannerClient {
         if statements.is_empty() {
             return Ok(Vec::new());
         }
-        let db = self.database_client().await?;
         let mut batch_builder = BatchDml::builder();
         for item in statements {
             batch_builder = batch_builder.add_statement(self.statement(&item.sql, &item.params));
@@ -513,7 +647,38 @@ impl SpannerClient {
         if let Some(tag) = request_tag.filter(|t| !t.is_empty()) {
             batch_builder = batch_builder.set_request_tag(tag);
         }
-        let batch = batch_builder.build();
+        self.run_batch_dml(batch_builder.build(), transaction_tag)
+            .await
+    }
+
+    /// Execute a batch of DML statements consuming owned [`SpannerBatchDmlStatement`] items.
+    pub async fn execute_batch_dml_owned(
+        &self,
+        statements: Vec<SpannerBatchDmlStatement>,
+        request_tag: Option<&str>,
+        transaction_tag: Option<&str>,
+    ) -> Result<Vec<i64>, SpannerError> {
+        if statements.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut batch_builder = BatchDml::builder();
+        for item in statements {
+            batch_builder =
+                batch_builder.add_statement(self.statement_owned(&item.sql, item.params));
+        }
+        if let Some(tag) = request_tag.filter(|t| !t.is_empty()) {
+            batch_builder = batch_builder.set_request_tag(tag);
+        }
+        self.run_batch_dml(batch_builder.build(), transaction_tag)
+            .await
+    }
+
+    async fn run_batch_dml(
+        &self,
+        batch: BatchDml,
+        transaction_tag: Option<&str>,
+    ) -> Result<Vec<i64>, SpannerError> {
+        let db = self.database_client().await?;
 
         let mut runner_builder = db.read_write_transaction();
         if let Some(tag) = transaction_tag.filter(|t| !t.is_empty()) {
@@ -542,12 +707,38 @@ impl SpannerClient {
         params: &[SpannerQueryParameter],
         exclude_txn_from_change_streams: bool,
     ) -> Result<i64, SpannerError> {
+        self.execute_statement_partitioned_dml(
+            self.statement(sql, params),
+            exclude_txn_from_change_streams,
+        )
+        .await
+    }
+
+    /// Execute a Partitioned DML (`PDML`) statement consuming owned [`SpannerQueryParameter`] items.
+    pub async fn execute_partitioned_dml_owned(
+        &self,
+        sql: &str,
+        params: Vec<SpannerQueryParameter>,
+        exclude_txn_from_change_streams: bool,
+    ) -> Result<i64, SpannerError> {
+        self.execute_statement_partitioned_dml(
+            self.statement_owned(sql, params),
+            exclude_txn_from_change_streams,
+        )
+        .await
+    }
+
+    async fn execute_statement_partitioned_dml(
+        &self,
+        stmt: Statement,
+        exclude_txn_from_change_streams: bool,
+    ) -> Result<i64, SpannerError> {
         let db = self.database_client().await?;
         let count = db
             .partitioned_dml_transaction()
             .set_exclude_txn_from_change_streams(exclude_txn_from_change_streams)
             .build()
-            .execute_update(self.statement(sql, params))
+            .execute_update(stmt)
             .await?;
         Ok(count)
     }
@@ -567,11 +758,55 @@ impl SpannerClient {
                 retry_count: 0,
             });
         }
-        let db = self.database_client().await?;
         let official_mutations = mutations
             .iter()
             .flat_map(official_mutation_rows)
             .collect::<Vec<_>>();
+        self.commit_official_mutations(
+            official_mutations,
+            transaction_tag,
+            exclude_txn_from_change_streams,
+            max_commit_delay_ms,
+        )
+        .await
+    }
+
+    /// Commit owned [`SpannerMutation`] items in a write-only transaction without cloning cell values.
+    pub async fn apply_mutations_owned(
+        &self,
+        mutations: Vec<SpannerMutation>,
+        transaction_tag: Option<&str>,
+        exclude_txn_from_change_streams: bool,
+        max_commit_delay_ms: Option<u64>,
+    ) -> Result<SpannerCommitResult, SpannerError> {
+        if mutations.is_empty() {
+            return Ok(SpannerCommitResult {
+                commit_timestamp_micros: None,
+                mutation_count: Some(0),
+                retry_count: 0,
+            });
+        }
+        let official_mutations = mutations
+            .into_iter()
+            .flat_map(official_mutation_rows_owned)
+            .collect::<Vec<_>>();
+        self.commit_official_mutations(
+            official_mutations,
+            transaction_tag,
+            exclude_txn_from_change_streams,
+            max_commit_delay_ms,
+        )
+        .await
+    }
+
+    async fn commit_official_mutations(
+        &self,
+        official_mutations: Vec<google_cloud_spanner::mutation::Mutation>,
+        transaction_tag: Option<&str>,
+        exclude_txn_from_change_streams: bool,
+        max_commit_delay_ms: Option<u64>,
+    ) -> Result<SpannerCommitResult, SpannerError> {
+        let db = self.database_client().await?;
         let mut tx_builder = db
             .write_only_transaction()
             .set_exclude_txn_from_change_streams(exclude_txn_from_change_streams);
@@ -599,7 +834,7 @@ impl SpannerClient {
         }
         let db = self.database_client().await?;
         let mut results = Vec::new();
-        let mut chunk: Vec<&SpannerMutationGroup> = Vec::new();
+        let mut chunk: Vec<MutationGroup> = Vec::new();
         let mut chunk_cells: usize = 0;
         let mut chunk_start: i32 = 0;
 
@@ -608,43 +843,91 @@ impl SpannerClient {
             if !chunk.is_empty() && chunk_cells + group_cells > MAX_MUTATION_CELLS_PER_BATCH {
                 let chunk_len = chunk.len() as i32;
                 let mut part = self
-                    .batch_write_chunk(db, &chunk, chunk_start, exclude_txn_from_change_streams)
+                    .batch_write_official_chunk(
+                        db,
+                        std::mem::take(&mut chunk),
+                        chunk_start,
+                        exclude_txn_from_change_streams,
+                    )
                     .await?;
                 results.append(&mut part);
                 chunk_start += chunk_len;
-                chunk.clear();
                 chunk_cells = 0;
             }
-            chunk.push(group);
+            chunk.push(MutationGroup::new(
+                group
+                    .mutations
+                    .iter()
+                    .flat_map(official_mutation_rows)
+                    .collect(),
+            ));
             chunk_cells += group_cells;
         }
         if !chunk.is_empty() {
             let mut part = self
-                .batch_write_chunk(db, &chunk, chunk_start, exclude_txn_from_change_streams)
+                .batch_write_official_chunk(db, chunk, chunk_start, exclude_txn_from_change_streams)
                 .await?;
             results.append(&mut part);
         }
         Ok(results)
     }
 
-    async fn batch_write_chunk(
+    /// Execute `BatchWrite` consuming owned [`SpannerMutationGroup`] items without cloning cells.
+    pub async fn batch_write_owned(
+        &self,
+        mutation_groups: Vec<SpannerMutationGroup>,
+        exclude_txn_from_change_streams: bool,
+    ) -> Result<Vec<SpannerBatchWriteResult>, SpannerError> {
+        if mutation_groups.is_empty() {
+            return Ok(Vec::new());
+        }
+        let db = self.database_client().await?;
+        let mut results = Vec::new();
+        let mut chunk: Vec<MutationGroup> = Vec::new();
+        let mut chunk_cells: usize = 0;
+        let mut chunk_start: i32 = 0;
+
+        for group in mutation_groups {
+            let group_cells = group.cell_count();
+            if !chunk.is_empty() && chunk_cells + group_cells > MAX_MUTATION_CELLS_PER_BATCH {
+                let chunk_len = chunk.len() as i32;
+                let mut part = self
+                    .batch_write_official_chunk(
+                        db,
+                        std::mem::take(&mut chunk),
+                        chunk_start,
+                        exclude_txn_from_change_streams,
+                    )
+                    .await?;
+                results.append(&mut part);
+                chunk_start += chunk_len;
+                chunk_cells = 0;
+            }
+            chunk.push(MutationGroup::new(
+                group
+                    .mutations
+                    .into_iter()
+                    .flat_map(official_mutation_rows_owned)
+                    .collect(),
+            ));
+            chunk_cells += group_cells;
+        }
+        if !chunk.is_empty() {
+            let mut part = self
+                .batch_write_official_chunk(db, chunk, chunk_start, exclude_txn_from_change_streams)
+                .await?;
+            results.append(&mut part);
+        }
+        Ok(results)
+    }
+
+    async fn batch_write_official_chunk(
         &self,
         db: &DatabaseClient,
-        groups: &[&SpannerMutationGroup],
+        official_groups: Vec<MutationGroup>,
         chunk_start: i32,
         exclude_txn_from_change_streams: bool,
     ) -> Result<Vec<SpannerBatchWriteResult>, SpannerError> {
-        let official_groups = groups
-            .iter()
-            .map(|g| {
-                MutationGroup::new(
-                    g.mutations
-                        .iter()
-                        .flat_map(official_mutation_rows)
-                        .collect(),
-                )
-            })
-            .collect::<Vec<_>>();
         let mut stream = db
             .batch_write_transaction()
             .set_exclude_txn_from_change_streams(exclude_txn_from_change_streams)

@@ -129,6 +129,18 @@ impl BigQueryClientConfig {
 /// Pure-Rust Google Cloud BigQuery client over REST v2 and Storage Read/Write API v1.
 pub struct BigQueryClient {
     config: BigQueryClientConfig,
+    rest_endpoint: String,
+    storage_endpoint: String,
+    queries_url: String,
+    jobs_url: String,
+    queries_base_url: Option<url::Url>,
+    project_parent: String,
+    default_dataset_json: Option<Value>,
+    config_labels_json: Option<Value>,
+    max_bytes_billed_str: Option<String>,
+    job_timeout_ms_str: Option<String>,
+    routing_header: Option<reqwest::header::HeaderValue>,
+    quota_project_header: Option<reqwest::header::HeaderValue>,
     http_client: reqwest::Client,
     token_cache: Option<Arc<GcpTokenCache>>,
     injected_read: Option<Read>,
@@ -139,8 +151,10 @@ pub struct BigQueryClient {
 impl BigQueryClient {
     /// Construct a new [`BigQueryClient`] from `config`.
     pub fn new(config: BigQueryClientConfig) -> Result<Self, BigQueryError> {
-        let is_cleartext = config.effective_rest_endpoint().starts_with("http://")
-            || config.effective_storage_endpoint().starts_with("http://");
+        let rest_endpoint = config.effective_rest_endpoint();
+        let storage_endpoint = config.effective_storage_endpoint();
+        let is_cleartext =
+            rest_endpoint.starts_with("http://") || storage_endpoint.starts_with("http://");
 
         let mut builder = reqwest::Client::builder()
             .pool_max_idle_per_host(config.pool_size.max(1))
@@ -177,8 +191,70 @@ impl BigQueryClient {
         }
         let token_cache = GcpTokenCache::from_options(&auth_opts, BIGQUERY_OAUTH_SCOPES);
 
+        let queries_url = format!(
+            "{rest_endpoint}/bigquery/v2/projects/{}/queries",
+            config.project_id
+        );
+        let jobs_url = format!(
+            "{rest_endpoint}/bigquery/v2/projects/{}/jobs",
+            config.project_id
+        );
+        let queries_base_url = url::Url::parse(&rest_endpoint).ok().and_then(|mut u| {
+            u.path_segments_mut().ok()?.extend([
+                "bigquery",
+                "v2",
+                "projects",
+                config.project_id.as_str(),
+                "queries",
+            ]);
+            Some(u)
+        });
+        let project_parent = format!("projects/{}", config.project_id);
+        let default_dataset_json = config
+            .dataset_id
+            .as_deref()
+            .filter(|ds| !ds.is_empty())
+            .map(|ds| {
+                json!({
+                    "projectId": config.project_id,
+                    "datasetId": ds,
+                })
+            });
+        let config_labels_json = if config.labels.is_empty() {
+            None
+        } else {
+            Some(json!(config.labels))
+        };
+        let max_bytes_billed_str = config.maximum_bytes_billed.map(|n| n.to_string());
+        let job_timeout_ms_str = config.job_timeout_ms.map(|n| n.to_string());
+        let routing_header = if config.project_id.trim().is_empty() {
+            None
+        } else {
+            let encoded_proj: String =
+                url::form_urlencoded::byte_serialize(config.project_id.trim().as_bytes()).collect();
+            reqwest::header::HeaderValue::from_str(&format!("project_id={encoded_proj}")).ok()
+        };
+        let quota_project_header = config
+            .auth_options
+            .get("quota_project_id")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .and_then(|qp| reqwest::header::HeaderValue::from_str(qp).ok());
+
         Ok(Self {
             config,
+            rest_endpoint,
+            storage_endpoint,
+            queries_url,
+            jobs_url,
+            queries_base_url,
+            project_parent,
+            default_dataset_json,
+            config_labels_json,
+            max_bytes_billed_str,
+            job_timeout_ms_str,
+            routing_header,
+            quota_project_header,
             http_client,
             token_cache,
             injected_read: None,
@@ -205,7 +281,7 @@ impl BigQueryClient {
             .get_or_try_init(|| async {
                 install_rustls_ring_provider();
                 Read::builder()
-                    .with_endpoint(self.config.effective_storage_endpoint())
+                    .with_endpoint(self.storage_endpoint.clone())
                     .with_credentials(official_credentials(self.token_cache.clone()))
                     .build()
                     .await
@@ -221,7 +297,7 @@ impl BigQueryClient {
             .get_or_try_init(|| async {
                 install_rustls_ring_provider();
                 Write::builder()
-                    .with_endpoint(self.config.effective_storage_endpoint())
+                    .with_endpoint(self.storage_endpoint.clone())
                     .with_credentials(official_credentials(self.token_cache.clone()))
                     .build()
                     .await
@@ -235,6 +311,24 @@ impl BigQueryClient {
     /// Return a reference to the client configuration.
     pub fn config(&self) -> &BigQueryClientConfig {
         &self.config
+    }
+
+    /// Precomputed effective BigQuery REST v2 base URL.
+    #[inline]
+    pub fn rest_endpoint(&self) -> &str {
+        &self.rest_endpoint
+    }
+
+    /// Precomputed effective BigQuery Storage API gRPC base URL.
+    #[inline]
+    pub fn storage_endpoint(&self) -> &str {
+        &self.storage_endpoint
+    }
+
+    /// Precomputed `x-goog-request-params` header value for project routing.
+    #[inline]
+    pub fn routing_header(&self) -> Option<&reqwest::header::HeaderValue> {
+        self.routing_header.as_ref()
     }
 
     /// Execute a GoogleSQL statement or query over BigQuery REST v2 (`jobs.query` fast-path with
@@ -280,13 +374,8 @@ impl BigQueryClient {
             ..Default::default()
         };
         let payload = self.build_jobs_insert_payload(sql, params, &opts);
-        let url = format!(
-            "{}/bigquery/v2/projects/{}/jobs",
-            self.config.effective_rest_endpoint(),
-            self.config.project_id
-        );
         let resp = self
-            .send_rest_json(reqwest::Method::POST, &url, Some(&payload))
+            .send_rest_json(reqwest::Method::POST, &self.jobs_url, Some(&payload))
             .await?;
         check_rest_error(&resp)?;
 
@@ -386,7 +475,11 @@ impl BigQueryClient {
         };
         let table_resource =
             format!("projects/{eff_project}/datasets/{dataset_id}/tables/{table_id}");
-        let parent = format!("projects/{eff_project}");
+        let parent = if eff_project == self.config.project_id {
+            self.project_parent.clone()
+        } else {
+            format!("projects/{eff_project}")
+        };
 
         let mut read_opts = bq_model::read_session::TableReadOptions::new();
         let mut has_read_opts = false;
@@ -473,7 +566,7 @@ impl BigQueryClient {
         write_read_rows_batches_to_shm(&schema_bytes, results_by_stream)
     }
 
-    /// Append an Arrow IPC stream to `parent_table` (`projects/{p}/datasets/{d}/tables/{t}`) over
+    /// Append an Arrow IPC stream slice to `parent_table` (`projects/{p}/datasets/{d}/tables/{t}`) over
     /// BigQuery Storage Write API v1 (`_default`, `COMMITTED`, `PENDING`, or `BUFFERED`).
     pub async fn append_arrow_stream(
         &self,
@@ -481,9 +574,28 @@ impl BigQueryClient {
         arrow_ipc_bytes: &[u8],
         mode: &str,
     ) -> Result<BigQueryAppendResult, BigQueryError> {
+        let _ = BigQueryWriteMode::from_str_mode(mode)?;
+        let table = self.normalize_table_resource(parent_table)?;
+        if arrow_ipc_bytes.is_empty() {
+            return Ok(BigQueryAppendResult {
+                appended_rows: 0,
+                write_stream: format!("{table}/streams/_default"),
+            });
+        }
+        self.append_arrow_stream_bytes(&table, Bytes::copy_from_slice(arrow_ipc_bytes), mode)
+            .await
+    }
+
+    /// Append an owned [`Bytes`] Arrow IPC stream to `parent_table` with zero-copy frame slicing.
+    pub async fn append_arrow_stream_bytes(
+        &self,
+        parent_table: &str,
+        arrow_ipc_bytes: Bytes,
+        mode: &str,
+    ) -> Result<BigQueryAppendResult, BigQueryError> {
         let write_mode = BigQueryWriteMode::from_str_mode(mode)?;
         let table = self.normalize_table_resource(parent_table)?;
-        let plan = ArrowAppendPlan::build(arrow_ipc_bytes, write_mode)?;
+        let plan = ArrowAppendPlan::build_bytes(arrow_ipc_bytes, write_mode)?;
         if plan.requests.is_empty() {
             return Ok(BigQueryAppendResult {
                 appended_rows: 0,
@@ -642,13 +754,8 @@ impl BigQueryClient {
         options: &BigQueryQueryOptions,
     ) -> Result<BigQueryQueryResult, BigQueryError> {
         let payload = self.build_fastpath_query_payload(sql, params, options);
-        let url = format!(
-            "{}/bigquery/v2/projects/{}/queries",
-            self.config.effective_rest_endpoint(),
-            self.config.project_id
-        );
         let resp = self
-            .send_rest_json(reqwest::Method::POST, &url, Some(&payload))
+            .send_rest_json(reqwest::Method::POST, &self.queries_url, Some(&payload))
             .await?;
         self.collect_query_response_pages(resp).await
     }
@@ -660,13 +767,8 @@ impl BigQueryClient {
         options: &BigQueryQueryOptions,
     ) -> Result<BigQueryQueryResult, BigQueryError> {
         let payload = self.build_jobs_insert_payload(sql, params, options);
-        let url = format!(
-            "{}/bigquery/v2/projects/{}/jobs",
-            self.config.effective_rest_endpoint(),
-            self.config.project_id
-        );
         let resp = self
-            .send_rest_json(reqwest::Method::POST, &url, Some(&payload))
+            .send_rest_json(reqwest::Method::POST, &self.jobs_url, Some(&payload))
             .await?;
         check_rest_error(&resp)?;
 
@@ -810,21 +912,33 @@ impl BigQueryClient {
         location: Option<&str>,
         page_token: Option<&str>,
     ) -> Result<String, BigQueryError> {
-        let mut url = url::Url::parse(&self.config.effective_rest_endpoint()).map_err(|e| {
-            BigQueryError::InvalidArgument(format!("invalid BigQuery REST endpoint: {e}"))
-        })?;
+        let mut url = match self.queries_base_url {
+            Some(ref base) => base.clone(),
+            None => {
+                let mut u = url::Url::parse(&self.rest_endpoint).map_err(|e| {
+                    BigQueryError::InvalidArgument(format!("invalid BigQuery REST endpoint: {e}"))
+                })?;
+                u.path_segments_mut()
+                    .map_err(|()| {
+                        BigQueryError::InvalidArgument(
+                            "REST endpoint cannot be a base URL".to_string(),
+                        )
+                    })?
+                    .extend([
+                        "bigquery",
+                        "v2",
+                        "projects",
+                        self.config.project_id.as_str(),
+                        "queries",
+                    ]);
+                u
+            }
+        };
         url.path_segments_mut()
             .map_err(|()| {
                 BigQueryError::InvalidArgument("REST endpoint cannot be a base URL".to_string())
             })?
-            .extend([
-                "bigquery",
-                "v2",
-                "projects",
-                self.config.project_id.as_str(),
-                "queries",
-                job_id,
-            ]);
+            .push(job_id);
         {
             let mut pairs = url.query_pairs_mut();
             pairs.append_pair("formatOptions.useInt64Timestamp", "true");
@@ -857,46 +971,46 @@ impl BigQueryClient {
         );
         body.insert("requestId".to_string(), Value::String(uuid4_str()));
 
-        if let Some(ref ds) = self.config.dataset_id
-            && !ds.is_empty()
-        {
-            body.insert(
-                "defaultDataset".to_string(),
-                json!({
-                    "projectId": self.config.project_id,
-                    "datasetId": ds,
-                }),
-            );
+        if let Some(ref ds_json) = self.default_dataset_json {
+            body.insert("defaultDataset".to_string(), ds_json.clone());
         }
         if let Some(ref loc) = self.config.location
             && !loc.is_empty()
         {
             body.insert("location".to_string(), Value::String(loc.clone()));
         }
-        if let Some(max_bytes) = options
-            .maximum_bytes_billed
-            .or(self.config.maximum_bytes_billed)
-        {
+        if let Some(max_bytes) = options.maximum_bytes_billed {
             body.insert(
                 "maximumBytesBilled".to_string(),
                 Value::String(max_bytes.to_string()),
             );
+        } else if let Some(ref max_bytes_str) = self.max_bytes_billed_str {
+            body.insert(
+                "maximumBytesBilled".to_string(),
+                Value::String(max_bytes_str.clone()),
+            );
         }
-        if let Some(timeout_ms) = options.job_timeout_ms.or(self.config.job_timeout_ms) {
+        if let Some(timeout_ms) = options.job_timeout_ms {
             body.insert(
                 "timeoutMs".to_string(),
                 Value::String(timeout_ms.to_string()),
             );
+        } else if let Some(ref timeout_str) = self.job_timeout_ms_str {
+            body.insert("timeoutMs".to_string(), Value::String(timeout_str.clone()));
         }
         if let Some(max_res) = options.max_results {
             body.insert("maxResults".to_string(), json!(max_res));
         }
 
-        let mut merged_labels = self.config.labels.clone();
-        for (k, v) in &options.labels {
-            merged_labels.insert(k.clone(), v.clone());
-        }
-        if !merged_labels.is_empty() {
+        if options.labels.is_empty() {
+            if let Some(ref lbls) = self.config_labels_json {
+                body.insert("labels".to_string(), lbls.clone());
+            }
+        } else {
+            let mut merged_labels = self.config.labels.clone();
+            for (k, v) in &options.labels {
+                merged_labels.insert(k.clone(), v.clone());
+            }
             body.insert("labels".to_string(), json!(merged_labels));
         }
 
@@ -943,24 +1057,18 @@ impl BigQueryClient {
         query_cfg.insert("query".to_string(), Value::String(sql.to_string()));
         query_cfg.insert("useLegacySql".to_string(), Value::Bool(false));
 
-        if let Some(ref ds) = self.config.dataset_id
-            && !ds.is_empty()
-        {
-            query_cfg.insert(
-                "defaultDataset".to_string(),
-                json!({
-                    "projectId": self.config.project_id,
-                    "datasetId": ds,
-                }),
-            );
+        if let Some(ref ds_json) = self.default_dataset_json {
+            query_cfg.insert("defaultDataset".to_string(), ds_json.clone());
         }
-        if let Some(max_bytes) = options
-            .maximum_bytes_billed
-            .or(self.config.maximum_bytes_billed)
-        {
+        if let Some(max_bytes) = options.maximum_bytes_billed {
             query_cfg.insert(
                 "maximumBytesBilled".to_string(),
                 Value::String(max_bytes.to_string()),
+            );
+        } else if let Some(ref max_bytes_str) = self.max_bytes_billed_str {
+            query_cfg.insert(
+                "maximumBytesBilled".to_string(),
+                Value::String(max_bytes_str.clone()),
             );
         }
         if let Some(prio) = options.priority.as_ref().or(self.config.priority.as_ref()) {
@@ -988,7 +1096,7 @@ impl BigQueryClient {
                 }
                 _ => json!({
                     "projectId": self.config.project_id,
-                    "datasetId": self.config.dataset_id.clone().unwrap_or_default(),
+                    "datasetId": self.config.dataset_id.as_deref().unwrap_or_default(),
                     "tableId": dest.trim().replace('`', ""),
                 }),
             };
@@ -1022,17 +1130,26 @@ impl BigQueryClient {
         if options.dry_run {
             configuration.insert("dryRun".to_string(), Value::Bool(true));
         }
-        if let Some(timeout_ms) = options.job_timeout_ms.or(self.config.job_timeout_ms) {
+        if let Some(timeout_ms) = options.job_timeout_ms {
             configuration.insert(
                 "jobTimeoutMs".to_string(),
                 Value::String(timeout_ms.to_string()),
             );
+        } else if let Some(ref timeout_str) = self.job_timeout_ms_str {
+            configuration.insert(
+                "jobTimeoutMs".to_string(),
+                Value::String(timeout_str.clone()),
+            );
         }
-        let mut merged_labels = self.config.labels.clone();
-        for (k, v) in &options.labels {
-            merged_labels.insert(k.clone(), v.clone());
-        }
-        if !merged_labels.is_empty() {
+        if options.labels.is_empty() {
+            if let Some(ref lbls) = self.config_labels_json {
+                configuration.insert("labels".to_string(), lbls.clone());
+            }
+        } else {
+            let mut merged_labels = self.config.labels.clone();
+            for (k, v) in &options.labels {
+                merged_labels.insert(k.clone(), v.clone());
+            }
             configuration.insert("labels".to_string(), json!(merged_labels));
         }
 
@@ -1118,20 +1235,21 @@ impl BigQueryClient {
         snapshot: Option<&vertebra_core::gcp_auth::GcpTokenSnapshot>,
     ) -> Result<reqwest::Response, BigQueryError> {
         let mut req = self.http_client.request(method, url);
+        if let Some(ref routing_hdr) = self.routing_header {
+            req = req.header("x-goog-request-params", routing_hdr.clone());
+        }
         if let Some(snap) = snapshot {
             req = req.header(
                 reqwest::header::AUTHORIZATION,
                 format!("Bearer {}", snap.access_token),
             );
-            if let Some(qp) = snap
-                .quota_project_id
-                .as_ref()
-                .or_else(|| self.config.auth_options.get("quota_project_id"))
-            {
+            if let Some(ref qp) = snap.quota_project_id {
                 req = req.header("x-goog-user-project", qp.as_str());
+            } else if let Some(ref qp_hdr) = self.quota_project_header {
+                req = req.header("x-goog-user-project", qp_hdr.clone());
             }
-        } else if let Some(qp) = self.config.auth_options.get("quota_project_id") {
-            req = req.header("x-goog-user-project", qp.as_str());
+        } else if let Some(ref qp_hdr) = self.quota_project_header {
+            req = req.header("x-goog-user-project", qp_hdr.clone());
         }
         if let Some(json_body) = body {
             req = req.json(json_body);

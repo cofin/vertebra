@@ -8,7 +8,11 @@ pub mod errors;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use bytes::Bytes;
+use pyo3::buffer::PyBuffer;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use vertebra_db::py_async::{
     RustDbTaskAwaitable, block_on_db, construct_py_arrow_cursor, spawn_rust_db_task_with_attr,
@@ -121,6 +125,19 @@ fn append_result_to_py(py: Python<'_>, res: BigQueryAppendResult) -> PyResult<Py
     dict.set_item("appended_rows", res.appended_rows)?;
     dict.set_item("write_stream", res.write_stream)?;
     Ok(dict.into_any().unbind())
+}
+
+fn extract_arrow_ipc_bytes(arrow_ipc_bytes: &Bound<'_, PyAny>) -> PyResult<Bytes> {
+    if let Ok(backed) = arrow_ipc_bytes.extract::<PyBackedBytes>() {
+        return Ok(Bytes::from_owner(backed));
+    }
+    let buf = PyBuffer::<u8>::get(arrow_ipc_bytes)?;
+    if !buf.is_c_contiguous() {
+        return Err(PyValueError::new_err(
+            "arrow_ipc_bytes buffer must be C-contiguous",
+        ));
+    }
+    Ok(Bytes::from(buf.to_vec(arrow_ipc_bytes.py())?))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -249,13 +266,13 @@ impl PySyncBigQueryClient {
     }
 
     #[getter]
-    fn rest_endpoint(&self) -> String {
-        self.inner.config().effective_rest_endpoint()
+    fn rest_endpoint(&self) -> &str {
+        self.inner.rest_endpoint()
     }
 
     #[getter]
-    fn storage_endpoint(&self) -> String {
-        self.inner.config().effective_storage_endpoint()
+    fn storage_endpoint(&self) -> &str {
+        self.inner.storage_endpoint()
     }
 
     #[getter]
@@ -321,14 +338,8 @@ impl PySyncBigQueryClient {
             priority,
             labels: labels.unwrap_or_default(),
         };
-        let client = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
         let res = py
-            .detach(|| {
-                block_on_db(
-                    async move { client.query_with_options(&sql_owned, &params, &opts).await },
-                )
-            })
+            .detach(|| block_on_db(self.inner.query_with_options(sql, &params, &opts)))
             .map_err(|e| bigquery_error_to_py(py, e))?;
         query_result_to_py(py, res)
     }
@@ -337,10 +348,8 @@ impl PySyncBigQueryClient {
     fn dry_run(&self, py: Python<'_>, sql: &str, params_json: Option<&str>) -> PyResult<Py<PyAny>> {
         let params =
             parse_query_parameters_json(params_json).map_err(|e| bigquery_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
         let res = py
-            .detach(|| block_on_db(async move { client.dry_run(&sql_owned, &params).await }))
+            .detach(|| block_on_db(self.inner.dry_run(sql, &params)))
             .map_err(|e| bigquery_error_to_py(py, e))?;
         dry_run_result_to_py(py, res)
     }
@@ -368,25 +377,17 @@ impl PySyncBigQueryClient {
     ) -> PyResult<Py<PyAny>> {
         let codec = BigQueryArrowCompression::from_str_opt(Some(compression));
         let fields = selected_fields.unwrap_or_default();
-        let client = Arc::clone(&self.inner);
-        let p = project_id.to_string();
-        let d = dataset_id.to_string();
-        let t = table_id.to_string();
         let (shm_name, byte_len, row_count, region) = py
             .detach(|| {
-                block_on_db(async move {
-                    client
-                        .read_table_to_shm_arrow_with_compression(
-                            &p,
-                            &d,
-                            &t,
-                            &fields,
-                            row_restriction.as_deref(),
-                            max_streams,
-                            codec,
-                        )
-                        .await
-                })
+                block_on_db(self.inner.read_table_to_shm_arrow_with_compression(
+                    project_id,
+                    dataset_id,
+                    table_id,
+                    &fields,
+                    row_restriction.as_deref(),
+                    max_streams,
+                    codec,
+                ))
             })
             .map_err(|e| bigquery_error_to_py(py, e))?;
         construct_py_arrow_cursor(py, &shm_name, byte_len, row_count, region)
@@ -397,20 +398,16 @@ impl PySyncBigQueryClient {
         &self,
         py: Python<'_>,
         parent_table: &str,
-        arrow_ipc_bytes: &[u8],
+        arrow_ipc_bytes: &Bound<'_, PyAny>,
         mode: &str,
     ) -> PyResult<Py<PyAny>> {
-        let client = Arc::clone(&self.inner);
-        let table = parent_table.to_string();
-        let payload = arrow_ipc_bytes.to_vec();
-        let mode_owned = mode.to_string();
+        let payload = extract_arrow_ipc_bytes(arrow_ipc_bytes)?;
         let res = py
             .detach(|| {
-                block_on_db(async move {
-                    client
-                        .append_arrow_stream(&table, &payload, &mode_owned)
-                        .await
-                })
+                block_on_db(
+                    self.inner
+                        .append_arrow_stream_bytes(parent_table, payload, mode),
+                )
             })
             .map_err(|e| bigquery_error_to_py(py, e))?;
         append_result_to_py(py, res)
@@ -505,13 +502,13 @@ impl PyAsyncBigQueryClient {
     }
 
     #[getter]
-    fn rest_endpoint(&self) -> String {
-        self.inner.config().effective_rest_endpoint()
+    fn rest_endpoint(&self) -> &str {
+        self.inner.rest_endpoint()
     }
 
     #[getter]
-    fn storage_endpoint(&self) -> String {
-        self.inner.config().effective_storage_endpoint()
+    fn storage_endpoint(&self) -> &str {
+        self.inner.storage_endpoint()
     }
 
     #[getter]
@@ -658,16 +655,17 @@ impl PyAsyncBigQueryClient {
         &self,
         py: Python<'_>,
         parent_table: String,
-        arrow_ipc_bytes: Vec<u8>,
+        arrow_ipc_bytes: &Bound<'_, PyAny>,
         mode: &str,
     ) -> PyResult<RustDbTaskAwaitable> {
+        let payload = extract_arrow_ipc_bytes(arrow_ipc_bytes)?;
         let client = Arc::clone(&self.inner);
         let mode_owned = mode.to_string();
         spawn_rust_db_task_with_attr(
             py,
             async move {
                 client
-                    .append_arrow_stream(&parent_table, &arrow_ipc_bytes, &mode_owned)
+                    .append_arrow_stream_bytes(&parent_table, payload, &mode_owned)
                     .await
             },
             append_result_to_py,

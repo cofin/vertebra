@@ -913,3 +913,116 @@ fn invalid_ca_pem_returns_invalid_argument_error() {
         "unexpected error: {err:?}"
     );
 }
+
+#[test]
+fn append_plan_build_bytes_slices_frames_zero_copy_and_allows_multi_batch_over_9mib() {
+    let five_mib = 5 * 1024 * 1024;
+    let batch_a = vec![0xAAu8; five_mib];
+    let batch_b = vec![0xBBu8; five_mib];
+    let raw_stream =
+        build_mock_arrow_ipc_stream(b"SCHEMA-ZERO-COPY", &[(&batch_a, 3), (&batch_b, 4)]);
+    assert!(raw_stream.len() > MAX_APPEND_ROWS_CHUNK_BYTES);
+
+    let stream_bytes = Bytes::from(raw_stream);
+    let base_ptr = stream_bytes.as_ptr() as usize;
+    let end_ptr = base_ptr + stream_bytes.len();
+
+    let plan = ArrowAppendPlan::build_bytes(stream_bytes.clone(), BigQueryWriteMode::Pending)
+        .expect("plan");
+    assert_eq!(plan.requests.len(), 2);
+    assert_eq!(plan.total_rows(), 7);
+    assert_eq!(
+        plan.requests.iter().map(|r| r.offset).collect::<Vec<_>>(),
+        vec![Some(0), Some(3)]
+    );
+
+    let schema_ptr = plan.schema.as_ptr() as usize;
+    assert!(
+        schema_ptr >= base_ptr && schema_ptr + plan.schema.len() <= end_ptr,
+        "schema frame copied instead of slicing backing Bytes"
+    );
+    for (idx, req) in plan.requests.iter().enumerate() {
+        let req_ptr = req.record_batch.as_ptr() as usize;
+        assert!(
+            req_ptr >= base_ptr && req_ptr + req.record_batch.len() <= end_ptr,
+            "record_batch[{idx}] copied instead of slicing backing Bytes"
+        );
+    }
+}
+
+#[tokio::test]
+async fn bigquery_client_precomputes_routing_headers_and_endpoints() {
+    let captured_headers: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let cap_clone = Arc::clone(&captured_headers);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            let io = TokioIo::new(stream);
+            let svc = service_fn(move |req: Request<Incoming>| {
+                let cap = Arc::clone(&cap_clone);
+                async move {
+                    let hdrs = req
+                        .headers()
+                        .iter()
+                        .map(|(k, v)| {
+                            (
+                                k.as_str().to_string(),
+                                v.to_str().unwrap_or_default().to_string(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    *cap.lock().await = hdrs;
+                    let _ = req.into_body().collect().await;
+                    let resp_json = json!({
+                        "jobComplete": true,
+                        "schema": {"fields": [{"name": "n", "type": "INT64", "mode": "NULLABLE"}]},
+                        "rows": [{"f": [{"v": "1"}]}],
+                        "totalRows": "1"
+                    });
+                    Ok::<_, Infallible>(
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header("content-type", "application/json")
+                            .body(Full::new(Bytes::from(resp_json.to_string())))
+                            .unwrap(),
+                    )
+                }
+            });
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(io, svc)
+                .await;
+        }
+    });
+
+    let mut cfg = BigQueryClientConfig::new("google.com:analytics-prod");
+    cfg.rest_endpoint = format!("http://{addr}/");
+    cfg.auth_options
+        .insert("quota_project_id".to_string(), "billing-proj".to_string());
+    let client = BigQueryClient::new(cfg).expect("client");
+
+    let expected_endpoint = format!("http://{addr}");
+    assert_eq!(client.rest_endpoint(), expected_endpoint);
+    assert_eq!(client.storage_endpoint(), DEFAULT_BIGQUERY_STORAGE_ENDPOINT);
+    assert_eq!(
+        client.routing_header().and_then(|h| h.to_str().ok()),
+        Some("project_id=google.com%3Aanalytics-prod")
+    );
+
+    let res = client.query("SELECT 1", &[], None).await.expect("query");
+    assert_eq!(res.rows, vec![vec![BigQueryCellValue::Int64(1)]]);
+
+    let hdrs = captured_headers.lock().await;
+    assert!(
+        hdrs.iter().any(|(k, v)| {
+            k == "x-goog-request-params" && v == "project_id=google.com%3Aanalytics-prod"
+        }),
+        "missing x-goog-request-params header in {hdrs:?}"
+    );
+    assert!(
+        hdrs.iter()
+            .any(|(k, v)| k == "x-goog-user-project" && v == "billing-proj"),
+        "missing x-goog-user-project header in {hdrs:?}"
+    );
+}

@@ -36,11 +36,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: '2026-11-06T17:11:00Z'
-last_verified_commit: null
+last_verified_commit: "aa318ff2e2b71fc1afb7f23b15caac3983f4cf20"
 verification_evidence: "cargo test -p vertebra-spanner -p vertebra-bigquery (40 passed, 1 ignored), make dev, mypy.stubtest vertebra._spanner vertebra._bigquery, pytest (301 passed), cargo clippy -D warnings, ruff check/format, mypy (419 files), review_setup.py validate"
 created_at: '2026-11-06T06:35:00Z'
 updated_at: '2026-11-06T17:11:00Z'
-commit: null
+commit: "aa318ff2e2b71fc1afb7f23b15caac3983f4cf20"
 tags:
 - spanner
 - bigquery

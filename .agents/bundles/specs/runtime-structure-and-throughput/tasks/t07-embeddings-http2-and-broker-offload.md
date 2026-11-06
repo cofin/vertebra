@@ -20,7 +20,7 @@ tests:
 - src/py/tests/unit/embeddings/test_embedding_broker.py
 - src/py/tests/unit/db/test_enterprise_olap_drivers.py
 plan_revision: 1
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: "af319da17dec0148a18532952cb7ea2a91d1c9d7"
 state_revision: 0
 claimed_by: null
 claimed_at: null

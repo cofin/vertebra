@@ -26,7 +26,7 @@ from vertebra.db.arrow import ARROW_SHM_THRESHOLD_ROWS, ArrowCursor, write_arrow
 from vertebra.telemetry.db_propagation import SqlTracePropagator
 from vertebra.telemetry.otel import TraceContext
 from vertebra.typing import ImproperConfigurationError
-from vertebra.utils.module_loader import ensure_module
+from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.schema import to_schema
 from vertebra.utils.serializers import encode_json
 from vertebra.utils.type_converters import time_iso_convert
@@ -45,6 +45,8 @@ __all__ = ("BigQueryCore",)
 _ON_DEMAND_TIB_PRICE_USD: Final[float] = 6.25
 _BYTES_PER_TIB: Final[float] = float(1 << 40)
 _STORAGE_API_FALLBACK_CODES: Final[frozenset[int]] = frozenset({7, 9, 12, 14})
+_MAX_APPEND_ROWS_BATCH_BYTES: Final[int] = 9 * 1024 * 1024
+_APPEND_ROWS_FRAME_HEADROOM_BYTES: Final[int] = 64 * 1024
 
 
 class BigQueryCore:
@@ -312,13 +314,20 @@ class BigQueryCore:
         rows = list(raw.get("rows", ()))
         return ArrowCursor.from_rows(rows, columns=columns, threshold_rows=threshold_rows)
 
-    @staticmethod
-    def coerce_arrow_ipc_bytes(data: ArrowCursor | bytes | Any) -> bytes:
-        """Extract serialized Arrow IPC stream bytes from an `ArrowCursor`, buffer, or table."""
+    @classmethod
+    def coerce_arrow_ipc_bytes(cls, data: ArrowCursor | bytes | Any) -> bytes:
+        """Extract serialized Arrow IPC stream bytes, casting dictionaries and splitting >9 MiB batches."""
+        if isinstance(data, bytes):
+            return data
         if isinstance(data, ArrowCursor):
+            if not data.used_shm and isinstance(data._buffer, bytes):
+                return data._buffer
             return bytes(data.buffer_view())
-        if isinstance(data, (bytes, bytearray, memoryview)):
+        if isinstance(data, (bytearray, memoryview)):
             return bytes(data)
+        pa = import_optional("pyarrow")
+        if pa is not None and hasattr(data, "schema"):
+            return cls._serialize_pyarrow_for_append(pa, data)
         return bytes(write_arrow_shm(data))
 
     @staticmethod
@@ -610,3 +619,52 @@ class BigQueryCore:
             if getattr(item, "last_modified", None) is not None
             else None,
         }
+
+    @classmethod
+    def _serialize_pyarrow_for_append(cls, pa: Any, data: Any) -> bytes:
+        if any(pa.types.is_dictionary(field.type) for field in data.schema):
+            clean_schema = pa.schema(
+                [
+                    field.with_type(field.type.value_type) if pa.types.is_dictionary(field.type) else field
+                    for field in data.schema
+                ]
+            )
+            data = (
+                data.cast(clean_schema) if hasattr(data, "cast") else pa.Table.from_batches([data]).cast(clean_schema)
+            )
+        schema = data.schema
+        raw_batches = data.to_batches() if hasattr(data, "to_batches") else [data]
+        safe_limit = _MAX_APPEND_ROWS_BATCH_BYTES - _APPEND_ROWS_FRAME_HEADROOM_BYTES
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, schema) as writer:
+            for batch in raw_batches:
+                if batch.num_rows > 1 and batch.nbytes > safe_limit:
+                    for sub_batch in cls._split_oversized_arrow_batch(pa, batch, schema):
+                        writer.write_batch(sub_batch)
+                else:
+                    writer.write_batch(batch)
+        ipc_bytes: bytes = sink.getvalue().to_pybytes()
+        return ipc_bytes
+
+    @classmethod
+    def _split_oversized_arrow_batch(cls, pa: Any, batch: Any, schema: Any) -> list[Any]:
+        safe_limit = _MAX_APPEND_ROWS_BATCH_BYTES - _APPEND_ROWS_FRAME_HEADROOM_BYTES
+        chunk_rows = max(1, (batch.num_rows * safe_limit) // max(1, int(batch.nbytes)))
+        chunks: list[Any] = []
+        offset = 0
+        while offset < batch.num_rows:
+            step = min(chunk_rows, batch.num_rows - offset)
+            candidate = batch.slice(offset, step)
+            while step > 1 and cls._serialized_batch_stream_size(pa, candidate, schema) > _MAX_APPEND_ROWS_BATCH_BYTES:
+                step = max(1, step // 2)
+                candidate = batch.slice(offset, step)
+            chunks.append(candidate)
+            offset += step
+        return chunks
+
+    @staticmethod
+    def _serialized_batch_stream_size(pa: Any, batch: Any, schema: Any) -> int:
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, schema) as writer:
+            writer.write_batch(batch)
+        return int(sink.getvalue().size)

@@ -2,7 +2,7 @@
 type: Task
 id: runtime-structure-and-throughput:t06
 title: Slice BigQuery append_arrow_stream zero-copy and trim GCP RPC allocations
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -11,6 +11,8 @@ files:
 - src/rs/vertebra-bigquery/src/lib.rs
 - src/rs/vertebra-bigquery/src/client.rs
 - src/rs/vertebra-bigquery/src/arrow_ipc.rs
+- src/py/vertebra/db/adapters/bigquery/core.py
+- src/rs/vertebra-spanner/src/lib.rs
 - src/rs/vertebra-spanner/src/client.rs
 - src/rs/vertebra-spanner/src/codec.rs
 tests:
@@ -18,18 +20,18 @@ tests:
 - src/rs/vertebra-spanner/tests/spanner_wire_tests.rs
 - src/py/tests/unit/db/test_bigquery.py
 plan_revision: 1
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
-state_revision: 0
+plan_commit: "af319da17dec0148a18532952cb7ea2a91d1c9d7"
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
+last_verified_at: '2026-11-06T17:46:15Z'
 last_verified_commit: null
-verification_evidence: null
+verification_evidence: "cargo test -p vertebra-bigquery -p vertebra-spanner (43 passed, 1 ignored), make dev, mypy.stubtest vertebra._bigquery vertebra._spanner, pytest (112 passed), cargo clippy -D warnings, ruff check/format, mypy, review_setup.py validate"
 created_at: '2026-11-06T06:35:00Z'
-updated_at: '2026-11-06T06:35:00Z'
+updated_at: '2026-11-06T17:46:15Z'
 commit: null
 tags:
 - bigquery
@@ -67,8 +69,9 @@ uv run --no-sync pytest src/py/tests/unit/db/test_bigquery.py src/py/tests/unit/
 
 ## Acceptance Criteria
 
-- [ ] R6: `append_arrow_stream` slices `Bytes` ranges zero-copy without whole-stream `Vec<u8>` duplication, and static gRPC routing headers are precomputed once per client.
+- [x] R6: `append_arrow_stream` slices `Bytes` ranges zero-copy without whole-stream `Vec<u8>` duplication, and static gRPC routing headers are precomputed once per client.
 
 ## Notes & Discoveries
 
-None.
+- `extract_arrow_ipc_bytes` wraps Python `bytes` zero-copy via `PyBackedBytes` -> `Bytes::from_owner` so `ArrowAppendPlan::build_bytes` slices schema and record-batch frames via `Bytes::slice` without heap-copying the IPC stream.
+- Because `vertebra_db::py_async::block_on_db` uses `std::thread::scope`, synchronous PyO3 methods in `vertebra-bigquery` and `vertebra-spanner` borrow `&self.inner` and `&str` inputs directly across `py.detach` without per-call `Arc::clone` or `String` allocations.
