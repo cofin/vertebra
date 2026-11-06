@@ -16,10 +16,10 @@ generated:
 verified:
 - by: agent:codex
   at: '2026-11-05T06:09:26Z'
-  commit: 5ad85a1b406f5b3ed01ce8d1f536e02383bc89e1
+  commit: 80ff8a65e43a2bcef9e48a7763e89a7352118232
 - by: agent:flow-review
   at: '2026-11-05T00:35:59Z'
-  commit: 4ce057e5aff909fcda2488cc0f6c4882ad0d38f0
+  commit: 21c99f9571ab044741a10f7bbd7be05cb0eb2117
 sources:
 - id: src-stack-regressions
   resource: src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py

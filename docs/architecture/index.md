@@ -5,35 +5,17 @@ Vertebra is organized into **Rust crates** (`src/rs/`), **Python framework and w
 ## Crate & Package Map
 
 ```mermaid
-flowchart TD
-    subgraph Rust["Rust Workspace (src/rs/)"]
-        Core["vertebra-core (Shared Memory & Worker Transport)"]
-        Http["vertebra-http (HTTP/1.1, H2, H3, gRPC, WS, SSE, Backpressure)"]
-        Py["vertebra-py (_vertebra PyO3 Extension)"]
-        Bundler["vertebra-bundler (_bundler Rolldown/Oxc + QuickJS SSR)"]
-        Storage["vertebra-storage (_storage Cloud & Local Object Storage)"]
-        Db["vertebra-db (Postgres, MySQL, SQLite Pools & Wire Codecs)"]
-    end
+flowchart LR
+    Client["TypeScript Client SDK (@vertebra/client)"]
+    Ingress["Rust HTTP & IPC Runtime (vertebra-http / vertebra-core)"]
+    Framework["Python Server & Framework (vertebra.server / framework / agent)"]
+    Data["Native Storage & Data Plane (storage / db / embeddings)"]
+    Bundler["Bundler & QuickJS SSR (vertebra-bundler)"]
 
-    subgraph Python["Python 3.12–3.15 & 3.14t/3.15t (src/py/vertebra/)"]
-        Server["vertebra.server (Workers, Lanes, Event Loops, ASGI/WSGI/RSGI)"]
-        Framework["vertebra.framework (App, Controller, Router, DI, Queues, Inertia, SSR)"]
-        Agent["vertebra.agent (MCP, A2A, SpecTree & Workflows)"]
-    end
-
-    subgraph TS["TypeScript SDK (src/ts/vertebra-client/)"]
-        Client["@vertebra/client (HTTP, SSE, WS, LiveState, Apex, Wasm, Arrow, MCP/A2A)"]
-    end
-
-    Http --> Core
-    Py --> Core
-    Py --> Http
-    Py --> Db
-    Server --> Py
-    Framework --> Server
+    Client --> Ingress
+    Ingress --> Framework
+    Framework --> Data
     Framework --> Bundler
-    Framework --> Storage
-    Client --> Http
 ```
 
 ## Architecture Chapters

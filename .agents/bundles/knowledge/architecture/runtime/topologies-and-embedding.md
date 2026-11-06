@@ -8,9 +8,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+  - by: agent:flow-review
+    at: "2026-11-06T06:10:00Z"
+    commit: 7657e8b7c2c96bdda6821aec70a2b603f438a127
 sources:
   - id: src-vertebra-http-src-main-rs
     resource: src/rs/vertebra-http/src/main.rs
@@ -106,7 +106,7 @@ Each `vertebra-server` worker process hosts its own Tokio ingress and embedded P
 
 ## Free-Threaded Python (`3.14t` & `3.15t`)
 
-- `_vertebra`, `_bundler`, and `_storage` declare `#[pymodule(gil_used = false)]` ([`vertebra-py/src/lib.rs`](../../../../../src/rs/vertebra-py/src/lib.rs)[^src-vertebra-py-src-lib-rs], `vertebra-bundler/src/lib.rs`, `vertebra-storage/src/lib.rs`), omit PyO3 global-mutex `freelist`s under `#[cfg(Py_GIL_DISABLED)]`, and set `immutable_type` on non-subclassed `#[pyclass]` types.
+- `_vertebra`, `_bundler`, `_storage`, `_bigquery`, and `_spanner` declare `#[pymodule(gil_used = false)]` ([`vertebra-py/src/lib.rs`](../../../../../src/rs/vertebra-py/src/lib.rs)[^src-vertebra-py-src-lib-rs], `vertebra-bundler/src/lib.rs`, `vertebra-storage/src/lib.rs`, `vertebra-bigquery/src/lib.rs`, `vertebra-spanner/src/lib.rs`), omit PyO3 global-mutex `freelist`s under `#[cfg(Py_GIL_DISABLED)]`, and set `immutable_type` on non-subclassed `#[pyclass]` types.
 - `spawn_python_workers` in `vertebra-http` queries `_vertebra.FREE_THREADED` and spawns `N` symmetric embedded Python worker threads sharing `BatchBridge`'s lock-free `crossbeam` receiver when `py_threads > 1`, keeping object creation, execution, and `Drop` on the owning thread (`ob_tid` biased refcount locality).
 - The `vertebra-server` binary installs `mimalloc::MiMalloc` as `#[global_allocator]` behind the default `mimalloc` feature (`default-features = false`, without `override`, coexisting cleanly with `libpython3.14t`/`libpython3.15t`'s internal `mimalloc`). PyO3 extension wheels use the host allocator.
 - Loop sharding, GIL auditing, and CPU affinity are described in [Platform & Lifecycle](platform-and-lifecycle.md).

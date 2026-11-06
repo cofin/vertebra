@@ -20,12 +20,15 @@ generated:
   by: flow/0.26.0
   at: '2026-11-04T04:33:00Z'
 verified:
+- by: agent:flow-review
+  at: '2026-11-06T06:10:00Z'
+  commit: 7657e8b7c2c96bdda6821aec70a2b603f438a127
 - by: agent:codex
   at: '2026-11-05T06:09:26Z'
-  commit: 5ad85a1b406f5b3ed01ce8d1f536e02383bc89e1
+  commit: 80ff8a65e43a2bcef9e48a7763e89a7352118232
 - by: agent:flow-review
   at: '2026-11-05T00:35:59Z'
-  commit: 4ce057e5aff909fcda2488cc0f6c4882ad0d38f0
+  commit: 21c99f9571ab044741a10f7bbd7be05cb0eb2117
 sources:
 - id: src-typing-public-py
   resource: src/py/vertebra/typing.py
@@ -225,7 +228,7 @@ sources:
 [`DatabaseRegistry`](../../../../../src/py/vertebra/db/registry.py)[^src-db-registry-py] derives `SCHEME_REGISTRY` declaratively from `REGISTERED_CONFIG_TYPES` (`BaseDatabaseConfig.url_schemes`) without engine-specific branching:
 
 - **Table-Driven URL Dispatch (`parse_url`)**: `DatabaseRegistry.parse_url(url, **overrides)` resolves the lowercase scheme (or base scheme before `+`) through `SCHEME_REGISTRY` to `config_cls.from_url(url, **overrides)`: `postgresql`/`postgres` → `PostgreSQLConfig`, `mysql`/`mariadb` → `MySQLConfig`, `sqlite` → `SQLiteConfig` (`:memory:` when empty), `oracle` → `OracleConfig`, `mssql`/`sqlserver` → `MSSQLConfig`, `duckdb` → `DuckDBConfig`, `bigquery`/`bq` → `BigQueryConfig`, `spanner`/`spangres`/`spanner+googlesql`/`spanner+spangres` → `SpannerConfig`, `redis`/`rediss`/`memory` → `RedisConfig`, `valkey`/`valkeys` → `ValkeyConfig`, `datafusion` → `DataFusionConfig`, `cloudsql` → `CloudSQLConfig`, and `alloydb` → `AlloyDBConfig`.
-- **Alias & Shared Pool Resolution (`register`, `get_driver`, `get_sync_driver`, `get_dialer`, `provide_driver`)**: `register(name, config_or_url)` stores a config and invalidates cached drivers for `name`. `get_driver(name)` and `get_sync_driver(name)` invoke `config.build_async_driver(self)` and `config.build_sync_driver(self)` (which resolve `driver_module`, `sync_driver_name`, and `async_driver_name` lazily via `BaseDatabaseConfig.resolve_driver_classes()`). `get_shared_driver` and `get_shared_sync_driver` deduplicate instances by `config.pool_key()` (isolated when `pool_key()` is `None`, such as `:memory:` SQLite/DuckDB). `provide_driver(name_or_config, *, sync=False, registry=None)` provides framework DI resolution for database, cache, and DataFusion configs while rejecting `CloudSQLConfig` and `AlloyDBConfig` transport dialers with `TypeError` (use `get_dialer(config, sync=...)` instead).
+- **Alias & Shared Pool Resolution (`register`, `get_driver`, `get_sync_driver`, `get_dialer`, `provide_driver`)**: `register(name, config_or_url)` stores a config, preserves cached drivers when re-registering an equal config (`existing == resolved`), and invalidates cached drivers when the config changes. `get_driver(name)` and `get_sync_driver(name)` invoke `config.build_async_driver(self)` and `config.build_sync_driver(self)` (which resolve `driver_module`, `sync_driver_name`, and `async_driver_name` lazily via `BaseDatabaseConfig.resolve_driver_classes()`). `get_shared_driver` and `get_shared_sync_driver` deduplicate instances by `config.pool_key()` (isolated when `pool_key()` is `None`, such as `:memory:` SQLite/DuckDB). `provide_driver(name_or_config, *, sync=False, registry=None)` provides framework DI resolution for database, cache, and DataFusion configs while rejecting `CloudSQLConfig` and `AlloyDBConfig` transport dialers with `TypeError` (use `get_dialer(config, sync=...)` instead).
 - **Uniform `SyncDatabaseDriver` / `AsyncDatabaseDriver` Contract & Capabilities (`driver/`)**: Every SQL and analytical driver implements `execute -> int`, `execute_many -> int`, `execute_tuples`, `execute_with_description -> (rows, columns)`, `select`, `select_one` (raising `NotFoundError` on `0` rows), `select_one_or_none -> Any | None`, `select_value` (raising `NotFoundError` on `0` rows and returning `None` on a single-row SQL `NULL`), `select_to_arrow -> ArrowCursor`, `stream_arrow_batches`, `load_from_arrow -> int`, `transaction()`, `cancel()`, and `close()`. Engine-specific capabilities are exposed via `@runtime_checkable` protocols in `capabilities.py`: `SyncPipelineCapable`, `AsyncPipelineCapable`, `NotificationSource`, `SyncChangeSource`, `AsyncChangeSource`, `QueueStore`, and `EmbeddingPushdown`.
 - [`vertebra.extensions.sqlalchemy.dialects`](../../../../../src/py/vertebra/extensions/sqlalchemy/dialects.py) integrates the relational and analytical drivers into SQLAlchemy 2.1 via the `+vtb` dialect suffix (`{postgresql,oracle,mysql,sqlite,mssql,duckdb,bigquery,spanner,spangres}+{vertebra,vtb,vertebra_async,vtb_async}`).
 
@@ -253,6 +256,12 @@ sources:
 - `compute_worker_pool_budget` (static) divides `max_connections` minus reserved connections across replicas × workers, with a minimum of 1.
 - `build_session_gucs` sets `application_name`, the timeouts, and `alloydb.enable_columnar_engine=on` when an AlloyDB URI or the columnar flag is set.
 - `to_cloud_dialer_config` returns an `AlloyDBConfig` or `CloudSQLConfig` when an instance is configured. `MySQLConfig.to_cloud_dialer_config` and `MSSQLConfig.to_cloud_dialer_config` do the same for Cloud SQL (`:3307`).
+
+### Current Runtime Execution & Pending Cutover Caveats
+
+- **Live Native Rust Wheels (`vertebra-bigquery`, `vertebra-spanner`)**: `SyncBigQueryDriver` / `AsyncBigQueryDriver` and `SyncSpannerDriver` / `AsyncSpannerDriver` execute queries, DML, DDL, and Arrow streaming directly through the native `vertebra._bigquery` and `vertebra._spanner` PyO3 extensions today, transferring `VTBARROW` buffers via unregistered `ShmCapsule` handles. `BigQueryCore.build_table_url` percent-encodes `project_id`, `dataset_id`, and `table_id`, and `BigQueryCore.export_to_gcs_sql` / `load_from_gcs_sql` validate qualified table identifiers (`allow_dots=True`).
+- **Python Client Backends Awaiting Dedicated Native Wheel Cutovers**: While `src/rs/vertebra-db` implements wire framing, binary vector/JSON codecs (`pgvector`, Oracle `0xDB` `VECTOR` and `OSON`, `PGCOPY`, TDS, TNS, `RESP3`), `TransportStream` mTLS/IAM dialers, and `ArrowCursor` writers, the Python driver classes in `adapters/{postgres,oracle,mysql,mssql,sqlite,duckdb,redis,valkey}` currently execute live SQL and `RESP3` operations through Python client backends (`psycopg`/`asyncpg`, `oracledb`, `pymysql`/`aiomysql`, `pymssql`, stdlib `sqlite3`, `duckdb`, and stream/in-memory `RESP3`) until each engine's dedicated `native-<engine>-driver` PyO3 wheel flow (`vertebra-postgres`, `vertebra-oracle`, `vertebra-mysql`, `vertebra-mssql`, `vertebra-sqlite`, `vertebra-duckdb`, `vertebra-redis`) lands.
+- **Adapter Contract Parity**: `SyncMySQLDriver.execute_many` and `AsyncMySQLDriver.execute_many` return summed `int` affected row counts across parameter batches, and `RedisConfig.from_url` parses `ssl`/`tls` and `resp3` query parameters alongside `rediss://` scheme detection.
 
 ## 3. Shared-Memory Arrow Cursor & `ShmCapsule` (`arrow.py`, `shm.rs`, `arrow_shm.rs`, `db.rs`)
 

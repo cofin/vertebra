@@ -8,9 +8,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+  - by: agent:flow-review
+    at: "2026-11-06T06:10:00Z"
+    commit: 7657e8b7c2c96bdda6821aec70a2b603f438a127
 sources:
   - id: src-makefile
     resource: Makefile
@@ -96,10 +96,10 @@ The workflow runs on `workflow_dispatch` (input `full_benchmark`), on published 
 
 ## 4. Profile-Guided Optimization (`build/packaging/pgo.py`, `tools/pgo/`)
 
-- [`pgo.py`](../../../../src/py/vertebra/build/packaging/pgo.py)[^src-build-packaging-pgo-py] & [`rust_pgo.py`](../../../../tools/pgo/rust_pgo.py)[^src-tools-pgo-rust-pgo-py]: `RustPgoConfig` (`PgoMode` `generate | use | baseline`), `EXTENSION_MANIFESTS`, `PgoPipelineResult`, `resolve_cargo_release_dir` (`CARGO_TARGET_DIR`), `build_instrumented`, `build_instrumented_extension`, `build_instrumented_extensions`, `run_default_pgo_workload`, `merge_profiles`, `weighted_merge_profiles`, `find_llvm_profdata`, `validate_profdata`, `check_profdata_size`, `build_optimized`, `build_optimized_extension`, `build_optimized_extensions`, and `run_pgo_pipeline` (`python -m tools.pgo.rust_pgo`).
+- [`pgo.py`](../../../../src/py/vertebra/build/packaging/pgo.py)[^src-build-packaging-pgo-py] & [`rust_pgo.py`](../../../../tools/pgo/rust_pgo.py)[^src-tools-pgo-rust-pgo-py]: `RustPGOConfig` (`PGOMode` `generate | use | baseline`), `EXTENSION_MANIFESTS`, `PGOPipelineResult`, `resolve_cargo_release_dir` (`CARGO_TARGET_DIR`), `build_instrumented`, `build_instrumented_extension`, `build_instrumented_extensions`, `run_default_pgo_workload`, `merge_profiles`, `weighted_merge_profiles`, `find_llvm_profdata`, `validate_profdata`, `check_profdata_size`, `build_optimized`, `build_optimized_extension`, `build_optimized_extensions`, and `run_pgo_pipeline` (`python -m tools.pgo.rust_pgo`).
 - [`python_pgo.py`](../../../../tools/pgo/python_pgo.py)[^src-tools-pgo-python-pgo-py]: `PythonBuildInfo`, `PlatformSupport`, `PLATFORM_MATRIX`, `detect_python_build`, `check_pgo_availability`, and `get_platform_support`.
 
-`make build-pgo` invokes `uv run python -m tools.pgo.rust_pgo` for two-phase instrumented and profile-use release builds across `vertebra-http` and all three PyO3 extensions (or `PROFDATA=<path> make build-pgo` to reuse an existing profile). `src/py/tests/unit/build/test_packaging_and_pgo.py` exercises both modules, and `vtb build --pgo [--profdata <path>] [--server-binary <path>]` records PGO and `.profdata` metadata and bundles `bin/vertebra-server` during packaging.
+`make build-pgo` invokes `uv run python -m tools.pgo.rust_pgo` for two-phase instrumented and profile-use release builds across `vertebra-http` and all five PyO3 extensions (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_spanner`), or `PROFDATA=<path> make build-pgo` to reuse an existing profile. `src/py/tests/unit/build/test_packaging_and_pgo.py` exercises both modules, and `vtb build [--server-binary <path>]` bundles a pre-built `bin/vertebra-server` into standalone and onefile artifacts.
 
 ## 5. Isolating `--group bench` Dependencies (`pyproject.toml`)
 
@@ -121,8 +121,8 @@ PyO3 links different CPython ABI symbols when `Py_GIL_DISABLED` is set, so free-
 ## 7. Free-Threaded Test Gate
 
 - The CI `test-python` matrix includes `3.14t` and `3.15t` and runs `make py-test` on both.
-- `_vertebra`, `_bundler`, and `_storage` declare `#[pymodule(gil_used = false)]`.
-- [`test_freethreaded_gil.py`](../../../../src/py/tests/unit/test_freethreaded_gil.py)[^src-tests-unit-test-freethreaded-gil-py] asserts `_vertebra.GIL_USED`, `_bundler.GIL_USED`, and `_storage.GIL_USED` are `False` and that `sys._is_gil_enabled()` stays false after import.
+- `_vertebra`, `_bundler`, `_storage`, `_bigquery`, and `_spanner` declare `#[pymodule(gil_used = false)]`.
+- [`test_freethreaded_gil.py`](../../../../src/py/tests/unit/test_freethreaded_gil.py)[^src-tests-unit-test-freethreaded-gil-py] asserts `GIL_USED` is `False` across `_vertebra`, `_bundler`, `_storage`, `_bigquery`, and `_spanner` and that `sys._is_gil_enabled()` stays false after import.
 - `unit/server/test_hotpath_and_314t.py` and `unit/server/test_loops.py` cover the free-threaded dispatch and `EventLoopPool` paths; `GilAuditReport` (`server/_gil_audit.py`) reports native extensions that re-enable the GIL.
 
 Provenance sources: [^src-makefile], [^src-tools-benchmarks-runner-py], [^src-tools-benchmarks-scenarios-py], [^src-tools-benchmarks-targets-py], [^src-tools-benchmarks-store-py], [^src-tools-pgo-init-py], [^src-benchmark-yml], [^src-vertebra-core-cargo-toml], [^src-vertebra-http-cargo-toml].

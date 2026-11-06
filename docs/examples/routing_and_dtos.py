@@ -19,14 +19,14 @@ __all__ = (
 
 
 # --8<-- [start:example]
-class CreateItemRequest(msgspec.Struct, frozen=True, gc=False):
+class CreateItemRequest(msgspec.Struct):
     """Incoming payload for creating an inventory item."""
 
     sku: str
     quantity: int
 
 
-class ItemResponse(msgspec.Struct, frozen=True, gc=False):
+class ItemResponse(msgspec.Struct):
     """Serialized inventory item returned to callers."""
 
     id: int

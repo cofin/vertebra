@@ -35,7 +35,7 @@ Vertebra keeps its base dependency footprint minimal (`msgspec` and `rich-click`
 
 | Extra | Install Command | Included Capabilities |
 | --- | --- | --- |
-| `sqlspec` | `uv add "vertebra-core[sqlspec]"` | First-class `sqlspec` (`>=0.70.0`) driver adapters, configs, and PyArrow integration |
+| `sqlspec` | `uv add "vertebra-core[sqlspec]"` | First-class `sqlspec` (`>=0.69.0`) driver adapters, configs, and PyArrow integration |
 | `alchemy` | `uv add "vertebra-core[alchemy]"` | `advanced-alchemy` (1.12+), `sqlalchemy` (2.0.36+), and `alembic` (1.14+) |
 | `arrow` | `uv add "vertebra-core[arrow]"` | Native PyArrow IPC streaming and Parquet datasets |
 | `pydantic` | `uv add "vertebra-core[pydantic]"` | Zero-copy `pydantic-core` (`validate_json` / `to_json`) schema integration |
@@ -55,13 +55,19 @@ Vertebra keeps its base dependency footprint minimal (`msgspec` and `rich-click`
 | `asyncapi` | `uv add "vertebra-core[asyncapi]"` | `litestar-asyncapi` AsyncAPI 3.0 specification and channel integration |
 | `htmx` | `uv add "vertebra-core[htmx]"` | `litestar-htmx` server-driven fragment and response helpers |
 | `saq` | `uv add "vertebra-core[saq]"` | `litestar-saq` background worker and queue integration |
+| `embeddings` | `uv add "vertebra-core[embeddings]"` | Local ONNX / `fastembed` embedding models via `1x` RAM `EmbeddingBroker` |
+| `bigquery` | `uv add "vertebra-core[bigquery]"` | Standalone native Rust `vertebra-bigquery` (`vertebra._bigquery`) driver wheel |
+| `bundler` | `uv add "vertebra-core[bundler]"` | Standalone native Rust `vertebra-bundler` (`vertebra._bundler`) Rolldown/Oxc & QuickJS SSR wheel |
+| `spanner` | `uv add "vertebra-core[spanner]"` | Standalone native Rust `vertebra-spanner` (`vertebra._spanner`) driver wheel |
+| `storage` | `uv add "vertebra-core[storage]"` | Standalone native Rust `vertebra-storage` (`vertebra._storage`) multicloud object storage wheel |
+| `rloop` | `uv add "vertebra-core[rloop]"` | Optional `rloop` asyncio event loop integration on POSIX hosts |
 | `all` | `uv add "vertebra-core[all]"` | Full ecosystem extras suite |
 
 Development, lint, type-checking, test, and benchmark dependencies are managed via PEP 735 `[dependency-groups]` (`uv sync --group dev`).
 
 ## Free-Threaded Python (`3.14t` / `3.15t`)
 
-All three native Rust extensions (`vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`) run without the GIL and support multi-core execution inside a single OS process under `--topology embedded`:
+All native Rust extensions (`vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`, `vertebra._bigquery`, `vertebra._spanner`) run without the GIL and support multi-core execution inside a single OS process under `--topology embedded`:
 
 ```bash
 uv python install 3.14t

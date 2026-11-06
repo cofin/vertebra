@@ -64,15 +64,15 @@ The `@vertebra/client` TypeScript SDK is supplied directly with the Python packa
 Run dedicated background task queue and cron workers:
 
 ```bash
-vtb workers run app:app --concurrency 16 --lanes cpu,io,agent
+vtb workers run app:app --concurrency 16 --queues cpu,io,agent
 ```
 
-### MCP Stdio-to-HTTP Bridge (`vtb mcp`)
+### MCP Stdio-to-HTTP Bridge (`vtb ai mcp`)
 
 Expose a remote or local Vertebra MCP HTTP endpoint over standard input/output for desktop AI hosts:
 
 ```bash
-vtb mcp bridge --url http://127.0.0.1:8000/mcp --timeout 30
+vtb ai mcp bridge --url http://127.0.0.1:8000/mcp --timeout 30
 ```
 
 ### Standalone Binary Packaging (`vtb build`)

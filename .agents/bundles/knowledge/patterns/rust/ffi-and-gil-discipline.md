@@ -9,8 +9,8 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-review
-    at: "2026-11-05T00:35:59Z"
-    commit: 4ce057e5aff909fcda2488cc0f6c4882ad0d38f0
+    at: "2026-11-06T06:10:00Z"
+    commit: 7657e8b7c2c96bdda6821aec70a2b603f438a127
 sources:
   - id: src-vertebra-py-build-rs
     resource: src/rs/vertebra-py/build.rs
@@ -117,7 +117,7 @@ pub fn get_batch(py: Python<'_>, timeout_ms: u64) -> PyResult<Option<RequestBatc
 
 ## Intern Repeated Keys, `PyOnceLock` Exceptions & Completion-Ring Discipline
 
-Use `pyo3::intern!(py, "...")` for fixed header names and scope/environ keys ([`headers.rs`](../../../../../src/rs/vertebra-py/src/headers.rs)[^src-vertebra-py-src-headers-rs], [`asgi.rs`](../../../../../src/rs/vertebra-py/src/asgi.rs), [`rsgi/scope.rs`](../../../../../src/rs/vertebra-py/src/rsgi/scope.rs)[^src-vertebra-py-src-rsgi-scope-rs], [`wsgi/environ.rs`](../../../../../src/rs/vertebra-py/src/wsgi/environ.rs)[^src-vertebra-py-src-wsgi-environ-rs]) and `PyOnceLock` for process-wide cached objects such as [`GcpExceptionTypes`](../../../../../src/rs/vertebra-py/src/errors.rs)[^src-vertebra-py-src-errors-rs]. Async Tokio database tasks spawned via [`spawn_rust_db_task`](../../../../../src/rs/vertebra-py/src/completion.rs)[^src-vertebra-py-src-completion-rs] and [`vertebra_db::py_async::spawn_rust_db_task_with_attr`](../../../../../src/rs/vertebra-db/src/py_async.rs)[^src-vertebra-db-src-py-async-rs] (compiled into `_vertebra`, `_bigquery`, and `_spanner` with distinct event-loop drainer attribute names and `ShmCapsule` `PyCapsule` handoff for `ArrowCursor`) never call `Python::attach` on Tokio worker threads: a paired completion task awaits the worker `JoinHandle`, enqueues a `DbOutcomeProducer` onto the per-loop `AsyncCompletionQueue` drained via `loop.add_reader`, converts worker or `map_ok` panics (`JoinError::is_panic()` / `catch_unwind`) into `TaskPanicError`, and attaches `_DbTaskCanceller` (`add_done_callback`) so cancelling the Python `asyncio.Future` aborts the underlying Tokio `AbortHandle`. `_vertebra`, `_bigquery`, and `_spanner` export `FREE_THREADED` (`cfg(Py_GIL_DISABLED)`) and `GIL_USED = False`.
+Use `pyo3::intern!(py, "...")` for fixed header names and scope/environ keys ([`headers.rs`](../../../../../src/rs/vertebra-py/src/headers.rs)[^src-vertebra-py-src-headers-rs], [`asgi.rs`](../../../../../src/rs/vertebra-py/src/asgi.rs), [`rsgi/scope.rs`](../../../../../src/rs/vertebra-py/src/rsgi/scope.rs)[^src-vertebra-py-src-rsgi-scope-rs], [`wsgi/environ.rs`](../../../../../src/rs/vertebra-py/src/wsgi/environ.rs)[^src-vertebra-py-src-wsgi-environ-rs]) and `PyOnceLock` for process-wide cached objects such as [`GcpExceptionTypes`](../../../../../src/rs/vertebra-py/src/errors.rs)[^src-vertebra-py-src-errors-rs]. Async Tokio database tasks spawned via [`spawn_rust_db_task`](../../../../../src/rs/vertebra-py/src/completion.rs)[^src-vertebra-py-src-completion-rs] and [`vertebra_db::py_async::spawn_rust_db_task_with_attr`](../../../../../src/rs/vertebra-db/src/py_async.rs)[^src-vertebra-db-src-py-async-rs] (compiled into `_vertebra`, `_bigquery`, and `_spanner` with distinct event-loop drainer attribute names and `ShmCapsule` `PyCapsule` handoff for `ArrowCursor`) never call `Python::attach` on Tokio worker threads: a paired completion task awaits the worker `JoinHandle`, enqueues a `DbOutcomeProducer` onto the per-loop `AsyncCompletionQueue` drained via `loop.add_reader`, converts worker or `map_ok` panics (`JoinError::is_panic()` / `catch_unwind`) into `TaskPanicError`, and attaches `_DbTaskCanceller` (`add_done_callback`) so cancelling the Python `asyncio.Future` aborts the underlying Tokio `AbortHandle` and evicts any unpopped completion entry. All five extensions export `FREE_THREADED` (`cfg(Py_GIL_DISABLED)`) and `GIL_USED = False`.
 
 
 ## Cross-extension ownership

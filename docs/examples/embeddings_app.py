@@ -20,7 +20,7 @@ __all__ = (
 
 
 # --8<-- [start:example]
-class SearchRequest(msgspec.Struct, frozen=True, gc=False):
+class SearchRequest(msgspec.Struct):
     """Query payload for semantic vector search."""
 
     query: str
@@ -28,7 +28,7 @@ class SearchRequest(msgspec.Struct, frozen=True, gc=False):
     top_k: int = 2
 
 
-class SearchHit(msgspec.Struct, frozen=True, gc=False):
+class SearchHit(msgspec.Struct):
     """Ranked semantic search match."""
 
     index: int
@@ -36,7 +36,7 @@ class SearchHit(msgspec.Struct, frozen=True, gc=False):
     document: str
 
 
-class SearchResponse(msgspec.Struct, frozen=True, gc=False):
+class SearchResponse(msgspec.Struct):
     """Top-k semantic search response."""
 
     dimensions: int

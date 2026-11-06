@@ -15,14 +15,14 @@ Practical guides for building, scaling, testing, and deploying applications with
 | Guide | Topics Covered |
 | --- | --- |
 | **[Server & Workers](server-and-workers.md)** | Embedded vs. shared-memory topologies, worker lanes (`fast`, `async`, `cpu`, `blocking`), `vtb run --with-workers`, `vtb workers run`, ASGI/WSGI/RSGI adapters, and `3.14t`/`3.15t` execution. |
-| **[Packaging & Deployment](packaging-and-deployment.md)** | Standalone and single-file binaries (`vtb build`, `StandaloneBuilder`, `OnefileBuilder`), TypeScript/Zod/OpenAPI/Protobuf codegen, Rust PGO, container cgroups, and WebAssembly sandboxes. |
-| **[Testing](testing.md)** | In-process testing patterns for `App`, `Controller`, and `Router` handlers, dependency overrides, in-memory `SyncObjectStore` / `AsyncObjectStore`, `SyncSqliteDriver`, and `MemoryQueueBackend`. |
+| **[Packaging & Deployment](packaging-and-deployment.md)** | Standalone and single-file binaries (`vtb build`, `StandaloneBuilder`, `OnefileBuilder`), TypeScript/Zod/OpenAPI/Protobuf codegen, container cgroups, and WebAssembly sandboxes. |
+| **[Testing](testing.md)** | In-process testing patterns for `App`, `Controller`, and `Router` handlers, dependency overrides, in-memory `SyncObjectStore` / `AsyncObjectStore`, `SyncSQLiteDriver`, and `MemoryQueueBackend`. |
 
 ## Databases & Analytics
 
 | Guide | Topics Covered |
 | --- | --- |
-| **[Overview & Drivers](databases.md)** | First-class SQLSpec & Litestar integration (`create_sqlspec_plugin`) and the 9 native Rust shared-memory database and cache drivers. |
+| **[Overview & Drivers](databases.md)** | First-class SQLSpec & Litestar integration (`create_sqlspec_plugin`) and the 11 database, analytical, cloud, and cache adapters. |
 | **[Cloud Dialers (Cloud SQL & AlloyDB)](cloud-dialers.md)** | Zero-sidecar Cloud SQL (`:3307`) and AlloyDB (`:5433`) ephemeral mTLS certificate dialers and IAM database authentication. |
 | **[RLS, CDC & Arrow Analytics](analytics-and-cdc.md)** | Multi-tenant Row-Level Security (`TenantPredicate`), logical replication CDC (`ChangeFeed`), zero-copy `ArrowCursor`, DuckDB `httpfs` ADC rotation, and `DataFusionEngine`. |
 | **[SQLSpec, SQLAlchemy & Extensions](extensions.md)** | `VertebraPlugin`, `create_sqlspec_plugin`, `create_alchemy_plugin`, SQLAlchemy 2.1 `+vtb` dialects, `Vector` & `BinaryJSON` column types, `GrpcServiceRegistry`, `ApexGateway`, and `BrokerPlugin`. |

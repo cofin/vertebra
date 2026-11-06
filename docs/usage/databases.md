@@ -14,10 +14,33 @@ flowchart LR
 
 Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standalone native cloud wheels and federated engines install via optional extras:
 
-```bash
-uv add "vertebra-core[bigquery]"
-uv add "vertebra-core[spanner]"
-```
+=== "uv"
+
+    ```bash
+    uv add "vertebra-core[bigquery]"
+    uv add "vertebra-core[spanner]"
+    ```
+
+=== "pip"
+
+    ```bash
+    pip install "vertebra-core[bigquery]"
+    pip install "vertebra-core[spanner]"
+    ```
+
+=== "pdm"
+
+    ```bash
+    pdm add "vertebra-core[bigquery]"
+    pdm add "vertebra-core[spanner]"
+    ```
+
+=== "poetry"
+
+    ```bash
+    poetry add "vertebra-core[bigquery]"
+    poetry add "vertebra-core[spanner]"
+    ```
 
 ## Unified Driver Contract & `provide_driver`
 

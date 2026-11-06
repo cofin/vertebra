@@ -9,10 +9,11 @@
 | Backend | Scheme / Class | Backing Mechanism |
 | --- | --- | --- |
 | **Memory** | `memory://` (`MemoryQueueBackend`) | In-process queue for local dev and unit tests |
-| **PostgreSQL** | `postgresql://` (`PostgresQueueBackend`) | `FOR UPDATE SKIP LOCKED` + `LISTEN/NOTIFY` wakeups |
+| **PostgreSQL** | `postgresql://` (`PostgreSQLQueueBackend`) | `FOR UPDATE SKIP LOCKED` + `LISTEN/NOTIFY` wakeups |
 | **Redis** | `redis://` (`RedisQueueBackend`) | Redis Streams consumer groups (`XREADGROUP` / `XACK`) |
 | **Valkey** | `valkey://` (`ValkeyQueueBackend`) | Valkey Streams + sorted-set delayed scheduling |
 | **Oracle** | `oracle://` (`OracleQueueBackend`) | `FOR UPDATE SKIP LOCKED` transactional queue tables |
+| **Cloud Spanner** | `spanner://` (`SpannerQueueBackend`) | Wound-wait claim transactions + dead-letter queue mutations |
 
 ```python
 from vertebra.framework.queues import (
@@ -74,7 +75,7 @@ bus = ChannelBus()
 
 ## Key-Value Stores & Transactional Email
 
-Cache serialized responses or key-value state in `KeyValueStore` (`NamespacedStore`), and send transactional emails through `EmailService` across 6 backends (`MemoryEmailBackend`, `SmtpBackend`, `ResendBackend`, `SendGridBackend`, `MailgunBackend`, `SesBackend`):
+Cache serialized responses or key-value state in `KeyValueStore` (`NamespacedStore`), and send transactional emails through `EmailService` across 6 transports (`MemoryEmailTransport`, `SmtpEmailTransport`, `ResendEmailTransport`, `SendGridEmailTransport`, `MailgunEmailTransport`, `SesEmailTransport`):
 
 Stores backed by Redis or Valkey prefix every key with `key_prefix` (default `"vertebra"`), and `delete_all()` removes only keys under that prefix. Expiries are sent in milliseconds, and `expires_in()` returns `None` for keys without an expiry.
 

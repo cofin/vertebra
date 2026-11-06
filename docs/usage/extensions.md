@@ -143,11 +143,11 @@ from vertebra.extensions.grpc import (
 )
 
 
-class LookupRequest(msgspec.Struct, frozen=True, gc=False):
+class LookupRequest(msgspec.Struct):
     sku: str
 
 
-class LookupReply(msgspec.Struct, frozen=True, gc=False):
+class LookupReply(msgspec.Struct):
     sku: str
     available: int
 

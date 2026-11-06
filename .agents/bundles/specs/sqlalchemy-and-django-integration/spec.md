@@ -58,7 +58,7 @@ SQLAlchemy and Advanced Alchemy are the primary user path. Vertebra's `Sync<Engi
 
 ## Dependencies
 
-`native-data-platform` `db-layout-and-contract`, `broker-pool-sharing`, and `storage-completeness` (`main @ f741701`); `integration-remediation` `db-engine-primitives`.
+`native-data-platform` `db-layout-and-contract` (`main @ 21c99f95`), `broker-pool-sharing`, and `storage-completeness`; `integration-remediation` `db-engine-primitives` (`main @ 80ff8a65`).
 
 ## Acceptance Boundary
 

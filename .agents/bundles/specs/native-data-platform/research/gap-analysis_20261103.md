@@ -77,13 +77,13 @@ Baseline: `main @ 142cc49`. Confidence is high unless marked otherwise. Each ite
 | Engine | Rust today | Python I/O today | Owner |
 | --- | --- | --- | --- |
 | Postgres | `postgres.rs`: startup, Parse/Bind/Execute/Sync/Query encoders, binary COPY rows, JSONB, pgvector, `PoolerMode`. No auth, backend decoder, SSLRequest, or socket. | `psycopg_pool` sync. Async `_ensure_async_pool` returns the asyncpg module. `memory://` fake rows. | native-postgres-driver |
-| MySQL | `mysql.rs`: packet framing, `compute_caching_sha2_scramble`, COM_QUERY/STMT_PREPARE/CLOSE. No handshake, native_password, auth_switch, RSA, resultset decoding, or TLS. | `pymysql` sync, `asyncmy` async, `memory://` fakes. | native-mysql-mssql-drivers |
+| MySQL | `mysql.rs`: packet framing, `compute_caching_sha2_scramble`, COM_QUERY/STMT_PREPARE/CLOSE. No handshake, native_password, auth_switch, RSA, resultset decoding, or TLS. | `pymysql` sync, `asyncmy` async, `memory://` fakes. | native-mysql-driver |
 | Oracle | `oracle.rs`: TNS connect/data, TTC piggyback, OSON, VECTOR. `tns.rs`: descriptors, tnsnames, wallets. No O5LOGON, TTC calls, or fetch. | `sqlite3.connect(":memory:")`. | native-oracle-driver |
-| MSSQL | `mssql.rs`: TDS packets, `encode_tds_sql_batch`, `rewrite_mssql_placeholders`, a PreLogin enum. No PRELOGIN/LOGIN7 encoders and no token decoder. | `sqlite3.connect(":memory:")`. | native-mysql-mssql-drivers |
-| SQLite | `sqlite.rs`: pragmas, lease wrapper, msgpack rows. No libsqlite binding. | stdlib `sqlite3`. | native-embedded-and-cache-drivers |
-| DuckDB | `duckdb.rs`: bootstrap SQL, lease wrapper. The `duckdb = []` feature is empty. | `duckdb` module with a silent `sqlite3` fallback. | native-embedded-and-cache-drivers |
+| MSSQL | `mssql.rs`: TDS packets, `encode_tds_sql_batch`, `rewrite_mssql_placeholders`, a PreLogin enum. No PRELOGIN/LOGIN7 encoders and no token decoder. | `sqlite3.connect(":memory:")`. | native-mssql-driver |
+| SQLite | `sqlite.rs`: pragmas, lease wrapper, msgpack rows. No libsqlite binding. | stdlib `sqlite3`. | native-sqlite-driver |
+| DuckDB | `duckdb.rs`: bootstrap SQL, lease wrapper. The `duckdb = []` feature is empty. | `duckdb` module with a silent `sqlite3` fallback. | native-duckdb-driver |
 | BigQuery / Spanner | Real I/O through `grpc.rs` (hyper HTTP/2, rustls) with known field-number bugs. | Rust. | gcp-wire-protocol-correctness |
-| Redis/Valkey | `resp3.rs`: encoder, `parse_resp3_frame`, HELLO3, invalidation, CRC16 slots, redirects. Only the encoder and the slot/redirect helpers are bound. | Pure-Python sockets (`db/redis/driver.py::_create_raw_socket`, `asyncio.open_connection`) and a Python RESP parser (`db/redis/core.py::RedisCore._parse_view`). | native-embedded-and-cache-drivers |
+| Redis/Valkey | `resp3.rs`: encoder, `parse_resp3_frame`, HELLO3, invalidation, CRC16 slots, redirects. Only the encoder and the slot/redirect helpers are bound. | Pure-Python sockets (`db/redis/driver.py::_create_raw_socket`, `asyncio.open_connection`) and a Python RESP parser (`db/redis/core.py::RedisCore._parse_view`). | native-redis-driver |
 
 **Reusable pieces.**
 - `grpc.rs`: rustls connector and Tokio runtime.
@@ -178,8 +178,8 @@ Baseline: `main @ 142cc49`. Confidence is high unless marked otherwise. Each ite
 1. Shared connection core (`db-layout-and-contract`).
 2. `native-postgres-driver`.
 3. `broker-pool-sharing`. The broker needs owned connections; Postgres proves the upstream-SQLSpec and AA paths end to end.
-4. `native-embedded-and-cache-drivers` (Redis).
-5. MySQL/MSSQL.
-6. Oracle.
+4. `native-redis-driver`, `native-sqlite-driver`, and `native-duckdb-driver`.
+5. `native-mysql-driver` and `native-mssql-driver`.
+6. `native-oracle-driver`.
 
 The storage and remaining-fakes items run in parallel.

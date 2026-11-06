@@ -78,19 +78,19 @@ def search_items(
 
 ## Typed `msgspec.Struct` Request & Response Models
 
-Vertebra uses `msgspec.Struct(..., frozen=True, gc=False)` (or `FrozenBaseStruct` from `vertebra.typing`) for fast JSON and MessagePack (`MsgPackBody`) validation and response serialization:
+Vertebra uses `msgspec.Struct` (or `FrozenBaseStruct` from `vertebra.typing`) for fast JSON and MessagePack (`MsgPackBody`) validation and response serialization:
 
 ```python
 import msgspec
 from vertebra import App
 
 
-class CreateOrderInput(msgspec.Struct, frozen=True, gc=False):
+class CreateOrderInput(msgspec.Struct):
     sku: str
     quantity: int = 1
 
 
-class OrderSummary(msgspec.Struct, frozen=True, gc=False):
+class OrderSummary(msgspec.Struct):
     order_id: int
     sku: str
     quantity: int

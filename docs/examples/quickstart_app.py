@@ -12,7 +12,7 @@ __all__ = (
 
 
 # --8<-- [start:example]
-class HealthStatus(msgspec.Struct, frozen=True, gc=False):
+class HealthStatus(msgspec.Struct):
     """Health check payload returned by the quickstart application."""
 
     status: str

@@ -13,7 +13,7 @@ tags:
 
 ## Runtime (`runtime/`)
 
-- [Runtime Topologies & Python Embedding](runtime/topologies-and-embedding.md) — `Topology::{Auto, Embedded, Shm}`, explicit `tokio::runtime::Builder`, `EmbeddedSupervisor` `SO_REUSEPORT` multi-process supervision, `BatchBridge`, `RingFactory`, and Free-Threaded Python `3.14t`/`3.15t` execution modes (`#[pymodule(gil_used = false)]` across `_vertebra`, `_bundler`, and `_storage`).
+- [Runtime Topologies & Python Embedding](runtime/topologies-and-embedding.md) — `Topology::{Auto, Embedded, Shm}`, explicit `tokio::runtime::Builder`, `EmbeddedSupervisor` `SO_REUSEPORT` multi-process supervision, `BatchBridge`, `RingFactory`, and Free-Threaded Python `3.14t`/`3.15t` execution modes (`#[pymodule(gil_used = false)]` across `_vertebra`, `_bundler`, `_storage`, `_bigquery`, and `_spanner`).
 - [SHM Worker Spawn, Shutdown & Recovery Hooks](runtime/shm-supervision-and-recovery.md) — `RingFactory` FD inheritance (`VERTEBRA_*_FD`), `shutdown_workers` (`SIGTERM` then `SIGKILL`), and library-level recovery primitives (`WorkerLifecycle` with `pidfd_open` + `Child::try_wait` and 1 s–32 s exponential backoff, `RingPair::reclaim`, `cleanup_stale_shm`).
 - [Server Platform & Process Lifecycle](runtime/platform-and-lifecycle.md) — `run_supervisor` binary launcher, `find_server_binary`, `EventLoopPool` (`uvloop` + inline `add_reader`), `GilAuditReport`, `SyncLoopShardedResource` / `AsyncLoopShardedResource`, `SyncPool`, `ShmAllocationPolicy`, and container platform primitives (`CgroupQuota`, `LameDuckController`, `ZPagesRegistry`).
 

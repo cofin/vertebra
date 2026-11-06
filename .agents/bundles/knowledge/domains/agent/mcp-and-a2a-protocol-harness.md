@@ -17,9 +17,12 @@ generated:
   by: flow/0.26.0
   at: '2026-11-04T04:33:00Z'
 verified:
+- by: agent:flow-review
+  at: '2026-11-06T06:10:00Z'
+  commit: 7657e8b7c2c96bdda6821aec70a2b603f438a127
 - by: agent:codex
   at: '2026-11-05T06:09:26Z'
-  commit: 5ad85a1b406f5b3ed01ce8d1f536e02383bc89e1
+  commit: 80ff8a65e43a2bcef9e48a7763e89a7352118232
 - by: agent:flow-setup
   at: '2026-11-04T04:33:00Z'
   commit: f741701
@@ -111,7 +114,7 @@ sources:
 
 | Component | Responsibility |
 | :--- | :--- |
-| [`MCPService`](../../../../../src/py/vertebra/agent/mcp/service.py) | Registers tools (`register_tool`), prompts (`register_prompt`), and resources (`register_resource`). Handles JSON-RPC 2.0 requests (`initialize`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get`, `ping`). `tools/call` enforces `Tool.requires_confirmation` through a `ConfirmationGate` (`_meta["vertebra/confirmationToken"]`, error `-32003`); approval binds to the tool, caller, and arguments, and `AgentPlugin` shares the runtime gate. WebMCP manifests list only tools opted in with `webmcp=True` (`@mcp_tool(webmcp=True)`, `Tool(webmcp=True)`, route `opt={"mcp_tool": ..., "webmcp": True}`, and guarded `SkillController` tools). `MCPHttpHandler` rejects an `Mcp-Name` header when the body field it names is missing or different, rejects `Mcp-Method`/`Mcp-Name` headers on JSON-RPC batch bodies, and `JSONRPCRouter` passes dict params to `params` handlers without unwrapping nested keys. |
+| [`MCPService`](../../../../../src/py/vertebra/agent/mcp/service.py) | Registers tools (`register_tool`), prompts (`register_prompt`), and resources (`register_resource`). Handles JSON-RPC 2.0 requests (`initialize`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get`, `ping`). `tools/call` enforces `Tool.requires_confirmation` through `ConfirmationGate` (`_meta["vertebra/confirmationToken"]`, error `-32003`), binding each approval ticket to the tool name, caller identity, and SHA-256 canonical argument digest (`compute_arguments_digest`); `AgentPlugin` shares the runtime gate. WebMCP manifests list only tools opted in with `webmcp=True` (`@mcp_tool(webmcp=True)`, `Tool(webmcp=True)`, route `opt={"mcp_tool": ..., "webmcp": True}`, and guarded `SkillController` tools). `MCPHttpHandler` rejects an `Mcp-Name` header when the body field it names is missing or different, rejects `Mcp-Method`/`Mcp-Name` headers on JSON-RPC batch bodies, and `JSONRPCRouter` passes dict params to `params` handlers without unwrapping nested keys. |
 | [`MCPController`](../../../../../src/py/vertebra/agent/mcp/controllers.py) | Exposes SSE endpoints at `/sse` (opening a persistent event stream and returning endpoint URI `/messages?session_id=...`) and handles incoming JSON-RPC POST messages. |
 | [`McpStdioServer`](../../../../../src/py/vertebra/agent/mcp/stdio.py)[^src-agent-mcp-stdio-py] | Provides local stdio communication for CLI agents and local developer tooling via standard input/output streams. |
 | [`ClientSessionStore`](../../../../../src/py/vertebra/agent/mcp/service.py) | Tracks active sessions, protocol version negotiation (`2026-07-28`), client capabilities, and roots. |
@@ -123,7 +126,7 @@ sources:
 `operations()` and side-effect-free `confirmation_reason(...)`; its definition and explicit
 `ToolPolicyError(VertebraError, PermissionError)` live in shared typing. [^src-typing-internal-py]
 [`build_tools`](../../../../../src/py/vertebra/agent/tools/__init__.py)[^src-agent-tools-init-py]
-accepts any conforming provider, resolves original bound annotations once, and preserves
+accepts any conforming provider, resolves original bound annotations once (stripping `AgentContext` and `AgentContext | None` parameters via `SchemaBuilder.is_stripped_annotation`), and preserves
 schemas, defaults, descriptions, and public `Tool.invoke` conversion. No engine imports or
 vendor dispatch remain in this generic consumer. Operations accept named positional-or-keyword
 and keyword-only parameters; registration rejects positional-only and variadic signatures.

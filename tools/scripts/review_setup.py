@@ -9,6 +9,7 @@ import ast
 import fnmatch
 import os
 import re
+import subprocess
 import sys
 import tomllib
 from collections.abc import Sequence
@@ -156,19 +157,6 @@ class MarkdownDocument(msgspec.Struct, frozen=True, gc=False):
         in_truth = False
         truth_start = 0
 
-        for line_idx, line in enumerate(lines, start=1):
-            stripped = line.strip()
-            if "<!-- truth: start -->" in stripped:
-                in_truth = True
-                truth_start = line_idx
-                continue
-            if "<!-- truth: end -->" in stripped:
-                in_truth = False
-                truth_span = (truth_start, line_idx)
-                continue
-            if in_truth:
-                truth_lines.append(line)
-
         headings: list[tuple[int, str, int]] = []
         links: list[tuple[str, int]] = []
         heading_re = re.compile(r"^(#{1,6})\s+(.+)$")
@@ -186,10 +174,25 @@ class MarkdownDocument(msgspec.Struct, frozen=True, gc=False):
                     fence_char = current_fence
                 elif current_fence == fence_char:
                     in_code_fence = False
+                if in_truth:
+                    truth_lines.append(line)
                 continue
 
             if in_code_fence:
+                if in_truth:
+                    truth_lines.append(line)
                 continue
+
+            if stripped == "<!-- truth: start -->":
+                in_truth = True
+                truth_start = line_idx
+                continue
+            if stripped == "<!-- truth: end -->":
+                in_truth = False
+                truth_span = (truth_start, line_idx)
+                continue
+            if in_truth:
+                truth_lines.append(line)
 
             match = heading_re.match(line)
             if match:
@@ -229,7 +232,7 @@ class MarkdownDocument(msgspec.Struct, frozen=True, gc=False):
 
             indent = len(line) - len(line.lstrip(" "))
 
-            if indent == 0:
+            if indent == 0 and not stripped.startswith("- "):
                 if current_top_key is not None:
                     if current_list is not None:
                         result[current_top_key] = current_list
@@ -309,14 +312,16 @@ class MarkdownDocument(msgspec.Struct, frozen=True, gc=False):
             return False
         if lower in ("null", "~"):
             return None
-        try:
-            return int(val)
-        except ValueError:
-            pass
-        try:
-            return float(val)
-        except ValueError:
-            pass
+        if not (val.startswith("0") and len(val) > 1):
+            try:
+                return int(val)
+            except ValueError:
+                pass
+        if "." in val:
+            try:
+                return float(val)
+            except ValueError:
+                pass
         return val
 
 
@@ -1624,12 +1629,58 @@ class ReviewSetupValidator:
 
         return issues
 
+    def _validate_commit_sha(
+        self,
+        raw_sha: object,
+        rel_file: str,
+        field_name: str,
+        has_git: bool,
+        ancestry_cache: dict[str, bool],
+    ) -> ReviewIssue | None:
+        """Validate that a frontmatter commit SHA is lowercase hex and reachable from HEAD."""
+        if raw_sha is None:
+            return None
+        sha = str(raw_sha).strip()
+        if not sha or sha.lower() in {"null", "~"}:
+            return None
+        if not re.fullmatch(r"[0-9a-f]{7,40}", sha):
+            return ReviewIssue(
+                "bundles",
+                rel_file,
+                1,
+                f"{field_name} '{sha}' must be a 7-40 character lowercase hex commit SHA",
+            )
+        if has_git:
+            is_ancestor = ancestry_cache.get(sha)
+            if is_ancestor is None:
+                proc = subprocess.run(
+                    ["git", "-C", str(self.repo_root), "merge-base", "--is-ancestor", sha, "HEAD"],
+                    check=False,
+                    capture_output=True,
+                )
+                is_ancestor = proc.returncode == 0
+                ancestry_cache[sha] = is_ancestor
+            if not is_ancestor:
+                return ReviewIssue(
+                    "bundles",
+                    rel_file,
+                    1,
+                    f"{field_name} '{sha}' is not an ancestor of HEAD",
+                )
+        return None
+
     def _check_bundles(self) -> list[ReviewIssue]:
-        """Validate OKF v0.2 frontmatter in knowledge bundle and absence of completed specs."""
+        """Validate OKF v0.2 frontmatter, truth budgets, commit SHAs, and absence of completed specs."""
         issues: list[ReviewIssue] = []
         bundles_root = self.repo_root / ".agents/bundles"
         if not bundles_root.exists():
             return issues
+
+        policy = self._manifest.policy if self._manifest else ValidationPolicy()
+        max_truth = policy.max_truth_lines
+        reserved_names = set(policy.okf_reserved) if policy.okf_reserved else {"index.md", "log.md"}
+        has_git = (self.repo_root / ".git").exists()
+        ancestry_cache: dict[str, bool] = {}
 
         index_file = bundles_root / "index.md"
         if index_file.exists():
@@ -1646,31 +1697,56 @@ class ReviewSetupValidator:
 
         specs_dir = bundles_root / "specs"
         if specs_dir.exists():
-            for spec_file in specs_dir.rglob("spec.md"):
-                doc = MarkdownDocument.parse(spec_file)
-                state_val = doc.frontmatter.get("state") or doc.frontmatter.get("status")
-                if state_val == "completed":
-                    issues.append(
-                        ReviewIssue(
-                            "bundles",
-                            str(spec_file.relative_to(self.repo_root)),
-                            1,
-                            "resident spec has 'state: completed' (specs must be archived on completion)",
+            for md_file in sorted(specs_dir.rglob("*.md")):
+                if md_file.name in reserved_names:
+                    continue
+                rel_spec = str(md_file.relative_to(self.repo_root))
+                doc = MarkdownDocument.parse(md_file)
+                if md_file.name == "spec.md":
+                    state_val = doc.frontmatter.get("state") or doc.frontmatter.get("status")
+                    if state_val == "completed":
+                        issues.append(
+                            ReviewIssue(
+                                "bundles",
+                                rel_spec,
+                                1,
+                                "resident spec has 'state: completed' (specs must be archived on completion)",
+                            )
                         )
-                    )
+                for commit_key in ("plan_commit", "baseline_commit", "last_verified_commit"):
+                    if commit_key in doc.frontmatter:
+                        sha_issue = self._validate_commit_sha(
+                            doc.frontmatter.get(commit_key),
+                            rel_spec,
+                            commit_key,
+                            has_git,
+                            ancestry_cache,
+                        )
+                        if sha_issue is not None:
+                            issues.append(sha_issue)
 
         tag_slug_re = re.compile(r"^[a-z0-9-]+$")
-        reserved_names = {"index.md", "log.md"}
 
         for subdir_name in ("knowledge", "product"):
             target_dir = bundles_root / subdir_name
             if not target_dir.exists():
                 continue
-            for md_path in target_dir.rglob("*.md"):
+            for md_path in sorted(target_dir.rglob("*.md")):
                 if md_path.name in reserved_names:
                     continue
                 rel_file = str(md_path.relative_to(self.repo_root))
                 doc = MarkdownDocument.parse(md_path)
+
+                if len(doc.truth_lines) > max_truth:
+                    truth_line_no = doc.truth_span[0] if doc.truth_span else 1
+                    issues.append(
+                        ReviewIssue(
+                            "bundles",
+                            rel_file,
+                            truth_line_no,
+                            f"truth block line count ({len(doc.truth_lines)}) exceeds max_truth_lines ({max_truth})",
+                        )
+                    )
 
                 doc_type = doc.frontmatter.get("type")
                 if not doc_type or not str(doc_type).strip():
@@ -1707,6 +1783,20 @@ class ReviewSetupValidator:
                                     f"tag '{tag}' must be a lowercase slug",
                                 )
                             )
+
+                verified = doc.frontmatter.get("verified")
+                if isinstance(verified, list):
+                    for ver_entry in verified:
+                        if isinstance(ver_entry, dict) and "commit" in ver_entry:
+                            sha_issue = self._validate_commit_sha(
+                                ver_entry.get("commit"),
+                                rel_file,
+                                "verified.commit",
+                                has_git,
+                                ancestry_cache,
+                            )
+                            if sha_issue is not None:
+                                issues.append(sha_issue)
 
                 sources = doc.frontmatter.get("sources")
                 if isinstance(sources, list):
