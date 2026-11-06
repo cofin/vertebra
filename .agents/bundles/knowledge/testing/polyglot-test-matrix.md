@@ -1,50 +1,80 @@
 ---
 type: Guide
-title: "Polyglot Test Matrix & Environment Setup"
-description: "Rust, Python, and TypeScript test suites, their Makefile and CI entry points, registry auto-setup, extension rebuilds, and /dev/shm cleanup."
+title: Polyglot Test Matrix & Environment Setup
+description: Rust, Python, and TypeScript test suites, their Makefile and CI entry
+  points, registry auto-setup, extension rebuilds, and /dev/shm cleanup.
 status: stable
-tags: [testing, verification, python, rust, typescript]
+tags:
+- testing
+- verification
+- python
+- rust
+- typescript
 generated:
   by: flow/0.26.0
-  at: "2026-11-04T04:33:00Z"
+  at: '2026-11-04T04:33:00Z'
 verified:
-  - by: agent:flow-review
-    at: "2026-11-05T00:35:59Z"
-    commit: 4ce057e5aff909fcda2488cc0f6c4882ad0d38f0
+- by: agent:codex
+  at: '2026-11-05T06:09:26Z'
+  commit: 5ad85a1b406f5b3ed01ce8d1f536e02383bc89e1
+- by: agent:flow-review
+  at: '2026-11-05T00:35:59Z'
+  commit: 4ce057e5aff909fcda2488cc0f6c4882ad0d38f0
 sources:
-  - id: src-native-driver-tests
-    resource: src/py/tests/unit/db/test_native_db_drivers.py
-    title: "Cancellation and cloud DBAPI regression coverage"
-  - id: src-sqlite-returning-tests
-    resource: src/py/tests/unit/db/test_sqlite_driver.py
-    title: "SQLite statement completion and transaction regressions"
-  - id: src-postgres-transaction-tests
-    resource: src/py/tests/unit/db/test_postgres_driver.py
-    title: "Asyncpg transaction and affected-count regressions"
-  - id: src-makefile
-    resource: Makefile
-    title: "Canonical polyglot build, test, lint, docs, and benchmark targets"
-  - id: src-tools-scripts-setup-env-sh
-    resource: tools/scripts/setup-env.sh
-    title: "Repository tooling module (tools/scripts/setup-env.sh)"
-  - id: src-pyproject-toml
-    resource: pyproject.toml
-    title: "Python package metadata, dependencies, and tool configuration"
-  - id: src-cargo-toml
-    resource: src/rs/Cargo.toml
-    title: "Rust crate manifest (src/rs/Cargo.toml)"
-  - id: src-tests-conftest-py
-    resource: src/py/tests/conftest.py
-    title: "Python implementation module (src/py/tests/conftest.py)"
-  - id: src-package-json
-    resource: src/ts/vertebra-client/package.json
-    title: "TypeScript package manifest (src/ts/vertebra-client/package.json)"
-  - id: src-ci-yml
-    resource: .github/workflows/ci.yml
-    title: "GitHub Actions workflow (ci.yml)"
-  - id: src-db-conformance
-    resource: src/py/tests/integration/db/test_driver_conformance.py
-    title: "Parameterized database contract and environment readiness gates"
+- id: src-stack-regressions
+  resource: src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
+  title: Native pipeline and fallback statement/result/bind regressions
+- id: src-bigquery-stack-regressions
+  resource: src/py/tests/unit/extensions/test_sqlspec_bigquery.py
+  title: Actual BigQuery driver stack execution over loopback REST
+- id: src-spanner-stack-regressions
+  resource: src/py/tests/unit/extensions/test_sqlspec_spanner.py
+  title: Actual Spanner driver stack execution over external client ports
+- id: src-psycopg-bind-regressions
+  resource: src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
+  title: Optional real psycopg converter acceptance for PostgreSQL primitives
+- id: src-provider-regressions
+  resource: src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
+  title: Native provider ownership, lazy resolution, policy and driver error regressions
+- id: src-provider-schema-regressions
+  resource: src/py/tests/unit/agent/test_core_and_observability.py
+  title: Neutral provider schema and validation boundaries
+- id: src-provider-snapshot-regressions
+  resource: src/py/tests/unit/agent/test_runtime_and_workflows.py
+  title: Approval binding and nested invocation ownership across controlled suspension
+- id: src-native-driver-tests
+  resource: src/py/tests/unit/db/test_native_db_drivers.py
+  title: Cancellation and cloud DBAPI regression coverage
+- id: src-sqlite-returning-tests
+  resource: src/py/tests/unit/db/test_sqlite_driver.py
+  title: SQLite statement completion and transaction regressions
+- id: src-postgres-transaction-tests
+  resource: src/py/tests/unit/db/test_postgres_driver.py
+  title: Asyncpg transaction and affected-count regressions
+- id: src-makefile
+  resource: Makefile
+  title: Canonical polyglot build, test, lint, docs, and benchmark targets
+- id: src-tools-scripts-setup-env-sh
+  resource: tools/scripts/setup-env.sh
+  title: Repository tooling module (tools/scripts/setup-env.sh)
+- id: src-pyproject-toml
+  resource: pyproject.toml
+  title: Python package metadata, dependencies, and tool configuration
+- id: src-cargo-toml
+  resource: src/rs/Cargo.toml
+  title: Rust crate manifest (src/rs/Cargo.toml)
+- id: src-tests-conftest-py
+  resource: src/py/tests/conftest.py
+  title: Python implementation module (src/py/tests/conftest.py)
+- id: src-package-json
+  resource: src/ts/vertebra-client/package.json
+  title: TypeScript package manifest (src/ts/vertebra-client/package.json)
+- id: src-ci-yml
+  resource: .github/workflows/ci.yml
+  title: GitHub Actions workflow (ci.yml)
+- id: src-db-conformance
+  resource: src/py/tests/integration/db/test_driver_conformance.py
+  title: Parameterized database contract and environment readiness gates
 ---
 
 # Polyglot Test Matrix & Environment Setup
@@ -127,6 +157,18 @@ For extracted wheels, verify an installed artifact outside the source tree as we
 
 Transaction tests exercise synchronous interruption, actual asyncio task cancellation, and AnyIO cancellation scopes against observable database state. Asyncpg interface tests use a local port with real SQLite autocommit behavior and verify transaction ownership, command counts, and connection release. Cloud DBAPI tests pass actual BigQuery, Spanner, and Spangres drivers through local service ports, including a BigQuery port that rejects permanent DDL inside transactions. SQLite `RETURNING` tests check counts, cross-connection visibility, commit, rollback, and reuse. These local ports verify integration contracts; they do not establish live PostgreSQL or GCP service acceptance. [^src-postgres-transaction-tests][^src-sqlite-returning-tests][^src-native-driver-tests]
 
+## SQLSpec and Native Client Boundary Evidence
+
+Tool-provider regressions exercise adapter-owned operations through the generic `build_tools` bridge, and independently exercise that bridge with a typed non-vendor provider. Assert schema types/defaults, named-parameter registration, conversion before policy, lazy resolution, native error identity and the absence of vendor imports/exports in generic agent code. Barrier-driven tests pause an approved operation, mutate caller-owned nested values, and prove execution plus stored approval retain the original owned invocation. Typed-value regressions distinguish Python-equal boolean/integer/float replacements inside mappings, containers and converted records while accepting reordered equivalent mappings. Keep this evidence separate from completed MCP provider discovery or full protocol conformance.[^src-provider-regressions][^src-provider-schema-regressions][^src-provider-snapshot-regressions]
+
+BigQuery and Spanner sync/async driver and config constructors reject non-null tenant enforcement before base initialization, supplied-core access, registry resolution, default-broker creation or native I/O. Constructor tripwires verify these effects are absent; ordinary unconfigured sessions retain script, Arrow, batch and snapshot behavior. This closes unsupported session creation instead of scattering guards across execution methods.[^src-bigquery-stack-regressions][^src-spanner-stack-regressions]
+
+Stack regressions exercise actual SQLSpec preparation and result objects over real native driver classes, replacing only the external DBAPI/client/service port. They assert exact SQL and parameters at that boundary, ordered rows/counts, rollback/error behavior, and retained statement metadata. PostgreSQL/MySQL ports use a local SQLite database after recording native binds; BigQuery uses a loopback REST service and Spanner uses a deterministic native-client port. These establish adapter integration behavior without claiming live PostgreSQL/MySQL/GCP service acceptance.[^src-stack-regressions][^src-bigquery-stack-regressions][^src-spanner-stack-regressions]
+
+Cover pipeline-capable and sequential fallback, default and explicit statement configuration, leading comments/CTE DML/`RETURNING`, native parameter formats, Arrow options versus named binds, prebound `SQL`, `execute_many` sets and filters, empty results, and result-count mismatches. Preserve installed SQLSpec/MyPyC statement and result contracts rather than replacing the system under test with mock objects.[^src-stack-regressions]
+
+`test_postgres_sync_primitives_bind_with_real_psycopg_converter` sends notification, embedding, similarity-search and tenant-session parameters through installed psycopg `PostgresQuery` and `Transformer` objects. Its `pytest.importorskip` calls mean a normal passing suite can omit converter acceptance. Record an explicit converter-enabled run when accepting native binds, and report skipped converter cases separately. A cached dependency or isolated test environment can supply this optional package; never hardcode that environment's filesystem path into production code or durable instructions.[^src-psycopg-bind-regressions]
+
 Provenance sources: [^src-pyproject-toml], [^src-cargo-toml], [^src-package-json], [^src-ci-yml].
 
 [^src-makefile]: `Makefile` — Canonical polyglot build, test, lint, docs, and benchmark targets.
@@ -144,3 +186,11 @@ Provenance sources: [^src-pyproject-toml], [^src-cargo-toml], [^src-package-json
 [^src-sqlite-returning-tests]: `src/py/tests/unit/db/test_sqlite_driver.py` — SQLite statement completion and transaction regressions.
 
 [^src-native-driver-tests]: `src/py/tests/unit/db/test_native_db_drivers.py` — Cancellation and cloud DBAPI regression coverage.
+
+[^src-stack-regressions]: `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py` — Native pipeline and fallback statement/result/bind regressions.
+[^src-bigquery-stack-regressions]: `src/py/tests/unit/extensions/test_sqlspec_bigquery.py` — Actual BigQuery driver stack execution over loopback REST.
+[^src-spanner-stack-regressions]: `src/py/tests/unit/extensions/test_sqlspec_spanner.py` — Actual Spanner driver stack execution over external client ports.
+[^src-psycopg-bind-regressions]: `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py` — Optional real psycopg converter acceptance for PostgreSQL primitives.
+[^src-provider-regressions]: `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py` — Native provider ownership, lazy resolution, policy and driver error regressions.
+[^src-provider-schema-regressions]: `src/py/tests/unit/agent/test_core_and_observability.py` — Neutral provider schema and validation boundaries.
+[^src-provider-snapshot-regressions]: `src/py/tests/unit/agent/test_runtime_and_workflows.py` — Approval binding and nested invocation ownership across controlled suspension.

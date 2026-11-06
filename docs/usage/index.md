@@ -23,7 +23,6 @@ Practical guides for building, scaling, testing, and deploying applications with
 | Guide | Topics Covered |
 | --- | --- |
 | **[Overview & Drivers](databases.md)** | First-class SQLSpec & Litestar integration (`create_sqlspec_plugin`) and the 9 native Rust shared-memory database and cache drivers. |
-| **[Query Pipelines & CTE Stacking](query-pipelines.md)** | Single-RTT CTE statement stacking (`SyncQueryPipeline` / `AsyncQueryPipeline`, `RelOverlay`), `build_jsonb_object`, and PgBouncer/PgCat/pgdog pooler-safe statement caching. |
 | **[Cloud Dialers (Cloud SQL & AlloyDB)](cloud-dialers.md)** | Zero-sidecar Cloud SQL (`:3307`) and AlloyDB (`:5433`) ephemeral mTLS certificate dialers and IAM database authentication. |
 | **[RLS, CDC & Arrow Analytics](analytics-and-cdc.md)** | Multi-tenant Row-Level Security (`TenantPredicate`), logical replication CDC (`ChangeFeed`), zero-copy `ArrowCursor`, DuckDB `httpfs` ADC rotation, and `DataFusionEngine`. |
 | **[SQLSpec, SQLAlchemy & Extensions](extensions.md)** | `VertebraPlugin`, `create_sqlspec_plugin`, `create_alchemy_plugin`, SQLAlchemy 2.1 `+vtb` dialects, `Vector` & `BinaryJSON` column types, `GrpcServiceRegistry`, `ApexGateway`, and `BrokerPlugin`. |
@@ -42,7 +41,7 @@ Practical guides for building, scaling, testing, and deploying applications with
 | --- | --- |
 | **[MCP, Skills & Stdio Bridge](agent-protocols.md)** | Model Context Protocol (`@tool`, `@prompt`, `@resource`, `MCPRegistry`), `SKILL.md` bundles (`MCPSkillsConfig`), async tasks, and `vtb ai mcp serve|bridge`. |
 | **[A2A, WebMCP & Workflows](a2a-and-workflows.md)** | Agent-to-Agent (`A2AService`, `AgentCard` with automatic `AgentInterface` and dynamic URL resolution), browser WebMCP (`@vertebra/client/webmcp`), `SpecTree`, `DynamicWorkflow`, and `AgentRuntime`. |
-| **[Vector Embeddings & Slabs](embeddings-and-vectors.md)** | Shared-memory `VectorSlab` and `VectorCache`, PEP 3118 `VectorView` / `VectorBatchView`, `Embedder`, `VertexEmbedder`, `GeminiEmbedder`, `AlloyDbEmbedder`, `OracleEmbedder`, `GemmaEmbedder`, `FastEmbedder`, `StaticEmbedder`, `RemoteEmbedder`, and `vtb ai models`. |
+| **[Vector Embeddings & Slabs](embeddings-and-vectors.md)** | Shared-memory `VectorSlab` and `VectorCache`, PEP 3118 `VectorView` / `VectorBatchView`, `Embedder`, `VertexEmbedder`, `GeminiEmbedder`, `PushdownEmbedder` with BigQuery, Spanner, PostgreSQL/AlloyDB, and Oracle `EmbeddingPushdown`, `GemmaEmbedder`, `FastEmbedder`, `StaticEmbedder`, `RemoteEmbedder`, and `vtb ai models`. |
 
 ## Frontend & Client SDK
 

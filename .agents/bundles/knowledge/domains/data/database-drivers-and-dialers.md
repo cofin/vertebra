@@ -1,182 +1,209 @@
 ---
 type: Guide
-title: "Database Drivers & Cloud Dialers"
-description: "The `vertebra-db` and `vertebra.db` Rust-native shared-memory drivers across PostgreSQL, MySQL, SQLite, Oracle, SQL Server, DuckDB, BigQuery, Spanner, Redis, and Valkey, the `vertebra.db.driver` base hierarchy, `ArrowCursor`, `DatabaseRegistry`, and Cloud SQL / AlloyDB dialers."
+title: Database Drivers & Cloud Dialers
+description: The `vertebra-db` and `vertebra.db` Rust-native shared-memory drivers
+  across PostgreSQL, MySQL, SQLite, Oracle, SQL Server, DuckDB, BigQuery, Spanner,
+  Redis, and Valkey, the `vertebra.db.driver` base hierarchy, `ArrowCursor`, `DatabaseRegistry`,
+  and Cloud SQL / AlloyDB dialers.
 status: stable
-tags: [domains, database, drivers, bigquery, spanner, cloud-sql, alloydb, arrow, shm]
+tags:
+- domains
+- database
+- drivers
+- bigquery
+- spanner
+- cloud-sql
+- alloydb
+- arrow
+- shm
 generated:
   by: flow/0.26.0
-  at: "2026-11-04T04:33:00Z"
+  at: '2026-11-04T04:33:00Z'
 verified:
-  - by: agent:flow-review
-    at: "2026-11-05T00:35:59Z"
-    commit: 4ce057e5aff909fcda2488cc0f6c4882ad0d38f0
+- by: agent:codex
+  at: '2026-11-05T06:09:26Z'
+  commit: 5ad85a1b406f5b3ed01ce8d1f536e02383bc89e1
+- by: agent:flow-review
+  at: '2026-11-05T00:35:59Z'
+  commit: 4ce057e5aff909fcda2488cc0f6c4882ad0d38f0
 sources:
-  - id: src-sqlalchemy-dialects
-    resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
-    title: "SQLAlchemy DBAPI transaction policy"
-  - id: src-vertebra-core-src-shm-rs
-    resource: src/rs/vertebra-core/src/shm.rs
-    title: "Rust implementation module (src/rs/vertebra-core/src/shm.rs)"
-  - id: src-vertebra-db-src-lib-rs
-    resource: src/rs/vertebra-db/src/lib.rs
-    title: "Rust implementation module (src/rs/vertebra-db/src/lib.rs)"
-  - id: src-vertebra-db-src-arrow-shm-rs
-    resource: src/rs/vertebra-db/src/arrow_shm.rs
-    title: "Rust implementation module (src/rs/vertebra-db/src/arrow_shm.rs)"
-  - id: src-vertebra-db-src-connection-rs
-    resource: src/rs/vertebra-db/src/connection.rs
-    title: "Rust implementation module (src/rs/vertebra-db/src/connection.rs)"
-  - id: src-vertebra-db-src-py-async-rs
-    resource: src/rs/vertebra-db/src/py_async.rs
-    title: "Rust implementation module (src/rs/vertebra-db/src/py_async.rs)"
-  - id: src-vertebra-db-src-postgres-rs
-    resource: src/rs/vertebra-db/src/postgres/mod.rs
-    title: "Rust implementation module (src/rs/vertebra-db/src/postgres/mod.rs)"
-  - id: src-vertebra-db-src-mysql-rs
-    resource: src/rs/vertebra-db/src/mysql/mod.rs
-    title: "Rust implementation module (src/rs/vertebra-db/src/mysql/mod.rs)"
-  - id: src-vertebra-db-src-sqlite-rs
-    resource: src/rs/vertebra-db/src/sqlite/mod.rs
-    title: "Rust implementation module (src/rs/vertebra-db/src/sqlite/mod.rs)"
-  - id: src-vertebra-db-src-oracle-rs
-    resource: src/rs/vertebra-db/src/oracle/mod.rs
-    title: "Rust implementation module (src/rs/vertebra-db/src/oracle/mod.rs)"
-  - id: src-vertebra-db-src-tns-rs
-    resource: src/rs/vertebra-db/src/oracle/tns.rs
-    title: "Rust implementation module (src/rs/vertebra-db/src/oracle/tns.rs)"
-  - id: src-vertebra-db-src-mssql-rs
-    resource: src/rs/vertebra-db/src/mssql/mod.rs
-    title: "Rust implementation module (src/rs/vertebra-db/src/mssql/mod.rs)"
-  - id: src-vertebra-db-src-duckdb-rs
-    resource: src/rs/vertebra-db/src/duckdb/mod.rs
-    title: "Rust implementation module (src/rs/vertebra-db/src/duckdb/mod.rs)"
-  - id: src-vertebra-db-src-gcp-rs
-    resource: src/rs/vertebra-db/src/gcp.rs
-    title: "Rust implementation module (src/rs/vertebra-db/src/gcp.rs)"
-  - id: src-vertebra-bigquery-src-lib-rs
-    resource: src/rs/vertebra-bigquery/src/lib.rs
-    title: "Rust implementation module (src/rs/vertebra-bigquery/src/lib.rs)"
-  - id: src-vertebra-bigquery-src-client-rs
-    resource: src/rs/vertebra-bigquery/src/client.rs
-    title: "Rust implementation module (src/rs/vertebra-bigquery/src/client.rs)"
-  - id: src-vertebra-bigquery-src-errors-rs
-    resource: src/rs/vertebra-bigquery/src/errors.rs
-    title: "Rust implementation module (src/rs/vertebra-bigquery/src/errors.rs)"
-  - id: src-vertebra-spanner-src-lib-rs
-    resource: src/rs/vertebra-spanner/src/lib.rs
-    title: "Rust implementation module (src/rs/vertebra-spanner/src/lib.rs)"
-  - id: src-vertebra-spanner-src-client-rs
-    resource: src/rs/vertebra-spanner/src/client.rs
-    title: "Rust implementation module (src/rs/vertebra-spanner/src/client.rs)"
-  - id: src-vertebra-spanner-src-errors-rs
-    resource: src/rs/vertebra-spanner/src/errors.rs
-    title: "Rust implementation module (src/rs/vertebra-spanner/src/errors.rs)"
-  - id: src-vertebra-db-src-resp3-rs
-    resource: src/rs/vertebra-db/src/resp3/mod.rs
-    title: "Rust implementation module (src/rs/vertebra-db/src/resp3/mod.rs)"
-  - id: src-vertebra-db-src-dialer-rs
-    resource: src/rs/vertebra-db/src/dialer.rs
-    title: "Rust implementation module (src/rs/vertebra-db/src/dialer.rs)"
-  - id: src-vertebra-py-src-completion-rs
-    resource: src/rs/vertebra-py/src/completion.rs
-    title: "Rust implementation module (src/rs/vertebra-py/src/completion.rs)"
-  - id: src-vertebra-py-src-db-rs
-    resource: src/rs/vertebra-py/src/db.rs
-    title: "Rust implementation module (src/rs/vertebra-py/src/db.rs)"
-  - id: src-vertebra-py-src-errors-rs
-    resource: src/rs/vertebra-py/src/errors.rs
-    title: "Rust implementation module (src/rs/vertebra-py/src/errors.rs)"
-  - id: src-vertebra-db-tests-gcp-credentials-tests-rs
-    resource: src/rs/vertebra-db/tests/gcp_credentials_tests.rs
-    title: "Rust implementation module (src/rs/vertebra-db/tests/gcp_credentials_tests.rs)"
-  - id: src-vertebra-spanner-tests-spanner-wire-tests-rs
-    resource: src/rs/vertebra-spanner/tests/spanner_wire_tests.rs
-    title: "Rust implementation module (src/rs/vertebra-spanner/tests/spanner_wire_tests.rs)"
-  - id: src-vertebra-bigquery-tests-bigquery-wire-tests-rs
-    resource: src/rs/vertebra-bigquery/tests/bigquery_wire_tests.rs
-    title: "Rust implementation module (src/rs/vertebra-bigquery/tests/bigquery_wire_tests.rs)"
-  - id: src-db-init-py
-    resource: src/py/vertebra/db/__init__.py
-    title: "Python implementation module (src/py/vertebra/db/__init__.py)"
-  - id: src-db-arrow-py
-    resource: src/py/vertebra/db/arrow.py
-    title: "Python implementation module (src/py/vertebra/db/arrow.py)"
-  - id: src-db-registry-py
-    resource: src/py/vertebra/db/registry.py
-    title: "Python implementation module (src/py/vertebra/db/registry.py)"
-  - id: src-db-driver-init-py
-    resource: src/py/vertebra/db/driver/__init__.py
-    title: "Python implementation module (src/py/vertebra/db/driver/__init__.py)"
-  - id: src-db-driver-common-py
-    resource: src/py/vertebra/db/driver/_common.py
-    title: "Python implementation module (src/py/vertebra/db/driver/_common.py)"
-  - id: src-db-driver-sync-py
-    resource: src/py/vertebra/db/driver/_sync.py
-    title: "Python implementation module (src/py/vertebra/db/driver/_sync.py)"
-  - id: src-db-driver-async-py
-    resource: src/py/vertebra/db/driver/_async.py
-    title: "Python implementation module (src/py/vertebra/db/driver/_async.py)"
-  - id: src-db-driver-capabilities-py
-    resource: src/py/vertebra/db/driver/capabilities.py
-    title: "Python implementation module (src/py/vertebra/db/driver/capabilities.py)"
-  - id: src-db-postgres-init-py
-    resource: src/py/vertebra/db/adapters/postgres/__init__.py
-    title: "Python implementation module (src/py/vertebra/db/adapters/postgres/__init__.py)"
-  - id: src-db-mysql-init-py
-    resource: src/py/vertebra/db/adapters/mysql/__init__.py
-    title: "Python implementation module (src/py/vertebra/db/adapters/mysql/__init__.py)"
-  - id: src-db-sqlite-init-py
-    resource: src/py/vertebra/db/adapters/sqlite/__init__.py
-    title: "Python implementation module (src/py/vertebra/db/adapters/sqlite/__init__.py)"
-  - id: src-db-oracle-init-py
-    resource: src/py/vertebra/db/adapters/oracle/__init__.py
-    title: "Python implementation module (src/py/vertebra/db/adapters/oracle/__init__.py)"
-  - id: src-db-mssql-init-py
-    resource: src/py/vertebra/db/adapters/mssql/__init__.py
-    title: "Python implementation module (src/py/vertebra/db/adapters/mssql/__init__.py)"
-  - id: src-db-duckdb-init-py
-    resource: src/py/vertebra/db/adapters/duckdb/__init__.py
-    title: "Python implementation module (src/py/vertebra/db/adapters/duckdb/__init__.py)"
-  - id: src-db-bigquery-init-py
-    resource: src/py/vertebra/db/adapters/bigquery/__init__.py
-    title: "Python implementation module (src/py/vertebra/db/adapters/bigquery/__init__.py)"
-  - id: src-db-spanner-init-py
-    resource: src/py/vertebra/db/adapters/spanner/__init__.py
-    title: "Python implementation module (src/py/vertebra/db/adapters/spanner/__init__.py)"
-  - id: src-db-redis-init-py
-    resource: src/py/vertebra/db/adapters/redis/__init__.py
-    title: "Python implementation module (src/py/vertebra/db/adapters/redis/__init__.py)"
-  - id: src-db-valkey-init-py
-    resource: src/py/vertebra/db/adapters/valkey/__init__.py
-    title: "Python implementation module (src/py/vertebra/db/adapters/valkey/__init__.py)"
-  - id: src-db-datafusion-init-py
-    resource: src/py/vertebra/db/adapters/datafusion/__init__.py
-    title: "Python implementation module (src/py/vertebra/db/adapters/datafusion/__init__.py)"
-  - id: src-db-dialer-cloudsql-py
-    resource: src/py/vertebra/db/dialer/cloudsql.py
-    title: "Python implementation module (src/py/vertebra/db/dialer/cloudsql.py)"
-  - id: src-db-dialer-alloydb-py
-    resource: src/py/vertebra/db/dialer/alloydb.py
-    title: "Python implementation module (src/py/vertebra/db/dialer/alloydb.py)"
-  - id: src-tests-integration-db-conformance-py
-    resource: src/py/tests/integration/db/test_driver_conformance.py
-    title: "Python implementation module (src/py/tests/integration/db/test_driver_conformance.py)"
-  - id: src-tests-unit-db-test-native-db-drivers-py
-    resource: src/py/tests/unit/db/test_native_db_drivers.py
-    title: "Python implementation module (src/py/tests/unit/db/test_native_db_drivers.py)"
-  - id: src-tests-unit-db-test-enterprise-olap-drivers-py
-    resource: src/py/tests/unit/db/test_enterprise_olap_drivers.py
-    title: "Python implementation module (src/py/tests/unit/db/test_enterprise_olap_drivers.py)"
-  - id: src-tests-unit-db-test-redis-valkey-resp3-py
-    resource: src/py/tests/unit/db/test_redis_valkey_resp3.py
-    title: "Python implementation module (src/py/tests/unit/db/test_redis_valkey_resp3.py)"
-  - id: src-tests-unit-db-test-bigquery-py
-    resource: src/py/tests/unit/db/test_bigquery.py
-    title: "Python implementation module (src/py/tests/unit/db/test_bigquery.py)"
-  - id: src-tests-unit-db-test-spanner-py
-    resource: src/py/tests/unit/db/test_spanner.py
-    title: "Python implementation module (src/py/tests/unit/db/test_spanner.py)"
+- id: src-typing-public-py
+  resource: src/py/vertebra/typing.py
+  title: Public neutral ToolProvider and ToolPolicyError exports
+- id: src-typing-internal-py
+  resource: src/py/vertebra/_typing.py
+  title: Shared neutral callable-map contract and policy exception
+- id: src-db-bigquery-tools-py
+  resource: src/py/vertebra/db/adapters/bigquery/tools.py
+  title: Adapter-owned BigQuery operations and billing policies
+- id: src-db-spanner-tools-py
+  resource: src/py/vertebra/db/adapters/spanner/tools.py
+  title: Adapter-owned Spanner operations and snapshot policies
+- id: src-sqlalchemy-dialects
+  resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
+  title: SQLAlchemy DBAPI transaction policy
+- id: src-vertebra-core-src-shm-rs
+  resource: src/rs/vertebra-core/src/shm.rs
+  title: Rust implementation module (src/rs/vertebra-core/src/shm.rs)
+- id: src-vertebra-db-src-lib-rs
+  resource: src/rs/vertebra-db/src/lib.rs
+  title: Rust implementation module (src/rs/vertebra-db/src/lib.rs)
+- id: src-vertebra-db-src-arrow-shm-rs
+  resource: src/rs/vertebra-db/src/arrow_shm.rs
+  title: Rust implementation module (src/rs/vertebra-db/src/arrow_shm.rs)
+- id: src-vertebra-db-src-connection-rs
+  resource: src/rs/vertebra-db/src/connection.rs
+  title: Rust implementation module (src/rs/vertebra-db/src/connection.rs)
+- id: src-vertebra-db-src-py-async-rs
+  resource: src/rs/vertebra-db/src/py_async.rs
+  title: Rust implementation module (src/rs/vertebra-db/src/py_async.rs)
+- id: src-vertebra-db-src-postgres-rs
+  resource: src/rs/vertebra-db/src/postgres/mod.rs
+  title: Rust implementation module (src/rs/vertebra-db/src/postgres/mod.rs)
+- id: src-vertebra-db-src-mysql-rs
+  resource: src/rs/vertebra-db/src/mysql/mod.rs
+  title: Rust implementation module (src/rs/vertebra-db/src/mysql/mod.rs)
+- id: src-vertebra-db-src-sqlite-rs
+  resource: src/rs/vertebra-db/src/sqlite/mod.rs
+  title: Rust implementation module (src/rs/vertebra-db/src/sqlite/mod.rs)
+- id: src-vertebra-db-src-oracle-rs
+  resource: src/rs/vertebra-db/src/oracle/mod.rs
+  title: Rust implementation module (src/rs/vertebra-db/src/oracle/mod.rs)
+- id: src-vertebra-db-src-tns-rs
+  resource: src/rs/vertebra-db/src/oracle/tns.rs
+  title: Rust implementation module (src/rs/vertebra-db/src/oracle/tns.rs)
+- id: src-vertebra-db-src-mssql-rs
+  resource: src/rs/vertebra-db/src/mssql/mod.rs
+  title: Rust implementation module (src/rs/vertebra-db/src/mssql/mod.rs)
+- id: src-vertebra-db-src-duckdb-rs
+  resource: src/rs/vertebra-db/src/duckdb/mod.rs
+  title: Rust implementation module (src/rs/vertebra-db/src/duckdb/mod.rs)
+- id: src-vertebra-db-src-gcp-rs
+  resource: src/rs/vertebra-db/src/gcp.rs
+  title: Rust implementation module (src/rs/vertebra-db/src/gcp.rs)
+- id: src-vertebra-bigquery-src-lib-rs
+  resource: src/rs/vertebra-bigquery/src/lib.rs
+  title: Rust implementation module (src/rs/vertebra-bigquery/src/lib.rs)
+- id: src-vertebra-bigquery-src-client-rs
+  resource: src/rs/vertebra-bigquery/src/client.rs
+  title: Rust implementation module (src/rs/vertebra-bigquery/src/client.rs)
+- id: src-vertebra-bigquery-src-errors-rs
+  resource: src/rs/vertebra-bigquery/src/errors.rs
+  title: Rust implementation module (src/rs/vertebra-bigquery/src/errors.rs)
+- id: src-vertebra-spanner-src-lib-rs
+  resource: src/rs/vertebra-spanner/src/lib.rs
+  title: Rust implementation module (src/rs/vertebra-spanner/src/lib.rs)
+- id: src-vertebra-spanner-src-client-rs
+  resource: src/rs/vertebra-spanner/src/client.rs
+  title: Rust implementation module (src/rs/vertebra-spanner/src/client.rs)
+- id: src-vertebra-spanner-src-errors-rs
+  resource: src/rs/vertebra-spanner/src/errors.rs
+  title: Rust implementation module (src/rs/vertebra-spanner/src/errors.rs)
+- id: src-vertebra-db-src-resp3-rs
+  resource: src/rs/vertebra-db/src/resp3/mod.rs
+  title: Rust implementation module (src/rs/vertebra-db/src/resp3/mod.rs)
+- id: src-vertebra-db-src-dialer-rs
+  resource: src/rs/vertebra-db/src/dialer.rs
+  title: Rust implementation module (src/rs/vertebra-db/src/dialer.rs)
+- id: src-vertebra-py-src-completion-rs
+  resource: src/rs/vertebra-py/src/completion.rs
+  title: Rust implementation module (src/rs/vertebra-py/src/completion.rs)
+- id: src-vertebra-py-src-db-rs
+  resource: src/rs/vertebra-py/src/db.rs
+  title: Rust implementation module (src/rs/vertebra-py/src/db.rs)
+- id: src-vertebra-py-src-errors-rs
+  resource: src/rs/vertebra-py/src/errors.rs
+  title: Rust implementation module (src/rs/vertebra-py/src/errors.rs)
+- id: src-vertebra-db-tests-gcp-credentials-tests-rs
+  resource: src/rs/vertebra-db/tests/gcp_credentials_tests.rs
+  title: Rust implementation module (src/rs/vertebra-db/tests/gcp_credentials_tests.rs)
+- id: src-vertebra-spanner-tests-spanner-wire-tests-rs
+  resource: src/rs/vertebra-spanner/tests/spanner_wire_tests.rs
+  title: Rust implementation module (src/rs/vertebra-spanner/tests/spanner_wire_tests.rs)
+- id: src-vertebra-bigquery-tests-bigquery-wire-tests-rs
+  resource: src/rs/vertebra-bigquery/tests/bigquery_wire_tests.rs
+  title: Rust implementation module (src/rs/vertebra-bigquery/tests/bigquery_wire_tests.rs)
+- id: src-db-init-py
+  resource: src/py/vertebra/db/__init__.py
+  title: Python implementation module (src/py/vertebra/db/__init__.py)
+- id: src-db-arrow-py
+  resource: src/py/vertebra/db/arrow.py
+  title: Python implementation module (src/py/vertebra/db/arrow.py)
+- id: src-db-registry-py
+  resource: src/py/vertebra/db/registry.py
+  title: Python implementation module (src/py/vertebra/db/registry.py)
+- id: src-db-driver-init-py
+  resource: src/py/vertebra/db/driver/__init__.py
+  title: Python implementation module (src/py/vertebra/db/driver/__init__.py)
+- id: src-db-driver-common-py
+  resource: src/py/vertebra/db/driver/_common.py
+  title: Python implementation module (src/py/vertebra/db/driver/_common.py)
+- id: src-db-driver-sync-py
+  resource: src/py/vertebra/db/driver/_sync.py
+  title: Python implementation module (src/py/vertebra/db/driver/_sync.py)
+- id: src-db-driver-async-py
+  resource: src/py/vertebra/db/driver/_async.py
+  title: Python implementation module (src/py/vertebra/db/driver/_async.py)
+- id: src-db-driver-capabilities-py
+  resource: src/py/vertebra/db/driver/capabilities.py
+  title: Python implementation module (src/py/vertebra/db/driver/capabilities.py)
+- id: src-db-postgres-init-py
+  resource: src/py/vertebra/db/adapters/postgres/__init__.py
+  title: Python implementation module (src/py/vertebra/db/adapters/postgres/__init__.py)
+- id: src-db-mysql-init-py
+  resource: src/py/vertebra/db/adapters/mysql/__init__.py
+  title: Python implementation module (src/py/vertebra/db/adapters/mysql/__init__.py)
+- id: src-db-sqlite-init-py
+  resource: src/py/vertebra/db/adapters/sqlite/__init__.py
+  title: Python implementation module (src/py/vertebra/db/adapters/sqlite/__init__.py)
+- id: src-db-oracle-init-py
+  resource: src/py/vertebra/db/adapters/oracle/__init__.py
+  title: Python implementation module (src/py/vertebra/db/adapters/oracle/__init__.py)
+- id: src-db-mssql-init-py
+  resource: src/py/vertebra/db/adapters/mssql/__init__.py
+  title: Python implementation module (src/py/vertebra/db/adapters/mssql/__init__.py)
+- id: src-db-duckdb-init-py
+  resource: src/py/vertebra/db/adapters/duckdb/__init__.py
+  title: Python implementation module (src/py/vertebra/db/adapters/duckdb/__init__.py)
+- id: src-db-bigquery-init-py
+  resource: src/py/vertebra/db/adapters/bigquery/__init__.py
+  title: Python implementation module (src/py/vertebra/db/adapters/bigquery/__init__.py)
+- id: src-db-spanner-init-py
+  resource: src/py/vertebra/db/adapters/spanner/__init__.py
+  title: Python implementation module (src/py/vertebra/db/adapters/spanner/__init__.py)
+- id: src-db-redis-init-py
+  resource: src/py/vertebra/db/adapters/redis/__init__.py
+  title: Python implementation module (src/py/vertebra/db/adapters/redis/__init__.py)
+- id: src-db-valkey-init-py
+  resource: src/py/vertebra/db/adapters/valkey/__init__.py
+  title: Python implementation module (src/py/vertebra/db/adapters/valkey/__init__.py)
+- id: src-db-datafusion-init-py
+  resource: src/py/vertebra/db/adapters/datafusion/__init__.py
+  title: Python implementation module (src/py/vertebra/db/adapters/datafusion/__init__.py)
+- id: src-db-dialer-cloudsql-py
+  resource: src/py/vertebra/db/dialer/cloudsql.py
+  title: Python implementation module (src/py/vertebra/db/dialer/cloudsql.py)
+- id: src-db-dialer-alloydb-py
+  resource: src/py/vertebra/db/dialer/alloydb.py
+  title: Python implementation module (src/py/vertebra/db/dialer/alloydb.py)
+- id: src-tests-integration-db-conformance-py
+  resource: src/py/tests/integration/db/test_driver_conformance.py
+  title: Python implementation module (src/py/tests/integration/db/test_driver_conformance.py)
+- id: src-tests-unit-db-test-native-db-drivers-py
+  resource: src/py/tests/unit/db/test_native_db_drivers.py
+  title: Python implementation module (src/py/tests/unit/db/test_native_db_drivers.py)
+- id: src-tests-unit-db-test-enterprise-olap-drivers-py
+  resource: src/py/tests/unit/db/test_enterprise_olap_drivers.py
+  title: Python implementation module (src/py/tests/unit/db/test_enterprise_olap_drivers.py)
+- id: src-tests-unit-db-test-redis-valkey-resp3-py
+  resource: src/py/tests/unit/db/test_redis_valkey_resp3.py
+  title: Python implementation module (src/py/tests/unit/db/test_redis_valkey_resp3.py)
+- id: src-tests-unit-db-test-bigquery-py
+  resource: src/py/tests/unit/db/test_bigquery.py
+  title: Python implementation module (src/py/tests/unit/db/test_bigquery.py)
+- id: src-tests-unit-db-test-spanner-py
+  resource: src/py/tests/unit/db/test_spanner.py
+  title: Python implementation module (src/py/tests/unit/db/test_spanner.py)
 ---
 
 # Database Drivers & Cloud Dialers
@@ -251,6 +278,28 @@ sources:
 | `AlloyDBConfig` / `SyncAlloyDBDialer` & `AsyncAlloyDBDialer` / `AlloyDBAuthType` | Port 5433. `encode_metadata_exchange` (and Rust `vertebra_db::dialer::AlloyDBDialer::encode_metadata_exchange`) writes a 4-byte big-endian length followed by protobuf-style fields: user agent (tag `0x0A`), auth type (`0x10`, `BUILT_IN=1` / `IAM=2`), token (`0x1A`). `build_handshake_frame` picks IAM or built-in auth from `enable_iam_auth`. |
 
 
+## Adapter tool providers
+
+The shared [`ToolProvider`](../../../../../src/py/vertebra/typing.py)[^src-typing-public-py]
+contract supplies named typed async callables and side-effect-free approval reasons. Its
+runtime-checkable protocol and explicit `ToolPolicyError` are defined in shared typing;
+providers import the public facade and no agent or framework layer. [^src-typing-internal-py]
+
+[`BigQueryToolProvider`](../../../../../src/py/vertebra/db/adapters/bigquery/tools.py)[^src-db-bigquery-tools-py]
+and [`SpannerToolProvider`](../../../../../src/py/vertebra/db/adapters/spanner/tools.py)[^src-db-spanner-tools-py]
+accept an explicit native driver, typed config, or registry alias. Construction and discovery
+are pure; invocation resolves only the owning driver through `provide_driver`. Async native
+calls are awaited and sync calls use `asyncio.to_thread`. Providers classify approval separately
+from execution routing: simple reads remain ungated; mutations and unclassified SQL including
+`WITH` require approval through the consumer. This adds no native SQL execution capability.
+
+BigQuery query and approved DML requests carry the minimum provider, per-call, and native
+configured billing cap. Non-positive effective caps are denied before query execution; optional
+dry-run estimates add an earlier over-budget refusal without replacing the actual request cap.
+Spanner reads retain strong or explicit/default-staleness snapshots. Schema inspection queries
+only `information_schema.tables` and `information_schema.columns`, binding supplied table names.
+Policy refusals use `ToolPolicyError`; native failures preserve their original exception.
+
 ## Transaction ownership and statement completion
 
 Driver transaction scopes roll back on `BaseException`, including cancellation. Async rollback is shielded from AnyIO cancellation scopes. Pooled asyncpg drivers retain both the acquired connection and its transaction object until commit or rollback; DML affected counts come from command status. SQLite completes and closes `RETURNING` statements before reading affected counts and committing. DuckDB batch counts sum affected rows across statements.
@@ -315,3 +364,11 @@ Provenance sources: [^src-vertebra-core-src-shm-rs], [^src-vertebra-db-src-arrow
 [^src-tests-unit-db-test-spanner-py]: `src/py/tests/unit/db/test_spanner.py` — Python implementation module (src/py/tests/unit/db/test_spanner.py).
 
 [^src-sqlalchemy-dialects]: `src/py/vertebra/extensions/sqlalchemy/dialects.py` — SQLAlchemy DBAPI transaction policy.
+
+[^src-typing-public-py]: `src/py/vertebra/typing.py` — Public neutral ToolProvider and ToolPolicyError exports.
+
+[^src-typing-internal-py]: `src/py/vertebra/_typing.py` — Shared neutral callable-map contract and policy exception.
+
+[^src-db-bigquery-tools-py]: `src/py/vertebra/db/adapters/bigquery/tools.py` — Adapter-owned BigQuery operations and billing policies.
+
+[^src-db-spanner-tools-py]: `src/py/vertebra/db/adapters/spanner/tools.py` — Adapter-owned Spanner operations and snapshot policies.

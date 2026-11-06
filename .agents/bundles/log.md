@@ -1,5 +1,19 @@
 # Bundle Activity Log
 
+## [2026-11-05] flow-revise | Align follow-up driver ownership
+
+- Broker pool sharing extracts PEP 249 code directly into neutral `db/dbapi`; SQLAlchemy keeps its async/greenlet and pool integration, and Django consumes the neutral facade. Downstream integration hardens the established surfaces rather than moving them again.
+- SQLSpec wrappers remain extension-owned per-engine packages. Shared artifact metadata belongs to storage; BigQuery Object Table values retain engine ownership. Native placeholder/profile and prepared-result parity require actual native acceptance, with explicit configuration preserved.
+- MCP consumes the neutral ToolProvider already established by adapter-owned classes. Oracle native tenancy requires trusted-context invocation, pool reset/failed-cleanup eviction, and live VPD acceptance. Remaining native adapter organization is recorded as bounded follow-up planning.
+- Independent plan review approves these ownership amendments. Child charters remain drafts; these revisions establish no runtime acceptance and perform no future implementation or hosted writes.
+
+## [2026-11-05] flow-archive | Completed `db-engine-primitives`
+
+- Completed all seven worksheets on `feat/db-engine-primitives`; reviewed source range `954998de..5ad85a1b`. Adapter-owned notification, CDC, embedding and tool implementations consume neutral contracts; the generic agent preserves typed validation, isolated invocation arguments, and caller-bound approval. Native stack dispatch replaces the CTE compiler, and engine-specific session SQL leaves generic RLS.
+- Local verification exits `0`: Python (`2060 passed, 69 skipped, 170 xfailed`), lint/type/stub/Clippy checks, documentation build/artifact checks, and repository review validation. Fresh correctness and quality reviews are clean after remediating typed approval matching and removing obsolete SQL hooks/reader state. Evidence is local CPython 3.12 Linux with actual converter/client-port/REST-fixture checks; live PostgreSQL/GCP/Oracle and hosted platform acceptance remain separate. Oracle context behavior has helper/stand-in acceptance only.
+- Task source commits: `t01=6c07c8fe`, `t02=7cdad03f`, `t03=254149af`, `t04=b41aae46`, `t05=16b7322d`, `t06=cb9abcb7`, `t07=2e3004af`; subsequent reviewed corrections are included through `5ad85a1b`.
+- Curated current domain chapters, ADR-002, Python dispatch/serialization patterns, polyglot testing, and runtime gotchas before deleting the completed spec. Parent continuity advances to `native-postgres-driver`; provider and integration charters retain their remaining acceptance boundaries. No branch delivery or hosted write accompanies this archive.
+
 ## [2026-11-05] flow-archive | Completed `db-layout-and-contract`
 
 - Completed all seven worksheets on `feat/db-updates`; source checkpoint `4ce057e`, documentation checkpoint `1fc52474`, and reviewed range `f741701..1fc52474`. Correctness re-verification resolves PY-01 through PY-08, release/artifact ownership findings, and the adjacent pre-existing GCP HTTP-classification defect. Fresh quality/debloat review has no findings; its minor documentation observation is resolved.

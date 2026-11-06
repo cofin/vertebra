@@ -1,4 +1,4 @@
-"""Google-first zero-weight embedders: VertexEmbedder, GeminiEmbedder, AlloyDbEmbedder, and OracleEmbedder."""
+"""Google Cloud gRPC embedders for Vertex AI and Gemini."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import inspect
 import os
 import urllib.request
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Any
 
 import msgspec
 
@@ -19,19 +18,14 @@ from vertebra._vertebra import (
     VectorCache,
     VectorView,
     decode_gemini_embed_grpc_frame_to_batch,
-    decode_oracle_vector_f32,
-    decode_pgvector_f32,
     encode_gemini_embed_grpc_frame,
 )
-from vertebra.embeddings._base import Embedder, EmbeddingError, MultimodalPart
+from vertebra.embeddings._base import Embedder, MultimodalPart
 from vertebra.utils.module_loader import import_optional
-from vertebra.utils.serializers import decode_json, encode_json
 
 __all__ = (
-    "AlloyDbEmbedder",
     "GeminiEmbedder",
     "GrpcTransportCallable",
-    "OracleEmbedder",
     "VertexEmbedder",
 )
 
@@ -324,188 +318,3 @@ class GeminiEmbedder(VertexEmbedder):
                 raise RuntimeError(f"Gemini embedding gRPC status {grpc_status}: {msg}")
             return resp_body
         return await super()._dispatch_with_auth_retry(url, body)
-
-
-class AlloyDbEmbedder(Embedder):
-    """In-database SQL pushdown embedder for AlloyDB AI (`google_ml_integration` `embedding()`)."""
-
-    def __init__(
-        self,
-        driver: Any,
-        model: str = "gemini-embedding-001",
-        *,
-        dimensions: int = 768,
-        cache: VectorCache | None = None,
-    ) -> None:
-        """Initialize the AlloyDB AI SQL pushdown embedder."""
-        super().__init__(model=model, dimensions=dimensions, cache=cache)
-        self._driver = driver
-
-    def sql_expr(self, column: str) -> str:
-        """Return an inline SQL expression `embedding('<model>', <column>)::vector` for zero-hop queries."""
-        safe_model = self._model.replace("'", "''")
-        return f"embedding('{safe_model}', {column})::vector"
-
-    async def _embed_batch_impl(
-        self,
-        texts: list[str],
-        *,
-        task: str = "document",
-        titles: list[str | None] | None = None,
-    ) -> VectorBatchView:
-        """Execute batch `unnest($2::text[]) WITH ORDINALITY` in AlloyDB and decode binary pgvector frames."""
-        sql = (
-            "SELECT embedding($1, t.txt)::vector FROM unnest($2::text[]) WITH ORDINALITY AS t(txt, ord) ORDER BY t.ord"
-        )
-        rows = await self._driver.fetch_all(sql, (self._model, texts))
-        decoded_rows: list[list[float]] = []
-        for row in rows:
-            cell = row[0] if isinstance(row, (tuple, list)) else row
-            if isinstance(cell, (bytes, bytearray, memoryview)):
-                vec = decode_pgvector_f32(bytes(cell))
-            elif isinstance(cell, str):
-                stripped = cell.strip("[]")
-                vec = [float(x) for x in stripped.split(",") if x.strip()]
-            else:
-                vec = [float(x) for x in cell]
-            decoded_rows.append(vec[: self._dimensions])
-        return VectorBatchView.from_f32_rows(decoded_rows, normalize=True)
-
-
-class OracleEmbedder(Embedder):
-    """In-database SQL pushdown embedder for Oracle 26ai `DBMS_VECTOR.UTL_TO_EMBEDDING(S)`."""
-
-    ORACLE_URL_MAX_LEN = 128
-
-    def __init__(
-        self,
-        driver: Any,
-        model: str = "gemini-embedding-001",
-        *,
-        dimensions: int = 768,
-        provider: str = "vertexai",
-        project: str | None = None,
-        project_number: str | None = None,
-        location: str = "us-central1",
-        credential_name: str = "VERTEX_CRED",
-        endpoint_url: str | None = None,
-        token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
-        cache: VectorCache | None = None,
-    ) -> None:
-        """Initialize the Oracle 26ai SQL pushdown embedder with `:predict` and 128-char URL guards."""
-        super().__init__(model=model, dimensions=dimensions, cache=cache)
-        self._driver = driver
-        self._provider = provider.lower()
-        self._credential_name = credential_name
-        self._token_cache = token_cache
-        self._applied_token_generation = 0
-
-        if self._provider == "vertexai":
-            resolved_model = model if model.endswith(":predict") else f"{model}:predict"
-            proj_id = project_number or project or os.environ.get("GOOGLE_CLOUD_PROJECT") or "default"
-            built_url = (
-                endpoint_url
-                or f"https://{location}-aiplatform.googleapis.com/v1/projects/{proj_id}/locations/{location}/publishers/google/models/"
-            )
-            if len(built_url) > self.ORACLE_URL_MAX_LEN:
-                raise ValueError(
-                    f"Oracle 26ai DBMS_VECTOR vertexai endpoint URL length ({len(built_url)}) exceeds the "
-                    f"128-character PL/SQL buffer ceiling (ORA-06502): {built_url!r}. "
-                    "Pass a numeric project_number (e.g. project_number='123456789012') instead of a long project slug."
-                )
-            self._resolved_model_parameter = resolved_model
-            self._endpoint_url = built_url
-        else:
-            self._resolved_model_parameter = model
-            self._endpoint_url = endpoint_url or ""
-
-    @property
-    def resolved_model_parameter(self) -> str:
-        """Return the model string passed inside the `DBMS_VECTOR` JSON parameter."""
-        return self._resolved_model_parameter
-
-    @property
-    def endpoint_url(self) -> str:
-        """Return the validated provider endpoint URL (`<= 128` chars for `vertexai`)."""
-        return self._endpoint_url
-
-    @property
-    def applied_token_generation(self) -> int:
-        """Return the last token cache generation rotated into `DBMS_VECTOR.CREATE_CREDENTIAL`."""
-        return self._applied_token_generation
-
-    async def _ensure_oracle_credential_fresh(self) -> None:
-        """Rotate `DBMS_VECTOR.CREATE_CREDENTIAL` when the token cache advances to a new generation."""
-        if self._token_cache is None and self._provider == "vertexai":
-            opts = {"use_metadata_server": "true"}
-            try:
-                self._token_cache = AsyncGcpTokenCache(opts)
-            except TypeError:
-                fallback_mod = import_optional("vertebra.storage._store")
-                if fallback_mod is None:
-                    return
-                self._token_cache = fallback_mod.AsyncGcpTokenCache(opts)
-            except ValueError:
-                return
-        if self._token_cache is None:
-            return
-        raw_snap = self._token_cache.get_token()
-        snap = await raw_snap if inspect.isawaitable(raw_snap) else raw_snap
-        gen = int(snap.generation)
-        if gen == self._applied_token_generation:
-            return
-        cred_json = encode_json({"access_token": snap.access_token})
-        plsql = (
-            "BEGIN DBMS_VECTOR.DROP_CREDENTIAL(credential_name => :cred_name); EXCEPTION WHEN OTHERS THEN NULL; END;"
-        )
-        create_plsql = (
-            "BEGIN DBMS_VECTOR.CREATE_CREDENTIAL(credential_name => :cred_name, params => JSON(:cred_params)); END;"
-        )
-        if hasattr(self._driver, "execute"):
-            await self._driver.execute(plsql, {"cred_name": self._credential_name})
-            await self._driver.execute(
-                create_plsql,
-                {"cred_name": self._credential_name, "cred_params": cred_json},
-            )
-        self._applied_token_generation = int(gen)
-
-    async def _embed_batch_impl(
-        self,
-        texts: list[str],
-        *,
-        task: str = "document",
-        titles: list[str | None] | None = None,
-    ) -> VectorBatchView:
-        """Execute `DBMS_VECTOR.UTL_TO_EMBEDDING` and decode Oracle 26ai `0xDB` binary vectors.
-
-        Raises:
-            EmbeddingError: When Oracle returns no row for a text.
-        """
-        await self._ensure_oracle_credential_fresh()
-        params_dict: dict[str, Any] = {
-            "provider": self._provider,
-            "credential_name": self._credential_name,
-            "model": self._resolved_model_parameter,
-            "dimensions": self._dimensions,
-        }
-        if self._endpoint_url:
-            params_dict["url"] = self._endpoint_url
-        params_json = encode_json(params_dict)
-
-        sql = "SELECT DBMS_VECTOR.UTL_TO_EMBEDDING(:text, JSON(:params)) FROM DUAL"
-        decoded_rows: list[list[float]] = []
-        for idx, item_text in enumerate(texts):
-            rows = await self._driver.fetch_all(sql, {"text": item_text, "params": params_json})
-            if not rows:
-                msg = f"Oracle DBMS_VECTOR.UTL_TO_EMBEDDING returned no embedding row for text index {idx}"
-                raise EmbeddingError(msg)
-            cell = rows[0][0] if isinstance(rows[0], (tuple, list)) else rows[0]
-            if isinstance(cell, (bytes, bytearray, memoryview)):
-                vec = decode_oracle_vector_f32(bytes(cell))
-            elif isinstance(cell, str):
-                parsed = decode_json(cell)
-                vec = [float(x) for x in parsed]
-            else:
-                vec = [float(x) for x in cell]
-            decoded_rows.append(vec[: self._dimensions])
-        return VectorBatchView.from_f32_rows(decoded_rows, normalize=True)

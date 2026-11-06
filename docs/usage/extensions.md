@@ -34,7 +34,7 @@ app = Litestar(
 
 - **Route Compiler**: `RouteCompiler` extracts Litestar routes into an optimized route table matched by the native HTTP router.
 - **Fast-Path Dispatch**: `FastPath` dispatches simple handlers directly, bypassing ASGI middleware layers when routes have no custom guards or intermediate transforms.
-- **Realtime Channels**: `ChannelsBackend` integrates with Litestar Channels over shared-memory and multi-engine pub/sub (`DatabaseChannelBackend`), wrapping client disconnection and cleanup in cancellation-shielded scopes to prevent resource leaks.
+- **Realtime Channels**: `ChannelsBackend` integrates with Litestar Channels through the engine-neutral `ChannelBus` in `vertebra.server._channels` (also available from `vertebra.framework.channels`). It provides local fan-out, bounded history, and optional `NotificationSource`, `AsyncChangeSource`, and `ChangeFeed` bridges. Client disconnection and cleanup use cancellation-shielded scopes.
 - **Response Caching**: `ResponseCacheStore` backs Litestar's `ResponseCacheConfig` using Vertebra's in-memory / SHM cache store.
 
 ### Litestar Ecosystem Plugins (`vertebra.extensions.litestar.*`)
@@ -73,11 +73,11 @@ app = Litestar(
 
 ## SQLSpec Integration, Statement Stacks & SHM Proxy (`vertebra.extensions.sqlspec`)
 
-Vertebra provides first-class support for `sqlspec` (`>=0.69.0`) across 8 database engines, CTE statement stacking, and shared-memory connection pooling:
+Vertebra provides first-class support for `sqlspec` (`>=0.69.0`) across 8 database engines, native statement pipelining, and shared-memory connection pooling:
 
 - **Native Drivers**: Typed sync and async database configs across relational, analytical, and cloud-native engines (`PostgreSQLSyncConfig`, `PostgreSQLAsyncConfig`, `MySQLSyncConfig`, `MySQLAsyncConfig`, `SQLiteSyncConfig`, `SQLiteAsyncConfig`, `OracleSyncConfig`, `OracleAsyncConfig`, `MSSQLSyncConfig`, `MSSQLAsyncConfig`, `DuckDBSyncConfig`, `DuckDBAsyncConfig`, `BigQuerySyncConfig`, `BigQueryAsyncConfig`, `SpannerSyncConfig`, `SpannerAsyncConfig`).
 - **Shared-Memory Proxy**: `ProxySyncConfig` and `ProxyAsyncConfig` (`ProxySyncDriver`, `ProxyAsyncDriver`) lease pooled connections over shared memory from the parent process so multi-worker deployments never multiply connection counts.
-- **CTE Statement Pipelining**: Execute stacked queries via `SyncQueryPipeline / AsyncQueryPipeline` in a single round-trip.
+- **Native Statement Pipelining**: SQLSpec `execute_stack` uses `SyncPipelineCapable` / `AsyncPipelineCapable` through `driver.pipeline()` for supported stacks and returns one ordered result per operation. Other stacks use sequential execution with transaction boundaries.
 - **Change Feed & CDC**: `ChangeFeedSyncEventBackend` and `ChangeFeedAsyncEventBackend` implement `sqlspec.extensions.events` protocols over PostgreSQL logical replication (`pg_logical_emit_message`) with automatic Parquet spillover for payloads exceeding 7,500 bytes.
 - **Object Storage & Arrow Export**: `ObjectStoreBackend` integrates with `sqlspec.storage.storage_registry` and provides PyArrow IPC and Parquet dataset streaming.
 

@@ -17,6 +17,8 @@ if TYPE_CHECKING:
         strip_pg_jsonb_header,
     )
     from vertebra.db.adapters.postgres.driver import AsyncPostgreSQLDriver, SyncPostgreSQLDriver
+    from vertebra.db.adapters.postgres.embeddings import PostgresEmbeddingPushdown
+    from vertebra.db.adapters.postgres.notify import PostgresNotificationSource, PostgresNotifyConfig
     from vertebra.db.arrow import (
         ARROW_SHM_THRESHOLD_ROWS,
         ArrowCursor,
@@ -27,6 +29,7 @@ if TYPE_CHECKING:
     )
 
 __all__ = (
+    "PostgresEmbeddingPushdown",
     "ARROW_SHM_THRESHOLD_ROWS",
     "PGCOPY_BINARY_SIGNATURE",
     "ArrowCursor",
@@ -34,6 +37,8 @@ __all__ = (
     "PoolerMode",
     "PostgreSQLConfig",
     "PostgreSQLCore",
+    "PostgresNotificationSource",
+    "PostgresNotifyConfig",
     "SyncPostgreSQLDriver",
     "_hydrate_rows_with_schema",
     "_table_to_rows_and_cols",
@@ -46,13 +51,16 @@ __all__ = (
 )
 
 __lazy_modules__ = [
+    "vertebra.db.adapters.postgres.embeddings",
     "vertebra.db.adapters.postgres.config",
     "vertebra.db.adapters.postgres.core",
     "vertebra.db.adapters.postgres.driver",
+    "vertebra.db.adapters.postgres.notify",
     "vertebra.db.arrow",
 ]
 
 _EXPORT_MAP: dict[str, tuple[str, str]] = {
+    "PostgresEmbeddingPushdown": ("vertebra.db.adapters.postgres.embeddings", "PostgresEmbeddingPushdown"),
     "ARROW_SHM_THRESHOLD_ROWS": ("vertebra.db.arrow", "ARROW_SHM_THRESHOLD_ROWS"),
     "PGCOPY_BINARY_SIGNATURE": ("vertebra.db.adapters.postgres.core", "PGCOPY_BINARY_SIGNATURE"),
     "ArrowCursor": ("vertebra.db.arrow", "ArrowCursor"),
@@ -60,6 +68,8 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "PoolerMode": ("vertebra.db.adapters.postgres.config", "PoolerMode"),
     "PostgreSQLConfig": ("vertebra.db.adapters.postgres.config", "PostgreSQLConfig"),
     "PostgreSQLCore": ("vertebra.db.adapters.postgres.core", "PostgreSQLCore"),
+    "PostgresNotificationSource": ("vertebra.db.adapters.postgres.notify", "PostgresNotificationSource"),
+    "PostgresNotifyConfig": ("vertebra.db.adapters.postgres.notify", "PostgresNotifyConfig"),
     "SyncPostgreSQLDriver": ("vertebra.db.adapters.postgres.driver", "SyncPostgreSQLDriver"),
     "_hydrate_rows_with_schema": ("vertebra.db.arrow", "_hydrate_rows_with_schema"),
     "_table_to_rows_and_cols": ("vertebra.db.arrow", "_table_to_rows_and_cols"),

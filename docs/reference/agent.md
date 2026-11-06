@@ -40,6 +40,41 @@ Agent runtime (`AgentRuntime`), Model Context Protocol (`MCPRegistry`, `MCPConfi
       members:
         - invoke
 
+## Provider Tools (`vertebra.agent.tools`)
+
+`build_tools` adapts a `vertebra.typing.ToolProvider` into validated `Tool` objects.
+Native adapters own their operations and policies; construction resolves no connection.
+Operations use named parameters; positional-only and variadic signatures are rejected.
+
+```python
+from vertebra.agent import ConfirmationGate, build_tools
+from vertebra.db.adapters.bigquery import BigQueryConfig, BigQueryToolProvider
+
+gate = ConfirmationGate()
+tools = build_tools(
+    BigQueryToolProvider(
+        config=BigQueryConfig(project_id="my-project"),
+        maximum_bytes_billed=1_000_000,
+    ),
+    confirmation_gate=gate,
+)
+rows = await tools["bigquery_query"].invoke(
+    {"sql": "SELECT @id AS id", "params": {"id": 1}}
+)
+```
+
+Spanner's adapter exports `SpannerToolProvider` with optional read-only snapshot staleness.
+Each provider accepts a native driver, config, or registry alias resolved at invocation.
+Mutations and ambiguous SQL, including `WITH`, require approval; approval does not expand
+native SQL support. Retry with the approved `confirmation_token` input. Tickets bind to
+the operation, validated arguments including defaults, and injected caller identity.
+BigQuery sends the minimum provider, per-call, and configured billing cap to native
+execution, including when its optional dry-run guard is disabled.
+
+::: vertebra.agent.tools.build_tools
+    options:
+      heading_level: 4
+
 ## Model Context Protocol (`vertebra.agent.mcp`)
 
 ::: vertebra.agent.mcp.models.MCPConfig

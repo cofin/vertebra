@@ -21,9 +21,7 @@ from vertebra.db.adapters.valkey import (
     SyncValkeyDriver,
     ValkeyConfig,
 )
-from vertebra.extensions.litestar.channels import ChannelsBackend
 from vertebra.extensions.litestar.store import MemoryStore
-from vertebra.framework.channels import ChannelBus
 from vertebra.framework.stores import KeyValueStore
 
 
@@ -275,8 +273,8 @@ async def test_valkey_resp3_client_tracking_and_litestar_integration() -> None:
 
 
 @pytest.mark.anyio
-async def test_key_value_backend_and_channel_bus() -> None:
-    """KeyValueStore and ChannelBus must provide unified caching and pub/sub streaming."""
+async def test_key_value_backend_and_redis_pubsub() -> None:
+    """Key/value caching and direct Redis subscriptions preserve their native behavior."""
     kv = KeyValueStore.from_valkey("memory://")
     await kv.set("a", "1")
     await kv.set_many({"b": "2", "c": "3"})
@@ -291,34 +289,26 @@ async def test_key_value_backend_and_channel_bus() -> None:
     await ns.set("user", "bob")
     assert await ns.get("user") == b"bob"
 
-    bus = ChannelBus.from_redis("memory://")
-    assert isinstance(bus.backend, ChannelBus)
-    await bus.on_startup()
-    await bus.subscribe(["events"])
-
-    stream = bus.stream_events()
-
-    async def _publish_soon() -> None:
-        await asyncio.sleep(0.02)
-        await bus.publish(b"msg1", ["events"])
-
-    pub_task = asyncio.create_task(_publish_soon())
-    channel, data = await anext(stream)
-    assert channel == "events"
-    assert data == b"msg1"
-    await pub_task
-
-    await bus.on_shutdown()
+    driver = AsyncRedisDriver(RedisConfig(url="memory://"))
+    subscription = await driver.subscribe("events")
+    assert await driver.publish("events", b"msg1\x00\xff") == 1
+    assert [event async for event in subscription] == [("events", b"msg1\x00\xff")]
+    await driver.unsubscribe("events")
+    await driver.publish("events", b"unsubscribed")
+    assert await driver.drain_messages() == []
+    await driver.close()
     await kv.close()
 
 
 @pytest.mark.anyio
 async def test_resp3_loopback_server_pipeline_evalsha_and_valkey_push_invalidation() -> None:
-    """AsyncValkeyDriver, KeyValueBackend, and ChannelBus operate over live loopback RESP3 server."""
+    """Valkey caching and pub/sub execute against a synchronized loopback RESP3 server."""
     stored_kv: dict[str, bytes] = {}
     cached_scripts: set[str] = set()
 
     subscriber_writers: list[asyncio.StreamWriter] = []
+    subscription_ready = asyncio.Event()
+    published_frames: list[tuple[str, bytes]] = []
 
     async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         buf = bytearray()
@@ -376,6 +366,7 @@ async def test_resp3_loopback_server_pipeline_evalsha_and_valkey_push_invalidati
                     elif cmd == "PUBLISH":
                         ch = frame[1].decode("utf-8") if isinstance(frame[1], bytes) else str(frame[1])
                         msg = frame[2] if isinstance(frame[2], bytes) else str(frame[2]).encode("utf-8")
+                        published_frames.append((ch, msg))
                         for sub_w in subscriber_writers:
                             sub_w.write(
                                 f"*3\r\n$7\r\nmessage\r\n${len(ch)}\r\n{ch}\r\n${len(msg)}\r\n".encode("ascii")
@@ -389,6 +380,8 @@ async def test_resp3_loopback_server_pipeline_evalsha_and_valkey_push_invalidati
                     else:
                         writer.write(b"+OK\r\n")
                     await writer.drain()
+                    if cmd == "SUBSCRIBE":
+                        subscription_ready.set()
         writer.close()
 
     server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
@@ -418,23 +411,15 @@ async def test_resp3_loopback_server_pipeline_evalsha_and_valkey_push_invalidati
     with pytest.raises(Resp3Error, match="ERR unknown command"):
         await driver.execute_command("UNKNOWN")
 
-    bus = ChannelBus(ChannelsBackend(driver=driver))
-    await bus.on_startup()
-    await bus.subscribe(["events"])
+    stream = driver.subscribe("events").__aiter__()
+    next_message = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(subscription_ready.wait(), timeout=2)
+    assert len(subscriber_writers) == 1
+    assert await driver.publish("events", b"remote_data\x00\xff") == 1
+    assert await asyncio.wait_for(next_message, timeout=2) == ("events", b"remote_data\x00\xff")
+    assert published_frames == [("events", b"remote_data\x00\xff")]
+    await stream.aclose()
 
-    stream = bus.stream_events()
-
-    async def _publish_remote() -> None:
-        await asyncio.sleep(0.02)
-        await bus.publish("remote_data", ["events"])
-
-    pub_task = asyncio.create_task(_publish_remote())
-    channel, payload = await anext(stream)
-    assert channel == "events"
-    assert payload == b"remote_data"
-    await pub_task
-
-    await bus.on_shutdown()
     await kv.close()
     await driver.close()
     for w in subscriber_writers:

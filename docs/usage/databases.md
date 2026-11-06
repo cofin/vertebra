@@ -1,6 +1,6 @@
 # Databases & Native Drivers
 
-Vertebra integrates first-class **SQLSpec** adapters (`vertebra.extensions.sqlspec`) with native Rust shared-memory database drivers (`vertebra.db` / `vertebra-db`). Each engine lives in its own adapter package under `vertebra.db.adapters.<engine>`, keeping `import vertebra.db` lightweight until a concrete driver is requested. See the focused guides for [Query Pipelines & CTE Stacking](query-pipelines.md), [Cloud SQL & AlloyDB Dialers](cloud-dialers.md), [RLS, CDC & Arrow Analytics](analytics-and-cdc.md), and [SQLSpec & SQLAlchemy Extensions](extensions.md).
+Vertebra integrates first-class **SQLSpec** adapters (`vertebra.extensions.sqlspec`) with native Rust shared-memory database drivers (`vertebra.db` / `vertebra-db`). Each engine lives in its own adapter package under `vertebra.db.adapters.<engine>`, keeping `import vertebra.db` lightweight until a concrete driver is requested. See the focused guides for [Cloud SQL & AlloyDB Dialers](cloud-dialers.md), [RLS, CDC & Arrow Analytics](analytics-and-cdc.md), and [SQLSpec & SQLAlchemy Extensions](extensions.md).
 
 ```mermaid
 flowchart LR
@@ -156,11 +156,27 @@ except (SpannerError, NotFoundError, DatabaseError) as exc:
 
 Cancelling an awaited async driver call aborts its background Rust task at the next suspension point; RPCs already transmitted on the wire may still complete server-side. In debug builds, an unexpected Rust task panic surfaces on the awaiting coroutine as `vertebra._vertebra.TaskPanicError` rather than leaving the future pending.
 
+## Native Statement Pipelining
+
+Drivers implementing `SyncPipelineCapable` or `AsyncPipelineCapable` expose `driver.pipeline()`:
+
+```python
+with driver.pipeline() as pipe:
+    pipe.select("SELECT id FROM orders WHERE account_id = $1", (account_id,))
+    pipe.select(
+        "SELECT COUNT(*) AS total FROM orders WHERE account_id = $1", (account_id,)
+    )
+    order_rows, total_rows = pipe.results()
+```
+
+The async form uses `async with driver.pipeline()` and `await pipe.results()`. Results follow queue order. Statements are independent SQL operations; each result contains its own rows or affected count.
+
+SQLSpec `execute_stack` uses the capability when the stack contains multiple `execute` operations and `continue_on_error=False`. SQLSpec prepares each statement and its binds once, and its processed row metadata selects the native `select` or `execute` operation. Other stacks execute sequentially through the corresponding adapter methods in a transaction. With `continue_on_error=True`, each operation commits or rolls back separately, captures its error, and permits later operations to run. Spanner retains native batch DML for raw all-DML stacks; BigQuery retains its session transaction behavior.
+
 ## Topic Guides
 
 | Guide | What You Will Learn |
 | --- | --- |
-| **[Query Pipelines & CTE Stacking](query-pipelines.md)** | Stack multi-step reads and mutations into a single PostgreSQL CTE round-trip with `SyncQueryPipeline` / `AsyncQueryPipeline` and `RelOverlay`. |
 | **[Cloud SQL & AlloyDB Dialers](cloud-dialers.md)** | Connect directly to Cloud SQL (`:3307`) and AlloyDB (`:5433`) with ephemeral mTLS and IAM auth without sidecars. |
 | **[RLS, CDC & Arrow Analytics](analytics-and-cdc.md)** | Enforce `TenantPredicate` Row-Level Security, stream `ChangeFeed` events, and query zero-copy `ArrowCursor` tables. |
 | **[SQLSpec, SQLAlchemy & Extensions](extensions.md)** | Configure `SQLSpecPlugin`, Advanced Alchemy, SQLAlchemy 2.1 `+vtb` dialects, `Vector`, and `BinaryJSON` column types. |

@@ -289,3 +289,14 @@ async def test_cache_store_delete_all_removes_only_its_prefix() -> None:
     assert await driver.get("other:keep") == b"x"
     assert await driver.get("vertebra:a") is None
     await driver.close()
+
+
+def test_channels_backend_accepts_engine_neutral_bus() -> None:
+    """Starlette attachments accept both the adapter and the shared channel bus."""
+    from vertebra.server._channels import ChannelBus
+
+    assert issubclass(ChannelsBackend, ChannelBus)
+    app = SimpleNamespace(state=SimpleNamespace())
+    bus = ChannelBus(history=2)
+    assert attach_channels(app, bus) is bus
+    assert app.state.channels is bus

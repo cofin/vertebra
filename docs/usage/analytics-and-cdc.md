@@ -1,42 +1,97 @@
 # Row-Level Security, CDC & Arrow Analytics
 
-Vertebra combines multi-tenant PostgreSQL Row-Level Security (`vertebra.db.rls`), logical replication Change Data Capture (`vertebra.db.cdc`), and zero-copy shared-memory Apache Arrow / DuckDB / DataFusion analytics.
+Vertebra provides dialect-agnostic tenant predicates, engine-neutral change feeds,
+and shared-memory Apache Arrow / DuckDB / DataFusion analytics.
 
-## Multi-Tenant Row-Level Security (`vertebra.db.rls`)
+## Tenant Predicates and Session Settings
 
-`TenantPredicate` and `TenantScopeConfig` enforce PostgreSQL tenant isolation by combining transaction-local session GUCs (`SELECT set_config('app.tenant_id', $1, true)`) with planner-unfenced predicates (`alias.tenant_id = $1::uuid`, casting the parameter rather than the column so B-tree indexes remain usable):
+`TenantScopeConfig` names the tenant column, the adapter's session setting, and an
+optional type cast. `TenantPredicate` renders an ANSI filter with a caller-selected
+placeholder. The cast applies to the parameter so the column remains indexable.
+Tenant values must be supplied separately as query parameters.
 
 ```python
 from vertebra.db.rls import TenantPredicate, TenantScopeConfig
 
-tenant_id = "0192f0a0-0000-7000-8000-000000000001"
-scope = TenantScopeConfig(tenant_column="tenant_id", parameter_cast="uuid")
+scope = TenantScopeConfig(
+    setting_name="app.tenant_id",
+    tenant_column="tenant_id",
+    parameter_cast="UUID",
+)
 predicate = TenantPredicate(
     table_alias="o",
-    tenant_value=tenant_id,
+    tenant_value="0192f0a0-0000-7000-8000-000000000001",
     config=scope,
 )
-guc_sql, guc_params = TenantPredicate.build_session_guc_sql(
-    tenant_id,
-    scope,
-)
-where_clause = predicate.to_sql_fragment(param_index=1)
+where_clause = predicate.to_sql_fragment(":tenant_id")
 ```
+
+The fragment is `o.tenant_id = CAST(:tenant_id AS UUID)`. Without `parameter_cast`,
+it is `o.tenant_id = :tenant_id`; the default placeholder is `?`.
+`guc_name` and `TenantPredicate.build_session_guc_sql()` have been removed.
+
+PostgreSQL session SQL belongs to `PostgreSQLCore`:
+
+```python
+from vertebra.db.adapters.postgres.core import PostgreSQLCore
+
+setting_sql, setting_params = PostgreSQLCore.build_session_guc_sql(
+    str(predicate.tenant_value), scope
+)
+postgres_filter = PostgreSQLCore.build_tenant_predicate_sql(predicate)
+```
+
+The SQLSpec PostgreSQL adapters' `apply_tenant_predicate()` prepares the session
+statement for psycopg `%s` or asyncpg `$N` binds and returns the PostgreSQL filter.
+Setter failures propagate unchanged. Other base SQLSpec adapters raise
+`NotSupportedError`. BigQuery and Spanner configs and drivers reject a configured
+`tenant_predicate` before initialization; ordinary unconfigured sessions retain
+their existing query, script, Arrow, batch, and snapshot behavior.
+
+`OracleCore.build_session_context_sql()` validates the namespace and final segment
+of `setting_name`, then returns named context binds. The current Oracle driver
+records these values in its SQLite stand-in. This verifies helper and emulation
+behavior only. Live `DBMS_SESSION.SET_CONTEXT` requires a trusted package associated
+with `CREATE CONTEXT`; trusted-package provisioning, session reset, and live Oracle
+acceptance belong to the native Oracle driver work. See the
+[Oracle DBMS_SESSION documentation](https://docs.oracle.com/en/database/oracle/oracle-database/26/arpls/DBMS_SESSION.html).
+Vertebra does not provision database RLS or VPD policies.
 
 ## Change Data Capture (`vertebra.db.cdc`)
 
-`ChangeFeed` (`CDCConfig`, `ChangeEvent`) and the `SyncChangeSource` / `AsyncChangeSource` capability protocols (`vertebra.db.driver`) stream logical replication and Cloud Spanner change-stream events with replay cursors (`replay_since()`) and Parquet archival (`flush_to_parquet()`):
+`ChangeFeed` (`CDCConfig`, `ChangeEvent`) and the `SyncChangeSource` / `AsyncChangeSource` capability protocols (`vertebra.db.driver`) provide event envelopes and change-stream capabilities with replay cursors (`replay_since()`) and Parquet archival (`flush_to_parquet()`):
 
 ```python
+from vertebra.db.adapters.postgres import PostgresNotifyConfig
 from vertebra.db.cdc import CDCConfig, ChangeFeed
 
 feed = ChangeFeed(
     CDCConfig(
-        replication_slot_name="vertebra_orders_cdc",
-        publication_name="orders_pub",
+        channel="orders",
+        spill_prefix="cdc/orders",
+        max_memory_spills=256,
     )
 )
+notify_config = PostgresNotifyConfig(
+    channel="orders",
+    replication_slot_name="vertebra_orders_cdc",
+    publication_name="orders_pub",
+)
 ```
+
+`PostgresNotificationSource(driver, notify_config, change_feed=feed)` publishes
+parameterized PostgreSQL notifications using the feed's spill envelopes. Its
+`build_emit_message_sql()` helper builds logical replication message SQL. Live
+`LISTEN` streaming requires a driver that implements `listen_notifications()`.
+In-memory spills use a bounded LRU cache; hydrating an evicted spill raises
+`KeyError`. Attach a `SyncObjectStore` for persistent spill hydration; storage
+errors propagate to the caller.
+
+Spanner readers live in `vertebra.db.adapters.spanner.change_stream` as
+`SyncSpannerChangeStreamSource` and `AsyncSpannerChangeStreamSource`. Bind stream
+defaults such as `start_timestamp` in the constructor; the resulting `stream()`
+method accepts no required arguments and satisfies `SyncChangeSource` or
+`AsyncChangeSource`. They are not exported from `vertebra.db.cdc`.
 
 ## Zero-Copy Arrow SHM (`ArrowCursor`), DuckDB & DataFusion
 

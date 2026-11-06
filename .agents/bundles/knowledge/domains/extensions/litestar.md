@@ -1,59 +1,77 @@
 ---
 type: Concept
-title: "Framework Extensions: Litestar, Starlette, FastAPI, Flask, and Django"
-description: "First-class framework plugins, matchit 0.9 RouteCompiler, Rust middleware offload specs, zero-copy C-API FastPath dispatch, and ecosystem bridges across Litestar, Starlette, FastAPI, Flask, and Django."
+title: 'Framework Extensions: Litestar, Starlette, FastAPI, Flask, and Django'
+description: First-class framework plugins, matchit 0.9 RouteCompiler, Rust middleware
+  offload specs, zero-copy C-API FastPath dispatch, and ecosystem bridges across Litestar,
+  Starlette, FastAPI, Flask, and Django.
 status: stable
-tags: [domains, extensions, litestar, starlette, fastapi, flask, django, asgi, wsgi, fastpath]
+tags:
+- domains
+- extensions
+- litestar
+- starlette
+- fastapi
+- flask
+- django
+- asgi
+- wsgi
+- fastpath
 generated:
   by: flow/0.26.0
-  at: "2026-11-04T04:33:00Z"
+  at: '2026-11-04T04:33:00Z'
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+- by: agent:codex
+  at: '2026-11-05T06:09:26Z'
+  commit: 5ad85a1b406f5b3ed01ce8d1f536e02383bc89e1
+- by: agent:flow-setup
+  at: '2026-11-04T04:33:00Z'
+  commit: f741701
 sources:
-  - id: src-extensions-litestar-init-py
-    resource: src/py/vertebra/extensions/litestar/__init__.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/__init__.py)"
-  - id: src-extensions-litestar-config-py
-    resource: src/py/vertebra/extensions/litestar/config.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/config.py)"
-  - id: src-extensions-litestar-plugin-py
-    resource: src/py/vertebra/extensions/litestar/plugin.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/plugin.py)"
-  - id: src-extensions-litestar-router-py
-    resource: src/py/vertebra/extensions/litestar/router.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/router.py)"
-  - id: src-extensions-litestar-offload-py
-    resource: src/py/vertebra/extensions/litestar/offload.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/offload.py)"
-  - id: src-extensions-litestar-fastpath-py
-    resource: src/py/vertebra/extensions/litestar/fastpath.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/fastpath.py)"
-  - id: src-extensions-litestar-channels-py
-    resource: src/py/vertebra/extensions/litestar/channels.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/channels.py)"
-  - id: src-extensions-litestar-store-py
-    resource: src/py/vertebra/extensions/litestar/store.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/store.py)"
-  - id: src-extensions-starlette-init-py
-    resource: src/py/vertebra/extensions/starlette/__init__.py
-    title: "Python implementation module (src/py/vertebra/extensions/starlette/__init__.py)"
-  - id: src-extensions-fastapi-init-py
-    resource: src/py/vertebra/extensions/fastapi/__init__.py
-    title: "Python implementation module (src/py/vertebra/extensions/fastapi/__init__.py)"
-  - id: src-extensions-flask-init-py
-    resource: src/py/vertebra/extensions/flask/__init__.py
-    title: "Python implementation module (src/py/vertebra/extensions/flask/__init__.py)"
-  - id: src-extensions-django-init-py
-    resource: src/py/vertebra/extensions/django/__init__.py
-    title: "Python implementation module (src/py/vertebra/extensions/django/__init__.py)"
-  - id: src-server-routing-py
-    resource: src/py/vertebra/server/_routing.py
-    title: "Python implementation module (src/py/vertebra/server/_routing.py)"
-  - id: src-server-fastpath-py
-    resource: src/py/vertebra/server/_fastpath.py
-    title: "Python implementation module (src/py/vertebra/server/_fastpath.py)"
+- id: src-extensions-litestar-init-py
+  resource: src/py/vertebra/extensions/litestar/__init__.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/__init__.py)
+- id: src-extensions-litestar-config-py
+  resource: src/py/vertebra/extensions/litestar/config.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/config.py)
+- id: src-extensions-litestar-plugin-py
+  resource: src/py/vertebra/extensions/litestar/plugin.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/plugin.py)
+- id: src-extensions-litestar-router-py
+  resource: src/py/vertebra/extensions/litestar/router.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/router.py)
+- id: src-extensions-litestar-offload-py
+  resource: src/py/vertebra/extensions/litestar/offload.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/offload.py)
+- id: src-extensions-litestar-fastpath-py
+  resource: src/py/vertebra/extensions/litestar/fastpath.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/fastpath.py)
+- id: src-extensions-litestar-channels-py
+  resource: src/py/vertebra/extensions/litestar/channels.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/channels.py)
+- id: src-extensions-litestar-store-py
+  resource: src/py/vertebra/extensions/litestar/store.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/store.py)
+- id: src-extensions-starlette-init-py
+  resource: src/py/vertebra/extensions/starlette/__init__.py
+  title: Python implementation module (src/py/vertebra/extensions/starlette/__init__.py)
+- id: src-extensions-fastapi-init-py
+  resource: src/py/vertebra/extensions/fastapi/__init__.py
+  title: Python implementation module (src/py/vertebra/extensions/fastapi/__init__.py)
+- id: src-extensions-flask-init-py
+  resource: src/py/vertebra/extensions/flask/__init__.py
+  title: Python implementation module (src/py/vertebra/extensions/flask/__init__.py)
+- id: src-extensions-django-init-py
+  resource: src/py/vertebra/extensions/django/__init__.py
+  title: Python implementation module (src/py/vertebra/extensions/django/__init__.py)
+- id: src-server-channels-py
+  resource: src/py/vertebra/server/_channels.py
+  title: Engine-neutral channel fan-out and capability bridges
+- id: src-server-routing-py
+  resource: src/py/vertebra/server/_routing.py
+  title: Python implementation module (src/py/vertebra/server/_routing.py)
+- id: src-server-fastpath-py
+  resource: src/py/vertebra/server/_fastpath.py
+  title: Python implementation module (src/py/vertebra/server/_fastpath.py)
 ---
 
 # Framework Extensions: Litestar, Starlette, FastAPI, Flask, and Django
@@ -72,7 +90,7 @@ Vertebra provides symmetric, zero-coupling extensions for **Litestar** (`vertebr
 - **[`RouteCompiler`](../../../../../src/py/vertebra/extensions/litestar/router.py)[^src-extensions-litestar-router-py] / [`RouterTable`](../../../../../src/py/vertebra/extensions/litestar/router.py)**: Introspects Litestar routes into [`RouteEntry`](../../../../../src/py/vertebra/extensions/litestar/router.py) items (`RouteCompiler.compile`, `RouteCompiler.extract_entries`, `extract_routes`, `extract_route_entries`) and rewrites `{param:type}` paths to `matchit 0.9` syntax (`normalize_path_for_matchit`, `convert_path_params`).
 - **[`offload_middlewares`](../../../../../src/py/vertebra/extensions/litestar/offload.py)[^src-extensions-litestar-offload-py] / [`OffloadPlan`](../../../../../src/py/vertebra/extensions/litestar/offload.py)**: Extracts Litestar `CORSConfig`, `CompressionConfig`, static mounts (reading `_static_files_config` without triggering Litestar deprecation warnings), and `OpenAPIConfig` into frozen `CorsOffloadSpec`, `CompressionOffloadSpec`, `StaticMountOffloadSpec`, and `OpenApiOffloadSpec` descriptors (`to_server_config`, `to_server_config_json`).
 - **[`FastPath`](../../../../../src/py/vertebra/extensions/litestar/fastpath.py)[^src-extensions-litestar-fastpath-py] & [`CompiledRoute`](../../../../../src/py/vertebra/extensions/litestar/fastpath.py)**: Frozen `msgspec.Struct(gc=False, kw_only=True)` route table compiled by `compile_fastpath_routes`. `_compile_direct_signature_plan` unwraps Litestar 2.x/3.0 `FromPath[T]`, `FromQuery[T]`, and `JSONBody[T]` (`Annotated` markers) into zero-`Request` `_DirectSignaturePlan` plans while falling back to `KwargsModel` for constrained `Parameter(gt=...)` / `FromHeader` / `FromCookie` markers. `FastPath.dispatch` and `FastPath.wrap_asgi` read bodies zero-copy via `AsgiScope.body_bytes()`, emit unary responses in 1 C-API call via `send.send_raw_response`, close unawaited `ASGIFileResponse.file_info` coroutines when intercepting `http.response.pathsend`, and route DI/DTO/`File`/`ServerSentEvent` handlers through [`dispatch_handler_direct`](../../../../../src/py/vertebra/extensions/litestar/fastpath.py).
-- **[`ChannelsBackend`](../../../../../src/py/vertebra/extensions/litestar/channels.py)[^src-extensions-litestar-channels-py]** & **[`MemoryStore`](../../../../../src/py/vertebra/extensions/litestar/store.py)[^src-extensions-litestar-store-py]**: Native `vertebra.db.channels.ChannelBus` (`Memory`, `SHM`, `Redis`, `Valkey`, `PostgreSQL`, `Oracle`) and monotonic-clock TTL `ResponseCacheStore` implementations with zero dependency on `vertebra.framework.*`. `MemoryStore` prefixes keys with `key_prefix` (default `vertebra`), deletes with `SCAN` + `UNLINK`, sends `PX` TTLs, and returns `None` from `expires_in` for keys without expiry.
+- **[`ChannelsBackend`](../../../../../src/py/vertebra/extensions/litestar/channels.py)[^src-extensions-litestar-channels-py]** & **[`MemoryStore`](../../../../../src/py/vertebra/extensions/litestar/store.py)[^src-extensions-litestar-store-py]**: Engine-neutral [`vertebra.server._channels.ChannelBus`](../../../../../src/py/vertebra/server/_channels.py)[^src-server-channels-py] and monotonic-clock TTL `ResponseCacheStore` implementations with zero dependency on `vertebra.framework.*`. `ChannelsBackend` subclasses `ChannelBus`, re-exported from `vertebra.framework.channels`, with local fan-out, bounded byte history, explicit `NotificationSource` and `AsyncChangeSource` pumps, and `ChangeFeed` spill hydration. A shared notification source/feed delivers local publications once; absent feeds retain local fan-out. A change source sharing the bus feed already delivers on its event topic, so the explicit pump skips that duplicate. A different channel override adds one delivery on the override topic while preserving independent feed-topic observation; an equal override delivers once on the original topic. Sources without a shared non-null feed retain pump delivery. Litestar streams use protected queue registration hooks and shield queue cleanup during cancellation. Engine transport factories and `vertebra.db.channels` are removed. `MemoryStore` prefixes keys with `key_prefix` (default `vertebra`), deletes with `SCAN` + `UNLINK`, sends `PX` TTLs, and returns `None` from `expires_in` for keys without expiry.
 
 ## 2. Starlette, FastAPI, Flask & Django Extensions
 
@@ -116,3 +134,5 @@ Provenance sources: [^src-extensions-litestar-init-py].
 [^src-extensions-django-init-py]: `src/py/vertebra/extensions/django/__init__.py` — Python implementation module (src/py/vertebra/extensions/django/__init__.py).
 [^src-server-routing-py]: `src/py/vertebra/server/_routing.py` — Python implementation module (src/py/vertebra/server/_routing.py).
 [^src-server-fastpath-py]: `src/py/vertebra/server/_fastpath.py` — Python implementation module (src/py/vertebra/server/_fastpath.py).
+
+[^src-server-channels-py]: `src/py/vertebra/server/_channels.py` — Engine-neutral channel fan-out, bounded replay, and capability stream bridges.

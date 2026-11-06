@@ -1,13 +1,5 @@
-"""Pub/sub channel bus backed by SHM rings, Valkey, Redis, PostgreSQL LISTEN/NOTIFY, Oracle AQ, and CDC."""
+"""Framework channel bus for local fan-out and capability stream bridges."""
 
-from __future__ import annotations
-
-from vertebra.db.channels import DatabaseChannelBackend
+from vertebra.server._channels import ChannelBus
 
 __all__ = ("ChannelBus",)
-
-
-class ChannelBus(DatabaseChannelBackend):
-    """Framework pub/sub channel bus backed by SHM ring buffers, Valkey, Redis, PostgreSQL, or Oracle AQ."""
-
-    __slots__ = ()

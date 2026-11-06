@@ -184,11 +184,12 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
+        maximum_bytes_billed: int | None = None,
         **kwargs: Any,
     ) -> list[Any]:
         """Execute a `SELECT` query and return rows as dictionaries or `schema_type` instances."""
         _ = kwargs
-        raw = self._run_query_sync(sql, parameters)
+        raw = self._run_query_sync(sql, parameters, maximum_bytes_billed=maximum_bytes_billed)
         return BigQueryCore.hydrate_query_rows(
             raw.get("columns", ()),
             raw.get("rows", ()),
@@ -672,11 +673,12 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
+        maximum_bytes_billed: int | None = None,
         **kwargs: Any,
     ) -> list[Any]:
         """Execute a `SELECT` query and return rows as dictionaries or `schema_type` instances."""
         _ = kwargs
-        raw = await self._run_query_async(sql, parameters)
+        raw = await self._run_query_async(sql, parameters, maximum_bytes_billed=maximum_bytes_billed)
         return BigQueryCore.hydrate_query_rows(
             raw.get("columns", ()),
             raw.get("rows", ()),

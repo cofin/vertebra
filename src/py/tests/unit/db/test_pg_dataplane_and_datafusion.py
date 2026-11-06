@@ -1,4 +1,4 @@
-"""Unit tests for PostgreSQL CTE query pipeline, RLS tenant predicates, CDC spill bridge, DataFusion, and memfd SHM."""
+"""Unit tests for PostgreSQL RLS tenant predicates, CDC spill bridge, DataFusion, and memfd SHM."""
 
 from __future__ import annotations
 
@@ -6,7 +6,9 @@ import os
 import re
 import socket
 import sys
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
+from unittest.mock import MagicMock
 
 import pyarrow as pa
 import pytest
@@ -24,15 +26,13 @@ from vertebra.db.adapters.datafusion import (
     DataFusionEngine,
     TableRegistration,
 )
-from vertebra.db.pipeline import (
-    AsyncQueryPipeline,
-    CTEStep,
-    RelOverlay,
-    SyncQueryPipeline,
-)
+from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgresEmbeddingPushdown, SyncPostgreSQLDriver
+from vertebra.db.adapters.postgres.notify import PostgresNotificationSource, PostgresNotifyConfig
+from vertebra.db.driver import NotificationEvent, NotificationSource, NotSupportedError
 from vertebra.server.platform import SHMAllocationPolicy
 from vertebra.typing import MissingDependencyError, reset_dependency_cache
 from vertebra.utils.module_loader import import_optional
+from vertebra.utils.serializers import decode_json
 
 
 class _DeterministicDataFrame:
@@ -79,150 +79,39 @@ class _DeterministicSessionContext:
         raise RuntimeError(msg)
 
 
-def test_query_pipeline_reloverlay_and_chunked_jsonb() -> None:
-    """Verify QueryPipeline.build_jsonb_object (>50 args), RelOverlay, and QueryPipeline compilation."""
-    pairs = [(f"k{i}", f"v{i}") for i in range(30)]
-    chunked = SyncQueryPipeline.build_jsonb_object(pairs, max_pairs_per_call=25)
-    assert " || " in chunked
-    assert chunked.count("jsonb_build_object(") == 2
-
-    pipeline = (
-        SyncQueryPipeline()
-        .add_step(
-            "inserted_order",
-            "INSERT INTO orders (id, total) VALUES (:id, :total) RETURNING *",
-            params={"id": 1, "total": 99},
-        )
-        .add_overlay("orders_view", RelOverlay(base_table="orders", inserted_cte="inserted_order"))
-        .add_step("summary", "SELECT count(*) AS cnt FROM orders_view")
-    )
-    sql, params = pipeline.compile()
-    assert "WITH inserted_order AS" in sql
-    assert "orders_view AS (SELECT * FROM orders UNION ALL SELECT * FROM inserted_order)" in sql
-    assert params == {"id": 1, "total": 99}
-
-    with pytest.raises(ValueError, match="Invalid SQL identifier"):
-        CTEStep(name="bad;name", sql="SELECT 1")
-    with pytest.raises(ValueError, match="Invalid SQL identifier"):
-        RelOverlay(base_table="orders; DROP TABLE users")
-
-
-def test_query_pipeline_build_jsonb_object_googlesql_dialect() -> None:
-    """Verify QueryPipeline.build_jsonb_object compiles GoogleSQL TO_JSON(STRUCT(...)) expressions."""
-    assert SyncQueryPipeline.build_jsonb_object([], dialect="googlesql") == "JSON '{}'"
-    assert (
-        SyncQueryPipeline.build_jsonb_object([("id", "t.id"), "name"], dialect="googlesql")
-        == "TO_JSON(STRUCT(t.id AS id, name AS name))"
-    )
-
-
-@pytest.mark.anyio
-async def test_query_pipeline_googlesql_compiles_struct_json_and_rewrites_named_params() -> None:
-    """Verify GoogleSQL QueryPipeline rewrites :param -> @param safely and executes over select() drivers."""
-    pipeline = (
-        SyncQueryPipeline(dialect="googlesql")
-        .add_step(
-            "recent_events",
-            (
-                "SELECT id, '14:30:00' AS ts, col::INT64 AS casted "
-                "FROM `proj.ds.events:raw` "
-                "WHERE org_id = :org_id AND status = @already_at"
-            ),
-            params={"org_id": "org_42", "@already_at": "active"},
-        )
-        .add_overlay(
-            "events_view",
-            RelOverlay(base_table="proj.ds.events_base", inserted_cte="recent_events"),
-        )
-        .add_step(
-            "summary",
-            "SELECT COUNT(*) AS total FROM events_view WHERE org_id = :org_id",
-            params={"org_id": "org_42"},
-        )
-    )
-    assert pipeline.dialect == "googlesql"
-    sql, params = pipeline.compile()
-    assert "@org_id" in sql
-    assert ":org_id" not in sql
-    assert "'14:30:00'" in sql
-    assert "`proj.ds.events:raw`" in sql
-    assert "::INT64" in sql
-    assert "@already_at" in sql
-    assert "TO_JSON(STRUCT(" in sql
-    assert "ARRAY_AGG(TO_JSON(" in sql
-    assert params == {"org_id": "org_42", "@already_at": "active"}
-
-    class _StubGoogleSQLDriver:
-        def __init__(self) -> None:
-            self.captured_sql = ""
-            self.captured_params: dict[str, object] = {}
-
-        def select(self, query: str, bind_params: dict[str, object]) -> list[dict[str, str]]:
-            self.captured_sql = query
-            self.captured_params = dict(bind_params)
-            return [{"payload": '{"recent_events":[{"id":1}],"summary":[{"total":1}]}'}]
-
-        async def execute_with_description(
-            self,
-            query: str,
-            bind_params: dict[str, object],
-        ) -> tuple[list[dict[str, str]], tuple[str, ...]]:
-            self.captured_sql = query
-            self.captured_params = dict(bind_params)
-            return ([{"payload": '{"recent_events":[{"id":1}],"summary":[{"total":1}]}'}], ("payload",))
-
-    stub = _StubGoogleSQLDriver()
-    sync_out = pipeline.execute(stub)
-    assert sync_out == {"recent_events": [{"id": 1}], "summary": [{"total": 1}]}
-    assert stub.captured_sql == sql
-    assert stub.captured_params == params
-
-    async_pipeline = (
-        AsyncQueryPipeline(dialect="googlesql")
-        .add_step(
-            "recent_events",
-            (
-                "SELECT id, '14:30:00' AS ts, col::INT64 AS casted "
-                "FROM `proj.ds.events:raw` "
-                "WHERE org_id = :org_id AND status = @already_at"
-            ),
-            params={"org_id": "org_42", "@already_at": "active"},
-        )
-        .add_overlay(
-            "events_view",
-            RelOverlay(base_table="proj.ds.events_base", inserted_cte="recent_events"),
-        )
-        .add_step(
-            "summary",
-            "SELECT COUNT(*) AS total FROM events_view WHERE org_id = :org_id",
-            params={"org_id": "org_42"},
-        )
-    )
-    async_out = await async_pipeline.execute(stub)
-    assert async_out == {"recent_events": [{"id": 1}], "summary": [{"total": 1}]}
-
-
 def test_rls_planner_unfenced_predicate_and_session_guc() -> None:
-    """Verify TenantPredicate and TenantPredicate.build_session_guc_sql."""
-    guc_sql, guc_params = TenantPredicate.build_session_guc_sql("tenant-123")
-    assert guc_sql == "SELECT set_config($1, $2, $3)"
-    assert guc_params == ("app.tenant_id", "tenant-123", True)
+    """Tenant fragments use ANSI casts while PostgreSQL owns session SQL."""
+    from vertebra.db.adapters.postgres.core import PostgreSQLCore
 
-    pred = TenantPredicate(
-        table_alias="o",
-        tenant_value="tenant-123",
-        config=TenantScopeConfig(tenant_column="org_id", parameter_cast="uuid"),
+    scope = TenantScopeConfig(setting_name="app.tenant_id", tenant_column="org_id", parameter_cast="UUID")
+    predicate = TenantPredicate(table_alias="o", tenant_value="tenant-123", config=scope)
+    assert predicate.column_reference() == "o.org_id"
+    assert predicate.to_sql_fragment() == "o.org_id = CAST(? AS UUID)"
+    assert PostgreSQLCore.build_tenant_predicate_sql(predicate, param_index=2) == "o.org_id = $2::UUID"
+    assert PostgreSQLCore.build_session_guc_sql("tenant-123", scope) == (
+        "SELECT set_config($1, $2, $3)",
+        ("app.tenant_id", "tenant-123", True),
     )
-    assert pred.to_sql_fragment(2) == "o.org_id = $2::uuid"
-    with pytest.raises(ValueError, match="table_alias"):
-        TenantPredicate(table_alias="o; DROP", tenant_value="t1")
-    with pytest.raises(ValueError, match="tenant_column"):
-        TenantScopeConfig(tenant_column="org_id; --")
+    plain = TenantPredicate(tenant_value="t1")
+    assert plain.column_reference() == "tenant_id"
+    assert plain.to_sql_fragment(":tenant_id") == "tenant_id = :tenant_id"
+    assert PostgreSQLCore.build_tenant_predicate_sql(plain) == "tenant_id = $1"
+    assert not hasattr(TenantPredicate, "build_session_guc_sql")
+    with pytest.raises(TypeError):
+        TenantScopeConfig(guc_name="app.tenant_id")
+    for bad in ("o; DROP", "a.b", ""):
+        if bad:
+            with pytest.raises(ValueError):
+                TenantPredicate(table_alias=bad, tenant_value="t1")
+        with pytest.raises(ValueError):
+            TenantScopeConfig(tenant_column=bad)
+        with pytest.raises(ValueError):
+            TenantScopeConfig(parameter_cast=bad)
 
 
 def test_cdc_listen_notify_spill_and_logical_emit() -> None:
     """Verify ChangeFeed >7500-byte spill hydration, replay_since, bounded eviction, and logical emit SQL."""
-    sql, params = ChangeFeed.build_emit_message_sql("orders", '{"id":1}')
+    sql, params = PostgresNotificationSource.build_emit_message_sql("orders", '{"id":1}')
     assert "pg_logical_emit_message" in sql
     assert params == (True, "orders", b'{"id":1}')
 
@@ -285,3 +174,175 @@ def test_embedded_datafusion_and_memfd_scm_rights(monkeypatch: pytest.MonkeyPatc
             s2.close()
     finally:
         os.close(fd)
+
+
+@pytest.mark.parametrize("transactional", [True, False])
+@pytest.mark.parametrize("payload", ['{"id":1}', b'{"id":1}'])
+def test_postgres_notify_sql_builders(payload: str | bytes, transactional: bool) -> None:
+    """PostgreSQL SQL builders retain payloads as bound values."""
+    assert PostgresNotificationSource.build_emit_message_sql("orders", payload, transactional=transactional) == (
+        "SELECT pg_logical_emit_message($1, $2, $3)",
+        (transactional, "orders", b'{"id":1}'),
+    )
+    assert PostgresNotificationSource.build_notify_sql("orders", "'quoted'") == (
+        "SELECT pg_notify($1, $2)",
+        ("orders", "'quoted'"),
+    )
+
+
+@pytest.mark.parametrize("field", ["channel", "spill_table", "replication_slot_name", "publication_name"])
+@pytest.mark.parametrize("invalid", ["bad; DROP TABLE orders", "bad.name", "", "has space"])
+def test_postgres_notify_config_rejects_invalid_identifiers(field: str, invalid: str) -> None:
+    """PostgreSQL configuration accepts single SQL identifiers only."""
+    with pytest.raises(ValueError, match=field):
+        PostgresNotifyConfig(**{field: invalid})
+
+
+@pytest.mark.parametrize("driver_type", [SyncPostgreSQLDriver, AsyncPostgreSQLDriver])
+@pytest.mark.parametrize("payload,expected", [("hello", "hello"), (b"\x00\xff", "b64:AP8=")])
+@pytest.mark.parametrize("with_feed", [False, True])
+@pytest.mark.anyio
+async def test_postgres_notify_publish(
+    driver_type: type[SyncPostgreSQLDriver] | type[AsyncPostgreSQLDriver],
+    payload: str | bytes,
+    expected: str,
+    with_feed: bool,
+) -> None:
+    """Both driver variants publish raw payloads or hydratable canonical CDC envelopes."""
+    driver = MagicMock(spec=driver_type)
+    feed = ChangeFeed(CDCConfig(spill_threshold_bytes=16)) if with_feed else None
+    source = PostgresNotificationSource(driver, change_feed=feed)
+    assert isinstance(source, NotificationSource)
+    assert source.change_feed is feed
+    await source.publish("orders", payload)
+    sql, parameters = driver.execute.call_args.args
+    assert sql == ("SELECT pg_notify($1, $2)" if driver_type is AsyncPostgreSQLDriver else "SELECT pg_notify(%s, %s)")
+    assert parameters[0] == "orders"
+    if feed is None:
+        assert parameters[1] == expected
+    else:
+        event = feed.hydrate_notification(parameters[1])
+        assert event.operation == "PUBLISH"
+        assert event.payload == {"channel": "orders", "data_b64": "aGVsbG8=" if payload == "hello" else "AP8="}
+        assert decode_json(parameters[1])["spilled"] is True
+        assert feed.replay_since(0) == [event]
+    if driver_type is AsyncPostgreSQLDriver:
+        driver.execute.assert_awaited_once()
+
+
+@pytest.mark.parametrize("action", ["publish", "subscribe", "unsubscribe"])
+@pytest.mark.parametrize("channel", ["bad;sql", "bad.name", ""])
+@pytest.mark.anyio
+async def test_postgres_notify_rejects_invalid_channels(action: str, channel: str) -> None:
+    """Every notification entry point rejects invalid channels before driver I/O."""
+    driver = MagicMock(spec=SyncPostgreSQLDriver)
+    source = PostgresNotificationSource(driver)
+    with pytest.raises(ValueError, match="channel"):
+        if action == "publish":
+            await source.publish(channel, "data")
+        else:
+            await getattr(source, action)([channel])
+    driver.execute.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_postgres_notify_subscription_stream_delegates() -> None:
+    """Subscriptions are idempotent and listener frames pass through the driver boundary."""
+    driver = MagicMock(spec=SyncPostgreSQLDriver)
+    event = NotificationEvent(channel="orders", payload=b"hello")
+
+    async def frames(channels: Sequence[str]) -> AsyncIterator[NotificationEvent]:
+        assert tuple(channels) == ("orders",)
+        yield event
+
+    driver.listen_notifications = MagicMock(side_effect=frames)
+    source = PostgresNotificationSource(driver, PostgresNotifyConfig(channel="orders"))
+    await source.subscribe(["orders", "orders", "unused"])
+    await source.unsubscribe(["unused", "unknown"])
+    assert [frame async for frame in source.listen()] == [event]
+    driver.listen_notifications.assert_called_once_with(("orders",))
+
+
+@pytest.mark.anyio
+async def test_postgres_notify_listen_without_native_stream() -> None:
+    """Unimplemented native streaming fails explicitly on iteration."""
+    source = PostgresNotificationSource(MagicMock(spec=SyncPostgreSQLDriver))
+    with pytest.raises(NotSupportedError, match="Live PostgreSQL LISTEN streaming requires"):
+        await anext(source.listen())
+
+
+class _PsycopgConnectionPort:
+    """External connection port using psycopg's real SQL parameter converter."""
+
+    def __init__(
+        self, query_type: Any, transformer_type: Any, columns: tuple[str, ...], rows: list[tuple[Any, ...]]
+    ) -> None:
+        self.query_type = query_type
+        self.transformer_type = transformer_type
+        self.description = tuple((column,) for column in columns)
+        self.rows = rows
+        self.calls: list[tuple[str, Any]] = []
+        self.failure: RuntimeError | None = None
+
+    def connection(self) -> _PsycopgConnectionPort:
+        return self
+
+    def cursor(self) -> _PsycopgConnectionPort:
+        return self
+
+    def execute(self, sql: str, parameters: Any = None) -> None:
+        query = self.query_type(self.transformer_type())
+        query.convert(sql, parameters)
+        self.calls.append((sql, parameters))
+        if self.failure is not None:
+            raise self.failure
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self.rows
+
+    def close(self) -> None:
+        """Keep the externally owned connection port available for assertions."""
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("operation", ["notify", "embedding", "search", "rls", "rls-failure"])
+async def test_postgres_sync_primitives_bind_with_real_psycopg_converter(operation: str) -> None:
+    """Public sync primitives generate SQL accepted by the installed psycopg converter."""
+    queries = pytest.importorskip("psycopg._queries")
+    adapt = pytest.importorskip("psycopg.adapt")
+    columns = ("id", "distance") if operation == "search" else ("embedding",)
+    rows: list[tuple[Any, ...]] = [(7, 0.25)] if operation == "search" else [([3.0, 4.0],)]
+    connection = _PsycopgConnectionPort(queries.PostgresQuery, adapt.Transformer, columns, rows)
+    driver = SyncPostgreSQLDriver(pool=connection)
+    try:
+        if operation in {"rls", "rls-failure"}:
+            from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncDriver
+
+            adapter = PostgreSQLSyncDriver(driver)
+            predicate = TenantPredicate(tenant_value="tenant-1")
+            if operation == "rls-failure":
+                connection.failure = RuntimeError("external session setter refused")
+                with pytest.raises(RuntimeError) as raised:
+                    adapter.apply_tenant_predicate(predicate)
+                assert raised.value is connection.failure
+            else:
+                assert adapter.apply_tenant_predicate(predicate) == "tenant_id = $1"
+            sql, parameters = connection.calls[0]
+            assert sql.casefold() == "select set_config(%s, %s, %s)"
+            assert tuple(parameters) == ("app.tenant_id", "tenant-1", True)
+        elif operation == "notify":
+            await PostgresNotificationSource(driver).publish("orders", "quote ' and % payload")
+            assert connection.calls == [("SELECT pg_notify(%s, %s)", ("orders", "quote ' and % payload"))]
+        else:
+            pushdown = PostgresEmbeddingPushdown(driver, dimensions=2, normalize=False)
+            if operation == "embedding":
+                assert (await pushdown.embed_query("document")).to_list() == [3.0, 4.0]
+                assert connection.calls[0][1] == ("gemini-embedding-001", ["document"])
+            else:
+                assert await pushdown.similarity_search([3.0, 4.0], table="docs", top_k=2) == [
+                    {"id": 7, "distance": 0.25}
+                ]
+                assert connection.calls[0][1] == ([3.0, 4.0], 2)
+            assert connection.calls[0][0].count("%s") == 2
+    finally:
+        driver.close()

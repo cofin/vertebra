@@ -10,6 +10,9 @@ from contextlib import asynccontextmanager, contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar, Final, Literal, Self, cast
 
+from sqlspec.core.parameters import ParameterStyle, ParameterStyleConfig
+from sqlspec.core.statement import StatementConfig
+
 from vertebra._vertebra import LeaseBroker
 from vertebra._vertebra import StatementCache as _RustStatementCache
 from vertebra.db.adapters.bigquery import ObjectRef
@@ -27,13 +30,12 @@ from vertebra.db.adapters.spanner import (
 from vertebra.db.adapters.spanner import (
     SyncSpannerDriver as _CoreSyncSpannerDriver,
 )
+from vertebra.db.driver import NotSupportedError
 from vertebra.extensions.sqlspec.adapters import (
     AsyncAdapterConfig,
-    AsyncQueryPipeline,
     BaseAsyncDriver,
     BaseSyncDriver,
     SyncAdapterConfig,
-    SyncQueryPipeline,
     TenantPredicate,
 )
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
@@ -449,6 +451,13 @@ class SpannerSyncDriver(BaseSyncDriver):
 
     dialect: str = "googlesql"
 
+    _arrow_execution_options = (
+        *BaseSyncDriver._arrow_execution_options,
+        "data_boost",
+        "max_partitions",
+        "staleness",
+    )
+
     def __init__(
         self,
         core: _CoreSyncSpannerDriver,
@@ -465,16 +474,18 @@ class SpannerSyncDriver(BaseSyncDriver):
         staleness: StalenessBound | None = None,
         active_snapshot: SyncSpannerSnapshot | None = None,
     ) -> None:
+        if tenant_predicate is not None:
+            msg = "Tenant session enforcement is unsupported for Spanner"
+            raise NotSupportedError(msg)
         super().__init__(
             core,
-            statement_config=statement_config,
+            statement_config=statement_config or _spanner_statement_config(core.config.dialect),
             driver_features=driver_features,
             observability=observability,
         )
         self._core: _CoreSyncSpannerDriver = core
         self._rust_statement_cache = statement_cache
         self._enable_sqlcommenter = enable_sqlcommenter
-        self._tenant_predicate = tenant_predicate
         self._storage_backend = storage_backend
         self.dialect = "spangres" if core.config.dialect == "spangres" else "googlesql"
         self._read_only = read_only
@@ -523,9 +534,8 @@ class SpannerSyncDriver(BaseSyncDriver):
         if self._read_only:
             raise ImproperConfigurationError("Cannot execute DML inside a read-only Spanner snapshot session")
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared = self._prepare(sql_str)
         params = self._normalize_params(parameters)
-        return self._core.execute(prepared, params)
+        return self._core.execute(sql_str, params)
 
     def execute_many(
         self,
@@ -541,8 +551,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         if self._read_only:
             raise ImproperConfigurationError("Cannot execute batch DML inside a read-only Spanner snapshot session")
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared = self._prepare(sql_str)
-        statements = [(prepared, p) for p in parameters]
+        statements = [(sql_str, p) for p in parameters]
         counts = self._core.execute_batch_dml(statements)
         return sum(counts)
 
@@ -578,7 +587,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         continue_on_error: bool = False,
         in_transaction: bool = False,
     ) -> Any:
-        """Execute a multi-statement stack using ``SyncQueryPipeline`` for reads or ``execute_batch_dml`` for DML."""
+        """Execute a multi-statement stack with independent reads or native ``execute_batch_dml`` for DML."""
         if hasattr(statements, "operations"):
             return super().execute_stack(statements, continue_on_error=continue_on_error)
         normalized: list[tuple[str, Mapping[str, Any] | Sequence[Any] | None]] = [
@@ -587,40 +596,19 @@ class SpannerSyncDriver(BaseSyncDriver):
         if not normalized:
             return []
 
-        all_selects = all(
-            sql.strip().upper().startswith("SELECT") and (params is None or not params) for sql, params in normalized
-        )
-        if all_selects and len(normalized) > 1:
-            pipeline_dialect: Literal["postgres", "googlesql"] = (
-                "postgres" if self._core.config.dialect == "spangres" else "googlesql"
-            )
-            pipe = SyncQueryPipeline(dialect=pipeline_dialect)
-            for idx, (sql, _) in enumerate(normalized[:-1]):
-                pipe.add_step(f"step_{idx}", sql, return_json_agg=False)
-            if any(f"step_{idx}" in normalized[-1][0] for idx in range(len(normalized) - 1)):
-                cte_clauses = ", ".join(f"{s.name} AS ({s.sql})" for s in pipe.steps)
-                compiled_sql = f"WITH {cte_clauses} {normalized[-1][0]}"
-                return [self.select(compiled_sql)]
-            full_pipe = SyncQueryPipeline(dialect=pipeline_dialect)
-            for idx, (sql, _) in enumerate(normalized):
-                full_pipe.add_step(f"step_{idx}", sql)
-            return [self.select(sql, params) for sql, params in normalized]
-
         all_dml = all(sql.strip().upper().startswith(("INSERT", "UPDATE", "DELETE")) for sql, _ in normalized)
         if all_dml and not self._read_only:
-            prepared_batch = [(self._prepare(sql), params) for sql, params in normalized]
-            return list(self._core.execute_batch_dml(prepared_batch))
+            return list(self._core.execute_batch_dml(normalized))
 
         if in_transaction and not self._read_only:
 
             def _run_stack(tx: Any) -> list[Any]:
                 results: list[Any] = []
                 for sql, params in normalized:
-                    prepared = self._prepare(sql)
-                    if prepared.strip().upper().startswith(("SELECT", "WITH", "GRAPH")):
-                        results.append(tx.query(prepared, params))
+                    if sql.strip().upper().startswith(("SELECT", "WITH", "GRAPH")):
+                        results.append(tx.query(sql, params))
                     else:
-                        results.append(tx.execute(prepared, params))
+                        results.append(tx.execute(sql, params))
                 return results
 
             return cast("list[Any]", self._core.run_in_transaction(_run_stack))
@@ -644,11 +632,10 @@ class SpannerSyncDriver(BaseSyncDriver):
         """Execute a ``SELECT`` query and hydrate rows as dictionaries or ``schema_type``."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared = self._prepare(sql_str)
         params = self._normalize_params(parameters)
         if self._active_snapshot is not None:
-            return self._active_snapshot.query(prepared, params, schema_type=schema_type)
-        return self._core.select(prepared, params, schema_type=schema_type)
+            return self._active_snapshot.query(sql_str, params, schema_type=schema_type)
+        return self._core.select(sql_str, params, schema_type=schema_type)
 
     def select_one(
         self,
@@ -661,11 +648,10 @@ class SpannerSyncDriver(BaseSyncDriver):
         """Execute a query and return the first row."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared = self._prepare(sql_str)
         params = self._normalize_params(parameters)
         if self._active_snapshot is not None:
-            return self._active_snapshot.query_one(prepared, params, schema_type=schema_type)
-        return self._core.select_one(prepared, params, schema_type=schema_type)
+            return self._active_snapshot.query_one(sql_str, params, schema_type=schema_type)
+        return self._core.select_one(sql_str, params, schema_type=schema_type)
 
     def select_one_or_none(
         self,
@@ -689,9 +675,8 @@ class SpannerSyncDriver(BaseSyncDriver):
         """Execute a query and return the first scalar column of the first row."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared = self._prepare(sql_str)
         params = self._normalize_params(parameters)
-        return self._core.select_value(prepared, params)
+        return self._core.select_value(sql_str, params)
 
     def snapshot(
         self,
@@ -727,7 +712,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         params: Mapping[str, Any] | Sequence[Any] | None = None,
     ) -> int:
         """Execute bulk Partitioned DML across database splits."""
-        return self._core.execute_partitioned_dml(self._prepare(sql), params)
+        return self._core.execute_partitioned_dml(sql, params)
 
     def apply_mutations(
         self,
@@ -764,7 +749,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         """Execute a parallel ``PartitionQuery`` scan (with ``data_boost``) into a zero-copy ``ArrowCursor``."""
         _ = kwargs
         raw_str = sql_or_table.sql if hasattr(sql_or_table, "sql") else str(sql_or_table)
-        sql = self._prepare(raw_str) if " " in raw_str.strip() else self._prepare(f"SELECT * FROM {raw_str}")
+        sql = raw_str if " " in raw_str.strip() else f"SELECT * FROM {raw_str}"
         params = self._normalize_params(parameters)
         return self._core.select_to_arrow(
             sql,
@@ -801,7 +786,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         _ = kwargs
         backend = self._require_storage(storage_backend)
         raw_str = sql_or_table.sql if hasattr(sql_or_table, "sql") else str(sql_or_table)
-        sql = self._prepare(raw_str) if " " in raw_str.strip() else self._prepare(f"SELECT * FROM {raw_str}")
+        sql = raw_str if " " in raw_str.strip() else f"SELECT * FROM {raw_str}"
         params = self._normalize_params(parameters)
         normalized_fmt: Literal["parquet", "arrow", "jsonl"] = "jsonl" if format == "csv" else format
         return self._core.export_to_object_store(
@@ -839,13 +824,6 @@ class SpannerSyncDriver(BaseSyncDriver):
             upsert=upsert,
         )
 
-    def _prepare(self, sql: str) -> str:
-        if self._tenant_predicate is not None:
-            apply_fn = getattr(self._tenant_predicate, "apply", None)
-            if callable(apply_fn):
-                return str(apply_fn(sql))
-        return sql
-
     def _require_storage(self, override: ObjectStoreBackend | None = None) -> ObjectStoreBackend:
         backend = override or self._storage_backend
         if backend is None:
@@ -857,6 +835,13 @@ class SpannerAsyncDriver(BaseAsyncDriver):
     """Asynchronous SQLSpec driver for Google Cloud Spanner (GoogleSQL and Spangres dialects)."""
 
     dialect: str = "googlesql"
+
+    _arrow_execution_options = (
+        *BaseAsyncDriver._arrow_execution_options,
+        "data_boost",
+        "max_partitions",
+        "staleness",
+    )
 
     def __init__(
         self,
@@ -874,16 +859,18 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         staleness: StalenessBound | None = None,
         active_snapshot: AsyncSpannerSnapshot | None = None,
     ) -> None:
+        if tenant_predicate is not None:
+            msg = "Tenant session enforcement is unsupported for Spanner"
+            raise NotSupportedError(msg)
         super().__init__(
             core,
-            statement_config=statement_config,
+            statement_config=statement_config or _spanner_statement_config(core.config.dialect),
             driver_features=driver_features,
             observability=observability,
         )
         self._core: _CoreAsyncSpannerDriver = core
         self._rust_statement_cache = statement_cache
         self._enable_sqlcommenter = enable_sqlcommenter
-        self._tenant_predicate = tenant_predicate
         self._storage_backend = storage_backend
         self.dialect = "spangres" if core.config.dialect == "spangres" else "googlesql"
         self._read_only = read_only
@@ -932,9 +919,8 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         if self._read_only:
             raise ImproperConfigurationError("Cannot execute DML inside a read-only Spanner snapshot session")
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared = self._prepare(sql_str)
         params = BaseSyncDriver._normalize_params(parameters)
-        return await self._core.execute(prepared, params)
+        return await self._core.execute(sql_str, params)
 
     async def execute_many(
         self,
@@ -950,8 +936,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         if self._read_only:
             raise ImproperConfigurationError("Cannot execute batch DML inside a read-only Spanner snapshot session")
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared = self._prepare(sql_str)
-        statements = [(prepared, p) for p in parameters]
+        statements = [(sql_str, p) for p in parameters]
         counts = await self._core.execute_batch_dml(statements)
         return sum(counts)
 
@@ -987,7 +972,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         continue_on_error: bool = False,
         in_transaction: bool = False,
     ) -> Any:
-        """Asynchronously execute a multi-statement stack using ``AsyncQueryPipeline`` or ``execute_batch_dml``."""
+        """Asynchronously execute a multi-statement stack with independent reads or native ``execute_batch_dml``."""
         if hasattr(statements, "operations"):
             return await super().execute_stack(statements, continue_on_error=continue_on_error)
         normalized: list[tuple[str, Mapping[str, Any] | Sequence[Any] | None]] = [
@@ -996,40 +981,19 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         if not normalized:
             return []
 
-        all_selects = all(
-            sql.strip().upper().startswith("SELECT") and (params is None or not params) for sql, params in normalized
-        )
-        if all_selects and len(normalized) > 1:
-            pipeline_dialect: Literal["postgres", "googlesql"] = (
-                "postgres" if self._core.config.dialect == "spangres" else "googlesql"
-            )
-            pipe = AsyncQueryPipeline(dialect=pipeline_dialect)
-            for idx, (sql, _) in enumerate(normalized[:-1]):
-                pipe.add_step(f"step_{idx}", sql, return_json_agg=False)
-            if any(f"step_{idx}" in normalized[-1][0] for idx in range(len(normalized) - 1)):
-                cte_clauses = ", ".join(f"{s.name} AS ({s.sql})" for s in pipe.steps)
-                compiled_sql = f"WITH {cte_clauses} {normalized[-1][0]}"
-                return [await self.select(compiled_sql)]
-            full_pipe = AsyncQueryPipeline(dialect=pipeline_dialect)
-            for idx, (sql, _) in enumerate(normalized):
-                full_pipe.add_step(f"step_{idx}", sql)
-            return [await self.select(sql, params) for sql, params in normalized]
-
         all_dml = all(sql.strip().upper().startswith(("INSERT", "UPDATE", "DELETE")) for sql, _ in normalized)
         if all_dml and not self._read_only:
-            prepared_batch = [(self._prepare(sql), params) for sql, params in normalized]
-            return list(await self._core.execute_batch_dml(prepared_batch))
+            return list(await self._core.execute_batch_dml(normalized))
 
         if in_transaction and not self._read_only:
 
             async def _run_stack(tx: Any) -> list[Any]:
                 results: list[Any] = []
                 for sql, params in normalized:
-                    prepared = self._prepare(sql)
-                    if prepared.strip().upper().startswith(("SELECT", "WITH", "GRAPH")):
-                        results.append(await tx.query(prepared, params))
+                    if sql.strip().upper().startswith(("SELECT", "WITH", "GRAPH")):
+                        results.append(await tx.query(sql, params))
                     else:
-                        results.append(await tx.execute(prepared, params))
+                        results.append(await tx.execute(sql, params))
                 return results
 
             return cast("list[Any]", await self._core.run_in_transaction(_run_stack))
@@ -1053,11 +1017,10 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         """Asynchronously execute a ``SELECT`` query."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared = self._prepare(sql_str)
         params = BaseSyncDriver._normalize_params(parameters)
         if self._active_snapshot is not None:
-            return await self._active_snapshot.query(prepared, params, schema_type=schema_type)
-        return await self._core.select(prepared, params, schema_type=schema_type)
+            return await self._active_snapshot.query(sql_str, params, schema_type=schema_type)
+        return await self._core.select(sql_str, params, schema_type=schema_type)
 
     async def select_one(
         self,
@@ -1070,11 +1033,10 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         """Asynchronously execute a query and return the first row."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared = self._prepare(sql_str)
         params = BaseSyncDriver._normalize_params(parameters)
         if self._active_snapshot is not None:
-            return await self._active_snapshot.query_one(prepared, params, schema_type=schema_type)
-        return await self._core.select_one(prepared, params, schema_type=schema_type)
+            return await self._active_snapshot.query_one(sql_str, params, schema_type=schema_type)
+        return await self._core.select_one(sql_str, params, schema_type=schema_type)
 
     async def select_one_or_none(
         self,
@@ -1098,9 +1060,8 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         """Asynchronously execute a query and return the first scalar column of the first row."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared = self._prepare(sql_str)
         params = BaseSyncDriver._normalize_params(parameters)
-        return await self._core.select_value(prepared, params)
+        return await self._core.select_value(sql_str, params)
 
     def snapshot(
         self,
@@ -1136,7 +1097,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         params: Mapping[str, Any] | Sequence[Any] | None = None,
     ) -> int:
         """Asynchronously execute Partitioned DML."""
-        return await self._core.execute_partitioned_dml(self._prepare(sql), params)
+        return await self._core.execute_partitioned_dml(sql, params)
 
     async def apply_mutations(
         self,
@@ -1173,7 +1134,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         """Asynchronously execute a parallel ``PartitionQuery`` scan into a zero-copy ``ArrowCursor``."""
         _ = kwargs
         raw_str = sql_or_table.sql if hasattr(sql_or_table, "sql") else str(sql_or_table)
-        sql = self._prepare(raw_str) if " " in raw_str.strip() else self._prepare(f"SELECT * FROM {raw_str}")
+        sql = raw_str if " " in raw_str.strip() else f"SELECT * FROM {raw_str}"
         params = BaseSyncDriver._normalize_params(parameters)
         return await self._core.select_to_arrow(
             sql,
@@ -1210,7 +1171,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         _ = kwargs
         backend = self._require_storage(storage_backend)
         raw_str = sql_or_table.sql if hasattr(sql_or_table, "sql") else str(sql_or_table)
-        sql = self._prepare(raw_str) if " " in raw_str.strip() else self._prepare(f"SELECT * FROM {raw_str}")
+        sql = raw_str if " " in raw_str.strip() else f"SELECT * FROM {raw_str}"
         params = BaseSyncDriver._normalize_params(parameters)
         normalized_fmt: Literal["parquet", "arrow", "jsonl"] = "jsonl" if format == "csv" else format
         return await self._core.export_to_object_store(
@@ -1247,13 +1208,6 @@ class SpannerAsyncDriver(BaseAsyncDriver):
             format=normalized_fmt,
             upsert=upsert,
         )
-
-    def _prepare(self, sql: str) -> str:
-        if self._tenant_predicate is not None:
-            apply_fn = getattr(self._tenant_predicate, "apply", None)
-            if callable(apply_fn):
-                return str(apply_fn(sql))
-        return sql
 
     def _require_storage(self, override: ObjectStoreBackend | None = None) -> ObjectStoreBackend:
         backend = override or self._storage_backend
@@ -1351,6 +1305,9 @@ class SpannerSyncConfig(SyncAdapterConfig[SpannerConfig, SpannerSyncDriver]):
         share_pool: bool = True,
         statement_config: Any | None = None,
     ) -> None:
+        if tenant_predicate is not None:
+            msg = "Tenant session enforcement is unsupported for Spanner"
+            raise NotSupportedError(msg)
         self.config = config
         self.dsn = dsn
         self.project_id = project_id
@@ -1379,7 +1336,7 @@ class SpannerSyncConfig(SyncAdapterConfig[SpannerConfig, SpannerSyncDriver]):
             bind_key=bind_key,
             broker=broker,
             share_pool=share_pool,
-            statement_config=statement_config,
+            statement_config=statement_config or _spanner_statement_config(resolved_cfg.dialect),
         )
         self.connection_instance = connection_instance
         self._cached_core: _CoreSyncSpannerDriver | None = None
@@ -1532,6 +1489,9 @@ class SpannerAsyncConfig(AsyncAdapterConfig[SpannerConfig, SpannerAsyncDriver]):
         share_pool: bool = True,
         statement_config: Any | None = None,
     ) -> None:
+        if tenant_predicate is not None:
+            msg = "Tenant session enforcement is unsupported for Spanner"
+            raise NotSupportedError(msg)
         self.config = config
         self.dsn = dsn
         self.project_id = project_id
@@ -1560,7 +1520,7 @@ class SpannerAsyncConfig(AsyncAdapterConfig[SpannerConfig, SpannerAsyncDriver]):
             bind_key=bind_key,
             broker=broker,
             share_pool=share_pool,
-            statement_config=statement_config,
+            statement_config=statement_config or _spanner_statement_config(resolved_cfg.dialect),
         )
         self.connection_instance = connection_instance
         self._cached_core: _CoreAsyncSpannerDriver | None = None
@@ -3007,3 +2967,16 @@ class SpannerAsyncEventQueueStore:
     async def ack(self, event_id: str) -> bool:
         """Asynchronously acknowledge ``event_id``."""
         return self._sync.ack(event_id)
+
+
+def _spanner_statement_config(dialect: Literal["googlesql", "spangres"]) -> StatementConfig:
+    """Use supported Spanner parsing while retaining native named binds."""
+    style = ParameterStyle.NUMERIC if dialect == "spangres" else ParameterStyle.NAMED_AT
+    return StatementConfig(
+        dialect="spangres" if dialect == "spangres" else "spanner",
+        parameter_config=ParameterStyleConfig(
+            default_parameter_style=style,
+            supported_parameter_styles={style},
+            supported_execution_parameter_styles={style},
+        ),
+    )

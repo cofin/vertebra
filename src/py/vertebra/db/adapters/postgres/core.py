@@ -7,6 +7,7 @@ import struct
 from collections.abc import Buffer, Sequence
 from typing import Any
 
+from vertebra.db.rls import TenantPredicate, TenantScopeConfig
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import encode_json_bytes
 
@@ -22,8 +23,27 @@ __all__ = (
 PGCOPY_BINARY_SIGNATURE: bytes = b"PGCOPY\n\xff\r\n\x00"
 
 
+_DEFAULT_TENANT_SCOPE = TenantScopeConfig()
+
+
 class PostgreSQLCore:
     """Protocol codecs and wire helpers for PostgreSQL binary JSONB and PGCOPY."""
+
+    @staticmethod
+    def build_session_guc_sql(
+        tenant_value: str,
+        config: TenantScopeConfig = _DEFAULT_TENANT_SCOPE,
+        *,
+        is_local: bool = True,
+    ) -> tuple[str, tuple[str, str, bool]]:
+        """Build a bound PostgreSQL session setting statement."""
+        return "SELECT set_config($1, $2, $3)", (config.setting_name, tenant_value, is_local)
+
+    @staticmethod
+    def build_tenant_predicate_sql(predicate: TenantPredicate, *, param_index: int = 1) -> str:
+        """Render a PostgreSQL numeric bind with the optional cast on its value."""
+        suffix = f"::{predicate.config.parameter_cast}" if predicate.config.parameter_cast else ""
+        return f"{predicate.column_reference()} = ${param_index}{suffix}"
 
     @staticmethod
     def strip_jsonb_header(payload: Buffer) -> memoryview:

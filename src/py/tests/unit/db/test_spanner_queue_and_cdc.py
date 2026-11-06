@@ -3,14 +3,23 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
 from tests.unit.db.test_spanner import FakeSpannerClient
+from vertebra.db import cdc
+from vertebra.db.adapters import spanner
 from vertebra.db.adapters.spanner import SpannerConfig, SyncSpannerDriver
-from vertebra.db.cdc import AsyncSpannerChangeStreamSource, SyncSpannerChangeStreamSource
-from vertebra.db.channels import DatabaseChannelBackend
+from vertebra.db.adapters.spanner.change_stream import (
+    AsyncSpannerChangeStreamSource,
+    SpannerChangeStreamRecord,
+    SpannerChildPartition,
+    SyncSpannerChangeStreamSource,
+)
+from vertebra.db.cdc import CDCConfig, ChangeFeed
+from vertebra.db.driver.capabilities import AsyncChangeSource, SyncChangeSource
+from vertebra.framework.channels import ChannelBus
 from vertebra.framework.queues import (
     QueueConfig,
     QueueService,
@@ -20,6 +29,7 @@ from vertebra.framework.queues import (
 )
 from vertebra.framework.queues.backends import SpannerQueueBackend as ExportedSpannerQueueBackend
 from vertebra.storage import SyncObjectStore
+from vertebra.utils.serializers import encode_json
 
 
 @pytest.mark.anyio
@@ -111,13 +121,15 @@ async def test_spanner_change_stream_source_partitions_and_object_store_spill() 
     """Verify SpannerChangeStreamSource GoogleSQL/Spangres queries, child partition scheduling, and ObjectStore spill."""
     driver = SyncSpannerDriver(SpannerConfig(), client=FakeSpannerClient())
     store = SyncObjectStore("memory://")
-    channel_backend, source = DatabaseChannelBackend.from_spanner_change_stream(
+    feed = ChangeFeed(CDCConfig(channel="orders_cdc", spill_threshold_bytes=400), store=store)
+    channel_backend = ChannelBus(change_feed=feed, history=16)
+    source = SyncSpannerChangeStreamSource(
         driver,
         "orders_stream",
         channel="orders_cdc",
-        spill_store=store,
+        change_feed=feed,
+        store=store,
         spill_threshold_bytes=400,
-        history=16,
     )
 
     assert "READ_orders_stream" in source.build_read_query("googlesql")
@@ -247,3 +259,161 @@ async def test_spanner_change_stream_poll_binds_params_for_dialect(dialect: str,
     assert events == []
     assert driver.calls == [(source.build_read_query(), _EXPECTED_READ_PARAMS[dialect])]
     assert "tok-1" in source.completed_partitions
+
+
+def test_spanner_change_stream_exports_belong_to_adapter() -> None:
+    """Expose reader and wire types through the adapter without generic CDC aliases."""
+    for symbol in (
+        SyncSpannerChangeStreamSource,
+        AsyncSpannerChangeStreamSource,
+        SpannerChildPartition,
+        SpannerChangeStreamRecord,
+    ):
+        assert getattr(spanner, symbol.__name__) is symbol
+        assert not hasattr(cdc, symbol.__name__)
+
+
+@pytest.mark.parametrize("stream_name", ["orders-stream", "orders.stream", "orders; DROP TABLE orders", ""])
+@pytest.mark.parametrize("source_type", [SyncSpannerChangeStreamSource, AsyncSpannerChangeStreamSource])
+def test_spanner_change_stream_rejects_invalid_identifiers(stream_name: str, source_type: Any) -> None:
+    """Reject stream names that cannot safely form the TVF identifier."""
+    with pytest.raises(ValueError):
+        source_type(_RecordingSpannerDriver(), stream_name)
+
+
+class _PartitionSpannerDriver(_RecordingSpannerDriver):
+    """Return root and child records in the active SQL dialect's row format."""
+
+    def __init__(self, dialect: Literal["googlesql", "spangres"]) -> None:
+        super().__init__()
+        self.dialect = dialect
+
+    def select(self, sql: str, parameters: Any = None) -> list[dict[str, Any]]:
+        super().select(sql, parameters)
+        token = parameters[2] if self.dialect == "spangres" else parameters["token"]
+        record: dict[str, Any] = {
+            "data_change_record": [{"table_name": "orders", "mod_type": "INSERT", "mods": [{"keys": {"id": token}}]}]
+        }
+        if token == "root":
+            record["child_partitions_record"] = [
+                {
+                    "start_timestamp": _END,
+                    "child_partitions": [{"token": "child", "parent_partition_tokens": ["root"]}],
+                }
+            ]
+        if self.dialect == "spangres":
+            return [{"read_json_orders_stream": encode_json(record)}]
+        return [{"ChangeRecord": [record]}]
+
+
+class _AsyncPartitionSpannerDriver:
+    """Return partition fixtures through an asynchronous select method."""
+
+    def __init__(self, dialect: Literal["googlesql", "spangres"]) -> None:
+        self.recording = _PartitionSpannerDriver(dialect)
+        self.dialect = dialect
+
+    async def select(self, sql: str, parameters: Any = None) -> list[dict[str, Any]]:
+        return self.recording.select(sql, parameters)
+
+
+@pytest.mark.parametrize("dialect", ["googlesql", "spangres"])
+def test_sync_spanner_change_source_stream_uses_constructor_defaults(dialect: Literal["googlesql", "spangres"]) -> None:
+    """A zero-argument capability stream polls the configured root and promotes children."""
+    driver = _PartitionSpannerDriver(dialect)
+    source: SyncChangeSource = SyncSpannerChangeStreamSource(
+        driver,
+        "orders_stream",
+        start_timestamp=_START,
+        end_timestamp=_END,
+        partition_token="root",
+        heartbeat_milliseconds=2500,
+    )
+    assert isinstance(source, SyncChangeSource)
+    events = list(source.stream())
+    assert [event.payload["partition_token"] for event in events] == ["root", "child"]
+    params = [call[1] for call in driver.calls]
+    if dialect == "spangres":
+        assert params == [[_START, _END, "root", 2500], [_END, _END, "child", 2500]]
+    else:
+        assert params == [
+            {"start_ts": _START, "end_ts": _END, "token": "root", "heartbeat_ms": 2500},
+            {"start_ts": _END, "end_ts": _END, "token": "child", "heartbeat_ms": 2500},
+        ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("dialect", ["googlesql", "spangres"])
+async def test_async_spanner_change_source_stream_uses_constructor_defaults(
+    dialect: Literal["googlesql", "spangres"],
+) -> None:
+    """An async capability stream awaits configured root and promoted child reads."""
+    driver = _AsyncPartitionSpannerDriver(dialect)
+    reader = AsyncSpannerChangeStreamSource(
+        driver,
+        "orders_stream",
+        start_timestamp=_START,
+        end_timestamp=_END,
+        partition_token="root",
+        heartbeat_milliseconds=2500,
+        poll_interval_seconds=0,
+    )
+    source: AsyncChangeSource = reader
+    assert isinstance(source, AsyncChangeSource)
+    events = [event async for event in source.stream()]
+    assert [event.payload["partition_token"] for event in events] == ["root", "child"]
+    params = [call[1] for call in driver.recording.calls]
+    if dialect == "spangres":
+        assert params == [[_START, _END, "root", 2500], [_END, _END, "child", 2500]]
+    else:
+        assert params == [
+            {"start_ts": _START, "end_ts": _END, "token": "root", "heartbeat_ms": 2500},
+            {"start_ts": _END, "end_ts": _END, "token": "child", "heartbeat_ms": 2500},
+        ]
+    assert reader.completed_partitions == frozenset({"root", "child"})
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("dialect", ["googlesql", "spangres"])
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_spanner_poll_constructor_defaults_and_call_overrides(
+    dialect: Literal["googlesql", "spangres"],
+    mode: str,
+) -> None:
+    """Direct polls resolve bound defaults and honor explicit timestamp, token, and heartbeat overrides."""
+    driver: Any = _RecordingSpannerDriver() if mode == "sync" else _AsyncRecordingSpannerDriver()
+    source_type: Any = SyncSpannerChangeStreamSource if mode == "sync" else AsyncSpannerChangeStreamSource
+    reader = source_type(
+        driver,
+        "orders_stream",
+        dialect=dialect,
+        start_timestamp=_START,
+        end_timestamp=_END,
+        partition_token="configured",
+        heartbeat_milliseconds=2500,
+    )
+    if mode == "sync":
+        assert reader.poll_partition() == []
+        assert (
+            reader.poll_partition("override", start_timestamp=_END, end_timestamp=_START, heartbeat_milliseconds=5000)
+            == []
+        )
+    else:
+        assert await reader.poll_partition() == []
+        assert (
+            await reader.poll_partition(
+                "override",
+                start_timestamp=_END,
+                end_timestamp=_START,
+                heartbeat_milliseconds=5000,
+            )
+            == []
+        )
+    params = [call[1] for call in driver.calls]
+    if dialect == "spangres":
+        assert params == [[_START, _END, "configured", 2500], [_END, _START, "override", 5000]]
+    else:
+        assert params == [
+            {"start_ts": _START, "end_ts": _END, "token": "configured", "heartbeat_ms": 2500},
+            {"start_ts": _END, "end_ts": _START, "token": "override", "heartbeat_ms": 5000},
+        ]

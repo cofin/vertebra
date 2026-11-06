@@ -20,7 +20,7 @@ from vertebra.db import (
     ArrowCursor,
     CloudSQLConfig,
     DatabaseRegistry,
-    OperationalError,
+    NotSupportedError,
     SyncAlloyDBDialer,
     SyncCloudSQLDialer,
 )
@@ -752,7 +752,7 @@ def test_sync_tenant_predicate_raises_when_guc_set_fails() -> None:
     config = SQLiteSyncConfig(path=":memory:")
     predicate = TenantPredicate(table_alias="t", tenant_value="acme")
     try:
-        with config.provide_session() as session, pytest.raises(OperationalError, match="set_config"):
+        with config.provide_session() as session, pytest.raises(NotSupportedError):
             session.apply_tenant_predicate(predicate)
     finally:
         config.close()
@@ -765,7 +765,146 @@ async def test_async_tenant_predicate_raises_when_guc_set_fails() -> None:
     predicate = TenantPredicate(table_alias="t", tenant_value="acme")
     try:
         async with config.provide_session() as session:
-            with pytest.raises(OperationalError, match="set_config"):
+            with pytest.raises(NotSupportedError):
                 await session.apply_tenant_predicate(predicate)
     finally:
         await config.close()
+
+
+@pytest.mark.parametrize("engine", ["postgres", "oracle"])
+def test_sync_tenant_session_setting_preserves_failure_identity(engine: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Supported adapter session-setting errors escape unchanged."""
+    from vertebra.db.adapters.postgres import SyncPostgreSQLDriver
+    from vertebra.extensions.sqlspec.adapters import OracleSyncDriver, PostgreSQLSyncDriver
+
+    native = SyncPostgreSQLDriver() if engine == "postgres" else SyncOracleDriver()
+    failure = RuntimeError("session setting refused")
+
+    def fail(*args: object, **kwargs: object) -> int:
+        raise failure
+
+    monkeypatch.setattr(type(native), "execute", fail)
+    adapter = PostgreSQLSyncDriver(native) if engine == "postgres" else OracleSyncDriver(native)
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            adapter.apply_tenant_predicate(TenantPredicate(table_alias="t", tenant_value="acme"))
+        assert raised.value is failure
+    finally:
+        native.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("engine", ["postgres", "oracle"])
+async def test_async_tenant_session_setting_preserves_failure_identity(
+    engine: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Async supported adapter session-setting errors escape unchanged."""
+    from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver
+    from vertebra.extensions.sqlspec.adapters import OracleAsyncDriver, PostgreSQLAsyncDriver
+
+    native = AsyncPostgreSQLDriver() if engine == "postgres" else AsyncOracleDriver()
+    failure = RuntimeError("session setting refused")
+
+    async def fail(*args: object, **kwargs: object) -> int:
+        raise failure
+
+    monkeypatch.setattr(type(native), "execute", fail)
+    adapter = PostgreSQLAsyncDriver(native) if engine == "postgres" else OracleAsyncDriver(native)
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            await adapter.apply_tenant_predicate(TenantPredicate(table_alias="t", tenant_value="acme"))
+        assert raised.value is failure
+    finally:
+        await native.close()
+
+
+@pytest.mark.parametrize("config_defaults", [False, True])
+def test_postgresql_tenant_session_prepares_psycopg_binds(config_defaults: bool) -> None:
+    """The native sync port receives psycopg binds and the exact session values."""
+    from typing import Any
+
+    from vertebra.db.adapters.postgres import PostgreSQLConfig, SyncPostgreSQLDriver
+    from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncConfig, PostgreSQLSyncDriver
+
+    class Port:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple[Any, ...]]] = []
+
+        def execute(self, sql: str, parameters: Any) -> list[Any]:
+            assert sql.casefold() == "select set_config(%s, %s, %s)"
+            self.calls.append((sql, tuple(parameters)))
+            return []
+
+    port = Port()
+    native = SyncPostgreSQLDriver(PostgreSQLConfig(dsn="memory://"), pool=port)
+    config = PostgreSQLSyncConfig(native.config, broker=object(), share_pool=False)
+    adapter = PostgreSQLSyncDriver(native, statement_config=config.statement_config if config_defaults else None)
+    try:
+        result = adapter.apply_tenant_predicate(TenantPredicate(table_alias="o", tenant_value="acme"))
+        assert result == "o.tenant_id = $1"
+        assert len(port.calls) == 1
+        assert port.calls[0][1] == ("app.tenant_id", "acme", True)
+    finally:
+        native.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("config_defaults", [False, True])
+async def test_postgresql_tenant_session_prepares_asyncpg_binds(config_defaults: bool) -> None:
+    """The async native port receives numeric binds and the exact session values."""
+    from typing import Any
+
+    from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig
+    from vertebra.extensions.sqlspec.adapters import PostgreSQLAsyncConfig, PostgreSQLAsyncDriver
+
+    class Port:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple[Any, ...]]] = []
+
+        async def execute_tuples(self, sql: str, parameters: Any) -> list[Any]:
+            assert sql.upper() == "SELECT SET_CONFIG($1, $2, $3)"
+            self.calls.append((sql, tuple(parameters)))
+            return []
+
+    port = Port()
+    native = AsyncPostgreSQLDriver(PostgreSQLConfig(dsn="memory://"), pool=port)
+    config = PostgreSQLAsyncConfig(native.config, broker=object(), share_pool=False)
+    adapter = PostgreSQLAsyncDriver(native, statement_config=config.statement_config if config_defaults else None)
+    try:
+        result = await adapter.apply_tenant_predicate(TenantPredicate(table_alias="o", tenant_value="acme"))
+        assert result == "o.tenant_id = $1"
+        assert len(port.calls) == 1
+        assert port.calls[0][1] == ("app.tenant_id", "acme", True)
+    finally:
+        await native.close()
+
+
+def test_oracle_tenant_context_stand_in_sets_session_attribute() -> None:
+    """The Oracle stand-in records named context binds without claiming live VPD support."""
+    from vertebra.extensions.sqlspec.adapters import OracleSyncDriver
+
+    native = SyncOracleDriver()
+    try:
+        adapter = OracleSyncDriver(native)
+        assert adapter.apply_tenant_predicate(TenantPredicate(table_alias="o", tenant_value="acme")) == (
+            "o.tenant_id = :tenant_id"
+        )
+        assert native._session_context == {("VERTEBRA_CTX", "tenant_id"): "acme"}
+    finally:
+        native.close()
+
+
+@pytest.mark.anyio
+async def test_async_oracle_tenant_context_stand_in_sets_session_attribute() -> None:
+    """The async Oracle wrapper delegates named context binds to the same stand-in."""
+    from vertebra.extensions.sqlspec.adapters import OracleAsyncDriver
+
+    native = AsyncOracleDriver()
+    try:
+        adapter = OracleAsyncDriver(native)
+        assert await adapter.apply_tenant_predicate(TenantPredicate(table_alias="o", tenant_value="acme")) == (
+            "o.tenant_id = :tenant_id"
+        )
+        assert native.sync_driver._session_context == {("VERTEBRA_CTX", "tenant_id"): "acme"}
+    finally:
+        await native.close()

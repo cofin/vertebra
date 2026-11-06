@@ -9,8 +9,10 @@ Tests cover:
 - Dual-host mounting of AgentPlugin on native vertebra App and Litestar.
 """
 
+import asyncio
+import dataclasses
 import sqlite3
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from types import SimpleNamespace
 from typing import Any
 
@@ -40,6 +42,7 @@ from vertebra.agent import (
     ModelDelta,
     ModelProvider,
     ObjectStoreSessionStore,
+    PermissionDeniedError,
     SessionNotFoundError,
     SpecNode,
     SpecTree,
@@ -49,13 +52,16 @@ from vertebra.agent import (
     WorkflowContext,
     WorkflowEngine,
     WorkflowLiveState,
+    build_tools,
 )
 from vertebra.agent.mcp.controllers import SkillController
 from vertebra.agent.mcp.service import MCPConfig
+from vertebra.db.driver import DatabaseError
 from vertebra.framework._app import App
 from vertebra.framework.live import LiveStateRoom
 from vertebra.framework.stores import KeyValueStore
 from vertebra.telemetry.genai import GenAiUsage
+from vertebra.typing import ToolPolicyError
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
@@ -587,3 +593,255 @@ async def test_agent_plugin_dual_host_mounting() -> None:
     assert dummy_config.state["a2a_service"] is not None
     assert dummy_config.state["agent_runtime"] is not None
     assert plugin.mcp_registry.get_tool("skill_action") is not None
+
+
+class _ConfirmedToolProvider:
+    """Neutral provider exposing confirmation and exact failure propagation."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.failure: BaseException | None = None
+
+    def operations(self) -> dict[str, Any]:
+        return {"query": self.query}
+
+    def confirmation_reason(self, operation_name: str, arguments: Mapping[str, Any]) -> str | None:
+        return "Approval required" if arguments["sql"] != "SELECT 1" else None
+
+    async def query(self, sql: str, params: dict[str, Any] | None = None, limit: int = 10) -> dict[str, Any]:
+        if self.failure is not None:
+            raise self.failure
+        result = {"sql": sql, "params": params, "limit": limit}
+        self.calls.append(result)
+        return result
+
+
+@pytest.mark.anyio
+async def test_provider_confirmation_binds_arguments_defaults_and_trusted_owner() -> None:
+    """Approval binds deep-copied canonical arguments and injected caller identity."""
+    provider = _ConfirmedToolProvider()
+    gate = ConfirmationGate()
+    tool = build_tools(provider, confirmation_gate=gate)["query"]
+    owner = AgentContext(CallerIdentity(user_id="alice"))
+    other = AgentContext(CallerIdentity(user_id="bob"))
+    assert (await tool.invoke({"sql": "SELECT 1"}))["limit"] == 10
+    params = {"ids": [1]}
+    with pytest.raises(PermissionDeniedError) as exc:
+        await tool.invoke({"sql": "UPDATE t", "params": params, "context": other}, context=owner)
+    token = str(exc.value).split("ticket=", 1)[1].rstrip(")")
+    ticket = gate.get_ticket(token)
+    assert ticket is not None
+    assert ticket.arguments == {"sql": "UPDATE t", "params": {"ids": [1]}, "limit": 10}
+    assert ticket.owner_id == "default:alice"
+    assert ticket.call_id == "call-query"
+    params["ids"].append(2)
+    assert ticket.arguments["params"] == {"ids": [1]}
+    gate.approve(token)
+    for payload, context in (
+        ({"sql": "UPDATE t", "params": params}, owner),
+        ({"sql": "UPDATE other", "params": {"ids": [1]}}, owner),
+        ({"sql": "UPDATE t", "params": {"ids": [1]}}, other),
+        ({"sql": "UPDATE t", "params": {"ids": [1]}}, None),
+    ):
+        with pytest.raises(PermissionDeniedError):
+            await tool.invoke({**payload, "confirmation_token": token, "context": owner}, context=context)
+    assert len(provider.calls) == 1
+    for _ in range(2):
+        result = await tool.invoke(
+            {"sql": "UPDATE t", "params": {"ids": [1]}, "limit": 10, "confirmation_token": token}, context=owner
+        )
+        assert result == ticket.arguments
+    assert len(provider.calls) == 3
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("token_kind", ["missing", "unknown", "pending", "rejected", "wrong-tool", "wrong-arguments"])
+async def test_provider_confirmation_denies_invalid_tickets(token_kind: str) -> None:
+    """Only actual approved tickets for the same operation and arguments execute."""
+    provider = _ConfirmedToolProvider()
+    gate = ConfirmationGate()
+    token: str | None = None
+    if token_kind == "unknown":
+        token = "unknown-token"
+    elif token_kind != "missing":
+        ticket = gate.request_confirmation(
+            "other" if token_kind == "wrong-tool" else "query",
+            "call-query",
+            {"sql": "UPDATE other" if token_kind == "wrong-arguments" else "UPDATE t", "params": None, "limit": 10},
+        )
+        token = ticket.token
+        if token_kind == "rejected":
+            gate.reject(token)
+        elif token_kind != "pending":
+            gate.approve(token)
+    with pytest.raises(PermissionDeniedError):
+        await build_tools(provider, confirmation_gate=gate)["query"].invoke(
+            {"sql": "UPDATE t", "confirmation_token": token}
+        )
+    assert provider.calls == []
+
+
+@pytest.mark.anyio
+async def test_provider_tools_translate_only_explicit_policy_errors() -> None:
+    """Policy refusals translate while native failures and cancellation retain identity."""
+    from vertebra.agent import PermissionDeniedError, build_tools
+
+    provider = _ConfirmedToolProvider()
+    tool = build_tools(provider)["query"]
+    for failure in (
+        DatabaseError("native"),
+        PermissionError("native permission"),
+        RuntimeError("driver"),
+        asyncio.CancelledError(),
+    ):
+        provider.failure = failure
+        with pytest.raises(type(failure)) as exc:
+            await tool.invoke({"sql": "SELECT 1"})
+        assert exc.value is failure
+    provider.failure = ToolPolicyError("policy limit")
+    with pytest.raises(PermissionDeniedError, match="policy limit"):
+        await tool.invoke({"sql": "SELECT 1"})
+
+
+@pytest.mark.anyio
+async def test_provider_execution_uses_isolated_approved_arguments() -> None:
+    """Caller mutations after authorization cannot change parameters awaiting execution."""
+    entered = asyncio.Event()
+    resume = asyncio.Event()
+
+    class PausedProvider(_ConfirmedToolProvider):
+        async def query(self, sql: str, params: dict[str, Any] | None = None, limit: int = 10) -> dict[str, Any]:
+            entered.set()
+            await resume.wait()
+            return {"sql": sql, "params": params, "limit": limit}
+
+    gate = ConfirmationGate()
+    tool = build_tools(PausedProvider(), confirmation_gate=gate)["query"]
+    params = {"ids": [1]}
+    with pytest.raises(PermissionDeniedError) as exc:
+        await tool.invoke({"sql": "UPDATE t", "params": params})
+    token = str(exc.value).split("ticket=", 1)[1].rstrip(")")
+    gate.approve(token)
+    task = asyncio.create_task(tool.invoke({"sql": "UPDATE t", "params": params, "confirmation_token": token}))
+    try:
+        async with asyncio.timeout(5):
+            await entered.wait()
+            params["ids"].append(2)
+            resume.set()
+            assert (await task)["params"] == {"ids": [1]}
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    ticket = gate.get_ticket(token)
+    assert ticket is not None
+    assert ticket.arguments["params"] == {"ids": [1]}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("approved,replacement", [(1, True), (True, 1), (1, 1.0), (1.0, 1)])
+async def test_provider_confirmation_distinguishes_nested_scalar_types(approved: Any, replacement: Any) -> None:
+    """Equal Python scalars with different native bind types require separate approval."""
+    provider = _ConfirmedToolProvider()
+    gate = ConfirmationGate()
+    tool = build_tools(provider, confirmation_gate=gate)["query"]
+    original = {"sql": "UPDATE t", "params": {"group": [{"value": approved}], "other": 2}}
+    with pytest.raises(PermissionDeniedError) as exc:
+        await tool.invoke(original)
+    token = str(exc.value).split("ticket=", 1)[1].rstrip(")")
+    gate.approve(token)
+    with pytest.raises(PermissionDeniedError):
+        await tool.invoke(
+            {"sql": "UPDATE t", "params": {"other": 2, "group": [{"value": replacement}]}, "confirmation_token": token}
+        )
+    assert provider.calls == []
+    equivalent = await tool.invoke(
+        {
+            "sql": "UPDATE t",
+            "params": {"other": 2, "group": [{"value": approved}]},
+            "limit": 10,
+            "confirmation_token": token,
+        }
+    )
+    assert type(equivalent["params"]["group"][0]["value"]) is type(approved)
+    assert len(provider.calls) == 1
+
+
+class _ApprovalStruct(msgspec.Struct, frozen=True, gc=False):
+    values: dict[str, Any]
+
+
+@dataclasses.dataclass(frozen=True)
+class _ApprovalDataclass:
+    values: dict[str, Any]
+
+
+class _RecordConfirmedProvider(_ConfirmedToolProvider):
+    """Provider accepting records converted by the public tool pipeline."""
+
+    def __init__(self, record_type: str) -> None:
+        super().__init__()
+        self.record_type = record_type
+
+    def operations(self) -> dict[str, Any]:
+        return {"query": self.struct_query if self.record_type == "struct" else self.dataclass_query}
+
+    async def struct_query(self, sql: str, record: _ApprovalStruct) -> Any:
+        self.calls.append({"sql": sql, "record": record})
+        return record
+
+    async def dataclass_query(self, sql: str, record: _ApprovalDataclass) -> Any:
+        self.calls.append({"sql": sql, "record": record})
+        return record
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("record_type", ["struct", "dataclass"])
+@pytest.mark.parametrize("approved,replacement", [(1, True), (1, 1.0)])
+async def test_provider_confirmation_compares_converted_record_fields(
+    record_type: str, approved: Any, replacement: Any
+) -> None:
+    """Converted records retain recursive field types when binding approval."""
+    provider = _RecordConfirmedProvider(record_type)
+    gate = ConfirmationGate()
+    tool = build_tools(provider, confirmation_gate=gate)["query"]
+    original = {"sql": "UPDATE t", "record": {"values": {"items": [{"value": approved}], "other": 2}}}
+    with pytest.raises(PermissionDeniedError) as exc:
+        await tool.invoke(original)
+    token = str(exc.value).split("ticket=", 1)[1].rstrip(")")
+    gate.approve(token)
+    with pytest.raises(PermissionDeniedError):
+        await tool.invoke(
+            {
+                "sql": "UPDATE t",
+                "record": {"values": {"other": 2, "items": [{"value": replacement}]}},
+                "confirmation_token": token,
+            }
+        )
+    assert provider.calls == []
+    result = await tool.invoke({**original, "confirmation_token": token})
+    assert type(result.values["items"][0]["value"]) is type(approved)
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("container", [tuple, set, frozenset])
+@pytest.mark.parametrize("replacement", [True, 1.0])
+async def test_provider_confirmation_compares_container_element_types(container: Any, replacement: Any) -> None:
+    """Approval distinguishes scalar types inside ordered and unordered containers."""
+    provider = _ConfirmedToolProvider()
+    gate = ConfirmationGate()
+    tool = build_tools(provider, confirmation_gate=gate)["query"]
+    with pytest.raises(PermissionDeniedError) as exc:
+        await tool.invoke({"sql": "UPDATE t", "params": {"values": container([1, 2])}})
+    token = str(exc.value).split("ticket=", 1)[1].rstrip(")")
+    gate.approve(token)
+    with pytest.raises(PermissionDeniedError):
+        await tool.invoke(
+            {"sql": "UPDATE t", "params": {"values": container([replacement, 2])}, "confirmation_token": token}
+        )
+    assert provider.calls == []
+    result = await tool.invoke(
+        {"sql": "UPDATE t", "params": {"values": container([1, 2])}, "confirmation_token": token}
+    )
+    assert result["params"]["values"] == container([1, 2])
+    assert len(provider.calls) == 1

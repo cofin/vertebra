@@ -18,6 +18,7 @@ from vertebra._bigquery import (
     SyncBigQueryClient,
 )
 from vertebra._vertebra import BigQueryError
+from vertebra.agent import ConfirmationGate, PermissionDeniedError, build_tools
 from vertebra.db import (
     ArrowCursor,
     DatabaseRegistry,
@@ -27,12 +28,15 @@ from vertebra.db.adapters.bigquery import (
     BigQueryConfig,
     BigQueryCore,
     BigQueryDryRunResult,
+    BigQueryEmbeddingPushdown,
+    BigQueryToolProvider,
     ObjectRef,
     ObjectTableConfig,
     SyncBigQueryDriver,
 )
 from vertebra.db.adapters.datafusion import DataFusionEngine
-from vertebra.embeddings import BigQueryEmbedder, EmbeddingError
+from vertebra.db.driver import DataError
+from vertebra.embeddings import PushdownEmbedder
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
 from vertebra.storage import SigningConfig, SyncObjectStore
 from vertebra.typing import (
@@ -483,7 +487,7 @@ async def test_async_bigquery_driver_arrow_object_store_and_object_tables(tmp_pa
 
 @pytest.mark.anyio
 async def test_bigquery_embedder_and_datafusion_registration(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify BigQueryEmbedder ML.GENERATE_EMBEDDING and DataFusionEngine.register_bigquery_query."""
+    """Verify BigQueryEmbeddingPushdown ML.GENERATE_EMBEDDING and DataFusionEngine.register_bigquery_query."""
     server = _MockBigQueryRestServer()
     try:
         cfg = BigQueryConfig(
@@ -494,22 +498,22 @@ async def test_bigquery_embedder_and_datafusion_registration(monkeypatch: pytest
         sync_driver = SyncBigQueryDriver(cfg)
         async_driver = AsyncBigQueryDriver(cfg)
 
-        embedder_sync = BigQueryEmbedder(
+        embedder_sync = BigQueryEmbeddingPushdown(
             sync_driver,
             model="analytics.text_embedding_model",
             dimensions=3,
             normalize=False,
         )
-        vec = embedder_sync.embed_query_sync("hello world")
+        vec = PushdownEmbedder(embedder_sync, dimensions=3, normalize=False).embed_query_sync("hello world")
         assert vec.to_list() == [0.25, 0.5, 0.75]
 
-        embedder_async = BigQueryEmbedder(
+        embedder_async = BigQueryEmbeddingPushdown(
             async_driver,
             model="analytics.text_embedding_model",
             dimensions=3,
             normalize=False,
         )
-        vecs = await embedder_async.embed_many(["doc one", "doc two"])
+        vecs = await embedder_async.embed_documents(["doc one", "doc two"])
         assert len(vecs.to_list()) == 2
         assert vecs.to_list()[0] == [0.25, 0.5, 0.75]
 
@@ -549,8 +553,8 @@ class _StubBigQuerySelectDriver:
 def test_bigquery_embedder_builders_reject_invalid_identifiers() -> None:
     """BigQuery SQL builders validate model, table, column, and distance values."""
     with pytest.raises(ValueError, match="model_endpoint"):
-        BigQueryEmbedder(object(), model="analytics.model`; DROP TABLE x; --").build_generate_embedding_sql()
-    embedder = BigQueryEmbedder(object(), model="analytics-proj.analytics.text_embedding_model")
+        BigQueryEmbeddingPushdown(object(), model="analytics.model`; DROP TABLE x; --").build_generate_embedding_sql()
+    embedder = BigQueryEmbeddingPushdown(object(), model="analytics-proj.analytics.text_embedding_model")
     assert "MODEL `analytics-proj.analytics.text_embedding_model`" in embedder.build_generate_embedding_sql()
     with pytest.raises(ValueError, match="base_table"):
         embedder.build_vector_search_sql("analytics.docs) --")
@@ -563,7 +567,7 @@ def test_bigquery_embedder_builders_reject_invalid_identifiers() -> None:
 @pytest.mark.parametrize("use_ai_function", [False, True], ids=["ml-generate", "ai-generate"])
 def test_bigquery_embedder_generate_sql_orders_rows_by_input_index(use_ai_function: bool) -> None:
     """The generated SQL carries the input offset through the model and orders the output by it."""
-    sql = BigQueryEmbedder(
+    sql = BigQueryEmbeddingPushdown(
         object(), model="analytics.text_embedding_model", use_ai_function=use_ai_function
     ).build_generate_embedding_sql()
     assert sql.startswith("SELECT ") and ", idx FROM " in sql
@@ -578,12 +582,12 @@ def test_bigquery_embedder_generate_sql_orders_rows_by_input_index(use_ai_functi
     ids=["missing-row", "empty-vector"],
 )
 async def test_bigquery_embedder_rejects_incomplete_results(rows: list[dict[str, Any]]) -> None:
-    """A short result or an empty vector raises EmbeddingError."""
-    embedder = BigQueryEmbedder(
+    """A short result or an empty vector raises DataError."""
+    embedder = BigQueryEmbeddingPushdown(
         _StubBigQuerySelectDriver(rows), model="analytics.text_embedding_model", dimensions=2, normalize=False
     )
-    with pytest.raises(EmbeddingError):
-        await embedder.embed_many(["alpha", "beta"])
+    with pytest.raises(DataError):
+        await embedder.embed_documents(["alpha", "beta"])
 
 
 def test_bigquery_client_invalid_params_raise_typed_error() -> None:
@@ -670,4 +674,76 @@ async def test_bigquery_select_to_arrow_keeps_small_rest_fallback_in_memory_and_
             )
             assert loaded_async == 2
     finally:
+        server.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_bigquery_tool_provider_enforces_native_request_billing_caps(asynchronous: bool) -> None:
+    """Driver overrides and provider ceilings reach actual BigQuery REST requests."""
+    server = _MockBigQueryRestServer()
+    config = BigQueryConfig(
+        project_id="test-proj",
+        dataset_id="analytics",
+        rest_endpoint=f"http://{server.host_port}",
+        maximum_bytes_billed=700,
+    )
+    driver = AsyncBigQueryDriver(config) if asynchronous else SyncBigQueryDriver(config)
+    try:
+        if asynchronous:
+            await driver.select("SELECT id, name, score FROM metrics", maximum_bytes_billed=300)
+        else:
+            driver.select("SELECT id, name, score FROM metrics", maximum_bytes_billed=300)
+        assert server.requests[-1]["body"]["maximumBytesBilled"] == "300"
+        if asynchronous:
+            await driver.select("SELECT id, name, score FROM metrics")
+        else:
+            driver.select("SELECT id, name, score FROM metrics")
+        assert server.requests[-1]["body"]["maximumBytesBilled"] == "700"
+        for provider_cap, caller_cap, expected in ((1000, None, 700), (500, 900, 500), (500, 200, 200)):
+            gate = ConfirmationGate()
+            tool = build_tools(
+                BigQueryToolProvider(driver, maximum_bytes_billed=provider_cap, enforce_dry_run_limit=False),
+                confirmation_gate=gate,
+            )["bigquery_query"]
+            await tool.invoke({"sql": "SELECT id, name, score FROM metrics", "max_bytes_billed": caller_cap})
+            assert server.requests[-1]["body"]["maximumBytesBilled"] == str(expected)
+            sql = "INSERT INTO metrics (id, name, score) VALUES (3, 'gamma', 7.0)"
+            with pytest.raises(PermissionDeniedError) as exc:
+                await tool.invoke({"sql": sql, "max_bytes_billed": caller_cap})
+            token = str(exc.value).split("ticket=", 1)[1].rstrip(")")
+            gate.approve(token)
+            result = await tool.invoke({"sql": sql, "max_bytes_billed": caller_cap, "confirmation_token": token})
+            assert result["affected_rows"] == 1
+            assert server.requests[-1]["body"]["maximumBytesBilled"] == str(expected)
+        before = len(server.requests)
+        for cap in (0, -1):
+            with pytest.raises(PermissionDeniedError, match="positive"):
+                await tool.invoke({"sql": "SELECT 1", "max_bytes_billed": cap})
+        assert len(server.requests) == before
+        for provider_cap, native_cap in ((0, 700), (1000, 0), (1000, -1)):
+            refused_config = BigQueryConfig(
+                project_id="test-proj", rest_endpoint=f"http://{server.host_port}", maximum_bytes_billed=native_cap
+            )
+            refused_driver = AsyncBigQueryDriver(refused_config) if asynchronous else SyncBigQueryDriver(refused_config)
+            refused_tool = build_tools(
+                BigQueryToolProvider(refused_driver, maximum_bytes_billed=provider_cap, enforce_dry_run_limit=False)
+            )["bigquery_query"]
+            with pytest.raises(PermissionDeniedError, match="positive"):
+                await refused_tool.invoke({"sql": "SELECT 1"})
+            assert len(server.requests) == before
+            if asynchronous:
+                await refused_driver.close()
+            else:
+                refused_driver.close()
+        guarded = build_tools(BigQueryToolProvider(driver, maximum_bytes_billed=1000))["bigquery_query"]
+        with pytest.raises(PermissionDeniedError, match="exceeds"):
+            await guarded.invoke({"sql": "SELECT id FROM metrics"})
+        assert len(server.requests) == before + 1
+        assert server.requests[-1]["body"]["configuration"]["dryRun"] is True
+    finally:
+        if asynchronous:
+            await driver.close()
+        else:
+            driver.close()
         server.close()

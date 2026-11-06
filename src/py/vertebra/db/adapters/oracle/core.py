@@ -9,9 +9,11 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 
 from vertebra.db.driver._common import ORACLE_DIALECT_TAG
+from vertebra.db.rls import TenantScopeConfig
 from vertebra.typing import VertebraError
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
+from vertebra.utils.text import validate_identifier
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -66,8 +68,27 @@ _CONNECT_TIMEOUT_RE = re.compile(r"\(\s*(?:TRANSPORT_)?CONNECT_TIMEOUT\s*=\s*(\d
 _NAMED_PARAM_RE = re.compile(r"(?<!:):([a-zA-Z_][a-zA-Z0-9_]*)")
 
 
+_DEFAULT_TENANT_SCOPE = TenantScopeConfig()
+
+
 class OracleCore:
     """TNS/TTC wire framing and Oracle 26ai `VECTOR` and `OSON` binary codecs."""
+
+    @staticmethod
+    def build_session_context_sql(
+        tenant_value: str,
+        config: TenantScopeConfig = _DEFAULT_TENANT_SCOPE,
+        *,
+        namespace: str = "VERTEBRA_CTX",
+    ) -> tuple[str, dict[str, str]]:
+        """Build bound context SQL for a trusted package or the Oracle stand-in."""
+        attribute = config.setting_name.rsplit(".", 1)[-1]
+        validate_identifier(namespace, "namespace", allow_dots=False)
+        validate_identifier(attribute, "attribute", allow_dots=False)
+        return (
+            "BEGIN DBMS_SESSION.SET_CONTEXT(:namespace, :attribute, :value); END;",
+            {"namespace": namespace, "attribute": attribute, "value": tenant_value},
+        )
 
     @staticmethod
     def parse_tns_descriptor_fields(descriptor: str) -> dict[str, Any]:

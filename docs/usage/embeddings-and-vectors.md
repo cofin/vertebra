@@ -1,6 +1,6 @@
 # Vector Embeddings & Shared-Memory Slabs
 
-`vertebra.embeddings` provides shared-memory vector embeddings (`VectorView`, `VectorBatchView`) backed by a POSIX shared-memory `VectorSlab` and a set-associative seqlock `VectorCache`. It defaults to zero-weight Google HTTP/2 gRPC (`VertexEmbedder`, `GeminiEmbedder`) and in-database SQL pushdown (`AlloyDbEmbedder`, `OracleEmbedder`), while supporting `1x` RAM local models (`GemmaEmbedder`, `FastEmbedder`, `StaticEmbedder`) through `EmbeddingBroker`.
+`vertebra.embeddings` provides shared-memory vector embeddings (`VectorView`, `VectorBatchView`) backed by a POSIX shared-memory `VectorSlab` and a set-associative seqlock `VectorCache`. It defaults to zero-weight Google HTTP/2 gRPC (`VertexEmbedder`, `GeminiEmbedder`) and in-database SQL pushdown (`PushdownEmbedder` with engine adapters), while supporting `1x` RAM local models (`GemmaEmbedder`, `FastEmbedder`, `StaticEmbedder`) through `EmbeddingBroker`.
 
 ```mermaid
 flowchart LR
@@ -13,7 +13,7 @@ flowchart LR
 
 ## Installation
 
-Zero-weight cloud gRPC (`VertexEmbedder`, `GeminiEmbedder`, `RemoteEmbedder`), database SQL pushdown (`AlloyDbEmbedder`, `OracleEmbedder`), pure-Rust `StaticEmbedder`, and `VectorView` / `VectorBatchView` ship in base `vertebra-core`. Install the `[embeddings]` extra only when running local ONNX / `EmbeddingGemma` weights:
+Zero-weight cloud gRPC (`VertexEmbedder`, `GeminiEmbedder`, `RemoteEmbedder`), database SQL pushdown (`PushdownEmbedder` with engine adapters), pure-Rust `StaticEmbedder`, and `VectorView` / `VectorBatchView` ship in base `vertebra-core`. Install the `[embeddings]` extra only when running local ONNX / `EmbeddingGemma` weights:
 
 === "uv"
 
@@ -50,8 +50,7 @@ Zero-weight cloud gRPC (`VertexEmbedder`, `GeminiEmbedder`, `RemoteEmbedder`), d
 | `Embedder` | `gemini-embedding-001` (`768` dims) | Delegates to `VertexEmbedder` by default | None |
 | `VertexEmbedder` | `gemini-embedding-001` (`768` dims) | Rust HTTP/2 gRPC + `RefreshingGcpCredentialProvider` | None |
 | `GeminiEmbedder` | `gemini-embedding-001` (`768` dims) | Rust HTTP/2 gRPC (`x-goog-api-key` or ADC) | None |
-| `AlloyDbEmbedder` | `gemini-embedding-001` (`768` dims) | In-DB `embedding()` + binary `pgvector` | None |
-| `OracleEmbedder` | `gemini-embedding-001` (`768` dims) | In-DB `DBMS_VECTOR.UTL_TO_EMBEDDING()` + `0xDB` wire | None |
+| `PushdownEmbedder` | `gemini-embedding-001` (`768` dims) | BigQuery, Spanner, PostgreSQL/AlloyDB, or Oracle SQL via `EmbeddingPushdown` | Driver extra for BigQuery/Spanner |
 | `StaticEmbedder` | `potion-base-8M` (`512` dims) | Pure-Rust `mmap` token lookup (`<50 µs`) | None |
 | `GemmaEmbedder` | `embeddinggemma-2-270m` (`768` dims) | `1x` RAM `EmbeddingBroker` (`int8` / `q4` / `bf16` / `fp32`) | `[embeddings]` |
 | `FastEmbedder` | `BAAI/bge-small-en-v1.5` (`384` dims) | `1x` RAM `EmbeddingBroker` (ONNX Runtime) | `[embeddings]` |
@@ -63,10 +62,8 @@ Zero-weight cloud gRPC (`VertexEmbedder`, `GeminiEmbedder`, `RemoteEmbedder`), d
 
 ```python
 from vertebra.embeddings import (
-    AlloyDbEmbedder,
     Embedder,
     GeminiEmbedder,
-    OracleEmbedder,
     VertexEmbedder,
 )
 
@@ -78,11 +75,31 @@ vertex_emb = VertexEmbedder(
     dimensions=768,
 )
 gemini_emb = GeminiEmbedder("gemini-embedding-001")
-alloy_emb = AlloyDbEmbedder(model="gemini-embedding-001")
-oracle_emb = OracleEmbedder(model="gemini-embedding-001")
 ```
 
-In-database embedders raise `EmbeddingError` (a `RuntimeError`) when the database returns no vector for a text, and propagate driver errors unchanged. Model, table, and column names passed to the SQL builders must be plain dotted identifiers.
+SQL generation belongs to the database adapters. Pass an existing sync or async driver to `BigQueryEmbeddingPushdown`, `SpannerEmbeddingPushdown`, `PostgresEmbeddingPushdown` (including AlloyDB), or `OracleEmbeddingPushdown`, then wrap it with `PushdownEmbedder` for caching, sync methods, Arrow output, and in-memory similarity search:
+
+```python
+from vertebra.db.adapters.postgres import (
+    AsyncPostgreSQLDriver,
+    PostgresEmbeddingPushdown,
+    SyncPostgreSQLDriver,
+)
+from vertebra.embeddings import PushdownEmbedder
+
+
+def create_sql_embedder(
+    driver: AsyncPostgreSQLDriver | SyncPostgreSQLDriver,
+) -> PushdownEmbedder:
+    pushdown = PostgresEmbeddingPushdown(driver, dimensions=768)
+    return PushdownEmbedder(pushdown, dimensions=768)
+```
+
+Call `await embedder.vector_search("query", table="documents")` to search inside the database. `embedder.similarity_search(query, candidates)` searches an in-memory `VectorBatchView`. The capability methods also accept `dimensions` and `normalize` per call. BigQuery uses `ML.GENERATE_EMBEDDING` or `AI.GENERATE_EMBEDDING`; Spanner uses `ML.PREDICT` or `AI.GENERATE_EMBEDDING`. Both retain input order with `ORDER BY idx`.
+
+Adapters raise `DataError` when the database returns empty or malformed vector rows; the facade translates inference `DataError` into `EmbeddingError`. Other driver errors propagate. SQL builders validate table and column identifiers; BigQuery model and table identifiers support hyphenated project IDs. PostgreSQL model strings are bound values. Oracle passes the model (including the Vertex `:predict` suffix) in JSON, validates Vertex endpoint URLs against its 128-byte UTF-8 limit, and rotates database credentials when the token cache generation advances.
+
+Replace the removed `BigQueryEmbedder`, `SpannerEmbedder`, `AlloyDbEmbedder`, and `OracleEmbedder` constructors with the corresponding engine capability wrapped by `PushdownEmbedder`. These names have no compatibility aliases.
 
 ## Local `1x` RAM Broker & `EmbeddingGemma`
 
