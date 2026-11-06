@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING, Any
 
 import anyio
 
-from vertebra.db.channels import DatabaseChannelBackend
+from vertebra.server._channels import ChannelBus
 from vertebra.utils.module_loader import import_optional
 
 if TYPE_CHECKING:
@@ -19,8 +18,8 @@ __all__ = (
 )
 
 
-class ChannelsBackend(DatabaseChannelBackend):
-    """Litestar channels pub/sub backend adapter with cancellation shielding and multi-engine backing."""
+class ChannelsBackend(ChannelBus):
+    """Litestar channels pub/sub backend adapter with cancellation shielding and capability bridges."""
 
     __slots__ = ()
 
@@ -36,10 +35,7 @@ class ChannelsBackend(DatabaseChannelBackend):
 
     async def stream_events(self) -> AsyncGenerator[tuple[str, bytes], None]:
         """Yield (channel, data) events with shielded cleanup on SSE disconnect."""
-        queue: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue()
-        self._queues.add(queue)
-        for channel in tuple(self._subscribed_channels):
-            self._subscribers.setdefault(channel, set()).add(queue)
+        queue = self._register_stream_queue()
         try:
             while self._running:
                 item = await queue.get()
@@ -50,15 +46,13 @@ class ChannelsBackend(DatabaseChannelBackend):
                     yield channel, payload
         finally:
             with anyio.CancelScope(shield=True):
-                self._queues.discard(queue)
-                for queues in self._subscribers.values():
-                    queues.discard(queue)
+                self._unregister_stream_queue(queue)
 
 
 def swap_channels_backend(
     app: Any,
-    backend: ChannelsBackend | DatabaseChannelBackend | None = None,
-) -> ChannelsBackend | DatabaseChannelBackend | None:
+    backend: ChannelsBackend | ChannelBus | None = None,
+) -> ChannelsBackend | ChannelBus | None:
     """Transparently replace MemoryChannelsBackend on a Litestar app's ChannelsPlugin."""
     plugins = getattr(app, "plugins", None)
     if plugins is None:
@@ -80,20 +74,20 @@ def swap_channels_backend(
                 replacement = backend if backend is not None else ChannelsBackend(history=history)
                 plugin._backend = replacement
                 return replacement
-            if isinstance(current_backend, (ChannelsBackend, DatabaseChannelBackend)):
+            if isinstance(current_backend, (ChannelsBackend, ChannelBus)):
                 return current_backend
     return None
 
 
 def _load_channels_types() -> tuple[type[Any] | None, type[Any] | None]:
-    """Load Litestar ChannelsPlugin and MemoryChannelsBackend and register DatabaseChannelBackend."""
+    """Load Litestar ChannelsPlugin and MemoryChannelsBackend and register ChannelBus."""
     ch_mod = import_optional("litestar.channels")
     mem_mod = import_optional("litestar.channels.backends.memory")
     if ch_mod is None or mem_mod is None:
         return None, None
     register_fn = getattr(ch_mod.ChannelsBackend, "register", None)
     if callable(register_fn):
-        register_fn(DatabaseChannelBackend)
+        register_fn(ChannelBus)
         register_fn(ChannelsBackend)
     return ch_mod.ChannelsPlugin, mem_mod.MemoryChannelsBackend
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import base64
 import datetime
 import decimal
 import gc
@@ -60,6 +61,7 @@ from vertebra.db.adapters.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLD
 from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
 from vertebra.db.adapters.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
+from vertebra.db.adapters.postgres.notify import PostgresNotificationSource
 from vertebra.db.adapters.redis import RedisConfig, SyncRedisDriver
 from vertebra.db.adapters.spanner import (
     AsyncSpannerDriver,
@@ -69,10 +71,9 @@ from vertebra.db.adapters.spanner import (
     SyncSpannerDriver,
     SyncSpannerTransaction,
 )
+from vertebra.db.adapters.spanner.change_stream import AsyncSpannerChangeStreamSource, SyncSpannerChangeStreamSource
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
 from vertebra.db.adapters.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
-from vertebra.db.cdc import AsyncSpannerChangeStreamSource, SyncSpannerChangeStreamSource
-from vertebra.db.channels import DatabaseChannelBackend
 from vertebra.db.driver._common import SPANGRES_DIALECT_TAG
 from vertebra.db.driver.capabilities import (
     AsyncChangeSource,
@@ -90,7 +91,8 @@ from vertebra.db.driver.capabilities import (
 from vertebra.db.registry import REGISTERED_CONFIG_TYPES
 from vertebra.extensions.litestar import ChannelsBackend, MemoryStore
 from vertebra.extensions.sqlalchemy import dialects
-from vertebra.storage import GcpTokenSnapshot, SyncObjectStore
+from vertebra.framework.channels import ChannelBus
+from vertebra.storage import GcpTokenSnapshot
 from vertebra.typing import MissingDependencyError, VertebraError, reset_dependency_cache
 from vertebra.utils.serializers import (
     decode_json,
@@ -532,7 +534,7 @@ async def test_valkey_resp3_client_tracking_and_litestar_integration() -> None:
     await store.set("k1", "v1", expires_in=60)
     assert await store.get("k1") == b"v1"
 
-    channels = ChannelsBackend.from_valkey("memory://", history=5)
+    channels = ChannelsBackend(history=5)
     await channels.on_startup()
     await channels.publish(b"hello", ["topic-a"])
     assert await channels.get_history("topic-a") == [b"hello"]
@@ -555,46 +557,263 @@ def test_database_registry_url_schemes() -> None:
     sync_sqlite.close()
 
 
+def test_channel_bus_clean_break_imports() -> None:
+    """Framework and server expose one bus and remove the database backend."""
+    from vertebra.server._channels import ChannelBus as ServerChannelBus
+
+    assert ServerChannelBus is ChannelBus
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("vertebra.db.channels")
+    assert not hasattr(vertebra_db, "DatabaseChannelBackend")
+
+
 @pytest.mark.anyio
-async def test_database_channel_backend_multi_engine_and_object_store_spill() -> None:
-    """Verify DatabaseChannelBackend supports PostgreSQL LISTEN/NOTIFY, Oracle AQ, CDC, and ObjectStore spill."""
-    pg_cfg = PostgreSQLConfig(
-        dsn="postgresql://app:secret@pgbouncer:6432/prod",
-        direct_dsn="postgresql://app:secret@pg-primary:5432/prod",
-        pooler_mode="transaction",
+async def test_channel_bus_fanout_history_and_lifecycle() -> None:
+    """Subscriptions fan out bytes, bound replay, detach topics, and stop on shutdown."""
+    bus = ChannelBus(history=2)
+    assert bus.backend is bus
+    await bus.subscribe(iter(["orders"]))
+    await bus.on_startup()
+    streams = [bus.stream_events(), bus.stream_events()]
+    pending = [asyncio.create_task(anext(stream)) for stream in streams]
+    await asyncio.sleep(0)
+    await bus.publish("first", ["orders"])
+    assert await asyncio.gather(*pending) == [("orders", b"first")] * 2
+    await bus.unsubscribe(iter(["orders"]))
+    await bus.publish(b"ignored", ["orders"])
+    await bus.subscribe(["orders", "other"])
+    pending = [asyncio.create_task(anext(stream)) for stream in streams]
+    await asyncio.sleep(0)
+    await bus.publish(b"last", ["orders"])
+    assert await asyncio.gather(*pending) == [("orders", b"last")] * 2
+    assert await bus.get_history("orders") == [b"ignored", b"last"]
+    assert await bus.get_history("orders", limit=1) == [b"last"]
+    assert await bus.get_history("missing") == []
+    assert bus.channels == ("orders", "other")
+    pending = [asyncio.create_task(anext(stream)) for stream in streams]
+    await asyncio.sleep(0)
+    await bus.on_shutdown()
+    results = await asyncio.gather(*pending, return_exceptions=True)
+    assert all(isinstance(result, StopAsyncIteration) for result in results)
+    await bus.on_startup()
+    await bus.subscribe(["orders"])
+    stream = bus.stream_events()
+    next_event = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+    await bus.publish(b"restart", ["orders"])
+    assert await next_event == ("orders", b"restart")
+    await stream.aclose()
+    await bus.on_shutdown()
+
+
+@pytest.mark.anyio
+async def test_channel_bus_notification_without_feed_keeps_local_fanout() -> None:
+    """Absent feeds do not suppress local publications and protocols receive subscriptions."""
+    source = _ConformingNotificationSource()
+    bus = ChannelBus(notification_source=source, history=4)
+    await bus.on_startup()
+    await bus.subscribe(iter(["orders"]))
+    assert bus.notification_source is source
+    stream = bus.stream_events()
+    next_event = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+    await bus.publish(b"local", ["orders"])
+    assert await asyncio.wait_for(next_event, 1) == ("orders", b"local")
+    assert await bus.get_history("orders") == [b"local"]
+    assert [event.payload async for event in source.listen()] == [b"local"]
+    await bus.unsubscribe(iter(["orders"]))
+    await source.publish("orders", b"unsubscribed")
+    assert [event.payload async for event in source.listen()] == [b"local"]
+    await stream.aclose()
+    await bus.on_shutdown()
+
+
+@pytest.mark.anyio
+async def test_channel_bus_shared_feed_publish_and_notification_hydration() -> None:
+    """Shared PostgreSQL feeds deliver local bytes once and hydrate remote spill envelopes."""
+
+    class Driver:
+        def __init__(self) -> None:
+            self.parameters: Any = None
+
+        def execute(self, sql: str, parameters: Any) -> None:
+            self.parameters = parameters
+
+    driver = Driver()
+    feed = ChangeFeed(CDCConfig(spill_threshold_bytes=16))
+    source = PostgresNotificationSource(cast(Any, driver), change_feed=feed)
+    bus = ChannelBus(notification_source=source, change_feed=feed, history=4)
+    payload = b"\x00\xff" * 5000
+    await bus.on_startup()
+    await bus.subscribe(["orders"])
+    await bus.publish(payload, ["orders"])
+    assert await bus.get_history("orders") == [payload]
+    assert bus.change_feed is feed
+    remote = _ConformingNotificationSource()
+    await remote.subscribe(["orders"])
+    await remote.publish("orders", driver.parameters[1])
+    await bus.pump_notifications(remote)
+    assert await bus.get_history("orders") == [payload, payload]
+    remote = _ConformingNotificationSource()
+    await remote.subscribe(["orders"])
+    await remote.publish("orders", b"b64:" + base64.b64encode(b"\xffbinary"))
+    await bus.pump_notifications(remote)
+    assert await bus.get_history("orders", 1) == [b"\xffbinary"]
+    await bus.on_shutdown()
+
+
+@pytest.mark.anyio
+async def test_channel_bus_change_feed_and_async_source() -> None:
+    """Feed listeners and async source pumps preserve serialized CDC and PUBLISH bytes."""
+    feed = ChangeFeed(CDCConfig(channel="orders"))
+    source = _ConformingAsyncChangeSource()
+    bus = ChannelBus(change_source=source, change_feed=feed, history=5)
+    assert bus.change_source is source
+    await bus.on_startup()
+    await bus.pump_change_source(channel="override")
+    assert decode_json((await bus.get_history("override"))[0])["operation"] == "UPDATE"
+    await bus.publish(b"feed-local", ["orders"])
+    assert await bus.get_history("orders") == [b"feed-local"]
+    feed.publish_event("PUBLISH", {"channel": "orders", "data_b64": base64.b64encode(b"feed").decode()})
+    assert await bus.get_history("orders") == [b"feed-local", b"feed"]
+    await bus.on_shutdown()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("channel", [None, "orders", "override"])
+@pytest.mark.parametrize("shared_feed", [False, True], ids=["independent-feed", "shared-feed"])
+async def test_channel_bus_spanner_source_delivers_once_per_output_channel(
+    channel: str | None, shared_feed: bool
+) -> None:
+    """Real Spanner CDC preserves feed observation and routes each output once."""
+
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str | None]] = []
+
+        async def query(
+            self, sql: str, params_json: str | None, staleness_mode: str, staleness_ms: int
+        ) -> dict[str, Any]:
+            self.calls.append((sql, params_json))
+            return {
+                "columns": ["data_change_record"],
+                "rows": [
+                    [
+                        [
+                            {
+                                "table_name": "orders",
+                                "mod_type": "INSERT",
+                                "mods": [{"keys": {"id": 1}}],
+                            }
+                        ]
+                    ]
+                ],
+            }
+
+    client = Client()
+    driver = AsyncSpannerDriver(SpannerConfig(), client=cast(Any, client))
+    feed = ChangeFeed(CDCConfig(channel="orders"))
+    source = AsyncSpannerChangeStreamSource(
+        driver, "orders_stream", change_feed=feed, start_timestamp="2026-11-02T00:00:00Z"
     )
-    store = SyncObjectStore("memory://")
-    pg_bus = DatabaseChannelBackend.from_postgres(pg_cfg, history=10, object_store=store)
-    assert pg_bus.postgres_driver is not None
-    assert pg_bus.postgres_driver.config.pooler_mode == "session"
-    assert pg_bus.postgres_driver.config.dsn == "postgresql://app:secret@pg-primary:5432/prod"
+    bus = ChannelBus(change_source=source, change_feed=feed if shared_feed else None, history=5)
+    try:
+        await bus.pump_change_source(channel=channel)
+        assert len(client.calls) == 1
+        assert "READ_orders_stream" in client.calls[0][0]
+        assert decode_json(client.calls[0][1])["start_ts"] == "2026-11-02T00:00:00Z"
+        event = feed.replay_since(0)[0]
+        output = encode_json_bytes(event)
+        expected_original = shared_feed or channel in (None, "orders")
+        assert await bus.get_history("orders") == ([output] if expected_original else [])
+        assert await bus.get_history("override") == ([output] if channel == "override" else [])
+    finally:
+        await driver.close()
 
-    await pg_bus.on_startup()
-    await pg_bus.subscribe(["orders"])
 
-    large_payload = b"X" * 8000
-    await pg_bus.publish(large_payload, ["orders"])
-    assert await pg_bus.get_history("orders") == [large_payload]
-
-    pg_bus.ingest_pg_notification("orders", "direct-pg-event")
-    assert await pg_bus.get_history("orders", limit=1) == [b"direct-pg-event"]
-    await pg_bus.on_shutdown()
-
-    ora_bus = DatabaseChannelBackend.from_oracle(OracleConfig(dsn="localhost:1521/FREEPDB1"), history=5)
-    assert ora_bus.oracle_driver is not None
-
-    feed = ChangeFeed(CDCConfig(channel="cdc:orders"), store=store)
-    cdc_bus = DatabaseChannelBackend.from_changefeed(feed, history=5)
-    await cdc_bus.on_startup()
-    await cdc_bus.subscribe(["cdc:orders"])
-    feed.publish_event(
-        "INSERT",
-        {"id": 1, "status": "paid"},
-    )
-    history = await cdc_bus.get_history("cdc:orders")
+@pytest.mark.anyio
+async def test_channel_bus_change_source_without_feeds_keeps_local_delivery() -> None:
+    """A source without a feed still forwards events when the bus also has no feed."""
+    bus = ChannelBus(change_source=_ConformingAsyncChangeSource(), history=5)
+    await bus.pump_change_source()
+    history = await bus.get_history("orders")
     assert len(history) == 1
-    assert b'"operation":"INSERT"' in history[0]
-    await cdc_bus.on_shutdown()
+    assert decode_json(history[0])["operation"] == "UPDATE"
+
+
+@pytest.mark.anyio
+async def test_channel_bus_pumps_decode_binary_and_preserve_raw_payloads() -> None:
+    """Notification and CDC pumps decode wrappers without treating plain JSON as a feed."""
+    source = _ConformingNotificationSource()
+    bus = ChannelBus(notification_source=source, history=8)
+    await bus.subscribe(["orders"])
+    await source.publish("orders", b"b64:" + base64.b64encode(b"\x00\xff"))
+    await source.publish("orders", b"raw")
+    await bus.pump_notifications()
+    assert await bus.get_history("orders") == [b"\x00\xff", b"raw"]
+    feed_bus = ChannelBus(change_feed=ChangeFeed(), history=8)
+    remote = _ConformingNotificationSource()
+    await remote.subscribe(["orders"])
+    await remote.publish("orders", b'{"id":1}')
+    await remote.publish("orders", b"{raw")
+    await feed_bus.pump_notifications(remote)
+    assert await feed_bus.get_history("orders") == [b'{"id":1}', b"{raw"]
+
+    class PublishSource:
+        async def stream(self) -> AsyncIterator[ChangeEvent]:
+            yield ChangeEvent(
+                event_id=1,
+                channel="cdc",
+                operation="PUBLISH",
+                payload={"channel": "orders", "data_b64": base64.b64encode(b"\xffcdc").decode()},
+            )
+
+    await bus.pump_change_source(PublishSource())
+    assert await bus.get_history("orders", 1) == [b"\xffcdc"]
+
+
+@pytest.mark.anyio
+async def test_channel_bus_pumps_propagate_failure_and_cancellation() -> None:
+    """Explicit pumps expose transport failures and release cancelled source generators."""
+
+    class FailingSource(_ConformingNotificationSource):
+        async def listen(self) -> AsyncIterator[NotificationEvent]:
+            raise RuntimeError("notification reader failed")
+            yield
+
+    class BlockingSource:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.closed = asyncio.Event()
+
+        async def stream(self) -> AsyncIterator[ChangeEvent]:
+            try:
+                self.started.set()
+                await asyncio.Event().wait()
+                yield ChangeEvent(event_id=1, channel="orders", operation="INSERT", payload={})
+            finally:
+                self.closed.set()
+
+    bus = ChannelBus()
+    with pytest.raises(RuntimeError, match="notification reader failed"):
+        await bus.pump_notifications(FailingSource())
+    source = BlockingSource()
+    pending = asyncio.create_task(bus.pump_change_source(source))
+    await asyncio.wait_for(source.started.wait(), 1)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert source.closed.is_set()
+    feed = ChangeFeed(CDCConfig(spill_threshold_bytes=1, max_memory_spills=1))
+    wire, _ = feed.publish_event("PUBLISH", {"channel": "orders", "data_b64": "YQ=="})
+    feed.publish_event("PUBLISH", {"channel": "orders", "data_b64": "Yg=="})
+    remote = _ConformingNotificationSource()
+    await remote.subscribe(["orders"])
+    await remote.publish("orders", wire)
+    with pytest.raises(KeyError, match="Evicted or unknown"):
+        await ChannelBus(change_feed=feed).pump_notifications(remote)
+    await bus.pump_notifications()
+    await bus.pump_change_source()
 
 
 @pytest.mark.anyio
@@ -2063,7 +2282,7 @@ def test_capability_exports_on_driver_and_lazy_db_root_with_zero_upward_imports(
             vertebra.__dict__["db"] = saved["vertebra.db"]
 
 
-_TEMPORARY_UPWARD_IMPORT_ALLOWLIST: frozenset[str] = frozenset({"vertebra.db.mcp_tools"})
+_TEMPORARY_UPWARD_IMPORT_ALLOWLIST: frozenset[str] = frozenset()
 
 
 @pytest.mark.parametrize(
@@ -2415,6 +2634,7 @@ def test_vertebra_db_ast_upward_import_boundary_gate() -> None:
         if violations:
             upward_imports_by_module[module_name] = violations
 
+    assert len(_TEMPORARY_UPWARD_IMPORT_ALLOWLIST) == 0
     unexpected = {
         mod: imports
         for mod, imports in upward_imports_by_module.items()
@@ -2467,3 +2687,183 @@ async def test_dialect_tag_uniqueness_deterministic_file_urls_and_spanner_cdc_pr
     assert isinstance(async_source, AsyncChangeSource)
     assert list(sync_source.stream()) == []
     assert [ev async for ev in async_source.stream()] == []
+
+
+def _engine_purity_violations(source: str, *, registry: bool = False) -> list[str]:
+    """Find adapter-bound execution and engine SQL outside declared generic seams."""
+    tree = ast.parse(source)
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    registered: set[str] = set()
+    allowed_nodes: set[ast.AST] = set()
+    annotations: set[ast.AST] = set()
+    checking: set[ast.AST] = set()
+    docstrings: set[ast.AST] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+        ):
+            docstrings.add(node.body[0].value)
+        if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING":
+            checking.update(child for statement in node.body for child in ast.walk(statement))
+        annotation = None
+        if isinstance(node, (ast.AnnAssign, ast.arg)):
+            annotation = node.annotation
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            annotation = node.returns
+        elif isinstance(node, ast.TypeAlias):
+            annotation = node.value
+        if annotation is not None:
+            annotations.update(ast.walk(annotation))
+        if node in tree.body and isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(
+                isinstance(target, ast.Name) and target.id == "REGISTERED_CONFIG_TYPES" for target in targets
+            ) and isinstance(node.value, ast.Tuple):
+                for item in node.value.elts:
+                    if isinstance(item, ast.Name):
+                        registered.add(item.id)
+                        allowed_nodes.add(item)
+    violations: list[str] = []
+    bindings: set[str] = set()
+    sql_functions = re.compile(
+        r"\b(?:pg_notify|pg_logical_emit_message|set_config)\s*\("
+        r"|\b(?:DBMS_AQ|DBMS_SESSION|DBMS_VECTOR)\s*\."
+        r"|\bML\s*\.\s*(?:GENERATE_EMBEDDING|PREDICT)\s*\(",
+        re.IGNORECASE,
+    )
+    for node in ast.walk(tree):
+        module = node.module if isinstance(node, ast.ImportFrom) else None
+        if isinstance(node, ast.ImportFrom) and node.level and module and module.split(".")[0] == "adapters":
+            module = f"vertebra.db.{module}"
+        if isinstance(node, ast.ImportFrom) and module and module.startswith("vertebra.db.adapters"):
+            for imported in node.names:
+                name = imported.asname or imported.name
+                bindings.add(name)
+                config_registration = (
+                    registry
+                    and re.fullmatch(r"vertebra\.db\.adapters\.[^.]+\.config", module)
+                    and parents.get(node) is tree
+                    and name in registered
+                )
+                driver_annotation = (
+                    registry and re.fullmatch(r"vertebra\.db\.adapters\.[^.]+\.driver", module) and node in checking
+                )
+                if not (config_registration or driver_annotation):
+                    violations.append(f"line {node.lineno}: forbidden adapter import {node.module}.{imported.name}")
+        elif isinstance(node, ast.Import):
+            for imported in node.names:
+                if imported.name.startswith("vertebra.db.adapters"):
+                    violations.append(f"line {node.lineno}: forbidden adapter import {imported.name}")
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node not in docstrings
+            and node not in annotations
+        ):
+            if sql_functions.search(node.value):
+                violations.append(f"line {node.lineno}: engine SQL construction")
+        elif isinstance(node, ast.Call):
+            function = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+            if function in {"import_module", "__import__", "ensure_module", "import_optional"}:
+                arguments = [*node.args, *(keyword.value for keyword in node.keywords)]
+                if any(
+                    isinstance(argument, ast.Constant)
+                    and isinstance(argument.value, str)
+                    and argument.value.startswith("vertebra.db.adapters")
+                    for argument in arguments
+                ):
+                    violations.append(f"line {node.lineno}: runtime adapter loading")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in bindings:
+            parent = parents.get(node)
+            construction = isinstance(parent, ast.Call) and parent.func is node
+            if construction or (node not in annotations and node not in allowed_nodes):
+                violations.append(f"line {node.lineno}: executable adapter binding {node.id}")
+    return violations
+
+
+def test_generic_db_engine_purity() -> None:
+    """Generic database modules retain declarative registration and protocol-only execution."""
+    root = Path(vertebra_db.__file__).parent
+    failures = {
+        str(path.relative_to(root)): issues
+        for path in [*root.glob("*.py"), *(root / "driver").glob("*.py")]
+        if (issues := _engine_purity_violations(path.read_text(), registry=path.name == "registry.py"))
+    }
+    assert failures == {}
+
+
+@pytest.mark.parametrize(
+    "source,registry",
+    [
+        ("from vertebra.db.adapters.postgres.driver import SyncPostgreSQLDriver", True),
+        ("from vertebra.db.adapters.postgres.config import PostgreSQLConfig", False),
+        ("from vertebra.db.adapters.postgres.config import PostgreSQLConfig\nREGISTERED_CONFIG_TYPES = ()", True),
+        (
+            "from vertebra.db.adapters.postgres.config import PostgreSQLConfig as Pg\nREGISTERED_CONFIG_TYPES = (Pg,)\nif isinstance(config, Pg):\n    pass",
+            True,
+        ),
+        (
+            "from vertebra.db.adapters.postgres.config import PostgreSQLConfig as Pg\nREGISTERED_CONFIG_TYPES = (Pg,)\nif type(config) is Pg:\n    pass",
+            True,
+        ),
+        (
+            "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    from vertebra.db.adapters.postgres.driver import SyncPostgreSQLDriver as Pg\ndef make():\n    return Pg()",
+            True,
+        ),
+        ('def build():\n    return "SELECT set_config($1, $2, $3)"', False),
+        ('def load():\n    return ensure_module("vertebra.db.adapters.postgres.driver")', False),
+    ],
+)
+def test_engine_purity_rejects_adapter_execution(source: str, registry: bool) -> None:
+    """Representative import, alias, dispatch, construction, and SQL leaks are rejected."""
+    assert _engine_purity_violations(source, registry=registry)
+
+
+def test_engine_purity_accepts_annotations_metadata_and_polymorphic_loading() -> None:
+    """Annotations, broker metadata, docstrings, and polymorphic config loaders remain valid."""
+    assert not _engine_purity_violations(
+        '''
+"""Engine SQL documentation mentions set_config(value)."""
+from typing import TYPE_CHECKING
+from vertebra.db.adapters.postgres.config import PostgreSQLConfig as Pg
+if TYPE_CHECKING:
+    from vertebra.db.adapters.postgres.driver import SyncPostgreSQLDriver as Driver
+type Config = Pg
+type Native = Driver
+REGISTERED_CONFIG_TYPES = (Pg,)
+SCHEME_REGISTRY = {scheme: config for config in REGISTERED_CONFIG_TYPES for scheme in config.url_schemes}
+POSTGRES_DIALECT_TAG = 1
+def create(config: Pg) -> Driver:
+    return config.build_sync_driver()
+def load(self):
+    return ensure_module(self.driver_module)
+''',
+        registry=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT pg_notify($1, $2)",
+        "SELECT pg_logical_emit_message($1, $2, $3)",
+        "SELECT set_config($1, $2, $3)",
+        "BEGIN DBMS_AQ.ENQUEUE(...); END;",
+        "BEGIN DBMS_SESSION.SET_CONTEXT(...); END;",
+        "SELECT DBMS_VECTOR.UTL_TO_EMBEDDING(:value) FROM DUAL",
+        "SELECT ML.GENERATE_EMBEDDING(MODEL endpoint)",
+        "SELECT ML.PREDICT(MODEL endpoint)",
+    ],
+)
+def test_engine_purity_rejects_engine_sql_construction(sql: str) -> None:
+    """Every banned engine SQL family is rejected from executable string construction."""
+    assert _engine_purity_violations(f"def build():\n    return {sql!r}")
+
+
+def test_engine_purity_rejects_relative_adapter_import() -> None:
+    """Relative imports cannot bypass the same generic-database boundary."""
+    assert _engine_purity_violations("from .adapters.postgres.config import PostgreSQLConfig")

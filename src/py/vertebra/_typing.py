@@ -10,7 +10,7 @@ from __future__ import annotations
 import contextlib
 import enum
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from enum import Enum
 from importlib.util import find_spec
 from typing import (
@@ -51,6 +51,8 @@ __all__ = (
     "OptionalDependency",
     "RawHeaders",
     "Struct",
+    "ToolPolicyError",
+    "ToolProvider",
     "UnsupportedBackendError",
     "VertebraError",
     "attrs_asdict",
@@ -88,6 +90,23 @@ class FrozenCamelizedStruct(FrozenBaseStruct, rename="camel", frozen=True):
 
 class VertebraError(Exception):
     """Base exception for Vertebra runtime and configuration errors."""
+
+
+class ToolPolicyError(VertebraError, PermissionError):
+    """An adapter tool operation is denied by its explicit execution policy."""
+
+
+@runtime_checkable
+class ToolProvider(Protocol):
+    """Supply typed asynchronous operations and side-effect-free approval policy."""
+
+    def operations(self) -> Mapping[str, Callable[..., Awaitable[Any]]]:
+        """Return named operation callables without resolving external resources."""
+        ...
+
+    def confirmation_reason(self, operation_name: str, arguments: Mapping[str, Any]) -> str | None:
+        """Return an approval reason or raise ToolPolicyError for a denied operation."""
+        ...
 
 
 class MissingDependencyError(VertebraError, ImportError):

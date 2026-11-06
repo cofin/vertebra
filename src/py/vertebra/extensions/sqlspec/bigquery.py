@@ -9,6 +9,9 @@ from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar, Final, Literal, Self
 
+from sqlspec.core.parameters import ParameterStyle, ParameterStyleConfig
+from sqlspec.core.statement import StatementConfig
+
 from vertebra._vertebra import LeaseBroker
 from vertebra._vertebra import StatementCache as _RustStatementCache
 from vertebra.db.adapters.bigquery import (
@@ -24,6 +27,7 @@ from vertebra.db.adapters.bigquery import (
     SyncBigQueryDriver as _CoreSyncBigQueryDriver,
 )
 from vertebra.db.arrow import ArrowCursor
+from vertebra.db.driver import NotSupportedError
 from vertebra.extensions.sqlspec.adapters import (
     AsyncAdapterConfig,
     BaseAsyncDriver,
@@ -300,6 +304,13 @@ class BigQuerySyncDriver(BaseSyncDriver):
 
     dialect: str = "bigquery"
 
+    _arrow_execution_options = (
+        *BaseSyncDriver._arrow_execution_options,
+        "selected_fields",
+        "row_restriction",
+        "max_streams",
+    )
+
     def __init__(
         self,
         core_driver: Any,
@@ -312,9 +323,12 @@ class BigQuerySyncDriver(BaseSyncDriver):
         enable_sqlcommenter: bool = True,
         tenant_predicate: TenantPredicate | None = None,
     ) -> None:
+        if tenant_predicate is not None:
+            msg = "Tenant session enforcement is unsupported for BigQuery"
+            raise NotSupportedError(msg)
         super().__init__(
             core_driver,
-            statement_config=statement_config,
+            statement_config=statement_config or _bigquery_statement_config(),
             driver_features=driver_features,
             observability=observability,
         )
@@ -322,7 +336,6 @@ class BigQuerySyncDriver(BaseSyncDriver):
         self._storage_backend: ObjectStoreBackend | None = storage_backend
         self._stmt_cache_capacity: int = statement_cache_size
         self._enable_sqlcommenter: bool = enable_sqlcommenter
-        self._tenant_predicate: TenantPredicate | None = tenant_predicate
         self._data_dictionary = BigQuerySyncDataDictionary(core_driver)
 
     @property
@@ -356,11 +369,10 @@ class BigQuerySyncDriver(BaseSyncDriver):
         """Execute a GoogleSQL statement and return affected or produced row count."""
         _ = (statement_config, kwargs)
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = self._normalize_params(parameters)
         return int(
             self._core.execute(
-                prepared_sql,
+                sql_str,
                 params,
                 job_labels=job_labels,
                 destination_table=destination_table,
@@ -382,8 +394,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
         """Execute ``sql`` across multiple parameter sets and return total affected rows."""
         _ = (filters, statement_config, kwargs)
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
-        return int(self._core.execute_many(prepared_sql, parameters))
+        return int(self._core.execute_many(sql_str, parameters))
 
     def execute_script(
         self,
@@ -431,9 +442,8 @@ class BigQuerySyncDriver(BaseSyncDriver):
         """Execute a ``SELECT`` query and hydrate rows into dictionaries or ``schema_type`` structs."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = self._normalize_params(parameters)
-        res: list[Any] = self._core.select(prepared_sql, params, schema_type=schema_type)
+        res: list[Any] = self._core.select(sql_str, params, schema_type=schema_type)
         return res
 
     def select_one(
@@ -448,9 +458,8 @@ class BigQuerySyncDriver(BaseSyncDriver):
         """Execute a ``SELECT`` query and return the first row, raising ``NotFoundError`` if empty."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = self._normalize_params(parameters)
-        return self._core.select_one(prepared_sql, params, schema_type=schema_type)
+        return self._core.select_one(sql_str, params, schema_type=schema_type)
 
     def select_one_or_none(
         self,
@@ -464,9 +473,8 @@ class BigQuerySyncDriver(BaseSyncDriver):
         """Execute a ``SELECT`` query and return the first row or ``None``."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = self._normalize_params(parameters)
-        return self._core.select_one_or_none(prepared_sql, params, schema_type=schema_type)
+        return self._core.select_one_or_none(sql_str, params, schema_type=schema_type)
 
     def select_value(
         self,
@@ -479,9 +487,8 @@ class BigQuerySyncDriver(BaseSyncDriver):
         """Execute a ``SELECT`` query and return the first scalar column of the first row."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = self._normalize_params(parameters)
-        return self._core.select_value(prepared_sql, params)
+        return self._core.select_value(sql_str, params)
 
     def dry_run(
         self,
@@ -491,8 +498,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
         tenant_id: str | None = None,
     ) -> BigQueryDryRunResult:
         """Validate ``sql`` via ``jobs.insert(dryRun=True)`` and return byte and USD cost estimates."""
-        prepared_sql = self._prepare_sql(sql, tenant_id=tenant_id)
-        res: BigQueryDryRunResult = self._core.dry_run(prepared_sql, parameters)
+        res: BigQueryDryRunResult = self._core.dry_run(sql, parameters)
         return res
 
     def select_to_arrow(
@@ -627,13 +633,6 @@ class BigQuerySyncDriver(BaseSyncDriver):
         """Close the underlying ``SyncBigQueryDriver``."""
         self._core.close()
 
-    def _prepare_sql(self, sql: str, *, tenant_id: str | None = None) -> str:
-        if self._tenant_predicate is not None and tenant_id is not None:
-            apply_fn = getattr(self._tenant_predicate, "apply", None)
-            if callable(apply_fn):
-                return str(apply_fn(sql, tenant_id))
-        return sql
-
     def _execute_stack_item(
         self,
         item: str | tuple[str, Mapping[str, Any] | Sequence[Any] | None],
@@ -663,6 +662,13 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
 
     dialect: str = "bigquery"
 
+    _arrow_execution_options = (
+        *BaseAsyncDriver._arrow_execution_options,
+        "selected_fields",
+        "row_restriction",
+        "max_streams",
+    )
+
     def __init__(
         self,
         core_driver: Any,
@@ -675,9 +681,12 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         enable_sqlcommenter: bool = True,
         tenant_predicate: TenantPredicate | None = None,
     ) -> None:
+        if tenant_predicate is not None:
+            msg = "Tenant session enforcement is unsupported for BigQuery"
+            raise NotSupportedError(msg)
         super().__init__(
             core_driver,
-            statement_config=statement_config,
+            statement_config=statement_config or _bigquery_statement_config(),
             driver_features=driver_features,
             observability=observability,
         )
@@ -685,7 +694,6 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         self._storage_backend: ObjectStoreBackend | None = storage_backend
         self._stmt_cache_capacity: int = statement_cache_size
         self._enable_sqlcommenter: bool = enable_sqlcommenter
-        self._tenant_predicate: TenantPredicate | None = tenant_predicate
         self._data_dictionary = BigQueryAsyncDataDictionary(core_driver)
 
     @property
@@ -719,11 +727,10 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         """Asynchronously execute a GoogleSQL statement and return affected or produced row count."""
         _ = (statement_config, kwargs)
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = BaseSyncDriver._normalize_params(parameters)
         return int(
             await self._core.execute(
-                prepared_sql,
+                sql_str,
                 params,
                 job_labels=job_labels,
                 destination_table=destination_table,
@@ -745,8 +752,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         """Asynchronously execute ``sql`` across multiple parameter sets and return total affected rows."""
         _ = (filters, statement_config, kwargs)
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
-        return int(await self._core.execute_many(prepared_sql, parameters))
+        return int(await self._core.execute_many(sql_str, parameters))
 
     async def execute_script(
         self,
@@ -794,9 +800,8 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         """Asynchronously execute a ``SELECT`` query and hydrate rows."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = BaseSyncDriver._normalize_params(parameters)
-        res: list[Any] = await self._core.select(prepared_sql, params, schema_type=schema_type)
+        res: list[Any] = await self._core.select(sql_str, params, schema_type=schema_type)
         return res
 
     async def select_one(
@@ -811,9 +816,8 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         """Asynchronously execute a ``SELECT`` query and return the first row, raising ``NotFoundError`` if empty."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = BaseSyncDriver._normalize_params(parameters)
-        return await self._core.select_one(prepared_sql, params, schema_type=schema_type)
+        return await self._core.select_one(sql_str, params, schema_type=schema_type)
 
     async def select_one_or_none(
         self,
@@ -827,9 +831,8 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         """Asynchronously execute a ``SELECT`` query and return the first row or ``None``."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = BaseSyncDriver._normalize_params(parameters)
-        return await self._core.select_one_or_none(prepared_sql, params, schema_type=schema_type)
+        return await self._core.select_one_or_none(sql_str, params, schema_type=schema_type)
 
     async def select_value(
         self,
@@ -842,9 +845,8 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         """Asynchronously execute a ``SELECT`` query and return the first scalar value."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
-        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = BaseSyncDriver._normalize_params(parameters)
-        return await self._core.select_value(prepared_sql, params)
+        return await self._core.select_value(sql_str, params)
 
     async def dry_run(
         self,
@@ -854,8 +856,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         tenant_id: str | None = None,
     ) -> BigQueryDryRunResult:
         """Asynchronously validate ``sql`` via ``jobs.insert(dryRun=True)``."""
-        prepared_sql = self._prepare_sql(sql, tenant_id=tenant_id)
-        res: BigQueryDryRunResult = await self._core.dry_run(prepared_sql, parameters)
+        res: BigQueryDryRunResult = await self._core.dry_run(sql, parameters)
         return res
 
     async def select_to_arrow(
@@ -990,13 +991,6 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         """Close the underlying ``AsyncBigQueryDriver``."""
         await self._core.close()
 
-    def _prepare_sql(self, sql: str, *, tenant_id: str | None = None) -> str:
-        if self._tenant_predicate is not None and tenant_id is not None:
-            apply_fn = getattr(self._tenant_predicate, "apply", None)
-            if callable(apply_fn):
-                return str(apply_fn(sql, tenant_id))
-        return sql
-
     async def _execute_stack_item_async(
         self,
         item: str | tuple[str, Mapping[str, Any] | Sequence[Any] | None],
@@ -1060,6 +1054,9 @@ class BigQuerySyncConfig(SyncAdapterConfig[BigQueryConfig, BigQuerySyncDriver]):
         share_pool: bool = False,
         statement_config: Any | None = None,
     ) -> None:
+        if tenant_predicate is not None:
+            msg = "Tenant session enforcement is unsupported for BigQuery"
+            raise NotSupportedError(msg)
         self.dsn = dsn
         self.project_id = project_id
         self.dataset_id = dataset_id
@@ -1086,7 +1083,7 @@ class BigQuerySyncConfig(SyncAdapterConfig[BigQueryConfig, BigQuerySyncDriver]):
             bind_key=bind_key,
             broker=broker,
             share_pool=share_pool,
-            statement_config=statement_config,
+            statement_config=statement_config or _bigquery_statement_config(),
         )
         self.connection_instance = connection_instance
 
@@ -1244,6 +1241,9 @@ class BigQueryAsyncConfig(AsyncAdapterConfig[BigQueryConfig, BigQueryAsyncDriver
         share_pool: bool = False,
         statement_config: Any | None = None,
     ) -> None:
+        if tenant_predicate is not None:
+            msg = "Tenant session enforcement is unsupported for BigQuery"
+            raise NotSupportedError(msg)
         self.dsn = dsn
         self.project_id = project_id
         self.dataset_id = dataset_id
@@ -1270,7 +1270,7 @@ class BigQueryAsyncConfig(AsyncAdapterConfig[BigQueryConfig, BigQueryAsyncDriver
             bind_key=bind_key,
             broker=broker,
             share_pool=share_pool,
-            statement_config=statement_config,
+            statement_config=statement_config or _bigquery_statement_config(),
         )
         self.connection_instance = connection_instance
 
@@ -2982,3 +2982,15 @@ def _coerce_stored_bytes(raw: Any) -> bytes | None:
     if isinstance(raw, str):
         return raw.encode("utf-8")
     return bytes(raw)
+
+
+def _bigquery_statement_config() -> StatementConfig:
+    """Preserve BigQuery named binds through upstream SQLSpec statement processing."""
+    return StatementConfig(
+        dialect="bigquery",
+        parameter_config=ParameterStyleConfig(
+            default_parameter_style=ParameterStyle.NAMED_AT,
+            supported_parameter_styles={ParameterStyle.NAMED_AT},
+            supported_execution_parameter_styles={ParameterStyle.NAMED_AT},
+        ),
+    )

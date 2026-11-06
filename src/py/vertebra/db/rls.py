@@ -1,64 +1,56 @@
-"""Planner-unfenced PostgreSQL tenant isolation and session GUC defense-in-depth."""
+"""Dialect-agnostic tenant predicates and session-setting configuration."""
 
 from __future__ import annotations
 
 from typing import Any
 
-import msgspec
-
+from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.text import validate_identifier
 
-__all__ = (
-    "TenantPredicate",
-    "TenantScopeConfig",
-)
+__all__ = ("TenantPredicate", "TenantScopeConfig")
 
 
-class TenantScopeConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
-    """Configuration for dual-layer PostgreSQL tenant isolation (planner predicate + RLS GUC)."""
+class TenantScopeConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
+    """Tenant column, optional parameter cast, and adapter-owned session setting."""
 
-    guc_name: str = "app.tenant_id"
-    """PostgreSQL session GUC name populated via `set_config(guc_name, tenant_id, true)`."""
+    setting_name: str = "app.tenant_id"
+    """Session setting or context attribute name bound by the owning adapter."""
+
     tenant_column: str = "tenant_id"
-    """Column identifier on tenant-scoped tables compared against the bound parameter."""
-    parameter_cast: str | None = "uuid"
-    """Optional PostgreSQL type cast applied to the bind parameter (`$1::<cast>`), never the column."""
+    """Tenant-scoped column compared against the bound tenant value."""
+
+    parameter_cast: str | None = None
+    """Optional SQL type identifier applied to the parameter instead of the column."""
 
     def __post_init__(self) -> None:
-        """Validate configured SQL identifiers."""
-        validate_identifier(self.tenant_column, "tenant_column")
+        validate_identifier(self.tenant_column, "tenant_column", allow_dots=False)
         if self.parameter_cast is not None:
-            validate_identifier(self.parameter_cast, "parameter_cast")
+            validate_identifier(self.parameter_cast, "parameter_cast", allow_dots=False)
 
 
-class TenantPredicate(msgspec.Struct, frozen=True, gc=False, kw_only=True):
-    """Positional tenant predicate allowing PostgreSQL index scans without ``security_barrier`` fencing."""
+class TenantPredicate(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
+    """Render a tenant predicate with a bound value and an optional ANSI cast."""
 
-    table_alias: str
-    """Table alias prefixing the tenant column in the generated SQL predicate."""
+    table_alias: str = ""
+    """Optional table alias prefixing the tenant column."""
+
     tenant_value: Any
-    """Bound tenant identifier value passed with the query parameters."""
+    """Tenant value supplied separately through the query's bind parameters."""
+
     config: TenantScopeConfig = TenantScopeConfig()
-    """Tenant column, GUC, and parameter-cast configuration."""
+    """Tenant column, session setting name, and optional parameter cast."""
 
     def __post_init__(self) -> None:
-        """Validate table alias identifier when supplied."""
         if self.table_alias:
-            validate_identifier(self.table_alias, "table_alias")
+            validate_identifier(self.table_alias, "table_alias", allow_dots=False)
 
-    def to_sql_fragment(self, param_index: int = 1) -> str:
-        """Render ``<alias>.<tenant_column> = $<N>[::<cast>]`` with cast on the parameter, never the column."""
-        col_ref = f"{self.table_alias}.{self.config.tenant_column}" if self.table_alias else self.config.tenant_column
-        cast_suffix = f"::{self.config.parameter_cast}" if self.config.parameter_cast else ""
-        return f"{col_ref} = ${param_index}{cast_suffix}"
+    def column_reference(self) -> str:
+        """Return the validated column reference, including its optional alias."""
+        return f"{self.table_alias}.{self.config.tenant_column}" if self.table_alias else self.config.tenant_column
 
-    @staticmethod
-    def build_session_guc_sql(
-        tenant_id: str,
-        config: TenantScopeConfig | None = None,
-        *,
-        is_local: bool = True,
-    ) -> tuple[str, tuple[str, str, bool]]:
-        """Build a parameterized ``set_config($1, $2, $3)`` statement for transaction-local RLS enforcement."""
-        cfg = config or TenantScopeConfig()
-        return "SELECT set_config($1, $2, $3)", (cfg.guc_name, tenant_id, is_local)
+    def to_sql_fragment(self, placeholder: str = "?") -> str:
+        """Render equality with an optional cast on the supplied bind placeholder."""
+        parameter = (
+            f"CAST({placeholder} AS {self.config.parameter_cast})" if self.config.parameter_cast else placeholder
+        )
+        return f"{self.column_reference()} = {parameter}"

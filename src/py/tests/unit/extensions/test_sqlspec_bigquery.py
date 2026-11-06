@@ -7,9 +7,15 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pytest
+from sqlspec import StatementStack
 
+from tests.unit.db.test_bigquery import _MockBigQueryRestServer
 from vertebra.db import ArrowCursor, NotFoundError
+from vertebra.db.adapters.bigquery import (
+    AsyncBigQueryDriver as CoreAsyncBigQueryDriver,
+)
 from vertebra.db.adapters.bigquery import BigQueryConfig, BigQueryDryRunResult, ObjectTableConfig
+from vertebra.db.adapters.bigquery import SyncBigQueryDriver as CoreSyncBigQueryDriver
 from vertebra.extensions.sqlspec import (
     BigQueryAsyncADKArtifactStore,
     BigQueryAsyncADKMemoryStore,
@@ -760,3 +766,215 @@ async def test_bigquery_async_config_driver_and_async_stores() -> None:
         assert len(items) == 1 and items[0]["event_id"] == eid
         await eq.ack(eid)
         assert await eq.consume("jobs") == []
+
+
+@pytest.mark.parametrize("config_created", [False, True])
+def test_bigquery_statement_stack_preserves_rows_over_native_rest_port(config_created: bool) -> None:
+    """Real BigQuery driver requests retain each SQLSpec read result and session transaction."""
+    server = _MockBigQueryRestServer()
+    core = CoreSyncBigQueryDriver(BigQueryConfig(project_id="test-proj", rest_endpoint=f"http://{server.host_port}"))
+    driver = (
+        BigQuerySyncConfig(project_id="test-proj", connection_instance=core).create_driver()
+        if config_created
+        else BigQuerySyncDriver(core)
+    )
+    try:
+        result = driver.execute_stack(
+            StatementStack()
+            .push_execute("SELECT id FROM metrics WHERE id >= @min_id", min_id=1)
+            .push_execute("SELECT name FROM metrics")
+        )
+        assert len(result) == 2
+        assert [item.rows_affected for item in result] == [2, 2]
+        assert result[0].get_result().get_data()[0]["id"] == 1
+        assert result[1].get_result().get_data()[1]["name"] == "beta"
+        single = driver.execute_stack(
+            StatementStack().push_execute("SELECT id FROM metrics WHERE id >= @min_id", min_id=2)
+        )
+        assert single[0].get_result().get_data()[1]["id"] == 2
+        arrow = driver.execute_stack(
+            StatementStack().push_execute_arrow("SELECT id FROM metrics WHERE id >= @min_id", min_id=1)
+        )[0]
+        assert arrow.is_arrow_result()
+        assert arrow.rows_affected == 2
+        assert [row["id"] for row in arrow.get_result().data.to_pylist()] == [1, 2]
+        assert arrow.get_result().statement.named_parameters == {"min_id": 1}
+        queries = [request["body"].get("query", "") for request in server.requests]
+        assert any("BEGIN TRANSACTION" in query for query in queries)
+        assert any("COMMIT TRANSACTION" in query for query in queries)
+        assert sum("FROM metrics" in query for query in queries) == 4
+        bound_request = next(
+            request["body"] for request in server.requests if "min_id" in request["body"].get("query", "")
+        )
+        assert "@min_id" in bound_request["query"]
+        assert bound_request["queryParameters"][0]["name"] == "min_id"
+        assert bound_request["queryParameters"][0]["parameterValue"]["value"] == "1"
+    finally:
+        core.close()
+        server.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("config_created", [False, True])
+async def test_bigquery_async_statement_stack_preserves_rows_over_native_rest_port(config_created: bool) -> None:
+    """Async BigQuery stack execution retains native session requests and separate row sets."""
+    server = _MockBigQueryRestServer()
+    core = CoreAsyncBigQueryDriver(BigQueryConfig(project_id="test-proj", rest_endpoint=f"http://{server.host_port}"))
+    driver = (
+        BigQueryAsyncConfig(project_id="test-proj", connection_instance=core).create_driver()
+        if config_created
+        else BigQueryAsyncDriver(core)
+    )
+    try:
+        result = await driver.execute_stack(
+            StatementStack()
+            .push_execute("SELECT id FROM metrics WHERE id >= @min_id", min_id=1)
+            .push_execute("SELECT name FROM metrics")
+        )
+        assert len(result) == 2
+        assert [item.rows_affected for item in result] == [2, 2]
+        assert result[0].get_result().get_data()[0]["id"] == 1
+        assert result[1].get_result().get_data()[1]["name"] == "beta"
+        single = await driver.execute_stack(
+            StatementStack().push_execute("SELECT id FROM metrics WHERE id >= @min_id", min_id=2)
+        )
+        assert single[0].get_result().get_data()[1]["id"] == 2
+        arrow = (
+            await driver.execute_stack(
+                StatementStack().push_execute_arrow("SELECT id FROM metrics WHERE id >= @min_id", min_id=1)
+            )
+        )[0]
+        assert arrow.is_arrow_result()
+        assert arrow.rows_affected == 2
+        assert [row["id"] for row in arrow.get_result().data.to_pylist()] == [1, 2]
+        assert arrow.get_result().statement.named_parameters == {"min_id": 1}
+        queries = [request["body"].get("query", "") for request in server.requests]
+        assert any("BEGIN TRANSACTION" in query for query in queries)
+        assert any("COMMIT TRANSACTION" in query for query in queries)
+        assert sum("FROM metrics" in query for query in queries) == 4
+        bound_request = next(
+            request["body"] for request in server.requests if "min_id" in request["body"].get("query", "")
+        )
+        assert "@min_id" in bound_request["query"]
+        assert bound_request["queryParameters"][0]["name"] == "min_id"
+        assert bound_request["queryParameters"][0]["parameterValue"]["value"] == "1"
+    finally:
+        await core.close()
+        server.close()
+
+
+class _ArrowOptionsBigQueryClient:
+    """External Storage Read client port recording native Arrow request options."""
+
+    def __init__(self) -> None:
+        self.requests: list[tuple[Any, ...]] = []
+
+    def query(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"session_id": "arrow-options-session"}
+
+    def read_table_arrow(
+        self,
+        project_id: str,
+        dataset_id: str,
+        table_id: str,
+        selected_fields: list[str] | None,
+        row_restriction: str | None,
+        max_streams: int,
+        compression: str,
+    ) -> None:
+        self.requests.append(
+            (project_id, dataset_id, table_id, selected_fields, row_restriction, max_streams, compression)
+        )
+        raise RuntimeError("external Arrow read reached")
+
+
+class _AsyncArrowOptionsBigQueryClient:
+    """Async Storage Read client port sharing the exact native request observations."""
+
+    def __init__(self, sync: _ArrowOptionsBigQueryClient) -> None:
+        self.sync = sync
+
+    async def query(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self.sync.query(*args, **kwargs)
+
+    async def read_table_arrow(self, *args: Any, **kwargs: Any) -> None:
+        self.sync.read_table_arrow(*args, **kwargs)
+
+
+def test_bigquery_arrow_stack_preserves_native_storage_options() -> None:
+    """BigQuery stack options reach the real native driver's external Storage Read port."""
+    client = _ArrowOptionsBigQueryClient()
+    core = CoreSyncBigQueryDriver(BigQueryConfig(project_id="test-proj", dataset_id="analytics"), client=client)
+    driver = BigQuerySyncDriver(core)
+    try:
+        with pytest.raises(RuntimeError, match="external Arrow read reached"):
+            driver.execute_stack(
+                StatementStack().push_execute_arrow(
+                    "metrics", selected_fields=["id"], row_restriction="id = 7", max_streams=1
+                )
+            )
+        assert client.requests == [
+            ("test-proj", "analytics", "metrics", ["id"], "id = 7", 1, core.config.arrow_compression)
+        ]
+    finally:
+        core.close()
+
+
+@pytest.mark.anyio
+async def test_bigquery_async_arrow_stack_preserves_native_storage_options() -> None:
+    """Async BigQuery forwards owning Arrow options through native session execution."""
+    client = _ArrowOptionsBigQueryClient()
+    core = CoreAsyncBigQueryDriver(
+        BigQueryConfig(project_id="test-proj", dataset_id="analytics"), client=_AsyncArrowOptionsBigQueryClient(client)
+    )
+    driver = BigQueryAsyncDriver(core)
+    try:
+        with pytest.raises(RuntimeError, match="external Arrow read reached"):
+            await driver.execute_stack(
+                StatementStack().push_execute_arrow(
+                    "metrics", selected_fields=["id"], row_restriction="id = 7", max_streams=1
+                )
+            )
+        assert client.requests == [
+            ("test-proj", "analytics", "metrics", ["id"], "id = 7", 1, core.config.arrow_compression)
+        ]
+    finally:
+        await core.close()
+
+
+@pytest.mark.parametrize("kind", ["sync-driver", "async-driver", "sync-config", "async-config"])
+def test_configured_tenant_predicate_rejected_before_constructor_effects(
+    kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unsupported isolation fails before base, core, resolver, broker, or native access."""
+    from vertebra.db import NotSupportedError
+    from vertebra.db.rls import TenantPredicate
+    from vertebra.extensions.sqlspec.adapters import (
+        AsyncAdapterConfig,
+        BaseAsyncDriver,
+        BaseSyncDriver,
+        SyncAdapterConfig,
+    )
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("Constructor performed a side effect before rejecting tenant isolation")
+
+    class ForbiddenCore:
+        def __getattribute__(self, name: str) -> Any:
+            forbidden(name)
+
+    for base in (BaseSyncDriver, BaseAsyncDriver, SyncAdapterConfig, AsyncAdapterConfig):
+        monkeypatch.setattr(base, "__init__", forbidden)
+    predicate = TenantPredicate(table_alias="t", tenant_value="tenant")
+    constructors = {
+        "sync-driver": lambda: BigQuerySyncDriver(ForbiddenCore(), tenant_predicate=predicate),
+        "async-driver": lambda: BigQueryAsyncDriver(ForbiddenCore(), tenant_predicate=predicate),
+        "sync-config": lambda: BigQuerySyncConfig(tenant_predicate=predicate),
+        "async-config": lambda: BigQueryAsyncConfig(tenant_predicate=predicate),
+    }
+    for config_type in (BigQuerySyncConfig, BigQueryAsyncConfig):
+        monkeypatch.setattr(config_type, "resolve_bigquery_config", forbidden)
+    for constructor_type in (BigQuerySyncDriver, BigQueryAsyncDriver, BigQuerySyncConfig, BigQueryAsyncConfig):
+        monkeypatch.setattr(constructor_type, "__setattr__", forbidden)
+    with pytest.raises(NotSupportedError):
+        constructors[kind]()

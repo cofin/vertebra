@@ -1,62 +1,75 @@
 ---
 type: Guide
-title: "SQLSpec, Advanced Alchemy & SQLAlchemy Dialect Extensions"
-description: "The `vertebra.extensions.sqlspec`, `vertebra.extensions.alchemy`, and `vertebra.extensions.sqlalchemy` packages: Tier-1 native SHM adapters (`SyncAdapterConfig`, `AsyncAdapterConfig`), Tier-2 universal SHM broker proxy (`ProxySyncConfig`, `ProxyAsyncConfig`), real `+vtb` dialect implementations, column types, and CDC event backends."
+title: SQLSpec, Advanced Alchemy & SQLAlchemy Dialect Extensions
+description: 'The `vertebra.extensions.sqlspec`, `vertebra.extensions.alchemy`, and
+  `vertebra.extensions.sqlalchemy` packages: Tier-1 native SHM adapters (`SyncAdapterConfig`,
+  `AsyncAdapterConfig`), Tier-2 universal SHM broker proxy (`ProxySyncConfig`, `ProxyAsyncConfig`),
+  real `+vtb` dialect implementations, column types, and CDC event backends.'
 status: stable
-tags: [domains, extensions, sqlspec, sqlalchemy, alembic, shm, arrow]
+tags:
+- domains
+- extensions
+- sqlspec
+- sqlalchemy
+- alembic
+- shm
+- arrow
 generated:
   by: flow/0.26.0
-  at: "2026-11-04T04:33:00Z"
+  at: '2026-11-04T04:33:00Z'
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+- by: agent:codex
+  at: '2026-11-05T06:09:26Z'
+  commit: 5ad85a1b406f5b3ed01ce8d1f536e02383bc89e1
+- by: agent:flow-setup
+  at: '2026-11-04T04:33:00Z'
+  commit: f741701
 sources:
-  - id: src-extensions-sqlspec-init-py
-    resource: src/py/vertebra/extensions/sqlspec/__init__.py
-    title: "Python implementation module (src/py/vertebra/extensions/sqlspec/__init__.py)"
-  - id: src-extensions-sqlspec-plugin-py
-    resource: src/py/vertebra/extensions/sqlspec/plugin.py
-    title: "Python implementation module (src/py/vertebra/extensions/sqlspec/plugin.py)"
-  - id: src-extensions-sqlspec-adapters-py
-    resource: src/py/vertebra/extensions/sqlspec/adapters.py
-    title: "Python implementation module (src/py/vertebra/extensions/sqlspec/adapters.py)"
-  - id: src-extensions-sqlspec-proxy-py
-    resource: src/py/vertebra/extensions/sqlspec/proxy.py
-    title: "Python implementation module (src/py/vertebra/extensions/sqlspec/proxy.py)"
-  - id: src-extensions-sqlspec-provider-py
-    resource: src/py/vertebra/extensions/sqlspec/provider.py
-    title: "Python implementation module (src/py/vertebra/extensions/sqlspec/provider.py)"
-  - id: src-extensions-sqlspec-storage-py
-    resource: src/py/vertebra/extensions/sqlspec/storage.py
-    title: "Python implementation module (src/py/vertebra/extensions/sqlspec/storage.py)"
-  - id: src-extensions-sqlspec-events-py
-    resource: src/py/vertebra/extensions/sqlspec/events.py
-    title: "Python implementation module (src/py/vertebra/extensions/sqlspec/events.py)"
-  - id: src-extensions-alchemy-init-py
-    resource: src/py/vertebra/extensions/alchemy/__init__.py
-    title: "Python implementation module (src/py/vertebra/extensions/alchemy/__init__.py)"
-  - id: src-extensions-alchemy-plugin-py
-    resource: src/py/vertebra/extensions/alchemy/plugin.py
-    title: "Python implementation module (src/py/vertebra/extensions/alchemy/plugin.py)"
-  - id: src-extensions-alchemy-broker-py
-    resource: src/py/vertebra/extensions/alchemy/broker.py
-    title: "Python implementation module (src/py/vertebra/extensions/alchemy/broker.py)"
-  - id: src-extensions-alchemy-storage-py
-    resource: src/py/vertebra/extensions/alchemy/storage.py
-    title: "Python implementation module (src/py/vertebra/extensions/alchemy/storage.py)"
-  - id: src-extensions-sqlalchemy-dialects-py
-    resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
-    title: "Python implementation module (src/py/vertebra/extensions/sqlalchemy/dialects.py)"
-  - id: src-extensions-sqlalchemy-types-py
-    resource: src/py/vertebra/extensions/sqlalchemy/types.py
-    title: "Python implementation module (src/py/vertebra/extensions/sqlalchemy/types.py)"
-  - id: src-extensions-sqlalchemy-alembic-py
-    resource: src/py/vertebra/extensions/sqlalchemy/alembic.py
-    title: "Python implementation module (src/py/vertebra/extensions/sqlalchemy/alembic.py)"
-  - id: src-pyproject-toml
-    resource: pyproject.toml
-    title: "Python package metadata, dependencies, and tool configuration"
+- id: src-extensions-sqlspec-init-py
+  resource: src/py/vertebra/extensions/sqlspec/__init__.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlspec/__init__.py)
+- id: src-extensions-sqlspec-plugin-py
+  resource: src/py/vertebra/extensions/sqlspec/plugin.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlspec/plugin.py)
+- id: src-extensions-sqlspec-adapters-py
+  resource: src/py/vertebra/extensions/sqlspec/adapters.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlspec/adapters.py)
+- id: src-extensions-sqlspec-proxy-py
+  resource: src/py/vertebra/extensions/sqlspec/proxy.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlspec/proxy.py)
+- id: src-extensions-sqlspec-provider-py
+  resource: src/py/vertebra/extensions/sqlspec/provider.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlspec/provider.py)
+- id: src-extensions-sqlspec-storage-py
+  resource: src/py/vertebra/extensions/sqlspec/storage.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlspec/storage.py)
+- id: src-extensions-sqlspec-events-py
+  resource: src/py/vertebra/extensions/sqlspec/events.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlspec/events.py)
+- id: src-extensions-alchemy-init-py
+  resource: src/py/vertebra/extensions/alchemy/__init__.py
+  title: Python implementation module (src/py/vertebra/extensions/alchemy/__init__.py)
+- id: src-extensions-alchemy-plugin-py
+  resource: src/py/vertebra/extensions/alchemy/plugin.py
+  title: Python implementation module (src/py/vertebra/extensions/alchemy/plugin.py)
+- id: src-extensions-alchemy-broker-py
+  resource: src/py/vertebra/extensions/alchemy/broker.py
+  title: Python implementation module (src/py/vertebra/extensions/alchemy/broker.py)
+- id: src-extensions-alchemy-storage-py
+  resource: src/py/vertebra/extensions/alchemy/storage.py
+  title: Python implementation module (src/py/vertebra/extensions/alchemy/storage.py)
+- id: src-extensions-sqlalchemy-dialects-py
+  resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlalchemy/dialects.py)
+- id: src-extensions-sqlalchemy-types-py
+  resource: src/py/vertebra/extensions/sqlalchemy/types.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlalchemy/types.py)
+- id: src-extensions-sqlalchemy-alembic-py
+  resource: src/py/vertebra/extensions/sqlalchemy/alembic.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlalchemy/alembic.py)
+- id: src-pyproject-toml
+  resource: pyproject.toml
+  title: Python package metadata, dependencies, and tool configuration
 ---
 
 # SQLSpec, Advanced Alchemy & SQLAlchemy Dialect Extensions
@@ -81,9 +94,11 @@ Shared plugin behavior:
 | `create_sqlspec_plugin(config, *, broker=None, store=None)` | `sqlspec/plugin.py` | Thin factory returning real `sqlspec.extensions.litestar.SQLSpecPlugin`. Injects Vertebra `LeaseBroker` and `ObjectStoreBackend` into the plugin configuration without shadow wrapper classes. |
 | `create_alchemy_plugin(config, *, broker=None, store=None)` | `alchemy/plugin.py` | Thin factory returning real `advanced_alchemy.extensions.litestar.SQLAlchemyPlugin`. Injects Vertebra `LeaseBroker` and `ObjectStoreBackend` into the plugin configuration without shadow wrapper classes. |
 | `create_async_alchemy_config` / `create_sync_alchemy_config` / `normalize_alchemy_url` | `alchemy/plugin.py` | Config helpers returning real `advanced_alchemy.config.SQLAlchemyAsyncConfig` / `SQLAlchemySyncConfig`, normalizing `bigquery://`, `spanner://`, and `spangres://` URLs to their `+vtb` SQLAlchemy dialects with `NullPool` when a `LeaseBroker` is attached. |
-| [`SyncAdapterConfig` / `AsyncAdapterConfig`](../../../../../src/py/vertebra/extensions/sqlspec/adapters.py)[^src-extensions-sqlspec-adapters-py] | `sqlspec/adapters.py` | **Tier-1 native SHM adapters**: concrete subclasses for PostgreSQL, MySQL, SQLite, Oracle, MSSQL, DuckDB, Google BigQuery, and Google Cloud Spanner (`PostgreSQLSyncConfig`, `BigQuerySyncConfig`, `BigQueryAsyncConfig`, `SpannerSyncConfig`, `SpannerAsyncConfig`, etc.) backed directly by `vertebra.db` drivers, `LeaseBroker`, `StatementCache`, `ArrowCursor`, and `ObjectStoreBackend` (`load_from_object_store*`, `export_to_object_store*`, `create_object_table*`, `list_object_table_refs*`, `read_arrow_from_object_store*`, `write_arrow_to_object_store*`). `BaseSyncDriver.apply_tenant_predicate` and `BaseAsyncDriver.apply_tenant_predicate` propagate driver exceptions unchanged when `SET LOCAL` fails so unscoped sessions never execute. Resolves native drivers via `DatabaseRegistry.default().get_shared_sync_driver` / `get_shared_async_driver` (`share_pool=True` default) so stacked Litestar, Django, and SQLAlchemy apps targeting the same database endpoint share one underlying connection pool, `SyncCloudSQLDialer` / `AsyncCloudSQLDialer` / `SyncAlloyDBDialer` / `AsyncAlloyDBDialer`, and process-wide `LeaseBroker`. |
+| [`SyncAdapterConfig` / `AsyncAdapterConfig`](../../../../../src/py/vertebra/extensions/sqlspec/adapters.py)[^src-extensions-sqlspec-adapters-py] | `sqlspec/adapters.py` | **Tier-1 native SHM adapters**: concrete subclasses for PostgreSQL, MySQL, SQLite, Oracle, MSSQL, DuckDB, Google BigQuery, and Google Cloud Spanner (`PostgreSQLSyncConfig`, `BigQuerySyncConfig`, `BigQueryAsyncConfig`, `SpannerSyncConfig`, `SpannerAsyncConfig`, etc.) backed directly by `vertebra.db` drivers, `LeaseBroker`, `StatementCache`, `ArrowCursor`, and `ObjectStoreBackend` (`load_from_object_store*`, `export_to_object_store*`, `create_object_table*`, `list_object_table_refs*`, `read_arrow_from_object_store*`, `write_arrow_to_object_store*`). `BaseSyncDriver.apply_tenant_predicate` and `BaseAsyncDriver.apply_tenant_predicate` raise native `NotSupportedError`. PostgreSQL and Oracle subclasses delegate to their engine cores and propagate original setter failures; PostgreSQL prepares sync `%s` and async `$N` binds through the configured SQLSpec profile and unwraps typed values. Oracle context acceptance currently covers the SQLite stand-in, with trusted-package and live-session acceptance deferred to the native Oracle driver. Resolves native drivers via `DatabaseRegistry.default().get_shared_sync_driver` / `get_shared_async_driver` (`share_pool=True` default) so stacked Litestar, Django, and SQLAlchemy apps targeting the same database endpoint share one underlying connection pool, `SyncCloudSQLDialer` / `AsyncCloudSQLDialer` / `SyncAlloyDBDialer` / `AsyncAlloyDBDialer`, and process-wide `LeaseBroker`. |
 | [`ProxySyncConfig` / `ProxyAsyncConfig`](../../../../../src/py/vertebra/extensions/sqlspec/proxy.py)[^src-extensions-sqlspec-proxy-py] | `sqlspec/proxy.py` | **Tier-2 universal SHM broker proxy**: wraps *any* existing SQLSpec or Advanced Alchemy driver (`asyncpg`, `psycopg`, `oracledb`, `duckdb`, `adbc`, etc.) with `LeaseBroker` slot acquisition, `StatementCache` plan lookup, and zero-copy `ShmRegion` Arrow IPC transfer. |
 | [`ChangeFeedSyncEventBackend` / `ChangeFeedAsyncEventBackend`](../../../../../src/py/vertebra/extensions/sqlspec/events.py)[^src-extensions-sqlspec-events-py] | `sqlspec/events.py` | SQLSpec event backends bridging database transactions to Vertebra CDC `ChangeFeed`. |
+
+BigQuery and Spanner configs and drivers reject non-None `tenant_predicate` before base initialization, supplied-core access, resolver/default-broker access, or native effects. These eight constructor guards prevent unsupported isolation sessions from existing. Ordinary None-predicate queries, scripts, Arrow, batch, and snapshots retain their previous preparation and results.
 
 Pool defaults: when a broker is attached to a `+vtb` dialect (`poolclass="NullPool"`), SQLAlchemy's per-process `QueuePool` is bypassed so the cross-process `LeaseBroker` governs connection concurrency.
 

@@ -16,9 +16,14 @@ from types import ModuleType
 import pytest
 from tools.docs.generate_cli_docs import ensure_native_stub_module
 
+from vertebra.db.adapters.postgres import PostgresEmbeddingPushdown, PostgresNotifyConfig
+from vertebra.db.cdc import ChangeFeed
+from vertebra.db.driver import EmbeddingPushdown
+from vertebra.embeddings import PushdownEmbedder
 from vertebra.typing import MissingDependencyError
 
 __all__ = (
+    "test_analytics_cdc_example_executes",
     "test_example_packages_define_docstring_and_dunder_all",
     "test_examples_contain_zero_inline_comments",
     "test_examples_define_standalone_structure",
@@ -60,6 +65,24 @@ def test_examples_directory_inventory() -> None:
     _, init_files, example_modules = _discover_python_files()
     assert len(init_files) >= 1
     assert len(example_modules) >= 6
+
+
+def test_analytics_cdc_example_executes() -> None:
+    """Execute the CDC guide's constructor example and hydrate a published spill."""
+    guide = (REPO_ROOT / "docs" / "usage" / "analytics-and-cdc.md").read_text(encoding="utf-8")
+    snippet = re.search(r"## Change Data Capture.*?```python\n(.*?)```", guide, flags=re.DOTALL)
+    assert snippet is not None
+    namespace: dict[str, object] = {}
+    exec(compile(snippet.group(1), "analytics-and-cdc.md", "exec"), namespace)
+    feed = namespace["feed"]
+    notify_config = namespace["notify_config"]
+    assert isinstance(feed, ChangeFeed)
+    assert isinstance(notify_config, PostgresNotifyConfig)
+    assert feed.config.channel == notify_config.channel == "orders"
+    payload = {"blob": "x" * 8000}
+    wire, event = feed.publish_event("UPDATE", payload)
+    assert event.spilled is True
+    assert feed.hydrate_notification(wire).payload == payload
 
 
 def test_example_packages_define_docstring_and_dunder_all() -> None:
@@ -381,3 +404,20 @@ def _load_example_module(path: Path) -> ModuleType:
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_sql_embedding_guide_constructs_engine_owned_capability() -> None:
+    """The guide constructs the public SQL facade with a caller-owned driver."""
+    guide = (REPO_ROOT / "docs" / "usage" / "embeddings-and-vectors.md").read_text(encoding="utf-8")
+    snippets = re.findall(r"```python\n(.*?)```", guide, flags=re.DOTALL)
+    snippet = next(block for block in snippets if "def create_sql_embedder(" in block)
+    namespace: dict[str, object] = {}
+    exec(compile(snippet, "embeddings-and-vectors.md", "exec"), namespace)
+    factory = namespace["create_sql_embedder"]
+    assert callable(factory)
+    driver = object()
+    embedder = factory(driver)
+    assert isinstance(embedder, PushdownEmbedder)
+    assert isinstance(embedder.pushdown, PostgresEmbeddingPushdown)
+    assert isinstance(embedder.pushdown, EmbeddingPushdown)
+    assert embedder.pushdown.driver is driver

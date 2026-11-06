@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sqlite3
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from vertebra.db.adapters.oracle.config import OracleConfig, OracleSessionAttrs
@@ -18,7 +19,7 @@ from vertebra.db.arrow import (
 from vertebra.db.driver import SyncDatabaseDriver, ThreadOffloadAsyncDatabaseDriver
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
 __all__ = (
     "AsyncOracleDriver",
@@ -38,6 +39,7 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         self._conn = sqlite3.connect(":memory:", check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._in_transaction: bool = False
+        self._session_context: dict[tuple[str, str], str] = {}
         self._pending_session_attrs: OracleSessionAttrs | None = self.config.session_attrs()
         self._last_piggyback_frame: bytes = b""
 
@@ -105,6 +107,13 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         grant = self._acquire_oracle_broker_lease(sql, len(bound))
         try:
             self._consume_piggyback()
+            if sql.strip().upper() == "BEGIN DBMS_SESSION.SET_CONTEXT(:NAMESPACE, :ATTRIBUTE, :VALUE); END;":
+                if not isinstance(parameters, Mapping):
+                    msg = "Oracle session context requires named bind parameters"
+                    raise TypeError(msg)
+                namespace, attribute, value = (str(parameters[key]) for key in ("namespace", "attribute", "value"))
+                self._session_context[(namespace, attribute)] = value
+                return 0
             cur = self._conn.execute(norm_sql, bound)
             if not self._in_transaction:
                 self._conn.commit()

@@ -3,6 +3,7 @@
 import importlib.util
 import subprocess
 import sys
+from typing import Any
 
 import msgspec
 import pytest
@@ -10,6 +11,8 @@ import pytest
 import vertebra._typing as internal_typing
 from vertebra import typing as vertebra_typing
 from vertebra._typing import HandlerID, LifecycleHook, OptionalDependency, RawHeaders
+from vertebra._typing import ToolPolicyError as InternalPolicyError
+from vertebra._typing import ToolProvider as InternalProvider
 from vertebra.typing import (
     HandlerID as PublicHandlerID,
 )
@@ -21,6 +24,9 @@ from vertebra.typing import (
 )
 from vertebra.typing import (
     Struct,
+    ToolPolicyError,
+    ToolProvider,
+    VertebraError,
 )
 from vertebra.utils.module_loader import (
     MissingDependencyError,
@@ -140,3 +146,24 @@ def test_module_loader_caches_imported_modules_and_ensure_module() -> None:
 
     reset_dependency_cache()
     assert "json" not in _module_cache
+
+
+def test_tool_provider_contract_and_policy_error_exports() -> None:
+    """Neutral tool contracts share identity and accept structural providers."""
+
+    class Provider:
+        def operations(self) -> dict[str, Any]:
+            return {"read": self.read}
+
+        def confirmation_reason(self, operation_name: str, arguments: Any) -> None:
+            return None
+
+        async def read(self) -> int:
+            return 1
+
+    assert ToolProvider is InternalProvider
+    assert ToolPolicyError is InternalPolicyError
+    assert isinstance(Provider(), ToolProvider)
+    error = ToolPolicyError("denied")
+    assert isinstance(error, VertebraError)
+    assert isinstance(error, PermissionError)

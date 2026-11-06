@@ -52,16 +52,6 @@ class ChangeFeedSyncEventBackend(SyncEventBackendProtocol):
         """Return the underlying ChangeFeed instance."""
         return self._feed
 
-    @staticmethod
-    def build_emit_message_sql(
-        prefix: str,
-        payload: bytes | str,
-        *,
-        transactional: bool = True,
-    ) -> tuple[str, tuple[bool, str, bytes]]:
-        """Build a pg_logical_emit_message SQL statement and bind parameter tuple."""
-        return ChangeFeed.build_emit_message_sql(prefix, payload, transactional=transactional)
-
     def publish(
         self,
         channel: str,
@@ -148,16 +138,6 @@ class ChangeFeedAsyncEventBackend(AsyncEventBackendProtocol):
     def feed(self) -> ChangeFeed:
         """Return the underlying ChangeFeed instance."""
         return self._feed
-
-    @staticmethod
-    def build_emit_message_sql(
-        prefix: str,
-        payload: bytes | str,
-        *,
-        transactional: bool = True,
-    ) -> tuple[str, tuple[bool, str, bytes]]:
-        """Build a pg_logical_emit_message SQL statement and bind parameter tuple."""
-        return ChangeFeed.build_emit_message_sql(prefix, payload, transactional=transactional)
 
     async def publish(
         self,

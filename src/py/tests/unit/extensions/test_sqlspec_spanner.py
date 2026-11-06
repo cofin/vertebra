@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-import pytest
+from typing import Any, Literal
 
-from tests.unit.db.test_spanner import FakeSpannerClient
+import pytest
+from sqlspec import StatementStack
+
+from tests.unit.db.test_spanner import FakeAsyncSpannerClient, FakeSpannerClient
 from vertebra.db import NotFoundError
-from vertebra.db.adapters.spanner import SpannerConfig, StalenessBound, SyncSpannerDriver
+from vertebra.db.adapters.spanner import AsyncSpannerDriver, SpannerConfig, StalenessBound, SyncSpannerDriver
 from vertebra.extensions.sqlspec.spanner import (
     SpannerAsyncADKArtifactStore,
     SpannerAsyncADKMemoryStore,
@@ -20,6 +23,12 @@ from vertebra.extensions.sqlspec.spanner import (
     SpannerSyncConfig,
     SpannerSyncEventQueueStore,
     SpannerSyncStore,
+)
+from vertebra.extensions.sqlspec.spanner import (
+    SpannerAsyncDriver as SQLSpecAsyncSpannerDriver,
+)
+from vertebra.extensions.sqlspec.spanner import (
+    SpannerSyncDriver as SQLSpecSyncSpannerDriver,
 )
 from vertebra.typing import ImproperConfigurationError
 
@@ -106,10 +115,12 @@ def test_spanner_sync_config_sessions_connection_shim_and_data_dictionary() -> N
         stack_out = rw_session.execute_stack(
             [
                 "SELECT user_id, order_id, total FROM child_orders",
-                "SELECT COUNT(*) AS cnt FROM step_0",
+                "SELECT COUNT(*) AS cnt FROM child_orders",
             ]
         )
-        assert stack_out[0][0]["cnt"] == 2
+        assert len(stack_out[0]) == 2
+        assert {row["order_id"] for row in stack_out[0]} == {"o1", "o2"}
+        assert stack_out[1] == [{"cnt": 2}]
 
         dd = rw_session.data_dictionary
         tables = dd.get_tables()
@@ -322,3 +333,183 @@ async def test_spanner_async_config_and_async_stores() -> None:
     items = await eq.consume("notifications")
     assert len(items) == 1
     assert await eq.ack(evt["event_id"]) is True
+
+
+class _ArrowOptionsSpannerClient(FakeSpannerClient):
+    """External Spanner client port recording partition and staleness options."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.arrow_requests: list[tuple[int, bool, str, int]] = []
+
+    def partitioned_query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        max_partitions: int = 8,
+        data_boost_enabled: bool = True,
+        staleness_mode: str = "strong",
+        staleness_ms: int = 0,
+    ) -> dict[str, Any]:
+        self.arrow_requests.append((max_partitions, data_boost_enabled, staleness_mode, staleness_ms))
+        return super().partitioned_query(
+            sql, params_json, max_partitions, data_boost_enabled, staleness_mode, staleness_ms
+        )
+
+
+@pytest.mark.parametrize("config_created", [False, True])
+@pytest.mark.parametrize("dialect", ["googlesql", "spangres"])
+def test_spanner_native_driver_stack_results_and_batch_dml(
+    config_created: bool, dialect: Literal["googlesql", "spangres"]
+) -> None:
+    """SQLSpec retains independent native Spanner reads and the raw batch DML contract."""
+    client = _ArrowOptionsSpannerClient()
+    core = SyncSpannerDriver(
+        SpannerConfig(project_id="test-proj", instance_id="test-inst", database_id="stack-db", dialect=dialect),
+        client=client,
+    )
+    driver = (
+        SpannerSyncConfig(core.config, connection_instance=core).create_driver()
+        if config_created
+        else SQLSpecSyncSpannerDriver(core)
+    )
+    select_sql = (
+        "SELECT id FROM stack_items WHERE id = $1"
+        if dialect == "spangres"
+        else "SELECT id FROM stack_items WHERE id = @id"
+    )
+    args = (1,) if dialect == "spangres" else ()
+    kwargs = {} if dialect == "spangres" else {"id": 1}
+    try:
+        core.update_ddl(["CREATE TABLE stack_items (id INT64 NOT NULL) PRIMARY KEY (id)"])
+        assert driver.execute_stack(
+            ["INSERT INTO stack_items (id) VALUES (1)", "INSERT INTO stack_items (id) VALUES (2)"]
+        ) == [1, 1]
+        result = driver.execute_stack(
+            StatementStack()
+            .push_execute(select_sql, *args, **kwargs)
+            .push_execute("SELECT COUNT(*) AS n FROM stack_items")
+        )
+        assert result[0].get_result().get_data() == [{"id": 1}]
+        assert result[1].get_result().get_data() == [{"n": 2}]
+        single = driver.execute_stack(
+            StatementStack().push_execute(
+                select_sql, *((2,) if dialect == "spangres" else ()), **({} if dialect == "spangres" else {"id": 2})
+            )
+        )
+        assert single[0].get_result().get_data() == [{"id": 2}]
+        bound = StalenessBound.exact_staleness(750)
+        arrow = driver.execute_stack(
+            StatementStack().push_execute_arrow(
+                select_sql, *args, data_boost=False, max_partitions=2, staleness=bound, **kwargs
+            )
+        )[0]
+        assert arrow.is_arrow_result()
+        assert arrow.rows_affected == 1
+        assert arrow.get_result().data.to_pylist() == [{"id": 1}]
+        assert arrow.get_result().statement.operation_type == "SELECT"
+        assert client.arrow_requests == [(2, False, bound.mode, bound.effective_value())]
+    finally:
+        core.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("config_created", [False, True])
+@pytest.mark.parametrize("dialect", ["googlesql", "spangres"])
+async def test_spanner_async_native_driver_stack_results_and_batch_dml(
+    config_created: bool, dialect: Literal["googlesql", "spangres"]
+) -> None:
+    """Async SQLSpec uses the real Spanner driver with its external client boundary."""
+    client = _ArrowOptionsSpannerClient()
+    core = AsyncSpannerDriver(
+        SpannerConfig(project_id="test-proj", instance_id="test-inst", database_id="stack-async-db", dialect=dialect),
+        client=FakeAsyncSpannerClient(client),
+    )
+    driver = (
+        SpannerAsyncConfig(core.config, connection_instance=core).create_driver()
+        if config_created
+        else SQLSpecAsyncSpannerDriver(core)
+    )
+    select_sql = (
+        "SELECT id FROM stack_items WHERE id = $1"
+        if dialect == "spangres"
+        else "SELECT id FROM stack_items WHERE id = @id"
+    )
+    args = (1,) if dialect == "spangres" else ()
+    kwargs = {} if dialect == "spangres" else {"id": 1}
+    try:
+        await core.update_ddl(["CREATE TABLE stack_items (id INT64 NOT NULL) PRIMARY KEY (id)"])
+        assert await driver.execute_stack(
+            ["INSERT INTO stack_items (id) VALUES (1)", "INSERT INTO stack_items (id) VALUES (2)"]
+        ) == [1, 1]
+        result = await driver.execute_stack(
+            StatementStack()
+            .push_execute(select_sql, *args, **kwargs)
+            .push_execute("SELECT COUNT(*) AS n FROM stack_items")
+        )
+        assert result[0].get_result().get_data() == [{"id": 1}]
+        assert result[1].get_result().get_data() == [{"n": 2}]
+        single = await driver.execute_stack(
+            StatementStack().push_execute(
+                select_sql, *((2,) if dialect == "spangres" else ()), **({} if dialect == "spangres" else {"id": 2})
+            )
+        )
+        assert single[0].get_result().get_data() == [{"id": 2}]
+        bound = StalenessBound.exact_staleness(750)
+        arrow = (
+            await driver.execute_stack(
+                StatementStack().push_execute_arrow(
+                    select_sql, *args, data_boost=False, max_partitions=2, staleness=bound, **kwargs
+                )
+            )
+        )[0]
+        assert arrow.is_arrow_result()
+        assert arrow.rows_affected == 1
+        assert arrow.get_result().data.to_pylist() == [{"id": 1}]
+        assert arrow.get_result().statement.operation_type == "SELECT"
+        assert client.arrow_requests == [(2, False, bound.mode, bound.effective_value())]
+    finally:
+        await core.close()
+
+
+@pytest.mark.parametrize("kind", ["sync-driver", "async-driver", "sync-config", "async-config"])
+def test_configured_tenant_predicate_rejected_before_constructor_effects(
+    kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unsupported isolation fails before base, core, resolver, broker, or native access."""
+    from vertebra.db import NotSupportedError
+    from vertebra.db.rls import TenantPredicate
+    from vertebra.extensions.sqlspec.adapters import (
+        AsyncAdapterConfig,
+        BaseAsyncDriver,
+        BaseSyncDriver,
+        SyncAdapterConfig,
+    )
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("Constructor performed a side effect before rejecting tenant isolation")
+
+    class ForbiddenCore:
+        def __getattribute__(self, name: str) -> Any:
+            forbidden(name)
+
+    for base in (BaseSyncDriver, BaseAsyncDriver, SyncAdapterConfig, AsyncAdapterConfig):
+        monkeypatch.setattr(base, "__init__", forbidden)
+    predicate = TenantPredicate(table_alias="t", tenant_value="tenant")
+    constructors = {
+        "sync-driver": lambda: SQLSpecSyncSpannerDriver(ForbiddenCore(), tenant_predicate=predicate),
+        "async-driver": lambda: SQLSpecAsyncSpannerDriver(ForbiddenCore(), tenant_predicate=predicate),
+        "sync-config": lambda: SpannerSyncConfig(tenant_predicate=predicate),
+        "async-config": lambda: SpannerAsyncConfig(tenant_predicate=predicate),
+    }
+    for config_type in (SpannerSyncConfig, SpannerAsyncConfig):
+        monkeypatch.setattr(config_type, "resolve_spanner_config", forbidden)
+    for constructor_type in (
+        SQLSpecSyncSpannerDriver,
+        SQLSpecAsyncSpannerDriver,
+        SpannerSyncConfig,
+        SpannerAsyncConfig,
+    ):
+        monkeypatch.setattr(constructor_type, "__setattr__", forbidden)
+    with pytest.raises(NotSupportedError):
+        constructors[kind]()
