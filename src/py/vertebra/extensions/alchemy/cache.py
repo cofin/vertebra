@@ -14,13 +14,13 @@ import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping, MutableMapping, Sequence
 from datetime import timedelta
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal, Self, TypeVar, cast
+from typing import Any, Literal, Self, cast
 
 import msgspec
 from sqlalchemy import inspect as sa_inspect
 
-from vertebra.db.redis import AsyncRedisDriver, RedisConfig, SyncRedisDriver
-from vertebra.db.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
+from vertebra.db.adapters.redis import AsyncRedisDriver, RedisConfig, SyncRedisDriver
+from vertebra.db.adapters.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.serializers import (
     ZeroCopyCodecRegistry,
@@ -43,9 +43,6 @@ except ImportError as exc:
         extra="alchemy",
     ) from exc
 
-if TYPE_CHECKING:
-    pass
-
 __all__ = (
     "AsyncCacheManager",
     "CacheConfig",
@@ -58,8 +55,6 @@ __all__ = (
     "msgspec_model_serializer",
     "setup_cache_listeners",
 )
-
-T = TypeVar("T")
 
 _MODEL_KEY = "__aa_model__"
 _TABLE_KEY = "__aa_table__"
@@ -442,7 +437,7 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
             self._misses += 1
         return miss_sentinel
 
-    def get_or_create(
+    def get_or_create[T](
         self,
         key: str,
         creator: Callable[[], T],
@@ -604,7 +599,7 @@ class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
             self._misses += 1
         return miss_sentinel
 
-    async def get_or_create_async(
+    async def get_or_create_async[T](
         self,
         key: str,
         creator: Callable[[], T | Awaitable[T]],
@@ -932,7 +927,7 @@ class AsyncCacheManager(CacheManager):
             return
         await super().delete_async(key)
 
-    async def get_or_create_async(
+    async def get_or_create_async[T](
         self,
         key: str,
         creator: Callable[[], T],
@@ -950,7 +945,7 @@ class AsyncCacheManager(CacheManager):
             )
         return await super().get_or_create_async(key, creator, expiration_time)
 
-    async def get_entity_async(
+    async def get_entity_async[T](
         self,
         model_name: str,
         entity_id: Any,
@@ -1017,7 +1012,7 @@ class AsyncCacheManager(CacheManager):
             return decoded
         return "0"
 
-    async def get_many_async(self, key: str, model_class: type[T]) -> list[T] | None:
+    async def get_many_async[T](self, key: str, model_class: type[T]) -> list[T] | None:
         """Get a cached list of entities natively on the event loop."""
         cached = await self.get_async(key)
         if cached is DOGPILE_NO_VALUE or cached is NO_VALUE or not isinstance(cached, list):
@@ -1041,7 +1036,7 @@ class AsyncCacheManager(CacheManager):
         payload = [base64.b64encode(serializer(item)).decode("ascii") for item in items]
         await self.set_async(key, payload)
 
-    async def get_many_and_count_async(
+    async def get_many_and_count_async[T](
         self,
         key: str,
         model_class: type[T],
@@ -1084,7 +1079,7 @@ class AsyncCacheManager(CacheManager):
             return
         await super().invalidate_all_async()
 
-    def get_schema_sync(
+    def get_schema_sync[T](
         self,
         model_name: str,
         entity_id: Any,
@@ -1100,7 +1095,7 @@ class AsyncCacheManager(CacheManager):
             return None
         return msgspec_model_deserializer(bytes(cached), schema_type, format=format)
 
-    async def get_schema_async(
+    async def get_schema_async[T](
         self,
         model_name: str,
         entity_id: Any,
@@ -1116,7 +1111,7 @@ class AsyncCacheManager(CacheManager):
             return None
         return msgspec_model_deserializer(bytes(cached), schema_type, format=format)
 
-    def get_many_schema_sync(
+    def get_many_schema_sync[T](
         self,
         key: str,
         schema_type: type[T],
@@ -1135,7 +1130,7 @@ class AsyncCacheManager(CacheManager):
             results.append(msgspec_model_deserializer(raw, schema_type, format=format))
         return results
 
-    async def get_many_schema_async(
+    async def get_many_schema_async[T](
         self,
         key: str,
         schema_type: type[T],

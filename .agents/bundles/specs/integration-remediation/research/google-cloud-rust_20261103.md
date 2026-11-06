@@ -3,6 +3,9 @@ type: Research
 title: Official Google Cloud Rust crates versus the hand-written GCP wire code
 description: Primary-source evaluation of googleapis/google-cloud-rust crates for Spanner, BigQuery Storage, and auth, with the per-area adopt or keep decision used by gcp-wire-protocol-correctness and gcp-driver-resilience.
 status: stable
+state: promoted
+promoted_to: integration-remediation
+tags: [research, gcp, rust, spanner, bigquery]
 created_at: 2026-11-03
 sources:
   - resource: https://crates.io/api/v1/crates/google-cloud-spanner

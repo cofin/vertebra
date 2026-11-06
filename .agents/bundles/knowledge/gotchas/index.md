@@ -1,7 +1,6 @@
 ---
 title: "Gotchas & Non-Obvious Footguns Index"
 description: "Index of Vertebra's runtime, PyO3 FFI, ASGI, shared-memory, and cross-platform IPC gotchas."
-status: stable
 tags:
   - gotchas
   - index

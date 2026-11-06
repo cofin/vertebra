@@ -9,12 +9,12 @@ research:
   - ../integration-remediation/research/audit-findings_20261103.md
   - ../native-data-platform/research/gap-analysis_20261103.md
 plan_revision: 4
-plan_commit: "679a981"
-state_revision: 0
+plan_commit: "f741701"
+state_revision: 1
 current_task: null
 last_verified_checkpoint: null
 created_at: 2026-11-03T03:30:00Z
-updated_at: 2026-11-04T01:12:00Z
+updated_at: "2026-11-05T01:03:53Z"
 tags: [db, layering, cdc, embeddings, agent-tools, pipeline, rls]
 ---
 
@@ -24,7 +24,7 @@ tags: [db, layering, cdc, embeddings, agent-tools, pipeline, rls]
 
 ### 1.1 Problem Statement & Objectives
 
-After [`db-layout-and-contract`](../db-layout-and-contract/spec.md) establishes `src/py/vertebra/db/adapters/<engine>/`, standalone `vertebra-bigquery` and `vertebra-spanner` PyO3 wheels, `Sync*`/`Async*` capability protocols (`SyncPipelineCapable`, `AsyncPipelineCapable`, `NotificationSource`, `SyncChangeSource`, `AsyncChangeSource`, `QueueStore`, `EmbeddingPushdown`), `provide_driver`, and the upward-import boundary gate, generic modules across `vertebra.db` and `vertebra.embeddings` still carry engine-specific SQL, dialect-coupled configuration fields, upward `vertebra.agent` imports, and the obsolete CTE `SyncQueryPipeline` / `AsyncQueryPipeline` compilers:
+The [database foundation](../../knowledge/domains/data/database-drivers-and-dialers.md) provides `src/py/vertebra/db/adapters/<engine>/`, standalone `vertebra-bigquery` and `vertebra-spanner` PyO3 wheels, `Sync*`/`Async*` capability protocols (`SyncPipelineCapable`, `AsyncPipelineCapable`, `NotificationSource`, `SyncChangeSource`, `AsyncChangeSource`, `QueueStore`, `EmbeddingPushdown`), `provide_driver`, and the upward-import boundary gate. Generic modules across `vertebra.db` and `vertebra.embeddings` still carry engine-specific SQL, dialect-coupled configuration fields, upward `vertebra.agent` imports, and the obsolete CTE `SyncQueryPipeline` / `AsyncQueryPipeline` compilers:
 
 - `src/py/vertebra/db/cdc.py` bundles PostgreSQL logical replication settings (`replication_slot_name`, `publication_name`, `max_slot_wal_keep_size_mb`, `spill_table`), `pg_logical_emit_message($1, $2, $3)`, an unbounded `_spill_store: dict[int, dict[str, Any]]`, swallowed `SyncObjectStore.get` errors in `hydrate_notification()`, and Spanner change-stream polling (`SpannerChildPartition`, `SpannerChangeStreamRecord`, `SyncSpannerChangeStreamSource`, and `AsyncSpannerChangeStreamSource` using `inspect.isawaitable` duck-typing and required `start_timestamp` kwargs on `stream()`).
 - `src/py/vertebra/db/channels.py` (`DatabaseChannelBackend`) mixes an in-memory asyncio pub/sub fan-out bus with hardcoded PostgreSQL `pg_notify` and Oracle `DBMS_AQ.ENQUEUE` PL/SQL branches, forcing `vertebra.framework.channels.ChannelBus` and `vertebra.extensions.{litestar,starlette,fastapi,flask}.channels` to inherit a database module.
@@ -42,8 +42,8 @@ This flow eliminates every engine leak from `vertebra/db/*` (outside `vertebra/d
 
 ### 1.2 Upstream Execution Baseline
 
-- **Branch baseline**: `refactor/sync-async-names @ 08ac03a` + [`db-layout-and-contract`](../db-layout-and-contract/spec.md) (`t01`–`t07`).
-- **Parent PRD**: [`integration-remediation`](../integration-remediation/spec.md) (Chapter 3), unlocked directly after [`db-layout-and-contract`](../db-layout-and-contract/spec.md) without waiting for `native-postgres-driver` because `execute_stack` dispatches on `isinstance(self.native_driver, SyncPipelineCapable)` (sync) and `isinstance(self.native_driver, AsyncPipelineCapable)` (async).
+- **Branch baseline**: `main @ f741701` + [database foundation](../../knowledge/domains/data/database-drivers-and-dialers.md) (completed).
+- **Parent PRD**: [`integration-remediation`](../integration-remediation/spec.md) (Chapter 3), enabled by the completed [database foundation](../../knowledge/domains/data/database-drivers-and-dialers.md) without waiting for `native-postgres-driver` because `execute_stack` dispatches on `isinstance(self.native_driver, SyncPipelineCapable)` (sync) and `isinstance(self.native_driver, AsyncPipelineCapable)` (async).
 
 ### 1.3 Code Analysis & Seam Summary
 
@@ -611,11 +611,11 @@ flowchart TD
 
 ## 5. Continuity Snapshot
 
-- **Active Focus**: Plan (`plan_revision: 4`) ready for user review alongside `db-layout-and-contract`; implementation begins after `db-layout-and-contract` completes.
+- **Active Focus**: Plan (`plan_revision: 4`) remains planned and ready for review. The database foundation prerequisite is complete; this flow has no implementation checkpoint.
 - **Completed Checkpoints**: None (`state: planned`).
 - **Key Decisions**:
   - `ChannelBus` lives in `src/py/vertebra/server/_channels.py` (re-exported from `vertebra.framework.channels`) so `vertebra.extensions.{litestar,starlette,fastapi,flask}.channels` share the engine-neutral pub/sub substrate without importing `vertebra.framework.*` or `vertebra.db.channels`.
   - `db/mcp_tools.py` moves to `src/py/vertebra/agent/tools/{__init__,bigquery,spanner}.py` (re-exported lazily on `vertebra.agent` with `if TYPE_CHECKING:` parity) using `provide_driver`.
   - `embeddings/_bigquery.py`, `embeddings/_spanner.py`, and `AlloyDbEmbedder`/`OracleEmbedder` in `embeddings/_google.py` are deleted cleanly without wrapper aliases; `PushdownEmbedder` overrides `Embedder.__new__` and delegates `_embed_batch_impl` and `vector_search` to `EmbeddingPushdown` implementations under `vertebra/db/adapters/{bigquery,spanner,postgres,oracle}/embeddings.py`.
   - `DatabaseChannelBackend` (`db/channels.py`) and `SyncQueryPipeline` / `AsyncQueryPipeline` (`db/pipeline.py`) are deleted cleanly without compatibility shims.
-- **Open Blockers**: Requires [`db-layout-and-contract`](../db-layout-and-contract/spec.md) (`t01`–`t07`) and user approval before stamping `plan_commit = HEAD`.
+- **Open Blockers**: The [database foundation](../../knowledge/domains/data/database-drivers-and-dialers.md) prerequisite is satisfied. User approval remains required before stamping `plan_commit = HEAD`.

@@ -1,23 +1,156 @@
-"""Base configuration and driver classes for Vertebra database drivers."""
+"""Base configuration, typed database exceptions, and driver classes for Vertebra database drivers."""
 
 from __future__ import annotations
 
-from vertebra.db.driver._async import (
-    AsyncDatabaseDriver,
-    ThreadOffloadAsyncDatabaseDriver,
-)
-from vertebra.db.driver._common import (
-    BaseDatabaseConfig,
-    CommonDriverMixin,
-    _normalize_driver_params,
-)
-from vertebra.db.driver._sync import SyncDatabaseDriver
+from typing import TYPE_CHECKING
+
+from vertebra.utils.module_loader import lazy_exports
+
+if TYPE_CHECKING:
+    from vertebra._vertebra import (
+        ConnectionFailure,
+        DatabaseError,
+        DataError,
+        IntegrityError,
+        InterfaceError,
+        InternalError,
+        NotFoundError,
+        NotSupportedError,
+        OperationalError,
+        PoolExhaustedError,
+        ProgrammingError,
+        QueryCancelledError,
+        SerializationFailure,
+    )
+    from vertebra.db.driver._async import (
+        AsyncDatabaseDriver,
+        ThreadOffloadAsyncDatabaseDriver,
+    )
+    from vertebra.db.driver._common import (
+        BIGQUERY_DIALECT_TAG,
+        DATAFUSION_DIALECT_TAG,
+        DUCKDB_DIALECT_TAG,
+        MSSQL_DIALECT_TAG,
+        MYSQL_DIALECT_TAG,
+        ORACLE_DIALECT_TAG,
+        POSTGRES_DIALECT_TAG,
+        REDIS_DIALECT_TAG,
+        SPANGRES_DIALECT_TAG,
+        SPANNER_GOOGLESQL_DIALECT_TAG,
+        SQLITE_DIALECT_TAG,
+        VALKEY_DIALECT_TAG,
+        BaseDatabaseConfig,
+        CommonDriverMixin,
+    )
+    from vertebra.db.driver._sync import SyncDatabaseDriver
+    from vertebra.db.driver.capabilities import (
+        AsyncChangeSource,
+        AsyncPipeline,
+        AsyncPipelineCapable,
+        ClaimedJob,
+        EmbeddingPushdown,
+        NotificationEvent,
+        NotificationSource,
+        QueueStore,
+        SyncChangeSource,
+        SyncPipeline,
+        SyncPipelineCapable,
+    )
 
 __all__ = (
+    "BIGQUERY_DIALECT_TAG",
+    "DATAFUSION_DIALECT_TAG",
+    "DUCKDB_DIALECT_TAG",
+    "MSSQL_DIALECT_TAG",
+    "MYSQL_DIALECT_TAG",
+    "ORACLE_DIALECT_TAG",
+    "POSTGRES_DIALECT_TAG",
+    "REDIS_DIALECT_TAG",
+    "SPANGRES_DIALECT_TAG",
+    "SPANNER_GOOGLESQL_DIALECT_TAG",
+    "SQLITE_DIALECT_TAG",
+    "VALKEY_DIALECT_TAG",
+    "AsyncChangeSource",
     "AsyncDatabaseDriver",
+    "AsyncPipeline",
+    "AsyncPipelineCapable",
     "BaseDatabaseConfig",
+    "ClaimedJob",
     "CommonDriverMixin",
+    "ConnectionFailure",
+    "DataError",
+    "DatabaseError",
+    "EmbeddingPushdown",
+    "IntegrityError",
+    "InterfaceError",
+    "InternalError",
+    "NotFoundError",
+    "NotSupportedError",
+    "NotificationEvent",
+    "NotificationSource",
+    "OperationalError",
+    "PoolExhaustedError",
+    "ProgrammingError",
+    "QueryCancelledError",
+    "QueueStore",
+    "SerializationFailure",
+    "SyncChangeSource",
     "SyncDatabaseDriver",
+    "SyncPipeline",
+    "SyncPipelineCapable",
     "ThreadOffloadAsyncDatabaseDriver",
-    "_normalize_driver_params",
 )
+
+__lazy_modules__ = [
+    "vertebra._vertebra",
+    "vertebra.db.driver._async",
+    "vertebra.db.driver._common",
+    "vertebra.db.driver._sync",
+    "vertebra.db.driver.capabilities",
+]
+
+_EXPORT_MAP: dict[str, tuple[str, str]] = {
+    "BIGQUERY_DIALECT_TAG": ("vertebra.db.driver._common", "BIGQUERY_DIALECT_TAG"),
+    "DATAFUSION_DIALECT_TAG": ("vertebra.db.driver._common", "DATAFUSION_DIALECT_TAG"),
+    "DUCKDB_DIALECT_TAG": ("vertebra.db.driver._common", "DUCKDB_DIALECT_TAG"),
+    "MSSQL_DIALECT_TAG": ("vertebra.db.driver._common", "MSSQL_DIALECT_TAG"),
+    "MYSQL_DIALECT_TAG": ("vertebra.db.driver._common", "MYSQL_DIALECT_TAG"),
+    "ORACLE_DIALECT_TAG": ("vertebra.db.driver._common", "ORACLE_DIALECT_TAG"),
+    "POSTGRES_DIALECT_TAG": ("vertebra.db.driver._common", "POSTGRES_DIALECT_TAG"),
+    "REDIS_DIALECT_TAG": ("vertebra.db.driver._common", "REDIS_DIALECT_TAG"),
+    "SPANGRES_DIALECT_TAG": ("vertebra.db.driver._common", "SPANGRES_DIALECT_TAG"),
+    "SPANNER_GOOGLESQL_DIALECT_TAG": ("vertebra.db.driver._common", "SPANNER_GOOGLESQL_DIALECT_TAG"),
+    "SQLITE_DIALECT_TAG": ("vertebra.db.driver._common", "SQLITE_DIALECT_TAG"),
+    "VALKEY_DIALECT_TAG": ("vertebra.db.driver._common", "VALKEY_DIALECT_TAG"),
+    "AsyncChangeSource": ("vertebra.db.driver.capabilities", "AsyncChangeSource"),
+    "AsyncDatabaseDriver": ("vertebra.db.driver._async", "AsyncDatabaseDriver"),
+    "AsyncPipeline": ("vertebra.db.driver.capabilities", "AsyncPipeline"),
+    "AsyncPipelineCapable": ("vertebra.db.driver.capabilities", "AsyncPipelineCapable"),
+    "BaseDatabaseConfig": ("vertebra.db.driver._common", "BaseDatabaseConfig"),
+    "ClaimedJob": ("vertebra.db.driver.capabilities", "ClaimedJob"),
+    "CommonDriverMixin": ("vertebra.db.driver._common", "CommonDriverMixin"),
+    "ConnectionFailure": ("vertebra._vertebra", "ConnectionFailure"),
+    "DataError": ("vertebra._vertebra", "DataError"),
+    "DatabaseError": ("vertebra._vertebra", "DatabaseError"),
+    "EmbeddingPushdown": ("vertebra.db.driver.capabilities", "EmbeddingPushdown"),
+    "IntegrityError": ("vertebra._vertebra", "IntegrityError"),
+    "InterfaceError": ("vertebra._vertebra", "InterfaceError"),
+    "InternalError": ("vertebra._vertebra", "InternalError"),
+    "NotFoundError": ("vertebra._vertebra", "NotFoundError"),
+    "NotSupportedError": ("vertebra._vertebra", "NotSupportedError"),
+    "NotificationEvent": ("vertebra.db.driver.capabilities", "NotificationEvent"),
+    "NotificationSource": ("vertebra.db.driver.capabilities", "NotificationSource"),
+    "OperationalError": ("vertebra._vertebra", "OperationalError"),
+    "PoolExhaustedError": ("vertebra._vertebra", "PoolExhaustedError"),
+    "ProgrammingError": ("vertebra._vertebra", "ProgrammingError"),
+    "QueryCancelledError": ("vertebra._vertebra", "QueryCancelledError"),
+    "QueueStore": ("vertebra.db.driver.capabilities", "QueueStore"),
+    "SerializationFailure": ("vertebra._vertebra", "SerializationFailure"),
+    "SyncChangeSource": ("vertebra.db.driver.capabilities", "SyncChangeSource"),
+    "SyncDatabaseDriver": ("vertebra.db.driver._sync", "SyncDatabaseDriver"),
+    "SyncPipeline": ("vertebra.db.driver.capabilities", "SyncPipeline"),
+    "SyncPipelineCapable": ("vertebra.db.driver.capabilities", "SyncPipelineCapable"),
+    "ThreadOffloadAsyncDatabaseDriver": ("vertebra.db.driver._async", "ThreadOffloadAsyncDatabaseDriver"),
+}
+
+__getattr__, __dir__ = lazy_exports(__name__, __all__, _EXPORT_MAP)

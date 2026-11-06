@@ -1,14 +1,26 @@
----
-title: "Vertebra Bundle Activity Log"
-description: "Chronological record of OKF v0.2 bundle initialization, knowledge syntheses, and completed Flow archives."
-status: stable
-tags:
-  - okf
-  - log
-  - history
----
-
 # Bundle Activity Log
+
+## [2026-11-05] flow-archive | Completed `db-layout-and-contract`
+
+- Completed all seven worksheets on `feat/db-updates`; source checkpoint `4ce057e`, documentation checkpoint `1fc52474`, and reviewed range `f741701..1fc52474`. Correctness re-verification resolves PY-01 through PY-08, release/artifact ownership findings, and the adjacent pre-existing GCP HTTP-classification defect. Fresh quality/debloat review has no findings; its minor documentation observation is resolved.
+- Verification exits `0`: Python (`1738 passed, 69 skipped, 170 xfailed`), Rust (`473 passed, 1 ignored`), TypeScript, lint/type/stub checks, docs, and review validation. Direct and source-built companion wheels pass isolated imports, combined extras installation, dependency checks, and optional-wheel removal/reinstallation. Local artifacts use CPython 3.12 Linux debug builds; live PostgreSQL/GCP and the hosted release platform matrix remain unverified. Hosted CI run `41935822926` is green at antecedent `989ebbd`; remediation commits remain local.
+- Curated domain, architecture, FFI pattern, testing, gotcha, packaging, and ADR-004 chapters before deleting the completed spec. The [database foundation](knowledge/domains/data/database-drivers-and-dialers.md) and [optional-wheel ownership decision](knowledge/decisions/adr-004-optional-driver-wheels-and-shm-ownership.md) are durable entry points.
+- Native Data Platform Chapter 1 is complete. `db-engine-primitives` remains planned with all seven worksheets intact; its foundation prerequisite is satisfied.
+
+## [2026-11-04] flow-implement | Completed `db-layout-and-contract` (`t01`–`t07`, checkpoint `a5dbea6`)
+
+- Completed all 7 tasks and Phase 1–3 Recovery Checkpoints on `feat/db-updates`: `t01` (`8675187`, `vertebra.db.adapters.<engine>` move and fail-closed `DataFusionEngine`), `t02` (`2fa781f`, `vertebra-db` `connection.rs`/`py_async.rs`, `ShmCapsule`, and `DatabaseError` hierarchy), `t03` (`95afe7a`, standalone `vertebra-bigquery` and `vertebra-spanner` PyO3 wheels and optional extras), `t04` (`c031fc9`, unified `SyncDatabaseDriver`/`AsyncDatabaseDriver` contract), `t05` (`2c0d365`, runtime-checkable `Sync*`/`Async*` capability protocols), `t06` (`144ef8b`, polymorphic `DatabaseRegistry`, `provide_driver`, and upward-import AST gate), and `t07` (`a5dbea6`, parameterized cross-engine conformance suite, `docs/`, and OKF data chapters).
+
+## [2026-11-04] flow-revise | Revised `db-layout-and-contract` (`plan_revision: 5`, `plan_commit: 2c0d365`)
+
+- Added all eleven `src/py/vertebra/db/adapters/<engine>/__init__.py` barrels (`lazy_exports`) to `db-layout-and-contract:t06` so `DatabaseRegistry.parse_url` imports `<Engine>Config` without eagerly importing `driver.py`, specified `+vtb`/`+vertebra` URL scheme fallback and `pool_fingerprint -> tuple[Any, ...] | None`, and aligned `t07` `conftest.py` and `docs/` targets (`0` review findings).
+
+## [2026-11-04] flow-setup | Cleaned Pre-OKF Legacy Artifacts and Aligned OKF v0.2 Bundle on `feat/db-updates`
+
+- Executed `/flow:setup` brownfield alignment (`Align & True-Up`, `shared` Git tracking policy) on `feat/db-updates` (`main @ f741701`):
+  - **Legacy Artifact & Beads Cleanup**: Audited and removed obsolete `.beads/` (`262` historical issues superseded on `main`), `.agents/skills/flow-memory-keeper/`, and legacy top-level `.agents/{archive,knowledge,research,specs,wisps,*.md,beads.json}` artifacts; cleaned `.git/info/exclude`, removed stale `merge.beads` / `beads` / `core.hooksPath` entries from `.git/config`, installed repository `pre-commit` hooks, and merged `.claude/settings.local.json` (`plansDirectory: ".agents/bundles/specs"`, backup at `.claude/settings.local.json.bak`).
+  - **OKF v0.2 Bundle, Truth Blocks & Provenance**: Added `bundle: "vertebra"` to `.agents/bundles/index.md`, created `.agents/bundles/specs/index.md`, stripped concept-only keys from reserved `index.md` and `log.md` files, added bounded `<= 40`-line `<!-- truth: start -->` blocks across all 35 remaining `knowledge/**` chapters, added `generated`, `verified`, and `sources` (`{id, resource, title}`) with matching `[^id]:` body footnotes across all 53 `product/**` and `knowledge/**` chapters, and synchronized `product/{product,product-guidelines,tech-stack}.md` (`0.3.0`, `JWTGuard`, `WASM*`, `MCP*`, `drive_native_batch`) and `okf-frontmatter.md`.
+  - **Active Spec & Research Continuity**: Re-anchored `plan_commit` (`f741701`) across `native-data-platform`, `integration-remediation`, `db-layout-and-contract` (`t01`–`t07`), and `db-engine-primitives` (`t01`–`t07`), updated squash-merged checkpoint SHAs (`364c7cb`, `984ce73`, `abd33ab`) in `integration-remediation/spec.md`, and marked all 4 spec-scoped research briefs `state: promoted`.
 
 ## [2026-11-03] flow-archive | Completed and Archived GCP Driver Resilience and Typed Errors (`gcp-driver-resilience`)
 

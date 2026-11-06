@@ -18,11 +18,10 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 futures = { workspace = true }
-google-cloud-auth = { workspace = true }
-google-cloud-bigquery = { workspace = true }
-google-cloud-gax = { workspace = true }
-google-cloud-longrunning = { workspace = true }
-google-cloud-spanner = { workspace = true }
+google-cloud-auth = { workspace = true, optional = true }
+google-cloud-gax = { workspace = true, optional = true }
+google-cloud-rpc = { workspace = true, optional = true }
+google-cloud-wkt = { workspace = true, optional = true }
 hex = { workspace = true }
 hmac = { workspace = true }
 http = { workspace = true }
@@ -30,29 +29,41 @@ http-body-util = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 lz4_flex = { workspace = true }
+pyo3 = { workspace = true, optional = true }
 rcgen = { workspace = true }
 reqwest = { workspace = true }
 rmp-serde = { workspace = true }
 rsa = { version = "0.9", features = ["sha2"] }
 rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tonic = { workspace = true }
+tokio-rustls = { workspace = true }
 url = { workspace = true }
+webpki-root-certs = { workspace = true }
 zstd = { workspace = true }
 
+[build-dependencies]
+pyo3-build-config = { workspace = true }
+
 [dev-dependencies]
-google-cloud-longrunning = { workspace = true }
-google-cloud-rpc = { workspace = true }
-google-cloud-spanner-admin-database-v1 = { workspace = true }
 proptest = { workspace = true }
-prost = { workspace = true }
-prost-types = { workspace = true }
 tempfile = "3"
 
 [features]
 default = []
 duckdb = []
+gcp = [
+    "dep:google-cloud-auth",
+    "dep:google-cloud-gax",
+    "dep:google-cloud-rpc",
+    "dep:google-cloud-wkt",
+]
+pyo3 = ["dep:pyo3"]
+
+[[test]]
+name = "gcp_credentials_tests"
+required-features = ["gcp"]

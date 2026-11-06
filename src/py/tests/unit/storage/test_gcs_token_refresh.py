@@ -23,7 +23,7 @@ from vertebra._vertebra import (
 from vertebra._vertebra import (
     SyncGcpTokenCache as CoreSyncGcpTokenCache,
 )
-from vertebra.db.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
+from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
 from vertebra.embeddings import VertexEmbedder
 from vertebra.storage import (
     AsyncGcpTokenCache,

@@ -15,8 +15,8 @@ from alembic.ddl.oracle import OracleImpl
 from alembic.ddl.postgresql import PostgresqlImpl
 from alembic.ddl.sqlite import SQLiteImpl
 
-from vertebra.db.mysql import MySQLConfig
-from vertebra.db.postgres import PostgreSQLConfig
+from vertebra.db.adapters.mysql import MySQLConfig
+from vertebra.db.adapters.postgres import PostgreSQLConfig
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:

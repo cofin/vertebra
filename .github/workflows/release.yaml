@@ -10,12 +10,12 @@ permissions:
 
 jobs:
   build_wheels:
-    name: Build wheels on ${{ matrix.os }} (${{ matrix.arch }})
-    runs-on: ${{ matrix.os }}
+    name: Build ${{ matrix.package.name }} on ${{ matrix.platform.os }} (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
+        platform:
           - os: ubuntu-latest
             arch: x86_64
           - os: ubuntu-24.04-arm
@@ -24,6 +24,23 @@ jobs:
             arch: "x86_64 arm64"
           - os: windows-latest
             arch: AMD64
+        package:
+          - name: core
+            path: .
+            module: vertebra._vertebra
+            exports: ArrowCursor DatabaseError
+          - name: bigquery
+            path: src/rs/vertebra-bigquery
+            module: vertebra._bigquery
+            exports: SyncBigQueryClient AsyncBigQueryClient
+          - name: spanner
+            path: src/rs/vertebra-spanner
+            module: vertebra._spanner
+            exports: SyncSpannerClient AsyncSpannerClient
+          - name: storage
+            path: src/rs/vertebra-storage
+            module: vertebra._storage
+            exports: SyncObjectStore AsyncObjectStore
 
     steps:
       - uses: actions/checkout@v7
@@ -36,9 +53,11 @@ jobs:
           targets: ${{ runner.os == 'macOS' && 'x86_64-apple-darwin,aarch64-apple-darwin' || '' }}
 
       - name: Install Bun
+        if: matrix.package.name == 'core'
         uses: oven-sh/setup-bun@v2
 
       - name: Build TypeScript client bundle
+        if: matrix.package.name == 'core'
         run: |
           cd src/ts/vertebra-client
           bun install
@@ -51,19 +70,25 @@ jobs:
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.3.5
+        with:
+          package-dir: ${{ matrix.package.path }}
         env:
           CIBW_BUILD: "cp312-* cp313-* cp314-* cp314t-* cp315-* cp315t-*"
-          CIBW_ARCHS_MACOS: ${{ matrix.arch }}
-          CIBW_ARCHS_LINUX: ${{ matrix.arch }}
-          CIBW_ARCHS_WINDOWS: ${{ matrix.arch }}
+          CIBW_ARCHS_MACOS: ${{ matrix.platform.arch }}
+          CIBW_ARCHS_LINUX: ${{ matrix.platform.arch }}
+          CIBW_ARCHS_WINDOWS: ${{ matrix.platform.arch }}
           CIBW_BEFORE_ALL_LINUX: "curl https://sh.rustup.rs -sSf | sh -s -- -y"
           CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH"'
-          CIBW_TEST_COMMAND: 'python -c "import vertebra; print(vertebra.__version__)"'
+          CIBW_TEST_COMMAND: >-
+            python -I -c "import importlib; module = importlib.import_module('${{ matrix.package.module }}');
+            assert all(hasattr(module, name) for name in '${{ matrix.package.exports }}'.split());
+            print(module.__file__)"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: cibw-wheels-${{ matrix.os }}-${{ strategy.job-index }}
+          name: cibw-wheels-${{ matrix.platform.os }}-${{ matrix.package.name }}-${{ strategy.job-index }}
           path: ./wheelhouse/*.whl
+          if-no-files-found: error
 
   build_sdist:
     name: Build source distribution
@@ -79,16 +104,66 @@ jobs:
           bun install
           bun run build
       - uses: astral-sh/setup-uv@v7
-      - name: Build sdist
-        run: uv build --sdist
+      - name: Build source distributions
+        run: |
+          uv build --sdist --out-dir dist
+          for package in bigquery spanner storage; do
+            uv build "src/rs/vertebra-$package" --sdist --out-dir dist
+          done
       - uses: actions/upload-artifact@v7
         with:
           name: cibw-sdist
           path: dist/*.tar.gz
+          if-no-files-found: error
+
+  test_wheels:
+    name: Install core and optional wheels together
+    needs: [build_wheels, build_sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: cibw-wheels-ubuntu-latest-*
+          path: dist
+          merge-multiple: true
+      - uses: astral-sh/setup-uv@v7
+      - name: Install optional extras from built wheels
+        shell: bash
+        run: |
+          version=$(uv run --no-project --python 3.12 python -c "from pathlib import Path; print(next(Path('dist').glob('vertebra_core-*.whl')).name.split('-')[1])")
+          uv venv --python 3.12 "$RUNNER_TEMP/wheel-smoke"
+          uv pip install --python "$RUNNER_TEMP/wheel-smoke/bin/python" --no-index --no-deps --find-links "$GITHUB_WORKSPACE/dist" vertebra-core vertebra-bigquery vertebra-spanner vertebra-storage
+          uv pip install --python "$RUNNER_TEMP/wheel-smoke/bin/python" --only-binary :all: --find-links "$GITHUB_WORKSPACE/dist" "vertebra-core[bigquery,spanner,storage]==$version"
+      - name: Check installed namespace and native exports
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        run: |
+          "$RUNNER_TEMP/wheel-smoke/bin/python" -I - <<'PY'
+          import importlib
+          import importlib.metadata
+          import pathlib
+          import sys
+
+          import vertebra
+          from vertebra import _vertebra
+
+          for name, exports in {
+              "bigquery": ("SyncBigQueryClient", "AsyncBigQueryClient"),
+              "spanner": ("SyncSpannerClient", "AsyncSpannerClient"),
+              "storage": ("SyncObjectStore", "AsyncObjectStore"),
+          }.items():
+              module = importlib.import_module(f"vertebra._{name}")
+              assert pathlib.Path(module.__file__).is_relative_to(sys.prefix)
+              assert all(hasattr(module, export) for export in exports)
+              assert importlib.metadata.version(f"vertebra-{name}") == vertebra.__version__
+          assert not hasattr(_vertebra, "SyncBigQueryClient")
+          assert not hasattr(_vertebra, "SyncSpannerClient")
+          assert pathlib.Path(vertebra.__file__).is_relative_to(sys.prefix)
+          PY
 
   upload_release:
     name: Upload wheels and sdist to GitHub Release
-    needs: [build_wheels, build_sdist]
+    needs: [build_wheels, build_sdist, test_wheels]
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions:
@@ -110,7 +185,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   upload_pypi:
-    needs: [build_wheels, build_sdist]
+    needs: [build_wheels, build_sdist, test_wheels]
     runs-on: ubuntu-latest
     environment:
       name: pypi

@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from vertebra.db.postgres import PostgreSQLConfig
+from vertebra.db.adapters.postgres import PostgreSQLConfig
 from vertebra.framework.queues import (
     CronSchedule,
     MemoryQueueBackend,

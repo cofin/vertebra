@@ -4,27 +4,69 @@ title: "Benchmark Suite & Free-Threaded Python 3.14t/3.15t"
 description: "Criterion microbenchmarks, the tools.benchmarks harness and its CI workflow, PGO tooling, --group bench isolation, and the free-threaded Python 3.14t/3.15t build and test gate."
 status: stable
 tags: [testing, benchmarks, free-threaded, python, rust]
+generated:
+  by: flow/0.26.0
+  at: "2026-11-04T04:33:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-04T04:33:00Z"
+    commit: f741701
 sources:
-  - resource: Makefile
-  - resource: pyproject.toml
-  - resource: tools/benchmarks/cli.py
-  - resource: tools/benchmarks/runner.py
-  - resource: tools/benchmarks/scenarios.py
-  - resource: tools/benchmarks/targets.py
-  - resource: tools/benchmarks/store.py
-  - resource: src/py/vertebra/build/packaging/pgo.py
-  - resource: tools/pgo/__init__.py
-  - resource: tools/pgo/rust_pgo.py
-  - resource: tools/pgo/python_pgo.py
-  - resource: .github/workflows/benchmark.yml
-  - resource: src/py/tests/unit/test_freethreaded_gil.py
-  - resource: src/rs/vertebra-core/Cargo.toml
-  - resource: src/rs/vertebra-http/Cargo.toml
+  - id: src-makefile
+    resource: Makefile
+    title: "Canonical polyglot build, test, lint, docs, and benchmark targets"
+  - id: src-pyproject-toml
+    resource: pyproject.toml
+    title: "Python package metadata, dependencies, and tool configuration"
+  - id: src-tools-benchmarks-cli-py
+    resource: tools/benchmarks/cli.py
+    title: "Repository tooling module (tools/benchmarks/cli.py)"
+  - id: src-tools-benchmarks-runner-py
+    resource: tools/benchmarks/runner.py
+    title: "Repository tooling module (tools/benchmarks/runner.py)"
+  - id: src-tools-benchmarks-scenarios-py
+    resource: tools/benchmarks/scenarios.py
+    title: "Repository tooling module (tools/benchmarks/scenarios.py)"
+  - id: src-tools-benchmarks-targets-py
+    resource: tools/benchmarks/targets.py
+    title: "Repository tooling module (tools/benchmarks/targets.py)"
+  - id: src-tools-benchmarks-store-py
+    resource: tools/benchmarks/store.py
+    title: "Repository tooling module (tools/benchmarks/store.py)"
+  - id: src-build-packaging-pgo-py
+    resource: src/py/vertebra/build/packaging/pgo.py
+    title: "Python implementation module (src/py/vertebra/build/packaging/pgo.py)"
+  - id: src-tools-pgo-init-py
+    resource: tools/pgo/__init__.py
+    title: "Repository tooling module (tools/pgo/__init__.py)"
+  - id: src-tools-pgo-rust-pgo-py
+    resource: tools/pgo/rust_pgo.py
+    title: "Repository tooling module (tools/pgo/rust_pgo.py)"
+  - id: src-tools-pgo-python-pgo-py
+    resource: tools/pgo/python_pgo.py
+    title: "Repository tooling module (tools/pgo/python_pgo.py)"
+  - id: src-benchmark-yml
+    resource: .github/workflows/benchmark.yml
+    title: "GitHub Actions workflow (benchmark.yml)"
+  - id: src-tests-unit-test-freethreaded-gil-py
+    resource: src/py/tests/unit/test_freethreaded_gil.py
+    title: "Python implementation module (src/py/tests/unit/test_freethreaded_gil.py)"
+  - id: src-vertebra-core-cargo-toml
+    resource: src/rs/vertebra-core/Cargo.toml
+    title: "Rust crate manifest (src/rs/vertebra-core/Cargo.toml)"
+  - id: src-vertebra-http-cargo-toml
+    resource: src/rs/vertebra-http/Cargo.toml
+    title: "Rust crate manifest (src/rs/vertebra-http/Cargo.toml)"
 ---
 
 # Benchmark Suite & Free-Threaded Python 3.14t/3.15t
 
-Vertebra has Rust Criterion microbenchmarks (`src/rs/vertebra-core/benches/`, `src/rs/vertebra-http/benches/`) and an end-to-end comparative HTTP harness in [`tools/benchmarks/`](../../../../tools/benchmarks/cli.py). No throughput figures are recorded in the repository outside `tools/benchmarks/results/`.
+<!-- truth: start -->
+- Keep benchmark-only packages (`duckdb`, `uvicorn`, `granian`, `spikard`) isolated in `[dependency-groups].bench` so standard and free-threaded (`3.14t`/`3.15t`) test suites never build benchmark sdists.
+- Run `make bench`, `make bench-ft`, `make rs-bench`, `make bench-micro`, and `make bench-check` against release or PGO builds (`make build` / `make build-pgo`) to enforce regression gates.
+<!-- truth: end -->
+
+Vertebra has Rust Criterion microbenchmarks (`src/rs/vertebra-core/benches/`, `src/rs/vertebra-http/benches/`) and an end-to-end comparative HTTP harness in [`tools/benchmarks/`](../../../../tools/benchmarks/cli.py)[^src-tools-benchmarks-cli-py]. No throughput figures are recorded in the repository outside `tools/benchmarks/results/`.
 
 ## 1. Benchmark Targets (`Makefile` & `tools.benchmarks`)
 
@@ -54,14 +96,14 @@ The workflow runs on `workflow_dispatch` (input `full_benchmark`), on published 
 
 ## 4. Profile-Guided Optimization (`build/packaging/pgo.py`, `tools/pgo/`)
 
-- [`pgo.py`](../../../../src/py/vertebra/build/packaging/pgo.py) & [`rust_pgo.py`](../../../../tools/pgo/rust_pgo.py): `RustPgoConfig` (`PgoMode` `generate | use | baseline`), `EXTENSION_MANIFESTS`, `PgoPipelineResult`, `resolve_cargo_release_dir` (`CARGO_TARGET_DIR`), `build_instrumented`, `build_instrumented_extension`, `build_instrumented_extensions`, `run_default_pgo_workload`, `merge_profiles`, `weighted_merge_profiles`, `find_llvm_profdata`, `validate_profdata`, `check_profdata_size`, `build_optimized`, `build_optimized_extension`, `build_optimized_extensions`, and `run_pgo_pipeline` (`python -m tools.pgo.rust_pgo`).
-- [`python_pgo.py`](../../../../tools/pgo/python_pgo.py): `PythonBuildInfo`, `PlatformSupport`, `PLATFORM_MATRIX`, `detect_python_build`, `check_pgo_availability`, and `get_platform_support`.
+- [`pgo.py`](../../../../src/py/vertebra/build/packaging/pgo.py)[^src-build-packaging-pgo-py] & [`rust_pgo.py`](../../../../tools/pgo/rust_pgo.py)[^src-tools-pgo-rust-pgo-py]: `RustPgoConfig` (`PgoMode` `generate | use | baseline`), `EXTENSION_MANIFESTS`, `PgoPipelineResult`, `resolve_cargo_release_dir` (`CARGO_TARGET_DIR`), `build_instrumented`, `build_instrumented_extension`, `build_instrumented_extensions`, `run_default_pgo_workload`, `merge_profiles`, `weighted_merge_profiles`, `find_llvm_profdata`, `validate_profdata`, `check_profdata_size`, `build_optimized`, `build_optimized_extension`, `build_optimized_extensions`, and `run_pgo_pipeline` (`python -m tools.pgo.rust_pgo`).
+- [`python_pgo.py`](../../../../tools/pgo/python_pgo.py)[^src-tools-pgo-python-pgo-py]: `PythonBuildInfo`, `PlatformSupport`, `PLATFORM_MATRIX`, `detect_python_build`, `check_pgo_availability`, and `get_platform_support`.
 
 `make build-pgo` invokes `uv run python -m tools.pgo.rust_pgo` for two-phase instrumented and profile-use release builds across `vertebra-http` and all three PyO3 extensions (or `PROFDATA=<path> make build-pgo` to reuse an existing profile). `src/py/tests/unit/build/test_packaging_and_pgo.py` exercises both modules, and `vtb build --pgo [--profdata <path>] [--server-binary <path>]` records PGO and `.profdata` metadata and bundles `bin/vertebra-server` during packaging.
 
 ## 5. Isolating `--group bench` Dependencies (`pyproject.toml`)
 
-Keep the benchmark-only dependencies (the `duckdb>=1.0` results store and the `uvicorn[standard]>=0.30`, `httptools>=0.6`, `uvloop>=0.21`, `granian>=1.6`, and `spikard>=0.12` baselines) in `[dependency-groups].bench` in [`pyproject.toml`](../../../../pyproject.toml), never in `dev`:
+Keep the benchmark-only dependencies (the `duckdb>=1.0` results store and the `uvicorn[standard]>=0.30`, `httptools>=0.6`, `uvloop>=0.21`, `granian>=1.6`, and `spikard>=0.12` baselines) in `[dependency-groups].bench` in [`pyproject.toml`](../../../../pyproject.toml)[^src-pyproject-toml], never in `dev`:
 
 - `pyproject.toml` sets no `[tool.uv] default-groups`, so `uv run` during `make py-test` and the CI `3.14t` job syncs only `dev`. Keeping `duckdb` out of `dev` prevents a source build of `duckdb` when no `cp314t` wheel exists.
 - Every `make bench*` target passes `--group bench` to `uv run`.
@@ -80,5 +122,23 @@ PyO3 links different CPython ABI symbols when `Py_GIL_DISABLED` is set, so free-
 
 - The CI `test-python` matrix includes `3.14t` and `3.15t` and runs `make py-test` on both.
 - `_vertebra`, `_bundler`, and `_storage` declare `#[pymodule(gil_used = false)]`.
-- [`test_freethreaded_gil.py`](../../../../src/py/tests/unit/test_freethreaded_gil.py) asserts `_vertebra.GIL_USED`, `_bundler.GIL_USED`, and `_storage.GIL_USED` are `False` and that `sys._is_gil_enabled()` stays false after import.
+- [`test_freethreaded_gil.py`](../../../../src/py/tests/unit/test_freethreaded_gil.py)[^src-tests-unit-test-freethreaded-gil-py] asserts `_vertebra.GIL_USED`, `_bundler.GIL_USED`, and `_storage.GIL_USED` are `False` and that `sys._is_gil_enabled()` stays false after import.
 - `unit/server/test_hotpath_and_314t.py` and `unit/server/test_loops.py` cover the free-threaded dispatch and `EventLoopPool` paths; `GilAuditReport` (`server/_gil_audit.py`) reports native extensions that re-enable the GIL.
+
+Provenance sources: [^src-makefile], [^src-tools-benchmarks-runner-py], [^src-tools-benchmarks-scenarios-py], [^src-tools-benchmarks-targets-py], [^src-tools-benchmarks-store-py], [^src-tools-pgo-init-py], [^src-benchmark-yml], [^src-vertebra-core-cargo-toml], [^src-vertebra-http-cargo-toml].
+
+[^src-makefile]: `Makefile` — Canonical polyglot build, test, lint, docs, and benchmark targets.
+[^src-pyproject-toml]: `pyproject.toml` — Python package metadata, dependencies, and tool configuration.
+[^src-tools-benchmarks-cli-py]: `tools/benchmarks/cli.py` — Repository tooling module (tools/benchmarks/cli.py).
+[^src-tools-benchmarks-runner-py]: `tools/benchmarks/runner.py` — Repository tooling module (tools/benchmarks/runner.py).
+[^src-tools-benchmarks-scenarios-py]: `tools/benchmarks/scenarios.py` — Repository tooling module (tools/benchmarks/scenarios.py).
+[^src-tools-benchmarks-targets-py]: `tools/benchmarks/targets.py` — Repository tooling module (tools/benchmarks/targets.py).
+[^src-tools-benchmarks-store-py]: `tools/benchmarks/store.py` — Repository tooling module (tools/benchmarks/store.py).
+[^src-build-packaging-pgo-py]: `src/py/vertebra/build/packaging/pgo.py` — Python implementation module (src/py/vertebra/build/packaging/pgo.py).
+[^src-tools-pgo-init-py]: `tools/pgo/__init__.py` — Repository tooling module (tools/pgo/__init__.py).
+[^src-tools-pgo-rust-pgo-py]: `tools/pgo/rust_pgo.py` — Repository tooling module (tools/pgo/rust_pgo.py).
+[^src-tools-pgo-python-pgo-py]: `tools/pgo/python_pgo.py` — Repository tooling module (tools/pgo/python_pgo.py).
+[^src-benchmark-yml]: `.github/workflows/benchmark.yml` — GitHub Actions workflow (benchmark.yml).
+[^src-tests-unit-test-freethreaded-gil-py]: `src/py/tests/unit/test_freethreaded_gil.py` — Python implementation module (src/py/tests/unit/test_freethreaded_gil.py).
+[^src-vertebra-core-cargo-toml]: `src/rs/vertebra-core/Cargo.toml` — Rust crate manifest (src/rs/vertebra-core/Cargo.toml).
+[^src-vertebra-http-cargo-toml]: `src/rs/vertebra-http/Cargo.toml` — Rust crate manifest (src/rs/vertebra-http/Cargo.toml).

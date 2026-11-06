@@ -1,20 +1,20 @@
 ---
 name: pyo3-bridge
-description: Use when implementing or debugging PyO3 native extension modules, GIL release discipline, free-threaded Python 3.14t/3.15t safety, zero-copy FFI buffer views, or msgspec C-API bridges in vertebra-py, vertebra-bundler, and vertebra-storage.
+description: Use when implementing or debugging PyO3 native extension modules, GIL release discipline, free-threaded Python 3.14t/3.15t safety, zero-copy FFI buffer views, or msgspec C-API bridges in vertebra-py, vertebra-bundler, vertebra-storage, vertebra-bigquery, and vertebra-spanner.
 ---
 
 <!-- truth: start -->
-- **Crates & Stubs**: `src/rs/vertebra-py`, `src/rs/vertebra-bundler`, `src/rs/vertebra-storage`, and `src/py/vertebra/{_vertebra,_bundler,_storage}.pyi`.
+- **Crates & Stubs**: `src/rs/vertebra-py`, `src/rs/vertebra-bundler`, `src/rs/vertebra-storage`, `src/rs/vertebra-bigquery`, `src/rs/vertebra-spanner`, and `src/py/vertebra/{_vertebra,_bundler,_storage,_bigquery,_spanner}.pyi`.
 - **Free-Threaded Declaration**: Every `#[pymodule]` declares `#[pymodule(gil_used = false)]`, and `#[pyclass]` types set `immutable_type` with `#[cfg_attr(not(Py_GIL_DISABLED), pyclass(freelist = 128))]` (`FFI-01`).
 - **GIL Detachment**: Release the GIL via `py.detach(|| ...)` around all blocking I/O, SHM futex/ulock waits, compression, and bundler builds (`FFI-02`, `FFI-03`).
 - **View Lifetimes**: Zero-copy views (`Request.__getbuffer__`, `body_view`, `decode_msgspec`) anchor or borrow within the active `Arc<BatchSnapshot>` lease and never outlive their backing SHM slot (`FFI-04`).
-- **Stub Parity**: Any `#[pyfunction]` or `#[pyclass]` signature change updates the corresponding `.pyi` stub and passes `mypy.stubtest` (`FFI-07`).
-- **Verify**: `make dev && uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage --allowlist tools/stubtest_allowlist.txt`
+- **Stub Parity**: Any `#[pyfunction]` or `#[pyclass]` signature change updates the corresponding `.pyi` stub and passes `mypy.stubtest` (`FFI-09`).
+- **Verify**: `make dev && uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._bigquery vertebra._spanner`
 <!-- truth: end -->
 
 # PyO3 Native Bridge & Free-Threaded Runtime (`pyo3-bridge`)
 
-Implementation guide for PyO3 native extensions (`_vertebra`, `_bundler`, `_storage`), zero-copy batch dispatch (`AsgiProtocol`, `RsgiScope`, `WsgiInput`), C-API `msgspec` struct hydration (`msgspec_bridge.rs`), and free-threaded Python 3.14t/3.15t concurrency.
+Implementation guide for PyO3 native extensions (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_spanner` across `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, and `vertebra-spanner`), zero-copy batch dispatch (`AsgiProtocol`, `RsgiScope`, `WsgiInput`), C-API `msgspec` struct hydration (`msgspec_bridge.rs`), and free-threaded Python 3.14t/3.15t concurrency.
 
 ## Architecture & Domain References
 
@@ -40,12 +40,12 @@ Implementation guide for PyO3 native extensions (`_vertebra`, `_bundler`, `_stor
    - In `Request.__getbuffer__`, pass `slf.as_ptr()` (borrowed, letting `PyBuffer_FillInfo` `Py_INCREF` the owner once) rather than `slf.into_ptr()`.
    - Map all fallible Rust operations on caller inputs to typed `PyErr` (`PyValueError`, `PyRuntimeError`, `PyTimeoutError`); never `unwrap()` user input.
 
-4. **Rebuild & Type-Stub Synchronization (`FFI-07`)**:
+4. **Rebuild & Type-Stub Synchronization (`FFI-09`)**:
    - After modifying any Rust crate under `src/rs/`, run `make dev` so `.venv` loads the updated native `.so`/`.abi3.so` binaries before running `pytest` or `stubtest`.
 
 ## Verification
 
 ```bash
 make dev
-uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage --allowlist tools/stubtest_allowlist.txt
+uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._bigquery vertebra._spanner
 ```

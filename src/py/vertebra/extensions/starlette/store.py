@@ -7,8 +7,8 @@ import time
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Self
 
-from vertebra.db.redis import AsyncRedisDriver, RedisConfig, SyncRedisDriver
-from vertebra.db.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
+from vertebra.db.adapters.redis import AsyncRedisDriver, RedisConfig, SyncRedisDriver
+from vertebra.db.adapters.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
 from vertebra.utils.text import validate_identifier
 
 if TYPE_CHECKING:

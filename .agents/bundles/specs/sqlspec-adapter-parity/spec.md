@@ -56,7 +56,7 @@ Vertebra's SQLSpec adapters must be feature-complete in the same way upstream ad
 
 ## Dependencies
 
-`native-data-platform` Chapters 1–6 (`db-layout-and-contract`, `native-postgres-driver`, `broker-pool-sharing`, `native-oracle-driver`, `native-mysql-mssql-drivers`, and `native-embedded-and-cache-drivers` on `refactor/sync-async-names @ 08ac03a`) and `integration-remediation` `db-engine-primitives`.
+`native-data-platform` Chapters 1–6 (`db-layout-and-contract`, `native-postgres-driver`, `broker-pool-sharing`, `native-oracle-driver`, `native-mysql-mssql-drivers`, and `native-embedded-and-cache-drivers` on `main @ f741701`) and `integration-remediation` `db-engine-primitives`.
 
 ## Acceptance Boundary
 

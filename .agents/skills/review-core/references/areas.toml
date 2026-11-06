@@ -80,6 +80,7 @@ prefix = "RT"
 title = "Rust runtime and IPC"
 paths = [
   "src/rs/vertebra-core/**",
+  "src/rs/vertebra-db/**",
   "src/rs/vertebra-storage/**",
   "src/rs/*"
 ]
@@ -158,10 +159,14 @@ prefix = "FFI"
 title = "PyO3 native extension bridge"
 paths = [
   "src/rs/vertebra-py/**",
+  "src/rs/vertebra-bigquery/**",
+  "src/rs/vertebra-spanner/**",
   "src/rs/vertebra-bundler/src/lib.rs",
   "src/py/vertebra/_vertebra.pyi",
   "src/py/vertebra/_bundler.pyi",
-  "src/py/vertebra/_storage.pyi"
+  "src/py/vertebra/_storage.pyi",
+  "src/py/vertebra/_bigquery.pyi",
+  "src/py/vertebra/_spanner.pyi"
 ]
 knowledge = [
   ".agents/bundles/knowledge/architecture/worker/pyo3-ffi-and-batch-dispatch.md",

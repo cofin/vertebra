@@ -1,0 +1,43 @@
+[package]
+name = "vertebra-bigquery"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Google Cloud BigQuery REST v2 and Storage Read/Write API v1 native client for Vertebra"
+
+[lib]
+name = "_bigquery"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+base64 = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+google-cloud-bigquery = { workspace = true }
+google-cloud-gax = { workspace = true }
+pyo3 = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
+vertebra-core = { path = "../vertebra-core" }
+vertebra-db = { path = "../vertebra-db", features = ["gcp", "pyo3"] }
+
+[build-dependencies]
+pyo3-build-config = { workspace = true }
+
+[dev-dependencies]
+google-cloud-rpc = { workspace = true }
+google-cloud-wkt = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+pyo3 = { workspace = true, features = ["auto-initialize"] }

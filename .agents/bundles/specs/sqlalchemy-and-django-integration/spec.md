@@ -54,7 +54,7 @@ Dialect entry points (`<engine>+vtb`, `<engine>+vtb_async`, `spangres+vtb`, `spa
 
 ## Dependencies
 
-`native-data-platform` `db-layout-and-contract`, `broker-pool-sharing`, and `storage-completeness` (`refactor/sync-async-names @ 08ac03a`); `integration-remediation` `db-engine-primitives`.
+`native-data-platform` `db-layout-and-contract`, `broker-pool-sharing`, and `storage-completeness` (`main @ f741701`); `integration-remediation` `db-engine-primitives`.
 
 ## Acceptance Boundary
 

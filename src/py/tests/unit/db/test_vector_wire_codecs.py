@@ -21,7 +21,7 @@ from vertebra._vertebra import (
     encode_pgvector_f16,
     encode_pgvector_f32,
 )
-from vertebra.db.duckdb import read_arrow_shm
+from vertebra.db.arrow import read_arrow_shm
 from vertebra.extensions.sqlalchemy.types import Vector
 
 

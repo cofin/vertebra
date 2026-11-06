@@ -2,6 +2,7 @@
 type: Task
 id: db-engine-primitives:t03
 title: Delete vertebra/db/channels.py and move engine-neutral pub/sub fan-out into vertebra/server/_channels.py::ChannelBus
+description: "Delete `src/py/vertebra/db/channels.py` (`DatabaseChannelBackend`), implement the engine-neutral `ChannelBus` pub/sub substrate in `src/py/vertebra/server/_channels.py` (re-exported in `src/py/vertebra/framework/channels.py`), and subclass `ChannelBus` in `src/py/vertebra/extensions/{litestar,starlette}/channels.py` with zero `vertebra.framework.*` or `vertebra.db.adapters.*` imports."
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -24,7 +25,7 @@ tests:
   - src/py/tests/unit/extensions/test_flask_plugin.py
   - src/py/tests/unit/docs/test_examples.py
 plan_revision: 4
-plan_commit: "679a981"
+plan_commit: "f741701"
 state_revision: 0
 claimed_by: null
 claimed_at: null

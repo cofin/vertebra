@@ -4,12 +4,29 @@ title: "ADR-003: PyPI vertebra-core Distribution and Wheel-Bundled TypeScript Cl
 description: "Architectural decision to publish the PyPI distribution as vertebra-core while preserving the vertebra Python namespace and bundling @vertebra/client inside the wheel."
 status: stable
 tags: [decisions, adr, packaging, pypi, typescript, importmap]
+generated:
+  by: flow/0.26.0
+  at: "2026-11-04T04:33:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-04T04:33:00Z"
+    commit: f741701
 sources:
-  - resource: pyproject.toml
-  - resource: src/ts/vertebra-client/package.json
-  - resource: src/ts/vertebra-client/tsup.config.ts
-  - resource: src/py/vertebra/build/_import_map.py
-  - resource: src/py/vertebra/framework/dev.py
+  - id: src-pyproject-toml
+    resource: pyproject.toml
+    title: "Python package metadata, dependencies, and tool configuration"
+  - id: src-package-json
+    resource: src/ts/vertebra-client/package.json
+    title: "TypeScript package manifest (src/ts/vertebra-client/package.json)"
+  - id: src-tsup-config-ts
+    resource: src/ts/vertebra-client/tsup.config.ts
+    title: "TypeScript client module (src/ts/vertebra-client/tsup.config.ts)"
+  - id: src-build-import-map-py
+    resource: src/py/vertebra/build/_import_map.py
+    title: "Python implementation module (src/py/vertebra/build/_import_map.py)"
+  - id: src-framework-dev-py
+    resource: src/py/vertebra/framework/dev.py
+    title: "Python implementation module (src/py/vertebra/framework/dev.py)"
 ---
 
 # ADR-003: PyPI `vertebra-core` Distribution and Wheel-Bundled TypeScript Client
@@ -35,3 +52,11 @@ Full-stack Python + TypeScript applications frequently suffer from version skew 
 
 - `pyproject.toml` configures `[project] name = "vertebra-core"` and `[tool.maturin] python-packages = ["vertebra"]`, while `importlib.metadata.version("vertebra-core")` resolves the installed package version.
 - `tsup.config.ts` and `ImportMapGenerator.sync_wheel_client` copy all 17 `@vertebra/client` entrypoints and `.d.ts` declarations into `src/py/vertebra/server/_js/bundle/` prior to building wheels, and user documentation never instructs running `npm install @vertebra/client` or `bun add @vertebra/client`.
+
+Provenance sources: [^src-pyproject-toml], [^src-package-json], [^src-tsup-config-ts], [^src-build-import-map-py], [^src-framework-dev-py].
+
+[^src-pyproject-toml]: `pyproject.toml` — Python package metadata, dependencies, and tool configuration.
+[^src-package-json]: `src/ts/vertebra-client/package.json` — TypeScript package manifest (src/ts/vertebra-client/package.json).
+[^src-tsup-config-ts]: `src/ts/vertebra-client/tsup.config.ts` — TypeScript client module (src/ts/vertebra-client/tsup.config.ts).
+[^src-build-import-map-py]: `src/py/vertebra/build/_import_map.py` — Python implementation module (src/py/vertebra/build/_import_map.py).
+[^src-framework-dev-py]: `src/py/vertebra/framework/dev.py` — Python implementation module (src/py/vertebra/framework/dev.py).

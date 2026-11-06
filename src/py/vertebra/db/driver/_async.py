@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
-from typing import Any, Self, TypeVar
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
+from typing import Any, Self
 
-from vertebra.db._arrow import (
+from anyio import CancelScope
+
+from vertebra._vertebra import NotFoundError
+from vertebra.db.arrow import (
     ARROW_SHM_THRESHOLD_ROWS,
     ArrowCursor,
     _table_to_rows_and_cols,
@@ -19,8 +23,6 @@ __all__ = (
     "AsyncDatabaseDriver",
     "ThreadOffloadAsyncDatabaseDriver",
 )
-
-SyncDriverT = TypeVar("SyncDriverT", bound=SyncDatabaseDriver[Any])
 
 
 class AsyncDatabaseDriver[ConfigT: BaseDatabaseConfig](CommonDriverMixin[ConfigT]):
@@ -37,7 +39,7 @@ class AsyncDatabaseDriver[ConfigT: BaseDatabaseConfig](CommonDriverMixin[ConfigT
         """Close the driver upon exiting the asynchronous context."""
         await self.close()
 
-    async def connect(self) -> Any:
+    async def connect(self) -> Self:
         """Establish or validate the underlying connection."""
         self._closed = False
         return self
@@ -46,11 +48,30 @@ class AsyncDatabaseDriver[ConfigT: BaseDatabaseConfig](CommonDriverMixin[ConfigT
         """Close the driver and release pooled resources."""
         self._closed = True
 
+    async def begin(self) -> None:
+        """Begin an explicit transaction when supported by the engine."""
+
     async def commit(self) -> None:
         """Commit the active transaction when supported by the engine."""
 
     async def rollback(self) -> None:
         """Roll back the active transaction when supported by the engine."""
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[Self]:
+        """Execute a block inside an async `begin()` / `commit()` / `rollback()` transaction scope."""
+        await self.begin()
+        try:
+            yield self
+        except BaseException:
+            with CancelScope(shield=True):
+                await self.rollback()
+            raise
+        else:
+            await self.commit()
+
+    async def cancel(self) -> None:
+        """Interrupt an in-flight query when supported, or act as an idempotent no-op."""
 
     async def execute(
         self,
@@ -65,7 +86,7 @@ class AsyncDatabaseDriver[ConfigT: BaseDatabaseConfig](CommonDriverMixin[ConfigT
     async def execute_many(
         self,
         sql: str,
-        parameter_sets: Sequence[Mapping[str, Any] | Sequence[Any]],
+        parameter_sets: Sequence[Sequence[Any] | Mapping[str, Any]],
         **kwargs: Any,
     ) -> int:
         """Execute a statement across a sequence of parameter sets and return total affected rows."""
@@ -73,24 +94,6 @@ class AsyncDatabaseDriver[ConfigT: BaseDatabaseConfig](CommonDriverMixin[ConfigT
         for params in parameter_sets:
             total += await self.execute(sql, params, **kwargs)
         return total
-
-    async def executemany(
-        self,
-        sql: str,
-        parameter_sets: Sequence[Mapping[str, Any] | Sequence[Any]],
-        **kwargs: Any,
-    ) -> int:
-        """Alias for `execute_many` matching DB-API 2.0 conventions."""
-        return await self.execute_many(sql, parameter_sets, **kwargs)
-
-    async def execute_with_description(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
-        """Execute a query and return `(tuple_rows, column_names)`."""
-        raise NotImplementedError
 
     async def execute_tuples(
         self,
@@ -101,6 +104,15 @@ class AsyncDatabaseDriver[ConfigT: BaseDatabaseConfig](CommonDriverMixin[ConfigT
         """Execute a query and return unboxed tuple rows."""
         rows, _ = await self.execute_with_description(sql, parameters, **kwargs)
         return rows
+
+    async def execute_with_description(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Execute a query and return `(tuple_rows, column_names)`."""
+        raise NotImplementedError
 
     async def select(
         self,
@@ -114,17 +126,6 @@ class AsyncDatabaseDriver[ConfigT: BaseDatabaseConfig](CommonDriverMixin[ConfigT
         rows, cols = await self.execute_with_description(sql, parameters, **kwargs)
         return self.hydrate_rows(rows, cols, schema_type)
 
-    async def fetch(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        schema_type: type[Any] | None = None,
-        **kwargs: Any,
-    ) -> list[Any]:
-        """Alias for `select`."""
-        return await self.select(sql, parameters, schema_type=schema_type, **kwargs)
-
     async def select_one(
         self,
         sql: str,
@@ -133,23 +134,12 @@ class AsyncDatabaseDriver[ConfigT: BaseDatabaseConfig](CommonDriverMixin[ConfigT
         schema_type: type[Any] | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Execute a query and return the first row, raising `KeyError` if no rows match."""
+        """Execute a query and return the first row, raising `NotFoundError` when 0 rows match."""
         rows = await self.select(sql, parameters, schema_type=schema_type, **kwargs)
         if not rows:
             msg = "Query returned no rows"
-            raise KeyError(msg)
+            raise NotFoundError(msg)
         return rows[0]
-
-    async def fetchrow(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        schema_type: type[Any] | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        """Execute a query and return the first row or `None` when empty."""
-        return await self.select_one_or_none(sql, parameters, schema_type=schema_type, **kwargs)
 
     async def select_one_or_none(
         self,
@@ -171,25 +161,17 @@ class AsyncDatabaseDriver[ConfigT: BaseDatabaseConfig](CommonDriverMixin[ConfigT
         value_type: type[Any] | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Execute a query and return the first column of the first row, or `None` when empty."""
+        """Execute a query and return the first scalar column, raising `NotFoundError` when 0 rows match."""
         rows, _ = await self.execute_with_description(sql, parameters, **kwargs)
-        if not rows or not rows[0]:
+        if not rows:
+            msg = "Query returned no rows"
+            raise NotFoundError(msg)
+        if not rows[0]:
             return None
         val = rows[0][0]
         if value_type is not None and val is not None:
             return to_value_type(val, value_type)
         return val
-
-    async def fetchval(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        value_type: type[Any] | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        """Alias for `select_value`."""
-        return await self.select_value(sql, parameters, value_type=value_type, **kwargs)
 
     async def select_to_arrow(
         self,
@@ -203,16 +185,29 @@ class AsyncDatabaseDriver[ConfigT: BaseDatabaseConfig](CommonDriverMixin[ConfigT
         rows, cols = await self.execute_with_description(sql, parameters, **kwargs)
         return ArrowCursor.from_rows(rows, cols, threshold_rows=threshold_rows)
 
-    async def fetch_arrow(
+    async def stream_arrow_batches(
         self,
-        sql_or_table: str,
+        sql: str,
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
-        threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS,
+        batch_size: int = 65_536,
         **kwargs: Any,
-    ) -> ArrowCursor:
-        """Alias for `select_to_arrow`."""
-        return await self.select_to_arrow(sql_or_table, parameters, threshold_rows=threshold_rows, **kwargs)
+    ) -> AsyncIterator[Any]:
+        """Execute a query and yield Arrow record batches asynchronously."""
+        chunk = max(1, int(batch_size))
+        cursor = await self.select_to_arrow(sql, parameters, **kwargs)
+        table = cursor.to_arrow_table()
+        if hasattr(table, "to_batches"):
+            batches = table.to_batches(max_chunksize=chunk)
+            if batches:
+                for batch in batches:
+                    yield batch
+                return
+            if cursor.row_count == 0:
+                return
+        rows = cursor.to_pylist()
+        for idx in range(0, len(rows), chunk):
+            yield rows[idx : idx + chunk]
 
     async def load_from_arrow(
         self,
@@ -230,17 +225,6 @@ class AsyncDatabaseDriver[ConfigT: BaseDatabaseConfig](CommonDriverMixin[ConfigT
         placeholders = ", ".join("?" for _ in cols)
         sql = f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders})"
         return await self.execute_many(sql, rows, **kwargs)
-
-    async def insert_arrow(
-        self,
-        table_name: str,
-        data: Any,
-        *,
-        columns: Sequence[str] | None = None,
-        **kwargs: Any,
-    ) -> int:
-        """Alias for `load_from_arrow`."""
-        return await self.load_from_arrow(table_name, data, columns=columns, **kwargs)
 
 
 class ThreadOffloadAsyncDatabaseDriver[
@@ -260,7 +244,7 @@ class ThreadOffloadAsyncDatabaseDriver[
         """Return the underlying synchronous driver instance."""
         return self._sync
 
-    async def connect(self) -> Any:
+    async def connect(self) -> Self:
         """Connect the underlying synchronous driver on a worker thread."""
         await asyncio.to_thread(self._sync.connect)
         self._closed = False
@@ -271,6 +255,10 @@ class ThreadOffloadAsyncDatabaseDriver[
         await asyncio.to_thread(self._sync.close)
         self._closed = True
 
+    async def begin(self) -> None:
+        """Begin a transaction on the underlying synchronous driver."""
+        await asyncio.to_thread(self._sync.begin)
+
     async def commit(self) -> None:
         """Commit the active transaction on the underlying synchronous driver."""
         await asyncio.to_thread(self._sync.commit)
@@ -278,6 +266,10 @@ class ThreadOffloadAsyncDatabaseDriver[
     async def rollback(self) -> None:
         """Roll back the active transaction on the underlying synchronous driver."""
         await asyncio.to_thread(self._sync.rollback)
+
+    async def cancel(self) -> None:
+        """Interrupt an active query on the underlying synchronous driver."""
+        await asyncio.to_thread(self._sync.cancel)
 
     async def execute(
         self,
@@ -291,20 +283,11 @@ class ThreadOffloadAsyncDatabaseDriver[
     async def execute_many(
         self,
         sql: str,
-        parameter_sets: Sequence[Mapping[str, Any] | Sequence[Any]],
+        parameter_sets: Sequence[Sequence[Any] | Mapping[str, Any]],
         **kwargs: Any,
     ) -> int:
         """Execute a batch statement via the paired synchronous driver."""
         return await asyncio.to_thread(self._sync.execute_many, sql, parameter_sets, **kwargs)
-
-    async def execute_with_description(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
-        """Execute a query with column descriptions via the paired synchronous driver."""
-        return await asyncio.to_thread(self._sync.execute_with_description, sql, parameters, **kwargs)
 
     async def execute_tuples(
         self,
@@ -314,6 +297,15 @@ class ThreadOffloadAsyncDatabaseDriver[
     ) -> list[tuple[Any, ...]]:
         """Execute a query returning tuple rows via the paired synchronous driver."""
         return await asyncio.to_thread(self._sync.execute_tuples, sql, parameters, **kwargs)
+
+    async def execute_with_description(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Execute a query with column descriptions via the paired synchronous driver."""
+        return await asyncio.to_thread(self._sync.execute_with_description, sql, parameters, **kwargs)
 
     async def select(
         self,
@@ -329,6 +321,57 @@ class ThreadOffloadAsyncDatabaseDriver[
             sql,
             parameters,
             schema_type=schema_type,
+            **kwargs,
+        )
+
+    async def select_one(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a query returning a single row via the paired synchronous driver."""
+        return await asyncio.to_thread(
+            self._sync.select_one,
+            sql,
+            parameters,
+            schema_type=schema_type,
+            **kwargs,
+        )
+
+    async def select_one_or_none(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any | None:
+        """Execute a query returning the first row or `None` via the paired synchronous driver."""
+        return await asyncio.to_thread(
+            self._sync.select_one_or_none,
+            sql,
+            parameters,
+            schema_type=schema_type,
+            **kwargs,
+        )
+
+    async def select_value(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        value_type: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a query returning the first scalar column via the paired synchronous driver."""
+        return await asyncio.to_thread(
+            self._sync.select_value,
+            sql,
+            parameters,
+            value_type=value_type,
             **kwargs,
         )
 
@@ -348,6 +391,21 @@ class ThreadOffloadAsyncDatabaseDriver[
             threshold_rows=threshold_rows,
             **kwargs,
         )
+
+    async def stream_arrow_batches(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        batch_size: int = 65_536,
+        **kwargs: Any,
+    ) -> AsyncIterator[Any]:
+        """Stream Arrow record batches via the paired synchronous driver."""
+        batches = await asyncio.to_thread(
+            lambda: list(self._sync.stream_arrow_batches(sql, parameters, batch_size=batch_size, **kwargs))
+        )
+        for batch in batches:
+            yield batch
 
     async def load_from_arrow(
         self,

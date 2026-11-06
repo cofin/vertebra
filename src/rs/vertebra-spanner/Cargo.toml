@@ -1,0 +1,46 @@
+[package]
+name = "vertebra-spanner"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Google Cloud Spanner v1 data-plane and DatabaseAdmin native client for Vertebra"
+
+[lib]
+name = "_spanner"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+base64 = { workspace = true }
+futures = { workspace = true }
+google-cloud-gax = { workspace = true }
+google-cloud-longrunning = { workspace = true }
+google-cloud-spanner = { workspace = true }
+pyo3 = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
+vertebra-core = { path = "../vertebra-core" }
+vertebra-db = { path = "../vertebra-db", features = ["gcp", "pyo3"] }
+
+[build-dependencies]
+pyo3-build-config = { workspace = true }
+
+[dev-dependencies]
+bytes = { workspace = true }
+google-cloud-auth = { workspace = true }
+google-cloud-rpc = { workspace = true }
+google-cloud-spanner-admin-database-v1 = { workspace = true }
+google-cloud-wkt = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+pyo3 = { workspace = true, features = ["auto-initialize"] }

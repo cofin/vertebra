@@ -1,7 +1,6 @@
 ---
 title: "Implementation Patterns Index"
 description: "Index of Vertebra's nested implementation pattern chapters across Python, Rust/PyO3/SHM, and TypeScript."
-status: stable
 tags:
   - patterns
   - index

@@ -9,7 +9,7 @@ import threading
 
 import pytest
 
-from vertebra.db.redis import (
+from vertebra.db.adapters.redis import (
     AsyncRedisDriver,
     ClusterRedirect,
     PubSubMessage,
@@ -20,7 +20,7 @@ from vertebra.db.redis import (
     hash_slot,
     parse_cluster_redirect,
 )
-from vertebra.db.valkey import (
+from vertebra.db.adapters.valkey import (
     AsyncValkeyDriver,
     SyncValkeyDriver,
     ValkeyConfig,

@@ -2,6 +2,7 @@
 type: Task
 id: db-engine-primitives:t07
 title: Make vertebra/db/rls.py dialect-agnostic, move GUC/context SQL builders to PostgreSQLCore and OracleCore, enforce generic vertebra/db engine purity, and update OKF chapters
+description: "Refactor `src/py/vertebra/db/rls.py` (`TenantScopeConfig`, `TenantPredicate`) into a dialect-agnostic tenant-isolation module, move PostgreSQL `set_config` and `$N::<cast>` builders to `PostgreSQLCore` and Oracle `DBMS_SESSION.SET_CONTEXT` builders to `OracleCore`, remove dead `.apply` duck-typing branches in SQLSpec GCP drivers, enforce an AST/source test proving zero engine leaks remain in `src/py/vertebra/db/*.py` and `src/py/vertebra/db/driver/*.py`, and finalize the OKF data and embeddings knowledge chapters."
 state: pending
 priority: P2
 verification_strategy: behavior_tdd
@@ -29,7 +30,7 @@ tests:
   - src/py/tests/unit/db/test_native_db_drivers.py
   - src/py/tests/unit/docs/test_examples.py
 plan_revision: 4
-plan_commit: "679a981"
+plan_commit: "f741701"
 state_revision: 0
 claimed_by: null
 claimed_at: null

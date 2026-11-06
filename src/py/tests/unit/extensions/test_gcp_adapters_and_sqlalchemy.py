@@ -2,30 +2,35 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import pytest
 
+import vertebra.db as vertebra_db
+import vertebra.extensions.fastapi as fastapi_ext
+import vertebra.extensions.flask as flask_ext
+import vertebra.extensions.litestar as litestar_ext
+import vertebra.extensions.starlette as starlette_ext
+from tests.unit.db.test_spanner import FakeSpannerClient
 from vertebra._vertebra import ArrowCursor as RustArrowCursor
 from vertebra._vertebra import Request, Response
 from vertebra.agent.runtime import ConfirmationGate
 from vertebra.db import (
     ArrowCursor,
+    DatabaseRegistry,
+    provide_driver,
+)
+from vertebra.db.adapters.bigquery import (
     BigQueryConfig,
     BigQueryDryRunResult,
-    DatabaseRegistry,
-    GCPDatabaseToolPolicy,
-    MySQLConfig,
-    PostgreSQLConfig,
-    SpannerConfig,
     SyncBigQueryDriver,
-    SyncMySQLDriver,
-    SyncPostgreSQLDriver,
-    SyncSpannerDriver,
+)
+from vertebra.db.adapters.mysql import MySQLConfig, SyncMySQLDriver
+from vertebra.db.adapters.postgres import PostgreSQLConfig, SyncPostgreSQLDriver
+from vertebra.db.adapters.spanner import SpannerConfig, SyncSpannerDriver
+from vertebra.db.mcp_tools import (
+    GCPDatabaseToolPolicy,
     is_mutating_sql,
-    provide_bigquery_driver,
-    provide_spanner_driver,
     register_gcp_database_tools,
 )
 from vertebra.extensions.alchemy import (
@@ -46,10 +51,7 @@ from vertebra.extensions.django.fastpath import (
     dispatch_django_direct,
 )
 from vertebra.extensions.fastapi import (
-    provide_bigquery_driver as fastapi_provide_bigquery,
-)
-from vertebra.extensions.fastapi import (
-    provide_spanner_driver as fastapi_provide_spanner,
+    provide_driver as fastapi_provide_driver,
 )
 from vertebra.extensions.fastapi.fastpath import (
     CompiledRoute as FastAPICompiledRoute,
@@ -58,10 +60,7 @@ from vertebra.extensions.fastapi.fastpath import (
     dispatch_handler_direct as dispatch_fastapi_direct,
 )
 from vertebra.extensions.flask import (
-    provide_bigquery_driver as flask_provide_bigquery,
-)
-from vertebra.extensions.flask import (
-    provide_spanner_driver as flask_provide_spanner,
+    provide_driver as flask_provide_driver,
 )
 from vertebra.extensions.flask.fastpath import (
     CompiledRoute as FlaskCompiledRoute,
@@ -70,10 +69,7 @@ from vertebra.extensions.flask.fastpath import (
     dispatch_wsgi_direct,
 )
 from vertebra.extensions.litestar import (
-    provide_bigquery_driver as litestar_provide_bigquery,
-)
-from vertebra.extensions.litestar import (
-    provide_spanner_driver as litestar_provide_spanner,
+    provide_driver as litestar_provide_driver,
 )
 from vertebra.extensions.litestar.fastpath import (
     _DirectSignaturePlan,
@@ -95,10 +91,7 @@ from vertebra.extensions.sqlalchemy import (
     Vector,
 )
 from vertebra.extensions.starlette import (
-    provide_bigquery_driver as starlette_provide_bigquery,
-)
-from vertebra.extensions.starlette import (
-    provide_spanner_driver as starlette_provide_spanner,
+    provide_driver as starlette_provide_driver,
 )
 from vertebra.extensions.starlette.fastpath import (
     CompiledRoute as StarletteCompiledRoute,
@@ -113,32 +106,6 @@ from vertebra.server._fastpath import (
     serialize_fastpath_special_result,
 )
 from vertebra.storage import StreamingStorageResponse, SyncObjectStore
-
-
-def _load_fake_spanner_client() -> type[Any]:
-    """Load FakeSpannerClient from test_spanner source without importing module-level dependencies."""
-    spanner_test_path = Path(__file__).resolve().parents[1] / "db" / "test_spanner.py"
-    with open(spanner_test_path, encoding="utf-8") as f:
-        lines = f.readlines()
-    cls_code = "".join(lines[41:598])
-    scope: dict[str, Any] = {
-        "sqlite3": __import__("sqlite3"),
-        "threading": __import__("threading"),
-        "_time": __import__("time"),
-        "re": __import__("re"),
-        "contextlib": __import__("contextlib"),
-        "Any": object,
-        "Sequence": list,
-        "Mapping": dict,
-        "encode_json": lambda x: __import__("json").dumps(x),
-        "decode_json": lambda x: __import__("json").loads(x),
-        "FrozenBaseStruct": __import__("msgspec").Struct,
-    }
-    exec(cls_code, scope)
-    return scope["FakeSpannerClient"]
-
-
-FakeSpannerClient = _load_fake_spanner_client()
 
 
 @pytest.mark.anyio
@@ -373,19 +340,23 @@ def test_django_backends_and_shared_provider_fingerprinting() -> None:
         endpoint="http://localhost:9010",
     )
 
-    d1 = provide_bigquery_driver(bq_cfg, sync=True, registry=registry)
-    d2 = litestar_provide_bigquery(bq_cfg, sync=True, registry=registry)
-    d3 = fastapi_provide_bigquery(bq_cfg, sync=True, registry=registry)
-    d4 = starlette_provide_bigquery(bq_cfg, sync=True, registry=registry)
-    d5 = flask_provide_bigquery(bq_cfg, sync=True, registry=registry)
+    d1 = provide_driver(bq_cfg, sync=True, registry=registry)
+    d2 = litestar_provide_driver(bq_cfg, sync=True, registry=registry)
+    d3 = fastapi_provide_driver(bq_cfg, sync=True, registry=registry)
+    d4 = starlette_provide_driver(bq_cfg, sync=True, registry=registry)
+    d5 = flask_provide_driver(bq_cfg, sync=True, registry=registry)
     assert d1 is d2 is d3 is d4 is d5
 
-    s1 = provide_spanner_driver(sp_cfg, sync=True, registry=registry)
-    s2 = litestar_provide_spanner(sp_cfg, sync=True, registry=registry)
-    s3 = fastapi_provide_spanner(sp_cfg, sync=True, registry=registry)
-    s4 = starlette_provide_spanner(sp_cfg, sync=True, registry=registry)
-    s5 = flask_provide_spanner(sp_cfg, sync=True, registry=registry)
+    s1 = provide_driver(sp_cfg, sync=True, registry=registry)
+    s2 = litestar_provide_driver(sp_cfg, sync=True, registry=registry)
+    s3 = fastapi_provide_driver(sp_cfg, sync=True, registry=registry)
+    s4 = starlette_provide_driver(sp_cfg, sync=True, registry=registry)
+    s5 = flask_provide_driver(sp_cfg, sync=True, registry=registry)
     assert s1 is s2 is s3 is s4 is s5
+
+    for ext_mod in (vertebra_db, litestar_ext, fastapi_ext, starlette_ext, flask_ext):
+        assert not hasattr(ext_mod, "provide_bigquery_driver")
+        assert not hasattr(ext_mod, "provide_spanner_driver")
 
 
 class _StubBigQueryDriver(SyncBigQueryDriver):

@@ -8,7 +8,8 @@ from typing import Any
 
 import pytest
 
-from vertebra.db import ArrowCursor, BigQueryConfig, BigQueryDryRunResult, ObjectTableConfig
+from vertebra.db import ArrowCursor, NotFoundError
+from vertebra.db.adapters.bigquery import BigQueryConfig, BigQueryDryRunResult, ObjectTableConfig
 from vertebra.extensions.sqlspec import (
     BigQueryAsyncADKArtifactStore,
     BigQueryAsyncADKMemoryStore,
@@ -315,6 +316,19 @@ class _SimulatedSyncCoreDriver:
         parameters: Mapping[str, Any] | Sequence[Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
+    ) -> Any:
+        rows = self.select(sql, parameters, schema_type=schema_type)
+        if not rows:
+            msg = "BigQuery query returned no rows"
+            raise NotFoundError(msg)
+        return rows[0]
+
+    def select_one_or_none(
+        self,
+        sql: str,
+        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
     ) -> Any | None:
         rows = self.select(sql, parameters, schema_type=schema_type)
         return rows[0] if rows else None
@@ -326,7 +340,8 @@ class _SimulatedSyncCoreDriver:
     ) -> Any:
         rows = self.select(sql, parameters)
         if not rows:
-            return None
+            msg = "BigQuery query returned no rows"
+            raise NotFoundError(msg)
         first = rows[0]
         return next(iter(first.values())) if first else None
 
@@ -344,17 +359,17 @@ class _SimulatedSyncCoreDriver:
             estimated_cost_usd=0.0,
         )
 
-    def fetch_arrow(
+    def select_to_arrow(
         self,
-        sql_or_table: str,
+        sql: str,
         parameters: Mapping[str, Any] | Sequence[Any] | None = None,
         **_kwargs: Any,
     ) -> ArrowCursor:
-        rows = self.select(sql_or_table, parameters)
+        rows = self.select(sql, parameters)
         return ArrowCursor.from_rows(rows, threshold_rows=1)
 
-    def insert_arrow(self, table: str, data: ArrowCursor | bytes | Any, **_kwargs: Any) -> int:
-        _ = table
+    def load_from_arrow(self, table_name: str, data: ArrowCursor | bytes | Any, **_kwargs: Any) -> int:
+        _ = table_name
         cursor = data if isinstance(data, ArrowCursor) else ArrowCursor(bytes(data))
         rows = cursor.to_pylist()
         self._engine.metrics_rows.extend(rows)
@@ -371,7 +386,7 @@ class _SimulatedSyncCoreDriver:
         overwrite: bool = True,
     ) -> int:
         _ = overwrite
-        cursor = self.fetch_arrow(sql_or_table)
+        cursor = self.select_to_arrow(sql_or_table)
         if isinstance(store, ObjectStoreBackend):
             key = destination_uri.split("://", 1)[-1].split("/", 1)[-1]
             store.write_arrow_cursor_sync(key, cursor, file_format=format, compression=compression)
@@ -453,8 +468,17 @@ class _SimulatedAsyncCoreDriver:
         parameters: Mapping[str, Any] | Sequence[Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
-    ) -> Any | None:
+    ) -> Any:
         return self._sync.select_one(sql, parameters, schema_type=schema_type)
+
+    async def select_one_or_none(
+        self,
+        sql: str,
+        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        *,
+        schema_type: type[Any] | None = None,
+    ) -> Any | None:
+        return self._sync.select_one_or_none(sql, parameters, schema_type=schema_type)
 
     async def select_value(
         self,
@@ -470,16 +494,16 @@ class _SimulatedAsyncCoreDriver:
     ) -> BigQueryDryRunResult:
         return self._sync.dry_run(sql, parameters)
 
-    async def fetch_arrow(
+    async def select_to_arrow(
         self,
-        sql_or_table: str,
+        sql: str,
         parameters: Mapping[str, Any] | Sequence[Any] | None = None,
         **kwargs: Any,
     ) -> ArrowCursor:
-        return self._sync.fetch_arrow(sql_or_table, parameters, **kwargs)
+        return self._sync.select_to_arrow(sql, parameters, **kwargs)
 
-    async def insert_arrow(self, table: str, data: ArrowCursor | bytes | Any, **kwargs: Any) -> int:
-        return self._sync.insert_arrow(table, data, **kwargs)
+    async def load_from_arrow(self, table_name: str, data: ArrowCursor | bytes | Any, **kwargs: Any) -> int:
+        return self._sync.load_from_arrow(table_name, data, **kwargs)
 
     async def export_to_object_store(
         self,
@@ -528,6 +552,18 @@ def test_bigquery_sync_config_driver_data_dictionary_and_connection_shim() -> No
     assert arrow_cur.row_count == 2
     appended = driver.load_from_arrow("metrics", arrow_cur)
     assert appended == 2
+
+    with pytest.raises(NotFoundError):
+        driver.select_one(
+            "SELECT store_key FROM vertebra_kv_store WHERE store_key = @store_key", {"store_key": "missing"}
+        )
+    assert (
+        driver.select_one_or_none(
+            "SELECT store_key FROM vertebra_kv_store WHERE store_key = @store_key",
+            {"store_key": "missing"},
+        )
+        is None
+    )
 
     exported = driver.select_to_storage(
         "SELECT id, name, score FROM metrics",

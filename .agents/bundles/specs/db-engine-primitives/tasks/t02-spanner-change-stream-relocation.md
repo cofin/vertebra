@@ -2,6 +2,7 @@
 type: Task
 id: db-engine-primitives:t02
 title: Relocate Spanner change stream readers to vertebra/db/adapters/spanner/change_stream.py with SyncChangeSource and AsyncChangeSource conformance
+description: "Move `SpannerChildPartition`, `SpannerChangeStreamRecord`, `SyncSpannerChangeStreamSource`, and `AsyncSpannerChangeStreamSource` out of `src/py/vertebra/db/cdc.py` into `src/py/vertebra/db/adapters/spanner/change_stream.py`, bind stream defaults on construction so `SyncSpannerChangeStreamSource.stream()` conforms statically and at runtime to `SyncChangeSource` and `AsyncSpannerChangeStreamSource.stream()` conforms to `AsyncChangeSource`, and eliminate `inspect.isawaitable` / `asyncio.iscoroutine` duck-typing."
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -15,7 +16,7 @@ files:
 tests:
   - src/py/tests/unit/db/test_spanner_queue_and_cdc.py
 plan_revision: 4
-plan_commit: "679a981"
+plan_commit: "f741701"
 state_revision: 0
 claimed_by: null
 claimed_at: null

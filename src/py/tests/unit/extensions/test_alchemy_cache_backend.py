@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import Integer, String, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from vertebra.db.redis import AsyncRedisDriver, RedisConfig, SyncRedisDriver
+from vertebra.db.adapters.redis import AsyncRedisDriver, RedisConfig, SyncRedisDriver
 from vertebra.extensions.alchemy import (
     AsyncCacheManager,
     CacheEntry,

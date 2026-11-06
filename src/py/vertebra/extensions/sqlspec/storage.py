@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from sqlspec.storage.registry import StorageRegistry
     from sqlspec.typing import ArrowRecordBatch, ArrowTable
 
-    from vertebra.db._arrow import ArrowCursor
+    from vertebra.db.arrow import ArrowCursor
 
 __all__ = (
     "ArrowFlightSerializer",

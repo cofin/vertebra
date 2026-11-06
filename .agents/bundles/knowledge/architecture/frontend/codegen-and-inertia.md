@@ -4,26 +4,66 @@ title: "Route Codegen Targets & Inertia v3 Middleware"
 description: "How vertebra.build.codegen turns App routes into TypeNode IR and TypeScript, Zod, Valibot, OpenAPI, Protobuf, and procedure client output, and how SyncInertiaMiddleware / AsyncInertiaMiddleware build Inertia v3 responses."
 status: stable
 tags: [architecture, frontend, codegen, typescript, inertia]
+generated:
+  by: flow/0.26.0
+  at: "2026-11-04T04:33:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-04T04:33:00Z"
+    commit: f741701
 sources:
-  - resource: src/py/vertebra/build/codegen/__init__.py
-  - resource: src/py/vertebra/build/codegen/_ir.py
-  - resource: src/py/vertebra/build/codegen/_extractor.py
-  - resource: src/py/vertebra/build/codegen/_typescript.py
-  - resource: src/py/vertebra/build/codegen/_manifest.py
-  - resource: src/py/vertebra/build/codegen/zod.py
-  - resource: src/py/vertebra/build/codegen/valibot.py
-  - resource: src/py/vertebra/build/codegen/openapi.py
-  - resource: src/py/vertebra/build/codegen/protobuf.py
-  - resource: src/py/vertebra/build/codegen/procedures.py
-  - resource: src/py/vertebra/build/codegen/plugin.py
-  - resource: src/py/vertebra/framework/inertia/__init__.py
-  - resource: src/py/vertebra/framework/_router.py
-  - resource: src/py/tests/unit/codegen/test_codegen_extractor.py
+  - id: src-build-codegen-init-py
+    resource: src/py/vertebra/build/codegen/__init__.py
+    title: "Python implementation module (src/py/vertebra/build/codegen/__init__.py)"
+  - id: src-build-codegen-ir-py
+    resource: src/py/vertebra/build/codegen/_ir.py
+    title: "Python implementation module (src/py/vertebra/build/codegen/_ir.py)"
+  - id: src-build-codegen-extractor-py
+    resource: src/py/vertebra/build/codegen/_extractor.py
+    title: "Python implementation module (src/py/vertebra/build/codegen/_extractor.py)"
+  - id: src-build-codegen-typescript-py
+    resource: src/py/vertebra/build/codegen/_typescript.py
+    title: "Python implementation module (src/py/vertebra/build/codegen/_typescript.py)"
+  - id: src-build-codegen-manifest-py
+    resource: src/py/vertebra/build/codegen/_manifest.py
+    title: "Python implementation module (src/py/vertebra/build/codegen/_manifest.py)"
+  - id: src-build-codegen-zod-py
+    resource: src/py/vertebra/build/codegen/zod.py
+    title: "Python implementation module (src/py/vertebra/build/codegen/zod.py)"
+  - id: src-build-codegen-valibot-py
+    resource: src/py/vertebra/build/codegen/valibot.py
+    title: "Python implementation module (src/py/vertebra/build/codegen/valibot.py)"
+  - id: src-build-codegen-openapi-py
+    resource: src/py/vertebra/build/codegen/openapi.py
+    title: "Python implementation module (src/py/vertebra/build/codegen/openapi.py)"
+  - id: src-build-codegen-protobuf-py
+    resource: src/py/vertebra/build/codegen/protobuf.py
+    title: "Python implementation module (src/py/vertebra/build/codegen/protobuf.py)"
+  - id: src-build-codegen-procedures-py
+    resource: src/py/vertebra/build/codegen/procedures.py
+    title: "Python implementation module (src/py/vertebra/build/codegen/procedures.py)"
+  - id: src-build-codegen-plugin-py
+    resource: src/py/vertebra/build/codegen/plugin.py
+    title: "Python implementation module (src/py/vertebra/build/codegen/plugin.py)"
+  - id: src-framework-inertia-init-py
+    resource: src/py/vertebra/framework/inertia/__init__.py
+    title: "Python implementation module (src/py/vertebra/framework/inertia/__init__.py)"
+  - id: src-framework-router-py
+    resource: src/py/vertebra/framework/_router.py
+    title: "Python implementation module (src/py/vertebra/framework/_router.py)"
+  - id: src-tests-unit-codegen-test-codegen-extractor-py
+    resource: src/py/tests/unit/codegen/test_codegen_extractor.py
+    title: "Python implementation module (src/py/tests/unit/codegen/test_codegen_extractor.py)"
 ---
 
 # Route Codegen Targets & Inertia v3 Middleware
 
-[`vertebra.build.codegen`](../../../../../src/py/vertebra/build/codegen/__init__.py) converts handler signatures on a Vertebra `App` into a msgspec-tagged IR, then renders client artifacts. `BuildOrchestrator` runs the TypeScript, Zod, and manifest generators (see [Bundler, HMR & SSR](bundler-hmr-and-ssr.md)); the remaining targets run through `CodegenPlugin.emit_all` or direct calls.
+<!-- truth: start -->
+- `TypeExtractor` lowers `App` route signatures and `msgspec.Struct` schemas into a canonical `TypeNode` IR shared across TypeScript, Zod, Valibot, OpenAPI, Protobuf v3, and procedure generators.
+- `SyncInertiaMiddleware` and `AsyncInertiaMiddleware` implement Inertia v3 (`X-Inertia`, partial reloads, `303` redirect coercion on `PUT`/`PATCH`/`DELETE`, and `409 X-Inertia-Location` version mismatches).
+<!-- truth: end -->
+
+[`vertebra.build.codegen`](../../../../../src/py/vertebra/build/codegen/__init__.py)[^src-build-codegen-init-py] converts handler signatures on a Vertebra `App` into a msgspec-tagged IR, then renders client artifacts. `BuildOrchestrator` runs the TypeScript, Zod, and manifest generators (see [Bundler, HMR & SSR](bundler-hmr-and-ssr.md)); the remaining targets run through `CodegenPlugin.emit_all` or direct calls.
 
 ```mermaid
 flowchart LR
@@ -38,9 +78,9 @@ flowchart LR
 
 ## IR and extraction (`_ir.py`, `_extractor.py`)
 
-[`TypeNode`](../../../../../src/py/vertebra/build/codegen/_ir.py) is `msgspec.Struct(frozen=True, tag_field="_type", tag=True)` with subclasses `PrimitiveType`, `LiteralType`, `ArrayType`, `TupleType`, `GenericType` (`Set`, `Record`), `UnionType`, `ObjectType` (`fields`, `name`, `optional_fields`), `NamedTypeRef` (recursive models), `AnnotatedType`, `StreamType`, `RawType` (TypeVars), and `UnknownType`. Each implements `to_typescript()` and `iter_children()`.
+[`TypeNode`](../../../../../src/py/vertebra/build/codegen/_ir.py)[^src-build-codegen-ir-py] is `msgspec.Struct(frozen=True, tag_field="_type", tag=True)` with subclasses `PrimitiveType`, `LiteralType`, `ArrayType`, `TupleType`, `GenericType` (`Set`, `Record`), `UnionType`, `ObjectType` (`fields`, `name`, `optional_fields`), `NamedTypeRef` (recursive models), `AnnotatedType`, `StreamType`, `RawType` (TypeVars), and `UnknownType`. Each implements `to_typescript()` and `iter_children()`.
 
-[`TypeExtractor.from_hint`](../../../../../src/py/vertebra/build/codegen/_extractor.py) maps:
+[`TypeExtractor.from_hint`](../../../../../src/py/vertebra/build/codegen/_extractor.py)[^src-build-codegen-extractor-py] maps:
 
 - `int`/`float` → `number`, `str` → `string`, `bool` → `boolean`, `None` → `null`, `bytes`/`bytearray`/`memoryview` → `Uint8Array`, `Any`/`object` → `UnknownType`.
 - `list`, `set`, `dict`, `tuple` (`tuple[T, ...]` → array), PEP 604 and `Union`, `Literal`, `Annotated`, and sync/async iterators and generators (`StreamType`).
@@ -64,7 +104,7 @@ flowchart LR
 
 `procedures.py` also defines Litestar-style parameter markers (`Parameter`, `Body`, `FromPath`, `FromQuery`, `FromHeader`, `FromCookie`, `JSONBody`, `MsgPackBody`, `MultipartBody`, `URLEncodedBody`, `SkipValidation`, `NamedDependency`), `resolve_parameter_node` (used by the Zod, Valibot, and OpenAPI targets to place parameters), and `json_schema_to_type_node`.
 
-[`CodegenPlugin(config, registry)`](../../../../../src/py/vertebra/build/codegen/plugin.py) stores `CodegenConfig` under `CODEGEN_STATE_KEY = "codegen"` (`install_state`, Litestar `on_app_init`) and `emit_all(routes, output_dir=None)` writes `schemas.valibot.ts`, `schemas.zod.ts`, `openapi.json`, `service.proto`, and `procedures.client.ts`. `CodegenConfig` defaults: `output_dir=src/generated`, Valibot/Zod/OpenAPI/procedures on, Protobuf off, `openapi_title="Vertebra API"`, `openapi_version="1.0.0"`.
+[`CodegenPlugin(config, registry)`](../../../../../src/py/vertebra/build/codegen/plugin.py)[^src-build-codegen-plugin-py] stores `CodegenConfig` under `CODEGEN_STATE_KEY = "codegen"` (`install_state`, Litestar `on_app_init`) and `emit_all(routes, output_dir=None)` writes `schemas.valibot.ts`, `schemas.zod.ts`, `openapi.json`, `service.proto`, and `procedures.client.ts`. `CodegenConfig` defaults: `output_dir=src/generated`, Valibot/Zod/OpenAPI/procedures on, Protobuf off, `openapi_title="Vertebra API"`, `openapi_version="1.0.0"`.
 
 ## Watch helpers (`plugin.py`)
 
@@ -72,7 +112,7 @@ flowchart LR
 
 ## Inertia v3 (`framework/inertia/__init__.py`)
 
-[`SyncInertiaMiddleware(config=None, ssr_client=None)` and `AsyncInertiaMiddleware(config=None, ssr_client=None)`](../../../../../src/py/vertebra/framework/inertia/__init__.py) turn an `InertiaResponse(component, props, encrypt_history, clear_history)` (helper `inertia()`) into a pure-Python `vertebra.framework._router.Response`.
+[`SyncInertiaMiddleware(config=None, ssr_client=None)` and `AsyncInertiaMiddleware(config=None, ssr_client=None)`](../../../../../src/py/vertebra/framework/inertia/__init__.py)[^src-framework-inertia-init-py] turn an `InertiaResponse(component, props, encrypt_history, clear_history)` (helper `inertia()`) into a pure-Python `vertebra.framework._router.Response`.
 
 - **Version**: `get_version()` returns `InertiaConfig.version`, else the first 8 hex chars of the MD5 of `manifest_path` (`dist/.vite/manifest.json`), else `"dev"`.
 - **Conflict**: an `X-Inertia: true` `GET` whose `X-Inertia-Version` differs returns `409` with `X-Inertia-Location: <request.path>`.
@@ -83,3 +123,20 @@ flowchart LR
 - `should_redirect_303(method, status)` reports whether a `301`/`302` after `PUT`/`PATCH`/`DELETE` should become `303`.
 
 `InertiaConfig` fields are listed in [Routing & App](../../domains/framework/routing-and-app.md).
+
+Provenance sources: [^src-build-codegen-typescript-py], [^src-build-codegen-manifest-py], [^src-build-codegen-zod-py], [^src-build-codegen-valibot-py], [^src-build-codegen-openapi-py], [^src-build-codegen-protobuf-py], [^src-build-codegen-procedures-py], [^src-framework-router-py], [^src-tests-unit-codegen-test-codegen-extractor-py].
+
+[^src-build-codegen-init-py]: `src/py/vertebra/build/codegen/__init__.py` — Python implementation module (src/py/vertebra/build/codegen/__init__.py).
+[^src-build-codegen-ir-py]: `src/py/vertebra/build/codegen/_ir.py` — Python implementation module (src/py/vertebra/build/codegen/_ir.py).
+[^src-build-codegen-extractor-py]: `src/py/vertebra/build/codegen/_extractor.py` — Python implementation module (src/py/vertebra/build/codegen/_extractor.py).
+[^src-build-codegen-typescript-py]: `src/py/vertebra/build/codegen/_typescript.py` — Python implementation module (src/py/vertebra/build/codegen/_typescript.py).
+[^src-build-codegen-manifest-py]: `src/py/vertebra/build/codegen/_manifest.py` — Python implementation module (src/py/vertebra/build/codegen/_manifest.py).
+[^src-build-codegen-zod-py]: `src/py/vertebra/build/codegen/zod.py` — Python implementation module (src/py/vertebra/build/codegen/zod.py).
+[^src-build-codegen-valibot-py]: `src/py/vertebra/build/codegen/valibot.py` — Python implementation module (src/py/vertebra/build/codegen/valibot.py).
+[^src-build-codegen-openapi-py]: `src/py/vertebra/build/codegen/openapi.py` — Python implementation module (src/py/vertebra/build/codegen/openapi.py).
+[^src-build-codegen-protobuf-py]: `src/py/vertebra/build/codegen/protobuf.py` — Python implementation module (src/py/vertebra/build/codegen/protobuf.py).
+[^src-build-codegen-procedures-py]: `src/py/vertebra/build/codegen/procedures.py` — Python implementation module (src/py/vertebra/build/codegen/procedures.py).
+[^src-build-codegen-plugin-py]: `src/py/vertebra/build/codegen/plugin.py` — Python implementation module (src/py/vertebra/build/codegen/plugin.py).
+[^src-framework-inertia-init-py]: `src/py/vertebra/framework/inertia/__init__.py` — Python implementation module (src/py/vertebra/framework/inertia/__init__.py).
+[^src-framework-router-py]: `src/py/vertebra/framework/_router.py` — Python implementation module (src/py/vertebra/framework/_router.py).
+[^src-tests-unit-codegen-test-codegen-extractor-py]: `src/py/tests/unit/codegen/test_codegen_extractor.py` — Python implementation module (src/py/tests/unit/codegen/test_codegen_extractor.py).
