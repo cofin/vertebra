@@ -65,16 +65,6 @@ def build_uuid_coercions(*, native: bool = False) -> dict[type[Any], Callable[[A
     return mapping
 
 
-def _coerce_stdlib_uuid(value: Any) -> UUID:
-    """Convert a ``uuid_utils.UUID`` or ``uuid.UUID`` object to a standard ``uuid.UUID``."""
-    if type(value) is UUID:
-        return value
-    int_val = getattr(value, "int", None)
-    if isinstance(int_val, int):
-        return UUID(int=int_val)
-    return UUID(str(value))
-
-
 def should_json_encode_sequence(seq: Sequence[Any]) -> bool:
     """Return True when ``seq`` contains structured mapping/dict elements that require JSON encoding."""
     if isinstance(seq, (str, bytes, bytearray, memoryview)) or not seq:
@@ -86,6 +76,16 @@ def should_json_encode_sequence(seq: Sequence[Any]) -> bool:
 def time_iso_convert(value: datetime | date | time) -> str:
     """Format a ``datetime``, ``date``, or ``time`` instance as an ISO 8601 string."""
     return value.isoformat()
+
+
+def _coerce_stdlib_uuid(value: Any) -> UUID:
+    """Convert a ``uuid_utils.UUID`` or ``uuid.UUID`` object to a standard ``uuid.UUID``."""
+    if type(value) is UUID:
+        return value
+    int_val = getattr(value, "int", None)
+    if isinstance(int_val, int):
+        return UUID(int=int_val)
+    return UUID(str(value))
 
 
 def _identity_decimal(value: Decimal) -> Decimal:

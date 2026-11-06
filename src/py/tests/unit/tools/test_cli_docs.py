@@ -1,13 +1,22 @@
 """Behavioral unit tests for the Vertebra Click CLI reference Markdown generator."""
 
+import importlib
+import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
-from tools.docs.generate_cli_docs import main as cli_docs_main
-from tools.docs.generate_cli_docs import render_cli_reference
+from tools.docs.generate_cli_docs import (
+    ensure_native_stub_module,
+    render_cli_reference,
+)
+from tools.docs.generate_cli_docs import (
+    main as cli_docs_main,
+)
 
 __all__ = (
     "test_cli_docs_main_writes_and_checks_staleness",
+    "test_ensure_native_stub_module_supports_mandatory_utils_imports_without_compiled_extension",
     "test_render_cli_reference_renders_all_vtb_commands_arguments_and_options_cleanly",
 )
 
@@ -78,3 +87,33 @@ def test_cli_docs_main_writes_and_checks_staleness(tmp_path: Path, capsys: pytes
     stale_rc = cli_docs_main(["--check", "--output", str(output_file)])
     assert stale_rc == 1
     assert "out of date" in capsys.readouterr().err.lower()
+
+
+def test_ensure_native_stub_module_supports_mandatory_utils_imports_without_compiled_extension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify ensure_native_stub_module satisfies vertebra.utils.{text,humanize,uuids} and hides dunder attributes."""
+    orig_find_spec = importlib.util.find_spec
+
+    def _fake_find_spec(name: str, package: str | None = None) -> object:
+        if name in ("vertebra._vertebra", "vertebra._bundler"):
+            return None
+        return orig_find_spec(name, package)
+
+    monkeypatch.setattr(importlib.util, "find_spec", _fake_find_spec)
+    monkeypatch.delitem(sys.modules, "vertebra._vertebra", raising=False)
+    monkeypatch.delitem(sys.modules, "vertebra._bundler", raising=False)
+    for mod_name in ("vertebra.utils.text", "vertebra.utils.humanize", "vertebra.utils.uuids"):
+        monkeypatch.delitem(sys.modules, mod_name, raising=False)
+
+    ensure_native_stub_module()
+    stub_mod = sys.modules["vertebra._vertebra"]
+    assert not hasattr(stub_mod, "__path__")
+    assert getattr(stub_mod, "AsyncObjectStore", None) is None
+
+    for mod_name in ("vertebra.utils.text", "vertebra.utils.humanize", "vertebra.utils.uuids"):
+        mod = importlib.import_module(mod_name)
+        assert mod is not None
+
+    markdown = render_cli_reference()
+    assert "#### `vtb run`" in markdown

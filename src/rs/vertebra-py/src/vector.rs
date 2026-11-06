@@ -357,6 +357,9 @@ impl VectorView {
         let py = slf.py();
         let this = slf.get();
         let slice = this.row_bytes()?;
+        // SAFETY: `view` is a valid `Py_buffer` pointer supplied by CPython's buffer
+        // protocol, `slf` is owned by `view->obj` until `__releasebuffer__`, and
+        // `this.shape_storage` / `this.stride_storage` live inside the pinned `VectorView`.
         let ret = ffi::PyBuffer_FillInfo(
             view,
             slf.as_ptr(),
@@ -729,6 +732,8 @@ impl VectorBatchView {
     pub fn to_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let len = self.slab.data_byte_len();
         let ptr = self.slab.data_ptr();
+        // SAFETY: `self.slab` owns at least `data_offset + data_byte_len()` initialized
+        // bytes and is immutable for the lifetime of `VectorBatchView`.
         let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
         PyBytes::new_with(py, len, |buf| {
             buf.copy_from_slice(slice);
@@ -828,6 +833,9 @@ impl VectorBatchView {
         let this = slf.get();
         let ptr = this.slab.data_ptr();
         let byte_len = this.slab.data_byte_len();
+        // SAFETY: `view` is a valid `Py_buffer` pointer supplied by CPython's buffer
+        // protocol, `slf` is retained by `view->obj` until `__releasebuffer__`, and
+        // `this.shape_storage` / `this.stride_storage` live inside `VectorBatchView`.
         let ret = ffi::PyBuffer_FillInfo(
             view,
             slf.as_ptr(),

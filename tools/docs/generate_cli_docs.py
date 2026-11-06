@@ -140,66 +140,42 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def ensure_native_stub_module() -> None:
+    """Install lightweight native extension placeholders in sys.modules when compiled extensions are absent."""
+    for mod_name in ("vertebra._vertebra", "vertebra._bundler"):
+        if mod_name not in sys.modules and importlib.util.find_spec(mod_name) is None:
+            stub_mod = types.ModuleType(mod_name)
+            object.__setattr__(stub_mod, "__getattr__", _make_stub_getattr())
+            sys.modules[mod_name] = stub_mod
+
+
+class _StubNativeBase:
+    """Accept arbitrary constructor arguments when a stubbed native symbol is invoked."""
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        pass
+
+
 def _make_stub_getattr(
     fallback_none_attrs: frozenset[str] = frozenset(
         {
             "AsyncObjectStore",
             "SchemaDigestCache",
             "SyncObjectStore",
-            "camelize",
             "field_id",
             "handler_id",
-            "humanize",
-            "humanize_bytes",
-            "humanize_duration",
-            "humanize_number",
-            "humanize_rate",
-            "kebabize",
-            "nanoid_generate",
-            "normalize_identifier",
-            "ordinalize",
-            "parse_bytes",
-            "parse_duration",
-            "pascalize",
-            "pluralize",
-            "quote_backtick_identifier",
-            "quote_bracket_identifier",
-            "quote_dialect_identifier",
-            "quote_identifier",
-            "singularize",
-            "slugify",
-            "snake_case",
-            "split_qualified_identifier",
             "state_id",
-            "titleize",
-            "truncate",
-            "truncate_utf8_bytes",
-            "uuid4_hex",
-            "uuid4_str",
-            "uuid4_u128",
-            "uuid7_str",
-            "uuid7_u128",
-            "validate_identifier",
         }
     ),
 ) -> Callable[[str], Any]:
     """Return a module __getattr__ hook that defers optional native symbols to Python fallbacks."""
 
     def _getattr(attr_name: str) -> Any:
-        if attr_name in fallback_none_attrs:
+        if (attr_name.startswith("__") and attr_name.endswith("__")) or attr_name in fallback_none_attrs:
             raise AttributeError(attr_name)
-        return type(attr_name, (), {})
+        return type(attr_name, (_StubNativeBase,), {})
 
     return _getattr
-
-
-def ensure_native_stub_module() -> None:
-    """Install lightweight native extension placeholders in sys.modules when compiled extensions are absent."""
-    for mod_name in ("vertebra._vertebra", "vertebra._bundler"):
-        if mod_name not in sys.modules and importlib.util.find_spec(mod_name) is None:
-            stub_mod = types.ModuleType(mod_name)
-            stub_mod.__getattr__ = _make_stub_getattr()  # type: ignore[method-assign]
-            sys.modules[mod_name] = stub_mod
 
 
 def _load_default_cli_group() -> click.Group:

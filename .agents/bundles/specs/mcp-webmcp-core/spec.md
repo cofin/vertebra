@@ -27,7 +27,7 @@ tags:
 
 ### 1.1 Upstream Execution Baseline
 
-This flow executes on `feat/mcp-webmcp-core`, stacked on `feat/runtime-structure-and-throughput` above `fix/post-merge-review-and-plan-sync` (`7657e8b7c2c96bdda6821aec70a2b603f438a127`) and `main @ 80ff8a65e43a2bcef9e48a7763e89a7352118232`. The neutral `vertebra.typing.ToolProvider` callable-map protocol, adapter-owned `BigQueryToolProvider` / `SpannerToolProvider` (`vertebra.db.adapters.{bigquery,spanner}.tools`), generic `vertebra.agent.tools.build_tools` consumer, and argument-bound `ConfirmationGate` tokens were merged in [PR #77](https://github.com/cofin/vertebra/pull/77) (`80ff8a65`) and hardened in `7657e8b7`.
+This flow executes on `feat/mcp-webmcp-core`, stacked on `feat/runtime-structure-and-throughput` (`c7b62a8c105f39c69f8411345c1a3ebb6722dfa7`) above `fix/post-merge-review-and-plan-sync` (`ebbb7fb07950ac7fc871f94ec6c9de66fa33e401`) and `main @ 80ff8a65e43a2bcef9e48a7763e89a7352118232`. The neutral `vertebra.typing.ToolProvider` callable-map protocol, adapter-owned `BigQueryToolProvider` / `SpannerToolProvider` (`vertebra.db.adapters.{bigquery,spanner}.tools`), generic `vertebra.agent.tools.build_tools` consumer, and argument-bound `ConfirmationGate` tokens were merged in [PR #77](https://github.com/cofin/vertebra/pull/77) (`80ff8a65`) and hardened in `7657e8b7`.
 
 ### 1.2 Code Analysis Summary
 
