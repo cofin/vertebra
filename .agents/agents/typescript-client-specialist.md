@@ -4,7 +4,7 @@ description: Implements and remediates TypeScript client SDK, Biome linting, tsu
 model: inherit
 mainAgent: false
 subagent: true
-commandExecutionPolicy: auto
+commandExecutionPolicy: sandbox
 tools:
   - read_file
   - view_file

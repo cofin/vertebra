@@ -1,13 +1,3 @@
----
-title: "Gotchas & Non-Obvious Footguns Index"
-description: "Index of Vertebra's runtime, PyO3 FFI, ASGI, shared-memory, and cross-platform IPC gotchas."
-tags:
-  - gotchas
-  - index
-  - pyo3
-  - shared-memory
----
-
 # Gotchas & Non-Obvious Footguns Index
 
 - [PyO3 FFI, Embedded Globals & Python Runtime Gotchas](pyo3-and-python-runtime.md) — Dual `.so` `OnceLock<BatchBridge>` split-globals trap in `Topology::Embedded`, `#[pymodule(gil_used = false)]` + conditional `freelist` on `3.14t`/`3.15t`, `PyBuffer_FillInfo` `Py_XNewRef` refcount ownership, frozen `RsgiReadyAwaitable`, `CARGO_TARGET_DIR` binary freshness, and Litestar v2 vs v3 fastpath/offload parity.

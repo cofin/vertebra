@@ -1,13 +1,3 @@
----
-title: "Domain Vocabulary Index"
-description: "Index of Vertebra's nested domain vocabulary and bounded-context chapters across Python, Rust, and TypeScript."
-tags:
-  - domains
-  - index
-  - vocabulary
-  - architecture
----
-
 # Domain Vocabulary Index
 
 Vertebra uses one domain naming model across Python, Rust, and TypeScript: each class, struct, and function names the domain concept directly, without brand prefixes (`Vertebra*`, except for the root `VertebraError` exception hierarchy in `vertebra.typing`), implementation-mechanism suffixes, or compatibility aliases.

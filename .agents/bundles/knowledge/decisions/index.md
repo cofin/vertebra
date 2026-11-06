@@ -1,13 +1,3 @@
----
-title: "Architectural Decision Records Index"
-description: "Index of Architectural Decision Records (ADRs) capturing durable cross-boundary choices in Vertebra."
-tags:
-  - decisions
-  - adr
-  - architecture
-  - index
----
-
 # Architectural Decision Records (`decisions/`)
 
 Durable architectural decisions that govern cross-language boundaries, runtime topologies, data-plane execution, and packaging in Vertebra.

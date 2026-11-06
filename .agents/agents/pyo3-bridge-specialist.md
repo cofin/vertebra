@@ -4,7 +4,7 @@ description: Implements and remediates PyO3 native extensions, GIL detachment, f
 model: inherit
 mainAgent: false
 subagent: true
-commandExecutionPolicy: auto
+commandExecutionPolicy: sandbox
 tools:
   - read_file
   - view_file

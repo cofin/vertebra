@@ -1,18 +1,6 @@
----
-title: "Vertebra Knowledge Base Index"
-description: "Curated map of Vertebra's nested architecture, domain taxonomy, implementation patterns, verification gates, and platform gotchas."
-tags:
-  - knowledge
-  - index
-  - architecture
-  - patterns
----
-
 # Vertebra Knowledge Base Index
 
 Curated current-state engineering documentation for **Vertebra** (`src/py/vertebra/`, `src/rs/`, `src/ts/vertebra-client/`).
-
----
 
 ## Workflow & Quality Gates
 

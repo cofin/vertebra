@@ -1,13 +1,3 @@
----
-title: "Testing & Verification Index"
-description: "Index of Vertebra's testing, verification, and benchmark chapters across Rust, Python, TypeScript, and free-threaded Python 3.14t/3.15t."
-tags:
-  - testing
-  - index
-  - verification
-  - benchmarks
----
-
 # Testing & Verification Index
 
 - [Polyglot Test Matrix & Environment Setup](polyglot-test-matrix.md) — `make setup-env` (`tools/scripts/setup-env.sh`), `make dev` (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_spanner`), `make rs-test`, `make py-test`, `make ts-test`, `make lint-all`, `make check`, CI workflow matrix (`.github/workflows/ci.yml`: Python `3.12`–`3.15` and free-threaded `3.14t`/`3.15t`, Rust feature matrix), and `/dev/shm` test hygiene.

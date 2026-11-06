@@ -4,7 +4,7 @@ description: Implements and remediates hot-path performance, zero-copy pipelines
 model: inherit
 mainAgent: false
 subagent: true
-commandExecutionPolicy: auto
+commandExecutionPolicy: sandbox
 tools:
   - read_file
   - view_file

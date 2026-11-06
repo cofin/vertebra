@@ -94,8 +94,6 @@ sources:
 - **Single-Copy `1x` RAM Local Model Broker (`_broker.py`, `_local.py`)**: [`EmbeddingBroker`](../../../../../src/py/vertebra/embeddings/_broker.py)[^src-embeddings-broker-py] loads local weights (`GemmaEmbedder`, `FastEmbedder`) once for an entire multi-worker deployment, dynamic-batches concurrent worker requests by token budget (`max_batch_tokens = 8192`) with length-sorted grouping, and isolates `onnxruntime` / `ctranslate2` inside a dedicated child process (`submit_batch_in_subprocess`) when running on free-threaded Python `3.14t`/`3.15t` (`sys._is_gil_enabled() is False`) so C-extension loads never re-enable the GIL in HTTP workers.
 <!-- truth: end -->
 
----
-
 ## 1. Architecture Overview
 
 ```mermaid
@@ -129,8 +127,6 @@ flowchart LR
     Slab --> VView
 ```
 
----
-
 ## 2. Shared-Memory `VectorSlab`, `VectorCache` & SIMD Kernels (`vertebra-core::vector`)
 
 | Component | Source | Responsibility |
@@ -141,8 +137,6 @@ flowchart LR
 | [`VectorCache`](../../../../../src/rs/vertebra-core/src/vector.rs) | `vertebra-core/src/vector.rs` | Set-associative seqlock cache keyed by 64-bit FNV-1a (`compute_vector_cache_key(model_id, task, dimensions, text)`), with off-GIL SIMD `cosine_top_k`, `dot_top_k`, and `hamming_top_k`. |
 | [`StaticEmbedderCore`](../../../../../src/rs/vertebra-core/src/vector.rs) | `vertebra-core/src/vector.rs` | Pure-Rust `mmap` wordpiece/unigram token table (`model2vec` / `potion-base-8M`) pooling and L2-normalizing token rows directly into `VectorSlab` in `<50 µs` with zero Python ML dependencies. |
 | `format_gemma_prompt` | `vertebra-core/src/vector.rs` | Formats asymmetrical `EmbeddingGemma` prompts (`"task: search result \| query: {text}"` vs `"title: {title \| none} \| text: {text}"`). |
-
----
 
 ## 3. PEP 3118 `VectorView` & `VectorBatchView` (`vertebra-py::vector`)
 
@@ -155,8 +149,6 @@ flowchart LR
   - `.to_oracle_bytes()`: Oracle 26ai `VECTOR` binary `0xDB` frame (`encode_vector_binary`).
   - `.to_sqlite_blob()`: Little-endian packed payload for `sqlite-vec`.
   - `.to_arrow_shm(column_name="embedding", *, shm_name=None)`: Apache Arrow IPC `RecordBatch` stream with a `FixedSizeListArray(Float32, dims)` column inside a `ShmRegion`.
-
----
 
 ## 4. Embedder Hierarchy (`vertebra.embeddings`)
 
@@ -176,8 +168,6 @@ flowchart LR
 | [`RemoteEmbedder`](../../../../../src/py/vertebra/embeddings/_remote.py)[^src-embeddings-remote-py] | `embeddinggemma-2-270m` (`768` dims) | Rust HTTP/2 gRPC `/vertebra.EmbeddingService/BatchEmbed` client and server (`create_embedding_grpc_service`). |
 
 SQL embedding execution remains adapter-owned. PostgreSQL inference and similarity search prepare `%s` for sync psycopg and `$N` for async transport, retaining model/text/vector binds. The generic `EmbeddingPushdown` protocol and `PushdownEmbedder` do not construct engine SQL or import concrete adapters; the engine-purity gate rejects engine SQL construction inside generic database modules. [^src-adapters-postgres-embeddings-py][^src-embeddings-pushdown-py]
-
----
 
 ## 5. `EmbeddingBroker` & Free-Threaded `3.14t`/`3.15t` Quarantine (`_broker.py`)
 

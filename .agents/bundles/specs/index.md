@@ -1,13 +1,3 @@
----
-title: "Active Specifications & Research Index"
-description: "Index of active Master PRDs, planned feature specifications, draft child flow charters, and spec-scoped primary-source research under .agents/bundles/specs/."
-tags:
-  - specs
-  - prd
-  - research
-  - index
----
-
 # Active Specifications & Research (`specs/`)
 
 Active specifications and promoted research notes under `.agents/bundles/specs/`. Completed flows are synthesized into [`../knowledge/`](../knowledge/index.md), logged in [`../log.md`](../log.md), and deleted upon `/flow:archive`.
@@ -21,11 +11,10 @@ The completed database foundation is documented in [driver contracts and adapter
 
 ## 2. Active Feature Specifications (`state: active`)
 
-No active feature specification. Completed engine primitives are documented in the [data chapter](../knowledge/domains/data/query-pipeline-cdc-and-tenancy.md) and [archive log](../log.md).
+- [`runtime-structure-and-throughput`](runtime-structure-and-throughput/spec.md) — Shared `_fastpath_core.py` and `FastPathProvider` registry, table-driven loop backends, Rust GCP submodule splits, `VertexEmbedder` HTTP/2 transport, and `vertebra.utils` Rust helper cleanup (`t01`–`t06` completed, `t07`–`t08` pending on `feat/runtime-structure-and-throughput`).
 
 ## 3. Planned Feature Specifications (`state: planned`)
 
-- [`runtime-structure-and-throughput`](runtime-structure-and-throughput/spec.md) — Shared `_fastpath_core.py` and `FastPathProvider` registry, table-driven loop backends, Rust GCP submodule splits, `VertexEmbedder` HTTP/2 transport, and `vertebra.utils` Rust helper cleanup (`t01`–`t08`).
 - [`mcp-webmcp-core`](mcp-webmcp-core/spec.md) — Unified `ToolSpec` / `ToolRegistry` / `MCPCore` (`2026-07-28`), shared ASGI/WSGI MCP mounts, `litestar-mcp` delegation, and `document.modelContext` WebMCP bridge (`t01`–`t08`).
 - [`storage-completeness`](storage-completeness/spec.md) — Complete `SyncObjectStore` and `AsyncObjectStore` (`vertebra-storage`), unified GCP token caches, fail-closed construction, and SQLSpec, Advanced Alchemy, Django, and Litestar storage contracts (`t01`–`t07`).
 - [`native-postgres-driver`](native-postgres-driver/spec.md) — Standalone Rust PostgreSQL wheel (`vertebra-postgres`) covering wire authentication, cloud mTLS/IAM, pools, single-Sync pipelines, binary COPY, SHM Arrow, notifications, logical replication, and native adapter cutover (`t01`–`t102`).

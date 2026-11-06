@@ -24,17 +24,17 @@ tests:
 plan_revision: 1
 plan_commit: "af319da17dec0148a18532952cb7ea2a91d1c9d7"
 state_revision: 2
-claimed_by: agent
-claimed_at: '2026-11-06T16:00:00Z'
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: '2026-11-06T16:11:30Z'
-last_verified_commit: null
+last_verified_commit: "cf4941e1be68765878f34dafe56838ab0f4b57b1"
 verification_evidence: "cargo test -p vertebra-core -p vertebra-db -p vertebra-py --features gcp (226 passed), make rs-test, make dev, mypy.stubtest vertebra._vertebra, pytest (955 passed, 1 skipped), cargo clippy -D warnings, review_setup.py validate"
 created_at: '2026-11-06T06:35:00Z'
 updated_at: '2026-11-06T16:11:30Z'
-commit: null
+commit: "cf4941e1be68765878f34dafe56838ab0f4b57b1"
 tags:
 - rust
 - proto

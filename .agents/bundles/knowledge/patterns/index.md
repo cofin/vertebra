@@ -1,14 +1,3 @@
----
-title: "Implementation Patterns Index"
-description: "Index of Vertebra's nested implementation pattern chapters across Python, Rust/PyO3/SHM, and TypeScript."
-tags:
-  - patterns
-  - index
-  - python
-  - rust
-  - typescript
----
-
 # Implementation Patterns Index
 
 Every pattern chapter contains code-truth blocks (`<!-- truth: start -->` / `<!-- truth: end -->`) anchored directly to `src/py/vertebra/`, `src/rs/`, and `src/ts/vertebra-client/`.

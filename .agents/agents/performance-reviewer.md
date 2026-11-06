@@ -5,7 +5,7 @@ model: inherit
 readonly: true
 mainAgent: false
 subagent: true
-commandExecutionPolicy: auto
+commandExecutionPolicy: sandbox
 disallowedTools:
   - Write
   - Edit

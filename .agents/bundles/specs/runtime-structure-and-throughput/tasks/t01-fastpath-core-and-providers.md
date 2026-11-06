@@ -33,11 +33,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: '2026-11-06T15:22:00Z'
-last_verified_commit: af319da17dec0148a18532952cb7ea2a91d1c9d7
+last_verified_commit: "4a5512d426a536fda14168e6752c0533335eaae3"
 verification_evidence: 260 passed across fastpath, framework plugin, CLI, and type_guards unit suites; ruff + mypy + review_setup clean
 created_at: '2026-11-06T06:35:00Z'
 updated_at: '2026-11-06T15:22:00Z'
-commit: null
+commit: "4a5512d426a536fda14168e6752c0533335eaae3"
 tags:
 - fastpath
 - server

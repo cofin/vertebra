@@ -400,6 +400,43 @@ def test_bundles_catches_completed_spec_and_broken_source(tmp_path: Path) -> Non
     assert any("resident spec has 'state: completed'" in i.message for i in issues)
 
 
+@pytest.mark.parametrize(
+    ("rel_path", "content", "expected_fragment"),
+    [
+        (
+            ".agents/bundles/knowledge/index.md",
+            "---\ntitle: Subdir Index\n---\n\n# Knowledge Index\n",
+            "reserved file 'index.md' must not carry YAML frontmatter",
+        ),
+        (
+            ".agents/bundles/log.md",
+            "---\ntitle: Log\n---\n\n# Activity Log\n",
+            "reserved file 'log.md' must not carry YAML frontmatter",
+        ),
+        (
+            ".agents/bundles/knowledge/patterns/rust/sample.md",
+            "---\ntype: Pattern\ntitle: Sample\ndescription: Desc.\nstatus: stable\n---\n\n# Sample\n\n---\n\n## Section\n",
+            "standalone '---' horizontal rule is forbidden in bundle markdown body",
+        ),
+    ],
+)
+def test_bundles_rejects_reserved_frontmatter_and_body_horizontal_rules(
+    tmp_path: Path,
+    rel_path: str,
+    content: str,
+    expected_fragment: str,
+) -> None:
+    """Verify bundles rule rejects frontmatter on subdirectory indexes/log.md and standalone body --- rules."""
+    repo = build_minimal_review_tree(tmp_path)
+    target = repo / rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+
+    validator = ReviewSetupValidator(repo)
+    issues = validator.validate(frozenset({"bundles"}))
+    assert any(expected_fragment in i.message for i in issues)
+
+
 def test_markdown_document_ignores_inline_and_fenced_truth_markers(tmp_path: Path) -> None:
     """Verify MarkdownDocument.parse only enters truth blocks on standalone non-fenced markers."""
     md_file = tmp_path / "log.md"

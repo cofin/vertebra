@@ -1,5 +1,13 @@
 # Bundle Activity Log
 
+## [2026-11-06] flow-setup | Aligned OKF v0.2 bundle indexes, subagent sandbox policy, workflow, and active spec continuity
+
+- Executed `/flow:setup` (`Align & True-Up`, `shared` Git tracking policy) on `feat/runtime-structure-and-throughput`:
+  - Stripped YAML frontmatter from all 9 subdirectory `index.md` files (`.agents/bundles/product/index.md`, `.agents/bundles/knowledge/index.md`, `.agents/bundles/knowledge/{architecture,decisions,domains,gotchas,patterns,testing}/index.md`, `.agents/bundles/specs/index.md`) while keeping `okf_version: "0.2"`, `bundle: "vertebra"`, and `type: Index` strictly on root `.agents/bundles/index.md`.
+  - Removed standalone `---` body horizontal rules across `.agents/bundles/index.md`, `.agents/bundles/knowledge/index.md`, `.agents/bundles/knowledge/domains/agent/embeddings-and-vectors.md`, and `.agents/bundles/log.md`, and extended `ReviewSetupValidator._check_bundles` (`tools/scripts/review_setup.py`) to enforce frontmatter-free subdirectory indexes and rule-free Markdown bodies.
+  - Set `commandExecutionPolicy: sandbox` across all 16 reviewer and specialist subagents in `.agents/agents/*-{reviewer,specialist}.md`.
+  - Synchronized `.agents/bundles/knowledge/workflow.md`, `AGENTS.md`, `.agents/bundles/index.md`, `.agents/bundles/specs/index.md`, and `runtime-structure-and-throughput` (`spec.md` `state: active` and landed commit SHAs on completed tasks `t01`–`t06`).
+
 ## [2026-11-06] flow-review & flow-revise | Post-merge remediation, 0.3.0 docs/OKF sync, per-engine charter split, and Wave 1 plan refinement
 
 - Audited squash-merged `main` (`80ff8a65`, folding [#71](https://github.com/cofin/vertebra/pull/71) `364c7cbe`, [#72](https://github.com/cofin/vertebra/pull/72) `984ce732`, [#73](https://github.com/cofin/vertebra/pull/73) `abd33ab6`, [#75](https://github.com/cofin/vertebra/pull/75) `f7417015`, [#76](https://github.com/cofin/vertebra/pull/76) `21c99f95`, and [#77](https://github.com/cofin/vertebra/pull/77) `80ff8a65`) and remediated findings on `fix/post-merge-review-and-plan-sync`:
@@ -268,8 +276,6 @@
 - Audited and resynthesized the entire OKF v0.2 bundle against the consolidated repository baseline (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`, `src/py/vertebra/`, and `src/ts/vertebra-client/`).
 - Reconciled all path moves (`builder/` $\to$ `build/`, `builder/_codegen/` $\to$ `build/codegen/`, `server/_asgi/_litestar_*.py` $\to$ `extensions/litestar/*.py`, `build/{standalone,onefile}.py` $\to$ `build/packaging/`) and canonical domain renames (`ObjectStore`/`SyncStore`/`AsyncStore`, `SQLSpecPlugin`, `AlchemyPlugin`, `BrokerPlugin`, `LitestarPlugin`, `ChannelsBackend`, `MemoryStore`, `WorkerRunner`/`LaneConfig`, `SseClient`/`WebSocketClient`, `LiveState`/`LiveStateClient`, `TraceContext`, `LogSink`/`LogHandler`, `CgroupQuota`, `LameDuckController`, `ZPagesRegistry`).
 - Rewrote `product/*`, `knowledge/workflow.md`, `architecture/**` (adding `runtime/platform-and-lifecycle.md` and `http/protocol-and-offload-modules.md`), `domains/**` (adding `storage/object-storage.md`, `data/database-drivers-and-dialers.md`, `data/query-pipeline-cdc-and-tenancy.md`, `telemetry/logging-tracing-and-genai.md`, `extensions/{litestar,sqlspec-alchemy-and-dialects,oracle-apex,grpc}.md`, `framework/{subdomains,live-state,cli}.md`, `server/worker-lanes.md`, and `frontend/{packaging-and-pgo,wasm}.md`), `patterns/**` (adding `python/serialization-and-utils.md`), `testing/**`, `gotchas/**`, and all category/root `index.md` files with zero broken links or missing source resources.
-
----
 
 - **2026-10-21 (`flow-archive`: `litestar-ecosystem-and-agentic-runtime`)**: Archived completed spec `litestar-ecosystem-and-agentic-runtime` (6 tasks closed) and synthesized multi-dimension OKF knowledge across `architecture/worker/asgi-and-wsgi-runners.md` (`extensions/litestar/{router,offload,fastpath,plugin,channels,store}.py`, `extensions/worker/runner.py`) and `architecture/http/ingress-and-routing.md` (`cors.rs`, `discovery.rs`, `mcp_bridge.rs`).
 - **2026-10-21 (`flow-archive`: `realtime-sse-websocket-pubsub`)**: Archived completed spec `realtime-sse-websocket-pubsub` (5 tasks closed) and synthesized multi-dimension OKF knowledge across `architecture/http/batching-dispatch-and-backpressure.md` (`sse.rs`, `ws_mount.rs`, `pubsub.rs`, `_asgi/_sse.py`, `_asgi/_websocket.py`, `try_acquire_for_path` priority route bypass) and `patterns/typescript/client-and-adapter-subpaths.md` (`sse.ts`, `websocket.ts`).

@@ -4,7 +4,7 @@ description: Implements and remediates Python framework architecture, server run
 model: inherit
 mainAgent: false
 subagent: true
-commandExecutionPolicy: auto
+commandExecutionPolicy: sandbox
 tools:
   - read_file
   - view_file
