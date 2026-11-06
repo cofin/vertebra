@@ -533,6 +533,51 @@ def test_bundles_rejects_unreachable_git_commit_sha(tmp_path: Path) -> None:
     assert not any(head_sha in i.message for i in issues)
 
 
+def test_bundles_skips_ancestry_check_in_shallow_git_clone(tmp_path: Path) -> None:
+    """Verify shallow Git clones skip ancestry checks while enforcing commit SHA syntax."""
+    repo = build_minimal_review_tree(tmp_path)
+    git_env = {
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }
+    subprocess.run(["git", "-C", str(repo), "init"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        check=True,
+        capture_output=True,
+        env=git_env,
+    )
+    head_sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (repo / ".git" / "shallow").write_text(f"{head_sha}\n", encoding="utf-8")
+
+    chapter = repo / ".agents/bundles/knowledge/patterns/rust/sample.md"
+    chapter.write_text(
+        "---\n"
+        "type: Pattern\n"
+        "title: Sample Pattern\n"
+        "description: Pattern description.\n"
+        "status: stable\n"
+        "verified:\n"
+        "  - by: agent\n"
+        "    commit: 80ff8a65e43a2bcef9e48a7763e89a7352118232\n"
+        "---\n\n"
+        "<!-- truth: start -->\n- Valid truth\n<!-- truth: end -->\n",
+        encoding="utf-8",
+    )
+
+    validator = ReviewSetupValidator(repo)
+    issues = validator.validate(frozenset({"bundles"}))
+    assert issues == []
+
+
 def test_privacy_catches_home_path_and_env_term_without_echoing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

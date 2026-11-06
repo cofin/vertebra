@@ -33,15 +33,6 @@ __all__: list[str] = [
 ]
 
 
-def _strip_leading_dot_slash(p: str) -> str:
-    """Safely strip leading ./ or / without removing leading dot from hidden directory names."""
-    if p.startswith("./"):
-        return p[2:]
-    if p.startswith("/"):
-        return p[1:]
-    return p
-
-
 class ReviewIssue(msgspec.Struct, frozen=True, gc=False):
     """Represents a validation failure or structural issue."""
 
@@ -1679,7 +1670,7 @@ class ReviewSetupValidator:
         policy = self._manifest.policy if self._manifest else ValidationPolicy()
         max_truth = policy.max_truth_lines
         reserved_names = set(policy.okf_reserved) if policy.okf_reserved else {"index.md", "log.md"}
-        has_git = (self.repo_root / ".git").exists()
+        has_git = (self.repo_root / ".git").exists() and not (self.repo_root / ".git" / "shallow").exists()
         ancestry_cache: dict[str, bool] = {}
 
         index_file = bundles_root / "index.md"
@@ -2216,6 +2207,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     sys.stderr.write(f"Unknown subcommand: {subcommand}\n")
     return 1
+
+
+def _strip_leading_dot_slash(p: str) -> str:
+    """Safely strip leading ./ or / without removing leading dot from hidden directory names."""
+    if p.startswith("./"):
+        return p[2:]
+    if p.startswith("/"):
+        return p[1:]
+    return p
 
 
 if __name__ == "__main__":
