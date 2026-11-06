@@ -8,7 +8,7 @@ parent_prd: integration-remediation
 research:
 - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: "55a6002aabb2d4e2a8bdadd0f7014ea643217ffe"
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
@@ -43,7 +43,7 @@ This flow executes on `feat/mcp-webmcp-core`, stacked on `feat/runtime-structure
 
 Read [MCP and A2A protocol harness](../../knowledge/domains/agent/mcp-and-a2a-protocol-harness.md), [Litestar extension](../../knowledge/domains/extensions/litestar.md), [client and adapter subpaths](../../knowledge/patterns/typescript/client-and-adapter-subpaths.md), [module and class layout](../../knowledge/patterns/python/module-and-class-layout.md), and the `python-framework`, `litestar-mcp`, and `typescript-client` skills.
 
-`vertebra.typing.ToolProvider` remains engine-neutral (`tool_functions() -> Mapping[str, Callable[..., Any]]`); `BigQueryToolProvider` and `SpannerToolProvider` retain zero upward imports from `vertebra.agent`, and `vertebra.agent.tools` contains zero vendor-specific dispatch.
+`vertebra.typing.ToolProvider` remains engine-neutral (`operations() -> Mapping[str, Callable[..., Awaitable[Any]]]` and `confirmation_reason(operation_name, arguments) -> str | None`); `BigQueryToolProvider` and `SpannerToolProvider` retain zero upward imports from `vertebra.agent`, and `vertebra.agent.tools` contains zero vendor-specific dispatch.
 
 ## 2. Requirements
 

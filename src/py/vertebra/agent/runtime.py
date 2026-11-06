@@ -170,7 +170,6 @@ class ConfirmationGate:
 
     def __init__(self) -> None:
         self._tickets: dict[str, ConfirmationTicket] = {}
-        self._approved_tokens: set[str] = set()
 
     def request_confirmation(
         self,
@@ -208,7 +207,6 @@ class ConfirmationGate:
             return False
         if owner_id is not None and ticket.owner_id is not None and ticket.owner_id != owner_id:
             return False
-        self._approved_tokens.add(token)
         self._tickets[token] = msgspec.structs.replace(ticket, status="approved")
         return True
 
@@ -224,7 +222,6 @@ class ConfirmationGate:
             return False
         if owner_id is not None and ticket.owner_id is not None and ticket.owner_id != owner_id:
             return False
-        self._approved_tokens.discard(token)
         self._tickets[token] = msgspec.structs.replace(ticket, status="rejected", reason=reason or ticket.reason)
         return True
 
@@ -232,11 +229,6 @@ class ConfirmationGate:
         """Check whether a token is approved under the specified owner."""
         if not token:
             return False
-        if token in self._approved_tokens:
-            ticket = self._tickets.get(token)
-            if ticket is not None and owner_id is not None and ticket.owner_id is not None:
-                return ticket.owner_id == owner_id
-            return True
         ticket = self._tickets.get(token)
         if ticket is None or ticket.status != "approved":
             return False

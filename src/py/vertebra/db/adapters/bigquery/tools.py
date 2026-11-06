@@ -7,8 +7,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 
-from vertebra.db.adapters.bigquery.config import BigQueryConfig, ObjectTableConfig
-from vertebra.db.adapters.bigquery.core import BigQueryCore
+from vertebra.db.adapters.bigquery.config import BigQueryConfig, BigQueryTableIdentifier, ObjectTableConfig
 from vertebra.db.adapters.bigquery.driver import AsyncBigQueryDriver, SyncBigQueryDriver
 from vertebra.db.driver import AsyncDatabaseDriver
 from vertebra.db.registry import DatabaseRegistry, provide_driver
@@ -35,7 +34,7 @@ _MUTATING_VERBS = frozenset(
         "LOAD",
     }
 )
-_LEADING_COMMENT_RE = re.compile(r"^\s*(?:--[^\n]*(?:\n|$)\s*|/\*.*?\*/\s*)+", re.DOTALL)
+_LEADING_COMMENT_RE = re.compile(r"^\s*(?:--[^\n]*(?:\n|$)\s*|#[^\n]*(?:\n|$)\s*|/\*.*?\*/\s*)+", re.DOTALL)
 
 
 class BigQueryToolProvider(ToolProvider):
@@ -164,16 +163,12 @@ class BigQueryToolProvider(ToolProvider):
         Raises:
             ValueError: When table_name is not a dotted identifier.
         """
-        validate_identifier(table_name, "table_name", allow_hyphens=True)
+        parts = BigQueryTableIdentifier.parse_parts(table_name, field_name="table_name")
+        quoted_table = ".".join(f"`{part}`" for part in parts)
         validate_identifier(connection_id, "connection_id", allow_hyphens=True)
-        try:
-            quoted_table = BigQueryCore.validate_and_quote_table(table_name)
-        except ValueError as exc:
-            msg = f"Invalid SQL identifier for table_name: {table_name!r}"
-            raise ValueError(msg) from exc
         drv = self._resolve_driver()
         bounded_limit = max(1, min(int(limit), 1000))
-        uri_pattern = object_uri_prefix or f"gs://{table_name.replace('.', '/')}/*"
+        uri_pattern = object_uri_prefix or f"gs://{'/'.join(parts)}/*"
         obj_cfg = ObjectTableConfig(
             table_name=table_name,
             connection_id=connection_id,

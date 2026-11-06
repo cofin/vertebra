@@ -34,7 +34,7 @@ _MUTATING_VERBS = frozenset(
     }
 )
 _DDL_VERBS = frozenset({"CREATE", "ALTER", "DROP", "TRUNCATE", "GRANT", "REVOKE"})
-_LEADING_COMMENT_RE = re.compile(r"^\s*(?:--[^\n]*(?:\n|$)\s*|/\*.*?\*/\s*)+", re.DOTALL)
+_LEADING_COMMENT_RE = re.compile(r"^\s*(?:--[^\n]*(?:\n|$)\s*|#[^\n]*(?:\n|$)\s*|/\*.*?\*/\s*)+", re.DOTALL)
 
 
 class SpannerToolProvider(ToolProvider):
@@ -79,8 +79,8 @@ class SpannerToolProvider(ToolProvider):
     ) -> dict[str, Any]:
         """Execute a governed Cloud Spanner query using lock-free ReadOnly snapshots for SELECTs."""
         drv = self._resolve_driver()
-        if self._leading_verb(sql) in _MUTATING_VERBS:
-            verb = self._leading_verb(sql)
+        verb = self._leading_verb(sql)
+        if verb in _MUTATING_VERBS:
             if verb in _DDL_VERBS:
                 op_meta = (
                     await drv.update_ddl([sql])

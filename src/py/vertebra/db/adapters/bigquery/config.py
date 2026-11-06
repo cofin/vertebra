@@ -16,7 +16,7 @@ from vertebra.typing import (
     ImproperConfigurationError,
 )
 from vertebra.utils.serializers import encode_json
-from vertebra.utils.text import validate_identifier
+from vertebra.utils.text import split_qualified_identifier, validate_identifier
 
 __all__ = (
     "BIGQUERY_DIALECT_TAG",
@@ -24,6 +24,7 @@ __all__ = (
     "DEFAULT_BIGQUERY_STORAGE_ENDPOINT",
     "BigQueryConfig",
     "BigQueryDryRunResult",
+    "BigQueryTableIdentifier",
     "ObjectRef",
     "ObjectTableConfig",
 )
@@ -342,7 +343,7 @@ class ObjectTableConfig(FrozenBaseStruct, frozen=True, gc=False):
         """Render the GoogleSQL `CREATE EXTERNAL TABLE ... WITH CONNECTION ... OPTIONS(...)` DDL."""
         if not self.uris:
             raise ImproperConfigurationError("ObjectTableConfig.uris must contain at least one URI")
-        quoted_table = self._validate_and_quote_table_name(self.table_name)
+        quoted_table = BigQueryTableIdentifier.validate_and_quote(self.table_name, field_name="table_name")
         validate_identifier(self.connection_id, "connection_id", allow_hyphens=True)
         exists_clause = "IF NOT EXISTS " if if_not_exists else ""
         staleness_clause = f"\nWITH MAX STALENESS {self.max_staleness}" if self.max_staleness else ""
@@ -425,54 +426,6 @@ class ObjectTableConfig(FrozenBaseStruct, frozen=True, gc=False):
         return refs
 
     @staticmethod
-    def _validate_and_quote_table_name(table_name: str) -> str:
-        stripped = table_name.strip()
-        if not stripped or any(ch.isspace() or ch in {";", "(", ")", "'", '"', "`"} for ch in stripped):
-            msg = f"Invalid SQL identifier for table_name: {table_name!r}"
-            raise ValueError(msg)
-        if "--" in stripped or "/*" in stripped or "*/" in stripped:
-            msg = f"Invalid SQL identifier for table_name: {table_name!r}"
-            raise ValueError(msg)
-        project_prefix: str | None = None
-        remainder = stripped
-        if ":" in stripped:
-            if stripped.count(":") != 1:
-                msg = f"Invalid SQL identifier for table_name: {table_name!r}"
-                raise ValueError(msg)
-            domain, after_colon = stripped.split(":", 1)
-            dot_idx = after_colon.find(".")
-            if dot_idx == -1:
-                msg = f"Invalid SQL identifier for table_name: {table_name!r}"
-                raise ValueError(msg)
-            proj_slug = after_colon[:dot_idx]
-            remainder = after_colon[dot_idx + 1 :]
-            validate_identifier(domain, "table_name", allow_dots=True, allow_hyphens=True)
-            validate_identifier(proj_slug, "table_name", allow_dots=False, allow_hyphens=True)
-            project_prefix = f"{domain}:{proj_slug}"
-        parts = remainder.split(".")
-        if project_prefix is not None:
-            if len(parts) != 2:
-                msg = f"Invalid SQL identifier for table_name: {table_name!r}"
-                raise ValueError(msg)
-            validate_identifier(parts[0], "table_name", allow_dots=False, allow_hyphens=False)
-            validate_identifier(parts[1], "table_name", allow_dots=False, allow_hyphens=True)
-            return f"`{project_prefix}`.`{parts[0]}`.`{parts[1]}`"
-        if len(parts) == 3:
-            validate_identifier(parts[0], "table_name", allow_dots=False, allow_hyphens=True)
-            validate_identifier(parts[1], "table_name", allow_dots=False, allow_hyphens=False)
-            validate_identifier(parts[2], "table_name", allow_dots=False, allow_hyphens=True)
-            return f"`{parts[0]}`.`{parts[1]}`.`{parts[2]}`"
-        if len(parts) == 2:
-            validate_identifier(parts[0], "table_name", allow_dots=False, allow_hyphens=False)
-            validate_identifier(parts[1], "table_name", allow_dots=False, allow_hyphens=True)
-            return f"`{parts[0]}`.`{parts[1]}`"
-        if len(parts) == 1:
-            validate_identifier(parts[0], "table_name", allow_dots=False, allow_hyphens=True)
-            return f"`{parts[0]}`"
-        msg = f"Invalid SQL identifier for table_name: {table_name!r}"
-        raise ValueError(msg)
-
-    @staticmethod
     def _extract_object_key_from_uri(uri: str) -> str:
         if "://" not in uri:
             return uri.lstrip("/")
@@ -514,3 +467,153 @@ class ObjectTableConfig(FrozenBaseStruct, frozen=True, gc=False):
             updated=updated,
             signed_url=signed_url,
         )
+
+
+class BigQueryTableIdentifier:
+    """Canonical BigQuery table identifier parser, validator, and GoogleSQL backtick quoter."""
+
+    @staticmethod
+    def split_parts(raw: str) -> list[str]:
+        """Split a BigQuery table reference into `[project, dataset, table]`, `[dataset, table]`, or `[table]`."""
+        cleaned = raw.strip().replace("`", "")
+        if not cleaned:
+            return []
+        if ":" in cleaned:
+            first, rest = cleaned.split(":", 1)
+            if "." in first:
+                if ":" in rest:
+                    proj_slug, ds_and_table = rest.split(":", 1)
+                    return [f"{first}:{proj_slug}", *split_qualified_identifier(ds_and_table)]
+                dot_parts = split_qualified_identifier(rest)
+                if dot_parts:
+                    return [f"{first}:{dot_parts[0]}", *dot_parts[1:]]
+                return [cleaned]
+            return [first, *split_qualified_identifier(rest)]
+        return split_qualified_identifier(cleaned)
+
+    @classmethod
+    def parse_parts(cls, table: str, *, field_name: str = "table") -> tuple[str, ...]:
+        """Validate a BigQuery table reference and return its normalized unquoted segments."""
+        stripped = table.strip()
+        if not stripped or any(ch.isspace() or ch in {";", "(", ")", "'", '"'} for ch in stripped):
+            msg = f"Invalid BigQuery identifier for {field_name}: {table!r}"
+            raise ValueError(msg)
+        if "--" in stripped or "/*" in stripped or "*/" in stripped:
+            msg = f"Invalid BigQuery identifier for {field_name}: {table!r}"
+            raise ValueError(msg)
+
+        if stripped.startswith("projects/"):
+            if "`" in stripped:
+                msg = f"Invalid BigQuery identifier for {field_name}: {table!r}"
+                raise ValueError(msg)
+            segments = stripped.split("/")
+            if len(segments) != 6 or segments[0] != "projects" or segments[2] != "datasets" or segments[4] != "tables":
+                msg = f"Invalid BigQuery resource identifier for {field_name}: {table!r}"
+                raise ValueError(msg)
+            cls._validate_project_id(segments[1], field_name=field_name)
+            validate_identifier(segments[3], field_name, allow_dots=False, allow_hyphens=False)
+            validate_identifier(segments[5], field_name, allow_dots=False, allow_hyphens=True)
+            return (segments[1], segments[3], segments[5])
+
+        if "`" in stripped:
+            if stripped.startswith("`") and stripped.endswith("`") and "`" not in stripped[1:-1]:
+                parts = cls.split_parts(stripped[1:-1])
+            else:
+                parts = cls._split_backticked_segments(stripped, original=table, field_name=field_name)
+        else:
+            parts = cls.split_parts(stripped)
+
+        if len(parts) == 3:
+            cls._validate_project_id(parts[0], field_name=field_name)
+            validate_identifier(parts[1], field_name, allow_dots=False, allow_hyphens=False)
+            validate_identifier(parts[2], field_name, allow_dots=False, allow_hyphens=True)
+            return (parts[0], parts[1], parts[2])
+        if len(parts) == 2:
+            validate_identifier(parts[0], field_name, allow_dots=False, allow_hyphens=False)
+            validate_identifier(parts[1], field_name, allow_dots=False, allow_hyphens=True)
+            return (parts[0], parts[1])
+        if len(parts) == 1:
+            validate_identifier(parts[0], field_name, allow_dots=False, allow_hyphens=True)
+            return (parts[0],)
+        msg = f"Invalid BigQuery identifier for {field_name}: {table!r}"
+        raise ValueError(msg)
+
+    @classmethod
+    def validate_and_quote(cls, table: str, *, field_name: str = "table") -> str:
+        """Validate a BigQuery table reference and return canonical per-segment backtick-quoted SQL."""
+        parts = cls.parse_parts(table, field_name=field_name)
+        return ".".join(f"`{part}`" for part in parts)
+
+    @staticmethod
+    def _validate_project_id(project_id: str, *, field_name: str) -> None:
+        if ":" in project_id:
+            if project_id.count(":") != 1:
+                msg = f"Invalid BigQuery project identifier for {field_name}: {project_id!r}"
+                raise ValueError(msg)
+            domain, proj_slug = project_id.split(":", 1)
+            validate_identifier(domain, field_name, allow_dots=True, allow_hyphens=True)
+            validate_identifier(proj_slug, field_name, allow_dots=False, allow_hyphens=True)
+            return
+        validate_identifier(project_id, field_name, allow_dots=False, allow_hyphens=True)
+
+    @staticmethod
+    def _split_backticked_segments(stripped: str, *, original: str, field_name: str) -> list[str]:
+        segments: list[str] = []
+        idx = 0
+        n = len(stripped)
+        first_bt = stripped.find("`")
+        colon = stripped.find(":")
+        if colon != -1 and (first_bt == -1 or colon < first_bt):
+            prefix = stripped[:colon]
+            rest = stripped[colon + 1 :]
+            if "." in prefix:
+                dot_after = rest.find(".")
+                if dot_after == -1 or dot_after + 1 >= len(rest):
+                    msg = f"Invalid BigQuery identifier for {field_name}: {original!r}"
+                    raise ValueError(msg)
+                proj_part = f"{prefix}:{rest[:dot_after]}"
+                if "`" in proj_part:
+                    msg = f"Invalid BigQuery identifier for {field_name}: {original!r}"
+                    raise ValueError(msg)
+                segments.append(proj_part)
+                stripped = rest[dot_after + 1 :]
+            else:
+                if not prefix or "`" in prefix or not rest:
+                    msg = f"Invalid BigQuery identifier for {field_name}: {original!r}"
+                    raise ValueError(msg)
+                segments.append(prefix)
+                stripped = rest
+            n = len(stripped)
+
+        while idx < n:
+            if stripped[idx] == "`":
+                end = stripped.find("`", idx + 1)
+                if end == -1:
+                    msg = f"Invalid BigQuery identifier for {field_name}: {original!r}"
+                    raise ValueError(msg)
+                segment = stripped[idx + 1 : end]
+                if not segment or "`" in segment:
+                    msg = f"Invalid BigQuery identifier for {field_name}: {original!r}"
+                    raise ValueError(msg)
+                segments.append(segment)
+                idx = end + 1
+                if idx < n:
+                    if stripped[idx] != "." or idx + 1 >= n:
+                        msg = f"Invalid BigQuery identifier for {field_name}: {original!r}"
+                        raise ValueError(msg)
+                    idx += 1
+            else:
+                dot = stripped.find(".", idx)
+                end = n if dot == -1 else dot
+                segment = stripped[idx:end]
+                if not segment or "`" in segment:
+                    msg = f"Invalid BigQuery identifier for {field_name}: {original!r}"
+                    raise ValueError(msg)
+                segments.append(segment)
+                if dot == -1:
+                    break
+                if dot + 1 >= n:
+                    msg = f"Invalid BigQuery identifier for {field_name}: {original!r}"
+                    raise ValueError(msg)
+                idx = dot + 1
+        return segments

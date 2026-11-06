@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
 from vertebra._vertebra import VectorBatchView, VectorView
+from vertebra.db.adapters.bigquery.config import BigQueryTableIdentifier
 from vertebra.db.driver import AsyncDatabaseDriver, DataError
 from vertebra.utils.serializers import decode_json
 from vertebra.utils.text import validate_identifier
@@ -93,7 +94,7 @@ class BigQueryEmbeddingPushdown:
         Raises:
             ValueError: When ``base_table``, ``embedding_column``, or ``distance_type`` is invalid.
         """
-        validate_identifier(base_table, "base_table", allow_hyphens=True)
+        quoted_table = BigQueryTableIdentifier.validate_and_quote(base_table, field_name="base_table")
         validate_identifier(embedding_column, "embedding_column", allow_dots=False)
         dist = distance_type.upper()
         if dist not in _DISTANCE_TYPES:
@@ -102,7 +103,7 @@ class BigQueryEmbeddingPushdown:
         return (
             "SELECT base.*, distance "
             f"FROM VECTOR_SEARCH("
-            f"TABLE {base_table}, "
+            f"TABLE {quoted_table}, "
             f"'{embedding_column}', "
             "(SELECT @query_vector AS embedding), "
             "top_k => @top_k, "

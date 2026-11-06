@@ -579,6 +579,8 @@ def gcp_database_tools() -> dict[str, Any]:
         ("EXPLAIN SELECT * FROM users", True),
         ("SELECT 1;", False),
         ("/* audit */ SELECT 1", False),
+        ("# audit\nSELECT 1", False),
+        ("# audit\nDELETE FROM users", True),
         ("INSERT INTO users (id) VALUES (1)", True),
         ("DROP TABLE users", True),
         ("EXECUTE IMMEDIATE 'DELETE FROM users WHERE TRUE'", True),
@@ -617,6 +619,7 @@ def test_provider_classifies_confirmation(
         {"sql": "   \n\t "},
         {"sql": "/* comment only */"},
         {"sql": "-- line comment\n"},
+        {"sql": "# hash comment\n"},
     ],
 )
 def test_provider_confirmation_reason_ignores_missing_or_blank_sql(
@@ -652,7 +655,8 @@ def test_provider_rejects_non_trailing_semicolons(
     "table_name",
     [
         "warehouse.invoices_obj LIMIT 1; DROP TABLE x",
-        "warehouse.`obj`",
+        "warehouse.`obj",
+        "warehouse.`obj; DROP TABLE x`",
         "1warehouse.obj",
         "bad-dataset.invoices_obj",
     ],
@@ -668,20 +672,45 @@ async def test_bigquery_object_table_inspect_rejects_invalid_table_name(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("table_name", "expected_quoted"),
+    ("table_name", "expected_quoted", "expected_uris"),
     [
-        ("analytics-proj.warehouse.invoices_obj", "`analytics-proj`.`warehouse`.`invoices_obj`"),
-        ("warehouse.invoices-obj", "`warehouse`.`invoices-obj`"),
+        (
+            "analytics-proj.warehouse.invoices_obj",
+            "`analytics-proj`.`warehouse`.`invoices_obj`",
+            ["gs://analytics-proj/warehouse/invoices_obj/*"],
+        ),
+        (
+            "warehouse.invoices-obj",
+            "`warehouse`.`invoices-obj`",
+            ["gs://warehouse/invoices-obj/*"],
+        ),
+        (
+            "warehouse.`obj`",
+            "`warehouse`.`obj`",
+            ["gs://warehouse/obj/*"],
+        ),
+        (
+            "google.com:corp-proj.warehouse.invoices-obj",
+            "`google.com:corp-proj`.`warehouse`.`invoices-obj`",
+            ["gs://google.com:corp-proj/warehouse/invoices-obj/*"],
+        ),
+        (
+            "projects/analytics-proj/datasets/warehouse/tables/invoices-obj",
+            "`analytics-proj`.`warehouse`.`invoices-obj`",
+            ["gs://analytics-proj/warehouse/invoices-obj/*"],
+        ),
     ],
 )
 async def test_bigquery_object_table_inspect_accepts_hyphenated_project_and_table_names(
     gcp_database_tools: dict[str, Any],
     table_name: str,
     expected_quoted: str,
+    expected_uris: list[str],
 ) -> None:
-    """Hyphenated project and table IDs are backtick-quoted in generated Object Table SQL and DDL."""
+    """Supported BigQuery table identifiers are normalized and backtick-quoted in Object Table SQL and DDL."""
     result = await gcp_database_tools["bigquery_object_table_inspect"].invoke({"table_name": table_name})
     assert result["row_count"] == 1
+    assert result["uris"] == expected_uris
     assert f"CREATE EXTERNAL TABLE IF NOT EXISTS {expected_quoted}" in result["ddl"]
 
 

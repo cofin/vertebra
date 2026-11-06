@@ -577,8 +577,12 @@ def test_bigquery_embedder_builders_reject_invalid_identifiers() -> None:
         BigQueryEmbeddingPushdown(object(), model="analytics.model`; DROP TABLE x; --").build_generate_embedding_sql()
     embedder = BigQueryEmbeddingPushdown(object(), model="analytics-proj.analytics.text_embedding_model")
     assert "MODEL `analytics-proj.analytics.text_embedding_model`" in embedder.build_generate_embedding_sql()
+    search_sql = embedder.build_vector_search_sql("my-proj.analytics.docs-v1")
+    assert "TABLE `my-proj`.`analytics`.`docs-v1`, " in search_sql
     with pytest.raises(ValueError, match="base_table"):
         embedder.build_vector_search_sql("analytics.docs) --")
+    with pytest.raises(ValueError, match="base_table"):
+        embedder.build_vector_search_sql("my-proj.bad-dataset.docs")
     with pytest.raises(ValueError, match="embedding_column"):
         embedder.build_vector_search_sql("analytics.docs", embedding_column="emb' OR '1")
     with pytest.raises(ValueError, match="distance_type"):
@@ -839,8 +843,14 @@ def test_bigquery_core_validate_and_quote_table_accepts_supported_shapes(
     raw_table: str,
     expected_quoted: str,
 ) -> None:
-    """BigQueryCore.validate_and_quote_table normalizes resource paths, domain projects, and backticks."""
+    """BigQueryCore and ObjectTableConfig normalize resource paths, domain projects, and backticks."""
     assert BigQueryCore.validate_and_quote_table(raw_table) == expected_quoted
+    ddl = ObjectTableConfig(
+        table_name=raw_table,
+        connection_id="us.gcs-conn",
+        uris=("gs://my-bucket/docs/*",),
+    ).create_object_table_sql()
+    assert f"CREATE EXTERNAL TABLE IF NOT EXISTS {expected_quoted}" in ddl
 
 
 @pytest.mark.parametrize(

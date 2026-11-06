@@ -2065,8 +2065,6 @@ class ReviewSetupValidator:
     def _get_tracked_files(self) -> list[str]:
         """Collect tracked source files under repo root."""
         try:
-            import subprocess
-
             res = subprocess.run(
                 ["git", "ls-files"],
                 cwd=self.repo_root,
@@ -2185,7 +2183,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     idx += 2
                 else:
                     idx += 1
-            import subprocess
 
             res = subprocess.run(
                 ["git", "diff", "--name-only", base_ref],
