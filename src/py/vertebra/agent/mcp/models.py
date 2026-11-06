@@ -39,6 +39,14 @@ class MCPConfig(FrozenBaseStruct, frozen=True, kw_only=True):
     """Expose progressive `skill://` resource catalogs and discovery tools."""
     tasks_enabled: bool = True
     """Enable `io.modelcontextprotocol/tasks` durable async task execution."""
+    path: str = "/mcp"
+    """HTTP path where the Streamable HTTP MCP endpoint is mounted."""
+    expose_well_known: bool = True
+    """Whether to expose the well-known discovery manifest route."""
+    well_known_path: str = "/.well-known/mcp.json"
+    """HTTP path for the well-known MCP discovery document."""
+    webmcp: Any | None = None
+    """Optional `WebMCPConfig` controlling browser WebMCP manifest generation."""
 
 
 class McpHttpRequest(FrozenBaseStruct, frozen=True, kw_only=True):

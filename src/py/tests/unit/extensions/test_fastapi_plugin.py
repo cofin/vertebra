@@ -13,6 +13,7 @@ import pytest
 import starlette.requests
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope, Request
+from vertebra.agent.mcp.routes import AsgiMcpApp
 from vertebra.extensions.django import (
     MsgspecView as DjangoMsgspecView,
 )
@@ -31,6 +32,7 @@ from vertebra.extensions.fastapi import (
     compile_dependant_plan,
     execute_dependant_plan,
     mcp_tool,
+    mount_mcp_routes,
     offload_middlewares,
 )
 from vertebra.extensions.flask import VertebraPlugin as FlaskVertebraPlugin
@@ -478,3 +480,54 @@ async def test_multi_framework_stacked_app_mount_auto_attaches_fastpath() -> Non
     dj_resp = dj_runner.handle_request(Request.from_parts("GET", "/django/items/42/"))
     assert dj_resp.status == 200
     assert decode_json(bytes(dj_resp.body)) == {"fw": "django", "id": 42}
+
+
+@pytest.mark.anyio
+async def test_fastapi_mount_mcp_routes_uses_shared_asgi_mcp_app() -> None:
+    """FastAPI mount_mcp_routes shares AsgiMcpApp over MCPCore with 2026-07-28 HTTP semantics."""
+    app, _ = _make_mock_fastapi_app()
+    reg = mount_mcp_routes(app)
+    assert reg.get_spec("create_order") is not None
+    mcp_app = getattr(app.state, "mcp_app", None)
+    assert isinstance(mcp_app, AsgiMcpApp)
+
+    proto_list = AsgiProtocol(b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
+    scope_list = AsgiScope.from_parts(
+        method="POST",
+        path="/mcp",
+        headers=[(b"content-type", b"application/json")],
+        body=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+    )
+    await mcp_app(scope_list, proto_list.receive, proto_list.send)
+    resp_list = proto_list.take_response()
+    assert resp_list.status == 200
+    tools_payload = decode_json(resp_list.body)
+    assert any(t["name"] == "create_order" for t in tools_payload["result"]["tools"])
+
+    proto_get = AsgiProtocol(b"")
+    await mcp_app(AsgiScope.from_parts(method="GET", path="/mcp"), proto_get.receive, proto_get.send)
+    assert proto_get.take_response().status == 405
+
+    proto_origin = AsgiProtocol(b'{"jsonrpc":"2.0","id":2,"method":"tools/list"}')
+    scope_origin = AsgiScope.from_parts(
+        method="POST",
+        path="/mcp",
+        headers=[
+            (b"content-type", b"application/json"),
+            (b"host", b"api.example.com"),
+            (b"origin", b"https://attacker.example.com"),
+        ],
+        body=b'{"jsonrpc":"2.0","id":2,"method":"tools/list"}',
+    )
+    await mcp_app(scope_origin, proto_origin.receive, proto_origin.send)
+    assert proto_origin.take_response().status == 403
+
+    proto_notify = AsgiProtocol(b'{"jsonrpc":"2.0","method":"notifications/cancelled"}')
+    scope_notify = AsgiScope.from_parts(
+        method="POST",
+        path="/mcp",
+        headers=[(b"content-type", b"application/json")],
+        body=b'{"jsonrpc":"2.0","method":"notifications/cancelled"}',
+    )
+    await mcp_app(scope_notify, proto_notify.receive, proto_notify.send)
+    assert proto_notify.take_response().status == 202

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from vertebra._vertebra import Request, Response, WsgiEnviron, run_wsgi_callable
 from vertebra.extensions.django.config import VertebraConfig
 from vertebra.extensions.django.fastpath import FastPath, dispatch_django_direct
-from vertebra.extensions.django.mcp import MCPRegistry, attach_mcp_routes, dispatch_mcp_request
+from vertebra.extensions.django.mcp import MCPRegistry, WsgiMcpApp, attach_mcp_routes, dispatch_mcp_request
 from vertebra.extensions.django.offload import offload_middlewares
 from vertebra.extensions.django.openapi import attach_openapi_docs, extract_openapi_schema
 from vertebra.extensions.django.router import RouteCompiler
@@ -29,6 +29,7 @@ class VertebraPlugin:
         "_compiler",
         "_config",
         "_fastpath",
+        "_mcp_app",
         "_mcp_registry",
         "_offload_bundle",
         "_openapi_schema",
@@ -56,6 +57,7 @@ class VertebraPlugin:
         self._offload_bundle: OffloadPlan | None = None
         self._openapi_schema: dict[str, Any] | None = None
         self._mcp_registry: MCPRegistry | None = None
+        self._mcp_app: WsgiMcpApp | None = None
         self._vite_bridge: ViteBridge | None = None
         self._static_responses: dict[str, Response] = {}
         if urlpatterns is not None or settings is not None:
@@ -132,6 +134,7 @@ class VertebraPlugin:
         if self._config.mcp is not None:
             mcp_reg, mcp_static = attach_mcp_routes(self._compiler or self._urlpatterns, self._config.mcp)
             self._mcp_registry = mcp_reg
+            self._mcp_app = getattr(mcp_reg, "_mcp_app", None)
             self._static_responses.update(mcp_static)
 
         if self._config.openapi is not None:
@@ -173,6 +176,8 @@ class VertebraPlugin:
                 headers = [(k.decode("latin-1"), v.decode("latin-1")) for k, v in resp.headers]
                 start_response(f"{resp.status} OK", headers)
                 return [bytes(resp.body)]
+            if self._mcp_app is not None and self._config.mcp is not None and path == self._config.mcp.path:
+                return self._mcp_app(environ, start_response)
             if (
                 method == "POST"
                 and self._mcp_registry is not None
@@ -203,6 +208,8 @@ class VertebraPlugin:
         path = request.path
         if method == "GET" and path in self._static_responses:
             return self._static_responses[path]
+        if self._mcp_app is not None and self._config.mcp is not None and path == self._config.mcp.path:
+            return self._mcp_app.handle_vertebra_request(request)
         if (
             method == "POST"
             and self._mcp_registry is not None

@@ -39,7 +39,7 @@ from vertebra.agent.mcp.models import (
     ToolCallOutput,
 )
 from vertebra.agent.mcp.registry import MCPRegistry, ToolRegistry
-from vertebra.agent.mcp.routes import MCPHttpHandler
+from vertebra.agent.mcp.routes import AsgiMcpApp, MCPHttpHandler, WsgiMcpApp
 from vertebra.agent.mcp.service import MCPCore, MCPService
 from vertebra.agent.mcp.skills import (
     SKILL_FILE_NAME,
@@ -74,6 +74,7 @@ __all__ = [
     "HEADER_MISMATCH",
     "MCP_PROTOCOL_VERSION",
     "UNSUPPORTED_PROTOCOL_VERSION",
+    "AsgiMcpApp",
     "BlobContent",
     "ContentBlock",
     "FilesystemSkillSource",
@@ -113,6 +114,7 @@ __all__ = [
     "WebMCPConfig",
     "WebMCPManifest",
     "WebMCPToolDescriptor",
+    "WsgiMcpApp",
     "build_webmcp_manifest",
     "decode_mcp_header_value",
     "encode_mcp_header_value",

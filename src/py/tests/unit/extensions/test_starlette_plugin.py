@@ -12,6 +12,7 @@ import pytest
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope
 from vertebra.agent.mcp.controllers import mcp_tool
+from vertebra.agent.mcp.routes import AsgiMcpApp
 from vertebra.db.adapters.redis import AsyncRedisDriver, RedisConfig
 from vertebra.extensions.starlette import (
     AsyncStorageRegistry,
@@ -306,3 +307,58 @@ def test_channels_backend_accepts_engine_neutral_bus() -> None:
     bus = ChannelBus(history=2)
     assert attach_channels(app, bus) is bus
     assert app.state.channels is bus
+
+
+@pytest.mark.anyio
+async def test_starlette_mount_mcp_routes_uses_shared_asgi_mcp_app() -> None:
+    """Starlette mount_mcp_routes delegates /mcp to shared AsgiMcpApp over MCPCore."""
+    app = _make_mock_starlette_app()
+    mcp_reg = mount_mcp_routes(app, webmcp_config=WebMCPConfig(enabled=True))
+    assert mcp_reg.get_spec("create_item") is not None
+    mcp_app = getattr(app.state, "mcp_app", None)
+    assert isinstance(mcp_app, AsgiMcpApp)
+
+    proto_discover = AsgiProtocol(b'{"jsonrpc":"2.0","id":1,"method":"server/discover"}')
+    scope_discover = AsgiScope.from_parts(
+        method="POST",
+        path="/mcp",
+        headers=[(b"content-type", b"application/json")],
+        body=b'{"jsonrpc":"2.0","id":1,"method":"server/discover"}',
+    )
+    await mcp_app(scope_discover, proto_discover.receive, proto_discover.send)
+    resp_discover = proto_discover.take_response()
+    assert resp_discover.status == 200
+    body_discover = msgspec.json.decode(resp_discover.body)
+    assert body_discover["result"]["protocolVersion"] == "2026-07-28"
+    assert body_discover["result"]["_meta"]["resultType"] == "server/discover"
+
+    proto_get = AsgiProtocol(b"")
+    scope_get = AsgiScope.from_parts(method="GET", path="/mcp")
+    await mcp_app(scope_get, proto_get.receive, proto_get.send)
+    assert proto_get.take_response().status == 405
+
+    proto_origin = AsgiProtocol(b'{"jsonrpc":"2.0","id":2,"method":"tools/list"}')
+    scope_origin = AsgiScope.from_parts(
+        method="POST",
+        path="/mcp",
+        headers=[
+            (b"content-type", b"application/json"),
+            (b"host", b"api.example.com"),
+            (b"origin", b"https://evil.example.com"),
+        ],
+        body=b'{"jsonrpc":"2.0","id":2,"method":"tools/list"}',
+    )
+    await mcp_app(scope_origin, proto_origin.receive, proto_origin.send)
+    assert proto_origin.take_response().status == 403
+
+    proto_notify = AsgiProtocol(b'{"jsonrpc":"2.0","method":"notifications/cancelled"}')
+    scope_notify = AsgiScope.from_parts(
+        method="POST",
+        path="/mcp",
+        headers=[(b"content-type", b"application/json")],
+        body=b'{"jsonrpc":"2.0","method":"notifications/cancelled"}',
+    )
+    await mcp_app(scope_notify, proto_notify.receive, proto_notify.send)
+    resp_notify = proto_notify.take_response()
+    assert resp_notify.status == 202
+    assert bytes(resp_notify.body) == b""

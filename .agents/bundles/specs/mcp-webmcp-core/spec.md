@@ -9,11 +9,11 @@ research:
 - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
 plan_commit: "55a6002aabb2d4e2a8bdadd0f7014ea643217ffe"
-state_revision: 4
-current_task: t04
-last_verified_checkpoint: "376d3faf71da99aceac4ecde17c690db9a0204b3"
+state_revision: 6
+current_task: t05
+last_verified_checkpoint: "5a4d46e462292493ed2ecb67512ebaef68a89c6c"
 created_at: '2026-11-03T03:30:00Z'
-updated_at: '2026-11-06T22:00:00Z'
+updated_at: '2026-11-06T22:13:30Z'
 tags:
 - mcp
 - webmcp
@@ -101,14 +101,14 @@ Read [MCP and A2A protocol harness](../../knowledge/domains/agent/mcp-and-a2a-pr
 
 - [x] [14ee1e3] t01 — Implement ToolSpec and msgspec defstruct/schema_components builder without eval (tasks/t01-toolspec-and-msgspec-schema.md)
 - [x] [376d3fa] t02 — Build ToolRegistry over neutral ToolProvider, SkillControllers, and route discovery (tasks/t02-tool-registry-and-providers.md)
-- [x] [376d3fa] t03 — Implement transport-agnostic MCPCore 2026-07-28 HTTP protocol engine (tasks/t03-mcp-core-protocol-engine.md)
+- [x] [5a4d46e] t03 — Implement transport-agnostic MCPCore 2026-07-28 HTTP protocol engine (tasks/t03-mcp-core-protocol-engine.md)
 
 **Phase 1 Recovery Checkpoint:** `uv run --no-sync pytest src/py/tests/unit/agent -q` and `mypy` / `ruff` on `src/py/vertebra/agent` exit 0.
 
 ### Phase 2: Framework Adapters, `litestar-mcp` Delegation, WebMCP Projection, and `@vertebra/client` Bridge
 
-- [ ] t04 — Unify Starlette, FastAPI, Flask, and Django mounts onto shared ASGI and WSGI MCP apps (tasks/t04-shared-asgi-wsgi-mcp-adapters.md)
-- [ ] t05 — Wire native AgentPlugin to MCPCore, delegate Litestar to litestar-mcp, and unify well-known discovery (tasks/t05-agent-plugin-and-litestar-mcp.md)
+- [x] [5a4d46e] t04 — Unify Starlette, FastAPI, Flask, and Django mounts onto shared ASGI and WSGI MCP apps (tasks/t04-shared-asgi-wsgi-mcp-adapters.md)
+- [~] t05 — Wire native AgentPlugin to MCPCore, delegate Litestar to litestar-mcp, and unify well-known discovery (tasks/t05-agent-plugin-and-litestar-mcp.md)
 - [ ] t06 — Project WebMCP manifests strictly from ToolSpec exposure metadata (tasks/t06-webmcp-manifest-projection.md)
 - [ ] t07 — Upgrade TypeScript webmcp.ts bridge to document.modelContext.registerTool with signal disposal (tasks/t07-typescript-webmcp-bridge.md)
 - [ ] t08 — Update TypeScript McpClient SSE/_meta handling, derive _CLIENT_SUBPATHS from package.json, and sync docs/OKF (tasks/t08-mcp-client-import-map-and-docs.md)

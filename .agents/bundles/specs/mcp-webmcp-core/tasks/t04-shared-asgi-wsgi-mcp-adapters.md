@@ -2,7 +2,7 @@
 type: Task
 id: mcp-webmcp-core:t04
 title: Unify Starlette, FastAPI, Flask, and Django mounts onto shared ASGI and WSGI MCP apps
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -20,18 +20,18 @@ tests:
 - src/py/tests/unit/extensions/test_django_plugin.py
 plan_revision: 2
 plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-06T22:13:30Z'
+last_verified_commit: "5a4d46e462292493ed2ecb67512ebaef68a89c6c"
+verification_evidence: "pytest test_starlette_plugin.py test_fastapi_plugin.py test_flask_plugin.py test_django_plugin.py (22 passed); ruff check & mypy passed"
 created_at: '2026-11-06T06:36:00Z'
-updated_at: '2026-11-06T06:36:00Z'
-commit: null
+updated_at: '2026-11-06T22:13:30Z'
+commit: "5a4d46e462292493ed2ecb67512ebaef68a89c6c"
 tags:
 - mcp
 - asgi
@@ -68,8 +68,8 @@ uv run --no-sync mypy src/py/vertebra/agent/mcp/routes.py src/py/vertebra/extens
 
 ## Acceptance Criteria
 
-- [ ] R5: Flask, Django, Starlette, and FastAPI delegate MCP HTTP traffic to shared `AsgiMcpApp` / `WsgiMcpApp` over `MCPCore` with zero duplicated JSON-RPC routers or per-request `asyncio.run` loops.
+- [x] R5: Flask, Django, Starlette, and FastAPI delegate MCP HTTP traffic to shared `AsgiMcpApp` / `WsgiMcpApp` over `MCPCore` with zero duplicated JSON-RPC routers or per-request `asyncio.run` loops.
 
 ## Notes & Discoveries
 
-None.
+- Consolidated `MCPConfig` in `vertebra.agent.mcp.models` and routed WSGI MCP requests through `PortalProvider.default()` so consecutive Flask and Django requests reuse the persistent background event loop.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -10,6 +11,8 @@ import pydantic
 import pytest
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope, Request, WsgiEnviron, run_wsgi_callable
+from vertebra.agent.mcp.models import MCPConfig as CanonicalMCPConfig
+from vertebra.agent.mcp.routes import WsgiMcpApp
 from vertebra.extensions.flask import (
     AsyncAPIDocsConfig,
     AsyncObjectStore,
@@ -366,3 +369,84 @@ async def test_flask_fastpath_async_views_wrap_asgi_and_wsgi_send_raw_response()
         "qty": 7,
         "mode": "suspended",
     }
+
+
+def test_flask_mcp_shares_wsgi_mcp_app_and_reuses_persistent_portal() -> None:
+    """Flask MCP uses canonical MCPConfig, WsgiMcpApp over MCPCore, and reuses the persistent Portal loop."""
+    assert MCPConfig is CanonicalMCPConfig
+
+    observed_loops: list[tuple[int, int]] = []
+    app = _MockFlaskApp()
+
+    @vertebra_route(status_code=200)
+    @mcp_tool(name="probe_loop", description="Probe active event loop and thread")
+    async def probe_loop(seq: int) -> dict[str, int]:
+        loop = asyncio.get_running_loop()
+        observed_loops.append((id(loop), threading.get_ident()))
+        return {"seq": seq}
+
+    app.add_url_rule("/probe/<int:seq>", endpoint="probe_loop", view_func=probe_loop, methods=["POST"])
+    plugin = VertebraPlugin(app, config=VertebraConfig(mcp=MCPConfig(server_name="flask-mcp")))
+    assert isinstance(getattr(plugin, "_mcp_app", None), WsgiMcpApp)
+
+    discover_req = Request.from_parts(
+        method="POST",
+        path="/mcp",
+        headers=[(b"content-type", b"application/json")],
+        body=b'{"jsonrpc":"2.0","id":1,"method":"server/discover"}',
+    )
+    discover_resp = plugin.handle_request(discover_req)
+    assert discover_resp.status == 200
+    discover_payload = decode_json(bytes(discover_resp.body))
+    assert discover_payload["result"]["protocolVersion"] == "2026-07-28"
+
+    init_req = Request.from_parts(
+        method="POST",
+        path="/mcp",
+        headers=[(b"content-type", b"application/json")],
+        body=b'{"jsonrpc":"2.0","id":2,"method":"initialize"}',
+    )
+    init_resp = plugin.handle_request(init_req)
+    assert decode_json(bytes(init_resp.body))["error"]["code"] == -32601
+
+    get_resp = plugin.handle_request(Request.from_parts(method="GET", path="/mcp"))
+    assert get_resp.status == 405
+
+    origin_resp = plugin.handle_request(
+        Request.from_parts(
+            method="POST",
+            path="/mcp",
+            headers=[
+                (b"content-type", b"application/json"),
+                (b"host", b"api.example.com"),
+                (b"origin", b"https://evil.example.com"),
+            ],
+            body=b'{"jsonrpc":"2.0","id":3,"method":"tools/list"}',
+        )
+    )
+    assert origin_resp.status == 403
+
+    notify_resp = plugin.handle_request(
+        Request.from_parts(
+            method="POST",
+            path="/mcp",
+            headers=[(b"content-type", b"application/json")],
+            body=b'{"jsonrpc":"2.0","method":"notifications/cancelled"}',
+        )
+    )
+    assert notify_resp.status == 202
+    assert bytes(notify_resp.body) == b""
+
+    for seq in (1, 2):
+        call_resp = plugin.handle_request(
+            Request.from_parts(
+                method="POST",
+                path="/mcp",
+                headers=[(b"content-type", b"application/json")],
+                body=f'{{"jsonrpc":"2.0","id":{seq},"method":"tools/call","params":{{"name":"probe_loop","arguments":{{"seq":{seq}}}}}}}'.encode(),
+            )
+        )
+        assert call_resp.status == 200
+
+    assert len(observed_loops) == 2
+    assert observed_loops[0] == observed_loops[1]
