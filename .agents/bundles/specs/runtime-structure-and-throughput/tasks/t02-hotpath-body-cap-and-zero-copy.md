@@ -9,6 +9,7 @@ depends_on:
 - runtime-structure-and-throughput:t01
 files:
 - src/py/vertebra/server/_fastpath.py
+- src/py/vertebra/server/_asgi/_queues.py
 - src/py/vertebra/server/_asgi/_wire.py
 - src/py/vertebra/server/_asgi/_runner.py
 tests:
@@ -51,7 +52,7 @@ Read `../spec.md`, `t01-fastpath-core-and-providers.md`, and `.agents/bundles/kn
 
 1. Add failing tests in `test_stage1_hotpath_and_314t.py`, `test_zero_copy_buffer.py`, and `test_asgi.py` covering chunked `receive()` payloads exceeding `max_body_size` (`413`), single invocation of `scope["_vertebra_body_bytes"]`, zero-copy `ArrowCursor` buffer return (`memoryview`/buffer object without `bytes(...)` copy), and raw `tuple[bytes, bytes]` header preservation in `AsgiSend.send_raw_response`.
 2. Update `extract_scope_body_fast` to enforce `max_body_size` (raising a typed `PayloadTooLarge` fastpath exception mapped to HTTP `413`) and pass prebuffered body bytes from `wrap_asgi_fastpath` into `extract_scope_body_fast` without calling `body_bytes_fn()` twice.
-3. Dispatch `serialize_fastpath_special_result` via `isinstance(result, ArrowCursor)` (and exact type lookup) returning `result.buffer_view()` directly, and preserve `bytes` header pairs in `src/py/vertebra/server/_asgi/_wire.py::AsgiSend.send_raw_response`.
+3. Dispatch `serialize_fastpath_special_result` via `isinstance(result, ArrowCursor)` (and exact type lookup) returning `result.buffer_view()` directly, and preserve `bytes` header pairs in `src/py/vertebra/server/_asgi/_queues.py::AsgiSend.send_raw_response`.
 4. Run verification and commit `perf(server): cap fastpath body buffering and preserve zero-copy Arrow and byte headers`.
 
 ## Verification

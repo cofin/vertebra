@@ -48,7 +48,7 @@ Eliminate whole-payload IPC buffer copies in `vertebra-bigquery` `append_arrow_s
 
 ## Context
 
-Read `../spec.md`, `t05-gcp-submodules-and-commit-delay.md`, and `.agents/skills/performance/SKILL.md`. `AppendRowsRequest` `ArrowRecordBatch.serialized_record_batch` accepts `prost::bytes::Bytes` (`#[prost(bytes = "bytes", ...)]` or sub-slices of an owned `Bytes` backing buffer) so record batches slice directly into the input IPC stream without copying batch bodies.
+Read `../spec.md`, `t05-gcp-submodules-and-commit-delay.md`, and `.agents/skills/review-performance/SKILL.md`. `AppendRowsRequest` `ArrowRecordBatch.serialized_record_batch` accepts `prost::bytes::Bytes` (`#[prost(bytes = "bytes", ...)]` or sub-slices of an owned `Bytes` backing buffer) so record batches slice directly into the input IPC stream without copying batch bodies.
 
 ## Steps
 

@@ -464,10 +464,31 @@ async def test_async_bigquery_driver_arrow_object_store_and_object_tables(tmp_pa
                 metadata_cache_mode="AUTOMATIC",
             )
             ddl = obj_cfg.create_object_table_sql()
-            assert "CREATE EXTERNAL TABLE IF NOT EXISTS analytics.object_table_docs" in ddl
+            assert "CREATE EXTERNAL TABLE IF NOT EXISTS `analytics`.`object_table_docs`" in ddl
             assert "WITH CONNECTION `us.gcs-conn`" in ddl
             assert "WITH MAX STALENESS INTERVAL 1 HOUR" in ddl
             assert "object_metadata = 'SIMPLE'" in ddl
+
+            hyphen_ddl = ObjectTableConfig(
+                table_name="analytics.object-table-docs",
+                connection_id="us.gcs-conn",
+                uris=("gs://my-bucket/docs/*",),
+            ).create_object_table_sql()
+            assert "CREATE EXTERNAL TABLE IF NOT EXISTS `analytics`.`object-table-docs`" in hyphen_ddl
+
+            with pytest.raises(ValueError, match="table_name"):
+                ObjectTableConfig(
+                    table_name="bad-dataset.object_table_docs",
+                    connection_id="us.gcs-conn",
+                    uris=("gs://my-bucket/docs/*",),
+                ).create_object_table_sql()
+
+            with pytest.raises(ValueError, match="connection_id"):
+                ObjectTableConfig(
+                    table_name="analytics.object_table_docs",
+                    connection_id="us.gcs-conn`; DROP TABLE x",
+                    uris=("gs://my-bucket/docs/*",),
+                ).create_object_table_sql()
 
             await driver.create_object_table(obj_cfg)
             refs: list[ObjectRef] = await driver.list_object_table_refs(

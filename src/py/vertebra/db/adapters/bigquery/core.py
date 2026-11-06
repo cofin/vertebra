@@ -385,15 +385,17 @@ class BigQueryCore:
         escaped_uris = ", ".join("'" + u.replace("'", "\\'") + "'" for u in uris)
         return f"LOAD DATA {verb} {table}\nFROM FILES (\n  format = '{fmt_upper}',\n  uris = [{escaped_uris}]\n)"
 
-    @staticmethod
+    @classmethod
     def build_object_table_select_sql(
+        cls,
         table_name: str,
         *,
         where: str | None = None,
         limit: int | None = None,
     ) -> str:
         """Build a `SELECT` query against a BigQuery Object Table."""
-        sql = f"SELECT uri, generation, content_type, size, md5_hash, updated FROM {table_name}"
+        quoted_table = cls.validate_and_quote_table(table_name)
+        sql = f"SELECT uri, generation, content_type, size, md5_hash, updated FROM {quoted_table}"
         if where:
             sql += f" WHERE {where}"
         if limit is not None:

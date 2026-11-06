@@ -650,26 +650,53 @@ def test_provider_rejects_non_trailing_semicolons(
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "table_name",
-    ["warehouse.invoices_obj LIMIT 1; DROP TABLE x", "warehouse.`obj`", "1warehouse.obj"],
+    [
+        "warehouse.invoices_obj LIMIT 1; DROP TABLE x",
+        "warehouse.`obj`",
+        "1warehouse.obj",
+        "bad-dataset.invoices_obj",
+    ],
 )
 async def test_bigquery_object_table_inspect_rejects_invalid_table_name(
     gcp_database_tools: dict[str, Any],
     table_name: str,
 ) -> None:
-    """bigquery_object_table_inspect rejects table names that are not plain qualified identifiers."""
+    """bigquery_object_table_inspect rejects table names that are not valid BigQuery qualified identifiers."""
     with pytest.raises(ValueError, match="table_name"):
         await gcp_database_tools["bigquery_object_table_inspect"].invoke({"table_name": table_name})
 
 
 @pytest.mark.anyio
-async def test_bigquery_object_table_inspect_accepts_project_qualified_name(
+@pytest.mark.parametrize(
+    ("table_name", "expected_quoted"),
+    [
+        ("analytics-proj.warehouse.invoices_obj", "`analytics-proj`.`warehouse`.`invoices_obj`"),
+        ("warehouse.invoices-obj", "`warehouse`.`invoices-obj`"),
+    ],
+)
+async def test_bigquery_object_table_inspect_accepts_hyphenated_project_and_table_names(
+    gcp_database_tools: dict[str, Any],
+    table_name: str,
+    expected_quoted: str,
+) -> None:
+    """Hyphenated project and table IDs are backtick-quoted in generated Object Table SQL and DDL."""
+    result = await gcp_database_tools["bigquery_object_table_inspect"].invoke({"table_name": table_name})
+    assert result["row_count"] == 1
+    assert f"CREATE EXTERNAL TABLE IF NOT EXISTS {expected_quoted}" in result["ddl"]
+
+
+@pytest.mark.anyio
+async def test_bigquery_object_table_inspect_rejects_invalid_connection_id(
     gcp_database_tools: dict[str, Any],
 ) -> None:
-    """Hyphenated project IDs remain valid table name prefixes."""
-    result = await gcp_database_tools["bigquery_object_table_inspect"].invoke(
-        {"table_name": "analytics-proj.warehouse.invoices_obj"}
-    )
-    assert result["row_count"] == 1
+    """bigquery_object_table_inspect rejects connection identifiers containing backticks or SQL syntax."""
+    with pytest.raises(ValueError, match="connection_id"):
+        await gcp_database_tools["bigquery_object_table_inspect"].invoke(
+            {
+                "table_name": "warehouse.invoices_obj",
+                "connection_id": "us.gcs-conn`; DROP TABLE x",
+            }
+        )
 
 
 @pytest.mark.anyio

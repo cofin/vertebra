@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 
 from vertebra.db.adapters.bigquery.config import BigQueryConfig, ObjectTableConfig
+from vertebra.db.adapters.bigquery.core import BigQueryCore
 from vertebra.db.adapters.bigquery.driver import AsyncBigQueryDriver, SyncBigQueryDriver
 from vertebra.db.driver import AsyncDatabaseDriver
 from vertebra.db.registry import DatabaseRegistry, provide_driver
@@ -164,6 +165,12 @@ class BigQueryToolProvider(ToolProvider):
             ValueError: When table_name is not a dotted identifier.
         """
         validate_identifier(table_name, "table_name", allow_hyphens=True)
+        validate_identifier(connection_id, "connection_id", allow_hyphens=True)
+        try:
+            quoted_table = BigQueryCore.validate_and_quote_table(table_name)
+        except ValueError as exc:
+            msg = f"Invalid SQL identifier for table_name: {table_name!r}"
+            raise ValueError(msg) from exc
         drv = self._resolve_driver()
         bounded_limit = max(1, min(int(limit), 1000))
         uri_pattern = object_uri_prefix or f"gs://{table_name.replace('.', '/')}/*"
@@ -172,7 +179,7 @@ class BigQueryToolProvider(ToolProvider):
             connection_id=connection_id,
             uris=(uri_pattern,),
         )
-        inspect_sql = f"SELECT uri, content_type, size, md5_hash, updated FROM {table_name} LIMIT {bounded_limit}"
+        inspect_sql = f"SELECT uri, content_type, size, md5_hash, updated FROM {quoted_table} LIMIT {bounded_limit}"
         rows = (
             await drv.select(inspect_sql)
             if isinstance(drv, AsyncDatabaseDriver)

@@ -16,6 +16,7 @@ from vertebra.typing import (
     ImproperConfigurationError,
 )
 from vertebra.utils.serializers import encode_json
+from vertebra.utils.text import validate_identifier
 
 __all__ = (
     "BIGQUERY_DIALECT_TAG",
@@ -341,6 +342,8 @@ class ObjectTableConfig(FrozenBaseStruct, frozen=True, gc=False):
         """Render the GoogleSQL `CREATE EXTERNAL TABLE ... WITH CONNECTION ... OPTIONS(...)` DDL."""
         if not self.uris:
             raise ImproperConfigurationError("ObjectTableConfig.uris must contain at least one URI")
+        quoted_table = self._validate_and_quote_table_name(self.table_name)
+        validate_identifier(self.connection_id, "connection_id", allow_hyphens=True)
         exists_clause = "IF NOT EXISTS " if if_not_exists else ""
         staleness_clause = f"\nWITH MAX STALENESS {self.max_staleness}" if self.max_staleness else ""
         escaped_uris = ", ".join("'" + u.replace("'", "\\'") + "'" for u in self.uris)
@@ -352,7 +355,7 @@ class ObjectTableConfig(FrozenBaseStruct, frozen=True, gc=False):
             options_parts.append(f"metadata_cache_mode = '{self.metadata_cache_mode}'")
         options_sql = ",\n  ".join(options_parts)
         return (
-            f"CREATE EXTERNAL TABLE {exists_clause}{self.table_name}\n"
+            f"CREATE EXTERNAL TABLE {exists_clause}{quoted_table}\n"
             f"WITH CONNECTION `{self.connection_id}`{staleness_clause}\n"
             f"OPTIONS (\n  {options_sql}\n)"
         )
@@ -420,6 +423,54 @@ class ObjectTableConfig(FrozenBaseStruct, frozen=True, gc=False):
                 signed_url = self._build_authenticated_gcs_browser_url(uri)
             refs.append(self._row_to_object_ref(row, signed_url=signed_url))
         return refs
+
+    @staticmethod
+    def _validate_and_quote_table_name(table_name: str) -> str:
+        stripped = table_name.strip()
+        if not stripped or any(ch.isspace() or ch in {";", "(", ")", "'", '"', "`"} for ch in stripped):
+            msg = f"Invalid SQL identifier for table_name: {table_name!r}"
+            raise ValueError(msg)
+        if "--" in stripped or "/*" in stripped or "*/" in stripped:
+            msg = f"Invalid SQL identifier for table_name: {table_name!r}"
+            raise ValueError(msg)
+        project_prefix: str | None = None
+        remainder = stripped
+        if ":" in stripped:
+            if stripped.count(":") != 1:
+                msg = f"Invalid SQL identifier for table_name: {table_name!r}"
+                raise ValueError(msg)
+            domain, after_colon = stripped.split(":", 1)
+            dot_idx = after_colon.find(".")
+            if dot_idx == -1:
+                msg = f"Invalid SQL identifier for table_name: {table_name!r}"
+                raise ValueError(msg)
+            proj_slug = after_colon[:dot_idx]
+            remainder = after_colon[dot_idx + 1 :]
+            validate_identifier(domain, "table_name", allow_dots=True, allow_hyphens=True)
+            validate_identifier(proj_slug, "table_name", allow_dots=False, allow_hyphens=True)
+            project_prefix = f"{domain}:{proj_slug}"
+        parts = remainder.split(".")
+        if project_prefix is not None:
+            if len(parts) != 2:
+                msg = f"Invalid SQL identifier for table_name: {table_name!r}"
+                raise ValueError(msg)
+            validate_identifier(parts[0], "table_name", allow_dots=False, allow_hyphens=False)
+            validate_identifier(parts[1], "table_name", allow_dots=False, allow_hyphens=True)
+            return f"`{project_prefix}`.`{parts[0]}`.`{parts[1]}`"
+        if len(parts) == 3:
+            validate_identifier(parts[0], "table_name", allow_dots=False, allow_hyphens=True)
+            validate_identifier(parts[1], "table_name", allow_dots=False, allow_hyphens=False)
+            validate_identifier(parts[2], "table_name", allow_dots=False, allow_hyphens=True)
+            return f"`{parts[0]}`.`{parts[1]}`.`{parts[2]}`"
+        if len(parts) == 2:
+            validate_identifier(parts[0], "table_name", allow_dots=False, allow_hyphens=False)
+            validate_identifier(parts[1], "table_name", allow_dots=False, allow_hyphens=True)
+            return f"`{parts[0]}`.`{parts[1]}`"
+        if len(parts) == 1:
+            validate_identifier(parts[0], "table_name", allow_dots=False, allow_hyphens=True)
+            return f"`{parts[0]}`"
+        msg = f"Invalid SQL identifier for table_name: {table_name!r}"
+        raise ValueError(msg)
 
     @staticmethod
     def _extract_object_key_from_uri(uri: str) -> str:
