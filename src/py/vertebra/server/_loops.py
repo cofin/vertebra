@@ -10,7 +10,9 @@ import threading
 from collections.abc import Coroutine, Iterable
 from contextlib import suppress
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
+
+import msgspec
 
 from vertebra.server._gil_audit import GilAuditReport
 from vertebra.server.platform import CgroupQuota
@@ -19,6 +21,7 @@ from vertebra.utils.module_loader import import_optional
 __all__ = (
     "EventLoopPool",
     "LoopBackend",
+    "LoopBackendSpec",
     "configure_worker_affinity",
     "create_event_loop",
     "resolve_loop_backend",
@@ -40,6 +43,30 @@ class LoopBackend(StrEnum):
     ASYNCIO = "asyncio"
 
 
+class LoopBackendSpec(msgspec.Struct, frozen=True, gc=False):
+    """Declarative specification for an optional event-loop backend module."""
+
+    backend: LoopBackend
+    """Target ``LoopBackend`` enum variant."""
+
+    module_name: str
+    """Importable module name checked against free-threaded quarantine and ``import_optional``."""
+
+    platforms: Literal["all", "win32", "posix"] = "all"
+    """Platform family considered during ``LoopBackend.AUTO`` discovery."""
+
+    auto_discover: bool = True
+    """Whether ``LoopBackend.AUTO`` evaluates this backend in priority order."""
+
+
+_LOOP_BACKEND_SPECS: tuple[LoopBackendSpec, ...] = (
+    LoopBackendSpec(backend=LoopBackend.WINLOOP, module_name="winloop", platforms="win32"),
+    LoopBackendSpec(backend=LoopBackend.UVLOOP, module_name="uvloop", platforms="posix"),
+    LoopBackendSpec(backend=LoopBackend.RLOOP, module_name="rloop", platforms="posix"),
+)
+_LOOP_SPEC_BY_BACKEND: dict[LoopBackend, LoopBackendSpec] = {spec.backend: spec for spec in _LOOP_BACKEND_SPECS}
+
+
 def resolve_loop_backend(
     backend: LoopBackend | str | None = None,
     *,
@@ -55,49 +82,23 @@ def resolve_loop_backend(
     if requested == LoopBackend.ASYNCIO:
         return LoopBackend.ASYNCIO
 
-    quarantined_prefixes: set[str] = {mod.split("==", 1)[0].strip().lower() for mod in quarantined_modules if mod}
-    env_quarantined = os.environ.get("VERTEBRA_QUARANTINED_LOOPS", "").strip()
-    if env_quarantined:
-        for token in env_quarantined.split(","):
-            cleaned = token.split("==", 1)[0].strip().lower()
-            if cleaned:
-                quarantined_prefixes.add(cleaned)
+    quarantined_prefixes = _collect_quarantined_prefixes(quarantined_modules)
 
-    if requested == LoopBackend.RLOOP:
-        if "rloop" not in quarantined_prefixes and import_optional("rloop") is not None:
-            return LoopBackend.RLOOP
+    if requested != LoopBackend.AUTO:
+        spec = _LOOP_SPEC_BY_BACKEND.get(requested)
+        if spec is not None and _is_backend_available(spec, quarantined_prefixes):
+            return spec.backend
         return LoopBackend.ASYNCIO
 
-    if requested == LoopBackend.WINLOOP:
-        if "winloop" not in quarantined_prefixes and import_optional("winloop") is not None:
-            return LoopBackend.WINLOOP
-        return LoopBackend.ASYNCIO
-
-    if requested == LoopBackend.UVLOOP:
-        if "uvloop" not in quarantined_prefixes and import_optional("uvloop") is not None:
-            return LoopBackend.UVLOOP
-        return LoopBackend.ASYNCIO
-
-    if sys.platform == "win32":
-        if "winloop" not in quarantined_prefixes and import_optional("winloop") is not None:
-            return LoopBackend.WINLOOP
-        return LoopBackend.ASYNCIO
-
-    if "uvloop" not in quarantined_prefixes and import_optional("uvloop") is not None:
-        return LoopBackend.UVLOOP
-    if not quarantined_prefixes and import_optional("rloop") is not None:
-        return LoopBackend.RLOOP
+    active_platform: Literal["win32", "posix"] = "win32" if sys.platform == "win32" else "posix"
+    for spec in _LOOP_BACKEND_SPECS:
+        if (
+            spec.auto_discover
+            and spec.platforms in {"all", active_platform}
+            and _is_backend_available(spec, quarantined_prefixes)
+        ):
+            return spec.backend
     return LoopBackend.ASYNCIO
-
-
-def _eager_task_factory(
-    loop: asyncio.AbstractEventLoop,
-    coro: Any,
-    **kwargs: Any,
-) -> asyncio.Task[Any]:
-    """Execute task immediately via asyncio.eager_task_factory with safe argument absorption."""
-    kwargs.pop("eager_start", None)
-    return asyncio.eager_task_factory(loop, coro, **kwargs)
 
 
 def create_event_loop(
@@ -108,18 +109,11 @@ def create_event_loop(
     """Create a high-performance event loop for the resolved LoopBackend."""
     resolved = resolve_loop_backend(backend, quarantined_modules=quarantined_modules)
     loop: asyncio.AbstractEventLoop | None = None
-    if resolved == LoopBackend.RLOOP:
-        rloop_mod = import_optional("rloop")
-        if rloop_mod is not None:
-            loop = rloop_mod.new_event_loop()
-    elif resolved == LoopBackend.WINLOOP:
-        winloop_mod = import_optional("winloop")
-        if winloop_mod is not None:
-            loop = winloop_mod.new_event_loop()
-    elif resolved == LoopBackend.UVLOOP:
-        uvloop_mod = import_optional("uvloop")
-        if uvloop_mod is not None:
-            loop = uvloop_mod.new_event_loop()
+    spec = _LOOP_SPEC_BY_BACKEND.get(resolved)
+    if spec is not None:
+        loop_mod = import_optional(spec.module_name)
+        if loop_mod is not None:
+            loop = loop_mod.new_event_loop()
 
     if loop is None:
         loop = asyncio.new_event_loop()
@@ -276,91 +270,22 @@ class EventLoopPool:
     ) -> None:
         """Schedule a fire-and-forget coroutine onto the target or next event loop shard."""
         idx = (worker_index if worker_index is not None else next(self._counter)) % self._size
-        loop = self._loops[idx]
-        tasks = self._task_sets[idx]
-        try:
-            running = asyncio.get_running_loop()
-        except RuntimeError:
-            running = None
-
-        if running is loop:
-            task = loop.create_task(coro)
-            tasks.add(task)
-            task.add_done_callback(tasks.discard)
-            return
-
-        def _callback() -> None:
-            task = loop.create_task(coro)
-            tasks.add(task)
-            task.add_done_callback(tasks.discard)
-
-        loop.call_soon_threadsafe(_callback)
+        self._dispatch_shard_coros(idx, [coro], self._running_loop_or_none())
 
     def spawn_batch(self, coros: Iterable[Coroutine[Any, Any, Any]]) -> None:
         """Partition and schedule a batch of coroutines with at most one wakeup per loop shard."""
-        try:
-            running = asyncio.get_running_loop()
-        except RuntimeError:
-            running = None
-
+        running = self._running_loop_or_none()
         if self._size == 1:
             batch = coros if isinstance(coros, list) else list(coros)
-            if not batch:
-                return
-            loop = self._loops[0]
-            tasks = self._task_sets[0]
-            if running is loop:
-                discard = tasks.discard
-                for item in batch:
-                    task = loop.create_task(item)
-                    tasks.add(task)
-                    task.add_done_callback(discard)
-                return
-
-            def _single_callback(
-                target_loop: asyncio.AbstractEventLoop = loop,
-                target_tasks: set[asyncio.Task[Any]] = tasks,
-                items: list[Coroutine[Any, Any, Any]] = batch,
-            ) -> None:
-                discard = target_tasks.discard
-                for item in items:
-                    task = target_loop.create_task(item)
-                    target_tasks.add(task)
-                    task.add_done_callback(discard)
-
-            loop.call_soon_threadsafe(_single_callback)
+            self._dispatch_shard_coros(0, batch, running)
             return
 
         buckets: list[list[Coroutine[Any, Any, Any]]] = [[] for _ in range(self._size)]
         for coro in coros:
-            idx = next(self._counter) % self._size
-            buckets[idx].append(coro)
+            buckets[next(self._counter) % self._size].append(coro)
 
         for idx, shard_coros in enumerate(buckets):
-            if not shard_coros:
-                continue
-            loop = self._loops[idx]
-            tasks = self._task_sets[idx]
-            if running is loop:
-                discard = tasks.discard
-                for item in shard_coros:
-                    task = loop.create_task(item)
-                    tasks.add(task)
-                    task.add_done_callback(discard)
-                continue
-
-            def _callback(
-                target_loop: asyncio.AbstractEventLoop = loop,
-                target_tasks: set[asyncio.Task[Any]] = tasks,
-                batch: list[Coroutine[Any, Any, Any]] = shard_coros,
-            ) -> None:
-                discard = target_tasks.discard
-                for item in batch:
-                    task = target_loop.create_task(item)
-                    target_tasks.add(task)
-                    task.add_done_callback(discard)
-
-            loop.call_soon_threadsafe(_callback)
+            self._dispatch_shard_coros(idx, shard_coros, running)
 
     def schedule[T](
         self,
@@ -484,6 +409,40 @@ class EventLoopPool:
             if not loop.is_closed():
                 loop.close()
 
+    def _dispatch_shard_coros(
+        self,
+        shard_idx: int,
+        items: list[Coroutine[Any, Any, Any]],
+        running: asyncio.AbstractEventLoop | None,
+    ) -> None:
+        if not items:
+            return
+        loop = self._loops[shard_idx]
+        tasks = self._task_sets[shard_idx]
+        if running is loop:
+            self._create_tracked_tasks(loop, tasks, items)
+            return
+        loop.call_soon_threadsafe(self._create_tracked_tasks, loop, tasks, items)
+
+    @staticmethod
+    def _create_tracked_tasks(
+        target_loop: asyncio.AbstractEventLoop,
+        target_tasks: set[asyncio.Task[Any]],
+        items: list[Coroutine[Any, Any, Any]],
+    ) -> None:
+        discard = target_tasks.discard
+        for item in items:
+            task = target_loop.create_task(item)
+            target_tasks.add(task)
+            task.add_done_callback(discard)
+
+    @staticmethod
+    def _running_loop_or_none() -> asyncio.AbstractEventLoop | None:
+        try:
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+
     @staticmethod
     async def _drain_loop() -> None:
         """Cancel every other task on the running loop, await the cancellations, and finalize async generators."""
@@ -500,3 +459,30 @@ class EventLoopPool:
         asyncio.set_event_loop(loop)
         loop.call_soon(ready.set)
         loop.run_forever()
+
+
+def _collect_quarantined_prefixes(quarantined_modules: frozenset[str] | tuple[str, ...]) -> set[str]:
+    """Normalize explicit and ``VERTEBRA_QUARANTINED_LOOPS`` entries into lowercase module prefixes."""
+    prefixes: set[str] = {mod.split("==", 1)[0].strip().lower() for mod in quarantined_modules if mod}
+    env_quarantined = os.environ.get("VERTEBRA_QUARANTINED_LOOPS", "").strip()
+    if env_quarantined:
+        for token in env_quarantined.split(","):
+            cleaned = token.split("==", 1)[0].strip().lower()
+            if cleaned:
+                prefixes.add(cleaned)
+    return prefixes
+
+
+def _is_backend_available(spec: LoopBackendSpec, quarantined_prefixes: set[str]) -> bool:
+    """Return True when ``spec.module_name`` is neither quarantined nor missing."""
+    return spec.module_name not in quarantined_prefixes and import_optional(spec.module_name) is not None
+
+
+def _eager_task_factory(
+    loop: asyncio.AbstractEventLoop,
+    coro: Any,
+    **kwargs: Any,
+) -> asyncio.Task[Any]:
+    """Execute task immediately via asyncio.eager_task_factory with safe argument absorption."""
+    kwargs.pop("eager_start", None)
+    return asyncio.eager_task_factory(loop, coro, **kwargs)

@@ -9,11 +9,11 @@ research:
 - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 1
 plan_commit: "af319da17dec0148a18532952cb7ea2a91d1c9d7"
-state_revision: 4
-current_task: runtime-structure-and-throughput:t03
+state_revision: 6
+current_task: runtime-structure-and-throughput:t04
 last_verified_checkpoint: null
 created_at: '2026-11-03T03:30:00Z'
-updated_at: '2026-11-06T15:42:25Z'
+updated_at: '2026-11-06T15:54:20Z'
 tags:
 - fastpath
 - rust
@@ -108,8 +108,8 @@ Every worksheet executes as one atomic, GPG-signed conventional commit with disj
 ### Phase 1: Python Server Fastpath, Loops, and Rust Core Wire Helpers
 
 - [x] [4a5512d4] t01 — Extract shared fastpath core and FastPathProvider registry (tasks/t01-fastpath-core-and-providers.md)
-- [x] t02 — Enforce hot-path body size cap, zero-copy Arrow responses, and raw byte headers (tasks/t02-hotpath-body-cap-and-zero-copy.md)
-- [ ] t03 — Make loop backend selection table-driven and externalize welcome page assets (tasks/t03-loop-registry-and-welcome-assets.md)
+- [x] [23f0b41d] t02 — Enforce hot-path body size cap, zero-copy Arrow responses, and raw byte headers (tasks/t02-hotpath-body-cap-and-zero-copy.md)
+- [x] t03 — Make loop backend selection table-driven and externalize welcome page assets (tasks/t03-loop-registry-and-welcome-assets.md)
 - [ ] t04 — Add vertebra-core protobuf wire helpers and rename vertebra-py async_bridge (tasks/t04-rust-proto-and-async-bridge.md)
 
 **Phase 1 Recovery Checkpoint:** `make rs-test`, `make dev`, and `uv run --no-sync pytest src/py/tests/unit/server src/py/tests/unit/framework src/py/tests/unit/extensions src/py/tests/unit/ffi -q` exit 0.

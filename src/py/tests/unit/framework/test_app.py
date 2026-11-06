@@ -1,5 +1,6 @@
 """Tests for App route registration, Controller, Router, ProcedureRouter, and handler ID stability."""
 
+import importlib.resources
 import sys
 from types import ModuleType
 from typing import Annotated
@@ -402,14 +403,37 @@ def test_app_ensure_dev_welcome_route_respects_user_root_route_and_mount(monkeyp
     def late_post() -> str:
         return "posted"
 
-    assert root_id not in app_late_post._handlers
+    @app_late_post.get("/health")
+    def late_health() -> str:
+        return "healthy"
+
+    assert root_id in app_late_post._handlers
+    assert app_late_post.ensure_dev_welcome_route() is True
     assert _make_handler_id("POST", "/") in app_late_post._handlers
+    assert _make_handler_id("GET", "/health") in app_late_post._handlers
+
+    app_late_any = App(debug=True)
+    assert app_late_any.ensure_dev_welcome_route() is True
+    app_late_any.add_route(Route(method="ANY", path="/", handler=lambda: "any-root"))
+    assert root_id not in app_late_any._handlers
+    assert app_late_any.ensure_dev_welcome_route() is False
 
     app_late_mount = App(debug=True)
     assert app_late_mount.ensure_dev_welcome_route() is True
     app_late_mount.mount("/", lambda *_args: None)
     assert root_id not in app_late_mount._handlers
     assert root_id not in app_late_mount.handler_index
+
+
+def test_welcome_page_assets_shipped_in_package_data() -> None:
+    """Verify welcome.html and welcome.css are stored as package data assets under vertebra.framework.assets."""
+    assets_dir = importlib.resources.files("vertebra.framework").joinpath("assets")
+    html_asset = assets_dir.joinpath("welcome.html")
+    css_asset = assets_dir.joinpath("welcome.css")
+    assert html_asset.is_file()
+    assert css_asset.is_file()
+    assert "<!DOCTYPE html>" in html_asset.read_text(encoding="utf-8")
+    assert "--bg-canvas" in css_asset.read_text(encoding="utf-8")
 
 
 def test_welcome_page_renderer_snapshot_and_html_escaping(monkeypatch: pytest.MonkeyPatch) -> None:

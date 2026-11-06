@@ -184,7 +184,8 @@ class App:
             if (self._dependencies or self._guards)
             else route
         )
-        if effective_route.path == "/" and self._welcome_route_active:
+        method_upper = effective_route.method.upper()
+        if effective_route.path == "/" and method_upper in {"GET", "ANY"} and self._welcome_route_active:
             welcome_id = _make_handler_id("GET", "/")
             self._handler_index.pop(welcome_id, None)
             self._handlers.pop(welcome_id, None)
@@ -193,7 +194,7 @@ class App:
         handler_id = _make_handler_id(effective_route.method, effective_route.path)
         info = HandlerInfo(
             handler_id=handler_id,
-            method=effective_route.method.upper(),
+            method=method_upper,
             path=effective_route.path,
             handler_name=getattr(effective_route.handler, "__qualname__", repr(effective_route.handler)),
             sync_to_thread=effective_route.sync_to_thread,
@@ -440,14 +441,13 @@ class App:
         """Register the development welcome route on unclaimed ``GET /`` when debug or ``VERTEBRA_DEV`` is active."""
         dev_env = os.environ.get("VERTEBRA_DEV", "").strip().lower() in {"1", "true", "yes", "on"}
         is_dev = bool(force_dev or self._debug or dev_env)
-        has_user_root_route = any(route.path == "/" for route in self._routes)
+        has_user_get_root = any(route.path == "/" and route.method.upper() in {"GET", "ANY"} for route in self._routes)
         has_root_mount = any(prefix in {"", "/"} for prefix, _, _ in self._mounts)
         welcome_id = _make_handler_id("GET", "/")
 
-        if not is_dev or has_user_root_route or has_root_mount:
+        if not is_dev or has_user_get_root or has_root_mount:
             if self._welcome_route_active:
-                has_user_get_root = any(route.path == "/" and route.method.upper() == "GET" for route in self._routes)
-                if not has_user_get_root:
+                if not any(route.path == "/" and route.method.upper() == "GET" for route in self._routes):
                     self._handler_index.pop(welcome_id, None)
                     self._handlers.pop(welcome_id, None)
                 self._welcome_route_active = False
