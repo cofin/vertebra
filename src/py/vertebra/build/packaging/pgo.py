@@ -61,10 +61,14 @@ _DEFAULT_MANIFEST = _RS_WORKSPACE / "vertebra-http" / "Cargo.toml"
 _PY_EXT_MANIFEST = _RS_WORKSPACE / "vertebra-py" / "Cargo.toml"
 _BUNDLER_EXT_MANIFEST = _RS_WORKSPACE / "vertebra-bundler" / "Cargo.toml"
 _STORAGE_EXT_MANIFEST = _RS_WORKSPACE / "vertebra-storage" / "Cargo.toml"
+_BIGQUERY_EXT_MANIFEST = _RS_WORKSPACE / "vertebra-bigquery" / "Cargo.toml"
+_SPANNER_EXT_MANIFEST = _RS_WORKSPACE / "vertebra-spanner" / "Cargo.toml"
 EXTENSION_MANIFESTS: tuple[Path, ...] = (
     _PY_EXT_MANIFEST,
     _BUNDLER_EXT_MANIFEST,
     _STORAGE_EXT_MANIFEST,
+    _BIGQUERY_EXT_MANIFEST,
+    _SPANNER_EXT_MANIFEST,
 )
 _DEFAULT_PROFILE_DIR = _REPO_ROOT / ".profiles" / "raw"
 _DEFAULT_PROFDATA_PATH = _REPO_ROOT / ".profiles" / "merged.profdata"
@@ -89,37 +93,59 @@ class PythonBuildInfo(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """Immutable snapshot of a CPython interpreter's optimization configuration."""
 
     version: str
+    """CPython semantic version string."""
     is_pgo: bool
+    """Whether CPython was compiled with Profile-Guided Optimization."""
     is_lto: bool
+    """Whether CPython was compiled with Link-Time Optimization."""
     is_debug: bool
+    """Whether CPython was compiled with debug assertions enabled."""
     architecture: str
+    """Host CPU architecture reported by platform.machine()."""
     is_tail_call_interp: bool = False
+    """Whether the tail-calling bytecode interpreter is enabled."""
     is_jit_available: bool = False
+    """Whether the copy-and-patch JIT compiler was built into CPython."""
     is_jit_enabled: bool = False
+    """Whether the copy-and-patch JIT compiler is active at runtime."""
     is_free_threaded: bool = False
+    """Whether the GIL is disabled (`Py_GIL_DISABLED=1`)."""
     has_frame_pointers: bool = False
+    """Whether frame pointers were preserved during compilation."""
 
 
 class PlatformSupport(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """CPython optimization availability record for an OS and CPU architecture pair."""
 
     os_name: str
+    """Normalized operating system identifier (`linux`, `darwin`, `windows`)."""
     architecture: str
+    """Normalized CPU architecture identifier (`x86_64`, `aarch64`, `arm64`, `x64`)."""
     cpython_pgo: bool
+    """Whether CPython PGO builds are supported on this platform."""
     cpython_lto: bool
+    """Whether CPython LTO builds are supported on this platform."""
     cpython_bolt: bool
+    """Whether LLVM BOLT post-link optimization is supported on this platform."""
     notes: str
+    """Human-readable summary of toolchain optimization support."""
 
 
 class RustPGOConfig(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """Immutable configuration for Rust PGO build stages."""
 
     crate_name: str = "vertebra-http"
+    """Primary Rust binary crate name compiled during PGO stages."""
     manifest_path: Path = msgspec.field(default_factory=lambda: _DEFAULT_MANIFEST)
+    """Filesystem path to the primary Rust binary Cargo.toml manifest."""
     profile_dir: Path = msgspec.field(default_factory=lambda: _DEFAULT_PROFILE_DIR)
+    """Directory storing raw `.profraw` LLVM execution counter files."""
     llvm_profdata_bin: str = ""
+    """Explicit `llvm-profdata` executable path or empty string for auto-discovery."""
     maturin_features: str = "extension-module"
+    """Cargo feature list passed to `maturin develop` for PyO3 extensions."""
     extension_manifests: tuple[Path, ...] = EXTENSION_MANIFESTS
+    """Ordered tuple of PyO3 Cargo.toml manifests built during extension PGO stages."""
 
     def resolved_profdata_bin(self) -> str:
         """Return the llvm-profdata executable path, auto-detecting when unset."""
@@ -140,11 +166,17 @@ class PGOPipelineResult(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """Summary of an executed Rust PGO build pipeline."""
 
     release_dir: Path
+    """Resolved Cargo release output directory containing optimized artifacts."""
     profdata_path: Path
+    """Filesystem path to the merged `.profdata` profile archive."""
     profdata_valid: bool
+    """Whether `llvm-profdata show` validated `profdata_path`."""
     profdata_bytes: int
+    """Size in bytes of the validated `.profdata` file (or 0 when invalid)."""
     used_pgo: bool
+    """Whether the final release build applied `-Cprofile-use`."""
     extension_manifests: tuple[Path, ...] = EXTENSION_MANIFESTS
+    """Tuple of PyO3 extension manifests compiled during the pipeline run."""
 
 
 PLATFORM_MATRIX: list[PlatformSupport] = [
@@ -483,7 +515,9 @@ def run_default_pgo_workload(
     ext_env = os.environ.copy()
     ext_env["LLVM_PROFILE_FILE"] = str(config.profile_dir / "vtb-ext-%p-%m.profraw")
     ext_script = (
-        "import vertebra._vertebra as v, vertebra._bundler, vertebra._storage; "
+        "import importlib.util, vertebra._vertebra as v; "
+        "[__import__(m) for m in ('vertebra._bundler', 'vertebra._storage', 'vertebra._bigquery', 'vertebra._spanner') "
+        "if importlib.util.find_spec(m) is not None]; "
         "hdrs = v.Headers.from_pairs([('content-type', 'application/json'), ('x-pgo', '1')]); "
         "req = v.Request.from_parts('POST', '/echo', b'pgo', headers=[('content-type', 'application/json')]); "
         "resp = v.Response(200, b'ok'); "

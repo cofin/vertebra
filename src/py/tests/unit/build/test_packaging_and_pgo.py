@@ -6,6 +6,7 @@ import sys
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from click.testing import CliRunner
@@ -206,8 +207,10 @@ def test_rust_and_python_pgo_tooling(tmp_path: Path) -> None:
     assert support.cpython_pgo is True
 
 
+@pytest.mark.parametrize("mod", [packaging_pgo, tools_python_pgo])
 def test_python_build_info_detects_315_tail_call_jit_freethreaded_and_frame_pointers(
     monkeypatch: pytest.MonkeyPatch,
+    mod: Any,
 ) -> None:
     """Verify PythonBuildInfo detects Python 3.15 tail-call interpreter, JIT, free-threading, and frame pointers."""
     synthetic_vars = {
@@ -218,27 +221,29 @@ def test_python_build_info_detects_315_tail_call_jit_freethreaded_and_frame_poin
     }
     fake_jit = SimpleNamespace(is_available=lambda: True, is_enabled=lambda: True)
 
-    for mod in (packaging_pgo, tools_python_pgo):
-        monkeypatch.setattr(mod, "_query_sysconfig", lambda _exe: dict(synthetic_vars))
-        monkeypatch.setattr(mod, "_query_version", lambda _exe: "3.15.0rc3")
-        monkeypatch.setattr(mod.sys, "_jit", fake_jit, raising=False)
-        info = mod.detect_python_build()
-        assert info.version == "3.15.0rc3"
-        assert info.is_pgo is True
-        assert info.is_lto is True
-        assert info.is_tail_call_interp is True
-        assert info.is_jit_available is True
-        assert info.is_jit_enabled is True
-        assert info.is_free_threaded is True
-        assert info.has_frame_pointers is True
+    monkeypatch.setattr(mod, "_query_sysconfig", lambda _exe: dict(synthetic_vars))
+    monkeypatch.setattr(mod, "_query_version", lambda _exe: "3.15.0rc3")
+    monkeypatch.setattr(mod.sys, "_jit", fake_jit, raising=False)
+    info = mod.detect_python_build()
+    assert info.version == "3.15.0rc3"
+    assert info.is_pgo is True
+    assert info.is_lto is True
+    assert info.is_tail_call_interp is True
+    assert info.is_jit_available is True
+    assert info.is_jit_enabled is True
+    assert info.is_free_threaded is True
+    assert info.has_frame_pointers is True
 
 
-def test_release_workflow_python_315_matrix() -> None:
+@pytest.mark.parametrize(
+    "target",
+    ["cp312-*", "cp313-*", "cp314-*", "cp314t-*", "cp315-*", "cp315t-*"],
+)
+def test_release_workflow_python_315_matrix(target: str) -> None:
     """Verify release.yaml covers supported Python and free-threaded wheel targets."""
     repo_root = Path(__file__).resolve().parents[5]
     release_yaml = (repo_root / ".github" / "workflows" / "release.yaml").read_text(encoding="utf-8")
-    for target in ("cp312-*", "cp313-*", "cp314-*", "cp314t-*", "cp315-*", "cp315t-*"):
-        assert target in release_yaml
+    assert target in release_yaml
 
 
 def test_resolve_cargo_release_dir_and_multi_extension_manifests(
@@ -248,7 +253,7 @@ def test_resolve_cargo_release_dir_and_multi_extension_manifests(
     """Verify CARGO_TARGET_DIR resolution, real workspace manifests, and multi-extension maturin invocations."""
     cfg = RustPGOConfig(profile_dir=tmp_path / "raw")
     assert cfg.manifest_path.is_file()
-    assert len(EXTENSION_MANIFESTS) == 3
+    assert len(EXTENSION_MANIFESTS) == 5
     assert all(manifest.is_file() for manifest in EXTENSION_MANIFESTS)
     assert not hasattr(packaging_pgo, "resolve_llvm_profdata")
     assert tools_rust_pgo.RustPGOConfig is RustPGOConfig
@@ -284,22 +289,19 @@ def test_resolve_cargo_release_dir_and_multi_extension_manifests(
 
     monkeypatch.setattr(packaging_pgo.subprocess, "run", fake_run)
     build_instrumented_extensions(cfg)
-    assert len(recorded_cmds) == 3
+    assert len(recorded_cmds) == 5
     assert "-m" not in recorded_cmds[0][0]
     assert "--features" in recorded_cmds[0][0]
     assert "extension-module" in recorded_cmds[0][0]
     assert f"-Cprofile-generate={cfg.profile_dir}" in recorded_cmds[0][1]
-    assert "-m" in recorded_cmds[1][0]
-    assert str(EXTENSION_MANIFESTS[1]) in recorded_cmds[1][0]
-    assert "-m" in recorded_cmds[2][0]
-    assert str(EXTENSION_MANIFESTS[2]) in recorded_cmds[2][0]
+    assert all("-m" in recorded_cmds[i][0] and str(EXTENSION_MANIFESTS[i]) in recorded_cmds[i][0] for i in range(1, 5))
 
     recorded_cmds.clear()
     valid_profdata = tmp_path / "valid.profdata"
     valid_profdata.write_bytes(b"PROFDATA")
     cfg_with_bin = RustPGOConfig(profile_dir=tmp_path / "raw", llvm_profdata_bin="llvm-profdata")
     build_optimized_extensions(cfg_with_bin, valid_profdata)
-    assert len(recorded_cmds) == 3
+    assert len(recorded_cmds) == 5
     assert all(f"-Cprofile-use={valid_profdata}" in flags for _, flags in recorded_cmds)
 
 
@@ -415,10 +417,12 @@ def test_two_phase_pgo_pipeline_and_cli_orchestration(
     assert result.profdata_valid is True
     assert result.profdata_bytes == len(b"MERGED_LLVM_PROFDATA")
     assert result.release_dir == tmp_path / "rs-target" / "release"
-    assert len(result.extension_manifests) == 3
+    assert len(result.extension_manifests) == 5
     assert observed_profile_env and observed_profile_env[0].endswith(".profraw")
     assert phases == [
         "cargo:gen",
+        "maturin:gen",
+        "maturin:gen",
         "maturin:gen",
         "maturin:gen",
         "maturin:gen",
@@ -427,6 +431,8 @@ def test_two_phase_pgo_pipeline_and_cli_orchestration(
         "profdata:merge",
         "profdata:show",
         "cargo:use",
+        "maturin:use",
+        "maturin:use",
         "maturin:use",
         "maturin:use",
         "maturin:use",
@@ -448,6 +454,8 @@ def test_two_phase_pgo_pipeline_and_cli_orchestration(
     assert phases == [
         "profdata:show",
         "cargo:use",
+        "maturin:use",
+        "maturin:use",
         "maturin:use",
         "maturin:use",
         "maturin:use",
@@ -569,12 +577,11 @@ def test_standalone_and_cli_server_binary_staging(tmp_path: Path) -> None:
     assert "Unsupported Python runtime version" in bad_ver.output
 
 
-def test_pyproject_sqlalchemy_dialect_entry_points_resolve() -> None:
-    """Verify public SQLAlchemy dialect aliases resolve to Dialect subclasses."""
+def test_pyproject_sqlalchemy_dialect_entry_points_set_is_complete() -> None:
+    """Verify pyproject.toml declares the exact set of public SQLAlchemy dialect entry points."""
     repo_root = Path(__file__).resolve().parents[5]
     pyproject_data = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
     entry_points: dict[str, str] = pyproject_data["project"]["entry-points"]["sqlalchemy.dialects"]
-
     expected_keys = {
         f"{engine}.{suffix}"
         for engine in ("postgresql", "oracle", "mysql", "sqlite", "mssql", "duckdb", "bigquery", "spanner", "spangres")
@@ -582,12 +589,71 @@ def test_pyproject_sqlalchemy_dialect_entry_points_resolve() -> None:
     }
     assert set(entry_points.keys()) == expected_keys
 
-    for ep_name, target_spec in entry_points.items():
-        mod_name, _, cls_name = target_spec.partition(":")
-        module = ensure_module(mod_name)
-        resolved_cls = getattr(module, cls_name)
-        assert issubclass(resolved_cls, Dialect), ep_name
-        assert "Vtb" not in cls_name
+
+@pytest.mark.parametrize(
+    "engine",
+    ["postgresql", "oracle", "mysql", "sqlite", "mssql", "duckdb", "bigquery", "spanner", "spangres"],
+)
+@pytest.mark.parametrize("suffix", ["vertebra", "vtb", "vertebra_async", "vtb_async"])
+def test_pyproject_sqlalchemy_dialect_entry_points_resolve(engine: str, suffix: str) -> None:
+    """Verify each public SQLAlchemy dialect alias resolves to a Dialect subclass."""
+    repo_root = Path(__file__).resolve().parents[5]
+    pyproject_data = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
+    entry_points: dict[str, str] = pyproject_data["project"]["entry-points"]["sqlalchemy.dialects"]
+    ep_name = f"{engine}.{suffix}"
+    target_spec = entry_points[ep_name]
+    mod_name, _, cls_name = target_spec.partition(":")
+    module = ensure_module(mod_name)
+    resolved_cls = getattr(module, cls_name)
+    assert issubclass(resolved_cls, Dialect), ep_name
+    assert "Vtb" not in cls_name
+
+
+@pytest.mark.parametrize(
+    ("pkg_slug", "expected_module"),
+    [
+        ("bigquery", "vertebra._bigquery"),
+        ("bundler", "vertebra._bundler"),
+        ("spanner", "vertebra._spanner"),
+        ("storage", "vertebra._storage"),
+    ],
+)
+def test_optional_extension_pyproject_isolation_and_bundler_extra(
+    pkg_slug: str,
+    expected_module: str,
+) -> None:
+    """Verify optional extension manifests isolate src/py/vertebra and sync with root pyproject.toml."""
+    repo_root = Path(__file__).resolve().parents[5]
+    ext_toml = tomllib.loads(
+        (repo_root / "src" / "rs" / f"vertebra-{pkg_slug}" / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    project = ext_toml["project"]
+    assert project["name"] == f"vertebra-{pkg_slug}"
+    assert project["description"]
+    assert project["license"] == {"text": "MIT"}
+    maturin_cfg = ext_toml["tool"]["maturin"]
+    assert maturin_cfg["python-source"] == "../../py"
+    assert maturin_cfg["module-name"] == expected_module
+    other_stubs = [
+        f"**/py/vertebra/_{other}.pyi"
+        for other in ("bigquery", "bundler", "spanner", "storage", "vertebra")
+        if other != pkg_slug
+    ]
+    assert maturin_cfg["exclude"] == [
+        "**/py/vertebra/**/*.py",
+        "**/py/vertebra/**/*.so",
+        "**/py/vertebra/py.typed",
+        *other_stubs,
+    ]
+    assert all(not pattern.startswith("!") for pattern in maturin_cfg["exclude"])
+
+    root_toml = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
+    version = root_toml["project"]["version"]
+    opt_deps = root_toml["project"]["optional-dependencies"]
+    pinned = f"vertebra-{pkg_slug}=={version}"
+    assert opt_deps[pkg_slug] == [pinned]
+    assert pinned in opt_deps["all"]
+    assert f"vertebra-{pkg_slug}" in root_toml["tool"]["uv"]["sources"]
 
 
 def test_run_default_pgo_workload_executes_extensions_routes_and_fast_fail(tmp_path: Path) -> None:
@@ -694,7 +760,19 @@ def test_run_default_pgo_workload_executes_extensions_routes_and_fast_fail(tmp_p
         run_default_pgo_workload(cfg, crashing_dir, requests_per_route=1)
 
 
-def test_standalone_and_onefile_launch_bundled_server_for_app_asgi_and_wsgi(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("ep_spec", "expected_type"),
+    [
+        ("app:app", "App"),
+        ("app:asgi_app", "function"),
+        ("app:wsgi_app", "function"),
+    ],
+)
+def test_standalone_and_onefile_launch_bundled_server_for_app_asgi_and_wsgi(
+    tmp_path: Path,
+    ep_spec: str,
+    expected_type: str,
+) -> None:
     """Verify packaged standalone and onefile bundles launch bin/vertebra-server for App, ASGI, and WSGI targets."""
     project_dir = tmp_path / "web_project"
     project_dir.mkdir(parents=True)
@@ -743,48 +821,51 @@ def test_standalone_and_onefile_launch_bundled_server_for_app_asgi_and_wsgi(tmp_
 
     repo_py = str(Path(__file__).resolve().parents[3])
     runner = CliRunner()
-    for idx, (ep_spec, expected_type) in enumerate(
-        (
-            ("app:app", "App"),
-            ("app:asgi_app", "function"),
-            ("app:wsgi_app", "function"),
-        )
-    ):
-        marker_file.unlink(missing_ok=True)
-        onefile_bin = tmp_path / f"web-onefile-{idx}"
-        res = runner.invoke(
-            build_command,
-            [
-                "--project-dir",
-                str(project_dir),
-                "--standalone",
-                "--onefile",
-                "--entrypoint",
-                ep_spec,
-                "--target",
-                "linux-x86_64",
-                "--python-version",
-                "3.15",
-                "--server-binary",
-                str(fake_server),
-                "--output",
-                str(onefile_bin),
-            ],
-        )
-        assert res.exit_code == 0, res.output
+    onefile_bin = tmp_path / "web-onefile"
+    res = runner.invoke(
+        build_command,
+        [
+            "--project-dir",
+            str(project_dir),
+            "--standalone",
+            "--onefile",
+            "--entrypoint",
+            ep_spec,
+            "--target",
+            "linux-x86_64",
+            "--python-version",
+            "3.15",
+            "--server-binary",
+            str(fake_server),
+            "--output",
+            str(onefile_bin),
+        ],
+    )
+    assert res.exit_code == 0, res.output
 
-        env = dict(os.environ)
-        env["XDG_CACHE_HOME"] = str(tmp_path / f"cache_{idx}")
-        env["PYTHONPATH"] = repo_py
-        env.pop("VERTEBRA_SERVER_BINARY", None)
-        env.pop("VERTEBRA_APP", None)
-        proc = subprocess.run([str(onefile_bin)], env=env, capture_output=True, text=True, check=False)
-        assert proc.returncode == 0, proc.stderr
-        assert marker_file.is_file()
-        recorded = decode_json(marker_file.read_bytes())
-        assert recorded["vertebra_app"] == ep_spec
-        assert recorded["type_name"] == expected_type
+    env = dict(os.environ)
+    env["XDG_CACHE_HOME"] = str(tmp_path / "cache")
+    env["PYTHONPATH"] = repo_py
+    env.pop("VERTEBRA_SERVER_BINARY", None)
+    env.pop("VERTEBRA_APP", None)
+    proc = subprocess.run([str(onefile_bin)], env=env, capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr
+    assert marker_file.is_file()
+    recorded = decode_json(marker_file.read_bytes())
+    assert recorded["vertebra_app"] == ep_spec
+    assert recorded["type_name"] == expected_type
 
+
+def test_standalone_missing_server_binary_reports_error(tmp_path: Path) -> None:
+    """Verify StandaloneBuilder __main__.py exits non-zero when vertebra-server binary is missing."""
+    project_dir = tmp_path / "web_project"
+    project_dir.mkdir(parents=True)
+    (project_dir / "pyproject.toml").write_text('[project]\nname = "web-project"\nversion = "0.1.0"\n')
+    (project_dir / "app.py").write_text(
+        '"""Sample Vertebra app."""\nfrom vertebra import App\napp = App()\n',
+        encoding="utf-8",
+    )
+    repo_py = str(Path(__file__).resolve().parents[3])
     no_bin_dist = tmp_path / "dist_no_bin"
     target = BuildTarget.resolve("linux-x86_64", python_version="3.15")
     StandaloneBuilder(project_dir=project_dir, target=target, entrypoint="app:app").build(no_bin_dist)

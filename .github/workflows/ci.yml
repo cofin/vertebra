@@ -134,9 +134,9 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            features: tls,compression
+            features: tls,compression,gcp
           - os: macos-latest
-            features: tls,compression,macos-ulock
+            features: tls,compression,gcp,macos-ulock
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7

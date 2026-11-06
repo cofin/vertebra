@@ -96,6 +96,7 @@ clean:                                              ## Remove build artifacts an
 	@# Python caches and artifacts
 	@rm -rf .pytest_cache .ruff_cache .mypy_cache .cache site .hypothesis .coverage coverage.xml coverage.json htmlcov .sqlspec >/dev/null 2>&1
 	@find . -name '*.egg-info' -o -name '*.pyc' -o -name '*.pyo' -o -name '__pycache__' | xargs rm -rf 2>/dev/null || true
+	@find src/py -depth -type d -empty -delete 2>/dev/null || true
 	@find . -name '*.so' -path '*/vertebra/*' -exec rm -f {} + >/dev/null 2>&1
 	@rm -rf build/ dist/ >/dev/null 2>&1
 	@# Rust artifacts
