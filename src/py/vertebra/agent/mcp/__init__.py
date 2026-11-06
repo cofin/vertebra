@@ -27,6 +27,8 @@ from vertebra.agent.mcp.models import (
     BlobContent,
     ContentBlock,
     MCPConfig,
+    McpHttpRequest,
+    McpHttpResponse,
     PromptArgument,
     PromptEntry,
     PromptMessage,
@@ -38,7 +40,7 @@ from vertebra.agent.mcp.models import (
 )
 from vertebra.agent.mcp.registry import MCPRegistry, ToolRegistry
 from vertebra.agent.mcp.routes import MCPHttpHandler
-from vertebra.agent.mcp.service import MCPService
+from vertebra.agent.mcp.service import MCPCore, MCPService
 from vertebra.agent.mcp.skills import (
     SKILL_FILE_NAME,
     SKILL_URI_PREFIX,
@@ -76,6 +78,7 @@ __all__ = [
     "ContentBlock",
     "FilesystemSkillSource",
     "MCPConfig",
+    "MCPCore",
     "MCPHttpHandler",
     "MCPRegistry",
     "MCPService",
@@ -84,6 +87,8 @@ __all__ = [
     "MCPTaskConfig",
     "MCPTaskStatus",
     "MCPTaskStore",
+    "McpHttpRequest",
+    "McpHttpResponse",
     "PromptArgument",
     "PromptController",
     "PromptEntry",

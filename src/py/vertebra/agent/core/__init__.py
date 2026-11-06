@@ -33,6 +33,7 @@ from vertebra.agent.core.guards import (
     TenantIsolationGuard,
     TokenBucketGuard,
     TurnBudget,
+    authorize,
 )
 from vertebra.agent.core.jsonrpc import (
     FRAME_KIND_BATCH_REQUEST,
@@ -118,6 +119,7 @@ __all__ = [
     "ToolResult",
     "ToolSpec",
     "TurnBudget",
+    "authorize",
     "bind_agent_context",
     "current_agent_context",
     "decode_cursor",

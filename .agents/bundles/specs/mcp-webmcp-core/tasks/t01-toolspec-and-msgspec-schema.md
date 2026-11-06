@@ -22,11 +22,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: Completed
 last_verified_at: '2026-11-06T21:39:00Z'
-last_verified_commit: "6b819b6d0d5e67d1b647d7873f9e536b2c510a29"
+last_verified_commit: "6b819b6d6d0e36aebaab33390fe2262df75f9e38"
 verification_evidence: "uv run --no-sync pytest src/py/tests/unit/agent/test_core_and_observability.py src/py/tests/unit/agent/test_mcp_enterprise_tools.py -q (20 passed) && ruff check && mypy"
 created_at: '2026-11-06T06:36:00Z'
 updated_at: '2026-11-06T21:39:00Z'
-commit: "6b819b6d0d5e67d1b647d7873f9e536b2c510a29"
+commit: "6b819b6d6d0e36aebaab33390fe2262df75f9e38"
 tags:
 - mcp
 - schema

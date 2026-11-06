@@ -54,6 +54,9 @@ __all__ = (
     "JSONRPCRequest",
     "JSONRPCResponse",
     "JSONRPCRouter",
+    "MCPCore",
+    "McpHttpRequest",
+    "McpHttpResponse",
     "McpToolBridge",
     "MemorySessionStore",
     "ModelDelta",
@@ -103,6 +106,7 @@ __all__ = (
     "WorkflowNode",
     "a2a",
     "a2a_card_to_mcp_tools",
+    "authorize",
     "bind_agent_context",
     "bridges",
     "build_tools",
@@ -156,6 +160,7 @@ _CORE_EXPORTS = frozenset(
         "ToolResult",
         "ToolSpec",
         "TurnBudget",
+        "authorize",
         "bind_agent_context",
         "current_agent_context",
         "decode_cursor",
@@ -293,7 +298,7 @@ def __getattr__(name: str) -> Any:
         globals()["mcp"] = mod
         return mod
 
-    if name == "ToolRegistry":
+    if name in ("ToolRegistry", "MCPCore", "McpHttpRequest", "McpHttpResponse"):
         mod = ensure_module("vertebra.agent.mcp")
         val = getattr(mod, name)
         globals()[name] = val

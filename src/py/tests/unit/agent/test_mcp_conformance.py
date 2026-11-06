@@ -7,15 +7,18 @@ import pytest
 
 from vertebra.agent.controller import ConfirmationDecisionRequest
 from vertebra.agent.core.context import AgentContext, CallerIdentity
-from vertebra.agent.core.guards import GuardProtocol, PermissionDeniedError
-from vertebra.agent.core.jsonrpc import JSONRPCErrorException
+from vertebra.agent.core.guards import GuardProtocol, PermissionDeniedError, RequireRoles, authorize
+from vertebra.agent.core.jsonrpc import METHOD_NOT_FOUND, JSONRPCErrorException
 from vertebra.agent.core.schema import tool
 from vertebra.agent.mcp import (
     HEADER_MISMATCH,
     UNSUPPORTED_PROTOCOL_VERSION,
     BlobContent,
     MCPConfig,
+    MCPCore,
     MCPHttpHandler,
+    McpHttpRequest,
+    McpHttpResponse,
     MCPRegistry,
     MCPService,
     MCPTaskStore,
@@ -46,21 +49,47 @@ from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
 @pytest.mark.anyio
-async def test_mcp_service_initialize_ping_and_discover() -> None:
-    """Verify initialize, ping, and server/discover responses conform to 2026-07-28."""
-    service = MCPService(config=MCPConfig(server_name="test-mcp", server_version="1.2.3"))
-    init_res = await service._handle_initialize()
-    assert init_res["protocolVersion"] == "2026-07-28"
-    assert init_res["serverInfo"]["name"] == "test-mcp"
-    assert init_res["serverInfo"]["version"] == "1.2.3"
-    assert "tools" in init_res["capabilities"]
-
-    ping_res = await service._handle_ping()
-    assert ping_res == {}
-
-    discover_res = await service._handle_discover()
+async def test_mcp_core_discover_and_removed_2024_methods() -> None:
+    """Verify server/discover 2026-07-28 metadata and -32601 rejection on removed 2024-11-05 methods."""
+    core = MCPCore(config=MCPConfig(server_name="test-mcp", server_version="1.2.3"))
+    discover_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "server/discover"},
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {}}),
+        )
+    )
+    assert isinstance(discover_resp, McpHttpResponse)
+    assert discover_resp.status == 200
+    discover_res = decode_json(discover_resp.body)["result"]
     assert discover_res["protocolVersion"] == "2026-07-28"
+    assert discover_res["serverInfo"]["name"] == "test-mcp"
+    assert discover_res["serverInfo"]["version"] == "1.2.3"
     assert discover_res["counts"]["tools"] == 0
+    assert discover_res["_meta"]["io.modelcontextprotocol/protocolVersion"] == "2026-07-28"
+    assert discover_res["_meta"]["resultType"] == "server/discover"
+    assert discover_res["_meta"]["ttlMs"] == 60000
+    assert discover_res["_meta"]["cacheScope"] == "public"
+
+    for removed_method in (
+        "initialize",
+        "ping",
+        "logging/setLevel",
+        "resources/subscribe",
+        "resources/unsubscribe",
+        "tasks/result",
+    ):
+        resp = await core.handle(
+            McpHttpRequest(
+                method="POST",
+                path="/mcp",
+                body=encode_json_bytes({"jsonrpc": "2.0", "id": 99, "method": removed_method, "params": {}}),
+            )
+        )
+        assert resp.status == 200
+        err_payload = decode_json(resp.body)
+        assert err_payload["error"]["code"] == METHOD_NOT_FOUND
 
 
 @pytest.mark.anyio
@@ -149,12 +178,7 @@ async def test_mcp_service_resources_and_templates() -> None:
 
     tmpl_read = await service._handle_resources_read({"uri": "file:///logs/2026-10-22"})
     assert tmpl_read["contents"][0]["text"] == "Logs for 2026-10-22"
-
-    ctx = AgentContext(session_id="client-conn-1")
-    await service._handle_resources_subscribe({"uri": "file:///config.json"}, context=ctx)
-    sent_count = service.notify_resource_updated("file:///config.json")
-    assert sent_count >= 0
-    await service._handle_resources_unsubscribe({"uri": "file:///config.json"}, context=ctx)
+    assert tmpl_read["_meta"]["resultType"] == "resources/read"
 
 
 @pytest.mark.anyio
@@ -180,15 +204,36 @@ async def test_mcp_service_prompts_list_and_get() -> None:
 
 @pytest.mark.anyio
 async def test_mcp_http_handler_conformance_and_negative_cases() -> None:
-    """Verify MCPHttpHandler headers validation, ETag 304 caching, and Origin validation."""
-    service = MCPService(config=MCPConfig(allowed_origins=("https://app.example.com",)))
-    handler = MCPHttpHandler(service)
+    """Verify MCPCore.handle and MCPHttpHandler headers validation, ETag 304 caching, and Origin validation."""
+    core = MCPCore(config=MCPConfig(allowed_origins=("https://app.example.com",)))
+    handler = MCPHttpHandler(core)
+
+    default_core = MCPCore()
+    cross_origin_default = await default_core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"Origin": "https://evil.example.com", "Host": "api.example.com"},
+            body=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+        )
+    )
+    assert cross_origin_default.status == 403
+
+    same_origin_default = await default_core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"Origin": "https://api.example.com", "Host": "api.example.com"},
+            body=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+        )
+    )
+    assert same_origin_default.status == 200
 
     disallowed_status, _, _ = await handler.handle_request(
         "POST",
         "/mcp",
         {"Origin": "https://evil.example.com"},
-        b'{"jsonrpc":"2.0","id":1,"method":"ping"}',
+        b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
     )
     assert disallowed_status == 403
 
@@ -196,19 +241,37 @@ async def test_mcp_http_handler_conformance_and_negative_cases() -> None:
         "POST",
         "/mcp",
         {"Origin": "https://app.example.com", "MCP-Protocol-Version": "2025-01-01"},
-        b'{"jsonrpc":"2.0","id":1,"method":"ping"}',
+        b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
     )
-    assert proto_status == 200
+    assert proto_status == 400
     proto_decoded = decode_json(proto_body)
     assert proto_decoded["error"]["code"] == UNSUPPORTED_PROTOCOL_VERSION
+
+    meta_proto_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"Origin": "https://app.example.com"},
+            body=encode_json_bytes(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/list",
+                    "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2024-11-05"}},
+                }
+            ),
+        )
+    )
+    assert meta_proto_resp.status == 400
+    assert decode_json(meta_proto_resp.body)["error"]["code"] == UNSUPPORTED_PROTOCOL_VERSION
 
     method_status, _, method_body = await handler.handle_request(
         "POST",
         "/mcp",
         {"Origin": "https://app.example.com", "Mcp-Method": "tools/list"},
-        b'{"jsonrpc":"2.0","id":1,"method":"ping"}',
+        b'{"jsonrpc":"2.0","id":1,"method":"prompts/list"}',
     )
-    assert method_status == 200
+    assert method_status == 400
     method_decoded = decode_json(method_body)
     assert method_decoded["error"]["code"] == HEADER_MISMATCH
 
@@ -218,7 +281,7 @@ async def test_mcp_http_handler_conformance_and_negative_cases() -> None:
         {"Origin": "https://app.example.com", "Mcp-Method": "prompts/get", "Mcp-Name": "wrong_name"},
         b'{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"correct_name"}}',
     )
-    assert name_status == 200
+    assert name_status == 400
     name_decoded = decode_json(name_body)
     assert name_decoded["error"]["code"] == HEADER_MISMATCH
 
@@ -226,18 +289,62 @@ async def test_mcp_http_handler_conformance_and_negative_cases() -> None:
     assert decode_mcp_header_value(encoded_non_ascii) == "тест"
 
     get_status, get_headers, _ = await handler.handle_request("GET", "/mcp", {}, b"")
-    assert get_status == 200
-    etag = get_headers.get("ETag")
+    assert get_status == 405
+    assert "POST" in get_headers.get("Allow", "")
+
+    notif_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"Origin": "https://app.example.com"},
+            body=b'{"jsonrpc":"2.0","method":"notifications/initialized"}',
+        )
+    )
+    assert notif_resp.status == 202
+    assert notif_resp.body == b""
+
+    batch_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"Origin": "https://app.example.com"},
+            body=b'[{"jsonrpc":"2.0","id":1,"method":"tools/list"}]',
+        )
+    )
+    assert batch_resp.status == 400
+
+    discover_status, discover_headers, _ = await handler.handle_request(
+        "POST",
+        "/mcp",
+        {"Origin": "https://app.example.com"},
+        b'{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}',
+    )
+    assert discover_status == 200
+    etag = discover_headers.get("ETag")
     assert etag is not None
 
     not_mod_status, _, not_mod_body = await handler.handle_request(
-        "GET",
+        "POST",
         "/mcp",
-        {"If-None-Match": etag},
-        b"",
+        {"Origin": "https://app.example.com", "If-None-Match": etag},
+        b'{"jsonrpc":"2.0","id":2,"method":"server/discover","params":{}}',
     )
     assert not_mod_status == 304
     assert not_mod_body == b""
+
+    @tool(name="admin_only", description="Admin tool", guards=(RequireRoles("admin"),))
+    def admin_only() -> str:
+        return "secret-ok"
+
+    core.registry.register_tool(admin_only)
+    spec = core.registry.get_spec("admin_only")
+    assert spec is not None
+    viewer_ctx = AgentContext(identity=CallerIdentity(user_id="bob", roles=("viewer",)))
+    with pytest.raises(PermissionDeniedError):
+        await authorize(viewer_ctx, spec)
+
+    admin_ctx = AgentContext(identity=CallerIdentity(user_id="alice", roles=("admin",)))
+    await authorize(admin_ctx, spec)
 
 
 @pytest.mark.anyio
@@ -568,7 +675,7 @@ async def test_mcp_http_handler_rejects_mcp_name_without_body_name(payload: obje
         {"Mcp-Method": "tools/call", "Mcp-Name": "other"},
         encode_json_bytes(payload),
     )
-    assert status == 200
+    assert status == 400
     decoded = decode_json(raw)
     assert decoded["error"]["code"] == HEADER_MISMATCH
     assert calls == []

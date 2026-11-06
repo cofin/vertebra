@@ -2,7 +2,7 @@
 type: Task
 id: mcp-webmcp-core:t03
 title: Implement transport-agnostic MCPCore 2026-07-28 HTTP protocol engine
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -16,18 +16,18 @@ tests:
 - src/py/tests/unit/agent/test_mcp_conformance.py
 plan_revision: 2
 plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: agent:flow-implement
+claimed_at: '2026-11-06T21:48:00Z'
 blocked_reason: null
 unblock_condition: null
-next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+next_step: Completed
+last_verified_at: '2026-11-06T21:58:00Z'
+last_verified_commit: "376d3faf71da99aceac4ecde17c690db9a0204b3"
+verification_evidence: "uv run --no-sync pytest src/py/tests/unit/agent -q (83 passed) && ruff check && mypy (37 source files)"
 created_at: '2026-11-06T06:36:00Z'
-updated_at: '2026-11-06T06:36:00Z'
-commit: null
+updated_at: '2026-11-06T21:58:00Z'
+commit: "376d3faf71da99aceac4ecde17c690db9a0204b3"
 tags:
 - mcp
 - protocol
@@ -63,8 +63,8 @@ uv run --no-sync mypy src/py/vertebra/agent
 
 ## Acceptance Criteria
 
-- [ ] R4: `MCPCore.handle` enforces all MCP `2026-07-28` HTTP status codes, `_meta` negotiation, `Origin` validation, `ETag`, guard checks, `ConfirmationGate` binding, and rejects removed `2024-11-05` methods with `-32601`.
+- [x] R4: `MCPCore.handle` enforces all MCP `2026-07-28` HTTP status codes, `_meta` negotiation, `Origin` validation, `ETag`, guard checks, `ConfirmationGate` binding, and rejects removed `2024-11-05` methods with `-32601`.
 
 ## Notes & Discoveries
 
-None.
+- `MCPCore.handle(McpHttpRequest) -> McpHttpResponse` centralizes MCP `2026-07-28` HTTP validation (default same-origin `Origin` check `403`, `GET` `405`, `OPTIONS` `204`, batch array `400`, notification `202` empty body, `_meta` protocol version negotiation, `ETag`/`If-None-Match` `304`, `authorize(ctx, spec)`, and removal of `2024-11-05` methods).
