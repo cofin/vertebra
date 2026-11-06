@@ -14,22 +14,17 @@ from typing import Any, ClassVar, Final, Literal, Self, cast
 from sqlspec.core.parameters import ParameterStyle, ParameterStyleConfig
 from sqlspec.core.statement import StatementConfig
 
-from vertebra._vertebra import LeaseBroker
-from vertebra._vertebra import StatementCache as _RustStatementCache
+from vertebra._vertebra import LeaseBroker, StatementCache
 from vertebra.db.adapters.bigquery import ObjectRef
 from vertebra.db.adapters.spanner import (
-    AsyncSpannerDriver as _CoreAsyncSpannerDriver,
-)
-from vertebra.db.adapters.spanner import (
+    AsyncSpannerDriver,
     AsyncSpannerSnapshot,
     Mutation,
     MutationGroup,
     SpannerConfig,
     StalenessBound,
+    SyncSpannerDriver,
     SyncSpannerSnapshot,
-)
-from vertebra.db.adapters.spanner import (
-    SyncSpannerDriver as _CoreSyncSpannerDriver,
 )
 from vertebra.db.driver import NotSupportedError
 from vertebra.extensions.sqlspec.adapters import (
@@ -83,7 +78,7 @@ def _farm_fingerprint_shard(value: str, shard_count: int = 16) -> int:
 class SpannerConnectionBatch:
     """Context manager emulating ``google.cloud.spanner_v1.database.Batch`` over ``Mutation``."""
 
-    def __init__(self, driver: _CoreSyncSpannerDriver) -> None:
+    def __init__(self, driver: SyncSpannerDriver) -> None:
         self._driver = driver
         self._mutations: list[Mutation] = []
 
@@ -128,11 +123,11 @@ class SpannerConnectionShim:
     ``google-cloud-spanner``.
     """
 
-    def __init__(self, driver: _CoreSyncSpannerDriver) -> None:
+    def __init__(self, driver: SyncSpannerDriver) -> None:
         self._driver = driver
 
     @property
-    def driver(self) -> _CoreSyncSpannerDriver:
+    def driver(self) -> SyncSpannerDriver:
         """Return the underlying synchronous Spanner driver."""
         return self._driver
 
@@ -461,8 +456,8 @@ class SpannerSyncDriver(BaseSyncDriver):
 
     def __init__(
         self,
-        core: _CoreSyncSpannerDriver,
-        statement_cache: _RustStatementCache | None = None,
+        core: SyncSpannerDriver,
+        statement_cache: StatementCache | None = None,
         enable_sqlcommenter: bool = False,
         tenant_predicate: TenantPredicate | None = None,
         storage_backend: ObjectStoreBackend | None = None,
@@ -484,7 +479,7 @@ class SpannerSyncDriver(BaseSyncDriver):
             driver_features=driver_features,
             observability=observability,
         )
-        self._core: _CoreSyncSpannerDriver = core
+        self._core: SyncSpannerDriver = core
         self._rust_statement_cache = statement_cache
         self._enable_sqlcommenter = enable_sqlcommenter
         self._storage_backend = storage_backend
@@ -496,7 +491,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         self._data_dictionary: SpannerSyncDataDictionary | None = None
 
     @property
-    def core_driver(self) -> _CoreSyncSpannerDriver:
+    def core_driver(self) -> SyncSpannerDriver:
         """Return the underlying ``SyncSpannerDriver``."""
         return self._core
 
@@ -849,8 +844,8 @@ class SpannerAsyncDriver(BaseAsyncDriver):
 
     def __init__(
         self,
-        core: _CoreAsyncSpannerDriver,
-        statement_cache: _RustStatementCache | None = None,
+        core: AsyncSpannerDriver,
+        statement_cache: StatementCache | None = None,
         enable_sqlcommenter: bool = False,
         tenant_predicate: TenantPredicate | None = None,
         storage_backend: ObjectStoreBackend | None = None,
@@ -872,7 +867,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
             driver_features=driver_features,
             observability=observability,
         )
-        self._core: _CoreAsyncSpannerDriver = core
+        self._core: AsyncSpannerDriver = core
         self._rust_statement_cache = statement_cache
         self._enable_sqlcommenter = enable_sqlcommenter
         self._storage_backend = storage_backend
@@ -884,7 +879,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         self._data_dictionary: SpannerAsyncDataDictionary | None = None
 
     @property
-    def core_driver(self) -> _CoreAsyncSpannerDriver:
+    def core_driver(self) -> AsyncSpannerDriver:
         """Return the underlying ``AsyncSpannerDriver``."""
         return self._core
 
@@ -1279,7 +1274,7 @@ class SpannerSyncConfig(SyncAdapterConfig[SpannerConfig, SpannerSyncDriver]):
 
     dialect: ClassVar[str] = "googlesql"
     _config_cls: ClassVar[type[SpannerConfig]] = SpannerConfig
-    _driver_cls: ClassVar[type[_CoreSyncSpannerDriver]] = _CoreSyncSpannerDriver
+    _driver_cls: ClassVar[type[SyncSpannerDriver]] = SyncSpannerDriver
     driver_type: ClassVar[type[SpannerSyncDriver]] = SpannerSyncDriver
 
     def __init__(
@@ -1346,7 +1341,7 @@ class SpannerSyncConfig(SyncAdapterConfig[SpannerConfig, SpannerSyncDriver]):
             statement_config=statement_config or _spanner_statement_config(resolved_cfg.dialect),
         )
         self.connection_instance = connection_instance
-        self._cached_core: _CoreSyncSpannerDriver | None = None
+        self._cached_core: SyncSpannerDriver | None = None
 
     def resolve_spanner_config(self) -> SpannerConfig:
         """Resolve the canonical ``SpannerConfig`` from explicit fields or ``dsn``."""
@@ -1377,7 +1372,7 @@ class SpannerSyncConfig(SyncAdapterConfig[SpannerConfig, SpannerSyncDriver]):
     def create_driver(self) -> SpannerSyncDriver:
         """Instantiate a ``SpannerSyncDriver``."""
         core = self._resolve_core_driver()
-        cache = _RustStatementCache(self.statement_cache_size) if self.statement_cache_size > 0 else None
+        cache = StatementCache(self.statement_cache_size) if self.statement_cache_size > 0 else None
         return SpannerSyncDriver(
             core=core,
             statement_cache=cache,
@@ -1390,7 +1385,7 @@ class SpannerSyncConfig(SyncAdapterConfig[SpannerConfig, SpannerSyncDriver]):
     def provide_driver(
         self,
         broker: LeaseBroker | None = None,
-        statement_cache: _RustStatementCache | None = None,
+        statement_cache: StatementCache | None = None,
     ) -> SpannerSyncDriver:
         """Return a configured ``SpannerSyncDriver`` instance."""
         del broker, statement_cache
@@ -1420,7 +1415,7 @@ class SpannerSyncConfig(SyncAdapterConfig[SpannerConfig, SpannerSyncDriver]):
         """
         del args, kwargs
         core = self._resolve_core_driver()
-        cache = _RustStatementCache(self.statement_cache_size) if self.statement_cache_size > 0 else None
+        cache = StatementCache(self.statement_cache_size) if self.statement_cache_size > 0 else None
         storage = self.resolve_storage_backend()
         if not transaction:
             with core.snapshot(staleness, multi_use=True) as snap:
@@ -1448,13 +1443,13 @@ class SpannerSyncConfig(SyncAdapterConfig[SpannerConfig, SpannerSyncDriver]):
                 in_transaction=True,
             )
 
-    def _resolve_core_driver(self) -> _CoreSyncSpannerDriver:
-        if isinstance(self.connection_instance, _CoreSyncSpannerDriver):
+    def _resolve_core_driver(self) -> SyncSpannerDriver:
+        if isinstance(self.connection_instance, SyncSpannerDriver):
             return self.connection_instance
         if isinstance(self.connection_instance, SpannerConnectionShim):
             return self.connection_instance.driver
         if self._cached_core is None:
-            self._cached_core = _CoreSyncSpannerDriver(self.resolve_spanner_config())
+            self._cached_core = SyncSpannerDriver(self.resolve_spanner_config())
         return self._cached_core
 
 
@@ -1463,7 +1458,7 @@ class SpannerAsyncConfig(AsyncAdapterConfig[SpannerConfig, SpannerAsyncDriver]):
 
     dialect: ClassVar[str] = "googlesql"
     _config_cls: ClassVar[type[SpannerConfig]] = SpannerConfig
-    _driver_cls: ClassVar[type[_CoreAsyncSpannerDriver]] = _CoreAsyncSpannerDriver
+    _driver_cls: ClassVar[type[AsyncSpannerDriver]] = AsyncSpannerDriver
     driver_type: ClassVar[type[SpannerAsyncDriver]] = SpannerAsyncDriver
 
     def __init__(
@@ -1530,8 +1525,8 @@ class SpannerAsyncConfig(AsyncAdapterConfig[SpannerConfig, SpannerAsyncDriver]):
             statement_config=statement_config or _spanner_statement_config(resolved_cfg.dialect),
         )
         self.connection_instance = connection_instance
-        self._cached_core: _CoreAsyncSpannerDriver | None = None
-        self._cached_sync_core: _CoreSyncSpannerDriver | None = None
+        self._cached_core: AsyncSpannerDriver | None = None
+        self._cached_sync_core: SyncSpannerDriver | None = None
 
     def resolve_spanner_config(self) -> SpannerConfig:
         """Resolve the canonical ``SpannerConfig`` from explicit fields or ``dsn``."""
@@ -1562,7 +1557,7 @@ class SpannerAsyncConfig(AsyncAdapterConfig[SpannerConfig, SpannerAsyncDriver]):
     def create_driver(self) -> SpannerAsyncDriver:
         """Instantiate a ``SpannerAsyncDriver``."""
         core = self._resolve_core_driver()
-        cache = _RustStatementCache(self.statement_cache_size) if self.statement_cache_size > 0 else None
+        cache = StatementCache(self.statement_cache_size) if self.statement_cache_size > 0 else None
         return SpannerAsyncDriver(
             core=core,
             statement_cache=cache,
@@ -1575,7 +1570,7 @@ class SpannerAsyncConfig(AsyncAdapterConfig[SpannerConfig, SpannerAsyncDriver]):
     def provide_driver(
         self,
         broker: LeaseBroker | None = None,
-        statement_cache: _RustStatementCache | None = None,
+        statement_cache: StatementCache | None = None,
     ) -> SpannerAsyncDriver:
         """Return a configured ``SpannerAsyncDriver`` instance."""
         del broker, statement_cache
@@ -1596,7 +1591,7 @@ class SpannerAsyncConfig(AsyncAdapterConfig[SpannerConfig, SpannerAsyncDriver]):
         """Yield a ``SpannerAsyncDriver`` bound to a lock-free ReadOnly snapshot or ReadWrite transaction."""
         del args, kwargs
         core = self._resolve_core_driver()
-        cache = _RustStatementCache(self.statement_cache_size) if self.statement_cache_size > 0 else None
+        cache = StatementCache(self.statement_cache_size) if self.statement_cache_size > 0 else None
         storage = self.resolve_storage_backend()
         if not transaction:
             async with core.snapshot(staleness, multi_use=True) as snap:
@@ -1624,28 +1619,28 @@ class SpannerAsyncConfig(AsyncAdapterConfig[SpannerConfig, SpannerAsyncDriver]):
                 in_transaction=True,
             )
 
-    def _resolve_core_driver(self) -> _CoreAsyncSpannerDriver:
-        if isinstance(self.connection_instance, _CoreAsyncSpannerDriver):
+    def _resolve_core_driver(self) -> AsyncSpannerDriver:
+        if isinstance(self.connection_instance, AsyncSpannerDriver):
             return self.connection_instance
-        if isinstance(self.connection_instance, _CoreSyncSpannerDriver):
+        if isinstance(self.connection_instance, SyncSpannerDriver):
             if self._cached_core is None:
-                self._cached_core = _CoreAsyncSpannerDriver(self.resolve_spanner_config())
+                self._cached_core = AsyncSpannerDriver(self.resolve_spanner_config())
             return self._cached_core
         if self._cached_core is None:
-            self._cached_core = _CoreAsyncSpannerDriver(self.resolve_spanner_config())
+            self._cached_core = AsyncSpannerDriver(self.resolve_spanner_config())
         return self._cached_core
 
-    def _resolve_sync_core_driver(self) -> _CoreSyncSpannerDriver:
-        if isinstance(self.connection_instance, _CoreSyncSpannerDriver):
+    def _resolve_sync_core_driver(self) -> SyncSpannerDriver:
+        if isinstance(self.connection_instance, SyncSpannerDriver):
             return self.connection_instance
-        if isinstance(self.connection_instance, _CoreAsyncSpannerDriver):
+        if isinstance(self.connection_instance, AsyncSpannerDriver):
             if self._cached_sync_core is None:
-                self._cached_sync_core = _CoreSyncSpannerDriver(self.resolve_spanner_config())
+                self._cached_sync_core = SyncSpannerDriver(self.resolve_spanner_config())
             return self._cached_sync_core
         if isinstance(self.connection_instance, SpannerConnectionShim):
             return self.connection_instance.driver
         if self._cached_sync_core is None:
-            self._cached_sync_core = _CoreSyncSpannerDriver(self.resolve_spanner_config())
+            self._cached_sync_core = SyncSpannerDriver(self.resolve_spanner_config())
         return self._cached_sync_core
 
 

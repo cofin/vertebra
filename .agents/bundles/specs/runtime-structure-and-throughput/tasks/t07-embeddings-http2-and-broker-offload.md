@@ -30,14 +30,14 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: '2026-11-06T18:57:36Z'
-last_verified_commit: "e99a7128a0625f36b47036ee520c8a46cbded84e"
+last_verified_commit: "ef83008b238bfc80edf7d04bdd9cb7036c54d989"
 verification_evidence:
   command: cargo test --manifest-path src/rs/Cargo.toml -p vertebra-py --features gcp && make dev && uv run --no-sync python -m mypy.stubtest vertebra._vertebra && uv run --no-sync pytest src/py/tests/unit/embeddings/test_google_embedders.py src/py/tests/unit/embeddings/test_embedding_broker.py src/py/tests/unit/db/test_enterprise_olap_drivers.py -q
   exit_code: 0
   summary: 11 Rust unit tests and 177 Python unit tests passed; stubtest, ruff, rustfmt, and mypy clean.
 created_at: '2026-11-06T06:35:00Z'
 updated_at: '2026-11-06T18:57:36Z'
-commit: "e99a7128a0625f36b47036ee520c8a46cbded84e"
+commit: "ef83008b238bfc80edf7d04bdd9cb7036c54d989"
 tags:
 - embeddings
 - http2

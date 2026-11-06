@@ -1,4 +1,4 @@
-"""Unit tests for vertebra.utils.text and vertebra.utils.humanize (Rust + Python fallback parity)."""
+"""Unit tests for Rust-accelerated vertebra.utils.text and vertebra.utils.humanize."""
 
 from __future__ import annotations
 
@@ -37,41 +37,14 @@ from vertebra.utils.text import (
 )
 
 
-@pytest.fixture(params=["native", "python"], autouse=True)
-def execution_backend(
-    request: pytest.FixtureRequest,
-    monkeypatch: pytest.MonkeyPatch,
-) -> str:
-    """Parameterize all tests in this module across compiled Rust and pure-Python fallbacks."""
-    mode = str(request.param)
-    if mode == "python":
-        monkeypatch.setattr(text_mod, "_snake_case_impl", text_mod._py_snake_case)
-        monkeypatch.setattr(text_mod, "_camelize_impl", text_mod._py_camelize)
-        monkeypatch.setattr(text_mod, "_pascalize_impl", text_mod._py_pascalize)
-        monkeypatch.setattr(text_mod, "_kebabize_impl", text_mod._py_kebabize)
-        monkeypatch.setattr(text_mod, "_slugify_impl", text_mod._py_slugify)
-        monkeypatch.setattr(text_mod, "_quote_identifier_impl", text_mod._py_quote_identifier)
-        monkeypatch.setattr(text_mod, "_quote_backtick_identifier_impl", text_mod._py_quote_backtick_identifier)
-        monkeypatch.setattr(text_mod, "_quote_bracket_identifier_impl", text_mod._py_quote_bracket_identifier)
-        monkeypatch.setattr(text_mod, "_quote_dialect_identifier_impl", text_mod._py_quote_dialect_identifier)
-        monkeypatch.setattr(text_mod, "_split_qualified_identifier_impl", text_mod._py_split_qualified_identifier)
-        monkeypatch.setattr(text_mod, "_normalize_identifier_impl", text_mod._py_normalize_identifier)
-        monkeypatch.setattr(text_mod, "_validate_identifier_impl", text_mod._py_validate_identifier)
-        monkeypatch.setattr(text_mod, "_truncate_utf8_bytes_impl", text_mod._py_truncate_utf8_bytes)
-        monkeypatch.setattr(text_mod, "_truncate_impl", text_mod._py_truncate)
-
-        monkeypatch.setattr(humanize_mod, "_humanize_impl", humanize_mod._py_humanize)
-        monkeypatch.setattr(humanize_mod, "_titleize_impl", humanize_mod._py_titleize)
-        monkeypatch.setattr(humanize_mod, "_pluralize_impl", humanize_mod._py_pluralize)
-        monkeypatch.setattr(humanize_mod, "_singularize_impl", humanize_mod._py_singularize)
-        monkeypatch.setattr(humanize_mod, "_ordinalize_impl", humanize_mod._py_ordinalize)
-        monkeypatch.setattr(humanize_mod, "_humanize_bytes_impl", humanize_mod._py_humanize_bytes)
-        monkeypatch.setattr(humanize_mod, "_parse_bytes_impl", humanize_mod._py_parse_bytes)
-        monkeypatch.setattr(humanize_mod, "_humanize_duration_impl", humanize_mod._py_humanize_duration)
-        monkeypatch.setattr(humanize_mod, "_parse_duration_impl", humanize_mod._py_parse_duration)
-        monkeypatch.setattr(humanize_mod, "_humanize_number_impl", humanize_mod._py_humanize_number)
-        monkeypatch.setattr(humanize_mod, "_humanize_rate_impl", humanize_mod._py_humanize_rate)
-    return mode
+def test_text_and_humanize_modules_omit_pure_python_fallback_tables() -> None:
+    """Verify text and humanize bind directly to vertebra._vertebra without pure-Python fallback tables."""
+    assert not hasattr(text_mod, "_LATIN_FOLD_MAP")
+    assert not hasattr(text_mod, "_py_snake_case")
+    assert not hasattr(text_mod, "_get_native_fn")
+    assert not hasattr(humanize_mod, "_IRREGULAR_NOUNS")
+    assert not hasattr(humanize_mod, "_UNCOUNTABLE_NOUNS")
+    assert not hasattr(humanize_mod, "_py_humanize")
 
 
 @pytest.mark.parametrize(
