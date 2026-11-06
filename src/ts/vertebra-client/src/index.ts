@@ -64,13 +64,10 @@ export {
 } from "./wasm";
 export {
   type BrowserModelContext,
-  type BrowserModelContextExecuteOptions,
-  type BrowserModelContextRegisterOptions,
   type BrowserModelContextTool,
   type RegisterWebMCPOptions,
   registerWebMCPTools,
   type WebMCPManifest,
-  type WebMCPRegistrationError,
   type WebMCPRegistrationHandle,
   type WebMCPToolDescriptor,
 } from "./webmcp";

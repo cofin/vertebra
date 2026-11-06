@@ -4,6 +4,7 @@ import argparse
 import ast
 import re
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import NamedTuple
@@ -16,6 +17,7 @@ __all__ = (
     "scan_overload_docstrings",
     "scan_public_docstring_leaks",
     "scan_undocumented_typeddicts",
+    "stage_mkdocs_inventory_cache",
 )
 
 _LEAK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -113,6 +115,41 @@ def scan_undocumented_typeddicts(paths: Sequence[Path]) -> list[TypedDictDocstri
     return violations
 
 
+def stage_mkdocs_inventory_cache(
+    xdg_cache_dir: Path,
+    *,
+    source_cache_dir: Path | None = None,
+) -> int:
+    """Stage cached mkdocs objects.inv files into a writable XDG cache dir with refreshed timestamps."""
+    resolved_source = (
+        source_cache_dir if source_cache_dir is not None else Path.home() / ".cache" / "mkdocs" / "mkdocs_url_cache"
+    )
+    if not resolved_source.is_dir():
+        return 0
+
+    target_dir = xdg_cache_dir / "mkdocs" / "mkdocs_url_cache"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    now = int(time.time())
+    staged_count = 0
+
+    for inv_file in sorted(resolved_source.glob("*.inv")):
+        raw = inv_file.read_bytes()
+        newline_idx = raw.find(b"\n")
+        if (
+            newline_idx > 0
+            and raw[:newline_idx].startswith(b"# ")
+            and b" downloaded at timestamp " in raw[:newline_idx]
+        ):
+            prefix_head = raw[:newline_idx].rsplit(b" downloaded at timestamp ", 1)[0]
+            updated = prefix_head + f" downloaded at timestamp {now}\n".encode("ascii") + raw[newline_idx + 1 :]
+        else:
+            updated = raw
+        (target_dir / inv_file.name).write_bytes(updated)
+        staged_count += 1
+
+    return staged_count
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entrypoint for public docstring, overload, and TypedDict/Struct hygiene checks."""
     parser = argparse.ArgumentParser(
@@ -130,6 +167,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Fail when public TypedDict fields lack PEP 257 inline docstrings or duplicate class Attributes.",
     )
     parser.add_argument(
+        "--stage-inventory-cache",
+        type=Path,
+        default=None,
+        help="Optional writable XDG_CACHE_HOME directory to seed with cached mkdocs objects.inv files.",
+    )
+    parser.add_argument(
         "paths",
         nargs="*",
         type=Path,
@@ -137,6 +180,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Target files or directories to scan (defaults to src/py/vertebra).",
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
+
+    if args.stage_inventory_cache is not None:
+        stage_mkdocs_inventory_cache(args.stage_inventory_cache)
 
     run_all = not (args.check_leaks or args.check_overloads or args.check_typeddicts)
     messages: list[str] = []

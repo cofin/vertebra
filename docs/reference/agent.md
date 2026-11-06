@@ -4,8 +4,8 @@ Agent runtime (`AgentRuntime`), Model Context Protocol (`MCPRegistry`, `MCPConfi
 
 | Section | Core Classes | Responsibility |
 | --- | --- | --- |
-| **Agent Plugin & Harness Runtime** | `AgentPlugin`, `AgentPluginConfig`, `AgentRuntime`, `ConfirmationGate`, `Tool` | Mount MCP/A2A/chat endpoints on `App`, execute bounded LLM tool-calling loops, and gate destructive tools on human approval |
-| **Model Context Protocol** | `MCPConfig`, `MCPRegistry`, `MCPSkillsConfig`, `MCPTaskConfig` | Register `@tool`, `@prompt`, and `@resource` handlers, expose `SKILL.md` progressive disclosure, and track long-running async tool tasks |
+| **Agent Plugin & Harness Runtime** | `AgentPlugin`, `AgentPluginConfig`, `AgentRuntime`, `ConfirmationGate`, `Tool`, `ToolSpec`, `ToolAnnotations` | Mount MCP/A2A/chat endpoints on `App`, execute bounded LLM tool-calling loops, and gate destructive tools on human approval |
+| **Model Context Protocol** | `MCPCore`, `MCPService`, `ToolRegistry`, `MCPRegistry`, `MCPConfig`, `MCPSkillsConfig`, `MCPTaskConfig` | Register `@tool`, `ToolProvider`, `@prompt`, and `@resource` handlers, expose `SKILL.md` progressive disclosure, and track long-running async tool tasks |
 | **Agent-to-Agent Protocol & Bridges** | `AgentCard`, `A2AConfig`, `A2AService`, `McpToolBridge`, `A2aAgentBridge` | Serve JWS-signed `/.well-known/agent-card.json` descriptors, stream A2A task updates, and bridge MCP tools with A2A agents |
 | **SpecTree, Workflows & Session Stores** | `SpecTree`, `DynamicWorkflow`, `WorkflowEngine`, `MemorySessionStore`, `SQLSpecSessionStore`, `AlchemySessionStore`, `ObjectStoreSessionStore` | Decompose goals into dependency trees, execute parallel DAG waves with checkpointing, and persist multi-turn conversation state |
 
@@ -82,16 +82,14 @@ execution, including when its optional dry-run guard is disabled.
       heading_level: 4
       members: false
 
-::: vertebra.agent.mcp.registry.MCPRegistry
+::: vertebra.agent.mcp.registry.ToolRegistry
     options:
       heading_level: 3
       members:
         - register_tool
+        - register_provider
         - list_tools
-        - register_resource
-        - list_resources
-        - register_prompt
-        - list_prompts
+        - list_specs
         - register_controller
 
 ::: vertebra.agent.mcp.skills.MCPSkillsConfig

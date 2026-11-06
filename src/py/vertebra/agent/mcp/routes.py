@@ -63,9 +63,7 @@ def render_well_known_mcp_json(
     tool_names: Iterable[str] | None = None,
 ) -> bytes:
     """Serialize the canonical ``/.well-known/mcp.json`` discovery document to UTF-8 JSON bytes."""
-    return encode_json_bytes(
-        build_well_known_mcp_document(config, registry, tool_names=tool_names)
-    )
+    return encode_json_bytes(build_well_known_mcp_document(config, registry, tool_names=tool_names))
 
 
 class MCPHttpHandler:

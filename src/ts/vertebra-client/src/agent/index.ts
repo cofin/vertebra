@@ -4,10 +4,11 @@ import { TraceContext } from "../telemetry";
 export const MCP_PROTOCOL_VERSION = "2026-07-28";
 
 /**
- * Encode an MCP header value, applying MIME RFC 2047 base64 encoding if non-ASCII.
+ * Encode an MCP header value, applying MIME RFC 2047 base64 encoding if non-ASCII,
+ * control/newline characters are present, or the value begins with the sentinel prefix.
  */
 export function encodeMcpHeaderValue(value: string): string {
-  if (/^[\x20-\x7E]*$/.test(value)) {
+  if (/^[\x20-\x7E]*$/.test(value) && !value.startsWith("=?base64?")) {
     return value;
   }
   const bytes = new TextEncoder().encode(value);
@@ -75,6 +76,7 @@ export class McpClient {
     const url = `${this.baseUrl}/mcp`;
     const headers: Record<string, string> = {
       "content-type": "application/json",
+      accept: "application/json, text/event-stream",
       "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
       "Mcp-Method": method,
     };
@@ -90,11 +92,24 @@ export class McpClient {
 
     const headersWithTrace = TraceContext.injectHeader(headers, this.traceContext);
 
+    const existingMeta =
+      params._meta !== null && typeof params._meta === "object" && !Array.isArray(params._meta)
+        ? (params._meta as Record<string, unknown>)
+        : {};
+    const enrichedParams: Record<string, unknown> = {
+      ...params,
+      _meta: {
+        "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+        "io.modelcontextprotocol/clientCapabilities": {},
+        ...existingMeta,
+      },
+    };
+
     const payload = {
       jsonrpc: "2.0",
       id: Math.floor(Math.random() * 1_000_000),
       method,
-      params,
+      params: enrichedParams,
     };
 
     const req = new Request(url, {
@@ -114,19 +129,48 @@ export class McpClient {
       throw new Error(`MCP error ${resp.status}: ${await resp.text()}`);
     }
 
-    const data = (await resp.json()) as { result?: T; error?: { message: string } };
+    const contentType = resp.headers.get("content-type") ?? "";
+    let data: { result?: T; error?: { message: string } };
+    if (contentType.includes("text/event-stream")) {
+      const sseText = await resp.text();
+      let lastParsed: { result?: T; error?: { message: string } } | null = null;
+      for (const line of sseText.split("\n")) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("data:")) {
+          const rawJson = trimmed.slice(5).trim();
+          if (rawJson) {
+            const candidate = JSON.parse(rawJson) as { result?: T; error?: { message: string } };
+            if ("result" in candidate || "error" in candidate) {
+              lastParsed = candidate;
+            }
+          }
+        }
+      }
+      if (!lastParsed) {
+        throw new Error("No JSON-RPC response message found in MCP SSE stream");
+      }
+      data = lastParsed;
+    } else {
+      data = (await resp.json()) as { result?: T; error?: { message: string } };
+    }
+
     if (data.error) {
       throw new Error(data.error.message);
     }
     return data.result as T;
   }
 
-  async initialize(capabilities: Record<string, unknown> = {}): Promise<unknown> {
-    return this.sendJsonRpc("initialize", {
-      protocolVersion: MCP_PROTOCOL_VERSION,
-      capabilities,
-      clientInfo: { name: "@vertebra/client", version: "0.1.0" },
+  async discover(capabilities: Record<string, unknown> = {}): Promise<unknown> {
+    return this.sendJsonRpc("server/discover", {
+      _meta: {
+        "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+        "io.modelcontextprotocol/clientCapabilities": capabilities,
+      },
     });
+  }
+
+  async initialize(capabilities: Record<string, unknown> = {}): Promise<unknown> {
+    return this.discover(capabilities);
   }
 
   async listTools(cursor?: string): Promise<{ tools: unknown[]; nextCursor?: string }> {

@@ -137,6 +137,7 @@ export {
   type RegisterWebMCPOptions,
   registerWebMCPTools,
   type WebMCPManifest,
+  type WebMCPRegistrationHandle,
   type WebMCPToolDescriptor,
 } from "./webmcp";
 export {
@@ -169,10 +170,10 @@ export {
 | `./wasm` | `src/wasm.ts` | `WASMClient`, `WASM_MAGIC_BYTES` | yes |
 | `./arrow` | `src/arrow.ts` | `ArrowStreamClient`, `ARROW_*` constants | yes |
 | `./router` | `src/router.ts` | `routeUrl`, `wsUrl`, `interpolateRoutePath`, `RouteUrlOptions` | yes |
-| `./webmcp` | `src/webmcp.ts` | `registerWebMCPTools`, `WebMCPManifest`, `WebMCPToolDescriptor`, `RegisterWebMCPOptions` | yes |
+| `./webmcp` | `src/webmcp.ts` | `registerWebMCPTools`, `WebMCPRegistrationHandle`, `WebMCPManifest`, `WebMCPToolDescriptor`, `RegisterWebMCPOptions` | yes |
 | `./agent` | `src/agent/index.ts` | `McpClient`, `A2aClient`, `AgentStreamClient`, `WorkflowLiveSubscriber` | yes |
 
-`tsup.config.ts` `onSuccess` copies the full `dist/` directory into `src/py/vertebra/server/_js/bundle/` (untracked) for `DevMiddleware` and `ImportMapGenerator.sync_wheel_client`. When `src/py/vertebra/server/_js/bundle/` is absent in source checkouts (such as `make py-test` running before `make ts-build`), `DevMiddleware` and `ImportMapGenerator.sync_wheel_client` fall back to `src/ts/vertebra-client/dist/` or `src/ts/vertebra-client/src/`.
+`tsup.config.ts` `onSuccess` copies the full `dist/` directory into `src/py/vertebra/server/_js/bundle/` (untracked) for `DevMiddleware` and `ImportMapGenerator.sync_wheel_client`. `ImportMapGenerator.load_client_subpaths` derives `_CLIENT_SUBPATHS` dynamically from `src/ts/vertebra-client/package.json` `exports` so subpath additions never drift. When `src/py/vertebra/server/_js/bundle/` is absent in source checkouts (such as `make py-test` running before `make ts-build`), `DevMiddleware` and `ImportMapGenerator.sync_wheel_client` fall back to `src/ts/vertebra-client/dist/` or `src/ts/vertebra-client/src/`.
 
 ## Rules
 

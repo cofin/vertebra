@@ -6,11 +6,11 @@ from pathlib import Path
 from typing import Any
 
 from vertebra.build._config import JsConfig
-from vertebra.utils.serializers import format_json
+from vertebra.utils.serializers import decode_json, format_json
 
-__all__ = ("ImportMapGenerator",)
+__all__ = ("ImportMapGenerator", "load_client_subpaths")
 
-_CLIENT_SUBPATHS: tuple[tuple[str, str, str], ...] = (
+_FALLBACK_CLIENT_SUBPATHS: tuple[tuple[str, str, str], ...] = (
     (".", "./index.js", "./index.d.ts"),
     ("./vite", "./vite/index.js", "./vite/index.d.ts"),
     ("./react", "./react/index.js", "./react/index.d.ts"),
@@ -22,13 +22,50 @@ _CLIENT_SUBPATHS: tuple[tuple[str, str, str], ...] = (
     ("./hmr", "./hmr/index.js", "./hmr/index.d.ts"),
     ("./wasm", "./wasm.js", "./wasm.d.ts"),
     ("./arrow", "./arrow.js", "./arrow.d.ts"),
-    ("./router", "./router.js", "./router.d.ts"),
-    ("./webmcp", "./webmcp.js", "./webmcp.d.ts"),
     ("./live", "./live/index.js", "./live/index.d.ts"),
     ("./apex", "./apex/index.js", "./apex/index.d.ts"),
     ("./telemetry", "./telemetry.js", "./telemetry.d.ts"),
+    ("./router", "./router.js", "./router.d.ts"),
+    ("./webmcp", "./webmcp.js", "./webmcp.d.ts"),
     ("./agent", "./agent/index.js", "./agent/index.d.ts"),
 )
+
+
+def load_client_subpaths(package_json_path: Path | None = None) -> tuple[tuple[str, str, str], ...]:
+    """Derive ``(subpath, js_rel, types_rel)`` tuples from ``@vertebra/client`` ``package.json`` ``exports``."""
+    candidates: tuple[Path, ...]
+    if package_json_path is not None:
+        candidates = (package_json_path,)
+    else:
+        candidates = (
+            Path(__file__).resolve().parents[3] / "ts" / "vertebra-client" / "package.json",
+            Path(__file__).resolve().parents[1] / "server" / "_js" / "bundle" / "package.json",
+        )
+    pkg_file = next((p for p in candidates if p.is_file()), None)
+    if pkg_file is None:
+        return _FALLBACK_CLIENT_SUBPATHS
+
+    raw = decode_json(pkg_file.read_text(encoding="utf-8"))
+    exports_obj = raw.get("exports") if isinstance(raw, dict) else None
+    if not isinstance(exports_obj, dict):
+        return _FALLBACK_CLIENT_SUBPATHS
+
+    entries: list[tuple[str, str, str]] = []
+    for subpath, target in exports_obj.items():
+        if not isinstance(target, dict):
+            continue
+        import_path = str(target.get("import", ""))
+        types_path = str(target.get("types", ""))
+        if not import_path or not types_path:
+            continue
+        norm_import = "./" + import_path.removeprefix("./").removeprefix("dist/")
+        norm_types = "./" + types_path.removeprefix("./").removeprefix("dist/")
+        entries.append((str(subpath), norm_import, norm_types))
+
+    return tuple(entries) if entries else _FALLBACK_CLIENT_SUBPATHS
+
+
+_CLIENT_SUBPATHS: tuple[tuple[str, str, str], ...] = load_client_subpaths()
 
 
 class ImportMapGenerator:

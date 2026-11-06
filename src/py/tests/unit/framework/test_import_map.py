@@ -128,3 +128,23 @@ def test_generate_import_map_include_client_and_sync_wheel_bundle(tmp_path: Path
     pkg = decode_json((client_dir / "package.json").read_text(encoding="utf-8"))
     assert pkg["name"] == "@vertebra/client"
     assert "./react" in pkg["exports"]
+
+
+def test_client_subpaths_derived_dynamically_from_package_json(tmp_path: Path) -> None:
+    """ImportMapGenerator.load_client_subpaths derives subpaths directly from package.json exports."""
+    from vertebra.build._import_map import _CLIENT_SUBPATHS, load_client_subpaths
+
+    ts_pkg = Path(__file__).resolve().parents[4] / "ts" / "vertebra-client" / "package.json"
+    raw_exports = decode_json(ts_pkg.read_text(encoding="utf-8"))["exports"]
+    assert [sub for sub, _, _ in _CLIENT_SUBPATHS] == list(raw_exports.keys())
+
+    custom_pkg = tmp_path / "package.json"
+    custom_pkg.write_text(
+        '{"name":"@vertebra/client","exports":{".":{"types":"./dist/index.d.ts","import":"./dist/index.js"},"./custom":{"types":"./dist/custom/index.d.ts","import":"./dist/custom/index.js"}}}',
+        encoding="utf-8",
+    )
+    loaded = load_client_subpaths(custom_pkg)
+    assert loaded == (
+        (".", "./index.js", "./index.d.ts"),
+        ("./custom", "./custom/index.js", "./custom/index.d.ts"),
+    )

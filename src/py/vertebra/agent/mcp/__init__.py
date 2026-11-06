@@ -44,7 +44,7 @@ from vertebra.agent.mcp.routes import (
     MCPHttpHandler,
     WsgiMcpApp,
     build_well_known_mcp_document,
-     render_well_known_mcp_json,
+    render_well_known_mcp_json,
 )
 from vertebra.agent.mcp.service import MCPCore, MCPService
 from vertebra.agent.mcp.skills import (

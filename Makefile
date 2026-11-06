@@ -276,16 +276,16 @@ docs-clean:                                         ## Remove built documentatio
 .PHONY: docs
 docs: docs-clean                                    ## Build and verify Zensical documentation
 	@echo "${INFO} Building documentation (Zensical)..."
-	@PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.scan_public_docstrings --check-leaks --check-overloads --check-typeddicts src/py/vertebra
+	@PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.scan_public_docstrings --check-leaks --check-overloads --check-typeddicts --stage-inventory-cache /tmp/vertebra-mkdocs-cache src/py/vertebra
 	@PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.generate_cli_docs --check
-	@PYTHONPATH="src/py:." uv run --no-sync zensical build --clean
+	@XDG_CACHE_HOME="/tmp/vertebra-mkdocs-cache" PYTHONPATH="src/py:." uv run --no-sync zensical build --clean
 	@PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.postbuild --site-dir site --docs-dir docs --zensical-config zensical.toml --rust-doc-dir "$(CARGO_TARGET_DIR)/doc"
 	@PYTHONPATH="src/py:." uv run --no-sync python -m tools.docs.verify_docs_artifacts --site-dir site
 	@echo "${OK} Documentation built and verified in site/"
 
 .PHONY: docs-serve
 docs-serve: docs                                    ## Build and serve documentation locally
-	@PYTHONPATH="src/py:." uv run --no-sync zensical serve --dev-addr 127.0.0.1:8000
+	@XDG_CACHE_HOME="/tmp/vertebra-mkdocs-cache" PYTHONPATH="src/py:." uv run --no-sync zensical serve --dev-addr 127.0.0.1:8000
 
 .PHONY: docs-check
 docs-check: docs                                    ## Build docs and verify live zensical serve HTTP 200

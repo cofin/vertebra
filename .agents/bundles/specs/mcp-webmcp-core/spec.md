@@ -3,17 +3,17 @@ type: Spec
 flow_id: mcp-webmcp-core
 title: MCP 2026-07-28 Core and WebMCP Bridge
 description: Build an agent-owned ToolSpec and ToolRegistry over the shared ToolProvider contract, a transport-agnostic MCPCore, framework adapters, and a WebMCP projection and TypeScript bridge.
-state: active
+state: completed
 parent_prd: integration-remediation
 research:
 - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
 plan_commit: "55a6002aabb2d4e2a8bdadd0f7014ea643217ffe"
-state_revision: 8
-current_task: t07
-last_verified_checkpoint: "f4ed07da322704eaea5fb4fd5993a0dbb34caf43"
+state_revision: 10
+current_task: null
+last_verified_checkpoint: "f8b6f844977a94d92d179cd8e7130a8c53a178e0"
 created_at: '2026-11-03T03:30:00Z'
-updated_at: '2026-11-06T22:39:00Z'
+updated_at: '2026-11-06T23:23:00Z'
 tags:
 - mcp
 - webmcp
@@ -110,13 +110,13 @@ Read [MCP and A2A protocol harness](../../knowledge/domains/agent/mcp-and-a2a-pr
 - [x] [23e7e92] t04 — Unify Starlette, FastAPI, Flask, and Django mounts onto shared ASGI and WSGI MCP apps (tasks/t04-shared-asgi-wsgi-mcp-adapters.md)
 - [x] [1014343] t05 — Wire native AgentPlugin to MCPCore, delegate Litestar to litestar-mcp, and unify well-known discovery (tasks/t05-agent-plugin-and-litestar-mcp.md)
 - [x] [f4ed07d] t06 — Project WebMCP manifests strictly from ToolSpec exposure metadata (tasks/t06-webmcp-manifest-projection.md)
-- [~] t07 — Upgrade TypeScript webmcp.ts bridge to document.modelContext.registerTool with signal disposal (tasks/t07-typescript-webmcp-bridge.md)
-- [ ] t08 — Update TypeScript McpClient SSE/_meta handling, derive _CLIENT_SUBPATHS from package.json, and sync docs/OKF (tasks/t08-mcp-client-import-map-and-docs.md)
+- [x] [f8b6f84] t07 — Upgrade TypeScript webmcp.ts bridge to document.modelContext.registerTool with signal disposal (tasks/t07-typescript-webmcp-bridge.md)
+- [x] t08 — Update TypeScript McpClient SSE/_meta handling, derive _CLIENT_SUBPATHS from package.json, and sync docs/OKF (tasks/t08-mcp-client-import-map-and-docs.md)
 
 **Phase 2 Recovery Checkpoint:** `make lint-all`, `make py-test`, `make ts-test`, and `make docs` exit 0, followed by independent `@code-reviewer` and `@quality-reviewer` passes before archiving on `feat/mcp-webmcp-core`.
 
 ## 5. Continuity Snapshot
 
-- State is `planned`; all 8 worksheets (`t01`–`t08`) are `pending` at `plan_revision: 2`, anchored at `plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"`.
+- State is `completed`; all 8 worksheets (`t01`–`t08`) are `completed` and verified on `feat/mcp-webmcp-core`.
 - Neutral `vertebra.typing.ToolProvider` and argument-bound `ConfirmationGate` tokens from `80ff8a65` and `7657e8b7` remain preserved and consumed directly.
-- Next action on `feat/mcp-webmcp-core`: `/flow:implement mcp-webmcp-core` starting at `t01`.
+- Next action on `feat/mcp-webmcp-core`: run independent `@code-reviewer` and `@quality-reviewer` passes, then `/flow:finish mcp-webmcp-core`.

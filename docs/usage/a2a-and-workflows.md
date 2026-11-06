@@ -41,7 +41,7 @@ a2a = A2AService(A2AConfig(path="/a2a", agent_card=card))
 
 ## Browser WebMCP (`@vertebra/client/webmcp`) & Bidirectional Bridges
 
-- **Browser WebMCP (`@vertebra/client/webmcp`)**: Register client-side browser tools on `navigator.modelContext` (`WebMcpBridge`, `registerWebMcpTools`) so browser agents and page assistants can invoke typed frontend actions directly. Server manifests (`build_webmcp_manifest`, `/.well-known/webmcp.json`) list only tools decorated with `@mcp_tool(webmcp=True)`; untagged tools are never browser-exposed.
+- **Browser WebMCP (`@vertebra/client/webmcp`)**: Register client-side browser tools on `document.modelContext` (falling back to `navigator.modelContext`) via `registerWebMCPTools(manifestOrOptions, { signal })`, returning a `WebMCPRegistrationHandle` (`tools`, `errors`, `dispose()`) with HMR idempotency and per-tool error isolation. Server manifests (`build_webmcp_manifest`, `/.well-known/webmcp.json`) project strictly from `ToolSpec` entries whose `exposure` includes `"webmcp"` (`@mcp_tool(webmcp=True)`), emitting `title`, `outputSchema`, and `annotations.consequentialHint = True` when `requires_confirmation=True`.
 - **Bidirectional MCP / A2A Bridges (`vertebra.agent.bridges`)**: Bridge MCP tools and A2A agents in either direction using `McpToolBridge`, `A2aAgentBridge`, `a2a_card_to_mcp_tools`, and `mcp_service_to_a2a`.
 
 ## `SpecTree` Planning & DAG Workflows (`vertebra.agent.spec`, `vertebra.agent.workflow`)
