@@ -105,12 +105,14 @@ class OracleEmbeddingPushdown:
         dimensions: int | None = None,
         normalize: bool = True,
     ) -> VectorBatchView:
-        """Execute `DBMS_VECTOR.UTL_TO_EMBEDDING` and decode Oracle 26ai `0xDB` binary vectors.
+        """Execute `DBMS_VECTOR.UTL_TO_EMBEDDINGS` and decode Oracle 26ai `0xDB` binary vectors.
 
         Raises:
-            DataError: When Oracle returns no row for a text.
+            DataError: When Oracle returns fewer or invalid vectors for the requested texts.
         """
-        if not texts:
+        _ = task
+        text_list = list(texts)
+        if not text_list:
             raise ValueError("texts must not be empty")
         dims = self._dimensions if dimensions is None else dimensions
         if dims <= 0:
@@ -126,15 +128,29 @@ class OracleEmbeddingPushdown:
             params_dict["url"] = self._endpoint_url
         params_json = encode_json(params_dict)
 
-        sql = "SELECT DBMS_VECTOR.UTL_TO_EMBEDDING(:text, JSON(:params)) FROM DUAL"
-        decoded_rows: list[list[float]] = []
-        for idx, item_text in enumerate(texts):
-            rows = await self._select(sql, {"text": item_text, "params": params_json})
-            if not rows:
-                msg = f"Oracle DBMS_VECTOR.UTL_TO_EMBEDDING returned no embedding row for text index {idx}"
-                raise DataError(msg)
-            decoded_rows.append(self._extract_vector(rows[0], dims))
+        sql = "SELECT DBMS_VECTOR.UTL_TO_EMBEDDINGS(:texts, JSON(:params)) FROM DUAL"
+        rows = await self._select(
+            sql,
+            {"texts": encode_json(text_list), "params": params_json},
+        )
+        decoded_rows = self._extract_batch_vectors(rows, len(text_list), dims)
         return VectorBatchView.from_f32_rows(decoded_rows, normalize=normalize and self._normalize)
+
+    async def embed_batch(
+        self,
+        texts: Sequence[str],
+        *,
+        task: str = "document",
+        dimensions: int | None = None,
+        normalize: bool = True,
+    ) -> VectorBatchView:
+        """Embed a batch of texts in a single `DBMS_VECTOR.UTL_TO_EMBEDDINGS` round trip."""
+        return await self.embed_documents(
+            texts,
+            task=task,
+            dimensions=dimensions,
+            normalize=normalize,
+        )
 
     async def embed_query(self, text: str, *, dimensions: int | None = None, normalize: bool = True) -> VectorView:
         """Generate a query vector."""
@@ -200,6 +216,43 @@ class OracleEmbeddingPushdown:
             await self._driver.execute(sql, params)
         else:
             await asyncio.to_thread(self._driver.execute, sql, params)
+
+    @classmethod
+    def _extract_batch_vectors(
+        cls,
+        rows: Sequence[Any],
+        expected_count: int,
+        dimensions: int,
+    ) -> list[list[float]]:
+        if not rows:
+            msg = "Oracle DBMS_VECTOR.UTL_TO_EMBEDDINGS returned no embedding rows"
+            raise DataError(msg)
+        if len(rows) == expected_count:
+            return [cls._extract_vector(row, dimensions) for row in rows]
+        if len(rows) == 1:
+            first_row = rows[0]
+            cell = (
+                next(iter(first_row.values()), None)
+                if isinstance(first_row, Mapping)
+                else first_row[0]
+                if isinstance(first_row, (list, tuple)) and first_row
+                else None
+            )
+            if isinstance(cell, str):
+                try:
+                    cell = decode_json(cell)
+                except (TypeError, ValueError) as exc:
+                    raise DataError("Oracle embedding row has no valid vector") from exc
+            if (
+                isinstance(cell, (list, tuple))
+                and len(cell) == expected_count
+                and all(isinstance(item, (list, tuple, bytes, bytearray, memoryview, Mapping, str)) for item in cell)
+            ):
+                return [
+                    cls._extract_vector(item if isinstance(item, Mapping) else (item,), dimensions) for item in cell
+                ]
+        msg = f"Oracle DBMS_VECTOR.UTL_TO_EMBEDDINGS returned {len(rows)} rows for {expected_count} requested texts"
+        raise DataError(msg)
 
     @staticmethod
     def _extract_vector(row: Any, dimensions: int) -> list[float]:

@@ -9,11 +9,11 @@ research:
 - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 1
 plan_commit: "af319da17dec0148a18532952cb7ea2a91d1c9d7"
-state_revision: 12
-current_task: runtime-structure-and-throughput:t07
+state_revision: 14
+current_task: runtime-structure-and-throughput:t08
 last_verified_checkpoint: phase_1
 created_at: '2026-11-03T03:30:00Z'
-updated_at: '2026-11-06T18:28:00Z'
+updated_at: '2026-11-06T18:57:36Z'
 tags:
 - fastpath
 - rust
@@ -118,7 +118,7 @@ Every worksheet executes as one atomic, GPG-signed conventional commit with disj
 
 - [x] [aa318ff2] t05 — Split Spanner and BigQuery Rust submodules, verify max_commit_delay_ms, and unify staging stores (tasks/t05-gcp-submodules-and-commit-delay.md)
 - [x] [bd4290b5] t06 — Slice BigQuery append_arrow_stream zero-copy and trim GCP RPC allocations (tasks/t06-gcp-zero-copy-arrow-and-allocations.md)
-- [ ] t07 — Add Rust HTTP/2 VertexEmbedder transport, bounded EmbeddingBroker offload, and batch Oracle pushdown (tasks/t07-embeddings-http2-and-broker-offload.md)
+- [x] [e99a7128] t07 — Add Rust HTTP/2 VertexEmbedder transport, bounded EmbeddingBroker offload, and batch Oracle pushdown (tasks/t07-embeddings-http2-and-broker-offload.md)
 - [ ] t08 — Remove pure-Python utils fallbacks, clean SQLSpec aliases, and sync docs/OKF (tasks/t08-utils-cleanup-and-docs.md)
 
 **Phase 2 Recovery Checkpoint:** `make lint-all`, `make rs-test`, `make py-test`, `make ts-test`, and `make docs` exit 0, followed by independent `@code-reviewer` and `@quality-reviewer` passes before archiving the flow on `feat/runtime-structure-and-throughput`.
@@ -126,5 +126,5 @@ Every worksheet executes as one atomic, GPG-signed conventional commit with disj
 ## 5. Continuity Snapshot
 
 - State is `active` on `feat/runtime-structure-and-throughput` (stacked on `fix/post-merge-review-and-plan-sync` at `af319da1`, [PR #80](https://github.com/cofin/vertebra/pull/80)).
-- Phase 1 (`t01`–`t04`) and Phase 2 tasks `t05`–`t06` (`4a5512d4..bd4290b5`) are completed, verified, and GPG-signed; `t07` and `t08` remain `pending`.
-- Next action on `feat/runtime-structure-and-throughput`: `/flow:implement runtime-structure-and-throughput` resuming at `t07`.
+- Phase 1 (`t01`–`t04`) and Phase 2 tasks `t05`–`t07` (`4a5512d4..HEAD`) are completed, verified, and GPG-signed; `t08` remains `pending`.
+- Next action on `feat/runtime-structure-and-throughput`: `/flow:implement runtime-structure-and-throughput` resuming at `t08`.

@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use vertebra_core::gcp_auth::{
     GcpTokenCache as NativeGcpTokenCache, GcpTokenSnapshot as NativeGcpTokenSnapshot,
-    current_unix_ms,
+    current_unix_ms, gcp_http2_post as native_gcp_http2_post,
 };
 
 use crate::async_bridge::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task};
@@ -232,9 +233,91 @@ impl PyAsyncGcpTokenCache {
     }
 }
 
+/// Execute a connection-pooled HTTP/2 or HTTP/1.1 unary POST request synchronously off the GIL.
+#[pyfunction]
+#[pyo3(signature = (url, headers, body, timeout_ms=30_000))]
+pub fn gcp_http2_post_sync<'py>(
+    py: Python<'py>,
+    url: &str,
+    headers: HashMap<String, String>,
+    body: &[u8],
+    timeout_ms: u64,
+) -> PyResult<(u16, HashMap<String, String>, Bound<'py, PyBytes>)> {
+    let url_owned = url.to_string();
+    let payload = body.to_vec();
+    let (status, resp_headers, resp_body) = py
+        .detach(|| {
+            block_on_db(async move {
+                native_gcp_http2_post(&url_owned, &headers, payload, timeout_ms).await
+            })
+        })
+        .map_err(|e| auth_error_to_py(py, e))?;
+    Ok((status, resp_headers, PyBytes::new(py, &resp_body)))
+}
+
+/// Execute a connection-pooled HTTP/2 or HTTP/1.1 unary POST request asynchronously via `RustDbTaskAwaitable`.
+#[pyfunction]
+#[pyo3(signature = (url, headers, body, timeout_ms=30_000))]
+pub fn gcp_http2_post_async(
+    py: Python<'_>,
+    url: String,
+    headers: HashMap<String, String>,
+    body: Vec<u8>,
+    timeout_ms: u64,
+) -> PyResult<RustDbTaskAwaitable> {
+    spawn_rust_db_task(
+        py,
+        async move { native_gcp_http2_post(&url, &headers, body, timeout_ms).await },
+        |py, (status, resp_headers, resp_body)| {
+            let tuple = (status, resp_headers, PyBytes::new(py, &resp_body)).into_pyobject(py)?;
+            Ok(tuple.into_any().unbind())
+        },
+        auth_error_to_py,
+    )
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGcpTokenSnapshot>()?;
     m.add_class::<PySyncGcpTokenCache>()?;
     m.add_class::<PyAsyncGcpTokenCache>()?;
+    m.add_function(wrap_pyfunction!(gcp_http2_post_sync, m)?)?;
+    m.add_function(wrap_pyfunction!(gcp_http2_post_async, m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[test]
+    fn gcp_http2_post_roundtrip_with_local_http_server() {
+        let result = block_on_db(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                let mut buf = vec![0u8; 4096];
+                let _ = socket.read(&mut buf).await.expect("read");
+                let resp = b"HTTP/1.1 200 OK\r\nContent-Type: application/grpc+proto\r\ngrpc-status: 0\r\nContent-Length: 5\r\n\r\n\x00\x00\x00\x00\x00";
+                socket.write_all(resp).await.expect("write");
+            });
+
+            let mut headers = HashMap::new();
+            headers.insert(
+                "content-type".to_string(),
+                "application/grpc+proto".to_string(),
+            );
+            let url = format!("http://{addr}/google.ai.generativelanguage.v1beta.GenerativeService/BatchEmbedContents");
+            let out = native_gcp_http2_post(&url, &headers, vec![0, 0, 0, 0, 0], 5_000).await?;
+            let _ = server.await;
+            Ok::<_, String>(out)
+        })
+        .expect("gcp_http2_post succeeded");
+
+        assert_eq!(result.0, 200);
+        assert_eq!(result.1.get("grpc-status").map(String::as_str), Some("0"));
+        assert_eq!(result.2, vec![0, 0, 0, 0, 0]);
+    }
 }

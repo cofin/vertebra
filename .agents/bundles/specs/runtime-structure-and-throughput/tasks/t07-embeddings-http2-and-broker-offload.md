@@ -2,12 +2,14 @@
 type: Task
 id: runtime-structure-and-throughput:t07
 title: Add Rust HTTP/2 VertexEmbedder transport, bounded EmbeddingBroker offload, and batch Oracle pushdown
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
 - runtime-structure-and-throughput:t04
 files:
+- src/rs/vertebra-core/src/gcp_auth.rs
+- src/rs/vertebra-py/Cargo.toml
 - src/rs/vertebra-py/src/gcp_auth.rs
 - src/rs/vertebra-py/src/lib.rs
 - src/py/vertebra/_vertebra.pyi
@@ -21,18 +23,21 @@ tests:
 - src/py/tests/unit/db/test_enterprise_olap_drivers.py
 plan_revision: 1
 plan_commit: "af319da17dec0148a18532952cb7ea2a91d1c9d7"
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: agent:executor
+claimed_at: '2026-11-06T18:45:00Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-06T18:57:36Z'
+last_verified_commit: "e99a7128a0625f36b47036ee520c8a46cbded84e"
+verification_evidence:
+  command: cargo test --manifest-path src/rs/Cargo.toml -p vertebra-py --features gcp && make dev && uv run --no-sync python -m mypy.stubtest vertebra._vertebra && uv run --no-sync pytest src/py/tests/unit/embeddings/test_google_embedders.py src/py/tests/unit/embeddings/test_embedding_broker.py src/py/tests/unit/db/test_enterprise_olap_drivers.py -q
+  exit_code: 0
+  summary: 11 Rust unit tests and 177 Python unit tests passed; stubtest, ruff, rustfmt, and mypy clean.
 created_at: '2026-11-06T06:35:00Z'
-updated_at: '2026-11-06T06:35:00Z'
-commit: null
+updated_at: '2026-11-06T18:57:36Z'
+commit: "e99a7128a0625f36b47036ee520c8a46cbded84e"
 tags:
 - embeddings
 - http2
@@ -69,8 +74,10 @@ uv run --no-sync pytest src/py/tests/unit/embeddings/test_google_embedders.py sr
 
 ## Acceptance Criteria
 
-- [ ] R7: `VertexEmbedder` uses Rust HTTP/2 by default, `GeminiEmbedder.embed_multimodal` transmits inline media bytes, `Embedder._run_sync` reuses a persistent portal, `EmbeddingBroker` offloads in-process inference with bounded queue depth, and `OracleEmbeddingPushdown` batches via `DBMS_VECTOR.UTL_TO_EMBEDDINGS`.
+- [x] R7: `VertexEmbedder` uses Rust HTTP/2 by default, `GeminiEmbedder.embed_multimodal` transmits inline media bytes, `Embedder._run_sync` reuses a persistent portal, `EmbeddingBroker` offloads in-process inference with bounded queue depth, and `OracleEmbeddingPushdown` batches via `DBMS_VECTOR.UTL_TO_EMBEDDINGS`.
 
 ## Notes & Discoveries
 
-None.
+- Exposed `gcp_http2_post_sync` and `gcp_http2_post_async` on `vertebra._vertebra` (backed by connection-pooled `reqwest::Client` instances with loopback proxy bypass for local test servers) and wired `VertexEmbedder._default_http_transport` to `gcp_http2_post_async`.
+- Simplified `Embedder.__new__` to return `object.__new__(vertex_cls)` directly without pre-calling `VertexEmbedder.__init__`, and added a persistent background event-loop thread (`_ensure_sync_portal_loop`) in `Embedder._run_sync`.
+- Forwarded full base64 inline media payloads in `GeminiEmbedder.embed_multimodal`, added `max_pending_requests` backpressure and `asyncio.to_thread` local inference offload in `EmbeddingBroker`, and batched `OracleEmbeddingPushdown.embed_documents` / `embed_batch` via `DBMS_VECTOR.UTL_TO_EMBEDDINGS`.

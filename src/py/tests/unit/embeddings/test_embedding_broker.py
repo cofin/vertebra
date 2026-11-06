@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 import sys
+import threading
 import types
 from typing import Any
 
@@ -323,3 +324,45 @@ def test_local_embedders_configure_fastembed_backend_factory(monkeypatch: pytest
             "threads": None,
         },
     )
+
+
+@pytest.mark.anyio
+async def test_embedding_broker_max_pending_requests_and_thread_offload() -> None:
+    """EmbeddingBroker enforces max_pending_requests and offloads local inference via asyncio.to_thread."""
+    loop_tid = threading.get_ident()
+    inference_tids: list[int] = []
+
+    def thread_recording_backend(texts: list[str], dims: int) -> list[list[float]]:
+        inference_tids.append(threading.get_ident())
+        return [[1.0, 0.0, 0.0, 0.0][:dims] for _ in texts]
+
+    broker = EmbeddingBroker(
+        backend_fn=thread_recording_backend,
+        dimensions=4,
+        config=EmbeddingBrokerConfig(
+            max_batch_requests=8,
+            max_batch_tokens=1024,
+            max_pending_requests=2,
+            coalesce_window_ms=40.0,
+            bulk_chunk_size=2,
+            isolate_gil_subprocess=False,
+        ),
+    )
+
+    task1 = asyncio.create_task(broker.submit_single("req-1"))
+    task2 = asyncio.create_task(broker.submit_single("req-2"))
+    await asyncio.sleep(0)
+    with pytest.raises(RuntimeError, match="max_pending_requests"):
+        await broker.submit_single("req-3-overflow")
+
+    v1, v2 = await asyncio.gather(task1, task2)
+    assert v1.dimensions == 4
+    assert v2.dimensions == 4
+    assert inference_tids
+    assert all(tid != loop_tid for tid in inference_tids)
+
+    inference_tids.clear()
+    batch = await broker.submit_batch(["b1", "b2", "b3"])
+    assert batch.count == 3
+    assert inference_tids
+    assert all(tid != loop_tid for tid in inference_tids)

@@ -27,6 +27,7 @@ pyo3 = { workspace = true, features = ["auto-initialize"] }
 
 [features]
 default = []
+gcp = ["vertebra-db/gcp"]
 # Use "extension-module" when building as a standalone .so (maturin develop).
 # Omit this feature when linking as rlib into the server binary.
 extension-module = ["pyo3/extension-module"]

@@ -34,7 +34,10 @@ pub use broker::{
     BrokerStats, LeaseBroker, LeaseGrant, StatementCache, StatementCacheStats, StatementPlan,
 };
 pub use db::{AlloyDBDialer, ArrowCursor, CloudSQLDialer};
-pub use gcp_auth::{PyAsyncGcpTokenCache, PyGcpTokenSnapshot, PySyncGcpTokenCache};
+pub use gcp_auth::{
+    PyAsyncGcpTokenCache, PyGcpTokenSnapshot, PySyncGcpTokenCache, gcp_http2_post_async,
+    gcp_http2_post_sync,
+};
 pub use headers::{Headers, HeadersIterator};
 pub use msgspec_bridge::{
     call_vectorcall, hydrate_one_vectorcall, hydrate_rows_vectorcall,
