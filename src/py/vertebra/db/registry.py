@@ -182,9 +182,23 @@ class DatabaseRegistry:
     @classmethod
     def parse_url(cls, url: str, **overrides: Any) -> AnyDatabaseConfig:
         """Parse a database, cache, analytics, or dialer URL into its typed configuration struct."""
-        parsed = urlparse(url)
-        scheme = parsed.scheme.lower()
-        config_cls = SCHEME_REGISTRY.get(scheme) or SCHEME_REGISTRY.get(scheme.split("+", 1)[0])
+        raw_scheme, sep, rest = url.partition("://")
+        scheme = (raw_scheme if sep else urlparse(url).scheme).lower()
+        base_scheme = scheme
+        if "+" in scheme:
+            prefix, _, driver_tag = scheme.rpartition("+")
+            if driver_tag in {"vtb", "vertebra"}:
+                base_scheme = prefix
+            elif driver_tag in {"vtb_async", "vertebra_async"}:
+                base_scheme = prefix
+                if sep:
+                    sync_tag = driver_tag.removesuffix("_async")
+                    url = f"{prefix}+{sync_tag}://{rest}"
+        config_cls = (
+            SCHEME_REGISTRY.get(scheme)
+            or SCHEME_REGISTRY.get(base_scheme)
+            or SCHEME_REGISTRY.get(base_scheme.split("+", 1)[0])
+        )
         if config_cls is None:
             msg = f"Unsupported database URL scheme: {scheme!r}"
             raise ValueError(msg)

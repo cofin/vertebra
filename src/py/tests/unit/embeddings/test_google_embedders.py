@@ -75,10 +75,10 @@ def test_clean_domain_naming_and_default_factory() -> None:
     assert vertebra.VectorView is VectorView
     assert vertebra.VectorBatchView is VectorBatchView
     assert "vertebra.embeddings" in vertebra.__lazy_modules__
-
-    for exported_name in vertebra.embeddings.__all__:
-        assert not exported_name.endswith("Bridge")
-        assert "GrpcBridge" not in exported_name
+    assert all(
+        not exported_name.endswith("Bridge") and "GrpcBridge" not in exported_name
+        for exported_name in vertebra.embeddings.__all__
+    )
 
 
 @pytest.mark.anyio
@@ -329,13 +329,28 @@ async def test_pushdown_search_parameters_and_validation(provider: Any, metric: 
     assert "docs" in sql and 3 in params.values() if isinstance(params, dict) else 3 in params
     if provider is PostgresEmbeddingPushdown:
         assert {"cosine": "<=>", "euclidean": "<->", "dot": "<#>"}[metric] in sql
-    for kwargs in (
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("provider", _PROVIDERS)
+@pytest.mark.parametrize(
+    "invalid_kwargs",
+    [
         {"table": "docs; DROP TABLE docs"},
         {"table": "docs", "embedding_column": "x.y"},
         {"table": "docs", "metric": "invalid"},
-    ):
-        with pytest.raises(ValueError):
-            await pushdown.similarity_search([1.0], **kwargs)
+    ],
+    ids=["bad-table", "dotted-column", "bad-metric"],
+)
+async def test_pushdown_search_rejects_invalid_arguments(
+    provider: Any,
+    invalid_kwargs: dict[str, Any],
+) -> None:
+    """Similarity search rejects unsafe table/column identifiers and unsupported metrics."""
+    options = {"provider": "local"} if provider is OracleEmbeddingPushdown else {}
+    pushdown = provider(_SelectPort([]), **options)
+    with pytest.raises(ValueError):
+        await pushdown.similarity_search([1.0], **invalid_kwargs)
 
 
 @pytest.mark.anyio
@@ -372,8 +387,10 @@ def test_postgres_sql_expression_model_binding_and_clean_break() -> None:
         pushdown.sql_expr("content); DROP TABLE docs")
     with pytest.raises(ValueError):
         PostgresEmbeddingPushdown(_SelectPort([]), model="")
-    for name in ("BigQueryEmbedder", "SpannerEmbedder", "AlloyDbEmbedder", "OracleEmbedder"):
-        assert not hasattr(vertebra.embeddings, name)
+    assert all(
+        not hasattr(vertebra.embeddings, name)
+        for name in ("BigQueryEmbedder", "SpannerEmbedder", "AlloyDbEmbedder", "OracleEmbedder")
+    )
     result = subprocess.run(
         [
             sys.executable,
@@ -494,3 +511,137 @@ async def test_facade_dispatches_query_and_document_capability_methods() -> None
     assert all(kwargs["task"] == "document" for kind, _, kwargs in capability.calls if kind == "documents")
     assert await embedder.vector_search("s", table="docs", top_k=2, metric="dot") == [{"id": 9}]
     assert capability.calls[-1][2] == {"table": "docs", "embedding_column": "embedding", "top_k": 2, "metric": "dot"}
+
+
+@pytest.mark.anyio
+async def test_embed_document_and_embed_many_vector_cache_parity_and_partial_misses() -> None:
+    """embed_document and embed_many share title-scoped VectorCache keys and record cached_input_tokens."""
+    batch_calls: list[tuple[list[str], str, list[str | None] | None]] = []
+
+    class CountingEmbedder(Embedder):
+        def __init__(self, cache: VectorCache) -> None:
+            super().__init__(model="test-cache-model", dimensions=4, cache=cache)
+
+        async def _embed_batch_impl(
+            self,
+            texts: list[str],
+            *,
+            task: str = "document",
+            titles: list[str | None] | None = None,
+        ) -> VectorBatchView:
+            batch_calls.append((list(texts), task, list(titles) if titles is not None else None))
+            rows = [
+                [
+                    float(len(txt)),
+                    float(len(titles[idx]) if titles and titles[idx] else 0),
+                    1.0,
+                    0.0,
+                ]
+                for idx, txt in enumerate(texts)
+            ]
+            return VectorBatchView.from_f32_rows(rows, normalize=False)
+
+    cache = VectorCache(capacity=64, dimensions=4)
+    emb = CountingEmbedder(cache)
+
+    v_doc_a = await emb.embed_document("body-text", title="DocA")
+    v_doc_b = await emb.embed_document("body-text", title="DocB")
+    v_doc_none = await emb.embed_document("body-text")
+    assert v_doc_a.to_list() == [9.0, 4.0, 1.0, 0.0]
+    assert v_doc_b.to_list() == [9.0, 4.0, 1.0, 0.0]
+    assert v_doc_none.to_list() == [9.0, 0.0, 1.0, 0.0]
+    assert len(batch_calls) == 3
+
+    full_hit = await emb.embed_many(["body-text", "body-text"], titles=["DocA", None])
+    assert len(batch_calls) == 3
+    assert full_hit.to_list() == [[9.0, 4.0, 1.0, 0.0], [9.0, 0.0, 1.0, 0.0]]
+    assert emb.last_usage is not None
+    assert emb.last_usage.input_tokens == 0
+    assert emb.last_usage.cached_input_tokens > 0
+
+    partial_hit = await emb.embed_many(
+        ["body-text", "fresh-body", "body-text"],
+        titles=["DocA", "FreshTitle", None],
+    )
+    assert len(batch_calls) == 4
+    assert batch_calls[-1] == (["fresh-body"], "document", ["FreshTitle"])
+    assert partial_hit.to_list() == [
+        [9.0, 4.0, 1.0, 0.0],
+        [10.0, 10.0, 1.0, 0.0],
+        [9.0, 0.0, 1.0, 0.0],
+    ]
+    assert emb.last_usage is not None
+    assert emb.last_usage.input_tokens > 0
+    assert emb.last_usage.cached_input_tokens > 0
+
+
+@pytest.mark.anyio
+async def test_pushdown_embedder_preserves_document_titles() -> None:
+    """PushdownEmbedder prefixes non-empty document titles before delegating to embed_documents."""
+    capability = _CapabilityPort()
+    embedder = PushdownEmbedder(capability, dimensions=4, normalize=False)
+    await embedder.embed_document("b1", title="T1")
+    await embedder.embed_many(["b1", "b2"], titles=["T1", None])
+    assert capability.calls[0] == (
+        "documents",
+        ["T1: b1"],
+        {"task": "document", "dimensions": 4, "normalize": False},
+    )
+    assert capability.calls[1] == (
+        "documents",
+        ["T1: b1", "b2"],
+        {"task": "document", "dimensions": 4, "normalize": False},
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("driver_kind", "expected_binds"),
+    [
+        ("sync", ("%s", "%s")),
+        ("asyncpg_pool", ("$1", "$2")),
+        ("psycopg_async_pool", ("%s", "%s")),
+        ("tx_asyncpg", ("$1", "$2")),
+        ("tx_psycopg", ("%s", "%s")),
+    ],
+)
+async def test_postgres_embedding_pushdown_placeholder_selection(
+    driver_kind: str,
+    expected_binds: tuple[str, str],
+) -> None:
+    """PostgresEmbeddingPushdown selects $1/$2 for asyncpg shapes and %s/%s for sync or psycopg pools."""
+
+    class AcquirePool:
+        def acquire(self) -> None:
+            return None
+
+    class ConnectionPool:
+        def connection(self) -> None:
+            return None
+
+    class AsyncpgTxConn:
+        def fetch(self) -> None:
+            return None
+
+    class PsycopgTxConn:
+        def cursor(self) -> None:
+            return None
+
+    rows = [{"embedding": [1.0, 0.0, 0.0, 0.0]}]
+    if driver_kind == "sync":
+        port: Any = _SelectPort(rows)
+    else:
+        port = _AsyncSelectPort(rows)
+        if driver_kind == "asyncpg_pool":
+            port.pool = AcquirePool()
+        elif driver_kind == "psycopg_async_pool":
+            port.pool = ConnectionPool()
+        elif driver_kind == "tx_asyncpg":
+            port._tx_conn = AsyncpgTxConn()
+        elif driver_kind == "tx_psycopg":
+            port._tx_conn = PsycopgTxConn()
+
+    pushdown = PostgresEmbeddingPushdown(port, dimensions=4, normalize=False)
+    await pushdown.embed_query("alpha")
+    b1, b2 = expected_binds
+    assert f"embedding({b1}, t.txt)::vector FROM unnest({b2}::text[])" in port.calls[-1][0]

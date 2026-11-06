@@ -577,13 +577,11 @@ class MCPService:
         """
         owner_id = self._caller_owner(context)
         token = meta.get(CONFIRMATION_TOKEN_META_KEY) if isinstance(meta, Mapping) else None
-        ticket = self.confirmation_gate.get_ticket(token) if isinstance(token, str) else None
-        if (
-            ticket is not None
-            and ticket.status == "approved"
-            and (ticket.owner_id is None or ticket.owner_id == owner_id)
-            and ticket.tool_name == tool_name
-            and ticket.arguments == arguments
+        if self.confirmation_gate.is_call_approved(
+            token if isinstance(token, str) else None,
+            tool_name=tool_name,
+            arguments=arguments,
+            owner_id=owner_id,
         ):
             return
         issued = self.confirmation_gate.request_confirmation(

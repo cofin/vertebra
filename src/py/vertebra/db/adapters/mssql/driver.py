@@ -19,6 +19,7 @@ from vertebra.db.arrow import (
     _table_to_rows_and_cols,
 )
 from vertebra.db.driver import SyncDatabaseDriver, ThreadOffloadAsyncDatabaseDriver
+from vertebra.utils.text import quote_dialect_identifier, validate_identifier
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -203,12 +204,19 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
     ) -> int:
         """Bulk-ingest an Arrow Table, `ArrowCursor`, or row sequence into `table_name`."""
         _ = kwargs
+        validate_identifier(table_name, "table_name", allow_dots=True)
+        if columns is not None:
+            for col in columns:
+                validate_identifier(str(col), "column", allow_dots=False)
         rows, cols = _table_to_rows_and_cols(data, columns)
+        for col in cols:
+            validate_identifier(str(col), "column", allow_dots=False)
         if not rows or not cols:
             return 0
         placeholders = ", ".join(f"@P{i + 1}" for i in range(len(cols)))
-        col_list = ", ".join(cols)
-        sql = f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders})"
+        quoted_table = quote_dialect_identifier(table_name, self.dialect)
+        col_list = ", ".join(quote_dialect_identifier(str(col), self.dialect) for col in cols)
+        sql = f"INSERT INTO {quoted_table} ({col_list}) VALUES ({placeholders})"
         grant = self._prepare_and_lease(sql)
         try:
             sqlite_sql = re.sub(r"@P\d+", "?", sql)

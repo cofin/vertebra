@@ -21,6 +21,7 @@ from vertebra.db.driver import (
     SyncDatabaseDriver,
 )
 from vertebra.utils.module_loader import ensure_module
+from vertebra.utils.text import quote_dialect_identifier, validate_identifier
 
 if TYPE_CHECKING:
     import ssl
@@ -92,46 +93,42 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
                 self._tx_conn.begin()
 
     def commit(self) -> None:
-        """Commit the active transaction across active or pooled connections."""
+        """Commit the active transaction."""
+        tx_conn = self._tx_conn
+        mru_conn = self._idle_conns.pop() if tx_conn is None and self._idle_conns else None
+        target = tx_conn if tx_conn is not None else mru_conn
         try:
-            if self._tx_conn is not None:
-                if hasattr(self._tx_conn, "commit"):
-                    self._tx_conn.commit()
-            else:
-                for conn in list(self._idle_conns):
-                    if hasattr(conn, "commit"):
-                        conn.commit()
-                if hasattr(self._connect_factory, "commit"):
-                    self._connect_factory.commit()
+            if target is not None:
+                if hasattr(target, "commit"):
+                    target.commit()
+            elif hasattr(self._connect_factory, "commit"):
+                self._connect_factory.commit()
         finally:
-            tx_conn = self._tx_conn
             self._tx_conn = None
             self._tx_snapshot = None
             self._in_transaction = False
-            if tx_conn is not None:
-                self._release(tx_conn)
+            if target is not None:
+                self._release(target)
 
     def rollback(self) -> None:
-        """Roll back the active transaction across active or pooled connections."""
+        """Roll back the active transaction."""
+        tx_conn = self._tx_conn
+        mru_conn = self._idle_conns.pop() if tx_conn is None and self._idle_conns else None
+        target = tx_conn if tx_conn is not None else mru_conn
         try:
             if self._tx_snapshot is not None:
                 self._in_memory_rows = list(self._tx_snapshot)
-            if self._tx_conn is not None:
-                if hasattr(self._tx_conn, "rollback"):
-                    self._tx_conn.rollback()
-            else:
-                for conn in list(self._idle_conns):
-                    if hasattr(conn, "rollback"):
-                        conn.rollback()
-                if hasattr(self._connect_factory, "rollback"):
-                    self._connect_factory.rollback()
+            if target is not None:
+                if hasattr(target, "rollback"):
+                    target.rollback()
+            elif hasattr(self._connect_factory, "rollback"):
+                self._connect_factory.rollback()
         finally:
-            tx_conn = self._tx_conn
             self._tx_conn = None
             self._tx_snapshot = None
             self._in_transaction = False
-            if tx_conn is not None:
-                self._release(tx_conn)
+            if target is not None:
+                self._release(target)
 
     def close(self) -> None:
         """Close the driver and release all pooled connections."""
@@ -194,12 +191,19 @@ class SyncMySQLDriver(SyncDatabaseDriver[MySQLConfig]):
     ) -> int:
         """Bulk-ingest an Arrow Table, `ArrowCursor`, or row sequence into `table_name`."""
         _ = kwargs
+        validate_identifier(table_name, "table_name", allow_dots=True)
+        if columns is not None:
+            for col in columns:
+                validate_identifier(str(col), "column", allow_dots=False)
         rows, cols = _table_to_rows_and_cols(data, columns)
+        for col in cols:
+            validate_identifier(str(col), "column", allow_dots=False)
         if not rows or not cols:
             return 0
         placeholders = ", ".join("%s" for _ in cols)
-        col_list = ", ".join(cols)
-        sql = f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders})"
+        quoted_table = quote_dialect_identifier(table_name, self.dialect)
+        col_list = ", ".join(quote_dialect_identifier(str(col), self.dialect) for col in cols)
+        sql = f"INSERT INTO {quoted_table} ({col_list}) VALUES ({placeholders})"
         for row in rows:
             self.execute(sql, row)
         return len(rows)
@@ -477,12 +481,19 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
     ) -> int:
         """Asynchronously bulk-ingest an Arrow Table, `ArrowCursor`, or row sequence into `table_name`."""
         _ = kwargs
+        validate_identifier(table_name, "table_name", allow_dots=True)
+        if columns is not None:
+            for col in columns:
+                validate_identifier(str(col), "column", allow_dots=False)
         rows, cols = _table_to_rows_and_cols(data, columns)
+        for col in cols:
+            validate_identifier(str(col), "column", allow_dots=False)
         if not rows or not cols:
             return 0
         placeholders = ", ".join("%s" for _ in cols)
-        col_list = ", ".join(cols)
-        sql = f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders})"
+        quoted_table = quote_dialect_identifier(table_name, self.dialect)
+        col_list = ", ".join(quote_dialect_identifier(str(col), self.dialect) for col in cols)
+        sql = f"INSERT INTO {quoted_table} ({col_list}) VALUES ({placeholders})"
         for row in rows:
             await self.execute(sql, row)
         return len(rows)
@@ -587,7 +598,7 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         if self._pool is not None:
             return self._pool
         asyncmy: Any = ensure_module("asyncmy", install_package="asyncmy", extra="mysql")
-        params = self.config.parse_dsn_params()
+        params = await self.config.parse_dsn_params_async()
         pool_kwargs: dict[str, Any] = {
             "host": params["host"],
             "port": params["port"],

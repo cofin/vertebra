@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Annotated, Any, cast
@@ -11,6 +12,7 @@ import msgspec
 import pytest
 
 from vertebra._vertebra import Response
+from vertebra.db.adapters.redis import AsyncRedisDriver, RedisConfig
 from vertebra.extensions.litestar import VertebraConfig, VertebraPlugin
 from vertebra.framework._app import App, _make_handler_id
 from vertebra.framework.asyncapi import AsyncAPISpecBuilder, AsyncChannelDef
@@ -339,7 +341,8 @@ def test_guard_requires_and_security_middleware() -> None:
     assert limiter.allow("client-2") is True
 
 
-def test_openapi_spec_builder_from_app_and_enable_docs() -> None:
+@pytest.mark.parametrize("docs_path", ["/docs", "/swagger"])
+def test_openapi_spec_builder_from_app_and_enable_docs(docs_path: str) -> None:
     """Verify OpenAPISpecBuilder.from_app route inspection and App.enable_docs route handlers."""
     app = App()
 
@@ -360,13 +363,12 @@ def test_openapi_spec_builder_from_app_and_enable_docs() -> None:
     assert "/custom-openapi.json" in route_paths
     assert "/docs" in route_paths
 
-    for docs_path in ("/docs", "/swagger"):
-        docs_id = _make_handler_id("GET", docs_path)
-        docs_resp = app._handlers[docs_id]()
-        assert isinstance(docs_resp, Response)
-        assert docs_resp.status == 200
-        assert (b"content-type", b"text/html; charset=utf-8") in docs_resp.headers
-        assert b"<!DOCTYPE html>" in bytes(docs_resp.body) or b"<!doctype html>" in bytes(docs_resp.body).lower()
+    docs_id = _make_handler_id("GET", docs_path)
+    docs_resp = app._handlers[docs_id]()
+    assert isinstance(docs_resp, Response)
+    assert docs_resp.status == 200
+    assert (b"content-type", b"text/html; charset=utf-8") in docs_resp.headers
+    assert b"<!DOCTYPE html>" in bytes(docs_resp.body) or b"<!doctype html>" in bytes(docs_resp.body).lower()
 
 
 def test_asyncapi_spec_builder_from_channels() -> None:
@@ -473,3 +475,35 @@ async def test_queue_and_email_backend_validation_and_policies(monkeypatch: pyte
     assert smtp_receipt.startswith("<") and smtp_receipt.endswith(">")
     assert len(sent_messages) == 1
     assert sent_messages[0]["Subject"] == "Invoice"
+
+
+@pytest.mark.anyio
+async def test_key_value_store_redis_invalidation_read_through_and_ttl_renewal() -> None:
+    """KeyValueStore attaches AsyncRedisDriver invalidation, populates read-through pttl, and renews driver px TTL."""
+    driver = AsyncRedisDriver(RedisConfig(url="memory://"))
+    store = KeyValueStore(driver=driver)
+    try:
+        await store.set("session-1", b"tok", expires_in=10)
+        assert "vertebra:session-1" in store._entries
+        driver.handle_invalidation_push(["vertebra:session-1"])
+        assert "vertebra:session-1" not in store._entries
+
+        await driver.set("vertebra:warm", b"cached-payload", px=3000)
+        assert "vertebra:warm" not in store._entries
+        loaded = await store.get("warm")
+        assert loaded == b"cached-payload"
+        assert "vertebra:warm" in store._entries
+        cached_val, cached_exp = store._entries["vertebra:warm"]
+        assert cached_val == b"cached-payload"
+        assert cached_exp is not None
+
+        hit_renewed = await store.get("warm", renew_for=timedelta(seconds=20))
+        assert hit_renewed == b"cached-payload"
+        assert 5000 < await driver.pttl("vertebra:warm") <= 20000
+
+        await driver.set("vertebra:miss-renew", b"fresh-payload", px=1500)
+        miss_renewed = await store.get("miss-renew", renew_for=timedelta(seconds=25))
+        assert miss_renewed == b"fresh-payload"
+        assert 5000 < await driver.pttl("vertebra:miss-renew") <= 25000
+    finally:
+        await store.close()

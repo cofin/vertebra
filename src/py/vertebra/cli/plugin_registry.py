@@ -287,11 +287,13 @@ def register_app_cli_plugins(cli_group: click.Group, app: Any) -> list[str]:
     if app is None:
         return activated
 
-    seen_ids: set[int] | None = getattr(cli_group, "_registered_plugin_ids", None)
-    if seen_ids is None:
+    seen_ids: set[int]
+    if isinstance(cli_group, VertebraGroup):
+        seen_ids = cli_group._registered_plugin_ids
+    elif hasattr(cli_group, "__dict__"):
+        seen_ids = cli_group.__dict__.setdefault("_registered_plugin_ids", set())
+    else:
         seen_ids = set()
-        with contextlib.suppress(AttributeError, TypeError):
-            cli_group._registered_plugin_ids = seen_ids  # type: ignore[attr-defined]
 
     for plugin in _collect_app_plugins(app):
         plugin_id = id(plugin)

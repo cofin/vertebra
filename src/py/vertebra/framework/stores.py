@@ -41,7 +41,7 @@ class KeyValueStore:
         self._key_prefix = validate_identifier(key_prefix, "key_prefix", allow_hyphens=True)
         self._entries: dict[str, tuple[bytes, float | None]] = {}
         self._driver = driver
-        if isinstance(driver, AsyncValkeyDriver):
+        if isinstance(driver, (AsyncValkeyDriver, AsyncRedisDriver)):
             driver.add_invalidation_listener(self._on_driver_invalidate)
 
     @property
@@ -86,18 +86,41 @@ class KeyValueStore:
         """Retrieve bytes for key if present and unexpired, optionally renewing TTL."""
         full_key = self._make_key(key)
         entry = self._entries.get(full_key)
-        if entry is None:
-            if self._driver is not None:
-                return await self._driver.get(full_key)
-            return None
-        value, expires_at = entry
         now = time.monotonic()
-        if expires_at is not None and now >= expires_at:
-            self._entries.pop(full_key, None)
-            return None
+        if entry is not None:
+            value, expires_at = entry
+            if expires_at is not None and now >= expires_at:
+                self._entries.pop(full_key, None)
+                entry = None
+        if entry is None:
+            if self._driver is None:
+                return None
+            raw = await self._driver.get(full_key)
+            if raw is None:
+                return None
+            val_bytes = raw.encode("utf-8") if isinstance(raw, str) else bytes(raw)
+            if renew_for is not None:
+                ttl_ms = self._ttl_milliseconds(renew_for)
+                new_expires = None if ttl_ms is None else time.monotonic() + ttl_ms / 1000.0
+                self._entries[full_key] = (val_bytes, new_expires)
+                await self._driver.set(full_key, val_bytes, px=ttl_ms)
+                return val_bytes
+            new_expires = None
+            if hasattr(self._driver, "pttl"):
+                pttl_ms = await self._driver.pttl(full_key)
+                if pttl_ms == -2:
+                    return None
+                if pttl_ms >= 0:
+                    new_expires = time.monotonic() + pttl_ms / 1000.0
+            self._entries[full_key] = (val_bytes, new_expires)
+            return val_bytes
+        value, _expires_at = entry
         if renew_for is not None:
-            ttl_s = renew_for.total_seconds() if isinstance(renew_for, timedelta) else float(renew_for)
-            self._entries[full_key] = (value, now + ttl_s)
+            ttl_ms = self._ttl_milliseconds(renew_for)
+            new_expires = None if ttl_ms is None else now + ttl_ms / 1000.0
+            self._entries[full_key] = (value, new_expires)
+            if self._driver is not None:
+                await self._driver.set(full_key, value, px=ttl_ms)
         return value
 
     async def set(

@@ -219,7 +219,8 @@ class _BaseSpannerChangeStreamSource[DriverT]:
 
     def schedule_partition(self, token: str, start_timestamp: str = "") -> None:
         """Schedule a partition token for change stream polling."""
-        if token not in self._completed_partitions and token not in self._active_partitions:
+        self._completed_partitions.discard(token)
+        if token not in self._active_partitions:
             self._active_partitions.append(token)
         if start_timestamp:
             self._partition_start_timestamps[token] = start_timestamp
@@ -234,8 +235,9 @@ class _BaseSpannerChangeStreamSource[DriverT]:
         for child in self._pending_children:
             parents_done = all(p in self._completed_partitions for p in child.parent_partition_tokens)
             if parents_done:
-                self.schedule_partition(child.token, child.start_timestamp)
-                promoted.append(child.token)
+                if child.token not in self._completed_partitions:
+                    self.schedule_partition(child.token, child.start_timestamp)
+                    promoted.append(child.token)
             else:
                 remaining.append(child)
         self._pending_children = remaining
@@ -282,6 +284,7 @@ class _BaseSpannerChangeStreamSource[DriverT]:
         emitted: list[ChangeEvent] = []
         for rec in records:
             effective_token = rec.partition_token if rec.partition_token is not None else partition_token
+            token_key = effective_token or ""
             if rec.record_type == "data_change":
                 payload = {
                     "stream_name": self._stream_name,
@@ -296,20 +299,26 @@ class _BaseSpannerChangeStreamSource[DriverT]:
                 }
                 _, evt = self._change_feed.publish_event(rec.mod_type or "CHANGE", payload)
                 emitted.append(evt)
-                if effective_token and rec.commit_timestamp:
-                    self._watermarks[effective_token] = rec.commit_timestamp
+                if rec.commit_timestamp:
+                    self._watermarks[token_key] = rec.commit_timestamp
+                    self._partition_start_timestamps[token_key] = rec.commit_timestamp
             elif rec.record_type == "heartbeat":
-                if effective_token and rec.watermark_timestamp:
-                    self._watermarks[effective_token] = rec.watermark_timestamp
+                if rec.watermark_timestamp:
+                    self._watermarks[token_key] = rec.watermark_timestamp
+                    self._partition_start_timestamps[token_key] = rec.watermark_timestamp
             elif rec.record_type == "child_partitions":
-                if effective_token and rec.watermark_timestamp:
-                    self._watermarks[effective_token] = rec.watermark_timestamp
+                if rec.watermark_timestamp:
+                    self._watermarks[token_key] = rec.watermark_timestamp
+                    self._partition_start_timestamps[token_key] = rec.watermark_timestamp
+                pending_tokens = {c.token for c in self._pending_children}
                 for child in rec.child_partitions:
                     parents_done = all(p in self._completed_partitions for p in child.parent_partition_tokens)
                     if not child.parent_partition_tokens or parents_done:
-                        self.schedule_partition(child.token, child.start_timestamp)
-                    else:
+                        if child.token not in self._completed_partitions:
+                            self.schedule_partition(child.token, child.start_timestamp)
+                    elif child.token not in pending_tokens:
                         self._pending_children.append(child)
+                        pending_tokens.add(child.token)
         return emitted
 
     def _parse_mapping(

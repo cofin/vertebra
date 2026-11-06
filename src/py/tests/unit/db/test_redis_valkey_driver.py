@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from vertebra.db import DatabaseRegistry
 from vertebra.db.adapters.redis import (
     AsyncRedisDriver,
     RedisConfig,
@@ -511,3 +512,118 @@ def test_store_rejects_invalid_key_prefix(store_cls: type[Any]) -> None:
     """Key prefixes containing glob characters are rejected."""
     with pytest.raises(ValueError, match="key_prefix"):
         store_cls(key_prefix="cache*")
+
+
+@pytest.mark.parametrize(
+    ("cfg", "expected_len", "expected_prefix"),
+    [
+        (RedisConfig(url="redis://localhost:6379/0"), 2, ("redis", "redis://localhost:6379/0")),
+        (ValkeyConfig(url="valkey://localhost:6379/0"), 2, ("valkey", "valkey://localhost:6379/0")),
+        (
+            RedisConfig(url="redis://localhost:6379/0", username="alice"),
+            13,
+            ("redis", "redis://localhost:6379/0", "alice", 3),
+        ),
+        (
+            RedisConfig(url="redis://localhost:6379/0", protocol=2),
+            13,
+            ("redis", "redis://localhost:6379/0", "", 2),
+        ),
+        (
+            RedisConfig(url="redis://localhost:6379/0", topology="sentinel", sentinel_master_name="mymaster"),
+            13,
+            ("redis", "redis://localhost:6379/0", "", 3, "sentinel", "mymaster"),
+        ),
+        (
+            RedisConfig(url="redis://localhost:6379/0", enable_client_tracking=True),
+            13,
+            ("redis", "redis://localhost:6379/0"),
+        ),
+        (
+            ValkeyConfig(url="valkey://localhost:6379/0", enable_client_side_caching=False),
+            13,
+            ("valkey", "valkey://localhost:6379/0"),
+        ),
+        (
+            ValkeyConfig(url="valkey://localhost:6379/0", client_tracking_prefixes=("tenant:",)),
+            13,
+            ("valkey", "valkey://localhost:6379/0"),
+        ),
+        (
+            RedisConfig(url="redis://localhost:6379/0", enable_gcp_iam_auth=True),
+            13,
+            ("redis", "redis://localhost:6379/0"),
+        ),
+        (
+            ValkeyConfig(
+                url="valkey://localhost:6379/0",
+                memorystore_instance_id="projects/p/locations/r/instances/i",
+            ),
+            13,
+            ("valkey", "valkey://localhost:6379/0"),
+        ),
+    ],
+    ids=[
+        "redis-default",
+        "valkey-default",
+        "redis-username",
+        "redis-resp2",
+        "redis-sentinel",
+        "redis-tracking-on",
+        "valkey-tracking-off",
+        "valkey-tracking-prefixes",
+        "redis-gcp-iam",
+        "valkey-memorystore-id",
+    ],
+)
+def test_redis_and_valkey_pool_key_compact_defaults_and_option_expansion(
+    cfg: RedisConfig | ValkeyConfig,
+    expected_len: int,
+    expected_prefix: tuple[Any, ...],
+) -> None:
+    """Default RedisConfig and ValkeyConfig emit compact 2-tuples while non-default options expand to 13-tuples."""
+    key = cfg.pool_key()
+    assert len(key) == expected_len
+    assert key[: len(expected_prefix)] == expected_prefix
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("cfg_cls", "url", "sync_cls", "async_cls"),
+    [
+        (RedisConfig, "memory://", SyncRedisDriver, AsyncRedisDriver),
+        (ValkeyConfig, "memory://", SyncValkeyDriver, AsyncValkeyDriver),
+    ],
+    ids=["redis", "valkey"],
+)
+async def test_redis_and_valkey_build_drivers_propagate_broker(
+    cfg_cls: type[RedisConfig] | type[ValkeyConfig],
+    url: str,
+    sync_cls: type[SyncRedisDriver],
+    async_cls: type[AsyncRedisDriver],
+) -> None:
+    """build_sync_driver and build_async_driver propagate explicit config.broker or registry._broker."""
+    reg_broker = object()
+    registry = DatabaseRegistry(broker=reg_broker)
+    cfg_from_reg = cfg_cls(url=url)
+    sync_drv = cfg_from_reg.build_sync_driver(registry)
+    async_drv = cfg_from_reg.build_async_driver(registry)
+    try:
+        assert isinstance(sync_drv, sync_cls)
+        assert isinstance(async_drv, async_cls)
+        assert sync_drv.broker is reg_broker
+        assert async_drv.broker is reg_broker
+    finally:
+        sync_drv.close()
+        await async_drv.close()
+
+    explicit_broker = object()
+    cfg_explicit = cfg_cls(url=url, broker=explicit_broker)
+    sync_exp = cfg_explicit.build_sync_driver(registry)
+    async_exp = cfg_explicit.build_async_driver(registry)
+    try:
+        assert sync_exp.broker is explicit_broker
+        assert async_exp.broker is explicit_broker
+    finally:
+        sync_exp.close()
+        await async_exp.close()

@@ -10,12 +10,13 @@ import pytest
 from sqlspec import StatementStack
 
 from tests.unit.db.test_bigquery import _MockBigQueryRestServer
-from vertebra.db import ArrowCursor, NotFoundError
+from vertebra.db import ArrowCursor, NotFoundError, NotSupportedError
 from vertebra.db.adapters.bigquery import (
     AsyncBigQueryDriver as CoreAsyncBigQueryDriver,
 )
 from vertebra.db.adapters.bigquery import BigQueryConfig, BigQueryDryRunResult, ObjectTableConfig
 from vertebra.db.adapters.bigquery import SyncBigQueryDriver as CoreSyncBigQueryDriver
+from vertebra.db.rls import TenantPredicate
 from vertebra.extensions.sqlspec import (
     BigQueryAsyncADKArtifactStore,
     BigQueryAsyncADKMemoryStore,
@@ -33,6 +34,12 @@ from vertebra.extensions.sqlspec import (
     BigQuerySyncEventQueueStore,
     BigQuerySyncStore,
     ObjectStoreBackend,
+)
+from vertebra.extensions.sqlspec.adapters import (
+    AsyncAdapterConfig,
+    BaseAsyncDriver,
+    BaseSyncDriver,
+    SyncAdapterConfig,
 )
 from vertebra.storage import SigningConfig, SyncObjectStore
 
@@ -947,14 +954,6 @@ def test_configured_tenant_predicate_rejected_before_constructor_effects(
     kind: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Unsupported isolation fails before base, core, resolver, broker, or native access."""
-    from vertebra.db import NotSupportedError
-    from vertebra.db.rls import TenantPredicate
-    from vertebra.extensions.sqlspec.adapters import (
-        AsyncAdapterConfig,
-        BaseAsyncDriver,
-        BaseSyncDriver,
-        SyncAdapterConfig,
-    )
 
     def forbidden(*args: Any, **kwargs: Any) -> Any:
         pytest.fail("Constructor performed a side effect before rejecting tenant isolation")
@@ -978,3 +977,68 @@ def test_configured_tenant_predicate_rejected_before_constructor_effects(
         monkeypatch.setattr(constructor_type, "__setattr__", forbidden)
     with pytest.raises(NotSupportedError):
         constructors[kind]()
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "execute",
+        "execute_many",
+        "execute_stack",
+        "select",
+        "select_one",
+        "select_one_or_none",
+        "select_value",
+        "dry_run",
+    ],
+)
+def test_bigquery_sync_driver_rejects_per_call_tenant_id(method_name: str) -> None:
+    """Sync BigQuery query methods raise NotSupportedError when tenant_id is supplied."""
+    engine = _InMemoryBigQueryEngine()
+    driver = BigQuerySyncDriver(_SimulatedSyncCoreDriver(engine))
+    calls = {
+        "execute": lambda: driver.execute("SELECT 1", tenant_id="tenant-a"),
+        "execute_many": lambda: driver.execute_many("INSERT INTO metrics VALUES (1)", [(1,)], tenant_id="tenant-a"),
+        "execute_stack": lambda: driver.execute_stack(["SELECT 1"], tenant_id="tenant-a"),
+        "select": lambda: driver.select("SELECT 1", tenant_id="tenant-a"),
+        "select_one": lambda: driver.select_one("SELECT 1", tenant_id="tenant-a"),
+        "select_one_or_none": lambda: driver.select_one_or_none("SELECT 1", tenant_id="tenant-a"),
+        "select_value": lambda: driver.select_value("SELECT 1", tenant_id="tenant-a"),
+        "dry_run": lambda: driver.dry_run("SELECT 1", tenant_id="tenant-a"),
+    }
+    with pytest.raises(NotSupportedError, match="Tenant session enforcement is unsupported for BigQuery"):
+        calls[method_name]()
+    assert engine.executed_sql == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "execute",
+        "execute_many",
+        "execute_stack",
+        "select",
+        "select_one",
+        "select_one_or_none",
+        "select_value",
+        "dry_run",
+    ],
+)
+async def test_bigquery_async_driver_rejects_per_call_tenant_id(method_name: str) -> None:
+    """Async BigQuery query methods raise NotSupportedError when tenant_id is supplied."""
+    engine = _InMemoryBigQueryEngine()
+    driver = BigQueryAsyncDriver(_SimulatedAsyncCoreDriver(engine))
+    calls = {
+        "execute": lambda: driver.execute("SELECT 1", tenant_id="tenant-a"),
+        "execute_many": lambda: driver.execute_many("INSERT INTO metrics VALUES (1)", [(1,)], tenant_id="tenant-a"),
+        "execute_stack": lambda: driver.execute_stack(["SELECT 1"], tenant_id="tenant-a"),
+        "select": lambda: driver.select("SELECT 1", tenant_id="tenant-a"),
+        "select_one": lambda: driver.select_one("SELECT 1", tenant_id="tenant-a"),
+        "select_one_or_none": lambda: driver.select_one_or_none("SELECT 1", tenant_id="tenant-a"),
+        "select_value": lambda: driver.select_value("SELECT 1", tenant_id="tenant-a"),
+        "dry_run": lambda: driver.dry_run("SELECT 1", tenant_id="tenant-a"),
+    }
+    with pytest.raises(NotSupportedError, match="Tenant session enforcement is unsupported for BigQuery"):
+        await calls[method_name]()
+    assert engine.executed_sql == []

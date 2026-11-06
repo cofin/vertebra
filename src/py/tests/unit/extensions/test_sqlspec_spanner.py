@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Literal
 
 import pytest
 from sqlspec import StatementStack
 
 from tests.unit.db.test_spanner import FakeAsyncSpannerClient, FakeSpannerClient
-from vertebra.db import NotFoundError
+from vertebra.db import NotFoundError, NotSupportedError
 from vertebra.db.adapters.spanner import AsyncSpannerDriver, SpannerConfig, StalenessBound, SyncSpannerDriver
+from vertebra.db.rls import TenantPredicate
+from vertebra.extensions.sqlspec.adapters import (
+    AsyncAdapterConfig,
+    BaseAsyncDriver,
+    BaseSyncDriver,
+    SyncAdapterConfig,
+)
 from vertebra.extensions.sqlspec.spanner import (
     SpannerAsyncADKArtifactStore,
     SpannerAsyncADKMemoryStore,
@@ -477,14 +485,6 @@ def test_configured_tenant_predicate_rejected_before_constructor_effects(
     kind: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Unsupported isolation fails before base, core, resolver, broker, or native access."""
-    from vertebra.db import NotSupportedError
-    from vertebra.db.rls import TenantPredicate
-    from vertebra.extensions.sqlspec.adapters import (
-        AsyncAdapterConfig,
-        BaseAsyncDriver,
-        BaseSyncDriver,
-        SyncAdapterConfig,
-    )
 
     def forbidden(*args: Any, **kwargs: Any) -> Any:
         pytest.fail("Constructor performed a side effect before rejecting tenant isolation")
@@ -493,8 +493,10 @@ def test_configured_tenant_predicate_rejected_before_constructor_effects(
         def __getattribute__(self, name: str) -> Any:
             forbidden(name)
 
-    for base in (BaseSyncDriver, BaseAsyncDriver, SyncAdapterConfig, AsyncAdapterConfig):
-        monkeypatch.setattr(base, "__init__", forbidden)
+    monkeypatch.setattr(BaseSyncDriver, "__init__", forbidden)
+    monkeypatch.setattr(BaseAsyncDriver, "__init__", forbidden)
+    monkeypatch.setattr(SyncAdapterConfig, "__init__", forbidden)
+    monkeypatch.setattr(AsyncAdapterConfig, "__init__", forbidden)
     predicate = TenantPredicate(table_alias="t", tenant_value="tenant")
     constructors = {
         "sync-driver": lambda: SQLSpecSyncSpannerDriver(ForbiddenCore(), tenant_predicate=predicate),
@@ -502,14 +504,142 @@ def test_configured_tenant_predicate_rejected_before_constructor_effects(
         "sync-config": lambda: SpannerSyncConfig(tenant_predicate=predicate),
         "async-config": lambda: SpannerAsyncConfig(tenant_predicate=predicate),
     }
-    for config_type in (SpannerSyncConfig, SpannerAsyncConfig):
-        monkeypatch.setattr(config_type, "resolve_spanner_config", forbidden)
-    for constructor_type in (
-        SQLSpecSyncSpannerDriver,
-        SQLSpecAsyncSpannerDriver,
-        SpannerSyncConfig,
-        SpannerAsyncConfig,
-    ):
-        monkeypatch.setattr(constructor_type, "__setattr__", forbidden)
+    monkeypatch.setattr(SpannerSyncConfig, "resolve_spanner_config", forbidden)
+    monkeypatch.setattr(SpannerAsyncConfig, "resolve_spanner_config", forbidden)
+    monkeypatch.setattr(SQLSpecSyncSpannerDriver, "__setattr__", forbidden)
+    monkeypatch.setattr(SQLSpecAsyncSpannerDriver, "__setattr__", forbidden)
+    monkeypatch.setattr(SpannerSyncConfig, "__setattr__", forbidden)
+    monkeypatch.setattr(SpannerAsyncConfig, "__setattr__", forbidden)
     with pytest.raises(NotSupportedError):
         constructors[kind]()
+
+
+class _StalenessAndThreadTrackingSpannerClient(FakeSpannerClient):
+    """External Spanner client port recording staleness bounds and caller thread identities."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.read_staleness: list[tuple[str, int]] = []
+        self.call_threads: list[int] = []
+
+    def query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        staleness_mode: str = "strong",
+        staleness_ms: int = 0,
+    ) -> dict[str, Any]:
+        self.call_threads.append(threading.get_ident())
+        self.read_staleness.append((staleness_mode, staleness_ms))
+        return super().query(
+            sql,
+            params_json=params_json,
+            staleness_mode=staleness_mode,
+            staleness_ms=staleness_ms,
+        )
+
+    def execute_dml(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+    ) -> int:
+        self.call_threads.append(threading.get_ident())
+        return super().execute_dml(
+            sql,
+            params_json=params_json,
+            request_tag=request_tag,
+            transaction_tag=transaction_tag,
+        )
+
+    def commit_mutations(
+        self,
+        mutations_json: str,
+        max_commit_delay_ms: int = 0,
+    ) -> dict[str, Any]:
+        self.call_threads.append(threading.get_ident())
+        return super().commit_mutations(mutations_json, max_commit_delay_ms=max_commit_delay_ms)
+
+    def update_ddl(self, statements: list[str]) -> str:
+        self.call_threads.append(threading.get_ident())
+        return super().update_ddl(statements)
+
+
+@pytest.mark.anyio
+async def test_spanner_sync_and_async_select_value_routes_through_active_snapshot() -> None:
+    """ReadOnly snapshot sessions route select_value through _active_snapshot with the bound StalenessBound."""
+    sync_client = _StalenessAndThreadTrackingSpannerClient()
+    sync_core = SyncSpannerDriver(
+        SpannerConfig(project_id="test-proj", instance_id="test-inst", database_id="snap-val-sync"),
+        client=sync_client,
+    )
+    sync_cfg = SpannerSyncConfig(sync_core.config, connection_instance=sync_core)
+    bound = StalenessBound.exact_staleness(425)
+    try:
+        sync_core.update_ddl(["CREATE TABLE counters (id STRING(32) NOT NULL, total INT64 NOT NULL) PRIMARY KEY (id)"])
+        sync_core.execute("INSERT INTO counters (id, total) VALUES (@id, @total)", {"id": "c1", "total": 19})
+        sync_client.read_staleness.clear()
+        with sync_cfg.provide_session(transaction=False, staleness=bound) as ro_sync:
+            val = ro_sync.select_value("SELECT total FROM counters WHERE id = @id", {"id": "c1"}, value_type=str)
+            assert val == "19"
+        assert sync_client.read_staleness == [(bound.mode, bound.effective_value())]
+    finally:
+        sync_core.close()
+
+    async_raw = _StalenessAndThreadTrackingSpannerClient()
+    async_core = AsyncSpannerDriver(
+        SpannerConfig(project_id="test-proj", instance_id="test-inst", database_id="snap-val-async"),
+        client=FakeAsyncSpannerClient(async_raw),
+    )
+    async_cfg = SpannerAsyncConfig(async_core.config, connection_instance=async_core)
+    try:
+        await async_core.update_ddl(
+            ["CREATE TABLE counters (id STRING(32) NOT NULL, total INT64 NOT NULL) PRIMARY KEY (id)"]
+        )
+        await async_core.execute("INSERT INTO counters (id, total) VALUES (@id, @total)", {"id": "c1", "total": 27})
+        async_raw.read_staleness.clear()
+        async with async_cfg.provide_session(transaction=False, staleness=bound) as ro_async:
+            aval = await ro_async.select_value(
+                "SELECT total FROM counters WHERE id = @id", {"id": "c1"}, value_type=str
+            )
+            assert aval == "27"
+        assert async_raw.read_staleness == [(bound.mode, bound.effective_value())]
+    finally:
+        await async_core.close()
+
+
+@pytest.mark.anyio
+async def test_spanner_async_stores_offload_sync_driver_calls_off_event_loop() -> None:
+    """SpannerAsyncStore and SpannerAsyncADKStore offload synchronous driver operations onto worker threads."""
+    tracking_client = _StalenessAndThreadTrackingSpannerClient()
+    sync_core = SyncSpannerDriver(
+        SpannerConfig(project_id="test-proj", instance_id="test-inst", database_id="offload-async-db"),
+        client=tracking_client,
+    )
+    config = SpannerAsyncConfig(
+        project_id="test-proj",
+        instance_id="test-inst",
+        database_id="offload-async-db",
+        connection_instance=sync_core,
+    )
+    loop_tid = threading.get_ident()
+    try:
+        kv_store = SpannerAsyncStore(config)
+        tracking_client.call_threads.clear()
+        await kv_store.create_tables()
+        await kv_store.set("sess-1", b"val-1", expires_in=60)
+        assert await kv_store.get("sess-1") == b"val-1"
+        assert tracking_client.call_threads
+        assert set(tracking_client.call_threads).isdisjoint({loop_tid})
+
+        adk_store = SpannerAsyncADKStore(config)
+        tracking_client.call_threads.clear()
+        await adk_store.create_tables()
+        created = await adk_store.create_session(app_name="demo", user_id="u1", state={"step": 1})
+        fetched = await adk_store.get_session(created["session_id"])
+        assert fetched is not None
+        assert tracking_client.call_threads
+        assert set(tracking_client.call_threads).isdisjoint({loop_tid})
+    finally:
+        sync_core.close()

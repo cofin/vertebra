@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -296,6 +297,7 @@ class SyncDBAPIConnection:
         "_config",
         "_driver",
         "_in_transaction",
+        "_owns_driver",
         "_share_pool",
         "_sqlite_conn",
         "_url",
@@ -336,10 +338,11 @@ class SyncDBAPIConnection:
 
         self._autocommit = isinstance(self._config, (BigQueryConfig, SpannerConfig))
         self._driver = driver
+        self._owns_driver = driver is not None
         self._sqlite_conn: sqlite3.Connection | None = None
 
         if self._driver is None:
-            if isinstance(self._config, SQLiteConfig):
+            if isinstance(self._config, SQLiteConfig) and self._broker is None:
                 db_target = str(self._config.database or ":memory:")
                 if db_target.startswith("sqlite+"):
                     db_target = db_target.split(":///", 1)[-1] if ":///" in db_target else ":memory:"
@@ -347,10 +350,9 @@ class SyncDBAPIConnection:
             if self._share_pool and broker is None:
                 self._driver = DatabaseRegistry.default().get_shared_sync_driver(self._config)
             else:
-                target_registry = (
-                    DatabaseRegistry.default() if self._broker is not None else DatabaseRegistry(broker=None)
-                )
+                target_registry = DatabaseRegistry(broker=self._broker)
                 self._driver = self._config.build_sync_driver(target_registry)
+                self._owns_driver = True
 
     @property
     def url(self) -> str:
@@ -530,9 +532,14 @@ class SyncDBAPIConnection:
     def close(self) -> None:
         """Close the underlying driver connection."""
         if not self.closed:
+            if self._in_transaction:
+                if self._autocommit:
+                    self.commit()
+                else:
+                    self.rollback()
             if self._sqlite_conn is not None:
                 self._sqlite_conn.close()
-            if self._driver is not None and hasattr(self._driver, "close"):
+            if self._owns_driver and self._driver is not None and hasattr(self._driver, "close"):
                 self._driver.close()
             self.closed = True
 
@@ -669,9 +676,7 @@ class AsyncDBAPICursor:
             sync_drv = getattr(self._driver, "_sync", None)
             raw_conn = getattr(sync_drv, "raw_connection", None)
             if raw_conn is not None:
-                cur = raw_conn.cursor()
-                cur.execute("SELECT last_insert_rowid()")
-                row = cur.fetchone()
+                row = await asyncio.to_thread(self._fetch_last_insert_rowid, raw_conn)
                 if row:
                     self.lastrowid = row[0]
         if self._conn.autocommit:
@@ -740,6 +745,13 @@ class AsyncDBAPICursor:
         self._rows = []
         self._pos = 0
 
+    @staticmethod
+    def _fetch_last_insert_rowid(raw_conn: Any) -> Any:
+        """Query ``last_insert_rowid()`` from a SQLite raw connection on a worker thread."""
+        cur = raw_conn.cursor()
+        cur.execute("SELECT last_insert_rowid()")
+        return cur.fetchone()
+
 
 class AsyncDBAPIConnection:
     """Asynchronous DBAPI connection adapting Vertebra async drivers.
@@ -749,7 +761,17 @@ class AsyncDBAPIConnection:
     or batching scopes.
     """
 
-    __slots__ = ("_autocommit", "_broker", "_config", "_driver", "_in_transaction", "_share_pool", "_url", "closed")
+    __slots__ = (
+        "_autocommit",
+        "_broker",
+        "_config",
+        "_driver",
+        "_in_transaction",
+        "_owns_driver",
+        "_share_pool",
+        "_url",
+        "closed",
+    )
 
     def __init__(
         self,
@@ -785,14 +807,14 @@ class AsyncDBAPIConnection:
 
         self._autocommit = isinstance(self._config, (BigQueryConfig, SpannerConfig))
         self._driver = driver
+        self._owns_driver = driver is not None
         if self._driver is None:
             if self._share_pool and broker is None:
                 self._driver = DatabaseRegistry.default().get_shared_driver(self._config)
             else:
-                target_registry = (
-                    DatabaseRegistry.default() if self._broker is not None else DatabaseRegistry(broker=None)
-                )
+                target_registry = DatabaseRegistry(broker=self._broker)
                 self._driver = self._config.build_async_driver(target_registry)
+                self._owns_driver = True
 
     @property
     def driver(self) -> Any:
@@ -848,7 +870,12 @@ class AsyncDBAPIConnection:
     async def close(self) -> None:
         """Close the asynchronous driver connection."""
         if not self.closed:
-            if self._driver is not None and hasattr(self._driver, "close"):
+            if self._in_transaction:
+                if self._autocommit:
+                    await self.commit()
+                else:
+                    await self.rollback()
+            if self._owns_driver and self._driver is not None and hasattr(self._driver, "close"):
                 await self._driver.close()
             self.closed = True
 

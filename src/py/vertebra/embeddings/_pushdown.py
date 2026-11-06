@@ -67,9 +67,14 @@ class PushdownEmbedder(Embedder):
     async def _embed_batch_impl(
         self, texts: list[str], *, task: str = "document", titles: list[str | None] | None = None
     ) -> VectorBatchView:
+        effective_texts = (
+            [f"{title}: {text}" if title else text for text, title in zip(texts, titles, strict=False)]
+            if titles and any(titles)
+            else texts
+        )
         try:
             return await self._pushdown.embed_documents(
-                texts, task=task, dimensions=self._dimensions, normalize=self._normalize
+                effective_texts, task=task, dimensions=self._dimensions, normalize=self._normalize
             )
         except DataError as exc:
             raise EmbeddingError(str(exc)) from exc

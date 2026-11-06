@@ -303,21 +303,29 @@ class FakeSpannerClient:
             }
 
         if "INFORMATION_SCHEMA.COLUMNS" in upper:
-            table_name = str(params_map.get("table_name") or params_map.get("p2") or "")
-            cur = self._conn.execute(f"PRAGMA table_info({table_name})")
-            rows = []
-            for idx, r in enumerate(cur.fetchall(), start=1):
-                rows.append(
-                    [
-                        table_name,
-                        str(r["name"]),
-                        idx,
-                        "NO" if r["notnull"] else "YES",
-                        str(r["type"] or "STRING(MAX)"),
-                        "NEVER",
-                        None,
-                    ]
+            filter_table = str(params_map.get("table_name") or params_map.get("p2") or params_map.get("p1") or "")
+            if filter_table:
+                target_tables = [filter_table]
+            else:
+                tbl_cur = self._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
                 )
+                target_tables = [str(r[0]) for r in tbl_cur.fetchall()]
+            rows = []
+            for tname in target_tables:
+                cur = self._conn.execute(f"PRAGMA table_info({tname})")
+                for idx, r in enumerate(cur.fetchall(), start=1):
+                    rows.append(
+                        [
+                            tname,
+                            str(r["name"]),
+                            idx,
+                            "NO" if r["notnull"] else "YES",
+                            str(r["type"] or "STRING(MAX)"),
+                            "NEVER",
+                            None,
+                        ]
+                    )
             return {
                 "columns": [
                     "table_name",
@@ -332,7 +340,7 @@ class FakeSpannerClient:
             }
 
         if "INFORMATION_SCHEMA.INDEXES" in upper:
-            table_name = str(params_map.get("table_name") or params_map.get("p2") or "")
+            table_name = str(params_map.get("table_name") or params_map.get("p2") or params_map.get("p1") or "")
             rows = []
             for stmt in self.ddl_history:
                 m = re.search(
@@ -647,12 +655,27 @@ def test_spanner_config_from_dsn_variants() -> None:
     assert len(fp) == 5
 
 
-@pytest.mark.parametrize("url", ["spangres://proj-pg/inst-pg/db-pg", "spanner+spangres://proj-pg/inst-pg/db-pg"])
-def test_registry_parses_spangres_scheme(url: str) -> None:
-    """DatabaseRegistry.parse_url routes Spangres URLs to SpannerConfig with the spangres dialect."""
+@pytest.mark.parametrize(
+    ("url", "expected_dialect"),
+    [
+        ("spangres://proj-pg/inst-pg/db-pg", "spangres"),
+        ("spanner+spangres://proj-pg/inst-pg/db-pg", "spangres"),
+        ("spangres+vtb://proj-pg/inst-pg/db-pg", "spangres"),
+        ("spangres+vtb_async://proj-pg/inst-pg/db-pg", "spangres"),
+        ("spangres+vertebra_async://proj-pg/inst-pg/db-pg", "spangres"),
+        ("spanner+vtb://proj-pg/inst-pg/db-pg", "googlesql"),
+        ("spanner+vtb_async://proj-pg/inst-pg/db-pg", "googlesql"),
+        ("spanner+vertebra_async://proj-pg/inst-pg/db-pg", "googlesql"),
+    ],
+)
+def test_registry_parses_spangres_scheme(url: str, expected_dialect: str) -> None:
+    """SpannerConfig.from_dsn and DatabaseRegistry.parse_url parse sync and _async Spanner/Spangres schemes."""
+    direct = SpannerConfig.from_dsn(url)
+    assert direct.dialect == expected_dialect
+    assert (direct.project_id, direct.instance_id, direct.database_id) == ("proj-pg", "inst-pg", "db-pg")
     config = DatabaseRegistry.parse_url(url)
     assert isinstance(config, SpannerConfig)
-    assert config.dialect == "spangres"
+    assert config.dialect == expected_dialect
     assert (config.project_id, config.instance_id, config.database_id) == ("proj-pg", "inst-pg", "db-pg")
 
 

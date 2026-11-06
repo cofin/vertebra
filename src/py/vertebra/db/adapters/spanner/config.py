@@ -346,10 +346,11 @@ class SpannerConfig(BaseDatabaseConfig, frozen=True, gc=False):
     @classmethod
     def from_dsn(cls, dsn: str, **overrides: Any) -> Self:
         """Construct a `SpannerConfig` from a `spanner://` or `spangres://` URI."""
-        parsed = urlparse(dsn)
-        scheme = parsed.scheme.lower()
+        raw_scheme, sep, rest = dsn.partition("://")
+        parsed = urlparse(f"{raw_scheme.replace('_', '-')}://{rest}" if sep and "_" in raw_scheme else dsn)
+        scheme = (raw_scheme if sep else parsed.scheme).lower()
         if scheme not in _ACCEPTED_SPANNER_SCHEMES:
-            msg = f"Unsupported Spanner DSN scheme {parsed.scheme!r}; expected 'spanner://' or 'spangres://'"
+            msg = f"Unsupported Spanner DSN scheme {raw_scheme or parsed.scheme!r}; expected 'spanner://' or 'spangres://'"
             raise ImproperConfigurationError(msg)
 
         dialect: Literal["googlesql", "spangres"] = "spangres" if scheme in _ACCEPTED_SPANGRES_SCHEMES else "googlesql"
@@ -540,7 +541,3 @@ class SpannerConfig(BaseDatabaseConfig, frozen=True, gc=False):
         ):
             opts["allow_ambient_adc"] = "false"
         return opts
-
-    def to_auth_options(self) -> dict[str, str]:
-        """Return the authentication options dictionary for the Rust client."""
-        return self.build_auth_options()

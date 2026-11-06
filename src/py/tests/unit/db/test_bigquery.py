@@ -679,7 +679,16 @@ async def test_bigquery_select_to_arrow_keeps_small_rest_fallback_in_memory_and_
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("asynchronous", [False, True])
-async def test_bigquery_tool_provider_enforces_native_request_billing_caps(asynchronous: bool) -> None:
+@pytest.mark.parametrize(
+    ("provider_cap", "caller_cap", "expected"),
+    [(1000, None, 700), (500, 900, 500), (500, 200, 200)],
+)
+async def test_bigquery_tool_provider_enforces_native_request_billing_caps(
+    asynchronous: bool,
+    provider_cap: int,
+    caller_cap: int | None,
+    expected: int,
+) -> None:
     """Driver overrides and provider ceilings reach actual BigQuery REST requests."""
     server = _MockBigQueryRestServer()
     config = BigQueryConfig(
@@ -700,47 +709,166 @@ async def test_bigquery_tool_provider_enforces_native_request_billing_caps(async
         else:
             driver.select("SELECT id, name, score FROM metrics")
         assert server.requests[-1]["body"]["maximumBytesBilled"] == "700"
-        for provider_cap, caller_cap, expected in ((1000, None, 700), (500, 900, 500), (500, 200, 200)):
-            gate = ConfirmationGate()
-            tool = build_tools(
-                BigQueryToolProvider(driver, maximum_bytes_billed=provider_cap, enforce_dry_run_limit=False),
-                confirmation_gate=gate,
-            )["bigquery_query"]
-            await tool.invoke({"sql": "SELECT id, name, score FROM metrics", "max_bytes_billed": caller_cap})
-            assert server.requests[-1]["body"]["maximumBytesBilled"] == str(expected)
-            sql = "INSERT INTO metrics (id, name, score) VALUES (3, 'gamma', 7.0)"
-            with pytest.raises(PermissionDeniedError) as exc:
-                await tool.invoke({"sql": sql, "max_bytes_billed": caller_cap})
-            token = str(exc.value).split("ticket=", 1)[1].rstrip(")")
-            gate.approve(token)
-            result = await tool.invoke({"sql": sql, "max_bytes_billed": caller_cap, "confirmation_token": token})
-            assert result["affected_rows"] == 1
-            assert server.requests[-1]["body"]["maximumBytesBilled"] == str(expected)
-        before = len(server.requests)
-        for cap in (0, -1):
-            with pytest.raises(PermissionDeniedError, match="positive"):
-                await tool.invoke({"sql": "SELECT 1", "max_bytes_billed": cap})
-        assert len(server.requests) == before
-        for provider_cap, native_cap in ((0, 700), (1000, 0), (1000, -1)):
-            refused_config = BigQueryConfig(
-                project_id="test-proj", rest_endpoint=f"http://{server.host_port}", maximum_bytes_billed=native_cap
-            )
-            refused_driver = AsyncBigQueryDriver(refused_config) if asynchronous else SyncBigQueryDriver(refused_config)
-            refused_tool = build_tools(
-                BigQueryToolProvider(refused_driver, maximum_bytes_billed=provider_cap, enforce_dry_run_limit=False)
-            )["bigquery_query"]
-            with pytest.raises(PermissionDeniedError, match="positive"):
-                await refused_tool.invoke({"sql": "SELECT 1"})
-            assert len(server.requests) == before
-            if asynchronous:
-                await refused_driver.close()
-            else:
-                refused_driver.close()
+
+        gate = ConfirmationGate()
+        tool = build_tools(
+            BigQueryToolProvider(driver, maximum_bytes_billed=provider_cap, enforce_dry_run_limit=False),
+            confirmation_gate=gate,
+        )["bigquery_query"]
+        await tool.invoke({"sql": "SELECT id, name, score FROM metrics", "max_bytes_billed": caller_cap})
+        assert server.requests[-1]["body"]["maximumBytesBilled"] == str(expected)
+        sql = "INSERT INTO metrics (id, name, score) VALUES (3, 'gamma', 7.0)"
+        with pytest.raises(PermissionDeniedError) as exc:
+            await tool.invoke({"sql": sql, "max_bytes_billed": caller_cap})
+        token = str(exc.value).split("ticket=", 1)[1].rstrip(")")
+        gate.approve(token)
+        result = await tool.invoke({"sql": sql, "max_bytes_billed": caller_cap, "confirmation_token": token})
+        assert result["affected_rows"] == 1
+        assert server.requests[-1]["body"]["maximumBytesBilled"] == str(expected)
+
         guarded = build_tools(BigQueryToolProvider(driver, maximum_bytes_billed=1000))["bigquery_query"]
+        before = len(server.requests)
         with pytest.raises(PermissionDeniedError, match="exceeds"):
             await guarded.invoke({"sql": "SELECT id FROM metrics"})
         assert len(server.requests) == before + 1
         assert server.requests[-1]["body"]["configuration"]["dryRun"] is True
+    finally:
+        if asynchronous:
+            await driver.close()
+        else:
+            driver.close()
+        server.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("caller_cap", [0, -1])
+async def test_bigquery_tool_provider_rejects_non_positive_caller_caps(
+    asynchronous: bool,
+    caller_cap: int,
+) -> None:
+    """Non-positive caller max_bytes_billed values fail policy before making a REST request."""
+    server = _MockBigQueryRestServer()
+    config = BigQueryConfig(
+        project_id="test-proj", rest_endpoint=f"http://{server.host_port}", maximum_bytes_billed=700
+    )
+    driver = AsyncBigQueryDriver(config) if asynchronous else SyncBigQueryDriver(config)
+    try:
+        tool = build_tools(BigQueryToolProvider(driver, maximum_bytes_billed=500, enforce_dry_run_limit=False))[
+            "bigquery_query"
+        ]
+        with pytest.raises(PermissionDeniedError, match="positive"):
+            await tool.invoke({"sql": "SELECT 1", "max_bytes_billed": caller_cap})
+        assert server.requests == []
+    finally:
+        if asynchronous:
+            await driver.close()
+        else:
+            driver.close()
+        server.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(("provider_cap", "native_cap"), [(0, 700), (1000, 0), (1000, -1)])
+async def test_bigquery_tool_provider_rejects_non_positive_configured_caps(
+    asynchronous: bool,
+    provider_cap: int,
+    native_cap: int,
+) -> None:
+    """Non-positive provider or driver maximum_bytes_billed values fail before issuing any RPC."""
+    server = _MockBigQueryRestServer()
+    config = BigQueryConfig(
+        project_id="test-proj",
+        rest_endpoint=f"http://{server.host_port}",
+        maximum_bytes_billed=native_cap,
+    )
+    driver = AsyncBigQueryDriver(config) if asynchronous else SyncBigQueryDriver(config)
+    try:
+        tool = build_tools(
+            BigQueryToolProvider(driver, maximum_bytes_billed=provider_cap, enforce_dry_run_limit=False)
+        )["bigquery_query"]
+        with pytest.raises(PermissionDeniedError, match="positive"):
+            await tool.invoke({"sql": "SELECT 1"})
+        assert server.requests == []
+    finally:
+        if asynchronous:
+            await driver.close()
+        else:
+            driver.close()
+        server.close()
+
+
+@pytest.mark.parametrize(
+    ("raw_table", "expected_quoted"),
+    [
+        ("metrics", "`metrics`"),
+        ("analytics.metrics-2026", "`analytics`.`metrics-2026`"),
+        ("my-proj.analytics.metrics", "`my-proj`.`analytics`.`metrics`"),
+        ("google.com:corp-proj.analytics.metrics", "`google.com:corp-proj`.`analytics`.`metrics`"),
+        ("`google.com:corp-proj`.analytics.`metrics-1`", "`google.com:corp-proj`.`analytics`.`metrics-1`"),
+        ("`my-proj.analytics.metrics`", "`my-proj`.`analytics`.`metrics`"),
+        (
+            "projects/google.com:corp-proj/datasets/analytics/tables/metrics-1",
+            "`google.com:corp-proj`.`analytics`.`metrics-1`",
+        ),
+    ],
+)
+def test_bigquery_core_validate_and_quote_table_accepts_supported_shapes(
+    raw_table: str,
+    expected_quoted: str,
+) -> None:
+    """BigQueryCore.validate_and_quote_table normalizes resource paths, domain projects, and backticks."""
+    assert BigQueryCore.validate_and_quote_table(raw_table) == expected_quoted
+
+
+@pytest.mark.parametrize(
+    "bad_table",
+    [
+        "",
+        "   ",
+        "analytics.metrics; DROP TABLE x",
+        "analytics.metrics -- comment",
+        "analytics.metrics /* comment */",
+        "analytics.metrics other",
+        "analytics.'metrics'",
+        "projects/p/datasets/d",
+        "projects/`p`/datasets/d/tables/t",
+        "a:b:c.ds.tbl",
+    ],
+)
+def test_bigquery_core_validate_and_quote_table_rejects_unsafe_identifiers(bad_table: str) -> None:
+    """BigQueryCore.validate_and_quote_table rejects SQL injection tokens and malformed table references."""
+    with pytest.raises(ValueError):
+        BigQueryCore.validate_and_quote_table(bad_table)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(
+    ("table_name", "columns"),
+    [
+        ("analytics.metrics; DROP TABLE x", None),
+        ("analytics.metrics", ["id", "name) VALUES (1); --"]),
+    ],
+    ids=["bad-table", "bad-column"],
+)
+async def test_bigquery_load_from_arrow_validates_identifiers_before_io(
+    asynchronous: bool,
+    table_name: str,
+    columns: list[str] | None,
+) -> None:
+    """load_from_arrow validates table and column identifiers before touching the wire client."""
+    server = _MockBigQueryRestServer()
+    config = BigQueryConfig(project_id="test-proj", dataset_id="analytics", rest_endpoint=f"http://{server.host_port}")
+    driver = AsyncBigQueryDriver(config) if asynchronous else SyncBigQueryDriver(config)
+    try:
+        with pytest.raises(ValueError):
+            if asynchronous:
+                await driver.load_from_arrow(table_name, [{"id": 1, "name": "a"}], columns=columns)
+            else:
+                driver.load_from_arrow(table_name, [{"id": 1, "name": "a"}], columns=columns)
+        assert server.requests == []
     finally:
         if asynchronous:
             await driver.close()

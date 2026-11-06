@@ -5,7 +5,6 @@ All CLI output should go through the ``console`` singleton or ``Console``.
 """
 
 import os
-import sys
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from typing import Any
@@ -73,14 +72,16 @@ class Console:
         no_color = os.environ.get("NO_COLOR")
         if no_color is not None:
             self._console = RichConsole(
-                file=file or sys.stderr,
+                file=file,
+                stderr=file is None,
                 no_color=True,
                 force_terminal=force_terminal,
                 highlight=False,
             )
         else:
             self._console = RichConsole(
-                file=file or sys.stderr,
+                file=file,
+                stderr=file is None,
                 force_terminal=force_terminal,
                 highlight=False,
             )

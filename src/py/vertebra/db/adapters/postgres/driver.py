@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import os
 from collections.abc import AsyncIterator, Awaitable, Buffer, Callable, Iterator, Mapping, Sequence
@@ -22,6 +23,7 @@ from vertebra.db.driver import (
     SyncDatabaseDriver,
 )
 from vertebra.utils.module_loader import ensure_module, import_optional
+from vertebra.utils.text import quote_dialect_identifier, validate_identifier
 
 __all__ = (
     "AsyncPostgreSQLDriver",
@@ -268,19 +270,22 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
     ) -> int:
         """Bulk-load an Arrow Table, RecordBatch, ArrowCursor, or row sequence into `table_name`."""
         _ = kwargs
+        validate_identifier(table_name, "table_name", allow_dots=True)
+        if columns is not None:
+            for col in columns:
+                validate_identifier(str(col), "column", allow_dots=False)
         tuple_rows, col_names = _table_to_rows_and_cols(data, columns)
+        for col in col_names:
+            validate_identifier(str(col), "column", allow_dots=False)
         if not tuple_rows or not col_names:
             return 0
         placeholders = ", ".join("%s" for _ in col_names)
-        cols_sql = ", ".join(col_names)
-        sql = f"INSERT INTO {table_name} ({cols_sql}) VALUES ({placeholders})"
+        quoted_table = quote_dialect_identifier(table_name, self.dialect)
+        cols_sql = ", ".join(quote_dialect_identifier(str(col), self.dialect) for col in col_names)
+        sql = f"INSERT INTO {quoted_table} ({cols_sql}) VALUES ({placeholders})"
         for row in tuple_rows:
             self.execute(sql, row)
         return len(tuple_rows)
-
-    def decode_binary_jsonb(self, raw: Buffer) -> memoryview:
-        """Return a zero-copy UTF-8 JSON memoryview from a binary PostgreSQL JSONB column."""
-        return self.strip_jsonb_header(raw)
 
     def _release_tx_conn(self) -> None:
         ctx = self._tx_conn_ctx
@@ -505,7 +510,7 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
                     await self._release_tx_conn()
                 raise
         else:
-            self._sync.begin()
+            await asyncio.to_thread(self._sync.begin)
 
     async def commit(self) -> None:
         """Commit the active transaction."""
@@ -521,7 +526,7 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
                 if inspect.isawaitable(res):
                     await res
             else:
-                self._sync.commit()
+                await asyncio.to_thread(self._sync.commit)
         finally:
             await self._release_tx_conn()
 
@@ -539,7 +544,7 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
                 if inspect.isawaitable(res):
                     await res
             else:
-                self._sync.rollback()
+                await asyncio.to_thread(self._sync.rollback)
         finally:
             await self._release_tx_conn()
 
@@ -554,7 +559,7 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
             res = self._pool.close()
             if inspect.iscoroutine(res):
                 await res
-        self._sync.close()
+        await asyncio.to_thread(self._sync.close)
 
     async def execute(
         self,
@@ -602,13 +607,18 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
     ) -> AsyncIterator[Any]:
         """Asynchronously execute a query via binary COPY or cursor fallback and yield batch chunks."""
         if self._pool is not None and hasattr(self._pool, "copy_binary_stream"):
-            for batch in self._sync.stream_arrow_batches(
-                sql,
-                parameters,
-                batch_size=batch_size,
-                columns=columns,
-                **kwargs,
-            ):
+            batches = await asyncio.to_thread(
+                lambda: list(
+                    self._sync.stream_arrow_batches(
+                        sql,
+                        parameters,
+                        batch_size=batch_size,
+                        columns=columns,
+                        **kwargs,
+                    )
+                )
+            )
+            for batch in batches:
                 yield batch
             return
 
@@ -645,13 +655,18 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
                     yield batch_rows
             return
 
-        for batch in self._sync.stream_arrow_batches(
-            sql,
-            parameters,
-            batch_size=batch_size,
-            columns=columns,
-            **kwargs,
-        ):
+        fallback_batches = await asyncio.to_thread(
+            lambda: list(
+                self._sync.stream_arrow_batches(
+                    sql,
+                    parameters,
+                    batch_size=batch_size,
+                    columns=columns,
+                    **kwargs,
+                )
+            )
+        )
+        for batch in fallback_batches:
             yield batch
 
     async def load_from_arrow(
@@ -664,19 +679,22 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
     ) -> int:
         """Asynchronously bulk-load an Arrow Table, RecordBatch, ArrowCursor, or row sequence into `table_name`."""
         _ = kwargs
+        validate_identifier(table_name, "table_name", allow_dots=True)
+        if columns is not None:
+            for col in columns:
+                validate_identifier(str(col), "column", allow_dots=False)
         tuple_rows, col_names = _table_to_rows_and_cols(data, columns)
+        for col in col_names:
+            validate_identifier(str(col), "column", allow_dots=False)
         if not tuple_rows or not col_names:
             return 0
         placeholders = ", ".join("%s" for _ in col_names)
-        cols_sql = ", ".join(col_names)
-        sql = f"INSERT INTO {table_name} ({cols_sql}) VALUES ({placeholders})"
+        quoted_table = quote_dialect_identifier(table_name, self.dialect)
+        cols_sql = ", ".join(quote_dialect_identifier(str(col), self.dialect) for col in col_names)
+        sql = f"INSERT INTO {quoted_table} ({cols_sql}) VALUES ({placeholders})"
         for row in tuple_rows:
             await self.execute(sql, row)
         return len(tuple_rows)
-
-    def decode_binary_jsonb(self, raw: Buffer) -> memoryview:
-        """Return a zero-copy UTF-8 JSON memoryview from a binary PostgreSQL JSONB column."""
-        return SyncPostgreSQLDriver.strip_jsonb_header(raw)
 
     async def _release_tx_conn(self) -> None:
         ctx = self._tx_conn_ctx
@@ -776,7 +794,12 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
             if not self.config.dsn.startswith("memory://") and self._sync._executor is None and self._pool is None:
                 self._ensure_async_pool()
 
-            return self._sync._run_sync_query(sql, parameters, auto_commit_dml=auto_commit_dml)
+            return await asyncio.to_thread(
+                self._sync._run_sync_query,
+                sql,
+                parameters,
+                auto_commit_dml=auto_commit_dml,
+            )
         finally:
             if lease is not None and hasattr(lease, "release"):
                 lease.release()

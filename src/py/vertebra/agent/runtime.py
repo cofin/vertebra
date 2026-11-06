@@ -4,9 +4,10 @@ This module provides the core execution harness for autonomous agents and agent 
 managing model generation, parallel tool execution, retry backoff, and human-in-the-loop gates.
 """
 
+import dataclasses
 import random
 import secrets
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol, cast, runtime_checkable
 
@@ -241,9 +242,63 @@ class ConfirmationGate:
             return False
         return not (owner_id is not None and ticket.owner_id is not None and ticket.owner_id != owner_id)
 
+    def is_call_approved(
+        self,
+        token: str | None,
+        *,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        owner_id: str | None = None,
+    ) -> bool:
+        """Check whether a token authorizes a specific tool name, exact arguments, and caller owner."""
+        if not token or not isinstance(token, str):
+            return False
+        ticket = self._tickets.get(token)
+        if ticket is None or ticket.status != "approved":
+            return False
+        if ticket.owner_id is not None and ticket.owner_id != owner_id:
+            return False
+        return ticket.tool_name == tool_name and self.arguments_equal(ticket.arguments, dict(arguments))
+
     def get_ticket(self, token: str) -> ConfirmationTicket | None:
         """Retrieve ticket details by token."""
         return self._tickets.get(token)
+
+    @staticmethod
+    def arguments_equal(left: Any, right: Any) -> bool:
+        """Compare approved values recursively without Python cross-type scalar coercion."""
+        if type(left) is not type(right):
+            return False
+        if isinstance(left, Mapping):
+            if len(left) != len(right):
+                return False
+            right_keys = {key: key for key in right}
+            return all(
+                key in right_keys
+                and ConfirmationGate.arguments_equal(key, right_keys[key])
+                and ConfirmationGate.arguments_equal(value, right[right_keys[key]])
+                for key, value in left.items()
+            )
+        if isinstance(left, (list, tuple)):
+            return len(left) == len(right) and all(
+                ConfirmationGate.arguments_equal(a, b) for a, b in zip(left, right, strict=True)
+            )
+        if isinstance(left, (set, frozenset)):
+            right_items = {item: item for item in right}
+            return len(left) == len(right) and all(
+                item in right_items and ConfirmationGate.arguments_equal(item, right_items[item]) for item in left
+            )
+        if isinstance(left, msgspec.Struct):
+            return all(
+                ConfirmationGate.arguments_equal(getattr(left, field.name), getattr(right, field.name))
+                for field in msgspec.structs.fields(left)
+            )
+        if dataclasses.is_dataclass(left) and not isinstance(left, type):
+            return all(
+                ConfirmationGate.arguments_equal(getattr(left, field.name), getattr(right, field.name))
+                for field in dataclasses.fields(left)
+            )
+        return bool(left == right)
 
 
 class RetryPolicy(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -517,7 +572,12 @@ class AgentRuntime:
                     if (
                         target_tool is not None
                         and target_tool.requires_confirmation
-                        and not self.confirmation_gate.is_approved(request.confirmation_token, owner_id=owner_id)
+                        and not self.confirmation_gate.is_call_approved(
+                            request.confirmation_token,
+                            tool_name=call.name,
+                            arguments=call.arguments,
+                            owner_id=owner_id,
+                        )
                     ):
                         needs_confirm_ticket = self.confirmation_gate.request_confirmation(
                             call.name,
@@ -691,7 +751,12 @@ class AgentRuntime:
                     if (
                         target_tool is not None
                         and target_tool.requires_confirmation
-                        and not self.confirmation_gate.is_approved(request.confirmation_token, owner_id=owner_id)
+                        and not self.confirmation_gate.is_call_approved(
+                            request.confirmation_token,
+                            tool_name=call.name,
+                            arguments=call.arguments,
+                            owner_id=owner_id,
+                        )
                     ):
                         needs_confirm_ticket = self.confirmation_gate.request_confirmation(
                             call.name,
@@ -713,6 +778,8 @@ class AgentRuntime:
                     return
 
                 tools_map = {t.name: t for t in active_agent.list_tools()}
+                if isinstance(self.agent, AgentGroup):
+                    tools_map[TRANSFER_TOOL_NAME] = self.agent.transfer_tool
                 results = await execute_tool_calls(tools_map, step_tool_calls, context=context)
 
                 for r in results:

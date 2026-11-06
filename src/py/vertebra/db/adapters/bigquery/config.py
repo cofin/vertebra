@@ -133,10 +133,11 @@ class BigQueryConfig(BaseDatabaseConfig, frozen=True, gc=False):
     @classmethod
     def from_dsn(cls, dsn: str, **overrides: Any) -> Self:
         """Construct a `BigQueryConfig` from a `bigquery://` DSN URI and keyword overrides."""
-        parsed = urlparse(dsn)
-        scheme = parsed.scheme.lower()
+        raw_scheme, sep, rest = dsn.partition("://")
+        parsed = urlparse(f"{raw_scheme.replace('_', '-')}://{rest}" if sep and "_" in raw_scheme else dsn)
+        scheme = (raw_scheme if sep else parsed.scheme).lower()
         if scheme not in _ACCEPTED_BIGQUERY_SCHEMES:
-            msg = f"Unsupported BigQuery DSN scheme {parsed.scheme!r}; expected 'bigquery://'"
+            msg = f"Unsupported BigQuery DSN scheme {raw_scheme or parsed.scheme!r}; expected 'bigquery://'"
             raise ImproperConfigurationError(msg)
 
         project_id = parsed.netloc.strip()

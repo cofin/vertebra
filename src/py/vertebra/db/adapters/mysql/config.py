@@ -112,6 +112,18 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
             iam_password=iam_password,
         )
 
+    async def parse_dsn_params_async(self) -> dict[str, Any]:
+        """Asynchronously parse DSN connection string into connection parameters for async driver pools."""
+        iam_password: str | None = None
+        if self.enable_iam_auth and self.cloud_sql_instance is None:
+            iam_password = await self.resolve_iam_password_async()
+        return MySQLCore.parse_dsn_params(
+            self.dsn,
+            default_charset=self.charset,
+            default_autocommit=self.autocommit,
+            iam_password=iam_password,
+        )
+
     @classmethod
     def from_url(cls, url: str, **overrides: Any) -> Self:
         """Construct a `MySQLConfig` from a `mysql://` or `mariadb://` URI."""

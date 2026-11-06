@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import re
 import struct
-from typing import TYPE_CHECKING, Any
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 import msgspec
 
@@ -14,9 +15,6 @@ from vertebra.typing import VertebraError
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 from vertebra.utils.text import validate_identifier
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
 
 __all__ = (
     "ORACLE_DIALECT_TAG",
@@ -471,7 +469,7 @@ class OracleCore:
         """Normalize `:1` or `:name` placeholders into positional parameters."""
         if not params:
             return sql, ()
-        if isinstance(params, dict):
+        if isinstance(params, Mapping):
             ordered: list[Any] = []
 
             def _replace_named(match: re.Match[str]) -> str:

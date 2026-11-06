@@ -62,9 +62,7 @@ class PostgresEmbeddingPushdown:
         dims = self._dimensions if dimensions is None else dimensions
         if dims <= 0:
             raise ValueError("dimensions must be positive")
-        model_parameter, texts_parameter = (
-            ("$1", "$2") if isinstance(self._driver, AsyncDatabaseDriver) else ("%s", "%s")
-        )
+        model_parameter, texts_parameter = ("$1", "$2") if self._uses_dollar_binds() else ("%s", "%s")
         sql = (
             f"SELECT embedding({model_parameter}, t.txt)::vector FROM unnest({texts_parameter}::text[]) "
             "WITH ORDINALITY AS t(txt, idx) ORDER BY t.idx"
@@ -95,9 +93,7 @@ class PostgresEmbeddingPushdown:
         if metric not in operators:
             raise ValueError(f"Unsupported metric {metric!r}")
         values = query_vector.to_list() if isinstance(query_vector, VectorView) else list(query_vector)
-        vector_parameter, limit_parameter = (
-            ("$1", "$2") if isinstance(self._driver, AsyncDatabaseDriver) else ("%s", "%s")
-        )
+        vector_parameter, limit_parameter = ("$1", "$2") if self._uses_dollar_binds() else ("%s", "%s")
         sql = (
             f"SELECT *, {embedding_column} {operators[metric]} {vector_parameter}::vector AS distance "
             f"FROM {table} ORDER BY distance ASC LIMIT {limit_parameter}"
@@ -108,6 +104,24 @@ class PostgresEmbeddingPushdown:
         if isinstance(self._driver, AsyncDatabaseDriver):
             return list(await self._driver.select(sql, params))
         return list(await asyncio.to_thread(self._driver.select, sql, params))
+
+    def _uses_dollar_binds(self) -> bool:
+        if not isinstance(self._driver, AsyncDatabaseDriver):
+            return False
+        tx_conn = getattr(self._driver, "_tx_conn", None)
+        if tx_conn is not None:
+            return hasattr(tx_conn, "fetch")
+        pool = getattr(self._driver, "pool", None)
+        if pool is not None:
+            if hasattr(pool, "acquire"):
+                return True
+            if hasattr(pool, "connection") or hasattr(pool, "cursor"):
+                return False
+        return not (
+            type(self._driver).__name__ == "AsyncPostgreSQLDriver"
+            and getattr(self._driver, "_async_executor", None) is None
+            and pool is None
+        )
 
     @staticmethod
     def _extract_vector(row: Any, dimensions: int) -> list[float]:

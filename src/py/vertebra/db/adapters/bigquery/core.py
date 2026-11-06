@@ -28,7 +28,7 @@ from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.schema import to_schema
 from vertebra.utils.serializers import decode_json, encode_json
-from vertebra.utils.text import split_qualified_identifier
+from vertebra.utils.text import split_qualified_identifier, validate_identifier
 from vertebra.utils.type_converters import time_iso_convert
 from vertebra.utils.type_guards import get_msgspec_rename_config
 
@@ -556,6 +556,113 @@ class BigQueryCore:
                 if limit is not None and len(rows) >= limit:
                     return rows
         return rows
+
+    @classmethod
+    def validate_and_quote_table(cls, table: str) -> str:
+        """Validate a BigQuery table reference and return a canonical backtick-quoted SQL identifier."""
+        stripped = table.strip()
+        if not stripped or any(ch.isspace() or ch in {";", "(", ")", "'", '"'} for ch in stripped):
+            raise ValueError(f"Invalid BigQuery table identifier: {table!r}")
+        if "--" in stripped or "/*" in stripped or "*/" in stripped:
+            raise ValueError(f"Invalid BigQuery table identifier: {table!r}")
+
+        if stripped.startswith("projects/"):
+            if "`" in stripped:
+                raise ValueError(f"Invalid BigQuery table identifier: {table!r}")
+            segments = stripped.split("/")
+            if len(segments) != 6 or segments[0] != "projects" or segments[2] != "datasets" or segments[4] != "tables":
+                raise ValueError(f"Invalid BigQuery table resource identifier: {table!r}")
+            cls._validate_bq_project_id(segments[1])
+            validate_identifier(segments[3], "dataset_id", allow_dots=False, allow_hyphens=False)
+            validate_identifier(segments[5], "table_id", allow_dots=False, allow_hyphens=True)
+            return f"`{segments[1]}`.`{segments[3]}`.`{segments[5]}`"
+
+        if "`" in stripped:
+            if stripped.startswith("`") and stripped.endswith("`") and "`" not in stripped[1:-1]:
+                parts = cls.split_table_parts(stripped[1:-1])
+            else:
+                parts = cls._split_backticked_table_segments(stripped, original=table)
+        else:
+            parts = cls.split_table_parts(stripped)
+
+        if len(parts) == 3:
+            cls._validate_bq_project_id(parts[0])
+            validate_identifier(parts[1], "dataset_id", allow_dots=False, allow_hyphens=False)
+            validate_identifier(parts[2], "table_id", allow_dots=False, allow_hyphens=True)
+            return f"`{parts[0]}`.`{parts[1]}`.`{parts[2]}`"
+        if len(parts) == 2:
+            validate_identifier(parts[0], "dataset_id", allow_dots=False, allow_hyphens=False)
+            validate_identifier(parts[1], "table_id", allow_dots=False, allow_hyphens=True)
+            return f"`{parts[0]}`.`{parts[1]}`"
+        if len(parts) == 1:
+            validate_identifier(parts[0], "table_id", allow_dots=False, allow_hyphens=True)
+            return f"`{parts[0]}`"
+        raise ValueError(f"Invalid BigQuery table identifier: {table!r}")
+
+    @staticmethod
+    def _validate_bq_project_id(project_id: str) -> None:
+        if ":" in project_id:
+            if project_id.count(":") != 1:
+                raise ValueError(f"Invalid BigQuery project identifier: {project_id!r}")
+            domain, proj_slug = project_id.split(":", 1)
+            validate_identifier(domain, "project_domain", allow_dots=True, allow_hyphens=True)
+            validate_identifier(proj_slug, "project_id", allow_dots=False, allow_hyphens=True)
+            return
+        validate_identifier(project_id, "project_id", allow_dots=False, allow_hyphens=True)
+
+    @staticmethod
+    def _split_backticked_table_segments(stripped: str, *, original: str) -> list[str]:
+        segments: list[str] = []
+        idx = 0
+        n = len(stripped)
+        first_bt = stripped.find("`")
+        colon = stripped.find(":")
+        if colon != -1 and (first_bt == -1 or colon < first_bt):
+            prefix = stripped[:colon]
+            rest = stripped[colon + 1 :]
+            if "." in prefix:
+                dot_after = rest.find(".")
+                if dot_after == -1 or dot_after + 1 >= len(rest):
+                    raise ValueError(f"Invalid BigQuery table identifier: {original!r}")
+                proj_part = f"{prefix}:{rest[:dot_after]}"
+                if "`" in proj_part:
+                    raise ValueError(f"Invalid BigQuery table identifier: {original!r}")
+                segments.append(proj_part)
+                stripped = rest[dot_after + 1 :]
+            else:
+                if not prefix or "`" in prefix or not rest:
+                    raise ValueError(f"Invalid BigQuery table identifier: {original!r}")
+                segments.append(prefix)
+                stripped = rest
+            n = len(stripped)
+
+        while idx < n:
+            if stripped[idx] == "`":
+                end = stripped.find("`", idx + 1)
+                if end == -1:
+                    raise ValueError(f"Invalid BigQuery table identifier: {original!r}")
+                segment = stripped[idx + 1 : end]
+                if not segment or "`" in segment:
+                    raise ValueError(f"Invalid BigQuery table identifier: {original!r}")
+                segments.append(segment)
+                idx = end + 1
+                if idx < n:
+                    if stripped[idx] != "." or idx + 1 >= n:
+                        raise ValueError(f"Invalid BigQuery table identifier: {original!r}")
+                    idx += 1
+            else:
+                dot = stripped.find(".", idx)
+                end = n if dot == -1 else dot
+                segment = stripped[idx:end]
+                if not segment or "`" in segment:
+                    raise ValueError(f"Invalid BigQuery table identifier: {original!r}")
+                segments.append(segment)
+                if dot == -1:
+                    break
+                if dot + 1 >= n:
+                    raise ValueError(f"Invalid BigQuery table identifier: {original!r}")
+                idx = dot + 1
+        return segments
 
     @classmethod
     def _encode_param_descriptor(

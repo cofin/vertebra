@@ -34,7 +34,7 @@ _MUTATING_VERBS = frozenset(
         "LOAD",
     }
 )
-_LEADING_COMMENT_RE = re.compile(r"^\s*(?:--[^\n]*\n|/\*.*?\*/\s*)+", re.DOTALL)
+_LEADING_COMMENT_RE = re.compile(r"^\s*(?:--[^\n]*(?:\n|$)\s*|/\*.*?\*/\s*)+", re.DOTALL)
 
 
 class BigQueryToolProvider(ToolProvider):
@@ -68,9 +68,12 @@ class BigQueryToolProvider(ToolProvider):
         if operation_name == "bigquery_query":
             self._effective_cap(arguments.get("max_bytes_billed"))
         if operation_name in {"bigquery_query", "bigquery_dry_run"}:
-            verb = self._leading_verb(arguments["sql"])
-            if operation_name == "bigquery_query" and verb != "SELECT":
-                return f"{verb or 'Unclassified'} statement requires human confirmation."
+            sql = arguments.get("sql")
+            if not isinstance(sql, str) or not sql.strip():
+                return None
+            verb = self._leading_verb(sql)
+            if operation_name == "bigquery_query" and verb and verb != "SELECT":
+                return f"{verb} statement requires human confirmation."
         return None
 
     async def bigquery_dry_run(

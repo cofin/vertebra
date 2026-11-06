@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, cast
 
 from vertebra.db.adapters.spanner.config import SpannerConfig, StalenessBound
@@ -34,7 +34,7 @@ _MUTATING_VERBS = frozenset(
     }
 )
 _DDL_VERBS = frozenset({"CREATE", "ALTER", "DROP", "TRUNCATE", "GRANT", "REVOKE"})
-_LEADING_COMMENT_RE = re.compile(r"^\s*(?:--[^\n]*\n|/\*.*?\*/\s*)+", re.DOTALL)
+_LEADING_COMMENT_RE = re.compile(r"^\s*(?:--[^\n]*(?:\n|$)\s*|/\*.*?\*/\s*)+", re.DOTALL)
 
 
 class SpannerToolProvider(ToolProvider):
@@ -63,9 +63,12 @@ class SpannerToolProvider(ToolProvider):
     def confirmation_reason(self, operation_name: str, arguments: Mapping[str, Any]) -> str | None:
         """Require approval for mutations and ambiguous executable SQL without doing I/O."""
         if operation_name == "spanner_query":
-            verb = self._leading_verb(arguments["sql"])
-            if verb != "SELECT":
-                return f"{verb or 'Unclassified'} statement requires human confirmation."
+            sql = arguments.get("sql")
+            if not isinstance(sql, str) or not sql.strip():
+                return None
+            verb = self._leading_verb(sql)
+            if verb and verb != "SELECT":
+                return f"{verb} statement requires human confirmation."
         return None
 
     async def spanner_query(
@@ -126,7 +129,35 @@ class SpannerToolProvider(ToolProvider):
             if self._read_only_staleness_seconds is not None
             else StalenessBound.strong()
         )
-        if table_name:
+        is_spangres = (
+            getattr(drv, "dialect", None) == "spangres"
+            or getattr(getattr(drv, "config", None), "dialect", "googlesql") == "spangres"
+        )
+        query_params: Sequence[Any] | Mapping[str, Any] | None
+        if is_spangres:
+            if table_name:
+                tables_sql = (
+                    "SELECT table_name, parent_table_name, on_delete_action "
+                    "FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1"
+                )
+                cols_sql = (
+                    "SELECT table_name, column_name, spanner_type, is_nullable "
+                    "FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 "
+                    "ORDER BY ordinal_position"
+                )
+                query_params = [table_name]
+            else:
+                tables_sql = (
+                    "SELECT table_name, parent_table_name, on_delete_action "
+                    "FROM information_schema.tables WHERE table_schema = 'public'"
+                )
+                cols_sql = (
+                    "SELECT table_name, column_name, spanner_type, is_nullable "
+                    "FROM information_schema.columns WHERE table_schema = 'public' "
+                    "ORDER BY table_name, ordinal_position"
+                )
+                query_params = None
+        elif table_name:
             tables_sql = (
                 "SELECT table_name, parent_table_name, on_delete_action "
                 "FROM information_schema.tables WHERE table_name = @table_name"
@@ -136,7 +167,7 @@ class SpannerToolProvider(ToolProvider):
                 "FROM information_schema.columns WHERE table_name = @table_name "
                 "ORDER BY ordinal_position"
             )
-            query_params: Mapping[str, Any] | None = {"table_name": table_name}
+            query_params = {"table_name": table_name}
         else:
             tables_sql = (
                 "SELECT table_name, parent_table_name, on_delete_action "

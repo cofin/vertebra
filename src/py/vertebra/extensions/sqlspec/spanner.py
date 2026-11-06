@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 import time
@@ -670,13 +671,16 @@ class SpannerSyncDriver(BaseSyncDriver):
         sql: Any,
         /,
         *parameters: Any,
+        value_type: type[Any] | None = None,
         **kwargs: Any,
     ) -> Any:
         """Execute a query and return the first scalar column of the first row."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
         params = self._normalize_params(parameters)
-        return self._core.select_value(sql_str, params)
+        if self._active_snapshot is not None:
+            return self._active_snapshot.select_value(sql_str, params, value_type=value_type)
+        return self._core.select_value(sql_str, params, value_type=value_type)
 
     def snapshot(
         self,
@@ -1055,13 +1059,16 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         sql: Any,
         /,
         *parameters: Any,
+        value_type: type[Any] | None = None,
         **kwargs: Any,
     ) -> Any:
         """Asynchronously execute a query and return the first scalar column of the first row."""
         _ = kwargs
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
         params = BaseSyncDriver._normalize_params(parameters)
-        return await self._core.select_value(sql_str, params)
+        if self._active_snapshot is not None:
+            return await self._active_snapshot.select_value(sql_str, params, value_type=value_type)
+        return await self._core.select_value(sql_str, params, value_type=value_type)
 
     def snapshot(
         self,
@@ -1884,7 +1891,7 @@ class SpannerAsyncADKStore:
 
     async def create_tables(self) -> None:
         """Asynchronously create the ADK session and interleaved event tables."""
-        self._sync.create_tables()
+        await asyncio.to_thread(self._sync.create_tables)
 
     async def create_session(
         self,
@@ -1895,23 +1902,29 @@ class SpannerAsyncADKStore:
         session_id: str | None = None,
     ) -> dict[str, Any]:
         """Asynchronously create an ADK session."""
-        return self._sync.create_session(app_name=app_name, user_id=user_id, state=state, session_id=session_id)
+        return await asyncio.to_thread(
+            self._sync.create_session,
+            app_name=app_name,
+            user_id=user_id,
+            state=state,
+            session_id=session_id,
+        )
 
     async def get_session(self, session_id: str) -> dict[str, Any] | None:
         """Asynchronously fetch an ADK session and its interleaved events."""
-        return self._sync.get_session(session_id)
+        return await asyncio.to_thread(self._sync.get_session, session_id)
 
     async def update_session_state(self, session_id: str, state: Mapping[str, Any]) -> bool:
         """Asynchronously update an ADK session's state."""
-        return self._sync.update_session_state(session_id, state)
+        return await asyncio.to_thread(self._sync.update_session_state, session_id, state)
 
     async def list_sessions(self, *, app_name: str, user_id: str) -> list[dict[str, Any]]:
         """Asynchronously list ADK sessions for ``(app_name, user_id)``."""
-        return self._sync.list_sessions(app_name=app_name, user_id=user_id)
+        return await asyncio.to_thread(self._sync.list_sessions, app_name=app_name, user_id=user_id)
 
     async def delete_session(self, session_id: str) -> bool:
         """Asynchronously delete an ADK session and its interleaved events."""
-        return self._sync.delete_session(session_id)
+        return await asyncio.to_thread(self._sync.delete_session, session_id)
 
     async def append_event(
         self,
@@ -1923,7 +1936,8 @@ class SpannerAsyncADKStore:
         event_id: str | None = None,
     ) -> dict[str, Any]:
         """Asynchronously append an event to ``adk_events``."""
-        return self._sync.append_event(
+        return await asyncio.to_thread(
+            self._sync.append_event,
             session_id,
             author=author,
             content=content,
@@ -1933,7 +1947,7 @@ class SpannerAsyncADKStore:
 
     async def get_events(self, session_id: str) -> list[dict[str, Any]]:
         """Asynchronously fetch all events for ``session_id``."""
-        return self._sync.get_events(session_id)
+        return await asyncio.to_thread(self._sync.get_events, session_id)
 
 
 def _cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
@@ -2248,7 +2262,7 @@ class SpannerAsyncADKMemoryStore:
 
     async def create_tables(self) -> None:
         """Asynchronously apply the Spanner ADK memory DDL statements."""
-        self._sync.create_tables()
+        await asyncio.to_thread(self._sync.create_tables)
 
     async def store_memory(
         self,
@@ -2262,7 +2276,8 @@ class SpannerAsyncADKMemoryStore:
         memory_id: str | None = None,
     ) -> dict[str, Any]:
         """Asynchronously store an ADK memory item."""
-        return self._sync.store_memory(
+        return await asyncio.to_thread(
+            self._sync.store_memory,
             app_name=app_name,
             user_id=user_id,
             content=content,
@@ -2274,7 +2289,7 @@ class SpannerAsyncADKMemoryStore:
 
     async def store_memories_batch(self, entries: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         """Asynchronously store a batch of ADK memory items."""
-        return self._sync.store_memories_batch(entries)
+        return await asyncio.to_thread(self._sync.store_memories_batch, entries)
 
     async def search_memory(
         self,
@@ -2289,7 +2304,8 @@ class SpannerAsyncADKMemoryStore:
         rrf_k: int = 60,
     ) -> list[dict[str, Any]]:
         """Asynchronously search ADK memories."""
-        return self._sync.search_memory(
+        return await asyncio.to_thread(
+            self._sync.search_memory,
             user_id,
             query=query,
             embedding=embedding,
@@ -2509,7 +2525,7 @@ class SpannerAsyncADKArtifactStore:
 
     async def create_tables(self) -> None:
         """Asynchronously create the ADK artifacts table."""
-        self._sync.create_tables()
+        await asyncio.to_thread(self._sync.create_tables)
 
     async def save_artifact(
         self,
@@ -2521,7 +2537,8 @@ class SpannerAsyncADKArtifactStore:
         version: int | None = None,
     ) -> dict[str, Any]:
         """Asynchronously save an ADK artifact."""
-        return self._sync.save_artifact(
+        return await asyncio.to_thread(
+            self._sync.save_artifact,
             session_id,
             artifact_key,
             data,
@@ -2537,7 +2554,7 @@ class SpannerAsyncADKArtifactStore:
         version: int | None = None,
     ) -> dict[str, Any] | None:
         """Asynchronously fetch an ADK artifact."""
-        return self._sync.get_artifact(session_id, artifact_key, version=version)
+        return await asyncio.to_thread(self._sync.get_artifact, session_id, artifact_key, version=version)
 
     async def get_artifact_ref(
         self,
@@ -2548,7 +2565,8 @@ class SpannerAsyncADKArtifactStore:
         expires_in_secs: int = 3600,
     ) -> ObjectRef | None:
         """Asynchronously return a zero-RTT presigned ``ObjectRef``."""
-        return self._sync.get_artifact_ref(
+        return await asyncio.to_thread(
+            self._sync.get_artifact_ref,
             session_id,
             artifact_key,
             version=version,
@@ -2557,11 +2575,11 @@ class SpannerAsyncADKArtifactStore:
 
     async def list_artifacts(self, session_id: str, *, artifact_key: str | None = None) -> list[dict[str, Any]]:
         """Asynchronously list ADK artifacts for ``session_id``."""
-        return self._sync.list_artifacts(session_id, artifact_key=artifact_key)
+        return await asyncio.to_thread(self._sync.list_artifacts, session_id, artifact_key=artifact_key)
 
     async def delete_artifact(self, session_id: str, artifact_key: str) -> bool:
         """Asynchronously delete an ADK artifact."""
-        return self._sync.delete_artifact(session_id, artifact_key)
+        return await asyncio.to_thread(self._sync.delete_artifact, session_id, artifact_key)
 
 
 class SpannerSyncStore:
@@ -2732,7 +2750,7 @@ class SpannerAsyncStore:
 
     async def create_tables(self) -> None:
         """Asynchronously create the sharded Spanner KV store table."""
-        self._sync.create_tables()
+        await asyncio.to_thread(self._sync.create_tables)
 
     async def set(
         self,
@@ -2742,31 +2760,31 @@ class SpannerAsyncStore:
         expires_in: int | timedelta | None = None,
     ) -> None:
         """Asynchronously upsert a key-value entry."""
-        self._sync.set(key, value, expires_in=expires_in)
+        await asyncio.to_thread(self._sync.set, key, value, expires_in=expires_in)
 
     async def get(self, key: str, *, renew_for: int | timedelta | None = None) -> bytes | None:
         """Asynchronously fetch an unexpired value."""
-        return self._sync.get(key, renew_for=renew_for)
+        return await asyncio.to_thread(self._sync.get, key, renew_for=renew_for)
 
     async def delete(self, key: str) -> bool:
         """Asynchronously delete a key."""
-        return self._sync.delete(key)
+        return await asyncio.to_thread(self._sync.delete, key)
 
     async def delete_all(self) -> int:
         """Asynchronously delete all entries."""
-        return self._sync.delete_all()
+        return await asyncio.to_thread(self._sync.delete_all)
 
     async def delete_expired(self) -> int:
         """Asynchronously delete expired entries."""
-        return self._sync.delete_expired()
+        return await asyncio.to_thread(self._sync.delete_expired)
 
     async def exists(self, key: str) -> bool:
         """Asynchronously check whether ``key`` exists."""
-        return self._sync.exists(key)
+        return await asyncio.to_thread(self._sync.exists, key)
 
     async def expires_in(self, key: str) -> int | None:
         """Asynchronously return remaining TTL in seconds."""
-        return self._sync.expires_in(key)
+        return await asyncio.to_thread(self._sync.expires_in, key)
 
 
 class SpannerSyncEventQueueStore:
@@ -2948,7 +2966,7 @@ class SpannerAsyncEventQueueStore:
 
     async def create_tables(self) -> None:
         """Asynchronously apply the Spanner event queue DDL."""
-        self._sync.create_tables()
+        await asyncio.to_thread(self._sync.create_tables)
 
     async def publish(
         self,
@@ -2958,15 +2976,15 @@ class SpannerAsyncEventQueueStore:
         event_id: str | None = None,
     ) -> dict[str, Any]:
         """Asynchronously publish an event to ``channel``."""
-        return self._sync.publish(channel, payload, event_id=event_id)
+        return await asyncio.to_thread(self._sync.publish, channel, payload, event_id=event_id)
 
     async def consume(self, channel: str, *, limit: int = 50) -> list[dict[str, Any]]:
         """Asynchronously consume pending events for ``channel``."""
-        return self._sync.consume(channel, limit=limit)
+        return await asyncio.to_thread(self._sync.consume, channel, limit=limit)
 
     async def ack(self, event_id: str) -> bool:
         """Asynchronously acknowledge ``event_id``."""
-        return self._sync.ack(event_id)
+        return await asyncio.to_thread(self._sync.ack, event_id)
 
 
 def _spanner_statement_config(dialect: Literal["googlesql", "spangres"]) -> StatementConfig:

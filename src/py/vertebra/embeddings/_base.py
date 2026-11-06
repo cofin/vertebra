@@ -56,9 +56,13 @@ class MultimodalPart(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Multimodal content part for Gemini Embedding 2 (image, audio, video, PDF, or text)."""
 
     mime_type: str = "text/plain"
+    """IANA media type describing the content part."""
     data: bytes | None = None
+    """Optional inline binary payload."""
     uri: str | None = None
+    """Optional GCS or HTTPS URI referencing external media."""
     text: str | None = None
+    """Optional UTF-8 text segment."""
 
 
 class Embedder:
@@ -128,6 +132,7 @@ class Embedder:
         if self._cache is not None:
             cached = self._cache.lookup(self._model, "query", text)
             if cached is not None:
+                self._record_usage((), cached_texts=(text,))
                 return cached
         vec = await self._embed_single_impl(text, task="query", title=None)
         if self._cache is not None and vec.dimensions == self._cache.dimensions:
@@ -140,10 +145,11 @@ class Embedder:
 
     async def embed_document(self, text: str, *, title: str | None = None) -> VectorView:
         """Embed a singular document (with optional title) and return a `VectorView`."""
-        lookup_text = f"{title or ''}|{text}"
+        lookup_text = f"{title}|{text}" if title else text
         if self._cache is not None:
             cached = self._cache.lookup(self._model, "document", lookup_text)
             if cached is not None:
+                self._record_usage((), cached_texts=(text,))
                 return cached
         vec = await self._embed_single_impl(text, task="document", title=title)
         if self._cache is not None and vec.dimensions == self._cache.dimensions:
@@ -168,13 +174,52 @@ class Embedder:
         title_list: list[str | None] = list(titles) if titles is not None else [None] * len(text_list)
         if len(title_list) != len(text_list):
             raise ValueError("titles length must match texts length")
-        self._record_usage(text_list)
-        batch = await self._embed_batch_impl(text_list, task=task, titles=title_list)
-        if self._cache is not None and batch.dimensions == self._cache.dimensions:
-            for idx, item_text in enumerate(text_list):
-                lookup_text = f"{title_list[idx]}|{item_text}" if title_list[idx] else item_text
-                self._cache.insert(self._model, task, lookup_text, batch[idx])
-        return batch
+        lookup_keys = [
+            f"{title_list[idx]}|{item_text}" if title_list[idx] else item_text
+            for idx, item_text in enumerate(text_list)
+        ]
+        if self._cache is None:
+            self._record_usage(text_list)
+            return await self._embed_batch_impl(text_list, task=task, titles=title_list)
+
+        cached_hits: dict[int, VectorView] = {}
+        miss_indices: list[int] = []
+        miss_texts: list[str] = []
+        miss_titles: list[str | None] = []
+        cached_texts: list[str] = []
+        for idx, item_text in enumerate(text_list):
+            hit = self._cache.lookup(self._model, task, lookup_keys[idx])
+            if hit is not None:
+                cached_hits[idx] = hit
+                cached_texts.append(item_text)
+            else:
+                miss_indices.append(idx)
+                miss_texts.append(item_text)
+                miss_titles.append(title_list[idx])
+
+        self._record_usage(miss_texts, cached_texts=cached_texts)
+        if not miss_indices:
+            return VectorBatchView.from_f32_rows(
+                [cached_hits[idx].to_list() for idx in range(len(text_list))],
+                normalize=False,
+            )
+        if not cached_hits:
+            batch = await self._embed_batch_impl(text_list, task=task, titles=title_list)
+            if batch.dimensions == self._cache.dimensions:
+                for idx in range(len(text_list)):
+                    self._cache.insert(self._model, task, lookup_keys[idx], batch[idx])
+            return batch
+
+        miss_batch = await self._embed_batch_impl(miss_texts, task=task, titles=miss_titles)
+        if miss_batch.dimensions == self._cache.dimensions:
+            for offset, orig_idx in enumerate(miss_indices):
+                self._cache.insert(self._model, task, lookup_keys[orig_idx], miss_batch[offset])
+        miss_map = {orig_idx: miss_batch[offset] for offset, orig_idx in enumerate(miss_indices)}
+        rows = [
+            cached_hits[idx].to_list() if idx in cached_hits else miss_map[idx].to_list()
+            for idx in range(len(text_list))
+        ]
+        return VectorBatchView.from_f32_rows(rows, normalize=False)
 
     def embed_many_sync(
         self,
@@ -232,14 +277,20 @@ class Embedder:
         """Concrete subclass implementation for batch embedding."""
         raise NotImplementedError(f"{type(self).__name__} must implement _embed_batch_impl")
 
-    def _record_usage(self, texts: Sequence[str]) -> GenAiUsage:
+    def _record_usage(
+        self,
+        texts: Sequence[str],
+        *,
+        cached_texts: Sequence[str] = (),
+    ) -> GenAiUsage:
         """Estimate input token count and record a `GenAiUsage` telemetry snapshot."""
         estimated_tokens = sum(max(1, len(t) // 4) for t in texts)
+        cached_tokens = sum(max(1, len(t) // 4) for t in cached_texts)
         usage = GenAiUsage(
             input_tokens=estimated_tokens,
             output_tokens=0,
             thought_tokens=0,
-            cached_input_tokens=0,
+            cached_input_tokens=cached_tokens,
         )
         self._last_usage = usage
         return usage

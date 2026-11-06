@@ -362,9 +362,12 @@ def test_django_backends_and_shared_provider_fingerprinting() -> None:
     s5 = flask_provide_driver(sp_cfg, sync=True, registry=registry)
     assert s1 is s2 is s3 is s4 is s5
 
-    for ext_mod in (vertebra_db, litestar_ext, fastapi_ext, starlette_ext, flask_ext):
-        assert not hasattr(ext_mod, "provide_bigquery_driver")
-        assert not hasattr(ext_mod, "provide_spanner_driver")
+
+@pytest.mark.parametrize("ext_mod", [vertebra_db, litestar_ext, fastapi_ext, starlette_ext, flask_ext])
+def test_legacy_gcp_provider_helpers_removed(ext_mod: Any) -> None:
+    """Engine-specific provide_*_driver helpers remain absent across db and host-framework extensions."""
+    assert not hasattr(ext_mod, "provide_bigquery_driver")
+    assert not hasattr(ext_mod, "provide_spanner_driver")
 
 
 class _BigQueryToolClient:
@@ -564,6 +567,10 @@ def gcp_database_tools() -> dict[str, Any]:
 
 
 @pytest.mark.parametrize(
+    ("provider_cls", "op_name"),
+    [(BigQueryToolProvider, "bigquery_query"), (SpannerToolProvider, "spanner_query")],
+)
+@pytest.mark.parametrize(
     ("sql", "expected"),
     [
         ("SELECT * FROM users", False),
@@ -582,31 +589,62 @@ def gcp_database_tools() -> dict[str, Any]:
         ("LOAD DATA INTO warehouse.t FROM FILES (format = 'CSV', uris = ['gs://bucket/a.csv'])", True),
     ],
 )
-def test_provider_classifies_confirmation(sql: str, expected: bool) -> None:
+def test_provider_classifies_confirmation(
+    provider_cls: type[BigQueryToolProvider | SpannerToolProvider],
+    op_name: str,
+    sql: str,
+    expected: bool,
+) -> None:
     """Providers classify simple reads separately from executable statements needing approval."""
-    for provider in (BigQueryToolProvider(), SpannerToolProvider()):
-        assert (
-            bool(
-                provider.confirmation_reason(
-                    "bigquery_query" if isinstance(provider, BigQueryToolProvider) else "spanner_query", {"sql": sql}
-                )
-            )
-            is expected
-        )
+    assert bool(provider_cls().confirmation_reason(op_name, {"sql": sql})) is expected
 
 
+@pytest.mark.parametrize(
+    ("provider_cls", "op_name"),
+    [
+        (BigQueryToolProvider, "bigquery_query"),
+        (BigQueryToolProvider, "bigquery_dry_run"),
+        (SpannerToolProvider, "spanner_query"),
+    ],
+)
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {},
+        {"sql": None},
+        {"sql": 42},
+        {"sql": ""},
+        {"sql": "   \n\t "},
+        {"sql": "/* comment only */"},
+        {"sql": "-- line comment\n"},
+    ],
+)
+def test_provider_confirmation_reason_ignores_missing_or_blank_sql(
+    provider_cls: type[BigQueryToolProvider | SpannerToolProvider],
+    op_name: str,
+    arguments: dict[str, Any],
+) -> None:
+    """Missing, non-string, blank, or comment-only SQL does not trigger a spurious confirmation prompt."""
+    assert provider_cls().confirmation_reason(op_name, arguments) is None
+
+
+@pytest.mark.parametrize(
+    ("provider_cls", "op_name"),
+    [(BigQueryToolProvider, "bigquery_query"), (SpannerToolProvider, "spanner_query")],
+)
 @pytest.mark.parametrize(
     "sql",
     ["SELECT 1; DELETE FROM orders", "SELECT 1; -- done", "SELECT 'a;b' AS v"],
     ids=["second-statement", "trailing-comment", "semicolon-in-literal"],
 )
-def test_provider_rejects_non_trailing_semicolons(sql: str) -> None:
+def test_provider_rejects_non_trailing_semicolons(
+    provider_cls: type[BigQueryToolProvider | SpannerToolProvider],
+    op_name: str,
+    sql: str,
+) -> None:
     """Any semicolon before the trailing terminator is rejected, so no second statement can hide."""
-    for provider in (BigQueryToolProvider(), SpannerToolProvider()):
-        with pytest.raises(PermissionError, match="Multi-statement SQL is not allowed"):
-            provider.confirmation_reason(
-                "bigquery_query" if isinstance(provider, BigQueryToolProvider) else "spanner_query", {"sql": sql}
-            )
+    with pytest.raises(PermissionError, match="Multi-statement SQL is not allowed"):
+        provider_cls().confirmation_reason(op_name, {"sql": sql})
 
 
 @pytest.mark.anyio
@@ -655,9 +693,9 @@ async def test_spanner_query_requires_confirmation_for_privilege_and_procedure_c
         await gcp_database_tools["spanner_query"].invoke({"sql": sql})
 
 
-def test_sqlalchemy_vtb_dialects_types_and_alembic_batching() -> None:
-    """Verify SQLAlchemy 2.1 +vtb dialects, Vector/BinaryJSON types, CreateVectorIndexOp, and SpannerAlembicImpl."""
-    for scheme in (
+@pytest.mark.parametrize(
+    "scheme",
+    [
         "bigquery+vtb",
         "bigquery+vertebra",
         "bigquery+vtb_async",
@@ -670,9 +708,16 @@ def test_sqlalchemy_vtb_dialects_types_and_alembic_batching() -> None:
         "spangres+vertebra",
         "spangres+vtb_async",
         "spangres+vertebra_async",
-    ):
-        assert scheme in ALL_DIALECT_SCHEMES
-        assert scheme in DIALECT_DESCRIPTORS
+    ],
+)
+def test_gcp_sqlalchemy_dialect_schemes_registered(scheme: str) -> None:
+    """All sync and async BigQuery, Spanner, and Spangres SQLAlchemy schemes are registered."""
+    assert scheme in ALL_DIALECT_SCHEMES
+    assert scheme in DIALECT_DESCRIPTORS
+
+
+def test_sqlalchemy_vtb_dialects_types_and_alembic_batching() -> None:
+    """Verify SQLAlchemy 2.1 +vtb dialects, Vector/BinaryJSON types, CreateVectorIndexOp, and SpannerAlembicImpl."""
 
     assert SyncBigQueryDialect.paramstyle == "named"
     assert AsyncBigQueryDialect.is_async is True
@@ -821,21 +866,35 @@ async def test_direct_tcp_iam_auth_for_postgres_and_mysql() -> None:
     assert mysql_driver.dialer is None
 
 
-def test_agent_tool_exports_and_removed_database_module() -> None:
-    """Agent package exports resolve to the tools package after the clean break."""
-    assert vertebra_agent.build_tools is build_tools
-    for name in (
+@pytest.mark.parametrize(
+    "legacy_symbol",
+    [
         "GCPDatabaseToolPolicy",
         "build_bigquery_tools",
         "build_spanner_tools",
         "is_mutating_sql",
         "register_gcp_database_tools",
-    ):
-        assert not hasattr(vertebra_agent, name)
-        assert not hasattr(vertebra_agent.tools, name)
-    for module_name in ("vertebra.db.mcp_tools", "vertebra.agent.tools.bigquery", "vertebra.agent.tools.spanner"):
-        with pytest.raises(ModuleNotFoundError, match=module_name):
-            importlib.import_module(module_name)
+    ],
+)
+def test_legacy_agent_gcp_exports_removed(legacy_symbol: str) -> None:
+    """Legacy GCP-specific symbols remain absent from vertebra.agent and vertebra.agent.tools."""
+    assert not hasattr(vertebra_agent, legacy_symbol)
+    assert not hasattr(vertebra_agent.tools, legacy_symbol)
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    ["vertebra.db.mcp_tools", "vertebra.agent.tools.bigquery", "vertebra.agent.tools.spanner"],
+)
+def test_legacy_gcp_tool_modules_removed(module_name: str) -> None:
+    """Removed database MCP tool modules raise ModuleNotFoundError."""
+    with pytest.raises(ModuleNotFoundError, match=module_name):
+        importlib.import_module(module_name)
+
+
+def test_agent_tool_exports_and_removed_database_module() -> None:
+    """Agent package exports resolve to the tools package without adapter imports."""
+    assert vertebra_agent.build_tools is build_tools
     source = Path(vertebra_agent.tools.__file__).read_text()
     imports = [node for node in ast.walk(ast.parse(source)) if isinstance(node, (ast.Import, ast.ImportFrom))]
     assert not any("vertebra.db.adapters" in ast.unparse(node) for node in imports)
@@ -922,14 +981,58 @@ async def test_agent_tools_dispatch_and_snapshot_scope(asynchronous: bool) -> No
     assert result == {"table_name": "orders", "tables": [], "columns": []}
     assert len(sp_client.queries) == 3
     assert sp_client.queries[0][2:4] == ("exact_staleness", 1250)
-    for sql, params, mode, milliseconds, thread_id in sp_client.queries[1:]:
-        assert "FROM information_schema.tables" in sql or "FROM information_schema.columns" in sql
-        assert "WHERE table_name = @table_name" in sql
-        assert "orders" not in sql
-        assert params is not None and "orders" in params
-        assert (mode, milliseconds) == ("exact_staleness", 2500)
-        assert (thread_id == threading.get_ident()) is asynchronous
+    tables_query, cols_query = sp_client.queries[1:]
+    assert "FROM information_schema.tables" in tables_query[0]
+    assert "WHERE table_name = @table_name" in tables_query[0]
+    assert "orders" not in tables_query[0]
+    assert tables_query[1] is not None and "orders" in tables_query[1]
+    assert tables_query[2:4] == ("exact_staleness", 2500)
+    assert (tables_query[4] == threading.get_ident()) is asynchronous
+    assert "FROM information_schema.columns" in cols_query[0]
+    assert "WHERE table_name = @table_name" in cols_query[0]
+    assert "orders" not in cols_query[0]
+    assert cols_query[1] is not None and "orders" in cols_query[1]
+    assert cols_query[2:4] == ("exact_staleness", 2500)
+    assert (cols_query[4] == threading.get_ident()) is asynchronous
     assert all((request[2] == threading.get_ident()) is asynchronous for request in bq_client.requests)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_spanner_schema_inspect_spangres_dialect_uses_positional_binds(asynchronous: bool) -> None:
+    """Spanner schema inspection under dialect='spangres' filters table_schema='public' and binds $1."""
+    sp_client = _SpannerToolClient()
+    sp_config = SpannerConfig(
+        project_id="core-proj",
+        instance_id="prod-inst",
+        database_id="orders-db",
+        dialect="spangres",
+    )
+    sp_driver = (
+        AsyncSpannerDriver(sp_config, client=_AsyncSpannerToolClient(sp_client))
+        if asynchronous
+        else SyncSpannerDriver(sp_config, client=sp_client)
+    )
+    sp_tools = build_tools(SpannerToolProvider(sp_driver, read_only_staleness_seconds=1.5))
+
+    filtered = await sp_tools["spanner_schema_inspect"].invoke({"table_name": "orders"})
+    assert filtered["table_name"] == "orders"
+    tables_q, cols_q = sp_client.queries
+    assert "WHERE table_schema = 'public' AND table_name = $1" in tables_q[0]
+    assert "@table_name" not in tables_q[0]
+    assert tables_q[1] is not None and '"orders"' in tables_q[1]
+    assert "WHERE table_schema = 'public' AND table_name = $1" in cols_q[0]
+    assert "@table_name" not in cols_q[0]
+
+    sp_client.queries.clear()
+    unfiltered = await sp_tools["spanner_schema_inspect"].invoke({})
+    assert unfiltered["table_name"] is None
+    all_tables_q, all_cols_q = sp_client.queries
+    assert "WHERE table_schema = 'public'" in all_tables_q[0]
+    assert "$1" not in all_tables_q[0]
+    assert all_tables_q[1] is None
+    assert "WHERE table_schema = 'public'" in all_cols_q[0]
+    assert all_cols_q[1] is None
 
 
 @pytest.mark.anyio
@@ -938,8 +1041,10 @@ async def test_agent_tools_register_single_engine_without_default_config() -> No
     registry = MCPRegistry()
     driver = SyncBigQueryDriver(BigQueryConfig(project_id="analytics-proj"), client=_BigQueryToolClient())
     tools = build_tools(BigQueryToolProvider(driver, registry=DatabaseRegistry()))
-    for tool in tools.values():
-        registry.register_tool(tool)
+    dry_run_tool, query_tool, inspect_tool = tools.values()
+    registry.register_tool(dry_run_tool)
+    registry.register_tool(query_tool)
+    registry.register_tool(inspect_tool)
     assert all(isinstance(tool, Tool) for tool in tools.values())
     assert {tool.name for tool in registry.list_tools()} == set(tools)
     assert (await tools["bigquery_query"].invoke({"sql": "SELECT 1"}))["rows"] == [{"val": 1}]
@@ -991,60 +1096,93 @@ async def test_spanner_tools_confirm_ddl_and_dml(asynchronous: bool) -> None:
     )
     gate = ConfirmationGate()
     tools = build_tools(SpannerToolProvider(driver), confirmation_gate=gate)
-    for sql, mode in (
-        ("CREATE TABLE orders (id INT64 NOT NULL, status STRING(32)) PRIMARY KEY (id)", "ddl"),
-        ("INSERT INTO orders (id, status) VALUES (1, 'PAID')", "dml"),
-    ):
-        with pytest.raises(PermissionDeniedError, match="ConfirmationGate") as exc:
-            await tools["spanner_query"].invoke({"sql": sql})
-        token = str(exc.value).split("ticket=", 1)[1].rstrip(")")
-        gate.approve(token)
-        result = await tools["spanner_query"].invoke({"sql": sql, "confirmation_token": token})
-        assert result["mode"] == mode
-        assert result["operation"] if mode == "ddl" else result["affected_rows"] == 1
+
+    ddl_sql = "CREATE TABLE orders (id INT64 NOT NULL, status STRING(32)) PRIMARY KEY (id)"
+    with pytest.raises(PermissionDeniedError, match="ConfirmationGate") as ddl_exc:
+        await tools["spanner_query"].invoke({"sql": ddl_sql})
+    ddl_token = str(ddl_exc.value).split("ticket=", 1)[1].rstrip(")")
+    gate.approve(ddl_token)
+    ddl_result = await tools["spanner_query"].invoke({"sql": ddl_sql, "confirmation_token": ddl_token})
+    assert ddl_result["mode"] == "ddl"
+    assert ddl_result["operation"] == "operations/ddl-1"
+
+    dml_sql = "INSERT INTO orders (id, status) VALUES (1, 'PAID')"
+    with pytest.raises(PermissionDeniedError, match="ConfirmationGate") as dml_exc:
+        await tools["spanner_query"].invoke({"sql": dml_sql})
+    dml_token = str(dml_exc.value).split("ticket=", 1)[1].rstrip(")")
+    gate.approve(dml_token)
+    dml_result = await tools["spanner_query"].invoke({"sql": dml_sql, "confirmation_token": dml_token})
+    assert dml_result["mode"] == "dml"
+    assert dml_result["affected_rows"] == 1
+
     result = await tools["spanner_query"].invoke({"sql": "SELECT id, status FROM orders"})
     assert result["rows"] == [{"id": 1, "status": "PAID"}]
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("asynchronous", [False, True])
-async def test_provider_approved_read_cte_retains_native_query_routing(asynchronous: bool) -> None:
+@pytest.mark.parametrize("engine", ["bigquery", "spanner"])
+async def test_provider_approved_read_cte_retains_native_query_routing(
+    asynchronous: bool,
+    engine: str,
+) -> None:
     """Ambiguous CTE SQL requires approval and keeps the native row-returning path."""
-    bq_client = _BigQueryToolClient()
-    sp_client = _SpannerToolClient()
-    bq_config = BigQueryConfig(project_id="analytics-proj")
-    sp_config = SpannerConfig(project_id="core-proj", instance_id="prod-inst", database_id="orders-db")
-    bq_driver = (
-        AsyncBigQueryDriver(bq_config, client=_AsyncBigQueryToolClient(bq_client))
-        if asynchronous
-        else SyncBigQueryDriver(bq_config, client=bq_client)
-    )
-    sp_driver = (
-        AsyncSpannerDriver(sp_config, client=_AsyncSpannerToolClient(sp_client))
-        if asynchronous
-        else SyncSpannerDriver(sp_config, client=sp_client)
-    )
-    for provider, name, client_calls in (
-        (BigQueryToolProvider(bq_driver, enforce_dry_run_limit=False), "bigquery_query", bq_client.requests),
-        (SpannerToolProvider(sp_driver), "spanner_query", sp_client.queries),
-    ):
-        gate = ConfirmationGate()
-        tool = build_tools(provider, confirmation_gate=gate)[name]
-        sql = "WITH record AS (SELECT 1 AS val) SELECT val FROM record"
-        with pytest.raises(PermissionDeniedError) as exc:
-            await tool.invoke({"sql": sql})
-        assert client_calls == []
-        token = str(exc.value).split("ticket=", 1)[1].rstrip(")")
-        gate.approve(token)
-        result = await tool.invoke({"sql": sql, "confirmation_token": token})
-        assert result["mode"] in {"query", "read_only_snapshot"}
-        assert "rows" in result
-        assert len(client_calls) == 1
+    if engine == "bigquery":
+        bq_client = _BigQueryToolClient()
+        bq_config = BigQueryConfig(project_id="analytics-proj")
+        bq_driver = (
+            AsyncBigQueryDriver(bq_config, client=_AsyncBigQueryToolClient(bq_client))
+            if asynchronous
+            else SyncBigQueryDriver(bq_config, client=bq_client)
+        )
+        provider: BigQueryToolProvider | SpannerToolProvider = BigQueryToolProvider(
+            bq_driver, enforce_dry_run_limit=False
+        )
+        name = "bigquery_query"
+        client_calls: list[Any] = bq_client.requests
+    else:
+        sp_client = _SpannerToolClient()
+        sp_config = SpannerConfig(project_id="core-proj", instance_id="prod-inst", database_id="orders-db")
+        sp_driver = (
+            AsyncSpannerDriver(sp_config, client=_AsyncSpannerToolClient(sp_client))
+            if asynchronous
+            else SyncSpannerDriver(sp_config, client=sp_client)
+        )
+        provider = SpannerToolProvider(sp_driver)
+        name = "spanner_query"
+        client_calls = sp_client.queries
+
+    gate = ConfirmationGate()
+    tool = build_tools(provider, confirmation_gate=gate)[name]
+    sql = "WITH record AS (SELECT 1 AS val) SELECT val FROM record"
+    with pytest.raises(PermissionDeniedError) as exc:
+        await tool.invoke({"sql": sql})
+    assert client_calls == []
+    token = str(exc.value).split("ticket=", 1)[1].rstrip(")")
+    gate.approve(token)
+    result = await tool.invoke({"sql": sql, "confirmation_token": token})
+    assert result["mode"] in {"query", "read_only_snapshot"}
+    assert "rows" in result
+    assert len(client_calls) == 1
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("asynchronous", [False, True])
-async def test_native_provider_preserves_driver_exception_identity(asynchronous: bool) -> None:
+@pytest.mark.parametrize(
+    "failure_factory",
+    [
+        lambda: DatabaseError("database"),
+        lambda: PermissionError("wire permission"),
+        lambda: RuntimeError("wire"),
+        asyncio.CancelledError,
+        lambda: ToolPolicyError("explicit policy"),
+    ],
+    ids=["database-error", "permission-error", "runtime-error", "cancelled-error", "tool-policy-error"],
+)
+async def test_native_provider_preserves_driver_exception_identity(
+    asynchronous: bool,
+    failure_factory: Any,
+) -> None:
     """Only explicit adapter policy refusals translate across the generic consumer."""
 
     class FailingClient(_BigQueryToolClient):
@@ -1055,25 +1193,19 @@ async def test_native_provider_preserves_driver_exception_identity(asynchronous:
         def query(self, sql: str, parameters: Any = None, *options: Any) -> dict[str, Any]:
             raise self.failure
 
-    for failure in (
-        DatabaseError("database"),
-        PermissionError("wire permission"),
-        RuntimeError("wire"),
-        asyncio.CancelledError(),
-        ToolPolicyError("explicit policy"),
-    ):
-        client = FailingClient(failure)
-        config = BigQueryConfig(project_id="analytics-proj")
-        driver = (
-            AsyncBigQueryDriver(config, client=_AsyncBigQueryToolClient(client))
-            if asynchronous
-            else SyncBigQueryDriver(config, client=client)
-        )
-        tool = build_tools(BigQueryToolProvider(driver, enforce_dry_run_limit=False))["bigquery_query"]
-        expected = PermissionDeniedError if isinstance(failure, ToolPolicyError) else type(failure)
-        with pytest.raises(expected) as exc:
-            await tool.invoke({"sql": "SELECT 1"})
-        if isinstance(failure, ToolPolicyError):
-            assert exc.value.__cause__ is failure
-        else:
-            assert exc.value is failure
+    failure = failure_factory()
+    client = FailingClient(failure)
+    config = BigQueryConfig(project_id="analytics-proj")
+    driver = (
+        AsyncBigQueryDriver(config, client=_AsyncBigQueryToolClient(client))
+        if asynchronous
+        else SyncBigQueryDriver(config, client=client)
+    )
+    tool = build_tools(BigQueryToolProvider(driver, enforce_dry_run_limit=False))["bigquery_query"]
+    expected = PermissionDeniedError if isinstance(failure, ToolPolicyError) else type(failure)
+    with pytest.raises(expected) as exc:
+        await tool.invoke({"sql": "SELECT 1"})
+    if isinstance(failure, ToolPolicyError):
+        assert exc.value.__cause__ is failure
+    else:
+        assert exc.value is failure

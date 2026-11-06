@@ -332,13 +332,13 @@ def _build_litestar_run_command(plugin: VertebraPlugin) -> click.Command:
     )
     @click.option(
         "--ssl-certfile",
-        type=click.Path(file_okay=True, exists=True, dir_okay=False, readable=True),
+        type=click.Path(file_okay=True, exists=False, dir_okay=False, readable=True),
         help="SSL certificate file path",
         default=None,
     )
     @click.option(
         "--ssl-keyfile",
-        type=click.Path(file_okay=True, exists=True, dir_okay=False, readable=True),
+        type=click.Path(file_okay=True, exists=False, dir_okay=False, readable=True),
         help="SSL key file path",
         default=None,
     )
@@ -473,8 +473,26 @@ def _build_litestar_run_command(plugin: VertebraPlugin) -> click.Command:
         if uds is not None:
             env["VERTEBRA_UDS"] = str(uds)
         if ssl_certfile and ssl_keyfile:
-            env["VERTEBRA_TLS_CERT"] = str(Path(ssl_certfile).resolve())
-            env["VERTEBRA_TLS_KEY"] = str(Path(ssl_keyfile).resolve())
+            cert_path = Path(ssl_certfile).resolve()
+            key_path = Path(ssl_keyfile).resolve()
+            if not create_self_signed_cert:
+                if not cert_path.is_file():
+                    raise CLIError(
+                        f"SSL certificate file does not exist: {cert_path}",
+                        exit_code=EXIT_CONFIG_ERROR,
+                    )
+                if not key_path.is_file():
+                    raise CLIError(
+                        f"SSL key file does not exist: {key_path}",
+                        exit_code=EXIT_CONFIG_ERROR,
+                    )
+            env["VERTEBRA_TLS_CERT"] = str(cert_path)
+            env["VERTEBRA_TLS_KEY"] = str(key_path)
+        elif ssl_certfile or ssl_keyfile:
+            raise CLIError(
+                "Both --ssl-certfile and --ssl-keyfile must be provided together",
+                exit_code=EXIT_CONFIG_ERROR,
+            )
         if create_self_signed_cert:
             env["VERTEBRA_SELF_SIGNED_CERT"] = "1"
 
