@@ -212,14 +212,17 @@ describe("@vertebra/client/agent SDK", () => {
     ).toBe("wss://api.example.com/ws/rooms/general?token=abc");
   });
 
-  it("registerWebMCPTools registers tools with navigator.modelContext and dispatches JSON-RPC tools/call", async () => {
-    const registered: BrowserModelContextTool[] = [];
+  it("registerWebMCPTools prioritizes document.modelContext, forwards signal, isolates errors, and supports HMR disposal", async () => {
+    const registered = new Map<string, { tool: BrowserModelContextTool; signal?: AbortSignal }>();
+    const unregistered: string[] = [];
     let capturedHeaders: Headers | null = null;
     let capturedBody: Record<string, unknown> | null = null;
+    let capturedSignal: AbortSignal | null | undefined = null;
 
     const fakeFetch: typeof fetch = async (_input, init) => {
       capturedHeaders = new Headers(init?.headers);
       capturedBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      capturedSignal = init?.signal;
       return new Response(
         JSON.stringify({
           jsonrpc: "2.0",
@@ -230,35 +233,98 @@ describe("@vertebra/client/agent SDK", () => {
       );
     };
 
-    const tools = await registerWebMCPTools(
-      {
+    const docContext = {
+      registerTool: (tool: BrowserModelContextTool, opts?: { signal?: AbortSignal }) => {
+        if (tool.name === "broken_tool") {
+          throw new Error("registration rejected");
+        }
+        registered.set(tool.name, { tool, signal: opts?.signal });
+        opts?.signal?.addEventListener("abort", () => {
+          registered.delete(tool.name);
+        });
+      },
+      unregisterTool: (name: string) => {
+        unregistered.push(name);
+        registered.delete(name);
+      },
+    };
+    const navContext = {
+      registerTool: () => {
+        throw new Error("navigator.modelContext should not be used when document.modelContext is present");
+      },
+    };
+
+    const g = globalThis as Record<string, unknown>;
+    const navObj = globalThis.navigator as unknown as Record<string, unknown>;
+    const prevDoc = g.document;
+    const prevNavModelContext = navObj.modelContext;
+    g.document = { modelContext: docContext };
+    navObj.modelContext = navContext;
+
+    try {
+      const manifest = {
         protocolVersion: MCP_PROTOCOL_VERSION,
         mcpEndpoint: "https://app.example.com/mcp",
         tools: [
           {
+            name: "broken_tool",
+            description: "Fails registration",
+            inputSchema: { type: "object" },
+          },
+          {
             name: "create_ticket",
+            title: "Create Ticket",
             description: "Create a support ticket",
             inputSchema: { type: "object", properties: { title: { type: "string" } } },
+            outputSchema: { type: "object", properties: { id: { type: "number" } } },
+            annotations: { consequentialHint: true },
           },
         ],
-      },
-      {
-        fetchImpl: fakeFetch,
-        modelContext: {
-          registerTool: (tool) => {
-            registered.push(tool);
-          },
-        },
-      },
-    );
+      };
 
-    expect(tools).toHaveLength(1);
-    expect(registered).toHaveLength(1);
-    const out = await registered[0]?.execute({ title: "Broken login" });
-    expect(out).toEqual({ status: "created", id: 101 });
-    expect(capturedHeaders?.get("MCP-Protocol-Version")).toBe(MCP_PROTOCOL_VERSION);
-    expect(capturedHeaders?.get("Mcp-Method")).toBe("tools/call");
-    expect(capturedHeaders?.get("Mcp-Name")).toBe("create_ticket");
-    expect((capturedBody?.params as { name?: string } | undefined)?.name).toBe("create_ticket");
+      const handle1 = await registerWebMCPTools(manifest, { fetchImpl: fakeFetch });
+      expect(handle1.tools).toHaveLength(1);
+      expect(handle1.errors).toHaveLength(1);
+      expect(handle1.errors[0]?.name).toBe("broken_tool");
+      expect(registered.size).toBe(1);
+
+      const firstEntry = registered.get("create_ticket");
+      expect(firstEntry?.tool.title).toBe("Create Ticket");
+      expect(firstEntry?.tool.outputSchema).toEqual({
+        type: "object",
+        properties: { id: { type: "number" } },
+      });
+      expect(firstEntry?.signal?.aborted).toBe(false);
+
+      // HMR re-registration replaces previous tool cleanly without duplicates
+      const abortCtrl = new AbortController();
+      const handle2 = await registerWebMCPTools(manifest, {
+        fetchImpl: fakeFetch,
+        signal: abortCtrl.signal,
+      });
+      expect(firstEntry?.signal?.aborted).toBe(true);
+      expect(registered.size).toBe(1);
+
+      const execAbort = new AbortController();
+      const activeTool = handle2.tools[0];
+      const out = await activeTool?.execute({ title: "Broken login" }, { signal: execAbort.signal });
+      expect(out).toEqual({ status: "created", id: 101 });
+      expect(capturedHeaders?.get("MCP-Protocol-Version")).toBe(MCP_PROTOCOL_VERSION);
+      expect(capturedHeaders?.get("Mcp-Method")).toBe("tools/call");
+      expect(capturedHeaders?.get("Mcp-Name")).toBe("create_ticket");
+      expect(capturedSignal).toBe(execAbort.signal);
+      expect((capturedBody?.params as { name?: string } | undefined)?.name).toBe("create_ticket");
+
+      handle2.dispose();
+      expect(registered.size).toBe(0);
+      expect(unregistered).toContain("create_ticket");
+    } finally {
+      g.document = prevDoc;
+      if (prevNavModelContext === undefined) {
+        delete navObj.modelContext;
+      } else {
+        navObj.modelContext = prevNavModelContext;
+      }
+    }
   });
 });

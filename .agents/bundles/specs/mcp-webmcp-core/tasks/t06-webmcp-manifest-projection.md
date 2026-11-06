@@ -22,11 +22,11 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: '2026-11-06T22:38:00Z'
-last_verified_commit: "10143439aba293218a7148a11a2529c877dfe2f1"
+last_verified_commit: "f4ed07da322704eaea5fb4fd5993a0dbb34caf43"
 verification_evidence: "18 passed in test_mcp_conformance.py; ruff, mypy, scan_public_docstrings.py passed."
 created_at: '2026-11-06T06:36:00Z'
 updated_at: '2026-11-06T22:38:00Z'
-commit: null
+commit: "f4ed07da322704eaea5fb4fd5993a0dbb34caf43"
 tags:
 - webmcp
 - manifest

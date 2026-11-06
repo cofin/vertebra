@@ -2,7 +2,7 @@
 type: Task
 id: mcp-webmcp-core:t07
 title: Upgrade TypeScript webmcp.ts bridge to document.modelContext.registerTool with signal disposal
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -14,17 +14,17 @@ tests:
 - src/ts/vertebra-client/tests/agent.test.ts
 plan_revision: 2
 plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: executor
+claimed_at: '2026-11-06T22:39:00Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-06T22:43:00Z'
+last_verified_commit: "f4ed07da322704eaea5fb4fd5993a0dbb34caf43"
+verification_evidence: "make ts-test (54 passed), biome check, and tsup build passed."
 created_at: '2026-11-06T06:36:00Z'
-updated_at: '2026-11-06T06:36:00Z'
+updated_at: '2026-11-06T22:43:00Z'
 commit: null
 tags:
 - typescript
@@ -60,7 +60,7 @@ bun run --cwd src/ts/vertebra-client build
 
 ## Acceptance Criteria
 
-- [ ] R8 (WebMCP): `registerWebMCPTools` supports `document.modelContext`, `AbortSignal` disposal, HMR idempotency, and per-tool error isolation without `provideContext`.
+- [x] R8 (WebMCP): `registerWebMCPTools` supports `document.modelContext`, `AbortSignal` disposal, HMR idempotency, and per-tool error isolation without `provideContext`.
 
 ## Notes & Discoveries
 
