@@ -56,12 +56,12 @@ class A2aAgentBridge:
                 elif isinstance(s, AgentSkill):
                     skills.append(s)
 
-        for tool_desc in mcp_service.registry.list_tools():
+        for spec in mcp_service.registry.list_specs(exposure="a2a"):
             skills.append(
                 AgentSkill(
-                    id=tool_desc.name,
-                    name=tool_desc.name,
-                    description=tool_desc.description,
+                    id=spec.name,
+                    name=spec.title or spec.name,
+                    description=spec.description,
                 )
             )
 

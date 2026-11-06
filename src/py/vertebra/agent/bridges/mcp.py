@@ -129,6 +129,7 @@ class McpToolBridge:
             tool_instance = Tool(
                 _bind_closure(skill_id, tool_name, tool_description),
                 name=tool_name,
+                title=skill.name or tool_name,
                 description=tool_description,
                 input_schema=input_schema,
             )

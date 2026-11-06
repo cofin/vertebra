@@ -90,14 +90,6 @@ class AgentChatController:
         self.queue_service = queue_service
         self.stream_broker = stream_broker if stream_broker is not None else SseStreamBroker()
 
-    def _resolve_owner(self, context: AgentContext | None) -> str:
-        ctx = context or AgentContext.current()
-        if ctx is not None and ctx.identity is not None:
-            owner = ctx.identity.owner_key()
-            if owner:
-                return owner
-        return ANONYMOUS_OWNER
-
     async def chat(
         self,
         request: ChatRequest,
@@ -406,6 +398,14 @@ class AgentChatController:
                 return 204, {}, b""
 
         return 404, {"content-type": "application/json"}, b'{"error": "not_found"}'
+
+    def _resolve_owner(self, context: AgentContext | None) -> str:
+        ctx = context or AgentContext.current()
+        if ctx is not None and ctx.identity is not None:
+            owner = ctx.identity.owner_key()
+            if owner:
+                return owner
+        return ANONYMOUS_OWNER
 
 
 __all__ = [

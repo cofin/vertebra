@@ -2,7 +2,7 @@
 type: Task
 id: mcp-webmcp-core:t02
 title: Build ToolRegistry over neutral ToolProvider, SkillControllers, and route discovery
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -19,18 +19,18 @@ tests:
 - src/py/tests/unit/db/test_spanner.py
 plan_revision: 2
 plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: agent:flow-implement
+claimed_at: '2026-11-06T21:40:00Z'
 blocked_reason: null
 unblock_condition: null
-next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+next_step: Completed
+last_verified_at: '2026-11-06T21:45:00Z'
+last_verified_commit: "14ee1e3ece3a0d5c1e013e6e837a9a36f8c19706"
+verification_evidence: "uv run --no-sync pytest src/py/tests/unit/agent/test_mcp_enterprise_tools.py src/py/tests/unit/db/test_bigquery.py src/py/tests/unit/db/test_spanner.py -q (116 passed) && ruff check && mypy"
 created_at: '2026-11-06T06:36:00Z'
-updated_at: '2026-11-06T06:36:00Z'
-commit: null
+updated_at: '2026-11-06T21:45:00Z'
+commit: "14ee1e3ece3a0d5c1e013e6e837a9a36f8c19706"
 tags:
 - mcp
 - registry
@@ -66,8 +66,8 @@ uv run --no-sync mypy src/py/vertebra/agent
 
 ## Acceptance Criteria
 
-- [ ] R3: `ToolRegistry` ingests any `vertebra.typing.ToolProvider` (including `BigQueryToolProvider` and `SpannerToolProvider`), `@tool` functions, `SkillController`s, and routes with full typed `ToolSpec` metadata and zero upward imports in `vertebra.db`.
+- [x] R3: `ToolRegistry` ingests any `vertebra.typing.ToolProvider` (including `BigQueryToolProvider` and `SpannerToolProvider`), `@tool` functions, `SkillController`s, and routes with full typed `ToolSpec` metadata and zero upward imports in `vertebra.db`.
 
 ## Notes & Discoveries
 
-None.
+- `ToolRegistry` stores `(ToolSpec, Tool)` pairs, adapts any `ToolProvider` via `build_tools`, and updates `SchemaDigestCache` across tools, resources, templates, and prompts.

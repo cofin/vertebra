@@ -89,6 +89,7 @@ __all__ = (
     "ToolArgumentError",
     "ToolCall",
     "ToolExposure",
+    "ToolRegistry",
     "ToolResult",
     "ToolSpec",
     "TurnBudget",
@@ -291,6 +292,12 @@ def __getattr__(name: str) -> Any:
         mod = ensure_module("vertebra.agent.mcp")
         globals()["mcp"] = mod
         return mod
+
+    if name == "ToolRegistry":
+        mod = ensure_module("vertebra.agent.mcp")
+        val = getattr(mod, name)
+        globals()[name] = val
+        return val
 
     if name in _CORE_EXPORTS:
         mod = ensure_module("vertebra.agent.core")

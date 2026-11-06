@@ -36,7 +36,7 @@ from vertebra.agent.mcp.models import (
     TextContent,
     ToolCallOutput,
 )
-from vertebra.agent.mcp.registry import MCPRegistry
+from vertebra.agent.mcp.registry import MCPRegistry, ToolRegistry
 from vertebra.agent.mcp.routes import MCPHttpHandler
 from vertebra.agent.mcp.service import MCPService
 from vertebra.agent.mcp.skills import (
@@ -104,6 +104,7 @@ __all__ = [
     "TaskStateError",
     "TextContent",
     "ToolCallOutput",
+    "ToolRegistry",
     "WebMCPConfig",
     "WebMCPManifest",
     "WebMCPToolDescriptor",

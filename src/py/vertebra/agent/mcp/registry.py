@@ -1,27 +1,41 @@
 """Registry for MCP tools, resources, templates, prompts, and schema caching.
 
 This module maintains the registered catalog of capabilities exposed by an MCP server,
-computing schema digests and ETags across mutations.
+storing immutable ToolSpec metadata alongside Tool descriptors, ingesting neutral
+ToolProvider instances, SkillControllers, and route handlers, and computing
+deterministic schema digests and ETags across mutations.
 """
 
-import re
-from collections.abc import Callable
-from typing import Any
+from __future__ import annotations
 
-from vertebra.agent.core.schema import SchemaDigestCache, Tool
+import re
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING, Any
+
+from vertebra.agent.core.schema import SchemaDigestCache, Tool, ToolExposure, ToolSpec
 from vertebra.agent.mcp.models import (
     PromptEntry,
     ResourceEntry,
     ResourceTemplateEntry,
 )
+from vertebra.agent.tools import build_tools
+from vertebra.typing import ToolProvider
 from vertebra.utils.serializers import encode_json_bytes
 
+if TYPE_CHECKING:
+    from vertebra.agent.runtime import ConfirmationGate
 
-class MCPRegistry:
-    """Central catalog of tools, resources, resource templates, and prompts."""
 
-    def __init__(self, schema_cache: SchemaDigestCache | None = None) -> None:
-        self._tools: dict[str, Tool] = {}
+class ToolRegistry:
+    """Central catalog of tools (ToolSpec + Tool), resources, resource templates, and prompts."""
+
+    def __init__(
+        self,
+        schema_cache: SchemaDigestCache | None = None,
+        *,
+        confirmation_gate: ConfirmationGate | None = None,
+    ) -> None:
+        self._entries: dict[str, tuple[ToolSpec, Tool]] = {}
         self._resources: dict[str, ResourceEntry] = {}
         self._templates: dict[str, ResourceTemplateEntry] = {}
         self._prompts: dict[str, PromptEntry] = {}
@@ -29,11 +43,16 @@ class MCPRegistry:
         self._skill_controllers: dict[str, Any] = {}
         self._listeners: list[Callable[[], None]] = []
         self.schema_cache = schema_cache if schema_cache is not None else SchemaDigestCache()
+        self.confirmation_gate = confirmation_gate
 
     @property
     def skill_controllers(self) -> dict[str, Any]:
         """Return registered skill controllers."""
         return self._skill_controllers
+
+    def etag(self) -> str:
+        """Return deterministic weak ETag across all registered tools, resources, templates, and prompts."""
+        return self.schema_cache.combined_etag()
 
     def add_listener(self, listener: Callable[[], None]) -> None:
         """Register a callback invoked whenever the registry is mutated."""
@@ -43,20 +62,62 @@ class MCPRegistry:
         for listener in self._listeners:
             listener()
 
-    def register_tool(self, tool: Tool) -> None:
-        """Register a tool and cache its schema digest."""
-        self._tools[tool.name] = tool
-        schema_bytes = encode_json_bytes(tool.input_schema)
-        self.schema_cache.put(f"tool:{tool.name}", schema_bytes)
+    def register_tool(self, tool_or_fn: Tool | Callable[..., Any]) -> Tool:
+        """Register a Tool descriptor (or callable) and cache its ToolSpec digest."""
+        tool_obj = tool_or_fn if isinstance(tool_or_fn, Tool) else Tool(tool_or_fn)
+        spec = tool_obj.spec
+        self._entries[spec.name] = (spec, tool_obj)
+        spec_payload = {
+            "name": spec.name,
+            "title": spec.title,
+            "description": spec.description,
+            "input_schema": spec.input_schema,
+            "output_schema": spec.output_schema,
+            "annotations": spec.annotations.to_mcp_dict(),
+            "exposure": sorted(spec.exposure),
+            "requires_confirmation": spec.requires_confirmation,
+        }
+        self.schema_cache.put(f"tool:{spec.name}", encode_json_bytes(spec_payload))
         self._notify()
+        return tool_obj
+
+    def register_provider(
+        self,
+        provider: ToolProvider,
+        *,
+        confirmation_gate: ConfirmationGate | None = None,
+    ) -> dict[str, Tool]:
+        """Adapt and register all operations from a neutral ToolProvider."""
+        effective_gate = confirmation_gate if confirmation_gate is not None else self.confirmation_gate
+        adapted = build_tools(provider, confirmation_gate=effective_gate)
+        for tool_obj in adapted.values():
+            self.register_tool(tool_obj)
+        return adapted
 
     def get_tool(self, name: str) -> Tool | None:
         """Retrieve a tool descriptor by name."""
-        return self._tools.get(name)
+        entry = self._entries.get(name)
+        return entry[1] if entry is not None else None
 
-    def list_tools(self) -> list[Tool]:
-        """Return all registered tools sorted by name."""
-        return [self._tools[k] for k in sorted(self._tools.keys())]
+    def get_spec(self, name: str) -> ToolSpec | None:
+        """Retrieve an immutable ToolSpec by name."""
+        entry = self._entries.get(name)
+        return entry[0] if entry is not None else None
+
+    def entries(self, *, exposure: ToolExposure | None = None) -> list[tuple[ToolSpec, Tool]]:
+        """Return registered (ToolSpec, Tool) pairs sorted by tool name, optionally filtered by exposure."""
+        sorted_entries = [self._entries[k] for k in sorted(self._entries.keys())]
+        if exposure is None:
+            return sorted_entries
+        return [(spec, t) for spec, t in sorted_entries if exposure in spec.exposure]
+
+    def list_specs(self, *, exposure: ToolExposure | None = None) -> list[ToolSpec]:
+        """Return registered ToolSpec items sorted by name, optionally filtered by exposure."""
+        return [spec for spec, _ in self.entries(exposure=exposure)]
+
+    def list_tools(self, *, exposure: ToolExposure | None = None) -> list[Tool]:
+        """Return registered Tool descriptors sorted by name, optionally filtered by exposure."""
+        return [t for _, t in self.entries(exposure=exposure)]
 
     def register_resource(self, resource: ResourceEntry) -> None:
         """Register a static resource descriptor."""
@@ -202,10 +263,12 @@ class MCPRegistry:
             raw_annotations = (
                 options.get("mcp_annotations") or opt_tool_dict.get("annotations") or meta_dict.get("annotations") or {}
             )
+            resolved_title = options.get("mcp_title") or opt_tool_dict.get("title") or meta_dict.get("title") or ""
             self.register_tool(
                 Tool(
                     fn,
                     name=resolved_name,
+                    title=str(resolved_title),
                     description=resolved_description,
                     requires_confirmation=resolved_confirmation,
                     timeout_seconds=resolved_timeout,
@@ -282,14 +345,8 @@ class MCPRegistry:
                 )
             )
 
-    def discover_app_routes(self, app: Any) -> None:
-        """Scan an application's routes and controllers for explicit MCP annotations."""
-        controllers = getattr(app, "controllers", ()) or ()
-        for ctrl in controllers:
-            if hasattr(ctrl, "get_tools") or hasattr(ctrl, "get_prompts") or hasattr(ctrl, "get_resources"):
-                self.register_controller(ctrl)
-
-        routes = getattr(app, "routes", ()) or ()
+    def register_routes(self, routes: Iterable[Any]) -> None:
+        """Register an iterable of route objects or route handler callables."""
         for route in routes:
             handler_map = getattr(route, "route_handler_map", None)
             if isinstance(handler_map, dict):
@@ -298,7 +355,22 @@ class MCPRegistry:
             else:
                 self.register_route_handler(route)
 
+    def discover_app_routes(self, app: Any) -> None:
+        """Scan an application's routes and controllers for explicit MCP annotations."""
+        controllers = getattr(app, "controllers", ()) or ()
+        for ctrl in controllers:
+            if hasattr(ctrl, "get_tools") or hasattr(ctrl, "get_prompts") or hasattr(ctrl, "get_resources"):
+                self.register_controller(ctrl)
+
+        routes = getattr(app, "routes", ()) or ()
+        self.register_routes(routes)
+
+
+class MCPRegistry(ToolRegistry):
+    """MCP capability registry extending ToolRegistry across tools, resources, templates, and prompts."""
+
 
 __all__ = [
     "MCPRegistry",
+    "ToolRegistry",
 ]

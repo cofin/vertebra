@@ -1,11 +1,18 @@
 """Unit tests for ORDS, Oracle 26ai Duality Views, and Oracle APEX MCP tool synthesis."""
 
-from collections.abc import AsyncIterator
+import ast
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from vertebra.agent.core import AgentContext, CallerIdentity, PermissionDeniedError, ToolSpec, tool
+from vertebra.agent.mcp import SkillController, ToolRegistry, mcp_tool
+from vertebra.agent.runtime import ConfirmationGate as RuntimeConfirmationGate
+from vertebra.db.adapters.bigquery.tools import BigQueryToolProvider
+from vertebra.db.adapters.spanner.tools import SpannerToolProvider
 from vertebra.extensions.apex import (
     ApexAccessPolicy,
     ApexGateway,
@@ -16,6 +23,7 @@ from vertebra.extensions.apex import (
     DualityViewSpec,
     OrdsTransportProtocol,
 )
+from vertebra.typing import ToolPolicyError, ToolProvider
 
 
 class MockOrdsTransport(OrdsTransportProtocol):
@@ -194,3 +202,134 @@ async def test_apex_gateway_page_and_plsql_tool_registration() -> None:
     apex_tool = mcp_tools["apex_p12_process_payment"]
     assert apex_tool.spec.name == "apex_p12_process_payment"
     assert "webmcp" not in apex_tool.spec.exposure
+
+
+class _CustomAnalyticsProvider(ToolProvider):
+    """Neutral ToolProvider verifying bound owner preservation and per-call confirmation."""
+
+    def __init__(self, prefix: str = "tenant-a") -> None:
+        self.prefix = prefix
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def operations(self) -> Mapping[str, Callable[..., Awaitable[Any]]]:
+        return {
+            "analytics_read": self.analytics_read,
+            "analytics_mutate": self.analytics_mutate,
+        }
+
+    def confirmation_reason(self, operation_name: str, arguments: Mapping[str, Any]) -> str | None:
+        if operation_name == "analytics_mutate" and arguments.get("force"):
+            return "Force mutation requires approval"
+        return None
+
+    async def analytics_read(self, metric: str, window_minutes: int = 15) -> dict[str, Any]:
+        """Read metric aggregation over a sliding window."""
+        if window_minutes <= 0:
+            raise ToolPolicyError("window_minutes must be positive")
+        self.calls.append(("read", {"metric": metric, "window_minutes": window_minutes}))
+        return {"owner": self.prefix, "metric": metric, "window_minutes": window_minutes}
+
+    async def analytics_mutate(self, metric: str, force: bool = False) -> dict[str, Any]:
+        """Mutate metric configuration."""
+        self.calls.append(("mutate", {"metric": metric, "force": force}))
+        return {"owner": self.prefix, "metric": metric, "mutated": True, "force": force}
+
+
+class _SampleSkillController(SkillController):
+    """Controller exposing a bound @tool method."""
+
+    skill_id = "ops_skill"
+    prefix = "ops"
+
+    def __init__(self, tag: str = "prod") -> None:
+        self.tag = tag
+
+    @tool(name="ops_ping", title="Ops Ping", webmcp=True)
+    async def ping(self, target: str) -> dict[str, str]:
+        """Ping an operational target."""
+        return {"target": target, "tag": self.tag}
+
+
+@pytest.mark.anyio
+async def test_tool_registry_provider_controller_and_route_discovery() -> None:
+    """Verify ToolRegistry ingests neutral ToolProviders, BigQuery/Spanner providers, SkillControllers, and routes."""
+    adapters_root = Path(__file__).resolve().parents[3] / "vertebra" / "db" / "adapters"
+    for py_path in adapters_root.rglob("*.py"):
+        tree = ast.parse(py_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert not alias.name.startswith("vertebra.agent"), f"Upward import in {py_path}"
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                assert not node.module.startswith("vertebra.agent"), f"Upward import in {py_path}"
+
+    gate = RuntimeConfirmationGate()
+    registry = ToolRegistry(confirmation_gate=gate)
+    initial_etag = registry.etag()
+
+    provider = _CustomAnalyticsProvider(prefix="cluster-west")
+    registry.register_provider(provider)
+    after_provider_etag = registry.etag()
+    assert after_provider_etag != initial_etag
+
+    registry.register_provider(BigQueryToolProvider())
+    registry.register_provider(SpannerToolProvider())
+    registry.register_controller(_SampleSkillController(tag="eu-central"))
+
+    @mcp_tool(name="route_health", description="Check route health", webmcp=True)
+    async def route_handler(service: str = "api") -> dict[str, str]:
+        return {"service": service, "status": "healthy"}
+
+    registry.register_routes([route_handler])
+    final_etag = registry.etag()
+    assert final_etag != after_provider_etag
+
+    specs = {spec.name: spec for spec in registry.list_specs()}
+    assert {
+        "analytics_read",
+        "analytics_mutate",
+        "bigquery_dry_run",
+        "bigquery_query",
+        "bigquery_object_table_inspect",
+        "spanner_query",
+        "spanner_schema_inspect",
+        "ops_ping",
+        "route_health",
+    }.issubset(specs.keys())
+
+    webmcp_specs = {spec.name for spec in registry.list_specs(exposure="webmcp")}
+    assert webmcp_specs == {"ops_ping", "route_health"}
+
+    read_spec = registry.get_spec("analytics_read")
+    assert isinstance(read_spec, ToolSpec)
+    assert read_spec.input_schema["properties"]["window_minutes"]["default"] == 15
+
+    read_tool = registry.get_tool("analytics_read")
+    assert read_tool is not None
+    read_out = await read_tool.invoke({"metric": "cpu"})
+    assert read_out == {"owner": "cluster-west", "metric": "cpu", "window_minutes": 15}
+
+    with pytest.raises(PermissionDeniedError, match="window_minutes must be positive"):
+        await read_tool.invoke({"metric": "cpu", "window_minutes": 0})
+
+    mutate_tool = registry.get_tool("analytics_mutate")
+    assert mutate_tool is not None
+    ctx = AgentContext(identity=CallerIdentity(user_id="alice", tenant_id="t1"))
+    safe_out = await mutate_tool.invoke({"metric": "cpu", "force": False}, context=ctx)
+    assert safe_out["mutated"] is True
+
+    with pytest.raises(PermissionDeniedError, match="ticket=") as err_info:
+        await mutate_tool.invoke({"metric": "cpu", "force": True}, context=ctx)
+
+    ticket_token = str(err_info.value).split("ticket=", 1)[1].rstrip(")")
+    assert gate.approve(ticket_token, owner_id=ctx.identity.owner_key()) is True
+
+    approved_out = await mutate_tool.invoke(
+        {"metric": "cpu", "force": True, "confirmation_token": ticket_token},
+        context=ctx,
+    )
+    assert approved_out == {"owner": "cluster-west", "metric": "cpu", "mutated": True, "force": True}
+
+    ping_tool = registry.get_tool("ops_ping")
+    assert ping_tool is not None
+    assert await ping_tool.invoke({"target": "db-1"}) == {"target": "db-1", "tag": "eu-central"}

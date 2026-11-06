@@ -25,6 +25,7 @@ def mcp_tool(
     name: str | None = None,
     description: str | None = None,
     *,
+    title: str | None = None,
     requires_confirmation: bool = False,
     timeout_seconds: float | None = None,
     annotations: dict[str, Any] | None = None,
@@ -35,6 +36,7 @@ def mcp_tool(
     Args:
         name: Optional override for the MCP tool name.
         description: Optional override for the MCP tool description.
+        title: Optional human-readable title for the tool.
         requires_confirmation: Require a human confirmation ticket before invoking the tool.
         timeout_seconds: Optional execution timeout in seconds.
         annotations: Optional metadata dictionary attached to the tool descriptor.
@@ -46,6 +48,7 @@ def mcp_tool(
         target_fn: Any = fn
         target_fn._mcp_tool_meta = {
             "name": name or fn.__name__,
+            "title": title or "",
             "description": description or inspect.getdoc(fn) or "",
             "requires_confirmation": requires_confirmation,
             "timeout_seconds": timeout_seconds,
@@ -223,14 +226,9 @@ class SkillController(PromptController):
                     if self.guards:
                         bound_tool = Tool(
                             bound_tool.fn,
-                            name=bound_tool.name,
-                            description=bound_tool.description,
-                            input_schema=bound_tool.input_schema,
-                            requires_confirmation=bound_tool.requires_confirmation,
-                            timeout_seconds=bound_tool.timeout_seconds,
-                            webmcp=bound_tool.webmcp,
                             annotations=bound_tool.annotations,
                             guards=(*self.guards, *bound_tool.guards),
+                            spec=bound_tool.spec,
                             instance=bound_tool._instance,
                         )
                     tools.append(bound_tool)
@@ -240,14 +238,9 @@ class SkillController(PromptController):
                     if self.guards:
                         bound_tool = Tool(
                             bound_tool.fn,
-                            name=bound_tool.name,
-                            description=bound_tool.description,
-                            input_schema=bound_tool.input_schema,
-                            requires_confirmation=bound_tool.requires_confirmation,
-                            timeout_seconds=bound_tool.timeout_seconds,
-                            webmcp=bound_tool.webmcp,
                             annotations=bound_tool.annotations,
                             guards=(*self.guards, *bound_tool.guards),
+                            spec=bound_tool.spec,
                             instance=bound_tool._instance,
                         )
                     tools.append(bound_tool)
@@ -257,6 +250,7 @@ class SkillController(PromptController):
                         Tool(
                             bound_tool,
                             name=meta.get("name") or attr_name,
+                            title=meta.get("title") or "",
                             description=meta.get("description") or inspect.getdoc(bound_tool) or "",
                             requires_confirmation=bool(meta.get("requires_confirmation", False)),
                             timeout_seconds=meta.get("timeout_seconds"),
