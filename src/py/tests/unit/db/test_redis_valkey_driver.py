@@ -9,14 +9,14 @@ from typing import Any
 
 import pytest
 
-from vertebra.db.redis import (
+from vertebra.db.adapters.redis import (
     AsyncRedisDriver,
     RedisConfig,
     Resp3Error,
     Resp3Parser,
     SyncRedisDriver,
 )
-from vertebra.db.valkey import (
+from vertebra.db.adapters.valkey import (
     AsyncValkeyDriver,
     SyncValkeyDriver,
     ValkeyConfig,

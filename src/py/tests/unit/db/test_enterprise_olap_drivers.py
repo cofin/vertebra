@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import os
-import sqlite3
 import struct
 import zipfile
 from typing import TYPE_CHECKING
@@ -19,39 +18,53 @@ from vertebra.db import (
     AlloyDBAuthType,
     AlloyDBConfig,
     ArrowCursor,
-    AsyncDuckDBDriver,
-    AsyncMSSQLDriver,
-    AsyncMySQLDriver,
-    AsyncOracleDriver,
-    AsyncPostgreSQLDriver,
-    AsyncSQLiteDriver,
     CloudSQLConfig,
     DatabaseRegistry,
+    OperationalError,
+    SyncAlloyDBDialer,
+    SyncCloudSQLDialer,
+)
+from vertebra.db.adapters.duckdb import (
+    AsyncDuckDBDriver,
     DuckDBConfig,
     DuckDBSecretConfig,
+    SyncDuckDBDriver,
+    duckdb_bootstrap_statements,
+)
+from vertebra.db.adapters.mssql import (
+    TDS_PKT_PRE_LOGIN,
+    TDS_PKT_SQL_BATCH,
+    AsyncMSSQLDriver,
     MSSQLConfig,
+    SyncMSSQLDriver,
+    decode_tds_packet,
+    encode_tds_packet,
+    encode_tds_sql_batch,
+    rewrite_mssql_placeholders,
+)
+from vertebra.db.adapters.mysql import (
+    AsyncMySQLDriver,
     MySQLConfig,
+)
+from vertebra.db.adapters.oracle import (
+    OSON_MAGIC,
+    AsyncOracleDriver,
     OracleConfig,
     OracleConnectDescriptor,
     OracleDriverFeatures,
     OracleTopologyConfig,
     OracleWallet,
-    PostgreSQLConfig,
-    SQLiteConfig,
-    SyncAlloyDBDialer,
-    SyncCloudSQLDialer,
-    SyncDuckDBDriver,
-    SyncMSSQLDriver,
     SyncOracleDriver,
-    SyncSQLiteDriver,
     decode_oson,
+    decode_tns_packet,
+    decode_ttc_session_attrs,
     decode_vector_binary,
     decode_vector_f32,
     decode_vector_f64,
     decode_vector_i8,
-    duckdb_bootstrap_statements,
     encode_oson,
-    encode_tds_sql_batch,
+    encode_tns_connect_packet,
+    encode_tns_data_packet,
     encode_ttc_session_attrs,
     encode_vector_binary,
     encode_vector_f32,
@@ -59,28 +72,21 @@ from vertebra.db import (
     encode_vector_i8,
     parse_tnsnames_ora,
     resolve_tns_alias,
-    rewrite_mssql_placeholders,
 )
-from vertebra.db.mssql import (
-    TDS_PKT_PRE_LOGIN,
-    TDS_PKT_SQL_BATCH,
-    decode_tds_packet,
-    encode_tds_packet,
-)
-from vertebra.db.oracle import (
-    OSON_MAGIC,
-    decode_tns_packet,
-    decode_ttc_session_attrs,
-    encode_tns_connect_packet,
-    encode_tns_data_packet,
-)
-from vertebra.db.postgres import (
+from vertebra.db.adapters.postgres import (
+    AsyncPostgreSQLDriver,
+    PostgreSQLConfig,
     decode_pgcopy_rows,
     encode_pg_jsonb,
     encode_pgcopy_rows,
     read_arrow_shm,
     strip_pg_jsonb_header,
     write_arrow_shm,
+)
+from vertebra.db.adapters.sqlite import (
+    AsyncSQLiteDriver,
+    SQLiteConfig,
+    SyncSQLiteDriver,
 )
 from vertebra.extensions.sqlalchemy.dialects import (
     ALL_DIALECT_SCHEMES,
@@ -109,6 +115,31 @@ from vertebra.typing import ImproperConfigurationError, VertebraError
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+@pytest.mark.anyio
+async def test_duckdb_execute_many_reports_affected_rows() -> None:
+    """Batch counts reflect matching rows for sync and async UPDATE and DELETE."""
+    sync_driver = SyncDuckDBDriver()
+    async_driver = AsyncDuckDBDriver()
+    try:
+        for driver in (sync_driver, async_driver.sync_driver):
+            driver.execute("CREATE TABLE affected_rows (value INTEGER)")
+            driver.execute_many("INSERT INTO affected_rows VALUES (?)", [(1,), (2,), (3,)])
+        assert (
+            sync_driver.execute_many("UPDATE affected_rows SET value = value + 1 WHERE value >= ?", [(0,), (0,)]) == 6
+        )
+        assert (
+            await async_driver.execute_many("UPDATE affected_rows SET value = value + 1 WHERE value >= ?", [(0,), (0,)])
+            == 6
+        )
+        assert sync_driver.execute_many("DELETE FROM affected_rows WHERE value >= ?", [(99,)]) == 0
+        assert await async_driver.execute_many("DELETE FROM affected_rows WHERE value >= ?", [(99,)]) == 0
+        assert sync_driver.execute_many("DELETE FROM affected_rows WHERE value >= ?", [(0,), (0,)]) == 3
+        assert await async_driver.execute_many("DELETE FROM affected_rows WHERE value >= ?", [(0,), (0,)]) == 3
+    finally:
+        sync_driver.close()
+        await async_driver.close()
 
 
 class _MockLeaseGrant:
@@ -220,7 +251,7 @@ def test_sqlite_initialization_pragmas_and_broker_coordination(tmp_path: Path) -
     assert broker.lease_table.acquired == 4
     assert broker.lease_table.released == 4
 
-    arrow_cur = driver.select_to_arrow("SELECT id, label FROM items ORDER BY id", shm_threshold_rows=1)
+    arrow_cur = driver.select_to_arrow("SELECT id, label FROM items ORDER BY id", threshold_rows=1)
     assert arrow_cur.shm_region is not None
     assert arrow_cur.to_pylist() == rows
     driver.close()
@@ -440,7 +471,7 @@ def test_duckdb_post_init_bootstrap_and_arrow_shm_streaming() -> None:
     assert "SET parquet_metadata_cache = true" in driver.executed_bootstrap_statements
     driver.execute("CREATE TABLE metrics (id INTEGER, score DOUBLE)")
     driver.execute("INSERT INTO metrics VALUES (1, 98.5), (2, 87.25)")
-    arrow_cur = driver.select_to_arrow("SELECT id, score FROM metrics ORDER BY id")
+    arrow_cur = driver.select_to_arrow("SELECT id, score FROM metrics ORDER BY id", threshold_rows=1)
     assert arrow_cur.shm_region is not None
     assert arrow_cur.to_pylist() == [{"id": 1, "score": 98.5}, {"id": 2, "score": 87.25}]
     driver.close()
@@ -493,7 +524,7 @@ async def test_sqlspec_adapters_and_async_drivers() -> None:
         await asession.execute("CREATE TABLE t_async (k INTEGER, v TEXT)")
         await asession.execute("INSERT INTO t_async VALUES (42, 'answer')")
         assert await asession.select_value("SELECT v FROM t_async WHERE k = 42") == "answer"
-        arrow_res = await asession.select_to_arrow("SELECT k, v FROM t_async", shm_threshold_rows=1)
+        arrow_res = await asession.select_to_arrow("SELECT k, v FROM t_async", threshold_rows=1)
         assert arrow_res.data.to_pylist() == [{"k": 42, "v": "answer"}]
     await duck_async.close()
 
@@ -678,13 +709,13 @@ def test_unified_db_arrow_cursor_identity_and_native_delegation() -> None:
     import pyarrow as pa
 
     import vertebra.db as db_pkg
-    import vertebra.db._arrow as db_arrow_mod
-    import vertebra.db.duckdb as db_duckdb_mod
-    import vertebra.db.mssql as db_mssql_mod
-    import vertebra.db.mysql as db_mysql_mod
-    import vertebra.db.oracle as db_oracle_mod
-    import vertebra.db.postgres as db_postgres_mod
-    import vertebra.db.sqlite as db_sqlite_mod
+    import vertebra.db.adapters.duckdb as db_duckdb_mod
+    import vertebra.db.adapters.mssql as db_mssql_mod
+    import vertebra.db.adapters.mysql as db_mysql_mod
+    import vertebra.db.adapters.oracle as db_oracle_mod
+    import vertebra.db.adapters.postgres as db_postgres_mod
+    import vertebra.db.adapters.sqlite as db_sqlite_mod
+    import vertebra.db.arrow as db_arrow_mod
     from vertebra._vertebra import ArrowCursor as NativeArrowCursor
 
     assert db_pkg.ArrowCursor is db_arrow_mod.ArrowCursor
@@ -721,7 +752,7 @@ def test_sync_tenant_predicate_raises_when_guc_set_fails() -> None:
     config = SQLiteSyncConfig(path=":memory:")
     predicate = TenantPredicate(table_alias="t", tenant_value="acme")
     try:
-        with config.provide_session() as session, pytest.raises(sqlite3.OperationalError, match="set_config"):
+        with config.provide_session() as session, pytest.raises(OperationalError, match="set_config"):
             session.apply_tenant_predicate(predicate)
     finally:
         config.close()
@@ -734,7 +765,7 @@ async def test_async_tenant_predicate_raises_when_guc_set_fails() -> None:
     predicate = TenantPredicate(table_alias="t", tenant_value="acme")
     try:
         async with config.provide_session() as session:
-            with pytest.raises(sqlite3.OperationalError, match="set_config"):
+            with pytest.raises(OperationalError, match="set_config"):
                 await session.apply_tenant_predicate(predicate)
     finally:
         await config.close()

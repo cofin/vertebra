@@ -4,12 +4,29 @@ title: "ADR-001: Dual-Topology Embedded and Shared-Memory Runtime"
 description: "Architectural decision to support both in-process Embedded and multi-process POSIX Shared-Memory worker topologies with automatic selection."
 status: stable
 tags: [decisions, adr, runtime, ipc, shm, free-threaded]
+generated:
+  by: flow/0.26.0
+  at: "2026-11-04T04:33:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-04T04:33:00Z"
+    commit: f741701
 sources:
-  - resource: src/rs/vertebra-http/src/main.rs
-  - resource: src/rs/vertebra-http/src/config.rs
-  - resource: src/rs/vertebra-core/src/bridge.rs
-  - resource: src/rs/vertebra-core/src/transport/ring_pair.rs
-  - resource: src/py/vertebra/cli/_launch.py
+  - id: src-vertebra-http-src-main-rs
+    resource: src/rs/vertebra-http/src/main.rs
+    title: "Rust implementation module (src/rs/vertebra-http/src/main.rs)"
+  - id: src-vertebra-http-src-config-rs
+    resource: src/rs/vertebra-http/src/config.rs
+    title: "Rust implementation module (src/rs/vertebra-http/src/config.rs)"
+  - id: src-vertebra-core-src-bridge-rs
+    resource: src/rs/vertebra-core/src/bridge.rs
+    title: "Rust implementation module (src/rs/vertebra-core/src/bridge.rs)"
+  - id: src-vertebra-core-src-transport-ring-pair-rs
+    resource: src/rs/vertebra-core/src/transport/ring_pair.rs
+    title: "Rust implementation module (src/rs/vertebra-core/src/transport/ring_pair.rs)"
+  - id: src-cli-launch-py
+    resource: src/py/vertebra/cli/_launch.py
+    title: "Python implementation module (src/py/vertebra/cli/_launch.py)"
 ---
 
 # ADR-001: Dual-Topology Embedded and Shared-Memory Runtime
@@ -38,3 +55,11 @@ Python web servers face distinct concurrency constraints across single-worker de
 
 - `vertebra-py` exposes identical `Request`, `Response`, `RequestBatch`, and `drive_{asgi,rsgi,wsgi}_batch` primitives regardless of whether batches arrive from `BatchBridge` (`Embedded`) or `RingPair` (`Shm`).
 - `ServerLaunchEnv.to_environ()` (`src/py/vertebra/cli/_launch.py`) and `ServerConfig::from_env()` (`src/rs/vertebra-http/src/config.rs`) resolve `Topology::Auto` deterministically and honor explicit `--topology embedded|shm` overrides.
+
+Provenance sources: [^src-vertebra-http-src-main-rs], [^src-vertebra-http-src-config-rs], [^src-vertebra-core-src-bridge-rs], [^src-vertebra-core-src-transport-ring-pair-rs], [^src-cli-launch-py].
+
+[^src-vertebra-http-src-main-rs]: `src/rs/vertebra-http/src/main.rs` — Rust implementation module (src/rs/vertebra-http/src/main.rs).
+[^src-vertebra-http-src-config-rs]: `src/rs/vertebra-http/src/config.rs` — Rust implementation module (src/rs/vertebra-http/src/config.rs).
+[^src-vertebra-core-src-bridge-rs]: `src/rs/vertebra-core/src/bridge.rs` — Rust implementation module (src/rs/vertebra-core/src/bridge.rs).
+[^src-vertebra-core-src-transport-ring-pair-rs]: `src/rs/vertebra-core/src/transport/ring_pair.rs` — Rust implementation module (src/rs/vertebra-core/src/transport/ring_pair.rs).
+[^src-cli-launch-py]: `src/py/vertebra/cli/_launch.py` — Python implementation module (src/py/vertebra/cli/_launch.py).

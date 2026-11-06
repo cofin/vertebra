@@ -151,10 +151,12 @@ ts-lint:                                            ## Lint TS package with auto
 .PHONY: dev
 dev:                                                ## Install native extensions in debug mode for development
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@(cd src/rs && PYO3_PYTHON="$(PYO3_PYTHON)" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage)
+	@(cd src/rs && PYO3_PYTHON="$(PYO3_PYTHON)" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --exclude vertebra-bigquery --exclude vertebra-spanner)
 	@uv run maturin develop --uv
 	@uv run maturin develop --uv -m src/rs/vertebra-bundler/Cargo.toml
 	@uv run maturin develop --uv -m src/rs/vertebra-storage/Cargo.toml
+	@uv run maturin develop --uv -m src/rs/vertebra-bigquery/Cargo.toml
+	@uv run maturin develop --uv -m src/rs/vertebra-spanner/Cargo.toml
 
 # =============================================================================
 # Build
@@ -162,10 +164,12 @@ dev:                                                ## Install native extensions
 .PHONY: build
 build: ts-build                                     ## Build optimized release binaries + native extension + TS client
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@(cd src/rs && PYO3_PYTHON="$(PYO3_PYTHON)" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --release --features vertebra-http/python,vertebra-http/tls,vertebra-http/compression)
+	@(cd src/rs && PYO3_PYTHON="$(PYO3_PYTHON)" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --exclude vertebra-bigquery --exclude vertebra-spanner --release --features vertebra-http/python,vertebra-http/tls,vertebra-http/compression)
 	@uv run maturin develop --uv -r
 	@uv run maturin develop --uv -r -m src/rs/vertebra-bundler/Cargo.toml
 	@uv run maturin develop --uv -r -m src/rs/vertebra-storage/Cargo.toml
+	@uv run maturin develop --uv -r -m src/rs/vertebra-bigquery/Cargo.toml
+	@uv run maturin develop --uv -r -m src/rs/vertebra-spanner/Cargo.toml
 	@uv build
 	@echo "${OK} Build complete"
 
@@ -187,12 +191,12 @@ build-pgo: ts-build                                 ## Build PGO-optimized relea
 rs-test:                                            ## Run Rust tests (all features)
 	@rm -rf /dev/shm/test-* /dev/shm/*vertebra* 2>/dev/null || true
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@cd src/rs && cargo test --workspace --features tls,compression
+	@cd src/rs && cargo test --workspace --features tls,compression,gcp
 	@echo "${OK} Rust tests passed"
 
 .PHONY: py-test
 py-test: dev                                        ## Run Python tests
-	@uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage
+	@uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._bigquery vertebra._spanner
 	@uv run pytest src/py/tests -v
 	@echo "${OK} Python tests passed"
 
@@ -219,11 +223,12 @@ lint: ts-lint                                       ## Format and lint everythin
 	@echo "${INFO} Linting and fixing Rust (Fmt & Clippy)..."
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo fmt --all)
-	@(cd src/rs && cargo clippy --fix --allow-dirty --allow-staged --workspace --all-targets --features tls,compression -- -D warnings)
+	@(cd src/rs && cargo clippy --fix --allow-dirty --allow-staged --workspace --all-targets --features tls,compression,gcp -- -D warnings)
 	@echo "${INFO} Running type checks (Mypy)..."
 	@uv run mypy src/py/vertebra tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
-	@if uv run python -c "import vertebra._vertebra, vertebra._bundler, vertebra._storage" >/dev/null 2>&1; then \
-		uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage; \
+	@stub_mods="$$(uv run python -c 'import importlib.util; print(" ".join(m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._bigquery", "vertebra._spanner") if importlib.util.find_spec(m) is not None))')"; \
+	if [ -n "$$stub_mods" ]; then \
+		uv run python -m mypy.stubtest $$stub_mods; \
 	fi
 	@$(MAKE) review-check
 	@echo "${OK} Lint complete"
@@ -236,13 +241,14 @@ lint-all:                                           ## Check formatting, linting
 	@uv run ruff check src/py/vertebra src/py/tests tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
 	@uv run ruff format --check src/py/vertebra src/py/tests tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
 	@uv run mypy src/py/vertebra tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
-	@if uv run python -c "import vertebra._vertebra, vertebra._bundler, vertebra._storage" >/dev/null 2>&1; then \
-		uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage; \
+	@stub_mods="$$(uv run python -c 'import importlib.util; print(" ".join(m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._bigquery", "vertebra._spanner") if importlib.util.find_spec(m) is not None))')"; \
+	if [ -n "$$stub_mods" ]; then \
+		uv run python -m mypy.stubtest $$stub_mods; \
 	fi
 	@echo "${INFO} Checking Rust (Fmt & Clippy)..."
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo fmt --all -- --check)
-	@(cd src/rs && cargo clippy --workspace --all-targets --features tls,compression -- -D warnings)
+	@(cd src/rs && cargo clippy --workspace --all-targets --features tls,compression,gcp -- -D warnings)
 	@$(MAKE) review-check
 	@echo "${OK} All lint checks passed"
 
@@ -420,4 +426,3 @@ pre-release:                                         ## Start a pre-release: mak
 	@uv lock --offline
 	@cargo update -w --manifest-path src/rs/Cargo.toml --offline
 	@echo "${OK} Pre-release $(version) complete"
-

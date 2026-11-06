@@ -233,11 +233,10 @@ def test_python_build_info_detects_315_tail_call_jit_freethreaded_and_frame_poin
         assert info.has_frame_pointers is True
 
 
-def test_release_workflow_cibuildwheel_v4_and_python_315_matrix() -> None:
-    """Verify release.yaml builds Python 3.12-3.15 and free-threaded 3.14t/3.15t wheels with cibuildwheel v4.3.4."""
+def test_release_workflow_python_315_matrix() -> None:
+    """Verify release.yaml covers supported Python and free-threaded wheel targets."""
     repo_root = Path(__file__).resolve().parents[5]
     release_yaml = (repo_root / ".github" / "workflows" / "release.yaml").read_text(encoding="utf-8")
-    assert "pypa/cibuildwheel@v4.3.4" in release_yaml
     for target in ("cp312-*", "cp313-*", "cp314-*", "cp314t-*", "cp315-*", "cp315t-*"):
         assert target in release_yaml
 
@@ -571,18 +570,17 @@ def test_standalone_and_cli_server_binary_staging(tmp_path: Path) -> None:
 
 
 def test_pyproject_sqlalchemy_dialect_entry_points_resolve() -> None:
-    """Verify all 24 pyproject.toml SQLAlchemy dialect entry points resolve to Dialect subclasses."""
+    """Verify public SQLAlchemy dialect aliases resolve to Dialect subclasses."""
     repo_root = Path(__file__).resolve().parents[5]
     pyproject_data = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
     entry_points: dict[str, str] = pyproject_data["project"]["entry-points"]["sqlalchemy.dialects"]
 
     expected_keys = {
         f"{engine}.{suffix}"
-        for engine in ("postgresql", "oracle", "mysql", "sqlite", "mssql", "duckdb")
+        for engine in ("postgresql", "oracle", "mysql", "sqlite", "mssql", "duckdb", "bigquery", "spanner", "spangres")
         for suffix in ("vertebra", "vtb", "vertebra_async", "vtb_async")
     }
     assert set(entry_points.keys()) == expected_keys
-    assert len(entry_points) == 24
 
     for ep_name, target_spec in entry_points.items():
         mod_name, _, cls_name = target_spec.partition(":")

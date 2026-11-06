@@ -9,15 +9,15 @@ from typing import TYPE_CHECKING, Any, cast
 import msgspec
 
 from vertebra._vertebra import AlloyDBDialer, CloudSQLDialer, LeaseBroker, LeaseGrant
-from vertebra.db._registry import AnyDatabaseConfig, DatabaseRegistry
-from vertebra.db.bigquery import BigQueryConfig
-from vertebra.db.duckdb import DuckDBConfig
-from vertebra.db.mssql import MSSQLConfig
-from vertebra.db.mysql import MySQLConfig
-from vertebra.db.oracle import OracleConfig
-from vertebra.db.postgres import PoolerMode, PostgreSQLConfig
-from vertebra.db.spanner import SpannerConfig
-from vertebra.db.sqlite import SQLiteConfig
+from vertebra.db.adapters.bigquery import BigQueryConfig
+from vertebra.db.adapters.duckdb import DuckDBConfig
+from vertebra.db.adapters.mssql import MSSQLConfig
+from vertebra.db.adapters.mysql import MySQLConfig
+from vertebra.db.adapters.oracle import OracleConfig
+from vertebra.db.adapters.postgres import PoolerMode, PostgreSQLConfig
+from vertebra.db.adapters.spanner import SpannerConfig
+from vertebra.db.adapters.sqlite import SQLiteConfig
+from vertebra.db.registry import AnyDatabaseConfig, DatabaseRegistry
 from vertebra.extensions.django.orm import rows_to_structs
 from vertebra.utils.module_loader import import_optional
 
@@ -160,7 +160,7 @@ class DatabaseWrapperMixin:
                 database=db_name,
                 user=user or "sa",
                 password=password,
-                cloudsql_instance=self.pooler_config.cloud_sql_instance,
+                cloud_sql_instance=self.pooler_config.cloud_sql_instance,
                 broker=self._broker,
             )
         if self.vendor == "duckdb":

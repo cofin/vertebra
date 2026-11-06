@@ -1,7 +1,6 @@
 ---
 title: "Vertebra Product Index"
 description: "Index for Vertebra's product definition, engineering guidelines, and polyglot technology stack."
-status: stable
 tags:
   - product
   - index

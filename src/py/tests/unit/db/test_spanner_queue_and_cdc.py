@@ -8,13 +8,9 @@ from typing import Any
 import pytest
 
 from tests.unit.db.test_spanner import FakeSpannerClient
-from vertebra.db import (
-    AsyncSpannerChangeStreamSource,
-    DatabaseChannelBackend,
-    SpannerConfig,
-    SyncSpannerChangeStreamSource,
-    SyncSpannerDriver,
-)
+from vertebra.db.adapters.spanner import SpannerConfig, SyncSpannerDriver
+from vertebra.db.cdc import AsyncSpannerChangeStreamSource, SyncSpannerChangeStreamSource
+from vertebra.db.channels import DatabaseChannelBackend
 from vertebra.framework.queues import (
     QueueConfig,
     QueueService,

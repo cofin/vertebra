@@ -2,6 +2,7 @@
 type: Task
 id: db-engine-primitives:t06
 title: Delete vertebra/db/pipeline.py, route SQLSpec execute_stack via SyncPipelineCapable and AsyncPipelineCapable, and update documentation
+description: "Delete `src/py/vertebra/db/pipeline.py` (`SyncQueryPipeline`, `AsyncQueryPipeline`, `CTEStep`, `RelOverlay`, `PipelineDialect`), update `execute_stack` in `vertebra.extensions.sqlspec.{adapters,bigquery,spanner}` to dispatch via `isinstance(self.native_driver, SyncPipelineCapable)` (sync) and `isinstance(self.native_driver, AsyncPipelineCapable)` (async) when supported and sequential/transactional execution otherwise, delete `docs/usage/query-pipelines.md` with a redirect in `zensical.toml`, and synchronize `README.md`, `docs/`, and OKF `sources:`."
 state: pending
 priority: P1
 verification_strategy: characterization
@@ -35,7 +36,7 @@ tests:
   - src/py/tests/unit/extensions/test_sqlspec_spanner.py
   - src/py/tests/unit/docs/test_examples.py
 plan_revision: 4
-plan_commit: "679a981"
+plan_commit: "f741701"
 state_revision: 0
 claimed_by: null
 claimed_at: null

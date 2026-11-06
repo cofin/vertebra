@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import array
+import sqlite3
 
 import pytest
 from advanced_alchemy.base import UUIDAuditBase
 from advanced_alchemy.repository import SQLAlchemyAsyncRepository
 from advanced_alchemy.service import SQLAlchemyAsyncRepositoryService
 from advanced_alchemy.types.file_object import FileObject, StoredObject
-from sqlalchemy import String, create_engine, select
+from sqlalchemy import String, create_engine, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.util.concurrency import greenlet_spawn
 
-from vertebra.db import PostgreSQLConfig, SyncPostgreSQLDriver
+from vertebra.db.adapters.mysql import MySQLConfig, SyncMySQLDriver
+from vertebra.db.adapters.postgres import PostgreSQLConfig, SyncPostgreSQLDriver
+from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SyncSQLiteDriver
 from vertebra.extensions.alchemy import (
     ObjectStoreBackend,
     create_alchemy_plugin,
@@ -22,6 +26,7 @@ from vertebra.extensions.alchemy import (
 )
 from vertebra.extensions.sqlalchemy import (
     AlembicImpl,
+    AsyncDBAPIConnection,
     BinaryJSON,
     CreateVectorIndexOp,
     CreateViewOp,
@@ -42,8 +47,96 @@ from vertebra.extensions.sqlalchemy import (
     SyncPostgreSQLDialect,
     SyncSQLiteDialect,
     Vector,
+    dialects,
 )
 from vertebra.storage import SyncObjectStore
+
+
+@pytest.mark.parametrize("dialect_name", ["PostgreSQL", "SQLite", "MySQL", "Oracle", "MSSQL", "DuckDB"])
+def test_sync_dialect_begins_native_transaction(dialect_name: str) -> None:
+    """Dialect begin reaches the native driver before writes and permits rollback."""
+    driver = SyncSQLiteDriver()
+    driver.execute("CREATE TABLE transaction_items (id INTEGER)")
+    conn = SyncDBAPIConnection(driver=driver, share_pool=False)
+    try:
+        getattr(dialects, f"Sync{dialect_name}Dialect")().do_begin(conn)
+        conn.cursor().execute("INSERT INTO transaction_items VALUES (?)", (1,))
+        conn.rollback()
+        assert driver.select_value("SELECT COUNT(*) FROM transaction_items") == 0
+    finally:
+        conn.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("dialect_name", ["PostgreSQL", "SQLite", "MySQL", "Oracle", "MSSQL", "DuckDB"])
+async def test_async_dialect_begins_native_transaction(dialect_name: str) -> None:
+    """Async dialect begin forwards through SQLAlchemy's real adapted DBAPI connection."""
+    driver = AsyncSQLiteDriver()
+    await driver.execute("CREATE TABLE transaction_items (id INTEGER)")
+    module = dialects.AsyncDBAPIModule()
+    adapted = await greenlet_spawn(module.connect, driver=driver, share_pool=False)
+    try:
+        await greenlet_spawn(getattr(dialects, f"Async{dialect_name}Dialect")().do_begin, adapted)
+        cursor = adapted.driver_connection.cursor()
+        await cursor.execute("INSERT INTO transaction_items VALUES (?)", (1,))
+        await adapted.driver_connection.rollback()
+        assert await driver.select_value("SELECT COUNT(*) FROM transaction_items") == 0
+    finally:
+        await adapted.driver_connection.close()
+
+
+@pytest.mark.parametrize("autocommit", [False, True])
+def test_sync_dbapi_native_dml_transaction_ownership(autocommit: bool) -> None:
+    """DBAPI cursors pin MySQL connections and respect commit, rollback, and autocommit."""
+    raw = sqlite3.connect(":memory:")
+    raw.execute("CREATE TABLE transaction_items (id INTEGER)")
+    driver = SyncMySQLDriver(MySQLConfig(dsn="mysql://localhost/db"), connect_factory=lambda: raw)
+    conn = SyncDBAPIConnection("mysql+vtb://localhost/db", driver=driver, share_pool=False)
+    conn.autocommit = autocommit
+    try:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO transaction_items VALUES (?)", (1,))
+        conn.commit()
+        cursor.executemany("INSERT INTO transaction_items VALUES (?)", [(2,), (3,)])
+        conn.rollback()
+        assert raw.execute("SELECT id FROM transaction_items ORDER BY id").fetchall() == (
+            [(1,), (2,), (3,)] if autocommit else [(1,)]
+        )
+        cursor.execute("INSERT INTO transaction_items VALUES (?) RETURNING id", (4,))
+        assert cursor.fetchall() == [(4,)]
+        conn.rollback()
+        assert raw.execute("SELECT COUNT(*) FROM transaction_items WHERE id = 4").fetchone() == (
+            (1,) if autocommit else (0,)
+        )
+    finally:
+        conn.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("autocommit", [False, True])
+async def test_async_dbapi_native_dml_transaction_ownership(autocommit: bool) -> None:
+    """Async cursors honor implicit transaction boundaries for single and batched DML."""
+    driver = AsyncSQLiteDriver()
+    await driver.execute("CREATE TABLE transaction_items (id INTEGER)")
+    conn = AsyncDBAPIConnection(driver=driver, share_pool=False)
+    conn.autocommit = autocommit
+    try:
+        cursor = conn.cursor()
+        await cursor.execute("INSERT INTO transaction_items VALUES (?)", (1,))
+        await conn.commit()
+        await cursor.executemany("INSERT INTO transaction_items VALUES (?)", [(2,), (3,)])
+        await conn.rollback()
+        assert await driver.execute_tuples("SELECT id FROM transaction_items ORDER BY id") == (
+            [(1,), (2,), (3,)] if autocommit else [(1,)]
+        )
+        await cursor.execute("INSERT INTO transaction_items VALUES (?) RETURNING id", (4,))
+        assert await cursor.fetchall() == [(4,)]
+        await conn.rollback()
+        assert await driver.select_value("SELECT COUNT(*) FROM transaction_items WHERE id = 4") == (
+            1 if autocommit else 0
+        )
+    finally:
+        await conn.close()
 
 
 class BaseTestModel(DeclarativeBase):
@@ -105,6 +198,12 @@ def test_sqlite_vtb_sync_engine_ddl_dml_and_rollback() -> None:
         rows_after = conn.execute(select(ItemRecord)).fetchall()
         assert len(rows_after) == 1
 
+    with engine.begin() as conn:
+        upd_res = conn.execute(update(ItemRecord).where(ItemRecord.id == 1).values(name="updated"))
+        assert upd_res.rowcount == 1
+        del_res = conn.execute(delete(ItemRecord).where(ItemRecord.id == 1))
+        assert del_res.rowcount == 1
+
     engine.dispose()
 
 
@@ -136,6 +235,13 @@ async def test_sqlite_vtb_async_engine_ddl_dml_and_rollback() -> None:
         items = result_final.scalars().all()
         assert len(items) == 1
         assert items[0].id == 10
+
+    async with AsyncSession(engine) as session:
+        upd_result = await session.execute(update(ItemRecord).where(ItemRecord.id == 10).values(name="async_updated"))
+        assert getattr(upd_result, "rowcount", None) == 1
+        del_result = await session.execute(delete(ItemRecord).where(ItemRecord.id == 10))
+        assert getattr(del_result, "rowcount", None) == 1
+        await session.commit()
 
     await engine.dispose()
 
@@ -391,3 +497,152 @@ def test_alchemy_sync_config_factory() -> None:
         storage_key="sync_docs",
     )
     assert sync_cfg.connection_string == "sqlite+vtb:///:memory:"
+
+
+@pytest.mark.anyio
+async def test_pep249_sync_and_async_dbapi_cursor_seven_element_descriptions() -> None:
+    """Verify SyncDBAPICursor and AsyncDBAPICursor synthesize 7-item PEP 249 descriptions from column names."""
+
+    class _TupleColSyncDriver:
+        def execute_with_description(
+            self, sql: str, parameters: object = None
+        ) -> tuple[list[tuple[object, ...]], tuple[str, ...]]:
+            _ = (sql, parameters)
+            return [(1, "alpha")], ("id", "name")
+
+        def commit(self) -> None:
+            return None
+
+        def rollback(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class _TupleColAsyncDriver:
+        async def execute_with_description(
+            self,
+            sql: str,
+            parameters: object = None,
+        ) -> tuple[list[tuple[object, ...]], tuple[str, ...]]:
+            _ = (sql, parameters)
+            return [(2, "beta")], ("id", "name")
+
+        async def commit(self) -> None:
+            return None
+
+        async def rollback(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    sync_conn = SyncDBAPIConnection("sqlite+vtb:///:memory:", driver=_TupleColSyncDriver())
+    sync_cur = sync_conn.cursor()
+    sync_cur.execute("SELECT id, name FROM items")
+    assert sync_cur.description == (
+        ("id", None, None, None, None, None, None),
+        ("name", None, None, None, None, None, None),
+    )
+    assert sync_cur.fetchall() == [(1, "alpha")]
+    sync_conn.close()
+
+    async_conn = AsyncDBAPIConnection("sqlite+vtb_async:///:memory:", driver=_TupleColAsyncDriver())
+    async_cur = async_conn.cursor()
+    await async_cur.execute("SELECT id, name FROM items")
+    assert async_cur.description == (
+        ("id", None, None, None, None, None, None),
+        ("name", None, None, None, None, None, None),
+    )
+    assert await async_cur.fetchall() == [(2, "beta")]
+    await async_conn.close()
+
+
+@pytest.mark.anyio
+async def test_pep249_sync_and_async_dbapi_dml_rowcount_routing() -> None:
+    """Verify non-row-returning UPDATE and DELETE statements report affected rowcount == 1 across sync and async cursors."""
+
+    class _DmlTrackingSyncDriver:
+        def __init__(self) -> None:
+            self.executed: list[str] = []
+
+        def execute(self, sql: str, parameters: object = None) -> int:
+            _ = parameters
+            self.executed.append(sql)
+            return 1
+
+        def execute_many(self, sql: str, seq_of_parameters: object) -> int:
+            self.executed.append(sql)
+            return len(list(seq_of_parameters)) if isinstance(seq_of_parameters, (list, tuple)) else 0
+
+        def execute_with_description(
+            self,
+            sql: str,
+            parameters: object = None,
+        ) -> tuple[list[tuple[object, ...]], tuple[str, ...]]:
+            _ = (sql, parameters)
+            return [(1,)], ("id",)
+
+        def close(self) -> None:
+            return None
+
+    class _DmlTrackingAsyncDriver:
+        def __init__(self) -> None:
+            self.executed: list[str] = []
+
+        async def execute(self, sql: str, parameters: object = None) -> int:
+            _ = parameters
+            self.executed.append(sql)
+            return 1
+
+        async def execute_many(self, sql: str, seq_of_parameters: object) -> int:
+            self.executed.append(sql)
+            return len(list(seq_of_parameters)) if isinstance(seq_of_parameters, (list, tuple)) else 0
+
+        async def execute_with_description(
+            self,
+            sql: str,
+            parameters: object = None,
+        ) -> tuple[list[tuple[object, ...]], tuple[str, ...]]:
+            _ = (sql, parameters)
+            return [(1,)], ("id",)
+
+        async def close(self) -> None:
+            return None
+
+    raw_sync = SyncDBAPIConnection("sqlite+vtb:///:memory:")
+    raw_cur = raw_sync.cursor()
+    raw_cur.execute("CREATE TABLE dml_items (id INTEGER PRIMARY KEY, label TEXT)")
+    raw_cur.execute("INSERT INTO dml_items (id, label) VALUES (?, ?)", (1, "v1"))
+    raw_cur.execute("UPDATE dml_items SET label = 'RETURNING' WHERE id = ?", (1,))
+    assert raw_cur.rowcount == 1
+    raw_cur.execute("DELETE FROM dml_items WHERE id = ?", (1,))
+    assert raw_cur.rowcount == 1
+    raw_sync.close()
+
+    sync_drv = _DmlTrackingSyncDriver()
+    drv_sync_conn = SyncDBAPIConnection("postgresql+vtb://localhost:5432/app", driver=sync_drv)
+    drv_sync_cur = drv_sync_conn.cursor()
+    drv_sync_cur.execute("UPDATE items SET name = 'RETURNING' WHERE id = 1")
+    assert drv_sync_cur.rowcount == 1
+    assert drv_sync_cur.description is None
+    drv_sync_cur.execute("DELETE FROM items WHERE id = 1")
+    assert drv_sync_cur.rowcount == 1
+    drv_sync_cur.execute("INSERT INTO items (name) VALUES ('a') RETURNING id")
+    assert drv_sync_cur.rowcount == 1
+    assert drv_sync_cur.fetchall() == [(1,)]
+    assert len(sync_drv.executed) == 2
+    drv_sync_conn.close()
+
+    async_drv = _DmlTrackingAsyncDriver()
+    drv_async_conn = AsyncDBAPIConnection("postgresql+vtb_async://localhost:5432/app", driver=async_drv)
+    drv_async_cur = drv_async_conn.cursor()
+    await drv_async_cur.execute("UPDATE items SET name = 'RETURNING' WHERE id = 1")
+    assert drv_async_cur.rowcount == 1
+    assert drv_async_cur.description is None
+    await drv_async_cur.execute("DELETE FROM items WHERE id = 1")
+    assert drv_async_cur.rowcount == 1
+    await drv_async_cur.executemany("UPDATE items SET name = ? WHERE id = ?", [("a", 1), ("b", 2)])
+    assert drv_async_cur.rowcount == 2
+    assert len(async_drv.executed) == 3
+    await drv_async_conn.close()

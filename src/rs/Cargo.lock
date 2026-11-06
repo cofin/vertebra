@@ -5202,7 +5202,6 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
- "webpki-roots",
 ]
 
 [[package]]
@@ -5459,6 +5458,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "vertebra-bigquery"
+version = "0.3.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "google-cloud-bigquery",
+ "google-cloud-gax",
+ "google-cloud-rpc",
+ "google-cloud-wkt",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "pyo3",
+ "pyo3-build-config",
+ "reqwest 0.13.5",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "url",
+ "vertebra-core",
+ "vertebra-db",
+]
+
+[[package]]
 name = "vertebra-bundler"
 version = "0.3.0"
 dependencies = [
@@ -5516,12 +5541,9 @@ dependencies = [
  "dashmap",
  "futures",
  "google-cloud-auth",
- "google-cloud-bigquery",
  "google-cloud-gax",
- "google-cloud-longrunning",
  "google-cloud-rpc",
- "google-cloud-spanner",
- "google-cloud-spanner-admin-database-v1",
+ "google-cloud-wkt",
  "hex",
  "hmac 0.12.1",
  "http",
@@ -5530,22 +5552,24 @@ dependencies = [
  "hyper-util",
  "lz4_flex",
  "proptest",
- "prost",
- "prost-types",
+ "pyo3",
+ "pyo3-build-config",
  "rcgen",
  "reqwest 0.13.5",
  "rmp-serde",
  "rsa",
  "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror",
  "tokio",
- "tonic",
+ "tokio-rustls",
  "url",
  "vertebra-core",
+ "webpki-root-certs",
  "zstd",
 ]
 
@@ -5600,15 +5624,41 @@ name = "vertebra-py"
 version = "0.3.0"
 dependencies = [
  "bytes",
- "google-cloud-gax",
- "google-cloud-rpc",
- "google-cloud-wkt",
  "jsonwebtoken",
  "libc",
  "pyo3",
  "pyo3-build-config",
  "serde_json",
  "tokio",
+ "vertebra-core",
+ "vertebra-db",
+]
+
+[[package]]
+name = "vertebra-spanner"
+version = "0.3.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "futures",
+ "google-cloud-auth",
+ "google-cloud-gax",
+ "google-cloud-longrunning",
+ "google-cloud-rpc",
+ "google-cloud-spanner",
+ "google-cloud-spanner-admin-database-v1",
+ "google-cloud-wkt",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "prost",
+ "prost-types",
+ "pyo3",
+ "pyo3-build-config",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "url",
  "vertebra-core",
  "vertebra-db",
 ]
@@ -5795,15 +5845,6 @@ name = "webpki-root-certs"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e49d0e65abc00c142e8f9428da991da9f1a250c39be97459901eb12b9b49f62a"
-dependencies = [
- "rustls-pki-types",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "1.0.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
 dependencies = [
  "rustls-pki-types",
 ]

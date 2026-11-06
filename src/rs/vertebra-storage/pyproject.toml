@@ -11,3 +11,5 @@ requires-python = ">=3.12"
 python-source = "../../py"
 module-name = "vertebra._storage"
 features = ["extension-module"]
+include = ["vertebra/_storage.pyi"]
+exclude = ["**/py/vertebra/**", "!**/py/vertebra/_storage.pyi"]

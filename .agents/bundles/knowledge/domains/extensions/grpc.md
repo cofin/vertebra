@@ -4,15 +4,33 @@ title: "gRPC Services & Wire Framing"
 description: "Native 5-byte LPM gRPC framing in Rust (vertebra-http) and typed @grpc_method services, ASGI dispatch, and Protobuf v3 schema generation in Python."
 status: stable
 tags: [domains, extensions, grpc, http2, protobuf]
+generated:
+  by: flow/0.26.0
+  at: "2026-11-04T04:33:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-04T04:33:00Z"
+    commit: f741701
 sources:
-  - resource: src/rs/vertebra-http/src/grpc.rs
-  - resource: src/py/vertebra/extensions/grpc/__init__.py
-  - resource: src/py/vertebra/build/codegen/protobuf.py
+  - id: src-vertebra-http-src-grpc-rs
+    resource: src/rs/vertebra-http/src/grpc.rs
+    title: "Rust implementation module (src/rs/vertebra-http/src/grpc.rs)"
+  - id: src-extensions-grpc-init-py
+    resource: src/py/vertebra/extensions/grpc/__init__.py
+    title: "Python implementation module (src/py/vertebra/extensions/grpc/__init__.py)"
+  - id: src-build-codegen-protobuf-py
+    resource: src/py/vertebra/build/codegen/protobuf.py
+    title: "Python implementation module (src/py/vertebra/build/codegen/protobuf.py)"
 ---
 
 # gRPC Services & Wire Framing
 
-Vertebra pairs native HTTP/2 5-byte Length-Prefixed Message (LPM) framing in [`src/rs/vertebra-http/src/grpc.rs`](../../../../../src/rs/vertebra-http/src/grpc.rs) with `msgspec.Struct`-typed Python handlers and `.proto` v3 schema generation in [`vertebra.extensions.grpc`](../../../../../src/py/vertebra/extensions/grpc/__init__.py) and [`vertebra.build.codegen.protobuf`](../../../../../src/py/vertebra/build/codegen/protobuf.py).
+<!-- truth: start -->
+- `vertebra-http/src/grpc.rs` frames HTTP/2 5-byte Length-Prefixed Messages (`GrpcFrame`, `GrpcStreamBody`, `GrpcStatus`) across Protobuf, `+json`, and `+msgpack` wire formats.
+- `GrpcServiceRegistry`, `@grpc_method`, and `ProtobufSchemaGenerator` expose typed unary and streaming gRPC handlers paired with bidirectional `.proto` route codegen.
+<!-- truth: end -->
+
+Vertebra pairs native HTTP/2 5-byte Length-Prefixed Message (LPM) framing in [`src/rs/vertebra-http/src/grpc.rs`](../../../../../src/rs/vertebra-http/src/grpc.rs)[^src-vertebra-http-src-grpc-rs] with `msgspec.Struct`-typed Python handlers and `.proto` v3 schema generation in [`vertebra.extensions.grpc`](../../../../../src/py/vertebra/extensions/grpc/__init__.py)[^src-extensions-grpc-init-py] and [`vertebra.build.codegen.protobuf`](../../../../../src/py/vertebra/build/codegen/protobuf.py)[^src-build-codegen-protobuf-py].
 
 ## 1. Rust HTTP/2 gRPC Wire Framing (`vertebra-http/src/grpc.rs`)
 
@@ -28,3 +46,7 @@ Vertebra pairs native HTTP/2 5-byte Length-Prefixed Message (LPM) framing in [`s
 - **[`@grpc_method(service=..., package="vertebra", name=...)`](../../../../../src/py/vertebra/extensions/grpc/__init__.py)**: Introspects type annotations on async handlers to build a frozen [`GrpcMethodSpec`](../../../../../src/py/vertebra/extensions/grpc/__init__.py) supporting all four [`GrpcMethodKind`](../../../../../src/py/vertebra/extensions/grpc/__init__.py) cardinalities (`UNARY`, `SERVER_STREAMING`, `CLIENT_STREAMING`, `BIDI_STREAMING`) over `msgspec.Struct` and `AsyncIterator[Struct]` types.
 - **[`GrpcServiceRegistry`](../../../../../src/py/vertebra/extensions/grpc/__init__.py)**: Registers `@grpc_method` callables by `/<package>.<service>/<Method>` path and dispatches both direct zero-copy Rust `Request` objects (`dispatch_request` using `decode_grpc_lpm_frames_zero_copy` and `MsgpackCodec` / `ProtobufCodec`) and ASGI HTTP/2 requests (`handle_asgi`), emitting `grpc-status` and percent-encoded `grpc-message` trailers.
 - **[`ProtobufSchemaGenerator`](../../../../../src/py/vertebra/extensions/grpc/__init__.py) & [`ProtobufParser`](../../../../../src/py/vertebra/build/codegen/protobuf.py)** (in [`vertebra.build.codegen.protobuf`](../../../../../src/py/vertebra/build/codegen/protobuf.py)): Bidirectional `.proto` v3 codegen (`routes_to_proto` from HTTP/RPC routes and `proto_to_python_routes` from `.proto` IDL into typed `msgspec.Struct` + `@grpc_method` and HTTP route stubs).
+
+[^src-vertebra-http-src-grpc-rs]: `src/rs/vertebra-http/src/grpc.rs` — Rust implementation module (src/rs/vertebra-http/src/grpc.rs).
+[^src-extensions-grpc-init-py]: `src/py/vertebra/extensions/grpc/__init__.py` — Python implementation module (src/py/vertebra/extensions/grpc/__init__.py).
+[^src-build-codegen-protobuf-py]: `src/py/vertebra/build/codegen/protobuf.py` — Python implementation module (src/py/vertebra/build/codegen/protobuf.py).

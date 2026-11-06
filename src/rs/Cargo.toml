@@ -7,6 +7,8 @@ members = [
     "vertebra-bundler",
     "vertebra-storage",
     "vertebra-db",
+    "vertebra-bigquery",
+    "vertebra-spanner",
 ]
 
 [workspace.package]

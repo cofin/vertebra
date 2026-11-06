@@ -53,7 +53,7 @@ Spanner and Redis/Valkey native `QueueStore` backends (deferred to PRD backlog).
 
 ## Dependencies
 
-`native-data-platform` `native-postgres-driver`, `native-oracle-driver`, and `native-embedded-and-cache-drivers` (`refactor/sync-async-names @ 08ac03a`); `integration-remediation` `db-engine-primitives` and `sqlspec-adapter-parity`.
+`native-data-platform` `native-postgres-driver`, `native-oracle-driver`, and `native-embedded-and-cache-drivers` (`main @ f741701`); `integration-remediation` `db-engine-primitives` and `sqlspec-adapter-parity`.
 
 ## Acceptance Boundary
 

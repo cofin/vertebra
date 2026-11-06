@@ -1,7 +1,6 @@
 ---
 title: "Architecture Index"
 description: "Index of Vertebra's nested architecture chapters across runtime topologies, IPC transport, HTTP ingress, Python workers, and frontend tooling."
-status: stable
 tags:
   - architecture
   - index

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from typing import Any
 from unittest.mock import MagicMock
@@ -12,13 +13,67 @@ import pyarrow.ipc as pa_ipc
 import pyarrow.parquet as pq
 import pytest
 
+from vertebra.db.adapters.datafusion import DataFusionConfig, DataFusionEngine
+from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, SyncPostgreSQLDriver
 from vertebra.db.cdc import CDCConfig, ChangeFeed
-from vertebra.db.datafusion import DataFusionConfig, DataFusionEngine
 from vertebra.db.pipeline import AsyncQueryPipeline, CTEStep, RelOverlay, SyncQueryPipeline
-from vertebra.db.postgres import AsyncPostgreSQLDriver, SyncPostgreSQLDriver
 from vertebra.db.rls import TenantPredicate, TenantScopeConfig
 from vertebra.storage import SyncObjectStore
 from vertebra.typing import MissingDependencyError, reset_dependency_cache
+from vertebra.utils.module_loader import import_optional
+
+
+class _GatewayDataFrame:
+    """In-memory Arrow DataFrame stand-in for DataFusionEngine unit tests."""
+
+    __slots__ = ("_table",)
+
+    def __init__(self, table: pa.Table) -> None:
+        self._table = table
+
+    def to_arrow_table(self) -> pa.Table:
+        """Return the underlying normalized PyArrow table."""
+        return self._table
+
+
+class _GatewaySessionContext:
+    """Deterministic PyArrow-backed SessionContext double that rejects unknown tables and invalid SQL."""
+
+    __slots__ = ("tables",)
+
+    def __init__(self) -> None:
+        self.tables: dict[str, pa.Table] = {}
+
+    def register_table(self, name: str, table: Any) -> None:
+        """Require normalized PyArrow tables on registration."""
+        if not isinstance(table, pa.Table):
+            msg = f"Expected pyarrow.Table, got {type(table)!r}"
+            raise TypeError(msg)
+        self.tables[name] = table
+
+    def sql(self, query: str) -> _GatewayDataFrame:
+        """Execute simple table scans and counts over registered PyArrow tables or raise."""
+        normalized = " ".join(query.strip().split())
+        select_all = re.fullmatch(r"SELECT \* FROM ([A-Za-z_][A-Za-z0-9_]*)", normalized, flags=re.IGNORECASE)
+        if select_all is not None:
+            tbl_name = select_all.group(1)
+            if tbl_name not in self.tables:
+                msg = f"Unknown DataFusion table: {tbl_name!r}"
+                raise RuntimeError(msg)
+            return _GatewayDataFrame(self.tables[tbl_name])
+        count_match = re.fullmatch(
+            r"SELECT count\(\*\) AS ([A-Za-z_][A-Za-z0-9_]*) FROM ([A-Za-z_][A-Za-z0-9_]*)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if count_match is not None:
+            alias, tbl_name = count_match.group(1), count_match.group(2)
+            if tbl_name not in self.tables:
+                msg = f"Unknown DataFusion table: {tbl_name!r}"
+                raise RuntimeError(msg)
+            return _GatewayDataFrame(pa.Table.from_pylist([{alias: self.tables[tbl_name].num_rows}]))
+        msg = f"Invalid DataFusion SQL: {query}"
+        raise RuntimeError(msg)
 
 
 def test_changefeed_bounded_history_and_spill_to_object_store(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -144,9 +199,10 @@ def test_query_pipeline_execution_sync_and_async() -> None:
     assert result_async == {"step1": [{"num": 1}]}
 
 
-def test_datafusion_engine_table_registration_and_execution() -> None:
-    """DataFusionEngine must register tables and execute SQL queries returning dicts, arrow, and IPC."""
-    engine = DataFusionEngine(DataFusionConfig())
+def test_datafusion_engine_table_registration_and_execution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DataFusionEngine must register normalized PyArrow tables, execute via SessionContext, and fail closed."""
+    ctx = None if import_optional("datafusion") is not None else _GatewaySessionContext()
+    engine = DataFusionEngine(DataFusionConfig(), ctx=ctx)
     store = SyncObjectStore("memory://")
     metrics_sink = pa.BufferOutputStream()
     pq.write_table(pa.Table.from_pylist([{"id": 1, "val": 100}]), metrics_sink)
@@ -170,6 +226,17 @@ def test_datafusion_engine_table_registration_and_execution() -> None:
     decoded_ipc = pa_ipc.open_stream(pa.BufferReader(ipc_bytes)).read_all()
     assert decoded_ipc.to_pylist() == [{"id": 1, "val": 100}, {"id": 2, "val": 200}]
 
+    with pytest.raises(Exception, match="nonexistent_table"):
+        engine.execute_dicts("SELECT * FROM nonexistent_table")
+
+    monkeypatch.setitem(sys.modules, "datafusion", None)
+    reset_dependency_cache("datafusion")
+    try:
+        with pytest.raises(MissingDependencyError):
+            DataFusionEngine().execute_dicts("SELECT 1")
+    finally:
+        reset_dependency_cache("datafusion")
+
 
 def test_cdc_changefeed_parquet_spill_to_object_store_and_datafusion_arrow_query() -> None:
     """ChangeFeed Parquet spill and DataFusion query execution composition with KeyError refusal."""
@@ -187,7 +254,8 @@ def test_cdc_changefeed_parquet_spill_to_object_store_and_datafusion_arrow_query
     put_res = feed.flush_to_parquet("cdc/events.parquet")
     assert put_res.path == "cdc/events.parquet"
 
-    engine = DataFusionEngine()
+    ctx = None if import_optional("datafusion") is not None else _GatewaySessionContext()
+    engine = DataFusionEngine(ctx=ctx)
     reg = engine.register_parquet_from_store("events", store, "cdc/events.parquet")
     assert reg.name == "events"
 

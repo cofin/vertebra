@@ -4,6 +4,8 @@ flow_id: integration-remediation
 title: Audit findings for the merged d3d5f8b..142cc49 range
 description: Verified findings from audits of the database framework extensions, framework/embeddings/utils/server, the Rust GCP driver layer, MCP/WebMCP, and the vertebra.db package, with owning child flow for each item.
 status: stable
+state: promoted
+promoted_to: integration-remediation
 created_at: 2026-11-03T03:30:00Z
 updated_at: 2026-11-03T03:30:00Z
 tags: [research, audit, remediation]

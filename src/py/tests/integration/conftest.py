@@ -2,24 +2,17 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
 
-from vertebra.db import (
-    MSSQLConfig,
-    MySQLConfig,
-    OracleConfig,
-    PostgreSQLConfig,
-    RedisConfig,
-    SyncMSSQLDriver,
-    SyncMySQLDriver,
-    SyncOracleDriver,
-    SyncPostgreSQLDriver,
-    SyncRedisDriver,
-    SyncValkeyDriver,
-    ValkeyConfig,
-)
+from vertebra.db.adapters.mssql import MSSQLConfig, SyncMSSQLDriver
+from vertebra.db.adapters.mysql import MySQLConfig, SyncMySQLDriver
+from vertebra.db.adapters.oracle import OracleConfig, SyncOracleDriver
+from vertebra.db.adapters.postgres import PostgreSQLConfig, SyncPostgreSQLDriver
+from vertebra.db.adapters.redis import RedisConfig, SyncRedisDriver
+from vertebra.db.adapters.valkey import SyncValkeyDriver, ValkeyConfig
+from vertebra.extensions.sqlspec import OracleAsyncConfig, PostgreSQLAsyncConfig
 
 if TYPE_CHECKING:
     from pytest_databases.docker.mariadb import MariaDBService
@@ -50,12 +43,9 @@ def vtb_postgres_driver(vtb_postgres_config: PostgreSQLConfig) -> SyncPostgreSQL
 @pytest.fixture
 def vtb_mysql_config(mysql_service: MySQLService) -> MySQLConfig:
     """Return a MySQLConfig wired to the pytest-databases MySQLService container."""
-    return MySQLConfig(
-        host=mysql_service.host,
-        port=mysql_service.port,
-        user=mysql_service.user,
-        password=mysql_service.password,
-        database=mysql_service.db,
+    return MySQLConfig.from_url(
+        f"mysql://{mysql_service.user}:{mysql_service.password}"
+        f"@{mysql_service.host}:{mysql_service.port}/{mysql_service.db}"
     )
 
 
@@ -68,12 +58,9 @@ def vtb_mysql_driver(vtb_mysql_config: MySQLConfig) -> SyncMySQLDriver:
 @pytest.fixture
 def vtb_mariadb_config(mariadb_service: MariaDBService) -> MySQLConfig:
     """Return a MySQLConfig wired to the pytest-databases MariaDBService container."""
-    return MySQLConfig(
-        host=mariadb_service.host,
-        port=mariadb_service.port,
-        user=mariadb_service.user,
-        password=mariadb_service.password,
-        database=mariadb_service.db,
+    return MySQLConfig.from_url(
+        f"mysql://{mariadb_service.user}:{mariadb_service.password}"
+        f"@{mariadb_service.host}:{mariadb_service.port}/{mariadb_service.db}"
     )
 
 
@@ -116,7 +103,7 @@ def vtb_mssql_driver(vtb_mssql_config: MSSQLConfig) -> SyncMSSQLDriver:
 @pytest.fixture
 def vtb_redis_config(redis_service: RedisService) -> RedisConfig:
     """Return a RedisConfig wired to the pytest-databases RedisService container."""
-    return RedisConfig(host=redis_service.host, port=redis_service.port)
+    return RedisConfig.from_url(f"redis://{redis_service.host}:{redis_service.port}/0")
 
 
 @pytest.fixture
@@ -128,7 +115,7 @@ def vtb_redis_driver(vtb_redis_config: RedisConfig) -> SyncRedisDriver:
 @pytest.fixture
 def vtb_valkey_config(valkey_service: ValkeyService) -> ValkeyConfig:
     """Return a ValkeyConfig wired to the pytest-databases ValkeyService container."""
-    return ValkeyConfig(host=valkey_service.host, port=valkey_service.port)
+    return ValkeyConfig.from_url(f"valkey://{valkey_service.host}:{valkey_service.port}/0")
 
 
 @pytest.fixture
@@ -138,24 +125,12 @@ def vtb_valkey_driver(vtb_valkey_config: ValkeyConfig) -> SyncValkeyDriver:
 
 
 @pytest.fixture
-def vtb_sqlspec_postgres_config(vtb_postgres_config: PostgreSQLConfig) -> Any:
-    """Return a SQLSpec VertebraPostgresConfig wired to the pytest-databases PostgresService container."""
-    from vertebra.extensions.sqlspec import VertebraPostgresConfig
-
-    return VertebraPostgresConfig(connection_config={"dsn": vtb_postgres_config.dsn})
+def vtb_sqlspec_postgres_config(vtb_postgres_config: PostgreSQLConfig) -> PostgreSQLAsyncConfig:
+    """Return a SQLSpec PostgreSQLAsyncConfig wired to the pytest-databases PostgresService container."""
+    return PostgreSQLAsyncConfig(vtb_postgres_config)
 
 
 @pytest.fixture
-def vtb_sqlspec_oracle_config(vtb_oracle_config: OracleConfig) -> Any:
-    """Return a SQLSpec VertebraOracleConfig wired to the pytest-databases Oracle 23ai container."""
-    from vertebra.extensions.sqlspec import VertebraOracleConfig
-
-    return VertebraOracleConfig(
-        connection_config={
-            "host": vtb_oracle_config.host,
-            "port": vtb_oracle_config.port,
-            "user": vtb_oracle_config.user,
-            "password": vtb_oracle_config.password,
-            "service_name": vtb_oracle_config.service_name,
-        }
-    )
+def vtb_sqlspec_oracle_config(vtb_oracle_config: OracleConfig) -> OracleAsyncConfig:
+    """Return a SQLSpec OracleAsyncConfig wired to the pytest-databases Oracle 23ai container."""
+    return OracleAsyncConfig(vtb_oracle_config)

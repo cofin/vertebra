@@ -15,7 +15,8 @@ import urllib.request
 from collections.abc import Callable
 from enum import IntEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar, Self
+from urllib.parse import urlparse
 
 from vertebra.db.dialer.cloudsql import (
     EphemeralCertBundle,
@@ -82,6 +83,8 @@ class AlloyDBClusterURI(FrozenBaseStruct, frozen=True, gc=False, kw_only=True, c
 class AlloyDBConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """Configuration for zero-sidecar AlloyDB connections on port 5433."""
 
+    url_schemes: ClassVar[tuple[str, ...]] = ("alloydb",)
+
     instance_uri: str
     """Full AlloyDB instance URI (`projects/<p>/locations/<l>/clusters/<c>/instances/<i>`)."""
     enable_iam_auth: bool = True
@@ -94,6 +97,17 @@ class AlloyDBConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     """AlloyDB Auth Proxy protocol TLS port (default `5433`)."""
     user_agent: str = "vertebra-db/0.1"
     """User-agent string sent during the `MetadataExchangeRequest` protobuf handshake."""
+
+    @classmethod
+    def from_url(cls, url: str, **overrides: Any) -> Self:
+        """Construct an `AlloyDBConfig` from an `alloydb://` instance URI."""
+        parsed = urlparse(url)
+        instance_uri = parsed.path if parsed.path.startswith("/projects/") else f"/{parsed.netloc}{parsed.path}"
+        return cls(instance_uri=instance_uri, **overrides)
+
+    def pool_key(self) -> tuple[Any, ...]:
+        """Return the canonical shared-dialer fingerprint tuple."""
+        return ("alloydb", self.instance_uri)
 
 
 class _BaseAlloyDBDialer:

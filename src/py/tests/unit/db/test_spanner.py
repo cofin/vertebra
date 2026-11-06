@@ -12,28 +12,30 @@ from typing import Any
 
 import pytest
 
-from vertebra._vertebra import (
+from vertebra._spanner import (
     AsyncSpannerClient,
+    SyncSpannerClient,
+)
+from vertebra._vertebra import (
     BigQueryError,
     BigQueryRowError,
     GoogleCloudAuthError,
     GoogleCloudError,
     SpannerAbortedError,
     SpannerError,
-    SyncSpannerClient,
 )
-from vertebra.db import (
+from vertebra.db import DatabaseRegistry, NotSupportedError
+from vertebra.db.adapters.datafusion import DataFusionEngine
+from vertebra.db.adapters.spanner import (
     AsyncSpannerDriver,
-    DatabaseRegistry,
-    DataFusionEngine,
     Mutation,
     MutationGroup,
     SpannerConfig,
+    SpannerCore,
     StalenessBound,
     SyncSpannerDriver,
     SyncSpannerTransaction,
 )
-from vertebra.db.spanner.core import SpannerCore
 from vertebra.embeddings import EmbeddingError, SpannerEmbedder
 from vertebra.storage import SyncObjectStore
 from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError, VertebraError
@@ -751,7 +753,7 @@ def test_sync_spanner_driver_crud_transactions_and_mutations() -> None:
 
 
 def test_sync_spanner_arrow_and_object_store_roundtrip() -> None:
-    """Verify SyncSpannerDriver fetch_arrow with data_boost=True and ObjectStore export/load."""
+    """Verify SyncSpannerDriver select_to_arrow with data_boost=True and ObjectStore export/load."""
     cfg = SpannerConfig(
         project_id="test-proj",
         instance_id="test-inst",
@@ -768,14 +770,16 @@ def test_sync_spanner_arrow_and_object_store_roundtrip() -> None:
             """
         ]
     )
-    driver.insert_arrow(
+    driver.load_from_arrow(
         "metrics",
         [
             {"metric_id": 10, "label": "cpu"},
             {"metric_id": 20, "label": "mem"},
         ],
     )
-    cursor = driver.fetch_arrow("SELECT metric_id, label FROM metrics ORDER BY metric_id ASC", data_boost_enabled=True)
+    cursor = driver.select_to_arrow(
+        "SELECT metric_id, label FROM metrics ORDER BY metric_id ASC", data_boost_enabled=True
+    )
     assert len(cursor) == 2
     assert cursor.to_pylist()[0]["label"] == "cpu"
 
@@ -1017,3 +1021,29 @@ def test_run_in_transaction_retries_only_aborted(error_factory: Callable[[], Exc
         with pytest.raises(RuntimeError):
             driver.run_in_transaction(work, max_attempts=3)
     assert len(calls) == expected_calls
+
+
+@pytest.mark.anyio
+async def test_spanner_commit_rejects_mixed_buffered_dml_and_mutations_atomically() -> None:
+    """Verify SyncSpannerDriver.commit and AsyncSpannerDriver.commit reject mixed DML and mutations before issuing RPCs."""
+    sync_client = FakeSpannerClient()
+    sync_client.update_ddl(["CREATE TABLE items (id INT64 NOT NULL, name STRING(64) NOT NULL) PRIMARY KEY (id)"])
+    sync_driver = SyncSpannerDriver(SpannerConfig(), client=sync_client)
+    sync_driver.begin()
+    sync_driver.execute("INSERT INTO items (id, name) VALUES (@id, @name)", {"id": 1, "name": "dml_row"})
+    sync_driver.apply_mutations([Mutation.insert("items", ("id", "name"), [(2, "mut_row")])])
+    with pytest.raises(NotSupportedError, match="Cannot mix SQL DML and key-value mutations"):
+        sync_driver.commit()
+    assert sync_driver.select("SELECT id, name FROM items") == []
+    sync_driver.close()
+
+    async_backing = FakeSpannerClient()
+    async_backing.update_ddl(["CREATE TABLE items (id INT64 NOT NULL, name STRING(64) NOT NULL) PRIMARY KEY (id)"])
+    async_driver = AsyncSpannerDriver(SpannerConfig(), client=FakeAsyncSpannerClient(async_backing))
+    await async_driver.begin()
+    await async_driver.execute("INSERT INTO items (id, name) VALUES (@id, @name)", {"id": 10, "name": "dml_row"})
+    await async_driver.apply_mutations([Mutation.insert("items", ("id", "name"), [(20, "mut_row")])])
+    with pytest.raises(NotSupportedError, match="Cannot mix SQL DML and key-value mutations"):
+        await async_driver.commit()
+    assert await async_driver.select("SELECT id, name FROM items") == []
+    await async_driver.close()

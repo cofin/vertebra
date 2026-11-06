@@ -11,7 +11,7 @@ import pydantic
 import pytest
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope, Request, WsgiEnviron, run_wsgi_callable
-from vertebra.db._registry import DatabaseRegistry
+from vertebra.db.registry import DatabaseRegistry
 from vertebra.extensions.django import (
     ArrowManager,
     ArrowQuerySet,

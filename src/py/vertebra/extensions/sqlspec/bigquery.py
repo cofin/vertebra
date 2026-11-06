@@ -11,19 +11,19 @@ from typing import Any, ClassVar, Final, Literal, Self
 
 from vertebra._vertebra import LeaseBroker
 from vertebra._vertebra import StatementCache as _RustStatementCache
-from vertebra.db._arrow import ArrowCursor
-from vertebra.db.bigquery import (
+from vertebra.db.adapters.bigquery import (
     AsyncBigQueryDriver as _CoreAsyncBigQueryDriver,
 )
-from vertebra.db.bigquery import (
+from vertebra.db.adapters.bigquery import (
     BigQueryConfig,
     BigQueryDryRunResult,
     ObjectRef,
     ObjectTableConfig,
 )
-from vertebra.db.bigquery import (
+from vertebra.db.adapters.bigquery import (
     SyncBigQueryDriver as _CoreSyncBigQueryDriver,
 )
+from vertebra.db.arrow import ArrowCursor
 from vertebra.extensions.sqlspec.adapters import (
     AsyncAdapterConfig,
     BaseAsyncDriver,
@@ -445,12 +445,12 @@ class BigQuerySyncDriver(BaseSyncDriver):
         tenant_id: str | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Execute a ``SELECT`` query and return the first row, raising ``KeyError`` if empty."""
+        """Execute a ``SELECT`` query and return the first row, raising ``NotFoundError`` if empty."""
         _ = kwargs
-        row = self.select_one_or_none(sql, *parameters, schema_type=schema_type, tenant_id=tenant_id)
-        if row is None:
-            raise KeyError("BigQuery query returned no rows")
-        return row
+        sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
+        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
+        params = self._normalize_params(parameters)
+        return self._core.select_one(prepared_sql, params, schema_type=schema_type)
 
     def select_one_or_none(
         self,
@@ -466,7 +466,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
         prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = self._normalize_params(parameters)
-        return self._core.select_one(prepared_sql, params, schema_type=schema_type)
+        return self._core.select_one_or_none(prepared_sql, params, schema_type=schema_type)
 
     def select_value(
         self,
@@ -509,7 +509,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
         _ = kwargs
         sql_str = sql_or_table.sql if hasattr(sql_or_table, "sql") else str(sql_or_table)
         params = self._normalize_params(parameters)
-        return self._core.fetch_arrow(
+        return self._core.select_to_arrow(
             sql_str,
             params,
             selected_fields=selected_fields,
@@ -527,7 +527,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
     ) -> Any:
         """Append an ``ArrowCursor``, Arrow IPC buffer, or ``pyarrow`` table via Storage Write API v1."""
         _ = kwargs
-        return int(self._core.insert_arrow(table, source, mode=mode))
+        return int(self._core.load_from_arrow(table, source, mode=mode))
 
     def select_to_storage(
         self,
@@ -808,12 +808,12 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         tenant_id: str | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Asynchronously execute a ``SELECT`` query and return the first row, raising ``KeyError`` if empty."""
+        """Asynchronously execute a ``SELECT`` query and return the first row, raising ``NotFoundError`` if empty."""
         _ = kwargs
-        row = await self.select_one_or_none(sql, *parameters, schema_type=schema_type, tenant_id=tenant_id)
-        if row is None:
-            raise KeyError("BigQuery query returned no rows")
-        return row
+        sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
+        prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
+        params = BaseSyncDriver._normalize_params(parameters)
+        return await self._core.select_one(prepared_sql, params, schema_type=schema_type)
 
     async def select_one_or_none(
         self,
@@ -829,7 +829,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
         prepared_sql = self._prepare_sql(sql_str, tenant_id=tenant_id)
         params = BaseSyncDriver._normalize_params(parameters)
-        return await self._core.select_one(prepared_sql, params, schema_type=schema_type)
+        return await self._core.select_one_or_none(prepared_sql, params, schema_type=schema_type)
 
     async def select_value(
         self,
@@ -872,7 +872,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         _ = kwargs
         sql_str = sql_or_table.sql if hasattr(sql_or_table, "sql") else str(sql_or_table)
         params = BaseSyncDriver._normalize_params(parameters)
-        return await self._core.fetch_arrow(
+        return await self._core.select_to_arrow(
             sql_str,
             params,
             selected_fields=selected_fields,
@@ -890,7 +890,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
     ) -> Any:
         """Asynchronously append an ``ArrowCursor``, Arrow IPC buffer, or ``pyarrow`` table."""
         _ = kwargs
-        return int(await self._core.insert_arrow(table, source, mode=mode))
+        return int(await self._core.load_from_arrow(table, source, mode=mode))
 
     async def select_to_storage(
         self,

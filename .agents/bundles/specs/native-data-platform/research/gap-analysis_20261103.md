@@ -4,6 +4,8 @@ flow_id: native-data-platform
 title: Broker, native driver, and storage gap analysis
 description: Verified gaps between today's code and the two required features (shared broker pools for any SQLSpec/AA config; Vertebra-native Rust drivers and storage), with work items mapped to child flows.
 status: stable
+state: promoted
+promoted_to: native-data-platform
 created_at: 2026-11-03T04:10:00Z
 updated_at: 2026-11-03T04:10:00Z
 tags: [research, broker, drivers, storage, gap-analysis]
@@ -59,7 +61,7 @@ Baseline: `main @ 142cc49`. Confidence is high unless marked otherwise. Each ite
    - `_call_broker_acquire` uses `inspect.signature`;
    - `_exec_begin_sync` falls back to `session.execute("BEGIN")`;
    - release wraps rollback in `suppress(Exception)`.
-   
+
    [broker-pool-sharing]
 9. There is no cursor streaming; results are fully materialized. [broker-pool-sharing]
 10. AA has no broker `Pool` or `creator`. `extensions/sqlalchemy/dialects.py::DBAPIConnection.__init__` silently falls back to `SQLiteConfig(":memory:")` on any `parse_url` exception. [broker-pool-sharing, sqlalchemy-and-django-integration]
@@ -67,7 +69,7 @@ Baseline: `main @ 142cc49`. Confidence is high unless marked otherwise. Each ite
 12. Docs overclaim:
     - `docs/usage/extensions.md` (proxy configs "lease pooled connections ... from the parent process");
     - `docs/architecture/pyo3-and-workers.md` ("Rust connection pools").
-    
+
     [broker-pool-sharing]
 
 ## 2. Native drivers

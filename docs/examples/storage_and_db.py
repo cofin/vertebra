@@ -2,7 +2,8 @@
 
 from advanced_alchemy.types.file_object import FileObject
 
-from vertebra.db.sqlite import SQLiteConfig, SyncSQLiteDriver
+from vertebra.db import DatabaseRegistry, NotFoundError, provide_driver
+from vertebra.db.adapters.sqlite import SQLiteConfig
 from vertebra.extensions.alchemy.storage import ObjectStoreBackend
 from vertebra.storage import SyncObjectStore
 
@@ -11,7 +12,7 @@ __all__ = ("main",)
 
 # --8<-- [start:example]
 def main() -> None:
-    """Save model file attachments and execute SQLite queries."""
+    """Save model file attachments and execute transactional SQLite queries."""
     store = SyncObjectStore("memory://")
     backend = ObjectStoreBackend(store=store, prefix="reports")
 
@@ -20,15 +21,24 @@ def main() -> None:
     assert saved.size == 17
     assert backend.get_content("q1.json") == b'{"quarter": "Q1"}'
 
-    db = SyncSQLiteDriver(SQLiteConfig(path=":memory:"))
+    registry = DatabaseRegistry()
+    db = provide_driver(SQLiteConfig(path=":memory:"), sync=True, registry=registry)
     try:
         db.execute("CREATE TABLE reports (id INTEGER PRIMARY KEY, key TEXT NOT NULL)")
         file_obj2 = FileObject(backend=backend, filename="q2.json")
         backend.save_object(file_obj2, b'{"quarter": "Q2"}')
-        db.execute("INSERT INTO reports (key) VALUES (?)", "reports/q2.json")
-        db.commit()
-        rows = db.select("SELECT key FROM reports")
-        assert rows == [{"key": "reports/q2.json"}]
+        with db.transaction():
+            inserted = db.execute("INSERT INTO reports (key) VALUES (?)", ("reports/q2.json",))
+            assert inserted == 1
+        row = db.select_one("SELECT key FROM reports WHERE id = ?", (1,))
+        assert row == {"key": "reports/q2.json"}
+        assert db.select_one_or_none("SELECT key FROM reports WHERE id = ?", (99,)) is None
+        with db.select_to_arrow("SELECT id, key FROM reports") as cursor:
+            assert cursor.row_count == 1
+        try:
+            db.select_one("SELECT key FROM reports WHERE id = ?", (99,))
+        except NotFoundError as exc:
+            assert isinstance(exc, ValueError)
         assert backend.get_content("q2.json") == b'{"quarter": "Q2"}'
     finally:
         db.close()

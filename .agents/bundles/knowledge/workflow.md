@@ -4,19 +4,36 @@ title: Project Workflow
 description: Canonical polyglot build, lint, test, and benchmark workflow plus Flow OKF v0.2 state and verification rules for Vertebra.
 status: stable
 tags: [workflow, commands, verification, testing, ci]
+generated:
+  by: flow/0.26.0
+  at: "2026-11-04T04:33:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-04T04:33:00Z"
+    commit: f741701
 sources:
-  - resource: Makefile
-  - resource: tools/scripts/setup-env.sh
-  - resource: pyproject.toml
-  - resource: src/rs/Cargo.toml
-  - resource: src/ts/vertebra-client/package.json
+  - id: src-makefile
+    resource: Makefile
+    title: "Canonical polyglot build, test, lint, docs, and benchmark targets"
+  - id: src-tools-scripts-setup-env-sh
+    resource: tools/scripts/setup-env.sh
+    title: "Repository tooling module (tools/scripts/setup-env.sh)"
+  - id: src-pyproject-toml
+    resource: pyproject.toml
+    title: "Python package metadata, dependencies, and tool configuration"
+  - id: src-cargo-toml
+    resource: src/rs/Cargo.toml
+    title: "Rust crate manifest (src/rs/Cargo.toml)"
+  - id: src-package-json
+    resource: src/ts/vertebra-client/package.json
+    title: "TypeScript package manifest (src/ts/vertebra-client/package.json)"
 ---
 
 # Project Workflow
 
 <!-- truth: start -->
 - Task files under `.agents/bundles/specs/<flow_id>/tasks/` are authoritative; `spec.md` is the synchronized checklist and continuity view.
-- Use Vertebra's canonical [`Makefile`](../../../Makefile) targets (`make setup-env`, `make install`, `make dev`, `make rs-test`, `make py-test`, `make ts-test`, `make test`, `make lint`, `make lint-all`, `make review-check`, `make review-route`, `make coverage`, `make check`, `make docs`, `make docs-serve`, `make docs-check`, `make docs-clean`, `make docs-rust`, `make build`, `make build-pgo`, `make bench`, `make bench-all`, `make bench-ft`, `make bench-report`, `make rs-bench`, `make bench-micro`, `make bench-baseline`, `make bench-check`, `make upgrade`) and rebuild the PyO3 extensions (`_vertebra`, `_bundler`, `_storage`) via `make dev` after any Rust edit before running `pytest`.
+- Use Vertebra's canonical [`Makefile`](../../../Makefile)[^src-makefile] targets (`make setup-env`, `make install`, `make dev`, `make rs-test`, `make py-test`, `make ts-test`, `make test`, `make lint`, `make lint-all`, `make review-check`, `make review-route`, `make coverage`, `make check`, `make docs`, `make docs-serve`, `make docs-check`, `make docs-clean`, `make docs-rust`, `make build`, `make build-pgo`, `make bench`, `make bench-all`, `make bench-ft`, `make bench-report`, `make rs-bench`, `make bench-micro`, `make bench-baseline`, `make bench-check`, `make upgrade`) and rebuild all five PyO3 extensions (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_spanner`) via `make dev` after any Rust edit before running `pytest`.
 - Every task declares and justifies one `verification_strategy`; only observable behavior and defect correction require an initial failing test.
 - Record durable findings in the task's `## Notes & Discoveries` and preserve unrelated worktree changes.
 - Operational project skills install only under `.agents/skills/` and subagents under `.agents/agents/`. Product, knowledge, research, and specs remain under `.agents/bundles/` (`specs/` and `research/` are created lazily only when needed).
@@ -25,28 +42,28 @@ sources:
 
 ## Canonical Polyglot Commands (`Makefile`)
 
-[`tools/scripts/setup-env.sh`](../../../tools/scripts/setup-env.sh) (`make setup-env`, run automatically by `make install` and `make upgrade`) first deletes any existing `uv.toml` and `src/rs/.cargo/config.toml`. On internal corporate Linux workstations whose package mirrors replace the public registries (detected by an `/etc/os-release` match in the script), it then writes `uv.toml` (default index `https://pypi.org/simple`), appends `registry=https://registry.npmjs.org` to `.npmrc` and `src/ts/vertebra-client/.npmrc`, and writes `src/rs/.cargo/config.toml` (sparse crates.io protocol, `git-fetch-with-cli = true`). On other hosts and in CI it writes nothing. The `Makefile` applies the same detection and exports `NPM_CONFIG_REGISTRY`, `PIP_INDEX_URL`, `UV_INDEX_URL`, `UV_DEFAULT_INDEX`, `CARGO_REGISTRIES_CRATES_IO_PROTOCOL`, and `CARGO_NET_GIT_FETCH_WITH_CLI`.
+[`tools/scripts/setup-env.sh`](../../../tools/scripts/setup-env.sh)[^src-tools-scripts-setup-env-sh] (`make setup-env`, run automatically by `make install` and `make upgrade`) first deletes any existing `uv.toml` and `src/rs/.cargo/config.toml`. On internal corporate Linux workstations whose package mirrors replace the public registries (detected by an `/etc/os-release` match in the script), it then writes `uv.toml` (default index `https://pypi.org/simple`), appends `registry=https://registry.npmjs.org` to `.npmrc` and `src/ts/vertebra-client/.npmrc`, and writes `src/rs/.cargo/config.toml` (sparse crates.io protocol, `git-fetch-with-cli = true`). On other hosts and in CI it writes nothing. The `Makefile` applies the same detection and exports `NPM_CONFIG_REGISTRY`, `PIP_INDEX_URL`, `UV_INDEX_URL`, `UV_DEFAULT_INDEX`, `CARGO_REGISTRIES_CRATES_IO_PROTOCOL`, and `CARGO_NET_GIT_FETCH_WITH_CLI`.
 
 ```bash
 # 1. Environment & Native PyO3 Extension Setup
 make setup-env                                            # Configure public registries on hosts that need them; no-op elsewhere
-make install                                              # destroy + clean + setup-env, then uv python pin 3.12, uv sync --all-extras --dev, ts-install, ts-build, dev
-make dev                                                  # cargo build of non-extension crates + maturin develop for _vertebra, _bundler, _storage
+make install                                              # destroy + clean + setup-env, then uv python pin 3.12, uv sync --all-extras --dev --group doc, ts-install, ts-build, dev
+make dev                                                  # cargo build of non-extension crates + maturin develop for _vertebra, _bundler, _storage, _bigquery, _spanner
 make upgrade                                              # uv lock --upgrade, cargo update, bun update, pre-commit autoupdate
 make clean                                                # Remove Python/Rust/TS build artifacts and caches (keeps .venv)
 make release bump=patch                                   # Bump version and synchronize package files via bump-my-version
 make pre-release version=0.2.0-alpha.1                    # Start or advance pre-release version via bump-my-version
 
 # 2. Focused Language Test Suites
-make rs-test                                              # rm -rf /dev/shm/test-* /dev/shm/*vertebra*, then cargo test --workspace --features tls,compression
-make py-test                                              # make dev, mypy.stubtest (_vertebra, _bundler, _storage), then uv run pytest src/py/tests -v
+make rs-test                                              # rm -rf /dev/shm/test-* /dev/shm/*vertebra*, then cargo test --workspace --features tls,compression,gcp
+make py-test                                              # make dev, mypy.stubtest (_vertebra, _bundler, _storage, _bigquery, _spanner), then uv run pytest src/py/tests -v
 uv run pytest src/py/tests/unit/server/test_runner.py -q  # Focused Python test file (run make dev first if Rust changed)
 make ts-test                                              # bun run test (vitest run) with an isolated --localstorage-file
 
 # 3. Aggregate Test, Lint & Pre-PR Verification Gates
 make test                                                 # rs-test + py-test + ts-test
-make lint                                                 # Biome --write --unsafe, ruff (src/py/vertebra src/py/tests tools/scripts tools/pgo tools/docs docs/examples), cargo fmt + clippy --fix, mypy + stubtest, review-check
-make lint-all                                             # Read-only CI gate: biome check, ruff check + format --check, mypy + stubtest, cargo fmt --check, clippy -D warnings, review-check
+make lint                                                 # Biome --write --unsafe, ruff (src/py/vertebra src/py/tests tools/scripts tools/pgo tools/docs docs/examples), cargo fmt + clippy --fix (--features tls,compression,gcp), mypy + stubtest, review-check
+make lint-all                                             # Read-only CI gate: biome check, ruff check + format --check, mypy + stubtest, cargo fmt --check, clippy --features tls,compression,gcp -D warnings, review-check
 make review-check                                         # Validate review capability manifests, skills, agents, and privacy constraints
 make review-route                                         # Route changed files to owning review areas and shards (BASE=origin/main)
 make coverage                                             # uv run pytest src/py/tests --cov, then coverage.xml and htmlcov/ (Python only)
@@ -58,7 +75,7 @@ make docs-clean                                           # rm -rf site .cache
 make docs-rust                                            # cargo doc --manifest-path src/rs/Cargo.toml --workspace --no-deps -> site/rustdoc/
 
 # 4. Release Builds & Benchmarks (--group bench kept out of dev)
-make build                                                # ts-build, release cargo build of non-extension crates, maturin develop -r for the three extensions, uv build
+make build                                                # ts-build, release cargo build of non-extension crates, maturin develop -r for all 5 extensions, uv build
 make build-pgo                                            # Two-phase Rust PGO instrumentation + profile-use build via tools/pgo/rust_pgo.py (or PROFDATA=<path>)
 make bench                                                # make build, then tools.benchmarks run -t ${TARGETS:-vtb} -s ${SCENARIOS:-default} ${BENCH_ARGS}
 make bench-all                                            # make build, then tools.benchmarks run -t all -s full
@@ -70,17 +87,18 @@ make bench-check                                          # Compare current benc
 make bench-report                                         # Latest benchmark report (make bench-diff compares the latest run with the previous one)
 ```
 
-`make dev` and `make build` exclude `vertebra-py`, `vertebra-bundler`, and `vertebra-storage` from `cargo build --workspace` because `maturin develop` builds and installs them into `.venv`. `make build` installs the release extensions into `.venv` and then runs `uv build`; it does not produce separate extension wheels.
+`make dev` and `make build` exclude `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, and `vertebra-spanner` from `cargo build --workspace` because `maturin develop` builds and installs all five PyO3 extensions into `.venv`. `make build` installs the release extensions into `.venv` and then runs `uv build`; it does not produce separate extension wheels.
 
 ## Polyglot Rebuild & Hygiene Rules
 
-1. **Rust to Python FFI Rebuild (`make dev`)**: `uv run pytest` loads the compiled `vertebra._vertebra`, `vertebra._bundler`, and `vertebra._storage` extensions from `.venv`. After any `.rs` change in `vertebra-core`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, or `vertebra-db`, run `make dev` (or `make py-test`) before `uv run pytest`. `vertebra-http` changes need `make dev` only to rebuild the `vertebra-server` binary.
-2. **PyPI Distribution vs. Import Namespace**: [`pyproject.toml`](../../../pyproject.toml) sets `[project] name = "vertebra-core"` while `[tool.maturin]` sets `python-packages = ["vertebra"]` and `module-name = "vertebra._vertebra"`. `importlib.metadata.version("vertebra-core")` and `vtb init` reference `vertebra-core`, whereas all Python code imports `vertebra`.
+1. **Rust to Python FFI Rebuild (`make dev`)**: `uv run pytest` loads the compiled `vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`, `vertebra._bigquery`, and `vertebra._spanner` extensions from `.venv`. After any `.rs` change in `vertebra-core`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`, `vertebra-bigquery`, or `vertebra-spanner`, run `make dev` (or `make py-test`) before `uv run pytest`. `vertebra-http` changes need `make dev` only to rebuild the `vertebra-server` binary.
+2. **PyPI Distribution vs. Import Namespace**: [`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml] sets `[project] name = "vertebra-core"` while `[tool.maturin]` sets `python-packages = ["vertebra"]` and `module-name = "vertebra._vertebra"`. `importlib.metadata.version("vertebra-core")` and `vtb init` reference `vertebra-core`, whereas all Python code imports `vertebra`.
 3. **Codegen & Wheel-Bundled TypeScript Sync**: `make ts-build` compiles all 17 `@vertebra/client` entrypoints (`.` plus `./react`, `./vue`, `./svelte`, `./angular`, `./htmx`, `./vite`, `./store`, `./hmr`, `./live`, `./apex`, `./telemetry`, `./wasm`, `./arrow`, `./router`, `./webmcp`, and `./agent`), emits `.d.ts` declarations, and copies `dist/` into `src/py/vertebra/server/_js/bundle/` for wheel distribution. When modifying route schemas or [`src/py/vertebra/build/codegen/`](../../../src/py/vertebra/build/codegen/__init__.py), run `make py-test` (`src/py/tests/unit/codegen/`) and `make ts-test`.
 4. **Shared-Memory Cleanup**: `make rs-test` and the autouse `_cleanup_shm` fixture in [`src/py/tests/conftest.py`](../../../src/py/tests/conftest.py) remove `/dev/shm/test-*`, `/dev/shm/*vertebra*`, and `/dev/shm/vtb-*`.
 5. **`--group bench` & `--group doc` Isolation**: Keep `duckdb`, `uvicorn`, `httptools`, `uvloop`, `granian`, and `spikard` inside `[dependency-groups].bench` and `zensical`, `mkdocstrings-python`, and `pymdown-extensions` inside `[dependency-groups].doc` in [`pyproject.toml`](../../../pyproject.toml) so Python `3.14t`/`3.15t` test runs never compile `duckdb` C++ or `zensical` Rust sdist dependencies from source.
 6. **Zensical Documentation & Griffe `msgspec.Struct` Hygiene**: Never enable `navigation.indexes` in [`zensical.toml`](../../../zensical.toml) (it hides section `Overview` links and causes empty primary sidebars on single-page tabs). Keep PEP 257 field docstrings on all documented `msgspec.Struct` and `.pyi` stub classes so custom Griffe templates (`tools/docs/templates/python/material/`) render complete attribute tables.
 7. **Pre-Commit Secret Hygiene**: Never use strings matching `ya29.*` (forbidden Google OAuth2 access token prefix) in tests or fixtures; use `"mock-oauth-token"` instead of token prefixes.
+8. **Git Config & Hook Hygiene**: Keep `extensions.worktreeConfig` unset and `core.repositoryformatversion = 0` in `.git/config` (Antigravity's Git client rejects `extensions.worktreeConfig`), and keep `core.hooksPath` unset so `pre-commit` manages `.git/hooks/pre-commit` and `.git/hooks/commit-msg` from [`.pre-commit-config.yaml`](../../../.pre-commit-config.yaml).
 
 ## Direct Markdown Continuity & Execution Loop
 
@@ -171,3 +189,11 @@ Before close or checkpoint, require:
 - discoveries and verification limitations recorded.
 
 Coverage follows repository and worksheet requirements. Compare affected lines/branches when deleting behavioral tests; there is no universal percentage or one-test-file-per-module mandate.
+
+Provenance sources: [^src-cargo-toml], [^src-package-json].
+
+[^src-makefile]: `Makefile` — Canonical polyglot build, test, lint, docs, and benchmark targets.
+[^src-tools-scripts-setup-env-sh]: `tools/scripts/setup-env.sh` — Repository tooling module (tools/scripts/setup-env.sh).
+[^src-pyproject-toml]: `pyproject.toml` — Python package metadata, dependencies, and tool configuration.
+[^src-cargo-toml]: `src/rs/Cargo.toml` — Rust crate manifest (src/rs/Cargo.toml).
+[^src-package-json]: `src/ts/vertebra-client/package.json` — TypeScript package manifest (src/ts/vertebra-client/package.json).

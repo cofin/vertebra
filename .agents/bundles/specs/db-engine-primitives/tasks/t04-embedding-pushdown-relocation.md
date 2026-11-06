@@ -2,6 +2,7 @@
 type: Task
 id: db-engine-primitives:t04
 title: Relocate SQL embedding pushdown builders to vertebra/db/adapters/<engine>/embeddings.py and add PushdownEmbedder
+description: "Move all database SQL embedding pushdown builders out of `src/py/vertebra/embeddings/` into `src/py/vertebra/db/adapters/{bigquery,spanner,postgres,oracle}/embeddings.py` implementing `EmbeddingPushdown`, add `PushdownEmbedder(Embedder)` in `src/py/vertebra/embeddings/_pushdown.py`, delete `embeddings/_bigquery.py`, `embeddings/_spanner.py`, and `AlloyDbEmbedder`/`OracleEmbedder` in `embeddings/_google.py`, convert `src/py/vertebra/embeddings/__init__.py` to `lazy_exports`, and update embedding documentation and OKF `sources:`."
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -32,7 +33,7 @@ tests:
   - src/py/tests/unit/db/test_spanner.py
   - src/py/tests/unit/docs/test_examples.py
 plan_revision: 4
-plan_commit: "679a981"
+plan_commit: "f741701"
 state_revision: 0
 claimed_by: null
 claimed_at: null

@@ -14,7 +14,7 @@ flowchart LR
 Stack multiple read and write steps into one statement with intra-statement read-your-own-writes over uncommitted CTE inserts and deletes:
 
 ```python
-from vertebra.db import RelOverlay, SyncQueryPipeline
+from vertebra.db.pipeline import AsyncQueryPipeline, RelOverlay, SyncQueryPipeline
 
 pipeline = (
     SyncQueryPipeline()

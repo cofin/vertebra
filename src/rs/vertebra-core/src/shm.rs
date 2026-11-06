@@ -1,11 +1,15 @@
 //! Shared memory region abstraction.
 
 use core::ptr::NonNull;
+use std::ffi::{NulError, c_void};
 use std::io;
+use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::Mutex;
+use std::sync::atomic::AtomicPtr;
 
 #[cfg(unix)]
 use std::ffi::CString;
-use std::ffi::NulError;
 #[cfg(unix)]
 use std::os::fd::RawFd;
 #[cfg(windows)]
@@ -44,11 +48,75 @@ pub struct ShmRegion {
     owns_handle: bool,
     owns_mapping: bool,
     #[cfg(unix)]
-    unlink_name: Option<CString>,
+    unlink_name: Mutex<Option<CString>>,
 }
 
+// SAFETY: `ShmRegion` owns an OS virtual-memory mapping (`mmap`/`MapViewOfFile`) that can be
+// safely transferred and shared across threads when callers synchronize interior writes.
 unsafe impl Send for ShmRegion {}
+// SAFETY: `ShmRegion` exposes mutable access only through `unsafe fn as_mut_slice` and guards
+// `unlink_name` behind a `Mutex`, so concurrent shared references cannot cause data races.
 unsafe impl Sync for ShmRegion {}
+
+/// C-ABI shared-memory ownership capsule for zero-copy cross-extension handoff.
+#[repr(C)]
+#[derive(Debug)]
+pub struct ShmCapsule {
+    pub ptr: *mut u8,
+    pub len: usize,
+    pub ctx: AtomicPtr<c_void>,
+    pub drop_fn: unsafe extern "C" fn(*mut c_void),
+    pub unlink_fn: Option<unsafe extern "C" fn(*mut c_void) -> bool>,
+}
+
+// SAFETY: `ShmCapsule` transfers ownership of a thread-safe `Arc<ShmRegion>` mapping (`Send + Sync`).
+unsafe impl Send for ShmCapsule {}
+// SAFETY: `ShmCapsule` synchronizes ownership claims via `AtomicPtr` (`ctx`) without unsynchronized interior mutation.
+unsafe impl Sync for ShmCapsule {}
+
+unsafe extern "C" fn drop_shm_region_arc(ctx: *mut c_void) {
+    if !ctx.is_null() {
+        // SAFETY: `ctx` was produced via `Arc::into_raw` on an `Arc<ShmRegion>` in
+        // `ShmCapsule::from_arc` and ownership is surrendered at most once to `drop_fn`.
+        unsafe {
+            drop(Arc::from_raw(ctx.cast::<ShmRegion>()));
+        }
+    }
+}
+
+unsafe extern "C" fn unlink_shm_region_arc(ctx: *mut c_void) -> bool {
+    if ctx.is_null() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: `ctx` points to a live `ShmRegion` inside an `Arc<ShmRegion>` whose strong
+        // count remains non-zero while the caller holds ownership of `ctx`.
+        let region = unsafe { &*(ctx as *const ShmRegion) };
+        region.unlink_now()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+impl ShmCapsule {
+    /// Wrap an [`Arc<ShmRegion>`] into a C-ABI [`ShmCapsule`] whose `drop_fn` releases the `Arc`
+    /// and whose `unlink_fn` invokes [`ShmRegion::unlink_now`] once.
+    pub fn from_arc(region: Arc<ShmRegion>) -> Self {
+        let ptr = region.as_ptr();
+        let len = region.len();
+        let ctx = AtomicPtr::new(Arc::into_raw(region) as *mut c_void);
+        Self {
+            ptr,
+            len,
+            ctx,
+            drop_fn: drop_shm_region_arc,
+            unlink_fn: Some(unlink_shm_region_arc),
+        }
+    }
+}
 
 impl ShmRegion {
     /// Create a new shared memory region and map it into the current process.
@@ -104,9 +172,14 @@ impl ShmRegion {
     /// Open an existing named region (Unix only).
     #[cfg(unix)]
     pub fn open_named(name: &str, size: usize) -> Result<Self, ShmError> {
+        if size == 0 {
+            return Err(ShmError::InvalidSize);
+        }
         validate_name(name)?;
+        let requested_size = size;
         let size = align_to_page(size)?;
         let cname = CString::new(name)?;
+        // SAFETY: `cname` is a validated NUL-terminated `CString`.
         let fd = if name.starts_with("/tmp/vtb-") {
             unsafe { libc::open(cname.as_ptr(), libc::O_RDWR, 0o600) }
         } else {
@@ -115,7 +188,28 @@ impl ShmRegion {
         if fd < 0 {
             return Err(io::Error::last_os_error().into());
         }
-        unsafe { map_fd_region(fd, size) }
+        // SAFETY: `libc::stat` is plain-old-data valid when zero-initialized, and `fd` is owned here.
+        unsafe {
+            let mut st: libc::stat = core::mem::zeroed();
+            if libc::fstat(fd, &mut st) == 0
+                && st.st_size >= 0
+                && (requested_size as u64) > (st.st_size as u64)
+            {
+                libc::close(fd);
+                return Err(ShmError::InvalidSize);
+            }
+        }
+        // SAFETY: `fd` is an open shared-memory descriptor backed by at least `requested_size` bytes.
+        match unsafe { map_fd_region(fd, size) } {
+            Ok(region) => Ok(region),
+            Err(err) => {
+                // SAFETY: `fd` was opened above and is closed on map failure.
+                unsafe {
+                    libc::close(fd);
+                }
+                Err(err)
+            }
+        }
     }
 
     /// Create a named shared memory region (Unix only).
@@ -175,14 +269,41 @@ impl ShmRegion {
         };
         region.owns_handle = true;
         region.owns_mapping = true;
-        region.unlink_name = Some(cname);
+        *region.unlink_name.get_mut().expect("unlink_name mutex") = Some(cname);
         Ok(region)
     }
 
     /// Disarm automatic `shm_unlink` on drop so a peer process can open the named region.
     #[cfg(unix)]
     pub fn disarm_unlink(&mut self) {
-        self.unlink_name = None;
+        *self
+            .unlink_name
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// Unlink the named POSIX `/dev/shm` segment or `/tmp/vtb-*` backing file immediately
+    /// while keeping the virtual-memory mapping valid until [`ShmRegion`] drops.
+    #[cfg(unix)]
+    pub fn unlink_now(&self) -> bool {
+        let name = self
+            .unlink_name
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let Some(name) = name else {
+            return false;
+        };
+        // SAFETY: `name` is a valid NUL-terminated `CString` created during `create_named`
+        // or `create_file_backed`.
+        let rc = unsafe {
+            if name.as_bytes().starts_with(b"/tmp/vtb-") {
+                libc::unlink(name.as_ptr())
+            } else {
+                libc::shm_unlink(name.as_ptr())
+            }
+        };
+        rc == 0
     }
 
     /// Create a file-backed shared memory region under `/tmp/vtb-*` (Unix only).
@@ -193,9 +314,11 @@ impl ShmRegion {
         }
         let size = align_to_page(size)?;
         let cname = CString::new(path)?;
+        // SAFETY: `cname` is a valid NUL-terminated `CString`.
         unsafe {
             let _ = libc::unlink(cname.as_ptr());
         }
+        // SAFETY: `cname` is a valid NUL-terminated `CString` and flags create the file atomically.
         let fd = unsafe {
             libc::open(
                 cname.as_ptr(),
@@ -206,6 +329,7 @@ impl ShmRegion {
         if fd < 0 {
             return Err(io::Error::last_os_error().into());
         }
+        // SAFETY: `fd` is a valid open file descriptor owned by this function.
         unsafe {
             if libc::ftruncate(fd, size as libc::off_t) != 0 {
                 let err = io::Error::last_os_error();
@@ -214,9 +338,11 @@ impl ShmRegion {
                 return Err(err.into());
             }
         }
+        // SAFETY: `fd` has been truncated to `size` bytes.
         let mut region = match unsafe { map_fd_region(fd, size) } {
             Ok(region) => region,
             Err(err) => {
+                // SAFETY: `fd` and `cname` are valid and mapping failed, so clean up both.
                 unsafe {
                     libc::close(fd);
                     let _ = libc::unlink(cname.as_ptr());
@@ -226,7 +352,7 @@ impl ShmRegion {
         };
         region.owns_handle = true;
         region.owns_mapping = true;
-        region.unlink_name = Some(cname);
+        *region.unlink_name.get_mut().expect("unlink_name mutex") = Some(cname);
         Ok(region)
     }
 
@@ -289,7 +415,7 @@ impl ShmRegion {
             owns_handle: false,
             owns_mapping: false,
             #[cfg(unix)]
-            unlink_name: None,
+            unlink_name: Mutex::new(None),
         }
     }
 
@@ -312,10 +438,28 @@ impl ShmRegion {
             Some(self.handle)
         }
     }
+
+    /// Return the OS-reported backing byte length for file/SHM-backed regions, if available.
+    pub fn backing_len(&self) -> Option<usize> {
+        #[cfg(unix)]
+        {
+            let fd = self.handle()?;
+            // SAFETY: `libc::stat` is plain-old-data valid when zero-initialized, and `fd` is live.
+            unsafe {
+                let mut st: libc::stat = core::mem::zeroed();
+                if libc::fstat(fd, &mut st) == 0 && st.st_size >= 0 {
+                    return usize::try_from(st.st_size).ok();
+                }
+            }
+        }
+        None
+    }
 }
 
 impl Drop for ShmRegion {
     fn drop(&mut self) {
+        // SAFETY: `self` has exclusive access during drop and owns `ptr`/`handle` according
+        // to `owns_mapping` and `owns_handle`.
         unsafe {
             #[cfg(unix)]
             {
@@ -325,7 +469,12 @@ impl Drop for ShmRegion {
                 if self.owns_handle && self.handle != INVALID_HANDLE {
                     libc::close(self.handle);
                 }
-                if let Some(name) = self.unlink_name.take() {
+                let unlink_opt = self
+                    .unlink_name
+                    .get_mut()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
+                if let Some(name) = unlink_opt {
                     if name.as_bytes().starts_with(b"/tmp/vtb-") {
                         let _ = libc::unlink(name.as_ptr());
                     } else {
@@ -460,7 +609,7 @@ unsafe fn map_fd_region(fd: RawFd, size: usize) -> Result<ShmRegion, ShmError> {
         owns_handle: true,
         owns_mapping: true,
         #[cfg(unix)]
-        unlink_name: None,
+        unlink_name: Mutex::new(None),
     })
 }
 
@@ -502,7 +651,7 @@ fn create_windows_region(size: usize) -> Result<ShmRegion, ShmError> {
         owns_handle: true,
         owns_mapping: true,
         #[cfg(unix)]
-        unlink_name: None,
+        unlink_name: Mutex::new(None),
     })
 }
 
@@ -524,7 +673,7 @@ unsafe fn map_windows_region(handle: RawHandle, size: usize) -> Result<ShmRegion
         owns_handle: true,
         owns_mapping: true,
         #[cfg(unix)]
-        unlink_name: None,
+        unlink_name: Mutex::new(None),
     })
 }
 
@@ -687,6 +836,112 @@ mod tests {
             .unwrap();
         assert!(child1.wait().unwrap().success());
         assert!(child2.wait().unwrap().success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unlink_now_removes_name_while_mapping_stays_readable() {
+        let name = format!("/vtb-unlink-now-{}", std::process::id());
+        let mut region = match ShmRegion::create_named(&name, 4096) {
+            Ok(region) => region,
+            Err(ShmError::Sys(err)) if err.kind() == io::ErrorKind::PermissionDenied => return,
+            Err(err) => panic!("create_named failed: {err:?}"),
+        };
+        // SAFETY: `region` is exclusively owned in this test.
+        unsafe {
+            region.as_mut_slice()[0..4].copy_from_slice(b"ABCD");
+        }
+        assert!(ShmRegion::open_named(&name, 4096).is_ok());
+        assert!(region.unlink_now());
+        assert!(!region.unlink_now());
+        assert!(ShmRegion::open_named(&name, 4096).is_err());
+        // SAFETY: `region` mapping remains valid until `region` drops.
+        unsafe {
+            assert_eq!(&region.as_slice()[0..4], b"ABCD");
+        }
+    }
+
+    #[test]
+    fn shm_capsule_from_arc_preserves_mapping_and_drops_cleanly() {
+        use std::sync::atomic::Ordering;
+
+        let mut region = ShmRegion::create(4096).unwrap();
+        // SAFETY: `region` is exclusively owned before wrapping in `Arc`.
+        unsafe {
+            region.as_mut_slice()[0..4].copy_from_slice(&[9, 8, 7, 6]);
+        }
+        let arc_region = Arc::new(region);
+        let weak = Arc::downgrade(&arc_region);
+        let capsule = ShmCapsule::from_arc(arc_region);
+        assert!(!capsule.ptr.is_null());
+        assert!(capsule.len >= 4096);
+        assert!(weak.upgrade().is_some());
+        // SAFETY: `capsule.ptr` points to at least `capsule.len` valid bytes while `ctx` is live.
+        unsafe {
+            let slice = core::slice::from_raw_parts(capsule.ptr, 4);
+            assert_eq!(slice, &[9, 8, 7, 6]);
+        }
+        let ctx = capsule.ctx.swap(core::ptr::null_mut(), Ordering::AcqRel);
+        assert!(!ctx.is_null());
+        // SAFETY: `ctx` was claimed once via atomic swap and is surrendered once to `drop_fn`.
+        unsafe {
+            (capsule.drop_fn)(ctx);
+        }
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shm_capsule_concurrent_atomic_swap_and_single_unlink() {
+        use std::sync::Barrier;
+        use std::sync::atomic::Ordering;
+
+        let name = format!("/vtb-cap-race-{}", std::process::id());
+        let region = match ShmRegion::create_named(&name, 4096) {
+            Ok(region) => region,
+            Err(ShmError::Sys(err)) if err.kind() == io::ErrorKind::PermissionDenied => return,
+            Err(err) => panic!("create_named failed: {err:?}"),
+        };
+        let arc_region = Arc::new(region);
+        let weak = Arc::downgrade(&arc_region);
+        let capsule = Arc::new(ShmCapsule::from_arc(arc_region));
+
+        let thread_count = 8usize;
+        let barrier = Arc::new(Barrier::new(thread_count));
+        let claimed: Vec<usize> = std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(thread_count);
+            for _ in 0..thread_count {
+                let cap = Arc::clone(&capsule);
+                let bar = Arc::clone(&barrier);
+                handles.push(s.spawn(move || {
+                    bar.wait();
+                    cap.ctx.swap(core::ptr::null_mut(), Ordering::AcqRel) as usize
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .filter(|&p| p != 0)
+                .collect()
+        });
+
+        assert_eq!(claimed.len(), 1);
+        let ctx = claimed[0] as *mut c_void;
+        let unlink_fn = capsule.unlink_fn.expect("unlink_fn present");
+        // SAFETY: `ctx` is owned exclusively by this test after winning the atomic swap.
+        assert!(unsafe { unlink_fn(ctx) });
+        // SAFETY: `ctx` is still live; second unlink must be a no-op returning `false`.
+        assert!(!unsafe { unlink_fn(ctx) });
+
+        let replacement = ShmRegion::create_named(&name, 4096).unwrap();
+        // SAFETY: `ctx` is surrendered once to `drop_fn`, whose disarmed `unlink_name` must not
+        // unlink the newly created `replacement` segment at `name`.
+        unsafe {
+            (capsule.drop_fn)(ctx);
+        }
+        assert!(weak.upgrade().is_none());
+        assert!(ShmRegion::open_named(&name, 4096).is_ok());
+        drop(replacement);
     }
 
     #[cfg(unix)]

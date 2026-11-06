@@ -1,8 +1,8 @@
 ---
 okf_version: "0.2"
+bundle: "vertebra"
 title: "Vertebra OKF Knowledge Bundle"
 description: "Root index for Vertebra's Open Knowledge Format (OKF v0.2) product definition, nested engineering knowledge base, and bundle activity log."
-status: stable
 tags:
   - okf
   - index
@@ -52,10 +52,11 @@ Root index for **Vertebra** — the Rust-powered, full-stack Python & TypeScript
 
 ## 3. Specifications, Research & Activity Log
 
-- **`specs/` (active)** —
-  - **Master PRDs**: [`native-data-platform`](specs/native-data-platform/spec.md) and [`integration-remediation`](specs/integration-remediation/spec.md)
-  - **Planned Child Flows (`status: planned`)**: [`db-layout-and-contract`](specs/db-layout-and-contract/spec.md) (`T1.1`–`T2.3`), [`db-engine-primitives`](specs/db-engine-primitives/spec.md) (`T1.1`–`T2.4`)
-  - **Draft Child Flows (`status: draft`)**: [`native-postgres-driver`](specs/native-postgres-driver/spec.md), [`broker-pool-sharing`](specs/broker-pool-sharing/spec.md), [`native-oracle-driver`](specs/native-oracle-driver/spec.md), [`native-mysql-mssql-drivers`](specs/native-mysql-mssql-drivers/spec.md), [`native-embedded-and-cache-drivers`](specs/native-embedded-and-cache-drivers/spec.md), [`storage-completeness`](specs/storage-completeness/spec.md), [`sqlspec-adapter-parity`](specs/sqlspec-adapter-parity/spec.md), [`queues-tasks-and-channels`](specs/queues-tasks-and-channels/spec.md), [`sqlalchemy-and-django-integration`](specs/sqlalchemy-and-django-integration/spec.md), [`mcp-webmcp-core`](specs/mcp-webmcp-core/spec.md), [`runtime-structure-and-throughput`](specs/runtime-structure-and-throughput/spec.md)
-  - **Active Research**: [`rust-driver-crates_20261103.md`](specs/native-data-platform/research/rust-driver-crates_20261103.md), [`object-store-013_20261103.md`](specs/native-data-platform/research/object-store-013_20261103.md), [`sqlspec-alchemy-django-contracts_20261103.md`](specs/integration-remediation/research/sqlspec-alchemy-django-contracts_20261103.md)
+- **[`specs/`](specs/index.md) (active)** —
+  - **Master PRDs (`state: planned`)**: [`native-data-platform`](specs/native-data-platform/spec.md) and [`integration-remediation`](specs/integration-remediation/spec.md)
+  - **Planned Child Flows (`state: planned`)**: [`db-engine-primitives`](specs/db-engine-primitives/spec.md) (`t01`–`t07`)
+  - **Draft Child Flows (`state: draft`)**: [`native-postgres-driver`](specs/native-postgres-driver/spec.md), [`broker-pool-sharing`](specs/broker-pool-sharing/spec.md), [`native-oracle-driver`](specs/native-oracle-driver/spec.md), [`native-mysql-mssql-drivers`](specs/native-mysql-mssql-drivers/spec.md), [`native-embedded-and-cache-drivers`](specs/native-embedded-and-cache-drivers/spec.md), [`storage-completeness`](specs/storage-completeness/spec.md), [`sqlspec-adapter-parity`](specs/sqlspec-adapter-parity/spec.md), [`queues-tasks-and-channels`](specs/queues-tasks-and-channels/spec.md), [`sqlalchemy-and-django-integration`](specs/sqlalchemy-and-django-integration/spec.md), [`mcp-webmcp-core`](specs/mcp-webmcp-core/spec.md), [`runtime-structure-and-throughput`](specs/runtime-structure-and-throughput/spec.md)
+  - **Active Research**: [`gap-analysis_20261103.md`](specs/native-data-platform/research/gap-analysis_20261103.md), [`rust-driver-crates_20261103.md`](specs/native-data-platform/research/rust-driver-crates_20261103.md), [`audit-findings_20261103.md`](specs/integration-remediation/research/audit-findings_20261103.md), [`google-cloud-rust_20261103.md`](specs/integration-remediation/research/google-cloud-rust_20261103.md)
+- **Completed database foundation**: [Driver contracts and adapter layout](knowledge/domains/data/database-drivers-and-dialers.md), [conformance readiness](knowledge/testing/polyglot-test-matrix.md#database-driver-conformance), and [optional wheel ownership](knowledge/decisions/adr-004-optional-driver-wheels-and-shm-ownership.md).
 - **`research/` (lazy)** — Materialized only when standalone un-scoped technical research briefs exist.
 - **[Bundle Activity Log](log.md)** — Chronological log of bundle initialization, syntheses, and archived flows.
