@@ -37,7 +37,7 @@ from vertebra.db.adapters.spanner import (
     SyncSpannerDriver,
     SyncSpannerTransaction,
 )
-from vertebra.db.driver import DataError
+from vertebra.db.driver import DatabaseError, DataError, OperationalError
 from vertebra.storage import SyncObjectStore
 from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError, VertebraError
 from vertebra.utils.serializers import decode_json, encode_json
@@ -954,6 +954,8 @@ def test_spanner_config_passes_admin_endpoint() -> None:
     [
         (GoogleCloudError, VertebraError),
         (GoogleCloudAuthError, GoogleCloudError),
+        (GoogleCloudAuthError, DatabaseError),
+        (GoogleCloudAuthError, OperationalError),
         (SpannerError, GoogleCloudError),
         (SpannerAbortedError, SpannerError),
         (BigQueryError, GoogleCloudError),

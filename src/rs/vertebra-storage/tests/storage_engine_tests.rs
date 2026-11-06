@@ -558,3 +558,23 @@ async fn gcs_v4_presign_iam_sign_blob_reuses_cached_token_and_retries_on_401() {
     assert_eq!(oauth_calls.load(Ordering::SeqCst), 2);
     assert_eq!(iam_calls.load(Ordering::SeqCst), 4);
 }
+
+#[test]
+fn block_on_storage_succeeds_inside_multi_thread_runtime_and_enter() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let out = rt.block_on(async {
+        _storage::store::block_on_storage(async {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            42_u64
+        })
+    });
+    assert_eq!(out, 42);
+
+    let _guard = rt.enter();
+    let entered = _storage::store::block_on_storage(async { 7_u64 });
+    assert_eq!(entered, 7);
+}

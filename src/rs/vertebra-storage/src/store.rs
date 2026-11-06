@@ -39,11 +39,17 @@ pub fn runtime_handle() -> tokio::runtime::Handle {
     tokio::runtime::Handle::try_current().unwrap_or_else(|_| STORAGE_RUNTIME.handle().clone())
 }
 
-pub fn block_on_storage<F: std::future::Future>(future: F) -> F::Output {
-    if let Ok(handle) = tokio::runtime::Handle::try_current()
-        && handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
-    {
-        return tokio::task::block_in_place(|| handle.block_on(future));
+pub fn block_on_storage<F>(future: F) -> F::Output
+where
+    F: std::future::Future + Send,
+    F::Output: Send,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return std::thread::scope(|s| {
+            s.spawn(|| STORAGE_RUNTIME.block_on(future))
+                .join()
+                .expect("storage runtime thread panicked")
+        });
     }
     STORAGE_RUNTIME.block_on(future)
 }

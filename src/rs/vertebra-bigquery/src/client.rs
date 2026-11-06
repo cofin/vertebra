@@ -818,10 +818,18 @@ impl BigQueryClient {
             builder = builder.no_proxy();
         }
 
-        if let Some(ref pem) = config.ca_pem
-            && let Ok(cert) = reqwest::Certificate::from_pem(pem)
-        {
-            builder = builder.add_root_certificate(cert);
+        if let Some(ref pem) = config.ca_pem {
+            let certs = reqwest::Certificate::from_pem_bundle(pem).map_err(|e| {
+                BigQueryError::InvalidArgument(format!("invalid BigQuery ca_pem certificate: {e}"))
+            })?;
+            if certs.is_empty() {
+                return Err(BigQueryError::InvalidArgument(
+                    "invalid BigQuery ca_pem certificate: no PEM certificate blocks found".into(),
+                ));
+            }
+            for cert in certs {
+                builder = builder.add_root_certificate(cert);
+            }
         }
 
         let http_client = builder

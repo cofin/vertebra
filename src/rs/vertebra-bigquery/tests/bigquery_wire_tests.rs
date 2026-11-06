@@ -899,3 +899,17 @@ async fn get_query_results_url_encodes_job_location_and_page_token() {
         "missing encoded pageToken target in {targets:?}"
     );
 }
+
+#[test]
+fn invalid_ca_pem_returns_invalid_argument_error() {
+    let mut cfg = BigQueryClientConfig::new("p1");
+    cfg.ca_pem = Some(b"not-a-valid-pem-certificate".to_vec());
+    let err = match BigQueryClient::new(cfg) {
+        Ok(_) => panic!("expected invalid ca_pem error"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, BigQueryError::InvalidArgument(ref msg) if msg.contains("ca_pem")),
+        "unexpected error: {err:?}"
+    );
+}

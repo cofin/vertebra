@@ -11,14 +11,14 @@ use std::any::Any;
 use std::ffi::{CStr, c_void};
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyType, PyWeakref, PyWeakrefMethods, PyWeakrefReference};
-use tokio::runtime::{Builder, Handle, Runtime, RuntimeFlavor};
+use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::task::AbortHandle;
 use vertebra_core::notify::{AsyncCompletionQueue, Notifier};
 use vertebra_core::shm::{ShmCapsule, ShmRegion};
@@ -46,7 +46,12 @@ fn make_task_panic_err(py: Python<'_>, message: String) -> PyErr {
     PyRuntimeError::new_err(message)
 }
 
-#[pyclass(name = "_DbTaskCanceller", frozen, immutable_type)]
+#[pyclass(
+    name = "_DbTaskCanceller",
+    module = "vertebra._vertebra",
+    frozen,
+    immutable_type
+)]
 struct DbTaskCanceller {
     abort: AbortHandle,
 }
@@ -92,16 +97,12 @@ where
     F: Future + Send,
     F::Output: Send,
 {
-    if let Ok(handle) = Handle::try_current() {
-        if handle.runtime_flavor() == RuntimeFlavor::MultiThread {
-            tokio::task::block_in_place(|| handle.block_on(fut))
-        } else {
-            std::thread::scope(|s| {
-                s.spawn(|| db_runtime_handle().block_on(fut))
-                    .join()
-                    .expect("db runtime thread panicked")
-            })
-        }
+    if Handle::try_current().is_ok() {
+        std::thread::scope(|s| {
+            s.spawn(|| db_runtime_handle().block_on(fut))
+                .join()
+                .expect("db runtime thread panicked")
+        })
     } else {
         db_runtime_handle().block_on(fut)
     }
@@ -143,7 +144,12 @@ impl DbCompletionRing {
     }
 }
 
-#[pyclass(name = "_DbCompletionDrainer", frozen, immutable_type)]
+#[pyclass(
+    name = "_DbCompletionDrainer",
+    module = "vertebra._vertebra",
+    frozen,
+    immutable_type
+)]
 pub struct DbCompletionDrainer {
     ring: Arc<DbCompletionRing>,
 }
@@ -209,7 +215,10 @@ fn ensure_db_completion_ring(
             .call_method1("add_reader", (fd, drainer_py.bind(py)))
             .is_ok()
         {
-            let _ = loop_obj.setattr(attr_name, drainer_py.bind(py));
+            if let Err(err) = loop_obj.setattr(attr_name, drainer_py.bind(py)) {
+                let _ = loop_obj.call_method1("remove_reader", (fd,));
+                return Err(err);
+            }
             return Ok(temp_ring);
         }
     }
@@ -228,12 +237,17 @@ fn ensure_db_completion_ring(
             ring: Arc::clone(&ring),
         },
     )?;
-    let _ = loop_obj.setattr(attr_name, drainer_py.bind(py));
+    loop_obj.setattr(attr_name, drainer_py.bind(py))?;
     Ok(ring)
 }
 
 /// Native Rust awaitable backed by a Tokio runtime and `AsyncCompletionQueue`.
-#[pyclass(name = "RustDbTaskAwaitable", frozen, immutable_type)]
+#[pyclass(
+    name = "RustDbTaskAwaitable",
+    module = "vertebra._vertebra",
+    frozen,
+    immutable_type
+)]
 pub struct RustDbTaskAwaitable {
     future: Py<PyAny>,
 }
@@ -268,15 +282,23 @@ where
     let ring = ensure_db_completion_ring(py, &loop_obj, attr_name)?;
     let fut_for_cb = py_fut.clone().unbind();
     let worker = db_runtime_handle().spawn(fut);
-    py_fut.call_method1(
-        "add_done_callback",
-        (Py::new(
-            py,
-            DbTaskCanceller {
-                abort: worker.abort_handle(),
-            },
-        )?,),
-    )?;
+    let abort = worker.abort_handle();
+    let canceller = match Py::new(
+        py,
+        DbTaskCanceller {
+            abort: abort.clone(),
+        },
+    ) {
+        Ok(cb) => cb,
+        Err(err) => {
+            abort.abort();
+            return Err(err);
+        }
+    };
+    if let Err(err) = py_fut.call_method1("add_done_callback", (canceller,)) {
+        abort.abort();
+        return Err(err);
+    }
     let fut_for_await = py_fut.unbind();
 
     db_runtime_handle().spawn(async move {
@@ -305,33 +327,6 @@ where
     Ok(RustDbTaskAwaitable {
         future: fut_for_await,
     })
-}
-
-unsafe extern "C" fn drop_shm_region_arc(ctx: *mut c_void) {
-    if !ctx.is_null() {
-        // SAFETY: `ctx` was produced via `Arc::into_raw` on an `Arc<ShmRegion>` in
-        // `wrap_shm_region_capsule` and ownership is claimed at most once via atomic swap.
-        unsafe {
-            drop(Arc::from_raw(ctx.cast::<ShmRegion>()));
-        }
-    }
-}
-
-unsafe extern "C" fn unlink_shm_region_arc(ctx: *mut c_void) -> bool {
-    if ctx.is_null() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        // SAFETY: `ctx` points to a live `ShmRegion` inside an `Arc<ShmRegion>` whose strong
-        // count remains non-zero while the caller holds ownership of `ctx`.
-        let region = unsafe { &*(ctx as *const ShmRegion) };
-        region.unlink_now()
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
 }
 
 unsafe extern "C" fn shm_pycapsule_destructor(capsule_obj: *mut ffi::PyObject) {
@@ -372,15 +367,7 @@ pub fn wrap_shm_region_capsule(
     py: Python<'_>,
     region: Arc<ShmRegion>,
 ) -> PyResult<Bound<'_, PyAny>> {
-    let ptr = region.as_ptr();
-    let len = region.len();
-    let boxed = Box::new(ShmCapsule {
-        ptr,
-        len,
-        ctx: AtomicPtr::new(Arc::into_raw(region) as *mut c_void),
-        drop_fn: drop_shm_region_arc,
-        unlink_fn: Some(unlink_shm_region_arc),
-    });
+    let boxed = Box::new(ShmCapsule::from_arc(region));
     let raw = Box::into_raw(boxed).cast::<c_void>();
     // SAFETY: `raw` is non-null, `SHM_CAPSULE_NAME` is a static NUL-terminated C string, and
     // `shm_pycapsule_destructor` reclaims `raw` (and `ctx` if unconsumed) in this crate's allocator.
@@ -609,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn block_on_db_succeeds_inside_current_thread_tokio_runtime() {
+    fn block_on_db_succeeds_inside_current_and_multi_thread_tokio_runtimes() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -621,6 +608,22 @@ mod tests {
             })
         });
         assert_eq!(out, 42);
+
+        let mt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mt_out = mt.block_on(async {
+            block_on_db(async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                99_u64
+            })
+        });
+        assert_eq!(mt_out, 99);
+
+        let _guard = mt.enter();
+        assert_eq!(block_on_db(async { 7_u64 }), 7);
     }
 
     #[test]
