@@ -111,6 +111,7 @@ class SyncSpannerClient:
         mutations_json: str,
         transaction_tag: str | None = None,
         exclude_txn_from_change_streams: bool = False,
+        max_commit_delay_ms: int | None = None,
     ) -> dict[str, Any]:
         """Commit a JSON-encoded list of Spanner mutations and return commit statistics."""
         ...
@@ -238,6 +239,7 @@ class AsyncSpannerClient:
         mutations_json: str,
         transaction_tag: str | None = None,
         exclude_txn_from_change_streams: bool = False,
+        max_commit_delay_ms: int | None = None,
     ) -> Awaitable[dict[str, Any]]:
         """Commit a JSON-encoded list of Spanner mutations asynchronously."""
         ...

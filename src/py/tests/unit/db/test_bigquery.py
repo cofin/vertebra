@@ -906,3 +906,43 @@ async def test_bigquery_load_from_arrow_validates_identifiers_before_io(
         else:
             driver.close()
         server.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(
+    "bad_uri",
+    [
+        "exports/metrics.parquet",
+        "memory://exports/metrics.parquet",
+        "s3://",
+    ],
+)
+async def test_bigquery_staging_rejects_missing_or_ephemeral_memory_store(
+    asynchronous: bool,
+    bad_uri: str,
+) -> None:
+    """BigQuery ObjectStore export/load rejects relative, memory://, or malformed URIs when store is None."""
+    server = _MockBigQueryRestServer()
+    config = BigQueryConfig(project_id="test-proj", dataset_id="analytics", rest_endpoint=f"http://{server.host_port}")
+    try:
+        if asynchronous:
+            driver = AsyncBigQueryDriver(config)
+            try:
+                with pytest.raises(ImproperConfigurationError):
+                    await driver.export_to_object_store("SELECT id, name, score FROM metrics", bad_uri, store=None)
+                with pytest.raises(ImproperConfigurationError):
+                    await driver.load_from_object_store("analytics.metrics", bad_uri, store=None)
+            finally:
+                await driver.close()
+        else:
+            sync_driver = SyncBigQueryDriver(config)
+            try:
+                with pytest.raises(ImproperConfigurationError):
+                    sync_driver.export_to_object_store("SELECT id, name, score FROM metrics", bad_uri, store=None)
+                with pytest.raises(ImproperConfigurationError):
+                    sync_driver.load_from_object_store("analytics.metrics", bad_uri, store=None)
+            finally:
+                sync_driver.close()
+    finally:
+        server.close()

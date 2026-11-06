@@ -908,7 +908,7 @@ async fn apply_mutations_commits_insert_rows() {
         ]],
     );
     let res = client
-        .apply_mutations(&[mutation], Some("mut-tx"), false)
+        .apply_mutations(&[mutation], Some("mut-tx"), false, None)
         .await
         .expect("apply_mutations");
     assert_eq!(res.commit_timestamp_micros, Some(1_700_000_000_000_000));
@@ -932,10 +932,70 @@ async fn apply_mutations_rejects_commit_without_timestamp() {
         vec!["id".into()],
         vec![vec![ProtobufValue::String("1".into())]],
     );
-    match client.apply_mutations(&[mutation], None, false).await {
+    match client.apply_mutations(&[mutation], None, false, None).await {
         Err(SpannerError::Protocol(msg)) => assert!(msg.contains("commit_timestamp")),
         other => panic!("expected Protocol error, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn commit_requests_propagate_max_commit_delay_across_dml_batch_dml_and_mutations() {
+    let stub = RecordingSpanner::default();
+    let mut cfg = SpannerClientConfig::new("projects/p/instances/i/databases/d");
+    cfg.max_commit_delay_ms = Some(25);
+    let client = SpannerClient::with_clients(
+        Spanner::from_stub(stub.clone()),
+        Some(DatabaseAdmin::from_stub(RecordingAdmin::default())),
+        cfg,
+    )
+    .expect("client");
+
+    let dml_count = client
+        .execute_dml("UPDATE t SET v = 1 WHERE id = 1", &[], None, Some("tx-dml"))
+        .await
+        .expect("execute_dml");
+    assert_eq!(dml_count, 3);
+
+    let stmts = vec![SpannerBatchDmlStatement {
+        sql: "UPDATE t SET v = 2 WHERE id = 2".into(),
+        params: vec![],
+    }];
+    let batch_counts = client
+        .execute_batch_dml(&stmts, None, Some("tx-batch"))
+        .await
+        .expect("execute_batch_dml");
+    assert_eq!(batch_counts, vec![2, 5]);
+
+    let mutation = SpannerMutation::insert(
+        "t",
+        vec!["id".into()],
+        vec![vec![ProtobufValue::String("1".into())]],
+    );
+    client
+        .apply_mutations(std::slice::from_ref(&mutation), Some("tx-mut"), false, None)
+        .await
+        .expect("apply_mutations default delay");
+    client
+        .apply_mutations(&[mutation], Some("tx-mut-override"), false, Some(40))
+        .await
+        .expect("apply_mutations override delay");
+
+    let commits = stub.commit_requests.lock().unwrap();
+    assert_eq!(commits.len(), 4);
+    for idx in 0..3 {
+        let delay = commits[idx]
+            .max_commit_delay
+            .as_ref()
+            .unwrap_or_else(|| panic!("commit[{idx}] missing max_commit_delay"));
+        assert_eq!(delay.seconds(), 0);
+        assert_eq!(delay.nanos(), 25_000_000);
+    }
+    let override_delay = commits[3]
+        .max_commit_delay
+        .as_ref()
+        .expect("commit[3] missing override max_commit_delay");
+    assert_eq!(override_delay.seconds(), 0);
+    assert_eq!(override_delay.nanos(), 40_000_000);
 }
 
 #[tokio::test]

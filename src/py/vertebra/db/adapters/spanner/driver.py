@@ -17,6 +17,7 @@ from vertebra._vertebra import (
 from vertebra._vertebra import (
     StatementCache as _RustStatementCache,
 )
+from vertebra.db._staging import ObjectStoreStaging
 from vertebra.db.adapters.spanner.config import (
     SPANGRES_DIALECT_TAG,
     SPANNER_GOOGLESQL_DIALECT_TAG,
@@ -979,7 +980,6 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         exclude_txn_from_change_streams: bool = False,
     ) -> Any:
         """Execute `fn(tx)` inside a read-write transaction with wound-wait retry on `Aborted`."""
-        _ = max_commit_delay_ms
         effective_tag = transaction_tag or (tag if tag else None)
         attempts = max(1, int(max_attempts))
         for attempt in range(1, attempts + 1):
@@ -990,6 +990,7 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
                     self.apply_mutations(
                         tx.mutations,
                         transaction_tag=effective_tag,
+                        max_commit_delay_ms=max_commit_delay_ms,
                         exclude_txn_from_change_streams=exclude_txn_from_change_streams,
                     )
                 return result
@@ -1008,7 +1009,6 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         exclude_txn_from_change_streams: bool = False,
     ) -> dict[str, Any]:
         """Commit a sequence of `Mutation` structs atomically."""
-        _ = max_commit_delay_ms
         if not mutations:
             return {"commit_timestamp_micros": 0, "mutation_count": 0, "retry_count": 0}
         normalized = [SpannerCore.coerce_mutation(m) for m in mutations]
@@ -1021,6 +1021,7 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
             }
 
         client = self._ensure_client()
+        effective_delay = max_commit_delay_ms if max_commit_delay_ms is not None else self.config.max_commit_delay_ms
         total_stats: dict[str, Any] = {
             "commit_timestamp_micros": None,
             "mutation_count": 0,
@@ -1032,6 +1033,7 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
                 mutations_json,
                 transaction_tag,
                 exclude_txn_from_change_streams,
+                effective_delay,
             )
             total_stats["commit_timestamp_micros"] = res.get("commit_timestamp_micros")
             total_stats["mutation_count"] += int(res.get("mutation_count", len(chunk)))
@@ -1222,13 +1224,14 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         else:
             target_store = store_or_uri if store is None else store
             target_uri = destination_uri or ""
+        ObjectStoreStaging.validate_staging_target(target_store, target_uri)
         cursor = self.select_to_arrow(
             sql_or_table,
             params,
             data_boost_enabled=data_boost_enabled,
             staleness=staleness,
         )
-        SpannerCore.write_cursor_to_object_store_sync(
+        ObjectStoreStaging.write_cursor_sync(
             cursor,
             destination_uri=target_uri,
             store=target_store,
@@ -1259,11 +1262,11 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
             target_store = store
         else:
             target_store = store_or_uris if store is None else store
-            uris_arg = source_uris or ()
+            uris_arg = () if source_uris is None else source_uris
         uris = [uris_arg] if isinstance(uris_arg, str) else list(uris_arg)
         total = 0
         for uri in uris:
-            cursor = SpannerCore.read_cursor_from_object_store_sync(uri, store=target_store, format=format)
+            cursor = ObjectStoreStaging.read_cursor_sync(uri, store=target_store, format=format)
             total += self.load_from_arrow(table, cursor, upsert=upsert)
         return total
 
@@ -1671,7 +1674,6 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         exclude_txn_from_change_streams: bool = False,
     ) -> Any:
         """Execute an async or sync `fn(tx)` inside a read-write transaction."""
-        _ = max_commit_delay_ms
         effective_tag = transaction_tag or (tag if tag else None)
         attempts = max(1, int(max_attempts))
         for attempt in range(1, attempts + 1):
@@ -1683,6 +1685,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
                     await self.apply_mutations(
                         tx.mutations,
                         transaction_tag=effective_tag,
+                        max_commit_delay_ms=max_commit_delay_ms,
                         exclude_txn_from_change_streams=exclude_txn_from_change_streams,
                     )
                 return result
@@ -1700,7 +1703,6 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         exclude_txn_from_change_streams: bool = False,
     ) -> dict[str, Any]:
         """Commit a sequence of `Mutation` structs asynchronously."""
-        _ = max_commit_delay_ms
         if not mutations:
             return {"commit_timestamp_micros": 0, "mutation_count": 0, "retry_count": 0}
         normalized = [SpannerCore.coerce_mutation(m) for m in mutations]
@@ -1713,6 +1715,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
             }
 
         client = self._ensure_client()
+        effective_delay = max_commit_delay_ms if max_commit_delay_ms is not None else self.config.max_commit_delay_ms
         total_stats: dict[str, Any] = {
             "commit_timestamp_micros": None,
             "mutation_count": 0,
@@ -1724,6 +1727,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
                 mutations_json,
                 transaction_tag,
                 exclude_txn_from_change_streams,
+                effective_delay,
             )
             total_stats["commit_timestamp_micros"] = res.get("commit_timestamp_micros")
             total_stats["mutation_count"] += int(res.get("mutation_count", len(chunk)))
@@ -1916,13 +1920,14 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         else:
             target_store = store_or_uri if store is None else store
             target_uri = destination_uri or ""
+        ObjectStoreStaging.validate_staging_target(target_store, target_uri)
         cursor = await self.select_to_arrow(
             sql_or_table,
             params,
             data_boost_enabled=data_boost_enabled,
             staleness=staleness,
         )
-        await SpannerCore.write_cursor_to_object_store_async(
+        await ObjectStoreStaging.write_cursor_async(
             cursor,
             destination_uri=target_uri,
             store=target_store,
@@ -1953,11 +1958,11 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
             target_store = store
         else:
             target_store = store_or_uris if store is None else store
-            uris_arg = source_uris or ()
+            uris_arg = () if source_uris is None else source_uris
         uris = [uris_arg] if isinstance(uris_arg, str) else list(uris_arg)
         total = 0
         for uri in uris:
-            cursor = await SpannerCore.read_cursor_from_object_store_async(uri, store=target_store, format=format)
+            cursor = await ObjectStoreStaging.read_cursor_async(uri, store=target_store, format=format)
             total += await self.load_from_arrow(table, cursor, upsert=upsert)
         return total
 

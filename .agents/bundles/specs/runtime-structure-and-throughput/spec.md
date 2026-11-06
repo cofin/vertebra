@@ -9,11 +9,11 @@ research:
 - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 1
 plan_commit: "af319da17dec0148a18532952cb7ea2a91d1c9d7"
-state_revision: 8
-current_task: runtime-structure-and-throughput:t05
+state_revision: 10
+current_task: runtime-structure-and-throughput:t06
 last_verified_checkpoint: phase_1
 created_at: '2026-11-03T03:30:00Z'
-updated_at: '2026-11-06T16:11:30Z'
+updated_at: '2026-11-06T17:11:00Z'
 tags:
 - fastpath
 - rust
@@ -110,13 +110,13 @@ Every worksheet executes as one atomic, GPG-signed conventional commit with disj
 - [x] [4a5512d4] t01 — Extract shared fastpath core and FastPathProvider registry (tasks/t01-fastpath-core-and-providers.md)
 - [x] [23f0b41d] t02 — Enforce hot-path body size cap, zero-copy Arrow responses, and raw byte headers (tasks/t02-hotpath-body-cap-and-zero-copy.md)
 - [x] [94b2bd93] t03 — Make loop backend selection table-driven and externalize welcome page assets (tasks/t03-loop-registry-and-welcome-assets.md)
-- [x] t04 — Add vertebra-core protobuf wire helpers and rename vertebra-py async_bridge (tasks/t04-rust-proto-and-async-bridge.md)
+- [x] [cf4941e1] t04 — Add vertebra-core protobuf wire helpers and rename vertebra-py async_bridge (tasks/t04-rust-proto-and-async-bridge.md)
 
 **Phase 1 Recovery Checkpoint:** `make rs-test`, `make dev`, and `uv run --no-sync pytest src/py/tests/unit/server src/py/tests/unit/framework src/py/tests/unit/extensions src/py/tests/unit/ffi -q` exit 0.
 
 ### Phase 2: Rust GCP Crate Modularization, Zero-Copy Throughput, Embeddings, and Utils Cleanup
 
-- [ ] t05 — Split Spanner and BigQuery Rust submodules, verify max_commit_delay_ms, and unify staging stores (tasks/t05-gcp-submodules-and-commit-delay.md)
+- [x] t05 — Split Spanner and BigQuery Rust submodules, verify max_commit_delay_ms, and unify staging stores (tasks/t05-gcp-submodules-and-commit-delay.md)
 - [ ] t06 — Slice BigQuery append_arrow_stream zero-copy and trim GCP RPC allocations (tasks/t06-gcp-zero-copy-arrow-and-allocations.md)
 - [ ] t07 — Add Rust HTTP/2 VertexEmbedder transport, bounded EmbeddingBroker offload, and batch Oracle pushdown (tasks/t07-embeddings-http2-and-broker-offload.md)
 - [ ] t08 — Remove pure-Python utils fallbacks, clean SQLSpec aliases, and sync docs/OKF (tasks/t08-utils-cleanup-and-docs.md)

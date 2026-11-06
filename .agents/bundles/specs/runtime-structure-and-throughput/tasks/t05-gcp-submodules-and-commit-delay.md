@@ -2,7 +2,7 @@
 type: Task
 id: runtime-structure-and-throughput:t05
 title: Split Spanner and BigQuery Rust submodules, verify max_commit_delay_ms, and unify staging stores
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -18,7 +18,9 @@ files:
 - src/rs/vertebra-bigquery/src/arrow_ipc.rs
 - src/py/vertebra/_spanner.pyi
 - src/py/vertebra/db/_staging.py
+- src/py/vertebra/db/adapters/spanner/core.py
 - src/py/vertebra/db/adapters/spanner/driver.py
+- src/py/vertebra/db/adapters/bigquery/core.py
 - src/py/vertebra/db/adapters/bigquery/driver.py
 tests:
 - src/rs/vertebra-spanner/tests/spanner_wire_tests.rs
@@ -26,18 +28,18 @@ tests:
 - src/py/tests/unit/db/test_spanner.py
 - src/py/tests/unit/db/test_bigquery.py
 plan_revision: 1
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
-state_revision: 0
+plan_commit: "af319da17dec0148a18532952cb7ea2a91d1c9d7"
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
+last_verified_at: '2026-11-06T17:11:00Z'
 last_verified_commit: null
-verification_evidence: null
+verification_evidence: "cargo test -p vertebra-spanner -p vertebra-bigquery (40 passed, 1 ignored), make dev, mypy.stubtest vertebra._spanner vertebra._bigquery, pytest (301 passed), cargo clippy -D warnings, ruff check/format, mypy (419 files), review_setup.py validate"
 created_at: '2026-11-06T06:35:00Z'
-updated_at: '2026-11-06T06:35:00Z'
+updated_at: '2026-11-06T17:11:00Z'
 commit: null
 tags:
 - spanner
@@ -75,8 +77,8 @@ uv run --no-sync pytest src/py/tests/unit/db/test_spanner.py src/py/tests/unit/d
 
 ## Acceptance Criteria
 
-- [ ] R5: Both GCP Rust crates are cleanly split into `client.rs`, `codec.rs`, and `arrow_ipc.rs` with zero duplicated JSON-to-protobuf value converters, `max_commit_delay_ms` wire tests pass on `CommitRequest.max_commit_delay`, and staging store helpers are shared cleanly.
+- [x] R5: Both GCP Rust crates are cleanly split into `client.rs`, `codec.rs`, and `arrow_ipc.rs` with zero duplicated JSON-to-protobuf value converters, `max_commit_delay_ms` wire tests pass on `CommitRequest.max_commit_delay`, and staging store helpers are shared cleanly.
 
 ## Notes & Discoveries
 
-None.
+- `ObjectStoreStaging._resolve_backend_path` preserves the full URI when `store.store_uri` matches the target URI scheme and authority so `ObjectStoreBackend._strip_matching_uri_prefix` resolves relative paths against local/warehouse roots without duplicating prefixes.

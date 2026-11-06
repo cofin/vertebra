@@ -1,6 +1,8 @@
 //! `vertebra-bigquery` crate and `vertebra._bigquery` PyO3 extension module.
 
+pub mod arrow_ipc;
 pub mod client;
+pub mod codec;
 pub mod errors;
 
 use std::collections::HashMap;
@@ -12,9 +14,9 @@ use vertebra_db::py_async::{
     RustDbTaskAwaitable, block_on_db, construct_py_arrow_cursor, spawn_rust_db_task_with_attr,
 };
 
-use crate::client::{
-    BigQueryAppendResult, BigQueryArrowCompression, BigQueryCellValue,
-    BigQueryClient as NativeBigQueryClient, BigQueryClientConfig, BigQueryDryRunResult,
+use crate::client::{BigQueryClient as NativeBigQueryClient, BigQueryClientConfig};
+use crate::codec::{
+    BigQueryAppendResult, BigQueryArrowCompression, BigQueryCellValue, BigQueryDryRunResult,
     BigQueryFieldSchema, BigQueryQueryOptions, BigQueryQueryResult, parse_query_parameters_json,
 };
 use crate::errors::bigquery_error_to_py;

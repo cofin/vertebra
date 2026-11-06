@@ -1,6 +1,8 @@
 //! `vertebra-spanner` crate and `vertebra._spanner` PyO3 extension module.
 
+pub mod arrow_ipc;
 pub mod client;
+pub mod codec;
 pub mod errors;
 
 use std::collections::HashMap;
@@ -10,11 +12,11 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use vertebra_db::py_async::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task_with_attr};
 
-use crate::client::{
-    ProtobufValue, SpannerBatchDmlStatement, SpannerBatchWriteResult,
-    SpannerClient as NativeSpannerClient, SpannerClientConfig, SpannerCommitResult, SpannerDialect,
-    SpannerError, SpannerMutation, SpannerMutationGroup, SpannerQueryResult, SpannerStaleness,
-    SpannerStructField, SpannerValue, parse_spanner_parameters_json,
+use crate::client::{SpannerClient as NativeSpannerClient, SpannerClientConfig};
+use crate::codec::{
+    SpannerBatchWriteResult, SpannerCommitResult, SpannerDialect, SpannerQueryResult,
+    SpannerStaleness, SpannerStructField, SpannerValue, parse_batch_dml_statements_json,
+    parse_mutation_groups_json, parse_mutations_json, parse_spanner_parameters_json,
 };
 use crate::errors::spanner_error_to_py;
 
@@ -127,162 +129,6 @@ fn batch_write_results_to_py(
         list.append(dict)?;
     }
     Ok(list.into_any().unbind())
-}
-
-fn json_cell_to_protobuf_value(val: &serde_json::Value) -> ProtobufValue {
-    match val {
-        serde_json::Value::Null => ProtobufValue::Null,
-        serde_json::Value::Bool(b) => ProtobufValue::Bool(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                ProtobufValue::String(i.to_string())
-            } else {
-                ProtobufValue::Number(n.as_f64().unwrap_or(0.0))
-            }
-        }
-        serde_json::Value::String(s) => ProtobufValue::String(s.clone()),
-        serde_json::Value::Array(arr) => {
-            ProtobufValue::List(arr.iter().map(json_cell_to_protobuf_value).collect())
-        }
-        serde_json::Value::Object(map) => {
-            ProtobufValue::String(serde_json::Value::Object(map.clone()).to_string())
-        }
-    }
-}
-
-fn parse_mutation_value(item: &serde_json::Value) -> Result<SpannerMutation, SpannerError> {
-    let op = item
-        .get("op")
-        .and_then(|v| v.as_str())
-        .unwrap_or("insert_or_update")
-        .to_ascii_lowercase();
-    let table = item
-        .get("table")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    if table.is_empty() {
-        return Err(SpannerError::InvalidArgument(
-            "mutation 'table' must not be empty".to_string(),
-        ));
-    }
-    if op == "delete" {
-        let all = item
-            .get("all")
-            .or_else(|| item.get("all_rows"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let keys = item
-            .get("keys")
-            .and_then(|v| v.as_array())
-            .map(|rows| {
-                rows.iter()
-                    .map(|r| {
-                        if let Some(arr) = r.as_array() {
-                            arr.iter().map(json_cell_to_protobuf_value).collect()
-                        } else {
-                            vec![json_cell_to_protobuf_value(r)]
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        return Ok(SpannerMutation::delete(table, keys, all));
-    }
-
-    let columns: Vec<String> = item
-        .get("columns")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|c| c.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    let values: Vec<Vec<ProtobufValue>> = item
-        .get("values")
-        .and_then(|v| v.as_array())
-        .map(|rows| {
-            rows.iter()
-                .map(|r| {
-                    r.as_array()
-                        .map(|cells| cells.iter().map(json_cell_to_protobuf_value).collect())
-                        .unwrap_or_default()
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    match op.as_str() {
-        "insert" => Ok(SpannerMutation::insert(table, columns, values)),
-        "update" => Ok(SpannerMutation::update(table, columns, values)),
-        "replace" => Ok(SpannerMutation::replace(table, columns, values)),
-        _ => Ok(SpannerMutation::insert_or_update(table, columns, values)),
-    }
-}
-
-fn parse_mutations_json(raw: &str) -> Result<Vec<SpannerMutation>, SpannerError> {
-    let val: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|e| SpannerError::InvalidArgument(format!("invalid mutations_json: {e}")))?;
-    let Some(arr) = val.as_array() else {
-        return Err(SpannerError::InvalidArgument(
-            "mutations_json must be a JSON array".to_string(),
-        ));
-    };
-    arr.iter().map(parse_mutation_value).collect()
-}
-
-fn parse_mutation_groups_json(raw: &str) -> Result<Vec<SpannerMutationGroup>, SpannerError> {
-    let val: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|e| SpannerError::InvalidArgument(format!("invalid mutation_groups_json: {e}")))?;
-    let Some(arr) = val.as_array() else {
-        return Err(SpannerError::InvalidArgument(
-            "mutation_groups_json must be a JSON array".to_string(),
-        ));
-    };
-    let mut groups = Vec::with_capacity(arr.len());
-    for group_val in arr {
-        let muts_arr = if let Some(inner) = group_val.get("mutations").and_then(|v| v.as_array()) {
-            inner
-        } else if let Some(inner) = group_val.as_array() {
-            inner
-        } else {
-            return Err(SpannerError::InvalidArgument(
-                "each mutation group must be a list of mutations or {'mutations': [...]}"
-                    .to_string(),
-            ));
-        };
-        let mut mutations = Vec::with_capacity(muts_arr.len());
-        for m in muts_arr {
-            mutations.push(parse_mutation_value(m)?);
-        }
-        groups.push(SpannerMutationGroup::new(mutations));
-    }
-    Ok(groups)
-}
-
-fn parse_batch_dml_statements_json(
-    raw: &str,
-) -> Result<Vec<SpannerBatchDmlStatement>, SpannerError> {
-    let val: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|e| SpannerError::InvalidArgument(format!("invalid statements_json: {e}")))?;
-    let Some(arr) = val.as_array() else {
-        return Err(SpannerError::InvalidArgument(
-            "statements_json must be a JSON array".to_string(),
-        ));
-    };
-    let mut out = Vec::with_capacity(arr.len());
-    for item in arr {
-        let sql = item
-            .get("sql")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let params_raw = item.get("params").map(serde_json::Value::to_string);
-        let params = parse_spanner_parameters_json(params_raw.as_deref())?;
-        out.push(SpannerBatchDmlStatement { sql, params });
-    }
-    Ok(out)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -516,13 +362,19 @@ impl PySyncSpannerClient {
         .map_err(|e| spanner_error_to_py(py, e))
     }
 
-    #[pyo3(signature = (mutations_json, transaction_tag=None, exclude_txn_from_change_streams=false))]
+    #[pyo3(signature = (
+        mutations_json,
+        transaction_tag=None,
+        exclude_txn_from_change_streams=false,
+        max_commit_delay_ms=None
+    ))]
     fn apply_mutations(
         &self,
         py: Python<'_>,
         mutations_json: &str,
         transaction_tag: Option<String>,
         exclude_txn_from_change_streams: bool,
+        max_commit_delay_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         let mutations =
             parse_mutations_json(mutations_json).map_err(|e| spanner_error_to_py(py, e))?;
@@ -535,6 +387,7 @@ impl PySyncSpannerClient {
                             &mutations,
                             transaction_tag.as_deref(),
                             exclude_txn_from_change_streams,
+                            max_commit_delay_ms,
                         )
                         .await
                 })
@@ -822,13 +675,19 @@ impl PyAsyncSpannerClient {
         )
     }
 
-    #[pyo3(signature = (mutations_json, transaction_tag=None, exclude_txn_from_change_streams=false))]
+    #[pyo3(signature = (
+        mutations_json,
+        transaction_tag=None,
+        exclude_txn_from_change_streams=false,
+        max_commit_delay_ms=None
+    ))]
     fn apply_mutations(
         &self,
         py: Python<'_>,
         mutations_json: String,
         transaction_tag: Option<String>,
         exclude_txn_from_change_streams: bool,
+        max_commit_delay_ms: Option<u64>,
     ) -> PyResult<RustDbTaskAwaitable> {
         let mutations =
             parse_mutations_json(&mutations_json).map_err(|e| spanner_error_to_py(py, e))?;
@@ -841,6 +700,7 @@ impl PyAsyncSpannerClient {
                         &mutations,
                         transaction_tag.as_deref(),
                         exclude_txn_from_change_streams,
+                        max_commit_delay_ms,
                     )
                     .await
             },

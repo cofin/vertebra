@@ -46,13 +46,14 @@ from vertebra.utils.serializers import decode_json, encode_json
 class FakeSpannerClient:
     """Test-only in-memory Spanner wire client double for unit testing `SyncSpannerDriver` and `AsyncSpannerDriver`."""
 
-    __slots__ = ("_conn", "_lock", "ddl_history")
+    __slots__ = ("_conn", "_lock", "ddl_history", "last_max_commit_delay_ms")
 
     def __init__(self) -> None:
         self._conn = sqlite3.connect(":memory:", check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self.ddl_history: list[str] = []
+        self.last_max_commit_delay_ms: int | None = None
 
     def query(
         self,
@@ -127,9 +128,11 @@ class FakeSpannerClient:
         mutations_json: str,
         transaction_tag: str | None = None,
         exclude_txn_from_change_streams: bool = False,
+        max_commit_delay_ms: int | None = None,
     ) -> dict[str, Any]:
         """Apply mutations against the test double."""
         _ = (transaction_tag, exclude_txn_from_change_streams)
+        self.last_max_commit_delay_ms = max_commit_delay_ms
         decoded = decode_json(mutations_json) if mutations_json else []
         with self._lock:
             count = 0
@@ -554,9 +557,15 @@ class FakeAsyncSpannerClient:
         mutations_json: str,
         transaction_tag: str | None = None,
         exclude_txn_from_change_streams: bool = False,
+        max_commit_delay_ms: int | None = None,
     ) -> dict[str, Any]:
         """Apply mutations asynchronously against the backing sync client."""
-        return self._sync_client.apply_mutations(mutations_json, transaction_tag, exclude_txn_from_change_streams)
+        return self._sync_client.apply_mutations(
+            mutations_json,
+            transaction_tag,
+            exclude_txn_from_change_streams,
+            max_commit_delay_ms,
+        )
 
     async def batch_write(
         self,
@@ -1075,3 +1084,91 @@ async def test_spanner_commit_rejects_mixed_buffered_dml_and_mutations_atomicall
         await async_driver.commit()
     assert await async_driver.select("SELECT id, name FROM items") == []
     await async_driver.close()
+
+
+@pytest.mark.anyio
+async def test_spanner_max_commit_delay_propagates_to_clients_and_drivers() -> None:
+    """Verify max_commit_delay_ms configures Rust clients and forwards through sync and async drivers."""
+    cfg = SpannerConfig(
+        project_id="p",
+        instance_id="i",
+        database_id="d",
+        endpoint="http://127.0.0.1:9010",
+        max_commit_delay_ms=25,
+    )
+    sync_rust = SpannerCore.create_sync_rust_client(cfg)
+    async_rust = SpannerCore.create_async_rust_client(cfg)
+    assert sync_rust.max_commit_delay_ms == 25
+    assert async_rust.max_commit_delay_ms == 25
+
+    sync_fake = FakeSpannerClient()
+    sync_fake.update_ddl(["CREATE TABLE items (id INT64 NOT NULL, name STRING(64) NOT NULL) PRIMARY KEY (id)"])
+    sync_driver = SyncSpannerDriver(cfg, client=sync_fake)
+    sync_driver.apply_mutations(
+        [Mutation.insert_or_update("items", ("id", "name"), [(1, "a")])],
+        max_commit_delay_ms=40,
+    )
+    assert sync_fake.last_max_commit_delay_ms == 40
+
+    def _sync_tx(tx: SyncSpannerTransaction) -> None:
+        tx.insert_or_update("items", ("id", "name"), [(2, "b")])
+
+    sync_driver.run_in_transaction(_sync_tx, max_commit_delay_ms=35)
+    assert sync_fake.last_max_commit_delay_ms == 35
+    sync_driver.close()
+
+    async_fake_backing = FakeSpannerClient()
+    async_fake_backing.update_ddl(["CREATE TABLE items (id INT64 NOT NULL, name STRING(64) NOT NULL) PRIMARY KEY (id)"])
+    async_driver = AsyncSpannerDriver(cfg, client=FakeAsyncSpannerClient(async_fake_backing))
+    await async_driver.apply_mutations(
+        [Mutation.insert_or_update("items", ("id", "name"), [(1, "a")])],
+        max_commit_delay_ms=45,
+    )
+    assert async_fake_backing.last_max_commit_delay_ms == 45
+
+    async def _async_tx(tx: Any) -> None:
+        tx.insert_or_update("items", ("id", "name"), [(2, "b")])
+
+    await async_driver.run_in_transaction(_async_tx, max_commit_delay_ms=50)
+    assert async_fake_backing.last_max_commit_delay_ms == 50
+    await async_driver.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(
+    "bad_uri",
+    [
+        "exports/metrics.parquet",
+        "memory://exports/metrics.parquet",
+        "gs://",
+    ],
+)
+async def test_spanner_staging_rejects_missing_or_ephemeral_memory_store(
+    asynchronous: bool,
+    bad_uri: str,
+) -> None:
+    """Spanner ObjectStore export/load rejects relative, memory://, or malformed URIs when store is None."""
+    backing = FakeSpannerClient()
+    backing.update_ddl(
+        ["CREATE TABLE metrics (metric_id INT64 NOT NULL, label STRING(64) NOT NULL) PRIMARY KEY (metric_id)"]
+    )
+    backing.execute_dml("INSERT INTO metrics (metric_id, label) VALUES (1, 'cpu')")
+    if asynchronous:
+        driver = AsyncSpannerDriver(SpannerConfig(), client=FakeAsyncSpannerClient(backing))
+        try:
+            with pytest.raises(ImproperConfigurationError):
+                await driver.export_to_object_store("SELECT metric_id, label FROM metrics", None, bad_uri)
+            with pytest.raises(ImproperConfigurationError):
+                await driver.load_from_object_store("metrics", None, bad_uri)
+        finally:
+            await driver.close()
+    else:
+        sync_driver = SyncSpannerDriver(SpannerConfig(), client=backing)
+        try:
+            with pytest.raises(ImproperConfigurationError):
+                sync_driver.export_to_object_store("SELECT metric_id, label FROM metrics", None, bad_uri)
+            with pytest.raises(ImproperConfigurationError):
+                sync_driver.load_from_object_store("metrics", None, bad_uri)
+        finally:
+            sync_driver.close()
