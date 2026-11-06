@@ -1518,81 +1518,10 @@ impl StaticEmbedderCore {
 // Compact Protobuf v3 + 5-Byte gRPC LPM Wire Codec for Google Embeddings
 // ============================================================================
 
-#[inline]
-fn put_varint(buf: &mut Vec<u8>, mut val: u64) {
-    while val >= 0x80 {
-        buf.push(((val as u8) & 0x7F) | 0x80);
-        val >>= 7;
-    }
-    buf.push(val as u8);
-}
-
-#[inline]
-fn put_bytes_field(buf: &mut Vec<u8>, field_number: u32, payload: &[u8]) {
-    let tag = (field_number << 3) | 2;
-    put_varint(buf, tag as u64);
-    put_varint(buf, payload.len() as u64);
-    buf.extend_from_slice(payload);
-}
-
-#[inline]
-fn put_varint_field(buf: &mut Vec<u8>, field_number: u32, val: u64) {
-    let tag = field_number << 3;
-    put_varint(buf, tag as u64);
-    put_varint(buf, val);
-}
-
-#[inline]
-fn read_varint(data: &[u8], pos: &mut usize) -> Result<u64, String> {
-    let mut result = 0u64;
-    let mut shift = 0u32;
-    while *pos < data.len() {
-        let byte = data[*pos];
-        *pos += 1;
-        result |= ((byte & 0x7F) as u64) << shift;
-        if (byte & 0x80) == 0 {
-            return Ok(result);
-        }
-        shift += 7;
-        if shift >= 64 {
-            return Err("protobuf varint overflow".to_string());
-        }
-    }
-    Err("unexpected EOF while reading protobuf varint".to_string())
-}
-
-#[inline]
-fn skip_protobuf_field(data: &[u8], pos: &mut usize, wire_type: u8) -> Result<(), String> {
-    match wire_type {
-        0 => {
-            let _ = read_varint(data, pos)?;
-            Ok(())
-        }
-        1 => {
-            if *pos + 8 > data.len() {
-                return Err("unexpected EOF skipping 64-bit protobuf field".to_string());
-            }
-            *pos += 8;
-            Ok(())
-        }
-        2 => {
-            let len = read_varint(data, pos)? as usize;
-            if *pos + len > data.len() {
-                return Err("unexpected EOF skipping length-delimited protobuf field".to_string());
-            }
-            *pos += len;
-            Ok(())
-        }
-        5 => {
-            if *pos + 4 > data.len() {
-                return Err("unexpected EOF skipping 32-bit protobuf field".to_string());
-            }
-            *pos += 4;
-            Ok(())
-        }
-        other => Err(format!("unsupported protobuf wire_type {other}")),
-    }
-}
+use crate::proto::{
+    WIRE_TYPE_LENGTH_DELIMITED, put_bytes_field, put_varint_field, read_length_delimited, read_tag,
+    skip_field,
+};
 
 /// Encode a `BatchEmbedContentsRequest` wrapped in a 5-byte gRPC Length-Prefixed Message frame.
 pub fn encode_batch_embed_grpc_request(
@@ -1696,35 +1625,28 @@ pub fn decode_batch_embed_grpc_response_into_slab(
     let mut raw_slices: Vec<&[u8]> = Vec::new();
     let mut pos = 0usize;
     while pos < payload.len() {
-        let tag = read_varint(payload, &mut pos)?;
-        let field_number = (tag >> 3) as u32;
-        let wire_type = (tag & 0x07) as u8;
-        if field_number == 1 && wire_type == 2 {
-            let emb_len = read_varint(payload, &mut pos)? as usize;
-            if pos + emb_len > payload.len() {
-                return Err("truncated ContentEmbedding message in gRPC response".to_string());
-            }
-            let emb_msg = &payload[pos..pos + emb_len];
-            pos += emb_len;
+        let (field_number, wire_type) = read_tag(payload, &mut pos)?;
+        if field_number == 1 && wire_type == WIRE_TYPE_LENGTH_DELIMITED {
+            let emb_msg = read_length_delimited(payload, &mut pos)
+                .map_err(|_| "truncated ContentEmbedding message in gRPC response".to_string())?;
 
             let mut epos = 0usize;
             while epos < emb_msg.len() {
-                let etag = read_varint(emb_msg, &mut epos)?;
-                let efield = (etag >> 3) as u32;
-                let ewire = (etag & 0x07) as u8;
-                if efield == 1 && ewire == 2 {
-                    let byte_len = read_varint(emb_msg, &mut epos)? as usize;
-                    if epos + byte_len > emb_msg.len() || !byte_len.is_multiple_of(4) {
+                let (efield, ewire) = read_tag(emb_msg, &mut epos)?;
+                if efield == 1 && ewire == WIRE_TYPE_LENGTH_DELIMITED {
+                    let slice = read_length_delimited(emb_msg, &mut epos).map_err(|_| {
+                        "invalid packed float slice in ContentEmbedding".to_string()
+                    })?;
+                    if !slice.len().is_multiple_of(4) {
                         return Err("invalid packed float slice in ContentEmbedding".to_string());
                     }
-                    raw_slices.push(&emb_msg[epos..epos + byte_len]);
-                    epos += byte_len;
+                    raw_slices.push(slice);
                 } else {
-                    skip_protobuf_field(emb_msg, &mut epos, ewire)?;
+                    skip_field(emb_msg, &mut epos, ewire)?;
                 }
             }
         } else {
-            skip_protobuf_field(payload, &mut pos, wire_type)?;
+            skip_field(payload, &mut pos, wire_type)?;
         }
     }
 

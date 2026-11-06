@@ -10,7 +10,7 @@ use vertebra_core::gcp_auth::{
     current_unix_ms,
 };
 
-use crate::completion::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task};
+use crate::async_bridge::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task};
 use crate::errors::auth_error_to_py;
 
 /// Immutable snapshot of a cached Google Cloud OAuth2 bearer token.

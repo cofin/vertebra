@@ -11,10 +11,13 @@ from vertebra._vertebra import (
     ArrowCursor,
     VectorBatchView,
     VectorView,
+    decode_gemini_embed_grpc_frame_to_batch,
     decode_oracle_vector_f32,
     decode_pgvector_bit,
     decode_pgvector_f16,
     decode_pgvector_f32,
+    encode_gemini_embed_grpc_frame,
+    encode_gemini_embed_grpc_response_frame,
     encode_oracle_vector_f32,
     encode_oracle_vector_i8,
     encode_pgvector_bit,
@@ -127,3 +130,27 @@ def test_sqlalchemy_vector_bind_and_result_pushdown() -> None:
     assert col_type.process_result_value(sqlite_bound, dialect_name="sqlite") == pytest.approx(
         [0.6, 0.8, 0.0, 0.0], rel=1e-6
     )
+
+
+def test_gemini_grpc_proto_frame_roundtrip_and_malformed_varint_rejection() -> None:
+    """Verify vertebra_core::proto varint/tag helpers roundtrip gRPC LPM embedding frames and reject overflow."""
+    req_frame = encode_gemini_embed_grpc_frame(
+        "gemini-embedding-001",
+        ["alpha", "beta"],
+        task="query",
+        titles=[None, "Doc Beta"],
+        output_dimensionality=256,
+    )
+    assert req_frame[0] == 0
+    body_len = int.from_bytes(req_frame[1:5], "big")
+    assert len(req_frame) == 5 + body_len
+
+    src_batch = VectorBatchView.from_f32_rows([[3.0, 4.0, 0.0, 0.0], [0.0, 0.0, 5.0, 12.0]], normalize=False)
+    resp_frame = encode_gemini_embed_grpc_response_frame(src_batch)
+    decoded = decode_gemini_embed_grpc_frame_to_batch(resp_frame, dimensions=2, normalize=True)
+    assert len(decoded) == 2
+    assert decoded[0].to_list() == pytest.approx([0.6, 0.8], rel=1e-5)
+
+    overflow_varint = bytes([0xFF] * 9 + [0x02])
+    with pytest.raises(ValueError, match="overflow"):
+        decode_gemini_embed_grpc_frame_to_batch(overflow_varint)

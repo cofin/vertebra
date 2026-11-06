@@ -2,7 +2,7 @@
 type: Task
 id: runtime-structure-and-throughput:t04
 title: Add vertebra-core protobuf wire helpers and rename vertebra-py async_bridge
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -12,25 +12,28 @@ files:
 - src/rs/vertebra-core/src/vector.rs
 - src/rs/vertebra-db/src/dialer.rs
 - src/rs/vertebra-py/src/lib.rs
+- src/rs/vertebra-py/src/gcp_auth.rs
 - src/rs/vertebra-py/src/vector.rs
 - src/rs/vertebra-py/src/async_bridge.rs
 - src/rs/vertebra-py/src/completion.rs
+- .agents/bundles/knowledge/patterns/rust/ffi-and-gil-discipline.md
+- .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
 tests:
 - src/py/tests/unit/db/test_vector_wire_codecs.py
 - src/py/tests/unit/ffi/test_ffi.py
 plan_revision: 1
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
-state_revision: 0
-claimed_by: null
-claimed_at: null
+plan_commit: "af319da17dec0148a18532952cb7ea2a91d1c9d7"
+state_revision: 2
+claimed_by: agent
+claimed_at: '2026-11-06T16:00:00Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
+last_verified_at: '2026-11-06T16:11:30Z'
 last_verified_commit: null
-verification_evidence: null
+verification_evidence: "cargo test -p vertebra-core -p vertebra-db -p vertebra-py --features gcp (226 passed), make rs-test, make dev, mypy.stubtest vertebra._vertebra, pytest (955 passed, 1 skipped), cargo clippy -D warnings, review_setup.py validate"
 created_at: '2026-11-06T06:35:00Z'
-updated_at: '2026-11-06T06:35:00Z'
+updated_at: '2026-11-06T16:11:30Z'
 commit: null
 tags:
 - rust
@@ -68,7 +71,7 @@ uv run --no-sync pytest src/py/tests/unit/db/test_vector_wire_codecs.py src/py/t
 
 ## Acceptance Criteria
 
-- [ ] R4: `vertebra_core::proto` owns shared varint/wire codecs with zero duplicate implementations in `dialer.rs` or `vector.rs`, and `vertebra-py/src/async_bridge.rs` replaces `completion.rs` cleanly.
+- [x] R4: `vertebra_core::proto` owns shared varint/wire codecs with zero duplicate implementations in `dialer.rs` or `vector.rs`, and `vertebra-py/src/async_bridge.rs` replaces `completion.rs` cleanly.
 
 ## Notes & Discoveries
 
