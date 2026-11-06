@@ -16,6 +16,7 @@ from vertebra.agent.mcp.models import MCPConfig, McpHttpRequest
 from vertebra.agent.mcp.registry import MCPRegistry
 from vertebra.agent.mcp.routes import build_well_known_mcp_document
 from vertebra.agent.mcp.service import MCPService
+from vertebra.agent.mcp.webmcp import build_webmcp_manifest
 from vertebra.agent.runtime import AgentRuntime
 from vertebra.agent.telemetry import AgentTelemetryRecorder
 from vertebra.framework._app import App
@@ -88,6 +89,13 @@ class AgentPlugin:
             @app.get(srv.config.well_known_path)
             async def _mcp_well_known() -> dict[str, Any]:
                 return build_well_known_mcp_document(srv.config, srv.registry)
+
+            if srv.config.webmcp is not None and srv.config.webmcp.enabled:
+                webmcp_cfg = srv.config.webmcp
+
+                @app.get(webmcp_cfg.manifest_path)
+                async def _webmcp_well_known() -> dict[str, Any]:
+                    return cast(dict[str, Any], msgspec.to_builtins(build_webmcp_manifest(srv.registry, webmcp_cfg)))
 
             @app.post(srv.config.path)
             async def _mcp_endpoint(
@@ -290,6 +298,24 @@ class AgentPlugin:
                     return cast(dict[str, Any], decode_json(mcp_resp.body) if mcp_resp.body else {})
 
                 route_handlers.append(post_fn(srv.config.path, include_in_schema=False)(_litestar_mcp_endpoint))
+
+            if (
+                srv.config.webmcp is not None
+                and srv.config.webmcp.enabled
+                and not self._has_route_path(route_handlers, srv.config.webmcp.manifest_path)
+            ):
+                webmcp_cfg = srv.config.webmcp
+
+                async def _litestar_webmcp_well_known() -> dict[str, Any]:
+                    return cast(dict[str, Any], msgspec.to_builtins(build_webmcp_manifest(srv.registry, webmcp_cfg)))
+
+                route_handlers.append(
+                    get_fn(
+                        webmcp_cfg.manifest_path,
+                        include_in_schema=False,
+                        opt={"exclude_from_auth": True},
+                    )(_litestar_webmcp_well_known)
+                )
 
         a2a_srv = self.a2a_service
         if a2a_srv is not None:

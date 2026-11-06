@@ -2,7 +2,7 @@
 type: Task
 id: mcp-webmcp-core:t06
 title: Project WebMCP manifests strictly from ToolSpec exposure metadata
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -15,17 +15,17 @@ tests:
 - src/py/tests/unit/agent/test_mcp_conformance.py
 plan_revision: 2
 plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: executor
+claimed_at: '2026-11-06T22:34:00Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-06T22:38:00Z'
+last_verified_commit: "10143439aba293218a7148a11a2529c877dfe2f1"
+verification_evidence: "18 passed in test_mcp_conformance.py; ruff, mypy, scan_public_docstrings.py passed."
 created_at: '2026-11-06T06:36:00Z'
-updated_at: '2026-11-06T06:36:00Z'
+updated_at: '2026-11-06T22:38:00Z'
 commit: null
 tags:
 - webmcp
@@ -61,7 +61,7 @@ uv run --no-sync mypy src/py/vertebra/agent/mcp/webmcp.py src/py/vertebra/agent/
 
 ## Acceptance Criteria
 
-- [ ] R7: `/.well-known/webmcp.json` includes only tools with `"webmcp" in spec.exposure` and emits `title`, `outputSchema`, and `consequentialHint`.
+- [x] R7: `/.well-known/webmcp.json` includes only tools with `"webmcp" in spec.exposure` and emits `title`, `outputSchema`, and `consequentialHint`.
 
 ## Notes & Discoveries
 

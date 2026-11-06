@@ -9,11 +9,11 @@ research:
 - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
 plan_commit: "55a6002aabb2d4e2a8bdadd0f7014ea643217ffe"
-state_revision: 6
-current_task: t05
-last_verified_checkpoint: "23e7e9266d6d2cc6c077e305fb8ef071e80b9a95"
+state_revision: 7
+current_task: t06
+last_verified_checkpoint: "10143439aba293218a7148a11a2529c877dfe2f1"
 created_at: '2026-11-03T03:30:00Z'
-updated_at: '2026-11-06T22:18:00Z'
+updated_at: '2026-11-06T22:34:00Z'
 tags:
 - mcp
 - webmcp
@@ -108,8 +108,8 @@ Read [MCP and A2A protocol harness](../../knowledge/domains/agent/mcp-and-a2a-pr
 ### Phase 2: Framework Adapters, `litestar-mcp` Delegation, WebMCP Projection, and `@vertebra/client` Bridge
 
 - [x] [23e7e92] t04 — Unify Starlette, FastAPI, Flask, and Django mounts onto shared ASGI and WSGI MCP apps (tasks/t04-shared-asgi-wsgi-mcp-adapters.md)
-- [~] t05 — Wire native AgentPlugin to MCPCore, delegate Litestar to litestar-mcp, and unify well-known discovery (tasks/t05-agent-plugin-and-litestar-mcp.md)
-- [ ] t06 — Project WebMCP manifests strictly from ToolSpec exposure metadata (tasks/t06-webmcp-manifest-projection.md)
+- [x] [1014343] t05 — Wire native AgentPlugin to MCPCore, delegate Litestar to litestar-mcp, and unify well-known discovery (tasks/t05-agent-plugin-and-litestar-mcp.md)
+- [~] t06 — Project WebMCP manifests strictly from ToolSpec exposure metadata (tasks/t06-webmcp-manifest-projection.md)
 - [ ] t07 — Upgrade TypeScript webmcp.ts bridge to document.modelContext.registerTool with signal disposal (tasks/t07-typescript-webmcp-bridge.md)
 - [ ] t08 — Update TypeScript McpClient SSE/_meta handling, derive _CLIENT_SUBPATHS from package.json, and sync docs/OKF (tasks/t08-mcp-client-import-map-and-docs.md)
 

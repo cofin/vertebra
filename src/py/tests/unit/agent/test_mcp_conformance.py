@@ -39,6 +39,7 @@ from vertebra.agent.mcp import (
     encode_mcp_header_value,
     mcp_tool,
     prompt,
+    render_webmcp_manifest_json,
     resource,
 )
 from vertebra.agent.mcp.service import CONFIRMATION_REQUIRED, CONFIRMATION_TOKEN_META_KEY
@@ -832,3 +833,74 @@ async def test_native_app_agent_plugin_routes_through_mcp_core_and_unifies_well_
     dj_wk_doc = decode_json(bytes(dj_static["/.well-known/mcp.json"].body))
     assert set(dj_wk_doc.keys()) == expected_keys
     assert dj_wk_doc["protocolVersion"] == "2026-07-28"
+
+
+@pytest.mark.anyio
+async def test_webmcp_manifest_projects_strictly_from_toolspec_exposure() -> None:
+    """WebMCP manifest projects strictly from ToolSpec exposure ('webmcp'), emitting title, outputSchema, and consequentialHint."""
+    from collections.abc import Mapping
+
+    from vertebra.agent.mcp import ToolRegistry
+    from vertebra.framework._app import App
+
+    class _DbToolProvider:
+        def operations(self) -> Mapping[str, Any]:
+            return {"run_sql": self.run_sql}
+
+        def confirmation_reason(self, operation_name: str, arguments: Mapping[str, Any]) -> str | None:
+            return None
+
+        async def run_sql(self, sql: str) -> list[dict[str, Any]]:
+            return [{"sql": sql}]
+
+    reg = ToolRegistry()
+    reg.register_provider(_DbToolProvider())
+
+    @tool(name="server_only_tool", description="Server-only tool")
+    def server_only_tool(x: int) -> int:
+        return x
+
+    @tool(
+        name="browser_delete_item",
+        title="Delete Item",
+        description="Delete an item from the browser context",
+        webmcp=True,
+        requires_confirmation=True,
+        annotations={"readOnlyHint": False},
+    )
+    def browser_delete_item(item_id: str) -> dict[str, bool]:
+        return {"deleted": True}
+
+    reg.register_tool(server_only_tool)
+    reg.register_tool(browser_delete_item)
+
+    manifest = build_webmcp_manifest(reg, WebMCPConfig())
+    assert [t.name for t in manifest.tools] == ["browser_delete_item"]
+    descriptor = manifest.tools[0]
+    assert descriptor.title == "Delete Item"
+    assert descriptor.output_schema is not None
+    assert descriptor.output_schema.get("type") == "object"
+    assert descriptor.requires_confirmation is True
+    assert descriptor.annotations.get("consequentialHint") is True
+
+    raw_json = decode_json(render_webmcp_manifest_json(reg, WebMCPConfig()))
+    tool_json = raw_json["tools"][0]
+    assert tool_json["title"] == "Delete Item"
+    assert tool_json["outputSchema"]["type"] == "object"
+    assert tool_json["annotations"]["consequentialHint"] is True
+
+    plugin = AgentPlugin(
+        AgentPluginConfig(
+            mcp=MCPConfig(server_name="webmcp-host", webmcp=WebMCPConfig(enabled=True)),
+        )
+    )
+    plugin.mcp_registry.register_tool(server_only_tool)
+    plugin.mcp_registry.register_tool(browser_delete_item)
+    app = App()
+    plugin.mount_native(app)
+    route_map = {(r.method.upper(), r.path): r.handler for r in app.routes}
+    assert ("GET", "/.well-known/webmcp.json") in route_map
+    webmcp_doc = await route_map[("GET", "/.well-known/webmcp.json")]()
+    assert [t["name"] for t in webmcp_doc["tools"]] == ["browser_delete_item"]
+    assert webmcp_doc["tools"][0]["title"] == "Delete Item"
+    assert webmcp_doc["tools"][0]["annotations"]["consequentialHint"] is True
