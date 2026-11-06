@@ -736,3 +736,99 @@ async def test_guarded_skill_controller_and_agent_plugin_preserve_webmcp_and_gua
 
     authed_ctx = AgentContext(identity=CallerIdentity(user_id="alice", tenant_id="t1"))
     assert await ping_tool.invoke({"target": "edge"}, context=authed_ctx) == "pong:edge"
+
+
+@pytest.mark.anyio
+async def test_native_app_agent_plugin_routes_through_mcp_core_and_unifies_well_known() -> None:
+    """Native App + AgentPlugin enforces MCPCore 2026-07-28 HTTP semantics and shares canonical /.well-known/mcp.json across all mounts."""
+    from types import SimpleNamespace
+
+    from vertebra.extensions.django.mcp import attach_mcp_routes as attach_django_mcp
+    from vertebra.extensions.flask.mcp import attach_mcp_routes as attach_flask_mcp
+    from vertebra.extensions.starlette.mcp import mount_mcp_routes as mount_starlette_mcp
+    from vertebra.framework._app import App
+
+    plugin = AgentPlugin(
+        AgentPluginConfig(
+            mcp=MCPConfig(server_name="native-mcp", server_version="2.1.0"),
+        )
+    )
+    assert plugin.mcp_service is not None
+
+    @tool(name="echo_val", description="Echo value")
+    def echo_val(val: str) -> str:
+        return val
+
+    plugin.mcp_registry.register_tool(echo_val)
+
+    app = App()
+    plugin.mount_native(app)
+    route_map = {(r.method.upper(), r.path): r.handler for r in app.routes}
+
+    post_mcp = route_map[("POST", "/mcp")]
+    get_mcp = route_map[("GET", "/mcp")]
+    get_wk = route_map[("GET", "/.well-known/mcp.json")]
+
+    status_disc, headers_disc, body_disc = await post_mcp(
+        body=b'{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}',
+        headers={"content-type": "application/json"},
+    )
+    assert status_disc == 200
+    assert "ETag" in headers_disc
+    assert decode_json(body_disc)["result"]["protocolVersion"] == "2026-07-28"
+
+    status_origin, _, _ = await post_mcp(
+        body=b'{"jsonrpc":"2.0","id":2,"method":"tools/list"}',
+        headers={"Origin": "https://evil.example.com", "Host": "api.example.com"},
+    )
+    assert status_origin == 403
+
+    status_get, headers_get, _ = await get_mcp(headers={})
+    assert status_get == 405
+    assert "POST" in headers_get.get("Allow", "")
+
+    status_notif, _, body_notif = await post_mcp(
+        body=b'{"jsonrpc":"2.0","method":"notifications/cancelled"}',
+        headers={"content-type": "application/json"},
+    )
+    assert status_notif == 202
+    assert body_notif == b""
+
+    native_wk = await get_wk()
+    expected_keys = {"protocolVersion", "mcp_version", "server", "serverInfo", "endpoint", "tools"}
+    assert set(native_wk.keys()) == expected_keys
+    assert native_wk["protocolVersion"] == "2026-07-28"
+    assert native_wk["tools"] == ["echo_val"]
+
+    st_app = SimpleNamespace(routes=[], state=SimpleNamespace())
+    mount_starlette_mcp(
+        st_app,
+        registry=plugin.mcp_registry,
+        config=MCPConfig(server_name="st-mcp", server_version="1.0.0"),
+    )
+    st_wk_route = next(r for r in st_app.routes if r.path == "/.well-known/mcp.json")
+    st_wk_resp = await st_wk_route.endpoint(SimpleNamespace())
+    st_wk_doc = decode_json(st_wk_resp.body if hasattr(st_wk_resp, "body") else st_wk_resp)
+    assert set(st_wk_doc.keys()) == expected_keys
+    assert st_wk_doc["protocolVersion"] == "2026-07-28"
+
+    flask_views: dict[str, Any] = {}
+
+    class _DummyFlask:
+        view_functions = flask_views
+        extensions: dict[str, Any] = {}
+
+        def add_url_rule(self, _rule: str, endpoint: str, view_func: Any, methods: list[str] | None = None) -> None:
+            flask_views[endpoint] = view_func
+
+    attach_flask_mcp(_DummyFlask(), config=MCPConfig(server_name="fl-mcp"))
+    fl_wk_bytes, fl_wk_status, _ = flask_views["vertebra_mcp_well_known"]()
+    assert fl_wk_status == 200
+    fl_wk_doc = decode_json(fl_wk_bytes)
+    assert set(fl_wk_doc.keys()) == expected_keys
+    assert fl_wk_doc["protocolVersion"] == "2026-07-28"
+
+    _, dj_static = attach_django_mcp([], config=MCPConfig(server_name="dj-mcp"))
+    dj_wk_doc = decode_json(bytes(dj_static["/.well-known/mcp.json"].body))
+    assert set(dj_wk_doc.keys()) == expected_keys
+    assert dj_wk_doc["protocolVersion"] == "2026-07-28"

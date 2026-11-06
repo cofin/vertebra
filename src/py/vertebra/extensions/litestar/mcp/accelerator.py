@@ -31,3 +31,8 @@ class JSONRPCFrameAccelerator:
         """Return True if the JSON-RPC payload is a notification without an id."""
         frame_kind, _, msg_id = classify_jsonrpc_frame(payload)
         return frame_kind == 0 or msg_id is None
+
+    @staticmethod
+    def is_batch(payload: bytes) -> bool:
+        """Return True if the JSON-RPC payload is a batch array rejected in MCP 2026-07-28."""
+        return payload.lstrip().startswith(b"[")

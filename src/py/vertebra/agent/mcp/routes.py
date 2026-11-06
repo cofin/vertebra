@@ -5,16 +5,18 @@ request validation, Origin checking, ETag 304 Not Modified caching, and JSON-RPC
 dispatch to MCPCore.
 """
 
-from collections.abc import AsyncIterable, Callable, Mapping
+from collections.abc import AsyncIterable, Callable, Iterable, Mapping
 from typing import Any
 
 from vertebra._vertebra import Request, Response, WsgiEnviron
 from vertebra.agent.core.context import AgentContext
 from vertebra.agent.mcp.client import MCP_NAME_FIELDS, decode_mcp_header_value
-from vertebra.agent.mcp.models import MCPConfig, McpHttpRequest, McpHttpResponse
+from vertebra.agent.mcp.models import MCP_PROTOCOL_VERSION, MCPConfig, McpHttpRequest, McpHttpResponse
+from vertebra.agent.mcp.registry import ToolRegistry
 from vertebra.agent.mcp.service import CACHEABLE_METHODS, MCPCore
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.portal import Portal, PortalProvider
+from vertebra.utils.serializers import encode_json_bytes
 
 __all__ = [
     "CACHEABLE_METHODS",
@@ -22,8 +24,48 @@ __all__ = [
     "AsgiMcpApp",
     "MCPHttpHandler",
     "WsgiMcpApp",
+    "build_well_known_mcp_document",
     "decode_mcp_header_value",
+    "render_well_known_mcp_json",
 ]
+
+
+def build_well_known_mcp_document(
+    config: MCPConfig,
+    registry: ToolRegistry | None = None,
+    *,
+    tool_names: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    """Build the canonical ``/.well-known/mcp.json`` discovery document for MCP 2026-07-28."""
+    if tool_names is not None:
+        resolved_tools = list(dict.fromkeys(str(name) for name in tool_names))
+    elif registry is not None:
+        resolved_tools = [spec.name for spec in registry.list_specs(exposure="mcp")]
+    else:
+        resolved_tools = []
+    return {
+        "protocolVersion": MCP_PROTOCOL_VERSION,
+        "mcp_version": MCP_PROTOCOL_VERSION,
+        "server": config.server_name,
+        "serverInfo": {
+            "name": config.server_name,
+            "version": config.server_version,
+        },
+        "endpoint": config.path,
+        "tools": resolved_tools,
+    }
+
+
+def render_well_known_mcp_json(
+    config: MCPConfig,
+    registry: ToolRegistry | None = None,
+    *,
+    tool_names: Iterable[str] | None = None,
+) -> bytes:
+    """Serialize the canonical ``/.well-known/mcp.json`` discovery document to UTF-8 JSON bytes."""
+    return encode_json_bytes(
+        build_well_known_mcp_document(config, registry, tool_names=tool_names)
+    )
 
 
 class MCPHttpHandler:

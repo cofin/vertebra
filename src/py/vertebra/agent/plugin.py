@@ -12,14 +12,15 @@ import msgspec
 from vertebra.agent.a2a.service import A2AConfig, A2AService
 from vertebra.agent.controller import AgentChatController
 from vertebra.agent.mcp.controllers import PromptController, SkillController
-from vertebra.agent.mcp.models import MCPConfig
+from vertebra.agent.mcp.models import MCPConfig, McpHttpRequest
 from vertebra.agent.mcp.registry import MCPRegistry
+from vertebra.agent.mcp.routes import build_well_known_mcp_document
 from vertebra.agent.mcp.service import MCPService
 from vertebra.agent.runtime import AgentRuntime
 from vertebra.agent.telemetry import AgentTelemetryRecorder
 from vertebra.framework._app import App
 from vertebra.utils.module_loader import import_optional
-from vertebra.utils.serializers import decode_json, encode_json_bytes
+from vertebra.utils.serializers import decode_json
 
 
 class AgentPluginConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -64,6 +65,7 @@ class AgentPlugin:
             A2AService(
                 config=self.config.a2a,
                 telemetry=recorder,
+                tool_registry=self.mcp_registry,
             )
             if self.config.a2a is not None
             else None
@@ -77,31 +79,51 @@ class AgentPlugin:
 
     def mount_native(self, app: App) -> None:
         """Mount agent routes and discovery endpoints on native vertebra App."""
+        self.mcp_registry.discover_app_routes(app)
         prefix = self.config.agent_base_path.rstrip("/")
 
         if self.mcp_service is not None:
             srv = self.mcp_service
 
-            @app.get("/.well-known/mcp.json")
+            @app.get(srv.config.well_known_path)
             async def _mcp_well_known() -> dict[str, Any]:
-                tools = [t.name for t in srv.registry.list_tools()]
-                return {
-                    "mcp_version": "2026-07-28",
-                    "server": srv.config.server_name,
-                    "tools": tools,
-                }
+                return build_well_known_mcp_document(srv.config, srv.registry)
 
-            @app.post("/mcp")
-            async def _mcp_endpoint(body: bytes) -> tuple[int, dict[str, str], bytes]:
-                resp = await srv.handle_payload(body)
-                return 200, {"content-type": "application/json"}, resp or b""
+            @app.post(srv.config.path)
+            async def _mcp_endpoint(
+                body: bytes = b"",
+                headers: dict[str, str] | None = None,
+            ) -> tuple[int, dict[str, str], bytes]:
+                mcp_resp = await srv.handle(
+                    McpHttpRequest(
+                        method="POST",
+                        path=srv.config.path,
+                        headers=headers or {},
+                        body=body,
+                    )
+                )
+                return mcp_resp.status, mcp_resp.headers, mcp_resp.body
+
+            @app.get(srv.config.path)
+            async def _mcp_get_endpoint(
+                headers: dict[str, str] | None = None,
+            ) -> tuple[int, dict[str, str], bytes]:
+                mcp_resp = await srv.handle(
+                    McpHttpRequest(
+                        method="GET",
+                        path=srv.config.path,
+                        headers=headers or {},
+                        body=b"",
+                    )
+                )
+                return mcp_resp.status, mcp_resp.headers, mcp_resp.body
 
         if self.a2a_service is not None:
             a2a_srv = self.a2a_service
 
             @app.get("/.well-known/agent-card.json")
             async def _a2a_agent_card(headers: dict[str, str] | None = None) -> dict[str, Any]:
-                card = a2a_srv.resolve_agent_card(headers=headers)
+                card = a2a_srv.resolve_agent_card(headers=headers, registry=self.mcp_registry)
                 if card is None:
                     return {}
                 return cast(dict[str, Any], decode_json(card.to_json_bytes()))
@@ -144,6 +166,10 @@ class AgentPlugin:
 
     def on_app_init(self, app_config: Any) -> Any:
         """Litestar InitPluginProtocol callback auto-discovering handlers and mounting routes."""
+        if isinstance(app_config, App):
+            self.mount_native(app_config)
+            return app_config
+
         if hasattr(app_config, "state"):
             app_config.state["mcp_registry"] = self.mcp_registry
             app_config.state["mcp_service"] = self.mcp_service
@@ -153,13 +179,25 @@ class AgentPlugin:
             app_config.state["agent_chat_controller"] = self.chat_controller
 
         if hasattr(app_config, "dependencies") and isinstance(app_config.dependencies, dict):
-            app_config.dependencies["mcp_registry"] = lambda: self.mcp_registry
-            app_config.dependencies["agent_runtime"] = lambda: self.runtime
+            di_mod = import_optional("litestar.di")
+            provide_cls = getattr(di_mod, "Provide", None) if di_mod is not None else None
+            if provide_cls is not None:
+                app_config.dependencies["mcp_registry"] = provide_cls(
+                    lambda: self.mcp_registry,
+                    sync_to_thread=False,
+                )
+                app_config.dependencies["agent_runtime"] = provide_cls(
+                    lambda: self.runtime,
+                    sync_to_thread=False,
+                )
+            else:
+                app_config.dependencies["mcp_registry"] = lambda: self.mcp_registry
+                app_config.dependencies["agent_runtime"] = lambda: self.runtime
 
         handlers = getattr(app_config, "route_handlers", None)
         if handlers is not None:
             self._discover_handlers(handlers)
-            self._mount_litestar_routes(handlers)
+            self._mount_litestar_routes(handlers, app_config=app_config)
 
         return app_config
 
@@ -185,25 +223,27 @@ class AgentPlugin:
             self.mcp_registry.register_route_handler(item, opt=opt)
 
         if isinstance(item, type):
-            if issubclass(item, SkillController):
-                skill_controller_instance = item()
-                for t in skill_controller_instance.get_tools():
-                    self.mcp_registry.register_tool(t)
-                for r in skill_controller_instance.get_resources():
-                    self.mcp_registry.register_resource(r)
-                for p in skill_controller_instance.get_prompts():
-                    self.mcp_registry.register_prompt(p)
-            elif issubclass(item, PromptController):
-                prompt_controller_instance = item()
-                for p in prompt_controller_instance.get_prompts():
-                    self.mcp_registry.register_prompt(p)
+            if issubclass(item, (SkillController, PromptController)):
+                self.mcp_registry.register_controller(item)
+        elif isinstance(item, (SkillController, PromptController)):
+            self.mcp_registry.register_controller(item)
 
         sub_handlers = getattr(item, "route_handlers", None)
         if sub_handlers is not None and isinstance(sub_handlers, list):
             for sub in sub_handlers:
                 self._inspect_item(sub)
 
-    def _mount_litestar_routes(self, route_handlers: list[Any]) -> None:
+    @staticmethod
+    def _has_route_path(handlers: list[Any], target_path: str) -> bool:
+        for h in handlers:
+            paths = getattr(h, "paths", None)
+            if paths and target_path in paths:
+                return True
+            if getattr(h, "path", None) == target_path:
+                return True
+        return False
+
+    def _mount_litestar_routes(self, route_handlers: list[Any], *, app_config: Any = None) -> None:
         """Mount Litestar route handlers for MCP, A2A, and chat controller."""
         litestar_mod = import_optional("litestar")
         if litestar_mod is None:
@@ -213,35 +253,55 @@ class AgentPlugin:
         if get_fn is None or post_fn is None:
             return
 
+        plugins = list(getattr(app_config, "plugins", None) or ())
+        litestar_mcp_plugins = [p for p in plugins if type(p).__name__ == "LitestarMCP"]
+        has_litestar_mcp = bool(litestar_mcp_plugins)
+
         srv = self.mcp_service
         if srv is not None:
+            well_known_already_mounted = self._has_route_path(route_handlers, srv.config.well_known_path) or any(
+                self._has_route_path(list(getattr(p, "_dynamic_handlers", None) or ()), srv.config.well_known_path)
+                for p in litestar_mcp_plugins
+            )
+            if not well_known_already_mounted:
 
-            async def _litestar_mcp_well_known() -> dict[str, Any]:
-                tools = [t.name for t in srv.registry.list_tools()]
-                return {
-                    "mcp_version": "2026-07-28",
-                    "server": srv.config.server_name,
-                    "tools": tools,
-                }
+                async def _litestar_mcp_well_known() -> dict[str, Any]:
+                    return build_well_known_mcp_document(srv.config, srv.registry)
 
-            async def _litestar_mcp_endpoint(data: dict[str, Any]) -> dict[str, Any]:
-                resp = await srv.handle_payload(encode_json_bytes(data))
-                return cast(dict[str, Any], decode_json(resp) if resp else {})
+                route_handlers.append(
+                    get_fn(
+                        srv.config.well_known_path,
+                        include_in_schema=False,
+                        opt={"exclude_from_auth": True},
+                    )(_litestar_mcp_well_known)
+                )
 
-            route_handlers.append(get_fn("/.well-known/mcp.json", include_in_schema=False)(_litestar_mcp_well_known))
-            route_handlers.append(post_fn("/mcp", include_in_schema=False)(_litestar_mcp_endpoint))
+            if not has_litestar_mcp and not self._has_route_path(route_handlers, srv.config.path):
+
+                async def _litestar_mcp_endpoint(body: bytes) -> dict[str, Any]:
+                    mcp_resp = await srv.handle(
+                        McpHttpRequest(
+                            method="POST",
+                            path=srv.config.path,
+                            headers={},
+                            body=body,
+                        )
+                    )
+                    return cast(dict[str, Any], decode_json(mcp_resp.body) if mcp_resp.body else {})
+
+                route_handlers.append(post_fn(srv.config.path, include_in_schema=False)(_litestar_mcp_endpoint))
 
         a2a_srv = self.a2a_service
         if a2a_srv is not None:
 
             async def _litestar_a2a_agent_card(headers: dict[str, str] | None = None) -> dict[str, Any]:
-                card = a2a_srv.resolve_agent_card(headers=headers)
+                card = a2a_srv.resolve_agent_card(headers=headers, registry=self.mcp_registry)
                 if card is None:
                     return {}
                 return cast(dict[str, Any], decode_json(card.to_json_bytes()))
 
-            async def _litestar_a2a_endpoint(data: dict[str, Any]) -> dict[str, Any]:
-                resp = await a2a_srv.handle_payload(encode_json_bytes(data))
+            async def _litestar_a2a_endpoint(body: bytes) -> dict[str, Any]:
+                resp = await a2a_srv.handle_payload(body)
                 return cast(dict[str, Any], decode_json(resp) if resp else {})
 
             route_handlers.append(

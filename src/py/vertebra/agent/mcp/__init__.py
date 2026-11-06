@@ -39,7 +39,13 @@ from vertebra.agent.mcp.models import (
     ToolCallOutput,
 )
 from vertebra.agent.mcp.registry import MCPRegistry, ToolRegistry
-from vertebra.agent.mcp.routes import AsgiMcpApp, MCPHttpHandler, WsgiMcpApp
+from vertebra.agent.mcp.routes import (
+    AsgiMcpApp,
+    MCPHttpHandler,
+    WsgiMcpApp,
+    build_well_known_mcp_document,
+     render_well_known_mcp_json,
+)
 from vertebra.agent.mcp.service import MCPCore, MCPService
 from vertebra.agent.mcp.skills import (
     SKILL_FILE_NAME,
@@ -116,6 +122,7 @@ __all__ = [
     "WebMCPToolDescriptor",
     "WsgiMcpApp",
     "build_webmcp_manifest",
+    "build_well_known_mcp_document",
     "decode_mcp_header_value",
     "encode_mcp_header_value",
     "mcp_prompt",
@@ -125,6 +132,7 @@ __all__ = [
     "parse_skill_frontmatter",
     "prompt",
     "render_webmcp_manifest_json",
+    "render_well_known_mcp_json",
     "resource",
     "run_stdio_http_bridge",
     "run_stdio_server",

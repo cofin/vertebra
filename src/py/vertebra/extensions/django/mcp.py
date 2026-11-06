@@ -14,7 +14,7 @@ from vertebra.agent.mcp.controllers import (
 )
 from vertebra.agent.mcp.models import MCPConfig
 from vertebra.agent.mcp.registry import MCPRegistry, ToolRegistry
-from vertebra.agent.mcp.routes import WsgiMcpApp
+from vertebra.agent.mcp.routes import WsgiMcpApp, render_well_known_mcp_json
 from vertebra.agent.mcp.service import MCPCore
 from vertebra.agent.mcp.webmcp import (
     WebMCPConfig,
@@ -81,19 +81,21 @@ def attach_mcp_routes(
 
     static_responses: dict[str, Response] = {}
     if resolved.expose_well_known:
-        webmcp_cfg = (
-            resolved.webmcp
-            if isinstance(resolved.webmcp, WebMCPConfig)
-            else WebMCPConfig(manifest_path=resolved.well_known_path)
-        )
-        well_known_bytes = render_webmcp_manifest_json(
-            registry,
-            config=webmcp_cfg,
-        ).encode("utf-8")
+        well_known_bytes = render_well_known_mcp_json(resolved, registry)
         static_responses[resolved.well_known_path] = Response(
             status=200,
             headers=[("content-type", "application/json")],
             body=well_known_bytes,
+        )
+    if isinstance(resolved.webmcp, WebMCPConfig) and resolved.webmcp.enabled:
+        webmcp_bytes = render_webmcp_manifest_json(
+            registry,
+            config=resolved.webmcp,
+        ).encode("utf-8")
+        static_responses[resolved.webmcp.manifest_path] = Response(
+            status=200,
+            headers=[("content-type", "application/json")],
+            body=webmcp_bytes,
         )
 
     return registry, static_responses

@@ -2,7 +2,7 @@
 type: Task
 id: mcp-webmcp-core:t05
 title: Wire native AgentPlugin to MCPCore, delegate Litestar to litestar-mcp, and unify well-known discovery
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -19,17 +19,17 @@ tests:
 - src/py/tests/unit/agent/test_a2a_protocol.py
 plan_revision: 2
 plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: executor
+claimed_at: '2026-11-06T22:18:00Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-06T22:33:00Z'
+last_verified_commit: "23e7e9266d6d2cc6c077e305fb8ef071e80b9a95"
+verification_evidence: "71 passed in test_litestar_ecosystem_mcp.py, test_mcp_conformance.py, test_a2a_protocol.py, test_runtime_and_workflows.py; ruff, mypy, scan_public_docstrings.py, review_setup.py validate passed."
 created_at: '2026-11-06T06:36:00Z'
-updated_at: '2026-11-06T06:36:00Z'
+updated_at: '2026-11-06T22:33:00Z'
 commit: null
 tags:
 - mcp
@@ -66,7 +66,7 @@ uv run --no-sync mypy src/py/vertebra/agent src/py/vertebra/extensions/litestar/
 
 ## Acceptance Criteria
 
-- [ ] R6: Native `AgentPlugin` routes through `MCPCore`, Litestar delegates to `litestar-mcp` without duplicate `opt["mcp_tool"]` entries, and `/.well-known/mcp.json` shares one canonical schema.
+- [x] R6: Native `AgentPlugin` routes through `MCPCore`, Litestar delegates to `litestar-mcp` without duplicate `opt["mcp_tool"]` entries, and `/.well-known/mcp.json` shares one canonical schema.
 
 ## Notes & Discoveries
 

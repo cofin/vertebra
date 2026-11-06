@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 import msgspec
 from litestar.response import Response
 
+from vertebra.agent.mcp.routes import render_well_known_mcp_json
 from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import encode_json_bytes
 
@@ -43,6 +45,23 @@ class WellKnownAgentCardOffload(msgspec.Struct, frozen=True, gc=False, kw_only=T
         else:
             payload = encode_json_bytes(card if isinstance(card, dict) else getattr(card, "__dict__", {}))
 
+        digest = hashlib.sha256(payload).hexdigest()
+        etag = f'"{digest}"'
+        return cls(path=path, body_bytes=payload, etag=etag, max_age=max_age)
+
+    @classmethod
+    def from_mcp_config(
+        cls,
+        config: Any,
+        registry: Any = None,
+        *,
+        tool_names: Iterable[str] | None = None,
+        path: str = "/.well-known/mcp.json",
+        max_age: int = 300,
+    ) -> WellKnownAgentCardOffload:
+        """Construct an offload descriptor for canonical `/.well-known/mcp.json` discovery."""
+        ensure_module("litestar_mcp", extra="mcp")
+        payload = render_well_known_mcp_json(config, registry, tool_names=tool_names)
         digest = hashlib.sha256(payload).hexdigest()
         etag = f'"{digest}"'
         return cls(path=path, body_bytes=payload, etag=etag, max_age=max_age)

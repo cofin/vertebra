@@ -14,7 +14,7 @@ from vertebra.agent.mcp.controllers import (
 )
 from vertebra.agent.mcp.models import MCPConfig
 from vertebra.agent.mcp.registry import MCPRegistry, ToolRegistry
-from vertebra.agent.mcp.routes import AsgiMcpApp
+from vertebra.agent.mcp.routes import AsgiMcpApp, render_well_known_mcp_json
 from vertebra.agent.mcp.service import MCPCore
 from vertebra.agent.mcp.webmcp import (
     WebMCPConfig,
@@ -97,6 +97,33 @@ def mount_mcp_routes(
                         endpoint=mcp_app.handle_starlette_request,
                         methods=["POST", "GET", "OPTIONS"],
                         name="_vertebra_mcp_endpoint",
+                    )
+                )
+
+        if resolved_config.expose_well_known and resolved_config.well_known_path not in existing_paths:
+            well_known_bytes = render_well_known_mcp_json(resolved_config, resolved_registry)
+
+            async def _serve_well_known(_request: Any) -> Any:
+                if responses_mod is not None and hasattr(responses_mod, "Response"):
+                    return responses_mod.Response(content=well_known_bytes, media_type="application/json")
+                return well_known_bytes
+
+            if routing_mod is not None and hasattr(routing_mod, "Route"):
+                routes.append(
+                    routing_mod.Route(
+                        resolved_config.well_known_path,
+                        endpoint=_serve_well_known,
+                        methods=["GET"],
+                        include_in_schema=False,
+                    )
+                )
+            else:
+                routes.append(
+                    SimpleNamespace(
+                        path=resolved_config.well_known_path,
+                        endpoint=_serve_well_known,
+                        methods=["GET"],
+                        name="_vertebra_mcp_well_known",
                     )
                 )
 

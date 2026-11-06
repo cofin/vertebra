@@ -20,6 +20,7 @@ import msgspec
 from vertebra.agent.a2a.models import (
     TERMINAL_A2A_STATES,
     AgentCard,
+    AgentSkill,
     Artifact,
     Message,
     PushNotificationConfig,
@@ -295,6 +296,8 @@ class A2AService:
         stream_broker: SseStreamBroker | None = None,
         telemetry: AgentTelemetryRecorder | None = None,
         executor: A2AExecutorCallable | None = None,
+        *,
+        tool_registry: Any | None = None,
     ) -> None:
         self.config = config if config is not None else A2AConfig()
         self.task_store = (
@@ -315,6 +318,7 @@ class A2AService:
         self.stream_broker = stream_broker if stream_broker is not None else SseStreamBroker()
         self.telemetry = telemetry if telemetry is not None else AgentTelemetryRecorder()
         self.executor = executor
+        self.tool_registry: Any | None = tool_registry
         self.router = JSONRPCRouter()
         self._event_counter: int = 0
         self._register_routes()
@@ -749,8 +753,9 @@ class A2AService:
         *,
         base_url: str | None = None,
         extended: bool = False,
+        registry: Any | None = None,
     ) -> AgentCard | None:
-        """Resolve the public or extended AgentCard with auto-populated interface and URL."""
+        """Resolve the public or extended AgentCard with auto-populated interface, URL, and ToolSpec skills."""
         card = self.config.extended_card if extended else self.config.agent_card
         if card is None:
             return None
@@ -759,6 +764,22 @@ class A2AService:
             base_url=base_url if base_url is not None else self.config.base_url,
             headers=headers,
         )
+        effective_registry = registry if registry is not None else self.tool_registry
+        if effective_registry is not None and hasattr(effective_registry, "list_specs"):
+            existing_ids = {s.id for s in resolved.skills}
+            projected_skills = list(resolved.skills)
+            for spec in effective_registry.list_specs(exposure="a2a"):
+                if spec.name not in existing_ids:
+                    existing_ids.add(spec.name)
+                    projected_skills.append(
+                        AgentSkill(
+                            id=spec.name,
+                            name=spec.title or spec.name,
+                            description=spec.description,
+                        )
+                    )
+            if len(projected_skills) != len(resolved.skills):
+                resolved = msgspec.structs.replace(resolved, skills=tuple(projected_skills))
         if self.config.card_secret and not resolved.signatures:
             resolved = AgentCardSigner.sign(resolved, self.config.card_secret)
         return resolved

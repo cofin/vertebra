@@ -13,7 +13,7 @@ from vertebra.agent.mcp.controllers import (
 )
 from vertebra.agent.mcp.models import MCPConfig
 from vertebra.agent.mcp.registry import MCPRegistry, ToolRegistry
-from vertebra.agent.mcp.routes import WsgiMcpApp
+from vertebra.agent.mcp.routes import WsgiMcpApp, render_well_known_mcp_json
 from vertebra.agent.mcp.service import MCPCore
 from vertebra.agent.mcp.webmcp import (
     WebMCPConfig,
@@ -66,15 +66,7 @@ def attach_mcp_routes(
         existing_endpoints = set(view_functions.keys())
 
         if resolved.expose_well_known and "vertebra_mcp_well_known" not in existing_endpoints:
-            webmcp_cfg = (
-                resolved.webmcp
-                if isinstance(resolved.webmcp, WebMCPConfig)
-                else WebMCPConfig(manifest_path=resolved.well_known_path)
-            )
-            well_known_bytes = render_webmcp_manifest_json(
-                registry,
-                config=webmcp_cfg,
-            ).encode("utf-8")
+            well_known_bytes = render_well_known_mcp_json(resolved, registry)
 
             def _serve_well_known() -> tuple[bytes, int, dict[str, str]]:
                 return well_known_bytes, 200, {"Content-Type": "application/json"}
@@ -84,6 +76,27 @@ def attach_mcp_routes(
                 resolved.well_known_path,
                 endpoint="vertebra_mcp_well_known",
                 view_func=_serve_well_known,
+                methods=["GET"],
+            )
+
+        if (
+            isinstance(resolved.webmcp, WebMCPConfig)
+            and resolved.webmcp.enabled
+            and "vertebra_webmcp_manifest" not in existing_endpoints
+        ):
+            webmcp_bytes = render_webmcp_manifest_json(
+                registry,
+                config=resolved.webmcp,
+            ).encode("utf-8")
+
+            def _serve_webmcp() -> tuple[bytes, int, dict[str, str]]:
+                return webmcp_bytes, 200, {"Content-Type": "application/json"}
+
+            cast("Any", _serve_webmcp).__vertebra_fastpath__ = True
+            app.add_url_rule(
+                resolved.webmcp.manifest_path,
+                endpoint="vertebra_webmcp_manifest",
+                view_func=_serve_webmcp,
                 methods=["GET"],
             )
 

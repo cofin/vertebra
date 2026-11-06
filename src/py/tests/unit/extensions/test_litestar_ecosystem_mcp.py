@@ -87,3 +87,73 @@ def test_missing_dependency_error_on_missing_mcp(monkeypatch: pytest.MonkeyPatch
     with pytest.raises(MissingDependencyError) as exc_info:
         ensure_module("litestar_mcp", extra="mcp")
     assert "mcp" in exc_info.value.install_package
+
+
+def test_litestar_mcp_delegation_no_duplicate_opt_mcp_tool_and_canonical_well_known() -> None:
+    """Litestar delegates /mcp to litestar-mcp without duplicate opt['mcp_tool'] entries and serves canonical /.well-known/mcp.json."""
+    from litestar import Litestar, get
+    from litestar.testing import TestClient
+
+    from vertebra.agent.mcp import MCPConfig
+    from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
+    from vertebra.utils.serializers import decode_json
+
+    @get("/orders", opt={"mcp_tool": "list_orders"})
+    async def list_orders() -> list[str]:
+        """List active orders."""
+        return ["ord-1", "ord-2"]
+
+    mcp_plugin = create_mcp_plugin(name="litestar-orders-mcp", enable_tasks=False)
+    agent_plugin = AgentPlugin(
+        AgentPluginConfig(mcp=MCPConfig(server_name="litestar-orders-mcp", server_version="1.0.0"))
+    )
+    app = Litestar(route_handlers=[list_orders], plugins=[mcp_plugin, agent_plugin])
+
+    with TestClient(app=app) as client:
+        tools_resp = client.post(
+            "/mcp",
+            headers={
+                "MCP-Protocol-Version": "2026-07-28",
+                "Mcp-Method": "tools/list",
+            },
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list",
+                "params": {
+                    "_meta": {
+                        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                        "io.modelcontextprotocol/clientCapabilities": {},
+                    }
+                },
+            },
+        )
+        assert tools_resp.status_code == 200
+        tools_list = tools_resp.json()["result"]["tools"]
+        tool_names = [t["name"] for t in tools_list]
+        assert tool_names.count("list_orders") == 1
+
+        wk_resp = client.get("/.well-known/mcp.json")
+        assert wk_resp.status_code == 200
+        wk_doc = wk_resp.json()
+        assert wk_doc["protocolVersion"] == "2026-07-28"
+        assert wk_doc["mcp_version"] == "2026-07-28"
+        assert wk_doc["server"] == "litestar-orders-mcp"
+        assert wk_doc["serverInfo"]["name"] == "litestar-orders-mcp"
+        assert wk_doc["endpoint"] == "/mcp"
+        assert "list_orders" in wk_doc["tools"]
+
+    offload = WellKnownAgentCardOffload.from_mcp_config(
+        MCPConfig(server_name="litestar-orders-mcp", server_version="1.0.0"),
+        agent_plugin.mcp_registry,
+    )
+    offload_doc = decode_json(offload.body_bytes)
+    assert set(offload_doc.keys()) == {
+        "protocolVersion",
+        "mcp_version",
+        "server",
+        "serverInfo",
+        "endpoint",
+        "tools",
+    }
+    assert offload_doc["protocolVersion"] == "2026-07-28"
