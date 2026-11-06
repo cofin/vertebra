@@ -1,6 +1,8 @@
 """Unit and property tests for agentic core, schema builder, guards, and telemetry."""
 
+import ast
 import dataclasses
+import inspect
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal, TypedDict
 
@@ -8,6 +10,8 @@ import anyio
 import msgspec
 import pytest
 
+import vertebra.agent as agent_pkg
+import vertebra.agent.core.schema as schema_mod
 from vertebra.agent.core.context import (
     AgentContext,
     CallerIdentity,
@@ -40,8 +44,11 @@ from vertebra.agent.core.jsonrpc import (
 from vertebra.agent.core.schema import (
     SchemaBuilder,
     SchemaDigestCache,
+    Tool,
+    ToolAnnotations,
     ToolArgumentError,
     ToolCall,
+    ToolSpec,
     execute_tool_calls,
     tool,
 )
@@ -614,3 +621,80 @@ async def test_provider_tools_preserve_keyword_only_defaults() -> None:
         await tool.invoke({"sql": "SELECT 1", "limit": "invalid"})
     assert exc.value.pointer == "/limit"
     assert len(provider.policy_calls) == 1
+
+
+@pytest.mark.anyio
+async def test_toolspec_and_msgspec_schema_components_without_eval() -> None:
+    """Verify ToolSpec, ToolAnnotations, msgspec.defstruct/schema_components derivation, and zero eval() calls."""
+    assert agent_pkg.ToolSpec is ToolSpec
+    assert agent_pkg.ToolAnnotations is ToolAnnotations
+
+    source_tree = ast.parse(inspect.getsource(schema_mod))
+    eval_calls = [
+        node
+        for node in ast.walk(source_tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "eval"
+    ]
+    assert eval_calls == []
+
+    def search_catalog(
+        query: Annotated[str, msgspec.Meta(min_length=2, max_length=64, description="Search query")],
+        limit: Annotated[int, msgspec.Meta(ge=1, le=50)] = 10,
+        ctx: AgentContext | None = None,
+    ) -> UserRecord:
+        """Search user catalog by query."""
+        _ = ctx
+        return UserRecord(name=query, age=limit)
+
+    search_catalog.__annotations__ = {
+        "query": 'Annotated[str, msgspec.Meta(min_length=2, max_length=64, description="Search query")]',
+        "limit": "Annotated[int, msgspec.Meta(ge=1, le=50)]",
+        "ctx": "AgentContext | None",
+        "return": "UserRecord",
+    }
+
+    default_tool = Tool(search_catalog, title="Catalog Search")
+    spec = default_tool.spec
+    assert isinstance(spec, ToolSpec)
+    assert spec.name == "search_catalog"
+    assert spec.title == "Catalog Search"
+    assert spec.description == "Search user catalog by query."
+    assert spec.exposure == frozenset({"mcp", "a2a"})
+    assert "webmcp" not in spec.exposure
+    assert spec.requires_confirmation is False
+    assert isinstance(spec.annotations, ToolAnnotations)
+    assert spec.annotations.consequential is False
+    assert "ctx" not in spec.input_schema["properties"]
+    assert spec.input_schema["properties"]["query"]["minLength"] == 2
+    assert spec.input_schema["properties"]["query"]["maxLength"] == 64
+    assert spec.input_schema["properties"]["query"]["description"] == "Search query"
+    assert spec.input_schema["properties"]["limit"]["minimum"] == 1
+    assert spec.input_schema["properties"]["limit"]["maximum"] == 50
+    assert spec.input_schema["properties"]["limit"]["default"] == 10
+    assert spec.output_schema is not None
+    assert spec.output_schema["type"] == "object"
+    assert "name" in spec.output_schema["properties"]
+    assert "age" in spec.output_schema["properties"]
+
+    web_tool = Tool(
+        search_catalog,
+        name="web_search_catalog",
+        webmcp=True,
+        requires_confirmation=True,
+        annotations={"read_only": True, "open_world": True},
+    )
+    assert web_tool.spec.exposure == frozenset({"mcp", "a2a", "webmcp"})
+    assert web_tool.spec.annotations.read_only is True
+    assert web_tool.spec.annotations.open_world is True
+    assert web_tool.spec.annotations.consequential is True
+
+    invoked = await default_tool.invoke({"query": "Ada", "limit": 36})
+    assert invoked == UserRecord(name="Ada", age=36)
+
+    with pytest.raises(ToolArgumentError) as err_short:
+        await default_tool.invoke({"query": "A", "limit": 10})
+    assert err_short.value.pointer == "/query"
+
+    with pytest.raises(ToolArgumentError) as err_range:
+        await default_tool.invoke({"query": "Ada", "limit": 99})
+    assert err_range.value.pointer == "/limit"

@@ -2,7 +2,7 @@
 type: Task
 id: mcp-webmcp-core:t01
 title: Implement ToolSpec and msgspec defstruct/schema_components builder without eval
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -15,18 +15,18 @@ tests:
 - src/py/tests/unit/agent/test_mcp_enterprise_tools.py
 plan_revision: 2
 plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: agent:flow-implement
+claimed_at: '2026-11-06T21:32:00Z'
 blocked_reason: null
 unblock_condition: null
-next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+next_step: Completed
+last_verified_at: '2026-11-06T21:39:00Z'
+last_verified_commit: "6b819b6d0d5e67d1b647d7873f9e536b2c510a29"
+verification_evidence: "uv run --no-sync pytest src/py/tests/unit/agent/test_core_and_observability.py src/py/tests/unit/agent/test_mcp_enterprise_tools.py -q (20 passed) && ruff check && mypy"
 created_at: '2026-11-06T06:36:00Z'
-updated_at: '2026-11-06T06:36:00Z'
-commit: null
+updated_at: '2026-11-06T21:39:00Z'
+commit: "6b819b6d0d5e67d1b647d7873f9e536b2c510a29"
 tags:
 - mcp
 - schema
@@ -63,8 +63,8 @@ uv run --no-sync mypy src/py/vertebra/agent/core/schema.py src/py/vertebra/agent
 
 ## Acceptance Criteria
 
-- [ ] R1, R2: `ToolSpec` and `ToolAnnotations` are exported cleanly, input/output JSON Schemas derive through `msgspec.defstruct`/`schema_components`, `msgspec.convert` validates arguments, and zero `eval()` calls remain.
+- [x] R1, R2: `ToolSpec` and `ToolAnnotations` are exported cleanly, input/output JSON Schemas derive through `msgspec.defstruct`/`schema_components`, `msgspec.convert` validates arguments, and zero `eval()` calls remain.
 
 ## Notes & Discoveries
 
-None.
+- `SchemaBuilder` uses `typing.get_type_hints(fn, include_extras=True)` with `msgspec.defstruct` and `msgspec.json.schema_components`, delegating all JSON Schema 2020-12 component derivation and `$defs` emission to `msgspec` without string `eval()`.

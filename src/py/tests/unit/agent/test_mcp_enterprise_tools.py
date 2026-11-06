@@ -191,3 +191,6 @@ async def test_apex_gateway_page_and_plsql_tool_registration() -> None:
 
     mcp_tools = gateway.build_mcp_tools()
     assert "apex_p12_process_payment" in mcp_tools
+    apex_tool = mcp_tools["apex_p12_process_payment"]
+    assert apex_tool.spec.name == "apex_p12_process_payment"
+    assert "webmcp" not in apex_tool.spec.exposure

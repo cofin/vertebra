@@ -3,17 +3,17 @@ type: Spec
 flow_id: mcp-webmcp-core
 title: MCP 2026-07-28 Core and WebMCP Bridge
 description: Build an agent-owned ToolSpec and ToolRegistry over the shared ToolProvider contract, a transport-agnostic MCPCore, framework adapters, and a WebMCP projection and TypeScript bridge.
-state: planned
+state: active
 parent_prd: integration-remediation
 research:
 - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
 plan_commit: "55a6002aabb2d4e2a8bdadd0f7014ea643217ffe"
-state_revision: 0
-current_task: null
+state_revision: 2
+current_task: t02
 last_verified_checkpoint: null
 created_at: '2026-11-03T03:30:00Z'
-updated_at: '2026-11-06T06:36:00Z'
+updated_at: '2026-11-06T21:39:00Z'
 tags:
 - mcp
 - webmcp
@@ -99,7 +99,7 @@ Read [MCP and A2A protocol harness](../../knowledge/domains/agent/mcp-and-a2a-pr
 
 ### Phase 1: `ToolSpec`, `msgspec` Schema Pipeline, `ToolRegistry`, and `MCPCore`
 
-- [ ] t01 — Implement ToolSpec and msgspec defstruct/schema_components builder without eval (tasks/t01-toolspec-and-msgspec-schema.md)
+- [x] [6b819b6] t01 — Implement ToolSpec and msgspec defstruct/schema_components builder without eval (tasks/t01-toolspec-and-msgspec-schema.md)
 - [ ] t02 — Build ToolRegistry over neutral ToolProvider, SkillControllers, and route discovery (tasks/t02-tool-registry-and-providers.md)
 - [ ] t03 — Implement transport-agnostic MCPCore 2026-07-28 HTTP protocol engine (tasks/t03-mcp-core-protocol-engine.md)
 
