@@ -38,6 +38,7 @@ from vertebra.extensions.starlette import (
 )
 from vertebra.server._channels import ChannelBus
 from vertebra.server._fastpath import attach_framework_fastpath
+from vertebra.utils.serializers import decode_json
 
 
 class _ItemPayload(msgspec.Struct, frozen=True, gc=False):
@@ -57,7 +58,7 @@ def _make_mock_starlette_app() -> Any:
         raw = await request.body()
         vtb_req = request.scope.get("vertebra_request")
         decoded = (
-            vtb_req.decode_msgspec(_ItemPayload) if vtb_req is not None else msgspec.json.decode(raw, type=_ItemPayload)
+            vtb_req.decode_msgspec(_ItemPayload) if vtb_req is not None else decode_json(raw, schema_type=_ItemPayload)
         )
         return {"created": decoded.name, "qty": decoded.qty, "body_len": len(raw)}
 
@@ -174,7 +175,7 @@ async def test_starlette_plugin_route_compiler_and_fastpath(monkeypatch: pytest.
     assert res_get is not None
     status, _headers, body = res_get
     assert status == 200
-    assert msgspec.json.decode(body) == {"item_id": 42, "method": "GET"}
+    assert decode_json(body) == {"item_id": 42, "method": "GET"}
     assert scope_get["path_params"] == {"item_id": 42}
     assert scope_get["app"] is app
 
@@ -187,12 +188,12 @@ async def test_starlette_plugin_route_compiler_and_fastpath(monkeypatch: pytest.
     assert res_post is not None
     status_post, _headers_post, body_post = res_post
     assert status_post == 200
-    assert msgspec.json.decode(body_post) == {"created": "bolt", "qty": 9, "body_len": 23}
+    assert decode_json(body_post) == {"created": "bolt", "qty": 9, "body_len": 23}
 
     scope_sync = AsgiScope.from_parts(method="GET", path="/ping", query_string="echo=fast")
     res_sync = await fastpath.dispatch(scope_sync, noop_receive, noop_send)
     assert res_sync is not None
-    assert msgspec.json.decode(res_sync[2]) == {"pong": "fast"}
+    assert decode_json(res_sync[2]) == {"pong": "fast"}
 
 
 @pytest.mark.anyio
@@ -283,7 +284,7 @@ async def test_starlette_fastpath_inline_sync_and_send_raw_response() -> None:
     await wrapped(scope, proto.receive, _RawSender())
     assert raw_calls == [200]
     assert observed_tids == [caller_tid]
-    assert msgspec.json.decode(proto.take_response().body) == {"pong": "inline"}
+    assert decode_json(proto.take_response().body) == {"pong": "inline"}
 
 
 @pytest.mark.anyio
@@ -328,7 +329,7 @@ async def test_starlette_mount_mcp_routes_uses_shared_asgi_mcp_app() -> None:
     await mcp_app(scope_discover, proto_discover.receive, proto_discover.send)
     resp_discover = proto_discover.take_response()
     assert resp_discover.status == 200
-    body_discover = msgspec.json.decode(resp_discover.body)
+    body_discover = decode_json(resp_discover.body)
     assert body_discover["result"]["protocolVersion"] == "2026-07-28"
     assert body_discover["result"]["_meta"]["resultType"] == "server/discover"
 

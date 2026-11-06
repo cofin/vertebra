@@ -10,26 +10,6 @@ from vertebra.utils.serializers import decode_json, format_json
 
 __all__ = ("ImportMapGenerator", "load_client_subpaths")
 
-_FALLBACK_CLIENT_SUBPATHS: tuple[tuple[str, str, str], ...] = (
-    (".", "./index.js", "./index.d.ts"),
-    ("./vite", "./vite/index.js", "./vite/index.d.ts"),
-    ("./react", "./react/index.js", "./react/index.d.ts"),
-    ("./vue", "./vue/index.js", "./vue/index.d.ts"),
-    ("./svelte", "./svelte/index.js", "./svelte/index.d.ts"),
-    ("./angular", "./angular/index.js", "./angular/index.d.ts"),
-    ("./htmx", "./htmx/index.js", "./htmx/index.d.ts"),
-    ("./store", "./store/index.js", "./store/index.d.ts"),
-    ("./hmr", "./hmr/index.js", "./hmr/index.d.ts"),
-    ("./wasm", "./wasm.js", "./wasm.d.ts"),
-    ("./arrow", "./arrow.js", "./arrow.d.ts"),
-    ("./live", "./live/index.js", "./live/index.d.ts"),
-    ("./apex", "./apex/index.js", "./apex/index.d.ts"),
-    ("./telemetry", "./telemetry.js", "./telemetry.d.ts"),
-    ("./router", "./router.js", "./router.d.ts"),
-    ("./webmcp", "./webmcp.js", "./webmcp.d.ts"),
-    ("./agent", "./agent/index.js", "./agent/index.d.ts"),
-)
-
 
 def load_client_subpaths(package_json_path: Path | None = None) -> tuple[tuple[str, str, str], ...]:
     """Derive ``(subpath, js_rel, types_rel)`` tuples from ``@vertebra/client`` ``package.json`` ``exports``."""
@@ -63,9 +43,6 @@ def load_client_subpaths(package_json_path: Path | None = None) -> tuple[tuple[s
         entries.append((str(subpath), norm_import, norm_types))
 
     return tuple(entries) if entries else _FALLBACK_CLIENT_SUBPATHS
-
-
-_CLIENT_SUBPATHS: tuple[tuple[str, str, str], ...] = load_client_subpaths()
 
 
 class ImportMapGenerator:
@@ -191,3 +168,26 @@ class ImportMapGenerator:
         }
         (target_dir / "package.json").write_text(format_json(pkg_manifest, indent=2) + "\n", encoding="utf-8")
         return target_dir
+
+
+_FALLBACK_CLIENT_SUBPATHS: tuple[tuple[str, str, str], ...] = (
+    (".", "./index.js", "./index.d.ts"),
+    ("./vite", "./vite/index.js", "./vite/index.d.ts"),
+    ("./react", "./react/index.js", "./react/index.d.ts"),
+    ("./vue", "./vue/index.js", "./vue/index.d.ts"),
+    ("./svelte", "./svelte/index.js", "./svelte/index.d.ts"),
+    ("./angular", "./angular/index.js", "./angular/index.d.ts"),
+    ("./htmx", "./htmx/index.js", "./htmx/index.d.ts"),
+    ("./store", "./store/index.js", "./store/index.d.ts"),
+    ("./hmr", "./hmr/index.js", "./hmr/index.d.ts"),
+    ("./wasm", "./wasm.js", "./wasm.d.ts"),
+    ("./arrow", "./arrow.js", "./arrow.d.ts"),
+    ("./live", "./live/index.js", "./live/index.d.ts"),
+    ("./apex", "./apex/index.js", "./apex/index.d.ts"),
+    ("./telemetry", "./telemetry.js", "./telemetry.d.ts"),
+    ("./router", "./router.js", "./router.d.ts"),
+    ("./webmcp", "./webmcp.js", "./webmcp.d.ts"),
+    ("./agent", "./agent/index.js", "./agent/index.d.ts"),
+)
+
+_CLIENT_SUBPATHS: tuple[tuple[str, str, str], ...] = load_client_subpaths()

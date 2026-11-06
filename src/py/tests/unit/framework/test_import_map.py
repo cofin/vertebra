@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from vertebra.build import JsConfig
-from vertebra.build._import_map import ImportMapGenerator
+from vertebra.build._import_map import _CLIENT_SUBPATHS, ImportMapGenerator, load_client_subpaths
 from vertebra.utils.serializers import decode_json
 
 
@@ -132,8 +132,6 @@ def test_generate_import_map_include_client_and_sync_wheel_bundle(tmp_path: Path
 
 def test_client_subpaths_derived_dynamically_from_package_json(tmp_path: Path) -> None:
     """ImportMapGenerator.load_client_subpaths derives subpaths directly from package.json exports."""
-    from vertebra.build._import_map import _CLIENT_SUBPATHS, load_client_subpaths
-
     ts_pkg = Path(__file__).resolve().parents[4] / "ts" / "vertebra-client" / "package.json"
     raw_exports = decode_json(ts_pkg.read_text(encoding="utf-8"))["exports"]
     assert [sub for sub, _, _ in _CLIENT_SUBPATHS] == list(raw_exports.keys())

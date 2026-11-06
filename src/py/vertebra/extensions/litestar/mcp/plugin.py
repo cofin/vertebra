@@ -21,6 +21,8 @@ except ImportError as exc:
         extra="mcp",
     ) from exc
 
+__all__ = ["create_mcp_plugin"]
+
 
 def create_mcp_plugin(
     config: MCPConfig | None = None,

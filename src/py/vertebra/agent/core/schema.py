@@ -25,6 +25,22 @@ try:
 except ImportError:
     _NativeSchemaDigestCache = None
 
+__all__ = [
+    "DEFAULT_TOOL_EXPOSURE",
+    "STRIP_TYPE_NAMES",
+    "SchemaBuilder",
+    "SchemaDigestCache",
+    "Tool",
+    "ToolAnnotations",
+    "ToolArgumentError",
+    "ToolCall",
+    "ToolExposure",
+    "ToolResult",
+    "ToolSpec",
+    "execute_tool_calls",
+    "tool",
+]
+
 
 type ToolExposure = Literal["mcp", "webmcp", "a2a"]
 
@@ -753,20 +769,3 @@ async def execute_tool_calls(
             tg.start_soon(run_single, idx, call)
 
     return [res for res in results if res is not None]
-
-
-__all__ = [
-    "DEFAULT_TOOL_EXPOSURE",
-    "STRIP_TYPE_NAMES",
-    "SchemaBuilder",
-    "SchemaDigestCache",
-    "Tool",
-    "ToolAnnotations",
-    "ToolArgumentError",
-    "ToolCall",
-    "ToolExposure",
-    "ToolResult",
-    "ToolSpec",
-    "execute_tool_calls",
-    "tool",
-]

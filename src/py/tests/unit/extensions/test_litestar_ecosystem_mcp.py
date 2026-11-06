@@ -5,7 +5,11 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from litestar import Litestar, get
+from litestar.testing import TestClient
 
+from vertebra.agent.mcp import MCPConfig
+from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
 from vertebra.extensions.litestar.mcp import (
     JSONRPCFrameAccelerator,
     ObjectStoreSkillSource,
@@ -15,6 +19,7 @@ from vertebra.extensions.litestar.mcp import (
 )
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import ensure_module
+from vertebra.utils.serializers import decode_json
 
 
 def test_agent_card_offload_etag_and_304_matching() -> None:
@@ -91,12 +96,6 @@ def test_missing_dependency_error_on_missing_mcp(monkeypatch: pytest.MonkeyPatch
 
 def test_litestar_mcp_delegation_no_duplicate_opt_mcp_tool_and_canonical_well_known() -> None:
     """Litestar delegates /mcp to litestar-mcp without duplicate opt['mcp_tool'] entries and serves canonical /.well-known/mcp.json."""
-    from litestar import Litestar, get
-    from litestar.testing import TestClient
-
-    from vertebra.agent.mcp import MCPConfig
-    from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
-    from vertebra.utils.serializers import decode_json
 
     @get("/orders", opt={"mcp_tool": "list_orders"})
     async def list_orders() -> list[str]:

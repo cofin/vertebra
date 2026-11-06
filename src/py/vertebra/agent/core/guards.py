@@ -13,6 +13,22 @@ import msgspec
 
 from vertebra.agent.core.context import AgentContext
 
+__all__ = [
+    "BudgetExceededError",
+    "GuardCallable",
+    "GuardChain",
+    "GuardProtocol",
+    "PermissionDeniedError",
+    "RateLimitExceededError",
+    "RequireAuthenticated",
+    "RequireRoles",
+    "RequireScopes",
+    "TenantIsolationGuard",
+    "TokenBucketGuard",
+    "TurnBudget",
+    "authorize",
+]
+
 
 class PermissionDeniedError(Exception):
     """Raised when an execution fails an authorization or identity guard check."""
@@ -175,20 +191,3 @@ async def authorize(
     active_ctx = ctx if ctx is not None else AgentContext()
     chain = GuardChain(raw_guards)
     await chain.execute(active_ctx, connection=connection, route_handler=route_handler)
-
-
-__all__ = [
-    "BudgetExceededError",
-    "GuardCallable",
-    "GuardChain",
-    "GuardProtocol",
-    "PermissionDeniedError",
-    "RateLimitExceededError",
-    "RequireAuthenticated",
-    "RequireRoles",
-    "RequireScopes",
-    "TenantIsolationGuard",
-    "TokenBucketGuard",
-    "TurnBudget",
-    "authorize",
-]

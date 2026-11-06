@@ -1,6 +1,8 @@
 """Conformance tests for MCP 2026-07-28 protocol, registry, HTTP handler, and tasks."""
 
 import dataclasses
+from collections.abc import Mapping
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -33,6 +35,7 @@ from vertebra.agent.mcp import (
     SkillIntegrityError,
     TaskLookupError,
     TextContent,
+    ToolRegistry,
     WebMCPConfig,
     build_webmcp_manifest,
     decode_mcp_header_value,
@@ -45,6 +48,10 @@ from vertebra.agent.mcp import (
 from vertebra.agent.mcp.service import CONFIRMATION_REQUIRED, CONFIRMATION_TOKEN_META_KEY
 from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
 from vertebra.agent.runtime import ConfirmationGate
+from vertebra.extensions.django.mcp import attach_mcp_routes as attach_django_mcp
+from vertebra.extensions.flask.mcp import attach_mcp_routes as attach_flask_mcp
+from vertebra.extensions.starlette.mcp import mount_mcp_routes as mount_starlette_mcp
+from vertebra.framework._app import App
 from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
@@ -742,13 +749,6 @@ async def test_guarded_skill_controller_and_agent_plugin_preserve_webmcp_and_gua
 @pytest.mark.anyio
 async def test_native_app_agent_plugin_routes_through_mcp_core_and_unifies_well_known() -> None:
     """Native App + AgentPlugin enforces MCPCore 2026-07-28 HTTP semantics and shares canonical /.well-known/mcp.json across all mounts."""
-    from types import SimpleNamespace
-
-    from vertebra.extensions.django.mcp import attach_mcp_routes as attach_django_mcp
-    from vertebra.extensions.flask.mcp import attach_mcp_routes as attach_flask_mcp
-    from vertebra.extensions.starlette.mcp import mount_mcp_routes as mount_starlette_mcp
-    from vertebra.framework._app import App
-
     plugin = AgentPlugin(
         AgentPluginConfig(
             mcp=MCPConfig(server_name="native-mcp", server_version="2.1.0"),
@@ -838,10 +838,6 @@ async def test_native_app_agent_plugin_routes_through_mcp_core_and_unifies_well_
 @pytest.mark.anyio
 async def test_webmcp_manifest_projects_strictly_from_toolspec_exposure() -> None:
     """WebMCP manifest projects strictly from ToolSpec exposure ('webmcp'), emitting title, outputSchema, and consequentialHint."""
-    from collections.abc import Mapping
-
-    from vertebra.agent.mcp import ToolRegistry
-    from vertebra.framework._app import App
 
     class _DbToolProvider:
         def operations(self) -> Mapping[str, Any]:

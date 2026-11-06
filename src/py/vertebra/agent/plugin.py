@@ -23,6 +23,11 @@ from vertebra.framework._app import App
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json
 
+__all__ = [
+    "AgentPlugin",
+    "AgentPluginConfig",
+]
+
 
 class AgentPluginConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration options for mounting the agentic harness."""
@@ -334,9 +339,3 @@ class AgentPlugin:
                 get_fn("/.well-known/agent-card.json", include_in_schema=False)(_litestar_a2a_agent_card)
             )
             route_handlers.append(post_fn("/a2a", include_in_schema=False)(_litestar_a2a_endpoint))
-
-
-__all__ = [
-    "AgentPlugin",
-    "AgentPluginConfig",
-]

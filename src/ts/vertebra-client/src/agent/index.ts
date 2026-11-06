@@ -48,30 +48,6 @@ export class McpClient {
     this.sessionId = id;
   }
 
-  private resolveMcpName(method: string, params: Record<string, unknown>): string | undefined {
-    if (method === "tools/call" && typeof params.name === "string") {
-      return params.name;
-    }
-    if (method === "resources/read" && typeof params.uri === "string") {
-      return params.uri;
-    }
-    if (method === "prompts/get" && typeof params.name === "string") {
-      return params.name;
-    }
-    if ((method.startsWith("tasks/") || method === "tasks/get") && typeof params.taskId === "string") {
-      return params.taskId;
-    }
-    if (method === "skills/get") {
-      if (typeof params.name === "string") {
-        return params.name;
-      }
-      if (typeof params.uri === "string") {
-        return params.uri;
-      }
-    }
-    return undefined;
-  }
-
   async sendJsonRpc<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     const url = `${this.baseUrl}/mcp`;
     const headers: Record<string, string> = {
@@ -211,6 +187,30 @@ export class McpClient {
 
   async cancelTask(taskId: string): Promise<unknown> {
     return this.sendJsonRpc("tasks/cancel", { taskId });
+  }
+
+  private resolveMcpName(method: string, params: Record<string, unknown>): string | undefined {
+    if (method === "tools/call" && typeof params.name === "string") {
+      return params.name;
+    }
+    if (method === "resources/read" && typeof params.uri === "string") {
+      return params.uri;
+    }
+    if (method === "prompts/get" && typeof params.name === "string") {
+      return params.name;
+    }
+    if ((method.startsWith("tasks/") || method === "tasks/get") && typeof params.taskId === "string") {
+      return params.taskId;
+    }
+    if (method === "skills/get") {
+      if (typeof params.name === "string") {
+        return params.name;
+      }
+      if (typeof params.uri === "string") {
+        return params.uri;
+      }
+    }
+    return undefined;
   }
 }
 

@@ -135,6 +135,18 @@ class VertebraPlugin:
             extensions["vertebra"] = self
         return self
 
+    def handle_request(self, request: Request) -> Response:
+        """Dispatch a Vertebra ``Request`` via fastpath or fallback to ``run_wsgi_callable``."""
+        if self._mcp_app is not None and self._config.mcp is not None and request.path == self._config.mcp.path:
+            return self._mcp_app.handle_vertebra_request(request)
+        if self._fastpath is not None:
+            fast_resp = self._fastpath.dispatch(request)
+            if fast_resp is not None:
+                return fast_resp
+        environ = request.wsgi_environ()
+        wsgi_target = getattr(self._app, "wsgi_app", self._app)
+        return run_wsgi_callable(wsgi_target, environ, int(request.request_id))
+
     def _wrap_wsgi_app(
         self,
         inner_wsgi: Callable[..., Iterable[bytes]],
@@ -158,15 +170,3 @@ class VertebraPlugin:
             return inner_wsgi(environ, start_response)
 
         return _wsgi_entry
-
-    def handle_request(self, request: Request) -> Response:
-        """Dispatch a Vertebra ``Request`` via fastpath or fallback to ``run_wsgi_callable``."""
-        if self._mcp_app is not None and self._config.mcp is not None and request.path == self._config.mcp.path:
-            return self._mcp_app.handle_vertebra_request(request)
-        if self._fastpath is not None:
-            fast_resp = self._fastpath.dispatch(request)
-            if fast_resp is not None:
-                return fast_resp
-        environ = request.wsgi_environ()
-        wsgi_target = getattr(self._app, "wsgi_app", self._app)
-        return run_wsgi_callable(wsgi_target, environ, int(request.request_id))

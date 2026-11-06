@@ -25,32 +25,11 @@ from vertebra.agent.a2a import (
 from vertebra.agent.bridges import A2aAgentBridge, McpToolBridge
 from vertebra.agent.core.context import AgentContext, CallerIdentity
 from vertebra.agent.core.schema import tool
-from vertebra.agent.mcp import MCPConfig, MCPService
+from vertebra.agent.mcp import MCPConfig, MCPService, ToolRegistry
+from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
 from vertebra.telemetry.otel import TraceContext
 from vertebra.typing import FrozenCamelizedStruct
 from vertebra.utils.serializers import decode_json, encode_json_bytes
-
-
-def _sample_card(route_path: str = "/a2a") -> AgentCard:
-    interface = AgentInterface(
-        url=f"http://localhost:8000{route_path}",
-        protocol_binding="JSONRPC",
-        protocol_version="1.0",
-    )
-    skill = AgentSkill(
-        id="summarize",
-        name="Summarizer",
-        description="Summarizes text into bullet points",
-        tags=("nlp", "text"),
-        examples=("Summarize the latest quarterly report",),
-    )
-    return AgentCard(
-        name="test-agent",
-        description="A2A test agent",
-        version="1.0",
-        supported_interfaces=(interface,),
-        skills=(skill,),
-    )
 
 
 def test_a2a_1_0_models_camel_case_wire_roundtrip_and_card_validation() -> None:
@@ -621,9 +600,6 @@ async def test_bidirectional_mcp_and_a2a_bridges_preserve_trace_context() -> Non
 @pytest.mark.anyio
 async def test_a2a_skill_card_projects_from_toolspec_exposure() -> None:
     """A2AHttpHandler and AgentPlugin project AgentCard skills strictly from ToolSpec entries with 'a2a' in exposure."""
-    from vertebra.agent.mcp import ToolRegistry
-    from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
-
     registry = ToolRegistry()
 
     @tool(
@@ -671,3 +647,25 @@ async def test_a2a_skill_card_projects_from_toolspec_exposure() -> None:
     plugin_skill_ids = [s.id for s in resolved_plugin_card.skills]
     assert "a2a_visible_tool" in plugin_skill_ids
     assert "mcp_private_tool" not in plugin_skill_ids
+
+
+def _sample_card(route_path: str = "/a2a") -> AgentCard:
+    interface = AgentInterface(
+        url=f"http://localhost:8000{route_path}",
+        protocol_binding="JSONRPC",
+        protocol_version="1.0",
+    )
+    skill = AgentSkill(
+        id="summarize",
+        name="Summarizer",
+        description="Summarizes text into bullet points",
+        tags=("nlp", "text"),
+        examples=("Summarize the latest quarterly report",),
+    )
+    return AgentCard(
+        name="test-agent",
+        description="A2A test agent",
+        version="1.0",
+        supported_interfaces=(interface,),
+        skills=(skill,),
+    )

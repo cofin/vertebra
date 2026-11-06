@@ -16,6 +16,8 @@ from vertebra.utils.serializers import encode_json_bytes
 if TYPE_CHECKING:
     from litestar.connection import ASGIConnection
 
+__all__ = ["WellKnownAgentCardOffload"]
+
 
 class WellKnownAgentCardOffload(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Offload specification and pre-serialized bytes for /.well-known/agent-card.json."""

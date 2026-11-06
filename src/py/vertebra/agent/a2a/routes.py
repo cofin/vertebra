@@ -12,6 +12,8 @@ from vertebra.agent.a2a.service import A2AConfig, A2AService
 from vertebra.agent.core.context import AgentContext
 from vertebra.utils.serializers import decode_json
 
+__all__ = ("A2AHttpHandler",)
+
 
 class A2AHttpHandler:
     """Streamable HTTP route handler coordinating validation, caching, and dispatch for A2A 1.0."""
@@ -20,19 +22,6 @@ class A2AHttpHandler:
         self.service = service
         self.config: A2AConfig = service.config
         self.registry = registry if registry is not None else getattr(service, "tool_registry", None)
-
-    def _match_etag(self, if_none_match: str | None, current_etag: str) -> bool:
-        if not if_none_match:
-            return False
-        tokens = [t.strip() for t in if_none_match.split(",")]
-        normalized_current = current_etag.strip('"')
-        for token in tokens:
-            if token == "*":
-                return True
-            raw = token.removeprefix("W/").removeprefix("w/").strip('"')
-            if raw == normalized_current:
-                return True
-        return False
 
     def register_in_discovery_cache(self, cache: Any) -> None:
         """Register the AgentCard in Rust WellKnownDiscoveryCache when URLs are static."""
@@ -142,7 +131,15 @@ class A2AHttpHandler:
 
         return 404, {"Content-Type": "text/plain"}, b"Not Found"
 
-
-__all__ = [
-    "A2AHttpHandler",
-]
+    def _match_etag(self, if_none_match: str | None, current_etag: str) -> bool:
+        if not if_none_match:
+            return False
+        tokens = [t.strip() for t in if_none_match.split(",")]
+        normalized_current = current_etag.strip('"')
+        for token in tokens:
+            if token == "*":
+                return True
+            raw = token.removeprefix("W/").removeprefix("w/").strip('"')
+            if raw == normalized_current:
+                return True
+        return False

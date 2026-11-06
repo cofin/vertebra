@@ -25,6 +25,11 @@ from vertebra.utils.serializers import encode_json_bytes
 if TYPE_CHECKING:
     from vertebra.agent.runtime import ConfirmationGate
 
+__all__ = (
+    "MCPRegistry",
+    "ToolRegistry",
+)
+
 
 class ToolRegistry:
     """Central catalog of tools (ToolSpec + Tool), resources, resource templates, and prompts."""
@@ -57,10 +62,6 @@ class ToolRegistry:
     def add_listener(self, listener: Callable[[], None]) -> None:
         """Register a callback invoked whenever the registry is mutated."""
         self._listeners.append(listener)
-
-    def _notify(self) -> None:
-        for listener in self._listeners:
-            listener()
 
     def register_tool(self, tool_or_fn: Tool | Callable[..., Any]) -> Tool:
         """Register a Tool descriptor (or callable) and cache its ToolSpec digest."""
@@ -365,12 +366,10 @@ class ToolRegistry:
         routes = getattr(app, "routes", ()) or ()
         self.register_routes(routes)
 
+    def _notify(self) -> None:
+        for listener in self._listeners:
+            listener()
+
 
 class MCPRegistry(ToolRegistry):
     """MCP capability registry extending ToolRegistry across tools, resources, templates, and prompts."""
-
-
-__all__ = [
-    "MCPRegistry",
-    "ToolRegistry",
-]

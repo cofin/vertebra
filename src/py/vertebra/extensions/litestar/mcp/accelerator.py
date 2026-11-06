@@ -5,6 +5,8 @@ from __future__ import annotations
 from vertebra._vertebra import classify_jsonrpc_frame
 from vertebra.utils.module_loader import ensure_module
 
+__all__ = ["JSONRPCFrameAccelerator"]
+
 
 class JSONRPCFrameAccelerator:
     """Classifies incoming JSON-RPC frames using zero-allocation Rust parser."""

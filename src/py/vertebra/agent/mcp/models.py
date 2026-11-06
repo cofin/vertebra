@@ -11,6 +11,25 @@ import msgspec
 
 from vertebra.typing import FrozenBaseStruct
 
+__all__ = [
+    "HEADER_MISMATCH",
+    "MCP_PROTOCOL_VERSION",
+    "UNSUPPORTED_PROTOCOL_VERSION",
+    "BlobContent",
+    "ContentBlock",
+    "MCPConfig",
+    "McpHttpRequest",
+    "McpHttpResponse",
+    "PromptArgument",
+    "PromptEntry",
+    "PromptMessage",
+    "ResourceEntry",
+    "ResourceLinkContent",
+    "ResourceTemplateEntry",
+    "TextContent",
+    "ToolCallOutput",
+]
+
 MCP_PROTOCOL_VERSION: str = "2026-07-28"
 HEADER_MISMATCH: int = -32020
 UNSUPPORTED_PROTOCOL_VERSION: int = -32022
@@ -183,23 +202,3 @@ class PromptEntry(FrozenBaseStruct, frozen=True, kw_only=True):
     """Declared arguments accepted when rendering the prompt via `prompts/get`."""
     getter: Callable[..., Any] | None = None
     """Sync or async callable returning rendered `PromptMessage` items."""
-
-
-__all__ = [
-    "HEADER_MISMATCH",
-    "MCP_PROTOCOL_VERSION",
-    "UNSUPPORTED_PROTOCOL_VERSION",
-    "BlobContent",
-    "ContentBlock",
-    "MCPConfig",
-    "McpHttpRequest",
-    "McpHttpResponse",
-    "PromptArgument",
-    "PromptEntry",
-    "PromptMessage",
-    "ResourceEntry",
-    "ResourceLinkContent",
-    "ResourceTemplateEntry",
-    "TextContent",
-    "ToolCallOutput",
-]

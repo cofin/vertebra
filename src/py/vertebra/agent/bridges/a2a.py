@@ -22,6 +22,11 @@ from vertebra.agent.a2a.service import A2AConfig, A2AService
 from vertebra.agent.core.context import AgentContext
 from vertebra.agent.mcp.service import MCPService
 
+__all__ = [
+    "A2aAgentBridge",
+    "mcp_service_to_a2a",
+]
+
 
 class A2aAgentBridge:
     """Projects an MCP service and registry into an A2A 1.0 compliant agent service."""
@@ -222,9 +227,3 @@ def mcp_service_to_a2a(
         name=name,
         description=description,
     )
-
-
-__all__ = [
-    "A2aAgentBridge",
-    "mcp_service_to_a2a",
-]

@@ -21,6 +21,16 @@ from vertebra.agent.spec import AgentMessage
 from vertebra.telemetry.genai import GenAiUsage
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
+__all__ = [
+    "AgentChatController",
+    "ChatRequest",
+    "ConfirmationDecisionRequest",
+    "QueuedTurnTicket",
+    "SessionHistory",
+    "SessionNotFoundError",
+    "TurnResult",
+]
+
 
 class SessionNotFoundError(Exception):
     """Raised when an agent session is not found or owner access is unauthorized."""
@@ -406,14 +416,3 @@ class AgentChatController:
             if owner:
                 return owner
         return ANONYMOUS_OWNER
-
-
-__all__ = [
-    "AgentChatController",
-    "ChatRequest",
-    "ConfirmationDecisionRequest",
-    "QueuedTurnTicket",
-    "SessionHistory",
-    "SessionNotFoundError",
-    "TurnResult",
-]

@@ -20,6 +20,16 @@ from vertebra.agent.mcp.models import (
     TextContent,
 )
 
+__all__ = [
+    "PromptController",
+    "SkillController",
+    "mcp_prompt",
+    "mcp_resource",
+    "mcp_tool",
+    "prompt",
+    "resource",
+]
+
 
 def mcp_tool(
     name: str | None = None,
@@ -310,14 +320,3 @@ class SkillController(PromptController):
             "tags": list(self.tags),
             "examples": list(self.examples),
         }
-
-
-__all__ = [
-    "PromptController",
-    "SkillController",
-    "mcp_prompt",
-    "mcp_resource",
-    "mcp_tool",
-    "prompt",
-    "resource",
-]

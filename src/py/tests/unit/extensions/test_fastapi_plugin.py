@@ -167,7 +167,7 @@ async def test_fastapi_plugin_compiled_dependant_and_zero_copy_fastpath() -> Non
     assert res is not None
     status, _headers, body = res
     assert status == 201
-    decoded = msgspec.json.decode(body, type=_OrderOutput)
+    decoded = decode_json(body, type=_OrderOutput)
     assert decoded == _OrderOutput(order_id=77, sku="GPU-H200", quantity=4, tenant="globex:admin")
     assert call_counter["tenant"] == 1
 
@@ -306,13 +306,13 @@ async def test_fastapi_fastpath_lazy_request_inline_sync_and_send_raw_response(
     await wrapped(scope_inline, proto.receive, _RawSender())
     assert raw_calls == [200]
     assert observed_tids["inline"] == caller_tid
-    assert msgspec.json.decode(proto.take_response().body) == {"item_id": 12}
+    assert decode_json(proto.take_response().body) == {"item_id": 12}
 
     proto_th = AsgiProtocol(b"")
     scope_th = AsgiScope.from_parts(method="GET", path="/threaded/15")
     await wrapped(scope_th, proto_th.receive, proto_th.send)
     assert observed_tids["threaded"] != caller_tid
-    assert msgspec.json.decode(proto_th.take_response().body) == {"item_id": 15}
+    assert decode_json(proto_th.take_response().body) == {"item_id": 15}
 
 
 @pytest.mark.anyio

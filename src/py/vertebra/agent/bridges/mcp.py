@@ -15,6 +15,11 @@ from vertebra.agent.core.schema import Tool
 from vertebra.telemetry.genai import inject_w3c_trace_context
 from vertebra.telemetry.otel import TraceContext
 
+__all__ = [
+    "McpToolBridge",
+    "a2a_card_to_mcp_tools",
+]
+
 
 class McpToolBridge:
     """Translates A2A 1.0 skills into callable MCP Tool instances."""
@@ -146,9 +151,3 @@ def a2a_card_to_mcp_tools(
 ) -> list[Tool]:
     """Helper shortcut converting AgentCard skills to MCP tools."""
     return McpToolBridge.from_agent_card(card, transport, prefix=prefix)
-
-
-__all__ = [
-    "McpToolBridge",
-    "a2a_card_to_mcp_tools",
-]
