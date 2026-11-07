@@ -37,6 +37,7 @@ from vertebra.storage import (
 from vertebra.storage import (
     StreamingStorageResponse as StorageStreamingStorageResponse,
 )
+from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import decode_json
 
 
@@ -46,6 +47,82 @@ def test_duplicated_storage_shims_removed_from_extension_modules() -> None:
     assert not hasattr(alchemy_storage_mod, "StoredObject")
     assert not hasattr(sqlspec_storage_mod, "SQLSpecStore")
     assert not hasattr(sqlspec_storage_mod, "SqlSpecStorageBridge")
+
+
+def test_sqlspec_storage_requires_explicit_target() -> None:
+    """Missing and blank targets cannot silently select volatile memory storage."""
+    with pytest.raises(ImproperConfigurationError):
+        SQLSpecObjectStoreBackend()
+    for target in (None, "", "  "):
+        with pytest.raises(ImproperConfigurationError):
+            SQLSpecObjectStoreBackend(target)
+
+
+def test_sqlspec_storage_native_sync_operations(tmp_path: Path) -> None:
+    """Native streams, pagination, readable handles, and conditional puts share one namespace."""
+    backend = SQLSpecObjectStoreBackend(f"file://{tmp_path}", base_path="sql")
+    assert isinstance(backend, ObjectStoreProtocol)
+    backend.write_bytes_sync("a.bin", b"123", if_not_exists=True)
+    with pytest.raises(FileExistsError):
+        backend.write_bytes_sync("a.bin", b"overwrite", if_not_exists=True)
+    backend.move_sync("a.bin", "b.bin")
+    assert not backend.exists_sync("a.bin")
+    backend.put_stream_sync("big.bin", iter([b"chunk1-", b"chunk2"]))
+    assert b"".join(bytes(chunk) for chunk in backend.get_stream_sync("big.bin", chunk_size=4)) == b"chunk1-chunk2"
+    paths, cursor = backend.list_page_sync(limit=1)
+    assert paths == ["b.bin"]
+    assert cursor is not None
+    assert backend.list_page_sync(cursor=cursor, limit=1) == (["big.bin"], None)
+    with backend.open_sync("b.bin") as reader:
+        assert reader.read() == b"123"
+    assert reader.closed
+    with pytest.raises(NotImplementedError):
+        backend.sign_sync("b.bin")
+    with pytest.raises(ValueError, match="limit"):
+        backend.list_page_sync(limit=0)
+    backend.write_text_sync("note.txt", "hello", if_not_exists=True)
+    with pytest.raises(FileExistsError):
+        backend.write_text_sync("note.txt", "overwrite", if_not_exists=True)
+
+
+@pytest.mark.anyio
+async def test_sqlspec_storage_native_async_operations(tmp_path: Path) -> None:
+    """Async protocol operations preserve conditional writes and incremental stream input."""
+    backend = SQLSpecObjectStoreBackend(f"file://{tmp_path}", base_path="sql")
+    await backend.write_bytes_async("a.bin", b"123", if_not_exists=True)
+    with pytest.raises(FileExistsError):
+        await backend.write_bytes_async("a.bin", b"overwrite", if_not_exists=True)
+    await backend.move_async("a.bin", "b.bin")
+    assert not await backend.exists_async("a.bin")
+    await backend.put_stream_async("big.bin", [b"chunk1-", b"chunk2"])
+    chunks = [bytes(chunk) async for chunk in backend.get_stream_async("big.bin", chunk_size=4)]
+    assert b"".join(chunks) == b"chunk1-chunk2"
+    paths, cursor = await backend.list_page_async(limit=1)
+    assert paths == ["b.bin"]
+    assert cursor is not None
+    assert await backend.list_page_async(cursor=cursor, limit=1) == (["big.bin"], None)
+    async with backend.open_async("b.bin") as reader:
+        assert await reader.read() == b"123"
+    assert reader.closed
+    with pytest.raises(NotImplementedError):
+        await backend.sign_async("b.bin")
+    await backend.write_text_async("note.txt", "hello", if_not_exists=True)
+    with pytest.raises(FileExistsError):
+        await backend.write_text_async("note.txt", "overwrite", if_not_exists=True)
+
+
+@pytest.mark.parametrize("path", ["../secret.txt", "nested/../../secret.txt", "memory://sql/../secret.txt"])
+def test_sqlspec_storage_rejects_traversal(path: str) -> None:
+    """Keys cannot traverse outside the configured object namespace."""
+    backend = SQLSpecObjectStoreBackend("memory://sql", base_path="tenant-a")
+    with pytest.raises(ValueError):
+        backend.read_bytes_sync(path)
+
+
+def test_sqlspec_storage_rejects_traversal_prefix() -> None:
+    """Invalid base prefixes fail before any object operation."""
+    with pytest.raises(ValueError, match="traversal"):
+        SQLSpecObjectStoreBackend("memory://sql", base_path="../tenant-a")
 
 
 def test_sqlspec_object_store_backend_protocol_arrow_and_sync_pipeline() -> None:
