@@ -37,6 +37,13 @@ use crate::store::{
     StoredObjectMeta, block_on_storage, runtime_handle,
 };
 
+pyo3::create_exception!(
+    vertebra._storage,
+    PreconditionError,
+    PyPermissionError,
+    "An atomic conditional storage operation conflicted with the current object state."
+);
+
 fn to_py_err(err: StorageError) -> PyErr {
     match err {
         StorageError::InvalidUrl(u, msg) => PyValueError::new_err(format!("{u}: {msg}")),
@@ -45,7 +52,7 @@ fn to_py_err(err: StorageError) -> PyErr {
             PyFileExistsError::new_err(format!("Object already exists at '{path}': {message}"))
         }
         StorageError::Precondition { path, message } => {
-            PyPermissionError::new_err(format!("Precondition failed for '{path}': {message}"))
+            PreconditionError::new_err(format!("Precondition failed for '{path}': {message}"))
         }
         StorageError::ObjectStore(object_store::Error::NotFound { path, source }) => {
             PyFileNotFoundError::new_err(format!("Object not found: {path} ({source})"))
@@ -54,7 +61,10 @@ fn to_py_err(err: StorageError) -> PyErr {
             PyFileExistsError::new_err(format!("Object already exists at '{path}': {source}"))
         }
         StorageError::ObjectStore(object_store::Error::Precondition { path, source }) => {
-            PyPermissionError::new_err(format!("Precondition failed for '{path}': {source}"))
+            PreconditionError::new_err(format!("Precondition failed for '{path}': {source}"))
+        }
+        StorageError::ObjectStore(object_store::Error::PermissionDenied { path, source }) => {
+            PyPermissionError::new_err(format!("Permission denied for '{path}': {source}"))
         }
         StorageError::Io(io_err) => match io_err.kind() {
             std::io::ErrorKind::NotFound => PyFileNotFoundError::new_err(io_err.to_string()),
@@ -1614,6 +1624,7 @@ fn assemble_gcs_iam_v4_url(
 
 #[pymodule(gil_used = false)]
 pub fn _storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("PreconditionError", m.py().get_type::<PreconditionError>())?;
     m.add_class::<PySyncObjectStore>()?;
     m.add_class::<PyAsyncObjectStore>()?;
     m.add_class::<PyObjectMeta>()?;
@@ -1637,4 +1648,66 @@ pub fn _storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_gcs_v4_canonical_request, m)?)?;
     m.add_function(wrap_pyfunction!(assemble_gcs_iam_v4_url, m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn test_precondition_error_mapping() {
+        Python::initialize();
+        Python::attach(|py| {
+            let cases = [
+                (
+                    StorageError::Precondition {
+                        path: "item.bin".into(),
+                        message: "stale version".into(),
+                    },
+                    py.get_type::<PreconditionError>(),
+                ),
+                (
+                    StorageError::ObjectStore(object_store::Error::Precondition {
+                        path: "item.bin".into(),
+                        source: Box::new(Error::other("stale version")),
+                    }),
+                    py.get_type::<PreconditionError>(),
+                ),
+                (
+                    StorageError::AlreadyExists {
+                        path: "item.bin".into(),
+                        message: "already exists".into(),
+                    },
+                    py.get_type::<PyFileExistsError>(),
+                ),
+                (
+                    StorageError::ObjectStore(object_store::Error::AlreadyExists {
+                        path: "item.bin".into(),
+                        source: Box::new(Error::new(ErrorKind::AlreadyExists, "already exists")),
+                    }),
+                    py.get_type::<PyFileExistsError>(),
+                ),
+                (
+                    StorageError::Io(Error::new(ErrorKind::PermissionDenied, "denied")),
+                    py.get_type::<PyPermissionError>(),
+                ),
+                (
+                    StorageError::ObjectStore(object_store::Error::PermissionDenied {
+                        path: "item.bin".into(),
+                        source: Box::new(Error::new(ErrorKind::PermissionDenied, "denied")),
+                    }),
+                    py.get_type::<PyPermissionError>(),
+                ),
+            ];
+            for (error, expected_type) in cases {
+                assert!(to_py_err(error).get_type(py).is(&expected_type));
+            }
+            assert!(
+                py.get_type::<PreconditionError>()
+                    .is_subclass_of::<PyPermissionError>()
+                    .expect("native exception inheritance is valid")
+            );
+        });
+    }
 }

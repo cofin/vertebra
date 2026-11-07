@@ -8,6 +8,7 @@ __all__ = [
     "AsyncObjectStore",
     "AsyncStreamReader",
     "ObjectMeta",
+    "PreconditionError",
     "RustTaskAwaitable",
     "StorageBuffer",
     "SyncMultipartUpload",
@@ -27,6 +28,9 @@ __all__ = [
     "py_verify_s3_v4_url",
     "sign_oci_par_url",
 ]
+
+class PreconditionError(PermissionError):
+    """An atomic conditional write conflicted with the current object state."""
 
 @final
 class StorageBuffer:

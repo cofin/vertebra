@@ -1,6 +1,7 @@
 """Unit tests for vertebra.storage (SyncObjectStore, AsyncObjectStore, zero-copy memoryview, and V4 presigning)."""
 
 import ast
+import subprocess
 import sys
 import threading
 from collections.abc import AsyncIterator, Iterator
@@ -10,6 +11,7 @@ from typing import Any, cast
 
 import pytest
 
+import vertebra._storage as native_storage
 import vertebra.storage as storage
 from vertebra._storage import StorageBuffer
 from vertebra.storage import (
@@ -456,3 +458,44 @@ async def test_explicit_memory_config_and_to_async_share_rust_in_memory_backend(
 
     roundtrip_sync = async_store.to_sync()
     assert roundtrip_sync.get("k2") == b"v2"
+
+
+@pytest.mark.anyio
+async def test_conditional_conflicts_expose_exact_native_exception() -> None:
+    """Conditional conflicts share one public native type without changing stored bytes."""
+    conflict = storage.PreconditionError
+    assert conflict is native_storage.PreconditionError
+    assert issubclass(conflict, PermissionError)
+    store = SyncObjectStore("memory://")
+    store.put("versioned.bin", b"first")
+    with pytest.raises(conflict) as sync_error:
+        store.put("versioned.bin", b"replacement", if_match="wrong-etag")
+    assert type(sync_error.value) is conflict
+    assert store.get("versioned.bin") == b"first"
+    async_store = store.to_async()
+    with pytest.raises(conflict) as async_error:
+        await async_store.put("versioned.bin", b"replacement", if_match="wrong-etag")
+    assert type(async_error.value) is conflict
+    assert await async_store.get("versioned.bin") == b"first"
+    with pytest.raises(FileExistsError) as create_error:
+        store.put("versioned.bin", b"replacement", if_not_exists=True)
+    assert type(create_error.value) is FileExistsError
+
+
+def test_storage_conflict_exception_loads_only_when_requested() -> None:
+    """A fresh process can import storage without its optional native extension."""
+    code = """
+import sys
+sys.modules["vertebra._storage"] = None
+import vertebra.storage as storage
+from vertebra.typing import MissingDependencyError
+for resource in (lambda: storage.PreconditionError, lambda: storage.SyncObjectStore("memory://")):
+    try:
+        resource()
+    except MissingDependencyError as exc:
+        assert exc.install_package == "vertebra-core[storage]"
+    else:
+        raise AssertionError("Optional native resource loaded without the storage extension")
+"""
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
