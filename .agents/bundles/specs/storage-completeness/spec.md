@@ -12,19 +12,19 @@ chapters:
   - ch03-litestar-and-range-streaming
   - ch04-arrow-shm-and-docs
 current_chapter: ch01-native-engine-and-auth
-current_task: "storage-completeness:ch01:t04"
+current_task: null
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/gap-analysis_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
 plan_commit: cdb978d3
-state_revision: 3
-last_verified_checkpoint: null
+state_revision: 4
+last_verified_checkpoint: 7ad5269a
 last_reviewed_chapter: null
 last_reviewed_commit: null
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-07T17:32:04Z"
+updated_at: "2026-11-07T18:04:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
@@ -185,8 +185,8 @@ Progress: `[0/3 files documented]` (executed in `ch04-arrow-shm-and-docs` task `
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ 494ad92b` on `feat/storage-updates` above `main @ 077a3fe9`; `plan_revision: 2`, `state: active`.
-- **Active Chapter & Next Task**: `ch01-native-engine-and-auth` (`storage-completeness:ch01:t04`; `ch01:t01` completed at `beb6a972`, `ch01:t02` completed at `cb6b0647`, `ch01:t03` completed at `494ad92b`).
+- **Verified Baseline**: `HEAD @ 7ad5269a` on `feat/storage-updates` above `main @ 077a3fe9`; `plan_revision: 2`, `state: active`.
+- **Active Chapter & Next Task**: `ch01-native-engine-and-auth` (`ch01:t01` completed at `beb6a972`, `ch01:t02` completed at `cb6b0647`, `ch01:t03` completed at `494ad92b`, `ch01:t04` completed at `7ad5269a`; ready for `ch01` closeout review).
 - **Documentation & OKF Status**: `[0/3 files documented]` scheduled in `ch04-arrow-shm-and-docs` (`storage-completeness:ch04:t03`).
 - **Active Invariants**: Zero `asyncio.to_thread` in `src/py/vertebra/storage/_store.py`; lazy `import_optional("vertebra._storage")` at construction time; `mypy.stubtest vertebra._storage` green after every FFI change.
 
