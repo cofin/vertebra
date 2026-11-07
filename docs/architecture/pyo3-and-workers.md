@@ -37,4 +37,4 @@ When a `RequestBatch` arrives in `vertebra.server.worker.Worker`:
 ## Native Database Pools & Object Storage (`vertebra-db`, `vertebra-storage`)
 
 - **`vertebra-db`**: Implements Rust connection pools, prepared statement caches (`StatementCache`), cross-worker connection leases (`LeaseBroker`), Arrow shared-memory cursors (`ArrowCursor`), and Cloud SQL (`:3307`) / AlloyDB (`:5433`) dialers exposed through `vertebra._vertebra`.
-- **`vertebra-storage`**: Compiles to `vertebra._storage`, wrapping the Rust `object_store` crate with zero-copy `StorageBuffer` views, `SyncReadableFile` and `AsyncReadableFile` random-access readers for PyArrow/Parquet, and cloud URL presigning (`S3`, `GCS`, `Azure`, `R2`, `OCI`, `HMAC`).
+- **`vertebra-storage`**: Compiles to `vertebra._storage`, wrapping the Rust `object_store` crate with zero-copy `StorageBuffer` views, `SyncReadableFile` and `AsyncReadableFile` random-access readers for PyArrow/Parquet, and cloud URL presigning (`S3`, `GCS`, `Azure`, `OCI`, `HMAC`).
