@@ -5,7 +5,7 @@ chapter_id: ch01-wheel-scaffold-and-config
 title: Implement pure PostgresConfig validation and sanitized PostgresError categories
 description: Declare the complete owned PostgresConfig option record matching contracts.md, enforce pure scalar/port/timeout/NUL/PEM/five-spelling TlsMode validation with secret redaction, and define ServerError and PostgresError categories.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -25,14 +25,14 @@ tests:
 estimated_loc: 235
 plan_revision: 4
 plan_commit: 45ff9563
-state_revision: 0
-claimed_by: agent:ch01-t04
-claimed_at: "2026-11-07T20:49:04Z"
+state_revision: 1
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-07T20:50:03Z"
-last_verified_commit: null
+last_verified_commit: dabd3ca2
 verification_evidence:
   - "UV_NO_SYNC=1; PYO3_PYTHON=${PWD}/.venv/bin/python; CARGO_TARGET_DIR=/tmp/vtb-cargo-target"
   - "Red: cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_wire_tests --locked: exit 101; unresolved public _postgres::config and _postgres::errors imports before implementation"
@@ -40,10 +40,10 @@ verification_evidence:
   - "flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked: exit 0; 7 integration tests, 0 unit/doc tests"
   - "cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings: exit 0"
   - "rustfmt --edition 2024 --check on lib.rs, config.rs, errors.rs, postgres_wire_tests.rs: exit 0"
-  - "git diff --check: exit 0; changes remain unstaged for coordinator signed implementation and SHA receipt commits"
+  - "git diff --check: exit 0"
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T16:40:00Z"
-commit: null
+updated_at: "2026-11-07T20:51:16Z"
+commit: dabd3ca2
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md

@@ -39,7 +39,7 @@ chapters:
   - ch30-user-and-domain-docs
   - ch31-final-review-and-release-gate
 current_chapter: ch01-wheel-scaffold-and-config
-current_task: "native-postgres-driver:ch01:t04"
+current_task: null
 parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
@@ -104,7 +104,7 @@ tags:
 <!-- truth: start -->
 - **Standalone Optional Wheel**: `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owns live PostgreSQL Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`) without linking database clients into `vertebra-core` [^pg-conn-rs] [^pg-core-rs].
 - **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB Admin discovery + mTLS + IAM), lossless codecs, statement caching, single-`Sync` `pipeline()`, binary `COPY`, native `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, and `pgoutput` v1 logical replication ship together with full `psycopg`/`asyncpg` removal [^py-async-rs] [^arrow-shm-rs] [^pg-driver-py] [^sqlspec-py].
-- **Nested Chapter Roadmap (`plan_revision: 4`)**: Decomposed into `31` dependency-ordered chapters (`ch01`–`ch31`, `111` vertical-slice tasks, each owning `<= 3` production files) anchored at `plan_commit: 45ff9563` with `current_chapter: ch01-wheel-scaffold-and-config` (`native-postgres-driver:ch01:t04`).
+- **Nested Chapter Roadmap (`plan_revision: 4`)**: Decomposed into `31` dependency-ordered chapters (`ch01`–`ch31`, `111` vertical-slice tasks, each owning `<= 3` production files) anchored at `plan_commit: 45ff9563` with `current_chapter: ch01-wheel-scaffold-and-config` (`4/4` tasks complete; checkpoint and review pending).
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -319,8 +319,8 @@ Every worksheet (`111` total across `31` chapters) executes in one bounded invoc
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ 05fff946` above `main @ 077a3fe9`; `state: active`, `has_chapters: true`, `plan_revision: 4`, `plan_commit: 45ff9563`.
-- **Active Chapter & Next Task**: [ch01-wheel-scaffold-and-config](chapters/ch01-wheel-scaffold-and-config/spec.md) (`native-postgres-driver:ch01:t04`); all `31` chapters (`111` vertical-slice tasks) have `planning_status: complete`; `ch01` is active and `ch02`–`ch31` are planned (`3/111` completed; `ch01:t01`–`t03` verified, `ch01:t04` in progress).
+- **Verified Baseline**: `HEAD @ dabd3ca2` above `main @ 077a3fe9`; `state: active`, `has_chapters: true`, `plan_revision: 4`, `plan_commit: 45ff9563`.
+- **Active Chapter & Review**: [ch01-wheel-scaffold-and-config](chapters/ch01-wheel-scaffold-and-config/spec.md) (`4/4` tasks complete; checkpoint and review pending); all `31` chapters (`111` vertical-slice tasks) have `planning_status: complete`; `ch01` is active and `ch02`–`ch31` are planned (`3/111` completed; `ch01:t01`–`t03` verified, `ch01:t04` in progress).
 - **Documentation & OKF Status**: `[0/11 files documented]`, scheduled in [ch30-user-and-domain-docs](chapters/ch30-user-and-domain-docs/spec.md) (`ch30:t01`–`ch30:t04`), followed by final complete-driver review and acceptance in [ch31-final-review-and-release-gate](chapters/ch31-final-review-and-release-gate/spec.md) (`ch31:t01`).
 - **Delivery & Next Action**: Complete single-PR delivery on `feat/native-postgres-driver`; intermediate chapters never trigger early `/flow:finish` or `/flow:archive`. Next canonical command: `/flow:implement native-postgres-driver`.
 
