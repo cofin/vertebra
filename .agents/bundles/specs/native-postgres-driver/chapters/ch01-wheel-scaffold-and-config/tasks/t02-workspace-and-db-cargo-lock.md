@@ -5,7 +5,7 @@ chapter_id: ch01-wheel-scaffold-and-config
 title: Register workspace member, add vertebra-db socket2/half pins, and lock Cargo.lock
 description: Register vertebra-postgres in src/rs/Cargo.toml, add socket2 =0.6.5 and half =2.7.1 to src/rs/vertebra-db/Cargo.toml, and resolve src/rs/Cargo.lock so workspace builds pass with --locked.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: static_validation
 depends_on:
@@ -24,18 +24,18 @@ tests: []
 estimated_loc: 45
 plan_revision: 4
 plan_commit: 45ff9563
-state_revision: 0
-claimed_by: agent:ch01-t02
-claimed_at: "2026-11-07T20:10:35.703011+00:00"
+state_revision: 1
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-07T20:16:22.351888+00:00"
+last_verified_commit: 9e128425
+verification_evidence: "exit 0: manifest assertions; pre-existing lock package/version identities preserved; workspace cargo check --locked; workspace all-targets Clippy --features tls,compression,gcp --locked -- -D warnings; crate cargo test --locked. PYO3_PYTHON=${PWD}/.venv/bin/python; CARGO_TARGET_DIR=/tmp/vtb-cargo-target; UV_NO_SYNC=1."
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T16:40:00Z"
-commit: null
+updated_at: "2026-11-07T20:16:22.351888+00:00"
+commit: 9e128425
 sources:
   - id: ws-cargo
     resource: src/rs/Cargo.toml
@@ -114,10 +114,12 @@ Commit as `build(postgres): register workspace member and lock Cargo dependencie
 
 ## Acceptance Criteria
 
-- [ ] `src/rs/Cargo.toml` includes `"vertebra-postgres"` in `[workspace].members` and `src/rs/vertebra-db/Cargo.toml` pins `socket2 = { version = "=0.6.5", features = ["all"] }` and `half = "=2.7.1"` (R1).
-- [ ] `src/rs/Cargo.lock` is committed in sync such that `cargo check --manifest-path src/rs/Cargo.toml --workspace --locked` and `--locked` workspace Clippy exit `0` (R1).
+- [x] `src/rs/Cargo.toml` includes `"vertebra-postgres"` in `[workspace].members` and `src/rs/vertebra-db/Cargo.toml` pins `socket2 = { version = "=0.6.5", features = ["all"] }` and `half = "=2.7.1"` (R1).
+- [x] `src/rs/Cargo.lock` is committed in sync such that `cargo check --manifest-path src/rs/Cargo.toml --workspace --locked` and `--locked` workspace Clippy exit `0` (R1).
 
 ## Notes & Discoveries
+
+- [2026-11-07] Registered the crate and resolved 17 new registry package entries without changing any existing locked package/version/source identity. Native gates select the isolated Python 3.12 via `PYO3_PYTHON`; the default system Python 3.14 has no linkable `libpython3.14`.
 
 - [2026-11-07 16:40] Locking `socket2` and `half` in `vertebra-db` alongside `vertebra-postgres`'s `postgres-protocol`, `x509-parser = "=0.18.1"`, `rsa` `["pem", "sha2"]`, `rustls-pemfile`, `half`, and `arrow-*` pins in `ch01:t02` prevents unowned `src/rs/Cargo.lock` churn across Chapters 02–28 (the only task that touches `Cargo.toml` + `Cargo.lock` later is `ch17:t04` when wiring `jiff = "=0.2.39"`).
 

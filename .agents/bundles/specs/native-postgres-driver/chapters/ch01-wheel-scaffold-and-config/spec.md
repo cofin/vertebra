@@ -9,7 +9,7 @@ state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: "native-postgres-driver:ch01:t02"
+current_task: "native-postgres-driver:ch01:t03"
 plan_revision: 4
 plan_commit: 45ff9563
 state_revision: 0
@@ -138,7 +138,7 @@ Progress: `[0/0 files documented in ch01]` (`src/py/vertebra/_postgres.pyi` modu
 ## 5. Implementation Plan
 
 - [x] [5f25a4a0] native-postgres-driver:ch01:t01 — Scaffold vertebra-postgres Cargo manifest, build script, and free-threaded PyO3 module (tasks/t01-crate-and-pymodule-scaffold.md)
-- [~] native-postgres-driver:ch01:t02 — Register workspace member, add vertebra-db socket2/half pins, and lock Cargo.lock (tasks/t02-workspace-and-db-cargo-lock.md)
+- [x] [9e128425] native-postgres-driver:ch01:t02 — Register workspace member, add vertebra-db socket2/half pins, and lock Cargo.lock (tasks/t02-workspace-and-db-cargo-lock.md)
 - [ ] native-postgres-driver:ch01:t03 — Wire vertebra-postgres wheel, _postgres.pyi stub, and Makefile build/test targets (tasks/t03-wheel-stub-and-makefile-matrix.md)
 - [ ] native-postgres-driver:ch01:t04 — Implement pure PostgresConfig validation and sanitized PostgresError categories (tasks/t04-configuration-and-error-categories.md)
 
@@ -147,7 +147,7 @@ Progress: `[0/0 files documented in ch01]` (`src/py/vertebra/_postgres.pyi` modu
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Baseline**: `HEAD @ 45ff9563`; chapter `state: active`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: `t02`, `t03`, `t04` (`3/4` pending; `t01` verified at `5f25a4a0`).
+- **Remaining Tasks in Chapter**: `t03`, `t04` (`2/4` pending; `t01` verified at `5f25a4a0`, `t02` at `9e128425`).
 - **Documentation & OKF Status**: `[0/0 files documented in ch01]`; `_postgres.pyi` wired in `t03`, root `pyproject.toml`/`uv.lock`/`areas.toml` wired in `ch08:t02`–`t04`, and full docs/OKF scheduled in `ch30`.
 - **Downstream Dependents**: Unblocks `ch02-wire-codec-and-session-startup` (`ch02:t01` depends on `ch01:t04`).
 
