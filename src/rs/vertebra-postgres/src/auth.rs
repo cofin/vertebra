@@ -17,17 +17,30 @@ enum AuthPhase {
 
 pub(crate) struct Authentication {
     phase: AuthPhase,
+    md5_response: Option<String>,
 }
 
 impl Authentication {
     pub(crate) fn new() -> Self {
         Self {
             phase: AuthPhase::Initial,
+            md5_response: None,
         }
     }
 
     pub(crate) fn is_complete(&self) -> bool {
         self.phase == AuthPhase::Complete
+    }
+
+    pub(crate) fn redact_server_text(&self, text: &str, config: &PostgresConfig) -> String {
+        let mut redacted = text.to_owned();
+        if let Some(response) = &self.md5_response {
+            redacted = redacted.replace(response, "<redacted>");
+        }
+        if let Some(password) = config.password.as_deref().filter(|value| !value.is_empty()) {
+            redacted = redacted.replace(password, "<redacted>");
+        }
+        redacted
     }
 
     pub(crate) fn handle_message(
@@ -56,11 +69,15 @@ impl Authentication {
                 })?;
                 if let Message::AuthenticationMd5Password(body) = msg {
                     let digest = md5_hash(config.user.as_bytes(), password.as_bytes(), body.salt());
-                    password_message(digest.as_bytes(), out)
+                    password_message(digest.as_bytes(), out).map_err(|_| {
+                        PostgresError::Config("invalid authentication password".into())
+                    })?;
+                    self.md5_response = Some(digest);
                 } else {
-                    password_message(password.as_bytes(), out)
+                    password_message(password.as_bytes(), out).map_err(|_| {
+                        PostgresError::Config("invalid authentication password".into())
+                    })?;
                 }
-                .map_err(|_| PostgresError::Config("invalid authentication password".into()))?;
                 self.phase = AuthPhase::PasswordSent;
             }
             Message::AuthenticationKerberosV5

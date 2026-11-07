@@ -351,7 +351,7 @@ async fn startup(
                         .map_err(|error| PostgresError::Protocol(error.to_string()))?;
                 }
             }
-            Message::ErrorResponse(body) => return Err(server_error(body)?),
+            Message::ErrorResponse(body) => return Err(server_error(body, &auth, config)?),
             _ => {
                 return Err(PostgresError::Protocol(
                     "unexpected startup message or order".into(),
@@ -363,16 +363,22 @@ async fn startup(
 
 fn server_error(
     body: postgres_protocol::message::backend::ErrorResponseBody,
+    auth: &Authentication,
+    config: &PostgresConfig,
 ) -> Result<PostgresError, PostgresError> {
     use fallible_iterator::FallibleIterator;
     let fields = body
         .fields()
         .map(|field| {
+            let value = std::str::from_utf8(field.value_bytes())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
             Ok((
                 field.type_(),
-                std::str::from_utf8(field.value_bytes())
-                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
-                    .to_owned(),
+                if matches!(field.type_(), b'S' | b'V' | b'C' | b'P' | b'p' | b'L') {
+                    value.to_owned()
+                } else {
+                    auth.redact_server_text(value, config)
+                },
             ))
         })
         .collect::<Vec<_>>()

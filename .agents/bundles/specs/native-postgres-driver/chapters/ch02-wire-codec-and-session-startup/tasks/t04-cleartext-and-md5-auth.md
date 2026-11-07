@@ -28,25 +28,25 @@ tests:
 estimated_loc: 210
 plan_revision: 6
 plan_commit: 8833b064
-state_revision: 1
+state_revision: 2
 claimed_by: agent:ch02-credential-remediation
 claimed_at: "2026-11-07T23:37:28Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: "2026-11-07T23:09:05Z"
-last_verified_commit: "67421061"
+last_verified_at: "2026-11-07T23:43:16Z"
+last_verified_commit: null
 verification_evidence:
-  red: 'The password_ TCP suite exits 101 against the trust-only baseline: all 8 test groups fail before production changes.'
-  focused: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_auth_wire_tests password_ exits 0: 8 real TCP peer test groups."
-  aggregate: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres exits 0 under the shared SHM test lock: 9 codec, 8 auth, 10 TLS, and 20 existing wire/config/error tests; zero failures or ignores."
-  lint: "cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings exits 0 without lint allowances."
+  red: "Committed pre-fix session consumer fails all three password_server_echo regressions with exit 101, including independent cleartext and actual captured MD5 wire credentials in Display; the protocol-preservation regression separately fails against the C-only exemption."
+  focused: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked --test postgres_auth_wire_tests password_ exits 0: 13 real TCP authentication test groups."
+  aggregate: "flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked exits 0: 54 tests (9 codec, 13 auth, 10 TLS, 22 wire/config/error), zero failures or ignores."
+  lint: "cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings exits 0 without lint allowances."
   formatting: "cargo fmt --manifest-path src/rs/Cargo.toml -p vertebra-postgres -- --check and git diff --check exit 0."
   review_privacy: "UV_NO_SYNC=1 uv run --no-sync python -m tools.scripts.review_setup validate exits 0."
   environment: "UV_NO_SYNC=1; PYO3_PYTHON=${PWD}/.venv/bin/python; dedicated Cargo target; aggregate tests acquire the shared SHM test lock."
-  checkpoint: "Completed source receipt: 67421061. Chapter checkpoint 7bf8e2e3 passes all 47 Rust tests and locked all-target Clippy with -D warnings."
+  checkpoint: "Source and tests are verified; parent binds the signed source SHA before completion."
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T23:37:28Z"
+updated_at: "2026-11-07T23:43:16Z"
 commit: null
 sources:
   - id: proto-research
@@ -83,25 +83,26 @@ Implement the crate-private `auth::Authentication` state machine in `src/rs/vert
   - Declare `pub(crate) mod auth;`.
 - `src/rs/vertebra-postgres/src/auth.rs`:
   - `#[derive(Debug, Clone, Copy, PartialEq, Eq)] enum AuthPhase { Initial, PasswordSent, Complete }`
-  - `pub(crate) struct Authentication { phase: AuthPhase }`:
+  - `pub(crate) struct Authentication { phase: AuthPhase, md5_response: Option<String> }`:
     - `pub(crate) fn new() -> Self` (`AuthPhase::Initial`).
     - `pub(crate) fn is_complete(&self) -> bool` (`self.phase == AuthPhase::Complete`).
+    - `pub(crate) fn redact_server_text(&self, text: &str, config: &PostgresConfig) -> String` masks the actual encoded MD5 response and non-empty configured password before startup free-text diagnostic ownership; severity, SQLSTATE, numeric positions, and source-line protocol fields remain unchanged. The private authentication object retains only the actual challenge response and has no `Debug` implementation.
     - `pub(crate) fn handle_message(&mut self, msg: &postgres_protocol::message::backend::Message, config: &PostgresConfig, out: &mut BytesMut) -> Result<bool, PostgresError>` returning `Ok(true)` when `msg` was an authentication message (writing any outbound response frame into `out`) and `Ok(false)` for non-auth messages:
       - `Message::AuthenticationOk`: allowed in `Initial` (trust) or `PasswordSent` -> sets `Complete`; in `Complete` returns `Err(PostgresError::Protocol(_))`.
       - `Message::AuthenticationCleartextPassword`: allowed ONLY in `Initial` (else `PostgresError::Protocol`); requires `config.password.as_deref()` (missing `None` -> `PostgresError::Config`); encodes `frontend::password_message(password.as_bytes(), out)` and sets `PasswordSent`.
-      - `Message::AuthenticationMd5Password(body)`: allowed ONLY in `Initial` (else `PostgresError::Protocol`); requires `config.password.as_deref()` (missing `None` -> `PostgresError::Config`); computes `let digest = postgres_protocol::authentication::md5_hash(config.user.as_bytes(), password.as_bytes(), body.salt());`, encodes `frontend::password_message(digest.as_bytes(), out)`, and sets `PasswordSent`.
+      - `Message::AuthenticationMd5Password(body)`: allowed ONLY in `Initial` (else `PostgresError::Protocol`); requires `config.password.as_deref()` (missing `None` -> `PostgresError::Config`); computes `let digest = postgres_protocol::authentication::md5_hash(config.user.as_bytes(), password.as_bytes(), body.salt());`, encodes `frontend::password_message(digest.as_bytes(), out)`, retains that actual response for diagnostic redaction, and sets `PasswordSent`.
       - `Message::AuthenticationKerberosV5 | AuthenticationScmCredential | AuthenticationGss | AuthenticationSspi | AuthenticationGssContinue(_) | AuthenticationSasl(_)`: returns `Err(PostgresError::UnsupportedAuth(_))` (`AuthenticationSasl` is extended in `ch03:t01`).
       - `Message::AuthenticationSaslContinue(_) | AuthenticationSaslFinal(_)` in `Initial` / `PasswordSent` / `Complete`: returns `Err(PostgresError::Protocol(_))`.
 - `src/rs/vertebra-postgres/src/session.rs`:
   - Delegate authentication `Message` frames in `ConnectAttempt::run` to `Authentication::handle_message`, flushing `out` under the single outer `deadline` whenever `!out.is_empty()`.
-  - Accept `ParameterStatus`, `BackendKeyData`, and `ReadyForQuery(b'I')` strictly when `auth.is_complete()` is `true`; `NoticeResponse` leaves `Authentication` unchanged in any phase.
+  - Accept `ParameterStatus`, `BackendKeyData`, and `ReadyForQuery(b'I')` strictly when `auth.is_complete()` is `true`; `NoticeResponse` validates all lazy fields and leaves `Authentication` unchanged in any phase. Startup `ErrorResponse` free text is redacted before constructing typed server errors; protocol tags `S`, `V`, `C`, `P`, `p`, and `L` remain exact even when they coincide with a low-entropy password.
 
 ## Edge Cases & Error Semantics
 
 - Missing `config.password` (`None`) on cleartext or MD5 challenge fails locally with `PostgresError::Config` before transmitting any `PasswordMessage` frame, and closes the socket.
 - Wrong password causing server `ErrorResponse` `28P01` returns `PostgresError::Server(err)` (`err.sqlstate == "28P01"`), closes the socket (`EOF` observed by server), and never retries on the same stream.
 - Duplicate challenges (`AuthenticationCleartextPassword` after `PasswordSent`, `AuthenticationMd5Password` after `AuthenticationCleartextPassword`, or second `AuthenticationOk`) fail with `PostgresError::Protocol`.
-- Error strings and `Debug` representations never contain the configured password or computed MD5 digest.
+- Untrusted human/free-text diagnostics never reflect the non-empty configured password or actual submitted MD5 token into error strings or `Debug` fields. Structured severity, SQLSTATE, numeric positions, and source-line protocol values remain exact even when they coincide with a low-entropy password; private credential storage has no `Debug` implementation.
 
 ## Public-Seam Test Blueprint
 
@@ -116,6 +117,8 @@ Implement the crate-private `auth::Authentication` state machine in `src/rs/vert
 | `password_wrong_28p01_and_redaction` | `password = Some("ultra-secret-pw")`, server replies to `PasswordMessage` with `ErrorResponse` `C="28P01"`, `M="password authentication failed for user \"alice\""` | Returns `Err(PostgresError::Server(err))` with `err.sqlstate == "28P01"`, formatted error excludes `"ultra-secret-pw"`, and server observes socket EOF without retry. |
 | `password_duplicate_challenge_or_ok` | Server sends `AuthenticationCleartextPassword` twice (without `AuthenticationOk`), or sends `AuthenticationOk` twice after password | Returns `Err(PostgresError::Protocol(_))` and closes socket. |
 | `password_unsupported_mechanisms` | Server sends `AuthenticationKerberosV5` (`2`), `AuthenticationGss` (`7`), `AuthenticationSspi` (`9`), or `AuthenticationScmCredential` (`6`) | Each returns `Err(PostgresError::UnsupportedAuth(_))` and closes socket. |
+| `password_server_echo_cleartext_is_redacted` / `password_server_echo_md5_is_redacted` | Server reflects configured password and actual captured response into `M`, `D`, and `W` | Typed `28P01`/`FATAL`, safe hint and position remain; free-text values become `<redacted>`, Display/Debug omit noncoincidental credentials, and peer observes EOF. |
+| `password_redaction_preserves_protocol_fields` | Password `17` or `FATAL`, server echoes it into `M`/`D` and sends structured `S/V=FATAL`, `C=28P01`, `P/p/L=17` | Free-text echoes are masked; every structured protocol field remains exact, and peer observes EOF. |
 
 ## Verification
 
@@ -132,14 +135,14 @@ Commit as `feat(postgres): authenticate password and MD5 connections`.
 ## Acceptance Criteria
 
 - [x] `auth::Authentication` handles trust, cleartext, and MD5 challenges strictly from `Initial`, delegating framing and hashing to `postgres_protocol` without custom crypto (R5).
-- [x] Missing passwords, `28P01` server rejections, duplicate challenges/OKs, and unsupported GSS/SSPI/Kerberos challenges fail terminally with redacted diagnostics and immediate socket closure (R5).
+- [x] Missing passwords, `28P01` server rejections, duplicate challenges/OKs, and unsupported GSS/SSPI/Kerberos challenges fail terminally with credential-safe free-text diagnostics and immediate socket closure; typed protocol values remain exact when coincidentally equal to a low-entropy password (R5).
 - [x] `session.rs` rejects `ParameterStatus`, `BackendKeyData`, and `ReadyForQuery` prior to `Authentication::is_complete()` while tolerating `NoticeResponse` in any phase (R3, R5).
 
 ## Notes & Discoveries
 
 - Authentication responses use the pinned upstream encoders and MD5 helper. The TCP peer checks the literal `postgres`/`hunter2`/`01020304` response `md5c73cff48cd454994b0c263a04cdfc859` without deriving its expected value through production hashing.
-- Error formatting and Debug checks exclude both the configured password and the actual response captured by the peer. Missing credentials and unsupported mechanisms produce zero outbound password bytes; duplicate and server-rejected exchanges close without retry.
-- The startup suite covers 20 wire/configuration/error cases; the canonical password suite covers cleartext/MD5 exchanges and unsupported Kerberos, SCM, GSS, and SSPI challenges. Shared peer fixtures preserve deterministic publication-deadline barriers.
+- Startup free-text diagnostics mask the non-empty configured password and actual MD5 response before constructing `ServerError`; replacing the response first also protects credentials containing a password substring. Structured severity, SQLSTATE, numeric positions, and source line remain exact, including passwords `17` and `FATAL` that coincide with legitimate protocol values. Safe hint text remains observable. Real peers reflect credentials into primary, detail, and context fields, and verify that both Display and Debug exclude them while the socket reaches EOF. Pre-challenge errors redact the configured password; empty passwords do not alter server text. Missing credentials and unsupported mechanisms produce zero outbound password bytes; duplicate and server-rejected exchanges close without retry.
+- The startup suite covers 22 wire/configuration/error cases; the canonical password suite covers cleartext/MD5 exchanges and unsupported Kerberos, SCM, GSS, and SSPI challenges. Cleartext success accepts valid notices before challenge, after the password response, and after AuthenticationOk; MD5 success also accepts notices before challenge and while PasswordSent. Shared peer fixtures preserve deterministic publication-deadline barriers.
 
 [^proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — `postgres-protocol` password and MD5 authentication helpers.
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Startup authentication error mapping and redaction rules.

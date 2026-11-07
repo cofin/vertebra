@@ -109,9 +109,10 @@ async fn password_md5_success() {
         let mut startup = vec![0; len as usize - 4];
         stream.read_exact(&mut startup).await.unwrap();
         assert_eq!(&startup, b"\0\x03\0\0user\0postgres\0database\0prod\0application_name\0vertebra\0client_encoding\0UTF8\0\0");
-        support::send(&mut stream, &challenge(5)).await;
+        let notice = support::frame(b'N', b"SNOTICE\0Mstartup notice\0\0");
+        support::send(&mut stream, &[notice.clone(), challenge(5)].concat()).await;
         assert_eq!(password_frame(&mut stream).await, MD5_RESPONSE);
-        support::send(&mut stream, &support::trust()).await;
+        support::send(&mut stream, &[notice, support::trust()].concat()).await;
         support::eof(&mut stream).await;
     });
     let handle = SessionHandle::new(config);
@@ -164,6 +165,142 @@ async fn password_wrong_28p01_and_redaction() {
         assert_redacted(&error);
         assert_response_redacted(&error, &peer.await.unwrap());
     }
+}
+
+async fn server_echo(code: i32) {
+    let (listener, mut config) = support::listener().await;
+    config.password = Some("ultra-secret-pw".into());
+    let peer = tokio::spawn(async move {
+        let mut stream = support::accept(listener).await;
+        support::send(&mut stream, &challenge(code)).await;
+        let response = password_frame(&mut stream).await;
+        let credential = std::str::from_utf8(&response[5..response.len() - 1]).unwrap();
+        let fields = format!(
+            "SFATAL\0VFATAL\0C28P01\0Mrejected ultra-secret-pw and {credential}\0Ddetail {credential} / ultra-secret-pw\0Hsafe retry advice\0Wcontext ultra-secret-pw / {credential}\0P17\0\0"
+        );
+        support::send(&mut stream, &support::frame(b'E', fields.as_bytes())).await;
+        support::eof(&mut stream).await;
+        response
+    });
+    let handle = SessionHandle::new(config);
+    let error = rejected(connect(&handle).await, &handle);
+    let response = peer.await.unwrap();
+    assert_response_redacted(&error, &response);
+    assert_redacted(&error);
+    let PostgresError::Server(server) = error else {
+        panic!("expected typed server rejection")
+    };
+    assert_eq!(server.sqlstate, "28P01");
+    assert_eq!(server.severity, "FATAL");
+    assert_eq!(server.message, "rejected <redacted> and <redacted>");
+    assert!(
+        server
+            .diagnostics
+            .contains(&(b'H', "safe retry advice".into()))
+    );
+    assert!(server.diagnostics.contains(&(b'P', "17".into())));
+    assert!(
+        server
+            .diagnostics
+            .contains(&(b'D', "detail <redacted> / <redacted>".into()))
+    );
+    assert!(
+        server
+            .diagnostics
+            .contains(&(b'W', "context <redacted> / <redacted>".into()))
+    );
+}
+
+#[tokio::test]
+async fn password_server_echo_cleartext_is_redacted() {
+    server_echo(3).await;
+}
+
+#[tokio::test]
+async fn password_server_echo_md5_is_redacted() {
+    server_echo(5).await;
+}
+
+#[tokio::test]
+async fn password_server_echo_before_challenge_is_redacted() {
+    let (listener, mut config) = support::listener().await;
+    config.password = Some("ultra-secret-pw".into());
+    let peer = tokio::spawn(async move {
+        let mut stream = support::accept(listener).await;
+        support::send(
+            &mut stream,
+            &support::frame(b'E', b"SFATAL\0C28P01\0Mrejected ultra-secret-pw\0\0"),
+        )
+        .await;
+        support::eof(&mut stream).await;
+    });
+    let handle = SessionHandle::new(config);
+    let error = rejected(connect(&handle).await, &handle);
+    peer.await.unwrap();
+    assert_eq!(error.sqlstate(), Some("28P01"));
+    assert_redacted(&error);
+}
+
+#[tokio::test]
+async fn password_redaction_preserves_protocol_fields() {
+    for password in ["17", "FATAL"] {
+        let (listener, mut config) = support::listener().await;
+        config.password = Some(password.into());
+        let peer = tokio::spawn(async move {
+            let mut stream = support::accept(listener).await;
+            support::send(&mut stream, &challenge(3)).await;
+            let response = password_frame(&mut stream).await;
+            assert_eq!(&response[5..response.len() - 1], password.as_bytes());
+            let fields = format!(
+                "SFATAL\0VFATAL\0C28P01\0Mrejected {password}\0Ddetail {password}\0P17\0p17\0L17\0\0"
+            );
+            support::send(&mut stream, &support::frame(b'E', fields.as_bytes())).await;
+            support::eof(&mut stream).await;
+        });
+        let handle = SessionHandle::new(config);
+        let error = rejected(connect(&handle).await, &handle);
+        peer.await.unwrap();
+        let PostgresError::Server(server) = error else {
+            panic!("expected typed server rejection")
+        };
+        assert_eq!(server.sqlstate, "28P01");
+        assert_eq!(server.severity, "FATAL");
+        assert_eq!(server.message, "rejected <redacted>");
+        for (tag, value) in [
+            (b'S', "FATAL"),
+            (b'V', "FATAL"),
+            (b'C', "28P01"),
+            (b'P', "17"),
+            (b'p', "17"),
+            (b'L', "17"),
+            (b'D', "detail <redacted>"),
+        ] {
+            assert!(server.diagnostics.contains(&(tag, value.into())));
+        }
+    }
+}
+
+#[tokio::test]
+async fn password_empty_secret_preserves_server_text() {
+    let (listener, mut config) = support::listener().await;
+    config.password = Some(String::new());
+    let peer = tokio::spawn(async move {
+        let mut stream = support::accept(listener).await;
+        support::send(&mut stream, &challenge(3)).await;
+        assert_eq!(password_frame(&mut stream).await, b"p\0\0\0\x05\0");
+        support::send(
+            &mut stream,
+            &support::frame(b'E', b"SFATAL\0C28P01\0Mempty credentials refused\0\0"),
+        )
+        .await;
+        support::eof(&mut stream).await;
+    });
+    let handle = SessionHandle::new(config);
+    let error = rejected(connect(&handle).await, &handle);
+    peer.await.unwrap();
+    assert!(
+        matches!(error, PostgresError::Server(server) if server.message == "empty credentials refused")
+    );
 }
 
 async fn after_password(frames: Vec<u8>, code: i32) -> PostgresError {
