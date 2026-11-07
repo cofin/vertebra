@@ -102,7 +102,7 @@ class ObjectStoreBackend(StorageBackend):
         super().__init__(key=key, fs=sync_store, **kwargs)
         self._sync_store = sync_store
         self._async_store = async_store
-        self._prefix = prefix.strip("/")
+        self._prefix = SyncObjectStore._normalize_key(prefix, prefix=True)
         self.protocol = self._normalize_protocol(sync_store.scheme)
 
     @property
@@ -223,12 +223,12 @@ class ObjectStoreBackend(StorageBackend):
 
     def list_objects(self, prefix: PathLike = "") -> builtins.list[ObjectMeta]:
         """List stored object metadata under the given prefix synchronously."""
-        qualified_prefix = self._qualify(prefix) if prefix else self._prefix
+        qualified_prefix = self._qualify(prefix, prefix=True)
         return self._sync_store.list(qualified_prefix)
 
     async def list_objects_async(self, prefix: PathLike = "") -> builtins.list[ObjectMeta]:
         """List stored object metadata under the given prefix asynchronously."""
-        qualified_prefix = self._qualify(prefix) if prefix else self._prefix
+        qualified_prefix = self._qualify(prefix, prefix=True)
         return await self._async_store.list(qualified_prefix)
 
     def delete_object(self, paths: PathLike | Sequence[PathLike]) -> None:
@@ -293,10 +293,10 @@ class ObjectStoreBackend(StorageBackend):
             msg = f"URL signing is not configured for backend {self.key!r}: {exc}"
             raise NotImplementedError(msg) from exc
 
-    def _qualify(self, path: PathLike) -> str:
+    def _qualify(self, path: PathLike, *, prefix: bool = False) -> str:
         """Normalize a PathLike key and prepend any configured namespace prefix."""
         raw_path = Path(path).as_posix() if isinstance(path, (Path, os.PathLike)) else str(path)
-        cleaned = raw_path.strip().lstrip("/")
+        cleaned = SyncObjectStore._normalize_key(raw_path, prefix=prefix)
         if not self._prefix:
             return cleaned
         return f"{self._prefix}/{cleaned}" if cleaned else self._prefix

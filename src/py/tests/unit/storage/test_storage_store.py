@@ -499,3 +499,61 @@ for resource in (lambda: storage.PreconditionError, lambda: storage.SyncObjectSt
 """
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("invalid", [" key", "key ", "/key", "key/", "a//b", "a/./b", r"a\b", "a/%2e%2e/b"])
+async def test_store_rejects_ambiguous_keys_without_mutation(invalid: str) -> None:
+    """Invalid keys never become aliases or mutate either copy/rename operand."""
+    store = SyncObjectStore("memory://")
+    store.put("key", b"source")
+    store.put("dest", b"destination")
+    for operation in (
+        lambda: store.put(invalid, b"wrong"),
+        lambda: store.get(invalid),
+        lambda: store.head(invalid),
+        lambda: store.copy("key", invalid),
+        lambda: store.copy(invalid, "dest"),
+        lambda: store.rename("key", invalid),
+        lambda: store.rename(invalid, "dest"),
+    ):
+        with pytest.raises(ValueError):
+            operation()
+    async_store = store.to_async()
+    for operation in (
+        lambda: async_store.put(invalid, b"wrong"),
+        lambda: async_store.get(invalid),
+        lambda: async_store.head(invalid),
+        lambda: async_store.copy("key", invalid),
+        lambda: async_store.copy(invalid, "dest"),
+        lambda: async_store.rename("key", invalid),
+        lambda: async_store.rename(invalid, "dest"),
+    ):
+        with pytest.raises(ValueError):
+            await operation()
+    assert store.get("key") == b"source"
+    assert await async_store.get("dest") == b"destination"
+
+
+@pytest.mark.anyio
+async def test_store_raw_identity_and_prefix_grammar() -> None:
+    """Raw keys and listing prefixes keep exact identities in sync and async calls."""
+    store = SyncObjectStore("memory://")
+    values = {"café%": b"unicode", "literal%2F": b"percent", "literal%252F": b"double", "dir/file": b"nested"}
+    for key, value in values.items():
+        assert store.put(key, value).path == key
+    async_store = store.to_async()
+    assert {item.path: store.get(item.path) for item in store.list("/")} == values
+    assert {item.path: await async_store.get(item.path) for item in await async_store.list()} == values
+    assert [item.path for item in store.list("dir/")] == ["dir/file"]
+    assert [item.path for item in (await async_store.list_page("dir/"))[0]] == ["dir/file"]
+    assert [item.path for item in store.list_with_delimiter("dir/")[0]] == ["dir/file"]
+    assert len(store.list_page("/")[0]) == 4
+    assert len((await async_store.list_with_delimiter("/"))[0]) == 3
+    for prefix in (" dir", "dir ", "/dir", "dir//", "dir/./"):
+        for operation in (store.list, store.list_page, store.list_with_delimiter):
+            with pytest.raises(ValueError):
+                operation(prefix)
+        for async_operation in (async_store.list, async_store.list_page, async_store.list_with_delimiter):
+            with pytest.raises(ValueError):
+                await async_operation(prefix)

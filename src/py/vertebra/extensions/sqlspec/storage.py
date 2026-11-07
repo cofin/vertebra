@@ -110,10 +110,7 @@ class ObjectStoreBackend:
         if target is None or (isinstance(target, str) and not target.strip()):
             msg = "An explicit storage URI, configuration, or store is required"
             raise ImproperConfigurationError(msg)
-        effective_prefix = (base_path or prefix).strip("/")
-        if ".." in effective_prefix.split("/"):
-            msg = "Path traversal in storage base_path is not allowed"
-            raise ValueError(msg)
+        effective_prefix = SyncObjectStore._normalize_key(base_path or prefix, prefix=True)
         sync_store: SyncObjectStore | None = None
         async_store: AsyncObjectStore | None = None
 
@@ -216,7 +213,7 @@ class ObjectStoreBackend:
 
     def resolve_uri(self, path: str | Path) -> str:
         """Resolve a backend-relative path to its unsigned canonical address."""
-        resolved = self._qualify(path)
+        resolved = self._qualify(path, prefix=True)
         parsed = urlparse(self.store_uri)
         if self.protocol == "file":
             root = Path(parsed.netloc + parsed.path if parsed.netloc else parsed.path)
@@ -269,16 +266,16 @@ class ObjectStoreBackend:
     def list_objects_sync(self, prefix: str = "", recursive: bool = True, **kwargs: Any) -> list[str]:
         """List relative object keys matching the optional prefix synchronously."""
         _ = kwargs
-        qualified_prefix = self._qualify(prefix) if prefix else self._base_path
+        qualified_prefix = self._qualify(prefix, prefix=True)
         items = self.sync_store.list(qualified_prefix)
         rel_paths = [self._unqualify(item.path) for item in items]
-        return self._filter_recursive(rel_paths, prefix=prefix, recursive=recursive)
+        return self._filter_recursive(rel_paths, prefix=self._unqualify(qualified_prefix), recursive=recursive)
 
     def list_page_sync(
         self, prefix: str = "", *, cursor: str | None = None, limit: int = 1000
     ) -> tuple[list[str], str | None]:
         """List relative keys with an opaque cursor from the native store."""
-        qualified = self._qualify(prefix) if prefix else f"{self._base_path}/" if self._base_path else ""
+        qualified = self._qualify(prefix, prefix=True)
         items, next_cursor = self.sync_store.list_page(qualified, cursor=cursor, limit=limit)
         return [self._unqualify(item.path) for item in items], next_cursor
 
@@ -328,11 +325,9 @@ class ObjectStoreBackend:
 
     def is_path_sync(self, path: str | Path) -> bool:
         """Return True when `path` acts as a non-empty key prefix."""
-        prefix_str = (path.as_posix() if isinstance(path, Path) else str(path)).strip("/")
-        if not prefix_str:
-            return bool(self.list_objects_sync("", recursive=True))
-        probe = f"{prefix_str}/"
-        return any(item.startswith(probe) for item in self.list_objects_sync(prefix_str, recursive=True))
+        qualified = self._qualify(path, prefix=True)
+        items = self.sync_store.list(qualified)
+        return any(item.path.startswith(f"{qualified}/") for item in items) if qualified else bool(items)
 
     def get_metadata_sync(self, path: str | Path, **kwargs: Any) -> dict[str, object]:
         """Return metadata dictionary for a stored object synchronously."""
@@ -489,16 +484,16 @@ class ObjectStoreBackend:
     async def list_objects_async(self, prefix: str = "", recursive: bool = True, **kwargs: Any) -> list[str]:
         """List relative object keys matching the optional prefix asynchronously."""
         _ = kwargs
-        qualified_prefix = self._qualify(prefix) if prefix else self._base_path
+        qualified_prefix = self._qualify(prefix, prefix=True)
         items = await self.async_store.list(qualified_prefix)
         rel_paths = [self._unqualify(item.path) for item in items]
-        return self._filter_recursive(rel_paths, prefix=prefix, recursive=recursive)
+        return self._filter_recursive(rel_paths, prefix=self._unqualify(qualified_prefix), recursive=recursive)
 
     async def list_page_async(
         self, prefix: str = "", *, cursor: str | None = None, limit: int = 1000
     ) -> tuple[list[str], str | None]:
         """List relative keys asynchronously with an opaque native cursor."""
-        qualified = self._qualify(prefix) if prefix else f"{self._base_path}/" if self._base_path else ""
+        qualified = self._qualify(prefix, prefix=True)
         items, next_cursor = await self.async_store.list_page(qualified, cursor=cursor, limit=limit)
         return [self._unqualify(item.path) for item in items], next_cursor
 
@@ -691,40 +686,32 @@ class ObjectStoreBackend:
         return memoryview(sink.getvalue())
 
     def _strip_matching_uri_prefix(self, raw_path_or_pattern: str) -> str:
-        """Strip a scheme/bucket prefix when `raw_path_or_pattern` is a full URI matching `self.store_uri`."""
-        stripped = raw_path_or_pattern.strip()
-        if "://" not in stripped:
-            return stripped
-        parsed_in = urlparse(stripped)
+        """Remove matching URI qualification while preserving raw key and glob text."""
+        if "://" not in raw_path_or_pattern:
+            return raw_path_or_pattern
+        scheme, _, address = raw_path_or_pattern.partition("://")
+        authority, separator, raw_path = address.partition("/")
         parsed_store = urlparse(self.store_uri)
-        in_proto = self._normalize_protocol(parsed_in.scheme)
+        in_proto = self._normalize_protocol(scheme)
         store_proto = self._normalize_protocol(parsed_store.scheme or self.protocol)
-        if in_proto != store_proto:
-            msg = f"URI scheme {parsed_in.scheme!r} does not match store URI {self.store_uri!r}"
+        if raw_path_or_pattern != raw_path_or_pattern.strip() or in_proto != store_proto:
+            msg = f"URI scheme {scheme!r} does not match store URI {self.store_uri!r}"
+            raise ValueError(msg)
+        if authority != parsed_store.netloc:
+            msg = f"URI authority {authority!r} does not match store URI {self.store_uri!r}"
             raise ValueError(msg)
         if in_proto == "file":
-            return parsed_in.netloc + parsed_in.path if parsed_in.netloc else parsed_in.path
-        if in_proto == "memory":
-            if parsed_store.netloc and parsed_in.netloc and parsed_in.netloc != parsed_store.netloc:
-                msg = f"Memory store authority {parsed_in.netloc!r} does not match {self.store_uri!r}"
-                raise ValueError(msg)
-            return parsed_in.path.lstrip("/")
-        if parsed_in.netloc != parsed_store.netloc:
-            msg = f"URI bucket {parsed_in.netloc!r} does not match store URI {self.store_uri!r}"
-            raise ValueError(msg)
-        rel_path = parsed_in.path.lstrip("/")
-        store_prefix = parsed_store.path.strip("/")
-        if store_prefix and rel_path.startswith(f"{store_prefix}/"):
-            rel_path = rel_path[len(store_prefix) + 1 :]
-        elif store_prefix and rel_path == store_prefix:
-            rel_path = ""
-        return rel_path
+            return f"/{raw_path}" if separator else ""
+        store_prefix = parsed_store.path.removeprefix("/").removesuffix("/")
+        if store_prefix and raw_path.startswith(f"{store_prefix}/"):
+            raw_path = raw_path[len(store_prefix) + 1 :]
+        elif store_prefix and raw_path == store_prefix:
+            raw_path = ""
+        return raw_path
 
     def _normalize_glob_pattern(self, pattern: str) -> tuple[str, str]:
         """Normalize a relative or URI-qualified glob pattern and extract its static prefix."""
-        rel_pattern = self._strip_matching_uri_prefix(pattern).strip().lstrip("/")
-        if self._base_path and rel_pattern.startswith(f"{self._base_path}/"):
-            rel_pattern = rel_pattern[len(self._base_path) + 1 :]
+        rel_pattern = self._unqualify(self._qualify(pattern, prefix=True))
         match = _GLOB_CHARS_RE.search(rel_pattern)
         if match is None:
             static_prefix = rel_pattern.rsplit("/", 1)[0] if "/" in rel_pattern else ""
@@ -740,27 +727,28 @@ class ObjectStoreBackend:
             return self.glob_sync(normalized)
         return [normalized] if self.exists_sync(normalized) else []
 
-    def _qualify(self, path: str | Path) -> str:
+    def _qualify(self, path: str | Path, *, prefix: bool = False) -> str:
         """Normalize a relative, URI-qualified, or local-root-qualified path into an ObjectStore key."""
         raw_str = path.as_posix() if isinstance(path, Path) else str(path)
+        if prefix and raw_str in {"", "/"}:
+            raw_str = ""
         raw_str = self._strip_matching_uri_prefix(raw_str)
-        if ".." in raw_str.split("/"):
-            msg = f"Path traversal in storage key is not allowed: {raw_str}"
-            raise ValueError(msg)
         if self.protocol == "file":
             parsed = urlparse(self.store_uri)
             local_root = Path(parsed.netloc + parsed.path if parsed.netloc else parsed.path).resolve()
             candidate = Path(raw_str)
             if candidate.is_absolute():
+                SyncObjectStore._normalize_key(raw_str.removeprefix("/"), prefix=prefix)
                 resolved_candidate = candidate.resolve()
                 try:
                     rel_to_root = resolved_candidate.relative_to(local_root)
                 except ValueError as exc:
                     msg = f"Path traversal outside storage root rejected: {raw_str}"
                     raise ValueError(msg) from exc
-                return rel_to_root.as_posix()
+                relative = "" if rel_to_root == Path(".") else rel_to_root.as_posix()
+                return SyncObjectStore._normalize_key(relative, prefix=prefix)
 
-        cleaned = raw_str.strip().lstrip("/")
+        cleaned = SyncObjectStore._normalize_key(raw_str, prefix=prefix)
         if not self._base_path:
             return cleaned
         if not cleaned:
@@ -782,7 +770,7 @@ class ObjectStoreBackend:
         """Filter listed relative paths when `recursive=False`."""
         if recursive:
             return paths
-        norm_prefix = prefix.strip("/")
+        norm_prefix = SyncObjectStore._normalize_key(prefix, prefix=True)
         base_prefix = f"{norm_prefix}/" if norm_prefix else ""
         filtered: list[str] = []
         for item in paths:

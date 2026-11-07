@@ -1448,10 +1448,16 @@ class _BaseObjectStore:
         return native_mod
 
     @staticmethod
-    def _normalize_key(path: str) -> str:
-        cleaned = path.strip().lstrip("/")
-        if ".." in Path(cleaned).parts:
-            msg = f"Invalid relative parent segment in storage key: {path}"
+    def _normalize_key(path: str, *, prefix: bool = False) -> str:
+        if prefix and path in {"", "/"}:
+            return ""
+        cleaned = path.removesuffix("/") if prefix else path
+        segments = cleaned.split("/")
+        if any(segment.lower() in {"..", "%2e%2e", ".%2e", "%2e."} for segment in segments):
+            msg = f"Path traversal in storage key or prefix is not allowed: {path}"
+            raise ValueError(msg)
+        if path != path.strip() or "\\" in path or any(segment in {"", "."} for segment in segments):
+            msg = f"Invalid relative storage {'prefix' if prefix else 'key'}: {path}"
             raise ValueError(msg)
         return cleaned
 
@@ -1685,19 +1691,19 @@ class SyncObjectStore(_BaseObjectStore):
         if limit < 1:
             msg = "limit must be >= 1"
             raise ValueError(msg)
-        norm_prefix = self._normalize_key(prefix) if prefix else None
+        norm_prefix = self._normalize_key(prefix, prefix=True) or None
         items, next_cursor = self._require_native().list_page(norm_prefix, cursor, limit)
         return [self._native_to_object_meta(item) for item in items], next_cursor
 
     def list_with_delimiter(self, prefix: str = "") -> tuple[list[ObjectMeta], list[str]]:
         """List direct child objects and `/` common sub-prefixes immediately beneath prefix."""
-        norm_prefix = self._normalize_key(prefix) if prefix else ""
+        norm_prefix = self._normalize_key(prefix, prefix=True)
         items, prefixes = self._require_native().list_with_delimiter(norm_prefix or None)
         return [self._native_to_object_meta(item) for item in items], [str(p) for p in prefixes]
 
     def list(self, prefix: str = "") -> list[ObjectMeta]:
         """List objects matching prefix."""
-        norm_prefix = self._normalize_key(prefix) if prefix else ""
+        norm_prefix = self._normalize_key(prefix, prefix=True)
         items = self._require_native().list(norm_prefix or None)
         return [
             self._native_to_object_meta(item)
@@ -1992,19 +1998,19 @@ class AsyncObjectStore(_BaseObjectStore):
         if limit < 1:
             msg = "limit must be >= 1"
             raise ValueError(msg)
-        norm_prefix = self._normalize_key(prefix) if prefix else None
+        norm_prefix = self._normalize_key(prefix, prefix=True) or None
         items, next_cursor = await self._require_native().list_page(norm_prefix, cursor, limit)
         return [self._native_to_object_meta(item) for item in items], next_cursor
 
     async def list_with_delimiter(self, prefix: str = "") -> tuple[list[ObjectMeta], list[str]]:
         """Asynchronously list direct child objects and `/` common sub-prefixes beneath prefix."""
-        norm_prefix = self._normalize_key(prefix) if prefix else ""
+        norm_prefix = self._normalize_key(prefix, prefix=True)
         items, prefixes = await self._require_native().list_with_delimiter(norm_prefix or None)
         return [self._native_to_object_meta(item) for item in items], [str(p) for p in prefixes]
 
     async def list(self, prefix: str = "") -> list[ObjectMeta]:
         """Asynchronously list objects matching prefix via Rust Tokio awaitable."""
-        norm_prefix = self._normalize_key(prefix) if prefix else ""
+        norm_prefix = self._normalize_key(prefix, prefix=True)
         items = await self._require_native().list(norm_prefix or None)
         return [
             self._native_to_object_meta(item)

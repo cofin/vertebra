@@ -573,3 +573,87 @@ async def test_changefeed_async_event_backend_lifecycle() -> None:
     await backend.nack("2")
     assert await backend.dequeue("orders", 0) is None
     assert await backend.dequeue("other", 0) is None
+
+
+@pytest.mark.anyio
+async def test_storage_adapters_preserve_raw_keys_and_validate_prefixes() -> None:
+    """Real Alchemy and SQLSpec storage surfaces preserve literal key identity."""
+    store = SyncObjectStore("memory://")
+    alchemy = AlchemyObjectStoreBackend(key="raw", fs=store, prefix="aa")
+    sqlspec = SQLSpecObjectStoreBackend(store=store, base_path="sql")
+    values = {"café%": b"unicode", "literal%2F": b"percent", "literal%252F": b"double", "dir/file": b"nested"}
+    for key, value in values.items():
+        alchemy.save_object(FileObject(backend=alchemy, filename=key), value)
+        await alchemy.save_object_async(FileObject(backend=alchemy, filename=key), value)
+        sqlspec.write_bytes_sync(key, value)
+        await sqlspec.write_bytes_async(key, value)
+        assert alchemy.get_content(key) == value
+        assert await alchemy.get_content_async(key) == value
+        assert sqlspec.read_bytes_sync(key) == value
+    assert sorted(item.path for item in alchemy.list_objects("/")) == sorted(f"aa/{key}" for key in values)
+    assert sorted(await sqlspec.list_objects_async("/")) == sorted(values)
+    assert [item.path for item in await alchemy.list_objects_async("dir/")] == ["aa/dir/file"]
+    assert sqlspec.list_objects_sync("dir/") == ["dir/file"]
+    assert sqlspec.is_path_sync("dir/")
+    assert sqlspec.is_path_sync("/")
+    for invalid in (" café%", "café% ", "dir//file", r"dir\file", "dir/./file"):
+        for operation in (alchemy.get_content, sqlspec.read_bytes_sync):
+            with pytest.raises(ValueError):
+                operation(invalid)
+        for operation in (alchemy.get_content_async, sqlspec.read_bytes_async):
+            with pytest.raises(ValueError):
+                await operation(invalid)
+        for source, destination in (("café%", invalid), (invalid, "literal%2F")):
+            for copy_operation in (alchemy.copy_object, sqlspec.copy_sync, sqlspec.move_sync):
+                with pytest.raises(ValueError):
+                    copy_operation(source, destination)
+            for async_copy_operation in (alchemy.copy_object_async, sqlspec.copy_async, sqlspec.move_async):
+                with pytest.raises(ValueError):
+                    await async_copy_operation(source, destination)
+        assert alchemy.get_content("café%") == b"unicode"
+        assert alchemy.get_content("literal%2F") == b"percent"
+        assert sqlspec.read_bytes_sync("café%") == b"unicode"
+        assert sqlspec.read_bytes_sync("literal%2F") == b"percent"
+    for prefix in (" dir", "/dir", "dir//"):
+        with pytest.raises(ValueError):
+            alchemy.list_objects(prefix)
+        with pytest.raises(ValueError):
+            await sqlspec.list_objects_async(prefix)
+        with pytest.raises(ValueError):
+            sqlspec.is_path_sync(prefix)
+
+
+@pytest.mark.anyio
+async def test_sqlspec_qualified_paths_keep_raw_identity_and_reject_mismatch(tmp_path: Path) -> None:
+    """Matching local/cloud qualifications retain raw names without outside-root effects."""
+    local = SQLSpecObjectStoreBackend(LocalConfig(root=tmp_path))
+    target = tmp_path / "dir/literal%2F"
+    local.write_bytes_sync(target, b"local")
+    assert await local.read_bytes_async(f"file://{target}") == b"local"
+    await local.write_bytes_async("dir/literal%252F", b"distinct")
+    assert local.read_bytes_sync("dir/literal%252F") == b"distinct"
+    assert sorted(await local.list_objects_async("dir/")) == ["dir/literal%252F", "dir/literal%2F"]
+    assert sorted(local.list_objects_sync("/")) == ["dir/literal%252F", "dir/literal%2F"]
+    assert await local.list_objects_async(f"file://{tmp_path}/dir/", recursive=False) == [
+        "dir/literal%252F",
+        "dir/literal%2F",
+    ]
+    with pytest.raises(ValueError):
+        local.write_bytes_sync(tmp_path.parent / "outside", b"wrong")
+    with pytest.raises(ValueError):
+        await local.write_bytes_async(f"file://other{target}", b"wrong")
+    with pytest.raises(ValueError):
+        local.write_bytes_sync(f"file://{tmp_path}/dir//alias", b"wrong")
+    remote = SQLSpecObjectStoreBackend("gs://bucket/root", store=SyncObjectStore("memory://"), base_path="scope")
+    remote.write_bytes_sync("gs://bucket/root/literal%2F", b"cloud")
+    assert await remote.read_bytes_async("gcs://bucket/root/literal%2F") == b"cloud"
+    for invalid in ("s3://bucket/root/literal%2F", "gs://other/root/literal%2F", "gs:///root/literal%2F"):
+        with pytest.raises(ValueError):
+            remote.copy_sync("literal%2F", invalid)
+        with pytest.raises(ValueError):
+            await remote.move_async(invalid, "literal%2F")
+    assert remote.read_bytes_sync("literal%2F") == b"cloud"
+    assert await remote.list_objects_async() == ["literal%2F"]
+    remote.write_bytes_sync("literal%252F", b"double")
+    assert remote.glob_sync("gs://bucket/root/literal%?F") == ["literal%2F"]
+    assert await remote.glob_async("gs://bucket/root/literal%25?F") == ["literal%252F"]
