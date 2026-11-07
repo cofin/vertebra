@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
 use bytes::Bytes;
-use futures::TryStreamExt;
+use futures::stream::BoxStream;
+use futures::{StreamExt, TryStreamExt};
 use object_store::aws::AmazonS3Builder;
 use object_store::azure::MicrosoftAzureBuilder;
 use object_store::gcp::GoogleCloudStorageBuilder;
@@ -12,12 +13,15 @@ use object_store::http::HttpBuilder;
 use object_store::local::LocalFileSystem;
 use object_store::memory::InMemory;
 use object_store::path::Path as StorePath;
-use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
+use object_store::{
+    Attribute, AttributeValue, Attributes, GetOptions, MultipartUpload, ObjectStore,
+    ObjectStoreExt, PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult, UpdateVersion,
+};
 use thiserror::Error;
 use url::Url;
 
 use crate::oci::{OciCavageCredentials, OciObjectStore};
-use crate::r2::{R2_UNIFORM_PART_SIZE, chunk_uniform_parts};
+use crate::r2::{R2_UNIFORM_PART_SIZE, UniformPartAccumulator, requires_uniform_part_size};
 
 static STORAGE_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     let default_threads = std::thread::available_parallelism()
@@ -56,14 +60,120 @@ where
 
 #[derive(Debug, Error)]
 pub enum StorageError {
+    #[error("object already exists at '{path}': {message}")]
+    AlreadyExists { path: String, message: String },
+    #[error("precondition failed for '{path}': {message}")]
+    Precondition { path: String, message: String },
+    #[error("invalid argument: {0}")]
+    InvalidInput(String),
     #[error("object_store error: {0}")]
-    ObjectStore(#[from] object_store::Error),
+    ObjectStore(object_store::Error),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("invalid storage URL '{0}': {1}")]
     InvalidUrl(String, String),
     #[error("signing error: {0}")]
     Signing(String),
+}
+
+pub type ObjectStoreError = StorageError;
+
+impl From<object_store::Error> for StorageError {
+    fn from(err: object_store::Error) -> Self {
+        match err {
+            object_store::Error::AlreadyExists { path, source } => Self::AlreadyExists {
+                path,
+                message: source.to_string(),
+            },
+            object_store::Error::Precondition { path, source } => Self::Precondition {
+                path,
+                message: source.to_string(),
+            },
+            other => Self::ObjectStore(other),
+        }
+    }
+}
+
+impl StorageError {
+    pub fn is_already_exists(&self) -> bool {
+        matches!(
+            self,
+            Self::AlreadyExists { .. }
+                | Self::ObjectStore(object_store::Error::AlreadyExists { .. })
+        )
+    }
+
+    pub fn is_precondition(&self) -> bool {
+        matches!(
+            self,
+            Self::Precondition { .. } | Self::ObjectStore(object_store::Error::Precondition { .. })
+        )
+    }
+
+    pub fn is_not_found(&self) -> bool {
+        matches!(
+            self,
+            Self::ObjectStore(object_store::Error::NotFound { .. })
+        ) || matches!(self, Self::Io(e) if e.kind() == std::io::ErrorKind::NotFound)
+    }
+}
+
+fn reject_traversal_segments(raw: &str) -> Result<(), StorageError> {
+    for seg in raw.split(['/', '\\']) {
+        if seg == ".."
+            || seg.eq_ignore_ascii_case("%2e%2e")
+            || seg.eq_ignore_ascii_case(".%2e")
+            || seg.eq_ignore_ascii_case("%2e.")
+        {
+            return Err(StorageError::InvalidInput(format!(
+                "invalid storage path '{raw}': parent traversal '..' is not allowed"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_object_path(path: &str) -> Result<StorePath, StorageError> {
+    reject_traversal_segments(path)?;
+    let trimmed = path.trim_matches('/');
+    if trimmed.is_empty() {
+        return Err(StorageError::InvalidInput(
+            "object path must not be empty".to_string(),
+        ));
+    }
+    Ok(StorePath::from(trimmed))
+}
+
+fn validate_optional_prefix(prefix: Option<&str>) -> Result<Option<StorePath>, StorageError> {
+    match prefix {
+        None => Ok(None),
+        Some(p) => {
+            reject_traversal_segments(p)?;
+            let trimmed = p.trim_matches('/');
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(StorePath::from(trimmed)))
+            }
+        }
+    }
+}
+
+fn build_store_attributes(
+    content_type: Option<&str>,
+    user_attributes: &HashMap<String, String>,
+) -> Attributes {
+    let mut attrs = Attributes::new();
+    if let Some(ct) = content_type {
+        attrs.insert(Attribute::ContentType, AttributeValue::from(ct.to_string()));
+    }
+    for (k, v) in user_attributes {
+        attrs.insert(
+            Attribute::Metadata(k.clone().into()),
+            AttributeValue::from(v.clone()),
+        );
+    }
+    attrs
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,6 +183,8 @@ pub struct StoredObjectMeta {
     pub last_modified: String,
     pub etag: Option<String>,
     pub version: Option<String>,
+    pub content_type: Option<String>,
+    pub attributes: HashMap<String, String>,
 }
 
 impl From<object_store::ObjectMeta> for StoredObjectMeta {
@@ -83,6 +195,162 @@ impl From<object_store::ObjectMeta> for StoredObjectMeta {
             last_modified: value.last_modified.to_rfc3339(),
             etag: value.e_tag,
             version: value.version,
+            content_type: None,
+            attributes: HashMap::new(),
+        }
+    }
+}
+
+impl StoredObjectMeta {
+    pub fn from_meta_and_attributes(value: object_store::ObjectMeta, attrs: &Attributes) -> Self {
+        let mut content_type = None;
+        let mut attributes = HashMap::new();
+        for (key, val) in attrs.iter() {
+            match key {
+                Attribute::ContentType => {
+                    content_type = Some(val.as_ref().to_string());
+                }
+                Attribute::Metadata(name) => {
+                    attributes.insert(name.as_ref().to_string(), val.as_ref().to_string());
+                }
+                _ => {}
+            }
+        }
+        Self {
+            path: value.location.to_string(),
+            size: value.size,
+            last_modified: value.last_modified.to_rfc3339(),
+            etag: value.e_tag,
+            version: value.version,
+            content_type,
+            attributes,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PutConditionalOptions {
+    pub if_not_exists: bool,
+    pub if_match: Option<String>,
+    pub if_none_match: Option<String>,
+    pub content_type: Option<String>,
+    pub attributes: HashMap<String, String>,
+}
+
+/// Stateful incremental multipart upload session.
+///
+/// When targeting Cloudflare R2 or OCI Object Storage (`scheme == "r2" | "oci"`), chunks are
+/// normalized through a rolling 8 MiB `UniformPartAccumulator` so every non-trailing part has
+/// identical byte length without buffering the entire payload in memory.
+pub struct MultipartUploadSession {
+    path: String,
+    upload: Option<Box<dyn MultipartUpload>>,
+    accumulator: Option<UniformPartAccumulator>,
+    total_bytes: u64,
+    flushed_part_sizes: Vec<usize>,
+    content_type: Option<String>,
+    attributes: HashMap<String, String>,
+    had_error: bool,
+}
+
+impl MultipartUploadSession {
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn bytes_written(&self) -> u64 {
+        self.total_bytes
+    }
+
+    pub fn part_sizes_flushed(&self) -> &[usize] {
+        &self.flushed_part_sizes
+    }
+
+    pub async fn write_chunk(&mut self, chunk: Bytes) -> Result<(), ObjectStoreError> {
+        let upload = self.upload.as_mut().ok_or_else(|| {
+            StorageError::InvalidInput("multipart upload session is already closed".to_string())
+        })?;
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        self.total_bytes += chunk.len() as u64;
+        if let Some(ref mut acc) = self.accumulator {
+            for part in acc.push(chunk) {
+                let part_len = part.len();
+                if let Err(err) = upload.put_part(PutPayload::from(part)).await {
+                    self.had_error = true;
+                    return Err(err.into());
+                }
+                self.flushed_part_sizes.push(part_len);
+            }
+        } else {
+            let part_len = chunk.len();
+            if let Err(err) = upload.put_part(PutPayload::from(chunk)).await {
+                self.had_error = true;
+                return Err(err.into());
+            }
+            self.flushed_part_sizes.push(part_len);
+        }
+        Ok(())
+    }
+
+    pub async fn complete(&mut self) -> Result<PutResult, ObjectStoreError> {
+        let mut upload = self.upload.take().ok_or_else(|| {
+            StorageError::InvalidInput("multipart upload session is already closed".to_string())
+        })?;
+        if let Some(ref mut acc) = self.accumulator
+            && let Some(tail) = acc.finish()
+        {
+            let tail_len = tail.len();
+            if let Err(err) = upload.put_part(PutPayload::from(tail)).await {
+                self.had_error = true;
+                self.upload = Some(upload);
+                return Err(err.into());
+            }
+            self.flushed_part_sizes.push(tail_len);
+        }
+        if self.flushed_part_sizes.is_empty() {
+            if let Err(err) = upload.put_part(PutPayload::new()).await {
+                self.had_error = true;
+                self.upload = Some(upload);
+                return Err(err.into());
+            }
+            self.flushed_part_sizes.push(0);
+        }
+        match upload.complete().await {
+            Ok(result) => Ok(result),
+            Err(err) => {
+                self.had_error = true;
+                Err(err.into())
+            }
+        }
+    }
+
+    pub async fn complete_with_meta(&mut self) -> Result<StoredObjectMeta, ObjectStoreError> {
+        let result = self.complete().await?;
+        Ok(StoredObjectMeta {
+            path: self.path.clone(),
+            size: self.total_bytes,
+            last_modified: chrono::Utc::now().to_rfc3339(),
+            etag: result.e_tag,
+            version: result.version,
+            content_type: self.content_type.clone(),
+            attributes: self.attributes.clone(),
+        })
+    }
+
+    pub async fn abort(&mut self) -> Result<(), ObjectStoreError> {
+        if let Some(ref mut acc) = self.accumulator {
+            acc.clear();
+        }
+        let Some(mut upload) = self.upload.take() else {
+            return Ok(());
+        };
+        match upload.abort().await {
+            Ok(()) => Ok(()),
+            Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(_) if self.had_error => Ok(()),
+            Err(err) => Err(err.into()),
         }
     }
 }
@@ -476,20 +744,119 @@ impl ObjectStoreEngine {
         }
     }
 
+    pub fn with_store(inner: Arc<dyn ObjectStore>, scheme: impl Into<String>) -> Self {
+        Self {
+            inner,
+            scheme: scheme.into(),
+        }
+    }
+
     pub fn scheme(&self) -> &str {
         &self.scheme
     }
 
     pub async fn put(&self, path: &str, data: Bytes) -> Result<StoredObjectMeta, StorageError> {
-        let location = StorePath::from(path);
+        self.put_opts(path, data, PutConditionalOptions::default())
+            .await
+    }
+
+    pub async fn put_opts(
+        &self,
+        path: &str,
+        data: Bytes,
+        opts: PutConditionalOptions,
+    ) -> Result<StoredObjectMeta, ObjectStoreError> {
+        let location = validate_object_path(path)?;
+        let create_only = opts.if_not_exists || opts.if_none_match.as_deref() == Some("*");
+        if create_only && opts.if_match.is_some() {
+            return Err(StorageError::InvalidInput(
+                "cannot combine if_not_exists or if_none_match='*' with if_match".to_string(),
+            ));
+        }
+
+        let mode = if create_only {
+            PutMode::Create
+        } else if let Some(ref etag) = opts.if_match {
+            PutMode::Update(UpdateVersion {
+                e_tag: Some(etag.clone()),
+                version: None,
+            })
+        } else if let Some(ref none_etag) = opts.if_none_match {
+            match self.inner.head(&location).await {
+                Ok(existing) if existing.e_tag.as_deref() == Some(none_etag.as_str()) => {
+                    return Err(StorageError::Precondition {
+                        path: location.to_string(),
+                        message: format!("If-None-Match matched existing ETag {none_etag}"),
+                    });
+                }
+                Ok(_) | Err(object_store::Error::NotFound { .. }) => PutMode::Overwrite,
+                Err(err) => return Err(err.into()),
+            }
+        } else {
+            PutMode::Overwrite
+        };
+
         let size = data.len() as u64;
-        let result = self.inner.put(&location, PutPayload::from(data)).await?;
+        let store_attrs = build_store_attributes(opts.content_type.as_deref(), &opts.attributes);
+        let put_options = PutOptions {
+            mode: mode.clone(),
+            attributes: store_attrs,
+            ..Default::default()
+        };
+
+        let result = match self
+            .inner
+            .put_opts(&location, PutPayload::from(data.clone()), put_options)
+            .await
+        {
+            Ok(res) => res,
+            Err(object_store::Error::NotImplemented { .. }) if self.scheme == "file" => {
+                if let PutMode::Update(ref uv) = mode {
+                    match self.inner.head(&location).await {
+                        Ok(existing) if existing.e_tag == uv.e_tag => {
+                            self.inner.put(&location, PutPayload::from(data)).await?
+                        }
+                        Ok(existing) => {
+                            return Err(StorageError::Precondition {
+                                path: location.to_string(),
+                                message: format!(
+                                    "ETag mismatch: expected {:?}, got {:?}",
+                                    uv.e_tag, existing.e_tag
+                                ),
+                            });
+                        }
+                        Err(object_store::Error::NotFound { .. }) => {
+                            return Err(StorageError::Precondition {
+                                path: location.to_string(),
+                                message: "object does not exist for if_match update".to_string(),
+                            });
+                        }
+                        Err(err) => return Err(err.into()),
+                    }
+                } else {
+                    self.inner
+                        .put_opts(
+                            &location,
+                            PutPayload::from(data),
+                            PutOptions {
+                                mode,
+                                ..Default::default()
+                            },
+                        )
+                        .await?
+                }
+            }
+            Err(err) => return Err(err.into()),
+        };
+
         Ok(StoredObjectMeta {
             path: location.to_string(),
             size,
             last_modified: chrono::Utc::now().to_rfc3339(),
             etag: result.e_tag,
             version: result.version,
+            content_type: opts.content_type,
+            attributes: opts.attributes,
         })
     }
 
@@ -498,8 +865,92 @@ impl ObjectStoreEngine {
         path: &str,
         file_path: &str,
     ) -> Result<StoredObjectMeta, StorageError> {
+        let _ = validate_object_path(path)?;
         let raw = tokio::fs::read(file_path).await?;
         self.put(path, Bytes::from(raw)).await
+    }
+
+    pub async fn create_multipart(
+        &self,
+        path: &str,
+        opts: PutConditionalOptions,
+    ) -> Result<MultipartUploadSession, ObjectStoreError> {
+        let location = validate_object_path(path)?;
+        let create_only = opts.if_not_exists || opts.if_none_match.as_deref() == Some("*");
+        if create_only && opts.if_match.is_some() {
+            return Err(StorageError::InvalidInput(
+                "cannot combine if_not_exists or if_none_match='*' with if_match".to_string(),
+            ));
+        }
+
+        if create_only {
+            if self.exists(path).await? {
+                return Err(StorageError::AlreadyExists {
+                    path: location.to_string(),
+                    message: "object already exists".to_string(),
+                });
+            }
+        } else if let Some(ref expected_etag) = opts.if_match {
+            match self.inner.head(&location).await {
+                Ok(existing) if existing.e_tag.as_deref() == Some(expected_etag.as_str()) => {}
+                Ok(existing) => {
+                    return Err(StorageError::Precondition {
+                        path: location.to_string(),
+                        message: format!(
+                            "ETag mismatch: expected {expected_etag}, got {:?}",
+                            existing.e_tag
+                        ),
+                    });
+                }
+                Err(object_store::Error::NotFound { .. }) => {
+                    return Err(StorageError::Precondition {
+                        path: location.to_string(),
+                        message: "object does not exist for if_match update".to_string(),
+                    });
+                }
+                Err(err) => return Err(err.into()),
+            }
+        } else if let Some(ref none_etag) = opts.if_none_match {
+            match self.inner.head(&location).await {
+                Ok(existing) if existing.e_tag.as_deref() == Some(none_etag.as_str()) => {
+                    return Err(StorageError::Precondition {
+                        path: location.to_string(),
+                        message: format!("If-None-Match matched existing ETag {none_etag}"),
+                    });
+                }
+                Ok(_) | Err(object_store::Error::NotFound { .. }) => {}
+                Err(err) => return Err(err.into()),
+            }
+        }
+
+        let mp_opts = PutMultipartOptions {
+            attributes: build_store_attributes(opts.content_type.as_deref(), &opts.attributes),
+            ..Default::default()
+        };
+        let upload = match self.inner.put_multipart_opts(&location, mp_opts).await {
+            Ok(up) => up,
+            Err(object_store::Error::NotImplemented { .. }) if self.scheme == "file" => {
+                self.inner.put_multipart(&location).await?
+            }
+            Err(err) => return Err(err.into()),
+        };
+
+        let accumulator = if requires_uniform_part_size(&self.scheme) {
+            Some(UniformPartAccumulator::new(R2_UNIFORM_PART_SIZE))
+        } else {
+            None
+        };
+
+        Ok(MultipartUploadSession {
+            path: location.to_string(),
+            upload: Some(upload),
+            accumulator,
+            total_bytes: 0,
+            flushed_part_sizes: Vec::new(),
+            content_type: opts.content_type,
+            attributes: opts.attributes,
+            had_error: false,
+        })
     }
 
     pub async fn put_multipart(
@@ -507,35 +958,31 @@ impl ObjectStoreEngine {
         path: &str,
         parts: Vec<Bytes>,
     ) -> Result<StoredObjectMeta, StorageError> {
-        let location = StorePath::from(path);
-        let normalized_parts = if self.scheme == "r2" && parts.len() > 1 {
-            let mut combined = Vec::new();
-            for p in &parts {
-                combined.extend_from_slice(p);
+        let mut session = self
+            .create_multipart(path, PutConditionalOptions::default())
+            .await?;
+        for chunk in parts {
+            if let Err(err) = session.write_chunk(chunk).await {
+                let _ = session.abort().await;
+                return Err(err);
             }
-            chunk_uniform_parts(Bytes::from(combined), R2_UNIFORM_PART_SIZE)
-        } else {
-            parts
-        };
-        let total_size: u64 = normalized_parts.iter().map(|b| b.len() as u64).sum();
-        let mut upload = self.inner.put_multipart(&location).await?;
-        for chunk in normalized_parts {
-            upload.put_part(PutPayload::from(chunk)).await?;
         }
-        let result = upload.complete().await?;
-        Ok(StoredObjectMeta {
-            path: location.to_string(),
-            size: total_size,
-            last_modified: chrono::Utc::now().to_rfc3339(),
-            etag: result.e_tag,
-            version: result.version,
-        })
+        session.complete_with_meta().await
     }
 
     pub async fn get(&self, path: &str) -> Result<Bytes, StorageError> {
-        let location = StorePath::from(path);
+        let location = validate_object_path(path)?;
         let result = self.inner.get(&location).await?;
         Ok(result.bytes().await?)
+    }
+
+    pub async fn get_stream(
+        &self,
+        path: &str,
+    ) -> Result<BoxStream<'static, Result<Bytes, ObjectStoreError>>, ObjectStoreError> {
+        let location = validate_object_path(path)?;
+        let result = self.inner.get(&location).await?;
+        Ok(result.into_stream().map_err(StorageError::from).boxed())
     }
 
     pub async fn get_range(
@@ -544,47 +991,150 @@ impl ObjectStoreEngine {
         offset: u64,
         length: u64,
     ) -> Result<Bytes, StorageError> {
-        let location = StorePath::from(path);
+        let location = validate_object_path(path)?;
         let start = offset;
         let end = offset + length;
         Ok(self.inner.get_range(&location, start..end).await?)
     }
 
     pub async fn head(&self, path: &str) -> Result<StoredObjectMeta, StorageError> {
-        let location = StorePath::from(path);
-        let meta = self.inner.head(&location).await?;
-        Ok(StoredObjectMeta::from(meta))
+        let location = validate_object_path(path)?;
+        let result = self
+            .inner
+            .get_opts(
+                &location,
+                GetOptions {
+                    head: true,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(StoredObjectMeta::from_meta_and_attributes(
+            result.meta,
+            &result.attributes,
+        ))
     }
 
     pub async fn exists(&self, path: &str) -> Result<bool, StorageError> {
-        let location = StorePath::from(path);
+        let location = validate_object_path(path)?;
         match self.inner.head(&location).await {
             Ok(_) => Ok(true),
             Err(object_store::Error::NotFound { .. }) => Ok(false),
-            Err(err) => Err(StorageError::ObjectStore(err)),
+            Err(err) => Err(err.into()),
         }
     }
 
     pub async fn delete(&self, path: &str) -> Result<(), StorageError> {
-        let location = StorePath::from(path);
+        let location = validate_object_path(path)?;
         self.inner.delete(&location).await?;
         Ok(())
     }
 
     pub async fn copy(&self, src: &str, dst: &str) -> Result<(), StorageError> {
-        let from = StorePath::from(src);
-        let to = StorePath::from(dst);
+        let from = validate_object_path(src)?;
+        let to = validate_object_path(dst)?;
         self.inner.copy(&from, &to).await?;
         Ok(())
     }
 
+    pub async fn rename(
+        &self,
+        src: &str,
+        dst: &str,
+        if_not_exists: bool,
+    ) -> Result<(), ObjectStoreError> {
+        let from = validate_object_path(src)?;
+        let to = validate_object_path(dst)?;
+        if if_not_exists {
+            self.inner.rename_if_not_exists(&from, &to).await?;
+        } else {
+            self.inner.rename(&from, &to).await?;
+        }
+        Ok(())
+    }
+
     pub async fn list(&self, prefix: Option<&str>) -> Result<Vec<StoredObjectMeta>, StorageError> {
-        let store_prefix = prefix.filter(|p| !p.is_empty()).map(StorePath::from);
+        let store_prefix = validate_optional_prefix(prefix)?;
         let stream = self.inner.list(store_prefix.as_ref());
         let metas: Vec<object_store::ObjectMeta> = stream.try_collect().await?;
         let mut items: Vec<StoredObjectMeta> =
             metas.into_iter().map(StoredObjectMeta::from).collect();
         items.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(items)
+    }
+
+    pub async fn list_page(
+        &self,
+        prefix: Option<&str>,
+        offset: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<StoredObjectMeta>, Option<String>), ObjectStoreError> {
+        if limit == 0 {
+            return Err(StorageError::InvalidInput("limit must be >= 1".to_string()));
+        }
+        let store_prefix = validate_optional_prefix(prefix)?;
+        let offset_path = match offset {
+            Some(o) if !o.is_empty() => Some(validate_object_path(o)?),
+            _ => None,
+        };
+
+        if self.scheme == "file" {
+            let mut all = self.list(prefix).await?;
+            if let Some(ref off) = offset_path {
+                let off_str = off.as_ref();
+                all.retain(|item| item.path.as_str() > off_str);
+            }
+            let next_cursor = if all.len() > limit {
+                all.truncate(limit);
+                all.last().map(|m| m.path.clone())
+            } else {
+                None
+            };
+            return Ok((all, next_cursor));
+        }
+
+        let mut stream = match offset_path.as_ref() {
+            Some(off) => self.inner.list_with_offset(store_prefix.as_ref(), off),
+            None => self.inner.list(store_prefix.as_ref()),
+        };
+        let mut page = Vec::with_capacity(limit.min(1024) + 1);
+        while page.len() <= limit {
+            match stream.try_next().await? {
+                Some(meta) => page.push(StoredObjectMeta::from(meta)),
+                None => break,
+            }
+        }
+        let next_cursor = if page.len() > limit {
+            page.truncate(limit);
+            page.last().map(|m| m.path.clone())
+        } else {
+            None
+        };
+        Ok((page, next_cursor))
+    }
+
+    pub async fn list_with_delimiter(
+        &self,
+        prefix: Option<&str>,
+    ) -> Result<(Vec<StoredObjectMeta>, Vec<String>), ObjectStoreError> {
+        let store_prefix = validate_optional_prefix(prefix)?;
+        let res = self
+            .inner
+            .list_with_delimiter(store_prefix.as_ref())
+            .await?;
+        let mut objects: Vec<StoredObjectMeta> = res
+            .objects
+            .into_iter()
+            .map(StoredObjectMeta::from)
+            .collect();
+        objects.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut prefixes: Vec<String> = res
+            .common_prefixes
+            .into_iter()
+            .map(|p| p.as_ref().trim_end_matches('/').to_string())
+            .collect();
+        prefixes.sort();
+        prefixes.dedup();
+        Ok((objects, prefixes))
     }
 }

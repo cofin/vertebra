@@ -13,8 +13,13 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use futures::StreamExt;
+use futures::stream::BoxStream;
 use pyo3::buffer::PyBuffer;
-use pyo3::exceptions::{PyBufferError, PyFileNotFoundError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{
+    PyBufferError, PyFileExistsError, PyFileNotFoundError, PyPermissionError, PyRuntimeError,
+    PyStopAsyncIteration, PyStopIteration, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyType, PyWeakref, PyWeakrefMethods, PyWeakrefReference};
 use tokio::task::AbortHandle;
@@ -32,19 +37,85 @@ use crate::signing::{
     verify_s3_v4_url,
 };
 use crate::store::{
-    ObjectStoreEngine, StorageError, StoredObjectMeta, block_on_storage, runtime_handle,
+    MultipartUploadSession, ObjectStoreEngine, PutConditionalOptions, StorageError,
+    StoredObjectMeta, block_on_storage, runtime_handle,
 };
 
 fn to_py_err(err: StorageError) -> PyErr {
     match err {
         StorageError::InvalidUrl(u, msg) => PyValueError::new_err(format!("{u}: {msg}")),
+        StorageError::InvalidInput(msg) => PyValueError::new_err(msg),
+        StorageError::AlreadyExists { path, message } => {
+            PyFileExistsError::new_err(format!("Object already exists at '{path}': {message}"))
+        }
+        StorageError::Precondition { path, message } => {
+            PyPermissionError::new_err(format!("Precondition failed for '{path}': {message}"))
+        }
         StorageError::ObjectStore(object_store::Error::NotFound { path, source }) => {
             PyFileNotFoundError::new_err(format!("Object not found: {path} ({source})"))
         }
-        StorageError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound => {
-            PyFileNotFoundError::new_err(io_err.to_string())
+        StorageError::ObjectStore(object_store::Error::AlreadyExists { path, source }) => {
+            PyFileExistsError::new_err(format!("Object already exists at '{path}': {source}"))
         }
+        StorageError::ObjectStore(object_store::Error::Precondition { path, source }) => {
+            PyPermissionError::new_err(format!("Precondition failed for '{path}': {source}"))
+        }
+        StorageError::Io(io_err) => match io_err.kind() {
+            std::io::ErrorKind::NotFound => PyFileNotFoundError::new_err(io_err.to_string()),
+            std::io::ErrorKind::AlreadyExists => PyFileExistsError::new_err(io_err.to_string()),
+            std::io::ErrorKind::PermissionDenied => PyPermissionError::new_err(io_err.to_string()),
+            _ => PyRuntimeError::new_err(io_err.to_string()),
+        },
         other => PyRuntimeError::new_err(other.to_string()),
+    }
+}
+
+fn validate_chunk_size(chunk_size: Option<usize>) -> PyResult<Option<usize>> {
+    if chunk_size == Some(0) {
+        return Err(PyValueError::new_err("chunk_size must be >= 1"));
+    }
+    Ok(chunk_size)
+}
+
+async fn pull_next_from_stream(
+    stream_opt: &mut Option<BoxStream<'static, Result<Bytes, StorageError>>>,
+    pending: &mut Bytes,
+    chunk_size: Option<usize>,
+) -> Result<Option<Bytes>, StorageError> {
+    loop {
+        if let Some(max_len) = chunk_size
+            && !pending.is_empty()
+        {
+            let take = pending.len().min(max_len);
+            return Ok(Some(pending.split_to(take)));
+        }
+        let Some(stream) = stream_opt.as_mut() else {
+            return Ok(None);
+        };
+        match stream.next().await {
+            Some(Ok(bytes)) => {
+                if bytes.is_empty() {
+                    continue;
+                }
+                if let Some(max_len) = chunk_size {
+                    if bytes.len() <= max_len {
+                        return Ok(Some(bytes));
+                    }
+                    *pending = bytes;
+                    return Ok(Some(pending.split_to(max_len)));
+                }
+                return Ok(Some(bytes));
+            }
+            Some(Err(err)) => {
+                *stream_opt = None;
+                *pending = Bytes::new();
+                return Err(err);
+            }
+            None => {
+                *stream_opt = None;
+                return Ok(None);
+            }
+        }
     }
 }
 
@@ -607,7 +678,13 @@ pub struct ObjectMeta {
     pub etag: Option<String>,
     #[pyo3(get)]
     pub version: Option<String>,
+    #[pyo3(get)]
+    pub content_type: Option<String>,
+    #[pyo3(get)]
+    pub attributes: HashMap<String, String>,
 }
+
+pub type PyObjectMeta = ObjectMeta;
 
 impl From<StoredObjectMeta> for ObjectMeta {
     fn from(value: StoredObjectMeta) -> Self {
@@ -617,6 +694,8 @@ impl From<StoredObjectMeta> for ObjectMeta {
             last_modified: value.last_modified,
             etag: value.etag,
             version: value.version,
+            content_type: value.content_type,
+            attributes: value.attributes,
         }
     }
 }
@@ -625,6 +704,247 @@ impl From<StoredObjectMeta> for ObjectMeta {
 impl ObjectMeta {
     fn __repr__(&self) -> String {
         format!("ObjectMeta(path={:?}, size={})", self.path, self.size)
+    }
+}
+
+struct SyncStreamState {
+    stream: Option<BoxStream<'static, Result<Bytes, StorageError>>>,
+    pending: Bytes,
+    chunk_size: Option<usize>,
+}
+
+#[pyclass(
+    name = "SyncStreamReader",
+    module = "vertebra._storage",
+    frozen,
+    immutable_type
+)]
+pub struct SyncStreamReader {
+    state: Mutex<SyncStreamState>,
+}
+
+pub type PySyncStreamReader = SyncStreamReader;
+
+#[pymethods]
+impl SyncStreamReader {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&self, py: Python<'_>) -> PyResult<StorageBuffer> {
+        match self.next_chunk(py)? {
+            Some(buf) => Ok(buf),
+            None => Err(PyStopIteration::new_err(())),
+        }
+    }
+
+    fn next_chunk(&self, py: Python<'_>) -> PyResult<Option<StorageBuffer>> {
+        let next = py
+            .detach(|| {
+                let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                let state = &mut *guard;
+                block_on_storage(pull_next_from_stream(
+                    &mut state.stream,
+                    &mut state.pending,
+                    state.chunk_size,
+                ))
+            })
+            .map_err(to_py_err)?;
+        Ok(next.map(|data| StorageBuffer { data }))
+    }
+
+    fn close(&self, py: Python<'_>) {
+        py.detach(|| {
+            let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            guard.stream = None;
+            guard.pending = Bytes::new();
+        });
+    }
+}
+
+enum AsyncStreamInit {
+    Pending {
+        engine: ObjectStoreEngine,
+        path: String,
+    },
+    Open(Option<BoxStream<'static, Result<Bytes, StorageError>>>),
+}
+
+struct AsyncStreamState {
+    init: AsyncStreamInit,
+    pending: Bytes,
+    chunk_size: Option<usize>,
+}
+
+impl AsyncStreamState {
+    async fn next_bytes(&mut self) -> Result<Option<Bytes>, StorageError> {
+        if let AsyncStreamInit::Pending { engine, path } =
+            std::mem::replace(&mut self.init, AsyncStreamInit::Open(None))
+        {
+            let stream = engine.get_stream(&path).await?;
+            self.init = AsyncStreamInit::Open(Some(stream));
+        }
+        let AsyncStreamInit::Open(ref mut stream_opt) = self.init else {
+            return Ok(None);
+        };
+        pull_next_from_stream(stream_opt, &mut self.pending, self.chunk_size).await
+    }
+}
+
+#[pyclass(
+    name = "AsyncStreamReader",
+    module = "vertebra._storage",
+    frozen,
+    immutable_type
+)]
+pub struct AsyncStreamReader {
+    state: Arc<tokio::sync::Mutex<AsyncStreamState>>,
+}
+
+pub type PyAsyncStreamReader = AsyncStreamReader;
+
+#[pymethods]
+impl AsyncStreamReader {
+    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __anext__(&self, py: Python<'_>) -> PyResult<RustTaskAwaitable> {
+        let state = Arc::clone(&self.state);
+        spawn_rust_task(
+            py,
+            async move {
+                let mut guard = state.lock().await;
+                guard.next_bytes().await
+            },
+            |py, next| match next {
+                Some(data) => Ok(Py::new(py, StorageBuffer { data })?.into_any()),
+                None => Err(PyStopAsyncIteration::new_err(())),
+            },
+        )
+    }
+
+    fn next_chunk(&self, py: Python<'_>) -> PyResult<RustTaskAwaitable> {
+        let state = Arc::clone(&self.state);
+        spawn_rust_task(
+            py,
+            async move {
+                let mut guard = state.lock().await;
+                guard.next_bytes().await
+            },
+            |py, next| match next {
+                Some(data) => Ok(Py::new(py, StorageBuffer { data })?.into_any()),
+                None => Ok(py.None()),
+            },
+        )
+    }
+
+    fn aclose(&self, py: Python<'_>) -> PyResult<RustTaskAwaitable> {
+        let state = Arc::clone(&self.state);
+        spawn_rust_task(
+            py,
+            async move {
+                let mut guard = state.lock().await;
+                guard.init = AsyncStreamInit::Open(None);
+                guard.pending = Bytes::new();
+                Ok(())
+            },
+            |py, ()| Ok(py.None()),
+        )
+    }
+}
+
+#[pyclass(
+    name = "SyncMultipartUpload",
+    module = "vertebra._storage",
+    frozen,
+    immutable_type
+)]
+pub struct SyncMultipartUpload {
+    session: Mutex<MultipartUploadSession>,
+}
+
+pub type PySyncMultipartUpload = SyncMultipartUpload;
+
+#[pymethods]
+impl SyncMultipartUpload {
+    fn write_part(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
+        let chunk = extract_buffer_bytes(py, data)?;
+        py.detach(|| {
+            let mut guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
+            block_on_storage(guard.write_chunk(chunk))
+        })
+        .map_err(to_py_err)
+    }
+
+    fn complete(&self, py: Python<'_>) -> PyResult<ObjectMeta> {
+        let meta = py
+            .detach(|| {
+                let mut guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
+                block_on_storage(guard.complete_with_meta())
+            })
+            .map_err(to_py_err)?;
+        Ok(ObjectMeta::from(meta))
+    }
+
+    fn abort(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| {
+            let mut guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
+            block_on_storage(guard.abort())
+        })
+        .map_err(to_py_err)
+    }
+}
+
+#[pyclass(
+    name = "AsyncMultipartUpload",
+    module = "vertebra._storage",
+    frozen,
+    immutable_type
+)]
+pub struct AsyncMultipartUpload {
+    session: Arc<tokio::sync::Mutex<MultipartUploadSession>>,
+}
+
+pub type PyAsyncMultipartUpload = AsyncMultipartUpload;
+
+#[pymethods]
+impl AsyncMultipartUpload {
+    fn write_part(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<RustTaskAwaitable> {
+        let chunk = extract_buffer_bytes(py, data)?;
+        let session = Arc::clone(&self.session);
+        spawn_rust_task(
+            py,
+            async move {
+                let mut guard = session.lock().await;
+                guard.write_chunk(chunk).await
+            },
+            |py, ()| Ok(py.None()),
+        )
+    }
+
+    fn complete(&self, py: Python<'_>) -> PyResult<RustTaskAwaitable> {
+        let session = Arc::clone(&self.session);
+        spawn_rust_task(
+            py,
+            async move {
+                let mut guard = session.lock().await;
+                guard.complete_with_meta().await
+            },
+            |py, meta| Ok(Py::new(py, ObjectMeta::from(meta))?.into_any()),
+        )
+    }
+
+    fn abort(&self, py: Python<'_>) -> PyResult<RustTaskAwaitable> {
+        let session = Arc::clone(&self.session);
+        spawn_rust_task(
+            py,
+            async move {
+                let mut guard = session.lock().await;
+                guard.abort().await
+            },
+            |py, ()| Ok(py.None()),
+        )
     }
 }
 
@@ -637,6 +957,8 @@ impl ObjectMeta {
 pub struct SyncObjectStore {
     engine: ObjectStoreEngine,
 }
+
+pub type PySyncObjectStore = SyncObjectStore;
 
 #[pymethods]
 impl SyncObjectStore {
@@ -654,11 +976,30 @@ impl SyncObjectStore {
         self.engine.scheme()
     }
 
-    fn put(&self, py: Python<'_>, path: &str, data: &Bound<'_, PyAny>) -> PyResult<ObjectMeta> {
+    #[pyo3(signature = (path, data, *, content_type=None, attributes=None, if_not_exists=false, if_match=None, if_none_match=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn put(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        data: &Bound<'_, PyAny>,
+        content_type: Option<String>,
+        attributes: Option<HashMap<String, String>>,
+        if_not_exists: bool,
+        if_match: Option<String>,
+        if_none_match: Option<String>,
+    ) -> PyResult<ObjectMeta> {
         let payload = extract_buffer_bytes(py, data)?;
+        let opts = PutConditionalOptions {
+            if_not_exists,
+            if_match,
+            if_none_match,
+            content_type,
+            attributes: attributes.unwrap_or_default(),
+        };
         let engine = self.engine.clone();
         let meta = py
-            .detach(|| block_on_storage(async move { engine.put(path, payload).await }))
+            .detach(|| block_on_storage(async move { engine.put_opts(path, payload, opts).await }))
             .map_err(to_py_err)?;
         Ok(ObjectMeta::from(meta))
     }
@@ -669,6 +1010,34 @@ impl SyncObjectStore {
             .detach(|| block_on_storage(async move { engine.put_file(path, file_path).await }))
             .map_err(to_py_err)?;
         Ok(ObjectMeta::from(meta))
+    }
+
+    #[pyo3(signature = (path, *, content_type=None, attributes=None, if_not_exists=false, if_match=None, if_none_match=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn create_multipart(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        content_type: Option<String>,
+        attributes: Option<HashMap<String, String>>,
+        if_not_exists: bool,
+        if_match: Option<String>,
+        if_none_match: Option<String>,
+    ) -> PyResult<SyncMultipartUpload> {
+        let opts = PutConditionalOptions {
+            if_not_exists,
+            if_match,
+            if_none_match,
+            content_type,
+            attributes: attributes.unwrap_or_default(),
+        };
+        let engine = self.engine.clone();
+        let session = py
+            .detach(|| block_on_storage(async move { engine.create_multipart(path, opts).await }))
+            .map_err(to_py_err)?;
+        Ok(SyncMultipartUpload {
+            session: Mutex::new(session),
+        })
     }
 
     fn put_multipart(
@@ -702,6 +1071,27 @@ impl SyncObjectStore {
             .detach(|| block_on_storage(async move { engine.get(path).await }))
             .map_err(to_py_err)?;
         Ok(StorageBuffer { data })
+    }
+
+    #[pyo3(signature = (path, *, chunk_size=None))]
+    fn get_stream(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        chunk_size: Option<usize>,
+    ) -> PyResult<SyncStreamReader> {
+        let chunk_size = validate_chunk_size(chunk_size)?;
+        let engine = self.engine.clone();
+        let stream = py
+            .detach(|| block_on_storage(async move { engine.get_stream(path).await }))
+            .map_err(to_py_err)?;
+        Ok(SyncStreamReader {
+            state: Mutex::new(SyncStreamState {
+                stream: Some(stream),
+                pending: Bytes::new(),
+                chunk_size,
+            }),
+        })
     }
 
     fn get_range<'py>(
@@ -746,6 +1136,13 @@ impl SyncObjectStore {
             .map_err(to_py_err)
     }
 
+    #[pyo3(signature = (src, dst, *, if_not_exists=false))]
+    fn rename(&self, py: Python<'_>, src: &str, dst: &str, if_not_exists: bool) -> PyResult<()> {
+        let engine = self.engine.clone();
+        py.detach(|| block_on_storage(async move { engine.rename(src, dst, if_not_exists).await }))
+            .map_err(to_py_err)
+    }
+
     #[pyo3(signature = (prefix=None))]
     fn list(&self, py: Python<'_>, prefix: Option<&str>) -> PyResult<Vec<ObjectMeta>> {
         let engine = self.engine.clone();
@@ -753,6 +1150,39 @@ impl SyncObjectStore {
             .detach(|| block_on_storage(async move { engine.list(prefix).await }))
             .map_err(to_py_err)?;
         Ok(items.into_iter().map(ObjectMeta::from).collect())
+    }
+
+    #[pyo3(signature = (prefix=None, offset=None, limit=1000))]
+    fn list_page(
+        &self,
+        py: Python<'_>,
+        prefix: Option<&str>,
+        offset: Option<&str>,
+        limit: usize,
+    ) -> PyResult<(Vec<ObjectMeta>, Option<String>)> {
+        if limit == 0 {
+            return Err(PyValueError::new_err("limit must be >= 1"));
+        }
+        let engine = self.engine.clone();
+        let (items, cursor) = py
+            .detach(|| {
+                block_on_storage(async move { engine.list_page(prefix, offset, limit).await })
+            })
+            .map_err(to_py_err)?;
+        Ok((items.into_iter().map(ObjectMeta::from).collect(), cursor))
+    }
+
+    #[pyo3(signature = (prefix=None))]
+    fn list_with_delimiter(
+        &self,
+        py: Python<'_>,
+        prefix: Option<&str>,
+    ) -> PyResult<(Vec<ObjectMeta>, Vec<String>)> {
+        let engine = self.engine.clone();
+        let (items, prefixes) = py
+            .detach(|| block_on_storage(async move { engine.list_with_delimiter(prefix).await }))
+            .map_err(to_py_err)?;
+        Ok((items.into_iter().map(ObjectMeta::from).collect(), prefixes))
     }
 }
 
@@ -765,6 +1195,8 @@ impl SyncObjectStore {
 pub struct AsyncObjectStore {
     engine: ObjectStoreEngine,
 }
+
+pub type PyAsyncObjectStore = AsyncObjectStore;
 
 #[pymethods]
 impl AsyncObjectStore {
@@ -782,17 +1214,31 @@ impl AsyncObjectStore {
         self.engine.scheme()
     }
 
+    #[pyo3(signature = (path, data, *, content_type=None, attributes=None, if_not_exists=false, if_match=None, if_none_match=None))]
+    #[allow(clippy::too_many_arguments)]
     fn put(
         &self,
         py: Python<'_>,
         path: String,
         data: &Bound<'_, PyAny>,
+        content_type: Option<String>,
+        attributes: Option<HashMap<String, String>>,
+        if_not_exists: bool,
+        if_match: Option<String>,
+        if_none_match: Option<String>,
     ) -> PyResult<RustTaskAwaitable> {
         let payload = extract_buffer_bytes(py, data)?;
+        let opts = PutConditionalOptions {
+            if_not_exists,
+            if_match,
+            if_none_match,
+            content_type,
+            attributes: attributes.unwrap_or_default(),
+        };
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
-            async move { engine.put(&path, payload).await },
+            async move { engine.put_opts(&path, payload, opts).await },
             |py, meta| Ok(Py::new(py, ObjectMeta::from(meta))?.into_any()),
         )
     }
@@ -808,6 +1254,41 @@ impl AsyncObjectStore {
             py,
             async move { engine.put_file(&path, &file_path).await },
             |py, meta| Ok(Py::new(py, ObjectMeta::from(meta))?.into_any()),
+        )
+    }
+
+    #[pyo3(signature = (path, *, content_type=None, attributes=None, if_not_exists=false, if_match=None, if_none_match=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn create_multipart(
+        &self,
+        py: Python<'_>,
+        path: String,
+        content_type: Option<String>,
+        attributes: Option<HashMap<String, String>>,
+        if_not_exists: bool,
+        if_match: Option<String>,
+        if_none_match: Option<String>,
+    ) -> PyResult<RustTaskAwaitable> {
+        let opts = PutConditionalOptions {
+            if_not_exists,
+            if_match,
+            if_none_match,
+            content_type,
+            attributes: attributes.unwrap_or_default(),
+        };
+        let engine = self.engine.clone();
+        spawn_rust_task(
+            py,
+            async move { engine.create_multipart(&path, opts).await },
+            |py, session| {
+                Ok(Py::new(
+                    py,
+                    AsyncMultipartUpload {
+                        session: Arc::new(tokio::sync::Mutex::new(session)),
+                    },
+                )?
+                .into_any())
+            },
         )
     }
 
@@ -840,6 +1321,21 @@ impl AsyncObjectStore {
         let engine = self.engine.clone();
         spawn_rust_task(py, async move { engine.get(&path).await }, |py, data| {
             Ok(Py::new(py, StorageBuffer { data })?.into_any())
+        })
+    }
+
+    #[pyo3(signature = (path, *, chunk_size=None))]
+    fn get_stream(&self, path: String, chunk_size: Option<usize>) -> PyResult<AsyncStreamReader> {
+        let chunk_size = validate_chunk_size(chunk_size)?;
+        Ok(AsyncStreamReader {
+            state: Arc::new(tokio::sync::Mutex::new(AsyncStreamState {
+                init: AsyncStreamInit::Pending {
+                    engine: self.engine.clone(),
+                    path,
+                },
+                pending: Bytes::new(),
+                chunk_size,
+            })),
         })
     }
 
@@ -890,6 +1386,22 @@ impl AsyncObjectStore {
         )
     }
 
+    #[pyo3(signature = (src, dst, *, if_not_exists=false))]
+    fn rename(
+        &self,
+        py: Python<'_>,
+        src: String,
+        dst: String,
+        if_not_exists: bool,
+    ) -> PyResult<RustTaskAwaitable> {
+        let engine = self.engine.clone();
+        spawn_rust_task(
+            py,
+            async move { engine.rename(&src, &dst, if_not_exists).await },
+            |py, ()| Ok(py.None()),
+        )
+    }
+
     #[pyo3(signature = (prefix=None))]
     fn list(&self, py: Python<'_>, prefix: Option<String>) -> PyResult<RustTaskAwaitable> {
         let engine = self.engine.clone();
@@ -899,6 +1411,49 @@ impl AsyncObjectStore {
             |py, items| {
                 let converted: Vec<ObjectMeta> = items.into_iter().map(ObjectMeta::from).collect();
                 Ok(converted.into_pyobject(py)?.into_any().unbind())
+            },
+        )
+    }
+
+    #[pyo3(signature = (prefix=None, offset=None, limit=1000))]
+    fn list_page(
+        &self,
+        py: Python<'_>,
+        prefix: Option<String>,
+        offset: Option<String>,
+        limit: usize,
+    ) -> PyResult<RustTaskAwaitable> {
+        if limit == 0 {
+            return Err(PyValueError::new_err("limit must be >= 1"));
+        }
+        let engine = self.engine.clone();
+        spawn_rust_task(
+            py,
+            async move {
+                engine
+                    .list_page(prefix.as_deref(), offset.as_deref(), limit)
+                    .await
+            },
+            |py, (items, cursor)| {
+                let converted: Vec<ObjectMeta> = items.into_iter().map(ObjectMeta::from).collect();
+                Ok((converted, cursor).into_pyobject(py)?.into_any().unbind())
+            },
+        )
+    }
+
+    #[pyo3(signature = (prefix=None))]
+    fn list_with_delimiter(
+        &self,
+        py: Python<'_>,
+        prefix: Option<String>,
+    ) -> PyResult<RustTaskAwaitable> {
+        let engine = self.engine.clone();
+        spawn_rust_task(
+            py,
+            async move { engine.list_with_delimiter(prefix.as_deref()).await },
+            |py, (items, prefixes)| {
+                let converted: Vec<ObjectMeta> = items.into_iter().map(ObjectMeta::from).collect();
+                Ok((converted, prefixes).into_pyobject(py)?.into_any().unbind())
             },
         )
     }
@@ -1185,6 +1740,10 @@ pub fn _storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SyncObjectStore>()?;
     m.add_class::<AsyncObjectStore>()?;
     m.add_class::<ObjectMeta>()?;
+    m.add_class::<SyncStreamReader>()?;
+    m.add_class::<AsyncStreamReader>()?;
+    m.add_class::<SyncMultipartUpload>()?;
+    m.add_class::<AsyncMultipartUpload>()?;
     m.add_class::<RustTaskAwaitable>()?;
     m.add_class::<StorageBuffer>()?;
     m.add_class::<PyGcpTokenSnapshot>()?;
