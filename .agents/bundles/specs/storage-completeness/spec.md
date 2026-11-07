@@ -28,8 +28,8 @@ chapters:
 - ch17-arrow-sync-codecs
 - ch18-arrow-async-bridge
 - ch19-sqlspec-arrow-streaming
-current_chapter: ch05-key-identity-and-preconditions
-current_task: null
+current_chapter: ch07-remove-r2-python
+current_task: storage-completeness:ch07:t01
 parent_prd: native-data-platform
 research:
 - ../native-data-platform/research/gap-analysis_20261103.md
@@ -40,10 +40,10 @@ plan_revision: 4
 plan_commit: 5fe477fa4f6e08bab9278dba3906e7c556ceb3a4
 state_revision: 7
 last_verified_checkpoint: 5fe477fa
-last_reviewed_chapter: null
-last_reviewed_commit: null
+last_reviewed_chapter: ch05-key-identity-and-preconditions
+last_reviewed_commit: 0bce1806
 created_at: '2026-11-03T04:05:00Z'
-updated_at: '2026-11-07T22:27:00Z'
+updated_at: '2026-11-07T22:33:17Z'
 generated:
   by: flow-setup
   at: '2026-11-07T04:15:00Z'
@@ -143,7 +143,7 @@ Anchored at `HEAD @ cdb978d3` above `main @ 077a3fe9` (incorporating `db-layout-
 
 - **R9 (Native Publication Repair)**: Preserve raw key identity, typed CAS errors, real Memory Create/Update, physical-target Local cross-process locking across all Vertebra mutations, metadata-bearing S3 conditional CompleteMultipartUpload, Azure conditional PutBlockList, GCS pinned-source generation rewrite and ordinary generation CAS, OCI conditional commit and 8 MiB/10000-part limits, actual final ETag/version and abort/cancellation ownership. Retain concrete SDK handles and configured transport/credential refresh without SDK forks or custom auth.
 - **R10 (First-Class R2 Withdrawal)**: Remove public R2Config/from_r2, r2:// scheme handling, native backend/module/helper/stub, framework classifiers, staging recognition, fixtures/tests and supported-provider docs/product/knowledge claims. Unsupported r2:// fails explicitly and never resolves as local disk. Generic S3 custom endpoints remain supported without hostname blacklist, alias or shim.
-- **R11 (Adapter Correctness Repair)**: Django collision retries retain per-call max_length and full content; SQLSpec signing maps only unsupported capability to NotImplementedError while configured provider validation failures propagate.
+- **R11 (Adapter Correctness Repair)**: Django collision retries retain per-call max_length and rewind replayable content; non-replayable input preserves the collision error. SQLSpec signing maps unsupported capability to NotImplementedError while configured validation and provider failures propagate. These adapter contracts do not establish native atomic multipart publication.
 
 ### 2.2 Cross-Chapter Public Contracts & Integration Map
 
@@ -232,7 +232,7 @@ Progress: `[0/9 files documented]` for final repair/HTTP/Arrow acceptance. Exist
 | Requirement | Repair chapter/tasks | Strategy | Canonical evidence |
 | --- | --- | --- | --- |
 | R1, R9 raw identity and conflicts | ch05:t01–t03 | regression_tdd | Native engine tests, facade/adapter tests and PyO3 mapping units. |
-| R4/R6, R11 adapter repairs | ch06:t01–t02 | regression_tdd | Django real competing-store collision and configured SQLSpec HMAC expiry. |
+| R4/R6, R11 adapter repairs | ch06:t01–t02 | regression_tdd | Django consumed-source producer collisions using native create-only puts; SQLSpec native HMAC expiry, local IAM HTTP failure and scalar/list GET/PUT signing. |
 | R10 R2 withdrawal | ch07:t01–t03, ch08:t01–t03, ch09:t01–t03 | regression_tdd/documentation_validation | Public config/classifier/staging/native parity tests and docs gates. |
 | R1/R9 boundary and ownership | ch10:t01–t04 | regression_tdd | Configured SDK transport/credential fixtures and complete-error/cancellation abort tests. |
 | R1/R9 Local atomicity | ch11:t01–t04 | integration_acceptance | Independent-process overlapping-root lock/publication/list regressions. |
@@ -248,7 +248,7 @@ Progress: `[0/9 files documented]` for final repair/HTTP/Arrow acceptance. Exist
 - [~] ch02-orm-and-sql-storage-contracts — Chapter 02: SQLSpec, Advanced Alchemy, and Django Storage Contracts (chapters/ch02-orm-and-sql-storage-contracts/spec.md)
 - [ ] ch03-litestar-and-range-streaming — Chapter 03: HTTP Range Streaming and Litestar Store/Static Integration (chapters/ch03-litestar-and-range-streaming/spec.md)
 - [ ] ch04-arrow-shm-and-docs — Chapter 04: Strict Arrow SHM Allocation, Parquet Streaming, and OKF Sync (chapters/ch04-arrow-shm-and-docs/spec.md)
-- [~] ch05-key-identity-and-preconditions — Raw Object Identity and Typed Conditional Conflicts (chapters/ch05-key-identity-and-preconditions/spec.md)
+- [x] [0bce1806] ch05-key-identity-and-preconditions — Raw Object Identity and Typed Conditional Conflicts (chapters/ch05-key-identity-and-preconditions/spec.md)
 - [~] ch06-adapter-correctness — Django Collision Length and SQLSpec Signing Errors (chapters/ch06-adapter-correctness/spec.md)
 - [ ] ch07-remove-r2-python — Withdraw First-Class R2 Python APIs (chapters/ch07-remove-r2-python/spec.md)
 - [ ] ch08-remove-r2-native — Move OCI Chunk Ownership and Remove Native R2 (chapters/ch08-remove-r2-native/spec.md)
@@ -269,11 +269,12 @@ Progress: `[0/9 files documented]` for final repair/HTTP/Arrow acceptance. Exist
 ## 6. Current State & Remaining Plan Snapshot
 
 - Verified functional source baseline: `5fe477fa`; revision 4 has approved key/error and adapter-repair frontiers. Additional bounded repair chapters retain their own independent plan-review requirements.
-- Active frontier is ch05: all three raw-key, public-qualification and typed-conflict tasks are committed and verified. Shared object-storage knowledge is synchronized; correctness and fresh quality reviews remain pending. All five native extensions are rebuilt with these contracts; Local and cloud atomic publication remains pending.
+- ch05 is completed and reviewed through `0bce1806`: all three raw-key, public-qualification and typed-conflict tasks are committed and verified, knowledge is synchronized, and correctness plus fresh quality reviews report no findings. All five native extensions are rebuilt with these contracts; Local and cloud atomic publication remains pending.
+- ch06 adapter tasks are completed at signed `cd7e5563` and `45b068e2`; knowledge is synchronized and the combined current-source storage/Django/data integration checkpoint passes 88 tests. Correctness and fresh quality reviews remain pending. Consumed-source recovery tests report native create-only conflicts from the producer; native multipart-completion acceptance remains in its repair chapters.
 - Original ch01:t01 is blocked; chapter review stamp is clear. Repair tasks use its committed functional artifacts directly, avoiding a dependency cycle.
 - ch02 original commits remain recorded and correctness approval is absent. ch06 repairs and native acceptance precede fresh correctness and quality review.
 - Native-dependent original ch03/ch04:t02 are blocked with explicit unblock conditions. HTTP coordinator owns ch03 detail and its integration evidence.
-- ch07 Python R2 withdrawal precedes ch08 native helper/module removal; generic S3 endpoint capability is preserved.
+- The next execution frontier is ch07 Python R2 withdrawal, followed by ch08 native helper/module removal; generic S3 endpoint capability is preserved. ch06 remains active for independent reviews.
 - ch10–ch15 cover native publication and lifecycle; ch11 uses persistent SDK-illegal .vtb-cas-lock#0 per physical parent directory and same-parent numeric-# stage names, with physical-directory-ID lock ordering and payload staging outside locks.
 - S3 direct completion returns honest typed 409 conflict/abort; GCS source-generation-pinned rewrite is backend-specific staging.
 - Original Arrow/SHM and user guides remain full scope. ch17–ch19 provide bounded sync codecs, typed per-batch PyArrow worker/native async I/O bridge and lazy SQLSpec integration; original ch04:t02 retains integration acceptance.

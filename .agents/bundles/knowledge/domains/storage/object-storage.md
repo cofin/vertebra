@@ -76,6 +76,12 @@ sources:
   - id: src-extensions-django-storage-py
     resource: src/py/vertebra/extensions/django/storage.py::DjangoStorage
     title: "Deconstructible Django Storage and File contract"
+  - id: src-tests-django-plugin-py
+    resource: src/py/tests/unit/extensions/test_django_plugin.py
+    title: "Django consumed-source collision recovery tests"
+  - id: src-tests-data-storage-integrations-py
+    resource: src/py/tests/unit/extensions/test_data_storage_integrations.py
+    title: "SQLSpec configured signing and adapter acceptance tests"
   - id: src-tests-integration-storage-conftest-py
     resource: src/py/tests/integration/storage/conftest.py
     title: "Floci emulator integration fixtures (src/py/tests/integration/storage/conftest.py)"
@@ -146,9 +152,13 @@ The error type identifies a reported condition conflict; provider-specific atomi
 
 SQLSpec constructs one primary native store and creates its shared-engine companion lazily. Conditional write options reach the native store; moves use native rename. Relative and URI-qualified keys preserve raw identities and reject ambiguous or mismatched qualification before effects. `build_duckdb_gcs_secret_sql` remains in this module; Arrow/Parquet streaming completion belongs to `ch04` [^src-extensions-sqlspec-storage-py].
 
+SQLSpec signing qualifies each key, then checks the corresponding store's public `supports_signing` capability. Unavailable signing raises `NotImplementedError` with backend context. Configured `presign_get` / `presign_put` calls preserve validation and provider errors without conversion or message classification. Native HMAC expiry errors remain exact `ValueError`; local IAM HTTP 503 failures remain exact `RuntimeError` with the native status message. Sync/async scalar/list shapes and GET/PUT selection are verified through the real signer. [^src-extensions-sqlspec-storage-py] [^src-tests-data-storage-integrations-py]
+
 Advanced Alchemy accepts a URI/store/config first or a backend key with explicit `store=` through `register_storage_backend`. Bounded sync/async reader chunks and iterables feed native multipart uploads; producer failures abort unfinished uploads. `get_content` / `get_content_async` return full bytes, and saved `FileObject` values receive size, etag, and a UTC save timestamp [^src-extensions-alchemy-storage-py].
 
 Django `_open` / inherited `open` return `File` over `SyncReadableFile`; `aopen` awaits the complete native payload before wrapping `BytesIO` because Django `File` reads synchronously. Both support read-only binary and text modes. `save` / `asave` stream Django chunks, apply filename limits, and retry native create-only collisions unless `file_overwrite=True`. `listdir` returns immediate names; `url` / `aurl` use signing or `base_url`; `path` supports local stores only. Creation/access timestamps reuse the object's UTC modification timestamp because object metadata does not provide separate values [^src-extensions-django-storage-py].
+
+Django `_save` performs one native upload attempt; public `save` retries through Django's `Storage.save` with the original per-call `max_length`. `asave` retains that limit during alternative-name selection. Both rewind seekable content to zero after `FileExistsError`; a failed rewind preserves the original collision, and an impossible filename limit raises `SuspiciousFileOperation`. Overwrite mode propagates reported collisions without retry. Same-instance sync/async calls keep independent limits. The tests consume input, publish a native create-only racer, then raise a second native create-only conflict inside the producer. They verify recovery and full retry payloads; atomic multipart-completion acceptance remains open in the native repair chapters. [^src-extensions-django-storage-py] [^src-tests-django-plugin-py]
 
 ## 5. Emulator Fixtures & Test Suites
 
@@ -180,3 +190,5 @@ Django `_open` / inherited `open` return `File` over `SyncReadableFile`; `aopen`
 [^src-tests-integration-storage-conftest-py]: `src/py/tests/integration/storage/conftest.py` — Floci emulator integration fixtures (src/py/tests/integration/storage/conftest.py).
 
 [^src-extensions-django-storage-py]: `src/py/vertebra/extensions/django/storage.py::DjangoStorage` — Deconstructible Django Storage and File contract.
+[^src-tests-django-plugin-py]: `src/py/tests/unit/extensions/test_django_plugin.py` — Consumed-source producer collision recovery and independent limits.
+[^src-tests-data-storage-integrations-py]: `src/py/tests/unit/extensions/test_data_storage_integrations.py` — Native signing validation, provider failures and result shapes.

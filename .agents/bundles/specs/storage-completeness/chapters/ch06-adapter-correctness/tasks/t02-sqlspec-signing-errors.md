@@ -26,7 +26,7 @@ claimed_by: agent:sqlspec_signing_repair
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
-next_step: Complete chapter documentation sync and independent reviews.
+next_step: Complete chapter correctness review and fresh quality review.
 last_verified_at: "2026-11-07T22:31:17Z"
 last_verified_commit: 45b068e2
 verification_evidence: >-
@@ -103,6 +103,6 @@ Record the failing regression before implementation. Use this task's reserved ta
 
 Configured signing delegates directly after checking the corresponding native facade's `supports_signing` capability. HMAC validation `ValueError` and real IAM HTTP 503 `RuntimeError` retain exact native types and messages through sync and async GET/upload calls. Unsupported scalar/list operations retain backend context, and successful HMAC scalar/list results verify the HTTP method and qualified key through the real store verifier. The local responder consumes actual native requests and shuts down deterministically. Production uses no exception-message classification, public signature changes, or native source changes.
 
-The focused pre-edit regression selection reports eight failures and six passing characterization cases. The full canonical module passes all 37 tests after the repair; Ruff, formatting, Mypy and diff checks pass. Source signing and task completion remain owned by the parent coordinator.
+The full canonical module passes all 37 tests; Ruff, formatting, Mypy and diff checks pass. Signed source is `45b068e2`, the worksheet is completed, and the combined current-source storage/Django/data integration checkpoint passes 88 tests. Chapter knowledge is synchronized; correctness review and fresh quality review remain pending.
 
 [^implementation]: `src/py/vertebra/extensions/sqlspec/storage.py` — Current repository source for this task.

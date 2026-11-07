@@ -5,7 +5,7 @@ chapter_id: ch05-key-identity-and-preconditions
 title: Raw Object Identity and Typed Conditional Conflicts
 description: Raw Object Identity and Typed Conditional Conflicts
 status: stable
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
@@ -14,13 +14,15 @@ plan_revision: 4
 plan_commit: 5fe477fa4f6e08bab9278dba3906e7c556ceb3a4
 state_revision: 0
 last_verified_checkpoint: 8d073a38
-last_reviewed_commit: null
+last_reviewed_commit: 0bce1806
 created_at: '2026-11-07T12:00:00Z'
 updated_at: '2026-11-07T22:27:00Z'
 generated:
   by: flow/0.28.0
   at: '2026-11-07T12:00:00Z'
-verified: []
+verified:
+- correctness_review: 0bce1806
+- quality_review: 0bce1806
 sources:
 - id: source
   resource: src/rs/vertebra-storage/src/store.rs
@@ -35,7 +37,7 @@ tags:
 <!-- truth: start -->
 Native, facade and adapter key operations preserve raw Unicode and percent-text identities and reject ambiguous relative paths. [^source]
 `vertebra.storage.PreconditionError` lazily exposes the native `PermissionError` subclass for conditional conflicts; genuine permission failures remain distinct.
-All three tasks are implemented and verified. Correctness review and fresh quality review remain pending; provider publication repair remains outside this chapter.
+All three tasks are implemented and verified. Correctness review and fresh quality review pass at `0bce1806`; provider publication repair remains outside this chapter.
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -95,12 +97,12 @@ Progress: `[1/1 files documented]`. [Object-storage knowledge](../../../../knowl
 - [x] [8d073a38] storage-completeness:ch05:t02 — Reject silent key aliasing in facade and adapter qualification (tasks/t02-public-key-validation.md)
 - [x] [682aaaff] storage-completeness:ch05:t03 — Export lazy typed PreconditionError for native CAS conflicts (tasks/t03-typed-conflict.md)
 
-**Chapter Recovery Checkpoint:** run every task's focused verification, then correctness review and a fresh quality review before closing this chapter. `/flow:implement storage-completeness ch05-key-identity-and-preconditions` executes its ready worksheet.
+**Chapter Recovery Checkpoint:** all focused verification, correctness review and fresh quality review pass. The reviewed source and documentation checkpoint is `0bce1806`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
 - Plan revision 4 is independently approved; completed task receipts match signed source commits.
-- All three tasks are implemented and verified: native paths `c90285cf`, typed errors `682aaaff`, public qualification `8d073a38`. Correctness and fresh quality reviews remain.
+- All three tasks are implemented and verified: native paths `c90285cf`, typed errors `682aaaff`, public qualification `8d073a38`. Correctness and fresh quality reviews pass at `0bce1806`.
 - Native engine tests pass all 23 cases; the rebuilt extension passes the mapping, optional-import and stub checks. The combined facade/adapter/Django checkpoint passes all 74 tests. Local and cloud atomic publication remains pending.
 - Documentation: `[1/1 files documented]`; the shared knowledge contract matches the implemented raw-key and exception boundaries. Final provider, HTTP and Arrow documentation remains assigned to the consolidation tasks.
 - Reclosure of ch01 and downstream acceptance waits for native repair gates; this chapter never depends on that reclosure.

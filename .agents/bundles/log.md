@@ -1,5 +1,11 @@
 # Bundle Activity Log
 
+## [2026-11-07] flow-docs | Synchronized adapter repairs before Chapter 06 review
+
+- Bound Django `cd7e5563` and SQLSpec `45b068e2` to current chapter/root/catalog state and object-storage knowledge. Django retains per-call filename limits, rewinds replayable consumed input and preserves non-replayable collision errors. SQLSpec checks signing capability and preserves exact native validation/provider failures and scalar/list GET/PUT behavior.
+- The combined current-source storage/Django/data integration checkpoint passes 88 tests. Django recovery tests raise native create-only conflicts inside the exhausted producer; they do not establish atomic multipart completion. Native publication repairs, final provider/HTTP/Arrow documentation and Chapter 06 correctness plus fresh quality reviews remain open.
+- Chapter 05 correctness and fresh quality reviews report no findings across `b9c91e08..0bce1806`; its raw-key, qualification and typed-error scope is complete. Native publication acceptance remains outside that approval. The execution pointer advances to Chapter 07 Python R2 withdrawal.
+
 ## [2026-11-07] flow-docs | Synchronized raw object identity and typed conditional errors before Chapter 05 review
 
 - Bound native raw paths `c90285cf`, lazy native `PreconditionError` `682aaaff`, and facade/Alchemy/SQLSpec qualification `8d073a38` to current chapter/root/catalog state and object-storage knowledge. The knowledge records exact raw percent/Unicode keys, root/trailing-slash prefix behavior, matching local/URI qualifications, permission-error distinctions and missing-wheel laziness.
