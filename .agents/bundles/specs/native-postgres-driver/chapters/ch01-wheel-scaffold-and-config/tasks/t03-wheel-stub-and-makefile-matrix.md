@@ -5,7 +5,7 @@ chapter_id: ch01-wheel-scaffold-and-config
 title: Wire vertebra-postgres wheel, _postgres.pyi stub, and Makefile build/test targets
 description: Author src/rs/vertebra-postgres/pyproject.toml, src/py/vertebra/_postgres.pyi, and Makefile dev/build/stubtest/postgres-test/postgres-wheel-check targets with wheel zipfile and sdist tarfile verification.
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: static_validation
 depends_on:
@@ -26,14 +26,22 @@ estimated_loc: 110
 plan_revision: 4
 plan_commit: 45ff9563
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:pyo3-bridge-specialist
+claimed_at: "2026-11-07T20:24:33.208990+00:00"
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: null
 last_verified_commit: null
-verification_evidence: null
+verification_evidence:
+  - "UV_NO_SYNC=1; PYO3_PYTHON=${PWD}/.venv/bin/python; CARGO_TARGET_DIR=/tmp/vtb-cargo-target"
+  - "make dev: exit 0; six editable native extension installs"
+  - "six-module mypy.stubtest: exit 0; native PostgreSQL runtime constants: exit 0"
+  - "flock /tmp/vertebra-flow-shm-tests.lock make postgres-test: exit 0; scaffold has zero Rust unit/doc tests"
+  - "make postgres-wheel-check: exit 0; release wheel has exactly extension plus stub; sdist retains crate Cargo.toml/build.rs/src/lib.rs"
+  - "Exact worksheet zipfile/tarfile inspection: exit 0"
+  - "Actual Makefile validator rejects temporary wheel with vertebra/unwanted.py: expected exit 1; original artifacts revalidated exit 0"
+  - "Ruff check/format, Mypy stub check, make review-check, git diff --check: exit 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-07T16:40:00Z"
 commit: null
@@ -144,10 +152,13 @@ Commit as `build(postgres): wire vertebra-postgres wheel, stub, and Makefile tar
 
 ## Acceptance Criteria
 
-- [ ] `src/rs/vertebra-postgres/pyproject.toml` and `src/py/vertebra/_postgres.pyi` package only `vertebra/_postgres.<ext>` and `vertebra/_postgres.pyi` in `.whl` while retaining Cargo sources (`Cargo.toml`, `build.rs`, `src/lib.rs`) in `.tar.gz` sdist (R1).
-- [ ] `Makefile` integrates `vertebra-postgres` across `dev`, `build`, `py-test`, `lint`, `lint-all`, `postgres-test`, and `postgres-wheel-check`, and `mypy.stubtest vertebra._postgres` exits `0` (R1).
+- [x] `src/rs/vertebra-postgres/pyproject.toml` and `src/py/vertebra/_postgres.pyi` package only `vertebra/_postgres.<ext>` and `vertebra/_postgres.pyi` in `.whl` while retaining Cargo sources (`Cargo.toml`, `build.rs`, `src/lib.rs`) in `.tar.gz` sdist (R1).
+- [x] `Makefile` integrates `vertebra-postgres` across `dev`, `build`, `py-test`, `lint`, `lint-all`, `postgres-test`, and `postgres-wheel-check`, and `mypy.stubtest vertebra._postgres` exits `0` (R1).
 
 ## Notes & Discoveries
+
+- Maturin omits the external `python-source` stub from the wheel without an explicit wheel include, although the sdist retains it. Staging the new stub does not change that outcome. `include = [{ path = "vertebra/_postgres.pyi", format = "wheel" }]` uses the documented path relative to `python-source`; native wheel validation proves exactly two namespace entries. Maturin rejects include paths containing `..`. Primary references: [configuration](https://www.maturin.rs/config.html) and [Python-part file selection](https://github.com/PyO3/maturin/blob/main/src/module_writer/mod.rs).
+- The strict native validator rejects a temporary copy containing `vertebra/unwanted.py` with exit `1` and the offending member in its diagnostic, then accepts the unchanged built artifacts with exit `0`. No isolated-violation artifacts enter the repository.
 
 - [2026-11-07 16:40] Root `pyproject.toml` `[postgres]` extra, `uv.lock`, `.agents/skills/review-core/references/areas.toml`, sibling `pyproject.toml` `_postgres.pyi` exclusions, and `release.yaml` are staged in `ch08:t02`–`t04` (and `ch29:t01`) once the Python client classes are registered.
 

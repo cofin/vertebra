@@ -1,0 +1,27 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "vertebra-postgres"
+version = "0.3.0"
+description = "Native Rust PostgreSQL Protocol 3.0 client and pool extension for Vertebra."
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+[tool.maturin]
+python-source = "../../py"
+module-name = "vertebra._postgres"
+features = ["extension-module"]
+include = [{ path = "vertebra/_postgres.pyi", format = "wheel" }]
+exclude = [
+    "**/py/vertebra/**/*.py",
+    "**/py/vertebra/**/*.so",
+    "**/py/vertebra/**/*.pyd",
+    "**/py/vertebra/py.typed",
+    "**/py/vertebra/_bigquery.pyi",
+    "**/py/vertebra/_bundler.pyi",
+    "**/py/vertebra/_spanner.pyi",
+    "**/py/vertebra/_storage.pyi",
+    "**/py/vertebra/_vertebra.pyi",
+]

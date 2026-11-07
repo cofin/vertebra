@@ -152,12 +152,13 @@ ts-lint:                                            ## Lint TS package with auto
 .PHONY: dev
 dev:                                                ## Install native extensions in debug mode for development
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@(cd src/rs && PYO3_PYTHON="$(PYO3_PYTHON)" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --exclude vertebra-bigquery --exclude vertebra-spanner)
+	@(cd src/rs && PYO3_PYTHON="$(PYO3_PYTHON)" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --exclude vertebra-bigquery --exclude vertebra-spanner --exclude vertebra-postgres)
 	@uv run maturin develop --uv
 	@uv run maturin develop --uv -m src/rs/vertebra-bundler/Cargo.toml
 	@uv run maturin develop --uv -m src/rs/vertebra-storage/Cargo.toml
 	@uv run maturin develop --uv -m src/rs/vertebra-bigquery/Cargo.toml
 	@uv run maturin develop --uv -m src/rs/vertebra-spanner/Cargo.toml
+	@uv run maturin develop --uv -m src/rs/vertebra-postgres/Cargo.toml
 
 # =============================================================================
 # Build
@@ -165,12 +166,13 @@ dev:                                                ## Install native extensions
 .PHONY: build
 build: ts-build                                     ## Build optimized release binaries + native extension + TS client
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@(cd src/rs && PYO3_PYTHON="$(PYO3_PYTHON)" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --exclude vertebra-bigquery --exclude vertebra-spanner --release --features vertebra-http/python,vertebra-http/tls,vertebra-http/compression)
+	@(cd src/rs && PYO3_PYTHON="$(PYO3_PYTHON)" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --exclude vertebra-bigquery --exclude vertebra-spanner --exclude vertebra-postgres --release --features vertebra-http/python,vertebra-http/tls,vertebra-http/compression)
 	@uv run maturin develop --uv -r
 	@uv run maturin develop --uv -r -m src/rs/vertebra-bundler/Cargo.toml
 	@uv run maturin develop --uv -r -m src/rs/vertebra-storage/Cargo.toml
 	@uv run maturin develop --uv -r -m src/rs/vertebra-bigquery/Cargo.toml
 	@uv run maturin develop --uv -r -m src/rs/vertebra-spanner/Cargo.toml
+	@uv run maturin develop --uv -r -m src/rs/vertebra-postgres/Cargo.toml
 	@uv build
 	@echo "${OK} Build complete"
 
@@ -197,9 +199,45 @@ rs-test:                                            ## Run Rust tests (all featu
 
 .PHONY: py-test
 py-test: dev                                        ## Run Python tests
-	@uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._bigquery vertebra._spanner
+	@uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._bigquery vertebra._spanner vertebra._postgres
 	@uv run pytest src/py/tests -v
 	@echo "${OK} Python tests passed"
+
+.PHONY: postgres-test
+postgres-test:                                      ## Run native PostgreSQL tests and stub parity
+	@cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked
+	@uv run --no-sync python -m mypy.stubtest vertebra._postgres
+
+.PHONY: postgres-wheel-check
+postgres-wheel-check:                               ## Build and verify isolated PostgreSQL wheel and sdist
+	@uv build src/rs/vertebra-postgres --wheel --sdist --out-dir /tmp/vertebra-postgres-wheel-check
+	@uv run --no-sync python - <<'PY'
+	from importlib.machinery import EXTENSION_SUFFIXES
+	from pathlib import Path
+	import tarfile
+	import zipfile
+	artifacts = Path("/tmp/vertebra-postgres-wheel-check")
+	wheels = list(artifacts.glob("vertebra_postgres-*.whl"))
+	sdists = list(artifacts.glob("vertebra_postgres-*.tar.gz"))
+	assert len(wheels) == 1 and len(sdists) == 1, (wheels, sdists)
+	wheel = zipfile.ZipFile(wheels[0])
+	members = [n for n in wheel.namelist() if n.startswith("vertebra/")]
+	wheel.close()
+	extensions = {"vertebra/_postgres" + suffix for suffix in EXTENSION_SUFFIXES}
+	assert len(members) == 2, members
+	assert "vertebra/_postgres.pyi" in members, members
+	assert len(extensions.intersection(members)) == 1, members
+	sdist = tarfile.open(sdists[0], "r:gz")
+	members = set(sdist.getnames())
+	sdist.close()
+	assert any(n.endswith("/Cargo.toml") for n in members), members
+	manifests = [n for n in members if n.endswith("/vertebra-postgres/Cargo.toml")]
+	assert len(manifests) == 1, manifests
+	crate = manifests[0].removesuffix("Cargo.toml")
+	assert crate + "build.rs" in members, members
+	assert crate + "src/lib.rs" in members, members
+	print("PostgreSQL wheel isolation and sdist Cargo sources verified")
+	PY
 
 .PHONY: test
 test: rs-test py-test ts-test                       ## Run all tests (Rust, Python, TypeScript)
@@ -227,7 +265,7 @@ lint: ts-lint                                       ## Format and lint everythin
 	@(cd src/rs && cargo clippy --fix --allow-dirty --allow-staged --workspace --all-targets --features tls,compression,gcp -- -D warnings)
 	@echo "${INFO} Running type checks (Mypy)..."
 	@uv run mypy src/py/vertebra tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
-	@stub_mods="$$(uv run python -c 'import importlib.util; print(" ".join(m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._bigquery", "vertebra._spanner") if importlib.util.find_spec(m) is not None))')"; \
+	@stub_mods="$$(uv run python -c 'import importlib.util; print(" ".join(m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._bigquery", "vertebra._spanner", "vertebra._postgres") if importlib.util.find_spec(m) is not None))')"; \
 	if [ -n "$$stub_mods" ]; then \
 		uv run python -m mypy.stubtest $$stub_mods; \
 	fi
@@ -242,7 +280,7 @@ lint-all:                                           ## Check formatting, linting
 	@uv run ruff check src/py/vertebra src/py/tests tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
 	@uv run ruff format --check src/py/vertebra src/py/tests tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
 	@uv run mypy src/py/vertebra tools/scripts tools/pgo $(wildcard tools/docs docs/examples)
-	@stub_mods="$$(uv run python -c 'import importlib.util; print(" ".join(m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._bigquery", "vertebra._spanner") if importlib.util.find_spec(m) is not None))')"; \
+	@stub_mods="$$(uv run python -c 'import importlib.util; print(" ".join(m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._bigquery", "vertebra._spanner", "vertebra._postgres") if importlib.util.find_spec(m) is not None))')"; \
 	if [ -n "$$stub_mods" ]; then \
 		uv run python -m mypy.stubtest $$stub_mods; \
 	fi
