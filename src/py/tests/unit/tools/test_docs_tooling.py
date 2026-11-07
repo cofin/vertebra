@@ -11,6 +11,7 @@ from tools.docs.postbuild import (
     sync_rustdoc_artifacts,
 )
 from tools.docs.postbuild import main as postbuild_main
+from tools.docs.scan_public_docstrings import stage_mkdocs_inventory_cache
 from tools.docs.verify_docs_artifacts import (
     DocsVerificationError,
     verify_site_artifacts,
@@ -24,6 +25,7 @@ __all__ = (
     "test_emit_legacy_html_redirects_preserves_hashes",
     "test_generate_llms_files_expands_snippets_and_orders_nav",
     "test_generate_llms_files_fallback_nav_uses_frontmatter_title",
+    "test_stage_mkdocs_inventory_cache_refreshes_timestamps",
     "test_sync_rustdoc_artifacts_copies_when_present",
     "test_verify_site_artifacts_accepts_clean_site_and_exemptions",
     "test_verify_site_artifacts_rejects_bloated_secondary_toc",
@@ -90,8 +92,31 @@ def test_zensical_config_branding_uses_cofin_vertebra() -> None:
     assert 'repo_name = "cofin/vertebra"' in zensical_text
     assert "litestar-org/vertebra" not in zensical_text
     assert "vertebra.litestar.dev" not in zensical_text
+    assert '"https://advanced-alchemy.litestar.dev/latest/objects.inv"' in zensical_text
+    assert '"https://sqlspec.dev/objects.inv"' in zensical_text
+    assert "docs.advanced-alchemy.litestar.dev" not in zensical_text
+    assert "docs.sqlspec.dev" not in zensical_text
     assert 'repository = "https://github.com/cofin/vertebra"' in cargo_text
     assert "vertebra-io/vertebra" not in cargo_text
+
+
+def test_stage_mkdocs_inventory_cache_refreshes_timestamps(tmp_path: Path) -> None:
+    """Verify stage_mkdocs_inventory_cache copies cached .inv files and refreshes expired timestamps."""
+    src_dir = tmp_path / "src_cache"
+    src_dir.mkdir(parents=True)
+    inv_file = src_dir / "sample.inv"
+    inv_file.write_bytes(
+        b"# https://sqlspec.dev/objects.inv downloaded at timestamp 1000\n# Sphinx inventory version 2\n"
+    )
+
+    xdg_dir = tmp_path / "xdg"
+    count = stage_mkdocs_inventory_cache(xdg_dir, source_cache_dir=src_dir)
+    assert count == 1
+    staged = (xdg_dir / "mkdocs" / "mkdocs_url_cache" / "sample.inv").read_bytes()
+    first_line, body = staged.split(b"\n", 1)
+    assert first_line.startswith(b"# https://sqlspec.dev/objects.inv downloaded at timestamp ")
+    assert int(first_line.rsplit(b" ", 1)[1]) > 1000
+    assert body == b"# Sphinx inventory version 2\n"
 
 
 def test_generate_llms_files_expands_snippets_and_orders_nav(tmp_path: Path) -> None:

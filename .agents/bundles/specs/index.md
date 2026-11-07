@@ -11,7 +11,6 @@ The completed database foundation is documented in [driver contracts and adapter
 
 ## 2. Planned Feature Specifications (`state: planned`)
 
-- [`mcp-webmcp-core`](mcp-webmcp-core/spec.md) — Unified `ToolSpec` / `ToolRegistry` / `MCPCore` (`2026-07-28`), shared ASGI/WSGI MCP mounts, `litestar-mcp` delegation, and `document.modelContext` WebMCP bridge (`t01`–`t08`).
 - [`storage-completeness`](storage-completeness/spec.md) — Complete `SyncObjectStore` and `AsyncObjectStore` (`vertebra-storage`), unified GCP token caches, fail-closed construction, and SQLSpec, Advanced Alchemy, Django, and Litestar storage contracts (`t01`–`t07`).
 - [`native-postgres-driver`](native-postgres-driver/spec.md) — Standalone Rust PostgreSQL wheel (`vertebra-postgres`) covering wire authentication, cloud mTLS/IAM, pools, single-Sync pipelines, binary COPY, SHM Arrow, notifications, logical replication, and native adapter cutover (`t01`–`t102`).
 

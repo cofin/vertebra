@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -12,6 +13,8 @@ import pydantic
 import pytest
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope, Request, WsgiEnviron, run_wsgi_callable
+from vertebra.agent.mcp.models import MCPConfig as CanonicalMCPConfig
+from vertebra.agent.mcp.routes import WsgiMcpApp
 from vertebra.db.registry import DatabaseRegistry
 from vertebra.extensions.django import (
     ArrowManager,
@@ -610,3 +613,88 @@ def test_cross_framework_shared_native_pool_and_lease_broker(tmp_path: Any) -> N
     assert isolated_dj.broker is not DatabaseRegistry.default_broker()
     assert isolated_sqlspec.create_driver().native_driver is not dj_sqlite.native_driver
     assert isolated_sa.driver is not dj_sqlite.native_driver
+
+
+def test_django_mcp_shares_wsgi_mcp_app_and_reuses_persistent_portal() -> None:
+    """Django MCP uses canonical MCPConfig, WsgiMcpApp over MCPCore, and reuses the persistent Portal loop."""
+    assert MCPConfig is CanonicalMCPConfig
+
+    observed_loops: list[tuple[int, int]] = []
+
+    @vertebra_view(methods=("POST",), status_code=200)
+    @mcp_tool(name="django_probe_loop", description="Probe active event loop in Django")
+    async def django_probe_loop(seq: int) -> dict[str, int]:
+        loop = asyncio.get_running_loop()
+        observed_loops.append((id(loop), threading.get_ident()))
+        return {"seq": seq}
+
+    urlpatterns: list[Any] = [
+        _MockURLPattern(
+            "probe/<int:seq>/",
+            django_probe_loop,
+            name="django_probe_loop",
+        )
+    ]
+    plugin = VertebraPlugin(
+        urlpatterns=urlpatterns,
+        config=VertebraConfig(mcp=MCPConfig(server_name="django-mcp")),
+    )
+    assert isinstance(getattr(plugin, "_mcp_app", None), WsgiMcpApp)
+
+    discover_resp = plugin.handle_request(
+        Request.from_parts(
+            method="POST",
+            path="/mcp",
+            headers=[(b"content-type", b"application/json")],
+            body=b'{"jsonrpc":"2.0","id":1,"method":"server/discover"}',
+        )
+    )
+    assert discover_resp.status == 200
+    assert decode_json(bytes(discover_resp.body))["result"]["protocolVersion"] == "2026-07-28"
+
+    get_resp = plugin.handle_request(Request.from_parts(method="GET", path="/mcp"))
+    assert get_resp.status == 405
+
+    origin_resp = plugin.handle_request(
+        Request.from_parts(
+            method="POST",
+            path="/mcp",
+            headers=[
+                (b"content-type", b"application/json"),
+                (b"host", b"api.example.com"),
+                (b"origin", b"https://evil.example.com"),
+            ],
+            body=b'{"jsonrpc":"2.0","id":2,"method":"tools/list"}',
+        )
+    )
+    assert origin_resp.status == 403
+
+    notify_resp = plugin.handle_request(
+        Request.from_parts(
+            method="POST",
+            path="/mcp",
+            headers=[(b"content-type", b"application/json")],
+            body=b'{"jsonrpc":"2.0","method":"notifications/cancelled"}',
+        )
+    )
+    assert notify_resp.status == 202
+    assert bytes(notify_resp.body) == b""
+
+    wrapped_wsgi = plugin.wrap_wsgi_application(lambda _e, sr: (sr("404 Not Found", []), [b""])[1])
+    wsgi_get = run_wsgi_callable(wrapped_wsgi, WsgiEnviron.from_parts(method="GET", path="/mcp"))
+    assert wsgi_get.status == 405
+
+    for seq in (1, 2):
+        wsgi_call = run_wsgi_callable(
+            wrapped_wsgi,
+            WsgiEnviron.from_parts(
+                method="POST",
+                path="/mcp",
+                headers=[(b"content-type", b"application/json")],
+                body=f'{{"jsonrpc":"2.0","id":{seq},"method":"tools/call","params":{{"name":"django_probe_loop","arguments":{{"seq":{seq}}}}}}}'.encode(),
+            ),
+        )
+        assert wsgi_call.status == 200
+
+    assert len(observed_loops) == 2
+    assert observed_loops[0] == observed_loops[1]

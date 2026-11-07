@@ -12,26 +12,16 @@ from vertebra.agent.a2a.service import A2AConfig, A2AService
 from vertebra.agent.core.context import AgentContext
 from vertebra.utils.serializers import decode_json
 
+__all__ = ("A2AHttpHandler",)
+
 
 class A2AHttpHandler:
     """Streamable HTTP route handler coordinating validation, caching, and dispatch for A2A 1.0."""
 
-    def __init__(self, service: A2AService) -> None:
+    def __init__(self, service: A2AService, *, registry: Any | None = None) -> None:
         self.service = service
         self.config: A2AConfig = service.config
-
-    def _match_etag(self, if_none_match: str | None, current_etag: str) -> bool:
-        if not if_none_match:
-            return False
-        tokens = [t.strip() for t in if_none_match.split(",")]
-        normalized_current = current_etag.strip('"')
-        for token in tokens:
-            if token == "*":
-                return True
-            raw = token.removeprefix("W/").removeprefix("w/").strip('"')
-            if raw == normalized_current:
-                return True
-        return False
+        self.registry = registry if registry is not None else getattr(service, "tool_registry", None)
 
     def register_in_discovery_cache(self, cache: Any) -> None:
         """Register the AgentCard in Rust WellKnownDiscoveryCache when URLs are static."""
@@ -39,7 +29,7 @@ class A2AHttpHandler:
             return
         if self.config.base_url is None and not self.config.agent_card.has_explicit_interfaces():
             return
-        resolved_card = self.service.resolve_agent_card()
+        resolved_card = self.service.resolve_agent_card(registry=self.registry)
         if resolved_card is None:
             return
         card_bytes = resolved_card.to_json_bytes()
@@ -77,7 +67,7 @@ class A2AHttpHandler:
         if method == "GET" and (
             normalized_path == agent_card_path or normalized_path == "/.well-known/agent-card.json"
         ):
-            resolved_card = self.service.resolve_agent_card(headers=lower_headers)
+            resolved_card = self.service.resolve_agent_card(headers=lower_headers, registry=self.registry)
             if resolved_card is None:
                 return 404, {"Content-Type": "text/plain"}, b"AgentCard not configured"
             card_bytes = resolved_card.to_json_bytes()
@@ -141,7 +131,15 @@ class A2AHttpHandler:
 
         return 404, {"Content-Type": "text/plain"}, b"Not Found"
 
-
-__all__ = [
-    "A2AHttpHandler",
-]
+    def _match_etag(self, if_none_match: str | None, current_etag: str) -> bool:
+        if not if_none_match:
+            return False
+        tokens = [t.strip() for t in if_none_match.split(",")]
+        normalized_current = current_etag.strip('"')
+        for token in tokens:
+            if token == "*":
+                return True
+            raw = token.removeprefix("W/").removeprefix("w/").strip('"')
+            if raw == normalized_current:
+                return True
+        return False

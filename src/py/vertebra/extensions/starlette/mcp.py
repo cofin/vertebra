@@ -12,7 +12,10 @@ from vertebra.agent.mcp.controllers import (
     mcp_resource,
     mcp_tool,
 )
-from vertebra.agent.mcp.registry import MCPRegistry
+from vertebra.agent.mcp.models import MCPConfig
+from vertebra.agent.mcp.registry import MCPRegistry, ToolRegistry
+from vertebra.agent.mcp.routes import AsgiMcpApp, render_well_known_mcp_json
+from vertebra.agent.mcp.service import MCPCore
 from vertebra.agent.mcp.webmcp import (
     WebMCPConfig,
     WebMCPManifest,
@@ -23,9 +26,13 @@ from vertebra.agent.mcp.webmcp import (
 from vertebra.utils.module_loader import import_optional
 
 __all__ = (
+    "AsgiMcpApp",
+    "MCPConfig",
+    "MCPCore",
     "MCPRegistry",
     "PromptController",
     "SkillController",
+    "ToolRegistry",
     "WebMCPConfig",
     "WebMCPManifest",
     "WebMCPToolDescriptor",
@@ -41,26 +48,91 @@ __all__ = (
 def mount_mcp_routes(
     app: Any,
     *,
-    registry: MCPRegistry | None = None,
+    registry: ToolRegistry | None = None,
+    config: MCPConfig | None = None,
     webmcp_config: WebMCPConfig | None = None,
 ) -> MCPRegistry:
-    """Discover @mcp_tool/@mcp_resource/@mcp_prompt on ``app`` routes and mount WebMCP manifest endpoint."""
-    resolved_registry = registry if registry is not None else MCPRegistry()
+    """Discover @mcp_tool/@mcp_resource/@mcp_prompt on ``app`` routes and mount shared AsgiMcpApp."""
+    resolved_config = config or MCPConfig(webmcp=webmcp_config)
+    resolved_webmcp = webmcp_config or (
+        resolved_config.webmcp if isinstance(resolved_config.webmcp, WebMCPConfig) else None
+    )
+    resolved_registry = registry if isinstance(registry, MCPRegistry) else MCPRegistry()
     resolved_registry.discover_app_routes(app)
+
+    core = MCPCore(config=resolved_config, registry=resolved_registry)
+    mcp_app = AsgiMcpApp(core)
 
     state = getattr(app, "state", None)
     if state is not None:
         if isinstance(state, dict):
             state["mcp_registry"] = resolved_registry
+            state["mcp_core"] = core
+            state["mcp_app"] = mcp_app
         else:
             state.mcp_registry = resolved_registry
+            state.mcp_core = core
+            state.mcp_app = mcp_app
 
-    if webmcp_config is not None and webmcp_config.enabled:
-        manifest_bytes = render_webmcp_manifest_json(resolved_registry, config=webmcp_config)
-        routes = getattr(app, "routes", None)
-        if isinstance(routes, list):
-            routing_mod = import_optional("starlette.routing")
-            responses_mod = import_optional("starlette.responses")
+    routes = getattr(app, "routes", None)
+    if isinstance(routes, list):
+        routing_mod = import_optional("starlette.routing")
+        responses_mod = import_optional("starlette.responses")
+        existing_paths = {getattr(r, "path", None) for r in routes}
+
+        if resolved_config.path not in existing_paths:
+            if routing_mod is not None and hasattr(routing_mod, "Route"):
+                routes.append(
+                    routing_mod.Route(
+                        resolved_config.path,
+                        endpoint=mcp_app.handle_starlette_request,
+                        methods=["POST", "GET", "OPTIONS"],
+                        include_in_schema=False,
+                    )
+                )
+            else:
+                routes.append(
+                    SimpleNamespace(
+                        path=resolved_config.path,
+                        endpoint=mcp_app.handle_starlette_request,
+                        methods=["POST", "GET", "OPTIONS"],
+                        name="_vertebra_mcp_endpoint",
+                    )
+                )
+
+        if resolved_config.expose_well_known and resolved_config.well_known_path not in existing_paths:
+            well_known_bytes = render_well_known_mcp_json(resolved_config, resolved_registry)
+
+            async def _serve_well_known(_request: Any) -> Any:
+                if responses_mod is not None and hasattr(responses_mod, "Response"):
+                    return responses_mod.Response(content=well_known_bytes, media_type="application/json")
+                return well_known_bytes
+
+            if routing_mod is not None and hasattr(routing_mod, "Route"):
+                routes.append(
+                    routing_mod.Route(
+                        resolved_config.well_known_path,
+                        endpoint=_serve_well_known,
+                        methods=["GET"],
+                        include_in_schema=False,
+                    )
+                )
+            else:
+                routes.append(
+                    SimpleNamespace(
+                        path=resolved_config.well_known_path,
+                        endpoint=_serve_well_known,
+                        methods=["GET"],
+                        name="_vertebra_mcp_well_known",
+                    )
+                )
+
+        if (
+            resolved_webmcp is not None
+            and resolved_webmcp.enabled
+            and resolved_webmcp.manifest_path not in existing_paths
+        ):
+            manifest_bytes = render_webmcp_manifest_json(resolved_registry, config=resolved_webmcp)
 
             async def _serve_webmcp(_request: Any) -> Any:
                 if responses_mod is not None and hasattr(responses_mod, "Response"):
@@ -70,7 +142,7 @@ def mount_mcp_routes(
             if routing_mod is not None and hasattr(routing_mod, "Route"):
                 routes.append(
                     routing_mod.Route(
-                        webmcp_config.manifest_path,
+                        resolved_webmcp.manifest_path,
                         endpoint=_serve_webmcp,
                         methods=["GET"],
                         include_in_schema=False,
@@ -79,7 +151,7 @@ def mount_mcp_routes(
             else:
                 routes.append(
                     SimpleNamespace(
-                        path=webmcp_config.manifest_path,
+                        path=resolved_webmcp.manifest_path,
                         endpoint=_serve_webmcp,
                         methods=["GET"],
                         name="_vertebra_webmcp_manifest",

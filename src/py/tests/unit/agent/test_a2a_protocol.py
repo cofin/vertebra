@@ -25,32 +25,11 @@ from vertebra.agent.a2a import (
 from vertebra.agent.bridges import A2aAgentBridge, McpToolBridge
 from vertebra.agent.core.context import AgentContext, CallerIdentity
 from vertebra.agent.core.schema import tool
-from vertebra.agent.mcp import MCPConfig, MCPService
+from vertebra.agent.mcp import MCPConfig, MCPService, ToolRegistry
+from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
 from vertebra.telemetry.otel import TraceContext
 from vertebra.typing import FrozenCamelizedStruct
 from vertebra.utils.serializers import decode_json, encode_json_bytes
-
-
-def _sample_card(route_path: str = "/a2a") -> AgentCard:
-    interface = AgentInterface(
-        url=f"http://localhost:8000{route_path}",
-        protocol_binding="JSONRPC",
-        protocol_version="1.0",
-    )
-    skill = AgentSkill(
-        id="summarize",
-        name="Summarizer",
-        description="Summarizes text into bullet points",
-        tags=("nlp", "text"),
-        examples=("Summarize the latest quarterly report",),
-    )
-    return AgentCard(
-        name="test-agent",
-        description="A2A test agent",
-        version="1.0",
-        supported_interfaces=(interface,),
-        skills=(skill,),
-    )
 
 
 def test_a2a_1_0_models_camel_case_wire_roundtrip_and_card_validation() -> None:
@@ -616,3 +595,77 @@ async def test_bidirectional_mcp_and_a2a_bridges_preserve_trace_context() -> Non
     assert len(spans) > 0
     for span in spans:
         assert span.trace_id == root_trace.trace_id
+
+
+@pytest.mark.anyio
+async def test_a2a_skill_card_projects_from_toolspec_exposure() -> None:
+    """A2AHttpHandler and AgentPlugin project AgentCard skills strictly from ToolSpec entries with 'a2a' in exposure."""
+    registry = ToolRegistry()
+
+    @tool(
+        name="a2a_visible_tool",
+        title="Visible A2A Skill",
+        description="Projected into A2A agent card",
+        exposure=frozenset({"mcp", "a2a"}),
+    )
+    def a2a_visible_tool(query: str) -> str:
+        return query
+
+    @tool(
+        name="mcp_private_tool",
+        description="Excluded from A2A agent card",
+        exposure=frozenset({"mcp"}),
+    )
+    def mcp_private_tool(query: str) -> str:
+        return query
+
+    registry.register_tool(a2a_visible_tool)
+    registry.register_tool(mcp_private_tool)
+
+    card = _sample_card()
+    service = A2AService(config=A2AConfig(agent_card=card))
+    handler = A2AHttpHandler(service, registry=registry)
+
+    status, _, body = await handler.handle_request("GET", "/.well-known/agent-card.json", {}, b"")
+    assert status == 200
+    card_doc = decode_json(body)
+    skill_ids = [s["id"] for s in card_doc["skills"]]
+    assert "a2a_visible_tool" in skill_ids
+    assert "mcp_private_tool" not in skill_ids
+
+    plugin = AgentPlugin(
+        AgentPluginConfig(
+            mcp=MCPConfig(server_name="dual-agent"),
+            a2a=A2AConfig(agent_card=AgentCard(name="DualAgent", description="Dual protocol")),
+        )
+    )
+    plugin.mcp_registry.register_tool(a2a_visible_tool)
+    plugin.mcp_registry.register_tool(mcp_private_tool)
+    assert plugin.a2a_service is not None
+    resolved_plugin_card = plugin.a2a_service.resolve_agent_card()
+    assert resolved_plugin_card is not None
+    plugin_skill_ids = [s.id for s in resolved_plugin_card.skills]
+    assert "a2a_visible_tool" in plugin_skill_ids
+    assert "mcp_private_tool" not in plugin_skill_ids
+
+
+def _sample_card(route_path: str = "/a2a") -> AgentCard:
+    interface = AgentInterface(
+        url=f"http://localhost:8000{route_path}",
+        protocol_binding="JSONRPC",
+        protocol_version="1.0",
+    )
+    skill = AgentSkill(
+        id="summarize",
+        name="Summarizer",
+        description="Summarizes text into bullet points",
+        tags=("nlp", "text"),
+        examples=("Summarize the latest quarterly report",),
+    )
+    return AgentCard(
+        name="test-agent",
+        description="A2A test agent",
+        version="1.0",
+        supported_interfaces=(interface,),
+        skills=(skill,),
+    )

@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from vertebra.extensions.starlette.mcp import (
+    AsgiMcpApp,
+    MCPConfig,
+    MCPCore,
     MCPRegistry,
     PromptController,
     SkillController,
+    ToolRegistry,
     WebMCPConfig,
     WebMCPManifest,
     WebMCPToolDescriptor,
@@ -18,9 +22,13 @@ from vertebra.extensions.starlette.mcp import (
 )
 
 __all__ = (
+    "AsgiMcpApp",
+    "MCPConfig",
+    "MCPCore",
     "MCPRegistry",
     "PromptController",
     "SkillController",
+    "ToolRegistry",
     "WebMCPConfig",
     "WebMCPManifest",
     "WebMCPToolDescriptor",

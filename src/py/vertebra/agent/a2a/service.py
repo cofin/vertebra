@@ -20,6 +20,7 @@ import msgspec
 from vertebra.agent.a2a.models import (
     TERMINAL_A2A_STATES,
     AgentCard,
+    AgentSkill,
     Artifact,
     Message,
     PushNotificationConfig,
@@ -43,17 +44,26 @@ from vertebra.agent.core.sse import SseFrame, SseStreamBroker
 from vertebra.agent.telemetry import AgentTelemetryRecorder
 from vertebra.utils.serializers import decode_json, encode_json, encode_json_bytes
 
+__all__ = (
+    "CONTENT_TYPE_NOT_SUPPORTED",
+    "EXTENDED_CARD_NOT_CONFIGURED",
+    "PUSH_NOTIFICATION_NOT_SUPPORTED",
+    "TASK_NOT_CANCELABLE",
+    "TASK_NOT_FOUND",
+    "UNSUPPORTED_OPERATION",
+    "A2AConfig",
+    "A2AService",
+    "A2ATaskStore",
+    "PushNotificationDispatcher",
+    "get_owner_key",
+)
+
 TASK_NOT_FOUND: int = -32001
 TASK_NOT_CANCELABLE: int = -32002
 PUSH_NOTIFICATION_NOT_SUPPORTED: int = -32003
 UNSUPPORTED_OPERATION: int = -32004
 CONTENT_TYPE_NOT_SUPPORTED: int = -32005
 EXTENDED_CARD_NOT_CONFIGURED: int = -32006
-
-
-def _serialize_struct(obj: Any) -> dict[str, Any]:
-    """Serialize msgspec Struct to a standard Python dictionary."""
-    return cast(dict[str, Any], decode_json(encode_json_bytes(obj)))
 
 
 def get_owner_key(context: AgentContext | None) -> str:
@@ -99,25 +109,6 @@ class A2ATaskStore:
         self.max_tasks = max_tasks
         self.ttl_seconds = ttl_seconds
         self._tasks: dict[str, tuple[Task, str, float]] = {}
-
-    def _now(self) -> float:
-        return time.time()
-
-    def _evict_expired(self) -> None:
-        current_time = self._now()
-        expired_keys = [
-            task_id
-            for task_id, (_, _, updated_at) in self._tasks.items()
-            if (current_time - updated_at) > self.ttl_seconds
-        ]
-        for key in expired_keys:
-            self._tasks.pop(key, None)
-
-        if len(self._tasks) > self.max_tasks:
-            sorted_entries = sorted(self._tasks.items(), key=lambda item: item[1][2])
-            overflow_count = len(self._tasks) - self.max_tasks
-            for idx in range(overflow_count):
-                self._tasks.pop(sorted_entries[idx][0], None)
 
     def save(self, task: Task, owner_id: str) -> None:
         """Store or update a task with caller ownership."""
@@ -178,6 +169,25 @@ class A2ATaskStore:
         )
         self.save(updated_task, owner_id)
         return updated_task
+
+    def _now(self) -> float:
+        return time.time()
+
+    def _evict_expired(self) -> None:
+        current_time = self._now()
+        expired_keys = [
+            task_id
+            for task_id, (_, _, updated_at) in self._tasks.items()
+            if (current_time - updated_at) > self.ttl_seconds
+        ]
+        for key in expired_keys:
+            self._tasks.pop(key, None)
+
+        if len(self._tasks) > self.max_tasks:
+            sorted_entries = sorted(self._tasks.items(), key=lambda item: item[1][2])
+            overflow_count = len(self._tasks) - self.max_tasks
+            for idx in range(overflow_count):
+                self._tasks.pop(sorted_entries[idx][0], None)
 
 
 class PushNotificationDispatcher:
@@ -295,6 +305,8 @@ class A2AService:
         stream_broker: SseStreamBroker | None = None,
         telemetry: AgentTelemetryRecorder | None = None,
         executor: A2AExecutorCallable | None = None,
+        *,
+        tool_registry: Any | None = None,
     ) -> None:
         self.config = config if config is not None else A2AConfig()
         self.task_store = (
@@ -315,26 +327,10 @@ class A2AService:
         self.stream_broker = stream_broker if stream_broker is not None else SseStreamBroker()
         self.telemetry = telemetry if telemetry is not None else AgentTelemetryRecorder()
         self.executor = executor
+        self.tool_registry: Any | None = tool_registry
         self.router = JSONRPCRouter()
         self._event_counter: int = 0
         self._register_routes()
-
-    def _next_event_id(self) -> str:
-        self._event_counter += 1
-        return f"evt-{self._event_counter}"
-
-    def _register_routes(self) -> None:
-        self.router.register("message/send", self.handle_message_send)
-        self.router.register("message/stream", self.handle_message_stream)
-        self.router.register("tasks/get", self.handle_tasks_get)
-        self.router.register("tasks/list", self.handle_tasks_list)
-        self.router.register("tasks/cancel", self.handle_tasks_cancel)
-        self.router.register("tasks/resubscribe", self.handle_tasks_resubscribe)
-        self.router.register("tasks/pushNotificationConfig/set", self.handle_push_set)
-        self.router.register("tasks/pushNotificationConfig/get", self.handle_push_get)
-        self.router.register("tasks/pushNotificationConfig/list", self.handle_push_list)
-        self.router.register("tasks/pushNotificationConfig/delete", self.handle_push_delete)
-        self.router.register("agent/authenticatedExtendedCard", self.handle_extended_card)
 
     async def handle_payload(self, body: bytes, context: AgentContext | None = None) -> bytes:
         """Process incoming raw JSON-RPC body and return response bytes."""
@@ -380,35 +376,6 @@ class A2AService:
                 "error": {"code": -32600, "message": "Invalid Request: Expected object or list"},
             }
         )
-
-    def _publish_event(
-        self,
-        task_id: str,
-        event: TaskStatusUpdateEvent | TaskArtifactUpdateEvent,
-    ) -> SseFrame:
-        event_id = self._next_event_id()
-        data_str = encode_json(_serialize_struct(event))
-        frame = SseFrame(id=event_id, event=event.kind, data=data_str)
-        self.stream_broker.publish(task_id, frame)
-        return frame
-
-    async def _emit_and_dispatch(
-        self,
-        task_id: str,
-        event: TaskStatusUpdateEvent | TaskArtifactUpdateEvent,
-    ) -> SseFrame:
-        frame = self._publish_event(task_id, event)
-        if self.config.enable_push_notifications:
-            await self.push_dispatcher.dispatch(task_id, event)
-        return frame
-
-    def _parse_message(self, message_data: dict[str, Any]) -> Message:
-        try:
-            return msgspec.convert(message_data, Message)
-        except Exception as exc:
-            raise JSONRPCErrorException(
-                JSONRPCError(code=INVALID_PARAMS, message=f"Invalid Message payload: {exc}")
-            ) from exc
 
     async def execute_task_flow(
         self,
@@ -749,8 +716,9 @@ class A2AService:
         *,
         base_url: str | None = None,
         extended: bool = False,
+        registry: Any | None = None,
     ) -> AgentCard | None:
-        """Resolve the public or extended AgentCard with auto-populated interface and URL."""
+        """Resolve the public or extended AgentCard with auto-populated interface, URL, and ToolSpec skills."""
         card = self.config.extended_card if extended else self.config.agent_card
         if card is None:
             return None
@@ -759,6 +727,22 @@ class A2AService:
             base_url=base_url if base_url is not None else self.config.base_url,
             headers=headers,
         )
+        effective_registry = registry if registry is not None else self.tool_registry
+        if effective_registry is not None and hasattr(effective_registry, "list_specs"):
+            existing_ids = {s.id for s in resolved.skills}
+            projected_skills = list(resolved.skills)
+            for spec in effective_registry.list_specs(exposure="a2a"):
+                if spec.name not in existing_ids:
+                    existing_ids.add(spec.name)
+                    projected_skills.append(
+                        AgentSkill(
+                            id=spec.name,
+                            name=spec.title or spec.name,
+                            description=spec.description,
+                        )
+                    )
+            if len(projected_skills) != len(resolved.skills):
+                resolved = msgspec.structs.replace(resolved, skills=tuple(projected_skills))
         if self.config.card_secret and not resolved.signatures:
             resolved = AgentCardSigner.sign(resolved, self.config.card_secret)
         return resolved
@@ -788,17 +772,53 @@ class A2AService:
                 )
             return resolved_card.to_dict()
 
+    def _next_event_id(self) -> str:
+        self._event_counter += 1
+        return f"evt-{self._event_counter}"
 
-__all__ = [
-    "CONTENT_TYPE_NOT_SUPPORTED",
-    "EXTENDED_CARD_NOT_CONFIGURED",
-    "PUSH_NOTIFICATION_NOT_SUPPORTED",
-    "TASK_NOT_CANCELABLE",
-    "TASK_NOT_FOUND",
-    "UNSUPPORTED_OPERATION",
-    "A2AConfig",
-    "A2AService",
-    "A2ATaskStore",
-    "PushNotificationDispatcher",
-    "get_owner_key",
-]
+    def _register_routes(self) -> None:
+        self.router.register("message/send", self.handle_message_send)
+        self.router.register("message/stream", self.handle_message_stream)
+        self.router.register("tasks/get", self.handle_tasks_get)
+        self.router.register("tasks/list", self.handle_tasks_list)
+        self.router.register("tasks/cancel", self.handle_tasks_cancel)
+        self.router.register("tasks/resubscribe", self.handle_tasks_resubscribe)
+        self.router.register("tasks/pushNotificationConfig/set", self.handle_push_set)
+        self.router.register("tasks/pushNotificationConfig/get", self.handle_push_get)
+        self.router.register("tasks/pushNotificationConfig/list", self.handle_push_list)
+        self.router.register("tasks/pushNotificationConfig/delete", self.handle_push_delete)
+        self.router.register("agent/authenticatedExtendedCard", self.handle_extended_card)
+
+    def _publish_event(
+        self,
+        task_id: str,
+        event: TaskStatusUpdateEvent | TaskArtifactUpdateEvent,
+    ) -> SseFrame:
+        event_id = self._next_event_id()
+        data_str = encode_json(_serialize_struct(event))
+        frame = SseFrame(id=event_id, event=event.kind, data=data_str)
+        self.stream_broker.publish(task_id, frame)
+        return frame
+
+    async def _emit_and_dispatch(
+        self,
+        task_id: str,
+        event: TaskStatusUpdateEvent | TaskArtifactUpdateEvent,
+    ) -> SseFrame:
+        frame = self._publish_event(task_id, event)
+        if self.config.enable_push_notifications:
+            await self.push_dispatcher.dispatch(task_id, event)
+        return frame
+
+    def _parse_message(self, message_data: dict[str, Any]) -> Message:
+        try:
+            return msgspec.convert(message_data, Message)
+        except Exception as exc:
+            raise JSONRPCErrorException(
+                JSONRPCError(code=INVALID_PARAMS, message=f"Invalid Message payload: {exc}")
+            ) from exc
+
+
+def _serialize_struct(obj: Any) -> dict[str, Any]:
+    """Serialize msgspec Struct to a standard Python dictionary."""
+    return cast(dict[str, Any], decode_json(encode_json_bytes(obj)))

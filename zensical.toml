@@ -154,8 +154,8 @@ inventories = [
   "https://docs.litestar.dev/latest/objects.inv",
   "https://msgspec.dev/objects.inv",
   "https://docs.sqlalchemy.org/en/20/objects.inv",
-  "https://docs.advanced-alchemy.litestar.dev/latest/objects.inv",
-  "https://docs.sqlspec.dev/latest/objects.inv",
+  "https://advanced-alchemy.litestar.dev/latest/objects.inv",
+  "https://sqlspec.dev/objects.inv",
 ]
 
 [project.plugins.mkdocstrings.handlers.python.options]

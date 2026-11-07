@@ -1,19 +1,22 @@
-"""JSON Schema 2020-12 builder and tool descriptor for agentic harnesses.
+"""JSON Schema 2020-12 builder, ToolSpec, and tool descriptor for agentic harnesses.
 
-This module provides reflection-based schema derivation for functions and methods,
-handling msgspec.Struct, dataclasses, TypedDict, Enum, Literal, and Annotated types,
-while stripping dependency-injected parameters such as AgentContext.
+This module provides msgspec-backed schema derivation (`typing.get_type_hints` ->
+`msgspec.defstruct` -> `msgspec.json.schema_components`) for functions and methods,
+immutable `ToolSpec` and `ToolAnnotations` structs, and `msgspec.convert` argument coercion.
 """
 
-import dataclasses
+from __future__ import annotations
+
+import copy
 import inspect
 import types
-from collections.abc import Callable, Mapping, Sequence
-from enum import Enum
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Union, get_args, get_origin, is_typeddict
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Union, cast, get_args, get_origin, get_type_hints
 
 import anyio
 import msgspec
+
+from vertebra.typing import FrozenBaseStruct
 
 try:
     from vertebra import _vertebra
@@ -21,6 +24,27 @@ try:
     _NativeSchemaDigestCache = getattr(_vertebra, "SchemaDigestCache", None)
 except ImportError:
     _NativeSchemaDigestCache = None
+
+__all__ = [
+    "DEFAULT_TOOL_EXPOSURE",
+    "STRIP_TYPE_NAMES",
+    "SchemaBuilder",
+    "SchemaDigestCache",
+    "Tool",
+    "ToolAnnotations",
+    "ToolArgumentError",
+    "ToolCall",
+    "ToolExposure",
+    "ToolResult",
+    "ToolSpec",
+    "execute_tool_calls",
+    "tool",
+]
+
+
+type ToolExposure = Literal["mcp", "webmcp", "a2a"]
+
+DEFAULT_TOOL_EXPOSURE: frozenset[ToolExposure] = frozenset({"mcp", "a2a"})
 
 
 class _PySchemaDigestCache:
@@ -85,6 +109,100 @@ STRIP_TYPE_NAMES: frozenset[str] = frozenset(
 )
 
 
+class ToolAnnotations(FrozenBaseStruct, frozen=True, kw_only=True, cache_hash=True):
+    """Semantic behavioral annotations for MCP and WebMCP tools."""
+
+    read_only: bool = False
+    """Whether the tool only reads state without mutating its environment."""
+    destructive: bool = False
+    """Whether the tool may perform destructive or irreversible mutations."""
+    idempotent: bool = False
+    """Whether repeated calls with identical arguments have no additional effect."""
+    open_world: bool = False
+    """Whether the tool interacts with external systems beyond the local runtime."""
+    consequential: bool = False
+    """Whether the tool carries high-impact side effects requiring user confirmation."""
+
+    @classmethod
+    def from_value(
+        cls,
+        raw: ToolAnnotations | Mapping[str, Any] | None = None,
+        *,
+        requires_confirmation: bool = False,
+    ) -> ToolAnnotations:
+        """Construct normalized `ToolAnnotations` from a mapping or existing instance."""
+        if isinstance(raw, ToolAnnotations):
+            if requires_confirmation and not raw.consequential:
+                return msgspec.structs.replace(raw, consequential=True)
+            return raw
+        if not isinstance(raw, Mapping):
+            return cls(consequential=bool(requires_confirmation))
+        read_only = bool(raw.get("read_only", raw.get("readOnlyHint", False)))
+        destructive = bool(raw.get("destructive", raw.get("destructiveHint", False)))
+        idempotent = bool(raw.get("idempotent", raw.get("idempotentHint", False)))
+        open_world = bool(
+            raw.get(
+                "open_world",
+                raw.get("openWorldHint", raw.get("untrustedContentHint", False)),
+            )
+        )
+        consequential = bool(raw.get("consequential", raw.get("consequentialHint", False)) or requires_confirmation)
+        return cls(
+            read_only=read_only,
+            destructive=destructive,
+            idempotent=idempotent,
+            open_world=open_world,
+            consequential=consequential,
+        )
+
+    def to_mcp_dict(self) -> dict[str, bool]:
+        """Project annotations into MCP 2026-07-28 camelCase hint keys."""
+        out: dict[str, bool] = {}
+        if self.read_only:
+            out["readOnlyHint"] = True
+        if self.destructive:
+            out["destructiveHint"] = True
+        if self.idempotent:
+            out["idempotentHint"] = True
+        if self.open_world:
+            out["openWorldHint"] = True
+        if self.consequential:
+            out["consequentialHint"] = True
+        return out
+
+    def to_webmcp_dict(self, *, requires_confirmation: bool = False) -> dict[str, bool]:
+        """Project annotations into browser WebMCP hint keys."""
+        out = self.to_mcp_dict()
+        if requires_confirmation or self.consequential:
+            out["consequentialHint"] = True
+        return out
+
+
+class ToolSpec(FrozenBaseStruct, frozen=True, kw_only=True):
+    """Canonical immutable tool specification shared across MCP, WebMCP, and A2A."""
+
+    name: str
+    """Unique identifier of the tool."""
+    title: str = ""
+    """Human-readable display title for the tool."""
+    description: str = ""
+    """Summary explaining what the tool does and when to invoke it."""
+    input_schema: dict[str, Any] = msgspec.field(default_factory=dict)
+    """JSON Schema 2020-12 object schema describing tool input parameters."""
+    output_schema: dict[str, Any] | None = None
+    """Optional JSON Schema 2020-12 schema describing structured tool output."""
+    annotations: ToolAnnotations = msgspec.field(default_factory=ToolAnnotations)
+    """Semantic behavioral hints for MCP and WebMCP clients."""
+    exposure: frozenset[ToolExposure] = msgspec.field(default_factory=lambda: DEFAULT_TOOL_EXPOSURE)
+    """Protocol surfaces where this tool is advertised (`"mcp"`, `"webmcp"`, `"a2a"`)."""
+    requires_confirmation: bool = False
+    """Whether invoking this tool requires an approved human confirmation ticket."""
+    guards: tuple[Any, ...] = ()
+    """Ordered sequence of authorization guards enforced before tool execution."""
+    timeout_seconds: float | None = None
+    """Optional execution timeout in seconds."""
+
+
 class ToolCall(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Tool execution request from a model or caller."""
 
@@ -127,7 +245,7 @@ class ToolArgumentError(Exception):
 
 
 class SchemaBuilder:
-    """Derives JSON Schema 2020-12 schemas from Python type hints."""
+    """Derives JSON Schema 2020-12 schemas from Python type hints via msgspec."""
 
     def __init__(self) -> None:
         self._defs: dict[str, Any] = {}
@@ -142,6 +260,11 @@ class SchemaBuilder:
         """Return whether a parameter annotation represents a framework-injected dependency."""
         if getattr(ann, "__name__", "") in strip_names:
             return True
+        if isinstance(ann, str):
+            stripped_str = ann.replace(" ", "")
+            for name in strip_names:
+                if stripped_str in (name, f"{name}|None", f"None|{name}", f"Optional[{name}]"):
+                    return True
         origin = get_origin(ann)
         if origin is Annotated:
             ann_args = get_args(ann)
@@ -153,44 +276,122 @@ class SchemaBuilder:
             return bool(non_none) and all(SchemaBuilder.is_stripped_annotation(arg, strip_names) for arg in non_none)
         return False
 
+    @staticmethod
+    def resolve_callable_hints(fn: Callable[..., Any]) -> dict[str, Any]:
+        """Resolve type hints for a callable using typing.get_type_hints with include_extras=True."""
+        target: Any = inspect.unwrap(fn)
+        globalns: dict[str, Any] = dict(getattr(target, "__globals__", {}) or {})
+        globalns.setdefault("Annotated", Annotated)
+        globalns.setdefault("Literal", Literal)
+        globalns.setdefault("Union", Union)
+        globalns.setdefault("Any", Any)
+        globalns.setdefault("msgspec", msgspec)
+        try:
+            hints = dict(get_type_hints(target, globalns=globalns, include_extras=True))
+        except Exception:
+            hints = {}
+            raw_annotations = getattr(target, "__annotations__", None) or {}
+            for name, val in raw_annotations.items():
+                if not isinstance(val, str):
+                    hints[name] = val
+        sig = inspect.signature(fn)
+        for param_name, param in sig.parameters.items():
+            if param_name not in hints and param.annotation is not inspect.Parameter.empty:
+                hints[param_name] = param.annotation
+        if "return" not in hints and sig.return_annotation is not inspect.Signature.empty:
+            hints["return"] = sig.return_annotation
+        return hints
+
+    @classmethod
+    def resolve_parameter_hints(
+        cls,
+        fn: Callable[..., Any],
+        *,
+        strip_types: Sequence[type | str] = (),
+    ) -> dict[str, Any]:
+        """Return resolved parameter annotations for non-stripped callable parameters."""
+        sig = inspect.signature(fn)
+        hints = cls.resolve_callable_hints(fn)
+        strip_names = cls._build_strip_names(strip_types)
+        resolved: dict[str, Any] = {}
+        for param_name, param in sig.parameters.items():
+            if param_name in ("self", "cls"):
+                continue
+            if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                continue
+            if hasattr(param.default, "dependency"):
+                continue
+            ann = hints.get(param_name, param.annotation)
+            if cls.is_stripped_annotation(ann, strip_names):
+                continue
+            resolved[param_name] = cls._normalize_annotated(ann)
+        return resolved
+
     def build_callable_schema(
         self,
         fn: Callable[..., Any],
         *,
         strip_types: Sequence[type | str] = (),
     ) -> dict[str, Any]:
-        """Derive an input JSON Schema for a callable function or method."""
+        """Derive an input JSON Schema for a callable via msgspec.defstruct and schema_components."""
         sig = inspect.signature(fn)
-        properties: dict[str, Any] = {}
-        required: list[str] = []
+        hints = self.resolve_callable_hints(fn)
+        strip_names = self._build_strip_names(strip_types)
 
-        strip_names = set(STRIP_TYPE_NAMES)
-        for st in strip_types:
-            if isinstance(st, str):
-                strip_names.add(st)
-            elif hasattr(st, "__name__"):
-                strip_names.add(st.__name__)
+        fields: list[tuple[str, Any] | tuple[str, Any, Any]] = []
+        defaults_to_attach: dict[str, Any] = {}
 
         for param_name, param in sig.parameters.items():
             if param_name in ("self", "cls"):
                 continue
-
+            if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                continue
             if hasattr(param.default, "dependency"):
                 continue
 
-            ann = param.annotation
+            ann = hints.get(param_name, param.annotation)
             if self.is_stripped_annotation(ann, strip_names):
                 continue
 
-            param_schema = self._type_to_schema(ann)
-            if param.default is not inspect.Parameter.empty:
-                if isinstance(param.default, (str, int, float, bool, list, dict)) or param.default is None:
-                    param_schema["default"] = param.default
+            normalized_ann = self._normalize_annotated(ann)
+            field_type = (
+                Any if normalized_ann is inspect.Parameter.empty or isinstance(normalized_ann, str) else normalized_ann
+            )
+
+            if param.default is inspect.Parameter.empty:
+                fields.append((param_name, field_type))
             else:
-                required.append(param_name)
+                default_val = param.default
+                if isinstance(default_val, (str, int, float, bool, list, dict)) or default_val is None:
+                    defaults_to_attach[param_name] = default_val
+                if isinstance(default_val, (list, dict, set)):
+                    fields.append(
+                        (
+                            param_name,
+                            field_type,
+                            msgspec.field(default_factory=self._make_default_factory(default_val)),
+                        )
+                    )
+                else:
+                    fields.append((param_name, field_type, default_val))
 
-            properties[param_name] = param_schema
+        struct_name = f"_{getattr(fn, '__name__', 'Tool').lstrip('_') or 'Tool'}Input"
+        param_struct = msgspec.defstruct(struct_name, fields, kw_only=True, gc=False)
+        (_,), component_defs = msgspec.json.schema_components(
+            (param_struct,),
+            schema_hook=self._fallback_schema_hook,
+        )
+        root_def = dict(component_defs.pop(struct_name, {}))
+        self._defs.update(component_defs)
 
+        properties: dict[str, Any] = {
+            prop_name: dict(prop_schema) for prop_name, prop_schema in (root_def.get("properties") or {}).items()
+        }
+        for param_name, default_val in defaults_to_attach.items():
+            if param_name in properties and "default" not in properties[param_name]:
+                properties[param_name]["default"] = default_val
+
+        required = list(root_def.get("required") or [])
         schema: dict[str, Any] = {
             "type": "object",
             "properties": properties,
@@ -199,180 +400,212 @@ class SchemaBuilder:
             schema["required"] = required
         if self._defs:
             schema["$defs"] = dict(self._defs)
-
         return schema
 
-    def _type_to_schema(self, tp: Any) -> dict[str, Any]:
-        """Convert a single Python type into a JSON schema dict, populating defs."""
-        if tp is Any or tp is inspect.Parameter.empty:
-            return {}
+    def build_output_schema(self, fn: Callable[..., Any]) -> dict[str, Any] | None:
+        """Derive an output JSON Schema for a callable's return annotation via schema_components."""
+        hints = self.resolve_callable_hints(fn)
+        return_ann = hints.get("return", inspect.Signature.empty)
+        return_ann = self._unwrap_awaitable_return(return_ann)
+        if return_ann in (inspect.Signature.empty, None, types.NoneType, Any) or isinstance(return_ann, str):
+            return None
+        normalized = self._normalize_annotated(return_ann)
+        try:
+            (root_schema,), component_defs = msgspec.json.schema_components(
+                (normalized,),
+                schema_hook=self._fallback_schema_hook,
+            )
+        except Exception:
+            return None
 
+        schema_dict = dict(root_schema)
+        ref = schema_dict.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/$defs/"):
+            ref_name = ref.removeprefix("#/$defs/")
+            if ref_name in component_defs:
+                target_def = dict(component_defs.pop(ref_name))
+                if component_defs:
+                    target_def["$defs"] = dict(component_defs)
+                return target_def
+        if component_defs:
+            schema_dict["$defs"] = dict(component_defs)
+        return schema_dict
+
+    @staticmethod
+    def _build_strip_names(strip_types: Sequence[type | str]) -> set[str]:
+        strip_names = set(STRIP_TYPE_NAMES)
+        for st in strip_types:
+            if isinstance(st, str):
+                strip_names.add(st)
+            elif hasattr(st, "__name__"):
+                strip_names.add(st.__name__)
+        return strip_names
+
+    @classmethod
+    def _normalize_annotated(cls, tp: Any) -> Any:
+        if tp is inspect.Parameter.empty or tp is Any:
+            return tp
         origin = get_origin(tp)
-
         if origin is Annotated:
             args = get_args(tp)
-            base_schema = self._type_to_schema(args[0])
-            for meta in args[1:]:
-                if isinstance(meta, str):
-                    base_schema["description"] = meta
-                elif isinstance(meta, msgspec.Meta):
-                    if meta.description is not None:
-                        base_schema["description"] = meta.description
-                    if meta.ge is not None:
-                        base_schema["minimum"] = meta.ge
-                    if meta.gt is not None:
-                        base_schema["exclusiveMinimum"] = meta.gt
-                    if meta.le is not None:
-                        base_schema["maximum"] = meta.le
-                    if meta.lt is not None:
-                        base_schema["exclusiveMaximum"] = meta.lt
-                    if meta.min_length is not None:
-                        base_schema["minLength"] = meta.min_length
-                    if meta.max_length is not None:
-                        base_schema["maxLength"] = meta.max_length
-                    if meta.pattern is not None:
-                        base_schema["pattern"] = meta.pattern
-            return base_schema
+            base = cls._normalize_annotated(args[0])
+            new_meta: list[Any] = []
+            for item in args[1:]:
+                if isinstance(item, str):
+                    new_meta.append(msgspec.Meta(description=item))
+                else:
+                    new_meta.append(item)
+            return Annotated[(base, *new_meta)]
+        return tp
 
-        if origin is Literal:
-            literal_values = list(get_args(tp))
-            return {"enum": literal_values}
+    @staticmethod
+    def _unwrap_awaitable_return(tp: Any) -> Any:
+        origin = get_origin(tp)
+        if origin is Coroutine:
+            args = get_args(tp)
+            return args[2] if len(args) == 3 else Any
+        if origin is Awaitable:
+            args = get_args(tp)
+            return args[0] if args else Any
+        return tp
 
-        if origin is types.UnionType or origin is Union:
-            union_args = get_args(tp)
-            schemas = [self._type_to_schema(arg) for arg in union_args]
-            return {"anyOf": schemas}
+    @staticmethod
+    def _make_default_factory(default_val: Any) -> Callable[[], Any]:
+        def _factory() -> Any:
+            return copy.copy(default_val)
 
-        if isinstance(tp, type) and issubclass(tp, (str, bytes)):
+        return _factory
+
+    @staticmethod
+    def _fallback_schema_hook(tp: type) -> dict[str, Any]:
+        if isinstance(tp, type) and issubclass(tp, (bytes, bytearray, memoryview)):
             return {"type": "string"}
-        if isinstance(tp, type) and issubclass(tp, bool):
-            return {"type": "boolean"}
-        if isinstance(tp, type) and issubclass(tp, int):
-            return {"type": "integer"}
-        if isinstance(tp, type) and issubclass(tp, float):
-            return {"type": "number"}
-
-        if isinstance(tp, type) and issubclass(tp, Enum):
-            enum_values = [e.value for e in tp]
-            name = tp.__name__
-            if name not in self._defs:
-                self._defs[name] = {"title": name, "enum": enum_values}
-            return {"$ref": f"#/$defs/{name}"}
-
-        if isinstance(tp, type) and issubclass(tp, msgspec.Struct):
-            struct_schema = msgspec.json.schema(tp)
-            if "$defs" in struct_schema:
-                self._defs.update(struct_schema["defs" if "defs" in struct_schema else "$defs"])
-            if "$ref" in struct_schema:
-                return {"$ref": struct_schema["$ref"]}
-            return struct_schema
-
-        if dataclasses.is_dataclass(tp):
-            name = tp.__name__ if hasattr(tp, "__name__") else "Dataclass"
-            if name not in self._defs:
-                properties: dict[str, Any] = {}
-                required: list[str] = []
-                for field in dataclasses.fields(tp):
-                    properties[field.name] = self._type_to_schema(field.type)
-                    if field.default is dataclasses.MISSING and field.default_factory is dataclasses.MISSING:
-                        required.append(field.name)
-                schema_def: dict[str, Any] = {
-                    "title": name,
-                    "type": "object",
-                    "properties": properties,
-                }
-                if required:
-                    schema_def["required"] = required
-                self._defs[name] = schema_def
-            return {"$ref": f"#/$defs/{name}"}
-
-        if is_typeddict(tp):
-            name = tp.__name__ if hasattr(tp, "__name__") else "TypedDict"
-            if name not in self._defs:
-                properties = {}
-                required = []
-                for k, v in getattr(tp, "__annotations__", {}).items():
-                    properties[k] = self._type_to_schema(v)
-                    if k in getattr(tp, "__required_keys__", ()):
-                        required.append(k)
-                td_def: dict[str, Any] = {
-                    "title": name,
-                    "type": "object",
-                    "properties": properties,
-                }
-                if required:
-                    td_def["required"] = required
-                self._defs[name] = td_def
-            return {"$ref": f"#/$defs/{name}"}
-
-        if origin in (list, Sequence, tuple, set, frozenset):
-            args = get_args(tp)
-            item_schema = self._type_to_schema(args[0]) if args else {}
-            return {"type": "array", "items": item_schema}
-
-        if origin in (dict, Mapping):
-            args = get_args(tp)
-            value_schema = self._type_to_schema(args[1]) if len(args) > 1 else {}
-            return {"type": "object", "additionalProperties": value_schema}
-
-        if isinstance(tp, type):
-            name = tp.__name__
-            return {"type": "object", "title": name}
-
-        return {}
+        name = getattr(tp, "__name__", "Object")
+        return {"type": "object", "title": name}
 
 
 class Tool:
-    """Method and function descriptor encapsulating callable logic and JSON schema."""
+    """Method and function descriptor encapsulating callable logic and a frozen ToolSpec."""
 
     def __init__(
         self,
         fn: Callable[..., Any],
         *,
         name: str | None = None,
+        title: str | None = None,
         description: str | None = None,
         input_schema: dict[str, Any] | None = None,
+        output_schema: dict[str, Any] | None = None,
         requires_confirmation: bool = False,
         timeout_seconds: float | None = None,
         webmcp: bool | None = None,
-        annotations: dict[str, Any] | None = None,
+        exposure: Iterable[ToolExposure] | None = None,
+        annotations: ToolAnnotations | Mapping[str, Any] | None = None,
         guards: Sequence[Any] = (),
+        spec: ToolSpec | None = None,
         instance: Any = None,
     ) -> None:
         meta = getattr(fn, "_mcp_tool_meta", None)
         meta_dict = meta if isinstance(meta, dict) else {}
         self.fn = fn
-        self.name = name or meta_dict.get("name") or fn.__name__
-        self.description = description or meta_dict.get("description") or inspect.getdoc(fn) or ""
-        self.requires_confirmation = bool(requires_confirmation or meta_dict.get("requires_confirmation", False))
-        self.timeout_seconds = timeout_seconds if timeout_seconds is not None else meta_dict.get("timeout_seconds")
-        self.webmcp: bool = bool(meta_dict.get("webmcp", False)) if webmcp is None else bool(webmcp)
-        self.annotations: dict[str, Any] = (
-            dict(meta_dict.get("annotations", {})) if annotations is None else dict(annotations)
-        )
-        self.guards: tuple[Any, ...] = tuple(guards)
         self._instance = instance
+        self._signature = inspect.signature(fn)
+        self._param_hints = SchemaBuilder.resolve_parameter_hints(fn)
 
-        if input_schema is None:
-            builder = SchemaBuilder()
-            self.input_schema = builder.build_callable_schema(fn)
+        if spec is not None:
+            resolved_guards = tuple(guards) if guards else spec.guards
+            self.spec = (
+                msgspec.structs.replace(spec, guards=resolved_guards) if resolved_guards != spec.guards else spec
+            )
+            self.name = self.spec.name
+            self.title = self.spec.title
+            self.description = self.spec.description
+            self.input_schema = self.spec.input_schema
+            self.output_schema = self.spec.output_schema
+            self.requires_confirmation = self.spec.requires_confirmation
+            self.timeout_seconds = self.spec.timeout_seconds
+            self.exposure = self.spec.exposure
+            self.webmcp = "webmcp" in self.spec.exposure
+            self.guards = self.spec.guards
+            raw_ann = annotations if isinstance(annotations, Mapping) else meta_dict.get("annotations")
+            self.annotations: dict[str, Any] = (
+                dict(raw_ann) if isinstance(raw_ann, Mapping) else self.spec.annotations.to_mcp_dict()
+            )
+            return
+
+        resolved_name = str(name or meta_dict.get("name") or getattr(fn, "__name__", "tool"))
+        resolved_title = str(title if title is not None else (meta_dict.get("title") or ""))
+        resolved_description = str(
+            description if description is not None else (meta_dict.get("description") or inspect.getdoc(fn) or "")
+        )
+        resolved_confirmation = bool(requires_confirmation or meta_dict.get("requires_confirmation", False))
+        resolved_timeout = timeout_seconds if timeout_seconds is not None else meta_dict.get("timeout_seconds")
+
+        raw_exposure = exposure if exposure is not None else meta_dict.get("exposure")
+        resolved_webmcp = bool(meta_dict.get("webmcp", False)) if webmcp is None else bool(webmcp)
+        if raw_exposure is not None:
+            exposure_set: set[ToolExposure] = {
+                cast("ToolExposure", item) for item in raw_exposure if item in ("mcp", "webmcp", "a2a")
+            }
+            if resolved_webmcp:
+                exposure_set.add("webmcp")
+            resolved_exposure = frozenset(exposure_set)
         else:
-            self.input_schema = input_schema
+            base_exposure: set[ToolExposure] = set(DEFAULT_TOOL_EXPOSURE)
+            if resolved_webmcp:
+                base_exposure.add("webmcp")
+            resolved_exposure = frozenset(base_exposure)
 
-    def __get__(self, instance: Any, owner: Any = None) -> "Tool":
+        raw_annotations = annotations if annotations is not None else meta_dict.get("annotations")
+        struct_annotations = ToolAnnotations.from_value(
+            raw_annotations,
+            requires_confirmation=resolved_confirmation,
+        )
+        dict_annotations = (
+            dict(raw_annotations) if isinstance(raw_annotations, Mapping) else struct_annotations.to_mcp_dict()
+        )
+
+        builder = SchemaBuilder()
+        resolved_input_schema = builder.build_callable_schema(fn) if input_schema is None else dict(input_schema)
+        resolved_output_schema = (
+            builder.build_output_schema(fn)
+            if output_schema is None and "output_schema" not in meta_dict
+            else (output_schema if output_schema is not None else meta_dict.get("output_schema"))
+        )
+        resolved_guards = tuple(guards or meta_dict.get("guards", ()))
+
+        self.spec = ToolSpec(
+            name=resolved_name,
+            title=resolved_title,
+            description=resolved_description,
+            input_schema=resolved_input_schema,
+            output_schema=resolved_output_schema,
+            annotations=struct_annotations,
+            exposure=resolved_exposure,
+            requires_confirmation=resolved_confirmation,
+            guards=resolved_guards,
+            timeout_seconds=resolved_timeout,
+        )
+        self.name = self.spec.name
+        self.title = self.spec.title
+        self.description = self.spec.description
+        self.input_schema = self.spec.input_schema
+        self.output_schema = self.spec.output_schema
+        self.requires_confirmation = self.spec.requires_confirmation
+        self.timeout_seconds = self.spec.timeout_seconds
+        self.exposure = self.spec.exposure
+        self.webmcp = "webmcp" in self.spec.exposure
+        self.annotations = dict_annotations
+        self.guards = self.spec.guards
+
+    def __get__(self, instance: Any, owner: Any = None) -> Tool:
         """Bind tool to an instance when accessed as an attribute on an object."""
         if instance is None:
             return self
         return Tool(
             self.fn,
-            name=self.name,
-            description=self.description,
-            input_schema=self.input_schema,
-            requires_confirmation=self.requires_confirmation,
-            timeout_seconds=self.timeout_seconds,
-            webmcp=self.webmcp,
             annotations=self.annotations,
-            guards=self.guards,
+            spec=self.spec,
             instance=instance,
         )
 
@@ -390,7 +623,7 @@ class Tool:
                 if inspect.isawaitable(guard_res):
                     await guard_res
 
-        sig = inspect.signature(self.fn)
+        sig = self._signature
         call_kwargs: dict[str, Any] = {}
         has_var_keyword = False
 
@@ -404,8 +637,10 @@ class Tool:
             if param.kind == inspect.Parameter.VAR_POSITIONAL:
                 continue
 
-            ann = param.annotation
-            if SchemaBuilder.is_stripped_annotation(ann) or param_name == "context":
+            ann = self._param_hints.get(param_name, param.annotation)
+            if (
+                param_name not in self._param_hints and SchemaBuilder.is_stripped_annotation(ann)
+            ) or param_name == "context":
                 if context is not None:
                     call_kwargs[param_name] = context
                 continue
@@ -440,28 +675,22 @@ class Tool:
         return res
 
     def _convert_argument(self, param_name: str, value: Any, annotation: Any) -> Any:
-        """Convert and validate a single argument against parameter type hint."""
+        """Convert and validate a single argument against its resolved parameter type hint."""
         if annotation is inspect.Parameter.empty or annotation is Any:
             return value
-
-        resolved_ann = annotation
-        if isinstance(resolved_ann, str):
-            try:
-                resolved_ann = eval(
-                    resolved_ann,
-                    {"int": int, "str": str, "float": float, "bool": bool, "dict": dict, "list": list, "Any": Any},
-                )
-            except Exception:
-                return value
-
+        if isinstance(annotation, str):
+            raise ToolArgumentError(
+                param_name=param_name,
+                message=f"Unresolved type annotation {annotation!r}",
+                pointer=f"/{param_name}",
+            )
         try:
-            return msgspec.convert(value, resolved_ann)
+            return msgspec.convert(value, annotation)
         except Exception as exc:
-            pointer = f"/{param_name}"
             raise ToolArgumentError(
                 param_name=param_name,
                 message=str(exc),
-                pointer=pointer,
+                pointer=f"/{param_name}",
             ) from exc
 
 
@@ -469,10 +698,13 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     *,
+    title: str | None = None,
     requires_confirmation: bool = False,
     timeout_seconds: float | None = None,
     webmcp: bool | None = None,
-    annotations: dict[str, Any] | None = None,
+    exposure: Iterable[ToolExposure] | None = None,
+    annotations: ToolAnnotations | Mapping[str, Any] | None = None,
+    guards: Sequence[Any] = (),
 ) -> Callable[[Callable[..., Any]], Tool]:
     """Decorator converting a function or method into a Tool descriptor."""
 
@@ -480,11 +712,14 @@ def tool(
         return Tool(
             fn,
             name=name,
+            title=title,
             description=description,
             requires_confirmation=requires_confirmation,
             timeout_seconds=timeout_seconds,
             webmcp=webmcp,
+            exposure=exposure,
             annotations=annotations,
+            guards=guards,
         )
 
     return decorator
@@ -534,16 +769,3 @@ async def execute_tool_calls(
             tg.start_soon(run_single, idx, call)
 
     return [res for res in results if res is not None]
-
-
-__all__ = [
-    "STRIP_TYPE_NAMES",
-    "SchemaBuilder",
-    "SchemaDigestCache",
-    "Tool",
-    "ToolArgumentError",
-    "ToolCall",
-    "ToolResult",
-    "execute_tool_calls",
-    "tool",
-]

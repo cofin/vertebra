@@ -12,7 +12,7 @@ import { interpolateRoutePath, routeUrl, wsUrl } from "../src/router";
 import { type BrowserModelContextTool, registerWebMCPTools } from "../src/webmcp";
 
 describe("@vertebra/client/agent SDK", () => {
-  it("encodes MCP headers correctly for ASCII and non-ASCII characters", () => {
+  it("encodes MCP headers correctly for ASCII, non-ASCII, and control/newline characters", () => {
     expect(encodeMcpHeaderValue("read_file")).toBe("read_file");
     expect(encodeMcpHeaderValue("tools/execute_query")).toBe("tools/execute_query");
 
@@ -20,23 +20,32 @@ describe("@vertebra/client/agent SDK", () => {
     const encoded = encodeMcpHeaderValue(nonAscii);
     expect(encoded.startsWith("=?base64?")).toBe(true);
     expect(encoded.endsWith("?=")).toBe(true);
+
+    const crlf = "bad\r\nInjected: 1";
+    const encodedCrlf = encodeMcpHeaderValue(crlf);
+    expect(encodedCrlf.startsWith("=?base64?")).toBe(true);
+    expect(encodedCrlf.includes("\r")).toBe(false);
+    expect(encodedCrlf.includes("\n")).toBe(false);
+
+    const spoofed = "=?base64?already?=";
+    const encodedSpoof = encodeMcpHeaderValue(spoofed);
+    expect(encodedSpoof).not.toBe(spoofed);
+    expect(encodedSpoof.startsWith("=?base64?")).toBe(true);
   });
 
-  it("McpClient sets protocol version, method, name, and traceparent headers", async () => {
+  it("McpClient sets protocol version, accept, _meta, and parses SSE JSON-RPC responses", async () => {
     let capturedRequest: Request | null = null;
+    let capturedBody: Record<string, unknown> | null = null;
 
     const mockTransport = async (req: Request): Promise<Response> => {
       capturedRequest = req;
+      capturedBody = (await req.clone().json()) as Record<string, unknown>;
       return new Response(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          result: { content: [{ type: "text", text: "Tool output" }] },
-        }),
+        'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"SSE tool output"}]}}\n\n',
         {
           status: 200,
           headers: {
-            "content-type": "application/json",
+            "content-type": "text/event-stream",
             "Mcp-Session-Id": "sess_server_999",
           },
         },
@@ -51,15 +60,21 @@ describe("@vertebra/client/agent SDK", () => {
 
     const result = await client.callTool<{ content: Array<{ text: string }> }>("lookup_order", { orderId: 45001 });
 
-    expect(result.content[0]?.text).toBe("Tool output");
+    expect(result.content[0]?.text).toBe("SSE tool output");
     expect(capturedRequest).not.toBeNull();
     const req = capturedRequest as unknown as Request;
 
+    expect(req.headers.get("accept")).toBe("application/json, text/event-stream");
     expect(req.headers.get("MCP-Protocol-Version")).toBe(MCP_PROTOCOL_VERSION);
     expect(req.headers.get("Mcp-Method")).toBe("tools/call");
     expect(req.headers.get("Mcp-Name")).toBe("lookup_order");
     expect(req.headers.get("Mcp-Session-Id")).toBe("initial_sess");
     expect(req.headers.get("traceparent")).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/i);
+
+    const params = (capturedBody?.params ?? {}) as Record<string, unknown>;
+    const meta = (params._meta ?? {}) as Record<string, unknown>;
+    expect(meta["io.modelcontextprotocol/protocolVersion"]).toBe(MCP_PROTOCOL_VERSION);
+    expect(meta["io.modelcontextprotocol/clientCapabilities"]).toEqual({});
 
     expect(client.getSessionId()).toBe("sess_server_999");
   });
@@ -212,14 +227,17 @@ describe("@vertebra/client/agent SDK", () => {
     ).toBe("wss://api.example.com/ws/rooms/general?token=abc");
   });
 
-  it("registerWebMCPTools registers tools with navigator.modelContext and dispatches JSON-RPC tools/call", async () => {
-    const registered: BrowserModelContextTool[] = [];
+  it("registerWebMCPTools prioritizes document.modelContext, forwards signal, isolates errors, and supports HMR disposal", async () => {
+    const registered = new Map<string, { tool: BrowserModelContextTool; signal?: AbortSignal }>();
+    const unregistered: string[] = [];
     let capturedHeaders: Headers | null = null;
     let capturedBody: Record<string, unknown> | null = null;
+    let capturedSignal: AbortSignal | null | undefined = null;
 
     const fakeFetch: typeof fetch = async (_input, init) => {
       capturedHeaders = new Headers(init?.headers);
       capturedBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      capturedSignal = init?.signal;
       return new Response(
         JSON.stringify({
           jsonrpc: "2.0",
@@ -230,35 +248,98 @@ describe("@vertebra/client/agent SDK", () => {
       );
     };
 
-    const tools = await registerWebMCPTools(
-      {
+    const docContext = {
+      registerTool: (tool: BrowserModelContextTool, opts?: { signal?: AbortSignal }) => {
+        if (tool.name === "broken_tool") {
+          throw new Error("registration rejected");
+        }
+        registered.set(tool.name, { tool, signal: opts?.signal });
+        opts?.signal?.addEventListener("abort", () => {
+          registered.delete(tool.name);
+        });
+      },
+      unregisterTool: (name: string) => {
+        unregistered.push(name);
+        registered.delete(name);
+      },
+    };
+    const navContext = {
+      registerTool: () => {
+        throw new Error("navigator.modelContext should not be used when document.modelContext is present");
+      },
+    };
+
+    const g = globalThis as Record<string, unknown>;
+    const navObj = globalThis.navigator as unknown as Record<string, unknown>;
+    const prevDoc = g.document;
+    const prevNavModelContext = navObj.modelContext;
+    g.document = { modelContext: docContext };
+    navObj.modelContext = navContext;
+
+    try {
+      const manifest = {
         protocolVersion: MCP_PROTOCOL_VERSION,
         mcpEndpoint: "https://app.example.com/mcp",
         tools: [
           {
+            name: "broken_tool",
+            description: "Fails registration",
+            inputSchema: { type: "object" },
+          },
+          {
             name: "create_ticket",
+            title: "Create Ticket",
             description: "Create a support ticket",
             inputSchema: { type: "object", properties: { title: { type: "string" } } },
+            outputSchema: { type: "object", properties: { id: { type: "number" } } },
+            annotations: { consequentialHint: true },
           },
         ],
-      },
-      {
-        fetchImpl: fakeFetch,
-        modelContext: {
-          registerTool: (tool) => {
-            registered.push(tool);
-          },
-        },
-      },
-    );
+      };
 
-    expect(tools).toHaveLength(1);
-    expect(registered).toHaveLength(1);
-    const out = await registered[0]?.execute({ title: "Broken login" });
-    expect(out).toEqual({ status: "created", id: 101 });
-    expect(capturedHeaders?.get("MCP-Protocol-Version")).toBe(MCP_PROTOCOL_VERSION);
-    expect(capturedHeaders?.get("Mcp-Method")).toBe("tools/call");
-    expect(capturedHeaders?.get("Mcp-Name")).toBe("create_ticket");
-    expect((capturedBody?.params as { name?: string } | undefined)?.name).toBe("create_ticket");
+      const handle1 = await registerWebMCPTools(manifest, { fetchImpl: fakeFetch });
+      expect(handle1.tools).toHaveLength(1);
+      expect(handle1.errors).toHaveLength(1);
+      expect(handle1.errors[0]?.name).toBe("broken_tool");
+      expect(registered.size).toBe(1);
+
+      const firstEntry = registered.get("create_ticket");
+      expect(firstEntry?.tool.title).toBe("Create Ticket");
+      expect(firstEntry?.tool.outputSchema).toEqual({
+        type: "object",
+        properties: { id: { type: "number" } },
+      });
+      expect(firstEntry?.signal?.aborted).toBe(false);
+
+      // HMR re-registration replaces previous tool cleanly without duplicates
+      const abortCtrl = new AbortController();
+      const handle2 = await registerWebMCPTools(manifest, {
+        fetchImpl: fakeFetch,
+        signal: abortCtrl.signal,
+      });
+      expect(firstEntry?.signal?.aborted).toBe(true);
+      expect(registered.size).toBe(1);
+
+      const execAbort = new AbortController();
+      const activeTool = handle2.tools[0];
+      const out = await activeTool?.execute({ title: "Broken login" }, { signal: execAbort.signal });
+      expect(out).toEqual({ status: "created", id: 101 });
+      expect(capturedHeaders?.get("MCP-Protocol-Version")).toBe(MCP_PROTOCOL_VERSION);
+      expect(capturedHeaders?.get("Mcp-Method")).toBe("tools/call");
+      expect(capturedHeaders?.get("Mcp-Name")).toBe("create_ticket");
+      expect(capturedSignal).toBe(execAbort.signal);
+      expect((capturedBody?.params as { name?: string } | undefined)?.name).toBe("create_ticket");
+
+      handle2.dispose();
+      expect(registered.size).toBe(0);
+      expect(unregistered).toContain("create_ticket");
+    } finally {
+      g.document = prevDoc;
+      if (prevNavModelContext === undefined) {
+        delete navObj.modelContext;
+      } else {
+        navObj.modelContext = prevNavModelContext;
+      }
+    }
   });
 });

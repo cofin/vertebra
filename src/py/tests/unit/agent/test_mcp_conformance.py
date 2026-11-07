@@ -1,21 +1,26 @@
 """Conformance tests for MCP 2026-07-28 protocol, registry, HTTP handler, and tasks."""
 
 import dataclasses
+from collections.abc import Mapping
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from vertebra.agent.controller import ConfirmationDecisionRequest
 from vertebra.agent.core.context import AgentContext, CallerIdentity
-from vertebra.agent.core.guards import GuardProtocol, PermissionDeniedError
-from vertebra.agent.core.jsonrpc import JSONRPCErrorException
+from vertebra.agent.core.guards import GuardProtocol, PermissionDeniedError, RequireRoles, authorize
+from vertebra.agent.core.jsonrpc import METHOD_NOT_FOUND, JSONRPCErrorException
 from vertebra.agent.core.schema import tool
 from vertebra.agent.mcp import (
     HEADER_MISMATCH,
     UNSUPPORTED_PROTOCOL_VERSION,
     BlobContent,
     MCPConfig,
+    MCPCore,
     MCPHttpHandler,
+    McpHttpRequest,
+    McpHttpResponse,
     MCPRegistry,
     MCPService,
     MCPTaskStore,
@@ -30,37 +35,69 @@ from vertebra.agent.mcp import (
     SkillIntegrityError,
     TaskLookupError,
     TextContent,
+    ToolRegistry,
     WebMCPConfig,
     build_webmcp_manifest,
     decode_mcp_header_value,
     encode_mcp_header_value,
     mcp_tool,
     prompt,
+    render_webmcp_manifest_json,
     resource,
 )
 from vertebra.agent.mcp.service import CONFIRMATION_REQUIRED, CONFIRMATION_TOKEN_META_KEY
 from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
 from vertebra.agent.runtime import ConfirmationGate
+from vertebra.extensions.django.mcp import attach_mcp_routes as attach_django_mcp
+from vertebra.extensions.flask.mcp import attach_mcp_routes as attach_flask_mcp
+from vertebra.extensions.starlette.mcp import mount_mcp_routes as mount_starlette_mcp
+from vertebra.framework._app import App
 from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
 @pytest.mark.anyio
-async def test_mcp_service_initialize_ping_and_discover() -> None:
-    """Verify initialize, ping, and server/discover responses conform to 2026-07-28."""
-    service = MCPService(config=MCPConfig(server_name="test-mcp", server_version="1.2.3"))
-    init_res = await service._handle_initialize()
-    assert init_res["protocolVersion"] == "2026-07-28"
-    assert init_res["serverInfo"]["name"] == "test-mcp"
-    assert init_res["serverInfo"]["version"] == "1.2.3"
-    assert "tools" in init_res["capabilities"]
-
-    ping_res = await service._handle_ping()
-    assert ping_res == {}
-
-    discover_res = await service._handle_discover()
+async def test_mcp_core_discover_and_removed_2024_methods() -> None:
+    """Verify server/discover 2026-07-28 metadata and -32601 rejection on removed 2024-11-05 methods."""
+    core = MCPCore(config=MCPConfig(server_name="test-mcp", server_version="1.2.3"))
+    discover_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "server/discover"},
+            body=encode_json_bytes({"jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {}}),
+        )
+    )
+    assert isinstance(discover_resp, McpHttpResponse)
+    assert discover_resp.status == 200
+    discover_res = decode_json(discover_resp.body)["result"]
     assert discover_res["protocolVersion"] == "2026-07-28"
+    assert discover_res["serverInfo"]["name"] == "test-mcp"
+    assert discover_res["serverInfo"]["version"] == "1.2.3"
     assert discover_res["counts"]["tools"] == 0
+    assert discover_res["_meta"]["io.modelcontextprotocol/protocolVersion"] == "2026-07-28"
+    assert discover_res["_meta"]["resultType"] == "server/discover"
+    assert discover_res["_meta"]["ttlMs"] == 60000
+    assert discover_res["_meta"]["cacheScope"] == "public"
+
+    for removed_method in (
+        "initialize",
+        "ping",
+        "logging/setLevel",
+        "resources/subscribe",
+        "resources/unsubscribe",
+        "tasks/result",
+    ):
+        resp = await core.handle(
+            McpHttpRequest(
+                method="POST",
+                path="/mcp",
+                body=encode_json_bytes({"jsonrpc": "2.0", "id": 99, "method": removed_method, "params": {}}),
+            )
+        )
+        assert resp.status == 200
+        err_payload = decode_json(resp.body)
+        assert err_payload["error"]["code"] == METHOD_NOT_FOUND
 
 
 @pytest.mark.anyio
@@ -149,12 +186,7 @@ async def test_mcp_service_resources_and_templates() -> None:
 
     tmpl_read = await service._handle_resources_read({"uri": "file:///logs/2026-10-22"})
     assert tmpl_read["contents"][0]["text"] == "Logs for 2026-10-22"
-
-    ctx = AgentContext(session_id="client-conn-1")
-    await service._handle_resources_subscribe({"uri": "file:///config.json"}, context=ctx)
-    sent_count = service.notify_resource_updated("file:///config.json")
-    assert sent_count >= 0
-    await service._handle_resources_unsubscribe({"uri": "file:///config.json"}, context=ctx)
+    assert tmpl_read["_meta"]["resultType"] == "resources/read"
 
 
 @pytest.mark.anyio
@@ -180,15 +212,36 @@ async def test_mcp_service_prompts_list_and_get() -> None:
 
 @pytest.mark.anyio
 async def test_mcp_http_handler_conformance_and_negative_cases() -> None:
-    """Verify MCPHttpHandler headers validation, ETag 304 caching, and Origin validation."""
-    service = MCPService(config=MCPConfig(allowed_origins=("https://app.example.com",)))
-    handler = MCPHttpHandler(service)
+    """Verify MCPCore.handle and MCPHttpHandler headers validation, ETag 304 caching, and Origin validation."""
+    core = MCPCore(config=MCPConfig(allowed_origins=("https://app.example.com",)))
+    handler = MCPHttpHandler(core)
+
+    default_core = MCPCore()
+    cross_origin_default = await default_core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"Origin": "https://evil.example.com", "Host": "api.example.com"},
+            body=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+        )
+    )
+    assert cross_origin_default.status == 403
+
+    same_origin_default = await default_core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"Origin": "https://api.example.com", "Host": "api.example.com"},
+            body=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+        )
+    )
+    assert same_origin_default.status == 200
 
     disallowed_status, _, _ = await handler.handle_request(
         "POST",
         "/mcp",
         {"Origin": "https://evil.example.com"},
-        b'{"jsonrpc":"2.0","id":1,"method":"ping"}',
+        b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
     )
     assert disallowed_status == 403
 
@@ -196,19 +249,37 @@ async def test_mcp_http_handler_conformance_and_negative_cases() -> None:
         "POST",
         "/mcp",
         {"Origin": "https://app.example.com", "MCP-Protocol-Version": "2025-01-01"},
-        b'{"jsonrpc":"2.0","id":1,"method":"ping"}',
+        b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
     )
-    assert proto_status == 200
+    assert proto_status == 400
     proto_decoded = decode_json(proto_body)
     assert proto_decoded["error"]["code"] == UNSUPPORTED_PROTOCOL_VERSION
+
+    meta_proto_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"Origin": "https://app.example.com"},
+            body=encode_json_bytes(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/list",
+                    "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2024-11-05"}},
+                }
+            ),
+        )
+    )
+    assert meta_proto_resp.status == 400
+    assert decode_json(meta_proto_resp.body)["error"]["code"] == UNSUPPORTED_PROTOCOL_VERSION
 
     method_status, _, method_body = await handler.handle_request(
         "POST",
         "/mcp",
         {"Origin": "https://app.example.com", "Mcp-Method": "tools/list"},
-        b'{"jsonrpc":"2.0","id":1,"method":"ping"}',
+        b'{"jsonrpc":"2.0","id":1,"method":"prompts/list"}',
     )
-    assert method_status == 200
+    assert method_status == 400
     method_decoded = decode_json(method_body)
     assert method_decoded["error"]["code"] == HEADER_MISMATCH
 
@@ -218,7 +289,7 @@ async def test_mcp_http_handler_conformance_and_negative_cases() -> None:
         {"Origin": "https://app.example.com", "Mcp-Method": "prompts/get", "Mcp-Name": "wrong_name"},
         b'{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"correct_name"}}',
     )
-    assert name_status == 200
+    assert name_status == 400
     name_decoded = decode_json(name_body)
     assert name_decoded["error"]["code"] == HEADER_MISMATCH
 
@@ -226,18 +297,62 @@ async def test_mcp_http_handler_conformance_and_negative_cases() -> None:
     assert decode_mcp_header_value(encoded_non_ascii) == "тест"
 
     get_status, get_headers, _ = await handler.handle_request("GET", "/mcp", {}, b"")
-    assert get_status == 200
-    etag = get_headers.get("ETag")
+    assert get_status == 405
+    assert "POST" in get_headers.get("Allow", "")
+
+    notif_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"Origin": "https://app.example.com"},
+            body=b'{"jsonrpc":"2.0","method":"notifications/initialized"}',
+        )
+    )
+    assert notif_resp.status == 202
+    assert notif_resp.body == b""
+
+    batch_resp = await core.handle(
+        McpHttpRequest(
+            method="POST",
+            path="/mcp",
+            headers={"Origin": "https://app.example.com"},
+            body=b'[{"jsonrpc":"2.0","id":1,"method":"tools/list"}]',
+        )
+    )
+    assert batch_resp.status == 400
+
+    discover_status, discover_headers, _ = await handler.handle_request(
+        "POST",
+        "/mcp",
+        {"Origin": "https://app.example.com"},
+        b'{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}',
+    )
+    assert discover_status == 200
+    etag = discover_headers.get("ETag")
     assert etag is not None
 
     not_mod_status, _, not_mod_body = await handler.handle_request(
-        "GET",
+        "POST",
         "/mcp",
-        {"If-None-Match": etag},
-        b"",
+        {"Origin": "https://app.example.com", "If-None-Match": etag},
+        b'{"jsonrpc":"2.0","id":2,"method":"server/discover","params":{}}',
     )
     assert not_mod_status == 304
     assert not_mod_body == b""
+
+    @tool(name="admin_only", description="Admin tool", guards=(RequireRoles("admin"),))
+    def admin_only() -> str:
+        return "secret-ok"
+
+    core.registry.register_tool(admin_only)
+    spec = core.registry.get_spec("admin_only")
+    assert spec is not None
+    viewer_ctx = AgentContext(identity=CallerIdentity(user_id="bob", roles=("viewer",)))
+    with pytest.raises(PermissionDeniedError):
+        await authorize(viewer_ctx, spec)
+
+    admin_ctx = AgentContext(identity=CallerIdentity(user_id="alice", roles=("admin",)))
+    await authorize(admin_ctx, spec)
 
 
 @pytest.mark.anyio
@@ -568,7 +683,7 @@ async def test_mcp_http_handler_rejects_mcp_name_without_body_name(payload: obje
         {"Mcp-Method": "tools/call", "Mcp-Name": "other"},
         encode_json_bytes(payload),
     )
-    assert status == 200
+    assert status == 400
     decoded = decode_json(raw)
     assert decoded["error"]["code"] == HEADER_MISMATCH
     assert calls == []
@@ -629,3 +744,159 @@ async def test_guarded_skill_controller_and_agent_plugin_preserve_webmcp_and_gua
 
     authed_ctx = AgentContext(identity=CallerIdentity(user_id="alice", tenant_id="t1"))
     assert await ping_tool.invoke({"target": "edge"}, context=authed_ctx) == "pong:edge"
+
+
+@pytest.mark.anyio
+async def test_native_app_agent_plugin_routes_through_mcp_core_and_unifies_well_known() -> None:
+    """Native App + AgentPlugin enforces MCPCore 2026-07-28 HTTP semantics and shares canonical /.well-known/mcp.json across all mounts."""
+    plugin = AgentPlugin(
+        AgentPluginConfig(
+            mcp=MCPConfig(server_name="native-mcp", server_version="2.1.0"),
+        )
+    )
+    assert plugin.mcp_service is not None
+
+    @tool(name="echo_val", description="Echo value")
+    def echo_val(val: str) -> str:
+        return val
+
+    plugin.mcp_registry.register_tool(echo_val)
+
+    app = App()
+    plugin.mount_native(app)
+    route_map = {(r.method.upper(), r.path): r.handler for r in app.routes}
+
+    post_mcp = route_map[("POST", "/mcp")]
+    get_mcp = route_map[("GET", "/mcp")]
+    get_wk = route_map[("GET", "/.well-known/mcp.json")]
+
+    status_disc, headers_disc, body_disc = await post_mcp(
+        body=b'{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}',
+        headers={"content-type": "application/json"},
+    )
+    assert status_disc == 200
+    assert "ETag" in headers_disc
+    assert decode_json(body_disc)["result"]["protocolVersion"] == "2026-07-28"
+
+    status_origin, _, _ = await post_mcp(
+        body=b'{"jsonrpc":"2.0","id":2,"method":"tools/list"}',
+        headers={"Origin": "https://evil.example.com", "Host": "api.example.com"},
+    )
+    assert status_origin == 403
+
+    status_get, headers_get, _ = await get_mcp(headers={})
+    assert status_get == 405
+    assert "POST" in headers_get.get("Allow", "")
+
+    status_notif, _, body_notif = await post_mcp(
+        body=b'{"jsonrpc":"2.0","method":"notifications/cancelled"}',
+        headers={"content-type": "application/json"},
+    )
+    assert status_notif == 202
+    assert body_notif == b""
+
+    native_wk = await get_wk()
+    expected_keys = {"protocolVersion", "mcp_version", "server", "serverInfo", "endpoint", "tools"}
+    assert set(native_wk.keys()) == expected_keys
+    assert native_wk["protocolVersion"] == "2026-07-28"
+    assert native_wk["tools"] == ["echo_val"]
+
+    st_app = SimpleNamespace(routes=[], state=SimpleNamespace())
+    mount_starlette_mcp(
+        st_app,
+        registry=plugin.mcp_registry,
+        config=MCPConfig(server_name="st-mcp", server_version="1.0.0"),
+    )
+    st_wk_route = next(r for r in st_app.routes if r.path == "/.well-known/mcp.json")
+    st_wk_resp = await st_wk_route.endpoint(SimpleNamespace())
+    st_wk_doc = decode_json(st_wk_resp.body if hasattr(st_wk_resp, "body") else st_wk_resp)
+    assert set(st_wk_doc.keys()) == expected_keys
+    assert st_wk_doc["protocolVersion"] == "2026-07-28"
+
+    flask_views: dict[str, Any] = {}
+
+    class _DummyFlask:
+        view_functions = flask_views
+        extensions: dict[str, Any] = {}
+
+        def add_url_rule(self, _rule: str, endpoint: str, view_func: Any, methods: list[str] | None = None) -> None:
+            flask_views[endpoint] = view_func
+
+    attach_flask_mcp(_DummyFlask(), config=MCPConfig(server_name="fl-mcp"))
+    fl_wk_bytes, fl_wk_status, _ = flask_views["vertebra_mcp_well_known"]()
+    assert fl_wk_status == 200
+    fl_wk_doc = decode_json(fl_wk_bytes)
+    assert set(fl_wk_doc.keys()) == expected_keys
+    assert fl_wk_doc["protocolVersion"] == "2026-07-28"
+
+    _, dj_static = attach_django_mcp([], config=MCPConfig(server_name="dj-mcp"))
+    dj_wk_doc = decode_json(bytes(dj_static["/.well-known/mcp.json"].body))
+    assert set(dj_wk_doc.keys()) == expected_keys
+    assert dj_wk_doc["protocolVersion"] == "2026-07-28"
+
+
+@pytest.mark.anyio
+async def test_webmcp_manifest_projects_strictly_from_toolspec_exposure() -> None:
+    """WebMCP manifest projects strictly from ToolSpec exposure ('webmcp'), emitting title, outputSchema, and consequentialHint."""
+
+    class _DbToolProvider:
+        def operations(self) -> Mapping[str, Any]:
+            return {"run_sql": self.run_sql}
+
+        def confirmation_reason(self, operation_name: str, arguments: Mapping[str, Any]) -> str | None:
+            return None
+
+        async def run_sql(self, sql: str) -> list[dict[str, Any]]:
+            return [{"sql": sql}]
+
+    reg = ToolRegistry()
+    reg.register_provider(_DbToolProvider())
+
+    @tool(name="server_only_tool", description="Server-only tool")
+    def server_only_tool(x: int) -> int:
+        return x
+
+    @tool(
+        name="browser_delete_item",
+        title="Delete Item",
+        description="Delete an item from the browser context",
+        webmcp=True,
+        requires_confirmation=True,
+        annotations={"readOnlyHint": False},
+    )
+    def browser_delete_item(item_id: str) -> dict[str, bool]:
+        return {"deleted": True}
+
+    reg.register_tool(server_only_tool)
+    reg.register_tool(browser_delete_item)
+
+    manifest = build_webmcp_manifest(reg, WebMCPConfig())
+    assert [t.name for t in manifest.tools] == ["browser_delete_item"]
+    descriptor = manifest.tools[0]
+    assert descriptor.title == "Delete Item"
+    assert descriptor.output_schema is not None
+    assert descriptor.output_schema.get("type") == "object"
+    assert descriptor.requires_confirmation is True
+    assert descriptor.annotations.get("consequentialHint") is True
+
+    raw_json = decode_json(render_webmcp_manifest_json(reg, WebMCPConfig()))
+    tool_json = raw_json["tools"][0]
+    assert tool_json["title"] == "Delete Item"
+    assert tool_json["outputSchema"]["type"] == "object"
+    assert tool_json["annotations"]["consequentialHint"] is True
+
+    plugin = AgentPlugin(
+        AgentPluginConfig(
+            mcp=MCPConfig(server_name="webmcp-host", webmcp=WebMCPConfig(enabled=True)),
+        )
+    )
+    plugin.mcp_registry.register_tool(server_only_tool)
+    plugin.mcp_registry.register_tool(browser_delete_item)
+    app = App()
+    plugin.mount_native(app)
+    route_map = {(r.method.upper(), r.path): r.handler for r in app.routes}
+    assert ("GET", "/.well-known/webmcp.json") in route_map
+    webmcp_doc = await route_map[("GET", "/.well-known/webmcp.json")]()
+    assert [t["name"] for t in webmcp_doc["tools"]] == ["browser_delete_item"]
+    assert webmcp_doc["tools"][0]["title"] == "Delete Item"
+    assert webmcp_doc["tools"][0]["annotations"]["consequentialHint"] is True

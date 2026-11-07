@@ -13,6 +13,22 @@ import msgspec
 
 from vertebra.agent.core.context import AgentContext
 
+__all__ = [
+    "BudgetExceededError",
+    "GuardCallable",
+    "GuardChain",
+    "GuardProtocol",
+    "PermissionDeniedError",
+    "RateLimitExceededError",
+    "RequireAuthenticated",
+    "RequireRoles",
+    "RequireScopes",
+    "TenantIsolationGuard",
+    "TokenBucketGuard",
+    "TurnBudget",
+    "authorize",
+]
+
 
 class PermissionDeniedError(Exception):
     """Raised when an execution fails an authorization or identity guard check."""
@@ -161,17 +177,17 @@ class GuardChain:
                 await res
 
 
-__all__ = [
-    "BudgetExceededError",
-    "GuardCallable",
-    "GuardChain",
-    "GuardProtocol",
-    "PermissionDeniedError",
-    "RateLimitExceededError",
-    "RequireAuthenticated",
-    "RequireRoles",
-    "RequireScopes",
-    "TenantIsolationGuard",
-    "TokenBucketGuard",
-    "TurnBudget",
-]
+async def authorize(
+    ctx: AgentContext | None,
+    spec: Any,
+    *,
+    connection: Any = None,
+    route_handler: Any = None,
+) -> None:
+    """Execute all guards declared on a ToolSpec or Tool against the caller context."""
+    raw_guards = getattr(spec, "guards", ()) or ()
+    if not raw_guards:
+        return
+    active_ctx = ctx if ctx is not None else AgentContext()
+    chain = GuardChain(raw_guards)
+    await chain.execute(active_ctx, connection=connection, route_handler=route_handler)

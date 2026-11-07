@@ -8,6 +8,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-archive
+    at: "2026-11-06T23:48:00Z"
+    commit: d4a5d1c1aef56ee238534f7e3e1d8b1fdbdf3e50
   - by: agent:flow-setup
     at: "2026-11-04T04:33:00Z"
     commit: f741701
@@ -61,7 +64,7 @@ The root entry re-exports the core client and every feature module. Framework ad
 <!-- truth: start -->
 - **Package**: `@vertebra/client` (`"type": "module"`, zero runtime `dependencies`, shipped in the `vertebra-core` Python wheel under `src/py/vertebra/server/_js/bundle/`).
 - **Root Entry (`src/index.ts`)**: Re-exports `HttpClient`, `SseClient`, `WebSocketClient`, `SessionStore`, `LiveStateClient`, `HotReloadClient`, `routeUrl`, `wsUrl`, `registerWebMCPTools`, `ArrowStreamClient`, `WASMClient`, `TraceContext`, `ApexRegion`, and `McpClient`/`A2aClient`.
-- **16 Subpath Exports**: `./react`, `./vue`, `./svelte`, `./angular`, `./htmx`, `./vite`, `./store`, `./hmr`, `./live`, `./apex`, `./telemetry`, `./wasm`, `./arrow`, `./router`, `./webmcp`, and `./agent` (kept in lockstep across `package.json` `exports` and `tsup.config.ts` `entry`).
+- **Subpath Exports**: `./react`, `./vue`, `./svelte`, `./angular`, `./htmx`, `./vite`, `./store`, `./hmr`, `./live`, `./apex`, `./telemetry`, `./wasm`, `./arrow`, `./router`, `./webmcp`, and `./agent` (kept in lockstep across `package.json` `exports` and `tsup.config.ts` `entry`).
 - **Framework Isolation**: Peer framework imports (`react`, `vue`, `svelte`, `@angular/core`, `vite`) live strictly in their subpath modules and are marked `external` in `tsup.config.ts`.
 - **Codegen & Hash Parity**: Route types and `fnv1aStateId` (64-bit) / `fnv1aFieldId` (32-bit) stay synchronized with `src/py/vertebra/build/codegen/` and `LiveState`.
 <!-- truth: end -->
@@ -137,6 +140,7 @@ export {
   type RegisterWebMCPOptions,
   registerWebMCPTools,
   type WebMCPManifest,
+  type WebMCPRegistrationHandle,
   type WebMCPToolDescriptor,
 } from "./webmcp";
 export {
@@ -150,7 +154,7 @@ export {
 
 ## Subpath exports vs tsup entries
 
-`package.json` declares 17 export keys; [`tsup.config.ts`](../../../../../src/ts/vertebra-client/tsup.config.ts)[^src-tsup-config-ts] builds every exported entry.
+`package.json` declares export keys for the root module and every subpath; [`tsup.config.ts`](../../../../../src/ts/vertebra-client/tsup.config.ts)[^src-tsup-config-ts] builds every exported entry.
 
 | Export | Source | Contents | tsup entry |
 | --- | --- | --- | --- |
@@ -169,10 +173,10 @@ export {
 | `./wasm` | `src/wasm.ts` | `WASMClient`, `WASM_MAGIC_BYTES` | yes |
 | `./arrow` | `src/arrow.ts` | `ArrowStreamClient`, `ARROW_*` constants | yes |
 | `./router` | `src/router.ts` | `routeUrl`, `wsUrl`, `interpolateRoutePath`, `RouteUrlOptions` | yes |
-| `./webmcp` | `src/webmcp.ts` | `registerWebMCPTools`, `WebMCPManifest`, `WebMCPToolDescriptor`, `RegisterWebMCPOptions` | yes |
+| `./webmcp` | `src/webmcp.ts` | `registerWebMCPTools`, `WebMCPRegistrationHandle`, `WebMCPManifest`, `WebMCPToolDescriptor`, `RegisterWebMCPOptions` | yes |
 | `./agent` | `src/agent/index.ts` | `McpClient`, `A2aClient`, `AgentStreamClient`, `WorkflowLiveSubscriber` | yes |
 
-`tsup.config.ts` `onSuccess` copies the full `dist/` directory into `src/py/vertebra/server/_js/bundle/` (untracked) for `DevMiddleware` and `ImportMapGenerator.sync_wheel_client`. When `src/py/vertebra/server/_js/bundle/` is absent in source checkouts (such as `make py-test` running before `make ts-build`), `DevMiddleware` and `ImportMapGenerator.sync_wheel_client` fall back to `src/ts/vertebra-client/dist/` or `src/ts/vertebra-client/src/`.
+`tsup.config.ts` `onSuccess` copies the full `dist/` directory into `src/py/vertebra/server/_js/bundle/` (untracked) for `DevMiddleware` and `ImportMapGenerator.sync_wheel_client`. `ImportMapGenerator.load_client_subpaths` derives `_CLIENT_SUBPATHS` dynamically from `src/ts/vertebra-client/package.json` `exports` so subpath additions never drift. When `src/py/vertebra/server/_js/bundle/` is absent in source checkouts (such as `make py-test` running before `make ts-build`), `DevMiddleware` and `ImportMapGenerator.sync_wheel_client` fall back to `src/ts/vertebra-client/dist/` or `src/ts/vertebra-client/src/`.
 
 ## Rules
 

@@ -33,6 +33,7 @@ from vertebra.agent.core.guards import (
     TenantIsolationGuard,
     TokenBucketGuard,
     TurnBudget,
+    authorize,
 )
 from vertebra.agent.core.jsonrpc import (
     FRAME_KIND_BATCH_REQUEST,
@@ -51,13 +52,17 @@ from vertebra.agent.core.jsonrpc import (
     JSONRPCRouter,
 )
 from vertebra.agent.core.schema import (
+    DEFAULT_TOOL_EXPOSURE,
     STRIP_TYPE_NAMES,
     SchemaBuilder,
     SchemaDigestCache,
     Tool,
+    ToolAnnotations,
     ToolArgumentError,
     ToolCall,
+    ToolExposure,
     ToolResult,
+    ToolSpec,
     execute_tool_calls,
     tool,
 )
@@ -83,6 +88,7 @@ __all__ = [
     "CallerIdentity",
     "CancellationToken",
     "CursorPage",
+    "DEFAULT_TOOL_EXPOSURE",
     "GuardCallable",
     "GuardChain",
     "GuardProtocol",
@@ -106,10 +112,14 @@ __all__ = [
     "TenantIsolationGuard",
     "TokenBucketGuard",
     "Tool",
+    "ToolAnnotations",
     "ToolArgumentError",
     "ToolCall",
+    "ToolExposure",
     "ToolResult",
+    "ToolSpec",
     "TurnBudget",
+    "authorize",
     "bind_agent_context",
     "current_agent_context",
     "decode_cursor",

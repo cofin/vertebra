@@ -1,61 +1,87 @@
-"""Full Model Context Protocol (MCP) 2026-07-28 JSON-RPC service.
+"""Full Model Context Protocol (MCP) 2026-07-28 JSON-RPC and HTTP core engine.
 
-This module provides the complete MCPService implementing initialize, tools/list,
-tools/call, resources/*, prompts/*, skills/*, tasks/*, completions, and logging with OpenTelemetry observability.
+This module provides MCPCore (and MCPService) implementing transport-agnostic
+MCP 2026-07-28 HTTP handling, server/discover, tools/list, tools/call, resources/*,
+prompts/*, skills/*, tasks/*, and completions with OpenTelemetry observability.
 """
 
 import asyncio
 import dataclasses
 import inspect
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import msgspec
 
 from vertebra.agent.core.cursor import paginate_sequence
+from vertebra.agent.core.guards import authorize
 from vertebra.agent.core.jsonrpc import (
     INVALID_PARAMS,
+    INVALID_REQUEST,
     JSONRPCError,
     JSONRPCErrorException,
     JSONRPCRouter,
 )
 from vertebra.agent.core.schema import ToolArgumentError
 from vertebra.agent.core.sse import SseFrame, SseStreamBroker
+from vertebra.agent.mcp.client import MCP_NAME_FIELDS, decode_mcp_header_value
 from vertebra.agent.mcp.models import (
+    HEADER_MISMATCH,
     MCP_PROTOCOL_VERSION,
+    UNSUPPORTED_PROTOCOL_VERSION,
     BlobContent,
     MCPConfig,
+    McpHttpRequest,
+    McpHttpResponse,
     PromptMessage,
     ResourceLinkContent,
     TextContent,
     ToolCallOutput,
 )
-from vertebra.agent.mcp.registry import MCPRegistry
+from vertebra.agent.mcp.registry import ToolRegistry
 from vertebra.agent.mcp.tasks import MCPTaskStore, TaskLookupError, TaskRecord, TaskStateError
 from vertebra.agent.runtime import ConfirmationGate
 from vertebra.agent.telemetry import AgentTelemetryRecorder
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
+_native_classify_jsonrpc_frame: Callable[[bytes], tuple[int, str | None, str | None]] | None = None
+try:
+    from vertebra._vertebra import classify_jsonrpc_frame as _native_classify_jsonrpc_frame
+except ImportError:
+    _native_classify_jsonrpc_frame = None
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "CACHEABLE_METHODS",
     "CONFIRMATION_REQUIRED",
     "CONFIRMATION_TOKEN_META_KEY",
+    "MCPCore",
     "MCPService",
 ]
 
 CONFIRMATION_REQUIRED: int = -32003
 CONFIRMATION_TOKEN_META_KEY: str = "vertebra/confirmationToken"
+CACHEABLE_METHODS: frozenset[str] = frozenset(
+    {
+        "server/discover",
+        "tools/list",
+        "resources/list",
+        "resources/templates/list",
+        "prompts/list",
+        "skills/list",
+    }
+)
 
 
-class MCPService:
-    """Dispatches and coordinates all MCP 2026-07-28 protocol methods."""
+class MCPCore:
+    """Transport-agnostic MCP 2026-07-28 HTTP and JSON-RPC protocol engine."""
 
     def __init__(
         self,
         config: MCPConfig | None = None,
-        registry: MCPRegistry | None = None,
+        registry: ToolRegistry | None = None,
         telemetry: AgentTelemetryRecorder | None = None,
         stream_broker: SseStreamBroker | None = None,
         task_store: MCPTaskStore | None = None,
@@ -63,16 +89,142 @@ class MCPService:
         confirmation_gate: ConfirmationGate | None = None,
     ) -> None:
         self.config = config if config is not None else MCPConfig()
-        self.registry = registry if registry is not None else MCPRegistry()
+        self.confirmation_gate = confirmation_gate if confirmation_gate is not None else ConfirmationGate()
+        self.registry = registry if registry is not None else ToolRegistry(confirmation_gate=self.confirmation_gate)
         self.telemetry = telemetry if telemetry is not None else AgentTelemetryRecorder()
         self.stream_broker = stream_broker if stream_broker is not None else SseStreamBroker()
         self.task_store = task_store if task_store is not None else MCPTaskStore(stream_broker=self.stream_broker)
         self.skill_catalog = skill_catalog
-        self.confirmation_gate = confirmation_gate if confirmation_gate is not None else ConfirmationGate()
         self.router = JSONRPCRouter()
         self._resource_subscriptions: dict[str, set[str]] = {}
+        self._background_tasks: set[asyncio.Task[Any]] = set()
 
         self._register_handlers()
+
+    async def handle(self, request: McpHttpRequest) -> McpHttpResponse:
+        """Process a transport-agnostic MCP 2026-07-28 HTTP request."""
+        lower_headers = {k.lower(): v for k, v in request.headers.items()}
+        origin = lower_headers.get("origin")
+        host = lower_headers.get("host")
+
+        if not self._is_origin_allowed(origin, host):
+            return McpHttpResponse(
+                status=403,
+                headers={"Content-Type": "text/plain"},
+                body=b"Forbidden: Disallowed Origin",
+            )
+
+        method = request.method.upper()
+        if method == "OPTIONS":
+            cors_headers = {
+                "Access-Control-Allow-Origin": origin or "*",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": (
+                    "Content-Type, MCP-Protocol-Version, Mcp-Method, Mcp-Name, "
+                    "Mcp-Session-Id, If-None-Match, Authorization"
+                ),
+            }
+            return McpHttpResponse(status=204, headers=cors_headers, body=b"")
+
+        if method != "POST":
+            return McpHttpResponse(
+                status=405,
+                headers={"Content-Type": "text/plain", "Allow": "POST, OPTIONS"},
+                body=b"Method Not Allowed",
+            )
+
+        proto_ver = lower_headers.get("mcp-protocol-version")
+        if proto_ver is not None and proto_ver != MCP_PROTOCOL_VERSION:
+            return self._jsonrpc_http_error(
+                status=400,
+                code=UNSUPPORTED_PROTOCOL_VERSION,
+                message=f"Unsupported MCP protocol version: {proto_ver}",
+            )
+
+        try:
+            frame_kind, frame_method, frame_id = _classify_jsonrpc_frame(request.body)
+        except Exception as exc:
+            return self._jsonrpc_http_error(
+                status=400,
+                code=-32700,
+                message=f"Parse error: {exc}",
+            )
+
+        mcp_method_header = lower_headers.get("mcp-method")
+        mcp_name_header = lower_headers.get("mcp-name")
+        if frame_kind == 2:
+            if mcp_method_header is not None or mcp_name_header is not None:
+                return self._jsonrpc_http_error(
+                    status=400,
+                    code=HEADER_MISMATCH,
+                    message="Mcp-Method and Mcp-Name headers cannot be used with JSON-RPC batch requests",
+                )
+            return self._jsonrpc_http_error(
+                status=400,
+                code=INVALID_REQUEST,
+                message="JSON-RPC batch arrays are not supported in MCP 2026-07-28",
+            )
+
+        if mcp_method_header is not None and frame_method is not None and mcp_method_header != frame_method:
+            return self._jsonrpc_http_error(
+                status=400,
+                code=HEADER_MISMATCH,
+                message=f"Header Mcp-Method '{mcp_method_header}' does not match body method '{frame_method}'",
+                req_id=frame_id,
+            )
+
+        body_dict = decode_json(request.body) if request.body else {}
+        raw_params = body_dict.get("params") if isinstance(body_dict, dict) else None
+        params = raw_params if isinstance(raw_params, dict) else {}
+        raw_meta = params.get("_meta")
+        if isinstance(raw_meta, Mapping):
+            meta_version = raw_meta.get("io.modelcontextprotocol/protocolVersion")
+            if meta_version is not None and meta_version != MCP_PROTOCOL_VERSION:
+                return self._jsonrpc_http_error(
+                    status=400,
+                    code=UNSUPPORTED_PROTOCOL_VERSION,
+                    message=f"Unsupported MCP _meta protocol version: {meta_version}",
+                    req_id=frame_id,
+                )
+
+        if mcp_name_header is not None and frame_method in MCP_NAME_FIELDS:
+            decoded_name = decode_mcp_header_value(mcp_name_header)
+            field_name = MCP_NAME_FIELDS[frame_method]
+            target_val = params.get(field_name)
+            if target_val is None and field_name == "taskId":
+                target_val = params.get("task_id")
+            if target_val is None or str(target_val) != decoded_name:
+                return self._jsonrpc_http_error(
+                    status=400,
+                    code=HEADER_MISMATCH,
+                    message=f"Header Mcp-Name '{decoded_name}' does not match body parameter {field_name!r}",
+                    req_id=frame_id,
+                )
+
+        current_etag = self.registry.etag()
+        if frame_method in CACHEABLE_METHODS and self._match_etag(lower_headers.get("if-none-match"), current_etag):
+            return McpHttpResponse(
+                status=304,
+                headers={"ETag": current_etag, "MCP-Protocol-Version": MCP_PROTOCOL_VERSION},
+                body=b"",
+            )
+
+        resp_bytes = await self.handle_payload(request.body, request.context)
+        resp_headers: dict[str, str] = {
+            "Content-Type": "application/json",
+            "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+        }
+        if frame_method in CACHEABLE_METHODS:
+            resp_headers["ETag"] = current_etag
+
+        session_id = lower_headers.get("mcp-session-id")
+        if session_id:
+            resp_headers["Mcp-Session-Id"] = session_id
+
+        if frame_kind == 0 or resp_bytes is None:
+            return McpHttpResponse(status=202, headers=resp_headers, body=b"")
+
+        return McpHttpResponse(status=200, headers=resp_headers, body=resp_bytes)
 
     async def handle_tool_call(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Execute a tool invocation with parameter validation and structured outputs."""
@@ -91,6 +243,58 @@ class MCPService:
     async def handle_payload(self, raw_bytes: bytes, context: Any = None) -> bytes | None:
         """Dispatch a raw JSON-RPC payload byte sequence through the router."""
         return await self.router.dispatch_payload(raw_bytes, context)
+
+    def _is_origin_allowed(self, origin: str | None, host: str | None) -> bool:
+        if not origin:
+            return True
+        allowed = self.config.allowed_origins
+        if "*" in allowed or origin in allowed:
+            return True
+        return bool(host and (origin == f"http://{host}" or origin == f"https://{host}"))
+
+    @staticmethod
+    def _match_etag(if_none_match: str | None, current_etag: str) -> bool:
+        if not if_none_match:
+            return False
+        tokens = [t.strip() for t in if_none_match.split(",")]
+        normalized_current = current_etag.strip('"').removeprefix("W/").removeprefix("w/").strip('"')
+        for token in tokens:
+            if token == "*":
+                return True
+            raw = token.strip('"').removeprefix("W/").removeprefix("w/").strip('"')
+            if raw == normalized_current:
+                return True
+        return False
+
+    @staticmethod
+    def _jsonrpc_http_error(
+        *,
+        status: int,
+        code: int,
+        message: str,
+        req_id: Any = None,
+    ) -> McpHttpResponse:
+        err = JSONRPCError(code=code, message=message)
+        err_body = encode_json_bytes(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": err.code, "message": err.message},
+            }
+        )
+        return McpHttpResponse(status=status, headers={"Content-Type": "application/json"}, body=err_body)
+
+    @staticmethod
+    def _with_meta(method: str, payload: dict[str, Any], *, cacheable: bool = False) -> dict[str, Any]:
+        meta: dict[str, Any] = {
+            "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+            "resultType": method,
+        }
+        if cacheable:
+            meta["ttlMs"] = 60000
+            meta["cacheScope"] = "public"
+        payload["_meta"] = meta
+        return payload
 
     @staticmethod
     def _task_to_dict(task: TaskRecord) -> dict[str, Any]:
@@ -116,92 +320,82 @@ class MCPService:
 
     def _register_handlers(self) -> None:
         """Register all MCP 2026-07-28 protocol handlers on the JSON-RPC router."""
-        self.router.register("initialize", self._handle_initialize)
         self.router.register("notifications/initialized", self._handle_initialized_notif)
-        self.router.register("ping", self._handle_ping)
         self.router.register("server/discover", self._handle_discover)
         self.router.register("tools/list", self._handle_tools_list)
         self.router.register("tools/call", self._handle_tools_call)
         self.router.register("resources/list", self._handle_resources_list)
         self.router.register("resources/read", self._handle_resources_read)
         self.router.register("resources/templates/list", self._handle_resources_templates_list)
-        self.router.register("resources/subscribe", self._handle_resources_subscribe)
-        self.router.register("resources/unsubscribe", self._handle_resources_unsubscribe)
         self.router.register("prompts/list", self._handle_prompts_list)
         self.router.register("prompts/get", self._handle_prompts_get)
         self.router.register("skills/list", self._handle_skills_list)
         self.router.register("skills/get", self._handle_skills_get)
         self.router.register("resources/directory/read", self._handle_resources_directory_read)
         self.router.register("tasks/get", self._handle_tasks_get)
-        self.router.register("tasks/result", self._handle_tasks_result)
         self.router.register("tasks/update", self._handle_tasks_update)
         self.router.register("tasks/cancel", self._handle_tasks_cancel)
         self.router.register("tasks/list", self._handle_tasks_list)
         self.router.register("completion/complete", self._handle_completion)
-        self.router.register("logging/setLevel", self._handle_set_level)
-
-    async def _handle_initialize(self, params: Any = None, context: Any = None) -> dict[str, Any]:
-        """Handle initialize handshake advertising protocol version and capabilities."""
-        return {
-            "protocolVersion": MCP_PROTOCOL_VERSION,
-            "capabilities": {
-                "tools": {"listChanged": True},
-                "resources": {"subscribe": True, "listChanged": True},
-                "prompts": {"listChanged": True},
-                "logging": {},
-                "tasks": {"listChanged": True},
-                "skills": {"listChanged": True},
-            },
-            "serverInfo": {
-                "name": self.config.server_name,
-                "version": self.config.server_version,
-            },
-            "instructions": self.config.instructions,
-        }
 
     async def _handle_initialized_notif(self, params: Any = None, context: Any = None) -> None:
         """Process notifications/initialized confirmation."""
         return None
 
-    async def _handle_ping(self, params: Any = None, context: Any = None) -> dict[str, Any]:
-        """Return empty pong response."""
-        return {}
-
     async def _handle_discover(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Return server capability manifest and registered count summaries."""
-        tools_list = self.registry.list_tools()
+        tools_list = self.registry.list_specs(exposure="mcp")
         resources_list = self.registry.list_resources()
         prompts_list = self.registry.list_prompts()
-        return {
-            "protocolVersion": MCP_PROTOCOL_VERSION,
-            "serverInfo": {"name": self.config.server_name, "version": self.config.server_version},
-            "counts": {
-                "tools": len(tools_list),
-                "resources": len(resources_list),
-                "prompts": len(prompts_list),
+        skills_list = self.skill_catalog.list_skills() if self.skill_catalog is not None else ()
+        return self._with_meta(
+            "server/discover",
+            {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "serverInfo": {"name": self.config.server_name, "version": self.config.server_version},
+                "instructions": self.config.instructions,
+                "capabilities": {
+                    "tools": {"listChanged": True} if self.config.tools_enabled else {},
+                    "resources": {"listChanged": True} if self.config.resources_enabled else {},
+                    "prompts": {"listChanged": True} if self.config.prompts_enabled else {},
+                    "tasks": {"listChanged": True} if self.config.tasks_enabled else {},
+                    "skills": {"listChanged": True} if self.config.skills_enabled else {},
+                },
+                "counts": {
+                    "tools": len(tools_list),
+                    "resources": len(resources_list),
+                    "prompts": len(prompts_list),
+                    "skills": len(skills_list),
+                },
             },
-        }
+            cacheable=True,
+        )
 
     async def _handle_tools_list(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """List registered tools with JSON-RPC cursor pagination."""
         cursor = params.get("cursor") if isinstance(params, Mapping) else None
-        tools = self.registry.list_tools()
-        page = paginate_sequence(tools, cursor=cursor, page_size=50)
+        specs = self.registry.list_specs(exposure="mcp")
+        page = paginate_sequence(specs, cursor=cursor, page_size=50)
 
         tool_dicts: list[dict[str, Any]] = []
-        for t in page.items:
-            tool_dicts.append(
-                {
-                    "name": t.name,
-                    "description": t.description,
-                    "inputSchema": t.input_schema,
-                }
-            )
+        for s in page.items:
+            item: dict[str, Any] = {
+                "name": s.name,
+                "title": s.title,
+                "description": s.description,
+                "inputSchema": s.input_schema,
+            }
+            if s.output_schema is not None:
+                item["outputSchema"] = s.output_schema
+            annotations_dict = s.annotations.to_mcp_dict()
+            if annotations_dict:
+                item["annotations"] = annotations_dict
+            tool_dicts.append(item)
 
         res: dict[str, Any] = {"tools": tool_dicts}
         if page.next_cursor is not None:
             res["nextCursor"] = page.next_cursor
-        return res
+        return self._with_meta("tools/list", res, cacheable=True)
 
     async def _handle_tools_call(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Execute a tool invocation with parameter validation and structured outputs."""
@@ -215,9 +409,13 @@ class MCPService:
             arguments = {}
 
         target_tool = self.registry.get_tool(tool_name)
-        if target_tool is None:
+        spec = self.registry.get_spec(tool_name)
+        if target_tool is None or (spec is not None and "mcp" not in spec.exposure):
             msg = f"Unknown tool: {tool_name}"
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
+
+        if spec is not None and spec.guards:
+            await authorize(context, spec)
 
         meta = params.get("_meta", {})
         call_id = str(params.get("callId", "call_0"))
@@ -236,13 +434,18 @@ class MCPService:
                 except Exception as exc:
                     self.task_store.fail(task.task_id, {"message": str(exc)})
 
-            asyncio.create_task(_run_async_tool())
-            return {"task": {"taskId": task.task_id, "status": task.status, "pollInterval": task.poll_interval_ms}}
+            bg_task = asyncio.create_task(_run_async_tool())
+            self._background_tasks.add(bg_task)
+            bg_task.add_done_callback(self._background_tasks.discard)
+            return self._with_meta(
+                "tools/call",
+                {"task": {"taskId": task.task_id, "status": task.status, "pollInterval": task.poll_interval_ms}},
+            )
 
         with self.telemetry.span_tool(tool_name, call_id):
             try:
                 raw_result = await target_tool.invoke(arguments, context=context)
-                return self._format_tool_output(raw_result, is_error=False)
+                return self._with_meta("tools/call", self._format_tool_output(raw_result, is_error=False))
             except ToolArgumentError as exc:
                 msg = f"Invalid arguments for tool '{tool_name}': {exc.message}"
                 raise JSONRPCErrorException(
@@ -250,10 +453,13 @@ class MCPService:
                 ) from exc
             except Exception as exc:
                 logger.exception("Tool '%s' execution raised exception", tool_name)
-                return {
-                    "content": [{"type": "text", "text": f"Error: {exc}"}],
-                    "isError": True,
-                }
+                return self._with_meta(
+                    "tools/call",
+                    {
+                        "content": [{"type": "text", "text": f"Error: {exc}"}],
+                        "isError": True,
+                    },
+                )
 
     def _format_tool_output(self, raw_result: Any, is_error: bool = False) -> dict[str, Any]:
         """Format arbitrary Python tool return values into MCP ToolCallOutput dictionaries."""
@@ -324,7 +530,7 @@ class MCPService:
         res: dict[str, Any] = {"resources": res_dicts}
         if page.next_cursor is not None:
             res["nextCursor"] = page.next_cursor
-        return res
+        return self._with_meta("resources/list", res, cacheable=True)
 
     async def _handle_resources_read(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Read content of a static resource or matched template or skill."""
@@ -337,15 +543,18 @@ class MCPService:
         if uri.startswith("skill://") and self.skill_catalog is not None:
             try:
                 file_bytes = await self.skill_catalog.read_file(uri)
-                return {
-                    "contents": [
-                        {
-                            "uri": uri,
-                            "mimeType": "text/markdown",
-                            "text": file_bytes.decode("utf-8", errors="replace"),
-                        }
-                    ]
-                }
+                return self._with_meta(
+                    "resources/read",
+                    {
+                        "contents": [
+                            {
+                                "uri": uri,
+                                "mimeType": "text/markdown",
+                                "text": file_bytes.decode("utf-8", errors="replace"),
+                            }
+                        ]
+                    },
+                )
             except Exception as exc:
                 msg = f"Failed to read skill resource '{uri}': {exc}"
                 raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg)) from exc
@@ -359,15 +568,18 @@ class MCPService:
                     if inspect.isawaitable(res_val):
                         res_val = await res_val
                     content_text = res_val if isinstance(res_val, str) else str(res_val)
-                return {
-                    "contents": [
-                        {
-                            "uri": res_entry.uri,
-                            "mimeType": res_entry.mimeType,
-                            "text": content_text,
-                        }
-                    ]
-                }
+                return self._with_meta(
+                    "resources/read",
+                    {
+                        "contents": [
+                            {
+                                "uri": res_entry.uri,
+                                "mimeType": res_entry.mimeType,
+                                "text": content_text,
+                            }
+                        ]
+                    },
+                )
 
             matched = self.registry.match_resource_template(uri)
             if matched is not None:
@@ -378,15 +590,18 @@ class MCPService:
                     if inspect.isawaitable(res_val):
                         res_val = await res_val
                     content_text = res_val if isinstance(res_val, str) else str(res_val)
-                return {
-                    "contents": [
-                        {
-                            "uri": uri,
-                            "mimeType": tmpl.mimeType,
-                            "text": content_text,
-                        }
-                    ]
-                }
+                return self._with_meta(
+                    "resources/read",
+                    {
+                        "contents": [
+                            {
+                                "uri": uri,
+                                "mimeType": tmpl.mimeType,
+                                "text": content_text,
+                            }
+                        ]
+                    },
+                )
 
         msg = f"Resource not found: {uri}"
         raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
@@ -411,30 +626,7 @@ class MCPService:
         res: dict[str, Any] = {"resourceTemplates": tmpl_dicts}
         if page.next_cursor is not None:
             res["nextCursor"] = page.next_cursor
-        return res
-
-    async def _handle_resources_subscribe(self, params: Any = None, context: Any = None) -> dict[str, Any]:
-        """Subscribe caller session to resource change notifications."""
-        if not isinstance(params, Mapping) or "uri" not in params:
-            msg = "Missing required 'uri' in resources/subscribe parameters"
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
-
-        uri = str(params["uri"])
-        session_id = getattr(context, "session_id", "default")
-        self._resource_subscriptions.setdefault(uri, set()).add(session_id)
-        return {}
-
-    async def _handle_resources_unsubscribe(self, params: Any = None, context: Any = None) -> dict[str, Any]:
-        """Unsubscribe caller session from resource change notifications."""
-        if not isinstance(params, Mapping) or "uri" not in params:
-            msg = "Missing required 'uri' in resources/unsubscribe parameters"
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
-
-        uri = str(params["uri"])
-        session_id = getattr(context, "session_id", "default")
-        if uri in self._resource_subscriptions:
-            self._resource_subscriptions[uri].discard(session_id)
-        return {}
+        return self._with_meta("resources/templates/list", res, cacheable=True)
 
     async def _handle_prompts_list(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """List registered prompt templates with cursor pagination."""
@@ -457,7 +649,7 @@ class MCPService:
         res: dict[str, Any] = {"prompts": prompt_dicts}
         if page.next_cursor is not None:
             res["nextCursor"] = page.next_cursor
-        return res
+        return self._with_meta("prompts/list", res, cacheable=True)
 
     async def _handle_prompts_get(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Retrieve and instantiate an MCP prompt template."""
@@ -488,27 +680,34 @@ class MCPService:
                     elif isinstance(m, dict):
                         messages.append(m)
 
-            return {
-                "description": prompt_entry.description,
-                "messages": messages,
-            }
+            return self._with_meta(
+                "prompts/get",
+                {
+                    "description": prompt_entry.description,
+                    "messages": messages,
+                },
+            )
 
     async def _handle_skills_list(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """List discovered skills from the configured skill catalog."""
         if self.skill_catalog is None:
-            return {"skills": []}
+            return self._with_meta("skills/list", {"skills": []}, cacheable=True)
         skills = self.skill_catalog.list_skills()
-        return {
-            "skills": [
-                {
-                    "name": s.name,
-                    "description": s.description,
-                    "files": sorted(s.files.keys()),
-                    "frontmatter": s.frontmatter,
-                }
-                for s in skills
-            ]
-        }
+        return self._with_meta(
+            "skills/list",
+            {
+                "skills": [
+                    {
+                        "name": s.name,
+                        "description": s.description,
+                        "files": sorted(s.files.keys()),
+                        "frontmatter": s.frontmatter,
+                    }
+                    for s in skills
+                ]
+            },
+            cacheable=True,
+        )
 
     async def _handle_skills_get(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Retrieve complete skill package details by name or uri."""
@@ -529,15 +728,18 @@ class MCPService:
         files_summary = {
             k: {"digest": f.digest, "sizeBytes": f.size_bytes, "mimeType": f.mime_type} for k, f in skill.files.items()
         }
-        return {
-            "skill": {
-                "name": skill.name,
-                "description": skill.description,
-                "body": skill.body,
-                "files": files_summary,
-                "frontmatter": skill.frontmatter,
-            }
-        }
+        return self._with_meta(
+            "skills/get",
+            {
+                "skill": {
+                    "name": skill.name,
+                    "description": skill.description,
+                    "body": skill.body,
+                    "files": files_summary,
+                    "frontmatter": skill.frontmatter,
+                }
+            },
+        )
 
     async def _handle_resources_directory_read(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Read directory listing for a skill package URI."""
@@ -545,10 +747,10 @@ class MCPService:
             msg = "Missing required 'uri' in resources/directory/read parameters"
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=msg))
         if self.skill_catalog is None:
-            return {"files": []}
+            return self._with_meta("resources/directory/read", {"files": []})
         uri = str(params["uri"])
         files = self.skill_catalog.read_directory(uri)
-        return {"files": files}
+        return self._with_meta("resources/directory/read", {"files": files})
 
     def _caller_owner(self, context: Any) -> str | None:
         if context is not None and getattr(context, "identity", None) is not None:
@@ -564,17 +766,7 @@ class MCPService:
         meta: Any,
         context: Any,
     ) -> None:
-        """Raise unless the call carries a ticket approved for this tool, caller, and arguments.
-
-        The token is read from ``_meta["vertebra/confirmationToken"]``. It must name an existing
-        ticket with ``status == "approved"``, issued for ``tool_name`` with identical
-        ``arguments``, and owned by the caller (or by no owner).
-
-        Raises:
-            JSONRPCErrorException: With code ``CONFIRMATION_REQUIRED`` and a newly issued ticket
-                token in ``data`` when the token is missing, unknown, unapproved, owned by another
-                caller, or issued for another tool or other arguments.
-        """
+        """Raise unless the call carries a ticket approved for this tool, caller, and arguments."""
         owner_id = self._caller_owner(context)
         token = meta.get(CONFIRMATION_TOKEN_META_KEY) if isinstance(meta, Mapping) else None
         if self.confirmation_gate.is_call_approved(
@@ -608,21 +800,7 @@ class MCPService:
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId'"))
         try:
             task = self.task_store.get(str(task_id), self._caller_owner(context))
-            return {"task": self._task_to_dict(task)}
-        except TaskLookupError as exc:
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
-
-    async def _handle_tasks_result(self, params: Any = None, context: Any = None) -> dict[str, Any]:
-        """Wait for task result until completion or required input."""
-        if not isinstance(params, Mapping):
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Invalid params"))
-        task_id = params.get("taskId") or params.get("task_id")
-        if not task_id:
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId'"))
-        timeout = float(params.get("timeoutSeconds", 30.0))
-        try:
-            task = await self.task_store.wait_for_result(str(task_id), self._caller_owner(context), timeout_s=timeout)
-            return {"task": self._task_to_dict(task)}
+            return self._with_meta("tasks/get", {"task": self._task_to_dict(task)})
         except TaskLookupError as exc:
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
 
@@ -636,7 +814,7 @@ class MCPService:
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId'"))
         try:
             task = self.task_store.submit_input(str(task_id), self._caller_owner(context), inputs)
-            return {"task": self._task_to_dict(task)}
+            return self._with_meta("tasks/update", {"task": self._task_to_dict(task)})
         except (TaskLookupError, TaskStateError) as exc:
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
 
@@ -650,7 +828,7 @@ class MCPService:
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId'"))
         try:
             task = self.task_store.cancel(str(task_id), self._caller_owner(context), reason)
-            return {"task": self._task_to_dict(task)}
+            return self._with_meta("tasks/cancel", {"task": self._task_to_dict(task)})
         except TaskLookupError as exc:
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
 
@@ -662,12 +840,30 @@ class MCPService:
         res: dict[str, Any] = {"tasks": [self._task_to_dict(t) for t in tasks]}
         if next_cursor is not None:
             res["nextCursor"] = next_cursor
-        return res
+        return self._with_meta("tasks/list", res)
 
     async def _handle_completion(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Handle argument completion request."""
-        return {"completion": {"values": [], "total": 0, "hasMore": False}}
+        return self._with_meta("completion/complete", {"completion": {"values": [], "total": 0, "hasMore": False}})
 
-    async def _handle_set_level(self, params: Any = None, context: Any = None) -> dict[str, Any]:
-        """Handle logging/setLevel configuration."""
-        return {}
+
+class MCPService(MCPCore):
+    """MCP 2026-07-28 protocol service specialization of MCPCore."""
+
+
+def _classify_jsonrpc_frame(payload: bytes) -> tuple[int, str | None, str | None]:
+    if _native_classify_jsonrpc_frame is not None:
+        return _native_classify_jsonrpc_frame(payload)
+    data = decode_json(payload)
+    if isinstance(data, list):
+        return 2, None, None
+    if not isinstance(data, dict):
+        raise ValueError("Expected object or list")
+    method = data.get("method")
+    req_id = data.get("id")
+    id_str = str(req_id) if req_id is not None else None
+    if method is not None:
+        if req_id is not None:
+            return 1, method, id_str
+        return 0, method, None
+    return 3, None, id_str

@@ -68,6 +68,7 @@ export {
   type RegisterWebMCPOptions,
   registerWebMCPTools,
   type WebMCPManifest,
+  type WebMCPRegistrationHandle,
   type WebMCPToolDescriptor,
 } from "./webmcp";
 export {

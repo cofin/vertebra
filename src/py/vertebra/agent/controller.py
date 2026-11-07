@@ -21,6 +21,16 @@ from vertebra.agent.spec import AgentMessage
 from vertebra.telemetry.genai import GenAiUsage
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
+__all__ = [
+    "AgentChatController",
+    "ChatRequest",
+    "ConfirmationDecisionRequest",
+    "QueuedTurnTicket",
+    "SessionHistory",
+    "SessionNotFoundError",
+    "TurnResult",
+]
+
 
 class SessionNotFoundError(Exception):
     """Raised when an agent session is not found or owner access is unauthorized."""
@@ -89,14 +99,6 @@ class AgentChatController:
         self.base_path = base_path.rstrip("/")
         self.queue_service = queue_service
         self.stream_broker = stream_broker if stream_broker is not None else SseStreamBroker()
-
-    def _resolve_owner(self, context: AgentContext | None) -> str:
-        ctx = context or AgentContext.current()
-        if ctx is not None and ctx.identity is not None:
-            owner = ctx.identity.owner_key()
-            if owner:
-                return owner
-        return ANONYMOUS_OWNER
 
     async def chat(
         self,
@@ -407,13 +409,10 @@ class AgentChatController:
 
         return 404, {"content-type": "application/json"}, b'{"error": "not_found"}'
 
-
-__all__ = [
-    "AgentChatController",
-    "ChatRequest",
-    "ConfirmationDecisionRequest",
-    "QueuedTurnTicket",
-    "SessionHistory",
-    "SessionNotFoundError",
-    "TurnResult",
-]
+    def _resolve_owner(self, context: AgentContext | None) -> str:
+        ctx = context or AgentContext.current()
+        if ctx is not None and ctx.identity is not None:
+            owner = ctx.identity.owner_key()
+            if owner:
+                return owner
+        return ANONYMOUS_OWNER

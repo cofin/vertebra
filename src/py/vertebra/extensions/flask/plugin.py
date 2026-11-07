@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from vertebra._vertebra import Request, Response, WsgiEnviron, run_wsgi_callable
 from vertebra.extensions.flask.config import VertebraConfig
 from vertebra.extensions.flask.fastpath import FastPath
-from vertebra.extensions.flask.mcp import MCPRegistry, attach_mcp_routes
+from vertebra.extensions.flask.mcp import MCPRegistry, WsgiMcpApp, attach_mcp_routes
 from vertebra.extensions.flask.offload import offload_middlewares
 from vertebra.extensions.flask.openapi import attach_openapi_docs, extract_openapi_schema
 from vertebra.extensions.flask.router import RouteCompiler
@@ -30,6 +30,7 @@ class VertebraPlugin:
         "_compiler",
         "_config",
         "_fastpath",
+        "_mcp_app",
         "_mcp_registry",
         "_offload_bundle",
         "_openapi_schema",
@@ -49,6 +50,7 @@ class VertebraPlugin:
         self._offload_bundle: OffloadPlan | None = None
         self._openapi_schema: dict[str, Any] | None = None
         self._mcp_registry: MCPRegistry | None = None
+        self._mcp_app: WsgiMcpApp | None = None
         self._vite_bridge: ViteAssetBridge | None = None
         self._original_wsgi_app: Callable[..., Iterable[bytes]] | None = None
         if app is not None:
@@ -101,6 +103,7 @@ class VertebraPlugin:
             self._vite_bridge = attach_vite(app, self._config.vite)
         if self._config.mcp is not None:
             self._mcp_registry = attach_mcp_routes(app, self._config.mcp)
+            self._mcp_app = getattr(self._mcp_registry, "_mcp_app", None)
         if self._config.openapi is not None:
             self._openapi_schema = attach_openapi_docs(app, self._config.openapi)
         else:
@@ -132,6 +135,18 @@ class VertebraPlugin:
             extensions["vertebra"] = self
         return self
 
+    def handle_request(self, request: Request) -> Response:
+        """Dispatch a Vertebra ``Request`` via fastpath or fallback to ``run_wsgi_callable``."""
+        if self._mcp_app is not None and self._config.mcp is not None and request.path == self._config.mcp.path:
+            return self._mcp_app.handle_vertebra_request(request)
+        if self._fastpath is not None:
+            fast_resp = self._fastpath.dispatch(request)
+            if fast_resp is not None:
+                return fast_resp
+        environ = request.wsgi_environ()
+        wsgi_target = getattr(self._app, "wsgi_app", self._app)
+        return run_wsgi_callable(wsgi_target, environ, int(request.request_id))
+
     def _wrap_wsgi_app(
         self,
         inner_wsgi: Callable[..., Iterable[bytes]],
@@ -142,6 +157,12 @@ class VertebraPlugin:
             environ: WsgiEnviron | dict[str, Any],
             start_response: Callable[..., Any],
         ) -> Iterable[bytes]:
+            if (
+                self._mcp_app is not None
+                and self._config.mcp is not None
+                and str(environ.get("PATH_INFO", "/") or "/") == self._config.mcp.path
+            ):
+                return self._mcp_app(environ, start_response)
             if self._fastpath is not None:
                 fast_chunks = self._fastpath.dispatch_wsgi(environ, start_response)
                 if fast_chunks is not None:
@@ -149,13 +170,3 @@ class VertebraPlugin:
             return inner_wsgi(environ, start_response)
 
         return _wsgi_entry
-
-    def handle_request(self, request: Request) -> Response:
-        """Dispatch a Vertebra ``Request`` via fastpath or fallback to ``run_wsgi_callable``."""
-        if self._fastpath is not None:
-            fast_resp = self._fastpath.dispatch(request)
-            if fast_resp is not None:
-                return fast_resp
-        environ = request.wsgi_environ()
-        wsgi_target = getattr(self._app, "wsgi_app", self._app)
-        return run_wsgi_callable(wsgi_target, environ, int(request.request_id))

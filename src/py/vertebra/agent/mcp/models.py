@@ -4,12 +4,31 @@ This module provides data models for tools, resources, prompts, content blocks,
 and server configurations compliant with the MCP 2026-07-28 specification.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
 import msgspec
 
 from vertebra.typing import FrozenBaseStruct
+
+__all__ = [
+    "HEADER_MISMATCH",
+    "MCP_PROTOCOL_VERSION",
+    "UNSUPPORTED_PROTOCOL_VERSION",
+    "BlobContent",
+    "ContentBlock",
+    "MCPConfig",
+    "McpHttpRequest",
+    "McpHttpResponse",
+    "PromptArgument",
+    "PromptEntry",
+    "PromptMessage",
+    "ResourceEntry",
+    "ResourceLinkContent",
+    "ResourceTemplateEntry",
+    "TextContent",
+    "ToolCallOutput",
+]
 
 MCP_PROTOCOL_VERSION: str = "2026-07-28"
 HEADER_MISMATCH: int = -32020
@@ -20,13 +39,13 @@ class MCPConfig(FrozenBaseStruct, frozen=True, kw_only=True):
     """Server configuration for Model Context Protocol handlers."""
 
     server_name: str = "vertebra-mcp"
-    """Server identifier returned in `initialize` and `/.well-known/mcp.json` responses."""
+    """Server identifier returned in `server/discover` and `/.well-known/mcp.json` responses."""
     server_version: str = "0.1.0"
-    """Semantic version string advertised during MCP capability negotiation."""
+    """Semantic version string advertised during MCP capability discovery."""
     instructions: str = ""
     """System-level usage instructions provided to connecting MCP clients."""
-    allowed_origins: tuple[str, ...] = ("*",)
-    """Allowed HTTP `Origin` header patterns for Streamable HTTP requests."""
+    allowed_origins: tuple[str, ...] = ()
+    """Allowed HTTP `Origin` header patterns for Streamable HTTP requests; empty enforces same-origin."""
     max_blob_bytes: int = 16_777_216
     """Maximum decoded payload size in bytes for binary resource and tool blobs."""
     tools_enabled: bool = True
@@ -39,6 +58,40 @@ class MCPConfig(FrozenBaseStruct, frozen=True, kw_only=True):
     """Expose progressive `skill://` resource catalogs and discovery tools."""
     tasks_enabled: bool = True
     """Enable `io.modelcontextprotocol/tasks` durable async task execution."""
+    path: str = "/mcp"
+    """HTTP path where the Streamable HTTP MCP endpoint is mounted."""
+    expose_well_known: bool = True
+    """Whether to expose the well-known discovery manifest route."""
+    well_known_path: str = "/.well-known/mcp.json"
+    """HTTP path for the well-known MCP discovery document."""
+    webmcp: Any | None = None
+    """Optional `WebMCPConfig` controlling browser WebMCP manifest generation."""
+
+
+class McpHttpRequest(FrozenBaseStruct, frozen=True, kw_only=True):
+    """Transport-agnostic HTTP request envelope for MCPCore.handle."""
+
+    method: str = "POST"
+    """HTTP verb of the incoming request (`"POST"`, `"GET"`, `"OPTIONS"`, etc.)."""
+    path: str = "/mcp"
+    """Request path targeted by the MCP transport."""
+    headers: Mapping[str, str] = msgspec.field(default_factory=dict)
+    """Request HTTP headers mapping."""
+    body: bytes = b""
+    """Raw HTTP request body bytes."""
+    context: Any | None = None
+    """Optional active `AgentContext` associated with the caller."""
+
+
+class McpHttpResponse(FrozenBaseStruct, frozen=True, kw_only=True):
+    """Transport-agnostic HTTP response envelope returned by MCPCore.handle."""
+
+    status: int = 200
+    """HTTP response status code."""
+    headers: dict[str, str] = msgspec.field(default_factory=dict)
+    """HTTP response headers dictionary."""
+    body: bytes = b""
+    """Serialized HTTP response body bytes."""
 
 
 class TextContent(FrozenBaseStruct, frozen=True, kw_only=True, cache_hash=True):
@@ -149,21 +202,3 @@ class PromptEntry(FrozenBaseStruct, frozen=True, kw_only=True):
     """Declared arguments accepted when rendering the prompt via `prompts/get`."""
     getter: Callable[..., Any] | None = None
     """Sync or async callable returning rendered `PromptMessage` items."""
-
-
-__all__ = [
-    "HEADER_MISMATCH",
-    "MCP_PROTOCOL_VERSION",
-    "UNSUPPORTED_PROTOCOL_VERSION",
-    "BlobContent",
-    "ContentBlock",
-    "MCPConfig",
-    "PromptArgument",
-    "PromptEntry",
-    "PromptMessage",
-    "ResourceEntry",
-    "ResourceTemplateEntry",
-    "ResourceLinkContent",
-    "TextContent",
-    "ToolCallOutput",
-]

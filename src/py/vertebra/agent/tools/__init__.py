@@ -3,26 +3,34 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from copy import deepcopy
 from functools import wraps
 from typing import Any, get_type_hints
 
-from vertebra.agent.core import AgentContext, PermissionDeniedError, Tool
+from vertebra.agent.core import AgentContext, PermissionDeniedError, Tool, ToolExposure, ToolSpec
 from vertebra.agent.runtime import ConfirmationGate
 from vertebra.typing import ToolPolicyError, ToolProvider
 
 __all__ = ("build_tools",)
 
 
-def build_tools(provider: ToolProvider, *, confirmation_gate: ConfirmationGate | None = None) -> dict[str, Tool]:
+def build_tools(
+    provider: ToolProvider,
+    *,
+    confirmation_gate: ConfirmationGate | None = None,
+    exposure: Iterable[ToolExposure] | None = None,
+) -> dict[str, Tool]:
     """Adapt named provider operations into validated tools sharing one confirmation gate.
 
     Raises:
         ValueError: If an operation declares reserved, positional-only, or variadic parameters.
     """
     gate = confirmation_gate if confirmation_gate is not None else ConfirmationGate()
-    return {name: _build_tool(provider, gate, name, operation) for name, operation in provider.operations().items()}
+    return {
+        name: _build_tool(provider, gate, name, operation, exposure=exposure)
+        for name, operation in provider.operations().items()
+    }
 
 
 def _build_tool(
@@ -30,6 +38,8 @@ def _build_tool(
     gate: ConfirmationGate,
     name: str,
     operation: Callable[..., Awaitable[Any]],
+    *,
+    exposure: Iterable[ToolExposure] | None = None,
 ) -> Tool:
     original = inspect.signature(operation)
     unsupported = [
@@ -91,4 +101,7 @@ def _build_tool(
             raise PermissionDeniedError(str(exc)) from exc
 
     invoke.__dict__["__signature__"] = signature.replace(parameters=parameters)
-    return Tool(invoke, name=name)
+    tool_obj = Tool(invoke, name=name, exposure=exposure)
+    if not isinstance(tool_obj.spec, ToolSpec):
+        raise TypeError("Tool must expose a frozen ToolSpec")
+    return tool_obj
