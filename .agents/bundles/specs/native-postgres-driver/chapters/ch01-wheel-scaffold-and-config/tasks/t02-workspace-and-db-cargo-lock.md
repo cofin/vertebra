@@ -5,7 +5,7 @@ chapter_id: ch01-wheel-scaffold-and-config
 title: Register workspace member, add vertebra-db socket2/half pins, and lock Cargo.lock
 description: Register vertebra-postgres in src/rs/Cargo.toml, add socket2 =0.6.5 and half =2.7.1 to src/rs/vertebra-db/Cargo.toml, and resolve src/rs/Cargo.lock so workspace builds pass with --locked.
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: static_validation
 depends_on:
@@ -25,8 +25,8 @@ estimated_loc: 45
 plan_revision: 4
 plan_commit: 45ff9563
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:ch01-t02
+claimed_at: "2026-11-07T20:10:35.703011+00:00"
 blocked_reason: null
 unblock_condition: null
 next_step: null

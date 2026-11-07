@@ -9,6 +9,7 @@ members = [
     "vertebra-db",
     "vertebra-bigquery",
     "vertebra-spanner",
+    "vertebra-postgres",
 ]
 
 [workspace.package]
