@@ -11,8 +11,8 @@ depends_on_chapters:
   - ch01-wheel-scaffold-and-config
 replan_trigger: null
 current_task: "native-postgres-driver:ch02:t01"
-plan_revision: 3
-plan_commit: dd432f18
+plan_revision: 4
+plan_commit: 45ff9563
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -87,15 +87,16 @@ Parent roadmap: [spec.md](../../spec.md). Public contracts: [contracts.md](../..
   - `pub(crate) const PROTOCOL_VERSION_3_0: i32 = 196_608;`
   - `pub(crate) async fn read_message<R: AsyncRead + Unpin>(reader: &mut R) -> Result<postgres_protocol::message::backend::Message, PostgresError>`
   - `pub(crate) fn encode_startup_frame(config: &PostgresConfig) -> Result<BytesMut, PostgresError>`
-  - `pub(crate) fn encode_terminate_frame() -> [u8; 5]` (`*b"X\0\0\0\x04"`)
+  - `pub(crate) const TERMINATE_FRAME: [u8; 5] = *b"X\0\0\0\x04";`
 - Rust (`src/rs/vertebra-postgres/src/session.rs`):
   - `#[derive(Clone, Copy, Debug, PartialEq, Eq)] pub enum TransactionStatus { Idle, InTransaction, Failed }` with `from_wire_byte(u8) -> Result<Self, PostgresError>` and `as_wire_byte(self) -> u8`
   - `#[derive(Clone, Copy, Debug, PartialEq, Eq)] pub struct BackendKey { pub process_id: i32, pub secret_key: i32 }`
   - `pub struct PostgresConnection` owning `stream: TransportStream`, `parameters: HashMap<String, String>`, `backend_key: Option<BackendKey>`, `transaction_status: TransactionStatus`, and `tls_server_end_point: Option<Vec<u8>>`
-  - `pub enum BeginConnect<'a> { Attempt(ConnectAttempt<'a>), AlreadyReady }`
-  - `pub struct SessionHandle` with `SessionHandle::new(config: PostgresConfig) -> Self`, `begin_connect(&self) -> Result<BeginConnect<'_>, PostgresError>`, `close(&self) -> impl Future<Output = Result<(), PostgresError>> + Send`, `is_closed(&self) -> bool`, `parameters(&self) -> HashMap<String, String>`
-  - `impl ConnectAttempt<'_> { pub async fn run(self) -> Result<PendingSession<'_>, PostgresError> }`
-  - `impl PendingSession<'_> { pub fn commit(self) -> Result<(), PostgresError> }`
+  - `pub enum BeginConnect { Attempt(ConnectAttempt), AlreadyReady }`
+  - `#[derive(Clone)] pub struct SessionHandle` with `SessionHandle::new(config: PostgresConfig) -> Self`, `begin_connect(&self) -> Result<BeginConnect, PostgresError>`, `close(&self) -> impl Future<Output = Result<(), PostgresError>> + Send`, `is_closed(&self) -> bool`, `parameters(&self) -> HashMap<String, String>`
+  - `impl ConnectAttempt { pub async fn run(self) -> Result<PendingSession, PostgresError> }`
+  - `SessionHandle` clones share owned `Arc<PostgresConfig>` and `Arc<std::sync::Mutex<SessionState>>`; `ConnectAttempt` and `PendingSession` own a cloned `SessionHandle`, deadline, and armed rollback state. Both guards and the `run()` future are `Send + 'static` without borrowing the caller, holding a mutex guard across `.await`, or leaking allocations.
+  - `impl PendingSession { pub fn commit(self) -> Result<(), PostgresError> }`
 - Rust (`src/rs/vertebra-postgres/src/tls.rs`, crate-private `pub(crate)`):
   - `pub(crate) struct DialedTransport { pub stream: TransportStream, pub tls_server_end_point: Option<Vec<u8>> }`
   - `pub(crate) async fn connect(config: &PostgresConfig, deadline: tokio::time::Instant) -> Result<DialedTransport, PostgresError>`

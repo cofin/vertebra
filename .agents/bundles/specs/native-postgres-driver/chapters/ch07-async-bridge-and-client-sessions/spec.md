@@ -11,8 +11,8 @@ depends_on_chapters:
   - ch06-alloydb-keepalive-unix-and-direct-iam
 replan_trigger: null
 current_task: "native-postgres-driver:ch07:t01"
-plan_revision: 3
-plan_commit: dd432f18
+plan_revision: 4
+plan_commit: 45ff9563
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -70,6 +70,8 @@ tags:
 Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md). Skills: [pyo3-bridge](../../../../../skills/pyo3-bridge/SKILL.md) and [runtime-ipc](../../../../../skills/runtime-ipc/SKILL.md). Knowledge: [database-drivers-and-dialers.md](../../../../knowledge/domains/data/database-drivers-and-dialers.md), [ffi-and-gil-discipline.md](../../../../knowledge/patterns/rust/ffi-and-gil-discipline.md), and [pyo3-and-python-runtime.md](../../../../knowledge/gotchas/pyo3-and-python-runtime.md). Note that `errors.rs::postgres_error_to_py` (`PyOnceLock` cache over `vertebra._vertebra` exception classes) was introduced in `ch05:t02` and is exercised end-to-end across the Python FFI seam in `ch07:t02` and `ch07:t03`.
 
 ## 2. Requirements, Concrete Contracts & Architecture
+
+`SessionHandle` shares owned `Arc<PostgresConfig>` and `Arc<std::sync::Mutex<SessionState>>`; `BeginConnect`, `ConnectAttempt`, and `PendingSession` have no lifetime parameters. The attempt, `run()` future, and pending result are `Send + 'static` so the completion bridge owns them through setup failure, cancellation, and `map_ok` publication.
 
 ### 2.1 Chapter Requirements
 

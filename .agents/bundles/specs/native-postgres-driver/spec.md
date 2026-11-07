@@ -4,7 +4,7 @@ flow_id: native-postgres-driver
 title: Complete Standalone Native PostgreSQL Driver
 description: One complete PR implementing native PostgreSQL transport/authentication, typed queries and pools, COPY/Arrow, pipelines/cancellation, notifications/replication, and production adapter cutover.
 status: stable
-state: planned
+state: active
 has_chapters: true
 chapters:
   - ch01-wheel-scaffold-and-config
@@ -39,13 +39,13 @@ chapters:
   - ch30-user-and-domain-docs
   - ch31-final-review-and-release-gate
 current_chapter: ch01-wheel-scaffold-and-config
-current_task: "native-postgres-driver:ch01:t01"
+current_task: "native-postgres-driver:ch01:t02"
 parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
   - research/cloud-material_20261105.md
-plan_revision: 3
-plan_commit: dd432f18
+plan_revision: 4
+plan_commit: 45ff9563
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_chapter: null
@@ -104,7 +104,7 @@ tags:
 <!-- truth: start -->
 - **Standalone Optional Wheel**: `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owns live PostgreSQL Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`) without linking database clients into `vertebra-core` [^pg-conn-rs] [^pg-core-rs].
 - **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB Admin discovery + mTLS + IAM), lossless codecs, statement caching, single-`Sync` `pipeline()`, binary `COPY`, native `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, and `pgoutput` v1 logical replication ship together with full `psycopg`/`asyncpg` removal [^py-async-rs] [^arrow-shm-rs] [^pg-driver-py] [^sqlspec-py].
-- **Nested Chapter Roadmap (`plan_revision: 3`)**: Decomposed into `31` dependency-ordered chapters (`ch01`–`ch31`, `111` vertical-slice tasks, each owning `<= 3` production files) anchored at `plan_commit: dd432f18` with `current_chapter: ch01-wheel-scaffold-and-config` (`native-postgres-driver:ch01:t01`).
+- **Nested Chapter Roadmap (`plan_revision: 4`)**: Decomposed into `31` dependency-ordered chapters (`ch01`–`ch31`, `111` vertical-slice tasks, each owning `<= 3` production files) anchored at `plan_commit: 45ff9563` with `current_chapter: ch01-wheel-scaffold-and-config` (`native-postgres-driver:ch01:t02`).
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -145,6 +145,8 @@ Read [database-drivers-and-dialers.md](../../knowledge/domains/data/database-dri
 `postgres-protocol = "=0.6.12"` owns low-level message framing and SCRAM helpers; `src/rs/vertebra-postgres` owns live connection state. `tokio-postgres = "=0.7.18"` is a dev-only test oracle. Protocol `3.0` supports PostgreSQL `14`–`18`. Arrow crates are pinned to `60.1.0`; cross-extension transfer uses producer-owned `ShmCapsule` callbacks, never Rust `Arc` or trait-object layouts across `cdylib` boundaries. A **physical session** is one socket; a **lease** exclusively owns that session; a **portal** pins its lease and transaction; a **checkpoint** records durably acknowledged logical replication progress.
 
 ## 2. Requirements, Concrete Contracts & Architecture
+
+The connection-publication seam uses owned `Arc<PostgresConfig>` and `Arc<std::sync::Mutex<SessionState>>` shared by cloneable `SessionHandle` values. `BeginConnect`, `ConnectAttempt`, and `PendingSession` have no lifetime parameters; attempts, their `run()` futures, and pending results are `Send + 'static` for the asynchronous completion bridge, with armed rollback on drop and publication only in `commit()`.
 
 ### 2.1 Functional Requirements (`R1`–`R27`)
 
@@ -281,7 +283,7 @@ Progress: `[0/11 files documented]` (owned by [ch30-user-and-domain-docs](chapte
 
 Every worksheet (`111` total across `31` chapters) executes in one bounded invocation and produces one signed local conventional commit. Each chapter owns `1`–`4` vertical-slice tasks (`<= 3` production files per task, zero overlapping `files:` across ready tasks) in a strict serial chapter dependency chain (`ch01` -> `ch31`). See [review.md](review.md) for adjudicated planning decisions.
 
-- [ ] ch01-wheel-scaffold-and-config — Standalone Optional Wheel Scaffold, Build Matrix, and Validated Connection Options (chapters/ch01-wheel-scaffold-and-config/spec.md)
+- [~] ch01-wheel-scaffold-and-config — Standalone Optional Wheel Scaffold, Build Matrix, and Validated Connection Options (chapters/ch01-wheel-scaffold-and-config/spec.md)
 - [ ] ch02-wire-codec-and-session-startup — Bounded Protocol Framing, Trust Lifecycle, SSLRequest TLS, and Cleartext/MD5 Startup (chapters/ch02-wire-codec-and-session-startup/spec.md)
 - [ ] ch03-scram-and-channel-binding — Ordered SCRAM-SHA-256, Peer Certificate Binding, and SCRAM-SHA-256-PLUS Negotiation (chapters/ch03-scram-and-channel-binding/spec.md)
 - [ ] ch04-cloud-material-and-admin-discovery — Single-Flight Cloud Material Cache, Ephemeral Keys, and Cloud SQL / AlloyDB Admin Discovery (chapters/ch04-cloud-material-and-admin-discovery/spec.md)
@@ -317,8 +319,8 @@ Every worksheet (`111` total across `31` chapters) executes in one bounded invoc
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dd432f18` above `main @ 077a3fe9`; `state: planned`, `has_chapters: true`, `plan_revision: 3`, `plan_commit: dd432f18`.
-- **Active Chapter & Next Task**: [ch01-wheel-scaffold-and-config](chapters/ch01-wheel-scaffold-and-config/spec.md) (`native-postgres-driver:ch01:t01`); all `31` chapters (`111` vertical-slice tasks) have `planning_status: complete` and `state: planned` (`0/111` completed).
+- **Verified Baseline**: `HEAD @ 45ff9563` above `main @ 077a3fe9`; `state: active`, `has_chapters: true`, `plan_revision: 4`, `plan_commit: 45ff9563`.
+- **Active Chapter & Next Task**: [ch01-wheel-scaffold-and-config](chapters/ch01-wheel-scaffold-and-config/spec.md) (`native-postgres-driver:ch01:t02`); all `31` chapters (`111` vertical-slice tasks) have `planning_status: complete`; `ch01` is active and `ch02`–`ch31` are planned (`1/111` completed).
 - **Documentation & OKF Status**: `[0/11 files documented]`, scheduled in [ch30-user-and-domain-docs](chapters/ch30-user-and-domain-docs/spec.md) (`ch30:t01`–`ch30:t04`), followed by final complete-driver review and acceptance in [ch31-final-review-and-release-gate](chapters/ch31-final-review-and-release-gate/spec.md) (`ch31:t01`).
 - **Delivery & Next Action**: Complete single-PR delivery on `feat/native-postgres-driver`; intermediate chapters never trigger early `/flow:finish` or `/flow:archive`. Next canonical command: `/flow:implement native-postgres-driver`.
 

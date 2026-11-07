@@ -9,9 +9,9 @@ state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: "native-postgres-driver:ch01:t01"
-plan_revision: 3
-plan_commit: dd432f18
+current_task: "native-postgres-driver:ch01:t02"
+plan_revision: 4
+plan_commit: 45ff9563
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -146,8 +146,8 @@ Progress: `[0/0 files documented in ch01]` (`src/py/vertebra/_postgres.pyi` modu
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dd432f18`; chapter `state: planned`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
+- **Verified Baseline**: `HEAD @ 45ff9563`; chapter `state: active`, `planning_status: complete`.
+- **Remaining Tasks in Chapter**: `t02`, `t03`, `t04` (`3/4` pending; `t01` verified at `5f25a4a0`).
 - **Documentation & OKF Status**: `[0/0 files documented in ch01]`; `_postgres.pyi` wired in `t03`, root `pyproject.toml`/`uv.lock`/`areas.toml` wired in `ch08:t02`–`t04`, and full docs/OKF scheduled in `ch30`.
 - **Downstream Dependents**: Unblocks `ch02-wire-codec-and-session-startup` (`ch02:t01` depends on `ch01:t04`).
 

@@ -22,8 +22,8 @@ files:
   - src/rs/vertebra-postgres/src/lib.rs
 tests: []
 estimated_loc: 120
-plan_revision: 3
-plan_commit: dd432f18
+plan_revision: 4
+plan_commit: 45ff9563
 state_revision: 0
 claimed_by: null
 claimed_at: null

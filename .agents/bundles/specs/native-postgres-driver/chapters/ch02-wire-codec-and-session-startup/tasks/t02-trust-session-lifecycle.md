@@ -24,8 +24,8 @@ tests:
   - src/rs/vertebra-postgres/tests/support/mod.rs
   - src/rs/vertebra-postgres/tests/postgres_wire_tests.rs
 estimated_loc: 240
-plan_revision: 3
-plan_commit: dd432f18
+plan_revision: 4
+plan_commit: 45ff9563
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -80,13 +80,13 @@ Implement `PostgresConnection`, `SessionHandle`, `ConnectAttempt`, and `PendingS
   - `pub struct PostgresConnection`:
     - Owns `stream: TransportStream`, `parameters: HashMap<String, String>`, `backend_key: Option<BackendKey>`, `transaction_status: TransactionStatus`, and `tls_server_end_point: Option<Vec<u8>>`.
     - Public getters `parameters(&self) -> &HashMap<String, String>`, `backend_key(&self) -> Option<BackendKey>`, `transaction_status(&self) -> TransactionStatus`.
-  - `pub struct SessionHandle`:
-    - Owns `config: PostgresConfig` and a short `std::sync::Mutex<SessionState>` (`Configured`, `Connecting`, `Ready { conn: PostgresConnection, params_snapshot: HashMap<String, String> }`, `Closed { params_snapshot: HashMap<String, String> }`) — never hold the `std::sync::Mutex` across `.await` or Python callbacks.
+  - `#[derive(Clone)] pub struct SessionHandle`:
+    - Owns `config: Arc<PostgresConfig>` and `state: Arc<std::sync::Mutex<SessionState>>` (`Configured`, `Connecting`, `Ready { conn: PostgresConnection, params_snapshot: HashMap<String, String> }`, `Closed { params_snapshot: HashMap<String, String> }`) — never hold the `std::sync::Mutex` across `.await` or Python callbacks.
     - `pub fn new(config: PostgresConfig) -> Self`
     - `pub fn config(&self) -> &PostgresConfig`
     - `pub fn is_closed(&self) -> bool` (`true` in `Configured`, `Connecting`, and `Closed`; `false` only in `Ready`).
     - `pub fn parameters(&self) -> HashMap<String, String>` (empty until `PendingSession::commit()` succeeds; retained after `close()`).
-    - `pub fn begin_connect(&self) -> Result<BeginConnect<'_>, PostgresError>`:
+    - `pub fn begin_connect(&self) -> Result<BeginConnect, PostgresError>`:
       - `Configured`: transitions to `Connecting`, records `deadline = tokio::time::Instant::now() + self.config.connect_timeout`, and returns `Ok(BeginConnect::Attempt(ConnectAttempt))` armed with a rollback-to-`Closed` drop guard.
       - `Ready`: returns `Ok(BeginConnect::AlreadyReady)` (owns no guard or socket; dropping `AlreadyReady` leaves `Ready` intact).
       - `Connecting` or `Closed`: returns `Err(PostgresError::Interface(_))`.
@@ -94,12 +94,13 @@ Implement `PostgresConnection`, `SessionHandle`, `ConnectAttempt`, and `PendingS
       - `Configured` or `Closed`: transitions/remains `Closed` and returns `Ok(())` idempotently.
       - `Connecting`: returns `Err(PostgresError::Interface(_))`.
       - `Ready`: atomically takes `PostgresConnection` and sets `Closed { params_snapshot }` under the short mutex before any I/O, then writes `protocol::TERMINATE_FRAME` + `flush()` + `shutdown()` under a `tokio::time::timeout(Duration::from_millis(100), ...)` best-effort budget and drops the stream.
-  - `impl ConnectAttempt<'_>`:
-    - `pub async fn run(self) -> Result<PendingSession<'_>, PostgresError>` driving dial + startup + auth inside a single `tokio::time::timeout_at(self.deadline, ...)`:
+  - `pub enum BeginConnect { Attempt(ConnectAttempt), AlreadyReady }`; `ConnectAttempt` and `PendingSession` each own `handle: SessionHandle`, `deadline: tokio::time::Instant`, and `armed: bool`; `PendingSession` additionally owns `conn: Option<PostgresConnection>`. These guards and the `run()` future satisfy `Send + 'static` with no borrowed caller state or leaked allocations.
+  - `impl ConnectAttempt`:
+    - `pub async fn run(self) -> Result<PendingSession, PostgresError>` driving dial + startup + auth inside a single `tokio::time::timeout_at(self.deadline, ...)`:
       - Initially accepts direct TCP (`unix_socket.is_none()`, `cloud_sql_instance.is_none()`, `alloydb_instance_uri.is_none()`, `!enable_iam_auth`) with `sslmode == TlsMode::Disable` and `AuthenticationOk` (trust); explicitly returns `UnsupportedFeature` / `UnsupportedAuth` for TLS/password/cloud modes until subsequent tasks.
       - Startup state machine enforces: (1) exactly one `AuthenticationOk` before any `ParameterStatus`, `BackendKeyData`, or `ReadyForQuery`; (2) `ParameterStatus` frames recorded in `parameters` (last value wins per key, valid UTF-8); (3) at most one `BackendKeyData`; (4) `ReadyForQuery` status parsed via `TransactionStatus::from_wire_byte(body.status())?` must equal `TransactionStatus::Idle` (`b'I'`) only after `parameters.get("client_encoding") == Some("UTF8")`.
       - Consumes `NoticeResponse` silently; maps `ErrorResponse` (`S`/`V` severity, `C` SQLSTATE, `M` message, and `(field.type_byte(), value)` `diagnostics` via `PostgresError::server(...)`) to `PostgresError::Server(ServerError)`.
-  - `impl PendingSession<'_>`:
+  - `impl PendingSession`:
     - `pub fn commit(mut self) -> Result<(), PostgresError>`: rechecks `tokio::time::Instant::now() <= self.deadline` (failing `PostgresError::Transport` and rolling back to `Closed` if elapsed), atomically publishes `SessionState::Ready`, and disarms the rollback guard.
 - `src/rs/vertebra-postgres/tests/support/mod.rs`:
   - Reusable loopback `TcpListener` harness, deterministic `tokio::sync::{Barrier, oneshot, Notify}` helpers, and raw backend frame builders (`AuthenticationOk`, `ParameterStatus`, `BackendKeyData`, `ReadyForQuery`, `ErrorResponse`) imported via `mod support;` across sibling wire test files.
@@ -117,6 +118,7 @@ Implement `PostgresConnection`, `SessionHandle`, `ConnectAttempt`, and `PendingS
 
 | Case | Input | Expected Output / Error |
 | --- | --- | --- |
+| `owned_guard_spawn` | Reserve an attempt from a retained `SessionHandle`, move `attempt.run()` into `tokio::spawn`, and obtain an owned `PendingSession` from the join handle against the trust loopback server | Both worker future and output compile as `Send + 'static`; `pending.commit()` publishes into the original handle, and dropping an uncommitted returned pending session instead closes that handle and the socket. |
 | `startup_trust` | Loopback server receives Protocol 3.0 startup, sends `AuthenticationOk`, `ParameterStatus("client_encoding", "UTF8")`, `ParameterStatus("server_version", "16.0")`, `ParameterStatus("server_version", "18.0")`, `BackendKeyData(4242, 9999)`, `ReadyForQuery(b'I')` | `commit()` succeeds; `!handle.is_closed()`; `parameters()["server_version"] == "18.0"`; `transaction_status() == TransactionStatus::Idle`; `close()` sends exact `b"X\0\0\0\x04"` + EOF; post-close `is_closed() == true` and `parameters()["server_version"] == "18.0"`. |
 | `startup_requires_auth_utf8_idle` | Sub-cases: missing `client_encoding`, `client_encoding = "SQL_ASCII"`, `ParameterStatus` before `AuthenticationOk`, or `ReadyForQuery(b'T')` | Each returns `Err(PostgresError::Protocol(_))`, server observes socket EOF, and `handle.is_closed() == true`. |
 | `startup_error_sqlstate` | Server sends `ErrorResponse` with `S="FATAL"`, `C="3D000"`, `M="database \"missing\" does not exist"`, `D="secret detail"` | Returns `Err(PostgresError::Server(err))` with `err.severity == "FATAL"`, `err.sqlstate == "3D000"`, `err.diagnostics` retaining `(b'D', "secret detail".into())`, and formatted `{err}` excluding `"secret detail"`. |
@@ -128,7 +130,7 @@ Implement `PostgresConnection`, `SessionHandle`, `ConnectAttempt`, and `PendingS
 
 ## Verification
 
-Write the nine canonical loopback tests in `src/rs/vertebra-postgres/tests/postgres_wire_tests.rs` first (confirming Red), implement `session.rs`, and verify exit `0`:
+Write the ten canonical loopback tests in `src/rs/vertebra-postgres/tests/postgres_wire_tests.rs` first (confirming Red), implement `session.rs`, and verify exit `0`:
 
 ```bash
 cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_wire_tests
@@ -142,7 +144,7 @@ Commit as `feat(postgres): own startup session lifecycle and publication`.
 
 - [ ] `SessionHandle` enforces `Configured -> Connecting -> Ready | Closed` under a short non-async mutex with `BeginConnect::AlreadyReady` idempotency and `<= 100ms` `Terminate` shutdown (R3, R7).
 - [ ] `ConnectAttempt` validates strict startup frame ordering, `client_encoding = "UTF8"`, `ReadyForQuery(b'I')`, sanitized `ErrorResponse` SQLSTATEs, and one outer `connect_timeout` deadline (R3).
-- [ ] Dropping `ConnectAttempt` or uncommitted `PendingSession` rolls `SessionHandle` to `Closed` and closes the underlying socket deterministically across all nine loopback tests (R7).
+- [ ] Dropping `ConnectAttempt` or uncommitted `PendingSession` rolls `SessionHandle` to `Closed` and closes the underlying socket deterministically across all ten loopback tests (R7).
 
 ## Notes & Discoveries
 

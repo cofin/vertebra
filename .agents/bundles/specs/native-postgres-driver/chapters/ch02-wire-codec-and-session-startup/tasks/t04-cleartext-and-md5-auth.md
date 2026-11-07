@@ -25,8 +25,8 @@ files:
 tests:
   - src/rs/vertebra-postgres/tests/postgres_auth_wire_tests.rs
 estimated_loc: 210
-plan_revision: 3
-plan_commit: dd432f18
+plan_revision: 4
+plan_commit: 45ff9563
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -102,7 +102,7 @@ Implement the crate-private `auth::Authentication` state machine in `src/rs/vert
 | Case | Input | Expected Output / Error |
 | --- | --- | --- |
 | `password_cleartext_success` | `user = "alice"`, `password = Some("s3cr3t!")`, `sslmode = "disable"`, server sends `[b'R', 0,0,0,8, 0,0,0,3]` (`AuthenticationCleartextPassword`) | Client writes exact `[b'p', 0,0,0,12, b"s3cr3t!\0"]`; after `AuthenticationOk` + `UTF8` + `ReadyForQuery(b'I')`, session commits `Ready`. |
-| `password_md5_success` | `user = "postgres"`, `password = Some("hunter2")`, salt `[0x01, 0x02, 0x03, 0x04]` (`[b'R', 0,0,0,12, 0,0,0,5, 1,2,3,4]`) | Client writes `PasswordMessage` containing exact 35-byte `"md5..."` + NUL matching `md5_hash(b"postgres", b"hunter2", [1,2,3,4])` (`"md5bf421e9ed1f974fbebaa8d99a0165529\0"`); session commits `Ready`. |
+| `password_md5_success` | `user = "postgres"`, `password = Some("hunter2")`, salt `[0x01, 0x02, 0x03, 0x04]` (`[b'R', 0,0,0,12, 0,0,0,5, 1,2,3,4]`) | Client writes `PasswordMessage` containing exact 35-byte `"md5..."` + NUL matching `md5_hash(b"postgres", b"hunter2", [1,2,3,4])` (`"md5c73cff48cd454994b0c263a04cdfc859\0"`); session commits `Ready`. |
 | `password_missing_rejected` | `password = None` against cleartext or MD5 challenge | Returns `Err(PostgresError::Config(_))`; server observes zero `PasswordMessage` bytes and immediate socket EOF. |
 | `password_wrong_28p01_and_redaction` | `password = Some("ultra-secret-pw")`, server replies to `PasswordMessage` with `ErrorResponse` `C="28P01"`, `M="password authentication failed for user \"alice\""` | Returns `Err(PostgresError::Server(err))` with `err.sqlstate == "28P01"`, formatted error excludes `"ultra-secret-pw"`, and server observes socket EOF without retry. |
 | `password_duplicate_challenge_or_ok` | Server sends `AuthenticationCleartextPassword` twice (without `AuthenticationOk`), or sends `AuthenticationOk` twice after password | Returns `Err(PostgresError::Protocol(_))` and closes socket. |

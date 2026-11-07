@@ -24,8 +24,8 @@ files:
 tests:
   - src/py/tests/unit/db/test_postgres_driver.py
 estimated_loc: 245
-plan_revision: 3
-plan_commit: dd432f18
+plan_revision: 4
+plan_commit: 45ff9563
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -77,6 +77,7 @@ Implement `PyAsyncPostgresClient` (`AsyncPostgresClient` in `vertebra._postgres`
   - Annotate `PyAsyncPostgresClient` with conditional `freelist = 128` (`not(Py_GIL_DISABLED)`), `name = "AsyncPostgresClient"`, `module = "vertebra._postgres"`, `frozen`, `immutable_type`, wrapping `session: Arc<SessionHandle>`.
   - `#[new]` with the exact same 25 keyword-only parameters and defaults as `PySyncPostgresClient` (`user`, `database`, `host = "localhost"`, `port = 5432`, `password = None`, `unix_socket = None`, `sslmode = "verify-full", ca_pem = None, client_cert_pem = None, client_key_pem = None, server_name = None, channel_binding = "prefer", connect_timeout = 10.0, application_name = "vertebra", session_gucs = None, keepalives = true, keepalives_idle = None, keepalives_interval = None, keepalives_count = None, cloud_sql_instance = None, cloud_sql_ip_type = "PRIVATE", alloydb_instance_uri = None, alloydb_ip_type = "PRIVATE", enable_iam_auth = false, cloud_auth_options = None, iam_auth_options = None`).
   - `pub fn connect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>>`:
+    - `BeginConnect`, `ConnectAttempt`, and `PendingSession` own cloned Arc-backed session configuration/state without caller lifetimes; both the worker future and pending result meet `Send + 'static`.
     - Reserve synchronously via `self.session.begin_connect().map_err(|e| postgres_error_to_py(py, e))?`.
     - For `BeginConnect::AlreadyReady`, schedule/return a guard-free no-op `RustDbTaskAwaitable` owning zero `ConnectAttempt` or `PendingSession` so cancelling that awaitable leaves the existing `Ready` session intact.
     - For `BeginConnect::Attempt(attempt)`, call `spawn_rust_db_task_with_attr(py, POSTGRES_COMPLETION_DRAINER_ATTR, async move { attempt.run().await }, |py, pending| { pending.commit().map_err(|e| postgres_error_to_py(py, e))?; Ok(py.None()) }, |py, err| postgres_error_to_py(py, err))`:

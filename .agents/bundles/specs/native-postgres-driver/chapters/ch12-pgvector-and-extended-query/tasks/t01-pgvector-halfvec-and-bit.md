@@ -24,8 +24,8 @@ tests:
   - src/rs/vertebra-db/tests/postgres_vector_tests.rs
   - src/rs/vertebra-postgres/tests/vector_codecs.rs
 estimated_loc: 240
-plan_revision: 3
-plan_commit: dd432f18
+plan_revision: 4
+plan_commit: 45ff9563
 state_revision: 0
 claimed_by: null
 claimed_at: null

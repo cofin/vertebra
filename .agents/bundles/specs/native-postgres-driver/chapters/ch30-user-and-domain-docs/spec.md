@@ -11,8 +11,8 @@ depends_on_chapters:
   - ch29-wheel-ci-and-benchmarks
 replan_trigger: null
 current_task: "native-postgres-driver:ch30:t01"
-plan_revision: 3
-plan_commit: dd432f18
+plan_revision: 4
+plan_commit: 45ff9563
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
