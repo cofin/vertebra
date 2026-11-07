@@ -5,7 +5,7 @@ chapter_id: ch02-wire-codec-and-session-startup
 title: Implement bounded PostgreSQL Protocol 3.0 startup encoder and backend frame decoder
 description: Implement crate-private protocol::read_message enforcing 4..=16_777_216 byte frame bounds before allocation over postgres-protocol 0.6.12 and protocol::encode_startup_frame with Protocol 3.0 UTF8 parameters.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -24,14 +24,14 @@ tests:
 estimated_loc: 180
 plan_revision: 5
 plan_commit: 399e068c
-state_revision: 2
-claimed_by: agent:ch02-t01
-claimed_at: "2026-11-07T21:54:00Z"
+state_revision: 3
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: "Coordinator signs the verified task commit and synchronizes completed state; /flow:implement native-postgres-driver continues with ch02:t02."
 last_verified_at: "2026-11-07T22:04:04Z"
-last_verified_commit: null
+last_verified_commit: a00c3248
 verification_evidence:
   - "UV_NO_SYNC=1; PYO3_PYTHON=${PWD}/.venv/bin/python; CARGO_TARGET_DIR=/tmp/vtb-cargo-target"
   - "Red: cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --lib protocol::tests --locked: exit 101; read_message and encode_startup_frame are absent before implementation"
@@ -41,8 +41,8 @@ verification_evidence:
   - "rustfmt --edition 2024 --check src/rs/vertebra-postgres/src/lib.rs src/rs/vertebra-postgres/src/protocol.rs: exit 0"
   - "git diff --check: exit 0"
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T22:04:04Z"
-commit: null
+updated_at: "2026-11-07T22:05:58Z"
+commit: a00c3248
 sources:
   - id: proto-research
     resource: .agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md

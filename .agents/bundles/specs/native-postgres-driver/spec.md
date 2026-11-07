@@ -39,14 +39,14 @@ chapters:
   - ch30-user-and-domain-docs
   - ch31-final-review-and-release-gate
 current_chapter: ch02-wire-codec-and-session-startup
-current_task: "native-postgres-driver:ch02:t01"
+current_task: "native-postgres-driver:ch02:t02"
 parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
   - research/cloud-material_20261105.md
 plan_revision: 5
 plan_commit: 399e068c
-state_revision: 1
+state_revision: 2
 last_verified_checkpoint: 76828ae6
 last_reviewed_chapter: ch01-wheel-scaffold-and-config
 last_reviewed_commit: 0c7a4636
@@ -107,7 +107,7 @@ tags:
 <!-- truth: start -->
 - **Standalone Optional Wheel**: `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owns live PostgreSQL Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`) without linking database clients into `vertebra-core` [^pg-conn-rs] [^pg-core-rs].
 - **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB Admin discovery + mTLS + IAM), lossless codecs, statement caching, single-`Sync` `pipeline()`, binary `COPY`, native `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, and `pgoutput` v1 logical replication ship together with full `psycopg`/`asyncpg` removal [^py-async-rs] [^arrow-shm-rs] [^pg-driver-py] [^sqlspec-py].
-- **Nested Chapter Roadmap (`plan_revision: 5`)**: All `31` chapters and `111` bounded tasks retain their full scope at `plan_commit: 399e068c`. Chapter 01 is complete and reviewed at `0c7a4636`; `current_chapter: ch02-wire-codec-and-session-startup` (`native-postgres-driver:ch02:t01`).
+- **Nested Chapter Roadmap (`plan_revision: 5`)**: All `31` chapters and `111` bounded tasks retain their full scope at `plan_commit: 399e068c`. Chapter 01 is complete and reviewed at `0c7a4636`; `current_chapter: ch02-wire-codec-and-session-startup` (`native-postgres-driver:ch02:t02`).
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -325,8 +325,8 @@ Every worksheet (`111` total across `31` chapters) executes in one bounded invoc
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Baseline**: `HEAD @ 399e068c` on `feat/native-postgres-completion`; flow `state: active`, `plan_revision: 5`, `plan_commit: 399e068c`.
-- **Chapter & Task Progress**: `1/31` chapters and `4/111` tasks are complete. Chapter 01 passes correctness and fresh quality review at `0c7a4636`.
-- **Current Chapter & Task**: `ch02-wire-codec-and-session-startup`, `native-postgres-driver:ch02:t01` is `in_progress`. Nine codec tests and seven existing integration tests pass; its crate-private producer-before-consumer Clippy contradiction requires bounded revision. Chapters 03–31 remain planned with complete blueprints.
+- **Chapter & Task Progress**: `1/31` chapters and `5/111` tasks are complete. Chapter 01 passes correctness and fresh quality review at `0c7a4636`.
+- **Current Chapter & Task**: `ch02-wire-codec-and-session-startup`, `native-postgres-driver:ch02:t02` is `in_progress`. Nine codec tests and seven existing integration tests pass; its crate-private producer-before-consumer Clippy contradiction requires bounded revision. Chapters 03–31 remain planned with complete blueprints.
 - **Documentation & OKF Status**: `[0/11 files documented]`; chapter 30 owns user guides and full knowledge synchronization, followed by chapter 31 final acceptance.
 - **Delivery & Next Action**: Full driver delivery remains on `feat/native-postgres-completion`. Resolve `/flow:revise native-postgres-driver ch02-wire-codec-and-session-startup`, then continue `/flow:implement native-postgres-driver`.
 
