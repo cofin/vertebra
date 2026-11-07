@@ -5,7 +5,7 @@ chapter_id: ch02-wire-codec-and-session-startup
 title: Negotiate PostgreSQL SSLRequest and verify rustls peer TLS identities
 description: Implement tls::connect negotiating the 8-byte PostgreSQL SSLRequest preamble and upgrading via shared TransportStream::upgrade_tls across Disable, Prefer, Require, VerifyCa, and VerifyFull with CA, SNI, and mTLS verification.
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -13,7 +13,7 @@ depends_on:
 read_set:
   - src/rs/vertebra-db/src/connection.rs
   - src/rs/vertebra-postgres/src/config.rs
-  - src/rs/vertebra-postgres/src/protocol.rs
+  - src/rs/vertebra-postgres/tests/postgres_wire_tests.rs
   - src/rs/vertebra-postgres/src/session.rs
   - src/rs/vertebra-postgres/tests/support/mod.rs
   - .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -22,21 +22,31 @@ files:
   - src/rs/vertebra-postgres/src/tls.rs
   - src/rs/vertebra-postgres/src/session.rs
 tests:
+  - src/rs/vertebra-postgres/tests/postgres_wire_tests.rs
+  - src/rs/vertebra-postgres/tests/support/mod.rs
   - src/rs/vertebra-postgres/tests/postgres_tls_wire_tests.rs
 estimated_loc: 235
 plan_revision: 6
 plan_commit: 8833b064
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
+last_verified_at: "2026-11-07T23:01:17Z"
 last_verified_commit: null
-verification_evidence: null
+verification_evidence:
+  red: 'Canonical enabled_modes_upgrade_before_trust_startup test exits 101 with UnsupportedFeature("only direct plaintext TCP is available") before integration.'
+  focused: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_tls_wire_tests exits 0: 10 real rcgen/tokio-rustls peer tests cover the complete TLS matrix."
+  aggregate: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres exits 0 under the shared SHM test lock: 9 codec, 10 TLS, and 20 existing wire/config/error tests; zero failures or ignores."
+  lint: "cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings exits 0 without lint allowances."
+  formatting: "cargo fmt --manifest-path src/rs/Cargo.toml -p vertebra-postgres -- --check and git diff --check exit 0."
+  review_privacy: "UV_NO_SYNC=1 make review-check exits 0."
+  environment: "UV_NO_SYNC=1; PYO3_PYTHON=${PWD}/.venv/bin/python; dedicated Cargo target; aggregate tests acquire the shared SHM test lock."
+  checkpoint: "Verified working tree awaits the coordinator's signed source commit; task remains in_progress with commit null."
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T05:00:00Z"
+updated_at: "2026-11-07T23:01:17Z"
 commit: null
 sources:
   - id: rs-upgrade-tls
@@ -65,7 +75,7 @@ Implement `src/rs/vertebra-postgres/src/tls.rs` and wire it into `session.rs` so
 
 - `src/rs/vertebra-db/src/connection.rs::{TransportStream, ConnectOptions, EndpointTarget, TlsMode, install_rustls_ring_provider}` — Shared raw TCP connect and `upgrade_tls` verifier [^rs-upgrade-tls].
 - `src/rs/vertebra-postgres/src/config.rs` — `PostgresConfig` (`sslmode`, `ca_pem`, `client_cert_pem`, `client_key_pem`, `server_name`, `host`, `port`).
-- `src/rs/vertebra-postgres/src/protocol.rs` — Startup/backend framing helpers.
+- `src/rs/vertebra-postgres/tests/postgres_wire_tests.rs` — Preserve the trust/auth tests, remove the obsolete TLS-unsupported assertion, and gate the deadline peer with an explicit barrier.
 - `src/rs/vertebra-postgres/src/session.rs` — `ConnectAttempt::run` transport dial seam from `ch02:t02`.
 - `src/rs/vertebra-postgres/tests/support/mod.rs` — Loopback listener and startup frame helpers from `ch02:t02`.
 - `.agents/bundles/specs/native-postgres-driver/contracts.md` — Direct TLS mode and `server_name` rules ([../../../contracts.md](../../../contracts.md)).
@@ -124,13 +134,15 @@ Commit as `feat(postgres): negotiate protocol TLS with shared transport`.
 
 ## Acceptance Criteria
 
-- [ ] `tls::connect` emits exact `[0, 0, 0, 8, 4, 210, 22, 47]` `SSLRequest` frames for enabled TLS modes and upgrades via `TransportStream::upgrade_tls` using the shared `ring` provider (R4).
-- [ ] `Disable`, `Prefer` (`S`/`N`), `Require` (with/without `ca_pem`), `VerifyCa`, `VerifyFull` (`server_name` override), and client mTLS behave strictly without post-`S` plaintext downgrade (R4).
-- [ ] `SSLRequest` and TLS handshakes share `ConnectAttempt`'s single outer deadline and transition `SessionHandle` to `Closed` on failure or expiry (R3, R4).
+- [x] `tls::connect` emits exact `[0, 0, 0, 8, 4, 210, 22, 47]` `SSLRequest` frames for enabled TLS modes and upgrades via `TransportStream::upgrade_tls` using the shared `ring` provider (R4).
+- [x] `Disable`, `Prefer` (`S`/`N`), `Require` (with/without `ca_pem`), `VerifyCa`, `VerifyFull` (`server_name` override), and client mTLS behave strictly without post-`S` plaintext downgrade (R4).
+- [x] `SSLRequest` and TLS handshakes share `ConnectAttempt`'s single outer deadline and transition `SessionHandle` to `Closed` on failure or expiry (R3, R4).
 
 ## Notes & Discoveries
 
-- [2026-11-07 05:00] Returning `DialedTransport { stream, tls_server_end_point }` from `tls::connect` lets `ch03:t02` populate X.509 endpoint binding bytes from `TransportStream::TlsTcp` without changing `session.rs` call signatures in `ch03:t02`.
+- Returning `DialedTransport { stream, tls_server_end_point }` from `tls::connect` lets `ch03:t02` populate X.509 endpoint binding bytes from `TransportStream::TlsTcp` without changing `session.rs` call signatures in `ch03:t02`.
+- Generic startup/send/EOF peer helpers accept both TCP and TLS streams. The publication-deadline test releases its peer only after clock resumption so its EOF watchdog cannot expire during an intentional clock advance.
+- Existing unsupported-auth assertions remain; the obsolete TLS-unsupported loop is removed because the TLS peer matrix exercises real negotiation. The non-idle transaction cases use an equivalent escaped byte string accepted by both Clippy and spelling checks.
 
 [^rs-upgrade-tls]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared `upgrade_tls` and `ring` TLS verifier.
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Direct TLS mode and SNI override contracts.

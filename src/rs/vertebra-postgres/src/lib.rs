@@ -4,6 +4,7 @@ pub mod config;
 pub mod errors;
 pub(crate) mod protocol;
 pub mod session;
+pub(crate) mod tls;
 
 use pyo3::prelude::*;
 

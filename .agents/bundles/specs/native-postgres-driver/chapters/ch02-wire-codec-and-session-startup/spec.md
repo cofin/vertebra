@@ -150,15 +150,15 @@ Progress: `[0/0 files documented in ch02]` (all new symbols in `protocol.rs`, `t
 
 - [x] [a00c3248] native-postgres-driver:ch02:t01 — Implement bounded PostgreSQL Protocol 3.0 startup encoder and backend frame decoder (tasks/t01-bounded-codec.md)
 - [x] [b19e402d] native-postgres-driver:ch02:t02 — Establish authenticated trust sessions with SessionHandle and PendingSession publication (tasks/t02-trust-session-lifecycle.md)
-- [ ] native-postgres-driver:ch02:t03 — Negotiate PostgreSQL SSLRequest and verify rustls peer TLS identities (tasks/t03-sslrequest-and-tls-identity.md)
+- [~] native-postgres-driver:ch02:t03 — Negotiate PostgreSQL SSLRequest and verify rustls peer TLS identities (tasks/t03-sslrequest-and-tls-identity.md)
 - [ ] native-postgres-driver:ch02:t04 — Authenticate cleartext password and MD5 startup exchanges (tasks/t04-cleartext-and-md5-auth.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: Codec task 01 is complete at `a00c3248`; upstream chapter 01 is complete and reviewed at `3d68c853`.
-- **Task State**: Codec and trust-session tasks are complete (`2/4`); TLS task 03 is next and password/MD5 task 04 remains pending.
+- **Verified Baseline**: Codec task 01 is complete at `a00c3248` and trust-session task 02 at `b19e402d`; upstream chapter 01 is complete and reviewed at `3d68c853`.
+- **Task State**: Codec and trust-session tasks are complete (`2/4`); TLS task 03 passes 10 peer tests, all 39 crate tests, and strict all-target Clippy; it remains in progress pending its signed checkpoint; password/MD5 task 04 remains pending.
 - **Shared Contracts**: Owned Arc-backed guards and read-only metadata adoption/channel-binding getters define the session seam; the session consumers remove the three private codec expectations.
 - **Documentation**: `[0/0 files documented in ch02]`; full user/domain guidance remains assigned to chapter 30.
 - **Next Action**: `/flow:implement native-postgres-driver ch02:t03`.

@@ -1,6 +1,6 @@
 //! Owned, cancellation-safe PostgreSQL session startup and publication.
 
-use crate::{config::PostgresConfig, errors::PostgresError, protocol};
+use crate::{config::PostgresConfig, errors::PostgresError, protocol, tls};
 use postgres_protocol::message::backend::Message;
 use std::{
     collections::HashMap,
@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 use tokio::{io::AsyncWriteExt, time::Instant};
-use vertebra_db::connection::{ConnectOptions, TlsMode, TransportStream};
+use vertebra_db::connection::TransportStream;
 
 /// PostgreSQL transaction state carried by ReadyForQuery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -197,9 +197,10 @@ pub struct ConnectAttempt {
 impl ConnectAttempt {
     /// Dial and authenticate within the reservation's original deadline.
     pub async fn run(mut self) -> Result<PendingSession, PostgresError> {
-        let conn = tokio::time::timeout_at(self.deadline, startup(self.handle.config()))
-            .await
-            .map_err(|_| PostgresError::Transport("connection deadline elapsed".into()))??;
+        let conn =
+            tokio::time::timeout_at(self.deadline, startup(self.handle.config(), self.deadline))
+                .await
+                .map_err(|_| PostgresError::Transport("connection deadline elapsed".into()))??;
         let pending = PendingSession {
             handle: self.handle.clone(),
             deadline: self.deadline,
@@ -261,23 +262,23 @@ impl Drop for PendingSession {
     }
 }
 
-async fn startup(config: &PostgresConfig) -> Result<PostgresConnection, PostgresError> {
-    if config.sslmode != TlsMode::Disable
-        || config.unix_socket.is_some()
+async fn startup(
+    config: &PostgresConfig,
+    deadline: Instant,
+) -> Result<PostgresConnection, PostgresError> {
+    if config.unix_socket.is_some()
         || config.cloud_sql_instance.is_some()
         || config.alloydb_instance_uri.is_some()
         || config.enable_iam_auth
     {
         return Err(PostgresError::UnsupportedFeature(
-            "only direct plaintext TCP is available".into(),
+            "only direct TCP is available".into(),
         ));
     }
-    let mut stream = TransportStream::connect(
-        &ConnectOptions::tcp(&config.host, config.port)
-            .with_connect_timeout(config.connect_timeout),
-    )
-    .await
-    .map_err(|error| PostgresError::Transport(error.to_string()))?;
+    let tls::DialedTransport {
+        mut stream,
+        tls_server_end_point,
+    } = tls::connect(config, deadline).await?;
     stream
         .write_all(&protocol::encode_startup_frame(config)?)
         .await
@@ -291,7 +292,7 @@ async fn startup(config: &PostgresConfig) -> Result<PostgresConnection, Postgres
         parameters: HashMap::new(),
         backend_key: None,
         transaction_status: TransactionStatus::Idle,
-        tls_server_end_point: None,
+        tls_server_end_point,
     };
     let mut authenticated = false;
     loop {

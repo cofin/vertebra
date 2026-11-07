@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use _postgres::config::{PostgresConfig, RawPostgresOptions};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
 
@@ -42,6 +42,11 @@ pub fn trust() -> Vec<u8> {
 
 pub async fn accept(listener: TcpListener) -> TcpStream {
     let (mut stream, _) = listener.accept().await.unwrap();
+    startup(&mut stream).await;
+    stream
+}
+
+pub async fn startup<S: AsyncRead + Unpin>(stream: &mut S) {
     let len = stream.read_i32().await.unwrap();
     assert!((8..1024).contains(&len));
     let mut startup = vec![0; len as usize - 4];
@@ -51,10 +56,9 @@ pub async fn accept(listener: TcpListener) -> TcpStream {
         &startup[4..],
         b"user\0app\0database\0prod\0application_name\0vertebra\0client_encoding\0UTF8\0\0"
     );
-    stream
 }
 
-pub async fn eof(stream: &mut TcpStream) {
+pub async fn eof<S: AsyncRead + Unpin>(stream: &mut S) {
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(2), stream.read_u8())
             .await
@@ -65,6 +69,6 @@ pub async fn eof(stream: &mut TcpStream) {
     );
 }
 
-pub async fn send(stream: &mut TcpStream, frames: &[u8]) {
+pub async fn send<S: AsyncWrite + Unpin>(stream: &mut S, frames: &[u8]) {
     stream.write_all(frames).await.unwrap();
 }

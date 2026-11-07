@@ -107,7 +107,7 @@ tags:
 <!-- truth: start -->
 - **Standalone Optional Wheel**: `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owns live PostgreSQL Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`) without linking database clients into `vertebra-core` [^pg-conn-rs] [^pg-core-rs].
 - **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB Admin discovery + mTLS + IAM), lossless codecs, statement caching, single-`Sync` `pipeline()`, binary `COPY`, native `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, and `pgoutput` v1 logical replication ship together with full `psycopg`/`asyncpg` removal [^py-async-rs] [^arrow-shm-rs] [^pg-driver-py] [^sqlspec-py].
-- **Nested Chapter Roadmap (`plan_revision: 6`)**: All 31 chapters and 111 tasks retain their scope at `plan_commit: 8833b064`; chapter 01 is complete and reviewed at `3d68c853`, and chapter 02 resumes at task 02.
+- **Nested Chapter Roadmap (`plan_revision: 6`)**: All 31 chapters and 111 tasks retain their scope at `plan_commit: 8833b064`; chapter 01 is complete and reviewed at `3d68c853`, and chapter 02 executes SSLRequest/TLS task 03.
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -326,10 +326,10 @@ Every worksheet (`111` total across `31` chapters) executes within its bounded o
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ 3d68c853`; flow `state: active`, `plan_revision: 6`, `plan_commit: 8833b064`.
+- **Verified Baseline**: `HEAD @ dabc3c4d`; flow `state: active`, `plan_revision: 6`, `plan_commit: 8833b064`.
 - **Progress**: `1/31` chapters and `6/111` tasks are complete; chapter 01 passes its prerequisite checkpoint and fresh correctness/quality review.
-- **Current Chapter & Task**: Chapter 02 codec and trust sessions are verified; `native-postgres-driver:ch02:t03` adds TLS before password/MD5 task 04.
-- **Remaining Plan**: Session/TLS/password tasks in chapter 02 and chapters 03–31 retain their complete blueprints.
+- **Current Chapter & Task**: Chapter 02 codec and trust sessions are verified; `native-postgres-driver:ch02:t03` implements SSLRequest/TLS with 10 passing peer tests, all 39 crate tests, and strict all-target Clippy; its signed checkpoint remains pending.
+- **Remaining Plan**: TLS checkpoint and password/MD5 task in chapter 02 and chapters 03–31 retain their complete blueprints.
 - **Documentation**: `[0/11 files documented]`; chapter 30 owns full guides and knowledge synchronization.
 - **Next Action**: Continue `/flow:implement native-postgres-driver`.
 

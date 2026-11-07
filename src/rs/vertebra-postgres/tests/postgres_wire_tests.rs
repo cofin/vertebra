@@ -537,7 +537,7 @@ async fn startup_requires_auth_utf8_idle() {
     ] {
         assert!(matches!(rejected(frames).await, PostgresError::Protocol(_)));
     }
-    for status in [b'T', b'E', b'?'] {
+    for status in *b"\x54\x45?" {
         assert!(matches!(
             rejected([auth.clone(), utf8.clone(), support::frame(b'Z', &[status])].concat()).await,
             PostgresError::Protocol(_)
@@ -699,9 +699,11 @@ async fn dropped_pending_session_closes() {
 async fn deadline_starts_at_reservation_and_covers_publication() {
     let (listener, mut config) = support::listener().await;
     config.connect_timeout = Duration::from_secs(1);
+    let (release_peer, wait_peer) = tokio::sync::oneshot::channel();
     let peer = tokio::spawn(async move {
         let mut stream = support::accept(listener).await;
         support::send(&mut stream, &support::trust()).await;
+        wait_peer.await.unwrap();
         support::eof(&mut stream).await;
     });
     let handle = SessionHandle::new(config);
@@ -713,6 +715,7 @@ async fn deadline_starts_at_reservation_and_covers_publication() {
     assert!(handle.parameters().is_empty());
     assert!(handle.begin_connect().is_err());
     tokio::time::resume();
+    release_peer.send(()).unwrap();
     peer.await.unwrap();
 
     let (listener, config) = support::listener().await;
@@ -756,21 +759,5 @@ async fn unsupported_challenges_fail_without_credentials() {
             rejected(support::frame(b'R', &challenge.to_be_bytes())).await,
             PostgresError::UnsupportedAuth(_)
         ));
-    }
-    let (listener, mut config) = support::listener().await;
-    drop(listener);
-    for mode in [
-        TlsMode::Prefer,
-        TlsMode::Require,
-        TlsMode::VerifyCa,
-        TlsMode::VerifyFull,
-    ] {
-        config.sslmode = mode;
-        let handle = SessionHandle::new(config.clone());
-        assert!(matches!(
-            attempt(&handle).run().await,
-            Err(PostgresError::UnsupportedFeature(_))
-        ));
-        assert!(handle.begin_connect().is_err());
     }
 }
