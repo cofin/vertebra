@@ -5,7 +5,7 @@ chapter_id: ch06-adapter-correctness
 title: Propagate configured signing validation failures
 description: Propagate configured signing validation failures
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on: []
@@ -26,13 +26,25 @@ claimed_by: agent:sqlspec_signing_repair
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
-next_step: Execute the independently approved native-message-preserving repair.
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+next_step: Complete chapter documentation sync and independent reviews.
+last_verified_at: "2026-11-07T22:31:17Z"
+last_verified_commit: 45b068e2
+verification_evidence: >-
+  Red: flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync pytest
+  src/py/tests/unit/extensions/test_data_storage_integrations.py -q -k
+  'signing_preserves or signing_unsupported or signing_retains' --disable-warnings
+  --tb=short exited 1 (8 failed, 6 passed) before production edits. Native exact
+  IAM prefix correction is independently approved. Green: flock
+  /tmp/vertebra-flow-shm-tests.lock uv run --no-sync pytest
+  src/py/tests/unit/extensions/test_data_storage_integrations.py -q
+  --disable-warnings --tb=short exited 0 (37 passed). Ruff check and format --check
+  on the two owned Python files exited 0; source Mypy exited 0 (1 file, no issues);
+  git diff --check exited 0. Current rebuilt native artifacts were used unchanged;
+  no Rust edit or rebuild is needed. Production diff is 12 added/14 removed lines;
+  public signatures are unchanged. Signed source 45b068e2 is verified. Combined current-source storage/Django/data integration checkpoint exits 0 with 88 passed.
 created_at: '2026-11-07T12:00:00Z'
 updated_at: '2026-11-07T12:00:00Z'
-commit: null
+commit: 45b068e2
 sources:
 - id: implementation
   resource: src/py/vertebra/extensions/sqlspec/storage.py
@@ -82,13 +94,15 @@ Record the failing regression before implementation. Use this task's reserved ta
 
 ## Acceptance Criteria
 
-- [ ] Every matrix row passes at its public seam with existing behavior preserved.
-- [ ] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
-- [ ] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
-- [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
+- [x] Every matrix row passes at its public seam with existing behavior preserved.
+- [x] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
+- [x] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
+- [x] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
 
-Red: the focused public-seam selection reports 8 failed and 6 passed. Native IAM errors observed through the current adapter have cause text `signing error: IAM signBlob returned HTTP 503 Service Unavailable`; the worksheet incorrectly requires the same message without the native `signing error: ` prefix. The exact prefix is retained by the independently approved bounded correction; the same public failure cases now proceed to implementation. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+Configured signing delegates directly after checking the corresponding native facade's `supports_signing` capability. HMAC validation `ValueError` and real IAM HTTP 503 `RuntimeError` retain exact native types and messages through sync and async GET/upload calls. Unsupported scalar/list operations retain backend context, and successful HMAC scalar/list results verify the HTTP method and qualified key through the real store verifier. The local responder consumes actual native requests and shuts down deterministically. Production uses no exception-message classification, public signature changes, or native source changes.
+
+The focused pre-edit regression selection reports eight failures and six passing characterization cases. The full canonical module passes all 37 tests after the repair; Ruff, formatting, Mypy and diff checks pass. Source signing and task completion remain owned by the parent coordinator.
 
 [^implementation]: `src/py/vertebra/extensions/sqlspec/storage.py` — Current repository source for this task.
