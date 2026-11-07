@@ -29,7 +29,7 @@ chapters:
 - ch18-arrow-async-bridge
 - ch19-sqlspec-arrow-streaming
 current_chapter: ch07-remove-r2-python
-current_task: storage-completeness:ch07:t01
+current_task: storage-completeness:ch07:t02
 parent_prd: native-data-platform
 research:
 - ../native-data-platform/research/gap-analysis_20261103.md

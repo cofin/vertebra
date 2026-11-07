@@ -5,7 +5,7 @@ chapter_id: ch07-remove-r2-python
 title: Remove R2 from framework backend classifiers
 description: Remove R2 from framework backend classifiers
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on: []
@@ -25,17 +25,27 @@ estimated_loc: 55
 plan_revision: 4
 plan_commit: ddfb11f2
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:python-framework-specialist
+claimed_at: '2026-11-07T22:20:00Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-07T22:37:24Z'
+last_verified_commit: 4486f6fe
+verification_evidence:
+  source_checkpoint: Signed classifier and canonical-test commit 4486f6fe
+  red: 'flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync pytest src/py/tests/unit/extensions/test_data_storage_integrations.py -q -k framework_storage: exit 1; 4 failed (DID NOT RAISE expected TypeError/ImproperConfigurationError), 4 passed, 37 deselected before production edits at 0f4b1895'
+  native_build: 'UV_NO_SYNC=1 CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" make dev: exit 0; all five debug PyO3 extensions rebuilt/installed; Rust source unchanged'
+  stubtest: 'uv run --no-sync python -m mypy.stubtest vertebra._storage: exit 0; no issues found in 1 module'
+  ruff: 'uv run --no-sync ruff check over three owned adapter modules and canonical test: exit 0'
+  format: 'uv run --no-sync ruff format --check over three owned adapter modules and canonical test: exit 0; 4 files already formatted'
+  mypy: 'uv run --no-sync mypy over three owned adapter modules: exit 0; no issues found in 3 source files'
+  green: 'flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync pytest src/py/tests/unit/extensions/test_data_storage_integrations.py -q: exit 0; 45 passed, 12 upstream SQLAlchemy deprecation warnings'
+  diff_check: 'git diff --check: exit 0'
+  platform_limits: none
 created_at: '2026-11-07T12:00:00Z'
-updated_at: '2026-11-07T12:00:00Z'
-commit: null
+updated_at: '2026-11-07T22:37:24Z'
+commit: 4486f6fe
 sources:
 - id: implementation
   resource: src/py/vertebra/extensions/alchemy/storage.py
@@ -92,12 +102,14 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Acceptance Criteria
 
-- [ ] Every matrix row passes at its public seam with existing behavior preserved.
-- [ ] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
-- [ ] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
-- [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
+- [x] Every matrix row passes at its public seam with existing behavior preserved.
+- [x] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
+- [x] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
+- [x] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
+
+The four public classifier calls reject the still-public `R2Config` before store construction, retaining SQLSpec's `ImproperConfigurationError` and the existing `TypeError` contracts elsewhere. All four corresponding APIs accept an explicit generic S3 custom endpoint and retain native SigV4 presigning. Successor ch07:t02 removes the core class and migrates its canonical regression; URI rejection remains with ch07:t02/t03. Production scope is exactly the three approved adapter modules, with the five-file bounded read manifest unchanged. The coordinator owns the signed local task commit and final task/chapter marker binding.
 
 Revision 4 is independently approved by the fresh consolidated ch07/ch08 plan review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
