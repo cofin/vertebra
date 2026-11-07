@@ -1,9 +1,9 @@
 # Native PostgreSQL Driver — Chapter Catalog
 
-31 chapters and 111 bounded tasks retain the complete driver scope. Chapter 01 is complete and reviewed; chapter 02 has complete codec and trust-session tasks, with password/MD5 authentication next.
+31 chapters and 111 bounded tasks retain the complete driver scope. Chapter 01 is reviewed; all four chapter 02 tasks are complete and await chapter review.
 
 * [ch01-wheel-scaffold-and-config](ch01-wheel-scaffold-and-config/spec.md) — [completed] (4/4 tasks complete) Scaffold the standalone vertebra-postgres PyO3 crate, lock workspace and vertebra-db Cargo dependencies upfront, wire the vertebra._postgres wheel/stub/Makefile matrix, and implement pure PostgresConfig validation and ServerError categories.
-* [ch02-wire-codec-and-session-startup](ch02-wire-codec-and-session-startup/spec.md) — [active] (3/4 tasks complete) Implement bounded 16 MiB PostgreSQL Protocol 3.0 framing, SessionHandle/PendingSession startup publication ownership, SSLRequest rustls negotiation, and cleartext/MD5 startup authentication.
+* [ch02-wire-codec-and-session-startup](ch02-wire-codec-and-session-startup/spec.md) — [active] (4/4 tasks complete) Implement bounded 16 MiB PostgreSQL Protocol 3.0 framing, SessionHandle/PendingSession startup publication ownership, SSLRequest rustls negotiation, and cleartext/MD5 startup authentication.
 * [ch03-scram-and-channel-binding](ch03-scram-and-channel-binding/spec.md) — [planned] (0/3 tasks complete) Ordered SCRAM-SHA-256 SASL state machine, RFC 5929 X.509 leaf tls-server-end-point digest derivation, and policy-driven SCRAM-SHA-256-PLUS channel binding with downgrade signaling.
 * [ch04-cloud-material-and-admin-discovery](ch04-cloud-material-and-admin-discovery/spec.md) — [planned] (0/4 tasks complete) Single-flight deadline-bounded cloud material cache, off-GIL PKCS#1 RSA-2048 ephemeral key generation with X.509 leaf validation, and Cloud SQL v1beta4 plus AlloyDB v1alpha Admin discovery clients.
 * [ch05-cloud-tls-and-scoped-iam](ch05-cloud-tls-and-scoped-iam/spec.md) — [planned] (0/4 tasks complete) Enforce cloud TLS 1.3 and service-specific SAN/CN peer verification, validate static IAM login provenance and actual lifetime, propagate requested OAuth scopes across GCP token caches, and establish automatic Cloud SQL mTLS + IAM PostgreSQL sessions.
