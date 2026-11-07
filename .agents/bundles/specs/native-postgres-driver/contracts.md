@@ -5,11 +5,14 @@ title: Native PostgreSQL public contracts
 description: Public interface and ownership contracts for the complete native PostgreSQL driver plan.
 status: stable
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+updated_at: "2026-11-07T16:40:00Z"
 generated:
-  by: flow-setup
-  at: "2026-11-07T04:15:00Z"
+  by: flow-revise
+  at: "2026-11-07T16:40:00Z"
 verified:
+  - by: agent:plan-generator
+    at: "2026-11-07T16:40:00Z"
+    commit: dd432f18
   - by: agent:flow-setup
     at: "2026-11-07T04:15:00Z"
     commit: cdb978d3
@@ -37,7 +40,7 @@ tags:
 - **Lossless Value & `VTBARROW` Contracts**: Frozen `msgspec` adapter records (`PgInterval`, `PgArray`, `PgComposite`, `PgTemporal`, `PgBitString`) and standard Arrow structural schemas preserve full PostgreSQL fidelity without Tokio-thread Python hydration [^pg-driver] [^arrow-cursor].
 <!-- truth: end -->
 
-All features ship in one complete-driver PR. These contracts govern the task drafts.
+All features ship in one complete-driver PR across `ch01`–`ch31`. These contracts govern every chapter specification and task worksheet.
 
 ## Connection constructors
 
@@ -174,8 +177,8 @@ instant or intentionally bind raw text. Binary temporal values retain full raw
 components independently of display settings.
 
 Arrow uses exact numeric UTF8 plus OID/typmod metadata, typed nested arrays/composites,
-typed vector columns, and lossless temporal/interval storage described in the schema
-worksheet. It never passes Python row materialization through its native fast path.
+typed vector columns, and lossless temporal/interval storage described in `ch19:t01`.
+It never passes Python row materialization through its native fast path.
 IPC chunking preserves every byte and one EOS before the producer-owned SHM capsule
 handoff; public cursors use vertebra.db.arrow.ArrowCursor.
 
@@ -235,7 +238,7 @@ The last maps config.slot/publication/queue_capacity to native arguments. Dedica
 direct config is required; no query-pool lease or original-loop consumer task is owned
 by this registry. Identity preflight issues no START_REPLICATION.
 
-PostgresReplicationIdentity and PostgresCheckpoint share identity_key:
+`PostgresReplicationIdentity` (defined in `vertebra.db.adapters.postgres.types`) and `PostgresCheckpoint` (defined alongside `PostgresChangeConfig`, `PostgresChangeSource`, `PostgresCheckpointStore`, `MemoryPostgresCheckpointStore`, `PostgresCheckpointConflictError`, and `PostgresReplicationGapError` in `vertebra.db.adapters.postgres.change_stream`) share `identity_key`:
 tuple[system_identifier:str,database:str,slot:str,publication_fingerprint:str]. The
 checkpoint additionally stores commit_end_lsn:u64 and next_event_id in1..2**63-1.
 PostgresChangeConfig adds positive finite checkpoint_timeout=10.0.
@@ -248,7 +251,7 @@ class PostgresCheckpointStore(Protocol):
 
 Save atomically compares expected value, validates identity and monotone LSN/counter,
 and returns only under its documented durability guarantee. Equal LSN requires equal
-counter. Memory storage is explicitly nondurable. Conflict raises adapter-owned
+counter. Memory storage (`MemoryPostgresCheckpointStore` in `vertebra.db.adapters.postgres.change_stream`) is explicitly nondurable. Conflict raises adapter-owned
 PostgresCheckpointConflictError(OperationalError) and terminates ownership rather
 than silently adopting another consumer's checkpoint. Other terminal gap errors use
 PostgresReplicationGapError(OperationalError) with identity_mismatch, wal_unavailable,
@@ -265,7 +268,7 @@ fails closed if state remains uncertain. No ack occurs on yield/close.
 
 ## Arrow selection result
 
-PostgresArrowResult is an adapter-owned immutable record with
+PostgresArrowResult (defined in `vertebra.db.adapters.postgres.types`) is an adapter-owned immutable record with
 buffer:bytes|core.ArrowCursor, row_count:int, columns:tuple[str,...], used_shm:bool.
 Selection uses inline IPC at/below threshold and SHM above it; streaming yields SHM
 per batch. The generic ArrowCursor gains optional nonnegative row_count metadata,
@@ -560,16 +563,16 @@ explicit verification mode. [libpq default](https://www.postgresql.org/docs/18/l
 
 Permanent native facade definitions live in `_sync.py::SyncPostgreSQLDriver` and
 `_async.py::AsyncPostgreSQLDriver`. The canonical `driver.py` barrel and package,
-config, registry, SQLSpec and SQLAlchemy paths select both together in t91; before
-that commit the existing public pair remains coherent. Final-module test imports
-switch to canonical public imports at activation. t92 then t93 remove the private
-unreachable legacy async and sync bodies, preserving static validity at every
-commit. The delivered barrel only imports the final classes and declares __all__;
+config, registry, SQLSpec and SQLAlchemy paths select both together in `ch27:t01` and
+`ch27:t02`; before that chapter the existing public pair remains coherent. Final-module
+test imports switch to canonical public imports at activation. `ch27:t03` then `ch27:t04`
+remove the private unreachable legacy async and sync bodies, preserving static validity
+at every commit. The delivered barrel only imports the final classes and declares `__all__`;
 no temporary module, fallback, duplicate body or compatibility alias survives.
 
-Both driver facades structurally satisfy adapter-owned event Protocols with real
+Both driver facades structurally satisfy adapter-owned event Protocols (`PostgresNotificationDriver` and `PostgresReplicationDriver` in `vertebra.db.adapters.postgres.events`) with real
 async hooks. PostgresNotificationDriver includes readonly config, async
-_publish_notification(channel:str,payload:str)->None and async listener opening.
+_publish_notification(channel:str,payload:str)->None and async listener opening (`PostgresNotificationSource` in `vertebra.db.adapters.postgres.notify` wires this signature in `ch21:t03` and verifies canonical public driver imports in `ch27:t02`).
 Sources uniformly await publish, without mode inspection or int/awaitable unions.
 The async facade awaits its own numeric pg_notify execute in the same task and may
 join its ambient transaction. The sync facade rejects publication from its active
@@ -591,7 +594,7 @@ generation-fenced claim finishes. A possibly sent cancel always retires the phys
 session; an ambient transaction remains failed until rollback. Task.cancel remains
 per-operation and cleanup outlives the Python future.
 
-Before any pipeline frames/flush, t50's private bounded SQL-head scanner validates
+Before any pipeline frames/flush, `ch15:t02`'s private bounded SQL-head scanner validates
 the entire batch. It skips leading empty semicolons, whitespace and nested/line
 comments, recognizes complete unquoted identifiers, and rejects transaction aliases
 BEGIN/COMMIT/END/ROLLBACK/ABORT/SAVEPOINT/RELEASE, START/PREPARE TRANSACTION and
@@ -614,7 +617,7 @@ Legacy raw-token/non-PG behavior retains the shared composed transport path.
 Both clients expose query(sql,parameters=(),*,parameter_oids=None,timeout=None)
 and query_multi(sql,*,timeout=None); async methods return their existing Awaitable
 result shapes. None adds no command deadline; positive finite seconds is validated
-before reservation. One absolute deadline starts at native operation reservation
+before reservation (`ch17:t01`–`t02`). One absolute deadline starts at native operation reservation
 before worker scheduling and covers required parameter discovery, writes/flush,
 reads, all simple-query results and active result enrichment. Pool acquisition,
 connection/reset/close budgets remain separate; CPU decoding and Python projection
