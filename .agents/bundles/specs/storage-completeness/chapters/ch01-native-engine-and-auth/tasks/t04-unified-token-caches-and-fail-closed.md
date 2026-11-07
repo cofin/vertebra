@@ -5,7 +5,7 @@ chapter_id: ch01-native-engine-and-auth
 title: Unify Python GCP token caches on vertebra._vertebra and enforce fail-closed stores
 description: Remove duplicate GcpTokenCache PyO3 classes from vertebra._storage, delete pure-Python OAuth fetchers and self._memory fallbacks from storage/_store.py, wire OCI PAR signing, and enforce fail-closed SyncObjectStore and AsyncObjectStore construction.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -29,18 +29,18 @@ tests:
 estimated_loc: 220
 plan_revision: 2
 plan_commit: cdb978d3
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-07T18:04:00Z"
+last_verified_commit: 7ad5269a
+verification_evidence: "cargo clippy -p vertebra-storage --all-targets -- -D warnings (0 warnings), cargo test -p vertebra-storage (22 passed), mypy.stubtest vertebra._storage (0 issues), ruff check (0 issues), mypy src/py/vertebra/storage (0 issues), pytest src/py/tests/unit/storage -q (48 passed)"
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T04:15:00Z"
-commit: null
+updated_at: "2026-11-07T18:04:00Z"
+commit: 7ad5269a
 sources:
   - id: core-pyi-gcp
     resource: src/py/vertebra/_vertebra.pyi::SyncGcpTokenCache
@@ -113,13 +113,14 @@ Remove the duplicate `GcpTokenSnapshot`, `SyncGcpTokenCache`, and `AsyncGcpToken
 
 ## Acceptance Criteria
 
-- [ ] Duplicate `GcpTokenSnapshot`, `SyncGcpTokenCache`, and `AsyncGcpTokenCache` classes are removed from `vertebra._storage` and unified on `vertebra._vertebra` (R2).
-- [ ] Pure-Python `urllib` OAuth token fetchers and `self._memory` fallback dicts are deleted from `src/py/vertebra/storage/_store.py` (R2, R3).
-- [ ] `SyncObjectStore` and `AsyncObjectStore` fail closed with `ImproperConfigurationError` / `MissingDependencyError` and support GCS V4 (RSA + IAM), S3 SigV4, Azure SAS, and OCI PAR presigning (R2, R3).
+- [x] Duplicate `GcpTokenSnapshot`, `SyncGcpTokenCache`, and `AsyncGcpTokenCache` classes are removed from `vertebra._storage` and unified on `vertebra._vertebra` (R2).
+- [x] Pure-Python `urllib` OAuth token fetchers and `self._memory` fallback dicts are deleted from `src/py/vertebra/storage/_store.py` (R2, R3).
+- [x] `SyncObjectStore` and `AsyncObjectStore` fail closed with `ImproperConfigurationError` / `MissingDependencyError` and support GCS V4 (RSA + IAM), S3 SigV4, Azure SAS, and OCI PAR presigning (R2, R3).
 
 ## Notes & Discoveries
 
 - [2026-11-07 04:15] Existing unit tests in `src/py/tests/unit/storage/` or `extensions/` that instantiate `SyncObjectStore()` with zero arguments must pass explicit `MemoryConfig()` or `"memory://test"` per the clean-break fail-closed contract.
+- [2026-11-07 18:04] `SyncObjectStore.to_async()` and `AsyncObjectStore.to_sync()` clone the underlying Rust `ObjectStoreEngine` handle directly in `vertebra._storage`, sharing `InMemory` namespaces and connection pools without Python `_memory` dicts.
 
 [^core-pyi-gcp]: `src/py/vertebra/_vertebra.pyi::SyncGcpTokenCache` — Core GCP token cache type stubs.
 [^storage-lib-rs]: `src/rs/vertebra-storage/src/lib.rs` — `vertebra._storage` PyO3 module definition.
