@@ -1,6 +1,6 @@
 ---
 type: Guide
-title: "Object Storage, Presigning & Upload Tracking"
+title: "Object Storage, Streaming & Presigning"
 description: "The vertebra-storage Rust crate (vertebra._storage) and vertebra.storage Python facade for multicloud streaming I/O, conditional puts, presigned URLs, unified GCP token caches, and range reads."
 status: stable
 tags:
@@ -42,7 +42,7 @@ sources:
     title: "Python type stub for vertebra._storage"
   - id: src-vertebra-storage-src-store-rs
     resource: src/rs/vertebra-storage/src/store.rs
-    title: "ObjectStoreEngine, StreamReader, and MultipartUploadSession (src/rs/vertebra-storage/src/store.rs)"
+    title: "ObjectStoreEngine and MultipartUploadSession (src/rs/vertebra-storage/src/store.rs)"
   - id: src-vertebra-storage-src-gcp-auth-rs
     resource: src/rs/vertebra-storage/src/gcp_auth.rs
     title: "RefreshingGcpCredentialProvider over vertebra_core::gcp_auth (src/rs/vertebra-storage/src/gcp_auth.rs)"
@@ -78,7 +78,7 @@ sources:
     title: "Floci emulator integration fixtures (src/py/tests/integration/storage/conftest.py)"
 ---
 
-# Object Storage, Presigning & Upload Tracking
+# Object Storage, Streaming & Presigning
 
 <!-- truth: start -->
 - **Rust Extension, Streaming & GIL-Free Async Execution (`vertebra-storage`, `vertebra.storage`)**: [`vertebra-storage`](../../../../../src/rs/vertebra-storage/src/lib.rs)[^src-vertebra-storage-src-lib-rs] (typed in [`_storage.pyi`](../../../../../src/py/vertebra/_storage.pyi)[^src-storage-pyi]) builds `vertebra._storage` (`#[pymodule(gil_used = false)]`) over `object_store 0.13`. `SyncObjectStore`, `SyncStreamReader`, and `SyncMultipartUpload` release the GIL via `py.detach()`, while `AsyncObjectStore`, `AsyncStreamReader`, `AsyncMultipartUpload`, and `py_sign_gcs_v4_iam_url_async` return a `RustTaskAwaitable` backed by a per-loop `AsyncCompletionQueue` and [`vertebra_core::notify::Notifier`](../../../../../src/rs/vertebra-core/src/notify.rs)[^src-vertebra-core-src-notify-rs] (`eventfd` on Linux, pipe elsewhere) registered via `loop.add_reader`, completing on `STORAGE_RUNTIME` with zero Tokio `Python::attach` calls.
@@ -92,13 +92,13 @@ Object storage comprises two layers: [`vertebra-storage`](../../../../../src/rs/
 | Symbol | Source | Responsibility |
 |---|---|---|
 | [`BackendConfig` / `ObjectStoreEngine`](../../../../../src/rs/vertebra-storage/src/store.rs)[^src-vertebra-storage-src-store-rs] | `store.rs` | Wraps `Arc<dyn object_store::ObjectStore>` across `memory`, `file`, `s3`/`b2`, `r2`, `oci`, `gs`/`gcs`, `az`/`azure`/`abfs`, and `http`/`https`. Exposes `put_opts` (`PutConditionalOptions`: `if_not_exists`, `if_match`, `if_none_match`, `content_type`, `attributes`), `get_stream`, `create_multipart`, `list_page`, `list_with_delimiter`, `rename`, `get_range`, `head`, `exists`, `delete`, `copy`, and `list`. |
-| `StreamReader` (`SyncStreamReader` / `AsyncStreamReader`) | `store.rs`, `lib.rs` | Pulls streaming `Bytes` chunks from `ObjectStore::get_opts` and slices them to optional `chunk_size` bounds as zero-copy `StorageBuffer` views without whole-object buffering. |
-| `MultipartUploadSession` (`SyncMultipartUpload` / `AsyncMultipartUpload`) | `store.rs`, `lib.rs` | Stateful `Box<dyn MultipartUpload>` session (`write_part`, `complete`, `abort`). For `r2` and `oci`, buffers writes into uniform `8 MiB` parts ([`R2_UNIFORM_PART_SIZE`](../../../../../src/rs/vertebra-storage/src/r2.rs)[^src-vertebra-storage-src-r2-rs]) incrementally without concatenating full payloads into `Vec<u8>`. |
+| `PySyncStreamReader` / `PyAsyncStreamReader` (`SyncStreamReader` / `AsyncStreamReader`) | `lib.rs` | Pulls streaming `Bytes` chunks from `ObjectStoreEngine::get_stream` and slices them to optional `chunk_size` bounds as zero-copy `StorageBuffer` views without whole-object buffering. |
+| `MultipartUploadSession` (`PySyncMultipartUpload` / `PyAsyncMultipartUpload`) | `store.rs`, `lib.rs` | Stateful `Box<dyn MultipartUpload>` session (`write_part`, `complete`, `abort`). For `r2` and `oci`, buffers writes into uniform `8 MiB` parts ([`R2_UNIFORM_PART_SIZE`](../../../../../src/rs/vertebra-storage/src/r2.rs)[^src-vertebra-storage-src-r2-rs]) incrementally without concatenating full payloads into `Vec<u8>`. |
 | `RefreshingGcpCredentialProvider` | `gcp_auth.rs` | Bridges `Arc<vertebra_core::gcp_auth::GcpTokenCache>` (`GCS_OAUTH_SCOPES`) into `GoogleCloudStorageBuilder::with_credentials(...)` when no static `service_account_path` or `service_account_key` is configured. |
 | [`OciObjectStore`](../../../../../src/rs/vertebra-storage/src/oci.rs)[^src-vertebra-storage-src-oci-rs] | `oci.rs` | Native `ObjectStore` over OCI Object Storage REST v2 (`/n/{ns}/b/{bucket}/o/{name}`, pre-authenticated `par_url`, RSA-SHA256 Cavage request signing, and `OciMultipartUpload`). |
-| `SyncObjectStore` / `AsyncObjectStore` / `RustTaskAwaitable` | `lib.rs` | Frozen PyO3 classes whose `.to_async()` and `.to_sync()` methods clone the shared `ObjectStoreEngine` (`Arc`), keeping `InMemory` namespaces and HTTP pools unified across sync and async callers. |
+| `PySyncObjectStore` / `PyAsyncObjectStore` / `RustTaskAwaitable` | `lib.rs` | Frozen PyO3 classes (`SyncObjectStore` / `AsyncObjectStore`) whose `.to_async()` and `.to_sync()` methods clone the shared `ObjectStoreEngine` (`Arc`), keeping `InMemory` namespaces and HTTP pools unified across sync and async callers. |
 
-Module signing functions exported by `_storage`: `py_sign_hmac_url`, `py_verify_hmac_url`, `py_sign_s3_v4_url`, `py_verify_s3_v4_url`, `py_sign_aws_sigv4_headers`, `py_sign_gcs_v4_iam_url`, `py_sign_gcs_v4_iam_url_async`, `py_sign_oci_cavage_headers`, `sign_oci_par_url`, `py_sign_azure_sas_url`, `py_chunk_r2_uniform_parts`.
+Module signing functions exported by `_storage`: `py_sign_hmac_url`, `py_verify_hmac_url`, `py_sign_s3_v4_url`, `py_verify_s3_v4_url`, `py_sign_aws_sigv4_headers`, `py_sign_gcs_v4_iam_url`, `py_sign_gcs_v4_iam_url_async`, `build_gcs_v4_canonical_request`, `assemble_gcs_iam_v4_url`, `py_sign_oci_cavage_headers`, `sign_oci_par_url`, `py_sign_azure_sas_url`, `py_chunk_r2_uniform_parts`.
 
 ## 2. Signing (`signing.rs`, `oci.rs`)
 
@@ -144,7 +144,7 @@ Provider configs are `msgspec.Struct(frozen=True, gc=False, kw_only=True)` imple
 [^src-vertebra-storage-cargo-toml]: `src/rs/vertebra-storage/Cargo.toml` — Rust crate manifest (src/rs/vertebra-storage/Cargo.toml).
 [^src-vertebra-storage-src-lib-rs]: `src/rs/vertebra-storage/src/lib.rs` — PyO3 module bindings for vertebra._storage (src/rs/vertebra-storage/src/lib.rs).
 [^src-storage-pyi]: `src/py/vertebra/_storage.pyi` — Python type stub for vertebra._storage.
-[^src-vertebra-storage-src-store-rs]: `src/rs/vertebra-storage/src/store.rs` — ObjectStoreEngine, StreamReader, and MultipartUploadSession (src/rs/vertebra-storage/src/store.rs).
+[^src-vertebra-storage-src-store-rs]: `src/rs/vertebra-storage/src/store.rs` — ObjectStoreEngine and MultipartUploadSession (src/rs/vertebra-storage/src/store.rs).
 [^src-vertebra-storage-src-gcp-auth-rs]: `src/rs/vertebra-storage/src/gcp_auth.rs` — RefreshingGcpCredentialProvider over vertebra_core::gcp_auth (src/rs/vertebra-storage/src/gcp_auth.rs).
 [^src-vertebra-storage-src-oci-rs]: `src/rs/vertebra-storage/src/oci.rs` — OCI REST v2 ObjectStore and PAR support (src/rs/vertebra-storage/src/oci.rs).
 [^src-vertebra-storage-src-r2-rs]: `src/rs/vertebra-storage/src/r2.rs` — Cloudflare R2 uniform multipart chunking (src/rs/vertebra-storage/src/r2.rs).

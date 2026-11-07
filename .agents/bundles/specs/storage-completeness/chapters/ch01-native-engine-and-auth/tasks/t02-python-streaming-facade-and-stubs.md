@@ -63,7 +63,7 @@ Expose the new Rust streaming, conditional-put, multipart-session, paginated-lis
 
 - `src/rs/vertebra-storage/src/lib.rs` — Exact PyO3 class and method signatures added in `ch01:t01`.
 - `src/py/vertebra/_storage.pyi` — Stub definitions verified by `mypy.stubtest vertebra._storage` [^storage-pyi].
-- `src/py/vertebra/storage/_store.py` — `SyncObjectStore`, `AsyncObjectStore`, `SyncReadableFile`, `AsyncReadableFile`, and `ObjectMetadata` [^py-store-facade].
+- `src/py/vertebra/storage/_store.py` — `SyncObjectStore`, `AsyncObjectStore`, `SyncReadableFile`, `AsyncReadableFile`, `ObjectMeta`, and `PutResult` [^py-store-facade].
 - `src/py/tests/unit/storage/test_multicloud_storage.py` — Multi-backend storage unit tests.
 - `src/py/tests/unit/storage/test_storage_store.py` — Store facade, readable-file, and zero-`to_thread` AST tests.
 - `.agents/skills/python-framework/SKILL.md` — PEP 585/604 typing, `msgspec.Struct(frozen=True, gc=False)`, and zero-inline-comment rules.
@@ -73,13 +73,13 @@ Expose the new Rust streaming, conditional-put, multipart-session, paginated-lis
 - `src/py/vertebra/_storage.pyi`:
   - Add `SyncStreamReader`, `AsyncStreamReader`, `SyncMultipartUpload`, and `AsyncMultipartUpload` classes matching `lib.rs` verbatim; add `content_type: str | None` and `attributes: dict[str, str]` properties on `ObjectMeta`; update `SyncObjectStore` and `AsyncObjectStore` with `get_stream`, `create_multipart`, conditional `put(...)` kwargs, `list_page`, `list_with_delimiter`, and `rename`.
 - `src/py/vertebra/storage/_store.py`:
-  - Extend `ObjectMetadata` (`msgspec.Struct(frozen=True, gc=False)`) with `content_type: str | None = None` and `attributes: dict[str, str] = msgspec.field(default_factory=dict)`.
+  - Extend `ObjectMeta` and `PutResult` (`msgspec.Struct(frozen=True, gc=False)`) with `content_type: str | None = None` and `attributes: dict[str, str] = msgspec.field(default_factory=dict)`.
   - `SyncObjectStore` & `AsyncObjectStore`:
-    - `put(self, key: str, data: bytes | bytearray | memoryview, *, content_type: str | None = None, attributes: Mapping[str, str] | None = None, if_not_exists: bool = False, if_match: str | None = None, if_none_match: str | None = None) -> ObjectMetadata` (awaitable on `AsyncObjectStore`)
-    - `get_stream(self, key: str, *, chunk_size: int | None = None) -> Iterator[StorageBuffer]` / `AsyncIterator[StorageBuffer]`
-    - `put_stream(self, key: str, chunks: Iterable[bytes | memoryview], *, content_type: str | None = None, attributes: Mapping[str, str] | None = None, if_not_exists: bool = False) -> ObjectMetadata` (and `AsyncIterable[bytes | memoryview] | Iterable[bytes | memoryview]` on `AsyncObjectStore`, driving `create_multipart` -> `write_part` -> `complete` with `abort` on exception)
-    - `list_page(self, prefix: str = "", *, cursor: str | None = None, limit: int = 1000) -> tuple[list[ObjectMetadata], str | None]`
-    - `list_with_delimiter(self, prefix: str = "") -> tuple[list[ObjectMetadata], list[str]]`
+    - `put(self, path: str, data: Buffer, *, content_type: str | None = None, attributes: Mapping[str, str] | None = None, if_not_exists: bool = False, if_match: str | None = None, if_none_match: str | None = None) -> PutResult` (awaitable on `AsyncObjectStore`)
+    - `get_stream(self, path: str, *, chunk_size: int | None = None) -> Iterator[StorageBuffer]` / `AsyncIterator[StorageBuffer]`
+    - `put_stream(self, path: str, chunks: Iterable[Buffer], *, content_type: str | None = None, attributes: Mapping[str, str] | None = None, if_not_exists: bool = False, if_match: str | None = None, if_none_match: str | None = None) -> PutResult` (and `AsyncIterable[Buffer] | Iterable[Buffer]` on `AsyncObjectStore`, driving `create_multipart` -> `write_part` -> `complete` with `abort` on exception)
+    - `list_page(self, prefix: str = "", *, cursor: str | None = None, limit: int = 1000) -> tuple[list[ObjectMeta], str | None]`
+    - `list_with_delimiter(self, prefix: str = "") -> tuple[list[ObjectMeta], list[str]]`
     - `rename(self, src: str, dst: str, *, overwrite: bool = True) -> None` (maps `overwrite=False` -> `if_not_exists=True`)
   - `SyncReadableFile` & `AsyncReadableFile`: ensure `__iter__` / `__aiter__` and `read(size)` stream over `get_range` / `get_stream` without loading the entire object when `size > 0`.
 

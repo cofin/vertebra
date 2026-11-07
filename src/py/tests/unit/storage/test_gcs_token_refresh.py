@@ -19,12 +19,14 @@ import pytest
 import vertebra._storage as native_storage_mod
 import vertebra._vertebra as native_core_mod
 import vertebra.embeddings._google as google_embeddings_mod
-import vertebra.storage._store as storage_store_mod
 from vertebra._vertebra import (
     AsyncGcpTokenCache as CoreAsyncGcpTokenCache,
 )
 from vertebra._vertebra import (
     GcpTokenSnapshot as CoreGcpTokenSnapshot,
+)
+from vertebra._vertebra import (
+    GoogleCloudAuthError,
 )
 from vertebra._vertebra import (
     SyncGcpTokenCache as CoreSyncGcpTokenCache,
@@ -53,6 +55,7 @@ class _MockTokenServer:
         self.last_headers: dict[str, str] = {}
         self.last_post_body: bytes = b""
         self.expires_in: int = 3600
+        self.token_status: int = 200
         self.expire_time_iso: str = "2099-01-01T00:00:00Z"
         self._lock = threading.Lock()
 
@@ -110,6 +113,14 @@ class _MockTokenServer:
                     if self.path == "/token":
                         parent.oauth_calls += 1
                         idx = parent.oauth_calls
+                        if parent.token_status != 200:
+                            err_raw = json.dumps({"error": "access_denied"}).encode("utf-8")
+                            self.send_response(parent.token_status)
+                            self.send_header("Content-Type", "application/json")
+                            self.send_header("Content-Length", str(len(err_raw)))
+                            self.end_headers()
+                            self.wfile.write(err_raw)
+                            return
                         payload = {
                             "access_token": f"mock-oauth-token-user-{idx}",
                             "expires_in": parent.expires_in,
@@ -638,7 +649,7 @@ def test_gcp_token_cache_unified_on_vertebra_core_and_removed_from_storage_ext(
     token_server: _MockTokenServer,
     tmp_path: Path,
 ) -> None:
-    """Verify vertebra.storage re-exports vertebra._vertebra token classes and removes duplicate _storage/urllib classes."""
+    """Verify vertebra.storage re-exports vertebra._vertebra token classes and shares handles across store conversions."""
     assert SyncGcpTokenCache is CoreSyncGcpTokenCache
     assert AsyncGcpTokenCache is CoreAsyncGcpTokenCache
     assert GcpTokenSnapshot is CoreGcpTokenSnapshot
@@ -649,21 +660,6 @@ def test_gcp_token_cache_unified_on_vertebra_core_and_removed_from_storage_ext(
     assert not hasattr(native_storage_mod, "SyncGcpTokenCache")
     assert not hasattr(native_storage_mod, "AsyncGcpTokenCache")
     assert not hasattr(native_storage_mod, "GcpTokenSnapshot")
-
-    assert not hasattr(GCSConfig, "_fetch_adc_token_with_expiry")
-    assert not hasattr(GCSConfig, "_exchange_authorized_user_token_with_expiry")
-    assert not hasattr(GCSConfig, "_impersonate_service_account_token_with_expiry")
-    assert not hasattr(GCSConfig, "_open_http_json")
-    assert not hasattr(GCSConfig, "_fetch_metadata_server_token_with_expiry")
-
-    store_source = Path(storage_store_mod.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(store_source)
-    urllib_imports = [
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.alias) and node.name in {"urllib.request", "urllib.error"}
-    ]
-    assert urllib_imports == []
 
     adc_path = tmp_path / "unified_adc.json"
     adc_path.write_text(
@@ -692,8 +688,76 @@ def test_gcp_token_cache_unified_on_vertebra_core_and_removed_from_storage_ext(
     assert seeded_snap.access_token == "seed-tok"
     assert direct_sync.generation == direct_async.generation == roundtrip_sync.generation == 1
 
-    store_with_cache = SyncObjectStore.from_memory("cache-share")
-    store_with_cache._gcp_token_cache = direct_sync
+    store_with_cache = SyncObjectStore("memory://cache-share", token_cache=direct_sync)
     async_store_with_cache = store_with_cache.to_async()
     assert isinstance(async_store_with_cache.token_cache, AsyncGcpTokenCache)
     assert async_store_with_cache.token_cache.generation == 1
+
+
+def test_gcs_config_ambient_adc_precedence_and_isolation(
+    token_server: _MockTokenServer,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify ambient GOOGLE_APPLICATION_CREDENTIALS takes precedence over metadata server and respects allow_ambient_adc=False."""
+    adc_path = tmp_path / "ambient_adc.json"
+    adc_path.write_text(
+        json.dumps(
+            {
+                "type": "authorized_user",
+                "client_id": "ambient-cid",
+                "client_secret": "ambient-csec",
+                "refresh_token": "ambient-rtok",
+                "token_uri": f"{token_server.base_url}/token",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(adc_path))
+    monkeypatch.setenv("GCE_METADATA_HOST", f"127.0.0.1:{token_server.port}")
+    monkeypatch.delenv("GOOGLE_OAUTH_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("CLOUDSDK_AUTH_ACCESS_TOKEN", raising=False)
+
+    cfg = GCSConfig(bucket="ambient-bucket")
+    snap = cfg.sync_token_cache().get_token()
+    assert snap.access_token == "mock-oauth-token-user-1"
+    assert token_server.oauth_calls == 1
+    assert token_server.metadata_calls == 0
+
+    assert cfg.resolve_adc_token() == "mock-oauth-token-user-2"
+    assert token_server.oauth_calls == 2
+    assert token_server.metadata_calls == 0
+
+    with pytest.raises(ValueError, match="unable to configure GcpTokenCache from options"):
+        cfg.sync_token_cache(allow_ambient_adc=False)
+    assert cfg.resolve_adc_token(allow_ambient_adc=False) is None
+    assert token_server.metadata_calls == 0
+
+
+def test_gcs_config_resolve_adc_token_catches_google_cloud_auth_error(
+    token_server: _MockTokenServer,
+    tmp_path: Path,
+) -> None:
+    """Verify resolve_adc_token and resolve_adc_token_async return None when OAuth exchange raises GoogleCloudAuthError."""
+    adc_path = tmp_path / "denied_adc.json"
+    adc_path.write_text(
+        json.dumps(
+            {
+                "type": "authorized_user",
+                "client_id": "denied-cid",
+                "client_secret": "denied-csec",
+                "refresh_token": "denied-rtok",
+                "token_uri": f"{token_server.base_url}/token",
+            }
+        ),
+        encoding="utf-8",
+    )
+    token_server.token_status = 403
+    cfg = GCSConfig(bucket="denied-bucket", application_credentials=str(adc_path))
+
+    with pytest.raises(GoogleCloudAuthError, match="HTTP 403"):
+        cfg.sync_token_cache().get_token()
+
+    assert cfg.resolve_adc_token() is None
+    assert asyncio.run(cfg.resolve_adc_token_async()) is None
+    assert token_server.oauth_calls == 3

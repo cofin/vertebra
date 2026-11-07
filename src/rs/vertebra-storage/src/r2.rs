@@ -76,8 +76,4 @@ impl UniformPartAccumulator {
     pub fn clear(&mut self) {
         self.buf.clear();
     }
-
-    pub fn buffered_len(&self) -> usize {
-        self.buf.len()
-    }
 }

@@ -14,13 +14,35 @@ from urllib.parse import unquote, urlparse
 
 import msgspec
 
-from vertebra._vertebra import AsyncGcpTokenCache, GcpTokenSnapshot, SyncGcpTokenCache
+from vertebra._vertebra import AsyncGcpTokenCache, GcpTokenSnapshot, GoogleCloudAuthError, SyncGcpTokenCache
 from vertebra.typing import ImproperConfigurationError, MissingDependencyError
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json
 
 if TYPE_CHECKING:
     from vertebra._storage import StorageBuffer
+
+__all__ = (
+    "AsyncGcpTokenCache",
+    "AsyncObjectStore",
+    "AsyncReadableFile",
+    "AzureConfig",
+    "GCSConfig",
+    "GcpTokenSnapshot",
+    "HTTPConfig",
+    "LocalConfig",
+    "MemoryConfig",
+    "OCIConfig",
+    "ObjectMeta",
+    "PutResult",
+    "R2Config",
+    "S3Config",
+    "SigningConfig",
+    "StorageConfig",
+    "SyncGcpTokenCache",
+    "SyncObjectStore",
+    "SyncReadableFile",
+)
 
 GCS_DEFAULT_SCOPES: Final[tuple[str, str]] = (
     "https://www.googleapis.com/auth/devstorage.full_control",
@@ -46,28 +68,6 @@ _SUPPORTED_SCHEMES: Final[frozenset[str]] = frozenset(
 )
 
 _OCI_PAR_PREFIX_RE: Final[re.Pattern[str]] = re.compile(r"^(https?://[^/]+)/p/([^/]+)/n/([^/]+)/b/([^/]+)/o/?$")
-
-__all__ = (
-    "AsyncGcpTokenCache",
-    "AsyncObjectStore",
-    "AsyncReadableFile",
-    "AzureConfig",
-    "GCSConfig",
-    "GcpTokenSnapshot",
-    "HTTPConfig",
-    "LocalConfig",
-    "MemoryConfig",
-    "OCIConfig",
-    "ObjectMeta",
-    "PutResult",
-    "R2Config",
-    "S3Config",
-    "SigningConfig",
-    "StorageConfig",
-    "SyncGcpTokenCache",
-    "SyncObjectStore",
-    "SyncReadableFile",
-)
 
 
 class LocalConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -268,8 +268,19 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             opts["quota_project_id"] = self.quota_project_id
         if scopes:
             opts["scopes"] = ",".join(scopes)
-        if not (
+        has_explicit_creds = bool(
             self.application_credentials or self.service_account_path or self.service_account_key or self.access_token
+        )
+        has_ambient_env_token = bool(
+            os.environ.get("GOOGLE_OAUTH_ACCESS_TOKEN", "").strip()
+            or os.environ.get("CLOUDSDK_AUTH_ACCESS_TOKEN", "").strip()
+        )
+        if (
+            allow_ambient_adc
+            and not has_explicit_creds
+            and not self.target_service_account
+            and self._resolve_adc_file(allow_ambient=True) is None
+            and not has_ambient_env_token
         ):
             opts["use_metadata_server"] = "true"
         return opts
@@ -304,7 +315,7 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         try:
             cache = self.sync_token_cache(allow_ambient_adc=allow_ambient_adc, scopes=scopes)
             return cache.get_token().access_token
-        except (RuntimeError, ValueError, OSError):
+        except (GoogleCloudAuthError, RuntimeError, ValueError, OSError):
             return None
 
     async def resolve_adc_token_async(
@@ -318,7 +329,7 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             cache = self.async_token_cache(allow_ambient_adc=allow_ambient_adc, scopes=scopes)
             snap = await cache.get_token()
             return snap.access_token
-        except (RuntimeError, ValueError, OSError):
+        except (GoogleCloudAuthError, RuntimeError, ValueError, OSError):
             return None
 
     def _resolve_adc_file(self, *, allow_ambient: bool = True) -> Path | None:
@@ -705,83 +716,6 @@ class _BaseObjectStore:
             self._local_root = root_path
         self._native: Any = None
 
-    @staticmethod
-    def _validate_url(url: str) -> tuple[str, str, Any]:
-        """Validate a storage target URL and return `(cleaned_url, scheme, parsed)`."""
-        cleaned = url.strip()
-        if not cleaned or "://" not in cleaned:
-            msg = f"Storage target URI must include a valid scheme: {url!r}"
-            raise ImproperConfigurationError(msg)
-        parsed = urlparse(cleaned)
-        scheme = parsed.scheme.lower()
-        if scheme not in _SUPPORTED_SCHEMES:
-            msg = f"Unsupported storage URI scheme {scheme!r} in {url!r}"
-            raise ImproperConfigurationError(msg)
-        if scheme == "file":
-            if not parsed.netloc and not parsed.path:
-                msg = f"Local filesystem storage URI is missing root path: {url!r}"
-                raise ImproperConfigurationError(msg)
-        elif scheme != "memory" and not parsed.netloc:
-            msg = f"Storage target URI is missing bucket or host: {url!r}"
-            raise ImproperConfigurationError(msg)
-        return cleaned, scheme, parsed
-
-    def _backfill_options_from_signing(self) -> None:
-        """Populate missing native builder options from an attached SigningConfig when provided."""
-        if self._signing is None:
-            return
-        if self._scheme in {"s3", "r2", "b2"} and self._signing.provider == "s3":
-            if self._signing.region:
-                self._options.setdefault("region", self._signing.region)
-            if self._signing.access_key_id:
-                self._options.setdefault("access_key_id", self._signing.access_key_id)
-            if self._signing.secret_access_key:
-                self._options.setdefault("secret_access_key", self._signing.secret_access_key)
-            if self._signing.endpoint:
-                self._options.setdefault("endpoint", self._signing.endpoint)
-                if self._signing.endpoint.startswith("http://"):
-                    self._options.setdefault("allow_http", "true")
-        elif self._scheme in {"az", "azure", "abfs"} and self._signing.provider == "azure":
-            if self._signing.account:
-                self._options.setdefault("account", self._signing.account)
-            if self._signing.azure_access_key:
-                self._options.setdefault("access_key", self._signing.azure_access_key)
-            if self._signing.endpoint:
-                self._options.setdefault("endpoint", self._signing.endpoint)
-                if self._signing.endpoint.startswith("http://"):
-                    self._options.setdefault("allow_http", "true")
-        elif self._scheme in {"gs", "gcs"} and self._signing.provider == "gcs":
-            if self._signing.access_token:
-                self._options.setdefault("access_token", self._signing.access_token)
-            if self._signing.service_account_email:
-                self._options.setdefault("service_account_email", self._signing.service_account_email)
-            if self._signing.target_service_account:
-                self._options.setdefault("target_service_account", self._signing.target_service_account)
-            if self._signing.iam_endpoint:
-                self._options.setdefault("iam_endpoint", self._signing.iam_endpoint)
-            if self._signing.endpoint:
-                self._options.setdefault("endpoint", self._signing.endpoint)
-                if self._signing.endpoint.startswith("http://"):
-                    self._options.setdefault("allow_http", "true")
-        elif self._scheme == "oci" and self._signing.provider == "oci":
-            if self._signing.namespace:
-                self._options.setdefault("namespace", self._signing.namespace)
-            if self._signing.region:
-                self._options.setdefault("region", self._signing.region)
-            if self._signing.par_token:
-                self._options.setdefault("par_token", self._signing.par_token)
-            if self._signing.par_url_prefix:
-                self._options.setdefault("par_url_prefix", self._signing.par_url_prefix)
-            if self._signing.endpoint:
-                self._options.setdefault("endpoint", self._signing.endpoint)
-
-    def _require_native(self) -> Any:
-        """Return the bound native store instance or raise RuntimeError if closed."""
-        if self._native is None:
-            msg = "ObjectStore handle is closed"
-            raise RuntimeError(msg)
-        return self._native
-
     @property
     def url(self) -> str:
         """Return the configured store base URL."""
@@ -1007,6 +941,83 @@ class _BaseObjectStore:
     def from_memory(cls, namespace: str = "default") -> Self:
         """Construct an in-memory ObjectStore."""
         return cls.from_config(MemoryConfig(namespace=namespace))
+
+    @staticmethod
+    def _validate_url(url: str) -> tuple[str, str, Any]:
+        """Validate a storage target URL and return `(cleaned_url, scheme, parsed)`."""
+        cleaned = url.strip()
+        if not cleaned or "://" not in cleaned:
+            msg = f"Storage target URI must include a valid scheme: {url!r}"
+            raise ImproperConfigurationError(msg)
+        parsed = urlparse(cleaned)
+        scheme = parsed.scheme.lower()
+        if scheme not in _SUPPORTED_SCHEMES:
+            msg = f"Unsupported storage URI scheme {scheme!r} in {url!r}"
+            raise ImproperConfigurationError(msg)
+        if scheme == "file":
+            if not parsed.netloc and not parsed.path:
+                msg = f"Local filesystem storage URI is missing root path: {url!r}"
+                raise ImproperConfigurationError(msg)
+        elif scheme != "memory" and not parsed.netloc:
+            msg = f"Storage target URI is missing bucket or host: {url!r}"
+            raise ImproperConfigurationError(msg)
+        return cleaned, scheme, parsed
+
+    def _backfill_options_from_signing(self) -> None:
+        """Populate missing native builder options from an attached SigningConfig when provided."""
+        if self._signing is None:
+            return
+        if self._scheme in {"s3", "r2", "b2"} and self._signing.provider == "s3":
+            if self._signing.region:
+                self._options.setdefault("region", self._signing.region)
+            if self._signing.access_key_id:
+                self._options.setdefault("access_key_id", self._signing.access_key_id)
+            if self._signing.secret_access_key:
+                self._options.setdefault("secret_access_key", self._signing.secret_access_key)
+            if self._signing.endpoint:
+                self._options.setdefault("endpoint", self._signing.endpoint)
+                if self._signing.endpoint.startswith("http://"):
+                    self._options.setdefault("allow_http", "true")
+        elif self._scheme in {"az", "azure", "abfs"} and self._signing.provider == "azure":
+            if self._signing.account:
+                self._options.setdefault("account", self._signing.account)
+            if self._signing.azure_access_key:
+                self._options.setdefault("access_key", self._signing.azure_access_key)
+            if self._signing.endpoint:
+                self._options.setdefault("endpoint", self._signing.endpoint)
+                if self._signing.endpoint.startswith("http://"):
+                    self._options.setdefault("allow_http", "true")
+        elif self._scheme in {"gs", "gcs"} and self._signing.provider == "gcs":
+            if self._signing.access_token:
+                self._options.setdefault("access_token", self._signing.access_token)
+            if self._signing.service_account_email:
+                self._options.setdefault("service_account_email", self._signing.service_account_email)
+            if self._signing.target_service_account:
+                self._options.setdefault("target_service_account", self._signing.target_service_account)
+            if self._signing.iam_endpoint:
+                self._options.setdefault("iam_endpoint", self._signing.iam_endpoint)
+            if self._signing.endpoint:
+                self._options.setdefault("endpoint", self._signing.endpoint)
+                if self._signing.endpoint.startswith("http://"):
+                    self._options.setdefault("allow_http", "true")
+        elif self._scheme == "oci" and self._signing.provider == "oci":
+            if self._signing.namespace:
+                self._options.setdefault("namespace", self._signing.namespace)
+            if self._signing.region:
+                self._options.setdefault("region", self._signing.region)
+            if self._signing.par_token:
+                self._options.setdefault("par_token", self._signing.par_token)
+            if self._signing.par_url_prefix:
+                self._options.setdefault("par_url_prefix", self._signing.par_url_prefix)
+            if self._signing.endpoint:
+                self._options.setdefault("endpoint", self._signing.endpoint)
+
+    def _require_native(self) -> Any:
+        """Return the bound native store instance or raise RuntimeError if closed."""
+        if self._native is None:
+            msg = "ObjectStore handle is closed"
+            raise RuntimeError(msg)
+        return self._native
 
     @staticmethod
     def _derive_signing_from_config(config: StorageConfig) -> SigningConfig | None:

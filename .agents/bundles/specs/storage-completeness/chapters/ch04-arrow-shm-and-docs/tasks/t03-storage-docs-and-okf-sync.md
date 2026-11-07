@@ -77,9 +77,8 @@ Bring user-facing storage documentation (`docs/usage/storage.md`, `docs/usage/st
 - `docs/usage/storage-auth-and-signing.md`:
   - Document `from vertebra.storage import SyncGcpTokenCache, AsyncGcpTokenCache, GcpTokenSnapshot` (backed by `vertebra._vertebra`), removing any `vertebra._storage.SyncGcpTokenCache` import examples, and document GCS V4 (`GOOG4-RSA-SHA256` + IAM `signBlob`), S3 SigV4, Azure SAS, and OCI PAR signing.
 - `.agents/bundles/knowledge/domains/storage/object-storage.md`:
-  - Replace stale `RustStorageAwaitable` references with `RustTaskAwaitable`.
-  - Add `src/rs/vertebra-core/src/notify.rs` and `src/rs/vertebra-core/src/gcp_auth.rs` to `sources:` with matching inline citations and footer definitions, and update `verified` commit to the latest chapter commit.
-  - Replace obsolete `_BaseObjectStore._memory` fallback gotchas with the fail-closed construction contract (`MissingDependencyError` / `ImproperConfigurationError`), incremental 8 MiB R2/OCI multipart chunking, and unified `vertebra._vertebra` GCP token caches.
+  - Preserve `ch01` `RustTaskAwaitable`, `src/rs/vertebra-core/src/notify.rs` + `src/rs/vertebra-core/src/gcp_auth.rs` provenance, unified `vertebra._vertebra` GCP token caches, and fail-closed construction invariants.
+  - Extend Section 4 (`Range Reads & Ecosystem Adapters`) and `sources:` with `ch02`–`ch04` `@deconstructible` `DjangoStorage`, `StorageRegistry` Advanced Alchemy registration, Litestar `ObjectStoreLitestarStore` / `ObjectStoreFileSystemAdapter` / RFC 9110 `206` & `416` streaming, and batch-streaming Arrow/Parquet helpers, updating `verified` to the latest chapter commit.
 
 ## Edge Cases & Error Semantics
 

@@ -50,7 +50,7 @@ Curated current-state engineering documentation for **Vertebra** (`src/py/verteb
   - [Standalone & Onefile Packaging and PGO Tooling](domains/frontend/packaging-and-pgo.md)
   - [WASM Plugin Host & Browser Bridge](domains/frontend/wasm.md)
 - **Storage, Data, Telemetry & Extensions (`domains/storage/`, `domains/data/`, `domains/telemetry/`, `domains/extensions/`)**:
-  - [Object Storage, Presigning & Upload Tracking](domains/storage/object-storage.md)
+  - [Object Storage, Streaming & Presigning](domains/storage/object-storage.md)
   - [Shared-Memory Connection Broker & Statement Cache](domains/data/broker-and-shm-leases.md)
   - [Database Drivers & Cloud Dialers](domains/data/database-drivers-and-dialers.md)
   - [GCP BigQuery & Spanner Native Drivers](domains/data/gcp-bigquery-and-spanner-drivers.md)
