@@ -5,7 +5,7 @@ chapter_id: ch02-wire-codec-and-session-startup
 title: Negotiate PostgreSQL SSLRequest and verify rustls peer TLS identities
 description: Implement tls::connect negotiating the 8-byte PostgreSQL SSLRequest preamble and upgrading via shared TransportStream::upgrade_tls across Disable, Prefer, Require, VerifyCa, and VerifyFull with CA, SNI, and mTLS verification.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -29,13 +29,13 @@ estimated_loc: 235
 plan_revision: 6
 plan_commit: 8833b064
 state_revision: 1
-claimed_by: agent:ch02-tls-deadline-remediation
-claimed_at: "2026-11-07T23:33:49Z"
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-07T23:36:44Z"
-last_verified_commit: null
+last_verified_commit: 0c3a0eaa
 verification_evidence:
   red: 'Canonical enabled_modes_upgrade_before_trust_startup test exits 101 with UnsupportedFeature("only direct plaintext TCP is available") before integration.'
   focused: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_tls_wire_tests exits 0: 10 real rcgen/tokio-rustls peer tests cover the complete TLS matrix."
@@ -48,8 +48,8 @@ verification_evidence:
   deadline_boundary: "After 75 ms reserved before run and 100 ms waiting for SSLResponse, both SSLResponse-stall and accepted-S/TLS-stall cases remain pending at virtual 249 ms and fail Transport at virtual 251 ms (Tokio timer rounding); the clock equals exactly the commanded advance, handle is terminal, and the actual peer observes EOF after clock resumption."
   checkpoint: "The test-only deadline remediation is verified with the existing native source; source and completion receipt binding remain with the coordinator."
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T23:36:44Z"
-commit: null
+updated_at: "2026-11-07T23:37:28Z"
+commit: 0c3a0eaa
 sources:
   - id: rs-upgrade-tls
     resource: src/rs/vertebra-db/src/connection.rs::TransportStream

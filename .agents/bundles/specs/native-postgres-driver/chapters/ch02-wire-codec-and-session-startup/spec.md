@@ -10,7 +10,7 @@ planning_status: complete
 depends_on_chapters:
   - ch01-wheel-scaffold-and-config
 replan_trigger: null
-current_task: "native-postgres-driver:ch02:t03"
+current_task: "native-postgres-driver:ch02:t04"
 plan_revision: 6
 plan_commit: 8833b064
 state_revision: 4
@@ -150,15 +150,15 @@ Progress: `[0/0 files documented in ch02]` (all new symbols in `protocol.rs`, `t
 
 - [x] [a00c3248] native-postgres-driver:ch02:t01 — Implement bounded PostgreSQL Protocol 3.0 startup encoder and backend frame decoder (tasks/t01-bounded-codec.md)
 - [x] [81791de2] native-postgres-driver:ch02:t02 — Establish authenticated trust sessions with SessionHandle and PendingSession publication (tasks/t02-trust-session-lifecycle.md)
-- [~] native-postgres-driver:ch02:t03 — Negotiate PostgreSQL SSLRequest and verify rustls peer TLS identities (tasks/t03-sslrequest-and-tls-identity.md)
-- [ ] native-postgres-driver:ch02:t04 — Authenticate cleartext password and MD5 startup exchanges (tasks/t04-cleartext-and-md5-auth.md)
+- [x] [0c3a0eaa] native-postgres-driver:ch02:t03 — Negotiate PostgreSQL SSLRequest and verify rustls peer TLS identities (tasks/t03-sslrequest-and-tls-identity.md)
+- [~] native-postgres-driver:ch02:t04 — Authenticate cleartext password and MD5 startup exchanges (tasks/t04-cleartext-and-md5-auth.md)
 
 **Chapter Recovery Checkpoint:** `flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings` exits `0` at `7bf8e2e3`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Baseline**: Checkpoint `7bf8e2e3` passes all 47 Rust tests (`9` codec, `8` auth, `10` TLS, `20` wire/config/error) and locked all-target Clippy with `-D warnings`; upstream chapter 01 remains complete and reviewed at `3d68c853`.
-- **Task State**: Codec task `t01` and session task `t02` are complete. TLS task `t03` is in progress; authentication task `t04` awaits credential-redaction repairs. The chapter remains active and unreviewed.
+- **Task State**: Codec task `t01` and session task `t02` are complete. TLS task `t03` is complete at `0c3a0eaa`; authentication task `t04` is in progress for credential-redaction repairs. The chapter remains active and unreviewed.
 - **Shared Contracts**: Bounded framing, owned session publication, strict TLS, and trust/password/MD5 authentication retain their declared phase and error behavior.
 - **Documentation**: `[0/0 files documented in ch02]`; chapter 30 retains full driver guides and knowledge synchronization.
 - **Next Action**: Validate discarded notice bodies, redact credential echoes in startup errors, and make TLS deadline tests deterministic; rerun correctness and quality review before chapter 03.
