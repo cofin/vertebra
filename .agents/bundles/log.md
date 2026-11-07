@@ -1,5 +1,11 @@
 # Bundle Activity Log
 
+## [2026-11-07] chapter-complete | Native PostgreSQL wheel scaffold and configuration
+
+- Closed `native-postgres-driver` chapter 01: four tasks at `5f25a4a0`, `9e128425`, `05fff946`, and `dabd3ca2`; reviewed range `0acdf576..0c7a4636` passes correctness and fresh independent quality review with no open findings.
+- The chapter checkpoint passes seven Rust tests, all-target Clippy, six-extension development installation and stub checks, and strict wheel/sdist validation. Constructor-count and worksheet-note findings are resolved; the validator hook uses `uv run --no-sync`.
+- Chapter 02 starts at `native-postgres-driver:ch02:t01`; 30 chapters and 107 tasks remain in the full driver plan.
+
 ## [2026-11-07] review-remediation | Native PostgreSQL worksheet note hygiene
 
 - Adopted the fresh quality review's worksheet-note finding. Chapter 01 notes state current dependency, packaging, interpreter, and error contracts without dated execution transcripts.

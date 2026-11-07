@@ -5,22 +5,28 @@ chapter_id: ch01-wheel-scaffold-and-config
 title: "Chapter 01: Standalone Optional Wheel Scaffold and Native Connection Configuration"
 description: Scaffold the standalone vertebra-postgres PyO3 crate, lock workspace and vertebra-db Cargo dependencies upfront, wire the vertebra._postgres wheel/stub/Makefile matrix, and implement pure PostgresConfig validation and ServerError categories.
 status: stable
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
 plan_revision: 4
 plan_commit: 45ff9563
-state_revision: 0
-last_verified_checkpoint: 08a6295b
-last_reviewed_commit: null
+state_revision: 1
+last_verified_checkpoint: 76828ae6
+last_reviewed_commit: 0c7a4636
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T20:55:31Z"
+updated_at: "2026-11-07T21:53:16Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:40:00Z"
 verified:
+  - by: agent:ch01-quality-review
+    at: "2026-11-07T21:53:16Z"
+    commit: 0c7a4636
+  - by: agent:ch01-correctness-review
+    at: "2026-11-07T21:53:16Z"
+    commit: 76828ae6
   - by: agent:plan-generator
     at: "2026-11-07T16:40:00Z"
     commit: dd432f18
@@ -146,10 +152,10 @@ Progress: `[0/0 files documented in ch01]` (`src/py/vertebra/_postgres.pyi` modu
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ 08a6295b`; chapter `state: active`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: All four tasks are complete and the chapter recovery checkpoint exits `0` at `08a6295b`; correctness review and fresh quality review remain before chapter completion.
-- **Documentation & OKF Status**: `[0/0 files documented in ch01]`; `_postgres.pyi` and strict wheel/sdist checks verified in `t03`, root `pyproject.toml`/`uv.lock`/`areas.toml` wiring scheduled in `ch08:t02`–`t04`, and full docs/OKF scheduled in `ch30`.
-- **Downstream Dependents**: `ch02-wire-codec-and-session-startup` (`ch02:t01` depends on `ch01:t04`) remains planned until chapter correctness and fresh quality reviews pass.
+- **Verified Baseline**: `HEAD @ 0c7a4636`; chapter `state: completed`, `planning_status: complete`.
+- **Task & Review State**: All four tasks, the chapter recovery checkpoint, correctness review, and fresh quality review pass. `last_reviewed_commit: 0c7a4636`.
+- **Documentation & OKF Status**: `[0/0 files documented in ch01]`; `_postgres.pyi` and wheel/sdist contracts are verified; full driver guides and knowledge remain assigned to chapter 30.
+- **Next Chapter**: `ch02-wire-codec-and-session-startup` starts with `native-postgres-driver:ch02:t01`.
 
 [^ws-cargo]: `src/rs/Cargo.toml` — Rust workspace members and shared crate dependency versions.
 [^spanner-wheel]: `src/rs/vertebra-spanner/pyproject.toml` — Reference optional Maturin namespace wheel configuration.
