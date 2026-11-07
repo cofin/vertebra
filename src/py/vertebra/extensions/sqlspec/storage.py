@@ -630,24 +630,22 @@ class ObjectStoreBackend:
     def _sign_single(self, path: str, *, expires_in: int, for_upload: bool) -> str:
         """Sign a single object key using the underlying ObjectStore."""
         qualified = self._qualify(path)
-        try:
-            if for_upload:
-                return self.sync_store.presign_put(qualified, expires_in_secs=expires_in)
-            return self.sync_store.presign_get(qualified, expires_in_secs=expires_in)
-        except (RuntimeError, ValueError) as exc:
-            msg = f"URL signing not supported by backend ({self.protocol}): {exc}"
-            raise NotImplementedError(msg) from exc
+        if not self.sync_store.supports_signing:
+            msg = f"URL signing not supported by backend ({self.protocol})"
+            raise NotImplementedError(msg)
+        if for_upload:
+            return self.sync_store.presign_put(qualified, expires_in_secs=expires_in)
+        return self.sync_store.presign_get(qualified, expires_in_secs=expires_in)
 
     async def _sign_single_async(self, path: str, *, expires_in: int, for_upload: bool) -> str:
         """Sign a single object key asynchronously using the underlying AsyncObjectStore."""
         qualified = self._qualify(path)
-        try:
-            if for_upload:
-                return await self.async_store.presign_put(qualified, expires_in_secs=expires_in)
-            return await self.async_store.presign_get(qualified, expires_in_secs=expires_in)
-        except (RuntimeError, ValueError) as exc:
-            msg = f"URL signing not supported by backend ({self.protocol}): {exc}"
-            raise NotImplementedError(msg) from exc
+        if not self.async_store.supports_signing:
+            msg = f"URL signing not supported by backend ({self.protocol})"
+            raise NotImplementedError(msg)
+        if for_upload:
+            return await self.async_store.presign_put(qualified, expires_in_secs=expires_in)
+        return await self.async_store.presign_get(qualified, expires_in_secs=expires_in)
 
     def _serialize_arrow_table(self, path: str | Path, table: ArrowTable, **kwargs: Any) -> memoryview:
         """Serialize a `pyarrow.Table` into a zero-copy `BufferOutputStream` buffer."""

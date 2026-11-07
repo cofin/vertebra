@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import io
+import threading
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pyarrow as pa
@@ -32,6 +35,7 @@ from vertebra.storage import (
     AsyncGcpTokenCache,
     GCSConfig,
     LocalConfig,
+    MemoryConfig,
     SigningConfig,
     SyncGcpTokenCache,
     SyncObjectStore,
@@ -125,6 +129,148 @@ def test_sqlspec_storage_rejects_traversal_prefix() -> None:
     """Invalid base prefixes fail before any object operation."""
     with pytest.raises(ValueError, match="traversal"):
         SQLSpecObjectStoreBackend("memory://sql", base_path="../tenant-a")
+
+
+@pytest.fixture
+def unavailable_signing_endpoint() -> Iterator[tuple[str, list[str]]]:
+    """Serve actual IAM signBlob failures without external credentials."""
+    requests: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: object) -> None:
+            """Keep local responder access logs out of test output."""
+
+        def do_POST(self) -> None:
+            """Return a provider error after consuming the native request."""
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            requests.append(self.path)
+            body = b"signing-unavailable"
+            self.send_response(503)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_port}", requests
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+            assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("for_upload", [False, True])
+def test_sqlspec_signing_preserves_native_validation(for_upload: bool) -> None:
+    """Configured signing validation remains distinct from unsupported signing."""
+    store = SyncObjectStore(MemoryConfig(), signing=SigningConfig(provider="hmac", hmac_secret="test-only-key"))
+    backend = SQLSpecObjectStoreBackend(store)
+    with pytest.raises(ValueError) as raised:
+        backend.sign_sync("key", expires_in=0, for_upload=for_upload)
+    assert type(raised.value) is ValueError
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("for_upload", [False, True])
+async def test_sqlspec_async_signing_preserves_native_validation(for_upload: bool) -> None:
+    """Async configured signing preserves the native validation exception."""
+    store = SyncObjectStore(MemoryConfig(), signing=SigningConfig(provider="hmac", hmac_secret="test-only-key"))
+    backend = SQLSpecObjectStoreBackend(store)
+    with pytest.raises(ValueError) as raised:
+        await backend.sign_async("key", expires_in=0, for_upload=for_upload)
+    assert type(raised.value) is ValueError
+
+
+@pytest.mark.parametrize("for_upload", [False, True])
+def test_sqlspec_signing_preserves_provider_failure(
+    for_upload: bool, unavailable_signing_endpoint: tuple[str, list[str]]
+) -> None:
+    """A real native IAM HTTP failure retains its exact error and message."""
+    endpoint, requests = unavailable_signing_endpoint
+    store = SyncObjectStore(
+        MemoryConfig(),
+        signing=SigningConfig(
+            provider="gcs",
+            bucket="unit",
+            service_account_email="signer@example.test",
+            access_token="mock-oauth-token",
+            iam_endpoint=endpoint,
+        ),
+    )
+    backend = SQLSpecObjectStoreBackend(store)
+    with pytest.raises(RuntimeError) as raised:
+        backend.sign_sync("key", for_upload=for_upload)
+    assert type(raised.value) is RuntimeError
+    assert str(raised.value) == "signing error: IAM signBlob returned HTTP 503 Service Unavailable"
+    assert requests == ["/v1/projects/-/serviceAccounts/signer@example.test:signBlob"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("for_upload", [False, True])
+async def test_sqlspec_async_signing_preserves_provider_failure(
+    for_upload: bool, unavailable_signing_endpoint: tuple[str, list[str]]
+) -> None:
+    """Async IAM failures propagate through the native async signer unchanged."""
+    endpoint, requests = unavailable_signing_endpoint
+    store = SyncObjectStore(
+        MemoryConfig(),
+        signing=SigningConfig(
+            provider="gcs",
+            bucket="unit",
+            service_account_email="signer@example.test",
+            access_token="mock-oauth-token",
+            iam_endpoint=endpoint,
+        ),
+    )
+    backend = SQLSpecObjectStoreBackend(store)
+    with pytest.raises(RuntimeError) as raised:
+        await backend.sign_async("key", for_upload=for_upload)
+    assert type(raised.value) is RuntimeError
+    assert str(raised.value) == "signing error: IAM signBlob returned HTTP 503 Service Unavailable"
+    assert requests == ["/v1/projects/-/serviceAccounts/signer@example.test:signBlob"]
+
+
+@pytest.mark.parametrize("paths", ["key", ["key", "other"]])
+def test_sqlspec_signing_unsupported_scalar_and_list(paths: str | list[str]) -> None:
+    """Unsigned stores report their backend instead of fabricating signing support."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig())
+    with pytest.raises(NotImplementedError, match="memory"):
+        backend.sign_sync(paths)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("paths", ["key", ["key", "other"]])
+async def test_sqlspec_async_signing_unsupported_scalar_and_list(paths: str | list[str]) -> None:
+    """Unsigned async stores retain the unsupported backend contract."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig())
+    with pytest.raises(NotImplementedError, match="memory"):
+        await backend.sign_async(paths)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("for_upload", [False, True])
+async def test_sqlspec_configured_signing_retains_scalar_list_shape(for_upload: bool) -> None:
+    """Signed sync and async results retain key, method, and collection shape."""
+    store = SyncObjectStore(MemoryConfig(), signing=SigningConfig(provider="hmac", hmac_secret="test-only-key"))
+    backend = SQLSpecObjectStoreBackend(store, base_path="tenant")
+    method = "PUT" if for_upload else "GET"
+    for scalar in (
+        backend.sign_sync("key", for_upload=for_upload),
+        await backend.sign_async("key", for_upload=for_upload),
+    ):
+        assert isinstance(scalar, str)
+        assert "/tenant/key?" in scalar
+        assert store.verify_presigned_url(scalar, method=method)
+    for urls in (
+        backend.sign_sync(["key", "other"], for_upload=for_upload),
+        await backend.sign_async(["key", "other"], for_upload=for_upload),
+    ):
+        assert isinstance(urls, list)
+        assert len(urls) == 2
+        assert all(store.verify_presigned_url(url, method=method) for url in urls)
+        assert "/tenant/key?" in urls[0]
+        assert "/tenant/other?" in urls[1]
 
 
 def test_sqlspec_object_store_backend_protocol_arrow_and_sync_pipeline() -> None:
