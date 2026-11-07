@@ -1661,7 +1661,7 @@ class ReviewSetupValidator:
         return None
 
     def _check_bundles(self) -> list[ReviewIssue]:
-        """Validate OKF v0.2 frontmatter, truth budgets, commit SHAs, and absence of completed specs."""
+        """Validate OKF v0.2 frontmatter, truth budgets, commit SHAs, and absence of completed top-level specs."""
         issues: list[ReviewIssue] = []
         bundles_root = self.repo_root / ".agents/bundles"
         if not bundles_root.exists():
@@ -1734,7 +1734,7 @@ class ReviewSetupValidator:
                     continue
                 rel_spec = str(md_file.relative_to(self.repo_root))
                 doc = MarkdownDocument.parse(md_file)
-                if md_file.name == "spec.md":
+                if md_file.name == "spec.md" and md_file.parent.parent == specs_dir:
                     state_val = doc.frontmatter.get("state") or doc.frontmatter.get("status")
                     if state_val == "completed":
                         issues.append(
