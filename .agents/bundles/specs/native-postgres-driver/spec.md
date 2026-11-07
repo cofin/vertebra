@@ -39,7 +39,7 @@ chapters:
   - ch30-user-and-domain-docs
   - ch31-final-review-and-release-gate
 current_chapter: ch02-wire-codec-and-session-startup
-current_task: null
+current_task: "native-postgres-driver:ch02:t03"
 parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
@@ -329,7 +329,7 @@ Every worksheet (`111` total across `31` chapters) executes within its bounded o
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Baseline**: Checkpoint `0446ee46` passes all 54 Rust tests (`9` codec, `13` auth, `10` TLS, `22` wire/config/error) under the shared SHM test lock and locked all-target Clippy with `-D warnings`; flow `state: active`, `plan_revision: 6`, `plan_commit: 8833b064`.
-- **Progress**: `1/31` chapters are complete and reviewed; `8/111` tasks are complete. Chapter 02 receipts bind to `a00c3248`, `81791de2`, `0c3a0eaa`, and `c5173f1b`.
+- **Progress**: `1/31` chapters are complete and reviewed; `7/111` tasks are complete. Chapter 02 receipts bind to `a00c3248`, `81791de2`, `0c3a0eaa`, and `c5173f1b`.
 - **Current Chapter**: `ch02-wire-codec-and-session-startup`, with `current_task: null`; renewed correctness and fresh independent quality review remain pending.
 - **Remaining Plan**: Chapter 02 closeout and chapters 03–31 retain complete blueprints.
 - **Documentation**: `[0/11 files documented]`; full guides and domain knowledge remain assigned to chapter 30.

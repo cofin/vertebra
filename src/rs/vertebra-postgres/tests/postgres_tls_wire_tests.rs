@@ -364,18 +364,27 @@ async fn mtls_requires_the_valid_client_identity() {
 #[tokio::test]
 async fn sslresponse_and_tls_share_the_reserved_deadline() {
     async fn peer_stage(
+        stage: &str,
         mut reached: tokio::sync::oneshot::Receiver<()>,
         client: &tokio::task::JoinHandle<Result<PendingSession, PostgresError>>,
     ) {
+        let watchdog = std::time::Instant::now();
         loop {
             match reached.try_recv() {
                 Ok(()) => return,
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
-                    assert!(!client.is_finished(), "client stopped before peer barrier");
+                    assert!(
+                        watchdog.elapsed() < Duration::from_secs(30),
+                        "peer stalled at {stage} for 30 seconds"
+                    );
+                    assert!(
+                        !client.is_finished(),
+                        "client stopped before {stage} peer barrier"
+                    );
                     // Keep socket I/O runnable without auto-advancing the paused clock.
                     tokio::task::yield_now().await;
                 }
-                Err(error) => panic!("peer barrier failed: {error}"),
+                Err(error) => panic!("{stage} peer barrier failed: {error}"),
             }
         }
     }
@@ -412,10 +421,19 @@ async fn sslresponse_and_tls_share_the_reserved_deadline() {
         });
         tokio::time::advance(Duration::from_millis(75)).await;
         let client = tokio::spawn(attempt.run());
-        peer_stage(request_received, &client).await;
+        peer_stage("SSLRequest", request_received, &client).await;
         tokio::time::advance(Duration::from_millis(100)).await;
         release_response.send(()).unwrap();
-        peer_stage(stage_received, &client).await;
+        peer_stage(
+            if after_s {
+                "TLS ClientHello"
+            } else {
+                "SSLResponse stall"
+            },
+            stage_received,
+            &client,
+        )
+        .await;
         tokio::time::advance(Duration::from_millis(74)).await;
         tokio::task::yield_now().await;
         assert!(!client.is_finished());

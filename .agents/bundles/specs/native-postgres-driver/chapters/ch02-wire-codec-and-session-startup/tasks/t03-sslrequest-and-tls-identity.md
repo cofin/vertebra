@@ -5,7 +5,7 @@ chapter_id: ch02-wire-codec-and-session-startup
 title: Negotiate PostgreSQL SSLRequest and verify rustls peer TLS identities
 description: Implement tls::connect negotiating the 8-byte PostgreSQL SSLRequest preamble and upgrading via shared TransportStream::upgrade_tls across Disable, Prefer, Require, VerifyCa, and VerifyFull with CA, SNI, and mTLS verification.
 status: stable
-state: completed
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -29,27 +29,28 @@ estimated_loc: 235
 plan_revision: 6
 plan_commit: 8833b064
 state_revision: 1
-claimed_by: null
-claimed_at: null
+claimed_by: agent:ch02-tls-deadline-remediation
+claimed_at: "2026-11-07T23:51:12Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: "2026-11-07T23:36:44Z"
+last_verified_at: "2026-11-07T23:51:48Z"
 last_verified_commit: 0c3a0eaa
 verification_evidence:
   red: 'Canonical enabled_modes_upgrade_before_trust_startup test exits 101 with UnsupportedFeature("only direct plaintext TCP is available") before integration.'
   focused: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_tls_wire_tests exits 0: 10 real rcgen/tokio-rustls peer tests cover the complete TLS matrix."
-  aggregate: "flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked exits 0: 49 tests (9 codec, 8 auth, 10 TLS, 22 wire/config/error), zero failures or ignores."
+  aggregate: "flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked exits 0: 54 tests (9 codec, 13 auth, 10 TLS, 22 wire/config/error), zero failures or ignores."
   lint: "cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings exits 0 without lint allowances."
   formatting: "cargo fmt --manifest-path src/rs/Cargo.toml -p vertebra-postgres -- --check and git diff --check exit 0."
   review_privacy: "UV_NO_SYNC=1 .venv/bin/python -m tools.scripts.review_setup validate exits 0."
   environment: "UV_NO_SYNC=1; PYO3_PYTHON=${PWD}/.venv/bin/python; dedicated Cargo target; aggregate tests acquire the shared SHM test lock."
-  deadline_characterization: "Original sslresponse_and_tls_share_the_reserved_deadline passes before replacement. The paused-clock replacement passes 20/20 independent focused runs, preserving all 10 TLS cases."
+  deadline_characterization: "The existing paused-clock deadline case passes before the watchdog change. The guarded replacement passes 20/20 independent focused runs, preserving all 10 TLS cases."
   deadline_boundary: "After 75 ms reserved before run and 100 ms waiting for SSLResponse, both SSLResponse-stall and accepted-S/TLS-stall cases remain pending at virtual 249 ms and fail Transport at virtual 251 ms (Tokio timer rounding); the clock equals exactly the commanded advance, handle is terminal, and the actual peer observes EOF after clock resumption."
-  checkpoint: "Completed repair receipt binds to 0c3a0eaa. Exact chapter checkpoint 0446ee46 passes all 54 tests and locked all-target Clippy with -D warnings."
+  deadline_watchdog: "The peer-stage yield loop checks independent std::time::Instant elapsed time against a generous 30-second watchdog, identifying stalled SSLRequest or TLS ClientHello stages. No product deadline assertion uses wall time; watchdog structure is inspected and no representative stalled fixture is claimed."
+  checkpoint: "The test-only peer watchdog change passes all 54 tests and locked all-target Clippy; the coordinator binds its signed source and completion receipt."
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T23:44:42Z"
-commit: 0c3a0eaa
+updated_at: "2026-11-07T23:51:48Z"
+commit: null
 sources:
   - id: rs-upgrade-tls
     resource: src/rs/vertebra-db/src/connection.rs::TransportStream
