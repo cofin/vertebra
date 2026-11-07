@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import calendar
+import contextlib
 import datetime
 import hashlib
 import hmac
@@ -15,15 +16,18 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Buffer, Mapping, Sequence
+from collections.abc import AsyncIterable, AsyncIterator, Buffer, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any, ClassVar, Literal, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import msgspec
 
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
+
+if TYPE_CHECKING:
+    from vertebra._storage import StorageBuffer
 
 __all__ = (
     "AsyncGcpTokenCache",
@@ -952,25 +956,20 @@ class ObjectMeta(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Normalized `/`-delimited object key within the bucket or root."""
     size: int
     """Object payload size in bytes."""
-    last_modified: str
+    last_modified: str = ""
     """RFC 3339 / ISO-8601 UTC timestamp of the object's last modification."""
     etag: str | None = None
     """Optional content entity tag (`ETag`) returned by the storage backend."""
     version: str | None = None
     """Optional backend object version identifier."""
+    content_type: str | None = None
+    """Optional MIME content type (`Content-Type`) associated with the object."""
+    attributes: dict[str, str] = msgspec.field(default_factory=dict)
+    """User-defined string metadata attributes persisted with the object."""
 
 
-class PutResult(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class PutResult(ObjectMeta, frozen=True, gc=False, kw_only=True):
     """Result metadata returned from a write operation."""
-
-    path: str
-    """Normalized `/`-delimited object key written to the store."""
-    size: int
-    """Number of payload bytes persisted."""
-    etag: str | None = None
-    """Content entity tag (`ETag`) assigned to the written object."""
-    version: str | None = None
-    """Optional object version identifier created by the write operation."""
 
 
 class SigningConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -1413,22 +1412,29 @@ class _BaseObjectStore:
     def _native_to_put_result(native_meta: Any, fallback_etag: str = "") -> PutResult:
         """Convert a native ObjectMeta instance into a PutResult."""
         etag = getattr(native_meta, "etag", None) or fallback_etag
+        raw_attrs = getattr(native_meta, "attributes", None)
         return PutResult(
             path=str(native_meta.path),
             size=int(native_meta.size),
+            last_modified=str(getattr(native_meta, "last_modified", "")),
             etag=str(etag) if etag else None,
             version=getattr(native_meta, "version", None),
+            content_type=getattr(native_meta, "content_type", None),
+            attributes={str(k): str(v) for k, v in raw_attrs.items()} if isinstance(raw_attrs, Mapping) else {},
         )
 
     @staticmethod
     def _native_to_object_meta(native_meta: Any) -> ObjectMeta:
         """Convert a native ObjectMeta instance into an ObjectMeta."""
+        raw_attrs = getattr(native_meta, "attributes", None)
         return ObjectMeta(
             path=str(native_meta.path),
             size=int(native_meta.size),
             last_modified=str(getattr(native_meta, "last_modified", "")),
             etag=getattr(native_meta, "etag", None),
             version=getattr(native_meta, "version", None),
+            content_type=getattr(native_meta, "content_type", None),
+            attributes={str(k): str(v) for k, v in raw_attrs.items()} if isinstance(raw_attrs, Mapping) else {},
         )
 
     def _presign(
@@ -1974,28 +1980,72 @@ class SyncObjectStore(_BaseObjectStore):
             converted._memory = self._memory
         return converted
 
-    def put(self, path: str, data: Buffer) -> PutResult:
+    def put(
+        self,
+        path: str,
+        data: Buffer,
+        *,
+        content_type: str | None = None,
+        attributes: Mapping[str, str] | None = None,
+        if_not_exists: bool = False,
+        if_match: str | None = None,
+        if_none_match: str | None = None,
+    ) -> PutResult:
         """Write any Buffer (bytes, bytearray, memoryview) to the given object key."""
         key = self._normalize_key(path)
         if self._local_root is not None:
             self._resolve_local(key)
         view = memoryview(data).cast("B")
+        norm_attrs = {str(k): str(v) for k, v in attributes.items()} if attributes is not None else None
         if self._native is not None:
-            native_meta = self._native.put(key, view)
+            native_meta = self._native.put(
+                key,
+                view,
+                content_type=content_type,
+                attributes=norm_attrs,
+                if_not_exists=if_not_exists,
+                if_match=if_match,
+                if_none_match=if_none_match,
+            )
             fallback_etag = "" if getattr(native_meta, "etag", None) else f"{view.nbytes:016x}"
             return self._native_to_put_result(native_meta, fallback_etag)
+        if if_not_exists and self.exists(key):
+            msg = f"Object already exists at '{key}'"
+            raise FileExistsError(msg)
         digest = hashlib.sha256(view).hexdigest()[:16]
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        resolved_attrs = norm_attrs or {}
         if self._local_root is not None:
             target = self._resolve_local(key)
             target.parent.mkdir(parents=True, exist_ok=True)
             with target.open("wb") as handle:
                 handle.write(view)
-            return PutResult(path=key, size=view.nbytes, etag=digest)
+            return PutResult(
+                path=key,
+                size=view.nbytes,
+                last_modified=timestamp,
+                etag=digest,
+                content_type=content_type,
+                attributes=resolved_attrs,
+            )
         raw = view.tobytes()
-        meta = ObjectMeta(path=key, size=len(raw), last_modified=timestamp, etag=digest)
+        meta = ObjectMeta(
+            path=key,
+            size=len(raw),
+            last_modified=timestamp,
+            etag=digest,
+            content_type=content_type,
+            attributes=resolved_attrs,
+        )
         self._memory[key] = (raw, meta)
-        return PutResult(path=key, size=len(raw), etag=digest)
+        return PutResult(
+            path=key,
+            size=len(raw),
+            last_modified=timestamp,
+            etag=digest,
+            content_type=content_type,
+            attributes=resolved_attrs,
+        )
 
     def put_file(self, path: str, file_path: str | Path) -> PutResult:
         """Read a local file and upload it to the given object key."""
@@ -2019,17 +2069,59 @@ class SyncObjectStore(_BaseObjectStore):
         if self._native is not None:
             views = [memoryview(part).cast("B") for part in parts]
             native_meta = self._native.put_multipart(key, views)
-            etag = native_meta.etag or f"{int(native_meta.size):016x}"
-            return PutResult(
-                path=str(native_meta.path),
-                size=int(native_meta.size),
-                etag=str(etag),
-                version=native_meta.version,
-            )
+            return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
         combined = bytearray()
         for part in parts:
             combined.extend(memoryview(part).cast("B"))
         return self.put(path, memoryview(combined))
+
+    def put_stream(
+        self,
+        path: str,
+        chunks: Iterable[Buffer],
+        *,
+        content_type: str | None = None,
+        attributes: Mapping[str, str] | None = None,
+        if_not_exists: bool = False,
+        if_match: str | None = None,
+        if_none_match: str | None = None,
+    ) -> PutResult:
+        """Stream an iterable of buffer chunks into an incremental multipart upload."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        norm_attrs = {str(k): str(v) for k, v in attributes.items()} if attributes is not None else None
+        if self._native is not None:
+            upload = self._native.create_multipart(
+                key,
+                content_type=content_type,
+                attributes=norm_attrs,
+                if_not_exists=if_not_exists,
+                if_match=if_match,
+                if_none_match=if_none_match,
+            )
+            try:
+                for chunk in chunks:
+                    upload.write_part(chunk)
+                native_meta = upload.complete()
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    upload.abort()
+                raise
+            fallback_etag = "" if getattr(native_meta, "etag", None) else f"{int(native_meta.size):016x}"
+            return self._native_to_put_result(native_meta, fallback_etag)
+        combined = bytearray()
+        for chunk in chunks:
+            combined.extend(memoryview(chunk).cast("B"))
+        return self.put(
+            path,
+            memoryview(combined),
+            content_type=content_type,
+            attributes=attributes,
+            if_not_exists=if_not_exists,
+            if_match=if_match,
+            if_none_match=if_none_match,
+        )
 
     def get(self, path: str) -> bytes:
         """Read full object bytes for the given key."""
@@ -2058,6 +2150,24 @@ class SyncObjectStore(_BaseObjectStore):
         if self._native is not None and hasattr(self._native, "get_buffer"):
             return memoryview(self._native.get_buffer(key))
         return memoryview(self.get(path))
+
+    def get_stream(self, path: str, *, chunk_size: int | None = None) -> Iterator[StorageBuffer]:
+        """Stream object payload chunks as zero-copy StorageBuffer instances."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if chunk_size is not None and chunk_size < 1:
+            msg = "chunk_size must be >= 1"
+            raise ValueError(msg)
+        if self._native is not None:
+            reader = self._native.get_stream(key, chunk_size=chunk_size)
+            try:
+                yield from reader
+            finally:
+                reader.close()
+            return
+        msg = "vertebra._storage native module is required for get_stream"
+        raise RuntimeError(msg)
 
     def get_range(self, path: str, offset: int, length: int) -> bytes:
         """Read a byte slice of length bytes starting at offset."""
@@ -2144,8 +2254,74 @@ class SyncObjectStore(_BaseObjectStore):
             msg = f"Source object not found: {src_key}"
             raise FileNotFoundError(msg)
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        meta = ObjectMeta(path=dst_key, size=entry[1].size, last_modified=timestamp, etag=entry[1].etag)
+        meta = ObjectMeta(
+            path=dst_key,
+            size=entry[1].size,
+            last_modified=timestamp,
+            etag=entry[1].etag,
+            content_type=entry[1].content_type,
+            attributes=dict(entry[1].attributes),
+        )
         self._memory[dst_key] = (entry[0], meta)
+
+    def rename(self, src: str, dst: str, *, overwrite: bool = True) -> None:
+        """Atomically rename or move an object from src to dst within the store."""
+        src_key = self._normalize_key(src)
+        dst_key = self._normalize_key(dst)
+        if self._local_root is not None:
+            self._resolve_local(src_key)
+            self._resolve_local(dst_key)
+        if self._native is not None:
+            self._native.rename(src_key, dst_key, if_not_exists=not overwrite)
+            return
+        if not overwrite and self.exists(dst_key):
+            msg = f"Destination object already exists: {dst_key}"
+            raise FileExistsError(msg)
+        if src_key == dst_key:
+            if not self.exists(src_key):
+                msg = f"Source object not found: {src_key}"
+                raise FileNotFoundError(msg)
+            return
+        self.copy(src_key, dst_key)
+        self.delete(src_key)
+
+    def list_page(
+        self,
+        prefix: str = "",
+        *,
+        cursor: str | None = None,
+        limit: int = 1000,
+    ) -> tuple[list[ObjectMeta], str | None]:
+        """Return up to limit objects under prefix starting after cursor, with the next cursor."""
+        if limit < 1:
+            msg = "limit must be >= 1"
+            raise ValueError(msg)
+        norm_prefix = self._normalize_key(prefix) if prefix else None
+        if self._native is not None:
+            items, next_cursor = self._native.list_page(norm_prefix, cursor, limit)
+            return [self._native_to_object_meta(item) for item in items], next_cursor
+        filtered = [m for m in self.list(prefix) if cursor is None or m.path > cursor]
+        page = filtered[:limit]
+        next_cur = page[-1].path if len(filtered) > limit else None
+        return page, next_cur
+
+    def list_with_delimiter(self, prefix: str = "") -> tuple[list[ObjectMeta], list[str]]:
+        """List direct child objects and `/` common sub-prefixes immediately beneath prefix."""
+        norm_prefix = self._normalize_key(prefix) if prefix else ""
+        if self._native is not None:
+            items, prefixes = self._native.list_with_delimiter(norm_prefix or None)
+            return [self._native_to_object_meta(item) for item in items], [str(p) for p in prefixes]
+        dir_prefix = f"{norm_prefix.rstrip('/')}/" if norm_prefix else ""
+        direct: list[ObjectMeta] = []
+        sub_prefixes: set[str] = set()
+        for meta in self.list(dir_prefix):
+            rest = meta.path[len(dir_prefix) :]
+            if "/" in rest:
+                head_seg = rest.split("/", 1)[0]
+                sub_prefixes.add(f"{dir_prefix}{head_seg}".rstrip("/"))
+            else:
+                direct.append(meta)
+        return direct, sorted(sub_prefixes)
 
     def list(self, prefix: str = "") -> list[ObjectMeta]:
         """List objects matching prefix."""
@@ -2172,13 +2348,25 @@ class SyncObjectStore(_BaseObjectStore):
         results = [meta for key, (_, meta) in self._memory.items() if not norm_prefix or key.startswith(norm_prefix)]
         return sorted(results, key=lambda m: m.path)
 
-    def open_reader(self, path: str, *, size: int | None = None) -> SyncReadableFile:
+    def open_reader(
+        self,
+        path: str,
+        *,
+        size: int | None = None,
+        chunk_size: int = 65536,
+    ) -> SyncReadableFile:
         """Open a seekable read-only SyncReadableFile stream over the given object key."""
-        return SyncReadableFile(self, path, size=size)
+        return SyncReadableFile(self, path, size=size, chunk_size=chunk_size)
 
-    def open_readable_file(self, path: str, *, size: int | None = None) -> SyncReadableFile:
+    def open_readable_file(
+        self,
+        path: str,
+        *,
+        size: int | None = None,
+        chunk_size: int = 65536,
+    ) -> SyncReadableFile:
         """Open a seekable read-only SyncReadableFile stream over the given object key."""
-        return SyncReadableFile(self, path, size=size)
+        return SyncReadableFile(self, path, size=size, chunk_size=chunk_size)
 
     def presign_get(
         self,
@@ -2266,28 +2454,72 @@ class AsyncObjectStore(_BaseObjectStore):
             converted._memory = self._memory
         return converted
 
-    async def put(self, path: str, data: Buffer) -> PutResult:
+    async def put(
+        self,
+        path: str,
+        data: Buffer,
+        *,
+        content_type: str | None = None,
+        attributes: Mapping[str, str] | None = None,
+        if_not_exists: bool = False,
+        if_match: str | None = None,
+        if_none_match: str | None = None,
+    ) -> PutResult:
         """Asynchronously write any Buffer to the given object key."""
         key = self._normalize_key(path)
         if self._local_root is not None:
             self._resolve_local(key)
         view = memoryview(data).cast("B")
+        norm_attrs = {str(k): str(v) for k, v in attributes.items()} if attributes is not None else None
         if self._native is not None:
-            native_meta = await self._native.put(key, view)
+            native_meta = await self._native.put(
+                key,
+                view,
+                content_type=content_type,
+                attributes=norm_attrs,
+                if_not_exists=if_not_exists,
+                if_match=if_match,
+                if_none_match=if_none_match,
+            )
             fallback_etag = "" if getattr(native_meta, "etag", None) else f"{view.nbytes:016x}"
             return self._native_to_put_result(native_meta, fallback_etag)
+        if if_not_exists and await self.exists(key):
+            msg = f"Object already exists at '{key}'"
+            raise FileExistsError(msg)
         digest = hashlib.sha256(view).hexdigest()[:16]
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        resolved_attrs = norm_attrs or {}
         if self._local_root is not None:
             target = self._resolve_local(key)
             target.parent.mkdir(parents=True, exist_ok=True)
             with target.open("wb") as handle:
                 handle.write(view)
-            return PutResult(path=key, size=view.nbytes, etag=digest)
+            return PutResult(
+                path=key,
+                size=view.nbytes,
+                last_modified=timestamp,
+                etag=digest,
+                content_type=content_type,
+                attributes=resolved_attrs,
+            )
         raw = view.tobytes()
-        meta = ObjectMeta(path=key, size=len(raw), last_modified=timestamp, etag=digest)
+        meta = ObjectMeta(
+            path=key,
+            size=len(raw),
+            last_modified=timestamp,
+            etag=digest,
+            content_type=content_type,
+            attributes=resolved_attrs,
+        )
         self._memory[key] = (raw, meta)
-        return PutResult(path=key, size=len(raw), etag=digest)
+        return PutResult(
+            path=key,
+            size=len(raw),
+            last_modified=timestamp,
+            etag=digest,
+            content_type=content_type,
+            attributes=resolved_attrs,
+        )
 
     async def put_file(self, path: str, file_path: str | Path) -> PutResult:
         """Asynchronously read a local file and upload it to the given object key."""
@@ -2311,17 +2543,67 @@ class AsyncObjectStore(_BaseObjectStore):
         if self._native is not None:
             views = [memoryview(part).cast("B") for part in parts]
             native_meta = await self._native.put_multipart(key, views)
-            etag = native_meta.etag or f"{int(native_meta.size):016x}"
-            return PutResult(
-                path=str(native_meta.path),
-                size=int(native_meta.size),
-                etag=str(etag),
-                version=native_meta.version,
-            )
+            return self._native_to_put_result(native_meta, f"{int(native_meta.size):016x}")
         combined = bytearray()
         for part in parts:
             combined.extend(memoryview(part).cast("B"))
         return await self.put(path, memoryview(combined))
+
+    async def put_stream(
+        self,
+        path: str,
+        chunks: AsyncIterable[Buffer] | Iterable[Buffer],
+        *,
+        content_type: str | None = None,
+        attributes: Mapping[str, str] | None = None,
+        if_not_exists: bool = False,
+        if_match: str | None = None,
+        if_none_match: str | None = None,
+    ) -> PutResult:
+        """Asynchronously stream sync or async buffer chunks into an incremental multipart upload."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        norm_attrs = {str(k): str(v) for k, v in attributes.items()} if attributes is not None else None
+        if self._native is not None:
+            upload = await self._native.create_multipart(
+                key,
+                content_type=content_type,
+                attributes=norm_attrs,
+                if_not_exists=if_not_exists,
+                if_match=if_match,
+                if_none_match=if_none_match,
+            )
+            try:
+                if isinstance(chunks, AsyncIterable):
+                    async for chunk in chunks:
+                        await upload.write_part(chunk)
+                else:
+                    for chunk in chunks:
+                        await upload.write_part(chunk)
+                native_meta = await upload.complete()
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    await upload.abort()
+                raise
+            fallback_etag = "" if getattr(native_meta, "etag", None) else f"{int(native_meta.size):016x}"
+            return self._native_to_put_result(native_meta, fallback_etag)
+        combined = bytearray()
+        if isinstance(chunks, AsyncIterable):
+            async for chunk in chunks:
+                combined.extend(memoryview(chunk).cast("B"))
+        else:
+            for chunk in chunks:
+                combined.extend(memoryview(chunk).cast("B"))
+        return await self.put(
+            path,
+            memoryview(combined),
+            content_type=content_type,
+            attributes=attributes,
+            if_not_exists=if_not_exists,
+            if_match=if_match,
+            if_none_match=if_none_match,
+        )
 
     async def get(self, path: str) -> bytes:
         """Asynchronously read an object from the store via Rust Tokio awaitable."""
@@ -2350,6 +2632,26 @@ class AsyncObjectStore(_BaseObjectStore):
         if self._native is not None and hasattr(self._native, "get_buffer"):
             return memoryview(await self._native.get_buffer(key))
         return memoryview(await self.get(path))
+
+    async def get_stream(self, path: str, *, chunk_size: int | None = None) -> AsyncIterator[StorageBuffer]:
+        """Asynchronously stream object payload chunks as zero-copy StorageBuffer instances."""
+        key = self._normalize_key(path)
+        if self._local_root is not None:
+            self._resolve_local(key)
+        if chunk_size is not None and chunk_size < 1:
+            msg = "chunk_size must be >= 1"
+            raise ValueError(msg)
+        if self._native is not None:
+            reader = self._native.get_stream(key, chunk_size=chunk_size)
+            try:
+                async for chunk in reader:
+                    yield chunk
+            finally:
+                with contextlib.suppress(RuntimeError):
+                    await reader.aclose()
+            return
+        msg = "vertebra._storage native module is required for get_stream"
+        raise RuntimeError(msg)
 
     async def get_range(self, path: str, offset: int, length: int) -> bytes:
         """Asynchronously read a byte range from the store via Rust Tokio awaitable."""
@@ -2436,8 +2738,74 @@ class AsyncObjectStore(_BaseObjectStore):
             msg = f"Source object not found: {src_key}"
             raise FileNotFoundError(msg)
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        meta = ObjectMeta(path=dst_key, size=entry[1].size, last_modified=timestamp, etag=entry[1].etag)
+        meta = ObjectMeta(
+            path=dst_key,
+            size=entry[1].size,
+            last_modified=timestamp,
+            etag=entry[1].etag,
+            content_type=entry[1].content_type,
+            attributes=dict(entry[1].attributes),
+        )
         self._memory[dst_key] = (entry[0], meta)
+
+    async def rename(self, src: str, dst: str, *, overwrite: bool = True) -> None:
+        """Asynchronously rename or move an object from src to dst within the store."""
+        src_key = self._normalize_key(src)
+        dst_key = self._normalize_key(dst)
+        if self._local_root is not None:
+            self._resolve_local(src_key)
+            self._resolve_local(dst_key)
+        if self._native is not None:
+            await self._native.rename(src_key, dst_key, if_not_exists=not overwrite)
+            return
+        if not overwrite and await self.exists(dst_key):
+            msg = f"Destination object already exists: {dst_key}"
+            raise FileExistsError(msg)
+        if src_key == dst_key:
+            if not await self.exists(src_key):
+                msg = f"Source object not found: {src_key}"
+                raise FileNotFoundError(msg)
+            return
+        await self.copy(src_key, dst_key)
+        await self.delete(src_key)
+
+    async def list_page(
+        self,
+        prefix: str = "",
+        *,
+        cursor: str | None = None,
+        limit: int = 1000,
+    ) -> tuple[list[ObjectMeta], str | None]:
+        """Asynchronously return up to limit objects under prefix starting after cursor."""
+        if limit < 1:
+            msg = "limit must be >= 1"
+            raise ValueError(msg)
+        norm_prefix = self._normalize_key(prefix) if prefix else None
+        if self._native is not None:
+            items, next_cursor = await self._native.list_page(norm_prefix, cursor, limit)
+            return [self._native_to_object_meta(item) for item in items], next_cursor
+        filtered = [m for m in await self.list(prefix) if cursor is None or m.path > cursor]
+        page = filtered[:limit]
+        next_cur = page[-1].path if len(filtered) > limit else None
+        return page, next_cur
+
+    async def list_with_delimiter(self, prefix: str = "") -> tuple[list[ObjectMeta], list[str]]:
+        """Asynchronously list direct child objects and `/` common sub-prefixes beneath prefix."""
+        norm_prefix = self._normalize_key(prefix) if prefix else ""
+        if self._native is not None:
+            items, prefixes = await self._native.list_with_delimiter(norm_prefix or None)
+            return [self._native_to_object_meta(item) for item in items], [str(p) for p in prefixes]
+        dir_prefix = f"{norm_prefix.rstrip('/')}/" if norm_prefix else ""
+        direct: list[ObjectMeta] = []
+        sub_prefixes: set[str] = set()
+        for meta in await self.list(dir_prefix):
+            rest = meta.path[len(dir_prefix) :]
+            if "/" in rest:
+                head_seg = rest.split("/", 1)[0]
+                sub_prefixes.add(f"{dir_prefix}{head_seg}".rstrip("/"))
+            else:
+                direct.append(meta)
+        return direct, sorted(sub_prefixes)
 
     async def list(self, prefix: str = "") -> list[ObjectMeta]:
         """Asynchronously list objects matching prefix via Rust Tokio awaitable."""
@@ -2464,13 +2832,25 @@ class AsyncObjectStore(_BaseObjectStore):
         results = [meta for key, (_, meta) in self._memory.items() if not norm_prefix or key.startswith(norm_prefix)]
         return sorted(results, key=lambda m: m.path)
 
-    def open_reader(self, path: str, *, size: int | None = None) -> AsyncReadableFile:
+    def open_reader(
+        self,
+        path: str,
+        *,
+        size: int | None = None,
+        chunk_size: int = 65536,
+    ) -> AsyncReadableFile:
         """Open a seekable read-only AsyncReadableFile stream over the given object key."""
-        return AsyncReadableFile(self, path, size=size)
+        return AsyncReadableFile(self, path, size=size, chunk_size=chunk_size)
 
-    def open_readable_file(self, path: str, *, size: int | None = None) -> AsyncReadableFile:
+    def open_readable_file(
+        self,
+        path: str,
+        *,
+        size: int | None = None,
+        chunk_size: int = 65536,
+    ) -> AsyncReadableFile:
         """Open a seekable read-only AsyncReadableFile stream over the given object key."""
-        return AsyncReadableFile(self, path, size=size)
+        return AsyncReadableFile(self, path, size=size, chunk_size=chunk_size)
 
     async def presign_get(
         self,
@@ -2494,19 +2874,30 @@ class AsyncObjectStore(_BaseObjectStore):
 
 
 class SyncReadableFile(io.RawIOBase):
-    """Seekable synchronous read-only file-like object backed by SyncObjectStore range reads (`get_range`).
+    """Seekable synchronous read-only file-like object backed by SyncObjectStore range and stream reads.
 
     Enables PyArrow, Polars, and DataFusion to inspect Parquet footer metadata and read
     targeted row-group byte slices without downloading full multi-gigabyte blobs.
     """
 
-    __slots__ = ("_closed", "_key", "_pos", "_size", "_store")
+    __slots__ = ("_chunk_size", "_closed", "_key", "_pos", "_size", "_store")
 
-    def __init__(self, store: SyncObjectStore, key: str, *, size: int | None = None) -> None:
+    def __init__(
+        self,
+        store: SyncObjectStore,
+        key: str,
+        *,
+        size: int | None = None,
+        chunk_size: int = 65536,
+    ) -> None:
         super().__init__()
+        if chunk_size < 1:
+            msg = "chunk_size must be >= 1"
+            raise ValueError(msg)
         self._store = store
         self._key = key
         self._size = store.head(key).size if size is None else size
+        self._chunk_size = chunk_size
         self._pos = 0
         self._closed = False
 
@@ -2528,6 +2919,23 @@ class SyncReadableFile(io.RawIOBase):
         """Close the handle when exiting the context manager."""
         _ = (exc_type, exc_val, exc_tb)
         self.close()
+
+    def __iter__(self) -> Iterator[bytes]:
+        """Yield byte chunks from the current cursor position to EOF without buffering the full object."""
+        self._ensure_open()
+        if self._pos == 0:
+            for buf in self._store.get_stream(self._key, chunk_size=self._chunk_size):
+                self._ensure_open()
+                chunk = bytes(buf)
+                if chunk:
+                    self._pos += len(chunk)
+                    yield chunk
+            return
+        while True:
+            chunk = self.read(self._chunk_size)
+            if not chunk:
+                break
+            yield chunk
 
     def readable(self) -> bool:
         """Return True indicating this stream supports reading."""
@@ -2564,13 +2972,13 @@ class SyncReadableFile(io.RawIOBase):
         self._pos = min(target, self._size)
         return self._pos
 
-    def read(self, size: int = -1) -> bytes:
+    def read(self, size: int | None = -1) -> bytes:
         """Read up to size bytes starting at the current cursor position."""
         self._ensure_open()
-        if self._pos >= self._size:
+        if size == 0 or self._pos >= self._size:
             return b""
         remaining = self._size - self._pos
-        length = remaining if size < 0 else min(size, remaining)
+        length = remaining if (size is None or size < 0) else min(size, remaining)
         if length <= 0:
             return b""
         data = self._store.get_range(self._key, self._pos, length)
@@ -2581,6 +2989,8 @@ class SyncReadableFile(io.RawIOBase):
         """Read bytes directly into a writable buffer and return the byte count."""
         self._ensure_open()
         view = memoryview(b).cast("B")
+        if len(view) == 0:
+            return 0
         data = self.read(len(view))
         count = len(data)
         view[:count] = data
@@ -2609,14 +3019,25 @@ class SyncReadableFile(io.RawIOBase):
 
 
 class AsyncReadableFile:
-    """Seekable asynchronous read-only stream backed by AsyncObjectStore range reads (`get_range`)."""
+    """Seekable asynchronous read-only stream backed by AsyncObjectStore range and stream reads."""
 
-    __slots__ = ("_closed", "_key", "_pos", "_size", "_store")
+    __slots__ = ("_chunk_size", "_closed", "_key", "_pos", "_size", "_store")
 
-    def __init__(self, store: AsyncObjectStore, key: str, *, size: int | None = None) -> None:
+    def __init__(
+        self,
+        store: AsyncObjectStore,
+        key: str,
+        *,
+        size: int | None = None,
+        chunk_size: int = 65536,
+    ) -> None:
+        if chunk_size < 1:
+            msg = "chunk_size must be >= 1"
+            raise ValueError(msg)
         self._store = store
         self._key = key
         self._size = size
+        self._chunk_size = chunk_size
         self._pos = 0
         self._closed = False
 
@@ -2638,6 +3059,25 @@ class AsyncReadableFile:
         """Close the handle when exiting the async context manager."""
         _ = (exc_type, exc_val, exc_tb)
         self.close()
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        """Asynchronously yield byte chunks from the current cursor position to EOF."""
+        self._ensure_open()
+        if self._pos == 0:
+            async for buf in self._store.get_stream(self._key, chunk_size=self._chunk_size):
+                self._ensure_open()
+                chunk = bytes(buf)
+                if chunk:
+                    self._pos += len(chunk)
+                    yield chunk
+            if self._size is None:
+                self._size = self._pos
+            return
+        while True:
+            chunk = await self.read(self._chunk_size)
+            if not chunk:
+                break
+            yield chunk
 
     def readable(self) -> bool:
         """Return True indicating this stream supports reading."""
@@ -2680,19 +3120,32 @@ class AsyncReadableFile:
             self._pos = target
         return self._pos
 
-    async def read(self, size: int = -1) -> bytes:
+    async def read(self, size: int | None = -1) -> bytes:
         """Asynchronously read up to size bytes starting at the current cursor position."""
         self._ensure_open()
+        if size == 0:
+            return b""
         total_size = await self._ensure_size()
         if self._pos >= total_size:
             return b""
         remaining = total_size - self._pos
-        length = remaining if size < 0 else min(size, remaining)
+        length = remaining if (size is None or size < 0) else min(size, remaining)
         if length <= 0:
             return b""
         data = await self._store.get_range(self._key, self._pos, length)
         self._pos += len(data)
         return data
+
+    async def readinto(self, b: Buffer) -> int:
+        """Asynchronously read bytes into a writable buffer and return the byte count."""
+        self._ensure_open()
+        view = memoryview(b).cast("B")
+        if len(view) == 0:
+            return 0
+        data = await self.read(len(view))
+        count = len(data)
+        view[:count] = data
+        return count
 
     async def read_at(self, offset: int, length: int) -> bytes:
         """Asynchronously read length bytes at offset without mutating the stream cursor."""
@@ -2700,8 +3153,10 @@ class AsyncReadableFile:
         if offset < 0 or length < 0:
             msg = "offset and length must be non-negative"
             raise ValueError(msg)
+        if length == 0:
+            return b""
         total_size = await self._ensure_size()
-        if offset >= total_size or length == 0:
+        if offset >= total_size:
             return b""
         bounded_len = min(length, total_size - offset)
         return await self._store.get_range(self._key, offset, bounded_len)

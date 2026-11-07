@@ -356,3 +356,35 @@ async def test_async_object_store_roundtrip_and_buffer_safety() -> None:
     assert await store.get("empty.bin") == b""
     await store.put("hello.bin", bytearray(b"hello-async"))
     assert await store.get("hello.bin") == b"hello-async"
+
+
+@pytest.mark.parametrize("backend_kind", ["local", "memory"])
+@pytest.mark.anyio
+async def test_multibackend_streaming_conditional_and_rename(
+    backend_kind: str,
+    tmp_path: Path,
+) -> None:
+    """LocalConfig and MemoryConfig stores support streaming, conditional writes, pagination, and rename."""
+    cfg: LocalConfig | MemoryConfig = (
+        LocalConfig(root=tmp_path / "bucket")
+        if backend_kind == "local"
+        else MemoryConfig(namespace="multibackend-stream")
+    )
+    store = AsyncObjectStore(cfg)
+
+    await store.put_stream(
+        "datasets/part-000.bin",
+        [b"row-0\n", b"row-1\n", b"row-2\n"],
+        if_not_exists=True,
+    )
+    with pytest.raises(FileExistsError):
+        await store.put("datasets/part-000.bin", b"overwrite", if_not_exists=True)
+
+    streamed = b"".join([bytes(buf) async for buf in store.get_stream("datasets/part-000.bin", chunk_size=6)])
+    assert streamed == b"row-0\nrow-1\nrow-2\n"
+
+    await store.rename("datasets/part-000.bin", "datasets/committed-000.bin", overwrite=False)
+    assert not await store.exists("datasets/part-000.bin")
+    items, next_cursor = await store.list_page("datasets/", limit=10)
+    assert [item.path for item in items] == ["datasets/committed-000.bin"]
+    assert next_cursor is None

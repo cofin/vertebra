@@ -778,8 +778,9 @@ struct AsyncStreamState {
 
 impl AsyncStreamState {
     async fn next_bytes(&mut self) -> Result<Option<Bytes>, StorageError> {
-        if let AsyncStreamInit::Pending { engine, path } =
-            std::mem::replace(&mut self.init, AsyncStreamInit::Open(None))
+        if matches!(self.init, AsyncStreamInit::Pending { .. })
+            && let AsyncStreamInit::Pending { engine, path } =
+                std::mem::replace(&mut self.init, AsyncStreamInit::Open(None))
         {
             let stream = engine.get_stream(&path).await?;
             self.init = AsyncStreamInit::Open(Some(stream));
