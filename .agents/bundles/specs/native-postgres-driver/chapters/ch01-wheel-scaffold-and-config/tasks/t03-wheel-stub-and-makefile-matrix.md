@@ -157,10 +157,9 @@ Commit as `build(postgres): wire vertebra-postgres wheel, stub, and Makefile tar
 
 ## Notes & Discoveries
 
-- Maturin omits the external `python-source` stub from the wheel without an explicit wheel include, although the sdist retains it. Staging the new stub does not change that outcome. `include = [{ path = "vertebra/_postgres.pyi", format = "wheel" }]` uses the documented path relative to `python-source`; native wheel validation proves exactly two namespace entries. Maturin rejects include paths containing `..`. Primary references: [configuration](https://www.maturin.rs/config.html) and [Python-part file selection](https://github.com/PyO3/maturin/blob/main/src/module_writer/mod.rs).
-- The strict native validator rejects a temporary copy containing `vertebra/unwanted.py` with exit `1` and the offending member in its diagnostic, then accepts the unchanged built artifacts with exit `0`. No isolated-violation artifacts enter the repository.
-
-- [2026-11-07 16:40] Root `pyproject.toml` `[postgres]` extra, `uv.lock`, `.agents/skills/review-core/references/areas.toml`, sibling `pyproject.toml` `_postgres.pyi` exclusions, and `release.yaml` are staged in `ch08:t02`–`t04` (and `ch29:t01`) once the Python client classes are registered.
+- Maturin requires `include = [{ path = "vertebra/_postgres.pyi", format = "wheel" }]` to package the stub from the external `python-source` directory. Include paths resolve relative to `python-source` and cannot contain `..`. Primary references: [configuration](https://www.maturin.rs/config.html) and [Python-part file selection](https://github.com/PyO3/maturin/blob/main/src/module_writer/mod.rs).
+- The native archive validator requires exactly the extension and stub in the wheel namespace and rejects an extra `vertebra/unwanted.py` member with its name in the diagnostic.
+- Chapters 08 and 29 own the root optional extra, UV lockfile, review areas, companion-wheel exclusions, and release matrix.
 
 [^spanner-pyproject]: `src/rs/vertebra-spanner/pyproject.toml` — Maturin namespace wheel manifest and exclusion globs.
 [^spanner-pyi]: `src/py/vertebra/_spanner.pyi::SyncSpannerClient` — Native extension type stub layout.

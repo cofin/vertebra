@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-07] review-remediation | Native PostgreSQL worksheet note hygiene
+
+- Adopted the fresh quality review's worksheet-note finding. Chapter 01 notes state current dependency, packaging, interpreter, and error contracts without dated execution transcripts.
+- The workspace registration added 17 registry packages without changing existing package/version/source identities. Initial native tests selected a system Python 3.14 without linkable `libpython3.14`; the verified gates selected the project's managed Python 3.12 through `PYO3_PYTHON`.
+
 ## [2026-11-07] review-remediation | Native PostgreSQL constructor inventory
 
 - Adopted the chapter 01 correctness review's constructor-count finding. Remaining descriptions and acceptance rows in chapters 06 and 08 use the 26-option inventory from `contracts.md`; exact signatures, defaults, task ownership, and behavior stay unchanged.

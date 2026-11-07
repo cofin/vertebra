@@ -119,9 +119,8 @@ Commit as `build(postgres): register workspace member and lock Cargo dependencie
 
 ## Notes & Discoveries
 
-- [2026-11-07] Registered the crate and resolved 17 new registry package entries without changing any existing locked package/version/source identity. Native gates select the isolated Python 3.12 via `PYO3_PYTHON`; the default system Python 3.14 has no linkable `libpython3.14`.
-
-- [2026-11-07 16:40] Locking `socket2` and `half` in `vertebra-db` alongside `vertebra-postgres`'s `postgres-protocol`, `x509-parser = "=0.18.1"`, `rsa` `["pem", "sha2"]`, `rustls-pemfile`, `half`, and `arrow-*` pins in `ch01:t02` prevents unowned `src/rs/Cargo.lock` churn across Chapters 02–28 (the only task that touches `Cargo.toml` + `Cargo.lock` later is `ch17:t04` when wiring `jiff = "=0.2.39"`).
+- Native gates select the project interpreter through `PYO3_PYTHON=${PWD}/.venv/bin/python`; extension tests require a matching linkable `libpython`.
+- Upfront `socket2`, `half`, protocol, TLS, X.509, and Arrow pins keep dependency resolution in this worksheet; the timezone-codec worksheet owns the later `jiff` dependency.
 
 [^ws-cargo]: `src/rs/Cargo.toml` — Workspace crate member registry.
 [^db-cargo]: `src/rs/vertebra-db/Cargo.toml` — Shared `vertebra-db` dependency table.

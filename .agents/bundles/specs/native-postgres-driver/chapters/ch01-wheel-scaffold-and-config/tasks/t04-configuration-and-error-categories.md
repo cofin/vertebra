@@ -145,12 +145,9 @@ Commit as `feat(postgres): validate owned connection options and error categorie
 
 ## Notes & Discoveries
 
-- The public Rust seam owns all 26 constructor fields. Invalid values yield field-only configuration messages; debug formatting replaces password/key material and both authentication maps with redaction markers.
-- Server display retains the primary severity/message and SQLSTATE, replaces control characters with spaces, and omits diagnostic detail/hint/context fields while retaining their exact structured tuples.
-- Pure validation leaves cloud/Unix cross-field projection to the scheduled chapters. Both maps and PEM buffers move into owned configuration without file, DNS, or network access.
-- Verification is complete at signed implementation commit `dabd3ca2`; task state is `completed`.
-
-- [2026-11-07 16:40] Defining `ServerError` (`severity`, `sqlstate`, `message`, `diagnostics: Vec<(u8, String)>`) and `PostgresError::Server(ServerError)` upfront in `ch01:t04` ensures `ch09:t02` simple-query error projections require zero breaking variant changes across `ch02`–`ch08`.
+- The public Rust seam owns all 26 constructor fields. Invalid values yield field-only configuration messages; debug formatting redacts password/key material and both authentication maps.
+- Server display retains the primary severity/message and SQLSTATE, replaces control characters with spaces, and omits diagnostic detail/hint/context fields while retaining their structured tuples.
+- Cloud/Unix cross-field projection belongs to its scheduled chapters. Maps and PEM buffers move into owned configuration without file, DNS, or network access.
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Public constructor fields, defaults, and redaction contract.
 [^db-conn-tls]: `src/rs/vertebra-db/src/connection.rs::TlsMode` — Shared transport TLS verification modes.

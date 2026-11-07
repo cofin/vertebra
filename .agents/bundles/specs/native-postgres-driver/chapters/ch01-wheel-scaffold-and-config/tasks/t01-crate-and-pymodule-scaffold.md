@@ -174,7 +174,7 @@ Commit as `build(postgres): scaffold vertebra-postgres crate and pymodule`.
 
 ## Notes & Discoveries
 
-- [2026-11-07 16:40] Authoring `Cargo.toml`, `build.rs`, and `src/lib.rs` together in `t01` before `t02` adds `"vertebra-postgres"` to `src/rs/Cargo.toml` ensures Cargo never encounters a workspace member missing `src/lib.rs` while keeping `t01` strictly within the 3-file bound.
+- The manifest, build script, and library target form a valid crate before workspace registration.
 
 [^ws-cargo]: `src/rs/Cargo.toml` — Rust workspace shared crate versions.
 [^spanner-cargo]: `src/rs/vertebra-spanner/Cargo.toml` — Reference optional PyO3 extension manifest.
