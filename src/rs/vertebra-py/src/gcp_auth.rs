@@ -69,16 +69,20 @@ fn build_token_cache(
     py: Python<'_>,
     options: Option<HashMap<String, String>>,
     scopes: Option<Vec<String>>,
+    allow_ambient_adc: bool,
 ) -> PyResult<Arc<NativeGcpTokenCache>> {
-    let default_options = HashMap::new();
-    let opts = options.as_ref().unwrap_or(&default_options);
+    let mut opts = options.unwrap_or_default();
+    if !allow_ambient_adc {
+        opts.entry("allow_ambient_adc".to_string())
+            .or_insert_with(|| "false".to_string());
+    }
     let scopes_vec: Option<Vec<&str>> = scopes
         .as_ref()
         .map(|s| s.iter().map(|x| x.as_str()).collect());
     let effective_scopes: &[&str] = scopes_vec
         .as_deref()
         .unwrap_or(vertebra_core::gcp_auth::DEFAULT_GCP_SCOPES);
-    py.detach(|| NativeGcpTokenCache::from_options(opts, effective_scopes))
+    py.detach(|| NativeGcpTokenCache::from_options(&opts, effective_scopes))
         .ok_or_else(|| PyValueError::new_err("unable to configure GcpTokenCache from options"))
 }
 
@@ -97,14 +101,21 @@ impl PySyncGcpTokenCache {
 #[pymethods]
 impl PySyncGcpTokenCache {
     #[new]
-    #[pyo3(signature = (options=None, scopes=None))]
+    #[pyo3(signature = (options=None, scopes=None, *, allow_ambient_adc=true))]
     fn new(
         py: Python<'_>,
         options: Option<HashMap<String, String>>,
         scopes: Option<Vec<String>>,
+        allow_ambient_adc: bool,
     ) -> PyResult<Self> {
-        let inner = build_token_cache(py, options, scopes)?;
+        let inner = build_token_cache(py, options, scopes, allow_ambient_adc)?;
         Ok(Self { inner })
+    }
+
+    fn to_async(&self) -> PyAsyncGcpTokenCache {
+        PyAsyncGcpTokenCache {
+            inner: Arc::clone(&self.inner),
+        }
     }
 
     #[getter]
@@ -174,14 +185,21 @@ impl PyAsyncGcpTokenCache {
 #[pymethods]
 impl PyAsyncGcpTokenCache {
     #[new]
-    #[pyo3(signature = (options=None, scopes=None))]
+    #[pyo3(signature = (options=None, scopes=None, *, allow_ambient_adc=true))]
     fn new(
         py: Python<'_>,
         options: Option<HashMap<String, String>>,
         scopes: Option<Vec<String>>,
+        allow_ambient_adc: bool,
     ) -> PyResult<Self> {
-        let inner = build_token_cache(py, options, scopes)?;
+        let inner = build_token_cache(py, options, scopes, allow_ambient_adc)?;
         Ok(Self { inner })
+    }
+
+    fn to_sync(&self) -> PySyncGcpTokenCache {
+        PySyncGcpTokenCache {
+            inner: Arc::clone(&self.inner),
+        }
     }
 
     #[getter]

@@ -94,13 +94,13 @@ class ObjectStoreBackend(StorageBackend):
             sync_store = target.to_sync()
         elif isinstance(target, _STORAGE_CONFIGS):
             sync_store = SyncObjectStore.from_config(target)
-            async_store = AsyncObjectStore.from_config(target)
+            async_store = sync_store.to_async()
         elif isinstance(target, str):
             sync_store = SyncObjectStore(target, options=string_options or None, signing=signing)
-            async_store = AsyncObjectStore(target, options=string_options or None, signing=signing)
+            async_store = sync_store.to_async()
         elif target is None:
             sync_store = SyncObjectStore("memory://", options=string_options or None, signing=signing)
-            async_store = AsyncObjectStore("memory://", options=string_options or None, signing=signing)
+            async_store = sync_store.to_async()
         else:
             msg = f"Expected SyncObjectStore, AsyncObjectStore, or URI string, got {type(target)!r}"
             raise TypeError(msg)
