@@ -122,32 +122,17 @@ class ObjectStoreBackend:
                 )
             sync_store = target.to_sync()
         elif isinstance(target, _STORAGE_CONFIGS):
-            sync_store = SyncObjectStore.from_config(target)
-            async_store = AsyncObjectStore.from_config(target)
+            sync_store = SyncObjectStore.from_config(target, signing=signing, token_cache=token_cache)
+            async_store = sync_store.to_async()
         else:
             uri_str = str(target)
-            sync_cache = (
-                token_cache
-                if isinstance(token_cache, SyncGcpTokenCache)
-                else (token_cache.to_sync() if token_cache is not None and hasattr(token_cache, "to_sync") else None)
-            )
-            async_cache = (
-                token_cache
-                if isinstance(token_cache, AsyncGcpTokenCache)
-                else (token_cache.to_async() if token_cache is not None and hasattr(token_cache, "to_async") else None)
-            )
             sync_store = SyncObjectStore(
                 uri_str,
                 options=merged_options or None,
                 signing=signing,
-                token_cache=sync_cache,
+                token_cache=token_cache,
             )
-            async_store = AsyncObjectStore(
-                uri_str,
-                options=merged_options or None,
-                signing=signing,
-                token_cache=async_cache,
-            )
+            async_store = sync_store.to_async()
 
         effective_prefix = (base_path or prefix).strip("/")
         self._sync_store = sync_store

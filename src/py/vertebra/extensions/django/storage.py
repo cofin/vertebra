@@ -79,16 +79,11 @@ class DjangoStorage:
             self._store = config.to_sync()
         elif config is not None:
             self._store = SyncObjectStore.from_config(config)
-            self._async_store = AsyncObjectStore.from_config(config)
+            self._async_store = self._store.to_async()
         else:
             mem_cfg = MemoryConfig()
             self._store = SyncObjectStore.from_config(mem_cfg)
-            self._async_store = AsyncObjectStore.from_config(mem_cfg)
-        if self._store.scheme == "memory":
-            if self._async_store._memory and not self._store._memory:
-                self._store._memory = self._async_store._memory
-            else:
-                self._async_store._memory = self._store._memory
+            self._async_store = self._store.to_async()
         self._base_url = base_url if base_url.endswith("/") else f"{base_url}/"
 
     @property

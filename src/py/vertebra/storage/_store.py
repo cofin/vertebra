@@ -1459,7 +1459,11 @@ class SyncObjectStore(_BaseObjectStore):
         token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
         _native_instance: Any = None,
     ) -> None:
-        resolved_cache = token_cache if isinstance(token_cache, SyncGcpTokenCache) else None
+        resolved_cache = (
+            token_cache
+            if isinstance(token_cache, SyncGcpTokenCache)
+            else (token_cache.to_sync() if isinstance(token_cache, AsyncGcpTokenCache) else None)
+        )
         super().__init__(target, options=options, signing=signing, token_cache=resolved_cache)
         native_mod = self._ensure_native_module()
         if _native_instance is not None:
@@ -1482,7 +1486,11 @@ class SyncObjectStore(_BaseObjectStore):
     def to_async(self) -> AsyncObjectStore:
         """Return an equivalent AsyncObjectStore instance sharing the underlying storage engine."""
         native = self._require_native()
-        async_token_cache = self._gcp_token_cache if isinstance(self._gcp_token_cache, AsyncGcpTokenCache) else None
+        async_token_cache = (
+            self._gcp_token_cache.to_async()
+            if isinstance(self._gcp_token_cache, SyncGcpTokenCache)
+            else (self._gcp_token_cache if isinstance(self._gcp_token_cache, AsyncGcpTokenCache) else None)
+        )
         return AsyncObjectStore(
             self._source_config_or_uri,
             options=self._source_options,
@@ -1752,7 +1760,11 @@ class AsyncObjectStore(_BaseObjectStore):
         token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
         _native_instance: Any = None,
     ) -> None:
-        resolved_cache = token_cache if isinstance(token_cache, AsyncGcpTokenCache) else None
+        resolved_cache = (
+            token_cache
+            if isinstance(token_cache, AsyncGcpTokenCache)
+            else (token_cache.to_async() if isinstance(token_cache, SyncGcpTokenCache) else None)
+        )
         super().__init__(target, options=options, signing=signing, token_cache=resolved_cache)
         native_mod = self._ensure_native_module()
         if _native_instance is not None:
@@ -1775,7 +1787,11 @@ class AsyncObjectStore(_BaseObjectStore):
     def to_sync(self) -> SyncObjectStore:
         """Return an equivalent SyncObjectStore instance sharing the underlying storage engine."""
         native = self._require_native()
-        sync_token_cache = self._gcp_token_cache if isinstance(self._gcp_token_cache, SyncGcpTokenCache) else None
+        sync_token_cache = (
+            self._gcp_token_cache.to_sync()
+            if isinstance(self._gcp_token_cache, AsyncGcpTokenCache)
+            else (self._gcp_token_cache if isinstance(self._gcp_token_cache, SyncGcpTokenCache) else None)
+        )
         return SyncObjectStore(
             self._source_config_or_uri,
             options=self._source_options,

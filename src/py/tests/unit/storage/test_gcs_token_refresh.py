@@ -681,3 +681,19 @@ def test_gcp_token_cache_unified_on_vertebra_core_and_removed_from_storage_ext(
     cfg = GCSConfig(bucket="unified-bucket", application_credentials=str(adc_path))
     assert cfg.resolve_adc_token() == "mock-oauth-token-user-1"
     assert token_server.oauth_calls == 1
+
+    direct_sync = SyncGcpTokenCache({"access_token": "seed-tok"}, allow_ambient_adc=False)
+    direct_async = direct_sync.to_async()
+    roundtrip_sync = direct_async.to_sync()
+    assert isinstance(direct_async, AsyncGcpTokenCache)
+    assert isinstance(roundtrip_sync, SyncGcpTokenCache)
+    assert direct_sync.generation == direct_async.generation == 0
+    seeded_snap = direct_sync.get_token()
+    assert seeded_snap.access_token == "seed-tok"
+    assert direct_sync.generation == direct_async.generation == roundtrip_sync.generation == 1
+
+    store_with_cache = SyncObjectStore.from_memory("cache-share")
+    store_with_cache._gcp_token_cache = direct_sync
+    async_store_with_cache = store_with_cache.to_async()
+    assert isinstance(async_store_with_cache.token_cache, AsyncGcpTokenCache)
+    assert async_store_with_cache.token_cache.generation == 1

@@ -1416,7 +1416,10 @@ class SyncGcpTokenCache:
         cls,
         options: dict[str, str] | None = None,
         scopes: Sequence[str] | None = None,
+        *,
+        allow_ambient_adc: bool = True,
     ) -> SyncGcpTokenCache: ...
+    def to_async(self) -> AsyncGcpTokenCache: ...
     @property
     def generation(self) -> int: ...
     @property
@@ -1436,7 +1439,10 @@ class AsyncGcpTokenCache:
         cls,
         options: dict[str, str] | None = None,
         scopes: Sequence[str] | None = None,
+        *,
+        allow_ambient_adc: bool = True,
     ) -> AsyncGcpTokenCache: ...
+    def to_sync(self) -> SyncGcpTokenCache: ...
     @property
     def generation(self) -> int: ...
     @property
