@@ -41,7 +41,7 @@ commit: null
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
-    title: Exact 25-parameter SyncPostgresClient and AsyncPostgresClient constructor specification
+    title: Exact 26-parameter SyncPostgresClient and AsyncPostgresClient constructor specification
   - id: pg-driver-tests
     resource: src/py/tests/unit/db/test_postgres_driver.py
     title: Canonical native PostgreSQL client unit test module
@@ -59,13 +59,13 @@ tags:
 
 ## Objective & Scope Boundary
 
-Verify and lock complete 25-parameter constructor parity across `src/rs/vertebra-postgres/src/sync_client.rs`, `src/rs/vertebra-postgres/src/async_client.rs`, and `src/py/vertebra/_postgres.pyi`, characterized end to end in `src/py/tests/unit/db/test_postgres_driver.py` (`native_constructor`) [^pg-contracts] [^pg-driver-tests] [^pg-config]. Ensure runtime `inspect.signature` parameter names, `KEYWORD_ONLY` kinds, and defaults match `contracts.md` identically on both `SyncPostgresClient` and `AsyncPostgresClient`, enforce strict `TypeError` (for positional/unknown kwargs, non-`str` mapping entries, and `bool` passed to integer `port` / `keepalives_*` fields) vs `ValueError` (for semantic conflicts), prove zero I/O at construction time and post-construction `session_gucs` mutation isolation, and verify Python-level reachability of `channel_binding="require"` (`SCRAM-SHA-256-PLUS`) and Unix `sslmode="disable"` startup.
+Verify and lock complete 26-parameter constructor parity across `src/rs/vertebra-postgres/src/sync_client.rs`, `src/rs/vertebra-postgres/src/async_client.rs`, and `src/py/vertebra/_postgres.pyi`, characterized end to end in `src/py/tests/unit/db/test_postgres_driver.py` (`native_constructor`) [^pg-contracts] [^pg-driver-tests] [^pg-config]. Ensure runtime `inspect.signature` parameter names, `KEYWORD_ONLY` kinds, and defaults match `contracts.md` identically on both `SyncPostgresClient` and `AsyncPostgresClient`, enforce strict `TypeError` (for positional/unknown kwargs, non-`str` mapping entries, and `bool` passed to integer `port` / `keepalives_*` fields) vs `ValueError` (for semantic conflicts), prove zero I/O at construction time and post-construction `session_gucs` mutation isolation, and verify Python-level reachability of `channel_binding="require"` (`SCRAM-SHA-256-PLUS`) and Unix `sslmode="disable"` startup.
 
 ## Bounded Read Manifest
 
 - `src/rs/vertebra-postgres/src/sync_client.rs` — `PySyncPostgresClient::__new__` and `extract_string_map` from `ch07:t02`.
 - `src/rs/vertebra-postgres/src/async_client.rs` — `PyAsyncPostgresClient::__new__` from `ch07:t03`.
-- `src/rs/vertebra-postgres/src/config.rs` — Normalized 25-field `PostgresConfig` semantic rules from `ch06:t03`.
+- `src/rs/vertebra-postgres/src/config.rs` — Normalized 26-field `PostgresConfig` semantic rules from `ch06:t03`.
 - `src/py/vertebra/_postgres.pyi` — Public type stub and docstrings for `vertebra._postgres`.
 - `src/py/tests/unit/db/test_postgres_driver.py` — Loopback socket/TLS server fixtures and native client tests [^pg-driver-tests].
 - `.agents/bundles/specs/native-postgres-driver/contracts.md` — Chapter [spec.md](../spec.md) and [contracts.md](../../../contracts.md) `Connection constructors` [^pg-contracts].
@@ -110,7 +110,7 @@ Verify and lock complete 25-parameter constructor parity across `src/rs/vertebra
 
 ## Acceptance Criteria
 
-- [ ] `SyncPostgresClient`, `AsyncPostgresClient`, and `src/py/vertebra/_postgres.pyi` expose identical 25-parameter keyword-only signatures, defaults, and `TypeError`/`ValueError` boundaries matching `contracts.md` and `mypy.stubtest` (R2, R6, R7).
+- [ ] `SyncPostgresClient`, `AsyncPostgresClient`, and `src/py/vertebra/_postgres.pyi` expose identical 26-parameter keyword-only signatures, defaults, and `TypeError`/`ValueError` boundaries matching `contracts.md` and `mypy.stubtest` (R2, R6, R7).
 - [ ] Pure zero-I/O construction, `Mapping[str, str]` snapshot isolation, secret redaction, `channel_binding="require"` (`SCRAM-SHA-256-PLUS`), and Unix `sslmode="disable"` + `session_gucs` startup are proven for both sync and async clients (R2, R6, R7).
 - [ ] Commit `test(postgres): preserve complete constructor parity` passes `pytest -k native_constructor`, `stubtest`, and `clippy` (R2, R6, R7).
 
@@ -118,6 +118,6 @@ Verify and lock complete 25-parameter constructor parity across `src/rs/vertebra
 
 - None.
 
-[^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Frozen 25-parameter `SyncPostgresClient` and `AsyncPostgresClient` constructor specification.
+[^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Frozen 26-parameter `SyncPostgresClient` and `AsyncPostgresClient` constructor specification.
 [^pg-driver-tests]: `src/py/tests/unit/db/test_postgres_driver.py` — Canonical PostgreSQL driver unit and characterization tests.
 [^pg-config]: `src/py/vertebra/db/adapters/postgres/config.py::PostgreSQLConfig` — PostgreSQL configuration and `session_gucs` precedence rules.

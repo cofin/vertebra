@@ -3,7 +3,7 @@ type: Spec
 parent_flow: native-postgres-driver
 chapter_id: ch08-constructor-parity-and-wheel-gil
 title: "Chapter 08: Complete Constructor Parity, Wheel Packaging, and Free-Threaded GIL Verification"
-description: Lock complete 25-parameter constructor parity across SyncPostgresClient and AsyncPostgresClient, wire root vertebra-core[postgres] packaging and review areas, exclude _postgres.pyi from all four companion wheels, and verify release.yaml schema plus isolated Python 3.14t/3.15t disabled-GIL imports.
+description: Lock complete 26-parameter constructor parity across SyncPostgresClient and AsyncPostgresClient, wire root vertebra-core[postgres] packaging and review areas, exclude _postgres.pyi from all four companion wheels, and verify release.yaml schema plus isolated Python 3.14t/3.15t disabled-GIL imports.
 status: stable
 state: planned
 planning_status: complete
@@ -28,7 +28,7 @@ verified:
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
-    title: Frozen 25-parameter SyncPostgresClient and AsyncPostgresClient constructor specification
+    title: Frozen 26-parameter SyncPostgresClient and AsyncPostgresClient constructor specification
   - id: pg-driver-tests
     resource: src/py/tests/unit/db/test_postgres_driver.py
     title: Canonical native PostgreSQL constructor and session unit test suite
@@ -149,7 +149,7 @@ Progress: `[1/1 stub file finalized for Phase 1 in ch08]` (`src/py/vertebra/_pos
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
 - **Downstream Dependents**: Completes Phase 1 transport, cloud, auth, packaging, and session foundations and unblocks `ch09-owned-results-and-numeric-codecs` (`ch09:t01` depends on `ch08:t04`).
 
-[^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Frozen 25-parameter constructor and FFI ownership specification.
+[^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Frozen 26-parameter constructor and FFI ownership specification.
 [^pg-driver-tests]: `src/py/tests/unit/db/test_postgres_driver.py` — Canonical native PostgreSQL client unit and characterization tests.
 [^root-pyproject]: `pyproject.toml` — Root optional extras, `uv.sources`, and `bumpversion` configuration.
 [^review-areas]: `.agents/skills/review-core/references/areas.toml` — Review area routing manifest.

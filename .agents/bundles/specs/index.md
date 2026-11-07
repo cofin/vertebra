@@ -13,11 +13,9 @@ The completed database foundation is documented in [driver contracts and adapter
 
 - [`storage-completeness`](storage-completeness/spec.md) — Complete `SyncObjectStore` and `AsyncObjectStore` (`vertebra-storage`), unified GCP token caches, fail-closed construction, and SQLSpec, Advanced Alchemy, Django, Litestar, and `VTBARROW` storage contracts ([`chapters/ch01`–`ch04`](storage-completeness/chapters/index.md), `12` tasks).
 
-## 3. Planned Feature Specifications (`state: planned`)
+- [`native-postgres-driver`](native-postgres-driver/spec.md) — Standalone Rust PostgreSQL wheel (`vertebra-postgres`) covering wire authentication, cloud mTLS/IAM, pools, single-Sync pipelines, binary COPY, SHM Arrow, notifications, logical replication, and native adapter cutover ([`chapters/ch01`–`ch31`](native-postgres-driver/chapters/index.md), `111` tasks). Chapter 01 remains active with `4/111` tasks complete and checkpoint `08a6295b` verified; correctness and fresh quality reviews are pending.
 
-- [`native-postgres-driver`](native-postgres-driver/spec.md) — Standalone Rust PostgreSQL wheel (`vertebra-postgres`) covering wire authentication, cloud mTLS/IAM, pools, single-Sync pipelines, binary COPY, SHM Arrow, notifications, logical replication, and native adapter cutover ([`chapters/ch01`–`ch31`](native-postgres-driver/chapters/index.md), `111` tasks).
-
-## 4. Draft Child Flow Charters (`state: draft`)
+## 3. Draft Child Flow Charters (`state: draft`)
 
 - [`broker-pool-sharing`](broker-pool-sharing/spec.md) — Shared broker-owned pools for any SQLSpec, Advanced Alchemy, or SQLAlchemy config.
 - [`native-oracle-driver`](native-oracle-driver/spec.md) — Standalone Rust Oracle Thin wheel (`vertebra-oracle`).
@@ -30,7 +28,7 @@ The completed database foundation is documented in [driver contracts and adapter
 - [`sqlspec-adapter-parity`](sqlspec-adapter-parity/spec.md) — Feature-complete SQLSpec per-engine adapters, stores, and data dictionaries.
 - [`queues-tasks-and-channels`](queues-tasks-and-channels/spec.md) — Native PostgreSQL and Oracle `QueueStore` backends, `litestar-queues`, Django tasks, distributed channels, and `ValkeyStore`.
 
-## 5. Promoted Spec Research (`state: promoted`)
+## 4. Promoted Spec Research (`state: promoted`)
 
 - [`gap-analysis_20261103.md`](native-data-platform/research/gap-analysis_20261103.md) — Broker, native driver, and storage gap analysis (`native-data-platform`).
 - [`rust-driver-crates_20261103.md`](native-data-platform/research/rust-driver-crates_20261103.md) — Primary-source Rust client crate comparison and per-engine wheel packaging (`native-data-platform`).

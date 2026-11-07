@@ -37,7 +37,7 @@ sources:
     title: Reference optional-wheel PyO3 client freelist and immutable_type patterns
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
-    title: Complete 25-parameter native SyncPostgresClient and AsyncPostgresClient constructor contract
+    title: Complete 26-parameter native SyncPostgresClient and AsyncPostgresClient constructor contract
 tags:
   - postgres
   - pyo3
@@ -50,7 +50,7 @@ tags:
 
 <!-- truth: start -->
 - **Armed Setup-Abort Worker Ownership**: `spawn_rust_db_task_with_attr` in `src/rs/vertebra-db/src/py_async.rs` wraps every spawned `JoinHandle` in a single RAII abort-on-drop guard immediately after `db_runtime_handle().spawn(fut)` and only disarms inside the completion monitor after worker join, guaranteeing zero leaked workers or `PendingSession` sockets if `Py::new(DbTaskCanceller)` or `add_done_callback` raises [^py-async-rs] [^core-notify].
-- **Detached Synchronous Client (`SyncPostgresClient`)**: `PySyncPostgresClient` (`frozen`, `immutable_type`, conditional `freelist = 128` under `not(Py_GIL_DISABLED)`) exposes the exact 25-parameter keyword-only constructor from `contracts.md`, copies `Mapping[str, str]` inputs while attached, drives `connect()` and `close()` inside `py.detach(|| block_on_db(...))`, and maps errors to canonical `vertebra._vertebra` exceptions [^spanner-py] [^pg-contracts].
+- **Detached Synchronous Client (`SyncPostgresClient`)**: `PySyncPostgresClient` (`frozen`, `immutable_type`, conditional `freelist = 128` under `not(Py_GIL_DISABLED)`) exposes the exact 26-parameter keyword-only constructor from `contracts.md`, copies `Mapping[str, str]` inputs while attached, drives `connect()` and `close()` inside `py.detach(|| block_on_db(...))`, and maps errors to canonical `vertebra._vertebra` exceptions [^spanner-py] [^pg-contracts].
 - **Cancellation-Safe Asynchronous Client (`AsyncPostgresClient`)**: `PyAsyncPostgresClient` uses dedicated loop attribute `_vertebra_postgres_completion_drainer`, reserves `begin_connect` synchronously, commits `PendingSession` exclusively inside `map_ok` on the Python event loop thread (rolling back to `Closed` if cancelled before or while queued in `DbCompletionRing`), and never calls `Python::attach` on Tokio workers [^py-async-rs] [^pg-contracts].
 <!-- truth: end -->
 
@@ -58,7 +58,7 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-`src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr` currently calls `abort.abort()` in two separate manual error branches before spawning its completion monitor task, rather than owning the `JoinHandle` through a unified RAII abort-on-drop guard that covers every fallible Python setup point until the monitor completes [^py-async-rs]. Building on that hardened async bridge and the complete PostgreSQL transport/authentication/cloud/Unix engine from Chapters 01–06, Chapter 07 exposes the public `SyncPostgresClient` and `AsyncPostgresClient` PyO3 classes and `src/py/vertebra/_postgres.pyi` type stubs with full 25-parameter constructors, GIL-detached synchronous session lifecycle, and cancellation-safe asynchronous session publication [^pg-contracts].
+`src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr` currently calls `abort.abort()` in two separate manual error branches before spawning its completion monitor task, rather than owning the `JoinHandle` through a unified RAII abort-on-drop guard that covers every fallible Python setup point until the monitor completes [^py-async-rs]. Building on that hardened async bridge and the complete PostgreSQL transport/authentication/cloud/Unix engine from Chapters 01–06, Chapter 07 exposes the public `SyncPostgresClient` and `AsyncPostgresClient` PyO3 classes and `src/py/vertebra/_postgres.pyi` type stubs with full 26-parameter constructors, GIL-detached synchronous session lifecycle, and cancellation-safe asynchronous session publication [^pg-contracts].
 
 ### 1.2 Non-Goals
 
@@ -76,7 +76,7 @@ Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md).
 ### 2.1 Chapter Requirements
 
 - **R7 (`ch07:t01`)**: Replace manual `abort.abort()` error branches in `src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr` with one private armed abort-on-drop worker guard wrapping `JoinHandle<Result<T, E>>` immediately after `spawn`, moving the armed guard into the monitor task and disarming only after `worker_handle.await` finishes while preserving original `PyErr` values.
-- **R6 (`ch07:t02`)**: Implement `PySyncPostgresClient` (`SyncPostgresClient` in `vertebra._postgres`) in `src/rs/vertebra-postgres/src/sync_client.rs`, register it in `lib.rs`, and declare `@final` `SyncPostgresClient` in `src/py/vertebra/_postgres.pyi` with the complete 25-parameter keyword-only `def __new__(cls, *, ...) -> SyncPostgresClient`, `connect() -> None`, `close() -> None`, `closed: bool`, and `parameters: dict[str, str]` (preserving `__version__: str`, `FREE_THREADED: bool`, and `GIL_USED: bool`, without exposing `BackendKeyData`).
+- **R6 (`ch07:t02`)**: Implement `PySyncPostgresClient` (`SyncPostgresClient` in `vertebra._postgres`) in `src/rs/vertebra-postgres/src/sync_client.rs`, register it in `lib.rs`, and declare `@final` `SyncPostgresClient` in `src/py/vertebra/_postgres.pyi` with the complete 26-parameter keyword-only `def __new__(cls, *, ...) -> SyncPostgresClient`, `connect() -> None`, `close() -> None`, `closed: bool`, and `parameters: dict[str, str]` (preserving `__version__: str`, `FREE_THREADED: bool`, and `GIL_USED: bool`, without exposing `BackendKeyData`).
 - **R7 (`ch07:t03`)**: Implement `PyAsyncPostgresClient` (`AsyncPostgresClient` in `vertebra._postgres`) in `src/rs/vertebra-postgres/src/async_client.rs`, register it alongside `DbCompletionDrainer` (`_vertebra_postgres_completion_drainer`) in `lib.rs`, and declare `@final` `AsyncPostgresClient` in `src/py/vertebra/_postgres.pyi` (`def __new__(cls, *, ...) -> AsyncPostgresClient`, `connect() -> Awaitable[None]`, `close() -> Awaitable[None]`, `closed: bool`, `parameters: dict[str, str]`, preserving `GIL_USED: bool` alongside `FREE_THREADED: bool`).
 
 ### 2.2 Concrete Type & Signature Contracts
@@ -88,7 +88,7 @@ Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md).
   - `struct ArmedWorkerGuard<T>(Option<JoinHandle<T>>)` (`impl Drop` calls `handle.abort()`; `async fn join_and_disarm(mut self) -> Result<T, tokio::task::JoinError>`).
 - **Python (`src/py/vertebra/_postgres.pyi` & `vertebra._postgres`)**:
   - Preserved module-level constants `__version__: str`, `FREE_THREADED: bool`, and `GIL_USED: bool` (`__all__ = ["FREE_THREADED", "GIL_USED", "AsyncPostgresClient", "SyncPostgresClient", "__version__"]`).
-  - `@final class SyncPostgresClient:` and `@final class AsyncPostgresClient:` sharing the exact 25 keyword-only `def __new__(cls, *, ...)` parameters (`user`, `database`, `host="localhost"`, `port=5432`, `password=None`, `unix_socket=None`, `sslmode="verify-full"`, `ca_pem=None`, `client_cert_pem=None`, `client_key_pem=None`, `server_name=None`, `channel_binding="prefer"`, `connect_timeout=10.0`, `application_name="vertebra"`, `session_gucs=None`, `keepalives=True`, `keepalives_idle=None`, `keepalives_interval=None`, `keepalives_count=None`, `cloud_sql_instance=None`, `cloud_sql_ip_type="PRIVATE"`, `alloydb_instance_uri=None`, `alloydb_ip_type="PRIVATE"`, `enable_iam_auth=False`, `cloud_auth_options=None`, `iam_auth_options=None`) returning `SyncPostgresClient` / `AsyncPostgresClient` for `#[pyclass(frozen, immutable_type)]` `mypy.stubtest` compatibility.
+  - `@final class SyncPostgresClient:` and `@final class AsyncPostgresClient:` sharing the exact 26 keyword-only `def __new__(cls, *, ...)` parameters (`user`, `database`, `host="localhost"`, `port=5432`, `password=None`, `unix_socket=None`, `sslmode="verify-full"`, `ca_pem=None`, `client_cert_pem=None`, `client_key_pem=None`, `server_name=None`, `channel_binding="prefer"`, `connect_timeout=10.0`, `application_name="vertebra"`, `session_gucs=None`, `keepalives=True`, `keepalives_idle=None`, `keepalives_interval=None`, `keepalives_count=None`, `cloud_sql_instance=None`, `cloud_sql_ip_type="PRIVATE"`, `alloydb_instance_uri=None`, `alloydb_ip_type="PRIVATE"`, `enable_iam_auth=False`, `cloud_auth_options=None`, `iam_auth_options=None`) returning `SyncPostgresClient` / `AsyncPostgresClient` for `#[pyclass(frozen, immutable_type)]` `mypy.stubtest` compatibility.
   - Properties on both classes: `@property def closed(self) -> bool: ...` and `@property def parameters(self) -> dict[str, str]: ...` (returning a fresh dict copy from `session.parameters()` on every read; never exposing process ID or cancel secret key).
 
 ### 2.3 Edge-Case & Failure-Mode Matrix

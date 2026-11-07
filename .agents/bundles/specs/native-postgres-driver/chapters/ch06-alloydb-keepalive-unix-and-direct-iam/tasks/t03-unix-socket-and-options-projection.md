@@ -74,7 +74,7 @@ Complete pure validation and normalization of all 25 public constructor paramete
 ## Symbol & Signature Contracts
 
 - `src/rs/vertebra-postgres/src/config.rs`:
-  - Normalize the complete 25-field `PostgresConfig` once (purely, with zero DNS, file, network, or credential-refresh side effects) into canonical endpoint, TLS/binding, keepalive, IAM/Admin credential, and startup GUC structures suitable for both direct clients and pool `validate_configuration` equality:
+  - Normalize the complete 26-field `PostgresConfig` once (purely, with zero DNS, file, network, or credential-refresh side effects) into canonical endpoint, TLS/binding, keepalive, IAM/Admin credential, and startup GUC structures suitable for both direct clients and pool `validate_configuration` equality:
     - **Endpoint mutual exclusion**: `unix_socket`, `cloud_sql_instance`, and `alloydb_instance_uri` are pairwise mutually exclusive (`> 1` set -> `PostgresError::Config`).
     - **`unix_socket` rules**: exact nonempty NUL-free socket file path (never a directory `.s.PGSQL.<port>` expansion here; adapter DSN bridge owns directory-to-socket conversion in `ch25:t01`). Requires `sslmode == TlsMode::Disable`, `ca_pem.is_none()`, `client_cert_pem.is_none()`, `client_key_pem.is_none()`, `server_name.is_none()`, `channel_binding != ChannelBindingPolicy::Require`, and no explicit keepalive tuning (`keepalives_idle.is_none() && keepalives_interval.is_none() && keepalives_count.is_none()`; default `keepalives == true` is a no-op on Unix).
     - **Direct `host` rules**: nonempty NUL-free IPv4, IPv6, or DNS hostname — reject URI schemes (`"://"`) and Unix path prefixes (`host.starts_with('/')`) on `host` (`unix_socket` must be used for Unix sockets).

@@ -1,5 +1,11 @@
 # Bundle Activity Log
 
+## [2026-11-07] flow-implement | Native PostgreSQL chapter 01 checkpoint verified
+
+- [`native-postgres-driver`](specs/native-postgres-driver/spec.md) runs on `feat/native-postgres-completion` with `4/111` tasks complete. Chapter 01 source commits are `t01=5f25a4a0`, `t02=9e128425`, `t03=05fff946`, and `t04=dabd3ca2`; plan revision `4` remains anchored at `45ff9563` across all `31` chapters and `111` worksheets.
+- Chapter checkpoint `08a6295b` passes locked crate tests (`7`), locked all-target Clippy with `-D warnings`, `make dev`, strict PostgreSQL wheel/sdist verification, locked `make postgres-test`, and six-module stubtest. These local scaffold/configuration gates establish no live PostgreSQL, cloud, complete-driver, free-threaded, or hosted acceptance.
+- Chapter 01 remains active with no current task or review stamp; correctness and fresh quality reviews are pending. Its documentation manifest stays `[0/0 files documented in ch01]`; the flow manifest stays `[0/11 files documented]`, with public and durable OKF driver consolidation owned by chapter 30. The frozen constructor signature contains `26` keyword-only arguments; descriptive inventory labels match that signature.
+
 ## [2026-11-07] flow-revise | Correct native PostgreSQL protocol fixtures and ownership signatures
 
 - Corrected the independently verified PostgreSQL salted MD5 fixture to `md5c73cff48cd454994b0c263a04cdfc859` for `postgres` / `hunter2` / salt `01020304`; aligned chapter 02 termination framing to `TERMINATE_FRAME` and replaced borrowed connection-attempt/pending guards with owned Arc-backed state compatible with the `Send + 'static` completion bridge while preserving cancellation rollback.

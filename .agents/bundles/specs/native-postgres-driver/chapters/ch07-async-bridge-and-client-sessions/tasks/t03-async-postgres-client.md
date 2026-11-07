@@ -47,7 +47,7 @@ sources:
     title: Canonical PostgreSQL sync and async native client unit tests
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
-    title: Complete 25-parameter AsyncPostgresClient constructor and async session contract
+    title: Complete 26-parameter AsyncPostgresClient constructor and async session contract
 tags:
   - postgres
   - pyo3
@@ -59,11 +59,11 @@ tags:
 
 ## Objective & Scope Boundary
 
-Implement `PyAsyncPostgresClient` (`AsyncPostgresClient` in `vertebra._postgres`) in `src/rs/vertebra-postgres/src/async_client.rs`, register it alongside `vertebra_db::py_async::{DbCompletionDrainer, RustDbTaskAwaitable}` in `src/rs/vertebra-postgres/src/lib.rs`, and declare `@final` `AsyncPostgresClient` (`def __new__(cls, *, ...) -> AsyncPostgresClient`) in `src/py/vertebra/_postgres.pyi` while preserving `__version__: str`, `FREE_THREADED: bool`, and `GIL_USED: bool` [^py-async-rs] [^pg-contracts]. `AsyncPostgresClient` shares the exact 25-parameter keyword-only constructor and `SessionHandle` engine with `SyncPostgresClient`, uses dedicated loop attribute `"_vertebra_postgres_completion_drainer"`, commits `PendingSession` exclusively inside `map_ok` on the Python event loop thread, and guarantees deterministic socket/state cleanup across in-flight cancellation, queued-completion cancellation races, and `add_done_callback` setup failures [^pg-driver-tests].
+Implement `PyAsyncPostgresClient` (`AsyncPostgresClient` in `vertebra._postgres`) in `src/rs/vertebra-postgres/src/async_client.rs`, register it alongside `vertebra_db::py_async::{DbCompletionDrainer, RustDbTaskAwaitable}` in `src/rs/vertebra-postgres/src/lib.rs`, and declare `@final` `AsyncPostgresClient` (`def __new__(cls, *, ...) -> AsyncPostgresClient`) in `src/py/vertebra/_postgres.pyi` while preserving `__version__: str`, `FREE_THREADED: bool`, and `GIL_USED: bool` [^py-async-rs] [^pg-contracts]. `AsyncPostgresClient` shares the exact 26-parameter keyword-only constructor and `SessionHandle` engine with `SyncPostgresClient`, uses dedicated loop attribute `"_vertebra_postgres_completion_drainer"`, commits `PendingSession` exclusively inside `map_ok` on the Python event loop thread, and guarantees deterministic socket/state cleanup across in-flight cancellation, queued-completion cancellation races, and `add_done_callback` setup failures [^pg-driver-tests].
 
 ## Bounded Read Manifest
 
-- `src/rs/vertebra-postgres/src/sync_client.rs` — `extract_string_map` and shared 25-parameter `PostgresConfig` construction from `ch07:t02`.
+- `src/rs/vertebra-postgres/src/sync_client.rs` — `extract_string_map` and shared 26-parameter `PostgresConfig` construction from `ch07:t02`.
 - `src/rs/vertebra-postgres/src/session.rs` — `SessionHandle`, `BeginConnect::{Attempt(ConnectAttempt), AlreadyReady}`, `PendingSession`, and `parameters()`.
 - `src/rs/vertebra-db/src/py_async.rs` — `spawn_rust_db_task_with_attr`, `RustDbTaskAwaitable`, `DbCompletionDrainer`, and `ch07:t01` `ArmedWorkerGuard` [^py-async-rs].
 - `src/py/vertebra/_postgres.pyi` — Stub file updated in `ch07:t02`.
@@ -75,7 +75,7 @@ Implement `PyAsyncPostgresClient` (`AsyncPostgresClient` in `vertebra._postgres`
 - `src/rs/vertebra-postgres/src/async_client.rs`:
   - `pub const POSTGRES_COMPLETION_DRAINER_ATTR: &str = "_vertebra_postgres_completion_drainer";`
   - Annotate `PyAsyncPostgresClient` with conditional `freelist = 128` (`not(Py_GIL_DISABLED)`), `name = "AsyncPostgresClient"`, `module = "vertebra._postgres"`, `frozen`, `immutable_type`, wrapping `session: Arc<SessionHandle>`.
-  - `#[new]` with the exact same 25 keyword-only parameters and defaults as `PySyncPostgresClient` (`user`, `database`, `host = "localhost"`, `port = 5432`, `password = None`, `unix_socket = None`, `sslmode = "verify-full", ca_pem = None, client_cert_pem = None, client_key_pem = None, server_name = None, channel_binding = "prefer", connect_timeout = 10.0, application_name = "vertebra", session_gucs = None, keepalives = true, keepalives_idle = None, keepalives_interval = None, keepalives_count = None, cloud_sql_instance = None, cloud_sql_ip_type = "PRIVATE", alloydb_instance_uri = None, alloydb_ip_type = "PRIVATE", enable_iam_auth = false, cloud_auth_options = None, iam_auth_options = None`).
+  - `#[new]` with the exact same 26 keyword-only parameters and defaults as `PySyncPostgresClient` (`user`, `database`, `host = "localhost"`, `port = 5432`, `password = None`, `unix_socket = None`, `sslmode = "verify-full", ca_pem = None, client_cert_pem = None, client_key_pem = None, server_name = None, channel_binding = "prefer", connect_timeout = 10.0, application_name = "vertebra", session_gucs = None, keepalives = true, keepalives_idle = None, keepalives_interval = None, keepalives_count = None, cloud_sql_instance = None, cloud_sql_ip_type = "PRIVATE", alloydb_instance_uri = None, alloydb_ip_type = "PRIVATE", enable_iam_auth = false, cloud_auth_options = None, iam_auth_options = None`).
   - `pub fn connect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>>`:
     - `BeginConnect`, `ConnectAttempt`, and `PendingSession` own cloned Arc-backed session configuration/state without caller lifetimes; both the worker future and pending result meet `Send + 'static`.
     - Reserve synchronously via `self.session.begin_connect().map_err(|e| postgres_error_to_py(py, e))?`.

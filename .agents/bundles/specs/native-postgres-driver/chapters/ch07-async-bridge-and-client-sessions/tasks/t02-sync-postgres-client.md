@@ -3,7 +3,7 @@ type: Task
 id: "native-postgres-driver:ch07:t02"
 chapter_id: ch07-async-bridge-and-client-sessions
 title: Expose physical synchronous native PostgreSQL sessions
-description: Implement PySyncPostgresClient (SyncPostgresClient in vertebra._postgres) and _postgres.pyi stubs with the complete 25-parameter constructor, GIL-detached connect/close lifecycle, copied parameter snapshots, and canonical core exception mapping.
+description: Implement PySyncPostgresClient (SyncPostgresClient in vertebra._postgres) and _postgres.pyi stubs with the complete 26-parameter constructor, GIL-detached connect/close lifecycle, copied parameter snapshots, and canonical core exception mapping.
 status: stable
 state: pending
 priority: P1
@@ -50,7 +50,7 @@ sources:
     title: Canonical PostgreSQL driver unit test module
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
-    title: Complete 25-parameter SyncPostgresClient constructor and lifecycle contract
+    title: Complete 26-parameter SyncPostgresClient constructor and lifecycle contract
 tags:
   - postgres
   - pyo3
@@ -62,7 +62,7 @@ tags:
 
 ## Objective & Scope Boundary
 
-Implement `PySyncPostgresClient` (`SyncPostgresClient` in `vertebra._postgres`) in `src/rs/vertebra-postgres/src/sync_client.rs`, register it in `src/rs/vertebra-postgres/src/lib.rs`, and publish its exact `@final` `def __new__(cls, *, ...) -> SyncPostgresClient` type signature in `src/py/vertebra/_postgres.pyi` (preserving `__version__: str`, `FREE_THREADED: bool`, and `GIL_USED: bool`) [^py-async-rs] [^spanner-py] [^pg-contracts]. `SyncPostgresClient` exposes the complete 25-parameter keyword-only constructor from `contracts.md` (pure validation and `Mapping[str, str]` snapshot copy without network I/O), drives `connect()` and `close()` inside `py.detach(|| block_on_db(...))`, exposes `closed: bool` and copied `parameters: dict[str, str]` without leaking `BackendKeyData`, and converts `PostgresError` through `ch05:t02` `errors.rs::postgres_error_to_py` while attached to Python [^pg-driver-tests]. `AsyncPostgresClient` belongs to `ch07:t03`, and exhaustive constructor characterization belongs to `ch08:t01`.
+Implement `PySyncPostgresClient` (`SyncPostgresClient` in `vertebra._postgres`) in `src/rs/vertebra-postgres/src/sync_client.rs`, register it in `src/rs/vertebra-postgres/src/lib.rs`, and publish its exact `@final` `def __new__(cls, *, ...) -> SyncPostgresClient` type signature in `src/py/vertebra/_postgres.pyi` (preserving `__version__: str`, `FREE_THREADED: bool`, and `GIL_USED: bool`) [^py-async-rs] [^spanner-py] [^pg-contracts]. `SyncPostgresClient` exposes the complete 26-parameter keyword-only constructor from `contracts.md` (pure validation and `Mapping[str, str]` snapshot copy without network I/O), drives `connect()` and `close()` inside `py.detach(|| block_on_db(...))`, exposes `closed: bool` and copied `parameters: dict[str, str]` without leaking `BackendKeyData`, and converts `PostgresError` through `ch05:t02` `errors.rs::postgres_error_to_py` while attached to Python [^pg-driver-tests]. `AsyncPostgresClient` belongs to `ch07:t03`, and exhaustive constructor characterization belongs to `ch08:t01`.
 
 ## Bounded Read Manifest
 
@@ -134,7 +134,7 @@ Implement `PySyncPostgresClient` (`SyncPostgresClient` in `vertebra._postgres`) 
 
 ## Acceptance Criteria
 
-- [ ] `SyncPostgresClient` is exported from `vertebra._postgres` (`frozen`, `immutable_type`, conditional `freelist`) with the exact 25-parameter keyword-only signature in `_postgres.pyi` passing `mypy.stubtest` (R6).
+- [ ] `SyncPostgresClient` is exported from `vertebra._postgres` (`frozen`, `immutable_type`, conditional `freelist`) with the exact 26-parameter keyword-only signature in `_postgres.pyi` passing `mypy.stubtest` (R6).
 - [ ] `connect()` and `close()` release the GIL during blocking runtime waits, enforce `Configured -> Connecting -> Ready -> Closed` lifecycle rules, copy `parameters` without exposing backend keys, and map errors to exact `vertebra._vertebra` exception classes (R6).
 - [ ] Commit `feat(postgres): expose synchronous physical connection client` passes `pytest -k native_sync`, `stubtest`, and `cargo test` (R6).
 

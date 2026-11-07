@@ -47,11 +47,11 @@ research:
 plan_revision: 4
 plan_commit: 45ff9563
 state_revision: 0
-last_verified_checkpoint: null
+last_verified_checkpoint: 08a6295b
 last_reviewed_chapter: null
 last_reviewed_commit: null
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-07T16:40:00Z"
+updated_at: "2026-11-07T20:55:31Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:40:00Z"
@@ -104,14 +104,14 @@ tags:
 <!-- truth: start -->
 - **Standalone Optional Wheel**: `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owns live PostgreSQL Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`) without linking database clients into `vertebra-core` [^pg-conn-rs] [^pg-core-rs].
 - **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB Admin discovery + mTLS + IAM), lossless codecs, statement caching, single-`Sync` `pipeline()`, binary `COPY`, native `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, and `pgoutput` v1 logical replication ship together with full `psycopg`/`asyncpg` removal [^py-async-rs] [^arrow-shm-rs] [^pg-driver-py] [^sqlspec-py].
-- **Nested Chapter Roadmap (`plan_revision: 4`)**: Decomposed into `31` dependency-ordered chapters (`ch01`–`ch31`, `111` vertical-slice tasks, each owning `<= 3` production files) anchored at `plan_commit: 45ff9563` with `current_chapter: ch01-wheel-scaffold-and-config` (`4/4` tasks complete; checkpoint and review pending).
+- **Nested Chapter Roadmap (`plan_revision: 4`)**: Decomposed into `31` dependency-ordered chapters (`ch01`–`ch31`, `111` vertical-slice tasks, each owning `<= 3` production files) anchored at `plan_commit: 45ff9563` with `current_chapter: ch01-wheel-scaffold-and-config` (`4/4` tasks complete; checkpoint verified at `08a6295b`; correctness and fresh quality reviews pending).
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
 ### 1.1 Problem Statement & Upstream Execution Baseline
 
-The governing scope rule is: **“Keep the complete driver in one PR.”** All `31` chapters (`111` worksheets) execute on `feat/native-postgres-driver`, stacked above `feat/storage-updates` (`dd432f18` / `cdb978d3`) and `main @ 077a3fe9`. The database foundation ([PR #76](https://github.com/cofin/vertebra/pull/76), `21c99f95`), engine primitives ([PR #77](https://github.com/cofin/vertebra/pull/77), `80ff8a65`), post-merge review remediation ([PR #80](https://github.com/cofin/vertebra/pull/80), `2b737240`), runtime structure ([PR #92](https://github.com/cofin/vertebra/pull/92), `d2fa5072`), and MCP/WebMCP core ([PR #94](https://github.com/cofin/vertebra/pull/94), `077a3fe9`) are squash-merged on `main`; those prior PRs do not validate this driver.
+The governing scope rule is: **“Keep the complete driver in one PR.”** All `31` chapters (`111` worksheets) execute on `feat/native-postgres-completion`, stacked above `feat/storage-updates` (`dd432f18` / `cdb978d3`) and `main @ 077a3fe9`. The database foundation ([PR #76](https://github.com/cofin/vertebra/pull/76), `21c99f95`), engine primitives ([PR #77](https://github.com/cofin/vertebra/pull/77), `80ff8a65`), post-merge review remediation ([PR #80](https://github.com/cofin/vertebra/pull/80), `2b737240`), runtime structure ([PR #92](https://github.com/cofin/vertebra/pull/92), `d2fa5072`), and MCP/WebMCP core ([PR #94](https://github.com/cofin/vertebra/pull/94), `077a3fe9`) are squash-merged on `main`; those prior PRs do not validate this driver.
 
 The complete charter decomposes into `31` nested chapters ([chapters/index.md](chapters/index.md)) so every worksheet remains bounded (`<= 3` production files, `<= 250` estimated LOC) and produces one signed local conventional commit without splitting delivery across partial PRs. No chapter constitutes a partial release; atomic Python adapter cutover (`ch27`), strict PG14–18 and live-service conformance (`ch28`), outside-checkout wheel and benchmark gates (`ch29`), user and OKF documentation synchronization (`ch30`), and routed correctness plus fresh quality reviews (`ch31`) are required before `/flow:finish`. No production implementation begins while `plan_commit` is null, and hosted writes require separate explicit user permission.
 
@@ -319,10 +319,10 @@ Every worksheet (`111` total across `31` chapters) executes in one bounded invoc
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dabd3ca2` above `main @ 077a3fe9`; `state: active`, `has_chapters: true`, `plan_revision: 4`, `plan_commit: 45ff9563`.
-- **Active Chapter & Review**: [ch01-wheel-scaffold-and-config](chapters/ch01-wheel-scaffold-and-config/spec.md) (`4/4` tasks complete; checkpoint and review pending); all `31` chapters (`111` vertical-slice tasks) have `planning_status: complete`; `ch01` is active and `ch02`–`ch31` are planned (`3/111` completed; `ch01:t01`–`t03` verified, `ch01:t04` in progress).
+- **Verified Baseline**: `HEAD @ 08a6295b` above `main @ 077a3fe9`; `state: active`, `has_chapters: true`, `plan_revision: 4`, `plan_commit: 45ff9563`.
+- **Active Chapter & Review**: [ch01-wheel-scaffold-and-config](chapters/ch01-wheel-scaffold-and-config/spec.md) (`4/4` tasks complete; checkpoint verified at `08a6295b`; correctness and fresh quality reviews pending); all `31` chapters (`111` vertical-slice tasks) have `planning_status: complete`; `ch01` is active and `ch02`–`ch31` are planned (`4/111` completed; `ch01:t01`–`t04` verified, `107` tasks pending).
 - **Documentation & OKF Status**: `[0/11 files documented]`, scheduled in [ch30-user-and-domain-docs](chapters/ch30-user-and-domain-docs/spec.md) (`ch30:t01`–`ch30:t04`), followed by final complete-driver review and acceptance in [ch31-final-review-and-release-gate](chapters/ch31-final-review-and-release-gate/spec.md) (`ch31:t01`).
-- **Delivery & Next Action**: Complete single-PR delivery on `feat/native-postgres-driver`; intermediate chapters never trigger early `/flow:finish` or `/flow:archive`. Next canonical command: `/flow:implement native-postgres-driver`.
+- **Delivery & Next Action**: Complete single-PR delivery on `feat/native-postgres-completion`; intermediate chapters never trigger early `/flow:finish` or `/flow:archive`. Next canonical command: `/flow:implement native-postgres-driver`.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` — Shared PostgreSQL wire frame helpers and SHM admission metadata in `vertebra-db`.

@@ -13,10 +13,10 @@ current_task: null
 plan_revision: 4
 plan_commit: 45ff9563
 state_revision: 0
-last_verified_checkpoint: null
+last_verified_checkpoint: 08a6295b
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T16:40:00Z"
+updated_at: "2026-11-07T20:55:31Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:40:00Z"
@@ -142,14 +142,14 @@ Progress: `[0/0 files documented in ch01]` (`src/py/vertebra/_postgres.pyi` modu
 - [x] [05fff946] native-postgres-driver:ch01:t03 — Wire vertebra-postgres wheel, _postgres.pyi stub, and Makefile build/test targets (tasks/t03-wheel-stub-and-makefile-matrix.md)
 - [x] [dabd3ca2] native-postgres-driver:ch01:t04 — Implement pure PostgresConfig validation and sanitized PostgresError categories (tasks/t04-configuration-and-error-categories.md)
 
-**Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings && make dev && make postgres-wheel-check && make postgres-test && uv run --no-sync python -m mypy.stubtest vertebra._postgres` exits `0`.
+**Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings && make dev && make postgres-wheel-check && make postgres-test && uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._bigquery vertebra._spanner vertebra._postgres` exits `0` at `08a6295b` (`7` PostgreSQL tests passing) with `UV_NO_SYNC=1` and the dedicated Python environment. PostgreSQL Rust test commands hold the shared-memory test lock.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dabd3ca2`; chapter `state: active`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: All four tasks are complete; the chapter recovery checkpoint, Markdown synchronization, correctness review, and fresh quality review remain.
-- **Documentation & OKF Status**: `[0/0 files documented in ch01]`; `_postgres.pyi` and strict wheel/sdist checks verified in `t03`, root `pyproject.toml`/`uv.lock`/`areas.toml` wired in `ch08:t02`–`t04`, and full docs/OKF scheduled in `ch30`.
-- **Downstream Dependents**: Unblocks `ch02-wire-codec-and-session-startup` (`ch02:t01` depends on `ch01:t04`).
+- **Verified Baseline**: `HEAD @ 08a6295b`; chapter `state: active`, `planning_status: complete`.
+- **Remaining Tasks in Chapter**: All four tasks are complete and the chapter recovery checkpoint exits `0` at `08a6295b`; correctness review and fresh quality review remain before chapter completion.
+- **Documentation & OKF Status**: `[0/0 files documented in ch01]`; `_postgres.pyi` and strict wheel/sdist checks verified in `t03`, root `pyproject.toml`/`uv.lock`/`areas.toml` wiring scheduled in `ch08:t02`–`t04`, and full docs/OKF scheduled in `ch30`.
+- **Downstream Dependents**: `ch02-wire-codec-and-session-startup` (`ch02:t01` depends on `ch01:t04`) remains planned until chapter correctness and fresh quality reviews pass.
 
 [^ws-cargo]: `src/rs/Cargo.toml` — Rust workspace members and shared crate dependency versions.
 [^spanner-wheel]: `src/rs/vertebra-spanner/pyproject.toml` — Reference optional Maturin namespace wheel configuration.
