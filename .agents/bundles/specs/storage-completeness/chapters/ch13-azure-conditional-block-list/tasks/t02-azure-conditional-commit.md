@@ -21,8 +21,9 @@ files:
 - src/rs/vertebra-storage/src/conditional.rs
 tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
+- src/rs/vertebra-storage/src/azure_publication.rs
 estimated_loc: 200
-plan_revision: 4
+plan_revision: 5
 plan_commit: null
 state_revision: 0
 claimed_by: null
@@ -69,6 +70,8 @@ Grounded contract evidence: [^research].
 
 Complete using PutBlockList through CloudRequestClient with `<Latest>` block identifiers from SDK PartIds. Send If-None-Match:* for Create and If-Match expected for Match; NotMatch sends native If-None-Match:<forbidden ETag> directly; Azure supports that exact condition, so no HEAD/unconditional publication is needed. Carry content type, metadata attributes and tags in commit headers; preserve SDK-authorized conditional/header naming. Parse actual ETag/version response into PutResult. Map create conflict versus update precondition accurately; permission errors remain genuine errors. Abort/cancellation retain staged-block ownership according to provider cleanup capability and documented Azure uncommitted-block lifecycle, with no fabricated explicit delete of competing committed blob.
 
+Use the concrete SDK credential injection and actual wrapper constructor owned by t01 for end-to-end acceptance. Fetch `store.credentials().get_credential()` immediately before every commit attempt, run public `AzureAuthorizer::new(credential.as_ref(), &account).authorize(&mut request)`, preserve `credential.sensitive_request()` semantics, then call the live `CloudRequestClient::execute`; no custom SAS URL/signature logic or cached Authorization. Real local HTTP responses distinguish genuine 403 permission denial from 412 conditional conflict. Error context includes only static provider/operation, status and safe recognized protocol code; never serialize the signed URI, SAS query, Authorization, credential Debug or untrusted echoed response body/source chain. The real SAS fixture's responder intentionally echoes the signed request target in its rejection body, so the test proves actual remote-error redaction rather than scanning an invented error string.
+
 Caller → seam → collaborator: public sync/async object-store or adapter operation → owned symbols above → existing native engine/provider or upstream framework contract. Preserve public APIs outside this task.
 
 ## Edge Cases & Error Semantics
@@ -86,7 +89,12 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 | Returned result | Commit response ETag/version differ from earlier head | PutResult returns commit response values |
 | Cancellation | Cancel before commit | No new target visible; safe cleanup/lifecycle evidence |
 
+| Configured commit transport and refresh | Real wrapper from t01 with local endpoint, allow_http/header options and rotating SDK bearer provider; two explicitly authorized commit attempts | Captured actual block-list requests retain configured options and fresh token identity; no mocked wrapper/client and no implicit retry of an ambiguous completion. |
+| SAS error redaction and classification | Real SDK SASToken provider; responder returns 403 with body echoing full signed target, then a separate 412 case | Permission error remains distinct from typed CAS conflict; exception/debug/source output excludes signed URI, SAS values, Authorization and echoed secrets while preserving provider, operation and status. |
+
 ## Verification
+
+Run the owned inline wrapper tests as well as canonical engine regressions: `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --lib azure_publication`.
 
 Record the failing public regression before implementation and the passing result after. Execute each command below in this worktree; the storage target directory is reserved and shared SHM tests use the host lock.
 
@@ -105,7 +113,7 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Notes & Discoveries
 
-The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+The executable transport staging and provider acceptance contracts await independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `src/rs/vertebra-storage/src/azure_publication.rs` — Current repository source for this task.
 

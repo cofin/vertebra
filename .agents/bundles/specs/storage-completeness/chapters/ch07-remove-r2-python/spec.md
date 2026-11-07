@@ -9,7 +9,7 @@ state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: storage-completeness:ch07:t02
+current_task: storage-completeness:ch07:t03
 plan_revision: 4
 plan_commit: ddfb11f2
 state_revision: 0
@@ -84,7 +84,7 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 ## 5. Implementation Plan
 
 - [x] [4486f6fe] storage-completeness:ch07:t01 — Remove R2 from framework backend classifiers (tasks/t01-framework-classifiers.md)
-- [ ] storage-completeness:ch07:t02 — Delete public R2Config and from_r2 convenience APIs (tasks/t02-withdraw-config-and-exports.md)
+- [x] [75f18e3b] storage-completeness:ch07:t02 — Delete public R2Config and from_r2 convenience APIs (tasks/t02-withdraw-config-and-exports.md)
 - [ ] storage-completeness:ch07:t03 — Reject removed R2 URIs before staging local-path resolution (tasks/t03-staging-reject-r2.md)
 
 **Chapter Recovery Checkpoint:** run every task's focused verification, then correctness review and a fresh quality review before closing this chapter. `/flow:implement storage-completeness ch07-remove-r2-python` executes its ready worksheet.

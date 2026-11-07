@@ -10,7 +10,7 @@ planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
-plan_revision: 4
+plan_revision: 5
 plan_commit: null
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
@@ -53,9 +53,14 @@ Grounded contract evidence: [^research].
 
 Add private `S3PublicationUpload` holding Arc<AmazonS3>, resolved bucket/endpoint/region/client options, upload id, ordered Vec<PartId> (identifiers only), condition and attributes. Initiate multipart with the SDK transport boundary and fresh AwsAuthorizer credentials, carrying content_type and user attributes/tags in CreateMultipartUpload request. SDK public `MultipartStore::put_part(path,&id,part_idx,PutPayload)` uploads parts and `abort_multipart` cleans them; avoid hidden/private SDK methods. Metadata-bearing initialization returns real upload id; do not use default trait create_multipart when it loses metadata. Preserve normal/custom S3 endpoints and existing signing/HTTP options. This task prepares and tests initialization/part/abort independently before conditional completion.
 
+This task activates the staged transport module: remove only the ch10:t02 `#[cfg(test)]` gate on `mod cloud_request;` in owned `lib.rs` as the first S3 initiation caller is wired. Keep all transport symbols crate-private and run normal non-test `cargo check` plus all-target Clippy; no test-only import, feature assumption, unconsumed helper or broad dead-code allowance may survive activation.
+
+The wrapper's actual constructor accepts a retained concrete SDK store: `async S3PublicationUpload::begin(store: Arc<AmazonS3>, config: S3PublicationConfig, path: StorePath, options: PutMultipartOptions, condition: PublishCondition) -> Result<Self, ObjectStoreError>`, with private `S3PublicationConfig { bucket: String, region: String, endpoint: String, client_options: ClientOptions }`. Production dispatch and inline native tests use this same constructor. Inline tests build a real `AmazonS3Builder` with the configured local endpoint and `.with_credentials(rotating_provider)`; use `Arc<dyn CredentialProvider<Credential = AwsCredential>>` only as the external credential supplier, never replace the wrapper, HttpClient or SDK authorizer. Canonical engine tests exercise ordinary supported configuration. The actual initiation, SDK part uploads and abort must reach the same local responder; each request obtains the SDK's current credential, and the responder captures distinct access-key/token identities after rotation. A configured header/proxy exclusion and allow_http setting must reach initiation through the newly activated transport, not merely an unrelated ordinary SDK read. This assigns the end-to-end transport/refresh proof after the provider caller exists.
+
 ### R2: Publish S3 multipart with conditional completion and actual result
 
-`S3PublicationUpload::complete` sends CompleteMultipartUpload ordered PartNumber/ETag XML using exact SDK PartId content_id values and If-None-Match:* for Create or If-Match:<expected> for Match. Nonmatching ETag semantics use a checked current version predicate and conditional completion retry rather than HEAD→unconditional overwrite; preserve absence handling with conditional Create. Parse response body even on 200 and reject embedded Error XML. Parse actual returned ETag/version into PutResult; do not synthesize final etag via a later racy HEAD. Preserve init metadata and caller content_type. 412 maps typed Precondition (Create conflicts AlreadyExists where required). Never publish through generic copy-if-not-exists because it loses update semantics/results/metadata.
+`S3PublicationUpload::complete` sends CompleteMultipartUpload ordered PartNumber/ETag XML using exact SDK PartId content_id values and If-None-Match:* for Create or If-Match:<expected> for Match. S3 accepts only `If-None-Match: *`, never an arbitrary forbidden tag. For NotMatch(tag), HEAD current state, reject equality, then fence completion with If-Match(current ETag), or Create when absent. A safe 412 retry re-evaluates the logical predicate and reuses the MPU only where provider behavior proves that upload ID remains valid; bound to eight attempts and return a typed CAS conflict on exhaustion, without claiming the forbidden tag matched. Known409 remains the no-replay failure contract of t03. Never use HEAD→unconditional overwrite or blindly retry ambiguous transport/200 outcomes. Parse response body even on 200 and reject embedded Error XML. Parse actual returned ETag/version into PutResult; do not synthesize final etag via a later racy HEAD. Preserve init metadata and caller content_type. 412 maps typed Precondition (Create conflicts AlreadyExists where required). Never publish through generic copy-if-not-exists because it loses update semantics/results/metadata.
+
 
 ### R3: Surface S3 completion conflicts without hidden replay
 

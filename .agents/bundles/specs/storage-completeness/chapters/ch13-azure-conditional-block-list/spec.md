@@ -10,7 +10,7 @@ planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
-plan_revision: 4
+plan_revision: 5
 plan_commit: null
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
@@ -53,9 +53,13 @@ Grounded contract evidence: [^research].
 
 Add private AzurePublicationUpload with Arc<MicrosoftAzure>, resolved account/container/endpoint, SDK MultipartId, ordered PartIds, condition, attributes/tags and SDK transport. Initiate and upload blocks through public MultipartStore APIs, preserving each returned content_id exactly for final block list. Credential access is store.credentials().get_credential() and authorization uses public AzureAuthorizer, covering access-key, bearer and SAS credential forms without handcrafted signing. Carry caller content_type/metadata/tags to t02 commit. Retain cleanup ownership after part failures and cancellation.
 
+The real wrapper constructor accepts `Arc<MicrosoftAzure>` rather than an erased injected store: `async AzurePublicationUpload::begin(store: Arc<MicrosoftAzure>, config: AzurePublicationConfig, path: StorePath, options: PutMultipartOptions, condition: PublishCondition) -> Result<Self, ObjectStoreError>`, with private `AzurePublicationConfig { account: String, container: String, endpoint: String, client_options: ClientOptions }`. Production dispatch and inline wrapper tests use the same constructor. Build test SDK stores via `MicrosoftAzureBuilder::with_account("unit").with_container_name("assets").with_endpoint(local_url).with_allow_http(true).with_credentials(provider).build()`. For SAS use `Arc::new(StaticCredentialProvider::new(AzureCredential::SASToken(vec![("sig".into(), "test-only-signature".into())])))`; bearer uses `AzureCredential::BearerToken("test-only-token".into())`. For refresh, the external `CredentialProvider<Credential = AzureCredential>` collaborator returns distinct credentials on successive lookups. No public Python config field, engine test hook or compatibility API is added. The real SDK block requests reach a local responder and preserve endpoint/client options; ch13:t02 uses this same concrete configuration for conditional commit and error-redaction acceptance.
+
 ### R2: Commit Azure block list atomically with metadata and conditions
 
 Complete using PutBlockList through CloudRequestClient with `<Latest>` block identifiers from SDK PartIds. Send If-None-Match:* for Create and If-Match expected for Match; NotMatch sends native If-None-Match:<forbidden ETag> directly; Azure supports that exact condition, so no HEAD/unconditional publication is needed. Carry content type, metadata attributes and tags in commit headers; preserve SDK-authorized conditional/header naming. Parse actual ETag/version response into PutResult. Map create conflict versus update precondition accurately; permission errors remain genuine errors. Abort/cancellation retain staged-block ownership according to provider cleanup capability and documented Azure uncommitted-block lifecycle, with no fabricated explicit delete of competing committed blob.
+
+Use the concrete SDK credential injection and actual wrapper constructor owned by t01 for end-to-end acceptance. Fetch `store.credentials().get_credential()` immediately before every commit attempt, run public `AzureAuthorizer::new(credential.as_ref(), &account).authorize(&mut request)`, preserve `credential.sensitive_request()` semantics, then call the live `CloudRequestClient::execute`; no custom SAS URL/signature logic or cached Authorization. Real local HTTP responses distinguish genuine 403 permission denial from 412 conditional conflict. Error context includes only static provider/operation, status and safe recognized protocol code; never serialize the signed URI, SAS query, Authorization, credential Debug or untrusted echoed response body/source chain. The real SAS fixture's responder intentionally echoes the signed request target in its rejection body, so the test proves actual remote-error redaction rather than scanning an invented error string.
 
 Caller → seam → collaborator: public storage/framework calls → owned deep module boundary → native SDK, transport or upstream framework. Public signatures remain stable except the deliberate removal of first-class R2 and addition of typed PreconditionError.
 

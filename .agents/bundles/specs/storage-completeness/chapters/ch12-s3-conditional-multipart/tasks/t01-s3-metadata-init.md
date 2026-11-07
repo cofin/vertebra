@@ -27,8 +27,9 @@ files:
 - src/rs/vertebra-storage/src/lib.rs
 tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
+- src/rs/vertebra-storage/src/s3_publication.rs
 estimated_loc: 220
-plan_revision: 4
+plan_revision: 5
 plan_commit: null
 state_revision: 0
 claimed_by: null
@@ -76,6 +77,10 @@ Grounded contract evidence: [^research].
 
 Add private `S3PublicationUpload` holding Arc<AmazonS3>, resolved bucket/endpoint/region/client options, upload id, ordered Vec<PartId> (identifiers only), condition and attributes. Initiate multipart with the SDK transport boundary and fresh AwsAuthorizer credentials, carrying content_type and user attributes/tags in CreateMultipartUpload request. SDK public `MultipartStore::put_part(path,&id,part_idx,PutPayload)` uploads parts and `abort_multipart` cleans them; avoid hidden/private SDK methods. Metadata-bearing initialization returns real upload id; do not use default trait create_multipart when it loses metadata. Preserve normal/custom S3 endpoints and existing signing/HTTP options. This task prepares and tests initialization/part/abort independently before conditional completion.
 
+This task activates the staged transport module: remove only the ch10:t02 `#[cfg(test)]` gate on `mod cloud_request;` in owned `lib.rs` as the first S3 initiation caller is wired. Keep all transport symbols crate-private and run normal non-test `cargo check` plus all-target Clippy; no test-only import, feature assumption, unconsumed helper or broad dead-code allowance may survive activation.
+
+The wrapper's actual constructor accepts a retained concrete SDK store: `async S3PublicationUpload::begin(store: Arc<AmazonS3>, config: S3PublicationConfig, path: StorePath, options: PutMultipartOptions, condition: PublishCondition) -> Result<Self, ObjectStoreError>`, with private `S3PublicationConfig { bucket: String, region: String, endpoint: String, client_options: ClientOptions }`. Production dispatch and inline native tests use this same constructor. Inline tests build a real `AmazonS3Builder` with the configured local endpoint and `.with_credentials(rotating_provider)`; use `Arc<dyn CredentialProvider<Credential = AwsCredential>>` only as the external credential supplier, never replace the wrapper, HttpClient or SDK authorizer. Canonical engine tests exercise ordinary supported configuration. The actual initiation, SDK part uploads and abort must reach the same local responder; each request obtains the SDK's current credential, and the responder captures distinct access-key/token identities after rotation. A configured header/proxy exclusion and allow_http setting must reach initiation through the newly activated transport, not merely an unrelated ordinary SDK read. This assigns the end-to-end transport/refresh proof after the provider caller exists.
+
 Caller → seam → collaborator: public sync/async object-store or adapter operation → owned symbols above → existing native engine/provider or upstream framework contract. Preserve public APIs outside this task.
 
 ## Edge Cases & Error Semantics
@@ -98,6 +103,8 @@ Record the failing public regression before implementation and the passing resul
 
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo fmt --manifest-path src/rs/Cargo.toml --all --check`
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --test storage_engine_tests`
+- `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo check --manifest-path src/rs/Cargo.toml -p vertebra-storage --lib`
+- `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --lib s3_publication`
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets -- -D warnings`
 
 Record exact exit statuses, native build checkpoint and any platform limitation in verification_evidence. Review closure uses these results, never planning-only structural validation.
@@ -111,7 +118,7 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Notes & Discoveries
 
-The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+The executable transport staging and provider acceptance contracts await independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `src/rs/vertebra-storage/src/s3_publication.rs` — Current repository source for this task.
 

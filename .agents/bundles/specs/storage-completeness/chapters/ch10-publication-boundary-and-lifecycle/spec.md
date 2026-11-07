@@ -10,7 +10,7 @@ planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
-plan_revision: 4
+plan_revision: 5
 plan_commit: null
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
@@ -55,11 +55,24 @@ Add private `conditional.rs` and `mod conditional;` in lib.rs. `ObjectStoreEngin
 
 ### R2: Reuse SDK HTTP transport and credential authorizers
 
-Add private `cloud_request.rs` with `CloudRequestClient { client: object_store::client::HttpClient }`; construction uses the public `ReqwestConnector` through `HttpConnector::connect(&ClientOptions)` and execute uses `HttpClient::execute(HttpRequest)` with HttpRequestBody. Retain the exact resolved SDK ClientOptions (HTTP allow flag, endpoint, proxy exclusions, certificates, timeouts and headers where configured) rather than reqwest::Client::new. The private request execution boundary accepts SDK-built `HttpRequest`, uses provider.credentials().get_credential() per attempt and `AwsAuthorizer::new(...).authorize(request,None)` / `AzureAuthorizer::new(...).authorize(request)` or GCS bearer. Reuse refresh/sensitive request semantics and operation-specific safe retry classification. Never reimplement AWS/Azure signing or fork/vendor object_store. This transport module is consumed by S3 init/complete, Azure commit and GCS rewrite tasks.
+Add the real private `cloud_request.rs` implementation with `pub(crate) struct CloudRequestClient { client: object_store::client::HttpClient }`. Its constructors and execution boundary are:
+
+- `CloudRequestClient::new(options: &ClientOptions) -> Result<Self, ObjectStoreError>` calls public `ReqwestConnector::connect(options)` through `HttpConnector`; retain the exact resolved HTTP, proxy, certificate, timeout and header configuration.
+- `async fn execute(&self, request: HttpRequest, operation: &'static str) -> Result<HttpResponse, ObjectStoreError>` executes the SDK request with `HttpRequestBody`. It returns non-2xx responses intact for the owning provider's status/predicate parser. It does not decide replay or retry publication.
+- `async fn execute_aws(&self, request: HttpRequest, credentials: &AwsCredentialProvider, region: &str, operation: &'static str) -> Result<HttpResponse, ObjectStoreError>` obtains `credentials.get_credential().await` on every invocation, uses `AwsAuthorizer::new(credential.as_ref(), "s3", region).authorize(&mut request, None)`, then delegates to `execute`. S3 is its first production consumer. Azure and GCS wrappers perform their own SDK credential lookup/authorization before calling `execute`; do not introduce unused provider helpers here.
+
+Map transport and credential-acquisition failures to credential-free storage errors with static operation and SDK error-kind context; never format or attach a signed request URI, Authorization, credential Debug, raw transport source chain or server body that can echo secrets. HTTP status parsing stays with the provider, which may preserve safe status/code context without forwarding untrusted response bodies. No custom signing, SDK fork or replacement reqwest client is permitted.
+
+In `lib.rs`, register this complete module under exactly `#[cfg(test)] mod cloud_request;` for this task. Its real SDK/network tests compile through the library test target; it is not wired into runtime publication yet. ch12:t01 owns removal of this single test-only gate when the first actual S3 initiation caller lands. No broad dead-code allowance, public export, placeholder request implementation or claim of live provider publication is permitted. ch12:t01 must run normal non-test compilation and all-target Clippy after activation; unused future provider APIs are implemented only when their consuming wrapper exists.
+
+The owned test seam is this private external-request boundary, with inline `cloud_request::tests` in `cloud_request.rs`. For credential injection, construct a real `AmazonS3` via public `AmazonS3Builder::with_bucket_name("unit").with_region("us-east-1").with_endpoint(local_url).with_allow_http(true).with_credentials(provider).build()`; `provider` is an `Arc<dyn object_store::client::CredentialProvider<Credential = AwsCredential>>` test collaborator whose `get_credential` returns distinct `Arc<AwsCredential>` values on successive calls. Its only substitution is the external credential supplier. Pass `sdk.credentials()` to `execute_aws`, not an erased `ObjectStoreEngine::with_store`, a mock request client or a mocked signing function. A real local HTTP responder captures requests and supplies bounded response/failure sequences.
+
+Caller → seam → collaborator: inline native transport acceptance → real `CloudRequestClient::{execute,execute_aws}` → SDK connector/authorizer/credential provider and local HTTP responder. Public ObjectStore publication acceptance is assigned to ch12:t01 and ch13:t01–t02 after their implementations exist.
+
 
 ### R3: Retain multipart abort ownership across completion errors and cancellation
 
-`MultipartUploadSession::complete` restores the upload handle to self.upload on failed upload.complete(), just as tail-part failure does. Publication implementations retain stage/upload handles until published or cleanup succeeds, with async Drop ownership spawning bounded cleanup on the existing storage runtime for dropped/cancelled sessions. Rust/PyO3 sync and async wrappers leave abort callable after a failed complete; Python put_stream finally invokes abort on producer error or cancellation and never masks original failure. Completed success clears ownership; abort remains idempotent. No shared global Python lock or unbounded Drop blocking.
+`MultipartUploadSession::complete` borrows the retained handle through `self.upload.as_mut()` across tail upload and `upload.complete().await`, and clears it only after successful completion. An equivalent RAII restore-on-drop guard is permitted only if it also preserves the handle when the future is cancelled; taking ownership out and restoring only on returned Err is insufficient. Publication implementations retain stage/upload handles until published or cleanup succeeds, with async Drop ownership spawning bounded cleanup on the existing storage runtime for dropped/cancelled sessions. Rust/PyO3 sync and async wrappers leave abort callable after a failed complete; Python put_stream finally invokes abort on producer error or cancellation and never masks original failure. Completed success clears ownership; abort remains idempotent. No shared global Python lock or unbounded Drop blocking.
 
 ### R4: Frame arbitrary S3 and GCS producer chunks into valid bounded parts
 
@@ -87,7 +100,7 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 | Requirement | Task | Strategy | Verification |
 | --- | --- | --- | --- |
 | R1 | [ch10:t01](tasks/t01-publication-dispatch.md) | regression_tdd | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
-| R2 | [ch10:t02](tasks/t02-sdk-http-transport.md) | regression_tdd | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
+| R2 | [ch10:t02](tasks/t02-sdk-http-transport.md) | behavior_tdd | Real inline `cloud_request::tests`; runtime activation and provider acceptance by ch12:t01/ch13:t01–t02. |
 | R3 | [ch10:t03](tasks/t03-session-cleanup.md) | regression_tdd | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
 
 | R4 | [ch10:t04](tasks/t04-minimum-cloud-part-framing.md) | regression_tdd | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |

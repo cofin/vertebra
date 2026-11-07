@@ -9,10 +9,10 @@
 * [ch07 — Withdraw First-Class R2 Python APIs](ch07-remove-r2-python/spec.md) — [planned] Withdraw First-Class R2 Python APIs
 * [ch08 — Move OCI Chunk Ownership and Remove Native R2](ch08-remove-r2-native/spec.md) — [planned] Move OCI Chunk Ownership and Remove Native R2
 * [ch09 — Synchronize Supported Providers and Native Guarantees](ch09-r2-docs-and-knowledge/spec.md) — [planned] Synchronize Supported Providers and Native Guarantees
-* [ch10 — Native Publication Boundary and Cleanup Ownership](ch10-publication-boundary-and-lifecycle/spec.md) — [planned] Native Publication Boundary and Cleanup Ownership
+* [ch10 — Native Publication Boundary and Cleanup Ownership](ch10-publication-boundary-and-lifecycle/spec.md) — [planned] Real request transport is verified in library tests; ch12:t01 owns runtime activation. Revision-5 contracts await cold review.
 * [ch11 — Local Cross-Process Conditional Publication](ch11-local-atomic-publication/spec.md) — [planned] Local Cross-Process Conditional Publication
-* [ch12 — S3 Metadata Multipart and Conditional Completion](ch12-s3-conditional-multipart/spec.md) — [planned] S3 Metadata Multipart and Conditional Completion
-* [ch13 — Azure Conditional Multipart Block Commit](ch13-azure-conditional-block-list/spec.md) — [planned] Azure Conditional Multipart Block Commit
+* [ch12 — S3 Metadata Multipart and Conditional Completion](ch12-s3-conditional-multipart/spec.md) — [planned] Activate the staged transport with the first S3 initiation caller, then verify metadata, refreshed SDK credentials and conditional completion.
+* [ch13 — Azure Conditional Multipart Block Commit](ch13-azure-conditional-block-list/spec.md) — [planned] Real SDK credential forms, block identity, conditional commit and SAS error redaction remain provider acceptance obligations.
 * [ch14 — GCS Generation CAS and Staged Rewrite Publication](ch14-gcs-conditional-rewrite/spec.md) — [planned] GCS Generation CAS and Staged Rewrite Publication
 * [ch15 — OCI Conditional Commit and Multipart Limits](ch15-oci-conditional-multipart/spec.md) — [planned] OCI Conditional Commit and Multipart Limits
 * [ch16 — Native Acceptance and Original Chapter Reclosure](ch16-native-acceptance-and-reclosure/spec.md) — [planned] Native Acceptance and Original Chapter Reclosure

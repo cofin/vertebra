@@ -25,8 +25,9 @@ files:
 - src/rs/vertebra-storage/src/lib.rs
 tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
+- src/rs/vertebra-storage/src/azure_publication.rs
 estimated_loc: 180
-plan_revision: 4
+plan_revision: 5
 plan_commit: null
 state_revision: 0
 claimed_by: null
@@ -74,6 +75,8 @@ Grounded contract evidence: [^research].
 
 Add private AzurePublicationUpload with Arc<MicrosoftAzure>, resolved account/container/endpoint, SDK MultipartId, ordered PartIds, condition, attributes/tags and SDK transport. Initiate and upload blocks through public MultipartStore APIs, preserving each returned content_id exactly for final block list. Credential access is store.credentials().get_credential() and authorization uses public AzureAuthorizer, covering access-key, bearer and SAS credential forms without handcrafted signing. Carry caller content_type/metadata/tags to t02 commit. Retain cleanup ownership after part failures and cancellation.
 
+The real wrapper constructor accepts `Arc<MicrosoftAzure>` rather than an erased injected store: `async AzurePublicationUpload::begin(store: Arc<MicrosoftAzure>, config: AzurePublicationConfig, path: StorePath, options: PutMultipartOptions, condition: PublishCondition) -> Result<Self, ObjectStoreError>`, with private `AzurePublicationConfig { account: String, container: String, endpoint: String, client_options: ClientOptions }`. Production dispatch and inline wrapper tests use the same constructor. Build test SDK stores via `MicrosoftAzureBuilder::with_account("unit").with_container_name("assets").with_endpoint(local_url).with_allow_http(true).with_credentials(provider).build()`. For SAS use `Arc::new(StaticCredentialProvider::new(AzureCredential::SASToken(vec![("sig".into(), "test-only-signature".into())])))`; bearer uses `AzureCredential::BearerToken("test-only-token".into())`. For refresh, the external `CredentialProvider<Credential = AzureCredential>` collaborator returns distinct credentials on successive lookups. No public Python config field, engine test hook or compatibility API is added. The real SDK block requests reach a local responder and preserve endpoint/client options; ch13:t02 uses this same concrete configuration for conditional commit and error-redaction acceptance.
+
 Caller → seam → collaborator: public sync/async object-store or adapter operation → owned symbols above → existing native engine/provider or upstream framework contract. Preserve public APIs outside this task.
 
 ## Edge Cases & Error Semantics
@@ -92,6 +95,8 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 
 ## Verification
 
+Run the owned inline wrapper tests as well as canonical engine regressions: `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --lib azure_publication`.
+
 Record the failing public regression before implementation and the passing result after. Execute each command below in this worktree; the storage target directory is reserved and shared SHM tests use the host lock.
 
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo fmt --manifest-path src/rs/Cargo.toml --all --check`
@@ -109,7 +114,7 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Notes & Discoveries
 
-The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+The executable transport staging and provider acceptance contracts await independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `src/rs/vertebra-storage/src/azure_publication.rs` — Current repository source for this task.
 

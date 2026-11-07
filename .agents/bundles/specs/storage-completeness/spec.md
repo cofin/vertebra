@@ -29,14 +29,14 @@ chapters:
 - ch18-arrow-async-bridge
 - ch19-sqlspec-arrow-streaming
 current_chapter: ch07-remove-r2-python
-current_task: storage-completeness:ch07:t02
+current_task: storage-completeness:ch07:t03
 parent_prd: native-data-platform
 research:
 - ../native-data-platform/research/gap-analysis_20261103.md
 - ../integration-remediation/research/audit-findings_20261103.md
 - research/conditional-publication_20261107.md
 - research/arrow-async-bridge_20261107.md
-plan_revision: 4
+plan_revision: 5
 plan_commit: 5fe477fa4f6e08bab9278dba3906e7c556ceb3a4
 state_revision: 7
 last_verified_checkpoint: 5fe477fa
@@ -168,8 +168,8 @@ flowchart LR
 - **HTTP & Litestar Boundary (`ch03`)**: Consumes `ch01` `AsyncObjectStore.get_stream`, `get_range`, `head`, `put` (`attributes` TTL metadata), and `list_page`.
 - **Arrow/SHM & Docs Boundary (`ch04`)**: Hardens `vertebra_db::arrow_shm::allocate_shm_region` and `ArrowCursor.from_rows`, wires `pyarrow.parquet` / `pyarrow.ipc` batch streaming over `SyncReadableFile` / `AsyncReadableFile` and `put_stream`, and updates docs + OKF chapters.
 
-- **Native publication boundary**: ObjectStoreEngine keeps Arc<dyn ObjectStore> plus private PublicationBackend concrete Arc/resolved configuration. Private conditional.rs/cloud_request.rs consume public SDK HttpConnector/HttpClient/HttpRequest and authorizers. Low-level MultipartStore IDs/PartIds remain SDK-owned transport artifacts. Generic copy-create cannot replace update publication or final PutResult.
-- **Provider predicates**: S3 metadata-bearing initiation plus conditional completion parses Error XML even on 200;409 returns honest typed conflict/abort with no hidden replay. Azure commits SDK block IDs with attributes/tags and conditions. GCS stages MPU then rewrite pins source generation and destination CAS across rewriteTokens, returning final resource ETag/generation. OCI uses existing signed transport and native conditional commit. Arbitrary negative ETags resolve HEAD then Create/Update CAS with bounded re-evaluation; never HEAD→Overwrite.
+- **Native publication boundary**: ObjectStoreEngine keeps Arc<dyn ObjectStore> plus private PublicationBackend concrete Arc/resolved configuration. Private conditional.rs/cloud_request.rs consume public SDK HttpConnector/HttpClient/HttpRequest and authorizers. ch10:t02 implements and verifies the real external-request boundary in a test-only module; ch12:t01 removes its exact lib.rs test gate when the first S3 caller lands and verifies non-test compilation plus all-target Clippy. Provider-level endpoint/refresh/SAS-redaction acceptance belongs to ch12:t01 and ch13:t01–t02. No unused provider helper, broad dead-code allowance or public injection API is introduced. Low-level MultipartStore IDs/PartIds remain SDK-owned transport artifacts. Generic copy-create cannot replace update publication or final PutResult.
+- **Provider predicates**: S3 metadata-bearing initiation plus conditional completion parses Error XML even on 200;409 returns honest typed conflict/abort with no hidden replay. Azure commits SDK block IDs with attributes/tags and conditions. GCS stages MPU then rewrite pins source generation and destination CAS across rewriteTokens, returning destination generation with its generation-pinned SDK XML ETag receipt. OCI uses existing signed transport and native conditional commit. Arbitrary negative ETags resolve HEAD then Create/Update CAS with bounded re-evaluation; never HEAD→Overwrite.
 - **Local concurrency**: Lock physical parent directories via persistent SDK-illegal .vtb-cas-lock#0 across independently configured overlapping roots and independent processes, acquire deduplicated two-directory locks in physical-ID order, and cover put/delete/copy/rename plus multipart publication. Native platform behavior and private artifact placement are explicit acceptance obligations; direct uncooperative OS writers are excluded.
 
 ### 2.3 Edge-Case, Failure-Mode & Invariant Matrix
@@ -234,7 +234,7 @@ Progress: `[0/9 files documented]` for final repair/HTTP/Arrow acceptance. Exist
 | R1, R9 raw identity and conflicts | ch05:t01–t03 | regression_tdd | Native engine tests, facade/adapter tests and PyO3 mapping units. |
 | R4/R6, R11 adapter repairs | ch06:t01–t02 | regression_tdd | Django consumed-source producer collisions using native create-only puts; SQLSpec native HMAC expiry, local IAM HTTP failure and scalar/list GET/PUT signing. |
 | R10 R2 withdrawal | ch07:t01–t03, ch08:t01–t03, ch09:t01–t03 | regression_tdd/documentation_validation | Public config/classifier/staging/native parity tests and docs gates. |
-| R1/R9 boundary and ownership | ch10:t01–t04 | regression_tdd | Configured SDK transport/credential fixtures and complete-error/cancellation abort tests. |
+| R1/R9 boundary and ownership | ch10:t01–t04 | regression_tdd / behavior_tdd | Real SDK/network request-boundary fixtures, test-only module staging, and complete-error/cancellation abort tests; provider activation/refresh/redaction is accepted by ch12:t01/ch13:t01–t02. |
 | R1/R9 Local atomicity | ch11:t01–t04 | integration_acceptance | Independent-process overlapping-root lock/publication/list regressions. |
 | R1/R9 S3/Azure/GCS/OCI | ch12:t01–t04, ch13:t01–t02, ch14:t01–t03, ch15:t01–t02 | regression_tdd | Provider HTTP completion predicates, metadata/results,409/200 Error, rewrite tokens, limits and cleanup. |
 | Original ch01/ch02 reclosure | ch16:t01–t02 | integration_acceptance | Complete native matrix, adapter suite, correctness review then fresh quality review. |
@@ -275,7 +275,7 @@ Progress: `[0/9 files documented]` for final repair/HTTP/Arrow acceptance. Exist
 - ch02 original commits remain recorded and correctness approval is absent. ch06 repairs and native acceptance precede fresh correctness and quality review.
 - Native-dependent original ch03/ch04:t02 are blocked with explicit unblock conditions. HTTP coordinator owns ch03 detail and its integration evidence.
 - The next execution frontier is ch07 Python R2 withdrawal, followed by ch08 native helper/module removal; generic S3 endpoint capability is preserved. ch06 remains active for independent reviews.
-- ch10–ch15 cover native publication and lifecycle; ch11 uses persistent SDK-illegal .vtb-cas-lock#0 per physical parent directory and same-parent numeric-# stage names, with physical-directory-ID lock ordering and payload staging outside locks.
+- ch10 transport is staged under its library-test module until ch12:t01 activates the first real provider caller; all revised ch10/ch12/ch13 revision-5 blueprints await independent cold review. ch10–ch15 cover native publication and lifecycle; ch11 uses persistent SDK-illegal .vtb-cas-lock#0 per physical parent directory and same-parent numeric-# stage names, with physical-directory-ID lock ordering and payload staging outside locks.
 - S3 direct completion returns honest typed 409 conflict/abort; GCS source-generation-pinned rewrite is backend-specific staging.
 - Original Arrow/SHM and user guides remain full scope. ch17–ch19 provide bounded sync codecs, typed per-batch PyArrow worker/native async I/O bridge and lazy SQLSpec integration; original ch04:t02 retains integration acceptance.
 - Final docs/OKF acceptance is `[0/9 files documented]`; correctness review then fresh quality review is mandatory before finish/archive.

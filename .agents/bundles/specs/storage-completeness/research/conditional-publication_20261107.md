@@ -10,7 +10,7 @@ generated:
   at: '2026-11-07T12:00:00Z'
 sources:
 - id: sdk
-  resource: src/rs/src/rs/Cargo.lock::object_store-0.13.2
+  resource: src/rs/Cargo.lock::object_store-0.13.2
   title: Pinned public SDK source
 - id: s3
   resource: https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html
@@ -60,6 +60,14 @@ Pinned object_store 0.13.2 exports `client::{ReqwestConnector,HttpConnector,Http
 
 ObjectStoreEngine therefore retains `Arc<dyn ObjectStore>` for ordinary operations plus a private concrete publication backend and resolved transport/endpoint configuration. Memory uses real PutMode Create/Update without a second whole-object copy. Local publication uses same-filesystem staging and native OS locks covering all cooperating Vertebra mutations; physical parent identity unifies overlapping roots. Direct uncooperative filesystem writers are outside that guarantee. Native lock behavior and SDK-private staging require platform evidence. [^sdk] [^locks]
 
+## Request Boundary and Runtime Activation
+
+`CloudRequestClient::new(&ClientOptions)` constructs the public SDK connector, `execute(HttpRequest, operation)` performs real HTTP, and `execute_aws(HttpRequest, &AwsCredentialProvider, region, operation)` fetches and applies SDK credentials per invocation. `HttpClient::execute` returns non-2xx statuses as responses; provider wrappers own status, predicate and safe retry classification. SDK `HttpError::kind()` provides credential-free transport context; raw request/source-chain formatting and echoed server bodies are excluded from error output. [^sdk]
+
+ch10:t02 owns the complete implementation and inline SDK/network tests under a temporary `#[cfg(test)] mod cloud_request;` declaration. ch12:t01 removes only that module gate when the first S3 initiation caller is wired, then runs ordinary library compilation and all-target Clippy. This stages real code without claiming runtime publication or retaining unused future provider APIs. Provider publication endpoint/refresh acceptance occurs in ch12:t01; Azure credential-form and SAS redaction acceptance occurs in ch13:t01–t02. [^sdk]
+
+The SDK supports concrete credential injection through `AmazonS3Builder::with_credentials(AwsCredentialProvider)` and `MicrosoftAzureBuilder::with_credentials(AzureCredentialProvider)`. Providers implement public `CredentialProvider::get_credential() -> Result<Arc<Credential>>`; `AzureCredential::SASToken(Vec<(String,String)>)` and `StaticCredentialProvider::new` supply the real SAS fixture. Inline provider wrapper tests use those same concrete constructor paths and actual SDK authorizers with a local HTTP responder. No engine test hook, public Python config addition, mock HttpClient or custom auth is required. [^sdk]
+
 ## Root-Adjudicated Local Artifacts and Lock Identity
 
 Use persistent `.vtb-cas-lock#0` inside each physical target parent directory. All cooperating Local mutations acquire the parent lock; two-directory operations deduplicate/order native physical directory IDs. This handles leaf case/Unicode aliases, overlapping roots and independently configured TMPDIR without a global temp registry. Payload staging occurs outside the lock; predicate, atomic link/rename and actual result metadata occur under lock. Persistent lockfiles are never unlinked/recreated. Preserve SDK-normal umask and existing-file read-lock compatibility; real permission errors remain visible.
@@ -86,7 +94,7 @@ Pinned SDK S3MultiPartUpload::put_part and GCSMultipartUpload::put_part forward 
 
 The implementation is split into shared transport/lifecycle, platform-local primitives, and provider publication chapters. No Python/global process lock, whole-payload Vec/list/mmap spool, single-PUT size-cap fallback, SDK fork or handcrafted cloud auth is accepted. Literal percent key identity, actual final ETag/version, metadata, competing writes,200-with-error bodies, token continuation and cancellation cleanup are observable test requirements. Native success is separate from planning validation and from final whole-flow gates.
 
-[^sdk]: Local installed `object_store-0.13.2/src/{client/http/connection.rs,multipart.rs,aws/mod.rs,aws/credential.rs,azure/mod.rs,azure/credential.rs,gcp/mod.rs,gcp/client.rs,lib.rs}` and `src/rs/vertebra-storage/src/{store.rs,lib.rs,oci.rs}`.
+[^sdk]: Local installed `object_store-0.13.2/src/{client/http/connection.rs,client/http/body.rs,client/mod.rs,multipart.rs,aws/mod.rs,aws/builder.rs,aws/credential.rs,azure/mod.rs,azure/builder.rs,azure/credential.rs,gcp/mod.rs,gcp/client.rs,lib.rs}` and `src/rs/vertebra-storage/src/{store.rs,lib.rs,oci.rs}`.
 [^s3]: [AWS CompleteMultipartUpload](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html).
 [^s3-copy]: [AWS UploadPartCopy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UploadPartCopy.html).
 [^azure]: [Azure Put Block List](https://learn.microsoft.com/en-us/rest/api/storageservices/put-block-list).

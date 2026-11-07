@@ -7,7 +7,7 @@ description: Reuse SDK HTTP transport and credential authorizers
 status: draft
 state: pending
 priority: P1
-verification_strategy: regression_tdd
+verification_strategy: behavior_tdd
 depends_on:
 - storage-completeness:ch10:t01
 read_set:
@@ -22,9 +22,9 @@ files:
 - src/rs/vertebra-storage/src/conditional.rs
 - src/rs/vertebra-storage/src/lib.rs
 tests:
-- src/rs/vertebra-storage/tests/storage_engine_tests.rs
+- src/rs/vertebra-storage/src/cloud_request.rs
 estimated_loc: 210
-plan_revision: 4
+plan_revision: 5
 plan_commit: null
 state_revision: 0
 claimed_by: null
@@ -70,9 +70,19 @@ Reuse SDK HTTP transport and credential authorizers. Execute one bounded workshe
 
 Grounded contract evidence: [^research].
 
-Add private `cloud_request.rs` with `CloudRequestClient { client: object_store::client::HttpClient }`; construction uses the public `ReqwestConnector` through `HttpConnector::connect(&ClientOptions)` and execute uses `HttpClient::execute(HttpRequest)` with HttpRequestBody. Retain the exact resolved SDK ClientOptions (HTTP allow flag, endpoint, proxy exclusions, certificates, timeouts and headers where configured) rather than reqwest::Client::new. The private request execution boundary accepts SDK-built `HttpRequest`, uses provider.credentials().get_credential() per attempt and `AwsAuthorizer::new(...).authorize(request,None)` / `AzureAuthorizer::new(...).authorize(request)` or GCS bearer. Reuse refresh/sensitive request semantics and operation-specific safe retry classification. Never reimplement AWS/Azure signing or fork/vendor object_store. This transport module is consumed by S3 init/complete, Azure commit and GCS rewrite tasks.
+Add the real private `cloud_request.rs` implementation with `pub(crate) struct CloudRequestClient { client: object_store::client::HttpClient }`. Its constructors and execution boundary are:
 
-Caller → seam → collaborator: public sync/async object-store or adapter operation → owned symbols above → existing native engine/provider or upstream framework contract. Preserve public APIs outside this task.
+- `CloudRequestClient::new(options: &ClientOptions) -> Result<Self, ObjectStoreError>` calls public `ReqwestConnector::connect(options)` through `HttpConnector`; retain the exact resolved HTTP, proxy, certificate, timeout and header configuration.
+- `async fn execute(&self, request: HttpRequest, operation: &'static str) -> Result<HttpResponse, ObjectStoreError>` executes the SDK request with `HttpRequestBody`. It returns non-2xx responses intact for the owning provider's status/predicate parser. It does not decide replay or retry publication.
+- `async fn execute_aws(&self, request: HttpRequest, credentials: &AwsCredentialProvider, region: &str, operation: &'static str) -> Result<HttpResponse, ObjectStoreError>` obtains `credentials.get_credential().await` on every invocation, uses `AwsAuthorizer::new(credential.as_ref(), "s3", region).authorize(&mut request, None)`, then delegates to `execute`. S3 is its first production consumer. Azure and GCS wrappers perform their own SDK credential lookup/authorization before calling `execute`; do not introduce unused provider helpers here.
+
+Map transport and credential-acquisition failures to credential-free storage errors with static operation and SDK error-kind context; never format or attach a signed request URI, Authorization, credential Debug, raw transport source chain or server body that can echo secrets. HTTP status parsing stays with the provider, which may preserve safe status/code context without forwarding untrusted response bodies. No custom signing, SDK fork or replacement reqwest client is permitted.
+
+In `lib.rs`, register this complete module under exactly `#[cfg(test)] mod cloud_request;` for this task. Its real SDK/network tests compile through the library test target; it is not wired into runtime publication yet. ch12:t01 owns removal of this single test-only gate when the first actual S3 initiation caller lands. No broad dead-code allowance, public export, placeholder request implementation or claim of live provider publication is permitted. ch12:t01 must run normal non-test compilation and all-target Clippy after activation; unused future provider APIs are implemented only when their consuming wrapper exists.
+
+The owned test seam is this private external-request boundary, with inline `cloud_request::tests` in `cloud_request.rs`. For credential injection, construct a real `AmazonS3` via public `AmazonS3Builder::with_bucket_name("unit").with_region("us-east-1").with_endpoint(local_url).with_allow_http(true).with_credentials(provider).build()`; `provider` is an `Arc<dyn object_store::client::CredentialProvider<Credential = AwsCredential>>` test collaborator whose `get_credential` returns distinct `Arc<AwsCredential>` values on successive calls. Its only substitution is the external credential supplier. Pass `sdk.credentials()` to `execute_aws`, not an erased `ObjectStoreEngine::with_store`, a mock request client or a mocked signing function. A real local HTTP responder captures requests and supplies bounded response/failure sequences.
+
+Caller → seam → collaborator: inline native transport acceptance → real `CloudRequestClient::{execute,execute_aws}` → SDK connector/authorizer/credential provider and local HTTP responder. Public ObjectStore publication acceptance is assigned to ch12:t01 and ch13:t01–t02 after their implementations exist.
 
 ## Edge Cases & Error Semantics
 
@@ -84,30 +94,31 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 
 | Case | Input | Observable result |
 | --- | --- | --- |
-| Configured transport | Endpoint emulator + allow_http; configured proxy exclusion/headers | Private publication request reaches same endpoint with expected headers/options |
-| Credential refresh | Expiring credential provider supplies changed token/key on retry | Second attempt uses refreshed SDK credential, not cached handcrafted auth |
-| Failure redaction | Real local HTTP responder rejects Azure SAS-authenticated publication with secret query values and an error body echoing its signed request target | Exact provider/status/operation failure remains observable while signed URI, query values, Authorization and echoed credentials are absent from exception/debug output; bounded safe error context only. |
+| Configured transport | Build real SDK client with allow_http and resolved headers/proxy exclusions; send an SDK `HttpRequest` to the real local responder through CloudRequestClient | Captured method, path, configured headers and payload match the request; no S3/Azure publication wrapper is required. |
+| Credential refresh | SDK credential-provider collaborator returns key/token A then B; responder returns 503 then 200 for two explicit request attempts | Actual authorization headers carry A then B, and provider is called once per attempt; no cached custom auth or hidden publication replay. |
+| HTTP ownership | Real responder returns 403, 412 and a bounded body | `execute` returns the exact statuses to its caller; it does not convert permission failure into a CAS conflict or retry a mutation. |
+| Transport privacy | Close the local connection for a credential-bearing request | Storage error retains static operation and safe transport kind; signed target, Authorization, tokens and raw source-chain text are absent. Provider-complete SAS/body redaction is verified by ch13:t02. |
 
 ## Verification
 
-Record the failing public regression before implementation and the passing result after. Execute each command below in this worktree; the storage target directory is reserved and shared SHM tests use the host lock.
+Record the failing real transport behavior before implementation and the passing result after. The test target is the library module, not a provider publication integration target that depends on later tasks. Execute each command below in this worktree; the storage target directory is reserved and shared SHM tests use the host lock.
 
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo fmt --manifest-path src/rs/Cargo.toml --all --check`
-- `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --test storage_engine_tests`
+- `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --lib cloud_request::tests`
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets -- -D warnings`
 
 Record exact exit statuses, native build checkpoint and any platform limitation in verification_evidence. Review closure uses these results, never planning-only structural validation.
 
 ## Acceptance Criteria
 
-- [ ] Every matrix row passes at its public seam with existing behavior preserved.
+- [ ] Every matrix row passes through the real private external-request seam; runtime provider publication is not claimed before ch12:t01 activation.
 - [ ] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
 - [ ] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
 - [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
 
-The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+The executable transport staging and provider acceptance contracts await independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `src/rs/vertebra-storage/src/cloud_request.rs` — Current repository source for this task.
 

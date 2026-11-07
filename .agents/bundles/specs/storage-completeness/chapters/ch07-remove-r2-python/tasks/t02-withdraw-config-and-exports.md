@@ -5,7 +5,7 @@ chapter_id: ch07-remove-r2-python
 title: Delete public R2Config and from_r2 convenience APIs
 description: Delete public R2Config and from_r2 convenience APIs
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -29,17 +29,36 @@ estimated_loc: 130
 plan_revision: 4
 plan_commit: ddfb11f2
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:r2-public-api-withdrawal
+claimed_at: '2026-11-07T22:42:52Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-07T22:42:52Z'
+last_verified_commit: 75f18e3b
+verification_evidence: |
+  Source checkpoint 767163e4 plus the owned uncommitted t02 diff. Red: the new
+  public withdrawal and unsupported-URI cases exit 1 (7 failed, 56 deselected),
+  exposing retained R2 symbols, native construction and framework acceptance.
+  Green: the declared four-path pytest lane exits 0 (69 passed, 12 existing
+  Advanced Alchemy/SQLAlchemy deprecation warnings, 5.51s). The final native
+  constructor observer delegates to the real constructor and records zero calls
+  for both rejected facade URIs. Generic S3 endpoint signing and all supported
+  provider coverage pass through the real native extension.
+  Native: CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target"
+  PYO3_PYTHON="$PWD/.venv/bin/python3.12" UV_NO_SYNC=1 make dev exits 0;
+  all five CPython 3.12 extensions are freshly built and installed at 767163e4.
+  uv run --no-sync flock /tmp/vertebra-flow-shm-tests.lock python -m
+  mypy.stubtest vertebra._storage exits 0 (1 module), retaining native R2
+  helper/stub parity until ch08. Focused Mypy exits 0 (2 source files);
+  Ruff check, Ruff format --check (6 files), and git diff --check exit 0.
+  Runtime checks use uv run --no-sync and the shared SHM flock. No platform
+  limitation or hosted action applies. Logs: /tmp/vertebra-ch07-t02-red.log,
+  /tmp/vertebra-ch07-t02-green.log, /tmp/vertebra-ch07-t02-dev.log,
+  /tmp/vertebra-ch07-t02-stubtest.log, /tmp/vertebra-ch07-t02-mypy.log.
 created_at: '2026-11-07T12:00:00Z'
 updated_at: '2026-11-07T12:00:00Z'
-commit: null
+commit: 75f18e3b
 sources:
 - id: implementation
   resource: src/py/vertebra/storage/_store.py
@@ -101,13 +120,15 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Acceptance Criteria
 
-- [ ] Every matrix row passes at its public seam with existing behavior preserved.
-- [ ] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
-- [ ] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
-- [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
+- [x] Every matrix row passes at its public seam with existing behavior preserved.
+- [x] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
+- [x] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
+- [x] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
 
 Revision 4 is independently approved by the fresh consolidated ch07/ch08 plan review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+
+The facade removes R2Config, from_r2, uniform chunk convenience, signing inference and exports without introducing an alias or endpoint restriction. Existing unsupported-scheme validation rejects r2 before native construction; its ImproperConfigurationError is a ValueError subclass. The t01 framework regression now exercises removed URI rejection, and generic custom S3 endpoints retain SigV4 signing. The unused R2 emulator fixture has no consumers. The native helper and stub stay owned by ch08. Implementation and verification are complete; the coordinator owns the signed local commit and final state/checklist synchronization.
 
 [^implementation]: `src/py/vertebra/storage/_store.py` — Current repository source for this task.

@@ -20,7 +20,7 @@ files:
 - src/rs/Cargo.lock
 tests: []
 estimated_loc: 20
-plan_revision: 4
+plan_revision: 5
 plan_commit: null
 state_revision: 0
 claimed_by: null
@@ -92,6 +92,6 @@ Inspect the lock diff to ensure the existing quick-xml version and all unrelated
 
 ## Notes & Discoveries
 
-The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+The executable transport staging and provider acceptance contracts await independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `src/rs/vertebra-storage/Cargo.toml` — Current repository source for this task.

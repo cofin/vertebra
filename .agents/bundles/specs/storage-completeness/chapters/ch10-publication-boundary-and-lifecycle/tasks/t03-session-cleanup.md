@@ -22,7 +22,7 @@ files:
 tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 160
-plan_revision: 4
+plan_revision: 5
 plan_commit: null
 state_revision: 0
 claimed_by: null
@@ -67,7 +67,7 @@ Retain multipart abort ownership across completion errors and cancellation. Exec
 
 Grounded contract evidence: [^research].
 
-`MultipartUploadSession::complete` restores the upload handle to self.upload on failed upload.complete(), just as tail-part failure does. Publication implementations retain stage/upload handles until published or cleanup succeeds, with async Drop ownership spawning bounded cleanup on the existing storage runtime for dropped/cancelled sessions. Rust/PyO3 sync and async wrappers leave abort callable after a failed complete; Python put_stream finally invokes abort on producer error or cancellation and never masks original failure. Completed success clears ownership; abort remains idempotent. No shared global Python lock or unbounded Drop blocking.
+`MultipartUploadSession::complete` borrows the retained handle through `self.upload.as_mut()` across tail upload and `upload.complete().await`, and clears it only after successful completion. An equivalent RAII restore-on-drop guard is permitted only if it also preserves the handle when the future is cancelled; taking ownership out and restoring only on returned Err is insufficient. Publication implementations retain stage/upload handles until published or cleanup succeeds, with async Drop ownership spawning bounded cleanup on the existing storage runtime for dropped/cancelled sessions. Rust/PyO3 sync and async wrappers leave abort callable after a failed complete; Python put_stream finally invokes abort on producer error or cancellation and never masks original failure. Completed success clears ownership; abort remains idempotent. No shared global Python lock or unbounded Drop blocking.
 
 Caller → seam → collaborator: public sync/async object-store or adapter operation → owned symbols above → existing native engine/provider or upstream framework contract. Preserve public APIs outside this task.
 
@@ -81,6 +81,7 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 
 | Case | Input | Observable result |
 | --- | --- | --- |
+| Cancel during completion | Public native session completes through a barrier-controlled MultipartUpload; cancel the pending completion future after the collaborator entered complete, then call abort on the retained session | Exact owned upload ID remains abortable; abort is observed once/idempotently, original destination is preserved and no handle is lost while the future is dropped. |
 | Complete failure | Test MultipartUpload returns error at complete, then abort session | Underlying abort called exactly once; original completion error retained |
 | Cancellation | Cancel async complete during provider publication, then drive runtime cleanup | Uncommitted upload/stage cleaned; winning object unchanged |
 | Success/idempotence | Complete then abort twice | Published data intact; cleanup no-ops |
@@ -104,7 +105,7 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Notes & Discoveries
 
-The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+The executable transport staging and provider acceptance contracts await independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `src/rs/vertebra-storage/src/store.rs` — Current repository source for this task.
 
