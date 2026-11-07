@@ -95,6 +95,6 @@ Record the failing regression before implementation. Use this task's reserved ta
 
 ## Notes & Discoveries
 
-The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+Revision 4 is independently approved. Both native precondition forms map to the exact public class; genuine permission failures and create-only collisions retain their distinct built-in types. The optional-wheel subprocess and all five extension stub checks pass. Chapter correctness and fresh quality reviews remain pending.
 
 [^implementation]: `src/rs/vertebra-storage/src/lib.rs` — Current repository source for this task.

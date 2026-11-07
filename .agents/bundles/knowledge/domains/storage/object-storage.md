@@ -122,6 +122,16 @@ Provider configs are `msgspec.Struct(frozen=True, gc=False, kw_only=True)` imple
 - `GCSConfig.sync_token_cache` / `async_token_cache` construct `vertebra._vertebra.{SyncGcpTokenCache, AsyncGcpTokenCache}`. Calling `store.to_async()` or `store.to_sync()` converts any attached token cache via `.to_async()` / `.to_sync()`, preserving a single shared Rust `Arc<GcpTokenCache>` generation counter.
 - `store.sign(key, *, expires_in=3600, method="GET")`, `presign_get`, and `presign_put` support `gs` (local RSA and keyless IAM `signBlob` with automatic `401` token-generation invalidation and retry), `s3`/`r2`, `azure`, `oci` (`par_token` or `par_url_prefix`), and `hmac`.
 
+### Raw Object Keys and Conditional Errors
+
+Object keys are nonempty relative raw text. Native `validate_object_path` and facade `_normalize_key` reject outer whitespace, boundary or repeated `/`, backslashes, literal `.` segments, and the strict parent-segment forms `..`, `%2e%2e`, `.%2e` and `%2e.` (case insensitive). Unicode and literal `%`, `%2F` and `%252F` retain distinct identities. Native SDK paths use `Path::parse`; returned metadata paths remain raw and are passed directly to read, copy, rename and delete operations without URL decoding. Both copy/rename operands are validated before mutation. [^src-vertebra-storage-src-store-rs] [^src-storage-store-py]
+
+Listing prefixes use a separate boundary rule: native `None`, empty text and `/` mean the root; a relative `logs/` prefix is valid. The facade exposes empty text and `/` as root prefixes. SQLSpec first verifies matching URI scheme/authority or containment in the configured local root, derives the relative key, then applies the raw-key grammar. Matching `file://` paths and absolute `Path` values inside that root remain accepted. Alchemy validates relative keys before adding its configured namespace. [^src-storage-store-py] [^src-extensions-sqlspec-storage-py] [^src-extensions-alchemy-storage-py]
+
+`vertebra.storage.PreconditionError` is the exact native `vertebra._storage.PreconditionError` class and subclasses `PermissionError`. Both native precondition error forms map to it; actual IO/SDK permission failures remain built-in `PermissionError`, and create-only conflicts remain `FileExistsError`. The public exception resolves lazily: importing `vertebra.storage` succeeds without the storage wheel, while requesting this exception then raises `MissingDependencyError`. [^src-vertebra-storage-src-lib-rs] [^src-storage-init-py] [^src-storage-pyi]
+
+The error type identifies a reported condition conflict; provider-specific atomic publication is a separate contract. Conditional multipart completion currently checks predicates before upload and still requires the native publication repair. Applications cannot treat this error export or adapter collision naming as proof of cross-worker multipart atomicity. [^src-vertebra-storage-src-store-rs]
+
 ## 4. Range Reads & Ecosystem Adapters
 
 | Symbol | Source | Responsibility |
@@ -134,7 +144,7 @@ Provider configs are `msgspec.Struct(frozen=True, gc=False, kw_only=True)` imple
 
 ### Adapter File and Registry Contracts
 
-SQLSpec constructs one primary native store and creates its shared-engine companion lazily. Conditional write options reach the native store; moves use native rename. Relative and URI-qualified keys reject traversal. `build_duckdb_gcs_secret_sql` remains in this module; Arrow/Parquet streaming completion belongs to `ch04` [^src-extensions-sqlspec-storage-py].
+SQLSpec constructs one primary native store and creates its shared-engine companion lazily. Conditional write options reach the native store; moves use native rename. Relative and URI-qualified keys preserve raw identities and reject ambiguous or mismatched qualification before effects. `build_duckdb_gcs_secret_sql` remains in this module; Arrow/Parquet streaming completion belongs to `ch04` [^src-extensions-sqlspec-storage-py].
 
 Advanced Alchemy accepts a URI/store/config first or a backend key with explicit `store=` through `register_storage_backend`. Bounded sync/async reader chunks and iterables feed native multipart uploads; producer failures abort unfinished uploads. `get_content` / `get_content_async` return full bytes, and saved `FileObject` values receive size, etag, and a UTC save timestamp [^src-extensions-alchemy-storage-py].
 

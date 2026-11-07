@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-07] flow-docs | Synchronized raw object identity and typed conditional errors before Chapter 05 review
+
+- Bound native raw paths `c90285cf`, lazy native `PreconditionError` `682aaaff`, and facade/Alchemy/SQLSpec qualification `8d073a38` to current chapter/root/catalog state and object-storage knowledge. The knowledge records exact raw percent/Unicode keys, root/trailing-slash prefix behavior, matching local/URI qualifications, permission-error distinctions and missing-wheel laziness.
+- All 23 native engine tests and the rebuilt extension's mapping/stub/optional-import checks pass; the combined facade, data-integration and Django checkpoint passes 74 tests. Chapter 05 stays active pending correctness and fresh quality reviews. Native publication repairs and final provider/HTTP/Arrow documentation remain open.
+
 - 2026-11-07: revise `storage-completeness` plan 4 at baseline `5fe477fa`: preserve original task identities, reopen native acceptance, add bounded raw-key/typed-conflict, adapter, first-class R2 withdrawal, provider publication and cleanup repair chapters; ch05 cold review approves the initial independent execution frontier while remaining repair and Arrow blueprints await independent cold review.
 
 ## [2026-11-07] flow-docs | Synchronized implemented ORM and SQL storage contracts before Chapter 02 review

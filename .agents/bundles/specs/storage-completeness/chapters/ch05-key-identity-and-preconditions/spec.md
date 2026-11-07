@@ -13,10 +13,10 @@ current_task: null
 plan_revision: 4
 plan_commit: 5fe477fa4f6e08bab9278dba3906e7c556ceb3a4
 state_revision: 0
-last_verified_checkpoint: 5fe477fa
+last_verified_checkpoint: 8d073a38
 last_reviewed_commit: null
 created_at: '2026-11-07T12:00:00Z'
-updated_at: '2026-11-07T12:00:00Z'
+updated_at: '2026-11-07T22:27:00Z'
 generated:
   by: flow/0.28.0
   at: '2026-11-07T12:00:00Z'
@@ -33,9 +33,9 @@ tags:
 # Raw Object Identity and Typed Conditional Conflicts
 
 <!-- truth: start -->
-This chapter restores an observable storage contract at the existing `5fe477fa` functional baseline. [^source]
-Production work stays within each task's explicit ownership. Raw keys, conditional publication, metadata and cleanup are correctness contracts.
-A completed implementation still requires correctness review followed by fresh quality review.
+Native, facade and adapter key operations preserve raw Unicode and percent-text identities and reject ambiguous relative paths. [^source]
+`vertebra.storage.PreconditionError` lazily exposes the native `PermissionError` subclass for conditional conflicts; genuine permission failures remain distinct.
+All three tasks are implemented and verified. Correctness review and fresh quality review remain pending; provider publication repair remains outside this chapter.
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -79,7 +79,7 @@ Caller → seam → collaborator: public storage/framework calls → owned deep 
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bundles/knowledge/domains/storage/object-storage.md` by ch09:t03 and user guides by ch04:t03; per-task tests are executable documentation. No separate untracked documentation obligation remains.
+Progress: `[1/1 files documented]`. [Object-storage knowledge](../../../../knowledge/domains/storage/object-storage.md) records raw object identities, prefix rules, qualified adapter inputs and lazy typed conflicts. The final supported-provider and HTTP/Arrow consolidation remains assigned to ch09:t03 and ch04:t03; this chapter does not claim those later contracts are complete.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -100,8 +100,9 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 ## 6. Current State & Remaining Plan Snapshot
 
 - Plan revision 4 is independently approved; completed task receipts match signed source commits.
-- All three tasks are implemented and verified; correctness and fresh quality reviews remain.
-- Documentation: `[0/1 files documented]`, owned by the explicit consolidation tasks.
+- All three tasks are implemented and verified: native paths `c90285cf`, typed errors `682aaaff`, public qualification `8d073a38`. Correctness and fresh quality reviews remain.
+- Native engine tests pass all 23 cases; the rebuilt extension passes the mapping, optional-import and stub checks. The combined facade/adapter/Django checkpoint passes all 74 tests. Local and cloud atomic publication remains pending.
+- Documentation: `[1/1 files documented]`; the shared knowledge contract matches the implemented raw-key and exception boundaries. Final provider, HTTP and Arrow documentation remains assigned to the consolidation tasks.
 - Reclosure of ch01 and downstream acceptance waits for native repair gates; this chapter never depends on that reclosure.
 
 [^source]: `src/rs/vertebra-storage/src/store.rs` — Verified repository implementation seam.

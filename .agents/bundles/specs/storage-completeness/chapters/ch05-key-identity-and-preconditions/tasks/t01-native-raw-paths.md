@@ -29,7 +29,7 @@ unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-07T21:49:51Z"
 last_verified_commit: c90285cf
-verification_evidence: "4 regressions failed before fix, then 4 passed; full native storage_engine_tests 23 passed; cargo clippy all-targets -D warnings, cargo fmt --all --check, git diff --check passed. Installed Python extension rebuild remains required before Python consumer checks."
+verification_evidence: "4 regressions failed before fix, then 4 passed; full native storage_engine_tests 23 passed; cargo clippy all-targets -D warnings, cargo fmt --all --check, git diff --check passed. All five Python extensions are rebuilt by t03; the combined current-source consumer checkpoint passes all 74 tests."
 created_at: '2026-11-07T12:00:00Z'
 updated_at: "2026-11-07T21:49:51Z"
 commit: c90285cf
@@ -94,6 +94,6 @@ Record the failing regression before implementation. Use this task's reserved ta
 
 ## Notes & Discoveries
 
-Native regression baseline: four raw-key tests fail against the prior implementation; all four pass with raw parsing. The complete Rust engine suite passes 23 tests, including embedded Python. Run Cargo through `uv run --no-sync` so embedded Python finds the isolated environment; `PYO3_PYTHON` alone selects the compilation interpreter. Python consumer verification still requires a native rebuild.
+Native regression baseline: four raw-key tests fail against the prior implementation; all four pass with raw parsing. The complete Rust engine suite passes 23 tests, including embedded Python. Run Cargo through `uv run --no-sync` so embedded Python finds the isolated environment; `PYO3_PYTHON` alone selects the compilation interpreter. All five extensions are rebuilt for the completed typed-conflict task, and the combined current-source facade/adapter/Django checkpoint passes 74 tests.
 
 [^implementation]: `src/rs/vertebra-storage/src/store.rs` — Current repository source for this task.

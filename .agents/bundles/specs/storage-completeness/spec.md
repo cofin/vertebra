@@ -43,7 +43,7 @@ last_verified_checkpoint: 5fe477fa
 last_reviewed_chapter: null
 last_reviewed_commit: null
 created_at: '2026-11-03T04:05:00Z'
-updated_at: '2026-11-07T20:37:46Z'
+updated_at: '2026-11-07T22:27:00Z'
 generated:
   by: flow-setup
   at: '2026-11-07T04:15:00Z'
@@ -268,8 +268,8 @@ Progress: `[0/9 files documented]` for final repair/HTTP/Arrow acceptance. Exist
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Verified functional source baseline: `5fe477fa`; revision4 has an approved key/error frontier and additional bounded repair chapters awaiting independent plan review.
-- Active frontier is ch05: native raw-key task t01 and typed-conflict task t03 are committed and verified; public qualification task t02 is next. All five native extensions are rebuilt with these contracts; Local atomic publication remains pending.
+- Verified functional source baseline: `5fe477fa`; revision 4 has approved key/error and adapter-repair frontiers. Additional bounded repair chapters retain their own independent plan-review requirements.
+- Active frontier is ch05: all three raw-key, public-qualification and typed-conflict tasks are committed and verified. Shared object-storage knowledge is synchronized; correctness and fresh quality reviews remain pending. All five native extensions are rebuilt with these contracts; Local and cloud atomic publication remains pending.
 - Original ch01:t01 is blocked; chapter review stamp is clear. Repair tasks use its committed functional artifacts directly, avoiding a dependency cycle.
 - ch02 original commits remain recorded and correctness approval is absent. ch06 repairs and native acceptance precede fresh correctness and quality review.
 - Native-dependent original ch03/ch04:t02 are blocked with explicit unblock conditions. HTTP coordinator owns ch03 detail and its integration evidence.
