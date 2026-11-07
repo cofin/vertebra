@@ -5,7 +5,7 @@ chapter_id: ch06-adapter-correctness
 title: Propagate configured signing validation failures
 description: Propagate configured signing validation failures
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: regression_tdd
 depends_on: []
@@ -22,11 +22,11 @@ estimated_loc: 75
 plan_revision: 4
 plan_commit: 88d5068031ba82078f2f7c4999cdf3cfd77c66be
 state_revision: 0
-claimed_by: null
+claimed_by: agent:sqlspec_signing_repair
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
-next_step: null
+next_step: Execute the independently approved native-message-preserving repair.
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
@@ -74,7 +74,7 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 | Configured validation | MemoryConfig with explicit HMAC signing; sign_sync/sign_async("key", expires_in=0) | ValueError propagates through GET and upload paths |
 | Unsupported backend | Unsigned explicit MemoryConfig; scalar and list sign calls | NotImplementedError with backend context |
 | Successful configured HMAC | Positive expiry and for_upload=True/False | Valid signed GET/PUT URL; scalar/list shape retained |
-| Configured native provider failure | A real `SyncObjectStore("memory://", signing=SigningConfig(provider="gcs", bucket="unit", service_account_email="signer@example.test", access_token="mock-oauth-token", iam_endpoint=local_server))`; local IAM responder returns HTTP 503 and body b"signing-unavailable" | Public `sign_sync` and `sign_async`, each with `for_upload=False/True`, preserve exact `RuntimeError` type (not its `NotImplementedError` subclass), with the unchanged native message exactly "IAM signBlob returned HTTP 503 Service Unavailable"; native signing does not include the responder body. No external credentials or mocked SUT/store methods. |
+| Configured native provider failure | A real `SyncObjectStore("memory://", signing=SigningConfig(provider="gcs", bucket="unit", service_account_email="signer@example.test", access_token="mock-oauth-token", iam_endpoint=local_server))`; local IAM responder returns HTTP 503 and body b"signing-unavailable" | Public `sign_sync` and `sign_async`, each with `for_upload=False/True`, preserve exact `RuntimeError` type (not its `NotImplementedError` subclass), with the unchanged native message exactly "signing error: IAM signBlob returned HTTP 503 Service Unavailable"; native signing does not include the responder body. No external credentials or mocked SUT/store methods. |
 
 ## Verification
 
@@ -89,6 +89,6 @@ Record the failing regression before implementation. Use this task's reserved ta
 
 ## Notes & Discoveries
 
-The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+Red: the focused public-seam selection reports 8 failed and 6 passed. Native IAM errors observed through the current adapter have cause text `signing error: IAM signBlob returned HTTP 503 Service Unavailable`; the worksheet incorrectly requires the same message without the native `signing error: ` prefix. The exact prefix is retained by the independently approved bounded correction; the same public failure cases now proceed to implementation. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `src/py/vertebra/extensions/sqlspec/storage.py` — Current repository source for this task.

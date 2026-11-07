@@ -74,6 +74,8 @@ Caller → seam → collaborator: public storage/framework calls → owned deep 
 | Deep owned boundary with exact provider semantics | Chosen: hides credentials, staging and concurrency while preserving configured SDK behavior. |
 | Generic head-then-write, Python lock, copy-create publication or blanket exception conversion | Rejected: loses atomicity, update results, metadata or error identity. |
 
+Canonical public GCS ETags remain the existing SDK XML API ETag at head/list/put/multipart receipt boundaries. JSON resource ETags are a separate namespace and must never be compared with a caller XML ETag. Evaluate caller predicates against SDK XML HEAD metadata and use that same snapshot generation for destination fencing. After successful JSON rewrite, parse the returned destination generation, then obtain its exact XML receipt through SDK `get_opts(path, GetOptions { head: true, version: Some(destination_generation), ..Default::default() })`; the SDK emits the generation query. Return that generation-pinned metadata ETag/version, never an unfenced current HEAD or the JSON resource ETag. If that generation cannot be retrieved, report an explicit provider/indeterminate receipt failure and retain cleanup ownership; never substitute a successor token. A competing writer immediately after rewrite must not alter the returned successful publication identity.
+
 ## 3. Documentation & OKF Knowledge Plan
 
 Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bundles/knowledge/domains/storage/object-storage.md` by ch09:t03 and user guides by ch04:t03; per-task tests are executable documentation. No separate untracked documentation obligation remains.

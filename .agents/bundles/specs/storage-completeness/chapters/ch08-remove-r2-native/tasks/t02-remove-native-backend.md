@@ -4,7 +4,7 @@ id: storage-completeness:ch08:t02
 chapter_id: ch08-remove-r2-native
 title: Delete native R2 builder, module, helper and stub surface
 description: Delete native R2 builder, module, helper and stub surface
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: regression_tdd
@@ -27,7 +27,7 @@ tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 130
 plan_revision: 4
-plan_commit: null
+plan_commit: ddfb11f2
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -107,6 +107,6 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Notes & Discoveries
 
-The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+Revision 4 is independently approved by the fresh consolidated ch07/ch08 plan review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `src/rs/vertebra-storage/src/store.rs` — Current repository source for this task.

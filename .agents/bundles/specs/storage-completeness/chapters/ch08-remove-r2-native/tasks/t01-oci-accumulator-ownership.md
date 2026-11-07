@@ -4,7 +4,7 @@ id: storage-completeness:ch08:t01
 chapter_id: ch08-remove-r2-native
 title: Transfer uniform multipart accumulation into OCI ownership
 description: Transfer uniform multipart accumulation into OCI ownership
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: characterization
@@ -22,7 +22,7 @@ tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 170
 plan_revision: 4
-plan_commit: null
+plan_commit: ddfb11f2
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -98,6 +98,6 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Notes & Discoveries
 
-Existing OCI `requires_uniform_part_size` already selects 8 MiB accumulation. Record green-before and green-after evidence for the behavior-preserving ownership transfer; do not claim a Red result. The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+Existing OCI `requires_uniform_part_size` already selects 8 MiB accumulation. Record green-before and green-after evidence for the behavior-preserving ownership transfer; do not claim a Red result. Revision 4 is independently approved by the fresh consolidated ch07/ch08 plan review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `src/rs/vertebra-storage/src/store.rs` — Current repository source for this task.

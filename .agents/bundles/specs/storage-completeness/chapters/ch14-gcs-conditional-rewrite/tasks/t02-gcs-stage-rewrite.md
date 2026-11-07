@@ -74,6 +74,8 @@ Grounded contract evidence: [^research].
 
 Add GcsPublicationUpload retaining Arc<GoogleCloudStorage>, unique private MPU stage key, condition, caller attributes and resolved GCS JSON endpoint/transport. SDK multipart writes stage; complete obtains immutable source generation and ETag before publication. Execute JSON `objects.rewrite` with sourceGeneration pinned, destination ifGenerationMatch=0 (Create) or verified current generation (Match/negative predicate), and source precondition. Include metadata/body so attributes/content_type persist; GET/HEAD→overwrite or generic copy-create is forbidden. Use SDK credentials().get_credential() bearer and configured endpoint/transport, including emulator skip_signature behavior. Stage uses a unique unpredictable key with Create semantics and collision retry; never overwrite an existing user object. Track the exact owned source generation for rewrite and cleanup. No new reserved cloud keyspace or cross-process listing-invisibility promise is introduced; raw provider listings may observe temporary stages and docs describe that lifecycle honestly.
 
+Canonical public GCS ETags remain the existing SDK XML API ETag at head/list/put/multipart receipt boundaries. JSON resource ETags are a separate namespace and must never be compared with a caller XML ETag. Evaluate caller predicates against SDK XML HEAD metadata and use that same snapshot generation for destination fencing. After successful JSON rewrite, parse the returned destination generation, then obtain its exact XML receipt through SDK `get_opts(path, GetOptions { head: true, version: Some(destination_generation), ..Default::default() })`; the SDK emits the generation query. Return that generation-pinned metadata ETag/version, never an unfenced current HEAD or the JSON resource ETag. If that generation cannot be retrieved, report an explicit provider/indeterminate receipt failure and retain cleanup ownership; never substitute a successor token. A competing writer immediately after rewrite must not alter the returned successful publication identity.
+
 Caller → seam → collaborator: public sync/async object-store or adapter operation → owned symbols above → existing native engine/provider or upstream framework contract. Preserve public APIs outside this task.
 
 ## Edge Cases & Error Semantics
@@ -86,6 +88,7 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 
 | Case | Input | Observable result |
 | --- | --- | --- |
+| XML versus JSON receipt | Emulator returns distinct XML ETag, JSON resource ETag and generation; competitor replaces destination just after rewrite | Public receipt uses original generation-pinned XML ETag and remains usable for next native if_match; successor is never reported as our result. |
 | Pinned source | Stage version changes while publication begins | Rewrite names exact original source generation; no newer stage bytes substituted |
 | Destination CAS | Competitor replaces target after expected ETag/generation resolved | Rewrite precondition rejects; competitor intact |
 | Metadata | Publish staged data with content_type and user attributes | Destination head returns exact metadata |

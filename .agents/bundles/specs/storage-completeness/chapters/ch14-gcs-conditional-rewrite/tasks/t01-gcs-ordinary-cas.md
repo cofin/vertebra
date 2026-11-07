@@ -68,6 +68,8 @@ Grounded contract evidence: [^research].
 
 For GCS `put_opts(if_match=etag)`, HEAD once to obtain both opaque ETag and generation, verify expected ETag, then PutMode::Update(UpdateVersion { e_tag: Some(actual_etag), version: Some(generation) }). Never pass ETag in place of generation and never use HEAD→Overwrite. For arbitrary negative if_none_match: HEAD current object; if absent use Create; if present with matching forbidden ETag fail; otherwise Update with actual generation. Retry only CAS races, repeating predicate evaluation with new HEAD; bound retries explicitly (8 attempts, then precondition/retryable conflict) and never switch to unconditional mode. `if_none_match="*"` uses Create directly. Preserve content_type/attributes and actual PutResult from successful atomic put.
 
+Canonical public GCS ETags remain the existing SDK XML API ETag at head/list/put/multipart receipt boundaries. JSON resource ETags are a separate namespace and must never be compared with a caller XML ETag. Evaluate caller predicates against SDK XML HEAD metadata and use that same snapshot generation for destination fencing. After successful JSON rewrite, parse the returned destination generation, then obtain its exact XML receipt through SDK `get_opts(path, GetOptions { head: true, version: Some(destination_generation), ..Default::default() })`; the SDK emits the generation query. Return that generation-pinned metadata ETag/version, never an unfenced current HEAD or the JSON resource ETag. If that generation cannot be retrieved, report an explicit provider/indeterminate receipt failure and retain cleanup ownership; never substitute a successor token. A competing writer immediately after rewrite must not alter the returned successful publication identity.
+
 Caller → seam → collaborator: public sync/async object-store or adapter operation → owned symbols above → existing native engine/provider or upstream framework contract. Preserve public APIs outside this task.
 
 ## Edge Cases & Error Semantics
@@ -80,6 +82,7 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 
 | Case | Input | Observable result |
 | --- | --- | --- |
+| XML versus JSON receipt | Emulator returns distinct XML ETag, JSON resource ETag and generation; competitor replaces destination just after rewrite | Public receipt uses original generation-pinned XML ETag and remains usable for next native if_match; successor is never reported as our result. |
 | GCS ETag/generation distinct | HEAD ETag abc, generation 1729; if_match abc | UpdateVersion uses generation 1729; caller ETag checked exactly |
 | Negative race | Forbidden ETag old; HEAD sees allowed new1; competitor publishes forbidden old before PUT | CAS fails, re-evaluation rejects; forbidden value never overwritten |
 | Absent negative | HEAD missing then competitor creates before Create | Create conflict triggers safe predicate re-evaluation or explicit failure, no overwrite |

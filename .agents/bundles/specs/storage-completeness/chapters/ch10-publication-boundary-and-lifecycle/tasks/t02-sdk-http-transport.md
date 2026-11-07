@@ -86,7 +86,7 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 | --- | --- | --- |
 | Configured transport | Endpoint emulator + allow_http; configured proxy exclusion/headers | Private publication request reaches same endpoint with expected headers/options |
 | Credential refresh | Expiring credential provider supplies changed token/key on retry | Second attempt uses refreshed SDK credential, not cached handcrafted auth |
-| Failure redaction | Credential-bearing request fails | No credentials or signed query values appear in error output |
+| Failure redaction | Real local HTTP responder rejects Azure SAS-authenticated publication with secret query values and an error body echoing its signed request target | Exact provider/status/operation failure remains observable while signed URI, query values, Authorization and echoed credentials are absent from exception/debug output; bounded safe error context only. |
 
 ## Verification
 

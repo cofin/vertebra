@@ -4,7 +4,7 @@ id: storage-completeness:ch07:t02
 chapter_id: ch07-remove-r2-python
 title: Delete public R2Config and from_r2 convenience APIs
 description: Delete public R2Config and from_r2 convenience APIs
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: regression_tdd
@@ -27,7 +27,7 @@ tests:
 - src/py/tests/integration/storage/conftest.py
 estimated_loc: 130
 plan_revision: 4
-plan_commit: null
+plan_commit: ddfb11f2
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -108,6 +108,6 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Notes & Discoveries
 
-The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+Revision 4 is independently approved by the fresh consolidated ch07/ch08 plan review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `src/py/vertebra/storage/_store.py` — Current repository source for this task.

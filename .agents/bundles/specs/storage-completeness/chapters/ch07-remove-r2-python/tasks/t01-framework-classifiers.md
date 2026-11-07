@@ -4,7 +4,7 @@ id: storage-completeness:ch07:t01
 chapter_id: ch07-remove-r2-python
 title: Remove R2 from framework backend classifiers
 description: Remove R2 from framework backend classifiers
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: regression_tdd
@@ -23,7 +23,7 @@ tests:
 - src/py/tests/unit/extensions/test_data_storage_integrations.py
 estimated_loc: 55
 plan_revision: 4
-plan_commit: null
+plan_commit: ddfb11f2
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -99,6 +99,6 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Notes & Discoveries
 
-The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+Revision 4 is independently approved by the fresh consolidated ch07/ch08 plan review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `src/py/vertebra/extensions/alchemy/storage.py` — Current repository source for this task.

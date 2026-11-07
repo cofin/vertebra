@@ -4,7 +4,7 @@ id: storage-completeness:ch08:t03
 chapter_id: ch08-remove-r2-native
 title: Delete the unreferenced native R2 module
 description: Delete the unreferenced native R2 module
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: characterization
@@ -24,7 +24,7 @@ tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 110
 plan_revision: 4
-plan_commit: null
+plan_commit: ddfb11f2
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -113,6 +113,6 @@ PYLINK
 
 ## Notes & Discoveries
 
-The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+Revision 4 is independently approved by the fresh consolidated ch07/ch08 plan review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `src/rs/vertebra-storage/src/oci.rs` — Current repository source for this task.

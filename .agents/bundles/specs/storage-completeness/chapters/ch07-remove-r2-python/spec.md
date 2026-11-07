@@ -4,14 +4,14 @@ parent_flow: storage-completeness
 chapter_id: ch07-remove-r2-python
 title: Withdraw First-Class R2 Python APIs
 description: Withdraw First-Class R2 Python APIs
-status: draft
+status: stable
 state: planned
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
 plan_revision: 4
-plan_commit: null
+plan_commit: ddfb11f2
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
 last_reviewed_commit: null
@@ -91,7 +91,7 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Baseline: `5fe477fa`; implementation is pending and cold plan review is required.
+- Revision 4 is independently approved at `ddfb11f2`; implementation follows the declared task dependencies.
 - Remaining: all 3 tasks above; dependent tasks remain ordered by depends_on.
 - Documentation: `[0/1 files documented]`, owned by the explicit consolidation tasks.
 - Reclosure of ch01 and downstream acceptance waits for native repair gates; this chapter never depends on that reclosure.

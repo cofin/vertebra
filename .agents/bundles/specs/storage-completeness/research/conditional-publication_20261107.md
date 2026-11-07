@@ -76,6 +76,8 @@ GCS JSON rewrite supports pinned source generation and destination ifGenerationM
 
 OCI CommitMultipartUpload supports If-Match and If-None-Match `*`; arbitrary negative ETags must use current-ETag compare-and-commit, not unsupported arbitrary If-None-Match. The owned OCI transport retains signing and abort ownership. OCI uniform parts remain 8 MiB with an explicit 10000-part limit; this does not imply a 5 TiB supported upload promise. [^oci]
 
+GCS XML and JSON ETags are not interchangeable. Existing public native tags remain XML ETags; generation fences translate predicates and publication receipts without cross-API string comparison. The pinned SDK `GetOptions { head: true, version: Some(generation), .. }` emits an XML HEAD with `generation` query and returns that generation's metadata. A successful JSON rewrite supplies the generation for this pinned receipt lookup; a successor must never be reported through an unfenced HEAD. Verify distinct XML/JSON values and a writer arriving immediately after rewrite. [^sdk] [^gcs-preconditions]
+
 ## Incremental Part Framing
 
 Pinned SDK S3MultiPartUpload::put_part and GCSMultipartUpload::put_part forward each supplied PutPayload as one service part. Current MultipartUploadSession forwards every non-OCI producer chunk unchanged. Arbitrary 64 KiB chunks therefore violate the minimum 5 MiB non-final part requirement at completion. A bounded rolling frame must accumulate only the current part and await flush before consuming more producer data. The SDK WriteMultipart helper supplies buffering but finish consumes ownership; adopting it without preserving abort on failure would recreate the cleanup defect. [^s3-limits] [^gcs-limits]
@@ -84,7 +86,7 @@ Pinned SDK S3MultiPartUpload::put_part and GCSMultipartUpload::put_part forward 
 
 The implementation is split into shared transport/lifecycle, platform-local primitives, and provider publication chapters. No Python/global process lock, whole-payload Vec/list/mmap spool, single-PUT size-cap fallback, SDK fork or handcrafted cloud auth is accepted. Literal percent key identity, actual final ETag/version, metadata, competing writes,200-with-error bodies, token continuation and cancellation cleanup are observable test requirements. Native success is separate from planning validation and from final whole-flow gates.
 
-[^sdk]: Local installed `object_store-0.13.2/src/{client/http/connection.rs,multipart.rs,aws/mod.rs,aws/credential.rs,azure/mod.rs,azure/credential.rs,gcp/mod.rs}` and `src/rs/vertebra-storage/src/{store.rs,lib.rs,oci.rs}`.
+[^sdk]: Local installed `object_store-0.13.2/src/{client/http/connection.rs,multipart.rs,aws/mod.rs,aws/credential.rs,azure/mod.rs,azure/credential.rs,gcp/mod.rs,gcp/client.rs,lib.rs}` and `src/rs/vertebra-storage/src/{store.rs,lib.rs,oci.rs}`.
 [^s3]: [AWS CompleteMultipartUpload](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html).
 [^s3-copy]: [AWS UploadPartCopy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UploadPartCopy.html).
 [^azure]: [Azure Put Block List](https://learn.microsoft.com/en-us/rest/api/storageservices/put-block-list).
