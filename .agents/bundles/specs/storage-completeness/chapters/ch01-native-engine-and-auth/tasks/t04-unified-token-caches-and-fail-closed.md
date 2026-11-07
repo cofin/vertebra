@@ -35,12 +35,12 @@ claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: "2026-11-07T18:23:00Z"
-last_verified_commit: e15f636a
-verification_evidence: "cargo clippy -p vertebra-py -p vertebra-storage --all-targets -- -D warnings (0 warnings), cargo test -p vertebra-storage -p vertebra-py (33 passed), mypy.stubtest vertebra._vertebra vertebra._storage (0 issues), ruff check + ruff format --check (0 issues), mypy (0 issues), pytest src/py/tests/unit/storage src/py/tests/unit/extensions -q (469 passed)"
+last_verified_at: "2026-11-07T19:00:40Z"
+last_verified_commit: dc2c2053
+verification_evidence: "cargo clippy -p vertebra-py -p vertebra-storage --all-targets -- -D warnings (0 warnings), cargo test -p vertebra-storage -p vertebra-py (33 passed), mypy.stubtest vertebra._vertebra vertebra._storage (0 issues), ruff check + ruff format --check (0 issues), mypy (0 issues), pytest src/py/tests/unit/storage src/py/tests/unit/extensions -q (471 passed)"
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T18:23:00Z"
-commit: e15f636a
+updated_at: "2026-11-07T19:00:40Z"
+commit: dc2c2053
 sources:
   - id: core-pyi-gcp
     resource: src/py/vertebra/_vertebra.pyi::SyncGcpTokenCache

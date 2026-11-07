@@ -11,24 +11,27 @@ chapters:
   - ch02-orm-and-sql-storage-contracts
   - ch03-litestar-and-range-streaming
   - ch04-arrow-shm-and-docs
-current_chapter: ch01-native-engine-and-auth
-current_task: null
+current_chapter: ch02-orm-and-sql-storage-contracts
+current_task: "storage-completeness:ch02:t01"
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/gap-analysis_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 2
 plan_commit: cdb978d3
-state_revision: 5
-last_verified_checkpoint: e15f636a
-last_reviewed_chapter: null
-last_reviewed_commit: null
+state_revision: 6
+last_verified_checkpoint: dc2c2053
+last_reviewed_chapter: ch01-native-engine-and-auth
+last_reviewed_commit: dc2c2053
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-07T18:24:00Z"
+updated_at: "2026-11-07T19:06:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
 verified:
+  - by: agent:code-reviewer
+    at: "2026-11-07T19:05:09Z"
+    commit: dc2c2053
   - by: agent:flow-setup
     at: "2026-11-07T04:15:00Z"
     commit: cdb978d3
@@ -176,7 +179,7 @@ Progress: `[1/3 files documented]` (`object-storage.md` updated in `ch01`; user 
 
 ## 5. Implementation Plan
 
-- [~] ch01-native-engine-and-auth — Native Rust Storage Engine, GCP Auth Unification, and Fail-Closed Facade (chapters/ch01-native-engine-and-auth/spec.md)
+- [x] [dc2c2053] ch01-native-engine-and-auth — Native Rust Storage Engine, GCP Auth Unification, and Fail-Closed Facade (chapters/ch01-native-engine-and-auth/spec.md)
 - [ ] ch02-orm-and-sql-storage-contracts — SQLSpec, Advanced Alchemy, and Django Storage Contracts (chapters/ch02-orm-and-sql-storage-contracts/spec.md)
 - [ ] ch03-litestar-and-range-streaming — HTTP Range Streaming and Litestar Store/Static Integration (chapters/ch03-litestar-and-range-streaming/spec.md)
 - [ ] ch04-arrow-shm-and-docs — Strict Arrow SHM Allocation, Parquet Streaming, and OKF Sync (chapters/ch04-arrow-shm-and-docs/spec.md)
@@ -185,8 +188,8 @@ Progress: `[1/3 files documented]` (`object-storage.md` updated in `ch01`; user 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ e15f636a` on `feat/storage-updates` above `main @ 077a3fe9`; `plan_revision: 2`, `state: active`.
-- **Active Chapter & Next Task**: `ch01-native-engine-and-auth` (`ch01:t01` completed at `beb6a972`, `ch01:t02` completed at `cb6b0647`, `ch01:t03` completed at `494ad92b`, `ch01:t04` completed at `e15f636a`; ready for `ch01` closeout review).
+- **Verified Baseline**: `HEAD @ dc2c2053` on `feat/storage-updates` above `main @ 077a3fe9`; `plan_revision: 2`, `state: active`; `ch01-native-engine-and-auth` closed and approved by `@code-reviewer` and `@quality-reviewer` across `1bb622a7..dc2c2053`.
+- **Active Chapter & Next Task**: `ch02-orm-and-sql-storage-contracts`, next task `storage-completeness:ch02:t01` (`ch02`–`ch04` pending, `8/12` tasks remaining).
 - **Documentation & OKF Status**: `[1/3 files documented]` (`object-storage.md` synchronized in `ch01`; user guides scheduled in `storage-completeness:ch04:t03`).
 - **Active Invariants**: Zero `asyncio.to_thread` in `src/py/vertebra/storage/_store.py`; lazy `import_optional("vertebra._storage")` at construction time; `mypy.stubtest vertebra._storage` green after every FFI change.
 
