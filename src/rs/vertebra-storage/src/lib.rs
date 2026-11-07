@@ -25,16 +25,12 @@ use pyo3::types::{PyBytes, PyType, PyWeakref, PyWeakrefMethods, PyWeakrefReferen
 use tokio::task::AbortHandle;
 use vertebra_core::notify::{AsyncCompletionQueue, Notifier};
 
-use crate::gcp_auth::{
-    GcpTokenCache as NativeGcpTokenCache, GcpTokenSnapshot as NativeGcpTokenSnapshot,
-    current_unix_ms,
-};
-use crate::oci::{OciCavageCredentials, sign_oci_cavage_request};
+use crate::oci::{OciCavageCredentials, OciParConfig, build_oci_par_url, sign_oci_cavage_request};
 use crate::r2::chunk_uniform_parts;
 use crate::signing::{
-    AwsSigV4HeaderConfig, AzureSasConfig, GcsSignConfig, HmacSigner, S3SignConfig,
-    sign_aws_sigv4_headers, sign_azure_sas_url, sign_gcs_v4_with_iam_endpoint, sign_s3_v4_url,
-    verify_s3_v4_url,
+    AwsSigV4HeaderConfig, AzureSasConfig, GcsSignConfig, GcsV4CanonicalRequest, HmacSigner,
+    S3SignConfig, sign_aws_sigv4_headers, sign_azure_sas_url, sign_gcs_v4_with_iam_endpoint,
+    sign_s3_v4_url, verify_s3_v4_url,
 };
 use crate::store::{
     MultipartUploadSession, ObjectStoreEngine, PutConditionalOptions, StorageError,
@@ -452,219 +448,6 @@ where
     })
 }
 
-#[pyclass(
-    name = "GcpTokenSnapshot",
-    module = "vertebra._storage",
-    frozen,
-    immutable_type,
-    from_py_object
-)]
-#[derive(Clone, Debug)]
-pub struct PyGcpTokenSnapshot {
-    #[pyo3(get)]
-    pub access_token: String,
-    #[pyo3(get)]
-    pub expires_at_unix_ms: u64,
-    #[pyo3(get)]
-    pub generation: u64,
-    #[pyo3(get)]
-    pub quota_project_id: Option<String>,
-}
-
-impl From<&NativeGcpTokenSnapshot> for PyGcpTokenSnapshot {
-    fn from(value: &NativeGcpTokenSnapshot) -> Self {
-        Self {
-            access_token: value.access_token.clone(),
-            expires_at_unix_ms: value.expires_at_unix_ms,
-            generation: value.generation,
-            quota_project_id: value.quota_project_id.clone(),
-        }
-    }
-}
-
-#[pymethods]
-impl PyGcpTokenSnapshot {
-    #[new]
-    #[pyo3(signature = (*, access_token, expires_at_unix_ms, generation, quota_project_id=None))]
-    fn new(
-        access_token: String,
-        expires_at_unix_ms: u64,
-        generation: u64,
-        quota_project_id: Option<String>,
-    ) -> Self {
-        Self {
-            access_token,
-            expires_at_unix_ms,
-            generation,
-            quota_project_id,
-        }
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "GcpTokenSnapshot(generation={}, expires_at_unix_ms={}, quota_project_id={:?})",
-            self.generation, self.expires_at_unix_ms, self.quota_project_id
-        )
-    }
-}
-
-#[pyclass(
-    name = "SyncGcpTokenCache",
-    module = "vertebra._storage",
-    frozen,
-    immutable_type
-)]
-pub struct PySyncGcpTokenCache {
-    inner: Arc<NativeGcpTokenCache>,
-}
-
-#[pymethods]
-impl PySyncGcpTokenCache {
-    #[new]
-    #[pyo3(signature = (options))]
-    fn new(py: Python<'_>, options: HashMap<String, String>) -> PyResult<Self> {
-        let inner = py
-            .detach(|| {
-                NativeGcpTokenCache::from_options(&options, crate::gcp_auth::GCS_OAUTH_SCOPES)
-            })
-            .ok_or_else(|| {
-                PyValueError::new_err("unable to configure GcpTokenCache from options")
-            })?;
-        Ok(Self { inner })
-    }
-
-    #[getter]
-    fn generation(&self) -> u64 {
-        self.inner.generation()
-    }
-
-    #[getter]
-    fn refresh_skew_ms(&self) -> u64 {
-        self.inner.refresh_skew_ms()
-    }
-
-    #[getter]
-    fn has_service_account_key(&self) -> bool {
-        self.inner.service_account_key().is_some()
-    }
-
-    #[getter]
-    fn service_account_email(&self) -> Option<String> {
-        self.inner
-            .service_account_key()
-            .map(|k| k.client_email.clone())
-    }
-
-    #[pyo3(signature = (*, now_unix_ms=None))]
-    fn needs_refresh(&self, now_unix_ms: Option<u64>) -> bool {
-        self.inner
-            .needs_refresh(now_unix_ms.unwrap_or_else(current_unix_ms))
-    }
-
-    fn invalidate(&self, failed_generation: u64) {
-        self.inner.invalidate(failed_generation);
-    }
-
-    fn sign_jwt_for_audience(&self, py: Python<'_>, audience: &str) -> PyResult<String> {
-        py.detach(|| self.inner.sign_jwt_for_audience(audience))
-            .map_err(PyValueError::new_err)
-    }
-
-    #[pyo3(signature = (*, force_refresh=false))]
-    fn get_token(&self, py: Python<'_>, force_refresh: bool) -> PyResult<PyGcpTokenSnapshot> {
-        if !force_refresh && let Some(snap) = self.inner.get_cached(current_unix_ms()) {
-            return Ok(PyGcpTokenSnapshot::from(snap.as_ref()));
-        }
-        let cache = Arc::clone(&self.inner);
-        let snap = py
-            .detach(|| {
-                block_on_storage(
-                    async move { cache.get_or_refresh_with_force(force_refresh).await },
-                )
-            })
-            .map_err(PyRuntimeError::new_err)?;
-        Ok(PyGcpTokenSnapshot::from(snap.as_ref()))
-    }
-}
-
-#[pyclass(
-    name = "AsyncGcpTokenCache",
-    module = "vertebra._storage",
-    frozen,
-    immutable_type
-)]
-pub struct PyAsyncGcpTokenCache {
-    inner: Arc<NativeGcpTokenCache>,
-}
-
-#[pymethods]
-impl PyAsyncGcpTokenCache {
-    #[new]
-    #[pyo3(signature = (options))]
-    fn new(py: Python<'_>, options: HashMap<String, String>) -> PyResult<Self> {
-        let inner = py
-            .detach(|| {
-                NativeGcpTokenCache::from_options(&options, crate::gcp_auth::GCS_OAUTH_SCOPES)
-            })
-            .ok_or_else(|| {
-                PyValueError::new_err("unable to configure GcpTokenCache from options")
-            })?;
-        Ok(Self { inner })
-    }
-
-    #[getter]
-    fn generation(&self) -> u64 {
-        self.inner.generation()
-    }
-
-    #[getter]
-    fn refresh_skew_ms(&self) -> u64 {
-        self.inner.refresh_skew_ms()
-    }
-
-    #[getter]
-    fn has_service_account_key(&self) -> bool {
-        self.inner.service_account_key().is_some()
-    }
-
-    #[getter]
-    fn service_account_email(&self) -> Option<String> {
-        self.inner
-            .service_account_key()
-            .map(|k| k.client_email.clone())
-    }
-
-    #[pyo3(signature = (*, now_unix_ms=None))]
-    fn needs_refresh(&self, now_unix_ms: Option<u64>) -> bool {
-        self.inner
-            .needs_refresh(now_unix_ms.unwrap_or_else(current_unix_ms))
-    }
-
-    fn invalidate(&self, failed_generation: u64) {
-        self.inner.invalidate(failed_generation);
-    }
-
-    fn sign_jwt_for_audience(&self, py: Python<'_>, audience: &str) -> PyResult<String> {
-        py.detach(|| self.inner.sign_jwt_for_audience(audience))
-            .map_err(PyValueError::new_err)
-    }
-
-    #[pyo3(signature = (*, force_refresh=false))]
-    fn get_token(&self, py: Python<'_>, force_refresh: bool) -> PyResult<RustTaskAwaitable> {
-        let cache = Arc::clone(&self.inner);
-        spawn_rust_task(
-            py,
-            async move {
-                cache
-                    .get_or_refresh_with_force(force_refresh)
-                    .await
-                    .map_err(StorageError::Signing)
-            },
-            |py, snap| Ok(Py::new(py, PyGcpTokenSnapshot::from(snap.as_ref()))?.into_any()),
-        )
-    }
-}
-
 #[pyclass(module = "vertebra._storage", frozen, immutable_type, from_py_object)]
 #[derive(Clone, Debug)]
 pub struct ObjectMeta {
@@ -977,6 +760,12 @@ impl SyncObjectStore {
         self.engine.scheme()
     }
 
+    fn to_async(&self) -> AsyncObjectStore {
+        AsyncObjectStore {
+            engine: self.engine.clone(),
+        }
+    }
+
     #[pyo3(signature = (path, data, *, content_type=None, attributes=None, if_not_exists=false, if_match=None, if_none_match=None))]
     #[allow(clippy::too_many_arguments)]
     fn put(
@@ -1213,6 +1002,12 @@ impl AsyncObjectStore {
     #[getter]
     fn scheme(&self) -> &str {
         self.engine.scheme()
+    }
+
+    fn to_sync(&self) -> SyncObjectStore {
+        SyncObjectStore {
+            engine: self.engine.clone(),
+        }
     }
 
     #[pyo3(signature = (path, data, *, content_type=None, attributes=None, if_not_exists=false, if_match=None, if_none_match=None))]
@@ -1736,6 +1531,89 @@ fn py_sign_gcs_v4_iam_url_async(
     )
 }
 
+#[pyfunction]
+#[pyo3(signature = (bucket, namespace, region, par_token, object_path, expires_in_secs=3600, endpoint=None))]
+#[allow(clippy::too_many_arguments)]
+fn sign_oci_par_url(
+    py: Python<'_>,
+    bucket: &str,
+    namespace: &str,
+    region: &str,
+    par_token: &str,
+    object_path: &str,
+    expires_in_secs: u64,
+    endpoint: Option<String>,
+) -> PyResult<String> {
+    let cfg = OciParConfig {
+        region: region.to_string(),
+        namespace: namespace.to_string(),
+        bucket: bucket.to_string(),
+        par_token: par_token.to_string(),
+        endpoint,
+    };
+    py.detach(|| build_oci_par_url(&cfg, object_path, expires_in_secs))
+        .map_err(PyErr::from)
+}
+
+#[pyfunction]
+#[pyo3(signature = (bucket, service_account_email, method, object_path, expires_in_secs=3600, timestamp=None))]
+fn build_gcs_v4_canonical_request(
+    py: Python<'_>,
+    bucket: &str,
+    service_account_email: &str,
+    method: &str,
+    object_path: &str,
+    expires_in_secs: u64,
+    timestamp: Option<i64>,
+) -> PyResult<(String, String, String, String)> {
+    let now_unix = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
+    let req = py
+        .detach(|| {
+            crate::signing::build_gcs_v4_canonical_request(
+                bucket,
+                service_account_email,
+                method,
+                object_path,
+                expires_in_secs,
+                now_unix,
+            )
+        })
+        .map_err(PyErr::from)?;
+    Ok((
+        req.canonical_uri,
+        req.canonical_querystring,
+        req.canonical_request,
+        req.string_to_sign,
+    ))
+}
+
+#[pyfunction]
+#[pyo3(signature = (canonical_uri, canonical_querystring, signature_hex, endpoint=None))]
+fn assemble_gcs_iam_v4_url(
+    py: Python<'_>,
+    canonical_uri: &str,
+    canonical_querystring: &str,
+    signature_hex: &str,
+    endpoint: Option<&str>,
+) -> PyResult<String> {
+    let canonical = GcsV4CanonicalRequest {
+        canonical_uri: canonical_uri.to_string(),
+        canonical_querystring: canonical_querystring.to_string(),
+        canonical_request: String::new(),
+        string_to_sign: String::new(),
+    };
+    let url = py
+        .detach(|| crate::signing::assemble_gcs_iam_v4_url(&canonical, signature_hex))
+        .map_err(PyErr::from)?;
+    if let Some(ep) = endpoint.map(str::trim).filter(|s| !s.is_empty()) {
+        let base = ep.trim_end_matches('/');
+        if let Some(rest) = url.strip_prefix("https://storage.googleapis.com") {
+            return Ok(format!("{base}{rest}"));
+        }
+    }
+    Ok(url)
+}
+
 #[pymodule(gil_used = false)]
 pub fn _storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SyncObjectStore>()?;
@@ -1747,9 +1625,6 @@ pub fn _storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AsyncMultipartUpload>()?;
     m.add_class::<RustTaskAwaitable>()?;
     m.add_class::<StorageBuffer>()?;
-    m.add_class::<PyGcpTokenSnapshot>()?;
-    m.add_class::<PySyncGcpTokenCache>()?;
-    m.add_class::<PyAsyncGcpTokenCache>()?;
     m.add_function(wrap_pyfunction!(py_sign_hmac_url, m)?)?;
     m.add_function(wrap_pyfunction!(py_verify_hmac_url, m)?)?;
     m.add_function(wrap_pyfunction!(py_sign_s3_v4_url, m)?)?;
@@ -1760,5 +1635,8 @@ pub fn _storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_sign_azure_sas_url, m)?)?;
     m.add_function(wrap_pyfunction!(py_chunk_r2_uniform_parts, m)?)?;
     m.add_function(wrap_pyfunction!(py_sign_aws_sigv4_headers, m)?)?;
+    m.add_function(wrap_pyfunction!(sign_oci_par_url, m)?)?;
+    m.add_function(wrap_pyfunction!(build_gcs_v4_canonical_request, m)?)?;
+    m.add_function(wrap_pyfunction!(assemble_gcs_iam_v4_url, m)?)?;
     Ok(())
 }

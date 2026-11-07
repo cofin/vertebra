@@ -16,7 +16,17 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from vertebra.storage import AsyncObjectStore, SigningConfig, SyncObjectStore
+import vertebra._storage as native_storage_mod
+from vertebra.storage import (
+    AsyncObjectStore,
+    AzureConfig,
+    GCSConfig,
+    OCIConfig,
+    R2Config,
+    S3Config,
+    SigningConfig,
+    SyncObjectStore,
+)
 
 
 def test_signing_functions_default_to_current_utc_timestamp() -> None:
@@ -304,3 +314,227 @@ def test_signing_expiry_bounds_invalid_keys_and_rfc3986_paths() -> None:
         1_794_009_660,
         "https://acct.r2.cloudflarestorage.com",
     )
+
+
+def test_native_oci_par_and_gcs_iam_assembly_exports() -> None:
+    """Verify sign_oci_par_url, build_gcs_v4_canonical_request, and assemble_gcs_iam_v4_url on vertebra._storage."""
+    par_url = native_storage_mod.sign_oci_par_url(
+        "lakehouse",
+        "mytenancy",
+        "us-ashburn-1",
+        "p/secret-par-token/",
+        "reports/q4.parquet",
+        600,
+    )
+    assert (
+        par_url
+        == "https://objectstorage.us-ashburn-1.oraclecloud.com/p/secret-par-token/n/mytenancy/b/lakehouse/o/reports%2Fq4.parquet"
+    )
+
+    with pytest.raises(ValueError, match="expires_in_secs"):
+        native_storage_mod.sign_oci_par_url(
+            "lakehouse",
+            "mytenancy",
+            "us-ashburn-1",
+            "secret-par-token",
+            "reports/q4.parquet",
+            0,
+        )
+
+    with pytest.raises(ValueError, match="PAR token"):
+        native_storage_mod.sign_oci_par_url(
+            "lakehouse",
+            "mytenancy",
+            "us-ashburn-1",
+            "   ",
+            "reports/q4.parquet",
+            600,
+        )
+
+    c_uri, c_qs, c_req, sts = native_storage_mod.build_gcs_v4_canonical_request(
+        "ml-bucket",
+        "signer@proj.iam.gserviceaccount.com",
+        "GET",
+        "reports/q4.parquet",
+        600,
+        1_794_009_600,
+    )
+    assert c_uri == "/ml-bucket/reports/q4.parquet"
+    assert "X-Goog-Algorithm=GOOG4-RSA-SHA256" in c_qs
+    assert "UNSIGNED-PAYLOAD" in c_req
+    assert sts.startswith("GOOG4-RSA-SHA256\n20261107T000000Z\n")
+
+    assembled = native_storage_mod.assemble_gcs_iam_v4_url(c_uri, c_qs, "DEADBEEFCAFE")
+    assert assembled.startswith("https://storage.googleapis.com/ml-bucket/reports/q4.parquet?")
+    assert assembled.endswith("&X-Goog-Signature=deadbeefcafe")
+
+    with pytest.raises(ValueError, match="hex"):
+        native_storage_mod.assemble_gcs_iam_v4_url(c_uri, c_qs, "not-valid-hex!!")
+
+
+def test_multicloud_store_sign_sync_and_async(tmp_path: Path) -> None:
+    """Verify store.sign across GCS (RSA + IAM signBlob), S3, R2, Azure SAS, and OCI PAR for sync and async stores."""
+    ts = 1_794_009_600
+    pem_key = subprocess.check_output(
+        ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"],
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    sa_json = json.dumps(
+        {
+            "type": "service_account",
+            "project_id": "test-gcp-proj",
+            "private_key_id": "key-1",
+            "private_key": pem_key,
+            "client_email": "rsa-signer@test-gcp-proj.iam.gserviceaccount.com",
+            "token_uri": "http://127.0.0.1:9/token",
+        }
+    )
+
+    gcs_rsa_cfg = GCSConfig(bucket="gcs-rsa-bucket", service_account_key=sa_json, iam_endpoint="http://127.0.0.1:9")
+    gcs_rsa_sync = SyncObjectStore(gcs_rsa_cfg)
+    gcs_rsa_async = AsyncObjectStore(gcs_rsa_cfg)
+
+    s3_cfg = S3Config(
+        bucket="s3-analytics",
+        region="us-east-1",
+        access_key_id="AKIAIOSFODNN7EXAMPLE",
+        secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    )
+    s3_sync = SyncObjectStore(s3_cfg)
+    s3_async = AsyncObjectStore(s3_cfg)
+
+    r2_cfg = R2Config(
+        bucket="r2-assets",
+        account_id="acct123456",
+        access_key_id="r2-ak",
+        secret_access_key="r2-sk",
+    )
+    r2_sync = SyncObjectStore(r2_cfg)
+    r2_async = AsyncObjectStore(r2_cfg)
+
+    az_key = base64.b64encode(b"0123456789abcdef0123456789abcdef").decode("ascii")
+    az_cfg = AzureConfig(container="az-lake", account="devstoreaccount1", access_key=az_key)
+    az_sync = SyncObjectStore(az_cfg)
+    az_async = AsyncObjectStore(az_cfg)
+
+    oci_cfg = OCIConfig(
+        bucket="oci-warehouse",
+        namespace="mytenancy",
+        region="us-ashburn-1",
+        par_token="par-tok-xyz",
+    )
+    oci_sync = SyncObjectStore(oci_cfg)
+    oci_async = AsyncObjectStore(oci_cfg)
+
+    oci_prefix_cfg = OCIConfig(
+        bucket="oci-warehouse-2",
+        namespace="ns2",
+        region="us-phoenix-1",
+        par_url_prefix="https://objectstorage.us-phoenix-1.oraclecloud.com/p/par-prefix-tok/n/ns2/b/oci-warehouse-2/o/",
+    )
+    oci_prefix_sync = SyncObjectStore(oci_prefix_cfg)
+
+    class _IamHandler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            _ = (format, args)
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            _ = self.rfile.read(length) if length > 0 else b""
+            if self.path == "/token":
+                body = b'{"access_token":"iam-oauth-tok","expires_in":3600,"token_type":"Bearer"}'
+            elif ":signBlob" in self.path:
+                body = b'{"keyId":"k1","signedBlob":"ZGVhZGJlZWZjYWZl"}'
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _IamHandler)
+    iam_base = f"http://127.0.0.1:{server.server_port}"
+    srv_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    srv_thread.start()
+
+    try:
+        adc_file = tmp_path / "iam_adc.json"
+        adc_file.write_text(
+            json.dumps(
+                {
+                    "type": "authorized_user",
+                    "client_id": "cid",
+                    "client_secret": "csec",
+                    "refresh_token": "rtok",
+                    "token_uri": f"{iam_base}/token",
+                }
+            ),
+            encoding="utf-8",
+        )
+        gcs_iam_cfg = GCSConfig(
+            bucket="gcs-iam-bucket",
+            application_credentials=str(adc_file),
+            target_service_account="iam-signer@test-gcp-proj.iam.gserviceaccount.com",
+            iam_endpoint=iam_base,
+        )
+        gcs_iam_sync = SyncObjectStore(gcs_iam_cfg)
+        gcs_iam_async = AsyncObjectStore(gcs_iam_cfg)
+
+        gcs_rsa_url = gcs_rsa_sync.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts)
+        assert gcs_rsa_url.startswith("https://storage.googleapis.com/gcs-rsa-bucket/reports/q4.parquet?")
+        assert "X-Goog-Algorithm=GOOG4-RSA-SHA256" in gcs_rsa_url
+        assert "X-Goog-Expires=600" in gcs_rsa_url
+
+        gcs_iam_url = gcs_iam_sync.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts)
+        assert gcs_iam_url.startswith("https://storage.googleapis.com/gcs-iam-bucket/reports/q4.parquet?")
+        assert "X-Goog-Signature=646561646265656663616665" in gcs_iam_url
+
+        s3_url = s3_sync.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts)
+        assert s3_url.startswith("https://s3.us-east-1.amazonaws.com/s3-analytics/reports/q4.parquet?")
+        assert s3_sync.verify_presigned_url(s3_url, method="GET", timestamp=ts + 10)
+
+        r2_url = r2_sync.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts)
+        assert r2_url.startswith("https://acct123456.r2.cloudflarestorage.com/r2-assets/reports/q4.parquet?")
+        assert r2_sync.verify_presigned_url(r2_url, method="GET", timestamp=ts + 10)
+
+        az_url = az_sync.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts)
+        assert az_url.startswith("https://devstoreaccount1.blob.core.windows.net/az-lake/reports/q4.parquet?")
+        assert "sv=2020-12-06" in az_url
+        assert "sp=r" in az_url
+        assert "sig=" in az_url
+
+        oci_url = oci_sync.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts)
+        assert (
+            oci_url
+            == "https://objectstorage.us-ashburn-1.oraclecloud.com/p/par-tok-xyz/n/mytenancy/b/oci-warehouse/o/reports%2Fq4.parquet"
+        )
+
+        oci_prefix_url = oci_prefix_sync.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts)
+        assert (
+            oci_prefix_url
+            == "https://objectstorage.us-phoenix-1.oraclecloud.com/p/par-prefix-tok/n/ns2/b/oci-warehouse-2/o/reports%2Fq4.parquet"
+        )
+
+        async def _verify_async() -> None:
+            assert (
+                await gcs_rsa_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts)
+                == gcs_rsa_url
+            )
+            assert (
+                await gcs_iam_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts)
+                == gcs_iam_url
+            )
+            assert await s3_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts) == s3_url
+            assert await r2_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts) == r2_url
+            assert await az_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts) == az_url
+            assert await oci_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts) == oci_url
+
+        asyncio.run(_verify_async())
+    finally:
+        server.shutdown()
+        server.server_close()
+        srv_thread.join(timeout=2.0)

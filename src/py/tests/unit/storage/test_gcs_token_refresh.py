@@ -16,9 +16,15 @@ from urllib.parse import parse_qs
 
 import pytest
 
+import vertebra._storage as native_storage_mod
+import vertebra._vertebra as native_core_mod
 import vertebra.embeddings._google as google_embeddings_mod
+import vertebra.storage._store as storage_store_mod
 from vertebra._vertebra import (
     AsyncGcpTokenCache as CoreAsyncGcpTokenCache,
+)
+from vertebra._vertebra import (
+    GcpTokenSnapshot as CoreGcpTokenSnapshot,
 )
 from vertebra._vertebra import (
     SyncGcpTokenCache as CoreSyncGcpTokenCache,
@@ -194,7 +200,7 @@ def test_gcp_token_cache_authorized_user_and_proactive_skew(
         application_credentials=str(adc_path),
         refresh_skew_seconds=300,
     )
-    cache = SyncGcpTokenCache.from_gcs_config(cfg)
+    cache = cfg.sync_token_cache()
 
     snap1 = cache.get_token()
     assert isinstance(snap1, GcpTokenSnapshot)
@@ -244,7 +250,7 @@ def test_gcp_token_cache_single_flight_deduplication_and_invalidation(
     )
 
     cfg = GCSConfig(bucket="test-bucket", application_credentials=str(adc_path))
-    cache = SyncGcpTokenCache.from_gcs_config(cfg)
+    cache = cfg.sync_token_cache()
 
     with ThreadPoolExecutor(max_workers=16) as pool:
         results = list(pool.map(lambda _: cache.get_token(), range(16)))
@@ -279,7 +285,7 @@ def test_gcp_token_cache_impersonation_and_metadata_server(
         target_service_account="runner@test-proj.iam.gserviceaccount.com",
         iam_endpoint=token_server.base_url,
     )
-    cache = SyncGcpTokenCache.from_gcs_config(cfg, allow_ambient_adc=False)
+    cache = cfg.sync_token_cache(allow_ambient_adc=False)
 
     snap = cache.get_token()
     assert snap.access_token == "mock-oauth-token-impersonated-1"
@@ -348,7 +354,7 @@ def test_duckdb_multi_session_token_generation_secret_rotation(
         encoding="utf-8",
     )
     gcs_cfg = GCSConfig(bucket="test-bucket", application_credentials=str(adc_path))
-    cache = SyncGcpTokenCache.from_gcs_config(gcs_cfg)
+    cache = gcs_cfg.sync_token_cache()
 
     db_cfg = DuckDBConfig(gcs_token_cache=cache)
     driver_a = SyncDuckDBDriver(db_cfg)
@@ -395,8 +401,8 @@ def test_async_duckdb_driver_token_generation_rotation(
         ),
         encoding="utf-8",
     )
-    cache = SyncGcpTokenCache.from_gcs_config(GCSConfig(bucket="b", application_credentials=str(adc_path)))
-    async_cache = AsyncGcpTokenCache.from_gcs_config(GCSConfig(bucket="b", application_credentials=str(adc_path)))
+    cache = GCSConfig(bucket="b", application_credentials=str(adc_path)).sync_token_cache()
+    async_cache = GCSConfig(bucket="b", application_credentials=str(adc_path)).async_token_cache()
 
     async def _run() -> None:
         drv = AsyncDuckDBDriver(DuckDBConfig(gcs_token_cache=cache))
@@ -443,7 +449,7 @@ def test_high_concurrency_async_storage_and_token_refresh_no_gil_blocking(
         encoding="utf-8",
     )
     cfg = GCSConfig(bucket="test-bucket", application_credentials=str(adc_path))
-    cache = AsyncGcpTokenCache.from_gcs_config(cfg)
+    cache = cfg.async_token_cache()
     local_store = AsyncObjectStore(
         f"file://{tmp_path / 'bucket'}",
         signing=SigningConfig(
@@ -626,3 +632,52 @@ def test_google_embedder_uses_vertebra_gcp_token_cache_without_storage_import(
     embedder = VertexEmbedder("gemini-embedding-001", project="test-proj")
     resolved_cache = embedder._ensure_token_cache(async_mode=True)
     assert isinstance(resolved_cache, AsyncGcpTokenCache)
+
+
+def test_gcp_token_cache_unified_on_vertebra_core_and_removed_from_storage_ext(
+    token_server: _MockTokenServer,
+    tmp_path: Path,
+) -> None:
+    """Verify vertebra.storage re-exports vertebra._vertebra token classes and removes duplicate _storage/urllib classes."""
+    assert SyncGcpTokenCache is CoreSyncGcpTokenCache
+    assert AsyncGcpTokenCache is CoreAsyncGcpTokenCache
+    assert GcpTokenSnapshot is CoreGcpTokenSnapshot
+    assert SyncGcpTokenCache is native_core_mod.SyncGcpTokenCache
+    assert AsyncGcpTokenCache is native_core_mod.AsyncGcpTokenCache
+    assert GcpTokenSnapshot is native_core_mod.GcpTokenSnapshot
+
+    assert not hasattr(native_storage_mod, "SyncGcpTokenCache")
+    assert not hasattr(native_storage_mod, "AsyncGcpTokenCache")
+    assert not hasattr(native_storage_mod, "GcpTokenSnapshot")
+
+    assert not hasattr(GCSConfig, "_fetch_adc_token_with_expiry")
+    assert not hasattr(GCSConfig, "_exchange_authorized_user_token_with_expiry")
+    assert not hasattr(GCSConfig, "_impersonate_service_account_token_with_expiry")
+    assert not hasattr(GCSConfig, "_open_http_json")
+    assert not hasattr(GCSConfig, "_fetch_metadata_server_token_with_expiry")
+
+    store_source = Path(storage_store_mod.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(store_source)
+    urllib_imports = [
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.alias) and node.name in {"urllib.request", "urllib.error"}
+    ]
+    assert urllib_imports == []
+
+    adc_path = tmp_path / "unified_adc.json"
+    adc_path.write_text(
+        json.dumps(
+            {
+                "type": "authorized_user",
+                "client_id": "cid",
+                "client_secret": "csec",
+                "refresh_token": "rtok",
+                "token_uri": f"{token_server.base_url}/token",
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = GCSConfig(bucket="unified-bucket", application_credentials=str(adc_path))
+    assert cfg.resolve_adc_token() == "mock-oauth-token-user-1"
+    assert token_server.oauth_calls == 1

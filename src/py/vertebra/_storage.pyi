@@ -4,18 +4,17 @@ from collections.abc import Buffer
 from typing import Any, final
 
 __all__ = [
-    "AsyncGcpTokenCache",
     "AsyncMultipartUpload",
     "AsyncObjectStore",
     "AsyncStreamReader",
-    "GcpTokenSnapshot",
     "ObjectMeta",
     "RustTaskAwaitable",
     "StorageBuffer",
-    "SyncGcpTokenCache",
     "SyncMultipartUpload",
     "SyncObjectStore",
     "SyncStreamReader",
+    "assemble_gcs_iam_v4_url",
+    "build_gcs_v4_canonical_request",
     "py_chunk_r2_uniform_parts",
     "py_sign_aws_sigv4_headers",
     "py_sign_azure_sas_url",
@@ -26,59 +25,8 @@ __all__ = [
     "py_sign_s3_v4_url",
     "py_verify_hmac_url",
     "py_verify_s3_v4_url",
+    "sign_oci_par_url",
 ]
-
-@final
-class GcpTokenSnapshot:
-    def __new__(
-        cls,
-        *,
-        access_token: str,
-        expires_at_unix_ms: int,
-        generation: int,
-        quota_project_id: str | None = None,
-    ) -> GcpTokenSnapshot: ...
-    @property
-    def access_token(self) -> str: ...
-    @property
-    def expires_at_unix_ms(self) -> int: ...
-    @property
-    def generation(self) -> int: ...
-    @property
-    def quota_project_id(self) -> str | None: ...
-    def __repr__(self) -> str: ...
-
-@final
-class SyncGcpTokenCache:
-    def __new__(cls, options: dict[str, str]) -> SyncGcpTokenCache: ...
-    @property
-    def generation(self) -> int: ...
-    @property
-    def refresh_skew_ms(self) -> int: ...
-    @property
-    def has_service_account_key(self) -> bool: ...
-    @property
-    def service_account_email(self) -> str | None: ...
-    def needs_refresh(self, *, now_unix_ms: int | None = None) -> bool: ...
-    def invalidate(self, failed_generation: int) -> None: ...
-    def sign_jwt_for_audience(self, audience: str) -> str: ...
-    def get_token(self, *, force_refresh: bool = False) -> GcpTokenSnapshot: ...
-
-@final
-class AsyncGcpTokenCache:
-    def __new__(cls, options: dict[str, str]) -> AsyncGcpTokenCache: ...
-    @property
-    def generation(self) -> int: ...
-    @property
-    def refresh_skew_ms(self) -> int: ...
-    @property
-    def has_service_account_key(self) -> bool: ...
-    @property
-    def service_account_email(self) -> str | None: ...
-    def needs_refresh(self, *, now_unix_ms: int | None = None) -> bool: ...
-    def invalidate(self, failed_generation: int) -> None: ...
-    def sign_jwt_for_audience(self, audience: str) -> str: ...
-    def get_token(self, *, force_refresh: bool = False) -> RustTaskAwaitable: ...
 
 @final
 class StorageBuffer:
@@ -146,6 +94,7 @@ class SyncObjectStore:
     def __new__(cls, url: str, options: dict[str, str] | None = None) -> SyncObjectStore: ...
     @property
     def scheme(self) -> str: ...
+    def to_async(self) -> AsyncObjectStore: ...
     def put(
         self,
         path: str,
@@ -195,6 +144,7 @@ class AsyncObjectStore:
     def __new__(cls, url: str, options: dict[str, str] | None = None) -> AsyncObjectStore: ...
     @property
     def scheme(self) -> str: ...
+    def to_sync(self) -> SyncObjectStore: ...
     def put(
         self,
         path: str,
@@ -332,3 +282,26 @@ def py_sign_aws_sigv4_headers(
     timestamp: int | None = None,
     session_token: str | None = None,
 ) -> dict[str, str]: ...
+def sign_oci_par_url(
+    bucket: str,
+    namespace: str,
+    region: str,
+    par_token: str,
+    object_path: str,
+    expires_in_secs: int = 3600,
+    endpoint: str | None = None,
+) -> str: ...
+def build_gcs_v4_canonical_request(
+    bucket: str,
+    service_account_email: str,
+    method: str,
+    object_path: str,
+    expires_in_secs: int = 3600,
+    timestamp: int | None = None,
+) -> tuple[str, str, str, str]: ...
+def assemble_gcs_iam_v4_url(
+    canonical_uri: str,
+    canonical_querystring: str,
+    signature_hex: str,
+    endpoint: str | None = None,
+) -> str: ...
