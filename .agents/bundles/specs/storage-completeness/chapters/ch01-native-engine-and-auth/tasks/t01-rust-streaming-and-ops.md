@@ -5,7 +5,7 @@ chapter_id: ch01-native-engine-and-auth
 title: Implement streaming reads, incremental multipart sessions, conditional puts, pagination, and rename in vertebra-storage
 description: Extend ObjectStoreEngine and PyO3 bindings in vertebra-storage with zero-copy stream readers, incremental multipart uploads, conditional put options, cursor pagination, and server-side rename.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -25,18 +25,18 @@ tests:
 estimated_loc: 220
 plan_revision: 2
 plan_commit: cdb978d3
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-07T16:12:00Z"
+last_verified_commit: beb6a972
+verification_evidence: "uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage && uv run --no-sync cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets -- -D warnings (exit 0)"
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T04:15:00Z"
-commit: null
+updated_at: "2026-11-07T16:12:00Z"
+commit: beb6a972
 sources:
   - id: store-engine
     resource: src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine
@@ -118,13 +118,14 @@ Deliver true chunk-streaming reads, stateful incremental multipart uploads (with
 
 ## Acceptance Criteria
 
-- [ ] `StoredObjectMeta` and `PyObjectMeta` expose `content_type` and `attributes` (R1).
-- [ ] `ObjectStoreEngine`, `PySyncObjectStore`, and `PyAsyncObjectStore` support `get_stream`, `create_multipart` (`SyncMultipartUpload` / `AsyncMultipartUpload`), conditional `put`, `list_page`, `list_with_delimiter`, and `rename` without `Vec<Bytes>` full-payload buffering (R1).
-- [ ] All async PyO3 operations deliver completions via `RustTaskAwaitable` without `Python::attach` on Tokio worker threads (R1).
+- [x] `StoredObjectMeta` and `PyObjectMeta` expose `content_type` and `attributes` (R1).
+- [x] `ObjectStoreEngine`, `PySyncObjectStore`, and `PyAsyncObjectStore` support `get_stream`, `create_multipart` (`SyncMultipartUpload` / `AsyncMultipartUpload`), conditional `put`, `list_page`, `list_with_delimiter`, and `rename` without `Vec<Bytes>` full-payload buffering (R1).
+- [x] All async PyO3 operations deliver completions via `RustTaskAwaitable` without `Python::attach` on Tokio worker threads (R1).
 
 ## Notes & Discoveries
 
 - [2026-11-07 04:15] `r2.rs` currently documents R2's uniform non-trailing part size requirement; `MultipartUploadSession` enforces an 8 MiB part buffer incrementally for `r2` and `oci`.
+- [2026-11-07 16:12] Downstream `ch01:t02` contract notes (`beb6a972`): `AsyncObjectStore.create_multipart(path, *, content_type=None, attributes=None, if_not_exists=False, if_match=None, if_none_match=None)` returns a `RustTaskAwaitable` resolving to `AsyncMultipartUpload`, whereas `AsyncObjectStore.get_stream(path, *, chunk_size=None)` returns `AsyncStreamReader` directly (opening lazily on the first `__anext__` / `next_chunk` Tokio task). `SyncStreamReader` exposes `__iter__`, `__next__`, `next_chunk`, and `close`; `AsyncStreamReader` exposes `__aiter__`, `__anext__`, `next_chunk`, and `aclose`. `AlreadyExists` maps to `FileExistsError`, `Precondition` maps to `PermissionError`, and `head` populates `content_type` and `attributes` via `get_opts(GetOptions { head: true, .. })`.
 
 [^store-engine]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — Native Rust storage engine.
 [^r2-multipart]: `src/rs/vertebra-storage/src/r2.rs::build_r2_store` — R2 multipart upload constraints.
