@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod errors;
+pub(crate) mod protocol;
 
 use pyo3::prelude::*;
 

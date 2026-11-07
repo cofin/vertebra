@@ -24,24 +24,24 @@ tests:
 estimated_loc: 180
 plan_revision: 5
 plan_commit: 399e068c
-state_revision: 1
+state_revision: 2
 claimed_by: agent:ch02-t01
 claimed_at: "2026-11-07T21:54:00Z"
 blocked_reason: null
 unblock_condition: null
-next_step: "Resolve the producer-before-consumer Clippy contradiction via /flow:revise native-postgres-driver ch02-wire-codec-and-session-startup before task completion."
-last_verified_at: "2026-11-07T21:57:00Z"
+next_step: "Coordinator signs the verified task commit and synchronizes completed state; /flow:implement native-postgres-driver continues with ch02:t02."
+last_verified_at: "2026-11-07T22:04:04Z"
 last_verified_commit: null
 verification_evidence:
   - "UV_NO_SYNC=1; PYO3_PYTHON=${PWD}/.venv/bin/python; CARGO_TARGET_DIR=/tmp/vtb-cargo-target"
   - "Red: cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --lib protocol::tests --locked: exit 101; read_message and encode_startup_frame are absent before implementation"
   - "Green: same focused command: exit 0; 9 passed, 0 failed, 0 ignored"
   - "flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked: exit 0; 9 unit tests, 7 integration tests, 0 doc tests"
-  - "cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings: exit 101; dead_code on crate-private MAX_BACKEND_FRAME_LENGTH, MIN_BACKEND_FRAME_LENGTH, TERMINATE_FRAME, read_message, encode_startup_frame in production lib and TERMINATE_FRAME in lib-test"
+  - "cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings: exit 0; exactly three item-level expectations match plan revision 5, with no broad allowance or visibility widening"
   - "rustfmt --edition 2024 --check src/rs/vertebra-postgres/src/lib.rs src/rs/vertebra-postgres/src/protocol.rs: exit 0"
   - "git diff --check: exit 0"
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T21:57:00Z"
+updated_at: "2026-11-07T22:04:04Z"
 commit: null
 sources:
   - id: proto-research
@@ -125,7 +125,7 @@ Commit as `feat(postgres): bound wire message decoding and startup framing`.
 
 - [x] `protocol::read_message` validates `4..=16_777_216` header lengths before allocating body buffers and delegates frame parsing to `postgres_protocol::message::backend::Message::parse` with zero unconsumed trailing bytes (R3).
 - [x] `protocol::encode_startup_frame` encodes Protocol 3.0 (`196608`) startup packets including `user`, `database`, `application_name`, and `client_encoding = "UTF8"` via `postgres_protocol::message::frontend::startup_message` (R3).
-- [ ] `protocol` remains `pub(crate)` with all unit tests and workspace Clippy checks exiting `0` (R3).
+- [x] `protocol` remains `pub(crate)` with all unit tests and workspace Clippy checks exiting `0` (R3).
 
 ## Notes & Discoveries
 
