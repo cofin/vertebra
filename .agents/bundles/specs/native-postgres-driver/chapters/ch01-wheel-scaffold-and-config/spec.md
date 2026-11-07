@@ -5,7 +5,7 @@ chapter_id: ch01-wheel-scaffold-and-config
 title: "Chapter 01: Standalone Optional Wheel Scaffold and Native Connection Configuration"
 description: Scaffold the standalone vertebra-postgres PyO3 crate, lock workspace and vertebra-db Cargo dependencies upfront, wire the vertebra._postgres wheel/stub/Makefile matrix, and implement pure PostgresConfig validation and ServerError categories.
 status: stable
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
@@ -14,13 +14,19 @@ plan_revision: 6
 plan_commit: 8833b064
 state_revision: 1
 last_verified_checkpoint: d809be01
-last_reviewed_commit: null
+last_reviewed_commit: 3d68c853
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T21:53:16Z"
+updated_at: "2026-11-07T22:46:50Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:40:00Z"
 verified:
+  - by: agent:diagnostic-prerequisite-quality
+    at: "2026-11-07T22:46:50Z"
+    commit: 3d68c853
+  - by: agent:diagnostic-prerequisite-correctness
+    at: "2026-11-07T22:46:50Z"
+    commit: 3d68c853
   - by: agent:ch01-quality-review
     at: "2026-11-07T21:53:16Z"
     commit: 0c7a4636
@@ -154,11 +160,11 @@ Progress: `[0/0 files documented in ch01]` (`src/py/vertebra/_postgres.pyi` modu
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ d809be01`; chapter `state: active`, all four task receipts are complete.
-- **Task State**: The coupled prerequisite delta is verified at `d809be01`; tasks 03 and 04 retain their existing completed receipts.
-- **Verification & Review**: The targeted prerequisite checkpoint and fresh correctness/quality review reclose this chapter before downstream session execution.
-- **Documentation**: `[0/0 files documented in ch01]`; full driver guides remain assigned to chapter 30.
-- **Downstream Resume**: Chapter 02 task 01 is complete; task 02 waits for the new upstream review stamp.
+- **Verified Baseline**: `HEAD @ 3d68c853`; chapter `state: completed`, `planning_status: complete`.
+- **Task & Review State**: All four task receipts are complete; the direct diagnostic-iterator prerequisite passes its exact native checkpoint, correctness review, and independent quality review.
+- **Checkpoint & Review**: `last_verified_checkpoint: d809be01`, `last_reviewed_commit: 3d68c853`.
+- **Documentation**: `[0/0 files documented in ch01]`; chapter 30 retains full driver guides and knowledge synchronization.
+- **Downstream Resume**: Chapter 02 codec task 01 is complete; session task 02 is ready with the direct trait dependency available.
 
 [^ws-cargo]: `src/rs/Cargo.toml` — Rust workspace members and shared crate dependency versions.
 [^spanner-wheel]: `src/rs/vertebra-spanner/pyproject.toml` — Reference optional Maturin namespace wheel configuration.

@@ -5,7 +5,7 @@ chapter_id: ch02-wire-codec-and-session-startup
 title: Establish authenticated trust sessions with SessionHandle and PendingSession publication
 description: Implement PostgresConnection, SessionHandle, ConnectAttempt, and PendingSession enforcing strict Protocol 3.0 startup ordering, total deadline budgets, cancellation rollback, and bounded Terminate close.
 status: stable
-state: blocked
+state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -30,9 +30,9 @@ plan_commit: 8833b064
 state_revision: 0
 claimed_by: null
 claimed_at: null
-blocked_reason: "Upstream chapter 01 direct diagnostic-iterator dependency repair awaits fresh review."
-unblock_condition: "Chapter 01 is completed with a fresh reviewed prerequisite repair."
-next_step: "/flow:implement native-postgres-driver ch01-wheel-scaffold-and-config"
+blocked_reason: null
+unblock_condition: null
+next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null

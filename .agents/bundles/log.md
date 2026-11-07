@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-07] chapter-complete | Native PostgreSQL diagnostic prerequisite review
+
+- Reclosed chapter 01 at reviewed `3d68c853`: cold correctness and fresh independent quality reports have no findings; native workspace checks, all-target Clippy, unchanged lock identities, and all 16 tests pass.
+- Existing task 01 and 02 owners bind to coupled source `d809be01`; no chapter/task is added. Chapter 02 session task is ready to resume from its preserved prototype with real Rust metadata getters and the direct iterator dependency.
+
 ## [2026-11-07] prerequisite-verified | Native PostgreSQL diagnostic iterator
 
 - Signed source `d809be01` contains exactly the crate's direct `fallible-iterator = "=0.2.0"` declaration and its existing-version Cargo lock edge. Both existing chapter 01 owners bind their completion receipts to that SHA.

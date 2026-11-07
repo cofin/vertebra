@@ -1,8 +1,8 @@
 # Native PostgreSQL Driver — Chapter Catalog
 
-31 chapters and 111 bounded tasks retain the complete driver scope. Chapter 01 owns an active prerequisite repair; chapter 02 has a completed codec and a blocked session task awaiting upstream review.
+31 chapters and 111 bounded tasks retain the complete driver scope. Chapter 01 is complete and reviewed; chapter 02 has a completed codec and a ready session task.
 
-* [ch01-wheel-scaffold-and-config](ch01-wheel-scaffold-and-config/spec.md) — [active] (4/4 tasks complete) Scaffold the standalone vertebra-postgres PyO3 crate, lock workspace and vertebra-db Cargo dependencies upfront, wire the vertebra._postgres wheel/stub/Makefile matrix, and implement pure PostgresConfig validation and ServerError categories.
+* [ch01-wheel-scaffold-and-config](ch01-wheel-scaffold-and-config/spec.md) — [completed] (4/4 tasks complete) Scaffold the standalone vertebra-postgres PyO3 crate, lock workspace and vertebra-db Cargo dependencies upfront, wire the vertebra._postgres wheel/stub/Makefile matrix, and implement pure PostgresConfig validation and ServerError categories.
 * [ch02-wire-codec-and-session-startup](ch02-wire-codec-and-session-startup/spec.md) — [active] (1/4 tasks complete) Implement bounded 16 MiB PostgreSQL Protocol 3.0 framing, SessionHandle/PendingSession startup publication ownership, SSLRequest rustls negotiation, and cleartext/MD5 startup authentication.
 * [ch03-scram-and-channel-binding](ch03-scram-and-channel-binding/spec.md) — [planned] (0/3 tasks complete) Ordered SCRAM-SHA-256 SASL state machine, RFC 5929 X.509 leaf tls-server-end-point digest derivation, and policy-driven SCRAM-SHA-256-PLUS channel binding with downgrade signaling.
 * [ch04-cloud-material-and-admin-discovery](ch04-cloud-material-and-admin-discovery/spec.md) — [planned] (0/4 tasks complete) Single-flight deadline-bounded cloud material cache, off-GIL PKCS#1 RSA-2048 ephemeral key generation with X.509 leaf validation, and Cloud SQL v1beta4 plus AlloyDB v1alpha Admin discovery clients.

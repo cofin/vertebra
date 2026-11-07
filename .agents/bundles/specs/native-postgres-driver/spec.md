@@ -38,8 +38,8 @@ chapters:
   - ch29-wheel-ci-and-benchmarks
   - ch30-user-and-domain-docs
   - ch31-final-review-and-release-gate
-current_chapter: ch01-wheel-scaffold-and-config
-current_task: null
+current_chapter: ch02-wire-codec-and-session-startup
+current_task: "native-postgres-driver:ch02:t02"
 parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
@@ -48,10 +48,10 @@ plan_revision: 6
 plan_commit: 8833b064
 state_revision: 2
 last_verified_checkpoint: d809be01
-last_reviewed_chapter: null
-last_reviewed_commit: null
+last_reviewed_chapter: ch01-wheel-scaffold-and-config
+last_reviewed_commit: 3d68c853
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-07T21:57:00Z"
+updated_at: "2026-11-07T22:46:50Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:40:00Z"
@@ -107,7 +107,7 @@ tags:
 <!-- truth: start -->
 - **Standalone Optional Wheel**: `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owns live PostgreSQL Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`) without linking database clients into `vertebra-core` [^pg-conn-rs] [^pg-core-rs].
 - **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB Admin discovery + mTLS + IAM), lossless codecs, statement caching, single-`Sync` `pipeline()`, binary `COPY`, native `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, and `pgoutput` v1 logical replication ship together with full `psycopg`/`asyncpg` removal [^py-async-rs] [^arrow-shm-rs] [^pg-driver-py] [^sqlspec-py].
-- **Nested Chapter Roadmap (`plan_revision: 6`)**: The full plan retains 31 chapters and 111 tasks at `plan_commit: 8833b064`. Chapter 01 owns the direct diagnostic-iterator prerequisite; the completed chapter 02 codec remains verified at `a00c3248`, and session execution waits for fresh upstream review.
+- **Nested Chapter Roadmap (`plan_revision: 6`)**: All 31 chapters and 111 tasks retain their scope at `plan_commit: 8833b064`; chapter 01 is complete and reviewed at `3d68c853`, and chapter 02 resumes at task 02.
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -290,7 +290,7 @@ Progress: `[0/11 files documented]` (owned by [ch30-user-and-domain-docs](chapte
 
 Every worksheet (`111` total across `31` chapters) executes within its bounded ownership. The chapter 01 direct diagnostic-iterator prerequisite pairs the existing task 01 manifest owner and task 02 lockfile owner in one coherent signed source commit, with both receipts bound to its SHA. Other worksheets produce their signed task commits independently. Each chapter owns `1`–`4` vertical-slice tasks (`<= 3` production files per task, zero overlapping `files:` across ready tasks) in a strict serial chapter dependency chain (`ch01` -> `ch31`). See [review.md](review.md) for adjudicated planning decisions.
 
-- [~] ch01-wheel-scaffold-and-config — Standalone Optional Wheel Scaffold, Build Matrix, and Validated Connection Options (chapters/ch01-wheel-scaffold-and-config/spec.md)
+- [x] [3d68c853] ch01-wheel-scaffold-and-config — Standalone Optional Wheel Scaffold, Build Matrix, and Validated Connection Options (chapters/ch01-wheel-scaffold-and-config/spec.md)
 - [~] ch02-wire-codec-and-session-startup — Bounded Protocol Framing, Trust Lifecycle, SSLRequest TLS, and Cleartext/MD5 Startup (chapters/ch02-wire-codec-and-session-startup/spec.md)
 - [ ] ch03-scram-and-channel-binding — Ordered SCRAM-SHA-256, Peer Certificate Binding, and SCRAM-SHA-256-PLUS Negotiation (chapters/ch03-scram-and-channel-binding/spec.md)
 - [ ] ch04-cloud-material-and-admin-discovery — Single-Flight Cloud Material Cache, Ephemeral Keys, and Cloud SQL / AlloyDB Admin Discovery (chapters/ch04-cloud-material-and-admin-discovery/spec.md)
@@ -326,12 +326,12 @@ Every worksheet (`111` total across `31` chapters) executes within its bounded o
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ d809be01`; flow `state: active`, `plan_revision: 6`, `plan_commit: 8833b064`.
-- **Current Ownership**: Chapter 01 has four completed task receipts and awaits fresh correctness and quality review of the coupled prerequisite delta.
-- **Downstream State**: Chapter 02 codec task 01 is complete at `a00c3248`; session task 02 is blocked until chapter 01 passes fresh correctness and quality review.
-- **Full Plan**: All 31 chapters and 111 tasks retain their scope; 5 task receipts are completed. The existing chapter 01 review gate remains open.
-- **Documentation**: `[0/11 files documented]`; chapter 30 owns full driver guides and knowledge synchronization.
-- **Next Action**: Complete the chapter 01 prerequisite delta and review, then resume `/flow:implement native-postgres-driver ch02-wire-codec-and-session-startup`.
+- **Verified Baseline**: `HEAD @ 3d68c853`; flow `state: active`, `plan_revision: 6`, `plan_commit: 8833b064`.
+- **Progress**: `1/31` chapters and `5/111` tasks are complete; chapter 01 passes its prerequisite checkpoint and fresh correctness/quality review.
+- **Current Chapter & Task**: `ch02-wire-codec-and-session-startup`, `native-postgres-driver:ch02:t02`; the codec is complete and the session prerequisite is available.
+- **Remaining Plan**: Session/TLS/password tasks in chapter 02 and chapters 03–31 retain their complete blueprints.
+- **Documentation**: `[0/11 files documented]`; chapter 30 owns full guides and knowledge synchronization.
+- **Next Action**: Continue `/flow:implement native-postgres-driver`.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` — Shared PostgreSQL wire frame helpers and SHM admission metadata in `vertebra-db`.
