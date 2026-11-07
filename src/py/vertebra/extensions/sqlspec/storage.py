@@ -790,6 +790,8 @@ class ObjectStoreBackend:
     def _normalize_protocol(scheme: str) -> str:
         """Normalize scheme names to SQLSpec protocol strings."""
         lowered = scheme.lower()
+        if lowered == "r2":
+            raise ImproperConfigurationError(f"Unsupported storage URI scheme {lowered!r}")
         if lowered == "gcs":
             return "gs"
         if lowered == "azure":

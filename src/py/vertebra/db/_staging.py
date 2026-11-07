@@ -241,7 +241,7 @@ class ObjectStoreStaging:
     def _reject_removed_scheme(uri: str) -> None:
         scheme = urlparse(uri.strip()).scheme.lower()
         if scheme == "r2":
-            raise ImproperConfigurationError(f"Unsupported staging URI scheme {scheme!r} in {uri!r}")
+            raise ImproperConfigurationError(f"Unsupported storage URI scheme {scheme!r}")
 
     @classmethod
     def _parse_implicit_uri(cls, uri: str) -> tuple[str, str, str]:
@@ -283,16 +283,15 @@ class ObjectStoreStaging:
     @classmethod
     def _validate_uri_qualification(cls, store: Any | None, uri: str) -> None:
         cls._reject_removed_scheme(uri)
-        if isinstance(store, str):
-            cls._reject_removed_scheme(store)
-        if "://" not in uri:
-            return
         store_uri = (
             store if isinstance(store, str) else getattr(store, "store_uri", None) or getattr(store, "url", None)
         )
         if not store_uri and store is not None and hasattr(store, "to_url_and_options"):
             store_uri, _ = store.to_url_and_options()
         if not isinstance(store_uri, str) or not store_uri:
+            return
+        cls._reject_removed_scheme(store_uri)
+        if "://" not in uri:
             return
         parsed_in = urlparse(uri.strip())
         parsed_store = urlparse(store_uri)
