@@ -39,7 +39,7 @@ chapters:
   - ch30-user-and-domain-docs
   - ch31-final-review-and-release-gate
 current_chapter: ch02-wire-codec-and-session-startup
-current_task: "native-postgres-driver:ch02:t04"
+current_task: null
 parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
@@ -327,8 +327,8 @@ Every worksheet (`111` total across `31` chapters) executes within its bounded o
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Baseline**: Checkpoint `7bf8e2e3` passes all 47 Rust tests (`9` codec, `8` auth, `10` TLS, `20` wire/config/error) and locked all-target Clippy with `-D warnings`; flow `state: active`, `plan_revision: 6`, `plan_commit: 8833b064`.
-- **Progress**: `1/31` chapters are complete and reviewed; `7/111` tasks are complete. Chapter 02 codec receipt binds to `a00c3248`; session notice validation binds to `81791de2`; TLS deadline assertions bind to `0c3a0eaa`; authentication task awaits credential-redaction repairs.
-- **Current Chapter**: `ch02-wire-codec-and-session-startup`, with `current_task: native-postgres-driver:ch02:t04`; updated correctness and quality review remain required.
+- **Progress**: `1/31` chapters are complete and reviewed; `8/111` tasks are complete. Chapter 02 codec receipt binds to `a00c3248`; session notice validation binds to `81791de2`; TLS deadline assertions bind to `0c3a0eaa`; authentication task awaits credential-redaction repairs.
+- **Current Chapter**: `ch02-wire-codec-and-session-startup`, with `current_task: null`; updated correctness and quality review remain required.
 - **Remaining Plan**: Chapter 02 closeout and chapters 03–31 retain complete blueprints.
 - **Documentation**: `[0/11 files documented]`; full guides and domain knowledge remain assigned to chapter 30.
 - **Next Action**: Repair chapter 02 notice validation, credential redaction, and TLS deadline regressions, then run `/flow:review native-postgres-driver`; advance to chapter 03 only after both reviews pass.

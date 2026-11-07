@@ -5,7 +5,7 @@ chapter_id: ch02-wire-codec-and-session-startup
 title: Authenticate cleartext password and MD5 startup exchanges
 description: Implement crate-private auth::Authentication state machine handling trust, cleartext password, and salted MD5 challenges via postgres-protocol 0.6.12 with strict phase ordering and secret redaction.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -29,13 +29,13 @@ estimated_loc: 210
 plan_revision: 6
 plan_commit: 8833b064
 state_revision: 2
-claimed_by: agent:ch02-credential-remediation
-claimed_at: "2026-11-07T23:37:28Z"
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-07T23:43:16Z"
-last_verified_commit: null
+last_verified_commit: c5173f1b
 verification_evidence:
   red: "Committed pre-fix session consumer fails all three password_server_echo regressions with exit 101, including independent cleartext and actual captured MD5 wire credentials in Display; the protocol-preservation regression separately fails against the C-only exemption."
   focused: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked --test postgres_auth_wire_tests password_ exits 0: 13 real TCP authentication test groups."
@@ -46,8 +46,8 @@ verification_evidence:
   environment: "UV_NO_SYNC=1; PYO3_PYTHON=${PWD}/.venv/bin/python; dedicated Cargo target; aggregate tests acquire the shared SHM test lock."
   checkpoint: "Source and tests are verified; parent binds the signed source SHA before completion."
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T23:43:16Z"
-commit: null
+updated_at: "2026-11-07T23:43:50Z"
+commit: c5173f1b
 sources:
   - id: proto-research
     resource: .agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md
