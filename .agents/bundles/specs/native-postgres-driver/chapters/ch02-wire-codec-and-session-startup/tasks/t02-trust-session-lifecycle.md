@@ -5,7 +5,7 @@ chapter_id: ch02-wire-codec-and-session-startup
 title: Establish authenticated trust sessions with SessionHandle and PendingSession publication
 description: Implement PostgresConnection, SessionHandle, ConnectAttempt, and PendingSession enforcing strict Protocol 3.0 startup ordering, total deadline budgets, cancellation rollback, and bounded Terminate close.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -28,13 +28,13 @@ estimated_loc: 240
 plan_revision: 6
 plan_commit: 8833b064
 state_revision: 1
-claimed_by: agent:ch02-t02
-claimed_at: "2026-11-07T22:48:03Z"
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-07T22:49:00Z"
-last_verified_commit: null
+last_verified_commit: b19e402d
 verification_evidence:
   red: "Canonical wire test exits 101 with unresolved _postgres::session before implementation."
   focused: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_wire_tests exits 0: 20 tests, including 13 new lifecycle/wire tests and 7 existing configuration/error tests."
@@ -44,8 +44,8 @@ verification_evidence:
   review_privacy: "UV_NO_SYNC=1 make review-check exits 0."
   environment: "PYO3_PYTHON=${PWD}/.venv/bin/python; reserved CARGO_TARGET_DIR; Tokio loopback peers and paused clock; no Python network calls."
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T22:49:00Z"
-commit: null
+updated_at: "2026-11-07T22:52:21Z"
+commit: b19e402d
 sources:
   - id: rs-transport
     resource: src/rs/vertebra-db/src/connection.rs::TransportStream

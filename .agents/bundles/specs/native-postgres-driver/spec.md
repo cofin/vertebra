@@ -39,7 +39,7 @@ chapters:
   - ch30-user-and-domain-docs
   - ch31-final-review-and-release-gate
 current_chapter: ch02-wire-codec-and-session-startup
-current_task: "native-postgres-driver:ch02:t02"
+current_task: "native-postgres-driver:ch02:t03"
 parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
@@ -327,8 +327,8 @@ Every worksheet (`111` total across `31` chapters) executes within its bounded o
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Baseline**: `HEAD @ 3d68c853`; flow `state: active`, `plan_revision: 6`, `plan_commit: 8833b064`.
-- **Progress**: `1/31` chapters and `5/111` tasks are complete; chapter 01 passes its prerequisite checkpoint and fresh correctness/quality review.
-- **Current Chapter & Task**: `ch02-wire-codec-and-session-startup`, `native-postgres-driver:ch02:t02` is in progress with 29 passing crate tests and clean all-target Clippy; its signed checkpoint is pending.
+- **Progress**: `1/31` chapters and `6/111` tasks are complete; chapter 01 passes its prerequisite checkpoint and fresh correctness/quality review.
+- **Current Chapter & Task**: Chapter 02 codec and trust sessions are verified; `native-postgres-driver:ch02:t03` adds TLS before password/MD5 task 04.
 - **Remaining Plan**: Session/TLS/password tasks in chapter 02 and chapters 03–31 retain their complete blueprints.
 - **Documentation**: `[0/11 files documented]`; chapter 30 owns full guides and knowledge synchronization.
 - **Next Action**: Continue `/flow:implement native-postgres-driver`.

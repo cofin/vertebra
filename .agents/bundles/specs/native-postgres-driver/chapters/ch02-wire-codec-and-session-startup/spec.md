@@ -10,7 +10,7 @@ planning_status: complete
 depends_on_chapters:
   - ch01-wheel-scaffold-and-config
 replan_trigger: null
-current_task: "native-postgres-driver:ch02:t02"
+current_task: "native-postgres-driver:ch02:t03"
 plan_revision: 6
 plan_commit: 8833b064
 state_revision: 2
@@ -149,7 +149,7 @@ Progress: `[0/0 files documented in ch02]` (all new symbols in `protocol.rs`, `t
 ## 5. Implementation Plan
 
 - [x] [a00c3248] native-postgres-driver:ch02:t01 — Implement bounded PostgreSQL Protocol 3.0 startup encoder and backend frame decoder (tasks/t01-bounded-codec.md)
-- [~] native-postgres-driver:ch02:t02 — Establish authenticated trust sessions with SessionHandle and PendingSession publication (tasks/t02-trust-session-lifecycle.md)
+- [x] [b19e402d] native-postgres-driver:ch02:t02 — Establish authenticated trust sessions with SessionHandle and PendingSession publication (tasks/t02-trust-session-lifecycle.md)
 - [ ] native-postgres-driver:ch02:t03 — Negotiate PostgreSQL SSLRequest and verify rustls peer TLS identities (tasks/t03-sslrequest-and-tls-identity.md)
 - [ ] native-postgres-driver:ch02:t04 — Authenticate cleartext password and MD5 startup exchanges (tasks/t04-cleartext-and-md5-auth.md)
 
@@ -158,10 +158,10 @@ Progress: `[0/0 files documented in ch02]` (all new symbols in `protocol.rs`, `t
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Baseline**: Codec task 01 is complete at `a00c3248`; upstream chapter 01 is complete and reviewed at `3d68c853`.
-- **Task State**: Session task 02 is in progress with 29 passing crate tests and clean all-target Clippy; its signed checkpoint is pending. TLS task 03 and password/MD5 task 04 remain pending.
+- **Task State**: Codec and trust-session tasks are complete (`2/4`); TLS task 03 is next and password/MD5 task 04 remains pending.
 - **Shared Contracts**: Owned Arc-backed guards and read-only metadata adoption/channel-binding getters define the session seam; the session consumers remove the three private codec expectations.
 - **Documentation**: `[0/0 files documented in ch02]`; full user/domain guidance remains assigned to chapter 30.
-- **Next Action**: `/flow:implement native-postgres-driver ch02-wire-codec-and-session-startup`.
+- **Next Action**: `/flow:implement native-postgres-driver ch02:t03`.
 
 [^rs-transport]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP and `rustls` TLS upgrade stream primitives.
 [^proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — Protocol 3.0 framing, `SSLRequest`, and auth state machine analysis.
