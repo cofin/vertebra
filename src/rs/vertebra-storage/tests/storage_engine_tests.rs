@@ -1485,3 +1485,302 @@ asyncio.run(run_async_checks())
         .expect("run Python sync + asyncio verification");
     });
 }
+
+#[tokio::test]
+async fn test_raw_object_key_roundtrip_and_cursor_identity() {
+    async fn verify(engine: &ObjectStoreEngine) {
+        let entries = [
+            ("literal%2Fkey", b"first".as_slice()),
+            ("literal%252Fkey", b"second".as_slice()),
+            ("unicodé%/file.bin", b"unicode".as_slice()),
+            ("literal/key", b"slash".as_slice()),
+            ("literal%2F/item.bin", b"percent slash".as_slice()),
+            ("literal%252F/item.bin", b"percent percent".as_slice()),
+            ("%252e%252e", b"literal encoded percent".as_slice()),
+        ];
+        for (key, payload) in entries {
+            let meta = engine
+                .put(key, Bytes::copy_from_slice(payload))
+                .await
+                .unwrap();
+            assert_eq!(meta.path, key);
+            assert_eq!(engine.head(key).await.unwrap().path, key);
+            assert_eq!(&engine.get(key).await.unwrap()[..], payload);
+        }
+        let mut expected: Vec<_> = entries.iter().map(|(key, _)| *key).collect();
+        expected.sort_unstable();
+        for prefix in [None, Some(""), Some("/")] {
+            let listed = engine.list(prefix).await.unwrap();
+            assert_eq!(
+                listed
+                    .iter()
+                    .map(|meta| meta.path.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            for meta in listed {
+                let (_, payload) = entries.iter().find(|(key, _)| *key == meta.path).unwrap();
+                assert_eq!(&engine.get(&meta.path).await.unwrap()[..], *payload);
+            }
+        }
+        let mut cursor = None;
+        let mut paged = Vec::new();
+        loop {
+            let (page, next) = engine.list_page(None, cursor.as_deref(), 1).await.unwrap();
+            paged.extend(page.into_iter().map(|meta| meta.path));
+            if next.is_none() {
+                break;
+            }
+            cursor = next;
+        }
+        assert_eq!(paged, expected);
+        for (prefix, key) in [
+            ("literal%2F/", "literal%2F/item.bin"),
+            ("literal%252F/", "literal%252F/item.bin"),
+            ("unicodé%/", "unicodé%/file.bin"),
+        ] {
+            let listed = engine.list(Some(prefix)).await.unwrap();
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].path, key);
+        }
+        let (_, directories) = engine.list_with_delimiter(None).await.unwrap();
+        assert_eq!(
+            directories,
+            ["literal", "literal%252F", "literal%2F", "unicodé%"]
+        );
+        engine.copy("literal%2Fkey", "copié%2F.bin").await.unwrap();
+        assert_eq!(&engine.get("copié%2F.bin").await.unwrap()[..], b"first");
+        engine
+            .rename("literal%252Fkey", "renamé%252F.bin", false)
+            .await
+            .unwrap();
+        assert!(!engine.exists("literal%252Fkey").await.unwrap());
+        assert_eq!(&engine.get("renamé%252F.bin").await.unwrap()[..], b"second");
+        engine.delete("copié%2F.bin").await.unwrap();
+        assert!(!engine.exists("copié%2F.bin").await.unwrap());
+    }
+    let memory = ObjectStoreEngine::new(BackendConfig::Memory).unwrap();
+    verify(&memory).await;
+    let directory = TempDir::new().unwrap();
+    let local =
+        ObjectStoreEngine::from_url(&format!("file://{}", directory.path().display()), None)
+            .unwrap();
+    verify(&local).await;
+}
+
+#[tokio::test]
+async fn test_foreign_raw_local_keys_are_readable() {
+    use object_store::ObjectStoreExt;
+    use object_store::local::LocalFileSystem;
+    use object_store::path::Path as StorePath;
+
+    let directory = TempDir::new().unwrap();
+    let provider = LocalFileSystem::new_with_prefix(directory.path()).unwrap();
+    provider
+        .put(
+            &StorePath::parse("foreigné%2Fkey").unwrap(),
+            Bytes::from_static(b"sdk").into(),
+        )
+        .await
+        .unwrap();
+    std::fs::write(directory.path().join("foreign%252Fkey"), b"filesystem").unwrap();
+    let engine =
+        ObjectStoreEngine::from_url(&format!("file://{}", directory.path().display()), None)
+            .unwrap();
+    for (key, value) in [
+        ("foreigné%2Fkey", b"sdk".as_slice()),
+        ("foreign%252Fkey", b"filesystem".as_slice()),
+    ] {
+        assert_eq!(&engine.get(key).await.unwrap()[..], value);
+        assert_eq!(engine.head(key).await.unwrap().path, key);
+    }
+    assert_eq!(
+        engine
+            .list(None)
+            .await
+            .unwrap()
+            .iter()
+            .map(|meta| meta.path.as_str())
+            .collect::<Vec<_>>(),
+        ["foreign%252Fkey", "foreigné%2Fkey"]
+    );
+    assert_eq!(
+        &provider
+            .get(&StorePath::parse("foreigné%2Fkey").unwrap())
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()[..],
+        b"sdk"
+    );
+}
+
+#[tokio::test]
+async fn test_raw_key_validation_and_prefix_compatibility() {
+    use _storage::store::StorageError;
+
+    async fn verify(engine: &ObjectStoreEngine) {
+        engine
+            .put("logs/source", Bytes::from_static(b"source"))
+            .await
+            .unwrap();
+        engine
+            .put("logs/destination", Bytes::from_static(b"destination"))
+            .await
+            .unwrap();
+        let invalid = [
+            "",
+            "/",
+            "/x",
+            "x/",
+            "x//y",
+            ".",
+            "a/./b",
+            "a/../b",
+            "a/%2E%2E/b",
+            "a/.%2e/b",
+            "a/%2e./b",
+            "a\\b",
+            " a",
+            "a ",
+        ];
+        for key in invalid {
+            assert!(
+                matches!(
+                    engine.put(key, Bytes::from_static(b"bad")).await,
+                    Err(StorageError::InvalidInput(_))
+                ),
+                "put accepted {key:?}"
+            );
+            assert!(
+                matches!(engine.get(key).await, Err(StorageError::InvalidInput(_))),
+                "get accepted {key:?}"
+            );
+            assert!(
+                matches!(engine.head(key).await, Err(StorageError::InvalidInput(_))),
+                "head accepted {key:?}"
+            );
+            assert!(
+                matches!(engine.delete(key).await, Err(StorageError::InvalidInput(_))),
+                "delete accepted {key:?}"
+            );
+            for (source, destination) in [("logs/source", key), (key, "logs/destination")] {
+                assert!(matches!(
+                    engine.copy(source, destination).await,
+                    Err(StorageError::InvalidInput(_))
+                ));
+                assert!(matches!(
+                    engine.rename(source, destination, false).await,
+                    Err(StorageError::InvalidInput(_))
+                ));
+                assert_eq!(&engine.get("logs/source").await.unwrap()[..], b"source");
+                assert_eq!(
+                    &engine.get("logs/destination").await.unwrap()[..],
+                    b"destination"
+                );
+            }
+        }
+        for prefix in [None, Some(""), Some("/"), Some("logs/")] {
+            assert_eq!(engine.list(prefix).await.unwrap().len(), 2);
+            assert_eq!(engine.list_page(prefix, None, 3).await.unwrap().0.len(), 2);
+            assert!(engine.list_with_delimiter(prefix).await.is_ok());
+        }
+        for prefix in [
+            "/logs",
+            "logs//",
+            "a//b",
+            " logs",
+            "logs ",
+            ".",
+            "a/../b",
+            "a/%2e%2e/b",
+            "a\\b",
+        ] {
+            assert!(
+                matches!(
+                    engine.list(Some(prefix)).await,
+                    Err(StorageError::InvalidInput(_))
+                ),
+                "list accepted {prefix:?}"
+            );
+            assert!(matches!(
+                engine.list_page(Some(prefix), None, 1).await,
+                Err(StorageError::InvalidInput(_))
+            ));
+            assert!(matches!(
+                engine.list_with_delimiter(Some(prefix)).await,
+                Err(StorageError::InvalidInput(_))
+            ));
+        }
+        assert!(matches!(
+            engine.list_page(None, Some("/logs/source"), 1).await,
+            Err(StorageError::InvalidInput(_))
+        ));
+    }
+    let memory = ObjectStoreEngine::new(BackendConfig::Memory).unwrap();
+    verify(&memory).await;
+    let directory = TempDir::new().unwrap();
+    let local =
+        ObjectStoreEngine::from_url(&format!("file://{}", directory.path().display()), None)
+            .unwrap();
+    verify(&local).await;
+}
+
+#[tokio::test]
+async fn test_oci_list_preserves_raw_names_and_rejects_invalid_foreign_paths() {
+    use _storage::oci::OciObjectStore;
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for body in [
+            r#"{"objects":[{"name":"café%2Fkey","size":3},{"name":"café%252Fkey","size":4}]}"#,
+            r#"{"objects":[{"name":"nested/../escape","size":0}]}"#,
+        ] {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut buffer = [0; 1024];
+                let length = stream.read(&mut buffer).await.unwrap();
+                assert!(length > 0, "OCI request closed before its headers");
+                request.extend_from_slice(&buffer[..length]);
+                assert!(request.len() <= 8192);
+            }
+            assert!(
+                std::str::from_utf8(&request)
+                    .unwrap()
+                    .starts_with("GET /n/ns/b/bucket/o?")
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    let provider = OciObjectStore::new(
+        "ns".into(),
+        "bucket".into(),
+        "region".into(),
+        Some(format!("http://{address}")),
+        None,
+    )
+    .unwrap();
+    let engine = ObjectStoreEngine::with_store(Arc::new(provider), "oci");
+    assert_eq!(
+        engine
+            .list(None)
+            .await
+            .unwrap()
+            .iter()
+            .map(|meta| meta.path.as_str())
+            .collect::<Vec<_>>(),
+        ["café%252Fkey", "café%2Fkey"]
+    );
+    assert!(engine.list(None).await.is_err());
+    server.await.unwrap();
+}

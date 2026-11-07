@@ -28,7 +28,7 @@ use url::Url;
 use crate::signing::{
     SigningError, parse_rsa_private_key, rfc3986_encode, validate_expires_in_secs,
 };
-use crate::store::StorageError;
+use crate::store::{StorageError, validate_object_path};
 
 pub use crate::r2::{R2_UNIFORM_PART_SIZE, chunk_uniform_parts};
 
@@ -707,8 +707,14 @@ impl ObjectStore for OciObjectStore {
                 .objects
                 .into_iter()
                 .map(|obj| {
+                    let location = validate_object_path(&obj.name).map_err(|error| {
+                        object_store::Error::Generic {
+                            store: "OCI",
+                            source: Box::new(error),
+                        }
+                    })?;
                     Ok(ObjectMeta {
-                        location: StorePath::from(obj.name),
+                        location,
                         last_modified: Utc::now(),
                         size: obj.size.unwrap_or(0),
                         e_tag: obj.etag,

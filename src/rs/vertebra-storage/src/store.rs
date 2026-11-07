@@ -127,28 +127,38 @@ fn reject_traversal_segments(raw: &str) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn validate_object_path(path: &str) -> Result<StorePath, StorageError> {
+pub(crate) fn validate_object_path(path: &str) -> Result<StorePath, StorageError> {
     reject_traversal_segments(path)?;
-    let trimmed = path.trim_matches('/');
-    if trimmed.is_empty() {
-        return Err(StorageError::InvalidInput(
-            "object path must not be empty".to_string(),
-        ));
+    if path.is_empty()
+        || path.trim() != path
+        || path.starts_with('/')
+        || path.ends_with('/')
+        || path.contains('\\')
+    {
+        return Err(StorageError::InvalidInput(format!(
+            "invalid relative object path '{path}'"
+        )));
     }
-    Ok(StorePath::from(trimmed))
+    StorePath::parse(path).map_err(|error| StorageError::InvalidInput(error.to_string()))
 }
 
 fn validate_optional_prefix(prefix: Option<&str>) -> Result<Option<StorePath>, StorageError> {
     match prefix {
-        None => Ok(None),
-        Some(p) => {
-            reject_traversal_segments(p)?;
-            let trimmed = p.trim_matches('/');
-            if trimmed.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(StorePath::from(trimmed)))
+        None | Some("") | Some("/") => Ok(None),
+        Some(prefix) => {
+            reject_traversal_segments(prefix)?;
+            if prefix.trim() != prefix
+                || prefix.starts_with('/')
+                || prefix.contains("//")
+                || prefix.contains('\\')
+            {
+                return Err(StorageError::InvalidInput(format!(
+                    "invalid relative object prefix '{prefix}'"
+                )));
             }
+            StorePath::parse(prefix.strip_suffix('/').unwrap_or(prefix))
+                .map(Some)
+                .map_err(|error| StorageError::InvalidInput(error.to_string()))
         }
     }
 }
