@@ -3,14 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
 import threading
+import time
+from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
+from urllib.parse import parse_qs, urlsplit
 
 import msgspec
 import pyarrow as pa
 import pydantic
 import pytest
+from django.core.exceptions import SuspiciousFileOperation
+from django.core.files.base import ContentFile, File
+from django.core.files.storage import Storage
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope, Request, WsgiEnviron, run_wsgi_callable
 from vertebra.agent.mcp.models import MCPConfig as CanonicalMCPConfig
@@ -61,6 +70,9 @@ from vertebra.extensions.django.db.backends.sqlite3 import (
 from vertebra.extensions.django.templatetags.vertebra_vite import vite_asset, vite_hmr_client
 from vertebra.extensions.sqlalchemy.dialects import SyncDBAPIConnection
 from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncConfig, SQLiteSyncConfig
+from vertebra.storage import SigningConfig
+from vertebra.typing import ImproperConfigurationError
+from vertebra.utils.module_loader import import_string
 from vertebra.utils.serializers import decode_json
 
 if TYPE_CHECKING:
@@ -390,11 +402,13 @@ async def test_django_cache_storage_mail_channels_queues_security_and_templates(
     assert isinstance(storage.async_store, AsyncObjectStore)
     saved_name = storage.save("avatars/a.txt", b"avatar-bytes")
     assert storage.exists(saved_name) is True
-    assert storage.open(saved_name) == b"avatar-bytes"
+    with storage.open(saved_name) as stored_file:
+        assert stored_file.read() == b"avatar-bytes"
     assert storage.size(saved_name) == 12
     assert storage.url(saved_name) == "/media/avatars/a.txt"
     await storage.asave("avatars/b.txt", b"async-avatar")
-    assert await storage.aopen("avatars/b.txt") == b"async-avatar"
+    with await storage.aopen("avatars/b.txt") as stored_file:
+        assert stored_file.read() == b"async-avatar"
     assert await storage.aexists("avatars/b.txt") is True
     assert await storage.asize("avatars/b.txt") == 12
     assert await storage.aurl("avatars/b.txt") == "/media/avatars/b.txt"
@@ -698,3 +712,117 @@ def test_django_mcp_shares_wsgi_mcp_app_and_reuses_persistent_portal() -> None:
 
     assert len(observed_loops) == 2
     assert observed_loops[0] == observed_loops[1]
+
+
+@pytest.mark.parametrize("config", [None, "", "   "])
+def test_django_storage_rejects_unconfigured_backend(config: str | None) -> None:
+    """Missing storage configuration never creates an implicit memory store."""
+    with pytest.raises(ImproperConfigurationError):
+        DjangoStorage(config)
+
+
+def test_django_storage_file_contract_and_deconstruction(tmp_path: Path) -> None:
+    """Django files, migration reconstruction, naming, and local paths remain usable."""
+    storage = DjangoStorage(f"file://{tmp_path}", base_url="/media/", location="uploads")
+    assert isinstance(storage, Storage)
+    path, args, kwargs = storage.deconstruct()
+    assert path == "vertebra.extensions.django.storage.DjangoStorage"
+    reconstructed = import_string(path)(*args, **kwargs)
+    first = storage.save("notes/readme.txt", ContentFile(b"hello"))
+    second = storage.save("notes/readme.txt", ContentFile(b"world"))
+    assert first == "notes/readme.txt"
+    assert second.startswith("notes/readme_") and second.endswith(".txt")
+    with reconstructed.open(first) as stored_file:
+        assert isinstance(stored_file, File)
+        assert stored_file.read() == b"hello"
+        stored_file.seek(1)
+        assert stored_file.read(2) == b"el"
+    assert storage.path(first) == str(tmp_path / "uploads/notes/readme.txt")
+    assert storage.url(first) == "/media/notes/readme.txt"
+    assert storage.generate_filename("notes/a b.txt") == "notes/a_b.txt"
+    storage.save("root.txt", ContentFile(b"root"))
+    assert storage.listdir("") == (["notes"], ["root.txt"])
+    assert sorted(storage.listdir("notes")[1]) == sorted(["readme.txt", Path(second).name])
+    for timestamp in (
+        storage.get_modified_time("root.txt"),
+        storage.get_created_time("root.txt"),
+        storage.get_accessed_time("root.txt"),
+    ):
+        assert isinstance(timestamp, datetime)
+        assert timestamp.tzinfo == UTC
+
+
+def test_django_storage_overwrite_length_and_remote_path(tmp_path: Path) -> None:
+    """Overwrite policy, filename limits, and remote storage boundaries follow Django."""
+    storage = DjangoStorage(f"file://{tmp_path}", file_overwrite=True)
+    storage.save("item.txt", ContentFile(b"old"))
+    assert storage.save("item.txt", ContentFile(b"new")) == "item.txt"
+    with storage.open("item.txt") as stored_file:
+        assert stored_file.read() == b"new"
+    shortened = storage.save("long-filename.txt", ContentFile(b"short"), max_length=14)
+    assert len(shortened) <= 14
+    remote = DjangoStorage(MemoryConfig())
+    with pytest.raises(ValueError):
+        remote.url(None)
+    with pytest.raises(NotImplementedError):
+        remote.path("item.txt")
+    with pytest.raises(ValueError):
+        remote.url("item.txt")
+
+
+@pytest.mark.anyio
+async def test_django_storage_async_files_and_collisions(tmp_path: Path) -> None:
+    """Async storage returns Django files and chooses names without overwriting content."""
+    storage = DjangoStorage(f"file://{tmp_path}", base_url="/media/")
+    first = await storage.asave("async.bin", ContentFile(b"xyz"))
+    second = await storage.asave("async.bin", ContentFile(b"other"))
+    assert first == "async.bin" and second != first
+    with await storage.aopen(first) as stored_file:
+        assert isinstance(stored_file, File)
+        assert stored_file.read() == b"xyz"
+    assert await storage.aexists(first)
+    assert await storage.asize(first) == 3
+    assert await storage.aurl(first) == "/media/async.bin"
+    await storage.adelete(first)
+    assert not await storage.aexists(first)
+
+
+def test_django_storage_import_without_optional_dependency() -> None:
+    """Importing storage without Django succeeds and construction names the missing extra."""
+    code = """
+import sys
+sys.modules['django'] = None
+from vertebra.extensions.django.storage import DjangoStorage
+from vertebra.typing import MissingDependencyError
+try:
+    DjangoStorage('memory://')
+except MissingDependencyError as exc:
+    assert 'django' in str(exc)
+else:
+    raise AssertionError('DjangoStorage accepted missing Django')
+"""
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.anyio
+async def test_django_storage_signing_and_async_limits(tmp_path: Path) -> None:
+    """Presigning honors upload namespace and requested expiry on sync and async paths."""
+    store = SyncObjectStore(
+        "memory://", signing=SigningConfig(hmac_secret="test-signing-key", endpoint="https://files.example.test")
+    )
+    storage = DjangoStorage(store=store, location="uploads", expires_in=60)
+    earliest_expiry = int(time.time()) + 120
+    signed = storage.url("a b.txt", expire=120)
+    assert store.verify_presigned_url(signed)
+    assert urlsplit(signed).path == "/uploads/a%20b.txt"
+    assert earliest_expiry <= int(parse_qs(urlsplit(signed).query)["X-Vtb-Expires"][0]) <= int(time.time()) + 120
+    assert store.verify_presigned_url(await storage.aurl("a b.txt", expire=120))
+    local = DjangoStorage(f"file://{tmp_path}")
+    short = await local.asave("too-long-filename.txt", ContentFile(b"xyz"), max_length=14)
+    assert len(short) <= 14
+    for name in ("../secret.txt", "nested/../../secret.txt", "nested\\..\\..\\secret.txt", "/absolute.txt"):
+        with pytest.raises(SuspiciousFileOperation):
+            local.path(name)
+        with pytest.raises(SuspiciousFileOperation):
+            await local.asave(name, ContentFile(b"no"))
