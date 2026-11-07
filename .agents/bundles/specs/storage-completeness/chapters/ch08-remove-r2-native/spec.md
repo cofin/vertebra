@@ -5,7 +5,7 @@ chapter_id: ch08-remove-r2-native
 title: Move OCI Chunk Ownership and Remove Native R2
 description: Move OCI Chunk Ownership and Remove Native R2
 status: stable
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
@@ -14,13 +14,15 @@ plan_revision: 4
 plan_commit: ddfb11f2
 state_revision: 0
 last_verified_checkpoint: c7868b02
-last_reviewed_commit: null
+last_reviewed_commit: 43654f61
 created_at: '2026-11-07T12:00:00Z'
 updated_at: '2026-11-07T12:00:00Z'
 generated:
   by: flow/0.28.0
   at: '2026-11-07T12:00:00Z'
-verified: []
+verified:
+- correctness_review: 43654f61
+- quality_review: 43654f61
 sources:
 - id: source
   resource: src/rs/vertebra-storage/src/store.rs

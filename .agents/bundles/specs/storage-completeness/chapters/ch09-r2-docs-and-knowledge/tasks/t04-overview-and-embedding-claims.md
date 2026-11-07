@@ -24,7 +24,7 @@ tests:
 - src/py/tests/unit/tools/test_docs_tooling.py
 estimated_loc: 60
 plan_revision: 5
-plan_commit: bdc7799ab18b9a961dacf99f5eee9af46a557aa3
+plan_commit: e3e344b5
 state_revision: 0
 claimed_by: null
 claimed_at: null

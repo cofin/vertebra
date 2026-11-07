@@ -4,8 +4,8 @@ id: storage-completeness:ch07:t04
 chapter_id: ch07-remove-r2-python
 title: Reject removed SQLSpec logical URI overrides before staging
 description: Reject R2 logical URI overrides and declared backend URIs before object or export query effects.
-status: draft
-state: pending
+status: stable
+state: in_progress
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -25,13 +25,13 @@ tests:
 - src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
 estimated_loc: 100
 plan_revision: 6
-plan_commit: null
+plan_commit: 43c2e3fe
 state_revision: 0
-claimed_by: null
+claimed_by: agent:r2_logical_uri_repair
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
-next_step: Obtain plan approval, then reproduce the logical URI bypass at the public seams.
+next_step: Reproduce the logical URI bypass and complete the independently approved repair.
 last_verified_at: null
 last_verified_commit: null
 created_at: '2026-11-07T23:24:00Z'
@@ -59,7 +59,7 @@ tags:
 
 ## Objective & Scope Boundary
 
-Complete first-class R2 removal at SQLSpec's logical URI boundary and staging's resolved declared backend URI boundary. Own exactly the two production modules and two canonical test modules above. Depend on completed ch07:t03 (`38757809`), not native publication repair. Execute one isolated task and one signed local conventional commit after plan approval; no production edit is authorized by this draft. [^sqlspec] [^staging]
+Complete first-class R2 removal at SQLSpec's logical URI boundary and staging's resolved declared backend URI boundary. Own exactly the two production modules and two canonical test modules above. Depend on completed ch07:t03 (`38757809`), not native publication repair. Revision 6 is independently approved at `43c2e3fe`. Execute the bounded repair in one isolated task and record its signed source commit and verification evidence. [^sqlspec] [^staging]
 
 ## Bounded Read Manifest
 

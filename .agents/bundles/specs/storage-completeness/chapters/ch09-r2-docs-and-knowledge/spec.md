@@ -9,9 +9,9 @@ state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: storage-completeness:ch09:t01
+current_task: storage-completeness:ch09:t02
 plan_revision: 5
-plan_commit: bdc7799ab18b9a961dacf99f5eee9af46a557aa3
+plan_commit: e3e344b5
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
 last_reviewed_commit: null
@@ -75,7 +75,7 @@ Remove first-class R2 from `README.md`, `docs/reference/index.md`, and `docs/usa
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/11 files documented]`. t01 owns three public provider/reference pages; t02 owns three architecture/product/catalog pages; t03 owns the storage and data-driver knowledge chapters; t04 owns the README, reference index and embedding guide. Detailed storage usage belongs to ch04:t03. t02/t03/t04 depend on t01 because the full documentation build requires its removed-symbol reference repair. t03 additionally waits on completed ch16:t01 native acceptance and reads its recorded evidence. Documentation-only validation uses the actual build and API surface, without artificial public-call regression tests.
+Progress: `[3/11 files documented]`. t01 owns three public provider/reference pages; t02 owns three architecture/product/catalog pages; t03 owns the storage and data-driver knowledge chapters; t04 owns the README, reference index and embedding guide. Detailed storage usage belongs to ch04:t03. t02/t03/t04 depend on t01 because the full documentation build requires its removed-symbol reference repair. t03 additionally waits on completed ch16:t01 native acceptance and reads its recorded evidence. Documentation-only validation uses the actual build and API surface, without artificial public-call regression tests.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -88,7 +88,7 @@ Progress: `[0/11 files documented]`. t01 owns three public provider/reference pa
 
 ## 5. Implementation Plan
 
-- [~] storage-completeness:ch09:t01 — Remove R2 claims from public navigation and reference (tasks/t01-public-provider-indexes.md)
+- [x] [7802c676] storage-completeness:ch09:t01 — Remove R2 claims from public navigation and reference (tasks/t01-public-provider-indexes.md)
 - [ ] storage-completeness:ch09:t02 — Remove R2 from architecture and product capability claims (tasks/t02-architecture-and-product.md)
 - [ ] storage-completeness:ch09:t03 — Record provider atomicity, key identity, cleanup and R2 withdrawal (tasks/t03-storage-knowledge.md)
 - [ ] storage-completeness:ch09:t04 — Remove R2 from repository and embedding overviews (tasks/t04-overview-and-embedding-claims.md)
@@ -99,7 +99,7 @@ Progress: `[0/11 files documented]`. t01 owns three public provider/reference pa
 
 - Baseline: `5fe477fa`; implementation is pending and cold plan review is required.
 - Remaining: all 4 tasks above; dependent tasks remain ordered by depends_on.
-- Documentation: `[0/11 files documented]`, owned by the explicit consolidation tasks.
+- Documentation: `[3/11 files documented]`, owned by the explicit consolidation tasks.
 - Reclosure of ch01 and downstream acceptance waits for native repair gates; this chapter never depends on that reclosure.
 
 [^source]: `docs/index.md` — Verified repository implementation seam.

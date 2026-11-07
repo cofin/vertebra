@@ -24,7 +24,7 @@ tests:
 - src/py/tests/unit/extensions/test_data_storage_integrations.py
 estimated_loc: 130
 plan_revision: 6
-plan_commit: null
+plan_commit: 43c2e3fe
 state_revision: 0
 claimed_by: agent:r2-staging-withdrawal
 claimed_at: '2026-11-07T22:46:57.858525+00:00'

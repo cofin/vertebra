@@ -23,7 +23,7 @@ tests:
 - src/py/tests/unit/extensions/test_data_storage_integrations.py
 estimated_loc: 55
 plan_revision: 6
-plan_commit: null
+plan_commit: 43c2e3fe
 state_revision: 0
 claimed_by: agent:python-framework-specialist
 claimed_at: '2026-11-07T22:20:00Z'

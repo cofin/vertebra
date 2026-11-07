@@ -5,7 +5,7 @@ chapter_id: ch09-r2-docs-and-knowledge
 title: Remove R2 claims from public navigation and reference
 description: Remove R2 claims from public navigation and reference
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: documentation_validation
 depends_on:
@@ -25,19 +25,57 @@ tests:
 - src/py/tests/unit/tools/test_docs_tooling.py
 estimated_loc: 60
 plan_revision: 5
-plan_commit: bdc7799ab18b9a961dacf99f5eee9af46a557aa3
+plan_commit: e3e344b5
 state_revision: 0
 claimed_by: agent:r2-docs-t01
 claimed_at: '2026-11-07T23:35:35.133022+00:00'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-07T23:37:29.484590+00:00'
+last_verified_commit: 7802c676
+verification_evidence: |
+  Preflight passes at 43654f61: worksheet and chapter are stable revision 5,
+  approval e3e344b5 is an ancestor, and completed predecessors 38757809
+  (ch07:t03) and c7868b02 (ch08:t03) are ancestors. All three owned docs and
+  the canonical docs-tooling module exist; read_set/files remain unchanged.
+  Native artifacts reuse completed ch08:t02 checkpoint 4614213f, which records
+  the successful all-five CPython 3.12 extension build after native R2 removal.
+  ch08:t03 deletes only an unregistered native file; no redundant make dev runs.
+  Baseline: UV_NO_SYNC=1 flock /tmp/vertebra-flow-docs-build.lock make docs
+  exits 2 because mkdocstrings cannot collect vertebra.storage._store.R2Config.
+  Log: /tmp/vertebra-ch09-t01-docs-baseline.log.
+  Baseline: UV_NO_SYNC=1 flock /tmp/vertebra-flow-shm-tests.lock uv run
+  --no-sync pytest src/py/tests/unit/tools/test_docs_tooling.py -q exits 0
+  (28 passed). Log: /tmp/vertebra-ch09-t01-tests-baseline.log.
+  Final: UV_NO_SYNC=1 flock /tmp/vertebra-flow-docs-build.lock make docs
+  exits 0: docstring/CLI checks, Zensical, postbuild and artifact verification
+  pass. Log: /tmp/vertebra-ch09-t01-docs-final.log.
+  Final: UV_NO_SYNC=1 flock /tmp/vertebra-flow-shm-tests.lock uv run
+  --no-sync pytest src/py/tests/unit/tools/test_docs_tooling.py -q exits 0
+  (28 passed). Log: /tmp/vertebra-ch09-t01-tests-final.log.
+  UV_NO_SYNC=1 uv run --no-sync python -m mypy.stubtest vertebra._storage
+  exits 0 (1 module). Log: /tmp/vertebra-ch09-t01-stubtest.log.
+  UV_NO_SYNC=1 uv run --no-sync ruff check
+  src/py/tests/unit/tools/test_docs_tooling.py exits 0.
+  Log: /tmp/vertebra-ch09-t01-ruff.log.
+  UV_NO_SYNC=1 make review-check exits 0.
+  Log: /tmp/vertebra-ch09-t01-review-check.log.
+  UV_NO_SYNC=1 uv run --no-sync python -m tools.scripts.review_setup validate
+  --rules bundles,privacy exits 0.
+  Log: /tmp/vertebra-ch09-t01-bundles-privacy.log.
+  Read-only final link/API probe exits 0: every owned Markdown link and API
+  directive resolves, all seven retained backend configurations export, and a
+  real S3Config preserves its generic custom endpoint option. No R2 entry
+  remains in the three owned pages. Log: /tmp/vertebra-ch09-t01-surface-links.log.
+  git diff --check exits 0. Documentation diff is +3/-8 across exactly the
+  three owned public pages; no tests change. No platform limitation is observed
+  for Linux CPython 3.12 documentation validation; no cloud/platform runtime
+  acceptance is claimed. Coordinator owns signed commit, final task state and
+  chapter/root synchronization. No Git mutation or hosted action is performed.
 created_at: '2026-11-07T12:00:00Z'
-updated_at: '2026-11-07T23:35:35.133022+00:00'
-commit: null
+updated_at: '2026-11-07T23:37:29.484590+00:00'
+commit: 7802c676
 sources:
 - id: implementation
   resource: docs/index.md
@@ -93,12 +131,14 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Acceptance Criteria
 
-- [ ] Every matrix row passes at its public seam with existing behavior preserved.
-- [ ] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
-- [ ] These three public documents are the owned documentation manifest items.
-- [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
+- [x] Every matrix row passes at its public seam with existing behavior preserved.
+- [x] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
+- [x] These three public documents are the owned documentation manifest items.
+- [x] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
+
+The three public provider/reference pages expose the seven retained backends. The removed R2Config directive is the baseline build failure; removing that directive restores the full documentation build. Generic S3 endpoint configuration remains intact. The coordinator owns the signed local commit and final task/checklist synchronization.
 
 Revision 5 is independently approved at e3e344b5; the root documentation manifest correction is committed at 49cbfcbb. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 

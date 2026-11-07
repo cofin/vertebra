@@ -4,14 +4,14 @@ parent_flow: storage-completeness
 chapter_id: ch10-publication-boundary-and-lifecycle
 title: Native Publication Boundary and Cleanup Ownership
 description: Native Publication Boundary and Cleanup Ownership
-status: draft
+status: stable
 state: planned
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
 plan_revision: 6
-plan_commit: null
+plan_commit: 43c2e3fe
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
 last_reviewed_commit: null

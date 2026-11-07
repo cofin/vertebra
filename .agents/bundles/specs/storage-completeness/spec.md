@@ -41,8 +41,8 @@ plan_revision: 6
 plan_commit: 5fe477fa4f6e08bab9278dba3906e7c556ceb3a4
 state_revision: 7
 last_verified_checkpoint: 5fe477fa
-last_reviewed_chapter: ch06-adapter-correctness
-last_reviewed_commit: 115ab8f5
+last_reviewed_chapter: ch08-remove-r2-native
+last_reviewed_commit: 43654f61
 created_at: '2026-11-03T04:05:00Z'
 updated_at: '2026-11-07T22:33:17Z'
 generated:
@@ -204,7 +204,7 @@ flowchart LR
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/13 files documented]` for final repair/HTTP/Arrow acceptance. Existing baseline prose and scoped Python withdrawal knowledge sync are not final evidence for the repaired native guarantees.
+Progress: `[3/13 files documented]` for final repair/HTTP/Arrow acceptance. Existing baseline prose and scoped Python withdrawal knowledge sync are not final evidence for the repaired native guarantees.
 
 | File | Owning task | Final content |
 | --- | --- | --- |
@@ -258,7 +258,7 @@ Progress: `[0/13 files documented]` for final repair/HTTP/Arrow acceptance. Exis
 - [x] [0bce1806] ch05-key-identity-and-preconditions — Raw Object Identity and Typed Conditional Conflicts (chapters/ch05-key-identity-and-preconditions/spec.md)
 - [x] [115ab8f5] ch06-adapter-correctness — Django Collision Length and SQLSpec Signing Errors (chapters/ch06-adapter-correctness/spec.md)
 - [~] ch07-remove-r2-python — Withdraw First-Class R2 Python APIs (chapters/ch07-remove-r2-python/spec.md)
-- [~] ch08-remove-r2-native — Move OCI Chunk Ownership and Remove Native R2 (chapters/ch08-remove-r2-native/spec.md)
+- [x] [43654f61] ch08-remove-r2-native — Move OCI Chunk Ownership and Remove Native R2 (chapters/ch08-remove-r2-native/spec.md)
 - [~] ch09-r2-docs-and-knowledge — Synchronize Supported Providers and Native Guarantees (chapters/ch09-r2-docs-and-knowledge/spec.md)
 - [ ] ch10-publication-boundary-and-lifecycle — Native Publication Boundary and Cleanup Ownership (chapters/ch10-publication-boundary-and-lifecycle/spec.md)
 - [ ] ch11-local-atomic-publication — Local Cross-Process Conditional Publication (chapters/ch11-local-atomic-publication/spec.md)
@@ -288,7 +288,7 @@ Progress: `[0/13 files documented]` for final repair/HTTP/Arrow acceptance. Exis
 - ch10 transport is staged under its library-test module until ch12:t01 activates the first real provider caller; revised native blueprints retain their scoped independent review requirements. ch10–ch15 cover native publication and lifecycle; ch11 uses persistent SDK-illegal .vtb-cas-lock#0 per physical parent directory and same-parent numeric-# stage names, with physical-directory-ID lock ordering and payload staging outside locks.
 - S3 direct completion returns honest typed 409 conflict/abort; GCS source-generation-pinned rewrite is backend-specific staging.
 - Original Arrow/SHM and user guides remain full scope. ch17–ch19 provide bounded sync codecs, typed per-batch PyArrow worker/native async I/O bridge and lazy SQLSpec integration; original ch04:t02 retains integration acceptance.
-- Final docs/OKF acceptance is `[0/13 files documented]`; ch09 owns eleven provider/knowledge pages and ch04 owns two storage guides. Correctness review then fresh quality review is mandatory before finish/archive.
+- Final docs/OKF acceptance is `[3/13 files documented]`; ch09 owns eleven provider/knowledge pages and ch04 owns two storage guides. Correctness review then fresh quality review is mandatory before finish/archive.
 
 [^rs-storage-engine]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — Native Rust storage engine over `object_store`.
 [^py-storage-facade]: `src/py/vertebra/storage/_store.py::SyncObjectStore` — Python sync/async object store facade and backend configs.

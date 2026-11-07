@@ -4,7 +4,7 @@ id: storage-completeness:ch10:t04
 chapter_id: ch10-publication-boundary-and-lifecycle
 title: Frame S3 producer chunks and preserve bounded backend policies
 description: Frame S3 producer chunks and preserve bounded backend policies
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: regression_tdd
@@ -23,7 +23,7 @@ tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 150
 plan_revision: 6
-plan_commit: null
+plan_commit: 43c2e3fe
 state_revision: 0
 claimed_by: null
 claimed_at: null
