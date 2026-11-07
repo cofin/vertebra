@@ -13,11 +13,11 @@ replan_trigger: null
 current_task: null
 plan_revision: 6
 plan_commit: 8833b064
-state_revision: 3
-last_verified_checkpoint: null
+state_revision: 4
+last_verified_checkpoint: 7bf8e2e3
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T23:09:05Z"
+updated_at: "2026-11-07T23:16:07Z"
 generated:
   by: flow-revise
   at: "2026-11-07T05:00:00Z"
@@ -82,11 +82,11 @@ Parent roadmap: [spec.md](../../spec.md). Public contracts: [contracts.md](../..
 
 ### 2.2 Concrete Type & Signature Contracts
 
-Task 01 applies `#[cfg_attr(not(test), expect(dead_code, reason = "Framing precedes session integration"))]` only to `read_message` and `encode_startup_frame`, and `#[expect(dead_code, reason = "Termination precedes session integration")]` only to `TERMINATE_FRAME`. Task 02 owns removal of all three annotations when its real session consumers land. Unfulfilled expectations remain fatal under the unchanged all-target `-D warnings` gate.
+`read_message`, `encode_startup_frame`, and `TERMINATE_FRAME` have real session consumers and retain crate-private visibility without dead-code allowances or expectations. The all-target `-D warnings` gate applies unchanged.
 
 - Rust (`src/rs/vertebra-postgres/src/protocol.rs`, crate-private `pub(crate)`):
   - `pub(crate) const MAX_BACKEND_FRAME_LENGTH: i32 = 16_777_216;`
-  - `pub(crate) const PROTOCOL_VERSION_3_0: i32 = 196_608;`
+  - `pub(crate) const MIN_BACKEND_FRAME_LENGTH: i32 = 4;`; the pinned upstream startup encoder emits Protocol 3.0 (`196_608`).
   - `pub(crate) async fn read_message<R: AsyncRead + Unpin>(reader: &mut R) -> Result<postgres_protocol::message::backend::Message, PostgresError>`
   - `pub(crate) fn encode_startup_frame(config: &PostgresConfig) -> Result<BytesMut, PostgresError>`
   - `pub(crate) const TERMINATE_FRAME: [u8; 5] = *b"X\0\0\0\x04";`
@@ -99,7 +99,7 @@ Task 01 applies `#[cfg_attr(not(test), expect(dead_code, reason = "Framing prece
   - `impl ConnectAttempt { pub async fn run(self) -> Result<PendingSession, PostgresError> }`
   - `SessionHandle` clones share owned `Arc<PostgresConfig>` and `Arc<std::sync::Mutex<SessionState>>`; `ConnectAttempt` and `PendingSession` own a cloned `SessionHandle`, deadline, and armed rollback state. Both guards and the `run()` future are `Send + 'static` without borrowing the caller, holding a mutex guard across `.await`, or leaking allocations.
   - `impl PendingSession { pub fn commit(self) -> Result<(), PostgresError> }`
-  - `PendingSession::connection(&self) -> &PostgresConnection` provides read-only prepublication inspection; `PostgresConnection::tls_server_end_point(&self) -> Option<&[u8]>` provides the negotiated channel-binding digest. Backend keys remain Rust-only.
+  - `PendingSession::connection(&self) -> &PostgresConnection` provides read-only prepublication inspection; `PostgresConnection::tls_server_end_point(&self) -> Option<&[u8]>` returns `None` until `ch03:t02` extracts the verified peer digest. Backend keys remain Rust-only.
   - Diagnostic fields use the direct `fallible_iterator::FallibleIterator` dependency and `ErrorField::{type_, value_bytes}` APIs.
 - Rust (`src/rs/vertebra-postgres/src/tls.rs`, crate-private `pub(crate)`):
   - `pub(crate) struct DialedTransport { pub stream: TransportStream, pub tls_server_end_point: Option<Vec<u8>> }`
@@ -111,12 +111,12 @@ Task 01 applies `#[cfg_attr(not(test), expect(dead_code, reason = "Framing prece
 
 ```text
 SessionHandle::begin_connect()
-  -> PendingSession::connection() -> PostgresConnection metadata getters (Rust adoption checks)
   -> ConnectAttempt::run() [single timeout_at(deadline)]
        -> tls::connect() -> frontend::ssl_request + TransportStream::upgrade_tls()
        -> protocol::encode_startup_frame() -> frontend::startup_message()
        -> protocol::read_message() -> backend::Message::parse()
        -> auth::Authentication::handle_message() -> frontend::password_message() / md5_hash()
+  -> PendingSession::connection() -> PostgresConnection metadata getters (Rust adoption checks)
   -> PendingSession::commit() -> SessionHandle::Ready(PostgresConnection)
 ```
 
@@ -135,7 +135,7 @@ SessionHandle::begin_connect()
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/0 files documented in ch02]` (all new symbols in `protocol.rs`, `tls.rs`, and `auth.rs` are crate-private, and `session.rs` `rlib` rustdoc comments land inline; user-facing TLS/auth documentation and OKF chapters are updated in `ch30:t01` and `ch30:t02`).
+Progress: `[0/0 files documented in ch02]` (all new symbols in `protocol.rs`, `tls.rs`, and `auth.rs` are crate-private, and `session.rs` `rlib` rustdoc comments are inline; user-facing TLS/auth guides and repository documentation belong to `ch30:t01`–`t02`, and durable OKF consolidation belongs to `ch30:t03`–`t04`).
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -153,15 +153,15 @@ Progress: `[0/0 files documented in ch02]` (all new symbols in `protocol.rs`, `t
 - [x] [be425286] native-postgres-driver:ch02:t03 — Negotiate PostgreSQL SSLRequest and verify rustls peer TLS identities (tasks/t03-sslrequest-and-tls-identity.md)
 - [x] [67421061] native-postgres-driver:ch02:t04 — Authenticate cleartext password and MD5 startup exchanges (tasks/t04-cleartext-and-md5-auth.md)
 
-**Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings` exits `0`.
+**Chapter Recovery Checkpoint:** `flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings` exits `0` at `7bf8e2e3`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: Source `67421061` passes all 47 Rust tests and all-target Clippy; upstream chapter 01 remains complete and reviewed.
-- **Task State**: All four chapter tasks are complete; chapter checkpoint, Markdown synchronization, correctness review, and fresh quality review remain.
+- **Verified Baseline**: Checkpoint `7bf8e2e3` passes all 47 Rust tests (`9` codec, `8` auth, `10` TLS, `20` wire/config/error) and locked all-target Clippy with `-D warnings`; upstream chapter 01 remains complete and reviewed at `3d68c853`.
+- **Task State**: All four chapter tasks are complete; `state: active`, `current_task: null`, and `last_reviewed_commit: null` remain until correctness and fresh independent quality review pass.
 - **Shared Contracts**: Bounded framing, owned session publication, strict TLS, and trust/password/MD5 authentication retain their declared phase and error behavior.
 - **Documentation**: `[0/0 files documented in ch02]`; chapter 30 retains full driver guides and knowledge synchronization.
-- **Next Action**: Complete chapter review, then continue chapter 03 SCRAM/channel binding.
+- **Next Action**: Run `/flow:review native-postgres-driver` for chapter 02; chapter 03 SCRAM/channel binding follows successful chapter review.
 
 [^rs-transport]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP and `rustls` TLS upgrade stream primitives.
 [^proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — Protocol 3.0 framing, `SSLRequest`, and auth state machine analysis.

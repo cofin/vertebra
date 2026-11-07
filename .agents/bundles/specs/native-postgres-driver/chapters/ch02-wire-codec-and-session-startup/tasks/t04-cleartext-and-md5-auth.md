@@ -35,7 +35,7 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-07T23:09:05Z"
-last_verified_commit: 67421061
+last_verified_commit: "67421061"
 verification_evidence:
   red: 'The password_ TCP suite exits 101 against the trust-only baseline: all 8 test groups fail before production changes.'
   focused: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_auth_wire_tests password_ exits 0: 8 real TCP peer test groups."
@@ -44,10 +44,10 @@ verification_evidence:
   formatting: "cargo fmt --manifest-path src/rs/Cargo.toml -p vertebra-postgres -- --check and git diff --check exit 0."
   review_privacy: "UV_NO_SYNC=1 uv run --no-sync python -m tools.scripts.review_setup validate exits 0."
   environment: "UV_NO_SYNC=1; PYO3_PYTHON=${PWD}/.venv/bin/python; dedicated Cargo target; aggregate tests acquire the shared SHM test lock."
-  checkpoint: "Verified working tree awaits the coordinator's signed source commit; task remains in_progress with commit null."
+  checkpoint: "Completed source receipt: 67421061. Chapter checkpoint 7bf8e2e3 passes all 47 Rust tests and locked all-target Clippy with -D warnings."
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T23:13:14Z"
-commit: 67421061
+updated_at: "2026-11-07T23:16:07Z"
+commit: "67421061"
 sources:
   - id: proto-research
     resource: .agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md
@@ -139,7 +139,7 @@ Commit as `feat(postgres): authenticate password and MD5 connections`.
 
 - Authentication responses use the pinned upstream encoders and MD5 helper. The TCP peer checks the literal `postgres`/`hunter2`/`01020304` response `md5c73cff48cd454994b0c263a04cdfc859` without deriving its expected value through production hashing.
 - Error formatting and Debug checks exclude both the configured password and the actual response captured by the peer. Missing credentials and unsupported mechanisms produce zero outbound password bytes; duplicate and server-rejected exchanges close without retry.
-- The existing startup suite retains all 20 tests. Its obsolete cleartext-unsupported case moves into the canonical password suite; Kerberos, SCM, GSS, and SSPI expectations remain. Shared peer fixtures and the publication-deadline barrier remain unchanged.
+- The startup suite covers 20 wire/configuration/error cases; the canonical password suite covers cleartext/MD5 exchanges and unsupported Kerberos, SCM, GSS, and SSPI challenges. Shared peer fixtures preserve deterministic publication-deadline barriers.
 
 [^proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — `postgres-protocol` password and MD5 authentication helpers.
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Startup authentication error mapping and redaction rules.

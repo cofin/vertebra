@@ -29,7 +29,7 @@ claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
-next_step: "Coordinator signs the verified task commit and synchronizes completed state; /flow:implement native-postgres-driver continues with ch02:t02."
+next_step: null
 last_verified_at: "2026-11-07T22:04:04Z"
 last_verified_commit: a00c3248
 verification_evidence:
@@ -41,7 +41,7 @@ verification_evidence:
   - "rustfmt --edition 2024 --check src/rs/vertebra-postgres/src/lib.rs src/rs/vertebra-postgres/src/protocol.rs: exit 0"
   - "git diff --check: exit 0"
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T22:05:58Z"
+updated_at: "2026-11-07T23:16:07Z"
 commit: a00c3248
 sources:
   - id: proto-research
@@ -76,7 +76,7 @@ Implement the crate-private `protocol` module in `src/rs/vertebra-postgres/src/p
 - `src/rs/vertebra-postgres/src/lib.rs`:
   - Declare `pub(crate) mod protocol;` (strictly crate-private; zero test-only `pub` exports).
 - `src/rs/vertebra-postgres/src/protocol.rs`:
-  - Apply `#[cfg_attr(not(test), expect(dead_code, reason = "Framing precedes session integration"))]` exactly to `read_message` and `encode_startup_frame`; apply `#[expect(dead_code, reason = "Termination precedes session integration")]` exactly to `TERMINATE_FRAME`. The real session consumer in `ch02:t02` removes these three expectations. Keep all-target `-D warnings` unchanged, with no broad allowance or visibility widening.
+  - Keep `read_message`, `encode_startup_frame`, and `TERMINATE_FRAME` crate-private with real session startup/close consumers and no dead-code allowances or expectations. Keep all-target `-D warnings` unchanged.
   - `pub(crate) const MAX_BACKEND_FRAME_LENGTH: i32 = 16_777_216;` (`16 MiB` inclusive of the 4-byte length word).
   - `pub(crate) const MIN_BACKEND_FRAME_LENGTH: i32 = 4;`
   - `pub(crate) async fn read_message<R: AsyncRead + Unpin>(reader: &mut R) -> Result<postgres_protocol::message::backend::Message, PostgresError>`:
@@ -131,7 +131,7 @@ Commit as `feat(postgres): bound wire message decoding and startup framing`.
 
 - `postgres_protocol::message::backend::Message::parse` consumes from a `BytesMut` starting at the tag byte (`buf[0]`), so passing a single exact-sized `5 + (len - 4)` `BytesMut` preserves zero-copy `Bytes` slices inside decoded `Message` variants while guaranteeing `buf.is_empty()` on exact consumption. Version `0.6.12` rejects trailing `AuthenticationOk` payload bytes and missing `ParameterStatus` NUL terminators.
 - Nine real-duplex tests cover bytewise and coalesced frames, truncation, signed and oversized lengths, both inclusive length boundaries, malformed bodies, startup bytes, and encoder NUL rejection. Invalid-length tests retain an open writer and unread sentinel body byte, proving refusal precedes body reads.
-- The producer stage uses exactly three native lint expectations; task 02 removes them as production consumers land. Rust treats an unfulfilled expectation as a fatal warning, enforcing cleanup under the existing all-target gate.
+- Session startup and close consume all codec producers directly; all-target Clippy enforces their private visibility without lint exceptions.
 
 [^proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — `postgres-protocol =0.6.12` frontend/backend framing analysis.
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Startup defaults and bounded framing rules.

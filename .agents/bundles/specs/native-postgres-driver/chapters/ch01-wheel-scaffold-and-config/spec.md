@@ -91,7 +91,7 @@ Parent roadmap: [spec.md](../../spec.md). Public interface contracts: [contracts
 
 ### 2.1 Chapter Requirements
 
-The static prerequisite repair belongs to the existing task 01 crate manifest and task 02 Cargo lockfile owners: add direct `fallible-iterator = "=0.2.0"` and its existing-version lock edge in one coherent signed delta, retain all existing functionality, and obtain fresh correctness/quality review before downstream execution.
+The task 01 crate manifest declares `fallible-iterator = "=0.2.0"` directly, paired with the task 02 existing-version Cargo lock edge at signed source `d809be01`. Both ownership receipts retain the complete scaffold contracts; correctness and independent quality review are complete at `3d68c853`.
 
 - **R1 (`ch01:t01`, `ch01:t02`, `ch01:t03`)**: Author `vertebra-postgres` (`lib.name = "_postgres"`, `cdylib` + `rlib`, `gil_used = false`), register workspace membership and lock `src/rs/Cargo.lock` alongside `vertebra-db`'s `socket2` and `half` pins, and wire `src/rs/vertebra-postgres/pyproject.toml`, `src/py/vertebra/_postgres.pyi`, and `Makefile` (`dev`, `build`, `py-test`, `lint`, `lint-all`, `postgres-test`, `postgres-wheel-check`).
 - **R2 & R3 (`ch01:t04`)**: Define the complete owned `PostgresConfig` struct matching every constructor field and default in `contracts.md`, validate scalar/port/timeout/NUL/PEM/five-spelling `TlsMode` rules purely in memory, and define `ServerError` and `PostgresError` with SQLSTATE retention, diagnostic preservation, and secret redaction.

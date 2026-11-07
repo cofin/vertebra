@@ -173,7 +173,7 @@ flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.
 
 Resolve the two-file delta with scoped/offline Cargo metadata before running the final locked gates. Compare `(name, version, source, checksum)` package identities against `git show 8833b064:src/rs/Cargo.lock`; all identities stay equal and the PostgreSQL package gains its direct `fallible-iterator` edge at existing version `0.2.0`.
 
-Tasks 01 and 02 share one signed source commit, `fix(postgres): declare diagnostic iterator prerequisite`, covering only the crate manifest and Cargo lockfile. Both worksheets record that source SHA and their respective ownership after the complete gates pass. Fresh correctness and independent quality review reclose chapter 01 before the blocked session task resumes.
+Tasks 01 and 02 share signed source `d809be01` (`fix(postgres): declare diagnostic iterator prerequisite`), covering only the crate manifest and Cargo lockfile. Both worksheets bind their respective ownership to that source SHA and its passing gates. Chapter 01 is complete and reviewed at `3d68c853`; the downstream session uses the direct iterator dependency.
 
 ## Acceptance Criteria
 

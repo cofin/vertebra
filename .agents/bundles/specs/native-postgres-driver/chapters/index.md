@@ -1,6 +1,6 @@
 # Native PostgreSQL Driver — Chapter Catalog
 
-31 chapters and 111 bounded tasks retain the complete driver scope. Chapter 01 is reviewed; all four chapter 02 tasks are complete and await chapter review.
+31 chapters and 111 bounded tasks retain the complete driver scope. Progress is 8/111 tasks complete and 1/31 chapters complete and reviewed at chapter 01 (`3d68c853`). Chapter 02 has four completed tasks and verified checkpoint `7bf8e2e3`; correctness and fresh independent quality review remain pending.
 
 * [ch01-wheel-scaffold-and-config](ch01-wheel-scaffold-and-config/spec.md) — [completed] (4/4 tasks complete) Scaffold the standalone vertebra-postgres PyO3 crate, lock workspace and vertebra-db Cargo dependencies upfront, wire the vertebra._postgres wheel/stub/Makefile matrix, and implement pure PostgresConfig validation and ServerError categories.
 * [ch02-wire-codec-and-session-startup](ch02-wire-codec-and-session-startup/spec.md) — [active] (4/4 tasks complete) Implement bounded 16 MiB PostgreSQL Protocol 3.0 framing, SessionHandle/PendingSession startup publication ownership, SSLRequest rustls negotiation, and cleartext/MD5 startup authentication.

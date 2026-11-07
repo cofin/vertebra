@@ -44,7 +44,7 @@ verification_evidence:
   review_privacy: "UV_NO_SYNC=1 make review-check exits 0."
   environment: "PYO3_PYTHON=${PWD}/.venv/bin/python; reserved CARGO_TARGET_DIR; Tokio loopback peers and paused clock; no Python network calls."
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T22:52:21Z"
+updated_at: "2026-11-07T23:16:07Z"
 commit: b19e402d
 sources:
   - id: rs-transport
@@ -83,7 +83,7 @@ Implement `PostgresConnection`, `SessionHandle`, `ConnectAttempt`, and `PendingS
 - `src/rs/vertebra-postgres/src/lib.rs`:
   - Export `pub mod session;` on the `rlib` seam.
 - `src/rs/vertebra-postgres/src/protocol.rs`:
-  - Remove the three producer-stage `expect(dead_code)` annotations from `read_message`, `encode_startup_frame`, and `TERMINATE_FRAME` as session startup/close establishes their real consumers. Leave private visibility and all-target `-D warnings` unchanged.
+  - Session startup/close consumes `read_message`, `encode_startup_frame`, and `TERMINATE_FRAME`; all three retain private visibility without dead-code allowances or expectations under all-target `-D warnings`.
 - `src/rs/vertebra-postgres/src/session.rs`:
   - `#[derive(Clone, Copy, Debug, PartialEq, Eq)] pub enum TransactionStatus { Idle, InTransaction, Failed }` with `pub fn from_wire_byte(byte: u8) -> Result<Self, PostgresError>` (`b'I' => Idle`, `b'T' => InTransaction`, `b'E' => Failed`, other => `Err(PostgresError::Protocol(_))`) and `pub const fn as_wire_byte(self) -> u8`.
   - `#[derive(Clone, Copy, Debug, PartialEq, Eq)] pub struct BackendKey { pub process_id: i32, pub secret_key: i32 }` (Rust-only; never exposed as Python client attributes).
@@ -107,8 +107,8 @@ Implement `PostgresConnection`, `SessionHandle`, `ConnectAttempt`, and `PendingS
   - `pub enum BeginConnect { Attempt(ConnectAttempt), AlreadyReady }`; `ConnectAttempt` and `PendingSession` each own `handle: SessionHandle`, `deadline: tokio::time::Instant`, and `armed: bool`; `PendingSession` additionally owns `conn: Option<PostgresConnection>`. These guards and the `run()` future satisfy `Send + 'static` with no borrowed caller state or leaked allocations.
   - `impl ConnectAttempt`:
     - `pub async fn run(self) -> Result<PendingSession, PostgresError>` driving dial + startup + auth inside a single `tokio::time::timeout_at(self.deadline, ...)`:
-      - Initially accepts direct TCP (`unix_socket.is_none()`, `cloud_sql_instance.is_none()`, `alloydb_instance_uri.is_none()`, `!enable_iam_auth`) with `sslmode == TlsMode::Disable` and `AuthenticationOk` (trust); explicitly returns `UnsupportedFeature` / `UnsupportedAuth` for TLS/password/cloud modes until subsequent tasks.
-      - Startup state machine enforces: (1) exactly one `AuthenticationOk` before any `ParameterStatus`, `BackendKeyData`, or `ReadyForQuery`; (2) `ParameterStatus` frames recorded in `parameters` (last value wins per key, valid UTF-8); (3) at most one `BackendKeyData`; (4) `ReadyForQuery` status parsed via `TransactionStatus::from_wire_byte(body.status())?` must equal `TransactionStatus::Idle` (`b'I'`) only after `parameters.get("client_encoding") == Some("UTF8")`.
+      - Accepts direct TCP (`unix_socket.is_none()`, `cloud_sql_instance.is_none()`, `alloydb_instance_uri.is_none()`, `!enable_iam_auth`); TLS policy delegates to `tls::connect` (`ch02:t03`) and trust/password/MD5 authentication delegates to `auth::Authentication` (`ch02:t04`). Unix/cloud/IAM modes return `UnsupportedFeature` until their owning chapters.
+      - Startup state machine enforces: (1) exactly one authentication completion before any `ParameterStatus`, `BackendKeyData`, or `ReadyForQuery`; (2) `ParameterStatus` frames recorded in `parameters` (last value wins per key, valid UTF-8); (3) at most one `BackendKeyData`; (4) `ReadyForQuery` status parsed via `TransactionStatus::from_wire_byte(body.status())?` must equal `TransactionStatus::Idle` (`b'I'`) only after `parameters.get("client_encoding") == Some("UTF8")`.
       - Consumes `NoticeResponse` silently; maps `ErrorResponse` (`S`/`V` severity, `C` SQLSTATE, `M` message, and `(field.type_(), UTF8(field.value_bytes()))` `diagnostics` via `PostgresError::server(...)`) to `PostgresError::Server(ServerError)`.
   - `impl PendingSession`:
     - `pub fn connection(&self) -> &PostgresConnection` exposes read-only negotiated metadata before adoption; Rust callers inspect backend key, transaction status, parameters, and channel-binding data without taking transport ownership or exposing Python attributes.
@@ -118,7 +118,7 @@ Implement `PostgresConnection`, `SessionHandle`, `ConnectAttempt`, and `PendingS
 
 ## Edge Cases & Error Semantics
 
-- A retained producer-stage expectation becomes unfulfilled when the session consumes its symbol and fails the existing `-D warnings` gate; remove all three annotations in this task.
+- Codec functions and termination framing have production callers and require no dead-code exceptions under the existing `-D warnings` gate.
 
 - Reject `ReadyForQuery(b'T')` (`TransactionStatus::InTransaction`), `ReadyForQuery(b'E')` (`TransactionStatus::Failed`), unknown `ReadyForQuery` status bytes, missing or non-`"UTF8"` `client_encoding`, duplicate `AuthenticationOk`, duplicate `BackendKeyData`, `ParameterStatus` before `AuthenticationOk`, or unexpected query frames (`RowDescription`, `DataRow`, `CommandComplete`) with `PostgresError::Protocol`.
 - Dropping `ConnectAttempt` mid-handshake or dropping `PendingSession` without calling `commit()` transitions `SessionHandle` to terminal `Closed` (`begin_connect()` thereafter returns `PostgresError::Interface`) and closes the TCP socket so the server observes `EOF`.
@@ -162,13 +162,10 @@ Commit as `feat(postgres): own startup session lifecycle and publication`.
 ## Notes & Discoveries
 
 - Owned `Arc` configuration/state and armed attempt/pending guards make `tokio::spawn(attempt.run())` and its returned pending connection `Send + 'static`; cancellation and uncommitted adoption drop the socket and close the retained handle.
-- `PendingSession::connection()` exposes retained parameters, backend key, idle status, and absent plaintext TLS binding before publication. Handle parameter snapshots remain empty until commit and survive terminal close.
+- `PendingSession::connection()` exposes retained parameters, backend key, idle status, and read-only TLS binding metadata before publication. The binding remains `None` until chapter 03 extracts the peer digest. Handle parameter snapshots remain empty until commit and survive terminal close.
 - One reservation deadline covers dial, startup, and late commit. `close()` publishes `Closed` before its bounded 100 ms best-effort Terminate/flush/shutdown, with no mutex guard held across awaits.
-- `postgres-protocol` 0.6.12 error diagnostics use `fallible_iterator::FallibleIterator`, `ErrorField::type_()`, and checked UTF8 `value_bytes()`; structured diagnostics remain absent from formatted primary errors.
-
-- Diagnostic traversal imports `fallible_iterator::FallibleIterator` directly; pinned protocol fields expose `type_()` and `value_bytes()`. No replacement parser or copied iterator trait is involved.
-
-- [2026-11-07 05:00] Keeping reusable loopback frame/barrier helpers in `src/rs/vertebra-postgres/tests/support/mod.rs` allows `postgres_wire_tests.rs`, `postgres_tls_wire_tests.rs`, and `postgres_auth_wire_tests.rs` to share `mod support;` without cross-importing test binaries.
+- `postgres-protocol` 0.6.12 error diagnostics require the direct `fallible_iterator::FallibleIterator` trait, `ErrorField::type_()`, and checked UTF8 `value_bytes()`; structured diagnostics remain absent from formatted primary errors.
+- Reusable loopback frame/barrier helpers in `src/rs/vertebra-postgres/tests/support/mod.rs` serve the wire, TLS, and auth suites through `mod support;` without cross-importing test binaries.
 
 [^rs-transport]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP transport stream.
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Session lifecycle and deadline contracts.

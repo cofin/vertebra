@@ -44,9 +44,9 @@ verification_evidence:
   formatting: "cargo fmt --manifest-path src/rs/Cargo.toml -p vertebra-postgres -- --check and git diff --check exit 0."
   review_privacy: "UV_NO_SYNC=1 make review-check exits 0."
   environment: "UV_NO_SYNC=1; PYO3_PYTHON=${PWD}/.venv/bin/python; dedicated Cargo target; aggregate tests acquire the shared SHM test lock."
-  checkpoint: "Verified working tree awaits the coordinator's signed source commit; task remains in_progress with commit null."
+  checkpoint: "Completed source receipt: be425286. Chapter checkpoint 7bf8e2e3 passes all 47 Rust tests and locked all-target Clippy with -D warnings."
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T23:03:32Z"
+updated_at: "2026-11-07T23:16:07Z"
 commit: be425286
 sources:
   - id: rs-upgrade-tls
@@ -102,7 +102,7 @@ Implement `src/rs/vertebra-postgres/src/tls.rs` and wire it into `session.rs` so
 
 - `Prefer` + `b'S'` delegates to `TransportStream::upgrade_tls` (which upgrades `Prefer` to `Require` policy: encrypted without CA when `ca_pem` is `None`, or CA-verified when `ca_pem` is `Some`); if the TLS handshake after `b'S'` fails (e.g. bad cert with `ca_pem` or broken TLS record), the attempt fails terminally and never reconnects in plaintext.
 - `VerifyCa` verifies the server certificate chain against `ca_pem` (or system roots) without checking hostname, whereas `VerifyFull` verifies both chain and SAN (`config.server_name.as_deref().unwrap_or(&config.host)`).
-- Expired server certificates, untrusted CAs, and missing or CA-mismatched client mTLS identities when required by the server fail with `PostgresError::Transport` and transition `SessionHandle` to `Closed`.
+- `VerifyCa`, `VerifyFull`, and `Require`/`Prefer` with `ca_pem` reject expired server certificates and untrusted chains; only `VerifyFull` checks the server hostname. `Require`/`Prefer` without `ca_pem` provide encryption without CA or hostname verification. Server rejection of a missing or CA-mismatched required client mTLS identity fails with `PostgresError::Transport` and transitions `SessionHandle` to `Closed`.
 - Delaying the `SSLRequest` response or TLS handshake past `deadline` aborts the dial, closes the TCP socket, and leaves `SessionHandle` in `Closed`.
 
 ## Public-Seam Test Blueprint
@@ -140,9 +140,9 @@ Commit as `feat(postgres): negotiate protocol TLS with shared transport`.
 
 ## Notes & Discoveries
 
-- Returning `DialedTransport { stream, tls_server_end_point }` from `tls::connect` lets `ch03:t02` populate X.509 endpoint binding bytes from `TransportStream::TlsTcp` without changing `session.rs` call signatures in `ch03:t02`.
+- `DialedTransport { stream, tls_server_end_point }` reserves the X.509 endpoint-binding seam for `ch03:t02`; its binding field remains `None` until that chapter extracts the verified peer digest from `TransportStream::TlsTcp`.
 - Generic startup/send/EOF peer helpers accept both TCP and TLS streams. The publication-deadline test releases its peer only after clock resumption so its EOF watchdog cannot expire during an intentional clock advance.
-- Existing unsupported-auth assertions remain; the obsolete TLS-unsupported loop is removed because the TLS peer matrix exercises real negotiation. The non-idle transaction cases use an equivalent escaped byte string accepted by both Clippy and spelling checks.
+- The TLS peer matrix verifies enabled modes, refusal, identity policy, client mTLS, deadlines, and terminal handshake failure over actual TCP/TLS streams.
 
 [^rs-upgrade-tls]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared `upgrade_tls` and `ring` TLS verifier.
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Direct TLS mode and SNI override contracts.

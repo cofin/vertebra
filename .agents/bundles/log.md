@@ -1,5 +1,12 @@
 # Bundle Activity Log
 
+## [2026-11-07] flow-docs-sync | Native PostgreSQL chapter 02 checkpoint
+
+- Completed chapter 02 task receipts bind to `t01=a00c3248`, `t02=b19e402d`, `t03=be425286`, and `t04=67421061`. Exact checkpoint `7bf8e2e3` passes all 47 Rust tests (`9` codec, `8` auth, `10` TLS, `20` wire/config/error) under the shared SHM test lock and locked all-target Clippy with `-D warnings`.
+- Synchronized root/chapter state, catalogs, indexes, and current session/TLS/auth contracts before chapter review. Chapter 02 remains active with no current task or review stamp; chapter 01 remains complete and reviewed at `3d68c853`. The roadmap retains 31 chapters, 111 tasks, `8/111` completed tasks, and `1/31` completed and reviewed chapters.
+- Replaced superseded worksheet notes with current rationale: session consumers remove the codec producer expectations; TCP/TLS helpers share deterministic startup and EOF barriers; real TLS/password suites replace unsupported-mode assertions. The publication-deadline peer waits for clock resumption before its EOF watchdog runs.
+- Chapter 02 documentation remains `[0/0 files documented in ch02]`, and the flow remains `[0/11 files documented]`; chapter 30 owns the full public guides and durable OKF consolidation. Correctness and fresh independent quality review remain before chapter advancement.
+
 ## [2026-11-07] chapter-complete | Native PostgreSQL diagnostic prerequisite review
 
 - Reclosed chapter 01 at reviewed `3d68c853`: cold correctness and fresh independent quality reports have no findings; native workspace checks, all-target Clippy, unchanged lock identities, and all 16 tests pass.

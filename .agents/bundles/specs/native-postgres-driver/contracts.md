@@ -5,7 +5,7 @@ title: Native PostgreSQL public contracts
 description: Public interface and ownership contracts for the complete native PostgreSQL driver plan.
 status: stable
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T16:40:00Z"
+updated_at: "2026-11-07T23:16:07Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:40:00Z"
@@ -111,6 +111,27 @@ configured direct TLS policy. Test cache expiry/refresh, rejected grants and fai
 authentication without same-stream retry.
 
 ## Pools and sessions
+
+The Rust startup seam in `src/rs/vertebra-postgres/src/session.rs` uses cloneable
+`SessionHandle` values with owned `Arc<PostgresConfig>` and
+`Arc<std::sync::Mutex<SessionState>>`. `BeginConnect`, `ConnectAttempt`, and
+`PendingSession` have no lifetime parameters; attempts, their `run()` futures, and
+pending results are `Send + 'static`. One absolute deadline begins at reservation
+and includes dial, SSLRequest, TLS, authentication, and `PendingSession::commit()`.
+Dropping an armed attempt or pending result closes the socket and handle.
+`PendingSession::connection()` exposes read-only prepublication metadata; committed
+parameter snapshots survive close. Backend cancellation keys remain Rust-only.
+The TLS-binding getter returns `None` until chapter 03 extracts the peer digest.
+
+Direct TCP TLS uses SSLRequest before `TransportStream::upgrade_tls` and never
+retries in plaintext after an `S` response. Only `Prefer` accepts `N` on the same
+socket. `Require`/`Prefer` without `ca_pem` provide encryption-only TLS; with
+`ca_pem` they verify the certificate chain and validity. `VerifyCa` verifies the
+chain and validity; `VerifyFull` also verifies the hostname, using `server_name`
+when supplied. Startup accepts trust, cleartext password, and MD5 with strict
+authentication completion before parameters/backend key/idle ReadyForQuery.
+The pinned `postgres-protocol = "=0.6.12"` encoders and `md5_hash` own password
+framing and hashing; SCRAM and channel binding belong to chapter 03.
 
 Both native pool constructors take the complete connection signature plus:
 

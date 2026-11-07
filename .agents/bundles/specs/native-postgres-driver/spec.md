@@ -46,12 +46,12 @@ research:
   - research/cloud-material_20261105.md
 plan_revision: 6
 plan_commit: 8833b064
-state_revision: 2
-last_verified_checkpoint: d809be01
+state_revision: 3
+last_verified_checkpoint: 7bf8e2e3
 last_reviewed_chapter: ch01-wheel-scaffold-and-config
 last_reviewed_commit: 3d68c853
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-07T22:46:50Z"
+updated_at: "2026-11-07T23:16:07Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:40:00Z"
@@ -107,7 +107,7 @@ tags:
 <!-- truth: start -->
 - **Standalone Optional Wheel**: `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owns live PostgreSQL Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`) without linking database clients into `vertebra-core` [^pg-conn-rs] [^pg-core-rs].
 - **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB Admin discovery + mTLS + IAM), lossless codecs, statement caching, single-`Sync` `pipeline()`, binary `COPY`, native `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, and `pgoutput` v1 logical replication ship together with full `psycopg`/`asyncpg` removal [^py-async-rs] [^arrow-shm-rs] [^pg-driver-py] [^sqlspec-py].
-- **Nested Chapter Roadmap (`plan_revision: 6`)**: All 31 chapters and 111 tasks retain their scope at `plan_commit: 8833b064`; chapter 01 is complete and reviewed at `3d68c853`, and chapter 02 executes SSLRequest/TLS task 03.
+- **Nested Chapter Roadmap (`plan_revision: 6`)**: All 31 chapters and 111 tasks retain their scope at `plan_commit: 8833b064`; chapter 01 is complete and reviewed at `3d68c853`, and all four chapter 02 tasks are complete at verified checkpoint `7bf8e2e3`, awaiting chapter review.
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -149,9 +149,9 @@ Read [database-drivers-and-dialers.md](../../knowledge/domains/data/database-dri
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
-The codec producer stage uses three exact symbol-level lint expectations until chapter 02 task 02 adds production callers and removes them; all-target Clippy remains mandatory with `-D warnings`.
+The crate-private codec has real session startup and close callers without dead-code allowances or expectations; all-target Clippy remains mandatory with `-D warnings`.
 
-Read-only `PendingSession::connection()` and `PostgresConnection::tls_server_end_point()` support Rust metadata adoption and channel binding; backend keys stay outside Python. Chapter 01 owns the direct fallible diagnostic-iterator prerequisite and fresh upstream review before chapter 02 resumes.
+Read-only `PendingSession::connection()` supports Rust metadata adoption; `PostgresConnection::tls_server_end_point()` reserves the channel-binding seam and returns `None` until chapter 03 adds the peer digest. Backend keys stay outside Python. The direct `fallible-iterator = "=0.2.0"` dependency supports pinned diagnostic traversal.
 
 The connection-publication seam uses owned `Arc<PostgresConfig>` and `Arc<std::sync::Mutex<SessionState>>` shared by cloneable `SessionHandle` values. `BeginConnect`, `ConnectAttempt`, and `PendingSession` have no lifetime parameters; attempts, their `run()` futures, and pending results are `Send + 'static` for the asynchronous completion bridge, with armed rollback on drop and publication only in `commit()`.
 
@@ -288,7 +288,7 @@ Progress: `[0/11 files documented]` (owned by [ch30-user-and-domain-docs](chapte
 
 ## 5. Implementation Plan
 
-Every worksheet (`111` total across `31` chapters) executes within its bounded ownership. The chapter 01 direct diagnostic-iterator prerequisite pairs the existing task 01 manifest owner and task 02 lockfile owner in one coherent signed source commit, with both receipts bound to its SHA. Other worksheets produce their signed task commits independently. Each chapter owns `1`–`4` vertical-slice tasks (`<= 3` production files per task, zero overlapping `files:` across ready tasks) in a strict serial chapter dependency chain (`ch01` -> `ch31`). See [review.md](review.md) for adjudicated planning decisions.
+Every worksheet (`111` total across `31` chapters) executes within its bounded ownership. Chapter 01 task 01 and task 02 bind their manifest and lockfile receipts to the coupled dependency commit `d809be01`. Other worksheets produce their signed task commits independently. Each chapter owns `1`–`4` vertical-slice tasks (`<= 3` production files per task, zero overlapping `files:` across ready tasks) in a strict serial chapter dependency chain (`ch01` -> `ch31`). See [review.md](review.md) for adjudicated planning decisions.
 
 - [x] [3d68c853] ch01-wheel-scaffold-and-config — Standalone Optional Wheel Scaffold, Build Matrix, and Validated Connection Options (chapters/ch01-wheel-scaffold-and-config/spec.md)
 - [~] ch02-wire-codec-and-session-startup — Bounded Protocol Framing, Trust Lifecycle, SSLRequest TLS, and Cleartext/MD5 Startup (chapters/ch02-wire-codec-and-session-startup/spec.md)
@@ -326,12 +326,12 @@ Every worksheet (`111` total across `31` chapters) executes within its bounded o
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ 67421061`; flow `state: active`, `plan_revision: 6`, `plan_commit: 8833b064`.
-- **Progress**: `1/31` chapters and `8/111` tasks are complete; chapter 02 has all four tasks verified and awaits chapter review.
-- **Current Chapter**: `ch02-wire-codec-and-session-startup`, checkpoint and reviews pending.
+- **Verified Baseline**: Checkpoint `7bf8e2e3` passes all 47 Rust tests (`9` codec, `8` auth, `10` TLS, `20` wire/config/error) and locked all-target Clippy with `-D warnings`; flow `state: active`, `plan_revision: 6`, `plan_commit: 8833b064`.
+- **Progress**: `1/31` chapters are complete and reviewed; `8/111` tasks are complete. Chapter 02 receipts bind to `a00c3248`, `b19e402d`, `be425286`, and `67421061`.
+- **Current Chapter**: `ch02-wire-codec-and-session-startup`, with `current_task: null`; correctness review and fresh independent quality review remain pending.
 - **Remaining Plan**: Chapter 02 closeout and chapters 03–31 retain complete blueprints.
 - **Documentation**: `[0/11 files documented]`; full guides and domain knowledge remain assigned to chapter 30.
-- **Next Action**: Complete chapter 02 review and continue `/flow:implement native-postgres-driver`.
+- **Next Action**: Run `/flow:review native-postgres-driver` for chapter 02; advance to chapter 03 only after correctness and fresh independent quality review pass.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` — Shared PostgreSQL wire frame helpers and SHM admission metadata in `vertebra-db`.
