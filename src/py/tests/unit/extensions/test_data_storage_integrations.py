@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import pyarrow as pa
 import pytest
-from advanced_alchemy.types.file_object import FileObject, StorageBackend, StoredObject
+from advanced_alchemy.types.file_object import FileObject, StorageBackend, StoredObject, storages
 from advanced_alchemy.types.file_object.registry import StorageRegistry as AlchemyStorageRegistry
 from advanced_alchemy.types.file_object.session_tracker import FileObjectSessionTracker
 from sqlspec.protocols import ObjectStoreProtocol
@@ -30,6 +31,7 @@ from vertebra.extensions.sqlspec.storage import ObjectStoreBackend as SQLSpecObj
 from vertebra.storage import (
     AsyncGcpTokenCache,
     GCSConfig,
+    LocalConfig,
     SigningConfig,
     SyncGcpTokenCache,
     SyncObjectStore,
@@ -257,6 +259,77 @@ def test_duckdb_gcs_secret_sql_builder() -> None:
 
     with pytest.raises(ValueError, match="Invalid SQL identifier"):
         build_duckdb_gcs_secret_sql("bad-name;DROP TABLE x", cfg)
+
+
+@pytest.mark.parametrize("target", [None, "", "   "])
+def test_alchemy_storage_rejects_missing_configuration(target: str | None) -> None:
+    """Backend construction and key-only registration require a configured store."""
+    with pytest.raises(ImproperConfigurationError):
+        AlchemyObjectStoreBackend(key="avatars", fs=target)
+    with pytest.raises(ImproperConfigurationError):
+        register_storage_backend("avatars", store=target)
+
+
+def test_alchemy_storage_registry_and_bounded_file_upload(tmp_path: Path) -> None:
+    """Configured public registry helpers preserve registry APIs and consume bounded reads."""
+    registry = AlchemyStorageRegistry()
+    registry_get = getattr(registry, "get", None)
+    backend = register_storage_backend("avatars", store=LocalConfig(root=tmp_path), registry=registry)
+    assert registry.get_backend("avatars") is backend
+    assert getattr(registry, "get", None) is registry_get
+    assert hasattr(storages, "get") == hasattr(AlchemyStorageRegistry, "get")
+
+    class BoundedReader(io.BytesIO):
+        """Reject unbounded reads from a caller-provided file stream."""
+
+        def read(self, size: int = -1) -> bytes:
+            assert 0 < size <= 4
+            return super().read(size)
+
+    avatar = FileObject(backend=backend, filename="u1.png", content_type="image/png")
+    backend.save_object(avatar, BoundedReader(b"chunk1-chunk2"), chunk_size=4)
+    assert avatar.size == 13
+    assert backend.get_content("u1.png") == b"chunk1-chunk2"
+    alias_backend = AlchemyObjectStoreBackend(key="direct", store=LocalConfig(root=tmp_path))
+    assert alias_backend.get_content("u1.png") == b"chunk1-chunk2"
+
+
+@pytest.mark.anyio
+async def test_alchemy_storage_async_bounded_streams(tmp_path: Path) -> None:
+    """Async file reads and iterable uploads retain bytes and clean up aborted writes."""
+    backend = AlchemyObjectStoreBackend(key="avatars", fs=LocalConfig(root=tmp_path))
+
+    class AsyncReader:
+        """Expose an asynchronous bounded file input."""
+
+        def __init__(self) -> None:
+            self.source = io.BytesIO(b"chunk1-chunk2")
+
+        async def read(self, size: int) -> bytes:
+            assert 0 < size <= 4
+            return self.source.read(size)
+
+    avatar = FileObject(backend=backend, filename="u1.png", content_type="image/png")
+    await backend.save_object_async(avatar, AsyncReader(), chunk_size=4)
+    assert avatar.size == 13
+    assert await backend.get_content_async("u1.png") == b"chunk1-chunk2"
+
+    async def chunks():
+        yield b"part1-"
+        yield b"part2"
+
+    streamed = FileObject(backend=backend, filename="iter.bin")
+    await backend.save_object_async(streamed, chunks())
+    assert streamed.size == 11
+    assert await backend.get_content_async("iter.bin") == b"part1-part2"
+
+    async def broken_chunks():
+        yield b"first"
+        raise ValueError("source failed")
+
+    with pytest.raises(ValueError, match="source failed"):
+        await backend.save_object_async(FileObject(backend=backend, filename="aborted.bin"), broken_chunks())
+    assert not await backend.exists_async("aborted.bin")
 
 
 @pytest.mark.anyio
