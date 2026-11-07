@@ -5,7 +5,7 @@ Typed object storage configurations, GIL-free `SyncObjectStore` and `AsyncObject
 | Component | Classes | Purpose |
 | --- | --- | --- |
 | **Store** | `SyncObjectStore`, `AsyncObjectStore` | Synchronous and asynchronous object I/O (`put`, `get`, `head`, `delete`, `list`, `copy`) |
-| **Backend Configs** | `S3Config`, `GCSConfig`, `AzureConfig`, `R2Config`, `OCIConfig`, `LocalConfig`, `MemoryConfig`, `HTTPConfig` | Frozen `msgspec.Struct` backend configurations for AWS S3, GCS (with ADC), Azure Blob, Cloudflare R2, native OCI REST v2, local disk, in-memory, and HTTP/WebDAV |
+| **Backend Configs** | `S3Config`, `GCSConfig`, `AzureConfig`, `OCIConfig`, `LocalConfig`, `MemoryConfig`, `HTTPConfig` | Frozen `msgspec.Struct` backend configurations for AWS S3, GCS (with ADC), Azure Blob, native OCI REST v2, local disk, in-memory, and HTTP/WebDAV |
 | **Signing & Range Reads** | `ObjectMeta`, `SigningConfig`, `SyncReadableFile`, `AsyncReadableFile` | Presigned URLs (HMAC, SigV4, GCS V4, Azure SAS, OCI Cavage) and PyArrow seekable range readers |
 
 ## Object Store
@@ -55,11 +55,6 @@ Typed object storage configurations, GIL-free `SyncObjectStore` and `AsyncObject
       members: false
 
 ::: vertebra.storage._store.AzureConfig
-    options:
-      heading_level: 4
-      members: false
-
-::: vertebra.storage._store.R2Config
     options:
       heading_level: 4
       members: false

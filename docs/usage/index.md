@@ -31,7 +31,7 @@ Practical guides for building, scaling, testing, and deploying applications with
 
 | Guide | Topics Covered |
 | --- | --- |
-| **[Overview & Backends](storage.md)** | Multicloud and local object storage (`SyncObjectStore`, `AsyncObjectStore`) across S3, GCS, Azure, R2, OCI, HTTP, Local, and Memory backends with GIL-free sync and `RustTaskAwaitable` async I/O. |
+| **[Overview & Backends](storage.md)** | Multicloud and local object storage (`SyncObjectStore`, `AsyncObjectStore`) across S3, GCS, Azure, OCI, HTTP, Local, and Memory backends with GIL-free sync and `RustTaskAwaitable` async I/O. |
 | **[GCS, Active ADC & Presigning](storage-auth-and-signing.md)** | Active `300s`-skew GCP ADC token caching (`RefreshingGcpCredentialProvider`, `SyncGcpTokenCache`, `AsyncGcpTokenCache`), keyless IAM `signBlob` V4 signing, and `SigningConfig` presigned URLs. |
 | **[Range Reads, Parquet & Attachments](storage-parquet-and-orm.md)** | Seekable HTTP `Range` reads (`SyncReadableFile` / `AsyncReadableFile`) for PyArrow/Polars Parquet inspection and transactional `ObjectStoreBackend` model attachments. |
 
