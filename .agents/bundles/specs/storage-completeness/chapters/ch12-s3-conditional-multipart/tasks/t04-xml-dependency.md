@@ -2,8 +2,8 @@
 type: Task
 id: storage-completeness:ch12:t04
 chapter_id: ch12-s3-conditional-multipart
-title: Declare direct XML and Windows identity dependencies
-description: Declare direct XML and Windows identity dependencies
+title: Declare native protocol and filesystem dependencies
+description: Declare native protocol and filesystem dependencies
 status: draft
 state: pending
 priority: P1
@@ -20,7 +20,7 @@ files:
 - src/rs/Cargo.lock
 tests: []
 estimated_loc: 30
-plan_revision: 5
+plan_revision: 6
 plan_commit: null
 state_revision: 0
 claimed_by: null
@@ -43,11 +43,11 @@ tags:
 - repair
 ---
 
-# Declare direct XML and Windows identity dependencies
+# Declare native protocol and filesystem dependencies
 
 ## Objective & Scope Boundary
 
-Declare direct XML and Windows identity dependencies. Execute one bounded worksheet and create one signed local conventional commit after verification. Read the existing functional baseline at `5fe477fa`; a reopened ch01 is not an execution prerequisite. Own only the listed production and canonical test files. [^implementation]
+Declare native protocol and filesystem dependencies. Execute one bounded worksheet and create one signed local conventional commit after verification. Read the existing functional baseline at `5fe477fa`; a reopened ch01 is not an execution prerequisite. Own only the listed production and canonical test files. [^implementation]
 
 ## Bounded Read Manifest
 
@@ -57,6 +57,8 @@ Declare direct XML and Windows identity dependencies. Execute one bounded worksh
 - `.agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md` — collaborating contract.
 
 ## Symbol & Signature Contracts
+
+Declare direct `uuid = { version = "=1.29.1", features = ["v4"] }` in the storage crate using the exact existing Cargo.lock package. Local and GCS stage names use `Uuid::new_v4`; no predictable process/timestamp identifier substitutes for the required unique private stage identity. This adds only the direct dependency edge, never upgrades a package or introduces a whole-object buffer.
 
 Add a Windows-target-only direct `windows-sys` workspace dependency to vertebra-storage, enabling `Win32_Foundation` and `Win32_Storage_FileSystem` in that crate. The existing locked 0.61 package identity is reused; update only its direct crate dependency edge in Cargo.lock. No workspace version or unrelated package changes. ch11:t01 consumes `GetFileInformationByHandleEx(FileIdInfo)` / `FILE_ID_INFO` and directory `FILE_FLAG_BACKUP_SEMANTICS` from that declared dependency, rather than unstable std MetadataExt methods or handwritten Win32 declarations. The dependency gate remains static validation and precedes both Local and provider protocol code.
 

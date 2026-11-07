@@ -10,8 +10,8 @@ planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
-plan_revision: 4
-plan_commit: null
+plan_revision: 5
+plan_commit: bdc7799ab18b9a961dacf99f5eee9af46a557aa3
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
 last_reviewed_commit: null
@@ -69,9 +69,13 @@ Caller → seam → collaborator: public storage/framework calls → owned deep 
 | Deep owned boundary with exact provider semantics | Chosen: hides credentials, staging and concurrency while preserving configured SDK behavior. |
 | Generic head-then-write, Python lock, copy-create publication or blanket exception conversion | Rejected: loses atomicity, update results, metadata or error identity. |
 
+### R4: Remove R2 from repository and embedding overviews
+
+Remove first-class R2 from `README.md`, `docs/reference/index.md`, and `docs/usage/embeddings-and-vectors.md`. Preserve the remaining supported providers and historical changelog entries.
+
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bundles/knowledge/domains/storage/object-storage.md` by ch09:t03 and user guides by ch04:t03; per-task tests are executable documentation. No separate untracked documentation obligation remains.
+Progress: `[0/11 files documented]`. t01 owns three public provider/reference pages; t02 owns three architecture/product/catalog pages; t03 owns the storage and data-driver knowledge chapters; t04 owns the README, reference index and embedding guide. Detailed storage usage belongs to ch04:t03. t02/t03/t04 depend on t01 because the full documentation build requires its removed-symbol reference repair. t03 additionally waits on completed ch16:t01 native acceptance and reads its recorded evidence. Documentation-only validation uses the actual build and API surface, without artificial public-call regression tests.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -79,21 +83,23 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 | --- | --- | --- | --- |
 | R1 | [ch09:t01](tasks/t01-public-provider-indexes.md) | documentation_validation | `src/py/tests/unit/tools/test_docs_tooling.py` |
 | R2 | [ch09:t02](tasks/t02-architecture-and-product.md) | documentation_validation | `src/py/tests/unit/tools/test_docs_tooling.py` |
-| R3 | [ch09:t03](tasks/t03-storage-knowledge.md) | documentation_validation | `src/py/tests/unit/tools/test_docs_tooling.py` |
+| R3 | [ch09:t03](tasks/t03-storage-knowledge.md) | documentation_validation | Completed ch16:t01 evidence, bundle validation and documentation build |
+| R4 | [ch09:t04](tasks/t04-overview-and-embedding-claims.md) | documentation_validation | Documentation build and supported-provider review |
 
 ## 5. Implementation Plan
 
 - [ ] storage-completeness:ch09:t01 — Remove R2 claims from public navigation and reference (tasks/t01-public-provider-indexes.md)
 - [ ] storage-completeness:ch09:t02 — Remove R2 from architecture and product capability claims (tasks/t02-architecture-and-product.md)
 - [ ] storage-completeness:ch09:t03 — Record provider atomicity, key identity, cleanup and R2 withdrawal (tasks/t03-storage-knowledge.md)
+- [ ] storage-completeness:ch09:t04 — Remove R2 from repository and embedding overviews (tasks/t04-overview-and-embedding-claims.md)
 
 **Chapter Recovery Checkpoint:** run every task's focused verification, then correctness review and a fresh quality review before closing this chapter. `/flow:implement storage-completeness ch09-r2-docs-and-knowledge` executes its ready worksheet.
 
 ## 6. Current State & Remaining Plan Snapshot
 
 - Baseline: `5fe477fa`; implementation is pending and cold plan review is required.
-- Remaining: all 3 tasks above; dependent tasks remain ordered by depends_on.
-- Documentation: `[0/1 files documented]`, owned by the explicit consolidation tasks.
+- Remaining: all 4 tasks above; dependent tasks remain ordered by depends_on.
+- Documentation: `[0/11 files documented]`, owned by the explicit consolidation tasks.
 - Reclosure of ch01 and downstream acceptance waits for native repair gates; this chapter never depends on that reclosure.
 
 [^source]: `docs/index.md` — Verified repository implementation seam.

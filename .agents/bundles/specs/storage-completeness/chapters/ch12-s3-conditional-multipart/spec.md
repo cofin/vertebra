@@ -10,7 +10,7 @@ planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
-plan_revision: 5
+plan_revision: 6
 plan_commit: null
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
@@ -66,7 +66,7 @@ The wrapper's actual constructor accepts a retained concrete SDK store: `async S
 
 `S3PublicationUpload::complete` performs direct conditional CompleteMultipartUpload. A known HTTP409 ConditionalRequestConflict is a typed PreconditionError/retryable CAS conflict with clear provider context; restore and retain the abortable upload handle, perform idempotent abort cleanup and return the conflict. Do not automatically re-initiate/replay a consumed unrewindable producer, stage/re-copy all S3 uploads, retain payloads, or broaden permissions. A caller may explicitly start a fresh operation with rewindable input. A412 fails without overwriting the competitor. An ambiguous transport outcome or HTTP200 response is never blindly retried: parse a complete200 body for success/Error XML; retain cleanup ownership while reporting an honest indeterminate/provider error if its outcome cannot be established. Cleanup must never delete a competing committed target. The root adjudicates this direct-complete behavior; R1 makes no hidden automatic replay promise.
 
-### R4: Declare direct XML and Windows identity dependencies
+### R4: Declare native protocol and filesystem dependencies
 
 Declare direct quick-xml0.39.4 with serialize support in vertebra-storage/Cargo.toml, using the already locked0.39.4 package from object_store's existing dependency graph. Update only vertebra-storage's dependency edge in Cargo.lock through Cargo's normal resolver; do not upgrade unrelated packages, rewrite PostgreSQL package entries or add an SDK fork. S3 CreateMultipartUpload/CompleteMultipartUpload and Azure block-list serialization/parsing reuse this maintained XML codec; HTTP200 Error bodies and XML entities/namespaces must be parsed structurally, not substring/string-split approximations. This task precedes S3 provider source imports. Preserve concurrent manifest/lock edits by other agents.
 
@@ -105,13 +105,13 @@ Dependency order is t04 XML dependency, then t01 initiation, t02 completion and 
 - [ ] storage-completeness:ch12:t02 — Publish S3 multipart with conditional completion and actual result (tasks/t02-s3-conditional-complete.md)
 - [ ] storage-completeness:ch12:t03 — Surface S3 completion conflicts without hidden replay (tasks/t03-s3-conflict-recovery.md)
 
-- [ ] storage-completeness:ch12:t04 — Declare direct XML and Windows identity dependencies (tasks/t04-xml-dependency.md)
+- [ ] storage-completeness:ch12:t04 — Declare native protocol and filesystem dependencies (tasks/t04-xml-dependency.md)
 
 **Chapter Recovery Checkpoint:** run every task's focused verification, then correctness review and a fresh quality review before closing this chapter. `/flow:implement storage-completeness ch12-s3-conditional-multipart` executes its ready worksheet.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Baseline: `5fe477fa`; implementation is pending and cold plan review is required.
+- Shared ordinary negative-CAS prerequisite ch20:t01 is explicit; this provider frontier remains draft pending independent cold review of the complete ownership map.
 - Remaining: all 4 tasks above; dependent tasks remain ordered by depends_on.
 - Documentation: `[0/1 files documented]`, owned by the explicit consolidation tasks.
 - Reclosure of ch01 and downstream acceptance waits for native repair gates; this chapter never depends on that reclosure.

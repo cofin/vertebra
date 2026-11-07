@@ -5,7 +5,7 @@ chapter_id: ch06-adapter-correctness
 title: Django Collision Length and SQLSpec Signing Errors
 description: Preserve Django per-call filename limits and replayable content after collision errors, and retain configured SQLSpec signing failures.
 status: stable
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
@@ -14,13 +14,16 @@ plan_revision: 4
 plan_commit: 88d5068031ba82078f2f7c4999cdf3cfd77c66be
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
-last_reviewed_commit: null
+last_reviewed_commit: 115ab8f5
 created_at: '2026-11-07T12:00:00Z'
 updated_at: '2026-11-07T22:33:17Z'
 generated:
   by: flow/0.28.0
   at: '2026-11-07T12:00:00Z'
-verified: []
+verified:
+- correctness_review: 115ab8f5
+- quality_review: 115ab8f5
+- metadata_reverification: bdc7799a
 sources:
 - id: source
   resource: src/py/vertebra/extensions/django/storage.py
@@ -44,7 +47,7 @@ tags:
 <!-- truth: start -->
 - Django retries preserve per-call `max_length` and rewind seekable input; non-replayable input retains the original `FileExistsError`. [^source]
 - SQLSpec checks signing capability before delegation and preserves configured validation and provider exceptions. [^sqlspec-signing]
-- Both task commits are verified; chapter correctness review and fresh quality review remain pending.
+- Both task commits are verified; chapter correctness review and fresh quality review pass at `115ab8f5`, with roadmap metadata reverified at `bdc7799a`.
 - Native atomic multipart publication remains a separate repair and acceptance obligation.
 <!-- truth: end -->
 
@@ -95,12 +98,12 @@ Progress: `[1/1 files documented]` for this chapter's adapter contracts in [obje
 - [x] [cd7e5563] storage-completeness:ch06:t01 — Retain max_length across real Django create collisions (tasks/t01-django-max-length-retry.md)
 - [x] [45b068e2] storage-completeness:ch06:t02 — Propagate configured signing validation failures (tasks/t02-sqlspec-signing-errors.md)
 
-**Chapter Recovery Checkpoint:** both worksheets are completed and the current-source storage/Django/data integration checkpoint passes 88 tests. `/flow:review storage-completeness ch06-adapter-correctness` performs correctness review, followed by fresh quality review before chapter closure.
+**Chapter Recovery Checkpoint:** both worksheets are completed and the current-source storage/Django/data integration checkpoint passes 88 tests. Correctness and fresh quality reviews pass at `115ab8f5`; the cross-chapter state correction is independently reverified at `bdc7799a`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
 - Plan revision 4 is independently approved; completed task receipts match signed source commits.
-- Both adapter repairs are implemented and verified; correctness review and fresh quality review remain.
+- Both adapter repairs are implemented and verified; correctness review and fresh quality review pass at `115ab8f5`; metadata finding DOC-NEW is resolved at `bdc7799a`.
 - Adapter knowledge is synchronized (`[1/1 files documented]`); final native/provider and user-guide consolidation remains in its owning tasks.
 - Reclosure of ch01 and downstream acceptance waits for native repair gates; this chapter never depends on that reclosure.
 

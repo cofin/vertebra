@@ -30,6 +30,9 @@ sources:
 - id: oci
   resource: https://docs.oracle.com/en-us/iaas/tools/python/latest/api/object_storage/client/oci.object_storage.ObjectStorageClient.html#oci.object_storage.ObjectStorageClient.commit_multipart_upload
   title: OCI conditional commit
+- id: oci-put
+  resource: https://docs.oracle.com/en-us/iaas/tools/python/latest/api/object_storage/client/oci.object_storage.ObjectStorageClient.html#oci.object_storage.ObjectStorageClient.put_object
+  title: OCI ordinary conditional object put and metadata
 - id: locks
   resource: https://doc.rust-lang.org/stable/std/fs/struct.File.html#method.lock
   title: Native file lock platform contracts
@@ -76,6 +79,8 @@ Stages use same-parent `.vertebra-stage-<uuid>#<counter>`, with no '#' in the ra
 
 Stable Rust 1.99 still marks Windows MetadataExt volume_serial_number/file_index as unstable windows_by_handle in its shipped standard-library source. Use the existing locked windows-sys 0.61 through a direct storage-crate Windows-target dependency with Win32_Foundation/Win32_Storage_FileSystem; GetFileInformationByHandleEx(FileIdInfo) returns physical volume/file identity from an opened directory handle. The static prerequisite ch12:t04 owns both manifest/lock edges before ch11:t01, without a package version upgrade.
 
+The lockfile already contains uuid 1.29.1, but vertebra-storage has no direct uuid edge. ch12:t04 declares that exact version with v4 for Local/GCS private stage identities; no transitive import or predictable timestamp/process substitute is assumed.
+
 ## Provider Protocol Findings
 
 S3 completion accepts If-Match or If-None-Match `*`. An HTTP200 can contain an Error body and requires XML inspection. A 409 requires re-initiation and part replay; the root selects an honest typed 409 conflict with retained abort ownership and no hidden replay. A caller can start a fresh operation with rewindable input. Always staging/re-copying S3 would add unjustified I/O, latency and permissions. UploadPartCopy supports ranged server-side copying from an existing object. Client payload collection or re-reading an unrewindable producer is not valid recovery. [^s3] [^s3-copy]
@@ -88,6 +93,14 @@ OCI CommitMultipartUpload supports If-Match and If-None-Match `*`; arbitrary neg
 
 GCS XML and JSON ETags are not interchangeable. Existing public native tags remain XML ETags; generation fences translate predicates and publication receipts without cross-API string comparison. The pinned SDK `GetOptions { head: true, version: Some(generation), .. }` emits an XML HEAD with `generation` query and returns that generation's metadata. A successful JSON rewrite supplies the generation for this pinned receipt lookup; a successor must never be reported through an unfenced HEAD. Verify distinct XML/JSON values and a writer arriving immediately after rewrite. [^sdk] [^gcs-preconditions]
 
+## Ordinary Negative-Predicate Ownership
+
+`ObjectStoreEngine::put_opts` currently HEAD-checks an arbitrary negative ETag and chooses Overwrite when it differs or is absent; multipart completion wrappers do not repair that ordinary entry point. ch20:t01 owns a bounded eight-attempt HEAD→UpdateVersion(actual ETag and version) or absent→Create loop, re-evaluating only native CAS failures and preserving the original logical predicate, metadata and actual successful receipt. Caller-owned ordinary Bytes may be cloned as views; no producer replay or full-stream buffer is introduced. Local stays behind the physical-parent guard, GCS negative updates carry generation, and positive GCS if_match remains ch14:t01. [^sdk]
+
+The owned OCI ordinary backend currently ignores PutOptions. OCI PutObject supports matching/create conditions and caller content type/metadata; ch20:t01 repairs its real If-Match/If-None-Match:* request behavior and opc-meta- headers before the shared loop relies on its Update/Create primitive. Native acceptance requires these ordinary barriers as well as multipart completion races; support is never inferred from a trait method that ignores its options. [^oci-put]
+
+Pinned Azure `put_block` generates a raw random text identifier, base64-encodes it in the blockid query, and returns raw `PartId.content_id`. The SDK block-list serializer base64-encodes that raw value into `<Uncommitted>` elements. ch13 retains raw identifiers internally and encodes once only at its final wire boundary; decode-once HTTP assertions compare exact ordered SDK IDs and detect omitted or double encoding. [^sdk]
+
 ## Incremental Part Framing
 
 Pinned SDK S3MultiPartUpload::put_part and GCSMultipartUpload::put_part forward each supplied PutPayload as one service part. Current MultipartUploadSession forwards every non-OCI producer chunk unchanged. Arbitrary 64 KiB chunks therefore violate the minimum 5 MiB non-final part requirement at completion. A bounded rolling frame must accumulate only the current part and await flush before consuming more producer data. The SDK WriteMultipart helper supplies buffering but finish consumes ownership; adopting it without preserving abort on failure would recreate the cleanup defect. [^s3-limits] [^gcs-limits]
@@ -96,7 +109,7 @@ Pinned SDK S3MultiPartUpload::put_part and GCSMultipartUpload::put_part forward 
 
 The implementation is split into shared transport/lifecycle, platform-local primitives, and provider publication chapters. No Python/global process lock, whole-payload Vec/list/mmap spool, single-PUT size-cap fallback, SDK fork or handcrafted cloud auth is accepted. Literal percent key identity, actual final ETag/version, metadata, competing writes,200-with-error bodies, token continuation and cancellation cleanup are observable test requirements. Native success is separate from planning validation and from final whole-flow gates.
 
-[^sdk]: Local installed `object_store-0.13.2/src/{client/http/connection.rs,client/http/body.rs,client/mod.rs,multipart.rs,aws/mod.rs,aws/builder.rs,aws/credential.rs,azure/mod.rs,azure/builder.rs,azure/credential.rs,gcp/mod.rs,gcp/client.rs,lib.rs}` and `src/rs/vertebra-storage/src/{store.rs,lib.rs,oci.rs}`.
+[^sdk]: Local installed `object_store-0.13.2/src/{client/http/connection.rs,client/http/body.rs,client/mod.rs,multipart.rs,aws/mod.rs,aws/builder.rs,aws/credential.rs,azure/mod.rs,azure/builder.rs,azure/credential.rs,azure/client.rs,gcp/mod.rs,gcp/client.rs,lib.rs}` and `src/rs/vertebra-storage/src/{store.rs,lib.rs,oci.rs}`.
 [^s3]: [AWS CompleteMultipartUpload](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html).
 [^s3-copy]: [AWS UploadPartCopy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UploadPartCopy.html).
 [^azure]: [Azure Put Block List](https://learn.microsoft.com/en-us/rest/api/storageservices/put-block-list).
@@ -107,3 +120,5 @@ The implementation is split into shared transport/lifecycle, platform-local prim
 
 [^s3-limits]: [AWS multipart upload limits](https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html) — minimum 5 MiB for each non-final part.
 [^gcs-limits]: [GCS XML API quotas and limits](https://cloud.google.com/storage/quotas#requests) — minimum 5 MiB non-final parts enforced on completion.
+
+[^oci-put]: [OCI ObjectStorageClient put_object](https://docs.oracle.com/en-us/iaas/tools/python/latest/api/object_storage/client/oci.object_storage.ObjectStorageClient.html#oci.object_storage.ObjectStorageClient.put_object) — ordinary conditional headers, Content-Type and opc_meta inputs.

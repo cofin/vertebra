@@ -9,6 +9,7 @@ state: pending
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
+- storage-completeness:ch20:t01
 - storage-completeness:ch10:t02
 - storage-completeness:ch10:t03
 - storage-completeness:ch08:t03
@@ -29,7 +30,7 @@ tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 - src/rs/vertebra-storage/src/s3_publication.rs
 estimated_loc: 220
-plan_revision: 5
+plan_revision: 6
 plan_commit: null
 state_revision: 0
 claimed_by: null

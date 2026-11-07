@@ -1,11 +1,13 @@
 # Chapters: Feature-Complete Storage
 
+20 chapters and 56 tasks retain the complete storage scope.
+
 * [ch01 — Chapter 01: Native Rust Storage Engine, GCP Auth Unification, and Fail-Closed Facade](ch01-native-engine-and-auth/spec.md) — [active] Add zero-copy streaming reads, incremental multipart uploads, conditional puts, paginated listing, rename, OCI PAR presigning, unified GCP token caches, and fail-closed construction across vertebra-storage and vertebra.storage.
 * [ch02 — Chapter 02: SQLSpec, Advanced Alchemy, and Django Storage Contracts](ch02-orm-and-sql-storage-contracts/spec.md) — [active] Implement fail-closed SQLSpec ObjectStoreProtocol, Advanced Alchemy StorageBackend registration without monkeypatching, and @deconstructible Django Storage subclass over SyncObjectStore and AsyncObjectStore.
 * [ch03 — Chapter 03: HTTP Range Streaming and Litestar Store/Static Integration](ch03-litestar-and-range-streaming/spec.md) — [planned] Implement RFC 9110 single-range 206/416 StreamingStorageResponse and Litestar AsyncObjectStore Store plus static-files filesystem adapter.
 * [ch04 — Chapter 04: Strict Arrow SHM Allocation, Parquet Streaming, and OKF Sync](ch04-arrow-shm-and-docs/spec.md) — [planned] Enforce fail-loud named ShmRegion allocation, eliminate JSON pseudo-Arrow fallback in ArrowCursor.from_rows, wire streaming Arrow/Parquet ObjectStore helpers, and synchronize storage documentation and OKF chapters.
 * [ch05 — Raw Object Identity and Typed Conditional Conflicts](ch05-key-identity-and-preconditions/spec.md) — [completed] Raw key identity, adapter qualification and lazy typed conflicts are verified; correctness and fresh quality reviews report no findings through `0bce1806`. Native publication acceptance remains separate.
-* [ch06 — Django Collision Length and SQLSpec Signing Errors](ch06-adapter-correctness/spec.md) — [active] Per-call filename limits, consumed-source recovery and configured signing errors are implemented and documented; correctness and fresh quality reviews remain pending. Native multipart publication acceptance remains separate.
+* [ch06 — Django Collision Length and SQLSpec Signing Errors](ch06-adapter-correctness/spec.md) — [completed] Per-call filename limits, consumed-source recovery and configured signing errors are verified and reviewed through `115ab8f5`. Native multipart publication acceptance remains separate.
 * [ch07 — Withdraw First-Class R2 Python APIs](ch07-remove-r2-python/spec.md) — [active] Withdraw First-Class R2 Python APIs
 * [ch08 — Move OCI Chunk Ownership and Remove Native R2](ch08-remove-r2-native/spec.md) — [active] Move OCI Chunk Ownership and Remove Native R2
 * [ch09 — Synchronize Supported Providers and Native Guarantees](ch09-r2-docs-and-knowledge/spec.md) — [planned] Synchronize Supported Providers and Native Guarantees
@@ -19,3 +21,5 @@
 * [ch17 — Bounded Arrow and Parquet Encoding and Sync Storage](ch17-arrow-sync-codecs/spec.md) — [planned] Bounded Arrow and Parquet Encoding and Sync Storage
 * [ch18 — Bounded PyArrow Worker and Native Async I/O Bridge](ch18-arrow-async-bridge/spec.md) — [planned] Bounded PyArrow Worker and Native Async I/O Bridge
 * [ch19 — SQLSpec Lazy Arrow and Parquet Integration](ch19-sqlspec-arrow-streaming/spec.md) — [planned] SQLSpec Lazy Arrow and Parquet Integration
+
+* [ch20 — Ordinary Byte-Put Negative Predicate CAS](ch20-ordinary-negative-cas/spec.md) — [planned] Fence shared ordinary negative ETag puts through native Create/Update, preserve Local/GCS dispatch truth, and repair actual OCI ordinary conditions before native acceptance.

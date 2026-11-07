@@ -23,7 +23,7 @@ tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 - src/rs/vertebra-storage/src/azure_publication.rs
 estimated_loc: 200
-plan_revision: 5
+plan_revision: 6
 plan_commit: null
 state_revision: 0
 claimed_by: null
@@ -68,9 +68,11 @@ Commit Azure block list atomically with metadata and conditions. Execute one bou
 
 Grounded contract evidence: [^research].
 
-Complete using PutBlockList through CloudRequestClient with `<Latest>` block identifiers from SDK PartIds. Send If-None-Match:* for Create and If-Match expected for Match; NotMatch sends native If-None-Match:<forbidden ETag> directly; Azure supports that exact condition, so no HEAD/unconditional publication is needed. Carry content type, metadata attributes and tags in commit headers; preserve SDK-authorized conditional/header naming. Parse actual ETag/version response into PutResult. Map create conflict versus update precondition accurately; permission errors remain genuine errors. Abort/cancellation retain staged-block ownership according to provider cleanup capability and documented Azure uncommitted-block lifecycle, with no fabricated explicit delete of competing committed blob.
+Complete using PutBlockList through CloudRequestClient with `<Uncommitted>` identifiers base64-encoded exactly once from raw SDK PartIds. Send If-None-Match:* for Create and If-Match expected for Match; NotMatch sends native If-None-Match:<forbidden ETag> directly; Azure supports that exact condition, so no HEAD/unconditional publication is needed. Carry content type, metadata attributes and tags in commit headers; preserve SDK-authorized conditional/header naming. Parse actual ETag/version response into PutResult. Map create conflict versus update precondition accurately; permission errors remain genuine errors. Abort/cancellation retain staged-block ownership according to provider cleanup capability and documented Azure uncommitted-block lifecycle, with no fabricated explicit delete of competing committed blob.
 
 Use the concrete SDK credential injection and actual wrapper constructor owned by t01 for end-to-end acceptance. Fetch `store.credentials().get_credential()` immediately before every commit attempt, run public `AzureAuthorizer::new(credential.as_ref(), &account).authorize(&mut request)`, preserve `credential.sensitive_request()` semantics, then call the live `CloudRequestClient::execute`; no custom SAS URL/signature logic or cached Authorization. Real local HTTP responses distinguish genuine 403 permission denial from 412 conditional conflict. Error context includes only static provider/operation, status and safe recognized protocol code; never serialize the signed URI, SAS query, Authorization, credential Debug or untrusted echoed response body/source chain. The real SAS fixture's responder intentionally echoes the signed request target in its rejection body, so the test proves actual remote-error redaction rather than scanning an invented error string.
+
+SDK `PartId.content_id` is raw block-ID text, not base64. Preserve that exact raw value in the ordered PartId vector throughout t01/t02. At the block-list wire boundary only, encode each raw identifier once with `base64::engine::general_purpose::STANDARD` and write `<Uncommitted>encoded-id</Uncommitted>`, matching the pinned SDK's newly uploaded-block contract. SDK block PUT already base64-encodes this same raw value in its `blockid` query. Never pre-encode stored PartIds, place raw IDs into XML, or base64 an already encoded wire token. Canonical HTTP assertions decode each captured blockid query and each ordered XML element once and compare the exact original raw SDK identifiers; this catches omitted and double encoding without asserting the random ID-generation algorithm.
 
 Caller → seam → collaborator: public sync/async object-store or adapter operation → owned symbols above → existing native engine/provider or upstream framework contract. Preserve public APIs outside this task.
 
@@ -84,6 +86,7 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 
 | Case | Input | Observable result |
 | --- | --- | --- |
+| Raw block identifier boundary | SDK returns raw PartId.content_id; responder captures PUT blockid query and ordered commit XML | One base64 decode at each wire boundary equals the exact raw PartId value; internal IDs stay raw and no omitted/double encoding can publish mismatched blocks. |
 | Stale/block race | Competing write between upload blocks and PutBlockList | Conditional commit rejects; competitor data intact |
 | Metadata atomicity | Commit content_type and owner attribute/tag | Head sees exact caller metadata on winning object |
 | Returned result | Commit response ETag/version differ from earlier head | PutResult returns commit response values |

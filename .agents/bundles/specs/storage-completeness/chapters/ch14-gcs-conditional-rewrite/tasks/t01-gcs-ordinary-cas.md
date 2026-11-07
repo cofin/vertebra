@@ -9,6 +9,7 @@ state: pending
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
+- storage-completeness:ch20:t01
 - storage-completeness:ch10:t01
 - storage-completeness:ch13:t02
 read_set:
@@ -22,7 +23,7 @@ files:
 tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 140
-plan_revision: 4
+plan_revision: 6
 plan_commit: null
 state_revision: 0
 claimed_by: null
@@ -66,7 +67,7 @@ Resolve GCS ETag predicates into generation CAS for ordinary puts. Execute one b
 
 Grounded contract evidence: [^research].
 
-For GCS `put_opts(if_match=etag)`, HEAD once to obtain both opaque ETag and generation, verify expected ETag, then PutMode::Update(UpdateVersion { e_tag: Some(actual_etag), version: Some(generation) }). Never pass ETag in place of generation and never use HEAD→Overwrite. For arbitrary negative if_none_match: HEAD current object; if absent use Create; if present with matching forbidden ETag fail; otherwise Update with actual generation. Retry only CAS races, repeating predicate evaluation with new HEAD; bound retries explicitly (8 attempts, then precondition/retryable conflict) and never switch to unconditional mode. `if_none_match="*"` uses Create directly. Preserve content_type/attributes and actual PutResult from successful atomic put.
+For GCS `put_opts(if_match=etag)`, HEAD once to obtain both opaque ETag and generation, verify expected ETag, then PutMode::Update(UpdateVersion { e_tag: Some(actual_etag), version: Some(generation) }). Never pass ETag in place of generation and never use HEAD→Overwrite. Shared ordinary negative if_none_match resolution and eight-attempt CAS-only retries are implemented by prerequisite ch20:t01. This task owns GCS positive if_match translation and validates that the shared negative path passes the same HEAD generation and canonical XML ETag into UpdateVersion, never a second independent retry loop or Overwrite fallback. `if_none_match="*"` uses Create directly. Preserve content_type/attributes and actual PutResult from successful atomic put.
 
 Canonical public GCS ETags remain the existing SDK XML API ETag at head/list/put/multipart receipt boundaries. JSON resource ETags are a separate namespace and must never be compared with a caller XML ETag. Evaluate caller predicates against SDK XML HEAD metadata and use that same snapshot generation for destination fencing. After successful JSON rewrite, parse the returned destination generation, then obtain its exact XML receipt through SDK `get_opts(path, GetOptions { head: true, version: Some(destination_generation), ..Default::default() })`; the SDK emits the generation query. Return that generation-pinned metadata ETag/version, never an unfenced current HEAD or the JSON resource ETag. If that generation cannot be retrieved, report an explicit provider/indeterminate receipt failure and retain cleanup ownership; never substitute a successor token. A competing writer immediately after rewrite must not alter the returned successful publication identity.
 

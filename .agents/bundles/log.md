@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-07] flow-review | Closed adapter repair Chapter 06
+
+- Correctness and fresh quality review approve `8d073a38..115ab8f5`; the DOC-NEW cross-chapter roadmap finding is resolved and independently reverified at `bdc7799a`. Review validation includes 122 combined tests, Ruff, Mypy, bundles/privacy and diff checks, all exit 0.
+- Chapter 06 is complete at reviewed `115ab8f5`. Its native-producer collision recovery and configured signing boundaries are verified; native atomic multipart publication remains a separate open repair and acceptance obligation.
+
 ## [2026-11-07] flow-docs | Synchronized adapter repairs before Chapter 06 review
 
 - Bound Django `cd7e5563` and SQLSpec `45b068e2` to current chapter/root/catalog state and object-storage knowledge. Django retains per-call filename limits, rewinds replayable consumed input and preserves non-replayable collision errors. SQLSpec checks signing capability and preserves exact native validation/provider failures and scalar/list GET/PUT behavior.

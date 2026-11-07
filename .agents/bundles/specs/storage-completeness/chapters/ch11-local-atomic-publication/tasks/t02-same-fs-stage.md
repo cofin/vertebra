@@ -4,7 +4,7 @@ id: storage-completeness:ch11:t02
 chapter_id: ch11-local-atomic-publication
 title: Manage SDK-private same-parent staging artifacts
 description: Manage SDK-private same-parent staging artifacts
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: characterization
@@ -22,7 +22,7 @@ tests:
 - src/rs/vertebra-storage/src/local_publication.rs
 estimated_loc: 210
 plan_revision: 5
-plan_commit: null
+plan_commit: bdc7799a
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -64,13 +64,13 @@ Manage SDK-private same-parent staging artifacts. Execute one bounded worksheet 
 
 ## Symbol & Signature Contracts
 
-The module remains test-only until t03. Implement the complete private staging/publication primitive API consumed by t03 without adding engine routing here: `async fn stage(&self, destination: &StorePath) -> Result<LocalStage, StorageError>`; `LocalStage` has `async fn write_chunk(&mut self, chunk: Bytes) -> Result<(), StorageError>` asynchronously appends only this chunk; `async fn publish(&self, stage: &mut LocalStage, destination: &StorePath, condition: &PublishCondition) -> Result<PutResult, StorageError>` obtains ordered parent guards, checks the predicate, atomically publishes and collects the exact SDK destination metadata under the guard. `async fn abort(&mut self) -> Result<(), StorageError>` is idempotent. The owning `LocalStage` retains file/path ownership across returned errors and cancellation; successful publication clears ownership only after its actual receipt is captured. Drop removes only its owned stage, never the persistent lockfile. Native file write/flush/metadata errors remain visible.
+The module remains test-only until t03. Implement the complete private staging/publication primitive API consumed by t03 without adding engine routing here: `async fn stage(&self, destination: &StorePath) -> Result<LocalStage, StorageError>`; `LocalStage` has `async fn write_chunk(&mut self, chunk: Bytes) -> Result<(), StorageError>` asynchronously appends only this chunk; `async fn publish(&self, stage: &mut LocalStage, destination: &StorePath, condition: &PublishCondition) -> Result<PutResult, StorageError>` obtains ordered parent guards, checks the predicate, atomically publishes and collects the exact SDK destination metadata under the guard. `async fn abort(&mut self) -> Result<(), StorageError>` is idempotent. The owning `LocalStage` retains file/path ownership across returned errors and cancellation; successful publication clears ownership only after its actual receipt is captured. Drop removes only its owned stage, never the persistent lockfile. Complete stage writes and flush outside the lock before publication; native file write/flush/metadata errors remain visible.
 
 Supply private `delete`, `rename` and `copy` mutation methods with StorePath operands and Result<(), StorageError>, retaining ordered guards through only their final mutation. Copy first opens a stable source snapshot and streams it into a same-parent destination stage outside publication locks, then publishes that stage with deduplicated source/destination parent guards. Ordinary puts use the same staging/publish primitives. Under a guard, Create uses native no-replace hard-link/create semantics; Match/NotMatch/Overwrite uses same-filesystem atomic rename only after evaluating actual current SDK metadata. Never fall back from unsupported LocalFileSystem PutMode::Update to an unchecked write. t03 wires these exact primitives into every public mutation and owns no changes to local_publication.rs.
 
 Grounded contract evidence: [^research].
 
-`LocalPublication::stage(destination)` creates an exclusive same-parent file named `.vertebra-stage-<uuid>#<counter>` whose base has no `#` and whose FIRST `#` suffix is nonempty ASCII digits. This exactly matches pinned LocalFileSystem's already unsupported/ignored filename grammar; it cannot collide with an SDK-legal object key and both list and list_with_delimiter hide it through every overlapping root. Never append a suffix to the caller's basename because legal `name#suffix` would make the SDK expose the resulting staging file. Use create_new and retry generated-name collision; retain file handle/path ownership. No OS-temp staging registry, global reserved prefix or new legal-key filtering.
+`LocalPublication::stage(destination)` creates an exclusive same-parent file named `.vertebra-stage-<uuid>#<counter>` whose base has no `#` and whose FIRST `#` suffix is nonempty ASCII digits. Use the declared exact-locked uuid dependency and `Uuid::new_v4()` for the unpredictable UUID component. This exactly matches pinned LocalFileSystem's already unsupported/ignored filename grammar; it cannot collide with an SDK-legal object key and both list and list_with_delimiter hide it through every overlapping root. Never append a suffix to the caller's basename because legal `name#suffix` would make the SDK expose the resulting staging file. Use create_new and retry generated-name collision; retain file handle/path ownership. No OS-temp staging registry, global reserved prefix or new legal-key filtering.
 
 Write the payload incrementally outside the persistent parent lock; same-parent staging guarantees same filesystem. Abort/cancellation/drop ownership removes only this session's actual created stage. Successful link/rename consumes or removes stage ownership. Persistent `.vtb-cas-lock#0` is never unlinked. Do not invent broad crash scavenging of similarly named files; any orphan after process death remains in the SDK's excluded keyspace and cleanup guarantees are bounded honestly. Keep normal SDK umask/access behavior. No mmap, whole-file readback, payload Vec or single-PUT size cap.
 
@@ -108,7 +108,7 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Notes & Discoveries
 
-The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+Revision 5 is independently approved at bdc7799a; production execution follows the declared task dependencies. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `src/rs/vertebra-storage/src/local_publication.rs` — Current repository source for this task.
 

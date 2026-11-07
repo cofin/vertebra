@@ -9,20 +9,23 @@ state: pending
 priority: P1
 verification_strategy: documentation_validation
 depends_on:
+- storage-completeness:ch09:t01
 - storage-completeness:ch16:t01
 read_set:
 - .agents/bundles/knowledge/domains/storage/object-storage.md
+- .agents/bundles/knowledge/domains/data/gcp-bigquery-and-spanner-drivers.md
 - src/py/tests/unit/tools/test_docs_tooling.py
 - src/rs/vertebra-storage/src/store.rs
-- src/rs/vertebra-storage/src/oci.rs
+- .agents/bundles/specs/storage-completeness/chapters/ch16-native-acceptance-and-reclosure/tasks/t01-native-contract-acceptance.md
 - src/py/vertebra/storage/_store.py
 files:
 - .agents/bundles/knowledge/domains/storage/object-storage.md
+- .agents/bundles/knowledge/domains/data/gcp-bigquery-and-spanner-drivers.md
 tests:
 - src/py/tests/unit/tools/test_docs_tooling.py
 estimated_loc: 180
-plan_revision: 4
-plan_commit: null
+plan_revision: 5
+plan_commit: bdc7799ab18b9a961dacf99f5eee9af46a557aa3
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -55,12 +58,13 @@ Record provider atomicity, key identity, cleanup and R2 withdrawal. Execute one 
 - `.agents/bundles/knowledge/domains/storage/object-storage.md` — owned implementation or canonical regression surface.
 - `src/py/tests/unit/tools/test_docs_tooling.py` — owned implementation or canonical regression surface.
 - `src/rs/vertebra-storage/src/store.rs` — collaborating contract.
-- `src/rs/vertebra-storage/src/oci.rs` — collaborating contract.
+- `.agents/bundles/knowledge/domains/data/gcp-bigquery-and-spanner-drivers.md` — remove first-class R2 from the shared staging capability declaration.
+- `.agents/bundles/specs/storage-completeness/chapters/ch16-native-acceptance-and-reclosure/tasks/t01-native-contract-acceptance.md` — completed public/native verification evidence for documented guarantees.
 - `src/py/vertebra/storage/_store.py` — collaborating contract.
 
 ## Symbol & Signature Contracts
 
-Rewrite storage knowledge source provenance and truth blocks around actual supported backends and OCI-owned uniform chunking. Remove r2.rs source/footnote/table entries, R2 signing and configuration claims. Document raw path identity, typed PreconditionError, SDK transport/refresh reuse, provider-specific conditional publication, local cooperating Vertebra process guarantee with uncooperative direct OS writers excluded, cancellation cleanup ownership, and evidence-backed supported platform behavior. No 5 TiB guarantee or universal local metadata guarantee is invented. Evidence is native/public tests, not plan assertions.
+Read the completed ch16:t01 acceptance receipt and its exact passing evidence before documenting guarantees. Rewrite storage knowledge source provenance and truth blocks around actual supported backends and OCI-owned uniform chunking. Remove first-class R2 from the data-driver chapter’s shared staging declaration while preserving every remaining target. Remove r2.rs source/footnote/table entries, R2 signing and configuration claims. Document raw path identity, typed PreconditionError, SDK transport/refresh reuse, provider-specific conditional publication, local cooperating Vertebra process guarantee with uncooperative direct OS writers excluded, cancellation cleanup ownership, and evidence-backed supported platform behavior. No 5 TiB guarantee or universal local metadata guarantee is invented. Evidence is native/public tests, not plan assertions.
 
 Caller → seam → collaborator: public sync/async object-store or adapter operation → owned symbols above → existing native engine/provider or upstream framework contract. Preserve public APIs outside this task.
 
@@ -79,12 +83,11 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 
 ## Verification
 
-Record the failing public regression before implementation and the passing result after. Execute each command below in this worktree; the storage target directory is reserved and shared SHM tests use the host lock.
+Validate the owned documentation against the exported API and completed native evidence. Record the documentation build and focused validation results; documentation-only edits do not require an artificial failing public-call regression. Use the verified native build checkpoint from the completed R2 removal tasks without rebuilding unchanged extensions.
 
-- `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" make dev`
 - `uv run --no-sync python -m mypy.stubtest vertebra._storage`
 - `uv run --no-sync ruff check src/py/tests/unit/tools/test_docs_tooling.py`
-- `uv run --no-sync pytest src/py/tests/unit/tools/test_docs_tooling.py -q`
+- `flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync pytest src/py/tests/unit/tools/test_docs_tooling.py -q`
 - `make review-check`
 - `make docs`
 
@@ -94,7 +97,7 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 - [ ] Every matrix row passes at its public seam with existing behavior preserved.
 - [ ] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
-- [ ] This knowledge file is the owned documentation manifest item; user guides stay with ch04:t03.
+- [ ] These two knowledge files are the owned documentation manifest items; user guides stay with ch04:t03.
 - [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries

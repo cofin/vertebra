@@ -10,7 +10,7 @@ planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
-plan_revision: 4
+plan_revision: 6
 plan_commit: null
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
@@ -51,11 +51,11 @@ Grounded contract evidence: [^research].
 
 ### R1: Validate provider races, raw identity, metadata and cleanup at native seams
 
-Run the complete native storage acceptance matrix after provider repair tasks. Add only missing public-seam regressions in canonical files; a source-text check or mocked ordinary put cannot substitute for multipart publication races. Real Memory and Local store behavior must run; S3/Azure/GCS/OCI HTTP capture fixtures must enforce actual completion predicates, metadata, multipart IDs, token/error responses and abort calls. Use deterministic barriers for races, independent processes for Local, cancellation barriers for cleanup, and return exact typed conflicts across PyO3. Rebuild native extension and prove stub parity, lazy imports and no first-class R2 APIs. Do not mark original ch01:t01 complete until this evidence and both independent reviews exist.
+Run the complete native storage acceptance matrix after provider repair tasks and ch20:t01. Ordinary negative-predicate byte puts and multipart publication are separate mandatory lanes, including the real S3/Azure forbidden-version barriers and actual OCI conditional headers. Add only missing public-seam regressions in canonical files; a source-text check or mocked ordinary put cannot substitute for multipart publication races. Real Memory and Local store behavior must run; S3/Azure/GCS/OCI HTTP capture fixtures must enforce actual completion predicates, metadata, multipart IDs, token/error responses and abort calls. Use deterministic barriers for races, independent processes for Local, cancellation barriers for cleanup, and return exact typed conflicts across PyO3. Rebuild native extension and prove stub parity, lazy imports and no first-class R2 APIs. Do not mark original ch01:t01 complete until this evidence and both independent reviews exist.
 
 ### R2: Reconcile original native and ORM task acceptance after repairs
 
-After ch16:t01 and ch06, run correctness review and then a fresh quality review of native repairs and original native chapter. Reconcile ch01:t01 to completed with repair acceptance commit/evidence, retain original baseline commit as provenance, and stamp ch01 last_reviewed_commit only at reviewed checkpoint. Then run complete canonical ORM/SQLSpec/Django suite and independent correctness plus fresh quality review before ch02 closes. Native-dependent original ch03/ch04 worksheets unblock only after these reviews; never erase preexisting implementation commit evidence or declare HTTP/Arrow complete merely because native tests pass. Root roadmap/catalog/state/checklist synchronization occurs atomically with review stamps. This coordination task does not depend on ch01 completed, avoiding a cycle.
+After ch16:t01, ch20:t01 and ch06, run correctness review and then a fresh quality review of native repairs and original native chapter. Reconcile ch01:t01 to completed with repair acceptance commit/evidence, retain original baseline commit as provenance, and stamp ch01 last_reviewed_commit only at reviewed checkpoint. Then run complete canonical ORM/SQLSpec/Django suite and independent correctness plus fresh quality review before ch02 closes. Native-dependent original ch03/ch04 worksheets unblock only after these reviews; never erase preexisting implementation commit evidence or declare HTTP/Arrow complete merely because native tests pass. Root roadmap/catalog/state/checklist synchronization occurs atomically with review stamps. This coordination task does not depend on ch01 completed, avoiding a cycle.
 
 Caller → seam → collaborator: public storage/framework calls → owned deep module boundary → native SDK, transport or upstream framework. Public signatures remain stable except the deliberate removal of first-class R2 and addition of typed PreconditionError.
 

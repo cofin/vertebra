@@ -4,7 +4,7 @@ id: storage-completeness:ch11:t03
 chapter_id: ch11-local-atomic-publication
 title: Guard every local mutation and publish with native atomic operations
 description: Guard every local mutation and publish with native atomic operations
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: regression_tdd
@@ -26,7 +26,7 @@ tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 240
 plan_revision: 5
-plan_commit: null
+plan_commit: bdc7799a
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -111,7 +111,7 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Notes & Discoveries
 
-The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+Revision 5 is independently approved at bdc7799a; production execution follows the declared task dependencies. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `src/rs/vertebra-storage/src/local_publication.rs` — Current repository source for this task.
 

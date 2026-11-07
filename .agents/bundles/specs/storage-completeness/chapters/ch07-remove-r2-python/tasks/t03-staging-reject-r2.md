@@ -5,7 +5,7 @@ chapter_id: ch07-remove-r2-python
 title: Reject removed R2 URIs before staging local-path resolution
 description: Reject removed R2 URIs before staging local-path resolution
 status: stable
-state: blocked
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -28,15 +28,62 @@ plan_commit: 69a77955
 state_revision: 0
 claimed_by: agent:r2-staging-withdrawal
 claimed_at: '2026-11-07T22:46:57.858525+00:00'
-blocked_reason: The expanded rooted-qualification and pre-query blueprint awaits independent readiness recheck.
-unblock_condition: Independent review approves the bounded revision 5 staging worksheet.
+blocked_reason: null
+unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-07T23:09:15.383841+00:00'
+last_verified_commit: 38757809
+verification_evidence: |
+  Signed source and canonical test checkpoint 38757809.
+  Initial R2 Red: uv run --no-sync flock /tmp/vertebra-flow-shm-tests.lock
+  pytest src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
+  src/py/tests/unit/extensions/test_data_storage_integrations.py -q -k staging
+  exits 1 (10 failed, 4 passed, 92 deselected). Real explicit Memory store and
+  SQLSpec validation/read/write cases expose accepted removed qualification.
+  Amended qualification Red: the same command exits 1 (30 failed, 15 passed,
+  92 deselected) with real native/backend mismatches and actual BigQuery HTTP
+  connections to /bigquery/v2/projects/unit/queries. Matching rooted aliases and
+  literal percent keys pass before mismatch assertions expose the bypass.
+  Removed explicit store Red: uv run --no-sync flock
+  /tmp/vertebra-flow-shm-tests.lock pytest
+  src/py/tests/unit/extensions/test_data_storage_integrations.py -q
+  -k 'bigquery_export and relative' exits 1 (2 failed, 81 deselected).
+  Fresh native: CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target"
+  PYO3_PYTHON="$PWD/.venv/bin/python3.12" UV_NO_SYNC=1 make dev exits 0,
+  rebuilding/installing all five CPython 3.12 extensions after OCI checkpoint
+  2e343bc3. The native build source checkpoint is bdc7799a.
+  Compatibility Red: uv run --no-sync flock /tmp/vertebra-flow-shm-tests.lock
+  pytest src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
+  src/py/tests/unit/extensions/test_data_storage_integrations.py -q
+  -k 'native_memory_namespace or native_file_authority or sqlspec_memory_authority'
+  exits 1 (4 failed, 1 passed, 139 deselected) against the initial qualification
+  guard. The identical focused command exits 0 (5 passed, 139 deselected) after
+  limiting authority checks to remote protocols or declared backend store_uri.
+  Both native variants preserve Memory logical namespaces and file authority
+  path mapping; SQLSpec's declared Memory authority still rejects mismatches.
+  Native Rust source is unchanged after the all-five-extension checkpoint.
+  Post-build Green: uv run --no-sync flock /tmp/vertebra-flow-shm-tests.lock
+  pytest src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
+  src/py/tests/unit/extensions/test_data_storage_integrations.py -q
+  exits 0 (139 passed, 5 existing optional-driver skips, 12 existing
+  Advanced Alchemy/SQLAlchemy deprecation warnings, 13.64s).
+  uv run --no-sync ruff check src/py/vertebra/db/_staging.py
+  src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
+  src/py/tests/unit/extensions/test_data_storage_integrations.py exits 0.
+  The same file set with uv run --no-sync ruff format --check exits 0.
+  uv run --no-sync mypy src/py/vertebra/db/_staging.py exits 0 (1 file).
+  git diff --check exits 0. Logs: /tmp/vertebra-ch07-t03-red.log,
+  /tmp/vertebra-ch07-t03-qualification-red.log,
+  /tmp/vertebra-ch07-t03-store-uri-red.log, /tmp/vertebra-ch07-t03-green.log,
+  /tmp/vertebra-ch07-t03-dev.log, /tmp/vertebra-ch07-t03-mypy.log,
+  /tmp/vertebra-ch07-t03-compat-red.log, /tmp/vertebra-ch07-t03-compat-green.log.
+  uv run --no-sync flock /tmp/vertebra-flow-shm-tests.lock python -m
+  mypy.stubtest vertebra._storage exits 0 (1 module); log:
+  /tmp/vertebra-ch07-t03-stubtest.log. All processes complete before handoff.
+  No platform limitation or hosted action applies.
 created_at: '2026-11-07T12:00:00Z'
 updated_at: '2026-11-07T12:00:00Z'
-commit: null
+commit: 38757809
 sources:
 - id: implementation
   resource: src/py/vertebra/db/_staging.py
@@ -81,7 +128,9 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 | Case | Input | Observable result |
 | --- | --- | --- |
 | Implicit rejected URI | resolve_sync_store/resolve_async_store(None,"r2://bucket/data.parquet") | ValueError; no r2: local path created |
+| Removed explicit store URI | BigQuery sync/async export with store="r2://unit" and relative destination "relative.ipc" | Unsupported-scheme ValueError before any HTTP connection/query. |
 | Explicit store rejected URI | Memory store plus r2://bucket/key passed through staging public export/read path | ValueError before any write; store unchanged |
+| Native nonremote qualification | Sync/Async native Memory store with memory://namespace/key; native Local store with file://localhost/key | Existing namespace/key and key resolution remains accepted; real read/write round-trips preserve exact keys and bytes. SQLSpec declared Memory authorities continue rejecting foreign qualification. |
 | Supported staging | file path and s3://bucket/key with configured store | Existing path resolution unchanged |
 | Mismatched explicit remote qualification | SQLSpec backend/native store configured for s3://unit, supplied s3://other/key or gs://unit/key through public staging validation/read/write sync and async | ValueError before upstream query/producer consumption or object mutation; original configured-store objects remain exact bytes. A matching s3://unit/key still round-trips. |
 
@@ -103,13 +152,15 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Acceptance Criteria
 
-- [ ] Every matrix row passes at its public seam with existing behavior preserved.
-- [ ] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
-- [ ] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
-- [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
+- [x] Every matrix row passes at its public seam with existing behavior preserved.
+- [x] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
+- [x] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
+- [x] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
 
-Revision 4 is independently approved by the fresh consolidated ch07/ch08 plan review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+Revision 5 is independently approved at bdc7799a against plan anchor 69a77955. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+
+Staging validates removed schemes in both destinations and explicit URI store configuration before upstream query execution. Explicit native/backend qualification checks compare protocol aliases and remote authority before dropping qualification; native Memory logical namespaces and native file path mapping retain their existing nonremote semantics, while declared SQLSpec authorities remain checked; matching SQLSpec URIs retain their raw root and key spelling. Real local HTTP responders prove both BigQuery export paths make zero connections on rejection. The exact rooted native keys remain scope/literal%2F and scope/literal%252F with distinct bytes and rows. No internal staging, storage, native client or export method is mocked. The coordinator owns the signed local commit and final task/checklist synchronization.
 
 [^implementation]: `src/py/vertebra/db/_staging.py` — Current repository source for this task.

@@ -4,7 +4,7 @@ id: storage-completeness:ch11:t01
 chapter_id: ch11-local-atomic-publication
 title: Add persistent OS locks per physical parent directory
 description: Add persistent OS locks per physical parent directory
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: characterization
@@ -26,7 +26,7 @@ tests:
 - src/rs/vertebra-storage/src/local_publication.rs
 estimated_loc: 200
 plan_revision: 5
-plan_commit: null
+plan_commit: bdc7799a
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -110,7 +110,7 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Notes & Discoveries
 
-The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+Revision 5 is independently approved at bdc7799a; production execution follows the declared task dependencies. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `src/rs/vertebra-storage/src/local_publication.rs` — Current repository source for this task.
 

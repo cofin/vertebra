@@ -24,8 +24,8 @@ files:
 tests:
 - src/py/tests/unit/tools/test_docs_tooling.py
 estimated_loc: 60
-plan_revision: 4
-plan_commit: null
+plan_revision: 5
+plan_commit: bdc7799ab18b9a961dacf99f5eee9af46a557aa3
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -81,12 +81,11 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 
 ## Verification
 
-Record the failing public regression before implementation and the passing result after. Execute each command below in this worktree; the storage target directory is reserved and shared SHM tests use the host lock.
+Validate the owned documentation against the exported API and completed native evidence. Record the documentation build and focused validation results; documentation-only edits do not require an artificial failing public-call regression. Use the verified native build checkpoint from the completed R2 removal tasks without rebuilding unchanged extensions.
 
-- `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" make dev`
 - `uv run --no-sync python -m mypy.stubtest vertebra._storage`
 - `uv run --no-sync ruff check src/py/tests/unit/tools/test_docs_tooling.py`
-- `uv run --no-sync pytest src/py/tests/unit/tools/test_docs_tooling.py -q`
+- `flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync pytest src/py/tests/unit/tools/test_docs_tooling.py -q`
 - `make review-check`
 - `make docs`
 

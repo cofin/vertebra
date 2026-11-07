@@ -29,7 +29,7 @@ tests:
 - src/py/tests/unit/extensions/test_data_storage_integrations.py
 - src/py/tests/unit/extensions/test_django_plugin.py
 estimated_loc: 60
-plan_revision: 4
+plan_revision: 6
 plan_commit: null
 state_revision: 0
 claimed_by: null

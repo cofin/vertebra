@@ -9,6 +9,7 @@ state: pending
 priority: P1
 verification_strategy: integration_acceptance
 depends_on:
+- storage-completeness:ch20:t01
 - storage-completeness:ch05:t03
 - storage-completeness:ch08:t03
 - storage-completeness:ch11:t04
@@ -29,7 +30,7 @@ tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 - src/py/tests/unit/storage/test_storage_store.py
 estimated_loc: 160
-plan_revision: 4
+plan_revision: 6
 plan_commit: null
 state_revision: 0
 claimed_by: null
@@ -75,7 +76,7 @@ Validate provider races, raw identity, metadata and cleanup at native seams. Exe
 
 Grounded contract evidence: [^research].
 
-Run the complete native storage acceptance matrix after provider repair tasks. Add only missing public-seam regressions in canonical files; a source-text check or mocked ordinary put cannot substitute for multipart publication races. Real Memory and Local store behavior must run; S3/Azure/GCS/OCI HTTP capture fixtures must enforce actual completion predicates, metadata, multipart IDs, token/error responses and abort calls. Use deterministic barriers for races, independent processes for Local, cancellation barriers for cleanup, and return exact typed conflicts across PyO3. Rebuild native extension and prove stub parity, lazy imports and no first-class R2 APIs. Do not mark original ch01:t01 complete until this evidence and both independent reviews exist.
+Run the complete native storage acceptance matrix after provider repair tasks and ch20:t01. Ordinary negative-predicate puts and multipart publication are distinct required acceptance lanes; neither substitutes for the other. Add only missing public-seam regressions in canonical files; a source-text check or mocked ordinary put cannot substitute for multipart publication races. Real Memory and Local store behavior must run; S3/Azure/GCS/OCI HTTP capture fixtures must enforce actual completion predicates, metadata, multipart IDs, token/error responses and abort calls. Use deterministic barriers for races, independent processes for Local, cancellation barriers for cleanup, and return exact typed conflicts across PyO3. Rebuild native extension and prove stub parity, lazy imports and no first-class R2 APIs. Do not mark original ch01:t01 complete until this evidence and both independent reviews exist.
 
 Caller → seam → collaborator: public sync/async object-store or adapter operation → owned symbols above → existing native engine/provider or upstream framework contract. Preserve public APIs outside this task.
 
@@ -89,6 +90,7 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 
 | Case | Input | Observable result |
 | --- | --- | --- |
+| Ordinary byte-put lane | Real HEAD-to-competing-forbidden-version barriers for S3/Azure/OCI, Memory CAS, Local guard and GCS generation | Native conditional write preserves the competitor with eight bounded CAS-only attempts; no negative-predicate path can issue unconditional Overwrite. |
 | Cross-provider predicate matrix | Create, matching/stale Match, negative ETag, absent object for memory/local/S3/Azure/GCS/OCI | Atomic winner preservation; typed conflict and actual result metadata |
 | Ownership matrix | Producer error, part failure, complete error, cancellation at publish | No unowned abort handle/stage and no partial target |
 | Raw metadata identity | Unicode/%/%2F/%252F foreign SDK/local keys plus listing prefixes | Exact list→get bytes and prefix identity |

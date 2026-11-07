@@ -9,6 +9,7 @@ state: pending
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
+- storage-completeness:ch20:t01
 - storage-completeness:ch10:t02
 - storage-completeness:ch10:t03
 - storage-completeness:ch12:t03
@@ -27,7 +28,7 @@ tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 - src/rs/vertebra-storage/src/azure_publication.rs
 estimated_loc: 180
-plan_revision: 5
+plan_revision: 6
 plan_commit: null
 state_revision: 0
 claimed_by: null
@@ -77,6 +78,8 @@ Add private AzurePublicationUpload with Arc<MicrosoftAzure>, resolved account/co
 
 The real wrapper constructor accepts `Arc<MicrosoftAzure>` rather than an erased injected store: `async AzurePublicationUpload::begin(store: Arc<MicrosoftAzure>, config: AzurePublicationConfig, path: StorePath, options: PutMultipartOptions, condition: PublishCondition) -> Result<Self, ObjectStoreError>`, with private `AzurePublicationConfig { account: String, container: String, endpoint: String, client_options: ClientOptions }`. Production dispatch and inline wrapper tests use the same constructor. Build test SDK stores via `MicrosoftAzureBuilder::with_account("unit").with_container_name("assets").with_endpoint(local_url).with_allow_http(true).with_credentials(provider).build()`. For SAS use `Arc::new(StaticCredentialProvider::new(AzureCredential::SASToken(vec![("sig".into(), "test-only-signature".into())])))`; bearer uses `AzureCredential::BearerToken("test-only-token".into())`. For refresh, the external `CredentialProvider<Credential = AzureCredential>` collaborator returns distinct credentials on successive lookups. No public Python config field, engine test hook or compatibility API is added. The real SDK block requests reach a local responder and preserve endpoint/client options; ch13:t02 uses this same concrete configuration for conditional commit and error-redaction acceptance.
 
+SDK `PartId.content_id` is raw block-ID text, not base64. Preserve that exact raw value in the ordered PartId vector throughout t01/t02. At the block-list wire boundary only, encode each raw identifier once with `base64::engine::general_purpose::STANDARD` and write `<Uncommitted>encoded-id</Uncommitted>`, matching the pinned SDK's newly uploaded-block contract. SDK block PUT already base64-encodes this same raw value in its `blockid` query. Never pre-encode stored PartIds, place raw IDs into XML, or base64 an already encoded wire token. Canonical HTTP assertions decode each captured blockid query and each ordered XML element once and compare the exact original raw SDK identifiers; this catches omitted and double encoding without asserting the random ID-generation algorithm.
+
 Caller → seam → collaborator: public sync/async object-store or adapter operation → owned symbols above → existing native engine/provider or upstream framework contract. Preserve public APIs outside this task.
 
 ## Edge Cases & Error Semantics
@@ -89,6 +92,7 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 
 | Case | Input | Observable result |
 | --- | --- | --- |
+| Raw block identifier boundary | SDK returns raw PartId.content_id; responder captures PUT blockid query and ordered commit XML | One base64 decode at each wire boundary equals the exact raw PartId value; internal IDs stay raw and no omitted/double encoding can publish mismatched blocks. |
 | SDK block identity | Upload irregular input chunks using SDK put_part | Ordered captured PartId identifiers are exactly those returned by SDK |
 | Credential forms | Use access-key and SAS/bearer fixture providers | Public AzureAuthorizer handles each; endpoint and HTTP options retained |
 | Upload failure | Block PUT fails before commit | Abort/cleanup no target replacement |

@@ -10,7 +10,7 @@ planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
-plan_revision: 5
+plan_revision: 6
 plan_commit: null
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
@@ -55,9 +55,11 @@ Add private AzurePublicationUpload with Arc<MicrosoftAzure>, resolved account/co
 
 The real wrapper constructor accepts `Arc<MicrosoftAzure>` rather than an erased injected store: `async AzurePublicationUpload::begin(store: Arc<MicrosoftAzure>, config: AzurePublicationConfig, path: StorePath, options: PutMultipartOptions, condition: PublishCondition) -> Result<Self, ObjectStoreError>`, with private `AzurePublicationConfig { account: String, container: String, endpoint: String, client_options: ClientOptions }`. Production dispatch and inline wrapper tests use the same constructor. Build test SDK stores via `MicrosoftAzureBuilder::with_account("unit").with_container_name("assets").with_endpoint(local_url).with_allow_http(true).with_credentials(provider).build()`. For SAS use `Arc::new(StaticCredentialProvider::new(AzureCredential::SASToken(vec![("sig".into(), "test-only-signature".into())])))`; bearer uses `AzureCredential::BearerToken("test-only-token".into())`. For refresh, the external `CredentialProvider<Credential = AzureCredential>` collaborator returns distinct credentials on successive lookups. No public Python config field, engine test hook or compatibility API is added. The real SDK block requests reach a local responder and preserve endpoint/client options; ch13:t02 uses this same concrete configuration for conditional commit and error-redaction acceptance.
 
+SDK `PartId.content_id` is raw block-ID text, not base64. Preserve that exact raw value in the ordered PartId vector throughout t01/t02. At the block-list wire boundary only, encode each raw identifier once with `base64::engine::general_purpose::STANDARD` and write `<Uncommitted>encoded-id</Uncommitted>`, matching the pinned SDK's newly uploaded-block contract. SDK block PUT already base64-encodes this same raw value in its `blockid` query. Never pre-encode stored PartIds, place raw IDs into XML, or base64 an already encoded wire token. Canonical HTTP assertions decode each captured blockid query and each ordered XML element once and compare the exact original raw SDK identifiers; this catches omitted and double encoding without asserting the random ID-generation algorithm.
+
 ### R2: Commit Azure block list atomically with metadata and conditions
 
-Complete using PutBlockList through CloudRequestClient with `<Latest>` block identifiers from SDK PartIds. Send If-None-Match:* for Create and If-Match expected for Match; NotMatch sends native If-None-Match:<forbidden ETag> directly; Azure supports that exact condition, so no HEAD/unconditional publication is needed. Carry content type, metadata attributes and tags in commit headers; preserve SDK-authorized conditional/header naming. Parse actual ETag/version response into PutResult. Map create conflict versus update precondition accurately; permission errors remain genuine errors. Abort/cancellation retain staged-block ownership according to provider cleanup capability and documented Azure uncommitted-block lifecycle, with no fabricated explicit delete of competing committed blob.
+Complete using PutBlockList through CloudRequestClient with `<Uncommitted>` identifiers base64-encoded exactly once from raw SDK PartIds. Send If-None-Match:* for Create and If-Match expected for Match; NotMatch sends native If-None-Match:<forbidden ETag> directly; Azure supports that exact condition, so no HEAD/unconditional publication is needed. Carry content type, metadata attributes and tags in commit headers; preserve SDK-authorized conditional/header naming. Parse actual ETag/version response into PutResult. Map create conflict versus update precondition accurately; permission errors remain genuine errors. Abort/cancellation retain staged-block ownership according to provider cleanup capability and documented Azure uncommitted-block lifecycle, with no fabricated explicit delete of competing committed blob.
 
 Use the concrete SDK credential injection and actual wrapper constructor owned by t01 for end-to-end acceptance. Fetch `store.credentials().get_credential()` immediately before every commit attempt, run public `AzureAuthorizer::new(credential.as_ref(), &account).authorize(&mut request)`, preserve `credential.sensitive_request()` semantics, then call the live `CloudRequestClient::execute`; no custom SAS URL/signature logic or cached Authorization. Real local HTTP responses distinguish genuine 403 permission denial from 412 conditional conflict. Error context includes only static provider/operation, status and safe recognized protocol code; never serialize the signed URI, SAS query, Authorization, credential Debug or untrusted echoed response body/source chain. The real SAS fixture's responder intentionally echoes the signed request target in its rejection body, so the test proves actual remote-error redaction rather than scanning an invented error string.
 
@@ -94,7 +96,7 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Baseline: `5fe477fa`; implementation is pending and cold plan review is required.
+- Shared ordinary negative-CAS prerequisite ch20:t01 is explicit; this provider frontier remains draft pending independent cold review of the complete ownership map.
 - Remaining: all 2 tasks above; dependent tasks remain ordered by depends_on.
 - Documentation: `[0/1 files documented]`, owned by the explicit consolidation tasks.
 - Reclosure of ch01 and downstream acceptance waits for native repair gates; this chapter never depends on that reclosure.

@@ -28,20 +28,21 @@ chapters:
 - ch17-arrow-sync-codecs
 - ch18-arrow-async-bridge
 - ch19-sqlspec-arrow-streaming
-current_chapter: ch07-remove-r2-python
-current_task: storage-completeness:ch07:t03
+- ch20-ordinary-negative-cas
+current_chapter: ch08-remove-r2-native
+current_task: storage-completeness:ch08:t02
 parent_prd: native-data-platform
 research:
 - ../native-data-platform/research/gap-analysis_20261103.md
 - ../integration-remediation/research/audit-findings_20261103.md
 - research/conditional-publication_20261107.md
 - research/arrow-async-bridge_20261107.md
-plan_revision: 5
+plan_revision: 6
 plan_commit: 5fe477fa4f6e08bab9278dba3906e7c556ceb3a4
 state_revision: 7
 last_verified_checkpoint: 5fe477fa
-last_reviewed_chapter: ch05-key-identity-and-preconditions
-last_reviewed_commit: 0bce1806
+last_reviewed_chapter: ch06-adapter-correctness
+last_reviewed_commit: 115ab8f5
 created_at: '2026-11-03T04:05:00Z'
 updated_at: '2026-11-07T22:33:17Z'
 generated:
@@ -141,7 +142,7 @@ Anchored at `HEAD @ cdb978d3` above `main @ 077a3fe9` (incorporating `db-layout-
 - **R7 (Litestar Store, Static Adapter, & HTTP Range Streaming)**: Implement RFC 9110 byte-range parsing (`200 OK`, `206 Partial Content`, `416 Range Not Satisfiable`) and non-blocking `to_fastpath_tuple` in `vertebra.storage._streaming.StreamingStorageResponse`, plus `ObjectStoreLitestarStore` (`litestar.stores.base.Store`) and `ObjectStoreFileSystemAdapter` in `vertebra.extensions.litestar.store`.
 - **R8 (Strict Arrow SHM & Streaming Parquet/Arrow Storage)**: Make `allocate_shm_region` return `Err(ArrowShmError)` when `ShmRegion::create_named` fails, ensure `ArrowCursor.from_rows` always produces valid Arrow IPC streams (never JSON bytes), and wire streaming `write_arrow`, `read_arrow`, `write_parquet`, `read_parquet`, and `ObjectStoreBackend._iter_arrow_async`.
 
-- **R9 (Native Publication Repair)**: Preserve raw key identity, typed CAS errors, real Memory Create/Update, physical-target Local cross-process locking across all Vertebra mutations, metadata-bearing S3 conditional CompleteMultipartUpload, Azure conditional PutBlockList, GCS pinned-source generation rewrite and ordinary generation CAS, OCI conditional commit and 8 MiB/10000-part limits, actual final ETag/version and abort/cancellation ownership. Retain concrete SDK handles and configured transport/credential refresh without SDK forks or custom auth.
+- **R9 (Native Publication Repair)**: Ordinary opaque negative-ETag byte puts use an actual native Create/Update fence with at most eight CAS-only attempts; shared ownership is ch20:t01 and includes actual OCI ordinary PutOptions support.  Preserve raw key identity, typed CAS errors, real Memory Create/Update, physical-target Local cross-process locking across all Vertebra mutations, metadata-bearing S3 conditional CompleteMultipartUpload, Azure conditional PutBlockList, GCS pinned-source generation rewrite and ordinary generation CAS, OCI conditional commit and 8 MiB/10000-part limits, actual final ETag/version and abort/cancellation ownership. Retain concrete SDK handles and configured transport/credential refresh without SDK forks or custom auth.
 - **R10 (First-Class R2 Withdrawal)**: Remove public R2Config/from_r2, r2:// scheme handling, native backend/module/helper/stub, framework classifiers, staging recognition, fixtures/tests and supported-provider docs/product/knowledge claims. Unsupported r2:// fails explicitly and never resolves as local disk. Generic S3 custom endpoints remain supported without hostname blacklist, alias or shim.
 - **R11 (Adapter Correctness Repair)**: Django collision retries retain per-call max_length and rewind replayable content; non-replayable input preserves the collision error. SQLSpec signing maps unsupported capability to NotImplementedError while configured validation and provider failures propagate. These adapter contracts do not establish native atomic multipart publication.
 
@@ -169,7 +170,8 @@ flowchart LR
 - **Arrow/SHM & Docs Boundary (`ch04`)**: Hardens `vertebra_db::arrow_shm::allocate_shm_region` and `ArrowCursor.from_rows`, wires `pyarrow.parquet` / `pyarrow.ipc` batch streaming over `SyncReadableFile` / `AsyncReadableFile` and `put_stream`, and updates docs + OKF chapters.
 
 - **Native publication boundary**: ObjectStoreEngine keeps Arc<dyn ObjectStore> plus private PublicationBackend concrete Arc/resolved configuration. Private conditional.rs/cloud_request.rs consume public SDK HttpConnector/HttpClient/HttpRequest and authorizers. ch10:t02 implements and verifies the real external-request boundary in a test-only module; ch12:t01 removes its exact lib.rs test gate when the first S3 caller lands and verifies non-test compilation plus all-target Clippy. Provider-level endpoint/refresh/SAS-redaction acceptance belongs to ch12:t01 and ch13:t01–t02. No unused provider helper, broad dead-code allowance or public injection API is introduced. Low-level MultipartStore IDs/PartIds remain SDK-owned transport artifacts. Generic copy-create cannot replace update publication or final PutResult.
-- **Provider predicates**: S3 metadata-bearing initiation plus conditional completion parses Error XML even on 200;409 returns honest typed conflict/abort with no hidden replay. Azure commits SDK block IDs with attributes/tags and conditions. GCS stages MPU then rewrite pins source generation and destination CAS across rewriteTokens, returning destination generation with its generation-pinned SDK XML ETag receipt. OCI uses existing signed transport and native conditional commit. Arbitrary negative ETags resolve HEAD then Create/Update CAS with bounded re-evaluation; never HEAD→Overwrite.
+- **Ordinary negative predicates**: ch20:t01 owns ObjectStoreEngine::put_opts NotMatch for caller-owned Bytes: HEAD and reject forbidden equality, otherwise UpdateVersion(actual ETag and version), or Create on absence; at most eight CAS-only retries. Local routes through its physical-parent guard, GCS carries generation, and OCI ordinary PUT honors actual conditional headers and metadata. No negative predicate may turn into Overwrite. ch14:t01 retains separate GCS positive if_match repair; ch16 acceptance requires both ordinary and multipart lanes.
+- **Provider predicates**: S3 metadata-bearing initiation plus conditional completion parses Error XML even on 200;409 returns honest typed conflict/abort with no hidden replay. Azure retains raw SDK PartId.content_id and base64-encodes once into <Uncommitted> block-list wire entries, with attributes/tags and conditions. GCS stages MPU then rewrite pins source generation and destination CAS across rewriteTokens, returning destination generation with its generation-pinned SDK XML ETag receipt. OCI uses existing signed transport and native conditional commit. Arbitrary negative ETags resolve HEAD then Create/Update CAS with bounded re-evaluation; never HEAD→Overwrite.
 - **Local concurrency**: Lock physical parent directories via persistent SDK-illegal .vtb-cas-lock#0 across independently configured overlapping roots and independent processes, acquire deduplicated two-directory locks in physical-ID order, and cover put/delete/copy/rename plus multipart publication. Native platform behavior and private artifact placement are explicit acceptance obligations; direct uncooperative OS writers are excluded.
 
 ### 2.3 Edge-Case, Failure-Mode & Invariant Matrix
@@ -233,10 +235,11 @@ Progress: `[0/9 files documented]` for final repair/HTTP/Arrow acceptance. Exist
 | --- | --- | --- | --- |
 | R1, R9 raw identity and conflicts | ch05:t01–t03 | regression_tdd | Native engine tests, facade/adapter tests and PyO3 mapping units. |
 | R4/R6, R11 adapter repairs | ch06:t01–t02 | regression_tdd | Django consumed-source producer collisions using native create-only puts; SQLSpec native HMAC expiry, local IAM HTTP failure and scalar/list GET/PUT signing. |
-| R10 R2 withdrawal | ch07:t01–t03, ch08:t01–t03, ch09:t01–t03 | regression_tdd/documentation_validation | Public config/classifier/staging/native parity tests and docs gates. |
+| R10 R2 withdrawal | ch07:t01–t03, ch08:t01–t03, ch09:t01–t04 | regression_tdd/documentation_validation | Public config/classifier/staging/native parity tests and docs gates. |
 | R1/R9 boundary and ownership | ch10:t01–t04 | regression_tdd / behavior_tdd | Real SDK/network request-boundary fixtures, test-only module staging, and complete-error/cancellation abort tests; provider activation/refresh/redaction is accepted by ch12:t01/ch13:t01–t02. |
 | R1/R9 Local atomicity | ch11:t01–t04 | integration_acceptance | Independent-process overlapping-root lock/publication/list regressions. |
 | R1/R9 S3/Azure/GCS/OCI | ch12:t01–t04, ch13:t01–t02, ch14:t01–t03, ch15:t01–t02 | regression_tdd | Provider HTTP completion predicates, metadata/results,409/200 Error, rewrite tokens, limits and cleanup. |
+| R1/R9 ordinary negative CAS | ch20:t01 | regression_tdd | Actual S3/Azure HEAD-to-forbidden-version HTTP barriers, bounded native Create/Update retries, Local OS guards, GCS generation and OCI real ordinary conditional headers. |
 | Original ch01/ch02 reclosure | ch16:t01–t02 | integration_acceptance | Complete native matrix, adapter suite, correctness review then fresh quality review. |
 | R8 bounded codecs and sync facade | ch17:t01–t02 | behavior_tdd | Actual IPC dictionaries, Parquet rowgroups/projection, lazy producer and reader ownership. |
 | R8 native async I/O bridge | ch18:t01–t03 | behavior_tdd | Owning-loop barriers, bounded cache/jobs, backpressure, cancellation/cleanup and exact decoded values. |
@@ -249,7 +252,7 @@ Progress: `[0/9 files documented]` for final repair/HTTP/Arrow acceptance. Exist
 - [ ] ch03-litestar-and-range-streaming — Chapter 03: HTTP Range Streaming and Litestar Store/Static Integration (chapters/ch03-litestar-and-range-streaming/spec.md)
 - [ ] ch04-arrow-shm-and-docs — Chapter 04: Strict Arrow SHM Allocation, Parquet Streaming, and OKF Sync (chapters/ch04-arrow-shm-and-docs/spec.md)
 - [x] [0bce1806] ch05-key-identity-and-preconditions — Raw Object Identity and Typed Conditional Conflicts (chapters/ch05-key-identity-and-preconditions/spec.md)
-- [~] ch06-adapter-correctness — Django Collision Length and SQLSpec Signing Errors (chapters/ch06-adapter-correctness/spec.md)
+- [x] [115ab8f5] ch06-adapter-correctness — Django Collision Length and SQLSpec Signing Errors (chapters/ch06-adapter-correctness/spec.md)
 - [~] ch07-remove-r2-python — Withdraw First-Class R2 Python APIs (chapters/ch07-remove-r2-python/spec.md)
 - [~] ch08-remove-r2-native — Move OCI Chunk Ownership and Remove Native R2 (chapters/ch08-remove-r2-native/spec.md)
 - [ ] ch09-r2-docs-and-knowledge — Synchronize Supported Providers and Native Guarantees (chapters/ch09-r2-docs-and-knowledge/spec.md)
@@ -263,6 +266,7 @@ Progress: `[0/9 files documented]` for final repair/HTTP/Arrow acceptance. Exist
 - [ ] ch17-arrow-sync-codecs — Bounded Arrow and Parquet Encoding and Sync Storage (chapters/ch17-arrow-sync-codecs/spec.md)
 - [ ] ch18-arrow-async-bridge — Bounded PyArrow Worker and Native Async I/O Bridge (chapters/ch18-arrow-async-bridge/spec.md)
 - [ ] ch19-sqlspec-arrow-streaming — SQLSpec Lazy Arrow and Parquet Integration (chapters/ch19-sqlspec-arrow-streaming/spec.md)
+- [ ] ch20-ordinary-negative-cas — Ordinary Byte-Put Negative Predicate CAS (chapters/ch20-ordinary-negative-cas/spec.md)
 
 **Flow Recovery Checkpoint:** `/flow:implement storage-completeness` follows the current task pointer and approved ready worksheet. Repair tasks use baseline artifacts without requiring reopened ch01 completion. Native acceptance and reviews reclose ch01, then ch02/HTTP and Arrow acceptance proceeds. The final gate is `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock make lint-all rs-test py-test ts-test docs`; it precedes finish/archive and protects shared SHM from concurrent flow suites.
 
@@ -270,12 +274,13 @@ Progress: `[0/9 files documented]` for final repair/HTTP/Arrow acceptance. Exist
 
 - Verified functional source baseline: `5fe477fa`; revision 4 has approved key/error and adapter-repair frontiers. Additional bounded repair chapters retain their own independent plan-review requirements.
 - ch05 is completed and reviewed through `0bce1806`: all three raw-key, public-qualification and typed-conflict tasks are committed and verified, knowledge is synchronized, and correctness plus fresh quality reviews report no findings. All five native extensions are rebuilt with these contracts; Local and cloud atomic publication remains pending.
-- ch06 adapter tasks are completed at signed `cd7e5563` and `45b068e2`; knowledge is synchronized and the combined current-source storage/Django/data integration checkpoint passes 88 tests. Correctness and fresh quality reviews remain pending. Consumed-source recovery tests report native create-only conflicts from the producer; native multipart-completion acceptance remains in its repair chapters.
+- ch06 adapter tasks are completed at signed `cd7e5563` and `45b068e2`; knowledge is synchronized and the combined storage/Django/data integration checkpoint passes 88 tests. Correctness and fresh quality reviews approve `115ab8f5`, with the metadata correction independently reverified at `bdc7799a`. Consumed-source recovery tests report native create-only conflicts from the producer; native multipart-completion acceptance remains in its repair chapters.
 - Original ch01:t01 is blocked; chapter review stamp is clear. Repair tasks use its committed functional artifacts directly, avoiding a dependency cycle.
 - ch02 original commits remain recorded and correctness approval is absent. ch06 repairs and native acceptance precede fresh correctness and quality review.
 - Native-dependent original ch03/ch04:t02 are blocked with explicit unblock conditions. HTTP coordinator owns ch03 detail and its integration evidence.
-- Ch07 classifier/API withdrawal is signed and verified; staging validation is in progress. Ch08 native OCI ownership and R2 dispatch/module withdrawal is the parallel native frontier. Generic S3 endpoint capability remains verified. Ch06 awaits its independent review closure.
-- ch10 transport is staged under its library-test module until ch12:t01 activates the first real provider caller; all revised ch10/ch12/ch13 revision-5 blueprints await independent cold review. ch10–ch15 cover native publication and lifecycle; ch11 uses persistent SDK-illegal .vtb-cas-lock#0 per physical parent directory and same-parent numeric-# stage names, with physical-directory-ID lock ordering and payload staging outside locks.
+- All three ch07 Python withdrawal tasks are signed and verified; chapter documentation sync and independent reviews remain. Ch08 native OCI ownership and R2 dispatch/module withdrawal is the parallel native frontier. Generic S3 endpoint capability remains verified. Ch06 is reviewed and complete through `115ab8f5`.
+- The complete roadmap contains 20 chapters and 56 tasks. ch20:t01 owns shared ordinary negative-ETag byte-put CAS and actual OCI ordinary headers; native acceptance/reclosure depends on it. S3/Azure frontiers remain draft pending independent cold review of this missing-owner repair.
+- ch10 transport is staged under its library-test module until ch12:t01 activates the first real provider caller; revised native blueprints retain their scoped independent review requirements. ch10–ch15 cover native publication and lifecycle; ch11 uses persistent SDK-illegal .vtb-cas-lock#0 per physical parent directory and same-parent numeric-# stage names, with physical-directory-ID lock ordering and payload staging outside locks.
 - S3 direct completion returns honest typed 409 conflict/abort; GCS source-generation-pinned rewrite is backend-specific staging.
 - Original Arrow/SHM and user guides remain full scope. ch17–ch19 provide bounded sync codecs, typed per-batch PyArrow worker/native async I/O bridge and lazy SQLSpec integration; original ch04:t02 retains integration acceptance.
 - Final docs/OKF acceptance is `[0/9 files documented]`; correctness review then fresh quality review is mandatory before finish/archive.

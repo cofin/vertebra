@@ -10,7 +10,7 @@ planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
-plan_revision: 4
+plan_revision: 6
 plan_commit: null
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
@@ -51,7 +51,7 @@ Grounded contract evidence: [^research].
 
 ### R1: Resolve GCS ETag predicates into generation CAS for ordinary puts
 
-For GCS `put_opts(if_match=etag)`, HEAD once to obtain both opaque ETag and generation, verify expected ETag, then PutMode::Update(UpdateVersion { e_tag: Some(actual_etag), version: Some(generation) }). Never pass ETag in place of generation and never use HEAD→Overwrite. For arbitrary negative if_none_match: HEAD current object; if absent use Create; if present with matching forbidden ETag fail; otherwise Update with actual generation. Retry only CAS races, repeating predicate evaluation with new HEAD; bound retries explicitly (8 attempts, then precondition/retryable conflict) and never switch to unconditional mode. `if_none_match="*"` uses Create directly. Preserve content_type/attributes and actual PutResult from successful atomic put.
+For GCS `put_opts(if_match=etag)`, HEAD once to obtain both opaque ETag and generation, verify expected ETag, then PutMode::Update(UpdateVersion { e_tag: Some(actual_etag), version: Some(generation) }). Never pass ETag in place of generation and never use HEAD→Overwrite. Prerequisite ch20:t01 owns shared arbitrary negative if_none_match resolution and eight-attempt native CAS-only retries. This chapter owns GCS positive if_match translation and validates generation/canonical XML ETag integration with the shared negative path; it does not add a competing loop or Overwrite fallback. `if_none_match="*"` uses Create directly. Preserve content_type/attributes and actual PutResult from successful atomic put.
 
 ### R2: Stage GCS multipart and publish through pinned JSON rewrite
 
