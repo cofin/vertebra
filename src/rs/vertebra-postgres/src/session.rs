@@ -1,6 +1,7 @@
 //! Owned, cancellation-safe PostgreSQL session startup and publication.
 
-use crate::{config::PostgresConfig, errors::PostgresError, protocol, tls};
+use crate::{auth::Authentication, config::PostgresConfig, errors::PostgresError, protocol, tls};
+use bytes::BytesMut;
 use postgres_protocol::message::backend::Message;
 use std::{
     collections::HashMap,
@@ -294,11 +295,26 @@ async fn startup(
         transaction_status: TransactionStatus::Idle,
         tls_server_end_point,
     };
-    let mut authenticated = false;
+    let mut auth = Authentication::new();
+    let mut out = BytesMut::new();
     loop {
-        match protocol::read_message(&mut conn.stream).await? {
-            Message::AuthenticationOk if !authenticated => authenticated = true,
-            Message::ParameterStatus(body) if authenticated => {
+        let message = protocol::read_message(&mut conn.stream).await?;
+        if auth.handle_message(&message, config, &mut out)? {
+            if !out.is_empty() {
+                conn.stream
+                    .write_all(&out)
+                    .await
+                    .map_err(|error| PostgresError::Transport(error.to_string()))?;
+                conn.stream
+                    .flush()
+                    .await
+                    .map_err(|error| PostgresError::Transport(error.to_string()))?;
+                out.clear();
+            }
+            continue;
+        }
+        match message {
+            Message::ParameterStatus(body) if auth.is_complete() => {
                 let name = body
                     .name()
                     .map_err(|error| PostgresError::Protocol(error.to_string()))?;
@@ -307,13 +323,13 @@ async fn startup(
                     .map_err(|error| PostgresError::Protocol(error.to_string()))?;
                 conn.parameters.insert(name.into(), value.into());
             }
-            Message::BackendKeyData(body) if authenticated && conn.backend_key.is_none() => {
+            Message::BackendKeyData(body) if auth.is_complete() && conn.backend_key.is_none() => {
                 conn.backend_key = Some(BackendKey {
                     process_id: body.process_id(),
                     secret_key: body.secret_key(),
                 });
             }
-            Message::ReadyForQuery(body) if authenticated => {
+            Message::ReadyForQuery(body) if auth.is_complete() => {
                 conn.transaction_status = TransactionStatus::from_wire_byte(body.status())?;
                 if conn.transaction_status != TransactionStatus::Idle
                     || conn.parameters.get("client_encoding").map(String::as_str) != Some("UTF8")
@@ -326,17 +342,6 @@ async fn startup(
             }
             Message::NoticeResponse(_) => {}
             Message::ErrorResponse(body) => return Err(server_error(body)?),
-            Message::AuthenticationCleartextPassword
-            | Message::AuthenticationMd5Password(_)
-            | Message::AuthenticationSasl(_)
-            | Message::AuthenticationGss
-            | Message::AuthenticationSspi
-            | Message::AuthenticationKerberosV5
-            | Message::AuthenticationScmCredential => {
-                return Err(PostgresError::UnsupportedAuth(
-                    "only trust authentication is available".into(),
-                ));
-            }
             _ => {
                 return Err(PostgresError::Protocol(
                     "unexpected startup message or order".into(),

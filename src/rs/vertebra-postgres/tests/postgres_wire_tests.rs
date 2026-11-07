@@ -754,7 +754,7 @@ async fn configured_close_and_unstarted_attempt_drop_are_terminal() {
 
 #[tokio::test]
 async fn unsupported_challenges_fail_without_credentials() {
-    for challenge in [2_i32, 3, 6, 7, 9] {
+    for challenge in [2_i32, 6, 7, 9] {
         assert!(matches!(
             rejected(support::frame(b'R', &challenge.to_be_bytes())).await,
             PostgresError::UnsupportedAuth(_)

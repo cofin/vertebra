@@ -1,5 +1,6 @@
 //! Standalone native PostgreSQL client extension for Vertebra.
 
+pub(crate) mod auth;
 pub mod config;
 pub mod errors;
 pub(crate) mod protocol;

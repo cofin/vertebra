@@ -13,11 +13,11 @@ replan_trigger: null
 current_task: "native-postgres-driver:ch02:t04"
 plan_revision: 6
 plan_commit: 8833b064
-state_revision: 2
+state_revision: 3
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T21:57:00Z"
+updated_at: "2026-11-07T23:09:05Z"
 generated:
   by: flow-revise
   at: "2026-11-07T05:00:00Z"
@@ -151,17 +151,17 @@ Progress: `[0/0 files documented in ch02]` (all new symbols in `protocol.rs`, `t
 - [x] [a00c3248] native-postgres-driver:ch02:t01 — Implement bounded PostgreSQL Protocol 3.0 startup encoder and backend frame decoder (tasks/t01-bounded-codec.md)
 - [x] [b19e402d] native-postgres-driver:ch02:t02 — Establish authenticated trust sessions with SessionHandle and PendingSession publication (tasks/t02-trust-session-lifecycle.md)
 - [x] [be425286] native-postgres-driver:ch02:t03 — Negotiate PostgreSQL SSLRequest and verify rustls peer TLS identities (tasks/t03-sslrequest-and-tls-identity.md)
-- [ ] native-postgres-driver:ch02:t04 — Authenticate cleartext password and MD5 startup exchanges (tasks/t04-cleartext-and-md5-auth.md)
+- [~] native-postgres-driver:ch02:t04 — Authenticate cleartext password and MD5 startup exchanges (tasks/t04-cleartext-and-md5-auth.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: TLS source `be425286` passes all 39 current Rust tests and all-target Clippy; upstream chapter 01 remains complete and reviewed.
-- **Task State**: Codec, trust session, and TLS tasks are complete (`3/4`); password/MD5 task 04 is next.
+- **Verified Baseline**: Committed source remains `be425286`; the task 04 working tree passes all 47 Rust tests, all-target Clippy, formatting, and the review setup gate. Upstream chapter 01 remains complete and reviewed.
+- **Task State**: Codec, trust session, and TLS tasks are complete (`3/4`); password/MD5 task 04 is verified in progress and awaits its signed source commit.
 - **Shared Contracts**: Owned publication guards, strict framing, shared-transport TLS policies, and read-only metadata inspection remain Rust-owned.
 - **Documentation**: `[0/0 files documented in ch02]`; chapter 30 retains full driver guides and knowledge synchronization.
-- **Next Action**: `/flow:implement native-postgres-driver ch02:t04`.
+- **Next Action**: Sign the task 04 source commit, synchronize chapter evidence, then run `/flow:review native-postgres-driver ch02-wire-codec-and-session-startup`.
 
 [^rs-transport]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP and `rustls` TLS upgrade stream primitives.
 [^proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — Protocol 3.0 framing, `SSLRequest`, and auth state machine analysis.
