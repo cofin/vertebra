@@ -134,7 +134,7 @@ On free-threaded Python (`3.14t`/`3.15t`) the broker runs the configured model i
 
 ## Staging Models with `vtb ai models` & Co-Located Workers
 
-Stage model bundles into GCS, S3, R2, Azure, or OCI without a Hugging Face account at runtime, warm the shared-memory cache on container startup, and run co-located background workers alongside HTTP ingress:
+Stage model bundles into GCS, S3, Azure, or OCI without a Hugging Face account at runtime, warm the shared-memory cache on container startup, and run co-located background workers alongside HTTP ingress:
 
 ```bash
 vtb ai models list

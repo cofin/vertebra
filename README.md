@@ -14,7 +14,7 @@ Vertebra is one unified runtime for Python and TypeScript across backend, fronte
 - **Python Framework & Server**: Type-safe APIs (`App`, `Controller`, `Router`, `Route`, `Procedure`, `ProcedureRouter`, `Provide`, `Inject`, `QueueService`, Inertia v3, SSR, and MCP/A2A agent protocols) plus native, ASGI, WSGI, and RSGI support.
 - **Worker Runtime (`vertebra-core`, `vertebra-py`)**: Runs Python in-process or across multiple worker processes over shared memory.
 - **HTTP Server & Bundler (`vertebra-http`, `vertebra-bundler`)**: HTTP/1.1, HTTP/2, HTTP/3, gRPC, WebSockets, SSE, TLS, compression, static files, JavaScript bundling, and QuickJS SSR.
-- **Storage, Databases & TypeScript Client (`vertebra-storage`, `vertebra-db`, `vertebra-bigquery`, `vertebra-spanner`, `@vertebra/client`)**: Multicloud object storage (S3, GCS, Azure, R2, OCI, HTTP, local), database drivers (Postgres, MySQL, SQLite, Oracle 26ai, SQL Server, DuckDB, Google BigQuery, Google Cloud Spanner, Redis, Valkey, DataFusion), native `driver.pipeline()` batching (`SyncPipelineCapable`, `AsyncPipelineCapable`), Cloud SQL/AlloyDB dialers, and a typed TypeScript client for React, Vue, Svelte, Angular, HTMX, and Vite.
+- **Storage, Databases & TypeScript Client (`vertebra-storage`, `vertebra-db`, `vertebra-bigquery`, `vertebra-spanner`, `@vertebra/client`)**: Multicloud object storage (S3, GCS, Azure, OCI, HTTP, local), database drivers (Postgres, MySQL, SQLite, Oracle 26ai, SQL Server, DuckDB, Google BigQuery, Google Cloud Spanner, Redis, Valkey, DataFusion), native `driver.pipeline()` batching (`SyncPipelineCapable`, `AsyncPipelineCapable`), Cloud SQL/AlloyDB dialers, and a typed TypeScript client for React, Vue, Svelte, Angular, HTMX, and Vite.
 
 ## Quickstart
 

@@ -31,7 +31,7 @@ Complete reference documentation for Vertebra's Python packages (`vertebra.*`), 
 
 | Module / Page | Summary |
 | --- | --- |
-| **[Object Storage](storage.md)** | Multicloud and local object storage (`SyncObjectStore`, `AsyncObjectStore`, `LocalConfig`, `S3Config`, `GCSConfig`, `AzureConfig`, `R2Config`, `OCIConfig`, `MemoryConfig`), presigning (`SigningConfig`), and random-access `SyncReadableFile` / `AsyncReadableFile`. |
+| **[Object Storage](storage.md)** | Multicloud and local object storage (`SyncObjectStore`, `AsyncObjectStore`, `LocalConfig`, `S3Config`, `GCSConfig`, `AzureConfig`, `OCIConfig`, `MemoryConfig`), presigning (`SigningConfig`), and random-access `SyncReadableFile` / `AsyncReadableFile`. |
 
 ## Frontend & Client SDK
 
