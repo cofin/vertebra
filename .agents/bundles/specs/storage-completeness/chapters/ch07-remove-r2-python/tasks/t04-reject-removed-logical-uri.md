@@ -5,7 +5,7 @@ chapter_id: ch07-remove-r2-python
 title: Reject removed SQLSpec logical URI overrides before staging
 description: Reject R2 logical URI overrides and declared backend URIs before object or export query effects.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -33,7 +33,7 @@ blocked_reason: null
 unblock_condition: null
 next_step: Reproduce the logical URI bypass and complete the independently approved repair.
 last_verified_at: null
-last_verified_commit: null
+last_verified_commit: a7036538
 created_at: '2026-11-07T23:24:00Z'
 updated_at: '2026-11-07T23:24:00Z'
 sources:
@@ -128,16 +128,26 @@ Name new tests with `logical_uri` / `declared_backend` so focused discovery incl
 
 ## Acceptance Criteria
 
-- [ ] Actual SQLSpec construction rejects removed logical URI overrides with explicit sync/async native Memory stores; seed bytes/list remain exact.
-- [ ] Independent actual declared-backend regressions prove relative validation/read/write refusal and zero real BigQuery query connections for sync/async export.
-- [ ] Supported rooted S3/GCS metadata, operations, aliases, generic custom S3 capabilities and native Memory/local compatibility pass.
-- [ ] Initial failing public regressions and focused/full canonical Green, lint, format, typing, stubtest and whitespace evidence are recorded.
-- [ ] Six-file read set, two production files and estimated 100 changed lines fit one isolated invocation and one signed local conventional commit.
-- [ ] ch09:t03 owns storage OKF correction; ch04:t03 owns final user documentation. The chapter stays open for correctness then fresh quality review.
+- [x] Actual SQLSpec construction rejects removed logical URI overrides with explicit sync/async native Memory stores; seed bytes/list remain exact.
+- [x] Independent actual declared-backend regressions prove relative validation/read/write refusal and zero real BigQuery query connections for sync/async export.
+- [x] Supported rooted S3/GCS metadata, operations, aliases, generic custom S3 capabilities and native Memory/local compatibility pass.
+- [x] Initial failing public regressions and focused/full canonical Green, lint, format, typing, stubtest and whitespace evidence are recorded.
+- [x] Six-file read set, two production files and estimated 100 changed lines fit one isolated invocation and one signed local conventional commit.
+- [x] ch09:t03 owns storage OKF correction; ch04:t03 owns final user documentation. The chapter stays open for correctness then fresh quality review.
 
 ## Notes & Discoveries
 
 At committed checkpoint `49cbfcbb`, `SQLSpecObjectStoreBackend("r2://unit", store=SyncObjectStore(MemoryConfig()))` exposes protocol `r2` and permits qualified read/write; relative staging validation and cursor publication also succeed. At current source checkpoint `c7868b02`, the constructor's explicit-store logical override remains unchecked and staging checks removed schemes only in the destination or string store before returning on a relative destination. These are the adopted Important `PY-NEW` contract gap; the declared-backend test isolates the second boundary without mocking the system under test.
+
+Execution preflight passes at `e178deca`: revision 6 / `43c2e3fe` matches the chapter, t03 is completed at `38757809`, all six manifest files and target symbols exist, and the task/checklist agree on `in_progress` / `[~]`. The coordinator retains Git and completion metadata ownership; the verified source change awaits its signed source commit.
+
+The initial focused command in Verification exits 1 with **22 failed, 61 passed, 84 deselected** (`/tmp/vertebra-ch07-t04-red.log`). Six actual constructor cases and twelve independent declared-backend validate/read/write cases report `DID NOT RAISE ImproperConfigurationError`. Four actual sync/async BigQuery exports reach the loopback endpoint, recording exactly `['connection', '/bigquery/v2/projects/unit/queries']`, and raise native `BigQueryError: unexpected query`; these failures establish the query boundary bypass before production changes.
+
+The unchanged focused command exits 0 with **83 passed, 84 deselected** (`/tmp/vertebra-ch07-t04-green.log`). The complete canonical command exits 0 with **162 passed, 5 skipped** (`/tmp/vertebra-ch07-t04-full.log`); the skips retain optional-driver requirements. All new negative cases assert exact scheme-only `ImproperConfigurationError`, unchanged native bytes and exact native keys; real export cases assert no connection/request events. Supported rooted S3/GS metadata, GCS alias, distinct literal percent keys, configured S3/custom-endpoint signing, SQLSpec Memory authority and native Memory/local controls pass.
+
+All remaining exact Verification commands exit 0: Ruff check, Ruff format check (four files), Mypy (two source files), `python -m mypy.stubtest vertebra._storage` (one module) and `git diff --check`. Runtime lanes use `uv run --no-sync flock /tmp/vertebra-flow-shm-tests.lock`; all test processes release the lock on completion.
+
+Native evidence: all five actual modules load from `$PWD/src/py/vertebra/<module>.cpython-312-x86_64-linux-gnu.so`: `_vertebra` (136805760 bytes), `_bundler` (105435520), `_storage` (177530416), `_bigquery` (216038856), `_spanner` (273171256). `git diff c7868b02 HEAD --stat -- src/rs` is empty at preflight, so this Python-only repair uses the existing rebuilt extensions without another native build. The patch changes only SQLSpec protocol rejection, the existing staging declared-URI guard and the canonical integration tests: **98 additions / 17 deletions** (115 changed lines; production **6 additions / 5 deletions**). The second canonical test module remains unchanged and passes. No API, signature, helper wrapper, mock system under test or provider hostname rule is added; unrelated concurrent edits are preserved. Correctness review and fresh quality review remain coordinator-owned before chapter closure.
 
 [^sqlspec]: `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend.__init__` — Public explicit native-store override and logical metadata assignment.
 [^staging]: `src/py/vertebra/db/_staging.py::ObjectStoreStaging._validate_uri_qualification` — Shared destination/store qualification checks and relative early return.

@@ -5,7 +5,7 @@ chapter_id: ch10-publication-boundary-and-lifecycle
 title: Retain concrete providers behind a private publication boundary
 description: Retain concrete providers behind a private publication boundary
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -28,8 +28,8 @@ estimated_loc: 230
 plan_revision: 6
 plan_commit: 43c2e3fe
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: publication_dispatch
+claimed_at: '2026-11-07T20:00:00Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null

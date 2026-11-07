@@ -30,7 +30,7 @@ chapters:
 - ch19-sqlspec-arrow-streaming
 - ch20-ordinary-negative-cas
 current_chapter: ch07-remove-r2-python
-current_task: storage-completeness:ch07:t04
+current_task: null
 parent_prd: native-data-platform
 research:
 - ../native-data-platform/research/gap-analysis_20261103.md
@@ -204,7 +204,7 @@ flowchart LR
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[3/13 files documented]` for final repair/HTTP/Arrow acceptance. Existing baseline prose and scoped Python withdrawal knowledge sync are not final evidence for the repaired native guarantees.
+Progress: `[6/13 files documented]` for final repair/HTTP/Arrow acceptance. Existing baseline prose and scoped Python withdrawal knowledge sync are not final evidence for the repaired native guarantees.
 
 | File | Owning task | Final content |
 | --- | --- | --- |
@@ -260,7 +260,7 @@ Progress: `[3/13 files documented]` for final repair/HTTP/Arrow acceptance. Exis
 - [~] ch07-remove-r2-python — Withdraw First-Class R2 Python APIs (chapters/ch07-remove-r2-python/spec.md)
 - [x] [43654f61] ch08-remove-r2-native — Move OCI Chunk Ownership and Remove Native R2 (chapters/ch08-remove-r2-native/spec.md)
 - [~] ch09-r2-docs-and-knowledge — Synchronize Supported Providers and Native Guarantees (chapters/ch09-r2-docs-and-knowledge/spec.md)
-- [ ] ch10-publication-boundary-and-lifecycle — Native Publication Boundary and Cleanup Ownership (chapters/ch10-publication-boundary-and-lifecycle/spec.md)
+- [~] ch10-publication-boundary-and-lifecycle — Native Publication Boundary and Cleanup Ownership (chapters/ch10-publication-boundary-and-lifecycle/spec.md)
 - [ ] ch11-local-atomic-publication — Local Cross-Process Conditional Publication (chapters/ch11-local-atomic-publication/spec.md)
 - [ ] ch12-s3-conditional-multipart — S3 Metadata Multipart and Conditional Completion (chapters/ch12-s3-conditional-multipart/spec.md)
 - [ ] ch13-azure-conditional-block-list — Azure Conditional Multipart Block Commit (chapters/ch13-azure-conditional-block-list/spec.md)
@@ -288,7 +288,7 @@ Progress: `[3/13 files documented]` for final repair/HTTP/Arrow acceptance. Exis
 - ch10 transport is staged under its library-test module until ch12:t01 activates the first real provider caller; revised native blueprints retain their scoped independent review requirements. ch10–ch15 cover native publication and lifecycle; ch11 uses persistent SDK-illegal .vtb-cas-lock#0 per physical parent directory and same-parent numeric-# stage names, with physical-directory-ID lock ordering and payload staging outside locks.
 - S3 direct completion returns honest typed 409 conflict/abort; GCS source-generation-pinned rewrite is backend-specific staging.
 - Original Arrow/SHM and user guides remain full scope. ch17–ch19 provide bounded sync codecs, typed per-batch PyArrow worker/native async I/O bridge and lazy SQLSpec integration; original ch04:t02 retains integration acceptance.
-- Final docs/OKF acceptance is `[3/13 files documented]`; ch09 owns eleven provider/knowledge pages and ch04 owns two storage guides. Correctness review then fresh quality review is mandatory before finish/archive.
+- Final docs/OKF acceptance is `[6/13 files documented]`; ch09 owns eleven provider/knowledge pages and ch04 owns two storage guides. Correctness review then fresh quality review is mandatory before finish/archive.
 
 [^rs-storage-engine]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — Native Rust storage engine over `object_store`.
 [^py-storage-facade]: `src/py/vertebra/storage/_store.py::SyncObjectStore` — Python sync/async object store facade and backend configs.

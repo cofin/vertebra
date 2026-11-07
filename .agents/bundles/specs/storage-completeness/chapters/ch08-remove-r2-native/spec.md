@@ -37,7 +37,7 @@ tags:
 <!-- truth: start -->
 OCI owns uniform multipart accumulation; native constructors reject R2 URLs, and the native R2 module/helper/stub surface is absent. [^source]
 All three task implementations are signed through `c7868b02`; native tests and extension parity pass.
-This chapter stays active pending correctness review followed by fresh quality review; no review stamp is claimed.
+Correctness review and fresh quality review approve `43654f61`; this native withdrawal chapter is complete.
 SQLSpec logical-URI and configured native-store rejection remains a ch07 repair. Native conditional publication and Arrow acceptance remain separate.
 <!-- truth: end -->
 
@@ -92,13 +92,13 @@ Progress: `[1/1 files documented]`. Native constructor rejection, removed export
 - [x] [4614213f] storage-completeness:ch08:t02 — Delete native R2 builder, module, helper and stub surface (tasks/t02-remove-native-backend.md)
 - [x] [c7868b02] storage-completeness:ch08:t03 — Delete the unreferenced native R2 module (tasks/t03-delete-dead-r2-module.md)
 
-**Chapter Recovery Checkpoint:** all task receipts are completed. `/flow:review storage-completeness ch08-remove-r2-native` performs correctness review; a fresh quality review follows before chapter closure.
+**Chapter Recovery Checkpoint:** all task receipts are completed. Correctness and fresh quality review pass at `43654f61`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
 - Revision 4 is independently approved at `ddfb11f2`; task receipts bind OCI ownership to `2e343bc3`, native API withdrawal to `4614213f`, and dead-module/provenance deletion to `c7868b02`.
 - The native suite passes all 25 cases before and after dead-module deletion; formatting and all-target Clippy exit 0. All five extension builds and stubtest pass at the native API withdrawal checkpoint; deleting the unregistered file changes no compiled source.
-- Scoped documentation is synchronized: `[1/1 files documented]`. Correctness and fresh quality reviews remain pending; state stays active and last_reviewed_commit stays null.
+- Scoped documentation is synchronized: `[1/1 files documented]`. Correctness and fresh quality review approve `43654f61`; the chapter state and review stamp record that checkpoint.
 - SQLSpec logical-R2 URI and configured native-store rejection remains a ch07 repair. Native CAS, original chapter reclosure and Arrow acceptance remain open and do not block this native removal review.
 
 [^source]: `src/rs/vertebra-storage/src/store.rs` — Verified repository implementation seam.

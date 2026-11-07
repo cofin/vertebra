@@ -9,7 +9,7 @@ state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: storage-completeness:ch07:t04
+current_task: null
 plan_revision: 6
 plan_commit: 43c2e3fe
 state_revision: 0
@@ -46,7 +46,7 @@ tags:
 - Framework classifiers and public R2 config/convenience exports are removed; direct facade `r2://` construction rejects the removed scheme. [^facade]
 - Destination and explicit string-store staging rejection, qualification matching and native Memory/local compatibility are implemented at `38757809`. [^staging]
 - SQLSpec's explicit-store logical URI override still accepts R2 metadata, and staging returns for relative destinations before checking the backend's declared `store_uri`. t04 closes both public boundaries. [^sqlspec] [^staging]
-- This chapter contains four tasks: three completed and one approved repair in progress. Correctness review and fresh quality review remain open. [^regression]
+- This chapter contains four tasks: four completed tasks awaiting correctness re-review and fresh quality review. Correctness review and fresh quality review remain open. [^regression]
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -112,13 +112,13 @@ Progress: `[0/1 files documented]` for the remaining logical override/declaratio
 - [x] [4486f6fe] storage-completeness:ch07:t01 — Remove R2 from framework backend classifiers (tasks/t01-framework-classifiers.md)
 - [x] [75f18e3b] storage-completeness:ch07:t02 — Delete public R2Config and from_r2 convenience APIs (tasks/t02-withdraw-config-and-exports.md)
 - [x] [38757809] storage-completeness:ch07:t03 — Reject removed R2 URIs before staging local-path resolution (tasks/t03-staging-reject-r2.md)
-- [~] storage-completeness:ch07:t04 — Reject removed SQLSpec logical URI overrides before staging (tasks/t04-reject-removed-logical-uri.md)
+- [x] [a7036538] storage-completeness:ch07:t04 — Reject removed SQLSpec logical URI overrides before staging (tasks/t04-reject-removed-logical-uri.md)
 
 **Chapter Recovery Checkpoint:** revision 6 is independently approved at `43c2e3fe`. t04 follows completed t03 and fits one invocation with six read files, two production files, two canonical test modules and estimated 100 changed lines. `/flow:implement storage-completeness ch07-remove-r2-python` executes the ready t04. Run correctness review followed by fresh quality review before chapter closure.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Three of four tasks are completed at `4486f6fe`, `75f18e3b` and `38757809`; their recorded states, acceptance evidence and commit SHAs remain intact. t04 is approved and in progress; its implementation evidence and signed source receipt follow verification.
+- Three of four tasks are completed at `4486f6fe`, `75f18e3b` and `38757809`; their recorded states, acceptance evidence and commit SHAs remain intact. t04 is signed at `a7036538`; its actual public regressions and all 162 canonical tests pass with five existing optional-driver skips.
 - Completed t03 evidence records 139 canonical tests with five existing optional-driver skips, all-five-extension rebuild, storage stubtest and focused Mypy/Ruff checks. That evidence proves its destination/qualification scope and does not close the logical override/declaration gap.
 - Source `c7868b02` retains the adopted Important `PY-NEW` gap in the SQLSpec logical override and staging relative return. t04 requires fresh public Red/Green and exact native bytes/keys, supported metadata, and real sync/async BigQuery zero-query evidence.
 - The chapter remains active with `last_reviewed_commit: null`. Correctness and fresh quality review remain required after t04; native publication acceptance and other chapters retain their independent ownership.
