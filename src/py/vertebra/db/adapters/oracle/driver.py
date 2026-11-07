@@ -17,6 +17,7 @@ from vertebra.db.arrow import (
     _table_to_rows_and_cols,
 )
 from vertebra.db.driver import SyncDatabaseDriver, ThreadOffloadAsyncDatabaseDriver
+from vertebra.utils.text import validate_identifier
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -215,11 +216,17 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
     ) -> int:
         """Bulk-ingest an Arrow Table, `ArrowCursor`, or row sequence into `table_name`."""
         _ = (direct_path, kwargs)
+        validate_identifier(table_name, "table_name", allow_dots=True)
+        if columns is not None:
+            for col in columns:
+                validate_identifier(str(col), "column", allow_dots=False)
         rows, cols = _table_to_rows_and_cols(data, columns)
+        for col in cols:
+            validate_identifier(str(col), "column", allow_dots=False)
         if not rows or not cols:
             return 0
         placeholders = ", ".join(f":{i + 1}" for i in range(len(cols)))
-        col_list = ", ".join(cols)
+        col_list = ", ".join(str(col) for col in cols)
         sql = f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders})"
         norm_sql, _ = OracleCore.normalize_sql(sql, rows[0])
         grant = self._acquire_oracle_broker_lease(sql, len(cols))

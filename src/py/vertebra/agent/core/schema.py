@@ -137,6 +137,71 @@ class SchemaBuilder:
         """Return collected schema definition components."""
         return dict(self._defs)
 
+    @staticmethod
+    def is_stripped_annotation(ann: Any, strip_names: set[str] | frozenset[str] = STRIP_TYPE_NAMES) -> bool:
+        """Return whether a parameter annotation represents a framework-injected dependency."""
+        if getattr(ann, "__name__", "") in strip_names:
+            return True
+        origin = get_origin(ann)
+        if origin is Annotated:
+            ann_args = get_args(ann)
+            if ann_args and SchemaBuilder.is_stripped_annotation(ann_args[0], strip_names):
+                return True
+            return any(hasattr(meta, "dependency") for meta in ann_args[1:])
+        if origin is types.UnionType or origin is Union:
+            non_none = [arg for arg in get_args(ann) if arg is not types.NoneType]
+            return bool(non_none) and all(SchemaBuilder.is_stripped_annotation(arg, strip_names) for arg in non_none)
+        return False
+
+    def build_callable_schema(
+        self,
+        fn: Callable[..., Any],
+        *,
+        strip_types: Sequence[type | str] = (),
+    ) -> dict[str, Any]:
+        """Derive an input JSON Schema for a callable function or method."""
+        sig = inspect.signature(fn)
+        properties: dict[str, Any] = {}
+        required: list[str] = []
+
+        strip_names = set(STRIP_TYPE_NAMES)
+        for st in strip_types:
+            if isinstance(st, str):
+                strip_names.add(st)
+            elif hasattr(st, "__name__"):
+                strip_names.add(st.__name__)
+
+        for param_name, param in sig.parameters.items():
+            if param_name in ("self", "cls"):
+                continue
+
+            if hasattr(param.default, "dependency"):
+                continue
+
+            ann = param.annotation
+            if self.is_stripped_annotation(ann, strip_names):
+                continue
+
+            param_schema = self._type_to_schema(ann)
+            if param.default is not inspect.Parameter.empty:
+                if isinstance(param.default, (str, int, float, bool, list, dict)) or param.default is None:
+                    param_schema["default"] = param.default
+            else:
+                required.append(param_name)
+
+            properties[param_name] = param_schema
+
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": properties,
+        }
+        if required:
+            schema["required"] = required
+        if self._defs:
+            schema["$defs"] = dict(self._defs)
+
+        return schema
+
     def _type_to_schema(self, tp: Any) -> dict[str, Any]:
         """Convert a single Python type into a JSON schema dict, populating defs."""
         if tp is Any or tp is inspect.Parameter.empty:
@@ -256,65 +321,6 @@ class SchemaBuilder:
 
         return {}
 
-    def build_callable_schema(
-        self,
-        fn: Callable[..., Any],
-        *,
-        strip_types: Sequence[type | str] = (),
-    ) -> dict[str, Any]:
-        """Derive an input JSON Schema for a callable function or method."""
-        sig = inspect.signature(fn)
-        properties: dict[str, Any] = {}
-        required: list[str] = []
-
-        strip_names = set(STRIP_TYPE_NAMES)
-        for st in strip_types:
-            if isinstance(st, str):
-                strip_names.add(st)
-            elif hasattr(st, "__name__"):
-                strip_names.add(st.__name__)
-
-        for param_name, param in sig.parameters.items():
-            if param_name in ("self", "cls"):
-                continue
-
-            if hasattr(param.default, "dependency"):
-                continue
-
-            ann = param.annotation
-            ann_name = getattr(ann, "__name__", "")
-            if ann_name in strip_names:
-                continue
-
-            origin = get_origin(ann)
-            if origin is Annotated:
-                ann_args = get_args(ann)
-                base_ann = ann_args[0]
-                if getattr(base_ann, "__name__", "") in strip_names:
-                    continue
-                if any(hasattr(meta, "dependency") for meta in ann_args[1:]):
-                    continue
-
-            param_schema = self._type_to_schema(ann)
-            if param.default is not inspect.Parameter.empty:
-                if isinstance(param.default, (str, int, float, bool, list, dict)) or param.default is None:
-                    param_schema["default"] = param.default
-            else:
-                required.append(param_name)
-
-            properties[param_name] = param_schema
-
-        schema: dict[str, Any] = {
-            "type": "object",
-            "properties": properties,
-        }
-        if required:
-            schema["required"] = required
-        if self._defs:
-            schema["$defs"] = dict(self._defs)
-
-        return schema
-
 
 class Tool:
     """Method and function descriptor encapsulating callable logic and JSON schema."""
@@ -370,31 +376,6 @@ class Tool:
             instance=instance,
         )
 
-    def _convert_argument(self, param_name: str, value: Any, annotation: Any) -> Any:
-        """Convert and validate a single argument against parameter type hint."""
-        if annotation is inspect.Parameter.empty or annotation is Any:
-            return value
-
-        resolved_ann = annotation
-        if isinstance(resolved_ann, str):
-            try:
-                resolved_ann = eval(
-                    resolved_ann,
-                    {"int": int, "str": str, "float": float, "bool": bool, "dict": dict, "list": list, "Any": Any},
-                )
-            except Exception:
-                return value
-
-        try:
-            return msgspec.convert(value, resolved_ann)
-        except Exception as exc:
-            pointer = f"/{param_name}"
-            raise ToolArgumentError(
-                param_name=param_name,
-                message=str(exc),
-                pointer=pointer,
-            ) from exc
-
     async def invoke(
         self,
         arguments: dict[str, Any],
@@ -424,8 +405,7 @@ class Tool:
                 continue
 
             ann = param.annotation
-            ann_name = getattr(ann, "__name__", "")
-            if ann_name in STRIP_TYPE_NAMES or param_name == "context":
+            if SchemaBuilder.is_stripped_annotation(ann) or param_name == "context":
                 if context is not None:
                     call_kwargs[param_name] = context
                 continue
@@ -458,6 +438,31 @@ class Tool:
         if inspect.isawaitable(res):
             return await res
         return res
+
+    def _convert_argument(self, param_name: str, value: Any, annotation: Any) -> Any:
+        """Convert and validate a single argument against parameter type hint."""
+        if annotation is inspect.Parameter.empty or annotation is Any:
+            return value
+
+        resolved_ann = annotation
+        if isinstance(resolved_ann, str):
+            try:
+                resolved_ann = eval(
+                    resolved_ann,
+                    {"int": int, "str": str, "float": float, "bool": bool, "dict": dict, "list": list, "Any": Any},
+                )
+            except Exception:
+                return value
+
+        try:
+            return msgspec.convert(value, resolved_ann)
+        except Exception as exc:
+            pointer = f"/{param_name}"
+            raise ToolArgumentError(
+                param_name=param_name,
+                message=str(exc),
+                pointer=pointer,
+            ) from exc
 
 
 def tool(

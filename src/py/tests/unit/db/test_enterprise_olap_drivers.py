@@ -6,13 +6,23 @@ import io
 import os
 import struct
 import zipfile
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import msgspec
+import pyarrow as pa
 import pytest
 from sqlalchemy.dialects import registry
 from sqlalchemy.engine.url import URL
 
+import vertebra.db as db_pkg
+import vertebra.db.adapters.duckdb as db_duckdb_mod
+import vertebra.db.adapters.mssql as db_mssql_mod
+import vertebra.db.adapters.mysql as db_mysql_mod
+import vertebra.db.adapters.oracle as db_oracle_mod
+import vertebra.db.adapters.postgres as db_postgres_mod
+import vertebra.db.adapters.sqlite as db_sqlite_mod
+import vertebra.db.arrow as db_arrow_mod
+from vertebra._vertebra import ArrowCursor as NativeArrowCursor
 from vertebra.db import (
     ARROW_SHM_THRESHOLD_ROWS,
     AlloyDBAuthType,
@@ -76,6 +86,7 @@ from vertebra.db.adapters.oracle import (
 from vertebra.db.adapters.postgres import (
     AsyncPostgreSQLDriver,
     PostgreSQLConfig,
+    SyncPostgreSQLDriver,
     decode_pgcopy_rows,
     encode_pg_jsonb,
     encode_pgcopy_rows,
@@ -104,9 +115,13 @@ from vertebra.extensions.sqlspec.adapters import (
     MySQLAsyncConfig,
     MySQLSyncConfig,
     OracleAsyncConfig,
+    OracleAsyncDriver,
     OracleSyncConfig,
+    OracleSyncDriver,
     PostgreSQLAsyncConfig,
+    PostgreSQLAsyncDriver,
     PostgreSQLSyncConfig,
+    PostgreSQLSyncDriver,
     SQLiteAsyncConfig,
     SQLiteSyncConfig,
     TenantPredicate,
@@ -123,9 +138,10 @@ async def test_duckdb_execute_many_reports_affected_rows() -> None:
     sync_driver = SyncDuckDBDriver()
     async_driver = AsyncDuckDBDriver()
     try:
-        for driver in (sync_driver, async_driver.sync_driver):
-            driver.execute("CREATE TABLE affected_rows (value INTEGER)")
-            driver.execute_many("INSERT INTO affected_rows VALUES (?)", [(1,), (2,), (3,)])
+        sync_driver.execute("CREATE TABLE affected_rows (value INTEGER)")
+        sync_driver.execute_many("INSERT INTO affected_rows VALUES (?)", [(1,), (2,), (3,)])
+        async_driver.sync_driver.execute("CREATE TABLE affected_rows (value INTEGER)")
+        async_driver.sync_driver.execute_many("INSERT INTO affected_rows VALUES (?)", [(1,), (2,), (3,)])
         assert (
             sync_driver.execute_many("UPDATE affected_rows SET value = value + 1 WHERE value >= ?", [(0,), (0,)]) == 6
         )
@@ -477,9 +493,36 @@ def test_duckdb_post_init_bootstrap_and_arrow_shm_streaming() -> None:
     driver.close()
 
 
+@pytest.mark.parametrize(
+    ("sync_cfg_cls", "async_cfg_cls", "async_drv_cls"),
+    [
+        (PostgreSQLSyncConfig, PostgreSQLAsyncConfig, AsyncPostgreSQLDriver),
+        (MySQLSyncConfig, MySQLAsyncConfig, AsyncMySQLDriver),
+        (SQLiteSyncConfig, SQLiteAsyncConfig, AsyncSQLiteDriver),
+        (OracleSyncConfig, OracleAsyncConfig, AsyncOracleDriver),
+        (MSSQLSyncConfig, MSSQLAsyncConfig, AsyncMSSQLDriver),
+        (DuckDBSyncConfig, DuckDBAsyncConfig, AsyncDuckDBDriver),
+    ],
+)
+@pytest.mark.anyio
+async def test_sqlspec_adapter_config_flags_and_async_driver_close(
+    sync_cfg_cls: type[Any],
+    async_cfg_cls: type[Any],
+    async_drv_cls: type[Any],
+) -> None:
+    """Verify Sync and Async SQLSpec adapter flags and async driver teardown across all 6 engines."""
+    scfg = sync_cfg_cls()
+    assert scfg.is_async is False
+    assert scfg.arrow_threshold_rows == ARROW_SHM_THRESHOLD_ROWS
+    acfg = async_cfg_cls()
+    assert acfg.is_async is True
+    async_drv = async_drv_cls()
+    await async_drv.close()
+
+
 @pytest.mark.anyio
 async def test_sqlspec_adapters_and_async_drivers() -> None:
-    """Verify all 12 Sync and Async SQLSpec adapter configurations and DatabaseRegistry resolution."""
+    """Verify DatabaseRegistry resolution and SQLite/DuckDB SQLSpec session round trips."""
     reg = DatabaseRegistry()
     assert isinstance(reg.parse_url("postgres://localhost/db"), PostgreSQLConfig)
     assert isinstance(reg.parse_url("mysql://localhost/db"), MySQLConfig)
@@ -487,29 +530,6 @@ async def test_sqlspec_adapters_and_async_drivers() -> None:
     assert isinstance(reg.parse_url("oracle://localhost:1521/FREEPDB1"), OracleConfig)
     assert isinstance(reg.parse_url("mssql://localhost:1433/master"), MSSQLConfig)
     assert isinstance(reg.parse_url("duckdb:///:memory:"), DuckDBConfig)
-
-    sync_configs = [
-        PostgreSQLSyncConfig(),
-        MySQLSyncConfig(),
-        SQLiteSyncConfig(),
-        OracleSyncConfig(),
-        MSSQLSyncConfig(),
-        DuckDBSyncConfig(),
-    ]
-    for scfg in sync_configs:
-        assert scfg.is_async is False
-        assert scfg.arrow_threshold_rows == ARROW_SHM_THRESHOLD_ROWS
-
-    async_configs = [
-        PostgreSQLAsyncConfig(),
-        MySQLAsyncConfig(),
-        SQLiteAsyncConfig(),
-        OracleAsyncConfig(),
-        MSSQLAsyncConfig(),
-        DuckDBAsyncConfig(),
-    ]
-    for acfg in async_configs:
-        assert acfg.is_async is True
 
     sqlite_sync = SQLiteSyncConfig(path=":memory:")
     with sqlite_sync.provide_session() as session:
@@ -528,53 +548,51 @@ async def test_sqlspec_adapters_and_async_drivers() -> None:
         assert arrow_res.data.to_pylist() == [{"k": 42, "v": "answer"}]
     await duck_async.close()
 
-    for async_drv in (
-        AsyncPostgreSQLDriver(),
-        AsyncMySQLDriver(),
-        AsyncSQLiteDriver(),
-        AsyncOracleDriver(),
-        AsyncMSSQLDriver(),
-        AsyncDuckDBDriver(),
-    ):
-        await async_drv.close()
 
-
-def test_sqlalchemy_vtb_dialects_nullpool_and_dbapi_broker_forwarding() -> None:
-    """Verify all SQLAlchemy +vtb dialects use NullPool and forward DBAPI operations through the SHM broker."""
-    assert len(ALL_DIALECT_SCHEMES) == 36
-    for dialect_name in (
+@pytest.mark.parametrize(
+    "dialect_name",
+    [
         "postgresql.vtb",
         "mysql.vtb",
         "sqlite.vtb",
         "oracle.vtb",
         "mssql.vtb",
         "duckdb.vtb",
-    ):
-        dialect_cls = registry.load(dialect_name)
-        broker_url = URL.create(dialect_name.replace(".", "+"), host="localhost", query={"shm_broker": "true"})
-        assert dialect_cls.get_pool_class(broker_url) is NullPool
-
+    ],
+)
+def test_sqlalchemy_vtb_dialect_nullpool_selection(dialect_name: str) -> None:
+    """Verify SQLAlchemy +vtb dialects select NullPool when shm_broker=true is enabled."""
+    assert len(ALL_DIALECT_SCHEMES) == 36
     assert registry.load("mssql.vtb") is SyncMSSQLDialect
     assert registry.load("duckdb.vtb") is SyncDuckDBDialect
+    dialect_cls = registry.load(dialect_name)
+    broker_url = URL.create(dialect_name.replace(".", "+"), host="localhost", query={"shm_broker": "true"})
+    assert dialect_cls.get_pool_class(broker_url) is NullPool
 
-    broker = _MockBroker()
-    for url in (
+
+@pytest.mark.parametrize(
+    "url",
+    [
         "sqlite+vtb:///:memory:",
         "oracle+vtb://localhost:1521/FREEPDB1",
         "mssql+vtb://localhost:1433/master",
         "duckdb+vtb:///:memory:",
-    ):
-        conn = SyncDBAPIConnection(url, broker=broker)
-        cur = conn.cursor()
-        assert isinstance(cur, SyncDBAPICursor)
-        cur.execute("CREATE TABLE items (id INTEGER, name TEXT)")
-        cur.execute("INSERT INTO items VALUES (1, 'vtb')")
-        cur.execute("SELECT id, name FROM items")
-        assert cur.fetchone() == (1, "vtb")
-        cur.close()
-        conn.close()
-    assert broker.lease_table.acquired >= 9
-    assert broker.lease_table.released >= 9
+    ],
+)
+def test_sqlalchemy_dbapi_broker_forwarding(url: str) -> None:
+    """Verify SyncDBAPIConnection forwards DBAPI operations through the SHM broker."""
+    broker = _MockBroker()
+    conn = SyncDBAPIConnection(url, broker=broker)
+    cur = conn.cursor()
+    assert isinstance(cur, SyncDBAPICursor)
+    cur.execute("CREATE TABLE items (id INTEGER, name TEXT)")
+    cur.execute("INSERT INTO items VALUES (1, 'vtb')")
+    cur.execute("SELECT id, name FROM items")
+    assert cur.fetchone() == (1, "vtb")
+    cur.close()
+    conn.close()
+    assert broker.lease_table.acquired >= 2
+    assert broker.lease_table.released >= 2
 
 
 class _LedgerRow(msgspec.Struct, frozen=True, gc=False):
@@ -663,17 +681,13 @@ def test_driver_schema_hydration_load_from_arrow_and_topologies() -> None:
 
 def test_native_arrow_cursor_pep3118_zero_copy_survives_shm_unlink() -> None:
     """Verify PEP 3118 memoryview and ArrowCursor.to_pyarrow() survive cursor.release() unlink."""
-    import pyarrow as pa
-
-    from vertebra._vertebra import ArrowCursor as NativeArrowCursor
-
     batch_a = pa.RecordBatch.from_pydict({"id": [1, 2], "name": ["alpha", "beta"]})
     batch_b = pa.RecordBatch.from_pydict({"id": [3, 4], "name": ["gamma", "delta"]})
     table = pa.Table.from_batches([batch_a, batch_b])
     sink = pa.BufferOutputStream()
     with pa.ipc.new_stream(sink, table.schema) as writer:
-        for b in table.to_batches():
-            writer.write_batch(b)
+        writer.write_batch(batch_a)
+        writer.write_batch(batch_b)
     ipc_bytes = sink.getvalue().to_pybytes()
 
     shm_name = f"/vtb-test-pep3118-{os.getpid()}"
@@ -706,18 +720,6 @@ def test_native_arrow_cursor_pep3118_zero_copy_survives_shm_unlink() -> None:
 
 def test_unified_db_arrow_cursor_identity_and_native_delegation() -> None:
     """Verify vertebra.db.ArrowCursor identity across drivers and native _vertebra.ArrowCursor delegation."""
-    import pyarrow as pa
-
-    import vertebra.db as db_pkg
-    import vertebra.db.adapters.duckdb as db_duckdb_mod
-    import vertebra.db.adapters.mssql as db_mssql_mod
-    import vertebra.db.adapters.mysql as db_mysql_mod
-    import vertebra.db.adapters.oracle as db_oracle_mod
-    import vertebra.db.adapters.postgres as db_postgres_mod
-    import vertebra.db.adapters.sqlite as db_sqlite_mod
-    import vertebra.db.arrow as db_arrow_mod
-    from vertebra._vertebra import ArrowCursor as NativeArrowCursor
-
     assert db_pkg.ArrowCursor is db_arrow_mod.ArrowCursor
     assert db_postgres_mod.ArrowCursor is db_pkg.ArrowCursor
     assert db_duckdb_mod.ArrowCursor is db_pkg.ArrowCursor
@@ -774,9 +776,6 @@ async def test_async_tenant_predicate_raises_when_guc_set_fails() -> None:
 @pytest.mark.parametrize("engine", ["postgres", "oracle"])
 def test_sync_tenant_session_setting_preserves_failure_identity(engine: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """Supported adapter session-setting errors escape unchanged."""
-    from vertebra.db.adapters.postgres import SyncPostgreSQLDriver
-    from vertebra.extensions.sqlspec.adapters import OracleSyncDriver, PostgreSQLSyncDriver
-
     native = SyncPostgreSQLDriver() if engine == "postgres" else SyncOracleDriver()
     failure = RuntimeError("session setting refused")
 
@@ -799,9 +798,6 @@ async def test_async_tenant_session_setting_preserves_failure_identity(
     engine: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Async supported adapter session-setting errors escape unchanged."""
-    from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver
-    from vertebra.extensions.sqlspec.adapters import OracleAsyncDriver, PostgreSQLAsyncDriver
-
     native = AsyncPostgreSQLDriver() if engine == "postgres" else AsyncOracleDriver()
     failure = RuntimeError("session setting refused")
 
@@ -821,10 +817,6 @@ async def test_async_tenant_session_setting_preserves_failure_identity(
 @pytest.mark.parametrize("config_defaults", [False, True])
 def test_postgresql_tenant_session_prepares_psycopg_binds(config_defaults: bool) -> None:
     """The native sync port receives psycopg binds and the exact session values."""
-    from typing import Any
-
-    from vertebra.db.adapters.postgres import PostgreSQLConfig, SyncPostgreSQLDriver
-    from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncConfig, PostgreSQLSyncDriver
 
     class Port:
         def __init__(self) -> None:
@@ -852,10 +844,6 @@ def test_postgresql_tenant_session_prepares_psycopg_binds(config_defaults: bool)
 @pytest.mark.parametrize("config_defaults", [False, True])
 async def test_postgresql_tenant_session_prepares_asyncpg_binds(config_defaults: bool) -> None:
     """The async native port receives numeric binds and the exact session values."""
-    from typing import Any
-
-    from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig
-    from vertebra.extensions.sqlspec.adapters import PostgreSQLAsyncConfig, PostgreSQLAsyncDriver
 
     class Port:
         def __init__(self) -> None:
@@ -881,8 +869,6 @@ async def test_postgresql_tenant_session_prepares_asyncpg_binds(config_defaults:
 
 def test_oracle_tenant_context_stand_in_sets_session_attribute() -> None:
     """The Oracle stand-in records named context binds without claiming live VPD support."""
-    from vertebra.extensions.sqlspec.adapters import OracleSyncDriver
-
     native = SyncOracleDriver()
     try:
         adapter = OracleSyncDriver(native)
@@ -897,8 +883,6 @@ def test_oracle_tenant_context_stand_in_sets_session_attribute() -> None:
 @pytest.mark.anyio
 async def test_async_oracle_tenant_context_stand_in_sets_session_attribute() -> None:
     """The async Oracle wrapper delegates named context binds to the same stand-in."""
-    from vertebra.extensions.sqlspec.adapters import OracleAsyncDriver
-
     native = AsyncOracleDriver()
     try:
         adapter = OracleAsyncDriver(native)
@@ -908,3 +892,60 @@ async def test_async_oracle_tenant_context_stand_in_sets_session_attribute() -> 
         assert native.sync_driver._session_context == {("VERTEBRA_CTX", "tenant_id"): "acme"}
     finally:
         await native.close()
+
+
+@pytest.mark.parametrize(
+    "driver_cls",
+    [SyncOracleDriver, SyncMSSQLDriver, SyncDuckDBDriver],
+    ids=["oracle-sync", "mssql-sync", "duckdb-sync"],
+)
+@pytest.mark.parametrize(
+    ("table_name", "columns"),
+    [
+        ("items; DROP TABLE items--", ("id", "label")),
+        ("items", ("id", "label) VALUES (1, 'x');--")),
+        ("schema..items", ("id",)),
+        ("items", ("schema.col",)),
+    ],
+    ids=["unsafe-table", "unsafe-column", "empty-dot-table", "dotted-column"],
+)
+def test_enterprise_and_olap_sync_load_from_arrow_rejects_unsafe_identifiers(
+    driver_cls: type[Any],
+    table_name: str,
+    columns: tuple[str, ...],
+) -> None:
+    """SyncOracleDriver, SyncMSSQLDriver, and SyncDuckDBDriver reject unsafe table and column identifiers."""
+    driver = driver_cls()
+    try:
+        with pytest.raises(ValueError, match="Invalid"):
+            driver.load_from_arrow(table_name, [{"id": 1, "label": "ok"}], columns=columns)
+    finally:
+        driver.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "driver_cls",
+    [AsyncOracleDriver, AsyncMSSQLDriver, AsyncDuckDBDriver],
+    ids=["oracle-async", "mssql-async", "duckdb-async"],
+)
+@pytest.mark.parametrize(
+    ("table_name", "columns"),
+    [
+        ("items; DROP TABLE items--", ("id", "label")),
+        ("items", ("id", "label) VALUES (1, 'x');--")),
+    ],
+    ids=["unsafe-table", "unsafe-column"],
+)
+async def test_enterprise_and_olap_async_load_from_arrow_rejects_unsafe_identifiers(
+    driver_cls: type[Any],
+    table_name: str,
+    columns: tuple[str, ...],
+) -> None:
+    """AsyncOracleDriver, AsyncMSSQLDriver, and AsyncDuckDBDriver reject unsafe table and column identifiers."""
+    driver = driver_cls()
+    try:
+        with pytest.raises(ValueError, match="Invalid"):
+            await driver.load_from_arrow(table_name, [{"id": 1, "label": "ok"}], columns=columns)
+    finally:
+        await driver.close()

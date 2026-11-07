@@ -1366,7 +1366,7 @@ class GoogleCloudError(VertebraError):
     reason: str | None
     """Structured machine-readable reason extracted from `google.rpc.ErrorInfo`."""
 
-class GoogleCloudAuthError(GoogleCloudError):
+class GoogleCloudAuthError(GoogleCloudError, OperationalError):
     """Credentials could not be obtained or were rejected."""
 
 class SpannerError(GoogleCloudError, DatabaseError):
@@ -1381,7 +1381,7 @@ class BigQueryError(GoogleCloudError, DatabaseError):
 class BigQueryRowError(BigQueryError, DataError):
     """BigQuery Storage Write rejected rows; see `row_errors`."""
 
-    row_errors: list[dict[str, Any]]
+    row_errors: Sequence[dict[str, Any]]
     """Rejected {"index": int, "code": int, "message": str} row error dictionaries reported by BigQuery Storage Write."""
 
 @final

@@ -13,15 +13,15 @@ files:
 - src/rs/vertebra-postgres/tests/array_codecs.rs
 tests:
 - src/rs/vertebra-postgres/tests/array_codecs.rs
-plan_revision: 1
-plan_commit: null
+plan_revision: 2
+plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
 state_revision: 0
 claimed_by: null
 claimed_at: null
 commit: null
 verification_evidence: null
 created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-05T20:03:00Z'
+updated_at: '2026-11-06T06:30:00Z'
 requirements:
 - R11
 blocked_reason: null

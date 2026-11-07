@@ -368,6 +368,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
     ) -> Any:
         """Execute a GoogleSQL statement and return affected or produced row count."""
         _ = (statement_config, kwargs)
+        self._reject_tenant_id(tenant_id)
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
         params = self._normalize_params(parameters)
         return int(
@@ -393,6 +394,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
     ) -> Any:
         """Execute ``sql`` across multiple parameter sets and return total affected rows."""
         _ = (filters, statement_config, kwargs)
+        self._reject_tenant_id(tenant_id)
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
         return int(self._core.execute_many(sql_str, parameters))
 
@@ -418,6 +420,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
         tenant_id: str | None = None,
     ) -> Any:
         """Compile and execute a batch of statements sequentially or inside a BigQuery session transaction."""
+        self._reject_tenant_id(tenant_id)
         if hasattr(statements, "operations"):
             return super().execute_stack(statements, continue_on_error=continue_on_error)
         results: list[Any] = []
@@ -441,6 +444,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
     ) -> list[Any]:
         """Execute a ``SELECT`` query and hydrate rows into dictionaries or ``schema_type`` structs."""
         _ = kwargs
+        self._reject_tenant_id(tenant_id)
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
         params = self._normalize_params(parameters)
         res: list[Any] = self._core.select(sql_str, params, schema_type=schema_type)
@@ -457,6 +461,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
     ) -> Any:
         """Execute a ``SELECT`` query and return the first row, raising ``NotFoundError`` if empty."""
         _ = kwargs
+        self._reject_tenant_id(tenant_id)
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
         params = self._normalize_params(parameters)
         return self._core.select_one(sql_str, params, schema_type=schema_type)
@@ -472,6 +477,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
     ) -> Any | None:
         """Execute a ``SELECT`` query and return the first row or ``None``."""
         _ = kwargs
+        self._reject_tenant_id(tenant_id)
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
         params = self._normalize_params(parameters)
         return self._core.select_one_or_none(sql_str, params, schema_type=schema_type)
@@ -486,6 +492,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
     ) -> Any:
         """Execute a ``SELECT`` query and return the first scalar column of the first row."""
         _ = kwargs
+        self._reject_tenant_id(tenant_id)
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
         params = self._normalize_params(parameters)
         return self._core.select_value(sql_str, params)
@@ -498,6 +505,7 @@ class BigQuerySyncDriver(BaseSyncDriver):
         tenant_id: str | None = None,
     ) -> BigQueryDryRunResult:
         """Validate ``sql`` via ``jobs.insert(dryRun=True)`` and return byte and USD cost estimates."""
+        self._reject_tenant_id(tenant_id)
         res: BigQueryDryRunResult = self._core.dry_run(sql, parameters)
         return res
 
@@ -633,6 +641,13 @@ class BigQuerySyncDriver(BaseSyncDriver):
         """Close the underlying ``SyncBigQueryDriver``."""
         self._core.close()
 
+    @staticmethod
+    def _reject_tenant_id(tenant_id: str | None) -> None:
+        """Raise ``NotSupportedError`` when a caller requests BigQuery tenant session scoping."""
+        if tenant_id is not None:
+            msg = "Tenant session enforcement is unsupported for BigQuery"
+            raise NotSupportedError(msg)
+
     def _execute_stack_item(
         self,
         item: str | tuple[str, Mapping[str, Any] | Sequence[Any] | None],
@@ -726,6 +741,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
     ) -> Any:
         """Asynchronously execute a GoogleSQL statement and return affected or produced row count."""
         _ = (statement_config, kwargs)
+        BigQuerySyncDriver._reject_tenant_id(tenant_id)
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
         params = BaseSyncDriver._normalize_params(parameters)
         return int(
@@ -751,6 +767,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
     ) -> Any:
         """Asynchronously execute ``sql`` across multiple parameter sets and return total affected rows."""
         _ = (filters, statement_config, kwargs)
+        BigQuerySyncDriver._reject_tenant_id(tenant_id)
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
         return int(await self._core.execute_many(sql_str, parameters))
 
@@ -776,6 +793,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         tenant_id: str | None = None,
     ) -> Any:
         """Asynchronously compile and execute a batch of statements."""
+        BigQuerySyncDriver._reject_tenant_id(tenant_id)
         if hasattr(statements, "operations"):
             return await super().execute_stack(statements, continue_on_error=continue_on_error)
         results: list[Any] = []
@@ -799,6 +817,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
     ) -> list[Any]:
         """Asynchronously execute a ``SELECT`` query and hydrate rows."""
         _ = kwargs
+        BigQuerySyncDriver._reject_tenant_id(tenant_id)
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
         params = BaseSyncDriver._normalize_params(parameters)
         res: list[Any] = await self._core.select(sql_str, params, schema_type=schema_type)
@@ -815,6 +834,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
     ) -> Any:
         """Asynchronously execute a ``SELECT`` query and return the first row, raising ``NotFoundError`` if empty."""
         _ = kwargs
+        BigQuerySyncDriver._reject_tenant_id(tenant_id)
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
         params = BaseSyncDriver._normalize_params(parameters)
         return await self._core.select_one(sql_str, params, schema_type=schema_type)
@@ -830,6 +850,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
     ) -> Any | None:
         """Asynchronously execute a ``SELECT`` query and return the first row or ``None``."""
         _ = kwargs
+        BigQuerySyncDriver._reject_tenant_id(tenant_id)
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
         params = BaseSyncDriver._normalize_params(parameters)
         return await self._core.select_one_or_none(sql_str, params, schema_type=schema_type)
@@ -844,6 +865,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
     ) -> Any:
         """Asynchronously execute a ``SELECT`` query and return the first scalar value."""
         _ = kwargs
+        BigQuerySyncDriver._reject_tenant_id(tenant_id)
         sql_str = sql.sql if hasattr(sql, "sql") else str(sql)
         params = BaseSyncDriver._normalize_params(parameters)
         return await self._core.select_value(sql_str, params)
@@ -856,6 +878,7 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
         tenant_id: str | None = None,
     ) -> BigQueryDryRunResult:
         """Asynchronously validate ``sql`` via ``jobs.insert(dryRun=True)``."""
+        BigQuerySyncDriver._reject_tenant_id(tenant_id)
         res: BigQueryDryRunResult = await self._core.dry_run(sql, parameters)
         return res
 

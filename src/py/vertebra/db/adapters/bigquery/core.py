@@ -19,7 +19,12 @@ from vertebra._vertebra import (
     BigQueryError,
     hydrate_rows_vectorcall,
 )
-from vertebra.db.adapters.bigquery.config import BigQueryConfig, BigQueryDryRunResult, ObjectTableConfig
+from vertebra.db.adapters.bigquery.config import (
+    BigQueryConfig,
+    BigQueryDryRunResult,
+    BigQueryTableIdentifier,
+    ObjectTableConfig,
+)
 from vertebra.db.arrow import ARROW_SHM_THRESHOLD_ROWS, ArrowCursor, write_arrow_shm
 from vertebra.storage import AsyncObjectStore, SyncObjectStore
 from vertebra.telemetry.db_propagation import SqlTracePropagator
@@ -28,7 +33,6 @@ from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.schema import to_schema
 from vertebra.utils.serializers import decode_json, encode_json
-from vertebra.utils.text import split_qualified_identifier
 from vertebra.utils.type_converters import time_iso_convert
 from vertebra.utils.type_guards import get_msgspec_rename_config
 
@@ -230,21 +234,7 @@ class BigQueryCore:
     @staticmethod
     def split_table_parts(raw: str) -> list[str]:
         """Split a BigQuery table reference into `[project, dataset, table]`, `[dataset, table]`, or `[table]`."""
-        cleaned = raw.strip().replace("`", "")
-        if not cleaned:
-            return []
-        if ":" in cleaned:
-            first, rest = cleaned.split(":", 1)
-            if "." in first:
-                if ":" in rest:
-                    proj_slug, ds_and_table = rest.split(":", 1)
-                    return [f"{first}:{proj_slug}", *split_qualified_identifier(ds_and_table)]
-                dot_parts = split_qualified_identifier(rest)
-                if dot_parts:
-                    return [f"{first}:{dot_parts[0]}", *dot_parts[1:]]
-                return [cleaned]
-            return [first, *split_qualified_identifier(rest)]
-        return split_qualified_identifier(cleaned)
+        return BigQueryTableIdentifier.split_parts(raw)
 
     @classmethod
     def try_parse_table_reference(
@@ -385,15 +375,17 @@ class BigQueryCore:
         escaped_uris = ", ".join("'" + u.replace("'", "\\'") + "'" for u in uris)
         return f"LOAD DATA {verb} {table}\nFROM FILES (\n  format = '{fmt_upper}',\n  uris = [{escaped_uris}]\n)"
 
-    @staticmethod
+    @classmethod
     def build_object_table_select_sql(
+        cls,
         table_name: str,
         *,
         where: str | None = None,
         limit: int | None = None,
     ) -> str:
         """Build a `SELECT` query against a BigQuery Object Table."""
-        sql = f"SELECT uri, generation, content_type, size, md5_hash, updated FROM {table_name}"
+        quoted_table = cls.validate_and_quote_table(table_name)
+        sql = f"SELECT uri, generation, content_type, size, md5_hash, updated FROM {quoted_table}"
         if where:
             sql += f" WHERE {where}"
         if limit is not None:
@@ -556,6 +548,11 @@ class BigQueryCore:
                 if limit is not None and len(rows) >= limit:
                     return rows
         return rows
+
+    @classmethod
+    def validate_and_quote_table(cls, table: str, *, field_name: str = "table") -> str:
+        """Validate a BigQuery table reference and return a canonical backtick-quoted SQL identifier."""
+        return BigQueryTableIdentifier.validate_and_quote(table, field_name=field_name)
 
     @classmethod
     def _encode_param_descriptor(

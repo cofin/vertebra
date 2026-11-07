@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+import types
 from typing import Any
 
 import pytest
@@ -13,7 +15,7 @@ from vertebra.extensions.sqlalchemy import (
     SyncMySQLDialect,
     Vector,
 )
-from vertebra.typing import MissingDependencyError
+from vertebra.typing import MissingDependencyError, reset_dependency_cache
 
 
 class FakeCursor:
@@ -304,3 +306,87 @@ def test_dbapi_connection_routes_mysql_and_dialect_compilation() -> None:
 
     adapted = SyncMySQLDialect.type_descriptor(vec)
     assert adapted is vec
+
+
+@pytest.mark.parametrize("finish_action", ["commit", "rollback"])
+def test_sync_mysql_driver_transaction_pins_connection_without_touching_idle_pool(finish_action: str) -> None:
+    """Explicit begin() pins a single connection so commit/rollback never mutates unrelated idle connections."""
+    conns_created: list[FakeSyncConnection] = []
+
+    def make_conn(*args: Any, **kwargs: Any) -> FakeSyncConnection:
+        _ = (args, kwargs)
+        conn = FakeSyncConnection(**kwargs)
+        conns_created.append(conn)
+        return conn
+
+    cfg = MySQLConfig(dsn="mysql://localhost:3306/app", min_size=1, max_size=4)
+    driver = SyncMySQLDriver(cfg, connect_factory=make_conn)
+    unrelated_idle = FakeSyncConnection()
+    candidate_conn = FakeSyncConnection()
+    driver._idle_conns.extend([unrelated_idle, candidate_conn])
+    try:
+        driver.begin()
+        pinned = driver._tx_conn
+        assert pinned is candidate_conn
+        other_idle = FakeSyncConnection()
+        driver._idle_conns.append(other_idle)
+
+        rows = driver.execute_tuples("SELECT id, name FROM items")
+        assert rows == [(1, "alpha"), (2, "beta")]
+        assert len(pinned.cursors) == 1
+        assert len(unrelated_idle.cursors) == 0
+        assert len(other_idle.cursors) == 0
+
+        if finish_action == "commit":
+            driver.commit()
+            assert pinned.committed is True
+            assert pinned.rolled_back is False
+        else:
+            driver.rollback()
+            assert pinned.rolled_back is True
+            assert pinned.committed is False
+
+        assert unrelated_idle.committed is False
+        assert unrelated_idle.rolled_back is False
+        assert other_idle.committed is False
+        assert other_idle.rolled_back is False
+    finally:
+        driver.close()
+
+
+@pytest.mark.anyio
+async def test_async_mysql_driver_ensure_pool_resolves_iam_password_async(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AsyncMySQLDriver._ensure_pool awaits parse_dsn_params_async() and passes the IAM token to asyncmy.create_pool."""
+    captured_kwargs: dict[str, Any] = {}
+    pool = FakeAsyncPool()
+
+    async def fake_create_pool(**kwargs: Any) -> FakeAsyncPool:
+        captured_kwargs.update(kwargs)
+        return pool
+
+    fake_asyncmy = types.ModuleType("asyncmy")
+    fake_asyncmy.__dict__["create_pool"] = fake_create_pool
+    monkeypatch.setitem(sys.modules, "asyncmy", fake_asyncmy)
+    reset_dependency_cache("asyncmy")
+
+    cfg = MySQLConfig(
+        dsn="mysql://iam-user@10.0.0.8:3307/prod_db",
+        enable_iam_auth=True,
+        iam_auth_options={"access_token": "mock-oauth-token"},
+        min_size=2,
+        max_size=6,
+    )
+    driver = AsyncMySQLDriver(cfg)
+    try:
+        rows = await driver.execute_tuples("SELECT id, name FROM async_items")
+        assert rows == [(10, "async_one"), (20, "async_two")]
+        assert captured_kwargs["host"] == "10.0.0.8"
+        assert captured_kwargs["port"] == 3307
+        assert captured_kwargs["user"] == "iam-user"
+        assert captured_kwargs["password"] == "mock-oauth-token"
+        assert captured_kwargs["db"] == "prod_db"
+        assert captured_kwargs["minsize"] == 2
+        assert captured_kwargs["maxsize"] == 6
+    finally:
+        await driver.close()
+        reset_dependency_cache("asyncmy")

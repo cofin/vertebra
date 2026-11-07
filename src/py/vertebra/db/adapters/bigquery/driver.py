@@ -29,6 +29,7 @@ from vertebra.db.driver._sync import SyncDatabaseDriver
 from vertebra.telemetry.db_propagation import SqlTracePropagator
 from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.schema import to_value_type
+from vertebra.utils.text import quote_dialect_identifier, validate_identifier
 
 if TYPE_CHECKING:
     from vertebra._bigquery import AsyncBigQueryClient, SyncBigQueryClient
@@ -287,7 +288,11 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         **kwargs: Any,
     ) -> int:
         """Bulk-load an Arrow IPC stream, `ArrowCursor`, or `pyarrow` table via Storage Write API v1."""
-        _ = (columns, kwargs)
+        _ = kwargs
+        BigQueryCore.validate_and_quote_table(table_name)
+        if columns is not None:
+            for col in columns:
+                validate_identifier(str(col), "column", allow_dots=False)
         client = self._ensure_client()
         ipc_bytes = BigQueryCore.coerce_arrow_ipc_bytes(data)
         if not ipc_bytes:
@@ -518,13 +523,16 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         table: str,
         ipc_bytes: bytes,
     ) -> int:
+        quoted_table = BigQueryCore.validate_and_quote_table(table)
         rows = BigQueryCore.arrow_ipc_bytes_to_dicts(ipc_bytes)
         if not rows:
             return 0
         cols = list(rows[0].keys())
-        col_list = ", ".join(cols)
+        for col in cols:
+            validate_identifier(str(col), "column", allow_dots=False)
+        col_list = ", ".join(quote_dialect_identifier(str(c), "bigquery") for c in cols)
         placeholders = ", ".join(f"@{c}" for c in cols)
-        sql = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})"
+        sql = f"INSERT INTO {quoted_table} ({col_list}) VALUES ({placeholders})"
         return self.execute_many(sql, rows)
 
 
@@ -776,7 +784,11 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
         **kwargs: Any,
     ) -> int:
         """Asynchronously bulk-load an Arrow IPC stream, `ArrowCursor`, or `pyarrow` table."""
-        _ = (columns, kwargs)
+        _ = kwargs
+        BigQueryCore.validate_and_quote_table(table_name)
+        if columns is not None:
+            for col in columns:
+                validate_identifier(str(col), "column", allow_dots=False)
         client = self._ensure_client()
         ipc_bytes = BigQueryCore.coerce_arrow_ipc_bytes(data)
         if not ipc_bytes:
@@ -1007,11 +1019,14 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
         table: str,
         ipc_bytes: bytes,
     ) -> int:
+        quoted_table = BigQueryCore.validate_and_quote_table(table)
         rows = BigQueryCore.arrow_ipc_bytes_to_dicts(ipc_bytes)
         if not rows:
             return 0
         cols = list(rows[0].keys())
-        col_list = ", ".join(cols)
+        for col in cols:
+            validate_identifier(str(col), "column", allow_dots=False)
+        col_list = ", ".join(quote_dialect_identifier(str(c), "bigquery") for c in cols)
         placeholders = ", ".join(f"@{c}" for c in cols)
-        sql = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})"
+        sql = f"INSERT INTO {quoted_table} ({col_list}) VALUES ({placeholders})"
         return await self.execute_many(sql, rows)

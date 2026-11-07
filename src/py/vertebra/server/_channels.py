@@ -163,7 +163,11 @@ class ChannelBus:
                     except (ValueError, UnicodeDecodeError):
                         envelope = None
                     if isinstance(envelope, dict) and {"event_id", "channel", "operation"} <= envelope.keys():
-                        change = self._change_feed.hydrate_notification(payload)
+                        change = (
+                            await asyncio.to_thread(self._change_feed.hydrate_notification, payload)
+                            if self._change_feed.store is not None
+                            else self._change_feed.hydrate_notification(payload)
+                        )
                         channel, payload = self._decode_change_event(change)
                 self._fan_in_local(channel, payload)
 

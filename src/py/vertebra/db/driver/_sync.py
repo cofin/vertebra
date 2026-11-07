@@ -14,6 +14,7 @@ from vertebra.db.arrow import (
 )
 from vertebra.db.driver._common import BaseDatabaseConfig, CommonDriverMixin
 from vertebra.utils.schema import to_value_type
+from vertebra.utils.text import quote_dialect_identifier, validate_identifier
 
 __all__ = ("SyncDatabaseDriver",)
 
@@ -209,10 +210,18 @@ class SyncDatabaseDriver[ConfigT: BaseDatabaseConfig](CommonDriverMixin[ConfigT]
         **kwargs: Any,
     ) -> int:
         """Bulk-load an `ArrowCursor`, PyArrow Table, Polars DataFrame, or row sequence into `table_name`."""
+        validate_identifier(table_name, "table_name", allow_dots=True)
+        if columns is not None:
+            for col in columns:
+                validate_identifier(str(col), "column", allow_dots=False)
         rows, cols = _table_to_rows_and_cols(data, columns)
+        for col in cols:
+            validate_identifier(str(col), "column", allow_dots=False)
         if not rows or not cols:
             return 0
-        col_list = ", ".join(cols)
+        dialect = getattr(self, "dialect", "ansi")
+        quoted_table = quote_dialect_identifier(table_name, dialect)
+        col_list = ", ".join(quote_dialect_identifier(str(col), dialect) for col in cols)
         placeholders = ", ".join("?" for _ in cols)
-        sql = f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders})"
+        sql = f"INSERT INTO {quoted_table} ({col_list}) VALUES ({placeholders})"
         return self.execute_many(sql, rows, **kwargs)

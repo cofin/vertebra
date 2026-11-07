@@ -25,26 +25,42 @@ class PythonBuildInfo(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """Immutable snapshot of a CPython interpreter's optimization configuration."""
 
     version: str
+    """CPython semantic version string."""
     is_pgo: bool
+    """Whether CPython was compiled with Profile-Guided Optimization."""
     is_lto: bool
+    """Whether CPython was compiled with Link-Time Optimization."""
     is_debug: bool
+    """Whether CPython was compiled with debug assertions enabled."""
     architecture: str
+    """Host CPU architecture reported by platform.machine()."""
     is_tail_call_interp: bool = False
+    """Whether the tail-calling bytecode interpreter is enabled."""
     is_jit_available: bool = False
+    """Whether the copy-and-patch JIT compiler was built into CPython."""
     is_jit_enabled: bool = False
+    """Whether the copy-and-patch JIT compiler is active at runtime."""
     is_free_threaded: bool = False
+    """Whether the GIL is disabled (`Py_GIL_DISABLED=1`)."""
     has_frame_pointers: bool = False
+    """Whether frame pointers were preserved during compilation."""
 
 
 class PlatformSupport(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """CPython optimization availability record for an OS and CPU architecture pair."""
 
     os_name: str
+    """Normalized operating system identifier (`linux`, `darwin`, `windows`)."""
     architecture: str
+    """Normalized CPU architecture identifier (`x86_64`, `aarch64`, `arm64`, `x64`)."""
     cpython_pgo: bool
+    """Whether CPython PGO builds are supported on this platform."""
     cpython_lto: bool
+    """Whether CPython LTO builds are supported on this platform."""
     cpython_bolt: bool
+    """Whether LLVM BOLT post-link optimization is supported on this platform."""
     notes: str
+    """Human-readable summary of toolchain optimization support."""
 
 
 CPYTHON_PGO_FLAGS: dict[str, str] = {

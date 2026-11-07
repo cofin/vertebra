@@ -4,18 +4,18 @@ flow_id: native-postgres-driver
 title: Complete standalone native PostgreSQL driver
 description: One complete PR implementing native PostgreSQL transport/authentication, typed queries and pools, COPY/Arrow,
   pipelines/cancellation, notifications/replication and production adapter cutover.
-state: draft
+state: planned
 parent_prd: native-data-platform
 research:
 - research/protocol-and-execution_20261105.md
 - research/cloud-material_20261105.md
-plan_revision: 1
-plan_commit: null
+plan_revision: 2
+plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
 created_at: '2026-11-03T04:05:00Z'
-updated_at: '2026-11-05T20:03:00Z'
+updated_at: '2026-11-06T06:30:00Z'
 tags:
 - rust
 - postgres
@@ -32,12 +32,12 @@ tags:
 ### 1.1 Upstream Execution Baseline
 
 The user decision is: “Keep the complete driver in one PR.” All worksheets run
-on `feat/native-postgres-driver`, stacked on `feat/db-engine-primitives` at
-`6b6ea07f9e9c118182256fd34a8bdde5dca68896`. Source behavior last changed at
-`5ad85a1b406f5b3ed01ce8d1f536e02383bc89e1`. The database foundation and engine
-primitives are complete; [PR76](https://github.com/cofin/vertebra/pull/76) and
-[PR77](https://github.com/cofin/vertebra/pull/77) pass their existing hosted checks.
-Those results do not validate this driver.
+on `feat/native-postgres-driver`, stacked on `feat/storage-completeness` above
+`main @ 80ff8a65e43a2bcef9e48a7763e89a7352118232` and the post-merge review
+remediation on `fix/post-merge-review-and-plan-sync` (`7657e8b7c2c96bdda6821aec70a2b603f438a127`).
+The database foundation ([PR #76](https://github.com/cofin/vertebra/pull/76), `21c99f95`) and
+engine primitives ([PR #77](https://github.com/cofin/vertebra/pull/77), `80ff8a65`) are squash-merged
+on `main`. Those results do not validate this driver.
 
 The complete charter requires more than the default eight worksheets. The user's
 one-PR scope governs delivery; small worksheets and signed local commits govern
@@ -368,13 +368,14 @@ The [planning review and adjudication](review.md) records adopted findings, inde
 
 ## 5. Continuity Snapshot
 
-- State is draft; all worksheets are pending, revision1, with null approval anchor.
-  No native PostgreSQL production implementation or conformance acceptance exists.
-- Delivery is the complete driver on one branch/PR. Intermediate tasks do not
-  complete/archive this flow or enable a partial native adapter.
-- Existing stacked PRs76/77 are green at their recorded heads. Their CI covers the
-  preceding source only; this plan still needs its own execution evidence.
+- State is `planned`; all 102 worksheets are `pending`, `plan_revision: 2`, anchored at
+  `plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"`. No native PostgreSQL
+  production implementation or conformance acceptance exists yet.
+- Delivery is the complete driver on one branch/PR (`feat/native-postgres-driver`).
+  Intermediate tasks do not complete/archive this flow or enable a partial native adapter.
+- Merged foundation PRs [#76](https://github.com/cofin/vertebra/pull/76) (`21c99f95`) and
+  [#77](https://github.com/cofin/vertebra/pull/77) (`80ff8a65`) cover the preceding source only;
+  this plan requires its own execution evidence.
 - Primary-source research and read-only PG18.3 prototypes establish protocol/API
   facts. They are not PG14–18, cloud-service, installed-wheel or performance acceptance.
-- After independent plan review and approval, stamp the actual HEAD across the spec
-  and worksheets, then `/flow:implement native-postgres-driver` from the first task.
+- Next action on its stacked branch: `/flow:implement native-postgres-driver` from `t01`.

@@ -11,8 +11,8 @@ files:
 - src/rs/vertebra-db/src/py_async.rs
 tests:
 - src/rs/vertebra-db/src/py_async.rs::tests::callback_registration_failure_aborts_worker
-plan_revision: 1
-plan_commit: null
+plan_revision: 2
+plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -23,7 +23,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-05T20:03:00Z'
+updated_at: '2026-11-06T06:30:00Z'
 commit: null
 tags:
 - postgres
@@ -50,7 +50,7 @@ Ownership is exactly the frontmatter list. Shared files are changed only after p
 ## Steps
 
 1. Add RED in existing canonical py_async.rs::tests: a Python asyncio.Future subclass raises from add_done_callback; the Rust future captures DropFlag before first poll and remains pending. Assert original PyErr propagates, future drop acknowledgment eventually arrives and map_ok never publishes. Wait for acknowledgment using a deterministic channel/condvar while py.detach, never sleeps or a GIL-held abort/join wait. A setup failure before future's first poll must also drop captured resources.
-2. spawn_rust_db_task_with_attr currently spawns before Py::new(DbTaskCanceller)/add_done_callback; dropping JoinHandle on error detaches worker. Introduce one private armed abort-on-drop worker owner immediately after spawn and before either fallible setup step. It owns JoinHandle; Drop requests abort and drops handle/output. Preserve original PyErr for allocation/registration failures. Both paths share the same guard, not only a catch around callback registration.
+2. `spawn_rust_db_task_with_attr` currently calls `abort.abort()` in two separate error branches (`Py::new(DbTaskCanceller)` and `add_done_callback`) before spawning the monitor task. Replace those ad-hoc `abort.abort()` branches with one private armed abort-on-drop worker owner constructed immediately after `spawn` and before either fallible setup step. It owns `JoinHandle`; `Drop` requests abort and drops handle/output. Preserve original `PyErr` for allocation/registration failures. Both paths share the same guard rather than separate manual abort branches.
 3. Only after setup succeeds move the armed guard into existing completion monitor; monitor awaits worker and disarms after join completion, so failed monitor setup/drop cannot leave a worker detached. Keep existing panic/error/cancellation mapping and per-extension drainer behavior unchanged. Cancellation/drop cleanup is eventual after runtime abort acknowledgment, not synchronous worker destruction at Python return. No new runtime/queue or public helper.
 4. Run existing shared cancellation/panic/drainer regressions as well as new test. Commit fix(db): abort workers on completion setup errors.
 

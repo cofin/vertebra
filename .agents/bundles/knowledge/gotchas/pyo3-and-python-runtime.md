@@ -16,13 +16,19 @@ generated:
   by: flow/0.26.0
   at: '2026-11-04T04:33:00Z'
 verified:
+- by: agent:flow-review
+  at: '2026-11-06T06:10:00Z'
+  commit: 7657e8b7c2c96bdda6821aec70a2b603f438a127
 - by: agent:codex
   at: '2026-11-05T06:09:26Z'
-  commit: 5ad85a1b406f5b3ed01ce8d1f536e02383bc89e1
-- by: agent:flow-review
-  at: '2026-11-05T00:35:59Z'
-  commit: 4ce057e5aff909fcda2488cc0f6c4882ad0d38f0
+  commit: 80ff8a65e43a2bcef9e48a7763e89a7352118232
 sources:
+- id: src-vertebra-bigquery-src-lib-rs
+  resource: src/rs/vertebra-bigquery/src/lib.rs
+  title: Rust implementation module (src/rs/vertebra-bigquery/src/lib.rs)
+- id: src-vertebra-spanner-src-lib-rs
+  resource: src/rs/vertebra-spanner/src/lib.rs
+  title: Rust implementation module (src/rs/vertebra-spanner/src/lib.rs)
 - id: src-stack-implementation
   resource: src/py/vertebra/extensions/sqlspec/adapters.py
   title: Prepared SQLSpec result construction and native bind execution
@@ -154,7 +160,7 @@ sources:
 
 ## 2. `#[pymodule(gil_used = false)]`, Global `freelist` Mutex & `RsgiReadyAwaitable` on `3.14t`/`3.15t`
 
-- **Missing `gil_used = false` Re-Enables the GIL**: Every `#[pymodule]` ([`vertebra-py/src/lib.rs`](../../../../src/rs/vertebra-py/src/lib.rs)[^src-vertebra-py-src-lib-rs], [`vertebra-bundler/src/lib.rs`](../../../../src/rs/vertebra-bundler/src/lib.rs)[^src-vertebra-bundler-src-lib-rs], [`vertebra-storage/src/lib.rs`](../../../../src/rs/vertebra-storage/src/lib.rs)[^src-vertebra-storage-src-lib-rs]) must keep `#[pymodule(gil_used = false)]`. [`GilAuditReport.audit()`](../../../../src/py/vertebra/server/_gil_audit.py)[^src-server-gil-audit-py] inspects loaded extensions at startup and raises `RuntimeError` when `VERTEBRA_STRICT_FREE_THREADING=1`.
+- **Missing `gil_used = false` Re-Enables the GIL**: Every `#[pymodule]` ([`vertebra-py/src/lib.rs`](../../../../src/rs/vertebra-py/src/lib.rs)[^src-vertebra-py-src-lib-rs], [`vertebra-bundler/src/lib.rs`](../../../../src/rs/vertebra-bundler/src/lib.rs)[^src-vertebra-bundler-src-lib-rs], [`vertebra-storage/src/lib.rs`](../../../../src/rs/vertebra-storage/src/lib.rs)[^src-vertebra-storage-src-lib-rs], [`vertebra-bigquery/src/lib.rs`](../../../../src/rs/vertebra-bigquery/src/lib.rs)[^src-vertebra-bigquery-src-lib-rs], [`vertebra-spanner/src/lib.rs`](../../../../src/rs/vertebra-spanner/src/lib.rs)[^src-vertebra-spanner-src-lib-rs]) must keep `#[pymodule(gil_used = false)]`. [`GilAuditReport.audit()`](../../../../src/py/vertebra/server/_gil_audit.py)[^src-server-gil-audit-py] inspects loaded extensions at startup and raises `RuntimeError` when `VERTEBRA_STRICT_FREE_THREADING=1`.
 - **PyO3 `0.30.1` `freelist` Global `Mutex` Contention**: Under `Py_GIL_DISABLED`, PyO3 `0.30.1` protects `#[pyclass(freelist = N)]` with a global `Mutex`, serializing allocations across worker threads. Gate `freelist = 128` behind `#[cfg_attr(not(Py_GIL_DISABLED), pyclass(..., freelist = 128, immutable_type))]` and omit `freelist` under `#[cfg_attr(Py_GIL_DISABLED, pyclass(..., immutable_type))]` so free-threaded builds use mimalloc thread-local heaps directly.
 - **`RsgiReadyAwaitable` Must Be `frozen`**: In [`rsgi/http.rs`](../../../../src/rs/vertebra-py/src/rsgi/http.rs)[^src-vertebra-py-src-rsgi-http-rs], `RsgiReadyAwaitable` (`_RsgiReadyAwaitable`) is shared as a cached singleton across concurrent coroutines on `3.14t`/`3.15t`; `__await__` and `__next__` must take `&self` (`frozen`), never `&mut self` (which raises `PyBorrowMutError` under concurrent awaits).
 
@@ -170,7 +176,7 @@ sources:
 - **`PyBuffer_FillInfo` Calls `Py_XNewRef` Internally**: In [`Request::__getbuffer__`](../../../../src/rs/vertebra-py/src/request.rs)[^src-vertebra-py-src-request-rs], pass borrowed `slf.as_ptr()` to `pyo3::ffi::PyBuffer_FillInfo` — never `slf.into_ptr()`. `PyBuffer_FillInfo` already increments `view.obj`'s reference count via `Py_XNewRef`, so passing an owned pointer leaks one reference per `memoryview(req)` (`Request` + `Arc<BatchSnapshot>`) on release. Note `Request.body_view` now delegates to `PyMemoryView_FromObject(slf)` so the `Arc<BatchSnapshot>` stays anchored until the `memoryview` is released or GC'd, and `.pyi` stubs must declare PEP 688 `def __buffer__(self, flags: int, /) -> memoryview: ...` for `mypy.stubtest`.
 - **`PYO3_PYTHON` & Relocatable `uv` Interpreters in `Topology::Embedded` (`main.rs`)**: Building `vertebra-http` without `PYO3_PYTHON="$(CURDIR)/.venv/bin/python"` can link `vertebra-server` against a bare system `libpython` missing stdlib C extensions (`_socket`) or `.venv` `site-packages`. Both `Makefile` (`dev` and `build`) and [`main.rs`](../../../../src/rs/vertebra-http/src/main.rs) (`prepare_embedded_python_env` prepending `.venv/bin` to `PATH` before CPython init and `ensure_embedded_python_path` injecting `.venv` `site-packages`) ensure the embedded interpreter always resolves the project `.venv`.
 - **Native Request vs Pure-Python Framework Types**: Native request-path classes (`Request`, `Response`, `Headers`, `AsgiScope`, `WsgiEnviron`) live in [`vertebra._vertebra`](../../../../src/rs/vertebra-py/src/lib.rs), whereas [`_asgi/_wire.py`](../../../../src/py/vertebra/server/_asgi/_wire.py)[^src-server-asgi-wire-py] provides wire/header helpers, [`_wsgi/_adapter.py`](../../../../src/py/vertebra/server/_wsgi/_adapter.py)[^src-server-wsgi-adapter-py] defines `WsgiAdapter`, and `vertebra.framework._router` defines pure-Python framework `Request`/`Response` classes. Import native FFI types explicitly from `vertebra._vertebra` for `isinstance` checks.
-- **Root vs Crate-Local `pyproject.toml` in Multi-Extension `maturin develop`**: `src/rs/vertebra-bundler/pyproject.toml` and `src/rs/vertebra-storage/pyproject.toml` declare their `module-name` (`vertebra._bundler`, `vertebra._storage`) locally and require `-m <Cargo.toml>`, whereas `vertebra-py` relies on the repository-root [`pyproject.toml`](../../../../pyproject.toml)[^src-pyproject-toml] (`[tool.maturin] module-name = "vertebra._vertebra"`, `python-source = "src/py"`). Always run `maturin develop` for `vertebra-py` from repository root **without** `-m src/rs/vertebra-py/Cargo.toml` (as enforced in `Makefile` and `vertebra.build.packaging.pgo._maturin_develop_command`).
+- **Root vs Crate-Local `pyproject.toml` in Multi-Extension `maturin develop`**: `src/rs/vertebra-{bundler,storage,bigquery,spanner}/pyproject.toml` declare their `module-name` (`vertebra._bundler`, `vertebra._storage`, `vertebra._bigquery`, `vertebra._spanner`) and source/stub ownership locally and require `-m <Cargo.toml>`, whereas `vertebra-py` relies on the repository-root [`pyproject.toml`](../../../../pyproject.toml)[^src-pyproject-toml] (`[tool.maturin] module-name = "vertebra._vertebra"`, `python-source = "src/py"`). Always run `maturin develop` for `vertebra-py` from repository root **without** `-m src/rs/vertebra-py/Cargo.toml` (as enforced in `Makefile` and `vertebra.build.packaging.pgo._maturin_develop_command`).
 - **`CARGO_TARGET_DIR` Binary Freshness**: [`find_server_binary()`](../../../../src/py/vertebra/supervisor/_supervisor.py)[^src-supervisor-supervisor-py] compares `st_mtime_ns` across `CARGO_TARGET_DIR`, `target/{release,debug}`, `src/rs/target/{release,debug}`, and `/tmp/vtb-cargo-target` so `make dev` never shadows a newer `make build` binary (or vice versa), and always run `make dev` after Rust PyO3 edits before `pytest`. Keep `duckdb`, `spikard`, and `granian` isolated in `[dependency-groups].bench` in [`pyproject.toml`](../../../../pyproject.toml).
 
 ## 5. Litestar v2 vs v3 Offload & Fast-Path Disqualifier Traps (`extensions/litestar/`)
@@ -262,3 +268,5 @@ Provenance sources: [^src-vertebra-py-src-transport-rs].
 [^src-bigquery-bind-types]: `src/py/vertebra/db/adapters/bigquery/core.py` — Type-sensitive native BOOL, INT64 and FLOAT64 parameter encoding.
 [^src-gcp-tenant-bigquery]: `src/py/vertebra/extensions/sqlspec/bigquery.py` — Early unsupported tenant enforcement in BigQuery constructors.
 [^src-gcp-tenant-spanner]: `src/py/vertebra/extensions/sqlspec/spanner.py` — Early unsupported tenant enforcement in Spanner constructors.
+[^src-vertebra-bigquery-src-lib-rs]: `src/rs/vertebra-bigquery/src/lib.rs` — Rust implementation module (src/rs/vertebra-bigquery/src/lib.rs).
+[^src-vertebra-spanner-src-lib-rs]: `src/rs/vertebra-spanner/src/lib.rs` — Rust implementation module (src/rs/vertebra-spanner/src/lib.rs).

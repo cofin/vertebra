@@ -166,16 +166,34 @@ class RedisConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
 
     def pool_key(self) -> tuple[Any, ...]:
         """Return the canonical shared-pool fingerprint tuple."""
-        return (self.dialect, self.url)
-
-    def build_sync_driver(self, registry: Any) -> Any:
-        """Instantiate the synchronous RESP3 driver for this configuration."""
-        _ = registry
-        sync_cls, _ = self.resolve_driver_classes()
-        return sync_cls(self)
-
-    def build_async_driver(self, registry: Any) -> Any:
-        """Instantiate the asynchronous RESP3 driver for this configuration."""
-        _ = registry
-        _, async_cls = self.resolve_driver_classes()
-        return async_cls(self)
+        memorystore_id = getattr(self, "memorystore_instance_id", None) or ""
+        default_tracking = self.dialect == "valkey"
+        if (
+            not self.username
+            and self.protocol == 3
+            and self.topology == "standalone"
+            and not self.effective_sentinel_master_name
+            and not self.sentinel_nodes
+            and not self.effective_cluster_enabled
+            and not self.cluster_nodes
+            and self.effective_tracking_enabled is default_tracking
+            and not self.client_tracking_prefixes
+            and not self.effective_iam_enabled
+            and not memorystore_id
+        ):
+            return (self.dialect, self.url)
+        return (
+            self.dialect,
+            self.url,
+            self.username or "",
+            self.protocol,
+            self.topology,
+            self.effective_sentinel_master_name or "",
+            self.sentinel_nodes,
+            self.effective_cluster_enabled,
+            self.cluster_nodes,
+            self.effective_tracking_enabled,
+            self.client_tracking_prefixes,
+            self.effective_iam_enabled,
+            memorystore_id,
+        )

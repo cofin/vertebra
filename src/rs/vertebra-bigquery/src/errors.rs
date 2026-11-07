@@ -44,12 +44,14 @@ fn stand_in_exception_types(py: Python<'_>) -> PyResult<BigQueryExceptionTypes> 
         Err(_) => py.get_type::<pyo3::exceptions::PyException>(),
     };
     let db = new_stand_in_class(py, "DatabaseError", &PyTuple::new(py, [&root])?)?;
+    let operational =
+        new_stand_in_class(py, "OperationalError", &PyTuple::new(py, [db.bind(py)])?)?;
     let data = new_stand_in_class(py, "DataError", &PyTuple::new(py, [db.bind(py)])?)?;
     let gc = new_stand_in_class(py, "GoogleCloudError", &PyTuple::new(py, [&root])?)?;
     let auth = new_stand_in_class(
         py,
         "GoogleCloudAuthError",
-        &PyTuple::new(py, [gc.bind(py)])?,
+        &PyTuple::new(py, [gc.bind(py), operational.bind(py)])?,
     )?;
     let bigquery = new_stand_in_class(
         py,
@@ -69,8 +71,8 @@ fn stand_in_exception_types(py: Python<'_>) -> PyResult<BigQueryExceptionTypes> 
 }
 
 fn resolve_exception_types(py: Python<'_>) -> PyResult<&'static BigQueryExceptionTypes> {
-    BIGQUERY_EXCEPTION_TYPES.get_or_try_init(py, || {
-        if let Ok(core_mod) = py.import("vertebra._vertebra") {
+    BIGQUERY_EXCEPTION_TYPES.get_or_try_init(py, || match py.import("vertebra._vertebra") {
+        Ok(core_mod) => {
             let auth = core_mod
                 .getattr("GoogleCloudAuthError")?
                 .cast_into::<PyType>()?
@@ -83,13 +85,16 @@ fn resolve_exception_types(py: Python<'_>) -> PyResult<&'static BigQueryExceptio
                 .getattr("BigQueryRowError")?
                 .cast_into::<PyType>()?
                 .unbind();
-            return Ok(BigQueryExceptionTypes {
+            Ok(BigQueryExceptionTypes {
                 auth,
                 bigquery,
                 bigquery_row,
-            });
+            })
         }
-        stand_in_exception_types(py)
+        Err(err) if err.is_instance_of::<pyo3::exceptions::PyModuleNotFoundError>(py) => {
+            stand_in_exception_types(py)
+        }
+        Err(err) => Err(err),
     })
 }
 

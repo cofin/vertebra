@@ -176,7 +176,6 @@ impl ShmRegion {
             return Err(ShmError::InvalidSize);
         }
         validate_name(name)?;
-        let requested_size = size;
         let size = align_to_page(size)?;
         let cname = CString::new(name)?;
         // SAFETY: `cname` is a validated NUL-terminated `CString`.
@@ -191,15 +190,17 @@ impl ShmRegion {
         // SAFETY: `libc::stat` is plain-old-data valid when zero-initialized, and `fd` is owned here.
         unsafe {
             let mut st: libc::stat = core::mem::zeroed();
-            if libc::fstat(fd, &mut st) == 0
-                && st.st_size >= 0
-                && (requested_size as u64) > (st.st_size as u64)
-            {
+            if libc::fstat(fd, &mut st) != 0 {
+                let err = io::Error::last_os_error();
+                libc::close(fd);
+                return Err(err.into());
+            }
+            if st.st_size < 0 || (size as u64) > (st.st_size as u64) {
                 libc::close(fd);
                 return Err(ShmError::InvalidSize);
             }
         }
-        // SAFETY: `fd` is an open shared-memory descriptor backed by at least `requested_size` bytes.
+        // SAFETY: `fd` is an open shared-memory descriptor backed by at least `size` page-aligned bytes.
         match unsafe { map_fd_region(fd, size) } {
             Ok(region) => Ok(region),
             Err(err) => {
@@ -722,12 +723,16 @@ pub fn shm_unlink_named(name: &str) -> Result<(), ShmError> {
 }
 
 fn align_to_page(size: usize) -> Result<usize, ShmError> {
-    let page = page_size()?;
-    Ok(size.div_ceil(page) * page)
+    let page = os_page_size()?;
+    size.div_ceil(page)
+        .checked_mul(page)
+        .ok_or(ShmError::InvalidSize)
 }
 
-fn page_size() -> Result<usize, ShmError> {
+/// Return the operating system virtual memory page size in bytes.
+pub fn os_page_size() -> Result<usize, ShmError> {
     #[cfg(unix)]
+    // SAFETY: `libc::sysconf(_SC_PAGESIZE)` is a thread-safe POSIX query taking no pointers.
     unsafe {
         let size = libc::sysconf(libc::_SC_PAGESIZE);
         if size <= 0 {
@@ -738,6 +743,7 @@ fn page_size() -> Result<usize, ShmError> {
     #[cfg(windows)]
     {
         use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+        // SAFETY: `SYSTEM_INFO` is plain-old-data valid when zero-initialized.
         unsafe {
             let mut info: SYSTEM_INFO = core::mem::zeroed();
             GetSystemInfo(&mut info);
@@ -942,6 +948,28 @@ mod tests {
         assert!(weak.upgrade().is_none());
         assert!(ShmRegion::open_named(&name, 4096).is_ok());
         drop(replacement);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_named_rejects_under_page_truncated_backing() {
+        let tmp_name = format!("/tmp/vtb-trunc-{}", std::process::id());
+        let cname = CString::new(tmp_name.as_str()).unwrap();
+        // SAFETY: `cname` is a valid NUL-terminated path under `/tmp/vtb-*`.
+        unsafe {
+            let _ = libc::unlink(cname.as_ptr());
+            let fd = libc::open(
+                cname.as_ptr(),
+                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+                0o600,
+            );
+            assert!(fd >= 0);
+            assert_eq!(libc::ftruncate(fd, 64), 0);
+            libc::close(fd);
+        }
+        let err = ShmRegion::open_named(&tmp_name, 64).unwrap_err();
+        let _ = shm_unlink_named(&tmp_name);
+        assert!(matches!(err, ShmError::InvalidSize));
     }
 
     #[cfg(unix)]

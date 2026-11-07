@@ -22,8 +22,6 @@ if TYPE_CHECKING:
     from vertebra.db.arrow import (
         ARROW_SHM_THRESHOLD_ROWS,
         ArrowCursor,
-        _hydrate_rows_with_schema,
-        _table_to_rows_and_cols,
         read_arrow_shm,
         write_arrow_shm,
     )
@@ -40,8 +38,6 @@ __all__ = (
     "PostgresNotificationSource",
     "PostgresNotifyConfig",
     "SyncPostgreSQLDriver",
-    "_hydrate_rows_with_schema",
-    "_table_to_rows_and_cols",
     "decode_pgcopy_rows",
     "encode_pg_jsonb",
     "encode_pgcopy_rows",
@@ -71,8 +67,6 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "PostgresNotificationSource": ("vertebra.db.adapters.postgres.notify", "PostgresNotificationSource"),
     "PostgresNotifyConfig": ("vertebra.db.adapters.postgres.notify", "PostgresNotifyConfig"),
     "SyncPostgreSQLDriver": ("vertebra.db.adapters.postgres.driver", "SyncPostgreSQLDriver"),
-    "_hydrate_rows_with_schema": ("vertebra.db.arrow", "_hydrate_rows_with_schema"),
-    "_table_to_rows_and_cols": ("vertebra.db.arrow", "_table_to_rows_and_cols"),
     "decode_pgcopy_rows": ("vertebra.db.adapters.postgres.core", "decode_pgcopy_rows"),
     "encode_pg_jsonb": ("vertebra.db.adapters.postgres.core", "encode_pg_jsonb"),
     "encode_pgcopy_rows": ("vertebra.db.adapters.postgres.core", "encode_pgcopy_rows"),

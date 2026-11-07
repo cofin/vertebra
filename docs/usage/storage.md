@@ -6,7 +6,7 @@ See the focused guides for [GCS, Active ADC & Presigning](storage-auth-and-signi
 
 ## Storage Backend Matrix
 
-All storage configurations inherit from `msgspec.Struct` (`frozen=True, gc=False`) and compile into canonical backend URLs via `SyncObjectStore.from_config(...)` or `AsyncObjectStore.from_config(...)`:
+All storage configurations inherit from `msgspec.Struct` and compile into canonical backend URLs via `SyncObjectStore.from_config(...)` or `AsyncObjectStore.from_config(...)`:
 
 | Backend | Config Class | Canonical URI Scheme | Key Capabilities & Auth Modes |
 | --- | --- | --- | --- |

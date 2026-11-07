@@ -60,4 +60,4 @@ async def test_memory_queue_and_storage() -> None:
 
 - **Dependency Overrides**: Pass overridden `Provide(...)` entries on `App(dependencies=...)` or `container.create_child({...})` so handlers receive test doubles.
 - **In-Memory Object Storage**: Call `SyncObjectStore.from_memory()` (or `AsyncObjectStore.from_memory()`) or pass `MemoryConfig()` to `SyncObjectStore.from_config()` for zero-disk storage tests.
-- **In-Memory SQLite Drivers**: Use `SyncSqliteDriver(SqliteConfig(path=":memory:"))` for fast SQL schema and query tests.
+- **In-Memory SQLite Drivers**: Use `SyncSQLiteDriver(SQLiteConfig(path=":memory:"))` for fast SQL schema and query tests.

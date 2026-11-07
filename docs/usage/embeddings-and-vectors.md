@@ -99,8 +99,6 @@ Call `await embedder.vector_search("query", table="documents")` to search inside
 
 Adapters raise `DataError` when the database returns empty or malformed vector rows; the facade translates inference `DataError` into `EmbeddingError`. Other driver errors propagate. SQL builders validate table and column identifiers; BigQuery model and table identifiers support hyphenated project IDs. PostgreSQL model strings are bound values. Oracle passes the model (including the Vertex `:predict` suffix) in JSON, validates Vertex endpoint URLs against its 128-byte UTF-8 limit, and rotates database credentials when the token cache generation advances.
 
-Replace the removed `BigQueryEmbedder`, `SpannerEmbedder`, `AlloyDbEmbedder`, and `OracleEmbedder` constructors with the corresponding engine capability wrapped by `PushdownEmbedder`. These names have no compatibility aliases.
-
 ## Local `1x` RAM Broker & `EmbeddingGemma`
 
 When running multiple HTTP or background worker processes, `EmbeddingBroker` loads model weights **once (`1x` RAM)**, forms token-budgeted length-sorted batches (`max_batch_tokens=8192`), and writes outputs into `VectorSlab`. On free-threaded Python `3.14t`/`3.15t`, `EmbeddingBroker` automatically isolates `onnxruntime` / `ctranslate2` in a dedicated child process so HTTP workers keep `sys._is_gil_enabled() == False`:

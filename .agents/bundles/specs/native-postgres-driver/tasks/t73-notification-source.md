@@ -19,8 +19,8 @@ tests:
 - src/py/tests/unit/db/test_postgres_native_notifications.py::test_notification_source_payload_and_close
 - src/py/tests/unit/db/test_postgres_native_notifications.py::test_notification_source_structural_port
 - src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py::test_postgres_notify_publish
-plan_revision: 1
-plan_commit: null
+plan_revision: 2
+plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -31,7 +31,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-05T20:03:00Z'
+updated_at: '2026-11-06T06:30:00Z'
 commit: null
 tags:
 - postgres

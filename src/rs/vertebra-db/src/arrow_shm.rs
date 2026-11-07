@@ -8,7 +8,7 @@
 use std::sync::{Arc, LazyLock};
 
 use dashmap::DashMap;
-use vertebra_core::shm::ShmRegion;
+use vertebra_core::shm::{ShmRegion, os_page_size};
 
 /// 8-byte magic header prefixing every `VTBARROW` shared-memory frame.
 pub const SHM_ARROW_MAGIC: &[u8; 8] = b"VTBARROW";
@@ -18,8 +18,6 @@ pub const ARROW_IPC_EOS_MARKER: [u8; 8] = [0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0
 
 /// Error message returned by shared-memory `VTBARROW` framing operations.
 pub type ArrowShmError = String;
-
-const PAGE_SIZE: usize = 4096;
 
 /// 16-byte header written at offset `0` of a shared-memory Arrow IPC `ShmRegion`.
 #[repr(C)]
@@ -76,9 +74,13 @@ pub fn normalize_shm_name(shm_name: &str) -> String {
 }
 
 #[inline]
-fn page_align(size: usize) -> usize {
-    let min_size = size.max(PAGE_SIZE);
-    (min_size + (PAGE_SIZE - 1)) & !(PAGE_SIZE - 1)
+fn page_align(size: usize) -> Result<usize, String> {
+    let page = os_page_size().map_err(|e| format!("failed to query OS page size: {e}"))?;
+    let min_size = size.max(page);
+    min_size
+        .div_ceil(page)
+        .checked_mul(page)
+        .ok_or_else(|| "SHM Arrow page alignment overflow".to_string())
 }
 
 #[inline]
@@ -111,7 +113,7 @@ pub fn write_shm_arrow_region_unregistered(
     let total_size = ShmArrowFrameHeader::SIZE
         .checked_add(ipc_bytes.len())
         .ok_or_else(|| "SHM Arrow frame size overflow".to_string())?;
-    let alloc_size = page_align(total_size);
+    let alloc_size = page_align(total_size)?;
     let mut region = allocate_shm_region(&name, alloc_size)?;
 
     let header = ShmArrowFrameHeader {
@@ -178,9 +180,11 @@ pub fn open_shm_arrow_region(shm_name: &str) -> Result<(Arc<ShmRegion>, usize), 
 
     #[cfg(unix)]
     {
-        let probe = ShmRegion::open_named(&name, PAGE_SIZE)
+        let probe_size =
+            os_page_size().map_err(|e| format!("failed to query OS page size: {e}"))?;
+        let probe = ShmRegion::open_named(&name, probe_size)
             .map_err(|e| format!("failed to open Arrow ShmRegion `{name}`: {e}"))?;
-        // SAFETY: `probe` maps `PAGE_SIZE` (`4096`) readable bytes of a published `VTBARROW`
+        // SAFETY: `probe` maps one OS page of readable bytes of a published `VTBARROW`
         // segment and `ShmArrowFrameHeader::from_slice` copies only the 16-byte header by value.
         let header = unsafe { ShmArrowFrameHeader::from_slice(probe.as_slice()) }?;
         let (len, total_size) = checked_header_frame_bounds(&header)?;
@@ -268,7 +272,7 @@ impl ShmArrowStreamWriter {
             .checked_add(padded_schema_len)
             .and_then(|v| v.checked_add(ARROW_IPC_EOS_MARKER.len()))
             .ok_or_else(|| "SHM stream initial capacity overflow".to_string())?;
-        let capacity = page_align(initial_capacity.max(min_required));
+        let capacity = page_align(initial_capacity.max(min_required))?;
         let region = allocate_shm_region(&norm_name, capacity)?;
 
         let mut writer = Self {
@@ -326,7 +330,7 @@ impl ShmArrowStreamWriter {
         let doubled = required
             .checked_mul(2)
             .ok_or_else(|| "SHM Arrow stream resize overflow".to_string())?;
-        let next_capacity = page_align(doubled.max(self.capacity.saturating_mul(2)));
+        let next_capacity = page_align(doubled.max(self.capacity.saturating_mul(2)))?;
 
         #[cfg(unix)]
         self.region.disarm_unlink();
@@ -437,8 +441,9 @@ mod tests {
 
     #[test]
     fn u64_max_byte_len_header_returns_error_without_overflow() {
+        let page = os_page_size().unwrap();
         let name = format!("/vtb-arrow-overflow-{}", std::process::id());
-        let mut region = ShmRegion::create(PAGE_SIZE).unwrap();
+        let mut region = ShmRegion::create(page).unwrap();
         let corrupt = ShmArrowFrameHeader {
             magic: *SHM_ARROW_MAGIC,
             byte_len: u64::MAX,
@@ -455,7 +460,7 @@ mod tests {
         assert!(release_shm_arrow_frame(&name));
 
         #[cfg(unix)]
-        if let Ok(mut named) = ShmRegion::create_named(&name, PAGE_SIZE) {
+        if let Ok(mut named) = ShmRegion::create_named(&name, page) {
             // SAFETY: `named` is exclusively owned in this unit test.
             unsafe {
                 named.as_mut_slice()[0..ShmArrowFrameHeader::SIZE]

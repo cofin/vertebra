@@ -5,11 +5,20 @@ build-backend = "maturin"
 [project]
 name = "vertebra-storage"
 version = "0.3.0"
+description = "Native Rust multi-cloud object storage extension for Vertebra."
 requires-python = ">=3.12"
+license = { text = "MIT" }
 
 [tool.maturin]
 python-source = "../../py"
 module-name = "vertebra._storage"
 features = ["extension-module"]
-include = ["vertebra/_storage.pyi"]
-exclude = ["**/py/vertebra/**", "!**/py/vertebra/_storage.pyi"]
+exclude = [
+    "**/py/vertebra/**/*.py",
+    "**/py/vertebra/**/*.so",
+    "**/py/vertebra/py.typed",
+    "**/py/vertebra/_bigquery.pyi",
+    "**/py/vertebra/_bundler.pyi",
+    "**/py/vertebra/_spanner.pyi",
+    "**/py/vertebra/_vertebra.pyi",
+]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import array
 import importlib
 import sqlite3
+from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
@@ -22,6 +23,8 @@ from sqlspec.core.filters import NullFilter
 from sqlspec.core.statement import StatementConfig
 
 import vertebra.extensions.sqlspec as sqlspec_extension
+from vertebra._vertebra import LeaseBroker
+from vertebra.db import DatabaseRegistry
 from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SyncSQLiteDriver
@@ -1370,3 +1373,73 @@ async def test_sqlspec_async_batch_stack_applies_filters(sql_object: bool) -> No
         assert native.pipeline_calls == 0
     finally:
         await native.close()
+
+
+def test_sync_dbapi_connection_driver_ownership_and_broker_isolation() -> None:
+    """Shared registry drivers survive connection close while dedicated and custom-broker drivers close."""
+    url = "postgresql+vtb://localhost:5432/ownership_sync_db"
+    shared_conn = SyncDBAPIConnection(url, share_pool=True)
+    shared_driver = shared_conn.driver
+    assert shared_driver is DatabaseRegistry.default().get_shared_sync_driver(shared_conn.config)
+    shared_conn.close()
+    assert shared_driver._closed is False
+
+    owned_conn = SyncDBAPIConnection(url, share_pool=False)
+    owned_driver = owned_conn.driver
+    assert owned_driver is not shared_driver
+    owned_conn.close()
+    assert owned_driver._closed is True
+    assert shared_driver._closed is False
+
+    custom_broker = LeaseBroker(pool_size=4, max_overflow=2)
+    broker_conn = SyncDBAPIConnection(url, broker=custom_broker, share_pool=True)
+    broker_driver = broker_conn.driver
+    assert broker_driver is not shared_driver
+    assert broker_driver.config.broker is custom_broker
+    broker_conn.close()
+    assert broker_driver._closed is True
+    assert shared_driver._closed is False
+
+
+@pytest.mark.anyio
+async def test_async_dbapi_connection_driver_ownership_broker_isolation_and_close_settlement(
+    tmp_path: Path,
+) -> None:
+    """Async DBAPI connections keep shared drivers open, isolate custom brokers, and settle active transactions."""
+    url = "postgresql+vtb_async://localhost:5432/ownership_async_db"
+    shared_conn = AsyncDBAPIConnection(url, share_pool=True)
+    shared_driver = shared_conn.driver
+    assert shared_driver is DatabaseRegistry.default().get_shared_driver(shared_conn.config)
+    await shared_conn.close()
+    assert shared_driver._closed is False
+
+    owned_conn = AsyncDBAPIConnection(url, share_pool=False)
+    owned_driver = owned_conn.driver
+    assert owned_driver is not shared_driver
+    await owned_conn.close()
+    assert owned_driver._closed is True
+    assert shared_driver._closed is False
+
+    custom_broker = LeaseBroker(pool_size=4, max_overflow=2)
+    broker_conn = AsyncDBAPIConnection(url, broker=custom_broker, share_pool=True)
+    broker_driver = broker_conn.driver
+    assert broker_driver is not shared_driver
+    assert broker_driver.config.broker is custom_broker
+    await broker_conn.close()
+    assert broker_driver._closed is True
+    assert shared_driver._closed is False
+
+    sqlite_url = f"sqlite+vtb_async:///{tmp_path / 'close_tx.db'}"
+    setup_conn = AsyncDBAPIConnection(sqlite_url, share_pool=True)
+    sqlite_drv = setup_conn.driver
+    await setup_conn.cursor().execute("CREATE TABLE close_tx_items (id INTEGER)")
+    await setup_conn.commit()
+    await setup_conn.close()
+
+    tx_conn = AsyncDBAPIConnection(sqlite_url, share_pool=True)
+    assert tx_conn.driver is sqlite_drv
+    await tx_conn.cursor().execute("INSERT INTO close_tx_items VALUES (?)", (1,))
+    await tx_conn.close()
+    assert sqlite_drv._sync._closed is False
+    assert await sqlite_drv.select_value("SELECT COUNT(*) FROM close_tx_items") == 0
+    await sqlite_drv.close()

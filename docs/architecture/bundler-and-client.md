@@ -10,13 +10,13 @@ Vertebra pairs its Python and Rust backend with a built-in frontend bundler (`ve
 - **Asset Manifests & `.d.ts` Generation**: Emits content-hashed asset manifests (`BuildResult`) and fast `.d.ts` declarations (`IsolatedDeclarationsGenerator`).
 - **Hot Module Replacement (HMR)**: In `vtb dev` mode, file changes watched by `SourceWatcher` trigger incremental rebuilds and push update frames to connected browsers via `@vertebra/client/hmr` (`HotReloadClient`).
 
-## QuickJS Server-Side Rendering Pool (`SsrPool` / `EmbeddedSsrClient`)
+## QuickJS Server-Side Rendering Pool (`SSRPool` / `SyncEmbeddedSSRClient` & `AsyncEmbeddedSSRClient`)
 
-Instead of sending SSR requests over localhost HTTP to a separate Node.js process, `vertebra-bundler` runs an in-process pool of QuickJS JavaScript runtimes (`SsrPool`):
+Instead of sending SSR requests over localhost HTTP to a separate Node.js process, `vertebra-bundler` runs an in-process pool of QuickJS JavaScript runtimes (`SSRPool`):
 
 1. Each QuickJS worker loads the compiled SSR bundle once at startup.
-2. `EmbeddedSsrClient.render(page)` sends the Inertia page payload to a pooled QuickJS worker in memory while releasing the Python GIL (`py.detach`).
-3. The rendered HTML head and body fragments (`SsrResult`) return directly to Python.
+2. `SyncEmbeddedSSRClient.render(page)` and `AsyncEmbeddedSSRClient.render(page)` send the Inertia page payload to a pooled QuickJS worker in memory while releasing the Python GIL (`py.detach`).
+3. The rendered HTML head and body fragments (`SSRResult`) return directly to Python.
 
 ## `@vertebra/client` Subpath Architecture
 
@@ -29,6 +29,6 @@ The `@vertebra/client` package provides 15 tree-shakeable ESM entry points:
 | `@vertebra/client/agent` | `McpClient`, `A2aClient`, `AgentStreamClient`, and `WorkflowLiveSubscriber` |
 | `@vertebra/client/apex` | `ApexRegion` island mounting and `ApexOfflineOutbox` mutation synchronization |
 | `@vertebra/client/arrow` | Binary Apache Arrow IPC stream fetcher (`ArrowStreamClient`) |
-| `@vertebra/client/wasm` | Browser WebAssembly module loader and execution client (`WasmClient`) |
+| `@vertebra/client/wasm` | Browser WebAssembly module loader and execution client (`WASMClient`) |
 | `@vertebra/client/telemetry` | W3C `TraceContext` (`traceparent`) parser, generator, and header injector |
 | `@vertebra/client/react`, `/vue`, `/svelte`, `/angular`, `/htmx`, `/vite` | Framework hooks (`useQuery`, `useMutation`), stores, services, HTMX helper (`initHtmx`), and Vite plugin (`vitePlugin`) |

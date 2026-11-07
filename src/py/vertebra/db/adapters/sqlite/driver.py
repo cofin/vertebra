@@ -5,10 +5,11 @@ from __future__ import annotations
 import datetime
 import os
 import sqlite3
+import threading
 from collections.abc import Mapping, Sequence
 from contextlib import closing
 from decimal import Decimal
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Self
 from uuid import UUID
 
 from vertebra.db.adapters.sqlite.config import SQLiteConfig
@@ -32,6 +33,7 @@ from vertebra.db.driver import (
     ThreadOffloadAsyncDatabaseDriver,
 )
 from vertebra.utils.serializers import encode_json
+from vertebra.utils.text import quote_dialect_identifier, validate_identifier
 
 __all__ = (
     "AsyncSQLiteDriver",
@@ -45,7 +47,7 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
     dialect: ClassVar[str] = "sqlite"
     dialect_tag: ClassVar[int] = SQLITE_DIALECT_TAG
 
-    __slots__ = ("_conn", "_in_transaction")
+    __slots__ = ("_conn", "_in_transaction", "_lock")
 
     def __init__(self, config: SQLiteConfig | None = None, *, broker: Any = None) -> None:
         resolved = config or SQLiteConfig()
@@ -53,6 +55,7 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
             msg = f"Invalid synchronous mode: {resolved.synchronous!r}"
             raise ValueError(msg)
         super().__init__(resolved, broker=broker)
+        self._lock = threading.RLock()
         self._in_transaction: bool = False
         try:
             self._conn = sqlite3.connect(str(self.config.path), check_same_thread=False)
@@ -71,32 +74,49 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
         """Return the underlying sqlite3.Connection."""
         return self._conn
 
+    def connect(self) -> Self:
+        """Establish or reopen the underlying SQLite connection."""
+        with self._lock:
+            if self._closed:
+                try:
+                    self._conn = sqlite3.connect(str(self.config.path), check_same_thread=False)
+                    for pragma in self.config.initialization_pragmas():
+                        self._conn.execute(pragma)
+                except sqlite3.Error as exc:
+                    raise _translate_sqlite_error(exc) from exc
+                self._in_transaction = False
+                self._closed = False
+            return self
+
     def begin(self) -> None:
         """Begin an explicit SQLite transaction."""
-        try:
-            if not self._conn.in_transaction:
-                self._conn.execute("BEGIN")
-            self._in_transaction = True
-        except sqlite3.Error as exc:
-            raise _translate_sqlite_error(exc) from exc
+        with self._lock:
+            try:
+                if not self._conn.in_transaction:
+                    self._conn.execute("BEGIN")
+                self._in_transaction = True
+            except sqlite3.Error as exc:
+                raise _translate_sqlite_error(exc) from exc
 
     def commit(self) -> None:
         """Commit the current SQLite transaction."""
-        try:
-            self._conn.commit()
-        except sqlite3.Error as exc:
-            raise _translate_sqlite_error(exc) from exc
-        finally:
-            self._in_transaction = False
+        with self._lock:
+            try:
+                self._conn.commit()
+            except sqlite3.Error as exc:
+                raise _translate_sqlite_error(exc) from exc
+            finally:
+                self._in_transaction = False
 
     def rollback(self) -> None:
         """Roll back the current SQLite transaction."""
-        try:
-            self._conn.rollback()
-        except sqlite3.Error as exc:
-            raise _translate_sqlite_error(exc) from exc
-        finally:
-            self._in_transaction = False
+        with self._lock:
+            try:
+                self._conn.rollback()
+            except sqlite3.Error as exc:
+                raise _translate_sqlite_error(exc) from exc
+            finally:
+                self._in_transaction = False
 
     def cancel(self) -> None:
         """Interrupt an active SQLite query, or act as an idempotent no-op when idle."""
@@ -105,9 +125,10 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
 
     def close(self) -> None:
         """Close the underlying SQLite connection."""
-        self._closed = True
-        self._in_transaction = False
-        self._conn.close()
+        with self._lock:
+            self._closed = True
+            self._in_transaction = False
+            self._conn.close()
 
     def execute(
         self,
@@ -120,14 +141,15 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
         bound = _normalize_sqlite_parameters(parameters)
         lease = self._acquire_sqlite_broker_lease(sql)
         try:
-            with closing(self._conn.execute(sql, bound)) as cur:
-                if cur.description is not None:
-                    for _ in cur:
-                        pass
-                rowcount = max(cur.rowcount, 0)
-            if not self._in_transaction:
-                self._conn.commit()
-            return rowcount
+            with self._lock:
+                with closing(self._conn.execute(sql, bound)) as cur:
+                    if cur.description is not None:
+                        for _ in cur:
+                            pass
+                    rowcount = max(cur.rowcount, 0)
+                if not self._in_transaction:
+                    self._conn.commit()
+                return rowcount
         except sqlite3.Error as exc:
             raise _translate_sqlite_error(exc) from exc
         finally:
@@ -146,10 +168,11 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
         bound_sets = [_normalize_sqlite_parameters(item) for item in parameter_sets]
         lease = self._acquire_sqlite_broker_lease(sql)
         try:
-            cur = self._conn.executemany(sql, bound_sets)
-            if not self._in_transaction:
-                self._conn.commit()
-            return cur.rowcount if cur.rowcount >= 0 else len(bound_sets)
+            with self._lock:
+                cur = self._conn.executemany(sql, bound_sets)
+                if not self._in_transaction:
+                    self._conn.commit()
+                return cur.rowcount if cur.rowcount >= 0 else len(bound_sets)
         except sqlite3.Error as exc:
             raise _translate_sqlite_error(exc) from exc
         finally:
@@ -166,10 +189,11 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
         bound = _normalize_sqlite_parameters(parameters)
         lease = self._acquire_sqlite_broker_lease(sql)
         try:
-            cur = self._conn.execute(sql, bound)
-            rows = [tuple(row) for row in cur.fetchall()]
-            cols = tuple(str(d[0]) for d in cur.description) if cur.description else ()
-            return rows, cols
+            with self._lock:
+                cur = self._conn.execute(sql, bound)
+                rows = [tuple(row) for row in cur.fetchall()]
+                cols = tuple(str(d[0]) for d in cur.description) if cur.description else ()
+                return rows, cols
         except sqlite3.Error as exc:
             raise _translate_sqlite_error(exc) from exc
         finally:
@@ -198,19 +222,27 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
     ) -> int:
         """Bulk-ingest an Arrow Table, `ArrowCursor`, or row sequence into `table_name`."""
         _ = kwargs
+        validate_identifier(table_name, "table_name", allow_dots=True)
+        if columns is not None:
+            for col in columns:
+                validate_identifier(str(col), "column", allow_dots=False)
         rows, cols = _table_to_rows_and_cols(data, columns)
+        for col in cols:
+            validate_identifier(str(col), "column", allow_dots=False)
         if not rows or not cols:
             return 0
         placeholders = ", ".join("?" for _ in cols)
-        col_list = ", ".join(cols)
-        sql = f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders})"
+        quoted_table = quote_dialect_identifier(table_name, self.dialect)
+        col_list = ", ".join(quote_dialect_identifier(str(col), self.dialect) for col in cols)
+        sql = f"INSERT INTO {quoted_table} ({col_list}) VALUES ({placeholders})"
         bound_rows = [_normalize_sqlite_parameters(row) for row in rows]
         lease = self._acquire_sqlite_broker_lease(sql)
         try:
-            self._conn.executemany(sql, bound_rows)
-            if not self._in_transaction:
-                self._conn.commit()
-            return len(rows)
+            with self._lock:
+                self._conn.executemany(sql, bound_rows)
+                if not self._in_transaction:
+                    self._conn.commit()
+                return len(rows)
         except sqlite3.Error as exc:
             raise _translate_sqlite_error(exc) from exc
         finally:

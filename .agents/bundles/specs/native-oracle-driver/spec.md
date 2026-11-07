@@ -58,7 +58,7 @@ Oracle application-context writes require the namespace's trusted package in the
 
 ## Dependencies
 
-`db-layout-and-contract` (`main @ f741701`) and `integration-remediation/db-engine-primitives`.
+`db-layout-and-contract` (`main @ 21c99f95`) and `integration-remediation/db-engine-primitives` (`main @ 80ff8a65`).
 
 ## Acceptance Boundary
 

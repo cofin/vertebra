@@ -6,15 +6,18 @@ pub mod r2;
 pub mod signing;
 pub mod store;
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::future::Future;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use pyo3::buffer::PyBuffer;
-use pyo3::exceptions::{PyFileNotFoundError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyBufferError, PyFileNotFoundError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyType, PyWeakref, PyWeakrefMethods, PyWeakrefReference};
+use tokio::task::AbortHandle;
 use vertebra_core::notify::{AsyncCompletionQueue, Notifier};
 
 use crate::gcp_auth::{
@@ -56,13 +59,17 @@ fn extract_buffer_bytes(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Byt
     if !buf.is_c_contiguous() {
         return Err(PyValueError::new_err("buffer must be C-contiguous"));
     }
-    let slice = unsafe { std::slice::from_raw_parts(buf.buf_ptr() as *const u8, buf.len_bytes()) };
-    let copied = py.detach(|| Bytes::copy_from_slice(slice));
-    Ok(copied)
+    Ok(Bytes::from(buf.to_vec(py)?))
 }
 
 /// Zero-copy read-only Python buffer wrapping Rust `bytes::Bytes`.
-#[pyclass(name = "StorageBuffer", frozen, immutable_type, from_py_object)]
+#[pyclass(
+    name = "StorageBuffer",
+    module = "vertebra._storage",
+    frozen,
+    immutable_type,
+    from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct StorageBuffer {
     pub data: Bytes,
@@ -78,12 +85,14 @@ impl StorageBuffer {
         PyBytes::new(py, &self.data)
     }
 
-    #[allow(unsafe_op_in_unsafe_fn)]
     unsafe fn __getbuffer__(
         slf: Bound<'_, Self>,
         view: *mut pyo3::ffi::Py_buffer,
         flags: std::os::raw::c_int,
     ) -> PyResult<()> {
+        if view.is_null() {
+            return Err(PyBufferError::new_err("null Py_buffer pointer"));
+        }
         let py = slf.py();
         let slice = &slf.get().data[..];
         let ptr = if slice.is_empty() {
@@ -91,22 +100,66 @@ impl StorageBuffer {
         } else {
             slice.as_ptr()
         };
-        let ret = pyo3::ffi::PyBuffer_FillInfo(
-            view,
-            slf.as_ptr(),
-            ptr as *mut std::os::raw::c_void,
-            slice.len() as isize,
-            1,
-            flags,
-        );
+        // SAFETY: `view` was verified non-null, `slf.as_ptr()` is a valid borrowed object
+        // reference whose refcount `PyBuffer_FillInfo` increments once, and `ptr` remains
+        // immutable and valid for `slice.len()` bytes for the lifetime of `slf`.
+        let ret = unsafe {
+            pyo3::ffi::PyBuffer_FillInfo(
+                view,
+                slf.as_ptr(),
+                ptr as *mut std::os::raw::c_void,
+                slice.len() as isize,
+                1,
+                flags,
+            )
+        };
         if ret == -1 {
             return Err(PyErr::fetch(py));
         }
         Ok(())
     }
 
-    #[allow(unsafe_op_in_unsafe_fn)]
     unsafe fn __releasebuffer__(&self, _view: *mut pyo3::ffi::Py_buffer) {}
+}
+
+fn panic_message(payload: Box<dyn Any + Send>) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        format!("Rust task panicked: {text}")
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        format!("Rust task panicked: {text}")
+    } else {
+        "Rust task panicked".to_string()
+    }
+}
+
+fn make_task_panic_err(py: Python<'_>, message: String) -> PyErr {
+    if let Ok(core_mod) = py.import("vertebra._vertebra")
+        && let Ok(exc_attr) = core_mod.getattr("TaskPanicError")
+        && let Ok(exc_ty) = exc_attr.cast_into::<PyType>()
+    {
+        return PyErr::from_type(exc_ty, (message,));
+    }
+    PyRuntimeError::new_err(message)
+}
+
+#[pyclass(
+    name = "_StorageTaskCanceller",
+    module = "vertebra._storage",
+    frozen,
+    immutable_type
+)]
+struct StorageTaskCanceller {
+    abort: AbortHandle,
+}
+
+#[pymethods]
+impl StorageTaskCanceller {
+    fn __call__(&self, future: &Bound<'_, PyAny>) -> PyResult<()> {
+        if future.call_method0("cancelled")?.extract::<bool>()? {
+            self.abort.abort();
+        }
+        Ok(())
+    }
 }
 
 type OutcomeProducer = Box<dyn FnOnce(Python<'_>) -> PyResult<Py<PyAny>> + Send>;
@@ -118,7 +171,7 @@ struct CompletedStorageTask {
 
 struct RustCompletionRing {
     completion: AsyncCompletionQueue<CompletedStorageTask>,
-    fallback_wakeup: Mutex<Option<(Py<PyAny>, Py<PyAny>)>>,
+    fallback_wakeup: Mutex<Option<(Py<PyWeakref>, &'static str)>>,
 }
 
 impl RustCompletionRing {
@@ -126,25 +179,38 @@ impl RustCompletionRing {
         if self.completion.notifier().is_some() {
             return;
         }
-        let pair = self
-            .fallback_wakeup
-            .lock()
-            .expect("lock storage fallback wakeup")
-            .as_ref()
-            .map(|(loop_ref, drainer_ref)| {
-                Python::attach(|py| (loop_ref.clone_ref(py), drainer_ref.clone_ref(py)))
-            });
-        if let Some((loop_ref, drainer_ref)) = pair {
-            Python::attach(|py| {
-                let _ = loop_ref
-                    .bind(py)
-                    .call_method1("call_soon_threadsafe", (&drainer_ref,));
-            });
-        }
+        Python::attach(|py| {
+            let target = {
+                let mut guard = self
+                    .fallback_wakeup
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                match guard.as_ref() {
+                    Some((weak_loop, attr_name)) => match weak_loop.bind(py).upgrade() {
+                        Some(loop_bound) => Some((loop_bound, *attr_name)),
+                        None => {
+                            *guard = None;
+                            None
+                        }
+                    },
+                    None => None,
+                }
+            };
+            if let Some((loop_bound, attr_name)) = target
+                && let Ok(drainer) = loop_bound.getattr(attr_name)
+            {
+                let _ = loop_bound.call_method1("call_soon_threadsafe", (drainer,));
+            }
+        });
     }
 }
 
-#[pyclass(name = "_StorageCompletionDrainer", frozen, immutable_type)]
+#[pyclass(
+    name = "_StorageCompletionDrainer",
+    module = "vertebra._storage",
+    frozen,
+    immutable_type
+)]
 struct StorageCompletionDrainer {
     ring: Arc<RustCompletionRing>,
 }
@@ -164,11 +230,15 @@ impl StorageCompletionDrainer {
                 if cancelled {
                     continue;
                 }
-                match (item.produce)(py) {
-                    Ok(val) => {
+                match catch_unwind(AssertUnwindSafe(|| (item.produce)(py))) {
+                    Ok(Ok(val)) => {
                         let _ = fut.call_method1("set_result", (val,));
                     }
-                    Err(err) => {
+                    Ok(Err(err)) => {
+                        let _ = fut.call_method1("set_exception", (err.into_value(py),));
+                    }
+                    Err(payload) => {
+                        let err = make_task_panic_err(py, panic_message(payload));
                         let _ = fut.call_method1("set_exception", (err.into_value(py),));
                     }
                 }
@@ -186,7 +256,7 @@ fn ensure_loop_completion_ring(
     if let Ok(existing) = loop_obj.getattr(ATTR_NAME)
         && let Ok(drainer) = existing.cast::<StorageCompletionDrainer>()
     {
-        return Ok(Arc::clone(&drainer.borrow().ring));
+        return Ok(Arc::clone(&drainer.get().ring));
     }
 
     #[cfg(unix)]
@@ -206,14 +276,21 @@ fn ensure_loop_completion_ring(
             .call_method1("add_reader", (fd, drainer_py.bind(py)))
             .is_ok()
         {
-            let _ = loop_obj.setattr(ATTR_NAME, drainer_py.bind(py));
+            if let Err(err) = loop_obj.setattr(ATTR_NAME, drainer_py.bind(py)) {
+                let _ = loop_obj.call_method1("remove_reader", (fd,));
+                return Err(err);
+            }
             return Ok(temp_ring);
         }
     }
 
+    let weak_loop = PyWeakrefReference::new(loop_obj)?
+        .into_any()
+        .cast_into::<PyWeakref>()?
+        .unbind();
     let ring = Arc::new(RustCompletionRing {
         completion: AsyncCompletionQueue::new(None),
-        fallback_wakeup: Mutex::new(None),
+        fallback_wakeup: Mutex::new(Some((weak_loop, ATTR_NAME))),
     });
     let drainer_py = Py::new(
         py,
@@ -221,19 +298,17 @@ fn ensure_loop_completion_ring(
             ring: Arc::clone(&ring),
         },
     )?;
-    *ring
-        .fallback_wakeup
-        .lock()
-        .expect("lock storage fallback wakeup") = Some((
-        loop_obj.clone().unbind(),
-        drainer_py.clone_ref(py).into_any(),
-    ));
-    let _ = loop_obj.setattr(ATTR_NAME, drainer_py.bind(py));
+    loop_obj.setattr(ATTR_NAME, drainer_py.bind(py))?;
     Ok(ring)
 }
 
 /// Native Rust awaitable backed by the shared Tokio runtime without `asyncio.to_thread`.
-#[pyclass(name = "RustTaskAwaitable", frozen, immutable_type)]
+#[pyclass(
+    name = "RustTaskAwaitable",
+    module = "vertebra._storage",
+    frozen,
+    immutable_type
+)]
 pub struct RustTaskAwaitable {
     future: Py<PyAny>,
 }
@@ -257,16 +332,44 @@ where
     let py_fut = loop_obj.call_method0("create_future")?;
     let ring = ensure_loop_completion_ring(py, &loop_obj)?;
     let fut_for_cb = py_fut.clone().unbind();
+    let handle = runtime_handle();
+    let worker = handle.spawn(fut);
+    let abort = worker.abort_handle();
+    let canceller = match Py::new(
+        py,
+        StorageTaskCanceller {
+            abort: abort.clone(),
+        },
+    ) {
+        Ok(cb) => cb,
+        Err(err) => {
+            abort.abort();
+            return Err(err);
+        }
+    };
+    if let Err(err) = py_fut.call_method1("add_done_callback", (canceller,)) {
+        abort.abort();
+        return Err(err);
+    }
     let fut_for_await = py_fut.unbind();
 
-    runtime_handle().spawn(async move {
-        let output = fut.await;
+    handle.spawn(async move {
+        let produce: OutcomeProducer = match worker.await {
+            Ok(Ok(val)) => Box::new(move |py| map_fn(py, val)),
+            Ok(Err(err)) => Box::new(move |_| Err(to_py_err(err))),
+            Err(join) if join.is_panic() => {
+                let message = panic_message(join.into_panic());
+                Box::new(move |py| Err(make_task_panic_err(py, message)))
+            }
+            Err(_) => Box::new(|_| {
+                Err(pyo3::exceptions::asyncio::CancelledError::new_err(
+                    "Rust storage task was cancelled",
+                ))
+            }),
+        };
         let should_signal = ring.completion.push(CompletedStorageTask {
             future: fut_for_cb,
-            produce: Box::new(move |py| match output {
-                Ok(val) => map_fn(py, val),
-                Err(err) => Err(to_py_err(err)),
-            }),
+            produce,
         });
         if should_signal {
             ring.signal_fallback();
@@ -278,7 +381,13 @@ where
     })
 }
 
-#[pyclass(name = "GcpTokenSnapshot", frozen, immutable_type, from_py_object)]
+#[pyclass(
+    name = "GcpTokenSnapshot",
+    module = "vertebra._storage",
+    frozen,
+    immutable_type,
+    from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyGcpTokenSnapshot {
     #[pyo3(get)]
@@ -328,7 +437,12 @@ impl PyGcpTokenSnapshot {
     }
 }
 
-#[pyclass(name = "SyncGcpTokenCache", frozen, immutable_type)]
+#[pyclass(
+    name = "SyncGcpTokenCache",
+    module = "vertebra._storage",
+    frozen,
+    immutable_type
+)]
 pub struct PySyncGcpTokenCache {
     inner: Arc<NativeGcpTokenCache>,
 }
@@ -402,7 +516,12 @@ impl PySyncGcpTokenCache {
     }
 }
 
-#[pyclass(name = "AsyncGcpTokenCache", frozen, immutable_type)]
+#[pyclass(
+    name = "AsyncGcpTokenCache",
+    module = "vertebra._storage",
+    frozen,
+    immutable_type
+)]
 pub struct PyAsyncGcpTokenCache {
     inner: Arc<NativeGcpTokenCache>,
 }
@@ -475,7 +594,7 @@ impl PyAsyncGcpTokenCache {
     }
 }
 
-#[pyclass(frozen, immutable_type, from_py_object)]
+#[pyclass(module = "vertebra._storage", frozen, immutable_type, from_py_object)]
 #[derive(Clone, Debug)]
 pub struct ObjectMeta {
     #[pyo3(get)]
@@ -509,7 +628,12 @@ impl ObjectMeta {
     }
 }
 
-#[pyclass(name = "SyncObjectStore", frozen, immutable_type)]
+#[pyclass(
+    name = "SyncObjectStore",
+    module = "vertebra._storage",
+    frozen,
+    immutable_type
+)]
 pub struct SyncObjectStore {
     engine: ObjectStoreEngine,
 }
@@ -632,7 +756,12 @@ impl SyncObjectStore {
     }
 }
 
-#[pyclass(name = "AsyncObjectStore", frozen, immutable_type)]
+#[pyclass(
+    name = "AsyncObjectStore",
+    module = "vertebra._storage",
+    frozen,
+    immutable_type
+)]
 pub struct AsyncObjectStore {
     engine: ObjectStoreEngine,
 }

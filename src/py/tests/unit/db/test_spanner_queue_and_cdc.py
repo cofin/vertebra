@@ -173,9 +173,7 @@ async def test_spanner_change_stream_source_partitions_and_object_store_spill() 
         },
     ]
 
-    parsed = []
-    for row in raw_rows:
-        parsed.extend(source.parse_raw_row(row, partition_token="parent-token-1"))
+    parsed = [rec for row in raw_rows for rec in source.parse_raw_row(row, partition_token="parent-token-1")]
     assert len(parsed) == 3
 
     emitted = source.ingest_records(parsed, partition_token="parent-token-1")
@@ -261,16 +259,19 @@ async def test_spanner_change_stream_poll_binds_params_for_dialect(dialect: str,
     assert "tok-1" in source.completed_partitions
 
 
-def test_spanner_change_stream_exports_belong_to_adapter() -> None:
-    """Expose reader and wire types through the adapter without generic CDC aliases."""
-    for symbol in (
+@pytest.mark.parametrize(
+    "symbol",
+    [
         SyncSpannerChangeStreamSource,
         AsyncSpannerChangeStreamSource,
         SpannerChildPartition,
         SpannerChangeStreamRecord,
-    ):
-        assert getattr(spanner, symbol.__name__) is symbol
-        assert not hasattr(cdc, symbol.__name__)
+    ],
+)
+def test_spanner_change_stream_exports_belong_to_adapter(symbol: type[Any]) -> None:
+    """Expose reader and wire types through the adapter without generic CDC aliases."""
+    assert getattr(spanner, symbol.__name__) is symbol
+    assert not hasattr(cdc, symbol.__name__)
 
 
 @pytest.mark.parametrize("stream_name", ["orders-stream", "orders.stream", "orders; DROP TABLE orders", ""])
@@ -417,3 +418,36 @@ async def test_spanner_poll_constructor_defaults_and_call_overrides(
             {"start_ts": _START, "end_ts": _END, "token": "configured", "heartbeat_ms": 2500},
             {"start_ts": _END, "end_ts": _START, "token": "override", "heartbeat_ms": 5000},
         ]
+
+
+def test_spanner_change_stream_reschedules_completed_partition_and_tracks_root_watermark() -> None:
+    """Bounded-window polling allows partition re-scheduling and records root watermarks under ''."""
+    driver = _RecordingSpannerDriver()
+    source = SyncSpannerChangeStreamSource(driver, "orders_stream")
+
+    source.poll_partition("tok-window", start_timestamp=_START, end_timestamp=_END)
+    assert "tok-window" in source.completed_partitions
+    assert "tok-window" not in source.active_partitions
+
+    source.schedule_partition("tok-window", _END)
+    assert "tok-window" not in source.completed_partitions
+    assert source.active_partitions == ("tok-window",)
+
+    root_records = [
+        SpannerChangeStreamRecord(
+            record_type="heartbeat",
+            watermark_timestamp="2026-11-02T00:05:00Z",
+            partition_token=None,
+        ),
+        SpannerChangeStreamRecord(
+            record_type="data_change",
+            commit_timestamp="2026-11-02T00:06:00Z",
+            table_name="orders",
+            mod_type="INSERT",
+            mods=({"keys": {"id": 1}},),
+            partition_token=None,
+        ),
+    ]
+    emitted = source.ingest_records(root_records, partition_token=None)
+    assert len(emitted) == 1
+    assert source.watermarks[""] == "2026-11-02T00:06:00Z"

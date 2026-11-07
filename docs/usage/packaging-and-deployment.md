@@ -4,7 +4,7 @@ Deploy Vertebra applications as standard Python wheels (`vtb run ...`), containe
 
 ## Standalone & Single-File Binaries (`vtb build`)
 
-`vertebra.build.packaging` bundles your Python application, compiled Rust extensions (`_vertebra`, `_bundler`, `_storage`), Python Build Standalone runtime, and frontend assets into a relocatable directory (`StandaloneBuilder`) or a self-extracting single-file binary with SHA-256 verification (`OnefileBuilder`):
+`vertebra.build.packaging` bundles your Python application, compiled Rust extensions (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_spanner`), Python Build Standalone runtime, and frontend assets into a relocatable directory (`StandaloneBuilder`) or a self-extracting single-file binary with SHA-256 verification (`OnefileBuilder`):
 
 ```bash
 vtb build --standalone --onefile

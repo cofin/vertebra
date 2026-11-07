@@ -33,6 +33,7 @@ from vertebra.telemetry.db_propagation import SqlTracePropagator
 from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.schema import to_value_type
 from vertebra.utils.serializers import encode_json
+from vertebra.utils.text import validate_identifier
 
 if TYPE_CHECKING:
     from vertebra._spanner import AsyncSpannerClient, SyncSpannerClient
@@ -1184,10 +1185,16 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
     ) -> int:
         """Bulk-load an `ArrowCursor`, Arrow IPC buffer, or `pyarrow` table into `table_name` via chunked mutations."""
         _ = kwargs
+        validate_identifier(table_name, "table_name", allow_dots=True)
+        if columns is not None:
+            for col in columns:
+                validate_identifier(str(col), "column", allow_dots=False)
         rows = SpannerCore.coerce_arrow_to_dicts(data)
         if not rows:
             return 0
         cols = list(columns) if columns is not None else list(rows[0].keys())
+        for col in cols:
+            validate_identifier(str(col), "column", allow_dots=False)
         values = [[r.get(c) for c in cols] for r in rows]
         mutation = (
             Mutation.insert_or_update(table_name, cols, values) if upsert else Mutation.insert(table_name, cols, values)
@@ -1872,10 +1879,16 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
     ) -> int:
         """Asynchronously bulk-load an `ArrowCursor`, Arrow IPC buffer, or `pyarrow` table into `table_name`."""
         _ = kwargs
+        validate_identifier(table_name, "table_name", allow_dots=True)
+        if columns is not None:
+            for col in columns:
+                validate_identifier(str(col), "column", allow_dots=False)
         rows = SpannerCore.coerce_arrow_to_dicts(data)
         if not rows:
             return 0
         cols = list(columns) if columns is not None else list(rows[0].keys())
+        for col in cols:
+            validate_identifier(str(col), "column", allow_dots=False)
         values = [[r.get(c) for c in cols] for r in rows]
         mutation = (
             Mutation.insert_or_update(table_name, cols, values) if upsert else Mutation.insert(table_name, cols, values)

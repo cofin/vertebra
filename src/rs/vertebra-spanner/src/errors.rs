@@ -55,7 +55,7 @@ fn stand_in_exception_types(py: Python<'_>) -> PyResult<SpannerExceptionTypes> {
     let auth = new_stand_in_class(
         py,
         "GoogleCloudAuthError",
-        &PyTuple::new(py, [gc.bind(py)])?,
+        &PyTuple::new(py, [gc.bind(py), operational.bind(py)])?,
     )?;
     let spanner = new_stand_in_class(
         py,
@@ -75,8 +75,8 @@ fn stand_in_exception_types(py: Python<'_>) -> PyResult<SpannerExceptionTypes> {
 }
 
 fn resolve_exception_types(py: Python<'_>) -> PyResult<&'static SpannerExceptionTypes> {
-    SPANNER_EXCEPTION_TYPES.get_or_try_init(py, || {
-        if let Ok(core_mod) = py.import("vertebra._vertebra") {
+    SPANNER_EXCEPTION_TYPES.get_or_try_init(py, || match py.import("vertebra._vertebra") {
+        Ok(core_mod) => {
             let auth = core_mod
                 .getattr("GoogleCloudAuthError")?
                 .cast_into::<PyType>()?
@@ -89,13 +89,16 @@ fn resolve_exception_types(py: Python<'_>) -> PyResult<&'static SpannerException
                 .getattr("SpannerAbortedError")?
                 .cast_into::<PyType>()?
                 .unbind();
-            return Ok(SpannerExceptionTypes {
+            Ok(SpannerExceptionTypes {
                 auth,
                 spanner,
                 spanner_aborted,
-            });
+            })
         }
-        stand_in_exception_types(py)
+        Err(err) if err.is_instance_of::<pyo3::exceptions::PyModuleNotFoundError>(py) => {
+            stand_in_exception_types(py)
+        }
+        Err(err) => Err(err),
     })
 }
 

@@ -6,6 +6,7 @@ import base64
 import subprocess
 import sys
 import threading
+from collections.abc import Buffer, Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -13,6 +14,7 @@ import pytest
 
 import vertebra.storage as storage
 from vertebra.storage import (
+    AsyncObjectStore,
     AzureConfig,
     GCSConfig,
     HTTPConfig,
@@ -320,3 +322,37 @@ def test_vertebra_readable_file_seek_slice_and_readinto() -> None:
         assert f.read_at(len(data) - 4, 4) == b"PAR1"
         f.seek(-4, 2)
         assert f.read() == b"PAR1"
+
+
+@pytest.mark.parametrize(
+    ("buffer_factory", "expected"),
+    [
+        (lambda: memoryview(b""), b""),
+        (bytearray, b""),
+        (lambda: bytearray(b"mutable-payload"), b"mutable-payload"),
+        (lambda: memoryview(bytearray(b"view-payload")), b"view-payload"),
+    ],
+)
+def test_object_store_accepts_empty_and_mutable_pep3118_buffers(
+    buffer_factory: Callable[[], Buffer],
+    expected: bytes,
+) -> None:
+    """SyncObjectStore copies empty and mutable PEP 3118 buffers safely without UB."""
+    store = SyncObjectStore.from_memory("buffer-safety")
+    payload = buffer_factory()
+    meta = store.put("blob.bin", payload)
+    assert meta.size == len(expected)
+    assert store.get("blob.bin") == expected
+    view = store.get_view("blob.bin")
+    assert bytes(view) == expected
+
+
+@pytest.mark.anyio
+async def test_async_object_store_roundtrip_and_buffer_safety() -> None:
+    """AsyncObjectStore resolves Tokio completions and handles empty memoryviews."""
+    store = AsyncObjectStore("memory://")
+    meta = await store.put("empty.bin", memoryview(b""))
+    assert meta.size == 0
+    assert await store.get("empty.bin") == b""
+    await store.put("hello.bin", bytearray(b"hello-async"))
+    assert await store.get("hello.bin") == b"hello-async"

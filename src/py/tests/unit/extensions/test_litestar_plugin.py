@@ -22,7 +22,9 @@ from vertebra.extensions.litestar import (
     enter_litestar_server_lifespan,
 )
 from vertebra.extensions.litestar import plugin as litestar_plugin_mod
+from vertebra.extensions.litestar.channels import ChannelsBackend, swap_channels_backend
 from vertebra.server._asgi._runner import AsgiRunner
+from vertebra.server._channels import ChannelBus
 from vertebra.server._dispatch import _schedule_coros
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
@@ -562,8 +564,6 @@ def test_vertebra_plugin_overrides_litestar_cli_run_command(
 
 def test_channels_backend_accepts_engine_neutral_bus() -> None:
     """Litestar can swap its memory backend for the shared bus directly."""
-    from vertebra.extensions.litestar.channels import ChannelsBackend, swap_channels_backend
-    from vertebra.server._channels import ChannelBus
 
     class MemoryChannelsBackend:
         history = 3
@@ -586,7 +586,6 @@ def test_channels_backend_accepts_engine_neutral_bus() -> None:
 @pytest.mark.anyio
 async def test_channels_stream_disconnect_releases_queue() -> None:
     """Cancelled Litestar consumers release queues through the protected cleanup hook."""
-    from vertebra.extensions.litestar.channels import ChannelsBackend
 
     class TrackedBackend(ChannelsBackend):
         def __init__(self) -> None:
@@ -618,3 +617,82 @@ async def test_channels_stream_disconnect_releases_queue() -> None:
         await backend.unsubscribe(["orders"])
         await backend.on_shutdown()
     assert backend.channels == ()
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_exit", "expected_error"),
+    [
+        ("only-certfile", 2, "Both --ssl-certfile and --ssl-keyfile must be provided together"),
+        ("only-keyfile", 2, "Both --ssl-certfile and --ssl-keyfile must be provided together"),
+        ("missing-certfile", 2, "SSL certificate file does not exist"),
+        ("missing-keyfile", 2, "SSL key file does not exist"),
+        ("self-signed-missing-files", 0, None),
+    ],
+)
+def test_litestar_cli_run_tls_cert_and_key_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    expected_exit: int,
+    expected_error: str | None,
+) -> None:
+    """Litestar run enforces mutual --ssl-certfile/--ssl-keyfile flags and file existence unless self-signed."""
+    captured_env: dict[str, str] = {}
+
+    def fake_build_cmd() -> list[str]:
+        return ["/bin/true"]
+
+    def fake_supervisor(*, server_cmd: list[str], env: dict[str, str], **_kwargs: Any) -> int:
+        _ = server_cmd
+        captured_env.update(env)
+        return 0
+
+    monkeypatch.setattr(litestar_plugin_mod, "build_server_command", fake_build_cmd)
+    monkeypatch.setattr(litestar_plugin_mod, "run_supervisor", fake_supervisor)
+
+    existing_cert = tmp_path / "present.crt"
+    existing_cert.write_text("CERT", encoding="utf-8")
+    missing_cert = tmp_path / "missing.crt"
+    missing_key = tmp_path / "missing.key"
+
+    cli_args_by_case: dict[str, list[str]] = {
+        "only-certfile": ["run", "--no-banner", "--ssl-certfile", str(existing_cert)],
+        "only-keyfile": ["run", "--no-banner", "--ssl-keyfile", str(missing_key)],
+        "missing-certfile": [
+            "run",
+            "--no-banner",
+            "--ssl-certfile",
+            str(missing_cert),
+            "--ssl-keyfile",
+            str(missing_key),
+        ],
+        "missing-keyfile": [
+            "run",
+            "--no-banner",
+            "--ssl-certfile",
+            str(existing_cert),
+            "--ssl-keyfile",
+            str(missing_key),
+        ],
+        "self-signed-missing-files": [
+            "run",
+            "--no-banner",
+            "--ssl-certfile",
+            str(missing_cert),
+            "--ssl-keyfile",
+            str(missing_key),
+            "--create-self-signed-cert",
+        ],
+    }
+
+    group = click.Group("litestar")
+    VertebraPlugin().on_cli_init(group)
+    result = CliRunner().invoke(group, cli_args_by_case[case])
+    assert result.exit_code == expected_exit, result.output
+    if expected_error is not None:
+        assert expected_error in result.output
+        assert captured_env == {}
+    else:
+        assert captured_env["VERTEBRA_TLS_CERT"] == str(missing_cert.resolve())
+        assert captured_env["VERTEBRA_TLS_KEY"] == str(missing_key.resolve())
+        assert captured_env["VERTEBRA_SELF_SIGNED_CERT"] == "1"

@@ -15,8 +15,8 @@ tests:
 - src/py/tests/unit/db/test_postgres_change_source.py::test_ack_caller_cancel_keeps_source_owned_task
 - src/py/tests/unit/db/test_postgres_change_source.py::test_ack_ambiguous_save_closes_generation
 - src/py/tests/unit/db/test_postgres_change_source.py::test_ack_barrier_retains_pending_next
-plan_revision: 1
-plan_commit: null
+plan_revision: 2
+plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -27,7 +27,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-05T20:03:00Z'
+updated_at: '2026-11-06T06:30:00Z'
 commit: null
 tags:
 - postgres

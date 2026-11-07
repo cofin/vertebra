@@ -11,12 +11,12 @@ import msgspec
 from vertebra import App
 
 
-class CreateItemRequest(msgspec.Struct, frozen=True, gc=False):
+class CreateItemRequest(msgspec.Struct):
     name: str
     quantity: int = 1
 
 
-class ItemResponse(msgspec.Struct, frozen=True, gc=False):
+class ItemResponse(msgspec.Struct):
     id: int
     name: str
     quantity: int

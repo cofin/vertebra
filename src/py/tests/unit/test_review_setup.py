@@ -1,11 +1,13 @@
 """Unit tests for review infrastructure setup validator, router, and ledger checker."""
 
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
 from tools.scripts.review_setup import (
     LedgerValidator,
+    MarkdownDocument,
     ReviewManifest,
     ReviewRouter,
     ReviewSetupValidator,
@@ -396,6 +398,184 @@ def test_bundles_catches_completed_spec_and_broken_source(tmp_path: Path) -> Non
     validator = ReviewSetupValidator(repo)
     issues = validator.validate(frozenset({"bundles"}))
     assert any("resident spec has 'state: completed'" in i.message for i in issues)
+
+
+def test_markdown_document_ignores_inline_and_fenced_truth_markers(tmp_path: Path) -> None:
+    """Verify MarkdownDocument.parse only enters truth blocks on standalone non-fenced markers."""
+    md_file = tmp_path / "log.md"
+    md_file.write_text(
+        "Mentioning `<!-- truth: start -->` inline in prose.\n\n"
+        "```markdown\n"
+        "<!-- truth: start -->\n"
+        "- Inside a code fence\n"
+        "<!-- truth: end -->\n"
+        "```\n\n"
+        "<!-- truth: start -->\n"
+        "- Real truth 1\n"
+        "- Real truth 2\n"
+        "<!-- truth: end -->\n",
+        encoding="utf-8",
+    )
+    doc = MarkdownDocument.parse(md_file)
+    assert doc.truth_lines == ["- Real truth 1", "- Real truth 2"]
+
+
+def test_bundles_catches_truth_budget_exceeded(tmp_path: Path) -> None:
+    """Verify bundles rule enforces max_truth_lines on knowledge and product chapters."""
+    repo = build_minimal_review_tree(tmp_path)
+    long_truth = "\n".join(f"- Truth line {idx}" for idx in range(45))
+    chapter = repo / ".agents/bundles/knowledge/patterns/rust/sample.md"
+    chapter.write_text(
+        "---\n"
+        "type: Pattern\n"
+        "title: Sample Pattern\n"
+        "description: Pattern description.\n"
+        "status: stable\n"
+        "tags: [rust, shm]\n"
+        "---\n\n"
+        f"<!-- truth: start -->\n{long_truth}\n<!-- truth: end -->\n",
+        encoding="utf-8",
+    )
+    validator = ReviewSetupValidator(repo)
+    issues = validator.validate(frozenset({"bundles"}))
+    assert any("truth block line count (45) exceeds max_truth_lines (40)" in i.message for i in issues)
+
+
+@pytest.mark.parametrize(
+    ("rel_path", "frontmatter_body", "expected_fragment"),
+    [
+        (
+            ".agents/bundles/knowledge/patterns/rust/sample.md",
+            "type: Pattern\ntitle: Sample\ndescription: Desc.\nstatus: stable\nverified:\n  - by: agent\n    commit: NOT_A_SHA\n",
+            "verified.commit 'NOT_A_SHA' must be a 7-40 character lowercase hex commit SHA",
+        ),
+        (
+            ".agents/bundles/knowledge/patterns/rust/sample.md",
+            "type: Pattern\ntitle: Sample\ndescription: Desc.\nstatus: stable\nverified:\n- by: agent\n  commit: BAD_UNINDENTED\n",
+            "verified.commit 'BAD_UNINDENTED' must be a 7-40 character lowercase hex commit SHA",
+        ),
+        (
+            ".agents/bundles/specs/sample-flow/spec.md",
+            "type: Spec\ntitle: Sample\ndescription: Desc.\nstate: planned\nplan_commit: XYZ1234\n",
+            "plan_commit 'XYZ1234' must be a 7-40 character lowercase hex commit SHA",
+        ),
+        (
+            ".agents/bundles/specs/sample-flow/tasks/t01-slice.md",
+            "type: Task\ntitle: Slice\nstate: pending\nbaseline_commit: 80e1234z\n",
+            "baseline_commit '80e1234z' must be a 7-40 character lowercase hex commit SHA",
+        ),
+    ],
+)
+def test_bundles_rejects_malformed_commit_shas(
+    tmp_path: Path,
+    rel_path: str,
+    frontmatter_body: str,
+    expected_fragment: str,
+) -> None:
+    """Verify bundles rule rejects non-hex commit SHAs across knowledge and spec frontmatter."""
+    repo = build_minimal_review_tree(tmp_path)
+    target = repo / rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(f"---\n{frontmatter_body}---\n\n# Doc\n", encoding="utf-8")
+
+    validator = ReviewSetupValidator(repo)
+    issues = validator.validate(frozenset({"bundles"}))
+    assert any(expected_fragment in i.message for i in issues)
+
+
+def test_bundles_rejects_unreachable_git_commit_sha(tmp_path: Path) -> None:
+    """Verify bundles rule rejects commit SHAs that are not ancestors of HEAD in Git repositories."""
+    repo = build_minimal_review_tree(tmp_path)
+    git_env = {
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }
+    subprocess.run(["git", "-C", str(repo), "init"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        check=True,
+        capture_output=True,
+        env=git_env,
+    )
+    head_sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    chapter = repo / ".agents/bundles/knowledge/patterns/rust/sample.md"
+    chapter.write_text(
+        "---\n"
+        "type: Pattern\n"
+        "title: Sample Pattern\n"
+        "description: Pattern description.\n"
+        "status: stable\n"
+        "verified:\n"
+        "  - by: agent\n"
+        f"    commit: {head_sha}\n"
+        "  - by: agent\n"
+        "    commit: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n"
+        "---\n\n"
+        "<!-- truth: start -->\n- Valid truth\n<!-- truth: end -->\n",
+        encoding="utf-8",
+    )
+
+    validator = ReviewSetupValidator(repo)
+    issues = validator.validate(frozenset({"bundles"}))
+    assert any(
+        "verified.commit 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef' is not an ancestor of HEAD" in i.message
+        for i in issues
+    )
+    assert not any(head_sha in i.message for i in issues)
+
+
+def test_bundles_skips_ancestry_check_in_shallow_git_clone(tmp_path: Path) -> None:
+    """Verify shallow Git clones skip ancestry checks while enforcing commit SHA syntax."""
+    repo = build_minimal_review_tree(tmp_path)
+    git_env = {
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }
+    subprocess.run(["git", "-C", str(repo), "init"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        check=True,
+        capture_output=True,
+        env=git_env,
+    )
+    head_sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (repo / ".git" / "shallow").write_text(f"{head_sha}\n", encoding="utf-8")
+
+    chapter = repo / ".agents/bundles/knowledge/patterns/rust/sample.md"
+    chapter.write_text(
+        "---\n"
+        "type: Pattern\n"
+        "title: Sample Pattern\n"
+        "description: Pattern description.\n"
+        "status: stable\n"
+        "verified:\n"
+        "  - by: agent\n"
+        "    commit: 80ff8a65e43a2bcef9e48a7763e89a7352118232\n"
+        "---\n\n"
+        "<!-- truth: start -->\n- Valid truth\n<!-- truth: end -->\n",
+        encoding="utf-8",
+    )
+
+    validator = ReviewSetupValidator(repo)
+    issues = validator.validate(frozenset({"bundles"}))
+    assert issues == []
 
 
 def test_privacy_catches_home_path_and_env_term_without_echoing(

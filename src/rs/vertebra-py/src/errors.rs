@@ -8,7 +8,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDict, PyList, PyTuple, PyType};
+use pyo3::types::{PyDict, PyTuple, PyType};
 use vertebra_db::connection::TransportError;
 
 /// Cached Python exception type objects for the `DatabaseError` hierarchy.
@@ -211,7 +211,7 @@ fn build_all_exception_types(
     let auth = new_exception_class(
         py,
         "GoogleCloudAuthError",
-        &PyTuple::new(py, [gc_bound])?,
+        &PyTuple::new(py, [gc_bound, op_bound])?,
         "Credentials could not be obtained or were rejected.",
         &[
             ("code", 16i32.into_pyobject(py)?.into_any()),
@@ -261,7 +261,7 @@ fn build_all_exception_types(
                 "code_name",
                 "INVALID_ARGUMENT".into_pyobject(py)?.into_any(),
             ),
-            ("row_errors", PyList::empty(py).into_any()),
+            ("row_errors", PyTuple::empty(py).into_any()),
         ],
     )?;
 
@@ -599,6 +599,8 @@ mod tests {
 
             let auth_err = auth_error_with(py, &all.gcp, "bad token".into());
             assert!(auth_err.is_instance(py, all.gcp.auth.bind(py)));
+            assert!(auth_err.is_instance(py, all.db.operational.bind(py)));
+            assert!(auth_err.is_instance(py, db));
             assert_eq!(
                 auth_err
                     .value(py)
@@ -607,6 +609,14 @@ mod tests {
                     .extract::<i32>()
                     .unwrap(),
                 16
+            );
+            assert!(
+                all.gcp
+                    .bigquery_row
+                    .bind(py)
+                    .getattr("row_errors")
+                    .unwrap()
+                    .is_instance_of::<PyTuple>()
             );
         });
     }

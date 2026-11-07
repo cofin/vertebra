@@ -21,7 +21,7 @@ Every pattern chapter contains code-truth blocks (`<!-- truth: start -->` / `<!-
 
 ## Rust & PyO3 (`rust/`)
 
-- [PyO3 0.30.1 FFI & GIL Discipline](rust/ffi-and-gil-discipline.md) — `#[pymodule(gil_used = false)]` across `_vertebra`, `_bundler`, and `_storage`, conditional `freelist` / `immutable_type` on `Py_GIL_DISABLED`, PEP 782 `PyBytes::new_with`, PEP 814 `PyFrozenDict::empty` + `PyUnstable_SetImmortal` on Python 3.15, anchored `__getbuffer__` `Request`, and C-API `PyIter_Send` ASGI/RSGI drivers.
+- [PyO3 0.30.1 FFI & GIL Discipline](rust/ffi-and-gil-discipline.md) — `#[pymodule(gil_used = false)]` across `_vertebra`, `_bundler`, `_storage`, `_bigquery`, and `_spanner`, conditional `freelist` / `immutable_type` on `Py_GIL_DISABLED`, PEP 782 `PyBytes::new_with`, PEP 814 `PyFrozenDict::empty` + `PyUnstable_SetImmortal` on Python 3.15, anchored `__getbuffer__` `Request`, and C-API `PyIter_Send` ASGI/RSGI drivers.
 - [Lock-Free Shared Memory & Sharded Concurrency](rust/lock-free-shm-and-sharding.md) — `CacheLine<T>` isolation (`ABI_VERSION = 3`), Dekker `SeqCst` `consumer_sleeping` and `active_flags` handshakes, generation-synchronized cached SPSC heads, cache-line-padded MPMC sequence slots, lock-free `ShmDispatcher` batch routing, and `BackpressureController` sliding-window atomics.
 
 ## TypeScript (`typescript/`)

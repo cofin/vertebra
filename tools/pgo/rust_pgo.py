@@ -91,7 +91,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--no-extensions",
         action="store_true",
-        help="Skip building the PyO3 extension crates (_vertebra, _bundler, _storage).",
+        help="Skip building the PyO3 extension crates (_vertebra, _bundler, _storage, _bigquery, _spanner).",
     )
     parser.add_argument(
         "--use-existing",

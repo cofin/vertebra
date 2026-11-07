@@ -129,6 +129,9 @@ embeddings = [
 bigquery = [
     "vertebra-bigquery==0.3.0",
 ]
+bundler = [
+    "vertebra-bundler==0.3.0",
+]
 spanner = [
     "vertebra-spanner==0.3.0",
 ]
@@ -161,7 +164,9 @@ all = [
     "litestar-asyncapi>=0.2.0",
     "litestar-htmx>=0.5.0",
     "litestar-saq>=0.8.0",
+    "fastembed>=0.6.0",
     "vertebra-bigquery==0.3.0",
+    "vertebra-bundler==0.3.0",
     "vertebra-spanner==0.3.0",
     "vertebra-storage==0.3.0",
     "rloop>=0.5.0; sys_platform != 'win32'",
@@ -231,6 +236,7 @@ bench = [
 [tool.uv.sources]
 pytest-databases = { git = "https://github.com/litestar-org/pytest-databases.git", branch = "test/clientless-all" }
 vertebra-bigquery = { path = "src/rs/vertebra-bigquery", editable = true }
+vertebra-bundler = { path = "src/rs/vertebra-bundler", editable = true }
 vertebra-spanner = { path = "src/rs/vertebra-spanner", editable = true }
 vertebra-storage = { path = "src/rs/vertebra-storage", editable = true }
 
@@ -370,6 +376,11 @@ replace = 'version = "{new_version}"'
 filename = "pyproject.toml"
 search = 'vertebra-bigquery=={current_version}'
 replace = 'vertebra-bigquery=={new_version}'
+
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
+search = 'vertebra-bundler=={current_version}'
+replace = 'vertebra-bundler=={new_version}'
 
 [[tool.bumpversion.files]]
 filename = "pyproject.toml"

@@ -50,7 +50,7 @@ Users keep existing configurations such as `sqlspec.adapters.asyncpg.AsyncpgConf
 
 ## Dependencies
 
-`db-layout-and-contract` (`main @ f741701`), `integration-remediation/db-engine-primitives`, and `native-postgres-driver` (first native Rust pool hosted by the broker).
+`db-layout-and-contract` (`main @ 21c99f95`), `integration-remediation/db-engine-primitives` (`main @ 80ff8a65`), and `native-postgres-driver` (first native Rust pool hosted by the broker).
 
 ## Acceptance Boundary
 

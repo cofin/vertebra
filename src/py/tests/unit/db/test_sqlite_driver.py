@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -105,3 +106,47 @@ async def test_async_execute_returning_respects_transaction(tmp_path: Path, comm
     finally:
         await observer.close()
         await driver.close()
+
+
+def test_sync_sqlite_driver_connect_reopens_closed_connection_and_reapplies_pragmas(tmp_path: Path) -> None:
+    """Reopening a closed SyncSQLiteDriver restores connectivity, persisted rows, and initialization pragmas."""
+    db_file = tmp_path / "reopen.db"
+    config = SQLiteConfig(path=str(db_file), busy_timeout_ms=2500, foreign_keys=True)
+    driver = SyncSQLiteDriver(config)
+    try:
+        driver.execute("CREATE TABLE items (value INTEGER)")
+        assert driver.execute("INSERT INTO items VALUES (?)", (42,)) == 1
+        driver.close()
+        assert driver.connect() is driver
+        assert driver.execute_tuples("SELECT value FROM items") == [(42,)]
+        assert driver.execute_tuples("PRAGMA busy_timeout") == [(2500,)]
+        assert driver.execute_tuples("PRAGMA foreign_keys") == [(1,)]
+        assert driver.execute("INSERT INTO items VALUES (?)", (99,)) == 1
+        assert driver.execute_tuples("SELECT value FROM items ORDER BY value") == [(42,), (99,)]
+    finally:
+        driver.close()
+
+
+def test_sync_sqlite_driver_serializes_concurrent_multithreaded_operations(tmp_path: Path) -> None:
+    """Concurrent multi-threaded SyncSQLiteDriver writes and reads serialize cleanly without corruption."""
+    config = SQLiteConfig(path=str(tmp_path / "concurrent.db"), busy_timeout_ms=5000)
+    driver = SyncSQLiteDriver(config)
+    try:
+        driver.execute("CREATE TABLE concurrent_items (worker_id INTEGER, seq INTEGER)")
+
+        def run_worker(worker_id: int) -> int:
+            inserted = sum(
+                driver.execute("INSERT INTO concurrent_items (worker_id, seq) VALUES (?, ?)", (worker_id, seq))
+                for seq in range(10)
+            )
+            count_rows = driver.execute_tuples("SELECT COUNT(*) FROM concurrent_items")
+            assert count_rows[0][0] >= inserted
+            return inserted
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            counts = list(pool.map(run_worker, range(6)))
+
+        assert counts == [10, 10, 10, 10, 10, 10]
+        assert driver.execute_tuples("SELECT COUNT(*) FROM concurrent_items") == [(60,)]
+    finally:
+        driver.close()

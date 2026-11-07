@@ -16,8 +16,8 @@ tests:
 - src/rs/vertebra-db/src/connection.rs::tests::alloydb_split_transport_stages
 - src/rs/vertebra-postgres/tests/postgres_cloud_wire_tests.rs::alloydb_metadata_iam
 - src/rs/vertebra-postgres/tests/postgres_cloud_wire_tests.rs::alloydb_token_expires_during_tls
-plan_revision: 1
-plan_commit: null
+plan_revision: 2
+plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -28,7 +28,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-05T20:03:00Z'
+updated_at: '2026-11-06T06:30:00Z'
 commit: null
 tags:
 - postgres

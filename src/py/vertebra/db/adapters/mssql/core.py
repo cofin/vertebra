@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import re
 import struct
-from typing import TYPE_CHECKING, Any
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from vertebra.db.driver._common import MSSQL_DIALECT_TAG
 from vertebra.typing import VertebraError
 from vertebra.utils.module_loader import import_optional
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
 
 __all__ = (
     "MSSQL_DIALECT_TAG",
@@ -209,7 +207,7 @@ class MSSQLCore:
         """Convert `@P1` / `?` / `$1` placeholders into positional parameters."""
         if not params:
             return sql, ()
-        if isinstance(params, dict):
+        if isinstance(params, Mapping):
             ordered: list[Any] = []
 
             def _replace_named(match: re.Match[str]) -> str:

@@ -178,6 +178,94 @@ async def test_agent_group_specialist_transfer() -> None:
     assert resp.agent_name == "BillingAgent"
     assert "BillingAgent" in resp.response
 
+    stream_model = DummyMockModel([step1, step2])
+    stream_runtime = AgentRuntime(model_provider=stream_model, agent_group=group)
+    frames = [
+        frame
+        async for frame in stream_runtime.stream_turn(
+            TurnRequest(session_id="sess_transfer_stream", message="I need a refund")
+        )
+    ]
+    assert any(frame.event_type == "agent_transfer" and frame.agent_name == "BillingAgent" for frame in frames)
+    assert any(frame.event_type == "delta" and "BillingAgent" in frame.text for frame in frames)
+    assert frames[-1].event_type == "done"
+    assert frames[-1].agent_name == "BillingAgent"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("replay_tool", "replay_args"),
+    [
+        ("drop_db", {"db_name": "production"}),
+        ("purge_audit_log", {"db_name": "staging"}),
+    ],
+    ids=["mutated-arguments", "different-tool"],
+)
+async def test_agent_runtime_confirmation_binds_tool_and_arguments(
+    replay_tool: str,
+    replay_args: dict[str, Any],
+) -> None:
+    """Verify run_turn and stream_turn reject approved tokens replayed for another tool or mutated arguments."""
+    gate = ConfirmationGate()
+    executed: list[tuple[str, str]] = []
+
+    async def drop_db(db_name: str) -> str:
+        executed.append(("drop_db", db_name))
+        return f"dropped:{db_name}"
+
+    async def purge_audit_log(db_name: str) -> str:
+        executed.append(("purge_audit_log", db_name))
+        return f"purged:{db_name}"
+
+    agent = Agent(
+        name="AdminAgent",
+        tools=(
+            Tool(name="drop_db", description="Drop database", fn=drop_db, requires_confirmation=True),
+            Tool(
+                name="purge_audit_log",
+                description="Purge audit log",
+                fn=purge_audit_log,
+                requires_confirmation=True,
+            ),
+        ),
+    )
+    approved_ticket = gate.request_confirmation("drop_db", "call_initial", {"db_name": "staging"})
+    assert gate.approve(approved_ticket.token) is True
+
+    replay_step = [
+        ModelDelta(
+            event_type="tool_call",
+            tool_name=replay_tool,
+            call_id="call_replay",
+            arguments=replay_args,
+        )
+    ]
+    runtime = AgentRuntime(model_provider=DummyMockModel([replay_step]), default_agent=agent, confirmation_gate=gate)
+    resp = await runtime.run_turn(
+        TurnRequest(session_id="sess_bind", message="Run operation", confirmation_token=approved_ticket.token)
+    )
+    assert resp.status == "confirmation_required"
+    assert resp.confirmation_token is not None
+    assert resp.confirmation_token != approved_ticket.token
+    assert executed == []
+
+    stream_runtime = AgentRuntime(
+        model_provider=DummyMockModel([replay_step]),
+        default_agent=agent,
+        confirmation_gate=gate,
+    )
+    frames = [
+        frame
+        async for frame in stream_runtime.stream_turn(
+            TurnRequest(
+                session_id="sess_bind_stream", message="Run operation", confirmation_token=approved_ticket.token
+            )
+        )
+    ]
+    assert frames[-1].event_type == "confirmation_required"
+    assert frames[-1].tool_name == replay_tool
+    assert executed == []
+
 
 @pytest.mark.anyio
 async def test_confirmation_gate_pause_and_approval() -> None:
@@ -682,22 +770,32 @@ async def test_provider_confirmation_denies_invalid_tickets(token_kind: str) -> 
 
 
 @pytest.mark.anyio
-async def test_provider_tools_translate_only_explicit_policy_errors() -> None:
-    """Policy refusals translate while native failures and cancellation retain identity."""
-    from vertebra.agent import PermissionDeniedError, build_tools
-
+@pytest.mark.parametrize(
+    "failure_factory",
+    [
+        lambda: DatabaseError("native"),
+        lambda: PermissionError("native permission"),
+        lambda: RuntimeError("driver"),
+        asyncio.CancelledError,
+    ],
+    ids=["database-error", "permission-error", "runtime-error", "cancelled-error"],
+)
+async def test_provider_tools_preserve_native_failures(failure_factory: Any) -> None:
+    """Native driver and cancellation failures retain exact exception identity."""
     provider = _ConfirmedToolProvider()
     tool = build_tools(provider)["query"]
-    for failure in (
-        DatabaseError("native"),
-        PermissionError("native permission"),
-        RuntimeError("driver"),
-        asyncio.CancelledError(),
-    ):
-        provider.failure = failure
-        with pytest.raises(type(failure)) as exc:
-            await tool.invoke({"sql": "SELECT 1"})
-        assert exc.value is failure
+    failure = failure_factory()
+    provider.failure = failure
+    with pytest.raises(type(failure)) as exc:
+        await tool.invoke({"sql": "SELECT 1"})
+    assert exc.value is failure
+
+
+@pytest.mark.anyio
+async def test_provider_tools_translate_explicit_policy_errors() -> None:
+    """Explicit ToolPolicyError refusals translate to PermissionDeniedError."""
+    provider = _ConfirmedToolProvider()
+    tool = build_tools(provider)["query"]
     provider.failure = ToolPolicyError("policy limit")
     with pytest.raises(PermissionDeniedError, match="policy limit"):
         await tool.invoke({"sql": "SELECT 1"})

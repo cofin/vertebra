@@ -25,7 +25,7 @@ To keep CPU-heavy or blocking I/O work from slowing down fast routes, Vertebra s
 For background queue workers (`vtb workers run`), `WorkerRunner` (`vertebra.framework.queues`) polls `cpu`, `io`, and `agent` lanes concurrently with configurable concurrency per lane:
 
 ```bash
-vtb workers run app:queue --lanes io,cpu,agent --concurrency 8
+vtb workers run app:queue --queues io,cpu,agent --concurrency 8
 ```
 
 ## Multi-Protocol Adapters (ASGI, RSGI & WSGI)
