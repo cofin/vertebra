@@ -11,6 +11,7 @@ from typing import Any, TypedDict
 from uuid import UUID
 
 import msgspec
+import pydantic
 import pytest
 
 from vertebra.typing import UNSET, CamelizedBaseStruct, Empty
@@ -29,11 +30,16 @@ from vertebra.utils.type_guards import (
     extract_dataclass_fields,
     extract_dataclass_items,
     get_msgspec_rename_config,
+    is_async_generator_callable,
     is_async_readable,
     is_attrs_schema,
+    is_coroutine_callable,
     is_dict_row,
+    is_generator_callable,
     is_iterable_parameters,
     is_mapping_like,
+    is_msgspec_struct_type,
+    is_pydantic_model_type,
     is_readable,
     is_schema,
     is_schema_or_dict,
@@ -90,6 +96,42 @@ class _AsyncReader:
 class _ClosableResource:
     def close(self) -> None:
         return None
+
+
+class _SamplePydanticModel(pydantic.BaseModel):
+    user_id: int
+    user_name: str
+
+
+async def _sample_coro_fn() -> int:
+    return 1
+
+
+async def _sample_async_gen_fn() -> Any:
+    yield 1
+
+
+def _sample_sync_gen_fn() -> Any:
+    yield 1
+
+
+def _sample_sync_fn() -> int:
+    return 1
+
+
+class _AsyncCallableObj:
+    async def __call__(self) -> int:
+        return 2
+
+
+class _AsyncGenCallableObj:
+    async def __call__(self) -> Any:
+        yield 2
+
+
+class _SyncGenCallableObj:
+    def __call__(self) -> Any:
+        yield 2
 
 
 @pytest.fixture
@@ -374,3 +416,49 @@ def test_should_json_encode_sequence(seq: list[Any], expected: bool) -> None:
 def test_time_iso_convert(temporal_val: date | time | datetime, expected_prefix: str) -> None:
     """Verify time_iso_convert formats date, time, and datetime values as ISO 8601 strings."""
     assert time_iso_convert(temporal_val).startswith(expected_prefix)
+
+
+@pytest.mark.parametrize(
+    ("candidate", "expected_coro", "expected_async_gen", "expected_sync_gen"),
+    [
+        (_sample_coro_fn, True, False, False),
+        (_AsyncCallableObj(), True, False, False),
+        (_sample_async_gen_fn, False, True, False),
+        (_AsyncGenCallableObj(), False, True, False),
+        (_sample_sync_gen_fn, False, False, True),
+        (_SyncGenCallableObj(), False, False, True),
+        (_sample_sync_fn, False, False, False),
+        ("not-callable", False, False, False),
+    ],
+)
+def test_callable_coroutine_and_generator_type_guards(
+    candidate: Any,
+    expected_coro: bool,
+    expected_async_gen: bool,
+    expected_sync_gen: bool,
+) -> None:
+    """Verify is_coroutine_callable, is_async_generator_callable, and is_generator_callable."""
+    assert is_coroutine_callable(candidate) is expected_coro
+    assert is_async_generator_callable(candidate) is expected_async_gen
+    assert is_generator_callable(candidate) is expected_sync_gen
+
+
+@pytest.mark.parametrize(
+    ("candidate", "expected_msgspec_type", "expected_pydantic_type"),
+    [
+        (_SampleStruct, True, False),
+        (_SampleStruct(user_id=1, user_name="Ada"), False, False),
+        (_SamplePydanticModel, False, True),
+        (_SamplePydanticModel(user_id=1, user_name="Ada"), False, False),
+        (_SampleDataclass, False, False),
+        ("not-a-type", False, False),
+    ],
+)
+def test_model_class_type_guards(
+    candidate: Any,
+    expected_msgspec_type: bool,
+    expected_pydantic_type: bool,
+) -> None:
+    """Verify is_msgspec_struct_type and is_pydantic_model_type match model classes only."""
+    assert is_msgspec_struct_type(candidate) is expected_msgspec_type
+    assert is_pydantic_model_type(candidate) is expected_pydantic_type

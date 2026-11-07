@@ -12,19 +12,14 @@ from typing import Any, ClassVar, Final, Literal, Self
 from sqlspec.core.parameters import ParameterStyle, ParameterStyleConfig
 from sqlspec.core.statement import StatementConfig
 
-from vertebra._vertebra import LeaseBroker
-from vertebra._vertebra import StatementCache as _RustStatementCache
+from vertebra._vertebra import LeaseBroker, StatementCache
 from vertebra.db.adapters.bigquery import (
-    AsyncBigQueryDriver as _CoreAsyncBigQueryDriver,
-)
-from vertebra.db.adapters.bigquery import (
+    AsyncBigQueryDriver,
     BigQueryConfig,
     BigQueryDryRunResult,
     ObjectRef,
     ObjectTableConfig,
-)
-from vertebra.db.adapters.bigquery import (
-    SyncBigQueryDriver as _CoreSyncBigQueryDriver,
+    SyncBigQueryDriver,
 )
 from vertebra.db.arrow import ArrowCursor
 from vertebra.db.driver import NotSupportedError
@@ -245,7 +240,7 @@ class BigQuerySyncDataDictionary(_BaseBigQueryDataDictionary):
         return res
 
     def _require_sync_driver(self) -> Any:
-        if isinstance(self._driver, _CoreSyncBigQueryDriver) or hasattr(self._driver, "select"):
+        if isinstance(self._driver, SyncBigQueryDriver) or hasattr(self._driver, "select"):
             return self._driver
         raise ImproperConfigurationError("Synchronous BigQuerySyncDataDictionary methods require SyncBigQueryDriver")
 
@@ -294,7 +289,7 @@ class BigQueryAsyncDataDictionary(_BaseBigQueryDataDictionary):
         return res
 
     def _require_async_driver(self) -> Any:
-        if isinstance(self._driver, _CoreAsyncBigQueryDriver) or hasattr(self._driver, "select"):
+        if isinstance(self._driver, AsyncBigQueryDriver) or hasattr(self._driver, "select"):
             return self._driver
         raise ImproperConfigurationError("Asynchronous BigQueryAsyncDataDictionary methods require AsyncBigQueryDriver")
 
@@ -1043,7 +1038,7 @@ class BigQuerySyncConfig(SyncAdapterConfig[BigQueryConfig, BigQuerySyncDriver]):
 
     dialect: ClassVar[str] = "bigquery"
     _config_cls: ClassVar[type[BigQueryConfig]] = BigQueryConfig
-    _driver_cls: ClassVar[type[_CoreSyncBigQueryDriver]] = _CoreSyncBigQueryDriver
+    _driver_cls: ClassVar[type[SyncBigQueryDriver]] = SyncBigQueryDriver
     driver_type: ClassVar[type[BigQuerySyncDriver]] = BigQuerySyncDriver
 
     def __init__(
@@ -1171,7 +1166,7 @@ class BigQuerySyncConfig(SyncAdapterConfig[BigQueryConfig, BigQuerySyncDriver]):
     def provide_driver(
         self,
         broker: LeaseBroker | None = None,
-        statement_cache: _RustStatementCache | None = None,
+        statement_cache: StatementCache | None = None,
     ) -> BigQuerySyncDriver:
         """Instantiate a ``BigQuerySyncDriver`` bound to this configuration."""
         if isinstance(self.connection_instance, BigQuerySyncDriver):
@@ -1180,7 +1175,7 @@ class BigQuerySyncConfig(SyncAdapterConfig[BigQueryConfig, BigQuerySyncDriver]):
             core = self.connection_instance
         else:
             bq_cfg = self.resolve_bigquery_config()
-            core = _CoreSyncBigQueryDriver(
+            core = SyncBigQueryDriver(
                 bq_cfg,
                 broker=broker,
                 statement_cache=statement_cache,
@@ -1205,7 +1200,7 @@ class BigQuerySyncConfig(SyncAdapterConfig[BigQueryConfig, BigQuerySyncDriver]):
         self,
         *args: Any,
         broker: LeaseBroker | None = None,
-        statement_cache: _RustStatementCache | None = None,
+        statement_cache: StatementCache | None = None,
         **kwargs: Any,
     ) -> Iterator[BigQuerySyncDriver]:
         """Yield a connected ``BigQuerySyncDriver`` session and close it on exit."""
@@ -1230,7 +1225,7 @@ class BigQueryAsyncConfig(AsyncAdapterConfig[BigQueryConfig, BigQueryAsyncDriver
 
     dialect: ClassVar[str] = "bigquery"
     _config_cls: ClassVar[type[BigQueryConfig]] = BigQueryConfig
-    _driver_cls: ClassVar[type[_CoreAsyncBigQueryDriver]] = _CoreAsyncBigQueryDriver
+    _driver_cls: ClassVar[type[AsyncBigQueryDriver]] = AsyncBigQueryDriver
     driver_type: ClassVar[type[BigQueryAsyncDriver]] = BigQueryAsyncDriver
 
     def __init__(
@@ -1358,7 +1353,7 @@ class BigQueryAsyncConfig(AsyncAdapterConfig[BigQueryConfig, BigQueryAsyncDriver
     def provide_driver(
         self,
         broker: LeaseBroker | None = None,
-        statement_cache: _RustStatementCache | None = None,
+        statement_cache: StatementCache | None = None,
     ) -> BigQueryAsyncDriver:
         """Instantiate a ``BigQueryAsyncDriver`` bound to this configuration."""
         if isinstance(self.connection_instance, BigQueryAsyncDriver):
@@ -1367,7 +1362,7 @@ class BigQueryAsyncConfig(AsyncAdapterConfig[BigQueryConfig, BigQueryAsyncDriver
             core = self.connection_instance
         else:
             bq_cfg = self.resolve_bigquery_config()
-            core = _CoreAsyncBigQueryDriver(
+            core = AsyncBigQueryDriver(
                 bq_cfg,
                 broker=broker,
                 statement_cache=statement_cache,
@@ -1392,7 +1387,7 @@ class BigQueryAsyncConfig(AsyncAdapterConfig[BigQueryConfig, BigQueryAsyncDriver
         self,
         *args: Any,
         broker: LeaseBroker | None = None,
-        statement_cache: _RustStatementCache | None = None,
+        statement_cache: StatementCache | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[BigQueryAsyncDriver]:
         """Asynchronously yield a connected ``BigQueryAsyncDriver`` session and close it on exit."""
@@ -1408,7 +1403,7 @@ class BigQueryAsyncConfig(AsyncAdapterConfig[BigQueryConfig, BigQueryAsyncDriver
     def create_connection(self) -> Any:
         """Create a zero-SDK ``BigQueryConnectionShim`` for upstream SQLSpec stores."""
         bq_cfg = self.resolve_bigquery_config()
-        sync_core = _CoreSyncBigQueryDriver(bq_cfg)
+        sync_core = SyncBigQueryDriver(bq_cfg)
         sync_core.connect()
         return BigQueryConnectionShim(sync_core)
 
@@ -1418,7 +1413,7 @@ class BigQuerySyncADKStore:
 
     def __init__(
         self,
-        config_or_driver: BigQuerySyncConfig | BigQuerySyncDriver | _CoreSyncBigQueryDriver,
+        config_or_driver: BigQuerySyncConfig | BigQuerySyncDriver | SyncBigQueryDriver,
         *,
         sessions_table: str = _DEFAULT_SESSIONS_TABLE,
         events_table: str = _DEFAULT_EVENTS_TABLE,
@@ -1629,7 +1624,7 @@ class BigQueryAsyncADKStore:
 
     def __init__(
         self,
-        config_or_driver: BigQueryAsyncConfig | BigQueryAsyncDriver | _CoreAsyncBigQueryDriver,
+        config_or_driver: BigQueryAsyncConfig | BigQueryAsyncDriver | AsyncBigQueryDriver,
         *,
         sessions_table: str = _DEFAULT_SESSIONS_TABLE,
         events_table: str = _DEFAULT_EVENTS_TABLE,
@@ -1840,7 +1835,7 @@ class BigQuerySyncADKMemoryStore:
 
     def __init__(
         self,
-        config_or_driver: BigQuerySyncConfig | BigQuerySyncDriver | _CoreSyncBigQueryDriver,
+        config_or_driver: BigQuerySyncConfig | BigQuerySyncDriver | SyncBigQueryDriver,
         *,
         memories_table: str = _DEFAULT_MEMORIES_TABLE,
     ) -> None:
@@ -1930,7 +1925,7 @@ class BigQueryAsyncADKMemoryStore:
 
     def __init__(
         self,
-        config_or_driver: BigQueryAsyncConfig | BigQueryAsyncDriver | _CoreAsyncBigQueryDriver,
+        config_or_driver: BigQueryAsyncConfig | BigQueryAsyncDriver | AsyncBigQueryDriver,
         *,
         memories_table: str = _DEFAULT_MEMORIES_TABLE,
     ) -> None:
@@ -2020,7 +2015,7 @@ class BigQuerySyncADKArtifactStore:
 
     def __init__(
         self,
-        config_or_driver: BigQuerySyncConfig | BigQuerySyncDriver | _CoreSyncBigQueryDriver,
+        config_or_driver: BigQuerySyncConfig | BigQuerySyncDriver | SyncBigQueryDriver,
         *,
         storage_backend: ObjectStoreBackend | str | None = None,
         artifacts_table: str = _DEFAULT_ARTIFACTS_TABLE,
@@ -2214,7 +2209,7 @@ class BigQueryAsyncADKArtifactStore:
 
     def __init__(
         self,
-        config_or_driver: BigQueryAsyncConfig | BigQueryAsyncDriver | _CoreAsyncBigQueryDriver,
+        config_or_driver: BigQueryAsyncConfig | BigQueryAsyncDriver | AsyncBigQueryDriver,
         *,
         storage_backend: ObjectStoreBackend | str | None = None,
         artifacts_table: str = _DEFAULT_ARTIFACTS_TABLE,
@@ -2408,7 +2403,7 @@ class BigQuerySyncStore:
 
     def __init__(
         self,
-        config_or_driver: BigQuerySyncConfig | BigQuerySyncDriver | _CoreSyncBigQueryDriver,
+        config_or_driver: BigQuerySyncConfig | BigQuerySyncDriver | SyncBigQueryDriver,
         *,
         table_name: str = _DEFAULT_KV_STORE_TABLE,
     ) -> None:
@@ -2509,7 +2504,7 @@ class BigQueryAsyncStore:
 
     def __init__(
         self,
-        config_or_driver: BigQueryAsyncConfig | BigQueryAsyncDriver | _CoreAsyncBigQueryDriver,
+        config_or_driver: BigQueryAsyncConfig | BigQueryAsyncDriver | AsyncBigQueryDriver,
         *,
         table_name: str = _DEFAULT_KV_STORE_TABLE,
     ) -> None:
@@ -2610,7 +2605,7 @@ class BigQuerySyncEventQueueStore:
 
     def __init__(
         self,
-        config_or_driver: BigQuerySyncConfig | BigQuerySyncDriver | _CoreSyncBigQueryDriver,
+        config_or_driver: BigQuerySyncConfig | BigQuerySyncDriver | SyncBigQueryDriver,
         *,
         queue_table: str = _DEFAULT_EVENT_QUEUE_TABLE,
     ) -> None:
@@ -2686,7 +2681,7 @@ class BigQueryAsyncEventQueueStore:
 
     def __init__(
         self,
-        config_or_driver: BigQueryAsyncConfig | BigQueryAsyncDriver | _CoreAsyncBigQueryDriver,
+        config_or_driver: BigQueryAsyncConfig | BigQueryAsyncDriver | AsyncBigQueryDriver,
         *,
         queue_table: str = _DEFAULT_EVENT_QUEUE_TABLE,
     ) -> None:
@@ -2764,7 +2759,7 @@ def _coerce_sync_driver(
         return config_or_driver
     if isinstance(config_or_driver, BigQuerySyncConfig):
         return config_or_driver.provide_driver()
-    if isinstance(config_or_driver, _CoreSyncBigQueryDriver) or hasattr(config_or_driver, "select"):
+    if isinstance(config_or_driver, SyncBigQueryDriver) or hasattr(config_or_driver, "select"):
         return BigQuerySyncDriver(config_or_driver)
     raise ImproperConfigurationError(
         f"Expected BigQuerySyncConfig or BigQuerySyncDriver, got {type(config_or_driver)!r}"
@@ -2778,7 +2773,7 @@ def _coerce_async_driver(
         return config_or_driver
     if isinstance(config_or_driver, BigQueryAsyncConfig):
         return config_or_driver.provide_driver()
-    if isinstance(config_or_driver, _CoreAsyncBigQueryDriver) or hasattr(config_or_driver, "select"):
+    if isinstance(config_or_driver, AsyncBigQueryDriver) or hasattr(config_or_driver, "select"):
         return BigQueryAsyncDriver(config_or_driver)
     raise ImproperConfigurationError(
         f"Expected BigQueryAsyncConfig or BigQueryAsyncDriver, got {type(config_or_driver)!r}"

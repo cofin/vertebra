@@ -205,6 +205,9 @@ pub(crate) fn with_buffer_slice<R>(
         let slice = if len == 0 {
             &[][..]
         } else {
+            // SAFETY: `py_buf` is verified C-contiguous (`PyBuffer<u8>`), `len > 0`
+            // ensures `buf_ptr()` is non-null and valid for `len` bytes, and `py_buf`
+            // stays alive across `f(slice)` while the GIL is held.
             unsafe { std::slice::from_raw_parts(py_buf.buf_ptr() as *const u8, len) }
         };
         let res = f(slice);
@@ -621,6 +624,9 @@ pub fn submit_raw_response(
             if len == 0 {
                 &[]
             } else {
+                // SAFETY: `py_buf` is C-contiguous (`owned_fallback` is `None`), `len > 0`
+                // guarantees `buf_ptr()` is non-null and valid for `len` bytes, and `py_buf`
+                // remains alive until the end of `submit_raw_response`.
                 unsafe { std::slice::from_raw_parts(py_buf.buf_ptr() as *const u8, len) }
             }
         }

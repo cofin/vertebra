@@ -1,12 +1,3 @@
----
-title: "Vertebra Product Index"
-description: "Index for Vertebra's product definition, engineering guidelines, and polyglot technology stack."
-tags:
-  - product
-  - index
-  - vertebra
----
-
 # Vertebra Product Definition Index
 
 Core product and engineering context for **Vertebra** (`vertebra` + `@vertebra/client`).

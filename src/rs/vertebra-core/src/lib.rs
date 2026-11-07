@@ -18,6 +18,7 @@ pub mod logger;
 pub mod notify;
 pub mod platform;
 pub mod process;
+pub mod proto;
 pub mod protocol;
 pub mod router;
 pub mod shm;

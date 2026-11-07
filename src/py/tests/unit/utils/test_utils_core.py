@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import types
 import uuid
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any
 import pytest
 
 from vertebra.typing import MissingDependencyError
+from vertebra.utils import module_loader as module_loader_mod
 from vertebra.utils import uuids as uuids_mod
 from vertebra.utils.config_tools import (
     SingletonMeta,
@@ -32,8 +34,10 @@ from vertebra.utils.module_loader import (
     ensure_numpy,
     ensure_pandas,
     ensure_pyarrow,
+    import_optional,
     import_optional_attr,
     module_to_os_path,
+    reset_dependency_cache,
     resolve_optional_attr,
 )
 from vertebra.utils.uuids import (
@@ -52,20 +56,6 @@ from vertebra.utils.uuids import (
 class _SampleSingleton(metaclass=SingletonMeta):
     def __init__(self, label: str = "default") -> None:
         self.label = label
-
-
-@pytest.fixture(params=["native", "python"])
-def uuid_backend(
-    request: pytest.FixtureRequest,
-    monkeypatch: pytest.MonkeyPatch,
-) -> str:
-    """Parameterize UUID and NanoID tests across compiled Rust and pure-Python fallbacks."""
-    mode = str(request.param)
-    if mode == "python":
-        monkeypatch.setattr(uuids_mod, "_native_uuid4_u128", None)
-        monkeypatch.setattr(uuids_mod, "_native_uuid7_u128", None)
-        monkeypatch.setattr(uuids_mod, "_native_nanoid_generate", None)
-    return mode
 
 
 @pytest.fixture(
@@ -130,14 +120,12 @@ def optional_data_module_case(
     ],
 )
 def test_uuid_versions_and_determinism(
-    uuid_backend: str,
     fn: Any,
     args: tuple[Any, ...],
     expected_version: int,
     is_deterministic: bool,
 ) -> None:
     """Verify uuid3, uuid4, uuid5, uuid6, and uuid7 version bits and determinism."""
-    assert uuid_backend in {"native", "python"}
     first = fn(*args)
     second = fn(*args)
     assert isinstance(first, uuid.UUID)
@@ -148,9 +136,8 @@ def test_uuid_versions_and_determinism(
         assert first != second
 
 
-def test_uuid7_monotonicity_and_conversion_helpers(uuid_backend: str) -> None:
+def test_uuid7_monotonicity_and_conversion_helpers() -> None:
     """Verify uuid7 monotonicity, uuid_from_* helpers, and nanoid generation."""
-    assert uuid_backend in {"native", "python"}
     u7_list = [uuid7() for _ in range(200)]
     assert u7_list == sorted(u7_list)
 
@@ -167,24 +154,39 @@ def test_uuid7_monotonicity_and_conversion_helpers(uuid_backend: str) -> None:
         nanoid(0)
 
 
-@pytest.fixture
-def patched_uuid_utils(monkeypatch: pytest.MonkeyPatch) -> uuid.UUID:
-    """Monkeypatch _load_uuid_utils with a deterministic uuid4 stub."""
-    fixed_u4 = uuid.UUID("12345678-1234-4678-8234-567812345678")
-    fake_mod = types.SimpleNamespace(
-        NAMESPACE_DNS=uuid.NAMESPACE_DNS,
-        UUID=uuid.UUID,
-        uuid3=lambda ns, name: uuid.uuid3(ns, name),
-        uuid4=lambda: fixed_u4,
-        uuid5=lambda ns, name: uuid.uuid5(ns, name),
-    )
-    monkeypatch.setattr(uuids_mod, "_load_uuid_utils", lambda: fake_mod)
-    return fixed_u4
+def test_uuids_module_omits_legacy_monkeypatch_hooks() -> None:
+    """Verify vertebra.utils.uuids omits _load_uuid_utils, _UuidBackend, and _py_uuid7 hooks."""
+    assert not hasattr(uuids_mod, "_load_uuid_utils")
+    assert not hasattr(uuids_mod, "_UuidBackend")
+    assert not hasattr(uuids_mod, "_py_uuid7")
 
 
-def test_uuid_monkeypatched_backend_fallback(patched_uuid_utils: uuid.UUID) -> None:
-    """Verify _load_uuid_utils monkeypatching works for test overrides."""
-    assert uuid4() == patched_uuid_utils
+def test_import_optional_fast_paths_sys_modules_and_caches_negative_misses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify import_optional fast-paths sys.modules hits and caches negative misses."""
+    reset_dependency_cache()
+    synthetic_name = "_vertebra_synthetic_fastpath_mod"
+    synthetic_mod = types.ModuleType(synthetic_name)
+    monkeypatch.setitem(sys.modules, synthetic_name, synthetic_mod)
+
+    availability_calls: list[str] = []
+    real_module_available = module_loader_mod.module_available
+
+    def _spy_module_available(name: str) -> bool:
+        availability_calls.append(name)
+        return real_module_available(name)
+
+    monkeypatch.setattr(module_loader_mod, "module_available", _spy_module_available)
+    assert import_optional(synthetic_name) is synthetic_mod
+    assert synthetic_name not in availability_calls
+
+    missing_name = "_vertebra_missing_pkg_xyz_999"
+    assert import_optional(missing_name) is None
+    assert import_optional(missing_name) is None
+    assert availability_calls.count(missing_name) == 2
+    assert real_module_available(missing_name) is False
+    reset_dependency_cache()
 
 
 def test_singleton_meta_reuses_instance() -> None:

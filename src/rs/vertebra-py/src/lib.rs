@@ -6,8 +6,8 @@ use pyo3::prelude::*;
 
 pub mod agent;
 pub mod asgi;
+pub mod async_bridge;
 pub mod broker;
-pub mod completion;
 pub mod db;
 pub mod errors;
 pub mod file_io;
@@ -29,12 +29,15 @@ pub use asgi::{
     AsgiProtocol, AsgiScope, AsgiScopeIterator, PyEmptyAwaitable, PyValueAwaitable,
     drive_asgi_batch, drive_native_batch,
 };
+pub use async_bridge::{RustDbTaskAwaitable, TaskPanicError};
 pub use broker::{
     BrokerStats, LeaseBroker, LeaseGrant, StatementCache, StatementCacheStats, StatementPlan,
 };
-pub use completion::{RustDbTaskAwaitable, TaskPanicError};
 pub use db::{AlloyDBDialer, ArrowCursor, CloudSQLDialer};
-pub use gcp_auth::{PyAsyncGcpTokenCache, PyGcpTokenSnapshot, PySyncGcpTokenCache};
+pub use gcp_auth::{
+    PyAsyncGcpTokenCache, PyGcpTokenSnapshot, PySyncGcpTokenCache, gcp_http2_post_async,
+    gcp_http2_post_sync,
+};
 pub use headers::{Headers, HeadersIterator};
 pub use msgspec_bridge::{
     call_vectorcall, hydrate_one_vectorcall, hydrate_rows_vectorcall,
@@ -143,7 +146,7 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(msgspec_bridge::pack_grpc_lpm_frame, m)?)?;
 
     // Native database dialers, wire codecs, and SHM Arrow IPC cursors
-    completion::register(m)?;
+    async_bridge::register(m)?;
     errors::register(m)?;
     gcp_auth::register(m)?;
     db::register_db_bindings(m)?;

@@ -34,17 +34,22 @@ __all__ = (
     "extract_dataclass_items",
     "get_msgspec_rename_config",
     "has_dict_attribute",
+    "is_async_generator_callable",
     "is_async_readable",
     "is_attrs_instance",
     "is_attrs_schema",
+    "is_coroutine_callable",
     "is_dataclass",
     "is_dataclass_instance",
     "is_dict",
     "is_dict_row",
+    "is_generator_callable",
     "is_iterable_parameters",
     "is_mapping_like",
     "is_msgspec_struct",
+    "is_msgspec_struct_type",
     "is_pydantic_model",
+    "is_pydantic_model_type",
     "is_readable",
     "is_schema",
     "is_schema_or_dict",
@@ -110,6 +115,20 @@ def is_pydantic_model(obj: Any) -> TypeGuard[BaseModelStub]:
     return isinstance(obj, base_model)
 
 
+def is_pydantic_model_type(obj: Any) -> TypeGuard[type[BaseModelStub]]:
+    """Check if ``obj`` is a Pydantic BaseModel subclass rather than an instance."""
+    if not isinstance(obj, type):
+        return False
+    if hasattr(obj, "__pydantic_validator__"):
+        return True
+    if not PYDANTIC_INSTALLED:
+        return False
+    try:
+        return issubclass(obj, vertebra_typing.BaseModel)
+    except TypeError:
+        return False
+
+
 def is_msgspec_struct(obj: Any) -> TypeGuard[Struct]:
     """Check if a value is a ``msgspec.Struct`` class or instance."""
     if isinstance(obj, type):
@@ -118,6 +137,43 @@ def is_msgspec_struct(obj: Any) -> TypeGuard[Struct]:
         except TypeError:
             return False
     return isinstance(obj, Struct)
+
+
+def is_msgspec_struct_type(obj: Any) -> TypeGuard[type[Struct]]:
+    """Check if ``obj`` is a ``msgspec.Struct`` subclass rather than an instance."""
+    if not isinstance(obj, type):
+        return False
+    try:
+        return issubclass(obj, Struct)
+    except TypeError:
+        return False
+
+
+def is_coroutine_callable(obj: Any) -> bool:
+    """Check if ``obj`` is an async coroutine function or callable object with an async ``__call__``."""
+    if inspect.iscoroutinefunction(obj):
+        return True
+    if callable(obj) and not isinstance(obj, type):
+        return inspect.iscoroutinefunction(type(obj).__call__)
+    return False
+
+
+def is_async_generator_callable(obj: Any) -> bool:
+    """Check if ``obj`` is an async generator function or callable object with an async generator ``__call__``."""
+    if inspect.isasyncgenfunction(obj):
+        return True
+    if callable(obj) and not isinstance(obj, type):
+        return inspect.isasyncgenfunction(type(obj).__call__)
+    return False
+
+
+def is_generator_callable(obj: Any) -> bool:
+    """Check if ``obj`` is a generator function or callable object with a generator ``__call__``."""
+    if inspect.isgeneratorfunction(obj):
+        return True
+    if callable(obj) and not isinstance(obj, type):
+        return inspect.isgeneratorfunction(type(obj).__call__)
+    return False
 
 
 def is_attrs_instance(obj: Any) -> bool:

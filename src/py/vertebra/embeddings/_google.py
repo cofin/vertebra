@@ -6,7 +6,6 @@ import asyncio
 import base64
 import inspect
 import os
-import urllib.request
 from collections.abc import Awaitable, Callable, Sequence
 
 import msgspec
@@ -19,6 +18,7 @@ from vertebra._vertebra import (
     VectorView,
     decode_gemini_embed_grpc_frame_to_batch,
     encode_gemini_embed_grpc_frame,
+    gcp_http2_post_async,
 )
 from vertebra.embeddings._base import Embedder, MultimodalPart
 from vertebra.utils.module_loader import import_optional
@@ -242,15 +242,8 @@ class VertexEmbedder(Embedder):
         headers: dict[str, str],
         body: bytes,
     ) -> tuple[int, dict[str, str], bytes]:
-        """Execute an HTTP POST in a worker thread when no custom transport is supplied."""
-
-        def _sync_send() -> tuple[int, dict[str, str], bytes]:
-            req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=30.0) as resp:
-                resp_headers = {k.lower(): v for k, v in resp.headers.items()}
-                return (resp.status, resp_headers, resp.read())
-
-        return await asyncio.to_thread(_sync_send)
+        """Execute a connection-pooled HTTP/2 POST via the native Rust transport."""
+        return await gcp_http2_post_async(url, headers, body)
 
 
 class GeminiEmbedder(VertexEmbedder):
@@ -297,7 +290,7 @@ class GeminiEmbedder(VertexEmbedder):
                 normalized_texts.append(item)
             else:
                 b64_payload = base64.b64encode(item.data).decode("ascii") if item.data else ""
-                descriptor = f"[{item.mime_type}:{item.uri or b64_payload[:64]}]{item.text or ''}"
+                descriptor = f"[{item.mime_type}:{item.uri or b64_payload}]{item.text or ''}"
                 normalized_texts.append(descriptor)
         return await self.embed_many(normalized_texts, task=task)
 

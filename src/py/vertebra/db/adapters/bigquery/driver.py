@@ -15,6 +15,7 @@ from vertebra._vertebra import (
 from vertebra._vertebra import (
     StatementCache as _RustStatementCache,
 )
+from vertebra.db._staging import ObjectStoreStaging
 from vertebra.db.adapters.bigquery.config import (
     BIGQUERY_DIALECT_TAG,
     BigQueryConfig,
@@ -362,6 +363,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
     ) -> int:
         """Export a BigQuery table or query to `gs://` via `EXPORT DATA` or multicloud `ObjectStore`."""
         if destination_uri.startswith("gs://") and store is None:
+            ObjectStoreStaging.validate_gcs_uri(destination_uri)
             export_sql = BigQueryCore.build_export_data_sql(
                 sql_or_table,
                 destination_uri=destination_uri,
@@ -371,8 +373,9 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
             )
             return self.execute(export_sql)
 
+        ObjectStoreStaging.validate_staging_target(store, destination_uri)
         cursor = self.select_to_arrow(sql_or_table)
-        BigQueryCore.write_arrow_cursor_to_object_store_sync(
+        ObjectStoreStaging.write_cursor_sync(
             cursor,
             destination_uri=destination_uri,
             store=store,
@@ -395,6 +398,8 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         if not uris:
             return 0
         if all(u.startswith("gs://") for u in uris) and store is None:
+            for u in uris:
+                ObjectStoreStaging.validate_gcs_uri(u)
             load_sql = BigQueryCore.build_load_data_sql(
                 table,
                 uris=uris,
@@ -405,7 +410,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
 
         total_rows = 0
         for uri in uris:
-            cursor = BigQueryCore.read_arrow_cursor_from_object_store_sync(
+            cursor = ObjectStoreStaging.read_cursor_sync(
                 uri,
                 store=store,
                 format=format,
@@ -858,6 +863,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
     ) -> int:
         """Asynchronously export a table or query to `gs://` or multicloud `ObjectStore`."""
         if destination_uri.startswith("gs://") and store is None:
+            ObjectStoreStaging.validate_gcs_uri(destination_uri)
             export_sql = BigQueryCore.build_export_data_sql(
                 sql_or_table,
                 destination_uri=destination_uri,
@@ -867,8 +873,9 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
             )
             return await self.execute(export_sql)
 
+        ObjectStoreStaging.validate_staging_target(store, destination_uri)
         cursor = await self.select_to_arrow(sql_or_table)
-        await BigQueryCore.write_arrow_cursor_to_object_store_async(
+        await ObjectStoreStaging.write_cursor_async(
             cursor,
             destination_uri=destination_uri,
             store=store,
@@ -891,6 +898,8 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
         if not uris:
             return 0
         if all(u.startswith("gs://") for u in uris) and store is None:
+            for u in uris:
+                ObjectStoreStaging.validate_gcs_uri(u)
             load_sql = BigQueryCore.build_load_data_sql(
                 table,
                 uris=uris,
@@ -901,7 +910,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
 
         total_rows = 0
         for uri in uris:
-            cursor = await BigQueryCore.read_arrow_cursor_from_object_store_async(
+            cursor = await ObjectStoreStaging.read_cursor_async(
                 uri,
                 store=store,
                 format=format,

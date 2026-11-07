@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import math
 import subprocess
 import sys
@@ -645,3 +646,96 @@ async def test_postgres_embedding_pushdown_placeholder_selection(
     await pushdown.embed_query("alpha")
     b1, b2 = expected_binds
     assert f"embedding({b1}, t.txt)::vector FROM unnest({b2}::text[])" in port.calls[-1][0]
+
+
+@pytest.mark.anyio
+async def test_embedder_default_factory_initializes_once_and_run_sync_reuses_portal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedder() invokes VertexEmbedder.__init__ once and _run_sync reuses one background loop thread."""
+    orig_init = VertexEmbedder.__init__
+    init_calls = 0
+
+    def counting_init(self: VertexEmbedder, *args: Any, **kwargs: Any) -> None:
+        nonlocal init_calls
+        init_calls += 1
+        orig_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(VertexEmbedder, "__init__", counting_init)
+    emb = Embedder("gemini-embedding-001", dimensions=256)
+    assert isinstance(emb, VertexEmbedder)
+    assert init_calls == 1
+
+    caller_tid = threading.get_ident()
+
+    async def probe() -> tuple[int, int]:
+        return (threading.get_ident(), id(asyncio.get_running_loop()))
+
+    tid1, loop_id1 = Embedder._run_sync(probe())
+    tid2, loop_id2 = Embedder._run_sync(probe())
+    assert tid1 != caller_tid
+    assert tid1 == tid2
+    assert loop_id1 == loop_id2
+
+
+@pytest.mark.anyio
+async def test_gemini_embedder_multimodal_preserves_full_inline_data_and_rust_http2_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GeminiEmbedder.embed_multimodal encodes full inline media payloads without 64-char truncation."""
+    recorded_bodies: list[bytes] = []
+
+    async def fake_transport(url: str, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, str], bytes]:
+        recorded_bodies.append(body)
+        src_batch = VectorBatchView.from_f32_rows([[1.0, 0.0, 0.0, 0.0]], normalize=True)
+        return (
+            200,
+            {"content-type": "application/grpc+proto", "grpc-status": "0"},
+            encode_gemini_embed_grpc_response_frame(src_batch),
+        )
+
+    embedder = GeminiEmbedder(
+        "gemini-embedding-2",
+        dimensions=4,
+        api_key="mock-gemini-api-key",
+        transport=fake_transport,
+    )
+    raw_media = b"\x89PNG\r\n\x1a\n" + (b"VERTEBRA_INLINE_MEDIA_CHUNK_" * 6)
+    expected_b64 = base64.b64encode(raw_media).decode("ascii").encode("ascii")
+    assert len(expected_b64) > 128
+
+    part = MultimodalPart(mime_type="image/png", data=raw_media, text="architecture-diagram")
+    batch = await embedder.embed_multimodal([part])
+    assert batch.count == 1
+    assert expected_b64 in recorded_bodies[0]
+
+    assert hasattr(vertebra._vertebra, "gcp_http2_post_async")
+    assert hasattr(vertebra._vertebra, "gcp_http2_post_sync")
+
+    called_native: list[tuple[str, dict[str, str], bytes]] = []
+
+    async def fake_native_http2(
+        url: str,
+        headers: dict[str, str],
+        body: bytes,
+        timeout_ms: int = 30_000,
+    ) -> tuple[int, dict[str, str], bytes]:
+        _ = timeout_ms
+        called_native.append((url, dict(headers), body))
+        src_batch = VectorBatchView.from_f32_rows([[0.0, 1.0, 0.0, 0.0]], normalize=True)
+        return (
+            200,
+            {"content-type": "application/grpc+proto", "grpc-status": "0"},
+            encode_gemini_embed_grpc_response_frame(src_batch),
+        )
+
+    monkeypatch.setattr("vertebra.embeddings._google.gcp_http2_post_async", fake_native_http2, raising=False)
+    default_vertex = VertexEmbedder(
+        "gemini-embedding-001",
+        dimensions=4,
+        token_cache=_FakeTokenCache(),
+        coalesce_window_ms=0.0,
+    )
+    vec = await default_vertex.embed_query("native http2 transport")
+    assert vec.dimensions == 4
+    assert len(called_native) == 1

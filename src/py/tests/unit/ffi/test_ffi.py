@@ -12,6 +12,8 @@ import pytest
 
 from vertebra._vertebra import (
     Response,
+    RustDbTaskAwaitable,
+    TaskPanicError,
     cancel_request_sleep,
     init_transport,
     prepare_request_sleep,
@@ -268,3 +270,9 @@ def test_dekker_request_sleep_helpers_roundtrip() -> None:
     assert isinstance(should_sleep, bool)
     assert should_sleep is True
     cancel_request_sleep()
+
+
+def test_async_bridge_exports_preserved() -> None:
+    """Verify async_bridge.rs exports RustDbTaskAwaitable and TaskPanicError on vertebra._vertebra."""
+    assert issubclass(TaskPanicError, RuntimeError)
+    assert hasattr(RustDbTaskAwaitable, "__await__")

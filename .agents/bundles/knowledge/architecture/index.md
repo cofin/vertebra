@@ -1,14 +1,3 @@
----
-title: "Architecture Index"
-description: "Index of Vertebra's nested architecture chapters across runtime topologies, IPC transport, HTTP ingress, Python workers, and frontend tooling."
-tags:
-  - architecture
-  - index
-  - runtime
-  - ipc
-  - http
----
-
 # Architecture Index
 
 ## Runtime (`runtime/`)

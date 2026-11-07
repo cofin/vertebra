@@ -97,11 +97,11 @@ def create_sql_embedder(
 
 Call `await embedder.vector_search("query", table="documents")` to search inside the database. `embedder.similarity_search(query, candidates)` searches an in-memory `VectorBatchView`. The capability methods also accept `dimensions` and `normalize` per call. BigQuery uses `ML.GENERATE_EMBEDDING` or `AI.GENERATE_EMBEDDING`; Spanner uses `ML.PREDICT` or `AI.GENERATE_EMBEDDING`. Both retain input order with `ORDER BY idx`.
 
-Adapters raise `DataError` when the database returns empty or malformed vector rows; the facade translates inference `DataError` into `EmbeddingError`. Other driver errors propagate. SQL builders validate table and column identifiers; BigQuery model and table identifiers support hyphenated project IDs. PostgreSQL model strings are bound values. Oracle passes the model (including the Vertex `:predict` suffix) in JSON, validates Vertex endpoint URLs against its 128-byte UTF-8 limit, and rotates database credentials when the token cache generation advances.
+Adapters raise `DataError` when the database returns empty or malformed vector rows; the facade translates inference `DataError` into `EmbeddingError`. Other driver errors propagate. SQL builders validate table and column identifiers; BigQuery model and table identifiers support hyphenated project IDs. PostgreSQL model strings are bound values. Oracle passes the model (including the Vertex `:predict` suffix) in JSON, batches both document and query embedding calls through `DBMS_VECTOR.UTL_TO_EMBEDDINGS` (`VECTOR_ARRAY_T`), validates Vertex endpoint URLs against its 128-byte UTF-8 limit, and rotates database credentials when the token cache generation advances.
 
 ## Local `1x` RAM Broker & `EmbeddingGemma`
 
-When running multiple HTTP or background worker processes, `EmbeddingBroker` loads model weights **once (`1x` RAM)**, forms token-budgeted length-sorted batches (`max_batch_tokens=8192`), and writes outputs into `VectorSlab`. On free-threaded Python `3.14t`/`3.15t`, `EmbeddingBroker` automatically isolates `onnxruntime` / `ctranslate2` in a dedicated child process so HTTP workers keep `sys._is_gil_enabled() == False`:
+When running multiple HTTP or background worker processes, `EmbeddingBroker` loads model weights **once (`1x` RAM)**, forms token-budgeted length-sorted batches (`max_batch_tokens=16384`, `max_pending_requests=1024`), and writes outputs into `VectorSlab`. On free-threaded Python `3.14t`/`3.15t`, `EmbeddingBroker` automatically isolates `onnxruntime` / `ctranslate2` in a dedicated child process so HTTP workers keep `sys._is_gil_enabled() == False`:
 
 ```python
 from vertebra.embeddings import (
@@ -122,7 +122,7 @@ static_emb = StaticEmbedder(dimensions=256)
 !!! warning "`EmbeddingGemma` Precision"
     `EmbeddingGemma` activations overflow IEEE 754 `fp16`. `GemmaEmbedder` enforces `precision` in `{"int8", "q4", "bf16", "fp32"}` and raises `ValueError` if `precision="fp16"` is requested.
 
-On free-threaded Python (`3.14t`/`3.15t`) the broker runs the configured model in a quarantined subprocess. Custom brokers pass either `backend_fn` (in-process callable) or `BackendFactory(target="package.module:callable", options={...})`, which the subprocess imports and runs.
+On free-threaded Python (`3.14t`/`3.15t`) the broker runs the configured model in a quarantined subprocess. Custom brokers pass either `backend_fn` (in-process callable, offloaded via `asyncio.to_thread` with `max_pending_requests` queue-cap backpressure when subprocess quarantine is not active) or `BackendFactory(target="package.module:callable", options={...})`, which the subprocess imports and runs.
 
 ## Zero-Copy `VectorView`, Matryoshka Truncation & Binary Wire Codecs
 

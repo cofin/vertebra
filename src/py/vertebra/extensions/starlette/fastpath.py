@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import Callable
 from typing import Any, Self
 from urllib.parse import parse_qsl
@@ -21,18 +20,19 @@ from vertebra.server._fastpath import (
     serialize_fastpath_special_result,
     wrap_asgi_fastpath,
 )
+from vertebra.server._fastpath_core import serialize_starlette_http_exception
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
+from vertebra.utils.type_guards import is_coroutine_callable
 
 __all__ = (
     "CompiledRoute",
     "FastPath",
     "compile_fastpath_routes",
     "dispatch_handler_direct",
+    "get_starlette_request_cls",
     "preseed_request_body",
 )
-
-_BODYLESS_HTTP_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "DELETE", "OPTIONS"})
 
 
 class CompiledRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -141,7 +141,7 @@ class FastPath:
         send: Any,
         *,
         body: bytes | None = None,
-    ) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
+    ) -> tuple[int, list[tuple[bytes, bytes]], bytes | memoryview] | None:
         """Attempt to dispatch the request directly via the compiled Starlette fastpath."""
         table = self._router_table
         if table is None or not table.routes:
@@ -175,7 +175,7 @@ class FastPath:
         scope["endpoint"] = compiled.endpoint
         scope["route"] = compiled.route
 
-        resolved_body = await _resolve_request_body(scope, receive, body, method=method)
+        resolved_body = await extract_scope_body_fast(scope, receive, body, method=method)
         try:
             return await dispatch_handler_direct(
                 compiled,
@@ -186,10 +186,18 @@ class FastPath:
                 sync_to_thread=self._sync_to_thread,
             )
         except Exception as exc:
-            http_exc_resp = _serialize_starlette_http_exception(exc)
+            http_exc_resp = serialize_starlette_http_exception(exc)
             if http_exc_resp is not None:
                 return http_exc_resp
             raise
+
+
+def get_starlette_request_cls() -> Any:
+    """Resolve ``starlette.requests.Request`` when installed, or return a lightweight fallback."""
+    req_mod = import_optional("starlette.requests")
+    if req_mod is not None and hasattr(req_mod, "Request"):
+        return req_mod.Request
+    return _FallbackStarletteRequest
 
 
 def preseed_request_body(scope: Any, request: Any, body: bytes | None = None) -> None:
@@ -220,9 +228,9 @@ async def dispatch_handler_direct(
     receive: Any,
     send: Any,
     sync_to_thread: bool = False,
-) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
+) -> tuple[int, list[tuple[bytes, bytes]], bytes | memoryview] | None:
     """Execute a middleware-free Starlette endpoint with pre-seeded Request._body."""
-    req_cls = _get_starlette_request_cls()
+    req_cls = get_starlette_request_cls()
     request = req_cls(scope, receive=receive, send=send)
     preseed_request_body(scope, request, body)
     req_fn = getattr(scope, "request", None)
@@ -322,13 +330,6 @@ class _FallbackStarletteRequest:
         return self._json
 
 
-def _get_starlette_request_cls() -> Any:
-    req_mod = import_optional("starlette.requests")
-    if req_mod is not None and hasattr(req_mod, "Request"):
-        return req_mod.Request
-    return _FallbackStarletteRequest
-
-
 def _has_custom_exception_handlers(app: Any) -> bool:
     exc_handlers = getattr(app, "exception_handlers", None)
     if not isinstance(exc_handlers, dict) or not exc_handlers:
@@ -337,14 +338,6 @@ def _has_custom_exception_handlers(app: Any) -> bool:
         mod_name = str(getattr(fn, "__module__", "") or "")
         if not mod_name.startswith(("starlette.", "fastapi.")):
             return True
-    return False
-
-
-def _is_async_endpoint(endpoint: Any) -> bool:
-    if inspect.iscoroutinefunction(endpoint):
-        return True
-    if callable(endpoint):
-        return inspect.iscoroutinefunction(type(endpoint).__call__)
     return False
 
 
@@ -362,39 +355,9 @@ def _compile_routes_from_table(
             path_template=entry.path_template,
             route=entry.route,
             endpoint=entry.endpoint,
-            is_async=_is_async_endpoint(entry.endpoint),
+            is_async=is_coroutine_callable(entry.endpoint),
             has_middleware=has_mw,
             has_custom_exception_handlers=has_exc,
             sync_to_thread=bool(getattr(entry.endpoint, "__vertebra_sync_to_thread__", False)),
         )
     return compiled
-
-
-async def _resolve_request_body(
-    scope: Any,
-    receive: Any,
-    body: bytes | None,
-    *,
-    method: str,
-) -> bytes:
-    return await extract_scope_body_fast(scope, receive, body, method=method)
-
-
-def _serialize_starlette_http_exception(exc: Exception) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
-    status_code = getattr(exc, "status_code", None)
-    detail = getattr(exc, "detail", None)
-    if not isinstance(status_code, int):
-        return None
-    headers: list[tuple[bytes, bytes]] = []
-    raw_hdrs = getattr(exc, "headers", None)
-    if isinstance(raw_hdrs, dict):
-        for k, v in raw_hdrs.items():
-            headers.append((str(k).lower().encode("latin-1"), str(v).encode("latin-1")))
-    if isinstance(detail, str):
-        body = detail.encode("utf-8")
-        headers.append((b"content-type", b"text/plain; charset=utf-8"))
-    else:
-        body = encode_json_bytes({"detail": detail})
-        headers.append((b"content-type", b"application/json"))
-    headers.append((b"content-length", str(len(body)).encode("ascii")))
-    return status_code, headers, body

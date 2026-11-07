@@ -21,6 +21,7 @@ from vertebra.typing import (
     PYDANTIC_INSTALLED,
     UUID_UTILS_INSTALLED,
 )
+from vertebra.utils.module_loader import import_optional_attr
 from vertebra.utils.serializers._numpy import numpy_array_enc_hook
 from vertebra.utils.serializers._schema import _dump_msgspec_fields
 from vertebra.utils.type_guards import (
@@ -29,7 +30,6 @@ from vertebra.utils.type_guards import (
     is_dataclass_instance,
     is_msgspec_struct,
 )
-from vertebra.utils.uuids import _load_uuid_utils
 
 __all__ = (
     "MsgPackSerializer",
@@ -121,8 +121,7 @@ def _get_msgpack_uuid_utils_type() -> type[Any] | None:
     if not UUID_UTILS_INSTALLED:
         _MsgPackUUIDTypeCache.uuid_utils_type = None
         return None
-    module = _load_uuid_utils()
-    _MsgPackUUIDTypeCache.uuid_utils_type = None if module is None else module.UUID
+    _MsgPackUUIDTypeCache.uuid_utils_type = import_optional_attr("uuid_utils", "UUID")
     return cast("type[Any] | None", _MsgPackUUIDTypeCache.uuid_utils_type)
 
 

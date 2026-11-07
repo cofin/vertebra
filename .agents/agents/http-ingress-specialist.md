@@ -4,7 +4,7 @@ description: Implements and remediates HTTP ingress pipelines, protocol framing,
 model: inherit
 mainAgent: false
 subagent: true
-commandExecutionPolicy: auto
+commandExecutionPolicy: sandbox
 tools:
   - read_file
   - view_file

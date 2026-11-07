@@ -38,7 +38,13 @@ from vertebra.extensions.litestar import (
     extract_routes,
     offload_middlewares,
 )
+from vertebra.server._asgi._queues import AsgiSend
 from vertebra.server._asgi._runner import AsgiRunner
+from vertebra.server._fastpath import (
+    PayloadTooLargeError,
+    extract_scope_body_fast,
+    wrap_asgi_fastpath,
+)
 from vertebra.server._gil_audit import GilAuditReport
 from vertebra.server._loops import EventLoopPool
 from vertebra.server._rsgi._adapter import RsgiAdapter
@@ -291,3 +297,89 @@ def test_pep810_lazy_modules_declared_on_packages() -> None:
     assert "vertebra.framework" in top_lazy
     assert isinstance(fw_lazy, list | tuple)
     assert "vertebra.framework.openapi" in fw_lazy
+
+
+@pytest.mark.anyio
+async def test_extract_scope_body_fast_enforces_max_body_size_and_maps_to_413() -> None:
+    """Verify oversized streaming and prebuffered request bodies abort immediately with 413."""
+    receive_calls = 0
+    chunks = [
+        {"type": "http.request", "body": b"0123456789", "more_body": True},
+        {"type": "http.request", "body": b"abcdef0123", "more_body": True},
+        {"type": "http.request", "body": b"unreachable-third-chunk", "more_body": False},
+    ]
+
+    async def chunked_receive() -> dict[str, Any]:
+        nonlocal receive_calls
+        msg = chunks[receive_calls]
+        receive_calls += 1
+        return msg
+
+    with pytest.raises(PayloadTooLargeError) as exc_info:
+        await extract_scope_body_fast({}, chunked_receive, method="POST", max_body_size=16)
+    assert exc_info.value.status_code == 413
+    assert receive_calls == 2
+
+    fallback_called = False
+
+    class OversizedBypass:
+        async def dispatch(self, scope: Any, receive: Any, send: Any) -> Any:
+            del send
+            body = await extract_scope_body_fast(scope, receive, method="POST", max_body_size=8)
+            return 200, [(b"content-type", b"text/plain")], body
+
+    async def fallback_app(scope: Any, receive: Any, send: Any) -> None:
+        nonlocal fallback_called
+        del scope, receive, send
+        fallback_called = True
+
+    wrapped = wrap_asgi_fastpath(OversizedBypass(), fallback_app)
+    stream_idx = 0
+
+    async def oversized_stream() -> dict[str, Any]:
+        nonlocal stream_idx
+        stream_idx += 1
+        return {"type": "http.request", "body": b"0123456789ab", "more_body": False}
+
+    send = AsgiSend(request_id=413)
+    await wrapped({"type": "http", "method": "POST", "path": "/upload"}, oversized_stream, send)
+    assert fallback_called is False
+    assert send.response.status == 413
+    assert send.response.body == b"Payload Too Large"
+
+
+@pytest.mark.anyio
+async def test_wrap_asgi_fastpath_invokes_prebuffered_body_supplier_once() -> None:
+    """Verify wrap_asgi_fastpath caches scope['_vertebra_body_bytes'] and calls body_bytes() at most once."""
+    supplier_calls = 0
+
+    class CountingScope(dict[str, Any]):
+        def body_bytes(self) -> bytes:
+            nonlocal supplier_calls
+            supplier_calls += 1
+            return b'{"hello":"world"}'
+
+    class EchoBypass:
+        async def dispatch(self, scope: Any, receive: Any, send: Any) -> Any:
+            del send
+            first = await extract_scope_body_fast(scope, receive, method="POST")
+            second = await extract_scope_body_fast(scope, receive, method="POST")
+            assert first == second
+            return 200, [(b"content-type", b"application/json")], first
+
+    async def unused_fallback(scope: Any, receive: Any, send: Any) -> None:
+        del scope, receive, send
+        raise AssertionError("fallback must not run")
+
+    async def unused_receive() -> dict[str, Any]:
+        raise AssertionError("receive must not run when body is prebuffered")
+
+    wrapped = wrap_asgi_fastpath(EchoBypass(), unused_fallback)
+    scope = CountingScope({"type": "http", "method": "POST", "path": "/echo"})
+    send = AsgiSend(request_id=501)
+    await wrapped(scope, unused_receive, send)
+
+    assert supplier_calls == 1
+    assert scope["_vertebra_body_bytes"] == b'{"hello":"world"}'
+    assert send.response.status == 200
+    assert send.response.body == b'{"hello":"world"}'

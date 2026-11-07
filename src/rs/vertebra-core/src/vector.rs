@@ -110,7 +110,12 @@ pub struct AlignedBuffer {
     layout: Layout,
 }
 
+// SAFETY: `AlignedBuffer` owns its heap allocation exclusively via `NonNull<u8>`
+// and only exposes shared/mutable access through `&self` / `&mut self` (or atomic
+// seqlock operations in `VectorCache`), making cross-thread transfer and sharing safe.
 unsafe impl Send for AlignedBuffer {}
+// SAFETY: Shared references to `AlignedBuffer` only allow read access or atomic
+// seqlock access to the underlying aligned byte allocation.
 unsafe impl Sync for AlignedBuffer {}
 
 impl AlignedBuffer {
@@ -118,6 +123,7 @@ impl AlignedBuffer {
         let alloc_size = size.max(64).next_multiple_of(64);
         let layout = Layout::from_size_align(alloc_size, 64)
             .map_err(|e| format!("invalid aligned buffer layout: {e}"))?;
+        // SAFETY: `alloc_size >= 64` is non-zero and a multiple of alignment `64`.
         let raw = unsafe { alloc_zeroed(layout) };
         let ptr =
             NonNull::new(raw).ok_or_else(|| "aligned buffer allocation failed".to_string())?;
@@ -147,6 +153,8 @@ impl AlignedBuffer {
 
 impl Drop for AlignedBuffer {
     fn drop(&mut self) {
+        // SAFETY: `self.ptr` was allocated with `alloc_zeroed(self.layout)` in
+        // `AlignedBuffer::new_zeroed` and is deallocated exactly once on drop.
         unsafe {
             dealloc(self.ptr.as_ptr(), self.layout);
         }
@@ -280,6 +288,8 @@ impl VectorSlab {
                 }
             }
         };
+        // SAFETY: `region` was newly created with at least `total_bytes` mapped writable bytes.
+        // SAFETY: `region` was newly created with at least `total_bytes` writable bytes.
         unsafe {
             std::ptr::write_bytes(region.as_ptr(), 0, total_bytes);
         }
@@ -306,6 +316,7 @@ impl VectorSlab {
         let open_size = min_size.max(4096);
         let region = ShmRegion::open_named(name, open_size)
             .map_err(|e| format!("failed to open SHM vector slab '{name}': {e}"))?;
+        // SAFETY: `open_size >= 4096 >= size_of::<VectorSlabHeader>()` (64 bytes) and page-aligned.
         let hdr = unsafe { &*(region.as_ptr() as *const VectorSlabHeader) };
         if hdr.magic != VECTOR_SLAB_MAGIC {
             return Err("invalid VectorSlab magic header".to_string());
@@ -395,6 +406,8 @@ impl VectorSlab {
             total_bytes: self.total_bytes as u64,
             _pad: [0u8; 8],
         };
+        // SAFETY: `self.base_mut_ptr()` is 64-byte aligned and points to at least
+        // `VECTOR_SLAB_HEADER_BYTES` (64 bytes) of writable backing storage.
         unsafe {
             std::ptr::write(self.base_mut_ptr() as *mut VectorSlabHeader, hdr);
         }
@@ -418,11 +431,13 @@ impl VectorSlab {
 
     #[inline]
     pub fn data_ptr(&self) -> *const u8 {
+        // SAFETY: `self.data_offset <= self.total_bytes` within the slab backing allocation.
         unsafe { self.base_ptr().add(self.data_offset) }
     }
 
     #[inline]
     pub fn data_mut_ptr(&mut self) -> *mut u8 {
+        // SAFETY: `self.data_offset <= self.total_bytes` within the mutable slab backing allocation.
         unsafe { self.base_mut_ptr().add(self.data_offset) }
     }
 
@@ -476,12 +491,14 @@ impl VectorSlab {
                 self.count
             ));
         }
+        // SAFETY: `row < self.count`, so `row * self.row_stride_bytes` is within the data region.
         Ok(unsafe { self.data_ptr().add(row * self.row_stride_bytes) })
     }
 
     #[inline]
     pub fn row_bytes(&self, row: usize) -> Result<&[u8], String> {
         let ptr = self.row_ptr(row)?;
+        // SAFETY: `ptr` points to a valid row of `self.packed_row_bytes` initialized bytes.
         Ok(unsafe { std::slice::from_raw_parts(ptr, self.packed_row_bytes) })
     }
 
@@ -493,7 +510,10 @@ impl VectorSlab {
                 self.count
             ));
         }
+        // SAFETY: `row < self.count`, so the row offset and `self.packed_row_bytes` length
+        // lie within the exclusively borrowed slab data region.
         let ptr = unsafe { self.data_mut_ptr().add(row * self.row_stride_bytes) };
+        // SAFETY: `ptr` is valid for `self.packed_row_bytes` mutable bytes tied to `&mut self`.
         Ok(unsafe { std::slice::from_raw_parts_mut(ptr, self.packed_row_bytes) })
     }
 
@@ -506,6 +526,8 @@ impl VectorSlab {
             ));
         }
         let ptr = self.row_ptr(row)? as *const f32;
+        // SAFETY: For `VectorDtype::Float32`, `row_stride_bytes` is a multiple of 4 and
+        // `ptr` is 4-byte aligned and valid for `self.dimensions` `f32` elements.
         Ok(unsafe { std::slice::from_raw_parts(ptr, self.dimensions) })
     }
 
@@ -523,7 +545,9 @@ impl VectorSlab {
                 self.count
             ));
         }
+        // SAFETY: `row < self.count` and `Float32` rows are 4-byte aligned within `data_mut_ptr()`.
         let ptr = unsafe { self.data_mut_ptr().add(row * self.row_stride_bytes) as *mut f32 };
+        // SAFETY: `ptr` is valid for `self.dimensions` mutable `f32` elements tied to `&mut self`.
         Ok(unsafe { std::slice::from_raw_parts_mut(ptr, self.dimensions) })
     }
 
@@ -536,6 +560,7 @@ impl VectorSlab {
             ));
         }
         let ptr = self.row_ptr(row)? as *const i8;
+        // SAFETY: `ptr` is valid for `self.dimensions` `i8` elements in `VectorDtype::Int8`.
         Ok(unsafe { std::slice::from_raw_parts(ptr, self.dimensions) })
     }
 
@@ -553,7 +578,9 @@ impl VectorSlab {
                 self.count
             ));
         }
+        // SAFETY: `row < self.count` within the mutable `Int8` data region.
         let ptr = unsafe { self.data_mut_ptr().add(row * self.row_stride_bytes) as *mut i8 };
+        // SAFETY: `ptr` is valid for `self.dimensions` mutable `i8` elements tied to `&mut self`.
         Ok(unsafe { std::slice::from_raw_parts_mut(ptr, self.dimensions) })
     }
 
@@ -562,6 +589,7 @@ impl VectorSlab {
         if self.scales_offset == 0 || row >= self.count {
             return 1.0;
         }
+        // SAFETY: `scales_offset` is 64-byte aligned and `scales_offset + count * 4 <= total_bytes`.
         unsafe {
             let scales_ptr = self.base_ptr().add(self.scales_offset) as *const f32;
             *scales_ptr.add(row)
@@ -573,6 +601,7 @@ impl VectorSlab {
         if self.scales_offset == 0 || row >= self.count {
             return;
         }
+        // SAFETY: `scales_offset` is 64-byte aligned and `row < self.count` within `total_bytes`.
         unsafe {
             let scales_ptr = self.base_mut_ptr().add(self.scales_offset) as *mut f32;
             *scales_ptr.add(row) = scale;
@@ -841,6 +870,9 @@ pub fn top_k_search(
     for idx in 0..slab.count() {
         let score = match (slab.dtype(), metric) {
             (VectorDtype::Float32, SimilarityMetric::Cosine) => {
+                // SAFETY: `query_bytes.len() == slab.packed_row_bytes() == slab.dimensions() * 4`
+                // and `i8` has alignment 1; for `f32` we read via `from_raw_parts` on aligned slab rows
+                // or decode `query_bytes` safely.
                 let q = unsafe {
                     std::slice::from_raw_parts(
                         query_bytes.as_ptr() as *const f32,
@@ -851,6 +883,7 @@ pub fn top_k_search(
                 cosine_similarity_f32(q, row)
             }
             (VectorDtype::Float32, SimilarityMetric::Dot) => {
+                // SAFETY: `query_bytes.len() == slab.dimensions() * 4`.
                 let q = unsafe {
                     std::slice::from_raw_parts(
                         query_bytes.as_ptr() as *const f32,
@@ -861,6 +894,7 @@ pub fn top_k_search(
                 dot_product_f32(q, row)
             }
             (VectorDtype::Int8, SimilarityMetric::Dot | SimilarityMetric::Cosine) => {
+                // SAFETY: `query_bytes.len() == slab.dimensions()` and `i8` has alignment 1.
                 let q = unsafe {
                     std::slice::from_raw_parts(query_bytes.as_ptr() as *const i8, slab.dimensions())
                 };
@@ -1125,6 +1159,8 @@ impl VectorCache {
                 }
             }
         };
+        // SAFETY: `region` was newly created with at least `total_bytes` mapped writable bytes.
+        // SAFETY: `region` was newly created with at least `total_bytes` writable bytes.
         unsafe {
             std::ptr::write_bytes(region.as_ptr(), 0, total_bytes);
         }
@@ -1172,6 +1208,8 @@ impl VectorCache {
 
     #[inline]
     fn slot_ptr(&self, idx: usize) -> *const u8 {
+        // SAFETY: Callers pass `idx < self.capacity`, so `64 + idx * self.slot_stride_bytes`
+        // is 64-byte aligned and within the cache allocation.
         unsafe { self.base_ptr().add(64 + idx * self.slot_stride_bytes) }
     }
 
@@ -1195,7 +1233,9 @@ impl VectorCache {
         for w in 0..ways {
             let idx = (base_idx + w) % self.capacity;
             let ptr = self.slot_ptr(idx);
+            // SAFETY: `ptr` is 64-byte aligned and points to a valid `VectorCacheSlotHeader`.
             let hdr = unsafe { &*(ptr as *const VectorCacheSlotHeader) };
+            // SAFETY: `ptr.add(64)` points to `self.dimensions` `f32` elements inside the slot.
             let vec_ptr = unsafe { ptr.add(64) as *const f32 };
 
             for _attempt in 0..4 {
@@ -1208,6 +1248,7 @@ impl VectorCache {
                     break;
                 }
                 for (i, item) in dst.iter_mut().enumerate() {
+                    // SAFETY: `i < self.dimensions`; volatile read pairs with the seqlock fence below.
                     *item = unsafe { std::ptr::read_volatile(vec_ptr.add(i)) };
                 }
                 std::sync::atomic::fence(Ordering::Acquire);
@@ -1238,6 +1279,7 @@ impl VectorCache {
         for w in 0..ways {
             let idx = (base_idx + w) % self.capacity;
             let ptr = self.slot_ptr(idx);
+            // SAFETY: `ptr` is 64-byte aligned and points to a valid `VectorCacheSlotHeader`.
             let hdr = unsafe { &*(ptr as *const VectorCacheSlotHeader) };
             let slot_key = hdr.key_hash.load(Ordering::Relaxed);
             if slot_key == 0 || slot_key == key_hash {
@@ -1252,7 +1294,9 @@ impl VectorCache {
         }
 
         let ptr = self.slot_ptr(target_idx) as *mut u8;
+        // SAFETY: `ptr` is 64-byte aligned and points to the target `VectorCacheSlotHeader`.
         let hdr = unsafe { &*(ptr as *const VectorCacheSlotHeader) };
+        // SAFETY: `ptr.add(64)` points to `self.dimensions` `f32` elements inside the target slot.
         let vec_ptr = unsafe { ptr.add(64) as *mut f32 };
 
         loop {
@@ -1270,6 +1314,8 @@ impl VectorCache {
                 let now_tick = self.tick.fetch_add(1, Ordering::Relaxed);
                 hdr.updated_tick.store(now_tick, Ordering::Relaxed);
                 for (i, &val) in values.iter().enumerate() {
+                    // SAFETY: Exclusive writer lock (`seq` is odd) guarantees no concurrent writer
+                    // on `vec_ptr`, and `i < self.dimensions`.
                     unsafe {
                         std::ptr::write_volatile(vec_ptr.add(i), val);
                     }
@@ -1302,7 +1348,9 @@ impl VectorCache {
 
         for idx in 0..self.capacity {
             let ptr = self.slot_ptr(idx);
+            // SAFETY: `ptr` is 64-byte aligned and points to a valid `VectorCacheSlotHeader`.
             let hdr = unsafe { &*(ptr as *const VectorCacheSlotHeader) };
+            // SAFETY: `ptr.add(64)` points to `self.dimensions` `f32` elements inside the slot.
             let vec_ptr = unsafe { ptr.add(64) as *const f32 };
 
             let seq1 = hdr.seq.load(Ordering::Acquire);
@@ -1314,6 +1362,7 @@ impl VectorCache {
                 continue;
             }
             for (i, dst) in row_buf.iter_mut().enumerate() {
+                // SAFETY: `i < self.dimensions`; volatile read pairs with the seqlock fence below.
                 *dst = unsafe { std::ptr::read_volatile(vec_ptr.add(i)) };
             }
             std::sync::atomic::fence(Ordering::Acquire);
@@ -1518,81 +1567,10 @@ impl StaticEmbedderCore {
 // Compact Protobuf v3 + 5-Byte gRPC LPM Wire Codec for Google Embeddings
 // ============================================================================
 
-#[inline]
-fn put_varint(buf: &mut Vec<u8>, mut val: u64) {
-    while val >= 0x80 {
-        buf.push(((val as u8) & 0x7F) | 0x80);
-        val >>= 7;
-    }
-    buf.push(val as u8);
-}
-
-#[inline]
-fn put_bytes_field(buf: &mut Vec<u8>, field_number: u32, payload: &[u8]) {
-    let tag = (field_number << 3) | 2;
-    put_varint(buf, tag as u64);
-    put_varint(buf, payload.len() as u64);
-    buf.extend_from_slice(payload);
-}
-
-#[inline]
-fn put_varint_field(buf: &mut Vec<u8>, field_number: u32, val: u64) {
-    let tag = field_number << 3;
-    put_varint(buf, tag as u64);
-    put_varint(buf, val);
-}
-
-#[inline]
-fn read_varint(data: &[u8], pos: &mut usize) -> Result<u64, String> {
-    let mut result = 0u64;
-    let mut shift = 0u32;
-    while *pos < data.len() {
-        let byte = data[*pos];
-        *pos += 1;
-        result |= ((byte & 0x7F) as u64) << shift;
-        if (byte & 0x80) == 0 {
-            return Ok(result);
-        }
-        shift += 7;
-        if shift >= 64 {
-            return Err("protobuf varint overflow".to_string());
-        }
-    }
-    Err("unexpected EOF while reading protobuf varint".to_string())
-}
-
-#[inline]
-fn skip_protobuf_field(data: &[u8], pos: &mut usize, wire_type: u8) -> Result<(), String> {
-    match wire_type {
-        0 => {
-            let _ = read_varint(data, pos)?;
-            Ok(())
-        }
-        1 => {
-            if *pos + 8 > data.len() {
-                return Err("unexpected EOF skipping 64-bit protobuf field".to_string());
-            }
-            *pos += 8;
-            Ok(())
-        }
-        2 => {
-            let len = read_varint(data, pos)? as usize;
-            if *pos + len > data.len() {
-                return Err("unexpected EOF skipping length-delimited protobuf field".to_string());
-            }
-            *pos += len;
-            Ok(())
-        }
-        5 => {
-            if *pos + 4 > data.len() {
-                return Err("unexpected EOF skipping 32-bit protobuf field".to_string());
-            }
-            *pos += 4;
-            Ok(())
-        }
-        other => Err(format!("unsupported protobuf wire_type {other}")),
-    }
-}
+use crate::proto::{
+    WIRE_TYPE_LENGTH_DELIMITED, put_bytes_field, put_varint_field, read_length_delimited, read_tag,
+    skip_field,
+};
 
 /// Encode a `BatchEmbedContentsRequest` wrapped in a 5-byte gRPC Length-Prefixed Message frame.
 pub fn encode_batch_embed_grpc_request(
@@ -1696,35 +1674,28 @@ pub fn decode_batch_embed_grpc_response_into_slab(
     let mut raw_slices: Vec<&[u8]> = Vec::new();
     let mut pos = 0usize;
     while pos < payload.len() {
-        let tag = read_varint(payload, &mut pos)?;
-        let field_number = (tag >> 3) as u32;
-        let wire_type = (tag & 0x07) as u8;
-        if field_number == 1 && wire_type == 2 {
-            let emb_len = read_varint(payload, &mut pos)? as usize;
-            if pos + emb_len > payload.len() {
-                return Err("truncated ContentEmbedding message in gRPC response".to_string());
-            }
-            let emb_msg = &payload[pos..pos + emb_len];
-            pos += emb_len;
+        let (field_number, wire_type) = read_tag(payload, &mut pos)?;
+        if field_number == 1 && wire_type == WIRE_TYPE_LENGTH_DELIMITED {
+            let emb_msg = read_length_delimited(payload, &mut pos)
+                .map_err(|_| "truncated ContentEmbedding message in gRPC response".to_string())?;
 
             let mut epos = 0usize;
             while epos < emb_msg.len() {
-                let etag = read_varint(emb_msg, &mut epos)?;
-                let efield = (etag >> 3) as u32;
-                let ewire = (etag & 0x07) as u8;
-                if efield == 1 && ewire == 2 {
-                    let byte_len = read_varint(emb_msg, &mut epos)? as usize;
-                    if epos + byte_len > emb_msg.len() || !byte_len.is_multiple_of(4) {
+                let (efield, ewire) = read_tag(emb_msg, &mut epos)?;
+                if efield == 1 && ewire == WIRE_TYPE_LENGTH_DELIMITED {
+                    let slice = read_length_delimited(emb_msg, &mut epos).map_err(|_| {
+                        "invalid packed float slice in ContentEmbedding".to_string()
+                    })?;
+                    if !slice.len().is_multiple_of(4) {
                         return Err("invalid packed float slice in ContentEmbedding".to_string());
                     }
-                    raw_slices.push(&emb_msg[epos..epos + byte_len]);
-                    epos += byte_len;
+                    raw_slices.push(slice);
                 } else {
-                    skip_protobuf_field(emb_msg, &mut epos, ewire)?;
+                    skip_field(emb_msg, &mut epos, ewire)?;
                 }
             }
         } else {
-            skip_protobuf_field(payload, &mut pos, wire_type)?;
+            skip_field(payload, &mut pos, wire_type)?;
         }
     }
 

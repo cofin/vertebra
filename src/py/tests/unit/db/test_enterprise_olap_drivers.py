@@ -62,6 +62,7 @@ from vertebra.db.adapters.oracle import (
     OracleConfig,
     OracleConnectDescriptor,
     OracleDriverFeatures,
+    OracleEmbeddingPushdown,
     OracleTopologyConfig,
     OracleWallet,
     SyncOracleDriver,
@@ -949,3 +950,35 @@ async def test_enterprise_and_olap_async_load_from_arrow_rejects_unsafe_identifi
             await driver.load_from_arrow(table_name, [{"id": 1, "label": "ok"}], columns=columns)
     finally:
         await driver.close()
+
+
+@pytest.mark.anyio
+async def test_oracle_embedding_pushdown_batches_via_utl_to_embeddings() -> None:
+    """OracleEmbeddingPushdown batches multi-text calls into a single DBMS_VECTOR.UTL_TO_EMBEDDINGS query."""
+
+    class BatchOraclePort:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+
+        def select(self, sql: str, parameters: dict[str, Any]) -> list[dict[str, Any]]:
+            self.calls.append((sql, dict(parameters)))
+            return [
+                {"embedding": encode_vector_f32([3.0, 4.0, 0.0, 0.0])},
+                {"embedding": encode_vector_f32([0.0, 5.0, 12.0, 0.0])},
+                {"embedding": encode_vector_f32([8.0, 0.0, 15.0, 0.0])},
+            ]
+
+        def execute(self, sql: str, parameters: dict[str, Any]) -> None:
+            self.calls.append((sql, dict(parameters)))
+
+    port = BatchOraclePort()
+    pushdown = OracleEmbeddingPushdown(port, provider="local", dimensions=4, normalize=True)
+    batch = await pushdown.embed_batch(["doc-1", "doc-2", "doc-3"])
+    assert batch.count == 3
+    assert len(port.calls) == 1
+    sql, params = port.calls[0]
+    assert "DBMS_VECTOR.UTL_TO_EMBEDDINGS" in sql
+    assert "doc-1" in params["texts"]
+    assert batch[0].to_list() == pytest.approx([0.6, 0.8, 0.0, 0.0])
+    assert batch[1].to_list() == pytest.approx([0.0, 5.0 / 13.0, 12.0 / 13.0, 0.0])
+    assert batch[2].to_list() == pytest.approx([8.0 / 17.0, 0.0, 15.0 / 17.0, 0.0])

@@ -47,11 +47,12 @@ def import_app(app_path: str) -> Any:
 
 def import_optional(module_name: str) -> Any | None:
     """Import and return a cached module when available, or None if not installed."""
-    if module_name in sys.modules:
-        loaded = sys.modules[module_name]
-        if loaded is not None:
-            _module_cache[module_name] = loaded
+    loaded = sys.modules.get(module_name)
+    if loaded is not None:
+        _module_cache[module_name] = loaded
         return loaded
+    if module_name in sys.modules:
+        return None
 
     cached = _module_cache.get(module_name)
     if cached is not None:

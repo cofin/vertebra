@@ -143,10 +143,10 @@ def test_gil_audit_quarantines_unsafe_modules_to_single_shard(monkeypatch: pytes
         gil_enabled_after=True,
         gil_reenabled_on_import=True,
         suspect_extensions=("legacy_c_ext",),
-        quarantined_modules=("uvloop==0.21.0",),
+        quarantined_modules=("uvloop==0.21.0", "rloop==0.1.0"),
     )
     assert reenabled_report.quarantine_unsafe_modules(8) == 1
-    assert os.environ.get("VERTEBRA_QUARANTINED_LOOPS") == "uvloop"
+    assert os.environ.get("VERTEBRA_QUARANTINED_LOOPS") == "rloop,uvloop"
 
     loop = create_event_loop(quarantined_modules=frozenset(reenabled_report.quarantined_modules))
     try:
@@ -252,7 +252,7 @@ def test_gil_audit_quarantine_forces_single_loop_shard(monkeypatch: pytest.Monke
         gil_enabled_before=False,
         gil_enabled_after=False,
         gil_reenabled_on_import=False,
-        quarantined_modules=("uvloop==0.21.0",),
+        quarantined_modules=("uvloop==0.21.0", "rloop==0.1.0"),
     )
     assert quarantined_report.quarantine_unsafe_modules(4) == 1
     pool = EventLoopPool(size=1, inline_single_loop=True, gil_report=quarantined_report)
@@ -307,3 +307,87 @@ def test_cgroup_quota_effective_cpu_count_and_launch_env(
     env = launch.to_environ(base={})
     assert env["VERTEBRA_THREADS"] == str(CgroupQuota.effective_cpu_count())
     assert "site-packages" in env["PYTHONPATH"] or env["PYTHONPATH"]
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "available_modules", "quarantined", "requested", "expected"),
+    [
+        ("linux", frozenset({"uvloop", "rloop"}), frozenset({"legacy_c_ext==1.0"}), "auto", LoopBackend.UVLOOP),
+        (
+            "linux",
+            frozenset({"uvloop", "rloop"}),
+            frozenset({"legacy_c_ext==1.0", "uvloop==0.21.0"}),
+            "auto",
+            LoopBackend.RLOOP,
+        ),
+        (
+            "linux",
+            frozenset({"uvloop", "rloop"}),
+            frozenset({"legacy_c_ext==1.0", "uvloop==0.21.0", "rloop==0.5.0"}),
+            "auto",
+            LoopBackend.ASYNCIO,
+        ),
+        ("linux", frozenset({"rloop"}), frozenset({"other_ext==2.0"}), "rloop", LoopBackend.RLOOP),
+        ("linux", frozenset({"rloop"}), frozenset({"rloop==0.5.0"}), "rloop", LoopBackend.ASYNCIO),
+        ("win32", frozenset({"winloop", "rloop"}), frozenset({"legacy_c_ext==1.0"}), "auto", LoopBackend.WINLOOP),
+        ("win32", frozenset({"winloop"}), frozenset({"winloop==0.8.0"}), "auto", LoopBackend.ASYNCIO),
+    ],
+)
+def test_resolve_loop_backend_scopes_quarantine_to_candidate_modules(
+    monkeypatch: pytest.MonkeyPatch,
+    platform_name: str,
+    available_modules: frozenset[str],
+    quarantined: frozenset[str],
+    requested: str,
+    expected: LoopBackend,
+) -> None:
+    """Verify unrelated quarantined C extensions do not suppress rloop or other non-quarantined loop backends."""
+    monkeypatch.delenv("VERTEBRA_LOOP", raising=False)
+    monkeypatch.delenv("VERTEBRA_QUARANTINED_LOOPS", raising=False)
+    monkeypatch.setattr("vertebra.server._loops.sys.platform", platform_name)
+    monkeypatch.setattr(
+        "vertebra.server._loops.import_optional",
+        lambda name: object() if name in available_modules else None,
+    )
+
+    assert resolve_loop_backend(requested, quarantined_modules=quarantined) == expected
+
+
+def test_event_loop_pool_spawn_and_spawn_batch_dispatch_across_threads_and_inline() -> None:
+    """Verify EventLoopPool.spawn and spawn_batch execute coroutines across multi-shard and inline single-shard pools."""
+    done_event = threading.Event()
+    recorded: list[int] = []
+    lock = threading.Lock()
+
+    async def _record(val: int, target_total: int) -> None:
+        with lock:
+            recorded.append(val)
+            if len(recorded) >= target_total:
+                done_event.set()
+
+    pool = EventLoopPool(size=2, loop_backend=LoopBackend.ASYNCIO)
+    try:
+        pool.spawn(_record(100, 5), worker_index=0)
+        pool.spawn_batch([_record(i, 5) for i in range(4)])
+        assert done_event.wait(timeout=5.0)
+        assert sorted(recorded) == [0, 1, 2, 3, 100]
+    finally:
+        pool.stop()
+
+    inline_recorded: list[int] = []
+    inline_pool = EventLoopPool(size=1, inline_single_loop=True, loop_backend=LoopBackend.ASYNCIO)
+    try:
+
+        async def _run_inline() -> None:
+            async def _push(v: int) -> None:
+                inline_recorded.append(v)
+
+            inline_pool.spawn(_push(10))
+            inline_pool.spawn_batch([_push(20), _push(30)])
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        inline_pool.primary_loop.run_until_complete(_run_inline())
+        assert inline_recorded == [10, 20, 30]
+    finally:
+        inline_pool.stop()

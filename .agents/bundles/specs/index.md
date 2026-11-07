@@ -1,13 +1,3 @@
----
-title: "Active Specifications & Research Index"
-description: "Index of active Master PRDs, planned feature specifications, draft child flow charters, and spec-scoped primary-source research under .agents/bundles/specs/."
-tags:
-  - specs
-  - prd
-  - research
-  - index
----
-
 # Active Specifications & Research (`specs/`)
 
 Active specifications and promoted research notes under `.agents/bundles/specs/`. Completed flows are synthesized into [`../knowledge/`](../knowledge/index.md), logged in [`../log.md`](../log.md), and deleted upon `/flow:archive`.
@@ -19,18 +9,13 @@ Active specifications and promoted research notes under `.agents/bundles/specs/`
 
 The completed database foundation is documented in [driver contracts and adapter layout](../knowledge/domains/data/database-drivers-and-dialers.md) and [ADR-004](../knowledge/decisions/adr-004-optional-driver-wheels-and-shm-ownership.md).
 
-## 2. Active Feature Specifications (`state: active`)
+## 2. Planned Feature Specifications (`state: planned`)
 
-No active feature specification. Completed engine primitives are documented in the [data chapter](../knowledge/domains/data/query-pipeline-cdc-and-tenancy.md) and [archive log](../log.md).
-
-## 3. Planned Feature Specifications (`state: planned`)
-
-- [`runtime-structure-and-throughput`](runtime-structure-and-throughput/spec.md) — Shared `_fastpath_core.py` and `FastPathProvider` registry, table-driven loop backends, Rust GCP submodule splits, `VertexEmbedder` HTTP/2 transport, and `vertebra.utils` Rust helper cleanup (`t01`–`t08`).
 - [`mcp-webmcp-core`](mcp-webmcp-core/spec.md) — Unified `ToolSpec` / `ToolRegistry` / `MCPCore` (`2026-07-28`), shared ASGI/WSGI MCP mounts, `litestar-mcp` delegation, and `document.modelContext` WebMCP bridge (`t01`–`t08`).
 - [`storage-completeness`](storage-completeness/spec.md) — Complete `SyncObjectStore` and `AsyncObjectStore` (`vertebra-storage`), unified GCP token caches, fail-closed construction, and SQLSpec, Advanced Alchemy, Django, and Litestar storage contracts (`t01`–`t07`).
 - [`native-postgres-driver`](native-postgres-driver/spec.md) — Standalone Rust PostgreSQL wheel (`vertebra-postgres`) covering wire authentication, cloud mTLS/IAM, pools, single-Sync pipelines, binary COPY, SHM Arrow, notifications, logical replication, and native adapter cutover (`t01`–`t102`).
 
-## 4. Draft Child Flow Charters (`state: draft`)
+## 3. Draft Child Flow Charters (`state: draft`)
 
 - [`broker-pool-sharing`](broker-pool-sharing/spec.md) — Shared broker-owned pools for any SQLSpec, Advanced Alchemy, or SQLAlchemy config.
 - [`native-oracle-driver`](native-oracle-driver/spec.md) — Standalone Rust Oracle Thin wheel (`vertebra-oracle`).
@@ -43,7 +28,7 @@ No active feature specification. Completed engine primitives are documented in t
 - [`sqlspec-adapter-parity`](sqlspec-adapter-parity/spec.md) — Feature-complete SQLSpec per-engine adapters, stores, and data dictionaries.
 - [`queues-tasks-and-channels`](queues-tasks-and-channels/spec.md) — Native PostgreSQL and Oracle `QueueStore` backends, `litestar-queues`, Django tasks, distributed channels, and `ValkeyStore`.
 
-## 5. Promoted Spec Research (`state: promoted`)
+## 4. Promoted Spec Research (`state: promoted`)
 
 - [`gap-analysis_20261103.md`](native-data-platform/research/gap-analysis_20261103.md) — Broker, native driver, and storage gap analysis (`native-data-platform`).
 - [`rust-driver-crates_20261103.md`](native-data-platform/research/rust-driver-crates_20261103.md) — Primary-source Rust client crate comparison and per-engine wheel packaging (`native-data-platform`).

@@ -121,7 +121,7 @@ flowchart LR
 | 5 | `queues-tasks-and-channels` | Working queues, tasks, channels, stores | Native `PostgresQueueStore` / `OracleQueueStore`, settings-driven `QueueService`, `litestar-queues` & Django tasks backends with DI, single cron parser, distributed Litestar/Starlette channels, `ValkeyStore` | `QueueService`, `QueueBackend`, `QueueBackendSettings` | 3, 4; native-data-platform Ch2, Ch4, Ch9 | draft |
 | 6 | `sqlalchemy-and-django-integration` | SQLAlchemy / AA / Django DB integration | `Sync<Engine>Dialect` / `Async<Engine>Dialect` + official GCP/DuckDB dialect bases over framework-neutral `db/dbapi/` (`SyncDBAPI*`/`AsyncDBAPI*`) from `broker-pool-sharing`, SQLAlchemy-only `async_adapter.py`, AA dogpile cache backend, real Django backends including Spanner via `django_spanner` | dialect entry points, `create_cache_config`, Django `ENGINE` paths | 3; native-data-platform Ch1, Ch3, Ch10 | draft |
 | 7 | `mcp-webmcp-core` | MCP 2026-07-28 core and WebMCP bridge | `ToolSpec`/`ToolRegistry` consuming neutral `ToolProvider`/`MCPCore`, ASGI/WSGI/native adapters, `litestar-mcp` delegation, TS bridge on `document.modelContext`, conformance | `ToolSpec`, `MCPCore`, `registerWebMCPTools` | 1, 3 | planned |
-| 8 | `runtime-structure-and-throughput` | Fastpath, Rust modules, helpers | Shared `_fastpath_core.py` + `FastPathProvider`, table-driven loops, Rust `proto.rs` + `vertebra-{spanner,bigquery}` submodule splits + shared `py_async`, zero-copy Arrow append, `VertexEmbedder` HTTP/2 transport, `utils` fallback removal | `FastPathProvider`, `vertebra.utils.*`, `_vertebra.pyi` | 2, 3, 9; native-data-platform Ch1 | planned |
+| 8 | `runtime-structure-and-throughput` | Fastpath, Rust modules, helpers | Shared `_fastpath_core.py` + `FastPathProvider`, table-driven loops, Rust `proto.rs` + `vertebra-{spanner,bigquery}` submodule splits + shared `py_async`, zero-copy Arrow append, `VertexEmbedder` HTTP/2 transport, `utils` fallback removal | `FastPathProvider`, `vertebra.utils.*`, `_vertebra.pyi` | 2, 3, 9; native-data-platform Ch1 | completed |
 | 9 | `gcp-driver-resilience` | GCP driver resilience and typed errors | Panic-safe/cancellable `spawn_rust_db_task`, typed `GoogleCloudError` hierarchy across sync/async bindings, async `gcloud` + `ProxyPolicy` + explicit scopes, BigQuery REST warning/URL fixes, `char`-aware Spangres lexer | `_vertebra.pyi` exceptions, `TaskPanicError`, `{Sync,Async}GcpTokenCache.from_options` | 2 | completed |
 
 ## 4. Global Constraints (Applicable to All Child Flows)
@@ -157,13 +157,13 @@ flowchart LR
 - [ ] queues-tasks-and-channels — Working queues, tasks, channels, stores (../queues-tasks-and-channels/spec.md)
 - [ ] sqlalchemy-and-django-integration — SQLAlchemy / AA / Django DB integration (../sqlalchemy-and-django-integration/spec.md)
 - [ ] mcp-webmcp-core — MCP 2026-07-28 core and WebMCP bridge (../mcp-webmcp-core/spec.md)
-- [ ] runtime-structure-and-throughput — Fastpath, Rust modules, helpers (../runtime-structure-and-throughput/spec.md)
+- [x] [c7b62a8c] runtime-structure-and-throughput — Fastpath, Rust modules, helpers (archived in `log.md`)
 
 ## Continuity Snapshot
 
 - **Flow ID:** `integration-remediation` (`state: planned`, `plan_revision: 6`, `plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"`)
-- **Active Focus:** Chapters 1, 2, 3, and 9 are merged onto `main @ 80ff8a65`. `runtime-structure-and-throughput` and `mcp-webmcp-core` are planned and ready for stacked implementation alongside `storage-completeness` and `native-postgres-driver`.
-- **Completed Checkpoints:** `critical-correctness-fixes` (`364c7cbe`), `gcp-wire-protocol-correctness` (`984ce732`), `gcp-driver-resilience` (`abd33ab6`), and `db-engine-primitives` (`80ff8a65`).
+- **Active Focus:** Chapters 1, 2, 3, and 9 are merged onto `main @ 80ff8a65`, and Chapter 8 (`runtime-structure-and-throughput`) is completed (`c7b62a8c`) on `feat/runtime-structure-and-throughput`. `mcp-webmcp-core` is planned and ready for stacked implementation alongside `storage-completeness` and `native-postgres-driver`.
+- **Completed Checkpoints:** `critical-correctness-fixes` (`364c7cbe`), `gcp-wire-protocol-correctness` (`984ce732`), `gcp-driver-resilience` (`abd33ab6`), `db-engine-primitives` (`80ff8a65`), and `runtime-structure-and-throughput` (`c7b62a8c`).
 - **Key decisions:**
   - Engine adapters and local primitives live under `vertebra/db/adapters/<engine>/` backed by per-engine PyO3 wheels `src/rs/vertebra-<engine>` (`vertebra._<engine>`); framework and agent integrations live under `vertebra.extensions.*`, `vertebra.framework.*`, and `vertebra.agent.tools`.
   - `db-engine-primitives` dispatches `execute_stack` on `SyncPipelineCapable` / `AsyncPipelineCapable`, using the existing protocols in the [database foundation](../../knowledge/domains/data/database-drivers-and-dialers.md).

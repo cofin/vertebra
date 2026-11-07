@@ -3,6 +3,10 @@
 use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use vertebra_core::proto::{
+    WIRE_TYPE_LENGTH_DELIMITED, WIRE_TYPE_VARINT, put_bytes_field, put_varint_field,
+    read_length_delimited, read_tag, read_varint, skip_field,
+};
 
 /// Authentication mode for Cloud SQL and AlloyDB connections.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,16 +197,11 @@ pub fn encode_alloydb_metadata_exchange(
 ) -> Bytes {
     let mut proto = BytesMut::with_capacity(user_agent.len() + oauth2_token.len() + 16);
     if !user_agent.is_empty() {
-        proto.put_u8(0x0a);
-        put_varint(&mut proto, user_agent.len() as u64);
-        proto.extend_from_slice(user_agent.as_bytes());
+        put_bytes_field(&mut proto, 1, user_agent.as_bytes());
     }
-    proto.put_u8(0x10);
-    put_varint(&mut proto, auth_type as u64);
+    put_varint_field(&mut proto, 2, auth_type as u64);
     if !oauth2_token.is_empty() {
-        proto.put_u8(0x1a);
-        put_varint(&mut proto, oauth2_token.len() as u64);
-        proto.extend_from_slice(oauth2_token.as_bytes());
+        put_bytes_field(&mut proto, 3, oauth2_token.as_bytes());
     }
 
     let mut framed = BytesMut::with_capacity(4 + proto.len());
@@ -218,12 +217,9 @@ pub fn encode_alloydb_metadata_exchange(
 /// - field 2 (tag `0x12`, string): `error_message`
 pub fn encode_alloydb_metadata_response(response_code: u32, error_message: &str) -> Bytes {
     let mut proto = BytesMut::with_capacity(error_message.len() + 12);
-    proto.put_u8(0x08);
-    put_varint(&mut proto, response_code as u64);
+    put_varint_field(&mut proto, 1, response_code as u64);
     if !error_message.is_empty() {
-        proto.put_u8(0x12);
-        put_varint(&mut proto, error_message.len() as u64);
-        proto.extend_from_slice(error_message.as_bytes());
+        put_bytes_field(&mut proto, 2, error_message.as_bytes());
     }
 
     let mut framed = BytesMut::with_capacity(4 + proto.len());
@@ -255,65 +251,31 @@ fn decode_alloydb_metadata_response_body(body: &[u8]) -> Result<(u32, String), S
     let mut idx = 0usize;
 
     while idx < body.len() {
-        let tag = body[idx];
-        idx += 1;
-        let field_num = tag >> 3;
-        let wire_type = tag & 0x07;
+        let (field_num, wire_type) = read_tag(body, &mut idx)?;
         match wire_type {
-            0 => {
-                let (val, next_idx) = read_varint(body, idx)?;
-                idx = next_idx;
+            WIRE_TYPE_VARINT => {
+                let val = read_varint(body, &mut idx)?;
                 if field_num == 1 {
                     response_code = val as u32;
                 }
             }
-            2 => {
-                let (len, next_idx) = read_varint(body, idx)?;
-                let len = len as usize;
-                if next_idx + len > body.len() {
-                    return Err("truncated string field in MetadataExchangeResponse".to_string());
-                }
-                let slice = &body[next_idx..next_idx + len];
-                idx = next_idx + len;
+            WIRE_TYPE_LENGTH_DELIMITED => {
+                let slice = read_length_delimited(body, &mut idx).map_err(|_| {
+                    "truncated string field in MetadataExchangeResponse".to_string()
+                })?;
                 if field_num == 2 {
                     error_message = String::from_utf8_lossy(slice).into_owned();
                 }
             }
             other => {
-                return Err(format!(
-                    "unsupported protobuf wire type {other} in MetadataExchangeResponse"
-                ));
+                skip_field(body, &mut idx, other).map_err(|_| {
+                    format!("unsupported protobuf wire type {other} in MetadataExchangeResponse")
+                })?;
             }
         }
     }
 
     Ok((response_code, error_message))
-}
-
-fn put_varint(buf: &mut BytesMut, mut value: u64) {
-    while value >= 0x80 {
-        buf.put_u8(((value as u8) & 0x7f) | 0x80);
-        value >>= 7;
-    }
-    buf.put_u8(value as u8);
-}
-
-fn read_varint(buf: &[u8], mut idx: usize) -> Result<(u64, usize), String> {
-    let mut val = 0u64;
-    let mut shift = 0u32;
-    while idx < buf.len() {
-        let b = buf[idx];
-        idx += 1;
-        val |= ((b & 0x7f) as u64) << shift;
-        if (b & 0x80) == 0 {
-            return Ok((val, idx));
-        }
-        shift += 7;
-        if shift >= 64 {
-            return Err("varint overflow in protobuf frame".to_string());
-        }
-    }
-    Err("unexpected EOF while reading varint".to_string())
 }
 
 /// Generate an ephemeral X.509 client certificate and private key PEM pair using `rcgen`.

@@ -5,9 +5,12 @@ description: Canonical polyglot build, lint, test, and benchmark workflow plus F
 status: stable
 tags: [workflow, commands, verification, testing, ci]
 generated:
-  by: flow/0.26.0
-  at: "2026-11-04T04:33:00Z"
+  by: flow/0.27.0
+  at: "2026-11-06T18:28:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-06T18:28:00Z"
+    commit: 77b54514efb09b5b30500a0a1f7832ba8352a2b9
   - by: agent:flow-setup
     at: "2026-11-04T04:33:00Z"
     commit: f741701
@@ -32,11 +35,11 @@ sources:
 # Project Workflow
 
 <!-- truth: start -->
-- Task files under `.agents/bundles/specs/<flow_id>/tasks/` are authoritative; `spec.md` is the synchronized checklist and continuity view.
+- Task files under `.agents/bundles/specs/<flow_id>/tasks/` (or `.agents/bundles/specs/<flow_id>/chapters/chNN-<slug>/tasks/` for multi-chapter initiatives) are authoritative; `spec.md` (and `chapters/index.md` + `chapters/chNN-<slug>/spec.md`) is the synchronized checklist and continuity view.
 - Use Vertebra's canonical [`Makefile`](../../../Makefile)[^src-makefile] targets (`make setup-env`, `make install`, `make dev`, `make rs-test`, `make py-test`, `make ts-test`, `make test`, `make lint`, `make lint-all`, `make review-check`, `make review-route`, `make coverage`, `make check`, `make docs`, `make docs-serve`, `make docs-check`, `make docs-clean`, `make docs-rust`, `make build`, `make build-pgo`, `make bench`, `make bench-all`, `make bench-ft`, `make bench-report`, `make rs-bench`, `make bench-micro`, `make bench-baseline`, `make bench-check`, `make upgrade`) and rebuild all five PyO3 extensions (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_spanner`) via `make dev` after any Rust edit before running `pytest`.
 - Every task declares and justifies one `verification_strategy`; only observable behavior and defect correction require an initial failing test.
 - Record durable findings in the task's `## Notes & Discoveries` and preserve unrelated worktree changes.
-- Operational project skills install only under `.agents/skills/` and subagents under `.agents/agents/`. Product, knowledge, research, and specs remain under `.agents/bundles/` (`specs/` and `research/` are created lazily only when needed).
+- Operational project skills install only under `.agents/skills/` and subagents under `.agents/agents/`. Product, knowledge, research, and specs remain under `.agents/bundles/` (`specs/` and `research/` are created lazily only when needed). Subdirectory `index.md` files (`product/index.md`, `knowledge/**/index.md`, `specs/index.md`, `chapters/index.md`) and `log.md` never carry YAML frontmatter, and Markdown bodies never use standalone `---` horizontal rules.
 - Flow never creates, moves, force-updates, or deletes Git tags, and never pushes automatically. All changes in Vertebra are made on a dedicated feature/fix branch with signed conventional commits (`commit.gpgsign=true`) and submitted via pull request, never directly on `main`.
 <!-- truth: end -->
 
@@ -103,33 +106,33 @@ make bench-report                                         # Latest benchmark rep
 ## Direct Markdown Continuity & Execution Loop
 
 1. Resolve `.agents/setup-state.json:root_directory` (defaulting to `.agents/`) and `bundle_root` (`.agents/bundles`).
-2. Read the bundle root index ([`.agents/bundles/index.md`](../index.md)) and candidate spec frontmatter under `specs/<flow_id>/spec.md`.
-3. Read authoritative task frontmatter in `specs/<flow_id>/tasks/*.md`.
+2. Read the bundle root index ([`.agents/bundles/index.md`](../index.md)) and candidate spec frontmatter under `specs/<flow_id>/spec.md` (and `specs/<flow_id>/chapters/index.md` + `specs/<flow_id>/chapters/chNN-<slug>/spec.md` for chaptered specs).
+3. Read authoritative task frontmatter in `specs/<flow_id>/tasks/*.md` (or `specs/<flow_id>/chapters/chNN-<slug>/tasks/*.md`).
 4. Run the 5-check preflight before executing a task:
-   - Worksheet completeness (`verification_strategy`, `target_paths`, `acceptance_criteria`).
+   - Worksheet completeness (`verification_strategy`, `files`/`tests`, `Acceptance Criteria`).
    - Target path existence in the repository.
-   - Dependency readiness (every `depends_on` task is `closed`).
+   - Dependency readiness (every `depends_on` task is `completed` or `closed`).
    - Checklist and frontmatter agreement between `tasks/<id>-<slug>.md` and `spec.md`.
    - Worktree cleanliness (preserve unrelated changes; never revert user edits).
-5. Select an explicit task ID, the sole `in_progress` task, or the first ready (`open`) task.
+5. Select an explicit task ID, the sole `in_progress` task, or the first ready (`pending` / `open`) task.
 6. Read the complete worksheet, direct dependency notes, and relevant nested knowledge chapters (`architecture/`, `domains/`, `patterns/`, `testing/`, `gotchas/`, `decisions/`) plus matching `.agents/skills/<domain>/SKILL.md`.
 
 Hooks and prior conversation are routing hints, not authority. Task worksheet frontmatter (`tasks/<id>-<slug>.md`) and `spec.md` checklists (`[ ]`, `[~]`, `[x] [<sha>]`, `[!]`, `[-]`), backed by Git commit SHAs, are the single authority for task state.
 
 ## Task State & Lifecycle Operations
 
-Write state changes directly to Markdown in canonical task-first, spec-last order: update `tasks/<id>-<slug>.md` YAML frontmatter first, then synchronize the corresponding checklist marker in `spec.md`.
+Write state changes directly to Markdown in canonical task-first, spec-last order: update `tasks/<id>-<slug>.md` YAML frontmatter first, then synchronize the corresponding checklist marker in `spec.md` (and `chapters/index.md` for chaptered specs). Keep all plan and spec Markdown in present tense with zero revision-history sections, struck-through checklist items, or standalone `---` horizontal rules.
 
 | Operation | Purpose |
 | --- | --- |
 | `claim` | Set one ready task's `state: in_progress` (`updated_at`) and mark `[~]` in `spec.md`. |
 | `note` | Append dated investigation findings to `## Notes & Discoveries` in the task worksheet. |
-| `block` / `unblock` | Set `state: blocked` (`[!]`) with an exact blocker and next step, or return to `open` (`[ ]`). |
-| `release` | Return an `in_progress` task to `open` (`[ ]`) when execution pauses before completion. |
-| `close` | Set `state: closed`, record `commit_sha`, check acceptance criteria (`[x]`), and mark `[x] [<sha>]` in `spec.md`. |
+| `block` / `unblock` | Set `state: blocked` (`[!]`) with `blocked_reason`, `unblock_condition`, and `next_step`, or return to `pending` (`[ ]`). |
+| `release` | Return an `in_progress` task to `pending` (`[ ]`) when execution pauses before completion. |
+| `complete_task` | Set `state: completed`, record `commit` (`7-40` hex SHA) and `last_verified_commit`, check acceptance criteria (`[x]`), and mark `[x] [<sha>]` in `spec.md`. |
 | `sync` | Reconcile `spec.md` checklist markers from task-file frontmatter via `/flow:learn sync`. |
 | `learn` | Assess drift, refresh cross-session context, sharpen the domain glossary, evaluate ADRs, resynthesize OKF chapters, and align `.agents/skills/` and `.agents/agents/` via `/flow:learn`. |
-| `complete` | Move an active spec whose tasks are all `closed` or `skipped` (`[-]`) to `completed` after two-axis review (`@code-reviewer` + `@quality-reviewer`). |
+| `complete` | Move an `active` spec whose tasks are all `completed` or `deferred` (`[-]`) to `completed` (recording `last_reviewed_commit`) after two-axis review (`@code-reviewer` + `@quality-reviewer`). |
 | `archive` | Elevate durable knowledge into nested OKF chapters (`knowledge/`), log the summary in `log.md`, and remove the completed spec directory (`specs/` returns to lazy `.gitkeep`). |
 
 ## Verification Strategies

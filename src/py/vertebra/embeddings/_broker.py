@@ -6,6 +6,7 @@ import asyncio
 import os
 import sys
 import uuid
+from collections import deque
 from collections.abc import Callable, Sequence
 from typing import Any, cast
 
@@ -32,6 +33,7 @@ class EmbeddingBrokerConfig(msgspec.Struct, frozen=True, gc=False):
 
     max_batch_requests: int = 64
     max_batch_tokens: int = 16_384
+    max_pending_requests: int = 1024
     coalesce_window_ms: float = 1.0
     bulk_chunk_size: int = 128
     isolate_gil_subprocess: bool = True
@@ -123,7 +125,7 @@ class EmbeddingBroker:
         self._backend_factory = backend_factory
         self._dimensions = dimensions
         self._config = config or EmbeddingBrokerConfig()
-        self._pending: list[_QueuedBrokerRequest] = []
+        self._pending: deque[_QueuedBrokerRequest] = deque()
         self._flush_task: asyncio.Task[None] | None = None
         self._subprocess: asyncio.subprocess.Process | None = None
         self._subprocess_lock = asyncio.Lock()
@@ -152,6 +154,10 @@ class EmbeddingBroker:
         if self.should_quarantine_subprocess():
             batch = await self.submit_batch_in_subprocess([text])
             return batch[0]
+
+        if len(self._pending) >= self._config.max_pending_requests:
+            msg = f"EmbeddingBroker pending queue exceeded max_pending_requests ({self._config.max_pending_requests})"
+            raise RuntimeError(msg)
 
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[VectorView] = loop.create_future()
@@ -185,7 +191,7 @@ class EmbeddingBroker:
                 await self._drain_pending_once()
 
             chunk_texts = text_list[offset : offset + chunk_size]
-            chunk_rows = self._execute_length_sorted_rows(chunk_texts)
+            chunk_rows = await asyncio.to_thread(self._execute_length_sorted_rows, chunk_texts)
             for rel_idx, row in enumerate(chunk_rows):
                 all_rows[offset + rel_idx] = row
             await asyncio.sleep(0.002)
@@ -217,8 +223,8 @@ class EmbeddingBroker:
                 dimensions=self._dimensions,
                 factory=self._backend_factory,
             )
-            assert proc.stdin is not None
-            assert proc.stdout is not None
+            if proc.stdin is None or proc.stdout is None:
+                raise RuntimeError("Quarantined embedding subprocess stdio pipes are unavailable")
             payload_line = encode_json(req) + "\n"
             proc.stdin.write(payload_line.encode("utf-8"))
             await proc.stdin.drain()
@@ -261,10 +267,13 @@ class EmbeddingBroker:
             if batch_items and token_sum + nxt.estimated_tokens > self._config.max_batch_tokens:
                 break
             token_sum += nxt.estimated_tokens
-            batch_items.append(self._pending.pop(0))
+            batch_items.append(self._pending.popleft())
 
         try:
-            rows = self._execute_length_sorted_rows([item.text for item in batch_items])
+            rows = await asyncio.to_thread(
+                self._execute_length_sorted_rows,
+                [item.text for item in batch_items],
+            )
             batch_view = VectorBatchView.from_f32_rows(rows, normalize=True)
             for idx, item in enumerate(batch_items):
                 if not item.future.done():

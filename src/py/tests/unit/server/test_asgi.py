@@ -739,11 +739,19 @@ async def test_asgi_scope_and_protocol_body_bytes_and_raw_response() -> None:
     assert proto2.take_response().status == 204
 
     send = AsgiSend(request_id=77)
-    await send.send_raw_response(202, [(b"x-fast", b"1")], b"fast-body")
+    raw_pair = (b"x-fast", b"1")
+    backing = bytearray(b"fast-zero-copy-body")
+    await send.send_raw_response(202, [raw_pair], memoryview(backing))
     assert send.started is True
     assert send.complete is True
+    assert send.raw_headers == [raw_pair]
+    assert send.raw_headers[0] is raw_pair
     assert send.response.status == 202
-    assert send.response.body == b"fast-body"
+    assert isinstance(send.response.body, memoryview)
+    assert send.response.zero_copy_buffer is not None
+    assert send.response.zero_copy_buffer.obj is backing
+    assert bytes(send.response.body) == b"fast-zero-copy-body"
+    assert send.response.raw_headers == [raw_pair]
     assert send.response.headers == [("x-fast", "1")]
 
 

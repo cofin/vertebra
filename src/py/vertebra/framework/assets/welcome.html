@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark light" />
+  <title>Vertebra v{{version}} — Development Server</title>
+  <style>
+{{styles}}
+  </style>
+</head>
+<body>
+  <svg class="ambient-waves" viewBox="0 0 1440 900" fill="none" preserveAspectRatio="none" aria-hidden="true">
+    <path d="M-100 220 C 320 120, 680 340, 1540 160" stroke="var(--wave-stroke)" stroke-width="1.5" />
+    <path d="M-100 680 C 420 560, 880 780, 1540 610" stroke="var(--wave-stroke)" stroke-width="1.5" />
+  </svg>
+
+  <main class="page">
+    <header class="topbar">
+      <div class="status-badge mono">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span>v{{version}}</span>
+        <span class="status-sep">·</span>
+        <span>{{gil_tag}}</span>
+        <span class="status-sep">·</span>
+        <span>{{topology}} ({{worker_label}}, {{loop_backend}})</span>
+      </div>
+      <button type="button" class="theme-btn" id="theme-toggle" data-theme-toggle aria-label="Toggle color theme">
+        <span id="theme-label">Light mode</span>
+      </button>
+    </header>
+
+    <section class="hero">
+      <div class="hero-lockup">
+        <svg class="hero-logo" viewBox="0 0 256 256" fill="none" role="img" aria-label="Vertebra Logo">
+          <path d="M128 26L168 54L128 82L88 54Z" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M88 54L36 40" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M168 54L220 40" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M128 100L164 128L128 156L92 128Z" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M92 128L44 114" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M164 128L212 114" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M128 174L160 202L128 230L96 202Z" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M96 202L54 188" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M160 202L202 188" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M128 82V100" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M128 156V174" stroke="#EDB641" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <div class="hero-divider" aria-hidden="true"></div>
+        <h1 class="brand-title">VERTEBRA</h1>
+      </div>
+      <p class="hero-lead">
+        The development server is running. Register a <code>@app.get("/")</code> route to replace this welcome page.
+      </p>
+    </section>
+
+    <section class="code-card" aria-label="Quickstart route example">
+      <div class="code-header">
+        <span class="mono">app.py</span>
+        <button type="button" class="copy-btn" id="copy-btn">Copy</button>
+      </div>
+      <pre class="code-body mono" id="quickstart-code"><span class="kw">from</span> vertebra <span class="kw">import</span> App
+
+app = <span class="fn">App</span>()
+
+
+<span class="dec">@app.get</span>(<span class="str">"/"</span>)
+<span class="kw">def</span> <span class="fn">index</span>() -&gt; <span class="fn">dict</span>[<span class="fn">str</span>, <span class="fn">str</span>]:
+    <span class="kw">return</span> {<span class="str">"status"</span>: <span class="str">"ok"</span>}</pre>
+    </section>
+
+    <section class="endpoints-bar" data-endpoint-tester aria-label="Registered endpoints">
+      {{endpoints_html}}
+    </section>
+
+    <nav class="links-grid" aria-label="Resources">
+      <a class="link-card" href="https://cofin.github.io/vertebra/" target="_blank" rel="noopener">
+        <div class="link-card-title">
+          <span>Documentation</span>
+          <span class="link-card-arrow">→</span>
+        </div>
+        <div class="link-card-desc">Quickstart, routing, shared-memory workers, and API reference</div>
+      </a>
+      <a class="link-card" href="{{docs_card_href}}">
+        <div class="link-card-title">
+          <span>OpenAPI &amp; Health</span>
+          <span class="link-card-arrow">→</span>
+        </div>
+        <div class="link-card-desc">{{docs_card_meta}}</div>
+      </a>
+      <a class="link-card" href="https://github.com/litestar-org" target="_blank" rel="noopener">
+        <div class="link-card-title">
+          <span>Litestar Ecosystem</span>
+          <span class="link-card-arrow">→</span>
+        </div>
+        <div class="link-card-desc">Litestar, msgspec, SQLSpec, and Advanced Alchemy on GitHub</div>
+      </a>
+    </nav>
+  </main>
+
+  <script>
+    (function () {
+      var root = document.documentElement;
+      var themeBtn = document.getElementById("theme-toggle");
+      var themeLabel = document.getElementById("theme-label");
+
+      function applyTheme(theme) {
+        root.setAttribute("data-theme", theme);
+        if (themeLabel) {
+          themeLabel.textContent = theme === "dark" ? "Light mode" : "Dark mode";
+        }
+        try {
+          localStorage.setItem("vertebra-welcome-theme", theme);
+        } catch (_err) {}
+      }
+
+      try {
+        var saved = localStorage.getItem("vertebra-welcome-theme");
+        if (saved === "light" || saved === "dark") {
+          applyTheme(saved);
+        }
+      } catch (_err) {}
+
+      if (themeBtn) {
+        themeBtn.addEventListener("click", function () {
+          var current = root.getAttribute("data-theme") === "light" ? "light" : "dark";
+          applyTheme(current === "dark" ? "light" : "dark");
+        });
+      }
+
+      var copyBtn = document.getElementById("copy-btn");
+      var codeEl = document.getElementById("quickstart-code");
+      if (copyBtn && codeEl) {
+        copyBtn.addEventListener("click", function () {
+          var raw = codeEl.textContent || "";
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(raw).then(function () {
+              copyBtn.textContent = "Copied";
+              setTimeout(function () { copyBtn.textContent = "Copy"; }, 1400);
+            });
+          }
+        });
+      }
+    })();
+  </script>
+</body>
+</html>

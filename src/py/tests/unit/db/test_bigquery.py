@@ -906,3 +906,89 @@ async def test_bigquery_load_from_arrow_validates_identifiers_before_io(
         else:
             driver.close()
         server.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(
+    "bad_uri",
+    [
+        "exports/metrics.parquet",
+        "memory://exports/metrics.parquet",
+        "s3://",
+    ],
+)
+async def test_bigquery_staging_rejects_missing_or_ephemeral_memory_store(
+    asynchronous: bool,
+    bad_uri: str,
+) -> None:
+    """BigQuery ObjectStore export/load rejects relative, memory://, or malformed URIs when store is None."""
+    server = _MockBigQueryRestServer()
+    config = BigQueryConfig(project_id="test-proj", dataset_id="analytics", rest_endpoint=f"http://{server.host_port}")
+    try:
+        if asynchronous:
+            driver = AsyncBigQueryDriver(config)
+            try:
+                with pytest.raises(ImproperConfigurationError):
+                    await driver.export_to_object_store("SELECT id, name, score FROM metrics", bad_uri, store=None)
+                with pytest.raises(ImproperConfigurationError):
+                    await driver.load_from_object_store("analytics.metrics", bad_uri, store=None)
+            finally:
+                await driver.close()
+        else:
+            sync_driver = SyncBigQueryDriver(config)
+            try:
+                with pytest.raises(ImproperConfigurationError):
+                    sync_driver.export_to_object_store("SELECT id, name, score FROM metrics", bad_uri, store=None)
+                with pytest.raises(ImproperConfigurationError):
+                    sync_driver.load_from_object_store("analytics.metrics", bad_uri, store=None)
+            finally:
+                sync_driver.close()
+    finally:
+        server.close()
+
+
+def test_bigquery_core_arrow_ipc_coercion_preserves_bytes_casts_dictionaries_and_splits_oversized_batches() -> None:
+    """coerce_arrow_ipc_bytes preserves bytes identity, casts dictionary columns, and splits >9 MiB batches."""
+    small_table = pa.Table.from_pydict({"id": [1, 2], "name": ["alpha", "beta"]})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, small_table.schema) as writer:
+        writer.write_table(small_table)
+    raw_bytes = sink.getvalue().to_pybytes()
+
+    assert BigQueryCore.coerce_arrow_ipc_bytes(raw_bytes) is raw_bytes
+    in_memory_cursor = ArrowCursor(raw_bytes, used_shm=False)
+    assert BigQueryCore.coerce_arrow_ipc_bytes(in_memory_cursor) is raw_bytes
+
+    dict_col = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0], type=pa.int32()),
+        pa.array(["alpha", "beta"], type=pa.string()),
+    )
+    dict_table = pa.Table.from_arrays([pa.array([10, 20, 30]), dict_col], names=["id", "tag"])
+    coerced_dict_ipc = BigQueryCore.coerce_arrow_ipc_bytes(dict_table)
+    decoded_dict_table = pa.ipc.open_stream(coerced_dict_ipc).read_all()
+    assert not pa.types.is_dictionary(decoded_dict_table.schema.field("tag").type)
+    assert decoded_dict_table.to_pylist() == [
+        {"id": 10, "tag": "alpha"},
+        {"id": 20, "tag": "beta"},
+        {"id": 30, "tag": "alpha"},
+    ]
+
+    row_payload = b"x" * 1024
+    oversized_rows = 10_000
+    oversized_table = pa.Table.from_pydict(
+        {
+            "id": list(range(oversized_rows)),
+            "payload": [row_payload] * oversized_rows,
+        }
+    )
+    coerced_oversized_ipc = BigQueryCore.coerce_arrow_ipc_bytes(oversized_table)
+    reader = pa.ipc.open_stream(coerced_oversized_ipc)
+    batches = list(reader)
+    assert len(batches) >= 2
+    assert sum(batch.num_rows for batch in batches) == oversized_rows
+    for batch in batches:
+        batch_sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(batch_sink, batch.schema) as batch_writer:
+            batch_writer.write_batch(batch)
+        assert batch_sink.getvalue().size <= 9 * 1024 * 1024

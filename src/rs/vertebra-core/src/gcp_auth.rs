@@ -1094,3 +1094,74 @@ impl GcpTokenCache {
         })
     }
 }
+
+static GCP_HTTP2_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+static GCP_HTTP2_DIRECT_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn shared_gcp_http_client() -> &'static reqwest::Client {
+    GCP_HTTP2_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_nodelay(true)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
+fn shared_gcp_direct_http_client() -> &'static reqwest::Client {
+    GCP_HTTP2_DIRECT_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .no_proxy()
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_nodelay(true)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
+async fn send_post_with_client(
+    client: &reqwest::Client,
+    url: &str,
+    headers: &HashMap<String, String>,
+    body: bytes::Bytes,
+    timeout: Duration,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let mut req = client.post(url).timeout(timeout).body(body);
+    for (k, v) in headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+    req.send().await
+}
+
+/// Execute a connection-pooled HTTP/2 or HTTP/1.1 unary POST request and return `(status, lowercase_headers, body)`.
+pub async fn gcp_http2_post(
+    url: &str,
+    headers: &HashMap<String, String>,
+    body: Vec<u8>,
+    timeout_ms: u64,
+) -> Result<(u16, HashMap<String, String>, Vec<u8>), String> {
+    let timeout = Duration::from_millis(timeout_ms.max(1));
+    let payload = bytes::Bytes::from(body);
+    let client = if url_is_loopback(url) {
+        shared_gcp_direct_http_client()
+    } else {
+        shared_gcp_http_client()
+    };
+
+    let resp = send_post_with_client(client, url, headers, payload, timeout)
+        .await
+        .map_err(|e| format!("GCP HTTP/2 POST to `{url}` failed: {e}"))?;
+
+    let status = resp.status().as_u16();
+    let mut out_headers = HashMap::with_capacity(resp.headers().len() + 2);
+    for (name, val) in resp.headers() {
+        if let Ok(val_str) = val.to_str() {
+            out_headers.insert(name.as_str().to_ascii_lowercase(), val_str.to_string());
+        }
+    }
+    let body_bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("failed to read GCP HTTP/2 response body from `{url}`: {e}"))?;
+    Ok((status, out_headers, body_bytes.to_vec()))
+}

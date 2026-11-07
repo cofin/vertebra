@@ -1,6 +1,8 @@
 //! `vertebra-spanner` crate and `vertebra._spanner` PyO3 extension module.
 
+pub mod arrow_ipc;
 pub mod client;
+pub mod codec;
 pub mod errors;
 
 use std::collections::HashMap;
@@ -10,11 +12,11 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use vertebra_db::py_async::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task_with_attr};
 
-use crate::client::{
-    ProtobufValue, SpannerBatchDmlStatement, SpannerBatchWriteResult,
-    SpannerClient as NativeSpannerClient, SpannerClientConfig, SpannerCommitResult, SpannerDialect,
-    SpannerError, SpannerMutation, SpannerMutationGroup, SpannerQueryResult, SpannerStaleness,
-    SpannerStructField, SpannerValue, parse_spanner_parameters_json,
+use crate::client::{SpannerClient as NativeSpannerClient, SpannerClientConfig};
+use crate::codec::{
+    SpannerBatchWriteResult, SpannerCommitResult, SpannerDialect, SpannerQueryResult,
+    SpannerStaleness, SpannerStructField, SpannerValue, parse_batch_dml_statements_json,
+    parse_mutation_groups_json, parse_mutations_json, parse_spanner_parameters_json,
 };
 use crate::errors::spanner_error_to_py;
 
@@ -129,162 +131,6 @@ fn batch_write_results_to_py(
     Ok(list.into_any().unbind())
 }
 
-fn json_cell_to_protobuf_value(val: &serde_json::Value) -> ProtobufValue {
-    match val {
-        serde_json::Value::Null => ProtobufValue::Null,
-        serde_json::Value::Bool(b) => ProtobufValue::Bool(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                ProtobufValue::String(i.to_string())
-            } else {
-                ProtobufValue::Number(n.as_f64().unwrap_or(0.0))
-            }
-        }
-        serde_json::Value::String(s) => ProtobufValue::String(s.clone()),
-        serde_json::Value::Array(arr) => {
-            ProtobufValue::List(arr.iter().map(json_cell_to_protobuf_value).collect())
-        }
-        serde_json::Value::Object(map) => {
-            ProtobufValue::String(serde_json::Value::Object(map.clone()).to_string())
-        }
-    }
-}
-
-fn parse_mutation_value(item: &serde_json::Value) -> Result<SpannerMutation, SpannerError> {
-    let op = item
-        .get("op")
-        .and_then(|v| v.as_str())
-        .unwrap_or("insert_or_update")
-        .to_ascii_lowercase();
-    let table = item
-        .get("table")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    if table.is_empty() {
-        return Err(SpannerError::InvalidArgument(
-            "mutation 'table' must not be empty".to_string(),
-        ));
-    }
-    if op == "delete" {
-        let all = item
-            .get("all")
-            .or_else(|| item.get("all_rows"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let keys = item
-            .get("keys")
-            .and_then(|v| v.as_array())
-            .map(|rows| {
-                rows.iter()
-                    .map(|r| {
-                        if let Some(arr) = r.as_array() {
-                            arr.iter().map(json_cell_to_protobuf_value).collect()
-                        } else {
-                            vec![json_cell_to_protobuf_value(r)]
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        return Ok(SpannerMutation::delete(table, keys, all));
-    }
-
-    let columns: Vec<String> = item
-        .get("columns")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|c| c.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    let values: Vec<Vec<ProtobufValue>> = item
-        .get("values")
-        .and_then(|v| v.as_array())
-        .map(|rows| {
-            rows.iter()
-                .map(|r| {
-                    r.as_array()
-                        .map(|cells| cells.iter().map(json_cell_to_protobuf_value).collect())
-                        .unwrap_or_default()
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    match op.as_str() {
-        "insert" => Ok(SpannerMutation::insert(table, columns, values)),
-        "update" => Ok(SpannerMutation::update(table, columns, values)),
-        "replace" => Ok(SpannerMutation::replace(table, columns, values)),
-        _ => Ok(SpannerMutation::insert_or_update(table, columns, values)),
-    }
-}
-
-fn parse_mutations_json(raw: &str) -> Result<Vec<SpannerMutation>, SpannerError> {
-    let val: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|e| SpannerError::InvalidArgument(format!("invalid mutations_json: {e}")))?;
-    let Some(arr) = val.as_array() else {
-        return Err(SpannerError::InvalidArgument(
-            "mutations_json must be a JSON array".to_string(),
-        ));
-    };
-    arr.iter().map(parse_mutation_value).collect()
-}
-
-fn parse_mutation_groups_json(raw: &str) -> Result<Vec<SpannerMutationGroup>, SpannerError> {
-    let val: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|e| SpannerError::InvalidArgument(format!("invalid mutation_groups_json: {e}")))?;
-    let Some(arr) = val.as_array() else {
-        return Err(SpannerError::InvalidArgument(
-            "mutation_groups_json must be a JSON array".to_string(),
-        ));
-    };
-    let mut groups = Vec::with_capacity(arr.len());
-    for group_val in arr {
-        let muts_arr = if let Some(inner) = group_val.get("mutations").and_then(|v| v.as_array()) {
-            inner
-        } else if let Some(inner) = group_val.as_array() {
-            inner
-        } else {
-            return Err(SpannerError::InvalidArgument(
-                "each mutation group must be a list of mutations or {'mutations': [...]}"
-                    .to_string(),
-            ));
-        };
-        let mut mutations = Vec::with_capacity(muts_arr.len());
-        for m in muts_arr {
-            mutations.push(parse_mutation_value(m)?);
-        }
-        groups.push(SpannerMutationGroup::new(mutations));
-    }
-    Ok(groups)
-}
-
-fn parse_batch_dml_statements_json(
-    raw: &str,
-) -> Result<Vec<SpannerBatchDmlStatement>, SpannerError> {
-    let val: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|e| SpannerError::InvalidArgument(format!("invalid statements_json: {e}")))?;
-    let Some(arr) = val.as_array() else {
-        return Err(SpannerError::InvalidArgument(
-            "statements_json must be a JSON array".to_string(),
-        ));
-    };
-    let mut out = Vec::with_capacity(arr.len());
-    for item in arr {
-        let sql = item
-            .get("sql")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let params_raw = item.get("params").map(serde_json::Value::to_string);
-        let params = parse_spanner_parameters_json(params_raw.as_deref())?;
-        out.push(SpannerBatchDmlStatement { sql, params });
-    }
-    Ok(out)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn build_spanner_config(
     database: String,
@@ -392,8 +238,8 @@ impl PySyncSpannerClient {
     }
 
     #[getter]
-    fn endpoint(&self) -> String {
-        self.inner.config().effective_endpoint()
+    fn endpoint(&self) -> &str {
+        self.inner.effective_endpoint()
     }
 
     #[getter]
@@ -435,12 +281,8 @@ impl PySyncSpannerClient {
         let params =
             parse_spanner_parameters_json(params_json).map_err(|e| spanner_error_to_py(py, e))?;
         let staleness = parse_staleness(staleness_mode, staleness_ms);
-        let client = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
         let res = py
-            .detach(|| {
-                block_on_db(async move { client.query(&sql_owned, &params, staleness).await })
-            })
+            .detach(|| block_on_db(self.inner.query_owned(sql, params, staleness)))
             .map_err(|e| spanner_error_to_py(py, e))?;
         query_result_to_py(py, res)
     }
@@ -456,19 +298,13 @@ impl PySyncSpannerClient {
     ) -> PyResult<i64> {
         let params =
             parse_spanner_parameters_json(params_json).map_err(|e| spanner_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
         py.detach(|| {
-            block_on_db(async move {
-                client
-                    .execute_dml(
-                        &sql_owned,
-                        &params,
-                        request_tag.as_deref(),
-                        transaction_tag.as_deref(),
-                    )
-                    .await
-            })
+            block_on_db(self.inner.execute_dml_owned(
+                sql,
+                params,
+                request_tag.as_deref(),
+                transaction_tag.as_deref(),
+            ))
         })
         .map_err(|e| spanner_error_to_py(py, e))
     }
@@ -483,13 +319,12 @@ impl PySyncSpannerClient {
     ) -> PyResult<Vec<i64>> {
         let stmts = parse_batch_dml_statements_json(statements_json)
             .map_err(|e| spanner_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
         py.detach(|| {
-            block_on_db(async move {
-                client
-                    .execute_batch_dml(&stmts, request_tag.as_deref(), transaction_tag.as_deref())
-                    .await
-            })
+            block_on_db(self.inner.execute_batch_dml_owned(
+                stmts,
+                request_tag.as_deref(),
+                transaction_tag.as_deref(),
+            ))
         })
         .map_err(|e| spanner_error_to_py(py, e))
     }
@@ -504,40 +339,40 @@ impl PySyncSpannerClient {
     ) -> PyResult<i64> {
         let params =
             parse_spanner_parameters_json(params_json).map_err(|e| spanner_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
         py.detach(|| {
-            block_on_db(async move {
-                client
-                    .execute_partitioned_dml(&sql_owned, &params, exclude_txn_from_change_streams)
-                    .await
-            })
+            block_on_db(self.inner.execute_partitioned_dml_owned(
+                sql,
+                params,
+                exclude_txn_from_change_streams,
+            ))
         })
         .map_err(|e| spanner_error_to_py(py, e))
     }
 
-    #[pyo3(signature = (mutations_json, transaction_tag=None, exclude_txn_from_change_streams=false))]
+    #[pyo3(signature = (
+        mutations_json,
+        transaction_tag=None,
+        exclude_txn_from_change_streams=false,
+        max_commit_delay_ms=None
+    ))]
     fn apply_mutations(
         &self,
         py: Python<'_>,
         mutations_json: &str,
         transaction_tag: Option<String>,
         exclude_txn_from_change_streams: bool,
+        max_commit_delay_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         let mutations =
             parse_mutations_json(mutations_json).map_err(|e| spanner_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
         let res = py
             .detach(|| {
-                block_on_db(async move {
-                    client
-                        .apply_mutations(
-                            &mutations,
-                            transaction_tag.as_deref(),
-                            exclude_txn_from_change_streams,
-                        )
-                        .await
-                })
+                block_on_db(self.inner.apply_mutations_owned(
+                    mutations,
+                    transaction_tag.as_deref(),
+                    exclude_txn_from_change_streams,
+                    max_commit_delay_ms,
+                ))
             })
             .map_err(|e| spanner_error_to_py(py, e))?;
         commit_result_to_py(py, res)
@@ -552,22 +387,19 @@ impl PySyncSpannerClient {
     ) -> PyResult<Py<PyAny>> {
         let groups = parse_mutation_groups_json(mutation_groups_json)
             .map_err(|e| spanner_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
         let res = py
             .detach(|| {
-                block_on_db(async move {
-                    client
-                        .batch_write(&groups, exclude_txn_from_change_streams)
-                        .await
-                })
+                block_on_db(
+                    self.inner
+                        .batch_write_owned(groups, exclude_txn_from_change_streams),
+                )
             })
             .map_err(|e| spanner_error_to_py(py, e))?;
         batch_write_results_to_py(py, res)
     }
 
     fn update_ddl(&self, py: Python<'_>, statements: Vec<String>) -> PyResult<String> {
-        let client = Arc::clone(&self.inner);
-        py.detach(|| block_on_db(async move { client.update_database_ddl(&statements).await }))
+        py.detach(|| block_on_db(self.inner.update_database_ddl(&statements)))
             .map_err(|e| spanner_error_to_py(py, e))
     }
 
@@ -593,21 +425,15 @@ impl PySyncSpannerClient {
         let params =
             parse_spanner_parameters_json(params_json).map_err(|e| spanner_error_to_py(py, e))?;
         let staleness = parse_staleness(staleness_mode, staleness_ms);
-        let client = Arc::clone(&self.inner);
-        let sql_owned = sql.to_string();
         let res = py
             .detach(|| {
-                block_on_db(async move {
-                    client
-                        .partitioned_query(
-                            &sql_owned,
-                            &params,
-                            max_partitions,
-                            data_boost_enabled,
-                            staleness,
-                        )
-                        .await
-                })
+                block_on_db(self.inner.partitioned_query_owned(
+                    sql,
+                    params,
+                    max_partitions,
+                    data_boost_enabled,
+                    staleness,
+                ))
             })
             .map_err(|e| spanner_error_to_py(py, e))?;
         query_result_to_py(py, res)
@@ -691,8 +517,8 @@ impl PyAsyncSpannerClient {
     }
 
     #[getter]
-    fn endpoint(&self) -> String {
-        self.inner.config().effective_endpoint()
+    fn endpoint(&self) -> &str {
+        self.inner.effective_endpoint()
     }
 
     #[getter]
@@ -737,7 +563,7 @@ impl PyAsyncSpannerClient {
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task_with_attr(
             py,
-            async move { client.query(&sql, &params, staleness).await },
+            async move { client.query_owned(&sql, params, staleness).await },
             query_result_to_py,
             spanner_error_to_py,
             SPANNER_COMPLETION_DRAINER_ATTR,
@@ -760,9 +586,9 @@ impl PyAsyncSpannerClient {
             py,
             async move {
                 client
-                    .execute_dml(
+                    .execute_dml_owned(
                         &sql,
-                        &params,
+                        params,
                         request_tag.as_deref(),
                         transaction_tag.as_deref(),
                     )
@@ -789,7 +615,11 @@ impl PyAsyncSpannerClient {
             py,
             async move {
                 client
-                    .execute_batch_dml(&stmts, request_tag.as_deref(), transaction_tag.as_deref())
+                    .execute_batch_dml_owned(
+                        stmts,
+                        request_tag.as_deref(),
+                        transaction_tag.as_deref(),
+                    )
                     .await
             },
             |py, counts| Ok(counts.into_pyobject(py)?.into_any().unbind()),
@@ -813,7 +643,7 @@ impl PyAsyncSpannerClient {
             py,
             async move {
                 client
-                    .execute_partitioned_dml(&sql, &params, exclude_txn_from_change_streams)
+                    .execute_partitioned_dml_owned(&sql, params, exclude_txn_from_change_streams)
                     .await
             },
             |py, count| Ok(count.into_pyobject(py)?.into_any().unbind()),
@@ -822,13 +652,19 @@ impl PyAsyncSpannerClient {
         )
     }
 
-    #[pyo3(signature = (mutations_json, transaction_tag=None, exclude_txn_from_change_streams=false))]
+    #[pyo3(signature = (
+        mutations_json,
+        transaction_tag=None,
+        exclude_txn_from_change_streams=false,
+        max_commit_delay_ms=None
+    ))]
     fn apply_mutations(
         &self,
         py: Python<'_>,
         mutations_json: String,
         transaction_tag: Option<String>,
         exclude_txn_from_change_streams: bool,
+        max_commit_delay_ms: Option<u64>,
     ) -> PyResult<RustDbTaskAwaitable> {
         let mutations =
             parse_mutations_json(&mutations_json).map_err(|e| spanner_error_to_py(py, e))?;
@@ -837,10 +673,11 @@ impl PyAsyncSpannerClient {
             py,
             async move {
                 client
-                    .apply_mutations(
-                        &mutations,
+                    .apply_mutations_owned(
+                        mutations,
                         transaction_tag.as_deref(),
                         exclude_txn_from_change_streams,
+                        max_commit_delay_ms,
                     )
                     .await
             },
@@ -864,7 +701,7 @@ impl PyAsyncSpannerClient {
             py,
             async move {
                 client
-                    .batch_write(&groups, exclude_txn_from_change_streams)
+                    .batch_write_owned(groups, exclude_txn_from_change_streams)
                     .await
             },
             batch_write_results_to_py,
@@ -911,7 +748,13 @@ impl PyAsyncSpannerClient {
             py,
             async move {
                 client
-                    .partitioned_query(&sql, &params, max_partitions, data_boost_enabled, staleness)
+                    .partitioned_query_owned(
+                        &sql,
+                        params,
+                        max_partitions,
+                        data_boost_enabled,
+                        staleness,
+                    )
                     .await
             },
             query_result_to_py,

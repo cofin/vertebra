@@ -115,6 +115,8 @@ __all__ = [
     "encode_ttc_session_attrs",
     "format_gemma_prompt",
     "format_traceparent",
+    "gcp_http2_post_async",
+    "gcp_http2_post_sync",
     "get_batch",
     "get_request_notify_fd",
     "humanize",
@@ -1447,3 +1449,16 @@ class AsyncGcpTokenCache:
     def invalidate(self, failed_generation: int) -> None: ...
     def sign_jwt_for_audience(self, audience: str) -> str: ...
     def get_token(self, *, force_refresh: bool = False) -> RustDbTaskAwaitable[GcpTokenSnapshot]: ...
+
+def gcp_http2_post_sync(
+    url: str,
+    headers: dict[str, str],
+    body: bytes,
+    timeout_ms: int = 30000,
+) -> tuple[int, dict[str, str], bytes]: ...
+def gcp_http2_post_async(
+    url: str,
+    headers: dict[str, str],
+    body: bytes,
+    timeout_ms: int = 30000,
+) -> RustDbTaskAwaitable[tuple[int, dict[str, str], bytes]]: ...

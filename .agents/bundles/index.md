@@ -13,8 +13,6 @@ tags:
 
 Root index for **Vertebra** — the Rust-powered, full-stack Python & TypeScript application backbone (`vertebra` + `@vertebra/client`).
 
----
-
 ## 1. Product Definition ([`product/`](product/index.md))
 
 - **[Product Overview](product/product.md)** — Vision, core capabilities, runtime topologies (`Auto`, `Embedded`, and `Shm`, Python `3.12`–`3.15` and free-threaded `3.14t`/`3.15t`), multicloud object storage, database drivers, telemetry, and Litestar/Starlette/FastAPI/Flask/Django/SQLSpec/Alchemy/APEX/gRPC integrations.
@@ -54,8 +52,7 @@ Root index for **Vertebra** — the Rust-powered, full-stack Python & TypeScript
 
 - **[`specs/`](specs/index.md) (active)** —
   - **Master PRDs (`state: planned`)**: [`native-data-platform`](specs/native-data-platform/spec.md) and [`integration-remediation`](specs/integration-remediation/spec.md)
-  - **Active Child Flows (`state: active`)**: None; engine primitives are complete and contracted into knowledge.
-  - **Planned Child Flows (`state: planned`)**: [`runtime-structure-and-throughput`](specs/runtime-structure-and-throughput/spec.md), [`mcp-webmcp-core`](specs/mcp-webmcp-core/spec.md), [`storage-completeness`](specs/storage-completeness/spec.md), [`native-postgres-driver`](specs/native-postgres-driver/spec.md)
+  - **Planned Child Flows (`state: planned`)**: [`mcp-webmcp-core`](specs/mcp-webmcp-core/spec.md), [`storage-completeness`](specs/storage-completeness/spec.md), [`native-postgres-driver`](specs/native-postgres-driver/spec.md)
   - **Draft Child Flows (`state: draft`)**: [`broker-pool-sharing`](specs/broker-pool-sharing/spec.md), [`native-oracle-driver`](specs/native-oracle-driver/spec.md), [`native-mysql-driver`](specs/native-mysql-driver/spec.md), [`native-mssql-driver`](specs/native-mssql-driver/spec.md), [`native-sqlite-driver`](specs/native-sqlite-driver/spec.md), [`native-duckdb-driver`](specs/native-duckdb-driver/spec.md), [`native-redis-driver`](specs/native-redis-driver/spec.md), [`sqlalchemy-and-django-integration`](specs/sqlalchemy-and-django-integration/spec.md), [`sqlspec-adapter-parity`](specs/sqlspec-adapter-parity/spec.md), [`queues-tasks-and-channels`](specs/queues-tasks-and-channels/spec.md)
   - **Active Research**: [`gap-analysis_20261103.md`](specs/native-data-platform/research/gap-analysis_20261103.md), [`rust-driver-crates_20261103.md`](specs/native-data-platform/research/rust-driver-crates_20261103.md), [`protocol-and-execution_20261105.md`](specs/native-postgres-driver/research/protocol-and-execution_20261105.md), [`cloud-material_20261105.md`](specs/native-postgres-driver/research/cloud-material_20261105.md), [`audit-findings_20261103.md`](specs/integration-remediation/research/audit-findings_20261103.md), [`google-cloud-rust_20261103.md`](specs/integration-remediation/research/google-cloud-rust_20261103.md)
 - **Completed engine primitives**: [Native pipelines, CDC, and tenant boundaries](knowledge/domains/data/query-pipeline-cdc-and-tenancy.md), [adapter-owned providers](knowledge/domains/data/database-drivers-and-dialers.md), and [generic agent consumption](knowledge/domains/agent/mcp-and-a2a-protocol-harness.md).

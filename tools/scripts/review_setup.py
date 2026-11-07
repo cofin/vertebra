@@ -1686,6 +1686,47 @@ class ReviewSetupValidator:
                     )
                 )
 
+        for bundle_md in sorted(bundles_root.rglob("*.md")):
+            rel_bundle_md = str(bundle_md.relative_to(self.repo_root))
+            raw_lines = bundle_md.read_text(encoding="utf-8").splitlines()
+            has_frontmatter = bool(raw_lines and raw_lines[0].strip() == "---")
+            if bundle_md != index_file and bundle_md.name in reserved_names and has_frontmatter:
+                issues.append(
+                    ReviewIssue(
+                        "bundles",
+                        rel_bundle_md,
+                        1,
+                        f"reserved file '{bundle_md.name}' must not carry YAML frontmatter",
+                    )
+                )
+            body_start_idx = 0
+            if has_frontmatter:
+                for line_idx in range(1, len(raw_lines)):
+                    if raw_lines[line_idx].strip() == "---":
+                        body_start_idx = line_idx + 1
+                        break
+            in_fence = False
+            fence_marker = ""
+            for offset, line in enumerate(raw_lines[body_start_idx:], start=body_start_idx + 1):
+                stripped = line.strip()
+                if stripped.startswith(("```", "~~~")):
+                    marker = stripped[:3]
+                    if not in_fence:
+                        in_fence = True
+                        fence_marker = marker
+                    elif marker == fence_marker:
+                        in_fence = False
+                    continue
+                if not in_fence and stripped == "---":
+                    issues.append(
+                        ReviewIssue(
+                            "bundles",
+                            rel_bundle_md,
+                            offset,
+                            "standalone '---' horizontal rule is forbidden in bundle markdown body",
+                        )
+                    )
+
         specs_dir = bundles_root / "specs"
         if specs_dir.exists():
             for md_file in sorted(specs_dir.rglob("*.md")):

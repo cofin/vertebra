@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import msgspec
@@ -493,7 +494,11 @@ async def test_django_fastpath_async_views_cached_msgspec_view_wrap_asgi_and_sen
         ),
     ]
     compiler = RouteCompiler(urlpatterns=urlpatterns)
-    fastpath = FastPath(compiler)
+    fastpath = FastPath.from_app(SimpleNamespace(urlpatterns=urlpatterns))
+    wrapped_wsgi = fastpath.wrap_wsgi()
+    assert wrapped_wsgi.__vertebra_fastpath__ is fastpath
+    assert not hasattr(wrapped_wsgi, "_vertebra_fastpath")
+    assert len(compiler.entries) == len(fastpath.routes)
 
     get_req_1 = Request.from_parts(method="GET", path="/items/10/")
     get_req_2 = Request.from_parts(method="GET", path="/items/20/")

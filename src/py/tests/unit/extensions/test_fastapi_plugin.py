@@ -43,6 +43,7 @@ from vertebra.extensions.litestar.router import RouterTable as LitestarRouterTab
 from vertebra.extensions.starlette import VertebraPlugin as StarletteVertebraPlugin
 from vertebra.framework._app import App
 from vertebra.server._fastpath import attach_framework_fastpath
+from vertebra.server._fastpath_core import resolve_fastpath_provider
 from vertebra.server.worker import _instantiate_mount_runners
 from vertebra.utils.serializers import decode_json
 
@@ -431,12 +432,19 @@ async def test_multi_framework_stacked_app_mount_auto_attaches_fastpath() -> Non
     root_app.mount("/flask", flask_app, protocol="wsgi")
     root_app.mount("/django", dj_plugin, protocol="wsgi")
 
+    fastapi_provider = resolve_fastpath_provider(fastapi_app)
+    assert fastapi_provider is not None and fastapi_provider.name == "fastapi"
+    starlette_provider = resolve_fastpath_provider(starlette_app)
+    assert starlette_provider is not None and starlette_provider.name == "starlette"
+
     mount_runners = dict(
         (prefix, (runner, proto)) for prefix, runner, proto in _instantiate_mount_runners(root_app.mounts)
     )
-    for prefix in ("/litestar", "/fastapi", "/starlette", "/flask", "/django"):
-        runner, _proto = mount_runners[prefix]
-        assert getattr(runner, "__vertebra_fastpath_attached__", False) is True
+    assert all(
+        getattr(mount_runners[p][0], "__vertebra_fastpath_attached__", False) is True
+        and not hasattr(mount_runners[p][0], "_vertebra_fastpath")
+        for p in ("/litestar", "/fastapi", "/starlette", "/flask", "/django")
+    )
 
     wrapped_once = attach_framework_fastpath(litestar_app, mount_prefix="/litestar", protocol="asgi")
     assert attach_framework_fastpath(wrapped_once, mount_prefix="/litestar", protocol="asgi") is wrapped_once

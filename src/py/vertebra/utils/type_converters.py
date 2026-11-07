@@ -8,7 +8,7 @@ from decimal import Decimal
 from typing import Any, Final
 from uuid import UUID
 
-from vertebra.utils.uuids import _coerce_stdlib_uuid, _load_uuid_utils
+from vertebra.utils.module_loader import import_optional_attr
 
 __all__ = (
     "DEFAULT_SPECIAL_CHARS",
@@ -59,11 +59,9 @@ def build_uuid_coercions(*, native: bool = False) -> dict[type[Any], Callable[[A
     """Build a type-to-coercion mapping for ``uuid.UUID`` and optional ``uuid_utils.UUID``."""
     coercer: Callable[[Any], Any] = _coerce_stdlib_uuid if native else str
     mapping: dict[type[Any], Callable[[Any], Any]] = {UUID: coercer}
-    uuid_utils_mod = _load_uuid_utils()
-    if uuid_utils_mod is not None:
-        ext_uuid_cls = getattr(uuid_utils_mod, "UUID", None)
-        if isinstance(ext_uuid_cls, type):
-            mapping[ext_uuid_cls] = coercer
+    ext_uuid_cls = import_optional_attr("uuid_utils", "UUID")
+    if isinstance(ext_uuid_cls, type):
+        mapping[ext_uuid_cls] = coercer
     return mapping
 
 
@@ -78,6 +76,16 @@ def should_json_encode_sequence(seq: Sequence[Any]) -> bool:
 def time_iso_convert(value: datetime | date | time) -> str:
     """Format a ``datetime``, ``date``, or ``time`` instance as an ISO 8601 string."""
     return value.isoformat()
+
+
+def _coerce_stdlib_uuid(value: Any) -> UUID:
+    """Convert a ``uuid_utils.UUID`` or ``uuid.UUID`` object to a standard ``uuid.UUID``."""
+    if type(value) is UUID:
+        return value
+    int_val = getattr(value, "int", None)
+    if isinstance(int_val, int):
+        return UUID(int=int_val)
+    return UUID(str(value))
 
 
 def _identity_decimal(value: Decimal) -> Decimal:

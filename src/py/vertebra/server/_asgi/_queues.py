@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import Buffer, Callable, Iterable
-from typing import Any
+from typing import Any, cast
 
 import msgspec
 
@@ -44,6 +44,7 @@ class AsgiResponse(msgspec.Struct, frozen=True, gc=False):
     file_path: str | None = None
     trailers: list[tuple[bytes, bytes]] = msgspec.field(default_factory=list)
     zero_copy_buffer: memoryview | None = None
+    raw_headers: list[tuple[bytes, bytes]] = msgspec.field(default_factory=list)
 
 
 class AsgiReceive:
@@ -141,6 +142,7 @@ class AsgiSend:
         "_file_path",
         "_headers",
         "_on_chunk",
+        "_raw_headers",
         "_request_id",
         "_started",
         "_status",
@@ -159,7 +161,8 @@ class AsgiSend:
         self._complete = False
         self._expects_trailers = False
         self._status = 200
-        self._headers: list[tuple[str, str]] = []
+        self._headers: list[tuple[str, str]] | None = None
+        self._raw_headers: list[tuple[bytes, bytes]] = []
         self._body_chunks: list[bytes] = []
         self._zero_copy_buffers: list[memoryview] = []
         self._file_path: str | None = None
@@ -176,21 +179,32 @@ class AsgiSend:
         return self._complete
 
     @property
+    def raw_headers(self) -> list[tuple[bytes, bytes]]:
+        """Return the raw byte HTTP header pairs without string decoding."""
+        return self._raw_headers
+
+    @property
     def response(self) -> AsgiResponse:
         """Build the final AsgiResponse once http.response.start has been received."""
         if not self._started:
             msg = "ASGI application did not send 'http.response.start' before completing"
             raise AsgiProtocolError(msg)
+        decoded_headers = (
+            self._headers
+            if self._headers is not None
+            else [(k.decode("latin-1"), v.decode("latin-1")) for k, v in self._raw_headers]
+        )
         if len(self._zero_copy_buffers) == 1 and not self._body_chunks:
             zc_buf = self._zero_copy_buffers[0]
             return AsgiResponse(
                 status=self._status,
-                headers=self._headers,
+                headers=decoded_headers,
                 body=zc_buf,
                 request_id=self._request_id,
                 file_path=self._file_path,
                 trailers=self._trailers,
                 zero_copy_buffer=zc_buf,
+                raw_headers=self._raw_headers,
             )
         if self._zero_copy_buffers:
             combined_parts = [*self._body_chunks, *(bytes(mv) for mv in self._zero_copy_buffers)]
@@ -199,12 +213,13 @@ class AsgiSend:
             body_bytes = b"".join(self._body_chunks)
         return AsgiResponse(
             status=self._status,
-            headers=self._headers,
+            headers=decoded_headers,
             body=body_bytes,
             request_id=self._request_id,
             file_path=self._file_path,
             trailers=self._trailers,
             zero_copy_buffer=None,
+            raw_headers=self._raw_headers,
         )
 
     async def __call__(self, message: dict[str, Any]) -> None:
@@ -219,13 +234,25 @@ class AsgiSend:
             self._status = int(message["status"])
             self._expects_trailers = bool(message.get("trailers", False))
             raw_headers: Iterable[tuple[bytes | str, bytes | str]] = message.get("headers", ())
-            self._headers = [
-                (
-                    k.decode("latin-1") if isinstance(k, bytes) else str(k),
-                    v.decode("latin-1") if isinstance(v, bytes) else str(v),
-                )
-                for k, v in raw_headers
-            ]
+            byte_pairs: list[tuple[bytes, bytes]] = []
+            str_pairs: list[tuple[str, str]] = []
+            for k, v in raw_headers:
+                if isinstance(k, bytes):
+                    kb = k
+                    ks = k.decode("latin-1")
+                else:
+                    ks = str(k)
+                    kb = ks.encode("latin-1")
+                if isinstance(v, bytes):
+                    vb = v
+                    vs = v.decode("latin-1")
+                else:
+                    vs = str(v)
+                    vb = vs.encode("latin-1")
+                byte_pairs.append((kb, vb))
+                str_pairs.append((ks, vs))
+            self._raw_headers = byte_pairs
+            self._headers = str_pairs
             return
 
         if msg_type == "http.response.body":
@@ -299,21 +326,30 @@ class AsgiSend:
         self._started = True
         self._complete = True
         self._status = int(status)
+        self._headers = None
         if headers:
-            self._headers = [
-                (
-                    k.decode("latin-1") if isinstance(k, bytes) else str(k),
-                    v.decode("latin-1") if isinstance(v, bytes) else str(v),
-                )
-                for k, v in headers
-            ]
+            raw_pairs: list[tuple[bytes, bytes]] = []
+            for pair in headers:
+                k, v = pair
+                if isinstance(k, bytes) and isinstance(v, bytes):
+                    raw_pairs.append(cast("tuple[bytes, bytes]", pair) if isinstance(pair, tuple) else (k, v))
+                else:
+                    kb = k if isinstance(k, bytes) else str(k).encode("latin-1")
+                    vb = v if isinstance(v, bytes) else str(v).encode("latin-1")
+                    raw_pairs.append((kb, vb))
+            self._raw_headers = raw_pairs
         else:
-            self._headers = []
+            self._raw_headers = []
         if body:
-            raw = body if isinstance(body, bytes) else bytes(body)
-            self._body_chunks.append(raw)
-            if self._on_chunk is not None:
-                self._on_chunk(self._request_id, raw)
+            if isinstance(body, memoryview):
+                self._zero_copy_buffers.append(body)
+                if self._on_chunk is not None:
+                    self._on_chunk(self._request_id, bytes(body))
+            else:
+                raw = body if isinstance(body, bytes) else bytes(body)
+                self._body_chunks.append(raw)
+                if self._on_chunk is not None:
+                    self._on_chunk(self._request_id, raw)
         return _EMPTY_SEND_AWAITABLE
 
     def _assert_started(self, msg_type: str) -> None:

@@ -19,6 +19,7 @@ from vertebra.typing import (
     PYDANTIC_INSTALLED,
     UUID_UTILS_INSTALLED,
 )
+from vertebra.utils.module_loader import import_optional_attr
 from vertebra.utils.serializers._numpy import numpy_array_enc_hook
 from vertebra.utils.serializers._schema import _dump_msgspec_fields
 from vertebra.utils.type_guards import (
@@ -27,7 +28,6 @@ from vertebra.utils.type_guards import (
     is_dataclass_instance,
     is_msgspec_struct,
 )
-from vertebra.utils.uuids import _load_uuid_utils
 
 __all__ = (
     "JSONSerializer",
@@ -163,8 +163,7 @@ def _get_uuid_utils_type() -> type[Any] | None:
     if not UUID_UTILS_INSTALLED:
         _UUIDTypeCache.uuid_utils_type = None
         return None
-    module = _load_uuid_utils()
-    resolved: type[Any] | None = None if module is None else cast("type[Any]", getattr(module, "UUID", None))
+    resolved = cast("type[Any] | None", import_optional_attr("uuid_utils", "UUID"))
     _UUIDTypeCache.uuid_utils_type = resolved
     return resolved
 

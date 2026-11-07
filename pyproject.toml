@@ -251,6 +251,7 @@ include = [
     { path = "src/rs/Cargo.lock", format = "sdist" },
     { path = "src/rs/vertebra-*/**/*", format = "sdist" },
     { path = "src/py/vertebra/server/_js/bundle/**/*", format = ["sdist", "wheel"] },
+    { path = "src/py/vertebra/framework/assets/*", format = ["sdist", "wheel"] },
 ]
 
 [tool.ruff]

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
+import threading
 from collections.abc import Awaitable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import Any, Literal, cast
 
 import msgspec
 
@@ -19,9 +19,6 @@ from vertebra._vertebra import (
 from vertebra.telemetry.genai import GenAiUsage
 from vertebra.typing import VertebraError
 from vertebra.utils.module_loader import ensure_module
-
-if TYPE_CHECKING:
-    from vertebra.embeddings._google import VertexEmbedder
 
 __all__ = (
     "Embedder",
@@ -73,6 +70,10 @@ class Embedder:
     and OpenTelemetry `GenAiUsage` accounting.
     """
 
+    _sync_portal_lock = threading.Lock()
+    _sync_portal_loop: asyncio.AbstractEventLoop | None = None
+    _sync_portal_thread: threading.Thread | None = None
+
     def __new__(
         cls,
         model: str = "gemini-embedding-001",
@@ -81,12 +82,11 @@ class Embedder:
         **kwargs: Any,
     ) -> Embedder:
         """Return a default `VertexEmbedder` when `Embedder(...)` is called directly."""
+        _ = (model, dimensions, kwargs)
         if cls is Embedder:
             google_mod = ensure_module("vertebra.embeddings._google")
             vertex_cls = google_mod.VertexEmbedder
-            instance: VertexEmbedder = object.__new__(vertex_cls)
-            vertex_cls.__init__(instance, model, dimensions=dimensions, **kwargs)
-            return instance
+            return cast("Embedder", object.__new__(vertex_cls))
         return super().__new__(cls)
 
     def __init__(
@@ -97,15 +97,12 @@ class Embedder:
         cache: VectorCache | None = None,
     ) -> None:
         """Initialize the base embedder model name, output dimensions, and optional SHM VectorCache."""
-        if getattr(self, "_initialized_base", False):
-            return
         if dimensions <= 0:
             raise ValueError(f"dimensions must be > 0, got {dimensions}")
         self._model = model
         self._dimensions = dimensions
         self._cache = cache
         self._last_usage: GenAiUsage | None = None
-        self._initialized_base = True
 
     @property
     def model(self) -> str:
@@ -311,8 +308,8 @@ class Embedder:
             return extracted
         raise TypeError(f"Unsupported tabular input type for embed_arrow: {type(cursor_or_table).__name__}")
 
-    @staticmethod
-    def _run_sync[T](coro: Awaitable[T]) -> T:
+    @classmethod
+    def _run_sync[T](cls, coro: Awaitable[T]) -> T:
         """Execute an awaitable synchronously, bridging safely if an event loop is already running."""
         try:
             loop = asyncio.get_running_loop()
@@ -320,5 +317,38 @@ class Embedder:
             loop = None
         if loop is None:
             return cast("T", asyncio.run(cast("Any", coro)))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return cast("T", pool.submit(asyncio.run, cast("Any", coro)).result())
+        portal_loop = cls._ensure_sync_portal_loop()
+        future = asyncio.run_coroutine_threadsafe(cast("Any", coro), portal_loop)
+        return cast("T", future.result())
+
+    @classmethod
+    def _ensure_sync_portal_loop(cls) -> asyncio.AbstractEventLoop:
+        """Return or start the persistent background event loop used for sync bridging."""
+        with cls._sync_portal_lock:
+            if (
+                cls._sync_portal_loop is not None
+                and cls._sync_portal_loop.is_running()
+                and cls._sync_portal_thread is not None
+                and cls._sync_portal_thread.is_alive()
+            ):
+                return cls._sync_portal_loop
+            ready = threading.Event()
+            holder: list[asyncio.AbstractEventLoop] = []
+
+            def _runner() -> None:
+                portal = asyncio.new_event_loop()
+                asyncio.set_event_loop(portal)
+                holder.append(portal)
+                ready.set()
+                portal.run_forever()
+
+            thread = threading.Thread(
+                target=_runner,
+                name="vertebra-embedder-sync-portal",
+                daemon=True,
+            )
+            thread.start()
+            ready.wait()
+            cls._sync_portal_loop = holder[0]
+            cls._sync_portal_thread = thread
+            return cls._sync_portal_loop

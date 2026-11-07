@@ -4,7 +4,7 @@ description: Implements and remediates OKF v0.2 knowledge chapters, bounded trut
 model: inherit
 mainAgent: false
 subagent: true
-commandExecutionPolicy: auto
+commandExecutionPolicy: sandbox
 tools:
   - read_file
   - view_file

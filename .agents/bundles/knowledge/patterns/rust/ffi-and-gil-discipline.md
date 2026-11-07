@@ -8,6 +8,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow
+    at: "2026-11-06T20:00:00Z"
+    commit: c7b62a8c105f39c69f8411345c1a3ebb6722dfa7
   - by: agent:flow-review
     at: "2026-11-06T06:10:00Z"
     commit: 7657e8b7c2c96bdda6821aec70a2b603f438a127
@@ -45,9 +48,9 @@ sources:
   - id: src-vertebra-py-src-rsgi-http-rs
     resource: src/rs/vertebra-py/src/rsgi/http.rs
     title: "Rust implementation module (src/rs/vertebra-py/src/rsgi/http.rs)"
-  - id: src-vertebra-py-src-completion-rs
-    resource: src/rs/vertebra-py/src/completion.rs
-    title: "Rust implementation module (src/rs/vertebra-py/src/completion.rs)"
+  - id: src-vertebra-py-src-async-bridge-rs
+    resource: src/rs/vertebra-py/src/async_bridge.rs
+    title: "Rust implementation module (src/rs/vertebra-py/src/async_bridge.rs)"
   - id: src-vertebra-py-src-errors-rs
     resource: src/rs/vertebra-py/src/errors.rs
     title: "Rust implementation module (src/rs/vertebra-py/src/errors.rs)"
@@ -117,7 +120,7 @@ pub fn get_batch(py: Python<'_>, timeout_ms: u64) -> PyResult<Option<RequestBatc
 
 ## Intern Repeated Keys, `PyOnceLock` Exceptions & Completion-Ring Discipline
 
-Use `pyo3::intern!(py, "...")` for fixed header names and scope/environ keys ([`headers.rs`](../../../../../src/rs/vertebra-py/src/headers.rs)[^src-vertebra-py-src-headers-rs], [`asgi.rs`](../../../../../src/rs/vertebra-py/src/asgi.rs), [`rsgi/scope.rs`](../../../../../src/rs/vertebra-py/src/rsgi/scope.rs)[^src-vertebra-py-src-rsgi-scope-rs], [`wsgi/environ.rs`](../../../../../src/rs/vertebra-py/src/wsgi/environ.rs)[^src-vertebra-py-src-wsgi-environ-rs]) and `PyOnceLock` for process-wide cached objects such as [`GcpExceptionTypes`](../../../../../src/rs/vertebra-py/src/errors.rs)[^src-vertebra-py-src-errors-rs]. Async Tokio database tasks spawned via [`spawn_rust_db_task`](../../../../../src/rs/vertebra-py/src/completion.rs)[^src-vertebra-py-src-completion-rs] and [`vertebra_db::py_async::spawn_rust_db_task_with_attr`](../../../../../src/rs/vertebra-db/src/py_async.rs)[^src-vertebra-db-src-py-async-rs] (compiled into `_vertebra`, `_bigquery`, and `_spanner` with distinct event-loop drainer attribute names and `ShmCapsule` `PyCapsule` handoff for `ArrowCursor`) never call `Python::attach` on Tokio worker threads: a paired completion task awaits the worker `JoinHandle`, enqueues a `DbOutcomeProducer` onto the per-loop `AsyncCompletionQueue` drained via `loop.add_reader`, converts worker or `map_ok` panics (`JoinError::is_panic()` / `catch_unwind`) into `TaskPanicError`, and attaches `_DbTaskCanceller` (`add_done_callback`) so cancelling the Python `asyncio.Future` aborts the underlying Tokio `AbortHandle` and evicts any unpopped completion entry. All five extensions export `FREE_THREADED` (`cfg(Py_GIL_DISABLED)`) and `GIL_USED = False`.
+Use `pyo3::intern!(py, "...")` for fixed header names and scope/environ keys ([`headers.rs`](../../../../../src/rs/vertebra-py/src/headers.rs)[^src-vertebra-py-src-headers-rs], [`asgi.rs`](../../../../../src/rs/vertebra-py/src/asgi.rs), [`rsgi/scope.rs`](../../../../../src/rs/vertebra-py/src/rsgi/scope.rs)[^src-vertebra-py-src-rsgi-scope-rs], [`wsgi/environ.rs`](../../../../../src/rs/vertebra-py/src/wsgi/environ.rs)[^src-vertebra-py-src-wsgi-environ-rs]) and `PyOnceLock` for process-wide cached objects such as [`GcpExceptionTypes`](../../../../../src/rs/vertebra-py/src/errors.rs)[^src-vertebra-py-src-errors-rs]. Async Tokio database tasks spawned via [`spawn_rust_db_task`](../../../../../src/rs/vertebra-py/src/async_bridge.rs)[^src-vertebra-py-src-async-bridge-rs] and [`vertebra_db::py_async::spawn_rust_db_task_with_attr`](../../../../../src/rs/vertebra-db/src/py_async.rs)[^src-vertebra-db-src-py-async-rs] (compiled into `_vertebra`, `_bigquery`, and `_spanner` with distinct event-loop drainer attribute names and `ShmCapsule` `PyCapsule` handoff for `ArrowCursor`) never call `Python::attach` on Tokio worker threads: a paired completion task awaits the worker `JoinHandle`, enqueues a `DbOutcomeProducer` onto the per-loop `AsyncCompletionQueue` drained via `loop.add_reader`, converts worker or `map_ok` panics (`JoinError::is_panic()` / `catch_unwind`) into `TaskPanicError`, and attaches `_DbTaskCanceller` (`add_done_callback`) so cancelling the Python `asyncio.Future` aborts the underlying Tokio `AbortHandle` and evicts any unpopped completion entry. All five extensions export `FREE_THREADED` (`cfg(Py_GIL_DISABLED)`) and `GIL_USED = False`.
 
 
 ## Cross-extension ownership
@@ -137,7 +140,7 @@ Transfer Arrow mappings through `construct_py_arrow_cursor` and the named C ABI 
 [^src-vertebra-py-src-wsgi-runner-rs]: `src/rs/vertebra-py/src/wsgi/runner.rs` — Rust implementation module (src/rs/vertebra-py/src/wsgi/runner.rs).
 [^src-vertebra-py-src-rsgi-scope-rs]: `src/rs/vertebra-py/src/rsgi/scope.rs` — Rust implementation module (src/rs/vertebra-py/src/rsgi/scope.rs).
 [^src-vertebra-py-src-rsgi-http-rs]: `src/rs/vertebra-py/src/rsgi/http.rs` — Rust implementation module (src/rs/vertebra-py/src/rsgi/http.rs).
-[^src-vertebra-py-src-completion-rs]: `src/rs/vertebra-py/src/completion.rs` — Rust implementation module (src/rs/vertebra-py/src/completion.rs).
+[^src-vertebra-py-src-async-bridge-rs]: `src/rs/vertebra-py/src/async_bridge.rs` — Rust implementation module (src/rs/vertebra-py/src/async_bridge.rs).
 [^src-vertebra-py-src-errors-rs]: `src/rs/vertebra-py/src/errors.rs` — Rust implementation module (src/rs/vertebra-py/src/errors.rs).
 [^src-vertebra-http-src-main-rs]: `src/rs/vertebra-http/src/main.rs` — Rust implementation module (src/rs/vertebra-http/src/main.rs).
 [^src-vertebra-db-src-py-async-rs]: `src/rs/vertebra-db/src/py_async.rs` — Rust implementation module (src/rs/vertebra-db/src/py_async.rs).
