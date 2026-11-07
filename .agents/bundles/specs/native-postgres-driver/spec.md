@@ -44,14 +44,14 @@ parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
   - research/cloud-material_20261105.md
-plan_revision: 4
-plan_commit: 45ff9563
+plan_revision: 5
+plan_commit: 399e068c
 state_revision: 1
 last_verified_checkpoint: 76828ae6
 last_reviewed_chapter: ch01-wheel-scaffold-and-config
 last_reviewed_commit: 0c7a4636
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-07T21:53:16Z"
+updated_at: "2026-11-07T21:57:00Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:40:00Z"
@@ -107,7 +107,7 @@ tags:
 <!-- truth: start -->
 - **Standalone Optional Wheel**: `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owns live PostgreSQL Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`) without linking database clients into `vertebra-core` [^pg-conn-rs] [^pg-core-rs].
 - **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB Admin discovery + mTLS + IAM), lossless codecs, statement caching, single-`Sync` `pipeline()`, binary `COPY`, native `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, and `pgoutput` v1 logical replication ship together with full `psycopg`/`asyncpg` removal [^py-async-rs] [^arrow-shm-rs] [^pg-driver-py] [^sqlspec-py].
-- **Nested Chapter Roadmap (`plan_revision: 4`)**: All `31` chapters and `111` bounded tasks retain their full scope at `plan_commit: 45ff9563`. Chapter 01 is complete and reviewed at `0c7a4636`; `current_chapter: ch02-wire-codec-and-session-startup` (`native-postgres-driver:ch02:t01`).
+- **Nested Chapter Roadmap (`plan_revision: 5`)**: All `31` chapters and `111` bounded tasks retain their full scope at `plan_commit: 399e068c`. Chapter 01 is complete and reviewed at `0c7a4636`; `current_chapter: ch02-wire-codec-and-session-startup` (`native-postgres-driver:ch02:t01`).
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -148,6 +148,8 @@ Read [database-drivers-and-dialers.md](../../knowledge/domains/data/database-dri
 `postgres-protocol = "=0.6.12"` owns low-level message framing and SCRAM helpers; `src/rs/vertebra-postgres` owns live connection state. `tokio-postgres = "=0.7.18"` is a dev-only test oracle. Protocol `3.0` supports PostgreSQL `14`–`18`. Arrow crates are pinned to `60.1.0`; cross-extension transfer uses producer-owned `ShmCapsule` callbacks, never Rust `Arc` or trait-object layouts across `cdylib` boundaries. A **physical session** is one socket; a **lease** exclusively owns that session; a **portal** pins its lease and transaction; a **checkpoint** records durably acknowledged logical replication progress.
 
 ## 2. Requirements, Concrete Contracts & Architecture
+
+The codec producer stage uses three exact symbol-level lint expectations until chapter 02 task 02 adds production callers and removes them; all-target Clippy remains mandatory with `-D warnings`.
 
 The connection-publication seam uses owned `Arc<PostgresConfig>` and `Arc<std::sync::Mutex<SessionState>>` shared by cloneable `SessionHandle` values. `BeginConnect`, `ConnectAttempt`, and `PendingSession` have no lifetime parameters; attempts, their `run()` futures, and pending results are `Send + 'static` for the asynchronous completion bridge, with armed rollback on drop and publication only in `commit()`.
 
@@ -287,7 +289,7 @@ Progress: `[0/11 files documented]` (owned by [ch30-user-and-domain-docs](chapte
 Every worksheet (`111` total across `31` chapters) executes in one bounded invocation and produces one signed local conventional commit. Each chapter owns `1`–`4` vertical-slice tasks (`<= 3` production files per task, zero overlapping `files:` across ready tasks) in a strict serial chapter dependency chain (`ch01` -> `ch31`). See [review.md](review.md) for adjudicated planning decisions.
 
 - [x] [0c7a4636] ch01-wheel-scaffold-and-config — Standalone Optional Wheel Scaffold, Build Matrix, and Validated Connection Options (chapters/ch01-wheel-scaffold-and-config/spec.md)
-- [ ] ch02-wire-codec-and-session-startup — Bounded Protocol Framing, Trust Lifecycle, SSLRequest TLS, and Cleartext/MD5 Startup (chapters/ch02-wire-codec-and-session-startup/spec.md)
+- [~] ch02-wire-codec-and-session-startup — Bounded Protocol Framing, Trust Lifecycle, SSLRequest TLS, and Cleartext/MD5 Startup (chapters/ch02-wire-codec-and-session-startup/spec.md)
 - [ ] ch03-scram-and-channel-binding — Ordered SCRAM-SHA-256, Peer Certificate Binding, and SCRAM-SHA-256-PLUS Negotiation (chapters/ch03-scram-and-channel-binding/spec.md)
 - [ ] ch04-cloud-material-and-admin-discovery — Single-Flight Cloud Material Cache, Ephemeral Keys, and Cloud SQL / AlloyDB Admin Discovery (chapters/ch04-cloud-material-and-admin-discovery/spec.md)
 - [ ] ch05-cloud-tls-and-scoped-iam — Cloud TLS 1.3 Peer Identities, Static Login Token Contract, Scoped Auth Caches, and Cloud SQL mTLS/IAM (chapters/ch05-cloud-tls-and-scoped-iam/spec.md)
@@ -322,11 +324,11 @@ Every worksheet (`111` total across `31` chapters) executes in one bounded invoc
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ 0c7a4636` on `feat/native-postgres-completion`; flow `state: active`, `plan_revision: 4`, `plan_commit: 45ff9563`.
+- **Verified Baseline**: `HEAD @ 399e068c` on `feat/native-postgres-completion`; flow `state: active`, `plan_revision: 5`, `plan_commit: 399e068c`.
 - **Chapter & Task Progress**: `1/31` chapters and `4/111` tasks are complete. Chapter 01 passes correctness and fresh quality review at `0c7a4636`.
-- **Next Chapter & Task**: `ch02-wire-codec-and-session-startup`, `native-postgres-driver:ch02:t01`; chapters 02–31 remain planned with complete blueprints.
+- **Current Chapter & Task**: `ch02-wire-codec-and-session-startup`, `native-postgres-driver:ch02:t01` is `in_progress`. Nine codec tests and seven existing integration tests pass; its crate-private producer-before-consumer Clippy contradiction requires bounded revision. Chapters 03–31 remain planned with complete blueprints.
 - **Documentation & OKF Status**: `[0/11 files documented]`; chapter 30 owns user guides and full knowledge synchronization, followed by chapter 31 final acceptance.
-- **Delivery & Next Action**: Full driver delivery remains on `feat/native-postgres-completion`. Continue `/flow:implement native-postgres-driver`.
+- **Delivery & Next Action**: Full driver delivery remains on `feat/native-postgres-completion`. Resolve `/flow:revise native-postgres-driver ch02-wire-codec-and-session-startup`, then continue `/flow:implement native-postgres-driver`.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` — Shared PostgreSQL wire frame helpers and SHM admission metadata in `vertebra-db`.

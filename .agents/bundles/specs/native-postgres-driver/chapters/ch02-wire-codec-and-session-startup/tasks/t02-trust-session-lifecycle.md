@@ -20,12 +20,13 @@ read_set:
 files:
   - src/rs/vertebra-postgres/src/lib.rs
   - src/rs/vertebra-postgres/src/session.rs
+  - src/rs/vertebra-postgres/src/protocol.rs
 tests:
   - src/rs/vertebra-postgres/tests/support/mod.rs
   - src/rs/vertebra-postgres/tests/postgres_wire_tests.rs
 estimated_loc: 240
-plan_revision: 4
-plan_commit: 45ff9563
+plan_revision: 5
+plan_commit: 399e068c
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -74,6 +75,8 @@ Implement `PostgresConnection`, `SessionHandle`, `ConnectAttempt`, and `PendingS
 
 - `src/rs/vertebra-postgres/src/lib.rs`:
   - Export `pub mod session;` on the `rlib` seam.
+- `src/rs/vertebra-postgres/src/protocol.rs`:
+  - Remove the three producer-stage `expect(dead_code)` annotations from `read_message`, `encode_startup_frame`, and `TERMINATE_FRAME` as session startup/close establishes their real consumers. Leave private visibility and all-target `-D warnings` unchanged.
 - `src/rs/vertebra-postgres/src/session.rs`:
   - `#[derive(Clone, Copy, Debug, PartialEq, Eq)] pub enum TransactionStatus { Idle, InTransaction, Failed }` with `pub fn from_wire_byte(byte: u8) -> Result<Self, PostgresError>` (`b'I' => Idle`, `b'T' => InTransaction`, `b'E' => Failed`, other => `Err(PostgresError::Protocol(_))`) and `pub const fn as_wire_byte(self) -> u8`.
   - `#[derive(Clone, Copy, Debug, PartialEq, Eq)] pub struct BackendKey { pub process_id: i32, pub secret_key: i32 }` (Rust-only; never exposed as Python client attributes).
@@ -106,6 +109,8 @@ Implement `PostgresConnection`, `SessionHandle`, `ConnectAttempt`, and `PendingS
   - Reusable loopback `TcpListener` harness, deterministic `tokio::sync::{Barrier, oneshot, Notify}` helpers, and raw backend frame builders (`AuthenticationOk`, `ParameterStatus`, `BackendKeyData`, `ReadyForQuery`, `ErrorResponse`) imported via `mod support;` across sibling wire test files.
 
 ## Edge Cases & Error Semantics
+
+- A retained producer-stage expectation becomes unfulfilled when the session consumes its symbol and fails the existing `-D warnings` gate; remove all three annotations in this task.
 
 - Reject `ReadyForQuery(b'T')` (`TransactionStatus::InTransaction`), `ReadyForQuery(b'E')` (`TransactionStatus::Failed`), unknown `ReadyForQuery` status bytes, missing or non-`"UTF8"` `client_encoding`, duplicate `AuthenticationOk`, duplicate `BackendKeyData`, `ParameterStatus` before `AuthenticationOk`, or unexpected query frames (`RowDescription`, `DataRow`, `CommandComplete`) with `PostgresError::Protocol`.
 - Dropping `ConnectAttempt` mid-handshake or dropping `PendingSession` without calling `commit()` transitions `SessionHandle` to terminal `Closed` (`begin_connect()` thereafter returns `PostgresError::Interface`) and closes the TCP socket so the server observes `EOF`.

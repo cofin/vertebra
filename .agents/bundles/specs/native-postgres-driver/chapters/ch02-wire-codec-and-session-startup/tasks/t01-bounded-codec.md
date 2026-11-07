@@ -5,7 +5,7 @@ chapter_id: ch02-wire-codec-and-session-startup
 title: Implement bounded PostgreSQL Protocol 3.0 startup encoder and backend frame decoder
 description: Implement crate-private protocol::read_message enforcing 4..=16_777_216 byte frame bounds before allocation over postgres-protocol 0.6.12 and protocol::encode_startup_frame with Protocol 3.0 UTF8 parameters.
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -22,19 +22,26 @@ files:
 tests:
   - src/rs/vertebra-postgres/src/protocol.rs
 estimated_loc: 180
-plan_revision: 4
-plan_commit: 45ff9563
-state_revision: 0
-claimed_by: null
-claimed_at: null
+plan_revision: 5
+plan_commit: 399e068c
+state_revision: 1
+claimed_by: agent:ch02-t01
+claimed_at: "2026-11-07T21:54:00Z"
 blocked_reason: null
 unblock_condition: null
-next_step: null
-last_verified_at: null
+next_step: "Resolve the producer-before-consumer Clippy contradiction via /flow:revise native-postgres-driver ch02-wire-codec-and-session-startup before task completion."
+last_verified_at: "2026-11-07T21:57:00Z"
 last_verified_commit: null
-verification_evidence: null
+verification_evidence:
+  - "UV_NO_SYNC=1; PYO3_PYTHON=${PWD}/.venv/bin/python; CARGO_TARGET_DIR=/tmp/vtb-cargo-target"
+  - "Red: cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --lib protocol::tests --locked: exit 101; read_message and encode_startup_frame are absent before implementation"
+  - "Green: same focused command: exit 0; 9 passed, 0 failed, 0 ignored"
+  - "flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked: exit 0; 9 unit tests, 7 integration tests, 0 doc tests"
+  - "cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings: exit 101; dead_code on crate-private MAX_BACKEND_FRAME_LENGTH, MIN_BACKEND_FRAME_LENGTH, TERMINATE_FRAME, read_message, encode_startup_frame in production lib and TERMINATE_FRAME in lib-test"
+  - "rustfmt --edition 2024 --check src/rs/vertebra-postgres/src/lib.rs src/rs/vertebra-postgres/src/protocol.rs: exit 0"
+  - "git diff --check: exit 0"
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T05:00:00Z"
+updated_at: "2026-11-07T21:57:00Z"
 commit: null
 sources:
   - id: proto-research
@@ -69,6 +76,7 @@ Implement the crate-private `protocol` module in `src/rs/vertebra-postgres/src/p
 - `src/rs/vertebra-postgres/src/lib.rs`:
   - Declare `pub(crate) mod protocol;` (strictly crate-private; zero test-only `pub` exports).
 - `src/rs/vertebra-postgres/src/protocol.rs`:
+  - Apply `#[cfg_attr(not(test), expect(dead_code, reason = "Framing precedes session integration"))]` exactly to `read_message` and `encode_startup_frame`; apply `#[expect(dead_code, reason = "Termination precedes session integration")]` exactly to `TERMINATE_FRAME`. The real session consumer in `ch02:t02` removes these three expectations. Keep all-target `-D warnings` unchanged, with no broad allowance or visibility widening.
   - `pub(crate) const MAX_BACKEND_FRAME_LENGTH: i32 = 16_777_216;` (`16 MiB` inclusive of the 4-byte length word).
   - `pub(crate) const MIN_BACKEND_FRAME_LENGTH: i32 = 4;`
   - `pub(crate) async fn read_message<R: AsyncRead + Unpin>(reader: &mut R) -> Result<postgres_protocol::message::backend::Message, PostgresError>`:
@@ -115,13 +123,15 @@ Commit as `feat(postgres): bound wire message decoding and startup framing`.
 
 ## Acceptance Criteria
 
-- [ ] `protocol::read_message` validates `4..=16_777_216` header lengths before allocating body buffers and delegates frame parsing to `postgres_protocol::message::backend::Message::parse` with zero unconsumed trailing bytes (R3).
-- [ ] `protocol::encode_startup_frame` encodes Protocol 3.0 (`196608`) startup packets including `user`, `database`, `application_name`, and `client_encoding = "UTF8"` via `postgres_protocol::message::frontend::startup_message` (R3).
+- [x] `protocol::read_message` validates `4..=16_777_216` header lengths before allocating body buffers and delegates frame parsing to `postgres_protocol::message::backend::Message::parse` with zero unconsumed trailing bytes (R3).
+- [x] `protocol::encode_startup_frame` encodes Protocol 3.0 (`196608`) startup packets including `user`, `database`, `application_name`, and `client_encoding = "UTF8"` via `postgres_protocol::message::frontend::startup_message` (R3).
 - [ ] `protocol` remains `pub(crate)` with all unit tests and workspace Clippy checks exiting `0` (R3).
 
 ## Notes & Discoveries
 
-- [2026-11-07 05:00] `postgres_protocol::message::backend::Message::parse` consumes from a `BytesMut` starting at the tag byte (`buf[0]`), so passing a single exact-sized `5 + (len - 4)` `BytesMut` preserves zero-copy `Bytes` slices inside decoded `Message` variants while guaranteeing `buf.is_empty()` on exact consumption.
+- `postgres_protocol::message::backend::Message::parse` consumes from a `BytesMut` starting at the tag byte (`buf[0]`), so passing a single exact-sized `5 + (len - 4)` `BytesMut` preserves zero-copy `Bytes` slices inside decoded `Message` variants while guaranteeing `buf.is_empty()` on exact consumption. Version `0.6.12` rejects trailing `AuthenticationOk` payload bytes and missing `ParameterStatus` NUL terminators.
+- Nine real-duplex tests cover bytewise and coalesced frames, truncation, signed and oversized lengths, both inclusive length boundaries, malformed bodies, startup bytes, and encoder NUL rejection. Invalid-length tests retain an open writer and unread sentinel body byte, proving refusal precedes body reads.
+- The producer stage uses exactly three native lint expectations; task 02 removes them as production consumers land. Rust treats an unfulfilled expectation as a fatal warning, enforcing cleanup under the existing all-target gate.
 
 [^proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — `postgres-protocol =0.6.12` frontend/backend framing analysis.
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Startup defaults and bounded framing rules.

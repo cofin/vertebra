@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-07] flow-revise | Native PostgreSQL codec producer staging
+
+- Native chapter 02 task 01 tests pass (nine codec cases plus seven existing configuration cases), while all-target Clippy reports private producers without callers before task 02 integration.
+- Revision 5 at `399e068c` scopes three expected-dead-code annotations to the two codec functions and termination constant. Task 02 owns removing them alongside real session consumers. Native scratch compilation proves production/unit targets pass and consumers make retained expectations fail under `-D warnings`; private visibility and the complete Clippy gate remain unchanged.
+
 ## [2026-11-07] chapter-complete | Native PostgreSQL wheel scaffold and configuration
 
 - Closed `native-postgres-driver` chapter 01: four tasks at `5f25a4a0`, `9e128425`, `05fff946`, and `dabd3ca2`; reviewed range `0acdf576..0c7a4636` passes correctness and fresh independent quality review with no open findings.

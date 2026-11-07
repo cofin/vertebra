@@ -24,8 +24,8 @@ files:
 tests:
   - src/rs/vertebra-postgres/tests/pool_reset.rs
 estimated_loc: 245
-plan_revision: 4
-plan_commit: 45ff9563
+plan_revision: 5
+plan_commit: 399e068c
 state_revision: 0
 claimed_by: null
 claimed_at: null

@@ -5,19 +5,19 @@ chapter_id: ch02-wire-codec-and-session-startup
 title: "Chapter 02: Bounded Protocol 3.0 Framing, Session Lifecycle, SSLRequest TLS, and Password/MD5 Auth"
 description: Implement bounded 16 MiB PostgreSQL Protocol 3.0 framing, SessionHandle/PendingSession startup publication ownership, SSLRequest rustls negotiation, and cleartext/MD5 startup authentication.
 status: stable
-state: planned
+state: active
 planning_status: complete
 depends_on_chapters:
   - ch01-wheel-scaffold-and-config
 replan_trigger: null
 current_task: "native-postgres-driver:ch02:t01"
-plan_revision: 4
-plan_commit: 45ff9563
-state_revision: 0
+plan_revision: 5
+plan_commit: 399e068c
+state_revision: 1
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T05:00:00Z"
+updated_at: "2026-11-07T21:57:00Z"
 generated:
   by: flow-revise
   at: "2026-11-07T05:00:00Z"
@@ -82,6 +82,8 @@ Parent roadmap: [spec.md](../../spec.md). Public contracts: [contracts.md](../..
 
 ### 2.2 Concrete Type & Signature Contracts
 
+Task 01 applies `#[cfg_attr(not(test), expect(dead_code, reason = "Framing precedes session integration"))]` only to `read_message` and `encode_startup_frame`, and `#[expect(dead_code, reason = "Termination precedes session integration")]` only to `TERMINATE_FRAME`. Task 02 owns removal of all three annotations when its real session consumers land. Unfulfilled expectations remain fatal under the unchanged all-target `-D warnings` gate.
+
 - Rust (`src/rs/vertebra-postgres/src/protocol.rs`, crate-private `pub(crate)`):
   - `pub(crate) const MAX_BACKEND_FRAME_LENGTH: i32 = 16_777_216;`
   - `pub(crate) const PROTOCOL_VERSION_3_0: i32 = 196_608;`
@@ -143,7 +145,7 @@ Progress: `[0/0 files documented in ch02]` (all new symbols in `protocol.rs`, `t
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch02:t01 — Implement bounded PostgreSQL Protocol 3.0 startup encoder and backend frame decoder (tasks/t01-bounded-codec.md)
+- [~] native-postgres-driver:ch02:t01 — Implement bounded PostgreSQL Protocol 3.0 startup encoder and backend frame decoder (tasks/t01-bounded-codec.md)
 - [ ] native-postgres-driver:ch02:t02 — Establish authenticated trust sessions with SessionHandle and PendingSession publication (tasks/t02-trust-session-lifecycle.md)
 - [ ] native-postgres-driver:ch02:t03 — Negotiate PostgreSQL SSLRequest and verify rustls peer TLS identities (tasks/t03-sslrequest-and-tls-identity.md)
 - [ ] native-postgres-driver:ch02:t04 — Authenticate cleartext password and MD5 startup exchanges (tasks/t04-cleartext-and-md5-auth.md)
@@ -152,8 +154,8 @@ Progress: `[0/0 files documented in ch02]` (all new symbols in `protocol.rs`, `t
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dd432f18`; chapter `state: planned`, `planning_status: complete`, depends on `ch01-wheel-scaffold-and-config`.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
+- **Verified Baseline**: `HEAD @ 399e068c`; chapter `state: active`, `planning_status: complete`, depends on completed `ch01-wheel-scaffold-and-config` reviewed at `0c7a4636`.
+- **Task Progress**: `t01` is `in_progress` with 9 codec tests and 7 existing integration tests passing. The all-target Clippy gate rejects unused crate-private producers until `t02` supplies production callers; bounded `/flow:revise native-postgres-driver ch02-wire-codec-and-session-startup` resolves the task boundary before completion. `t02`, `t03`, and `t04` remain pending.
 - **Documentation & OKF Status**: `[0/0 files documented in ch02]`; user docs and OKF data chapters scheduled in `ch30`.
 - **Downstream Dependents**: Unblocks `ch03-scram-and-channel-binding` (`ch03:t01` depends on `ch02:t04`).
 

@@ -24,8 +24,8 @@ files:
 tests:
   - src/py/tests/integration/db/test_postgres_command_deadlines.py
 estimated_loc: 215
-plan_revision: 4
-plan_commit: 45ff9563
+plan_revision: 5
+plan_commit: 399e068c
 state_revision: 0
 claimed_by: null
 claimed_at: null

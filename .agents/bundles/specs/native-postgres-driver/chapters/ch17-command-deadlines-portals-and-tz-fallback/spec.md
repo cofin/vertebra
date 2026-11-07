@@ -11,8 +11,8 @@ depends_on_chapters:
   - ch16-pipeline-scope-and-cancellation
 replan_trigger: null
 current_task: "native-postgres-driver:ch17:t01"
-plan_revision: 4
-plan_commit: 45ff9563
+plan_revision: 5
+plan_commit: 399e068c
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null

@@ -21,8 +21,8 @@ files:
   - .agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md
 tests: []
 estimated_loc: 185
-plan_revision: 4
-plan_commit: 45ff9563
+plan_revision: 5
+plan_commit: 399e068c
 state_revision: 0
 claimed_by: null
 claimed_at: null
