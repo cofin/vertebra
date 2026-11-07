@@ -5,7 +5,7 @@ chapter_id: ch02-wire-codec-and-session-startup
 title: Negotiate PostgreSQL SSLRequest and verify rustls peer TLS identities
 description: Implement tls::connect negotiating the 8-byte PostgreSQL SSLRequest preamble and upgrading via shared TransportStream::upgrade_tls across Disable, Prefer, Require, VerifyCa, and VerifyFull with CA, SNI, and mTLS verification.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -29,13 +29,13 @@ estimated_loc: 235
 plan_revision: 6
 plan_commit: 8833b064
 state_revision: 1
-claimed_by: agent:ch02-tls-deadline-remediation
-claimed_at: "2026-11-07T23:51:12Z"
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-07T23:51:48Z"
-last_verified_commit: 0c3a0eaa
+last_verified_commit: ad8be7b6
 verification_evidence:
   red: 'Canonical enabled_modes_upgrade_before_trust_startup test exits 101 with UnsupportedFeature("only direct plaintext TCP is available") before integration.'
   focused: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_tls_wire_tests exits 0: 10 real rcgen/tokio-rustls peer tests cover the complete TLS matrix."
@@ -49,8 +49,8 @@ verification_evidence:
   deadline_watchdog: "The peer-stage yield loop checks independent std::time::Instant elapsed time against a generous 30-second watchdog, identifying stalled SSLRequest or TLS ClientHello stages. No product deadline assertion uses wall time; watchdog structure is inspected and no representative stalled fixture is claimed."
   checkpoint: "The test-only peer watchdog change passes all 54 tests and locked all-target Clippy; the coordinator binds its signed source and completion receipt."
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T23:51:48Z"
-commit: null
+updated_at: "2026-11-07T23:52:38Z"
+commit: ad8be7b6
 sources:
   - id: rs-upgrade-tls
     resource: src/rs/vertebra-db/src/connection.rs::TransportStream

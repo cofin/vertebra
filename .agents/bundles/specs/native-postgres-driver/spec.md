@@ -39,7 +39,7 @@ chapters:
   - ch30-user-and-domain-docs
   - ch31-final-review-and-release-gate
 current_chapter: ch02-wire-codec-and-session-startup
-current_task: "native-postgres-driver:ch02:t03"
+current_task: null
 parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
@@ -47,7 +47,7 @@ research:
 plan_revision: 6
 plan_commit: 8833b064
 state_revision: 4
-last_verified_checkpoint: 0446ee46
+last_verified_checkpoint: ad8be7b6
 last_reviewed_chapter: ch01-wheel-scaffold-and-config
 last_reviewed_commit: 3d68c853
 created_at: "2026-11-03T04:05:00Z"
@@ -107,7 +107,7 @@ tags:
 <!-- truth: start -->
 - **Standalone Optional Wheel**: `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owns live PostgreSQL Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`) without linking database clients into `vertebra-core` [^pg-conn-rs] [^pg-core-rs].
 - **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB Admin discovery + mTLS + IAM), lossless codecs, statement caching, single-`Sync` `pipeline()`, binary `COPY`, native `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, and `pgoutput` v1 logical replication ship together with full `psycopg`/`asyncpg` removal [^py-async-rs] [^arrow-shm-rs] [^pg-driver-py] [^sqlspec-py].
-- **Nested Chapter Roadmap (`plan_revision: 6`)**: All 31 chapters and 111 tasks retain their scope at `plan_commit: 8833b064`; chapter 01 is complete and reviewed at `3d68c853`, and all four chapter 02 tasks are complete at verified checkpoint `0446ee46`, awaiting renewed correctness and fresh independent quality review.
+- **Nested Chapter Roadmap (`plan_revision: 6`)**: All 31 chapters and 111 tasks retain their scope at `plan_commit: 8833b064`; chapter 01 is complete and reviewed at `3d68c853`, and all four chapter 02 tasks are complete at verified checkpoint `ad8be7b6`, awaiting renewed correctness and fresh independent quality review.
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -328,8 +328,8 @@ Every worksheet (`111` total across `31` chapters) executes within its bounded o
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: Checkpoint `0446ee46` passes all 54 Rust tests (`9` codec, `13` auth, `10` TLS, `22` wire/config/error) under the shared SHM test lock and locked all-target Clippy with `-D warnings`; flow `state: active`, `plan_revision: 6`, `plan_commit: 8833b064`.
-- **Progress**: `1/31` chapters are complete and reviewed; `7/111` tasks are complete. Chapter 02 receipts bind to `a00c3248`, `81791de2`, `0c3a0eaa`, and `c5173f1b`.
+- **Verified Baseline**: Checkpoint `ad8be7b6` passes all 54 Rust tests (`9` codec, `13` auth, `10` TLS, `22` wire/config/error) under the shared SHM test lock and locked all-target Clippy with `-D warnings`; flow `state: active`, `plan_revision: 6`, `plan_commit: 8833b064`.
+- **Progress**: `1/31` chapters are complete and reviewed; `8/111` tasks are complete. Chapter 02 receipts bind to `a00c3248`, `81791de2`, `ad8be7b6`, and `c5173f1b`.
 - **Current Chapter**: `ch02-wire-codec-and-session-startup`, with `current_task: null`; renewed correctness and fresh independent quality review remain pending.
 - **Remaining Plan**: Chapter 02 closeout and chapters 03–31 retain complete blueprints.
 - **Documentation**: `[0/11 files documented]`; full guides and domain knowledge remain assigned to chapter 30.

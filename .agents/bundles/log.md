@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-07] review-remediation | Bound native PostgreSQL TLS fixture waits
+
+- Correctness re-verification approves `3364250d..a33a8235` with all 54 tests and locked Clippy passing. Its sole minor test finding adds a 30-second independent monotonic watchdog inside paused-clock peer-stage waits at `ad8be7b6`; controlled virtual deadline assertions remain unchanged.
+- The focused deadline test passes 20 consecutive runs; all 54 tests, locked all-target Clippy, formatting, bundle validation, and whitespace checks pass. Task 03 binds to `ad8be7b6`; chapter 02 remains active and unreviewed pending fresh-quality recheck.
+
 ## [2026-11-07] flow-docs-sync | Native PostgreSQL startup repairs verified
 
 - Completed the three quality repairs under their existing owners: lazy notice validation at `81791de2` (receipt `f09355bb`), deterministic TLS deadline coverage at `0c3a0eaa` (receipt `e61340dc`), and credential-safe startup diagnostics at `c5173f1b` (receipt `0446ee46`). Codec source remains `a00c3248`.

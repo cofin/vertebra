@@ -10,11 +10,11 @@ planning_status: complete
 depends_on_chapters:
   - ch01-wheel-scaffold-and-config
 replan_trigger: null
-current_task: "native-postgres-driver:ch02:t03"
+current_task: null
 plan_revision: 6
 plan_commit: 8833b064
 state_revision: 5
-last_verified_checkpoint: 0446ee46
+last_verified_checkpoint: ad8be7b6
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-07T23:44:42Z"
@@ -154,16 +154,16 @@ Progress: `[0/0 files documented in ch02]` (all new symbols in `protocol.rs`, `t
 
 - [x] [a00c3248] native-postgres-driver:ch02:t01 — Implement bounded PostgreSQL Protocol 3.0 startup encoder and backend frame decoder (tasks/t01-bounded-codec.md)
 - [x] [81791de2] native-postgres-driver:ch02:t02 — Establish authenticated trust sessions with SessionHandle and PendingSession publication (tasks/t02-trust-session-lifecycle.md)
-- [~] native-postgres-driver:ch02:t03 — Negotiate PostgreSQL SSLRequest and verify rustls peer TLS identities (tasks/t03-sslrequest-and-tls-identity.md)
+- [x] [ad8be7b6] native-postgres-driver:ch02:t03 — Negotiate PostgreSQL SSLRequest and verify rustls peer TLS identities (tasks/t03-sslrequest-and-tls-identity.md)
 - [x] [c5173f1b] native-postgres-driver:ch02:t04 — Authenticate cleartext password and MD5 startup exchanges (tasks/t04-cleartext-and-md5-auth.md)
 
-**Chapter Recovery Checkpoint:** `flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings` exits `0` at `0446ee46`.
+**Chapter Recovery Checkpoint:** `flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings` exits `0` at `ad8be7b6`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: Checkpoint `0446ee46` passes all 54 Rust tests (`9` codec, `13` auth, `10` TLS, `22` wire/config/error) under the shared SHM test lock and locked all-target Clippy with `-D warnings`; upstream chapter 01 remains complete and reviewed at `3d68c853`.
-- **Task State**: All four tasks are complete at `a00c3248`, `81791de2`, `0c3a0eaa`, and `c5173f1b`. The chapter remains `active` with `current_task: null` and `last_reviewed_commit: null` pending renewed correctness and fresh independent quality review.
-- **Shared Contracts**: Bounded framing, fully consumed lazy diagnostic bodies, owned session publication, mode-specific TLS verification, and credential-safe trust/password/MD5 authentication retain their declared phase and error behavior. Controlled Tokio time and peer barriers prove the reserved TLS deadline remains pending at 249 ms and terminal at 251 ms, without a wall-clock threshold.
+- **Verified Baseline**: Checkpoint `ad8be7b6` passes all 54 Rust tests (`9` codec, `13` auth, `10` TLS, `22` wire/config/error) under the shared SHM test lock and locked all-target Clippy with `-D warnings`; upstream chapter 01 remains complete and reviewed at `3d68c853`.
+- **Task State**: All four tasks are complete at `a00c3248`, `81791de2`, `ad8be7b6`, and `c5173f1b`. The chapter remains `active` with `current_task: null` and `last_reviewed_commit: null` pending renewed correctness and fresh independent quality review.
+- **Shared Contracts**: Bounded framing, fully consumed lazy diagnostic bodies, owned session publication, mode-specific TLS verification, and credential-safe trust/password/MD5 authentication retain their declared phase and error behavior. Controlled Tokio time, peer barriers, and independent stage watchdogs prove the reserved TLS deadline remains pending at 249 ms and terminal at 251 ms, without a wall-clock threshold.
 - **Documentation**: `[0/0 files documented in ch02]`; chapter 30 retains full driver guides and knowledge synchronization.
 - **Next Action**: Run `/flow:review native-postgres-driver`; advance to chapter 03 only after correctness and fresh independent quality review pass.
 
