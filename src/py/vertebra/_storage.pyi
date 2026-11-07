@@ -16,7 +16,6 @@ __all__ = [
     "SyncStreamReader",
     "assemble_gcs_iam_v4_url",
     "build_gcs_v4_canonical_request",
-    "py_chunk_r2_uniform_parts",
     "py_sign_aws_sigv4_headers",
     "py_sign_azure_sas_url",
     "py_sign_gcs_v4_iam_url",
@@ -270,10 +269,6 @@ def py_sign_azure_sas_url(
     timestamp: int | None = None,
     endpoint: str | None = None,
 ) -> str: ...
-def py_chunk_r2_uniform_parts(
-    data: Buffer | bytes,
-    part_size: int = 8388608,
-) -> list[StorageBuffer]: ...
 def py_sign_aws_sigv4_headers(
     service: str,
     region: str,

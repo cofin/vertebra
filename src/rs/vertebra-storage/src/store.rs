@@ -390,15 +390,6 @@ pub enum BackendConfig {
         endpoint: Option<String>,
         credentials: Option<OciCavageCredentials>,
     },
-    R2 {
-        bucket: String,
-        account_id: String,
-        access_key_id: Option<String>,
-        secret_access_key: Option<String>,
-        jurisdiction: Option<String>,
-        endpoint: Option<String>,
-        allow_http: bool,
-    },
     Http {
         url: String,
     },
@@ -545,41 +536,6 @@ impl ObjectStoreEngine {
                     scheme: "oci".to_string(),
                 })
             }
-            BackendConfig::R2 {
-                bucket,
-                account_id,
-                access_key_id,
-                secret_access_key,
-                jurisdiction,
-                endpoint,
-                allow_http,
-            } => {
-                let resolved_endpoint = endpoint.unwrap_or_else(|| match jurisdiction.as_deref() {
-                    Some(j) if !j.trim().is_empty() => {
-                        format!(
-                            "https://{}.{}.r2.cloudflarestorage.com",
-                            account_id,
-                            j.trim()
-                        )
-                    }
-                    _ => format!("https://{}.r2.cloudflarestorage.com", account_id),
-                });
-                let mut builder = AmazonS3Builder::new()
-                    .with_bucket_name(&bucket)
-                    .with_region("auto")
-                    .with_endpoint(resolved_endpoint)
-                    .with_allow_http(allow_http);
-                if let Some(key_id) = access_key_id {
-                    builder = builder.with_access_key_id(key_id);
-                }
-                if let Some(secret) = secret_access_key {
-                    builder = builder.with_secret_access_key(secret);
-                }
-                Ok(Self {
-                    inner: Arc::new(builder.build()?),
-                    scheme: "r2".to_string(),
-                })
-            }
             BackendConfig::Http { url } => {
                 let store = HttpBuilder::new().with_url(url).build()?;
                 Ok(Self {
@@ -638,19 +594,6 @@ impl ObjectStoreEngine {
                     access_key_id: opts.get("access_key_id").cloned(),
                     secret_access_key: opts.get("secret_access_key").cloned(),
                     endpoint,
-                    allow_http: opts.get("allow_http").is_some_and(|v| v == "true"),
-                })
-            }
-            "r2" => {
-                let bucket = parsed.host_str().unwrap_or_default().to_string();
-                let account_id = opts.get("account_id").cloned().unwrap_or_default();
-                Self::new(BackendConfig::R2 {
-                    bucket,
-                    account_id,
-                    access_key_id: opts.get("access_key_id").cloned(),
-                    secret_access_key: opts.get("secret_access_key").cloned(),
-                    jurisdiction: opts.get("jurisdiction").cloned(),
-                    endpoint: opts.get("endpoint").cloned(),
                     allow_http: opts.get("allow_http").is_some_and(|v| v == "true"),
                 })
             }

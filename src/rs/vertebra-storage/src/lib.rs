@@ -2,7 +2,6 @@
 
 pub mod gcp_auth;
 pub mod oci;
-pub mod r2;
 pub mod signing;
 pub mod store;
 
@@ -26,7 +25,6 @@ use tokio::task::AbortHandle;
 use vertebra_core::notify::{AsyncCompletionQueue, Notifier};
 
 use crate::oci::{OciCavageCredentials, OciParConfig, build_oci_par_url, sign_oci_cavage_request};
-use crate::r2::chunk_uniform_parts;
 use crate::signing::{
     AwsSigV4HeaderConfig, AzureSasConfig, GcsSignConfig, GcsV4CanonicalRequest, HmacSigner,
     S3SignConfig, sign_aws_sigv4_headers, sign_azure_sas_url, sign_gcs_v4_with_iam_endpoint,
@@ -1457,21 +1455,6 @@ fn py_sign_azure_sas_url(
 }
 
 #[pyfunction]
-#[pyo3(signature = (data, part_size=8388608))]
-fn py_chunk_r2_uniform_parts(
-    py: Python<'_>,
-    data: &Bound<'_, PyAny>,
-    part_size: usize,
-) -> PyResult<Vec<StorageBuffer>> {
-    let payload = extract_buffer_bytes(py, data)?;
-    let parts = py.detach(|| chunk_uniform_parts(payload, part_size));
-    Ok(parts
-        .into_iter()
-        .map(|d| StorageBuffer { data: d })
-        .collect())
-}
-
-#[pyfunction]
 #[pyo3(signature = (service, region, access_key_id, secret_access_key, method, url, payload, content_type="application/json", timestamp=None, session_token=None))]
 #[allow(clippy::too_many_arguments)]
 fn py_sign_aws_sigv4_headers(
@@ -1642,7 +1625,6 @@ pub fn _storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_sign_gcs_v4_iam_url_async, m)?)?;
     m.add_function(wrap_pyfunction!(py_sign_oci_cavage_headers, m)?)?;
     m.add_function(wrap_pyfunction!(py_sign_azure_sas_url, m)?)?;
-    m.add_function(wrap_pyfunction!(py_chunk_r2_uniform_parts, m)?)?;
     m.add_function(wrap_pyfunction!(py_sign_aws_sigv4_headers, m)?)?;
     m.add_function(wrap_pyfunction!(sign_oci_par_url, m)?)?;
     m.add_function(wrap_pyfunction!(build_gcs_v4_canonical_request, m)?)?;

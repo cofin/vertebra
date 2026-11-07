@@ -7,10 +7,67 @@ use _storage::signing::{
     sign_gcs_v4_with_iam_endpoint, sign_gcs_v4_with_options_and_cache, sign_s3_v4_url,
     verify_s3_v4_url,
 };
-use _storage::store::{BackendConfig, ObjectStoreEngine};
+use _storage::store::{BackendConfig, ObjectStoreEngine, StorageError};
 use bytes::Bytes;
 use std::collections::HashMap;
 use tempfile::TempDir;
+
+#[test]
+fn test_native_r2_url_is_unsupported_with_or_without_s3_options() {
+    let options = HashMap::from([
+        ("region".to_string(), "us-east-1".to_string()),
+        ("access_key_id".to_string(), "test-access-key".to_string()),
+        (
+            "secret_access_key".to_string(),
+            "test-secret-key".to_string(),
+        ),
+        (
+            "endpoint".to_string(),
+            "https://objects.example.com".to_string(),
+        ),
+    ]);
+    for supplied_options in [None, Some(&options)] {
+        assert!(matches!(
+            ObjectStoreEngine::from_url("r2://bucket", supplied_options),
+            Err(StorageError::InvalidUrl(url, reason))
+                if url == "r2://bucket"
+                    && reason == "unsupported storage URL scheme 'r2'"
+        ));
+    }
+    let s3 = ObjectStoreEngine::from_url("s3://bucket", Some(&options))
+        .expect("generic S3 custom endpoint remains supported");
+    assert_eq!(s3.scheme(), "s3");
+}
+
+#[test]
+fn test_native_python_r2_surface_is_withdrawn() {
+    use pyo3::ffi::c_str;
+    use pyo3::prelude::*;
+    use pyo3::types::PyModule;
+
+    Python::initialize();
+    Python::attach(|py| {
+        let module = PyModule::new(py, "_storage").expect("create native module");
+        _storage::_storage(&module).expect("populate native module");
+        py.run(
+            c_str!(
+                r#"
+for store_type in (SyncObjectStore, AsyncObjectStore):
+    try:
+        store_type("r2://bucket")
+    except ValueError as exc:
+        assert str(exc) == "r2://bucket: unsupported storage URL scheme 'r2'"
+    else:
+        raise AssertionError("native R2 construction must fail")
+assert "py_chunk_r2_uniform_parts" not in globals()
+"#
+            ),
+            Some(&module.dict()),
+            None,
+        )
+        .expect("native Python R2 withdrawal");
+    });
+}
 
 #[tokio::test]
 async fn test_memory_backend_crud_range_and_multipart() {
@@ -761,44 +818,50 @@ fn test_multicloud_presigning_parity_rfc3986_oci_par_and_expiry_bounds() {
         Err(SigningError::InvalidKey(_))
     ));
 
-    let r2_cfg = S3SignConfig {
+    let custom_s3_cfg = S3SignConfig {
         bucket: "assets".to_string(),
-        region: "auto".to_string(),
-        access_key_id: "r2-access-key".to_string(),
-        secret_access_key: "r2-secret-key".to_string(),
-        endpoint: Some("https://acct.r2.cloudflarestorage.com".to_string()),
+        region: "us-east-1".to_string(),
+        access_key_id: "custom-access-key".to_string(),
+        secret_access_key: "custom-secret-key".to_string(),
+        endpoint: Some("https://objects.example.com".to_string()),
     };
-    let r2_url =
-        sign_s3_v4_url(&r2_cfg, "GET", "img/logo.png", 3600, fixed_ts).expect("R2 SigV4 sign");
-    assert!(r2_url.starts_with("https://acct.r2.cloudflarestorage.com/assets/img/logo.png?"));
-    assert!(r2_url.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"));
+    let custom_s3_url = sign_s3_v4_url(&custom_s3_cfg, "GET", "img/logo.png", 3600, fixed_ts)
+        .expect("custom S3 SigV4 sign");
+    assert!(custom_s3_url.starts_with("https://objects.example.com/assets/img/logo.png?"));
+    assert!(custom_s3_url.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"));
     assert!(
-        r2_url.contains("X-Amz-Credential=r2-access-key%2F20261107%2Fauto%2Fs3%2Faws4_request")
+        custom_s3_url.contains(
+            "X-Amz-Credential=custom-access-key%2F20261107%2Fus-east-1%2Fs3%2Faws4_request"
+        )
     );
-    let (_, r2_sig) = r2_url
+    let (_, custom_s3_sig) = custom_s3_url
         .split_once("&X-Amz-Signature=")
         .expect("X-Amz-Signature");
-    assert_eq!(r2_sig.len(), 64);
-    assert!(r2_sig.chars().all(|c| c.is_ascii_hexdigit()));
-    let r2_url_repeat =
-        sign_s3_v4_url(&r2_cfg, "GET", "img/logo.png", 3600, fixed_ts).expect("R2 SigV4 repeat");
-    assert_eq!(r2_url, r2_url_repeat);
-    assert!(verify_s3_v4_url(&r2_cfg, "GET", &r2_url, fixed_ts + 60).expect("verify R2 URL"));
+    assert_eq!(custom_s3_sig.len(), 64);
+    assert!(custom_s3_sig.chars().all(|c| c.is_ascii_hexdigit()));
+    let custom_s3_url_repeat =
+        sign_s3_v4_url(&custom_s3_cfg, "GET", "img/logo.png", 3600, fixed_ts)
+            .expect("custom S3 SigV4 repeat");
+    assert_eq!(custom_s3_url, custom_s3_url_repeat);
+    assert!(
+        verify_s3_v4_url(&custom_s3_cfg, "GET", &custom_s3_url, fixed_ts + 60)
+            .expect("verify custom S3 URL")
+    );
 
-    let r2_encoded = sign_s3_v4_url(
-        &r2_cfg,
+    let custom_s3_encoded = sign_s3_v4_url(
+        &custom_s3_cfg,
         "PUT",
         "reports/2026 Q4/summary+final.parquet",
         3600,
         fixed_ts,
     )
-    .expect("R2 special key");
-    assert!(r2_encoded.starts_with(
-        "https://acct.r2.cloudflarestorage.com/assets/reports/2026%20Q4/summary%2Bfinal.parquet?"
+    .expect("custom S3 special key");
+    assert!(custom_s3_encoded.starts_with(
+        "https://objects.example.com/assets/reports/2026%20Q4/summary%2Bfinal.parquet?"
     ));
     assert!(
-        verify_s3_v4_url(&r2_cfg, "PUT", &r2_encoded, fixed_ts + 60)
-            .expect("verify R2 special key")
+        verify_s3_v4_url(&custom_s3_cfg, "PUT", &custom_s3_encoded, fixed_ts + 60)
+            .expect("verify custom S3 special key")
     );
 
     let raw_az_key = b"0123456789abcdef0123456789abcdef";
@@ -915,10 +978,10 @@ fn test_multicloud_presigning_parity_rfc3986_oci_par_and_expiry_bounds() {
             Err(SigningError::InvalidExpiry(_))
         ));
         assert!(matches!(
-            r2_cfg.sign_v4_url("GET", "img/logo.png", bad_exp, fixed_ts),
+            custom_s3_cfg.sign_v4_url("GET", "img/logo.png", bad_exp, fixed_ts),
             Err(SigningError::InvalidExpiry(_))
         ));
-        assert!(sign_s3_v4_url(&r2_cfg, "GET", "img/logo.png", bad_exp, fixed_ts).is_err());
+        assert!(sign_s3_v4_url(&custom_s3_cfg, "GET", "img/logo.png", bad_exp, fixed_ts).is_err());
         assert!(matches!(
             az_cfg.sign_sas_url("PUT", "blob/file.csv", bad_exp, fixed_ts),
             Err(SigningError::InvalidExpiry(_))
@@ -932,7 +995,7 @@ fn test_multicloud_presigning_parity_rfc3986_oci_par_and_expiry_bounds() {
 
     assert!(sign_gcs_v4_url(&gcs_cfg, "GET", "dir/a.txt", 1, fixed_ts).is_ok());
     assert!(sign_gcs_v4_url(&gcs_cfg, "GET", "dir/a.txt", 604_800, fixed_ts).is_ok());
-    assert!(sign_s3_v4_url(&r2_cfg, "GET", "img/logo.png", 604_800, fixed_ts).is_ok());
+    assert!(sign_s3_v4_url(&custom_s3_cfg, "GET", "img/logo.png", 604_800, fixed_ts).is_ok());
     assert!(sign_azure_sas_url(&az_cfg, "PUT", "blob/file.csv", 604_800, fixed_ts).is_ok());
     assert!(build_oci_par_url(&oci_par_cfg, "k/1.bin", 604_800).is_ok());
 }
