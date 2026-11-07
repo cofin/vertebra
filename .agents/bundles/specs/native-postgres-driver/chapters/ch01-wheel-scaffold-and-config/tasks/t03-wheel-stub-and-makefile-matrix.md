@@ -5,7 +5,7 @@ chapter_id: ch01-wheel-scaffold-and-config
 title: Wire vertebra-postgres wheel, _postgres.pyi stub, and Makefile build/test targets
 description: Author src/rs/vertebra-postgres/pyproject.toml, src/py/vertebra/_postgres.pyi, and Makefile dev/build/stubtest/postgres-test/postgres-wheel-check targets with wheel zipfile and sdist tarfile verification.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: static_validation
 depends_on:
@@ -26,13 +26,13 @@ estimated_loc: 110
 plan_revision: 4
 plan_commit: 45ff9563
 state_revision: 0
-claimed_by: agent:pyo3-bridge-specialist
-claimed_at: "2026-11-07T20:24:33.208990+00:00"
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
+last_verified_at: "2026-11-07T20:37:14Z"
+last_verified_commit: 05fff946c8325a3855208f02a1c8ee0b963e0d17
 verification_evidence:
   - "UV_NO_SYNC=1; PYO3_PYTHON=${PWD}/.venv/bin/python; CARGO_TARGET_DIR=/tmp/vtb-cargo-target"
   - "make dev: exit 0; six editable native extension installs"
@@ -44,7 +44,7 @@ verification_evidence:
   - "Ruff check/format, Mypy stub check, make review-check, git diff --check: exit 0"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-07T16:40:00Z"
-commit: null
+commit: 05fff946c8325a3855208f02a1c8ee0b963e0d17
 sources:
   - id: spanner-pyproject
     resource: src/rs/vertebra-spanner/pyproject.toml
