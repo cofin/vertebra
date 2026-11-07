@@ -74,6 +74,8 @@ Use persistent `.vtb-cas-lock#0` inside each physical target parent directory. A
 
 Stages use same-parent `.vertebra-stage-<uuid>#<counter>`, with no '#' in the random base and a nonempty numeric suffix after the FIRST '#'. Pinned SDK local.rs::is_valid_file_path already rejects/ignores that grammar in both listing paths, so no legal SDK key is reserved. Appending to a legal caller basename containing '#nondigit' is unsafe and forbidden. Normal abort/cancellation removes only owned stages; no broad crash scavenger is added. Direct uncooperative OS writers remain outside the guarantee. [^sdk]
 
+Stable Rust 1.99 still marks Windows MetadataExt volume_serial_number/file_index as unstable windows_by_handle in its shipped standard-library source. Use the existing locked windows-sys 0.61 through a direct storage-crate Windows-target dependency with Win32_Foundation/Win32_Storage_FileSystem; GetFileInformationByHandleEx(FileIdInfo) returns physical volume/file identity from an opened directory handle. The static prerequisite ch12:t04 owns both manifest/lock edges before ch11:t01, without a package version upgrade.
+
 ## Provider Protocol Findings
 
 S3 completion accepts If-Match or If-None-Match `*`. An HTTP200 can contain an Error body and requires XML inspection. A 409 requires re-initiation and part replay; the root selects an honest typed 409 conflict with retained abort ownership and no hidden replay. A caller can start a fresh operation with rewindable input. Always staging/re-copying S3 would add unjustified I/O, latency and permissions. UploadPartCopy supports ranged server-side copying from an existing object. Client payload collection or re-reading an unrewindable producer is not valid recovery. [^s3] [^s3-copy]

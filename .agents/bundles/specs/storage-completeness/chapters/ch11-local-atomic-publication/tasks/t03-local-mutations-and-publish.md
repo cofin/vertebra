@@ -12,19 +12,20 @@ depends_on:
 - storage-completeness:ch11:t02
 - storage-completeness:ch10:t03
 read_set:
+- src/rs/vertebra-storage/src/lib.rs
 - src/rs/vertebra-storage/src/local_publication.rs
 - src/rs/vertebra-storage/src/store.rs
 - src/rs/vertebra-storage/src/conditional.rs
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 - .agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md
 files:
-- src/rs/vertebra-storage/src/local_publication.rs
+- src/rs/vertebra-storage/src/lib.rs
 - src/rs/vertebra-storage/src/store.rs
 - src/rs/vertebra-storage/src/conditional.rs
 tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 240
-plan_revision: 4
+plan_revision: 5
 plan_commit: null
 state_revision: 0
 claimed_by: null
@@ -58,6 +59,8 @@ Guard every local mutation and publish with native atomic operations. Execute on
 
 ## Bounded Read Manifest
 
+- `src/rs/vertebra-storage/src/lib.rs` — activate the already tested private module when its first production caller lands.
+
 - `src/rs/vertebra-storage/src/local_publication.rs` — owned implementation or canonical regression surface.
 - `src/rs/vertebra-storage/src/store.rs` — owned implementation or canonical regression surface.
 - `src/rs/vertebra-storage/src/conditional.rs` — owned implementation or canonical regression surface.
@@ -66,6 +69,8 @@ Guard every local mutation and publish with native atomic operations. Execute on
 - `.agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md` — Grounded SDK/protocol and ownership evidence.
 
 ## Symbol & Signature Contracts
+
+Activate `mod local_publication;` in lib.rs by removing the exact test-only gate introduced by t01. Own only lib.rs, store.rs and conditional.rs production wiring: t01/t02 already supply complete typed lock/stage/publication/mutation primitives. Route the concrete Local PublicationBackend and every engine mutation into those primitives; do not duplicate their filesystem policy or add a second lock path. Normal non-test cargo check and all-target Clippy are mandatory in this activation commit so test-only imports/features/dead APIs cannot hide incomplete production wiring.
 
 Grounded contract evidence: [^research].
 
@@ -86,6 +91,8 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 | Every mutation cooperates | Pause conditional publish guard and race ordinary put/delete/copy/rename from another process | Second operation cannot bypass guard; no torn publication |
 
 ## Verification
+
+- `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo check --manifest-path src/rs/Cargo.toml -p vertebra-storage --lib`
 
 Record the failing public regression before implementation and the passing result after. Execute each command below in this worktree; the storage target directory is reserved and shared SHM tests use the host lock.
 

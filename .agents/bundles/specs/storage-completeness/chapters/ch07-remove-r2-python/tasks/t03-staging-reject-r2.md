@@ -5,12 +5,15 @@ chapter_id: ch07-remove-r2-python
 title: Reject removed R2 URIs before staging local-path resolution
 description: Reject removed R2 URIs before staging local-path resolution
 status: stable
-state: in_progress
+state: blocked
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
 - storage-completeness:ch07:t02
 read_set:
+- src/py/vertebra/extensions/sqlspec/storage.py
+- src/py/vertebra/db/adapters/bigquery/driver.py
+- src/py/vertebra/db/adapters/bigquery/config.py
 - src/py/vertebra/db/_staging.py
 - src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
 - src/py/tests/unit/extensions/test_data_storage_integrations.py
@@ -25,8 +28,8 @@ plan_commit: 69a77955
 state_revision: 0
 claimed_by: agent:r2-staging-withdrawal
 claimed_at: '2026-11-07T22:46:57.858525+00:00'
-blocked_reason: null
-unblock_condition: null
+blocked_reason: The expanded rooted-qualification and pre-query blueprint awaits independent readiness recheck.
+unblock_condition: Independent review approves the bounded revision 5 staging worksheet.
 next_step: null
 last_verified_at: null
 last_verified_commit: null
@@ -50,6 +53,10 @@ tags:
 Reject removed R2 URIs before staging local-path resolution. Execute one bounded worksheet and create one signed local conventional commit after verification. Read the existing functional baseline at `5fe477fa`; a reopened ch01 is not an execution prerequisite. Own only the listed production and canonical test files. [^implementation]
 
 ## Bounded Read Manifest
+
+- `src/py/vertebra/extensions/sqlspec/storage.py` — configured qualification or public export/remote-endpoint contract; read-only collaborator.
+- `src/py/vertebra/db/adapters/bigquery/driver.py` — configured qualification or public export/remote-endpoint contract; read-only collaborator.
+- `src/py/vertebra/db/adapters/bigquery/config.py` — configured qualification or public export/remote-endpoint contract; read-only collaborator.
 
 - `src/py/vertebra/db/_staging.py` — owned implementation or canonical regression surface.
 - `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py` — owned implementation or canonical regression surface.
@@ -77,6 +84,10 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 | Explicit store rejected URI | Memory store plus r2://bucket/key passed through staging public export/read path | ValueError before any write; store unchanged |
 | Supported staging | file path and s3://bucket/key with configured store | Existing path resolution unchanged |
 | Mismatched explicit remote qualification | SQLSpec backend/native store configured for s3://unit, supplied s3://other/key or gs://unit/key through public staging validation/read/write sync and async | ValueError before upstream query/producer consumption or object mutation; original configured-store objects remain exact bytes. A matching s3://unit/key still round-trips. |
+
+Use `ObjectStoreStaging.write_cursor_sync` / `write_cursor_async` and `read_cursor_sync` / `read_cursor_async` with a real ArrowCursor and `SQLSpecObjectStoreBackend("gs://bucket/root", store=SyncObjectStore("memory://"), base_path="scope")`. Exercise matching `gs://` and `gcs://` URIs for `root/literal%2F` and `root/literal%252F`. Assert actual underlying native keys are exactly `scope/literal%2F` and `scope/literal%252F`, their bytes and decoded rows remain distinct, and staging reads round-trip both. No `scope/root/...` alias is created. For mismatched scheme/bucket, assert original bytes and exact listed keys remain unchanged.
+
+The upstream public callers are `SyncBigQueryDriver.export_to_object_store` and `AsyncBigQueryDriver.export_to_object_store`. Construct real drivers with `BigQueryConfig(project_id="unit", rest_endpoint=local_http_endpoint, storage_endpoint=local_http_endpoint, access_token="test-only-token", use_shm_cache=False)`. The real local HTTP server counts requests/connections and returns a bounded failure for an unexpected request. Export to removed or mismatched qualified destinations with the configured real backend: the exact validation ValueError must occur and the server count remains zero. This is the pre-query consumption tripwire; do not patch select_to_arrow, execute, staging methods, SQLSpec, or native clients. Valid row/cursor staging uses a real local ArrowCursor; it does not need a cloud query. External responder/caller-owned data are the only substitutes.
 
 ## Verification
 

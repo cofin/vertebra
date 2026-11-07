@@ -7,7 +7,7 @@ description: Manage SDK-private same-parent staging artifacts
 status: draft
 state: pending
 priority: P1
-verification_strategy: regression_tdd
+verification_strategy: characterization
 depends_on:
 - storage-completeness:ch11:t01
 read_set:
@@ -19,9 +19,9 @@ read_set:
 files:
 - src/rs/vertebra-storage/src/local_publication.rs
 tests:
-- src/rs/vertebra-storage/tests/storage_engine_tests.rs
+- src/rs/vertebra-storage/src/local_publication.rs
 estimated_loc: 210
-plan_revision: 4
+plan_revision: 5
 plan_commit: null
 state_revision: 0
 claimed_by: null
@@ -64,6 +64,10 @@ Manage SDK-private same-parent staging artifacts. Execute one bounded worksheet 
 
 ## Symbol & Signature Contracts
 
+The module remains test-only until t03. Implement the complete private staging/publication primitive API consumed by t03 without adding engine routing here: `async fn stage(&self, destination: &StorePath) -> Result<LocalStage, StorageError>`; `LocalStage` has `async fn write_chunk(&mut self, chunk: Bytes) -> Result<(), StorageError>` asynchronously appends only this chunk; `async fn publish(&self, stage: &mut LocalStage, destination: &StorePath, condition: &PublishCondition) -> Result<PutResult, StorageError>` obtains ordered parent guards, checks the predicate, atomically publishes and collects the exact SDK destination metadata under the guard. `async fn abort(&mut self) -> Result<(), StorageError>` is idempotent. The owning `LocalStage` retains file/path ownership across returned errors and cancellation; successful publication clears ownership only after its actual receipt is captured. Drop removes only its owned stage, never the persistent lockfile. Native file write/flush/metadata errors remain visible.
+
+Supply private `delete`, `rename` and `copy` mutation methods with StorePath operands and Result<(), StorageError>, retaining ordered guards through only their final mutation. Copy first opens a stable source snapshot and streams it into a same-parent destination stage outside publication locks, then publishes that stage with deduplicated source/destination parent guards. Ordinary puts use the same staging/publish primitives. Under a guard, Create uses native no-replace hard-link/create semantics; Match/NotMatch/Overwrite uses same-filesystem atomic rename only after evaluating actual current SDK metadata. Never fall back from unsupported LocalFileSystem PutMode::Update to an unchecked write. t03 wires these exact primitives into every public mutation and owns no changes to local_publication.rs.
+
 Grounded contract evidence: [^research].
 
 `LocalPublication::stage(destination)` creates an exclusive same-parent file named `.vertebra-stage-<uuid>#<counter>` whose base has no `#` and whose FIRST `#` suffix is nonempty ASCII digits. This exactly matches pinned LocalFileSystem's already unsupported/ignored filename grammar; it cannot collide with an SDK-legal object key and both list and list_with_delimiter hide it through every overlapping root. Never append a suffix to the caller's basename because legal `name#suffix` would make the SDK expose the resulting staging file. Use create_new and retry generated-name collision; retain file handle/path ownership. No OS-temp staging registry, global reserved prefix or new legal-key filtering.
@@ -80,16 +84,17 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 
 | Case | Input | Observable result |
 | --- | --- | --- |
-| Artifact isolation | Upload staged object while listing through root and broader overlapping root | SDK-illegal lock/stage names invisible in list and delimiter; legal keep#suffix remains visible |
-| Abort cleanup | Cancel multipart and repeat abort | Owned stage removed; persistent lock remains; destination untouched |
-| Same filesystem | Stage destination under a mountpoint distinct from OS temp | Final native rename/link succeeds without cross-device copy fallback |
+| Artifact isolation primitive | Create/write a real LocalStage while listing via actual LocalFileSystem from narrow and broader roots | Both SDK listing APIs hide the existing-illegal lock/stage grammar; legal keep#suffix remains visible. |
+| Stage cleanup primitive | Cancel a staged primitive operation and repeat abort | Only its owned file disappears; destination and persistent lockfile remain. |
+| Same-filesystem publish primitive | Stage and publish in a real destination directory distinct from OS temp | Atomic native rename/link succeeds; actual destination receipt matches SDK head while guarded. |
+| Predicate primitive | Existing target and Create/Match/NotMatch with a controlled competing real filesystem/native-SDK write | Rejected predicate preserves exact target; successful guarded publication returns its own ETag/version. |
 
 ## Verification
 
-Record the failing public regression before implementation and the passing result after. Execute each command below in this worktree; the storage target directory is reserved and shared SHM tests use the host lock.
+Characterize real filesystem stage, link/rename and SDK listing behavior before the private adapter, then verify the inline primitive against those semantics. This task does not claim public engine acceptance before t03 routing; no fake Red or mocked filesystem is accepted. Execute each command below in this worktree; the storage target directory is reserved and shared SHM tests use the host lock.
 
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo fmt --manifest-path src/rs/Cargo.toml --all --check`
-- `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --test storage_engine_tests`
+- `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --lib local_publication`
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets -- -D warnings`
 
 Record exact exit statuses, native build checkpoint and any platform limitation in verification_evidence. Review closure uses these results, never planning-only structural validation.

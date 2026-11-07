@@ -10,7 +10,7 @@ planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
-plan_revision: 4
+plan_revision: 5
 plan_commit: null
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
@@ -80,6 +80,8 @@ Caller → seam → collaborator: public storage/framework calls → owned deep 
 | Deep owned boundary with exact provider semantics | Chosen: hides credentials, staging and concurrency while preserving configured SDK behavior. |
 | Generic head-then-write, Python lock, copy-create publication or blanket exception conversion | Rejected: loses atomicity, update results, metadata or error identity. |
 
+t01/t02 implement and characterize the actual private OS/filesystem primitives in a test-only local_publication module; t03 owns its lib.rs activation and all production routing with normal non-test compilation and all-target Clippy. Public cross-process engine acceptance occurs only in t03/t04 after that routing exists. No mocked OS lock or prematurely claimed public publication guarantee substitutes for those gates.
+
 ## 3. Documentation & OKF Knowledge Plan
 
 Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bundles/knowledge/domains/storage/object-storage.md` by ch09:t03 and user guides by ch04:t03; per-task tests are executable documentation. No separate untracked documentation obligation remains.
@@ -88,8 +90,8 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 
 | Requirement | Task | Strategy | Verification |
 | --- | --- | --- | --- |
-| R1 | [ch11:t01](tasks/t01-physical-target-locks.md) | regression_tdd | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
-| R2 | [ch11:t02](tasks/t02-same-fs-stage.md) | regression_tdd | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
+| R1 | [ch11:t01](tasks/t01-physical-target-locks.md) | characterization | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
+| R2 | [ch11:t02](tasks/t02-same-fs-stage.md) | characterization | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
 | R3 | [ch11:t03](tasks/t03-local-mutations-and-publish.md) | regression_tdd | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
 | R4 | [ch11:t04](tasks/t04-local-subprocess-acceptance.md) | integration_acceptance | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
 

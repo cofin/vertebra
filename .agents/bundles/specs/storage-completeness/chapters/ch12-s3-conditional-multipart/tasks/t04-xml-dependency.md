@@ -2,8 +2,8 @@
 type: Task
 id: storage-completeness:ch12:t04
 chapter_id: ch12-s3-conditional-multipart
-title: Declare direct XML codec dependency for provider requests
-description: Declare direct XML codec dependency for provider requests
+title: Declare direct XML and Windows identity dependencies
+description: Declare direct XML and Windows identity dependencies
 status: draft
 state: pending
 priority: P1
@@ -19,7 +19,7 @@ files:
 - src/rs/vertebra-storage/Cargo.toml
 - src/rs/Cargo.lock
 tests: []
-estimated_loc: 20
+estimated_loc: 30
 plan_revision: 5
 plan_commit: null
 state_revision: 0
@@ -43,11 +43,11 @@ tags:
 - repair
 ---
 
-# Declare direct XML codec dependency for provider requests
+# Declare direct XML and Windows identity dependencies
 
 ## Objective & Scope Boundary
 
-Declare direct XML codec dependency for provider requests. Execute one bounded worksheet and create one signed local conventional commit after verification. Read the existing functional baseline at `5fe477fa`; a reopened ch01 is not an execution prerequisite. Own only the listed production and canonical test files. [^implementation]
+Declare direct XML and Windows identity dependencies. Execute one bounded worksheet and create one signed local conventional commit after verification. Read the existing functional baseline at `5fe477fa`; a reopened ch01 is not an execution prerequisite. Own only the listed production and canonical test files. [^implementation]
 
 ## Bounded Read Manifest
 
@@ -57,6 +57,8 @@ Declare direct XML codec dependency for provider requests. Execute one bounded w
 - `.agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md` — collaborating contract.
 
 ## Symbol & Signature Contracts
+
+Add a Windows-target-only direct `windows-sys` workspace dependency to vertebra-storage, enabling `Win32_Foundation` and `Win32_Storage_FileSystem` in that crate. The existing locked 0.61 package identity is reused; update only its direct crate dependency edge in Cargo.lock. No workspace version or unrelated package changes. ch11:t01 consumes `GetFileInformationByHandleEx(FileIdInfo)` / `FILE_ID_INFO` and directory `FILE_FLAG_BACKUP_SEMANTICS` from that declared dependency, rather than unstable std MetadataExt methods or handwritten Win32 declarations. The dependency gate remains static validation and precedes both Local and provider protocol code.
 
 Declare direct quick-xml 0.39.4 with serialize support in vertebra-storage/Cargo.toml, using the already locked 0.39.4 package from object_store's existing dependency graph. Update only vertebra-storage's dependency edge in Cargo.lock through Cargo's normal resolver; do not upgrade unrelated packages, rewrite PostgreSQL package entries or add an SDK fork. S3 CreateMultipartUpload/CompleteMultipartUpload and Azure block-list serialization/parsing reuse this maintained XML codec; HTTP 200 Error bodies and XML entities/namespaces must be parsed structurally, not substring/string-split approximations. This task precedes S3 provider source imports. Preserve concurrent manifest/lock edits by other agents.
 

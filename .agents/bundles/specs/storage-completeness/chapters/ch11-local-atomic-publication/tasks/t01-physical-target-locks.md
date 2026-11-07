@@ -7,26 +7,25 @@ description: Add persistent OS locks per physical parent directory
 status: draft
 state: pending
 priority: P1
-verification_strategy: regression_tdd
+verification_strategy: characterization
 depends_on:
+- storage-completeness:ch12:t04
 - storage-completeness:ch10:t01
 - storage-completeness:ch10:t03
 - storage-completeness:ch10:t04
 read_set:
 - src/rs/vertebra-storage/src/local_publication.rs
-- src/rs/vertebra-storage/src/conditional.rs
 - src/rs/vertebra-storage/src/lib.rs
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 - src/rs/vertebra-storage/src/store.rs
 - .agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md
 files:
 - src/rs/vertebra-storage/src/local_publication.rs
-- src/rs/vertebra-storage/src/conditional.rs
 - src/rs/vertebra-storage/src/lib.rs
 tests:
-- src/rs/vertebra-storage/tests/storage_engine_tests.rs
+- src/rs/vertebra-storage/src/local_publication.rs
 estimated_loc: 200
-plan_revision: 4
+plan_revision: 5
 plan_commit: null
 state_revision: 0
 claimed_by: null
@@ -61,7 +60,6 @@ Add persistent OS locks per physical parent directory. Execute one bounded works
 ## Bounded Read Manifest
 
 - `src/rs/vertebra-storage/src/local_publication.rs` — owned implementation or canonical regression surface.
-- `src/rs/vertebra-storage/src/conditional.rs` — owned implementation or canonical regression surface.
 - `src/rs/vertebra-storage/src/lib.rs` — owned implementation or canonical regression surface.
 - `src/rs/vertebra-storage/tests/storage_engine_tests.rs` — owned implementation or canonical regression surface.
 - `src/rs/vertebra-storage/src/store.rs` — collaborating contract.
@@ -69,6 +67,10 @@ Add persistent OS locks per physical parent directory. Execute one bounded works
 - `.agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md` — Grounded SDK/protocol and ownership evidence.
 
 ## Symbol & Signature Contracts
+
+Declare `#[cfg(test)] mod local_publication;` in lib.rs. This task implements real filesystem primitives and inline tests, not production engine routing; t03 removes that gate when the first real caller lands. No broad dead-code allowance or public test hook is introduced. `DirectoryIdentity` is a private comparable physical-directory identity. `DirectoryGuard` owns its opened persistent lockfile for its entire lifetime and releases the OS lock on Drop. `LocalPublication::new(store: Arc<LocalFileSystem>, root: PathBuf) -> Self` retains the exact concrete SDK store/root; `async fn lock_parents(&self, paths: &[PathBuf]) -> Result<Vec<DirectoryGuard>, StorageError>` resolves, deduplicates and sorts physical parent identities before acquiring each lock. Retain all acquired guards inside this future so cancellation releases them.
+
+Use `std::fs::File::try_lock()` in a cancellable async wait loop with bounded `tokio::time::sleep`, treating only WouldBlock as contention and propagating other errors. File opening/metadata work may use bounded blocking jobs, but those jobs never acquire or wait for locks; no abandoned blocking lock waiter can retain a guard after cancellation. Unix identity uses stable MetadataExt dev/ino; Windows uses declared windows-sys `GetFileInformationByHandleEx(FileIdInfo)` / `FILE_ID_INFO` on an opened directory handle with `OpenOptionsExt::custom_flags(FILE_FLAG_BACKUP_SEMANTICS)`, never unstable std windows_by_handle methods. Capture the returned volume serial and full file ID for deterministic identity/order; propagate unsupported-filesystem or permission failures rather than inventing an alias hash. Platform runtime evidence is recorded separately.
 
 Grounded contract evidence: [^research].
 
@@ -84,16 +86,17 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 
 | Case | Input | Observable result |
 | --- | --- | --- |
-| Overlapping roots | Independent processes use LocalConfig(/data) key a/b and LocalConfig(/data/a) key b | Same physical parent .vtb-cas-lock#0 serializes them |
-| Two-key ordering | Concurrent copy/rename a→b and b→a with subprocess barrier | Physical-directory-ID order/dedupe prevents deadlock; exact data/conflicts asserted |
-| Native platform behavior | Run lock contention on supported Unix/macOS/Windows CI | Blocking/exclusion verified; no process mutex substituted |
+| Physical identity primitive | Open two aliases/overlapping roots for one real directory and acquire its guard in independent subprocesses | Same persistent lock inode/file ID enforces exclusion; no engine mutation routing is claimed yet. |
+| Ordered acquisition primitive | Opposite ordered path vectors include duplicate aliases | Real OS guards deduplicate physical identities and acquire in the same order without deadlock. |
+| Cancellation primitive | Another process holds a lock; cancel a waiting acquisition future, release holder, then reacquire | No orphan waiter takes/retains the lock; all previously acquired guards release. |
+| Native platform behavior | Inline real filesystem/subprocess lock tests on supported Linux/macOS/Windows | OS exclusion and permission failures remain observable; unsupported platform/runtime evidence is stated. |
 
 ## Verification
 
-Record the failing public regression before implementation and the passing result after. Execute each command below in this worktree; the storage target directory is reserved and shared SHM tests use the host lock.
+Characterize real OS lock behavior and filesystem identities before introducing the private adapter, then run inline tests against the actual primitive. Public ObjectStoreEngine overlap/copy/rename acceptance belongs to t03/t04 after routing exists; no fabricated Red or mocked lock is accepted. Execute each command below in this worktree; the storage target directory is reserved and shared SHM tests use the host lock.
 
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo fmt --manifest-path src/rs/Cargo.toml --all --check`
-- `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --test storage_engine_tests`
+- `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --lib local_publication`
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets -- -D warnings`
 
 Record exact exit statuses, native build checkpoint and any platform limitation in verification_evidence. Review closure uses these results, never planning-only structural validation.

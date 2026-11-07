@@ -87,13 +87,13 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 
 - [x] [4486f6fe] storage-completeness:ch07:t01 — Remove R2 from framework backend classifiers (tasks/t01-framework-classifiers.md)
 - [x] [75f18e3b] storage-completeness:ch07:t02 — Delete public R2Config and from_r2 convenience APIs (tasks/t02-withdraw-config-and-exports.md)
-- [~] storage-completeness:ch07:t03 — Reject removed R2 URIs before staging local-path resolution (tasks/t03-staging-reject-r2.md)
+- [!] storage-completeness:ch07:t03 — Reject removed R2 URIs before staging local-path resolution (tasks/t03-staging-reject-r2.md)
 
 **Chapter Recovery Checkpoint:** run every task's focused verification, then correctness review and a fresh quality review before closing this chapter. `/flow:implement storage-completeness ch07-remove-r2-python` executes its ready worksheet.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Classifier and API withdrawal are signed at `4486f6fe` and `75f18e3b`; staging withdrawal and qualification validation are in progress.
+- Classifier and API withdrawal are signed at `4486f6fe` and `75f18e3b`; staging withdrawal and qualification validation await the revised blueprint readiness check.
 - Remaining: ch07:t03 staging scheme/authority validation, followed by chapter documentation sync and independent reviews. Native dispatch/module withdrawal remains assigned to ch08.
 - Documentation: `[0/1 files documented]`, owned by the explicit consolidation tasks.
 - Reclosure of ch01 and downstream acceptance waits for native repair gates; this chapter never depends on that reclosure.
