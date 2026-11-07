@@ -21,8 +21,8 @@ tests:
   - src/py/tests/unit/extensions/test_django_plugin.py
   - src/py/tests/unit/extensions/test_data_storage_integrations.py
 estimated_loc: 210
-plan_revision: 2
-plan_commit: cdb978d3
+plan_revision: 3
+plan_commit: 0acdf576
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -33,7 +33,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+updated_at: "2026-11-07T20:00:00Z"
 commit: null
 sources:
   - id: django-storage-mod
@@ -53,12 +53,12 @@ tags:
 
 ## Objective & Scope Boundary
 
-Refactor `src/py/vertebra/extensions/django/storage.py::DjangoStorage` into a `@deconstructible` subclass of `django.core.files.storage.Storage` that fails closed when `config` and `store` are omitted, returns `django.core.files.base.File` (wrapping `SyncReadableFile`) from `_open`/`open`/`aopen`, removes all private `_memory` dict access, and implements Django's complete file, directory, URL, path, and timestamp contract [^django-storage-mod] [^readable-file-api].
+Refactor `src/py/vertebra/extensions/django/storage.py::DjangoStorage` into a `@deconstructible` subclass of `django.core.files.storage.Storage` that fails closed when `config` and `store` are omitted, returns `django.core.files.base.File` (wrapping `SyncReadableFile`) from `_open`/`open` and async-loaded `aopen`, removes all private `_memory` dict access, and implements Django's complete file, directory, URL, path, and timestamp contract [^django-storage-mod] [^readable-file-api].
 
 ## Bounded Read Manifest
 
 - `src/py/vertebra/extensions/django/storage.py` — Current standalone `DjangoStorage` implementation [^django-storage-mod].
-- `src/py/vertebra/storage/_store.py` — `SyncObjectStore`, `AsyncObjectStore`, `SyncReadableFile`, `LocalConfig`, and `ObjectMetadata` [^readable-file-api].
+- `src/py/vertebra/storage/_store.py` — `SyncObjectStore`, `AsyncObjectStore`, `SyncReadableFile`, `LocalConfig`, and `ObjectMeta` [^readable-file-api].
 - `src/py/tests/unit/extensions/test_django_plugin.py` — Django extension tests.
 - `src/py/tests/unit/extensions/test_data_storage_integrations.py` — Cross-framework storage contract tests.
 - `.agents/skills/python-framework/SKILL.md` — Optional dependency loading (`MissingDependencyError`), typing, and docstring rules.
@@ -72,11 +72,11 @@ Refactor `src/py/vertebra/extensions/django/storage.py::DjangoStorage` into a `@
     - Core hooks & sync/async operations:
       - `_open(self, name: str, mode: str = "rb") -> File` (wraps `SyncReadableFile` in `django.core.files.base.File(readable, name=name)`)
       - `_save(self, name: str, content: IO[bytes] | File | bytes) -> str` (streams via `put_stream` for multi-chunk `File.chunks()` or `put` for bytes)
-      - `aopen`, `asave`, `delete`, `adelete`, `exists`, `aexists`, `size`, `asize`
+      - `aopen` returning a Django `File` over an `io.BytesIO` payload obtained through awaited native `get` (Django `File` has synchronous reads; no blocking native I/O runs on the event loop), `asave`, `delete`, `adelete`, `exists`, `aexists`, `size`, `asize`
       - `listdir(self, path: str) -> tuple[list[str], list[str]]` (uses `store.list_with_delimiter` to return `(directories, filenames)` relative to `path`)
       - `url(self, name: str | None, *, expire: int | None = None) -> str` and `aurl` (uses `store.sign` when `supports_signing`, else `base_url` join, raising `ValueError` if neither is configured)
       - `path(self, name: str) -> str` (returns resolved local filesystem path when backed by `LocalConfig` / `file://`, otherwise raises `NotImplementedError`)
-      - Inherited/overridden `Storage` helpers: `get_available_name` (honoring `file_overwrite` and `max_length`), `generate_filename`, `get_valid_name`, `get_alternative_name`, and UTC `datetime` `get_modified_time`, `get_created_time`, `get_accessed_time` parsed from `ObjectMetadata.last_modified`.
+      - Inherited/overridden `Storage` helpers: `get_available_name` (honoring `file_overwrite` and `max_length`), `generate_filename`, `get_valid_name`, `get_alternative_name`, and UTC `datetime` `get_modified_time`, `get_created_time`, `get_accessed_time` parsed from `ObjectMeta.last_modified`.
 
 ## Edge Cases & Error Semantics
 
@@ -110,7 +110,7 @@ Refactor `src/py/vertebra/extensions/django/storage.py::DjangoStorage` into a `@
 
 ## Notes & Discoveries
 
-- [2026-11-07 04:15] `ObjectMetadata.last_modified` from `vertebra-storage` is RFC 3339 UTC; parse with `datetime.fromisoformat`.
+- [2026-11-07 04:15] `ObjectMeta.last_modified` from `vertebra-storage` is RFC 3339 UTC; parse with `datetime.fromisoformat`.
 
 [^django-storage-mod]: `src/py/vertebra/extensions/django/storage.py::DjangoStorage` — Django storage adapter.
 [^readable-file-api]: `src/py/vertebra/storage/_store.py::SyncReadableFile` — Seekable object-store file reader.

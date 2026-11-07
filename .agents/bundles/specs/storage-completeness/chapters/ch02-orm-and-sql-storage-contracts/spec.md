@@ -11,13 +11,13 @@ depends_on_chapters:
   - ch01-native-engine-and-auth
 replan_trigger: null
 current_task: "storage-completeness:ch02:t01"
-plan_revision: 2
-plan_commit: cdb978d3
+plan_revision: 3
+plan_commit: 0acdf576
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+updated_at: "2026-11-07T20:00:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
@@ -46,7 +46,7 @@ tags:
 # Chapter 02: SQLSpec, Advanced Alchemy, and Django Storage Contracts
 
 <!-- truth: start -->
-- **Fail-Closed Extension Constructors**: `ObjectStoreBackend`, Advanced Alchemy `StorageBackend` / `register_storage_backend`, and `DjangoStorage` raise `ImproperConfigurationError` when no store, config, or URI is supplied instead of defaulting to `"memory://"` [^sqlspec-storage] [^alchemy-storage] [^django-storage].
+- **Fail-Closed Extension Constructors**: `ObjectStoreBackend`, Advanced Alchemy `ObjectStoreBackend(StorageBackend)` / `register_storage_backend`, and `DjangoStorage` raise `ImproperConfigurationError` when no store, config, or URI is supplied instead of defaulting to `"memory://"` [^sqlspec-storage] [^alchemy-storage] [^django-storage].
 - **Zero Monkeypatching in Advanced Alchemy**: `src/py/vertebra/extensions/alchemy/storage.py` registers backends exclusively via `StorageRegistry.register_backend` without mutating `storages.get` [^alchemy-storage].
 - **Real Django Storage Inheritance**: `DjangoStorage` subclasses `django.core.files.storage.Storage` with `@deconstructible`, returns `django.core.files.base.File` from `_open`/`open`/`aopen`, and implements full sync/async file and metadata methods [^django-storage].
 <!-- truth: end -->
@@ -70,14 +70,17 @@ Parent roadmap: [spec.md](../../spec.md); depends on [ch01-native-engine-and-aut
 
 ### 2.1 Chapter Requirements
 
-- **R4 (`ch02:t01`)**: Remove implicit `"memory://"` fallback in `vertebra.extensions.sqlspec.storage.ObjectStoreBackend`; implement sync and async `ObjectStoreProtocol` methods (`read_bytes`, `write_bytes`, `read_text`, `write_text`, `exists`, `delete`, `copy`, `move`, `list_objects`, `list_page`, `get_stream`, `put_stream`, `sign_sync`, `sign_async`, `open`, `get_metadata`) delegating to `SyncObjectStore` / `AsyncObjectStore`; preserve `build_duckdb_gcs_secret_sql`.
-- **R5 (`ch02:t02`)**: Delete `setattr(storages, _storage_get_attr, storages.get_backend)` and `"memory://"` fallbacks from `vertebra.extensions.alchemy.storage`; require an explicit `fs` (`SyncObjectStore | AsyncObjectStore | StorageConfig | str`) in `StorageBackend` and `register_storage_backend`; implement `save_object`, `save_object_async`, `get_object`, `get_object_async`, `delete_object`, `delete_object_async`, `sign`, and `sign_async` without `asyncio.to_thread`.
-- **R6 (`ch02:t03`)**: Refactor `vertebra.extensions.django.storage.DjangoStorage` into a `@deconstructible` subclass of `django.core.files.storage.Storage` (raising `MissingDependencyError` when `django` is absent and `ImproperConfigurationError` when `config` and `store` are omitted), returning `django.core.files.base.File` over `SyncReadableFile` from `_open`/`open`/`aopen` and implementing `_save`, `save`, `asave`, `delete`, `adelete`, `exists`, `aexists`, `size`, `asize`, `listdir`, `url`, `aurl`, `path`, `get_available_name`, `generate_filename`, `get_valid_name`, `get_accessed_time`, `get_created_time`, `get_modified_time`, and `get_alternative_name`.
+- **R4 (`ch02:t01`)**: Remove implicit `"memory://"` fallback in `vertebra.extensions.sqlspec.storage.ObjectStoreBackend`; preserve canonical `ObjectStoreProtocol` `*_sync` / `*_async` methods and unsupported-signing `NotImplementedError`, forward conditional write options, and add `list_page_sync` / `list_page_async`, `get_stream_sync` / `get_stream_async`, `put_stream_sync` / `put_stream_async`, and `open_sync` / `open_async` extensions delegating to `SyncObjectStore` / `AsyncObjectStore`; preserve `build_duckdb_gcs_secret_sql`.
+- **R5 (`ch02:t02`)**: Delete `setattr(storages, _storage_get_attr, storages.get_backend)` and `"memory://"` fallbacks from `vertebra.extensions.alchemy.storage`; require an explicit store target (`SyncObjectStore | AsyncObjectStore | StorageConfig | str`) in `ObjectStoreBackend(StorageBackend)` and `register_storage_backend(store_or_key, *, store, key, prefix, set_default, registry)`, preserving existing helper call forms while rejecting a key-only target; implement `save_object`, `save_object_async`, `get_content`, `get_content_async`, `delete_object`, `delete_object_async`, `sign`, and `sign_async` without `asyncio.to_thread`.
+- **R6 (`ch02:t03`)**: Refactor `vertebra.extensions.django.storage.DjangoStorage` into a `@deconstructible` subclass of `django.core.files.storage.Storage` (raising `MissingDependencyError` when `django` is absent and `ImproperConfigurationError` when `config` and `store` are omitted), returning Django `File` over `SyncReadableFile` from sync `_open`/`open` and an async-loaded `io.BytesIO` from `aopen` and implementing `_save`, `save`, `asave`, `delete`, `adelete`, `exists`, `aexists`, `size`, `asize`, `listdir`, `url`, `aurl`, `path`, `get_available_name`, `generate_filename`, `get_valid_name`, `get_accessed_time`, `get_created_time`, `get_modified_time`, and `get_alternative_name`.
+
+`ObjectStoreBackend` accepts `uri=None` so omitted configuration raises `ImproperConfigurationError`; an explicit `store=` takes precedence. It constructs one primary native store immediately and lazily obtains the shared-engine companion on first opposite-side use. Protocol consumers call canonical `*_sync` / `*_async` methods; native streaming, opaque-cursor pagination, and readable-file handles remain separately named extensions. Relative keys, URI keys, and `base_path` reject traversal segments before I/O.
 
 ### 2.2 Edge-Case & Failure-Mode Matrix
 
 | Boundary | Deterministic Behavior |
 | --- | --- |
+| Unsigned `ObjectStoreBackend.sign_sync` / `sign_async` | Raises `NotImplementedError`, matching installed SQLSpec `ObjectStoreProtocol`. |
 | `ObjectStoreBackend()`, `StorageBackend()`, `register_storage_backend("default")`, or `DjangoStorage()` with no target | Raises `ImproperConfigurationError`. |
 | `DjangoStorage.path(name)` on remote backend (`gs`, `s3`, `r2`, `oci`, `az`, `memory`) | Raises `NotImplementedError` per Django's remote-storage contract; returns resolved local filesystem path on `LocalConfig`. |
 | `DjangoStorage._save(name, content)` when `name` already exists and `max_length` is set | Resolves a non-colliding filename via `Storage.get_available_name(name, max_length=max_length)` before uploading. |
