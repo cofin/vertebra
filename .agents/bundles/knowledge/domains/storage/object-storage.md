@@ -48,10 +48,7 @@ sources:
     title: "RefreshingGcpCredentialProvider over vertebra_core::gcp_auth (src/rs/vertebra-storage/src/gcp_auth.rs)"
   - id: src-vertebra-storage-src-oci-rs
     resource: src/rs/vertebra-storage/src/oci.rs
-    title: "OCI REST v2 ObjectStore and PAR support (src/rs/vertebra-storage/src/oci.rs)"
-  - id: src-vertebra-storage-src-r2-rs
-    resource: src/rs/vertebra-storage/src/r2.rs
-    title: "Cloudflare R2 uniform multipart chunking (src/rs/vertebra-storage/src/r2.rs)"
+    title: "OCI REST v2 ObjectStore, uniform multipart chunking and PAR support (src/rs/vertebra-storage/src/oci.rs)"
   - id: src-vertebra-storage-src-signing-rs
     resource: src/rs/vertebra-storage/src/signing.rs
     title: "Multicloud URL and header signing (src/rs/vertebra-storage/src/signing.rs)"
@@ -96,14 +93,14 @@ Object storage comprises two layers: [`vertebra-storage`](../../../../../src/rs/
 |---|---|---|
 | [`BackendConfig` / `ObjectStoreEngine`](../../../../../src/rs/vertebra-storage/src/store.rs)[^src-vertebra-storage-src-store-rs] | `store.rs` | Wraps `Arc<dyn object_store::ObjectStore>` across `memory`, `file`, `s3`/`b2`, `oci`, `gs`/`gcs`, `az`/`azure`/`abfs`, and `http`/`https`. Exposes `put_opts` (`PutConditionalOptions`: `if_not_exists`, `if_match`, `if_none_match`, `content_type`, `attributes`), `get_stream`, `create_multipart`, `list_page`, `list_with_delimiter`, `rename`, `get_range`, `head`, `exists`, `delete`, `copy`, and `list`. |
 | `PySyncStreamReader` / `PyAsyncStreamReader` (`SyncStreamReader` / `AsyncStreamReader`) | `lib.rs` | Pulls streaming `Bytes` chunks from `ObjectStoreEngine::get_stream` and slices them to optional `chunk_size` bounds as zero-copy `StorageBuffer` views without whole-object buffering. |
-| `MultipartUploadSession` (`PySyncMultipartUpload` / `PyAsyncMultipartUpload`) | `store.rs`, `lib.rs` | Stateful `Box<dyn MultipartUpload>` session (`write_part`, `complete`, `abort`). OCI buffers writes incrementally through `oci.rs::UniformPartAccumulator` and `OCI_UNIFORM_PART_SIZE` (`8 MiB`) without concatenating full payloads into `Vec<u8>`. |
+| `MultipartUploadSession` (`PySyncMultipartUpload` / `PyAsyncMultipartUpload`) | `store.rs`, `lib.rs`, [`oci.rs`](../../../../../src/rs/vertebra-storage/src/oci.rs)[^src-vertebra-storage-src-oci-rs] | Stateful `Box<dyn MultipartUpload>` session (`write_part`, `complete`, `abort`). OCI buffers writes incrementally through `oci.rs::UniformPartAccumulator` and `OCI_UNIFORM_PART_SIZE` (`8 MiB`) without concatenating full payloads into `Vec<u8>`. |
 | `RefreshingGcpCredentialProvider` | `gcp_auth.rs` | Bridges `Arc<vertebra_core::gcp_auth::GcpTokenCache>` (`GCS_OAUTH_SCOPES`) into `GoogleCloudStorageBuilder::with_credentials(...)` when no static `service_account_path` or `service_account_key` is configured. |
 | [`OciObjectStore`](../../../../../src/rs/vertebra-storage/src/oci.rs)[^src-vertebra-storage-src-oci-rs] | `oci.rs` | Native `ObjectStore` over OCI Object Storage REST v2 (`/n/{ns}/b/{bucket}/o/{name}`, pre-authenticated `par_url`, RSA-SHA256 Cavage request signing, and `OciMultipartUpload`). |
 | `PySyncObjectStore` / `PyAsyncObjectStore` / `RustTaskAwaitable` | `lib.rs` | Frozen PyO3 classes (`SyncObjectStore` / `AsyncObjectStore`) whose `.to_async()` and `.to_sync()` methods clone the shared `ObjectStoreEngine` (`Arc`), keeping `InMemory` namespaces and HTTP pools unified across sync and async callers. |
 
 Module signing functions exported by `_storage`: `py_sign_hmac_url`, `py_verify_hmac_url`, `py_sign_s3_v4_url`, `py_verify_s3_v4_url`, `py_sign_aws_sigv4_headers`, `py_sign_gcs_v4_iam_url`, `py_sign_gcs_v4_iam_url_async`, `build_gcs_v4_canonical_request`, `assemble_gcs_iam_v4_url`, `py_sign_oci_cavage_headers`, `sign_oci_par_url`, `py_sign_azure_sas_url`.
 
-Native Rust and Python store constructors reject `r2://`; module registration, `py_chunk_r2_uniform_parts` and its stub export are absent. Generic S3 endpoints and OCI uniform multipart behavior remain supported. The unreferenced `r2.rs` source file awaits its separate deletion and provenance cleanup task. [^src-vertebra-storage-src-store-rs] [^src-vertebra-storage-src-lib-rs] [^src-storage-pyi]
+Native Rust and Python store constructors reject `r2://`; the native R2 module, `py_chunk_r2_uniform_parts` and its stub export are absent. Generic S3 endpoints remain supported, and uniform multipart accumulation belongs to OCI. [^src-vertebra-storage-src-store-rs] [^src-vertebra-storage-src-lib-rs] [^src-storage-pyi] [^src-vertebra-storage-src-oci-rs]
 
 ## 2. Signing (`signing.rs`, `oci.rs`)
 
@@ -182,8 +179,7 @@ Django `_save` performs one native upload attempt; public `save` retries through
 [^src-storage-pyi]: `src/py/vertebra/_storage.pyi` — Python type stub for vertebra._storage.
 [^src-vertebra-storage-src-store-rs]: `src/rs/vertebra-storage/src/store.rs` — ObjectStoreEngine and MultipartUploadSession (src/rs/vertebra-storage/src/store.rs).
 [^src-vertebra-storage-src-gcp-auth-rs]: `src/rs/vertebra-storage/src/gcp_auth.rs` — RefreshingGcpCredentialProvider over vertebra_core::gcp_auth (src/rs/vertebra-storage/src/gcp_auth.rs).
-[^src-vertebra-storage-src-oci-rs]: `src/rs/vertebra-storage/src/oci.rs` — OCI REST v2 ObjectStore and PAR support (src/rs/vertebra-storage/src/oci.rs).
-[^src-vertebra-storage-src-r2-rs]: `src/rs/vertebra-storage/src/r2.rs` — Cloudflare R2 uniform multipart chunking (src/rs/vertebra-storage/src/r2.rs).
+[^src-vertebra-storage-src-oci-rs]: `src/rs/vertebra-storage/src/oci.rs` — OCI REST v2 ObjectStore, uniform multipart chunking and PAR support (src/rs/vertebra-storage/src/oci.rs).
 [^src-vertebra-storage-src-signing-rs]: `src/rs/vertebra-storage/src/signing.rs` — Multicloud URL and header signing (src/rs/vertebra-storage/src/signing.rs).
 [^src-vertebra-storage-tests-storage-engine-tests-rs]: `src/rs/vertebra-storage/tests/storage_engine_tests.rs` — Rust integration tests for vertebra-storage (src/rs/vertebra-storage/tests/storage_engine_tests.rs).
 [^src-storage-init-py]: `src/py/vertebra/storage/__init__.py` — Public vertebra.storage exports (src/py/vertebra/storage/__init__.py).
