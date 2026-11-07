@@ -5,7 +5,7 @@ chapter_id: ch01-wheel-scaffold-and-config
 title: Scaffold vertebra-postgres Cargo manifest, build script, and free-threaded PyO3 module
 description: Create src/rs/vertebra-postgres/Cargo.toml with complete locked dependency pins, build.rs with PyO3 cfg/rpath setup, and src/lib.rs exporting gil_used=false vertebra._postgres metadata constants prior to workspace registration.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: static_validation
 depends_on: []
@@ -25,17 +25,21 @@ estimated_loc: 120
 plan_revision: 6
 plan_commit: 8833b064
 state_revision: 0
-claimed_by: agent:pg-prerequisite-repair
-claimed_at: "2026-11-07T22:33:25Z"
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: "Declared TOML assertions, rustfmt --edition 2024 --check, cargo check --workspace --locked (baseline and final), git diff --check: exit 0; Cargo workspace manifest and lock unchanged."
+last_verified_at: "2026-11-07T22:40:44Z"
+last_verified_commit: d809be01
+verification_evidence:
+  - "Direct fallible-iterator =0.2.0 manifest and lock-edge assertions: exit 0; all existing package/version/source/checksum identities unchanged."
+  - "UV_NO_SYNC=1; PYO3_PYTHON=${PWD}/.venv/bin/python; CARGO_TARGET_DIR=/tmp/vtb-cargo-target."
+  - "Workspace cargo check --locked: exit 0; workspace all-target Clippy --features tls,compression,gcp --locked -- -D warnings: exit 0."
+  - "flock /tmp/vertebra-flow-shm-tests.lock cargo test -p vertebra-postgres --locked: exit 0; 9 codec and 7 configuration tests."
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T16:40:00Z"
-commit: null
+updated_at: "2026-11-07T22:40:44Z"
+commit: d809be01
 sources:
   - id: ws-cargo
     resource: src/rs/Cargo.toml
@@ -63,7 +67,7 @@ tags:
 
 ## Objective & Scope Boundary
 
-The native crate, build script, metadata exports, and workspace registration satisfy the scaffold contracts below. The remaining task-01 delta declares `fallible-iterator = "=0.2.0"` directly in the existing crate manifest, paired atomically with task 02's existing-version lock edge. No library/build-script changes or new Python exports belong to this prerequisite repair. All complete dependency, feature-isolation, and free-threaded scaffold contracts remain required.
+The native crate, build script, metadata exports, and workspace registration satisfy the scaffold contracts below. The task-01 manifest declares `fallible-iterator = "=0.2.0"` directly in the existing crate manifest, paired atomically with task 02's existing-version lock edge. No library/build-script changes or new Python exports belong to this prerequisite repair. All complete dependency, feature-isolation, and free-threaded scaffold contracts remain required.
 
 ## Bounded Read Manifest
 
@@ -173,7 +177,7 @@ Tasks 01 and 02 share one signed source commit, `fix(postgres): declare diagnost
 
 ## Acceptance Criteria
 
-- [ ] The direct `fallible-iterator = "=0.2.0"` prerequisite is present and its existing-version lock edge passes the static native delta gates (R1).
+- [x] The direct `fallible-iterator = "=0.2.0"` prerequisite is present and its existing-version lock edge passes the static native delta gates (R1).
 
 - [x] `src/rs/vertebra-postgres/Cargo.toml` declares `_postgres` (`cdylib` + `rlib`), `postgres-protocol = "=0.6.12"`, `x509-parser = "=0.18.1"` (`default-features = false`), `rsa` `["pem", "sha2"]`, `rustls-pemfile`, `half = "=2.7.1"`, `arrow-{array,buffer,ipc,schema} = "=60.1.0"`, and dev-only `tokio-postgres = "=0.7.18"` (R1).
 - [x] `src/rs/vertebra-postgres/build.rs` and `src/rs/vertebra-postgres/src/lib.rs` (`#[pymodule(gil_used = false)] fn _postgres` exporting `FREE_THREADED`, `GIL_USED`, `__version__`) pass `rustfmt --edition 2024 --check` (R1).

@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-07] prerequisite-verified | Native PostgreSQL diagnostic iterator
+
+- Signed source `d809be01` contains exactly the crate's direct `fallible-iterator = "=0.2.0"` declaration and its existing-version Cargo lock edge. Both existing chapter 01 owners bind their completion receipts to that SHA.
+- Exact manifest/lock assertions, unchanged package/version/source/checksum identities, locked workspace check, workspace all-target Clippy with `tls,compression,gcp` and `-D warnings`, and all 16 current Rust tests pass. Fresh correctness and independent quality review remain before upstream closeout and session-prototype restoration.
+
 ## [2026-11-07] flow-revise | Native PostgreSQL diagnostic iterator prerequisite
 
 - Chapter 02 session compilation demonstrates that `postgres-protocol` diagnostics require the direct `fallible-iterator` trait dependency and `ErrorField::type_` / `value_bytes` APIs. Revision 6 at `8833b064` assigns the two-file prerequisite delta to the existing chapter 01 manifest/lock owners, clears upstream review, and holds downstream session execution until fresh review.

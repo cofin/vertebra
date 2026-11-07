@@ -9,11 +9,11 @@ state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: "native-postgres-driver:ch01:t01"
+current_task: null
 plan_revision: 6
 plan_commit: 8833b064
 state_revision: 1
-last_verified_checkpoint: 76828ae6
+last_verified_checkpoint: d809be01
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-07T21:53:16Z"
@@ -145,8 +145,8 @@ Progress: `[0/0 files documented in ch01]` (`src/py/vertebra/_postgres.pyi` modu
 
 ## 5. Implementation Plan
 
-- [~] native-postgres-driver:ch01:t01 — Scaffold vertebra-postgres Cargo manifest, build script, and free-threaded PyO3 module (tasks/t01-crate-and-pymodule-scaffold.md)
-- [~] native-postgres-driver:ch01:t02 — Register workspace member, add vertebra-db socket2/half pins, and lock Cargo.lock (tasks/t02-workspace-and-db-cargo-lock.md)
+- [x] [d809be01] native-postgres-driver:ch01:t01 — Scaffold vertebra-postgres Cargo manifest, build script, and free-threaded PyO3 module (tasks/t01-crate-and-pymodule-scaffold.md)
+- [x] [d809be01] native-postgres-driver:ch01:t02 — Register workspace member, add vertebra-db socket2/half pins, and lock Cargo.lock (tasks/t02-workspace-and-db-cargo-lock.md)
 - [x] [05fff946] native-postgres-driver:ch01:t03 — Wire vertebra-postgres wheel, _postgres.pyi stub, and Makefile build/test targets (tasks/t03-wheel-stub-and-makefile-matrix.md)
 - [x] [dabd3ca2] native-postgres-driver:ch01:t04 — Implement pure PostgresConfig validation and sanitized PostgresError categories (tasks/t04-configuration-and-error-categories.md)
 
@@ -154,8 +154,8 @@ Progress: `[0/0 files documented in ch01]` (`src/py/vertebra/_postgres.pyi` modu
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ 8833b064`; chapter `state: active`, `planning_status: complete`, `last_reviewed_commit: null`.
-- **Task State**: Tasks 01 and 02 own the coupled manifest/lock prerequisite delta; tasks 03 and 04 retain completed receipts.
+- **Verified Baseline**: `HEAD @ d809be01`; chapter `state: active`, all four task receipts are complete.
+- **Task State**: The coupled prerequisite delta is verified at `d809be01`; tasks 03 and 04 retain their existing completed receipts.
 - **Verification & Review**: The targeted prerequisite checkpoint and fresh correctness/quality review reclose this chapter before downstream session execution.
 - **Documentation**: `[0/0 files documented in ch01]`; full driver guides remain assigned to chapter 30.
 - **Downstream Resume**: Chapter 02 task 01 is complete; task 02 waits for the new upstream review stamp.

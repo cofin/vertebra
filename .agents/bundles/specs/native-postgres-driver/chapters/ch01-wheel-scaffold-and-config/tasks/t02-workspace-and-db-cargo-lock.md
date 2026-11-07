@@ -5,7 +5,7 @@ chapter_id: ch01-wheel-scaffold-and-config
 title: Register workspace member, add vertebra-db socket2/half pins, and lock Cargo.lock
 description: Register vertebra-postgres in src/rs/Cargo.toml, add socket2 =0.6.5 and half =2.7.1 to src/rs/vertebra-db/Cargo.toml, and resolve src/rs/Cargo.lock so workspace builds pass with --locked.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: static_validation
 depends_on:
@@ -25,17 +25,21 @@ estimated_loc: 45
 plan_revision: 6
 plan_commit: 8833b064
 state_revision: 1
-claimed_by: agent:pg-prerequisite-repair
-claimed_at: "2026-11-07T22:33:25Z"
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: "exit 0: manifest assertions; pre-existing lock package/version identities preserved; workspace cargo check --locked; workspace all-targets Clippy --features tls,compression,gcp --locked -- -D warnings; crate cargo test --locked. PYO3_PYTHON=${PWD}/.venv/bin/python; CARGO_TARGET_DIR=/tmp/vtb-cargo-target; UV_NO_SYNC=1."
+last_verified_at: "2026-11-07T22:40:44Z"
+last_verified_commit: d809be01
+verification_evidence:
+  - "Direct fallible-iterator =0.2.0 manifest and lock-edge assertions: exit 0; all existing package/version/source/checksum identities unchanged."
+  - "UV_NO_SYNC=1; PYO3_PYTHON=${PWD}/.venv/bin/python; CARGO_TARGET_DIR=/tmp/vtb-cargo-target."
+  - "Workspace cargo check --locked: exit 0; workspace all-target Clippy --features tls,compression,gcp --locked -- -D warnings: exit 0."
+  - "flock /tmp/vertebra-flow-shm-tests.lock cargo test -p vertebra-postgres --locked: exit 0; 9 codec and 7 configuration tests."
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T20:16:22.351888+00:00"
-commit: null
+updated_at: "2026-11-07T22:40:44Z"
+commit: d809be01
 sources:
   - id: ws-cargo
     resource: src/rs/Cargo.toml
@@ -57,7 +61,7 @@ tags:
 
 ## Objective & Scope Boundary
 
-Workspace membership and the shared `socket2`/`half` pins satisfy the contracts below. The remaining task-02 delta records the direct `fallible-iterator` edge for `vertebra-postgres` at its existing locked version `0.2.0`, paired atomically with task 01's crate-manifest declaration. Workspace and `vertebra-db` manifests retain their verified contents; unrelated package identities stay unchanged.
+Workspace membership and the shared `socket2`/`half` pins satisfy the contracts below. The task-02 lock entry records the direct `fallible-iterator` edge for `vertebra-postgres` at its existing locked version `0.2.0`, paired atomically with task 01's crate-manifest declaration. Workspace and `vertebra-db` manifests retain their verified contents; unrelated package identities stay unchanged.
 
 ## Bounded Read Manifest
 
@@ -125,7 +129,7 @@ Tasks 01 and 02 share one signed source commit, `fix(postgres): declare diagnost
 
 ## Acceptance Criteria
 
-- [ ] The direct `fallible-iterator = "=0.2.0"` prerequisite is present and its existing-version lock edge passes the static native delta gates (R1).
+- [x] The direct `fallible-iterator = "=0.2.0"` prerequisite is present and its existing-version lock edge passes the static native delta gates (R1).
 
 - [x] `src/rs/Cargo.toml` includes `"vertebra-postgres"` in `[workspace].members` and `src/rs/vertebra-db/Cargo.toml` pins `socket2 = { version = "=0.6.5", features = ["all"] }` and `half = "=2.7.1"` (R1).
 - [x] `src/rs/Cargo.lock` is committed in sync such that `cargo check --manifest-path src/rs/Cargo.toml --workspace --locked` and `--locked` workspace Clippy exit `0` (R1).

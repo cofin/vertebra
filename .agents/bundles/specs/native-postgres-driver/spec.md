@@ -39,7 +39,7 @@ chapters:
   - ch30-user-and-domain-docs
   - ch31-final-review-and-release-gate
 current_chapter: ch01-wheel-scaffold-and-config
-current_task: "native-postgres-driver:ch01:t01"
+current_task: null
 parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
@@ -47,7 +47,7 @@ research:
 plan_revision: 6
 plan_commit: 8833b064
 state_revision: 2
-last_verified_checkpoint: 76828ae6
+last_verified_checkpoint: d809be01
 last_reviewed_chapter: null
 last_reviewed_commit: null
 created_at: "2026-11-03T04:05:00Z"
@@ -326,10 +326,10 @@ Every worksheet (`111` total across `31` chapters) executes within its bounded o
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ 8833b064`; flow `state: active`, `plan_revision: 6`, `plan_commit: 8833b064`.
-- **Current Ownership**: Chapter 01 tasks 01 and 02 own the coupled direct-dependency/lock-edge prerequisite; tasks 03 and 04 remain complete. Upstream review is open.
+- **Verified Baseline**: `HEAD @ d809be01`; flow `state: active`, `plan_revision: 6`, `plan_commit: 8833b064`.
+- **Current Ownership**: Chapter 01 has four completed task receipts and awaits fresh correctness and quality review of the coupled prerequisite delta.
 - **Downstream State**: Chapter 02 codec task 01 is complete at `a00c3248`; session task 02 is blocked until chapter 01 passes fresh correctness and quality review.
-- **Full Plan**: All 31 chapters and 111 tasks retain their scope; 3 task receipts remain completed while the two existing prerequisite owners are active.
+- **Full Plan**: All 31 chapters and 111 tasks retain their scope; 5 task receipts are completed. The existing chapter 01 review gate remains open.
 - **Documentation**: `[0/11 files documented]`; chapter 30 owns full driver guides and knowledge synchronization.
 - **Next Action**: Complete the chapter 01 prerequisite delta and review, then resume `/flow:implement native-postgres-driver ch02-wire-codec-and-session-startup`.
 
