@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-07] chapter-complete | Native PostgreSQL wire startup
+
+- Correctness and fresh independent quality review approve `3364250d..27b5a9e5` with no findings. All 54 tests, locked all-target Clippy, formatting, bundle/link/privacy validation, task receipts, and whitespace checks pass.
+- Close chapter 02 at `27b5a9e5` and advance to chapter 03; 8/111 tasks and 2/31 chapters are complete. User authorization retains all 31 chapters through final acceptance and archive.
+
 ## [2026-11-07] review-remediation | Bound native PostgreSQL TLS fixture waits
 
 - Correctness re-verification approves `3364250d..a33a8235` with all 54 tests and locked Clippy passing. Its sole minor test finding adds a 30-second independent monotonic watchdog inside paused-clock peer-stage waits at `ad8be7b6`; controlled virtual deadline assertions remain unchanged.

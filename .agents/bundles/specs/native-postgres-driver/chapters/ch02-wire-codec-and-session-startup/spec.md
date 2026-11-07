@@ -5,7 +5,7 @@ chapter_id: ch02-wire-codec-and-session-startup
 title: "Chapter 02: Bounded Protocol 3.0 Framing, Session Lifecycle, SSLRequest TLS, and Password/MD5 Auth"
 description: Implement bounded 16 MiB PostgreSQL Protocol 3.0 framing, SessionHandle/PendingSession startup publication ownership, SSLRequest rustls negotiation, and cleartext/MD5 startup authentication.
 status: stable
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch01-wheel-scaffold-and-config
@@ -15,13 +15,16 @@ plan_revision: 6
 plan_commit: 8833b064
 state_revision: 5
 last_verified_checkpoint: ad8be7b6
-last_reviewed_commit: null
+last_reviewed_commit: 27b5a9e5
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-07T23:44:42Z"
 generated:
   by: flow-revise
   at: "2026-11-07T05:00:00Z"
 verified:
+  - by: agent:postgres-ch02-correctness-and-fresh-quality
+    at: "2026-11-07T23:56:35Z"
+    commit: 27b5a9e5
   - by: agent:plan-generator
     at: "2026-11-07T05:00:00Z"
     commit: dd432f18
@@ -162,10 +165,10 @@ Progress: `[0/0 files documented in ch02]` (all new symbols in `protocol.rs`, `t
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Baseline**: Checkpoint `ad8be7b6` passes all 54 Rust tests (`9` codec, `13` auth, `10` TLS, `22` wire/config/error) under the shared SHM test lock and locked all-target Clippy with `-D warnings`; upstream chapter 01 remains complete and reviewed at `3d68c853`.
-- **Task State**: All four tasks are complete at `a00c3248`, `81791de2`, `ad8be7b6`, and `c5173f1b`. The chapter remains `active` with `current_task: null` and `last_reviewed_commit: null` pending renewed correctness and fresh independent quality review.
+- **Task State**: All four tasks are complete at `a00c3248`, `81791de2`, `ad8be7b6`, and `c5173f1b`. The chapter is `completed` with `current_task: null`; correctness and fresh independent quality review approve `27b5a9e5`.
 - **Shared Contracts**: Bounded framing, fully consumed lazy diagnostic bodies, owned session publication, mode-specific TLS verification, and credential-safe trust/password/MD5 authentication retain their declared phase and error behavior. Controlled Tokio time, peer barriers, and independent stage watchdogs prove the reserved TLS deadline remains pending at 249 ms and terminal at 251 ms, without a wall-clock threshold.
 - **Documentation**: `[0/0 files documented in ch02]`; chapter 30 retains full driver guides and knowledge synchronization.
-- **Next Action**: Run `/flow:review native-postgres-driver`; advance to chapter 03 only after correctness and fresh independent quality review pass.
+- **Next Action**: Continue `/flow:implement native-postgres-driver` with chapter 03 SCRAM and channel binding.
 
 [^rs-transport]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP and `rustls` TLS upgrade stream primitives.
 [^proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — Protocol 3.0 framing, `SSLRequest`, and auth state machine analysis.
