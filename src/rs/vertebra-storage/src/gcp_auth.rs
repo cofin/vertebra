@@ -1,4 +1,4 @@
-//! Active GCP Application Default Credentials (ADC) token cache and `RefreshingGcpCredentialProvider`.
+//! Google Cloud Storage OAuth2 scopes and `RefreshingGcpCredentialProvider` over `vertebra_core::gcp_auth::GcpTokenCache`.
 
 use std::sync::Arc;
 
@@ -6,11 +6,8 @@ use async_trait::async_trait;
 use object_store::CredentialProvider;
 use object_store::gcp::GcpCredential;
 
-pub use vertebra_core::gcp_auth::{
-    DEFAULT_GCP_SCOPES, DEFAULT_REFRESH_SKEW_MS, GCLOUD_CLI_TIMEOUT, GcpAuthSource, GcpTokenCache,
-    GcpTokenSnapshot, ProxyPolicy, ServiceAccountKey, current_unix_ms, default_gcloud_binary,
-    discover_adc_file_path, extract_adc_service_account_key, parse_service_account_key_json,
-};
+#[allow(unused_imports)]
+pub(crate) use vertebra_core::gcp_auth::{GcpTokenCache, GcpTokenSnapshot, current_unix_ms};
 
 pub const GCS_OAUTH_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/devstorage.full_control",
@@ -57,37 +54,30 @@ impl CredentialProvider for RefreshingGcpCredentialProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+    use vertebra_core::gcp_auth::{DEFAULT_REFRESH_SKEW_MS, GcpAuthSource, ProxyPolicy};
 
-    async fn spawn_mock_oauth_server(
-        expires_in_secs: Arc<AtomicU64>,
-    ) -> (String, Arc<AtomicUsize>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+    #[tokio::test]
+    async fn test_refreshing_gcp_credential_provider_get_credential() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
         let counter = Arc::new(AtomicUsize::new(0));
-        let counter_clone = counter.clone();
+        let counter_clone = Arc::clone(&counter);
 
         tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
-                let c = counter_clone.clone();
-                let exp = expires_in_secs.clone();
+                let c = Arc::clone(&counter_clone);
                 tokio::spawn(async move {
-                    let mut buf = [0u8; 4096];
+                    let mut buf = [0u8; 2048];
                     let _ = stream.read(&mut buf).await;
-                    let req_str = String::from_utf8_lossy(&buf);
                     let call_no = c.fetch_add(1, Ordering::SeqCst) + 1;
-                    let body = if req_str.contains(":generateAccessToken") {
-                        format!(
-                            r#"{{"accessToken":"mock-oauth-token-imp-{call_no}","expireTime":"2099-01-01T00:00:00Z"}}"#
-                        )
-                    } else {
-                        let ttl = exp.load(Ordering::SeqCst);
-                        format!(
-                            r#"{{"access_token":"mock-oauth-token-{call_no}","expires_in":{ttl},"token_type":"Bearer"}}"#
-                        )
-                    };
+                    let body = format!(
+                        r#"{{"access_token":"tok_{call_no}","expires_in":3600,"token_type":"Bearer"}}"#
+                    );
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
@@ -98,81 +88,74 @@ mod tests {
             }
         });
 
-        (format!("http://127.0.0.1:{}", addr.port()), counter)
-    }
-
-    #[tokio::test]
-    async fn test_proactive_skew_and_single_flight_refresh() {
-        let expires_in = Arc::new(AtomicU64::new(3600));
-        let (base_url, calls) = spawn_mock_oauth_server(expires_in.clone()).await;
-
         let cache = Arc::new(GcpTokenCache::with_proxy_policy(
             GcpAuthSource::AuthorizedUser {
                 client_id: "cid".to_string(),
                 client_secret: "csec".to_string(),
                 refresh_token: "rtok".to_string(),
                 quota_project_id: Some("proj-1".to_string()),
-                token_uri: format!("{base_url}/token"),
+                token_uri: format!("http://127.0.0.1:{}/token", addr.port()),
             },
             DEFAULT_REFRESH_SKEW_MS,
             ProxyPolicy::Direct,
         ));
 
-        let mut handles = Vec::new();
-        for _ in 0..16 {
-            let c = cache.clone();
-            handles.push(tokio::spawn(
-                async move { c.get_or_refresh().await.unwrap() },
-            ));
-        }
-        for h in handles {
-            let snap = h.await.unwrap();
-            assert_eq!(snap.access_token, "mock-oauth-token-1");
-            assert_eq!(snap.generation, 1);
-            assert_eq!(snap.quota_project_id.as_deref(), Some("proj-1"));
-        }
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let provider = RefreshingGcpCredentialProvider::new(Arc::clone(&cache));
+        assert!(Arc::ptr_eq(provider.cache(), &cache));
 
-        expires_in.store(240, Ordering::SeqCst);
+        let cred = provider.get_credential().await.expect("get_credential");
+        assert_eq!(cred.bearer, "tok_1");
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+
         cache.invalidate(1);
-        cache.invalidate(1);
-
-        let snap2 = cache.get_or_refresh().await.unwrap();
-        assert_eq!(snap2.access_token, "mock-oauth-token-2");
-        assert_eq!(snap2.generation, 2);
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-
-        let snap3 = cache.get_or_refresh().await.unwrap();
-        assert_eq!(snap3.access_token, "mock-oauth-token-3");
-        assert_eq!(snap3.generation, 3);
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        let refreshed = provider
+            .get_credential()
+            .await
+            .expect("refreshed get_credential");
+        assert_eq!(refreshed.bearer, "tok_2");
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
-    async fn test_impersonated_service_account_refresh() {
-        let expires_in = Arc::new(AtomicU64::new(3600));
-        let (base_url, calls) = spawn_mock_oauth_server(expires_in).await;
+    async fn test_refreshing_gcp_credential_provider_propagates_auth_error() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let body = r#"{"error":"invalid_grant"}"#;
+                let resp = format!(
+                    "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
 
         let cache = Arc::new(GcpTokenCache::with_proxy_policy(
-            GcpAuthSource::ImpersonatedServiceAccount {
-                base: Box::new(GcpAuthSource::MetadataServer {
-                    service_account: "default".to_string(),
-                    quota_project_id: None,
-                    endpoint: base_url.clone(),
-                    scopes: Vec::new(),
-                }),
-                target_service_account: "sa@proj.iam.gserviceaccount.com".to_string(),
-                iam_endpoint: base_url,
-                scopes: vec!["https://www.googleapis.com/auth/cloud-platform".to_string()],
-                quota_project_id: Some("proj".to_string()),
+            GcpAuthSource::AuthorizedUser {
+                client_id: "cid".to_string(),
+                client_secret: "csec".to_string(),
+                refresh_token: "bad".to_string(),
+                quota_project_id: None,
+                token_uri: format!("http://127.0.0.1:{}/token", addr.port()),
             },
             DEFAULT_REFRESH_SKEW_MS,
             ProxyPolicy::Direct,
         ));
-
         let provider = RefreshingGcpCredentialProvider::new(cache);
-        let cred = provider.get_credential().await.unwrap();
-        assert_eq!(cred.bearer, "mock-oauth-token-imp-2");
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let err = provider
+            .get_credential()
+            .await
+            .expect_err("403 must fail get_credential");
+        assert!(matches!(
+            err,
+            object_store::Error::Generic { store: "GCS", .. }
+        ));
     }
 }

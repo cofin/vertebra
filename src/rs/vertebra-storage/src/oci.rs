@@ -1,4 +1,4 @@
-//! Native Oracle Cloud Infrastructure (OCI) Object Storage v2 REST backend and Cavage RSA-SHA256 signing.
+//! Native Oracle Cloud Infrastructure (OCI) Object Storage v2 REST backend, PAR URL builder, and Cavage RSA-SHA256 signing.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -19,14 +19,15 @@ use object_store::{
     Result as StoreResult, UploadPart,
 };
 use rsa::RsaPrivateKey;
-use rsa::pkcs1::DecodeRsaPrivateKey;
 use rsa::pkcs1v15::SigningKey;
-use rsa::pkcs8::DecodePrivateKey;
 use rsa::signature::{SignatureEncoding, Signer};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 
+use crate::signing::{
+    SigningError, parse_rsa_private_key, rfc3986_encode, validate_expires_in_secs,
+};
 use crate::store::StorageError;
 
 pub use crate::r2::{R2_UNIFORM_PART_SIZE, chunk_uniform_parts};
@@ -42,6 +43,81 @@ pub fn sha256_base64(body: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(body);
     BASE64_STANDARD.encode(hasher.finalize())
+}
+
+/// Configuration for building an OCI Object Storage Pre-Authenticated Request (PAR) URL.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OciParConfig {
+    pub region: String,
+    pub namespace: String,
+    pub bucket: String,
+    pub par_token: String,
+    pub endpoint: Option<String>,
+}
+
+fn normalize_oci_par_token(par_token: &str) -> Result<String, SigningError> {
+    let trimmed = par_token.trim().trim_matches('/');
+    let raw = trimmed
+        .strip_prefix("p/")
+        .unwrap_or(trimmed)
+        .trim_matches('/');
+    if raw.is_empty() {
+        return Err(SigningError::InvalidKey(
+            "OCI PAR token must not be empty".to_string(),
+        ));
+    }
+    Ok(rfc3986_encode(raw, true))
+}
+
+/// Construct a deterministic OCI Object Storage Pre-Authenticated Request (PAR) URL with RFC 3986 key escaping and expiry bounds check.
+pub fn build_oci_par_url(
+    config: &OciParConfig,
+    object_key: &str,
+    expires_in_secs: u64,
+) -> Result<String, SigningError> {
+    validate_expires_in_secs(expires_in_secs)?;
+    let encoded_token = normalize_oci_par_token(&config.par_token)?;
+    let namespace = config.namespace.trim();
+    if namespace.is_empty() {
+        return Err(SigningError::InvalidInput(
+            "empty OCI namespace".to_string(),
+        ));
+    }
+    let bucket = config.bucket.trim();
+    if bucket.is_empty() {
+        return Err(SigningError::InvalidInput("empty OCI bucket".to_string()));
+    }
+    let trimmed_key = object_key.trim_start_matches('/');
+    if trimmed_key.is_empty() {
+        return Err(SigningError::InvalidInput(
+            "empty OCI object_key".to_string(),
+        ));
+    }
+
+    let base_endpoint = if let Some(ep) = config
+        .endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Url::parse(ep)
+            .map_err(|e| SigningError::InvalidInput(format!("invalid OCI endpoint `{ep}`: {e}")))?;
+        ep.trim_end_matches('/').to_string()
+    } else {
+        let region = config.region.trim();
+        if region.is_empty() {
+            return Err(SigningError::InvalidInput("empty OCI region".to_string()));
+        }
+        format!("https://objectstorage.{region}.oraclecloud.com")
+    };
+
+    let encoded_ns = rfc3986_encode(namespace, true);
+    let encoded_bkt = rfc3986_encode(bucket, true);
+    let encoded_key = rfc3986_encode(trimmed_key, true);
+
+    Ok(format!(
+        "{base_endpoint}/p/{encoded_token}/n/{encoded_ns}/b/{encoded_bkt}/o/{encoded_key}"
+    ))
 }
 
 /// OCI `draft-cavage-http-signatures-08` credentials.
@@ -65,14 +141,12 @@ impl OciCavageCredentials {
         )
     }
 
-    fn parse_private_key(&self) -> Result<RsaPrivateKey, StorageError> {
-        RsaPrivateKey::from_pkcs8_pem(&self.private_key_pem)
-            .or_else(|_| RsaPrivateKey::from_pkcs1_pem(&self.private_key_pem))
-            .map_err(|e| StorageError::Signing(format!("invalid OCI RSA private key PEM: {e}")))
+    fn parse_private_key(&self) -> Result<RsaPrivateKey, SigningError> {
+        parse_rsa_private_key(&self.private_key_pem)
     }
 }
 
-/// Signed HTTP headers produced by `sign_oci_cavage_request`.
+/// Signed HTTP headers produced by `sign_oci_request_headers` and `sign_oci_cavage_request`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OciSignedHeaders {
     pub authorization: String,
@@ -83,34 +157,53 @@ pub struct OciSignedHeaders {
     pub content_length: Option<String>,
 }
 
-/// Sign an OCI REST v2 HTTP request using `draft-cavage-http-signatures-08` (`rsa-sha256`).
-pub fn sign_oci_cavage_request(
+/// Sign an OCI REST v2 HTTP request target and headers using `draft-cavage-http-signatures-08` (`rsa-sha256`).
+pub fn sign_oci_request_headers(
     creds: &OciCavageCredentials,
     method: &str,
     url_str: &str,
     body: Option<&[u8]>,
     content_type: Option<&str>,
     now_unix: i64,
-) -> Result<OciSignedHeaders, StorageError> {
+) -> Result<OciSignedHeaders, SigningError> {
+    if creds.tenancy_ocid.trim().is_empty() || creds.fingerprint.trim().is_empty() {
+        return Err(SigningError::InvalidKey(
+            "missing OCI tenancy_ocid or fingerprint".to_string(),
+        ));
+    }
+    if !creds.tenancy_ocid.starts_with("ST$") && creds.user_ocid.trim().is_empty() {
+        return Err(SigningError::InvalidKey(
+            "missing OCI user_ocid".to_string(),
+        ));
+    }
     let parsed = Url::parse(url_str)
-        .map_err(|e| StorageError::InvalidUrl(url_str.to_string(), e.to_string()))?;
+        .map_err(|e| SigningError::InvalidInput(format!("invalid OCI URL `{url_str}`: {e}")))?;
+    let host_only = parsed
+        .host_str()
+        .filter(|h| !h.is_empty())
+        .ok_or_else(|| SigningError::InvalidInput("missing OCI host".to_string()))?;
     let host = match parsed.port() {
-        Some(port) => format!("{}:{}", parsed.host_str().unwrap_or_default(), port),
-        None => parsed.host_str().unwrap_or_default().to_string(),
+        Some(port)
+            if (parsed.scheme() == "http" && port != 80)
+                || (parsed.scheme() == "https" && port != 443) =>
+        {
+            format!("{host_only}:{port}")
+        }
+        _ => host_only.to_string(),
     };
     let timestamp: DateTime<Utc> = Utc
         .timestamp_opt(now_unix, 0)
         .single()
-        .ok_or_else(|| StorageError::Signing("invalid unix timestamp".to_string()))?;
+        .ok_or_else(|| SigningError::InvalidExpiry("invalid unix timestamp".to_string()))?;
     let date_hdr = timestamp.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
 
-    let method_lower = method.to_ascii_lowercase();
+    let method_lower = method.trim().to_ascii_lowercase();
     let path_and_query = match parsed.query() {
         Some(q) if !q.is_empty() => format!("{}?{}", parsed.path(), q),
         _ => parsed.path().to_string(),
     };
 
-    let is_write = matches!(method.to_ascii_uppercase().as_str(), "PUT" | "POST");
+    let is_write = matches!(method.trim().to_ascii_uppercase().as_str(), "PUT" | "POST");
     let (headers_list, signing_string, x_sha, c_type, c_len) = if is_write {
         let payload = body.unwrap_or(&[]);
         let body_sha = sha256_base64(payload);
@@ -155,6 +248,19 @@ pub fn sign_oci_cavage_request(
         content_type: c_type,
         content_length: c_len,
     })
+}
+
+/// Sign an OCI REST v2 HTTP request using `draft-cavage-http-signatures-08` (`rsa-sha256`).
+pub fn sign_oci_cavage_request(
+    creds: &OciCavageCredentials,
+    method: &str,
+    url_str: &str,
+    body: Option<&[u8]>,
+    content_type: Option<&str>,
+    now_unix: i64,
+) -> Result<OciSignedHeaders, StorageError> {
+    sign_oci_request_headers(creds, method, url_str, body, content_type, now_unix)
+        .map_err(StorageError::from)
 }
 
 #[derive(Serialize)]
@@ -237,20 +343,24 @@ impl OciObjectStore {
     }
 
     pub fn object_url(&self, location: &StorePath) -> String {
-        let encoded_name: String =
-            url::form_urlencoded::byte_serialize(location.as_ref().as_bytes()).collect();
+        let encoded_name = rfc3986_encode(location.as_ref(), true);
         format!(
-            "{}/n/{}/b/{}/o/{}",
-            self.endpoint, self.namespace, self.bucket, encoded_name
+            "{}/n/{}/b/{}/o/{encoded_name}",
+            self.endpoint, self.namespace, self.bucket
         )
     }
 
     pub fn par_url(&self, token_id: &str, location: &StorePath) -> String {
-        let encoded_name: String =
-            url::form_urlencoded::byte_serialize(location.as_ref().as_bytes()).collect();
+        let trimmed = token_id.trim().trim_matches('/');
+        let raw_tok = trimmed
+            .strip_prefix("p/")
+            .unwrap_or(trimmed)
+            .trim_matches('/');
+        let encoded_tok = rfc3986_encode(raw_tok, true);
+        let encoded_name = rfc3986_encode(location.as_ref(), true);
         format!(
-            "{}/p/{}/n/{}/b/{}/o/{}",
-            self.endpoint, token_id, self.namespace, self.bucket, encoded_name
+            "{}/p/{encoded_tok}/n/{}/b/{}/o/{encoded_name}",
+            self.endpoint, self.namespace, self.bucket
         )
     }
 
@@ -654,11 +764,10 @@ impl MultipartUpload for OciMultipartUpload {
         let bytes: Bytes = data.into();
 
         Box::pin(async move {
-            let encoded_name: String =
-                url::form_urlencoded::byte_serialize(location.as_ref().as_bytes()).collect();
+            let encoded_name = rfc3986_encode(location.as_ref(), true);
             let part_url = format!(
-                "{}/n/{}/b/{}/u/{}?uploadId={}&uploadPartNum={}",
-                store.endpoint, store.namespace, store.bucket, encoded_name, upload_id, part_num
+                "{}/n/{}/b/{}/u/{encoded_name}?uploadId={upload_id}&uploadPartNum={part_num}",
+                store.endpoint, store.namespace, store.bucket
             );
             let req = store
                 .apply_signing(
@@ -687,25 +796,20 @@ impl MultipartUpload for OciMultipartUpload {
                 .to_string();
             parts_map
                 .lock()
-                .expect("lock OCI multipart parts")
+                .unwrap_or_else(|e| e.into_inner())
                 .insert(part_num, etag);
             Ok(())
         })
     }
 
     async fn complete(&mut self) -> StoreResult<PutResult> {
-        let encoded_name: String =
-            url::form_urlencoded::byte_serialize(self.location.as_ref().as_bytes()).collect();
+        let encoded_name = rfc3986_encode(self.location.as_ref(), true);
         let commit_url = format!(
-            "{}/n/{}/b/{}/u/{}?uploadId={}",
-            self.store.endpoint,
-            self.store.namespace,
-            self.store.bucket,
-            encoded_name,
-            self.upload_id
+            "{}/n/{}/b/{}/u/{encoded_name}?uploadId={}",
+            self.store.endpoint, self.store.namespace, self.store.bucket, self.upload_id
         );
         let snapshot: Vec<(usize, String)> = {
-            let guard = self.parts.lock().expect("lock OCI multipart parts");
+            let guard = self.parts.lock().unwrap_or_else(|e| e.into_inner());
             let mut entries: Vec<(usize, String)> =
                 guard.iter().map(|(k, v)| (*k, v.clone())).collect();
             entries.sort_by_key(|(k, _)| *k);
@@ -757,15 +861,10 @@ impl MultipartUpload for OciMultipartUpload {
     }
 
     async fn abort(&mut self) -> StoreResult<()> {
-        let encoded_name: String =
-            url::form_urlencoded::byte_serialize(self.location.as_ref().as_bytes()).collect();
+        let encoded_name = rfc3986_encode(self.location.as_ref(), true);
         let abort_url = format!(
-            "{}/n/{}/b/{}/u/{}?uploadId={}",
-            self.store.endpoint,
-            self.store.namespace,
-            self.store.bucket,
-            encoded_name,
-            self.upload_id
+            "{}/n/{}/b/{}/u/{encoded_name}?uploadId={}",
+            self.store.endpoint, self.store.namespace, self.store.bucket, self.upload_id
         );
         let req = self.store.apply_signing(
             self.store.client.delete(&abort_url),
