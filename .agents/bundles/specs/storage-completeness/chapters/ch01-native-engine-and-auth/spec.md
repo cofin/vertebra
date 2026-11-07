@@ -82,17 +82,17 @@ Parent roadmap: [spec.md](../../spec.md). Skills: [pyo3-bridge](../../../../../s
 
 - Rust (`src/rs/vertebra-storage/src/store.rs`):
   - `pub struct PutConditionalOptions { pub if_not_exists: bool, pub if_match: Option<String>, pub if_none_match: Option<String>, pub content_type: Option<String>, pub attributes: HashMap<String, String> }`
-  - `pub async fn put_opts(&self, path: &str, data: Bytes, opts: PutConditionalOptions) -> Result<StoredObjectMeta, ObjectStoreError>`
-  - `pub async fn get_stream(&self, path: &str) -> Result<BoxStream<'static, object_store::Result<Bytes>>, ObjectStoreError>`
-  - `pub async fn create_multipart(&self, path: &str, opts: PutConditionalOptions) -> Result<MultipartUploadSession, ObjectStoreError>`
-  - `pub async fn list_page(&self, prefix: Option<&str>, offset: Option<&str>, limit: usize) -> Result<(Vec<StoredObjectMeta>, Option<String>), ObjectStoreError>`
-  - `pub async fn list_with_delimiter(&self, prefix: Option<&str>) -> Result<(Vec<StoredObjectMeta>, Vec<String>), ObjectStoreError>`
-  - `pub async fn rename(&self, src: &str, dst: &str, if_not_exists: bool) -> Result<(), ObjectStoreError>`
+  - `pub async fn put_opts(&self, path: &str, data: Bytes, opts: PutConditionalOptions) -> Result<StoredObjectMeta, StorageError>`
+  - `pub async fn get_stream(&self, path: &str) -> Result<BoxStream<'static, Result<Bytes, StorageError>>, StorageError>`
+  - `pub async fn create_multipart(&self, path: &str, opts: PutConditionalOptions) -> Result<MultipartUploadSession, StorageError>`
+  - `pub async fn list_page(&self, prefix: Option<&str>, offset: Option<&str>, limit: usize) -> Result<(Vec<StoredObjectMeta>, Option<String>), StorageError>`
+  - `pub async fn list_with_delimiter(&self, prefix: Option<&str>) -> Result<(Vec<StoredObjectMeta>, Vec<String>), StorageError>`
+  - `pub async fn rename(&self, src: &str, dst: &str, if_not_exists: bool) -> Result<(), StorageError>`
 - Python (`src/py/vertebra/storage/_store.py` & `src/py/vertebra/_storage.pyi`):
-  - `SyncObjectStore.get_stream(self, key: str, *, chunk_size: int | None = None) -> Iterator[StorageBuffer]`
-  - `AsyncObjectStore.get_stream(self, key: str, *, chunk_size: int | None = None) -> AsyncIterator[StorageBuffer]`
-  - `SyncObjectStore.put_stream(self, key: str, chunks: Iterable[bytes | memoryview], *, content_type: str | None = None, attributes: Mapping[str, str] | None = None) -> ObjectMeta`
-  - `AsyncObjectStore.put_stream(self, key: str, chunks: AsyncIterable[bytes | memoryview] | Iterable[bytes | memoryview], *, content_type: str | None = None, attributes: Mapping[str, str] | None = None) -> ObjectMeta`
+  - `SyncObjectStore.get_stream(self, path: str, *, chunk_size: int | None = None) -> Iterator[StorageBuffer]`
+  - `AsyncObjectStore.get_stream(self, path: str, *, chunk_size: int | None = None) -> AsyncIterator[StorageBuffer]`
+  - `SyncObjectStore.put_stream(self, path: str, chunks: Iterable[Buffer], *, content_type: str | None = None, attributes: Mapping[str, str] | None = None, if_not_exists: bool = False, if_match: str | None = None, if_none_match: str | None = None) -> PutResult`
+  - `AsyncObjectStore.put_stream(self, path: str, chunks: AsyncIterable[Buffer] | Iterable[Buffer], *, content_type: str | None = None, attributes: Mapping[str, str] | None = None, if_not_exists: bool = False, if_match: str | None = None, if_none_match: str | None = None) -> PutResult`
 
 ### 2.3 Edge-Case & Alternatives Summary
 
@@ -101,7 +101,9 @@ Parent roadmap: [spec.md](../../spec.md). Skills: [pyo3-bridge](../../../../../s
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/0 files documented in ch01]` (consolidated in `ch04:t03` once all storage and framework APIs land; `src/py/vertebra/_storage.pyi` docstrings and type stubs stay synchronized in `ch01:t02` and `ch01:t04`).
+Progress: `[1/1 files documented in ch01]`
+
+* `.agents/bundles/knowledge/domains/storage/object-storage.md` — Documents `ch01` `RustTaskAwaitable` + `notify.rs` provenance, streaming/conditional/multipart engine contracts, unified `vertebra._vertebra` token caches, and fail-closed `SyncObjectStore` / `AsyncObjectStore` invariants (`docs/usage/storage*.md` and `ch02`–`ch04` adapter/Arrow extensions are owned by `ch04:t03`).
 
 ## 4. Requirement-to-Task Traceability Matrix
 

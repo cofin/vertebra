@@ -5,9 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use object_store::CredentialProvider;
 use object_store::gcp::GcpCredential;
-
-#[allow(unused_imports)]
-pub(crate) use vertebra_core::gcp_auth::{GcpTokenCache, GcpTokenSnapshot, current_unix_ms};
+use vertebra_core::gcp_auth::GcpTokenCache;
 
 pub const GCS_OAUTH_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/devstorage.full_control",

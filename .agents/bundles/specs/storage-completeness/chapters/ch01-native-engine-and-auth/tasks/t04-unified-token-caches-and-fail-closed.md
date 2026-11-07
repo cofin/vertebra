@@ -68,7 +68,7 @@ Remove the duplicate `GcpTokenSnapshot`, `SyncGcpTokenCache`, and `AsyncGcpToken
 ## Bounded Read Manifest
 
 - `src/rs/vertebra-storage/src/lib.rs` — PyO3 module exports (`m.add_class` / `m.add_function`) [^storage-lib-rs].
-- `src/py/vertebra/_vertebra.pyi::{GcpTokenSnapshot,SyncGcpTokenCache,AsyncGcpTokenCache}` — Canonical core token cache API (`from_options`, `from_service_account_json`, `get_token`, `invalidate`) [^core-pyi-gcp].
+- `src/py/vertebra/_vertebra.pyi::{GcpTokenSnapshot,SyncGcpTokenCache,AsyncGcpTokenCache}` — Canonical core token cache API (`__init__(options, scopes=None, *, allow_ambient_adc=True)`, `to_async`, `to_sync`, `get_token`, `invalidate`) [^core-pyi-gcp].
 - `src/py/vertebra/_storage.pyi` — Stubs for `vertebra._storage`.
 - `src/py/vertebra/storage/_store.py` — `GCSConfig`, `OCIConfig`, `SigningConfig`, `_BaseObjectStore`, `SyncObjectStore`, and `AsyncObjectStore` [^storage-store-py].
 - `src/py/tests/unit/storage/test_gcs_token_refresh.py` — GCS token cache refresh and impersonation tests.
@@ -78,9 +78,9 @@ Remove the duplicate `GcpTokenSnapshot`, `SyncGcpTokenCache`, and `AsyncGcpToken
 
 - `src/rs/vertebra-storage/src/lib.rs` & `src/py/vertebra/_storage.pyi`:
   - Remove `PyGcpTokenSnapshot`, `PySyncGcpTokenCache`, and `PyAsyncGcpTokenCache` from `vertebra._storage`.
-  - Register `sign_oci_par_url` and `assemble_gcs_iam_v4_url` (or `sign_gcs_iam_v4_url`) on `vertebra._storage` and declare exact signatures in `_storage.pyi`.
+  - Register `sign_oci_par_url`, `build_gcs_v4_canonical_request`, `assemble_gcs_iam_v4_url`, `py_sign_gcs_v4_iam_url`, and `py_sign_gcs_v4_iam_url_async` on `vertebra._storage` and declare exact signatures in `_storage.pyi`.
 - `src/py/vertebra/storage/_store.py`:
-  - Import `GcpTokenSnapshot`, `SyncGcpTokenCache`, and `AsyncGcpTokenCache` from `vertebra._vertebra` and route `GCSConfig` sync/async token acquisition exclusively through `SyncGcpTokenCache.from_options(...)` / `AsyncGcpTokenCache.from_options(...)`.
+  - Import `GcpTokenSnapshot`, `GoogleCloudAuthError`, `SyncGcpTokenCache`, and `AsyncGcpTokenCache` from `vertebra._vertebra` and route `GCSConfig` sync/async token acquisition exclusively through `SyncGcpTokenCache(opts, list(scopes))` / `AsyncGcpTokenCache(opts, list(scopes))`.
   - Delete `GCSConfig._fetch_adc_token_with_expiry`, `_exchange_authorized_user_token_with_expiry`, `_impersonate_service_account_token_with_expiry`, `_open_http_json`, and Python-dict token caches.
   - Delete `self._memory` dict fallback and default `target: str | StorageConfig = "memory://"` from `_BaseObjectStore`, `SyncObjectStore`, and `AsyncObjectStore`:
     - `SyncObjectStore(target: str | StorageConfig)` and `AsyncObjectStore(target: str | StorageConfig)`: raise `ImproperConfigurationError` if `target` is `None`, empty `""`, or lacks a valid scheme, and raise `MissingDependencyError("vertebra._storage", install_package="vertebra-core[storage]", extra="storage")` when `import_optional("vertebra._storage")` returns `None`.

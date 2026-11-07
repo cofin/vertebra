@@ -448,9 +448,15 @@ where
     })
 }
 
-#[pyclass(module = "vertebra._storage", frozen, immutable_type, from_py_object)]
+#[pyclass(
+    name = "ObjectMeta",
+    module = "vertebra._storage",
+    frozen,
+    immutable_type,
+    from_py_object
+)]
 #[derive(Clone, Debug)]
-pub struct ObjectMeta {
+pub struct PyObjectMeta {
     #[pyo3(get)]
     pub path: String,
     #[pyo3(get)]
@@ -467,9 +473,7 @@ pub struct ObjectMeta {
     pub attributes: HashMap<String, String>,
 }
 
-pub type PyObjectMeta = ObjectMeta;
-
-impl From<StoredObjectMeta> for ObjectMeta {
+impl From<StoredObjectMeta> for PyObjectMeta {
     fn from(value: StoredObjectMeta) -> Self {
         Self {
             path: value.path,
@@ -484,7 +488,7 @@ impl From<StoredObjectMeta> for ObjectMeta {
 }
 
 #[pymethods]
-impl ObjectMeta {
+impl PyObjectMeta {
     fn __repr__(&self) -> String {
         format!("ObjectMeta(path={:?}, size={})", self.path, self.size)
     }
@@ -502,14 +506,12 @@ struct SyncStreamState {
     frozen,
     immutable_type
 )]
-pub struct SyncStreamReader {
+pub struct PySyncStreamReader {
     state: Mutex<SyncStreamState>,
 }
 
-pub type PySyncStreamReader = SyncStreamReader;
-
 #[pymethods]
-impl SyncStreamReader {
+impl PySyncStreamReader {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
@@ -581,14 +583,12 @@ impl AsyncStreamState {
     frozen,
     immutable_type
 )]
-pub struct AsyncStreamReader {
+pub struct PyAsyncStreamReader {
     state: Arc<tokio::sync::Mutex<AsyncStreamState>>,
 }
 
-pub type PyAsyncStreamReader = AsyncStreamReader;
-
 #[pymethods]
-impl AsyncStreamReader {
+impl PyAsyncStreamReader {
     fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
@@ -644,14 +644,12 @@ impl AsyncStreamReader {
     frozen,
     immutable_type
 )]
-pub struct SyncMultipartUpload {
+pub struct PySyncMultipartUpload {
     session: Mutex<MultipartUploadSession>,
 }
 
-pub type PySyncMultipartUpload = SyncMultipartUpload;
-
 #[pymethods]
-impl SyncMultipartUpload {
+impl PySyncMultipartUpload {
     fn write_part(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
         let chunk = extract_buffer_bytes(py, data)?;
         py.detach(|| {
@@ -661,14 +659,14 @@ impl SyncMultipartUpload {
         .map_err(to_py_err)
     }
 
-    fn complete(&self, py: Python<'_>) -> PyResult<ObjectMeta> {
+    fn complete(&self, py: Python<'_>) -> PyResult<PyObjectMeta> {
         let meta = py
             .detach(|| {
                 let mut guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
                 block_on_storage(guard.complete_with_meta())
             })
             .map_err(to_py_err)?;
-        Ok(ObjectMeta::from(meta))
+        Ok(PyObjectMeta::from(meta))
     }
 
     fn abort(&self, py: Python<'_>) -> PyResult<()> {
@@ -686,14 +684,12 @@ impl SyncMultipartUpload {
     frozen,
     immutable_type
 )]
-pub struct AsyncMultipartUpload {
+pub struct PyAsyncMultipartUpload {
     session: Arc<tokio::sync::Mutex<MultipartUploadSession>>,
 }
 
-pub type PyAsyncMultipartUpload = AsyncMultipartUpload;
-
 #[pymethods]
-impl AsyncMultipartUpload {
+impl PyAsyncMultipartUpload {
     fn write_part(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<RustTaskAwaitable> {
         let chunk = extract_buffer_bytes(py, data)?;
         let session = Arc::clone(&self.session);
@@ -715,7 +711,7 @@ impl AsyncMultipartUpload {
                 let mut guard = session.lock().await;
                 guard.complete_with_meta().await
             },
-            |py, meta| Ok(Py::new(py, ObjectMeta::from(meta))?.into_any()),
+            |py, meta| Ok(Py::new(py, PyObjectMeta::from(meta))?.into_any()),
         )
     }
 
@@ -738,14 +734,12 @@ impl AsyncMultipartUpload {
     frozen,
     immutable_type
 )]
-pub struct SyncObjectStore {
+pub struct PySyncObjectStore {
     engine: ObjectStoreEngine,
 }
 
-pub type PySyncObjectStore = SyncObjectStore;
-
 #[pymethods]
-impl SyncObjectStore {
+impl PySyncObjectStore {
     #[new]
     #[pyo3(signature = (url, options=None))]
     fn new(py: Python<'_>, url: &str, options: Option<HashMap<String, String>>) -> PyResult<Self> {
@@ -760,8 +754,8 @@ impl SyncObjectStore {
         self.engine.scheme()
     }
 
-    fn to_async(&self) -> AsyncObjectStore {
-        AsyncObjectStore {
+    fn to_async(&self) -> PyAsyncObjectStore {
+        PyAsyncObjectStore {
             engine: self.engine.clone(),
         }
     }
@@ -778,7 +772,7 @@ impl SyncObjectStore {
         if_not_exists: bool,
         if_match: Option<String>,
         if_none_match: Option<String>,
-    ) -> PyResult<ObjectMeta> {
+    ) -> PyResult<PyObjectMeta> {
         let payload = extract_buffer_bytes(py, data)?;
         let opts = PutConditionalOptions {
             if_not_exists,
@@ -791,15 +785,15 @@ impl SyncObjectStore {
         let meta = py
             .detach(|| block_on_storage(async move { engine.put_opts(path, payload, opts).await }))
             .map_err(to_py_err)?;
-        Ok(ObjectMeta::from(meta))
+        Ok(PyObjectMeta::from(meta))
     }
 
-    fn put_file(&self, py: Python<'_>, path: &str, file_path: &str) -> PyResult<ObjectMeta> {
+    fn put_file(&self, py: Python<'_>, path: &str, file_path: &str) -> PyResult<PyObjectMeta> {
         let engine = self.engine.clone();
         let meta = py
             .detach(|| block_on_storage(async move { engine.put_file(path, file_path).await }))
             .map_err(to_py_err)?;
-        Ok(ObjectMeta::from(meta))
+        Ok(PyObjectMeta::from(meta))
     }
 
     #[pyo3(signature = (path, *, content_type=None, attributes=None, if_not_exists=false, if_match=None, if_none_match=None))]
@@ -813,7 +807,7 @@ impl SyncObjectStore {
         if_not_exists: bool,
         if_match: Option<String>,
         if_none_match: Option<String>,
-    ) -> PyResult<SyncMultipartUpload> {
+    ) -> PyResult<PySyncMultipartUpload> {
         let opts = PutConditionalOptions {
             if_not_exists,
             if_match,
@@ -825,7 +819,7 @@ impl SyncObjectStore {
         let session = py
             .detach(|| block_on_storage(async move { engine.create_multipart(path, opts).await }))
             .map_err(to_py_err)?;
-        Ok(SyncMultipartUpload {
+        Ok(PySyncMultipartUpload {
             session: Mutex::new(session),
         })
     }
@@ -835,7 +829,7 @@ impl SyncObjectStore {
         py: Python<'_>,
         path: &str,
         parts: Vec<Bound<'_, PyAny>>,
-    ) -> PyResult<ObjectMeta> {
+    ) -> PyResult<PyObjectMeta> {
         let mut chunks = Vec::with_capacity(parts.len());
         for part in &parts {
             chunks.push(extract_buffer_bytes(py, part)?);
@@ -844,7 +838,7 @@ impl SyncObjectStore {
         let meta = py
             .detach(|| block_on_storage(async move { engine.put_multipart(path, chunks).await }))
             .map_err(to_py_err)?;
-        Ok(ObjectMeta::from(meta))
+        Ok(PyObjectMeta::from(meta))
     }
 
     fn get<'py>(&self, py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyBytes>> {
@@ -869,13 +863,13 @@ impl SyncObjectStore {
         py: Python<'_>,
         path: &str,
         chunk_size: Option<usize>,
-    ) -> PyResult<SyncStreamReader> {
+    ) -> PyResult<PySyncStreamReader> {
         let chunk_size = validate_chunk_size(chunk_size)?;
         let engine = self.engine.clone();
         let stream = py
             .detach(|| block_on_storage(async move { engine.get_stream(path).await }))
             .map_err(to_py_err)?;
-        Ok(SyncStreamReader {
+        Ok(PySyncStreamReader {
             state: Mutex::new(SyncStreamState {
                 stream: Some(stream),
                 pending: Bytes::new(),
@@ -900,12 +894,12 @@ impl SyncObjectStore {
         Ok(PyBytes::new(py, &data))
     }
 
-    fn head(&self, py: Python<'_>, path: &str) -> PyResult<ObjectMeta> {
+    fn head(&self, py: Python<'_>, path: &str) -> PyResult<PyObjectMeta> {
         let engine = self.engine.clone();
         let meta = py
             .detach(|| block_on_storage(async move { engine.head(path).await }))
             .map_err(to_py_err)?;
-        Ok(ObjectMeta::from(meta))
+        Ok(PyObjectMeta::from(meta))
     }
 
     fn exists(&self, py: Python<'_>, path: &str) -> PyResult<bool> {
@@ -934,12 +928,12 @@ impl SyncObjectStore {
     }
 
     #[pyo3(signature = (prefix=None))]
-    fn list(&self, py: Python<'_>, prefix: Option<&str>) -> PyResult<Vec<ObjectMeta>> {
+    fn list(&self, py: Python<'_>, prefix: Option<&str>) -> PyResult<Vec<PyObjectMeta>> {
         let engine = self.engine.clone();
         let items = py
             .detach(|| block_on_storage(async move { engine.list(prefix).await }))
             .map_err(to_py_err)?;
-        Ok(items.into_iter().map(ObjectMeta::from).collect())
+        Ok(items.into_iter().map(PyObjectMeta::from).collect())
     }
 
     #[pyo3(signature = (prefix=None, offset=None, limit=1000))]
@@ -949,7 +943,7 @@ impl SyncObjectStore {
         prefix: Option<&str>,
         offset: Option<&str>,
         limit: usize,
-    ) -> PyResult<(Vec<ObjectMeta>, Option<String>)> {
+    ) -> PyResult<(Vec<PyObjectMeta>, Option<String>)> {
         if limit == 0 {
             return Err(PyValueError::new_err("limit must be >= 1"));
         }
@@ -959,7 +953,7 @@ impl SyncObjectStore {
                 block_on_storage(async move { engine.list_page(prefix, offset, limit).await })
             })
             .map_err(to_py_err)?;
-        Ok((items.into_iter().map(ObjectMeta::from).collect(), cursor))
+        Ok((items.into_iter().map(PyObjectMeta::from).collect(), cursor))
     }
 
     #[pyo3(signature = (prefix=None))]
@@ -967,12 +961,15 @@ impl SyncObjectStore {
         &self,
         py: Python<'_>,
         prefix: Option<&str>,
-    ) -> PyResult<(Vec<ObjectMeta>, Vec<String>)> {
+    ) -> PyResult<(Vec<PyObjectMeta>, Vec<String>)> {
         let engine = self.engine.clone();
         let (items, prefixes) = py
             .detach(|| block_on_storage(async move { engine.list_with_delimiter(prefix).await }))
             .map_err(to_py_err)?;
-        Ok((items.into_iter().map(ObjectMeta::from).collect(), prefixes))
+        Ok((
+            items.into_iter().map(PyObjectMeta::from).collect(),
+            prefixes,
+        ))
     }
 }
 
@@ -982,14 +979,12 @@ impl SyncObjectStore {
     frozen,
     immutable_type
 )]
-pub struct AsyncObjectStore {
+pub struct PyAsyncObjectStore {
     engine: ObjectStoreEngine,
 }
 
-pub type PyAsyncObjectStore = AsyncObjectStore;
-
 #[pymethods]
-impl AsyncObjectStore {
+impl PyAsyncObjectStore {
     #[new]
     #[pyo3(signature = (url, options=None))]
     fn new(py: Python<'_>, url: &str, options: Option<HashMap<String, String>>) -> PyResult<Self> {
@@ -1004,8 +999,8 @@ impl AsyncObjectStore {
         self.engine.scheme()
     }
 
-    fn to_sync(&self) -> SyncObjectStore {
-        SyncObjectStore {
+    fn to_sync(&self) -> PySyncObjectStore {
+        PySyncObjectStore {
             engine: self.engine.clone(),
         }
     }
@@ -1035,7 +1030,7 @@ impl AsyncObjectStore {
         spawn_rust_task(
             py,
             async move { engine.put_opts(&path, payload, opts).await },
-            |py, meta| Ok(Py::new(py, ObjectMeta::from(meta))?.into_any()),
+            |py, meta| Ok(Py::new(py, PyObjectMeta::from(meta))?.into_any()),
         )
     }
 
@@ -1049,7 +1044,7 @@ impl AsyncObjectStore {
         spawn_rust_task(
             py,
             async move { engine.put_file(&path, &file_path).await },
-            |py, meta| Ok(Py::new(py, ObjectMeta::from(meta))?.into_any()),
+            |py, meta| Ok(Py::new(py, PyObjectMeta::from(meta))?.into_any()),
         )
     }
 
@@ -1079,7 +1074,7 @@ impl AsyncObjectStore {
             |py, session| {
                 Ok(Py::new(
                     py,
-                    AsyncMultipartUpload {
+                    PyAsyncMultipartUpload {
                         session: Arc::new(tokio::sync::Mutex::new(session)),
                     },
                 )?
@@ -1102,7 +1097,7 @@ impl AsyncObjectStore {
         spawn_rust_task(
             py,
             async move { engine.put_multipart(&path, chunks).await },
-            |py, meta| Ok(Py::new(py, ObjectMeta::from(meta))?.into_any()),
+            |py, meta| Ok(Py::new(py, PyObjectMeta::from(meta))?.into_any()),
         )
     }
 
@@ -1121,9 +1116,9 @@ impl AsyncObjectStore {
     }
 
     #[pyo3(signature = (path, *, chunk_size=None))]
-    fn get_stream(&self, path: String, chunk_size: Option<usize>) -> PyResult<AsyncStreamReader> {
+    fn get_stream(&self, path: String, chunk_size: Option<usize>) -> PyResult<PyAsyncStreamReader> {
         let chunk_size = validate_chunk_size(chunk_size)?;
-        Ok(AsyncStreamReader {
+        Ok(PyAsyncStreamReader {
             state: Arc::new(tokio::sync::Mutex::new(AsyncStreamState {
                 init: AsyncStreamInit::Pending {
                     engine: self.engine.clone(),
@@ -1153,7 +1148,7 @@ impl AsyncObjectStore {
     fn head(&self, py: Python<'_>, path: String) -> PyResult<RustTaskAwaitable> {
         let engine = self.engine.clone();
         spawn_rust_task(py, async move { engine.head(&path).await }, |py, meta| {
-            Ok(Py::new(py, ObjectMeta::from(meta))?.into_any())
+            Ok(Py::new(py, PyObjectMeta::from(meta))?.into_any())
         })
     }
 
@@ -1205,7 +1200,8 @@ impl AsyncObjectStore {
             py,
             async move { engine.list(prefix.as_deref()).await },
             |py, items| {
-                let converted: Vec<ObjectMeta> = items.into_iter().map(ObjectMeta::from).collect();
+                let converted: Vec<PyObjectMeta> =
+                    items.into_iter().map(PyObjectMeta::from).collect();
                 Ok(converted.into_pyobject(py)?.into_any().unbind())
             },
         )
@@ -1231,7 +1227,8 @@ impl AsyncObjectStore {
                     .await
             },
             |py, (items, cursor)| {
-                let converted: Vec<ObjectMeta> = items.into_iter().map(ObjectMeta::from).collect();
+                let converted: Vec<PyObjectMeta> =
+                    items.into_iter().map(PyObjectMeta::from).collect();
                 Ok((converted, cursor).into_pyobject(py)?.into_any().unbind())
             },
         )
@@ -1248,7 +1245,8 @@ impl AsyncObjectStore {
             py,
             async move { engine.list_with_delimiter(prefix.as_deref()).await },
             |py, (items, prefixes)| {
-                let converted: Vec<ObjectMeta> = items.into_iter().map(ObjectMeta::from).collect();
+                let converted: Vec<PyObjectMeta> =
+                    items.into_iter().map(PyObjectMeta::from).collect();
                 Ok((converted, prefixes).into_pyobject(py)?.into_any().unbind())
             },
         )
@@ -1616,13 +1614,13 @@ fn assemble_gcs_iam_v4_url(
 
 #[pymodule(gil_used = false)]
 pub fn _storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<SyncObjectStore>()?;
-    m.add_class::<AsyncObjectStore>()?;
-    m.add_class::<ObjectMeta>()?;
-    m.add_class::<SyncStreamReader>()?;
-    m.add_class::<AsyncStreamReader>()?;
-    m.add_class::<SyncMultipartUpload>()?;
-    m.add_class::<AsyncMultipartUpload>()?;
+    m.add_class::<PySyncObjectStore>()?;
+    m.add_class::<PyAsyncObjectStore>()?;
+    m.add_class::<PyObjectMeta>()?;
+    m.add_class::<PySyncStreamReader>()?;
+    m.add_class::<PyAsyncStreamReader>()?;
+    m.add_class::<PySyncMultipartUpload>()?;
+    m.add_class::<PyAsyncMultipartUpload>()?;
     m.add_class::<RustTaskAwaitable>()?;
     m.add_class::<StorageBuffer>()?;
     m.add_function(wrap_pyfunction!(py_sign_hmac_url, m)?)?;

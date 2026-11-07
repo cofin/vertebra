@@ -68,7 +68,7 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-`vertebra-storage` compiles as a standalone optional PyO3 extension (`vertebra._storage`) with `AbortHandle` and `TaskPanicError` completion delivery, yet its Rust engine and Python framework adapters still exhibit buffering, duplicate credential machinery, silent `memory://` fallbacks, and incomplete framework contracts [^rs-storage-engine] [^py-storage-facade]. This flow delivers complete, zero-copy sync and async object storage across all four framework integrations (`sqlspec`, `advanced_alchemy`, `django`, `litestar`) and hardens the Arrow/Parquet and `VTBARROW` shared-memory data plane [^arrow-shm-alloc].
+`vertebra-storage` compiles as a standalone optional PyO3 extension (`vertebra._storage`) with `AbortHandle` and `TaskPanicError` completion delivery, incremental streaming/multipart sessions, unified `vertebra._vertebra` GCP token caches, and fail-closed `SyncObjectStore` / `AsyncObjectStore` facades [^rs-storage-engine] [^py-storage-facade] [^core-gcp-auth], while its framework adapters and Arrow shared-memory data plane still require completion across `sqlspec`, `advanced_alchemy`, `django`, `litestar`, and `vertebra-db` [^arrow-shm-alloc]. This flow completes zero-copy sync and async object storage across all four framework integrations and hardens the Arrow/Parquet and `VTBARROW` shared-memory data plane.
 
 ### 1.2 Non-Goals
 
@@ -82,11 +82,11 @@ Anchored at `HEAD @ cdb978d3` above `main @ 077a3fe9` (incorporating `db-layout-
 
 ### 1.4 Code Analysis & Seam Summary
 
-| Existing Seam | Verified Present-State Status at `e15f636a` |
+| Existing Seam | Verified Present-State Architecture |
 | --- | --- |
-| `src/rs/vertebra-storage/src/{lib.rs,store.rs,r2.rs}` [^rs-storage-engine] | Completed in `ch01` (`beb6a972`, `cb6b0647`): incremental `MultipartUploadSession` (uniform `8 MiB` R2/OCI parts), `StreamReader` (`get_stream`), conditional `put_opts`, `list_page`, `list_with_delimiter`, and `rename`. |
-| `src/rs/vertebra-storage/src/{lib.rs,gcp_auth.rs,signing.rs,oci.rs}` [^core-gcp-auth] | Completed in `ch01` (`494ad92b`, `e15f636a`): unified on `vertebra._vertebra.{SyncGcpTokenCache, AsyncGcpTokenCache, GcpTokenSnapshot}`, deleted duplicate `_storage` token classes and Python `urllib` OAuth fetchers, and wired `sign_oci_par_url`. |
-| `src/py/vertebra/storage/_store.py` [^py-storage-facade] | Completed in `ch01` (`e15f636a`): fail-closed `MissingDependencyError` / `ImproperConfigurationError` construction, zero `self._memory` dicts, and shared `.to_async()` / `.to_sync()` engine + token-cache handles. |
+| `src/rs/vertebra-storage/src/{lib.rs,store.rs,r2.rs}` [^rs-storage-engine] | Provides incremental `MultipartUploadSession` (uniform `8 MiB` R2/OCI parts), `PySyncStreamReader` / `PyAsyncStreamReader` (`get_stream`), conditional `put_opts`, `list_page`, `list_with_delimiter`, and `rename`. |
+| `src/rs/vertebra-storage/src/{lib.rs,gcp_auth.rs,signing.rs,oci.rs}` [^core-gcp-auth] | Consumes `vertebra_core::gcp_auth::GcpTokenCache` via `vertebra._vertebra.{SyncGcpTokenCache, AsyncGcpTokenCache, GcpTokenSnapshot}`, with `RefreshingGcpCredentialProvider` and native `sign_oci_par_url` / GCS V4 IAM / S3 SigV4 / Azure SAS / HMAC signing. |
+| `src/py/vertebra/storage/_store.py` [^py-storage-facade] | Enforces fail-closed `MissingDependencyError` / `ImproperConfigurationError` construction, zero `self._memory` fallback dicts or Python `urllib` OAuth fetchers, and shared `.to_async()` / `.to_sync()` engine and token-cache handles. |
 | `src/py/vertebra/extensions/{sqlspec,alchemy,django,litestar}/` | Pending `ch02` & `ch03`: `alchemy/storage.py` still monkeypatches `storages.get` and defaults to `memory://`; `django/storage.py::DjangoStorage` does not yet subclass `django.core.files.storage.Storage` (`@deconstructible`) or return `File` handles; Litestar lacks `ObjectStoreLitestarStore`, an async static-files adapter, and RFC 9110 `Range` / `416` streaming. |
 | `src/rs/vertebra-db/src/arrow_shm.rs` & `src/py/vertebra/db/arrow.py` [^arrow-shm-alloc] | Pending `ch04`: `allocate_shm_region` still falls back to anonymous `ShmRegion::create` when `ShmRegion::create_named` fails; `ArrowCursor.from_rows` still falls back to JSON bytes when `pyarrow` is absent. |
 
@@ -121,7 +121,7 @@ flowchart LR
     PyStore --> ArrowPlane["db.arrow + arrow_shm.rs"]
 ```
 
-- **Rust/FFI Boundary (`ch01`)**: `vertebra._storage` exports `StorageBuffer`, `RustTaskAwaitable`, `ObjectMeta` (extended with `content_type: str | None` and `attributes: dict[str, str]`), `ListPage` / `(list[ObjectMeta], list[str])`, `SyncStreamReader`, `AsyncStreamReader`, `SyncMultipartUpload`, `AsyncMultipartUpload`, `SyncObjectStore`, `AsyncObjectStore`, and presigning functions (`sign_gcs_v4_url`, `sign_gcs_iam_v4_url`, `sign_s3_v4_url`, `sign_azure_sas_url`, `sign_oci_par_url`).
+- **Rust/FFI Boundary (`ch01`)**: `vertebra._storage` exports `StorageBuffer`, `RustTaskAwaitable`, `ObjectMeta` (with `content_type: str | None` and `attributes: dict[str, str]`), `tuple[list[ObjectMeta], str | None]` (`list_page`) / `tuple[list[ObjectMeta], list[str]]` (`list_with_delimiter`), `SyncStreamReader`, `AsyncStreamReader`, `SyncMultipartUpload`, `AsyncMultipartUpload`, `SyncObjectStore`, `AsyncObjectStore`, and signing functions (`py_sign_gcs_v4_iam_url`, `py_sign_gcs_v4_iam_url_async`, `build_gcs_v4_canonical_request`, `assemble_gcs_iam_v4_url`, `py_sign_s3_v4_url`, `py_verify_s3_v4_url`, `py_sign_aws_sigv4_headers`, `py_sign_azure_sas_url`, `sign_oci_par_url`, `py_sign_oci_cavage_headers`, `py_sign_hmac_url`, `py_verify_hmac_url`).
 - **ORM & SQL Boundary (`ch02`)**: Consumes `ch01` `SyncObjectStore` / `AsyncObjectStore` and `SyncReadableFile` / `AsyncReadableFile` with zero `self._memory` access and fail-closed `ImproperConfigurationError` validation.
 - **HTTP & Litestar Boundary (`ch03`)**: Consumes `ch01` `AsyncObjectStore.get_stream`, `get_range`, `head`, `put` (`attributes` TTL metadata), and `list_page`.
 - **Arrow/SHM & Docs Boundary (`ch04`)**: Hardens `vertebra_db::arrow_shm::allocate_shm_region` and `ArrowCursor.from_rows`, wires `pyarrow.parquet` / `pyarrow.ipc` batch streaming over `SyncReadableFile` / `AsyncReadableFile` and `put_stream`, and updates docs + OKF chapters.
@@ -160,7 +160,7 @@ Progress: `[1/3 files documented]` (`object-storage.md` updated in `ch01`; user 
 
 * `docs/usage/storage.md` — Document `get_stream`, `put_stream`, conditional `put`, `list_page`, `list_with_delimiter`, `rename`, fail-closed construction, `ObjectStoreLitestarStore`, `ObjectStoreFileSystemAdapter`, and RFC 9110 `Range` / `416` streaming.
 * `docs/usage/storage-auth-and-signing.md` — Document unified `vertebra._vertebra.{SyncGcpTokenCache, AsyncGcpTokenCache, GcpTokenSnapshot}` usage and GCS V4, IAM `signBlob`, S3 SigV4, Azure SAS, and OCI PAR presigning.
-* `.agents/bundles/knowledge/domains/storage/object-storage.md` — Synchronized in `ch01` (`e15f636a`) with `RustTaskAwaitable` + `src/rs/vertebra-core/src/notify.rs` provenance, streaming/conditional/multipart engine tables, unified `vertebra._vertebra` token caches, and fail-closed invariants; re-verify in `ch04:t03` after `ch02`–`ch04` land.
+* `.agents/bundles/knowledge/domains/storage/object-storage.md` — Documents `RustTaskAwaitable` + `src/rs/vertebra-core/src/notify.rs` provenance, streaming/conditional/multipart engine tables, unified `vertebra._vertebra` token caches, and fail-closed invariants; extended in `ch04:t03` once `ch02`–`ch04` land.
 
 ## 4. Requirement-to-Task Traceability Matrix
 

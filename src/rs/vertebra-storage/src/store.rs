@@ -19,6 +19,7 @@ use object_store::{
 };
 use thiserror::Error;
 use url::Url;
+use vertebra_core::gcp_auth::GcpTokenCache;
 
 use crate::oci::{OciCavageCredentials, OciObjectStore};
 use crate::r2::{R2_UNIFORM_PART_SIZE, UniformPartAccumulator, requires_uniform_part_size};
@@ -108,13 +109,6 @@ impl StorageError {
             self,
             Self::Precondition { .. } | Self::ObjectStore(object_store::Error::Precondition { .. })
         )
-    }
-
-    pub fn is_not_found(&self) -> bool {
-        matches!(
-            self,
-            Self::ObjectStore(object_store::Error::NotFound { .. })
-        ) || matches!(self, Self::Io(e) if e.kind() == std::io::ErrorKind::NotFound)
     }
 }
 
@@ -254,14 +248,6 @@ pub struct MultipartUploadSession {
 }
 
 impl MultipartUploadSession {
-    pub fn path(&self) -> &str {
-        &self.path
-    }
-
-    pub fn bytes_written(&self) -> u64 {
-        self.total_bytes
-    }
-
     pub fn part_sizes_flushed(&self) -> &[usize] {
         &self.flushed_part_sizes
     }
@@ -375,7 +361,7 @@ pub enum BackendConfig {
         service_account_key: Option<String>,
         application_credentials_path: Option<String>,
         access_token: Option<String>,
-        credential_cache: Option<Arc<crate::gcp_auth::GcpTokenCache>>,
+        credential_cache: Option<Arc<GcpTokenCache>>,
         endpoint: Option<String>,
         allow_http: bool,
         skip_signature: bool,
@@ -700,10 +686,8 @@ impl ObjectStoreEngine {
             }
             "gs" | "gcs" => {
                 let bucket = parsed.host_str().unwrap_or_default().to_string();
-                let credential_cache = crate::gcp_auth::GcpTokenCache::from_options(
-                    &opts,
-                    crate::gcp_auth::GCS_OAUTH_SCOPES,
-                );
+                let credential_cache =
+                    GcpTokenCache::from_options(&opts, crate::gcp_auth::GCS_OAUTH_SCOPES);
                 Self::new(BackendConfig::Gcs {
                     bucket,
                     service_account_path: opts.get("service_account_path").cloned(),

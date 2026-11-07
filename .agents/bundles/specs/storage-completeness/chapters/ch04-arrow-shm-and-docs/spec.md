@@ -58,7 +58,7 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-`src/rs/vertebra-db/src/arrow_shm.rs::allocate_shm_region` silently falls back to `ShmRegion::create` on `ShmRegion::create_named` failure, creating an anonymous region that cross-process `VTBARROW` readers cannot open by name [^arrow-shm]. In Python, `src/py/vertebra/db/arrow.py::ArrowCursor.from_rows` falls back to `encode_json_bytes(dict_list)` when `pyarrow` is absent, corrupting callers expecting Arrow IPC framing [^db-arrow]. Finally, Arrow/Parquet object-storage helpers and `.agents/bundles/knowledge/domains/storage/object-storage.md` (which still mentions `RustStorageAwaitable` and `_memory` dict fallbacks) require streaming integration and present-tense synchronization [^okf-storage].
+`src/rs/vertebra-db/src/arrow_shm.rs::allocate_shm_region` silently falls back to `ShmRegion::create` on `ShmRegion::create_named` failure, creating an anonymous region that cross-process `VTBARROW` readers cannot open by name [^arrow-shm]. In Python, `src/py/vertebra/db/arrow.py::ArrowCursor.from_rows` falls back to `encode_json_bytes(dict_list)` when `pyarrow` is absent, corrupting callers expecting Arrow IPC framing [^db-arrow]. Finally, Arrow/Parquet object-storage helpers require batch-streaming integration over `SyncReadableFile` / `AsyncReadableFile` and `put_stream`, and `docs/usage/storage*.md` plus `.agents/bundles/knowledge/domains/storage/object-storage.md` require final synchronization across `ch02`–`ch04` framework and Arrow/Parquet contracts [^okf-storage].
 
 ### 1.2 Non-Goals
 
@@ -74,7 +74,7 @@ Parent roadmap: [spec.md](../../spec.md); depends on Chapters 01, 02, and 03. Sk
 
 - **R8.1 (`ch04:t01`)**: Introduce `pub type ArrowShmError = String` (or typed `ArrowShmError` implementing `Display` + `Error` convertible to `String`) in `src/rs/vertebra-db/src/arrow_shm.rs` and make `allocate_shm_region` return `Err(...)` whenever `ShmRegion::create_named` fails on `#[cfg(unix)]`; in `src/py/vertebra/db/arrow.py::ArrowCursor.from_rows`, delete the `encode_json_bytes` fallback so `from_rows` emits valid Arrow IPC stream bytes (even for empty `[]` with explicit `schema` or empty struct stream) and raises `MissingDependencyError("pyarrow", install_package="pyarrow", extra="arrow")` when `pyarrow` is uninstalled.
 - **R8.2 (`ch04:t02`)**: Add batch-streaming `write_arrow`, `read_arrow_batches`, `write_parquet`, and `read_parquet_batches` on `SyncObjectStore` and `AsyncObjectStore` (`src/py/vertebra/storage/_store.py`) backed by `put_stream` and `SyncReadableFile` / `AsyncReadableFile`, and wire `ObjectStoreBackend._iter_arrow_async` in `src/py/vertebra/extensions/sqlspec/storage.py` to yield Arrow batches incrementally without buffering whole files in memory.
-- **R8.3 (`ch04:t03`)**: Update `docs/usage/storage.md`, `docs/usage/storage-auth-and-signing.md`, and `.agents/bundles/knowledge/domains/storage/object-storage.md` (`RustTaskAwaitable`, `src/rs/vertebra-core/src/notify.rs` source provenance, unified `vertebra._vertebra.{SyncGcpTokenCache, AsyncGcpTokenCache}`, fail-closed stores, framework contracts, and Arrow/Parquet streaming).
+- **R8.3 (`ch04:t03`)**: Update `docs/usage/storage.md` and `docs/usage/storage-auth-and-signing.md` and extend `.agents/bundles/knowledge/domains/storage/object-storage.md` (which already documents `ch01` `RustTaskAwaitable`, `notify.rs` provenance, unified `vertebra._vertebra` GCP auth, and fail-closed construction) with `ch02`–`ch04` ORM/Litestar contracts and Arrow/Parquet batch streaming.
 
 ### 2.2 Edge-Case & Failure-Mode Matrix
 
@@ -92,11 +92,11 @@ Parent roadmap: [spec.md](../../spec.md); depends on Chapters 01, 02, and 03. Sk
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/3 files documented]` (owned by `storage-completeness:ch04:t03`):
+Progress: `[1/3 files documented]` (`object-storage.md` documents `ch01`; `storage-completeness:ch04:t03` completes user guides and extends `object-storage.md` for `ch02`–`ch04`):
 
 * `docs/usage/storage.md` — Streaming `get_stream`/`put_stream`, conditional `put`, pagination, `rename`, fail-closed config, Litestar `Store`/static/Range streaming, and Arrow/Parquet helpers.
 * `docs/usage/storage-auth-and-signing.md` — Unified `vertebra._vertebra.{SyncGcpTokenCache, AsyncGcpTokenCache}` and GCS/S3/Azure/OCI presigning.
-* `.agents/bundles/knowledge/domains/storage/object-storage.md` — `RustTaskAwaitable`, `notify.rs` provenance, unified GCP auth, and retired `_memory` fallback notes.
+* `.agents/bundles/knowledge/domains/storage/object-storage.md` — Extend existing `ch01` chapter with `ch02`–`ch04` SQLSpec/Alchemy/Django/Litestar contracts and Arrow/Parquet batch streaming.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -118,7 +118,7 @@ Progress: `[0/3 files documented]` (owned by `storage-completeness:ch04:t03`):
 
 - **Verified Baseline**: `HEAD @ cdb978d3`; `depends_on_chapters: [ch01, ch02, ch03]`, `state: planned`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
-- **Documentation & OKF Status**: `[0/3 files documented]` completed in `t03` prior to final flow review.
+- **Documentation & OKF Status**: `[1/3 files documented]` (`object-storage.md` updated for `ch01`; remaining `2` user guides + `ch02`–`ch04` OKF extensions completed in `t03` prior to final flow review).
 
 [^arrow-shm]: `src/rs/vertebra-db/src/arrow_shm.rs::allocate_shm_region` — Named shared-memory segment allocator for Arrow IPC frames.
 [^db-arrow]: `src/py/vertebra/db/arrow.py::ArrowCursor` — Python Arrow IPC result wrapper.
