@@ -580,6 +580,363 @@ fn block_on_storage_succeeds_inside_multi_thread_runtime_and_enter() {
 }
 
 #[tokio::test]
+async fn test_refreshing_gcp_credential_provider_over_core_token_cache() {
+    use _storage::gcp_auth::{GCS_OAUTH_SCOPES, RefreshingGcpCredentialProvider};
+    use object_store::CredentialProvider;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use vertebra_core::gcp_auth::{
+        DEFAULT_REFRESH_SKEW_MS, GcpAuthSource, GcpTokenCache, ProxyPolicy,
+    };
+
+    assert!(GCS_OAUTH_SCOPES.contains(&"https://www.googleapis.com/auth/devstorage.full_control"));
+    assert!(GCS_OAUTH_SCOPES.contains(&"https://www.googleapis.com/auth/cloud-platform"));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock oauth");
+    let addr = listener.local_addr().expect("local addr");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_srv = Arc::clone(&calls);
+
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let c = Arc::clone(&calls_srv);
+            tokio::spawn(async move {
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf).await;
+                let seq = c.fetch_add(1, Ordering::SeqCst) + 1;
+                let body = format!(
+                    r#"{{"access_token":"tok_{seq}","expires_in":3600,"token_type":"Bearer"}}"#
+                );
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let cache = Arc::new(GcpTokenCache::with_proxy_policy(
+        GcpAuthSource::AuthorizedUser {
+            client_id: "cid".to_string(),
+            client_secret: "csec".to_string(),
+            refresh_token: "rtok".to_string(),
+            quota_project_id: Some("proj-storage".to_string()),
+            token_uri: format!("http://127.0.0.1:{}/token", addr.port()),
+        },
+        DEFAULT_REFRESH_SKEW_MS,
+        ProxyPolicy::Direct,
+    ));
+    let provider = RefreshingGcpCredentialProvider::new(Arc::clone(&cache));
+    assert!(Arc::ptr_eq(provider.cache(), &cache));
+
+    let cred1 = provider.get_credential().await.expect("get_credential 1");
+    assert_eq!(cred1.bearer, "tok_1");
+    let cred2 = provider.get_credential().await.expect("get_credential 2");
+    assert_eq!(cred2.bearer, "tok_1");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    cache.invalidate(1);
+    let cred3 = provider
+        .get_credential()
+        .await
+        .expect("get_credential after invalidate");
+    assert_eq!(cred3.bearer, "tok_2");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn test_multicloud_presigning_parity_rfc3986_oci_par_and_expiry_bounds() {
+    use _storage::oci::{
+        OciCavageCredentials, OciParConfig, build_oci_par_url, sign_oci_request_headers,
+    };
+    use _storage::signing::{
+        SigningError, assemble_gcs_iam_v4_url, build_gcs_v4_canonical_request, sign_gcs_v4_url,
+    };
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use hmac::{Hmac, Mac};
+    use rsa::RsaPrivateKey;
+    use rsa::pkcs1v15::{SigningKey, VerifyingKey};
+    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::signature::{SignatureEncoding, Signer, Verifier};
+    use sha2::Sha256;
+
+    let pem = concat!(
+        "-----BEGIN PRIVATE KEY-----\n",
+        "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDJTl8KiBfisWRw\n",
+        "nP4tfbLiOa0io1rTfTen2IIYQgek3ET1isNNTWqeWSaD8mzOrVlLZlAaDZopzq4Z\n",
+        "jzLNq9uwIDWPuCzZIVMIAGDpcI+cAuofDs9FGRh3x5fO78Z0ch4tfwAh3SZpcu4P\n",
+        "LqPpU1FwvhfHftK5UdM0LHW57xhPPzu+lfVuBH8fRULmrqQJvDpcwb0QZtHCTs/z\n",
+        "VWbLGhl1XCLUEI/95CnOVctJHeckgJL5chUXxDoXpZGyFfv8qz832BgO3LN7Hnn1\n",
+        "w9gLsidb94Bmq/kA49esiXDECgcBSRgZmpYSOZOwibU9RI3nFtNGb6IpGiXhiqI9\n",
+        "ci5V3jtFAgMBAAECggEAAN/7ltGaSqh3xdB5tUlUQiEjhMQTGTHm+N2tuCA4FH8k\n",
+        "zL4XILBbjhAAgB2uQNvrY290Frm94gA2s5s2CpRGiTdT4pWABoGRTz1HE5r6sJls\n",
+        "v7SLgn96ekW+i2DCW9gMZOXOhDw3F/9/q3yXWwzjjKyhyFpLSQNVnBXqb5m1lwXy\n",
+        "M9Eej90qFDr3Or+Y+Met0LEvt3E+tYuPjVlLTmQFjZOTCB/Kqudq3mkUG8G9cV6Y\n",
+        "YNN+RXjsHj7xsL3Rp+V6vua3B3hWjSnsqpl1u0CD0fBDOrbie2yCmK4n7C/0Hi7H\n",
+        "wwZoSGXR+y0hdMEXuZXX0iXjv3pFBvr7+RQwxWggAQKBgQDo8f2xFAUIUVH7t6Rm\n",
+        "nSN2XbVqOl2vdR47yoYS5HOxjgQtmgMqHQ4eusVIVirSStyGMs49ZtVGiL4cYqxs\n",
+        "vECXDHyiL3dPCcSS8MkzYcGv5QjXsuQLHvp4my2REWNB9RVCADslTIetMEFoFm0T\n",
+        "GvQz+RMvyJoGZl26mchwFGldRQKBgQDdOsGlqtjSc+TQ5q5YtZ0+phIzPZ1usbN4\n",
+        "qdjEYp5SCGNU2/AFayqKSPgD/ulMtdiXzA2qK4I9h5xmRE/A/FJVhW66S29+6CAP\n",
+        "/EGtfAYdFozsaZpjxCpYszagGVBnvViv9Y4KWUeyhN1lwfkbTLZ0jIiICt4Vp3Ci\n",
+        "5k6Vp2RGAQKBgA/6IQtXMy0p3rSkGNuM5ZTFwp6hmDFjmApDzsRW9PR1qCW0jYkC\n",
+        "6ygCaWuXtWItDkkKDQk7F1+6G0f5IJhopQl3Ksk49jbulZP6feJPTyiQTfX1aBy3\n",
+        "KDjDc/GiPquUcrvPJj9dq2Seja3k8+A+lgdGiyFY4e+Ub9NPnubJD5z9AoGBALeA\n",
+        "2kmpykne2eixv+JTWwgxRp18OU8tVTn8YJKdXsear5IfERvdhZ7I4fimhCweFnfr\n",
+        "SVZi2phhGUj21tS0NzM7B9q9YdF5h8barjvRyVxtbR1YhzjD6YBDv0bTWI+ETsE9\n",
+        "xMEuxzr73I1gdVnAqwNH4qQ9p3N8vQBSWtLl01YBAoGBAND7MuyVNdG+9pGItdFt\n",
+        "k9pz3Vc9t+8Fn31K9HldC9ejmnBapfkgwLdJemLQaqAs6tkbG2ajlCqv7Y4ZAARc\n",
+        "qkcDJbfy9jP/h7kvb/UNP21SxDscrKTAczxEm7PiTk3HPNOwx3/N6tPc+5HhR8LR\n",
+        "8OwWavCVE6HreFLFfrEAgSgF\n",
+        "-----END PRIVATE KEY-----\n"
+    );
+
+    let fixed_ts = chrono::NaiveDate::from_ymd_opt(2026, 11, 7)
+        .expect("valid date")
+        .and_hms_opt(0, 0, 0)
+        .expect("valid time")
+        .and_utc()
+        .timestamp();
+
+    let gcs_cfg = GcsSignConfig {
+        bucket: "analytics-bkt".to_string(),
+        service_account_email: "signer@proj.iam.gserviceaccount.com".to_string(),
+        private_key_pem: Some(pem.to_string()),
+        access_token: None,
+    };
+    let local_gcs_url = sign_gcs_v4_url(&gcs_cfg, "GET", "dir/a b+c.txt", 900, fixed_ts)
+        .expect("local GCS V4 RSA sign");
+    assert!(
+        local_gcs_url
+            .starts_with("https://storage.googleapis.com/analytics-bkt/dir/a%20b%2Bc.txt?")
+    );
+    assert!(local_gcs_url.contains("X-Goog-Date=20261107T000000Z"));
+
+    let canonical = build_gcs_v4_canonical_request(
+        "analytics-bkt",
+        "signer@proj.iam.gserviceaccount.com",
+        "GET",
+        "dir/a b+c.txt",
+        900,
+        fixed_ts,
+    )
+    .expect("build canonical request");
+    let rsa_priv = RsaPrivateKey::from_pkcs8_pem(pem).expect("parse test rsa");
+    let sig_bytes = SigningKey::<Sha256>::new(rsa_priv.clone())
+        .sign(canonical.string_to_sign.as_bytes())
+        .to_bytes();
+    let iam_assembled_url = assemble_gcs_iam_v4_url(&canonical, &hex::encode_upper(&sig_bytes))
+        .expect("assemble IAM URL");
+    assert_eq!(local_gcs_url, iam_assembled_url);
+
+    let utf8_gcs_url = sign_gcs_v4_url(
+        &gcs_cfg,
+        "PUT",
+        "reports/2026 Q4/summary+final.parquet",
+        900,
+        fixed_ts,
+    )
+    .expect("GCS V4 complex path");
+    assert!(utf8_gcs_url.starts_with(
+        "https://storage.googleapis.com/analytics-bkt/reports/2026%20Q4/summary%2Bfinal.parquet?"
+    ));
+
+    let bad_gcs_cfg = GcsSignConfig {
+        private_key_pem: Some("not-a-valid-pem".to_string()),
+        ..gcs_cfg.clone()
+    };
+    assert!(matches!(
+        sign_gcs_v4_url(&bad_gcs_cfg, "GET", "dir/a.txt", 900, fixed_ts),
+        Err(SigningError::InvalidKey(_))
+    ));
+    assert!(matches!(
+        assemble_gcs_iam_v4_url(&canonical, "zz-not-hex"),
+        Err(SigningError::InvalidKey(_))
+    ));
+
+    let r2_cfg = S3SignConfig {
+        bucket: "assets".to_string(),
+        region: "auto".to_string(),
+        access_key_id: "r2-access-key".to_string(),
+        secret_access_key: "r2-secret-key".to_string(),
+        endpoint: Some("https://acct.r2.cloudflarestorage.com".to_string()),
+    };
+    let r2_url =
+        sign_s3_v4_url(&r2_cfg, "GET", "img/logo.png", 3600, fixed_ts).expect("R2 SigV4 sign");
+    assert!(r2_url.starts_with("https://acct.r2.cloudflarestorage.com/assets/img/logo.png?"));
+    assert!(r2_url.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"));
+    assert!(
+        r2_url.contains("X-Amz-Credential=r2-access-key%2F20261107%2Fauto%2Fs3%2Faws4_request")
+    );
+    let (_, r2_sig) = r2_url
+        .split_once("&X-Amz-Signature=")
+        .expect("X-Amz-Signature");
+    assert_eq!(r2_sig.len(), 64);
+    assert!(r2_sig.chars().all(|c| c.is_ascii_hexdigit()));
+    let r2_url_repeat =
+        sign_s3_v4_url(&r2_cfg, "GET", "img/logo.png", 3600, fixed_ts).expect("R2 SigV4 repeat");
+    assert_eq!(r2_url, r2_url_repeat);
+    assert!(verify_s3_v4_url(&r2_cfg, "GET", &r2_url, fixed_ts + 60).expect("verify R2 URL"));
+
+    let r2_encoded = sign_s3_v4_url(
+        &r2_cfg,
+        "PUT",
+        "reports/2026 Q4/summary+final.parquet",
+        3600,
+        fixed_ts,
+    )
+    .expect("R2 special key");
+    assert!(r2_encoded.starts_with(
+        "https://acct.r2.cloudflarestorage.com/assets/reports/2026%20Q4/summary%2Bfinal.parquet?"
+    ));
+    assert!(
+        verify_s3_v4_url(&r2_cfg, "PUT", &r2_encoded, fixed_ts + 60)
+            .expect("verify R2 special key")
+    );
+
+    let raw_az_key = b"0123456789abcdef0123456789abcdef";
+    let az_cfg = AzureSasConfig {
+        account: "acct1".to_string(),
+        container: "container".to_string(),
+        access_key_b64: BASE64_STANDARD.encode(raw_az_key),
+        endpoint: None,
+    };
+    let az_url =
+        sign_azure_sas_url(&az_cfg, "PUT", "blob/file.csv", 3600, fixed_ts).expect("Azure SAS PUT");
+    assert!(az_url.starts_with("https://acct1.blob.core.windows.net/container/blob/file.csv?"));
+    assert!(az_url.contains("sv=2020-12-06"));
+    assert!(az_url.contains("sr=b"));
+    assert!(az_url.contains("sp=cw"));
+    assert!(az_url.contains("se=2026-11-07T01%3A00%3A00Z"));
+    let parsed_az = url::Url::parse(&az_url).expect("parse Azure SAS URL");
+    let az_sig = parsed_az
+        .query_pairs()
+        .find(|(k, _)| k == "sig")
+        .map(|(_, v)| v.into_owned())
+        .expect("sig param");
+    let expected_sts = "cw\n2026-11-07T00:00:00Z\n2026-11-07T01:00:00Z\n/blob/acct1/container/blob/file.csv\n\n\nhttps\n2020-12-06\nb\n\n\n\n\n\n";
+    let mut mac = Hmac::<Sha256>::new_from_slice(raw_az_key).expect("hmac key");
+    mac.update(expected_sts.as_bytes());
+    let expected_az_sig = BASE64_STANDARD.encode(mac.finalize().into_bytes());
+    assert_eq!(az_sig, expected_az_sig);
+
+    let bad_az_cfg = AzureSasConfig {
+        access_key_b64: "%%%not-valid-base64%%%".to_string(),
+        ..az_cfg.clone()
+    };
+    assert!(matches!(
+        bad_az_cfg.sign_sas_url("PUT", "blob/file.csv", 3600, fixed_ts),
+        Err(SigningError::InvalidKey(_))
+    ));
+    assert!(sign_azure_sas_url(&bad_az_cfg, "PUT", "blob/file.csv", 3600, fixed_ts).is_err());
+
+    let oci_par_cfg = OciParConfig {
+        region: "us-ashburn-1".to_string(),
+        namespace: "ns1".to_string(),
+        bucket: "bkt".to_string(),
+        par_token: "p/tok/".to_string(),
+        endpoint: None,
+    };
+    let oci_url = build_oci_par_url(&oci_par_cfg, "k/1.bin", 3600).expect("OCI PAR URL");
+    assert_eq!(
+        oci_url,
+        "https://objectstorage.us-ashburn-1.oraclecloud.com/p/tok/n/ns1/b/bkt/o/k%2F1.bin"
+    );
+
+    let oci_creds = OciCavageCredentials {
+        tenancy_ocid: "ocid1.tenancy.oc1..aaaa".to_string(),
+        user_ocid: "ocid1.user.oc1..bbbb".to_string(),
+        fingerprint: "aa:bb:cc".to_string(),
+        private_key_pem: pem.to_string(),
+    };
+    let oci_hdrs = sign_oci_request_headers(
+        &oci_creds,
+        "GET",
+        "https://objectstorage.us-ashburn-1.oraclecloud.com/n/ns1/b/bkt/o/k%2F1.bin",
+        None,
+        None,
+        fixed_ts,
+    )
+    .expect("sign OCI request headers");
+    let sig_part = oci_hdrs
+        .authorization
+        .split("signature=\"")
+        .nth(1)
+        .and_then(|s| s.strip_suffix('"'))
+        .expect("OCI signature field");
+    let oci_sig_bytes = BASE64_STANDARD.decode(sig_part).expect("decode OCI sig");
+    let oci_rsa_sig =
+        rsa::pkcs1v15::Signature::try_from(oci_sig_bytes.as_slice()).expect("rsa sig");
+    let expected_oci_signing_str = format!(
+        "(request-target): get /n/ns1/b/bkt/o/k%2F1.bin\ndate: {}\nhost: objectstorage.us-ashburn-1.oraclecloud.com",
+        oci_hdrs.date
+    );
+    VerifyingKey::<Sha256>::new(rsa_priv.to_public_key())
+        .verify(expected_oci_signing_str.as_bytes(), &oci_rsa_sig)
+        .expect("OCI RSA signature must verify");
+
+    let bad_oci_creds = OciCavageCredentials {
+        private_key_pem: "invalid-pem".to_string(),
+        ..oci_creds
+    };
+    assert!(matches!(
+        sign_oci_request_headers(
+            &bad_oci_creds,
+            "GET",
+            "https://objectstorage.us-ashburn-1.oraclecloud.com/n/ns1/b/bkt/o/k%2F1.bin",
+            None,
+            None,
+            fixed_ts,
+        ),
+        Err(SigningError::InvalidKey(_))
+    ));
+
+    for bad_exp in [0_u64, 604_801_u64] {
+        assert!(matches!(
+            sign_gcs_v4_url(&gcs_cfg, "GET", "dir/a.txt", bad_exp, fixed_ts),
+            Err(SigningError::InvalidExpiry(_))
+        ));
+        assert!(matches!(
+            build_gcs_v4_canonical_request(
+                "analytics-bkt",
+                "signer@proj.iam.gserviceaccount.com",
+                "GET",
+                "dir/a.txt",
+                bad_exp,
+                fixed_ts,
+            ),
+            Err(SigningError::InvalidExpiry(_))
+        ));
+        assert!(matches!(
+            r2_cfg.sign_v4_url("GET", "img/logo.png", bad_exp, fixed_ts),
+            Err(SigningError::InvalidExpiry(_))
+        ));
+        assert!(sign_s3_v4_url(&r2_cfg, "GET", "img/logo.png", bad_exp, fixed_ts).is_err());
+        assert!(matches!(
+            az_cfg.sign_sas_url("PUT", "blob/file.csv", bad_exp, fixed_ts),
+            Err(SigningError::InvalidExpiry(_))
+        ));
+        assert!(sign_azure_sas_url(&az_cfg, "PUT", "blob/file.csv", bad_exp, fixed_ts).is_err());
+        assert!(matches!(
+            build_oci_par_url(&oci_par_cfg, "k/1.bin", bad_exp),
+            Err(SigningError::InvalidExpiry(_))
+        ));
+    }
+
+    assert!(sign_gcs_v4_url(&gcs_cfg, "GET", "dir/a.txt", 1, fixed_ts).is_ok());
+    assert!(sign_gcs_v4_url(&gcs_cfg, "GET", "dir/a.txt", 604_800, fixed_ts).is_ok());
+    assert!(sign_s3_v4_url(&r2_cfg, "GET", "img/logo.png", 604_800, fixed_ts).is_ok());
+    assert!(sign_azure_sas_url(&az_cfg, "PUT", "blob/file.csv", 604_800, fixed_ts).is_ok());
+    assert!(build_oci_par_url(&oci_par_cfg, "k/1.bin", 604_800).is_ok());
+}
+
+#[tokio::test]
 async fn test_streaming_chunk_read_memory_and_local() {
     use futures::TryStreamExt;
 

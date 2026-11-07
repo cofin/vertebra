@@ -230,3 +230,77 @@ def test_gcs_keyless_presign_reuses_object_store_token_cache(
         server.shutdown()
         server.server_close()
         thread.join(timeout=2.0)
+
+
+def test_signing_expiry_bounds_invalid_keys_and_rfc3986_paths() -> None:
+    """Verify out-of-bounds expiry and malformed keys raise ValueError and paths follow RFC 3986."""
+    native_mod = SyncObjectStore._get_native_module()
+    assert native_mod is not None
+
+    azure_key = base64.b64encode(b"0123456789abcdef0123456789abcdef").decode("ascii")
+    for bad_expiry in (0, 604_801):
+        with pytest.raises(ValueError, match="expires_in_secs"):
+            native_mod.py_sign_s3_v4_url(
+                "assets",
+                "auto",
+                "r2-ak",
+                "r2-sk",
+                "GET",
+                "img/logo.png",
+                bad_expiry,
+                1_794_009_600,
+                "https://acct.r2.cloudflarestorage.com",
+            )
+        with pytest.raises(ValueError, match="expires_in_secs"):
+            native_mod.py_sign_azure_sas_url(
+                "acct1",
+                "container",
+                azure_key,
+                "PUT",
+                "blob/file.csv",
+                bad_expiry,
+                1_794_009_600,
+            )
+        with pytest.raises(ValueError, match="expires_in_secs"):
+            native_mod.py_sign_hmac_url(
+                "https://cdn.example.com/assets/file.bin",
+                "test-hmac-secret-key-32-bytes-ok",
+                "GET",
+                bad_expiry,
+                1_794_009_600,
+            )
+
+    with pytest.raises(ValueError, match="base64"):
+        native_mod.py_sign_azure_sas_url(
+            "acct1",
+            "container",
+            "%%%not-valid-base64%%%",
+            "PUT",
+            "blob/file.csv",
+            3600,
+            1_794_009_600,
+        )
+
+    r2_url = native_mod.py_sign_s3_v4_url(
+        "assets",
+        "auto",
+        "r2-ak",
+        "r2-sk",
+        "GET",
+        "reports/2026 Q4/summary+final.parquet",
+        3600,
+        1_794_009_600,
+        "https://acct.r2.cloudflarestorage.com",
+    )
+    assert r2_url.startswith("https://acct.r2.cloudflarestorage.com/assets/reports/2026%20Q4/summary%2Bfinal.parquet?")
+    assert "X-Amz-Credential=r2-ak%2F20261107%2Fauto%2Fs3%2Faws4_request" in r2_url
+    assert native_mod.py_verify_s3_v4_url(
+        "assets",
+        "auto",
+        "r2-ak",
+        "r2-sk",
+        "GET",
+        r2_url,
+        1_794_009_660,
+        "https://acct.r2.cloudflarestorage.com",
+    )
