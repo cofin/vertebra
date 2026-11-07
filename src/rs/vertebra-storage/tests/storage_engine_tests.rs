@@ -578,3 +578,553 @@ fn block_on_storage_succeeds_inside_multi_thread_runtime_and_enter() {
     let entered = _storage::store::block_on_storage(async { 7_u64 });
     assert_eq!(entered, 7);
 }
+
+#[tokio::test]
+async fn test_streaming_chunk_read_memory_and_local() {
+    use futures::TryStreamExt;
+
+    let expected: Vec<u8> = (0..(3 * 65536)).map(|i| (i % 251) as u8).collect();
+    let payload = Bytes::from(expected.clone());
+
+    let mem_engine = ObjectStoreEngine::new(BackendConfig::Memory).expect("memory engine");
+    mem_engine
+        .put("blobs/stream.bin", payload.clone())
+        .await
+        .expect("put memory stream blob");
+    let mem_chunks: Vec<Bytes> = mem_engine
+        .get_stream("blobs/stream.bin")
+        .await
+        .expect("open memory stream")
+        .try_collect()
+        .await
+        .expect("collect memory stream");
+    assert!(!mem_chunks.is_empty());
+    let mem_joined: Vec<u8> = mem_chunks.iter().flat_map(|b| b.iter().copied()).collect();
+    assert_eq!(mem_joined.len(), 196_608);
+    assert_eq!(mem_joined, expected);
+
+    let tmp = TempDir::new().expect("tempdir");
+    let url = format!("file://{}", tmp.path().display());
+    let local_engine = ObjectStoreEngine::from_url(&url, None).expect("local engine");
+    local_engine
+        .put("blobs/stream.bin", payload)
+        .await
+        .expect("put local stream blob");
+    let local_chunks: Vec<Bytes> = local_engine
+        .get_stream("blobs/stream.bin")
+        .await
+        .expect("open local stream")
+        .try_collect()
+        .await
+        .expect("collect local stream");
+    assert!(!local_chunks.is_empty());
+    let local_joined: Vec<u8> = local_chunks
+        .iter()
+        .flat_map(|b| b.iter().copied())
+        .collect();
+    assert_eq!(local_joined.len(), 196_608);
+    assert_eq!(local_joined, expected);
+}
+
+#[tokio::test]
+async fn test_incremental_r2_uniform_multipart_session() {
+    use _storage::store::PutConditionalOptions;
+    use std::sync::Arc;
+
+    let engine =
+        ObjectStoreEngine::with_store(Arc::new(object_store::memory::InMemory::new()), "r2");
+    let mut session = engine
+        .create_multipart(
+            "blobs/r2_incremental.bin",
+            PutConditionalOptions {
+                content_type: Some("application/octet-stream".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create r2 multipart session");
+
+    let chunk_sizes = [
+        3 * 1024 * 1024,
+        3 * 1024 * 1024,
+        3 * 1024 * 1024,
+        1024 * 1024,
+        512 * 1024,
+    ];
+    let mut expected = Vec::with_capacity(chunk_sizes.iter().sum());
+    for (part_idx, &len) in chunk_sizes.iter().enumerate() {
+        let data: Vec<u8> = (0..len)
+            .map(|offset| ((part_idx * 37 + offset) % 253) as u8)
+            .collect();
+        expected.extend_from_slice(&data);
+        session
+            .write_chunk(Bytes::from(data))
+            .await
+            .expect("write_chunk");
+        if part_idx < 2 {
+            assert!(
+                session.part_sizes_flushed().is_empty(),
+                "must buffer until 8 MiB threshold"
+            );
+        } else {
+            assert_eq!(
+                session.part_sizes_flushed(),
+                &[R2_UNIFORM_PART_SIZE],
+                "must flush exact 8 MiB part immediately upon crossing threshold"
+            );
+        }
+    }
+
+    let _put_res = session.complete().await.expect("complete r2 multipart");
+    assert_eq!(
+        session.part_sizes_flushed(),
+        &[R2_UNIFORM_PART_SIZE, 2 * 1024 * 1024 + 512 * 1024]
+    );
+
+    let fetched = engine
+        .get("blobs/r2_incremental.bin")
+        .await
+        .expect("get completed r2 object");
+    assert_eq!(fetched.len(), 10 * 1024 * 1024 + 512 * 1024);
+    assert_eq!(&fetched[..], &expected[..]);
+
+    let mut empty_session = engine
+        .create_multipart("blobs/r2_empty.bin", PutConditionalOptions::default())
+        .await
+        .expect("create empty multipart");
+    empty_session
+        .complete()
+        .await
+        .expect("complete 0-byte multipart");
+    let empty_fetched = engine.get("blobs/r2_empty.bin").await.expect("get empty");
+    assert!(empty_fetched.is_empty());
+}
+
+#[tokio::test]
+async fn test_multipart_abort_cleanup_and_idempotency() {
+    use _storage::store::PutConditionalOptions;
+
+    let engine = ObjectStoreEngine::new(BackendConfig::Memory).expect("memory engine");
+    let mut session = engine
+        .create_multipart("blobs/aborted.bin", PutConditionalOptions::default())
+        .await
+        .expect("create multipart");
+    session
+        .write_chunk(Bytes::from_static(b"part1"))
+        .await
+        .expect("write part1");
+    session.abort().await.expect("first abort");
+    session.abort().await.expect("second idempotent abort");
+
+    assert!(
+        !engine
+            .exists("blobs/aborted.bin")
+            .await
+            .expect("exists check")
+    );
+}
+
+#[tokio::test]
+async fn test_conditional_put_if_not_exists_if_match_and_metadata() {
+    use _storage::store::{ObjectStoreError, PutConditionalOptions};
+
+    let engine = ObjectStoreEngine::new(BackendConfig::Memory).expect("memory engine");
+    let mut attrs = HashMap::new();
+    attrs.insert("owner".to_string(), "worker-1".to_string());
+
+    let meta1 = engine
+        .put_opts(
+            "locks/a",
+            Bytes::from_static(b"v1"),
+            PutConditionalOptions {
+                if_not_exists: true,
+                content_type: Some("text/plain".to_string()),
+                attributes: attrs.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("initial conditional create");
+    let etag1 = meta1.etag.clone().expect("etag1 must be present");
+    assert_eq!(meta1.content_type.as_deref(), Some("text/plain"));
+    assert_eq!(meta1.attributes, attrs);
+
+    let head_meta = engine.head("locks/a").await.expect("head locks/a");
+    assert_eq!(head_meta.content_type.as_deref(), Some("text/plain"));
+    assert_eq!(head_meta.attributes, attrs);
+
+    let dup_err = engine
+        .put_opts(
+            "locks/a",
+            Bytes::from_static(b"v2"),
+            PutConditionalOptions {
+                if_not_exists: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("second if_not_exists must fail");
+    assert!(
+        matches!(dup_err, ObjectStoreError::AlreadyExists { .. }),
+        "expected AlreadyExists, got {dup_err:?}"
+    );
+
+    let precond_err = engine
+        .put_opts(
+            "locks/a",
+            Bytes::from_static(b"v2"),
+            PutConditionalOptions {
+                if_match: Some("wrong-etag".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("wrong if_match must fail");
+    assert!(
+        matches!(precond_err, ObjectStoreError::Precondition { .. }),
+        "expected Precondition, got {precond_err:?}"
+    );
+
+    let meta2 = engine
+        .put_opts(
+            "locks/a",
+            Bytes::from_static(b"v2"),
+            PutConditionalOptions {
+                if_match: Some(etag1),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("matching if_match must update");
+    assert_eq!(meta2.size, 2);
+    let updated = engine.get("locks/a").await.expect("get updated locks/a");
+    assert_eq!(&updated[..], b"v2");
+}
+
+#[tokio::test]
+async fn test_cursor_pagination_and_delimiter_listing() {
+    use _storage::store::ObjectStoreError;
+
+    async fn verify_pagination_and_delimiter(engine: &ObjectStoreEngine) {
+        engine
+            .put("dir/sub/c.txt", Bytes::from_static(b"c"))
+            .await
+            .expect("put c");
+        engine
+            .put("dir/a.txt", Bytes::from_static(b"a"))
+            .await
+            .expect("put a");
+        engine
+            .put("dir/b.txt", Bytes::from_static(b"b"))
+            .await
+            .expect("put b");
+
+        let zero_err = engine
+            .list_page(Some("dir/"), None, 0)
+            .await
+            .expect_err("limit 0 must fail");
+        assert!(matches!(zero_err, ObjectStoreError::InvalidInput(_)));
+
+        let (page1, cursor1) = engine
+            .list_page(Some("dir/"), None, 2)
+            .await
+            .expect("list_page 1");
+        let page1_paths: Vec<&str> = page1.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(page1_paths, vec!["dir/a.txt", "dir/b.txt"]);
+        assert_eq!(cursor1.as_deref(), Some("dir/b.txt"));
+
+        let (page2, cursor2) = engine
+            .list_page(Some("dir/"), cursor1.as_deref(), 2)
+            .await
+            .expect("list_page 2");
+        let page2_paths: Vec<&str> = page2.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(page2_paths, vec!["dir/sub/c.txt"]);
+        assert_eq!(cursor2, None);
+
+        let (objs, prefixes) = engine
+            .list_with_delimiter(Some("dir/"))
+            .await
+            .expect("list_with_delimiter");
+        let obj_paths: Vec<&str> = objs.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(obj_paths, vec!["dir/a.txt", "dir/b.txt"]);
+        assert_eq!(prefixes, vec!["dir/sub".to_string()]);
+    }
+
+    let mem_engine = ObjectStoreEngine::new(BackendConfig::Memory).expect("memory engine");
+    verify_pagination_and_delimiter(&mem_engine).await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let local_url = format!("file://{}", tmp.path().display());
+    let local_engine = ObjectStoreEngine::from_url(&local_url, None).expect("local engine");
+    verify_pagination_and_delimiter(&local_engine).await;
+}
+
+#[tokio::test]
+async fn test_atomic_rename_and_conflict() {
+    use _storage::store::ObjectStoreError;
+
+    async fn verify_rename(engine: &ObjectStoreEngine) {
+        engine
+            .put("dir/a.txt", Bytes::from_static(b"alpha"))
+            .await
+            .expect("put a");
+        engine
+            .put("dir/b.txt", Bytes::from_static(b"beta"))
+            .await
+            .expect("put b");
+
+        engine
+            .rename("dir/a.txt", "dir/moved.txt", true)
+            .await
+            .expect("rename a -> moved");
+        assert!(!engine.exists("dir/a.txt").await.expect("exists a"));
+        let moved = engine.get("dir/moved.txt").await.expect("get moved");
+        assert_eq!(&moved[..], b"alpha");
+
+        let conflict_err = engine
+            .rename("dir/b.txt", "dir/moved.txt", true)
+            .await
+            .expect_err("rename onto existing dst must fail");
+        assert!(
+            matches!(conflict_err, ObjectStoreError::AlreadyExists { .. }),
+            "expected AlreadyExists, got {conflict_err:?}"
+        );
+        let b_data = engine.get("dir/b.txt").await.expect("b must remain intact");
+        assert_eq!(&b_data[..], b"beta");
+    }
+
+    let mem_engine = ObjectStoreEngine::new(BackendConfig::Memory).expect("memory engine");
+    verify_rename(&mem_engine).await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let local_url = format!("file://{}", tmp.path().display());
+    let local_engine = ObjectStoreEngine::from_url(&local_url, None).expect("local engine");
+    verify_rename(&local_engine).await;
+}
+
+#[tokio::test]
+async fn test_local_conditional_put_if_none_match_and_traversal_rejection() {
+    use _storage::store::{ObjectStoreError, PutConditionalOptions};
+
+    let tmp = TempDir::new().expect("tempdir");
+    let local_url = format!("file://{}", tmp.path().display());
+    let local = ObjectStoreEngine::from_url(&local_url, None).expect("local engine");
+
+    async fn assert_traversal_rejected(engine: &ObjectStoreEngine, bad_path: &str) {
+        let err = engine
+            .put(bad_path, Bytes::from_static(b"nope"))
+            .await
+            .expect_err("traversal must fail");
+        assert!(matches!(err, ObjectStoreError::InvalidInput(_)));
+    }
+
+    assert_traversal_rejected(&local, "../escape.txt").await;
+    assert_traversal_rejected(&local, "nested/../../escape.txt").await;
+    assert_traversal_rejected(&local, "dir/%2e%2e/x").await;
+
+    let meta1 = local
+        .put_opts(
+            "locks/local.txt",
+            Bytes::from_static(b"v1"),
+            PutConditionalOptions {
+                if_not_exists: true,
+                content_type: Some("text/plain".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("local conditional create");
+    let etag1 = meta1.etag.expect("local etag");
+
+    let dup = local
+        .put_opts(
+            "locks/local.txt",
+            Bytes::from_static(b"v2"),
+            PutConditionalOptions {
+                if_none_match: Some("*".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("if_none_match=* on existing local file must fail");
+    assert!(dup.is_already_exists());
+
+    let none_match_hit = local
+        .put_opts(
+            "locks/local.txt",
+            Bytes::from_static(b"v2"),
+            PutConditionalOptions {
+                if_none_match: Some(etag1.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("if_none_match matching current etag must fail");
+    assert!(none_match_hit.is_precondition());
+
+    let wrong_match = local
+        .put_opts(
+            "locks/local.txt",
+            Bytes::from_static(b"v2"),
+            PutConditionalOptions {
+                if_match: Some("stale-etag".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("stale if_match on local file must fail");
+    assert!(wrong_match.is_precondition());
+
+    local
+        .put_opts(
+            "locks/local.txt",
+            Bytes::from_static(b"v2"),
+            PutConditionalOptions {
+                if_match: Some(etag1),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("matching if_match on local file must update");
+    assert_eq!(
+        &local.get("locks/local.txt").await.expect("get local")[..],
+        b"v2"
+    );
+}
+
+#[test]
+fn test_pyo3_sync_and_async_streaming_multipart_conditional_pagination_and_rename() {
+    use pyo3::ffi::c_str;
+    use pyo3::prelude::*;
+    use pyo3::types::PyModule;
+
+    Python::initialize();
+    Python::attach(|py| {
+        let storage_mod = PyModule::new(py, "_storage").expect("create _storage module");
+        _storage::_storage(&storage_mod).expect("populate _storage module");
+        let sys_modules = py
+            .import("sys")
+            .expect("import sys")
+            .getattr("modules")
+            .expect("sys.modules");
+        sys_modules
+            .set_item("vertebra._storage", &storage_mod)
+            .expect("register vertebra._storage");
+
+        py.run(
+            c_str!(
+                r#"
+import asyncio
+import vertebra._storage as st
+
+sync_store = st.SyncObjectStore("memory://")
+m1 = sync_store.put(
+    "locks/item.txt",
+    b"hello",
+    content_type="text/plain",
+    attributes={"env": "test"},
+    if_not_exists=True,
+)
+assert m1.content_type == "text/plain"
+assert m1.attributes == {"env": "test"}
+assert sync_store.head("locks/item.txt").content_type == "text/plain"
+assert sync_store.head("locks/item.txt").attributes == {"env": "test"}
+
+try:
+    sync_store.put("locks/item.txt", b"dup", if_not_exists=True)
+    raise AssertionError("expected FileExistsError")
+except FileExistsError:
+    pass
+
+try:
+    sync_store.put("locks/item.txt", b"stale", if_match="bad-etag")
+    raise AssertionError("expected PermissionError")
+except PermissionError:
+    pass
+
+sync_store.put("locks/item.txt", b"updated", if_match=m1.etag)
+assert sync_store.get("locks/item.txt") == b"updated"
+
+mp = sync_store.create_multipart("blobs/mp.bin", content_type="application/octet-stream")
+mp.write_part(b"alpha-")
+mp.write_part(memoryview(b"beta"))
+mp_meta = mp.complete()
+assert mp_meta.size == 10
+
+chunks = [ bytes(memoryview(c)) for c in sync_store.get_stream("blobs/mp.bin", chunk_size=4) ]
+assert [len(c) for c in chunks] == [4, 4, 2]
+assert b"".join(chunks) == b"alpha-beta"
+
+try:
+    sync_store.get_stream("blobs/mp.bin", chunk_size=0)
+    raise AssertionError("expected ValueError for chunk_size=0")
+except ValueError:
+    pass
+
+try:
+    sync_store.list_page(limit=0)
+    raise AssertionError("expected ValueError for limit=0")
+except ValueError as exc:
+    assert "limit must be >= 1" in str(exc)
+
+async def run_async_checks():
+    astore = st.AsyncObjectStore("memory://")
+    am1 = await astore.put(
+        "dir/a.txt",
+        b"a-val",
+        content_type="text/plain",
+        attributes={"k": "v"},
+        if_not_exists=True,
+    )
+    assert am1.content_type == "text/plain"
+    assert am1.attributes == {"k": "v"}
+    await astore.put("dir/b.txt", b"b-val")
+    await astore.put("dir/sub/c.txt", b"c-val")
+
+    p1, cur1 = await astore.list_page("dir/", None, 2)
+    assert [x.path for x in p1] == ["dir/a.txt", "dir/b.txt"]
+    assert cur1 == "dir/b.txt"
+    p2, cur2 = await astore.list_page("dir/", cur1, 2)
+    assert [x.path for x in p2] == ["dir/sub/c.txt"]
+    assert cur2 is None
+
+    objs, prefixes = await astore.list_with_delimiter("dir/")
+    assert [x.path for x in objs] == ["dir/a.txt", "dir/b.txt"]
+    assert prefixes == ["dir/sub"]
+
+    amp = await astore.create_multipart("dir/streamed.bin")
+    await amp.write_part(b"chunk-1-")
+    await amp.write_part(b"chunk-2")
+    amp_meta = await amp.complete()
+    assert amp_meta.size == 15
+
+    aborted = await astore.create_multipart("dir/aborted.bin")
+    await aborted.write_part(b"discard")
+    await aborted.abort()
+    await aborted.abort()
+    assert not await astore.exists("dir/aborted.bin")
+
+    parts = []
+    async for buf in astore.get_stream("dir/streamed.bin", chunk_size=6):
+        parts.append(bytes(memoryview(buf)))
+    assert [len(p) for p in parts] == [6, 6, 3]
+    assert b"".join(parts) == b"chunk-1-chunk-2"
+
+    await astore.rename("dir/a.txt", "dir/moved.txt", if_not_exists=True)
+    assert not await astore.exists("dir/a.txt")
+    try:
+        await astore.rename("dir/b.txt", "dir/moved.txt", if_not_exists=True)
+        raise AssertionError("expected FileExistsError on rename conflict")
+    except FileExistsError:
+        pass
+    assert await astore.get("dir/b.txt") == b"b-val"
+
+asyncio.run(run_async_checks())
+"#
+            ),
+            None,
+            None,
+        )
+        .expect("run Python sync + asyncio verification");
+    });
+}
