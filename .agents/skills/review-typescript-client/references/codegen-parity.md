@@ -11,4 +11,4 @@ This reference outlines synchronization rules between Python server schemas and 
    - Zod schemas in `zod.py` and TypeScript interface generators in `_typescript.py` must stay in lockstep.
 
 2. **Error Definitions**:
-   - Error response shapes emitted by Python handlers must match TypeScript error classes (`ClientError`, `NetworkError`, `ProtocolError`).
+   - Error response shapes emitted by Python handlers must match TypeScript error classes (`ClientError`, `NetworkError`, `TimeoutError`, `ServerError`, `ValidationError`).

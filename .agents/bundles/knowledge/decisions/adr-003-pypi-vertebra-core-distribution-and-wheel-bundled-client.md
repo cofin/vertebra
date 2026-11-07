@@ -1,13 +1,22 @@
 ---
-type: Concept
+type: Decision
 title: "ADR-003: PyPI vertebra-core Distribution and Wheel-Bundled TypeScript Client"
 description: "Architectural decision to publish the PyPI distribution as vertebra-core while preserving the vertebra Python namespace and bundling @vertebra/client inside the wheel."
 status: stable
-tags: [decisions, adr, packaging, pypi, typescript, importmap]
+tags:
+  - decisions
+  - adr
+  - packaging
+  - pypi
+  - typescript
+  - importmap
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: cdb978d3
   - by: agent:flow-setup
     at: "2026-11-04T04:33:00Z"
     commit: f741701

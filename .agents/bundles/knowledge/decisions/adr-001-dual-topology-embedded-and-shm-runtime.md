@@ -1,13 +1,22 @@
 ---
-type: Concept
+type: Decision
 title: "ADR-001: Dual-Topology Embedded and Shared-Memory Runtime"
 description: "Architectural decision to support both in-process Embedded and multi-process POSIX Shared-Memory worker topologies with automatic selection."
 status: stable
-tags: [decisions, adr, runtime, ipc, shm, free-threaded]
+tags:
+  - decisions
+  - adr
+  - runtime
+  - ipc
+  - shm
+  - free-threaded
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: cdb978d3
   - by: agent:flow-setup
     at: "2026-11-04T04:33:00Z"
     commit: f741701

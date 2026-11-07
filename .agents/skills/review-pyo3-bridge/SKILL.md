@@ -40,12 +40,15 @@ description: Use when reviewing PyO3 native extension modules, GIL release disci
 
 ## Suppressions Index
 
+Shared catalog: [`false-positive-suppressions.md`](../review-core/references/false-positive-suppressions.md).
+
 - `FP-FFI-01`: PyO3 thread detachment
 - `FP-FFI-02`: Cloneable PyClass FromPyObject
 
 ## Focused Commands
 
 ```bash
-cargo test -p vertebra-py
-uv run mypy src/py/vertebra
+cargo test --manifest-path src/rs/Cargo.toml -p vertebra-py -p vertebra-bundler -p vertebra-storage -p vertebra-bigquery -p vertebra-spanner
+uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._bigquery vertebra._spanner
+uv run --no-sync mypy src/py/vertebra
 ```

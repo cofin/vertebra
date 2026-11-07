@@ -1,9 +1,11 @@
 ---
 type: Spec
 flow_id: native-mssql-driver
-title: Standalone Rust SQL Server Wheel (vertebra-mssql)
-description: Standalone PyO3 crate src/rs/vertebra-mssql (vertebra._mssql + vertebra-core[mssql]) built on tiberius (rustls, TDS 7.4/8.0, sp_executesql RPC, token stream, BulkLoad, ATTENTION cancellation, VTBARROW ShmCapsule ArrowCursor), replacing the sqlite3 stand-in.
+title: "Standalone Rust SQL Server Wheel (vertebra-mssql)"
+description: "Standalone PyO3 crate src/rs/vertebra-mssql (vertebra._mssql + vertebra-core[mssql]) built on tiberius (rustls, TDS 7.4/8.0, sp_executesql RPC, token stream, BulkLoad, ATTENTION cancellation, VTBARROW ShmCapsule ArrowCursor), replacing the sqlite3 stand-in."
+status: draft
 state: draft
+has_chapters: false
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/rust-driver-crates_20261103.md
@@ -13,12 +15,40 @@ plan_commit: null
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
-created_at: 2026-11-03T04:05:00Z
-updated_at: "2026-11-06T06:30:00Z"
-tags: [rust, mssql, tds, driver, wheel]
+created_at: "2026-11-03T04:05:00Z"
+updated_at: "2026-11-07T04:15:00Z"
+generated:
+  by: flow-setup
+  at: "2026-11-07T04:15:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T04:15:00Z"
+    commit: cdb978d3
+sources:
+  - id: mssql-rs
+    resource: src/rs/vertebra-db/src/mssql/mod.rs
+    title: TDS packet framing and @P1 placeholder rewrite helpers in vertebra-db
+  - id: mssql-py
+    resource: src/py/vertebra/db/adapters/mssql/driver.py
+    title: Python SyncMSSQLDriver and AsyncMSSQLDriver target cutover module
+  - id: py-async-rs
+    resource: src/rs/vertebra-db/src/py_async.rs
+    title: Shared AsyncCompletionQueue + Notifier PyO3 bridge
+tags:
+  - rust
+  - mssql
+  - tds
+  - driver
+  - wheel
 ---
 
 # Flow Charter: Standalone Rust SQL Server Wheel (`vertebra-mssql`)
+
+<!-- truth: start -->
+- **Zero-ODBC Pure-Rust Wheel**: `src/rs/vertebra-mssql` (`vertebra._mssql`, `vertebra-core[mssql]`) builds on `tiberius 0.13.0` (`rustls`) with zero `msodbcsql18` or `unixODBC` C/C++ dependencies [^mssql-rs].
+- **TDS 7.4/8.0 & `VTBARROW`**: `SyncMSSQLClient` and `AsyncMSSQLClient` implement `PRELOGIN`, TLS-in-TDS / TDS 8.0, `sp_executesql` RPC `@P1` binding, `BulkLoad`, `ATTENTION` cancellation, and `VTBARROW` `ShmCapsule` results [^py-async-rs].
+- **Stand-In Removal**: `SyncMSSQLDriver` and `AsyncMSSQLDriver` delete `sqlite3.connect(":memory:")` execution and pass `test_driver_conformance.py` against SQL Server [^mssql-py].
+<!-- truth: end -->
 
 ## Approach
 
@@ -58,3 +88,7 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 - t02 MSSQL SQL batch, `sp_executesql` RPC, transactions, `ATTENTION` cancel, and `DatabaseError` mapping.
 - t03 MSSQL codecs, `VTBARROW` `ShmCapsule` export, `BulkLoad` `load_from_arrow`, and `BrokerEngineBackend` registration.
 - t04 Python `SyncMSSQLDriver` / `AsyncMSSQLDriver` cutover, `sqlite3` stand-in removal, conformance activation, and docs/OKF update.
+
+[^mssql-rs]: `src/rs/vertebra-db/src/mssql/mod.rs` — TDS packet framing and @P1 placeholder rewrite helpers in vertebra-db.
+[^mssql-py]: `src/py/vertebra/db/adapters/mssql/driver.py` — Python SyncMSSQLDriver and AsyncMSSQLDriver target cutover module.
+[^py-async-rs]: `src/rs/vertebra-db/src/py_async.rs` — Shared AsyncCompletionQueue + Notifier PyO3 bridge.

@@ -24,7 +24,7 @@ Consult this catalog before reporting any review finding. If a candidate finding
 - **Applies to**: RT-08
 - **Scope**: src/rs/vertebra-core/src/platform/macos.rs
 - **Do not flag**: Treating `rc >= 0` as success for Darwin `__ulock_wait` with `ULF_NO_ERRNO`.
-- **Why**: XNU ulock syscall returns 0 on wake and positive value on timeout/interruption when errno translation is bypassed; see [platform lifecycle](../../../bundles/knowledge/architecture/runtime/platform-and-lifecycle.md).
+- **Why**: With `ULF_NO_ERRNO`, Darwin XNU `__ulock_wait` returns `>= 0` (remaining waiters) on wake/success and `< 0` (`-errno`, e.g. `-ETIMEDOUT` or `-EINTR`) on timeout or interruption; see [SHM gotchas](../../../bundles/knowledge/gotchas/shm-and-cross-platform-ipc.md).
 
 ---
 

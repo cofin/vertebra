@@ -1,13 +1,20 @@
 ---
 type: Guide
 title: "Protocol and Offload Modules in vertebra-http"
-description: "Inventory of vertebra-http protocol, realtime, and offload modules with their public symbols and whether response::handle or main.rs calls them."
+description: "Inventory of vertebra-http protocol, body streaming, realtime, MCP bridge, and offload modules with their public symbols and server wiring."
 status: stable
-tags: [architecture, http, protocols, rust]
+tags:
+  - architecture
+  - http
+  - protocols
+  - rust
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: cdb978d3
   - by: agent:flow-setup
     at: "2026-11-04T04:33:00Z"
     commit: f741701
@@ -15,6 +22,12 @@ sources:
   - id: src-vertebra-http-src-lib-rs
     resource: src/rs/vertebra-http/src/lib.rs
     title: "Rust implementation module (src/rs/vertebra-http/src/lib.rs)"
+  - id: src-vertebra-http-src-body-rs
+    resource: src/rs/vertebra-http/src/body.rs
+    title: "Rust implementation module (src/rs/vertebra-http/src/body.rs)"
+  - id: src-vertebra-http-src-mcp-bridge-rs
+    resource: src/rs/vertebra-http/src/mcp_bridge.rs
+    title: "Rust implementation module (src/rs/vertebra-http/src/mcp_bridge.rs)"
   - id: src-vertebra-http-src-response-rs
     resource: src/rs/vertebra-http/src/response.rs
     title: "Rust implementation module (src/rs/vertebra-http/src/response.rs)"
@@ -81,7 +94,7 @@ sources:
 
 <!-- truth: start -->
 - `vertebra-http` executes health checks, CORS preflight/response headers, `zstd`/`brotli`/`gzip` compression, static mounts, OpenAPI caching, HMR WebSockets, and `.well-known` endpoints directly in Rust without waking Python workers.
-- Realtime and framing modules (`grpc.rs`, `sse.rs`, `ws.rs`, `pubsub.rs`, `multipart.rs`, `mcp_stdio.rs`, `http3.rs`) expose Rust protocol primitives wired into `ServerState` and `response::handle`.
+- Realtime, body-streaming, and framing modules (`body.rs`, `grpc.rs`, `sse.rs`, `ws_mount.rs`, `pubsub.rs`, `multipart.rs`, `mcp_bridge.rs`, `http3.rs`) expose Rust protocol primitives wired into `ServerState`, `response::handle`, and CLI bridge entrypoints.
 <!-- truth: end -->
 
 [`lib.rs`](../../../../../src/rs/vertebra-http/src/lib.rs)[^src-vertebra-http-src-lib-rs] exports every module as `pub mod`. The modules in the first table below are wired directly into `main.rs`, `server.rs`, and [`response::handle`](../../../../../src/rs/vertebra-http/src/response.rs)[^src-vertebra-http-src-response-rs]. The remaining modules are standalone library components exercised by `src/rs/vertebra-http/tests/` and unit tests (`vertebra-py` does not depend on `vertebra-http`).
@@ -104,12 +117,15 @@ sources:
 | [`multipart.rs`](../../../../../src/rs/vertebra-http/src/multipart.rs)[^src-vertebra-http-src-multipart-rs] | `MultipartLimits`, `MultipartPart`, `ParsedMultipart`, `parse_multipart_body` | Configured via `ServerConfig::multipart_limits`; pre-validates `multipart/form-data` part counts and sizes (`413`/`400`) in `response::handle` |
 | [`grpc.rs`](../../../../../src/rs/vertebra-http/src/grpc.rs)[^src-vertebra-http-src-grpc-rs] | `decode_grpc_frames`, `encode_grpc_frame`, `GrpcStatus` | Configured via `ServerConfig::max_grpc_message_size`; validates `application/grpc` request framing in `response::handle` |
 | [`access_log.rs`](../../../../../src/rs/vertebra-http/src/access_log.rs)[^src-vertebra-http-src-access-log-rs] | `AccessLogger`, `AccessLogFormat`, `AccessLogEntry`, `format_utc_clf_timestamp` | Cached on `ServerState::access_logger` (`VERTEBRA_ACCESS_LOG`); records formatted CLF or JSON request entries at the end of `response::handle` |
+| [`body.rs`](../../../../../src/rs/vertebra-http/src/body.rs)[^src-vertebra-http-src-body-rs] | `FrameReceiver`, `ResponseBody` (`Either<Full<Bytes>, FrameReceiver>`), `HttpResponse`, `PendingResponse` (`unary`, `streaming`), `full_body`, `stream_body` | Re-exported by `response.rs`; carries unary `Full<Bytes>` and progressive chunk/SSE/gRPC trailer streams through `batcher.rs` and `response::handle` |
+| [`mcp_bridge.rs`](../../../../../src/rs/vertebra-http/src/mcp_bridge.rs)[^src-vertebra-http-src-mcp-bridge-rs] | `extract_mcp_observability_headers`, `McpObservabilityHeaders` | Wired into `response.rs` to inspect JSON-RPC 2.0 `method` and `params.name` fields on MCP requests |
 | [`sse.rs`](../../../../../src/rs/vertebra-http/src/sse.rs)[^src-vertebra-http-src-sse-rs], [`pubsub.rs`](../../../../../src/rs/vertebra-http/src/pubsub.rs)[^src-vertebra-http-src-pubsub-rs], [`ws_mount.rs`](../../../../../src/rs/vertebra-http/src/ws_mount.rs)[^src-vertebra-http-src-ws-mount-rs] | `SseHub`, `PubSubBroker`, `WsConnectionRegistry` | Retained on `ServerState` (`sse_hub`, `pubsub_broker`, `ws_registry`); `ws_registry.close_all(1001, "Server shutting down")` drains WebSockets on server shutdown |
 
 ## Library only (no production caller in `response::handle`)
 
 | Module | Symbols | Notes |
 |---|---|---|
+| `mcp_bridge.rs` (stdio bridge) | `McpStdioBridge` (`new`, `run_with_responder`), `McpBridgeConfig` | Native stdio-to-HTTP JSON-RPC 2.0 line bridge (`vtb mcp bridge`) forwarding Bearer auth and `McpObservabilityHeaders` |
 | `h2c.rs` (upgrade helpers) | `parse_h2c_upgrade_headers`, `build_h2c_switching_protocols_response`, `decode_base64url`, `PrependStream`, `H2cUpgradeParams` | RFC 9113 `Upgrade: h2c` parsing helpers |
 | `http3.rs` (QUIC listener) | `build_quic_server_config`, `serve_http3_endpoint`, `handle_h3_request`, `H3ChannelBody` | Feature `http3`; standalone QUIC endpoint helpers |
 | `tls.rs` (identity helpers) | `IpCidr`, `TrustedProxyConfig`, `ClientIdentity`, `ProxyAuthMetadata`, `extract_client_identity_from_der`, `normalize_trusted_proxy_headers` | Certificate CN and proxy XFCC/IAP header helpers |
@@ -126,6 +142,8 @@ Additional domain-specific modules:
 - Verify live call sites with `rg 'crate::<module>' src/rs/vertebra-http/src` before documenting a module as active on the `vertebra-server` hot path.
 
 [^src-vertebra-http-src-lib-rs]: `src/rs/vertebra-http/src/lib.rs` — Rust implementation module (src/rs/vertebra-http/src/lib.rs).
+[^src-vertebra-http-src-body-rs]: `src/rs/vertebra-http/src/body.rs` — Rust implementation module (src/rs/vertebra-http/src/body.rs).
+[^src-vertebra-http-src-mcp-bridge-rs]: `src/rs/vertebra-http/src/mcp_bridge.rs` — Rust implementation module (src/rs/vertebra-http/src/mcp_bridge.rs).
 [^src-vertebra-http-src-response-rs]: `src/rs/vertebra-http/src/response.rs` — Rust implementation module (src/rs/vertebra-http/src/response.rs).
 [^src-vertebra-http-src-server-rs]: `src/rs/vertebra-http/src/server.rs` — Rust implementation module (src/rs/vertebra-http/src/server.rs).
 [^src-vertebra-http-src-cors-rs]: `src/rs/vertebra-http/src/cors.rs` — Rust implementation module (src/rs/vertebra-http/src/cors.rs).

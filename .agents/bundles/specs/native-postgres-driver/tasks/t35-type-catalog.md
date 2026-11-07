@@ -1,37 +1,40 @@
 ---
 type: Task
-id: native-postgres-driver:t35
-title: Session type discovery and format negotiation
+id: "native-postgres-driver:t35"
+title: "Session type discovery and format negotiation"
+description: "Session type discovery and format negotiation for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t34
+  - "native-postgres-driver:t34"
 files:
-- src/rs/vertebra-postgres/src/types.rs
-- src/rs/vertebra-postgres/src/codecs/mod.rs
-- src/rs/vertebra-postgres/src/session.rs
-- src/rs/vertebra-postgres/src/lib.rs
-- src/rs/vertebra-postgres/tests/type_catalog.rs
+  - src/rs/vertebra-postgres/src/types.rs
+  - src/rs/vertebra-postgres/src/codecs/mod.rs
+  - src/rs/vertebra-postgres/src/session.rs
+  - src/rs/vertebra-postgres/src/lib.rs
+  - src/rs/vertebra-postgres/tests/type_catalog.rs
 tests:
-- src/rs/vertebra-postgres/tests/type_catalog.rs
+  - src/rs/vertebra-postgres/tests/type_catalog.rs
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: cdb978d3
 state_revision: 0
 claimed_by: null
 claimed_at: null
-commit: null
-verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
-requirements:
-- R11
-- R15
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: null
 last_verified_commit: null
+verification_evidence: null
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
+commit: null
+tags:
+  - postgres
+  - driver
+  - rust
 ---
 
 # Session type discovery and format negotiation

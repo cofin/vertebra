@@ -1,24 +1,24 @@
 ---
 type: Task
-id: native-postgres-driver:t79
-title: Expose cancellation-safe native replication handles
+id: "native-postgres-driver:t79"
+title: "Expose cancellation-safe native replication handles"
+description: "Expose cancellation-safe native replication handles for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t78
+  - "native-postgres-driver:t78"
 files:
-- src/rs/vertebra-postgres/src/replication/mod.rs
-- src/rs/vertebra-postgres/src/async_client.rs
-- src/py/vertebra/_postgres.pyi
-- src/py/vertebra/db/adapters/postgres/types.py
-- src/py/tests/unit/db/test_postgres_change_source.py
+  - src/rs/vertebra-postgres/src/replication/mod.rs
+  - src/rs/vertebra-postgres/src/async_client.rs
+  - src/py/vertebra/_postgres.pyi
+  - src/py/vertebra/db/adapters/postgres/types.py
+  - src/py/tests/unit/db/test_postgres_change_source.py
 tests:
-- src/py/tests/unit/db/test_postgres_change_source.py::test_native_replication_identity_does_not_start
-- src/py/tests/unit/db/test_postgres_change_source.py::test_native_replication_stream_lifecycle
-- src/py/tests/unit/db/test_postgres_change_source.py::test_native_replication_cancel_queued_record
+  - src/py/tests/unit/db/test_postgres_change_source.py
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: cdb978d3
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -28,16 +28,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- native
-- data-events
-requirements:
-- R22
-- R23
+  - postgres
+  - native
+  - data-events
 ---
 
 # Expose cancellation-safe native replication handles

@@ -3,11 +3,18 @@ type: Guide
 title: "SHM Worker Spawn, Shutdown & Recovery Hooks"
 description: "How RingFactory hands shared-memory rings to Python worker subprocesses, stops them, and which crash-recovery helpers exist but are not wired into the server."
 status: stable
-tags: [architecture, runtime, shared-memory, process-lifecycle]
+tags:
+  - architecture
+  - runtime
+  - shared-memory
+  - process-lifecycle
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: cdb978d3
   - by: agent:flow-setup
     at: "2026-11-04T04:33:00Z"
     commit: f741701

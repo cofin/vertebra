@@ -38,6 +38,8 @@ description: Use when reviewing hot-path allocation discipline, zero-copy guaran
 
 ## Suppressions Index
 
+Shared catalog: [`false-positive-suppressions.md`](../review-core/references/false-positive-suppressions.md).
+
 - `FP-PERF-01`: Dispatch spec caching
 
 ## Focused Commands

@@ -3,11 +3,20 @@ type: Concept
 title: "Oracle APEX, ORDS & 26ai Duality View Integration"
 description: "The `vertebra.extensions.apex` package (scoped APEX/VPD Oracle sessions, auth handoff, reactive islands, offline HLC sync, federated DataFusion queries, ORDS/26ai Duality View catalogs, and the policy-gated APEX MCP/A2A gateway) and the `@vertebra/client/apex` browser bridge."
 status: stable
-tags: [domains, extensions, oracle, apex, ords, duality-views]
+tags:
+  - domains
+  - extensions
+  - oracle
+  - apex
+  - ords
+  - duality-views
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: cdb978d3
   - by: agent:flow-setup
     at: "2026-11-04T04:33:00Z"
     commit: f741701

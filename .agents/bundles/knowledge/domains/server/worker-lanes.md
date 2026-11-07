@@ -3,14 +3,19 @@ type: Concept
 title: "Multi-Lane Worker Runner"
 description: "Admission-controlled background task worker lanes (LaneConfig, WorkerRunner) and the vtb workers run CLI."
 status: stable
-tags: [domains, server, worker-lanes, queues, cli]
+tags:
+  - domains
+  - server
+  - worker-lanes
+  - queues
+  - cli
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+    at: "2026-11-07T03:55:00Z"
+    commit: cdb978d3
 sources:
   - id: src-server-lanes-py
     resource: src/py/vertebra/server/lanes.py

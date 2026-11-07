@@ -4,17 +4,19 @@ Vertebra is a Python web framework and server powered by a Rust runtime (`verteb
 
 ## Flow Operational Rule
 
-When a repository has `.agents/`, read its configured root, bundle index, active spec, authoritative task worksheet, and applicable recursively nested knowledge before acting. Operational skills resolve only from `.agents/skills/`.
+When a repository has `.agents/`, read its configured root (`.agents/setup-state.json`), bundle index ([`.agents/bundles/index.md`](.agents/bundles/index.md)), active specification (`specs/<flow_id>/spec.md`, plus `chapters/index.md` and `chapters/<ch_id>/spec.md` when `has_chapters: true`), authoritative task worksheet (`tasks/<id>-<slug>.md`), and applicable nested knowledge chapters before acting. Operational skills resolve only from `.agents/skills/` and paired subagents from `.agents/agents/`.
 
-Route through the `flow` skill and exactly one lifecycle skill. Refine plans until every worksheet is executable, follow the selected worksheet without improvising, and route contradictions through revise/refine. Rewrite revised worksheets in place in present tense without historical transcripts, standalone `---` horizontal rules, or frontmatter in subdirectory `index.md` files, and keep Markdown checklist markers (`[x] [<sha>]`, `[~]`, `[ ]`, `[!]`, `[-]`) synchronized with task `state`. Apply direct Markdown frontmatter state synchronization and reconcile task-first.
+Route through the `flow` skill and one matching lifecycle skill. Refine plans until every worksheet is executable, follow the selected worksheet without improvising, and route contradictions through revise/refine. Rewrite revised specifications, chapter catalogs, and worksheets in place in present tense without historical transcripts, standalone `---` horizontal rules, or frontmatter in subdirectory `index.md` files, and keep Markdown checklist markers (`[x] [<sha>]`, `[~]`, `[ ]`, `[!]`, `[-]`) synchronized with task `state` (`completed`, `in_progress`, `pending`, `blocked`, `deferred`). Apply direct Markdown frontmatter state synchronization and reconcile task-first.
 
 Close and archive completed specs on the working branch without waiting for branch merge; when scope grows beyond the active spec, finish the current spec and open a follow-up spec via `/flow:plan`. Before deleting any spec during archive, curate evidence-backed OKF chapters across nested domain, architecture, pattern, testing, and gotcha folders ([`knowledge/index.md`](.agents/bundles/knowledge/index.md)). Keep `specs/` and `research/` lazy (only materialized when active specs or research briefs exist).
 
+<!-- project-customization: start -->
 Write direct, zero-slop prose and code: avoid AI puffery, negative parallelisms, formulaic transitions, and inline `#` comments in Python (use Google-style docstrings and PEP 585/604/695 types). Proactively fix adjacent lint, typing, or dead-code issues in touched in-scope files and suggest the exact canonical `/flow:<action>` command next.
 
-Use `structured-choice-v1` for unresolved decisions: one decision at a time, only through a currently allowed compatible native tool or the equivalent sequential-text fallback. Run correctness review and then the mandatory fresh quality review before finish/archive.
+Use `structured-choice-v1` for unresolved decisions (`1` question for dependent forks, `2–3` orthogonal leaf questions once on a settled frontier) through a compatible native tool or sequential-text fallback. Run correctness review and then fresh quality review before finish/archive.
 
 Commits remain local unless the user explicitly asks for delivery. Never create, move, force-update, or delete Git tags. Never commit or push directly to `main`; all changes must be made on a dedicated feature/fix branch with signed conventional commits and submitted via pull request.
+<!-- project-customization: end -->
 
 ## Canonical Bundle Entry Points
 

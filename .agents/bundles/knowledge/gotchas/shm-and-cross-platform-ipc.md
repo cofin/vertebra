@@ -3,11 +3,19 @@ type: Guide
 title: "Shared-Memory Rings & Cross-Platform IPC Gotchas"
 description: "Critical shared-memory ring, futex/ulock memory ordering, macOS XNU shm_open/pipe FD, response framing, and matchit 0.9 routing gotchas."
 status: stable
-tags: [gotchas, shared-memory, ipc, macos, routing]
+tags:
+  - gotchas
+  - shared-memory
+  - ipc
+  - macos
+  - routing
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: cdb978d3
   - by: agent:flow-setup
     at: "2026-11-04T04:33:00Z"
     commit: f741701
@@ -95,7 +103,7 @@ sources:
 ## 4. Container `/dev/shm` Sizing, `memfd_create` Primary Rings & `/tmp/vtb-*` Overflow Fallback (`shm.rs`, `tiered_ring.rs`, `ring_pair.rs`, `codec.rs`)
 
 - **Container `/dev/shm` (`64 MiB` Default) vs `memfd_create` and `/tmp/vtb-*` Overflow**: Docker and Kubernetes default `/dev/shm` to `64 MiB`, whereas Cloud Run and AWS Lambda size in-memory filesystems proportionally to instance memory. On Linux, primary `RingPair` rings use `memfd_create` (`ShmRegion::create`, backed by general cgroup anonymous RAM rather than `/dev/shm`), and [`RingPairConfig::for_environment(worker_count)`](../../../../src/rs/vertebra-core/src/transport/ring_pair.rs) automatically selects `RingPairConfig::default()` (`46 MiB/worker`: `16 MiB` request ring + `30 MiB` `TieredRingConfig::default()`) or `RingPairConfig::compact()` (`12 MiB/worker`: `4 MiB` request ring + `8 MiB` `TieredRingConfig::compact()`) based on `VERTEBRA_SHM_PROFILE`, cgroup `memory.max`, or `/dev/shm` capacity on non-Linux Unix. For oversized single requests (`> 64 KiB`, `VQOV`) and responses (`> 2 MiB`, `VROV`), [`ShmRegion::create_overflow_region`](../../../../src/rs/vertebra-core/src/shm.rs) probes `/dev/shm` free capacity (`statvfs` >= `2 × size + 8 MiB` headroom) and automatically falls back to `/tmp/vtb-*` (`create_file_backed`, or immediately when `VERTEBRA_OVERFLOW_BACKEND=tmp`).
-- **Right-Sized Default Tiers (`>= BatchLimit`) & Dynamic `from_env` Slot Calculation**: [`TieredRingConfig::default()`](../../../../src/rs/vertebra-core/src/tiered_ring.rs)[^src-vertebra-core-src-tiered-ring-rs] allocates `small` `4 KiB × 512` (`511` usable slots, well above `BatchLimit = 64` so a full 64-response batch never parks mid-flush), `medium` `32 KiB × 128`, `large` `256 KiB × 32`, and `xlarge` `2 MiB × 8` (`30 MiB` per direction). `RingPair::from_env` reconstructs `request_slots` and each response tier's `slot_count` from `VERTEBRA_REQ_RING_SIZE` and `VERTEBRA_RESP_RING_{SMALL,MEDIUM,LARGE,XLARGE}_SIZE` via `RingLayout::slots_from_total_size` so child workers attach seamlessly to both `default` and `compact` ring geometries.
+- **Right-Sized Default Tiers (`>= BatchLimit`) & Dynamic `from_env` Slot Calculation**: [`TieredRingConfig::default()`](../../../../src/rs/vertebra-core/src/tiered_ring.rs)[^src-vertebra-core-src-tiered-ring-rs] allocates `small` `4 KiB × 512` (`511` usable slots, well above `BatchLimit = 64` so a full 64-response batch never parks mid-flush), `medium` `32 KiB × 128`, `large` `256 KiB × 32`, and `xlarge` `2 MiB × 8` (`30 MiB` per direction). `RingPair::from_env` reconstructs `request_slots` and each response tier's `slot_count` from `VERTEBRA_REQ_RING_SIZE` and `VERTEBRA_RESP_RING_{SMALL,MEDIUM,LARGE,XLARGE}_SIZE` via `RingLayout::slots_from_total_size` so child workers attach to both `default` and `compact` ring geometries.
 - **`VRES` vs `ResponseSlot` Framing**: [`ring_pair.rs`](../../../../src/rs/vertebra-core/src/transport/ring_pair.rs) uses a 20-byte `VRES` wire header (`drain_responses_with` zero-copy drain), whereas [`ipc.rs`](../../../../src/rs/vertebra-core/src/ipc.rs)[^src-vertebra-core-src-ipc-rs] defines a 16-byte `ResponseSlot` header.
 - **Compression Codec vs Streaming Flag Bits**: [`CompressionCodec`](../../../../src/rs/vertebra-core/src/protocol/codec.rs)[^src-vertebra-core-src-protocol-codec-rs] encodes the batch-slab codec in `CODEC_MASK = 0b11 << 6` (bits 6–7) gated on `flags::COMPRESSED` (bit 1), while `response_flags` (`STREAMING = 1 << 6`, `FINAL = 1 << 7`, `HEADERS_SENT = 1 << 8`, `TRAILERS = 1 << 9`) in [`protocol/mod.rs`](../../../../src/rs/vertebra-core/src/protocol/mod.rs)[^src-vertebra-core-src-protocol-mod-rs] occupy bits 6–9 on `ResponseSlot` streaming response frames; always check `flags & flags::COMPRESSED != 0` via `CompressionCodec::from_flags` before reading bits 6–7 as a codec.
 

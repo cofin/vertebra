@@ -1,22 +1,23 @@
 ---
 type: Task
-id: native-postgres-driver:t75
-title: Decode pgoutput relation metadata and lossless tuples
+id: "native-postgres-driver:t75"
+title: "Decode pgoutput relation metadata and lossless tuples"
+description: "Decode pgoutput relation metadata and lossless tuples for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t74
+  - "native-postgres-driver:t74"
 files:
-- src/rs/vertebra-postgres/src/replication/pgoutput.rs
-- src/rs/vertebra-postgres/src/replication/mod.rs
-- src/rs/vertebra-postgres/tests/postgres_pgoutput_tests.rs
-- src/py/vertebra/db/adapters/postgres/types.py
+  - src/rs/vertebra-postgres/src/replication/pgoutput.rs
+  - src/rs/vertebra-postgres/src/replication/mod.rs
+  - src/rs/vertebra-postgres/tests/postgres_pgoutput_tests.rs
+  - src/py/vertebra/db/adapters/postgres/types.py
 tests:
-- src/rs/vertebra-postgres/tests/postgres_pgoutput_tests.rs::relation_and_tuple_values
-- src/rs/vertebra-postgres/tests/postgres_pgoutput_tests.rs::malformed_pgoutput_is_bounded
+  - src/rs/vertebra-postgres/tests/postgres_pgoutput_tests.rs
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: cdb978d3
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -26,15 +27,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- native
-- data-events
-requirements:
-- R22
+  - postgres
+  - native
+  - data-events
 ---
 
 # Decode pgoutput relation metadata and lossless tuples

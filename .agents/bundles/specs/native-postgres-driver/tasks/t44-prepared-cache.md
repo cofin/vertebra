@@ -1,40 +1,44 @@
 ---
 type: Task
-id: native-postgres-driver:t44
-title: Session statement cache with modern pooler capability
+id: "native-postgres-driver:t44"
+title: "Session statement cache with modern pooler capability"
+description: "Session statement cache with modern pooler capability for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t43
+  - "native-postgres-driver:t43"
 files:
-- src/rs/vertebra-postgres/src/statements.rs
-- src/rs/vertebra-postgres/src/config.rs
-- src/rs/vertebra-postgres/src/session.rs
-- src/rs/vertebra-postgres/src/extended.rs
-- src/rs/vertebra-postgres/src/transaction.rs
-- src/py/vertebra/db/adapters/postgres/config.py
-- src/rs/vertebra-postgres/tests/statement_cache.rs
-- src/py/tests/unit/db/test_postgres_types.py
+  - src/rs/vertebra-postgres/src/statements.rs
+  - src/rs/vertebra-postgres/src/config.rs
+  - src/rs/vertebra-postgres/src/session.rs
+  - src/rs/vertebra-postgres/src/extended.rs
+  - src/rs/vertebra-postgres/src/transaction.rs
+  - src/py/vertebra/db/adapters/postgres/config.py
+  - src/rs/vertebra-postgres/tests/statement_cache.rs
+  - src/py/tests/unit/db/test_postgres_types.py
 tests:
-- src/rs/vertebra-postgres/tests/statement_cache.rs
-- src/py/tests/unit/db/test_postgres_types.py
+  - src/rs/vertebra-postgres/tests/statement_cache.rs
+  - src/py/tests/unit/db/test_postgres_types.py
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: cdb978d3
 state_revision: 0
 claimed_by: null
 claimed_at: null
-commit: null
-verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
-requirements:
-- R15
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: null
 last_verified_commit: null
+verification_evidence: null
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
+commit: null
+tags:
+  - postgres
+  - driver
+  - rust
 ---
 
 # Session statement cache with modern pooler capability

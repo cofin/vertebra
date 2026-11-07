@@ -39,6 +39,8 @@ description: Use when reviewing TypeScript client SDK code, Biome linting, tsup 
 
 ## Suppressions Index
 
+Shared catalog: [`false-positive-suppressions.md`](../review-core/references/false-positive-suppressions.md).
+
 - `FP-TS-01`: Zero dependency client backoff
 
 ## Focused Commands

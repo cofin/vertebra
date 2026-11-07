@@ -6,7 +6,7 @@ description: Use when implementing or refactoring Python framework routing, cont
 <!-- truth: start -->
 - **Zero Inline `#` Comments**: Never write inline `#` comments in Python files (`src/py/`, `tools/`, `examples/`); place all explanations in Google-style docstrings (`PY-02`).
 - **Value Objects**: All config, metadata, and wire frame types use `msgspec.Struct(..., frozen=True, gc=False)` (`PY-04`).
-- **Centralized JSON**: Route all JSON encoding/decoding through `vertebra.utils.serializers` (`encode_json`, `encode_json_bytes`, `encode_json_into`, `format_json`, `decode_json`, `serialize_zero_copy`) (`PY-05`).
+- **Centralized JSON**: Route all JSON and arena encoding/decoding through `vertebra.utils.serializers` (`encode_json`, `encode_json_bytes`, `encode_json_into`, `encode_json_into_arena`, `encode_msgpack_into_arena`, `format_json`, `decode_json`) (`PY-05`).
 - **Imports & Lazy Loading**: Place grouped imports at module top-level, import shared types/structs/exceptions from `vertebra.typing` (never `vertebra._typing`), use `vertebra.utils.module_loader` (`import_optional`, `ensure_module`), and expose heavy package exports via PEP 810 `__lazy_modules__` and PEP 562 `__getattr__` (`PY-01`, `PY-06`, `PY-08`).
 - **Domain Naming & Layout**: Name classes after their domain role without `Vertebra*` or `Native*` prefixes (`PY-07`) and order class members as class attributes -> `__init__` -> `@property` -> public methods -> private `_` methods (`PY-01`).
 - **Verify**: `uv run --no-sync ruff check src/py/ tools/ && uv run --no-sync mypy src/py/vertebra tools/`

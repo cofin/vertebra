@@ -23,28 +23,40 @@ preloadSkills:
   - review-core
   - review-runtime-ipc
   - runtime-ipc
+skills:
+  - review-core
+  - review-runtime-ipc
+  - runtime-ipc
 ---
+
+# Role & Identity
 
 You are a write-enabled specialist executing fixes and implementations in `runtime-ipc`.
 
-# Scope
+## Scope
 
 - Paths: `[areas.runtime-ipc]` in [`areas.toml`](../skills/review-core/references/areas.toml).
 - Checklist: `RT-01`..`RT-12` in [`checklist.md`](../skills/review-core/references/checklist.md).
 - Rulebook: [Lock-free SHM and sharding](../bundles/knowledge/patterns/rust/lock-free-shm-and-sharding.md), [SHM and cross-platform IPC gotchas](../bundles/knowledge/gotchas/shm-and-cross-platform-ipc.md).
 
-# Implementation Process
+# Responsibilities
+
+## Implementation Process
 
 1. Review the assigned task worksheet or candidate finding.
 2. Implement targeted fixes using `edit_file` or `write_file`.
 3. Add or strengthen unit and concurrency tests covering the exact boundary or ordering invariant.
 
-# Verification
+# Verification & Constraints
 
-1. Run `cargo test -p vertebra-core -p vertebra-storage -p vertebra-db`.
-2. Run `cargo clippy --workspace --all-targets -- -D warnings`.
+## Verification
 
-# Flow Integration
+1. Run `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-storage -p vertebra-db`.
+2. Run `cargo clippy --manifest-path src/rs/Cargo.toml --workspace --all-targets --features tls,compression,gcp -- -D warnings`.
 
-1. Update worksheet `state` to `closed` and checklist markers to `[x]`.
+# Output Contract
+
+## Flow Integration
+
+1. Update worksheet `state` to `completed`, bind `commit: <sha>`, and update `spec.md` checklist markers to `[x] [<sha>]`.
 2. Update review ledger status to `fixed:<sha>`.

@@ -1,31 +1,65 @@
 ---
 type: Research
-title: Official Google Cloud Rust crates versus the hand-written GCP wire code
-description: Primary-source evaluation of googleapis/google-cloud-rust crates for Spanner, BigQuery Storage, and auth, with the per-area adopt or keep decision used by gcp-wire-protocol-correctness and gcp-driver-resilience.
+flow_id: integration-remediation
+title: "Official Google Cloud Rust crates versus the hand-written GCP wire code"
+description: "Primary-source evaluation of googleapis/google-cloud-rust crates for Spanner, BigQuery Storage, and auth, recording the adopt/keep decisions implemented in gcp-wire-protocol-correctness and gcp-driver-resilience."
 status: stable
 state: promoted
 promoted_to: integration-remediation
-tags: [research, gcp, rust, spanner, bigquery]
-created_at: 2026-11-03
+created_at: "2026-11-03T00:00:00Z"
+updated_at: "2026-11-07T04:15:00Z"
+generated:
+  by: flow-setup
+  at: "2026-11-07T04:15:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T04:15:00Z"
+    commit: cdb978d3
 sources:
-  - resource: https://crates.io/api/v1/crates/google-cloud-spanner
-  - resource: https://crates.io/api/v1/crates/google-cloud-bigquery
-  - resource: https://crates.io/api/v1/crates/google-cloud-auth
-  - resource: https://crates.io/api/v1/crates/google-cloud-gax-internal
-  - resource: https://github.com/googleapis/google-cloud-rust
-  - resource: https://docs.rs/google-cloud-spanner/0.34.8-preview
-  - resource: https://docs.rs/google-cloud-bigquery/0.19.0
-  - resource: https://github.com/googleapis/googleapis/blob/master/google/spanner/v1/spanner.proto
-  - resource: https://github.com/googleapis/googleapis/blob/master/google/spanner/v1/transaction.proto
-  - resource: https://github.com/googleapis/googleapis/blob/master/google/spanner/v1/commit_response.proto
-  - resource: https://github.com/googleapis/googleapis/blob/master/google/spanner/v1/result_set.proto
-  - resource: https://github.com/googleapis/googleapis/blob/master/google/cloud/bigquery/storage/v1/storage.proto
-  - resource: https://github.com/googleapis/googleapis/blob/master/google/cloud/bigquery/storage/v1/stream.proto
-  - resource: https://github.com/googleapis/googleapis/blob/master/google/cloud/bigquery/storage/v1/arrow.proto
-  - resource: https://cloud.google.com/spanner/docs/emulator
+  - id: crate-spanner
+    resource: https://crates.io/api/v1/crates/google-cloud-spanner
+    title: google-cloud-spanner crates.io metadata
+  - id: crate-bq
+    resource: https://crates.io/api/v1/crates/google-cloud-bigquery
+    title: google-cloud-bigquery crates.io metadata
+  - id: crate-auth
+    resource: https://crates.io/api/v1/crates/google-cloud-auth
+    title: google-cloud-auth 1.18.0 crates.io metadata
+  - id: crate-gaxi
+    resource: https://crates.io/api/v1/crates/google-cloud-gax-internal
+    title: google-cloud-gax-internal tonic and reqwest transport
+  - id: gcp-rust-repo
+    resource: https://github.com/googleapis/google-cloud-rust
+    title: Official googleapis/google-cloud-rust monorepo
+  - id: docs-spanner
+    resource: https://docs.rs/google-cloud-spanner/0.34.8-preview
+    title: google-cloud-spanner 0.34.8-preview API reference
+  - id: docs-bq
+    resource: https://docs.rs/google-cloud-bigquery/0.19.0
+    title: google-cloud-bigquery 0.19.0 API reference
+  - id: spanner-proto
+    resource: https://github.com/googleapis/googleapis/blob/master/google/spanner/v1/spanner.proto
+    title: Official Spanner v1 protobuf definitions
+  - id: bq-storage-proto
+    resource: https://github.com/googleapis/googleapis/blob/master/google/cloud/bigquery/storage/v1/storage.proto
+    title: Official BigQuery Storage v1 protobuf definitions
+  - id: spanner-emulator
+    resource: https://cloud.google.com/spanner/docs/emulator
+    title: Cloud Spanner emulator gRPC/REST port documentation
+tags:
+  - research
+  - gcp
+  - rust
+  - spanner
+  - bigquery
 ---
 
 # Official Google Cloud Rust crates versus the hand-written GCP wire code
+
+<!-- truth: start -->
+- **Official SDK Adoption**: `google-cloud-spanner =0.34.8-preview` [^crate-spanner] [^docs-spanner] and `google-cloud-bigquery =0.19.0` [^crate-bq] [^docs-bq] from `googleapis/google-cloud-rust` [^gcp-rust-repo] replace hand-written protobuf encoders and eliminate wire field-number mismatches verified against `googleapis` protos [^spanner-proto] [^bq-storage-proto].
+- **Auth & TLS Standardization**: Both crates run with `default-features = false`, `tonic/tls-ring` + `tls-webpki-roots` over `google-cloud-gax-internal` [^crate-gaxi], bridging `GcpTokenCache` through `google-cloud-auth` `CredentialsProvider` [^crate-auth] and rewriting emulator admin ports per Spanner emulator rules [^spanner-emulator].
+<!-- truth: end -->
 
 ## Question
 
@@ -114,3 +148,14 @@ All googleapis crates above declare `rust-version = "1.91.0"`. The Vertebra work
 | `spanner.v1.Transaction` | `precommit_token` | 3 | 8 |
 | `spanner.v1.CommitRequest` | `precommit_token` | 9 | 12 |
 | `spanner.v1.PartialResultSet` | `precommit_token` | 8 | 8 (correct) |
+
+[^crate-spanner]: google-cloud-spanner crates.io metadata (https://crates.io/api/v1/crates/google-cloud-spanner).
+[^crate-bq]: google-cloud-bigquery crates.io metadata (https://crates.io/api/v1/crates/google-cloud-bigquery).
+[^crate-auth]: google-cloud-auth 1.18.0 crates.io metadata (https://crates.io/api/v1/crates/google-cloud-auth).
+[^crate-gaxi]: google-cloud-gax-internal tonic and reqwest transport (https://crates.io/api/v1/crates/google-cloud-gax-internal).
+[^gcp-rust-repo]: Official googleapis/google-cloud-rust monorepo (https://github.com/googleapis/google-cloud-rust).
+[^docs-spanner]: google-cloud-spanner 0.34.8-preview API reference (https://docs.rs/google-cloud-spanner/0.34.8-preview).
+[^docs-bq]: google-cloud-bigquery 0.19.0 API reference (https://docs.rs/google-cloud-bigquery/0.19.0).
+[^spanner-proto]: Official Spanner v1 protobuf definitions (https://github.com/googleapis/googleapis/blob/master/google/spanner/v1/spanner.proto).
+[^bq-storage-proto]: Official BigQuery Storage v1 protobuf definitions (https://github.com/googleapis/googleapis/blob/master/google/cloud/bigquery/storage/v1/storage.proto).
+[^spanner-emulator]: Cloud Spanner emulator gRPC/REST port documentation (https://cloud.google.com/spanner/docs/emulator).

@@ -1,9 +1,11 @@
 ---
 type: Spec
 flow_id: native-oracle-driver
-title: Standalone Rust Oracle Thin Wheel (vertebra-oracle)
-description: Standalone PyO3 crate src/rs/vertebra-oracle (vertebra._oracle + vertebra-core[oracle]) built on oracledb =26.0.0-beta.5 with TLS/wallets, binds/defines, LOBs, OSON/VECTOR, DRCP, SyncOraclePipeline / AsyncOraclePipeline, TxEventQ notifications, and Arrow 59 -> VTBARROW ShmCapsule results, replacing the sqlite3 stand-in.
+title: "Standalone Rust Oracle Thin Wheel (vertebra-oracle)"
+description: "Standalone PyO3 crate src/rs/vertebra-oracle (vertebra._oracle + vertebra-core[oracle]) built on oracledb =26.0.0-beta.5 with TLS/wallets, binds/defines, LOBs, OSON/VECTOR, DRCP, SyncOraclePipeline / AsyncOraclePipeline, TxEventQ notifications, and Arrow 59 -> VTBARROW ShmCapsule results, replacing the sqlite3 stand-in."
+status: draft
 state: draft
+has_chapters: false
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/rust-driver-crates_20261103.md
@@ -13,12 +15,40 @@ plan_commit: null
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
-created_at: 2026-11-03T04:05:00Z
-updated_at: "2026-11-05T06:20:28Z"
-tags: [rust, oracle, driver, wheel, pipeline]
+created_at: "2026-11-03T04:05:00Z"
+updated_at: "2026-11-07T04:15:00Z"
+generated:
+  by: flow-setup
+  at: "2026-11-07T04:15:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T04:15:00Z"
+    commit: cdb978d3
+sources:
+  - id: oracle-rs
+    resource: src/rs/vertebra-db/src/oracle/mod.rs
+    title: Shared Oracle OSON, VECTOR, and session attribute codecs in vertebra-db
+  - id: oracle-tns
+    resource: src/rs/vertebra-db/src/oracle/tns.rs
+    title: TNS descriptor and wallet parsing primitives in vertebra-db
+  - id: oracle-py
+    resource: src/py/vertebra/db/adapters/oracle/driver.py
+    title: Python SyncOracleDriver and AsyncOracleDriver target cutover module
+tags:
+  - rust
+  - oracle
+  - driver
+  - wheel
+  - pipeline
 ---
 
 # Flow Charter: Standalone Rust Oracle Thin Wheel (`vertebra-oracle`)
+
+<!-- truth: start -->
+- **Standalone Optional Wheel**: `src/rs/vertebra-oracle` (`vertebra._oracle`, `vertebra-core[oracle]`) wraps `oracledb =26.0.0-beta.5` (`arrow 59`) without Oracle Instant Client or leaking `arrow 59` into `vertebra-core` [^oracle-rs] [^oracle-tns].
+- **Worker-Thread Sync/Async Clients & `VTBARROW`**: `SyncOracleClient` (`SyncCompletionQueue`) and `AsyncOracleClient` (`AsyncCompletionQueue` + `Notifier`) execute on dedicated Rust worker threads with `connection.break_execution()` cancellation, sequential `pipeline()`, and `VTBARROW` `ShmCapsule` results [^oracle-py].
+- **Trusted-Package Tenant Isolation**: Native Oracle tenancy invokes the deployed `CREATE CONTEXT` trusted package on session lease and resets or evicts sessions on release, replacing the `sqlite3.connect(":memory:")` stand-in [^oracle-py].
+<!-- truth: end -->
 
 ## Approach
 
@@ -78,3 +108,7 @@ Oracle application-context writes require the namespace's trusted package in the
 - t06 Sequential `SyncOraclePipeline` / `AsyncOraclePipeline` (`SyncPipelineCapable` / `AsyncPipelineCapable`) + upstream 26ai pipelining tracking test.
 - t07 `arrow 59` -> `VTBARROW` `ShmCapsule` `ArrowCursor` + `OracleNotificationSource` (TxEventQ).
 - t08 Python `SyncOracleDriver`/`AsyncOracleDriver` cutover + conformance activation.
+
+[^oracle-rs]: `src/rs/vertebra-db/src/oracle/mod.rs` — Shared Oracle OSON, VECTOR, and session attribute codecs in vertebra-db.
+[^oracle-tns]: `src/rs/vertebra-db/src/oracle/tns.rs` — TNS descriptor and wallet parsing primitives in vertebra-db.
+[^oracle-py]: `src/py/vertebra/db/adapters/oracle/driver.py` — Python SyncOracleDriver and AsyncOracleDriver target cutover module.

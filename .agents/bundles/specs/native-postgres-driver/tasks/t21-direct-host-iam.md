@@ -1,23 +1,23 @@
 ---
 type: Task
-id: native-postgres-driver:t21
-title: Refresh direct-host IAM passwords without changing transport policy
+id: "native-postgres-driver:t21"
+title: "Refresh direct-host IAM passwords without changing transport policy"
+description: "Refresh direct-host IAM passwords without changing transport policy for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
-- native-postgres-driver:t20
+  - "native-postgres-driver:t20"
 files:
-- src/rs/vertebra-postgres/src/config.rs
-- src/rs/vertebra-postgres/src/credentials.rs
-- src/rs/vertebra-postgres/src/session.rs
-- src/rs/vertebra-postgres/tests/postgres_auth_wire_tests.rs
+  - src/rs/vertebra-postgres/src/config.rs
+  - src/rs/vertebra-postgres/src/credentials.rs
+  - src/rs/vertebra-postgres/src/session.rs
+  - src/rs/vertebra-postgres/tests/postgres_auth_wire_tests.rs
 tests:
-- src/rs/vertebra-postgres/tests/postgres_auth_wire_tests.rs::direct_iam_refresh
-- src/rs/vertebra-postgres/tests/postgres_auth_wire_tests.rs::direct_iam_grant_failure
-- src/rs/vertebra-postgres/tests/postgres_auth_wire_tests.rs::direct_iam_authentication_failure
+  - src/rs/vertebra-postgres/tests/postgres_auth_wire_tests.rs
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: cdb978d3
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -27,15 +27,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- connection
-- iam
-requirements:
-- R5
+  - postgres
+  - connection
+  - iam
 ---
 
 # Refresh direct-host IAM passwords without changing transport policy

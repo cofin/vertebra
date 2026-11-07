@@ -1,27 +1,29 @@
 ---
 type: Task
-id: native-postgres-driver:t01
-title: Register the standalone optional PostgreSQL wheel
+id: "native-postgres-driver:t01"
+title: "Register the standalone optional PostgreSQL wheel"
+description: "Register the standalone optional PostgreSQL wheel for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: static_validation
 depends_on: []
 files:
-- src/rs/Cargo.toml
-- src/rs/Cargo.lock
-- src/rs/vertebra-postgres/Cargo.toml
-- src/rs/vertebra-postgres/pyproject.toml
-- src/rs/vertebra-postgres/build.rs
-- src/rs/vertebra-postgres/src/lib.rs
-- src/py/vertebra/_postgres.pyi
-- pyproject.toml
-- uv.lock
-- Makefile
-- .github/workflows/release.yaml
-- .agents/skills/review-core/references/areas.toml
+  - src/rs/Cargo.toml
+  - src/rs/Cargo.lock
+  - src/rs/vertebra-postgres/Cargo.toml
+  - src/rs/vertebra-postgres/pyproject.toml
+  - src/rs/vertebra-postgres/build.rs
+  - src/rs/vertebra-postgres/src/lib.rs
+  - src/py/vertebra/_postgres.pyi
+  - pyproject.toml
+  - uv.lock
+  - Makefile
+  - .github/workflows/release.yaml
+  - .agents/skills/review-core/references/areas.toml
 tests: []
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: cdb978d3
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -31,15 +33,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- connection
-- native
-requirements:
-- R1
+  - postgres
+  - connection
+  - native
 ---
 
 # Register the standalone optional PostgreSQL wheel

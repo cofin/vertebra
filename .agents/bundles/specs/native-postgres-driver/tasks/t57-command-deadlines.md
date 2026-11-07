@@ -1,48 +1,48 @@
 ---
 type: Task
-id: native-postgres-driver:t57
-title: Optional native command I/O deadlines
+id: "native-postgres-driver:t57"
+title: "Optional native command I/O deadlines"
+description: "Optional native command I/O deadlines for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t56
+  - "native-postgres-driver:t56"
 files:
-- src/rs/vertebra-postgres/src/session.rs
-- src/rs/vertebra-postgres/src/query.rs
-- src/rs/vertebra-postgres/src/extended.rs
-- src/rs/vertebra-postgres/src/metadata.rs
-- src/rs/vertebra-postgres/src/types.rs
-- src/rs/vertebra-postgres/src/cancel.rs
-- src/rs/vertebra-postgres/src/errors.rs
-- src/rs/vertebra-postgres/src/sync_client.rs
-- src/rs/vertebra-postgres/src/async_client.rs
-- src/py/vertebra/_postgres.pyi
-- src/rs/vertebra-postgres/tests/command_deadlines.rs
-- src/py/tests/integration/db/test_postgres_command_deadlines.py
+  - src/rs/vertebra-postgres/src/session.rs
+  - src/rs/vertebra-postgres/src/query.rs
+  - src/rs/vertebra-postgres/src/extended.rs
+  - src/rs/vertebra-postgres/src/metadata.rs
+  - src/rs/vertebra-postgres/src/types.rs
+  - src/rs/vertebra-postgres/src/cancel.rs
+  - src/rs/vertebra-postgres/src/errors.rs
+  - src/rs/vertebra-postgres/src/sync_client.rs
+  - src/rs/vertebra-postgres/src/async_client.rs
+  - src/py/vertebra/_postgres.pyi
+  - src/rs/vertebra-postgres/tests/command_deadlines.rs
+  - src/py/tests/integration/db/test_postgres_command_deadlines.py
 tests:
-- src/rs/vertebra-postgres/tests/command_deadlines.rs
-- src/py/tests/integration/db/test_postgres_command_deadlines.py
+  - src/rs/vertebra-postgres/tests/command_deadlines.rs
+  - src/py/tests/integration/db/test_postgres_command_deadlines.py
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: cdb978d3
 state_revision: 0
 claimed_by: null
 claimed_at: null
-commit: null
-verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
-requirements:
-- R6
-- R7
-- R10
-- R12
-- R18
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: null
 last_verified_commit: null
+verification_evidence: null
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
+commit: null
+tags:
+  - postgres
+  - driver
+  - rust
 ---
 
 # Optional native command I/O deadlines
@@ -53,7 +53,7 @@ Bound an explicitly timed native query's complete command I/O with one absolute 
 
 ## Context
 
-Read `../spec.md`, `../contracts.md`, t40 metadata normalization, t41 execution and t55/t56 generation-fenced cancellation, plus local PyO3/data ownership guidance. This worksheet owns only the listed modules/tests and one signed local feature-branch commit in the complete-driver PR. Estimated 390 handwritten changed lines including focused native/live tests; retain the approximate 400-line heuristic. Preserve other edits. State is pending, revision 1 and plan_commit:null; no implementation starts from this draft.
+Read `../spec.md`, `../contracts.md`, t40 metadata normalization, t41 execution and t55/t56 generation-fenced cancellation, plus local PyO3/data ownership guidance. This worksheet owns only the listed modules/tests and one signed local feature-branch commit in the complete-driver PR. Estimated 390 handwritten changed lines including focused native/live tests; retain the approximate 400-line heuristic. Preserve other edits. State is `pending` at `plan_revision: 2` and `plan_commit: cdb978d3`.
 
 There is no new global command-timeout default, config registry, alternate client view or source-protocol signature. The existing pool-acquisition, reset and close budgets remain separate. A command timeout is an I/O budget measured after native operation reservation, not a preemptible end-to-end wall-time bound on argument conversion, CPU decoding or Python result projection.
 

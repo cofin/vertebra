@@ -37,12 +37,14 @@ description: Use when evaluating test strength, observable assertions, negative 
 
 ## Suppressions Index
 
+Shared catalog: [`false-positive-suppressions.md`](../review-core/references/false-positive-suppressions.md).
+
 - `FP-TEST-01`: Anyio test markers
 
 ## Focused Commands
 
 ```bash
 uv run pytest src/py/tests/unit
-cargo test --workspace --no-run
+cargo test --manifest-path src/rs/Cargo.toml --workspace --no-run
 cd src/ts/vertebra-client && bun run test
 ```

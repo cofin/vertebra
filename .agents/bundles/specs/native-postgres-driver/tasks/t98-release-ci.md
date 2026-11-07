@@ -1,22 +1,24 @@
 ---
 type: Task
-id: native-postgres-driver:t98
-title: Verify complete native PostgreSQL wheels and strict CI service lanes
+id: "native-postgres-driver:t98"
+title: "Verify complete native PostgreSQL wheels and strict CI service lanes"
+description: "Verify complete native PostgreSQL wheels and strict CI service lanes for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: static_validation
 depends_on:
-- native-postgres-driver:t97
+  - "native-postgres-driver:t97"
 files:
-- .github/workflows/ci.yml
-- .github/workflows/release.yaml
-- Makefile
-- tools/scripts/verify_postgres_wheel.py
-- src/py/vertebra/_postgres.pyi
+  - .github/workflows/ci.yml
+  - .github/workflows/release.yaml
+  - Makefile
+  - tools/scripts/verify_postgres_wheel.py
+  - src/py/vertebra/_postgres.pyi
 tests:
-- tools/scripts/verify_postgres_wheel.py
+  - tools/scripts/verify_postgres_wheel.py
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: cdb978d3
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -26,15 +28,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- cutover
-- native
-requirements:
-- R26
+  - postgres
+  - cutover
+  - native
 ---
 
 # Verify complete native PostgreSQL wheels and strict CI service lanes

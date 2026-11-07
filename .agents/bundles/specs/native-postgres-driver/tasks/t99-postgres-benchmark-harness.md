@@ -1,23 +1,23 @@
 ---
 type: Task
-id: native-postgres-driver:t99
-title: Implement reproducible PostgreSQL benchmark capture and comparison harness
+id: "native-postgres-driver:t99"
+title: "Implement reproducible PostgreSQL benchmark capture and comparison harness"
+description: "Implement reproducible PostgreSQL benchmark capture and comparison harness for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t98
+  - "native-postgres-driver:t98"
 files:
-- tools/benchmarks/postgres.py
-- src/py/tests/unit/tools/test_postgres_benchmarks.py
-- pyproject.toml
-- uv.lock
+  - tools/benchmarks/postgres.py
+  - src/py/tests/unit/tools/test_postgres_benchmarks.py
+  - pyproject.toml
+  - uv.lock
 tests:
-- src/py/tests/unit/tools/test_postgres_benchmarks.py
-requirements:
-- R27
+  - src/py/tests/unit/tools/test_postgres_benchmarks.py
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: cdb978d3
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -27,13 +27,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T00:00:00Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T00:00:00Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- benchmarks
-- harness
+  - postgres
+  - benchmarks
+  - harness
 ---
 
 # Implement reproducible PostgreSQL benchmark capture and comparison harness

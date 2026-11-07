@@ -1,94 +1,84 @@
 ---
 type: Concept
-title: Shared-Memory Vector Slabs, Zero-Weight Cloud & SQL Embeddings, and Local Broker
-description: 'The `vertebra-core::vector`, `vertebra-py::vector`, and `vertebra.embeddings`
-  stack: POSIX shared-memory `VectorSlab` and `VectorCache`, PEP 3118 `VectorView`
-  and `VectorBatchView`, SIMD MRL truncation and quantization, native HTTP/2 gRPC
-  Vertex AI and Gemini embedders, AlloyDB and Oracle 26ai in-database SQL pushdown,
-  and `1x` RAM `EmbeddingBroker` with free-threaded 3.14t/3.15t GIL quarantine.'
+title: "Shared-Memory Vector Slabs, Zero-Weight Cloud & SQL Embeddings, and Local Broker"
+description: "The vertebra-core::vector, vertebra-py::vector, and vertebra.embeddings stack covering POSIX shared-memory VectorSlab and VectorCache, PEP 3118 VectorView and VectorBatchView, SIMD MRL truncation and quantization, native HTTP/2 gRPC Vertex AI and Gemini embedders, SQL pushdown, and the 1x RAM EmbeddingBroker."
 status: stable
 tags:
-- domains
-- agent
-- embeddings
-- vector
-- shm
-- grpc
-- simd
+  - domains
+  - agent
+  - embeddings
+  - vector
+  - shm
+  - grpc
+  - simd
 generated:
   by: flow/0.26.0
-  at: '2026-11-04T04:33:00Z'
+  at: "2026-11-04T04:33:00Z"
 verified:
-- by: agent:flow
-  at: '2026-11-06T20:00:00Z'
-  commit: c7b62a8c105f39c69f8411345c1a3ebb6722dfa7
-- by: agent:codex
-  at: '2026-11-05T06:09:26Z'
-  commit: 80ff8a65e43a2bcef9e48a7763e89a7352118232
-- by: agent:flow-setup
-  at: '2026-11-04T04:33:00Z'
-  commit: f741701
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: cdb978d3
 sources:
-- id: src-adapters-oracle-embeddings-py
-  resource: src/py/vertebra/db/adapters/oracle/embeddings.py
-  title: SQL embedding capability and facade
-- id: src-adapters-postgres-embeddings-py
-  resource: src/py/vertebra/db/adapters/postgres/embeddings.py
-  title: SQL embedding capability and facade
-- id: src-adapters-spanner-embeddings-py
-  resource: src/py/vertebra/db/adapters/spanner/embeddings.py
-  title: SQL embedding capability and facade
-- id: src-adapters-bigquery-embeddings-py
-  resource: src/py/vertebra/db/adapters/bigquery/embeddings.py
-  title: SQL embedding capability and facade
-- id: src-embeddings-pushdown-py
-  resource: src/py/vertebra/embeddings/_pushdown.py
-  title: SQL embedding capability and facade
-- id: src-vertebra-core-src-vector-rs
-  resource: src/rs/vertebra-core/src/vector.rs
-  title: Rust implementation module (src/rs/vertebra-core/src/vector.rs)
-- id: src-vertebra-py-src-vector-rs
-  resource: src/rs/vertebra-py/src/vector.rs
-  title: Rust implementation module (src/rs/vertebra-py/src/vector.rs)
-- id: src-vertebra-py-src-gcp-auth-rs
-  resource: src/rs/vertebra-py/src/gcp_auth.rs
-  title: Rust GCP OAuth token caches and HTTP/2 gRPC transport (src/rs/vertebra-py/src/gcp_auth.rs)
-- id: src-vertebra-http-src-grpc-rs
-  resource: src/rs/vertebra-http/src/grpc.rs
-  title: Rust implementation module (src/rs/vertebra-http/src/grpc.rs)
-- id: src-embeddings-init-py
-  resource: src/py/vertebra/embeddings/__init__.py
-  title: Python implementation module (src/py/vertebra/embeddings/__init__.py)
-- id: src-embeddings-base-py
-  resource: src/py/vertebra/embeddings/_base.py
-  title: Python implementation module (src/py/vertebra/embeddings/_base.py)
-- id: src-embeddings-google-py
-  resource: src/py/vertebra/embeddings/_google.py
-  title: Python implementation module (src/py/vertebra/embeddings/_google.py)
-- id: src-embeddings-remote-py
-  resource: src/py/vertebra/embeddings/_remote.py
-  title: Python implementation module (src/py/vertebra/embeddings/_remote.py)
-- id: src-embeddings-models-py
-  resource: src/py/vertebra/embeddings/_models.py
-  title: Python implementation module (src/py/vertebra/embeddings/_models.py)
-- id: src-embeddings-broker-py
-  resource: src/py/vertebra/embeddings/_broker.py
-  title: Python implementation module (src/py/vertebra/embeddings/_broker.py)
-- id: src-embeddings-local-py
-  resource: src/py/vertebra/embeddings/_local.py
-  title: Python implementation module (src/py/vertebra/embeddings/_local.py)
-- id: src-cli-ai-py
-  resource: src/py/vertebra/cli/ai.py
-  title: Python implementation module (src/py/vertebra/cli/ai.py)
-- id: src-tests-unit-embeddings-test-vector-views-py
-  resource: src/py/tests/unit/embeddings/test_vector_views.py
-  title: Python implementation module (src/py/tests/unit/embeddings/test_vector_views.py)
-- id: src-tests-unit-embeddings-test-google-embedders-py
-  resource: src/py/tests/unit/embeddings/test_google_embedders.py
-  title: Python implementation module (src/py/tests/unit/embeddings/test_google_embedders.py)
-- id: src-tests-unit-embeddings-test-embedding-broker-py
-  resource: src/py/tests/unit/embeddings/test_embedding_broker.py
-  title: Python implementation module (src/py/tests/unit/embeddings/test_embedding_broker.py)
+  - id: src-adapters-oracle-embeddings-py
+    resource: src/py/vertebra/db/adapters/oracle/embeddings.py
+    title: "SQL embedding capability and facade"
+  - id: src-adapters-postgres-embeddings-py
+    resource: src/py/vertebra/db/adapters/postgres/embeddings.py
+    title: "SQL embedding capability and facade"
+  - id: src-adapters-spanner-embeddings-py
+    resource: src/py/vertebra/db/adapters/spanner/embeddings.py
+    title: "SQL embedding capability and facade"
+  - id: src-adapters-bigquery-embeddings-py
+    resource: src/py/vertebra/db/adapters/bigquery/embeddings.py
+    title: "SQL embedding capability and facade"
+  - id: src-embeddings-pushdown-py
+    resource: src/py/vertebra/embeddings/_pushdown.py
+    title: "SQL embedding capability and facade"
+  - id: src-vertebra-core-src-vector-rs
+    resource: src/rs/vertebra-core/src/vector.rs
+    title: "Rust implementation module (src/rs/vertebra-core/src/vector.rs)"
+  - id: src-vertebra-py-src-vector-rs
+    resource: src/rs/vertebra-py/src/vector.rs
+    title: "Rust implementation module (src/rs/vertebra-py/src/vector.rs)"
+  - id: src-vertebra-py-src-gcp-auth-rs
+    resource: src/rs/vertebra-py/src/gcp_auth.rs
+    title: "Rust GCP OAuth token caches and HTTP/2 gRPC transport (src/rs/vertebra-py/src/gcp_auth.rs)"
+  - id: src-vertebra-http-src-grpc-rs
+    resource: src/rs/vertebra-http/src/grpc.rs
+    title: "Rust implementation module (src/rs/vertebra-http/src/grpc.rs)"
+  - id: src-embeddings-init-py
+    resource: src/py/vertebra/embeddings/__init__.py
+    title: "Python implementation module (src/py/vertebra/embeddings/__init__.py)"
+  - id: src-embeddings-base-py
+    resource: src/py/vertebra/embeddings/_base.py
+    title: "Python implementation module (src/py/vertebra/embeddings/_base.py)"
+  - id: src-embeddings-google-py
+    resource: src/py/vertebra/embeddings/_google.py
+    title: "Python implementation module (src/py/vertebra/embeddings/_google.py)"
+  - id: src-embeddings-remote-py
+    resource: src/py/vertebra/embeddings/_remote.py
+    title: "Python implementation module (src/py/vertebra/embeddings/_remote.py)"
+  - id: src-embeddings-models-py
+    resource: src/py/vertebra/embeddings/_models.py
+    title: "Python implementation module (src/py/vertebra/embeddings/_models.py)"
+  - id: src-embeddings-broker-py
+    resource: src/py/vertebra/embeddings/_broker.py
+    title: "Python implementation module (src/py/vertebra/embeddings/_broker.py)"
+  - id: src-embeddings-local-py
+    resource: src/py/vertebra/embeddings/_local.py
+    title: "Python implementation module (src/py/vertebra/embeddings/_local.py)"
+  - id: src-cli-ai-py
+    resource: src/py/vertebra/cli/ai.py
+    title: "Python implementation module (src/py/vertebra/cli/ai.py)"
+  - id: src-tests-unit-embeddings-test-vector-views-py
+    resource: src/py/tests/unit/embeddings/test_vector_views.py
+    title: "Python implementation module (src/py/tests/unit/embeddings/test_vector_views.py)"
+  - id: src-tests-unit-embeddings-test-google-embedders-py
+    resource: src/py/tests/unit/embeddings/test_google_embedders.py
+    title: "Python implementation module (src/py/tests/unit/embeddings/test_google_embedders.py)"
+  - id: src-tests-unit-embeddings-test-embedding-broker-py
+    resource: src/py/tests/unit/embeddings/test_embedding_broker.py
+    title: "Python implementation module (src/py/tests/unit/embeddings/test_embedding_broker.py)"
 ---
 
 # Shared-Memory Vector Slabs, Zero-Weight Cloud & SQL Embeddings, and Local Broker
@@ -160,8 +150,8 @@ flowchart LR
 
 | Class | Default Model | Execution Path |
 | :--- | :--- | :--- |
-| [`Embedder`](../../../../../src/py/vertebra/embeddings/_base.py) | Delegates to `VertexEmbedder` | Unified facade with `embed_query()`, `embed_document()`, `embed_many()`, `embed_arrow()`, and `similarity_search()`. |
-| [`VertexEmbedder`](../../../../../src/py/vertebra/embeddings/_google.py) | `gemini-embedding-001` (`768` dims) | Rust HTTP/2 (`gcp_http2_post` / `gcp_http2_post_async`) `PredictionService/EmbedContent` with `SyncGcpTokenCache` / `AsyncGcpTokenCache` Bearer token injection and packed-`f32` decoding into `VectorSlab`. |
+| [`Embedder`](../../../../../src/py/vertebra/embeddings/_base.py)[^src-embeddings-base-py] | Delegates to `VertexEmbedder` | Unified facade with `embed_query()`, `embed_document()`, `embed_many()`, `embed_arrow()`, and `similarity_search()`. |
+| [`VertexEmbedder`](../../../../../src/py/vertebra/embeddings/_google.py)[^src-embeddings-google-py] | `gemini-embedding-001` (`768` dims) | Rust HTTP/2 (`gcp_http2_post` / `gcp_http2_post_async`) `PredictionService/EmbedContent` with `SyncGcpTokenCache` / `AsyncGcpTokenCache` Bearer token injection and packed-`f32` decoding into `VectorSlab`. |
 | [`GeminiEmbedder`](../../../../../src/py/vertebra/embeddings/_google.py) | `gemini-embedding-001` (`768` dims) | Rust HTTP/2 gRPC `GenerativeService/BatchEmbedContents` with `x-goog-api-key` or ADC Bearer auth and inline `bytes` / `MultimodalPart` multimodal support (`embed_multimodal`). |
 | `PushdownEmbedder` | `gemini-embedding-001` (`768` dims) | Generic embedding facade over engine-owned capabilities. |
 | `BigQueryEmbeddingPushdown` | `gemini-embedding-001` | `ML.GENERATE_EMBEDDING` / `AI.GENERATE_EMBEDDING` and `VECTOR_SEARCH`. |
@@ -171,7 +161,7 @@ flowchart LR
 | [`GemmaEmbedder`](../../../../../src/py/vertebra/embeddings/_local.py)[^src-embeddings-local-py] | `embeddinggemma-2-270m` (`768` dims) | `EmbeddingBroker`-hosted `EmbeddingGemma` (`270M` / `300M`, `100+` languages, MRL `768`/`512`/`256`/`128`). Rejects `precision="fp16"` (`ValueError`) to prevent activation overflow; supports `int8` (default), `q4`, `bf16`, and `fp32`. |
 | [`FastEmbedder`](../../../../../src/py/vertebra/embeddings/_local.py) | `BAAI/bge-small-en-v1.5` (`384` dims) | `EmbeddingBroker`-hosted ONNX Runtime execution for BGE, Nomic, Arctic, Jina, and MiniLM models. |
 | [`StaticEmbedder`](../../../../../src/py/vertebra/embeddings/_local.py) | `potion-base-8M` (`512` dims) | Pure-Rust `StaticEmbedderCore` mmap lookup table with zero ML dependencies. |
-| [`RemoteEmbedder`](../../../../../src/py/vertebra/embeddings/_remote.py)[^src-embeddings-remote-py] | `embeddinggemma-2-270m` (`768` dims) | Rust HTTP/2 gRPC `/vertebra.EmbeddingService/BatchEmbed` client and server (`create_embedding_grpc_service`). |
+| [`RemoteEmbedder`](../../../../../src/py/vertebra/embeddings/_remote.py)[^src-embeddings-remote-py] | `embeddinggemma-2-270m` (`768` dims) | Rust HTTP/2 gRPC ([`grpc.rs`](../../../../../src/rs/vertebra-http/src/grpc.rs)[^src-vertebra-http-src-grpc-rs]) `/vertebra.EmbeddingService/BatchEmbed` client and server (`create_embedding_grpc_service`). |
 
 SQL embedding execution remains adapter-owned. PostgreSQL inference and similarity search prepare `%s` for sync psycopg and `$N` for async transport, retaining model/text/vector binds. The generic `EmbeddingPushdown` protocol and `PushdownEmbedder` do not construct engine SQL or import concrete adapters; the engine-purity gate rejects engine SQL construction inside generic database modules. [^src-adapters-postgres-embeddings-py][^src-embeddings-pushdown-py]
 

@@ -1,18 +1,60 @@
 ---
 type: Research
 flow_id: native-postgres-driver
-title: Native PostgreSQL cloud connection material and scoped authentication audit
-state: promoted
-created_at: 2026-11-05
-sources_verified_at: 2026-11-05
-scope: Read-only local source audit and public official Google documentation and connector source research
+title: "Native PostgreSQL cloud connection material and scoped authentication audit"
+description: "Primary-source cloud material, mTLS identity, and scoped credential contracts for Cloud SQL and AlloyDB in native PostgreSQL."
 status: stable
+state: promoted
 promoted_to: native-postgres-driver
-updated_at: '2026-11-05T18:41:01Z'
-description: Primary-source cloud material, identity and scoped credential contracts for native PostgreSQL.
+created_at: "2026-11-05T00:00:00Z"
+updated_at: "2026-11-07T04:15:00Z"
+generated:
+  by: flow-setup
+  at: "2026-11-07T04:15:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T04:15:00Z"
+    commit: cdb978d3
+sources:
+  - id: rs-conn
+    resource: src/rs/vertebra-db/src/connection.rs::TransportStream
+    title: Cloud mTLS TransportStream and EndpointTarget in vertebra-db
+  - id: rs-dialer
+    resource: src/rs/vertebra-db/src/dialer.rs
+    title: CloudSqlDialer and AlloyDbDialer URI and metadata framing
+  - id: rs-gcp-auth
+    resource: src/rs/vertebra-core/src/gcp_auth.rs::GcpTokenCache
+    title: Core GCP single-flight token cache
+  - id: pg-config
+    resource: src/py/vertebra/db/adapters/postgres/config.py::PostgreSQLConfig
+    title: PostgreSQL cloud_sql_instance, alloydb_instance_uri, and IAM config
+  - id: cloudsql-get
+    resource: https://docs.cloud.google.com/sql/docs/postgres/admin-api/rest/v1beta4/connect/get
+    title: Cloud SQL Admin API connectSettings endpoint
+  - id: cloudsql-ephemeral
+    resource: https://docs.cloud.google.com/sql/docs/postgres/admin-api/rest/v1beta4/connect/generateEphemeralCert
+    title: Cloud SQL Admin API generateEphemeralCert endpoint
+  - id: alloydb-conninfo
+    resource: https://docs.cloud.google.com/alloydb/docs/reference/rest/v1/projects.locations.clusters.instances/getConnectionInfo
+    title: AlloyDB connectionInfo REST endpoint
+  - id: alloydb-proto
+    resource: https://raw.githubusercontent.com/googleapis/googleapis/master/google/cloud/alloydb/v1alpha/service.proto
+    title: AlloyDB v1alpha service and certificate issuance protobuf
+tags:
+  - postgres
+  - gcp
+  - cloudsql
+  - alloydb
+  - mtls
+  - iam
 ---
 
 # Native PostgreSQL cloud connection material audit
+
+<!-- truth: start -->
+- **Control-Plane Material Lifecycle**: Cloud SQL (`connectSettings` + `generateEphemeralCert` with RSA-2048 public key and `sqlservice.login` scope) [^cloudsql-get] [^cloudsql-ephemeral] and AlloyDB (`v1alpha` `connectionInfo` + `generateClientCertificate` + post-TLS1.3 `MetadataExchangeRequest` with `alloydb.login` scope) [^alloydb-conninfo] [^alloydb-proto] fetch, validate, and renew certificates natively.
+- **Strict TLS 1.3 Peer Identity & Scoped Tokens**: Cloud mTLS enforces TLS 1.3 plus SAN/CN peer verification (`connection.rs` / `dialer.rs`) [^rs-conn] [^rs-dialer] and separates admin vs. login scopes across owned `ScopedTokenProvider` caches without cross-`cdylib` `Arc` extraction [^rs-gcp-auth] [^pg-config].
+<!-- truth: end -->
 
 URI + IAM connections require adapter-owned control-plane fetching and renewal. Existing native transport consumes prepared material. It does not discover endpoints or obtain issued client certificates. Required cloud functionality belongs in the complete native-postgres-driver PR; prepared-material injection is an internal seam and test facility, not the end-user completion boundary.
 
@@ -135,3 +177,12 @@ The implementation worksheets assign bounded ownership across these seams:
 6. Connect/reconnect and pool integration: automatically obtain fresh material, refresh before new physical connections, retain established socket ownership, bounded failed-renewal policy, close/cancellation cleanup. Prepared-material-only tests are not completion evidence.
 
 Use deterministic local mock Admin APIs and mTLS peers to verify fields, scoped tokens, selected IP/PSC DNS, certificate issuance responses, unknown/malformed data, exact deadline, 401 generation invalidation, concurrent single-flight, real expiry, failed refresh, TLS1.2 rejection, wrong CA/SAN/CN, metadata failure, cancellation and no token leakage. Keep live cloud checks explicitly separate and optional where credentials/infrastructure are absent. The complete PR still needs automatic URI+IAM functionality; no silent limited-ADC fallback or caller-supplied-material requirement substitutes for it.
+
+[^rs-conn]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Cloud mTLS TransportStream and EndpointTarget in vertebra-db.
+[^rs-dialer]: `src/rs/vertebra-db/src/dialer.rs` — CloudSqlDialer and AlloyDbDialer URI and metadata framing.
+[^rs-gcp-auth]: `src/rs/vertebra-core/src/gcp_auth.rs::GcpTokenCache` — Core GCP single-flight token cache.
+[^pg-config]: `src/py/vertebra/db/adapters/postgres/config.py::PostgreSQLConfig` — PostgreSQL cloud_sql_instance, alloydb_instance_uri, and IAM config.
+[^cloudsql-get]: Cloud SQL Admin API connectSettings endpoint (https://docs.cloud.google.com/sql/docs/postgres/admin-api/rest/v1beta4/connect/get).
+[^cloudsql-ephemeral]: Cloud SQL Admin API generateEphemeralCert endpoint (https://docs.cloud.google.com/sql/docs/postgres/admin-api/rest/v1beta4/connect/generateEphemeralCert).
+[^alloydb-conninfo]: AlloyDB connectionInfo REST endpoint (https://docs.cloud.google.com/alloydb/docs/reference/rest/v1/projects.locations.clusters.instances/getConnectionInfo).
+[^alloydb-proto]: AlloyDB v1alpha service and certificate issuance protobuf (https://raw.githubusercontent.com/googleapis/googleapis/master/google/cloud/alloydb/v1alpha/service.proto).

@@ -1,19 +1,21 @@
 ---
 type: Task
-id: native-postgres-driver:t95
-title: Accept live PostgreSQL logical replication and durable source recovery
+id: "native-postgres-driver:t95"
+title: "Accept live PostgreSQL logical replication and durable source recovery"
+description: "Accept live PostgreSQL logical replication and durable source recovery for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t94
+  - "native-postgres-driver:t94"
 files:
-- src/py/tests/integration/conftest.py
-- src/py/tests/integration/db/test_postgres_replication.py
+  - src/py/tests/integration/conftest.py
+  - src/py/tests/integration/db/test_postgres_replication.py
 tests:
-- src/py/tests/integration/db/test_postgres_replication.py
+  - src/py/tests/integration/db/test_postgres_replication.py
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: cdb978d3
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -23,17 +25,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- replication
-- integration
-requirements:
-- R22
-- R23
-- R25
+  - postgres
+  - replication
+  - integration
 ---
 
 # Accept live PostgreSQL logical replication and durable source recovery

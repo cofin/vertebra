@@ -1,9 +1,11 @@
 ---
 type: Spec
 flow_id: sqlspec-adapter-parity
-title: Feature-Complete SQLSpec Adapters
-description: Restructure Vertebra SQLSpec adapters to mirror upstream adapter packages, implement the SQLSpec driver dispatch contract, subclass upstream ADK/events/Litestar stores and Sync/Async data dictionaries, add a temporary adapter-name resolver shim, and fix shared-pool, shim, and Spanner store defects.
+title: "Feature-Complete SQLSpec Adapters"
+description: "Restructure Vertebra SQLSpec adapters to mirror upstream adapter packages, implement the SQLSpec driver dispatch contract, subclass upstream ADK/events/Litestar stores and Sync/Async data dictionaries, add a temporary adapter-name resolver shim, and fix shared-pool, shim, and Spanner store defects."
+status: draft
 state: draft
+has_chapters: false
 parent_prd: integration-remediation
 research:
   - ../integration-remediation/research/audit-findings_20261103.md
@@ -12,12 +14,40 @@ plan_commit: null
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
-created_at: 2026-11-03T03:30:00Z
-updated_at: "2026-11-05T06:20:28Z"
-tags: [sqlspec, adapters, adk, events, litestar]
+created_at: "2026-11-03T03:30:00Z"
+updated_at: "2026-11-07T04:15:00Z"
+generated:
+  by: flow-setup
+  at: "2026-11-07T04:15:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T04:15:00Z"
+    commit: cdb978d3
+sources:
+  - id: sqlspec-adapters
+    resource: src/py/vertebra/extensions/sqlspec/adapters.py
+    title: Current monolithic SQLSpec adapter definitions
+  - id: sqlspec-plugin
+    resource: src/py/vertebra/extensions/sqlspec/plugin.py
+    title: SQLSpecPlugin lifecycle and pool configuration
+  - id: sqlspec-provider
+    resource: src/py/vertebra/extensions/sqlspec/provider.py
+    title: SQLSpecSyncProvider and SQLSpecAsyncProvider Arrow result surface
+tags:
+  - sqlspec
+  - adapters
+  - adk
+  - events
+  - litestar
 ---
 
 # Flow Charter: Feature-Complete SQLSpec Adapters
+
+<!-- truth: start -->
+- **Upstream Package & Dispatch Parity**: Per-engine packages `extensions/sqlspec/adapters/<engine>/` implement `dispatch_execute*`, `<Engine>SyncDataDictionary` / `<Engine>AsyncDataDictionary`, and upstream-base ADK/events/Litestar stores while preserving `<Engine>SyncConfig` / `<Engine>AsyncConfig` naming [^sqlspec-adapters].
+- **Storage-Owned `ArtifactReference` & Refcounted Pools**: Shared artifact metadata uses `vertebra.storage.ArtifactReference` without cross-engine BigQuery imports in Spanner, and `DatabaseRegistry` pools close via reference counting [^sqlspec-plugin].
+- **`VTBARROW` Provider Cutover**: `SQLSpecSyncProvider` and `SQLSpecAsyncProvider` replace `SharedArrowBuffer`/`SharedArrowTable` with Rust `VTBARROW` `ArrowCursor` frames [^sqlspec-provider].
+<!-- truth: end -->
 
 ## Charter
 
@@ -86,3 +116,7 @@ Vertebra's SQLSpec adapters must be feature-complete in the same way upstream ad
 - t06 Spanner stores on upstream bases, DDL/parameter fixes, and direct storage-owned artifact-reference construction without cross-engine imports.
 - t07 Remaining engine stores + `DatabaseRegistry` shared-pool refcount.
 - t08 Rust `VTBARROW` replacement for `provider.py::{SharedArrowBuffer,SharedArrowTable}` + docs.
+
+[^sqlspec-adapters]: `src/py/vertebra/extensions/sqlspec/adapters.py` — Current monolithic SQLSpec adapter definitions.
+[^sqlspec-plugin]: `src/py/vertebra/extensions/sqlspec/plugin.py` — SQLSpecPlugin lifecycle and pool configuration.
+[^sqlspec-provider]: `src/py/vertebra/extensions/sqlspec/provider.py` — SQLSpecSyncProvider and SQLSpecAsyncProvider Arrow result surface.

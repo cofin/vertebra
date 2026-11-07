@@ -1,12 +1,41 @@
 ---
 type: Guide
+flow_id: native-postgres-driver
 title: Native PostgreSQL public contracts
 description: Public interface and ownership contracts for the complete native PostgreSQL driver plan.
-status: draft
-tags: [postgres, interfaces, ownership]
+status: stable
+created_at: "2026-11-05T00:00:00Z"
+updated_at: "2026-11-07T04:15:00Z"
+generated:
+  by: flow-setup
+  at: "2026-11-07T04:15:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T04:15:00Z"
+    commit: cdb978d3
+sources:
+  - id: pg-config
+    resource: src/py/vertebra/db/adapters/postgres/config.py::PostgreSQLConfig
+    title: PostgreSQL DSN, TLS, Cloud SQL, AlloyDB, and IAM configuration
+  - id: pg-driver
+    resource: src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver
+    title: Public SyncPostgreSQLDriver and AsyncPostgreSQLDriver adapter surface
+  - id: arrow-cursor
+    resource: src/py/vertebra/db/arrow.py::ArrowCursor
+    title: Public ArrowCursor result wrapper over VTBARROW ShmCapsule
+tags:
+  - postgres
+  - interfaces
+  - ownership
+  - contracts
 ---
 
 # Native PostgreSQL public contracts
+
+<!-- truth: start -->
+- **Owned Primitive FFI Boundary**: `SyncPostgresClient` and `AsyncPostgresClient` accept owned primitive options across `vertebra._postgres` and never extract Rust `Arc` or `PyRef` handles from sibling `cdylib` extensions [^pg-config].
+- **Lossless Value & `VTBARROW` Contracts**: Frozen `msgspec` adapter records (`PgInterval`, `PgArray`, `PgComposite`, `PgTemporal`, `PgBitString`) and standard Arrow structural schemas preserve full PostgreSQL fidelity without Tokio-thread Python hydration [^pg-driver] [^arrow-cursor].
+<!-- truth: end -->
 
 All features ship in one complete-driver PR. These contracts govern the task drafts.
 
@@ -602,3 +631,7 @@ text/OID/context fallback; fatal active enrichment attaches the original complet
 result through AfterCompletion. High-level single/multi calls forward timeout;
 execute_many applies it separately per command. No pipeline/COPY/portal timeout or
 global command default is added.
+
+[^pg-config]: `src/py/vertebra/db/adapters/postgres/config.py::PostgreSQLConfig` — PostgreSQL DSN, TLS, Cloud SQL, AlloyDB, and IAM configuration.
+[^pg-driver]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — Public SyncPostgreSQLDriver and AsyncPostgreSQLDriver adapter surface.
+[^arrow-cursor]: `src/py/vertebra/db/arrow.py::ArrowCursor` — Public ArrowCursor result wrapper over VTBARROW ShmCapsule.
