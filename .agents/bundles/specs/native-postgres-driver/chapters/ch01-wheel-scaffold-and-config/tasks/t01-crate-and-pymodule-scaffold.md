@@ -5,7 +5,7 @@ chapter_id: ch01-wheel-scaffold-and-config
 title: Scaffold vertebra-postgres Cargo manifest, build script, and free-threaded PyO3 module
 description: Create src/rs/vertebra-postgres/Cargo.toml with complete locked dependency pins, build.rs with PyO3 cfg/rpath setup, and src/lib.rs exporting gil_used=false vertebra._postgres metadata constants prior to workspace registration.
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: static_validation
 depends_on: []
@@ -25,8 +25,8 @@ estimated_loc: 120
 plan_revision: 3
 plan_commit: dd432f18
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:ch01-t01
+claimed_at: "2026-11-07T20:00:34Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
