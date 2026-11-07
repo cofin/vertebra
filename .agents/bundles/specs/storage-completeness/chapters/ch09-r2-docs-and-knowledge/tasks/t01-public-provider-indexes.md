@@ -5,7 +5,7 @@ chapter_id: ch09-r2-docs-and-knowledge
 title: Remove R2 claims from public navigation and reference
 description: Remove R2 claims from public navigation and reference
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: documentation_validation
 depends_on:
@@ -27,8 +27,8 @@ estimated_loc: 60
 plan_revision: 5
 plan_commit: bdc7799ab18b9a961dacf99f5eee9af46a557aa3
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:r2-docs-t01
+claimed_at: '2026-11-07T23:35:35.133022+00:00'
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -36,7 +36,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: '2026-11-07T12:00:00Z'
-updated_at: '2026-11-07T12:00:00Z'
+updated_at: '2026-11-07T23:35:35.133022+00:00'
 commit: null
 sources:
 - id: implementation

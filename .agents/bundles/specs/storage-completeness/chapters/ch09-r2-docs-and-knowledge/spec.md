@@ -5,11 +5,11 @@ chapter_id: ch09-r2-docs-and-knowledge
 title: Synchronize Supported Providers and Native Guarantees
 description: Synchronize Supported Providers and Native Guarantees
 status: stable
-state: planned
+state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: null
+current_task: storage-completeness:ch09:t01
 plan_revision: 5
 plan_commit: bdc7799ab18b9a961dacf99f5eee9af46a557aa3
 state_revision: 0
@@ -88,7 +88,7 @@ Progress: `[0/11 files documented]`. t01 owns three public provider/reference pa
 
 ## 5. Implementation Plan
 
-- [ ] storage-completeness:ch09:t01 — Remove R2 claims from public navigation and reference (tasks/t01-public-provider-indexes.md)
+- [~] storage-completeness:ch09:t01 — Remove R2 claims from public navigation and reference (tasks/t01-public-provider-indexes.md)
 - [ ] storage-completeness:ch09:t02 — Remove R2 from architecture and product capability claims (tasks/t02-architecture-and-product.md)
 - [ ] storage-completeness:ch09:t03 — Record provider atomicity, key identity, cleanup and R2 withdrawal (tasks/t03-storage-knowledge.md)
 - [ ] storage-completeness:ch09:t04 — Remove R2 from repository and embedding overviews (tasks/t04-overview-and-embedding-claims.md)
