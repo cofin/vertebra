@@ -5,7 +5,7 @@ chapter_id: ch02-wire-codec-and-session-startup
 title: Establish authenticated trust sessions with SessionHandle and PendingSession publication
 description: Implement PostgresConnection, SessionHandle, ConnectAttempt, and PendingSession enforcing strict Protocol 3.0 startup ordering, total deadline budgets, cancellation rollback, and bounded Terminate close.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -28,13 +28,13 @@ estimated_loc: 240
 plan_revision: 6
 plan_commit: 8833b064
 state_revision: 2
-claimed_by: agent:ch02-notice-remediation
-claimed_at: "2026-11-07T23:31:03.229411+00:00"
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-07T23:32:39.944985+00:00"
-last_verified_commit: b19e402d
+last_verified_commit: 81791de2
 verification_evidence:
   red: "Notice regression exits 101 against the discarded-body implementation: malformed NoticeResponse is accepted; final half-closed peer regression also exits 101 without consumer validation."
   focused: "Locked canonical wire test suite exits 0: 22 tests, including malformed notice refusal before/after auth with peer EOF and valid notice adoption."
@@ -44,8 +44,8 @@ verification_evidence:
   review_privacy: "UV_NO_SYNC=1 .venv/bin/python -m tools.scripts.review_setup validate exits 0."
   environment: "PYO3_PYTHON=${PWD}/.venv/bin/python; reserved CARGO_TARGET_DIR; Tokio loopback peers and paused clock; no Python network calls."
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T23:16:07Z"
-commit: null
+updated_at: "2026-11-07T23:33:49Z"
+commit: 81791de2
 sources:
   - id: rs-transport
     resource: src/rs/vertebra-db/src/connection.rs::TransportStream
