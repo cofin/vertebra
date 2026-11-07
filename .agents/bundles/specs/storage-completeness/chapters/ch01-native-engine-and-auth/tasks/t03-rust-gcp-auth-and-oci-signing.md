@@ -5,7 +5,7 @@ chapter_id: ch01-native-engine-and-auth
 title: Deduplicate Rust GCS auth wrapper and complete multi-cloud presigning including OCI PAR
 description: Trim vertebra-storage gcp_auth.rs to RefreshingGcpCredentialProvider over vertebra_core::gcp_auth::GcpTokenCache and complete GCS V4, IAM signBlob, S3 SigV4, Azure SAS, and OCI PAR URL presigning.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -27,18 +27,18 @@ tests:
 estimated_loc: 190
 plan_revision: 2
 plan_commit: cdb978d3
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-07T17:32:04Z"
+last_verified_commit: 494ad92b
+verification_evidence: "uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage (22 passed: 3 unit + 19 integration), cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets -- -D warnings (0 warnings), uv run --no-sync pytest src/py/tests/unit/storage/test_signing.py -q (4 passed)"
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T04:15:00Z"
-commit: null
+updated_at: "2026-11-07T17:32:04Z"
+commit: 494ad92b
 sources:
   - id: core-gcp-cache
     resource: src/rs/vertebra-core/src/gcp_auth.rs::GcpTokenCache
@@ -108,12 +108,13 @@ Eliminate duplicated `gcp_auth` re-exports and redundant token-refresh tests in 
 
 ## Acceptance Criteria
 
-- [ ] `src/rs/vertebra-storage/src/gcp_auth.rs` delegates exclusively to `vertebra_core::gcp_auth::GcpTokenCache` without duplicate token-cache re-exports or duplicated core tests (R2).
-- [ ] GCS V4 (RSA + IAM `signBlob`), S3 SigV4, Azure SAS, and OCI PAR URL builders handle RFC 3986 path encoding and expiry bounds without panics (R2).
+- [x] `src/rs/vertebra-storage/src/gcp_auth.rs` delegates exclusively to `vertebra_core::gcp_auth::GcpTokenCache` without duplicate token-cache re-exports or duplicated core tests (R2).
+- [x] GCS V4 (RSA + IAM `signBlob`), S3 SigV4, Azure SAS, and OCI PAR URL builders handle RFC 3986 path encoding and expiry bounds without panics (R2).
 
 ## Notes & Discoveries
 
 - [2026-11-07 04:15] `vertebra-core` already owns single-flight proactive refresh and `gcloud` fallback tests in `src/rs/vertebra-core/src/gcp_auth.rs`.
+- [2026-11-07 17:32] Kept crate-private `pub(crate) use` in `gcp_auth.rs` so `store.rs` and `lib.rs` compile cleanly before `ch01:t04` deletes the duplicate PyO3 token classes; added typed `SigningError` (`InvalidExpiry`, `InvalidKey`, `InvalidUrl`, `SignBlob`) with `1..=604_800`s bounds and `build_oci_par_url` / `sign_oci_request_headers`.
 
 [^core-gcp-cache]: `src/rs/vertebra-core/src/gcp_auth.rs::GcpTokenCache` — Canonical GCP OAuth2 token cache.
 [^storage-gcp-provider]: `src/rs/vertebra-storage/src/gcp_auth.rs::RefreshingGcpCredentialProvider` — GCS `CredentialProvider` wrapper.
