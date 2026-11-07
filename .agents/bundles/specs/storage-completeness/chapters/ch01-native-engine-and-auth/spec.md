@@ -5,22 +5,25 @@ chapter_id: ch01-native-engine-and-auth
 title: "Chapter 01: Native Rust Storage Engine, GCP Auth Unification, and Fail-Closed Facade"
 description: Add zero-copy streaming reads, incremental multipart uploads, conditional puts, paginated listing, rename, OCI PAR presigning, unified GCP token caches, and fail-closed construction across vertebra-storage and vertebra.storage.
 status: stable
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
 plan_revision: 2
 plan_commit: cdb978d3
-state_revision: 5
-last_verified_checkpoint: e15f636a
-last_reviewed_commit: null
+state_revision: 6
+last_verified_checkpoint: dc2c2053
+last_reviewed_commit: dc2c2053
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T18:24:00Z"
+updated_at: "2026-11-07T19:06:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
 verified:
+  - by: agent:code-reviewer
+    at: "2026-11-07T19:05:09Z"
+    commit: dc2c2053
   - by: agent:flow-setup
     at: "2026-11-07T04:15:00Z"
     commit: cdb978d3
@@ -119,14 +122,14 @@ Progress: `[1/1 files documented in ch01]`
 - [x] [beb6a972] storage-completeness:ch01:t01 — Implement streaming reads, incremental multipart sessions, conditional puts, pagination, and rename in vertebra-storage (tasks/t01-rust-streaming-and-ops.md)
 - [x] [cb6b0647] storage-completeness:ch01:t02 — Wire Python streaming/conditional/paginated storage facade and _storage.pyi stubs (tasks/t02-python-streaming-facade-and-stubs.md)
 - [x] [494ad92b] storage-completeness:ch01:t03 — Deduplicate Rust GCS auth wrapper and complete multi-cloud presigning including OCI PAR (tasks/t03-rust-gcp-auth-and-oci-signing.md)
-- [x] [e15f636a] storage-completeness:ch01:t04 — Unify Python GCP token caches on vertebra._vertebra and enforce fail-closed stores (tasks/t04-unified-token-caches-and-fail-closed.md)
+- [x] [dc2c2053] storage-completeness:ch01:t04 — Unify Python GCP token caches on vertebra._vertebra and enforce fail-closed stores (tasks/t04-unified-token-caches-and-fail-closed.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage && make dev && uv run --no-sync python -m mypy.stubtest vertebra._storage && uv run --no-sync pytest src/py/tests/unit/storage -q` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ e15f636a`; chapter `state: active`, `planning_status: complete`; all `4/4` tasks in `ch01` completed (`t01` @ `beb6a972`, `t02` @ `cb6b0647`, `t03` @ `494ad92b`, `t04` @ `e15f636a`), and `object-storage.md` synchronized in present tense.
-- **Remaining Tasks in Chapter**: None (`0/4` pending; ready for `ch01` closeout review).
+- **Verified Baseline**: `HEAD @ dc2c2053`; chapter `state: completed`, `planning_status: complete`; all `4/4` tasks in `ch01` completed (`t01` @ `beb6a972`, `t02` @ `cb6b0647`, `t03` @ `494ad92b`, `t04` @ `dc2c2053`), `object-storage.md` synchronized, and zero-context `@code-reviewer` + `@quality-reviewer` passes approved across `1bb622a7..dc2c2053`.
+- **Remaining Tasks in Chapter**: None (`0/4` pending; chapter closed).
 - **Downstream Dependents**: Unblocks `ch02-orm-and-sql-storage-contracts`, `ch03-litestar-and-range-streaming`, and `ch04-arrow-shm-and-docs`.
 
 [^store-rs]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — Rust object-store wrapper and metadata model.
