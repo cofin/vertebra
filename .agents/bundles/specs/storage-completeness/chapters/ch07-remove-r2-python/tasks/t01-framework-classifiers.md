@@ -75,8 +75,8 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 
 | Case | Input | Observable result |
 | --- | --- | --- |
-| Supported custom endpoint | Construct each adapter using S3Config(endpoint="http://127.0.0.1:9000", allow_http=True) | Normal S3 classification retained |
-| Removed first-class classifier | Read adapter public configurations and constructor behavior after core withdrawal | No R2Config import remains; r2:// ultimately rejected by store constructor |
+| Supported custom endpoint | Construct each adapter using S3Config(bucket="unit", endpoint="http://127.0.0.1:9000", allow_http=True, access_key_id="test-only-key", secret_access_key="test-only-secret") | Normal S3 classification retained |
+| Removed first-class classifier | While the core class still exists at this frontier, pass explicit R2Config(bucket="unit", account_id="acct") to Alchemy ObjectStoreBackend, SQLSpec ObjectStoreBackend, and both Starlette registry registration APIs | Alchemy and both Starlette registries raise TypeError; SQLSpec preserves its existing ImproperConfigurationError for unsupported target types, all before native construction; valid custom-S3 config remains accepted by each corresponding API. URI rejection belongs to successor t02/t03, not this task. |
 
 ## Verification
 

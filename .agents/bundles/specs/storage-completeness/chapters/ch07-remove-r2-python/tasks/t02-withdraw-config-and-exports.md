@@ -11,6 +11,7 @@ verification_strategy: regression_tdd
 depends_on:
 - storage-completeness:ch07:t01
 read_set:
+- src/py/tests/unit/extensions/test_data_storage_integrations.py
 - src/py/vertebra/storage/_store.py
 - src/py/vertebra/storage/__init__.py
 - src/py/tests/unit/storage/test_multicloud_storage.py
@@ -20,6 +21,7 @@ files:
 - src/py/vertebra/storage/_store.py
 - src/py/vertebra/storage/__init__.py
 tests:
+- src/py/tests/unit/extensions/test_data_storage_integrations.py
 - src/py/tests/unit/storage/test_multicloud_storage.py
 - src/py/tests/unit/storage/test_signing.py
 - src/py/tests/integration/storage/conftest.py
@@ -55,6 +57,8 @@ Delete public R2Config and from_r2 convenience APIs. Execute one bounded workshe
 
 ## Bounded Read Manifest
 
+- `src/py/tests/unit/extensions/test_data_storage_integrations.py` — migrate the preceding classifier regression when its temporary R2Config input disappears.
+
 - `src/py/vertebra/storage/_store.py` — owned implementation or canonical regression surface.
 - `src/py/vertebra/storage/__init__.py` — owned implementation or canonical regression surface.
 - `src/py/tests/unit/storage/test_multicloud_storage.py` — owned implementation or canonical regression surface.
@@ -62,6 +66,8 @@ Delete public R2Config and from_r2 convenience APIs. Execute one bounded workshe
 - `src/py/tests/integration/storage/conftest.py` — owned implementation or canonical regression surface.
 
 ## Symbol & Signature Contracts
+
+Migrate t01's temporary R2Config classifier regression in `src/py/tests/unit/extensions/test_data_storage_integrations.py` when deleting the class: retain generic S3 endpoint acceptance and replace construction of the removed configuration with public symbol withdrawal and explicit unsupported-scheme coverage. Run that canonical module in this task so class deletion never leaves a broken test import or constructor.
 
 Delete R2Config, its `chunk_uniform_parts` helper, from_r2 constructor, config union/validation members, signing configuration branch, supported-scheme membership, and public __all__/package exports. Reject `r2://` in facade URI construction as unsupported with ValueError before native construction. Convert relevant canonical signing/config examples to generic S3 custom endpoints or OCI 8 MiB coverage; delete R2-only fixture and its consumers without skipping unrelated provider acceptance. Generic S3 custom endpoints and S3 SigV4 remain fully supported. No alias or deprecation shim remains. Native helper is retained until ch08 withdrawal, keeping stubtest parity between commits.
 
@@ -87,9 +93,9 @@ Record the failing public regression before implementation and the passing resul
 
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" make dev`
 - `uv run --no-sync python -m mypy.stubtest vertebra._storage`
-- `uv run --no-sync ruff check src/py/vertebra/storage/_store.py src/py/vertebra/storage/__init__.py src/py/tests/unit/storage/test_multicloud_storage.py src/py/tests/unit/storage/test_signing.py src/py/tests/integration/storage/conftest.py`
+- `uv run --no-sync ruff check src/py/vertebra/storage/_store.py src/py/vertebra/storage/__init__.py src/py/tests/unit/storage/test_multicloud_storage.py src/py/tests/unit/storage/test_signing.py src/py/tests/integration/storage/conftest.py src/py/tests/unit/extensions/test_data_storage_integrations.py`
 - `uv run --no-sync mypy src/py/vertebra/storage/_store.py src/py/vertebra/storage/__init__.py`
-- `uv run --no-sync pytest src/py/tests/unit/storage/test_multicloud_storage.py src/py/tests/unit/storage/test_signing.py src/py/tests/integration/storage/conftest.py -q`
+- `uv run --no-sync pytest src/py/tests/unit/storage/test_multicloud_storage.py src/py/tests/unit/storage/test_signing.py src/py/tests/integration/storage/conftest.py src/py/tests/unit/extensions/test_data_storage_integrations.py -q`
 
 Record exact exit statuses, native build checkpoint and any platform limitation in verification_evidence. Review closure uses these results, never planning-only structural validation.
 

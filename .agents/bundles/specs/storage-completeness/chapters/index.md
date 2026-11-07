@@ -5,7 +5,7 @@
 * [ch03 — Chapter 03: HTTP Range Streaming and Litestar Store/Static Integration](ch03-litestar-and-range-streaming/spec.md) — [planned] Implement RFC 9110 single-range 206/416 StreamingStorageResponse and Litestar AsyncObjectStore Store plus static-files filesystem adapter.
 * [ch04 — Chapter 04: Strict Arrow SHM Allocation, Parquet Streaming, and OKF Sync](ch04-arrow-shm-and-docs/spec.md) — [planned] Enforce fail-loud named ShmRegion allocation, eliminate JSON pseudo-Arrow fallback in ArrowCursor.from_rows, wire streaming Arrow/Parquet ObjectStore helpers, and synchronize storage documentation and OKF chapters.
 * [ch05 — Raw Object Identity and Typed Conditional Conflicts](ch05-key-identity-and-preconditions/spec.md) — [active] Raw Object Identity and Typed Conditional Conflicts
-* [ch06 — Django Collision Length and SQLSpec Signing Errors](ch06-adapter-correctness/spec.md) — [planned] Django Collision Length and SQLSpec Signing Errors
+* [ch06 — Django Collision Length and SQLSpec Signing Errors](ch06-adapter-correctness/spec.md) — [active] Django Collision Length and SQLSpec Signing Errors
 * [ch07 — Withdraw First-Class R2 Python APIs](ch07-remove-r2-python/spec.md) — [planned] Withdraw First-Class R2 Python APIs
 * [ch08 — Move OCI Chunk Ownership and Remove Native R2](ch08-remove-r2-native/spec.md) — [planned] Move OCI Chunk Ownership and Remove Native R2
 * [ch09 — Synchronize Supported Providers and Native Guarantees](ch09-r2-docs-and-knowledge/spec.md) — [planned] Synchronize Supported Providers and Native Guarantees

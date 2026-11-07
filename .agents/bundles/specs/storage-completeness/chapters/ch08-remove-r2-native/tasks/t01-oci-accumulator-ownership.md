@@ -7,7 +7,7 @@ description: Transfer uniform multipart accumulation into OCI ownership
 status: draft
 state: pending
 priority: P1
-verification_strategy: regression_tdd
+verification_strategy: characterization
 depends_on:
 - storage-completeness:ch07:t02
 read_set:
@@ -59,9 +59,11 @@ Transfer uniform multipart accumulation into OCI ownership. Execute one bounded 
 
 ## Symbol & Signature Contracts
 
-Move the incremental `UniformPartAccumulator` and fixed 8 MiB constant to `oci.rs` with OCI-specific naming (`OCI_UNIFORM_PART_SIZE`). `store.rs::create_multipart` uses uniform re-chunking only for scheme oci. Preserve existing helper exports still called by lib.rs until the next task; no Python behavior depends on moving them. Do not retain a whole-payload Vec or a 1 GiB buffer. Renaming canonical tests to OCI must retain observable part sizes and exact reconstructed payload assertions. This task stays green while r2.rs still exists; remove only its production accumulator caller, then remove the file in t02.
+Move the incremental `UniformPartAccumulator` and fixed 8 MiB constant to `oci.rs` with OCI-specific naming (`OCI_UNIFORM_PART_SIZE`). `store.rs::create_multipart` uses uniform re-chunking only for scheme oci. Preserve existing helper exports still called by lib.rs until the next task; no Python behavior depends on moving them. Do not retain a whole-payload Vec or a 1 GiB buffer. Renaming canonical tests to OCI must retain observable part sizes and exact reconstructed payload assertions. This task stays green while r2.rs still exists; remove only its production accumulator caller, then remove the file in t03.
 
 Caller → seam → collaborator: public sync/async object-store or adapter operation → owned symbols above → existing native engine/provider or upstream framework contract. Preserve public APIs outside this task.
+
+Before this task completes, remove every OCI-to-R2 import/reexport: migrate or remove the complete OCI chunk helper surface, including `chunk_uniform_parts`, and rename its constant to `OCI_UNIFORM_PART_SIZE` in OCI ownership and canonical Rust tests. Preserve only the temporary `lib.rs -> r2::chunk_uniform_parts` dependency for the still-exported Python helper until t02 removes its registration/stub. t02 must not need to edit oci.rs. The orphan r2.rs file is deleted by t03, together with durable source-link cleanup.
 
 ## Edge Cases & Error Semantics
 
@@ -79,10 +81,10 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 
 ## Verification
 
-Record the failing public regression before implementation and the passing result after. Execute each command below in this worktree; the storage target directory is reserved and shared SHM tests use the host lock.
+Characterize the existing OCI accumulator at the public multipart seam before the move and run the same assertions after it. OCI already requires uniform 8 MiB parts; this ownership transfer preserves behavior and does not invent a failing regression. Execute each command below in this worktree; the storage target directory is reserved and shared SHM tests use the host lock.
 
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo fmt --manifest-path src/rs/Cargo.toml --all --check`
-- `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --test storage_engine_tests`
+- `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --test storage_engine_tests`
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets -- -D warnings`
 
 Record exact exit statuses, native build checkpoint and any platform limitation in verification_evidence. Review closure uses these results, never planning-only structural validation.
@@ -96,6 +98,6 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Notes & Discoveries
 
-The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+Existing OCI `requires_uniform_part_size` already selects 8 MiB accumulation. Record green-before and green-after evidence for the behavior-preserving ownership transfer; do not claim a Red result. The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `src/rs/vertebra-storage/src/store.rs` — Current repository source for this task.

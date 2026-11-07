@@ -7,7 +7,7 @@ description: Delete the unreferenced native R2 module
 status: draft
 state: pending
 priority: P1
-verification_strategy: regression_tdd
+verification_strategy: characterization
 depends_on:
 - storage-completeness:ch08:t02
 read_set:
@@ -16,8 +16,10 @@ read_set:
 - src/rs/vertebra-storage/src/lib.rs
 - src/rs/vertebra-storage/src/store.rs
 - src/rs/vertebra-storage/src/oci.rs
+- .agents/bundles/knowledge/domains/storage/object-storage.md
 files:
 - src/rs/vertebra-storage/src/r2.rs
+- .agents/bundles/knowledge/domains/storage/object-storage.md
 tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 110
@@ -37,7 +39,7 @@ updated_at: '2026-11-07T12:00:00Z'
 commit: null
 sources:
 - id: implementation
-  resource: src/rs/vertebra-storage/src/r2.rs
+  resource: src/rs/vertebra-storage/src/oci.rs
   title: Owned implementation seam
 tags:
 - storage
@@ -57,10 +59,11 @@ Delete the unreferenced native R2 module. Execute one bounded worksheet and crea
 - `src/rs/vertebra-storage/src/lib.rs` — collaborating contract.
 - `src/rs/vertebra-storage/src/store.rs` — collaborating contract.
 - `src/rs/vertebra-storage/src/oci.rs` — collaborating contract.
+- `.agents/bundles/knowledge/domains/storage/object-storage.md` — owned durable provenance and relative source links.
 
 ## Symbol & Signature Contracts
 
-Delete `src/rs/vertebra-storage/src/r2.rs` only after native module/import/helper withdrawal. Verify no source imports, registration or storage plan provenance points to r2.rs, and keep OCI accumulator in oci.rs. Do not remove generic S3 endpoint or signing support. The production file count includes this deletion.
+Delete `src/rs/vertebra-storage/src/r2.rs` only after native module/import/helper withdrawal. Verify no active module import/registration or durable knowledge source link points to r2.rs, and keep OCI accumulator in oci.rs. Update all R2 module links, sources and footnotes in the owned storage knowledge page to the retained OCI implementation in the same change. This worksheet and its predecessor read_set/files fields may retain the deleted path as execution/deletion input until flow archive; they are not live source links. Their sources/footnotes instead cite retained OCI ownership. Do not remove generic S3 endpoint or signing support. The production file count includes this deletion.
 
 Caller → seam → collaborator: public sync/async object-store or adapter operation → owned symbols above → existing native engine/provider or upstream framework contract. Preserve public APIs outside this task.
 
@@ -79,13 +82,27 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 
 ## Verification
 
-Record the failing public regression before implementation and the passing result after. Execute each command below in this worktree; the storage target directory is reserved and shared SHM tests use the host lock.
+Record the passing native build/test baseline before this behavior-preserving dead-module deletion, then verify the same gates afterward. Do not manufacture a failing source/file-existence test; public R2 withdrawal regressions already belong to t02. Execute each command below in this worktree; the storage target directory is reserved and shared SHM tests use the host lock.
 
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo fmt --manifest-path src/rs/Cargo.toml --all --check`
-- `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --test storage_engine_tests`
+- `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --test storage_engine_tests`
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets -- -D warnings`
 
 Record exact exit statuses, native build checkpoint and any platform limitation in verification_evidence. Review closure uses these results, never planning-only structural validation.
+
+Also execute `uv run --no-sync python -m tools.scripts.review_setup validate` for native bundle/privacy validation, then validate every relative source link in the owned knowledge page:
+
+```bash
+uv run --no-sync python - <<'PYLINK'
+from pathlib import Path
+import re
+page = Path(".agents/bundles/knowledge/domains/storage/object-storage.md")
+for target in re.findall(r"\]\(([^)]+)\)", page.read_text()):
+    target = target.split("#", 1)[0]
+    if target and "://" not in target:
+        assert (page.parent / target).resolve().exists(), target
+PYLINK
+```
 
 ## Acceptance Criteria
 
@@ -98,4 +115,4 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
-[^implementation]: `src/rs/vertebra-storage/src/r2.rs` — Current repository source for this task.
+[^implementation]: `src/rs/vertebra-storage/src/oci.rs` — Current repository source for this task.

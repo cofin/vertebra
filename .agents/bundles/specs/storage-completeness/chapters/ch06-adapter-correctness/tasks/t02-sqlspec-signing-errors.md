@@ -4,7 +4,7 @@ id: storage-completeness:ch06:t02
 chapter_id: ch06-adapter-correctness
 title: Propagate configured signing validation failures
 description: Propagate configured signing validation failures
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: regression_tdd
@@ -20,7 +20,7 @@ tests:
 - src/py/tests/unit/extensions/test_data_storage_integrations.py
 estimated_loc: 75
 plan_revision: 4
-plan_commit: null
+plan_commit: 88d5068031ba82078f2f7c4999cdf3cfd77c66be
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -74,7 +74,7 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 | Configured validation | MemoryConfig with explicit HMAC signing; sign_sync/sign_async("key", expires_in=0) | ValueError propagates through GET and upload paths |
 | Unsupported backend | Unsigned explicit MemoryConfig; scalar and list sign calls | NotImplementedError with backend context |
 | Successful configured HMAC | Positive expiry and for_upload=True/False | Valid signed GET/PUT URL; scalar/list shape retained |
-| Configured native provider failure | A real `SyncObjectStore("memory://", signing=SigningConfig(provider="gcs", bucket="unit", service_account_email="signer@example.test", access_token="mock-oauth-token", iam_endpoint=local_server))`; local IAM responder returns HTTP 503 and body b"signing-unavailable" | Public `sign_sync` and `sign_async`, each with `for_upload=False/True`, preserve exact `RuntimeError` type (not its `NotImplementedError` subclass), with native HTTP 503 and the fixed responder body in the message. No external credentials or mocked SUT/store methods. |
+| Configured native provider failure | A real `SyncObjectStore("memory://", signing=SigningConfig(provider="gcs", bucket="unit", service_account_email="signer@example.test", access_token="mock-oauth-token", iam_endpoint=local_server))`; local IAM responder returns HTTP 503 and body b"signing-unavailable" | Public `sign_sync` and `sign_async`, each with `for_upload=False/True`, preserve exact `RuntimeError` type (not its `NotImplementedError` subclass), with the unchanged native message exactly "IAM signBlob returned HTTP 503 Service Unavailable"; native signing does not include the responder body. No external credentials or mocked SUT/store methods. |
 
 ## Verification
 

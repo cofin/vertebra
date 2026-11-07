@@ -29,7 +29,7 @@ chapters:
 - ch18-arrow-async-bridge
 - ch19-sqlspec-arrow-streaming
 current_chapter: ch05-key-identity-and-preconditions
-current_task: storage-completeness:ch05:t02
+current_task: null
 parent_prd: native-data-platform
 research:
 - ../native-data-platform/research/gap-analysis_20261103.md
@@ -249,7 +249,7 @@ Progress: `[0/9 files documented]` for final repair/HTTP/Arrow acceptance. Exist
 - [ ] ch03-litestar-and-range-streaming — Chapter 03: HTTP Range Streaming and Litestar Store/Static Integration (chapters/ch03-litestar-and-range-streaming/spec.md)
 - [ ] ch04-arrow-shm-and-docs — Chapter 04: Strict Arrow SHM Allocation, Parquet Streaming, and OKF Sync (chapters/ch04-arrow-shm-and-docs/spec.md)
 - [~] ch05-key-identity-and-preconditions — Raw Object Identity and Typed Conditional Conflicts (chapters/ch05-key-identity-and-preconditions/spec.md)
-- [ ] ch06-adapter-correctness — Django Collision Length and SQLSpec Signing Errors (chapters/ch06-adapter-correctness/spec.md)
+- [~] ch06-adapter-correctness — Django Collision Length and SQLSpec Signing Errors (chapters/ch06-adapter-correctness/spec.md)
 - [ ] ch07-remove-r2-python — Withdraw First-Class R2 Python APIs (chapters/ch07-remove-r2-python/spec.md)
 - [ ] ch08-remove-r2-native — Move OCI Chunk Ownership and Remove Native R2 (chapters/ch08-remove-r2-native/spec.md)
 - [ ] ch09-r2-docs-and-knowledge — Synchronize Supported Providers and Native Guarantees (chapters/ch09-r2-docs-and-knowledge/spec.md)

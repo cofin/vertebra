@@ -93,8 +93,8 @@ Eliminate two silent data-plane fallbacks: (1) in `src/rs/vertebra-db/src/arrow_
 
 ## Verification
 
-- Initial Red baseline: `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db arrow_shm && uv run --no-sync pytest src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py -q`
-- Final Green + Clippy + lint gate: `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-db --all-targets -- -D warnings && uv run --no-sync ruff check src/py/vertebra/db/arrow.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py && uv run --no-sync mypy src/py/vertebra/db/arrow.py && uv run --no-sync pytest src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py -q`
+- Initial Red baseline: `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db arrow_shm && uv run --no-sync pytest src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py -q`
+- Final Green + Clippy + lint gate: `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-db --all-targets -- -D warnings && uv run --no-sync ruff check src/py/vertebra/db/arrow.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py && uv run --no-sync mypy src/py/vertebra/db/arrow.py && uv run --no-sync pytest src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py -q`
 
 ## Acceptance Criteria
 

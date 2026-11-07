@@ -69,6 +69,8 @@ Caller → seam → collaborator: public storage/framework calls → owned deep 
 | Deep owned boundary with exact provider semantics | Chosen: hides credentials, staging and concurrency while preserving configured SDK behavior. |
 | Generic head-then-write, Python lock, copy-create publication or blanket exception conversion | Rejected: loses atomicity, update results, metadata or error identity. |
 
+Native removal tasks keep intermediate builds coherent: t01 removes every OCI-to-R2 reexport and converts helper tests; t02 withdraws the last lib.rs helper/module registration with its stub; t03 deletes the now-unreferenced source and updates durable storage knowledge links to OCI ownership.
+
 ## 3. Documentation & OKF Knowledge Plan
 
 Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bundles/knowledge/domains/storage/object-storage.md` by ch09:t03 and user guides by ch04:t03; per-task tests are executable documentation. No separate untracked documentation obligation remains.

@@ -5,7 +5,7 @@ chapter_id: ch05-key-identity-and-preconditions
 title: Reject silent key aliasing in facade and adapter qualification
 description: Reject silent key aliasing in facade and adapter qualification
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -27,17 +27,25 @@ estimated_loc: 160
 plan_revision: 4
 plan_commit: 5fe477fa4f6e08bab9278dba3906e7c556ceb3a4
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:public_key_validation
+claimed_at: "2026-11-07T22:06:40Z"
 blocked_reason: null
 unblock_condition: null
-next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+next_step: Complete chapter correctness and fresh quality reviews.
+last_verified_at: "2026-11-07T22:16:14Z"
+last_verified_commit: 8d073a38
+verification_evidence: >-
+  Red: real native public-seam regression selection failed 6, passed 5 before
+  production edits. Green: flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync
+  pytest src/py/tests/unit/storage/test_storage_store.py
+  src/py/tests/unit/extensions/test_data_storage_integrations.py -q --disable-warnings
+  --tb=short exited 0 (50 passed). Ruff check and Ruff format --check on all five
+  owned Python files exited 0. Mypy on all three owned production files exited 0
+  (no issues). git diff --check exited 0. Existing freshly rebuilt native artifacts
+  from c90285cf and 682aaaff were used; no Rust source changed or rebuild required.
 created_at: '2026-11-07T12:00:00Z'
-updated_at: '2026-11-07T12:00:00Z'
-commit: null
+updated_at: "2026-11-07T22:16:14Z"
+commit: 8d073a38
 sources:
 - id: implementation
   resource: src/py/vertebra/storage/_store.py
@@ -95,13 +103,17 @@ Record the failing regression before implementation. Use this task's reserved ta
 
 ## Acceptance Criteria
 
-- [ ] Every matrix row passes at its public seam with existing behavior preserved.
-- [ ] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
-- [ ] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
-- [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
+- [x] Every matrix row passes at its public seam with existing behavior preserved.
+- [x] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
+- [x] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
+- [x] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
 
-The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+Revision 4 is independently approved. The public-seam Red selection (`-k 'ambiguous_keys or raw_identity or preserve_raw_keys or qualified_paths_keep'`) reports 6 failed and 5 passed against the unchanged production baseline. Failures expose whitespace and slash aliases, ambiguous prefixes, adapter aliases, and an accepted mismatched file authority.
+
+The facade and both adapters share raw relative key and prefix validation. SQLSpec classifies matching URI/absolute local qualifications before validating residual keys; literal percent text and Unicode remain unchanged. URI-qualified glob `?` remains a wildcard rather than being lost as a URL query. The adjacent `is_path_sync` prefix probe uses the same validated qualification instead of stripping leading slashes.
+
+The canonical two-module Green run reports 50 passed. Regressions cover actual Alchemy FileObject saves and SQLSpec writes through sync and async native stores, exact listed identities, root/trailing-slash prefixes, matching qualified file paths, canonical cloud scheme aliases, mismatched authorities and schemes, and nonmutation with either invalid copy/move operand. Ruff, formatting, source Mypy, and diff checks pass. Implementation stays within three production files (59 added production lines); no public signatures or native code change. The parent coordinator owns the signed commit and task completion receipt.
 
 [^implementation]: `src/py/vertebra/storage/_store.py` — Current repository source for this task.

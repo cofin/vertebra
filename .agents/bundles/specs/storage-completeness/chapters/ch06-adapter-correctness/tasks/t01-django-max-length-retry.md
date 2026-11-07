@@ -4,8 +4,8 @@ id: storage-completeness:ch06:t01
 chapter_id: ch06-adapter-correctness
 title: Retain max_length across real Django create collisions
 description: Retain max_length across real Django create collisions
-status: draft
-state: pending
+status: stable
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on: []
@@ -20,19 +20,23 @@ tests:
 - src/py/tests/unit/extensions/test_data_storage_integrations.py
 estimated_loc: 100
 plan_revision: 4
-plan_commit: null
+plan_commit: 88d5068031ba82078f2f7c4999cdf3cfd77c66be
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:django_retry_repair
+claimed_at: "2026-11-07T22:11:17Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-07T22:24:54Z"
+last_verified_commit: cd7e5563
+verification_evidence: >-
+  Red 9 failed and 1 passed before production edits. Green 10 focused retry regressions
+  and 47 full Django/data integration tests. Ruff, format, source Mypy and diff checks
+  exited 0. Combined current-source checkpoint across storage_store, data integrations
+  and Django passed all 74 tests under the shared SHM lock. Source signed cd7e5563.
 created_at: '2026-11-07T12:00:00Z'
-updated_at: '2026-11-07T12:00:00Z'
-commit: null
+updated_at: "2026-11-07T22:11:17Z"
+commit: cd7e5563
 sources:
 - id: implementation
   resource: src/py/vertebra/extensions/django/storage.py
@@ -87,13 +91,15 @@ Record the failing regression before implementation. Use this task's reserved ta
 
 ## Acceptance Criteria
 
-- [ ] Every matrix row passes at its public seam with existing behavior preserved.
-- [ ] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
-- [ ] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
-- [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
+- [x] Every matrix row passes at its public seam with existing behavior preserved.
+- [x] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
+- [x] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
+- [x] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
 
-The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+- [2026-11-07 22:16] Red: 9 failed and 1 passed using real native competing writes after input consumption. Green: all 10 new retry regressions pass; full Django/data integration modules pass 47 tests. Source Mypy, Ruff, formatting and diff checks pass. Public save owns per-call length-preserving retries; non-replayable input and overwrite-mode producer conflicts propagate FileExistsError without an empty alternative. No native publication atomicity claim is made.
+
+Revision 4 is independently approved. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `src/py/vertebra/extensions/django/storage.py` — Current repository source for this task.

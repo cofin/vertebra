@@ -4,14 +4,14 @@ parent_flow: storage-completeness
 chapter_id: ch06-adapter-correctness
 title: Django Collision Length and SQLSpec Signing Errors
 description: Django Collision Length and SQLSpec Signing Errors
-status: draft
-state: planned
+status: stable
+state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: null
+current_task: storage-completeness:ch06:t02
 plan_revision: 4
-plan_commit: null
+plan_commit: 88d5068031ba82078f2f7c4999cdf3cfd77c66be
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
 last_reviewed_commit: null
@@ -65,7 +65,7 @@ Caller → seam → collaborator: public storage/framework calls → owned deep 
 | Deep owned boundary with exact provider semantics | Chosen: hides credentials, staging and concurrency while preserving configured SDK behavior. |
 | Generic head-then-write, Python lock, copy-create publication or blanket exception conversion | Rejected: loses atomicity, update results, metadata or error identity. |
 
-The collision regression covers consumed seekable files on both sync and async paths, explicit rewind, impossible maximum lengths, and bounded same-instance interleavings. Signing tests cover both native HMAC validation `ValueError` and a real local IAM HTTP 503 `RuntimeError` through GET and upload methods; exact exception types distinguish provider failures from unsupported signing.
+The collision regression covers consumed seekable files on both sync and async paths, explicit rewind, impossible maximum lengths, and bounded same-instance interleavings. Signing tests cover both native HMAC validation `ValueError` and a real local IAM HTTP 503 `RuntimeError` with the existing native status message through GET and upload methods; exact exception types distinguish provider failures from unsupported signing.
 
 ## 3. Documentation & OKF Knowledge Plan
 
@@ -80,15 +80,15 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 
 ## 5. Implementation Plan
 
-- [ ] storage-completeness:ch06:t01 — Retain max_length across real Django create collisions (tasks/t01-django-max-length-retry.md)
+- [x] [cd7e5563] storage-completeness:ch06:t01 — Retain max_length across real Django create collisions (tasks/t01-django-max-length-retry.md)
 - [ ] storage-completeness:ch06:t02 — Propagate configured signing validation failures (tasks/t02-sqlspec-signing-errors.md)
 
 **Chapter Recovery Checkpoint:** run every task's focused verification, then correctness review and a fresh quality review before closing this chapter. `/flow:implement storage-completeness ch06-adapter-correctness` executes its ready worksheet.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Baseline: `5fe477fa`; implementation is pending and cold plan review is required.
-- Remaining: all 2 tasks above; dependent tasks remain ordered by depends_on.
+- Plan revision 4 is independently approved; completed task receipts match signed source commits.
+- Django retry repair is implemented and verified; SQLSpec signing error preservation remains ready.
 - Documentation: `[0/1 files documented]`, owned by the explicit consolidation tasks.
 - Reclosure of ch01 and downstream acceptance waits for native repair gates; this chapter never depends on that reclosure.
 
