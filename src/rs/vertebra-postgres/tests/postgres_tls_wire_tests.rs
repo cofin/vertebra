@@ -363,18 +363,42 @@ async fn mtls_requires_the_valid_client_identity() {
 
 #[tokio::test]
 async fn sslresponse_and_tls_share_the_reserved_deadline() {
+    async fn peer_stage(
+        mut reached: tokio::sync::oneshot::Receiver<()>,
+        client: &tokio::task::JoinHandle<Result<PendingSession, PostgresError>>,
+    ) {
+        loop {
+            match reached.try_recv() {
+                Ok(()) => return,
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    assert!(!client.is_finished(), "client stopped before peer barrier");
+                    // Keep socket I/O runnable without auto-advancing the paused clock.
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("peer barrier failed: {error}"),
+            }
+        }
+    }
+
     for after_s in [false, true] {
         let (listener, mut config) = support::listener().await;
         config.sslmode = TlsMode::Require;
         config.connect_timeout = Duration::from_millis(250);
         let handle = SessionHandle::new(config);
+        tokio::time::pause();
+        let reserved_at = Instant::now();
         let BeginConnect::Attempt(attempt) = handle.begin_connect().unwrap() else {
             panic!()
         };
+        let (request_seen, request_received) = tokio::sync::oneshot::channel();
+        let (release_response, response_allowed) = tokio::sync::oneshot::channel();
+        let (stage_seen, stage_received) = tokio::sync::oneshot::channel();
+        let (release_eof, eof_allowed) = tokio::sync::oneshot::channel();
         let peer = tokio::spawn(async move {
             let mut stream = ssl_request(&listener).await;
+            request_seen.send(()).unwrap();
+            response_allowed.await.unwrap();
             if after_s {
-                tokio::time::sleep(Duration::from_millis(100)).await;
                 stream.write_all(b"S").await.unwrap();
                 let mut hello = [0; 5];
                 stream.read_exact(&mut hello).await.unwrap();
@@ -382,16 +406,31 @@ async fn sslresponse_and_tls_share_the_reserved_deadline() {
                 let mut rest = vec![0; u16::from_be_bytes([hello[3], hello[4]]) as usize];
                 stream.read_exact(&mut rest).await.unwrap();
             }
+            stage_seen.send(()).unwrap();
+            eof_allowed.await.unwrap();
             support::eof(&mut stream).await;
         });
-        tokio::time::sleep(Duration::from_millis(75)).await;
-        let start = Instant::now();
+        tokio::time::advance(Duration::from_millis(75)).await;
+        let client = tokio::spawn(attempt.run());
+        peer_stage(request_received, &client).await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        release_response.send(()).unwrap();
+        peer_stage(stage_received, &client).await;
+        tokio::time::advance(Duration::from_millis(74)).await;
+        tokio::task::yield_now().await;
+        assert!(!client.is_finished());
+        // Tokio timers round deadlines to the next millisecond.
+        tokio::time::advance(Duration::from_millis(2)).await;
         assert!(matches!(
-            attempt.run().await,
+            client.await.unwrap(),
             Err(PostgresError::Transport(_))
         ));
-        assert!(start.elapsed() < Duration::from_millis(225));
+        assert_eq!(Instant::now(), reserved_at + Duration::from_millis(251));
         assert!(handle.is_closed());
+        assert!(handle.parameters().is_empty());
+        assert!(handle.begin_connect().is_err());
+        tokio::time::resume();
+        release_eof.send(()).unwrap();
         peer.await.unwrap();
     }
 }

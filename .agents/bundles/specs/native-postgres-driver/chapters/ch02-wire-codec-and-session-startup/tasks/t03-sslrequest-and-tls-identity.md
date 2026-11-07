@@ -34,19 +34,21 @@ claimed_at: "2026-11-07T23:33:49Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: "2026-11-07T23:01:17Z"
-last_verified_commit: be425286
+last_verified_at: "2026-11-07T23:36:44Z"
+last_verified_commit: null
 verification_evidence:
   red: 'Canonical enabled_modes_upgrade_before_trust_startup test exits 101 with UnsupportedFeature("only direct plaintext TCP is available") before integration.'
   focused: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_tls_wire_tests exits 0: 10 real rcgen/tokio-rustls peer tests cover the complete TLS matrix."
-  aggregate: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres exits 0 under the shared SHM test lock: 9 codec, 10 TLS, and 20 existing wire/config/error tests; zero failures or ignores."
-  lint: "cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings exits 0 without lint allowances."
+  aggregate: "flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked exits 0: 49 tests (9 codec, 8 auth, 10 TLS, 22 wire/config/error), zero failures or ignores."
+  lint: "cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings exits 0 without lint allowances."
   formatting: "cargo fmt --manifest-path src/rs/Cargo.toml -p vertebra-postgres -- --check and git diff --check exit 0."
-  review_privacy: "UV_NO_SYNC=1 make review-check exits 0."
+  review_privacy: "UV_NO_SYNC=1 .venv/bin/python -m tools.scripts.review_setup validate exits 0."
   environment: "UV_NO_SYNC=1; PYO3_PYTHON=${PWD}/.venv/bin/python; dedicated Cargo target; aggregate tests acquire the shared SHM test lock."
-  checkpoint: "Completed source receipt: be425286. Chapter checkpoint 7bf8e2e3 passes all 47 Rust tests and locked all-target Clippy with -D warnings."
+  deadline_characterization: "Original sslresponse_and_tls_share_the_reserved_deadline passes before replacement. The paused-clock replacement passes 20/20 independent focused runs, preserving all 10 TLS cases."
+  deadline_boundary: "After 75 ms reserved before run and 100 ms waiting for SSLResponse, both SSLResponse-stall and accepted-S/TLS-stall cases remain pending at virtual 249 ms and fail Transport at virtual 251 ms (Tokio timer rounding); the clock equals exactly the commanded advance, handle is terminal, and the actual peer observes EOF after clock resumption."
+  checkpoint: "The test-only deadline remediation is verified with the existing native source; source and completion receipt binding remain with the coordinator."
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T23:33:49Z"
+updated_at: "2026-11-07T23:36:44Z"
 commit: null
 sources:
   - id: rs-upgrade-tls
@@ -142,7 +144,7 @@ Commit as `feat(postgres): negotiate protocol TLS with shared transport`.
 
 - `DialedTransport { stream, tls_server_end_point }` reserves the X.509 endpoint-binding seam for `ch03:t02`; its binding field remains `None` until that chapter extracts the verified peer digest from `TransportStream::TlsTcp`.
 - Generic startup/send/EOF peer helpers accept both TCP and TLS streams. The publication-deadline test releases its peer only after clock resumption so its EOF watchdog cannot expire during an intentional clock advance.
-- The TLS peer matrix verifies enabled modes, refusal, identity policy, client mTLS, deadlines, and terminal handshake failure over actual TCP/TLS streams.
+- The TLS peer matrix verifies enabled modes, refusal, identity policy, client mTLS, deadlines, and terminal handshake failure over actual TCP/TLS streams. Deadline cases use paused Tokio time and explicit SSLRequest/ClientHello/EOF barriers; a runnable barrier waiter prevents automatic clock advancement during socket I/O, and EOF watchdogs start only after clock resumption.
 
 [^rs-upgrade-tls]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared `upgrade_tls` and `ring` TLS verifier.
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Direct TLS mode and SNI override contracts.
