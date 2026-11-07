@@ -5,7 +5,7 @@ chapter_id: ch02-wire-codec-and-session-startup
 title: Authenticate cleartext password and MD5 startup exchanges
 description: Implement crate-private auth::Authentication state machine handling trust, cleartext password, and salted MD5 challenges via postgres-protocol 0.6.12 with strict phase ordering and secret redaction.
 status: stable
-state: completed
+state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -46,8 +46,8 @@ verification_evidence:
   environment: "UV_NO_SYNC=1; PYO3_PYTHON=${PWD}/.venv/bin/python; dedicated Cargo target; aggregate tests acquire the shared SHM test lock."
   checkpoint: "Completed source receipt: 67421061. Chapter checkpoint 7bf8e2e3 passes all 47 Rust tests and locked all-target Clippy with -D warnings."
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T23:16:07Z"
-commit: "67421061"
+updated_at: "2026-11-07T23:31:15Z"
+commit: null
 sources:
   - id: proto-research
     resource: .agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md

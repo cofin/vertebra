@@ -5,7 +5,7 @@ chapter_id: ch02-wire-codec-and-session-startup
 title: Establish authenticated trust sessions with SessionHandle and PendingSession publication
 description: Implement PostgresConnection, SessionHandle, ConnectAttempt, and PendingSession enforcing strict Protocol 3.0 startup ordering, total deadline budgets, cancellation rollback, and bounded Terminate close.
 status: stable
-state: completed
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -27,25 +27,25 @@ tests:
 estimated_loc: 240
 plan_revision: 6
 plan_commit: 8833b064
-state_revision: 1
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: agent:ch02-notice-remediation
+claimed_at: "2026-11-07T23:31:03.229411+00:00"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: "2026-11-07T22:49:00Z"
+last_verified_at: "2026-11-07T23:32:39.944985+00:00"
 last_verified_commit: b19e402d
 verification_evidence:
-  red: "Canonical wire test exits 101 with unresolved _postgres::session before implementation."
-  focused: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_wire_tests exits 0: 20 tests, including 13 new lifecycle/wire tests and 7 existing configuration/error tests."
-  aggregate: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres exits 0: 9 codec tests and 20 wire tests; zero failures, ignores, or doctest failures."
-  lint: "cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings exits 0 with all three producer expectations removed."
+  red: "Notice regression exits 101 against the discarded-body implementation: malformed NoticeResponse is accepted; final half-closed peer regression also exits 101 without consumer validation."
+  focused: "Locked canonical wire test suite exits 0: 22 tests, including malformed notice refusal before/after auth with peer EOF and valid notice adoption."
+  aggregate: "flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked exits 0: all 49 tests (9 codec, 8 auth, 10 TLS, 22 wire); zero failures, ignores, or doctest failures."
+  lint: "cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings exits 0."
   formatting: "cargo fmt --manifest-path src/rs/Cargo.toml -p vertebra-postgres -- --check and git diff --check exit 0."
-  review_privacy: "UV_NO_SYNC=1 make review-check exits 0."
+  review_privacy: "UV_NO_SYNC=1 .venv/bin/python -m tools.scripts.review_setup validate exits 0."
   environment: "PYO3_PYTHON=${PWD}/.venv/bin/python; reserved CARGO_TARGET_DIR; Tokio loopback peers and paused clock; no Python network calls."
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-07T23:16:07Z"
-commit: b19e402d
+commit: null
 sources:
   - id: rs-transport
     resource: src/rs/vertebra-db/src/connection.rs::TransportStream
@@ -109,7 +109,7 @@ Implement `PostgresConnection`, `SessionHandle`, `ConnectAttempt`, and `PendingS
     - `pub async fn run(self) -> Result<PendingSession, PostgresError>` driving dial + startup + auth inside a single `tokio::time::timeout_at(self.deadline, ...)`:
       - Accepts direct TCP (`unix_socket.is_none()`, `cloud_sql_instance.is_none()`, `alloydb_instance_uri.is_none()`, `!enable_iam_auth`); TLS policy delegates to `tls::connect` (`ch02:t03`) and trust/password/MD5 authentication delegates to `auth::Authentication` (`ch02:t04`). Unix/cloud/IAM modes return `UnsupportedFeature` until their owning chapters.
       - Startup state machine enforces: (1) exactly one authentication completion before any `ParameterStatus`, `BackendKeyData`, or `ReadyForQuery`; (2) `ParameterStatus` frames recorded in `parameters` (last value wins per key, valid UTF-8); (3) at most one `BackendKeyData`; (4) `ReadyForQuery` status parsed via `TransactionStatus::from_wire_byte(body.status())?` must equal `TransactionStatus::Idle` (`b'I'`) only after `parameters.get("client_encoding") == Some("UTF8")`.
-      - Consumes `NoticeResponse` silently; maps `ErrorResponse` (`S`/`V` severity, `C` SQLSTATE, `M` message, and `(field.type_(), UTF8(field.value_bytes()))` `diagnostics` via `PostgresError::server(...)`) to `PostgresError::Server(ServerError)`.
+      - Exhausts every `NoticeResponse` field through the pinned fallible iterator, validating UTF8, the final terminator, and complete body consumption before silently discarding a valid notice at any startup phase. Invalid notice fields return `Protocol` and close the connection. Maps `ErrorResponse` (`S`/`V` severity, `C` SQLSTATE, `M` message, and `(field.type_(), UTF8(field.value_bytes()))` `diagnostics` via `PostgresError::server(...)`) to `PostgresError::Server(ServerError)`.
   - `impl PendingSession`:
     - `pub fn connection(&self) -> &PostgresConnection` exposes read-only negotiated metadata before adoption; Rust callers inspect backend key, transaction status, parameters, and channel-binding data without taking transport ownership or exposing Python attributes.
     - `pub fn commit(mut self) -> Result<(), PostgresError>`: rechecks `tokio::time::Instant::now() <= self.deadline` (failing `PostgresError::Transport` and rolling back to `Closed` if elapsed), atomically publishes `SessionState::Ready`, and disarms the rollback guard.
@@ -160,6 +160,8 @@ Commit as `feat(postgres): own startup session lifecycle and publication`.
 - [x] Dropping `ConnectAttempt` or uncommitted `PendingSession` rolls `SessionHandle` to `Closed` and closes the underlying socket deterministically across all ten loopback tests (R7).
 
 ## Notes & Discoveries
+
+- Lazy notice bodies require full `ErrorFields` iteration even when discarded; the pinned iterator rejects missing terminators and trailing bytes, and each field value receives checked UTF8 validation. Real TCP regressions cover five malformed payloads before/after authentication plus valid notices at both trust startup phases, with terminal handle state and peer EOF.
 
 - Owned `Arc` configuration/state and armed attempt/pending guards make `tokio::spawn(attempt.run())` and its returned pending connection `Send + 'static`; cancellation and uncommitted adoption drop the socket and close the retained handle.
 - `PendingSession::connection()` exposes retained parameters, backend key, idle status, and read-only TLS binding metadata before publication. The binding remains `None` until chapter 03 extracts the peer digest. Handle parameter snapshots remain empty until commit and survive terminal close.

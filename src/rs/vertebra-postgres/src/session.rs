@@ -340,7 +340,17 @@ async fn startup(
                 }
                 return Ok(conn);
             }
-            Message::NoticeResponse(_) => {}
+            Message::NoticeResponse(body) => {
+                use fallible_iterator::FallibleIterator;
+                let mut fields = body.fields();
+                while let Some(field) = fields
+                    .next()
+                    .map_err(|error| PostgresError::Protocol(error.to_string()))?
+                {
+                    std::str::from_utf8(field.value_bytes())
+                        .map_err(|error| PostgresError::Protocol(error.to_string()))?;
+                }
+            }
             Message::ErrorResponse(body) => return Err(server_error(body)?),
             _ => {
                 return Err(PostgresError::Protocol(

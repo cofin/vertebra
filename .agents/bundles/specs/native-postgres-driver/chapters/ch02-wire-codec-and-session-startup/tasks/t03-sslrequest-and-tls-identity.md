@@ -5,7 +5,7 @@ chapter_id: ch02-wire-codec-and-session-startup
 title: Negotiate PostgreSQL SSLRequest and verify rustls peer TLS identities
 description: Implement tls::connect negotiating the 8-byte PostgreSQL SSLRequest preamble and upgrading via shared TransportStream::upgrade_tls across Disable, Prefer, Require, VerifyCa, and VerifyFull with CA, SNI, and mTLS verification.
 status: stable
-state: completed
+state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -46,8 +46,8 @@ verification_evidence:
   environment: "UV_NO_SYNC=1; PYO3_PYTHON=${PWD}/.venv/bin/python; dedicated Cargo target; aggregate tests acquire the shared SHM test lock."
   checkpoint: "Completed source receipt: be425286. Chapter checkpoint 7bf8e2e3 passes all 47 Rust tests and locked all-target Clippy with -D warnings."
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T23:16:07Z"
-commit: be425286
+updated_at: "2026-11-07T23:31:15Z"
+commit: null
 sources:
   - id: rs-upgrade-tls
     resource: src/rs/vertebra-db/src/connection.rs::TransportStream

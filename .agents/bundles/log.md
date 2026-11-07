@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-07] review-remediation | Native PostgreSQL startup validation
+
+- Cold correctness approves `3364250d..07635dcd` with all 47 tests and locked Clippy passing. Fresh quality review verifies malformed discarded notices, reflected password/MD5-token leakage, and a wall-clock-dependent TLS deadline assertion.
+- Reopen chapter 02 tasks 02–04 under their existing owners for public-session regressions and narrow repairs; retain all 31 chapters and 111 tasks. Task 01 and chapter 01 remain complete. Updated correctness and quality review are required before closure.
+
 ## [2026-11-07] flow-docs-sync | Native PostgreSQL chapter 02 checkpoint
 
 - Completed chapter 02 task receipts bind to `t01=a00c3248`, `t02=b19e402d`, `t03=be425286`, and `t04=67421061`. Exact checkpoint `7bf8e2e3` passes all 47 Rust tests (`9` codec, `8` auth, `10` TLS, `20` wire/config/error) under the shared SHM test lock and locked all-target Clippy with `-D warnings`.

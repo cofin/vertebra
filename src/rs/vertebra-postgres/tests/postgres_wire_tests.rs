@@ -506,6 +506,75 @@ async fn rejected(frames: Vec<u8>) -> PostgresError {
 }
 
 #[tokio::test]
+async fn startup_rejects_malformed_notices() {
+    for body in [
+        b"SNOTICE\0Mnotice\0".as_slice(),
+        b"SNOTICE\0Mnotice\0\0trailing",
+        b"SNOTICE\0M\xff\0\0",
+        b"SNOTICE\0Munterminated",
+        b"",
+    ] {
+        for after_auth in [false, true] {
+            let auth = support::frame(b'R', &[0; 4]);
+            let notice = support::frame(b'N', body);
+            let frames = if after_auth {
+                [auth, notice].concat()
+            } else {
+                notice
+            };
+            let (listener, config) = support::listener().await;
+            let peer = tokio::spawn(async move {
+                let mut stream = support::accept(listener).await;
+                support::send(&mut stream, &frames).await;
+                tokio::io::AsyncWriteExt::shutdown(&mut stream)
+                    .await
+                    .unwrap();
+                support::eof(&mut stream).await;
+            });
+            let handle = SessionHandle::new(config);
+            assert!(matches!(
+                attempt(&handle).run().await,
+                Err(PostgresError::Protocol(_))
+            ));
+            assert!(handle.is_closed());
+            assert!(handle.parameters().is_empty());
+            assert!(handle.begin_connect().is_err());
+            peer.await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn startup_accepts_valid_notices_before_and_after_authentication() {
+    let (listener, config) = support::listener().await;
+    let peer = tokio::spawn(async move {
+        let mut stream = support::accept(listener).await;
+        let notice = support::frame(b'N', b"SNOTICE\0Mnotice\0Ddetail\0\0");
+        support::send(
+            &mut stream,
+            &[
+                notice.clone(),
+                support::frame(b'R', &[0; 4]),
+                notice.clone(),
+                support::parameter("client_encoding", "UTF8"),
+                notice,
+                support::frame(b'Z', b"I"),
+            ]
+            .concat(),
+        )
+        .await;
+        support::eof(&mut stream).await;
+    });
+    let handle = SessionHandle::new(config);
+    let pending = attempt(&handle).run().await.unwrap();
+    pending.commit().unwrap();
+    assert!(!handle.is_closed());
+    assert_eq!(handle.parameters()["client_encoding"], "UTF8");
+    drop(handle);
+    peer.await.unwrap();
+}
+
+#[tokio::test]
 async fn startup_requires_auth_utf8_idle() {
     let auth = support::frame(b'R', &[0; 4]);
     let utf8 = support::parameter("client_encoding", "UTF8");
