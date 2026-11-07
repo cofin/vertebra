@@ -5,7 +5,7 @@ chapter_id: ch02-orm-and-sql-storage-contracts
 title: Complete fail-closed SQLSpec ObjectStoreProtocol over SyncObjectStore and AsyncObjectStore
 description: Remove implicit memory:// defaults in vertebra.extensions.sqlspec.storage.ObjectStoreBackend and implement full sync/async SQLSpec ObjectStoreProtocol streaming, pagination, rename, and presigning methods.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -29,12 +29,12 @@ claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-07T20:10:17Z"
+last_verified_commit: dd3c9c08
+verification_evidence: "Red: omitted URI/conditional writes/prefix traversal fail; Green: focused SQLSpec 9 passed, full integration module 16 passed; mypy source, Ruff check/format, diff check exit 0."
 created_at: "2026-11-07T04:15:00Z"
 updated_at: "2026-11-07T20:00:00Z"
-commit: null
+commit: dd3c9c08
 sources:
   - id: sqlspec-storage-mod
     resource: src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend
@@ -107,11 +107,13 @@ Canonical module: `src/py/tests/unit/extensions/test_data_storage_integrations.p
 
 ## Acceptance Criteria
 
-- [ ] `ObjectStoreBackend` fails closed on omitted/empty URI and conforms to SQLSpec `ObjectStoreProtocol` across sync and async operations (R3, R4).
-- [ ] `build_duckdb_gcs_secret_sql` remains intact for `native-duckdb-driver` (R4).
-- [ ] Zero inline `#` comments in touched Python files.
+- [x] `ObjectStoreBackend` fails closed on omitted/empty URI and conforms to SQLSpec `ObjectStoreProtocol` across sync and async operations (R3, R4).
+- [x] `build_duckdb_gcs_secret_sql` remains intact for `native-duckdb-driver` (R4).
+- [x] Zero inline `#` comments in touched Python files.
 
 ## Notes & Discoveries
+
+- Native streaming/page/readable-file extensions, conditional puts, fail-closed construction, shared-engine lazy companions, and native rename pass focused and full integration tests at `dd3c9c08`; existing Arrow and DuckDB helper behavior remains green.
 
 - Installed `sqlspec.protocols::ObjectStoreProtocol` uses `*_sync` exclusively and requires `NotImplementedError` for unsupported URL signing. Streaming/page/open additions are Vertebra extensions rather than upstream protocol members; the existing focused baseline passes (`2 passed`, exit `0`).
 

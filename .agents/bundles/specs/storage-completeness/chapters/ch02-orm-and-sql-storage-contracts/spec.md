@@ -5,12 +5,12 @@ chapter_id: ch02-orm-and-sql-storage-contracts
 title: "Chapter 02: SQLSpec, Advanced Alchemy, and Django Storage Contracts"
 description: Implement fail-closed SQLSpec ObjectStoreProtocol, Advanced Alchemy StorageBackend registration without monkeypatching, and @deconstructible Django Storage subclass over SyncObjectStore and AsyncObjectStore.
 status: stable
-state: planned
+state: active
 planning_status: complete
 depends_on_chapters:
   - ch01-native-engine-and-auth
 replan_trigger: null
-current_task: "storage-completeness:ch02:t01"
+current_task: "storage-completeness:ch02:t02"
 plan_revision: 3
 plan_commit: 0acdf576
 state_revision: 0
@@ -105,7 +105,7 @@ Progress: `[0/0 files documented in ch02]` (documented in `ch04:t03` across `doc
 
 ## 5. Implementation Plan
 
-- [ ] storage-completeness:ch02:t01 — Complete fail-closed SQLSpec ObjectStoreProtocol over SyncObjectStore and AsyncObjectStore (tasks/t01-sqlspec-object-store-protocol.md)
+- [x] [dd3c9c08] storage-completeness:ch02:t01 — Complete fail-closed SQLSpec ObjectStoreProtocol over SyncObjectStore and AsyncObjectStore (tasks/t01-sqlspec-object-store-protocol.md)
 - [ ] storage-completeness:ch02:t02 — Remove storages.get monkeypatch and harden Advanced Alchemy StorageBackend (tasks/t02-advanced-alchemy-storage-backend.md)
 - [ ] storage-completeness:ch02:t03 — Subclass Django Storage (@deconstructible) with File handles and full metadata contract (tasks/t03-django-deconstructible-storage.md)
 
@@ -114,7 +114,8 @@ Progress: `[0/0 files documented in ch02]` (documented in `ch04:t03` across `doc
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Baseline**: `HEAD @ cdb978d3`; `depends_on_chapters: [ch01-native-engine-and-auth]`, `state: planned`.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
+- **Verified Task**: `t01` completes the SQLSpec protocol and native extensions at `dd3c9c08`.
+- **Remaining Tasks in Chapter**: `t02`, `t03` (`2/3` pending).
 - **Active Invariants**: Zero `asyncio.to_thread` in `extensions/alchemy/storage.py`; zero `storages.get` monkeypatching; `build_duckdb_gcs_secret_sql` preserved intact.
 
 [^sqlspec-storage]: `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` — SQLSpec object storage adapter.

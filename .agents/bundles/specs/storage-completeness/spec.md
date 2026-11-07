@@ -12,7 +12,7 @@ chapters:
   - ch03-litestar-and-range-streaming
   - ch04-arrow-shm-and-docs
 current_chapter: ch02-orm-and-sql-storage-contracts
-current_task: "storage-completeness:ch02:t01"
+current_task: "storage-completeness:ch02:t02"
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/gap-analysis_20261103.md
@@ -180,7 +180,7 @@ Progress: `[1/3 files documented]` (`object-storage.md` updated in `ch01`; user 
 ## 5. Implementation Plan
 
 - [x] [dc2c2053] ch01-native-engine-and-auth — Native Rust Storage Engine, GCP Auth Unification, and Fail-Closed Facade (chapters/ch01-native-engine-and-auth/spec.md)
-- [ ] ch02-orm-and-sql-storage-contracts — SQLSpec, Advanced Alchemy, and Django Storage Contracts (chapters/ch02-orm-and-sql-storage-contracts/spec.md)
+- [~] ch02-orm-and-sql-storage-contracts — SQLSpec, Advanced Alchemy, and Django Storage Contracts (chapters/ch02-orm-and-sql-storage-contracts/spec.md)
 - [ ] ch03-litestar-and-range-streaming — HTTP Range Streaming and Litestar Store/Static Integration (chapters/ch03-litestar-and-range-streaming/spec.md)
 - [ ] ch04-arrow-shm-and-docs — Strict Arrow SHM Allocation, Parquet Streaming, and OKF Sync (chapters/ch04-arrow-shm-and-docs/spec.md)
 
@@ -189,7 +189,7 @@ Progress: `[1/3 files documented]` (`object-storage.md` updated in `ch01`; user 
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Baseline**: `HEAD @ 0acdf576` on `feat/storage-updates` above `main @ 077a3fe9`; `plan_revision: 3`, `state: active`; `ch01-native-engine-and-auth` closed and approved by `@code-reviewer` and `@quality-reviewer` across `1bb622a7..dc2c2053`.
-- **Active Chapter & Next Task**: `ch02-orm-and-sql-storage-contracts`, next task `storage-completeness:ch02:t01` (`ch02`–`ch04` pending, `8/12` tasks remaining).
+- **Active Chapter & Next Task**: `ch02-orm-and-sql-storage-contracts`, next task `storage-completeness:ch02:t02` (`ch02`–`ch04` pending, `7/12` tasks remaining).
 - **Documentation & OKF Status**: `[1/3 files documented]` (`object-storage.md` synchronized in `ch01`; user guides scheduled in `storage-completeness:ch04:t03`).
 - **Active Invariants**: Zero `asyncio.to_thread` in `src/py/vertebra/storage/_store.py`; lazy `import_optional("vertebra._storage")` at construction time; `mypy.stubtest vertebra._storage` green after every FFI change.
 
