@@ -9,7 +9,7 @@ state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: storage-completeness:ch08:t01
+current_task: storage-completeness:ch08:t02
 plan_revision: 4
 plan_commit: ddfb11f2
 state_revision: 0
@@ -85,7 +85,7 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 
 ## 5. Implementation Plan
 
-- [~] storage-completeness:ch08:t01 — Transfer uniform multipart accumulation into OCI ownership (tasks/t01-oci-accumulator-ownership.md)
+- [x] [2e343bc3] storage-completeness:ch08:t01 — Transfer uniform multipart accumulation into OCI ownership (tasks/t01-oci-accumulator-ownership.md)
 - [ ] storage-completeness:ch08:t02 — Delete native R2 builder, module, helper and stub surface (tasks/t02-remove-native-backend.md)
 - [ ] storage-completeness:ch08:t03 — Delete the unreferenced native R2 module (tasks/t03-delete-dead-r2-module.md)
 
@@ -93,8 +93,8 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Revision 4 is independently approved at `ddfb11f2`; OCI ownership transfer is in progress against the completed Python API withdrawal.
-- Remaining: finish verified OCI ownership transfer, remove native R2 dispatch/helper, then delete the dead module and its durable provenance links.
+- Revision 4 is independently approved at `ddfb11f2`; OCI ownership transfer is signed and verified at `2e343bc3`.
+- Remaining: remove native R2 dispatch/helper, then delete the dead module and its durable provenance links. OCI accumulator ownership preserves all 23 native regression cases.
 - Documentation: `[0/1 files documented]`, owned by the explicit consolidation tasks.
 - Reclosure of ch01 and downstream acceptance waits for native repair gates; this chapter never depends on that reclosure.
 

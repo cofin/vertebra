@@ -5,7 +5,7 @@ chapter_id: ch08-remove-r2-native
 title: Transfer uniform multipart accumulation into OCI ownership
 description: Transfer uniform multipart accumulation into OCI ownership
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: characterization
 depends_on:
@@ -29,12 +29,40 @@ claimed_at: '2026-11-07T22:47:32Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-07T22:50:18Z'
+last_verified_commit: 2e343bc3
+verification_evidence: |
+  Source checkpoint 69a77955; verification checkpoint fe65a5aa plus the owned
+  uncommitted Rust diff. The initial unmodified canonical suite exits 0
+  (23 passed). Green-before characterization changes only the canonical test:
+  the OCI public multipart seam emits [8388608,8388608,3] for irregular producer
+  chunks totaling 16777219 bytes, reconstructs the exact payload, advances
+  uploads before completion, retains empty [0] and sub-part [4] semantics.
+  That suite exits 0 (23 passed, 0.35s) before any production move. Green-after
+  runs the same assertions after the OCI-owned implementation move and exits 0
+  (23 passed, 0.31s). No Red result is claimed for this characterization.
+  Before and after command:
+  CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target"
+  PYO3_PYTHON="$PWD/.venv/bin/python3.12"
+  flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test
+  --manifest-path src/rs/Cargo.toml -p vertebra-storage --test storage_engine_tests
+  Formatting command exits 0:
+  CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target"
+  PYO3_PYTHON="$PWD/.venv/bin/python3.12"
+  cargo fmt --manifest-path src/rs/Cargo.toml --all --check
+  Clippy command exits 0 (all targets, warnings denied):
+  CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target"
+  PYO3_PYTHON="$PWD/.venv/bin/python3.12"
+  cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage
+  --all-targets -- -D warnings
+  git diff --check exits 0. No OCI source/test imports or reexports depend on
+  r2.rs. The temporary lib.rs helper remains for t02. Native Rust tests compile
+  the owned storage source; no Python extension rebuild, public FFI change,
+  platform limitation or hosted action applies. Coordinator owns signed commit
+  and final state/checklist synchronization.
 created_at: '2026-11-07T12:00:00Z'
-updated_at: '2026-11-07T12:00:00Z'
-commit: null
+updated_at: '2026-11-07T22:50:18Z'
+commit: 2e343bc3
 sources:
 - id: implementation
   resource: src/rs/vertebra-storage/src/store.rs
@@ -91,13 +119,21 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Acceptance Criteria
 
-- [ ] Every matrix row passes at its public seam with existing behavior preserved.
-- [ ] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
-- [ ] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
-- [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
+- [x] Every matrix row passes at its public seam with existing behavior preserved.
+- [x] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
+- [x] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
+- [x] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
 
 Existing OCI `requires_uniform_part_size` already selects 8 MiB accumulation. Record green-before and green-after evidence for the behavior-preserving ownership transfer; do not claim a Red result. Revision 4 is independently approved by the fresh consolidated ch07/ch08 plan review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+
+The OCI module owns its 8 MiB constant, chunk helper and crate-private rolling
+accumulator without an R2 import or reexport. Multipart sessions select uniform
+re-chunking only for OCI. The accumulator preserves Bytes slices and retains only
+an unfinished frame; no whole-payload buffer is introduced. The legacy R2 module
+and Python helper remain untouched for the ordered t02/t03 withdrawal. All owned
+implementation and test gates pass; the coordinator owns the signed local commit
+and final state/checklist synchronization.
 
 [^implementation]: `src/rs/vertebra-storage/src/store.rs` — Current repository source for this task.
