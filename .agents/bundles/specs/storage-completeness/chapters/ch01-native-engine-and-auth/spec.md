@@ -12,11 +12,11 @@ replan_trigger: null
 current_task: null
 plan_revision: 2
 plan_commit: cdb978d3
-state_revision: 4
-last_verified_checkpoint: 7ad5269a
+state_revision: 5
+last_verified_checkpoint: e15f636a
 last_reviewed_commit: null
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T18:04:00Z"
+updated_at: "2026-11-07T18:24:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
@@ -58,7 +58,7 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-`src/rs/vertebra-storage` currently buffers multipart uploads in `Vec<Bytes>` (re-concatenating Cloudflare R2 parts into `Vec<u8>`), lacks streaming chunk iterators, conditional `put`, cursor pagination, server-side `rename`, and end-to-end OCI PAR presigning, and exports duplicate GCP token-cache PyO3 classes alongside pure-Python OAuth token fetchers and `self._memory` dict fallbacks in `src/py/vertebra/storage/_store.py` [^store-rs] [^r2-rs] [^gcp-auth-rs] [^py-store]. Chapter 01 completes the Rust/PyO3 storage engine, unifies GCP auth on `vertebra._vertebra`, and makes `SyncObjectStore` and `AsyncObjectStore` fail closed.
+Chapter 01 delivers the native Rust/PyO3 storage engine, unified GCP OAuth2 token-cache authority, and fail-closed Python facade in `src/rs/vertebra-storage` and `src/py/vertebra/storage/_store.py` [^store-rs] [^r2-rs] [^gcp-auth-rs] [^py-store]: incremental `MultipartUploadSession` (with uniform `8 MiB` R2/OCI part chunking), `StreamReader` (`get_stream`), conditional `put_opts`, cursor `list_page` / `list_with_delimiter`, `rename`, end-to-end OCI PAR presigning (`sign_oci_par_url`), unified `vertebra._vertebra` token caches, and fail-closed `SyncObjectStore` / `AsyncObjectStore` construction.
 
 ### 1.2 Non-Goals
 
@@ -117,13 +117,13 @@ Progress: `[0/0 files documented in ch01]` (consolidated in `ch04:t03` once all 
 - [x] [beb6a972] storage-completeness:ch01:t01 — Implement streaming reads, incremental multipart sessions, conditional puts, pagination, and rename in vertebra-storage (tasks/t01-rust-streaming-and-ops.md)
 - [x] [cb6b0647] storage-completeness:ch01:t02 — Wire Python streaming/conditional/paginated storage facade and _storage.pyi stubs (tasks/t02-python-streaming-facade-and-stubs.md)
 - [x] [494ad92b] storage-completeness:ch01:t03 — Deduplicate Rust GCS auth wrapper and complete multi-cloud presigning including OCI PAR (tasks/t03-rust-gcp-auth-and-oci-signing.md)
-- [x] [7ad5269a] storage-completeness:ch01:t04 — Unify Python GCP token caches on vertebra._vertebra and enforce fail-closed stores (tasks/t04-unified-token-caches-and-fail-closed.md)
+- [x] [e15f636a] storage-completeness:ch01:t04 — Unify Python GCP token caches on vertebra._vertebra and enforce fail-closed stores (tasks/t04-unified-token-caches-and-fail-closed.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage && make dev && uv run --no-sync python -m mypy.stubtest vertebra._storage && uv run --no-sync pytest src/py/tests/unit/storage -q` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ 7ad5269a`; chapter `state: active`, `planning_status: complete`; all `4/4` tasks in `ch01` completed (`t01` @ `beb6a972`, `t02` @ `cb6b0647`, `t03` @ `494ad92b`, `t04` @ `7ad5269a`).
+- **Verified Baseline**: `HEAD @ e15f636a`; chapter `state: active`, `planning_status: complete`; all `4/4` tasks in `ch01` completed (`t01` @ `beb6a972`, `t02` @ `cb6b0647`, `t03` @ `494ad92b`, `t04` @ `e15f636a`), and `object-storage.md` synchronized in present tense.
 - **Remaining Tasks in Chapter**: None (`0/4` pending; ready for `ch01` closeout review).
 - **Downstream Dependents**: Unblocks `ch02-orm-and-sql-storage-contracts`, `ch03-litestar-and-range-streaming`, and `ch04-arrow-shm-and-docs`.
 

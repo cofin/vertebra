@@ -1,5 +1,13 @@
 # Bundle Activity Log
 
+## [2026-11-07] flow-implement | Implemented storage-completeness Chapter 01 (ch01-native-engine-and-auth)
+
+- Completed all 4 vertical-slice tasks in `storage-completeness` `ch01-native-engine-and-auth` on `feat/storage-updates` above `1bb622a7` and synchronized [`object-storage.md`](knowledge/domains/storage/object-storage.md):
+  - **Rust Streaming, Incremental Multipart, Conditional Puts, Pagination & Rename (`ch01:t01`, `beb6a972`)**: Extended `StoredObjectMeta` with `content_type` and `attributes`, added `PutConditionalOptions` (`if_not_exists`, `if_match`, `if_none_match`), `StreamReader` (`get_stream`), stateful `MultipartUploadSession` (uniform `8 MiB` R2/OCI part buffering without whole-payload `Vec<Bytes>` / `Vec<u8>` concatenation), `list_page`, `list_with_delimiter`, and `rename` in `vertebra-storage`.
+  - **Python Streaming Facade & `_storage.pyi` Stubs (`ch01:t02`, `cb6b0647`)**: Wired `SyncStreamReader`, `AsyncStreamReader`, `SyncMultipartUpload`, `AsyncMultipartUpload`, `get_stream`, `put_stream` (with automatic `abort()` on producer failure), conditional `put`, `list_page`, `list_with_delimiter`, `rename`, and streaming `SyncReadableFile.__iter__` / `AsyncReadableFile.__aiter__` across `vertebra._storage` and `vertebra.storage`.
+  - **Deduplicated Rust GCS Auth Wrapper & Multi-Cloud Presigning (`ch01:t03`, `494ad92b`)**: Trimmed `vertebra-storage/src/gcp_auth.rs` to `GCS_OAUTH_SCOPES` and `RefreshingGcpCredentialProvider` over `vertebra_core::gcp_auth::GcpTokenCache`, enforced `1..=604_800s` expiry bounds and RFC 3986 path encoding across GCS V4 (`GOOG4-RSA-SHA256` + IAM `signBlob`) and S3 SigV4, and added native OCI PAR presigning (`sign_oci_par_url`).
+  - **Unified `vertebra._vertebra` Token Caches & Fail-Closed Facade (`ch01:t04`, `7ad5269a`, `e15f636a`)**: Removed duplicate `SyncGcpTokenCache`, `AsyncGcpTokenCache`, and `GcpTokenSnapshot` PyO3 classes from `vertebra._storage`, re-exported `vertebra._vertebra` token caches (with `allow_ambient_adc` and `.to_async()` / `.to_sync()` shared-`Arc` conversion parity), deleted pure-Python `urllib` OAuth fetchers and `self._memory` fallbacks, shared native stores via `.to_async()` across Django/Alchemy/SQLSpec adapters, and enforced `ImproperConfigurationError` / `MissingDependencyError` (`vertebra-core[storage]`).
+
 ## [2026-11-07] flow-setup | Aligned OKF v0.2 knowledge, skills, subagents, and chaptered storage-completeness spec
 
 - Executed `/flow:setup` (`Align & True-Up`, `shared` Git tracking policy) on `feat/storage-updates` (`HEAD @ cdb978d3`, `main @ 077a3fe9`):

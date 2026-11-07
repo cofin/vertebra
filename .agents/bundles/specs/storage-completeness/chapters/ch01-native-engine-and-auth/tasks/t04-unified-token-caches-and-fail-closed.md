@@ -29,18 +29,18 @@ tests:
 estimated_loc: 220
 plan_revision: 2
 plan_commit: cdb978d3
-state_revision: 2
+state_revision: 3
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: "2026-11-07T18:04:00Z"
-last_verified_commit: 7ad5269a
-verification_evidence: "cargo clippy -p vertebra-storage --all-targets -- -D warnings (0 warnings), cargo test -p vertebra-storage (22 passed), mypy.stubtest vertebra._storage (0 issues), ruff check (0 issues), mypy src/py/vertebra/storage (0 issues), pytest src/py/tests/unit/storage -q (48 passed)"
+last_verified_at: "2026-11-07T18:23:00Z"
+last_verified_commit: e15f636a
+verification_evidence: "cargo clippy -p vertebra-py -p vertebra-storage --all-targets -- -D warnings (0 warnings), cargo test -p vertebra-storage -p vertebra-py (33 passed), mypy.stubtest vertebra._vertebra vertebra._storage (0 issues), ruff check + ruff format --check (0 issues), mypy (0 issues), pytest src/py/tests/unit/storage src/py/tests/unit/extensions -q (469 passed)"
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T18:04:00Z"
-commit: 7ad5269a
+updated_at: "2026-11-07T18:23:00Z"
+commit: e15f636a
 sources:
   - id: core-pyi-gcp
     resource: src/py/vertebra/_vertebra.pyi::SyncGcpTokenCache
@@ -121,6 +121,7 @@ Remove the duplicate `GcpTokenSnapshot`, `SyncGcpTokenCache`, and `AsyncGcpToken
 
 - [2026-11-07 04:15] Existing unit tests in `src/py/tests/unit/storage/` or `extensions/` that instantiate `SyncObjectStore()` with zero arguments must pass explicit `MemoryConfig()` or `"memory://test"` per the clean-break fail-closed contract.
 - [2026-11-07 18:04] `SyncObjectStore.to_async()` and `AsyncObjectStore.to_sync()` clone the underlying Rust `ObjectStoreEngine` handle directly in `vertebra._storage`, sharing `InMemory` namespaces and connection pools without Python `_memory` dicts.
+- [2026-11-07 18:23] Extended `vertebra._vertebra.{SyncGcpTokenCache, AsyncGcpTokenCache}` with `allow_ambient_adc: bool = True` and `.to_async()` / `.to_sync()` cloning `Arc<GcpTokenCache>`, and updated `django`, `alchemy`, and `sqlspec` storage adapters to derive `async_store = sync_store.to_async()`.
 
 [^core-pyi-gcp]: `src/py/vertebra/_vertebra.pyi::SyncGcpTokenCache` — Core GCP token cache type stubs.
 [^storage-lib-rs]: `src/rs/vertebra-storage/src/lib.rs` — `vertebra._storage` PyO3 module definition.
