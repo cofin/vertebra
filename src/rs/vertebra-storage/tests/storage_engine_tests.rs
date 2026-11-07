@@ -1,5 +1,5 @@
 use _storage::oci::{
-    EMPTY_BODY_SHA256_BASE64, OciCavageCredentials, R2_UNIFORM_PART_SIZE, chunk_uniform_parts,
+    EMPTY_BODY_SHA256_BASE64, OCI_UNIFORM_PART_SIZE, OciCavageCredentials, chunk_uniform_parts,
     sha256_base64, sign_oci_cavage_request,
 };
 use _storage::signing::{
@@ -172,13 +172,14 @@ async fn test_gcs_v4_keyless_iam_signblob_fallback() {
 }
 
 #[test]
-fn test_r2_uniform_part_chunking_and_azure_sas_signing() {
-    let payload = Bytes::from(vec![b'a'; R2_UNIFORM_PART_SIZE * 2 + 1234]);
-    let parts = chunk_uniform_parts(payload, R2_UNIFORM_PART_SIZE);
+fn test_oci_uniform_part_chunking_and_azure_sas_signing() {
+    let payload = Bytes::from(vec![b'a'; OCI_UNIFORM_PART_SIZE * 2 + 1234]);
+    let parts = chunk_uniform_parts(payload.clone(), OCI_UNIFORM_PART_SIZE);
     assert_eq!(parts.len(), 3);
-    assert_eq!(parts[0].len(), R2_UNIFORM_PART_SIZE);
-    assert_eq!(parts[1].len(), R2_UNIFORM_PART_SIZE);
+    assert_eq!(parts[0].len(), OCI_UNIFORM_PART_SIZE);
+    assert_eq!(parts[1].len(), OCI_UNIFORM_PART_SIZE);
     assert_eq!(parts[2].len(), 1234);
+    assert_eq!(parts.concat(), payload);
 
     let sas_cfg = AzureSasConfig {
         account: "devstoreaccount1".to_string(),
@@ -984,29 +985,40 @@ async fn test_streaming_chunk_read_memory_and_local() {
 }
 
 #[tokio::test]
-async fn test_incremental_r2_uniform_multipart_session() {
+async fn test_incremental_oci_uniform_multipart_session() {
     use _storage::store::PutConditionalOptions;
     use std::sync::Arc;
 
     let engine =
-        ObjectStoreEngine::with_store(Arc::new(object_store::memory::InMemory::new()), "r2");
+        ObjectStoreEngine::with_store(Arc::new(object_store::memory::InMemory::new()), "oci");
     let mut session = engine
         .create_multipart(
-            "blobs/r2_incremental.bin",
+            "blobs/oci_incremental.bin",
             PutConditionalOptions {
                 content_type: Some("application/octet-stream".to_string()),
                 ..Default::default()
             },
         )
         .await
-        .expect("create r2 multipart session");
+        .expect("create OCI multipart session");
 
     let chunk_sizes = [
         3 * 1024 * 1024,
         3 * 1024 * 1024,
         3 * 1024 * 1024,
+        3 * 1024 * 1024,
+        3 * 1024 * 1024,
         1024 * 1024,
-        512 * 1024,
+        3,
+    ];
+    let flushed_sizes: &[&[usize]] = &[
+        &[],
+        &[],
+        &[8_388_608],
+        &[8_388_608],
+        &[8_388_608],
+        &[8_388_608, 8_388_608],
+        &[8_388_608, 8_388_608],
     ];
     let mut expected = Vec::with_capacity(chunk_sizes.iter().sum());
     for (part_idx, &len) in chunk_sizes.iter().enumerate() {
@@ -1018,43 +1030,50 @@ async fn test_incremental_r2_uniform_multipart_session() {
             .write_chunk(Bytes::from(data))
             .await
             .expect("write_chunk");
-        if part_idx < 2 {
-            assert!(
-                session.part_sizes_flushed().is_empty(),
-                "must buffer until 8 MiB threshold"
-            );
-        } else {
-            assert_eq!(
-                session.part_sizes_flushed(),
-                &[R2_UNIFORM_PART_SIZE],
-                "must flush exact 8 MiB part immediately upon crossing threshold"
-            );
-        }
+        assert_eq!(
+            session.part_sizes_flushed(),
+            flushed_sizes[part_idx],
+            "must flush exact 8 MiB parts as the producer advances"
+        );
     }
 
-    let _put_res = session.complete().await.expect("complete r2 multipart");
-    assert_eq!(
-        session.part_sizes_flushed(),
-        &[R2_UNIFORM_PART_SIZE, 2 * 1024 * 1024 + 512 * 1024]
-    );
+    let _put_res = session.complete().await.expect("complete OCI multipart");
+    assert_eq!(session.part_sizes_flushed(), &[8_388_608, 8_388_608, 3]);
 
     let fetched = engine
-        .get("blobs/r2_incremental.bin")
+        .get("blobs/oci_incremental.bin")
         .await
-        .expect("get completed r2 object");
-    assert_eq!(fetched.len(), 10 * 1024 * 1024 + 512 * 1024);
+        .expect("get completed OCI object");
+    assert_eq!(fetched.len(), 16_777_219);
     assert_eq!(&fetched[..], &expected[..]);
 
     let mut empty_session = engine
-        .create_multipart("blobs/r2_empty.bin", PutConditionalOptions::default())
+        .create_multipart("blobs/oci_empty.bin", PutConditionalOptions::default())
         .await
         .expect("create empty multipart");
     empty_session
         .complete()
         .await
         .expect("complete 0-byte multipart");
-    let empty_fetched = engine.get("blobs/r2_empty.bin").await.expect("get empty");
+    assert_eq!(empty_session.part_sizes_flushed(), &[0]);
+    let empty_fetched = engine.get("blobs/oci_empty.bin").await.expect("get empty");
     assert!(empty_fetched.is_empty());
+
+    let mut tail_session = engine
+        .create_multipart("blobs/oci_tail.bin", PutConditionalOptions::default())
+        .await
+        .expect("create sub-part multipart");
+    tail_session
+        .write_chunk(Bytes::from_static(b"tail"))
+        .await
+        .expect("write sub-part chunk");
+    assert!(tail_session.part_sizes_flushed().is_empty());
+    tail_session.complete().await.expect("complete sub-part");
+    assert_eq!(tail_session.part_sizes_flushed(), &[4]);
+    assert_eq!(
+        engine.get("blobs/oci_tail.bin").await.expect("get tail"),
+        Bytes::from_static(b"tail")
+    );
 }
 
 #[tokio::test]

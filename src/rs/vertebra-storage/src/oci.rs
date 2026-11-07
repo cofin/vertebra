@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use chrono::{DateTime, TimeZone, Utc};
 use futures::TryStreamExt;
 use futures::stream::{BoxStream, StreamExt};
@@ -30,7 +30,76 @@ use crate::signing::{
 };
 use crate::store::{StorageError, validate_object_path};
 
-pub use crate::r2::{R2_UNIFORM_PART_SIZE, chunk_uniform_parts};
+/// Uniform 8 MiB multipart chunk size required by OCI multipart uploads.
+pub const OCI_UNIFORM_PART_SIZE: usize = 8 * 1024 * 1024;
+
+/// Split a payload into uniform `part_size` chunks (all non-trailing chunks have identical byte length).
+pub fn chunk_uniform_parts(data: Bytes, part_size: usize) -> Vec<Bytes> {
+    let chunk_len = part_size.max(1);
+    if data.is_empty() {
+        return vec![Bytes::new()];
+    }
+    let mut parts = Vec::with_capacity(data.len().div_ceil(chunk_len));
+    let mut offset = 0;
+    while offset < data.len() {
+        let end = (offset + chunk_len).min(data.len());
+        parts.push(data.slice(offset..end));
+        offset = end;
+    }
+    parts
+}
+
+/// Rolling fixed-capacity re-chunker that emits exact `part_size` `Bytes` frames incrementally
+/// without concatenating an entire multi-part stream in memory.
+#[derive(Debug)]
+pub(crate) struct UniformPartAccumulator {
+    part_size: usize,
+    buf: BytesMut,
+}
+
+impl UniformPartAccumulator {
+    pub fn new(part_size: usize) -> Self {
+        Self {
+            part_size: part_size.max(1),
+            buf: BytesMut::new(),
+        }
+    }
+
+    pub fn push(&mut self, mut chunk: Bytes) -> Vec<Bytes> {
+        if chunk.is_empty() {
+            return Vec::new();
+        }
+        let mut ready = Vec::new();
+        if !self.buf.is_empty() {
+            if self.buf.len() + chunk.len() < self.part_size {
+                self.buf.extend_from_slice(&chunk);
+                return ready;
+            }
+            let needed = self.part_size - self.buf.len();
+            self.buf.extend_from_slice(&chunk.split_to(needed));
+            ready.push(self.buf.split().freeze());
+        }
+        while chunk.len() >= self.part_size {
+            ready.push(chunk.split_to(self.part_size));
+        }
+        if !chunk.is_empty() {
+            self.buf.extend_from_slice(&chunk);
+        }
+        ready
+    }
+
+    pub fn finish(&mut self) -> Option<Bytes> {
+        if self.buf.is_empty() {
+            None
+        } else {
+            Some(self.buf.split().freeze())
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.buf.clear();
+    }
+}
 
 /// Base64 SHA-256 of an empty 0-byte body (`""`), required by OCI on 0-byte `POST`/`PUT` requests.
 pub const EMPTY_BODY_SHA256_BASE64: &str = "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=";

@@ -21,8 +21,9 @@ use thiserror::Error;
 use url::Url;
 use vertebra_core::gcp_auth::GcpTokenCache;
 
-use crate::oci::{OciCavageCredentials, OciObjectStore};
-use crate::r2::{R2_UNIFORM_PART_SIZE, UniformPartAccumulator, requires_uniform_part_size};
+use crate::oci::{
+    OCI_UNIFORM_PART_SIZE, OciCavageCredentials, OciObjectStore, UniformPartAccumulator,
+};
 
 static STORAGE_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     let default_threads = std::thread::available_parallelism()
@@ -243,7 +244,7 @@ pub struct PutConditionalOptions {
 
 /// Stateful incremental multipart upload session.
 ///
-/// When targeting Cloudflare R2 or OCI Object Storage (`scheme == "r2" | "oci"`), chunks are
+/// When targeting OCI Object Storage (`scheme == "oci"`), chunks are
 /// normalized through a rolling 8 MiB `UniformPartAccumulator` so every non-trailing part has
 /// identical byte length without buffering the entire payload in memory.
 pub struct MultipartUploadSession {
@@ -929,8 +930,8 @@ impl ObjectStoreEngine {
             Err(err) => return Err(err.into()),
         };
 
-        let accumulator = if requires_uniform_part_size(&self.scheme) {
-            Some(UniformPartAccumulator::new(R2_UNIFORM_PART_SIZE))
+        let accumulator = if self.scheme == "oci" {
+            Some(UniformPartAccumulator::new(OCI_UNIFORM_PART_SIZE))
         } else {
             None
         };
