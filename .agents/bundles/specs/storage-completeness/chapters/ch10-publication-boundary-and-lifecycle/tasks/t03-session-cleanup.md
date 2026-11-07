@@ -22,8 +22,8 @@ files:
 tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 160
-plan_revision: 6
-plan_commit: 43c2e3fe
+plan_revision: 7
+plan_commit: null
 state_revision: 0
 claimed_by: null
 claimed_at: null

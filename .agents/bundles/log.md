@@ -1,5 +1,11 @@
 # Bundle Activity Log
 
+## [2026-11-07] flow-docs | Synchronized logical R2 rejection before Chapter 07 re-review
+
+- Bound the fourth Python withdrawal task to signed source `a7036538`. SQLSpec rejects logical R2 overrides over supported native stores; staging checks resolved declarations before relative destinations. Both guards return the exact scheme-only diagnostic without exposing URI credentials or query text.
+- Initial public regressions report 22 failures; final canonical acceptance passes 162 tests with five existing optional-driver skips. Actual constructor/native-object cases, independent declared-backend read/write cases and real sync/async BigQuery HTTP tripwires prove retained bytes/keys and zero query connections. Mypy, Ruff and storage stubtest pass. All four Chapter 07 tasks and scoped knowledge sync are complete; correctness re-review and fresh quality review remain pending.
+- Native withdrawal is independently reviewed at `43654f61`, with final source `c7868b02`. Memory publication source `d50cf6a2` passes 28 Rust engine cases; its Python extension rebuild/acceptance and Local/cloud publication repairs remain open.
+
 ## [2026-11-07] flow-docs | Synchronized native R2 withdrawal before Chapter 08 review
 
 - Bound OCI accumulator ownership `2e343bc3`, native constructor/module/helper/stub withdrawal `4614213f` and dead-module/provenance deletion `c7868b02` to the chapter/root/catalog state and storage knowledge. Native constructors reject R2 URLs; generic S3 custom endpoints and OCI incremental 8 MiB accumulation remain supported.

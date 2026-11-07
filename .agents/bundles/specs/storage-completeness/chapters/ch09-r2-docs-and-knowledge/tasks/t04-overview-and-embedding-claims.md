@@ -5,7 +5,7 @@ chapter_id: ch09-r2-docs-and-knowledge
 title: Remove R2 from repository and embedding overviews
 description: Remove R2 from repository and embedding overviews
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: documentation_validation
 depends_on:
@@ -26,17 +26,55 @@ estimated_loc: 60
 plan_revision: 5
 plan_commit: e3e344b5
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:r2-docs-t04
+claimed_at: '2026-11-07T23:55:16Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-07T23:57:00Z'
+last_verified_commit: 74afde94
+verification_evidence: |
+  Preflight passes at d50cf6a2: worksheet and chapter match stable revision 5
+  and approval e3e344b5; t01 is completed at ancestor 7802c676. The five
+  manifest files exist, and read_set/files/tests remain unchanged.
+  Native artifacts reuse completed ch08:t02 checkpoint 4614213f and the
+  dead-module deletion evidence at c7868b02; no unchanged extension rebuild runs.
+  Baseline: UV_NO_SYNC=1 flock /tmp/vertebra-flow-docs-build.lock make docs
+  exits 0: docstring/CLI checks, Zensical, postbuild and artifact validation pass.
+  Log: /tmp/vertebra-ch09-t04-docs-baseline.log.
+  Baseline: UV_NO_SYNC=1 flock /tmp/vertebra-flow-shm-tests.lock uv run
+  --no-sync pytest src/py/tests/unit/tools/test_docs_tooling.py -q exits 0
+  (28 passed). Log: /tmp/vertebra-ch09-t04-tests-baseline.log.
+  Final: UV_NO_SYNC=1 flock /tmp/vertebra-flow-docs-build.lock make docs
+  exits 0: docstring/CLI checks, Zensical, postbuild and artifact validation pass.
+  Log: /tmp/vertebra-ch09-t04-docs-final.log.
+  Final: UV_NO_SYNC=1 flock /tmp/vertebra-flow-shm-tests.lock uv run
+  --no-sync pytest src/py/tests/unit/tools/test_docs_tooling.py -q exits 0
+  (28 passed). Log: /tmp/vertebra-ch09-t04-tests-final.log.
+  UV_NO_SYNC=1 uv run --no-sync python -m mypy.stubtest vertebra._storage
+  exits 0 (1 module). Log: /tmp/vertebra-ch09-t04-stubtest.log.
+  UV_NO_SYNC=1 uv run --no-sync ruff check
+  src/py/tests/unit/tools/test_docs_tooling.py exits 0.
+  Log: /tmp/vertebra-ch09-t04-ruff.log.
+  UV_NO_SYNC=1 make review-check exits 0.
+  Log: /tmp/vertebra-ch09-t04-review-check.log.
+  UV_NO_SYNC=1 uv run --no-sync python -m tools.scripts.review_setup validate
+  --rules bundles,privacy exits 0.
+  Log: /tmp/vertebra-ch09-t04-bundles-privacy.log.
+  Read-only final link/API probe exits 0: every owned relative Markdown link
+  resolves, all seven retained backend configs export, R2Config is absent,
+  and a real S3Config retains its generic custom endpoint. No R2 provider
+  claim remains in the three owned pages.
+  Log: /tmp/vertebra-ch09-t04-surface-links.log.
+  git diff --check exits 0. The production diff is exactly three one-line
+  removals (+3/-3); examples, other providers and changelog history are intact.
+  No tests change. Linux CPython 3.12 documentation validation has no observed
+  platform limitation; no cloud runtime acceptance is claimed. Coordinator
+  owns signed commit, final task state and chapter/root synchronization.
+  No Git mutation or hosted action is performed.
 created_at: '2026-11-07T12:00:00Z'
-updated_at: '2026-11-07T12:00:00Z'
-commit: null
+updated_at: '2026-11-07T23:57:00Z'
+commit: 74afde94
 sources:
 - id: implementation
   resource: README.md
@@ -92,12 +130,16 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Acceptance Criteria
 
-- [ ] Every matrix row passes at its public seam with existing behavior preserved.
-- [ ] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
-- [ ] The README, reference index and embedding guide are the three owned documentation manifest items.
-- [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
+- [x] Every matrix row passes at its public seam with existing behavior preserved.
+- [x] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
+- [x] The README, reference index and embedding guide are the three owned documentation manifest items.
+- [x] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
+
+The three owned pages each remove one first-class R2 claim. Remaining provider
+lists and examples are preserved. The coordinator owns the signed local commit
+and final task/checklist synchronization after the shared-worktree write barrier.
 
 Revision 5 is independently approved at e3e344b5; the root documentation manifest correction is committed at 49cbfcbb. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 

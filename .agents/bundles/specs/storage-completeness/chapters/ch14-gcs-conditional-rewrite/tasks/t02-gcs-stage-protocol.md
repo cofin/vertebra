@@ -12,6 +12,7 @@ depends_on:
 - storage-completeness:ch10:t02
 - storage-completeness:ch10:t03
 - storage-completeness:ch14:t01
+- storage-completeness:ch21:t01
 read_set:
 - src/rs/vertebra-storage/src/gcs_stage.rs
 - src/rs/vertebra-storage/src/lib.rs
@@ -68,7 +69,7 @@ Implement this bounded native contract after its listed predecessors. Own only t
 
 Add the real private `gcs_stage.rs` under exactly `#[cfg(test)] mod gcs_stage;` until t04 activates its first production caller. No public test API, broad dead-code allowance or fake stage implementation is introduced. Inline `gcs_stage::tests` exercise actual CloudRequestClient/SDK HTTP and credential-provider collaborators against a local responder.
 
-`GcsResumableStage` retains the concrete `Arc<GoogleCloudStorage>`, exact resolved GCS configuration, `Arc<CloudRequestClient>` and shared native async session state. `GcsStageConfig` carries `base: Url`, `bucket: String`, `client_options: ClientOptions`, and `skip_signature: bool` captured by ch10:t01. `StageReceipt { key: StorePath, generation: String, size: u64 }` identifies only the stage object. Stage methods `begin`, `write_chunk(Bytes)`, `finish() -> Result<StageReceipt, StorageError>` and `abort() -> Result<(), StorageError>` retain Active/Finalized ownership; t03 completes recovery/cleanup before runtime activation. Store pending data and the request offset in retained async state BEFORE sending, so dropping a future cannot lose them.
+`GcsResumableStage` retains the concrete `Arc<GoogleCloudStorage>`, exact resolved GCS configuration, `Arc<CloudRequestClient>` and shared native async session state. `GcsStageConfig` carries `base: Url`, `bucket: String`, `client_options: ClientOptions`, and `skip_signature: bool` captured by ch21:t01. `StageReceipt { key: StorePath, generation: String, size: u64 }` identifies only the stage object. Stage methods `begin`, `write_chunk(Bytes)`, `finish() -> Result<StageReceipt, StorageError>` and `abort() -> Result<(), StorageError>` retain Active/Finalized ownership; t03 completes recovery/cleanup before runtime activation. Store pending data and the request offset in retained async state BEFORE sending, so dropping a future cannot lose them.
 
 Initiate `POST {base}/upload/storage/v1/b/{bucket}/o?uploadType=resumable&name={stage}&ifGenerationMatch=0` with JSON contentType/metadata and exact body length, omitting X-Upload-Content-Length when total size is unknown. Use an unpredictable UUID key beside the destination's parent without reserving a legal user prefix. Encode opaque bucket/key segments exactly once. The zero-generation predicate is part of session initiation, never an unsupported XML MPU completion option. Retry a definitive initiation collision with a fresh UUID only before producer consumption. A late 412 fails safely without changing names or replaying consumed input.
 

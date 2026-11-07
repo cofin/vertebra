@@ -4,14 +4,14 @@ parent_flow: storage-completeness
 chapter_id: ch10-publication-boundary-and-lifecycle
 title: Native Publication Boundary and Cleanup Ownership
 description: Native Publication Boundary and Cleanup Ownership
-status: stable
+status: draft
 state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: storage-completeness:ch10:t01
-plan_revision: 6
-plan_commit: 43c2e3fe
+plan_revision: 7
+plan_commit: null
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
 last_reviewed_commit: null
@@ -51,7 +51,11 @@ Grounded contract evidence: [^research].
 
 ### R1: Retain concrete providers behind a private publication boundary
 
-Add private `conditional.rs` and `mod conditional;` in lib.rs. `ObjectStoreEngine` keeps existing `inner: Arc<dyn ObjectStore>` and a private `publication: PublicationBackend`. `PublicationBackend` retains concrete Arc handles for Memory, Local, S3, Azure, GCS, OCI and resolved endpoint/region/bucket/client options as needed; ordinary read/list code keeps inner. Build each SDK store once and share Arc into both fields, preserving existing credential provider/refresh identity and configured transport. Private `PublishCondition { Overwrite, Create, Match(String), NotMatch(String) }` normalizes PutConditionalOptions, rejecting conflicting selectors before provider effects. The private `PublicationBackend::begin(path, options)` returns a `Box<dyn MultipartUpload>` implementing provider-specific final publish; no public backend enum or generic copy-create substitute. Existing `with_store` stays usable for injected canonical stores, retaining actual PutMode support; unsupported custom-store conditional multipart fails explicitly until it provides the required primitive. S3/Azure/GCS variant constructors carry concrete handles before their later protocol task; no silent conditional fallback is allowed.
+Add private `conditional.rs` and `mod conditional;` in lib.rs. `ObjectStoreEngine` retains `inner: Arc<dyn ObjectStore>` plus private `publication: PublicationBackend`. The enum retains concrete `Arc` handles for Memory, Local, S3, Azure, GCS and OCI plus an explicit Custom variant for injected stores. Build each SDK store exactly once and clone that same Arc into read and publication fields; clone/to_async/to_sync preserve its credential-provider and client identity. Ordinary reads/lists retain their existing path. No resolved GCS configuration, connector capture or service-account parsing belongs to this task; ch21:t01 owns those additions.
+
+Private `PublishCondition { Overwrite, Create, Match(String), NotMatch(String) }` normalizes `PutConditionalOptions`, rejects simultaneous selectors before effects, and maps `if_none_match="*"` to Create. `PublicationBackend::begin(path, options) -> Result<Box<dyn MultipartUpload>, ObjectStoreError>` dispatches only implemented capabilities. Memory publication stores segmented `PutPayload` parts, builds a cheap view on completion and calls actual native InMemory `PutMode::Overwrite`, `Create` or `Update(UpdateVersion { e_tag: Some(tag), version: None })` with caller attributes. Preserve the actual successful `PutResult`; no full-object concatenation or extra byte copy. Local/S3/Azure/GCS/OCI conditional multipart fail explicitly until their provider chapters implement the required primitive; normal Overwrite remains available. Existing `with_store` keeps injected ordinary PutMode support and explicitly rejects unsupported conditional multipart.
+
+Memory `NotMatch` deliberately returns native NotSupported at BEGIN, before consuming any producer input or changing a destination. This temporary capability boundary is mandatory to remove in ch20:t01, which adds Memory negative multipart completion using the SAME eight-attempt PutPayload CAS helper as ordinary negative puts. This task neither implements a separate negative loop nor claims final Memory negative-predicate acceptance. Retain concrete GCS Arc identity now; ch21:t01 adds the SDK-resolved configuration beside it, and ch14:t04 activates its final publication wrapper.
 
 ### R2: Reuse SDK HTTP transport and credential authorizers
 
@@ -91,7 +95,7 @@ Caller → seam → collaborator: public storage/framework calls → owned deep 
 | Deep owned boundary with exact provider semantics | Chosen: hides credentials, staging and concurrency while preserving configured SDK behavior. |
 | Generic head-then-write, Python lock, copy-create publication or blanket exception conversion | Rejected: loses atomicity, update results, metadata or error identity. |
 
-GCS configuration retention includes the true SDK-resolved service-account endpoint and captured ClientOptions. Its downstream conditional staging uses JSON resumable insertion; bounded stage frames replace XML multipart part-count policy for GCS.
+ch21:t01 owns GCS SDK-resolved service-account endpoint and ClientOptions capture after ch10:t01. ch14 owns downstream resumable staging and final read-versus-publication configuration acceptance.
 
 ## 3. Documentation & OKF Knowledge Plan
 

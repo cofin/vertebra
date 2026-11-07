@@ -1,6 +1,6 @@
 # Chapters: Feature-Complete Storage
 
-20 chapters and 58 tasks retain the complete storage scope.
+21 chapters and 59 tasks retain the complete storage scope.
 
 * [ch01 — Chapter 01: Native Rust Storage Engine, GCP Auth Unification, and Fail-Closed Facade](ch01-native-engine-and-auth/spec.md) — [active] Add zero-copy streaming reads, incremental multipart uploads, conditional puts, paginated listing, rename, OCI PAR presigning, unified GCP token caches, and fail-closed construction across vertebra-storage and vertebra.storage.
 * [ch02 — Chapter 02: SQLSpec, Advanced Alchemy, and Django Storage Contracts](ch02-orm-and-sql-storage-contracts/spec.md) — [active] Implement fail-closed SQLSpec ObjectStoreProtocol, Advanced Alchemy StorageBackend registration without monkeypatching, and @deconstructible Django Storage subclass over SyncObjectStore and AsyncObjectStore.
@@ -11,7 +11,7 @@
 * [ch07 — Withdraw First-Class R2 Python APIs](ch07-remove-r2-python/spec.md) — [active] The first three withdrawal/staging tasks are signed; correctness review requires SQLSpec logical-R2 URI and configured native-store rejection repair before fresh reviews.
 * [ch08 — Move OCI Chunk Ownership and Remove Native R2](ch08-remove-r2-native/spec.md) — [completed] OCI accumulation ownership, native R2 constructor/helper/stub withdrawal and dead-module deletion are signed through `c7868b02`; knowledge is synchronized. Correctness and fresh quality reviews remain pending.
 * [ch09 — Synchronize Supported Providers and Native Guarantees](ch09-r2-docs-and-knowledge/spec.md) — [active] Synchronize Supported Providers and Native Guarantees
-* [ch10 — Native Publication Boundary and Cleanup Ownership](ch10-publication-boundary-and-lifecycle/spec.md) — [active] Real request transport is verified in library tests; ch12:t01 owns runtime activation. Revision-5 contracts await cold review.
+* [ch10 — Native Publication Boundary and Cleanup Ownership](ch10-publication-boundary-and-lifecycle/spec.md) — [active] Real request transport is verified in library tests; ch12:t01 owns runtime activation. Concrete identity/Memory Create-Match dispatch stays bounded in ch10:t01; ch21 owns resolved GCS configuration and ch20 closes Memory negative multipart support.
 * [ch11 — Local Cross-Process Conditional Publication](ch11-local-atomic-publication/spec.md) — [planned] Local Cross-Process Conditional Publication
 * [ch12 — S3 Metadata Multipart and Conditional Completion](ch12-s3-conditional-multipart/spec.md) — [planned] Activate the staged transport with the first S3 initiation caller, then verify metadata, refreshed SDK credentials and conditional completion.
 * [ch13 — Azure Conditional Multipart Block Commit](ch13-azure-conditional-block-list/spec.md) — [planned] Real SDK credential forms, block identity, conditional commit and SAS error redaction remain provider acceptance obligations.
@@ -22,4 +22,6 @@
 * [ch18 — Bounded PyArrow Worker and Native Async I/O Bridge](ch18-arrow-async-bridge/spec.md) — [planned] Bounded PyArrow Worker and Native Async I/O Bridge
 * [ch19 — SQLSpec Lazy Arrow and Parquet Integration](ch19-sqlspec-arrow-streaming/spec.md) — [planned] SQLSpec Lazy Arrow and Parquet Integration
 
-* [ch20 — Ordinary Byte-Put Negative Predicate CAS](ch20-ordinary-negative-cas/spec.md) — [planned] Fence shared ordinary negative ETag puts through native Create/Update, preserve Local/GCS dispatch truth, and repair actual OCI ordinary conditions before native acceptance.
+* [ch20 — Ordinary and Memory Multipart Negative Predicate CAS](ch20-ordinary-negative-cas/spec.md) — [planned] Fence ordinary negative puts and Memory negative multipart with one cheap PutPayload CAS helper, preserve Local/GCS dispatch truth, and repair actual OCI ordinary conditions before native acceptance.
+
+* [ch21 — SDK-Resolved GCS Configuration](ch21-sdk-resolved-config/spec.md) — [planned] Capture exact SDK endpoint/ClientOptions beside one concrete GCS Arc; constructor/read/config acceptance precedes ch14 staging and final publication comparison.

@@ -54,7 +54,7 @@ Caller ETag comparison uses SDK XML HEAD metadata. Positive Match forwards that 
 
 ### R2: Create bounded private stages atomically
 
-JSON resumable initiation carries ifGenerationMatch=0, content_type and metadata. Retain opaque Location capability and bounded 8 MiB/256 KiB-aligned frames. Preserve empty, partial-tail and exact-frame EOF. Initiation collisions can change names only before producer consumption; late conflicts never replay consumed input. Use exact configured SDK transport and credentials, including skip-signature and service-account endpoint fallback. t02 compiles the actual private protocol under a test-only module and tests real HTTP requests.
+JSON resumable initiation carries ifGenerationMatch=0, content_type and metadata. Retain opaque Location capability and bounded 8 MiB/256 KiB-aligned frames. Preserve empty, partial-tail and exact-frame EOF. Initiation collisions can change names only before producer consumption; late conflicts never replay consumed input. Use exact configured SDK transport and credentials, including skip-signature and service-account endpoint fallback. ch21:t01 first retains the exact SDK-resolved configuration with actual read/config tests. t02 depends on that task, compiles the actual private protocol under a test-only module and tests real HTTP requests.
 
 ### R3: Retain recovery and cleanup ownership
 
@@ -62,7 +62,7 @@ Keep the pending frame before sending and recover acknowledgement via session st
 
 ### R4: Publish exact staged generations and return canonical XML tokens
 
-The production wrapper starts only after both private stage tasks pass. JSON rewrite pins source generation and destination conditions across every rewriteToken continuation. Caller ETags are compared only with XML SDK metadata. After completion, SDK generation-specific HEAD returns the published generation's XML ETag/version. Missing generation receipts fail explicitly; current HEAD or JSON resource.etag never substitutes for our result. Caller metadata persists and cleanup targets only the owned stage generation. Temporary cloud stages may be visible in provider listings.
+The production wrapper starts only after both private stage tasks pass. JSON rewrite pins source generation and destination conditions across every rewriteToken continuation. Caller ETags are compared only with XML SDK metadata. After completion, SDK generation-specific HEAD returns the published generation's XML ETag/version. Missing generation receipts fail explicitly; current HEAD or JSON resource.etag never substitutes for our result. Caller metadata persists and cleanup targets only the owned stage generation. Temporary cloud stages may be visible in provider listings. t04 compares actual configured SDK reads with actual public resumable/rewrite requests, covering explicit and singleton service-account endpoint resolution, headers and shared credentials. On activation it removes every exact temporary config-field expectation introduced by ch21:t01 in conditional.rs.
 
 ## 3. Documentation & OKF Knowledge Plan
 

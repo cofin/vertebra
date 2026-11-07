@@ -13,7 +13,7 @@ current_task: null
 plan_revision: 6
 plan_commit: 43c2e3fe
 state_revision: 0
-last_verified_checkpoint: c7868b02
+last_verified_checkpoint: a7036538
 last_reviewed_commit: null
 created_at: '2026-11-07T12:00:00Z'
 updated_at: '2026-11-07T23:24:00Z'
@@ -45,13 +45,13 @@ tags:
 <!-- truth: start -->
 - Framework classifiers and public R2 config/convenience exports are removed; direct facade `r2://` construction rejects the removed scheme. [^facade]
 - Destination and explicit string-store staging rejection, qualification matching and native Memory/local compatibility are implemented at `38757809`. [^staging]
-- SQLSpec's explicit-store logical URI override still accepts R2 metadata, and staging returns for relative destinations before checking the backend's declared `store_uri`. t04 closes both public boundaries. [^sqlspec] [^staging]
-- This chapter contains four tasks: four completed tasks awaiting correctness re-review and fresh quality review. Correctness review and fresh quality review remain open. [^regression]
+- SQLSpec rejects R2 logical URI overrides even with a supported explicit native store. Staging checks the resolved declared store URI before returning for relative destinations; both guards use a scheme-only diagnostic. [^sqlspec] [^staging]
+- All four tasks are completed; 162 canonical tests pass with five existing optional-driver skips. Correctness re-review and fresh quality review remain open. [^regression]
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
-Withdraw the entire first-class R2 Python surface while preserving generic S3 custom endpoints and supported explicit native-store overrides. Production scope stays within each worksheet's ownership. The current source checkpoint is `c7868b02`; completed task artifacts remain authoritative at their recorded commits. Important finding `PY-NEW` is adopted: at committed `49cbfcbb`, a real SQLSpec backend declaring `r2://unit` over native Memory permits qualified read/write and relative staging publication. The remaining worksheet owns this exact gap. Native R2 dispatch/module/helper withdrawal belongs to ch08 and is not an execution dependency. [^sqlspec] [^staging]
+The first-class R2 Python surface is withdrawn while generic S3 custom endpoints and supported explicit native-store overrides remain operational. Production scope stays within each worksheet's ownership. The verified Python source checkpoint is `a7036538`; completed task artifacts remain authoritative at their recorded commits. SQLSpec logical metadata and staging declarations reject R2 before native object effects or export queries. Native withdrawal is completed and reviewed independently in ch08; native publication repair retains its own acceptance boundary. [^sqlspec] [^staging]
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
@@ -96,7 +96,7 @@ Staging resolves the existing declared URI from string store, backend `store_uri
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/1 files documented]` for the remaining logical override/declaration contract in `.agents/bundles/knowledge/domains/storage/object-storage.md`. The existing Python withdrawal and staging qualification entries retain their verified scope; ch09:t03 consolidates the final native and logical URI guarantees after t04 verification. ch04:t03 owns final user guides. Canonical public regression tests document exact errors, metadata, native object retention and query ordering. No additional production/doc ownership is added to t04.
+Progress: `[1/1 files documented]` for the verified Python withdrawal, logical override and staging declaration contracts in `.agents/bundles/knowledge/domains/storage/object-storage.md`. ch09:t03 retains final native guarantee consolidation and ch04:t03 owns final user guides. Canonical public regression tests document exact errors, supported metadata, native object retention and query ordering.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -114,15 +114,15 @@ Progress: `[0/1 files documented]` for the remaining logical override/declaratio
 - [x] [38757809] storage-completeness:ch07:t03 — Reject removed R2 URIs before staging local-path resolution (tasks/t03-staging-reject-r2.md)
 - [x] [a7036538] storage-completeness:ch07:t04 — Reject removed SQLSpec logical URI overrides before staging (tasks/t04-reject-removed-logical-uri.md)
 
-**Chapter Recovery Checkpoint:** revision 6 is independently approved at `43c2e3fe`. t04 follows completed t03 and fits one invocation with six read files, two production files, two canonical test modules and estimated 100 changed lines. `/flow:implement storage-completeness ch07-remove-r2-python` executes the ready t04. Run correctness review followed by fresh quality review before chapter closure.
+**Chapter Recovery Checkpoint:** all four task receipts are completed and scoped knowledge is synchronized. `/flow:review storage-completeness` routes the required correctness re-review and subsequent fresh quality review before chapter closure.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Three of four tasks are completed at `4486f6fe`, `75f18e3b` and `38757809`; their recorded states, acceptance evidence and commit SHAs remain intact. t04 is signed at `a7036538`; its actual public regressions and all 162 canonical tests pass with five existing optional-driver skips.
-- Completed t03 evidence records 139 canonical tests with five existing optional-driver skips, all-five-extension rebuild, storage stubtest and focused Mypy/Ruff checks. That evidence proves its destination/qualification scope and does not close the logical override/declaration gap.
-- Source `c7868b02` retains the adopted Important `PY-NEW` gap in the SQLSpec logical override and staging relative return. t04 requires fresh public Red/Green and exact native bytes/keys, supported metadata, and real sync/async BigQuery zero-query evidence.
-- The chapter remains active with `last_reviewed_commit: null`. Correctness and fresh quality review remain required after t04; native publication acceptance and other chapters retain their independent ownership.
-- Remaining documentation: `[0/1 files documented]` for the pending logical declaration guarantee, finalized by ch09:t03 after verified behavior. Final user guides remain ch04:t03.
+- All four tasks are completed at `4486f6fe`, `75f18e3b`, `38757809` and `a7036538`. Canonical acceptance passes 162 tests with five existing optional-driver skips; focused Mypy, Ruff, storage stubtest and whitespace checks pass.
+- t04 records 22 failing public regressions before its six-added/five-removed-line production repair. Its final regressions verify exact scheme-only errors, retained native bytes/keys, supported rooted S3/GCS metadata and real sync/async BigQuery exports with zero query connections.
+- The Python repair uses the rebuilt native withdrawal extensions at `c7868b02`. The newer Memory publication source checkpoint `d50cf6a2` has Rust acceptance only; its Python rebuild/acceptance and other provider publication repairs remain open.
+- The chapter remains active with `last_reviewed_commit: null`. Correctness re-review and fresh quality review remain required; native publication acceptance and other chapters retain their independent ownership.
+- Scoped documentation is synchronized: `[1/1 files documented]`. Final native guarantee consolidation remains ch09:t03 and final user guides remain ch04:t03.
 
 [^sqlspec]: `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` — Classifiers, explicit native-store logical override, metadata and public operations.
 [^facade]: `src/py/vertebra/storage/_store.py` — Supported configuration, facade scheme rejection and native signing.

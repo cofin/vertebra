@@ -4,7 +4,7 @@ id: storage-completeness:ch10:t01
 chapter_id: ch10-publication-boundary-and-lifecycle
 title: Retain concrete providers behind a private publication boundary
 description: Retain concrete providers behind a private publication boundary
-status: stable
+status: draft
 state: in_progress
 priority: P1
 verification_strategy: regression_tdd
@@ -24,9 +24,9 @@ files:
 - src/rs/vertebra-storage/src/lib.rs
 tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
-estimated_loc: 230
-plan_revision: 6
-plan_commit: 43c2e3fe
+estimated_loc: 220
+plan_revision: 7
+plan_commit: null
 state_revision: 0
 claimed_by: publication_dispatch
 claimed_at: '2026-11-07T20:00:00Z'
@@ -34,8 +34,16 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_commit: d50cf6a2
+verification_evidence: >-
+  Independent core source checkpoint d50cf6a2: public publication selection Red exits
+  101 with two failures before implementation; final canonical native suite exits 0
+  with 28 passed. Reserved-target cargo fmt --all --check and storage all-target
+  Clippy -D warnings exit 0, as does git diff --check. Actual production additions
+  are 216 LOC across three files. GCS configuration capture is owned by ch21;
+  Memory NotMatch rejects at begin until mandatory shared ch20 CAS support.
+  Installed Python extensions are unchanged; final native Python acceptance remains
+  a later gate. Task closure awaits independently approved bounded split.
 created_at: '2026-11-07T12:00:00Z'
 updated_at: '2026-11-07T12:00:00Z'
 commit: null
@@ -70,11 +78,11 @@ Retain concrete providers behind a private publication boundary. Execute one bou
 
 Grounded contract evidence: [^research].
 
-Add private `conditional.rs` and `mod conditional;` in lib.rs. `ObjectStoreEngine` keeps existing `inner: Arc<dyn ObjectStore>` and a private `publication: PublicationBackend`. `PublicationBackend` retains concrete Arc handles for Memory, Local, S3, Azure, GCS, OCI and resolved endpoint/region/bucket/client options as needed; ordinary read/list code keeps inner. Build each SDK store once and share Arc into both fields, preserving existing credential provider/refresh identity and configured transport. Private `PublishCondition { Overwrite, Create, Match(String), NotMatch(String) }` normalizes PutConditionalOptions, rejecting conflicting selectors before provider effects. The private `PublicationBackend::begin(path, options)` returns a `Box<dyn MultipartUpload>` implementing provider-specific final publish; no public backend enum or generic copy-create substitute. Existing `with_store` stays usable for injected canonical stores, retaining actual PutMode support; unsupported custom-store conditional multipart fails explicitly until it provides the required primitive. S3/Azure/GCS variant constructors carry concrete handles before their later protocol task; no silent conditional fallback is allowed.
+Add private `conditional.rs` and `mod conditional;` in lib.rs. `ObjectStoreEngine` retains `inner: Arc<dyn ObjectStore>` plus private `publication: PublicationBackend`. The enum retains concrete `Arc` handles for Memory, Local, S3, Azure, GCS and OCI plus an explicit Custom variant for injected stores. Build each SDK store exactly once and clone that same Arc into read and publication fields; clone/to_async/to_sync preserve its credential-provider and client identity. Ordinary reads/lists retain their existing path. No resolved GCS configuration, connector capture or service-account parsing belongs to this task; ch21:t01 owns those additions.
 
-For GCS retain a private `GcsStageConfig { base: Url, bucket: String, client_options: ClientOptions, skip_signature: bool }` beside the same concrete SDK store. Resolve the actual builder configuration before type erasure: explicit/environment BaseUrl wins, then service-account `gcs_base_url`, then the pinned SDK default. `get_config_value(BaseUrl)` alone does not include the service-account fallback. If necessary deserialize only endpoint metadata from the configured service-account source with a narrow serde struct; preserve the SDK rejection when both service-account path and inline key are configured; resolve metadata only from its accepted singleton source, ignore credential fields and leave all authentication/refresh to SDK providers. Never log the source JSON or reconstruct credentials.
+Private `PublishCondition { Overwrite, Create, Match(String), NotMatch(String) }` normalizes `PutConditionalOptions`, rejects simultaneous selectors before effects, and maps `if_none_match="*"` to Create. `PublicationBackend::begin(path, options) -> Result<Box<dyn MultipartUpload>, ObjectStoreError>` dispatches only implemented capabilities. Memory publication stores segmented `PutPayload` parts, builds a cheap view on completion and calls actual native InMemory `PutMode::Overwrite`, `Create` or `Update(UpdateVersion { e_tag: Some(tag), version: None })` with caller attributes. Preserve the actual successful `PutResult`; no full-object concatenation or extra byte copy. Local/S3/Azure/GCS/OCI conditional multipart fail explicitly until their provider chapters implement the required primitive; normal Overwrite remains available. Existing `with_store` keeps injected ordinary PutMode support and explicitly rejects unsupported conditional multipart.
 
-Capture the exact final SDK ClientOptions with a real delegating public HttpConnector passed through `GoogleCloudStorageBuilder::with_http_connector`: its `connect(&ClientOptions)` clones the options and delegates unchanged to ReqwestConnector. In the pinned builder the final build-time connect belongs to the object store, following any credential/metadata client setup. Reuse those captured options for the private request client, including allow_http, proxy exclusions, TLS, timeouts and default headers. Read the effective skip-signature setting from the configured builder; session authentication also preserves the SDK's empty-bearer behavior. Tests compare actual configured SDK reads and publication requests against local endpoints, including each singleton service-account base-url fallback and simultaneous path-plus-inline rejection; no constructor network probe or auth fork is introduced. The retained record is consumed by the GCS resumable-stage chapter.
+Memory `NotMatch` deliberately returns native NotSupported at BEGIN, before consuming any producer input or changing a destination. This temporary capability boundary is mandatory to remove in ch20:t01, which adds Memory negative multipart completion using the SAME eight-attempt PutPayload CAS helper as ordinary negative puts. This task neither implements a separate negative loop nor claims final Memory negative-predicate acceptance. Retain concrete GCS Arc identity now; ch21:t01 adds the SDK-resolved configuration beside it, and ch14:t04 activates its final publication wrapper.
 
 Caller → seam → collaborator: public sync/async object-store or adapter operation → owned symbols above → existing native engine/provider or upstream framework contract. Preserve public APIs outside this task.
 
@@ -90,7 +98,8 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 | --- | --- | --- |
 | One engine identity | Construct and clone/to_async/to_sync engine | Read and publication handles use same concrete store/provider credentials |
 | Selector validation | if_not_exists plus if_match or both match/nonmatch selectors | InvalidInput before upload initiation |
-| Memory create/update | Begin multipart, mutate destination, finish | Real memory PutMode Create/Update applies atomically; no extra whole-object copy |
+| Memory create/update | Begin multipart with Create or Match, install a competing version, finish | Actual InMemory Create/Update rejects the stale predicate and preserves competitor bytes; segmented parts retain byte identity and metadata. |
+| Temporary Memory negative gate | Existing object, begin with opaque if_none_match, producer counter initially zero | BEGIN returns NotSupported, producer counter stays zero and destination bytes/metadata are unchanged; ch20:t01 owns final support. |
 
 ## Verification
 
@@ -111,7 +120,7 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Notes & Discoveries
 
-The executable transport staging and provider acceptance contracts await independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+The bounded dispatch contract awaits independent cold review. The current core implementation fits this task; adding 70–90 LOC of GCS configuration capture would exceed the 250-LOC bound, so ch21:t01 owns that complete contract. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `src/rs/vertebra-storage/src/store.rs` — Current repository source for this task.
 

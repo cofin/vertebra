@@ -67,7 +67,7 @@ Implement this bounded native contract after its listed predecessors. Own only t
 
 ## Symbol & Signature Contracts
 
-Add private `GcsPublicationUpload` implementing the existing native MultipartUpload boundary using the completed GcsResumableStage. Activate `mod gcs_stage;` by removing its exact test-only gate and register `mod gcs_publication;` in lib.rs. Wire the existing GCS PublicationBackend into this wrapper, retaining the same SDK store, credential provider and resolved transport/configuration. Normal non-test cargo check and all-target Clippy must pass in this activation commit; no private helper can remain unused behind test compilation.
+Add private `GcsPublicationUpload` implementing the existing native MultipartUpload boundary using the completed GcsResumableStage. Activate `mod gcs_stage;` by removing its exact test-only gate and register `mod gcs_publication;` in lib.rs. Wire the existing GCS PublicationBackend into this wrapper, retaining the same SDK store, credential provider and resolved transport/configuration. Remove every exact field-local `#[cfg_attr(not(test), expect(dead_code, reason = "consumed by ch14:t04 GCS publication"))]` introduced by ch21:t01 in conditional.rs as the real production wrapper begins reading GcsStageConfig and its GCS variant field. Normal non-test cargo check and all-target Clippy must pass in this activation commit; no private helper can remain unused behind test compilation.
 
 Finish the stage and retain its exact source generation. Execute authenticated JSON objects.rewrite with sourceGeneration and source-generation precondition pinned, raw destination encoded once, and destination ifGenerationMatch=0 for Create or the same verified SDK HEAD generation for Match/NotMatch. Evaluate caller ETags against XML SDK metadata. A conflicting destination generation rejects safely; no HEAD-to-unconditional-overwrite or implicit full-upload retry is allowed. Include caller metadata/content_type in the rewrite body. Overwrite uses the provider's normal atomic rewrite behavior.
 
@@ -81,6 +81,7 @@ Retain session, pending frame and exact generation ownership across errors and c
 
 | Case | Input | Observable result |
 | --- | --- | --- |
+| Read/publication configuration identity | Public SDK read followed by native multipart publication through separately configured explicit endpoint, singleton path fallback and singleton inline-key fallback fixtures; default headers/HTTP policy and rotating SDK credential supplier | Actual read, resumable initiation and rewrite requests reach the same configured origin with identical required transport headers; the same SDK credential provider refreshes, skip-signature performs no lookup, and an empty bearer is omitted. Dual-source rejection remains constructor acceptance in ch21:t01. |
 | Multi-request publication | done=false/t1, done=false/t2, done=true generation=900 | Every request keeps exact source/destination predicates; no source bytes are recopied in process. |
 | XML versus JSON receipt | Distinct JSON/XML ETags and a competitor just after rewrite | Public receipt is generation-900 XML ETag, usable for subsequent native if_match; successor is never reported as our result. |
 | Missing published generation | Generation-pinned XML receipt lookup fails | Explicit provider/indeterminate receipt error; no fabricated success or successor token. |
@@ -89,7 +90,7 @@ Retain session, pending frame and exact generation ownership across errors and c
 
 ## Verification
 
-Record the failing behavioral regression and passing native result at this task's actual boundary. Test-only private primitives use real SDK transport and local HTTP responders; they make no premature public-engine publication claim.
+Record the failing regression and passing public native multipart result at this task's actual boundary. This task owns the full actual SDK-read-versus-publication HTTP comparison; ch21:t01 owns only constructor/read/captured-config acceptance.
 
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo fmt --manifest-path src/rs/Cargo.toml --all --check`
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --test storage_engine_tests`

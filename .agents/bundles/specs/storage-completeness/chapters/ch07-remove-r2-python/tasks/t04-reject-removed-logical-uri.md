@@ -31,9 +31,10 @@ claimed_by: agent:r2_logical_uri_repair
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
-next_step: Reproduce the logical URI bypass and complete the independently approved repair.
+next_step: null
 last_verified_at: null
 last_verified_commit: a7036538
+commit: a7036538
 created_at: '2026-11-07T23:24:00Z'
 updated_at: '2026-11-07T23:24:00Z'
 sources:
@@ -137,9 +138,7 @@ Name new tests with `logical_uri` / `declared_backend` so focused discovery incl
 
 ## Notes & Discoveries
 
-At committed checkpoint `49cbfcbb`, `SQLSpecObjectStoreBackend("r2://unit", store=SyncObjectStore(MemoryConfig()))` exposes protocol `r2` and permits qualified read/write; relative staging validation and cursor publication also succeed. At current source checkpoint `c7868b02`, the constructor's explicit-store logical override remains unchecked and staging checks removed schemes only in the destination or string store before returning on a relative destination. These are the adopted Important `PY-NEW` contract gap; the declared-backend test isolates the second boundary without mocking the system under test.
-
-Execution preflight passes at `e178deca`: revision 6 / `43c2e3fe` matches the chapter, t03 is completed at `38757809`, all six manifest files and target symbols exist, and the task/checklist agree on `in_progress` / `[~]`. The coordinator retains Git and completion metadata ownership; the verified source change awaits its signed source commit.
+Signed source checkpoint `a7036538` rejects R2 in SQLSpec's existing protocol normalization seam and validates the resolved staging declaration before the relative-destination return. The canonical declared-backend regression exercises the second boundary independently of constructor refusal, using actual native state and real BigQuery query endpoints. All acceptance criteria are implemented; correctness re-review and fresh quality review remain open at chapter level.
 
 The initial focused command in Verification exits 1 with **22 failed, 61 passed, 84 deselected** (`/tmp/vertebra-ch07-t04-red.log`). Six actual constructor cases and twelve independent declared-backend validate/read/write cases report `DID NOT RAISE ImproperConfigurationError`. Four actual sync/async BigQuery exports reach the loopback endpoint, recording exactly `['connection', '/bigquery/v2/projects/unit/queries']`, and raise native `BigQueryError: unexpected query`; these failures establish the query boundary bypass before production changes.
 

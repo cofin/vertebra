@@ -32,9 +32,12 @@ claimed_at: '2026-11-07T23:42:15Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: '2026-11-07T23:43:06Z'
-last_verified_commit: 06bfc64f
+last_verified_at: '2026-11-07T23:49:37Z'
+last_verified_commit: 4867dfb9
 verification_evidence: |
+  R2 withdrawal source checkpoint 06bfc64f is an ancestor of repair baseline
+  34113093. Its completed validation evidence below remains applicable to the
+  unchanged native surface and canonical docs-tooling tests.
   Preflight passes at e178deca: worksheet/chapter are stable revision 5,
   approval e3e344b5 and completed dependencies 7802c676 (ch09:t01),
   38757809 (ch07:t03) and c7868b02 (ch08:t03) are ancestors. All owned
@@ -63,15 +66,34 @@ verification_evidence: |
   endpoint configuration remains intact; R2Config/from_r2/native helper are
   absent. All 85 relative links resolve; no R2 claim remains in the three owned
   pages. Log: /tmp/vertebra-ch09-t02-surface-links.log.
-  git diff --check exits 0. Production documentation diff is +3/-3 across
+  git diff --check exits 0. R2 withdrawal documentation diff at 06bfc64f is +3/-3 across
   exactly the three owned architecture/product/catalog pages; no tests change.
   Linux CPython 3.12 documentation validation is verified; other platforms and
   live cloud runtime acceptance are not claimed. Coordinator owns signed commit,
   final task state and chapter/root synchronization. No Git mutation or hosted
   action is performed; commit and last_verified_commit remain null for handoff.
+  The bounded adjacent export correction changes only the same Object Storage
+  paragraph in product.md (+1/-1). It places SyncGcpTokenCache,
+  AsyncGcpTokenCache and GcpTokenSnapshot in Python exports rather than the
+  vertebra._storage export list. The runtime probe verifies each is absent from
+  vertebra._storage and exported by vertebra.storage as the exact
+  vertebra._vertebra class. Its 85-link/R2-claim check exits 0.
+  Log: /tmp/vertebra-ch09-t02-export-surface-links.log.
+  Fresh UV_NO_SYNC=1 flock /tmp/vertebra-flow-docs-build.lock make docs exits 0
+  with docstring/CLI checks, Zensical, postbuild and artifact verification.
+  Log: /tmp/vertebra-ch09-t02-export-docs.log.
+  Fresh UV_NO_SYNC=1 uv run --no-sync python -m tools.scripts.review_setup
+  validate --rules bundles,privacy exits 0.
+  Log: /tmp/vertebra-ch09-t02-export-bundles-privacy.log.
+  Fresh UV_NO_SYNC=1 make review-check exits 0.
+  Log: /tmp/vertebra-ch09-t02-export-review-check.log.
+  git merge-base --is-ancestor 06bfc64f HEAD and git diff --check exit 0.
+  No tests or compiled sources change in this correction; no redundant native
+  rebuild or canonical test rerun is needed. Original Linux CPython 3.12 scope
+  and platform/cloud acceptance limits remain. Coordinator owns repair commit.
 created_at: '2026-11-07T12:00:00Z'
-updated_at: '2026-11-07T23:43:06Z'
-commit: 06bfc64f
+updated_at: '2026-11-07T23:49:37Z'
+commit: 4867dfb9
 sources:
 - id: implementation
   resource: docs/architecture/pyo3-and-workers.md
@@ -129,12 +151,14 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 - [x] Every matrix row passes at its public seam with existing behavior preserved.
 - [x] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
 - [x] These three architecture/product/catalog files are the owned documentation manifest items.
-- [x] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
+- [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
 
-The three owned pages remove only first-class R2 capability/configuration entries.
-All remaining provider and HMAC signing descriptions retain their existing text.
+The three owned pages remove first-class R2 capability/configuration entries.
+The Object Storage product paragraph places shared GCP token caches and snapshots
+under the Python exports, matching runtime class identity. All remaining provider
+and HMAC signing descriptions retain their existing text.
 The coordinator owns the signed local commit and final task/checklist synchronization.
 
 Revision 5 is independently approved at e3e344b5; the root documentation manifest correction is committed at 49cbfcbb. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
