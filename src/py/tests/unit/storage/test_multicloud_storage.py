@@ -1,4 +1,4 @@
-"""Unit tests for multi-cloud StorageConfig providers, GCP ADC auth/signing, OCI/Azure/R2 signing, and SyncReadableFile."""
+"""Unit tests for multi-cloud StorageConfig providers, GCP ADC auth/signing, OCI/Azure signing, and SyncReadableFile."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import vertebra._storage as native_storage
 import vertebra.storage as storage
 from vertebra.storage import (
     AsyncObjectStore,
@@ -21,7 +22,6 @@ from vertebra.storage import (
     LocalConfig,
     MemoryConfig,
     OCIConfig,
-    R2Config,
     S3Config,
     SigningConfig,
     SyncObjectStore,
@@ -30,8 +30,36 @@ from vertebra.storage import (
 from vertebra.utils.serializers import encode_json_bytes
 
 
+def test_r2_public_storage_apis_are_removed() -> None:
+    """The public storage API exposes only supported provider entry points."""
+    assert not hasattr(storage, "R2Config")
+    assert "R2Config" not in storage.__all__
+    assert not hasattr(SyncObjectStore, "from_r2")
+    assert not hasattr(AsyncObjectStore, "from_r2")
+
+
+@pytest.mark.parametrize("store_type", [SyncObjectStore, AsyncObjectStore])
+def test_r2_uri_is_rejected_before_native_construction(
+    store_type: type[SyncObjectStore] | type[AsyncObjectStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removed provider URIs fail validation before invoking the native engine."""
+
+    native_constructor = getattr(native_storage, store_type.__name__)
+    native_targets: list[str] = []
+
+    def construct_native(target: str, options: dict[str, str] | None = None) -> object:
+        native_targets.append(target)
+        return native_constructor(target, options)
+
+    monkeypatch.setattr(native_storage, store_type.__name__, construct_native)
+    with pytest.raises(ValueError, match="Unsupported storage URI scheme 'r2'"):
+        store_type("r2://assets")
+    assert native_targets == []
+
+
 def test_storage_provider_configs_to_url_and_options(tmp_path: Path) -> None:
-    """All 8 provider configurations emit canonical URLs and option dictionaries."""
+    """All 7 provider configurations emit canonical URLs and option dictionaries."""
     local_cfg = LocalConfig(root=tmp_path)
     local_url, local_opts = local_cfg.to_url_and_options()
     assert local_url.startswith("file://")
@@ -77,11 +105,6 @@ def test_storage_provider_configs_to_url_and_options(tmp_path: Path) -> None:
     assert oci_url == "oci://models@mytenancy"
     assert oci_opts["namespace"] == "mytenancy"
     assert oci_opts["region"] == "us-ashburn-1"
-
-    r2_cfg = R2Config(bucket="assets", account_id="acct123", jurisdiction="eu")
-    r2_url, r2_opts = r2_cfg.to_url_and_options()
-    assert r2_url == "r2://assets"
-    assert r2_opts["endpoint"] == "https://acct123.eu.r2.cloudflarestorage.com"
 
     http_cfg = HTTPConfig(url="https://cdn.example.com/files", headers={"X-Token": "abc"})
     http_url, http_opts = http_cfg.to_url_and_options()
@@ -270,8 +293,8 @@ def test_verify_presigned_url_gcs_raises_not_implemented() -> None:
         )
 
 
-def test_azure_sas_and_r2_uniform_chunking() -> None:
-    """Azure SAS URL signing and Cloudflare R2 uniform multipart chunking are deterministic."""
+def test_azure_sas_signing() -> None:
+    """Azure SAS URL signing is deterministic."""
     key = base64.b64encode(b"0123456789abcdef0123456789abcdef").decode("ascii")
     signed_url = SigningConfig.sign_azure_sas(
         "devstoreaccount1",
@@ -299,10 +322,6 @@ def test_azure_sas_and_r2_uniform_chunking() -> None:
     )
     presigned_az = az_store.presign_put("dir/blob.parquet", expires_in_secs=1800, timestamp=1_700_000_000)
     assert presigned_az == signed_url
-
-    payload = b"x" * (12 * 1024 * 1024)
-    chunks = R2Config.chunk_uniform_parts(payload, part_size=5 * 1024 * 1024)
-    assert [len(c) for c in chunks] == [5 * 1024 * 1024, 5 * 1024 * 1024, 2 * 1024 * 1024]
 
 
 def test_vertebra_readable_file_seek_slice_and_readinto() -> None:

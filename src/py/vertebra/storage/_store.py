@@ -35,7 +35,6 @@ __all__ = (
     "OCIConfig",
     "ObjectMeta",
     "PutResult",
-    "R2Config",
     "S3Config",
     "SigningConfig",
     "StorageConfig",
@@ -62,7 +61,6 @@ _SUPPORTED_SCHEMES: Final[frozenset[str]] = frozenset(
         "oci",
         "http",
         "https",
-        "r2",
         "b2",
     }
 )
@@ -451,58 +449,6 @@ class OCIConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         return f"oci://{self.bucket}@{self.namespace}", opts
 
 
-class R2Config(msgspec.Struct, frozen=True, gc=False, kw_only=True):
-    """Configuration for Cloudflare R2 object storage."""
-
-    bucket: str
-    """Target Cloudflare R2 bucket name."""
-    account_id: str
-    """Cloudflare 32-character hexadecimal account identifier."""
-    access_key_id: str | None = None
-    """Optional R2 S3-compatible API token access key ID."""
-    secret_access_key: str | None = None
-    """Optional R2 S3-compatible API token secret access key."""
-    jurisdiction: Literal["eu", "fedramp"] | str | None = None
-    """Optional R2 data-locality jurisdiction subdomain (`"eu"` or `"fedramp"`)."""
-    custom_domain: str | None = None
-    """Optional public custom domain bound to the R2 bucket."""
-    endpoint: str | None = None
-    """Optional explicit R2 endpoint URL override."""
-    allow_http: bool = False
-    """When True, permit unencrypted `http://` connections for local testing."""
-
-    @staticmethod
-    def chunk_uniform_parts(data: Buffer, part_size: int = 8 * 1024 * 1024) -> list[bytes]:
-        """Split a payload into uniform-sized parts for Cloudflare R2 multipart uploads."""
-        raw = memoryview(data).cast("B").tobytes()
-        native_mod = _BaseObjectStore._ensure_native_module()
-        return [bytes(part) for part in native_mod.py_chunk_r2_uniform_parts(raw, part_size)]
-
-    def resolved_endpoint(self) -> str:
-        """Resolve the Cloudflare R2 jurisdiction or custom endpoint URL."""
-        if self.endpoint:
-            return self.endpoint.rstrip("/")
-        if self.jurisdiction:
-            return f"https://{self.account_id}.{self.jurisdiction}.r2.cloudflarestorage.com"
-        return f"https://{self.account_id}.r2.cloudflarestorage.com"
-
-    def to_url_and_options(self) -> tuple[str, dict[str, str]]:
-        """Convert configuration into a canonical URL and options dictionary."""
-        opts: dict[str, str] = {
-            "account_id": self.account_id,
-            "endpoint": self.resolved_endpoint(),
-        }
-        if self.access_key_id:
-            opts["access_key_id"] = self.access_key_id
-        if self.secret_access_key:
-            opts["secret_access_key"] = self.secret_access_key
-        if self.jurisdiction:
-            opts["jurisdiction"] = str(self.jurisdiction)
-        if self.allow_http:
-            opts["allow_http"] = "true"
-        return f"r2://{self.bucket}", opts
-
-
 class HTTPConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration for HTTP/WebDAV object storage."""
 
@@ -527,7 +473,7 @@ class MemoryConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         return "memory://", {"namespace": self.namespace}
 
 
-type StorageConfig = LocalConfig | S3Config | GCSConfig | AzureConfig | OCIConfig | R2Config | HTTPConfig | MemoryConfig
+type StorageConfig = LocalConfig | S3Config | GCSConfig | AzureConfig | OCIConfig | HTTPConfig | MemoryConfig
 
 
 class ObjectMeta(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -685,7 +631,7 @@ class _BaseObjectStore:
             merged_opts = dict(options or {})
         elif isinstance(
             target,
-            (LocalConfig, S3Config, GCSConfig, AzureConfig, OCIConfig, R2Config, HTTPConfig, MemoryConfig),
+            (LocalConfig, S3Config, GCSConfig, AzureConfig, OCIConfig, HTTPConfig, MemoryConfig),
         ):
             if isinstance(target, LocalConfig):
                 create_local_dirs = target.create_dirs
@@ -906,33 +852,6 @@ class _BaseObjectStore:
         )
 
     @classmethod
-    def from_r2(
-        cls,
-        bucket: str,
-        account_id: str,
-        *,
-        access_key_id: str | None = None,
-        secret_access_key: str | None = None,
-        jurisdiction: Literal["eu", "fedramp"] | str | None = None,
-        custom_domain: str | None = None,
-        endpoint: str | None = None,
-        allow_http: bool = False,
-        signing: SigningConfig | None = None,
-    ) -> Self:
-        """Construct an ObjectStore backed by Cloudflare R2."""
-        cfg = R2Config(
-            bucket=bucket,
-            account_id=account_id,
-            access_key_id=access_key_id,
-            secret_access_key=secret_access_key,
-            jurisdiction=jurisdiction,
-            custom_domain=custom_domain,
-            endpoint=endpoint,
-            allow_http=allow_http,
-        )
-        return cls.from_config(cfg, signing=signing)
-
-    @classmethod
     def from_http(cls, url: str, *, headers: dict[str, str] | None = None) -> Self:
         """Construct an ObjectStore backed by HTTP/WebDAV."""
         return cls.from_config(HTTPConfig(url=url, headers=headers))
@@ -967,7 +886,7 @@ class _BaseObjectStore:
         """Populate missing native builder options from an attached SigningConfig when provided."""
         if self._signing is None:
             return
-        if self._scheme in {"s3", "r2", "b2"} and self._signing.provider == "s3":
+        if self._scheme in {"s3", "b2"} and self._signing.provider == "s3":
             if self._signing.region:
                 self._options.setdefault("region", self._signing.region)
             if self._signing.access_key_id:
@@ -1030,15 +949,6 @@ class _BaseObjectStore:
                 access_key_id=config.access_key_id,
                 secret_access_key=config.secret_access_key,
                 endpoint=config.endpoint,
-            )
-        if isinstance(config, R2Config) and config.access_key_id and config.secret_access_key:
-            return SigningConfig(
-                provider="s3",
-                bucket=config.bucket,
-                region="auto",
-                access_key_id=config.access_key_id,
-                secret_access_key=config.secret_access_key,
-                endpoint=config.resolved_endpoint(),
             )
         if isinstance(config, GCSConfig):
             email, pem = config.extract_service_account_identity()

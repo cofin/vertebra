@@ -37,7 +37,6 @@ from vertebra.storage import (
     GCSConfig,
     LocalConfig,
     MemoryConfig,
-    R2Config,
     S3Config,
     SigningConfig,
     SyncGcpTokenCache,
@@ -51,11 +50,10 @@ from vertebra.utils.serializers import decode_json
 
 
 @pytest.mark.parametrize("adapter", ["alchemy", "sqlspec", "starlette-sync", "starlette-async"])
-def test_framework_storage_rejects_r2_config(adapter: str) -> None:
-    """First-class R2 configs are rejected by every framework classifier."""
-    config = R2Config(bucket="unit", account_id="acct")
-    error_type = ImproperConfigurationError if adapter == "sqlspec" else TypeError
-    with pytest.raises(error_type, match="R2Config"):
+def test_framework_storage_rejects_r2_uri(adapter: str) -> None:
+    """Removed provider URIs fail through every framework storage entry point."""
+    config = "r2://unit"
+    with pytest.raises(ValueError, match="Unsupported storage URI scheme 'r2'"):
         if adapter == "alchemy":
             AlchemyObjectStoreBackend(fs=config)
         elif adapter == "sqlspec":

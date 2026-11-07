@@ -15,7 +15,6 @@ from vertebra.storage import (
     LocalConfig,
     MemoryConfig,
     OCIConfig,
-    R2Config,
     S3Config,
     SyncObjectStore,
 )
@@ -147,20 +146,6 @@ def floci_gcs_config() -> GCSConfig:
         service_account_email="test@vertebra.iam.gserviceaccount.com",
         iam_endpoint=iam_endpoint,
         access_token="floci-test-token",
-    )
-
-
-@pytest.fixture
-def floci_r2_config() -> R2Config:
-    """Return R2Config targeting a local Floci S3/R2 emulator (port 4566)."""
-    endpoint = os.environ.get("FLOCI_R2_ENDPOINT", "http://127.0.0.1:4566")
-    return R2Config(
-        bucket="vertebra-r2",
-        account_id="testaccount",
-        access_key_id="test",
-        secret_access_key="test",
-        endpoint=endpoint,
-        allow_http=True,
     )
 
 

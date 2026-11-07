@@ -22,7 +22,6 @@ from vertebra.storage import (
     AzureConfig,
     GCSConfig,
     OCIConfig,
-    R2Config,
     S3Config,
     SigningConfig,
     SyncObjectStore,
@@ -253,13 +252,13 @@ def test_signing_expiry_bounds_invalid_keys_and_rfc3986_paths() -> None:
             native_mod.py_sign_s3_v4_url(
                 "assets",
                 "auto",
-                "r2-ak",
-                "r2-sk",
+                "custom-ak",
+                "custom-sk",
                 "GET",
                 "img/logo.png",
                 bad_expiry,
                 1_794_009_600,
-                "https://acct.r2.cloudflarestorage.com",
+                "https://custom.example",
             )
         with pytest.raises(ValueError, match="expires_in_secs"):
             native_mod.py_sign_azure_sas_url(
@@ -291,28 +290,28 @@ def test_signing_expiry_bounds_invalid_keys_and_rfc3986_paths() -> None:
             1_794_009_600,
         )
 
-    r2_url = native_mod.py_sign_s3_v4_url(
+    custom_s3_url = native_mod.py_sign_s3_v4_url(
         "assets",
         "auto",
-        "r2-ak",
-        "r2-sk",
+        "custom-ak",
+        "custom-sk",
         "GET",
         "reports/2026 Q4/summary+final.parquet",
         3600,
         1_794_009_600,
-        "https://acct.r2.cloudflarestorage.com",
+        "https://custom.example",
     )
-    assert r2_url.startswith("https://acct.r2.cloudflarestorage.com/assets/reports/2026%20Q4/summary%2Bfinal.parquet?")
-    assert "X-Amz-Credential=r2-ak%2F20261107%2Fauto%2Fs3%2Faws4_request" in r2_url
+    assert custom_s3_url.startswith("https://custom.example/assets/reports/2026%20Q4/summary%2Bfinal.parquet?")
+    assert "X-Amz-Credential=custom-ak%2F20261107%2Fauto%2Fs3%2Faws4_request" in custom_s3_url
     assert native_mod.py_verify_s3_v4_url(
         "assets",
         "auto",
-        "r2-ak",
-        "r2-sk",
+        "custom-ak",
+        "custom-sk",
         "GET",
-        r2_url,
+        custom_s3_url,
         1_794_009_660,
-        "https://acct.r2.cloudflarestorage.com",
+        "https://custom.example",
     )
 
 
@@ -373,7 +372,7 @@ def test_native_oci_par_and_gcs_iam_assembly_exports() -> None:
 
 
 def test_multicloud_store_sign_sync_and_async(tmp_path: Path) -> None:
-    """Verify store.sign across GCS (RSA + IAM signBlob), S3, R2, Azure SAS, and OCI PAR for sync and async stores."""
+    """Verify store.sign across GCS (RSA + IAM signBlob), S3, custom S3 endpoints, Azure SAS, and OCI PAR for sync and async stores."""
     ts = 1_794_009_600
     pem_key = subprocess.check_output(
         ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"],
@@ -404,14 +403,15 @@ def test_multicloud_store_sign_sync_and_async(tmp_path: Path) -> None:
     s3_sync = SyncObjectStore(s3_cfg)
     s3_async = AsyncObjectStore(s3_cfg)
 
-    r2_cfg = R2Config(
-        bucket="r2-assets",
-        account_id="acct123456",
-        access_key_id="r2-ak",
-        secret_access_key="r2-sk",
+    custom_s3_cfg = S3Config(
+        bucket="custom-assets",
+        region="auto",
+        endpoint="https://custom.example",
+        access_key_id="custom-ak",
+        secret_access_key="custom-sk",
     )
-    r2_sync = SyncObjectStore(r2_cfg)
-    r2_async = AsyncObjectStore(r2_cfg)
+    custom_s3_sync = SyncObjectStore(custom_s3_cfg)
+    custom_s3_async = AsyncObjectStore(custom_s3_cfg)
 
     az_key = base64.b64encode(b"0123456789abcdef0123456789abcdef").decode("ascii")
     az_cfg = AzureConfig(container="az-lake", account="devstoreaccount1", access_key=az_key)
@@ -497,9 +497,9 @@ def test_multicloud_store_sign_sync_and_async(tmp_path: Path) -> None:
         assert s3_url.startswith("https://s3.us-east-1.amazonaws.com/s3-analytics/reports/q4.parquet?")
         assert s3_sync.verify_presigned_url(s3_url, method="GET", timestamp=ts + 10)
 
-        r2_url = r2_sync.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts)
-        assert r2_url.startswith("https://acct123456.r2.cloudflarestorage.com/r2-assets/reports/q4.parquet?")
-        assert r2_sync.verify_presigned_url(r2_url, method="GET", timestamp=ts + 10)
+        custom_s3_url = custom_s3_sync.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts)
+        assert custom_s3_url.startswith("https://custom.example/custom-assets/reports/q4.parquet?")
+        assert custom_s3_sync.verify_presigned_url(custom_s3_url, method="GET", timestamp=ts + 10)
 
         az_url = az_sync.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts)
         assert az_url.startswith("https://devstoreaccount1.blob.core.windows.net/az-lake/reports/q4.parquet?")
@@ -529,7 +529,10 @@ def test_multicloud_store_sign_sync_and_async(tmp_path: Path) -> None:
                 == gcs_iam_url
             )
             assert await s3_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts) == s3_url
-            assert await r2_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts) == r2_url
+            assert (
+                await custom_s3_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts)
+                == custom_s3_url
+            )
             assert await az_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts) == az_url
             assert await oci_async.sign("reports/q4.parquet", expires_in=600, method="GET", timestamp=ts) == oci_url
 
