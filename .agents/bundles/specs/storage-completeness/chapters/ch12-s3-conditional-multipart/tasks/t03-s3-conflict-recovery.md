@@ -4,7 +4,7 @@ id: storage-completeness:ch12:t03
 chapter_id: ch12-s3-conditional-multipart
 title: Surface S3 completion conflicts without hidden replay
 description: Surface S3 completion conflicts without hidden replay
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: regression_tdd
@@ -22,7 +22,7 @@ tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 170
 plan_revision: 6
-plan_commit: null
+plan_commit: e3e344b5
 state_revision: 0
 claimed_by: null
 claimed_at: null

@@ -5,7 +5,7 @@ chapter_id: ch08-remove-r2-native
 title: Delete native R2 builder, module, helper and stub surface
 description: Delete native R2 builder, module, helper and stub surface
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -29,17 +29,63 @@ estimated_loc: 130
 plan_revision: 4
 plan_commit: ddfb11f2
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:r2-native-withdrawal
+claimed_at: '2026-11-07T23:12:59Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-07T23:14:59Z'
+last_verified_commit: 4614213f
+verification_evidence: |
+  Signed native source and canonical test checkpoint 4614213f.
+  Red: the canonical tests test_native_r2_url_is_unsupported_with_or_without_s3_options
+  and test_native_python_r2_surface_is_withdrawn fail before production edits:
+  Rust accepts r2://bucket and the real native SyncObjectStore constructor
+  accepts it instead of raising ValueError. No SUT or collaborator is mocked.
+  Red command exits 101 (2 failed, 23 filtered out):
+  CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target"
+  PYO3_PYTHON="$PWD/.venv/bin/python3.12"
+  flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test
+  --manifest-path src/rs/Cargo.toml -p vertebra-storage --test storage_engine_tests
+  test_native_ -- --nocapture
+  Green command exits 0 (25 passed, 0.35s), preserving OCI exact multipart
+  sizes/payload and generic S3 custom-endpoint signing/verification assertions:
+  CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target"
+  PYO3_PYTHON="$PWD/.venv/bin/python3.12"
+  flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test
+  --manifest-path src/rs/Cargo.toml -p vertebra-storage --test storage_engine_tests
+  Formatting command exits 0:
+  CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target"
+  PYO3_PYTHON="$PWD/.venv/bin/python3.12"
+  cargo fmt --manifest-path src/rs/Cargo.toml --all --check
+  Clippy command exits 0 (all targets, warnings denied):
+  CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target"
+  PYO3_PYTHON="$PWD/.venv/bin/python3.12"
+  cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage
+  --all-targets -- -D warnings
+  Native rebuild command exits 0 and installs all five CPython 3.12 extensions
+  (_vertebra, _bundler, _storage, _bigquery, _spanner) from this worktree:
+  UV_NO_SYNC=1 CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target"
+  PYO3_PYTHON="$PWD/.venv/bin/python3.12" make dev
+  Post-build commands exit 0:
+  uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler
+  vertebra._storage vertebra._bigquery vertebra._spanner (5 modules)
+  uv run --no-sync ruff check src/py/vertebra/_storage.pyi
+  uv run --no-sync mypy src/py/vertebra/_storage.pyi (1 source file)
+  A fresh uv run --no-sync python probe verifies installed native SyncObjectStore
+  and AsyncObjectStore both reject r2://bucket with the exact unsupported-scheme
+  ValueError, with and without explicit generic S3 options; both construct
+  s3://bucket against https://objects.example.com with scheme s3; the native
+  py_chunk_r2_uniform_parts attribute is absent. Public Python sync/async
+  facades also reject r2://bucket. This probe exits 0.
+  git diff --check exits 0. Production diff removes 80 lines across the three
+  owned files; canonical test diff is +92/-29. r2.rs and oci.rs are unchanged.
+  The dead r2.rs file remains for explicit t03 deletion. Linux CPython 3.12 is
+  verified; other Python/platform builds and live cloud services are not claimed.
+  Coordinator owns the signed commit and final state/checklist synchronization.
 created_at: '2026-11-07T12:00:00Z'
-updated_at: '2026-11-07T12:00:00Z'
-commit: null
+updated_at: '2026-11-07T23:14:59Z'
+commit: 4614213f
 sources:
 - id: implementation
   resource: src/rs/vertebra-storage/src/store.rs
@@ -100,13 +146,13 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Acceptance Criteria
 
-- [ ] Every matrix row passes at its public seam with existing behavior preserved.
-- [ ] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
-- [ ] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
-- [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
+- [x] Every matrix row passes at its public seam with existing behavior preserved.
+- [x] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
+- [x] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
+- [x] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
 
-Revision 4 is independently approved by the fresh consolidated ch07/ch08 plan review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+Revision 4 is independently approved by the fresh consolidated ch07/ch08 plan review. Native R2 dispatch, public helper and stub exports are withdrawn; unsupported R2 URLs retain the existing invalid-URL error mapping. Generic S3 custom endpoints and OCI-owned 8 MiB accumulation remain verified. The unreferenced r2.rs source remains owned by t03. Coordinator commit binding and chapter review remain pending.
 
 [^implementation]: `src/rs/vertebra-storage/src/store.rs` — Current repository source for this task.

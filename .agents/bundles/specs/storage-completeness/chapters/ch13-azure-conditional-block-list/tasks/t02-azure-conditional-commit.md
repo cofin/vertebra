@@ -4,7 +4,7 @@ id: storage-completeness:ch13:t02
 chapter_id: ch13-azure-conditional-block-list
 title: Commit Azure block list atomically with metadata and conditions
 description: Commit Azure block list atomically with metadata and conditions
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: regression_tdd
@@ -24,7 +24,7 @@ tests:
 - src/rs/vertebra-storage/src/azure_publication.rs
 estimated_loc: 200
 plan_revision: 6
-plan_commit: null
+plan_commit: e3e344b5
 state_revision: 0
 claimed_by: null
 claimed_at: null

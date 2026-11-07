@@ -4,7 +4,7 @@ id: storage-completeness:ch12:t04
 chapter_id: ch12-s3-conditional-multipart
 title: Declare native protocol and filesystem dependencies
 description: Declare native protocol and filesystem dependencies
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: static_validation
@@ -21,7 +21,7 @@ files:
 tests: []
 estimated_loc: 30
 plan_revision: 6
-plan_commit: null
+plan_commit: e3e344b5
 state_revision: 0
 claimed_by: null
 claimed_at: null

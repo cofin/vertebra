@@ -1,5 +1,11 @@
 # Bundle Activity Log
 
+## [2026-11-07] flow-docs | Synchronized Python R2 withdrawal before Chapter 07 review
+
+- Bound framework classifier withdrawal `4486f6fe`, public configuration/export withdrawal `75f18e3b` and staging qualification repair `38757809` to the root/chapter/catalog state and storage knowledge. The facade rejects R2 schemes before native construction; staging rejects removed or mismatched qualifications before upstream queries or object effects while preserving generic S3 endpoints, raw keys and native Memory/local mapping.
+- Canonical staging acceptance passes 139 tests with five existing optional-driver skips. All five native extensions rebuild successfully; storage stubtest, focused Mypy, Ruff and diff checks pass. Chapter 07 stays active pending correctness and fresh quality reviews. OCI owns its accumulator at `2e343bc3`; native R2 dispatch/module/helper cleanup and conditional-publication acceptance remain open.
+- The final documentation manifest includes thirteen files: eleven provider/knowledge pages in Chapter 09 and two storage guides in Chapter 04. This scoped knowledge sync does not close final native/HTTP/Arrow documentation acceptance.
+
 ## [2026-11-07] flow-review | Closed adapter repair Chapter 06
 
 - Correctness and fresh quality review approve `8d073a38..115ab8f5`; the DOC-NEW cross-chapter roadmap finding is resolved and independently reverified at `bdc7799a`. Review validation includes 122 combined tests, Ruff, Mypy, bundles/privacy and diff checks, all exit 0.

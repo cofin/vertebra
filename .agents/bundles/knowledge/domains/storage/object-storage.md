@@ -73,18 +73,12 @@ sources:
   - id: src-extensions-sqlspec-storage-py
     resource: src/py/vertebra/extensions/sqlspec/storage.py
     title: "SQLSpec ObjectStoreProtocol adapter (src/py/vertebra/extensions/sqlspec/storage.py)"
-  - id: src-extensions-django-storage-py
-    resource: src/py/vertebra/extensions/django/storage.py::DjangoStorage
-    title: "Deconstructible Django Storage and File contract"
-  - id: src-tests-django-plugin-py
-    resource: src/py/tests/unit/extensions/test_django_plugin.py
-    title: "Django consumed-source collision recovery tests"
-  - id: src-tests-data-storage-integrations-py
-    resource: src/py/tests/unit/extensions/test_data_storage_integrations.py
-    title: "SQLSpec configured signing and adapter acceptance tests"
-  - id: src-tests-integration-storage-conftest-py
-    resource: src/py/tests/integration/storage/conftest.py
-    title: "Floci emulator integration fixtures (src/py/tests/integration/storage/conftest.py)"
+  - {id: src-extensions-django-storage-py, resource: "src/py/vertebra/extensions/django/storage.py::DjangoStorage", title: "Deconstructible Django Storage and File contract"}
+  - {id: src-tests-django-plugin-py, resource: "src/py/tests/unit/extensions/test_django_plugin.py", title: "Django consumed-source collision recovery tests"}
+  - {id: src-tests-data-storage-integrations-py, resource: "src/py/tests/unit/extensions/test_data_storage_integrations.py", title: "SQLSpec configured signing and adapter acceptance tests"}
+  - {id: src-tests-integration-storage-conftest-py, resource: "src/py/tests/integration/storage/conftest.py", title: "Floci emulator integration fixtures (src/py/tests/integration/storage/conftest.py)"}
+  - {id: src-db-staging-py, resource: "src/py/vertebra/db/_staging.py::ObjectStoreStaging", title: "Database staging qualification and storage resolution"}
+  - {id: src-tests-db-staging-py, resource: "src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py", title: "Staging rejection and native Memory/local compatibility tests"}
 ---
 
 # Object Storage, Streaming & Presigning
@@ -96,18 +90,20 @@ sources:
 
 Object storage comprises two layers: [`vertebra-storage`](../../../../../src/rs/vertebra-storage/src/lib.rs)[^src-vertebra-storage-cargo-toml] (`vertebra._storage`, `#[pymodule(gil_used = false)]`) over `object_store 0.13`, and [`vertebra.storage`](../../../../../src/py/vertebra/storage/__init__.py)[^src-storage-init-py], which resolves `vertebra._storage` lazily at store construction time via `import_optional("vertebra._storage")` and fails closed when the optional wheel is uninstalled.
 
-## 1. Rust Engine (`store.rs`, `oci.rs`, `r2.rs`, `lib.rs`)
+## 1. Rust Engine (`store.rs`, `oci.rs`, `lib.rs`)
 
 | Symbol | Source | Responsibility |
 |---|---|---|
-| [`BackendConfig` / `ObjectStoreEngine`](../../../../../src/rs/vertebra-storage/src/store.rs)[^src-vertebra-storage-src-store-rs] | `store.rs` | Wraps `Arc<dyn object_store::ObjectStore>` across `memory`, `file`, `s3`/`b2`, `r2`, `oci`, `gs`/`gcs`, `az`/`azure`/`abfs`, and `http`/`https`. Exposes `put_opts` (`PutConditionalOptions`: `if_not_exists`, `if_match`, `if_none_match`, `content_type`, `attributes`), `get_stream`, `create_multipart`, `list_page`, `list_with_delimiter`, `rename`, `get_range`, `head`, `exists`, `delete`, `copy`, and `list`. |
+| [`BackendConfig` / `ObjectStoreEngine`](../../../../../src/rs/vertebra-storage/src/store.rs)[^src-vertebra-storage-src-store-rs] | `store.rs` | Wraps `Arc<dyn object_store::ObjectStore>` across `memory`, `file`, `s3`/`b2`, `oci`, `gs`/`gcs`, `az`/`azure`/`abfs`, and `http`/`https`. Exposes `put_opts` (`PutConditionalOptions`: `if_not_exists`, `if_match`, `if_none_match`, `content_type`, `attributes`), `get_stream`, `create_multipart`, `list_page`, `list_with_delimiter`, `rename`, `get_range`, `head`, `exists`, `delete`, `copy`, and `list`. |
 | `PySyncStreamReader` / `PyAsyncStreamReader` (`SyncStreamReader` / `AsyncStreamReader`) | `lib.rs` | Pulls streaming `Bytes` chunks from `ObjectStoreEngine::get_stream` and slices them to optional `chunk_size` bounds as zero-copy `StorageBuffer` views without whole-object buffering. |
-| `MultipartUploadSession` (`PySyncMultipartUpload` / `PyAsyncMultipartUpload`) | `store.rs`, `lib.rs` | Stateful `Box<dyn MultipartUpload>` session (`write_part`, `complete`, `abort`). For `r2` and `oci`, buffers writes into uniform `8 MiB` parts ([`R2_UNIFORM_PART_SIZE`](../../../../../src/rs/vertebra-storage/src/r2.rs)[^src-vertebra-storage-src-r2-rs]) incrementally without concatenating full payloads into `Vec<u8>`. |
+| `MultipartUploadSession` (`PySyncMultipartUpload` / `PyAsyncMultipartUpload`) | `store.rs`, `lib.rs` | Stateful `Box<dyn MultipartUpload>` session (`write_part`, `complete`, `abort`). OCI buffers writes incrementally through `oci.rs::UniformPartAccumulator` and `OCI_UNIFORM_PART_SIZE` (`8 MiB`) without concatenating full payloads into `Vec<u8>`. |
 | `RefreshingGcpCredentialProvider` | `gcp_auth.rs` | Bridges `Arc<vertebra_core::gcp_auth::GcpTokenCache>` (`GCS_OAUTH_SCOPES`) into `GoogleCloudStorageBuilder::with_credentials(...)` when no static `service_account_path` or `service_account_key` is configured. |
 | [`OciObjectStore`](../../../../../src/rs/vertebra-storage/src/oci.rs)[^src-vertebra-storage-src-oci-rs] | `oci.rs` | Native `ObjectStore` over OCI Object Storage REST v2 (`/n/{ns}/b/{bucket}/o/{name}`, pre-authenticated `par_url`, RSA-SHA256 Cavage request signing, and `OciMultipartUpload`). |
 | `PySyncObjectStore` / `PyAsyncObjectStore` / `RustTaskAwaitable` | `lib.rs` | Frozen PyO3 classes (`SyncObjectStore` / `AsyncObjectStore`) whose `.to_async()` and `.to_sync()` methods clone the shared `ObjectStoreEngine` (`Arc`), keeping `InMemory` namespaces and HTTP pools unified across sync and async callers. |
 
-Module signing functions exported by `_storage`: `py_sign_hmac_url`, `py_verify_hmac_url`, `py_sign_s3_v4_url`, `py_verify_s3_v4_url`, `py_sign_aws_sigv4_headers`, `py_sign_gcs_v4_iam_url`, `py_sign_gcs_v4_iam_url_async`, `build_gcs_v4_canonical_request`, `assemble_gcs_iam_v4_url`, `py_sign_oci_cavage_headers`, `sign_oci_par_url`, `py_sign_azure_sas_url`, `py_chunk_r2_uniform_parts`.
+Module signing functions exported by `_storage`: `py_sign_hmac_url`, `py_verify_hmac_url`, `py_sign_s3_v4_url`, `py_verify_s3_v4_url`, `py_sign_aws_sigv4_headers`, `py_sign_gcs_v4_iam_url`, `py_sign_gcs_v4_iam_url_async`, `build_gcs_v4_canonical_request`, `assemble_gcs_iam_v4_url`, `py_sign_oci_cavage_headers`, `sign_oci_par_url`, `py_sign_azure_sas_url`.
+
+Native Rust and Python store constructors reject `r2://`; module registration, `py_chunk_r2_uniform_parts` and its stub export are absent. Generic S3 endpoints and OCI uniform multipart behavior remain supported. The unreferenced `r2.rs` source file awaits its separate deletion and provenance cleanup task. [^src-vertebra-storage-src-store-rs] [^src-vertebra-storage-src-lib-rs] [^src-storage-pyi]
 
 ## 2. Signing (`signing.rs`, `oci.rs`)
 
@@ -122,11 +118,19 @@ Module signing functions exported by `_storage`: `py_sign_hmac_url`, `py_verify_
 
 ## 3. Python Facade (`_store.py`)
 
-Provider configs are `msgspec.Struct(frozen=True, gc=False, kw_only=True)` implementing `to_url_and_options()`: `LocalConfig`, `S3Config`, `GCSConfig`, `AzureConfig`, `OCIConfig`, `R2Config`, `HTTPConfig`, `MemoryConfig` (`StorageConfig` union), paired with `SigningConfig`.
+Provider configs are `msgspec.Struct(frozen=True, gc=False, kw_only=True)` implementing `to_url_and_options()`: `LocalConfig`, `S3Config`, `GCSConfig`, `AzureConfig`, `OCIConfig`, `HTTPConfig`, `MemoryConfig` (`StorageConfig` union), paired with `SigningConfig`. `R2Config` and `from_r2` are absent from the facade and package exports. Both store classes reject `r2://` with `ImproperConfigurationError` (a `ValueError`) before native construction. Advanced Alchemy, SQLSpec and Starlette classify the remaining configs; their public construction/registration APIs reject R2 URIs. [^src-storage-store-py] [^src-storage-init-py] [^src-tests-data-storage-integrations-py]
+
+`S3Config(endpoint=...)` and `from_s3(endpoint=...)` accept explicit generic S3 custom endpoints and retain native SigV4 signing. Endpoint hostnames have no provider blacklist, R2 alias or compatibility normalization. [^src-storage-store-py] [^src-tests-data-storage-integrations-py]
 
 - `SyncObjectStore(target, *, options, signing, token_cache)` and `AsyncObjectStore(target, *, options, signing, token_cache)` validate schemes upfront and delegate every CRUD, streaming (`get_stream`, `put_stream`), conditional `put`, `list_page`, `list_with_delimiter`, `rename`, and `get_view` (`memoryview` over `StorageBuffer`) call to `vertebra._storage`.
 - `GCSConfig.sync_token_cache` / `async_token_cache` construct `vertebra._vertebra.{SyncGcpTokenCache, AsyncGcpTokenCache}`. Calling `store.to_async()` or `store.to_sync()` converts any attached token cache via `.to_async()` / `.to_sync()`, preserving a single shared Rust `Arc<GcpTokenCache>` generation counter.
-- `store.sign(key, *, expires_in=3600, method="GET")`, `presign_get`, and `presign_put` support `gs` (local RSA and keyless IAM `signBlob` with automatic `401` token-generation invalidation and retry), `s3`/`r2`, `azure`, `oci` (`par_token` or `par_url_prefix`), and `hmac`.
+- `store.sign(key, *, expires_in=3600, method="GET")`, `presign_get`, and `presign_put` support `gs` (local RSA and keyless IAM `signBlob` with automatic `401` token-generation invalidation and retry), `s3`, `azure`, `oci` (`par_token` or `par_url_prefix`), and `hmac`.
+
+### Database Staging Qualification
+
+`ObjectStoreStaging` rejects `r2://` destinations and explicit R2 store URLs before resolving paths, consuming a producer, querying an export source or mutating an object. Implicit unsupported schemes fail explicitly. Configured remote targets must match the store's protocol and authority/bucket; comparison preserves the existing `gcs`→`gs` and `azure`→`az` aliases. Matching SQLSpec URIs remain fully qualified so its backend enforces the configured root and raw-key grammar. Reason: removing a URI prefix must never redirect a foreign target into the configured store or local disk. [^src-db-staging-py] [^src-tests-data-storage-integrations-py]
+
+Explicit native Memory stores retain logical namespace keys, and native local stores retain their existing file-authority path mapping. SQLSpec's declared Memory authority still requires a match. Relative paths with an explicit store, matching local/file targets, supported remote targets and literal percent keys preserve their existing behavior. [^src-db-staging-py] [^src-tests-db-staging-py] [^src-tests-data-storage-integrations-py]
 
 ### Raw Object Keys and Conditional Errors
 
@@ -162,7 +166,7 @@ Django `_save` performs one native upload attempt; public `save` retries through
 
 ## 5. Emulator Fixtures & Test Suites
 
-[`src/py/tests/integration/storage/conftest.py`](../../../../../src/py/tests/integration/storage/conftest.py)[^src-tests-integration-storage-conftest-py] defines Floci emulator fixtures (`floci_s3_config`, `floci_azure_config`, `floci_gcs_config`, `floci_r2_config`). Rust engine and PyO3 streaming/signing tests run in [`storage_engine_tests.rs`](../../../../../src/rs/vertebra-storage/tests/storage_engine_tests.rs)[^src-vertebra-storage-tests-storage-engine-tests-rs], and Python unit suites live in `src/py/tests/unit/storage/`.
+[`src/py/tests/integration/storage/conftest.py`](../../../../../src/py/tests/integration/storage/conftest.py)[^src-tests-integration-storage-conftest-py] defines Floci emulator fixtures (`floci_s3_config`, `floci_azure_config`, `floci_gcs_config`). Rust engine and PyO3 streaming/signing tests run in [`storage_engine_tests.rs`](../../../../../src/rs/vertebra-storage/tests/storage_engine_tests.rs)[^src-vertebra-storage-tests-storage-engine-tests-rs], and Python unit suites live in `src/py/tests/unit/storage/`.
 
 ## 6. Operational Invariants & Gotchas
 
@@ -192,3 +196,5 @@ Django `_save` performs one native upload attempt; public `save` retries through
 [^src-extensions-django-storage-py]: `src/py/vertebra/extensions/django/storage.py::DjangoStorage` — Deconstructible Django Storage and File contract.
 [^src-tests-django-plugin-py]: `src/py/tests/unit/extensions/test_django_plugin.py` — Consumed-source producer collision recovery and independent limits.
 [^src-tests-data-storage-integrations-py]: `src/py/tests/unit/extensions/test_data_storage_integrations.py` — Native signing validation, provider failures and result shapes.
+[^src-db-staging-py]: `src/py/vertebra/db/_staging.py::ObjectStoreStaging` — Scheme rejection, configured qualification and path resolution.
+[^src-tests-db-staging-py]: `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py` — Staging rejection and native Memory/local compatibility.

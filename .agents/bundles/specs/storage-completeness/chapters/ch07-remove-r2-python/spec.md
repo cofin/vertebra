@@ -73,7 +73,7 @@ For an explicitly configured store/backend, validate every fully qualified URI a
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bundles/knowledge/domains/storage/object-storage.md` by ch09:t03 and user guides by ch04:t03; per-task tests are executable documentation. No separate untracked documentation obligation remains.
+Progress: `[1/1 files documented]` for this chapter's verified Python withdrawal and staging contracts in `.agents/bundles/knowledge/domains/storage/object-storage.md`. Final native provider/guarantee consolidation remains with ch09:t03 and user guides with ch04:t03; per-task canonical tests record the observable Python behavior.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -94,8 +94,8 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 ## 6. Current State & Remaining Plan Snapshot
 
 - Classifier and API withdrawal are signed at `4486f6fe` and `75f18e3b`; staging withdrawal and qualification validation are signed at `38757809` and verified by 139 canonical tests.
-- All three Python withdrawal tasks are implemented and verified. Chapter documentation sync and independent reviews remain; native dispatch/module withdrawal remains assigned to ch08.
-- Documentation: `[0/1 files documented]`, owned by the explicit consolidation tasks.
+- All three Python withdrawal tasks are implemented and verified; the storage knowledge chapter reflects their current contracts. Correctness review and fresh quality review remain pending, so this chapter stays active with no review stamp. Native dispatch/module/helper withdrawal remains assigned to ch08.
+- Documentation: `[1/1 files documented]` for the Python scope. Staging passes 139 canonical tests with five existing optional-driver skips; all-five-extension rebuild, storage stubtest, focused Mypy and Ruff checks pass. Native conditional-publication acceptance remains open.
 - Reclosure of ch01 and downstream acceptance waits for native repair gates; this chapter never depends on that reclosure.
 
 [^source]: `src/py/vertebra/extensions/alchemy/storage.py` — Verified repository implementation seam.

@@ -4,14 +4,14 @@ parent_flow: storage-completeness
 chapter_id: ch12-s3-conditional-multipart
 title: S3 Metadata Multipart and Conditional Completion
 description: S3 Metadata Multipart and Conditional Completion
-status: draft
+status: stable
 state: planned
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
 plan_revision: 6
-plan_commit: null
+plan_commit: e3e344b5
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
 last_reviewed_commit: null

@@ -30,7 +30,7 @@ chapters:
 - ch19-sqlspec-arrow-streaming
 - ch20-ordinary-negative-cas
 current_chapter: ch08-remove-r2-native
-current_task: storage-completeness:ch08:t02
+current_task: storage-completeness:ch08:t03
 parent_prd: native-data-platform
 research:
 - ../native-data-platform/research/gap-analysis_20261103.md
@@ -90,7 +90,7 @@ tags:
 # Feature-Complete Storage
 
 <!-- truth: start -->
-- **Canonical Engine Seam**: `vertebra-storage` (`vertebra._storage`, `vertebra-core[storage]`) provides `SyncObjectStore`, `AsyncObjectStore`, `SyncReadableFile`, and `AsyncReadableFile` over `gs`, `s3`, `r2`, `oci`, `az`, `file`, and explicit test-only `memory` backends [^rs-storage-engine] [^py-storage-facade].
+- **Canonical Engine Seam**: `vertebra-storage` (`vertebra._storage`, `vertebra-core[storage]`) provides `SyncObjectStore`, `AsyncObjectStore`, `SyncReadableFile`, and `AsyncReadableFile` over `gs`, `s3`, `oci`, `az`, `file`, and explicit test-only `memory` backends. The Python facade rejects `r2://`; native R2 dispatch/module/helper withdrawal remains in ch08 [^rs-storage-engine] [^py-storage-facade].
 - **Async & Optional Wheel Invariants**: `vertebra._storage` resolves lazily via `import_optional("vertebra._storage")` and fails closed with `MissingDependencyError(..., extra="storage")` or `ImproperConfigurationError`; `src/py/vertebra/storage/_store.py` contains zero `asyncio.to_thread` calls and zero `self._memory` fallback dicts [^py-storage-facade].
 - **Unified GCP Auth**: Python storage and presigning callers consume `vertebra._vertebra.{SyncGcpTokenCache, AsyncGcpTokenCache, GcpTokenSnapshot}` backed by `vertebra_core::gcp_auth::GcpTokenCache`, removing duplicate token classes from `vertebra._storage` and pure-Python OAuth fetchers from `storage/_store.py` [^core-gcp-auth].
 - **ORM & SQL Contracts**: SQLSpec `ObjectStoreBackend` preserves canonical `*_sync` / `*_async` methods and unsupported-signing `NotImplementedError`; Advanced Alchemy `ObjectStoreBackend(StorageBackend)` registers through `StorageRegistry`; Django `DjangoStorage` is deconstructible and returns Django `File` handles. All three require explicit storage configuration [^sqlspec-storage] [^alchemy-storage] [^django-storage].
@@ -204,7 +204,7 @@ flowchart LR
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/9 files documented]` for final repair/HTTP/Arrow acceptance. Existing baseline prose is not final evidence for the repaired guarantees.
+Progress: `[0/13 files documented]` for final repair/HTTP/Arrow acceptance. Existing baseline prose and scoped Python withdrawal knowledge sync are not final evidence for the repaired native guarantees.
 
 | File | Owning task | Final content |
 | --- | --- | --- |
@@ -217,6 +217,10 @@ Progress: `[0/9 files documented]` for final repair/HTTP/Arrow acceptance. Exist
 | .agents/bundles/product/product.md | ch09:t02 | Supported provider product contract. |
 | .agents/bundles/knowledge/domains/index.md | ch09:t02 | Current object-storage catalog. |
 | .agents/bundles/knowledge/domains/storage/object-storage.md | ch09:t03 then ch04:t03 | Evidence-backed native repair semantics, followed by HTTP/Arrow consumer contracts and provenance. |
+| .agents/bundles/knowledge/domains/data/gcp-bigquery-and-spanner-drivers.md | ch09:t03 | Supported staging schemes and current data-driver provider claims. |
+| README.md | ch09:t04 | Repository provider overview without first-class R2 claims. |
+| docs/reference/index.md | ch09:t04 | Supported-provider reference overview. |
+| docs/usage/embeddings-and-vectors.md | ch09:t04 | Supported embedding storage providers. |
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -278,12 +282,12 @@ Progress: `[0/9 files documented]` for final repair/HTTP/Arrow acceptance. Exist
 - Original ch01:t01 is blocked; chapter review stamp is clear. Repair tasks use its committed functional artifacts directly, avoiding a dependency cycle.
 - ch02 original commits remain recorded and correctness approval is absent. ch06 repairs and native acceptance precede fresh correctness and quality review.
 - Native-dependent original ch03/ch04:t02 are blocked with explicit unblock conditions. HTTP coordinator owns ch03 detail and its integration evidence.
-- All three ch07 Python withdrawal tasks are signed and verified; chapter documentation sync and independent reviews remain. Ch08 native OCI ownership and R2 dispatch/module withdrawal is the parallel native frontier. Generic S3 endpoint capability remains verified. Ch06 is reviewed and complete through `115ab8f5`.
-- The complete roadmap contains 20 chapters and 56 tasks. ch20:t01 owns shared ordinary negative-ETag byte-put CAS and actual OCI ordinary headers; native acceptance/reclosure depends on it. S3/Azure frontiers remain draft pending independent cold review of this missing-owner repair.
+- All three ch07 Python withdrawal tasks are signed at `4486f6fe`, `75f18e3b` and `38757809`; scoped storage knowledge is synchronized. Staging qualification and native Memory/local compatibility pass 139 canonical tests with five existing optional-driver skips; generic S3 endpoint capability remains verified. Ch07 stays active pending correctness and fresh quality reviews. Ch08 OCI accumulator ownership is committed at `2e343bc3`; native R2 dispatch/module/helper withdrawal remains active at ch08:t02. Native conditional-publication acceptance remains open.
+- The complete roadmap contains 20 chapters and 56 tasks. ch20:t01 owns shared ordinary negative-ETag byte-put CAS and actual OCI ordinary headers; native acceptance/reclosure depends on it. Shared ordinary CAS and the complete S3/Azure frontiers are independently approved at `e3e344b5`; their declared execution dependencies remain.
 - ch10 transport is staged under its library-test module until ch12:t01 activates the first real provider caller; revised native blueprints retain their scoped independent review requirements. ch10–ch15 cover native publication and lifecycle; ch11 uses persistent SDK-illegal .vtb-cas-lock#0 per physical parent directory and same-parent numeric-# stage names, with physical-directory-ID lock ordering and payload staging outside locks.
 - S3 direct completion returns honest typed 409 conflict/abort; GCS source-generation-pinned rewrite is backend-specific staging.
 - Original Arrow/SHM and user guides remain full scope. ch17–ch19 provide bounded sync codecs, typed per-batch PyArrow worker/native async I/O bridge and lazy SQLSpec integration; original ch04:t02 retains integration acceptance.
-- Final docs/OKF acceptance is `[0/9 files documented]`; correctness review then fresh quality review is mandatory before finish/archive.
+- Final docs/OKF acceptance is `[0/13 files documented]`; ch09 owns eleven provider/knowledge pages and ch04 owns two storage guides. Correctness review then fresh quality review is mandatory before finish/archive.
 
 [^rs-storage-engine]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — Native Rust storage engine over `object_store`.
 [^py-storage-facade]: `src/py/vertebra/storage/_store.py::SyncObjectStore` — Python sync/async object store facade and backend configs.

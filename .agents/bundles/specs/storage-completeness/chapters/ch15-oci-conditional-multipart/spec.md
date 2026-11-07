@@ -10,7 +10,7 @@ planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
-plan_revision: 4
+plan_revision: 5
 plan_commit: null
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
@@ -69,6 +69,8 @@ Caller → seam → collaborator: public storage/framework calls → owned deep 
 | --- | --- |
 | Deep owned boundary with exact provider semantics | Chosen: hides credentials, staging and concurrency while preserving configured SDK behavior. |
 | Generic head-then-write, Python lock, copy-create publication or blanket exception conversion | Rejected: loses atomicity, update results, metadata or error identity. |
+
+The part-count boundary is tested through the actual private OciMultipartUpload in inline `oci::tests` with real HTTP upload/abort observation; no external integration target accesses its private fields. Public engine tests retain irregular 8 MiB framing and exact payload coverage.
 
 ## 3. Documentation & OKF Knowledge Plan
 
