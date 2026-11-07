@@ -5,7 +5,7 @@ chapter_id: ch02-wire-codec-and-session-startup
 title: Negotiate PostgreSQL SSLRequest and verify rustls peer TLS identities
 description: Implement tls::connect negotiating the 8-byte PostgreSQL SSLRequest preamble and upgrading via shared TransportStream::upgrade_tls across Disable, Prefer, Require, VerifyCa, and VerifyFull with CA, SNI, and mTLS verification.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -35,7 +35,7 @@ blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-07T23:01:17Z"
-last_verified_commit: null
+last_verified_commit: be425286
 verification_evidence:
   red: 'Canonical enabled_modes_upgrade_before_trust_startup test exits 101 with UnsupportedFeature("only direct plaintext TCP is available") before integration.'
   focused: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_tls_wire_tests exits 0: 10 real rcgen/tokio-rustls peer tests cover the complete TLS matrix."
@@ -46,8 +46,8 @@ verification_evidence:
   environment: "UV_NO_SYNC=1; PYO3_PYTHON=${PWD}/.venv/bin/python; dedicated Cargo target; aggregate tests acquire the shared SHM test lock."
   checkpoint: "Verified working tree awaits the coordinator's signed source commit; task remains in_progress with commit null."
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T23:01:17Z"
-commit: null
+updated_at: "2026-11-07T23:03:32Z"
+commit: be425286
 sources:
   - id: rs-upgrade-tls
     resource: src/rs/vertebra-db/src/connection.rs::TransportStream

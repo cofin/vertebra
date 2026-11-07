@@ -39,7 +39,7 @@ chapters:
   - ch30-user-and-domain-docs
   - ch31-final-review-and-release-gate
 current_chapter: ch02-wire-codec-and-session-startup
-current_task: "native-postgres-driver:ch02:t03"
+current_task: "native-postgres-driver:ch02:t04"
 parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
@@ -326,11 +326,11 @@ Every worksheet (`111` total across `31` chapters) executes within its bounded o
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dabc3c4d`; flow `state: active`, `plan_revision: 6`, `plan_commit: 8833b064`.
-- **Progress**: `1/31` chapters and `6/111` tasks are complete; chapter 01 passes its prerequisite checkpoint and fresh correctness/quality review.
-- **Current Chapter & Task**: Chapter 02 codec and trust sessions are verified; `native-postgres-driver:ch02:t03` implements SSLRequest/TLS with 10 passing peer tests, all 39 crate tests, and strict all-target Clippy; its signed checkpoint remains pending.
-- **Remaining Plan**: TLS checkpoint and password/MD5 task in chapter 02 and chapters 03–31 retain their complete blueprints.
-- **Documentation**: `[0/11 files documented]`; chapter 30 owns full guides and knowledge synchronization.
+- **Verified Baseline**: `HEAD @ be425286`; flow `state: active`, `plan_revision: 6`, `plan_commit: 8833b064`.
+- **Progress**: `1/31` chapters and `7/111` tasks are complete; chapter 02 has codec, trust sessions, and TLS verified.
+- **Current Chapter & Task**: `ch02-wire-codec-and-session-startup`, `native-postgres-driver:ch02:t04` (password/MD5 authentication).
+- **Remaining Plan**: Chapter 02 authentication and chapters 03–31 retain complete blueprints.
+- **Documentation**: `[0/11 files documented]`; full driver guides and domain knowledge remain assigned to chapter 30.
 - **Next Action**: Continue `/flow:implement native-postgres-driver`.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
