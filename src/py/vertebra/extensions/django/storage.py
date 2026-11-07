@@ -146,7 +146,14 @@ class DjangoStorage(_Storage):
 
     def save(self, name: str | None, content: Any, max_length: int | None = None) -> str:
         """Save Django files or byte buffers using Django's collision handling."""
-        return str(super().save(name, self._file(content, name), max_length=max_length))
+        content = self._file(content, name)
+        while True:
+            try:
+                return str(super().save(name, content, max_length=max_length))
+            except FileExistsError as exc:
+                if self._file_overwrite:
+                    raise
+                self._rewind_after_collision(content, exc)
 
     async def aopen(self, name: str, mode: str = "rb") -> File:
         """Load bytes asynchronously before exposing Django's synchronous file API."""
@@ -171,7 +178,10 @@ class DjangoStorage(_Storage):
                     self._key(name), content.chunks(), if_not_exists=not self._file_overwrite
                 )
                 return name
-            except FileExistsError:
+            except FileExistsError as exc:
+                if self._file_overwrite:
+                    raise
+                self._rewind_after_collision(content, exc)
                 name = self._alternative_name(name, max_length)
 
     def delete(self, name: str) -> None:
@@ -257,14 +267,10 @@ class DjangoStorage(_Storage):
         return File(readable, name=name)
 
     def _save(self, name: str, content: Any) -> str:
-        """Stream file chunks and retry native create-only collisions safely."""
+        """Stream one upload attempt and leave collision recovery to the public save operation."""
         content = self._file(content, name)
-        while True:
-            try:
-                self._store.put_stream(self._key(name), content.chunks(), if_not_exists=not self._file_overwrite)
-                return name
-            except FileExistsError:
-                name = self.get_available_name(name)
+        self._store.put_stream(self._key(name), content.chunks(), if_not_exists=not self._file_overwrite)
+        return name
 
     def _key(self, name: str | None) -> str:
         """Validate an object name and apply the configured namespace."""
@@ -292,6 +298,14 @@ class DjangoStorage(_Storage):
                 raise module.SuspiciousFileOperation("The filename cannot fit within max_length")
             candidate = posixpath.join(directory, self.get_alternative_name(root, extension))
         return str(candidate)
+
+    @staticmethod
+    def _rewind_after_collision(content: File, conflict: FileExistsError) -> None:
+        """Replay seekable input or preserve the conflict when consumed bytes cannot be recovered."""
+        try:
+            content.seek(0)
+        except (AttributeError, OSError, ValueError):
+            raise conflict from None
 
     @staticmethod
     def _file(content: Any, name: str | None) -> File:

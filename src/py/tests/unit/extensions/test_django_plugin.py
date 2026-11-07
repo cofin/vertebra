@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import subprocess
 import sys
 import threading
 import time
+from collections.abc import AsyncIterable, AsyncIterator, Buffer, Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -70,7 +73,7 @@ from vertebra.extensions.django.db.backends.sqlite3 import (
 from vertebra.extensions.django.templatetags.vertebra_vite import vite_asset, vite_hmr_client
 from vertebra.extensions.sqlalchemy.dialects import SyncDBAPIConnection
 from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncConfig, SQLiteSyncConfig
-from vertebra.storage import SigningConfig
+from vertebra.storage import PutResult, SigningConfig
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import import_string
 from vertebra.utils.serializers import decode_json
@@ -826,3 +829,167 @@ async def test_django_storage_signing_and_async_limits(tmp_path: Path) -> None:
             local.path(name)
         with pytest.raises(SuspiciousFileOperation):
             await local.asave(name, ContentFile(b"no"))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("max_length", [12, 16])
+async def test_django_storage_retry_preserves_consumed_content_and_length(asynchronous: bool, max_length: int) -> None:
+    """A consumed create collision retains both the field limit and complete retry bytes."""
+    name = "12345678.txt"
+    store = _AsyncCreateCollisionStore({name}) if asynchronous else _CreateCollisionStore({name})
+    storage = DjangoStorage(store=store)
+    content = _CurrentPositionFile(io.BytesIO(b"new data"))
+    if max_length == 12:
+        with pytest.raises(SuspiciousFileOperation):
+            if asynchronous:
+                await storage.asave(name, content, max_length=max_length)
+            else:
+                storage.save(name, content, max_length=max_length)
+        assert storage.listdir("") == ([], [name])
+    else:
+        saved = (
+            await storage.asave(name, content, max_length=max_length)
+            if asynchronous
+            else storage.save(name, content, max_length=max_length)
+        )
+        assert saved != name
+        assert len(saved) <= max_length
+        with storage.open(saved) as result:
+            assert result.read() == b"new data"
+    with storage.open(name) as racer:
+        assert racer.read() == b"racer"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("file_overwrite", [False, True])
+async def test_django_storage_exhausted_nonseekable_collision_fails_without_empty_write(
+    asynchronous: bool, file_overwrite: bool
+) -> None:
+    """A non-replayable consumed input cannot turn a collision into an empty success."""
+    name = "report.txt"
+    store = _AsyncCreateCollisionStore({name}) if asynchronous else _CreateCollisionStore({name})
+    storage = DjangoStorage(store=store, file_overwrite=file_overwrite)
+    content = _NonSeekableCurrentFile(io.BytesIO(b"payload"))
+    with pytest.raises(FileExistsError):
+        if asynchronous:
+            await storage.asave(name, content)
+        else:
+            storage.save(name, content)
+    assert storage.listdir("") == ([], [name])
+    with storage.open(name) as racer:
+        assert racer.read() == b"racer"
+
+
+def test_django_storage_concurrent_retries_keep_per_operation_limits() -> None:
+    """Same-instance synchronous retries keep distinct limits and independent file positions."""
+    names = ("leftlongname.txt", "rightlongname.txt")
+    storage = DjangoStorage(store=_CreateCollisionStore(set(names), threading.Barrier(2)))
+    payloads = (b"left data", b"right data")
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        futures = [
+            workers.submit(storage.save, name, _CurrentPositionFile(io.BytesIO(payload)), limit)
+            for name, payload, limit in zip(names, payloads, (16, 24), strict=True)
+        ]
+        results = [future.result(timeout=10) for future in futures]
+    for original, saved, payload, limit in zip(names, results, payloads, (16, 24), strict=True):
+        assert saved != original
+        assert len(saved) <= limit
+        with storage.open(saved) as uploaded:
+            assert uploaded.read() == payload
+        with storage.open(original) as racer:
+            assert racer.read() == b"racer"
+
+
+@pytest.mark.anyio
+async def test_django_storage_concurrent_async_retries_keep_per_operation_limits() -> None:
+    """Same-instance async retries retain independent limits after both inputs are consumed."""
+    names = ("leftlongname.txt", "rightlongname.txt")
+    storage = DjangoStorage(store=_AsyncCreateCollisionStore(set(names), asyncio.Barrier(2)))
+    payloads = (b"left data", b"right data")
+    results = await asyncio.wait_for(
+        asyncio.gather(
+            *(
+                storage.asave(name, _CurrentPositionFile(io.BytesIO(payload)), limit)
+                for name, payload, limit in zip(names, payloads, (16, 24), strict=True)
+            )
+        ),
+        timeout=10,
+    )
+    for original, saved, payload, limit in zip(names, results, payloads, (16, 24), strict=True):
+        assert saved != original
+        assert len(saved) <= limit
+        with await storage.aopen(saved) as uploaded:
+            assert uploaded.read() == payload
+        with await storage.aopen(original) as racer:
+            assert racer.read() == b"racer"
+
+
+class _CurrentPositionFile(File):
+    """Seekable file whose producer does not implicitly rewind between upload attempts."""
+
+    def chunks(self, chunk_size: int | None = None) -> Iterator[bytes]:
+        while chunk := self.read(chunk_size or 2):
+            yield chunk
+
+
+class _NonSeekableCurrentFile(_CurrentPositionFile):
+    """Input that cannot replay bytes consumed by an unsuccessful upload."""
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        raise io.UnsupportedOperation("input cannot rewind")
+
+
+class _CreateCollisionStore(SyncObjectStore):
+    """Real native uploads lose their first consumed attempt to a competing native create."""
+
+    def __init__(self, paths: set[str], barrier: threading.Barrier | None = None) -> None:
+        super().__init__("memory://")
+        self._collision_paths = paths
+        self._barrier = barrier
+        self._claim_lock = threading.Lock()
+
+    def put_stream(self, path: str, chunks: Iterable[Buffer], **kwargs: Any) -> PutResult:
+        with self._claim_lock:
+            collide = path in self._collision_paths
+            self._collision_paths.discard(path)
+        if not collide:
+            return super().put_stream(path, chunks, **kwargs)
+
+        def consumed_chunks() -> Iterator[Buffer]:
+            yield from chunks
+            if self._barrier is not None:
+                self._barrier.wait(timeout=5)
+            self.put(path, b"racer", if_not_exists=True)
+            self.put(path, b"blocked", if_not_exists=True)
+
+        return super().put_stream(path, consumed_chunks(), **kwargs)
+
+
+class _AsyncCreateCollisionStore(AsyncObjectStore):
+    """Async native uploads surface a real collision only after the source is exhausted."""
+
+    def __init__(self, paths: set[str], barrier: asyncio.Barrier | None = None) -> None:
+        super().__init__("memory://")
+        self._collision_paths = paths
+        self._barrier = barrier
+
+    async def put_stream(self, path: str, chunks: AsyncIterable[Buffer] | Iterable[Buffer], **kwargs: Any) -> PutResult:
+        if path not in self._collision_paths:
+            return await super().put_stream(path, chunks, **kwargs)
+        self._collision_paths.remove(path)
+
+        async def consumed_chunks() -> AsyncIterator[Buffer]:
+            if isinstance(chunks, AsyncIterable):
+                async for chunk in chunks:
+                    yield chunk
+            else:
+                for chunk in chunks:
+                    yield chunk
+            if self._barrier is not None:
+                await asyncio.wait_for(self._barrier.wait(), timeout=5)
+            await self.put(path, b"racer", if_not_exists=True)
+            await self.put(path, b"blocked", if_not_exists=True)
+
+        return await super().put_stream(path, consumed_chunks(), **kwargs)
