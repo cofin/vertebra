@@ -320,7 +320,7 @@ Every worksheet (`111` total across `31` chapters) executes in one bounded invoc
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Baseline**: `HEAD @ 05fff946` above `main @ 077a3fe9`; `state: active`, `has_chapters: true`, `plan_revision: 4`, `plan_commit: 45ff9563`.
-- **Active Chapter & Next Task**: [ch01-wheel-scaffold-and-config](chapters/ch01-wheel-scaffold-and-config/spec.md) (`native-postgres-driver:ch01:t04`); all `31` chapters (`111` vertical-slice tasks) have `planning_status: complete`; `ch01` is active and `ch02`–`ch31` are planned (`3/111` completed; `ch01:t01`–`t03` verified, `ch01:t04` pending).
+- **Active Chapter & Next Task**: [ch01-wheel-scaffold-and-config](chapters/ch01-wheel-scaffold-and-config/spec.md) (`native-postgres-driver:ch01:t04`); all `31` chapters (`111` vertical-slice tasks) have `planning_status: complete`; `ch01` is active and `ch02`–`ch31` are planned (`3/111` completed; `ch01:t01`–`t03` verified, `ch01:t04` in progress).
 - **Documentation & OKF Status**: `[0/11 files documented]`, scheduled in [ch30-user-and-domain-docs](chapters/ch30-user-and-domain-docs/spec.md) (`ch30:t01`–`ch30:t04`), followed by final complete-driver review and acceptance in [ch31-final-review-and-release-gate](chapters/ch31-final-review-and-release-gate/spec.md) (`ch31:t01`).
 - **Delivery & Next Action**: Complete single-PR delivery on `feat/native-postgres-driver`; intermediate chapters never trigger early `/flow:finish` or `/flow:archive`. Next canonical command: `/flow:implement native-postgres-driver`.
 

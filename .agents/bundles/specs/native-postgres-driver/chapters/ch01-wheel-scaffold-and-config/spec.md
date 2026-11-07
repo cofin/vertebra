@@ -140,14 +140,14 @@ Progress: `[0/0 files documented in ch01]` (`src/py/vertebra/_postgres.pyi` modu
 - [x] [5f25a4a0] native-postgres-driver:ch01:t01 — Scaffold vertebra-postgres Cargo manifest, build script, and free-threaded PyO3 module (tasks/t01-crate-and-pymodule-scaffold.md)
 - [x] [9e128425] native-postgres-driver:ch01:t02 — Register workspace member, add vertebra-db socket2/half pins, and lock Cargo.lock (tasks/t02-workspace-and-db-cargo-lock.md)
 - [x] [05fff946] native-postgres-driver:ch01:t03 — Wire vertebra-postgres wheel, _postgres.pyi stub, and Makefile build/test targets (tasks/t03-wheel-stub-and-makefile-matrix.md)
-- [ ] native-postgres-driver:ch01:t04 — Implement pure PostgresConfig validation and sanitized PostgresError categories (tasks/t04-configuration-and-error-categories.md)
+- [~] native-postgres-driver:ch01:t04 — Implement pure PostgresConfig validation and sanitized PostgresError categories (tasks/t04-configuration-and-error-categories.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings && make dev && make postgres-wheel-check && make postgres-test && uv run --no-sync python -m mypy.stubtest vertebra._postgres` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Baseline**: `HEAD @ 05fff946`; chapter `state: active`, `planning_status: complete`.
-- **Remaining Tasks in Chapter**: `t04` (`1/4` pending; `t01` verified at `5f25a4a0`, `t02` at `9e128425`, `t03` at `05fff946`).
+- **Remaining Tasks in Chapter**: `t04` (`1/4` in progress; `t01` verified at `5f25a4a0`, `t02` at `9e128425`, `t03` at `05fff946`).
 - **Documentation & OKF Status**: `[0/0 files documented in ch01]`; `_postgres.pyi` and strict wheel/sdist checks verified in `t03`, root `pyproject.toml`/`uv.lock`/`areas.toml` wired in `ch08:t02`–`t04`, and full docs/OKF scheduled in `ch30`.
 - **Downstream Dependents**: Unblocks `ch02-wire-codec-and-session-startup` (`ch02:t01` depends on `ch01:t04`).
 

@@ -5,7 +5,7 @@ chapter_id: ch01-wheel-scaffold-and-config
 title: Implement pure PostgresConfig validation and sanitized PostgresError categories
 description: Declare the complete owned PostgresConfig option record matching contracts.md, enforce pure scalar/port/timeout/NUL/PEM/five-spelling TlsMode validation with secret redaction, and define ServerError and PostgresError categories.
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -26,14 +26,21 @@ estimated_loc: 235
 plan_revision: 4
 plan_commit: 45ff9563
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:ch01-t04
+claimed_at: "2026-11-07T20:49:04Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
+last_verified_at: "2026-11-07T20:50:03Z"
 last_verified_commit: null
-verification_evidence: null
+verification_evidence:
+  - "UV_NO_SYNC=1; PYO3_PYTHON=${PWD}/.venv/bin/python; CARGO_TARGET_DIR=/tmp/vtb-cargo-target"
+  - "Red: cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_wire_tests --locked: exit 101; unresolved public _postgres::config and _postgres::errors imports before implementation"
+  - "Green: same focused command: exit 0; 7 passed, 0 failed, 0 ignored"
+  - "flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked: exit 0; 7 integration tests, 0 unit/doc tests"
+  - "cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings: exit 0"
+  - "rustfmt --edition 2024 --check on lib.rs, config.rs, errors.rs, postgres_wire_tests.rs: exit 0"
+  - "git diff --check: exit 0; changes remain unstaged for coordinator signed implementation and SHA receipt commits"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-07T16:40:00Z"
 commit: null
@@ -132,11 +139,16 @@ Commit as `feat(postgres): validate owned connection options and error categorie
 
 ## Acceptance Criteria
 
-- [ ] `PostgresConfig` owns every constructor field and default specified in `contracts.md` without exposing partial mutating setters or reparsing DSNs (R2, R3).
-- [ ] Pure validation rejects empty/NUL strings, out-of-range ports, non-finite/non-positive timeouts, mismatched PEM pairs, URI/path hosts, and non-canonical `sslmode` / `channel_binding` values without I/O (R2, R3).
-- [ ] `ServerError` (`severity`, `sqlstate`, `message`, `diagnostics`) and `PostgresError::Server(ServerError)` retain validated 5-byte ASCII SQLSTATE codes and structured diagnostic tuples upfront while redacting secrets and `D`/`H`/`W` details from formatted messages (R2, R3).
+- [x] `PostgresConfig` owns every constructor field and default specified in `contracts.md` without exposing partial mutating setters or reparsing DSNs (R2, R3).
+- [x] Pure validation rejects empty/NUL strings, out-of-range ports, non-finite/non-positive timeouts, mismatched PEM pairs, URI/path hosts, and non-canonical `sslmode` / `channel_binding` values without I/O (R2, R3).
+- [x] `ServerError` (`severity`, `sqlstate`, `message`, `diagnostics`) and `PostgresError::Server(ServerError)` retain validated 5-byte ASCII SQLSTATE codes and structured diagnostic tuples upfront while redacting secrets and `D`/`H`/`W` details from formatted messages (R2, R3).
 
 ## Notes & Discoveries
+
+- The public Rust seam owns all 26 constructor fields. Invalid values yield field-only configuration messages; debug formatting replaces password/key material and both authentication maps with redaction markers.
+- Server display retains the primary severity/message and SQLSTATE, replaces control characters with spaces, and omits diagnostic detail/hint/context fields while retaining their exact structured tuples.
+- Pure validation leaves cloud/Unix cross-field projection to the scheduled chapters. Both maps and PEM buffers move into owned configuration without file, DNS, or network access.
+- Verification is complete on the owned working-tree changes. Task state remains `in_progress` until the coordinator creates the signed implementation commit and records its SHA.
 
 - [2026-11-07 16:40] Defining `ServerError` (`severity`, `sqlstate`, `message`, `diagnostics: Vec<(u8, String)>`) and `PostgresError::Server(ServerError)` upfront in `ch01:t04` ensures `ch09:t02` simple-query error projections require zero breaking variant changes across `ch02`–`ch08`.
 

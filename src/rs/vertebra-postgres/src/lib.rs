@@ -1,5 +1,8 @@
 //! Standalone native PostgreSQL client extension for Vertebra.
 
+pub mod config;
+pub mod errors;
+
 use pyo3::prelude::*;
 
 /// Whether this build targets free-threaded Python.
