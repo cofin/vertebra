@@ -5,7 +5,7 @@ title: Native PostgreSQL public contracts
 description: Public interface and ownership contracts for the complete native PostgreSQL driver plan.
 status: stable
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T23:16:07Z"
+updated_at: "2026-11-07T23:44:42Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:40:00Z"
@@ -132,6 +132,14 @@ when supplied. Startup accepts trust, cleartext password, and MD5 with strict
 authentication completion before parameters/backend key/idle ReadyForQuery.
 The pinned `postgres-protocol = "=0.6.12"` encoders and `md5_hash` own password
 framing and hashing; SCRAM and channel binding belong to chapter 03.
+
+The codec validates bounded frame/parser envelopes; startup session consumers
+exhaust lazy notice/error fields and validate UTF8 before discarding notices or
+constructing errors. Untrusted human/free-text diagnostics mask the non-empty
+configured password and actual submitted MD5 token before Display/Debug ownership.
+Structured protocol fields `S`, `V`, `C`, `P`, `p`, and `L` remain exact, including
+coincidental low-entropy password characters. Empty secrets leave text unchanged;
+private credential-bearing authentication storage has no `Debug` implementation.
 
 Both native pool constructors take the complete connection signature plus:
 

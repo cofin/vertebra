@@ -44,9 +44,9 @@ verification_evidence:
   formatting: "cargo fmt --manifest-path src/rs/Cargo.toml -p vertebra-postgres -- --check and git diff --check exit 0."
   review_privacy: "UV_NO_SYNC=1 uv run --no-sync python -m tools.scripts.review_setup validate exits 0."
   environment: "UV_NO_SYNC=1; PYO3_PYTHON=${PWD}/.venv/bin/python; dedicated Cargo target; aggregate tests acquire the shared SHM test lock."
-  checkpoint: "Source and tests are verified; parent binds the signed source SHA before completion."
+  checkpoint: "Completed repair receipt binds to c5173f1b. Exact chapter checkpoint 0446ee46 passes all 54 tests and locked all-target Clippy with -D warnings."
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T23:43:50Z"
+updated_at: "2026-11-07T23:44:42Z"
 commit: c5173f1b
 sources:
   - id: proto-research
@@ -72,7 +72,7 @@ Implement the crate-private `auth::Authentication` state machine in `src/rs/vert
 
 - `src/rs/vertebra-postgres/src/config.rs` — `PostgresConfig` (`user`, `password`).
 - `src/rs/vertebra-postgres/src/errors.rs` — `PostgresError::{Config, Protocol, Server, UnsupportedAuth}`.
-- `src/rs/vertebra-postgres/tests/postgres_wire_tests.rs` — Preserve the startup suite while migrating obsolete unsupported-cleartext expectations to password authentication coverage.
+- `src/rs/vertebra-postgres/tests/postgres_wire_tests.rs` — Preserve the startup lifecycle and lazy diagnostic-body validation coverage.
 - `src/rs/vertebra-postgres/src/session.rs` — Startup frame loop in `ConnectAttempt::run` from `ch02:t02` and `ch02:t03`.
 - `src/rs/vertebra-postgres/tests/support/mod.rs` — Loopback server and raw packet helpers.
 - `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — Upstream `password_message` and `md5_hash` contracts [^proto-research].
@@ -141,7 +141,8 @@ Commit as `feat(postgres): authenticate password and MD5 connections`.
 ## Notes & Discoveries
 
 - Authentication responses use the pinned upstream encoders and MD5 helper. The TCP peer checks the literal `postgres`/`hunter2`/`01020304` response `md5c73cff48cd454994b0c263a04cdfc859` without deriving its expected value through production hashing.
-- Startup free-text diagnostics mask the non-empty configured password and actual MD5 response before constructing `ServerError`; replacing the response first also protects credentials containing a password substring. Structured severity, SQLSTATE, numeric positions, and source line remain exact, including passwords `17` and `FATAL` that coincide with legitimate protocol values. Safe hint text remains observable. Real peers reflect credentials into primary, detail, and context fields, and verify that both Display and Debug exclude them while the socket reaches EOF. Pre-challenge errors redact the configured password; empty passwords do not alter server text. Missing credentials and unsupported mechanisms produce zero outbound password bytes; duplicate and server-rejected exchanges close without retry.
+- Startup free-text diagnostics mask the non-empty configured password and actual MD5 response before constructing `ServerError`; replacing the response first protects credentials containing a password substring. Pre-challenge errors redact the configured password; empty passwords leave server text unchanged. Credential-bearing authentication storage has no `Debug` implementation.
+- Structured `S`/`V`/`C`/`P`/`p`/`L` protocol fields remain exact, including passwords `17` and `FATAL` that coincide with legitimate values. Safe hint text remains observable. Real peers verify redacted credential echoes in primary, detail, and context text through Display/Debug plus socket EOF. Missing credentials and unsupported mechanisms produce zero outbound password bytes; duplicate and server-rejected exchanges close without retry.
 - The startup suite covers 22 wire/configuration/error cases; the canonical password suite covers cleartext/MD5 exchanges and unsupported Kerberos, SCM, GSS, and SSPI challenges. Cleartext success accepts valid notices before challenge, after the password response, and after AuthenticationOk; MD5 success also accepts notices before challenge and while PasswordSent. Shared peer fixtures preserve deterministic publication-deadline barriers.
 
 [^proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — `postgres-protocol` password and MD5 authentication helpers.

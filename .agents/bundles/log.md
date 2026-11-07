@@ -1,5 +1,12 @@
 # Bundle Activity Log
 
+## [2026-11-07] flow-docs-sync | Native PostgreSQL startup repairs verified
+
+- Completed the three quality repairs under their existing owners: lazy notice validation at `81791de2` (receipt `f09355bb`), deterministic TLS deadline coverage at `0c3a0eaa` (receipt `e61340dc`), and credential-safe startup diagnostics at `c5173f1b` (receipt `0446ee46`). Codec source remains `a00c3248`.
+- Exact coordinator checkpoint `0446ee46` passes all 54 tests (`9` codec, `13` auth, `10` TLS, `22` wire/config/error) under the shared SHM lock and locked all-target Clippy with `-D warnings`. Controlled Tokio time and SSLRequest/ClientHello/EOF barriers replace the wall-clock TLS assertion; both deadline cases remain pending at 249 ms and terminate at 251 ms.
+- Synchronized current contracts, root/chapter state, catalogs, indexes, and worksheet prose. Free-text error diagnostics mask the non-empty configured password and actual submitted MD5 token while exact `S`/`V`/`C`/`P`/`p`/`L` fields retain coincidental low-entropy values; empty passwords leave text unchanged.
+- Chapter 02 remains active with no current task or review stamp pending renewed correctness and fresh independent quality review. The plan retains 31 chapters, 111 tasks, `8/111` completed tasks, `1/31` reviewed chapters, chapter 01 review `3d68c853`, and documentation manifests `[0/0 files documented in ch02]` and `[0/11 files documented]`.
+
 ## [2026-11-07] review-remediation | Native PostgreSQL startup validation
 
 - Cold correctness approves `3364250d..07635dcd` with all 47 tests and locked Clippy passing. Fresh quality review verifies malformed discarded notices, reflected password/MD5-token leakage, and a wall-clock-dependent TLS deadline assertion.

@@ -41,7 +41,7 @@ verification_evidence:
   - "rustfmt --edition 2024 --check src/rs/vertebra-postgres/src/lib.rs src/rs/vertebra-postgres/src/protocol.rs: exit 0"
   - "git diff --check: exit 0"
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T23:16:07Z"
+updated_at: "2026-11-07T23:44:42Z"
 commit: a00c3248
 sources:
   - id: proto-research
@@ -130,6 +130,7 @@ Commit as `feat(postgres): bound wire message decoding and startup framing`.
 ## Notes & Discoveries
 
 - `postgres_protocol::message::backend::Message::parse` consumes from a `BytesMut` starting at the tag byte (`buf[0]`), so passing a single exact-sized `5 + (len - 4)` `BytesMut` preserves zero-copy `Bytes` slices inside decoded `Message` variants while guaranteeing `buf.is_empty()` on exact consumption. Version `0.6.12` rejects trailing `AuthenticationOk` payload bytes and missing `ParameterStatus` NUL terminators.
+- The codec owns bounded frame/parser envelopes. Lazy notice/error field bodies require complete fallible iteration and checked UTF8 in the session consumer, including notices that the session discards.
 - Nine real-duplex tests cover bytewise and coalesced frames, truncation, signed and oversized lengths, both inclusive length boundaries, malformed bodies, startup bytes, and encoder NUL rejection. Invalid-length tests retain an open writer and unread sentinel body byte, proving refusal precedes body reads.
 - Session startup and close consume all codec producers directly; all-target Clippy enforces their private visibility without lint exceptions.
 

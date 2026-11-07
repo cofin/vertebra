@@ -46,12 +46,12 @@ research:
   - research/cloud-material_20261105.md
 plan_revision: 6
 plan_commit: 8833b064
-state_revision: 3
-last_verified_checkpoint: 7bf8e2e3
+state_revision: 4
+last_verified_checkpoint: 0446ee46
 last_reviewed_chapter: ch01-wheel-scaffold-and-config
 last_reviewed_commit: 3d68c853
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-07T23:16:07Z"
+updated_at: "2026-11-07T23:44:42Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:40:00Z"
@@ -107,7 +107,7 @@ tags:
 <!-- truth: start -->
 - **Standalone Optional Wheel**: `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owns live PostgreSQL Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`) without linking database clients into `vertebra-core` [^pg-conn-rs] [^pg-core-rs].
 - **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB Admin discovery + mTLS + IAM), lossless codecs, statement caching, single-`Sync` `pipeline()`, binary `COPY`, native `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, and `pgoutput` v1 logical replication ship together with full `psycopg`/`asyncpg` removal [^py-async-rs] [^arrow-shm-rs] [^pg-driver-py] [^sqlspec-py].
-- **Nested Chapter Roadmap (`plan_revision: 6`)**: All 31 chapters and 111 tasks retain their scope at `plan_commit: 8833b064`; chapter 01 is complete and reviewed at `3d68c853`, and chapter 02 is active for bounded notice-validation, credential-redaction, and deterministic-deadline review repairs.
+- **Nested Chapter Roadmap (`plan_revision: 6`)**: All 31 chapters and 111 tasks retain their scope at `plan_commit: 8833b064`; chapter 01 is complete and reviewed at `3d68c853`, and all four chapter 02 tasks are complete at verified checkpoint `0446ee46`, awaiting renewed correctness and fresh independent quality review.
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -154,6 +154,8 @@ The crate-private codec has real session startup and close callers without dead-
 Read-only `PendingSession::connection()` supports Rust metadata adoption; `PostgresConnection::tls_server_end_point()` reserves the channel-binding seam and returns `None` until chapter 03 adds the peer digest. Backend keys stay outside Python. The direct `fallible-iterator = "=0.2.0"` dependency supports pinned diagnostic traversal.
 
 The connection-publication seam uses owned `Arc<PostgresConfig>` and `Arc<std::sync::Mutex<SessionState>>` shared by cloneable `SessionHandle` values. `BeginConnect`, `ConnectAttempt`, and `PendingSession` have no lifetime parameters; attempts, their `run()` futures, and pending results are `Send + 'static` for the asynchronous completion bridge, with armed rollback on drop and publication only in `commit()`.
+
+The codec validates the bounded frame/parser envelope; session consumers exhaust lazy `NoticeResponse` and `ErrorResponse` fields with checked UTF8. Startup error free text masks the non-empty configured password and actual submitted MD5 token before ownership. Structured `S`/`V`/`C`/`P`/`p`/`L` fields remain exact even when they coincide with low-entropy password characters; empty secrets leave text unchanged and credential storage has no `Debug` implementation.
 
 ### 2.1 Functional Requirements (`R1`–`R27`)
 
@@ -326,12 +328,12 @@ Every worksheet (`111` total across `31` chapters) executes within its bounded o
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: Checkpoint `7bf8e2e3` passes all 47 Rust tests (`9` codec, `8` auth, `10` TLS, `20` wire/config/error) and locked all-target Clippy with `-D warnings`; flow `state: active`, `plan_revision: 6`, `plan_commit: 8833b064`.
-- **Progress**: `1/31` chapters are complete and reviewed; `8/111` tasks are complete. Chapter 02 codec receipt binds to `a00c3248`; session notice validation binds to `81791de2`; TLS deadline assertions bind to `0c3a0eaa`; authentication task awaits credential-redaction repairs.
-- **Current Chapter**: `ch02-wire-codec-and-session-startup`, with `current_task: null`; updated correctness and quality review remain required.
+- **Verified Baseline**: Checkpoint `0446ee46` passes all 54 Rust tests (`9` codec, `13` auth, `10` TLS, `22` wire/config/error) under the shared SHM test lock and locked all-target Clippy with `-D warnings`; flow `state: active`, `plan_revision: 6`, `plan_commit: 8833b064`.
+- **Progress**: `1/31` chapters are complete and reviewed; `8/111` tasks are complete. Chapter 02 receipts bind to `a00c3248`, `81791de2`, `0c3a0eaa`, and `c5173f1b`.
+- **Current Chapter**: `ch02-wire-codec-and-session-startup`, with `current_task: null`; renewed correctness and fresh independent quality review remain pending.
 - **Remaining Plan**: Chapter 02 closeout and chapters 03–31 retain complete blueprints.
 - **Documentation**: `[0/11 files documented]`; full guides and domain knowledge remain assigned to chapter 30.
-- **Next Action**: Repair chapter 02 notice validation, credential redaction, and TLS deadline regressions, then run `/flow:review native-postgres-driver`; advance to chapter 03 only after both reviews pass.
+- **Next Action**: Run `/flow:review native-postgres-driver` for chapter 02; advance to chapter 03 only after correctness and fresh independent quality review pass.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` — Shared PostgreSQL wire frame helpers and SHM admission metadata in `vertebra-db`.
