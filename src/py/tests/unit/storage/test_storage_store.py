@@ -1,10 +1,12 @@
 """Unit tests for vertebra.storage (SyncObjectStore, AsyncObjectStore, zero-copy memoryview, and V4 presigning)."""
 
 import ast
+import sys
 import threading
 from collections.abc import AsyncIterator, Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -13,6 +15,7 @@ from vertebra._storage import StorageBuffer
 from vertebra.storage import (
     AsyncObjectStore,
     AsyncReadableFile,
+    HTTPConfig,
     LocalConfig,
     MemoryConfig,
     ObjectMeta,
@@ -21,6 +24,7 @@ from vertebra.storage import (
     SyncObjectStore,
     SyncReadableFile,
 )
+from vertebra.typing import ImproperConfigurationError, MissingDependencyError, reset_dependency_cache
 
 
 def test_memory_store_sync_crud_and_zero_copy_memoryview() -> None:
@@ -383,3 +387,72 @@ def test_store_module_contains_zero_asyncio_to_thread_calls() -> None:
         or (isinstance(node, ast.Name) and node.id == "to_thread")
     ]
     assert offending == []
+
+
+def test_fail_closed_empty_or_missing_target_raises_improper_configuration() -> None:
+    """SyncObjectStore and AsyncObjectStore reject None, empty, and schemeless targets with ImproperConfigurationError."""
+    with pytest.raises(TypeError):
+        cast(Any, SyncObjectStore)()
+
+    with pytest.raises(TypeError):
+        cast(Any, AsyncObjectStore)()
+
+    for invalid_target in ("", "   ", "relative/path/without/scheme", "ftp://unsupported.example.com/bucket"):
+        with pytest.raises(ImproperConfigurationError):
+            SyncObjectStore(invalid_target)
+        with pytest.raises(ImproperConfigurationError):
+            AsyncObjectStore(invalid_target)
+
+    with pytest.raises(ImproperConfigurationError):
+        cast(Any, SyncObjectStore)(None)
+
+    with pytest.raises(ImproperConfigurationError):
+        cast(Any, AsyncObjectStore)(None)
+
+    with pytest.raises(ImproperConfigurationError):
+        SyncObjectStore(HTTPConfig(url=""))
+
+
+def test_fail_closed_missing_storage_extension_raises_missing_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Masking vertebra._storage causes SyncObjectStore and AsyncObjectStore to raise MissingDependencyError."""
+    monkeypatch.setitem(sys.modules, "vertebra._storage", None)
+    reset_dependency_cache()
+    try:
+        with pytest.raises(MissingDependencyError) as exc_file:
+            SyncObjectStore(f"file://{tmp_path}")
+        assert exc_file.value.install_package == "vertebra-core[storage]"
+        assert "vertebra-core[storage]" in exc_file.value.hint
+
+        with pytest.raises(MissingDependencyError) as exc_mem_sync:
+            SyncObjectStore("memory://test")
+        assert exc_mem_sync.value.install_package == "vertebra-core[storage]"
+
+        with pytest.raises(MissingDependencyError) as exc_mem_async:
+            AsyncObjectStore(MemoryConfig(namespace="masked"))
+        assert exc_mem_async.value.install_package == "vertebra-core[storage]"
+    finally:
+        monkeypatch.undo()
+        reset_dependency_cache()
+
+
+@pytest.mark.anyio
+async def test_explicit_memory_config_and_to_async_share_rust_in_memory_backend() -> None:
+    """Explicit MemoryConfig delegates to Rust InMemory without Python _memory dict and shares state across to_async."""
+    store = SyncObjectStore(MemoryConfig(namespace="t1"))
+    assert not hasattr(store, "_memory")
+
+    store.put("k", b"v")
+    assert store.get("k") == b"v"
+
+    async_store = store.to_async()
+    assert not hasattr(async_store, "_memory")
+    assert await async_store.get("k") == b"v"
+
+    await async_store.put("k2", b"v2")
+    assert store.get("k2") == b"v2"
+
+    roundtrip_sync = async_store.to_sync()
+    assert roundtrip_sync.get("k2") == b"v2"
