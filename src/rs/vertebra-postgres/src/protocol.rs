@@ -8,14 +8,9 @@ use crate::{config::PostgresConfig, errors::PostgresError};
 
 pub(crate) const MAX_BACKEND_FRAME_LENGTH: i32 = 16_777_216;
 pub(crate) const MIN_BACKEND_FRAME_LENGTH: i32 = 4;
-#[expect(dead_code, reason = "Termination precedes session integration")]
 pub(crate) const TERMINATE_FRAME: [u8; 5] = *b"X\0\0\0\x04";
 
 /// Read exactly one backend frame, checking the length before allocating its body.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Framing precedes session integration")
-)]
 pub(crate) async fn read_message<R: AsyncRead + Unpin>(
     reader: &mut R,
 ) -> Result<Message, PostgresError> {
@@ -48,10 +43,6 @@ pub(crate) async fn read_message<R: AsyncRead + Unpin>(
 }
 
 /// Encode Protocol 3.0 startup parameters with explicit UTF8 client encoding.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Framing precedes session integration")
-)]
 pub(crate) fn encode_startup_frame(config: &PostgresConfig) -> Result<BytesMut, PostgresError> {
     let mut frame = BytesMut::new();
     frontend::startup_message(

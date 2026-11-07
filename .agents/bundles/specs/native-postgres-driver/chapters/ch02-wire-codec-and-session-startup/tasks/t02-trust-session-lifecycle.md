@@ -5,7 +5,7 @@ chapter_id: ch02-wire-codec-and-session-startup
 title: Establish authenticated trust sessions with SessionHandle and PendingSession publication
 description: Implement PostgresConnection, SessionHandle, ConnectAttempt, and PendingSession enforcing strict Protocol 3.0 startup ordering, total deadline budgets, cancellation rollback, and bounded Terminate close.
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -27,17 +27,24 @@ tests:
 estimated_loc: 240
 plan_revision: 6
 plan_commit: 8833b064
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: agent:ch02-t02
+claimed_at: "2026-11-07T22:48:03Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
+last_verified_at: "2026-11-07T22:49:00Z"
 last_verified_commit: null
-verification_evidence: null
+verification_evidence:
+  red: "Canonical wire test exits 101 with unresolved _postgres::session before implementation."
+  focused: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_wire_tests exits 0: 20 tests, including 13 new lifecycle/wire tests and 7 existing configuration/error tests."
+  aggregate: "cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres exits 0: 9 codec tests and 20 wire tests; zero failures, ignores, or doctest failures."
+  lint: "cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings exits 0 with all three producer expectations removed."
+  formatting: "cargo fmt --manifest-path src/rs/Cargo.toml -p vertebra-postgres -- --check and git diff --check exit 0."
+  review_privacy: "UV_NO_SYNC=1 make review-check exits 0."
+  environment: "PYO3_PYTHON=${PWD}/.venv/bin/python; reserved CARGO_TARGET_DIR; Tokio loopback peers and paused clock; no Python network calls."
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T05:00:00Z"
+updated_at: "2026-11-07T22:49:00Z"
 commit: null
 sources:
   - id: rs-transport
@@ -148,11 +155,16 @@ Commit as `feat(postgres): own startup session lifecycle and publication`.
 
 ## Acceptance Criteria
 
-- [ ] `SessionHandle` enforces `Configured -> Connecting -> Ready | Closed` under a short non-async mutex with `BeginConnect::AlreadyReady` idempotency and `<= 100ms` `Terminate` shutdown (R3, R7).
-- [ ] `ConnectAttempt` validates strict startup frame ordering, `client_encoding = "UTF8"`, `ReadyForQuery(b'I')`, sanitized `ErrorResponse` SQLSTATEs, and one outer `connect_timeout` deadline (R3).
-- [ ] Dropping `ConnectAttempt` or uncommitted `PendingSession` rolls `SessionHandle` to `Closed` and closes the underlying socket deterministically across all ten loopback tests (R7).
+- [x] `SessionHandle` enforces `Configured -> Connecting -> Ready | Closed` under a short non-async mutex with `BeginConnect::AlreadyReady` idempotency and `<= 100ms` `Terminate` shutdown (R3, R7).
+- [x] `ConnectAttempt` validates strict startup frame ordering, `client_encoding = "UTF8"`, `ReadyForQuery(b'I')`, sanitized `ErrorResponse` SQLSTATEs, and one outer `connect_timeout` deadline (R3).
+- [x] Dropping `ConnectAttempt` or uncommitted `PendingSession` rolls `SessionHandle` to `Closed` and closes the underlying socket deterministically across all ten loopback tests (R7).
 
 ## Notes & Discoveries
+
+- Owned `Arc` configuration/state and armed attempt/pending guards make `tokio::spawn(attempt.run())` and its returned pending connection `Send + 'static`; cancellation and uncommitted adoption drop the socket and close the retained handle.
+- `PendingSession::connection()` exposes retained parameters, backend key, idle status, and absent plaintext TLS binding before publication. Handle parameter snapshots remain empty until commit and survive terminal close.
+- One reservation deadline covers dial, startup, and late commit. `close()` publishes `Closed` before its bounded 100 ms best-effort Terminate/flush/shutdown, with no mutex guard held across awaits.
+- `postgres-protocol` 0.6.12 error diagnostics use `fallible_iterator::FallibleIterator`, `ErrorField::type_()`, and checked UTF8 `value_bytes()`; structured diagnostics remain absent from formatted primary errors.
 
 - Diagnostic traversal imports `fallible_iterator::FallibleIterator` directly; pinned protocol fields expose `type_()` and `value_bytes()`. No replacement parser or copied iterator trait is involved.
 

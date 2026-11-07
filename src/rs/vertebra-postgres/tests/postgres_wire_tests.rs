@@ -403,3 +403,374 @@ fn server_errors_retain_diagnostics_but_display_only_primary_fields() {
         assert!(!error.to_string().is_empty());
     }
 }
+
+mod support;
+
+use _postgres::session::{BackendKey, BeginConnect, SessionHandle, TransactionStatus};
+use tokio::{io::AsyncReadExt, sync::oneshot};
+
+fn attempt(handle: &SessionHandle) -> _postgres::session::ConnectAttempt {
+    let BeginConnect::Attempt(attempt) = handle.begin_connect().unwrap() else {
+        panic!("expected attempt")
+    };
+    attempt
+}
+
+#[tokio::test]
+async fn startup_trust() {
+    let (listener, config) = support::listener().await;
+    let peer = tokio::spawn(async move {
+        let mut stream = support::accept(listener).await;
+        let bytes = [
+            support::frame(b'N', b"SNOTICE\0Mstartup notice\0\0"),
+            support::frame(b'R', &[0; 4]),
+            support::parameter("client_encoding", "UTF8"),
+            support::parameter("server_version", "16.0"),
+            support::parameter("server_version", "18.0"),
+            support::frame(b'K', &[0, 0, 16, 146, 0, 0, 39, 15]),
+            support::frame(b'Z', b"I"),
+        ]
+        .concat();
+        support::send(&mut stream, &bytes).await;
+        let mut terminate = [0; 5];
+        stream.read_exact(&mut terminate).await.unwrap();
+        assert_eq!(&terminate, b"X\0\0\0\x04");
+        support::eof(&mut stream).await;
+    });
+    let handle = SessionHandle::new(config);
+    assert!(handle.is_closed());
+    assert!(handle.parameters().is_empty());
+    let pending = attempt(&handle).run().await.unwrap();
+    assert_eq!(pending.connection().parameters()["server_version"], "18.0");
+    assert_eq!(
+        pending.connection().backend_key(),
+        Some(BackendKey {
+            process_id: 4242,
+            secret_key: 9999
+        })
+    );
+    assert_eq!(
+        pending.connection().transaction_status(),
+        TransactionStatus::Idle
+    );
+    assert_eq!(pending.connection().tls_server_end_point(), None);
+    assert!(handle.is_closed());
+    assert!(handle.parameters().is_empty());
+    pending.commit().unwrap();
+    assert!(!handle.is_closed());
+    assert_eq!(handle.parameters()["server_version"], "18.0");
+    let closing = handle.clone();
+    tokio::spawn(async move { closing.close().await })
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(handle.is_closed());
+    assert_eq!(handle.parameters()["server_version"], "18.0");
+    peer.await.unwrap();
+}
+
+#[tokio::test]
+async fn owned_guard_spawn() {
+    let (listener, config) = support::listener().await;
+    let peer = tokio::spawn(async move {
+        let mut stream = support::accept(listener).await;
+        support::send(&mut stream, &support::trust()).await;
+        support::eof(&mut stream).await;
+    });
+    let handle = SessionHandle::new(config);
+    let worker = tokio::spawn(attempt(&handle).run());
+    let pending = worker.await.unwrap().unwrap();
+    pending.commit().unwrap();
+    assert!(!handle.is_closed());
+    drop(handle);
+    peer.await.unwrap();
+}
+
+async fn rejected(frames: Vec<u8>) -> PostgresError {
+    let (listener, config) = support::listener().await;
+    let peer = tokio::spawn(async move {
+        let mut stream = support::accept(listener).await;
+        support::send(&mut stream, &frames).await;
+        support::eof(&mut stream).await;
+    });
+    let handle = SessionHandle::new(config);
+    let error = match attempt(&handle).run().await {
+        Err(error) => error,
+        Ok(_) => panic!("startup accepted"),
+    };
+    assert!(handle.is_closed());
+    assert!(handle.parameters().is_empty());
+    assert!(handle.begin_connect().is_err());
+    peer.await.unwrap();
+    error
+}
+
+#[tokio::test]
+async fn startup_requires_auth_utf8_idle() {
+    let auth = support::frame(b'R', &[0; 4]);
+    let utf8 = support::parameter("client_encoding", "UTF8");
+    let ready = support::frame(b'Z', b"I");
+    for frames in [
+        [auth.clone(), ready.clone()].concat(),
+        [
+            auth.clone(),
+            support::parameter("client_encoding", "SQL_ASCII"),
+            ready.clone(),
+        ]
+        .concat(),
+        utf8.clone(),
+        support::frame(b'K', &[0; 8]),
+        ready,
+        [
+            auth.clone(),
+            support::frame(b'S', b"client_encoding\0\xff\0"),
+        ]
+        .concat(),
+        [
+            auth.clone(),
+            utf8.clone(),
+            support::frame(b'C', b"SELECT 1\0"),
+        ]
+        .concat(),
+        [auth.clone(), support::frame(b'T', &[0, 0])].concat(),
+        [auth.clone(), support::frame(b'D', &[0, 0])].concat(),
+    ] {
+        assert!(matches!(rejected(frames).await, PostgresError::Protocol(_)));
+    }
+    for status in [b'T', b'E', b'?'] {
+        assert!(matches!(
+            rejected([auth.clone(), utf8.clone(), support::frame(b'Z', &[status])].concat()).await,
+            PostgresError::Protocol(_)
+        ));
+    }
+    for status in [
+        TransactionStatus::Idle,
+        TransactionStatus::InTransaction,
+        TransactionStatus::Failed,
+    ] {
+        assert_eq!(
+            TransactionStatus::from_wire_byte(status.as_wire_byte()).unwrap(),
+            status
+        );
+    }
+    assert!(TransactionStatus::from_wire_byte(b'?').is_err());
+}
+
+#[tokio::test]
+async fn startup_error_sqlstate() {
+    let error = rejected(support::frame(
+        b'E',
+        b"SFATAL\0C3D000\0Mdatabase \"missing\" does not exist\0Dsecret detail\0\0",
+    ))
+    .await;
+    let PostgresError::Server(error) = error else {
+        panic!("expected server error")
+    };
+    assert_eq!(error.severity, "FATAL");
+    assert_eq!(error.sqlstate, "3D000");
+    assert!(error.diagnostics.contains(&(b'D', "secret detail".into())));
+    assert!(!error.to_string().contains("secret detail"));
+}
+
+#[tokio::test]
+async fn total_deadline() {
+    let (listener, mut config) = support::listener().await;
+    config.connect_timeout = Duration::from_millis(50);
+    let (accepted, receive) = oneshot::channel();
+    let peer = tokio::spawn(async move {
+        let mut stream = support::accept(listener).await;
+        accepted.send(()).unwrap();
+        support::eof(&mut stream).await;
+    });
+    let handle = SessionHandle::new(config);
+    let worker = tokio::spawn(attempt(&handle).run());
+    receive.await.unwrap();
+    assert!(matches!(
+        worker.await.unwrap(),
+        Err(PostgresError::Transport(_))
+    ));
+    assert!(handle.begin_connect().is_err());
+    peer.await.unwrap();
+}
+
+#[tokio::test]
+async fn duplicate_auth_rejected() {
+    for frames in [
+        [support::frame(b'R', &[0; 4]), support::frame(b'R', &[0; 4])].concat(),
+        [
+            support::frame(b'R', &[0; 4]),
+            support::parameter("client_encoding", "UTF8"),
+            support::frame(b'K', &[0; 8]),
+            support::frame(b'K', &[0; 8]),
+        ]
+        .concat(),
+    ] {
+        assert!(matches!(rejected(frames).await, PostgresError::Protocol(_)));
+    }
+}
+
+#[tokio::test]
+async fn repeated_connect_and_close() {
+    let (listener, config) = support::listener().await;
+    let peer = tokio::spawn(async move {
+        let mut stream = support::accept(listener).await;
+        support::send(&mut stream, &support::trust()).await;
+        let mut terminate = [0; 5];
+        stream.read_exact(&mut terminate).await.unwrap();
+        assert_eq!(&terminate, b"X\0\0\0\x04");
+        support::eof(&mut stream).await;
+    });
+    let handle = SessionHandle::new(config);
+    attempt(&handle).run().await.unwrap().commit().unwrap();
+    assert!(matches!(
+        handle.clone().begin_connect(),
+        Ok(BeginConnect::AlreadyReady)
+    ));
+    assert!(!handle.is_closed());
+    handle.close().await.unwrap();
+    handle.close().await.unwrap();
+    assert!(handle.begin_connect().is_err());
+    peer.await.unwrap();
+}
+
+#[tokio::test]
+async fn overlapping_connect_fails() {
+    let (listener, config) = support::listener().await;
+    let (accepted, receive) = oneshot::channel();
+    let peer = tokio::spawn(async move {
+        let mut stream = support::accept(listener).await;
+        accepted.send(()).unwrap();
+        support::eof(&mut stream).await;
+    });
+    let handle = SessionHandle::new(config);
+    let worker = tokio::spawn(attempt(&handle).run());
+    receive.await.unwrap();
+    assert!(matches!(
+        handle.begin_connect(),
+        Err(PostgresError::Interface(_))
+    ));
+    assert!(matches!(
+        handle.close().await,
+        Err(PostgresError::Interface(_))
+    ));
+    worker.abort();
+    assert!(matches!(worker.await, Err(error) if error.is_cancelled()));
+    assert!(handle.begin_connect().is_err());
+    peer.await.unwrap();
+}
+
+#[tokio::test]
+async fn dropped_attempt_closes() {
+    let (listener, config) = support::listener().await;
+    let (accepted, receive) = oneshot::channel();
+    let peer = tokio::spawn(async move {
+        let mut stream = support::accept(listener).await;
+        accepted.send(()).unwrap();
+        support::eof(&mut stream).await;
+    });
+    let handle = SessionHandle::new(config);
+    let worker = tokio::spawn(attempt(&handle).run());
+    receive.await.unwrap();
+    worker.abort();
+    assert!(matches!(worker.await, Err(error) if error.is_cancelled()));
+    assert!(handle.is_closed());
+    assert!(handle.parameters().is_empty());
+    assert!(handle.begin_connect().is_err());
+    peer.await.unwrap();
+}
+
+#[tokio::test]
+async fn dropped_pending_session_closes() {
+    let (listener, config) = support::listener().await;
+    let peer = tokio::spawn(async move {
+        let mut stream = support::accept(listener).await;
+        support::send(&mut stream, &support::trust()).await;
+        support::eof(&mut stream).await;
+    });
+    let handle = SessionHandle::new(config);
+    drop(tokio::spawn(attempt(&handle).run()).await.unwrap().unwrap());
+    assert!(handle.is_closed());
+    assert!(handle.parameters().is_empty());
+    assert!(handle.begin_connect().is_err());
+    peer.await.unwrap();
+}
+
+#[tokio::test]
+async fn deadline_starts_at_reservation_and_covers_publication() {
+    let (listener, mut config) = support::listener().await;
+    config.connect_timeout = Duration::from_secs(1);
+    let peer = tokio::spawn(async move {
+        let mut stream = support::accept(listener).await;
+        support::send(&mut stream, &support::trust()).await;
+        support::eof(&mut stream).await;
+    });
+    let handle = SessionHandle::new(config);
+    let pending = attempt(&handle).run().await.unwrap();
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(matches!(pending.commit(), Err(PostgresError::Transport(_))));
+    assert!(handle.is_closed());
+    assert!(handle.parameters().is_empty());
+    assert!(handle.begin_connect().is_err());
+    tokio::time::resume();
+    peer.await.unwrap();
+
+    let (listener, config) = support::listener().await;
+    drop(listener);
+    let handle = SessionHandle::new(config);
+    let reserved = attempt(&handle);
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(11)).await;
+    assert!(matches!(
+        reserved.run().await,
+        Err(PostgresError::Transport(_))
+    ));
+    assert!(handle.begin_connect().is_err());
+    tokio::time::resume();
+}
+
+#[tokio::test]
+async fn configured_close_and_unstarted_attempt_drop_are_terminal() {
+    let (listener, config) = support::listener().await;
+    drop(listener);
+    let handle = SessionHandle::new(config.clone());
+    assert_eq!(handle.config(), &config);
+    handle.close().await.unwrap();
+    handle.close().await.unwrap();
+    assert!(matches!(
+        handle.begin_connect(),
+        Err(PostgresError::Interface(_))
+    ));
+    let handle = SessionHandle::new(config);
+    drop(attempt(&handle));
+    assert!(matches!(
+        handle.begin_connect(),
+        Err(PostgresError::Interface(_))
+    ));
+}
+
+#[tokio::test]
+async fn unsupported_challenges_fail_without_credentials() {
+    for challenge in [2_i32, 3, 6, 7, 9] {
+        assert!(matches!(
+            rejected(support::frame(b'R', &challenge.to_be_bytes())).await,
+            PostgresError::UnsupportedAuth(_)
+        ));
+    }
+    let (listener, mut config) = support::listener().await;
+    drop(listener);
+    for mode in [
+        TlsMode::Prefer,
+        TlsMode::Require,
+        TlsMode::VerifyCa,
+        TlsMode::VerifyFull,
+    ] {
+        config.sslmode = mode;
+        let handle = SessionHandle::new(config.clone());
+        assert!(matches!(
+            attempt(&handle).run().await,
+            Err(PostgresError::UnsupportedFeature(_))
+        ));
+        assert!(handle.begin_connect().is_err());
+    }
+}
