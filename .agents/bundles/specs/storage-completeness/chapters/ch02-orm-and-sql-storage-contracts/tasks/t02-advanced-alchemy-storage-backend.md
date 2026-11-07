@@ -5,7 +5,7 @@ chapter_id: ch02-orm-and-sql-storage-contracts
 title: Remove storages.get monkeypatch and harden Advanced Alchemy StorageBackend
 description: Delete import-time storages.get monkeypatching and memory:// fallbacks in vertebra.extensions.alchemy.storage and register StorageBackend strictly via Advanced Alchemy StorageRegistry.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -22,18 +22,18 @@ tests:
 estimated_loc: 160
 plan_revision: 3
 plan_commit: 0acdf576
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-07T20:16:12.017238+00:00"
+last_verified_commit: 7769500a
+verification_evidence: "Red: 3 failed, 3 passed (-k alchemy); Green: 21 passed full canonical integration module; Ruff check and format, mypy source, git diff --check all exit 0."
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T20:00:00Z"
-commit: null
+updated_at: "2026-11-07T20:16:12.017238+00:00"
+commit: 7769500a
 sources:
   - id: alchemy-storage-mod
     resource: src/py/vertebra/extensions/alchemy/storage.py::ObjectStoreBackend
@@ -67,7 +67,7 @@ Delete the `setattr(storages, _storage_get_attr, storages.get_backend)` monkeypa
 - `src/py/vertebra/extensions/alchemy/storage.py`:
   - Remove lines mutating `advanced_alchemy.types.file_object.storages` (`_storage_get_attr = "get"; setattr(storages, ...)`).
   - `class ObjectStoreBackend(StorageBackend)` (the existing public class exported by `vertebra.extensions.alchemy` and used by `alchemy/plugin.py`):
-    - `__init__(self, key: str = "default", fs: SyncObjectStore | AsyncObjectStore | StorageConfig | str | None = None, *, store: SyncObjectStore | AsyncObjectStore | StorageConfig | str | None = None, prefix: str = "", **kwargs: Any) -> None`: Resolve `store` first when explicitly supplied, otherwise `fs`; raise `ImproperConfigurationError` only when that resolved target is absent or a blank string. `ObjectStoreBackend(key="avatars", store=LocalConfig(tmp_path))` is valid with the default `fs=None`.
+    - `__init__(self, key: str = "default", fs: SyncObjectStore | AsyncObjectStore | StorageConfig | str | None = None, *, store: SyncObjectStore | AsyncObjectStore | StorageConfig | str | None = None, prefix: str = "", **kwargs: Any) -> None`: Resolve `store` first when explicitly supplied, otherwise `fs`; raise `ImproperConfigurationError` only when that resolved target is absent or a blank string. `ObjectStoreBackend(key="avatars", store=LocalConfig(root=tmp_path))` is valid with the default `fs=None`.
     - `save_object` / `save_object_async` (supporting `bytes`, file-like streams, and async iterables via `put` / `put_stream` without `asyncio.to_thread`)
     - `get_content` / `get_content_async`
     - `delete_object` / `delete_object_async`
@@ -83,13 +83,13 @@ Delete the `setattr(storages, _storage_get_attr, storages.get_backend)` monkeypa
 
 ## Public-Seam Test Blueprint
 
-- **Canonical test file**: `src/py/tests/unit/extensions/test_data_storage_integrations.py` (real `StorageRegistry` + `FileObject` + `LocalConfig(tmp_path)`).
+- **Canonical test file**: `src/py/tests/unit/extensions/test_data_storage_integrations.py` (real `StorageRegistry` + `FileObject` + `LocalConfig(root=tmp_path)`).
 - **Worked Test Matrix**:
 
 | Case | Input | Expected Output / Error |
 | --- | --- | --- |
-| Zero monkeypatch check | Import `vertebra.extensions.alchemy.storage` and inspect `StorageRegistry` | Module AST has zero `setattr(storages, ...)` calls; `registry = StorageRegistry(); register_storage_backend("avatars", store=LocalConfig(tmp_path), registry=registry)` resolves via `registry.get_backend("avatars")`. |
-| Explicit store alias | `backend = ObjectStoreBackend(key="avatars", store=LocalConfig(tmp_path))` | Backend saves and reads configured local bytes with default `fs=None`. |
+| Zero monkeypatch check | Import `vertebra.extensions.alchemy.storage` and inspect `StorageRegistry` | Module AST has zero `setattr(storages, ...)` calls; `registry = StorageRegistry(); register_storage_backend("avatars", store=LocalConfig(root=tmp_path), registry=registry)` resolves via `registry.get_backend("avatars")`. |
+| Explicit store alias | `backend = ObjectStoreBackend(key="avatars", store=LocalConfig(root=tmp_path))` | Backend saves and reads configured local bytes with default `fs=None`. |
 | Fail-closed missing target | `ObjectStoreBackend(key="avatars", fs="")` and `register_storage_backend("avatars", store=None)` | Both raise `ImproperConfigurationError`. |
 | `FileObject` sync & async lifecycle | Save `FileObject(backend="avatars", filename="u1.png", content=b"\x89PNG...")` via `save_object_async`, read `get_content_async`, sign, and `delete_object_async` | Round-trips exact bytes `b"\x89PNG..."`, deletes cleanly, and passes `test_storage_and_alchemy_zero_to_thread`. |
 
@@ -100,10 +100,12 @@ Delete the `setattr(storages, _storage_get_attr, storages.get_backend)` monkeypa
 
 ## Acceptance Criteria
 
-- [ ] `storages.get` monkeypatch and `"memory://"` fallback are completely removed from `src/py/vertebra/extensions/alchemy/storage.py` (R3, R5).
-- [ ] `ObjectStoreBackend` and `register_storage_backend` integrate cleanly with `StorageRegistry.register_backend` / `get_backend` and `FileObject` with zero `asyncio.to_thread` calls (R5).
+- [x] `storages.get` monkeypatch and `"memory://"` fallback are completely removed from `src/py/vertebra/extensions/alchemy/storage.py` (R3, R5).
+- [x] `ObjectStoreBackend` and `register_storage_backend` integrate cleanly with `StorageRegistry.register_backend` / `get_backend` and `FileObject` with zero `asyncio.to_thread` calls (R5).
 
 ## Notes & Discoveries
+
+- [2026-11-07 20:15] Native `put_stream` consumes bounded sync/async reads and iterable buffers without concatenation, preserves one-shot async readers, and aborts an upload when caller iteration raises. Local backend metadata does not retain MIME attributes, so assertions use portable payload, size, and lifecycle contracts.
 
 - Public `ObjectStoreBackend` and `register_storage_backend` signatures follow the installed Advanced Alchemy `StorageRegistry.register_backend` / `get_backend` contract and existing `alchemy/__init__.py` / `alchemy/plugin.py` consumers; no class aliases or speculative positional arguments are introduced.
 

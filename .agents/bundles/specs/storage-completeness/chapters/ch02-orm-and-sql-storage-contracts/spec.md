@@ -10,7 +10,7 @@ planning_status: complete
 depends_on_chapters:
   - ch01-native-engine-and-auth
 replan_trigger: null
-current_task: "storage-completeness:ch02:t02"
+current_task: "storage-completeness:ch02:t03"
 plan_revision: 3
 plan_commit: 0acdf576
 state_revision: 0
@@ -106,7 +106,7 @@ Progress: `[0/0 files documented in ch02]` (documented in `ch04:t03` across `doc
 ## 5. Implementation Plan
 
 - [x] [dd3c9c08] storage-completeness:ch02:t01 — Complete fail-closed SQLSpec ObjectStoreProtocol over SyncObjectStore and AsyncObjectStore (tasks/t01-sqlspec-object-store-protocol.md)
-- [ ] storage-completeness:ch02:t02 — Remove storages.get monkeypatch and harden Advanced Alchemy StorageBackend (tasks/t02-advanced-alchemy-storage-backend.md)
+- [x] [7769500a] storage-completeness:ch02:t02 — Remove storages.get monkeypatch and harden Advanced Alchemy StorageBackend (tasks/t02-advanced-alchemy-storage-backend.md)
 - [ ] storage-completeness:ch02:t03 — Subclass Django Storage (@deconstructible) with File handles and full metadata contract (tasks/t03-django-deconstructible-storage.md)
 
 **Chapter Recovery Checkpoint:** `uv run --no-sync pytest src/py/tests/unit/extensions/test_data_storage_integrations.py src/py/tests/unit/extensions/test_django_plugin.py -q && uv run --no-sync ruff check src/py/vertebra/extensions/{sqlspec,alchemy,django}/storage.py` exits `0`.
