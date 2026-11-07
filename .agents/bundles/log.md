@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## [2026-11-07] review-remediation | Native PostgreSQL constructor inventory
+
+- Adopted the chapter 01 correctness review's constructor-count finding. Remaining descriptions and acceptance rows in chapters 06 and 08 use the 26-option inventory from `contracts.md`; exact signatures, defaults, task ownership, and behavior stay unchanged.
+
 ## [2026-11-07] flow-implement | Native PostgreSQL chapter 01 checkpoint verified
 
 - [`native-postgres-driver`](specs/native-postgres-driver/spec.md) runs on `feat/native-postgres-completion` with `4/111` tasks complete. Chapter 01 source commits are `t01=5f25a4a0`, `t02=9e128425`, `t03=05fff946`, and `t04=dabd3ca2`; plan revision `4` remains anchored at `45ff9563` across all `31` chapters and `111` worksheets.

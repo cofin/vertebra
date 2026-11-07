@@ -3,7 +3,7 @@ type: Task
 id: "native-postgres-driver:ch06:t03"
 chapter_id: ch06-alloydb-keepalive-unix-and-direct-iam
 title: Project complete connection options and establish Unix domain socket startup
-description: Normalize all 25 constructor options into canonical endpoint, credential, keepalive, and startup GUC policies, project application_name and session_gucs into StartupMessage, and establish Unix socket sessions without SSLRequest.
+description: Normalize all 26 constructor options into canonical endpoint, credential, keepalive, and startup GUC policies, project application_name and session_gucs into StartupMessage, and establish Unix socket sessions without SSLRequest.
 status: stable
 state: pending
 priority: P1
@@ -48,7 +48,7 @@ sources:
     title: Existing build_session_gucs application_name and session_gucs precedence
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
-    title: Complete 25-option constructor normalization, Unix exclusions, and startup GUC rules
+    title: Complete 26-option constructor normalization, Unix exclusions, and startup GUC rules
 tags:
   - postgres
   - config
@@ -60,7 +60,7 @@ tags:
 
 ## Objective & Scope Boundary
 
-Complete pure validation and normalization of all 25 public constructor parameters in `src/rs/vertebra-postgres/src/config.rs`, project `application_name` and overlaid `session_gucs` directly into `StartupMessage` in `src/rs/vertebra-postgres/src/protocol.rs`, and wire local Unix domain socket session establishment (`ConnectOptions::unix` without `SSLRequest` or TCP keepalive calls) in `src/rs/vertebra-postgres/src/session.rs` [^db-conn] [^pg-config] [^pg-contracts]. Every field in `contracts.md::Connection constructors` becomes reachable and validated before the Python `SyncPostgresClient` and `AsyncPostgresClient` facades land in Chapter 07. Direct-host IAM token execution at connect time is completed in `ch06:t04`.
+Complete pure validation and normalization of all 26 public constructor parameters in `src/rs/vertebra-postgres/src/config.rs`, project `application_name` and overlaid `session_gucs` directly into `StartupMessage` in `src/rs/vertebra-postgres/src/protocol.rs`, and wire local Unix domain socket session establishment (`ConnectOptions::unix` without `SSLRequest` or TCP keepalive calls) in `src/rs/vertebra-postgres/src/session.rs` [^db-conn] [^pg-config] [^pg-contracts]. Every field in `contracts.md::Connection constructors` becomes reachable and validated before the Python `SyncPostgresClient` and `AsyncPostgresClient` facades land in Chapter 07. Direct-host IAM token execution at connect time is completed in `ch06:t04`.
 
 ## Bounded Read Manifest
 
@@ -122,7 +122,7 @@ Complete pure validation and normalization of all 25 public constructor paramete
 
 ## Acceptance Criteria
 
-- [ ] All 25 constructor fields in `contracts.md` are validated purely and normalized into owned endpoint, TLS/binding, keepalive, IAM, and GUC policies without duplicate DSN parsing or I/O (R2, R3).
+- [ ] All 26 constructor fields in `contracts.md` are validated purely and normalized into owned endpoint, TLS/binding, keepalive, IAM, and GUC policies without duplicate DSN parsing or I/O (R2, R3).
 - [ ] `session_gucs` overlays `application_name`, enforces `UTF8` `client_encoding`, rejects reserved keys and NUL bytes, and encodes directly into `StartupMessage` (R2, R3).
 - [ ] Unix domain socket connections establish without `SSLRequest` under `absolute_deadline` on Unix (`UnsupportedFeature` -> `NotSupportedError` on non-Unix), and commit `feat(postgres): project full options into Unix and startup sessions` passes all verification commands (R2, R3).
 

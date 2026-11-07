@@ -3,7 +3,7 @@ type: Task
 id: "native-postgres-driver:ch08:t01"
 chapter_id: ch08-constructor-parity-and-wheel-gil
 title: Characterize and lock complete sync and async constructor parity
-description: Enforce exact runtime inspect.signature, bool-free integer extraction, mapping snapshot isolation, and _postgres.pyi docstring parity across SyncPostgresClient and AsyncPostgresClient, verifying all 25 constructor parameters from Python.
+description: Enforce exact runtime inspect.signature, bool-free integer extraction, mapping snapshot isolation, and _postgres.pyi docstring parity across SyncPostgresClient and AsyncPostgresClient, verifying all 26 constructor parameters from Python.
 status: stable
 state: pending
 priority: P1
@@ -74,7 +74,7 @@ Verify and lock complete 26-parameter constructor parity across `src/rs/vertebra
 
 - `src/rs/vertebra-postgres/src/sync_client.rs` & `src/rs/vertebra-postgres/src/async_client.rs`:
   - Share one canonical constructor-extraction helper across `PySyncPostgresClient` and `PyAsyncPostgresClient` so the two classes can never drift in parameter handling:
-    - Exact 25 `KEYWORD_ONLY` parameters in order: `user`, `database`, `host = "localhost"`, `port = 5432`, `password = None`, `unix_socket = None`, `sslmode = "verify-full"`, `ca_pem = None`, `client_cert_pem = None`, `client_key_pem = None`, `server_name = None`, `channel_binding = "prefer"`, `connect_timeout = 10.0`, `application_name = "vertebra"`, `session_gucs = None`, `keepalives = true`, `keepalives_idle = None`, `keepalives_interval = None`, `keepalives_count = None`, `cloud_sql_instance = None`, `cloud_sql_ip_type = "PRIVATE"`, `alloydb_instance_uri = None`, `alloydb_ip_type = "PRIVATE"`, `enable_iam_auth = false`, `cloud_auth_options = None`, `iam_auth_options = None`.
+    - Exact 26 `KEYWORD_ONLY` parameters in order: `user`, `database`, `host = "localhost"`, `port = 5432`, `password = None`, `unix_socket = None`, `sslmode = "verify-full"`, `ca_pem = None`, `client_cert_pem = None`, `client_key_pem = None`, `server_name = None`, `channel_binding = "prefer"`, `connect_timeout = 10.0`, `application_name = "vertebra"`, `session_gucs = None`, `keepalives = true`, `keepalives_idle = None`, `keepalives_interval = None`, `keepalives_count = None`, `cloud_sql_instance = None`, `cloud_sql_ip_type = "PRIVATE"`, `alloydb_instance_uri = None`, `alloydb_ip_type = "PRIVATE"`, `enable_iam_auth = false`, `cloud_auth_options = None`, `iam_auth_options = None`.
     - Reject `PyBool` passed to `port`, `keepalives_idle`, `keepalives_interval`, or `keepalives_count` (`is_instance_of::<PyBool>()` -> `PyTypeError`) and reject `PyInt`/`PyBool` where `bool` is required (`keepalives`, `enable_iam_auth`).
     - Enforce `Mapping[str, str]` on `session_gucs`, `cloud_auth_options`, and `iam_auth_options` (`PyTypeError` on non-mapping or non-`str` keys/values; snapshot copied immediately while attached).
     - Redact `password`, `client_key_pem`, `access_token`, and `bearer_token` from every raised `ValueError` and `__repr__`.
@@ -94,7 +94,7 @@ Verify and lock complete 26-parameter constructor parity across `src/rs/vertebra
 
 | Case | Input | Expected Output / Error |
 | --- | --- | --- |
-| Exact `inspect.signature` & default inventory (`test_native_constructor_signature_parity`) | `inspect.signature(SyncPostgresClient)` and `inspect.signature(AsyncPostgresClient)` | Both expose the exact 25 `KEYWORD_ONLY` parameter names and default values listed in `contracts.md`; positional args `("u", "d")` and unknown kwarg `extra=1` raise `TypeError`. |
+| Exact `inspect.signature` & default inventory (`test_native_constructor_signature_parity`) | `inspect.signature(SyncPostgresClient)` and `inspect.signature(AsyncPostgresClient)` | Both expose the exact 26 `KEYWORD_ONLY` parameter names and default values listed in `contracts.md`; positional args `("u", "d")` and unknown kwarg `extra=1` raise `TypeError`. |
 | `TypeError` vs `ValueError` & secret redaction | `session_gucs={"k": 1}`, `iam_auth_options={1: "v"}`, `port=True` vs `port=70000`, `sslmode="bogus"`, `password="s3cr3t\x00bad"`, `client_key_pem=b"PRIVATE-KEY-SECRET"` with `client_cert_pem=None` | Type violations raise `TypeError`; semantic violations raise `ValueError` whose message omits `"s3cr3t"` and `"PRIVATE-KEY-SECRET"`. |
 | Pure zero-I/O construction & `session_gucs` snapshot isolation | Construct both clients with Cloud SQL, AlloyDB, and Unix options under `socket.getaddrinfo` spy and local server accept counter; mutate `gucs["app.tag"] = "mutated"` after construction and connect | `0` DNS/accept/OAuth calls during construction; connected loopback server receives original `gucs["app.tag"] == "initial"`. |
 | Python-level `channel_binding="require"` (`SCRAM-SHA-256-PLUS`) reachability | Both `SyncPostgresClient` and `AsyncPostgresClient` constructed with `sslmode="verify-full"`, `ca_pem=server_ca_pem`, `server_name="localhost"`, `channel_binding="require"`, `password="scram-pass"` against local TLS `SCRAM-SHA-256-PLUS` scripted server | Both complete `tls-server-end-point` channel-bound SCRAM authentication and reach `closed is False` (and fail before credentials when server advertises only plain `SCRAM-SHA-256`). |
