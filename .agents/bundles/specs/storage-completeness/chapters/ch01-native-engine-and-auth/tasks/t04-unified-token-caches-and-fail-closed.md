@@ -1,62 +1,66 @@
 ---
 type: Task
-id: "storage-completeness:ch01:t04"
+id: storage-completeness:ch01:t04
 chapter_id: ch01-native-engine-and-auth
 title: Unify Python GCP token caches on vertebra._vertebra and enforce fail-closed stores
-description: Remove duplicate GcpTokenCache PyO3 classes from vertebra._storage, delete pure-Python OAuth fetchers and self._memory fallbacks from storage/_store.py, wire OCI PAR signing, and enforce fail-closed SyncObjectStore and AsyncObjectStore construction.
-status: stable
+description: Remove duplicate GcpTokenCache PyO3 classes from vertebra._storage, delete pure-Python OAuth fetchers and self._memory
+  fallbacks from storage/_store.py, wire OCI PAR signing, and enforce fail-closed SyncObjectStore and AsyncObjectStore construction.
+status: draft
 state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-  - "storage-completeness:ch01:t02"
-  - "storage-completeness:ch01:t03"
+- storage-completeness:ch01:t02
+- storage-completeness:ch01:t03
 read_set:
-  - src/rs/vertebra-storage/src/lib.rs
-  - src/py/vertebra/_vertebra.pyi
-  - src/py/vertebra/_storage.pyi
-  - src/py/vertebra/storage/_store.py
-  - src/py/tests/unit/storage/test_gcs_token_refresh.py
-  - src/py/tests/unit/storage/test_signing.py
+- src/rs/vertebra-storage/src/lib.rs
+- src/py/vertebra/_storage.pyi
+- src/py/vertebra/storage/_store.py
+- src/py/tests/unit/storage/test_gcs_token_refresh.py
+- src/py/tests/unit/storage/test_signing.py
+- src/py/tests/unit/storage/test_storage_store.py
 files:
-  - src/rs/vertebra-storage/src/lib.rs
-  - src/py/vertebra/_storage.pyi
-  - src/py/vertebra/storage/_store.py
+- src/rs/vertebra-storage/src/lib.rs
+- src/py/vertebra/_storage.pyi
+- src/py/vertebra/storage/_store.py
 tests:
-  - src/py/tests/unit/storage/test_gcs_token_refresh.py
-  - src/py/tests/unit/storage/test_signing.py
-  - src/py/tests/unit/storage/test_storage_store.py
+- src/py/tests/unit/storage/test_gcs_token_refresh.py
+- src/py/tests/unit/storage/test_signing.py
+- src/py/tests/unit/storage/test_storage_store.py
 estimated_loc: 220
-plan_revision: 2
-plan_commit: cdb978d3
+plan_revision: 4
+plan_commit: null
 state_revision: 3
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: "2026-11-07T19:00:40Z"
+last_verified_at: '2026-11-07T19:00:40Z'
 last_verified_commit: dc2c2053
-verification_evidence: "cargo clippy -p vertebra-py -p vertebra-storage --all-targets -- -D warnings (0 warnings), cargo test -p vertebra-storage -p vertebra-py (33 passed), mypy.stubtest vertebra._vertebra vertebra._storage (0 issues), ruff check + ruff format --check (0 issues), mypy (0 issues), pytest src/py/tests/unit/storage src/py/tests/unit/extensions -q (471 passed)"
-created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T19:00:40Z"
+verification_evidence: cargo clippy -p vertebra-py -p vertebra-storage --all-targets -- -D warnings (0 warnings), cargo test
+  -p vertebra-storage -p vertebra-py (33 passed), mypy.stubtest vertebra._vertebra vertebra._storage (0 issues), ruff check
+  + ruff format --check (0 issues), mypy (0 issues), pytest src/py/tests/unit/storage src/py/tests/unit/extensions -q (471
+  passed)
+created_at: '2026-11-07T04:15:00Z'
+updated_at: '2026-11-07T19:00:40Z'
 commit: dc2c2053
 sources:
-  - id: core-pyi-gcp
-    resource: src/py/vertebra/_vertebra.pyi::SyncGcpTokenCache
-    title: Canonical SyncGcpTokenCache, AsyncGcpTokenCache, and GcpTokenSnapshot on vertebra._vertebra
-  - id: storage-lib-rs
-    resource: src/rs/vertebra-storage/src/lib.rs
-    title: vertebra._storage PyO3 module registration and signing functions
-  - id: storage-store-py
-    resource: src/py/vertebra/storage/_store.py::GCSConfig
-    title: Python GCSConfig, SigningConfig, SyncObjectStore, and AsyncObjectStore
+- id: core-pyi-gcp
+  resource: src/py/vertebra/_vertebra.pyi::SyncGcpTokenCache
+  title: Canonical SyncGcpTokenCache, AsyncGcpTokenCache, and GcpTokenSnapshot on vertebra._vertebra
+- id: storage-lib-rs
+  resource: src/rs/vertebra-storage/src/lib.rs
+  title: vertebra._storage PyO3 module registration and signing functions
+- id: storage-store-py
+  resource: src/py/vertebra/storage/_store.py::GCSConfig
+  title: Python GCSConfig, SigningConfig, SyncObjectStore, and AsyncObjectStore
 tags:
-  - storage
-  - gcp
-  - signing
-  - pyo3
-  - security
+- storage
+- gcp
+- signing
+- pyo3
+- security
 ---
 
 # Task t04: Unify Python GCP Token Caches on `vertebra._vertebra` and Enforce Fail-Closed Stores
@@ -74,6 +78,8 @@ Remove the duplicate `GcpTokenSnapshot`, `SyncGcpTokenCache`, and `AsyncGcpToken
 - `src/py/tests/unit/storage/test_gcs_token_refresh.py` — GCS token cache refresh and impersonation tests.
 - `src/py/tests/unit/storage/test_signing.py` — Presigned URL tests across GCS, S3, Azure, and OCI.
 
+- `src/py/tests/unit/storage/test_storage_store.py` — Native-wheel absence and facade construction regressions.
+
 ## Symbol & Signature Contracts
 
 - `src/rs/vertebra-storage/src/lib.rs` & `src/py/vertebra/_storage.pyi`:
@@ -85,7 +91,7 @@ Remove the duplicate `GcpTokenSnapshot`, `SyncGcpTokenCache`, and `AsyncGcpToken
   - Delete `self._memory` dict fallback and default `target: str | StorageConfig = "memory://"` from `_BaseObjectStore`, `SyncObjectStore`, and `AsyncObjectStore`:
     - `SyncObjectStore(target: str | StorageConfig)` and `AsyncObjectStore(target: str | StorageConfig)`: raise `ImproperConfigurationError` if `target` is `None`, empty `""`, or lacks a valid scheme, and raise `MissingDependencyError("vertebra._storage", install_package="vertebra-core[storage]", extra="storage")` when `import_optional("vertebra._storage")` returns `None`.
     - Explicit `MemoryConfig(...)` and `"memory://..."` URIs remain supported via `vertebra._storage`'s Rust `InMemory` backend.
-  - Wire `sign` on `SyncObjectStore` (sync) and `AsyncObjectStore` (async) across `gs` (local RSA PEM and IAM `signBlob` via `SyncGcpTokenCache` / `AsyncGcpTokenCache`), `s3` / `r2`, `az`, and `oci` (PAR base token / native PAR).
+  - Wire `sign` on `SyncObjectStore` (sync) and `AsyncObjectStore` (async) across `gs` (local RSA PEM and IAM `signBlob` via `SyncGcpTokenCache` / `AsyncGcpTokenCache`), `s3`, `az`, and `oci` (PAR base token / native PAR).
 
 ## Edge Cases & Error Semantics
 

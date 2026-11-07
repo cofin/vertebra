@@ -1,56 +1,64 @@
 ---
 type: Task
-id: "storage-completeness:ch01:t02"
+id: storage-completeness:ch01:t02
 chapter_id: ch01-native-engine-and-auth
 title: Wire Python streaming/conditional/paginated storage facade and _storage.pyi stubs
-description: Update _storage.pyi and vertebra.storage._store.{SyncObjectStore,AsyncObjectStore,SyncReadableFile,AsyncReadableFile} for streaming reads/uploads, conditional puts, cursor pagination, delimiter listing, and rename.
-status: stable
+description: Update _storage.pyi and vertebra.storage._store.{SyncObjectStore,AsyncObjectStore,SyncReadableFile,AsyncReadableFile}
+  for streaming reads/uploads, conditional puts, cursor pagination, delimiter listing, and rename.
+status: draft
 state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-  - "storage-completeness:ch01:t01"
+- storage-completeness:ch01:t01
 read_set:
-  - src/rs/vertebra-storage/src/lib.rs
-  - src/py/vertebra/_storage.pyi
-  - src/py/vertebra/storage/_store.py
-  - src/py/tests/unit/storage/test_multicloud_storage.py
-  - src/py/tests/unit/storage/test_storage_store.py
-  - .agents/skills/python-framework/SKILL.md
+- src/rs/vertebra-storage/src/lib.rs
+- src/py/vertebra/_storage.pyi
+- src/py/vertebra/storage/_store.py
+- src/py/tests/unit/storage/test_multicloud_storage.py
+- src/py/tests/unit/storage/test_storage_store.py
+- .agents/skills/python-framework/SKILL.md
 files:
-  - src/rs/vertebra-storage/src/lib.rs
-  - src/py/vertebra/_storage.pyi
-  - src/py/vertebra/storage/_store.py
+- src/rs/vertebra-storage/src/lib.rs
+- src/py/vertebra/_storage.pyi
+- src/py/vertebra/storage/_store.py
 tests:
-  - src/py/tests/unit/storage/test_multicloud_storage.py
-  - src/py/tests/unit/storage/test_storage_store.py
+- src/py/tests/unit/storage/test_multicloud_storage.py
+- src/py/tests/unit/storage/test_storage_store.py
 estimated_loc: 210
-plan_revision: 2
-plan_commit: cdb978d3
+plan_revision: 4
+plan_commit: null
 state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: "2026-11-07T16:44:30Z"
+last_verified_at: '2026-11-07T16:44:30Z'
 last_verified_commit: cb6b0647
-verification_evidence: "Red: uv run --no-sync pytest src/py/tests/unit/storage/test_storage_store.py src/py/tests/unit/storage/test_multicloud_storage.py -q (exit 1, 8 failed); uv run --no-sync python -m mypy.stubtest vertebra._storage (exit 1, 27 errors). Green: cargo fmt --manifest-path src/rs/Cargo.toml --all -- --check (exit 0); uv run --no-sync cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets -- -D warnings (exit 0); uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage (exit 0, 20 passed); make dev (exit 0); uv run --no-sync python -m mypy.stubtest vertebra._storage (exit 0); uv run --no-sync ruff check src/py/vertebra/_storage.pyi src/py/vertebra/storage src/py/tests/unit/storage (exit 0); uv run --no-sync mypy src/py/vertebra/storage (exit 0); uv run --no-sync pytest src/py/tests/unit/storage -q (exit 0, 41 passed)."
-created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T16:44:30Z"
+verification_evidence: 'Red: uv run --no-sync pytest src/py/tests/unit/storage/test_storage_store.py src/py/tests/unit/storage/test_multicloud_storage.py
+  -q (exit 1, 8 failed); uv run --no-sync python -m mypy.stubtest vertebra._storage (exit 1, 27 errors). Green: cargo fmt
+  --manifest-path src/rs/Cargo.toml --all -- --check (exit 0); uv run --no-sync cargo clippy --manifest-path src/rs/Cargo.toml
+  -p vertebra-storage --all-targets -- -D warnings (exit 0); uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml
+  -p vertebra-storage (exit 0, 20 passed); make dev (exit 0); uv run --no-sync python -m mypy.stubtest vertebra._storage (exit
+  0); uv run --no-sync ruff check src/py/vertebra/_storage.pyi src/py/vertebra/storage src/py/tests/unit/storage (exit 0);
+  uv run --no-sync mypy src/py/vertebra/storage (exit 0); uv run --no-sync pytest src/py/tests/unit/storage -q (exit 0, 41
+  passed).'
+created_at: '2026-11-07T04:15:00Z'
+updated_at: '2026-11-07T16:44:30Z'
 commit: cb6b0647
 sources:
-  - id: storage-pyi
-    resource: src/py/vertebra/_storage.pyi::SyncObjectStore
-    title: Type stubs for the vertebra._storage PyO3 extension
-  - id: py-store-facade
-    resource: src/py/vertebra/storage/_store.py::AsyncObjectStore
-    title: Python SyncObjectStore, AsyncObjectStore, SyncReadableFile, and AsyncReadableFile
+- id: storage-pyi
+  resource: src/py/vertebra/_storage.pyi::SyncObjectStore
+  title: Type stubs for the vertebra._storage PyO3 extension
+- id: py-store-facade
+  resource: src/py/vertebra/storage/_store.py::AsyncObjectStore
+  title: Python SyncObjectStore, AsyncObjectStore, SyncReadableFile, and AsyncReadableFile
 tags:
-  - storage
-  - python
-  - streaming
-  - typing
+- storage
+- python
+- streaming
+- typing
 ---
 
 # Task t02: Wire Python Streaming, Conditional, and Paginated Storage Facade and `_storage.pyi` Stubs

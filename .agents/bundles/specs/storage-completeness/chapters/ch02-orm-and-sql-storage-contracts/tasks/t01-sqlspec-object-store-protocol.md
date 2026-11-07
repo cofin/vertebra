@@ -1,52 +1,54 @@
 ---
 type: Task
-id: "storage-completeness:ch02:t01"
+id: storage-completeness:ch02:t01
 chapter_id: ch02-orm-and-sql-storage-contracts
 title: Complete fail-closed SQLSpec ObjectStoreProtocol over SyncObjectStore and AsyncObjectStore
-description: Remove implicit memory:// defaults in vertebra.extensions.sqlspec.storage.ObjectStoreBackend and implement full sync/async SQLSpec ObjectStoreProtocol streaming, pagination, rename, and presigning methods.
-status: stable
+description: Remove implicit memory:// defaults in vertebra.extensions.sqlspec.storage.ObjectStoreBackend and implement full
+  sync/async SQLSpec ObjectStoreProtocol streaming, pagination, rename, and presigning methods.
+status: draft
 state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
 read_set:
-  - src/py/vertebra/extensions/sqlspec/storage.py
-  - src/py/vertebra/storage/_store.py
-  - src/py/tests/unit/extensions/test_data_storage_integrations.py
-  - .agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md
-  - .agents/skills/python-framework/SKILL.md
-  - .venv/lib/python3.12/site-packages/sqlspec/protocols.py
+- src/py/vertebra/extensions/sqlspec/storage.py
+- src/py/vertebra/storage/_store.py
+- src/py/tests/unit/extensions/test_data_storage_integrations.py
+- .agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md
+- .agents/skills/python-framework/SKILL.md
+- .venv/lib/python3.12/site-packages/sqlspec/protocols.py
 files:
-  - src/py/vertebra/extensions/sqlspec/storage.py
+- src/py/vertebra/extensions/sqlspec/storage.py
 tests:
-  - src/py/tests/unit/extensions/test_data_storage_integrations.py
+- src/py/tests/unit/extensions/test_data_storage_integrations.py
 estimated_loc: 170
-plan_revision: 3
-plan_commit: 0acdf576
+plan_revision: 4
+plan_commit: null
 state_revision: 0
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: "2026-11-07T20:10:17Z"
+last_verified_at: '2026-11-07T20:10:17Z'
 last_verified_commit: dd3c9c08
-verification_evidence: "Red: omitted URI/conditional writes/prefix traversal fail; Green: focused SQLSpec 9 passed, full integration module 16 passed; mypy source, Ruff check/format, diff check exit 0."
-created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T20:00:00Z"
+verification_evidence: 'Red: omitted URI/conditional writes/prefix traversal fail; Green: focused SQLSpec 9 passed, full integration
+  module 16 passed; mypy source, Ruff check/format, diff check exit 0.'
+created_at: '2026-11-07T04:15:00Z'
+updated_at: '2026-11-07T20:00:00Z'
 commit: dd3c9c08
 sources:
-  - id: sqlspec-storage-mod
-    resource: src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend
-    title: SQLSpec ObjectStoreBackend and build_duckdb_gcs_secret_sql
-  - id: py-store-api
-    resource: src/py/vertebra/storage/_store.py::SyncObjectStore
-    title: SyncObjectStore and AsyncObjectStore streaming and signing API
+- id: sqlspec-storage-mod
+  resource: src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend
+  title: SQLSpec ObjectStoreBackend and build_duckdb_gcs_secret_sql
+- id: py-store-api
+  resource: src/py/vertebra/storage/_store.py::SyncObjectStore
+  title: SyncObjectStore and AsyncObjectStore streaming and signing API
 tags:
-  - storage
-  - sqlspec
-  - extensions
-  - python
+- storage
+- sqlspec
+- extensions
+- python
 ---
 
 # Task t01: Complete Fail-Closed SQLSpec `ObjectStoreProtocol` Over `SyncObjectStore` and `AsyncObjectStore`

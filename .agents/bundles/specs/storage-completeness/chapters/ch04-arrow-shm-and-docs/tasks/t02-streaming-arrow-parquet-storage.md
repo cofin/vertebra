@@ -1,117 +1,114 @@
 ---
 type: Task
-id: "storage-completeness:ch04:t02"
+id: storage-completeness:ch04:t02
 chapter_id: ch04-arrow-shm-and-docs
-title: Wire batch-streaming Arrow and Parquet helpers across SyncObjectStore, AsyncObjectStore, and SQLSpec
-description: Implement batch-streaming Arrow IPC and Parquet read/write helpers on SyncObjectStore and AsyncObjectStore and non-buffering _iter_arrow_async in extensions/sqlspec/storage.py.
-status: stable
-state: pending
+title: Accept complete streaming Arrow and Parquet facade and SQLSpec contracts
+description: Integrate bounded sync codecs, async native I/O bridge and SQLSpec streaming through their public APIs.
+status: draft
+state: blocked
 priority: P1
-verification_strategy: behavior_tdd
+verification_strategy: integration_acceptance
 depends_on:
-  - "storage-completeness:ch04:t01"
+- storage-completeness:ch04:t01
+- storage-completeness:ch17:t02
+- storage-completeness:ch18:t03
+- storage-completeness:ch19:t02
 read_set:
-  - src/py/vertebra/storage/_store.py
-  - src/py/vertebra/extensions/sqlspec/storage.py
-  - src/py/vertebra/db/arrow.py
-  - src/py/tests/unit/storage/test_storage_store.py
-  - src/py/tests/unit/extensions/test_data_storage_integrations.py
+- src/py/vertebra/storage/_store.py
+- src/py/vertebra/storage/_arrow.py
+- src/py/vertebra/extensions/sqlspec/storage.py
+- src/py/vertebra/db/arrow.py
+- src/py/tests/unit/storage/test_storage_store.py
+- src/py/tests/unit/extensions/test_data_storage_integrations.py
 files:
-  - src/py/vertebra/storage/_store.py
-  - src/py/vertebra/extensions/sqlspec/storage.py
+- src/py/vertebra/storage/_store.py
 tests:
-  - src/py/tests/unit/storage/test_storage_store.py
-  - src/py/tests/unit/extensions/test_data_storage_integrations.py
-estimated_loc: 195
-plan_revision: 2
-plan_commit: cdb978d3
+- src/py/tests/unit/storage/test_storage_store.py
+- src/py/tests/unit/extensions/test_data_storage_integrations.py
+estimated_loc: 100
+plan_revision: 4
+plan_commit: null
 state_revision: 0
 claimed_by: null
 claimed_at: null
-blocked_reason: null
-unblock_condition: null
+blocked_reason: Native key identity, typed CAS conflicts and atomic conditional publication are awaiting repair and independent
+  review.
+unblock_condition: ch16 native acceptance passes, ch01 recloses with correctness and fresh quality reviews, and ch02 correctness/quality
+  review completes.
 next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+created_at: '2026-11-07T04:15:00Z'
+updated_at: '2026-11-07T04:15:00Z'
 commit: null
 sources:
-  - id: store-arrow-helpers
-    resource: src/py/vertebra/storage/_store.py::SyncObjectStore
-    title: SyncObjectStore and AsyncObjectStore Arrow and Parquet helpers
-  - id: sqlspec-arrow-iter
-    resource: src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend
-    title: SQLSpec ObjectStoreBackend Arrow/Parquet streaming methods
-  - id: arrow-cursor
-    resource: src/py/vertebra/db/arrow.py::ArrowCursor
-    title: ArrowCursor batch and IPC stream conversion
+- id: store-arrow-helpers
+  resource: src/py/vertebra/storage/_store.py::SyncObjectStore
+  title: SyncObjectStore and AsyncObjectStore Arrow and Parquet helpers
+- id: sqlspec-arrow-iter
+  resource: src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend
+  title: SQLSpec ObjectStoreBackend Arrow/Parquet streaming methods
+- id: arrow-cursor
+  resource: src/py/vertebra/db/arrow.py::ArrowCursor
+  title: ArrowCursor batch and IPC stream conversion
 tags:
-  - storage
-  - arrow
-  - parquet
-  - sqlspec
-  - streaming
+- storage
+- arrow
+- parquet
+- sqlspec
+- streaming
 ---
 
-# Task t02: Wire Batch-Streaming Arrow and Parquet Helpers Across `SyncObjectStore`, `AsyncObjectStore`, and SQLSpec
+# Accept complete streaming Arrow and Parquet facade and SQLSpec contracts
 
 ## Objective & Scope Boundary
 
-Add batch-streaming Arrow IPC and Parquet read/write helpers on `SyncObjectStore` and `AsyncObjectStore` (`src/py/vertebra/storage/_store.py`) backed by `put_stream`, `get_stream`, and range-backed `SyncReadableFile` / `AsyncReadableFile`, and update `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` (`_iter_arrow_async` / `read_arrow_async` / `write_arrow_async`) so multi-batch Parquet and Arrow IPC datasets stream batch-by-batch without whole-table `to_pylist()` or full-file buffering [^store-arrow-helpers] [^sqlspec-arrow-iter] [^arrow-cursor].
+Preserve original ch04:t02 and accept the complete R8 streaming contract after bounded implementation chapters ch17–ch19. Own only final facade integration and canonical consumer regressions; do not reimplement codecs or compress all sync/async Arrow/Parquet behavior into this task. [^facade]
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/storage/_store.py` — `SyncObjectStore`, `AsyncObjectStore`, `SyncReadableFile`, and `AsyncReadableFile` [^store-arrow-helpers].
-- `src/py/vertebra/extensions/sqlspec/storage.py` — `ObjectStoreBackend` Arrow/Parquet methods [^sqlspec-arrow-iter].
-- `src/py/vertebra/db/arrow.py` — `ArrowCursor` (`from_rows`, `as_bytes`, `to_arrow`) [^arrow-cursor].
-- `src/py/tests/unit/storage/test_storage_store.py` — Storage Arrow/Parquet round-trip tests.
-- `src/py/tests/unit/extensions/test_data_storage_integrations.py` — SQLSpec storage Arrow streaming tests.
+- `src/py/vertebra/storage/_store.py` — public sync/async facade methods.
+- `src/py/vertebra/storage/_arrow.py` — private bounded codecs and worker/native-I/O bridge.
+- `src/py/vertebra/extensions/sqlspec/storage.py` — protocol integration.
+- `src/py/vertebra/db/arrow.py` — unchanged public ArrowCursor conversion/signatures.
+- `src/py/tests/unit/storage/test_storage_store.py` — public facade regressions.
+- `src/py/tests/unit/extensions/test_data_storage_integrations.py` — SQLSpec public consumer regressions.
 
 ## Symbol & Signature Contracts
 
-- `src/py/vertebra/storage/_store.py`:
-  - `SyncObjectStore` & `AsyncObjectStore`:
-    - `write_arrow(self, key: str, data: ArrowCursor | Any, *, batch_size: int = 65536) -> ObjectMetadata` (streams Arrow IPC chunks via `put_stream` with `content_type="application/vnd.apache.arrow.stream"`)
-    - `iter_arrow_batches(self, key: str) -> Iterator[Any]` / `AsyncIterator[Any]` (reads Arrow IPC stream incrementally into `pyarrow.RecordBatch` items)
-    - `write_parquet(self, key: str, batches: Any, *, schema: Any = None, compression: str = "zstd", row_group_size: int = 65536) -> ObjectMetadata` (streams encoded Parquet row-group buffers through a chunked sink writer into `put_stream` with `content_type="application/vnd.apache.parquet"`)
-    - `iter_parquet_batches(self, key: str, *, batch_size: int = 65536, columns: Sequence[str] | None = None) -> Iterator[Any]` / `AsyncIterator[Any]` (uses `SyncReadableFile` / range-fetched row groups over `AsyncObjectStore` to yield `pyarrow.RecordBatch` items incrementally)
-- `src/py/vertebra/extensions/sqlspec/storage.py`:
-  - Wire `ObjectStoreBackend._iter_arrow_async` (and sync `_iter_arrow` / `write_arrow_async` where defined by SQLSpec `ObjectStoreProtocol`) to delegate directly to `AsyncObjectStore.iter_parquet_batches` / `iter_arrow_batches` (detecting `.parquet` vs `.arrow`/`.ipc` format) without materializing all batches into a `list` first.
+SyncObjectStore and AsyncObjectStore expose write_arrow, iter_arrow_batches, read_arrow, write_parquet, iter_parquet_batches and read_parquet with identical options and sync versus awaitable/AsyncIterator return forms defined by ch17/ch18. SQLSpec read/write/cursor/stream APIs preserve installed ObjectStoreProtocol signatures. PyArrow is optional, imports remain lazy, and missing dependency raises MissingDependencyError. Iterators retain only current batches/range cache, use native async I/O and close helper-owned reader/upload resources; caller store remains open. Table convenience outputs may materialize requested result data. No whole encoded-input bytes/list/mmap spool, no synchronous cloud I/O or PyArrow worker callback on event loop, and zero asyncio.to_thread in _store.py.
 
 ## Edge Cases & Error Semantics
 
-- Calling any Arrow/Parquet storage helper when `pyarrow` is uninstalled raises `MissingDependencyError("pyarrow", install_package="pyarrow", extra="arrow")`.
-- Writing a 3-row-group Parquet dataset (`row_group_size=100`, 250 rows) and iterating via `iter_parquet_batches(..., batch_size=100, columns=["id"])` yields 3 `RecordBatch` instances containing only column `"id"` (`100`, `100`, `50` rows).
-- Zero `asyncio.to_thread` calls in `src/py/vertebra/storage/_store.py`.
+Schema/dictionary replacement, empty stream/explicit schema, projected Parquet column ranges, missing dependency, invalid row-group/batch size, corrupt encoding, producer failure, wrong owning loop, early iterator close and cancellation have the exact ch17–ch19 typed/cleanup behavior. Do not swallow validation or provider errors as unsupported capability.
 
 ## Public-Seam Test Blueprint
 
-- **Canonical test files**: `src/py/tests/unit/storage/test_storage_store.py` and `src/py/tests/unit/extensions/test_data_storage_integrations.py`.
-- **Worked Test Matrix**:
-
-| Case | Input | Expected Output / Error |
+| Case | Input | Expected result |
 | --- | --- | --- |
-| Async Parquet multi-row-group projection | Write 250 rows (`id`, `payload`) via `await store.write_parquet("ds.parquet", table, row_group_size=100)`; read `store.iter_parquet_batches("ds.parquet", batch_size=100, columns=["id"])` | Yields 3 `pa.RecordBatch` objects (`100`, `100`, `50` rows) with `batch.schema.names == ["id"]` and exact IDs `0..249`. |
-| Async Arrow IPC `ArrowCursor` round-trip | `cursor = ArrowCursor.from_rows([{"k": "a", "v": 1}, {"k": "b", "v": 2}])`; `await store.write_arrow("ds.arrow", cursor)` -> `iter_arrow_batches("ds.arrow")` | Yields valid `RecordBatch`es decoding to `[{"k": "a", "v": 1}, {"k": "b", "v": 2}]`. |
-| SQLSpec `ObjectStoreBackend._iter_arrow_async` | Stream batches from `backend._iter_arrow_async("ds.parquet")` | Returns an async generator yielding `RecordBatch`es incrementally without pre-loading a list. |
-| Missing `pyarrow` guard | Mask `pyarrow` unavailable and call `store.write_parquet("x.parquet", ...)` | Raises `MissingDependencyError`. |
+| Sync and async projection |250rows id/payload, rowgroups100/100/50, columns=["id"]|Three batches100/100/50, schema id and IDs0..249 through facade and SQLSpec.|
+| IPC dictionaries and empty stream |Dictionary replacement batches and empty explicit schema|Valid PyArrow decode with exact values/schema; zero-batch iteration ends cleanly.|
+| Consumer backpressure |Gated native multipart and producer/consumer barriers|Producer advances at most current bounded batch; paused reader reserves no blocked worker.|
+| Failure/cancellation/lifetime |Raise producer at batch2; cancel reader/writer while native I/O pending; reuse store|Original error/cancellation, awaited abort/reader cleanup, no dangling MPU/new I/O, caller store operational.|
+| Optional dependency and wrong loop |Fresh process masks PyArrow; bridge invoked from other loop|MissingDependencyError or explicit RuntimeError before I/O.|
 
 ## Verification
 
-- Initial Red baseline: `uv run --no-sync pytest src/py/tests/unit/storage/test_storage_store.py src/py/tests/unit/extensions/test_data_storage_integrations.py -k "arrow or parquet" -q`
-- Final Green + lint + typecheck gate: `uv run --no-sync ruff check src/py/vertebra/storage/_store.py src/py/vertebra/extensions/sqlspec/storage.py && uv run --no-sync mypy src/py/vertebra/storage src/py/vertebra/extensions/sqlspec/storage.py && uv run --no-sync pytest src/py/tests/unit/storage/test_storage_store.py src/py/tests/unit/extensions/test_data_storage_integrations.py -q`
+- `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" make dev`
+- `uv run --no-sync python -m mypy.stubtest vertebra._storage`
+- `uv run --no-sync ruff check src/py/vertebra/storage/_store.py src/py/vertebra/storage/_arrow.py src/py/vertebra/extensions/sqlspec/storage.py src/py/tests/unit/storage/test_storage_store.py src/py/tests/unit/extensions/test_data_storage_integrations.py`
+- `uv run --no-sync mypy src/py/vertebra/storage src/py/vertebra/extensions/sqlspec/storage.py`
+- `uv run --no-sync pytest src/py/tests/unit/storage/test_storage_store.py src/py/tests/unit/extensions/test_data_storage_integrations.py -q`
 
 ## Acceptance Criteria
 
-- [ ] `SyncObjectStore` and `AsyncObjectStore` stream Arrow IPC and Parquet batches via `put_stream`, `get_stream`, and range reads with zero `asyncio.to_thread` calls (R8).
-- [ ] `ObjectStoreBackend._iter_arrow_async` yields `RecordBatch` items lazily without whole-dataset list materialization (R4, R8).
+- [ ] Every public API and negative/lifetime row passes with actual native Memory/Local stores and dictionary/projection fixtures.
+- [ ] Canonical tests demonstrate bounded progression and actual values, not source-text checks or generic mocks.
+- [ ] Task evidence records exact focused results and final native build checkpoint; docs/OKF follow through original ch04:t03.
 
 ## Notes & Discoveries
 
-- [2026-11-07 04:15] Parquet footer metadata resides in the trailing 8 bytes (`footer_len` + `PAR1`); `AsyncObjectStore.get_range` reads footer + selected row-group byte ranges cleanly without blocking.
+Private codec and async bridge responsibilities belong to ch17–ch19. This original task retains R8 integration acceptance and its stable identity. No implementation or review result is inferred from plan structure.
 
-[^store-arrow-helpers]: `src/py/vertebra/storage/_store.py::SyncObjectStore` — Object store Arrow and Parquet streaming methods.
-[^sqlspec-arrow-iter]: `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` — SQLSpec Arrow/Parquet storage integration.
-[^arrow-cursor]: `src/py/vertebra/db/arrow.py::ArrowCursor` — Arrow IPC cursor primitive.
+[^facade]: `src/py/vertebra/storage/_store.py::SyncObjectStore` and `AsyncObjectStore` — Public object storage boundary.

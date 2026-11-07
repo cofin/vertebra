@@ -1,57 +1,60 @@
 ---
 type: Task
-id: "storage-completeness:ch03:t02"
+id: storage-completeness:ch03:t02
 chapter_id: ch03-litestar-and-range-streaming
 title: Implement ObjectStoreLitestarStore and ObjectStoreFileSystemAdapter in extensions.litestar
-description: Add an AsyncObjectStore-backed Litestar Store (ObjectStoreLitestarStore) with TTL metadata and an async static-files adapter (ObjectStoreFileSystemAdapter) with Range support in vertebra.extensions.litestar.
-status: stable
-state: pending
+description: Add an AsyncObjectStore-backed Litestar Store (ObjectStoreLitestarStore) with TTL metadata and an async static-files
+  adapter (ObjectStoreFileSystemAdapter) with Range support in vertebra.extensions.litestar.
+status: draft
+state: blocked
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-  - "storage-completeness:ch03:t01"
+- storage-completeness:ch03:t01
 read_set:
-  - src/py/vertebra/extensions/litestar/store.py
-  - src/py/vertebra/extensions/litestar/__init__.py
-  - src/py/vertebra/storage/_streaming.py
-  - src/py/tests/unit/extensions/test_litestar_plugin.py
-  - .agents/bundles/knowledge/domains/extensions/litestar.md
-  - .agents/skills/python-framework/SKILL.md
+- src/py/vertebra/extensions/litestar/store.py
+- src/py/vertebra/extensions/litestar/__init__.py
+- src/py/vertebra/storage/_streaming.py
+- src/py/tests/unit/extensions/test_litestar_plugin.py
+- .agents/bundles/knowledge/domains/extensions/litestar.md
+- .agents/skills/python-framework/SKILL.md
 files:
-  - src/py/vertebra/extensions/litestar/store.py
-  - src/py/vertebra/extensions/litestar/__init__.py
+- src/py/vertebra/extensions/litestar/store.py
+- src/py/vertebra/extensions/litestar/__init__.py
 tests:
-  - src/py/tests/unit/extensions/test_litestar_plugin.py
+- src/py/tests/unit/extensions/test_litestar_plugin.py
 estimated_loc: 190
-plan_revision: 2
-plan_commit: cdb978d3
+plan_revision: 4
+plan_commit: null
 state_revision: 0
 claimed_by: null
 claimed_at: null
-blocked_reason: null
-unblock_condition: null
+blocked_reason: Native key identity, typed CAS conflicts and atomic conditional publication are awaiting repair and independent
+  review.
+unblock_condition: ch16 native acceptance passes, ch01 recloses with correctness and fresh quality reviews, and ch02 correctness/quality
+  review completes.
 next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+created_at: '2026-11-07T04:15:00Z'
+updated_at: '2026-11-07T04:15:00Z'
 commit: null
 sources:
-  - id: litestar-store-mod
-    resource: src/py/vertebra/extensions/litestar/store.py::ValkeyStore
-    title: Litestar Store implementations in vertebra.extensions.litestar.store
-  - id: litestar-pkg-init
-    resource: src/py/vertebra/extensions/litestar/__init__.py
-    title: Litestar extension package exports
-  - id: range-streaming
-    resource: src/py/vertebra/storage/_streaming.py::StreamingStorageResponse
-    title: Non-blocking HTTP Range streaming response
+- id: litestar-store-mod
+  resource: src/py/vertebra/extensions/litestar/store.py::ValkeyStore
+  title: Litestar Store implementations in vertebra.extensions.litestar.store
+- id: litestar-pkg-init
+  resource: src/py/vertebra/extensions/litestar/__init__.py
+  title: Litestar extension package exports
+- id: range-streaming
+  resource: src/py/vertebra/storage/_streaming.py::StreamingStorageResponse
+  title: Non-blocking HTTP Range streaming response
 tags:
-  - storage
-  - litestar
-  - extensions
-  - http
+- storage
+- litestar
+- extensions
+- http
 ---
 
 # Task t02: Implement `ObjectStoreLitestarStore` and `ObjectStoreFileSystemAdapter` in `extensions.litestar`

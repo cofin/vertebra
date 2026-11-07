@@ -1,31 +1,33 @@
 ---
 type: Task
-id: "storage-completeness:ch04:t03"
+id: storage-completeness:ch04:t03
 chapter_id: ch04-arrow-shm-and-docs
 title: Synchronize storage usage guides and OKF object-storage knowledge chapter
-description: Update docs/usage/storage.md, docs/usage/storage-auth-and-signing.md, and .agents/bundles/knowledge/domains/storage/object-storage.md to match the shipped storage, auth, framework, and Arrow contracts.
-status: stable
+description: Update docs/usage/storage.md, docs/usage/storage-auth-and-signing.md, and .agents/bundles/knowledge/domains/storage/object-storage.md
+  to match the shipped storage, auth, framework, and Arrow contracts.
+status: draft
 state: pending
 priority: P1
 verification_strategy: documentation_validation
 depends_on:
-  - "storage-completeness:ch04:t02"
+- storage-completeness:ch04:t02
+- storage-completeness:ch09:t03
 read_set:
-  - docs/usage/storage.md
-  - docs/usage/storage-auth-and-signing.md
-  - docs/usage/storage-parquet-and-orm.md
-  - .agents/bundles/knowledge/domains/storage/object-storage.md
-  - src/py/vertebra/_storage.pyi
-  - src/py/tests/unit/tools/test_docs_tooling.py
+- docs/usage/storage.md
+- docs/usage/storage-auth-and-signing.md
+- docs/usage/storage-parquet-and-orm.md
+- .agents/bundles/knowledge/domains/storage/object-storage.md
+- src/py/vertebra/_storage.pyi
+- src/py/tests/unit/tools/test_docs_tooling.py
 files:
-  - docs/usage/storage.md
-  - docs/usage/storage-auth-and-signing.md
-  - .agents/bundles/knowledge/domains/storage/object-storage.md
+- docs/usage/storage.md
+- docs/usage/storage-auth-and-signing.md
+- .agents/bundles/knowledge/domains/storage/object-storage.md
 tests:
-  - src/py/tests/unit/tools/test_docs_tooling.py
+- src/py/tests/unit/tools/test_docs_tooling.py
 estimated_loc: 180
-plan_revision: 2
-plan_commit: cdb978d3
+plan_revision: 4
+plan_commit: null
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -35,24 +37,24 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+created_at: '2026-11-07T04:15:00Z'
+updated_at: '2026-11-07T04:15:00Z'
 commit: null
 sources:
-  - id: docs-storage
-    resource: docs/usage/storage.md
-    title: User-facing object storage guide
-  - id: docs-storage-auth
-    resource: docs/usage/storage-auth-and-signing.md
-    title: User-facing GCP auth and presigned URL guide
-  - id: okf-object-storage
-    resource: .agents/bundles/knowledge/domains/storage/object-storage.md
-    title: OKF v0.2 domain knowledge chapter for object storage
+- id: docs-storage
+  resource: docs/usage/storage.md
+  title: User-facing object storage guide
+- id: docs-storage-auth
+  resource: docs/usage/storage-auth-and-signing.md
+  title: User-facing GCP auth and presigned URL guide
+- id: okf-object-storage
+  resource: .agents/bundles/knowledge/domains/storage/object-storage.md
+  title: OKF v0.2 domain knowledge chapter for object storage
 tags:
-  - storage
-  - docs
-  - okf
-  - signing
+- storage
+- docs
+- okf
+- signing
 ---
 
 # Task t03: Synchronize Storage Usage Guides and OKF `object-storage` Knowledge Chapter
@@ -79,6 +81,8 @@ Bring user-facing storage documentation (`docs/usage/storage.md`, `docs/usage/st
 - `.agents/bundles/knowledge/domains/storage/object-storage.md`:
   - Preserve `ch01` `RustTaskAwaitable`, `src/rs/vertebra-core/src/notify.rs` + `src/rs/vertebra-core/src/gcp_auth.rs` provenance, unified `vertebra._vertebra` GCP token caches, and fail-closed construction invariants.
   - Extend Section 4 (`Range Reads & Ecosystem Adapters`) and `sources:` with `ch02`–`ch04` `@deconstructible` `DjangoStorage`, `StorageRegistry` Advanced Alchemy registration, Litestar `ObjectStoreLitestarStore` / `ObjectStoreFileSystemAdapter` / RFC 9110 `206` & `416` streaming, and batch-streaming Arrow/Parquet helpers, updating `verified` to the latest chapter commit.
+
+Final guide examples cover exact raw-key grammar and qualified adapter paths, typed PreconditionError, S3 known409 failure/abort semantics, OCI8MiB/10000-part limits and no5TiB promise, local cooperating-process guarantee with direct OS writers excluded, complete HTTP/TTL/static behavior and all sync/async Arrow/Parquet APIs. Remove first-class R2 references. Document bounded PyArrow worker/native async I/O bridge, optional dependency, helper/store ownership and cancellation; Table convenience outputs may materialize. Native repair knowledge from ch09:t03 is extended with final HTTP/Arrow evidence, not overwritten with inferred claims.
 
 ## Edge Cases & Error Semantics
 

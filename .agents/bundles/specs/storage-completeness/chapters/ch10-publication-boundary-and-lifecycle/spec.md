@@ -1,0 +1,114 @@
+---
+type: Spec
+parent_flow: storage-completeness
+chapter_id: ch10-publication-boundary-and-lifecycle
+title: Native Publication Boundary and Cleanup Ownership
+description: Native Publication Boundary and Cleanup Ownership
+status: draft
+state: planned
+planning_status: complete
+depends_on_chapters: []
+replan_trigger: null
+current_task: null
+plan_revision: 4
+plan_commit: null
+state_revision: 0
+last_verified_checkpoint: 5fe477fa
+last_reviewed_commit: null
+created_at: '2026-11-07T12:00:00Z'
+updated_at: '2026-11-07T12:00:00Z'
+generated:
+  by: flow/0.28.0
+  at: '2026-11-07T12:00:00Z'
+verified: []
+sources:
+- id: source
+  resource: src/rs/vertebra-storage/src/store.rs
+  title: Grounded implementation seam
+- id: research
+  resource: .agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md
+  title: Grounded storage publication or Arrow API evidence
+tags:
+- storage
+- repair
+---
+
+# Native Publication Boundary and Cleanup Ownership
+
+<!-- truth: start -->
+This chapter restores an observable storage contract at the existing `5fe477fa` functional baseline. [^source]
+Production work stays within each task's explicit ownership. Raw keys, conditional publication, metadata and cleanup are correctness contracts.
+A completed implementation still requires correctness review followed by fresh quality review.
+<!-- truth: end -->
+
+## 1. Specification, Context & Provenance
+
+Native Publication Boundary and Cleanup Ownership addresses confirmed storage contract gaps. The concrete source and canonical tests are bounded in each worksheet. The baseline is available even while ch01:t01 is reopened; tasks depend only on explicitly listed predecessor artifacts. Use project-local pyo3-bridge/runtime-ipc/python-framework skills according to owned language and the storage domain knowledge chapter.
+
+## 2. Requirements, Concrete Contracts & Architecture
+
+Grounded contract evidence: [^research].
+
+### R1: Retain concrete providers behind a private publication boundary
+
+Add private `conditional.rs` and `mod conditional;` in lib.rs. `ObjectStoreEngine` keeps existing `inner: Arc<dyn ObjectStore>` and a private `publication: PublicationBackend`. `PublicationBackend` retains concrete Arc handles for Memory, Local, S3, Azure, GCS, OCI and resolved endpoint/region/bucket/client options as needed; ordinary read/list code keeps inner. Build each SDK store once and share Arc into both fields, preserving existing credential provider/refresh identity and configured transport. Private `PublishCondition { Overwrite, Create, Match(String), NotMatch(String) }` normalizes PutConditionalOptions, rejecting conflicting selectors before provider effects. The private `PublicationBackend::begin(path, options)` returns a `Box<dyn MultipartUpload>` implementing provider-specific final publish; no public backend enum or generic copy-create substitute. Existing `with_store` stays usable for injected canonical stores, retaining actual PutMode support; unsupported custom-store conditional multipart fails explicitly until it provides the required primitive. S3/Azure/GCS variant constructors carry concrete handles before their later protocol task; no silent conditional fallback is allowed.
+
+### R2: Reuse SDK HTTP transport and credential authorizers
+
+Add private `cloud_request.rs` with `CloudRequestClient { client: object_store::client::HttpClient }`; construction uses the public `ReqwestConnector` through `HttpConnector::connect(&ClientOptions)` and execute uses `HttpClient::execute(HttpRequest)` with HttpRequestBody. Retain the exact resolved SDK ClientOptions (HTTP allow flag, endpoint, proxy exclusions, certificates, timeouts and headers where configured) rather than reqwest::Client::new. The private request execution boundary accepts SDK-built `HttpRequest`, uses provider.credentials().get_credential() per attempt and `AwsAuthorizer::new(...).authorize(request,None)` / `AzureAuthorizer::new(...).authorize(request)` or GCS bearer. Reuse refresh/sensitive request semantics and operation-specific safe retry classification. Never reimplement AWS/Azure signing or fork/vendor object_store. This transport module is consumed by S3 init/complete, Azure commit and GCS rewrite tasks.
+
+### R3: Retain multipart abort ownership across completion errors and cancellation
+
+`MultipartUploadSession::complete` restores the upload handle to self.upload on failed upload.complete(), just as tail-part failure does. Publication implementations retain stage/upload handles until published or cleanup succeeds, with async Drop ownership spawning bounded cleanup on the existing storage runtime for dropped/cancelled sessions. Rust/PyO3 sync and async wrappers leave abort callable after a failed complete; Python put_stream finally invokes abort on producer error or cancellation and never masks original failure. Completed success clears ownership; abort remains idempotent. No shared global Python lock or unbounded Drop blocking.
+
+### R4: Frame arbitrary S3 and GCS producer chunks into valid bounded parts
+
+Pinned SDK S3/GCS MultipartUpload::put_part maps each caller PutPayload directly to one service part; both require at least5MiB for non-final parts. `MultipartUploadSession::write_chunk` must frame arbitrary producer chunks for S3/GCS using a private `PutPayloadMut` current-part accumulator with8MiB target. Slice incoming Bytes and retain segments without copying the full stream; fill/await exactly one upload.put_part before accepting more producer data. Retain only one partial part plus the current caller-owned input; no Vec/list of all parts or unbounded concurrent tasks. Existing OCI-owned8MiB UniformPartAccumulator remains the OCI policy; Azure/local/memory preserve native semantics unless their provider boundary explicitly opts into framing. `complete` flushes short final tail (and correct empty-object behavior), preserving abort ownership on failure; part_sizes_flushed reports actual service parts. Enforce provider's10000-part limit before sending the disallowed part, abort safely and describe the effective fixed-part capacity honestly; no invented5TiB promise,1GiB buffers or single-PUT fallback. Do not adopt consuming WriteMultipart::finish unless handle ownership can survive its failure; the explicit rolling path is selected.
+
+Caller → seam → collaborator: public storage/framework calls → owned deep module boundary → native SDK, transport or upstream framework. Public signatures remain stable except the deliberate removal of first-class R2 and addition of typed PreconditionError.
+
+| Failure or edge | Required invariant |
+| --- | --- |
+| Competing writers | The winning object remains intact; stale CAS fails with typed PreconditionError or create-only FileExistsError. |
+| Provider/transport error | Preserve the provider failure and cleanup ownership; no silent fallback or full-object buffering. |
+| Optional dependency absent | Imports remain lazy and configured construction fails explicitly. |
+
+| Alternative | Decision |
+| --- | --- |
+| Deep owned boundary with exact provider semantics | Chosen: hides credentials, staging and concurrency while preserving configured SDK behavior. |
+| Generic head-then-write, Python lock, copy-create publication or blanket exception conversion | Rejected: loses atomicity, update results, metadata or error identity. |
+
+## 3. Documentation & OKF Knowledge Plan
+
+Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bundles/knowledge/domains/storage/object-storage.md` by ch09:t03 and user guides by ch04:t03; per-task tests are executable documentation. No separate untracked documentation obligation remains.
+
+## 4. Requirement-to-Task Traceability Matrix
+
+| Requirement | Task | Strategy | Verification |
+| --- | --- | --- | --- |
+| R1 | [ch10:t01](tasks/t01-publication-dispatch.md) | regression_tdd | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
+| R2 | [ch10:t02](tasks/t02-sdk-http-transport.md) | regression_tdd | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
+| R3 | [ch10:t03](tasks/t03-session-cleanup.md) | regression_tdd | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
+
+| R4 | [ch10:t04](tasks/t04-minimum-cloud-part-framing.md) | regression_tdd | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
+
+## 5. Implementation Plan
+
+- [ ] storage-completeness:ch10:t01 — Retain concrete providers behind a private publication boundary (tasks/t01-publication-dispatch.md)
+- [ ] storage-completeness:ch10:t02 — Reuse SDK HTTP transport and credential authorizers (tasks/t02-sdk-http-transport.md)
+- [ ] storage-completeness:ch10:t03 — Retain multipart abort ownership across completion errors and cancellation (tasks/t03-session-cleanup.md)
+
+- [ ] storage-completeness:ch10:t04 — Frame arbitrary S3 and GCS producer chunks into valid bounded parts (tasks/t04-minimum-cloud-part-framing.md)
+
+**Chapter Recovery Checkpoint:** run every task's focused verification, then correctness review and a fresh quality review before closing this chapter. `/flow:implement storage-completeness ch10-publication-boundary-and-lifecycle` executes its ready worksheet.
+
+## 6. Current State & Remaining Plan Snapshot
+
+- Baseline: `5fe477fa`; implementation is pending and cold plan review is required.
+- Remaining: all 4 tasks above; dependent tasks remain ordered by depends_on.
+- Documentation: `[0/1 files documented]`, owned by the explicit consolidation tasks.
+- Reclosure of ch01 and downstream acceptance waits for native repair gates; this chapter never depends on that reclosure.
+
+[^source]: `src/rs/vertebra-storage/src/store.rs` — Verified repository implementation seam.
+
+[^research]: `.agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md` — Source-grounded architecture and probe evidence.

@@ -1,51 +1,53 @@
 ---
 type: Task
-id: "storage-completeness:ch02:t02"
+id: storage-completeness:ch02:t02
 chapter_id: ch02-orm-and-sql-storage-contracts
 title: Remove storages.get monkeypatch and harden Advanced Alchemy StorageBackend
-description: Delete import-time storages.get monkeypatching and memory:// fallbacks in vertebra.extensions.alchemy.storage and register StorageBackend strictly via Advanced Alchemy StorageRegistry.
-status: stable
+description: Delete import-time storages.get monkeypatching and memory:// fallbacks in vertebra.extensions.alchemy.storage
+  and register StorageBackend strictly via Advanced Alchemy StorageRegistry.
+status: draft
 state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
 read_set:
-  - src/py/vertebra/extensions/alchemy/storage.py
-  - src/py/vertebra/storage/_store.py
-  - src/py/tests/unit/extensions/test_data_storage_integrations.py
-  - .agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md
-  - .agents/skills/python-framework/SKILL.md
+- src/py/vertebra/extensions/alchemy/storage.py
+- src/py/vertebra/storage/_store.py
+- src/py/tests/unit/extensions/test_data_storage_integrations.py
+- .agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md
+- .agents/skills/python-framework/SKILL.md
 files:
-  - src/py/vertebra/extensions/alchemy/storage.py
+- src/py/vertebra/extensions/alchemy/storage.py
 tests:
-  - src/py/tests/unit/extensions/test_data_storage_integrations.py
+- src/py/tests/unit/extensions/test_data_storage_integrations.py
 estimated_loc: 160
-plan_revision: 3
-plan_commit: 0acdf576
+plan_revision: 4
+plan_commit: null
 state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: "2026-11-07T20:16:12.017238+00:00"
+last_verified_at: '2026-11-07T20:16:12.017238+00:00'
 last_verified_commit: 7769500a
-verification_evidence: "Red: 3 failed, 3 passed (-k alchemy); Green: 21 passed full canonical integration module; Ruff check and format, mypy source, git diff --check all exit 0."
-created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T20:16:12.017238+00:00"
+verification_evidence: 'Red: 3 failed, 3 passed (-k alchemy); Green: 21 passed full canonical integration module; Ruff check
+  and format, mypy source, git diff --check all exit 0.'
+created_at: '2026-11-07T04:15:00Z'
+updated_at: '2026-11-07T20:16:12.017238+00:00'
 commit: 7769500a
 sources:
-  - id: alchemy-storage-mod
-    resource: src/py/vertebra/extensions/alchemy/storage.py::ObjectStoreBackend
-    title: Advanced Alchemy StorageBackend and register_storage_backend
-  - id: store-zero-thread
-    resource: src/py/vertebra/storage/_store.py::AsyncObjectStore
-    title: Non-blocking AsyncObjectStore backing Advanced Alchemy async file operations
+- id: alchemy-storage-mod
+  resource: src/py/vertebra/extensions/alchemy/storage.py::ObjectStoreBackend
+  title: Advanced Alchemy StorageBackend and register_storage_backend
+- id: store-zero-thread
+  resource: src/py/vertebra/storage/_store.py::AsyncObjectStore
+  title: Non-blocking AsyncObjectStore backing Advanced Alchemy async file operations
 tags:
-  - storage
-  - advanced-alchemy
-  - extensions
-  - python
+- storage
+- advanced-alchemy
+- extensions
+- python
 ---
 
 # Task t02: Remove `storages.get` Monkeypatch and Harden Advanced Alchemy `StorageBackend`

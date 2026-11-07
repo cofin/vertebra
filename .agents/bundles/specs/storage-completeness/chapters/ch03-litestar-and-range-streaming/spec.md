@@ -2,45 +2,46 @@
 type: Spec
 parent_flow: storage-completeness
 chapter_id: ch03-litestar-and-range-streaming
-title: "Chapter 03: HTTP Range Streaming and Litestar Store/Static Integration"
-description: Implement RFC 9110 single-range 206/416 StreamingStorageResponse and Litestar AsyncObjectStore Store plus static-files filesystem adapter.
-status: stable
+title: 'Chapter 03: HTTP Range Streaming and Litestar Store/Static Integration'
+description: Implement RFC 9110 single-range 206/416 StreamingStorageResponse and Litestar AsyncObjectStore Store plus static-files
+  filesystem adapter.
+status: draft
 state: planned
 planning_status: complete
 depends_on_chapters:
-  - ch01-native-engine-and-auth
+- ch01-native-engine-and-auth
 replan_trigger: null
-current_task: "storage-completeness:ch03:t01"
-plan_revision: 2
-plan_commit: cdb978d3
+current_task: storage-completeness:ch03:t01
+plan_revision: 4
+plan_commit: null
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
-created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+created_at: '2026-11-07T04:15:00Z'
+updated_at: '2026-11-07T04:15:00Z'
 generated:
   by: flow-setup
-  at: "2026-11-07T04:15:00Z"
+  at: '2026-11-07T04:15:00Z'
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-07T04:15:00Z"
-    commit: cdb978d3
+- by: agent:flow-setup
+  at: '2026-11-07T04:15:00Z'
+  commit: cdb978d3
 sources:
-  - id: streaming-py
-    resource: src/py/vertebra/storage/_streaming.py::StreamingStorageResponse
-    title: Zero-copy HTTP streaming response over SyncObjectStore and AsyncObjectStore
-  - id: litestar-store
-    resource: src/py/vertebra/extensions/litestar/store.py::ValkeyStore
-    title: Litestar Store adapter module hosting key-value and session stores
-  - id: litestar-init
-    resource: src/py/vertebra/extensions/litestar/__init__.py
-    title: Litestar extension public exports
+- id: streaming-py
+  resource: src/py/vertebra/storage/_streaming.py::StreamingStorageResponse
+  title: Zero-copy HTTP streaming response over SyncObjectStore and AsyncObjectStore
+- id: litestar-store
+  resource: src/py/vertebra/extensions/litestar/store.py::ValkeyStore
+  title: Litestar Store adapter module hosting key-value and session stores
+- id: litestar-init
+  resource: src/py/vertebra/extensions/litestar/__init__.py
+  title: Litestar extension public exports
 tags:
-  - storage
-  - litestar
-  - http
-  - streaming
-  - zero-copy
+- storage
+- litestar
+- http
+- streaming
+- zero-copy
 ---
 
 # Chapter 03: HTTP Range Streaming and Litestar Store/Static Integration
@@ -102,8 +103,8 @@ Progress: `[0/0 files documented in ch03]` (documented in `ch04:t03` across `doc
 
 ## 5. Implementation Plan
 
-- [ ] storage-completeness:ch03:t01 — Implement RFC 9110 Range/206/416 StreamingStorageResponse and async chunk/fastpath delivery (tasks/t01-range-streaming-response.md)
-- [ ] storage-completeness:ch03:t02 — Implement ObjectStoreLitestarStore and ObjectStoreFileSystemAdapter in extensions.litestar (tasks/t02-litestar-store-and-static-adapter.md)
+- [!] storage-completeness:ch03:t01 — Implement RFC 9110 Range/206/416 StreamingStorageResponse and async chunk/fastpath delivery (tasks/t01-range-streaming-response.md)
+- [!] storage-completeness:ch03:t02 — Implement ObjectStoreLitestarStore and ObjectStoreFileSystemAdapter in extensions.litestar (tasks/t02-litestar-store-and-static-adapter.md)
 
 **Chapter Recovery Checkpoint:** `uv run --no-sync pytest src/py/tests/unit/server/test_zero_copy_buffer.py src/py/tests/unit/extensions/test_litestar_plugin.py -q && uv run --no-sync ruff check src/py/vertebra/storage/_streaming.py src/py/vertebra/extensions/litestar` exits `0`.
 

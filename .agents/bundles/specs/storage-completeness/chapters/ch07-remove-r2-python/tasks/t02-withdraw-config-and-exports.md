@@ -1,0 +1,107 @@
+---
+type: Task
+id: storage-completeness:ch07:t02
+chapter_id: ch07-remove-r2-python
+title: Delete public R2Config and from_r2 convenience APIs
+description: Delete public R2Config and from_r2 convenience APIs
+status: draft
+state: pending
+priority: P1
+verification_strategy: regression_tdd
+depends_on:
+- storage-completeness:ch07:t01
+read_set:
+- src/py/vertebra/storage/_store.py
+- src/py/vertebra/storage/__init__.py
+- src/py/tests/unit/storage/test_multicloud_storage.py
+- src/py/tests/unit/storage/test_signing.py
+- src/py/tests/integration/storage/conftest.py
+files:
+- src/py/vertebra/storage/_store.py
+- src/py/vertebra/storage/__init__.py
+tests:
+- src/py/tests/unit/storage/test_multicloud_storage.py
+- src/py/tests/unit/storage/test_signing.py
+- src/py/tests/integration/storage/conftest.py
+estimated_loc: 130
+plan_revision: 4
+plan_commit: null
+state_revision: 0
+claimed_by: null
+claimed_at: null
+blocked_reason: null
+unblock_condition: null
+next_step: null
+last_verified_at: null
+last_verified_commit: null
+verification_evidence: null
+created_at: '2026-11-07T12:00:00Z'
+updated_at: '2026-11-07T12:00:00Z'
+commit: null
+sources:
+- id: implementation
+  resource: src/py/vertebra/storage/_store.py
+  title: Owned implementation seam
+tags:
+- storage
+- repair
+---
+
+# Delete public R2Config and from_r2 convenience APIs
+
+## Objective & Scope Boundary
+
+Delete public R2Config and from_r2 convenience APIs. Execute one bounded worksheet and create one signed local conventional commit after verification. Read the existing functional baseline at `5fe477fa`; a reopened ch01 is not an execution prerequisite. Own only the listed production and canonical test files. [^implementation]
+
+## Bounded Read Manifest
+
+- `src/py/vertebra/storage/_store.py` — owned implementation or canonical regression surface.
+- `src/py/vertebra/storage/__init__.py` — owned implementation or canonical regression surface.
+- `src/py/tests/unit/storage/test_multicloud_storage.py` — owned implementation or canonical regression surface.
+- `src/py/tests/unit/storage/test_signing.py` — owned implementation or canonical regression surface.
+- `src/py/tests/integration/storage/conftest.py` — owned implementation or canonical regression surface.
+
+## Symbol & Signature Contracts
+
+Delete R2Config, its `chunk_uniform_parts` helper, from_r2 constructor, config union/validation members, signing configuration branch, supported-scheme membership, and public __all__/package exports. Reject `r2://` in facade URI construction as unsupported with ValueError before native construction. Convert relevant canonical signing/config examples to generic S3 custom endpoints or OCI 8 MiB coverage; delete R2-only fixture and its consumers without skipping unrelated provider acceptance. Generic S3 custom endpoints and S3 SigV4 remain fully supported. No alias or deprecation shim remains. Native helper is retained until ch08 withdrawal, keeping stubtest parity between commits.
+
+Caller → seam → collaborator: public sync/async object-store or adapter operation → owned symbols above → existing native engine/provider or upstream framework contract. Preserve public APIs outside this task.
+
+## Edge Cases & Error Semantics
+
+The matrix below specifies observable failure behavior. Preserve the original error when cleanup also fails; retain ownership until abort or cleanup completes. No whole-object Vec/list/spool, size-cap fallback, Python lock, SDK fork, auth reimplementation or silent alias is permitted.
+
+## Public-Seam Test Blueprint
+
+Use the listed canonical test files and actual public store/framework calls. Do not assert source text or merely duplicate a helper implementation.
+
+| Case | Input | Observable result |
+| --- | --- | --- |
+| Public withdrawal | import vertebra.storage; inspect R2Config/from_r2 availability | R2-specific symbols absent; supported provider exports still resolve |
+| Explicit unsupported URI | SyncObjectStore/AsyncObjectStore("r2://assets") | Clear unsupported-scheme ValueError; no native helper invocation |
+| Custom S3 endpoint | S3Config(bucket="assets", endpoint="https://custom.example", region="auto") | Accepted as ordinary S3 configuration/signing; no hostname blacklist |
+
+## Verification
+
+Record the failing public regression before implementation and the passing result after. Execute each command below in this worktree; the storage target directory is reserved and shared SHM tests use the host lock.
+
+- `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" make dev`
+- `uv run --no-sync python -m mypy.stubtest vertebra._storage`
+- `uv run --no-sync ruff check src/py/vertebra/storage/_store.py src/py/vertebra/storage/__init__.py src/py/tests/unit/storage/test_multicloud_storage.py src/py/tests/unit/storage/test_signing.py src/py/tests/integration/storage/conftest.py`
+- `uv run --no-sync mypy src/py/vertebra/storage/_store.py src/py/vertebra/storage/__init__.py`
+- `uv run --no-sync pytest src/py/tests/unit/storage/test_multicloud_storage.py src/py/tests/unit/storage/test_signing.py src/py/tests/integration/storage/conftest.py -q`
+
+Record exact exit statuses, native build checkpoint and any platform limitation in verification_evidence. Review closure uses these results, never planning-only structural validation.
+
+## Acceptance Criteria
+
+- [ ] Every matrix row passes at its public seam with existing behavior preserved.
+- [ ] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
+- [ ] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
+- [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
+
+## Notes & Discoveries
+
+The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+
+[^implementation]: `src/py/vertebra/storage/_store.py` — Current repository source for this task.

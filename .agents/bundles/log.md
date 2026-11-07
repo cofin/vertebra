@@ -1,5 +1,7 @@
 # Bundle Activity Log
 
+- 2026-11-07: revise `storage-completeness` plan 4 at baseline `5fe477fa`: preserve original task identities, reopen native acceptance, add bounded raw-key/typed-conflict, adapter, first-class R2 withdrawal, provider publication and cleanup repair chapters; ch05 cold review approves the initial independent execution frontier while remaining repair and Arrow blueprints await independent cold review.
+
 ## [2026-11-07] flow-docs | Synchronized implemented ORM and SQL storage contracts before Chapter 02 review
 
 - Synchronized the root/chapter roadmap, chapter catalog, and object-storage knowledge with SQLSpec `dd3c9c08`, Advanced Alchemy `7769500a`, and Django `8fccaed8`. The knowledge chapter records canonical SQLSpec suffixes/signing errors, public Advanced Alchemy registry and `FileObject` operations, and Django deconstruction, `File` handles, async loading, naming, paths, and timestamps.

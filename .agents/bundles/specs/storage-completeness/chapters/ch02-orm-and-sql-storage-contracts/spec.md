@@ -2,45 +2,46 @@
 type: Spec
 parent_flow: storage-completeness
 chapter_id: ch02-orm-and-sql-storage-contracts
-title: "Chapter 02: SQLSpec, Advanced Alchemy, and Django Storage Contracts"
-description: Implement fail-closed SQLSpec ObjectStoreProtocol, Advanced Alchemy StorageBackend registration without monkeypatching, and @deconstructible Django Storage subclass over SyncObjectStore and AsyncObjectStore.
-status: stable
+title: 'Chapter 02: SQLSpec, Advanced Alchemy, and Django Storage Contracts'
+description: Implement fail-closed SQLSpec ObjectStoreProtocol, Advanced Alchemy StorageBackend registration without monkeypatching,
+  and @deconstructible Django Storage subclass over SyncObjectStore and AsyncObjectStore.
+status: draft
 state: active
 planning_status: complete
 depends_on_chapters:
-  - ch01-native-engine-and-auth
+- ch01-native-engine-and-auth
 replan_trigger: null
 current_task: null
-plan_revision: 3
-plan_commit: 0acdf576
+plan_revision: 4
+plan_commit: null
 state_revision: 1
 last_verified_checkpoint: 8fccaed8
 last_reviewed_commit: null
-created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T20:37:46Z"
+created_at: '2026-11-07T04:15:00Z'
+updated_at: '2026-11-07T20:37:46Z'
 generated:
   by: flow-setup
-  at: "2026-11-07T04:15:00Z"
+  at: '2026-11-07T04:15:00Z'
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-07T04:15:00Z"
-    commit: cdb978d3
+- by: agent:flow-setup
+  at: '2026-11-07T04:15:00Z'
+  commit: cdb978d3
 sources:
-  - id: sqlspec-storage
-    resource: src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend
-    title: SQLSpec ObjectStoreBackend over SyncObjectStore and AsyncObjectStore
-  - id: alchemy-storage
-    resource: src/py/vertebra/extensions/alchemy/storage.py::ObjectStoreBackend
-    title: Advanced Alchemy StorageBackend and StorageRegistry helper
-  - id: django-storage
-    resource: src/py/vertebra/extensions/django/storage.py::DjangoStorage
-    title: Django storage backend integration
+- id: sqlspec-storage
+  resource: src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend
+  title: SQLSpec ObjectStoreBackend over SyncObjectStore and AsyncObjectStore
+- id: alchemy-storage
+  resource: src/py/vertebra/extensions/alchemy/storage.py::ObjectStoreBackend
+  title: Advanced Alchemy StorageBackend and StorageRegistry helper
+- id: django-storage
+  resource: src/py/vertebra/extensions/django/storage.py::DjangoStorage
+  title: Django storage backend integration
 tags:
-  - storage
-  - sqlspec
-  - advanced-alchemy
-  - django
-  - extensions
+- storage
+- sqlspec
+- advanced-alchemy
+- django
+- extensions
 ---
 
 # Chapter 02: SQLSpec, Advanced Alchemy, and Django Storage Contracts
@@ -113,11 +114,10 @@ Progress: `[0/0 files documented in ch02]`. The root manifest owns `.agents/bund
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Source Checkpoint**: `8fccaed8`; `state: active`, `current_task: null`, three tasks complete. Chapter completion awaits correctness and fresh quality review.
-- **Implemented Tasks**: SQLSpec protocol/native extensions at `dd3c9c08`, Advanced Alchemy registry and bounded streams at `7769500a`, Django Storage/File contracts at `8fccaed8`.
-- **Focused Checkpoint**: Both canonical modules pass together (`35 passed`); Ruff passes for all three adapter modules. The task worksheets retain their red/green and typing evidence.
-- **Remaining Work**: Review this chapter, then execute `ch03` Litestar/HTTP contracts and `ch04` Arrow/SHM and user guides.
-- **Active Invariants**: Explicit configured targets; canonical SQLSpec suffixes and unsupported-signing `NotImplementedError`; public Advanced Alchemy registry APIs without `asyncio.to_thread`; read-only Django `File` handles, collision-safe names, and unchanged DuckDB helper.
+- Baseline `5fe477fa` contains all three original implementation task commits; chapter correctness approval is absent.
+- Django max_length retries and SQLSpec signing errors are repaired by ch06; key qualification and R2 withdrawal are owned by ch05 and ch07.
+- Native-dependent acceptance remains blocked until ch16 and reclosed ch01 pass. Implementation commit evidence remains in the original task worksheets.
+- Correctness review followed by fresh quality review is mandatory before ch02 closes and ch03 is accepted.
 
 [^sqlspec-storage]: `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` — SQLSpec object storage adapter.
 [^alchemy-storage]: `src/py/vertebra/extensions/alchemy/storage.py::ObjectStoreBackend` — Advanced Alchemy storage backend and registry integration.

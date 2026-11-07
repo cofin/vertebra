@@ -1,53 +1,56 @@
 ---
 type: Task
-id: "storage-completeness:ch03:t01"
+id: storage-completeness:ch03:t01
 chapter_id: ch03-litestar-and-range-streaming
 title: Implement RFC 9110 Range/206/416 StreamingStorageResponse and async chunk/fastpath delivery
-description: Add RFC 9110 single-range parsing (200, 206 Partial Content, 416 Range Not Satisfiable) and non-blocking AsyncObjectStore streaming/fastpath delivery to vertebra.storage._streaming.
-status: stable
-state: pending
+description: Add RFC 9110 single-range parsing (200, 206 Partial Content, 416 Range Not Satisfiable) and non-blocking AsyncObjectStore
+  streaming/fastpath delivery to vertebra.storage._streaming.
+status: draft
+state: blocked
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
 read_set:
-  - src/py/vertebra/storage/_streaming.py
-  - src/py/vertebra/storage/__init__.py
-  - src/py/vertebra/storage/_store.py
-  - src/py/tests/unit/server/test_zero_copy_buffer.py
-  - .agents/skills/python-framework/SKILL.md
+- src/py/vertebra/storage/_streaming.py
+- src/py/vertebra/storage/__init__.py
+- src/py/vertebra/storage/_store.py
+- src/py/tests/unit/server/test_zero_copy_buffer.py
+- .agents/skills/python-framework/SKILL.md
 files:
-  - src/py/vertebra/storage/_streaming.py
-  - src/py/vertebra/storage/__init__.py
+- src/py/vertebra/storage/_streaming.py
+- src/py/vertebra/storage/__init__.py
 tests:
-  - src/py/tests/unit/server/test_zero_copy_buffer.py
-  - src/py/tests/unit/storage/test_storage_store.py
+- src/py/tests/unit/server/test_zero_copy_buffer.py
+- src/py/tests/unit/storage/test_storage_store.py
 estimated_loc: 180
-plan_revision: 2
-plan_commit: cdb978d3
+plan_revision: 4
+plan_commit: null
 state_revision: 0
 claimed_by: null
 claimed_at: null
-blocked_reason: null
-unblock_condition: null
+blocked_reason: Native key identity, typed CAS conflicts and atomic conditional publication are awaiting repair and independent
+  review.
+unblock_condition: ch16 native acceptance passes, ch01 recloses with correctness and fresh quality reviews, and ch02 correctness/quality
+  review completes.
 next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+created_at: '2026-11-07T04:15:00Z'
+updated_at: '2026-11-07T04:15:00Z'
 commit: null
 sources:
-  - id: streaming-resp
-    resource: src/py/vertebra/storage/_streaming.py::StreamingStorageResponse
-    title: StreamingStorageResponse zero-copy HTTP response wrapper
-  - id: storage-pkg-init
-    resource: src/py/vertebra/storage/__init__.py
-    title: Public exports of vertebra.storage
+- id: streaming-resp
+  resource: src/py/vertebra/storage/_streaming.py::StreamingStorageResponse
+  title: StreamingStorageResponse zero-copy HTTP response wrapper
+- id: storage-pkg-init
+  resource: src/py/vertebra/storage/__init__.py
+  title: Public exports of vertebra.storage
 tags:
-  - storage
-  - http
-  - streaming
-  - zero-copy
+- storage
+- http
+- streaming
+- zero-copy
 ---
 
 # Task t01: Implement RFC 9110 `Range`/`206`/`416` `StreamingStorageResponse` and Async Chunk/Fastpath Delivery
