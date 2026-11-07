@@ -15,11 +15,13 @@ use object_store::memory::InMemory;
 use object_store::path::Path as StorePath;
 use object_store::{
     Attribute, AttributeValue, Attributes, GetOptions, MultipartUpload, ObjectStore,
-    ObjectStoreExt, PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult, UpdateVersion,
+    ObjectStoreExt, PutMode, PutOptions, PutPayload, PutResult, UpdateVersion,
 };
 use thiserror::Error;
 use url::Url;
 use vertebra_core::gcp_auth::GcpTokenCache;
+
+use crate::conditional::{PublicationBackend, PublishCondition};
 
 use crate::oci::{
     OCI_UNIFORM_PART_SIZE, OciCavageCredentials, OciObjectStore, UniformPartAccumulator,
@@ -164,7 +166,7 @@ fn validate_optional_prefix(prefix: Option<&str>) -> Result<Option<StorePath>, S
     }
 }
 
-fn build_store_attributes(
+pub(crate) fn build_store_attributes(
     content_type: Option<&str>,
     user_attributes: &HashMap<String, String>,
 ) -> Attributes {
@@ -398,16 +400,21 @@ pub enum BackendConfig {
 #[derive(Clone)]
 pub struct ObjectStoreEngine {
     inner: Arc<dyn ObjectStore>,
+    publication: PublicationBackend,
     scheme: String,
 }
 
 impl ObjectStoreEngine {
     pub fn new(config: BackendConfig) -> Result<Self, StorageError> {
         match config {
-            BackendConfig::Memory => Ok(Self {
-                inner: Arc::new(InMemory::new()),
-                scheme: "memory".to_string(),
-            }),
+            BackendConfig::Memory => {
+                let store = Arc::new(InMemory::new());
+                Ok(Self {
+                    inner: store.clone(),
+                    publication: PublicationBackend::Memory(store),
+                    scheme: "memory".to_string(),
+                })
+            }
             BackendConfig::Local { root } => {
                 std::fs::create_dir_all(&root).map_err(|e| {
                     StorageError::InvalidUrl(
@@ -415,9 +422,10 @@ impl ObjectStoreEngine {
                         format!("failed creating directory: {e}"),
                     )
                 })?;
-                let store = LocalFileSystem::new_with_prefix(&root)?;
+                let store = Arc::new(LocalFileSystem::new_with_prefix(&root)?);
                 Ok(Self {
-                    inner: Arc::new(store),
+                    inner: store.clone(),
+                    publication: PublicationBackend::Local(store),
                     scheme: "file".to_string(),
                 })
             }
@@ -444,8 +452,10 @@ impl ObjectStoreEngine {
                 if let Some(ep) = endpoint {
                     builder = builder.with_endpoint(ep);
                 }
+                let store = Arc::new(builder.build()?);
                 Ok(Self {
-                    inner: Arc::new(builder.build()?),
+                    inner: store.clone(),
+                    publication: PublicationBackend::S3(store),
                     scheme: "s3".to_string(),
                 })
             }
@@ -497,8 +507,10 @@ impl ObjectStoreEngine {
                 if skip_signature {
                     builder = builder.with_skip_signature(true);
                 }
+                let store = Arc::new(builder.build()?);
                 Ok(Self {
-                    inner: Arc::new(builder.build()?),
+                    inner: store.clone(),
+                    publication: PublicationBackend::Gcs(store),
                     scheme: "gs".to_string(),
                 })
             }
@@ -518,8 +530,10 @@ impl ObjectStoreEngine {
                 if let Some(ep) = endpoint {
                     builder = builder.with_endpoint(ep);
                 }
+                let store = Arc::new(builder.build()?);
                 Ok(Self {
-                    inner: Arc::new(builder.build()?),
+                    inner: store.clone(),
+                    publication: PublicationBackend::Azure(store),
                     scheme: "az".to_string(),
                 })
             }
@@ -530,16 +544,24 @@ impl ObjectStoreEngine {
                 endpoint,
                 credentials,
             } => {
-                let store = OciObjectStore::new(namespace, bucket, region, endpoint, credentials)?;
+                let store = Arc::new(OciObjectStore::new(
+                    namespace,
+                    bucket,
+                    region,
+                    endpoint,
+                    credentials,
+                )?);
                 Ok(Self {
-                    inner: Arc::new(store),
+                    inner: store.clone(),
+                    publication: PublicationBackend::Oci(store),
                     scheme: "oci".to_string(),
                 })
             }
             BackendConfig::Http { url } => {
-                let store = HttpBuilder::new().with_url(url).build()?;
+                let store = Arc::new(HttpBuilder::new().with_url(url).build()?);
                 Ok(Self {
-                    inner: Arc::new(store),
+                    inner: store.clone(),
+                    publication: PublicationBackend::Custom(store),
                     scheme: "http".to_string(),
                 })
             }
@@ -684,6 +706,7 @@ impl ObjectStoreEngine {
 
     pub fn with_store(inner: Arc<dyn ObjectStore>, scheme: impl Into<String>) -> Self {
         Self {
+            publication: PublicationBackend::Custom(inner.clone()),
             inner,
             scheme: scheme.into(),
         }
@@ -705,22 +728,13 @@ impl ObjectStoreEngine {
         opts: PutConditionalOptions,
     ) -> Result<StoredObjectMeta, ObjectStoreError> {
         let location = validate_object_path(path)?;
-        let create_only = opts.if_not_exists || opts.if_none_match.as_deref() == Some("*");
-        if create_only && opts.if_match.is_some() {
-            return Err(StorageError::InvalidInput(
-                "cannot combine if_not_exists or if_none_match='*' with if_match".to_string(),
-            ));
-        }
-
-        let mode = if create_only {
-            PutMode::Create
-        } else if let Some(ref etag) = opts.if_match {
-            PutMode::Update(UpdateVersion {
-                e_tag: Some(etag.clone()),
+        let mode = match PublishCondition::normalize(&opts)? {
+            PublishCondition::Create => PutMode::Create,
+            PublishCondition::Match(etag) => PutMode::Update(UpdateVersion {
+                e_tag: Some(etag),
                 version: None,
-            })
-        } else if let Some(ref none_etag) = opts.if_none_match {
-            match self.inner.head(&location).await {
+            }),
+            PublishCondition::NotMatch(none_etag) => match self.inner.head(&location).await {
                 Ok(existing) if existing.e_tag.as_deref() == Some(none_etag.as_str()) => {
                     return Err(StorageError::Precondition {
                         path: location.to_string(),
@@ -729,9 +743,8 @@ impl ObjectStoreEngine {
                 }
                 Ok(_) | Err(object_store::Error::NotFound { .. }) => PutMode::Overwrite,
                 Err(err) => return Err(err.into()),
-            }
-        } else {
-            PutMode::Overwrite
+            },
+            PublishCondition::Overwrite => PutMode::Overwrite,
         };
 
         let size = data.len() as u64;
@@ -814,64 +827,7 @@ impl ObjectStoreEngine {
         opts: PutConditionalOptions,
     ) -> Result<MultipartUploadSession, ObjectStoreError> {
         let location = validate_object_path(path)?;
-        let create_only = opts.if_not_exists || opts.if_none_match.as_deref() == Some("*");
-        if create_only && opts.if_match.is_some() {
-            return Err(StorageError::InvalidInput(
-                "cannot combine if_not_exists or if_none_match='*' with if_match".to_string(),
-            ));
-        }
-
-        if create_only {
-            if self.exists(path).await? {
-                return Err(StorageError::AlreadyExists {
-                    path: location.to_string(),
-                    message: "object already exists".to_string(),
-                });
-            }
-        } else if let Some(ref expected_etag) = opts.if_match {
-            match self.inner.head(&location).await {
-                Ok(existing) if existing.e_tag.as_deref() == Some(expected_etag.as_str()) => {}
-                Ok(existing) => {
-                    return Err(StorageError::Precondition {
-                        path: location.to_string(),
-                        message: format!(
-                            "ETag mismatch: expected {expected_etag}, got {:?}",
-                            existing.e_tag
-                        ),
-                    });
-                }
-                Err(object_store::Error::NotFound { .. }) => {
-                    return Err(StorageError::Precondition {
-                        path: location.to_string(),
-                        message: "object does not exist for if_match update".to_string(),
-                    });
-                }
-                Err(err) => return Err(err.into()),
-            }
-        } else if let Some(ref none_etag) = opts.if_none_match {
-            match self.inner.head(&location).await {
-                Ok(existing) if existing.e_tag.as_deref() == Some(none_etag.as_str()) => {
-                    return Err(StorageError::Precondition {
-                        path: location.to_string(),
-                        message: format!("If-None-Match matched existing ETag {none_etag}"),
-                    });
-                }
-                Ok(_) | Err(object_store::Error::NotFound { .. }) => {}
-                Err(err) => return Err(err.into()),
-            }
-        }
-
-        let mp_opts = PutMultipartOptions {
-            attributes: build_store_attributes(opts.content_type.as_deref(), &opts.attributes),
-            ..Default::default()
-        };
-        let upload = match self.inner.put_multipart_opts(&location, mp_opts).await {
-            Ok(up) => up,
-            Err(object_store::Error::NotImplemented { .. }) if self.scheme == "file" => {
-                self.inner.put_multipart(&location).await?
-            }
-            Err(err) => return Err(err.into()),
-        };
+        let upload = self.publication.begin(&location, &opts).await?;
 
         let accumulator = if self.scheme == "oci" {
             Some(UniformPartAccumulator::new(OCI_UNIFORM_PART_SIZE))

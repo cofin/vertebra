@@ -1164,6 +1164,227 @@ async fn test_multipart_abort_cleanup_and_idempotency() {
 }
 
 #[tokio::test]
+async fn test_memory_multipart_publication_conditions_are_atomic() {
+    use _storage::store::PutConditionalOptions;
+
+    let engine = ObjectStoreEngine::new(BackendConfig::Memory).expect("memory engine");
+    for condition in [
+        PutConditionalOptions {
+            if_not_exists: true,
+            ..Default::default()
+        },
+        PutConditionalOptions {
+            if_none_match: Some("*".into()),
+            ..Default::default()
+        },
+    ] {
+        let mut upload = engine
+            .create_multipart("race", condition)
+            .await
+            .expect("begin absent");
+        upload
+            .write_chunk(Bytes::from_static(b"loser"))
+            .await
+            .expect("part");
+        engine
+            .clone()
+            .put("race", Bytes::from_static(b"winner"))
+            .await
+            .expect("competing writer");
+        assert!(
+            upload
+                .complete()
+                .await
+                .expect_err("atomic create")
+                .is_already_exists()
+        );
+        assert_eq!(engine.get("race").await.expect("winner"), "winner");
+        engine.delete("race").await.expect("reset");
+    }
+    let original = engine
+        .put("race", Bytes::from_static(b"original"))
+        .await
+        .expect("initial");
+    let mut upload = engine
+        .create_multipart(
+            "race",
+            PutConditionalOptions {
+                if_match: original.etag,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("begin update");
+    upload
+        .write_chunk(Bytes::from_static(b"loser"))
+        .await
+        .expect("part");
+    engine
+        .clone()
+        .put("race", Bytes::from_static(b"winner"))
+        .await
+        .expect("competing writer");
+    assert!(
+        upload
+            .complete()
+            .await
+            .expect_err("atomic update")
+            .is_precondition()
+    );
+    assert_eq!(engine.get("race").await.expect("winner"), "winner");
+}
+
+#[tokio::test]
+async fn test_publication_identity_metadata_and_custom_store_contract() {
+    use _storage::store::PutConditionalOptions;
+    use std::sync::Arc;
+
+    let engine = ObjectStoreEngine::new(BackendConfig::Memory).expect("memory");
+    let mut upload = engine
+        .clone()
+        .create_multipart(
+            "identity",
+            PutConditionalOptions {
+                if_not_exists: true,
+                content_type: Some("text/plain".into()),
+                attributes: HashMap::from([("owner".into(), "caller".into())]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create");
+    upload
+        .write_chunk(Bytes::from_static(b"part one"))
+        .await
+        .expect("part");
+    upload
+        .write_chunk(Bytes::from_static(b"part two"))
+        .await
+        .expect("part");
+    let result = upload.complete().await.expect("complete");
+    let metadata = engine
+        .head("identity")
+        .await
+        .expect("same provider identity");
+    assert_eq!(metadata.etag, result.e_tag);
+    assert_eq!(metadata.content_type.as_deref(), Some("text/plain"));
+    assert_eq!(
+        metadata.attributes.get("owner").map(String::as_str),
+        Some("caller")
+    );
+    assert_eq!(
+        engine.get("identity").await.expect("body"),
+        "part onepart two"
+    );
+
+    let mut update = engine
+        .create_multipart(
+            "identity",
+            PutConditionalOptions {
+                if_match: metadata.etag.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("matching multipart update");
+    update
+        .write_chunk(Bytes::from_static(b"updated"))
+        .await
+        .expect("update part");
+    let receipt = update.complete().await.expect("atomic update");
+    assert_ne!(receipt.e_tag, metadata.etag);
+    assert_eq!(
+        engine.head("identity").await.expect("updated receipt").etag,
+        receipt.e_tag
+    );
+    assert_eq!(
+        engine.get("identity").await.expect("updated body"),
+        "updated"
+    );
+
+    assert!(matches!(
+        engine
+            .create_multipart(
+                "negative",
+                PutConditionalOptions {
+                    if_none_match: Some("arbitrary-tag".into()),
+                    ..Default::default()
+                }
+            )
+            .await,
+        Err(StorageError::ObjectStore(
+            object_store::Error::NotSupported { .. }
+        ))
+    ));
+    assert!(
+        !engine
+            .exists("negative")
+            .await
+            .expect("rejected before producer")
+    );
+
+    let custom =
+        ObjectStoreEngine::with_store(Arc::new(object_store::memory::InMemory::new()), "memory");
+    let condition = PutConditionalOptions {
+        if_not_exists: true,
+        ..Default::default()
+    };
+    custom
+        .put_opts("custom", Bytes::from_static(b"winner"), condition.clone())
+        .await
+        .expect("native PutMode");
+    assert!(
+        custom
+            .put_opts("custom", Bytes::new(), condition.clone())
+            .await
+            .expect_err("native create conflict")
+            .is_already_exists()
+    );
+    assert!(matches!(
+        custom.create_multipart("absent", condition).await,
+        Err(StorageError::ObjectStore(
+            object_store::Error::NotSupported { .. }
+        ))
+    ));
+    assert_eq!(custom.get("custom").await.expect("winner"), "winner");
+    assert!(!custom.exists("absent").await.expect("no upload"));
+}
+
+#[tokio::test]
+async fn test_publication_rejects_conflicting_selectors() {
+    use _storage::store::PutConditionalOptions;
+
+    let engine = ObjectStoreEngine::new(BackendConfig::Memory).expect("memory engine");
+    for condition in [
+        PutConditionalOptions {
+            if_not_exists: true,
+            if_match: Some("tag".into()),
+            ..Default::default()
+        },
+        PutConditionalOptions {
+            if_not_exists: true,
+            if_none_match: Some("tag".into()),
+            ..Default::default()
+        },
+        PutConditionalOptions {
+            if_match: Some("tag".into()),
+            if_none_match: Some("other".into()),
+            ..Default::default()
+        },
+    ] {
+        assert!(matches!(
+            engine.create_multipart("missing", condition.clone()).await,
+            Err(StorageError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            engine.put_opts("missing", Bytes::new(), condition).await,
+            Err(StorageError::InvalidInput(_))
+        ));
+        assert!(!engine.exists("missing").await.expect("no publication"));
+    }
+}
+
+#[tokio::test]
 async fn test_conditional_put_if_not_exists_if_match_and_metadata() {
     use _storage::store::{ObjectStoreError, PutConditionalOptions};
 
