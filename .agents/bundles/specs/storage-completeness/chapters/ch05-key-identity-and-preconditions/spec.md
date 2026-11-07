@@ -9,7 +9,7 @@ state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: storage-completeness:ch05:t03
+current_task: storage-completeness:ch05:t02
 plan_revision: 4
 plan_commit: 5fe477fa4f6e08bab9278dba3906e7c556ceb3a4
 state_revision: 0
@@ -93,7 +93,7 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 
 - [x] [c90285cf] storage-completeness:ch05:t01 — Preserve native raw key and prefix identity (tasks/t01-native-raw-paths.md)
 - [ ] storage-completeness:ch05:t02 — Reject silent key aliasing in facade and adapter qualification (tasks/t02-public-key-validation.md)
-- [ ] storage-completeness:ch05:t03 — Export lazy typed PreconditionError for native CAS conflicts (tasks/t03-typed-conflict.md)
+- [x] [682aaaff] storage-completeness:ch05:t03 — Export lazy typed PreconditionError for native CAS conflicts (tasks/t03-typed-conflict.md)
 
 **Chapter Recovery Checkpoint:** run every task's focused verification, then correctness review and a fresh quality review before closing this chapter. `/flow:implement storage-completeness ch05-key-identity-and-preconditions` executes its ready worksheet.
 

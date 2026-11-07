@@ -29,7 +29,7 @@ chapters:
 - ch18-arrow-async-bridge
 - ch19-sqlspec-arrow-streaming
 current_chapter: ch05-key-identity-and-preconditions
-current_task: storage-completeness:ch05:t03
+current_task: storage-completeness:ch05:t02
 parent_prd: native-data-platform
 research:
 - ../native-data-platform/research/gap-analysis_20261103.md
@@ -269,7 +269,7 @@ Progress: `[0/9 files documented]` for final repair/HTTP/Arrow acceptance. Exist
 ## 6. Current State & Remaining Plan Snapshot
 
 - Verified functional source baseline: `5fe477fa`; revision4 has an approved key/error frontier and additional bounded repair chapters awaiting independent plan review.
-- Active execution follows current_chapter/current_task in frontmatter; ch05 worker claims and task evidence are authoritative and preserved.
+- Active frontier is ch05: native raw-key task t01 and typed-conflict task t03 are committed and verified; public qualification task t02 is next. All five native extensions are rebuilt with these contracts; Local atomic publication remains pending.
 - Original ch01:t01 is blocked; chapter review stamp is clear. Repair tasks use its committed functional artifacts directly, avoiding a dependency cycle.
 - ch02 original commits remain recorded and correctness approval is absent. ch06 repairs and native acceptance precede fresh correctness and quality review.
 - Native-dependent original ch03/ch04:t02 are blocked with explicit unblock conditions. HTTP coordinator owns ch03 detail and its integration evidence.

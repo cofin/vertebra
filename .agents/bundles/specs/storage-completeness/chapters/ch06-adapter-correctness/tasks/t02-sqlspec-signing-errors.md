@@ -13,6 +13,7 @@ read_set:
 - src/py/vertebra/extensions/sqlspec/storage.py
 - src/py/tests/unit/extensions/test_data_storage_integrations.py
 - src/py/vertebra/storage/_store.py
+- src/py/tests/unit/storage/test_signing.py
 files:
 - src/py/vertebra/extensions/sqlspec/storage.py
 tests:
@@ -52,6 +53,7 @@ Propagate configured signing validation failures. Execute one bounded worksheet 
 - `src/py/vertebra/extensions/sqlspec/storage.py` — owned implementation or canonical regression surface.
 - `src/py/tests/unit/extensions/test_data_storage_integrations.py` — owned implementation or canonical regression surface.
 - `src/py/vertebra/storage/_store.py` — collaborating contract.
+- `src/py/tests/unit/storage/test_signing.py` — existing local IAM responder/native signing fixture pattern.
 
 ## Symbol & Signature Contracts
 
@@ -72,6 +74,7 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 | Configured validation | MemoryConfig with explicit HMAC signing; sign_sync/sign_async("key", expires_in=0) | ValueError propagates through GET and upload paths |
 | Unsupported backend | Unsigned explicit MemoryConfig; scalar and list sign calls | NotImplementedError with backend context |
 | Successful configured HMAC | Positive expiry and for_upload=True/False | Valid signed GET/PUT URL; scalar/list shape retained |
+| Configured native provider failure | A real `SyncObjectStore("memory://", signing=SigningConfig(provider="gcs", bucket="unit", service_account_email="signer@example.test", access_token="mock-oauth-token", iam_endpoint=local_server))`; local IAM responder returns HTTP 503 and body b"signing-unavailable" | Public `sign_sync` and `sign_async`, each with `for_upload=False/True`, preserve exact `RuntimeError` type (not its `NotImplementedError` subclass), with native HTTP 503 and the fixed responder body in the message. No external credentials or mocked SUT/store methods. |
 
 ## Verification
 

@@ -65,6 +65,8 @@ Caller → seam → collaborator: public storage/framework calls → owned deep 
 | Deep owned boundary with exact provider semantics | Chosen: hides credentials, staging and concurrency while preserving configured SDK behavior. |
 | Generic head-then-write, Python lock, copy-create publication or blanket exception conversion | Rejected: loses atomicity, update results, metadata or error identity. |
 
+The collision regression covers consumed seekable files on both sync and async paths, explicit rewind, impossible maximum lengths, and bounded same-instance interleavings. Signing tests cover both native HMAC validation `ValueError` and a real local IAM HTTP 503 `RuntimeError` through GET and upload methods; exact exception types distinguish provider failures from unsupported signing.
+
 ## 3. Documentation & OKF Knowledge Plan
 
 Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bundles/knowledge/domains/storage/object-storage.md` by ch09:t03 and user guides by ch04:t03; per-task tests are executable documentation. No separate untracked documentation obligation remains.

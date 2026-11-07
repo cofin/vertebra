@@ -5,7 +5,7 @@ chapter_id: ch05-key-identity-and-preconditions
 title: Export lazy typed PreconditionError for native CAS conflicts
 description: Export lazy typed PreconditionError for native CAS conflicts
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on: []
@@ -31,12 +31,12 @@ claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-07T22:04:34Z"
+last_verified_commit: 682aaaff
+verification_evidence: "Red: 2 public typed-error/optional-import failures. Green: Rust converter unit covers six variants; full native engine 23 passed; Python storage 18 passed; make dev rebuilt all five extensions; all five mypy.stubtest modules passed; raw percent/Unicode key runtime probe passed; Mypy, Ruff, Clippy, formatting and diff checks passed."
 created_at: '2026-11-07T12:00:00Z'
-updated_at: '2026-11-07T12:00:00Z'
-commit: null
+updated_at: "2026-11-07T22:04:34Z"
+commit: 682aaaff
 sources:
 - id: implementation
   resource: src/rs/vertebra-storage/src/lib.rs
@@ -62,7 +62,7 @@ Export lazy typed PreconditionError for native CAS conflicts. Execute one bounde
 
 ## Symbol & Signature Contracts
 
-Use PyO3 create_exception! to define `_storage.PreconditionError(PermissionError)`. Both `StorageError::Precondition` and nested `StorageError::ObjectStore(object_store::Error::Precondition)` map to this exact class in `lib.rs::to_py_err`. Register the exception in `_storage`; declare it in `_storage.pyi`. Expose `vertebra.storage.PreconditionError` through module-level lazy __getattr__ and __all__; add a `TYPE_CHECKING`-only `from vertebra._storage import PreconditionError as PreconditionError` so static consumers resolve the exact native class without eager runtime import; importing vertebra.storage while the optional native wheel is absent continues to succeed, and requesting the exception then uses the existing MissingDependencyError contract. Keep genuine IO PermissionDenied as built-in PermissionError, not the CAS subtype. Add owned `lib.rs` cfg(test) unit `test_precondition_error_mapping` after Python::initialize() inside Python::attach(...); construct BOTH StorageError::Precondition and nested object_store::Error::Precondition and assert exact native PreconditionError type, construct IO PermissionDenied and assert exact built-in PermissionError, and both AlreadyExists forms assert exact FileExistsError. Create-only conflicts remain FileExistsError. Consumers such as Litestar renewal may catch only this type.
+Use PyO3 create_exception! to define `_storage.PreconditionError(PermissionError)`. Both `StorageError::Precondition` and nested `StorageError::ObjectStore(object_store::Error::Precondition)` map to this exact class in `lib.rs::to_py_err`. Register the exception in `_storage`; declare it in `_storage.pyi`. Expose `vertebra.storage.PreconditionError` through module-level lazy __getattr__ and __all__; add a `TYPE_CHECKING`-only `from vertebra._storage import PreconditionError as PreconditionError` so static consumers resolve the exact native class without eager runtime import; importing vertebra.storage while the optional native wheel is absent continues to succeed, and requesting the exception then uses the existing MissingDependencyError contract. Keep genuine IO PermissionDenied and wrapped object_store::Error::PermissionDenied as built-in PermissionError, not the CAS subtype; provider authorization failures must remain distinct from optimistic conflicts. Add owned `lib.rs` cfg(test) unit `test_precondition_error_mapping` after Python::initialize() inside Python::attach(...); construct BOTH StorageError::Precondition and nested object_store::Error::Precondition and assert exact native PreconditionError type, construct IO PermissionDenied and wrapped SDK PermissionDenied and assert exact built-in PermissionError for both, and both AlreadyExists forms assert exact FileExistsError. Create-only conflicts remain FileExistsError. Consumers such as Litestar renewal may catch only this type.
 
 Caller → seam → collaborator: public sync/async object-store or adapter operation → owned symbols above → existing native engine/provider or upstream framework contract. Preserve public APIs outside this task.
 
@@ -80,7 +80,7 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 | Permission distinction | Rust cfg(test) unit in owned lib.rs constructs StorageError::Io(PermissionDenied), calls to_py_err under Python::initialize(); Python::attach(...), and checks exact built-in type | PermissionError with type unequal to PreconditionError |
 | Optional import | Fresh subprocess sets sys.modules["vertebra._storage"] = None BEFORE first import vertebra.storage, then imports storage without accessing exception | Import succeeds; store construction and requested native exception fail with existing optional dependency error |
 
-| Rust complete mapping | Owned lib.rs cfg(test) maps both CAS error forms, both AlreadyExists forms and genuine IO PermissionDenied | Exact PreconditionError for both CAS forms, exact FileExistsError for create conflicts, exact built-in PermissionError for permission failure. |
+| Rust complete mapping | Owned lib.rs cfg(test) maps both CAS error forms, both AlreadyExists forms and genuine IO and wrapped SDK PermissionDenied | Exact PreconditionError for both CAS forms, exact FileExistsError for create conflicts, exact built-in PermissionError for permission failure. |
 
 ## Verification
 
@@ -88,10 +88,10 @@ Record the failing regression before implementation. Use this task's reserved ta
 
 ## Acceptance Criteria
 
-- [ ] Every matrix row passes at its public seam with existing behavior preserved.
-- [ ] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
-- [ ] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
-- [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
+- [x] Every matrix row passes at its public seam with existing behavior preserved.
+- [x] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
+- [x] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
+- [x] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
 
