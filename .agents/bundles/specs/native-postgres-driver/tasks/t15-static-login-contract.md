@@ -1,20 +1,22 @@
 ---
 type: Task
-id: native-postgres-driver:t15
-title: Validate designated static login scope and actual lifetime
+id: "native-postgres-driver:t15"
+title: "Validate designated static login scope and actual lifetime"
+description: "Validate designated static login scope and actual lifetime for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
-- native-postgres-driver:t14
+  - "native-postgres-driver:t14"
 files:
-- src/rs/vertebra-postgres/src/lib.rs
-- src/rs/vertebra-postgres/src/errors.rs
-- src/rs/vertebra-postgres/src/credentials.rs
+  - src/rs/vertebra-postgres/src/lib.rs
+  - src/rs/vertebra-postgres/src/errors.rs
+  - src/rs/vertebra-postgres/src/credentials.rs
 tests:
-- src/rs/vertebra-postgres/src/credentials.rs::tests::static_login_contract
+  - src/rs/vertebra-postgres/src/credentials.rs
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: cdb978d3
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -24,16 +26,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- connection
-- credentials
-requirements:
-- R5
-- R9
+  - postgres
+  - connection
+  - credentials
 ---
 
 # Validate designated static login scope and actual lifetime
@@ -44,7 +43,7 @@ Reject static login credentials with unknown scope/lifetime and preserve the sup
 
 ## Context
 
-Read ../spec.md, ../contracts.md, t14 cloud-identity prerequisites and ../contracts.md. This is one invocation and one signed conventional local commit in the complete-driver PR, estimated200 handwritten lines including tests. Ownership is only the listed files; t16 extends the same credentials.rs only after this task completes. Preserve all unrelated work. Revision1/pending/null plan_commit is not implementation approval. No production changes occur during this draft pass.
+Read ../spec.md, ../contracts.md, t14 cloud-identity prerequisites and ../contracts.md. This is one invocation and one signed conventional local commit in the complete-driver PR, estimated200 handwritten lines including tests. Ownership is only the listed files; t16 extends the same credentials.rs only after this task completes. Preserve all unrelated work. State is `pending` at `plan_revision: 2` and `plan_commit: cdb978d3`.
 
 The deep policy seam is StaticLoginCredential; t16 adds ADC refresh providers and wire integration around this validated helper. Keep the core generic unscoped Static default unchanged; PostgreSQL strict login does not use that unknown-lifetime default.
 

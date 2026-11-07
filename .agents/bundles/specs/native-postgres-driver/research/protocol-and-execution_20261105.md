@@ -1,25 +1,66 @@
 ---
 type: Research
 flow_id: native-postgres-driver
-title: PostgreSQL protocol and execution constraints
+title: "PostgreSQL protocol and execution constraints"
+description: "Primary sources, repository facts, and read-only wire probes for the complete one-PR native PostgreSQL driver."
 status: stable
 state: promoted
-created_at: 2026-11-05 00:00:00+00:00
-sources:
-- resource: https://raw.githubusercontent.com/rust-postgres/rust-postgres/postgres-protocol-v0.6.12/postgres-protocol/src/authentication/sasl.rs
-- resource: https://raw.githubusercontent.com/rust-postgres/rust-postgres/postgres-protocol-v0.6.12/postgres-protocol/src/message/frontend.rs
-- resource: https://raw.githubusercontent.com/rust-postgres/rust-postgres/postgres-protocol-v0.6.12/postgres-protocol/src/message/backend.rs
-- resource: https://raw.githubusercontent.com/rust-postgres/rust-postgres/tokio-postgres-v0.7.18/tokio-postgres/src/query.rs
-- resource: https://raw.githubusercontent.com/jbg/tokio-postgres-rustls/v0.14.0/src/lib.rs
-- resource: https://www.postgresql.org/docs/18/protocol-overview.html
-- resource: https://www.postgresql.org/docs/18/protocol-flow.html
-- resource: https://www.postgresql.org/docs/18/protocol-replication.html
-- resource: https://www.pgbouncer.org/config.html
-- resource: https://www.postgresql.org/docs/18/datetime-config-files.html
-description: Primary sources, repository facts and read-only wire probes for the complete one-PR native PostgreSQL driver.
 promoted_to: native-postgres-driver
-updated_at: '2026-11-05T18:41:01Z'
+created_at: "2026-11-05T00:00:00Z"
+updated_at: "2026-11-07T04:15:00Z"
+generated:
+  by: flow-setup
+  at: "2026-11-07T04:15:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T04:15:00Z"
+    commit: cdb978d3
+sources:
+  - id: pg-sasl
+    resource: https://raw.githubusercontent.com/rust-postgres/rust-postgres/postgres-protocol-v0.6.12/postgres-protocol/src/authentication/sasl.rs
+    title: postgres-protocol 0.6.12 SCRAM-SHA-256 and channel-binding implementation
+  - id: pg-frontend
+    resource: https://raw.githubusercontent.com/rust-postgres/rust-postgres/postgres-protocol-v0.6.12/postgres-protocol/src/message/frontend.rs
+    title: postgres-protocol 0.6.12 frontend frame encoders
+  - id: pg-backend
+    resource: https://raw.githubusercontent.com/rust-postgres/rust-postgres/postgres-protocol-v0.6.12/postgres-protocol/src/message/backend.rs
+    title: postgres-protocol 0.6.12 backend message parser
+  - id: tokio-pg-query
+    resource: https://raw.githubusercontent.com/rust-postgres/rust-postgres/tokio-postgres-v0.7.18/tokio-postgres/src/query.rs
+    title: tokio-postgres per-query Sync emission constraint
+  - id: tokio-pg-rustls
+    resource: https://raw.githubusercontent.com/jbg/tokio-postgres-rustls/v0.14.0/src/lib.rs
+    title: tokio-postgres-rustls 0.14.0 private digest visibility
+  - id: pg18-overview
+    resource: https://www.postgresql.org/docs/18/protocol-overview.html
+    title: PostgreSQL 18 Protocol 3.0 overview
+  - id: pg18-flow
+    resource: https://www.postgresql.org/docs/18/protocol-flow.html
+    title: PostgreSQL 18 extended query, pipeline, and COPY protocol flow
+  - id: pg18-repl
+    resource: https://www.postgresql.org/docs/18/protocol-replication.html
+    title: PostgreSQL 18 logical replication wire protocol
+  - id: pgbouncer-cfg
+    resource: https://www.pgbouncer.org/config.html
+    title: PgBouncer transaction-mode prepared statement and cancellation configuration
+  - id: pg18-datetime
+    resource: https://www.postgresql.org/docs/18/datetime-config-files.html
+    title: PostgreSQL 18 timezone_abbreviations input configuration
+tags:
+  - postgres
+  - protocol
+  - scram
+  - arrow
+  - replication
 ---
+
+# PostgreSQL Protocol and Execution Constraints
+
+<!-- truth: start -->
+- **Owned Protocol 3.0 State Machine**: `vertebra-postgres` uses `postgres-protocol =0.6.12` encoders/parsers [^pg-frontend] [^pg-backend] [^pg18-overview] rather than `tokio-postgres` query methods (which append `Sync` per statement) [^tokio-pg-query], and computes `tls-server-end-point` digests via `x509-parser =0.18.0` for `SCRAM-SHA-256-PLUS` [^pg-sasl] [^tokio-pg-rustls].
+- **Single-`Sync` Cold Pipelines, Portals, & `COPY`**: Cold pipelines emit `Parse`/`Describe`/`Bind`(text)/`Describe`/`Execute` sequences terminated by one `Sync`, portals pin their lease/transaction, and `COPY` enforces explicit `CopyFail` / `CancelRequest` drain recovery [^pg18-flow] [^pgbouncer-cfg].
+- **Lossless Values & `pgoutput` v1**: Unresolved temporal text is output-only (`DataError` on typed rebind) [^pg18-datetime], and logical replication streams `pgoutput` v1 committed transactions with durable compare-and-save LSN acknowledgments [^pg18-repl].
+<!-- truth: end -->
 
 Verified 2026-11-05 against the local native-postgres-driver draft and native-data-platform crate survey plus primary sources. Research only; no production edits or runtime validation. Local facts below describe the inspected checkout. Recommendations are design inferences.
 
@@ -216,3 +257,14 @@ output/context but rejects all such typed binds with DataError before text, bina
 pipeline or COPY submission. Callers explicitly resolve the instant or intentionally
 bind raw text. This is a conservative design inference from the input-configuration
 contract, not runtime acceptance. [PostgreSQL 18 datetime configuration](https://www.postgresql.org/docs/18/datetime-config-files.html).
+
+[^pg-sasl]: postgres-protocol 0.6.12 SCRAM-SHA-256 and channel-binding implementation (https://raw.githubusercontent.com/rust-postgres/rust-postgres/postgres-protocol-v0.6.12/postgres-protocol/src/authentication/sasl.rs).
+[^pg-frontend]: postgres-protocol 0.6.12 frontend frame encoders (https://raw.githubusercontent.com/rust-postgres/rust-postgres/postgres-protocol-v0.6.12/postgres-protocol/src/message/frontend.rs).
+[^pg-backend]: postgres-protocol 0.6.12 backend message parser (https://raw.githubusercontent.com/rust-postgres/rust-postgres/postgres-protocol-v0.6.12/postgres-protocol/src/message/backend.rs).
+[^tokio-pg-query]: tokio-postgres per-query Sync emission constraint (https://raw.githubusercontent.com/rust-postgres/rust-postgres/tokio-postgres-v0.7.18/tokio-postgres/src/query.rs).
+[^tokio-pg-rustls]: tokio-postgres-rustls 0.14.0 private digest visibility (https://raw.githubusercontent.com/jbg/tokio-postgres-rustls/v0.14.0/src/lib.rs).
+[^pg18-overview]: PostgreSQL 18 Protocol 3.0 overview (https://www.postgresql.org/docs/18/protocol-overview.html).
+[^pg18-flow]: PostgreSQL 18 extended query, pipeline, and COPY protocol flow (https://www.postgresql.org/docs/18/protocol-flow.html).
+[^pg18-repl]: PostgreSQL 18 logical replication wire protocol (https://www.postgresql.org/docs/18/protocol-replication.html).
+[^pgbouncer-cfg]: PgBouncer transaction-mode prepared statement and cancellation configuration (https://www.pgbouncer.org/config.html).
+[^pg18-datetime]: PostgreSQL 18 timezone_abbreviations input configuration (https://www.postgresql.org/docs/18/datetime-config-files.html).

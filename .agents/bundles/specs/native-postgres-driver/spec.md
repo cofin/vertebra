@@ -2,42 +2,64 @@
 type: Spec
 flow_id: native-postgres-driver
 title: Complete standalone native PostgreSQL driver
-description: One complete PR implementing native PostgreSQL transport/authentication, typed queries and pools, COPY/Arrow,
-  pipelines/cancellation, notifications/replication and production adapter cutover.
+description: One complete PR implementing native PostgreSQL transport/authentication, typed queries and pools, COPY/Arrow, pipelines/cancellation, notifications/replication, and production adapter cutover.
+status: stable
 state: planned
+has_chapters: false
 parent_prd: native-data-platform
 research:
-- research/protocol-and-execution_20261105.md
-- research/cloud-material_20261105.md
+  - research/protocol-and-execution_20261105.md
+  - research/cloud-material_20261105.md
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: cdb978d3
 state_revision: 0
 current_task: null
-last_verified_checkpoint: null
-created_at: '2026-11-03T04:05:00Z'
-updated_at: '2026-11-06T06:30:00Z'
+last_verified_checkpoint: 077a3fe9
+created_at: "2026-11-03T04:05:00Z"
+updated_at: "2026-11-07T04:15:00Z"
+generated:
+  by: flow-setup
+  at: "2026-11-07T04:15:00Z"
+verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T04:15:00Z"
+    commit: cdb978d3
+sources:
+  - id: pg-conn-rs
+    resource: src/rs/vertebra-db/src/connection.rs::TransportStream
+    title: Shared TCP, Unix, TLS, and cloud mTLS stream primitives
+  - id: pg-core-rs
+    resource: src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool
+    title: Existing PostgreSQL frame codecs and admission metadata in vertebra-db
+  - id: py-async-rs
+    resource: src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr
+    title: Shared AsyncCompletionQueue and independent event-loop drainer
+  - id: pg-driver-py
+    resource: src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver
+    title: Python SyncPostgreSQLDriver and AsyncPostgreSQLDriver target cutover module
 tags:
-- rust
-- postgres
-- driver
-- wheel
-- pipeline
-- one-pr
+  - rust
+  - postgres
+  - driver
+  - wheel
+  - pipeline
+  - one-pr
 ---
 
 # Standalone native PostgreSQL driver
+
+<!-- truth: start -->
+- **Standalone Optional Wheel**: `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owns live PostgreSQL Protocol 3.0 sockets on `postgres-protocol =0.6.12` + `rustls` (`ring`) without linking database clients into `vertebra-core` [^pg-conn-rs] [^pg-core-rs].
+- **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB mTLS + IAM), binary/lossless codecs, statement caching, single-`Sync` `pipeline()`, `COPY`, `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, and `pgoutput` v1 logical replication ship together with full `psycopg`/`asyncpg` removal [^py-async-rs] [^pg-driver-py].
+- **Flat Worksheet Layout Status**: All 102 worksheets (`t01`–`t102`) are anchored at `plan_revision: 2` and `plan_commit: cdb978d3` (`has_chapters: false`; nested chapter decomposition deferred to `/flow:revise native-postgres-driver`).
+<!-- truth: end -->
 
 ## 1. Specification & Context
 
 ### 1.1 Upstream Execution Baseline
 
 The user decision is: “Keep the complete driver in one PR.” All worksheets run
-on `feat/native-postgres-driver`, stacked on `feat/storage-completeness` above
-`main @ 80ff8a65e43a2bcef9e48a7763e89a7352118232` and the post-merge review
-remediation on `fix/post-merge-review-and-plan-sync` (`7657e8b7c2c96bdda6821aec70a2b603f438a127`).
-The database foundation ([PR #76](https://github.com/cofin/vertebra/pull/76), `21c99f95`) and
-engine primitives ([PR #77](https://github.com/cofin/vertebra/pull/77), `80ff8a65`) are squash-merged
-on `main`. Those results do not validate this driver.
+on `feat/native-postgres-driver`, stacked on `feat/storage-updates` (`cdb978d3`) above `main @ 077a3fe9`. The database foundation ([PR #76](https://github.com/cofin/vertebra/pull/76), `21c99f95`), engine primitives ([PR #77](https://github.com/cofin/vertebra/pull/77), `80ff8a65`), post-merge review remediation ([PR #80](https://github.com/cofin/vertebra/pull/80), `2b737240`), runtime structure ([PR #92](https://github.com/cofin/vertebra/pull/92), `d2fa5072`), and MCP/WebMCP core ([PR #94](https://github.com/cofin/vertebra/pull/94), `077a3fe9`) are squash-merged on `main`. Those results do not validate this driver.
 
 The complete charter requires more than the default eight worksheets. The user's
 one-PR scope governs delivery; small worksheets and signed local commits govern
@@ -369,7 +391,7 @@ The [planning review and adjudication](review.md) records adopted findings, inde
 ## 5. Continuity Snapshot
 
 - State is `planned`; all 102 worksheets are `pending`, `plan_revision: 2`, anchored at
-  `plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"`. No native PostgreSQL
+  `plan_commit: cdb978d3`. No native PostgreSQL
   production implementation or conformance acceptance exists yet.
 - Delivery is the complete driver on one branch/PR (`feat/native-postgres-driver`).
   Intermediate tasks do not complete/archive this flow or enable a partial native adapter.
@@ -379,3 +401,8 @@ The [planning review and adjudication](review.md) records adopted findings, inde
 - Primary-source research and read-only PG18.3 prototypes establish protocol/API
   facts. They are not PG14–18, cloud-service, installed-wheel or performance acceptance.
 - Next action on its stacked branch: `/flow:implement native-postgres-driver` from `t01`.
+
+[^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
+[^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` — Existing PostgreSQL frame codecs and admission metadata in vertebra-db.
+[^py-async-rs]: `src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr` — Shared AsyncCompletionQueue and independent event-loop drainer.
+[^pg-driver-py]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — Python SyncPostgreSQLDriver and AsyncPostgreSQLDriver target cutover module.

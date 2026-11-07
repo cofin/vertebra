@@ -3,14 +3,19 @@ type: Guide
 title: "Benchmark Suite & Free-Threaded Python 3.14t/3.15t"
 description: "Criterion microbenchmarks, the tools.benchmarks harness and its CI workflow, PGO tooling, --group bench isolation, and the free-threaded Python 3.14t/3.15t build and test gate."
 status: stable
-tags: [testing, benchmarks, free-threaded, python, rust]
+tags:
+  - testing
+  - benchmarks
+  - free-threaded
+  - python
+  - rust
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:flow-review
-    at: "2026-11-06T06:10:00Z"
-    commit: 7657e8b7c2c96bdda6821aec70a2b603f438a127
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: cdb978d3
 sources:
   - id: src-makefile
     resource: Makefile
@@ -123,7 +128,7 @@ PyO3 links different CPython ABI symbols when `Py_GIL_DISABLED` is set, so free-
 - The CI `test-python` matrix includes `3.14t` and `3.15t` and runs `make py-test` on both.
 - `_vertebra`, `_bundler`, `_storage`, `_bigquery`, and `_spanner` declare `#[pymodule(gil_used = false)]`.
 - [`test_freethreaded_gil.py`](../../../../src/py/tests/unit/test_freethreaded_gil.py)[^src-tests-unit-test-freethreaded-gil-py] asserts `GIL_USED` is `False` across `_vertebra`, `_bundler`, `_storage`, `_bigquery`, and `_spanner` and that `sys._is_gil_enabled()` stays false after import.
-- `unit/server/test_hotpath_and_314t.py` and `unit/server/test_loops.py` cover the free-threaded dispatch and `EventLoopPool` paths; `GilAuditReport` (`server/_gil_audit.py`) reports native extensions that re-enable the GIL.
+- `unit/server/test_stage1_hotpath_and_314t.py` and `unit/server/test_runtime_tuning.py` cover the free-threaded dispatch, loop backend selection, and `EventLoopPool` paths; `GilAuditReport` (`server/_gil_audit.py`) reports native extensions that re-enable the GIL.
 
 Provenance sources: [^src-makefile], [^src-tools-benchmarks-runner-py], [^src-tools-benchmarks-scenarios-py], [^src-tools-benchmarks-targets-py], [^src-tools-benchmarks-store-py], [^src-tools-pgo-init-py], [^src-benchmark-yml], [^src-vertebra-core-cargo-toml], [^src-vertebra-http-cargo-toml].
 

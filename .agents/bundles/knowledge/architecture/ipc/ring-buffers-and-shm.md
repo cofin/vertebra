@@ -3,11 +3,19 @@ type: Guide
 title: "Lock-Free Ring Buffers & Shared Memory"
 description: "ShmRegion allocation, the ShmHeader layout, SpscRing and MpmcRing slot protocols, blocking waits, and platform wake primitives in vertebra-core."
 status: stable
-tags: [architecture, ipc, shared-memory, ring-buffer, rust]
+tags:
+  - architecture
+  - ipc
+  - shared-memory
+  - ring-buffer
+  - rust
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: cdb978d3
   - by: agent:flow-setup
     at: "2026-11-04T04:33:00Z"
     commit: f741701

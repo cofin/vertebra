@@ -1,24 +1,25 @@
 ---
 type: Task
-id: native-postgres-driver:t61
-title: Own COPY TO streaming and recovery
+id: "native-postgres-driver:t61"
+title: "Own COPY TO streaming and recovery"
+description: "Own COPY TO streaming and recovery for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t60
+  - "native-postgres-driver:t60"
 files:
-- src/rs/vertebra-postgres/src/copy.rs
-- src/rs/vertebra-postgres/src/session.rs
-- src/rs/vertebra-postgres/src/sync_client.rs
-- src/rs/vertebra-postgres/src/async_client.rs
-- src/py/vertebra/_postgres.pyi
-- src/rs/vertebra-postgres/tests/postgres_copy_wire_tests.rs
+  - src/rs/vertebra-postgres/src/copy.rs
+  - src/rs/vertebra-postgres/src/session.rs
+  - src/rs/vertebra-postgres/src/sync_client.rs
+  - src/rs/vertebra-postgres/src/async_client.rs
+  - src/py/vertebra/_postgres.pyi
+  - src/rs/vertebra-postgres/tests/postgres_copy_wire_tests.rs
 tests:
-- src/rs/vertebra-postgres/tests/postgres_copy_wire_tests.rs::copy_out_streams_before_completion
-- src/rs/vertebra-postgres/tests/postgres_copy_wire_tests.rs::copy_out_failure_drains
+  - src/rs/vertebra-postgres/tests/postgres_copy_wire_tests.rs
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: cdb978d3
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -28,15 +29,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- native
-- data-events
-requirements:
-- R19
+  - postgres
+  - native
+  - data-events
 ---
 
 # Own COPY TO streaming and recovery

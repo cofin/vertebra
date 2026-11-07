@@ -3,17 +3,20 @@ type: Pattern
 title: "PyO3 0.30.1 FFI & GIL Discipline"
 description: "PyO3 0.30.1 conventions across Python 3.12-3.15/3.15t: gil_used = false, conditional freelist/immutable_type, PEP 782/814 C-API fast paths, anchored Py_buffer, and C-API PyIter_Send drivers."
 status: stable
-tags: [patterns, rust, pyo3, ffi, gil, python315]
+tags:
+  - patterns
+  - rust
+  - pyo3
+  - ffi
+  - gil
+  - python315
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:flow
-    at: "2026-11-06T20:00:00Z"
-    commit: c7b62a8c105f39c69f8411345c1a3ebb6722dfa7
-  - by: agent:flow-review
-    at: "2026-11-06T06:10:00Z"
-    commit: 7657e8b7c2c96bdda6821aec70a2b603f438a127
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: cdb978d3
 sources:
   - id: src-vertebra-py-build-rs
     resource: src/rs/vertebra-py/build.rs
@@ -70,14 +73,18 @@ sources:
 
 # PyO3 0.30.1 FFI & GIL Discipline
 
+<!-- truth: start -->
+- All five PyO3 extension crates (`vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, `vertebra-spanner`) declare `#[pymodule(gil_used = false)]` and maintain `.pyi` stub parity in `src/py/vertebra/`.
+- Blocking ring, condition, and I/O calls release the GIL via `py.detach(|| ...)`, whereas non-blocking small response writes (`<= 64 KiB`) copy inline before detaching only on full-ring retry.
+- Hot-path `#[pyclass]` types gate `freelist = 128` behind `#[cfg_attr(not(Py_GIL_DISABLED), ...)]`, retain `immutable_type` across builds, and anchor `PyBuffer_FillInfo` with borrowed `slf.as_ptr()`.
+- Separately linked database extensions pass distinct `spawn_rust_db_task_with_attr` drainer names and transfer `ArrowCursor` backing through producer-owned `vertebra.ShmCapsule` callbacks without calling `Python::attach` on Tokio threads.
+<!-- truth: end -->
+
 The five PyO3 extensions are `_vertebra` ([`vertebra-py`](../../../../../src/rs/vertebra-py/src/lib.rs)[^src-vertebra-py-src-lib-rs]), `_bundler` (`vertebra-bundler`), `_storage` (`vertebra-storage`), `_bigquery` ([`vertebra-bigquery`](../../../../../src/rs/vertebra-bigquery/src/lib.rs)[^src-vertebra-bigquery-src-lib-rs]), and `_spanner` ([`vertebra-spanner`](../../../../../src/rs/vertebra-spanner/src/lib.rs)[^src-vertebra-spanner-src-lib-rs]), typed by `src/py/vertebra/{_vertebra,_bundler,_storage,_bigquery,_spanner}.pyi`. All five use PyO3 `0.30.1` with the `Bound<'py, T>` API and declare `#[pymodule(gil_used = false)]` so importing them on `python3.14t` and `python3.15t` leaves the GIL disabled. Keep that attribute on every new `#[pymodule]`.
 
 ## Release the GIL Around Blocking Work, Inline Fast Non-Blocking Submits
 
 Any `#[pyfunction]` that blocks on a ring, condition, or the filesystem releases the GIL with `py.detach(|| ...)`. Conversely, small non-blocking response writes (`<= 64 KiB` in `submit_response_raw` and `submit_batch_raw` in [`transport.rs`](../../../../../src/rs/vertebra-py/src/transport.rs)[^src-vertebra-py-src-transport-rs]) copy the `PyBuffer` payload directly into the SHM `SpscRing` slot or `ResponseSink` *without* `py.detach` thread-state churn, detaching only when a full ring requires a blocking spin/futex retry.
-
-<!-- truth: start -->
-- All five PyO3 extension crates (`vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, `vertebra-spanner`) declare `#[pymodule(gil_used = false)]` and maintain stub parity in `src/py/vertebra/{_vertebra,_bundler,_storage,_bigquery,_spanner}.pyi`.
 
 ```rust
 #[pyfunction]
@@ -105,7 +112,6 @@ pub fn get_batch(py: Python<'_>, timeout_ms: u64) -> PyResult<Option<RequestBatc
     Ok(snapshot.map(|s| RequestBatch { snapshot: s }))
 }
 ```
-<!-- truth: end -->
 
 ## One `_vertebra` Module When Embedding
 

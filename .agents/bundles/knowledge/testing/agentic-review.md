@@ -3,11 +3,18 @@ type: Guide
 title: Agentic Review and Benchmark Gates
 description: Manifest-driven review workflow, checklist validation, and benchmark regression gates.
 status: stable
-tags: [review, testing, benchmarks, quality]
+tags:
+  - review
+  - testing
+  - benchmarks
+  - quality
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: cdb978d3
   - by: agent:flow-setup
     at: "2026-11-04T04:33:00Z"
     commit: f741701
@@ -23,14 +30,14 @@ sources:
     title: "Repository tooling module (tools/benchmarks/cli.py)"
 ---
 
-<!-- truth: start -->
-- **Review routing**: `make review-route BASE=origin/main` maps modified files to owning areas and shards.
-- **Review validation**: `make review-check` validates skills, manifests, agents, and privacy constraints.
-- **Benchmark gate**: `make bench-check BASELINE=pre-refactor` enforces <= 3% throughput regression and <= 5% latency increase.
-- **Suppression triage**: Every false-positive must be cataloged in `false-positive-suppressions.md` with concrete evidence.
-<!-- truth: end -->
-
 # Agentic Review and Benchmark Gates
+
+<!-- truth: start -->
+- `make review-route BASE=origin/main` maps modified files to owning areas and shards.
+- `make review-check` validates skills, manifests, agents, and privacy constraints.
+- `make bench-check BASELINE=pre-refactor` enforces `<= 3%` throughput regression and `<= 5%` latency increase.
+- Every false-positive suppression is cataloged in `false-positive-suppressions.md` with concrete evidence.
+<!-- truth: end -->
 
 ## Overview
 

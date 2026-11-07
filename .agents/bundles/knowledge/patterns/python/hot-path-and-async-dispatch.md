@@ -1,97 +1,68 @@
 ---
 type: Pattern
-title: Hot-Path Caching & Single-Wake Async Dispatch
-description: 'Hot-path request dispatch patterns: startup signature caching, inline
-  vectorized sync batches, uvloop Dekker polling, Rust ASGI/RSGI drivers, and zero-copy
-  response coercion.'
+title: "Hot-Path Caching & Single-Wake Async Dispatch"
+description: "Hot-path request dispatch patterns covering startup signature caching, inline vectorized sync batches, LoopBackend Dekker polling, Rust ASGI/RSGI drivers, and zero-copy response coercion."
 status: stable
 tags:
-- patterns
-- python
-- performance
-- batch-dispatch
-- async
+  - patterns
+  - python
+  - performance
+  - batch-dispatch
+  - async
 generated:
   by: flow/0.26.0
-  at: '2026-11-04T04:33:00Z'
+  at: "2026-11-04T04:33:00Z"
 verified:
-- by: agent:flow
-  at: '2026-11-06T20:00:00Z'
-  commit: c7b62a8c105f39c69f8411345c1a3ebb6722dfa7
-- by: agent:codex
-  at: '2026-11-05T06:09:26Z'
-  commit: 80ff8a65e43a2bcef9e48a7763e89a7352118232
-- by: agent:flow-setup
-  at: '2026-11-04T04:33:00Z'
-  commit: f741701
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: cdb978d3
+  - by: agent:codex
+    at: "2026-11-05T06:09:26Z"
+    commit: 80ff8a65e43a2bcef9e48a7763e89a7352118232
+  - by: agent:flow-setup
+    at: "2026-11-04T04:33:00Z"
+    commit: f741701
 sources:
-- id: src-sqlspec-stack
-  resource: src/py/vertebra/extensions/sqlspec/adapters.py
-  title: Prepared stack execution and native bind defaults
-- id: src-sqlspec-bigquery
-  resource: src/py/vertebra/extensions/sqlspec/bigquery.py
-  title: BigQuery-owned parser and named-at bind defaults
-- id: src-sqlspec-spanner
-  resource: src/py/vertebra/extensions/sqlspec/spanner.py
-  title: Spanner GoogleSQL and Spangres parser and bind defaults
-- id: src-sqlspec-stack-tests
-  resource: src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
-  title: Ordered results, native binds, Arrow and batched stack regressions
-- id: src-tool-bridge
-  resource: src/py/vertebra/agent/tools/__init__.py
-  title: Generic provider signature, conversion and confirmation adaptation
-- id: src-tool-schema-tests
-  resource: src/py/tests/unit/agent/test_core_and_observability.py
-  title: Typed provider schemas and validation before policy
-- id: src-tool-snapshot-tests
-  resource: src/py/tests/unit/agent/test_runtime_and_workflows.py
-  title: Owned invocation snapshots, defaults and caller-bound approval across awaits
-- id: src-bigquery-bind-types
-  resource: src/py/vertebra/db/adapters/bigquery/core.py
-  title: Distinct boolean, integer and floating-point native parameter descriptors
-- id: src-pg-notify
-  resource: src/py/vertebra/db/adapters/postgres/notify.py
-  title: Mode-correct native notification parameters
-- id: src-pg-embeddings
-  resource: src/py/vertebra/db/adapters/postgres/embeddings.py
-  title: Mode-correct embedding and vector-search parameters
-- id: src-pg-primitive-tests
-  resource: src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
-  title: Real optional psycopg conversion for notification, embedding and tenant-session
-    primitives
-- id: src-server-worker-py
-  resource: src/py/vertebra/server/worker.py
-  title: Python implementation module (src/py/vertebra/server/worker.py)
-- id: src-server-dispatch-py
-  resource: src/py/vertebra/server/_dispatch.py
-  title: Python implementation module (src/py/vertebra/server/_dispatch.py)
-- id: src-server-loops-py
-  resource: src/py/vertebra/server/_loops.py
-  title: Python implementation module (src/py/vertebra/server/_loops.py)
-- id: src-server-fastpath-py
-  resource: src/py/vertebra/server/_fastpath.py
-  title: Python implementation module (src/py/vertebra/server/_fastpath.py)
-- id: src-server-fastpath-core-py
-  resource: src/py/vertebra/server/_fastpath_core.py
-  title: Shared FastPathProvider registry and direct route compilation core (src/py/vertebra/server/_fastpath_core.py)
-- id: src-server-asgi-runner-py
-  resource: src/py/vertebra/server/_asgi/_runner.py
-  title: Python implementation module (src/py/vertebra/server/_asgi/_runner.py)
-- id: src-server-rsgi-adapter-py
-  resource: src/py/vertebra/server/_rsgi/_adapter.py
-  title: Python implementation module (src/py/vertebra/server/_rsgi/_adapter.py)
-- id: src-server-wsgi-adapter-py
-  resource: src/py/vertebra/server/_wsgi/_adapter.py
-  title: Python implementation module (src/py/vertebra/server/_wsgi/_adapter.py)
-- id: src-utils-sync-tools-py
-  resource: src/py/vertebra/utils/sync_tools.py
-  title: Python implementation module (src/py/vertebra/utils/sync_tools.py)
-- id: src-extensions-litestar-fastpath-py
-  resource: src/py/vertebra/extensions/litestar/fastpath.py
-  title: Python implementation module (src/py/vertebra/extensions/litestar/fastpath.py)
+  - id: src-server-worker-py
+    resource: src/py/vertebra/server/worker.py
+    title: "Python implementation module (src/py/vertebra/server/worker.py)"
+  - id: src-server-dispatch-py
+    resource: src/py/vertebra/server/_dispatch.py
+    title: "Python implementation module (src/py/vertebra/server/_dispatch.py)"
+  - id: src-server-loops-py
+    resource: src/py/vertebra/server/_loops.py
+    title: "Python implementation module (src/py/vertebra/server/_loops.py)"
+  - id: src-server-fastpath-py
+    resource: src/py/vertebra/server/_fastpath.py
+    title: "Python implementation module (src/py/vertebra/server/_fastpath.py)"
+  - id: src-server-fastpath-core-py
+    resource: src/py/vertebra/server/_fastpath_core.py
+    title: "Shared FastPathProvider registry and direct route compilation core (src/py/vertebra/server/_fastpath_core.py)"
+  - id: src-server-asgi-runner-py
+    resource: src/py/vertebra/server/_asgi/_runner.py
+    title: "Python implementation module (src/py/vertebra/server/_asgi/_runner.py)"
+  - id: src-server-rsgi-adapter-py
+    resource: src/py/vertebra/server/_rsgi/_adapter.py
+    title: "Python implementation module (src/py/vertebra/server/_rsgi/_adapter.py)"
+  - id: src-server-wsgi-adapter-py
+    resource: src/py/vertebra/server/_wsgi/_adapter.py
+    title: "Python implementation module (src/py/vertebra/server/_wsgi/_adapter.py)"
+  - id: src-utils-sync-tools-py
+    resource: src/py/vertebra/utils/sync_tools.py
+    title: "Python implementation module (src/py/vertebra/utils/sync_tools.py)"
+  - id: src-extensions-litestar-fastpath-py
+    resource: src/py/vertebra/extensions/litestar/fastpath.py
+    title: "Python implementation module (src/py/vertebra/extensions/litestar/fastpath.py)"
 ---
 
 # Hot-Path Caching & Single-Wake Async Dispatch
+
+<!-- truth: start -->
+- Route and framework handlers compile signatures at startup (`HandlerSpec`, `DirectPlan`, `FastPathProvider`) and never call `inspect.signature()` on the request path.
+- Synchronous native handlers default to inline vectorized execution (`sync_to_thread=False`), flushing entire batches via a single `submit_batch_raw` call without `ThreadPoolExecutor` hops.
+- `create_event_loop` selects `LoopBackend` through `_LOOP_BACKEND_SPECS` (`uvloop`, `winloop`, `rloop`, `asyncio`) and pairs `loop.add_reader(notify_fd)` with Dekker `prepare_request_sleep` / `cancel_request_sleep` barriers.
+- Suspended `async_native` coroutines drop `Request` references before `await` so in-flight I/O never pins `Arc<BatchSnapshot>` slabs in `BufferPool`.
+<!-- truth: end -->
 
 Python worker code on the request hot path ([`worker.py`](../../../../../src/py/vertebra/server/worker.py)[^src-server-worker-py], [`_dispatch.py`](../../../../../src/py/vertebra/server/_dispatch.py)[^src-server-dispatch-py], [`_loops.py`](../../../../../src/py/vertebra/server/_loops.py)[^src-server-loops-py], [`_asgi/_runner.py`](../../../../../src/py/vertebra/server/_asgi/_runner.py)[^src-server-asgi-runner-py]) avoids per-request reflection, GIL-thrashing thread pools, per-request cross-thread wakeups, and unnecessary `asyncio.Task` allocations.
 
@@ -99,7 +70,6 @@ Python worker code on the request hot path ([`worker.py`](../../../../../src/py/
 
 Never call `inspect.signature()` on the request path. [`compile_handler_spec(handler, sync_to_thread=...)`](../../../../../src/py/vertebra/server/_dispatch.py) (pre-compiled at worker startup via `compile_handler_table(handlers)`) compiles a `HandlerSpec` and specialized invoker closure once:
 
-<!-- truth: start -->
 ```python
 class HandlerSpec(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     """Pre-compiled dispatch specification and invoker for a route handler."""
@@ -115,35 +85,19 @@ def compile_handler_table(handlers: Mapping[int, Callable[..., Any]]) -> dict[in
     """Pre-compile dispatch specs for all registered handler callables."""
     return {hid: compile_handler_spec(fn) for hid, fn in handlers.items()}
 ```
-<!-- truth: end -->
 
-## 2. Inline Vectorized Sync Batches, `uvloop` Dekker Polling & `O(1)` Mounts
+## 2. Inline Vectorized Sync Batches, `LoopBackend` Dekker Polling & `O(1)` Mounts
 
 - **Inline Vectorized Sync Execution (`"sync_inline"`)**: Non-async native handlers default to `sync_to_thread=False`. Both [`Worker._process_batch`](../../../../../src/py/vertebra/server/worker.py) (when `all_sync_native` is true) and [`dispatch_batch`](../../../../../src/py/vertebra/server/_dispatch.py) run inline sync handlers in a tight loop on the worker thread and flush the entire batch via one `submit_batch_raw(raw_items)` call (`0` `ThreadPoolExecutor` submissions). Only handlers explicitly opted into `sync_to_thread=True` (`__vertebra_sync_to_thread__`) allocate the lazy `ThreadPoolExecutor` (`max_workers = max(4, min(32, cpu_count))` on GIL builds).
-- **Single-Thread `LoopBackend` (`uvloop`, `winloop`, `rloop`, `asyncio`) + `loop.add_reader` Dekker Polling**: [`create_event_loop()`](../../../../../src/py/vertebra/server/_loops.py) resolves `LoopBackend` via the table-driven `_LOOP_BACKENDS` registry (`auto` -> `uvloop>=0.23.0` on POSIX, `winloop>=0.8.1` on Windows, opt-in `rloop>=0.5.0`, or stdlib `asyncio`, honoring `--loop` / `VERTEBRA_LOOP` and module-specific `GilAuditReport` `quarantined_modules` without deprecated `EventLoopPolicy` APIs). In SHM mode and single-worker Embedded mode (`get_request_notify_fd() >= 0`), `Worker._run_inline_event_loop` registers `loop.add_reader(notify_fd, ...)` with Dekker `prepare_request_sleep` / `cancel_request_sleep` barriers so async, ASGI, and RSGI coroutines execute inline on the worker's own event loop without a background loop thread or `call_soon_threadsafe` hop.
+- **Single-Thread `LoopBackend` (`uvloop`, `winloop`, `rloop`, `asyncio`) + `loop.add_reader` Dekker Polling**: [`create_event_loop()`](../../../../../src/py/vertebra/server/_loops.py) resolves `LoopBackend` via the table-driven `_LOOP_BACKEND_SPECS` registry (`auto` -> `uvloop>=0.23.0` on POSIX, `winloop>=0.8.1` on Windows, opt-in `rloop>=0.5.0`, or stdlib `asyncio`, honoring `--loop` / `VERTEBRA_LOOP` and module-specific `GilAuditReport` `quarantined_modules` without deprecated `EventLoopPolicy` APIs). In SHM mode and single-worker Embedded mode (`get_request_notify_fd() >= 0`), `Worker._run_inline_event_loop` registers `loop.add_reader(notify_fd, ...)` with Dekker `prepare_request_sleep` / `cancel_request_sleep` barriers so async, ASGI, and RSGI coroutines execute inline on the worker's own event loop without a background loop thread or `call_soon_threadsafe` hop.
 - **`O(1)` `MOUNT_HANDLER_BASE` Mount Dispatch, `drive_native_batch` & `FastPathProvider` Stacking**: Mounted prefixes encode `MOUNT_HANDLER_BASE | mount_idx` (`0xFFFF_0000_0000_0000 | idx`) directly in the Rust `matchit` route table so `partition_batch` resolves mounts via `O(1)` bitmask indexing instead of linear prefix scans. Native `async def` handlers with synchronous guards/dependencies compile to `_invoke_compiled_sync_to_coro` and step via C-API `drive_native_batch` (`PyIter_Send`). Standalone and `App.mount("/prefix", sub_app)` applications across `Litestar`, `FastAPI`, `Starlette`, `Flask`, and `Django` auto-attach their zero-closure `FastPath` (`__vertebra_fastpath__`) via [`attach_framework_fastpath`](../../../../../src/py/vertebra/server/_fastpath.py)[^src-server-fastpath-py] and [`_fastpath_core.py`](../../../../../src/py/vertebra/server/_fastpath_core.py)[^src-server-fastpath-core-py], enforcing `extract_scope_body_fast(..., max_body_size=...)` (`413 Payload Too Large` on oversized chunked streams), zero-copy `ArrowCursor` buffer-view responses, and raw `bytes` header preservation in `AsgiSend.send_raw_response`.
 
 ## 3. Zero-Copy Response Coercion, Snapshot Unpinning & Loop-Sharded Resources
 
 - **Zero-Copy Buffer Coercion (`_serialize_result` / `coerce_response`)**: `_serialize_result` accepts `bytes | bytearray | memoryview` (including native `req.body_view` zero-copy returns), `str`, `Response`, and `msgspec`-serializable values (`encode_json_bytes`), forwarding buffers directly to Rust `submit_batch_raw` / `submit_response_raw` (`PyBuffer` extraction).
 - **Unpinning `BatchSnapshot` Across `await`**: Before awaiting an `async_native` handler coroutine, `_dispatch_async_item` extracts `request_id`, `method`, and `path` into a lightweight `_AsyncErrorStub` and drops the `Request` reference so suspended I/O tasks never pin `Arc<BatchSnapshot>` slabs in `BufferPool`.
-- **Loop-Local & Fused Fast Paths**: Use [`SyncLoopShardedResource[T]` / `AsyncLoopShardedResource[T]`](../../../../../src/py/vertebra/utils/sync_tools.py) to shard non-thread-safe primitives across `EventLoopPool` loops on free-threaded Python `3.14t`/`3.15t`, and [`LitestarFastPathBypass`](../../../../../src/py/vertebra/extensions/litestar/fastpath.py)[^src-extensions-litestar-fastpath-py] for fused Litestar direct dispatch.
-
-## 4. Retain Prepared Database Operations
-
-SQLSpec `execute_stack` retains each prepared `SQL` object beside its compiled SQL and native parameters. `returns_rows()` on that object selects row versus affected-count handling, including leading comments, CTE DML and `RETURNING`; reconstructing SQL or guessing from a prefix loses upstream classification. Row results retain the prepared statement through `SQLResult` and supported `StackResult` factories. Eligible multi-operation `execute` stacks use the advertised sync/async native pipeline capability; transactional/sequential fallback preserves order, rollback and continue-on-error behavior.[^src-sqlspec-stack][^src-sqlspec-stack-tests]
-
-Native execution defaults belong to concrete wrapper classes and are shared by direct and config-created sessions. PostgreSQL sync and MySQL use positional pyformat output, PostgreSQL async uses numeric output, and the BigQuery/Spanner wrappers own their supported parser/bind configuration. An explicit caller `StatementConfig` stays authoritative. This is a native execution boundary: parser metadata and emitted binds must agree without splitting raw execution SQL from a separately parsed metadata query.[^src-sqlspec-stack][^src-sqlspec-bigquery][^src-sqlspec-spanner][^src-sqlspec-stack-tests]
-
-Fallback operations also preserve preparation. `execute_arrow` separates Arrow execution options from SQL bind values and attaches the retained prepared statement to the Arrow result. `execute_many` uses SQLSpec's `is_many=True` contract for parameter sets and applies filters before compilation. A common single-execute path alone does not establish these contracts.[^src-sqlspec-stack][^src-sqlspec-stack-tests]
-
-Neutral tool providers return their original typed bound operations without resolving drivers. The generic agent bridge resolves annotations and retains that signature for schema generation and conversion. Parameters must be addressable by name: ordinary and keyword-only declarations work, while positional-only/variadic declarations and reserved token/context names fail at registration. An untyped `**kwargs` wrapper alone loses this conversion boundary.[^src-tool-bridge][^src-tool-schema-tests]
-
-After validation and default materialization, the bridge owns a deep copy of the bound business arguments. Provider policy, approval matching and actual operation execution use that same bound invocation; an independently copied ticket preserves its approved arguments. Caller changes to nested values while an operation awaits cannot alter the authorized execution. Token/context controls stay outside business arguments.[^src-tool-bridge][^src-tool-snapshot-tests]
-
-Approval matching also preserves converted value types recursively through mapping keys/values, ordered and unordered containers, `msgspec.Struct` fields and dataclass fields. Python considers `True`, `1` and `1.0` equal, while BigQuery encodes them as `BOOL`, `INT64` and `FLOAT64`; ordinary equality could authorize a different native bind. Reordered mappings with the same typed content still match.[^src-tool-bridge][^src-tool-snapshot-tests][^src-bigquery-bind-types]
-
-PostgreSQL notification and embedding primitives emit sync `%s` or async `$N` binds at their owning adapter boundary. SQLSpec prepares PostgreSQL tenant-session SQL through the same native execution profile while retaining original session values and failure identity. This primitive preparation is not a generic rewrite of arbitrary caller SQL.[^src-pg-notify][^src-pg-embeddings][^src-sqlspec-stack][^src-pg-primitive-tests]
+- **Loop-Local & Fused Fast Paths**: Use [`SyncLoopShardedResource[T]` / `AsyncLoopShardedResource[T]`](../../../../../src/py/vertebra/utils/sync_tools.py) to shard non-thread-safe primitives across `EventLoopPool` loops on free-threaded Python `3.14t`/`3.15t`, and [`FastPath` / `dispatch_handler_direct`](../../../../../src/py/vertebra/extensions/litestar/fastpath.py)[^src-extensions-litestar-fastpath-py] for fused Litestar direct dispatch.
+- **Prepared Database & Tool Boundaries**: Prepared statement retention, native parameter bind modes, and Arrow zero-copy rules are documented in [Database Drivers, Native Dialers & Arrow Zero-Copy](../../domains/data/database-drivers-and-dialers.md), while typed tool schema compilation and confirmation gates live in [MCP, WebMCP & A2A Protocol Harness](../../domains/agent/mcp-and-a2a-protocol-harness.md).
 
 Provenance sources: [^src-server-rsgi-adapter-py], [^src-server-wsgi-adapter-py], [^src-utils-sync-tools-py].
 
@@ -157,15 +111,3 @@ Provenance sources: [^src-server-rsgi-adapter-py], [^src-server-wsgi-adapter-py]
 [^src-server-wsgi-adapter-py]: `src/py/vertebra/server/_wsgi/_adapter.py` — Python implementation module (src/py/vertebra/server/_wsgi/_adapter.py).
 [^src-utils-sync-tools-py]: `src/py/vertebra/utils/sync_tools.py` — Python implementation module (src/py/vertebra/utils/sync_tools.py).
 [^src-extensions-litestar-fastpath-py]: `src/py/vertebra/extensions/litestar/fastpath.py` — Python implementation module (src/py/vertebra/extensions/litestar/fastpath.py).
-
-[^src-sqlspec-stack]: `src/py/vertebra/extensions/sqlspec/adapters.py` — Prepared stack execution and native bind defaults.
-[^src-sqlspec-bigquery]: `src/py/vertebra/extensions/sqlspec/bigquery.py` — BigQuery-owned parser and named-at bind defaults.
-[^src-sqlspec-spanner]: `src/py/vertebra/extensions/sqlspec/spanner.py` — Spanner GoogleSQL and Spangres parser and bind defaults.
-[^src-sqlspec-stack-tests]: `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py` — Ordered results, native binds, Arrow and batched stack regressions.
-[^src-tool-bridge]: `src/py/vertebra/agent/tools/__init__.py` — Generic provider signature, conversion and confirmation adaptation.
-[^src-tool-schema-tests]: `src/py/tests/unit/agent/test_core_and_observability.py` — Typed provider schemas and validation before policy.
-[^src-tool-snapshot-tests]: `src/py/tests/unit/agent/test_runtime_and_workflows.py` — Owned invocation snapshots, defaults and caller-bound approval across awaits.
-[^src-bigquery-bind-types]: `src/py/vertebra/db/adapters/bigquery/core.py` — Distinct boolean, integer and floating-point native parameter descriptors.
-[^src-pg-notify]: `src/py/vertebra/db/adapters/postgres/notify.py` — Mode-correct native notification parameters.
-[^src-pg-embeddings]: `src/py/vertebra/db/adapters/postgres/embeddings.py` — Mode-correct embedding and vector-search parameters.
-[^src-pg-primitive-tests]: `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py` — Real optional psycopg conversion for notification, embedding and tenant-session primitives.

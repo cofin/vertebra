@@ -3,14 +3,21 @@ type: Decision
 title: "ADR-004: Optional Driver Wheels and Shared-Memory Ownership"
 description: "Database client dependency isolation and producer-owned Arrow mapping transfer across independently linked PyO3 extensions."
 status: stable
-tags: [decisions, adr, packaging, database, pyo3, shm, ownership]
+tags:
+  - decisions
+  - adr
+  - packaging
+  - database
+  - pyo3
+  - shm
+  - ownership
 generated:
   by: flow/0.26.0
   at: "2026-11-05T00:14:04Z"
 verified:
-  - by: agent:flow-review
-    at: "2026-11-06T06:10:00Z"
-    commit: 7657e8b7c2c96bdda6821aec70a2b603f438a127
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: cdb978d3
 sources:
   - id: src-python-packaging
     resource: pyproject.toml

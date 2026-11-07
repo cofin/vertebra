@@ -41,4 +41,4 @@ Read-only reviewers must never run state-altering commands:
 - Never run tests that clear shared memory without locks (`make rs-test`).
 - Never run auto-fixing linters or formatters (`make lint`, `cargo fmt` without `--check`).
 - Never run git mutation commands (`git commit`, `git push`, `git reset`, `git checkout`).
-- Use only targeted inspection commands (`cargo check`, `cargo test -p <crate> --test <name>`, `git diff`).
+- Use only targeted inspection commands (`cargo check --manifest-path src/rs/Cargo.toml`, `cargo test --manifest-path src/rs/Cargo.toml -p <crate> --test <name>`, `git diff`).

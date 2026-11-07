@@ -11,7 +11,7 @@ The completed database foundation is documented in [driver contracts and adapter
 
 ## 2. Planned Feature Specifications (`state: planned`)
 
-- [`storage-completeness`](storage-completeness/spec.md) — Complete `SyncObjectStore` and `AsyncObjectStore` (`vertebra-storage`), unified GCP token caches, fail-closed construction, and SQLSpec, Advanced Alchemy, Django, and Litestar storage contracts (`t01`–`t07`).
+- [`storage-completeness`](storage-completeness/spec.md) — Complete `SyncObjectStore` and `AsyncObjectStore` (`vertebra-storage`), unified GCP token caches, fail-closed construction, and SQLSpec, Advanced Alchemy, Django, Litestar, and `VTBARROW` storage contracts ([`chapters/ch01`–`ch04`](storage-completeness/chapters/index.md), `12` tasks).
 - [`native-postgres-driver`](native-postgres-driver/spec.md) — Standalone Rust PostgreSQL wheel (`vertebra-postgres`) covering wire authentication, cloud mTLS/IAM, pools, single-Sync pipelines, binary COPY, SHM Arrow, notifications, logical replication, and native adapter cutover (`t01`–`t102`).
 
 ## 3. Draft Child Flow Charters (`state: draft`)

@@ -41,6 +41,8 @@ description: Use when reviewing Python framework architecture, server runners, L
 
 ## Suppressions Index
 
+Shared catalog: [`false-positive-suppressions.md`](../review-core/references/false-positive-suppressions.md).
+
 - `FP-PY-01`: Absence of inline comments in Python
 - `FP-PY-02`: PEP 562 lazy attribute loading
 - `FP-PY-03`: ASGI direct send optimization

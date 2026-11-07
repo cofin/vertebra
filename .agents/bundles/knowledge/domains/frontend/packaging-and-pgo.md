@@ -3,14 +3,19 @@ type: Concept
 title: "Standalone & Onefile Packaging, Wheel Matrix, and PGO Tooling"
 description: "Relocatable StandaloneBuilder, self-extracting VTB1FILE OnefileBuilder, BuildTarget resolution, cibuildwheel 3.12-3.15t release matrix, and Rust/CPython PGO pipelines."
 status: stable
-tags: [domains, frontend, packaging, pgo, build]
+tags:
+  - domains
+  - frontend
+  - packaging
+  - pgo
+  - build
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:flow-review
-    at: "2026-11-06T06:10:00Z"
-    commit: 7657e8b7c2c96bdda6821aec70a2b603f438a127
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: cdb978d3
 sources:
   - id: src-bundler-wheel-manifest
     resource: src/rs/vertebra-bundler/pyproject.toml

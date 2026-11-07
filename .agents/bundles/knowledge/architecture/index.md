@@ -4,7 +4,7 @@
 
 - [Runtime Topologies & Python Embedding](runtime/topologies-and-embedding.md) — `Topology::{Auto, Embedded, Shm}`, explicit `tokio::runtime::Builder`, `EmbeddedSupervisor` `SO_REUSEPORT` multi-process supervision, `BatchBridge`, `RingFactory`, and Free-Threaded Python `3.14t`/`3.15t` execution modes (`#[pymodule(gil_used = false)]` across `_vertebra`, `_bundler`, `_storage`, `_bigquery`, and `_spanner`).
 - [SHM Worker Spawn, Shutdown & Recovery Hooks](runtime/shm-supervision-and-recovery.md) — `RingFactory` FD inheritance (`VERTEBRA_*_FD`), `shutdown_workers` (`SIGTERM` then `SIGKILL`), and library-level recovery primitives (`WorkerLifecycle` with `pidfd_open` + `Child::try_wait` and 1 s–32 s exponential backoff, `RingPair::reclaim`, `cleanup_stale_shm`).
-- [Server Platform & Process Lifecycle](runtime/platform-and-lifecycle.md) — `run_supervisor` binary launcher, `find_server_binary`, `EventLoopPool` (`uvloop` + inline `add_reader`), `GilAuditReport`, `SyncLoopShardedResource` / `AsyncLoopShardedResource`, `SyncPool`, `ShmAllocationPolicy`, and container platform primitives (`CgroupQuota`, `LameDuckController`, `ZPagesRegistry`).
+- [Server Platform & Process Lifecycle](runtime/platform-and-lifecycle.md) — `run_supervisor` binary launcher, `find_server_binary`, `EventLoopPool` (`uvloop` + inline `add_reader`), `GilAuditReport`, `SyncLoopShardedResource` / `AsyncLoopShardedResource`, `SyncPool`, `SHMAllocationPolicy`, and container platform primitives (`CgroupQuota`, `LameDuckController`, `ZPagesRegistry`).
 
 ## IPC & Shared Memory (`ipc/`)
 
@@ -15,7 +15,7 @@
 
 - [HTTP Ingress, Request Pipeline & Native Routing](http/ingress-and-routing.md) — `run_with_listener` `SO_REUSEPORT` accept loop (`ServerState`), tuned `http1::Builder`, ALPN `TlsAcceptor` (`h2` + mTLS), `Router` (`normalize_typed_path` + FNV-1a `HandlerId`), and `RouteTable` (`MOUNT_HANDLER_BASE`).
 - [Request Batching, Dispatch & Backpressure](http/batching-dispatch-and-backpressure.md) — Double-buffered `RequestBatcher` shard pool (`BatchLimit`, compact binary headers), `Dispatcher` (`DispatchBackend::{Direct, Bridge, Shm}`), lock-free batch-affinitized `ShmDispatcher` 8-shard `Mutex<InFlightRequests>` slabs, `PendingRequests` streaming `DashMap`, and lock-free atomic `BackpressureController`.
-- [Protocol and Offload Modules in vertebra-http](http/protocol-and-offload-modules.md) — Inventory of wired `vertebra-http` offloads (`cors`, `compression`, `assets`, `openapi_cache`, `health` via `VERTEBRA_OFFLOAD_CONFIG`), wire protocols (`h2c`, `http3`, `grpc`), realtime brokers (`sse`, `ws_mount`, `pubsub`), and library helpers (`payload`, `multipart`, `access_log`, `profile`, `discovery`, `dispatcher/direct`).
+- [Protocol and Offload Modules in vertebra-http](http/protocol-and-offload-modules.md) — Inventory of wired `vertebra-http` offloads (`cors`, `compression`, `assets`, `openapi_cache`, `health` via `VERTEBRA_OFFLOAD_CONFIG`), wire protocols (`h2c`, `http3`, `grpc`), realtime and protocol bridges (`sse`, `ws_mount`, `pubsub`, `mcp_bridge`), and library helpers (`payload`, `multipart`, `access_log`, `profile`, `discovery`, `dispatcher/direct`).
 
 ## Python Worker & Protocols (`worker/`)
 

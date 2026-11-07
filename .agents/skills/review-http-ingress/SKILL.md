@@ -39,11 +39,13 @@ description: Use when reviewing HTTP/1.1, HTTP/2, HTTP/3, or gRPC ingress pipeli
 
 ## Suppressions Index
 
+Shared catalog: [`false-positive-suppressions.md`](../review-core/references/false-positive-suppressions.md).
+
 - `FP-HTTP-01`: Matchit route path syntax
 
 ## Focused Commands
 
 ```bash
-cargo test -p vertebra-http
-cargo check -p vertebra-http --no-default-features --features tls,compression
+cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --features tls,compression
+cargo check --manifest-path src/rs/Cargo.toml -p vertebra-http --no-default-features --features tls,compression,http3
 ```

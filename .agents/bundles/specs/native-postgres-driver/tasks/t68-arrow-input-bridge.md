@@ -1,24 +1,25 @@
 ---
 type: Task
-id: native-postgres-driver:t68
-title: Stream Arrow input buffers into native COPY
+id: "native-postgres-driver:t68"
+title: "Stream Arrow input buffers into native COPY"
+description: "Stream Arrow input buffers into native COPY for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
-- native-postgres-driver:t67
+  - "native-postgres-driver:t67"
 files:
-- src/rs/vertebra-postgres/src/copy.rs
-- src/rs/vertebra-postgres/src/sync_client.rs
-- src/rs/vertebra-postgres/src/async_client.rs
-- src/py/vertebra/_postgres.pyi
-- src/py/vertebra/db/adapters/postgres/arrow.py
-- src/py/tests/unit/db/test_postgres_native_data.py
+  - src/rs/vertebra-postgres/src/copy.rs
+  - src/rs/vertebra-postgres/src/sync_client.rs
+  - src/rs/vertebra-postgres/src/async_client.rs
+  - src/py/vertebra/_postgres.pyi
+  - src/py/vertebra/db/adapters/postgres/arrow.py
+  - src/py/tests/unit/db/test_postgres_native_data.py
 tests:
-- src/py/tests/unit/db/test_postgres_native_data.py::test_native_load_arrow_streams_without_rows
-- src/py/tests/unit/db/test_postgres_native_data.py::test_native_load_arrow_producer_error_rolls_back
+  - src/py/tests/unit/db/test_postgres_native_data.py
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: cdb978d3
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -28,15 +29,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- native
-- data-events
-requirements:
-- R20
+  - postgres
+  - native
+  - data-events
 ---
 
 # Stream Arrow input buffers into native COPY

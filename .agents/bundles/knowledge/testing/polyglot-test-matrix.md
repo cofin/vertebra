@@ -1,80 +1,88 @@
 ---
 type: Guide
-title: Polyglot Test Matrix & Environment Setup
-description: Rust, Python, and TypeScript test suites, their Makefile and CI entry
-  points, registry auto-setup, extension rebuilds, and /dev/shm cleanup.
+title: "Polyglot Test Matrix & Environment Setup"
+description: "Rust, Python, and TypeScript test suites, their Makefile and CI entry points, registry auto-setup, extension rebuilds, and /dev/shm cleanup."
 status: stable
 tags:
-- testing
-- verification
-- python
-- rust
-- typescript
+  - testing
+  - verification
+  - python
+  - rust
+  - typescript
 generated:
   by: flow/0.26.0
-  at: '2026-11-04T04:33:00Z'
+  at: "2026-11-04T04:33:00Z"
 verified:
-- by: agent:codex
-  at: '2026-11-05T06:09:26Z'
-  commit: 80ff8a65e43a2bcef9e48a7763e89a7352118232
-- by: agent:flow-review
-  at: '2026-11-05T00:35:59Z'
-  commit: 21c99f9571ab044741a10f7bbd7be05cb0eb2117
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: cdb978d3
 sources:
-- id: src-stack-regressions
-  resource: src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
-  title: Native pipeline and fallback statement/result/bind regressions
-- id: src-bigquery-stack-regressions
-  resource: src/py/tests/unit/extensions/test_sqlspec_bigquery.py
-  title: Actual BigQuery driver stack execution over loopback REST
-- id: src-spanner-stack-regressions
-  resource: src/py/tests/unit/extensions/test_sqlspec_spanner.py
-  title: Actual Spanner driver stack execution over external client ports
-- id: src-psycopg-bind-regressions
-  resource: src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
-  title: Optional real psycopg converter acceptance for PostgreSQL primitives
-- id: src-provider-regressions
-  resource: src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
-  title: Native provider ownership, lazy resolution, policy and driver error regressions
-- id: src-provider-schema-regressions
-  resource: src/py/tests/unit/agent/test_core_and_observability.py
-  title: Neutral provider schema and validation boundaries
-- id: src-provider-snapshot-regressions
-  resource: src/py/tests/unit/agent/test_runtime_and_workflows.py
-  title: Approval binding and nested invocation ownership across controlled suspension
-- id: src-native-driver-tests
-  resource: src/py/tests/unit/db/test_native_db_drivers.py
-  title: Cancellation and cloud DBAPI regression coverage
-- id: src-sqlite-returning-tests
-  resource: src/py/tests/unit/db/test_sqlite_driver.py
-  title: SQLite statement completion and transaction regressions
-- id: src-postgres-transaction-tests
-  resource: src/py/tests/unit/db/test_postgres_driver.py
-  title: Asyncpg transaction and affected-count regressions
-- id: src-makefile
-  resource: Makefile
-  title: Canonical polyglot build, test, lint, docs, and benchmark targets
-- id: src-tools-scripts-setup-env-sh
-  resource: tools/scripts/setup-env.sh
-  title: Repository tooling module (tools/scripts/setup-env.sh)
-- id: src-pyproject-toml
-  resource: pyproject.toml
-  title: Python package metadata, dependencies, and tool configuration
-- id: src-cargo-toml
-  resource: src/rs/Cargo.toml
-  title: Rust crate manifest (src/rs/Cargo.toml)
-- id: src-tests-conftest-py
-  resource: src/py/tests/conftest.py
-  title: Python implementation module (src/py/tests/conftest.py)
-- id: src-package-json
-  resource: src/ts/vertebra-client/package.json
-  title: TypeScript package manifest (src/ts/vertebra-client/package.json)
-- id: src-ci-yml
-  resource: .github/workflows/ci.yml
-  title: GitHub Actions workflow (ci.yml)
-- id: src-db-conformance
-  resource: src/py/tests/integration/db/test_driver_conformance.py
-  title: Parameterized database contract and environment readiness gates
+  - id: src-stack-regressions
+    resource: src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
+    title: "Native pipeline and fallback statement/result/bind regressions"
+  - id: src-bigquery-stack-regressions
+    resource: src/py/tests/unit/extensions/test_sqlspec_bigquery.py
+    title: "Actual BigQuery driver stack execution over loopback REST"
+  - id: src-spanner-stack-regressions
+    resource: src/py/tests/unit/extensions/test_sqlspec_spanner.py
+    title: "Actual Spanner driver stack execution over external client ports"
+  - id: src-psycopg-bind-regressions
+    resource: src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
+    title: "Optional real psycopg converter acceptance for PostgreSQL primitives"
+  - id: src-provider-regressions
+    resource: src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
+    title: "Native provider ownership, lazy resolution, policy and driver error regressions"
+  - id: src-provider-schema-regressions
+    resource: src/py/tests/unit/agent/test_core_and_observability.py
+    title: "Neutral provider schema and validation boundaries"
+  - id: src-provider-snapshot-regressions
+    resource: src/py/tests/unit/agent/test_runtime_and_workflows.py
+    title: "Approval binding and nested invocation ownership across controlled suspension"
+  - id: src-tests-unit-agent-mcp-conformance-py
+    resource: src/py/tests/unit/agent/test_mcp_conformance.py
+    title: "MCP 2026-07-28 protocol, ToolRegistry provider, WebMCP, and HTTP handler conformance suite"
+  - id: src-agent-mcp-registry-py
+    resource: src/py/vertebra/agent/mcp/registry.py
+    title: "Unified ToolRegistry and MCPRegistry implementation"
+  - id: src-native-driver-tests
+    resource: src/py/tests/unit/db/test_native_db_drivers.py
+    title: "Cancellation and cloud DBAPI regression coverage"
+  - id: src-sqlite-returning-tests
+    resource: src/py/tests/unit/db/test_sqlite_driver.py
+    title: "SQLite statement completion and transaction regressions"
+  - id: src-postgres-transaction-tests
+    resource: src/py/tests/unit/db/test_postgres_driver.py
+    title: "Asyncpg transaction and affected-count regressions"
+  - id: src-tests-unit-server-stage1-hotpath-py
+    resource: src/py/tests/unit/server/test_stage1_hotpath_and_314t.py
+    title: "Server hot-path batch dispatch and free-threaded 3.14t/3.15t unit tests"
+  - id: src-ts-tests-agent-test-ts
+    resource: src/ts/vertebra-client/tests/agent.test.ts
+    title: "TypeScript Vitest suite for agent, router, and WebMCP client modules"
+  - id: src-makefile
+    resource: Makefile
+    title: "Canonical polyglot build, test, lint, docs, and benchmark targets"
+  - id: src-tools-scripts-setup-env-sh
+    resource: tools/scripts/setup-env.sh
+    title: "Repository tooling module (tools/scripts/setup-env.sh)"
+  - id: src-pyproject-toml
+    resource: pyproject.toml
+    title: "Python package metadata, dependencies, and tool configuration"
+  - id: src-cargo-toml
+    resource: src/rs/Cargo.toml
+    title: "Rust crate manifest (src/rs/Cargo.toml)"
+  - id: src-tests-conftest-py
+    resource: src/py/tests/conftest.py
+    title: "Python implementation module (src/py/tests/conftest.py)"
+  - id: src-package-json
+    resource: src/ts/vertebra-client/package.json
+    title: "TypeScript package manifest (src/ts/vertebra-client/package.json)"
+  - id: src-ci-yml
+    resource: .github/workflows/ci.yml
+    title: "GitHub Actions workflow (ci.yml)"
+  - id: src-db-conformance
+    resource: src/py/tests/integration/db/test_driver_conformance.py
+    title: "Parameterized database contract and environment readiness gates"
 ---
 
 # Polyglot Test Matrix & Environment Setup
@@ -128,13 +136,13 @@ CI runs on pushes to `main` and on every pull request. A `changes` job (`dorny/p
 
 **Python** (`[tool.pytest.ini_options] testpaths = ["src/py/tests"]`, dependency group `test` = `pytest`, `pytest-cov>=5.0`, `anyio`, `[tool.coverage.report] fail_under = 80`):
 
-- **1:1 Module-Mirrored Layout**: Every directory under `src/py/tests/unit/` mirrors `src/py/vertebra/` (`unit/server/`, `unit/supervisor/`, `unit/framework/`, `unit/extensions/`, `unit/db/`, `unit/storage/`, `unit/telemetry/`, `unit/codegen/`, `unit/build/`, `unit/cli/`, `unit/ffi/`, `unit/native/`, `unit/utils/`) and contains an `__init__.py` so `ruff` (`INP001`) and `pytest` resolve package namespaces cleanly.
-- **Top-Level Imports (`PLC0415`) & Zero Stage-Numbered Tests**: All test files place imports at module top level (`PLC0415` enforced) and use domain-named filenames (`test_hotpath_and_314t.py`, `test_loops.py`, `test_asgi_runner.py`, `test_wsgi_adapter.py`, `test_rsgi_adapter.py`) rather than stage-numbered or audit-remediation filenames.
+- **1:1 Module-Mirrored Layout**: Every directory under `src/py/tests/unit/` mirrors `src/py/vertebra/` (`unit/server/`, `unit/supervisor/`, `unit/framework/`, `unit/extensions/`, `unit/db/`, `unit/storage/`, `unit/telemetry/`, `unit/codegen/`, `unit/build/`, `unit/cli/`, `unit/ffi/`, `unit/native/`, `unit/utils/`, `unit/agent/`) and contains an `__init__.py` so `ruff` (`INP001`) and `pytest` resolve package namespaces cleanly.
+- **Top-Level Imports (`PLC0415`) & Server Suite Coverage**: All test files place imports at module top level (`PLC0415` enforced) across `src/py/tests/unit/server/` ([`test_stage1_hotpath_and_314t.py`](../../../../src/py/tests/unit/server/test_stage1_hotpath_and_314t.py)[^src-tests-unit-server-stage1-hotpath-py], `test_runtime_tuning.py`, `test_runner.py`, `test_asgi.py`, `test_wsgi.py`, `test_rsgi_protocol.py`, and `test_litestar_direct_fastpath.py`).
 - **Strong vs. Weak Assertions**: Assert exact observable outputs (status codes, wire bytes, SQL strings + bind tuples, round-trip decoded frames, state transitions, and negative error paths with `pytest.raises(SpecificException, match=...)`) rather than `assert x is not None` or `hasattr` checks.
 
 **Rust**: Single-binary integration harnesses (`tests/it/main.rs`) in `vertebra-core` (`tests/it/{shm,spsc,mpmc,streaming,tiered_ring}.rs`) and `vertebra-http` (`tests/it/{server,routing,batcher,dispatcher,backpressure,tls,h2c_mtls,http3,grpc,sse,pubsub,websocket,fastpaths,discovery,streaming}.rs`), plus `vertebra-storage/tests/storage_engine_tests.rs` and `vertebra-db/tests/gcp_credentials_tests.rs` (`--features gcp`). `vertebra-py`, `vertebra-bundler`, `vertebra-db`, `vertebra-bigquery`, and `vertebra-spanner` run crate unit tests (`#[cfg(test)]`) and integration suites under `cargo test --workspace --features tls,compression,gcp`.
 
-**TypeScript**: `package.json` runs `vitest run` over `tests/unit/client.test.ts`, `tests/unit/store.test.ts`, `tests/unit/adapters.test.ts`, and the top-level `apex`, `arrow`, `live`, `realtime`, `telemetry`, and `wasm` suites (including error-injection, retry-exhaustion, and reconnect-cap coverage).
+**TypeScript**: `package.json` runs `vitest run` over `tests/unit/client.test.ts`, `tests/unit/store.test.ts`, and the top-level [`tests/agent.test.ts`](../../../../src/ts/vertebra-client/tests/agent.test.ts)[^src-ts-tests-agent-test-ts] (covering `./agent` `McpClient`, `A2aClient`, `AgentStreamClient`, and `WorkflowLiveSubscriber`; `./router` `routeUrl`, `wsUrl`, and `interpolateRoutePath`; and `./webmcp` `registerWebMCPTools`), `apex`, `arrow`, `live`, `realtime`, `telemetry`, and `wasm` suites (including error-injection, retry-exhaustion, and reconnect-cap coverage).
 
 ## 5. Async Tests & Shared-Memory Hygiene
 
@@ -144,22 +152,15 @@ Runtime segments are named `/vtb-{pid:x}-{seq:x}-{attempt:x}` and match neither 
 
 ## Database driver conformance
 
-`src/py/tests/integration/db/test_driver_conformance.py` parameterizes the shared sync and async SQL contract across eight adapters. It checks scalar conversion, execution return values, empty results versus SQL `NULL`, transaction commit and rollback, typed errors, Arrow round trips, and idle cancellation. Optional pipelining assertions follow the advertised sync or async capability.[^src-db-conformance]
-
-SQLite runs locally. PostgreSQL, Oracle, MySQL, MSSQL, and DuckDB retain strict expected failures for their pending native extension cutovers. These fixtures require the named native extension before exercising SQL, so an expected failure caused by a missing extension does not establish server behavior. BigQuery requires `VERTEBRA_CONFORMANCE_BIGQUERY_DSN`; Spanner requires `VERTEBRA_CONFORMANCE_SPANNER_DSN` or `SPANNER_EMULATOR_HOST`. Without that configuration the cloud cases skip.[^src-db-conformance]
-
-Redis and Valkey default to `memory://` behavioral checks; `VERTEBRA_CONFORMANCE_DOCKER=1` selects their `pytest-databases` fixtures. DataFusion cases cover registry resolution, Arrow normalization with an injected context, and missing-dependency refusal. Report passed, skipped, and expected-failure cases separately, and require live engine evidence when accepting a native cutover.[^src-db-conformance]
-
-For extracted wheels, verify an installed artifact outside the source tree as well as an editable build. Inspect wheel contents for ownership of the extension and its stub, install the core and selected engine from the built distributions, and check that removing an optional engine leaves the core Python package intact. Reason: editable imports do not prove distribution isolation.
-
+`src/py/tests/integration/db/test_driver_conformance.py` parameterizes the shared sync and async SQL contract across eight adapters, checking scalar conversion, execution return values, empty results versus SQL `NULL`, transaction commit and rollback, typed errors, Arrow round trips, idle cancellation, and advertised sync/async pipelining capabilities. SQLite runs locally, while `EngineConformanceSpec` entries declaring `native_extension_module` fail strictly (`strict=True` `xfail`) when that extension module is absent so a missing-extension `xfail` never masquerades as live server behavior. BigQuery requires `VERTEBRA_CONFORMANCE_BIGQUERY_DSN` and Spanner requires `VERTEBRA_CONFORMANCE_SPANNER_DSN` or `SPANNER_EMULATOR_HOST` (skipping when unconfigured); Redis and Valkey default to `memory://` (`VERTEBRA_CONFORMANCE_DOCKER=1` selects `pytest-databases` fixtures); and DataFusion cases cover registry resolution, Arrow normalization, and missing-dependency refusal. Report passed, skipped, and expected-failure cases separately, require live engine evidence when accepting a native driver, and verify built companion wheels outside the source tree so editable imports never mask distribution isolation issues.[^src-db-conformance]
 
 ## Driver regression boundaries
 
 Transaction tests exercise synchronous interruption, actual asyncio task cancellation, and AnyIO cancellation scopes against observable database state. Asyncpg interface tests use a local port with real SQLite autocommit behavior and verify transaction ownership, command counts, and connection release. Cloud DBAPI tests pass actual BigQuery, Spanner, and Spangres drivers through local service ports, including a BigQuery port that rejects permanent DDL inside transactions. SQLite `RETURNING` tests check counts, cross-connection visibility, commit, rollback, and reuse. These local ports verify integration contracts; they do not establish live PostgreSQL or GCP service acceptance. [^src-postgres-transaction-tests][^src-sqlite-returning-tests][^src-native-driver-tests]
 
-## SQLSpec and Native Client Boundary Evidence
+## SQLSpec, MCP Conformance, and Native Client Boundary Evidence
 
-Tool-provider regressions exercise adapter-owned operations through the generic `build_tools` bridge, and independently exercise that bridge with a typed non-vendor provider. Assert schema types/defaults, named-parameter registration, conversion before policy, lazy resolution, native error identity and the absence of vendor imports/exports in generic agent code. Barrier-driven tests pause an approved operation, mutate caller-owned nested values, and prove execution plus stored approval retain the original owned invocation. Typed-value regressions distinguish Python-equal boolean/integer/float replacements inside mappings, containers and converted records while accepting reordered equivalent mappings. Keep this evidence separate from completed MCP provider discovery or full protocol conformance.[^src-provider-regressions][^src-provider-schema-regressions][^src-provider-snapshot-regressions]
+Tool-provider regressions exercise adapter-owned operations through `build_tools` and [`ToolRegistry.register_provider`](../../../../src/py/vertebra/agent/mcp/registry.py)[^src-agent-mcp-registry-py], and independently exercise `ToolRegistry` with typed non-vendor providers. [`test_mcp_conformance.py`](../../../../src/py/tests/unit/agent/test_mcp_conformance.py)[^src-tests-unit-agent-mcp-conformance-py] verifies MCP `2026-07-28` Streamable HTTP (`POST /mcp`, `204` on `OPTIONS /mcp`, `405` on `GET /mcp`), `server/discover`, `Mcp-Name` observability header parity, `WebMCPConfig` / `build_webmcp_manifest`, task stores, and provider-registered tools across native, Starlette, FastAPI, Flask, and Django mounts. Assert schema types/defaults, named-parameter registration, conversion before policy, lazy resolution, native error identity, and the absence of vendor imports/exports in generic agent code. Barrier-driven tests pause an approved operation, mutate caller-owned nested values, and prove execution plus stored approval retain the original owned invocation. Typed-value regressions distinguish Python-equal boolean/integer/float replacements inside mappings, containers, and converted records while accepting reordered equivalent mappings.[^src-provider-regressions][^src-provider-schema-regressions][^src-provider-snapshot-regressions]
 
 BigQuery and Spanner sync/async driver and config constructors reject non-null tenant enforcement before base initialization, supplied-core access, registry resolution, default-broker creation or native I/O. Constructor tripwires verify these effects are absent; ordinary unconfigured sessions retain script, Arrow, batch and snapshot behavior. This closes unsupported session creation instead of scattering guards across execution methods.[^src-bigquery-stack-regressions][^src-spanner-stack-regressions]
 
@@ -178,15 +179,14 @@ Provenance sources: [^src-pyproject-toml], [^src-cargo-toml], [^src-package-json
 [^src-tests-conftest-py]: `src/py/tests/conftest.py` — Python implementation module (src/py/tests/conftest.py).
 [^src-package-json]: `src/ts/vertebra-client/package.json` — TypeScript package manifest (src/ts/vertebra-client/package.json).
 [^src-ci-yml]: `.github/workflows/ci.yml` — GitHub Actions workflow (ci.yml).
-
 [^src-db-conformance]: `src/py/tests/integration/db/test_driver_conformance.py` — Parameterized database contract and environment readiness gates.
-
 [^src-postgres-transaction-tests]: `src/py/tests/unit/db/test_postgres_driver.py` — Asyncpg transaction and affected-count regressions.
-
 [^src-sqlite-returning-tests]: `src/py/tests/unit/db/test_sqlite_driver.py` — SQLite statement completion and transaction regressions.
-
 [^src-native-driver-tests]: `src/py/tests/unit/db/test_native_db_drivers.py` — Cancellation and cloud DBAPI regression coverage.
-
+[^src-tests-unit-server-stage1-hotpath-py]: `src/py/tests/unit/server/test_stage1_hotpath_and_314t.py` — Server hot-path batch dispatch and free-threaded 3.14t/3.15t unit tests.
+[^src-ts-tests-agent-test-ts]: `src/ts/vertebra-client/tests/agent.test.ts` — TypeScript Vitest suite for agent, router, and WebMCP client modules.
+[^src-tests-unit-agent-mcp-conformance-py]: `src/py/tests/unit/agent/test_mcp_conformance.py` — MCP 2026-07-28 protocol, ToolRegistry provider, WebMCP, and HTTP handler conformance suite.
+[^src-agent-mcp-registry-py]: `src/py/vertebra/agent/mcp/registry.py` — Unified ToolRegistry and MCPRegistry implementation.
 [^src-stack-regressions]: `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py` — Native pipeline and fallback statement/result/bind regressions.
 [^src-bigquery-stack-regressions]: `src/py/tests/unit/extensions/test_sqlspec_bigquery.py` — Actual BigQuery driver stack execution over loopback REST.
 [^src-spanner-stack-regressions]: `src/py/tests/unit/extensions/test_sqlspec_spanner.py` — Actual Spanner driver stack execution over external client ports.

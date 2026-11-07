@@ -41,6 +41,8 @@ description: Use when reviewing Rust shared-memory rings, futex/ulock handshakes
 
 ## Suppressions Index
 
+Shared catalog: [`false-positive-suppressions.md`](../review-core/references/false-positive-suppressions.md).
+
 - `FP-RT-01`: SeqCst on futex wait words
 - `FP-RT-02`: Rust comments and safety invariants
 - `FP-RT-03`: Darwin ulock return code convention
@@ -48,7 +50,6 @@ description: Use when reviewing Rust shared-memory rings, futex/ulock handshakes
 ## Focused Commands
 
 ```bash
-cargo test -p vertebra-core --test test_ring
-cargo test -p vertebra-core --test test_mpmc
-cargo test -p vertebra-core --test test_shm
+cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --test it
+cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-storage -p vertebra-db
 ```

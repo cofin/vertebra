@@ -9,8 +9,8 @@ generated:
   at: "2026-11-06T18:28:00Z"
 verified:
   - by: agent:flow-setup
-    at: "2026-11-06T18:28:00Z"
-    commit: 77b54514efb09b5b30500a0a1f7832ba8352a2b9
+    at: "2026-11-07T03:55:00Z"
+    commit: cdb978d3
   - by: agent:flow-setup
     at: "2026-11-04T04:33:00Z"
     commit: f741701
@@ -100,7 +100,7 @@ make bench-report                                         # Latest benchmark rep
 4. **Shared-Memory Cleanup**: `make rs-test` and the autouse `_cleanup_shm` fixture in [`src/py/tests/conftest.py`](../../../src/py/tests/conftest.py) remove `/dev/shm/test-*`, `/dev/shm/*vertebra*`, and `/dev/shm/vtb-*`.
 5. **`--group bench` & `--group doc` Isolation**: Keep `duckdb`, `uvicorn`, `httptools`, `uvloop`, `granian`, and `spikard` inside `[dependency-groups].bench` and `zensical`, `mkdocstrings-python`, and `pymdown-extensions` inside `[dependency-groups].doc` in [`pyproject.toml`](../../../pyproject.toml) so Python `3.14t`/`3.15t` test runs never compile `duckdb` C++ or `zensical` Rust sdist dependencies from source.
 6. **Zensical Documentation & Griffe `msgspec.Struct` Hygiene**: Never enable `navigation.indexes` in [`zensical.toml`](../../../zensical.toml) (it hides section `Overview` links and causes empty primary sidebars on single-page tabs). Keep PEP 257 field docstrings on all documented `msgspec.Struct` and `.pyi` stub classes so custom Griffe templates (`tools/docs/templates/python/material/`) render complete attribute tables.
-7. **Pre-Commit Secret Hygiene**: Never use strings matching `ya29.*` (forbidden Google OAuth2 access token prefix) in tests or fixtures; use `"mock-oauth-token"` instead of token prefixes.
+7. **Pre-Commit Secret Hygiene**: Never use Google OAuth2 access token prefixes in tests or fixtures; use `"mock-oauth-token"` instead.
 8. **Git Config & Hook Hygiene**: Keep `extensions.worktreeConfig` unset and `core.repositoryformatversion = 0` in `.git/config` (Antigravity's Git client rejects `extensions.worktreeConfig`), and keep `core.hooksPath` unset so `pre-commit` manages `.git/hooks/pre-commit` and `.git/hooks/commit-msg` from [`.pre-commit-config.yaml`](../../../.pre-commit-config.yaml).
 
 ## Direct Markdown Continuity & Execution Loop
@@ -111,10 +111,10 @@ make bench-report                                         # Latest benchmark rep
 4. Run the 5-check preflight before executing a task:
    - Worksheet completeness (`verification_strategy`, `files`/`tests`, `Acceptance Criteria`).
    - Target path existence in the repository.
-   - Dependency readiness (every `depends_on` task is `completed` or `closed`).
+   - Dependency readiness (every `depends_on` task has `state: completed`; task `state` enum is `pending | in_progress | blocked | completed | deferred`).
    - Checklist and frontmatter agreement between `tasks/<id>-<slug>.md` and `spec.md`.
    - Worktree cleanliness (preserve unrelated changes; never revert user edits).
-5. Select an explicit task ID, the sole `in_progress` task, or the first ready (`pending` / `open`) task.
+5. Select an explicit task ID, the sole `in_progress` task, or the first ready (`pending`) task.
 6. Read the complete worksheet, direct dependency notes, and relevant nested knowledge chapters (`architecture/`, `domains/`, `patterns/`, `testing/`, `gotchas/`, `decisions/`) plus matching `.agents/skills/<domain>/SKILL.md`.
 
 Hooks and prior conversation are routing hints, not authority. Task worksheet frontmatter (`tasks/<id>-<slug>.md`) and `spec.md` checklists (`[ ]`, `[~]`, `[x] [<sha>]`, `[!]`, `[-]`), backed by Git commit SHAs, are the single authority for task state.
@@ -133,7 +133,7 @@ Write state changes directly to Markdown in canonical task-first, spec-last orde
 | `sync` | Reconcile `spec.md` checklist markers from task-file frontmatter via `/flow:learn sync`. |
 | `learn` | Assess drift, refresh cross-session context, sharpen the domain glossary, evaluate ADRs, resynthesize OKF chapters, and align `.agents/skills/` and `.agents/agents/` via `/flow:learn`. |
 | `complete` | Move an `active` spec whose tasks are all `completed` or `deferred` (`[-]`) to `completed` (recording `last_reviewed_commit`) after two-axis review (`@code-reviewer` + `@quality-reviewer`). |
-| `archive` | Elevate durable knowledge into nested OKF chapters (`knowledge/`), log the summary in `log.md`, and remove the completed spec directory (`specs/` returns to lazy `.gitkeep`). |
+| `archive` | Elevate durable knowledge into nested OKF chapters (`knowledge/`), log the summary in `log.md`, and remove the completed spec directory (`specs/` is lazy and removed when zero active specs remain). |
 
 ## Verification Strategies
 
@@ -155,7 +155,7 @@ Never manufacture a failing unit test for documentation, configuration, generate
 3. Obtain the strategy's required initial evidence, implement the vertical slice (production code + canonical module tests), and obtain focused green evidence.
 4. Run relevant aggregate gates (`make lint-all`, `make rs-test`, `make py-test`, `make ts-test`) and confirm `git diff --check` is clean.
 5. Stage exact task-owned paths only and create one signed conventional commit (`<type>(<scope>): <description>`) on the feature/fix branch.
-6. Close the task (`state: closed`, `commit_sha`, checked acceptance criteria) and update `spec.md` (`[x] [<sha>]`) in the same turn.
+6. Complete the task (`state: completed`, `commit`, `last_verified_commit`, checked acceptance criteria) and update `spec.md` (`[x] [<sha>]`) in the same turn.
 7. During `/flow:archive`, synthesize reusable learnings across the 5 OKF dimensions (`architecture/`, `domains/`, `patterns/`, `testing/`, `gotchas/`, plus `decisions/` when an ADR threshold is met), prepend the archive summary to `.agents/bundles/log.md`, and remove the completed spec directory.
 
 ## Low-Signal Test & Gate Policy
@@ -181,17 +181,7 @@ Operational project skills live only at `.agents/skills/` and subagents at `.age
 
 ## Quality Gates
 
-Before close or checkpoint, require:
-
-- worksheet acceptance criteria satisfied with fresh evidence;
-- selected verification strategy followed, including isolated gate proof when required;
-- focused and relevant aggregate commands green (`make lint-all`, `make rs-test`, `make py-test`, `make ts-test`);
-- repository-defined lint, type, build, docs, coverage, security, and performance gates run when applicable;
-- no accidental public API, typing, performance, import-boundary, or behavior change;
-- no unrelated paths staged and `git diff --check` clean;
-- discoveries and verification limitations recorded.
-
-Coverage follows repository and worksheet requirements. Compare affected lines/branches when deleting behavioral tests; there is no universal percentage or one-test-file-per-module mandate.
+Before completing a task or checkpoint, verify that all worksheet acceptance criteria pass with fresh evidence, the selected verification strategy (including isolated gate proof when required) was followed, focused and aggregate gates (`make lint-all`, `make rs-test`, `make py-test`, `make ts-test`, plus docs/security/performance gates when applicable) exit `0`, public API/typing/performance/import boundaries remain intact, `git diff --check` is clean with no unrelated paths staged, and discoveries or verification limits are recorded. Coverage follows repository and worksheet requirements; compare affected lines and branches when deleting behavioral tests.
 
 Provenance sources: [^src-cargo-toml], [^src-package-json].
 

@@ -1,24 +1,23 @@
 ---
 type: Task
-id: native-postgres-driver:t24
-title: Expose async physical sessions with cancellation-safe publication
+id: "native-postgres-driver:t24"
+title: "Expose async physical sessions with cancellation-safe publication"
+description: "Expose async physical sessions with cancellation-safe publication for the standalone vertebra-postgres native driver."
+status: stable
 state: pending
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
-- native-postgres-driver:t23
+  - "native-postgres-driver:t23"
 files:
-- src/rs/vertebra-postgres/src/lib.rs
-- src/rs/vertebra-postgres/src/async_client.rs
-- src/py/vertebra/_postgres.pyi
-- src/py/tests/unit/db/test_postgres_driver.py
+  - src/rs/vertebra-postgres/src/lib.rs
+  - src/rs/vertebra-postgres/src/async_client.rs
+  - src/py/vertebra/_postgres.pyi
+  - src/py/tests/unit/db/test_postgres_driver.py
 tests:
-- src/py/tests/unit/db/test_postgres_driver.py::test_native_async_lifecycle
-- src/py/tests/unit/db/test_postgres_driver.py::test_native_async_cancel_connect
-- src/py/tests/unit/db/test_postgres_driver.py::test_native_async_cancel_queued_completion
-- src/py/tests/unit/db/test_postgres_driver.py::test_native_async_setup_failure_closes
+  - src/py/tests/unit/db/test_postgres_driver.py
 plan_revision: 2
-plan_commit: "7657e8b7c2c96bdda6821aec70a2b603f438a127"
+plan_commit: cdb978d3
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -28,15 +27,13 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: '2026-11-05T18:25:07Z'
-updated_at: '2026-11-06T06:30:00Z'
+created_at: "2026-11-05T18:25:07Z"
+updated_at: "2026-11-07T04:15:00Z"
 commit: null
 tags:
-- postgres
-- connection
-- native
-requirements:
-- R7
+  - postgres
+  - connection
+  - native
 ---
 
 # Expose async physical sessions with cancellation-safe publication

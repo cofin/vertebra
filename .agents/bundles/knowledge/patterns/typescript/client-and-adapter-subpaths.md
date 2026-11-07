@@ -3,14 +3,18 @@ type: Pattern
 title: "Client SDK Root Exports, Subpaths & Build Entries"
 description: "Rules for the @vertebra/client root entry, package.json subpath exports, tsup build entries, optional peers, and codegen parity."
 status: stable
-tags: [patterns, typescript, client-sdk, packaging]
+tags:
+  - patterns
+  - typescript
+  - client-sdk
+  - packaging
 generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
-  - by: agent:flow-archive
-    at: "2026-11-06T23:48:00Z"
-    commit: d4a5d1c1aef56ee238534f7e3e1d8b1fdbdf3e50
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: cdb978d3
   - by: agent:flow-setup
     at: "2026-11-04T04:33:00Z"
     commit: f741701
@@ -55,99 +59,37 @@ sources:
 
 # Client SDK Root Exports, Subpaths & Build Entries
 
+<!-- truth: start -->
+- `@vertebra/client` is an ESM-only package (`"type": "module"`, zero runtime `dependencies`) shipped in the `vertebra-core` Python wheel under `src/py/vertebra/server/_js/bundle/`.
+- `src/index.ts` re-exports `HttpClient`, `SseClient`, `WebSocketClient`, `SessionStore`, `LiveStateClient`, `HotReloadClient`, `routeUrl`, `wsUrl`, `registerWebMCPTools`, `ArrowStreamClient`, `WASMClient`, `TraceContext`, `ApexRegion`, and `McpClient`/`A2aClient`.
+- Subpath exports (`./react`, `./vue`, `./svelte`, `./angular`, `./htmx`, `./vite`, `./store`, `./hmr`, `./live`, `./apex`, `./telemetry`, `./wasm`, `./arrow`, `./router`, `./webmcp`, and `./agent`) stay in lockstep across `package.json` `exports` and `tsup.config.ts` `entry`.
+- Peer framework imports (`react`, `vue`, `svelte`, `@angular/core`, `vite`) live strictly in their subpath modules and are marked `external` in `tsup.config.ts`.
+- Route types and `fnv1aStateId` (64-bit) / `fnv1aFieldId` (32-bit) stay synchronized with `src/py/vertebra/build/codegen/` and `LiveState`.
+<!-- truth: end -->
+
 [`@vertebra/client`](../../../../../src/ts/vertebra-client/package.json)[^src-package-json] is an ESM-only package (`"type": "module"`) with no runtime `dependencies`. Optional peers are `react ^19.0.0`, `vue ^3.5.0`, `@angular/core ^22.0.0`, and `vite ^8.0.0`; Svelte is a devDependency only and HTMX is not a dependency.
 
 ## Root entry (`src/index.ts`)
 
 The root entry re-exports the core client and every feature module. Framework adapters are subpath-only.
 
-<!-- truth: start -->
-- **Package**: `@vertebra/client` (`"type": "module"`, zero runtime `dependencies`, shipped in the `vertebra-core` Python wheel under `src/py/vertebra/server/_js/bundle/`).
-- **Root Entry (`src/index.ts`)**: Re-exports `HttpClient`, `SseClient`, `WebSocketClient`, `SessionStore`, `LiveStateClient`, `HotReloadClient`, `routeUrl`, `wsUrl`, `registerWebMCPTools`, `ArrowStreamClient`, `WASMClient`, `TraceContext`, `ApexRegion`, and `McpClient`/`A2aClient`.
-- **Subpath Exports**: `./react`, `./vue`, `./svelte`, `./angular`, `./htmx`, `./vite`, `./store`, `./hmr`, `./live`, `./apex`, `./telemetry`, `./wasm`, `./arrow`, `./router`, `./webmcp`, and `./agent` (kept in lockstep across `package.json` `exports` and `tsup.config.ts` `entry`).
-- **Framework Isolation**: Peer framework imports (`react`, `vue`, `svelte`, `@angular/core`, `vite`) live strictly in their subpath modules and are marked `external` in `tsup.config.ts`.
-- **Codegen & Hash Parity**: Route types and `fnv1aStateId` (64-bit) / `fnv1aFieldId` (32-bit) stay synchronized with `src/py/vertebra/build/codegen/` and `LiveState`.
-<!-- truth: end -->
-
 ```typescript
-export {
-  A2aClient,
-  type A2aClientOptions,
-  AgentStreamClient,
-  type AgentStreamClientOptions,
-  encodeMcpHeaderValue,
-  MCP_PROTOCOL_VERSION,
-  McpClient,
-  type McpClientOptions,
-  type WorkflowLiveStatePayload,
-  WorkflowLiveSubscriber,
-} from "./agent/index";
-export {
-  type ApexGlobalNamespace,
-  type ApexItemHandle,
-  type ApexOfflineMutationEntry,
-  type ApexOfflineOperation,
-  ApexOfflineOutbox,
-  ApexRegion,
-  type ApexRegionBridgeOptions,
-  type IslandDescriptor,
-} from "./apex/index";
-export {
-  ARROW_CONTINUATION_MARKER,
-  ARROW_FILE_MAGIC,
-  ARROW_STREAM_MIME,
-  ArrowStreamClient,
-  type ArrowStreamOptions,
-} from "./arrow";
+export { A2aClient, type A2aClientOptions, AgentStreamClient, type AgentStreamClientOptions, encodeMcpHeaderValue, MCP_PROTOCOL_VERSION, McpClient, type McpClientOptions, type WorkflowLiveStatePayload, WorkflowLiveSubscriber } from "./agent/index";
+export { type ApexGlobalNamespace, type ApexItemHandle, type ApexOfflineMutationEntry, type ApexOfflineOperation, ApexOfflineOutbox, ApexRegion, type ApexRegionBridgeOptions, type IslandDescriptor } from "./apex/index";
+export { ARROW_CONTINUATION_MARKER, ARROW_FILE_MAGIC, ARROW_STREAM_MIME, ArrowStreamClient, type ArrowStreamOptions } from "./arrow";
 export { HttpClient } from "./client/client";
 export * from "./client/errors";
 export { computeBackoffDelay } from "./client/retry";
 export type { ClientConfig, RetryConfig, RouteResponse } from "./client/types";
 export { HotReloadClient, initHotReload, type ServerMessage } from "./hmr/index";
-export {
-  fnv1aFieldId,
-  fnv1aStateId,
-  HybridLogicalClock,
-  LiveStateClient,
-  type LiveStateListener,
-  OfflineDeltaQueue,
-  type StateDeltaMessage,
-  StateOpcode,
-  type StateOpcodeValue,
-} from "./live/index";
-export {
-  interpolateRoutePath,
-  type RouteUrlOptions,
-  routeUrl,
-  wsUrl,
-} from "./router";
-export {
-  SseClient,
-  type SseClientOptions,
-  type SseEventHandler,
-  type SseMessageMeta,
-} from "./sse";
+export { fnv1aFieldId, fnv1aStateId, HybridLogicalClock, LiveStateClient, type LiveStateListener, OfflineDeltaQueue, type StateDeltaMessage, StateOpcode, type StateOpcodeValue } from "./live/index";
+export { interpolateRoutePath, type RouteUrlOptions, routeUrl, wsUrl } from "./router";
+export { SseClient, type SseClientOptions, type SseEventHandler, type SseMessageMeta } from "./sse";
 export { SessionStore, store } from "./store/index";
 export { TraceContext } from "./telemetry";
-export {
-  WASM_MAGIC_BYTES,
-  WASMClient,
-  type WASMClientOptions,
-} from "./wasm";
-export {
-  type BrowserModelContext,
-  type BrowserModelContextTool,
-  type RegisterWebMCPOptions,
-  registerWebMCPTools,
-  type WebMCPManifest,
-  type WebMCPRegistrationHandle,
-  type WebMCPToolDescriptor,
-} from "./webmcp";
-export {
-  type PubSubWireFrame,
-  WebSocketClient,
-  type WebSocketClientOptions,
-} from "./websocket";
+export { WASM_MAGIC_BYTES, WASMClient, type WASMClientOptions } from "./wasm";
+export { type BrowserModelContext, type BrowserModelContextTool, type RegisterWebMCPOptions, registerWebMCPTools, type WebMCPManifest, type WebMCPRegistrationHandle, type WebMCPToolDescriptor } from "./webmcp";
+export { type PubSubWireFrame, WebSocketClient, type WebSocketClientOptions } from "./websocket";
 ```
 
 `SseClient`, `WebSocketClient`, `HotReloadClient`, `initHotReload`, `routeUrl`, `wsUrl`, and `registerWebMCPTools` are exported from the root entry.

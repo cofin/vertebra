@@ -1,29 +1,27 @@
 ---
 type: Guide
-title: Native Pipelines, Change Feeds, Tenant Predicates & DataFusion
-description: Native pipeline capabilities, engine-neutral change feeds, adapter-owned
-  PostgreSQL notifications and Spanner change streams, tenant predicates, and the
-  DataFusionEngine table catalog.
+title: "Native Pipelines, Change Feeds, Tenant Predicates & DataFusion"
+description: "Native pipeline capabilities, engine-neutral change feeds, adapter-owned PostgreSQL notifications and Spanner change streams, tenant predicates, and the DataFusionEngine table catalog."
 status: stable
 tags:
-- domains
-- database
-- postgres
-- cdc
-- tenancy
+  - domains
+  - database
+  - postgres
+  - cdc
+  - tenancy
 generated:
   by: flow/0.26.0
-  at: '2026-11-04T04:33:00Z'
+  at: "2026-11-04T04:33:00Z"
 verified:
-- by: agent:flow-review
-  at: '2026-11-06T06:10:00Z'
-  commit: 7657e8b7c2c96bdda6821aec70a2b603f438a127
-- by: agent:codex
-  at: '2026-11-05T06:09:26Z'
-  commit: 80ff8a65e43a2bcef9e48a7763e89a7352118232
-- by: agent:flow-setup
-  at: '2026-11-04T04:33:00Z'
-  commit: f741701
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: cdb978d3
+  - by: agent:codex
+    at: "2026-11-05T06:09:26Z"
+    commit: 80ff8a65e43a2bcef9e48a7763e89a7352118232
+  - by: agent:flow-setup
+    at: "2026-11-04T04:33:00Z"
+    commit: f741701
 sources:
 - id: src-postgres-tenant-core
   resource: src/py/vertebra/db/adapters/postgres/core.py
@@ -123,11 +121,11 @@ Single-operation stacks, non-pipeline drivers, stacks containing `execute_many`,
 | [`PostgreSQLCore`](../../../../../src/py/vertebra/db/adapters/postgres/core.py)[^src-postgres-tenant-core] | `build_session_guc_sql` binds the setting name, tenant string, and local flag in `SELECT set_config($1, $2, $3)`. `build_tenant_predicate_sql` renders `$N` with an optional PostgreSQL `::<type>` cast. |
 | [`OracleCore`](../../../../../src/py/vertebra/db/adapters/oracle/core.py)[^src-oracle-tenant-core] | `build_session_context_sql` extracts the final segment of `setting_name`, validates namespace and attribute, and returns `BEGIN DBMS_SESSION.SET_CONTEXT(:namespace, :attribute, :value); END;` with named binds. |
 
-`BaseSyncDriver.apply_tenant_predicate` and its async counterpart refuse unsupported engines with native `NotSupportedError`. PostgreSQL adapters compile through their existing statement profiles: sync uses psycopg `%s`, async uses asyncpg `$N`; typed SQLSpec parameters are unwrapped before native transport. Oracle adapters bind the context setter and return a named predicate. Original setter exceptions propagate unchanged.
+`BaseSyncDriver.apply_tenant_predicate` and its async counterpart refuse unsupported engines with native `NotSupportedError`. PostgreSQL adapters compile through their existing statement profiles: sync uses psycopg `%s`, async uses asyncpg `$N`; typed SQLSpec parameters are unwrapped before native transport. Oracle adapters bind the context setter and return a named predicate, propagating original setter exceptions unchanged.[^src-tenant-enterprise-tests]
 
-BigQuery and Spanner's eight SQLSpec config/driver constructors reject a non-None `tenant_predicate` as their first executable statement, before base initialization, core access, config resolution, broker allocation, or native side effects. Unsupported isolation sessions cannot be constructed. Unconfigured sessions retain query, script, Arrow, batch, and snapshot behavior; dead predicate `.apply` dispatch is removed.
+BigQuery and Spanner's eight SQLSpec config/driver constructors reject a non-None `tenant_predicate` as their first executable statement, before base initialization, core access, config resolution, broker allocation, or native side effects. Unsupported isolation sessions cannot be constructed; unconfigured sessions retain query, script, Arrow, batch, and snapshot behavior.[^src-tenant-enterprise-tests]
 
-The current Oracle driver records context values in its SQLite stand-in. This verifies helper and emulation behavior only. Oracle requires a trusted package associated with `CREATE CONTEXT` in the call stack for live `DBMS_SESSION.SET_CONTEXT`; trusted-package provisioning, session reset, and live Oracle acceptance remain native Oracle driver work. No helper provisions RLS or VPD policies. [Oracle DBMS_SESSION reference](https://docs.oracle.com/en/database/oracle/oracle-database/26/arpls/DBMS_SESSION.html).
+The Python Oracle adapter records context values in its in-process SQLite stand-in. Live Oracle `DBMS_SESSION.SET_CONTEXT` execution requires a trusted package associated with `CREATE CONTEXT` in the call stack, and no helper provisions RLS or VPD policies ([Oracle DBMS_SESSION reference](https://docs.oracle.com/en/database/oracle/oracle-database/26/arpls/DBMS_SESSION.html)).
 
 ### Generic Database Engine Purity
 
@@ -177,21 +175,14 @@ Provenance sources: [^src-tests-unit-db-test-pg-dataplane-and-datafusion-py], [^
 [^src-db-registry-py]: `src/py/vertebra/db/registry.py` — Python implementation module (src/py/vertebra/db/registry.py).
 [^src-db-driver-capabilities-py]: `src/py/vertebra/db/driver/capabilities.py` — Python implementation module (src/py/vertebra/db/driver/capabilities.py).
 [^src-tests-unit-db-test-pg-dataplane-and-datafusion-py]: `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py` — Python implementation module (src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py).
-
 [^src-db-postgres-notify-py]: `src/py/vertebra/db/adapters/postgres/notify.py` — PostgreSQL notification transport and logical message builders.
 [^src-extensions-sqlspec-events-py]: `src/py/vertebra/extensions/sqlspec/events.py` — Engine-neutral SQLSpec change-feed event backends.
 [^src-tests-unit-db-test-pg-gateway-py]: `src/py/tests/unit/db/test_pg_gateway.py` — CDC spill bounds, key normalization, and storage error coverage.
 [^src-tests-unit-extensions-test-data-storage-integrations-py]: `src/py/tests/unit/extensions/test_data_storage_integrations.py` — SQLSpec event backend lifecycle and spill hydration coverage.
-
 [^src-db-spanner-change-stream-py]: `src/py/vertebra/db/adapters/spanner/change_stream.py` — Spanner readers, constructor-bound stream defaults, record parsing, and child-partition scheduling.
-
 [^src-extensions-sqlspec-bigquery-py]: `src/py/vertebra/extensions/sqlspec/bigquery.py` — BigQuery SQLSpec native statement defaults and session execution.
 [^src-extensions-sqlspec-spanner-py]: `src/py/vertebra/extensions/sqlspec/spanner.py` — Spanner SQLSpec parser and native parameter defaults.
-
 [^src-postgres-tenant-core]: `src/py/vertebra/db/adapters/postgres/core.py` — PostgreSQL tenant and session SQL builders.
-
 [^src-oracle-tenant-core]: `src/py/vertebra/db/adapters/oracle/core.py` — Oracle context SQL builder.
-
 [^src-tenant-native-tests]: `src/py/tests/unit/db/test_native_db_drivers.py` — Generic engine-purity positive and negative probes.
-
 [^src-tenant-enterprise-tests]: `src/py/tests/unit/db/test_enterprise_olap_drivers.py` — Session bind and failure identity acceptance.

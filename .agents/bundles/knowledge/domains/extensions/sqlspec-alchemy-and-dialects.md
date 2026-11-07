@@ -1,32 +1,29 @@
 ---
 type: Guide
-title: SQLSpec, Advanced Alchemy & SQLAlchemy Dialect Extensions
-description: 'The `vertebra.extensions.sqlspec`, `vertebra.extensions.alchemy`, and
-  `vertebra.extensions.sqlalchemy` packages: Tier-1 native SHM adapters (`SyncAdapterConfig`,
-  `AsyncAdapterConfig`), Tier-2 universal SHM broker proxy (`ProxySyncConfig`, `ProxyAsyncConfig`),
-  real `+vtb` dialect implementations, column types, and CDC event backends.'
+title: "SQLSpec, Advanced Alchemy & SQLAlchemy Dialect Extensions"
+description: "The `vertebra.extensions.sqlspec`, `vertebra.extensions.alchemy`, and `vertebra.extensions.sqlalchemy` packages providing native SHM adapters (`SyncAdapterConfig`, `AsyncAdapterConfig`), universal SHM broker proxies (`ProxySyncConfig`, `ProxyAsyncConfig`), `+vtb` dialect implementations, column types, and CDC event backends."
 status: stable
 tags:
-- domains
-- extensions
-- sqlspec
-- sqlalchemy
-- alembic
-- shm
-- arrow
+  - domains
+  - extensions
+  - sqlspec
+  - sqlalchemy
+  - alembic
+  - shm
+  - arrow
 generated:
   by: flow/0.26.0
-  at: '2026-11-04T04:33:00Z'
+  at: "2026-11-04T04:33:00Z"
 verified:
-- by: agent:flow-review
-  at: '2026-11-06T06:10:00Z'
-  commit: 7657e8b7c2c96bdda6821aec70a2b603f438a127
-- by: agent:codex
-  at: '2026-11-05T06:09:26Z'
-  commit: 80ff8a65e43a2bcef9e48a7763e89a7352118232
-- by: agent:flow-setup
-  at: '2026-11-04T04:33:00Z'
-  commit: f741701
+  - by: agent:flow-setup
+    at: "2026-11-07T03:55:00Z"
+    commit: cdb978d3
+  - by: agent:codex
+    at: "2026-11-05T06:09:26Z"
+    commit: 80ff8a65e43a2bcef9e48a7763e89a7352118232
+  - by: agent:flow-setup
+    at: "2026-11-04T04:33:00Z"
+    commit: f741701
 sources:
 - id: src-extensions-sqlspec-init-py
   resource: src/py/vertebra/extensions/sqlspec/__init__.py
@@ -97,7 +94,7 @@ Shared plugin behavior:
 | `create_sqlspec_plugin(config, *, broker=None, store=None)` | `sqlspec/plugin.py` | Thin factory returning real `sqlspec.extensions.litestar.SQLSpecPlugin`. Injects Vertebra `LeaseBroker` and `ObjectStoreBackend` into the plugin configuration without shadow wrapper classes. |
 | `create_alchemy_plugin(config, *, broker=None, store=None)` | `alchemy/plugin.py` | Thin factory returning real `advanced_alchemy.extensions.litestar.SQLAlchemyPlugin`. Injects Vertebra `LeaseBroker` and `ObjectStoreBackend` into the plugin configuration without shadow wrapper classes. |
 | `create_async_alchemy_config` / `create_sync_alchemy_config` / `normalize_alchemy_url` | `alchemy/plugin.py` | Config helpers returning real `advanced_alchemy.config.SQLAlchemyAsyncConfig` / `SQLAlchemySyncConfig`, normalizing `bigquery://`, `spanner://`, and `spangres://` URLs to their `+vtb` SQLAlchemy dialects with `NullPool` when a `LeaseBroker` is attached. |
-| [`SyncAdapterConfig` / `AsyncAdapterConfig`](../../../../../src/py/vertebra/extensions/sqlspec/adapters.py)[^src-extensions-sqlspec-adapters-py] | `sqlspec/adapters.py` | **Tier-1 native SHM adapters**: concrete subclasses for PostgreSQL, MySQL, SQLite, Oracle, MSSQL, DuckDB, Google BigQuery, and Google Cloud Spanner (`PostgreSQLSyncConfig`, `BigQuerySyncConfig`, `BigQueryAsyncConfig`, `SpannerSyncConfig`, `SpannerAsyncConfig`, etc.) backed directly by `vertebra.db` drivers, `LeaseBroker`, `StatementCache`, `ArrowCursor`, and `ObjectStoreBackend` (`load_from_object_store*`, `export_to_object_store*`, `create_object_table*`, `list_object_table_refs*`, `read_arrow_from_object_store*`, `write_arrow_to_object_store*`). `BaseSyncDriver.apply_tenant_predicate` and `BaseAsyncDriver.apply_tenant_predicate` raise native `NotSupportedError`. PostgreSQL and Oracle subclasses delegate to their engine cores and propagate original setter failures; PostgreSQL prepares sync `%s` and async `$N` binds through the configured SQLSpec profile and unwraps typed values. Oracle context acceptance currently covers the SQLite stand-in, with trusted-package and live-session acceptance deferred to the native Oracle driver. Resolves native drivers via `DatabaseRegistry.default().get_shared_sync_driver` / `get_shared_async_driver` (`share_pool=True` default when `driver` is omitted; explicit `driver=` instances are preserved verbatim without pool sharing) so stacked Litestar, Django, and SQLAlchemy apps targeting the same database endpoint share one underlying connection pool, `SyncCloudSQLDialer` / `AsyncCloudSQLDialer` / `SyncAlloyDBDialer` / `AsyncAlloyDBDialer`, and process-wide `LeaseBroker`. |
+| [`SyncAdapterConfig` / `AsyncAdapterConfig`](../../../../../src/py/vertebra/extensions/sqlspec/adapters.py)[^src-extensions-sqlspec-adapters-py] | `sqlspec/adapters.py` | **Tier-1 native SHM adapters**: concrete subclasses for PostgreSQL, MySQL, SQLite, Oracle, MSSQL, DuckDB, Google BigQuery, and Google Cloud Spanner (`PostgreSQLSyncConfig`, `BigQuerySyncConfig`, `BigQueryAsyncConfig`, `SpannerSyncConfig`, `SpannerAsyncConfig`, etc.) backed directly by `vertebra.db` drivers, `LeaseBroker`, `StatementCache`, `ArrowCursor`, and `ObjectStoreBackend` (`load_from_object_store*`, `export_to_object_store*`, `create_object_table*`, `list_object_table_refs*`, `read_arrow_from_object_store*`, `write_arrow_to_object_store*`). `BaseSyncDriver.apply_tenant_predicate` and `BaseAsyncDriver.apply_tenant_predicate` raise native `NotSupportedError`. `PostgreSQLSyncDriver` and `PostgreSQLAsyncDriver` prepare sync `%s` and async `$N` tenant session binds through the configured SQLSpec profile and unwrap typed values, while `OracleSyncDriver` and `OracleAsyncDriver` execute `OracleCore.build_session_context_sql` and return `predicate.to_sql_fragment(":tenant_id")`. Resolves native drivers via `DatabaseRegistry.default().get_shared_sync_driver` / `get_shared_async_driver` (`share_pool=True` default when `driver` is omitted; explicit `driver=` instances are preserved verbatim without pool sharing) so stacked Litestar, Django, and SQLAlchemy apps targeting the same database endpoint share one underlying connection pool, `SyncCloudSQLDialer` / `AsyncCloudSQLDialer` / `SyncAlloyDBDialer` / `AsyncAlloyDBDialer`, and process-wide `LeaseBroker`. |
 | [`ProxySyncConfig` / `ProxyAsyncConfig`](../../../../../src/py/vertebra/extensions/sqlspec/proxy.py)[^src-extensions-sqlspec-proxy-py] | `sqlspec/proxy.py` | **Tier-2 universal SHM broker proxy**: wraps *any* existing SQLSpec or Advanced Alchemy driver (`asyncpg`, `psycopg`, `oracledb`, `duckdb`, `adbc`, etc.) with `LeaseBroker` slot acquisition, `StatementCache` plan lookup, and zero-copy `ShmRegion` Arrow IPC transfer. |
 | [`ChangeFeedSyncEventBackend` / `ChangeFeedAsyncEventBackend`](../../../../../src/py/vertebra/extensions/sqlspec/events.py)[^src-extensions-sqlspec-events-py] | `sqlspec/events.py` | SQLSpec event backends bridging database transactions to Vertebra CDC `ChangeFeed`. |
 

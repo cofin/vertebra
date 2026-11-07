@@ -22,7 +22,7 @@ Shared checklist with stable IDs across all 8 review domains. Every rule require
 ## HTTP: HTTP ingress
 
 - **HTTP-01**: Request body and multipart limits are enforced before buffering; streaming bodies are bounded per chunk and in total. Verify: `payload.rs`, `multipart.rs`, and `streaming_body_tests.rs`.
-- **HTTP-02**: Every bounded queue/ring on ingress has explicit full behavior (shed with `503` + `Retry-After`, or await a permit); no `unbounded_channel` on the request path. Verify: `backpressure.rs`, `collector.rs`, and `dispatcher/`.
+- **HTTP-02**: Every bounded queue/ring on ingress has explicit full behavior (shed with `503` + `Retry-After`, or await a permit); no `unbounded_channel` on the request path. Verify: `backpressure.rs`, `batcher.rs`, and `dispatcher/`.
 - **HTTP-03**: Correlation slots (`InFlightRequests`) are freed on client disconnect, timeout, worker death, and shutdown. Verify: `correlation.rs` exit paths; test that drops client connection mid-request.
 - **HTTP-04**: h2/h2c/h3 honor protocol flow control and settings; h2c prior-knowledge detection matches the exact connection preface; `Upgrade: h2c` only when enabled. Verify: `h2c.rs`, `http3.rs`, and `h2c_and_mtls_tests.rs`.
 - **HTTP-05**: gRPC framing: 5-byte prefix (flag byte + big-endian `u32` length), length capped by max message size before allocation, `grpc-status`/`grpc-message` trailers on every outcome including errors. Verify: `grpc.rs` and `grpc_wire_tests.rs`.
@@ -30,22 +30,22 @@ Shared checklist with stable IDs across all 8 review domains. Every rule require
 - **HTTP-07**: Secrets: token comparisons are constant-time (`profile.rs`); access logs never emit authorization headers, cookies, or query secrets. Verify: `access_log.rs`.
 - **HTTP-08**: CORS regex origins are anchored; preflight validates method and requested headers; responses set `Vary: Origin`. Verify: `cors.rs`.
 - **HTTP-09**: Compression skips already-compressed types, tiny bodies, `q=0` encodings, and SSE unless flushed per event. Verify: `compression.rs`.
-- **HTTP-10**: Route normalization and FNV-1a handler ids stay identical between `vertebra-http/src/router.rs` and `vertebra/framework/_router.py`; matchit 0.9 `{name}`/`{*rest}` syntax via `normalize_typed_path`. Verify: paired tests on both sides.
+- **HTTP-10**: Route normalization and FNV-1a handler ids stay identical between `vertebra-http/src/routing.rs` and `vertebra/framework/_router.py`; matchit 0.9 `{name}`/`{*rest}` syntax via `normalize_typed_path`. Verify: paired tests on both sides.
 - **HTTP-11**: SSE/WebSocket/pubsub: per-subscriber buffers bounded, slow consumers evicted or dropped by policy, heartbeats configured, graceful shutdown drains. Verify: `sse.rs`, `ws_mount.rs`, and `pubsub.rs`.
-- **HTTP-12**: Feature-gated modules compile alone and together (`tls`, `compression`, `http3`). Verify: `cargo check -p vertebra-http --no-default-features --features <f>`.
+- **HTTP-12**: Feature-gated modules compile alone and together (`tls`, `compression`, `http3`). Verify: `cargo check --manifest-path src/rs/Cargo.toml -p vertebra-http --no-default-features --features <f>`.
 
 ## FFI: PyO3 bridge
 
 - **FFI-01**: Every `#[pymodule]` declares `gil_used = false`. Verify: `rg '#\[pymodule' src/rs`.
 - **FFI-02**: Blocking waits, bulk copies, file I/O, subprocess waits, Oxc builds, and QuickJS renders run inside `py.detach(...)`. Verify: `get_batch`, `submit_*`, `Bundler::build`, `SsrPool::render`, and RSGI file I/O.
 - **FFI-03**: No `Python<'_>`, `Bound`, or borrowed Python data crosses into a `py.detach` closure; no `unsafe impl Send/Sync` added to bypass that. Verify: closures and `unsafe impl`.
-- **FFI-04**: Zero-copy views (`PyBuffer`, `body_view`, memoryviews over SHM) never outlive the slot or owner; views over released slots are invalidated or copied. Verify: `request.rs`, `batch.rs`, and WSGI input.
+- **FFI-04**: Zero-copy views (`PyBuffer`, `body_view`, memoryviews over SHM) never outlive the slot or owner; views over released slots are invalidated or copied. Verify: `request.rs`, `transport.rs`, `lib.rs`, and `wsgi/input.rs`.
 - **FFI-05**: Free-threaded safety: `#[pyclass]` with mutable state uses `frozen` + atomics/`Mutex`, never relies on the GIL for exclusion; no `static mut`; `OnceLock`/`PyOnceLock` used correctly under 3.14t. Verify: struct definitions in `vertebra-py/src`.
 - **FFI-06**: No `unwrap`/`expect` on caller-controlled data in `#[pyfunction]`/`#[pymethods]`; errors map to typed `PyErr`. Verify: grep `unwrap()` in `vertebra-py/src`.
 - **FFI-07**: Long-lived `Py<T>` held in Rust structs have a defined drop path; `clone_ref` is deliberate; no reference leak in loops. Verify: `sys.getrefcount` assertions in tests.
-- **FFI-08**: Hot attribute/key names use `intern!`; no per-call `PyString::new` inside per-request loops. Verify: `scope.rs` and `request.rs`.
-- **FFI-09**: `_vertebra.pyi` matches every added or changed `#[pyfunction]`/`#[pymethods]` signature and return type. Verify: diff Rust signatures vs stub; `uv run mypy src/py/vertebra`.
-- **FFI-10**: Embedding registers `_vertebra` via `pyo3::append_to_inittab!(_vertebra)` before `Python::initialize()`. Verify: `runtime.rs`.
+- **FFI-08**: Hot attribute/key names use `intern!`; no per-call `PyString::new` inside per-request loops. Verify: `asgi.rs`, `rsgi/scope.rs`, and `request.rs`.
+- **FFI-09**: `{_vertebra,_bundler,_storage,_bigquery,_spanner}.pyi` match every added or changed `#[pyfunction]`/`#[pymethods]` signature and return type across all 5 PyO3 extensions. Verify: diff Rust signatures vs stubs; `uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._bigquery vertebra._spanner` and `uv run --no-sync mypy src/py/vertebra`.
+- **FFI-10**: Embedding registers `_vertebra` via `append_to_inittab!(pymodule_init)` (`use _vertebra::pymodule_init`) before Tokio/Python worker initialization. Verify: `src/rs/vertebra-http/src/main.rs`.
 
 ## PY: Python framework and server
 
@@ -75,7 +75,7 @@ Shared checklist with stable IDs across all 8 review domains. Every rule require
 
 ## PERF: Performance
 
-- **PERF-01**: A change on a hot path (rings, dispatch, batching, codec, router, `_native.py`, `_asgi/_runner.py`) includes before/after numbers from `cargo bench -- --save-baseline`/`--baseline` or `make bench` + `make bench-diff` on the same machine. Verify: Criterion benchmark logs.
+- **PERF-01**: A change on a hot path (rings, dispatch, batching, codec, router, `_dispatch.py`, `_fastpath_core.py`, `_asgi/_runner.py`) includes before/after numbers from `cargo bench --manifest-path src/rs/Cargo.toml -- --save-baseline`/`--baseline` or `make bench` + `make bench-diff` on the same machine. Verify: Criterion benchmark logs.
 - **PERF-02**: No new per-request heap allocation (`Vec`, `String`, `Box`, `format!`, Python list/dict churn) where a pool, arena, or reusable buffer exists. Verify: allocations on request loop.
 - **PERF-03**: No added cross-thread wakeup or lock acquisition per request; batch granularity preserved. Verify: futex calls and lock traces.
 - **PERF-04**: No added copy across SHM or FFI (`try_send_with`, `try_recv_with`, `body_view` remain zero-copy). Verify: slice slicing and view lifetimes.
