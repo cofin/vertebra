@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import socket
 import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,6 +20,8 @@ from sqlspec.storage.registry import StorageRegistry as SQLSpecStorageRegistry
 
 import vertebra.extensions.alchemy.storage as alchemy_storage_mod
 import vertebra.extensions.sqlspec.storage as sqlspec_storage_mod
+from vertebra.db._staging import ObjectStoreStaging
+from vertebra.db.adapters.bigquery import AsyncBigQueryDriver, BigQueryConfig, SyncBigQueryDriver
 from vertebra.db.arrow import ArrowCursor
 from vertebra.db.cdc import CDCConfig
 from vertebra.extensions.alchemy.storage import ObjectStoreBackend as AlchemyObjectStoreBackend
@@ -34,6 +37,7 @@ from vertebra.extensions.sqlspec.storage import ObjectStoreBackend as SQLSpecObj
 from vertebra.extensions.starlette.storage import AsyncStorageRegistry, SyncStorageRegistry
 from vertebra.storage import (
     AsyncGcpTokenCache,
+    AsyncObjectStore,
     GCSConfig,
     LocalConfig,
     MemoryConfig,
@@ -849,3 +853,240 @@ async def test_sqlspec_qualified_paths_keep_raw_identity_and_reject_mismatch(tmp
     remote.write_bytes_sync("literal%252F", b"double")
     assert remote.glob_sync("gs://bucket/root/literal%?F") == ["literal%2F"]
     assert await remote.glob_async("gs://bucket/root/literal%25?F") == ["literal%252F"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("operation", ["read", "write"])
+async def test_staging_backend_rejects_r2_before_object_effects(asynchronous: bool, operation: str) -> None:
+    """SQLSpec staging rejects removed qualification before reading or replacing objects."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig())
+    original = ArrowCursor.from_rows([{"id": 1}])
+    replacement = ArrowCursor.from_rows([{"id": 2}])
+    backend.write_arrow_cursor_sync("data.ipc", original, file_format="arrow-ipc")
+    with pytest.raises(ValueError, match="(?i)unsupported.*scheme.*r2"):
+        if asynchronous:
+            if operation == "read":
+                await ObjectStoreStaging.read_cursor_async("r2://bucket/data.ipc", store=backend, format="ipc")
+            else:
+                await ObjectStoreStaging.write_cursor_async(
+                    replacement, destination_uri="r2://bucket/data.ipc", store=backend, format="ipc"
+                )
+        elif operation == "read":
+            ObjectStoreStaging.read_cursor_sync("r2://bucket/data.ipc", store=backend, format="ipc")
+        else:
+            ObjectStoreStaging.write_cursor_sync(
+                replacement, destination_uri="r2://bucket/data.ipc", store=backend, format="ipc"
+            )
+    assert backend.read_arrow_sync("data.ipc", file_format="arrow-ipc").to_pylist() == [{"id": 1}]
+    assert backend.list_objects_sync() == ["data.ipc"]
+
+
+@pytest.mark.anyio
+async def test_staging_preserves_configured_s3_backend_qualification() -> None:
+    """Configured S3 qualification and its mismatch checks survive staging resolution."""
+    backend = SQLSpecObjectStoreBackend("s3://bucket/root", store=SyncObjectStore(MemoryConfig()))
+    cursor = ArrowCursor.from_rows([{"id": 7}])
+    uri = "s3://bucket/root/data.ipc"
+    ObjectStoreStaging.validate_staging_target(backend, uri)
+    ObjectStoreStaging.write_cursor_sync(cursor, destination_uri=uri, store=backend, format="ipc")
+    assert (await ObjectStoreStaging.read_cursor_async(uri, store=backend, format="ipc")).to_pylist() == [{"id": 7}]
+    with pytest.raises(ValueError):
+        ObjectStoreStaging.write_cursor_sync(
+            cursor, destination_uri="s3://other/root/data.ipc", store=backend, format="ipc"
+        )
+    assert backend.list_objects_sync() == ["data.ipc"]
+
+
+@pytest.fixture
+def staging_http_tripwire() -> Iterator[tuple[str, list[str]]]:
+    """Count real connections and requests while refusing unexpected cloud operations."""
+    events: list[str] = []
+
+    class Server(ThreadingHTTPServer):
+        def get_request(self) -> tuple[socket.socket, tuple[str, int]]:
+            connection, address = super().get_request()
+            events.append("connection")
+            return connection, address
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: object) -> None:
+            """Keep the local tripwire silent."""
+
+        def do_POST(self) -> None:
+            """Return a bounded client error without retries or external services."""
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            events.append(self.path)
+            body = b'{"error":{"code":400,"message":"unexpected query","status":"INVALID_ARGUMENT"}}'
+            self.send_response(400)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:
+            """Refuse unexpected native reads through the same local responder."""
+            self.do_POST()
+
+        def do_PUT(self) -> None:
+            """Refuse unexpected native writes through the same local responder."""
+            self.do_POST()
+
+    with Server(("127.0.0.1", 0), Handler) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_port}", events
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+            assert not thread.is_alive()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("operation", ["validate", "read", "write"])
+@pytest.mark.parametrize("uri", ["s3://other/root/data.ipc", "gs://unit/root/data.ipc"])
+async def test_staging_rejects_mismatched_backend_qualification(asynchronous: bool, operation: str, uri: str) -> None:
+    """Invalid scheme or bucket cannot redirect staging to an existing configured key."""
+    native = SyncObjectStore(MemoryConfig())
+    backend = SQLSpecObjectStoreBackend("s3://unit/root", store=native, base_path="scope")
+    original = ArrowCursor.from_rows([{"id": 1}])
+    backend.write_arrow_cursor_sync("data.ipc", original, file_format="arrow-ipc")
+    original_bytes = native.get("scope/data.ipc")
+    with pytest.raises(ValueError, match="does not match"):
+        if operation == "validate":
+            ObjectStoreStaging.validate_staging_target(backend, uri)
+        elif asynchronous:
+            if operation == "read":
+                await ObjectStoreStaging.read_cursor_async(uri, store=backend, format="ipc")
+            else:
+                await ObjectStoreStaging.write_cursor_async(original, destination_uri=uri, store=backend, format="ipc")
+        elif operation == "read":
+            ObjectStoreStaging.read_cursor_sync(uri, store=backend, format="ipc")
+        else:
+            ObjectStoreStaging.write_cursor_sync(original, destination_uri=uri, store=backend, format="ipc")
+    assert native.get("scope/data.ipc") == original_bytes
+    assert [item.path for item in native.list()] == ["scope/data.ipc"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("store_type", [SyncObjectStore, AsyncObjectStore])
+@pytest.mark.parametrize("operation", ["validate", "read", "write"])
+@pytest.mark.parametrize("uri", ["s3://other/data.ipc", "gs://unit/data.ipc"])
+async def test_staging_rejects_mismatched_native_qualification(
+    staging_http_tripwire: tuple[str, list[str]],
+    store_type: type[SyncObjectStore] | type[AsyncObjectStore],
+    operation: str,
+    uri: str,
+) -> None:
+    """A real native S3 store rejects foreign qualification before any HTTP connection."""
+    endpoint, events = staging_http_tripwire
+    store = store_type(
+        S3Config(
+            bucket="unit",
+            endpoint=endpoint,
+            allow_http=True,
+            access_key_id="test-only-key",
+            secret_access_key="test-only-secret",
+        )
+    )
+    cursor = ArrowCursor.from_rows([{"id": 1}])
+    with pytest.raises(ValueError, match="does not match"):
+        if operation == "validate":
+            ObjectStoreStaging.validate_staging_target(store, uri)
+        elif isinstance(store, AsyncObjectStore):
+            if operation == "read":
+                await ObjectStoreStaging.read_cursor_async(uri, store=store, format="ipc")
+            else:
+                await ObjectStoreStaging.write_cursor_async(cursor, destination_uri=uri, store=store, format="ipc")
+        elif operation == "read":
+            ObjectStoreStaging.read_cursor_sync(uri, store=store, format="ipc")
+        else:
+            ObjectStoreStaging.write_cursor_sync(cursor, destination_uri=uri, store=store, format="ipc")
+    assert events == []
+
+
+@pytest.mark.anyio
+async def test_staging_rooted_aliases_preserve_literal_native_keys() -> None:
+    """Matching GS aliases retain configured roots and distinct percent-encoded key text."""
+    native = SyncObjectStore(MemoryConfig())
+    backend = SQLSpecObjectStoreBackend("gs://bucket/root", store=native, base_path="scope")
+    first = ArrowCursor.from_rows([{"id": 1}])
+    second = ArrowCursor.from_rows([{"id": 2}])
+    ObjectStoreStaging.write_cursor_sync(
+        first, destination_uri="gs://bucket/root/literal%2F", store=backend, format="ipc"
+    )
+    await ObjectStoreStaging.write_cursor_async(
+        second, destination_uri="gcs://bucket/root/literal%252F", store=backend, format="ipc"
+    )
+    assert ObjectStoreStaging.read_cursor_sync(
+        "gcs://bucket/root/literal%2F", store=backend, format="ipc"
+    ).to_pylist() == [{"id": 1}]
+    assert (
+        await ObjectStoreStaging.read_cursor_async("gs://bucket/root/literal%252F", store=backend, format="ipc")
+    ).to_pylist() == [{"id": 2}]
+    original = {item.path: native.get(item.path) for item in native.list()}
+    assert sorted(original) == ["scope/literal%252F", "scope/literal%2F"]
+    assert original["scope/literal%2F"] != original["scope/literal%252F"]
+    for uri in ("gs://other/root/literal%2F", "s3://bucket/root/literal%252F"):
+        with pytest.raises(ValueError, match="does not match"):
+            ObjectStoreStaging.write_cursor_sync(first, destination_uri=uri, store=backend, format="ipc")
+        with pytest.raises(ValueError, match="does not match"):
+            await ObjectStoreStaging.read_cursor_async(uri, store=backend, format="ipc")
+    assert {item.path: native.get(item.path) for item in native.list()} == original
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("uri", ["r2://unit/data.ipc", "s3://other/data.ipc", "gs://unit/data.ipc", "relative.ipc"])
+async def test_bigquery_export_rejects_staging_before_http(
+    staging_http_tripwire: tuple[str, list[str]], asynchronous: bool, uri: str
+) -> None:
+    """Real BigQuery exports reject destination qualification before querying their endpoint."""
+    endpoint, events = staging_http_tripwire
+    config = BigQueryConfig(
+        project_id="unit",
+        rest_endpoint=endpoint,
+        storage_endpoint=endpoint,
+        access_token="test-only-token",
+        use_shm_cache=False,
+    )
+    backend = SQLSpecObjectStoreBackend("s3://unit", store=SyncObjectStore(MemoryConfig()))
+    destination_store = "r2://unit" if uri == "relative.ipc" else backend
+    error = "(?i)unsupported.*scheme.*r2" if uri.startswith("r2:") or uri == "relative.ipc" else "does not match"
+    if asynchronous:
+        async_driver = AsyncBigQueryDriver(config)
+        try:
+            with pytest.raises(ValueError, match=error):
+                await async_driver.export_to_object_store("SELECT 1 AS id", uri, store=destination_store)
+        finally:
+            await async_driver.close()
+    else:
+        sync_driver = SyncBigQueryDriver(config)
+        try:
+            with pytest.raises(ValueError, match=error):
+                sync_driver.export_to_object_store("SELECT 1 AS id", uri, store=destination_store)
+        finally:
+            sync_driver.close()
+    assert events == []
+    assert backend.list_objects_sync() == []
+
+
+@pytest.mark.anyio
+async def test_staging_preserves_sqlspec_memory_authority_validation() -> None:
+    """A declared SQLSpec Memory authority still rejects foreign qualification."""
+    native = SyncObjectStore(MemoryConfig())
+    backend = SQLSpecObjectStoreBackend("memory://unit", store=native)
+    original = ArrowCursor.from_rows([{"id": 1}])
+    backend.write_arrow_cursor_sync("key.ipc", original, file_format="arrow-ipc")
+    original_bytes = native.get("key.ipc")
+    with pytest.raises(ValueError, match="does not match"):
+        ObjectStoreStaging.validate_staging_target(backend, "memory://other/key.ipc")
+    with pytest.raises(ValueError, match="does not match"):
+        ObjectStoreStaging.write_cursor_sync(
+            original, destination_uri="memory://other/key.ipc", store=backend, format="ipc"
+        )
+    with pytest.raises(ValueError, match="does not match"):
+        await ObjectStoreStaging.read_cursor_async("memory://other/key.ipc", store=backend, format="ipc")
+    assert native.get("key.ipc") == original_bytes
+    assert [item.path for item in native.list()] == ["key.ipc"]

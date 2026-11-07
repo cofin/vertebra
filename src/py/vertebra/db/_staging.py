@@ -18,7 +18,7 @@ from vertebra.utils.serializers import decode_json, encode_json
 __all__ = ("ObjectStoreStaging",)
 
 _REMOTE_SCHEMES: Final[frozenset[str]] = frozenset(
-    {"gs", "gcs", "s3", "r2", "az", "azure", "abfs", "abfss", "oci", "http", "https"}
+    {"gs", "gcs", "s3", "az", "azure", "abfs", "abfss", "oci", "http", "https"}
 )
 
 
@@ -40,6 +40,7 @@ class ObjectStoreStaging:
     @classmethod
     def validate_staging_target(cls, store: Any | None, uri: str) -> None:
         """Validate `(store, uri)` before executing an upstream database export query."""
+        cls._validate_uri_qualification(store, uri)
         if store is None:
             cls._parse_implicit_uri(uri)
             return
@@ -236,6 +237,12 @@ class ObjectStoreStaging:
         if url.strip().lower().startswith("memory://"):
             raise ImproperConfigurationError("memory:// staging URIs require an explicit ObjectStore instance")
 
+    @staticmethod
+    def _reject_removed_scheme(uri: str) -> None:
+        scheme = urlparse(uri.strip()).scheme.lower()
+        if scheme == "r2":
+            raise ImproperConfigurationError(f"Unsupported staging URI scheme {scheme!r} in {uri!r}")
+
     @classmethod
     def _parse_implicit_uri(cls, uri: str) -> tuple[str, str, str]:
         stripped = uri.strip()
@@ -274,7 +281,35 @@ class ObjectStoreStaging:
         return lowered
 
     @classmethod
+    def _validate_uri_qualification(cls, store: Any | None, uri: str) -> None:
+        cls._reject_removed_scheme(uri)
+        if isinstance(store, str):
+            cls._reject_removed_scheme(store)
+        if "://" not in uri:
+            return
+        store_uri = (
+            store if isinstance(store, str) else getattr(store, "store_uri", None) or getattr(store, "url", None)
+        )
+        if not store_uri and store is not None and hasattr(store, "to_url_and_options"):
+            store_uri, _ = store.to_url_and_options()
+        if not isinstance(store_uri, str) or not store_uri:
+            return
+        parsed_in = urlparse(uri.strip())
+        parsed_store = urlparse(store_uri)
+        protocol = cls._normalize_protocol(parsed_in.scheme)
+        if protocol != cls._normalize_protocol(parsed_store.scheme):
+            raise ImproperConfigurationError(
+                f"Staging URI scheme {parsed_in.scheme!r} does not match store URI {store_uri!r}"
+            )
+        requires_authority_match = protocol not in {"file", "memory"} or hasattr(store, "store_uri")
+        if requires_authority_match and parsed_in.netloc != parsed_store.netloc:
+            raise ImproperConfigurationError(
+                f"Staging URI authority {parsed_in.netloc!r} does not match store URI {store_uri!r}"
+            )
+
+    @classmethod
     def _resolve_backend_path(cls, store: Any, uri: str) -> str:
+        cls._validate_uri_qualification(store, uri)
         stripped = uri.strip()
         if not stripped:
             raise ImproperConfigurationError("Staging destination URI must not be empty")
@@ -290,8 +325,9 @@ class ObjectStoreStaging:
                 return stripped
         return parsed_in.path.lstrip("/")
 
-    @staticmethod
-    def _resolve_store_key(store: Any, uri: str) -> str:
+    @classmethod
+    def _resolve_store_key(cls, store: Any, uri: str) -> str:
+        cls._validate_uri_qualification(store, uri)
         stripped = uri.strip()
         if not stripped:
             raise ImproperConfigurationError("Staging destination URI must not be empty")

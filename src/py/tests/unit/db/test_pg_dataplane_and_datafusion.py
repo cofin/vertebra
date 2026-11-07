@@ -7,6 +7,7 @@ import re
 import socket
 import sys
 from collections.abc import AsyncIterator, Sequence
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -20,6 +21,7 @@ from vertebra.db import (
     TenantPredicate,
     TenantScopeConfig,
 )
+from vertebra.db._staging import ObjectStoreStaging
 from vertebra.db.adapters.datafusion import (
     ARROW_STREAM_MEDIA_TYPE,
     DataFusionConfig,
@@ -30,6 +32,7 @@ from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgresEmbeddi
 from vertebra.db.adapters.postgres.notify import PostgresNotificationSource, PostgresNotifyConfig
 from vertebra.db.driver import NotificationEvent, NotificationSource, NotSupportedError
 from vertebra.server.platform import SHMAllocationPolicy
+from vertebra.storage import AsyncObjectStore, MemoryConfig, SyncObjectStore
 from vertebra.typing import MissingDependencyError, reset_dependency_cache
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json
@@ -346,3 +349,100 @@ async def test_postgres_sync_primitives_bind_with_real_psycopg_converter(operati
             assert connection.calls[0][0].count("%s") == 2
     finally:
         driver.close()
+
+
+@pytest.mark.parametrize("resolver", ["resolve_sync_store", "resolve_async_store"])
+def test_staging_rejects_implicit_r2_uri(resolver: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Removed storage schemes fail without creating a local staging directory."""
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match="(?i)unsupported.*scheme.*r2"):
+        getattr(ObjectStoreStaging, resolver)(None, "r2://bucket/data.parquet")
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("store_type", [SyncObjectStore, AsyncObjectStore])
+@pytest.mark.parametrize("operation", ["validate", "read", "write"])
+async def test_staging_rejects_explicit_store_r2_uri(
+    store_type: type[SyncObjectStore] | type[AsyncObjectStore], operation: str
+) -> None:
+    """Public staging operations reject R2 qualification before native object effects."""
+    store = store_type(MemoryConfig())
+    sync_store = store if isinstance(store, SyncObjectStore) else store.to_sync()
+    sync_store.put("data.json", b'{"id":1}\n')
+    cursor = ArrowCursor.from_rows([{"id": 2}])
+    with pytest.raises(ValueError, match="(?i)unsupported.*scheme.*r2"):
+        if operation == "validate":
+            ObjectStoreStaging.validate_staging_target(store, "r2://bucket/data.json")
+        elif isinstance(store, SyncObjectStore):
+            if operation == "read":
+                ObjectStoreStaging.read_cursor_sync("r2://bucket/data.json", store=store, format="json")
+            else:
+                ObjectStoreStaging.write_cursor_sync(
+                    cursor, destination_uri="r2://bucket/data.json", store=store, format="json"
+                )
+        elif operation == "read":
+            await ObjectStoreStaging.read_cursor_async("r2://bucket/data.json", store=store, format="json")
+        else:
+            await ObjectStoreStaging.write_cursor_async(
+                cursor, destination_uri="r2://bucket/data.json", store=store, format="json"
+            )
+    assert sync_store.get("data.json") == b'{"id":1}\n'
+    assert [item.path for item in sync_store.list()] == ["data.json"]
+
+
+@pytest.mark.anyio
+async def test_staging_preserves_local_paths_and_file_uris(tmp_path: Path) -> None:
+    """Explicit paths and implicit file URIs round-trip through the native local store."""
+    cursor = ArrowCursor.from_rows([{"id": 7}])
+    store = SyncObjectStore.from_local(tmp_path)
+    ObjectStoreStaging.validate_staging_target(store, "plain.json")
+    ObjectStoreStaging.write_cursor_sync(cursor, destination_uri="plain.json", store=store, format="json")
+    assert ObjectStoreStaging.read_cursor_sync("plain.json", store=store, format="json").to_pylist() == [{"id": 7}]
+    uri = (tmp_path / "implicit.json").as_uri()
+    ObjectStoreStaging.validate_staging_target(None, uri)
+    await ObjectStoreStaging.write_cursor_async(cursor, destination_uri=uri, store=None, format="json")
+    assert (await ObjectStoreStaging.read_cursor_async(uri, store=None, format="json")).to_pylist() == [{"id": 7}]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("store_type", [SyncObjectStore, AsyncObjectStore])
+async def test_staging_preserves_native_memory_namespace_keys(
+    store_type: type[SyncObjectStore] | type[AsyncObjectStore],
+) -> None:
+    """Native Memory authorities remain logical key namespaces for both staging modes."""
+    store = store_type("memory://")
+    uri = "memory://namespace/key.json"
+    sync_store, sync_key = ObjectStoreStaging.resolve_sync_store(store, uri)
+    _, async_key = ObjectStoreStaging.resolve_async_store(store, uri)
+    assert sync_key == async_key == "namespace/key.json"
+    ObjectStoreStaging.validate_staging_target(store, uri)
+    cursor = ArrowCursor.from_rows([{"id": 7}])
+    ObjectStoreStaging.write_cursor_sync(cursor, destination_uri=uri, store=store, format="json")
+    assert (await ObjectStoreStaging.read_cursor_async(uri, store=store, format="json")).to_pylist() == [{"id": 7}]
+    await ObjectStoreStaging.write_cursor_async(
+        cursor, destination_uri="memory://other/second.json", store=store, format="json"
+    )
+    assert ObjectStoreStaging.read_cursor_sync(
+        "memory://other/second.json", store=store, format="json"
+    ).to_pylist() == [{"id": 7}]
+    assert sync_store.get("namespace/key.json") == sync_store.get("other/second.json") == b'{"id":7}\n'
+    assert [item.path for item in sync_store.list()] == ["namespace/key.json", "other/second.json"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("store_type", [SyncObjectStore, AsyncObjectStore])
+async def test_staging_preserves_native_file_authority_resolution(
+    store_type: type[SyncObjectStore] | type[AsyncObjectStore], tmp_path: Path
+) -> None:
+    """Native local stores retain their existing file-URI path resolution semantics."""
+    store = store_type.from_local(tmp_path)
+    uri = "file://localhost/key.json"
+    _, sync_key = ObjectStoreStaging.resolve_sync_store(store, uri)
+    _, async_key = ObjectStoreStaging.resolve_async_store(store, uri)
+    assert sync_key == async_key == "key.json"
+    ObjectStoreStaging.validate_staging_target(store, uri)
+    cursor = ArrowCursor.from_rows([{"id": 7}])
+    ObjectStoreStaging.write_cursor_sync(cursor, destination_uri=uri, store=store, format="json")
+    assert (await ObjectStoreStaging.read_cursor_async(uri, store=store, format="json")).to_pylist() == [{"id": 7}]
+    assert (tmp_path / "key.json").read_bytes() == b'{"id":7}\n'
