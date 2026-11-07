@@ -5,7 +5,7 @@ chapter_id: ch01-native-engine-and-auth
 title: Wire Python streaming/conditional/paginated storage facade and _storage.pyi stubs
 description: Update _storage.pyi and vertebra.storage._store.{SyncObjectStore,AsyncObjectStore,SyncReadableFile,AsyncReadableFile} for streaming reads/uploads, conditional puts, cursor pagination, delimiter listing, and rename.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -18,6 +18,7 @@ read_set:
   - src/py/tests/unit/storage/test_storage_store.py
   - .agents/skills/python-framework/SKILL.md
 files:
+  - src/rs/vertebra-storage/src/lib.rs
   - src/py/vertebra/_storage.pyi
   - src/py/vertebra/storage/_store.py
 tests:
@@ -26,18 +27,18 @@ tests:
 estimated_loc: 210
 plan_revision: 2
 plan_commit: cdb978d3
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-07T16:44:30Z"
+last_verified_commit: cb6b0647
+verification_evidence: "Red: uv run --no-sync pytest src/py/tests/unit/storage/test_storage_store.py src/py/tests/unit/storage/test_multicloud_storage.py -q (exit 1, 8 failed); uv run --no-sync python -m mypy.stubtest vertebra._storage (exit 1, 27 errors). Green: cargo fmt --manifest-path src/rs/Cargo.toml --all -- --check (exit 0); uv run --no-sync cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets -- -D warnings (exit 0); uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage (exit 0, 20 passed); make dev (exit 0); uv run --no-sync python -m mypy.stubtest vertebra._storage (exit 0); uv run --no-sync ruff check src/py/vertebra/_storage.pyi src/py/vertebra/storage src/py/tests/unit/storage (exit 0); uv run --no-sync mypy src/py/vertebra/storage (exit 0); uv run --no-sync pytest src/py/tests/unit/storage -q (exit 0, 41 passed)."
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T04:15:00Z"
-commit: null
+updated_at: "2026-11-07T16:44:30Z"
+commit: cb6b0647
 sources:
   - id: storage-pyi
     resource: src/py/vertebra/_storage.pyi::SyncObjectStore
@@ -108,13 +109,15 @@ Expose the new Rust streaming, conditional-put, multipart-session, paginated-lis
 
 ## Acceptance Criteria
 
-- [ ] `_storage.pyi` matches compiled `vertebra._storage` with zero `mypy.stubtest` discrepancies (R1).
-- [ ] `SyncObjectStore` and `AsyncObjectStore` support `get_stream`, `put_stream`, conditional `put`, `list_page`, `list_with_delimiter`, and `rename` with zero `asyncio.to_thread` calls (R1).
-- [ ] Zero inline `#` comments in touched Python files; all explanations live in Google-style docstrings.
+- [x] `_storage.pyi` matches compiled `vertebra._storage` with zero `mypy.stubtest` discrepancies (R1).
+- [x] `SyncObjectStore` and `AsyncObjectStore` support `get_stream`, `put_stream`, conditional `put`, `list_page`, `list_with_delimiter`, and `rename` with zero `asyncio.to_thread` calls (R1).
+- [x] Zero inline `#` comments in touched Python files; all explanations live in Google-style docstrings.
 
 ## Notes & Discoveries
 
 - [2026-11-07 04:15] Keep `import_optional("vertebra._storage")` lazy inside store/helper methods so CLI and doc imports succeed without `[storage]` installed.
+- [2026-11-07 16:38] Guard `std::mem::replace` inside `AsyncStreamState::next_bytes` (`src/rs/vertebra-storage/src/lib.rs`) with `matches!(self.init, AsyncStreamInit::Pending { .. })` so `AsyncStreamInit::Open(Some(stream))` survives across multi-chunk `__anext__` / `next_chunk` calls on `LocalFileSystem` and network backends.
+- [2026-11-07 16:40] `PutResult` subclasses `ObjectMeta` (`msgspec.Struct(frozen=True, gc=False, kw_only=True)`) so write results carry `last_modified`, `content_type`, and `attributes` while preserving `isinstance(..., ObjectMeta)` and `isinstance(..., PutResult)` compatibility.
 
 [^storage-pyi]: `src/py/vertebra/_storage.pyi::SyncObjectStore` — Type stub contract for `vertebra._storage`.
 [^py-store-facade]: `src/py/vertebra/storage/_store.py::AsyncObjectStore` — Python object storage facade.
