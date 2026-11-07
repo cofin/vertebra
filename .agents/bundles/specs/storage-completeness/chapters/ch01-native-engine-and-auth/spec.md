@@ -9,14 +9,14 @@ state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: "storage-completeness:ch01:t02"
+current_task: "storage-completeness:ch01:t03"
 plan_revision: 2
 plan_commit: cdb978d3
-state_revision: 1
+state_revision: 2
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T16:12:00Z"
+updated_at: "2026-11-07T16:44:30Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
@@ -115,7 +115,7 @@ Progress: `[0/0 files documented in ch01]` (consolidated in `ch04:t03` once all 
 ## 5. Implementation Plan
 
 - [x] [beb6a972] storage-completeness:ch01:t01 — Implement streaming reads, incremental multipart sessions, conditional puts, pagination, and rename in vertebra-storage (tasks/t01-rust-streaming-and-ops.md)
-- [ ] storage-completeness:ch01:t02 — Wire Python streaming/conditional/paginated storage facade and _storage.pyi stubs (tasks/t02-python-streaming-facade-and-stubs.md)
+- [x] [cb6b0647] storage-completeness:ch01:t02 — Wire Python streaming/conditional/paginated storage facade and _storage.pyi stubs (tasks/t02-python-streaming-facade-and-stubs.md)
 - [ ] storage-completeness:ch01:t03 — Deduplicate Rust GCS auth wrapper and complete multi-cloud presigning including OCI PAR (tasks/t03-rust-gcp-auth-and-oci-signing.md)
 - [ ] storage-completeness:ch01:t04 — Unify Python GCP token caches on vertebra._vertebra and enforce fail-closed stores (tasks/t04-unified-token-caches-and-fail-closed.md)
 
@@ -123,8 +123,8 @@ Progress: `[0/0 files documented in ch01]` (consolidated in `ch04:t03` once all 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ beb6a972`; chapter `state: active`, `planning_status: complete`; `t01` completed (`beb6a972`).
-- **Remaining Tasks in Chapter**: `t02`, `t03`, `t04` (`3/4` pending).
+- **Verified Baseline**: `HEAD @ cb6b0647`; chapter `state: active`, `planning_status: complete`; `t01` completed (`beb6a972`), `t02` completed (`cb6b0647`).
+- **Remaining Tasks in Chapter**: `t03`, `t04` (`2/4` pending).
 - **Downstream Dependents**: Unblocks `ch02-orm-and-sql-storage-contracts`, `ch03-litestar-and-range-streaming`, and `ch04-arrow-shm-and-docs`.
 
 [^store-rs]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — Rust object-store wrapper and metadata model.
