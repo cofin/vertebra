@@ -82,7 +82,7 @@ verification_evidence: |
   owned files; canonical test diff is +92/-29. r2.rs and oci.rs are unchanged.
   The dead r2.rs file remains for explicit t03 deletion. Linux CPython 3.12 is
   verified; other Python/platform builds and live cloud services are not claimed.
-  Coordinator owns the signed commit and final state/checklist synchronization.
+  Signed task receipt is bound to 4614213f; chapter reviews remain pending.
 created_at: '2026-11-07T12:00:00Z'
 updated_at: '2026-11-07T23:14:59Z'
 commit: 4614213f
@@ -153,6 +153,6 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Notes & Discoveries
 
-Revision 4 is independently approved by the fresh consolidated ch07/ch08 plan review. Native R2 dispatch, public helper and stub exports are withdrawn; unsupported R2 URLs retain the existing invalid-URL error mapping. Generic S3 custom endpoints and OCI-owned 8 MiB accumulation remain verified. The unreferenced r2.rs source remains owned by t03. Coordinator commit binding and chapter review remain pending.
+Revision 4 is independently approved by the fresh consolidated ch07/ch08 plan review. Native R2 dispatch, public helper and stub exports are withdrawn; unsupported R2 URLs retain the existing invalid-URL error mapping. Generic S3 custom endpoints and OCI-owned 8 MiB accumulation remain verified. The unreferenced r2.rs source deletion is complete in t03 at `c7868b02`. This task is bound to signed `4614213f`; chapter correctness and fresh quality reviews remain pending.
 
 [^implementation]: `src/rs/vertebra-storage/src/store.rs` — Current repository source for this task.

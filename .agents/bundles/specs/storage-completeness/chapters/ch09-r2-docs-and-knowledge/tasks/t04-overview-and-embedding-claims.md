@@ -4,7 +4,7 @@ id: storage-completeness:ch09:t04
 chapter_id: ch09-r2-docs-and-knowledge
 title: Remove R2 from repository and embedding overviews
 description: Remove R2 from repository and embedding overviews
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: documentation_validation
@@ -99,6 +99,6 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Notes & Discoveries
 
-The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+Revision 5 is independently approved at e3e344b5; the root documentation manifest correction is committed at 49cbfcbb. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `README.md` — Current repository source for this task.

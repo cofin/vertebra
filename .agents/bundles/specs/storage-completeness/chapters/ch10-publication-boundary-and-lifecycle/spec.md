@@ -4,14 +4,14 @@ parent_flow: storage-completeness
 chapter_id: ch10-publication-boundary-and-lifecycle
 title: Native Publication Boundary and Cleanup Ownership
 description: Native Publication Boundary and Cleanup Ownership
-status: stable
+status: draft
 state: planned
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
-plan_revision: 5
-plan_commit: 69a77955
+plan_revision: 6
+plan_commit: null
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
 last_reviewed_commit: null
@@ -74,9 +74,9 @@ Caller → seam → collaborator: inline native transport acceptance → real `C
 
 `MultipartUploadSession::complete` borrows the retained handle through `self.upload.as_mut()` across tail upload and `upload.complete().await`, and clears it only after successful completion. An equivalent RAII restore-on-drop guard is permitted only if it also preserves the handle when the future is cancelled; taking ownership out and restoring only on returned Err is insufficient. Publication implementations retain stage/upload handles until published or cleanup succeeds, with async Drop ownership spawning bounded cleanup on the existing storage runtime for dropped/cancelled sessions. Rust/PyO3 sync and async wrappers leave abort callable after a failed complete; Python put_stream finally invokes abort on producer error or cancellation and never masks original failure. Completed success clears ownership; abort remains idempotent. No shared global Python lock or unbounded Drop blocking.
 
-### R4: Frame arbitrary S3 and GCS producer chunks into valid bounded parts
+### R4: Frame S3 producer chunks and preserve bounded backend policies
 
-Pinned SDK S3/GCS MultipartUpload::put_part maps each caller PutPayload directly to one service part; both require at least5MiB for non-final parts. `MultipartUploadSession::write_chunk` must frame arbitrary producer chunks for S3/GCS using a private `PutPayloadMut` current-part accumulator with8MiB target. Slice incoming Bytes and retain segments without copying the full stream; fill/await exactly one upload.put_part before accepting more producer data. Retain only one partial part plus the current caller-owned input; no Vec/list of all parts or unbounded concurrent tasks. Existing OCI-owned8MiB UniformPartAccumulator remains the OCI policy; Azure/local/memory preserve native semantics unless their provider boundary explicitly opts into framing. `complete` flushes short final tail (and correct empty-object behavior), preserving abort ownership on failure; part_sizes_flushed reports actual service parts. Enforce provider's10000-part limit before sending the disallowed part, abort safely and describe the effective fixed-part capacity honestly; no invented5TiB promise,1GiB buffers or single-PUT fallback. Do not adopt consuming WriteMultipart::finish unless handle ownership can survive its failure; the explicit rolling path is selected.
+Pinned S3 MultipartUpload::put_part forwards each caller PutPayload as one service part, requiring at least 5 MiB for each non-final part. MultipartUploadSession frames arbitrary S3 producer chunks with a private PutPayloadMut accumulator targeting 8 MiB. Slice incoming Bytes, retain only the current partial part and caller-owned input, and await each flush before consuming more producer data. Complete flushes a short final tail and handles an empty stream while preserving abort ownership. Enforce S3's 10000-part limit before sending a disallowed part; preserve OCI's separate owned 8 MiB/count policy. Azure/Local/Memory retain their native semantics. GCS conditional publication delegates framing to ch14's bounded 8 MiB JSON resumable stage with 256 KiB-aligned non-final requests and exact-frame EOF finalization; no XML multipart 10000-part cap applies to that session. This task does not require future GCS resumable public acceptance before its implementation. No whole-object buffer, unbounded in-flight tasks, consuming finish that loses abort ownership, maximum-object-size promise or single-PUT fallback is introduced.
 
 Caller → seam → collaborator: public storage/framework calls → owned deep module boundary → native SDK, transport or upstream framework. Public signatures remain stable except the deliberate removal of first-class R2 and addition of typed PreconditionError.
 
@@ -90,6 +90,8 @@ Caller → seam → collaborator: public storage/framework calls → owned deep 
 | --- | --- |
 | Deep owned boundary with exact provider semantics | Chosen: hides credentials, staging and concurrency while preserving configured SDK behavior. |
 | Generic head-then-write, Python lock, copy-create publication or blanket exception conversion | Rejected: loses atomicity, update results, metadata or error identity. |
+
+GCS configuration retention includes the true SDK-resolved service-account endpoint and captured ClientOptions. Its downstream conditional staging uses JSON resumable insertion; bounded stage frames replace XML multipart part-count policy for GCS.
 
 ## 3. Documentation & OKF Knowledge Plan
 
@@ -111,7 +113,7 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 - [ ] storage-completeness:ch10:t02 — Reuse SDK HTTP transport and credential authorizers (tasks/t02-sdk-http-transport.md)
 - [ ] storage-completeness:ch10:t03 — Retain multipart abort ownership across completion errors and cancellation (tasks/t03-session-cleanup.md)
 
-- [ ] storage-completeness:ch10:t04 — Frame arbitrary S3 and GCS producer chunks into valid bounded parts (tasks/t04-minimum-cloud-part-framing.md)
+- [ ] storage-completeness:ch10:t04 — Frame S3 producer chunks and preserve bounded backend policies (tasks/t04-minimum-cloud-part-framing.md)
 
 **Chapter Recovery Checkpoint:** run every task's focused verification, then correctness review and a fresh quality review before closing this chapter. `/flow:implement storage-completeness ch10-publication-boundary-and-lifecycle` executes its ready worksheet.
 

@@ -2,9 +2,9 @@
 type: Task
 id: storage-completeness:ch10:t04
 chapter_id: ch10-publication-boundary-and-lifecycle
-title: Frame arbitrary S3 and GCS producer chunks into valid bounded parts
-description: Frame arbitrary S3 and GCS producer chunks into valid bounded parts
-status: stable
+title: Frame S3 producer chunks and preserve bounded backend policies
+description: Frame S3 producer chunks and preserve bounded backend policies
+status: draft
 state: pending
 priority: P1
 verification_strategy: regression_tdd
@@ -22,8 +22,8 @@ files:
 tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 150
-plan_revision: 5
-plan_commit: 69a77955
+plan_revision: 6
+plan_commit: null
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -48,11 +48,11 @@ tags:
 - repair
 ---
 
-# Frame arbitrary S3 and GCS producer chunks into valid bounded parts
+# Frame S3 producer chunks and preserve bounded backend policies
 
 ## Objective & Scope Boundary
 
-Frame arbitrary S3 and GCS producer chunks into valid bounded parts. Execute one bounded worksheet and create one signed local conventional commit after verification. Read the existing functional baseline at `5fe477fa`; a reopened ch01 is not an execution prerequisite. Own only the listed production and canonical test files. [^implementation]
+Frame S3 producer chunks and preserve bounded backend policies. Execute one bounded worksheet and create one signed local conventional commit after verification. Read the existing functional baseline at `5fe477fa`; a reopened ch01 is not an execution prerequisite. Own only the listed production and canonical test files. [^implementation]
 
 ## Bounded Read Manifest
 
@@ -64,7 +64,7 @@ Frame arbitrary S3 and GCS producer chunks into valid bounded parts. Execute one
 
 ## Symbol & Signature Contracts
 
-Pinned SDK S3/GCS MultipartUpload::put_part maps each caller PutPayload directly to one service part; both require at least 5 MiB for non-final parts. `MultipartUploadSession::write_chunk` must frame arbitrary producer chunks for S3/GCS using a private `PutPayloadMut` current-part accumulator with 8 MiB target. Slice incoming Bytes and retain segments without copying the full stream; fill/await exactly one upload.put_part before accepting more producer data. Retain only one partial part plus the current caller-owned input; no Vec/list of all parts or unbounded concurrent tasks. Existing OCI-owned 8 MiB UniformPartAccumulator remains the OCI policy; Azure/local/memory preserve native semantics unless their provider boundary explicitly opts into framing. `complete` flushes short final tail (and correct empty-object behavior), preserving abort ownership on failure; part_sizes_flushed reports actual service parts. Enforce provider's 10000-part limit before sending the disallowed part, abort safely and describe the effective fixed-part capacity honestly; no invented 5 TiB promise, 1 GiB buffers or single-PUT fallback. Do not adopt consuming WriteMultipart::finish unless handle ownership can survive its failure; the explicit rolling path is selected.
+Pinned S3 MultipartUpload::put_part forwards each caller PutPayload as one service part, requiring at least 5 MiB for each non-final part. MultipartUploadSession frames arbitrary S3 producer chunks with a private PutPayloadMut accumulator targeting 8 MiB. Slice incoming Bytes, retain only the current partial part and caller-owned input, and await each flush before consuming more producer data. Complete flushes a short final tail and handles an empty stream while preserving abort ownership. Enforce S3's 10000-part limit before sending a disallowed part; preserve OCI's separate owned 8 MiB/count policy. Azure/Local/Memory retain their native semantics. GCS conditional publication delegates framing to ch14's bounded 8 MiB JSON resumable stage with 256 KiB-aligned non-final requests and exact-frame EOF finalization; no XML multipart 10000-part cap applies to that session. This task does not require future GCS resumable public acceptance before its implementation. No whole-object buffer, unbounded in-flight tasks, consuming finish that loses abort ownership, maximum-object-size promise or single-PUT fallback is introduced.
 
 Caller → seam → collaborator: public sync/async object-store or adapter operation → owned symbols above → existing native engine/provider or upstream framework contract. Preserve public APIs outside this task.
 
@@ -78,7 +78,7 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 
 | Case | Input | Observable result |
 | --- | --- | --- |
-| Tiny chunks | S3 and GCS emulators reject nonfinal parts <5 MiB; producer yields 64 KiB chunks totaling2*8MiB+3 | Service receives 8 MiB,8MiB,3byte parts, exact reconstructed payload and original metadata |
+| Tiny chunks | S3 responder rejects nonfinal parts <5 MiB; producer yields 64 KiB chunks totaling2*8MiB+3 | Service receives 8 MiB,8MiB,3byte parts, exact reconstructed payload and original metadata |
 | Large/irregular chunks | Caller yields3MiB,13MiB,17bytes and pauses uploads | Bounded framing emits8MiB parts incrementally; producer backpressure holds; no whole-stream accumulation |
 | Tail/failure/limit | Empty stream, short final tail, part error and injected10001st part | Correct empty/tail semantics; abort remains callable; explicit limit error without publication |
 

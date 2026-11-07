@@ -3,99 +3,128 @@ type: Spec
 parent_flow: storage-completeness
 chapter_id: ch07-remove-r2-python
 title: Withdraw First-Class R2 Python APIs
-description: Withdraw First-Class R2 Python APIs
-status: stable
+description: Remove R2 configuration, classifiers, logical URI overrides and staging declarations while preserving supported native stores.
+status: draft
 state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: null
-plan_revision: 5
-plan_commit: 69a77955
+current_task: storage-completeness:ch07:t04
+plan_revision: 6
+plan_commit: null
 state_revision: 0
-last_verified_checkpoint: 5fe477fa
+last_verified_checkpoint: c7868b02
 last_reviewed_commit: null
 created_at: '2026-11-07T12:00:00Z'
-updated_at: '2026-11-07T12:00:00Z'
+updated_at: '2026-11-07T23:24:00Z'
 generated:
   by: flow/0.28.0
   at: '2026-11-07T12:00:00Z'
 verified: []
 sources:
-- id: source
-  resource: src/py/vertebra/extensions/alchemy/storage.py
-  title: Grounded implementation seam
+- id: sqlspec
+  resource: src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend
+  title: SQLSpec classifiers, logical URI metadata and native object operations
+- id: facade
+  resource: src/py/vertebra/storage/_store.py
+  title: Supported storage configuration, facade URI construction and signing
+- id: staging
+  resource: src/py/vertebra/db/_staging.py::ObjectStoreStaging
+  title: Staging target qualification before path resolution and export queries
+- id: regression
+  resource: src/py/tests/unit/extensions/test_data_storage_integrations.py
+  title: Canonical framework, native object and real HTTP regressions
 tags:
 - storage
-- repair
+- r2-withdrawal
+- python
 ---
 
 # Withdraw First-Class R2 Python APIs
 
 <!-- truth: start -->
-This chapter restores an observable storage contract at the existing `5fe477fa` functional baseline. [^source]
-Production work stays within each task's explicit ownership. Raw keys, conditional publication, metadata and cleanup are correctness contracts.
-A completed implementation still requires correctness review followed by fresh quality review.
+- Framework classifiers and public R2 config/convenience exports are removed; direct facade `r2://` construction rejects the removed scheme. [^facade]
+- Destination and explicit string-store staging rejection, qualification matching and native Memory/local compatibility are implemented at `38757809`. [^staging]
+- SQLSpec's explicit-store logical URI override still accepts R2 metadata, and staging returns for relative destinations before checking the backend's declared `store_uri`. t04 closes both public boundaries. [^sqlspec] [^staging]
+- This chapter contains four tasks: three completed and one pending plan approval. Correctness review and fresh quality review remain open. [^regression]
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
-Withdraw First-Class R2 Python APIs addresses confirmed storage contract gaps. The concrete source and canonical tests are bounded in each worksheet. The baseline is available even while ch01:t01 is reopened; tasks depend only on explicitly listed predecessor artifacts. Use project-local pyo3-bridge/runtime-ipc/python-framework skills according to owned language and the storage domain knowledge chapter.
+Withdraw the entire first-class R2 Python surface while preserving generic S3 custom endpoints and supported explicit native-store overrides. Production scope stays within each worksheet's ownership. The current source checkpoint is `c7868b02`; completed task artifacts remain authoritative at their recorded commits. Important finding `PY-NEW` is adopted: at committed `49cbfcbb`, a real SQLSpec backend declaring `r2://unit` over native Memory permits qualified read/write and relative staging publication. The remaining worksheet owns this exact gap. Native R2 dispatch/module/helper withdrawal belongs to ch08 and is not an execution dependency. [^sqlspec] [^staging]
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
 ### R1: Remove R2 from framework backend classifiers
 
-Remove R2Config imports and entries in `_STORAGE_CONFIGS` from Advanced Alchemy, SQLSpec and Starlette. Remove r2:// advertised URI support in their docstrings. Keep S3Config with arbitrary explicit custom endpoints accepted; no provider hostname blacklist, alias or Cloudflare compatibility shim. This task precedes core Python API withdrawal so its imports stay valid at every commit.
+Remove `R2Config` imports and `_STORAGE_CONFIGS` entries from Advanced Alchemy, SQLSpec and Starlette. Remove advertised R2 URI support. Preserve `S3Config` with arbitrary explicit custom endpoints and native SigV4 signing. No provider hostname blacklist, R2 alias or compatibility shim is introduced. Classifier withdrawal precedes public config removal to keep every task commit importable.
 
-### R2: Delete public R2Config and from_r2 convenience APIs
+### R2: Delete public R2Config and convenience APIs
 
-Delete R2Config, its `chunk_uniform_parts` helper, from_r2 constructor, config union/validation members, signing configuration branch, supported-scheme membership, and public __all__/package exports. Reject `r2://` in facade URI construction as unsupported with ValueError before native construction. Convert relevant canonical signing/config examples to generic S3 custom endpoints or OCI 8 MiB coverage; delete R2-only fixture and its consumers without skipping unrelated provider acceptance. Generic S3 custom endpoints and S3 SigV4 remain fully supported. No alias or deprecation shim remains. Native helper is retained until ch08 withdrawal, keeping stubtest parity between commits.
+Remove `R2Config`, its uniform-chunk helper, `from_r2`, config union/validation entries, signing inference and public exports. Facade URI construction rejects `r2://` with `ImproperConfigurationError` (a `ValueError`) before native construction. Preserve supported provider exports, generic S3 endpoint signing and OCI framing coverage. Native helper/stub withdrawal remains with ch08. [^facade]
 
-### R3: Reject removed R2 URIs before staging local-path resolution
+### R3: Reject removed staging destinations and mismatched qualification
 
-`ObjectStoreStaging.validate_staging_target`, `_parse_implicit_uri`, `_resolve_backend_path` and `_resolve_store_key` reject URL scheme r2 with a clear ValueError identifying unsupported storage scheme. Remove r2 from `_REMOTE_SCHEMES` only together with explicit unknown/removed-URI rejection so `r2://bucket/key` never becomes a local filename or directory. Preserve plain paths, file:// and supported remote schemes, and explicit passed-store compatibility checks. No R2 alias or special endpoint normalization.
+`ObjectStoreStaging` rejects removed destinations and explicit string-store URLs before local-path resolution, native object effects or upstream query execution. Supported qualified URIs must match the actual declared backend `store_uri` or native `url`, normalizing only existing `gcs`→`gs` and `azure`→`az` aliases. Preserve matching SQLSpec qualification for its root containment and raw-key checks. Native Memory namespaces and local file-authority mapping retain their existing behavior; declared SQLSpec Memory authorities remain strict. [^staging]
 
-Caller → seam → collaborator: public storage/framework calls → owned deep module boundary → native SDK, transport or upstream framework. Public signatures remain stable except the deliberate removal of first-class R2 and addition of typed PreconditionError.
+### R4: Reject removed SQLSpec logical overrides and resolved declared store URIs
 
-| Failure or edge | Required invariant |
+Keep `ObjectStoreBackend.__init__(uri=None, *, store=None, base_path="", prefix="", options=None, signing=None, token_cache=None, **kwargs)` unchanged. Supplying a supported native `store` cannot authorize an R2 logical string `uri` or expose an operational backend with `protocol == "r2"`. Reject it with an unsupported-scheme `ImproperConfigurationError` identifying only scheme `r2`; the diagnostic must not echo a potentially credential-bearing URI. Preserve supported logical S3/GCS overrides, exact `store_uri`/normalized `protocol`, configured root, literal keys and native capabilities. [^sqlspec]
+
+Staging resolves the existing declared URI from string store, backend `store_uri`, native `url` or config `to_url_and_options()` before its relative-destination early return. Reject a removed declared scheme before validation/read/write effects and before real sync/async BigQuery exports query their configured endpoint. Validation performs no remote metadata request. The independent regression uses actual writable public backend configuration and native object state, never mocked staging methods or fabricated errors. [^staging] [^regression]
+
+| Caller | Owned seam | Collaborator and observable contract |
+| --- | --- | --- |
+| Public framework/config construction | Existing adapter classifiers and facade constructor | Supported native stores and signing remain operational; removed config/URI refuses explicitly. |
+| SQLSpec construction with explicit native store | `ObjectStoreBackend.__init__` | Logical metadata cannot retain R2 while its engine uses another provider. |
+| Public staging validation/read/write | `_validate_uri_qualification` before resolution | Declared URI rejection precedes relative return and preserves exact native bytes/keys. |
+| Actual BigQuery sync/async export | `validate_staging_target` | No query connection or POST is made for an invalid declared backend. |
+
+| Edge or failure | Required behavior |
 | --- | --- |
-| Competing writers | The winning object remains intact; stale CAS fails with typed PreconditionError or create-only FileExistsError. |
-| Provider/transport error | Preserve the provider failure and cleanup ownership; no silent fallback or full-object buffering. |
-| Optional dependency absent | Imports remain lazy and configured construction fails explicitly. |
+| Removed URI with explicit native Memory | Clear unsupported `r2` scheme error; seed bytes and object list survive. |
+| Public backend `store_uri = "r2://unit"`, relative destination | Validation/read/write and export reject before effects, independently of constructor validation. |
+| Rooted logical S3/GCS override | Exact supported metadata and sync/async round trips remain accepted; foreign scheme/bucket/root remains rejected. |
+| Native Memory/local authority | Existing namespace/path mapping and exact keys remain accepted. |
+| Explicit S3 custom endpoint | Preserve endpoint configuration and native SigV4 capabilities. |
 
 | Alternative | Decision |
 | --- | --- |
-| Deep owned boundary with exact provider semantics | Chosen: hides credentials, staging and concurrency while preserving configured SDK behavior. |
-| Generic head-then-write, Python lock, copy-create publication or blanket exception conversion | Rejected: loses atomicity, update results, metadata or error identity. |
-
-For an explicitly configured store/backend, validate every fully qualified URI against its actual `store_uri` (SQLSpec backend) or `url` (native store) before stripping qualification. Normalize only the existing protocol aliases (`gcs`→`gs`, `azure`→`az`) for comparison and require matching remote authority/bucket. Never turn a mismatched scheme or bucket into a relative path by discarding its prefix. Preserve the matching fully qualified backend path so SQLSpec performs its own raw-key/root-containment validation. `validate_staging_target` performs the same qualification rejection before upstream query or producer consumption. No metadata request or object mutation is needed for this validation; local/file and supported matching remote behavior remain accepted.
+| Validate removed scheme at existing SQLSpec and staging boundaries | Chosen: covers logical metadata and relative staging with two owned modules and no new interface. |
+| Inspect native scheme alone | Rejected: explicit native Memory does not establish the logical backend declaration. |
+| Remove supported logical overrides or add an R2 compatibility wrapper | Rejected: breaks valid rooted callers or retains the removed provider surface. |
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[1/1 files documented]` for this chapter's verified Python withdrawal and staging contracts in `.agents/bundles/knowledge/domains/storage/object-storage.md`. Final native provider/guarantee consolidation remains with ch09:t03 and user guides with ch04:t03; per-task canonical tests record the observable Python behavior.
+Progress: `[0/1 files documented]` for the remaining logical override/declaration contract in `.agents/bundles/knowledge/domains/storage/object-storage.md`. The existing Python withdrawal and staging qualification entries retain their verified scope; ch09:t03 consolidates the final native and logical URI guarantees after t04 verification. ch04:t03 owns final user guides. Canonical public regression tests document exact errors, metadata, native object retention and query ordering. No additional production/doc ownership is added to t04.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
 | Requirement | Task | Strategy | Verification |
 | --- | --- | --- | --- |
-| R1 | [ch07:t01](tasks/t01-framework-classifiers.md) | regression_tdd | `src/py/tests/unit/extensions/test_data_storage_integrations.py` |
-| R2 | [ch07:t02](tasks/t02-withdraw-config-and-exports.md) | regression_tdd | `src/py/tests/unit/storage/test_multicloud_storage.py` |
-| R3 | [ch07:t03](tasks/t03-staging-reject-r2.md) | regression_tdd | `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py` |
+| R1 | [ch07:t01](tasks/t01-framework-classifiers.md) | regression_tdd | Canonical framework classifier and S3 endpoint cases |
+| R2 | [ch07:t02](tasks/t02-withdraw-config-and-exports.md) | regression_tdd | Canonical facade, signing and public export cases |
+| R3 | [ch07:t03](tasks/t03-staging-reject-r2.md) | regression_tdd | Canonical staging, real HTTP qualification and native compatibility cases |
+| R4; R3 declared-backend completion | [ch07:t04](tasks/t04-reject-removed-logical-uri.md) | regression_tdd | Actual SQLSpec metadata/native objects, independent relative staging and real BigQuery zero-query tripwire |
 
 ## 5. Implementation Plan
 
 - [x] [4486f6fe] storage-completeness:ch07:t01 — Remove R2 from framework backend classifiers (tasks/t01-framework-classifiers.md)
 - [x] [75f18e3b] storage-completeness:ch07:t02 — Delete public R2Config and from_r2 convenience APIs (tasks/t02-withdraw-config-and-exports.md)
 - [x] [38757809] storage-completeness:ch07:t03 — Reject removed R2 URIs before staging local-path resolution (tasks/t03-staging-reject-r2.md)
+- [ ] storage-completeness:ch07:t04 — Reject removed SQLSpec logical URI overrides before staging (tasks/t04-reject-removed-logical-uri.md)
 
-**Chapter Recovery Checkpoint:** run every task's focused verification, then correctness review and a fresh quality review before closing this chapter. `/flow:implement storage-completeness ch07-remove-r2-python` executes its ready worksheet.
+**Chapter Recovery Checkpoint:** revision 6 is a draft awaiting plan approval (`plan_commit: null`). t04 follows completed t03 and fits one invocation with six read files, two production files, two canonical test modules and estimated 100 changed lines. After approval, `/flow:implement storage-completeness ch07-remove-r2-python` executes t04. Run correctness review followed by fresh quality review before chapter closure.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Classifier and API withdrawal are signed at `4486f6fe` and `75f18e3b`; staging withdrawal and qualification validation are signed at `38757809` and verified by 139 canonical tests.
-- All three Python withdrawal tasks are implemented and verified; the storage knowledge chapter reflects their current contracts. Correctness review and fresh quality review remain pending, so this chapter stays active with no review stamp. Native dispatch/module/helper withdrawal remains assigned to ch08.
-- Documentation: `[1/1 files documented]` for the Python scope. Staging passes 139 canonical tests with five existing optional-driver skips; all-five-extension rebuild, storage stubtest, focused Mypy and Ruff checks pass. Native conditional-publication acceptance remains open.
-- Reclosure of ch01 and downstream acceptance waits for native repair gates; this chapter never depends on that reclosure.
+- Three of four tasks are completed at `4486f6fe`, `75f18e3b` and `38757809`; their recorded states, acceptance evidence and commit SHAs remain intact. t04 is pending and selected, with no implementation evidence or approval stamp.
+- Completed t03 evidence records 139 canonical tests with five existing optional-driver skips, all-five-extension rebuild, storage stubtest and focused Mypy/Ruff checks. That evidence proves its destination/qualification scope and does not close the logical override/declaration gap.
+- Source `c7868b02` retains the adopted Important `PY-NEW` gap in the SQLSpec logical override and staging relative return. t04 requires fresh public Red/Green and exact native bytes/keys, supported metadata, and real sync/async BigQuery zero-query evidence.
+- The chapter remains active with `last_reviewed_commit: null`. Correctness and fresh quality review remain required after t04; native publication acceptance and other chapters retain their independent ownership.
+- Remaining documentation: `[0/1 files documented]` for the pending logical declaration guarantee, finalized by ch09:t03 after verified behavior. Final user guides remain ch04:t03.
 
-[^source]: `src/py/vertebra/extensions/alchemy/storage.py` — Verified repository implementation seam.
+[^sqlspec]: `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` — Classifiers, explicit native-store logical override, metadata and public operations.
+[^facade]: `src/py/vertebra/storage/_store.py` — Supported configuration, facade scheme rejection and native signing.
+[^staging]: `src/py/vertebra/db/_staging.py::ObjectStoreStaging` — Destination/store qualification and relative resolution behavior.
+[^regression]: `src/py/tests/unit/extensions/test_data_storage_integrations.py` and `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py` — Canonical native object, HTTP query and Memory/local compatibility evidence.

@@ -23,8 +23,8 @@ tests:
 - src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
 - src/py/tests/unit/extensions/test_data_storage_integrations.py
 estimated_loc: 130
-plan_revision: 5
-plan_commit: 69a77955
+plan_revision: 6
+plan_commit: null
 state_revision: 0
 claimed_by: agent:r2-staging-withdrawal
 claimed_at: '2026-11-07T22:46:57.858525+00:00'

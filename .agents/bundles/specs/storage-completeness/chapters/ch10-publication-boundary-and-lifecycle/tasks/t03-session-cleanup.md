@@ -4,7 +4,7 @@ id: storage-completeness:ch10:t03
 chapter_id: ch10-publication-boundary-and-lifecycle
 title: Retain multipart abort ownership across completion errors and cancellation
 description: Retain multipart abort ownership across completion errors and cancellation
-status: stable
+status: draft
 state: pending
 priority: P1
 verification_strategy: regression_tdd
@@ -22,8 +22,8 @@ files:
 tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 160
-plan_revision: 5
-plan_commit: 69a77955
+plan_revision: 6
+plan_commit: null
 state_revision: 0
 claimed_by: null
 claimed_at: null

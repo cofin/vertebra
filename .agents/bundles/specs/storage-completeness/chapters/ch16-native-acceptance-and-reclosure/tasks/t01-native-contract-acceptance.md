@@ -15,7 +15,7 @@ depends_on:
 - storage-completeness:ch11:t04
 - storage-completeness:ch12:t03
 - storage-completeness:ch13:t02
-- storage-completeness:ch14:t03
+- storage-completeness:ch14:t04
 - storage-completeness:ch15:t02
 read_set:
 - src/rs/vertebra-storage/src/store.rs

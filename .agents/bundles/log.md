@@ -1,5 +1,11 @@
 # Bundle Activity Log
 
+## [2026-11-07] flow-docs | Synchronized native R2 withdrawal before Chapter 08 review
+
+- Bound OCI accumulator ownership `2e343bc3`, native constructor/module/helper/stub withdrawal `4614213f` and dead-module/provenance deletion `c7868b02` to the chapter/root/catalog state and storage knowledge. Native constructors reject R2 URLs; generic S3 custom endpoints and OCI incremental 8 MiB accumulation remain supported.
+- All 25 native cases pass, including before/after dead-module characterization; formatting and all-target Clippy exit 0. All five extensions build and pass stubtest at the API withdrawal checkpoint. The unregistered file deletion changes no compiled source. Chapter 08 stays active pending correctness and fresh quality reviews, with no review stamp.
+- Chapter 07 correctness review identifies SQLSpec logical-R2 URI and configured native-store acceptance paths. Their repair and fresh reviews remain pending. Native CAS, Arrow and final provider/HTTP documentation acceptance remain open.
+
 ## [2026-11-07] flow-docs | Synchronized Python R2 withdrawal before Chapter 07 review
 
 - Bound framework classifier withdrawal `4486f6fe`, public configuration/export withdrawal `75f18e3b` and staging qualification repair `38757809` to the root/chapter/catalog state and storage knowledge. The facade rejects R2 schemes before native construction; staging rejects removed or mismatched qualifications before upstream queries or object effects while preserving generic S3 endpoints, raw keys and native Memory/local mapping.

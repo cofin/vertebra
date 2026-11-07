@@ -58,8 +58,8 @@ verification_evidence: |
   git diff --check exits 0. No OCI source/test imports or reexports depend on
   r2.rs. The temporary lib.rs helper remains for t02. Native Rust tests compile
   the owned storage source; no Python extension rebuild, public FFI change,
-  platform limitation or hosted action applies. Coordinator owns signed commit
-  and final state/checklist synchronization.
+  platform limitation or hosted action applies. Signed task receipt is bound
+  to 2e343bc3; correctness and fresh quality reviews remain pending.
 created_at: '2026-11-07T12:00:00Z'
 updated_at: '2026-11-07T22:50:18Z'
 commit: 2e343bc3
@@ -131,9 +131,8 @@ Existing OCI `requires_uniform_part_size` already selects 8 MiB accumulation. Re
 The OCI module owns its 8 MiB constant, chunk helper and crate-private rolling
 accumulator without an R2 import or reexport. Multipart sessions select uniform
 re-chunking only for OCI. The accumulator preserves Bytes slices and retains only
-an unfinished frame; no whole-payload buffer is introduced. The legacy R2 module
-and Python helper remain untouched for the ordered t02/t03 withdrawal. All owned
-implementation and test gates pass; the coordinator owns the signed local commit
-and final state/checklist synchronization.
+an unfinished frame; no whole-payload buffer is introduced. All owned
+implementation and test gates pass at signed `2e343bc3`. Native helper/module
+withdrawal and dead-file deletion are complete in t02/t03; chapter reviews remain pending.
 
 [^implementation]: `src/rs/vertebra-storage/src/store.rs` — Current repository source for this task.

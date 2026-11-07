@@ -5,7 +5,7 @@ chapter_id: ch08-remove-r2-native
 title: Delete the unreferenced native R2 module
 description: Delete the unreferenced native R2 module
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: characterization
 depends_on:
@@ -26,17 +26,43 @@ estimated_loc: 110
 plan_revision: 4
 plan_commit: ddfb11f2
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:r2-dead-module-cleanup
+claimed_at: '2026-11-07T23:18:31Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-07T23:19:28Z'
+last_verified_commit: c7868b02
+verification_evidence: |
+  Characterization baseline at native checkpoint 49cbfcbb passes before deletion:
+  cargo fmt exits 0; storage_engine_tests exits 0 (25 passed, 0.34s);
+  storage all-target Clippy exits 0; review_setup validate exits 0.
+  The same native gates pass after dead-module deletion:
+  cargo fmt exits 0; storage_engine_tests exits 0 (25 passed, 0.41s);
+  storage all-target Clippy exits 0; review_setup validate exits 0.
+  Exact native commands use these portable environment assignments:
+  CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target"
+  PYO3_PYTHON="$PWD/.venv/bin/python3.12"
+  cargo fmt --manifest-path src/rs/Cargo.toml --all --check
+  flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test
+  --manifest-path src/rs/Cargo.toml -p vertebra-storage --test storage_engine_tests
+  cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets -- -D warnings
+  Bundle/privacy command exits 0 before and after deletion:
+  uv run --no-sync python -m tools.scripts.review_setup validate
+  The worksheet's read-only relative-link check exits 0 after deletion;
+  19 relative links and all 22 frontmatter source resources resolve.
+  No module import, registration, source link or footnote in the owned
+  knowledge page references the deleted native module. git diff --check exits 0.
+  OCI exact chunk sizes and reconstructed payload, unsupported native R2
+  construction and generic S3 custom-endpoint signing remain green.
+  No compiled source changes: the removed file is already unregistered.
+  Existing all-five extension artifacts from the verified t02 checkpoint remain
+  unchanged; no rebuild or repeat Python suite is required for this deletion.
+  No platform limitation is observed. Signed task receipt is bound to
+  c7868b02; correctness and fresh quality reviews remain pending.
 created_at: '2026-11-07T12:00:00Z'
-updated_at: '2026-11-07T12:00:00Z'
-commit: null
+updated_at: '2026-11-07T23:19:28Z'
+commit: c7868b02
 sources:
 - id: implementation
   resource: src/rs/vertebra-storage/src/oci.rs
@@ -106,13 +132,21 @@ PYLINK
 
 ## Acceptance Criteria
 
-- [ ] Every matrix row passes at its public seam with existing behavior preserved.
-- [ ] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
-- [ ] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
-- [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
+- [x] Every matrix row passes at its public seam with existing behavior preserved.
+- [x] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
+- [x] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
+- [x] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
 
 Revision 4 is independently approved by the fresh consolidated ch07/ch08 plan review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+
+The unregistered R2 module has no remaining source callers. OCI owns the retained
+incremental accumulator and 8 MiB constant. The durable storage chapter cites OCI
+for multipart ownership and contains no deleted-module sources or footnotes.
+The existing canonical tests characterize the public contracts before and after
+deletion; no new source-text or file-existence tests are introduced. All task-owned
+writes are bound to signed `c7868b02`; unrelated chapter-plan changes remain
+untouched. Chapter correctness and fresh quality reviews remain pending.
 
 [^implementation]: `src/rs/vertebra-storage/src/oci.rs` — Current repository source for this task.

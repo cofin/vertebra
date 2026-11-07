@@ -4,7 +4,7 @@ id: storage-completeness:ch09:t02
 chapter_id: ch09-r2-docs-and-knowledge
 title: Remove R2 from architecture and product capability claims
 description: Remove R2 from architecture and product capability claims
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: documentation_validation
@@ -99,6 +99,6 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Notes & Discoveries
 
-The plan awaits independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+Revision 5 is independently approved at e3e344b5; the root documentation manifest correction is committed at 49cbfcbb. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `docs/architecture/pyo3-and-workers.md` — Current repository source for this task.

@@ -10,7 +10,7 @@ planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
-plan_revision: 6
+plan_revision: 7
 plan_commit: null
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
@@ -23,86 +23,71 @@ generated:
 verified: []
 sources:
 - id: source
-  resource: src/rs/vertebra-storage/src/store.rs
-  title: Grounded implementation seam
+  resource: src/rs/vertebra-storage/src/gcs_stage.rs
+  title: Generation-fenced resumable staging and publication
 - id: research
   resource: .agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md
-  title: Grounded storage publication or Arrow API evidence
+  title: SDK and provider protocol evidence
 tags:
 - storage
 - repair
 ---
 
-# GCS Generation CAS and Staged Rewrite Publication
+# GCS Generation-Fenced Staging and Rewrite
 
 <!-- truth: start -->
-This chapter restores an observable storage contract at the existing `5fe477fa` functional baseline. [^source]
-Production work stays within each task's explicit ownership. Raw keys, conditional publication, metadata and cleanup are correctness contracts.
-A completed implementation still requires correctness review followed by fresh quality review.
+Caller ETags use the existing SDK XML namespace and same-snapshot generation fences.
+Private cloud stages use JSON resumable insertion with ifGenerationMatch=0.
+Publication uses generation-pinned JSON rewrite and returns the exact generation-pinned XML receipt.
+Native implementation requires correctness review followed by fresh independent quality review.
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
-GCS Generation CAS and Staged Rewrite Publication addresses confirmed storage contract gaps. The concrete source and canonical tests are bounded in each worksheet. The baseline is available even while ch01:t01 is reopened; tasks depend only on explicitly listed predecessor artifacts. Use project-local pyo3-bridge/runtime-ipc/python-framework skills according to owned language and the storage domain knowledge chapter.
+Preserve native storage conditional writes, bounded streaming, opaque keys, metadata and exact publication receipts. XML multipart completion cannot enforce Create, so private stages use the supported JSON resumable protocol. The tasks retain explicit ownership and actual protocol evidence [^research].
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
-Grounded contract evidence: [^research].
+### R1: Fence ordinary GCS predicates with the same HEAD generation
 
-### R1: Resolve GCS ETag predicates into generation CAS for ordinary puts
+Caller ETag comparison uses SDK XML HEAD metadata. Positive Match forwards that same snapshot's generation through UpdateVersion; shared ordinary negative CAS uses prerequisite ch20:t01. Create remains native Create. Rewrite receipt tests belong to t04 after publication exists.
 
-For GCS `put_opts(if_match=etag)`, HEAD once to obtain both opaque ETag and generation, verify expected ETag, then PutMode::Update(UpdateVersion { e_tag: Some(actual_etag), version: Some(generation) }). Never pass ETag in place of generation and never use HEAD→Overwrite. Prerequisite ch20:t01 owns shared arbitrary negative if_none_match resolution and eight-attempt native CAS-only retries. This chapter owns GCS positive if_match translation and validates generation/canonical XML ETag integration with the shared negative path; it does not add a competing loop or Overwrite fallback. `if_none_match="*"` uses Create directly. Preserve content_type/attributes and actual PutResult from successful atomic put.
+### R2: Create bounded private stages atomically
 
-### R2: Stage GCS multipart and publish through pinned JSON rewrite
+JSON resumable initiation carries ifGenerationMatch=0, content_type and metadata. Retain opaque Location capability and bounded 8 MiB/256 KiB-aligned frames. Preserve empty, partial-tail and exact-frame EOF. Initiation collisions can change names only before producer consumption; late conflicts never replay consumed input. Use exact configured SDK transport and credentials, including skip-signature and service-account endpoint fallback. t02 compiles the actual private protocol under a test-only module and tests real HTTP requests.
 
-Add GcsPublicationUpload retaining Arc<GoogleCloudStorage>, unique private MPU stage key, condition, caller attributes and resolved GCS JSON endpoint/transport. SDK multipart writes stage; complete obtains immutable source generation and ETag before publication. Execute JSON `objects.rewrite` with sourceGeneration pinned, destination ifGenerationMatch=0 (Create) or verified current generation (Match/negative predicate), and source precondition. Include metadata/body so attributes/content_type persist; GET/HEAD→overwrite or generic copy-create is forbidden. Use SDK credentials().get_credential() bearer and configured endpoint/transport, including emulator skip_signature behavior. Stage uses a unique unpredictable key with Create semantics and collision retry; never overwrite an existing user object. Track the exact owned source generation for rewrite and cleanup. No new reserved cloud keyspace or cross-process listing-invisibility promise is introduced; raw provider listings may observe temporary stages and docs describe that lifecycle honestly.
+### R3: Retain recovery and cleanup ownership
 
-### R3: Complete GCS rewrite tokens and return actual published generation
+Keep the pending frame before sending and recover acknowledgement via session status probes. Bound recovery attempts; validate offsets. Session cancellation uses JSON HTTP 499. Finalized cleanup pins both object generation and ifGenerationMatch. Uncertain finalization without a captured generation retains an explicit indeterminate outcome; a random key does not authorize deleting another object. Session credentials and untrusted bodies never appear in errors. t03 finishes lifecycle behavior before runtime activation.
 
-Loop JSON rewrite until done=true, passing prior rewriteToken and identical pinned source/destination conditions each request. Bounded in-flight state contains token, generations, identifiers and metadata only, never payload. Parse final resource.etag and resource.generation into PutResult and returned ObjectMeta; avoid post-publication HEAD races. If token expires/fails, preserve atomicity and explicit error; source generation cleanup is conditional on owned generation so another object is never deleted. Cleanup stage on success, failed precondition, provider error and cancellation, retaining ownership until completion. Provider-side eventual cleanup limits are documented honestly.
+### R4: Publish exact staged generations and return canonical XML tokens
 
-Caller → seam → collaborator: public storage/framework calls → owned deep module boundary → native SDK, transport or upstream framework. Public signatures remain stable except the deliberate removal of first-class R2 and addition of typed PreconditionError.
-
-| Failure or edge | Required invariant |
-| --- | --- |
-| Competing writers | The winning object remains intact; stale CAS fails with typed PreconditionError or create-only FileExistsError. |
-| Provider/transport error | Preserve the provider failure and cleanup ownership; no silent fallback or full-object buffering. |
-| Optional dependency absent | Imports remain lazy and configured construction fails explicitly. |
-
-| Alternative | Decision |
-| --- | --- |
-| Deep owned boundary with exact provider semantics | Chosen: hides credentials, staging and concurrency while preserving configured SDK behavior. |
-| Generic head-then-write, Python lock, copy-create publication or blanket exception conversion | Rejected: loses atomicity, update results, metadata or error identity. |
-
-Canonical public GCS ETags remain the existing SDK XML API ETag at head/list/put/multipart receipt boundaries. JSON resource ETags are a separate namespace and must never be compared with a caller XML ETag. Evaluate caller predicates against SDK XML HEAD metadata and use that same snapshot generation for destination fencing. After successful JSON rewrite, parse the returned destination generation, then obtain its exact XML receipt through SDK `get_opts(path, GetOptions { head: true, version: Some(destination_generation), ..Default::default() })`; the SDK emits the generation query. Return that generation-pinned metadata ETag/version, never an unfenced current HEAD or the JSON resource ETag. If that generation cannot be retrieved, report an explicit provider/indeterminate receipt failure and retain cleanup ownership; never substitute a successor token. A competing writer immediately after rewrite must not alter the returned successful publication identity.
+The production wrapper starts only after both private stage tasks pass. JSON rewrite pins source generation and destination conditions across every rewriteToken continuation. Caller ETags are compared only with XML SDK metadata. After completion, SDK generation-specific HEAD returns the published generation's XML ETag/version. Missing generation receipts fail explicitly; current HEAD or JSON resource.etag never substitutes for our result. Caller metadata persists and cleanup targets only the owned stage generation. Temporary cloud stages may be visible in provider listings.
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bundles/knowledge/domains/storage/object-storage.md` by ch09:t03 and user guides by ch04:t03; per-task tests are executable documentation. No separate untracked documentation obligation remains.
+Progress: `[0/1 files documented]`. ch09:t03 documents evidence-backed storage behavior after native ch16 acceptance; ch04:t03 owns user storage guides. No platform, maximum-object-size or cloud listing-invisibility guarantee is invented.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
-| Requirement | Task | Strategy | Verification |
+| Requirement | Task | Strategy | Boundary |
 | --- | --- | --- | --- |
-| R1 | [ch14:t01](tasks/t01-gcs-ordinary-cas.md) | regression_tdd | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
-| R2 | [ch14:t02](tasks/t02-gcs-stage-rewrite.md) | regression_tdd | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
-| R3 | [ch14:t03](tasks/t03-gcs-rewrite-tokens-cleanup.md) | regression_tdd | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
+| R1 | [ch14:t01](tasks/t01-gcs-ordinary-cas.md) | regression_tdd | Actual native ordinary puts and GCS HTTP generation headers |
+| R2 | [ch14:t02](tasks/t02-gcs-stage-protocol.md) | behavior_tdd | Real private SDK/HTTP resumable stage |
+| R3 | [ch14:t03](tasks/t03-gcs-stage-lifecycle.md) | regression_tdd | Real private HTTP recovery/cancellation/cleanup |
+| R4 | [ch14:t04](tasks/t04-gcs-rewrite-publication.md) | regression_tdd | Public native multipart publication |
 
 ## 5. Implementation Plan
 
-- [ ] storage-completeness:ch14:t01 — Resolve GCS ETag predicates into generation CAS for ordinary puts (tasks/t01-gcs-ordinary-cas.md)
-- [ ] storage-completeness:ch14:t02 — Stage GCS multipart and publish through pinned JSON rewrite (tasks/t02-gcs-stage-rewrite.md)
-- [ ] storage-completeness:ch14:t03 — Complete GCS rewrite tokens and return actual published generation (tasks/t03-gcs-rewrite-tokens-cleanup.md)
-
-**Chapter Recovery Checkpoint:** run every task's focused verification, then correctness review and a fresh quality review before closing this chapter. `/flow:implement storage-completeness ch14-gcs-conditional-rewrite` executes its ready worksheet.
+- [ ] storage-completeness:ch14:t01 — Resolve ordinary GCS ETags into same-snapshot generation CAS (tasks/t01-gcs-ordinary-cas.md)
+- [ ] storage-completeness:ch14:t02 — Create generation-fenced resumable stages (tasks/t02-gcs-stage-protocol.md)
+- [ ] storage-completeness:ch14:t03 — Recover and clean up retained resumable sessions (tasks/t03-gcs-stage-lifecycle.md)
+- [ ] storage-completeness:ch14:t04 — Publish staged generations and return canonical XML receipts (tasks/t04-gcs-rewrite-publication.md)
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Baseline: `5fe477fa`; implementation is pending and cold plan review is required.
-- Remaining: all 3 tasks above; dependent tasks remain ordered by depends_on.
-- Documentation: `[0/1 files documented]`, owned by the explicit consolidation tasks.
-- Reclosure of ch01 and downstream acceptance waits for native repair gates; this chapter never depends on that reclosure.
+All four tasks remain pending at the verified R2-removal baseline. The revised frontier awaits independent executable-plan review. t02/t03 provide test-gated real primitives; t04 activates normal production routing and runs non-test compilation. ch16 acceptance depends on t04, never the incomplete staging predecessor.
 
-[^source]: `src/rs/vertebra-storage/src/store.rs` — Verified repository implementation seam.
+[^source]: `src/rs/vertebra-storage/src/gcs_stage.rs` — Owned staging implementation introduced by this chapter.
 
-[^research]: `.agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md` — Source-grounded architecture and probe evidence.
+[^research]: `.agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md` — SDK and primary provider protocol evidence.

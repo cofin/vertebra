@@ -4,7 +4,7 @@ parent_flow: storage-completeness
 chapter_id: ch09-r2-docs-and-knowledge
 title: Synchronize Supported Providers and Native Guarantees
 description: Synchronize Supported Providers and Native Guarantees
-status: draft
+status: stable
 state: planned
 planning_status: complete
 depends_on_chapters: []

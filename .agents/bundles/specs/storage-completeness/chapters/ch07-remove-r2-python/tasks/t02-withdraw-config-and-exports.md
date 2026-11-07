@@ -26,8 +26,8 @@ tests:
 - src/py/tests/unit/storage/test_signing.py
 - src/py/tests/integration/storage/conftest.py
 estimated_loc: 130
-plan_revision: 5
-plan_commit: 69a77955
+plan_revision: 6
+plan_commit: null
 state_revision: 0
 claimed_by: agent:r2-public-api-withdrawal
 claimed_at: '2026-11-07T22:42:52Z'

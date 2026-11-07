@@ -103,7 +103,7 @@ Pinned Azure `put_block` generates a raw random text identifier, base64-encodes 
 
 ## Incremental Part Framing
 
-Pinned SDK S3MultiPartUpload::put_part and GCSMultipartUpload::put_part forward each supplied PutPayload as one service part. Current MultipartUploadSession forwards every non-OCI producer chunk unchanged. Arbitrary 64 KiB chunks therefore violate the minimum 5 MiB non-final part requirement at completion. A bounded rolling frame must accumulate only the current part and await flush before consuming more producer data. The SDK WriteMultipart helper supplies buffering but finish consumes ownership; adopting it without preserving abort on failure would recreate the cleanup defect. [^s3-limits] [^gcs-limits]
+Pinned SDK S3MultiPartUpload::put_part and XML GCSMultipartUpload::put_part forward each supplied PutPayload as one service part; arbitrary 64 KiB chunks violate their 5 MiB non-final minimum. S3 uses bounded 8 MiB rolling frames with backpressure. Conditional GCS publication instead uses JSON resumable staging with 8 MiB frames and 256 KiB-aligned non-final requests, preserving unknown-size EOF and acknowledgement recovery; XML part-count policy does not apply. The SDK WriteMultipart helper consumes finish ownership, so its buffering cannot substitute for retained abort ownership. [^s3-limits] [^gcs-limits]
 
 ## Source and Validation Bounds
 
@@ -122,3 +122,21 @@ The implementation is split into shared transport/lifecycle, platform-local prim
 [^gcs-limits]: [GCS XML API quotas and limits](https://cloud.google.com/storage/quotas#requests) — minimum 5 MiB non-final parts enforced on completion.
 
 [^oci-put]: [OCI ObjectStorageClient put_object](https://docs.oracle.com/en-us/iaas/tools/python/latest/api/object_storage/client/oci.object_storage.ObjectStorageClient.html#oci.object_storage.ObjectStorageClient.put_object) — ordinary conditional headers, Content-Type and opc_meta inputs.
+
+## GCS Conditional Resumable Stages
+
+JSON `objects.insert` initiates a resumable session with `ifGenerationMatch=0`; XML multipart completion cannot supply that predicate. Initiation carries contentType/metadata and omits a total-size header for unknown streams. Session Location is an authentication capability and stays out of diagnostics. The configured endpoint origin and HTTP policy constrain subsequent session requests.
+
+Send bounded 8 MiB frames with non-final sizes divisible by 256 KiB, `Content-Range: bytes s-e/*`, and exact Content-Length. EOF uses a final partial request with `/N`, or an empty `bytes */N` request on an exact frame boundary; empty input uses `bytes */0`. Retain the current frame until acknowledged. An empty status query with `bytes */*` (or `bytes */N` at EOF) returns 308/Range for incomplete state or 200/201 metadata for completion. Validate monotonic offsets, resend only retained missing bytes, and bound recovery attempts. Late 412/404/410 never triggers hidden producer replay.
+
+Cancel an active JSON session with DELETE; successful cancellation returns 499. Finalized stage deletion includes both its captured generation and ifGenerationMatch. Unknown finalization without a captured generation remains explicit indeterminate cleanup ownership; never delete a guessed current object by name. Final publication uses pinned JSON rewrite but returns SDK XML metadata for the exact published generation.
+
+The built GoogleCloudStorage exposes its credential provider, not its resolved endpoint/ClientOptions. Preserve actual builder endpoint precedence (explicit base URL, service-account gcs_base_url, SDK default) and capture the final SDK transport options via a real delegating HttpConnector. Authentication and refreshing remain SDK-owned.
+
+Primary protocol sources:
+
+- [Objects.insert and conditional resumable initiation](https://docs.cloud.google.com/storage/docs/json_api/v1/objects/insert).
+- [Resumable transfer, acknowledgement recovery and cancellation](https://docs.cloud.google.com/storage/docs/performing-resumable-uploads).
+- [Session URI security and lifecycle](https://docs.cloud.google.com/storage/docs/resumable-uploads).
+- [Object generation-specific deletion](https://docs.cloud.google.com/storage/docs/json_api/v1/objects/delete).
+- [Google resumable-media framing implementation](https://github.com/googleapis/google-resumable-media-python/blob/main/google/resumable_media/_upload.py) and its [empty/exact-boundary tests](https://github.com/googleapis/google-resumable-media-python/blob/main/tests/unit/test__upload.py).

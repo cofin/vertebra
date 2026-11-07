@@ -4,7 +4,7 @@ id: storage-completeness:ch10:t01
 chapter_id: ch10-publication-boundary-and-lifecycle
 title: Retain concrete providers behind a private publication boundary
 description: Retain concrete providers behind a private publication boundary
-status: stable
+status: draft
 state: pending
 priority: P1
 verification_strategy: regression_tdd
@@ -25,8 +25,8 @@ files:
 tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 230
-plan_revision: 5
-plan_commit: 69a77955
+plan_revision: 6
+plan_commit: null
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -71,6 +71,10 @@ Retain concrete providers behind a private publication boundary. Execute one bou
 Grounded contract evidence: [^research].
 
 Add private `conditional.rs` and `mod conditional;` in lib.rs. `ObjectStoreEngine` keeps existing `inner: Arc<dyn ObjectStore>` and a private `publication: PublicationBackend`. `PublicationBackend` retains concrete Arc handles for Memory, Local, S3, Azure, GCS, OCI and resolved endpoint/region/bucket/client options as needed; ordinary read/list code keeps inner. Build each SDK store once and share Arc into both fields, preserving existing credential provider/refresh identity and configured transport. Private `PublishCondition { Overwrite, Create, Match(String), NotMatch(String) }` normalizes PutConditionalOptions, rejecting conflicting selectors before provider effects. The private `PublicationBackend::begin(path, options)` returns a `Box<dyn MultipartUpload>` implementing provider-specific final publish; no public backend enum or generic copy-create substitute. Existing `with_store` stays usable for injected canonical stores, retaining actual PutMode support; unsupported custom-store conditional multipart fails explicitly until it provides the required primitive. S3/Azure/GCS variant constructors carry concrete handles before their later protocol task; no silent conditional fallback is allowed.
+
+For GCS retain a private `GcsStageConfig { base: Url, bucket: String, client_options: ClientOptions, skip_signature: bool }` beside the same concrete SDK store. Resolve the actual builder configuration before type erasure: explicit/environment BaseUrl wins, then service-account `gcs_base_url`, then the pinned SDK default. `get_config_value(BaseUrl)` alone does not include the service-account fallback. If necessary deserialize only endpoint metadata from the configured service-account source with a narrow serde struct; preserve SDK service-account path-over-inline precedence, ignore credential fields and leave all authentication/refresh to SDK providers. Never log the source JSON or reconstruct credentials.
+
+Capture the exact final SDK ClientOptions with a real delegating public HttpConnector passed through `GoogleCloudStorageBuilder::with_http_connector`: its `connect(&ClientOptions)` clones the options and delegates unchanged to ReqwestConnector. In the pinned builder the final build-time connect belongs to the object store, following any credential/metadata client setup. Reuse those captured options for the private request client, including allow_http, proxy exclusions, TLS, timeouts and default headers. Read the effective skip-signature setting from the configured builder; session authentication also preserves the SDK's empty-bearer behavior. Tests compare actual configured SDK reads and publication requests against local endpoints, including service-account base-url fallback; no constructor network probe or auth fork is introduced. The retained record is consumed by the GCS resumable-stage chapter.
 
 Caller → seam → collaborator: public sync/async object-store or adapter operation → owned symbols above → existing native engine/provider or upstream framework contract. Preserve public APIs outside this task.
 

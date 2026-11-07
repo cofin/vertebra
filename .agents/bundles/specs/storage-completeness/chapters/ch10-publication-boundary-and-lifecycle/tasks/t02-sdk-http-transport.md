@@ -4,7 +4,7 @@ id: storage-completeness:ch10:t02
 chapter_id: ch10-publication-boundary-and-lifecycle
 title: Reuse SDK HTTP transport and credential authorizers
 description: Reuse SDK HTTP transport and credential authorizers
-status: stable
+status: draft
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -24,8 +24,8 @@ files:
 tests:
 - src/rs/vertebra-storage/src/cloud_request.rs
 estimated_loc: 210
-plan_revision: 5
-plan_commit: 69a77955
+plan_revision: 6
+plan_commit: null
 state_revision: 0
 claimed_by: null
 claimed_at: null
