@@ -5,7 +5,7 @@ chapter_id: ch01-wheel-scaffold-and-config
 title: Scaffold vertebra-postgres Cargo manifest, build script, and free-threaded PyO3 module
 description: Create src/rs/vertebra-postgres/Cargo.toml with complete locked dependency pins, build.rs with PyO3 cfg/rpath setup, and src/lib.rs exporting gil_used=false vertebra._postgres metadata constants prior to workspace registration.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: static_validation
 depends_on: []
@@ -25,17 +25,17 @@ estimated_loc: 120
 plan_revision: 3
 plan_commit: dd432f18
 state_revision: 0
-claimed_by: agent:ch01-t01
-claimed_at: "2026-11-07T20:00:34Z"
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-07T20:05:56Z"
+last_verified_commit: 5f25a4a0
+verification_evidence: "Declared TOML assertions, rustfmt --edition 2024 --check, cargo check --workspace --locked (baseline and final), git diff --check: exit 0; Cargo workspace manifest and lock unchanged."
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-07T16:40:00Z"
-commit: null
+commit: 5f25a4a0
 sources:
   - id: ws-cargo
     resource: src/rs/Cargo.toml
@@ -168,9 +168,9 @@ Commit as `build(postgres): scaffold vertebra-postgres crate and pymodule`.
 
 ## Acceptance Criteria
 
-- [ ] `src/rs/vertebra-postgres/Cargo.toml` declares `_postgres` (`cdylib` + `rlib`), `postgres-protocol = "=0.6.12"`, `x509-parser = "=0.18.1"` (`default-features = false`), `rsa` `["pem", "sha2"]`, `rustls-pemfile`, `half = "=2.7.1"`, `arrow-{array,buffer,ipc,schema} = "=60.1.0"`, and dev-only `tokio-postgres = "=0.7.18"` (R1).
-- [ ] `src/rs/vertebra-postgres/build.rs` and `src/rs/vertebra-postgres/src/lib.rs` (`#[pymodule(gil_used = false)] fn _postgres` exporting `FREE_THREADED`, `GIL_USED`, `__version__`) pass `rustfmt --edition 2024 --check` (R1).
-- [ ] Existing workspace passes `cargo check --manifest-path src/rs/Cargo.toml --workspace --locked` with zero dirty lockfile changes (R1).
+- [x] `src/rs/vertebra-postgres/Cargo.toml` declares `_postgres` (`cdylib` + `rlib`), `postgres-protocol = "=0.6.12"`, `x509-parser = "=0.18.1"` (`default-features = false`), `rsa` `["pem", "sha2"]`, `rustls-pemfile`, `half = "=2.7.1"`, `arrow-{array,buffer,ipc,schema} = "=60.1.0"`, and dev-only `tokio-postgres = "=0.7.18"` (R1).
+- [x] `src/rs/vertebra-postgres/build.rs` and `src/rs/vertebra-postgres/src/lib.rs` (`#[pymodule(gil_used = false)] fn _postgres` exporting `FREE_THREADED`, `GIL_USED`, `__version__`) pass `rustfmt --edition 2024 --check` (R1).
+- [x] Existing workspace passes `cargo check --manifest-path src/rs/Cargo.toml --workspace --locked` with zero dirty lockfile changes (R1).
 
 ## Notes & Discoveries
 
