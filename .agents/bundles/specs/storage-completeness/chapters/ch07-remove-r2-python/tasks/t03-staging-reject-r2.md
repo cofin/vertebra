@@ -5,7 +5,7 @@ chapter_id: ch07-remove-r2-python
 title: Reject removed R2 URIs before staging local-path resolution
 description: Reject removed R2 URIs before staging local-path resolution
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -19,12 +19,12 @@ files:
 tests:
 - src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
 - src/py/tests/unit/extensions/test_data_storage_integrations.py
-estimated_loc: 90
-plan_revision: 4
-plan_commit: ddfb11f2
+estimated_loc: 130
+plan_revision: 5
+plan_commit: 69a77955
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:r2-staging-withdrawal
+claimed_at: '2026-11-07T22:46:57.858525+00:00'
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -59,6 +59,8 @@ Reject removed R2 URIs before staging local-path resolution. Execute one bounded
 
 `ObjectStoreStaging.validate_staging_target`, `_parse_implicit_uri`, `_resolve_backend_path` and `_resolve_store_key` reject URL scheme r2 with a clear ValueError identifying unsupported storage scheme. Remove r2 from `_REMOTE_SCHEMES` only together with explicit unknown/removed-URI rejection so `r2://bucket/key` never becomes a local filename or directory. Preserve plain paths, file:// and supported remote schemes, and explicit passed-store compatibility checks. No R2 alias or special endpoint normalization.
 
+For an explicitly configured store/backend, validate every fully qualified URI against its actual `store_uri` (SQLSpec backend) or `url` (native store) before stripping qualification. Normalize only the existing protocol aliases (`gcs`→`gs`, `azure`→`az`) for comparison and require matching remote authority/bucket. Never turn a mismatched scheme or bucket into a relative path by discarding its prefix. Preserve the matching fully qualified backend path so SQLSpec performs its own raw-key/root-containment validation. `validate_staging_target` performs the same qualification rejection before upstream query or producer consumption. No metadata request or object mutation is needed for this validation; local/file and supported matching remote behavior remain accepted.
+
 Caller → seam → collaborator: public sync/async object-store or adapter operation → owned symbols above → existing native engine/provider or upstream framework contract. Preserve public APIs outside this task.
 
 ## Edge Cases & Error Semantics
@@ -74,6 +76,7 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 | Implicit rejected URI | resolve_sync_store/resolve_async_store(None,"r2://bucket/data.parquet") | ValueError; no r2: local path created |
 | Explicit store rejected URI | Memory store plus r2://bucket/key passed through staging public export/read path | ValueError before any write; store unchanged |
 | Supported staging | file path and s3://bucket/key with configured store | Existing path resolution unchanged |
+| Mismatched explicit remote qualification | SQLSpec backend/native store configured for s3://unit, supplied s3://other/key or gs://unit/key through public staging validation/read/write sync and async | ValueError before upstream query/producer consumption or object mutation; original configured-store objects remain exact bytes. A matching s3://unit/key still round-trips. |
 
 ## Verification
 

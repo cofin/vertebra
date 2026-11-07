@@ -250,8 +250,8 @@ Progress: `[0/9 files documented]` for final repair/HTTP/Arrow acceptance. Exist
 - [ ] ch04-arrow-shm-and-docs — Chapter 04: Strict Arrow SHM Allocation, Parquet Streaming, and OKF Sync (chapters/ch04-arrow-shm-and-docs/spec.md)
 - [x] [0bce1806] ch05-key-identity-and-preconditions — Raw Object Identity and Typed Conditional Conflicts (chapters/ch05-key-identity-and-preconditions/spec.md)
 - [~] ch06-adapter-correctness — Django Collision Length and SQLSpec Signing Errors (chapters/ch06-adapter-correctness/spec.md)
-- [ ] ch07-remove-r2-python — Withdraw First-Class R2 Python APIs (chapters/ch07-remove-r2-python/spec.md)
-- [ ] ch08-remove-r2-native — Move OCI Chunk Ownership and Remove Native R2 (chapters/ch08-remove-r2-native/spec.md)
+- [~] ch07-remove-r2-python — Withdraw First-Class R2 Python APIs (chapters/ch07-remove-r2-python/spec.md)
+- [~] ch08-remove-r2-native — Move OCI Chunk Ownership and Remove Native R2 (chapters/ch08-remove-r2-native/spec.md)
 - [ ] ch09-r2-docs-and-knowledge — Synchronize Supported Providers and Native Guarantees (chapters/ch09-r2-docs-and-knowledge/spec.md)
 - [ ] ch10-publication-boundary-and-lifecycle — Native Publication Boundary and Cleanup Ownership (chapters/ch10-publication-boundary-and-lifecycle/spec.md)
 - [ ] ch11-local-atomic-publication — Local Cross-Process Conditional Publication (chapters/ch11-local-atomic-publication/spec.md)
@@ -274,7 +274,7 @@ Progress: `[0/9 files documented]` for final repair/HTTP/Arrow acceptance. Exist
 - Original ch01:t01 is blocked; chapter review stamp is clear. Repair tasks use its committed functional artifacts directly, avoiding a dependency cycle.
 - ch02 original commits remain recorded and correctness approval is absent. ch06 repairs and native acceptance precede fresh correctness and quality review.
 - Native-dependent original ch03/ch04:t02 are blocked with explicit unblock conditions. HTTP coordinator owns ch03 detail and its integration evidence.
-- The next execution frontier is ch07 Python R2 withdrawal, followed by ch08 native helper/module removal; generic S3 endpoint capability is preserved. ch06 remains active for independent reviews.
+- Ch07 classifier/API withdrawal is signed and verified; staging validation is in progress. Ch08 native OCI ownership and R2 dispatch/module withdrawal is the parallel native frontier. Generic S3 endpoint capability remains verified. Ch06 awaits its independent review closure.
 - ch10 transport is staged under its library-test module until ch12:t01 activates the first real provider caller; all revised ch10/ch12/ch13 revision-5 blueprints await independent cold review. ch10–ch15 cover native publication and lifecycle; ch11 uses persistent SDK-illegal .vtb-cas-lock#0 per physical parent directory and same-parent numeric-# stage names, with physical-directory-ID lock ordering and payload staging outside locks.
 - S3 direct completion returns honest typed 409 conflict/abort; GCS source-generation-pinned rewrite is backend-specific staging.
 - Original Arrow/SHM and user guides remain full scope. ch17–ch19 provide bounded sync codecs, typed per-batch PyArrow worker/native async I/O bridge and lazy SQLSpec integration; original ch04:t02 retains integration acceptance.

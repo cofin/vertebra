@@ -5,7 +5,7 @@ chapter_id: ch08-remove-r2-native
 title: Transfer uniform multipart accumulation into OCI ownership
 description: Transfer uniform multipart accumulation into OCI ownership
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: characterization
 depends_on:
@@ -24,8 +24,8 @@ estimated_loc: 170
 plan_revision: 4
 plan_commit: ddfb11f2
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:oci-accumulator-ownership
+claimed_at: '2026-11-07T22:47:32Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null

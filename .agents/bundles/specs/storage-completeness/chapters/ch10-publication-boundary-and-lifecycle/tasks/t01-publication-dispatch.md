@@ -4,7 +4,7 @@ id: storage-completeness:ch10:t01
 chapter_id: ch10-publication-boundary-and-lifecycle
 title: Retain concrete providers behind a private publication boundary
 description: Retain concrete providers behind a private publication boundary
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: regression_tdd
@@ -26,7 +26,7 @@ tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 230
 plan_revision: 5
-plan_commit: null
+plan_commit: 69a77955
 state_revision: 0
 claimed_by: null
 claimed_at: null

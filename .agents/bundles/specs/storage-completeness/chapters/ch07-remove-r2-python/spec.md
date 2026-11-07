@@ -10,8 +10,8 @@ planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: storage-completeness:ch07:t03
-plan_revision: 4
-plan_commit: ddfb11f2
+plan_revision: 5
+plan_commit: 69a77955
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
 last_reviewed_commit: null
@@ -69,6 +69,8 @@ Caller → seam → collaborator: public storage/framework calls → owned deep 
 | Deep owned boundary with exact provider semantics | Chosen: hides credentials, staging and concurrency while preserving configured SDK behavior. |
 | Generic head-then-write, Python lock, copy-create publication or blanket exception conversion | Rejected: loses atomicity, update results, metadata or error identity. |
 
+For an explicitly configured store/backend, validate every fully qualified URI against its actual `store_uri` (SQLSpec backend) or `url` (native store) before stripping qualification. Normalize only the existing protocol aliases (`gcs`→`gs`, `azure`→`az`) for comparison and require matching remote authority/bucket. Never turn a mismatched scheme or bucket into a relative path by discarding its prefix. Preserve the matching fully qualified backend path so SQLSpec performs its own raw-key/root-containment validation. `validate_staging_target` performs the same qualification rejection before upstream query or producer consumption. No metadata request or object mutation is needed for this validation; local/file and supported matching remote behavior remain accepted.
+
 ## 3. Documentation & OKF Knowledge Plan
 
 Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bundles/knowledge/domains/storage/object-storage.md` by ch09:t03 and user guides by ch04:t03; per-task tests are executable documentation. No separate untracked documentation obligation remains.
@@ -85,14 +87,14 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 
 - [x] [4486f6fe] storage-completeness:ch07:t01 — Remove R2 from framework backend classifiers (tasks/t01-framework-classifiers.md)
 - [x] [75f18e3b] storage-completeness:ch07:t02 — Delete public R2Config and from_r2 convenience APIs (tasks/t02-withdraw-config-and-exports.md)
-- [ ] storage-completeness:ch07:t03 — Reject removed R2 URIs before staging local-path resolution (tasks/t03-staging-reject-r2.md)
+- [~] storage-completeness:ch07:t03 — Reject removed R2 URIs before staging local-path resolution (tasks/t03-staging-reject-r2.md)
 
 **Chapter Recovery Checkpoint:** run every task's focused verification, then correctness review and a fresh quality review before closing this chapter. `/flow:implement storage-completeness ch07-remove-r2-python` executes its ready worksheet.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Revision 4 is independently approved at `ddfb11f2`; implementation follows the declared task dependencies.
-- Remaining: all 3 tasks above; dependent tasks remain ordered by depends_on.
+- Classifier and API withdrawal are signed at `4486f6fe` and `75f18e3b`; staging withdrawal and qualification validation are in progress.
+- Remaining: ch07:t03 staging scheme/authority validation, followed by chapter documentation sync and independent reviews. Native dispatch/module withdrawal remains assigned to ch08.
 - Documentation: `[0/1 files documented]`, owned by the explicit consolidation tasks.
 - Reclosure of ch01 and downstream acceptance waits for native repair gates; this chapter never depends on that reclosure.
 

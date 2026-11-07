@@ -22,8 +22,8 @@ files:
 tests:
 - src/py/tests/unit/extensions/test_data_storage_integrations.py
 estimated_loc: 55
-plan_revision: 4
-plan_commit: ddfb11f2
+plan_revision: 5
+plan_commit: 69a77955
 state_revision: 0
 claimed_by: agent:python-framework-specialist
 claimed_at: '2026-11-07T22:20:00Z'
