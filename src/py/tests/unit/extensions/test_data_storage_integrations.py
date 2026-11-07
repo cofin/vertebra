@@ -31,11 +31,14 @@ from vertebra.extensions.sqlspec.storage import (
     register_storage_alias,
 )
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend as SQLSpecObjectStoreBackend
+from vertebra.extensions.starlette.storage import AsyncStorageRegistry, SyncStorageRegistry
 from vertebra.storage import (
     AsyncGcpTokenCache,
     GCSConfig,
     LocalConfig,
     MemoryConfig,
+    R2Config,
+    S3Config,
     SigningConfig,
     SyncGcpTokenCache,
     SyncObjectStore,
@@ -45,6 +48,51 @@ from vertebra.storage import (
 )
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import decode_json
+
+
+@pytest.mark.parametrize("adapter", ["alchemy", "sqlspec", "starlette-sync", "starlette-async"])
+def test_framework_storage_rejects_r2_config(adapter: str) -> None:
+    """First-class R2 configs are rejected by every framework classifier."""
+    config = R2Config(bucket="unit", account_id="acct")
+    error_type = ImproperConfigurationError if adapter == "sqlspec" else TypeError
+    with pytest.raises(error_type, match="R2Config"):
+        if adapter == "alchemy":
+            AlchemyObjectStoreBackend(fs=config)
+        elif adapter == "sqlspec":
+            SQLSpecObjectStoreBackend(config)
+        elif adapter == "starlette-sync":
+            SyncStorageRegistry().register("unit", config)
+        else:
+            AsyncStorageRegistry().register("unit", config)
+
+
+@pytest.mark.parametrize("adapter", ["alchemy", "sqlspec", "starlette-sync", "starlette-async"])
+def test_framework_storage_accepts_s3_custom_endpoint(adapter: str) -> None:
+    """Generic S3 custom endpoints retain native construction and SigV4 signing."""
+    config = S3Config(
+        bucket="unit",
+        endpoint="http://127.0.0.1:9000",
+        allow_http=True,
+        access_key_id="test-only-key",
+        secret_access_key="test-only-secret",
+    )
+    if adapter == "alchemy":
+        store = AlchemyObjectStoreBackend(fs=config).sync_store
+    elif adapter == "sqlspec":
+        store = SQLSpecObjectStoreBackend(config).sync_store
+    elif adapter == "starlette-sync":
+        registry = SyncStorageRegistry()
+        registry.register("unit", config)
+        store = registry.get("unit")
+    else:
+        async_registry = AsyncStorageRegistry()
+        async_registry.register("unit", config)
+        store = async_registry.get("unit").to_sync()
+    assert store.scheme == "s3"
+    assert store.url == "s3://unit"
+    signed_url = store.presign_get("key")
+    assert signed_url.startswith("http://127.0.0.1:9000/unit/key?")
+    assert "X-Amz-Algorithm=AWS4-HMAC-SHA256" in signed_url
 
 
 def test_duplicated_storage_shims_removed_from_extension_modules() -> None:

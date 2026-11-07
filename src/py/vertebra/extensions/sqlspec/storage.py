@@ -21,7 +21,6 @@ from vertebra.storage import (
     MemoryConfig,
     ObjectMeta,
     OCIConfig,
-    R2Config,
     S3Config,
     SigningConfig,
     StorageConfig,
@@ -52,7 +51,7 @@ __all__ = (
 )
 
 _GLOB_CHARS_RE = re.compile(r"[*?[]")
-_STORAGE_CONFIGS = (LocalConfig, S3Config, GCSConfig, AzureConfig, OCIConfig, R2Config, HTTPConfig, MemoryConfig)
+_STORAGE_CONFIGS = (LocalConfig, S3Config, GCSConfig, AzureConfig, OCIConfig, HTTPConfig, MemoryConfig)
 
 
 class ArrowFlightSerializer:
@@ -92,7 +91,7 @@ class ObjectStoreBackend:
         """Initialize the SQLSpec storage backend from a URI or pre-configured ObjectStore.
 
         Args:
-            uri: Either a storage URI (`memory://`, `file://`, `s3://`, `gs://`, `az://`, `oci://`, `r2://`) or an `ObjectStore`.
+            uri: Either a storage URI (`memory://`, `file://`, `s3://`, `gs://`, `az://`, `oci://`) or an `ObjectStore`.
             store: Optional explicit `ObjectStore` instance taking precedence over `uri`.
             base_path: Base path prefix prepended to relative object paths.
             prefix: Alias for `base_path` when configuring key namespaces directly.

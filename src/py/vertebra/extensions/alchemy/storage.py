@@ -19,7 +19,6 @@ from vertebra.storage import (
     MemoryConfig,
     ObjectMeta,
     OCIConfig,
-    R2Config,
     S3Config,
     StorageConfig,
     SyncObjectStore,
@@ -45,7 +44,7 @@ __all__ = (
     "register_storage_backend",
 )
 
-_STORAGE_CONFIGS = (LocalConfig, S3Config, GCSConfig, AzureConfig, OCIConfig, R2Config, HTTPConfig, MemoryConfig)
+_STORAGE_CONFIGS = (LocalConfig, S3Config, GCSConfig, AzureConfig, OCIConfig, HTTPConfig, MemoryConfig)
 
 
 class ObjectStoreBackend(StorageBackend):
@@ -66,7 +65,7 @@ class ObjectStoreBackend(StorageBackend):
 
         Args:
             key: Logical storage backend key registered in Advanced Alchemy's `storages` registry.
-            fs: Either an `ObjectStore` instance or a storage URI string (`memory://`, `file://`, `s3://`, `gs://`, `az://`, `oci://`, `r2://`).
+            fs: Either an `ObjectStore` instance or a storage URI string (`memory://`, `file://`, `s3://`, `gs://`, `az://`, `oci://`).
             store: Explicit `ObjectStore` keyword alias when constructing directly.
             prefix: Optional key namespace prefix prepended to all stored object paths.
             **kwargs: Optional string options or signing configuration when fs is a URI string.

@@ -12,7 +12,6 @@ from vertebra.storage import (
     LocalConfig,
     MemoryConfig,
     OCIConfig,
-    R2Config,
     S3Config,
     StorageConfig,
     SyncObjectStore,
@@ -31,7 +30,7 @@ __all__ = (
     "attach_storage",
 )
 
-_STORAGE_CONFIGS = (LocalConfig, S3Config, GCSConfig, AzureConfig, OCIConfig, R2Config, HTTPConfig, MemoryConfig)
+_STORAGE_CONFIGS = (LocalConfig, S3Config, GCSConfig, AzureConfig, OCIConfig, HTTPConfig, MemoryConfig)
 
 
 class SyncStorageRegistry:
