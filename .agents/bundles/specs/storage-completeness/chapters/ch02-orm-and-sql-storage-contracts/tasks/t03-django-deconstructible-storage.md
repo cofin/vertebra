@@ -5,7 +5,7 @@ chapter_id: ch02-orm-and-sql-storage-contracts
 title: Subclass Django Storage (@deconstructible) with File handles and full metadata contract
 description: Refactor vertebra.extensions.django.storage.DjangoStorage into a fail-closed @deconstructible subclass of django.core.files.storage.Storage returning Django File objects and implementing all sync/async storage and metadata methods.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -23,18 +23,18 @@ tests:
 estimated_loc: 210
 plan_revision: 3
 plan_commit: 0acdf576
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-07T20:37:34Z"
+last_verified_commit: 8fccaed8
+verification_evidence: "Red: 5 failed, 7 passed. Green: 35 canonical integration tests; source mypy, Ruff check/format and diff check pass. Coordinator chapter checkpoint: 35 passed and Ruff across all three adapters."
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T20:00:00Z"
-commit: null
+updated_at: "2026-11-07T20:37:34Z"
+commit: 8fccaed8
 sources:
   - id: django-storage-mod
     resource: src/py/vertebra/extensions/django/storage.py::DjangoStorage
@@ -105,8 +105,8 @@ Refactor `src/py/vertebra/extensions/django/storage.py::DjangoStorage` into a `@
 
 ## Acceptance Criteria
 
-- [ ] `DjangoStorage` is a `@deconstructible` subclass of `django.core.files.storage.Storage` that fails closed when unconfigured (R3, R6).
-- [ ] `_open` / `open` / `aopen` return `django.core.files.base.File` handles and all required sync/async storage, `listdir`, `url`, `path`, naming, and timestamp methods pass contract tests without touching `_memory` (R6).
+- [x] `DjangoStorage` is a `@deconstructible` subclass of `django.core.files.storage.Storage` that fails closed when unconfigured (R3, R6).
+- [x] `_open` / `open` / `aopen` return `django.core.files.base.File` handles and all required sync/async storage, `listdir`, `url`, `path`, naming, and timestamp methods pass contract tests without touching `_memory` (R6).
 
 ## Notes & Discoveries
 

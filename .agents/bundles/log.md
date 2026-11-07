@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-07] flow-docs | Synchronized implemented ORM and SQL storage contracts before Chapter 02 review
+
+- Synchronized the root/chapter roadmap, chapter catalog, and object-storage knowledge with SQLSpec `dd3c9c08`, Advanced Alchemy `7769500a`, and Django `8fccaed8`. The knowledge chapter records canonical SQLSpec suffixes/signing errors, public Advanced Alchemy registry and `FileObject` operations, and Django deconstruction, `File` handles, async loading, naming, paths, and timestamps.
+- Both canonical extension modules pass together (`35 passed`); Ruff passes for the three adapter modules. Chapter 02 remains active pending correctness and fresh quality review; Chapter 03/04 and both root-manifest user guides remain pending (`1/3` files documented).
+
 - 2026-11-07: revise `storage-completeness` ch02 plan 3 at `0acdf576`: ground SQLSpec method names and unsupported-signing errors in installed ObjectStoreProtocol, preserve Advanced Alchemy public class and registry helper, and specify nonblocking Django async File loading.
 
 ## [2026-11-07] flow-revise | Chapterized native-postgres-driver into 31 chapters and 111 vertical-slice tasks

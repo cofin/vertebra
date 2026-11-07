@@ -73,6 +73,9 @@ sources:
   - id: src-extensions-sqlspec-storage-py
     resource: src/py/vertebra/extensions/sqlspec/storage.py
     title: "SQLSpec ObjectStoreProtocol adapter (src/py/vertebra/extensions/sqlspec/storage.py)"
+  - id: src-extensions-django-storage-py
+    resource: src/py/vertebra/extensions/django/storage.py::DjangoStorage
+    title: "Deconstructible Django Storage and File contract"
   - id: src-tests-integration-storage-conftest-py
     resource: src/py/tests/integration/storage/conftest.py
     title: "Floci emulator integration fixtures (src/py/tests/integration/storage/conftest.py)"
@@ -125,8 +128,17 @@ Provider configs are `msgspec.Struct(frozen=True, gc=False, kw_only=True)` imple
 |---|---|---|
 | [`SyncReadableFile` / `AsyncReadableFile`](../../../../../src/py/vertebra/storage/_store.py) | `_store.py` | Seekable read-only streams (`io.RawIOBase` on sync) streaming from offset `0` via `get_stream` in `__iter__`/`__aiter__` and serving random-access `read` / cursor-preserving `read_at` via `get_range` for PyArrow and Polars Parquet footers. |
 | [`StreamingStorageResponse`](../../../../../src/py/vertebra/storage/_streaming.py)[^src-storage-streaming-py] | `_streaming.py` | Frozen `msgspec.Struct` descriptor for streaming objects, HTTP `206 Partial Content` byte ranges, and `307 Temporary Redirect` presigned URL handoffs through `FastPath`. |
-| [`ObjectStoreBackend`](../../../../../src/py/vertebra/extensions/alchemy/storage.py)[^src-extensions-alchemy-storage-py] | `extensions/alchemy/storage.py` | `advanced_alchemy.types.file_object.StorageBackend` adapter deriving `async_store = sync_store.to_async()` so sync and async share one native engine. |
-| [`ObjectStoreBackend`](../../../../../src/py/vertebra/extensions/sqlspec/storage.py)[^src-extensions-sqlspec-storage-py] | `extensions/sqlspec/storage.py` | `sqlspec.protocols.ObjectStoreProtocol` adapter sharing `SyncObjectStore` / `AsyncObjectStore` and `SyncGcpTokenCache` / `AsyncGcpTokenCache` via `.to_async()`. |
+| [`ObjectStoreBackend`](../../../../../src/py/vertebra/extensions/alchemy/storage.py)[^src-extensions-alchemy-storage-py] | `extensions/alchemy/storage.py` | Explicit-target `ObjectStoreBackend(StorageBackend)` shares a native engine across sync and async handles. `register_storage_backend` uses `StorageRegistry.register_backend` / `get_backend` without mutating `storages.get`; `FileObject` consumers use `save_object`, `get_content`, `delete_object`, and `sign` with async companions. |
+| [`ObjectStoreBackend`](../../../../../src/py/vertebra/extensions/sqlspec/storage.py)[^src-extensions-sqlspec-storage-py] | `extensions/sqlspec/storage.py` | Explicit-target `ObjectStoreProtocol` adapter preserves canonical `*_sync` / `*_async` operations and unsupported-signing `NotImplementedError`. Paired `get_stream`, `put_stream`, `list_page`, and `open` extensions use the same suffixes and native shared-engine handles. |
+| [`DjangoStorage`](../../../../../src/py/vertebra/extensions/django/storage.py)[^src-extensions-django-storage-py] | `extensions/django/storage.py` | Deconstructible Django `Storage` with explicit configuration, Django `File` handles, namespace-aware native operations, collision-safe names, URLs, local paths, and UTC timestamps. |
+
+### Adapter File and Registry Contracts
+
+SQLSpec constructs one primary native store and creates its shared-engine companion lazily. Conditional write options reach the native store; moves use native rename. Relative and URI-qualified keys reject traversal. `build_duckdb_gcs_secret_sql` remains in this module; Arrow/Parquet streaming completion belongs to `ch04` [^src-extensions-sqlspec-storage-py].
+
+Advanced Alchemy accepts a URI/store/config first or a backend key with explicit `store=` through `register_storage_backend`. Bounded sync/async reader chunks and iterables feed native multipart uploads; producer failures abort unfinished uploads. `get_content` / `get_content_async` return full bytes, and saved `FileObject` values receive size, etag, and a UTC save timestamp [^src-extensions-alchemy-storage-py].
+
+Django `_open` / inherited `open` return `File` over `SyncReadableFile`; `aopen` awaits the complete native payload before wrapping `BytesIO` because Django `File` reads synchronously. Both support read-only binary and text modes. `save` / `asave` stream Django chunks, apply filename limits, and retry native create-only collisions unless `file_overwrite=True`. `listdir` returns immediate names; `url` / `aurl` use signing or `base_url`; `path` supports local stores only. Creation/access timestamps reuse the object's UTC modification timestamp because object metadata does not provide separate values [^src-extensions-django-storage-py].
 
 ## 5. Emulator Fixtures & Test Suites
 
@@ -156,3 +168,5 @@ Provider configs are `msgspec.Struct(frozen=True, gc=False, kw_only=True)` imple
 [^src-extensions-alchemy-storage-py]: `src/py/vertebra/extensions/alchemy/storage.py` — Advanced Alchemy StorageBackend adapter (src/py/vertebra/extensions/alchemy/storage.py).
 [^src-extensions-sqlspec-storage-py]: `src/py/vertebra/extensions/sqlspec/storage.py` — SQLSpec ObjectStoreProtocol adapter (src/py/vertebra/extensions/sqlspec/storage.py).
 [^src-tests-integration-storage-conftest-py]: `src/py/tests/integration/storage/conftest.py` — Floci emulator integration fixtures (src/py/tests/integration/storage/conftest.py).
+
+[^src-extensions-django-storage-py]: `src/py/vertebra/extensions/django/storage.py::DjangoStorage` — Deconstructible Django Storage and File contract.
