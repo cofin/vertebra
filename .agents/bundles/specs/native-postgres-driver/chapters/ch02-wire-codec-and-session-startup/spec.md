@@ -11,8 +11,8 @@ depends_on_chapters:
   - ch01-wheel-scaffold-and-config
 replan_trigger: null
 current_task: "native-postgres-driver:ch02:t02"
-plan_revision: 5
-plan_commit: 399e068c
+plan_revision: 6
+plan_commit: 8833b064
 state_revision: 2
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -99,6 +99,8 @@ Task 01 applies `#[cfg_attr(not(test), expect(dead_code, reason = "Framing prece
   - `impl ConnectAttempt { pub async fn run(self) -> Result<PendingSession, PostgresError> }`
   - `SessionHandle` clones share owned `Arc<PostgresConfig>` and `Arc<std::sync::Mutex<SessionState>>`; `ConnectAttempt` and `PendingSession` own a cloned `SessionHandle`, deadline, and armed rollback state. Both guards and the `run()` future are `Send + 'static` without borrowing the caller, holding a mutex guard across `.await`, or leaking allocations.
   - `impl PendingSession { pub fn commit(self) -> Result<(), PostgresError> }`
+  - `PendingSession::connection(&self) -> &PostgresConnection` provides read-only prepublication inspection; `PostgresConnection::tls_server_end_point(&self) -> Option<&[u8]>` provides the negotiated channel-binding digest. Backend keys remain Rust-only.
+  - Diagnostic fields use the direct `fallible_iterator::FallibleIterator` dependency and `ErrorField::{type_, value_bytes}` APIs.
 - Rust (`src/rs/vertebra-postgres/src/tls.rs`, crate-private `pub(crate)`):
   - `pub(crate) struct DialedTransport { pub stream: TransportStream, pub tls_server_end_point: Option<Vec<u8>> }`
   - `pub(crate) async fn connect(config: &PostgresConfig, deadline: tokio::time::Instant) -> Result<DialedTransport, PostgresError>`
@@ -109,6 +111,7 @@ Task 01 applies `#[cfg_attr(not(test), expect(dead_code, reason = "Framing prece
 
 ```text
 SessionHandle::begin_connect()
+  -> PendingSession::connection() -> PostgresConnection metadata getters (Rust adoption checks)
   -> ConnectAttempt::run() [single timeout_at(deadline)]
        -> tls::connect() -> frontend::ssl_request + TransportStream::upgrade_tls()
        -> protocol::encode_startup_frame() -> frontend::startup_message()
@@ -146,7 +149,7 @@ Progress: `[0/0 files documented in ch02]` (all new symbols in `protocol.rs`, `t
 ## 5. Implementation Plan
 
 - [x] [a00c3248] native-postgres-driver:ch02:t01 — Implement bounded PostgreSQL Protocol 3.0 startup encoder and backend frame decoder (tasks/t01-bounded-codec.md)
-- [ ] native-postgres-driver:ch02:t02 — Establish authenticated trust sessions with SessionHandle and PendingSession publication (tasks/t02-trust-session-lifecycle.md)
+- [!] native-postgres-driver:ch02:t02 — Establish authenticated trust sessions with SessionHandle and PendingSession publication (tasks/t02-trust-session-lifecycle.md)
 - [ ] native-postgres-driver:ch02:t03 — Negotiate PostgreSQL SSLRequest and verify rustls peer TLS identities (tasks/t03-sslrequest-and-tls-identity.md)
 - [ ] native-postgres-driver:ch02:t04 — Authenticate cleartext password and MD5 startup exchanges (tasks/t04-cleartext-and-md5-auth.md)
 
@@ -154,10 +157,11 @@ Progress: `[0/0 files documented in ch02]` (all new symbols in `protocol.rs`, `t
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ 399e068c`; chapter `state: active`, `planning_status: complete`, depends on completed `ch01-wheel-scaffold-and-config` reviewed at `0c7a4636`.
-- **Task Progress**: `t01` is `in_progress` with 9 codec tests and 7 existing integration tests passing. The all-target Clippy gate rejects unused crate-private producers until `t02` supplies production callers; bounded `/flow:revise native-postgres-driver ch02-wire-codec-and-session-startup` resolves the task boundary before completion. `t02`, `t03`, and `t04` remain pending.
-- **Documentation & OKF Status**: `[0/0 files documented in ch02]`; user docs and OKF data chapters scheduled in `ch30`.
-- **Downstream Dependents**: Unblocks `ch03-scram-and-channel-binding` (`ch03:t01` depends on `ch02:t04`).
+- **Verified Baseline**: Codec task 01 is complete at `a00c3248`; chapter `state: active`, `planning_status: complete`.
+- **Task State**: Session task 02 is blocked on the direct diagnostic-iterator prerequisite and fresh chapter 01 review; TLS task 03 and password/MD5 task 04 remain pending.
+- **Shared Contracts**: The session uses owned Arc-backed guards and read-only metadata getters; private codec expectations are removed when session consumers land.
+- **Documentation**: `[0/0 files documented in ch02]`; full user and domain guidance remains assigned to chapter 30.
+- **Resume**: Complete and review the existing chapter 01 prerequisite owners, then resume task 02.
 
 [^rs-transport]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP and `rustls` TLS upgrade stream primitives.
 [^proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — Protocol 3.0 framing, `SSLRequest`, and auth state machine analysis.

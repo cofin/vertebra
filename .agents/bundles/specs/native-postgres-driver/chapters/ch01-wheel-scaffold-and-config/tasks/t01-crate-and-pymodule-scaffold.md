@@ -5,7 +5,7 @@ chapter_id: ch01-wheel-scaffold-and-config
 title: Scaffold vertebra-postgres Cargo manifest, build script, and free-threaded PyO3 module
 description: Create src/rs/vertebra-postgres/Cargo.toml with complete locked dependency pins, build.rs with PyO3 cfg/rpath setup, and src/lib.rs exporting gil_used=false vertebra._postgres metadata constants prior to workspace registration.
 status: stable
-state: completed
+state: in_progress
 priority: P1
 verification_strategy: static_validation
 depends_on: []
@@ -22,20 +22,20 @@ files:
   - src/rs/vertebra-postgres/src/lib.rs
 tests: []
 estimated_loc: 120
-plan_revision: 5
-plan_commit: 399e068c
+plan_revision: 6
+plan_commit: 8833b064
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:pg-prerequisite-repair
+claimed_at: "2026-11-07T22:33:25Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: "2026-11-07T20:05:56Z"
-last_verified_commit: 5f25a4a0
+last_verified_at: null
+last_verified_commit: null
 verification_evidence: "Declared TOML assertions, rustfmt --edition 2024 --check, cargo check --workspace --locked (baseline and final), git diff --check: exit 0; Cargo workspace manifest and lock unchanged."
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-07T16:40:00Z"
-commit: 5f25a4a0
+commit: null
 sources:
   - id: ws-cargo
     resource: src/rs/Cargo.toml
@@ -63,7 +63,7 @@ tags:
 
 ## Objective & Scope Boundary
 
-Create the complete `src/rs/vertebra-postgres` crate scaffold (`Cargo.toml`, `build.rs`, and `src/lib.rs`) with all protocol, TLS, X.509, `half`, and Arrow dependencies pinned upfront and `#[pymodule(gil_used = false)] fn _postgres` exporting truthful metadata constants before registering the crate in `src/rs/Cargo.toml` [^ws-cargo] [^spanner-cargo] [^spanner-lib] [^proto-research]. Registering `"vertebra-postgres"` in `src/rs/Cargo.toml` and updating `src/rs/Cargo.lock` belong to `native-postgres-driver:ch01:t02` ([../spec.md](../spec.md)).
+The native crate, build script, metadata exports, and workspace registration satisfy the scaffold contracts below. The remaining task-01 delta declares `fallible-iterator = "=0.2.0"` directly in the existing crate manifest, paired atomically with task 02's existing-version lock edge. No library/build-script changes or new Python exports belong to this prerequisite repair. All complete dependency, feature-isolation, and free-threaded scaffold contracts remain required.
 
 ## Bounded Read Manifest
 
@@ -86,6 +86,7 @@ Create the complete `src/rs/vertebra-postgres` crate scaffold (`Cargo.toml`, `bu
     - `arrow-ipc = { version = "=60.1.0", default-features = false }`
     - `arrow-schema = { version = "=60.1.0", default-features = false }`
     - `bytes = { workspace = true }`
+    - `fallible-iterator = "=0.2.0"`
     - `half = "=2.7.1"`
     - `postgres-protocol = "=0.6.12"`
     - `pyo3 = { workspace = true }`
@@ -123,9 +124,9 @@ Create the complete `src/rs/vertebra-postgres` crate scaffold (`Cargo.toml`, `bu
 
 ## Edge Cases & Error Semantics
 
-- Pin `x509-parser = { version = "=0.18.1", default-features = false }` to match the workspace `Cargo.lock` resolution without OpenSSL/native TLS features, enable `"pem"` on `rsa = { version = "0.9", features = ["pem", "sha2"] }` alongside `rustls-pemfile = { workspace = true }`, and declare `half = "=2.7.1"` plus `arrow-{array,buffer,ipc,schema} = { version = "=60.1.0", default-features = false }` upfront so `ch04`, `ch12:t01`, and `ch19:t01` never dirty `src/rs/Cargo.lock`.
-- Keep `tokio-postgres = "=0.7.18"` strictly inside `[dev-dependencies]` and `[features] default = []` empty so workspace `cargo test` links `_postgres` cleanly with `pyo3` `auto-initialize` [^proto-research].
-- Leaving `src/rs/Cargo.toml` untouched in `t01` guarantees the existing workspace remains `--locked`-green while `src/lib.rs` is already present before `t02` adds `"vertebra-postgres"` to `[workspace].members`.
+- Direct diagnostic iteration uses the same `fallible-iterator 0.2.0` trait implemented by `postgres-protocol 0.6.12`; a different trait version is incompatible.
+- Manifest and lock changes form one coherent source delta; neither owner commits an intermediate unresolved lock state.
+- Existing package/version/source/checksum identities and all workspace membership, dependency pins, metadata exports, and module visibility stay intact.
 
 ## Public-Seam Test Blueprint
 
@@ -137,42 +138,50 @@ Create the complete `src/rs/vertebra-postgres` crate scaffold (`Cargo.toml`, `bu
 | Library target & feature isolation | Parse `src/rs/vertebra-postgres/Cargo.toml` with `tomllib` | `lib == {"name": "_postgres", "crate-type": ["cdylib", "rlib"]}`, `features == {"default": [], "extension-module": ["pyo3/extension-module"]}`. |
 | Complete upfront dependency pins | Inspect `dependencies` and `dev-dependencies` tables | `postgres-protocol == "=0.6.12"`, `x509-parser == {"version": "=0.18.1", "default-features": False}`, `rsa["features"] == ["pem", "sha2"]`, `rustls-pemfile == {"workspace": True}`, `half == "=2.7.1"`, all four `arrow-*` crates `{"version": "=60.1.0", "default-features": False}`, `"tokio-postgres" not in dependencies`, `dev-dependencies["tokio-postgres"] == "=0.7.18"`. |
 | `build.rs` & `lib.rs` formatting and module exports | `rustfmt --edition 2024 --check` + source inspection of `src/lib.rs` | Exits `0`; `#[pymodule(gil_used = false)] fn _postgres` exports `FREE_THREADED`, `GIL_USED`, and `__version__`. |
-| Existing workspace `--locked` health | `cargo check --manifest-path src/rs/Cargo.toml --workspace --locked` | Exits `0` with `src/rs/Cargo.lock` completely clean prior to `t02`. |
+| Coupled prerequisite `--locked` health | `cargo check --manifest-path src/rs/Cargo.toml --workspace --locked` | Exits `0` after the coupled delta; final validation makes no further lock edits. |
 
 ## Verification
 
-Verify all manifest pins, formatting, and workspace health exit `0`:
+Baseline and final native gates select the project interpreter with `PYO3_PYTHON=${PWD}/.venv/bin/python`, `UV_NO_SYNC=1`, and the PostgreSQL Cargo target directory. The current change is the coupled direct-dependency/lock-edge delta; scaffold files and workspace membership retain their verified contracts.
 
 ```bash
-uv run --no-sync python -c '
-import pathlib, tomllib
-pkg = tomllib.loads(pathlib.Path("src/rs/vertebra-postgres/Cargo.toml").read_text())
-deps = pkg["dependencies"]
-assert pkg["lib"] == {"name": "_postgres", "crate-type": ["cdylib", "rlib"]}
-assert pkg["features"] == {"default": [], "extension-module": ["pyo3/extension-module"]}
-assert deps["postgres-protocol"] == "=0.6.12"
-assert deps["x509-parser"] == {"version": "=0.18.1", "default-features": False}
-assert deps["rsa"] == {"version": "0.9", "features": ["pem", "sha2"]}
-assert deps["rustls-pemfile"] == {"workspace": True}
-assert deps["half"] == "=2.7.1"
-for k in ("arrow-array", "arrow-buffer", "arrow-ipc", "arrow-schema"):
-    assert deps[k] == {"version": "=60.1.0", "default-features": False}, k
-assert "tokio-postgres" not in deps
-assert pkg["dev-dependencies"]["tokio-postgres"] == "=0.7.18"
-'
-rustfmt --edition 2024 --check src/rs/vertebra-postgres/build.rs src/rs/vertebra-postgres/src/lib.rs
-cargo check --manifest-path src/rs/Cargo.toml --workspace --locked
+uv run --no-sync python - <<'PY'
+from pathlib import Path
+import subprocess
+import tomllib
+manifest = tomllib.loads(Path("src/rs/vertebra-postgres/Cargo.toml").read_text())
+assert manifest["dependencies"]["fallible-iterator"] == "=0.2.0"
+previous = tomllib.loads(subprocess.check_output(["git", "show", "8833b064:src/rs/Cargo.lock"], text=True))
+current = tomllib.loads(Path("src/rs/Cargo.lock").read_text())
+def identities(data):
+    return {(p["name"], p["version"], p.get("source"), p.get("checksum")) for p in data["package"]}
+assert identities(previous) == identities(current)
+package = next(p for p in current["package"] if p["name"] == "vertebra-postgres")
+assert any(dep == "fallible-iterator" or dep == "fallible-iterator 0.2.0" for dep in package["dependencies"])
+PY
 ```
 
-Commit as `build(postgres): scaffold vertebra-postgres crate and pymodule`.
+```bash
+cargo check --manifest-path src/rs/Cargo.toml --workspace --locked
+cargo clippy --manifest-path src/rs/Cargo.toml --workspace --all-targets --features tls,compression,gcp --locked -- -D warnings
+flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked
+```
+
+Resolve the two-file delta with scoped/offline Cargo metadata before running the final locked gates. Compare `(name, version, source, checksum)` package identities against `git show 8833b064:src/rs/Cargo.lock`; all identities stay equal and the PostgreSQL package gains its direct `fallible-iterator` edge at existing version `0.2.0`.
+
+Tasks 01 and 02 share one signed source commit, `fix(postgres): declare diagnostic iterator prerequisite`, covering only the crate manifest and Cargo lockfile. Both worksheets record that source SHA and their respective ownership after the complete gates pass. Fresh correctness and independent quality review reclose chapter 01 before the blocked session task resumes.
 
 ## Acceptance Criteria
+
+- [ ] The direct `fallible-iterator = "=0.2.0"` prerequisite is present and its existing-version lock edge passes the static native delta gates (R1).
 
 - [x] `src/rs/vertebra-postgres/Cargo.toml` declares `_postgres` (`cdylib` + `rlib`), `postgres-protocol = "=0.6.12"`, `x509-parser = "=0.18.1"` (`default-features = false`), `rsa` `["pem", "sha2"]`, `rustls-pemfile`, `half = "=2.7.1"`, `arrow-{array,buffer,ipc,schema} = "=60.1.0"`, and dev-only `tokio-postgres = "=0.7.18"` (R1).
 - [x] `src/rs/vertebra-postgres/build.rs` and `src/rs/vertebra-postgres/src/lib.rs` (`#[pymodule(gil_used = false)] fn _postgres` exporting `FREE_THREADED`, `GIL_USED`, `__version__`) pass `rustfmt --edition 2024 --check` (R1).
 - [x] Existing workspace passes `cargo check --manifest-path src/rs/Cargo.toml --workspace --locked` with zero dirty lockfile changes (R1).
 
 ## Notes & Discoveries
+
+- `fallible-iterator = "=0.2.0"` is a direct dependency because the pinned protocol crate exposes diagnostic fields through its non-reexported trait. This static prerequisite delta shares a signed commit with the task 02 lockfile edge; both worksheets keep their existing file ownership.
 
 - The manifest, build script, and library target form a valid crate before workspace registration.
 

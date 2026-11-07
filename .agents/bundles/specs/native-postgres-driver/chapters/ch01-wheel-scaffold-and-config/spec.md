@@ -5,16 +5,16 @@ chapter_id: ch01-wheel-scaffold-and-config
 title: "Chapter 01: Standalone Optional Wheel Scaffold and Native Connection Configuration"
 description: Scaffold the standalone vertebra-postgres PyO3 crate, lock workspace and vertebra-db Cargo dependencies upfront, wire the vertebra._postgres wheel/stub/Makefile matrix, and implement pure PostgresConfig validation and ServerError categories.
 status: stable
-state: completed
+state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: null
-plan_revision: 5
-plan_commit: 399e068c
+current_task: "native-postgres-driver:ch01:t01"
+plan_revision: 6
+plan_commit: 8833b064
 state_revision: 1
 last_verified_checkpoint: 76828ae6
-last_reviewed_commit: 0c7a4636
+last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-07T21:53:16Z"
 generated:
@@ -85,6 +85,8 @@ Parent roadmap: [spec.md](../../spec.md). Public interface contracts: [contracts
 
 ### 2.1 Chapter Requirements
 
+The static prerequisite repair belongs to the existing task 01 crate manifest and task 02 Cargo lockfile owners: add direct `fallible-iterator = "=0.2.0"` and its existing-version lock edge in one coherent signed delta, retain all existing functionality, and obtain fresh correctness/quality review before downstream execution.
+
 - **R1 (`ch01:t01`, `ch01:t02`, `ch01:t03`)**: Author `vertebra-postgres` (`lib.name = "_postgres"`, `cdylib` + `rlib`, `gil_used = false`), register workspace membership and lock `src/rs/Cargo.lock` alongside `vertebra-db`'s `socket2` and `half` pins, and wire `src/rs/vertebra-postgres/pyproject.toml`, `src/py/vertebra/_postgres.pyi`, and `Makefile` (`dev`, `build`, `py-test`, `lint`, `lint-all`, `postgres-test`, `postgres-wheel-check`).
 - **R2 & R3 (`ch01:t04`)**: Define the complete owned `PostgresConfig` struct matching every constructor field and default in `contracts.md`, validate scalar/port/timeout/NUL/PEM/five-spelling `TlsMode` rules purely in memory, and define `ServerError` and `PostgresError` with SQLSTATE retention, diagnostic preservation, and secret redaction.
 
@@ -143,19 +145,20 @@ Progress: `[0/0 files documented in ch01]` (`src/py/vertebra/_postgres.pyi` modu
 
 ## 5. Implementation Plan
 
-- [x] [5f25a4a0] native-postgres-driver:ch01:t01 — Scaffold vertebra-postgres Cargo manifest, build script, and free-threaded PyO3 module (tasks/t01-crate-and-pymodule-scaffold.md)
-- [x] [9e128425] native-postgres-driver:ch01:t02 — Register workspace member, add vertebra-db socket2/half pins, and lock Cargo.lock (tasks/t02-workspace-and-db-cargo-lock.md)
+- [~] native-postgres-driver:ch01:t01 — Scaffold vertebra-postgres Cargo manifest, build script, and free-threaded PyO3 module (tasks/t01-crate-and-pymodule-scaffold.md)
+- [~] native-postgres-driver:ch01:t02 — Register workspace member, add vertebra-db socket2/half pins, and lock Cargo.lock (tasks/t02-workspace-and-db-cargo-lock.md)
 - [x] [05fff946] native-postgres-driver:ch01:t03 — Wire vertebra-postgres wheel, _postgres.pyi stub, and Makefile build/test targets (tasks/t03-wheel-stub-and-makefile-matrix.md)
 - [x] [dabd3ca2] native-postgres-driver:ch01:t04 — Implement pure PostgresConfig validation and sanitized PostgresError categories (tasks/t04-configuration-and-error-categories.md)
 
-**Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings && make dev && make postgres-wheel-check && make postgres-test && uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._bigquery vertebra._spanner vertebra._postgres` exits `0` at `08a6295b` (`7` PostgreSQL tests passing) with `UV_NO_SYNC=1` and the dedicated Python environment. PostgreSQL Rust test commands hold the shared-memory test lock.
+**Prerequisite Recovery Checkpoint:** `cargo check --manifest-path src/rs/Cargo.toml --workspace --locked && cargo clippy --manifest-path src/rs/Cargo.toml --workspace --all-targets --features tls,compression,gcp --locked -- -D warnings && flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked` exits `0` for the coupled two-file prerequisite delta; existing wheel/FFI contracts retain their verified evidence.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ 0c7a4636`; chapter `state: completed`, `planning_status: complete`.
-- **Task & Review State**: All four tasks, the chapter recovery checkpoint, correctness review, and fresh quality review pass. `last_reviewed_commit: 0c7a4636`.
-- **Documentation & OKF Status**: `[0/0 files documented in ch01]`; `_postgres.pyi` and wheel/sdist contracts are verified; full driver guides and knowledge remain assigned to chapter 30.
-- **Next Chapter**: `ch02-wire-codec-and-session-startup` starts with `native-postgres-driver:ch02:t01`.
+- **Verified Baseline**: `HEAD @ 8833b064`; chapter `state: active`, `planning_status: complete`, `last_reviewed_commit: null`.
+- **Task State**: Tasks 01 and 02 own the coupled manifest/lock prerequisite delta; tasks 03 and 04 retain completed receipts.
+- **Verification & Review**: The targeted prerequisite checkpoint and fresh correctness/quality review reclose this chapter before downstream session execution.
+- **Documentation**: `[0/0 files documented in ch01]`; full driver guides remain assigned to chapter 30.
+- **Downstream Resume**: Chapter 02 task 01 is complete; task 02 waits for the new upstream review stamp.
 
 [^ws-cargo]: `src/rs/Cargo.toml` — Rust workspace members and shared crate dependency versions.
 [^spanner-wheel]: `src/rs/vertebra-spanner/pyproject.toml` — Reference optional Maturin namespace wheel configuration.

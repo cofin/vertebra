@@ -23,8 +23,8 @@ files:
   - .agents/bundles/product/tech-stack.md
 tests: []
 estimated_loc: 195
-plan_revision: 5
-plan_commit: 399e068c
+plan_revision: 6
+plan_commit: 8833b064
 state_revision: 0
 claimed_by: null
 claimed_at: null

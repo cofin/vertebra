@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-07] flow-revise | Native PostgreSQL diagnostic iterator prerequisite
+
+- Chapter 02 session compilation demonstrates that `postgres-protocol` diagnostics require the direct `fallible-iterator` trait dependency and `ErrorField::type_` / `value_bytes` APIs. Revision 6 at `8833b064` assigns the two-file prerequisite delta to the existing chapter 01 manifest/lock owners, clears upstream review, and holds downstream session execution until fresh review.
+- The session prototype is preserved in local stash `67802374b0cee58f89b6a2f9399a0393d966457b`. The plan retains 31 chapters and 111 tasks; read-only Rust metadata adoption/channel-binding getters are concrete shared contracts with no Python exposure.
+
 ## [2026-11-07] flow-revise | Native PostgreSQL codec producer staging
 
 - Native chapter 02 task 01 tests pass (nine codec cases plus seven existing configuration cases), while all-target Clippy reports private producers without callers before task 02 integration.

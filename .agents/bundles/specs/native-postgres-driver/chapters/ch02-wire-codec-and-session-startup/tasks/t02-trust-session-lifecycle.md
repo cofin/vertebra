@@ -5,7 +5,7 @@ chapter_id: ch02-wire-codec-and-session-startup
 title: Establish authenticated trust sessions with SessionHandle and PendingSession publication
 description: Implement PostgresConnection, SessionHandle, ConnectAttempt, and PendingSession enforcing strict Protocol 3.0 startup ordering, total deadline budgets, cancellation rollback, and bounded Terminate close.
 status: stable
-state: pending
+state: blocked
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -25,14 +25,14 @@ tests:
   - src/rs/vertebra-postgres/tests/support/mod.rs
   - src/rs/vertebra-postgres/tests/postgres_wire_tests.rs
 estimated_loc: 240
-plan_revision: 5
-plan_commit: 399e068c
+plan_revision: 6
+plan_commit: 8833b064
 state_revision: 0
 claimed_by: null
 claimed_at: null
-blocked_reason: null
-unblock_condition: null
-next_step: null
+blocked_reason: "Upstream chapter 01 direct diagnostic-iterator dependency repair awaits fresh review."
+unblock_condition: "Chapter 01 is completed with a fresh reviewed prerequisite repair."
+next_step: "/flow:implement native-postgres-driver ch01-wheel-scaffold-and-config"
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
@@ -82,7 +82,7 @@ Implement `PostgresConnection`, `SessionHandle`, `ConnectAttempt`, and `PendingS
   - `#[derive(Clone, Copy, Debug, PartialEq, Eq)] pub struct BackendKey { pub process_id: i32, pub secret_key: i32 }` (Rust-only; never exposed as Python client attributes).
   - `pub struct PostgresConnection`:
     - Owns `stream: TransportStream`, `parameters: HashMap<String, String>`, `backend_key: Option<BackendKey>`, `transaction_status: TransactionStatus`, and `tls_server_end_point: Option<Vec<u8>>`.
-    - Public getters `parameters(&self) -> &HashMap<String, String>`, `backend_key(&self) -> Option<BackendKey>`, `transaction_status(&self) -> TransactionStatus`.
+    - Public getters `parameters(&self) -> &HashMap<String, String>`, `backend_key(&self) -> Option<BackendKey>`, `transaction_status(&self) -> TransactionStatus`, and `tls_server_end_point(&self) -> Option<&[u8]>` for TLS channel-binding consumers.
   - `#[derive(Clone)] pub struct SessionHandle`:
     - Owns `config: Arc<PostgresConfig>` and `state: Arc<std::sync::Mutex<SessionState>>` (`Configured`, `Connecting`, `Ready { conn: PostgresConnection, params_snapshot: HashMap<String, String> }`, `Closed { params_snapshot: HashMap<String, String> }`) — never hold the `std::sync::Mutex` across `.await` or Python callbacks.
     - `pub fn new(config: PostgresConfig) -> Self`
@@ -102,8 +102,9 @@ Implement `PostgresConnection`, `SessionHandle`, `ConnectAttempt`, and `PendingS
     - `pub async fn run(self) -> Result<PendingSession, PostgresError>` driving dial + startup + auth inside a single `tokio::time::timeout_at(self.deadline, ...)`:
       - Initially accepts direct TCP (`unix_socket.is_none()`, `cloud_sql_instance.is_none()`, `alloydb_instance_uri.is_none()`, `!enable_iam_auth`) with `sslmode == TlsMode::Disable` and `AuthenticationOk` (trust); explicitly returns `UnsupportedFeature` / `UnsupportedAuth` for TLS/password/cloud modes until subsequent tasks.
       - Startup state machine enforces: (1) exactly one `AuthenticationOk` before any `ParameterStatus`, `BackendKeyData`, or `ReadyForQuery`; (2) `ParameterStatus` frames recorded in `parameters` (last value wins per key, valid UTF-8); (3) at most one `BackendKeyData`; (4) `ReadyForQuery` status parsed via `TransactionStatus::from_wire_byte(body.status())?` must equal `TransactionStatus::Idle` (`b'I'`) only after `parameters.get("client_encoding") == Some("UTF8")`.
-      - Consumes `NoticeResponse` silently; maps `ErrorResponse` (`S`/`V` severity, `C` SQLSTATE, `M` message, and `(field.type_byte(), value)` `diagnostics` via `PostgresError::server(...)`) to `PostgresError::Server(ServerError)`.
+      - Consumes `NoticeResponse` silently; maps `ErrorResponse` (`S`/`V` severity, `C` SQLSTATE, `M` message, and `(field.type_(), UTF8(field.value_bytes()))` `diagnostics` via `PostgresError::server(...)`) to `PostgresError::Server(ServerError)`.
   - `impl PendingSession`:
+    - `pub fn connection(&self) -> &PostgresConnection` exposes read-only negotiated metadata before adoption; Rust callers inspect backend key, transaction status, parameters, and channel-binding data without taking transport ownership or exposing Python attributes.
     - `pub fn commit(mut self) -> Result<(), PostgresError>`: rechecks `tokio::time::Instant::now() <= self.deadline` (failing `PostgresError::Transport` and rolling back to `Closed` if elapsed), atomically publishes `SessionState::Ready`, and disarms the rollback guard.
 - `src/rs/vertebra-postgres/tests/support/mod.rs`:
   - Reusable loopback `TcpListener` harness, deterministic `tokio::sync::{Barrier, oneshot, Notify}` helpers, and raw backend frame builders (`AuthenticationOk`, `ParameterStatus`, `BackendKeyData`, `ReadyForQuery`, `ErrorResponse`) imported via `mod support;` across sibling wire test files.
@@ -152,6 +153,8 @@ Commit as `feat(postgres): own startup session lifecycle and publication`.
 - [ ] Dropping `ConnectAttempt` or uncommitted `PendingSession` rolls `SessionHandle` to `Closed` and closes the underlying socket deterministically across all ten loopback tests (R7).
 
 ## Notes & Discoveries
+
+- Diagnostic traversal imports `fallible_iterator::FallibleIterator` directly; pinned protocol fields expose `type_()` and `value_bytes()`. No replacement parser or copied iterator trait is involved.
 
 - [2026-11-07 05:00] Keeping reusable loopback frame/barrier helpers in `src/rs/vertebra-postgres/tests/support/mod.rs` allows `postgres_wire_tests.rs`, `postgres_tls_wire_tests.rs`, and `postgres_auth_wire_tests.rs` to share `mod support;` without cross-importing test binaries.
 

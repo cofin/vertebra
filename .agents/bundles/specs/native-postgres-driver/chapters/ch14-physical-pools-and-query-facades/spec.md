@@ -11,8 +11,8 @@ depends_on_chapters:
   - ch13-transactions-portals-and-statement-cache
 replan_trigger: null
 current_task: "native-postgres-driver:ch14:t01"
-plan_revision: 5
-plan_commit: 399e068c
+plan_revision: 6
+plan_commit: 8833b064
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null

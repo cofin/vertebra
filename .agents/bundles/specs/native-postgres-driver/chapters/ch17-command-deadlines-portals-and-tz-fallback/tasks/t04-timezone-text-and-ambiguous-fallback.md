@@ -25,8 +25,8 @@ tests:
   - src/rs/vertebra-postgres/tests/timezone_text.rs
   - src/py/tests/unit/db/test_postgres_native_queries.py
 estimated_loc: 230
-plan_revision: 5
-plan_commit: 399e068c
+plan_revision: 6
+plan_commit: 8833b064
 state_revision: 0
 claimed_by: null
 claimed_at: null

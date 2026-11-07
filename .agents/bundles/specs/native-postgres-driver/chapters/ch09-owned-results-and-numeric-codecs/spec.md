@@ -11,8 +11,8 @@ depends_on_chapters:
   - ch08-constructor-parity-and-wheel-gil
 replan_trigger: null
 current_task: "native-postgres-driver:ch09:t01"
-plan_revision: 5
-plan_commit: 399e068c
+plan_revision: 6
+plan_commit: 8833b064
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
