@@ -91,7 +91,12 @@ class AsyncMultipartUpload:
 
 @final
 class SyncObjectStore:
-    def __new__(cls, url: str, options: dict[str, str] | None = None) -> SyncObjectStore: ...
+    def __new__(
+        cls,
+        url: str,
+        options: dict[str, str] | None = None,
+        token_cache_capsule: object | None = None,
+    ) -> SyncObjectStore: ...
     @property
     def scheme(self) -> str: ...
     def to_async(self) -> AsyncObjectStore: ...
@@ -141,7 +146,12 @@ class SyncObjectStore:
 
 @final
 class AsyncObjectStore:
-    def __new__(cls, url: str, options: dict[str, str] | None = None) -> AsyncObjectStore: ...
+    def __new__(
+        cls,
+        url: str,
+        options: dict[str, str] | None = None,
+        token_cache_capsule: object | None = None,
+    ) -> AsyncObjectStore: ...
     @property
     def scheme(self) -> str: ...
     def to_sync(self) -> SyncObjectStore: ...
@@ -233,6 +243,8 @@ def py_sign_gcs_v4_iam_url(
     iam_endpoint: str = "https://iamcredentials.googleapis.com",
     access_token: str | None = None,
     private_key_pem: str | None = None,
+    endpoint: str | None = None,
+    token_cache_capsule: object | None = None,
 ) -> str: ...
 def py_sign_gcs_v4_iam_url_async(
     bucket: str,
@@ -244,6 +256,8 @@ def py_sign_gcs_v4_iam_url_async(
     iam_endpoint: str = "https://iamcredentials.googleapis.com",
     access_token: str | None = None,
     private_key_pem: str | None = None,
+    endpoint: str | None = None,
+    token_cache_capsule: object | None = None,
 ) -> RustTaskAwaitable: ...
 def py_sign_oci_cavage_headers(
     tenancy_ocid: str,
@@ -298,6 +312,7 @@ def build_gcs_v4_canonical_request(
     object_path: str,
     expires_in_secs: int = 3600,
     timestamp: int | None = None,
+    endpoint: str | None = None,
 ) -> tuple[str, str, str, str]: ...
 def assemble_gcs_iam_v4_url(
     canonical_uri: str,

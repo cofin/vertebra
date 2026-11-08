@@ -21,16 +21,19 @@ use pyo3::exceptions::{
     PyStopAsyncIteration, PyStopIteration, PyValueError,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyType, PyWeakref, PyWeakrefMethods, PyWeakrefReference};
+use pyo3::types::{PyBytes, PyCapsule, PyType, PyWeakref, PyWeakrefMethods, PyWeakrefReference};
 use tokio::task::AbortHandle;
+use vertebra_core::gcp_auth::{
+    GCP_TOKEN_CACHE_CAPSULE_NAME, GcpTokenCacheCapsule, SharedGcpTokenCacheHandle,
+};
 use vertebra_core::notify::{AsyncCompletionQueue, Notifier};
 
 use crate::oci::{OciCavageCredentials, OciParConfig, build_oci_par_url, sign_oci_cavage_request};
 use crate::r2::chunk_uniform_parts;
 use crate::signing::{
     AwsSigV4HeaderConfig, AzureSasConfig, GcsSignConfig, GcsV4CanonicalRequest, HmacSigner,
-    S3SignConfig, sign_aws_sigv4_headers, sign_azure_sas_url, sign_gcs_v4_with_iam_endpoint,
-    sign_s3_v4_url, verify_s3_v4_url,
+    S3SignConfig, resolve_gcs_endpoint_origin, sign_aws_sigv4_headers, sign_azure_sas_url,
+    sign_gcs_v4_with_iam_endpoint_and_cache, sign_s3_v4_url, verify_s3_v4_url,
 };
 use crate::store::{
     MultipartUploadSession, ObjectStoreEngine, PutConditionalOptions, StorageError,
@@ -71,6 +74,26 @@ fn validate_chunk_size(chunk_size: Option<usize>) -> PyResult<Option<usize>> {
         return Err(PyValueError::new_err("chunk_size must be >= 1"));
     }
     Ok(chunk_size)
+}
+
+fn extract_token_cache_capsule(
+    capsule_any: &Bound<'_, PyAny>,
+) -> PyResult<SharedGcpTokenCacheHandle> {
+    let capsule = capsule_any.cast::<PyCapsule>().map_err(|_| {
+        PyValueError::new_err("token_cache_capsule must be a valid GcpTokenCache PyCapsule")
+    })?;
+    let ptr = capsule
+        .pointer_checked(Some(GCP_TOKEN_CACHE_CAPSULE_NAME))
+        .map_err(|_| {
+            PyValueError::new_err(
+                "token_cache_capsule name mismatch; expected vertebra.GcpTokenCacheCapsule",
+            )
+        })?
+        .as_ptr()
+        .cast::<GcpTokenCacheCapsule>();
+    // SAFETY: `pointer_checked` verified the exact `GCP_TOKEN_CACHE_CAPSULE_NAME` tag on a live `PyCapsule`
+    // created by `PyCapsule::new_with_value(..., GcpTokenCacheCapsule, GCP_TOKEN_CACHE_CAPSULE_NAME)`.
+    unsafe { SharedGcpTokenCacheHandle::from_capsule_ptr(ptr) }.map_err(PyValueError::new_err)
 }
 
 async fn pull_next_from_stream(
@@ -741,10 +764,18 @@ pub struct PySyncObjectStore {
 #[pymethods]
 impl PySyncObjectStore {
     #[new]
-    #[pyo3(signature = (url, options=None))]
-    fn new(py: Python<'_>, url: &str, options: Option<HashMap<String, String>>) -> PyResult<Self> {
+    #[pyo3(signature = (url, options=None, token_cache_capsule=None))]
+    fn new(
+        py: Python<'_>,
+        url: &str,
+        options: Option<HashMap<String, String>>,
+        token_cache_capsule: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let token_cache = token_cache_capsule
+            .map(extract_token_cache_capsule)
+            .transpose()?;
         let engine = py
-            .detach(|| ObjectStoreEngine::from_url(url, options.as_ref()))
+            .detach(|| ObjectStoreEngine::from_url_with_cache(url, options, token_cache))
             .map_err(to_py_err)?;
         Ok(Self { engine })
     }
@@ -986,10 +1017,18 @@ pub struct PyAsyncObjectStore {
 #[pymethods]
 impl PyAsyncObjectStore {
     #[new]
-    #[pyo3(signature = (url, options=None))]
-    fn new(py: Python<'_>, url: &str, options: Option<HashMap<String, String>>) -> PyResult<Self> {
+    #[pyo3(signature = (url, options=None, token_cache_capsule=None))]
+    fn new(
+        py: Python<'_>,
+        url: &str,
+        options: Option<HashMap<String, String>>,
+        token_cache_capsule: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let token_cache = token_cache_capsule
+            .map(extract_token_cache_capsule)
+            .transpose()?;
         let engine = py
-            .detach(|| ObjectStoreEngine::from_url(url, options.as_ref()))
+            .detach(|| ObjectStoreEngine::from_url_with_cache(url, options, token_cache))
             .map_err(to_py_err)?;
         Ok(Self { engine })
     }
@@ -1343,7 +1382,7 @@ fn py_verify_s3_v4_url(
 }
 
 #[pyfunction]
-#[pyo3(signature = (bucket, service_account_email, method, object_path, expires_in_secs=3600, timestamp=None, iam_endpoint="https://iamcredentials.googleapis.com", access_token=None, private_key_pem=None))]
+#[pyo3(signature = (bucket, service_account_email, method, object_path, expires_in_secs=3600, timestamp=None, iam_endpoint="https://iamcredentials.googleapis.com", access_token=None, private_key_pem=None, endpoint=None, token_cache_capsule=None))]
 #[allow(clippy::too_many_arguments)]
 fn py_sign_gcs_v4_iam_url(
     py: Python<'_>,
@@ -1356,18 +1395,25 @@ fn py_sign_gcs_v4_iam_url(
     iam_endpoint: &str,
     access_token: Option<String>,
     private_key_pem: Option<String>,
+    endpoint: Option<String>,
+    token_cache_capsule: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<String> {
+    let token_cache = token_cache_capsule
+        .map(extract_token_cache_capsule)
+        .transpose()?;
     let timestamp = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
     let cfg = GcsSignConfig {
         bucket: bucket.to_string(),
         service_account_email: service_account_email.to_string(),
         private_key_pem,
         access_token,
+        endpoint,
     };
     py.detach(|| {
         block_on_storage(async move {
-            sign_gcs_v4_with_iam_endpoint(
+            sign_gcs_v4_with_iam_endpoint_and_cache(
                 &cfg,
+                token_cache.as_ref(),
                 method,
                 object_path,
                 expires_in_secs,
@@ -1490,7 +1536,7 @@ fn py_sign_aws_sigv4_headers(
 }
 
 #[pyfunction]
-#[pyo3(signature = (bucket, service_account_email, method, object_path, expires_in_secs=3600, timestamp=None, iam_endpoint="https://iamcredentials.googleapis.com", access_token=None, private_key_pem=None))]
+#[pyo3(signature = (bucket, service_account_email, method, object_path, expires_in_secs=3600, timestamp=None, iam_endpoint="https://iamcredentials.googleapis.com", access_token=None, private_key_pem=None, endpoint=None, token_cache_capsule=None))]
 #[allow(clippy::too_many_arguments)]
 fn py_sign_gcs_v4_iam_url_async(
     py: Python<'_>,
@@ -1503,7 +1549,12 @@ fn py_sign_gcs_v4_iam_url_async(
     iam_endpoint: &str,
     access_token: Option<String>,
     private_key_pem: Option<String>,
+    endpoint: Option<String>,
+    token_cache_capsule: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<RustTaskAwaitable> {
+    let token_cache = token_cache_capsule
+        .map(extract_token_cache_capsule)
+        .transpose()?;
     let timestamp = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
     let iam_endpoint = iam_endpoint.to_string();
     let cfg = GcsSignConfig {
@@ -1511,12 +1562,14 @@ fn py_sign_gcs_v4_iam_url_async(
         service_account_email,
         private_key_pem,
         access_token,
+        endpoint,
     };
     spawn_rust_task(
         py,
         async move {
-            sign_gcs_v4_with_iam_endpoint(
+            sign_gcs_v4_with_iam_endpoint_and_cache(
                 &cfg,
+                token_cache.as_ref(),
                 &method,
                 &object_path,
                 expires_in_secs,
@@ -1554,7 +1607,8 @@ fn sign_oci_par_url(
 }
 
 #[pyfunction]
-#[pyo3(signature = (bucket, service_account_email, method, object_path, expires_in_secs=3600, timestamp=None))]
+#[pyo3(signature = (bucket, service_account_email, method, object_path, expires_in_secs=3600, timestamp=None, endpoint=None))]
+#[allow(clippy::too_many_arguments)]
 fn build_gcs_v4_canonical_request(
     py: Python<'_>,
     bucket: &str,
@@ -1563,6 +1617,7 @@ fn build_gcs_v4_canonical_request(
     object_path: &str,
     expires_in_secs: u64,
     timestamp: Option<i64>,
+    endpoint: Option<&str>,
 ) -> PyResult<(String, String, String, String)> {
     let now_unix = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
     let req = py
@@ -1574,6 +1629,7 @@ fn build_gcs_v4_canonical_request(
                 object_path,
                 expires_in_secs,
                 now_unix,
+                endpoint,
             )
         })
         .map_err(PyErr::from)?;
@@ -1594,22 +1650,24 @@ fn assemble_gcs_iam_v4_url(
     signature_hex: &str,
     endpoint: Option<&str>,
 ) -> PyResult<String> {
+    let (base_url, _, prefix) = resolve_gcs_endpoint_origin(endpoint).map_err(PyErr::from)?;
+    let resolved_uri = if !prefix.is_empty()
+        && !canonical_uri.starts_with(&format!("/{prefix}/"))
+        && canonical_uri != format!("/{prefix}")
+    {
+        format!("/{prefix}{canonical_uri}")
+    } else {
+        canonical_uri.to_string()
+    };
     let canonical = GcsV4CanonicalRequest {
-        canonical_uri: canonical_uri.to_string(),
+        canonical_uri: resolved_uri,
         canonical_querystring: canonical_querystring.to_string(),
         canonical_request: String::new(),
         string_to_sign: String::new(),
+        base_url,
     };
-    let url = py
-        .detach(|| crate::signing::assemble_gcs_iam_v4_url(&canonical, signature_hex))
-        .map_err(PyErr::from)?;
-    if let Some(ep) = endpoint.map(str::trim).filter(|s| !s.is_empty()) {
-        let base = ep.trim_end_matches('/');
-        if let Some(rest) = url.strip_prefix("https://storage.googleapis.com") {
-            return Ok(format!("{base}{rest}"));
-        }
-    }
-    Ok(url)
+    py.detach(|| crate::signing::assemble_gcs_iam_v4_url(&canonical, signature_hex))
+        .map_err(PyErr::from)
 }
 
 #[pymodule(gil_used = false)]

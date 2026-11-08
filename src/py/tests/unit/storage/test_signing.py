@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 import vertebra._storage as native_storage_mod
+import vertebra._vertebra as core_mod
 from vertebra.storage import (
     AsyncObjectStore,
     AzureConfig,
@@ -370,6 +371,125 @@ def test_native_oci_par_and_gcs_iam_assembly_exports() -> None:
 
     with pytest.raises(ValueError, match="hex"):
         native_storage_mod.assemble_gcs_iam_v4_url(c_uri, c_qs, "not-valid-hex!!")
+
+
+def test_native_gcs_custom_endpoint_presign_and_capsule_validation(tmp_path: Path) -> None:
+    """Verify custom GCS endpoint V4 signing, token_cache_capsule IAM quota project, and invalid capsule rejection."""
+    with pytest.raises(ValueError, match="capsule"):
+        native_storage_mod.SyncObjectStore("memory://test", None, "not-a-capsule")
+    with pytest.raises(ValueError, match="capsule"):
+        native_storage_mod.AsyncObjectStore("memory://test", None, "not-a-capsule")
+
+    pem_key = subprocess.check_output(
+        ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"],
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    sa_email = "emu-signer@test-gcp-proj.iam.gserviceaccount.com"
+    ep = "http://127.0.0.1:4443/storage/v1"
+    signed_sync = native_storage_mod.py_sign_gcs_v4_iam_url(
+        "my-bkt",
+        sa_email,
+        "GET",
+        "dir/file.txt",
+        900,
+        1_700_000_000,
+        private_key_pem=pem_key,
+        endpoint=ep,
+    )
+    assert signed_sync.startswith("http://127.0.0.1:4443/storage/v1/my-bkt/dir/file.txt?")
+
+    c_uri, c_qs, c_req, _sts = native_storage_mod.build_gcs_v4_canonical_request(
+        "my-bkt",
+        sa_email,
+        "GET",
+        "dir/file.txt",
+        900,
+        1_700_000_000,
+        endpoint=ep,
+    )
+    assert c_uri == "/storage/v1/my-bkt/dir/file.txt"
+    assert "host:127.0.0.1:4443\n" in c_req
+    assert c_qs in signed_sync
+
+    async def _run_async_custom_ep() -> str:
+        return await native_storage_mod.py_sign_gcs_v4_iam_url_async(
+            "my-bkt",
+            sa_email,
+            "GET",
+            "dir/file.txt",
+            900,
+            1_700_000_000,
+            private_key_pem=pem_key,
+            endpoint=ep,
+        )
+
+    assert asyncio.run(_run_async_custom_ep()) == signed_sync
+
+    seen_quota_projects: list[str] = []
+
+    class _QuotaIamHandler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            _ = (format, args)
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            _ = self.rfile.read(length) if length > 0 else b""
+            if self.path == "/token":
+                body = b'{"access_token":"qp-tok-1","expires_in":3600,"token_type":"Bearer"}'
+            elif ":signBlob" in self.path:
+                seen_quota_projects.append(self.headers.get("x-goog-user-project", ""))
+                body = b'{"keyId":"k1","signedBlob":"ZGVhZGJlZWZjYWZl"}'
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _QuotaIamHandler)
+    iam_base = f"http://127.0.0.1:{server.server_port}"
+    srv_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    srv_thread.start()
+    try:
+        adc_file = tmp_path / "qp_adc.json"
+        adc_file.write_text(
+            json.dumps(
+                {
+                    "type": "authorized_user",
+                    "client_id": "cid",
+                    "client_secret": "csec",
+                    "refresh_token": "rtok",
+                    "quota_project_id": "qp-sign-py",
+                    "token_uri": f"{iam_base}/token",
+                }
+            ),
+            encoding="utf-8",
+        )
+        cache = core_mod.SyncGcpTokenCache(
+            options={"application_credentials": str(adc_file)},
+            allow_ambient_adc=False,
+        )
+        iam_url = native_storage_mod.py_sign_gcs_v4_iam_url(
+            "my-bkt",
+            sa_email,
+            "GET",
+            "dir/file.txt",
+            900,
+            1_700_000_000,
+            iam_endpoint=iam_base,
+            endpoint=ep,
+            token_cache_capsule=cache._capsule(),
+        )
+        assert iam_url.startswith("http://127.0.0.1:4443/storage/v1/my-bkt/dir/file.txt?")
+        assert seen_quota_projects == ["qp-sign-py"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        srv_thread.join(timeout=2.0)
 
 
 def test_multicloud_store_sign_sync_and_async(tmp_path: Path) -> None:

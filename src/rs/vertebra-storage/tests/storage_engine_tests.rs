@@ -154,6 +154,7 @@ async fn test_gcs_v4_keyless_iam_signblob_fallback() {
         service_account_email: "runner@project.iam.gserviceaccount.com".to_string(),
         private_key_pem: None,
         access_token: Some("mock-oauth-token".to_string()),
+        endpoint: None,
     };
     let iam_base = format!("http://{addr}");
     let url = sign_gcs_v4_with_iam_endpoint(
@@ -410,6 +411,7 @@ async fn gcs_v4_presign_auto_local_rsa_from_adc_service_account_zero_rtt() {
         service_account_email: "sa-local@analytics.iam.gserviceaccount.com".to_string(),
         private_key_pem: None,
         access_token: None,
+        endpoint: None,
     };
 
     let signed_url = sign_gcs_v4_with_options_and_cache(
@@ -537,6 +539,7 @@ async fn gcs_v4_presign_iam_sign_blob_reuses_cached_token_and_retries_on_401() {
         service_account_email: "runner@project.iam.gserviceaccount.com".to_string(),
         private_key_pem: None,
         access_token: None,
+        endpoint: None,
     };
 
     for _ in 0..3 {
@@ -712,6 +715,7 @@ fn test_multicloud_presigning_parity_rfc3986_oci_par_and_expiry_bounds() {
         service_account_email: "signer@proj.iam.gserviceaccount.com".to_string(),
         private_key_pem: Some(pem.to_string()),
         access_token: None,
+        endpoint: None,
     };
     let local_gcs_url = sign_gcs_v4_url(&gcs_cfg, "GET", "dir/a b+c.txt", 900, fixed_ts)
         .expect("local GCS V4 RSA sign");
@@ -728,6 +732,7 @@ fn test_multicloud_presigning_parity_rfc3986_oci_par_and_expiry_bounds() {
         "dir/a b+c.txt",
         900,
         fixed_ts,
+        None,
     )
     .expect("build canonical request");
     let rsa_priv = RsaPrivateKey::from_pkcs8_pem(pem).expect("parse test rsa");
@@ -913,6 +918,7 @@ fn test_multicloud_presigning_parity_rfc3986_oci_par_and_expiry_bounds() {
                 "dir/a.txt",
                 bad_exp,
                 fixed_ts,
+                None,
             ),
             Err(SigningError::InvalidExpiry(_))
         ));
@@ -1636,6 +1642,159 @@ async fn test_gcs_native_plane_if_match_skip_signature_and_capsule_quota_project
         .to_ascii_lowercase();
     assert!(last_req.contains("authorization: bearer capsule-token-1"));
     assert!(last_req.contains("x-goog-user-project: billing-proj-99"));
+}
+
+#[tokio::test]
+async fn test_gcs_v4_custom_endpoint_and_iam_signblob_quota_project() {
+    use _storage::signing::{
+        GcsSignConfig, build_gcs_v4_canonical_request, sign_gcs_v4_url,
+        sign_gcs_v4_with_iam_endpoint_and_cache,
+    };
+    use rsa::RsaPrivateKey;
+    use rsa::pkcs1v15::{Signature, VerifyingKey};
+    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::signature::Verifier;
+    use sha2::Sha256;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use vertebra_core::gcp_auth::{
+        DEFAULT_REFRESH_SKEW_MS, GcpAuthSource, GcpTokenCache, ProxyPolicy,
+        SharedGcpTokenCacheHandle,
+    };
+
+    let pem = concat!(
+        "-----BEGIN PRIVATE KEY-----\n",
+        "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDJTl8KiBfisWRw\n",
+        "nP4tfbLiOa0io1rTfTen2IIYQgek3ET1isNNTWqeWSaD8mzOrVlLZlAaDZopzq4Z\n",
+        "jzLNq9uwIDWPuCzZIVMIAGDpcI+cAuofDs9FGRh3x5fO78Z0ch4tfwAh3SZpcu4P\n",
+        "LqPpU1FwvhfHftK5UdM0LHW57xhPPzu+lfVuBH8fRULmrqQJvDpcwb0QZtHCTs/z\n",
+        "VWbLGhl1XCLUEI/95CnOVctJHeckgJL5chUXxDoXpZGyFfv8qz832BgO3LN7Hnn1\n",
+        "w9gLsidb94Bmq/kA49esiXDECgcBSRgZmpYSOZOwibU9RI3nFtNGb6IpGiXhiqI9\n",
+        "ci5V3jtFAgMBAAECggEAAN/7ltGaSqh3xdB5tUlUQiEjhMQTGTHm+N2tuCA4FH8k\n",
+        "zL4XILBbjhAAgB2uQNvrY290Frm94gA2s5s2CpRGiTdT4pWABoGRTz1HE5r6sJls\n",
+        "v7SLgn96ekW+i2DCW9gMZOXOhDw3F/9/q3yXWwzjjKyhyFpLSQNVnBXqb5m1lwXy\n",
+        "M9Eej90qFDr3Or+Y+Met0LEvt3E+tYuPjVlLTmQFjZOTCB/Kqudq3mkUG8G9cV6Y\n",
+        "YNN+RXjsHj7xsL3Rp+V6vua3B3hWjSnsqpl1u0CD0fBDOrbie2yCmK4n7C/0Hi7H\n",
+        "wwZoSGXR+y0hdMEXuZXX0iXjv3pFBvr7+RQwxWggAQKBgQDo8f2xFAUIUVH7t6Rm\n",
+        "nSN2XbVqOl2vdR47yoYS5HOxjgQtmgMqHQ4eusVIVirSStyGMs49ZtVGiL4cYqxs\n",
+        "vECXDHyiL3dPCcSS8MkzYcGv5QjXsuQLHvp4my2REWNB9RVCADslTIetMEFoFm0T\n",
+        "GvQz+RMvyJoGZl26mchwFGldRQKBgQDdOsGlqtjSc+TQ5q5YtZ0+phIzPZ1usbN4\n",
+        "qdjEYp5SCGNU2/AFayqKSPgD/ulMtdiXzA2qK4I9h5xmRE/A/FJVhW66S29+6CAP\n",
+        "/EGtfAYdFozsaZpjxCpYszagGVBnvViv9Y4KWUeyhN1lwfkbTLZ0jIiICt4Vp3Ci\n",
+        "5k6Vp2RGAQKBgA/6IQtXMy0p3rSkGNuM5ZTFwp6hmDFjmApDzsRW9PR1qCW0jYkC\n",
+        "6ygCaWuXtWItDkkKDQk7F1+6G0f5IJhopQl3Ksk49jbulZP6feJPTyiQTfX1aBy3\n",
+        "KDjDc/GiPquUcrvPJj9dq2Seja3k8+A+lgdGiyFY4e+Ub9NPnubJD5z9AoGBALeA\n",
+        "2kmpykne2eixv+JTWwgxRp18OU8tVTn8YJKdXsear5IfERvdhZ7I4fimhCweFnfr\n",
+        "SVZi2phhGUj21tS0NzM7B9q9YdF5h8barjvRyVxtbR1YhzjD6YBDv0bTWI+ETsE9\n",
+        "xMEuxzr73I1gdVnAqwNH4qQ9p3N8vQBSWtLl01YBAoGBAND7MuyVNdG+9pGItdFt\n",
+        "k9pz3Vc9t+8Fn31K9HldC9ejmnBapfkgwLdJemLQaqAs6tkbG2ajlCqv7Y4ZAARc\n",
+        "qkcDJbfy9jP/h7kvb/UNP21SxDscrKTAczxEm7PiTk3HPNOwx3/N6tPc+5HhR8LR\n",
+        "8OwWavCVE6HreFLFfrEAgSgF\n",
+        "-----END PRIVATE KEY-----\n"
+    );
+
+    let ep = "http://127.0.0.1:4443/storage/v1";
+    let cfg = GcsSignConfig {
+        bucket: "my-bkt".to_string(),
+        service_account_email: "signer@proj.iam.gserviceaccount.com".to_string(),
+        private_key_pem: Some(pem.to_string()),
+        access_token: None,
+        endpoint: Some(ep.to_string()),
+    };
+    let signed = sign_gcs_v4_url(&cfg, "GET", "dir/file.txt", 900, 1_700_000_000)
+        .expect("custom endpoint sign");
+    assert!(signed.starts_with("http://127.0.0.1:4443/storage/v1/my-bkt/dir/file.txt?"));
+    let canonical = build_gcs_v4_canonical_request(
+        "my-bkt",
+        "signer@proj.iam.gserviceaccount.com",
+        "GET",
+        "dir/file.txt",
+        900,
+        1_700_000_000,
+        Some(ep),
+    )
+    .expect("canonical custom ep");
+    assert_eq!(canonical.canonical_uri, "/storage/v1/my-bkt/dir/file.txt");
+    assert!(
+        canonical
+            .canonical_request
+            .contains("\nhost:127.0.0.1:4443\n")
+    );
+    let (_, sig_hex) = signed.split_once("&X-Goog-Signature=").expect("sig");
+    let sig_bytes = hex::decode(sig_hex).expect("hex");
+    let signature = Signature::try_from(sig_bytes.as_slice()).expect("rsa sig");
+    let priv_key = RsaPrivateKey::from_pkcs8_pem(pem).expect("rsa key");
+    VerifyingKey::<Sha256>::new(priv_key.to_public_key())
+        .verify(canonical.string_to_sign.as_bytes(), &signature)
+        .expect("custom endpoint RSA signature must verify");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind iam");
+    let addr = listener.local_addr().expect("iam addr");
+    let seen_iam_reqs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_iam_srv = Arc::clone(&seen_iam_reqs);
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let log = Arc::clone(&seen_iam_srv);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let body = if req.starts_with("POST /token ") {
+                    r#"{"access_token":"iam-qp-tok","expires_in":3600,"token_type":"Bearer"}"#
+                } else {
+                    log.lock().expect("lock").push(req);
+                    r#"{"keyId":"k1","signedBlob":"ZGVhZGJlZWZjYWZl"}"#
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let cache = Arc::new(GcpTokenCache::with_proxy_policy(
+        GcpAuthSource::AuthorizedUser {
+            client_id: "cid".to_string(),
+            client_secret: "csec".to_string(),
+            refresh_token: "rtok".to_string(),
+            quota_project_id: Some("qp-sign".to_string()),
+            token_uri: format!("http://127.0.0.1:{}/token", addr.port()),
+        },
+        DEFAULT_REFRESH_SKEW_MS,
+        ProxyPolicy::Direct,
+    ));
+    let handle = SharedGcpTokenCacheHandle::from_arc(cache);
+    let iam_cfg = GcsSignConfig {
+        bucket: "my-bkt".to_string(),
+        service_account_email: "signer@proj.iam.gserviceaccount.com".to_string(),
+        private_key_pem: None,
+        access_token: None,
+        endpoint: Some(ep.to_string()),
+    };
+    let iam_signed = sign_gcs_v4_with_iam_endpoint_and_cache(
+        &iam_cfg,
+        Some(&handle),
+        "GET",
+        "dir/file.txt",
+        900,
+        1_700_000_000,
+        &format!("http://127.0.0.1:{}", addr.port()),
+    )
+    .await
+    .expect("iam sign with handle");
+    assert!(iam_signed.starts_with("http://127.0.0.1:4443/storage/v1/my-bkt/dir/file.txt?"));
+    let captured = seen_iam_reqs.lock().expect("lock");
+    assert!(
+        captured
+            .last()
+            .expect("iam request")
+            .to_ascii_lowercase()
+            .contains("x-goog-user-project: qp-sign")
+    );
 }
 
 #[test]

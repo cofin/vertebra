@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Write as _;
 use std::sync::{Arc, LazyLock, RwLock};
+use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -17,7 +18,9 @@ use rsa::signature::{SignatureEncoding, Signer};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use url::Url;
-use vertebra_core::gcp_auth::{GcpTokenCache, extract_adc_service_account_key};
+use vertebra_core::gcp_auth::{
+    GcpTokenCache, SharedGcpTokenCacheHandle, extract_adc_service_account_key,
+};
 use vertebra_core::util::{constant_time_eq, sha256_hex};
 
 use crate::store::StorageError;
@@ -477,6 +480,7 @@ pub struct GcsSignConfig {
     pub service_account_email: String,
     pub private_key_pem: Option<String>,
     pub access_token: Option<String>,
+    pub endpoint: Option<String>,
 }
 
 /// Deterministic GCS V4 canonical request and string-to-sign components (`GOOG4-RSA-SHA256`).
@@ -486,6 +490,41 @@ pub struct GcsV4CanonicalRequest {
     pub canonical_querystring: String,
     pub canonical_request: String,
     pub string_to_sign: String,
+    pub base_url: String,
+}
+
+pub(crate) fn resolve_gcs_endpoint_origin(
+    endpoint: Option<&str>,
+) -> Result<(String, String, String), SigningError> {
+    let Some(raw) = endpoint.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok((
+            "https://storage.googleapis.com".to_string(),
+            "storage.googleapis.com".to_string(),
+            String::new(),
+        ));
+    };
+    let parsed = Url::parse(raw)
+        .map_err(|e| SigningError::InvalidInput(format!("invalid GCS endpoint `{raw}`: {e}")))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(SigningError::InvalidInput(format!(
+            "GCS endpoint `{raw}` must use http:// or https://"
+        )));
+    }
+    let host_only = parsed.host_str().filter(|h| !h.is_empty()).ok_or_else(|| {
+        SigningError::InvalidInput(format!("missing host in GCS endpoint `{raw}`"))
+    })?;
+    let host = match parsed.port() {
+        Some(port)
+            if (parsed.scheme() == "http" && port != 80)
+                || (parsed.scheme() == "https" && port != 443) =>
+        {
+            format!("{host_only}:{port}")
+        }
+        _ => host_only.to_string(),
+    };
+    let prefix = parsed.path().trim_matches('/').to_string();
+    let base_url = format!("{}://{host}", parsed.scheme());
+    Ok((base_url, host, prefix))
 }
 
 /// Build the GCS V4 (`GOOG4-RSA-SHA256`) canonical request and string-to-sign without requiring a local private key.
@@ -496,6 +535,7 @@ pub fn build_gcs_v4_canonical_request(
     object_path: &str,
     expires_in_secs: u64,
     now_unix: i64,
+    endpoint: Option<&str>,
 ) -> Result<GcsV4CanonicalRequest, SigningError> {
     validate_expires_in_secs(expires_in_secs)?;
     let trimmed_bucket = bucket.trim();
@@ -515,6 +555,8 @@ pub fn build_gcs_v4_canonical_request(
         ));
     }
 
+    let (base_url, host, endpoint_prefix) = resolve_gcs_endpoint_origin(endpoint)?;
+
     let timestamp: DateTime<Utc> = Utc
         .timestamp_opt(now_unix, 0)
         .single()
@@ -524,7 +566,14 @@ pub fn build_gcs_v4_canonical_request(
 
     let encoded_bucket = rfc3986_encode(trimmed_bucket, true);
     let encoded_object = rfc3986_encode(trimmed_object, false);
-    let canonical_uri = format!("/{encoded_bucket}/{encoded_object}");
+    let canonical_uri = if endpoint_prefix.is_empty() {
+        format!("/{encoded_bucket}/{encoded_object}")
+    } else {
+        format!(
+            "/{}/{encoded_bucket}/{encoded_object}",
+            rfc3986_encode(&endpoint_prefix, false)
+        )
+    };
     let credential_scope = format!("{datestamp}/auto/storage/goog4_request");
     let credential = format!("{trimmed_email}/{credential_scope}");
 
@@ -547,10 +596,11 @@ pub fn build_gcs_v4_canonical_request(
         .join("&");
 
     let canonical_request = format!(
-        "{}\n{}\n{}\nhost:storage.googleapis.com\n\nhost\nUNSIGNED-PAYLOAD",
+        "{}\n{}\n{}\nhost:{}\n\nhost\nUNSIGNED-PAYLOAD",
         method.trim().to_ascii_uppercase(),
         canonical_uri,
-        canonical_querystring
+        canonical_querystring,
+        host
     );
     let string_to_sign = format!(
         "GOOG4-RSA-SHA256\n{}\n{}\n{}",
@@ -564,6 +614,7 @@ pub fn build_gcs_v4_canonical_request(
         canonical_querystring,
         canonical_request,
         string_to_sign,
+        base_url,
     })
 }
 
@@ -581,8 +632,13 @@ pub fn assemble_gcs_iam_v4_url(
     let sig_bytes = hex::decode(trimmed)
         .map_err(|e| SigningError::InvalidKey(format!("invalid GCS V4 signature hex: {e}")))?;
     let normalized_hex = hex::encode(sig_bytes);
+    let origin = if canonical.base_url.trim().is_empty() {
+        "https://storage.googleapis.com"
+    } else {
+        canonical.base_url.trim_end_matches('/')
+    };
     Ok(format!(
-        "https://storage.googleapis.com{}?{}&X-Goog-Signature={normalized_hex}",
+        "{origin}{}?{}&X-Goog-Signature={normalized_hex}",
         canonical.canonical_uri, canonical.canonical_querystring
     ))
 }
@@ -607,6 +663,7 @@ pub fn sign_gcs_v4_url(
         object_path,
         expires_in_secs,
         now_unix,
+        config.endpoint.as_deref(),
     )?;
     let signing_key = SigningKey::<Sha256>::new(rsa_key);
     let signature = signing_key.sign(canonical.string_to_sign.as_bytes());
@@ -623,6 +680,45 @@ struct IamSignBlobRequest {
 struct IamSignBlobResponse {
     #[serde(rename = "signedBlob")]
     signed_blob: String,
+}
+
+static IAM_LOOPBACK_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .no_proxy()
+        .pool_max_idle_per_host(32)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap_or_default()
+});
+
+static IAM_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .pool_max_idle_per_host(32)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap_or_default()
+});
+
+fn is_loopback_iam_endpoint(iam_base_url: &str) -> bool {
+    let Ok(parsed) = Url::parse(iam_base_url.trim()) else {
+        return false;
+    };
+    matches!(
+        parsed.host_str(),
+        Some("127.0.0.1" | "localhost" | "::1" | "[::1]")
+    )
+}
+
+fn select_iam_http_client(iam_base_url: &str) -> &'static reqwest::Client {
+    if is_loopback_iam_endpoint(iam_base_url) {
+        &IAM_LOOPBACK_CLIENT
+    } else {
+        &IAM_HTTP_CLIENT
+    }
 }
 
 static SIGNING_TOKEN_CACHES: LazyLock<RwLock<HashMap<String, Arc<GcpTokenCache>>>> =
@@ -705,10 +801,10 @@ fn get_or_create_signing_token_cache(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn sign_gcs_v4_with_options_and_cache_checked(
+pub async fn sign_gcs_v4_with_options_and_handle_checked(
     config: &GcsSignConfig,
     credentials_options: Option<&HashMap<String, String>>,
-    token_cache: Option<&Arc<GcpTokenCache>>,
+    token_cache: Option<&SharedGcpTokenCacheHandle>,
     method: &str,
     object_path: &str,
     expires_in_secs: u64,
@@ -729,7 +825,7 @@ pub async fn sign_gcs_v4_with_options_and_cache_checked(
         });
         if !has_target_sa_override {
             let discovered_key = token_cache
-                .and_then(|c| c.service_account_key().cloned())
+                .and_then(SharedGcpTokenCacheHandle::service_account_key)
                 .or_else(|| match credentials_options {
                     Some(opts) => extract_adc_service_account_key(opts, true),
                     None => extract_adc_service_account_key(&HashMap::new(), true),
@@ -749,6 +845,7 @@ pub async fn sign_gcs_v4_with_options_and_cache_checked(
             service_account_email: email,
             private_key_pem: Some(pem),
             access_token: None,
+            endpoint: config.endpoint.clone(),
         };
         return sign_gcs_v4_url(&local_cfg, method, object_path, expires_in_secs, now_unix);
     }
@@ -760,6 +857,7 @@ pub async fn sign_gcs_v4_with_options_and_cache_checked(
         object_path,
         expires_in_secs,
         now_unix,
+        config.endpoint.as_deref(),
     )?;
 
     let url_endpoint = format!(
@@ -767,18 +865,16 @@ pub async fn sign_gcs_v4_with_options_and_cache_checked(
         iam_base_url.trim_end_matches('/'),
         config.service_account_email.trim()
     );
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .unwrap_or_default();
+    let client = select_iam_http_client(iam_base_url);
     let payload_b64 = BASE64_STANDARD.encode(canonical.string_to_sign.as_bytes());
 
     let resolved_cache = if config.access_token.is_some() {
         None
     } else if let Some(cache) = token_cache {
-        Some(Arc::clone(cache))
+        Some(cache.clone())
     } else {
         get_or_create_signing_token_cache(credentials_options, iam_base_url)
+            .map(SharedGcpTokenCacheHandle::from_arc)
     };
 
     let resp = if let Some(ref cache) = resolved_cache {
@@ -786,34 +882,40 @@ pub async fn sign_gcs_v4_with_options_and_cache_checked(
             .get_or_refresh()
             .await
             .map_err(SigningError::RemoteSigning)?;
-        let first_resp = client
+        let mut first_req = client
             .post(&url_endpoint)
             .bearer_auth(&snap.access_token)
             .json(&IamSignBlobRequest {
                 payload: payload_b64.clone(),
-            })
-            .send()
-            .await
-            .map_err(|e| {
-                SigningError::RemoteSigning(format!("IAM signBlob request failed: {e}"))
-            })?;
+            });
+        if let Some(ref qp) = snap.quota_project_id
+            && !qp.trim().is_empty()
+        {
+            first_req = first_req.header("x-goog-user-project", qp.trim());
+        }
+        let first_resp = first_req.send().await.map_err(|e| {
+            SigningError::RemoteSigning(format!("IAM signBlob request failed: {e}"))
+        })?;
         if first_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             cache.invalidate(snap.generation);
             let refreshed = cache
                 .get_or_refresh()
                 .await
                 .map_err(SigningError::RemoteSigning)?;
-            client
+            let mut retry_req = client
                 .post(&url_endpoint)
                 .bearer_auth(&refreshed.access_token)
                 .json(&IamSignBlobRequest {
                     payload: payload_b64,
-                })
-                .send()
-                .await
-                .map_err(|e| {
-                    SigningError::RemoteSigning(format!("IAM signBlob request failed: {e}"))
-                })?
+                });
+            if let Some(ref qp) = refreshed.quota_project_id
+                && !qp.trim().is_empty()
+            {
+                retry_req = retry_req.header("x-goog-user-project", qp.trim());
+            }
+            retry_req.send().await.map_err(|e| {
+                SigningError::RemoteSigning(format!("IAM signBlob request failed: {e}"))
+            })?
         } else {
             first_resp
         }
@@ -849,6 +951,33 @@ pub async fn sign_gcs_v4_with_options_and_cache_checked(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub async fn sign_gcs_v4_with_options_and_cache_checked(
+    config: &GcsSignConfig,
+    credentials_options: Option<&HashMap<String, String>>,
+    token_cache: Option<&Arc<GcpTokenCache>>,
+    method: &str,
+    object_path: &str,
+    expires_in_secs: u64,
+    now_unix: i64,
+    iam_base_url: &str,
+) -> Result<String, SigningError> {
+    let handle = token_cache
+        .cloned()
+        .map(SharedGcpTokenCacheHandle::from_arc);
+    sign_gcs_v4_with_options_and_handle_checked(
+        config,
+        credentials_options,
+        handle.as_ref(),
+        method,
+        object_path,
+        expires_in_secs,
+        now_unix,
+        iam_base_url,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn sign_gcs_v4_with_options_and_cache(
     config: &GcsSignConfig,
     credentials_options: Option<&HashMap<String, String>>,
@@ -873,6 +1002,29 @@ pub async fn sign_gcs_v4_with_options_and_cache(
     .map_err(StorageError::from)
 }
 
+pub async fn sign_gcs_v4_with_iam_endpoint_and_cache(
+    config: &GcsSignConfig,
+    token_cache: Option<&SharedGcpTokenCacheHandle>,
+    method: &str,
+    object_path: &str,
+    expires_in_secs: u64,
+    now_unix: i64,
+    iam_base_url: &str,
+) -> Result<String, StorageError> {
+    sign_gcs_v4_with_options_and_handle_checked(
+        config,
+        None,
+        token_cache,
+        method,
+        object_path,
+        expires_in_secs,
+        now_unix,
+        iam_base_url,
+    )
+    .await
+    .map_err(StorageError::from)
+}
+
 pub async fn sign_gcs_v4_with_iam_endpoint(
     config: &GcsSignConfig,
     method: &str,
@@ -881,9 +1033,8 @@ pub async fn sign_gcs_v4_with_iam_endpoint(
     now_unix: i64,
     iam_base_url: &str,
 ) -> Result<String, StorageError> {
-    sign_gcs_v4_with_options_and_cache(
+    sign_gcs_v4_with_iam_endpoint_and_cache(
         config,
-        None,
         None,
         method,
         object_path,
