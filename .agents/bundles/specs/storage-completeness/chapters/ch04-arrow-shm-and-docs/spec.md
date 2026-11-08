@@ -48,7 +48,7 @@ tags:
 
 R8 hardens named SHM allocation and ArrowCursor IPC, then implements bounded read and write codec bridges on public sync/async storage helpers. The four tasks separately own strict allocation, read lifecycle, write lifecycle, and S3 minimum-part compliance.
 
-The active chapter owns plan revision 10 at baseline `78293774`; completed tasks t01–t03 retain their owned revision 9 at `222cbf99`. This chapter depends on ch01-native-engine-and-auth, ch02-orm-and-sql-storage-contracts, ch03-litestar-and-range-streaming. The native storage facade supplies stream/range I/O and multipart abort; PyArrow 26.0.1 supplies synchronous callbacks, dictionary memo, and codec operations. Sources below anchor the public seams. Skills are local runtime-ipc and pyo3-bridge for allocation/lifetime changes, python-framework for facade contracts, and review-tests for public behavior evidence.
+The active chapter owns plan revision 10 at baseline `78293774`; completed tasks t01 and t03 retain revision 9 at `222cbf99`, while t02 and t04 own revision 10 at `78293774`. This chapter depends on ch01-native-engine-and-auth, ch02-orm-and-sql-storage-contracts, ch03-litestar-and-range-streaming. The native storage facade supplies stream/range I/O and multipart abort; PyArrow 26.0.1 supplies synchronous callbacks, dictionary memo, and codec operations. Sources below anchor the public seams. Skills are local runtime-ipc and pyo3-bridge for allocation/lifetime changes, python-framework for facade contracts, and review-tests for public behavior evidence.
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
