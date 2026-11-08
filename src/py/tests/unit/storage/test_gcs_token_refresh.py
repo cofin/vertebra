@@ -44,6 +44,7 @@ from vertebra.storage import (
     SyncGcpTokenCache,
     SyncObjectStore,
 )
+from vertebra.typing import ImproperConfigurationError
 
 
 class _MockTokenServer:
@@ -844,11 +845,39 @@ def test_gcp_token_cache_capsule_export_parity() -> None:
     assert ctypes.pythonapi.PyCapsule_GetName(async_capsule) == b"vertebra.GcpTokenCacheCapsule"
 
 
-def test_sync_and_async_object_store_share_token_cache_across_data_plane_and_sign(
+@pytest.mark.anyio
+async def test_sync_and_async_object_store_share_token_cache_across_data_plane_and_sign(
     token_server: _MockTokenServer,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify SyncObjectStore and AsyncObjectStore share token_cache across put, get, and IAM sign."""
+    """Verify SyncObjectStore and AsyncObjectStore share token_cache across put, get, and IAM sign without probing ambient ADC."""
+    pem_key = subprocess.check_output(
+        ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"],
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    ambient_sa_path = tmp_path / "ambient_sa.json"
+    ambient_sa_path.write_text(
+        json.dumps(
+            {
+                "type": "service_account",
+                "project_id": "ambient-proj",
+                "private_key_id": "ambient-kid",
+                "private_key": pem_key,
+                "client_email": "signer@test-proj.iam.gserviceaccount.com",
+                "token_uri": "http://127.0.0.1:9/token",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(ambient_sa_path))
+
+    with pytest.raises(ImproperConfigurationError, match="token_cache"):
+        SyncObjectStore("gs://b", token_cache="not-a-cache")  # type: ignore[arg-type]
+    with pytest.raises(ImproperConfigurationError, match="token_cache"):
+        AsyncObjectStore("gs://b", token_cache="not-a-cache")  # type: ignore[arg-type]
+
     adc_path = tmp_path / "shared_adc.json"
     adc_path.write_text(
         json.dumps(
@@ -885,12 +914,14 @@ def test_sync_and_async_object_store_share_token_cache_across_data_plane_and_sig
     assert sync_store.get("k") == b"hi-sync"
     signed_sync = sync_store.sign("k", timestamp=1_700_000_000)
     assert signed_sync.startswith(f"{token_server.base_url}/b/k?")
+    assert token_server.iam_calls == 1
     assert token_server.oauth_calls == 1
     assert sync_cache.generation == 1
 
     token_server.fail_next_sign_blob_401 = True
     signed_after_401 = sync_store.sign("k", timestamp=1_700_000_000)
     assert signed_after_401.startswith(f"{token_server.base_url}/b/k?")
+    assert token_server.iam_calls == 3
     assert sync_cache.generation == 2
     assert token_server.oauth_calls == 2
 
@@ -910,45 +941,65 @@ def test_sync_and_async_object_store_share_token_cache_across_data_plane_and_sig
         token_cache=async_cache,
     )
 
-    async def _run_async() -> None:
-        await async_store.put("k", b"hi-async")
-        assert await async_store.get("k") == b"hi-async"
-        signed_async = await async_store.sign("k", timestamp=1_700_000_000)
-        assert signed_async.startswith(f"{token_server.base_url}/b/k?")
-        assert async_cache.generation == 1
-        assert token_server.oauth_calls == 3
+    await async_store.put("k", b"hi-async")
+    assert await async_store.get("k") == b"hi-async"
+    signed_async = await async_store.sign("k", timestamp=1_700_000_000)
+    assert signed_async.startswith(f"{token_server.base_url}/b/k?")
+    assert token_server.iam_calls == 4
+    assert async_cache.generation == 1
+    assert token_server.oauth_calls == 3
 
-        token_server.fail_next_sign_blob_401 = True
-        await async_store.sign("k", timestamp=1_700_000_000)
-        assert async_cache.generation == 2
-        assert token_server.oauth_calls == 4
+    token_server.fail_next_sign_blob_401 = True
+    await async_store.sign("k", timestamp=1_700_000_000)
+    assert token_server.iam_calls == 6
+    assert async_cache.generation == 2
+    assert token_server.oauth_calls == 4
 
-        assert await async_store.get("k") == b"hi-async"
-        assert token_server.last_headers.get("authorization") == "Bearer mock-oauth-token-user-4"
-        assert token_server.oauth_calls == 4
-
-    asyncio.run(_run_async())
+    assert await async_store.get("k") == b"hi-async"
+    assert token_server.last_headers.get("authorization") == "Bearer mock-oauth-token-user-4"
+    assert token_server.oauth_calls == 4
 
 
-def test_gcs_config_to_url_and_options_is_non_blocking_and_preserves_env(
+@pytest.mark.anyio
+async def test_gcs_config_to_url_and_options_is_non_blocking_and_preserves_env(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    """Verify GCSConfig.to_url_and_options performs zero network I/O and never mutates os.environ."""
+    """Verify GCSConfig and ObjectStore construction inside an active loop performs zero network I/O and leaves os.environ intact."""
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
     monkeypatch.delenv("NO_PROXY", raising=False)
     monkeypatch.delenv("no_proxy", raising=False)
+    adc_path = tmp_path / "source_adc.json"
+    adc_path.write_text(
+        json.dumps(
+            {
+                "type": "authorized_user",
+                "client_id": "cid",
+                "client_secret": "csec",
+                "refresh_token": "rtok",
+                "token_uri": "http://127.0.0.1:9/token",
+            }
+        ),
+        encoding="utf-8",
+    )
     env_snapshot = dict(os.environ)
 
     cfg = GCSConfig(
         bucket="b",
+        application_credentials=str(adc_path),
         target_service_account="imp@p.iam.gserviceaccount.com",
         iam_endpoint="http://127.0.0.1:9",
-        endpoint="http://127.0.0.1:4443",
+        endpoint="http://127.0.0.1:9",
     )
     url, opts = cfg.to_url_and_options()
     assert url == "gs://b"
     assert opts["target_service_account"] == "imp@p.iam.gserviceaccount.com"
-    assert opts["endpoint"] == "http://127.0.0.1:4443"
+    assert opts["endpoint"] == "http://127.0.0.1:9"
     assert opts["allow_http"] == "true"
     assert "access_token" not in opts
+
+    sync_store = SyncObjectStore(cfg)
+    async_store = AsyncObjectStore(cfg)
+    assert sync_store.scheme == "gs"
+    assert async_store.scheme == "gs"
     assert dict(os.environ) == env_snapshot

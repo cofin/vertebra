@@ -1248,9 +1248,18 @@ class _BaseObjectStore:
             )
         )
 
+    def _allow_ambient_adc(self) -> bool:
+        """Return True unless `allow_ambient_adc` is explicitly disabled in store options."""
+        return self._options.get("allow_ambient_adc", "true").strip().lower() not in {"false", "0", "no"}
+
     def _build_signing_adc_helper(self, effective_email: str) -> GCSConfig:
         """Build a source-credential GCSConfig for authenticating IAM signBlob calls."""
         assert self._signing is not None
+        refresh_skew_seconds = 300
+        raw_skew_ms = self._options.get("refresh_skew_ms")
+        if raw_skew_ms is not None:
+            with contextlib.suppress(ValueError):
+                refresh_skew_seconds = max(0, int(raw_skew_ms) // 1000)
         return GCSConfig(
             bucket=self._signing.bucket,
             service_account_path=self._options.get("service_account_path"),
@@ -1258,6 +1267,7 @@ class _BaseObjectStore:
             application_credentials=self._options.get("application_credentials_path"),
             service_account_email=effective_email,
             iam_endpoint=self._signing.iam_endpoint,
+            refresh_skew_seconds=refresh_skew_seconds,
             quota_project_id=self._options.get("quota_project_id"),
         )
 
@@ -1276,13 +1286,17 @@ class _BaseObjectStore:
     def _ensure_sync_gcs_token_cache(self, effective_email: str) -> SyncGcpTokenCache:
         """Lazily initialize and return the synchronous token cache for keyless GCS IAM signing."""
         if not isinstance(self._gcp_token_cache, SyncGcpTokenCache):
-            self._gcp_token_cache = self._build_signing_adc_helper(effective_email).sync_token_cache()
+            self._gcp_token_cache = self._build_signing_adc_helper(effective_email).sync_token_cache(
+                allow_ambient_adc=self._allow_ambient_adc()
+            )
         return self._gcp_token_cache
 
     def _ensure_async_gcs_token_cache(self, effective_email: str) -> AsyncGcpTokenCache:
         """Lazily initialize and return the asynchronous token cache for keyless GCS IAM signing."""
         if not isinstance(self._gcp_token_cache, AsyncGcpTokenCache):
-            self._gcp_token_cache = self._build_signing_adc_helper(effective_email).async_token_cache()
+            self._gcp_token_cache = self._build_signing_adc_helper(effective_email).async_token_cache(
+                allow_ambient_adc=self._allow_ambient_adc()
+            )
         return self._gcp_token_cache
 
     def _execute_gcs_v4_iam_sign(
@@ -1430,6 +1444,9 @@ class SyncObjectStore(_BaseObjectStore):
         token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
         _native_instance: Any = None,
     ) -> None:
+        if token_cache is not None and not isinstance(token_cache, (SyncGcpTokenCache, AsyncGcpTokenCache)):
+            msg = f"token_cache must be a SyncGcpTokenCache or AsyncGcpTokenCache, got {type(token_cache).__name__}"
+            raise ImproperConfigurationError(msg)
         resolved_cache = (
             token_cache
             if isinstance(token_cache, SyncGcpTokenCache)
@@ -1443,11 +1460,7 @@ class SyncObjectStore(_BaseObjectStore):
         if self._gcp_token_cache is None:
             cache_opts = self._auto_build_gcs_token_cache_options()
             if cache_opts is not None:
-                allow_ambient = cache_opts.get("allow_ambient_adc", "true").strip().lower() not in {
-                    "false",
-                    "0",
-                    "no",
-                }
+                allow_ambient = self._allow_ambient_adc()
                 with contextlib.suppress(ValueError, GoogleCloudAuthError, OSError):
                     self._gcp_token_cache = SyncGcpTokenCache(
                         cache_opts,
@@ -1774,6 +1787,9 @@ class AsyncObjectStore(_BaseObjectStore):
         token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
         _native_instance: Any = None,
     ) -> None:
+        if token_cache is not None and not isinstance(token_cache, (SyncGcpTokenCache, AsyncGcpTokenCache)):
+            msg = f"token_cache must be a SyncGcpTokenCache or AsyncGcpTokenCache, got {type(token_cache).__name__}"
+            raise ImproperConfigurationError(msg)
         resolved_cache = (
             token_cache
             if isinstance(token_cache, AsyncGcpTokenCache)
@@ -1787,11 +1803,7 @@ class AsyncObjectStore(_BaseObjectStore):
         if self._gcp_token_cache is None:
             cache_opts = self._auto_build_gcs_token_cache_options()
             if cache_opts is not None:
-                allow_ambient = cache_opts.get("allow_ambient_adc", "true").strip().lower() not in {
-                    "false",
-                    "0",
-                    "no",
-                }
+                allow_ambient = self._allow_ambient_adc()
                 with contextlib.suppress(ValueError, GoogleCloudAuthError, OSError):
                     self._gcp_token_cache = AsyncGcpTokenCache(
                         cache_opts,

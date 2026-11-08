@@ -374,7 +374,8 @@ def test_native_oci_par_and_gcs_iam_assembly_exports() -> None:
         native_storage_mod.assemble_gcs_iam_v4_url(c_uri, c_qs, "not-valid-hex!!")
 
 
-def test_native_gcs_custom_endpoint_presign_and_capsule_validation(tmp_path: Path) -> None:
+@pytest.mark.anyio
+async def test_native_gcs_custom_endpoint_presign_and_capsule_validation(tmp_path: Path) -> None:
     """Verify custom GCS endpoint V4 signing, token_cache_capsule IAM quota project, and invalid capsule rejection."""
     with pytest.raises(ValueError, match="capsule"):
         native_storage_mod.SyncObjectStore("memory://test", None, "not-a-capsule")
@@ -413,19 +414,17 @@ def test_native_gcs_custom_endpoint_presign_and_capsule_validation(tmp_path: Pat
     assert "host:127.0.0.1:4443\n" in c_req
     assert c_qs in signed_sync
 
-    async def _run_async_custom_ep() -> str:
-        return await native_storage_mod.py_sign_gcs_v4_iam_url_async(
-            "my-bkt",
-            sa_email,
-            "GET",
-            "dir/file.txt",
-            900,
-            1_700_000_000,
-            private_key_pem=pem_key,
-            endpoint=ep,
-        )
-
-    assert asyncio.run(_run_async_custom_ep()) == signed_sync
+    signed_async = await native_storage_mod.py_sign_gcs_v4_iam_url_async(
+        "my-bkt",
+        sa_email,
+        "GET",
+        "dir/file.txt",
+        900,
+        1_700_000_000,
+        private_key_pem=pem_key,
+        endpoint=ep,
+    )
+    assert signed_async == signed_sync
 
     seen_quota_projects: list[str] = []
 
@@ -661,7 +660,8 @@ def test_multicloud_store_sign_sync_and_async(tmp_path: Path) -> None:
         srv_thread.join(timeout=2.0)
 
 
-def test_gcs_config_custom_endpoint_store_sign_preserves_no_proxy_env(
+@pytest.mark.anyio
+async def test_gcs_config_custom_endpoint_store_sign_preserves_no_proxy_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify SyncObjectStore and AsyncObjectStore honor GCSConfig.endpoint in store.sign without mutating NO_PROXY."""
@@ -696,7 +696,7 @@ def test_gcs_config_custom_endpoint_store_sign_preserves_no_proxy_env(
     assert sync_signed.startswith("http://127.0.0.1:4443/b/a/b.txt?")
     assert "X-Goog-Algorithm=GOOG4-RSA-SHA256" in sync_signed
 
-    async_signed = asyncio.run(async_store.sign("a/b.txt", expires_in=600, timestamp=1_700_000_000))
+    async_signed = await async_store.sign("a/b.txt", expires_in=600, timestamp=1_700_000_000)
     assert async_signed == sync_signed
     assert "NO_PROXY" not in os.environ
     assert "no_proxy" not in os.environ

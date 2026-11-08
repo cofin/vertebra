@@ -824,12 +824,19 @@ pub async fn sign_gcs_v4_with_options_and_handle_checked(
                 .is_some_and(|v| !v.trim().is_empty())
         });
         if !has_target_sa_override {
-            let discovered_key = token_cache
-                .and_then(SharedGcpTokenCacheHandle::service_account_key)
-                .or_else(|| match credentials_options {
-                    Some(opts) => extract_adc_service_account_key(opts, true),
+            let discovered_key = if let Some(cache) = token_cache {
+                cache.service_account_key()
+            } else {
+                match credentials_options {
+                    Some(opts) => {
+                        let allow_ambient = !opts
+                            .get("allow_ambient_adc")
+                            .is_some_and(|v| v.eq_ignore_ascii_case("false") || v == "0");
+                        extract_adc_service_account_key(opts, allow_ambient)
+                    }
                     None => extract_adc_service_account_key(&HashMap::new(), true),
-                });
+                }
+            };
             if let Some(sa_key) = discovered_key
                 && (config.service_account_email.is_empty()
                     || sa_key.client_email == config.service_account_email)

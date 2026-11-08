@@ -377,6 +377,18 @@ fn ambient_proxy_url() -> Option<String> {
     None
 }
 
+fn merged_loopback_proxy_excludes() -> String {
+    for key in ["NO_PROXY", "no_proxy"] {
+        if let Ok(val) = std::env::var(key) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return format!("{trimmed},{LOOPBACK_PROXY_EXCLUDES}");
+            }
+        }
+    }
+    LOOPBACK_PROXY_EXCLUDES.to_string()
+}
+
 fn build_http_client_options(
     allow_http: bool,
     endpoint: Option<&str>,
@@ -389,8 +401,8 @@ fn build_http_client_options(
         .with_timeout(Duration::from_secs(300))
         .with_http2_keep_alive_interval(Duration::from_secs(30))
         .with_allow_http(allow_http);
-    if allow_http || is_loopback_endpoint(endpoint) {
-        opts = opts.with_proxy_excludes(LOOPBACK_PROXY_EXCLUDES);
+    if is_loopback_endpoint(endpoint) {
+        opts = opts.with_proxy_excludes(merged_loopback_proxy_excludes());
         if let Some(proxy_url) = ambient_proxy_url() {
             opts = opts.with_proxy_url(proxy_url);
         }
@@ -563,17 +575,17 @@ impl ObjectStoreEngine {
                     );
                 }
 
-                if let Some(sa_path) = service_account_path {
-                    builder = builder.with_service_account_path(sa_path);
-                }
-                if let Some(sa_key) = service_account_key {
-                    builder = builder.with_service_account_key(sa_key);
-                }
                 if let Some(cache) = credential_cache {
                     let creds =
                         Arc::new(crate::gcp_auth::RefreshingGcpCredentialProvider::new(cache));
                     builder = builder.with_credentials(creds);
                 } else {
+                    if let Some(sa_path) = service_account_path {
+                        builder = builder.with_service_account_path(sa_path);
+                    }
+                    if let Some(sa_key) = service_account_key {
+                        builder = builder.with_service_account_key(sa_key);
+                    }
                     if let Some(adc_path) = application_credentials_path {
                         builder = builder.with_application_credentials(adc_path);
                     }
