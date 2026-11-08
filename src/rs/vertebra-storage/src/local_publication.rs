@@ -4,8 +4,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use object_store::local::LocalFileSystem;
+use object_store::path::Path as StorePath;
+use object_store::{ObjectStoreExt, PutResult};
+use tokio::io::AsyncWriteExt;
 
+use crate::conditional::PublishCondition;
 use crate::store::StorageError;
 
 const LOCK_NAME: &str = ".vtb-cas-lock#0";
@@ -90,9 +95,196 @@ pub(super) struct LocalPublication {
     root: PathBuf,
 }
 
+pub(super) struct LocalStage {
+    path: Option<PathBuf>,
+    file: Option<tokio::fs::File>,
+}
+
+impl LocalStage {
+    pub(super) async fn write_chunk(&mut self, chunk: Bytes) -> Result<(), StorageError> {
+        self.file
+            .as_mut()
+            .ok_or_else(|| StorageError::InvalidInput("local stage is closed".into()))?
+            .write_all(&chunk)
+            .await?;
+        Ok(())
+    }
+
+    pub(super) async fn abort(&mut self) -> Result<(), StorageError> {
+        self.file.take();
+        if let Some(path) = &self.path {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            self.path = None;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for LocalStage {
+    fn drop(&mut self) {
+        self.file.take();
+        if let Some(path) = &self.path {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 impl LocalPublication {
     pub(super) fn new(store: Arc<LocalFileSystem>, root: PathBuf) -> Self {
         Self { store, root }
+    }
+
+    pub(super) async fn stage(&self, destination: &StorePath) -> Result<LocalStage, StorageError> {
+        let destination = self.store.path_to_filesystem(destination)?;
+        let parent = destination.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "destination has no parent")
+        })?;
+        std::fs::create_dir_all(parent)?;
+        for counter in 0_u64.. {
+            let path = parent.join(format!(
+                ".vertebra-stage-{}#{counter}",
+                uuid::Uuid::new_v4()
+            ));
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => {
+                    return Ok(LocalStage {
+                        path: Some(path),
+                        file: Some(tokio::fs::File::from_std(file)),
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(io::Error::other("local stage names exhausted").into())
+    }
+
+    pub(super) async fn publish(
+        &self,
+        stage: &mut LocalStage,
+        destination: &StorePath,
+        condition: &PublishCondition,
+    ) -> Result<PutResult, StorageError> {
+        self.publish_with_parents(stage, destination, condition, &[])
+            .await
+    }
+
+    async fn publish_with_parents(
+        &self,
+        stage: &mut LocalStage,
+        destination: &StorePath,
+        condition: &PublishCondition,
+        source: &[PathBuf],
+    ) -> Result<PutResult, StorageError> {
+        stage
+            .file
+            .as_mut()
+            .ok_or_else(|| StorageError::InvalidInput("local stage is closed".into()))?
+            .flush()
+            .await?;
+        let path = stage
+            .path
+            .as_ref()
+            .ok_or_else(|| StorageError::InvalidInput("local stage is closed".into()))?;
+        let target = self.store.path_to_filesystem(destination)?;
+        if path.parent().map(std::fs::canonicalize).transpose()?
+            != target.parent().map(std::fs::canonicalize).transpose()?
+        {
+            return Err(StorageError::InvalidInput(
+                "local stage has a different parent".into(),
+            ));
+        }
+        let mut parents = source.to_vec();
+        parents.push(target.clone());
+        let _guards = self.lock_parents(&parents).await?;
+        let current = match self.store.head(destination).await {
+            Ok(meta) => Some(meta),
+            Err(object_store::Error::NotFound { .. }) => None,
+            Err(error) => return Err(error.into()),
+        };
+        let matches = match condition {
+            PublishCondition::Overwrite => true,
+            PublishCondition::Create => current.is_none(),
+            PublishCondition::Match(tag) => {
+                current.as_ref().and_then(|meta| meta.e_tag.as_ref()) == Some(tag)
+            }
+            PublishCondition::NotMatch(tag) => {
+                current.as_ref().and_then(|meta| meta.e_tag.as_ref()) != Some(tag)
+            }
+        };
+        if !matches {
+            return Err(if matches!(condition, PublishCondition::Create) {
+                StorageError::AlreadyExists {
+                    path: destination.to_string(),
+                    message: "local destination exists".into(),
+                }
+            } else {
+                StorageError::Precondition {
+                    path: destination.to_string(),
+                    message: "local ETag predicate failed".into(),
+                }
+            });
+        }
+        if matches!(condition, PublishCondition::Create) {
+            std::fs::hard_link(path, &target).map_err(|error| {
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    StorageError::AlreadyExists {
+                        path: destination.to_string(),
+                        message: error.to_string(),
+                    }
+                } else {
+                    error.into()
+                }
+            })?;
+        } else {
+            std::fs::rename(path, &target)?;
+        }
+        let receipt = self.store.head(destination).await?;
+        stage.abort().await?;
+        Ok(PutResult {
+            e_tag: receipt.e_tag,
+            version: receipt.version,
+        })
+    }
+
+    pub(super) async fn delete(&self, path: &StorePath) -> Result<(), StorageError> {
+        let target = self.store.path_to_filesystem(path)?;
+        let _guards = self.lock_parents(std::slice::from_ref(&target)).await?;
+        std::fs::remove_file(target)?;
+        Ok(())
+    }
+
+    pub(super) async fn rename(
+        &self,
+        from: &StorePath,
+        to: &StorePath,
+    ) -> Result<(), StorageError> {
+        let source = self.store.path_to_filesystem(from)?;
+        let destination = self.store.path_to_filesystem(to)?;
+        std::fs::create_dir_all(
+            destination
+                .parent()
+                .ok_or_else(|| io::Error::other("destination has no parent"))?,
+        )?;
+        let _guards = self
+            .lock_parents(&[source.clone(), destination.clone()])
+            .await?;
+        std::fs::rename(source, destination)?;
+        Ok(())
+    }
+
+    pub(super) async fn copy(&self, from: &StorePath, to: &StorePath) -> Result<(), StorageError> {
+        let source = self.store.path_to_filesystem(from)?;
+        let mut input = tokio::fs::File::open(&source).await?;
+        let mut stage = self.stage(to).await?;
+        tokio::io::copy(&mut input, stage.file.as_mut().expect("new stage is open")).await?;
+        self.publish_with_parents(&mut stage, to, &PublishCondition::Overwrite, &[source])
+            .await?;
+        Ok(())
     }
 
     pub(super) async fn lock_parents(
@@ -131,15 +323,404 @@ impl LocalPublication {
 #[cfg(test)]
 mod tests {
     use super::{LocalPublication, directory_identity};
+    use crate::conditional::PublishCondition;
     use crate::store::StorageError;
+    use bytes::Bytes;
     use object_store::local::LocalFileSystem;
+    use object_store::path::Path as StorePath;
+    use object_store::{ObjectStore, ObjectStoreExt};
     use std::fs::{File, OpenOptions};
     use std::io::{BufRead, BufReader, Write};
     use std::path::Path;
     use std::process::{Child, Command, Stdio};
     use std::sync::Arc;
+    use tokio::io::AsyncWriteExt;
 
     const LOCK_NAME: &str = ".vtb-cas-lock#0";
+
+    #[tokio::test]
+    async fn stages_are_private_and_cleanup_only_owned_artifacts() {
+        use futures::TryStreamExt;
+        let root = tempfile::tempdir().unwrap();
+        let publication = publication(root.path());
+        let key = StorePath::from("nested/keep#suffix");
+        let mut stage = publication.stage(&key).await.unwrap();
+        stage.write_chunk(Bytes::from_static(b"one")).await.unwrap();
+        stage.write_chunk(Bytes::from_static(b"two")).await.unwrap();
+        stage.file.as_mut().unwrap().flush().await.unwrap();
+        let path = stage.path.clone().unwrap();
+        assert_eq!(path.parent().unwrap(), root.path().join("nested"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"onetwo");
+        let mut other = publication.stage(&key).await.unwrap();
+        let other_path = other.path.clone().unwrap();
+        assert_ne!(path, other_path);
+        std::fs::write(root.path().join("nested/keep#suffix"), b"kept").unwrap();
+        drop(open_lock(&root.path().join("nested")));
+        let narrow = LocalFileSystem::new_with_prefix(root.path().join("nested")).unwrap();
+        for (store, prefix) in [
+            (publication.store.as_ref(), Some(StorePath::from("nested"))),
+            (&narrow, None),
+        ] {
+            let listed: Vec<_> = store.list(None).try_collect().await.unwrap();
+            assert_eq!(listed.len(), 1);
+            assert!(listed[0].location.as_ref().ends_with("keep#suffix"));
+            assert_eq!(
+                store
+                    .list_with_delimiter(prefix.as_ref())
+                    .await
+                    .unwrap()
+                    .objects
+                    .len(),
+                1
+            );
+        }
+        stage.abort().await.unwrap();
+        stage.abort().await.unwrap();
+        assert!(!path.exists());
+        assert!(other_path.exists());
+        assert!(root.path().join("nested").join(LOCK_NAME).exists());
+        other.abort().await.unwrap();
+        let abandoned = publication.stage(&key).await.unwrap();
+        let abandoned_path = abandoned.path.clone().unwrap();
+        drop(abandoned);
+        assert!(!abandoned_path.exists());
+        assert_eq!(
+            std::fs::read(root.path().join("nested/keep#suffix")).unwrap(),
+            b"kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_publish_checks_current_predicates_and_returns_sdk_receipts() {
+        let root = tempfile::tempdir().unwrap();
+        let publication = publication(root.path());
+        let key = StorePath::from("nested/%2F-λ");
+        let mut stage = publication.stage(&key).await.unwrap();
+        stage
+            .write_chunk(Bytes::from_static(b"first"))
+            .await
+            .unwrap();
+        let path = stage.path.clone().unwrap();
+        let first = publication
+            .publish(&mut stage, &key, &PublishCondition::Create)
+            .await
+            .unwrap();
+        assert!(!path.exists());
+        assert!(stage.path.is_none());
+        assert_eq!(
+            first.e_tag,
+            publication.store.head(&key).await.unwrap().e_tag
+        );
+        let mut replacement = publication.stage(&key).await.unwrap();
+        replacement
+            .write_chunk(Bytes::from_static(b"replacement"))
+            .await
+            .unwrap();
+        for condition in [
+            PublishCondition::Create,
+            PublishCondition::Match("stale".into()),
+            PublishCondition::NotMatch(first.e_tag.clone().unwrap()),
+        ] {
+            let error = publication
+                .publish(&mut replacement, &key, &condition)
+                .await
+                .unwrap_err();
+            assert!(error.is_already_exists() || error.is_precondition());
+            assert!(replacement.path.as_ref().unwrap().exists());
+            assert_eq!(
+                publication
+                    .store
+                    .get(&key)
+                    .await
+                    .unwrap()
+                    .bytes()
+                    .await
+                    .unwrap(),
+                b"first"[..]
+            );
+        }
+        let second = publication
+            .publish(
+                &mut replacement,
+                &key,
+                &PublishCondition::Match(first.e_tag.unwrap()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            second.e_tag,
+            publication.store.head(&key).await.unwrap().e_tag
+        );
+        assert_eq!(
+            second.version,
+            publication.store.head(&key).await.unwrap().version
+        );
+        assert_eq!(
+            publication
+                .store
+                .get(&key)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            b"replacement"[..]
+        );
+        let absent = StorePath::from("nested/absent");
+        let mut stage = publication.stage(&absent).await.unwrap();
+        assert!(
+            publication
+                .publish(
+                    &mut stage,
+                    &absent,
+                    &PublishCondition::Match("missing".into())
+                )
+                .await
+                .unwrap_err()
+                .is_precondition()
+        );
+        publication
+            .publish(
+                &mut stage,
+                &absent,
+                &PublishCondition::NotMatch("missing".into()),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn competing_sdk_write_is_checked_after_parent_guard_acquisition() {
+        let root = tempfile::tempdir().unwrap();
+        let publication = publication(root.path());
+        let key = StorePath::from("object");
+        let before = publication
+            .store
+            .put(&key, Bytes::from_static(b"before").into())
+            .await
+            .unwrap();
+        let mut stage = publication.stage(&key).await.unwrap();
+        stage
+            .write_chunk(Bytes::from_static(b"ours"))
+            .await
+            .unwrap();
+        stage.file.as_mut().unwrap().flush().await.unwrap();
+        let held = open_lock(root.path());
+        held.try_lock().unwrap();
+        let condition = PublishCondition::Match(before.e_tag.unwrap());
+        let mut waiting = Box::pin(publication.publish(&mut stage, &key, &condition));
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        let winner = publication
+            .store
+            .put(&key, Bytes::from_static(b"competing native SDK").into())
+            .await
+            .unwrap();
+        drop(held);
+        assert!(waiting.await.unwrap_err().is_precondition());
+        assert_eq!(
+            publication.store.head(&key).await.unwrap().e_tag,
+            winner.e_tag
+        );
+        stage.abort().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_publication_errors_retain_stage_and_original_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let publication = publication(root.path());
+        let key = StorePath::from("target");
+        let mut stage = publication.stage(&key).await.unwrap();
+        stage
+            .write_chunk(Bytes::from_static(b"owned"))
+            .await
+            .unwrap();
+        let path = stage.path.clone().unwrap();
+        std::fs::create_dir(root.path().join("target")).unwrap();
+        assert!(
+            publication
+                .publish(&mut stage, &key, &PublishCondition::Overwrite)
+                .await
+                .is_err()
+        );
+        assert!(path.exists());
+        assert!(root.path().join("target").is_dir());
+        std::fs::create_dir(root.path().join("elsewhere")).unwrap();
+        assert!(matches!(
+            publication
+                .publish(
+                    &mut stage,
+                    &StorePath::from("elsewhere/object"),
+                    &PublishCondition::Overwrite
+                )
+                .await,
+            Err(StorageError::InvalidInput(_))
+        ));
+        assert!(path.exists());
+        stage.abort().await.unwrap();
+        assert!(!path.exists());
+        assert!(root.path().join(LOCK_NAME).exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let denied = root.path().join("denied");
+            std::fs::create_dir(&denied).unwrap();
+            std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let error = publication
+                .stage(&StorePath::from("denied/object"))
+                .await
+                .err()
+                .unwrap();
+            std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(
+                matches!(error, StorageError::Io(error) if error.kind() == std::io::ErrorKind::PermissionDenied)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_publication_retains_abort_ownership_and_mutations_share_guards() {
+        let root = tempfile::tempdir().unwrap();
+        let publication = publication(root.path());
+        let key = StorePath::from("source");
+        publication
+            .store
+            .put(&key, Bytes::from_static(b"original").into())
+            .await
+            .unwrap();
+        let mut stage = publication.stage(&key).await.unwrap();
+        stage
+            .write_chunk(Bytes::from_static(b"cancelled"))
+            .await
+            .unwrap();
+        stage.file.as_mut().unwrap().flush().await.unwrap();
+        let path = stage.path.clone().unwrap();
+        let held = open_lock(root.path());
+        held.try_lock().unwrap();
+        let mut waiting =
+            Box::pin(publication.publish(&mut stage, &key, &PublishCondition::Overwrite));
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        drop(waiting);
+        assert!(path.exists());
+        stage.abort().await.unwrap();
+        stage.abort().await.unwrap();
+        let mut deleting = Box::pin(publication.delete(&key));
+        assert!(futures::poll!(deleting.as_mut()).is_pending());
+        drop(deleting);
+        assert_eq!(
+            publication
+                .store
+                .get(&key)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            b"original"[..]
+        );
+        drop(held);
+        let copied = StorePath::from("other/copy");
+        publication.copy(&key, &copied).await.unwrap();
+        let moved = StorePath::from("third/moved");
+        publication.rename(&copied, &moved).await.unwrap();
+        assert!(publication.store.head(&copied).await.is_err());
+        assert_eq!(
+            publication
+                .store
+                .get(&moved)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            b"original"[..]
+        );
+        publication.delete(&moved).await.unwrap();
+        assert!(publication.store.head(&moved).await.is_err());
+        assert!(root.path().join(LOCK_NAME).exists());
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn same_parent_filesystem_and_sdk_characterization() {
+        use futures::TryStreamExt;
+        use object_store::path::Path as StorePath;
+        use object_store::{ObjectStore, ObjectStoreExt};
+
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("nested");
+        std::fs::create_dir(&parent).unwrap();
+        let broad = LocalFileSystem::new_with_prefix(root.path()).unwrap();
+        let narrow = LocalFileSystem::new_with_prefix(&parent).unwrap();
+        let stage = parent.join(format!(".vertebra-stage-{}#0", uuid::Uuid::new_v4()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&stage)
+            .unwrap();
+        file.write_all(b"first").unwrap();
+        file.write_all(b"second").unwrap();
+        file.flush().unwrap();
+        drop(file);
+        drop(open_lock(&parent));
+        std::fs::write(parent.join("keep#suffix"), b"legal").unwrap();
+        for store in [&broad, &narrow] {
+            let listed: Vec<_> = store.list(None).try_collect().await.unwrap();
+            assert_eq!(listed.len(), 1);
+            assert!(listed[0].location.as_ref().ends_with("keep#suffix"));
+        }
+        assert_eq!(
+            narrow
+                .list_with_delimiter(None)
+                .await
+                .unwrap()
+                .objects
+                .len(),
+            1
+        );
+        assert_eq!(
+            broad
+                .list_with_delimiter(Some(&StorePath::from("nested")))
+                .await
+                .unwrap()
+                .objects
+                .len(),
+            1
+        );
+        let destination = narrow
+            .path_to_filesystem(&StorePath::from("%2F-λ"))
+            .unwrap();
+        std::fs::hard_link(&stage, &destination).unwrap();
+        assert_eq!(
+            std::fs::hard_link(&stage, &destination).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        let original = narrow.head(&StorePath::from("%2F-λ")).await.unwrap();
+        assert_eq!(original.size, 11);
+        assert_eq!(
+            narrow
+                .get(&StorePath::from("%2F-λ"))
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            b"firstsecond"[..]
+        );
+        std::fs::remove_file(&stage).unwrap();
+        std::fs::write(&stage, b"replacement").unwrap();
+        std::fs::rename(&stage, &destination).unwrap();
+        assert!(!stage.exists());
+        assert_eq!(
+            narrow
+                .get(&StorePath::from("%2F-λ"))
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            b"replacement"[..]
+        );
+    }
 
     fn open_lock(parent: &Path) -> File {
         OpenOptions::new()
