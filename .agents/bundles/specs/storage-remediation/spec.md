@@ -14,17 +14,17 @@ chapters:
   - ch05-framework-adapters-and-test-hygiene
   - ch06-docs-okf-and-plan-sync
 current_chapter: ch02-zero-copy-ffi-keys-and-backends
-current_task: null
+current_task: "storage-remediation:ch02:t04"
 parent_prd: native-data-platform
 research: []
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 10
+state_revision: 11
 last_verified_checkpoint: 211c3161
 last_reviewed_chapter: ch01-native-gcs-plane-and-signing
 last_reviewed_commit: 4b81d314
 created_at: "2026-11-08T20:30:00Z"
-updated_at: "2026-11-08T23:53:48Z"
+updated_at: "2026-11-08T23:58:00Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
@@ -260,9 +260,9 @@ Zero-context code and quality reviews of `feat/storage-updates` (`077a3fe9..fd57
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `211c3161` — `1/6` chapters completed (`ch01`).
-- **Active Chapter**: `ch02-zero-copy-ffi-keys-and-backends` (`4/4` tasks completed, pending review).
-- **Remaining Plan**: `ch02-zero-copy-ffi-keys-and-backends`, `ch03-bulk-file-io-compose-and-streams`, `ch04-streaming-arrow-parquet-and-shm`, `ch05-framework-adapters-and-test-hygiene`, `ch06-docs-okf-and-plan-sync`.
+- **Verified Baseline (`HEAD`)**: `211c3161` — `ch01` completed & reviewed (`1ff643ec`); all `4/4` `ch02` tasks (`d889b958`, `fb8dde11`, `8eb43fb2`, `211c3161`) implemented, tested, and committed on `feat/storage-updates`.
+- **Active Chapter**: `ch02-zero-copy-ffi-keys-and-backends` (paused at `ch02` zero-context chapter review `1ff643ec..HEAD`).
+- **Remaining Plan**: Complete `ch02` review -> `ch03-bulk-file-io-compose-and-streams` (`t01`–`t04`) -> `ch04-streaming-arrow-parquet-and-shm` (`t01`–`t03`) -> `ch05-framework-adapters-and-test-hygiene` (`t01`–`t03`) -> `ch06-docs-okf-and-plan-sync` (`t01`–`t02`) -> dual review, archive, push, and open stacked PRs (`feat/storage-updates`, `feat/driver-fail-loud`, `feat/native-postgres-driver`).
 - **Documentation & OKF Sync**: `[0/6 files documented]`.
 - **Active Invariants & Triggers**: Zero `planning_status: empirical_dependent` chapters; every chapter is decision-complete (`planning_status: complete`).
 
