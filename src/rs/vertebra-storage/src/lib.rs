@@ -1,5 +1,7 @@
 //! `vertebra-storage` crate and `vertebra._storage` PyO3 extension module.
 
+#[cfg(test)]
+mod cloud_request;
 mod conditional;
 pub mod gcp_auth;
 pub mod oci;
