@@ -4,7 +4,7 @@ flow_id: storage-remediation
 title: Native GCS Data Plane, Bulk Transfers, and Zero-Copy Storage Hardening
 description: Remediate native GCS data-plane authentication, conditional generation updates, emulator static-bearer bypass, connection pooling, custom-endpoint V4 presigning, zero-copy PyBackedBytes FFI, checked byte-range arithmetic, raw object key preservation, streaming OCI operations, streaming bulk file transfers, server-side GCS compose, glob prefix pushdown, read-ahead/writable file streams, bounded Arrow/Parquet/SHM codecs, and clean-break framework storage adapters.
 status: stable
-state: planned
+state: active
 has_chapters: true
 chapters:
   - ch01-native-gcs-plane-and-signing
@@ -14,17 +14,17 @@ chapters:
   - ch05-framework-adapters-and-test-hygiene
   - ch06-docs-okf-and-plan-sync
 current_chapter: ch01-native-gcs-plane-and-signing
-current_task: "storage-remediation:ch01:t01"
+current_task: "storage-remediation:ch01:t02"
 parent_prd: native-data-platform
 research: []
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 0
-last_verified_checkpoint: fd571e3a
+state_revision: 1
+last_verified_checkpoint: f38d895b
 last_reviewed_chapter: null
 last_reviewed_commit: null
 created_at: "2026-11-08T20:30:00Z"
-updated_at: "2026-11-08T20:55:00Z"
+updated_at: "2026-11-08T22:30:30Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
@@ -250,7 +250,7 @@ Zero-context code and quality reviews of `feat/storage-updates` (`077a3fe9..fd57
 
 ## 5. Implementation Plan
 
-- [ ] ch01-native-gcs-plane-and-signing — Cross-extension `GcpTokenCacheCapsule`, native GCS conditional/emulator/pooling fixes, pooled IAM `signBlob`, custom GCS endpoint presigning, and non-blocking `GCSConfig` (chapters/ch01-native-gcs-plane-and-signing/spec.md)
+- [~] ch01-native-gcs-plane-and-signing — Cross-extension `GcpTokenCacheCapsule`, native GCS conditional/emulator/pooling fixes, pooled IAM `signBlob`, custom GCS endpoint presigning, and non-blocking `GCSConfig` (chapters/ch01-native-gcs-plane-and-signing/spec.md)
 - [ ] ch02-zero-copy-ffi-keys-and-backends — Zero-copy `PyBackedBytes` FFI, checked `get_range`, raw `StorePath::parse` keys, `PreconditionError`, S3/R2/HTTP backend options, Litestar raw keys, and streaming/paginated `OciObjectStore` (chapters/ch02-zero-copy-ffi-keys-and-backends/spec.md)
 - [ ] ch03-bulk-file-io-compose-and-streams — Streaming `put_file`/`get_file`, bounded-concurrency `download_many`/`upload_many`/`staged_download`, conditional `copy`, `glob`, server-side GCS `compose`, read-ahead `open_reader`, and streaming `open_writer` (chapters/ch03-bulk-file-io-compose-and-streams/spec.md)
 - [ ] ch04-streaming-arrow-parquet-and-shm — True streaming `StreamingStorageResponse`, bounded `_arrow.py` layout/readinto/pre-buffer + Parquet dictionary/encoding options, and zero-copy `read_arrow_shm` + columnar Arrow hydration (chapters/ch04-streaming-arrow-parquet-and-shm/spec.md)

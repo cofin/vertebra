@@ -5,7 +5,7 @@ chapter_id: ch01-native-gcs-plane-and-signing
 title: Add C-ABI GcpTokenCacheCapsule and SharedGcpTokenCacheHandle and expose _capsule() on _vertebra caches
 description: Define GCP_TOKEN_CACHE_CAPSULE_NAME, #[repr(C)] GcpTokenCacheCapsule, SharedGcpTokenCacheHandle, and GcpTokenCache::quota_project_id in vertebra-core, and expose _capsule() on SyncGcpTokenCache and AsyncGcpTokenCache in vertebra-py and _vertebra.pyi.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -25,18 +25,27 @@ tests:
 estimated_loc: 210
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: agent:executor
+claimed_at: "2026-11-08T22:25:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-08T22:30:02Z"
+last_verified_commit: f38d895b
+verification_evidence:
+  red:
+    exit_code: 1
+    summary: "AttributeError: 'builtins.SyncGcpTokenCache' object has no attribute '_capsule'"
+  green:
+    cargo_test_exit_code: 0
+    stubtest_exit_code: 0
+    pytest_exit_code: 0
+    pytest_summary: "14 passed in 6.34s"
+    clippy_exit_code: 0
 created_at: "2026-11-08T20:30:00Z"
-updated_at: "2026-11-08T20:30:00Z"
-commit: null
+updated_at: "2026-11-08T22:30:30Z"
+commit: f38d895b
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:30:00Z"
@@ -129,15 +138,15 @@ Out of scope: `vertebra-storage` adoption (`t02` and `t03`) and Python `_store.p
 
 ```bash
 PATH="$PWD/.venv/bin:$PATH" PYO3_PYTHON="$PWD/.venv/bin/python" CARGO_TARGET_DIR=/tmp/vtb-cargo-target cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core gcp_auth
-PATH="$PWD/.venv/bin:$PATH" PYO3_PYTHON="$PWD/.venv/bin/python" CARGO_TARGET_DIR=/tmp/vtb-cargo-target uv run --offline --no-sync maturin develop --uv --offline --manifest-path src/rs/vertebra-py/Cargo.toml --features tls,compression,gcp
-uv run --no-sync python -m mypy.stubtest vertebra._vertebra --allowlist tools/stubtest/allowlist.txt
+PATH="$PWD/.venv/bin:$PATH" PYO3_PYTHON="$PWD/.venv/bin/python" CARGO_TARGET_DIR=/tmp/vtb-cargo-target uv run --offline --no-sync maturin develop --uv --offline
+uv run --no-sync python -m mypy.stubtest vertebra._vertebra
 uv run --no-sync pytest src/py/tests/unit/storage/test_gcs_token_refresh.py -q
 ```
 
 ## Acceptance Criteria
 
-- [ ] `GcpTokenCacheCapsule` (`#[repr(C)]`) and `SharedGcpTokenCacheHandle` pass warm-cache, single-flight refresh, `invalidate()`, `service_account_key()`, `quota_project_id()`, and post-capsule-drop lifetime tests (R1.1).
-- [ ] `SyncGcpTokenCache._capsule()` and `AsyncGcpTokenCache._capsule()` are exposed and pass `mypy.stubtest vertebra._vertebra` (R1.1).
+- [x] `GcpTokenCacheCapsule` (`#[repr(C)]`) and `SharedGcpTokenCacheHandle` pass warm-cache, single-flight refresh, `invalidate()`, `service_account_key()`, `quota_project_id()`, and post-capsule-drop lifetime tests (R1.1).
+- [x] `SyncGcpTokenCache._capsule()` and `AsyncGcpTokenCache._capsule()` are exposed and pass `mypy.stubtest vertebra._vertebra` (R1.1).
 
 ## Notes & Discoveries
 

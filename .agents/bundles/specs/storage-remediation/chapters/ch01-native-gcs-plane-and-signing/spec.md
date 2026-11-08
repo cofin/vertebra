@@ -6,18 +6,18 @@ chapter_id: ch01-native-gcs-plane-and-signing
 title: "Chapter 01: Native GCS Data Plane, Token Capsule, and Signing"
 description: Share SyncGcpTokenCache and AsyncGcpTokenCache across vertebra._vertebra and vertebra._storage via a C-ABI PyCapsule, harden native GCS conditional generation updates, skip_signature emulator static-bearer bypass, ambient ADC isolation, x-goog-user-project headers, and pooled HTTP/IAM clients, support custom-endpoint GCS V4 presigning, and remove blocking Python GCSConfig setup.
 status: stable
-state: planned
+state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: "storage-remediation:ch01:t01"
+current_task: "storage-remediation:ch01:t02"
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 0
-last_verified_checkpoint: null
+state_revision: 1
+last_verified_checkpoint: f38d895b
 last_reviewed_commit: null
 created_at: "2026-11-08T20:30:00Z"
-updated_at: "2026-11-08T20:30:00Z"
+updated_at: "2026-11-08T22:30:30Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:30:00Z"
@@ -138,7 +138,7 @@ tags:
 
 ## 5. Implementation Plan
 
-- [ ] storage-remediation:ch01:t01 — Add C-ABI `GcpTokenCacheCapsule` and `SharedGcpTokenCacheHandle` in `vertebra-core` and `_capsule()` on `_vertebra` token caches (tasks/t01-gcp-token-cache-capsule.md)
+- [x] [f38d895b] storage-remediation:ch01:t01 — Add C-ABI `GcpTokenCacheCapsule` and `SharedGcpTokenCacheHandle` in `vertebra-core` and `_capsule()` on `_vertebra` token caches (tasks/t01-gcp-token-cache-capsule.md)
 - [ ] storage-remediation:ch01:t02 — Wire `SharedGcpTokenCacheHandle` into `vertebra-storage` and harden GCS `if_match`, `skip_signature`, `allow_ambient_adc`, `x-goog-user-project`, and HTTP pooling (tasks/t02-native-gcs-data-plane-and-pooling.md)
 - [ ] storage-remediation:ch01:t03 — Pool IAM `signBlob` HTTP clients, add custom GCS `endpoint` presigning, and wire PyO3 `_storage` bindings and `_storage.pyi` (tasks/t03-gcs-presigning-and-python-config-wiring.md)
 - [ ] storage-remediation:ch01:t04 — Wire Python `GCSConfig`, `SyncObjectStore`, and `AsyncObjectStore` to `token_cache._capsule()` and custom GCS signing `endpoint` without blocking I/O (tasks/t04-python-gcs-config-and-store-wiring.md)
@@ -146,8 +146,8 @@ tags:
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `fd571e3a` — `0/4` tasks completed in `ch01`.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04`.
+- **Verified Baseline (`HEAD`)**: `f38d895b` — `1/4` tasks completed in `ch01`.
+- **Remaining Tasks in Chapter**: `t02`, `t03`, `t04`.
 - **Remaining Chapters**: `ch01`–`ch06`.
 
 [^core-gcp-auth]: `src/rs/vertebra-core/src/gcp_auth.rs::GcpTokenCache` — Core GCP OAuth2 token cache shared across PyO3 extensions.
