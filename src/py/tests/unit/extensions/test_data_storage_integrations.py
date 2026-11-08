@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pyarrow as pa
@@ -30,6 +31,7 @@ from vertebra.extensions.sqlspec.storage import ObjectStoreBackend as SQLSpecObj
 from vertebra.storage import (
     AsyncGcpTokenCache,
     GCSConfig,
+    MemoryConfig,
     SigningConfig,
     SyncGcpTokenCache,
     SyncObjectStore,
@@ -37,6 +39,7 @@ from vertebra.storage import (
 from vertebra.storage import (
     StreamingStorageResponse as StorageStreamingStorageResponse,
 )
+from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import decode_json
 
 
@@ -46,6 +49,212 @@ def test_duplicated_storage_shims_removed_from_extension_modules() -> None:
     assert not hasattr(alchemy_storage_mod, "StoredObject")
     assert not hasattr(sqlspec_storage_mod, "SQLSpecStore")
     assert not hasattr(sqlspec_storage_mod, "SqlSpecStorageBridge")
+
+
+@pytest.mark.parametrize("target", [None, "", "  "])
+def test_sqlspec_object_store_requires_explicit_target(target: str | None) -> None:
+    """Missing and blank targets fail before a storage engine is constructed."""
+    with pytest.raises(ImproperConfigurationError):
+        SQLSpecObjectStoreBackend(target)
+
+
+def test_sqlspec_object_store_requires_target_when_omitted() -> None:
+    """Omitting the target reports configuration failure."""
+    with pytest.raises(ImproperConfigurationError):
+        SQLSpecObjectStoreBackend()
+
+
+@pytest.mark.parametrize("uri", [None, "", "  "])
+def test_sqlspec_explicit_store_precedes_empty_uri(tmp_path: Path, uri: str | None) -> None:
+    """An explicit store supplies the canonical address when the URI is omitted or blank."""
+    backend = SQLSpecObjectStoreBackend(uri, store=SyncObjectStore.from_local(tmp_path), base_path="tenant-a")
+    assert backend.resolve_uri("object.bin") == str(tmp_path / "tenant-a" / "object.bin")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("async_store", [False, True])
+async def test_sqlspec_shared_store_conditional_writes_and_rename(tmp_path: Path, async_store: bool) -> None:
+    """Paired handles retain bytes and native write conditions across moves."""
+    store = SyncObjectStore.from_local(tmp_path)
+    backend = SQLSpecObjectStoreBackend(store=store.to_async() if async_store else store, base_path="tenant-a")
+    assert isinstance(backend, ObjectStoreProtocol)
+    backend.write_bytes_sync("a.bin", b"123")
+    await backend.move_async("a.bin", "b.bin")
+    assert not backend.exists_sync("a.bin")
+    assert await backend.read_bytes_async("b.bin") == b"123"
+    with pytest.raises(FileExistsError):
+        backend.write_bytes_sync("b.bin", b"replacement", if_not_exists=True)
+    assert await backend.read_bytes_async("b.bin") == b"123"
+    with pytest.raises(FileExistsError):
+        await backend.write_bytes_async("b.bin", b"replacement", if_not_exists=True)
+    backend.write_text_sync("c.txt", "sync")
+    await backend.write_text_async("d.txt", "async")
+    backend.move_sync("c.txt", "d.txt")
+    assert not await backend.exists_async("c.txt")
+    assert await backend.read_text_async("d.txt") == "sync"
+    assert backend.store.get("tenant-a/b.bin") == b"123"
+
+
+@pytest.mark.anyio
+async def test_sqlspec_write_metadata_and_conditions() -> None:
+    """Native metadata and etag conditions survive both byte and text writes."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(), base_path="tenant-a")
+    backend.write_bytes_sync("meta.bin", b"data", content_type="text/plain", attributes={"tenant": "a"})
+    meta = await backend.async_store.head("tenant-a/meta.bin")
+    assert meta.content_type == "text/plain"
+    assert meta.attributes == {"tenant": "a"}
+    await backend.write_text_async("meta.bin", "updated", if_match=meta.etag, content_type="text/markdown")
+    assert backend.read_text_sync("meta.bin") == "updated"
+    assert backend.sync_store.head("tenant-a/meta.bin").content_type == "text/markdown"
+    with pytest.raises(OSError):
+        backend.write_bytes_sync("meta.bin", b"rejected", if_match="wrong-etag")
+    with pytest.raises(OSError):
+        await backend.write_text_async("meta.bin", "rejected", if_none_match="*")
+    assert backend.read_text_sync("meta.bin") == "updated"
+
+
+@pytest.mark.anyio
+async def test_sqlspec_native_streams_and_namespace_pages(tmp_path: Path) -> None:
+    """Native streams retain chunk bytes and pages share opaque sync/async cursors."""
+    store = SyncObjectStore.from_local(tmp_path)
+    backend = SQLSpecObjectStoreBackend(store=store, base_path="tenant-a")
+    store.put("tenant-other/hidden.bin", b"hidden")
+    result = backend.put_stream_sync("b.bin", iter([b"123"]))
+    assert result.etag
+    uploaded = await backend.put_stream_async("big.bin", [b"chunk1-", b"chunk2"])
+    assert uploaded.etag
+    assert b"".join(bytes(chunk) for chunk in backend.get_stream_sync("big.bin", chunk_size=3)) == b"chunk1-chunk2"
+    assert (
+        b"".join([bytes(chunk) async for chunk in backend.get_stream_async("big.bin", chunk_size=4)])
+        == b"chunk1-chunk2"
+    )
+    assert all(isinstance(chunk, bytes) for chunk in backend.stream_read_sync("big.bin", chunk_size=3))
+    assert b"".join(backend.stream_read_sync("big.bin", chunk_size=3)) == b"chunk1-chunk2"
+    stream = await backend.stream_read_async("big.bin", chunk_size=4)
+    assert b"".join([chunk async for chunk in stream]) == b"chunk1-chunk2"
+    page, cursor = backend.list_page_sync(limit=1)
+    assert page == ["b.bin"]
+    assert cursor is not None
+    assert await backend.list_page_async(cursor=cursor, limit=1) == (["big.bin"], None)
+    with pytest.raises(ValueError, match="limit"):
+        backend.list_page_sync(limit=0)
+    with pytest.raises(ValueError, match="limit"):
+        await backend.list_page_async(limit=0)
+
+
+@pytest.mark.anyio
+async def test_sqlspec_seekable_reader_factories(tmp_path: Path) -> None:
+    """Native readers preserve seek/read/close and their metadata lookup behavior."""
+    backend = SQLSpecObjectStoreBackend(store=SyncObjectStore.from_local(tmp_path), base_path="tenant-a")
+    backend.write_bytes_sync("big.bin", b"chunk1-chunk2")
+    with backend.open_sync("big.bin", chunk_size=3) as reader:
+        assert reader.read(7) == b"chunk1-"
+        assert reader.seek(0) == 0
+        assert reader.read() == b"chunk1-chunk2"
+    assert reader.closed
+    async with backend.open_async("big.bin", size=13, chunk_size=3) as async_reader:
+        assert await async_reader.read(7) == b"chunk1-"
+        assert async_reader.seek(0) == 0
+        assert await async_reader.read() == b"chunk1-chunk2"
+    assert async_reader.closed
+    with pytest.raises(FileNotFoundError):
+        backend.open_sync("missing.bin")
+    missing = backend.open_sync("missing.bin", size=1)
+    with pytest.raises(FileNotFoundError):
+        missing.read(1)
+    missing.close()
+    async_missing = backend.open_async("missing.bin")
+    with pytest.raises(FileNotFoundError):
+        await async_missing.read(1)
+    async_missing.close()
+
+
+@pytest.mark.parametrize("path", ["../secret.txt", "safe/../secret.txt", "memory://bucket/../secret.txt"])
+@pytest.mark.parametrize(
+    "operation", ["read_bytes_sync", "get_stream_sync", "open_sync", "glob_sync", "list_page_sync", "sign_sync"]
+)
+def test_sqlspec_rejects_namespace_traversal(path: str, operation: str) -> None:
+    """Every key-bearing synchronous seam refuses parent segments before namespace qualification."""
+    backend = SQLSpecObjectStoreBackend("memory://bucket", base_path="tenant-a")
+    with pytest.raises(ValueError, match="traversal"):
+        result = getattr(backend, operation)(path)
+        if operation == "get_stream_sync":
+            list(result)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "operation", ["read_bytes_async", "get_stream_async", "open_async", "glob_async", "list_page_async", "sign_async"]
+)
+async def test_sqlspec_rejects_async_namespace_traversal(operation: str) -> None:
+    """Asynchronous and reader-factory seams refuse parent key segments."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(), base_path="tenant-a")
+    with pytest.raises(ValueError, match="traversal"):
+        if operation == "get_stream_async":
+            async for _ in backend.get_stream_async("../secret.txt"):
+                pass
+        elif operation == "open_async":
+            backend.open_async("../secret.txt")
+        else:
+            await getattr(backend, operation)("../secret.txt")
+
+
+@pytest.mark.parametrize("namespace", [{"base_path": "tenant/../other"}, {"prefix": "../other"}])
+def test_sqlspec_rejects_configured_namespace_traversal(namespace: dict[str, str]) -> None:
+    """Parent segments in configured namespaces fail at construction."""
+    with pytest.raises(ValueError, match="traversal"):
+        SQLSpecObjectStoreBackend(MemoryConfig(), **namespace)
+
+
+@pytest.mark.anyio
+async def test_sqlspec_stream_options_and_failed_uploads() -> None:
+    """Streaming uploads preserve write options and abort incomplete objects."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(), base_path="tenant-a")
+    backend.put_stream_sync("meta.bin", [b"sync"], content_type="text/plain", attributes={"tenant": "a"})
+    meta = await backend.async_store.head("tenant-a/meta.bin")
+    assert meta.content_type == "text/plain"
+    assert meta.attributes == {"tenant": "a"}
+    with pytest.raises(FileExistsError):
+        backend.put_stream_sync("meta.bin", [b"rejected"], if_not_exists=True)
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield b"async-"
+        yield b"payload"
+
+    await backend.put_stream_async(
+        "meta.bin", chunks(), if_match=meta.etag, content_type="text/markdown", attributes={"tenant": "b"}
+    )
+    assert backend.read_bytes_sync("meta.bin") == b"async-payload"
+    updated = backend.sync_store.head("tenant-a/meta.bin")
+    assert updated.content_type == "text/markdown"
+    assert updated.attributes == {"tenant": "b"}
+    with pytest.raises(OSError):
+        await backend.put_stream_async("meta.bin", [b"rejected"], if_none_match="*")
+
+    def broken_chunks() -> Iterator[bytes]:
+        yield b"partial"
+        raise RuntimeError("source failed")
+
+    async def broken_async_chunks() -> AsyncIterator[bytes]:
+        yield b"partial"
+        raise RuntimeError("source failed")
+
+    with pytest.raises(RuntimeError, match="source failed"):
+        backend.put_stream_sync("failed-sync.bin", broken_chunks())
+    with pytest.raises(RuntimeError, match="source failed"):
+        await backend.put_stream_async("failed-async.bin", broken_async_chunks())
+    assert not backend.exists_sync("failed-sync.bin")
+    assert not await backend.exists_async("failed-async.bin")
+
+
+@pytest.mark.anyio
+async def test_sqlspec_unsupported_signing_preserves_adapter_error() -> None:
+    """Unconfigured native signing is reported using SQLSpec's adapter contract."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig())
+    with pytest.raises(NotImplementedError, match="signing not supported"):
+        backend.sign_sync("object.bin")
+    with pytest.raises(NotImplementedError, match="signing not supported"):
+        await backend.sign_async(["object.bin"], for_upload=True)
 
 
 def test_sqlspec_object_store_backend_protocol_arrow_and_sync_pipeline() -> None:

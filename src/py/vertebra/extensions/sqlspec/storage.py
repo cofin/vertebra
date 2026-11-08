@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import re
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterable, AsyncIterator, Buffer, Iterable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast, overload
 from urllib.parse import urlparse
@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from vertebra.storage import (
     AsyncGcpTokenCache,
     AsyncObjectStore,
+    AsyncReadableFile,
     AzureConfig,
     GCSConfig,
     HTTPConfig,
@@ -20,6 +21,7 @@ from vertebra.storage import (
     MemoryConfig,
     ObjectMeta,
     OCIConfig,
+    PutResult,
     R2Config,
     S3Config,
     SigningConfig,
@@ -27,8 +29,9 @@ from vertebra.storage import (
     StreamingStorageResponse,
     SyncGcpTokenCache,
     SyncObjectStore,
+    SyncReadableFile,
 )
-from vertebra.typing import MissingDependencyError
+from vertebra.typing import ImproperConfigurationError, MissingDependencyError
 from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_msgpack, encode_msgpack_bytes
 from vertebra.utils.text import validate_identifier
@@ -38,6 +41,7 @@ if TYPE_CHECKING:
     from sqlspec.storage.registry import StorageRegistry
     from sqlspec.typing import ArrowRecordBatch, ArrowTable
 
+    from vertebra._storage import StorageBuffer
     from vertebra.db.arrow import ArrowCursor
 
 __all__ = (
@@ -76,7 +80,7 @@ class ObjectStoreBackend:
 
     def __init__(
         self,
-        uri: str | SyncObjectStore | AsyncObjectStore | StorageConfig = "memory://",
+        uri: str | SyncObjectStore | AsyncObjectStore | StorageConfig | None = None,
         *,
         store: SyncObjectStore | AsyncObjectStore | StorageConfig | None = None,
         base_path: str = "",
@@ -98,12 +102,17 @@ class ObjectStoreBackend:
             token_cache: Optional shared `GcpTokenCache` for GCS OAuth2 bearer token refresh.
             **kwargs: Additional scalar backend options merged into `options`.
         """
+        self._reject_traversal(base_path)
+        self._reject_traversal(prefix)
         merged_options: dict[str, str] = dict(options or {})
         for key, value in kwargs.items():
             if isinstance(value, (str, int, float, bool)):
                 merged_options.setdefault(str(key), str(value))
 
         target = store if store is not None else uri
+        if target is None or (isinstance(target, str) and not target.strip()):
+            msg = "SQLSpec storage requires an explicit store, configuration, or URI"
+            raise ImproperConfigurationError(msg)
         sync_store: SyncObjectStore
         async_store: AsyncObjectStore
 
@@ -138,7 +147,7 @@ class ObjectStoreBackend:
         self._sync_store = sync_store
         self._async_store = async_store
         self._base_path = effective_prefix
-        if store is not None and isinstance(uri, str) and uri != "memory://":
+        if store is not None and isinstance(uri, str) and uri.strip() and uri != "memory://":
             self.store_uri = uri
             parsed_scheme = urlparse(uri).scheme
             self.protocol = self._normalize_protocol(parsed_scheme or sync_store.scheme)
@@ -219,8 +228,7 @@ class ObjectStoreBackend:
 
     def write_bytes_sync(self, path: str | Path, data: bytes, **kwargs: Any) -> None:
         """Write full object bytes synchronously."""
-        _ = kwargs
-        self._sync_store.put(self._qualify(path), data)
+        self._sync_store.put(self._qualify(path), data, **self._write_options(kwargs))
 
     def read_text_sync(self, path: str | Path, encoding: str = "utf-8", **kwargs: Any) -> str:
         """Read and decode UTF-8 text from an object synchronously."""
@@ -248,10 +256,7 @@ class ObjectStoreBackend:
     def move_sync(self, source: str | Path, destination: str | Path, **kwargs: Any) -> None:
         """Move an object within the store synchronously."""
         _ = kwargs
-        src_key = self._qualify(source)
-        dst_key = self._qualify(destination)
-        self._sync_store.copy(src_key, dst_key)
-        self._sync_store.delete(src_key)
+        self._sync_store.rename(self._qualify(source), self._qualify(destination))
 
     def list_objects_sync(self, prefix: str = "", recursive: bool = True, **kwargs: Any) -> list[str]:
         """List relative object keys matching the optional prefix synchronously."""
@@ -377,13 +382,48 @@ class ObjectStoreBackend:
         """Stream fixed-size byte chunks from a stored object synchronously."""
         _ = kwargs
         step = chunk_size if chunk_size is not None and chunk_size > 0 else 65_536
-        key = self._qualify(path)
-        with self._sync_store.open_readable_file(key) as reader:
-            while True:
-                chunk = reader.read(step)
-                if not chunk:
-                    break
-                yield chunk
+        for chunk in self.get_stream_sync(path, chunk_size=step):
+            yield bytes(chunk)
+
+    def get_stream_sync(self, path: str | Path, *, chunk_size: int | None = None) -> Iterator[StorageBuffer]:
+        """Return native buffer chunks without buffering the object."""
+        return self._sync_store.get_stream(self._qualify(path), chunk_size=chunk_size)
+
+    def get_stream_async(self, path: str | Path, *, chunk_size: int | None = None) -> AsyncIterator[StorageBuffer]:
+        """Return an asynchronous native buffer iterator."""
+        return self._async_store.get_stream(self._qualify(path), chunk_size=chunk_size)
+
+    def put_stream_sync(self, path: str | Path, chunks: Iterable[Buffer], **kwargs: Any) -> PutResult:
+        """Upload buffer chunks incrementally with native write options."""
+        return self._sync_store.put_stream(self._qualify(path), chunks, **self._write_options(kwargs))
+
+    async def put_stream_async(
+        self, path: str | Path, chunks: AsyncIterable[Buffer] | Iterable[Buffer], **kwargs: Any
+    ) -> PutResult:
+        """Upload synchronous or asynchronous chunks incrementally."""
+        return await self._async_store.put_stream(self._qualify(path), chunks, **self._write_options(kwargs))
+
+    def list_page_sync(
+        self, prefix: str = "", *, cursor: str | None = None, limit: int = 1000
+    ) -> tuple[list[str], str | None]:
+        """List a page of relative keys while preserving the native cursor."""
+        items, next_cursor = self._sync_store.list_page(self._qualify(prefix), cursor=cursor, limit=limit)
+        return [self._unqualify(item.path) for item in items], next_cursor
+
+    async def list_page_async(
+        self, prefix: str = "", *, cursor: str | None = None, limit: int = 1000
+    ) -> tuple[list[str], str | None]:
+        """List an asynchronous page of relative keys with a native cursor."""
+        items, next_cursor = await self._async_store.list_page(self._qualify(prefix), cursor=cursor, limit=limit)
+        return [self._unqualify(item.path) for item in items], next_cursor
+
+    def open_sync(self, path: str | Path, *, size: int | None = None, chunk_size: int = 65536) -> SyncReadableFile:
+        """Create a seekable reader, resolving metadata unless its size is supplied."""
+        return self._sync_store.open_reader(self._qualify(path), size=size, chunk_size=chunk_size)
+
+    def open_async(self, path: str | Path, *, size: int | None = None, chunk_size: int = 65536) -> AsyncReadableFile:
+        """Create a seekable asynchronous reader without performing storage I/O."""
+        return self._async_store.open_reader(self._qualify(path), size=size, chunk_size=chunk_size)
 
     def stream_response(
         self,
@@ -417,8 +457,7 @@ class ObjectStoreBackend:
 
     async def write_bytes_async(self, path: str | Path, data: bytes, **kwargs: Any) -> None:
         """Write full object bytes asynchronously."""
-        _ = kwargs
-        await self._async_store.put(self._qualify(path), data)
+        await self._async_store.put(self._qualify(path), data, **self._write_options(kwargs))
 
     async def read_text_async(self, path: str | Path, encoding: str = "utf-8", **kwargs: Any) -> str:
         """Read and decode UTF-8 text from an object asynchronously."""
@@ -466,10 +505,7 @@ class ObjectStoreBackend:
     async def move_async(self, source: str | Path, destination: str | Path, **kwargs: Any) -> None:
         """Move an object within the store asynchronously."""
         _ = kwargs
-        src_key = self._qualify(source)
-        dst_key = self._qualify(destination)
-        await self._async_store.copy(src_key, dst_key)
-        await self._async_store.delete(src_key)
+        await self._async_store.rename(self._qualify(source), self._qualify(destination))
 
     async def get_metadata_async(self, path: str | Path, **kwargs: Any) -> dict[str, object]:
         """Return metadata dictionary for a stored object asynchronously."""
@@ -550,16 +586,9 @@ class ObjectStoreBackend:
         return [await self._sign_single_async(item, expires_in=expires_in, for_upload=for_upload) for item in paths]
 
     async def _iter_bytes_async(self, key: str, chunk_size: int) -> AsyncIterator[bytes]:
-        """Yield byte slices asynchronously using range reads against the underlying store."""
-        meta = await self._async_store.head(key)
-        offset = 0
-        while offset < meta.size:
-            length = min(chunk_size, meta.size - offset)
-            chunk = await self._async_store.get_range(key, offset, length)
-            if not chunk:
-                break
-            offset += len(chunk)
-            yield chunk
+        """Yield byte chunks asynchronously from the native storage stream."""
+        async for chunk in self._async_store.get_stream(key, chunk_size=chunk_size):
+            yield bytes(chunk)
 
     async def _iter_arrow_async(
         self,
@@ -636,6 +665,7 @@ class ObjectStoreBackend:
 
     def _strip_matching_uri_prefix(self, raw_path_or_pattern: str) -> str:
         """Strip a scheme/bucket prefix when `raw_path_or_pattern` is a full URI matching `self.store_uri`."""
+        self._reject_traversal(raw_path_or_pattern)
         stripped = raw_path_or_pattern.strip()
         if "://" not in stripped:
             return stripped
@@ -717,6 +747,22 @@ class ObjectStoreBackend:
         if self._base_path and qualified_path == self._base_path:
             return ""
         return qualified_path
+
+    @staticmethod
+    def _reject_traversal(path: str) -> None:
+        """Reject parent segments before resolving a key or configured namespace."""
+        if ".." in path.split("/"):
+            msg = f"Path traversal rejected: {path}"
+            raise ValueError(msg)
+
+    @staticmethod
+    def _write_options(kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Select supported native conditional and metadata write options."""
+        return {
+            key: kwargs[key]
+            for key in ("content_type", "attributes", "if_not_exists", "if_match", "if_none_match")
+            if key in kwargs
+        }
 
     @staticmethod
     def _filter_recursive(paths: list[str], *, prefix: str, recursive: bool) -> list[str]:
