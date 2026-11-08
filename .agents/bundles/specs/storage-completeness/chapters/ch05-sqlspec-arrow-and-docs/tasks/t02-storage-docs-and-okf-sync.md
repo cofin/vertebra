@@ -7,7 +7,7 @@ description: Update docs/usage/storage.md, docs/usage/storage-auth-and-signing.m
   and .agents/bundles/knowledge/domains/storage/object-storage.md to match the shipped
   storage, auth, framework, and Arrow contracts.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: documentation_validation
 depends_on:
@@ -28,18 +28,35 @@ tests:
 estimated_loc: 180
 plan_revision: 10
 plan_commit: '78293774'
-state_revision: 1
+state_revision: 2
 claimed_by: agent:final-storage-docs-executor
 claimed_at: '2026-11-08T18:17:27.526464Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-08T18:30:13.716527Z'
+last_verified_commit: 56c514dd
+verification_evidence:
+  documentation:
+    review_check_exit_code: 0
+    make_docs_exit_code: 0
+    tooling_viewport_exit_code: 0
+    tooling_viewport_result: 29 passed
+    offline_example_exit_code: 0
+    offline_example_result: Native CRUD/stream/Parquet, Litestar static GET/HEAD and
+      Range200/206/416,HMAC,S3/Azure/OCI,cache aliases/factories pass. All Python
+      blocks parse.
+    limits: Live GCS ADC/IAM calls are not executed.
+  full_checkpoint:
+    python_exit_code: 0
+    python_result: 2592 passed, 74 skipped, 170 xfailed
+    lint_all_exit_code: 0
+    native_workspace_exit_code: 0
+    native_note: Native source unchanged since validated3f3958e3; all5extensions rebuilt
+      and stubtest passed.
 created_at: '2026-11-07T04:15:00Z'
-updated_at: '2026-11-08T18:17:27.526464Z'
-commit: null
+updated_at: '2026-11-08T18:30:13.716527Z'
+commit: 56c514dd
 sources:
 - id: docs-storage
   resource: docs/usage/storage.md
@@ -116,8 +133,8 @@ Bring user-facing storage documentation (`docs/usage/storage.md`, `docs/usage/st
 
 ## Acceptance Criteria
 
-- [ ] `docs/usage/storage.md` and `docs/usage/storage-auth-and-signing.md` accurately document all Chapter 01–05 APIs without deprecated symbols (R1–R8).
-- [ ] `.agents/bundles/knowledge/domains/storage/object-storage.md` cites `RustTaskAwaitable`, `notify.rs`, and unified `vertebra._vertebra` token caches and passes `make review-check` + `make docs` (R1–R8).
+- [x] `docs/usage/storage.md` and `docs/usage/storage-auth-and-signing.md` accurately document all Chapter 01–05 APIs without deprecated symbols (R1–R8).
+- [x] `.agents/bundles/knowledge/domains/storage/object-storage.md` cites `RustTaskAwaitable`, `notify.rs`, and unified `vertebra._vertebra` token caches and passes `make review-check` + `make docs` (R1–R8).
 
 ## Notes & Discoveries
 

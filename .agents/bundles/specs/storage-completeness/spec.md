@@ -16,19 +16,19 @@ chapters:
 - ch04-arrow-shm-and-docs
 - ch05-sqlspec-arrow-and-docs
 current_chapter: ch05-sqlspec-arrow-and-docs
-current_task: storage-completeness:ch05:t02
+current_task: null
 parent_prd: native-data-platform
 research:
 - ../native-data-platform/research/gap-analysis_20261103.md
 - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 10
 plan_commit: '78293774'
-state_revision: 22
-last_verified_checkpoint: 71cb322b
+state_revision: 23
+last_verified_checkpoint: 56c514dd
 last_reviewed_chapter: ch04-arrow-shm-and-docs
 last_reviewed_commit: e663c51f
 created_at: '2026-11-03T04:05:00Z'
-updated_at: '2026-11-08T18:17:27.526464Z'
+updated_at: '2026-11-08T18:30:13.716527Z'
 generated:
   by: flow-setup
   at: '2026-11-07T04:15:00Z'
@@ -80,7 +80,7 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-`vertebra-storage` compiles as a standalone optional PyO3 extension (`vertebra._storage`) with `AbortHandle` and `TaskPanicError` completion delivery, incremental streaming/multipart sessions, unified `vertebra._vertebra` GCP token caches, and fail-closed `SyncObjectStore` / `AsyncObjectStore` facades [^rs-storage-engine] [^py-storage-facade] [^core-gcp-auth], and its SQLSpec, Advanced Alchemy, and Django adapters implement their upstream storage contracts over paired native stores. Litestar Store/static integration and HTTP Range streaming are implemented, as are strict named Arrow SHM allocation and bounded storage codecs [^arrow-shm-alloc] [^py-storage-facade]. SQLSpec codec delegation and the consumer storage/auth guides remain planned in `ch05`.
+`vertebra-storage` compiles as a standalone optional PyO3 extension (`vertebra._storage`) with `AbortHandle` and `TaskPanicError` completion delivery, incremental streaming/multipart sessions, unified `vertebra._vertebra` GCP token caches, and fail-closed `SyncObjectStore` / `AsyncObjectStore` facades [^rs-storage-engine] [^py-storage-facade] [^core-gcp-auth], and its SQLSpec, Advanced Alchemy, and Django adapters implement their upstream storage contracts over paired native stores. Litestar Store/static integration and HTTP Range streaming are implemented, as are strict named Arrow SHM allocation and bounded storage codecs [^arrow-shm-alloc] [^py-storage-facade]. SQLSpec codec delegation and the consumer storage/auth guides are complete.
 
 ### 1.2 Non-Goals
 
@@ -122,7 +122,7 @@ Django File handles reopen through the native store, including real `FieldFile` 
 
 - **R1 (Streaming & Conditional Native Engine)**: Implement `get_stream` (`StorageBuffer` chunk iterators), byte-range reads, `put_opts` (`if_not_exists`, `if_match`, `if_none_match`, `content_type`, `attributes`), incremental `MultipartUploadSession` (`put_stream` without whole-payload `Vec<Bytes>` buffering, including uniform 8 MiB R2/OCI part chunking), `list_page`, `list_with_delimiter`, and `rename` across `SyncObjectStore`, `AsyncObjectStore`, `SyncReadableFile`, and `AsyncReadableFile`.
 - **R2 (Unified GCP Auth & Multi-Cloud Signing)**: Support presigned URLs across GCS V4 (local `GOOG4-RSA-SHA256` and IAM `signBlob`), S3 SigV4, Azure SAS, and OCI PAR; remove duplicate `SyncGcpTokenCache`, `AsyncGcpTokenCache`, and `GcpTokenSnapshot` PyO3 classes from `vertebra._storage` and delete pure-Python OAuth token fetchers from `storage/_store.py` in favor of `vertebra._vertebra.{SyncGcpTokenCache, AsyncGcpTokenCache, GcpTokenSnapshot}`.
-- **R3 (Fail-Closed Construction)**: Reject missing `vertebra._storage` with `MissingDependencyError(..., extra="storage")` and omitted/empty `uri`/`config`/`store` arguments with `ImproperConfigurationError`, removing `self._memory` dicts and implicit `"memory://"` defaults while keeping explicit `MemoryConfig()` and `"memory://..."` URIs supported for tests.
+- **R3 (Fail-Closed Construction)**: Store constructors require an explicit positional target: omission raises TypeError, while explicit None, empty, and schemeless targets raise ImproperConfigurationError. Missing native storage raises MissingDependencyError for a valid target. Explicit MemoryConfig and memory:// targets remain supported without an implicit memory fallback.
 - **R4 (SQLSpec ObjectStoreProtocol)**: Complete sync and async `ObjectStoreProtocol` methods (exact `*_sync` / `*_async` protocol signatures plus native `get_stream_*`, `put_stream_*`, `list_page_*`, and `open_*` adapter extensions) on `vertebra.extensions.sqlspec.storage.ObjectStoreBackend`, preserving `build_duckdb_gcs_secret_sql`.
 - **R5 (Advanced Alchemy StorageBackend)**: Complete the existing concrete `vertebra.extensions.alchemy.storage.ObjectStoreBackend` and explicit `register_storage_backend` forms through Advanced Alchemy `StorageRegistry.register_backend` / `get_backend`, using upstream `get_content[_async]` signatures without monkeypatching `storages.get` or defaulting to `memory://`.
 - **R6 (Django Storage Subclass)**: Make `vertebra.extensions.django.storage.DjangoStorage` a `@deconstructible` subclass of `django.core.files.storage.Storage` returning `django.core.files.base.File` from `_open`/`open`/`aopen` and implementing `_save`/`save`/`asave`, `delete`/`adelete`, `exists`/`aexists`, `size`/`asize`, `listdir`, `url`/`aurl`, `path`, `get_available_name`, `generate_filename`, `get_valid_name`, `get_accessed_time`, `get_created_time`, `get_modified_time`, and `get_alternative_name`.
@@ -153,7 +153,8 @@ flowchart LR
 | Boundary / Failure Mode | Required Deterministic Behavior |
 | --- | --- |
 | `vertebra._storage` wheel absent at runtime | Module import succeeds; instantiating `SyncObjectStore` or `AsyncObjectStore` raises `MissingDependencyError("vertebra._storage", install_package="vertebra-core[storage]", extra="storage")`. |
-| Omitted `uri=None` / `config=None` / `store=None` | Raises `ImproperConfigurationError` immediately; explicit `MemoryConfig()` or `"memory://bucket"` succeeds. |
+| Omitted constructor target | Python TypeError for the required positional argument; no implicit backend. |
+| Explicit None, empty, or schemeless target | ImproperConfigurationError; explicit MemoryConfig or memory:// remains supported. |
 | Conditional `put(if_not_exists=True)` or `if_match="etag"` mismatch | Raises `FileExistsError` / `PreconditionError` (`StoragePermissionError` / `OSError` subclass) mapped from `object_store::Error::AlreadyExists` / `Precondition`. |
 | Multipart upload stream raises mid-transfer | Calls `MultipartUpload::abort()` in Rust/Python `finally` path so orphan parts do not remain uncommitted. |
 | Unsatisfiable HTTP `Range: bytes=9999-10000` on 128-byte object | Returns `416 Range Not Satisfiable` with `Content-Range: bytes */128` and empty body `b""`. |
@@ -178,10 +179,10 @@ flowchart LR
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[3/5 files documented]`. Storage knowledge covers native storage and implemented adapters; the Litestar knowledge chapter covers Store/static/Range consumers; the technology matrix covers Django typing. Both user guides remain planned in `storage-completeness:ch05:t02`.
+Progress: `[5/5 files documented]`. Storage knowledge covers native storage and implemented adapters; the Litestar knowledge chapter covers Store/static/Range consumers; the technology matrix covers Django typing. Both user guides document the completed storage and signing contracts.
 
-* `docs/usage/storage.md` — Document `get_stream`, `put_stream`, conditional `put`, `list_page`, `list_with_delimiter`, `rename`, fail-closed construction, `ObjectStoreLitestarStore`, `ObjectStoreFileSystemAdapter`, and RFC 9110 `Range` / `416` streaming.
-* `docs/usage/storage-auth-and-signing.md` — Document unified `vertebra._vertebra.{SyncGcpTokenCache, AsyncGcpTokenCache, GcpTokenSnapshot}` usage and GCS V4, IAM `signBlob`, S3 SigV4, Azure SAS, and OCI PAR presigning.
+* `docs/usage/storage.md` — Documents `get_stream`, `put_stream`, conditional `put`, `list_page`, `list_with_delimiter`, `rename`, fail-closed construction, `ObjectStoreLitestarStore`, `ObjectStoreFileSystemAdapter`, and RFC 9110 `Range` / `416` streaming.
+* `docs/usage/storage-auth-and-signing.md` — Documents unified `vertebra._vertebra.{SyncGcpTokenCache, AsyncGcpTokenCache, GcpTokenSnapshot}` usage and GCS V4, IAM `signBlob`, S3 SigV4, Azure SAS, and OCI PAR presigning.
 * `.agents/bundles/knowledge/domains/storage/object-storage.md` — Documents native streaming, signing, unified GCP caches, fail-closed construction, SQLSpec protocol/extensions, Advanced Alchemy registry/FileObject behavior, and Django Storage/File contracts. Litestar/Range, strict Arrow SHM, and bounded storage codec contracts are documented; final SQLSpec codec and consumer-guide synchronization remains owned by `ch05:t02`.
 * `.agents/bundles/knowledge/domains/extensions/litestar.md` — Documents persistent object-store TTL envelopes, hierarchical namespaces, virtual static GET/HEAD serving, lazy exports, and the explicit Range Stream bridge.
 * `.agents/bundles/product/tech-stack.md` — Documents `django-stubs>=6.1.2` as a lint development dependency for the real Django base and `File[bytes]` typing.
@@ -210,11 +211,10 @@ Progress: `[3/5 files documented]`. Storage knowledge covers native storage and 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Chapters ch01 through ch04 are reviewed and complete; ch05 is active on storage/auth documentation.
-- Progress is 4/5 chapters and 14/15 tasks complete. One task remains in ch05: storage/auth documentation. SQLSpec Arrow delegation passes90 canonical integration cases.
-- Active ch04 and planned ch05 own revision 10 at `78293774`; completed earlier chapters/tasks retain their recorded owned revisions.
-- Documentation is 3/5 targets complete; both consumer guides remain scheduled in ch05:t02.
-- Native async I/O stays on the caller loop, codecs use bounded SyncPool operations, and S3/B2 multipart parts coalesce incrementally to 8 MiB.
+- Chapters ch01 through ch04 are reviewed and complete; ch05 has both tasks complete and awaits correctness and fresh quality review.
+- Progress is 4/5 chapters and 15/15 tasks complete. No implementation task remains; all 5/5 documentation targets are complete.
+- Full lint, locked Rust workspace, Python (2592 passed, 74 skipped, 170 xfailed), and documentation gates pass. Live cloud credentials are outside local validation.
+- Durable knowledge covers native completion/GCP ownership, strict SHM/IPC, bounded codecs and cancellation, real S3 completion, framework consumers, and the persistent TTL envelope ADR.
 
 [^rs-storage-engine]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — Native Rust storage engine over `object_store`.
 [^py-storage-facade]: `src/py/vertebra/storage/_store.py::SyncObjectStore` — Python sync/async object store facade and backend configs.

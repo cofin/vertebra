@@ -1,12 +1,16 @@
 # Bundle Activity Log
 
+## Completed storage documentation and durable synthesis
+
+Source `56c514dd` completes both user guides and source-backed native/storage/framework knowledge, including ADR-005 for persistent TTL envelopes. Documentation review/build gates and 29 tooling/viewport cases pass; offline native/provider/framework examples pass. Full Python exits 0 with 2592 passed, 74 skipped, 170 xfailed; full lint and locked native workspace gates pass. All 15 implementation tasks and 5 documentation targets are complete; chapter 5 independent reviews precede finish/archive. No live GCS ADC/IAM calls are executed.
+
 ## Verified SQLSpec bounded Arrow consumers
 
-Source `bf5a4cf3` preserves public Table/None/iterator contracts while using bounded native async codecs, async pattern matching, raw IPC buffers, format options and owned inner iterator cleanup. Four Red failures lead to90 canonical integration passes, including25 new public cases. Storage/adapter MyPy,Ruff,format and diff checks pass. Only the final storage/auth documentation task remains.
+Source `bf5a4cf3` preserves public Table/None/iterator contracts while using bounded native async codecs, async pattern matching, raw IPC buffers, format options and owned inner iterator cleanup. Four Red failures lead to90 canonical integration passes, including 25 new public cases. Storage/adapter MyPy,Ruff,format and diff checks pass. Only the final storage/auth documentation task remains.
 
 ## Completed strict Arrow and bounded storage chapter
 
-Correctness and fresh quality reviews pass at `e663c51f` with no unresolved findings. All four chapter tasks are complete, including real S3 minimum-part completion and repeated-cancellation ownership. Full lint, locked Rust workspace, Python (2567 passed,74 skipped,170 xfailed), and documentation gates pass. Chapter ch05 starts SQLSpec delegation; its final two tasks complete the original documentation scope.
+Correctness and fresh quality reviews pass at `e663c51f` with no unresolved findings. All four chapter tasks are complete, including real S3 minimum-part completion and repeated-cancellation ownership. Full lint, locked Rust workspace, Python (2567 passed, 74 skipped, 170 xfailed), and documentation gates pass. Chapter ch05 starts SQLSpec delegation; its final two tasks complete the original documentation scope.
 
 ## Verified repeated-cancellation codec ownership
 
@@ -14,7 +18,7 @@ Source `71cb322b` retains worker and loop-task ownership through repeated task c
 
 ## Verified native S3 minimum-part completion
 
-Source `3f3958e3` repairs 8 real S3 Complete failures by applying the existing 8 MiB native accumulator to normalized S3/B2. Locked native 3 unit + 22 integration tests,119 canonical Python store cases, all-five rebuild/stubtest and focused quality gates pass; lockfiles are unchanged. Full locked Rust workspace exits0; full Python passes 2563 cases with 74 skips and 170 xfails; docs exits0. Chapter ch04 has 4 completed tasks awaiting correctness and fresh quality review. Two SQLSpec/documentation tasks remain.
+Source `3f3958e3` repairs 8 real S3 Complete failures by applying the existing 8 MiB native accumulator to normalized S3/B2. Locked native 3 unit + 22 integration tests,119 canonical Python store cases, all-five rebuild/stubtest and focused quality gates pass; lockfiles are unchanged. Full locked Rust workspace exits 0; full Python passes 2563 cases with 74 skips and 170 xfails; docs exits 0. Chapter ch04 has 4 completed tasks awaiting correctness and fresh quality review. Two SQLSpec/documentation tasks remain.
 
 ## [2026-11-08] flow-implement | Synchronize bounded storage codecs
 
