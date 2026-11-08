@@ -25,8 +25,8 @@ tests:
   - src/rs/vertebra-postgres/tests/postgres_auth_wire_tests.rs
   - src/rs/vertebra-postgres/tests/postgres_tls_wire_tests.rs
 estimated_loc: 245
-plan_revision: 6
-plan_commit: 8833b064
+plan_revision: 7
+plan_commit: 1c75af65
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -37,7 +37,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T05:00:00Z"
+updated_at: "2026-11-07T23:59:30Z"
 commit: null
 sources:
   - id: pg-contracts
@@ -63,7 +63,7 @@ Complete `ChannelBindingPolicy` (`Disable`, `Prefer`, `Require`) selection and `
 
 - `src/rs/vertebra-postgres/src/config.rs` — `ChannelBindingPolicy` (`Disable`, `Prefer` default, `Require`) and `PostgresConfig.channel_binding`.
 - `src/rs/vertebra-postgres/src/binding.rs` — `tls_server_end_point` and peer binding availability from `ch03:t02`.
-- `src/rs/vertebra-postgres/src/tls.rs` — `DialedTransport` carrying verified peer binding state from `ch03:t02`.
+- `src/rs/vertebra-postgres/src/tls.rs` — `DialedTransport` carrying negotiated peer binding state from `ch03:t02`.
 - `src/rs/vertebra-postgres/src/auth.rs` — `Authentication` SASL state machine from `ch03:t01`.
 - `src/rs/vertebra-postgres/src/session.rs` — `ConnectAttempt::run` passing transport binding into `Authentication::handle_message`.
 - `.agents/bundles/specs/native-postgres-driver/contracts.md` — `channel_binding = "prefer"` constructor contract ([../../../contracts.md](../../../contracts.md)).
@@ -128,7 +128,7 @@ Commit as `feat(postgres): authenticate certificate-bound SCRAM sessions`.
 
 ## Notes & Discoveries
 
-- [2026-11-07 05:00] Testing `e=server-does-support-channel-binding` inside `AuthenticationSaslFinal` verifies real RFC 5802 wire downgrade signaling through `postgres_protocol::authentication::sasl::ScramSha256::finish` rather than stopping at client-first selection.
+- Testing `e=server-does-support-channel-binding` inside `AuthenticationSaslFinal` verifies real RFC 5802 wire downgrade signaling through `postgres_protocol::authentication::sasl::ScramSha256::finish` rather than stopping at client-first selection.
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — `channel_binding` policy defaults and failure categories.
 [^proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — `ChannelBinding` APIs and `GS2` `y,,` downgrade semantics.

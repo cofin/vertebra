@@ -23,8 +23,8 @@ files:
 tests:
   - src/rs/vertebra-postgres/tests/temporal_codecs.rs
 estimated_loc: 230
-plan_revision: 6
-plan_commit: 8833b064
+plan_revision: 7
+plan_commit: 1c75af65
 state_revision: 0
 claimed_by: null
 claimed_at: null

@@ -28,8 +28,8 @@ tests:
   - src/py/tests/unit/db/test_postgres_native_adapter_pipeline.py
   - src/py/tests/unit/db/test_postgres_native_adapter_arrow.py
 estimated_loc: 230
-plan_revision: 6
-plan_commit: 8833b064
+plan_revision: 7
+plan_commit: 1c75af65
 state_revision: 0
 claimed_by: null
 claimed_at: null

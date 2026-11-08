@@ -44,14 +44,14 @@ parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
   - research/cloud-material_20261105.md
-plan_revision: 6
-plan_commit: 8833b064
+plan_revision: 7
+plan_commit: 1c75af65
 state_revision: 4
 last_verified_checkpoint: ad8be7b6
 last_reviewed_chapter: ch02-wire-codec-and-session-startup
 last_reviewed_commit: 27b5a9e5
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-07T23:44:42Z"
+updated_at: "2026-11-07T23:59:30Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:40:00Z"
@@ -107,7 +107,7 @@ tags:
 <!-- truth: start -->
 - **Standalone Optional Wheel**: `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owns live PostgreSQL Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`) without linking database clients into `vertebra-core` [^pg-conn-rs] [^pg-core-rs].
 - **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB Admin discovery + mTLS + IAM), lossless codecs, statement caching, single-`Sync` `pipeline()`, binary `COPY`, native `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, and `pgoutput` v1 logical replication ship together with full `psycopg`/`asyncpg` removal [^py-async-rs] [^arrow-shm-rs] [^pg-driver-py] [^sqlspec-py].
-- **Nested Chapter Roadmap (`plan_revision: 6`)**: All 31 chapters and 111 tasks retain their scope at `plan_commit: 8833b064`; chapters 01–02 are complete and reviewed, most recently at `27b5a9e5`. Chapter 03 SCRAM and channel binding is next.
+- **Nested Chapter Roadmap (`plan_revision: 7`)**: All 31 chapters and 111 tasks retain their scope at `plan_commit: 1c75af65`; chapters 01–02 are complete and reviewed, most recently at `27b5a9e5`. Chapter 03 SCRAM and channel binding is next.
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -328,12 +328,12 @@ Every worksheet (`111` total across `31` chapters) executes within its bounded o
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: Checkpoint `ad8be7b6` passes all 54 Rust tests (`9` codec, `13` auth, `10` TLS, `22` wire/config/error) under the shared SHM test lock and locked all-target Clippy with `-D warnings`; flow `state: active`, `plan_revision: 6`, `plan_commit: 8833b064`.
+- **Verified Baseline**: Checkpoint `ad8be7b6` passes all 54 Rust tests (`9` codec, `13` auth, `10` TLS, `22` wire/config/error) under the shared SHM test lock and locked all-target Clippy with `-D warnings`; flow `state: active`, `plan_revision: 7`, `plan_commit: 1c75af65`.
 - **Progress**: `2/31` chapters are complete and reviewed; `8/111` tasks are complete. Chapter 02 receipts bind to `a00c3248`, `81791de2`, `ad8be7b6`, and `c5173f1b`.
-- **Current Chapter**: `ch03-scram-and-channel-binding`, with `current_task: native-postgres-driver:ch03:t01`; deterministic pinned-API and RFC corrections precede SCRAM execution.
+- **Current Chapter**: `ch03-scram-and-channel-binding`, with `current_task: native-postgres-driver:ch03:t01`; revision 7 defines the pinned SCRAM iteration policy, complete PSS parsing, and RFC 5929 digest selection; cold chapter-plan review precedes execution.
 - **Remaining Plan**: Chapters 03–31 retain complete blueprints.
 - **Documentation**: `[0/11 files documented]`; full guides and domain knowledge remain assigned to chapter 30.
-- **Next Action**: Apply `/flow:revise native-postgres-driver ch03-scram-and-channel-binding` for verified factual corrections, then continue `/flow:implement native-postgres-driver` through the full remaining plan.
+- **Next Action**: Cold-review chapter 03's revision 7 blueprints, then continue `/flow:implement native-postgres-driver` through the full remaining plan.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` — Shared PostgreSQL wire frame helpers and SHM admission metadata in `vertebra-db`.

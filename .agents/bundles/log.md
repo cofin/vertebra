@@ -1,5 +1,11 @@
 # Bundle Activity Log
 
+## [2026-11-07] flow-revise | Native PostgreSQL SCRAM and certificate-binding contracts
+
+- Revision 7 anchors all 143 specification/task identities to `1c75af65` while retaining 31 chapters, 111 tasks, 8 completed tasks, and completed chapter 01/02 review stamps. No production, test, manifest, or dependency files change.
+- Correct chapter 03's upstream iteration-cap rationale and original startup-deadline seam; restrict RFC 5929 substitution to MD5/SHA-1, classify MD2 as unavailable, and require complete PSS parameter consumption with default hashAlgorithm only inside a present SEQUENCE. Explicit OID dispatch preserves DSA-SHA2 and negotiated-leaf wording preserves existing TLS trust policies.
+- Update pinned x509-parser research references to 0.18.1. Cold changed-surface plan review precedes SCRAM task execution.
+
 ## [2026-11-07] chapter-complete | Native PostgreSQL wire startup
 
 - Correctness and fresh independent quality review approve `3364250d..27b5a9e5` with no findings. All 54 tests, locked all-target Clippy, formatting, bundle/link/privacy validation, task receipts, and whitespace checks pass.

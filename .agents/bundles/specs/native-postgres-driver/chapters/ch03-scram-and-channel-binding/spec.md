@@ -11,13 +11,13 @@ depends_on_chapters:
   - ch02-wire-codec-and-session-startup
 replan_trigger: null
 current_task: "native-postgres-driver:ch03:t01"
-plan_revision: 6
-plan_commit: 8833b064
+plan_revision: 7
+plan_commit: 1c75af65
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T16:40:00Z"
+updated_at: "2026-11-07T23:59:30Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:40:00Z"
@@ -52,7 +52,7 @@ tags:
 - **Key Invariants:**
   - Production SCRAM framing, SASLprep, PBKDF2, and proof verification delegate exclusively to pinned `postgres_protocol::authentication::sasl::ScramSha256` (`=0.6.12`) with client-enforced iteration bounds `1..=100_000` and strict server-nonce extension (`server_nonce.len() > client_nonce.len() && server_nonce.starts_with(client_nonce)`).
   - `AuthenticationOk` is accepted after SASL only from `ScramVerifiedAwaitingOk` (after `AuthenticationSaslFinal` passes `ScramSha256::finish`), and `ScramSha256::message()` is never invoked after `finish()`.
-  - `binding::tls_server_end_point` hashes the entire verified peer leaf certificate DER via `x509-parser = "=0.18.1"` (`default-features = false`), mapping SHA-1/MD5 and omitted RSA-PSS hash parameters to SHA-256 while treating no-hash Ed25519/Ed448 (`EdDSA`) or unknown OIDs as unavailable channel binding (`tls_server_end_point: None`).
+  - `binding::tls_server_end_point` hashes the entire negotiated peer leaf certificate DER via `x509-parser = "=0.18.1"` (`default-features = false`), mapping only SHA-1/MD5 to SHA-256, including default SHA-1 when `hashAlgorithm` is absent inside a present RSA-PSS parameters SEQUENCE; it treats no-hash Ed25519/Ed448 (`EdDSA`), unsupported MD2, or unknown OIDs as unavailable channel binding (`tls_server_end_point: None`).
   - `ChannelBindingPolicy::Prefer` over TLS with usable binding emits `p=tls-server-end-point,,` when `SCRAM-SHA-256-PLUS` is offered and `y,,` (`ChannelBinding::unrequested()`) when only plain `SCRAM-SHA-256` is offered, failing terminally without retry on `e=server-does-support-channel-binding`.
 - **Verification Gate:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings`.
 <!-- truth: end -->
@@ -99,7 +99,7 @@ impl Authentication {
 ### Caller -> Seam -> Collaborator Map
 
 - `SessionHandle::begin_connect` -> `ConnectAttempt::run` (`session.rs`) -> `tls::connect` (`tls.rs`), which extracts leaf DER from `TransportStream::TlsTcp` (`peer_certificates().and_then(|c| c.first())`) and invokes `binding::tls_server_end_point` (`binding.rs`) to populate `DialedTransport.tls_server_end_point`.
-- `ConnectAttempt::run` -> `Authentication::handle_message` (`auth.rs`) -> `postgres_protocol::authentication::sasl::{ScramSha256, ChannelBinding, SCRAM_SHA_256, SCRAM_SHA_256_PLUS}` and `postgres_protocol::message::frontend::{sasl_initial_response, sasl_response}`, rechecking `ConnectAttempt`'s single outer deadline after bounded PBKDF2 before flushing or committing `PendingSession`.
+- `ConnectAttempt::run` -> `Authentication::handle_message` (`auth.rs`) -> `postgres_protocol::authentication::sasl::{ScramSha256, ChannelBinding, SCRAM_SHA_256, SCRAM_SHA_256_PLUS}` and `postgres_protocol::message::frontend::{sasl_initial_response, sasl_response}`, rechecking the original reservation deadline passed into `startup(config, deadline)` after bounded PBKDF2 before flushing or returning a publishable connection; `PendingSession::commit` retains its deadline check.
 
 ### Edge-Case & Invariant Matrix
 
@@ -107,7 +107,7 @@ impl Authentication {
 | --- | --- | --- |
 | Malformed SASL iteration or nonce | `AuthenticationSaslContinue` with `i=0`, `i=100001`, non-decimal/duplicate `i=`, or `r=` equal to / not prefixed by client nonce | Reject before `ScramSha256::update` with `PostgresError::Protocol`, close socket, never emit `SASLResponse`. |
 | Premature or out-of-order SASL frames | `AuthenticationOk` in `ScramStarted`/`ScramFinalSent`, or duplicate `AuthenticationSaslContinue`/`AuthenticationSaslFinal` | Fail with `PostgresError::Protocol`; only `ScramVerifiedAwaitingOk` transitions to `Complete` on `AuthenticationOk`. |
-| Certificate signature hash selection | RSA/ECDSA SHA-224/256/384/512, DSA SHA-224/256, SHA-1/MD5, RSA-PSS explicit or omitted default (SHA-1), Ed25519/Ed448 | Hash full leaf DER; substitute SHA-256 for SHA-1/MD5/default-PSS; return `Err` (binding unavailable) for Ed25519/Ed448, unknown OIDs, or trailing DER. |
+| Certificate signature hash selection | RSA/ECDSA SHA-224/256/384/512, DSA SHA-224/256, SHA-1/MD5, RSA-PSS explicit or omitted `hashAlgorithm` in a present parameters SEQUENCE (default SHA-1), MD2, Ed25519/Ed448 | Hash full leaf DER; substitute SHA-256 for SHA-1/MD5/default-PSS; return `Err` (binding unavailable) for unsupported MD2, Ed25519/Ed448, unknown OIDs, malformed PSS parameters, or trailing DER. |
 | Plain-only offer over bound TLS under `Prefer` | Usable `tls_server_end_point` + server offers `["SCRAM-SHA-256"]` only | Construct `ScramSha256` with `ChannelBinding::unrequested()` emitting `GS2` `"y,,"`; if stripped PLUS server replies `e=server-does-support-channel-binding`, fail terminally without `"n,,"` retry. |
 | `ChannelBindingPolicy::Require` | Trust, cleartext, MD5, plain-only SCRAM, plaintext transport, or Ed25519 unavailable binding | Fail locally with `PostgresError::UnsupportedAuth` / `Transport` before transmitting any credential bytes. |
 
@@ -115,8 +115,8 @@ impl Authentication {
 
 | Option | Decision & Rationale |
 | --- | --- |
-| Upstream `postgres-protocol` `ScramSha256` + pre-update bounds vs custom Rust SCRAM implementation | **Chosen:** Delegate crypto, SASLprep, and wire proof checks to `postgres_protocol = "=0.6.12"`, adding only strict `i in 1..=100_000`, strict nonce extension, and explicit phase gates. Eliminates custom client crypto while closing upstream's prefix-only nonce check and unbounded PBKDF2 cost. |
-| `x509-parser` public `SignatureAlgorithm::RSASSA_PSS` inspection vs unconditional SHA-256 or TLS exporter | **Chosen:** Parse leaf DER via `x509-parser = "=0.18.1"` (`default-features = false`) per RFC 5929 Section 4.1 (`tls-server-end-point`). PostgreSQL `SCRAM-SHA-256-PLUS` mandates `tls-server-end-point` (not RFC 9266 `tls-exporter`), and EdDSA has no RFC 5929 SHA-256 substitution. |
+| Upstream `postgres-protocol` `ScramSha256` + pre-update bounds vs custom Rust SCRAM implementation | **Chosen:** Delegate crypto, SASLprep, and wire proof checks to `postgres_protocol = "=0.6.12"`, adding only strict `i in 1..=100_000`, strict nonce extension, and explicit phase gates. Upstream already caps iterations at `100_000`; the local nonzero bound and strict nonce extension close its zero-iteration and prefix-only acceptance without custom client crypto. |
+| `x509-parser` public `SignatureAlgorithm::RSASSA_PSS` inspection vs unconditional SHA-256 or TLS exporter | **Chosen:** Parse leaf DER via `x509-parser = "=0.18.1"` (`default-features = false`) per RFC 5929 Section 4.1 (`tls-server-end-point`). Explicit signature-OID dispatch preserves DSA-SHA2 support; PSS-specific parsing requires complete parameter consumption, a present SEQUENCE, and signature-hash selection independent of MGF1. MD2 is unavailable rather than a SHA-256 substitution. PostgreSQL `SCRAM-SHA-256-PLUS` mandates `tls-server-end-point` (not RFC 9266 `tls-exporter`), and EdDSA has no RFC 5929 SHA-256 substitution. |
 
 ## 3. Documentation & OKF Knowledge Plan
 
@@ -134,15 +134,15 @@ Progress: `[0/0 files documented in ch03]`
 ## 5. Implementation Plan
 
 - [ ] native-postgres-driver:ch03:t01 — Authenticate ordered SCRAM-SHA-256 SASL exchanges (tasks/t01-scram-sha256.md)
-- [ ] native-postgres-driver:ch03:t02 — Derive RFC 5929 tls-server-end-point digests from verified peer certificates (tasks/t02-peer-certificate-binding.md)
+- [ ] native-postgres-driver:ch03:t02 — Derive RFC 5929 tls-server-end-point digests from negotiated peer certificates (tasks/t02-peer-certificate-binding.md)
 - [ ] native-postgres-driver:ch03:t03 — Enforce SCRAM-SHA-256-PLUS channel-binding policies and GS2 downgrade protection (tasks/t03-scram-sha256-plus.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dd432f18`; chapter `state: planned`, `planning_status: complete`, depends on `ch02-wire-codec-and-session-startup`.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending), awaiting `native-postgres-driver:ch02:t04`.
+- **Verified Baseline**: Plan anchor `1c75af65`; upstream chapter 02 is complete and reviewed at `27b5a9e5` with 54 native tests and locked all-target Clippy passing. Chapter `state: planned` and `planning_status: complete` retain three bounded tasks.
+- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending). The upstream dependency is complete; after cold review of the corrected blueprints, `/flow:implement native-postgres-driver` executes the three tasks in their declared order.
 - **Documentation & OKF Status**: `[0/0 files documented in ch03]`; RFC 5929 channel-binding OKF curation scheduled in `ch30:t02`.
 - **Downstream Dependents**: Unblocks `ch04-cloud-material-and-admin-discovery` (`ch04:t01` depends on `ch03:t03`).
 

@@ -22,8 +22,8 @@ files:
 tests:
   - src/rs/vertebra-postgres/tests/postgres_auth_wire_tests.rs
 estimated_loc: 235
-plan_revision: 6
-plan_commit: 8833b064
+plan_revision: 7
+plan_commit: 1c75af65
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -34,7 +34,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T05:00:00Z"
+updated_at: "2026-11-07T23:59:30Z"
 commit: null
 sources:
   - id: proto-research
@@ -59,10 +59,10 @@ Extend `src/rs/vertebra-postgres/src/auth.rs` and `session.rs` to authenticate o
 ## Bounded Read Manifest
 
 - `src/rs/vertebra-postgres/src/auth.rs` — `AuthPhase` and `Authentication::handle_message` from `ch02:t04`.
-- `src/rs/vertebra-postgres/src/session.rs` — `ConnectAttempt::run` startup loop and outer `deadline` enforcement.
+- `src/rs/vertebra-postgres/src/session.rs` — `startup(config, deadline)` loop called by `ConnectAttempt::run` and original reservation-deadline enforcement.
 - `src/rs/vertebra-postgres/src/protocol.rs` — Bounded `Message::{AuthenticationSasl, AuthenticationSaslContinue, AuthenticationSaslFinal, AuthenticationOk}` decoding.
 - `src/rs/vertebra-postgres/tests/postgres_auth_wire_tests.rs` — Scripted authentication server fixtures from `ch02:t04`.
-- `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — Upstream `ScramSha256` behavior (prefix-only nonce check, unbounded iteration count, and `message()` panic/misuse after `finish()`) [^proto-research].
+- `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — Upstream `ScramSha256` behavior (prefix-only nonce check, acceptance of zero iterations despite the upstream `100_000` cap, and `message()` panic/misuse after `finish()`) [^proto-research].
 
 ## Symbol & Signature Contracts
 
@@ -82,7 +82,7 @@ Extend `src/rs/vertebra-postgres/src/auth.rs` and `session.rs` to authenticate o
   - `Message::AuthenticationOk`:
     - Accepted ONLY in `Initial`, `PasswordSent`, or `ScramVerifiedAwaitingOk` -> `AuthPhase::Complete`; rejected with `PostgresError::Protocol` in `ScramStarted`, `ScramFinalSent`, or `Complete`.
 - `src/rs/vertebra-postgres/src/session.rs`:
-  - After `Authentication::handle_message` returns from CPU-bound `AuthenticationSaslContinue` PBKDF2 work (and before flushing `out` or calling `PendingSession::commit`), check `tokio::time::Instant::now() >= self.deadline` and abort with `PostgresError::Transport` if the outer connection budget elapsed during PBKDF2.
+  - In `startup(config, deadline)`, after `Authentication::handle_message` returns from CPU-bound `AuthenticationSaslContinue` PBKDF2 work and before flushing `out` or returning a publishable connection, check `tokio::time::Instant::now() >= deadline` and abort with `PostgresError::Transport` if the original reservation budget elapsed during PBKDF2. `PendingSession::commit` retains its existing check against that same deadline.
 
 ## Edge Cases & Error Semantics
 
@@ -124,7 +124,7 @@ Commit as `feat(postgres): validate SCRAM startup authentication`.
 
 ## Notes & Discoveries
 
-- [2026-11-07 05:00] `postgres-protocol` `0.6.12` checks only `server_nonce.starts_with(&client_nonce)` without requiring strictly greater length and parses `i: u32` without an upper bound; both guards are enforced in `auth.rs` prior to `scram.update`.
+- `postgres-protocol` `0.6.12` rejects iterations above `100_000` before PBKDF2, but accepts zero and checks only the nonce prefix. Local validation enforces the explicit `1..=100_000` policy and strict nonce extension before `scram.update`; upstream retains all cryptography and full SCRAM grammar checks.
 
 [^proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — `postgres-protocol` `0.6.12` SASL SCRAM audit findings.
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Startup SASL authentication and timeout invariants.
