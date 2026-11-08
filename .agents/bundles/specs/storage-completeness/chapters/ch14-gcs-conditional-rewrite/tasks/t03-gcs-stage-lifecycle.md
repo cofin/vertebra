@@ -4,7 +4,7 @@ id: storage-completeness:ch14:t03
 chapter_id: ch14-gcs-conditional-rewrite
 title: Recover and clean up GCS resumable stage sessions
 description: Recover and clean up GCS resumable stage sessions
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: regression_tdd
@@ -12,7 +12,7 @@ depends_on:
 - storage-completeness:ch14:t02
 read_set:
 - src/rs/vertebra-storage/src/gcs_stage.rs
-- src/rs/vertebra-storage/src/cloud_request.rs
+- src/rs/vertebra-storage/src/gcs_request.rs
 - src/rs/vertebra-storage/src/conditional.rs
 - .agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md
 files:
@@ -21,7 +21,7 @@ tests:
 - src/rs/vertebra-storage/src/gcs_stage.rs
 estimated_loc: 235
 plan_revision: 8
-plan_commit: null
+plan_commit: c737ffeb
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -55,7 +55,7 @@ Implement this bounded native contract after its listed predecessors. Own only t
 ## Bounded Read Manifest
 
 - `src/rs/vertebra-storage/src/gcs_stage.rs`
-- `src/rs/vertebra-storage/src/cloud_request.rs`
+- `src/rs/vertebra-storage/src/gcs_request.rs`
 - `src/rs/vertebra-storage/src/conditional.rs`
 - `.agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md`
 

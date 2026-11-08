@@ -5,7 +5,7 @@ chapter_id: ch11-local-atomic-publication
 title: Add persistent OS locks per physical parent directory
 description: Add persistent OS locks per physical parent directory
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: characterization
 depends_on:
@@ -28,8 +28,8 @@ estimated_loc: 200
 plan_revision: 5
 plan_commit: bdc7799a
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:runtime-ipc-specialist
+claimed_at: '2026-11-08T00:43:03+00:00'
 blocked_reason: null
 unblock_condition: null
 next_step: null

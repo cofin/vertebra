@@ -5,11 +5,11 @@ chapter_id: ch11-local-atomic-publication
 title: Local Cross-Process Conditional Publication
 description: Local Cross-Process Conditional Publication
 status: stable
-state: planned
+state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: null
+current_task: storage-completeness:ch11:t01
 plan_revision: 5
 plan_commit: bdc7799a
 state_revision: 0
@@ -97,7 +97,7 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 
 ## 5. Implementation Plan
 
-- [ ] storage-completeness:ch11:t01 — Add persistent OS locks per physical parent directory (tasks/t01-physical-target-locks.md)
+- [~] storage-completeness:ch11:t01 — Add persistent OS locks per physical parent directory (tasks/t01-physical-target-locks.md)
 - [ ] storage-completeness:ch11:t02 — Manage SDK-private same-parent staging artifacts (tasks/t02-same-fs-stage.md)
 - [ ] storage-completeness:ch11:t03 — Guard every local mutation and publish with native atomic operations (tasks/t03-local-mutations-and-publish.md)
 - [ ] storage-completeness:ch11:t04 — Prove local CAS across processes, roots and cleanup boundaries (tasks/t04-local-subprocess-acceptance.md)

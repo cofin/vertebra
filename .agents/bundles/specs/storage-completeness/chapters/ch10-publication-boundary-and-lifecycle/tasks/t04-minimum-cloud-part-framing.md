@@ -30,7 +30,7 @@ claimed_by: agent:minimum_part_framing
 claimed_at: '2026-11-08T00:29:50Z'
 blocked_reason: null
 unblock_condition: null
-next_step: Coordinator signs the verified source and binds its receipt.
+next_step: null
 last_verified_at: '2026-11-08T00:36:39Z'
 last_verified_commit: fe992ae3
 verification_evidence: |

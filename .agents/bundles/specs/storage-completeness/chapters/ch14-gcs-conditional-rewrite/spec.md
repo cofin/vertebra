@@ -4,14 +4,14 @@ parent_flow: storage-completeness
 chapter_id: ch14-gcs-conditional-rewrite
 title: GCS Generation CAS and Staged Rewrite Publication
 description: GCS Generation CAS and Staged Rewrite Publication
-status: draft
+status: stable
 state: planned
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
 plan_revision: 8
-plan_commit: null
+plan_commit: c737ffeb
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
 last_reviewed_commit: null
@@ -86,7 +86,7 @@ Progress: `[0/1 files documented]`. ch09:t03 documents evidence-backed storage b
 
 ## 6. Current State & Remaining Plan Snapshot
 
-All four tasks remain pending at the verified R2-removal baseline. The revised frontier awaits independent executable-plan review. ch21:t02 provides test-gated snapshot primitives activated by t01; t02/t03 provide test-gated resumable primitives activated by t04 and runs non-test compilation. ch16 acceptance depends on t04, never the incomplete staging predecessor.
+All four tasks remain pending at the verified R2-removal baseline. The revision8 frontier is independently approved at `c737ffeb`. ch21:t02 provides test-gated snapshot primitives activated by t01; t02/t03 provide test-gated resumable primitives activated by t04 and runs non-test compilation. ch16 acceptance depends on t04, never the incomplete staging predecessor.
 
 [^source]: `src/rs/vertebra-storage/src/gcs_stage.rs` — Owned staging implementation introduced by this chapter.
 

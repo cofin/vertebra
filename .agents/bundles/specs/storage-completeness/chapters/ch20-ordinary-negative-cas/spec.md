@@ -4,14 +4,14 @@ parent_flow: storage-completeness
 chapter_id: ch20-ordinary-negative-cas
 title: Ordinary and Memory Multipart Negative Predicate CAS
 description: Fence arbitrary negative ETag ordinary writes across native providers
-status: draft
+status: stable
 state: planned
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
 plan_revision: 8
-plan_commit: null
+plan_commit: c737ffeb
 state_revision: 0
 last_verified_checkpoint: bdc7799a
 last_reviewed_commit: null
@@ -86,7 +86,7 @@ Progress: `[0/1 files documented]`. Before chapter review, isolated present-tens
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Verified source baseline: `bdc7799a`; this revision-7 chapter is draft pending independent cold review and has no production edits.
+- The revision8 frontier is independently approved at `c737ffeb`; its production task remains pending the declared Local publication prerequisite.
 - Remaining: one bounded ordinary and Memory multipart negative-CAS repair, with three production files and one canonical native test module.
 - Documentation: `[0/1 files documented]`, updated before review of implemented behavior.
 - ch16 native acceptance and reclosure cannot complete before ch20:t01 and the provider-specific repairs.

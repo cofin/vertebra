@@ -137,7 +137,7 @@ The executable transport staging and provider acceptance contracts are independe
 - Real loopback tests observe allow_http, configured default headers, proxy exclusions, raw encoded path, payload, 503 then 200 authorization with credential A then B, unchanged 403 and 412 bodies, connection closure privacy, and credential-supplier error privacy. Only the external credential provider is substituted.
 - Verification commands use `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12"`. The focused command is `flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --lib cloud_request::tests`; baseline: 3 passed, final: 5 passed, exit 0. The listed formatting and Clippy commands and `git diff --check` also exit 0.
 - Owned implementation is 79 lines in `cloud_request.rs` plus two `lib.rs` registration lines. Canonical inline test/fixture code is separate from that implementation bound. `conditional.rs` needs no change. The module remains exactly gated by `#[cfg(test)]`; no public API, broad unused-code allowance, runtime provider publication or future GCS helper is introduced.
-- The parent owns the signed atomic commit and final task/checklist SHA binding. This worksheet stays `in_progress` until that binding completes; no Git write or hosted action occurs in this executor.
+- The signed source checkpoint is `2bc92864`; this worksheet and chapter checklist are completed. Runtime activation remains explicitly owned by ch12:t01, with provider-level behavior accepted in the owning backend chapters.
 
 [^implementation]: `src/rs/vertebra-storage/src/cloud_request.rs` — Current repository source for this task.
 

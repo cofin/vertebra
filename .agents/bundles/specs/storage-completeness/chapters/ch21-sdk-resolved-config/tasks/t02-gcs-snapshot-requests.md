@@ -4,7 +4,7 @@ id: storage-completeness:ch21:t02
 chapter_id: ch21-sdk-resolved-config
 title: Capture and fence GCS data and metadata snapshots
 description: Implement the real private XML request boundary for opaque ETag predicates
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: integration_acceptance
@@ -25,7 +25,7 @@ tests:
 - src/rs/vertebra-storage/src/gcs_request.rs
 estimated_loc: 230
 plan_revision: 8
-plan_commit: null
+plan_commit: c737ffeb
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -88,6 +88,7 @@ Generation-only fencing cannot protect an opaque ETag against metadata-only chan
 | Case | Input | Observable result |
 | --- | --- | --- |
 | Atomic snapshot | One HEAD returns quoted ETag A, generation1729, metageneration4 | All fields derive from that same response; quoted ETag is unchanged. |
+| Opaque keys | Literal %2F versus %252F, Unicode and reserved characters in accepted StorePath keys | Actual HEAD/PUT/fenced-HEAD targets encode exactly once and identify the original key; no path/query confusion or metadata unquote. |
 | Metadata-only race | After snapshot, responder changes A to F and M4 to M5 with generation1729 unchanged | PUT carries G1729/M4 and fails412; exact competitor data/metadata survives. |
 | Create and attributes | Missing target with caller content type/attributes and segmented payload | PUT uses only generation-match0, exact bytes/headers and response receipt; race412 never overwrites. |
 | Fenced receipt | Rewrite published G900/M1, metadata becomes M2 before HEAD | HEAD includes generation900 and G900/M1 predicates; explicit receipt failure, no successor ETag returned. |
@@ -112,7 +113,7 @@ Run the real private library target, format check, normal compilation and all-ta
 
 ## Notes & Discoveries
 
-This frontier awaits independent review. A provider/API contradiction routes through bounded Flow revision before production edits.
+The impacted frontier is independently approved at `c737ffeb`. A provider/API contradiction routes through bounded Flow revision before production edits.
 
 [^implementation]: `src/rs/vertebra-storage/src/gcs_request.rs` — Actual private request implementation introduced by this task.
 [^research]: `.agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md` — SDK and primary HTTP evidence.

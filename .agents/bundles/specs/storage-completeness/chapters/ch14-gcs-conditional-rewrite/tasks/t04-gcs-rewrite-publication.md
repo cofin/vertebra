@@ -4,7 +4,7 @@ id: storage-completeness:ch14:t04
 chapter_id: ch14-gcs-conditional-rewrite
 title: Publish staged GCS generations and return canonical XML receipts
 description: Publish staged GCS generations and return canonical XML receipts
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: regression_tdd
@@ -26,7 +26,7 @@ tests:
 - src/rs/vertebra-storage/src/gcs_publication.rs
 estimated_loc: 240
 plan_revision: 8
-plan_commit: null
+plan_commit: c737ffeb
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -68,7 +68,7 @@ Implement this bounded native contract after its listed predecessors. Own only t
 
 ## Symbol & Signature Contracts
 
-Add private `GcsPublicationUpload` implementing the existing native MultipartUpload boundary using the completed GcsResumableStage. Activate `mod gcs_stage;` by removing its exact test-only gate and register `mod gcs_publication;` in lib.rs. Wire the existing GCS PublicationBackend into this wrapper, retaining the same SDK store, credential provider and resolved transport/configuration. Remove every exact field-local `#[cfg_attr(not(test), expect(dead_code, reason = "consumed by ch14:t04 GCS publication"))]` introduced by ch21:t01 in conditional.rs as the real production wrapper begins reading GcsStageConfig and its GCS variant field. Normal non-test cargo check and all-target Clippy must pass in this activation commit; no private helper can remain unused behind test compilation.
+Add private `GcsPublicationUpload` implementing the existing native MultipartUpload boundary using the completed GcsResumableStage. Activate `mod gcs_stage;` by removing its exact test-only gate and register `mod gcs_publication;` in lib.rs. Wire the existing GCS PublicationBackend into this wrapper, retaining the same SDK store, credential provider and resolved transport/configuration. The first production request consumer ch14:t01 already removes ch21:t01's exact temporary configuration-field expectations; this activation introduces no replacement allowance. Normal non-test cargo check and all-target Clippy must pass in this activation commit; no private helper can remain unused behind test compilation.
 
 Finish the stage and retain its exact source generation. Resolve destination predicates through the real GcsRequestClient snapshot tuple (quoted XML ETag, generation, metageneration). Match compares that ETag exactly; absent Match fails before rewrite. Present Match/NotMatch use BOTH JSON ifGenerationMatch=G and ifMetagenerationMatch=M; absent NotMatch/Create use ifGenerationMatch=0 with no metageneration. A race may fail with a truthful typed conflict; never use unconditional rewrite or replay consumed input. Metadata/content_type remain in the rewrite body. Source generation and source precondition stay pinned.
 

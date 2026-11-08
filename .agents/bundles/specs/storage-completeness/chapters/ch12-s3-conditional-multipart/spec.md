@@ -5,11 +5,11 @@ chapter_id: ch12-s3-conditional-multipart
 title: S3 Metadata Multipart and Conditional Completion
 description: S3 Metadata Multipart and Conditional Completion
 status: stable
-state: planned
+state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: null
+current_task: storage-completeness:ch12:t01
 plan_revision: 6
 plan_commit: e3e344b5
 state_revision: 0
@@ -105,7 +105,7 @@ Dependency order is t04 XML dependency, then t01 initiation, t02 completion and 
 - [ ] storage-completeness:ch12:t02 — Publish S3 multipart with conditional completion and actual result (tasks/t02-s3-conditional-complete.md)
 - [ ] storage-completeness:ch12:t03 — Surface S3 completion conflicts without hidden replay (tasks/t03-s3-conflict-recovery.md)
 
-- [ ] storage-completeness:ch12:t04 — Declare native protocol and filesystem dependencies (tasks/t04-xml-dependency.md)
+- [x] [35a4f784] storage-completeness:ch12:t04 — Declare native protocol and filesystem dependencies (tasks/t04-xml-dependency.md)
 
 **Chapter Recovery Checkpoint:** run every task's focused verification, then correctness review and a fresh quality review before closing this chapter. `/flow:implement storage-completeness ch12-s3-conditional-multipart` executes its ready worksheet.
 

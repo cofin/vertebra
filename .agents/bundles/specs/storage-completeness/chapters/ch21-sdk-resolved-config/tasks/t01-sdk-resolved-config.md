@@ -4,8 +4,8 @@ id: storage-completeness:ch21:t01
 chapter_id: ch21-sdk-resolved-config
 title: Retain SDK-resolved GCS endpoint and transport configuration
 description: Retain SDK-resolved GCS endpoint and transport configuration
-status: draft
-state: in_progress
+status: stable
+state: completed
 priority: P1
 verification_strategy: characterization
 depends_on:
@@ -22,19 +22,19 @@ tests:
 - src/rs/vertebra-storage/src/conditional.rs
 estimated_loc: 120
 plan_revision: 8
-plan_commit: null
+plan_commit: c737ffeb
 state_revision: 0
 claimed_by: agent:sdk_config_capture
 claimed_at: '2026-11-08T00:36:39Z'
 blocked_reason: null
 unblock_condition: null
-next_step: Complete receipt rebinding after the impacted revision8 plan review.
+next_step: null
 last_verified_at: '2026-11-08T00:36:39Z'
 last_verified_commit: fe992ae3
-verification_evidence: "Frozen approved revision7 constructor contract: SDK baseline3Green; final14lib+28canonical plus normalcheck/Clippy/fmt/diff0. Signed isolated844cd4a8 imported asfe992ae3; combined15lib+39canonical0. Independent correctness at844cd4a8 findings[]. New revision8 paired-snapshot plan review and receipt rebinding remain."
+verification_evidence: "Frozen approved revision7 constructor contract: SDK baseline3Green; final14lib+28canonical plus normalcheck/Clippy/fmt/diff0. Signed isolated844cd4a8 imported asfe992ae3; combined15lib+39canonical0. Independent correctness at844cd4a8 findings[]. Revision8 impacted frontier independently approved atc737ffeb; receipt rebound to main sourcefe992ae3."
 created_at: '2026-11-07T12:00:00Z'
 updated_at: '2026-11-07T12:00:00Z'
-commit: null
+commit: fe992ae3
 sources:
 - id: implementation
   resource: src/rs/vertebra-storage/src/store.rs
@@ -93,21 +93,21 @@ Characterize configured SDK reads before capture, then verify retained configura
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets -- -D warnings`
 - `git diff --check`
 
-Record exact statuses, constructor request count, tested singleton sources and final capture evidence. A normal build must pass; field-local expectations, if required, have the explicit ch14:t04 removal owner.
+Record exact statuses, constructor request count, tested singleton sources and final capture evidence. A normal build must pass; field-local expectations, if required, have the explicit ch14:t01 removal owner.
 
 ## Acceptance Criteria
 
-- [ ] All matrix rows exercise the real SDK/configuration path and preserve exact final transport and endpoint behavior.
-- [ ] SDK construction occurs once; concrete Arc, credentials and refresh identity are shared with ordinary reads.
-- [ ] Only two production files change; read_set <=6 and estimated implementation <=120 LOC.
-- [ ] Any exact field expectation is temporary and ch14:t01 removes it upon actual production use.
+- [x] All matrix rows exercise the real SDK/configuration path and preserve exact final transport and endpoint behavior.
+- [x] SDK construction occurs once; concrete Arc, credentials and refresh identity are shared with ordinary reads.
+- [x] Only two production files change; read_set <=6 and estimated implementation <=120 LOC.
+- [x] Any exact field expectation is temporary and ch14:t01 removes it upon actual production use.
 - [ ] Signed local conventional commit, exact verification evidence, correctness and fresh quality reviews are recorded; docs remain assigned to ch09:t03/ch04:t03.
 
 ## Notes & Discoveries
 
-The actual ch10 core already occupies 216 added implementation LOC; connector/configuration capture adds 70–90 LOC and therefore has this independent bounded owner. Any source contradiction routes through `/flow:revise storage-completeness ch21-sdk-resolved-config` before production edits.
+Connector/configuration capture has 119 added implementation lines across two owned files; its independent owner preserves the 250-line task bound alongside the earlier 216-line publication core. Any source contradiction routes through `/flow:revise storage-completeness ch21-sdk-resolved-config` before production edits.
 
 [^implementation]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine::new` — Actual GCS construction seam.
 [^research]: `.agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md` — Accepted SDK configuration and connector evidence.
 
-The constructor-capture source is signed at `fe992ae3`, imported from independently verified `844cd4a8`. Its bounded implementation has 119 added production lines and shares `Arc<GcsStageConfig>` without cloning large configuration into the publication enum. The real SDK baseline passes before capture; actual configured reads and final capture pass afterward. Independent correctness review reports no verified findings. This task remains in progress only for revision8 receipt rebinding; the newly added snapshot-request task retains its separate acceptance.
+The constructor-capture source is signed at `fe992ae3`, imported from independently verified `844cd4a8`. Its bounded implementation has 119 added production lines and shares `Arc<GcsStageConfig>` without cloning large configuration into the publication enum. The real SDK baseline passes before capture; actual configured reads and final capture pass afterward. Independent correctness review reports no verified findings. The revision8 impacted frontier is independently approved at `c737ffeb`; this completed receipt is bound to the imported source. The newly added snapshot-request task retains its separate acceptance.

@@ -4,7 +4,7 @@ id: storage-completeness:ch14:t02
 chapter_id: ch14-gcs-conditional-rewrite
 title: Create generation-fenced GCS resumable stages
 description: Create generation-fenced GCS resumable stages
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: integration_acceptance
@@ -26,7 +26,7 @@ tests:
 - src/rs/vertebra-storage/src/gcs_stage.rs
 estimated_loc: 230
 plan_revision: 8
-plan_commit: null
+plan_commit: c737ffeb
 state_revision: 0
 claimed_by: null
 claimed_at: null

@@ -4,14 +4,14 @@ parent_flow: storage-completeness
 chapter_id: ch21-sdk-resolved-config
 title: GCS Configuration and Snapshot Requests
 description: Preserve the actual GCS SDK endpoint and transport beside its concrete store
-status: draft
+status: stable
 state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: storage-completeness:ch21:t01
+current_task: storage-completeness:ch21:t02
 plan_revision: 8
-plan_commit: null
+plan_commit: c737ffeb
 state_revision: 0
 last_verified_checkpoint: 34113093
 last_reviewed_commit: null
@@ -86,14 +86,14 @@ Progress: `[0/1 files documented]`. ch09:t03 records only accepted source-backed
 
 ## 5. Implementation Plan
 
-- [~] storage-completeness:ch21:t01 — Retain SDK-resolved GCS endpoint and transport configuration (tasks/t01-sdk-resolved-config.md)
+- [x] [fe992ae3] storage-completeness:ch21:t01 — Retain SDK-resolved GCS endpoint and transport configuration (tasks/t01-sdk-resolved-config.md)
 - [ ] storage-completeness:ch21:t02 — Capture and fence GCS data and metadata snapshots (tasks/t02-gcs-snapshot-requests.md)
 
 **Chapter Recovery Checkpoint:** focused library tests, normal non-test compilation and all-target Clippy precede correctness and fresh quality review. ch14:t02 depends on this task; full read-versus-publication comparison belongs to ch14:t04.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Two bounded tasks own SDK configuration and real snapshot requests separately; each has at most two production files, six reads and 250 implementation LOC. The concrete dispatch predecessor ch10:t01 remains independently executable. The new request frontier requires independent review; configuration capture retains its verified source contract.
+Two bounded tasks own SDK configuration and real snapshot requests separately; each has at most two production files, six reads and 250 implementation LOC. The concrete dispatch predecessor ch10:t01 remains independently executable. The revision8 request frontier is independently approved at `c737ffeb`; configuration capture is completed at `fe992ae3`, and snapshot requests remain pending. Full-chapter correctness and fresh quality reviews follow both tasks.
 
 [^source]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine::new` — Actual configured GCS builder and credential precedence.
 [^research]: `.agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md` — Pinned SDK builder, endpoint and transport evidence.

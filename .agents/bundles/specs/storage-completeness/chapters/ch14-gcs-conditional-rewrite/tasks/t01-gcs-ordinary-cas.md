@@ -4,7 +4,7 @@ id: storage-completeness:ch14:t01
 chapter_id: ch14-gcs-conditional-rewrite
 title: Resolve GCS ETag predicates into generation CAS for ordinary puts
 description: Resolve GCS ETag predicates into generation CAS for ordinary puts
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: regression_tdd
@@ -28,7 +28,7 @@ tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 210
 plan_revision: 8
-plan_commit: null
+plan_commit: c737ffeb
 state_revision: 0
 claimed_by: null
 claimed_at: null
