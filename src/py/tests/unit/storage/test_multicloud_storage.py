@@ -215,7 +215,7 @@ def test_gcs_adc_authorized_user_and_impersonation_flow(
         assert _MockAdcAndIamHandler.seen_headers[1].get("authorization") == "Bearer mock-source-adc-token"
 
         _, opts = cfg.to_url_and_options()
-        assert opts["access_token"] == "mock-impersonated-sa-token"
+        assert "access_token" not in opts
         assert opts["target_service_account"] == "lake-reader@analytics-proj.iam.gserviceaccount.com"
     finally:
         server.shutdown()

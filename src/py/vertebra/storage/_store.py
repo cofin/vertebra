@@ -153,7 +153,7 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     quota_project_id: str | None = None
     """Optional Google Cloud quota project ID forwarded as `x-goog-user-project`."""
 
-    def to_url_and_options(self, *, eager_impersonation: bool = True) -> tuple[str, dict[str, str]]:
+    def to_url_and_options(self) -> tuple[str, dict[str, str]]:
         """Convert configuration into a canonical URL and options dictionary."""
         opts: dict[str, str] = {
             "refresh_skew_ms": str(max(0, int(self.refresh_skew_seconds * 1000))),
@@ -171,12 +171,8 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             opts["target_service_account"] = self.target_service_account
         if self.quota_project_id:
             opts["quota_project_id"] = self.quota_project_id
-
-        resolved_token = self.access_token
-        if resolved_token is None and self.target_service_account and eager_impersonation:
-            resolved_token = self.resolve_adc_token()
-        if resolved_token:
-            opts["access_token"] = resolved_token
+        if self.access_token:
+            opts["access_token"] = self.access_token
 
         emulator_host = os.environ.get("STORAGE_EMULATOR_HOST", "").strip()
         resolved_endpoint = self.endpoint
@@ -189,20 +185,12 @@ class GCSConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
         if self.allow_http or (resolved_endpoint is not None and resolved_endpoint.startswith("http://")):
             opts["allow_http"] = "true"
-            for env_key in ("NO_PROXY", "no_proxy"):
-                existing_no_proxy = os.environ.get(env_key, "")
-                if "127.0.0.1" not in existing_no_proxy:
-                    os.environ[env_key] = (
-                        f"{existing_no_proxy},127.0.0.1,localhost,::1,metadata.google.internal"
-                        if existing_no_proxy
-                        else "127.0.0.1,localhost,::1,metadata.google.internal"
-                    )
 
         has_explicit_auth = bool(
             self.service_account_path
             or self.service_account_key
             or self.application_credentials
-            or resolved_token
+            or self.access_token
             or self.target_service_account
         )
         if self.skip_signature or (bool(emulator_host) and self.endpoint is None and not has_explicit_auth):
@@ -690,10 +678,7 @@ class _BaseObjectStore:
         ):
             if isinstance(target, LocalConfig):
                 create_local_dirs = target.create_dirs
-            if isinstance(target, GCSConfig):
-                resolved_url, cfg_opts = target.to_url_and_options(eager_impersonation=False)
-            else:
-                resolved_url, cfg_opts = target.to_url_and_options()
+            resolved_url, cfg_opts = target.to_url_and_options()
             merged_opts = dict(cfg_opts)
             if options:
                 merged_opts.update(options)
@@ -1273,7 +1258,20 @@ class _BaseObjectStore:
             application_credentials=self._options.get("application_credentials_path"),
             service_account_email=effective_email,
             iam_endpoint=self._signing.iam_endpoint,
+            quota_project_id=self._options.get("quota_project_id"),
         )
+
+    def _auto_build_gcs_token_cache_options(self) -> dict[str, str] | None:
+        """Build native GcpTokenCache options when dynamic GCS OAuth2 credentials can be shared."""
+        if self._scheme not in {"gs", "gcs"}:
+            return None
+        if self._options.get("skip_signature", "").strip().lower() in {"true", "1", "yes"}:
+            return None
+        if self._options.get("access_token") or self._options.get("target_service_account"):
+            return None
+        opts = dict(self._options)
+        opts.setdefault("scopes", ",".join(GCS_DEFAULT_SCOPES))
+        return opts
 
     def _ensure_sync_gcs_token_cache(self, effective_email: str) -> SyncGcpTokenCache:
         """Lazily initialize and return the synchronous token cache for keyless GCS IAM signing."""
@@ -1287,11 +1285,6 @@ class _BaseObjectStore:
             self._gcp_token_cache = self._build_signing_adc_helper(effective_email).async_token_cache()
         return self._gcp_token_cache
 
-    @staticmethod
-    def _is_iam_unauthorized_error(exc: BaseException) -> bool:
-        """Return True when an IAM signBlob error indicates an HTTP 401 Unauthorized response."""
-        return isinstance(exc, (RuntimeError, PermissionError)) and "HTTP 401" in str(exc)
-
     def _execute_gcs_v4_iam_sign(
         self,
         key: str,
@@ -1302,6 +1295,7 @@ class _BaseObjectStore:
         now_ts: int,
         access_token: str | None,
         private_key_pem: str | None,
+        token_cache_capsule: object | None = None,
     ) -> str:
         assert self._signing is not None
         native_mod = self._ensure_native_module()
@@ -1316,6 +1310,8 @@ class _BaseObjectStore:
                 self._signing.iam_endpoint,
                 access_token,
                 private_key_pem,
+                self._signing.endpoint,
+                token_cache_capsule,
             )
         )
 
@@ -1334,38 +1330,21 @@ class _BaseObjectStore:
             raise ValueError(msg)
         private_key_pem = None if self._signing.target_service_account else self._signing.private_key_pem
         access_token = self._signing.access_token
-        token_generation: int | None = None
+        capsule: object | None = None
         if access_token is None and private_key_pem is None:
             cache = self._ensure_sync_gcs_token_cache(effective_email)
-            snap = cache.get_token()
-            access_token = snap.access_token
-            token_generation = snap.generation
+            capsule = cache._capsule()
 
-        try:
-            return self._execute_gcs_v4_iam_sign(
-                key,
-                effective_email=effective_email,
-                method=method,
-                expires_in_secs=expires_in_secs,
-                now_ts=now_ts,
-                access_token=access_token,
-                private_key_pem=private_key_pem,
-            )
-        except (RuntimeError, PermissionError) as exc:
-            if token_generation is None or not self._is_iam_unauthorized_error(exc):
-                raise
-            cache = self._ensure_sync_gcs_token_cache(effective_email)
-            cache.invalidate(token_generation)
-            refreshed = cache.get_token()
-            return self._execute_gcs_v4_iam_sign(
-                key,
-                effective_email=effective_email,
-                method=method,
-                expires_in_secs=expires_in_secs,
-                now_ts=now_ts,
-                access_token=refreshed.access_token,
-                private_key_pem=private_key_pem,
-            )
+        return self._execute_gcs_v4_iam_sign(
+            key,
+            effective_email=effective_email,
+            method=method,
+            expires_in_secs=expires_in_secs,
+            now_ts=now_ts,
+            access_token=access_token,
+            private_key_pem=private_key_pem,
+            token_cache_capsule=capsule,
+        )
 
     async def _sign_gcs_v4_iam_async(
         self,
@@ -1382,47 +1361,27 @@ class _BaseObjectStore:
             raise ValueError(msg)
         private_key_pem = None if self._signing.target_service_account else self._signing.private_key_pem
         access_token = self._signing.access_token
-        token_generation: int | None = None
+        capsule: object | None = None
         if access_token is None and private_key_pem is None:
             cache = self._ensure_async_gcs_token_cache(effective_email)
-            snap = await cache.get_token()
-            access_token = snap.access_token
-            token_generation = snap.generation
+            capsule = cache._capsule()
 
         native_mod = self._ensure_native_module()
-        try:
-            return str(
-                await native_mod.py_sign_gcs_v4_iam_url_async(
-                    self._signing.bucket,
-                    effective_email,
-                    method,
-                    key,
-                    expires_in_secs,
-                    now_ts,
-                    self._signing.iam_endpoint,
-                    access_token,
-                    private_key_pem,
-                )
+        return str(
+            await native_mod.py_sign_gcs_v4_iam_url_async(
+                self._signing.bucket,
+                effective_email,
+                method,
+                key,
+                expires_in_secs,
+                now_ts,
+                self._signing.iam_endpoint,
+                access_token,
+                private_key_pem,
+                self._signing.endpoint,
+                capsule,
             )
-        except (RuntimeError, PermissionError) as exc:
-            if token_generation is None or not self._is_iam_unauthorized_error(exc):
-                raise
-            cache = self._ensure_async_gcs_token_cache(effective_email)
-            cache.invalidate(token_generation)
-            refreshed = await cache.get_token()
-            return str(
-                await native_mod.py_sign_gcs_v4_iam_url_async(
-                    self._signing.bucket,
-                    effective_email,
-                    method,
-                    key,
-                    expires_in_secs,
-                    now_ts,
-                    self._signing.iam_endpoint,
-                    refreshed.access_token,
-                    private_key_pem,
-                )
-            )
+        )
 
     def _resolve_local(self, key: str) -> Path:
         assert self._local_root is not None
@@ -1481,8 +1440,23 @@ class SyncObjectStore(_BaseObjectStore):
         if _native_instance is not None:
             self._native = _native_instance
             return
+        if self._gcp_token_cache is None:
+            cache_opts = self._auto_build_gcs_token_cache_options()
+            if cache_opts is not None:
+                allow_ambient = cache_opts.get("allow_ambient_adc", "true").strip().lower() not in {
+                    "false",
+                    "0",
+                    "no",
+                }
+                with contextlib.suppress(ValueError, GoogleCloudAuthError, OSError):
+                    self._gcp_token_cache = SyncGcpTokenCache(
+                        cache_opts,
+                        list(GCS_DEFAULT_SCOPES),
+                        allow_ambient_adc=allow_ambient,
+                    )
+        capsule = self._gcp_token_cache._capsule() if self._gcp_token_cache is not None else None
         try:
-            self._native = native_mod.SyncObjectStore(self._url, self._options or None)
+            self._native = native_mod.SyncObjectStore(self._url, self._options or None, capsule)
         except ValueError as exc:
             raise ImproperConfigurationError(str(exc)) from exc
 
@@ -1810,8 +1784,23 @@ class AsyncObjectStore(_BaseObjectStore):
         if _native_instance is not None:
             self._native = _native_instance
             return
+        if self._gcp_token_cache is None:
+            cache_opts = self._auto_build_gcs_token_cache_options()
+            if cache_opts is not None:
+                allow_ambient = cache_opts.get("allow_ambient_adc", "true").strip().lower() not in {
+                    "false",
+                    "0",
+                    "no",
+                }
+                with contextlib.suppress(ValueError, GoogleCloudAuthError, OSError):
+                    self._gcp_token_cache = AsyncGcpTokenCache(
+                        cache_opts,
+                        list(GCS_DEFAULT_SCOPES),
+                        allow_ambient_adc=allow_ambient,
+                    )
+        capsule = self._gcp_token_cache._capsule() if self._gcp_token_cache is not None else None
         try:
-            self._native = native_mod.AsyncObjectStore(self._url, self._options or None)
+            self._native = native_mod.AsyncObjectStore(self._url, self._options or None, capsule)
         except ValueError as exc:
             raise ImproperConfigurationError(str(exc)) from exc
 

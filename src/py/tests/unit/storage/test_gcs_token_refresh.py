@@ -7,6 +7,7 @@ import asyncio
 import base64
 import ctypes
 import json
+import os
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -53,6 +54,8 @@ class _MockTokenServer:
         self.metadata_calls = 0
         self.iam_calls = 0
         self.gcs_calls = 0
+        self.stored_objects: dict[str, bytes] = {}
+        self.fail_next_sign_blob_401 = False
         self.last_headers: dict[str, str] = {}
         self.last_post_body: bytes = b""
         self.expires_in: int = 3600
@@ -88,22 +91,49 @@ class _MockTokenServer:
                     if (
                         self.path.startswith("/storage/v1/b/")
                         or self.path.startswith("/download/storage/v1/b/")
+                        or self.path.startswith("/b/")
                         or "model.bin" in self.path
                         or "model%2Ebin" in self.path
                     ):
                         parent.gcs_calls += 1
-                        raw = b"gcs-object-payload"
+                        raw = parent.stored_objects.get("latest", b"gcs-object-payload")
                         self.send_response(200)
                         self.send_header("Content-Type", "application/octet-stream")
                         self.send_header("Content-Length", str(len(raw)))
                         self.send_header("Last-Modified", "Wed, 21 Oct 2015 07:28:00 GMT")
                         self.send_header("ETag", '"etag-1"')
+                        self.send_header("x-goog-generation", "1")
                         self.end_headers()
                         self.wfile.write(raw)
                         return
 
                 self.send_response(404)
                 self.end_headers()
+
+            def do_PUT(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length) if length > 0 else b""
+                with parent._lock:
+                    parent.last_headers = {k.lower(): v for k, v in self.headers.items()}
+                    parent.gcs_calls += 1
+                    parent.stored_objects["latest"] = body
+                    resp = json.dumps(
+                        {
+                            "name": "k",
+                            "bucket": "b",
+                            "size": str(len(body)),
+                            "etag": "etag-put-1",
+                            "generation": "1",
+                            "updated": "2026-11-08T00:00:00Z",
+                        }
+                    ).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(resp)))
+                    self.send_header("ETag", '"etag-put-1"')
+                    self.send_header("x-goog-generation", "1")
+                    self.end_headers()
+                    self.wfile.write(resp)
 
             def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -152,12 +182,43 @@ class _MockTokenServer:
 
                     if ":signBlob" in self.path:
                         parent.iam_calls += 1
+                        if parent.fail_next_sign_blob_401:
+                            parent.fail_next_sign_blob_401 = False
+                            err_raw = b'{"error":{"code":401,"message":"UNAUTHENTICATED"}}'
+                            self.send_response(401)
+                            self.send_header("Content-Type", "application/json")
+                            self.send_header("Content-Length", str(len(err_raw)))
+                            self.end_headers()
+                            self.wfile.write(err_raw)
+                            return
                         raw = b'{"keyId":"k1","signedBlob":"ZGVhZGJlZWZjYWZl"}'
                         self.send_response(200)
                         self.send_header("Content-Type", "application/json")
                         self.send_header("Content-Length", str(len(raw)))
                         self.end_headers()
                         self.wfile.write(raw)
+                        return
+
+                    if "/upload/storage/v1/b/" in self.path:
+                        parent.gcs_calls += 1
+                        parent.stored_objects["latest"] = body
+                        resp = json.dumps(
+                            {
+                                "name": "k",
+                                "bucket": "b",
+                                "size": str(len(body)),
+                                "etag": "etag-post-1",
+                                "generation": "1",
+                                "updated": "2026-11-08T00:00:00Z",
+                            }
+                        ).encode("utf-8")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(resp)))
+                        self.send_header("ETag", '"etag-post-1"')
+                        self.send_header("x-goog-generation", "1")
+                        self.end_headers()
+                        self.wfile.write(resp)
                         return
 
                 self.send_response(404)
@@ -781,3 +842,113 @@ def test_gcp_token_cache_capsule_export_parity() -> None:
     async_capsule = async_cache._capsule()
     assert type(async_capsule).__name__ == "PyCapsule"
     assert ctypes.pythonapi.PyCapsule_GetName(async_capsule) == b"vertebra.GcpTokenCacheCapsule"
+
+
+def test_sync_and_async_object_store_share_token_cache_across_data_plane_and_sign(
+    token_server: _MockTokenServer,
+    tmp_path: Path,
+) -> None:
+    """Verify SyncObjectStore and AsyncObjectStore share token_cache across put, get, and IAM sign."""
+    adc_path = tmp_path / "shared_adc.json"
+    adc_path.write_text(
+        json.dumps(
+            {
+                "type": "authorized_user",
+                "client_id": "shared-cid",
+                "client_secret": "shared-csec",
+                "refresh_token": "shared-rtok",
+                "quota_project_id": "shared-qp",
+                "token_uri": f"{token_server.base_url}/token",
+            }
+        ),
+        encoding="utf-8",
+    )
+    signing = SigningConfig(
+        provider="gcs",
+        bucket="b",
+        service_account_email="signer@test-proj.iam.gserviceaccount.com",
+        iam_endpoint=token_server.base_url,
+        endpoint=token_server.base_url,
+    )
+
+    sync_cache = SyncGcpTokenCache(
+        {"application_credentials": str(adc_path)},
+        allow_ambient_adc=False,
+    )
+    sync_store = SyncObjectStore(
+        "gs://b",
+        options={"endpoint": token_server.base_url, "allow_http": "true"},
+        signing=signing,
+        token_cache=sync_cache,
+    )
+    sync_store.put("k", b"hi-sync")
+    assert sync_store.get("k") == b"hi-sync"
+    signed_sync = sync_store.sign("k", timestamp=1_700_000_000)
+    assert signed_sync.startswith(f"{token_server.base_url}/b/k?")
+    assert token_server.oauth_calls == 1
+    assert sync_cache.generation == 1
+
+    token_server.fail_next_sign_blob_401 = True
+    signed_after_401 = sync_store.sign("k", timestamp=1_700_000_000)
+    assert signed_after_401.startswith(f"{token_server.base_url}/b/k?")
+    assert sync_cache.generation == 2
+    assert token_server.oauth_calls == 2
+
+    assert sync_store.get("k") == b"hi-sync"
+    assert token_server.last_headers.get("authorization") == "Bearer mock-oauth-token-user-2"
+    assert token_server.last_headers.get("x-goog-user-project") == "shared-qp"
+    assert token_server.oauth_calls == 2
+
+    async_cache = AsyncGcpTokenCache(
+        {"application_credentials": str(adc_path)},
+        allow_ambient_adc=False,
+    )
+    async_store = AsyncObjectStore(
+        "gs://b",
+        options={"endpoint": token_server.base_url, "allow_http": "true"},
+        signing=signing,
+        token_cache=async_cache,
+    )
+
+    async def _run_async() -> None:
+        await async_store.put("k", b"hi-async")
+        assert await async_store.get("k") == b"hi-async"
+        signed_async = await async_store.sign("k", timestamp=1_700_000_000)
+        assert signed_async.startswith(f"{token_server.base_url}/b/k?")
+        assert async_cache.generation == 1
+        assert token_server.oauth_calls == 3
+
+        token_server.fail_next_sign_blob_401 = True
+        await async_store.sign("k", timestamp=1_700_000_000)
+        assert async_cache.generation == 2
+        assert token_server.oauth_calls == 4
+
+        assert await async_store.get("k") == b"hi-async"
+        assert token_server.last_headers.get("authorization") == "Bearer mock-oauth-token-user-4"
+        assert token_server.oauth_calls == 4
+
+    asyncio.run(_run_async())
+
+
+def test_gcs_config_to_url_and_options_is_non_blocking_and_preserves_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify GCSConfig.to_url_and_options performs zero network I/O and never mutates os.environ."""
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    env_snapshot = dict(os.environ)
+
+    cfg = GCSConfig(
+        bucket="b",
+        target_service_account="imp@p.iam.gserviceaccount.com",
+        iam_endpoint="http://127.0.0.1:9",
+        endpoint="http://127.0.0.1:4443",
+    )
+    url, opts = cfg.to_url_and_options()
+    assert url == "gs://b"
+    assert opts["target_service_account"] == "imp@p.iam.gserviceaccount.com"
+    assert opts["endpoint"] == "http://127.0.0.1:4443"
+    assert opts["allow_http"] == "true"
+    assert "access_token" not in opts
+    assert dict(os.environ) == env_snapshot

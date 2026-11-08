@@ -6,6 +6,7 @@ import asyncio
 import base64
 import calendar
 import json
+import os
 import subprocess
 import threading
 import time
@@ -658,3 +659,44 @@ def test_multicloud_store_sign_sync_and_async(tmp_path: Path) -> None:
         server.shutdown()
         server.server_close()
         srv_thread.join(timeout=2.0)
+
+
+def test_gcs_config_custom_endpoint_store_sign_preserves_no_proxy_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify SyncObjectStore and AsyncObjectStore honor GCSConfig.endpoint in store.sign without mutating NO_PROXY."""
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    pem_key = subprocess.check_output(
+        ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"],
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    sa_json = json.dumps(
+        {
+            "type": "service_account",
+            "project_id": "test-gcp-proj",
+            "private_key_id": "key-1",
+            "private_key": pem_key,
+            "client_email": "emu-rsa@test-gcp-proj.iam.gserviceaccount.com",
+            "token_uri": "http://127.0.0.1:9/token",
+        }
+    )
+    cfg = GCSConfig(
+        bucket="b",
+        endpoint="http://127.0.0.1:4443",
+        service_account_key=sa_json,
+    )
+    sync_store = SyncObjectStore(cfg)
+    async_store = AsyncObjectStore(cfg)
+    assert "NO_PROXY" not in os.environ
+    assert "no_proxy" not in os.environ
+
+    sync_signed = sync_store.sign("a/b.txt", expires_in=600, timestamp=1_700_000_000)
+    assert sync_signed.startswith("http://127.0.0.1:4443/b/a/b.txt?")
+    assert "X-Goog-Algorithm=GOOG4-RSA-SHA256" in sync_signed
+
+    async_signed = asyncio.run(async_store.sign("a/b.txt", expires_in=600, timestamp=1_700_000_000))
+    assert async_signed == sync_signed
+    assert "NO_PROXY" not in os.environ
+    assert "no_proxy" not in os.environ
