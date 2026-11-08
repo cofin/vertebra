@@ -1,6 +1,6 @@
 # Native PostgreSQL Driver — Chapter Catalog
 
-31 chapters and 111 bounded tasks retain the complete driver scope. Progress is 11/111 tasks complete and 3/31 chapters complete and reviewed, most recently chapter 03 at `8289858e`. Chapter 04 cloud material contracts require bounded refinement before implementation.
+31 chapters and 111 bounded tasks retain the complete driver scope. Progress is 11/111 tasks complete and 3/31 chapters complete and reviewed, most recently chapter 03 at `8289858e`. Chapter 04 local clock/key, actual-expiry and result-sharing refresh contracts are executable; cold changed-plan review precedes implementation.
 
 * [ch01-wheel-scaffold-and-config](ch01-wheel-scaffold-and-config/spec.md) — [completed] (4/4 tasks complete) Scaffold the standalone vertebra-postgres PyO3 crate, lock workspace and vertebra-db Cargo dependencies upfront, wire the vertebra._postgres wheel/stub/Makefile matrix, and implement pure PostgresConfig validation and ServerError categories.
 * [ch02-wire-codec-and-session-startup](ch02-wire-codec-and-session-startup/spec.md) — [completed] (4/4 tasks complete) Implement bounded 16 MiB PostgreSQL Protocol 3.0 framing, SessionHandle/PendingSession startup publication ownership, SSLRequest rustls negotiation, and cleartext/MD5 startup authentication.

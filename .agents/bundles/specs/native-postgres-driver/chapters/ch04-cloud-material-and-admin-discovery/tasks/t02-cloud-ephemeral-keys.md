@@ -22,8 +22,8 @@ files:
 tests:
   - src/rs/vertebra-postgres/tests/postgres_cloud_wire_tests.rs
 estimated_loc: 215
-plan_revision: 8
-plan_commit: 8c540809
+plan_revision: 9
+plan_commit: b0de4dcb
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -76,7 +76,7 @@ Implement `src/rs/vertebra-postgres/src/cloud/keys.rs` using `rsa = { version = 
     - Owns `public_key_pem: String` (`-----BEGIN RSA PUBLIC KEY-----\n...\n-----END RSA PUBLIC KEY-----\n`, LF line endings via `rsa::pkcs1::EncodeRsaPublicKey::to_pkcs1_pem(LineEnding::LF)`), `private_key_pem: Vec<u8>` (`-----BEGIN RSA PRIVATE KEY-----\n...`, LF line endings via `rsa::pkcs1::EncodeRsaPrivateKey::to_pkcs1_pem(LineEnding::LF)`), and `RsaPublicKey` components (`n`, `e`).
     - Custom `fmt::Debug` redacting `private_key_pem` (`"<redacted>"`).
   - `pub async fn generate_ephemeral_rsa_keypair(deadline: tokio::time::Instant) -> Result<EphemeralRsaKeyPair, PostgresError>`:
-    - Offloads `RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048)` onto `tokio::task::spawn_blocking` outside any Python attachment and awaits completion under `tokio::time::timeout_at(deadline, ...)` (if cancelled or past `deadline`, bounded blocking keygen may finish in the background thread, but `Err(PostgresError::Transport(_))` is returned immediately and no key material is published).
+    - Reject `Instant::now() >= deadline` before launching work and again before returning a completed key; `timeout_at` alone permits ready-success after expiry. Offloads `RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048)` onto `tokio::task::spawn_blocking` outside any Python attachment and awaits completion under `tokio::time::timeout_at(deadline, ...)` (if cancelled or past `deadline`, bounded blocking keygen may finish in the background thread, but `Err(PostgresError::Transport(_))` is returned immediately and no key material is published).
   - `#[derive(Clone)] pub struct ValidatedClientIdentity`:
     - `pub cert_chain_pem: Vec<u8>` (joined leaf-first PEM blocks normalized with LF trailing newlines)
     - `pub private_key_pem: Vec<u8>` (redacted in `Debug`)
@@ -96,7 +96,7 @@ Implement `src/rs/vertebra-postgres/src/cloud/keys.rs` using `rsa = { version = 
 
 ## Public-Seam Test Blueprint
 
-- **Canonical test file**: `src/rs/vertebra-postgres/tests/postgres_cloud_wire_tests.rs` (test names prefixed `issued_key_`).
+- **Canonical test file**: `src/rs/vertebra-postgres/tests/postgres_cloud_wire_tests.rs` (test names prefixed `issued_key_`), extending only its existing in-file fixtures. For a leaf matching the request key, decode PKCS#1 with `rsa::pkcs1::DecodeRsaPublicKey`, encode SPKI using `rsa::pkcs8::EncodePublicKey::to_public_key_der`, then `rcgen::SubjectPublicKeyInfo::from_der(spki.as_bytes())`. Sign it via pinned rcgen 0.14.10 `CertificateParams::signed_by(&public_key, &Issuer::from_params(&ca_params, &ca_key))` using an ECDSA CA; no generated client private key or OpenSSL process is needed. Set exact signed timestamps with `rcgen::date_time_ymd(1970,1,1) + std::time::Duration::from_secs(epoch_seconds)`. Test fixtures need no undeclared support-module read.
 - **Worked Test Matrix**:
 
 | Case | Input | Expected Output / Error |

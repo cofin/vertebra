@@ -25,8 +25,8 @@ tests:
   - src/rs/vertebra-db/src/connection.rs
   - src/rs/vertebra-postgres/tests/postgres_cloud_wire_tests.rs
 estimated_loc: 245
-plan_revision: 8
-plan_commit: 8c540809
+plan_revision: 9
+plan_commit: b0de4dcb
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -63,7 +63,7 @@ tags:
 
 ## Objective & Scope Boundary
 
-Extract `TransportStream::connect_alloydb_tls` and module-level `finish_alloydb_metadata` in `src/rs/vertebra-db/src/connection.rs` (refactoring `TransportStream::connect` to compose both stages under a single `absolute_deadline`), and implement `dial_alloydb` returning pre-startup `DialedCloudTransport` in `src/rs/vertebra-postgres/src/cloud/mod.rs` wired into `src/rs/vertebra-postgres/src/session.rs` [^db-conn] [^db-dialer] [^pg-contracts]. Immediately after `connect_alloydb_tls` verifies the server's TLS 1.3 IP/PSC DNS SAN identity and before `finish_alloydb_metadata` transmits any token-bearing `MetadataExchangeRequest` bytes, `dial_alloydb` invokes `login_snapshot.ensure_usable(clock.now_ms())`, dropping the stream with `0` metadata bytes and `PostgresError::Auth` (`GoogleCloudAuthError`) if the token expired or entered refresh skew during TLS, and returns `DialedCloudTransport` **before** PostgreSQL `StartupMessage` so `session.rs` executes `StartupMessage` and authentication uniformly across Cloud SQL and AlloyDB [^cloud-research] [^pg-contracts].
+Extract `TransportStream::connect_alloydb_tls` and module-level `finish_alloydb_metadata` in `src/rs/vertebra-db/src/connection.rs` (refactoring `TransportStream::connect` to compose both stages under a single `absolute_deadline`), and implement `dial_alloydb` returning pre-startup `DialedCloudTransport` in `src/rs/vertebra-postgres/src/cloud/mod.rs` wired into `src/rs/vertebra-postgres/src/session.rs` [^db-conn] [^db-dialer] [^pg-contracts]. Immediately after `connect_alloydb_tls` verifies the server's TLS 1.3 IP/PSC DNS SAN identity and before `finish_alloydb_metadata` transmits any token-bearing `MetadataExchangeRequest` bytes, `dial_alloydb` invokes `login_snapshot.ensure_usable(clock.now_unix_ms())`, dropping the stream with `0` metadata bytes and `PostgresError::Auth` (`GoogleCloudAuthError`) if the token expired or entered refresh skew during TLS, and returns `DialedCloudTransport` **before** PostgreSQL `StartupMessage` so `session.rs` executes `StartupMessage` and authentication uniformly across Cloud SQL and AlloyDB [^cloud-research] [^pg-contracts].
 
 ## Bounded Read Manifest
 
@@ -88,7 +88,7 @@ Extract `TransportStream::connect_alloydb_tls` and module-level `finish_alloydb_
   - `pub(crate) async fn dial_alloydb(config: &PostgresConfig, connector: &CloudConnector, absolute_deadline: tokio::time::Instant) -> Result<DialedCloudTransport, PostgresError>`:
     - Obtain `PreparedCloudMaterial` from `connector.prepare(..., absolute_deadline)` (port `5433`, `ALLOYDB_LOGIN_SCOPE` `https://www.googleapis.com/auth/alloydb.login` fetched for **both** `vertebra_db::dialer::AuthType::Password` and `vertebra_db::dialer::AuthType::Iam`).
     - Drive `tokio::time::timeout_at(absolute_deadline, TransportStream::connect_alloydb_tls(&connect_opts))`.
-    - Immediately call `login_snapshot.ensure_usable(connector.clock().now_ms())?`. On failure, drop `stream` immediately and return `PostgresError::Auth` (zero `MetadataExchangeRequest` bytes written).
+    - Immediately call `login_snapshot.ensure_usable(connector.now_unix_ms())?`. On failure, drop `stream` immediately and return `PostgresError::Auth` (zero `MetadataExchangeRequest` bytes written).
     - Call `finish_alloydb_metadata(&mut stream, &connect_opts, absolute_deadline).await?`.
     - Compute `tls_server_end_point` from `stream.peer_leaf_der()` for `SCRAM-SHA-256-PLUS` and return `DialedCloudTransport { stream, tls_server_end_point, login_snapshot: config.enable_iam_auth.then_some(login_snapshot) }` **before** emitting PostgreSQL `StartupMessage` (and never emitting `SSLRequest`).
   - Route `ConnectAttempt::run` in `session.rs` to `cloud::dial_alloydb` when `config.alloydb_instance_uri` is `Some(_)`, then run `session.rs`'s unified `StartupMessage` + `auth.rs` engine (`AuthType::Iam` uses `dialed.login_snapshot` as password, re-checking `ensure_usable` in `auth.rs` before password/SASL write; `AuthType::Password` has `login_snapshot == None` and uses `config.password`) to `TransactionStatus::Idle`.

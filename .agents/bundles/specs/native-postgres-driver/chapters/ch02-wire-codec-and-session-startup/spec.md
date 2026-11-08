@@ -11,8 +11,8 @@ depends_on_chapters:
   - ch01-wheel-scaffold-and-config
 replan_trigger: null
 current_task: null
-plan_revision: 8
-plan_commit: 8c540809
+plan_revision: 9
+plan_commit: b0de4dcb
 state_revision: 5
 last_verified_checkpoint: ad8be7b6
 last_reviewed_commit: 27b5a9e5

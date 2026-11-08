@@ -11,8 +11,8 @@ depends_on_chapters:
   - ch15-pool-facades-and-single-sync-pipeline
 replan_trigger: null
 current_task: "native-postgres-driver:ch16:t01"
-plan_revision: 8
-plan_commit: 8c540809
+plan_revision: 9
+plan_commit: b0de4dcb
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null

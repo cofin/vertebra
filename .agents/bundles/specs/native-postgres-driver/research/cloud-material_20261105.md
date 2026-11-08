@@ -25,6 +25,9 @@ sources:
   - id: rs-gcp-auth
     resource: src/rs/vertebra-core/src/gcp_auth.rs::GcpTokenCache
     title: Core GCP single-flight token cache
+  - id: pinned-cloud-deps
+    resource: src/rs/Cargo.lock
+    title: Pinned Tokio 1.54.1, reqwest 0.13.5 and rcgen 0.14.10 APIs
   - id: pg-config
     resource: src/py/vertebra/db/adapters/postgres/config.py::PostgreSQLConfig
     title: PostgreSQL cloud_sql_instance, alloydb_instance_uri, and IAM config
@@ -58,7 +61,7 @@ tags:
 
 URI + IAM connections require adapter-owned control-plane fetching and renewal. Existing native transport consumes prepared material. It does not discover endpoints or obtain issued client certificates. Required cloud functionality belongs in the complete native-postgres-driver PR; prepared-material injection is an internal seam and test facility, not the end-user completion boundary.
 
-No credentials were read, no Google Cloud resources were accessed, and no source or .agents files were changed during this audit. Public documentation and public upstream source were read.
+The research uses public documentation, public upstream source and pinned local crate sources. It accesses no credentials or Google Cloud resources and changes no production or dependency files.
 
 ## Existing source contracts
 
@@ -121,6 +124,20 @@ src/rs/vertebra-core/src/gcp_auth.rs::GcpTokenCache semantics:
 - Static tokens default to an extremely distant expiry when omitted. That cannot establish actual expiry or scope for the new strict cloud-login provider contract. Do not turn a scope request into a claim about unknown token scope.
 
 src/rs/vertebra-bigquery/src/client.rs::{send_rest_json,dispatch_http_once} is a private reusable pattern, not a public generic API: reqwest, bearer and quota headers, generation-aware invalidate and one 401 retry. src/rs/vertebra-db/src/gcp.rs::GcpTokenCredentials offers public credentials for official SDKs under optional gcp. Token HTTP clients are private. Reuse generic reqwest/auth pieces without making postgres depend on unrelated BigQuery/Spanner engines. Preserve existing proxy policy and direct metadata-server routing, timeouts, quota headers, and sanitized diagnostics.
+
+## Verified Local Cache, Clock & Fixture Contracts
+
+The plan uses pinned local crate sources resolved by `src/rs/Cargo.lock` [^pinned-cloud-deps], with shared auth/URI source as the concrete authority [^rs-gcp-auth] [^rs-dialer]. Executors consume this evidence through their bounded research read, without adding registry-source files to task read manifests.
+
+- Shared auth exposes `current_unix_ms()` and no `Clock`/`SystemClock`. Chapter 04 owns `Clock: Send + Sync { fn now_unix_ms(&self) -> u64; }` and delegates production wall time to that function. The native constructor injects `Arc<dyn Clock>` alongside `Arc<dyn CloudMaterialFetcher>`; downstream guards use the same method.
+- `CloudSqlInstanceUri` has public `project,region,instance`; `AlloyDbClusterUri` has public `project,location,cluster,instance`. Both derive `Clone,Debug,PartialEq,Eq,Serialize,Deserialize`, not `Hash`. `IpType`/`AuthType` also lack `Hash`. Manual local hashing uses variant and each exact component with Rust `Hash`, and private numeric IP/auth tags preserve shared equality without changing shared types or using diagnostic strings.
+- `GcpTokenCache::from_options(&HashMap<String,String>, &[&str]) -> Option<Arc<Self>>` sets static `expires_at_unix_ms: None`; source acquisition resolves that to `u64::MAX / 2`. It cannot supply a promised actual static expiry. `GcpTokenCache::new(GcpAuthSource::Static { access_token, expires_at_unix_ms: Some(actual), quota_project_id }, skew)` retains exact explicit expiry. Production designated login options validate actual expiry/scopes and local usability before/after acquisition; the material fixture supplies `expires_at_unix_ms="2000000"`, login scope, and explicit `refresh_skew_ms="0"` so the 240s material-boundary fixture remains valid. Default 300s login skew has its own strict-boundary test. A static cache fetch by itself does not refuse expired static tokens: callers enforce the clock/skew guard and never assume a refresh extends expiry.
+- `type TokenFetchFuture<'a> = Pin<Box<dyn Future<Output=TokenFetchResult> + Send + 'a>>` makes shared source acquisition `Send`; native cache acquisition is awaited directly. Only blocking constructor/discovery work needs `spawn_blocking`.
+- Tokio 1.54.1 `watch::channel<T>(init) -> (Sender<T>,Receiver<T>)`, `Sender::subscribe`, synchronous `Sender::send_replace`, `Receiver::borrow_and_update` and async `Receiver::changed` implement one result per refresh flight. Clone a borrowed result and drop its `watch::Ref` before awaiting. A caller-owned RAII guard sends a sanitized cancellation error on drop; followers keep their receivers when a later caller replaces the finished failed flight. Short per-key mutex sections never retain a guard across token/HTTP/DNS/body work. Cancelling a follower affects no other waiter.
+- Tokio 1.54.1 `Timeout::poll` polls the wrapped future before its delay. An already-expired deadline can therefore return immediate success; explicit entry, post-await and prepublication deadline checks are mandatory in cache, token, key, HTTP and DNS seams.
+- reqwest 0.13.5 async `Response::chunk(&mut self) -> Result<Option<Bytes>>` is available. Stream with checked aggregate length before append, guard every chunk with the original deadline, reject oversized advertised lengths and still enforce actual counts without relying on Content-Length. A dropped request/response future ends the owned HTTP work; diagnostics never include response bodies or unsanitized source chains. Disable redirects to prevent credential forwarding.
+- rcgen 0.14.10 exposes `SubjectPublicKeyInfo::from_der`, `CertificateParams::signed_by(&impl PublicKeyData,&Issuer<'_,impl SigningKey>)`, `Issuer::from_params` and `date_time_ymd`. A fixture decodes requested PKCS#1 RSA public PEM, re-encodes SPKI with `rsa::pkcs8::EncodePublicKey`, then signs that public key with an in-file ECDSA CA. Exact Unix seconds use `date_time_ymd(1970,1,1) + Duration::from_secs(timestamp)`. No client private key, undeclared support-module read or external signer is needed.
+- The fetcher production collaborator also provides `resolve_address(host,port,deadline) -> AddressFuture<'_>`: `AdminDiscoveryFetcher` uses deadline-guarded `tokio::net::lookup_host`; deterministic wire fixtures forward real Admin fetching and resolve advertised PSC hostnames to their local peer through that same trait. Material retains original peer DNS separately and owns final target construction. No public Python constructor shape changes or test-only cache setter is introduced.
 
 ## Final source-specific scope policy
 
@@ -186,3 +203,5 @@ Use deterministic local mock Admin APIs and mTLS peers to verify fields, scoped 
 [^cloudsql-ephemeral]: Cloud SQL Admin API generateEphemeralCert endpoint (https://docs.cloud.google.com/sql/docs/postgres/admin-api/rest/v1beta4/connect/generateEphemeralCert).
 [^alloydb-conninfo]: AlloyDB connectionInfo REST endpoint (https://docs.cloud.google.com/alloydb/docs/reference/rest/v1/projects.locations.clusters.instances/getConnectionInfo).
 [^alloydb-proto]: AlloyDB v1alpha service and certificate issuance protobuf (https://raw.githubusercontent.com/googleapis/googleapis/master/google/cloud/alloydb/v1alpha/service.proto).
+
+[^pinned-cloud-deps]: `src/rs/Cargo.lock` — Local pinned Tokio 1.54.1 watch/timeout, reqwest 0.13.5 chunked response and rcgen 0.14.10 public-key signing APIs.

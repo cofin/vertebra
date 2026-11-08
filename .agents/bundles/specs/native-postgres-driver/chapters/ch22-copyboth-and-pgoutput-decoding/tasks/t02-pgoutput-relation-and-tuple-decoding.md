@@ -24,8 +24,8 @@ files:
 tests:
   - src/rs/vertebra-postgres/tests/postgres_pgoutput_tests.rs
 estimated_loc: 240
-plan_revision: 8
-plan_commit: 8c540809
+plan_revision: 9
+plan_commit: b0de4dcb
 state_revision: 0
 claimed_by: null
 claimed_at: null

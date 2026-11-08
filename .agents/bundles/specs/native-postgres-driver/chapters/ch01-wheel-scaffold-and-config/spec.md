@@ -10,8 +10,8 @@ planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
-plan_revision: 8
-plan_commit: 8c540809
+plan_revision: 9
+plan_commit: b0de4dcb
 state_revision: 1
 last_verified_checkpoint: d809be01
 last_reviewed_commit: 3d68c853

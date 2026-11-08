@@ -24,8 +24,8 @@ files:
 tests:
   - src/rs/vertebra-postgres/tests/postgres_cloud_wire_tests.rs
 estimated_loc: 230
-plan_revision: 8
-plan_commit: 8c540809
+plan_revision: 9
+plan_commit: b0de4dcb
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -59,7 +59,7 @@ tags:
 
 ## Objective & Scope Boundary
 
-Wire automatic Cloud SQL `:3307` mTLS session establishment across `src/rs/vertebra-postgres/src/cloud/mod.rs`, `src/rs/vertebra-postgres/src/auth.rs`, and `src/rs/vertebra-postgres/src/session.rs` [^db-conn] [^cloud-research] [^pg-contracts]. `cloud::dial_cloudsql` prepares ephemeral certificate and scoped IAM login material via `CloudConnector::prepare`, connects over immediate TLS 1.3 (`EndpointTarget::CloudSql` without emitting PostgreSQL `SSLRequest` and without falling back to direct `:5432`), and returns a pre-startup `DialedCloudTransport` to `session.rs` **before** emitting PostgreSQL `StartupMessage` (so `session.rs` runs `StartupMessage` and authentication uniformly across direct and cloud streams, enabling `ch06:t02` to apply `set_tcp_keepalive` at one seam without touching `cloud/mod.rs`). `auth.rs` enforces `ScopedLoginSnapshot::ensure_usable(clock.now_ms())` immediately before any password or SASL credential response is written on the wire, reaching `TransactionStatus::Idle` inside the caller's single `absolute_deadline` and `PendingSession` guard.
+Wire automatic Cloud SQL `:3307` mTLS session establishment across `src/rs/vertebra-postgres/src/cloud/mod.rs`, `src/rs/vertebra-postgres/src/auth.rs`, and `src/rs/vertebra-postgres/src/session.rs` [^db-conn] [^cloud-research] [^pg-contracts]. `cloud::dial_cloudsql` prepares ephemeral certificate and scoped IAM login material via `CloudConnector::prepare`, connects over immediate TLS 1.3 (`EndpointTarget::CloudSql` without emitting PostgreSQL `SSLRequest` and without falling back to direct `:5432`), and returns a pre-startup `DialedCloudTransport` to `session.rs` **before** emitting PostgreSQL `StartupMessage` (so `session.rs` runs `StartupMessage` and authentication uniformly across direct and cloud streams, enabling `ch06:t02` to apply `set_tcp_keepalive` at one seam without touching `cloud/mod.rs`). `auth.rs` enforces `ScopedLoginSnapshot::ensure_usable(clock.now_unix_ms())` immediately before any password or SASL credential response is written on the wire, reaching `TransactionStatus::Idle` inside the caller's single `absolute_deadline` and `PendingSession` guard.
 
 ## Bounded Read Manifest
 
@@ -74,7 +74,7 @@ Wire automatic Cloud SQL `:3307` mTLS session establishment across `src/rs/verte
 
 - `src/rs/vertebra-postgres/src/auth.rs`:
   - Accept an optional pre-resolved `&ScopedLoginSnapshot` + `&dyn Clock` in startup credential challenge handling (`AuthenticationCleartextPassword`, `AuthenticationMD5Password`, `AuthenticationSASL`).
-  - Immediately before encoding and writing the first password or SASL `client-first-message` frame, invoke `login_snapshot.ensure_usable(clock.now_ms())?`. If the token crossed `now + refresh_skew_ms >= expires_at_unix_ms` while TLS or server greeting was held, abort immediately with `PostgresError::Auth` (`0` credential frames written).
+  - Immediately before encoding and writing the first password or SASL `client-first-message` frame, invoke `login_snapshot.ensure_usable(clock.now_unix_ms())?`. If the token crossed `now + refresh_skew_ms >= expires_at_unix_ms` while TLS or server greeting was held, abort immediately with `PostgresError::Auth` (`0` credential frames written).
 - `src/rs/vertebra-postgres/src/cloud/mod.rs`:
   - Define `pub(crate) struct DialedCloudTransport { pub stream: TransportStream, pub tls_server_end_point: Option<Vec<u8>>, pub login_snapshot: Option<ScopedLoginSnapshot> }`.
   - `pub(crate) async fn dial_cloudsql(config: &PostgresConfig, connector: &CloudConnector, absolute_deadline: tokio::time::Instant) -> Result<DialedCloudTransport, PostgresError>`:

@@ -25,8 +25,8 @@ tests:
   - src/rs/vertebra-core/tests/it/gcp_auth.rs
   - src/rs/vertebra-postgres/tests/postgres_cloud_wire_tests.rs
 estimated_loc: 245
-plan_revision: 8
-plan_commit: 8c540809
+plan_revision: 9
+plan_commit: b0de4dcb
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -89,14 +89,16 @@ Extend `src/rs/vertebra-core/src/gcp_auth.rs` so `GcpTokenCache` propagates expl
   - `pub const ADMIN_CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";`
   - `pub const CLOUDSQL_LOGIN_SCOPE: &str = "https://www.googleapis.com/auth/sqlservice.login";`
   - `pub const ALLOYDB_LOGIN_SCOPE: &str = "https://www.googleapis.com/auth/alloydb.login";`
-  - `pub(crate) struct ScopedLoginSnapshot { pub snapshot: GcpTokenSnapshot, pub required_scopes: Vec<String>, pub declared_scopes: Option<Vec<String>>, pub refresh_skew_ms: u64, is_static: bool }` with `pub(crate) fn ensure_usable(&self, now_ms: u64) -> Result<(), PostgresError>` enforcing `now_ms.saturating_add(self.refresh_skew_ms) < self.snapshot.expires_at_unix_ms`.
+  - `pub struct ScopedLoginSnapshot { pub snapshot: GcpTokenSnapshot, pub required_scopes: Vec<String>, pub declared_scopes: Option<Vec<String>>, pub refresh_skew_ms: u64, is_static: bool }` with `pub fn ensure_usable(&self, now_ms: u64) -> Result<(), PostgresError>` enforcing `now_ms.saturating_add(self.refresh_skew_ms) < self.snapshot.expires_at_unix_ms`.
   - `pub(crate) struct ScopedTokenProvider`:
     - Pure constructor storing owned `cloud_auth_options: Option<HashMap<String, String>>`, `iam_auth_options: Option<HashMap<String, String>>`, and `Arc<dyn Clock>` (zero file I/O or ADC discovery in constructor).
     - Lazily initializes separate internal Admin and scope-keyed login `Arc<GcpTokenCache>` instances during `connect` via `tokio::task::spawn_blocking` awaited under `tokio::time::timeout_at(absolute_deadline, ...)` (discarding late results if the deadline elapses).
     - When `iam_auth_options` contains `access_token` or `bearer_token`, routes strictly through `ch05:t02` `StaticLoginCredential::from_options` -> `into_token_cache` (never `from_scoped_options` or `from_options`).
     - When `iam_auth_options` is `None`, derives the login source from `cloud_auth_options` with the required login scope, **except** if `cloud_auth_options` carries a static `access_token`/`bearer_token`, which fails immediately with `PostgresError::Auth` rather than assuming an opaque Admin token holds login scopes.
 - `src/rs/vertebra-postgres/src/cloud/material.rs`:
-  - Replace interim `ch04:t01` `GcpTokenCache::from_options` calls with `ScopedTokenProvider` (`ADMIN_CLOUD_PLATFORM_SCOPE` for Admin requests, `CLOUDSQL_LOGIN_SCOPE` for Cloud SQL IAM `:generateEphemeralCert`, `ALLOYDB_LOGIN_SCOPE` for AlloyDB), check `login_snapshot.ensure_usable(clock.now_ms())` before token-bearing `:generateEphemeralCert` POSTs, and preserve the exact field name `effective_expiry_ms: u64` on `PreparedCloudMaterial`, computing `effective_expiry_ms = min(signed_cert_not_after_ms, login_snapshot.snapshot.expires_at_unix_ms)` when a login token is bound.
+  - Replace interim `ch04:t01` token resolution (Admin/dynamic `from_options` and explicit-expiry static source construction) with `ScopedTokenProvider` (`ADMIN_CLOUD_PLATFORM_SCOPE` for Admin requests, `CLOUDSQL_LOGIN_SCOPE` for Cloud SQL IAM `:generateEphemeralCert`, `ALLOYDB_LOGIN_SCOPE` for AlloyDB), check `login_snapshot.ensure_usable(clock.now_unix_ms())` before token-bearing `:generateEphemeralCert` POSTs, and preserve the exact field name `effective_expiry_ms: u64` on `PreparedCloudMaterial`, computing `effective_expiry_ms = min(signed_cert_not_after_ms, login_snapshot.snapshot.expires_at_unix_ms)` when a login token is bound.
+
+- Reuse `cloud::material::{Clock,CloudTokenBundle,LoginTokenSnapshot}` and the established native constructor/fetcher seam. Add concrete `ScopedTokenProvider::new(cloud_auth_options: Option<HashMap<String,String>>, iam_auth_options: Option<HashMap<String,String>>, clock: Arc<dyn Clock>) -> Self`, `resolve_admin_token(&self, deadline: Instant) -> impl Future<Output=Result<Arc<GcpTokenSnapshot>,PostgresError>> + Send`, and `resolve_login_snapshot(&self, required_scopes: &[String], deadline: Instant) -> impl Future<Output=Result<ScopedLoginSnapshot,PostgresError>> + Send`. Constructor is pure; only cache/source construction uses `spawn_blocking`, and native token futures are awaited directly under deadline. Replace interim material static parsing with `StaticLoginCredential` and preserve the actual expiry. Change the native prepared login payload to `Option<ScopedLoginSnapshot>` for downstream wire guards, constructing it from actual native snapshot, scope provenance, skew and static-source flag, never a sentinel. Pass an immutable redacted `CloudTokenBundle` view to the same fetcher (copying token/actual expiry/generation/quota/skew into `LoginTokenSnapshot`); no REST client signature or Python constructor changes. Keep per-key shared failures/cancellation and all entry/pretransmission/publication deadline checks. `Clock::now_unix_ms` remains the sole wall-time method.
 
 ## Edge Cases & Error Semantics
 

@@ -252,6 +252,27 @@ unknown scope before transmission. Construct the native static cache with that
 actual expiry; never fabricate TTL. Scoped provider failures use exact core
 GoogleCloudAuthError; server SQLSTATE28 remains DatabaseError.
 
+Cloud material is owned by cloud/material.rs. Its native collaborator constructor is
+CloudConnector::new(Arc<dyn Clock>, Arc<dyn CloudMaterialFetcher>); Clock requires
+Send+Sync and now_unix_ms(). The fetcher returns owned CloudDiscovery through a
+boxed Send future borrowing self/connector/config/token bundle for one lifetime.
+Material alone constructs EndpointTarget and PreparedCloudMaterial. Per-key watch
+results fan out one success/error/cancellation to joined callers; an RAII owner
+publishes cancellation without an async lock, and later calls retry completed
+failures. No network/token/body await retains a cache lock. All stages, including
+lock wait and chunked bodies, share the caller's absolute deadline and explicitly
+reject already-expired ready-success. Response bodies are capped at 1_048_576 bytes.
+
+Shared cloud URI types retain their existing equality/API. Native resource keys
+hash variant and exact public URI components; private keys use explicit IP/auth
+tags and length-prefixed sorted credential-map/scope fingerprints. Static login
+actual expiry passes through existing designated iam_auth_options into
+GcpAuthSource::Static { expires_at_unix_ms: Some(actual), .. }; generic from_options
+static sentinel expiry never establishes login lifetime. Chapter 05 centralizes
+this validation and maps failures to Auth while retaining the same native seam.
+No public Python constructor keyword or test-only expiry override is added.
+
+
 DSN defaults at bridge invocation: explicit user > nonempty PGUSER > getpass.getuser;
 explicit dbname > nonempty PGDATABASE > resolved user; explicit empty user/dbname
 fails. Empty URI path is absent. Password explicit > PGPASSWORD if set > None;

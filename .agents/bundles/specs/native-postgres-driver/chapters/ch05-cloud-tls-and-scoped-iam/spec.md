@@ -11,8 +11,8 @@ depends_on_chapters:
   - ch04-cloud-material-and-admin-discovery
 replan_trigger: null
 current_task: "native-postgres-driver:ch05:t01"
-plan_revision: 8
-plan_commit: 8c540809
+plan_revision: 9
+plan_commit: b0de4dcb
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -74,6 +74,8 @@ Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md).
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
+Shared clock contract: use `cloud::material::Clock::now_unix_ms()` and `CloudConnector::now_unix_ms()` from chapter 04. Its injected clock/fetcher constructor, actual login expiry, per-key shared-result cancellation and explicit deadline checks remain intact; no Python constructor keyword is added.
+
 ### 2.1 Chapter Requirements
 
 - **R4, R9 (`ch05:t01`)**: Add `CloudPeerIdentity` (`CloudSql { server_name: Option<String>, expected_cn: String }` and `AlloyDb { expected_san: String }`) to `EndpointTarget::{CloudSql, AlloyDb}` in `src/rs/vertebra-db/src/connection.rs` (`socket2 = { version = "=0.6.5", features = ["all"] }` is already registered on `vertebra-db` in `ch01:t02`); restrict `build_cloud_mtls_config` to `&[&rustls::version::TLS13]`; retain verified peer leaf DER on `TransportStream` for `tls-server-end-point` SCRAM binding; wire `src/rs/vertebra-postgres/src/cloud/material.rs` (consuming `CloudSqlDiscovery` and `AlloyDbDiscovery` from `ch04:t03`–`t04` as the sole constructor of `EndpointTarget::{CloudSql, AlloyDb}` and `PreparedCloudMaterial`) into `CloudPeerIdentity`.
@@ -94,7 +96,7 @@ Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md).
 - **Rust (`src/rs/vertebra-postgres/src/{errors.rs,credentials.rs,cloud/mod.rs}`)**
   - `PostgresError::Auth(String)` and `pub(crate) fn postgres_error_to_py(py: Python<'_>, err: PostgresError) -> PyErr`
   - `pub(crate) fn StaticLoginCredential::from_options(options: &HashMap<String, String>, required_scopes: &[String], now_ms: u64, refresh_skew_ms: u64) -> Result<Self, PostgresError>`
-  - `pub(crate) struct ScopedTokenProvider` (`resolve_admin_token`, `resolve_login_snapshot` using `tokio::task::spawn_blocking` under `tokio::time::timeout_at(absolute_deadline, ...)`)
+  - `pub(crate) struct ScopedTokenProvider` (`resolve_admin_token`, `resolve_login_snapshot`; only source/cache construction uses `spawn_blocking`, while native `Send` token futures are awaited directly under the original deadline)
   - `pub(crate) fn ScopedLoginSnapshot::ensure_usable(&self, now_ms: u64) -> Result<(), PostgresError>`
   - `pub(crate) struct DialedCloudTransport { pub stream: TransportStream, pub tls_server_end_point: Option<Vec<u8>>, pub login_snapshot: Option<ScopedLoginSnapshot> }`
   - `pub(crate) async fn dial_cloudsql(config: &PostgresConfig, connector: &CloudConnector, absolute_deadline: tokio::time::Instant) -> Result<DialedCloudTransport, PostgresError>`

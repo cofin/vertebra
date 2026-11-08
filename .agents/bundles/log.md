@@ -1,5 +1,11 @@
 # Bundle Activity Log
 
+## [2026-11-08] flow-revise | Native PostgreSQL cloud material contracts
+
+- Revision 9 anchors all 143 root/chapter/task metadata identities to `b0de4dcb` and preserves 31 chapters, 111 tasks, 11 completed tasks, all three completed chapter review stamps, and source receipts. Unblock chapter 04 task 01 to pending with null block fields; cold changed-plan review precedes production work.
+- Define owned Clock/SystemClock, component-consistent hashing without shared-type edits, a concrete Send fetcher constructor, real designated static login expiry through native Static source, and caller-owned watch-result refresh/cancellation fan-out. Enforce one deadline through lock/token/HTTP/body/DNS work with explicit ready-success rejection and bounded streamed bodies. Synchronize chapters 05–06 clock/provider consumers and preserve 26 Python constructor keywords.
+- Pinned local Tokio 1.54.1, reqwest 0.13.5, rcgen 0.14.10 and shared auth/URI sources resolve the API/fixture contradictions. No production, test, dependency, tag or external hosted artifact changes occur; planning validation is distinct from cloud runtime acceptance.
+
 ## [2026-11-08] chapter-complete | Native PostgreSQL SCRAM and channel binding
 
 - Correctness and fresh independent quality review approve `1c75af65..8289858e` with no remaining findings. All 79 tests, locked all-target Clippy, formatting, full bundle/link/privacy validation, task receipts, and whitespace checks pass.

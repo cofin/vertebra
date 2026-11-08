@@ -25,8 +25,8 @@ tests:
   - src/rs/vertebra-postgres/tests/postgres_auth_wire_tests.rs
   - src/rs/vertebra-postgres/tests/postgres_tls_wire_tests.rs
 estimated_loc: 245
-plan_revision: 8
-plan_commit: 8c540809
+plan_revision: 9
+plan_commit: b0de4dcb
 state_revision: 0
 claimed_by: null
 claimed_at: null

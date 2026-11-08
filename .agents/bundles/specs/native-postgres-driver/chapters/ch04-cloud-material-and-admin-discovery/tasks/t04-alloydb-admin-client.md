@@ -24,8 +24,8 @@ files:
 tests:
   - src/rs/vertebra-postgres/tests/postgres_cloud_wire_tests.rs
 estimated_loc: 245
-plan_revision: 8
-plan_commit: 8c540809
+plan_revision: 9
+plan_commit: b0de4dcb
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -81,16 +81,18 @@ Implement `src/rs/vertebra-postgres/src/cloud/alloydb.rs` and wire `CloudResourc
     - `GenerateClientCertificateResponse`: `#[serde(default, rename = "pemCertificateChain")] pem_certificate_chain: Vec<String>`, `#[serde(default, rename = "caCert")] ca_cert: String`.
   - Raw discovery struct returned to `cloud/material.rs` (`alloydb.rs` never constructs `EndpointTarget::AlloyDb`, `PreparedCloudMaterial`, or `GcpTokenCache`, keeping `cloud/material.rs` the sole owner of those seams for `ch05:t01` and `ch05:t03`):
     - `pub(crate) struct AlloyDbDiscovery { pub host: String, pub port: u16, pub peer_dns_name: Option<String>, pub server_ca_pem: Vec<u8>, pub client_identity: ValidatedClientIdentity }`
-  - `pub(crate) async fn fetch_alloydb_discovery(connector: &CloudConnector, uri: &AlloyDbClusterUri, ip_type: IpType, admin_endpoint: &str, admin_token: &str, absolute_deadline: tokio::time::Instant) -> Result<AlloyDbDiscovery, PostgresError>`:
-    1. Percent-encode `project`, `location`, `cluster`, and `instance` segments to form:
+  - `pub(crate) async fn fetch_alloydb_discovery(connector: &CloudConnector, uri: &AlloyDbClusterUri, ip_type: IpType, admin_endpoint: &str, admin: &GcpTokenSnapshot, absolute_deadline: tokio::time::Instant) -> Result<AlloyDbDiscovery, PostgresError>`:
+    1. Use `connector.get_json::<ConnectionInfoResponse>(url, admin, deadline)` and `post_json::<GenerateClientCertificateResponse,_>(url, &body, admin, deadline)` with the borrowed Admin snapshot for quota/bearer headers. Percent-encode `project`, `location`, `cluster`, and `instance` segments to form:
        - `cluster_path = /v1alpha/projects/{p}/locations/{l}/clusters/{c}`
        - `instance_path = {cluster_path}/instances/{i}`
-    2. `GET {admin_endpoint}{instance_path}/connectionInfo` with `Authorization: Bearer <admin_token>`:
+    2. `GET {admin_endpoint}{instance_path}/connectionInfo` with `Authorization: Bearer <admin.access_token>`:
        - Select network host strictly matching `ip_type` on port `5433`: `IpType::Private` -> non-empty `ipAddress`; `IpType::Public` -> non-empty `publicIpAddress`; `IpType::Psc` -> non-empty `pscDnsName` (or `pscAutoDnsName`, stripping any trailing `.` for SAN identity and setting `peer_dns_name = Some(host.clone())`). Fail explicitly if the requested network field is missing or empty without switching to another `IpType` or `localhost`.
-    3. Generate PKCS#1 RSA-2048 keypair (`keys::generate_ephemeral_rsa_keypair(absolute_deadline)`) and `POST {admin_endpoint}{cluster_path}:generateClientCertificate` with `Authorization: Bearer <admin_token>` and exact JSON body `{"publicKey": keypair.public_key_pem(), "certDuration": "3600s", "useMetadataExchange": true}`.
-    4. Require non-empty `caCert` and non-empty `pemCertificateChain`, validate `pemCertificateChain` (preserving leaf-first chain order `[leaf, intermediate, ...]`) against `keypair` and `now_ms` via `keys::validate_issued_certificate_chain`, and return `AlloyDbDiscovery { host, port: 5433, peer_dns_name, server_ca_pem, client_identity }`.
+    3. Generate PKCS#1 RSA-2048 keypair (`keys::generate_ephemeral_rsa_keypair(absolute_deadline)`) and `POST {admin_endpoint}{cluster_path}:generateClientCertificate` with `Authorization: Bearer <admin.access_token>` and exact JSON body `{"publicKey": keypair.public_key_pem(), "certDuration": "3600s", "useMetadataExchange": true}`.
+    4. Require non-empty `caCert` and non-empty `pemCertificateChain`, validate `pemCertificateChain` (preserving leaf-first chain order `[leaf, intermediate, ...]`) against `keypair` and `connector.now_unix_ms()` via `keys::validate_issued_certificate_chain`, and return `AlloyDbDiscovery { host, port: 5433, peer_dns_name, server_ca_pem, client_identity }`.
 - `src/rs/vertebra-postgres/src/cloud/material.rs`:
-  - In `CloudConnector::prepare` for `CloudResourceTarget::AlloyDb(uri)`: resolve the Admin bearer token (`https://www.googleapis.com/auth/cloud-platform`) from the Admin credential cache AND resolve an `https://www.googleapis.com/auth/alloydb.login` token snapshot from the login credential cache in **both** `AuthType::Password` (`1` built-in) and `AuthType::Iam` (`2` IAM) modes (AlloyDB's post-TLS `MetadataExchangeRequest` requires `oauth2_token` in both modes; IAM mode additionally reuses that login snapshot as the PostgreSQL startup password in `ch06:t01`). Call `alloydb::fetch_alloydb_discovery(...)`, compute `effective_expiry_ms = min(discovery.client_identity.signed_not_after_ms, login_token_expiry_ms)` (`"3600s"` is only a request hint), and construct `EndpointTarget::AlloyDb` (port `5433`, `auth_type` `1` or `2`, `oauth2_token`) + `PreparedCloudMaterial` solely inside `cloud/material.rs` before caching.
+  - In `CloudConnector::prepare` before `AdminDiscoveryFetcher::fetch` dispatch for `CloudResourceTarget::AlloyDb(uri)`: resolve the Admin bearer token (`https://www.googleapis.com/auth/cloud-platform`) from the Admin credential cache AND resolve an `https://www.googleapis.com/auth/alloydb.login` token snapshot from the login credential cache (actual `expiry_ms: u64`, never sentinel lifetime) in **both** `AuthType::Password` (`1` built-in) and `AuthType::Iam` (`2` IAM) modes (AlloyDB's post-TLS `MetadataExchangeRequest` requires `oauth2_token` in both modes; IAM mode additionally reuses that login snapshot as the PostgreSQL startup password in `ch06:t01`). Call `alloydb::fetch_alloydb_discovery(...)`, compute `effective_expiry_ms = min(discovery.client_identity.signed_not_after_ms, login_token_expiry_ms)` (`"3600s"` is only a request hint), and construct `EndpointTarget::AlloyDb` (port `5433`, `auth_type` `1` or `2`, `oauth2_token`) + `PreparedCloudMaterial` solely inside `cloud/material.rs` before caching.
+
+- `AdminDiscoveryFetcher::fetch` implements the existing `CloudMaterialFetcher` lifetime/`Send` contract by calling this raw discovery function, then mapping its validated owned fields to `CloudDiscovery` inside `material.rs`. It receives the resolved `CloudTokenBundle` and forwards the Admin snapshot (preserving quota headers); it never resolves credentials in the REST module. Keep `CloudConnector::prepare`, injected `Clock::now_unix_ms`, per-key flight/result ownership, and existing helper signatures unchanged. Check `Instant::now() < absolute_deadline` and actual login usability before any token-bearing operation and publication. The Admin wire fixture implements the existing production `resolve_address` method with deterministic PSC/hostname-to-loopback resolution and delegates `fetch` to real `AdminDiscoveryFetcher`; no external DNS is used. Canonical cloud tests use their in-file fixtures; no hidden `tests/support/mod.rs` read or import is introduced.
 
 ## Edge Cases & Error Semantics
 

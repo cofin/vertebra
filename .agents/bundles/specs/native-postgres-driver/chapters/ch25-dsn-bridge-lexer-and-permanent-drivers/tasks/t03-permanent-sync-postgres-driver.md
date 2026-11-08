@@ -23,8 +23,8 @@ tests:
   - src/py/tests/unit/db/postgres_ports.py
   - src/py/tests/unit/db/test_postgres_native_adapters.py
 estimated_loc: 245
-plan_revision: 8
-plan_commit: 8c540809
+plan_revision: 9
+plan_commit: b0de4dcb
 state_revision: 0
 claimed_by: null
 claimed_at: null

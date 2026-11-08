@@ -11,8 +11,8 @@ depends_on_chapters:
   - ch02-wire-codec-and-session-startup
 replan_trigger: null
 current_task: null
-plan_revision: 8
-plan_commit: 8c540809
+plan_revision: 9
+plan_commit: b0de4dcb
 state_revision: 0
 last_verified_checkpoint: 1987a327
 last_reviewed_commit: 8289858e

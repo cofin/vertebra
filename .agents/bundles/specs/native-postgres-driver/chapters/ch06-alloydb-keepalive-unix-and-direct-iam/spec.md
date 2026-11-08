@@ -11,8 +11,8 @@ depends_on_chapters:
   - ch05-cloud-tls-and-scoped-iam
 replan_trigger: null
 current_task: "native-postgres-driver:ch06:t01"
-plan_revision: 8
-plan_commit: 8c540809
+plan_revision: 9
+plan_commit: b0de4dcb
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -73,9 +73,11 @@ Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md).
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
+Shared clock contract: use `cloud::material::Clock::now_unix_ms()` and `CloudConnector::now_unix_ms()` from chapter 04. Its injected clock/fetcher constructor, actual login expiry, per-key shared-result cancellation and explicit deadline checks remain intact; no Python constructor keyword is added.
+
 ### 2.1 Chapter Requirements
 
-- **R5, R9 (`ch06:t01`)**: Extract `TransportStream::connect_alloydb_tls(&ConnectOptions)` and `finish_alloydb_metadata(&mut TransportStream, &ConnectOptions, tokio::time::Instant)` in `src/rs/vertebra-db/src/connection.rs`, refactor `TransportStream::connect` to compose both under one deadline, and implement `dial_alloydb` in `src/rs/vertebra-postgres/src/cloud/mod.rs` + `session.rs` (`vertebra_db::dialer::AuthType::Password` and `AuthType::Iam`) checking `login_snapshot.ensure_usable(clock.now_ms())` immediately after TLS, completing `finish_alloydb_metadata`, and returning pre-startup `DialedCloudTransport` to `session.rs` before `StartupMessage`.
+- **R5, R9 (`ch06:t01`)**: Extract `TransportStream::connect_alloydb_tls(&ConnectOptions)` and `finish_alloydb_metadata(&mut TransportStream, &ConnectOptions, tokio::time::Instant)` in `src/rs/vertebra-db/src/connection.rs`, refactor `TransportStream::connect` to compose both under one deadline, and implement `dial_alloydb` in `src/rs/vertebra-postgres/src/cloud/mod.rs` + `session.rs` (`vertebra_db::dialer::AuthType::Password` and `AuthType::Iam`) checking `login_snapshot.ensure_usable(clock.now_unix_ms())` immediately after TLS, completing `finish_alloydb_metadata`, and returning pre-startup `DialedCloudTransport` to `session.rs` before `StartupMessage`.
 - **R2, R3 (`ch06:t02`)**: Define `TcpKeepaliveConfig` and `TransportStream::set_tcp_keepalive(&self, config: TcpKeepaliveConfig) -> Result<(), TransportError>` in `src/rs/vertebra-db/src/connection.rs` over `PlainTcp` and `TlsTcp.get_ref().0`, validate `keepalives*` fields in `src/rs/vertebra-postgres/src/config.rs`, and apply keepalives once at `session.rs`'s unified pre-`StartupMessage` seam across all direct TCP, direct TLS, Cloud SQL, and AlloyDB streams without touching `cloud/mod.rs`.
 - **R2, R3 (`ch06:t03`)**: Complete pure normalization of all 26 constructor options in `src/rs/vertebra-postgres/src/config.rs`, encode `application_name` + overlaid `session_gucs` (with `client_encoding = "UTF8"` enforcement and reserved-key rejection) in `src/rs/vertebra-postgres/src/protocol.rs`, and establish Unix domain socket sessions without `SSLRequest` in `src/rs/vertebra-postgres/src/session.rs` (`PostgresError::UnsupportedFeature` -> `NotSupportedError` on `#[cfg(not(unix))]`).
 - **R5 (`ch06:t04`)**: Implement direct-host `enable_iam_auth = true` (TCP or Unix without cloud resource URIs) across `config.rs`, `credentials.rs`, and `session.rs`, resolving `ScopedTokenProvider` lazily under `absolute_deadline` (`sqlservice.login` default or explicit `iam_auth_options["scopes"]` such as `alloydb.login`), superseding `config.password` while leaving direct transport/TLS policy untouched.

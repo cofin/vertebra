@@ -23,8 +23,8 @@ files:
 tests:
   - src/rs/vertebra-postgres/tests/postgres_auth_wire_tests.rs
 estimated_loc: 205
-plan_revision: 8
-plan_commit: 8c540809
+plan_revision: 9
+plan_commit: b0de4dcb
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -81,7 +81,7 @@ Enable direct-host IAM password authentication (`enable_iam_auth = true` with `c
   - When direct-host IAM is active on `NormalizedEndpoint::Tcp` or `NormalizedEndpoint::Unix`:
     1. Resolve `ScopedLoginSnapshot` via `provider.resolve_direct_login(..., absolute_deadline).await?` **before** dialing the PostgreSQL listener so grant/consent/refresh failures abort before opening a database socket.
     2. Proceed through unchanged direct transport (`ConnectOptions::tcp` + configured `SSLRequest`/`sslmode`/PEMs, or `ConnectOptions::unix` plaintext without adding TLS). Zero Cloud SQL/AlloyDB Admin discovery, ephemeral certificate, or AlloyDB metadata calls occur.
-    3. Pass `&ScopedLoginSnapshot` as the effective password to `auth.rs` (superseding `config.password` without mutating `PostgresConfig`), enforcing `ensure_usable(clock.now_ms())` immediately before password/SASL frame emission.
+    3. Pass `&ScopedLoginSnapshot` as the effective password to `auth.rs` (superseding `config.password` without mutating `PostgresConfig`), enforcing `ensure_usable(clock.now_unix_ms())` immediately before password/SASL frame emission.
     4. On server `ErrorResponse` `28P01` / `28xxx`, invalidate the cached generation in `ScopedTokenProvider`, close the session terminally without retrying a second token on that stream, and redact both the IAM token and any configured `config.password` from error messages.
 
 ## Edge Cases & Error Semantics

@@ -44,8 +44,8 @@ parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
   - research/cloud-material_20261105.md
-plan_revision: 8
-plan_commit: 8c540809
+plan_revision: 9
+plan_commit: b0de4dcb
 state_revision: 4
 last_verified_checkpoint: 1987a327
 last_reviewed_chapter: ch03-scram-and-channel-binding
@@ -107,7 +107,7 @@ tags:
 <!-- truth: start -->
 - **Standalone Optional Wheel**: `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owns live PostgreSQL Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`) without linking database clients into `vertebra-core` [^pg-conn-rs] [^pg-core-rs].
 - **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB Admin discovery + mTLS + IAM), lossless codecs, statement caching, single-`Sync` `pipeline()`, binary `COPY`, native `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, and `pgoutput` v1 logical replication ship together with full `psycopg`/`asyncpg` removal [^py-async-rs] [^arrow-shm-rs] [^pg-driver-py] [^sqlspec-py].
-- **Nested Chapter Roadmap (`plan_revision: 8`)**: All 31 chapters and 111 tasks retain their scope at `plan_commit: 8c540809`; chapters 01–03 are complete and reviewed, most recently at `8289858e`. Chapter 04 cloud material contracts are under bounded refinement.
+- **Nested Chapter Roadmap (`plan_revision: 9`)**: All 31 chapters and 111 tasks retain their scope at `plan_commit: b0de4dcb`; chapters 01–03 are complete and reviewed, most recently at `8289858e`. Chapter 04 has executable local clock/key, actual-expiry and result-sharing refresh contracts; cold changed-plan review precedes source execution.
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -158,6 +158,10 @@ The connection-publication seam uses owned `Arc<PostgresConfig>` and `Arc<std::s
 Ordered SCRAM enforces iterations `1..=100_000`, strict server-nonce extension, and verified `AuthenticationSaslFinal` before `AuthenticationOk`; upstream `ScramSha256` owns cryptography. Startup rechecks the original reservation deadline after authentication handling and before credential flush. `Disable`, `Prefer`, and `Require` select GS2 `n,,`, `y,,`, or `p=tls-server-end-point,,` according to transport binding and mechanism offers; missing required binding fails before the startup frame, and failed exchanges never replay credentials or reconnect in a weaker mode.
 
 The codec validates the bounded frame/parser envelope; session consumers exhaust lazy `NoticeResponse` and `ErrorResponse` fields with checked UTF8. Startup error free text replaces exact occurrences of the non-empty configured password and actual submitted MD5 token or SCRAM client proof before ownership. Structured `S`/`V`/`C`/`P`/`p`/`L` fields remain exact, including coincidental low-entropy password characters. Empty passwords contribute no replacement; private credential storage has no `Debug` implementation. SCRAM server-final verification failures use the static `Protocol("SCRAM server-final verification failed")` diagnostic without a peer error source chain.
+
+### Cloud Control-Plane Shared Seam
+
+Chapter 04 owns local `Clock::now_unix_ms`, `SystemClock`, component-wise URI hashing, and `CloudConnector::new(Arc<dyn Clock>, Arc<dyn CloudMaterialFetcher>)`. Fetchers return raw owned discovery via a boxed `Send` future; material alone constructs transport/prepared targets. A per-key watch result and RAII refresh owner share success/failure/cancellation without retaining locks over network awaits. Explicit designated login expiry becomes `GcpAuthSource::Static { expires_at_unix_ms: Some(actual), .. }`; unknown static lifetime fails closed. All lock/token/request/chunk/DNS work shares one deadline with ready-success rejection and a 1 MiB body cap. Chapters 05–06 retain this clock/lifetime/flight seam while adding strict canonical auth errors, source-wide requested scopes and pretransmission guards. The 26 public Python constructor keywords remain fixed.
 
 ### 2.1 Functional Requirements (`R1`–`R27`)
 
@@ -330,12 +334,12 @@ Every worksheet (`111` total across `31` chapters) executes within its bounded o
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: Source `1987a327` passes all 79 native Rust tests (`9` codec, `27` auth, `21` TLS, `22` wire/config/error) and locked all-target Clippy with `-D warnings`; flow `state: active`, `plan_revision: 8`, `plan_commit: 8c540809`.
+- **Verified Baseline**: Source `1987a327` passes all 79 native Rust tests (`9` codec, `27` auth, `21` TLS, `22` wire/config/error) and locked all-target Clippy with `-D warnings`; flow `state: active`, `plan_revision: 9`, `plan_commit: b0de4dcb`.
 - **Progress**: `3/31` chapters are complete and reviewed; `11/111` tasks are complete. Chapter 01 is reviewed at `3d68c853`, chapter 02 at `27b5a9e5`, and chapter 03 at `8289858e`.
-- **Current Chapter**: `ch04-cloud-material-and-admin-discovery`, with `current_task: native-postgres-driver:ch04:t01`; clock, key hashing, fetcher/single-flight, and token-expiry fixture contracts require refinement before source execution.
-- **Remaining Plan**: Chapters 04–31 remain; chapter 04 enters bounded contract refinement before source execution.
+- **Current Chapter**: `ch04-cloud-material-and-admin-discovery`, with `current_task: native-postgres-driver:ch04:t01`; local clock, exact component hashing, native real-expiry resolver and shared-result cancellation contracts are executable; cold changed-plan review precedes source execution.
+- **Remaining Plan**: Chapters 04–31 remain; chapter 04 is ready for cold changed-plan review and implementation.
 - **Documentation**: `[0/11 files documented]`; full guides and domain knowledge remain assigned to chapter 30.
-- **Next Action**: Run `/flow:revise native-postgres-driver ch04-cloud-material-and-admin-discovery` for verified source/worksheet mismatches, then continue implementation through all remaining chapters.
+- **Next Action**: Run cold changed-plan review, then `/flow:implement native-postgres-driver ch04-cloud-material-and-admin-discovery`; continue through every remaining chapter.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` — Shared PostgreSQL wire frame helpers and SHM admission metadata in `vertebra-db`.

@@ -26,8 +26,8 @@ tests:
   - src/rs/vertebra-postgres/tests/support/mod.rs
   - src/rs/vertebra-postgres/tests/postgres_tls_wire_tests.rs
 estimated_loc: 235
-plan_revision: 8
-plan_commit: 8c540809
+plan_revision: 9
+plan_commit: b0de4dcb
 state_revision: 1
 claimed_by: null
 claimed_at: null

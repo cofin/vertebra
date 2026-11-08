@@ -11,8 +11,8 @@ depends_on_chapters:
   - ch03-scram-and-channel-binding
 replan_trigger: null
 current_task: "native-postgres-driver:ch04:t01"
-plan_revision: 8
-plan_commit: 8c540809
+plan_revision: 9
+plan_commit: b0de4dcb
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -53,7 +53,7 @@ tags:
 
 - **Scope:** Implement the zero-sidecar Google Cloud control-plane engine under `src/rs/vertebra-postgres/src/cloud/`: single-flight `CloudMaterialCache` and `CloudConnector` (`ch04:t01`), PKCS#1 RSA-2048 ephemeral key generation and signed X.509 leaf validation (`ch04:t02`), Cloud SQL Admin `v1beta4` raw discovery (`ch04:t03`), and AlloyDB Admin `v1alpha` raw discovery (`ch04:t04`).
 - **Key Invariants:**
-  - `CloudMaterialCache` keys entries by `(credential_identity, resource_uri, ip_type, admin_endpoint, auth_mode)`, coalesces concurrent refreshes per key under one async singleflight lock, and reuses cached material strictly while `now_ms + 240_000 < effective_expiry_ms` where `effective_expiry_ms = min(signed_cert_not_after_ms, cert_bound_login_token_expiry_ms)`.
+  - `CloudMaterialCache` keys entries by `(credential_identity, resource_uri, ip_type, admin_endpoint, auth_mode)`, coalesces concurrent refreshes per key through a shared watch result and short async slot locks, and reuses cached material strictly while `now_ms + 240_000 < effective_expiry_ms` where `effective_expiry_ms = min(signed_cert_not_after_ms, cert_bound_login_token_expiry_ms)`.
   - Ephemeral client keys use `rsa = { version = "0.9", features = ["pem", "sha2"] }` (`RsaPrivateKey::new(&mut OsRng, 2048)`) outside Python GIL attachment to emit PKCS#1 LF PEM (`RSA PUBLIC KEY` / `RSA PRIVATE KEY`) — never `vertebra_db`'s self-signed X.509 certificate helper — and verify leaf SPKI modulus/exponent equality plus signed `NotAfter > now` via `x509-parser = "=0.18.1"` and `rustls-pemfile`.
   - `cloudsql.rs` (`fetch_cloudsql_discovery` -> `CloudSqlDiscovery`) and `alloydb.rs` (`fetch_alloydb_discovery` -> `AlloyDbDiscovery`) return raw validated Admin discovery records to `cloud/material.rs`, making `cloud/material.rs` the **sole** constructor of `EndpointTarget::{CloudSql, AlloyDb}` and `PreparedCloudMaterial` across `ch04` and `ch05`.
   - Admin HTTP calls run through one internal `reqwest::Client` under `tokio::time::timeout_at(absolute_deadline, ...)` with a `1 MiB` response body cap, percent-encoded URI segments, HTTPS enforcement (permitting explicit loopback `http://` overrides solely for mock tests), and separate Admin (`cloud-platform`) vs login (`sqlservice.login` / `alloydb.login`) token caches constructed inside `vertebra-postgres`.
@@ -110,6 +110,16 @@ pub(crate) struct CloudSqlDiscovery { pub host: String, pub port: u16, pub peer_
 pub(crate) struct AlloyDbDiscovery { pub host: String, pub port: u16, pub peer_dns_name: Option<String>, pub server_ca_pem: Vec<u8>, pub client_identity: ValidatedClientIdentity }
 ```
 
+### Local Collaborator, Lifetime & Flight Contracts
+
+`cloud/material.rs` defines `Clock: Send + Sync { fn now_unix_ms(&self) -> u64; }` and `SystemClock` delegating to shared `current_unix_ms()`. `CloudConnector::new(Arc<dyn Clock>, Arc<dyn CloudMaterialFetcher>) -> Result<Self,PostgresError>` is the native collaborator constructor; production supplies `SystemClock` and `AdminDiscoveryFetcher`. The trait's `fetch<'a>(&'a self, &'a CloudConnector, &'a CloudConnectorConfig, &'a CloudTokenBundle, Instant) -> Pin<Box<dyn Future<Output=Result<CloudDiscovery,PostgresError>> + Send + 'a>>` returns owned raw discovery; material alone creates targets/prepared material. Task 01 specifies exact fields, constructor ownership, helper signatures, and per-key publication algorithm.
+
+`CloudResourceTarget` derives equality and implements manual component-wise `Hash`: variant tag and Cloud SQL `(project,region,instance)` or AlloyDB `(project,location,cluster,instance)`. Private cache keys use explicit numeric IP/auth tags because shared URI/IP/auth types lack `Hash`. SHA-256 of length-prefixed sorted credential maps and scope lists isolates secrets/identity; no `Debug` strings become keys.
+
+`LoginTokenSnapshot.expiry_ms: u64` always preserves actual native expiry. The production resolver consumes existing designated `iam_auth_options` actual expiry/scopes and constructs `GcpAuthSource::Static { expires_at_unix_ms: Some(actual), .. }` directly. Generic `from_options` returns `Option<Arc<_>>`, discards static expiry, and cannot satisfy strict login lifetime. Missing/unknown expiry fails closed; Admin sentinel lifetime never becomes login lifetime. Chapter 05 centralizes the same static parsing and canonical auth mapping, then supplies fully scoped dynamic ADC without adding Python constructor keywords.
+
+A per-key watch result `Option<Result<Arc<PreparedCloudMaterial>,PostgresError>>` shares one failed/successful refresh among subscribed followers. A caller-owned RAII refresh guard synchronously publishes cancellation on drop; no async lock guard crosses token/network/body/DNS awaits. The next independent call replaces a completed failure, while existing subscribers retain it. The owner's deadline bounds shared work; followers retain their own deadlines. Entry/await/completion checks reject already-expired monotonic deadlines even on a ready cache/HTTP success. Chunked body reads count before append and cap at `1_048_576` bytes with complete-body-only deserialization.
+
 ### Caller -> Seam -> Collaborator Map
 
 - `CloudConnector::prepare` (`cloud/material.rs`) -> `CloudMaterialCache` singleflight slot + scope-distinct token resolution (`cloud-platform` Admin token + `sqlservice.login` / `alloydb.login` login snapshot) -> `cloudsql::fetch_cloudsql_discovery` (`cloud/cloudsql.rs`) or `alloydb::fetch_alloydb_discovery` (`cloud/alloydb.rs`).
@@ -119,7 +129,7 @@ pub(crate) struct AlloyDbDiscovery { pub host: String, pub port: u16, pub peer_d
 
 | Scenario | Input / Control-Plane Condition | Required Behavior |
 | --- | --- | --- |
-| Concurrent cold/expiring opens | `N` tasks call `prepare` when cache is empty or `now_ms + 240_000 >= effective_expiry_ms` | Single Admin discovery + cert issuance runs; all `N` callers share result; failed refresh never returns stale/expired material; cancelled caller releases lock cleanly. |
+| Concurrent cold/expiring opens | `N` tasks call `prepare` when cache is empty or `now_ms + 240_000 >= effective_expiry_ms` | Single Admin discovery + cert issuance runs; all `N` callers share result; failed refresh never returns stale/expired material; cancelled refresh owner publishes cancellation to joined followers; cancelling a follower leaves the owner running. |
 | API duration hint vs signed X.509 `NotAfter` | AlloyDB `certDuration: "3600s"` or Cloud SQL response returns leaf signed for only `300s` (or already expired) | `effective_expiry_ms = min(signed_not_after_ms, cert_bound_token_expiry_ms)`; expired leaf fails terminally before cache publication. |
 | Issued leaf key mismatch | Admin mock returns valid X.509 cert whose SPKI RSA `(n, e)` differs from generated `EphemeralRsaKeyPair` | `validate_issued_certificate_chain` rejects with `PostgresError::Transport` / `Protocol` and never caches. |
 | Cloud SQL engine / region / IP mismatch | `connectSettings` returns `MYSQL_8_0`, mismatched `region`, or omits requested `PUBLIC`/`PRIVATE`/`PSC` address | Fail explicitly without falling back to `localhost` or another network type. |
@@ -136,7 +146,7 @@ pub(crate) struct AlloyDbDiscovery { pub host: String, pub port: u16, pub peer_d
 
 Progress: `[0/0 files documented in ch04]`
 
-- Knowledge updates are deferred to Chapter 30 (`ch30:t02`), which documents the Cloud SQL `v1beta4` / AlloyDB `v1alpha` zero-sidecar material lifecycle and PKCS#1 validation invariants in `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md`.
+- Knowledge updates are deferred to Chapter 30 (`ch30:t03`), which documents the Cloud SQL `v1beta4` / AlloyDB `v1alpha` zero-sidecar material lifecycle and PKCS#1 validation invariants in `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md`.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -148,7 +158,7 @@ Progress: `[0/0 files documented in ch04]`
 
 ## 5. Implementation Plan
 
-- [!] native-postgres-driver:ch04:t01 — Cache expiring cloud connection material under one total deadline (tasks/t01-cloud-material-cache.md)
+- [ ] native-postgres-driver:ch04:t01 — Cache expiring cloud connection material under one total deadline (tasks/t01-cloud-material-cache.md)
 - [ ] native-postgres-driver:ch04:t02 — Generate PKCS#1 RSA-2048 ephemeral keys and validate issued X.509 chains (tasks/t02-cloud-ephemeral-keys.md)
 - [ ] native-postgres-driver:ch04:t03 — Discover Cloud SQL v1beta4 addresses and issue scoped ephemeral certificates (tasks/t03-cloudsql-admin-client.md)
 - [ ] native-postgres-driver:ch04:t04 — Discover AlloyDB v1alpha targets and issue metadata-enabled client certificates (tasks/t04-alloydb-admin-client.md)
@@ -157,9 +167,9 @@ Progress: `[0/0 files documented in ch04]`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dd432f18`; chapter `state: planned`, `planning_status: complete`, depends on `ch03-scram-and-channel-binding`.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending), awaiting `native-postgres-driver:ch03:t03`.
-- **Documentation & OKF Status**: `[0/0 files documented in ch04]`; Cloud SQL `v1beta4` and AlloyDB `v1alpha` OKF curation scheduled in `ch30:t02`.
+- **Verified Baseline**: Planning anchor `b0de4dcb`; source `1987a327` passes all 79 native tests and locked all-target Clippy. Chapter 03 is complete and reviewed at `8289858e`; chapter 04 is active with complete, executable blueprints.
+- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending); `t01` is ready after cold changed-plan review.
+- **Documentation & OKF Status**: `[0/0 files documented in ch04]`; Cloud SQL `v1beta4` and AlloyDB `v1alpha` OKF curation scheduled in `ch30:t03`.
 - **Downstream Dependents**: Unblocks `ch05-cloud-tls-and-scoped-iam` (`ch05:t01`–`ch05:t04`).
 
 [^cloud-research]: `.agents/bundles/specs/native-postgres-driver/research/cloud-material_20261105.md` — Cloud SQL `v1beta4` and AlloyDB `v1alpha` Admin REST schemas and key material rules.
