@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import subprocess
 import sys
+import threading
 from asyncio import CancelledError
 from collections.abc import AsyncIterator, Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from advanced_alchemy.types.file_object import FileObject, StorageBackend, StoredObject
 from advanced_alchemy.types.file_object.registry import StorageRegistry as AlchemyStorageRegistry
@@ -34,9 +40,12 @@ from vertebra.extensions.sqlspec.storage import (
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend as SQLSpecObjectStoreBackend
 from vertebra.storage import (
     AsyncGcpTokenCache,
+    AsyncObjectStore,
+    AsyncReadableFile,
     GCSConfig,
     LocalConfig,
     MemoryConfig,
+    S3Config,
     SigningConfig,
     SyncGcpTokenCache,
     SyncObjectStore,
@@ -46,6 +55,335 @@ from vertebra.storage import (
 )
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import decode_json
+
+
+class _SQLSpecRangeServer:
+    """Serve real native S3 reads with an optional response barrier."""
+
+    def __init__(self, payload: bytes, *, gated: bool) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.paths: list[str] = []
+        self.ranges: list[tuple[int, int]] = []
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_HEAD(self) -> None:
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("ETag", '"fixture"')
+                self.send_header("Last-Modified", "Wed, 21 Oct 2015 07:28:00 GMT")
+                self.end_headers()
+
+            def do_GET(self) -> None:
+                owner.paths.append(self.path)
+                owner.entered.set()
+                if gated and not owner.release.wait(10):
+                    self.send_error(504)
+                    return
+                range_header = self.headers.get("Range")
+                start, end = 0, len(payload) - 1
+                if range_header:
+                    left, right = range_header.removeprefix("bytes=").split("-")
+                    start, end = int(left), int(right) if right else end
+                owner.ranges.append((start, end))
+                body = payload[start : end + 1]
+                self.send_response(206 if range_header else 200)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("ETag", '"fixture"')
+                if range_header:
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{len(payload)}")
+                self.end_headers()
+                with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                    self.wfile.write(body)
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self.endpoint = f"http://127.0.0.1:{self._server.server_port}"
+
+    def __enter__(self) -> _SQLSpecRangeServer:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.release.set()
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join()
+
+
+@pytest.mark.anyio
+async def test_sqlspec_arrow_async_io_stays_on_caller_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Async Table reads and writes use native async I/O rather than synchronous stores."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-arrow-native-async"))
+    table = pa.table({"id": [1, 2]})
+    backend.write_arrow_sync("input.parquet", table)
+
+    def reject_sync(*args: object, **kwargs: object) -> Any:
+        raise AssertionError("synchronous storage called by async Arrow consumer")
+
+    monkeypatch.setattr(SyncObjectStore, "get_range", reject_sync)
+    monkeypatch.setattr(SyncObjectStore, "put", reject_sync)
+    monkeypatch.setattr(SyncObjectStore, "put_stream", reject_sync)
+    assert (await backend.read_arrow_async("input.parquet")).equals(table)
+    assert await backend.write_arrow_async("output.parquet", table) is None
+    assert (await backend.read_arrow_async("output.parquet")).equals(table)
+
+
+@pytest.mark.anyio
+async def test_sqlspec_arrow_stream_demands_one_file_at_a_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A first batch is delivered before reading a later matching object."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-arrow-demand"), base_path="warehouse")
+    for name, first in (("a", 0), ("b", 250)):
+        backend.write_arrow_sync(
+            f"tables/{name}.parquet", pa.table({"id": range(first, first + 250)}), row_group_size=100
+        )
+    requested: list[str] = []
+    sync_range = SyncObjectStore.get_range
+    async_range = AsyncObjectStore.get_range
+
+    def observe_sync(self: SyncObjectStore, key: str, offset: int, length: int) -> bytes:
+        requested.append(key)
+        return sync_range(self, key, offset, length)
+
+    async def observe_async(self: AsyncObjectStore, key: str, offset: int, length: int) -> bytes:
+        requested.append(key)
+        return await async_range(self, key, offset, length)
+
+    monkeypatch.setattr(SyncObjectStore, "get_range", observe_sync)
+    monkeypatch.setattr(AsyncObjectStore, "get_range", observe_async)
+    stream = backend.stream_arrow_async("tables/*.parquet", batch_size=100, columns=["id"])
+    try:
+        batch = await anext(stream)
+        assert batch.to_pydict() == {"id": list(range(100))}
+        assert requested and set(requested) == {"warehouse/tables/a.parquet"}
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.anyio
+async def test_sqlspec_arrow_explicit_prefetch_options() -> None:
+    """Accepted Parquet constructor options remain distinct from batch iteration options."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-arrow-prefetch"))
+    table = pa.table({"id": range(250), "label": ["data"] * 250})
+    backend.write_arrow_sync("data.parquet", table, row_group_size=100)
+    batches = [
+        batch
+        async for batch in backend.stream_arrow_async(
+            "data.parquet", batch_size=100, columns=["id"], pre_buffer=True, use_threads=False
+        )
+    ]
+    assert [batch.num_rows for batch in batches] == [100, 100, 50]
+    assert pa.Table.from_batches(batches).to_pydict() == {"id": list(range(250))}
+
+
+@pytest.mark.anyio
+async def test_sqlspec_arrow_default_prefetch_preserves_rowgroup_demand() -> None:
+    """The public SQLSpec stream returns its first batch before native later-rowgroup reads."""
+    table = pa.table({"id": range(250), "payload": [b"x" * 4096] * 250})
+    sink = pa.BufferOutputStream()
+    pq.write_table(table, sink, row_group_size=100, compression="NONE", use_dictionary=False)
+    payload = sink.getvalue().to_pybytes()
+    metadata = pq.ParquetFile(BytesIO(payload)).metadata
+    later_columns = [metadata.row_group(i).column(0) for i in (1, 2)]
+    with _SQLSpecRangeServer(payload, gated=False) as server:
+        backend = SQLSpecObjectStoreBackend(
+            S3Config(
+                bucket="sqlspec-codec",
+                region="us-east-1",
+                endpoint=server.endpoint,
+                access_key_id="test",
+                secret_access_key="test",
+                allow_http=True,
+            )
+        )
+        stream = backend.stream_arrow_async("data", batch_size=100, columns=["id"])
+        try:
+            assert (await anext(stream)).to_pydict() == {"id": list(range(100))}
+            footer_start = len(payload) - 65536
+            data_ranges = [(start, end) for start, end in server.ranges if end < footer_start]
+            assert data_ranges
+            for column in later_columns:
+                start = column.data_page_offset
+                end = start + column.total_compressed_size
+                assert not any(left < end and right >= start for left, right in data_ranges)
+            batches = [batch async for batch in stream]
+            assert [batch.num_rows for batch in batches] == [100, 50]
+            assert pa.Table.from_batches(batches).to_pydict() == {"id": list(range(100, 250))}
+        finally:
+            await stream.aclose()
+
+
+def test_sqlspec_arrow_ipc_table_reads_native_ranges(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Materialized IPC Tables retain file fallback and schema without fetching encoded objects whole."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-arrow-ipc-ranges"))
+    schema = pa.schema([("id", pa.int64())])
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_file(sink, schema):
+        pass
+    backend.write_bytes_sync("empty.ipc", sink.getvalue())
+
+    def reject_view(*args: object, **kwargs: object) -> Any:
+        raise AssertionError("whole encoded object requested")
+
+    monkeypatch.setattr(SyncObjectStore, "get_view", reject_view)
+    result = backend.read_arrow_sync("empty.ipc")
+    assert result.schema == schema
+    assert result.num_rows == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("file_format", ["parquet", "arrow-ipc"])
+@pytest.mark.parametrize("as_view", [False, True])
+async def test_sqlspec_arrow_cursor_accepts_raw_ipc_buffers(
+    asynchronous: bool, file_format: str, as_view: bool
+) -> None:
+    """Buffer-protocol cursor inputs preserve format selection, values and None returns."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-arrow-raw-cursor"))
+    table = pa.table({"id": [1, 2], "label": ["a", "b"]})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    payload = sink.getvalue().to_pybytes()
+    source = memoryview(payload) if as_view else payload
+    if asynchronous:
+        assert await backend.write_arrow_cursor_async("output.unknown", source, file_format=file_format) is None
+        actual = await backend.read_arrow_async("output.unknown", file_format=file_format)
+    else:
+        assert backend.write_arrow_cursor_sync("output.unknown", source, file_format=file_format) is None
+        actual = backend.read_arrow_sync("output.unknown", file_format=file_format)
+    assert actual.equals(table)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("compression", [None, "gzip"])
+async def test_sqlspec_arrow_parquet_preserves_codec_defaults(asynchronous: bool, compression: str | None) -> None:
+    """Unspecified compression retains PyArrow defaults while explicit writer options survive."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-arrow-compression"))
+    table = pa.table({"id": range(250)})
+    options = {"compression": compression} if compression is not None else {}
+    if asynchronous:
+        assert await backend.write_arrow_async("data.parquet", table, row_group_size=100, **options) is None
+        raw = await backend.read_bytes_async("data.parquet")
+    else:
+        assert backend.write_arrow_sync("data.parquet", table, row_group_size=100, **options) is None
+        raw = backend.read_bytes_sync("data.parquet")
+    expected_sink = pa.BufferOutputStream()
+    pq.write_table(table, expected_sink, row_group_size=100, **options)
+    expected = pq.ParquetFile(expected_sink.getvalue()).metadata
+    actual = pq.ParquetFile(BytesIO(raw)).metadata
+    assert [actual.row_group(i).num_rows for i in range(actual.num_row_groups)] == [100, 100, 50]
+    assert actual.row_group(0).column(0).compression == expected.row_group(0).column(0).compression
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_sqlspec_arrow_ipc_invalid_options_abort(asynchronous: bool) -> None:
+    """Invalid codec keywords retain PyArrow errors and leave no completed native object."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-arrow-invalid-options"))
+    table = pa.table({"id": [1]})
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        if asynchronous:
+            await backend.write_arrow_async("bad.ipc", table, unsupported_option=True)
+        else:
+            backend.write_arrow_sync("bad.ipc", table, unsupported_option=True)
+    assert not await backend.exists_async("bad.ipc")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_sqlspec_arrow_empty_ipc_file_retains_schema(asynchronous: bool) -> None:
+    """The complete-Table contract retains typed zero-row IPC file schemas on both APIs."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-arrow-empty-file"))
+    schema = pa.schema([("id", pa.int64()), ("label", pa.string())])
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_file(sink, schema):
+        pass
+    backend.write_bytes_sync("empty.feather", sink.getvalue())
+    result = (
+        await backend.read_arrow_async("empty.feather") if asynchronous else backend.read_arrow_sync("empty.feather")
+    )
+    assert result.schema == schema
+    assert result.num_rows == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("cancel_pending", [False, True])
+@pytest.mark.parametrize("file_format", ["parquet", "arrow-ipc"])
+async def test_sqlspec_arrow_outer_stream_closes_native_source(
+    monkeypatch: pytest.MonkeyPatch, cancel_pending: bool, file_format: str
+) -> None:
+    """Outer close or cancellation unwinds the actual native per-file reader before returning."""
+    table = pa.table({"id": range(250)})
+    sink = pa.BufferOutputStream()
+    if file_format == "parquet":
+        pq.write_table(table, sink, row_group_size=100)
+    else:
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table, max_chunksize=100)
+    closed: list[object] = []
+    close_reader = AsyncReadableFile.close
+    get_stream = AsyncObjectStore.get_stream
+
+    def observe_close(self: AsyncReadableFile) -> None:
+        close_reader(self)
+        closed.append(self)
+
+    async def observe_stream(self: AsyncObjectStore, key: str, *, chunk_size: int | None = None) -> AsyncIterator[Any]:
+        source = get_stream(self, key, chunk_size=chunk_size)
+        try:
+            async for chunk in source:
+                yield chunk
+        finally:
+            await source.aclose()
+            closed.append(key)
+
+    monkeypatch.setattr(AsyncReadableFile, "close", observe_close)
+    monkeypatch.setattr(AsyncObjectStore, "get_stream", observe_stream)
+    with _SQLSpecRangeServer(sink.getvalue().to_pybytes(), gated=cancel_pending) as server:
+        store = AsyncObjectStore(
+            S3Config(
+                bucket="sqlspec-codec",
+                region="us-east-1",
+                endpoint=server.endpoint,
+                access_key_id="test",
+                secret_access_key="test",
+                allow_http=True,
+            )
+        )
+        backend = SQLSpecObjectStoreBackend(store)
+        stream = backend.stream_arrow_async("data", file_format=file_format, batch_size=100)
+        task: asyncio.Task[Any] | None = None
+        try:
+            if cancel_pending:
+                task = asyncio.create_task(anext(stream))
+                async with asyncio.timeout(5):
+                    while not server.entered.is_set():
+                        await asyncio.sleep(0.001)
+                assert not task.done()
+                task.cancel()
+                with pytest.raises(CancelledError):
+                    await asyncio.wait_for(task, 2)
+            else:
+                first = await anext(stream)
+                assert first.to_pydict() == {"id": list(range(100))}
+                assert not closed
+                await stream.aclose()
+            assert closed
+            assert server.paths and set(server.paths) == {"/sqlspec-codec/data"}
+        finally:
+            server.release.set()
+            if task is not None:
+                if not task.done():
+                    task.cancel()
+                with contextlib.suppress(CancelledError, Exception):
+                    await task
+            await stream.aclose()
 
 
 def test_duplicated_storage_shims_removed_from_extension_modules() -> None:

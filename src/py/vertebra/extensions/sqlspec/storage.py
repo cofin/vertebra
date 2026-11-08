@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
+import contextlib
 import fnmatch
 import re
-from collections.abc import AsyncIterable, AsyncIterator, Buffer, Iterable, Iterator
+from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Buffer, Iterable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast, overload
 from urllib.parse import urlparse
@@ -30,6 +30,14 @@ from vertebra.storage import (
     SyncGcpTokenCache,
     SyncObjectStore,
     SyncReadableFile,
+)
+from vertebra.storage._arrow import (
+    iter_batches_async,
+    iter_batches_sync,
+    read_table_async,
+    read_table_sync,
+    write_batches_async,
+    write_batches_sync,
 )
 from vertebra.typing import ImproperConfigurationError, MissingDependencyError
 from vertebra.utils.module_loader import ensure_module
@@ -316,38 +324,19 @@ class ObjectStoreBackend:
 
     def read_arrow_sync(self, path: str | Path, **kwargs: Any) -> ArrowTable:
         """Read a Parquet or Arrow IPC object into a `pyarrow.Table` synchronously."""
-        pa = ensure_module("pyarrow", package="pyarrow", extra="arrow")
         file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
-        key = self._qualify(path)
-        if file_format == "parquet":
-            pq = ensure_module("pyarrow.parquet", package="pyarrow", extra="arrow")
-            with self._sync_store.open_readable_file(key) as reader:
-                return pq.read_table(reader, **kwargs)
-        ipc = ensure_module("pyarrow.ipc", package="pyarrow", extra="arrow")
-        view = self._sync_store.get_view(key)
-        buf = pa.py_buffer(view)
-        try:
-            with ipc.open_stream(buf) as stream_reader:
-                return stream_reader.read_all()
-        except pa.ArrowInvalid:
-            with ipc.open_file(buf) as file_reader:
-                return file_reader.read_all()
+        return read_table_sync(self._sync_store, self._qualify(path), file_format=file_format, options=kwargs)
 
     def write_arrow_sync(self, path: str | Path, table: ArrowTable, **kwargs: Any) -> None:
-        """Serialize and write a `pyarrow.Table` as Parquet or Arrow IPC synchronously."""
-        payload = self._serialize_arrow_table(path, table, **kwargs)
-        self._sync_store.put(self._qualify(path), payload)
+        """Write a Table through bounded native multipart codec output."""
+        file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
+        write_batches_sync(self._sync_store, self._qualify(path), table, file_format=file_format, options=kwargs)
 
     def write_arrow_cursor_sync(self, path: str | Path, cursor: ArrowCursor | Any, **kwargs: Any) -> None:
-        """Write an `ArrowCursor` to object storage as zero-copy Arrow IPC or batch-streamed Parquet."""
+        """Write IPC cursor buffers through a persistent batch codec reader."""
         file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
-        key = self._qualify(path)
-        view = cursor.buffer_view() if hasattr(cursor, "buffer_view") else memoryview(cursor)
-        if file_format == "arrow-ipc" and len(view) > 0:
-            self._sync_store.put(key, view)
-            return
-        payload = self._serialize_arrow_cursor_parquet(cursor, **kwargs)
-        self._sync_store.put(key, payload)
+        source = cursor if hasattr(cursor, "buffer_view") else _IPCBuffer(cursor)
+        write_batches_sync(self._sync_store, self._qualify(path), source, file_format=file_format, options=kwargs)
 
     def stream_arrow_sync(
         self,
@@ -357,21 +346,15 @@ class ObjectStoreBackend:
         batch_size: int = 65_536,
         **kwargs: Any,
     ) -> Iterator[ArrowRecordBatch]:
-        """Stream `pyarrow.RecordBatch` frames from matching Parquet or IPC objects synchronously."""
-        pa = ensure_module("pyarrow", package="pyarrow", extra="arrow")
-        matched = self._resolve_pattern_matches_sync(pattern)
-        for rel_path in matched:
-            key = self._qualify(rel_path)
-            if file_format == "parquet":
-                pq = ensure_module("pyarrow.parquet", package="pyarrow", extra="arrow")
-                with self._sync_store.open_readable_file(key) as reader:
-                    parquet_file = pq.ParquetFile(reader)
-                    yield from parquet_file.iter_batches(batch_size=batch_size, **kwargs)
-            else:
-                ipc = ensure_module("pyarrow.ipc", package="pyarrow", extra="arrow")
-                buf = pa.py_buffer(self._sync_store.get_view(key))
-                with ipc.open_stream(buf) as stream_reader:
-                    yield from stream_reader
+        """Yield projected batches on demand from each matching native object."""
+        for rel_path in self._resolve_pattern_matches_sync(pattern):
+            yield from iter_batches_sync(
+                self._sync_store,
+                self._qualify(rel_path),
+                file_format=file_format,
+                batch_size=batch_size,
+                options=kwargs,
+            )
 
     def stream_read_sync(
         self,
@@ -521,23 +504,23 @@ class ObjectStoreBackend:
 
     async def read_arrow_async(self, path: str | Path, **kwargs: Any) -> ArrowTable:
         """Read a Parquet or Arrow IPC object into a `pyarrow.Table` asynchronously."""
-        return await asyncio.to_thread(self.read_arrow_sync, path, **kwargs)
+        file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
+        return await read_table_async(self._async_store, self._qualify(path), file_format=file_format, options=kwargs)
 
     async def write_arrow_async(self, path: str | Path, table: ArrowTable, **kwargs: Any) -> None:
-        """Serialize and write a `pyarrow.Table` as Parquet or Arrow IPC asynchronously."""
-        payload = await asyncio.to_thread(self._serialize_arrow_table, path, table, **kwargs)
-        await self._async_store.put(self._qualify(path), payload)
+        """Encode off-loop and upload incrementally using native asynchronous I/O."""
+        file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
+        await write_batches_async(
+            self._async_store, self._qualify(path), table, file_format=file_format, options=kwargs
+        )
 
     async def write_arrow_cursor_async(self, path: str | Path, cursor: ArrowCursor | Any, **kwargs: Any) -> None:
-        """Write an `ArrowCursor` asynchronously as zero-copy Arrow IPC or batch-streamed Parquet."""
+        """Write cursor or buffer IPC through the shared off-loop batch encoder."""
         file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
-        key = self._qualify(path)
-        view = cursor.buffer_view() if hasattr(cursor, "buffer_view") else memoryview(cursor)
-        if file_format == "arrow-ipc" and len(view) > 0:
-            await self._async_store.put(key, view)
-            return
-        payload = await asyncio.to_thread(self._serialize_arrow_cursor_parquet, cursor, **kwargs)
-        await self._async_store.put(key, payload)
+        source = cursor if hasattr(cursor, "buffer_view") else _IPCBuffer(cursor)
+        await write_batches_async(
+            self._async_store, self._qualify(path), source, file_format=file_format, options=kwargs
+        )
 
     def stream_arrow_async(
         self,
@@ -599,11 +582,17 @@ class ObjectStoreBackend:
         **kwargs: Any,
     ) -> AsyncIterator[ArrowRecordBatch]:
         """Yield Arrow record batches asynchronously."""
-        batches = await asyncio.to_thread(
-            lambda: list(self.stream_arrow_sync(pattern, file_format=file_format, batch_size=batch_size, **kwargs))
-        )
-        for batch in batches:
-            yield batch
+        for rel_path in await self._resolve_pattern_matches_async(pattern):
+            batches = iter_batches_async(
+                self._async_store,
+                self._qualify(rel_path),
+                file_format=file_format,
+                batch_size=batch_size,
+                options=kwargs,
+            )
+            async with contextlib.aclosing(cast("AsyncGenerator[ArrowRecordBatch, None]", batches)):
+                async for batch in batches:
+                    yield batch
 
     def _sign_single(self, path: str, *, expires_in: int, for_upload: bool) -> str:
         """Sign a single object key using the underlying ObjectStore."""
@@ -626,42 +615,6 @@ class ObjectStoreBackend:
         except (RuntimeError, ValueError) as exc:
             msg = f"URL signing not supported by backend ({self.protocol}): {exc}"
             raise NotImplementedError(msg) from exc
-
-    def _serialize_arrow_table(self, path: str | Path, table: ArrowTable, **kwargs: Any) -> memoryview:
-        """Serialize a `pyarrow.Table` into a zero-copy `BufferOutputStream` buffer."""
-        pa = ensure_module("pyarrow", package="pyarrow", extra="arrow")
-        file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
-        sink = pa.BufferOutputStream()
-        if file_format == "parquet":
-            pq = ensure_module("pyarrow.parquet", package="pyarrow", extra="arrow")
-            pq.write_table(table, sink, **kwargs)
-        else:
-            ipc = ensure_module("pyarrow.ipc", package="pyarrow", extra="arrow")
-            with ipc.new_stream(sink, table.schema) as writer:
-                writer.write_table(table)
-        return memoryview(sink.getvalue())
-
-    def _serialize_arrow_cursor_parquet(self, cursor: ArrowCursor | Any, **kwargs: Any) -> memoryview:
-        """Stream `RecordBatch` frames from an `ArrowCursor` into an in-memory Parquet buffer."""
-        pa = ensure_module("pyarrow", package="pyarrow", extra="arrow")
-        pq = ensure_module("pyarrow.parquet", package="pyarrow", extra="arrow")
-        ipc = ensure_module("pyarrow.ipc", package="pyarrow", extra="arrow")
-        sink = pa.BufferOutputStream()
-        view = cursor.buffer_view() if hasattr(cursor, "buffer_view") else memoryview(cursor)
-        if len(view) > 0:
-            try:
-                with (
-                    ipc.open_stream(pa.py_buffer(view)) as reader,
-                    pq.ParquetWriter(sink, reader.schema, **kwargs) as writer,
-                ):
-                    for batch in reader:
-                        writer.write_batch(batch)
-                return memoryview(sink.getvalue())
-            except (TypeError, ValueError, OSError):
-                pass
-        table = cursor.to_arrow_table() if hasattr(cursor, "to_arrow_table") else cursor
-        pq.write_table(table, sink, **kwargs)
-        return memoryview(sink.getvalue())
 
     def _strip_matching_uri_prefix(self, raw_path_or_pattern: str) -> str:
         """Strip a scheme/bucket prefix when `raw_path_or_pattern` is a full URI matching `self.store_uri`."""
@@ -713,6 +666,13 @@ class ObjectStoreBackend:
         if any(ch in normalized for ch in ("*", "?", "[")):
             return self.glob_sync(normalized)
         return [normalized] if self.exists_sync(normalized) else []
+
+    async def _resolve_pattern_matches_async(self, pattern: str) -> list[str]:
+        """Resolve URI-aware patterns through native asynchronous listing and metadata."""
+        normalized = self._strip_matching_uri_prefix(pattern)
+        if any(ch in normalized for ch in ("*", "?", "[")):
+            return await self.glob_async(normalized)
+        return [normalized] if await self.exists_async(normalized) else []
 
     def _qualify(self, path: str | Path) -> str:
         """Normalize a relative, URI-qualified, or local-root-qualified path into an ObjectStore key."""
@@ -840,3 +800,16 @@ def build_duckdb_gcs_secret_sql(
         )
     sql = f"CREATE OR REPLACE SECRET {secret_name} (TYPE gcs, BEARER_TOKEN ?)"
     return sql, (token,)
+
+
+class _IPCBuffer:
+    """Retain a caller-owned IPC buffer for the shared worker's persistent reader."""
+
+    __slots__ = ("_view",)
+
+    def __init__(self, payload: Buffer) -> None:
+        self._view = memoryview(payload)
+
+    def buffer_view(self) -> memoryview:
+        """Expose the original owner-preserving view without decoding on the caller loop."""
+        return self._view
