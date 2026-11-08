@@ -4,14 +4,14 @@ parent_flow: storage-completeness
 chapter_id: ch20-ordinary-negative-cas
 title: Ordinary and Memory Multipart Negative Predicate CAS
 description: Fence arbitrary negative ETag ordinary writes across native providers
-status: draft
+status: stable
 state: planned
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
 plan_revision: 7
-plan_commit: null
+plan_commit: 5f64d1a8
 state_revision: 0
 last_verified_checkpoint: bdc7799a
 last_reviewed_commit: null

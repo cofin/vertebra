@@ -4,7 +4,7 @@ id: storage-completeness:ch21:t01
 chapter_id: ch21-sdk-resolved-config
 title: Retain SDK-resolved GCS endpoint and transport configuration
 description: Retain SDK-resolved GCS endpoint and transport configuration
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: regression_tdd
@@ -22,7 +22,7 @@ tests:
 - src/rs/vertebra-storage/src/conditional.rs
 estimated_loc: 120
 plan_revision: 7
-plan_commit: null
+plan_commit: 5f64d1a8
 state_revision: 0
 claimed_by: null
 claimed_at: null

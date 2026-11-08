@@ -4,7 +4,7 @@ id: storage-completeness:ch20:t01
 chapter_id: ch20-ordinary-negative-cas
 title: Fence ordinary and Memory multipart negative ETags through provider CAS
 description: Preserve negative predicates during ordinary byte puts with bounded native CAS retries
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: regression_tdd
@@ -26,7 +26,7 @@ tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 245
 plan_revision: 7
-plan_commit: null
+plan_commit: 5f64d1a8
 state_revision: 0
 claimed_by: null
 claimed_at: null

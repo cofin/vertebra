@@ -4,14 +4,14 @@ parent_flow: storage-completeness
 chapter_id: ch10-publication-boundary-and-lifecycle
 title: Native Publication Boundary and Cleanup Ownership
 description: Native Publication Boundary and Cleanup Ownership
-status: draft
+status: stable
 state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: storage-completeness:ch10:t01
+current_task: storage-completeness:ch10:t02
 plan_revision: 7
-plan_commit: null
+plan_commit: 5f64d1a8
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
 last_reviewed_commit: null
@@ -113,7 +113,7 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 
 ## 5. Implementation Plan
 
-- [~] storage-completeness:ch10:t01 — Retain concrete providers behind a private publication boundary (tasks/t01-publication-dispatch.md)
+- [x] [d50cf6a2] storage-completeness:ch10:t01 — Retain concrete providers behind a private publication boundary (tasks/t01-publication-dispatch.md)
 - [ ] storage-completeness:ch10:t02 — Reuse SDK HTTP transport and credential authorizers (tasks/t02-sdk-http-transport.md)
 - [ ] storage-completeness:ch10:t03 — Retain multipart abort ownership across completion errors and cancellation (tasks/t03-session-cleanup.md)
 

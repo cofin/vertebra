@@ -25,7 +25,7 @@ tests:
 - src/rs/vertebra-storage/src/cloud_request.rs
 estimated_loc: 210
 plan_revision: 7
-plan_commit: null
+plan_commit: 5f64d1a8
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -118,7 +118,7 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Notes & Discoveries
 
-The executable transport staging and provider acceptance contracts await independent cold review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+The executable transport staging and provider acceptance contracts are independently approved at 5f64d1a8. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `src/rs/vertebra-storage/src/cloud_request.rs` — Current repository source for this task.
 

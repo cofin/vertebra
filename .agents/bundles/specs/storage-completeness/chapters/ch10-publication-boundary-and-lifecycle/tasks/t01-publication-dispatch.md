@@ -4,8 +4,8 @@ id: storage-completeness:ch10:t01
 chapter_id: ch10-publication-boundary-and-lifecycle
 title: Retain concrete providers behind a private publication boundary
 description: Retain concrete providers behind a private publication boundary
-status: draft
-state: in_progress
+status: stable
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -26,7 +26,7 @@ tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 220
 plan_revision: 7
-plan_commit: null
+plan_commit: 5f64d1a8
 state_revision: 0
 claimed_by: publication_dispatch
 claimed_at: '2026-11-07T20:00:00Z'
@@ -43,10 +43,10 @@ verification_evidence: >-
   are 216 LOC across three files. GCS configuration capture is owned by ch21;
   Memory NotMatch rejects at begin until mandatory shared ch20 CAS support.
   Installed Python extensions are unchanged; final native Python acceptance remains
-  a later gate. Task closure awaits independently approved bounded split.
+  a later gate. Bounded split revision 7 is independently approved at 5f64d1a8.
 created_at: '2026-11-07T12:00:00Z'
 updated_at: '2026-11-07T12:00:00Z'
-commit: null
+commit: d50cf6a2
 sources:
 - id: implementation
   resource: src/rs/vertebra-storage/src/store.rs
@@ -113,10 +113,10 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Acceptance Criteria
 
-- [ ] Every matrix row passes at its public seam with existing behavior preserved.
-- [ ] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
-- [ ] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
-- [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
+- [x] Every matrix row passes at its public seam with existing behavior preserved.
+- [x] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
+- [x] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
+- [x] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
 
