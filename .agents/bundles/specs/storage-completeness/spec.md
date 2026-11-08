@@ -12,19 +12,19 @@ chapters:
   - ch03-litestar-and-range-streaming
   - ch04-arrow-shm-and-docs
 current_chapter: ch02-orm-and-sql-storage-contracts
-current_task: "storage-completeness:ch02:t03"
+current_task: null
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/gap-analysis_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 7
 plan_commit: a51ebcb6
-state_revision: 10
-last_verified_checkpoint: 749e2a18
+state_revision: 11
+last_verified_checkpoint: 04be780b7901e76ea3a487dfa5ba519061a14a8c
 last_reviewed_chapter: ch01-native-engine-and-auth
 last_reviewed_commit: dc2c2053
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-08T14:48:21Z"
+updated_at: "2026-11-08T15:13:53Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
@@ -198,9 +198,9 @@ Progress: `[2/4 files documented]`. Storage knowledge covers the native engine a
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `0155d9dc` on `feat/storage-updates`; `plan_revision: 7`, `state: active`. `ch01-native-engine-and-auth` is completed with review stamp `dc2c2053`.
-- **Plan Identity**: Active `ch02` and completed `t03` share revision `7` at `0155d9dc`; `t01` and `t02` retain their verified plan identities and evidence.
-- **Active Chapter**: `ch02-orm-and-sql-storage-contracts`, `current_task: null`; all `3/3` tasks are completed. Source commits are `7e13257b`, `0e579db6`, and `6ed9661b`; receipt/checkpoint `749e2a18` awaits correctness and fresh quality review. The chapter remains active until both reviews pass.
+- **Verified Plan Baseline**: `a51ebcb6` on `feat/storage-updates`; `plan_revision: 7`, `state: active`. `ch01-native-engine-and-auth` is completed with review stamp `dc2c2053`.
+- **Plan Identity**: Active `ch02` and completed `t03` share revision `7` at `a51ebcb6`; `t01` and `t02` retain their verified plan identities and evidence.
+- **Active Chapter**: `ch02-orm-and-sql-storage-contracts`, `current_task: null`; all `3/3` tasks are completed. Source commits are `7e13257b`, `0e579db6`, and `04be780b7901e76ea3a487dfa5ba519061a14a8c`. The chapter awaits correctness recheck and fresh quality review.
 - **Remaining Plan**: `7/12` tasks are completed; `ch03` has `2` pending tasks and `ch04` has `3`. Their states remain planned.
 - **Documentation & OKF Status**: `[2/4 files documented]`; storage knowledge and the technology matrix are synchronized. The two user guides remain planned in `ch04:t03`.
 - **Active Invariants**: Native paired stores, explicit configuration, exact upstream adapter contracts, and no Advanced Alchemy registry monkeypatching. SQLSpec Arrow/Parquet batch-streaming work remains in `ch04:t02`.

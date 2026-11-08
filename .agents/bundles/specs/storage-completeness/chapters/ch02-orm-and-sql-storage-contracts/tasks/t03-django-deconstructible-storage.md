@@ -5,7 +5,7 @@ chapter_id: ch02-orm-and-sql-storage-contracts
 title: Subclass Django Storage (@deconstructible) with File handles and full metadata contract
 description: Refactor vertebra.extensions.django.storage.DjangoStorage into a fail-closed @deconstructible subclass of django.core.files.storage.Storage returning Django File objects and implementing all sync/async storage and metadata methods.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -26,24 +26,27 @@ tests:
 estimated_loc: 210
 plan_revision: 7
 plan_commit: a51ebcb6
-state_revision: 2
+state_revision: 3
 claimed_by: agent:python-framework-specialist
 claimed_at: "2026-11-08T14:32:16Z"
 blocked_reason: null
 unblock_condition: null
 next_step: "Chapter correctness review, then fresh quality review"
-last_verified_at: "2026-11-08T14:40:17Z"
-last_verified_commit: 6ed9661be17a6da446d436cbe056381784c8a475
+last_verified_at: "2026-11-08T15:13:53Z"
+last_verified_commit: 04be780b7901e76ea3a487dfa5ba519061a14a8c
 verification_evidence:
   red: "uv run --no-sync pytest src/py/tests/unit/extensions/test_django_plugin.py src/py/tests/unit/extensions/test_data_storage_integrations.py -k django -q: exit 1, missing configuration regression fails"
   reflection_red: "UV_NO_SYNC=1 uv run --no-sync pytest src/py/tests/unit/extensions/test_django_plugin.py -k file_annotations -q --disable-warnings: exit 1, 2 failed with File not subscriptable"
-  green: "UV_NO_SYNC=1 uv run --no-sync ruff check src/py/vertebra/extensions/django/storage.py src/py/tests/unit/extensions/test_django_plugin.py src/py/tests/unit/extensions/test_data_storage_integrations.py && UV_NO_SYNC=1 uv run --no-sync mypy src/py/vertebra/extensions/django/storage.py && UV_NO_SYNC=1 uv run --no-sync pytest src/py/tests/unit/extensions/test_django_plugin.py src/py/tests/unit/extensions/test_data_storage_integrations.py -q: exit 0, 125 passed"
+  green: "UV_NO_SYNC=1 uv run --no-sync ruff check src/py/vertebra/extensions/django/storage.py src/py/tests/unit/extensions/test_django_plugin.py src/py/tests/unit/extensions/test_data_storage_integrations.py && UV_NO_SYNC=1 uv run --no-sync mypy src/py/vertebra/extensions/django/storage.py && UV_NO_SYNC=1 uv run --no-sync pytest src/py/tests/unit/extensions/test_django_plugin.py src/py/tests/unit/extensions/test_data_storage_integrations.py -q: exit 0, 136 passed"
   full_mypy: "UV_NO_SYNC=1 uv run --no-sync mypy: exit 0, 419 source files"
   format: "UV_NO_SYNC=1 uv run --no-sync ruff format --check src/py/vertebra/extensions/django/storage.py src/py/tests/unit/extensions/test_django_plugin.py src/py/tests/unit/extensions/test_data_storage_integrations.py: exit 0"
   lock: "uv lock --check: exit 0"
+  consumer_red: "UV_NO_SYNC=1 uv run --no-sync pytest src/py/tests/unit/extensions/test_django_plugin.py -k 'reopens_through_native_store or migration_writer_round_trips_configuration' -q --disable-warnings: exit 1, 10 failed"
+  broad: "UV_NO_SYNC=1 uv run --no-sync pytest src/py/tests/unit/extensions src/py/tests/unit/storage -q: exit 0, 592 passed"
+  docs: "UV_NO_SYNC=1 make docs: exit 0, documentation artifacts verified"
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-08T15:12:28Z"
-commit: null
+updated_at: "2026-11-08T15:13:53Z"
+commit: 04be780b7901e76ea3a487dfa5ba519061a14a8c
 sources:
   - id: django-storage-mod
     resource: src/py/vertebra/extensions/django/storage.py::DjangoStorage
@@ -137,7 +140,7 @@ Review regression verification: real `FieldFile` open/read/close/reopen returns 
 
 - [x] Django storage subclasses the real upstream typed base with `django-stubs` in the lint group; lock validation and full configured MyPy pass.
 
-- [ ] FieldFile reopen remains on object storage, and real migration serialization round trips LocalConfig and MemoryConfig/provider options.
+- [x] FieldFile reopen remains on object storage, and real migration serialization round trips LocalConfig and MemoryConfig/provider options.
 
 ## Notes & Discoveries
 
