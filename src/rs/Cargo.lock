@@ -5443,6 +5443,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a06f08a856b009bc7bbaf7d3e79808595d032dd19074c0c2ef26e49e03e6bdc"
 dependencies = [
  "getrandom 0.4.3",
+ "js-sys",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -5678,6 +5680,7 @@ dependencies = [
  "object_store",
  "pyo3",
  "pyo3-build-config",
+ "quick-xml",
  "reqwest 0.13.5",
  "rsa",
  "serde",
@@ -5687,7 +5690,9 @@ dependencies = [
  "thiserror",
  "tokio",
  "url",
+ "uuid",
  "vertebra-core",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
