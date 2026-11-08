@@ -80,6 +80,8 @@ if TYPE_CHECKING:
     )
     from vertebra.extensions.litestar.store import (
         MemoryStore,
+        ObjectStoreFileSystemAdapter,
+        ObjectStoreLitestarStore,
         ResponseCacheStore,
         swap_response_cache_store,
     )
@@ -107,6 +109,8 @@ __all__ = (
     "JWTAuthenticator",
     "JWTIdentityResolver",
     "MemoryStore",
+    "ObjectStoreFileSystemAdapter",
+    "ObjectStoreLitestarStore",
     "ObjectStoreSkillSource",
     "OffloadPlan",
     "OpenApiOffloadSpec",
@@ -182,6 +186,8 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "JWTAuthenticator": ("vertebra.extensions.litestar.security", "JWTAuthenticator"),
     "JWTIdentityResolver": ("vertebra.extensions.litestar.security", "JWTIdentityResolver"),
     "MemoryStore": ("vertebra.extensions.litestar.store", "MemoryStore"),
+    "ObjectStoreFileSystemAdapter": ("vertebra.extensions.litestar.store", "ObjectStoreFileSystemAdapter"),
+    "ObjectStoreLitestarStore": ("vertebra.extensions.litestar.store", "ObjectStoreLitestarStore"),
     "ObjectStoreSkillSource": ("vertebra.extensions.litestar.mcp", "ObjectStoreSkillSource"),
     "OffloadPlan": ("vertebra.extensions.litestar.offload", "OffloadPlan"),
     "OpenApiOffloadSpec": ("vertebra.extensions.litestar.offload", "OpenApiOffloadSpec"),
