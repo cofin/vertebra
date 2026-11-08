@@ -222,6 +222,7 @@ def py_sign_s3_v4_url(
     expires_in_secs: int = 3600,
     timestamp: int | None = None,
     endpoint: str | None = None,
+    virtual_hosted_style: bool = False,
 ) -> str: ...
 def py_verify_s3_v4_url(
     bucket: str,
@@ -232,6 +233,7 @@ def py_verify_s3_v4_url(
     signed_url: str,
     timestamp: int,
     endpoint: str | None = None,
+    virtual_hosted_style: bool = False,
 ) -> bool: ...
 def py_sign_gcs_v4_iam_url(
     bucket: str,

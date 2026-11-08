@@ -1343,7 +1343,7 @@ fn py_verify_hmac_url(
 }
 
 #[pyfunction]
-#[pyo3(signature = (bucket, region, access_key_id, secret_access_key, method, object_path, expires_in_secs=3600, timestamp=None, endpoint=None))]
+#[pyo3(signature = (bucket, region, access_key_id, secret_access_key, method, object_path, expires_in_secs=3600, timestamp=None, endpoint=None, virtual_hosted_style=false))]
 #[allow(clippy::too_many_arguments)]
 fn py_sign_s3_v4_url(
     py: Python<'_>,
@@ -1356,6 +1356,7 @@ fn py_sign_s3_v4_url(
     expires_in_secs: u64,
     timestamp: Option<i64>,
     endpoint: Option<String>,
+    virtual_hosted_style: bool,
 ) -> PyResult<String> {
     let timestamp = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
     py.detach(|| {
@@ -1365,7 +1366,7 @@ fn py_sign_s3_v4_url(
             access_key_id: access_key_id.to_string(),
             secret_access_key: secret_access_key.to_string(),
             endpoint,
-            virtual_hosted_style: false,
+            virtual_hosted_style,
         };
         sign_s3_v4_url(&cfg, method, object_path, expires_in_secs, timestamp)
     })
@@ -1373,7 +1374,7 @@ fn py_sign_s3_v4_url(
 }
 
 #[pyfunction]
-#[pyo3(signature = (bucket, region, access_key_id, secret_access_key, method, signed_url, timestamp, endpoint=None))]
+#[pyo3(signature = (bucket, region, access_key_id, secret_access_key, method, signed_url, timestamp, endpoint=None, virtual_hosted_style=false))]
 #[allow(clippy::too_many_arguments)]
 fn py_verify_s3_v4_url(
     py: Python<'_>,
@@ -1385,6 +1386,7 @@ fn py_verify_s3_v4_url(
     signed_url: &str,
     timestamp: i64,
     endpoint: Option<String>,
+    virtual_hosted_style: bool,
 ) -> PyResult<bool> {
     py.detach(|| {
         let cfg = S3SignConfig {
@@ -1393,7 +1395,7 @@ fn py_verify_s3_v4_url(
             access_key_id: access_key_id.to_string(),
             secret_access_key: secret_access_key.to_string(),
             endpoint,
-            virtual_hosted_style: false,
+            virtual_hosted_style,
         };
         verify_s3_v4_url(&cfg, method, signed_url, timestamp)
     })

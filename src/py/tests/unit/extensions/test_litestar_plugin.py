@@ -18,6 +18,8 @@ from click.testing import CliRunner
 
 from vertebra.build import BuildOrchestrator
 from vertebra.extensions.litestar import (
+    ObjectStoreFileSystemAdapter,
+    ObjectStoreLitestarStore,
     VertebraConfig,
     VertebraPlugin,
     enter_litestar_server_lifespan,
@@ -947,3 +949,33 @@ async def test_static_object_store_explicit_range_handler() -> None:
         assert response.status_code == 416
         assert response.content == b""
         assert response.headers["content-range"] == f"bytes */{len(payload)}"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("backend_kind", ["memory", "local"])
+async def test_litestar_store_and_fs_adapter_preserve_percent_and_tilde_keys(
+    tmp_path: Path,
+    backend_kind: str,
+) -> None:
+    """ObjectStoreLitestarStore and ObjectStoreFileSystemAdapter preserve literal %25 and ~ keys without unquoting."""
+    cfg = MemoryConfig() if backend_kind == "memory" else LocalConfig(root=tmp_path / "store")
+    storage = AsyncObjectStore(cfg)
+    kv_store = ObjectStoreLitestarStore(storage, namespace="cache")
+
+    await kv_store.set("user~1%25a", b"ok-1")
+    await kv_store.set("rate%25limit~bucket", b"ok-2")
+    assert await kv_store.get("user~1%25a") == b"ok-1"
+    assert await kv_store.exists("rate%25limit~bucket") is True
+    await kv_store.delete_all()
+    assert await kv_store.get("user~1%25a") is None
+    assert await kv_store.exists("rate%25limit~bucket") is False
+
+    await storage.put("public/dir%25v1~beta/rate%25limit~doc.txt", b"raw-bytes")
+    adapter = ObjectStoreFileSystemAdapter(storage, base_path="public")
+    dir_info = await adapter.info("dir%25v1~beta")
+    assert dir_info["type"] == "directory"
+    file_info = await adapter.info("dir%25v1~beta/rate%25limit~doc.txt")
+    assert file_info["type"] == "file"
+    assert file_info["size"] == 9
+    async with await adapter.open("dir%25v1~beta/rate%25limit~doc.txt") as reader:
+        assert await reader.read() == b"raw-bytes"

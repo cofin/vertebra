@@ -700,3 +700,49 @@ async def test_gcs_config_custom_endpoint_store_sign_preserves_no_proxy_env(
     assert async_signed == sync_signed
     assert "NO_PROXY" not in os.environ
     assert "no_proxy" not in os.environ
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected_prefix"),
+    [
+        (None, "https://my-bkt.s3.us-east-1.amazonaws.com/a~b/rate%25limit.txt?"),
+        ("https://s3.example.com", "https://my-bkt.s3.example.com/a~b/rate%25limit.txt?"),
+    ],
+)
+def test_s3_sigv4_virtual_hosted_style_py_bindings(endpoint: str | None, expected_prefix: str) -> None:
+    """Verify py_sign_s3_v4_url and py_verify_s3_v4_url support virtual_hosted_style URLs and host verification."""
+    signed = native_storage_mod.py_sign_s3_v4_url(
+        "my-bkt",
+        "us-east-1",
+        "AKIAIOSFODNN7EXAMPLE",
+        "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        "GET",
+        "a~b/rate%limit.txt",
+        900,
+        1_700_000_000,
+        endpoint,
+        virtual_hosted_style=True,
+    )
+    assert signed.startswith(expected_prefix)
+    assert native_storage_mod.py_verify_s3_v4_url(
+        "my-bkt",
+        "us-east-1",
+        "AKIAIOSFODNN7EXAMPLE",
+        "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        "GET",
+        signed,
+        1_700_000_060,
+        endpoint,
+        virtual_hosted_style=True,
+    )
+    assert not native_storage_mod.py_verify_s3_v4_url(
+        "my-bkt",
+        "us-east-1",
+        "AKIAIOSFODNN7EXAMPLE",
+        "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        "GET",
+        signed,
+        1_700_000_060,
+        endpoint,
+        virtual_hosted_style=False,
+    )

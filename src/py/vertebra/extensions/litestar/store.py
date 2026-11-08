@@ -8,7 +8,6 @@ import time
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Self
-from urllib.parse import unquote
 
 from vertebra.db.adapters.redis import AsyncRedisDriver, RedisConfig
 from vertebra.db.adapters.valkey import AsyncValkeyDriver, ValkeyConfig
@@ -269,12 +268,10 @@ class ObjectStoreLitestarStore(_StoreBase):
         while True:
             items, cursor = await self._store.list_page(self._prefix, cursor=cursor, limit=1000)
             for item in items:
-                key = unquote(item.path)
-                if key.startswith(self._prefix):
-                    await self._store.delete(key)
+                if item.path.startswith(self._prefix):
+                    await self._store.delete(item.path)
             if cursor is None:
                 break
-            cursor = unquote(cursor)
 
     async def exists(self, key: str) -> bool:
         """Return whether a live entry exists, including empty payloads."""
@@ -331,7 +328,7 @@ class ObjectStoreFileSystemAdapter:
             except FileNotFoundError:
                 prefix = key + "/"
                 items, _ = await self._store.list_page(prefix, limit=1)
-                if not any(unquote(item.path).startswith(prefix) for item in items):
+                if not any(item.path.startswith(prefix) for item in items):
                     raise FileNotFoundError(os.fspath(path)) from None
             else:
                 size = meta.size
