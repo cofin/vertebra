@@ -942,3 +942,402 @@ async def test_storage_arrow_missing_codec_before_io(monkeypatch: pytest.MonkeyP
         with pytest.raises(MissingDependencyError, match="pyarrow"):
             await anext(store.to_async().iter_arrow_batches("missing"))
     reset_dependency_cache()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("file_format", ["arrow-ipc", "parquet"])
+async def test_storage_arrow_writers_roundtrip(file_format: str) -> None:
+    """Public writers return native metadata and preserve batches and rowgroups."""
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    table = pa.table({"id": range(250)})
+    store = SyncObjectStore("memory://")
+    if file_format == "parquet":
+        result = store.write_parquet("sync", table, row_group_size=100)
+        async_result = await store.to_async().write_parquet("async", table, row_group_size=100)
+    else:
+        result = store.write_arrow("sync", table, batch_size=100)
+        async_result = await store.to_async().write_arrow("async", table, batch_size=100)
+    assert isinstance(result, PutResult)
+    assert isinstance(async_result, PutResult)
+    assert result.size > 0
+    assert async_result.size == result.size
+    for key in ("sync", "async"):
+        payload = pa.BufferReader(store.get(key))
+        if file_format == "parquet":
+            reader = pq.ParquetFile(payload)
+            assert [reader.metadata.row_group(i).num_rows for i in range(3)] == [100, 100, 50]
+            assert reader.read().equals(table)
+        else:
+            with pa.ipc.open_stream(payload) as reader:
+                batches = list(reader)
+            assert [batch.num_rows for batch in batches] == [100, 100, 50]
+            assert pa.Table.from_batches(batches).equals(table)
+
+
+class _ObservedArrowUpload:
+    """Record completion while delegating every operation to a real native upload."""
+
+    def __init__(self, native: Any, events: list[tuple[str, int]], asynchronous: bool) -> None:
+        self.native = native
+        self.events = events
+        self.asynchronous = asynchronous
+
+    def write_part(self, chunk: Any) -> Any:
+        self.events.append(("start", len(chunk)))
+        result = self.native.write_part(chunk)
+        if self.asynchronous:
+
+            async def complete() -> None:
+                await result
+                self.events.append(("part", len(chunk)))
+
+            return complete()
+        self.events.append(("part", len(chunk)))
+        return result
+
+    def complete(self) -> Any:
+        self.events.append(("complete", 0))
+        return self.native.complete()
+
+    def abort(self) -> Any:
+        self.events.append(("abort", 0))
+        return self.native.abort()
+
+
+class _ObservedArrowStore:
+    """Observe native multipart sessions without replacing the public store helper."""
+
+    def __init__(self, native: Any, events: list[tuple[str, int]], asynchronous: bool) -> None:
+        self.native = native
+        self.events = events
+        self.asynchronous = asynchronous
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.native, name)
+
+    def create_multipart(self, *args: Any, **kwargs: Any) -> Any:
+        upload = self.native.create_multipart(*args, **kwargs)
+        self.events.append(("create", 0))
+        if self.asynchronous:
+
+            async def complete() -> Any:
+                return _ObservedArrowUpload(await upload, self.events, True)
+
+            return complete()
+        return _ObservedArrowUpload(upload, self.events, False)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("file_format", ["arrow-ipc", "parquet"])
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("fail", [False, True])
+async def test_storage_arrow_writer_demand_and_abort(file_format: str, asynchronous: bool, fail: bool) -> None:
+    """The first batch finishes native writes before the producer advances or fails."""
+    pa = pytest.importorskip("pyarrow")
+    batch = pa.record_batch({"id": [1, 2]})
+    events: list[tuple[str, int]] = []
+    closed: list[bool] = []
+    base = SyncObjectStore("memory://")
+    paired = base.to_async() if asynchronous else base
+    native = _ObservedArrowStore(paired._require_native(), events, asynchronous)
+    store = (
+        AsyncObjectStore("memory://", _native_instance=native)
+        if asynchronous
+        else SyncObjectStore("memory://", _native_instance=native)
+    )
+
+    def batches() -> Iterator[Any]:
+        try:
+            yield batch
+            assert sum(size for kind, size in events if kind == "part") > 20
+            if fail:
+                raise ValueError("producer failed")
+            yield batch
+        finally:
+            closed.append(True)
+
+    async def write() -> Any:
+        if asynchronous:
+            return await (
+                store.write_parquet("output", batches())
+                if file_format == "parquet"
+                else store.write_arrow("output", batches())
+            )
+        return (
+            store.write_parquet("output", batches())
+            if file_format == "parquet"
+            else store.write_arrow("output", batches())
+        )
+
+    if fail:
+        with pytest.raises(ValueError, match="producer failed"):
+            await write()
+        assert ("abort", 0) in events
+        assert ("complete", 0) not in events
+        assert not base.exists("output")
+    else:
+        assert isinstance(await write(), PutResult)
+        iterator = (
+            base.iter_parquet_batches("output") if file_format == "parquet" else base.iter_arrow_batches("output")
+        )
+        assert pa.Table.from_batches(list(iterator)).equals(pa.Table.from_batches([batch, batch]))
+    assert closed == [True]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("file_format", ["arrow-ipc", "parquet"])
+@pytest.mark.parametrize("input_kind", ["empty-table", "batch", "cursor", "empty-iterable"])
+async def test_storage_arrow_writer_input_contracts(
+    file_format: str, input_kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tables, batches, cursors and explicit empty schemas retain Arrow values."""
+    from vertebra.db.arrow import ArrowCursor
+    from vertebra.storage._arrow import write_batches_async, write_batches_sync
+
+    pa = pytest.importorskip("pyarrow")
+    table = pa.table({"id": pa.array([] if input_kind.startswith("empty") else [1, 2], type=pa.int64())})
+    cursor = ArrowCursor.from_rows([{"id": 1}, {"id": 2}]) if input_kind == "cursor" else None
+    if cursor is not None:
+
+        def reject_rows(*args: Any, **kwargs: Any) -> Any:
+            pytest.fail("Arrow writers must decode the cursor buffer without Python rows")
+
+        monkeypatch.setattr(ArrowCursor, "to_pylist", reject_rows)
+        monkeypatch.setattr(ArrowCursor, "to_arrow_table", reject_rows)
+    data = (
+        cursor
+        if cursor is not None
+        else table.to_batches()[0]
+        if input_kind == "batch"
+        else iter(())
+        if input_kind == "empty-iterable"
+        else table
+    )
+    store = SyncObjectStore("memory://")
+    try:
+        write_batches_sync(store, "sync", data, file_format=file_format, schema=table.schema, batch_size=1)
+        await write_batches_async(
+            store.to_async(), "async", data, file_format=file_format, schema=table.schema, batch_size=1
+        )
+        for key in ("sync", "async"):
+            batches = store.iter_parquet_batches(key) if file_format == "parquet" else store.iter_arrow_batches(key)
+            assert pa.Table.from_batches(list(batches), schema=table.schema).equals(table)
+    finally:
+        if cursor is not None:
+            cursor.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("file_format", ["arrow-ipc", "parquet"])
+@pytest.mark.parametrize("case", ["zero-size", "empty", "schema-mismatch", "bad-option", "missing-codec"])
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_storage_arrow_writer_rejections(
+    file_format: str, case: str, asynchronous: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Invalid inputs preserve their errors and never commit an object."""
+    from vertebra.storage._arrow import write_batches_async, write_batches_sync
+
+    pa = pytest.importorskip("pyarrow")
+    batch = pa.record_batch({"id": [1]})
+    store = SyncObjectStore("memory://")
+    options = {"unsupported_codec_option": True} if case == "bad-option" else None
+    data = [] if case == "empty" else [batch, pa.record_batch({"other": [2]})] if case == "schema-mismatch" else [batch]
+    error = MissingDependencyError if case == "missing-codec" else TypeError if case == "bad-option" else ValueError
+    with monkeypatch.context() as context:
+        if case == "missing-codec":
+            context.setitem(sys.modules, "pyarrow", None)
+            reset_dependency_cache()
+        with pytest.raises(error):
+            if asynchronous:
+                await write_batches_async(
+                    store.to_async(),
+                    "missing",
+                    iter(data),
+                    file_format=file_format,
+                    batch_size=0 if case == "zero-size" else 2,
+                    options=options,
+                )
+            else:
+                write_batches_sync(
+                    store,
+                    "missing",
+                    iter(data),
+                    file_format=file_format,
+                    batch_size=0 if case == "zero-size" else 2,
+                    options=options,
+                )
+    reset_dependency_cache()
+    assert not store.exists("missing")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("file_format", ["arrow-ipc", "parquet"])
+async def test_storage_arrow_writer_native_network_cancellation(file_format: str) -> None:
+    """Cancel an actual native multipart request and observe abort before returning."""
+    pa = pytest.importorskip("pyarrow")
+    batch = pa.record_batch({"payload": [b"x" * (9 * 1024 * 1024)]})
+    entered = threading.Event()
+    release = threading.Event()
+    aborted = threading.Event()
+    requests: list[tuple[str, str]] = []
+    closed: list[bool] = []
+
+    class MultipartHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            requests.append(("POST", self.path))
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            if "uploads" in self.path:
+                body = b"<InitiateMultipartUploadResult><Bucket>codec-fixture</Bucket><Key>output</Key><UploadId>fixture</UploadId></InitiateMultipartUploadResult>"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_error(500, "unexpected completion")
+
+        def do_PUT(self) -> None:
+            requests.append(("PUT", self.path))
+            self.rfile.read(int(self.headers["Content-Length"]))
+            entered.set()
+            release.wait(10)
+            self.send_response(200)
+            self.send_header("ETag", '"part"')
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_DELETE(self) -> None:
+            requests.append(("DELETE", self.path))
+            aborted.set()
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            _ = (format, args)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), MultipartHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    config = S3Config(
+        bucket="codec-fixture",
+        region="us-east-1",
+        endpoint=f"http://127.0.0.1:{server.server_port}",
+        access_key_id="test",
+        secret_access_key="test",
+        allow_http=True,
+    )
+    native_store = AsyncObjectStore(config)
+    events: list[tuple[str, int]] = []
+    store = AsyncObjectStore(config, _native_instance=_ObservedArrowStore(native_store._require_native(), events, True))
+
+    def batches() -> Iterator[Any]:
+        try:
+            yield batch
+            yield batch
+        finally:
+            closed.append(True)
+
+    before = asyncio.all_tasks()
+    operation = (
+        store.write_parquet("output", batches(), compression="NONE")
+        if file_format == "parquet"
+        else store.write_arrow("output", batches())
+    )
+    task = asyncio.create_task(operation)
+    try:
+        async with asyncio.timeout(10):
+            while not entered.is_set():
+                if task.done():
+                    await task
+                await asyncio.sleep(0.001)
+        assert await asyncio.create_task(asyncio.sleep(0, result="responsive")) == "responsive"
+        assert sum(kind == "start" for kind, _ in events) > sum(kind == "part" for kind, _ in events)
+        assert ("complete", 0) not in events
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        assert aborted.is_set()
+        assert closed == [True]
+        assert any(method == "DELETE" and "uploadId=fixture" in path for method, path in requests)
+        assert all("uploads" in path for method, path in requests if method == "POST")
+        assert not (asyncio.all_tasks() - before)
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("file_format", ["arrow-ipc", "parquet"])
+async def test_storage_arrow_writer_dictionary_state(file_format: str) -> None:
+    """Persistent writers preserve dictionary batches and native media metadata."""
+    pa = pytest.importorskip("pyarrow")
+    labels = pa.DictionaryArray.from_arrays(pa.array([0, 1]), pa.array(["one", "two"]))
+    batch = pa.record_batch([labels], names=["label"])
+    store = SyncObjectStore("memory://")
+    async_store = store.to_async()
+    if file_format == "parquet":
+        await async_store.write_parquet("dictionary", iter([batch, batch]), row_group_size=2)
+        result = list(store.iter_parquet_batches("dictionary", batch_size=2))
+    else:
+        await async_store.write_arrow("dictionary", iter([batch, batch]), batch_size=2)
+        result = list(store.iter_arrow_batches("dictionary"))
+    assert [item.column(0).to_pylist() for item in result] == [["one", "two"], ["one", "two"]]
+    expected = "application/vnd.apache.parquet" if file_format == "parquet" else "application/vnd.apache.arrow.stream"
+    assert store.head("dictionary").content_type == expected
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("file_format", ["arrow-ipc", "parquet"])
+async def test_storage_arrow_writer_waits_for_cancelled_codec_worker(file_format: str) -> None:
+    """Cancellation retains the sink and producer until the active codec step exits."""
+    pa = pytest.importorskip("pyarrow")
+    batch = pa.record_batch({"id": [1]})
+    entered = threading.Event()
+    release = threading.Event()
+    closed: list[bool] = []
+    store = SyncObjectStore("memory://")
+
+    def batches() -> Iterator[Any]:
+        try:
+            yield batch
+            entered.set()
+            if not release.wait(10):
+                raise TimeoutError("codec barrier was not released")
+            yield batch
+        finally:
+            closed.append(True)
+
+    async_store = store.to_async()
+    operation = (
+        async_store.write_parquet("cancelled", batches())
+        if file_format == "parquet"
+        else async_store.write_arrow("cancelled", batches())
+    )
+    task = asyncio.create_task(operation)
+    try:
+        async with asyncio.timeout(5):
+            while not entered.is_set():
+                if task.done():
+                    await task
+                await asyncio.sleep(0.001)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert closed == []
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        assert closed == [True]
+        assert not store.exists("cancelled")
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task

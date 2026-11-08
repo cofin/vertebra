@@ -1706,6 +1706,24 @@ class SyncObjectStore(_BaseObjectStore):
             if not norm_prefix or str(item.path).startswith(norm_prefix)
         ]
 
+    def write_arrow(self, key: str, data: Any, *, batch_size: int = 65536) -> PutResult:
+        """Write batch-bounded Arrow IPC through native multipart upload."""
+        return _arrow.write_batches_sync(self, key, data, file_format="arrow-ipc", batch_size=batch_size)
+
+    def write_parquet(
+        self, key: str, batches: Any, *, schema: Any = None, compression: str = "zstd", row_group_size: int = 65536
+    ) -> PutResult:
+        """Write batch-bounded Parquet rowgroups through native multipart upload."""
+        return _arrow.write_batches_sync(
+            self,
+            key,
+            batches,
+            file_format="parquet",
+            batch_size=row_group_size,
+            schema=schema,
+            options={"compression": compression},
+        )
+
     def iter_arrow_batches(self, key: str) -> Iterator[Any]:
         """Yield Arrow IPC RecordBatch objects through native streaming reads."""
         return _arrow.iter_batches_sync(self, key, file_format="arrow-ipc")
@@ -2022,6 +2040,24 @@ class AsyncObjectStore(_BaseObjectStore):
             for item in items
             if not norm_prefix or str(item.path).startswith(norm_prefix)
         ]
+
+    async def write_arrow(self, key: str, data: Any, *, batch_size: int = 65536) -> PutResult:
+        """Write batch-bounded Arrow IPC through native multipart upload."""
+        return await _arrow.write_batches_async(self, key, data, file_format="arrow-ipc", batch_size=batch_size)
+
+    async def write_parquet(
+        self, key: str, batches: Any, *, schema: Any = None, compression: str = "zstd", row_group_size: int = 65536
+    ) -> PutResult:
+        """Write batch-bounded Parquet rowgroups through native multipart upload."""
+        return await _arrow.write_batches_async(
+            self,
+            key,
+            batches,
+            file_format="parquet",
+            batch_size=row_group_size,
+            schema=schema,
+            options={"compression": compression},
+        )
 
     def iter_arrow_batches(self, key: str) -> AsyncIterator[Any]:
         """Yield Arrow IPC RecordBatch objects through native asynchronous streaming reads."""

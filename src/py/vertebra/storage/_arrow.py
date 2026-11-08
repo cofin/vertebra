@@ -6,7 +6,17 @@ import asyncio
 import contextlib
 import io
 import threading
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Generator, Iterator, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Buffer,
+    Callable,
+    Generator,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, cast
 
@@ -14,7 +24,7 @@ from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.sync_tools import SyncPool
 
 if TYPE_CHECKING:
-    from vertebra.storage._store import AsyncObjectStore, AsyncReadableFile, SyncObjectStore
+    from vertebra.storage._store import AsyncObjectStore, AsyncReadableFile, PutResult, SyncObjectStore
 
 
 class _CodecBridge:
@@ -301,3 +311,192 @@ def _read_table(source: Any, file_format: str, options: Mapping[str, Any] | None
         reader = pa.ipc.open_file(source, **dict(options or {}))
     with reader:
         return reader.read_all()
+
+
+class _OutputSink(io.RawIOBase):
+    """Retain only the current codec operation's output and absolute position."""
+
+    def __init__(self) -> None:
+        self._chunks: list[bytes] = []
+        self._position = 0
+
+    def writable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self._position
+
+    def write(self, data: Buffer) -> int:
+        if self.closed:
+            raise ValueError("I/O operation on closed Arrow sink")
+        chunk = bytes(data)
+        self._chunks.append(chunk)
+        self._position += len(chunk)
+        return len(chunk)
+
+    def drain(self) -> list[bytes]:
+        chunks, self._chunks = self._chunks, []
+        return chunks
+
+
+class _BatchWriter:
+    """Encode one input batch at a time with persistent dictionary and footer state."""
+
+    def __init__(self) -> None:
+        self.sink = _OutputSink()
+        self._writer: Any = None
+        self._source: Any = None
+        self._batches: Iterator[Any] = iter(())
+        self._batch_size = 65536
+        self._parquet = False
+
+    def open(
+        self, data: Any, file_format: str, batch_size: int, schema: Any, options: Mapping[str, Any] | None
+    ) -> list[bytes]:
+        pa = ensure_module("pyarrow", package="pyarrow", extra="arrow")
+        self._batch_size = batch_size
+        self._parquet = file_format == "parquet"
+        if isinstance(data, pa.Table):
+            schema = schema if schema is not None else data.schema
+            self._source = data.to_reader(max_chunksize=batch_size)
+        elif isinstance(data, pa.RecordBatch):
+            schema = schema if schema is not None else data.schema
+            self._source = iter((data,))
+        elif hasattr(data, "buffer_view"):
+            self._source = pa.ipc.open_stream(pa.py_buffer(data.buffer_view()))
+            schema = schema if schema is not None else self._source.schema
+        else:
+            self._source = iter(data)
+        first = next(self._source, None)
+        if schema is None:
+            while first is not None and first.num_rows == 0:
+                schema = first.schema
+                first = next(self._source, None)
+            if first is not None:
+                schema = first.schema
+        if schema is None:
+            raise ValueError("An empty batch iterable requires an explicit schema")
+        self._batches = self._split_batches(first)
+        kwargs = dict(options or {})
+        if self._parquet:
+            pq = ensure_module("pyarrow.parquet", package="pyarrow", extra="arrow")
+            self._writer = pq.ParquetWriter(self.sink, schema, **kwargs)
+        else:
+            self._writer = pa.ipc.new_stream(self.sink, schema, **kwargs)
+        return self.sink.drain()
+
+    def next(self) -> tuple[bool, list[bytes]]:
+        batch = next(self._batches, None)
+        if batch is None:
+            self.close()
+            return True, self.sink.drain()
+        if self._parquet:
+            self._writer.write_batch(batch, row_group_size=self._batch_size)
+        else:
+            self._writer.write_batch(batch)
+        return False, self.sink.drain()
+
+    def close(self) -> None:
+        try:
+            if self._writer is not None:
+                writer, self._writer = self._writer, None
+                writer.close()
+        finally:
+            try:
+                close_batches = getattr(self._batches, "close", None)
+                if close_batches is not None:
+                    close_batches()
+            finally:
+                source, self._source = self._source, None
+                close = getattr(source, "close", None)
+                if close is not None:
+                    close()
+
+    def _split_batches(self, first: Any) -> Iterator[Any]:
+        batch = first
+        while batch is not None:
+            for offset in range(0, batch.num_rows, self._batch_size):
+                yield batch.slice(offset, self._batch_size)
+            batch = next(self._source, None)
+
+
+def write_batches_sync(
+    store: SyncObjectStore,
+    key: str,
+    data: Any,
+    *,
+    file_format: str,
+    batch_size: int = 65536,
+    schema: Any = None,
+    options: Mapping[str, Any] | None = None,
+) -> PutResult:
+    """Upload incremental codec output through the native synchronous multipart path."""
+    kwargs = dict(options or {})
+    if file_format == "parquet":
+        batch_size = kwargs.pop("row_group_size", batch_size)
+    _validate_batch_size(batch_size)
+    writer = _BatchWriter()
+
+    def chunks() -> Generator[bytes, None, None]:
+        try:
+            yield from writer.open(data, file_format, batch_size, schema, kwargs)
+            while True:
+                done, output = writer.next()
+                yield from output
+                if done:
+                    break
+        finally:
+            writer.close()
+            writer.sink.close()
+
+    output = chunks()
+    try:
+        media_type = (
+            "application/vnd.apache.parquet" if file_format == "parquet" else "application/vnd.apache.arrow.stream"
+        )
+        return store.put_stream(key, output, content_type=media_type)
+    finally:
+        output.close()
+
+
+async def write_batches_async(
+    store: AsyncObjectStore,
+    key: str,
+    data: Any,
+    *,
+    file_format: str,
+    batch_size: int = 65536,
+    schema: Any = None,
+    options: Mapping[str, Any] | None = None,
+) -> PutResult:
+    """Encode batch-sized steps off-loop and await each native multipart write."""
+    kwargs = dict(options or {})
+    if file_format == "parquet":
+        batch_size = kwargs.pop("row_group_size", batch_size)
+    _validate_batch_size(batch_size)
+    bridge = _CodecBridge()
+    writer = _BatchWriter()
+
+    async def chunks() -> AsyncGenerator[bytes, None]:
+        try:
+            for chunk in await bridge.run(writer.open, data, file_format, batch_size, schema, kwargs):
+                yield chunk
+            while True:
+                done, output = await bridge.run(writer.next)
+                for chunk in output:
+                    yield chunk
+                if done:
+                    break
+        finally:
+            await bridge.stop()
+            await bridge.run(writer.close)
+            writer.sink.close()
+
+    output = chunks()
+    try:
+        media_type = (
+            "application/vnd.apache.parquet" if file_format == "parquet" else "application/vnd.apache.arrow.stream"
+        )
+        return await store.put_stream(key, output, content_type=media_type)
+    finally:
+        await output.aclose()
