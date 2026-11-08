@@ -5,7 +5,7 @@ chapter_id: ch11-local-atomic-publication
 title: Add persistent OS locks per physical parent directory
 description: Add persistent OS locks per physical parent directory
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: characterization
 depends_on:
@@ -33,12 +33,35 @@ claimed_at: '2026-11-08T00:43:03+00:00'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-08T00:48:13+00:00'
+last_verified_commit: 8c808beb
+verification_evidence: |
+  Linux x86_64 native source checkpoint: 8c808beb.
+  All Cargo commands acquire /tmp/vertebra-flow-storage-cargo.lock first and set
+  CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" and
+  PYO3_PYTHON="$PWD/.venv/bin/python3.12". Runtime commands additionally acquire
+  /tmp/vertebra-flow-shm-tests.lock before uv run --no-sync cargo.
+  Characterization before the adapter: cargo test --manifest-path src/rs/Cargo.toml
+  -p vertebra-storage --lib local_publication: exit 0, 3 tests including the subprocess entrypoint.
+  Final focused gate: same command, exit 0, 7 tests, including independently
+  launched LocalPublication child, physical alias deduplication, opposing order,
+  cancellation after one acquired guard, read-only existing lockfile, and real
+  permission denial. Subprocess markers/stdin and direct future polling are barriers.
+  cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets
+  -- -D warnings: exit 0. git diff --check: exit 0.
+  cargo fmt --manifest-path src/rs/Cargo.toml --all --check: final exit 0.
+  The initial exit 1 concerns concurrent GCS formatting and shared module order,
+  corrected by that file owner before this final gate.
+  Implementation is 129 lines plus 2 registration lines, within 250. The module
+  remains cfg(test); no production ObjectStoreEngine routing is claimed.
+  macOS and Windows runtime/build evidence is unavailable on this Linux host;
+  only x86_64-unknown-linux-gnu is installed. Windows implementation uses the
+  declared windows-sys FileIdInfo API and full volume/file identity.
+  The coordinator owns signed commit creation and final state/SHA synchronization.
+  All task-owned writes and subprocess/build sessions are quiescent for commit.
 created_at: '2026-11-07T12:00:00Z'
-updated_at: '2026-11-07T12:00:00Z'
-commit: null
+updated_at: '2026-11-08T00:48:13+00:00'
+commit: 8c808beb
 sources:
 - id: implementation
   resource: src/rs/vertebra-storage/src/local_publication.rs
@@ -103,12 +126,17 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Acceptance Criteria
 
-- [ ] Every matrix row passes at its public seam with existing behavior preserved.
-- [ ] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
-- [ ] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
-- [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
+- [x] Every matrix row passes at its public seam with existing behavior preserved.
+- [x] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
+- [x] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
+- [x] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
+
+Linux characterization confirms cross-process exclusion through a symlink and persistence after handle release. The adapter retains its exact SDK Arc/root, sorts and deduplicates physical parent identities, and keeps acquired guards in the cancellable future. File creation uses create_new with ordinary umask; existing files open read-only. No blocking lock waiter or lockfile unlink is introduced.
+
+The bounded implementation read manifest contains five source/research paths. Operational prerequisite probes separately inspect src/rs/vertebra-storage/Cargo.toml and src/rs/Cargo.toml for declared Windows features and dependency versions, plus rustc/rustup for the native toolchain. These configuration-only probes provide no additional implementation context; the coordinator classifies them as operational preflight separately from the implementation read bound.
+
 
 Revision 5 is independently approved at bdc7799a; production execution follows the declared task dependencies. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 

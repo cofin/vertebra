@@ -87,13 +87,13 @@ Progress: `[0/1 files documented]`. ch09:t03 records only accepted source-backed
 ## 5. Implementation Plan
 
 - [x] [fe992ae3] storage-completeness:ch21:t01 — Retain SDK-resolved GCS endpoint and transport configuration (tasks/t01-sdk-resolved-config.md)
-- [ ] storage-completeness:ch21:t02 — Capture and fence GCS data and metadata snapshots (tasks/t02-gcs-snapshot-requests.md)
+- [~] storage-completeness:ch21:t02 — Capture and fence GCS data and metadata snapshots (tasks/t02-gcs-snapshot-requests.md)
 
 **Chapter Recovery Checkpoint:** focused library tests, normal non-test compilation and all-target Clippy precede correctness and fresh quality review. ch14:t02 depends on this task; full read-versus-publication comparison belongs to ch14:t04.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Two bounded tasks own SDK configuration and real snapshot requests separately; each has at most two production files, six reads and 250 implementation LOC. The concrete dispatch predecessor ch10:t01 remains independently executable. The revision8 request frontier is independently approved at `c737ffeb`; configuration capture is completed at `fe992ae3`, and snapshot requests remain pending. Full-chapter correctness and fresh quality reviews follow both tasks.
+Two bounded tasks own SDK configuration and real snapshot requests separately; each has at most two production files, six reads and 250 implementation LOC. The concrete dispatch predecessor ch10:t01 remains independently executable. The revision8 request frontier is independently approved at `c737ffeb`; configuration capture is completed at `fe992ae3`, and snapshot requests are in progress. Full-chapter correctness and fresh quality reviews follow both tasks.
 
 [^source]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine::new` — Actual configured GCS builder and credential precedence.
 [^research]: `.agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md` — Pinned SDK builder, endpoint and transport evidence.

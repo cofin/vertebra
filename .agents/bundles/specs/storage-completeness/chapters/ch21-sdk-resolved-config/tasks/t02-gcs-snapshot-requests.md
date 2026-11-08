@@ -5,7 +5,7 @@ chapter_id: ch21-sdk-resolved-config
 title: Capture and fence GCS data and metadata snapshots
 description: Implement the real private XML request boundary for opaque ETag predicates
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: integration_acceptance
 depends_on:
@@ -27,8 +27,8 @@ estimated_loc: 230
 plan_revision: 8
 plan_commit: c737ffeb
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:gcs_snapshot_requests
+claimed_at: '2026-11-08T00:45:50Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
