@@ -2,45 +2,49 @@
 type: Spec
 parent_flow: storage-completeness
 chapter_id: ch03-litestar-and-range-streaming
-title: "Chapter 03: HTTP Range Streaming and Litestar Store/Static Integration"
-description: Implement RFC 9110 single-range 206/416 StreamingStorageResponse and Litestar AsyncObjectStore Store plus static-files filesystem adapter.
+title: 'Chapter 03: HTTP Range Streaming and Litestar Store/Static Integration'
+description: Implement RFC 9110 single-range 206/416 StreamingStorageResponse and
+  Litestar AsyncObjectStore Store plus static-files filesystem adapter.
 status: stable
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters:
-  - ch01-native-engine-and-auth
+- ch01-native-engine-and-auth
 replan_trigger: null
 current_task: null
 plan_revision: 8
 plan_commit: 222cbf99
 state_revision: 1
-last_verified_checkpoint: 99317bed609e62a73d8b0036d444c1268ac2eb1d
-last_reviewed_commit: null
-created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-08T02:25:35Z"
+last_verified_checkpoint: 50e9c631
+last_reviewed_commit: 50e9c631
+created_at: '2026-11-07T04:15:00Z'
+updated_at: '2026-11-08T16:38:12.594924Z'
 generated:
   by: flow-setup
-  at: "2026-11-07T04:15:00Z"
+  at: '2026-11-07T04:15:00Z'
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-07T04:15:00Z"
-    commit: cdb978d3
+- by: agent:code-reviewer
+  at: '2026-11-08T16:38:12.594924Z'
+  commit: 50e9c631
+- by: agent:quality-reviewer
+  at: '2026-11-08T16:38:12.594924Z'
+  commit: 50e9c631
 sources:
-  - id: streaming-py
-    resource: src/py/vertebra/storage/_streaming.py::StreamingStorageResponse
-    title: Zero-copy HTTP streaming response over SyncObjectStore and AsyncObjectStore
-  - id: litestar-store
-    resource: src/py/vertebra/extensions/litestar/store.py::MemoryStore
-    title: Litestar Store adapter module hosting key-value and session stores
-  - id: litestar-init
-    resource: src/py/vertebra/extensions/litestar/__init__.py
-    title: Litestar extension public exports
+- id: streaming-py
+  resource: src/py/vertebra/storage/_streaming.py::StreamingStorageResponse
+  title: Zero-copy HTTP streaming response over SyncObjectStore and AsyncObjectStore
+- id: litestar-store
+  resource: src/py/vertebra/extensions/litestar/store.py::MemoryStore
+  title: Litestar Store adapter module hosting key-value and session stores
+- id: litestar-init
+  resource: src/py/vertebra/extensions/litestar/__init__.py
+  title: Litestar extension public exports
 tags:
-  - storage
-  - litestar
-  - http
-  - streaming
-  - zero-copy
+- storage
+- litestar
+- http
+- streaming
+- zero-copy
 ---
 
 # Chapter 03: HTTP Range Streaming and Litestar Store/Static Integration
@@ -114,9 +118,9 @@ Progress: `[2/2 files documented in ch03]`. `.agents/bundles/knowledge/domains/e
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Checkpoint**: Range/FastPath consumers pass 51 canonical cases at `a0888371`; Litestar source `99317bed609e62a73d8b0036d444c1268ac2eb1d` passes 21 canonical and 654 extension/storage cases, focused MyPy, Ruff, and format checks. Chapter state is `active` pending reviews.
-- **Remaining Tasks in Chapter**: None (`2/2` tasks complete). Chapter remains `active` until independent correctness review and fresh quality review pass at the implemented source checkpoint.
-- **Active Invariants**: Zero blocking `SyncObjectStore` I/O inside async Litestar handlers; `StorageBuffer` views preserved end-to-end.
+- Both tasks are complete; correctness review and fresh quality review pass at `50e9c631` with no unresolved findings.
+- The broad extension/storage/Range regression gate passes 654 tests; full configured MyPy passes 419 source files. Parametrized Litestar rejection cases pass 28 focused tests after quality cleanup.
+- Native async I/O and retained buffer ownership remain preserved. Remaining storage work belongs to chapters ch04 and ch05.
 
 [^streaming-py]: `src/py/vertebra/storage/_streaming.py::StreamingStorageResponse` — Zero-copy storage HTTP response builder.
 [^litestar-store]: `src/py/vertebra/extensions/litestar/store.py::MemoryStore` — Litestar `Store` implementations.

@@ -15,20 +15,20 @@ chapters:
 - ch03-litestar-and-range-streaming
 - ch04-arrow-shm-and-docs
 - ch05-sqlspec-arrow-and-docs
-current_chapter: ch03-litestar-and-range-streaming
-current_task: null
+current_chapter: ch04-arrow-shm-and-docs
+current_task: storage-completeness:ch04:t01
 parent_prd: native-data-platform
 research:
 - ../native-data-platform/research/gap-analysis_20261103.md
 - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 9
 plan_commit: 222cbf99
-state_revision: 13
-last_verified_checkpoint: 62b19c5c
-last_reviewed_chapter: ch02-orm-and-sql-storage-contracts
-last_reviewed_commit: 62b19c5c
+state_revision: 14
+last_verified_checkpoint: 50e9c631
+last_reviewed_chapter: ch03-litestar-and-range-streaming
+last_reviewed_commit: 50e9c631
 created_at: '2026-11-03T04:05:00Z'
-updated_at: '2026-11-08T15:23:04.650445Z'
+updated_at: '2026-11-08T16:38:12.594924Z'
 generated:
   by: flow-setup
   at: '2026-11-07T04:15:00Z'
@@ -202,17 +202,17 @@ Progress: `[3/5 files documented]`. Storage knowledge covers native storage and 
 
 - [x] [dc2c2053] ch01-native-engine-and-auth — Native Rust Storage Engine, GCP Auth Unification, and Fail-Closed Facade (chapters/ch01-native-engine-and-auth/spec.md)
 - [x] [62b19c5c] ch02-orm-and-sql-storage-contracts — SQLSpec, Advanced Alchemy, and Django Storage Contracts (chapters/ch02-orm-and-sql-storage-contracts/spec.md)
-- [~] ch03-litestar-and-range-streaming — HTTP Range Streaming and Litestar Store/Static Integration (chapters/ch03-litestar-and-range-streaming/spec.md)
-- [ ] ch04-arrow-shm-and-docs — Strict Arrow SHM and Bounded Storage Codecs (chapters/ch04-arrow-shm-and-docs/spec.md)
+- [x] [50e9c631] ch03-litestar-and-range-streaming — HTTP Range Streaming and Litestar Store/Static Integration (chapters/ch03-litestar-and-range-streaming/spec.md)
+- [~] ch04-arrow-shm-and-docs — Strict Arrow SHM and Bounded Storage Codecs (chapters/ch04-arrow-shm-and-docs/spec.md)
 - [ ] ch05-sqlspec-arrow-and-docs — SQLSpec Batch Consumers and Storage Documentation (chapters/ch05-sqlspec-arrow-and-docs/spec.md)
 
 **Flow Recovery Checkpoint:** `make lint-all && make rs-test && make py-test && make docs` exits `0`, followed by independent `@code-reviewer` and `@quality-reviewer` passes on `feat/storage-updates` before `/flow:finish`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Current State**: Chapters `ch01` and `ch02` are reviewed and complete; `ch03` is active with both tasks complete at Range checkpoint `a0888371` and Litestar checkpoint `99317bed`, awaiting independent correctness and fresh quality reviews.
-- **Full Plan**: `2/5` chapters and `9/14` tasks are complete. Five tasks remain: three strict Arrow/storage tasks in `ch04`, and two SQLSpec/documentation tasks in `ch05`.
-- **Plan Identity**: Active `ch03` owns revision `8`; revised `ch04`/`ch05` own revision `9` at `222cbf99`. Completed chapters retain their verified owned revisions.
+- **Current State**: Chapters `ch01` through `ch03` are reviewed and complete at their recorded checkpoints; `ch04` is active on strict Arrow SHM allocation and real IPC.
+- **Full Plan**: `3/5` chapters and `9/14` tasks are complete. Five tasks remain: three strict Arrow/storage tasks in `ch04`, and two SQLSpec/documentation tasks in `ch05`.
+- **Plan Identity**: Completed `ch03` owns revision `8`; active `ch04` and planned `ch05` own revision `9` at `222cbf99`. Completed chapters retain their verified owned revisions.
 - **Documentation**: `[3/5 files documented]`; both consumer guides remain scheduled in `ch05:t02`.
 - **Invariants**: Native async I/O remains on the caller loop; PyArrow codecs use bounded SyncPool steps; default Parquet batch prefetch is disabled, with explicit caller opt-in documented.
 

@@ -8,7 +8,7 @@ description: Remove anonymous allocation after named SHM failure and JSON pseudo
   columns, threshold, and live-view ownership. Unrelated write_arrow_shm input policy
   remains outside this task.
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -28,9 +28,9 @@ tests:
 estimated_loc: 180
 plan_revision: 9
 plan_commit: 222cbf99
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: agent:strict-shm-executor
+claimed_at: '2026-11-08T16:38:12.594924Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -38,7 +38,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: '2026-11-08T00:00:00Z'
-updated_at: '2026-11-08T00:00:00Z'
+updated_at: '2026-11-08T16:38:12.594924Z'
 commit: null
 sources:
 - id: shm

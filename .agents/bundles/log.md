@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## Completed storage HTTP and Litestar chapter
+
+Correctness and fresh quality reviews pass at `50e9c631` with no unresolved findings. Native FastPath 200/206/416, valid ETags, persistent TTL envelopes, namespace deletion, and actual Litestar static consumers are covered. The broad Python gate passes 654 tests, full MyPy covers 419 source files, and docs build passes. Chapter ch04 starts the strict Arrow SHM worksheet; five storage tasks remain across ch04 and ch05.
+
+
 ## [2026-11-08] review | Repair storage HTTP range metadata and entity tags
 
 - Source `6871b518` preserves direct async range status/Content-Range and formats HTTP entity tags; `598921a6` aligns the existing consumer assertion and collapses a boolean-equivalent provider branch for the lint gate.

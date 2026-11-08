@@ -7,7 +7,7 @@ description: R8 hardens named SHM allocation and ArrowCursor IPC, then implement
   bounded read and write codec bridges on public sync/async storage helpers. The three
   tasks separately own strict allocation, read lifecycle, and write lifecycle.
 status: stable
-state: planned
+state: active
 planning_status: complete
 depends_on_chapters:
 - ch01-native-engine-and-auth
@@ -17,11 +17,11 @@ replan_trigger: null
 current_task: storage-completeness:ch04:t01
 plan_revision: 9
 plan_commit: 222cbf99
-state_revision: 0
+state_revision: 1
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: '2026-11-08T00:00:00Z'
-updated_at: '2026-11-08T00:00:00Z'
+updated_at: '2026-11-08T16:38:12.594924Z'
 sources:
 - id: store
   resource: src/py/vertebra/storage/_store.py::AsyncObjectStore
