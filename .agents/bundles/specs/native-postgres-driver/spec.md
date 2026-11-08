@@ -39,7 +39,7 @@ chapters:
   - ch30-user-and-domain-docs
   - ch31-final-review-and-release-gate
 current_chapter: ch03-scram-and-channel-binding
-current_task: null
+current_task: "native-postgres-driver:ch03:t01"
 parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
@@ -331,8 +331,8 @@ Every worksheet (`111` total across `31` chapters) executes within its bounded o
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Baseline**: Source `aa538f9a` passes all 76 native Rust tests (`9` codec, `24` auth, `21` TLS, `22` wire/config/error) and locked all-target Clippy with `-D warnings`; flow `state: active`, `plan_revision: 8`, `plan_commit: 8c540809`.
-- **Progress**: `2/31` chapters are complete and reviewed; `11/111` tasks are complete. Chapter 01 remains reviewed at `3d68c853` and chapter 02 at `27b5a9e5`.
-- **Current Chapter**: `ch03-scram-and-channel-binding`, with `current_task: null`; ordered SCRAM, peer-certificate binding, and channel-binding policy tasks are complete at `9b94bff8`, `2db27cd1`, and `aa538f9a`. Chapter review remains pending.
+- **Progress**: `2/31` chapters are complete and reviewed; `10/111` tasks are complete. Chapter 01 remains reviewed at `3d68c853` and chapter 02 at `27b5a9e5`.
+- **Current Chapter**: `ch03-scram-and-channel-binding`, with `current_task: native-postgres-driver:ch03:t01`; a verified server-final credential-reflection defect is under bounded remediation before renewed reviews.
 - **Remaining Plan**: Chapter 03 requires correctness and fresh quality review; chapters 04–31 retain complete blueprints.
 - **Documentation**: `[0/11 files documented]`; full guides and domain knowledge remain assigned to chapter 30.
 - **Next Action**: Run `/flow:review native-postgres-driver` for chapter 03 code and synchronized Markdown before advancing to chapter 04.

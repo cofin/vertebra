@@ -31,14 +31,14 @@ enum AuthPhase {
 
 pub(crate) struct Authentication {
     phase: AuthPhase,
-    md5_response: Option<String>,
+    password_response: Option<String>,
 }
 
 impl Authentication {
     pub(crate) fn new() -> Self {
         Self {
             phase: AuthPhase::Initial,
-            md5_response: None,
+            password_response: None,
         }
     }
 
@@ -48,7 +48,7 @@ impl Authentication {
 
     pub(crate) fn redact_server_text(&self, text: &str, config: &PostgresConfig) -> String {
         let mut redacted = text.to_owned();
-        if let Some(response) = &self.md5_response {
+        if let Some(response) = &self.password_response {
             redacted = redacted.replace(response, "<redacted>");
         }
         if let Some(password) = config.password.as_deref().filter(|value| !value.is_empty()) {
@@ -106,7 +106,7 @@ impl Authentication {
                     password_message(digest.as_bytes(), out).map_err(|_| {
                         PostgresError::Config("invalid authentication password".into())
                     })?;
-                    self.md5_response = Some(digest);
+                    self.password_response = Some(digest);
                 } else {
                     password_message(password.as_bytes(), out).map_err(|_| {
                         PostgresError::Config("invalid authentication password".into())
@@ -216,6 +216,15 @@ impl Authentication {
                 scram
                     .update(body.data())
                     .map_err(|error| PostgresError::Protocol(error.to_string()))?;
+                self.password_response = Some(
+                    std::str::from_utf8(scram.message())
+                        .ok()
+                        .and_then(|message| message.rsplit_once(",p="))
+                        .map(|(_, proof)| proof.to_owned())
+                        .ok_or_else(|| {
+                            PostgresError::Protocol("invalid final SCRAM message".into())
+                        })?,
+                );
                 sasl_response(scram.message(), out)
                     .map_err(|error| PostgresError::Protocol(error.to_string()))?;
                 self.phase = AuthPhase::ScramFinalSent(scram);
@@ -228,9 +237,9 @@ impl Authentication {
                         "unexpected SASL final order".into(),
                     ));
                 };
-                scram
-                    .finish(body.data())
-                    .map_err(|error| PostgresError::Protocol(error.to_string()))?;
+                scram.finish(body.data()).map_err(|_| {
+                    PostgresError::Protocol("SCRAM server-final verification failed".into())
+                })?;
                 self.phase = AuthPhase::ScramVerifiedAwaitingOk;
             }
             Message::AuthenticationKerberosV5

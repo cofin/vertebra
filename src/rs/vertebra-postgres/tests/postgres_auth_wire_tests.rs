@@ -888,6 +888,92 @@ async fn scram_wrong_server_verifier() {
     }
 }
 
+async fn scram_reflected_error(stage: &str) {
+    const PASSWORD: &str = "ultra-secret-pw";
+    let (listener, mut config) = support::listener().await;
+    config.password = Some(PASSWORD.into());
+    let stage = stage.to_owned();
+    let typed_error = stage == "server";
+    let peer = tokio::spawn(async move {
+        let mut stream = support::accept(listener).await;
+        support::send(&mut stream, &scram_offer(false)).await;
+        let first = scram_initial(&mut stream).await;
+        let server = server_first(&first, 4096);
+        support::send(&mut stream, &sasl(11, server.as_bytes())).await;
+        let frame = password_frame(&mut stream).await;
+        let response = std::str::from_utf8(&frame[5..]).unwrap();
+        let (bare, proof) = response.rsplit_once(",p=").unwrap();
+        assert_eq!(
+            bare,
+            format!("c=biws,r={}server", first.strip_prefix("n=,r=").unwrap())
+        );
+        assert_eq!(STANDARD.decode(proof).unwrap().len(), 32);
+        let proof = proof.to_owned();
+        let error = if stage == "server" {
+            let fields = format!(
+                "SFATAL\0VFATAL\0C28P01\0Mrejected {PASSWORD} and {proof}\0Ddetail {proof} / {PASSWORD}\0Hsafe retry advice\0Wcontext {PASSWORD} / {proof}\0P17\0\0"
+            );
+            support::frame(b'E', fields.as_bytes())
+        } else {
+            let reflected = match stage.as_str() {
+                "password" => PASSWORD,
+                "proof" => &proof,
+                "proof-unpadded" => proof.trim_end_matches('='),
+                _ => panic!("unknown reflection stage"),
+            };
+            sasl(12, format!("e={reflected}").as_bytes())
+        };
+        support::send(&mut stream, &error).await;
+        support::eof(&mut stream).await;
+        proof
+    });
+    let handle = SessionHandle::new(config);
+    let error = rejected(connect(&handle).await, &handle);
+    if typed_error {
+        let PostgresError::Server(server) = &error else {
+            panic!("expected typed server rejection")
+        };
+        assert_eq!(server.sqlstate, "28P01");
+        assert_eq!(server.severity, "FATAL");
+        assert_eq!(server.message, "rejected <redacted> and <redacted>");
+        for (tag, value) in [
+            (b'S', "FATAL"),
+            (b'V', "FATAL"),
+            (b'C', "28P01"),
+            (b'P', "17"),
+            (b'D', "detail <redacted> / <redacted>"),
+            (b'H', "safe retry advice"),
+            (b'W', "context <redacted> / <redacted>"),
+        ] {
+            assert!(server.diagnostics.contains(&(tag, value.into())));
+        }
+    } else {
+        assert!(matches!(error, PostgresError::Protocol(_)));
+    }
+    let proof = peer.await.unwrap();
+    for secret in [PASSWORD, proof.as_str(), proof.trim_end_matches('=')] {
+        assert!(!error.to_string().contains(secret));
+        assert!(!format!("{error:?}").contains(secret));
+    }
+}
+
+#[tokio::test]
+async fn scram_final_error_omits_reflected_password() {
+    scram_reflected_error("password").await;
+}
+
+#[tokio::test]
+async fn scram_final_error_omits_reflected_client_proof() {
+    for stage in ["proof", "proof-unpadded"] {
+        scram_reflected_error(stage).await;
+    }
+}
+
+#[tokio::test]
+async fn scram_server_error_redacts_submitted_client_proof() {
+    scram_reflected_error("server").await;
+}
+
 #[derive(Default)]
 struct ScramWake(AtomicUsize);
 impl Wake for ScramWake {
