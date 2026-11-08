@@ -1,5 +1,11 @@
 # Bundle Activity Log
 
+## [2026-11-08] revise | Align storage integration worksheets with installed framework contracts
+
+- [`storage-completeness`](specs/storage-completeness/spec.md), `ch02-orm-and-sql-storage-contracts`, and its three pending worksheets share revision `3` anchored at `e8901de4`. The completed `ch01` review stamp `dc2c2053` and all four task commits remain unchanged and ancestry-verified.
+- Installed source evidence establishes SQLSpec `0.71.1` exact `_sync` / `_async` protocol names, Advanced Alchemy `1.12.0` concrete `ObjectStoreBackend` / upstream `get_content` methods, and Django `6.1.3` `Storage.save` / `File` contracts. The blueprints declare explicit native adapter extensions, callable omission errors, public registry registration, and non-blocking async adapter entry points.
+- Baseline collection covers `15` canonical storage/Django tests; the coordinator's fresh extension-suite baseline passes `421` tests. This revision changes planning Markdown only and records no implementation acceptance.
+
 ## [2026-11-08] verify | Reconcile the fail-loud baseline and PostgreSQL plan identity
 
 - Current planning progress is committed at `e8901de4`. The root bundle index includes [`driver-fail-loud`](specs/driver-fail-loud/spec.md), with `11` planned chapters and `35` pending tasks, as the prerequisite for native engine implementation.

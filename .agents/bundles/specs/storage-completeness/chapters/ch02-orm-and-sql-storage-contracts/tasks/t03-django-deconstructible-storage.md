@@ -21,8 +21,8 @@ tests:
   - src/py/tests/unit/extensions/test_django_plugin.py
   - src/py/tests/unit/extensions/test_data_storage_integrations.py
 estimated_loc: 210
-plan_revision: 2
-plan_commit: cdb978d3
+plan_revision: 3
+plan_commit: e8901de4
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -33,7 +33,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+updated_at: "2026-11-08T02:09:14Z"
 commit: null
 sources:
   - id: django-storage-mod
@@ -49,68 +49,71 @@ tags:
   - python
 ---
 
-# Task t03: Subclass Django `Storage` (`@deconstructible`) with `File` Handles and Full Metadata Contract
+# Task t03: Implement Deconstructible Django `Storage` With Real `File` Handles
 
 ## Objective & Scope Boundary
 
-Refactor `src/py/vertebra/extensions/django/storage.py::DjangoStorage` into a `@deconstructible` subclass of `django.core.files.storage.Storage` that fails closed when `config` and `store` are omitted, returns `django.core.files.base.File` (wrapping `SyncReadableFile`) from `_open`/`open`/`aopen`, removes all private `_memory` dict access, and implements Django's complete file, directory, URL, path, and timestamp contract [^django-storage-mod] [^readable-file-api].
+Make `DjangoStorage` a fail-closed `@deconstructible` subclass of Django `Storage`, return real seekable `File` handles, retain sync and async CRUD, and implement Django naming, collision, directory, URL, local-path, and timestamp contracts over the native paired store. Preserve both existing storage registries.[^django-storage-mod][^readable-file-api]
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/extensions/django/storage.py` — Current standalone `DjangoStorage` implementation [^django-storage-mod].
-- `src/py/vertebra/storage/_store.py` — `SyncObjectStore`, `AsyncObjectStore`, `SyncReadableFile`, `LocalConfig`, and `ObjectMetadata` [^readable-file-api].
-- `src/py/tests/unit/extensions/test_django_plugin.py` — Django extension tests.
-- `src/py/tests/unit/extensions/test_data_storage_integrations.py` — Cross-framework storage contract tests.
-- `.agents/skills/python-framework/SKILL.md` — Optional dependency loading (`MissingDependencyError`), typing, and docstring rules.
+- `src/py/vertebra/extensions/django/storage.py` — `DjangoStorage` and public sync/async registries.[^django-storage-mod]
+- `src/py/vertebra/storage/_store.py` — `SyncObjectStore`, `AsyncObjectStore`, `SyncReadableFile`, `LocalConfig`, and `ObjectMeta`.[^readable-file-api]
+- `src/py/tests/unit/extensions/test_django_plugin.py` — Existing Django consumer and storage tests.
+- `src/py/tests/unit/extensions/test_data_storage_integrations.py` — Cross-framework storage tests.
+- `.agents/skills/python-framework/SKILL.md` — Optional dependency loading, typing, and docstrings.
+
+**Installed upstream contract evidence:** Django `6.1.3`, `.venv/lib/python3.12/site-packages/django/core/files/storage/base.py::Storage`, `.venv/lib/python3.12/site-packages/django/core/files/base.py::File` / `ContentFile`, and `.venv/lib/python3.12/site-packages/django/utils/deconstruct.py::deconstructible`. Django `Storage.save` validates filenames and selects an available name before `_save`; its `open` delegates to `_open`. No native async storage base methods exist, so `a*` methods are Vertebra extensions.
 
 ## Symbol & Signature Contracts
 
-- `src/py/vertebra/extensions/django/storage.py`:
-  - Guard `django.core.files.base.File`, `django.core.files.storage.Storage`, and `django.utils.deconstruct.deconstructible` via optional import so importing the module without `django` installed does not crash at import time, while instantiating `DjangoStorage` without `django` raises `MissingDependencyError("django", install_package="django", extra="django")`.
-  - `@deconstructible` `class DjangoStorage(Storage)`:
-    - `__init__(self, config: StorageConfig | str | None = None, *, store: SyncObjectStore | None = None, async_store: AsyncObjectStore | None = None, base_url: str | None = None, location: str = "", file_overwrite: bool = False, expires_in: int = 3600) -> None`: raise `ImproperConfigurationError` if `config`, `store`, and `async_store` are all `None` (or empty `""`).
-    - Core hooks & sync/async operations:
-      - `_open(self, name: str, mode: str = "rb") -> File` (wraps `SyncReadableFile` in `django.core.files.base.File(readable, name=name)`)
-      - `_save(self, name: str, content: IO[bytes] | File | bytes) -> str` (streams via `put_stream` for multi-chunk `File.chunks()` or `put` for bytes)
-      - `aopen`, `asave`, `delete`, `adelete`, `exists`, `aexists`, `size`, `asize`
-      - `listdir(self, path: str) -> tuple[list[str], list[str]]` (uses `store.list_with_delimiter` to return `(directories, filenames)` relative to `path`)
-      - `url(self, name: str | None, *, expire: int | None = None) -> str` and `aurl` (uses `store.sign` when `supports_signing`, else `base_url` join, raising `ValueError` if neither is configured)
-      - `path(self, name: str) -> str` (returns resolved local filesystem path when backed by `LocalConfig` / `file://`, otherwise raises `NotImplementedError`)
-      - Inherited/overridden `Storage` helpers: `get_available_name` (honoring `file_overwrite` and `max_length`), `generate_filename`, `get_valid_name`, `get_alternative_name`, and UTC `datetime` `get_modified_time`, `get_created_time`, `get_accessed_time` parsed from `ObjectMetadata.last_modified`.
+- Load optional Django classes/decorator through `vertebra.utils.module_loader` so importing the module without Django succeeds, and constructing `DjangoStorage` raises `MissingDependencyError("django", install_package="django", extra="django")`. When installed, subclass the real `Storage` and apply the real `@deconstructible` decorator.
+- Preserve `config` accepting existing `SyncObjectStore` / `AsyncObjectStore` objects as well as `StorageConfig | str | None = None`. Preserve `store: SyncObjectStore | AsyncObjectStore | None = None`; add `async_store: AsyncObjectStore | None = None`, `base_url: str | None = None`, `location: str = ""`, `file_overwrite: bool = False`, and `expires_in: int = 3600` keyword arguments. Select `store`, then `async_store`, then `config`; absent/blank selected target raises `ImproperConfigurationError`. URI strings construct a store directly, config structs use `from_config`, and all explicit handles derive a paired handle without recreating an engine.
+- `_open(self, name: str, mode: str = "rb") -> File` returns `File(self.store.open_reader(qualified_name), name=name)`. `open` follows the real base contract. `async def aopen(self, name: str, mode: str = "rb") -> File` first awaits async metadata, then constructs a `File` over a `SyncReadableFile` with the known size; construction performs no synchronous storage I/O. Subsequent `File` reads follow Django's synchronous file interface. Unsupported write modes raise `ValueError` rather than pretending to support writable handles.
+- `save(self, name: str | None, content: Any, max_length: int | None = None) -> str` delegates to Django filename validation/collision selection, wrapping byte buffers in `ContentFile` for the existing byte-input convenience. `_save(self, name: str, content: Any) -> str` only persists the chosen key: buffers use `put`; `File.chunks()` / file readers stream with `put_stream`.
+- `async def asave(self, name: str | None, content: Any, max_length: int | None = None) -> str` applies equivalent filename validation/max-length/collision behavior with native `await exists`, and uploads via paired async put/stream without sync storage I/O or `asyncio.to_thread`. Async iterables remain incremental.
+- Preserve `delete` / `adelete`, `exists` / `aexists`, `size` / `asize`, and store properties. `listdir(path: str) -> tuple[list[str], list[str]]` maps native `(list[ObjectMeta], common_prefixes)` from `list_with_delimiter` into Django `(directories, filenames)` relative to `path`, with the location prefix stripped and deterministic ordering.
+- `url(self, name: str, *, expire: int | None = None) -> str` and `aurl` sign qualified keys when supported, using configured `expires_in` unless overridden; otherwise join URL-quoted name with `base_url`. Raise `ValueError` if neither signing nor a base URL is configured.
+- `path(name: str) -> str` returns a resolved path under the explicit `LocalConfig` / `file://` root including `location`; other schemes raise `NotImplementedError`. Reject traversal for every operation before applying `location`.
+- Inherit Django `get_valid_name`, `generate_filename`, `get_alternative_name`, and collision/max-length behavior; honor `file_overwrite` without bypassing Django path validation. `get_modified_time`, `get_created_time`, and `get_accessed_time` return UTC-aware `datetime` parsed from native `ObjectMeta.last_modified`. The adapter exposes the one available native modification timestamp for all three hooks; absent/unparsable metadata raises `NotImplementedError` rather than inventing a timestamp.
+- Caller wiring: Django `FileField` / `Storage.save` → validated chosen name → `_save` → native paired store; Django `Storage.open` → `_open` → `File(SyncReadableFile)`; migration serialization → decorator `deconstruct()` → the same constructor path/args/kwargs.
 
 ## Edge Cases & Error Semantics
 
-- `DjangoStorage()` with no `config` or `store` raises `ImproperConfigurationError` (never defaults to `MemoryConfig()`).
-- `storage.save("docs/report.pdf", ContentFile(b"v2"))` when `"docs/report.pdf"` already exists and `file_overwrite=False` writes to an alternative non-colliding name (`"docs/report_<suffix>.pdf"`) via `get_available_name` / `get_alternative_name`.
-- `storage.deconstruct()` returns `("vertebra.extensions.django.storage.DjangoStorage", args, kwargs)` that reconstructs an equivalent `DjangoStorage` instance for Django `makemigrations`.
-- `storage.path("key")` on `MemoryConfig` / `S3Config` / `GCSConfig` raises `NotImplementedError`.
+- `DjangoStorage()`, None/blank configuration with no explicit store, and unsupported read modes fail explicitly. Explicit `MemoryConfig()` is supported for tests.
+- Save collision with `file_overwrite=False` returns an alternative filename; `file_overwrite=True` replaces contents under the requested valid name. `max_length` follows Django's truncation/error rules, preserving `SuspiciousFileOperation` on invalid traversal/names.
+- Existing tests that compare `open()` / `aopen()` directly with bytes must read/close the returned real `File`; do not preserve a bytes-return alias.
+- `deconstruct()` preserves constructor data suitable for `STORAGES`/migration serialization; reconstruct the class and prove file behavior, rather than comparing two unrelated store instances for identity.
+- `listdir` returns direct children only; `path` on memory/cloud raises `NotImplementedError`. Expiry/signing errors propagate honestly.
 
 ## Public-Seam Test Blueprint
 
-- **Canonical test files**: `src/py/tests/unit/extensions/test_django_plugin.py` and `src/py/tests/unit/extensions/test_data_storage_integrations.py`.
-- **Worked Test Matrix**:
+**Canonical modules:** `test_django_plugin.py` and `test_data_storage_integrations.py` under `src/py/tests/unit/extensions/`. Use `LocalConfig(root=tmp_path)`, Django `ContentFile`, and the native engine; keep existing byte-input convenience assertions after updating the consumer's `File.read` usage. Observe intended Red before production edits.
 
 | Case | Input | Expected Output / Error |
 | --- | --- | --- |
-| Subclass, `@deconstructible`, & fail-closed init | `DjangoStorage()` vs `s = DjangoStorage(f"file://{tmp_path}", base_url="/media/")` | `DjangoStorage()` raises `ImproperConfigurationError`; `isinstance(s, Storage)` is `True`; `path, args, kwargs = s.deconstruct()` reconstructs equal storage. |
-| `save` collision + `open` returns `File` | Save `ContentFile(b"hello")` twice to `"notes/readme.txt"` (`file_overwrite=False`), then `with s.open(saved_name) as fh:` | Second `save` returns distinct `notes/readme_*.txt`; `isinstance(fh, File)` is `True`; `fh.read() == b"hello"`. |
-| `listdir` & timestamps | Seed `"sub/a.txt"` and `"root.txt"`; call `s.listdir("")` and `s.get_modified_time("root.txt")` | `listdir("") == (["sub"], ["root.txt"])`; `get_modified_time` returns timezone-aware `datetime`. |
-| `path()` local vs remote | `LocalConfig(tmp_path)` `s.path("root.txt")` vs `MemoryConfig()` `s_mem.path("root.txt")` | Local returns `str(tmp_path / "root.txt")`; remote/memory raises `NotImplementedError`. |
-| Async `asave` / `aopen` / `aexists` / `adelete` | `name = await s.asave("async.bin", ContentFile(b"xyz"))` | `await s.aexists(name)` is `True`, `await s.asize(name) == 3`, `await s.adelete(name)` removes object. |
+| Base/decorator/fail-closed | `DjangoStorage()`; `s = DjangoStorage(LocalConfig(root=tmp_path), base_url="/media/")` | Missing target raises `ImproperConfigurationError`; `isinstance(s, Storage)` is true; `s.deconstruct()` reconstructs a working adapter. |
+| Save collision, overwrite, and File | Save `ContentFile(b"hello")` twice as `notes/readme.txt`; then open each | Distinct alternative name by default; handles are real `File` and read `b"hello"`; overwrite mode retains one chosen name with new bytes. |
+| Naming/path safety | Invalid `../outside.txt`, filename exceeding `max_length`, and location `uploads` | Match Django validation/error behavior and keep native keys inside the chosen root/location. |
+| Directory and time | Store `sub/a.txt`, `root.txt`; call `listdir("")` and all three timestamp methods | Return `(["sub"], ["root.txt"])`; all timestamp hooks return aware UTC `datetime` from native metadata. |
+| Local/cloud path | Local `s.path("root.txt")`; explicit memory `s_mem.path("root.txt")` | Local path is `str(tmp_path / "root.txt")`; memory raises `NotImplementedError`. |
+| Async lifecycle and File | `name = await s.asave("async.bin", ContentFile(b"xyz"))`; `fh = await s.aopen(name)` | `isinstance(fh, File)`, `fh.read() == b"xyz"`; async exists/size yield true/3; delete removes the object. |
+| URL semantics | Base URL plus `"a b.txt"`; separate explicit HMAC-signed store | URL quotes space as `%20`; configured signing honors method/expiry and returns a verifiable signature. |
 
 ## Verification
 
-- Initial Red baseline: `uv run --no-sync pytest src/py/tests/unit/extensions/test_django_plugin.py src/py/tests/unit/extensions/test_data_storage_integrations.py -k django -q`
-- Final Green + lint + typecheck gate: `uv run --no-sync ruff check src/py/vertebra/extensions/django/storage.py src/py/tests/unit/extensions/test_django_plugin.py && uv run --no-sync mypy src/py/vertebra/extensions/django/storage.py && uv run --no-sync pytest src/py/tests/unit/extensions/test_django_plugin.py src/py/tests/unit/extensions/test_data_storage_integrations.py -q`
+- Initial Red: `uv run --no-sync pytest src/py/tests/unit/extensions/test_django_plugin.py src/py/tests/unit/extensions/test_data_storage_integrations.py -k django -q` after adding the focused regression.
+- Final: `uv run --no-sync ruff check src/py/vertebra/extensions/django/storage.py src/py/tests/unit/extensions/test_django_plugin.py src/py/tests/unit/extensions/test_data_storage_integrations.py && uv run --no-sync mypy src/py/vertebra/extensions/django/storage.py && uv run --no-sync pytest src/py/tests/unit/extensions/test_django_plugin.py src/py/tests/unit/extensions/test_data_storage_integrations.py -q`.
 
 ## Acceptance Criteria
 
-- [ ] `DjangoStorage` is a `@deconstructible` subclass of `django.core.files.storage.Storage` that fails closed when unconfigured (R3, R6).
-- [ ] `_open` / `open` / `aopen` return `django.core.files.base.File` handles and all required sync/async storage, `listdir`, `url`, `path`, naming, and timestamp methods pass contract tests without touching `_memory` (R6).
+- [ ] Real deconstructible Django `Storage` subclass refuses absent configuration and supports migration reconstruction (R3, R6).
+- [ ] `open` / `aopen` return real seekable `File` handles; sync/async save, naming/collisions, directory, URL, local path, and timestamp contracts pass public tests (R6).
+- [ ] Both registries stay public; no private `_memory` access, no inline Python comments, and lint/type checks pass (R6).
 
 ## Notes & Discoveries
 
-- [2026-11-07 04:15] `ObjectMetadata.last_modified` from `vertebra-storage` is RFC 3339 UTC; parse with `datetime.fromisoformat`.
+- Installed contract baseline: Django `6.1.3`; Django `save` owns validation/name allocation and `_save` owns persistence. Native metadata type is `ObjectMeta`, with one RFC 3339 modification timestamp.
 
-[^django-storage-mod]: `src/py/vertebra/extensions/django/storage.py::DjangoStorage` — Django storage adapter.
-[^readable-file-api]: `src/py/vertebra/storage/_store.py::SyncReadableFile` — Seekable object-store file reader.
+[^django-storage-mod]: `src/py/vertebra/extensions/django/storage.py::DjangoStorage` — Django backend and registries.
+[^readable-file-api]: `src/py/vertebra/storage/_store.py::SyncReadableFile` — Seekable native-store file handle and metadata contracts.

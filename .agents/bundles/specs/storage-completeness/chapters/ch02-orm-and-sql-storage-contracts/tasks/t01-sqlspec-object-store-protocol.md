@@ -20,8 +20,8 @@ files:
 tests:
   - src/py/tests/unit/extensions/test_data_storage_integrations.py
 estimated_loc: 170
-plan_revision: 2
-plan_commit: cdb978d3
+plan_revision: 3
+plan_commit: e8901de4
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -32,7 +32,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+updated_at: "2026-11-08T02:09:14Z"
 commit: null
 sources:
   - id: sqlspec-storage-mod
@@ -48,69 +48,70 @@ tags:
   - python
 ---
 
-# Task t01: Complete Fail-Closed SQLSpec `ObjectStoreProtocol` Over `SyncObjectStore` and `AsyncObjectStore`
+# Task t01: Complete Fail-Closed SQLSpec `ObjectStoreProtocol` Over Shared Storage Handles
 
 ## Objective & Scope Boundary
 
-Make `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` fail closed when no `uri` or `store` is supplied and implement complete sync and async SQLSpec `ObjectStoreProtocol` methods (`read_bytes`, `write_bytes`, `read_text`, `write_text`, `exists`, `delete`, `copy`, `move`, `list_objects`, `list_page`, `get_stream`, `put_stream`, `sign_sync`, `sign_async`, `open`, `get_metadata`) over `SyncObjectStore` and `AsyncObjectStore` while preserving `build_duckdb_gcs_secret_sql` intact [^sqlspec-storage-mod] [^py-store-api]. Streaming Arrow/Parquet `_iter_arrow_async` batch iteration is owned by `storage-completeness:ch04:t02`.
+Make `ObjectStoreBackend` reject omitted/empty targets, retain SQLSpec's exact `*_sync` / `*_async` protocol, and add native streaming, pagination, and seekable-reader extensions. Share one engine between sync and async handles; moves use native `rename`. Preserve `build_duckdb_gcs_secret_sql` and all Arrow methods; Arrow/Parquet `_iter_arrow_async` changes belong to `storage-completeness:ch04:t02`.[^sqlspec-storage-mod][^py-store-api]
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/extensions/sqlspec/storage.py` — `ObjectStoreBackend` and `build_duckdb_gcs_secret_sql` [^sqlspec-storage-mod].
-- `src/py/vertebra/storage/_store.py` — `SyncObjectStore`, `AsyncObjectStore`, `SyncReadableFile`, `AsyncReadableFile`, and `StorageConfig` [^py-store-api].
-- `src/py/tests/unit/extensions/test_data_storage_integrations.py` — Canonical SQLSpec and Advanced Alchemy storage contract tests.
+- `src/py/vertebra/extensions/sqlspec/storage.py` — `ObjectStoreBackend`, `register_storage_alias`, and `build_duckdb_gcs_secret_sql`.[^sqlspec-storage-mod]
+- `src/py/vertebra/storage/_store.py` — `SyncObjectStore`, `AsyncObjectStore`, `SyncReadableFile`, `AsyncReadableFile`, `ObjectMeta`, and `PutResult`.[^py-store-api]
+- `src/py/tests/unit/extensions/test_data_storage_integrations.py` — SQLSpec protocol, pipelines, signing, and Arrow regression coverage.
 - `.agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md` — SQLSpec extension integration rules.
-- `.agents/skills/python-framework/SKILL.md` — Python typing, docstring, and zero-inline-comment rules.
+- `.agents/skills/python-framework/SKILL.md` — Python typing, docstrings, and module rules.
+
+**Installed upstream contract evidence:** SQLSpec `0.71.1`, `.venv/lib/python3.12/site-packages/sqlspec/protocols.py::ObjectStoreProtocol`; inspect that class for the complete signature inventory. Protocol byte/text/CRUD/metadata names use `*_sync` and `*_async`. `get_stream_*`, `put_stream_*`, `list_page_*`, and `open_*` below are Vertebra adapter extensions, not SQLSpec protocol members.
 
 ## Symbol & Signature Contracts
 
-- `src/py/vertebra/extensions/sqlspec/storage.py`:
-  - `ObjectStoreBackend.__init__(self, uri: str | SyncObjectStore | AsyncObjectStore | StorageConfig, *, base_path: str = "", **options: Any) -> None`:
-    - Raise `ImproperConfigurationError` if `uri` is `None` or an empty/whitespace `str`.
-    - Construct paired `SyncObjectStore` and `AsyncObjectStore` lazily on demand when initialized from a `str` URI or `StorageConfig`, or bind directly when given an explicit store instance.
-  - Sync & async protocol methods (`*_sync` / plain sync and `*_async` per SQLSpec `ObjectStoreProtocol`):
-    - `read_bytes` / `read_bytes_async`, `write_bytes` / `write_bytes_async` (supporting `content_type`, `attributes`, `if_not_exists`)
-    - `read_text` / `read_text_async`, `write_text` / `write_text_async`
-    - `exists` / `exists_async`, `delete` / `delete_async`, `copy` / `copy_async`, `move` / `move_async` (delegating to `store.rename`)
-    - `list_objects` / `list_objects_async`, `list_page` / `list_page_async`
-    - `get_stream` / `get_stream_async`, `put_stream` / `put_stream_async`
-    - `open_sync` (`SyncReadableFile`) / `open_async` (`AsyncReadableFile`)
-    - `get_metadata` / `get_metadata_async`, `sign_sync` / `sign_async`
-  - Keep `build_duckdb_gcs_secret_sql` public signature and behavior unchanged until `native-duckdb-driver`.
+- Preserve the existing constructor's `store`, `base_path`, `prefix`, `options`, `signing`, `token_cache`, and `**kwargs` keywords. Change `uri` to `str | SyncObjectStore | AsyncObjectStore | StorageConfig | None = None`. Select explicit `store` before `uri`; an omitted/None/blank selected target raises `ImproperConfigurationError`. Construct one `SyncObjectStore` from a URI/config and derive `.to_async()`; explicit stores derive their paired handle via `.to_sync()` / `.to_async()`.
+- Preserve `resolve_uri`, `read_bytes_sync`, `write_bytes_sync`, `read_text_sync`, `write_text_sync`, `exists_sync`, `delete_sync`, `copy_sync`, `move_sync`, `list_objects_sync`, `glob_sync`, `is_object_sync`, `is_path_sync`, `get_metadata_sync`, all corresponding existing async methods, Arrow methods, and overloaded `sign_sync` / `sign_async` signatures. Do not introduce plain-sync compatibility aliases.
+- `write_bytes_sync(path: str | Path, data: bytes, **kwargs: Any) -> None` and its async counterpart forward `content_type`, `attributes`, `if_not_exists`, `if_match`, and `if_none_match` to native `put`; text writes pass these options through. `move_sync(source: str | Path, destination: str | Path, **kwargs: Any) -> None` and `move_async` use paired store `rename` with the existing default overwrite behavior.
+- Add `get_stream_sync(path: str | Path, *, chunk_size: int | None = None) -> Iterator[StorageBuffer]` and `get_stream_async(...) -> AsyncIterator[StorageBuffer]` as iterator factories delegating to native `get_stream`. `StorageBuffer` is a type-only import from `vertebra._storage`. Keep SQLSpec `stream_read_sync(...) -> Iterator[bytes]` and `async def stream_read_async(...) -> AsyncIterator[bytes]`; callers await the latter before iterating and receive byte chunks. No full-object buffering.
+- Add `put_stream_sync(path: str | Path, chunks: Iterable[Buffer], **kwargs: Any) -> PutResult` and `async def put_stream_async(path: str | Path, chunks: AsyncIterable[Buffer] | Iterable[Buffer], **kwargs: Any) -> PutResult`, forwarding the same conditional/metadata write options to paired `put_stream`.
+- Add `list_page_sync(prefix: str = "", *, cursor: str | None = None, limit: int = 1000) -> tuple[list[str], str | None]` and the async counterpart. Qualify the prefix, unqualify each returned `ObjectMeta.path`, preserve the native cursor opaquely, and retain native `limit >= 1` validation.
+- Add `open_sync(path: str | Path, *, size: int | None = None, chunk_size: int = 65536) -> SyncReadableFile` and `open_async(...) -> AsyncReadableFile` as reader factories using the paired stores' `open_reader`; reader factories are synchronous and perform no I/O until reading.
+- Caller wiring: SQLSpec `SyncStoragePipeline` / `AsyncStoragePipeline` → exact protocol methods → the shared paired native store; adapter extensions → native streaming/listing/reader seams. All key-bearing operations reject `..` segments before namespace qualification.
 
 ## Edge Cases & Error Semantics
 
-- `ObjectStoreBackend(None)` (via `Any`) or `ObjectStoreBackend("")` raises `ImproperConfigurationError` instead of opening `"memory://"`.
-- Path normalization with `base_path="tenant-a"` prefixes keys cleanly without leading `/` duplication and rejects `..` path traversal segments with `ValueError`.
-- Calling `sign_sync` / `sign_async` on a backend without signing credentials raises `NotSupportedError` / `ImproperConfigurationError` from the underlying store.
+- `ObjectStoreBackend()`, `ObjectStoreBackend(None)`, `ObjectStoreBackend("")`, and `ObjectStoreBackend("  ")` raise `ImproperConfigurationError`; `ObjectStoreBackend(store=explicit_store)` succeeds. Explicit `MemoryConfig()` remains supported.
+- `base_path="tenant-a"` prefixes relative keys exactly once. Any `..` segment in object keys or configured base paths raises `ValueError`, including memory and cloud targets.
+- Unsupported signing retains the existing adapter's `NotImplementedError` contract. Configured HMAC signing retains GET/PUT and scalar/list return behavior.
+- Conditional-write failures propagate from the native store. A failed stream upload does not leave a completed object. Cursor continuation returns only the requested namespace.
 
 ## Public-Seam Test Blueprint
 
-- **Canonical test file**: `src/py/tests/unit/extensions/test_data_storage_integrations.py` (exercising real `LocalConfig(tmp_path)` and `sqlspec` `ObjectStoreProtocol` `isinstance` conformance).
-- **Worked Test Matrix**:
+**Canonical module:** `src/py/tests/unit/extensions/test_data_storage_integrations.py`. Use real local/native storage, the real SQLSpec protocol and pipeline, and concrete bytes. Add one behavioral test at a time and observe the intended Red failure before editing production code.
 
 | Case | Input | Expected Output / Error |
 | --- | --- | --- |
-| Fail-closed constructor | `ObjectStoreBackend("")` and `ObjectStoreBackend(None)` | Both raise `ImproperConfigurationError`. |
-| `ObjectStoreProtocol` sync/async CRUD + `move` | `backend = ObjectStoreBackend(f"file://{tmp_path}", base_path="sql")`; `await backend.write_bytes_async("a.bin", b"123")`; `await backend.move_async("a.bin", "b.bin")` | `isinstance(backend, ObjectStoreProtocol)` is `True`; `exists_async("a.bin")` is `False`; `await backend.read_bytes_async("b.bin") == b"123"`. |
-| Streaming & cursor pagination | `await backend.put_stream_async("big.bin", [b"chunk1-", b"chunk2"])`, then `list_page_async(limit=1)` and `get_stream_async("big.bin")` | Stream chunks concatenate to `b"chunk1-chunk2"`; `list_page_async` returns `(["b.bin"], cursor)` then `(["big.bin"], None)`. |
-| Path traversal guard | `backend.read_bytes("../secret.txt")` | Raises `ValueError`. |
-| DuckDB GCS secret helper preserved | `build_duckdb_gcs_secret_sql(...)` | Emits expected `CREATE SECRET` SQL unchanged. |
+| Fail-closed constructor | Omitted, None, empty, whitespace target; explicit `store=SyncObjectStore.from_local(tmp_path)` | First four raise `ImproperConfigurationError`; explicit store works and `isinstance(backend, ObjectStoreProtocol)` is true. |
+| Sync/async writes and rename | `write_bytes_sync("a.bin", b"123")`; `await move_async("a.bin", "b.bin")` | `exists_sync("a.bin")` is false and `await read_bytes_async("b.bin") == b"123"`. |
+| Conditional write + metadata | Write `"b.bin"` with `if_not_exists=True`; write `"meta.bin"` with `content_type="text/plain", attributes={"tenant": "a"}` | Existing object is retained on failure; metadata is visible from the paired underlying store. |
+| Streaming and pagination | `await put_stream_async("big.bin", [b"chunk1-", b"chunk2"])`; `list_page_sync(limit=1)` then `await list_page_async(cursor=cursor, limit=1)` | `get_stream_sync` and async stream concatenate to `b"chunk1-chunk2"`; isolated seed `b.bin,big.bin` pages return `["b.bin"]` then `["big.bin"]`. |
+| Seekable readers | `open_sync("big.bin")` and `open_async("big.bin")` | Seek/read reproduce `b"chunk1-chunk2"` and close cleanly. |
+| Namespace refusal | `read_bytes_sync("../secret.txt")` and equivalent async/native extensions | Raise `ValueError` before reading outside the prefix. |
+| Existing pipelines, signing, Arrow, secret helper | Existing canonical SQLSpec and DuckDB-secret tests | Preserve their byte/table/signature/SQL assertions. |
 
 ## Verification
 
-- Initial Red baseline: `uv run --no-sync pytest src/py/tests/unit/extensions/test_data_storage_integrations.py -k sqlspec -q`
-- Final Green + lint + typecheck gate: `uv run --no-sync ruff check src/py/vertebra/extensions/sqlspec/storage.py src/py/tests/unit/extensions/test_data_storage_integrations.py && uv run --no-sync mypy src/py/vertebra/extensions/sqlspec/storage.py && uv run --no-sync pytest src/py/tests/unit/extensions/test_data_storage_integrations.py -q`
+- Initial Red: `uv run --no-sync pytest src/py/tests/unit/extensions/test_data_storage_integrations.py -k sqlspec -q` after adding the focused regression.
+- Final: `uv run --no-sync ruff check src/py/vertebra/extensions/sqlspec/storage.py src/py/tests/unit/extensions/test_data_storage_integrations.py && uv run --no-sync mypy src/py/vertebra/extensions/sqlspec/storage.py && uv run --no-sync pytest src/py/tests/unit/extensions/test_data_storage_integrations.py -q`.
 
 ## Acceptance Criteria
 
-- [ ] `ObjectStoreBackend` fails closed on omitted/empty URI and conforms to SQLSpec `ObjectStoreProtocol` across sync and async operations (R3, R4).
-- [ ] `build_duckdb_gcs_secret_sql` remains intact for `native-duckdb-driver` (R4).
-- [ ] Zero inline `#` comments in touched Python files.
+- [ ] Omitted/blank storage configuration raises `ImproperConfigurationError`; real SQLSpec protocol and pipeline behavior remains conformant (R3, R4).
+- [ ] Streaming, pagination, readers, conditional metadata writes, and rename delegate to one shared native engine without full-object buffering (R1, R4).
+- [ ] Namespace traversal is rejected; configured and unsupported signing retain their public contracts (R4).
+- [ ] Arrow methods and `build_duckdb_gcs_secret_sql` remain intact for their owning downstream flows (R4).
+- [ ] Touched Python passes lint/type checks with zero inline comments.
 
 ## Notes & Discoveries
 
-- [2026-11-07 04:15] Consult the `sqlspec` plugin skill conventions when checking upstream `ObjectStoreProtocol` method names.
+- Installed contract baseline: SQLSpec `0.71.1`; metadata is `ObjectMeta`. Sync protocol names have `_sync`; native iterator/page/reader helpers are explicit adapter extensions.
 
-[^sqlspec-storage-mod]: `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` — SQLSpec storage backend implementation.
-[^py-store-api]: `src/py/vertebra/storage/_store.py::SyncObjectStore` — Underlying Vertebra object store classes.
+[^sqlspec-storage-mod]: `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` — SQLSpec storage backend and public helper implementation.
+[^py-store-api]: `src/py/vertebra/storage/_store.py::SyncObjectStore` — Paired native store, streaming, metadata, and reader signatures.
