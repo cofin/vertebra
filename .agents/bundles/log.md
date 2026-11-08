@@ -1,5 +1,11 @@
 # Bundle Activity Log
 
+## [2026-11-08] review-remediation | Native PostgreSQL SCRAM error privacy
+
+- Correctness review of the chapter 03 checkpoint finds peer-controlled SASL Final `e=` reflected through the upstream error. The adopted repair also masks the actual submitted SCRAM client proof in typed server-error free text using the existing private MD5-or-SCRAM response slot; structured `S`/`V`/`C`/`P`/`p`/`L` identity remains exact.
+- Public-session regression tests produce meaningful Red (`101`) for password reflection in `e=`, unpadded captured-proof reflection in `e=`, and submitted-proof reflection in typed SQLSTATE `28P01` message `M`. Signed source `1987a327` maps final verification failure to a static diagnostic without the peer error source chain and passes all 79 native tests (`9` codec, `27` auth, `21` TLS, `22` wire/config/error), locked all-target Clippy with `-D warnings`, formatting, bundle validation, and whitespace checks at both worker and coordinator checkpoints.
+- Rebind task 01 to `1987a327`, retaining tasks 02/03 at `2db27cd1`/`aa538f9a`. Chapter 03 remains active with null task/review pointers pending correctness recheck and fresh quality review. Progress returns to `11/111` completed tasks and `2/31` reviewed chapters; prior stamps `3d68c853`/`27b5a9e5`, revision 8 / anchor `8c540809`, and documentation manifests `[0/0 files documented in ch03]` / `[0/11 files documented]` remain unchanged.
+
 ## [2026-11-08] flow-docs-sync | Native PostgreSQL SCRAM chapter checkpoint
 
 - Bind chapter 03 task receipts to `t01=9b94bff8`, `t02=2db27cd1`, and `t03=aa538f9a`. Exact coordinator checkpoint `aa538f9a` passes all 76 native tests (`9` codec, `24` auth, `21` TLS, `22` wire/config/error) under the shared SHM lock and locked all-target Clippy with `-D warnings`.

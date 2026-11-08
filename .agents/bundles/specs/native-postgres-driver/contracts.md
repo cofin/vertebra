@@ -146,10 +146,13 @@ flushing credentials; publication retains its original deadline check.
 
 The codec validates bounded frame/parser envelopes; startup session consumers
 exhaust lazy notice/error fields and validate UTF8 before discarding notices or
-constructing errors. Untrusted human/free-text diagnostics mask the non-empty
-configured password and actual submitted MD5 token before Display/Debug ownership.
+constructing errors. Untrusted human/free-text diagnostics replace exact occurrences
+of the non-empty configured password and actual submitted MD5 token or SCRAM client
+proof before Display/Debug ownership. SCRAM server-final verification failures use
+the static `Protocol("SCRAM server-final verification failed")` diagnostic without
+retaining the peer-controlled upstream error or a peer error source chain.
 Structured protocol fields `S`, `V`, `C`, `P`, `p`, and `L` remain exact, including
-coincidental low-entropy password characters. Empty secrets leave text unchanged;
+coincidental low-entropy password characters. Empty passwords add no replacement;
 private credential-bearing authentication storage has no `Debug` implementation.
 
 Both native pool constructors take the complete connection signature plus:

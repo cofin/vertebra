@@ -10,11 +10,11 @@ planning_status: complete
 depends_on_chapters:
   - ch02-wire-codec-and-session-startup
 replan_trigger: null
-current_task: "native-postgres-driver:ch03:t01"
+current_task: null
 plan_revision: 8
 plan_commit: 8c540809
 state_revision: 0
-last_verified_checkpoint: aa538f9a
+last_verified_checkpoint: 1987a327
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-08T00:32:06Z"
@@ -52,6 +52,7 @@ tags:
 - **Key Invariants:**
   - Production SCRAM framing, SASLprep, PBKDF2, and proof verification delegate exclusively to pinned `postgres_protocol::authentication::sasl::ScramSha256` (`=0.6.12`) with client-enforced iteration bounds `1..=100_000` and strict server-nonce extension (`server_nonce.len() > client_nonce.len() && server_nonce.starts_with(client_nonce)`).
   - `AuthenticationOk` is accepted after SASL only from `ScramVerifiedAwaitingOk` (after `AuthenticationSaslFinal` passes `ScramSha256::finish`), and `ScramSha256::message()` is never invoked after `finish()`.
+  - Failed SCRAM server-final verification returns a static `Protocol` diagnostic with no peer error source chain. Typed server-error free text replaces exact configured-password and submitted-MD5-token/SCRAM-proof occurrences; structured `S`/`V`/`C`/`P`/`p`/`L` fields retain protocol identity.
   - `binding::tls_server_end_point` hashes the entire negotiated peer leaf certificate DER via `x509-parser = "=0.18.1"` (`default-features = false`), mapping only SHA-1/MD5 to SHA-256, including default SHA-1 when `hashAlgorithm` is absent inside a present RSA-PSS parameters SEQUENCE; it treats no-hash Ed25519/Ed448 (`EdDSA`), unsupported MD2, or unknown OIDs as unavailable channel binding (`tls_server_end_point: None`).
   - `ChannelBindingPolicy::Prefer` over TLS with usable binding emits `p=tls-server-end-point,,` when `SCRAM-SHA-256-PLUS` is offered and `y,,` (`ChannelBinding::unrequested()`) when only plain `SCRAM-SHA-256` is offered, failing terminally without retry on `e=server-does-support-channel-binding`.
 - **Verification Gate:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings`.
@@ -92,7 +93,7 @@ enum AuthPhase {
 }
 pub(crate) struct Authentication {
     phase: AuthPhase,
-    md5_response: Option<String>,
+    password_response: Option<String>,
 }
 impl Authentication {
     pub(crate) fn new() -> Self;
@@ -120,6 +121,7 @@ impl Authentication {
 | Malformed SASL iteration or nonce | `AuthenticationSaslContinue` with `i=0`, `i=100001`, non-decimal/duplicate `i=`, or `r=` equal to / not prefixed by client nonce | Reject before `ScramSha256::update` with `PostgresError::Protocol`, close socket, never emit `SASLResponse`. |
 | Expired reservation with ready SASL Continue | Public client future parked after its initial response, valid Continue queued behind a fresh reactor-waker barrier, clock advanced past the original deadline | Post-work/preflush check returns `Transport`, closes terminally, and emits no response; removing that check makes the same public-seam test fail on outbound bytes. |
 | Premature or out-of-order SASL frames | `AuthenticationOk` in `ScramStarted`/`ScramFinalSent`, or duplicate `AuthenticationSaslContinue`/`AuthenticationSaslFinal` | Fail with `PostgresError::Protocol`; only `ScramVerifiedAwaitingOk` transitions to `Complete` on `AuthenticationOk`. |
+| Peer-controlled final error or typed error reflection | `AuthenticationSaslFinal` `e=` contains a password or captured proof; `ErrorResponse` `M` contains the submitted proof | Failed final verification returns static `Protocol("SCRAM server-final verification failed")` without the upstream error chain. Typed errors retain SQLSTATE and structured field identity while exact configured-password and submitted-proof occurrences in free text become `<redacted>`; failures close terminally. |
 | Certificate signature hash selection | RSA/ECDSA SHA-224/256/384/512, DSA SHA-224/256, SHA-1/MD5, RSA-PSS explicit or omitted `hashAlgorithm` in a present parameters SEQUENCE (default SHA-1), MD2, Ed25519/Ed448 | Hash full leaf DER; substitute SHA-256 for SHA-1/MD5/default-PSS; return `Err` (binding unavailable) for unsupported MD2, Ed25519/Ed448, unknown OIDs, malformed PSS parameters, or trailing DER. |
 | Plain-only offer over bound TLS under `Prefer` | Usable `tls_server_end_point` + server offers `["SCRAM-SHA-256"]` only | Construct `ScramSha256` with `ChannelBinding::unrequested()` emitting `GS2` `"y,,"`; if stripped PLUS server replies `e=server-does-support-channel-binding`, fail terminally without `"n,,"` retry. |
 | `ChannelBindingPolicy::Require` | Trust, cleartext, MD5, plain-only SCRAM, plaintext transport, or Ed25519 unavailable binding | Missing binding returns `PostgresError::UnsupportedAuth` before the startup frame; bound TLS rejects weaker authentication before credential bytes. TLS negotiation errors retain `Transport`. |
@@ -146,7 +148,7 @@ Progress: `[0/0 files documented in ch03]`
 
 ## 5. Implementation Plan
 
-- [~] native-postgres-driver:ch03:t01 — Authenticate ordered SCRAM-SHA-256 SASL exchanges (tasks/t01-scram-sha256.md)
+- [x] [1987a327] native-postgres-driver:ch03:t01 — Authenticate ordered SCRAM-SHA-256 SASL exchanges (tasks/t01-scram-sha256.md)
 - [x] [2db27cd1] native-postgres-driver:ch03:t02 — Derive RFC 5929 tls-server-end-point digests from negotiated peer certificates (tasks/t02-peer-certificate-binding.md)
 - [x] [aa538f9a] native-postgres-driver:ch03:t03 — Enforce SCRAM-SHA-256-PLUS channel-binding policies and GS2 downgrade protection (tasks/t03-scram-sha256-plus.md)
 
@@ -154,8 +156,8 @@ Progress: `[0/0 files documented in ch03]`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: Source `aa538f9a` passes all 76 native tests (`9` codec, `24` auth, `21` TLS, `22` wire/config/error) and locked all-target Clippy with `-D warnings`. Chapter 02 remains reviewed at `27b5a9e5`; plan revision 8 remains anchored at `8c540809`.
-- **Remaining Tasks in Chapter**: All three tasks are complete at `9b94bff8`, `2db27cd1`, and `aa538f9a`; `current_task` and `last_reviewed_commit` are null pending correctness and fresh quality review of code and synchronized Markdown.
+- **Verified Baseline**: Source `1987a327` passes all 79 native tests (`9` codec, `27` auth, `21` TLS, `22` wire/config/error) and locked all-target Clippy with `-D warnings`. Chapter 02 remains reviewed at `27b5a9e5`; plan revision 8 remains anchored at `8c540809`.
+- **Remaining Tasks in Chapter**: All three tasks are complete at `1987a327`, `2db27cd1`, and `aa538f9a`; `current_task` and `last_reviewed_commit` are null pending correctness and fresh quality review of code and synchronized Markdown.
 - **Verified Policy Coverage**: The full 54-case matrix covers all three policies, plaintext/bound TLS/Ed25519 TLS, and six authentication offers; independent proofs, leaf mismatch, bad verifier, GS2 `y,,` downgrade refusal, and no-replay barriers cover terminal outcomes.
 - **Documentation & OKF Status**: `[0/0 files documented in ch03]`; full user guides and durable OKF consolidation belong to chapter 30, with data-domain curation in `ch30:t03`.
 - **Downstream Dependents**: Chapter 04 (`ch04:t01` depends on `ch03:t03`) waits for chapter 03 review and closure.

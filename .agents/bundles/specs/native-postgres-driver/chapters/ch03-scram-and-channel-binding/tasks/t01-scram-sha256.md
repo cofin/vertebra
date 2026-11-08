@@ -5,7 +5,7 @@ chapter_id: ch03-scram-and-channel-binding
 title: Authenticate ordered SCRAM-SHA-256 SASL exchanges
 description: Extend auth::Authentication with ordered SCRAM-SHA-256 SASL phases over postgres-protocol 0.6.12, enforcing 1..=100_000 iteration bounds, strict server nonce extension, and post-PBKDF2 deadline checks.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -25,15 +25,15 @@ estimated_loc: 235
 plan_revision: 8
 plan_commit: 8c540809
 state_revision: 2
-claimed_by: agent:ch03_final_error_remediation
-claimed_at: "2026-11-08T00:53:24Z"
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
-next_step: Bind the verified privacy repair to a signed source commit, then rerun chapter correctness and fresh quality review.
+next_step: null
 last_verified_at: "2026-11-08T00:55:51Z"
-last_verified_commit: null
+last_verified_commit: 1987a327
 verification_evidence: |
-  Preflight: source baseline 2539e22e; chapter 02 completed/reviewed at 27b5a9e5; root/chapter/task plan revision 8 and anchor 8c540809 match; declared source/test symbols exist. The privacy repair remains in_progress with commit and last_verified_commit null until signed source binding.
+  Preflight: source baseline 2539e22e; chapter 02 completed/reviewed at 27b5a9e5; root/chapter/task plan revision 8 and anchor 8c540809 match; declared source/test symbols exist. Signed source 1987a327 binds the completed privacy repair.
   Red: public SessionHandle with real TCP, valid Continue, and captured client-final proves e= reflected password and unpadded submitted proof leak through Display (focused scram_final_error_omits_reflected filter: exit 101, both tests fail). A padded proof e= is already rejected without disclosure by the upstream parser and remains covered.
   Red: after the same real SCRAM exchange, typed ErrorResponse SQLSTATE 28P01 retains the actual submitted proof in M despite password masking (scram_server_error_redacts_submitted_client_proof: exit 101).
   Green: all 14 scram_* groups pass, including both reflection channels, full and unpadded proof cases, password masking, preserved typed S/V/C/P fields and safe H text, literal PBKDF2 golden, independent tokio-postgres oracle, iteration bounds, phase/verifier refusal, deadline, notices, and binding policy. Every new rejection checks terminal Closed, empty parameters, reconnect refusal, and actual peer EOF.
@@ -41,7 +41,7 @@ verification_evidence: |
   With the same environment, cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings exits 0. Package cargo fmt --check, UV_NO_SYNC=1 uv run --no-sync python -m tools.scripts.review_setup validate, and git diff --check exit 0. No Python exports or bindings change.
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T00:55:51Z"
-commit: null
+commit: 1987a327
 sources:
   - id: proto-research
     resource: .agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md
@@ -152,7 +152,7 @@ Commit as `feat(postgres): validate SCRAM startup authentication`.
 - `postgres-protocol` `0.6.12` rejects iterations above `100_000` before PBKDF2, but accepts zero and checks only the nonce prefix. Local validation enforces the explicit `1..=100_000` policy and strict nonce extension before `scram.update`; upstream retains all cryptography and full SCRAM grammar checks.
 - The independent `tokio-postgres` oracle validates the same core SCRAM peer exchange with plain and combined mechanism offers; native-only coverage adds notices at every authentication phase because the oracle rejects notices during authentication.
 - The public deadline fixture registers a fresh read waker while the peer withholds Continue, observes its wake before any clock advance, and resumes the unspawned client only after expiry. Assert zero outbound credentials to verify the post-handle/preflush guard independently of the outer timeout.
-- Upstream server-final errors can contain peer-controlled `e=` text; final verification maps failures to a static phase-specific diagnostic. The existing server-text redactor retains the single submitted MD5 response or SCRAM proof so typed errors preserve useful diagnostics without reflecting that credential.
+- Upstream server-final errors can contain peer-controlled `e=` text; `ScramSha256::finish` failures map to the static `Protocol("SCRAM server-final verification failed")` message without a peer error source chain. The private `password_response` holds the submitted MD5 token or SCRAM client proof; the existing free-text redactor replaces exact occurrences of that response and the non-empty configured password. Structured `S`/`V`/`C`/`P`/`p`/`L` fields preserve protocol identity.
 
 [^proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — `postgres-protocol` `0.6.12` SASL SCRAM audit findings.
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Startup SASL authentication and timeout invariants.
