@@ -15,6 +15,7 @@ from urllib.parse import unquote, urlparse
 import msgspec
 
 from vertebra._vertebra import AsyncGcpTokenCache, GcpTokenSnapshot, GoogleCloudAuthError, SyncGcpTokenCache
+from vertebra.storage import _arrow
 from vertebra.typing import ImproperConfigurationError, MissingDependencyError
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json
@@ -1705,6 +1706,16 @@ class SyncObjectStore(_BaseObjectStore):
             if not norm_prefix or str(item.path).startswith(norm_prefix)
         ]
 
+    def iter_arrow_batches(self, key: str) -> Iterator[Any]:
+        """Yield Arrow IPC RecordBatch objects through native streaming reads."""
+        return _arrow.iter_batches_sync(self, key, file_format="arrow-ipc")
+
+    def iter_parquet_batches(
+        self, key: str, *, batch_size: int = 65536, columns: Sequence[str] | None = None
+    ) -> Iterator[Any]:
+        """Yield projected Parquet batches through bounded native range reads."""
+        return _arrow.iter_batches_sync(self, key, file_format="parquet", batch_size=batch_size, columns=columns)
+
     def open_reader(
         self,
         path: str,
@@ -2011,6 +2022,16 @@ class AsyncObjectStore(_BaseObjectStore):
             for item in items
             if not norm_prefix or str(item.path).startswith(norm_prefix)
         ]
+
+    def iter_arrow_batches(self, key: str) -> AsyncIterator[Any]:
+        """Yield Arrow IPC RecordBatch objects through native asynchronous streaming reads."""
+        return _arrow.iter_batches_async(self, key, file_format="arrow-ipc")
+
+    def iter_parquet_batches(
+        self, key: str, *, batch_size: int = 65536, columns: Sequence[str] | None = None
+    ) -> AsyncIterator[Any]:
+        """Yield projected Parquet batches through bounded native range reads."""
+        return _arrow.iter_batches_async(self, key, file_format="parquet", batch_size=batch_size, columns=columns)
 
     def open_reader(
         self,

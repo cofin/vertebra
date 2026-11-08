@@ -1,10 +1,12 @@
 """Unit tests for vertebra.storage (SyncObjectStore, AsyncObjectStore, zero-copy memoryview, and V4 presigning)."""
 
 import ast
+import asyncio
+import contextlib
 import sys
 import threading
 from collections.abc import AsyncIterator, Iterator
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
 
@@ -21,6 +23,7 @@ from vertebra.storage import (
     ObjectMeta,
     PutResult,
     RangeNotSatisfiableError,
+    S3Config,
     SigningConfig,
     StreamingStorageResponse,
     SyncObjectStore,
@@ -572,3 +575,370 @@ def test_storage_response_rejects_malformed_entity_tags(etag: str, in_headers: b
             else StreamingStorageResponse(data=b"body", etag=etag)
         )
         response.to_fastpath_tuple()
+
+
+@pytest.mark.parametrize("file_format", ["arrow-ipc", "parquet"])
+@pytest.mark.anyio
+async def test_storage_arrow_batch_readers(file_format: str) -> None:
+    """Public sync and async readers decode exact batches and Parquet projections."""
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    table = pa.table({"id": range(250), "label": ["value"] * 250})
+    sink = pa.BufferOutputStream()
+    if file_format == "parquet":
+        pq.write_table(table, sink, row_group_size=100)
+    else:
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table, max_chunksize=100)
+    store = SyncObjectStore("memory://")
+    store.put("batches", sink.getvalue())
+    if file_format == "parquet":
+        sync_batches = list(store.iter_parquet_batches("batches", batch_size=100, columns=["id"]))
+        async_batches = [
+            batch async for batch in store.to_async().iter_parquet_batches("batches", batch_size=100, columns=["id"])
+        ]
+        expected = table.select(["id"])
+    else:
+        sync_batches = list(store.iter_arrow_batches("batches"))
+        async_batches = [batch async for batch in store.to_async().iter_arrow_batches("batches")]
+        expected = table
+    assert [batch.num_rows for batch in sync_batches] == [100, 100, 50]
+    assert pa.Table.from_batches(sync_batches).equals(expected)
+    assert pa.Table.from_batches(async_batches).equals(expected)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("empty", [False, True])
+async def test_storage_arrow_ipc_file_table_fallback(empty: bool) -> None:
+    """Seekable IPC file reads preserve data and zero-row schemas."""
+    from vertebra.storage._arrow import read_table_async, read_table_sync
+
+    pa = pytest.importorskip("pyarrow")
+    table = pa.table({"id": pa.array([] if empty else [1, 2], type=pa.int64())})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_file(sink, table.schema) as writer:
+        writer.write_table(table)
+    store = SyncObjectStore("memory://")
+    store.put("file", sink.getvalue())
+    assert read_table_sync(store, "file", file_format="arrow-ipc").equals(table)
+    assert (await read_table_async(store.to_async(), "file", file_format="arrow-ipc")).equals(table)
+
+
+@pytest.mark.anyio
+async def test_storage_arrow_dictionary_stream_and_early_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One persistent IPC decoder retains dictionary state and closes native streams."""
+    pa = pytest.importorskip("pyarrow")
+    labels = pa.DictionaryArray.from_arrays(pa.array([0, 1]), pa.array(["one", "two"]))
+    batch = pa.record_batch([labels], names=["label"])
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, batch.schema) as writer:
+        writer.write_batch(batch)
+        writer.write_batch(batch)
+    store = SyncObjectStore("memory://")
+    store.put("dictionary", sink.getvalue())
+    streams: list[Any] = []
+    original = AsyncObjectStore.get_stream
+
+    def observe_stream(self: AsyncObjectStore, *args: Any, **kwargs: Any) -> Any:
+        stream = original(self, *args, **kwargs)
+        streams.append(stream)
+        return stream
+
+    monkeypatch.setattr(AsyncObjectStore, "get_stream", observe_stream)
+    batches = store.to_async().iter_arrow_batches("dictionary")
+    assert (await anext(batches)).column(0).to_pylist() == ["one", "two"]
+    assert (await anext(batches)).column(0).to_pylist() == ["one", "two"]
+    await batches.aclose()
+    assert len(streams) == 1
+    assert streams[0].ag_frame is None
+    assert [item.column(0).to_pylist() for item in store.iter_arrow_batches("dictionary")] == [
+        ["one", "two"],
+        ["one", "two"],
+    ]
+
+
+@pytest.mark.anyio
+async def test_storage_parquet_reader_native_range_demand(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Later rowgroups remain unread until the consumer asks for their batches."""
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    table = pa.table({"id": range(300), "blob": [f"{index}:" + "x" * 2048 for index in range(300)]})
+    sink = pa.BufferOutputStream()
+    pq.write_table(table, sink, row_group_size=100, compression=None, use_dictionary=False)
+    payload = sink.getvalue()
+    metadata = pq.ParquetFile(pa.BufferReader(payload)).metadata
+    second_offset = metadata.row_group(1).column(0).data_page_offset
+    store = SyncObjectStore("memory://")
+    store.put("groups", payload)
+    ranges: list[tuple[int, int]] = []
+    handles: list[AsyncReadableFile] = []
+    original_range = AsyncObjectStore.get_range
+    original_open = AsyncObjectStore.open_reader
+
+    async def observe_range(self: AsyncObjectStore, key: str, offset: int, length: int) -> bytes:
+        ranges.append((offset, length))
+        return await original_range(self, key, offset, length)
+
+    def observe_open(self: AsyncObjectStore, *args: Any, **kwargs: Any) -> AsyncReadableFile:
+        handle = original_open(self, *args, **kwargs)
+        handles.append(handle)
+        return handle
+
+    def reject_materialization(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("batch readers must use native streams or ranges")
+
+    monkeypatch.setattr(AsyncObjectStore, "get_range", observe_range)
+    monkeypatch.setattr(AsyncObjectStore, "open_reader", observe_open)
+    monkeypatch.setattr(AsyncObjectStore, "get", reject_materialization)
+    monkeypatch.setattr(AsyncObjectStore, "get_view", reject_materialization)
+    monkeypatch.setattr(SyncObjectStore, "get_range", reject_materialization)
+    batches = store.to_async().iter_parquet_batches("groups", batch_size=100)
+    first = await anext(batches)
+    assert first.equals(table.slice(0, 100).to_batches()[0])
+    assert payload.size > 3 * 65536
+    data_ranges = [(offset, length) for offset, length in ranges if offset != payload.size - 65536]
+    assert data_ranges
+    assert all(offset + length <= second_offset for offset, length in data_ranges)
+    checkpoint = ranges.copy()
+    await asyncio.sleep(0)
+    assert ranges == checkpoint
+    assert (await anext(batches)).equals(table.slice(100, 100).to_batches()[0])
+    assert any(offset == second_offset for offset, _ in ranges)
+    await batches.aclose()
+    assert len(handles) == 1
+    assert handles[0].closed
+
+
+@pytest.mark.anyio
+async def test_storage_parquet_explicit_prefetch_option(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The private SQLSpec seam forwards an explicit prefetch opt-in."""
+    from vertebra.storage._arrow import iter_batches_async
+
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    table = pa.table({"id": [1, 2]})
+    sink = pa.BufferOutputStream()
+    pq.write_table(table, sink)
+    store = SyncObjectStore("memory://")
+    store.put("prefetch", sink.getvalue())
+    seen: list[bool] = []
+    original = pq.ParquetFile
+
+    def observe_options(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs["pre_buffer"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pq, "ParquetFile", observe_options)
+    result = [
+        batch
+        async for batch in iter_batches_async(
+            store.to_async(), "prefetch", file_format="parquet", options={"pre_buffer": True}
+        )
+    ]
+    assert pa.Table.from_batches(result).equals(table)
+    assert seen == [True]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("batch_size", [0, -1])
+async def test_storage_parquet_rejects_batch_size_before_io(batch_size: int) -> None:
+    """Invalid demand sizes fail before looking up a missing native object."""
+    store = SyncObjectStore("memory://")
+    with pytest.raises(ValueError, match="batch_size"):
+        next(store.iter_parquet_batches("missing", batch_size=batch_size))
+    with pytest.raises(ValueError, match="batch_size"):
+        await anext(store.to_async().iter_parquet_batches("missing", batch_size=batch_size))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("file_format", ["arrow-ipc", "parquet"])
+async def test_storage_arrow_corruption_closes_sources(file_format: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Corrupt codecs raise their original errors and close real native sources."""
+    pa = pytest.importorskip("pyarrow")
+    store = SyncObjectStore("memory://")
+    store.put("corrupt", b"truncated invalid codec")
+    sources: list[Any] = []
+    original = AsyncObjectStore.open_reader if file_format == "parquet" else AsyncObjectStore.get_stream
+
+    def observe_source(self: AsyncObjectStore, *args: Any, **kwargs: Any) -> Any:
+        source = original(self, *args, **kwargs)
+        sources.append(source)
+        return source
+
+    monkeypatch.setattr(AsyncObjectStore, "open_reader" if file_format == "parquet" else "get_stream", observe_source)
+    async_store = store.to_async()
+    iterator = (
+        async_store.iter_parquet_batches("corrupt")
+        if file_format == "parquet"
+        else async_store.iter_arrow_batches("corrupt")
+    )
+    with pytest.raises(pa.ArrowInvalid):
+        await anext(iterator)
+    assert len(sources) == 1
+    assert sources[0].closed if file_format == "parquet" else sources[0].ag_frame is None
+    sync_iterator = (
+        store.iter_parquet_batches("corrupt") if file_format == "parquet" else store.iter_arrow_batches("corrupt")
+    )
+    with pytest.raises(pa.ArrowInvalid):
+        next(sync_iterator)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("file_format", ["arrow-ipc", "parquet"])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_storage_arrow_native_network_barrier(
+    file_format: str, cancel: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real native network reads keep the loop responsive and unwind before close."""
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    table = pa.table({"id": [1, 2]})
+    sink = pa.BufferOutputStream()
+    if file_format == "parquet":
+        pq.write_table(table, sink)
+    else:
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+    payload = sink.getvalue().to_pybytes()
+    entered = threading.Event()
+    release = threading.Event()
+    paths: list[str] = []
+
+    class RangeHandler(BaseHTTPRequestHandler):
+        def do_HEAD(self) -> None:
+            paths.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("ETag", '"fixture"')
+            self.send_header("Last-Modified", "Mon, 01 Jan 2024 00:00:00 GMT")
+            self.end_headers()
+
+        def do_GET(self) -> None:
+            paths.append(self.path)
+            entered.set()
+            if not release.wait(10):
+                return
+            range_header = self.headers.get("Range")
+            if range_header:
+                start, end = range_header.removeprefix("bytes=").split("-", 1)
+                offset = int(start)
+                limit = int(end) + 1 if end else len(payload)
+                body = payload[offset:limit]
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {offset}-{limit - 1}/{len(payload)}")
+            else:
+                body = payload
+                self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("ETag", '"fixture"')
+            self.end_headers()
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            _ = (format, args)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RangeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    sources: list[Any] = []
+    original = AsyncObjectStore.open_reader if file_format == "parquet" else AsyncObjectStore.get_stream
+
+    def observe_source(self: AsyncObjectStore, *args: Any, **kwargs: Any) -> Any:
+        source = original(self, *args, **kwargs)
+        sources.append(source)
+        return source
+
+    monkeypatch.setattr(AsyncObjectStore, "open_reader" if file_format == "parquet" else "get_stream", observe_source)
+    store = AsyncObjectStore(
+        S3Config(
+            bucket="codec-fixture",
+            region="us-east-1",
+            endpoint=f"http://127.0.0.1:{server.server_port}",
+            access_key_id="test",
+            secret_access_key="test",
+            allow_http=True,
+        )
+    )
+    batches = (
+        store.iter_parquet_batches("data.parquet")
+        if file_format == "parquet"
+        else store.iter_arrow_batches("data.parquet")
+    )
+    before = asyncio.all_tasks()
+    task = asyncio.create_task(anext(batches))
+    try:
+        async with asyncio.timeout(5):
+            while not entered.is_set():
+                if task.done():
+                    await task
+                await asyncio.sleep(0.001)
+        assert await asyncio.create_task(asyncio.sleep(0, result="responsive")) == "responsive"
+        if cancel:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 2)
+        else:
+            release.set()
+            assert (await asyncio.wait_for(task, 5)).equals(table.to_batches()[0])
+            await batches.aclose()
+        assert len(sources) == 1
+        assert sources[0].closed if file_format == "parquet" else sources[0].ag_frame is None
+        assert all(path == "/codec-fixture/data.parquet" for path in paths)
+        assert not (asyncio.all_tasks() - before)
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        await batches.aclose()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("file_format", ["arrow-ipc", "parquet"])
+async def test_storage_arrow_schema_only_batches(file_format: str) -> None:
+    """Schema-only streams yield no batches without losing full-Table schema."""
+    from vertebra.storage._arrow import read_table_async, read_table_sync
+
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    table = pa.table({"id": pa.array([], type=pa.int64())})
+    sink = pa.BufferOutputStream()
+    if file_format == "parquet":
+        pq.write_table(table, sink)
+    else:
+        with pa.ipc.new_stream(sink, table.schema):
+            pass
+    store = SyncObjectStore("memory://")
+    store.put("empty", sink.getvalue())
+    sync_batches = (
+        store.iter_parquet_batches("empty") if file_format == "parquet" else store.iter_arrow_batches("empty")
+    )
+    assert list(sync_batches) == []
+    async_store = store.to_async()
+    async_batches = (
+        async_store.iter_parquet_batches("empty")
+        if file_format == "parquet"
+        else async_store.iter_arrow_batches("empty")
+    )
+    assert [batch async for batch in async_batches] == []
+    assert read_table_sync(store, "empty", file_format=file_format).equals(table)
+    assert (await read_table_async(async_store, "empty", file_format=file_format)).equals(table)
+
+
+@pytest.mark.anyio
+async def test_storage_arrow_missing_codec_before_io(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Optional Arrow dependencies fail explicitly before native reads begin."""
+    store = SyncObjectStore("memory://")
+    with monkeypatch.context() as context:
+        context.setitem(sys.modules, "pyarrow", None)
+        reset_dependency_cache()
+        with pytest.raises(MissingDependencyError, match="pyarrow"):
+            next(store.iter_arrow_batches("missing"))
+        with pytest.raises(MissingDependencyError, match="pyarrow"):
+            await anext(store.to_async().iter_arrow_batches("missing"))
+    reset_dependency_cache()
