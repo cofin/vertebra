@@ -1,14 +1,15 @@
 //! Multi-backend `ObjectStoreEngine` wrapping Apache `object_store`.
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use object_store::aws::AmazonS3Builder;
 use object_store::azure::MicrosoftAzureBuilder;
-use object_store::gcp::GoogleCloudStorageBuilder;
+use object_store::client::{HttpClient, HttpConnector, ReqwestConnector};
+use object_store::gcp::{GoogleCloudStorage, GoogleCloudStorageBuilder, GoogleConfigKey};
 use object_store::http::HttpBuilder;
 use object_store::local::LocalFileSystem;
 use object_store::memory::InMemory;
@@ -21,7 +22,7 @@ use thiserror::Error;
 use url::Url;
 use vertebra_core::gcp_auth::GcpTokenCache;
 
-use crate::conditional::{PublicationBackend, PublishCondition};
+use crate::conditional::{GcsStageConfig, PublicationBackend, PublishCondition};
 
 use crate::oci::{
     OCI_UNIFORM_PART_SIZE, OciCavageCredentials, OciObjectStore, UniformPartAccumulator,
@@ -181,6 +182,82 @@ pub(crate) fn build_store_attributes(
         );
     }
     attrs
+}
+
+#[derive(Debug)]
+struct CapturingConnector(Arc<Mutex<Option<object_store::ClientOptions>>>);
+
+impl HttpConnector for CapturingConnector {
+    fn connect(&self, options: &object_store::ClientOptions) -> object_store::Result<HttpClient> {
+        *self.0.lock().map_err(|_| object_store::Error::Generic {
+            store: "GCS",
+            source: "GCS client configuration capture unavailable".into(),
+        })? = Some(options.clone());
+        ReqwestConnector::default().connect(options)
+    }
+}
+
+pub(crate) fn build_gcs_store(
+    builder: GoogleCloudStorageBuilder,
+) -> Result<(Arc<GoogleCloudStorage>, GcsStageConfig), StorageError> {
+    #[derive(serde::Deserialize)]
+    struct Endpoint {
+        gcs_base_url: Option<String>,
+    }
+    let base = builder.get_config_value(&GoogleConfigKey::BaseUrl);
+    let bucket = builder.get_config_value(&GoogleConfigKey::Bucket);
+    let skip_signature = builder.get_config_value(&GoogleConfigKey::SkipSignature);
+    let path = builder.get_config_value(&GoogleConfigKey::ServiceAccount);
+    let key = builder.get_config_value(&GoogleConfigKey::ServiceAccountKey);
+    let endpoint = (|| -> Result<Option<Endpoint>, StorageError> {
+        let data = match (path, key) {
+            (Some(path), None) if base.is_none() => Some(std::fs::read(path).map_err(|_| {
+                StorageError::InvalidInput("GCS endpoint metadata unavailable".into())
+            })?),
+            (None, Some(key)) if base.is_none() => Some(key.into_bytes()),
+            _ => None,
+        };
+        data.map(|data| {
+            serde_json::from_slice(&data)
+                .map_err(|_| StorageError::InvalidInput("invalid GCS endpoint metadata".into()))
+        })
+        .transpose()
+    })();
+    let captured = Arc::new(Mutex::new(None));
+    let store = Arc::new(
+        builder
+            .with_http_connector(CapturingConnector(captured.clone()))
+            .build()?,
+    );
+    let endpoint = endpoint?;
+    let base = base
+        .or_else(|| endpoint.and_then(|value| value.gcs_base_url))
+        .unwrap_or_else(|| "https://storage.googleapis.com".into());
+    let base =
+        Url::parse(&base).map_err(|_| StorageError::InvalidInput("invalid GCS endpoint".into()))?;
+    let client_options = captured
+        .lock()
+        .map_err(|_| {
+            StorageError::InvalidInput("GCS client configuration capture unavailable".into())
+        })?
+        .take()
+        .ok_or_else(|| StorageError::InvalidInput("missing GCS client configuration".into()))?;
+    let skip_signature = skip_signature.is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "1" | "true" | "on" | "yes" | "y"
+        )
+    });
+    Ok((
+        store,
+        GcsStageConfig {
+            base,
+            bucket: bucket
+                .ok_or_else(|| StorageError::InvalidInput("missing GCS bucket".into()))?,
+            client_options,
+            skip_signature,
+        },
+    ))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -561,10 +638,13 @@ impl ObjectStoreEngine {
                 if skip_signature {
                     builder = builder.with_skip_signature(true);
                 }
-                let store = Arc::new(builder.build()?);
+                let (store, config) = build_gcs_store(builder)?;
                 Ok(Self {
                     inner: store.clone(),
-                    publication: PublicationBackend::Gcs(store),
+                    publication: PublicationBackend::Gcs {
+                        store,
+                        config: Arc::new(config),
+                    },
                     scheme: "gs".to_string(),
                 })
             }
@@ -1181,5 +1261,349 @@ mod tests {
                 0
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod gcs_config_tests {
+    use super::*;
+    use object_store::{ClientConfigKey, ClientOptions};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    struct Responder {
+        base: String,
+        count: Arc<AtomicUsize>,
+        requests: Arc<std::sync::Mutex<Vec<String>>>,
+        stop: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Responder {
+        fn new() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let count = Arc::new(AtomicUsize::new(0));
+            let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let (seen, captured, done) = (count.clone(), requests.clone(), stop.clone());
+            let thread = std::thread::spawn(move || {
+                while !done.load(Ordering::Acquire) {
+                    let Ok((mut socket, _)) = listener.accept() else {
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    };
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    let mut bytes = Vec::new();
+                    while !bytes.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0];
+                        if socket.read(&mut byte).unwrap_or(0) == 0 {
+                            break;
+                        }
+                        bytes.push(byte[0]);
+                    }
+                    captured
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8(bytes).unwrap());
+                    seen.fetch_add(1, Ordering::Release);
+                    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nETag: \"etag\"\r\nLast-Modified: Wed, 01 Jan 2025 00:00:00 GMT\r\nx-goog-generation: 7\r\nConnection: close\r\n\r\nsdk").unwrap();
+                }
+            });
+            Self {
+                base,
+                count,
+                requests,
+                stop,
+                thread: Some(thread),
+            }
+        }
+    }
+
+    impl Drop for Responder {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            self.thread.take().unwrap().join().unwrap();
+        }
+    }
+
+    fn account(base: &str) -> String {
+        serde_json::json!({"private_key":"unused", "private_key_id":"unused", "client_email":"fixture@example.invalid", "disable_oauth":true, "gcs_base_url":base}).to_string()
+    }
+
+    #[tokio::test]
+    async fn gcs_singleton_sources_and_explicit_override_preserve_sdk_reads() {
+        for path_source in [false, true] {
+            for explicit in [false, true] {
+                let fallback = Responder::new();
+                let override_server = Responder::new();
+                let file = tempfile::NamedTempFile::new().unwrap();
+                std::fs::write(file.path(), account(&fallback.base)).unwrap();
+                let mut builder = GoogleCloudStorageBuilder::new()
+                    .with_bucket_name("bucket")
+                    .with_client_options(ClientOptions::new().with_allow_http(true));
+                builder = if path_source {
+                    builder.with_service_account_path(file.path().to_str().unwrap())
+                } else {
+                    builder.with_service_account_key(account(&fallback.base))
+                };
+                if explicit {
+                    builder = builder.with_base_url(&override_server.base);
+                }
+                let (store, config) = build_gcs_store(builder).unwrap();
+                assert_eq!(config.bucket, "bucket");
+                assert!(!config.skip_signature);
+                assert_eq!(
+                    config.base.as_str().trim_end_matches('/'),
+                    if explicit {
+                        &override_server.base
+                    } else {
+                        &fallback.base
+                    }
+                );
+                assert_eq!(fallback.count.load(Ordering::Acquire), 0);
+                assert_eq!(override_server.count.load(Ordering::Acquire), 0);
+                assert!(
+                    store
+                        .credentials()
+                        .get_credential()
+                        .await
+                        .unwrap()
+                        .bearer
+                        .is_empty()
+                );
+                assert_eq!(
+                    store
+                        .get(&StorePath::from("key"))
+                        .await
+                        .unwrap()
+                        .bytes()
+                        .await
+                        .unwrap(),
+                    Bytes::from_static(b"sdk")
+                );
+                let target = if explicit {
+                    &override_server
+                } else {
+                    &fallback
+                };
+                let unused = if explicit {
+                    &fallback
+                } else {
+                    &override_server
+                };
+                assert_eq!(target.count.load(Ordering::Acquire), 1);
+                assert_eq!(unused.count.load(Ordering::Acquire), 0);
+                let request = target.requests.lock().unwrap()[0].clone();
+                assert!(
+                    request.starts_with("GET /bucket/key HTTP/1.1\r\n"),
+                    "{request}"
+                );
+                assert!(!request.to_ascii_lowercase().contains("authorization:"));
+            }
+        }
+    }
+
+    #[test]
+    fn gcs_dual_service_account_sources_keep_sdk_rejection() {
+        let responder = Responder::new();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), account(&responder.base)).unwrap();
+        let result = build_gcs_store(
+            GoogleCloudStorageBuilder::new()
+                .with_bucket_name("bucket")
+                .with_service_account_path(file.path().to_str().unwrap())
+                .with_service_account_key(account(&responder.base)),
+        );
+        let error = result.err().unwrap();
+        assert!(matches!(
+            error,
+            StorageError::ObjectStore(object_store::Error::Generic { store: "GCS", .. })
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("One of service account path or service account key may be provided."),
+            "{error}"
+        );
+        assert_eq!(responder.count.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn gcs_final_transport_options_preserve_real_sdk_request() {
+        let responder = Responder::new();
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "x-capture-fixture",
+            http::HeaderValue::from_static("retained"),
+        );
+        let options = ClientOptions::new()
+            .with_allow_http(true)
+            .with_allow_invalid_certificates(true)
+            .with_timeout(Duration::from_secs(3))
+            .with_connect_timeout(Duration::from_secs(2))
+            .with_proxy_url("http://127.0.0.1:1")
+            .with_proxy_excludes("127.0.0.1")
+            .with_default_headers(headers);
+        let credentials: object_store::gcp::GcpCredentialProvider = Arc::new(
+            object_store::StaticCredentialProvider::new(object_store::gcp::GcpCredential {
+                bearer: "fixture-token".into(),
+            }),
+        );
+        let builder = GoogleCloudStorageBuilder::new()
+            .with_bucket_name("bucket")
+            .with_base_url(&responder.base)
+            .with_skip_signature(true)
+            .with_credentials(credentials.clone())
+            .with_client_options(options.clone());
+        let (store, config) = build_gcs_store(builder).unwrap();
+        assert!(Arc::ptr_eq(store.credentials(), &credentials));
+        assert_eq!(config.base.as_str().trim_end_matches('/'), responder.base);
+        assert_eq!(config.bucket, "bucket");
+        assert!(config.skip_signature);
+        for key in [
+            ClientConfigKey::AllowHttp,
+            ClientConfigKey::AllowInvalidCertificates,
+            ClientConfigKey::Timeout,
+            ClientConfigKey::ConnectTimeout,
+            ClientConfigKey::ProxyUrl,
+            ClientConfigKey::ProxyExcludes,
+        ] {
+            assert_eq!(
+                config.client_options.get_config_value(&key),
+                options.get_config_value(&key),
+                "{key:?}"
+            );
+        }
+        assert_eq!(
+            config.client_options.get_default_headers(),
+            options.get_default_headers()
+        );
+        assert_eq!(responder.count.load(Ordering::Acquire), 0);
+        assert_eq!(
+            store
+                .get(&StorePath::from("key"))
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            Bytes::from_static(b"sdk")
+        );
+        assert!(
+            responder.requests.lock().unwrap()[0]
+                .to_ascii_lowercase()
+                .contains("x-capture-fixture: retained\r\n")
+        );
+        assert_eq!(
+            options
+                .get_config_value(&ClientConfigKey::AllowHttp)
+                .as_deref(),
+            Some("true")
+        );
+    }
+    #[test]
+    fn gcs_engine_environment_override_shares_sdk_identity() {
+        if std::env::var_os("VERTEBRA_GCS_CAPTURE_CHILD").is_none() {
+            let fallback = Responder::new();
+            let target = Responder::new();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "store::gcs_config_tests::gcs_engine_environment_override_shares_sdk_identity",
+                    "--nocapture",
+                ])
+                .env("VERTEBRA_GCS_CAPTURE_CHILD", "1")
+                .env("GOOGLE_BASE_URL", &target.base)
+                .env("GOOGLE_SERVICE_ACCOUNT_KEY", account(&fallback.base))
+                .env_remove("GOOGLE_SERVICE_ACCOUNT")
+                .env_remove("GOOGLE_SERVICE_ACCOUNT_PATH")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            assert_eq!(target.count.load(Ordering::Acquire), 1);
+            assert_eq!(fallback.count.load(Ordering::Acquire), 0);
+            return;
+        }
+        let engine = ObjectStoreEngine::new(BackendConfig::Gcs {
+            bucket: "bucket".into(),
+            service_account_path: None,
+            service_account_key: None,
+            application_credentials_path: None,
+            access_token: None,
+            credential_cache: None,
+            endpoint: None,
+            allow_http: true,
+            skip_signature: false,
+        })
+        .unwrap();
+        let cloned = engine.clone();
+        let PublicationBackend::Gcs { store, config } = &engine.publication else {
+            panic!("GCS backend")
+        };
+        let PublicationBackend::Gcs { store: other, .. } = &cloned.publication else {
+            panic!("GCS clone")
+        };
+        assert!(Arc::ptr_eq(store, other));
+        let ordinary: Arc<dyn ObjectStore> = store.clone();
+        assert!(Arc::ptr_eq(&engine.inner, &ordinary));
+        assert!(Arc::ptr_eq(store.credentials(), other.credentials()));
+        assert_eq!(
+            config.base.as_str().trim_end_matches('/'),
+            std::env::var("GOOGLE_BASE_URL").unwrap()
+        );
+        assert_eq!(config.bucket, "bucket");
+        assert!(!config.skip_signature);
+        assert_eq!(
+            block_on_storage(engine.get("key")).unwrap(),
+            Bytes::from_static(b"sdk")
+        );
+    }
+    #[test]
+    fn gcs_sdk_defaults_and_configuration_errors_are_preserved() {
+        let credentials: object_store::gcp::GcpCredentialProvider = Arc::new(
+            object_store::StaticCredentialProvider::new(object_store::gcp::GcpCredential {
+                bearer: "fixture-token".into(),
+            }),
+        );
+        let builder = GoogleCloudStorageBuilder::new()
+            .with_bucket_name("bucket")
+            .with_credentials(credentials)
+            .with_config(GoogleConfigKey::SkipSignature, "ON");
+        let (_, config) = build_gcs_store(builder.clone()).unwrap();
+        assert_eq!(config.base.as_str(), "https://storage.googleapis.com/");
+        assert!(config.skip_signature);
+        let error = build_gcs_store(builder.with_config(GoogleConfigKey::SkipSignature, "invalid"))
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error,
+            StorageError::ObjectStore(object_store::Error::Generic {
+                store: "Config",
+                ..
+            })
+        ));
+        let responder = Responder::new();
+        let error = build_gcs_store(
+            GoogleCloudStorageBuilder::new()
+                .with_bucket_name("bucket")
+                .with_base_url(&responder.base)
+                .with_service_account_key(
+                    r#"{"private_key":"fixture-private-material","client_email": false}"#,
+                ),
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(
+            error,
+            StorageError::ObjectStore(object_store::Error::Generic { store: "GCS", .. })
+        ));
+        assert!(!error.to_string().contains("fixture-private-material"));
+        assert_eq!(responder.count.load(Ordering::Acquire), 0);
     }
 }

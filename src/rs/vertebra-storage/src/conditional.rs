@@ -47,12 +47,43 @@ impl PublishCondition {
 }
 
 #[derive(Clone)]
+pub(crate) struct GcsStageConfig {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "consumed by ch14:t01 GCS publication")
+    )]
+    pub(crate) base: url::Url,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "consumed by ch14:t01 GCS publication")
+    )]
+    pub(crate) bucket: String,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "consumed by ch14:t01 GCS publication")
+    )]
+    pub(crate) client_options: object_store::ClientOptions,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "consumed by ch14:t01 GCS publication")
+    )]
+    pub(crate) skip_signature: bool,
+}
+
+#[derive(Clone)]
 pub(crate) enum PublicationBackend {
     Memory(Arc<InMemory>),
     Local(Arc<LocalFileSystem>),
     S3(Arc<AmazonS3>),
     Azure(Arc<MicrosoftAzure>),
-    Gcs(Arc<GoogleCloudStorage>),
+    Gcs {
+        store: Arc<GoogleCloudStorage>,
+        #[cfg_attr(
+            not(test),
+            expect(dead_code, reason = "consumed by ch14:t01 GCS publication")
+        )]
+        config: Arc<GcsStageConfig>,
+    },
     Oci(Arc<OciObjectStore>),
     Custom(Arc<dyn ObjectStore>),
 }
@@ -93,7 +124,7 @@ impl PublicationBackend {
             Self::Local(store) => store.as_ref(),
             Self::S3(store) => store.as_ref(),
             Self::Azure(store) => store.as_ref(),
-            Self::Gcs(store) => store.as_ref(),
+            Self::Gcs { store, .. } => store.as_ref(),
             Self::Oci(store) => store.as_ref(),
             Self::Custom(store) => store.as_ref(),
         };
