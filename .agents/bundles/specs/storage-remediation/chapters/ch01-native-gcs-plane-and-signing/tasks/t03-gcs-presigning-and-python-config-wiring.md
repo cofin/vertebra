@@ -5,7 +5,7 @@ chapter_id: ch01-native-gcs-plane-and-signing
 title: Pool IAM signBlob clients, add custom GCS endpoint presigning, and wire PyO3 _storage bindings and _storage.pyi
 description: Pool reqwest::Client instances in signing.rs, forward x-goog-user-project on IAM signBlob, add endpoint to GcsSignConfig and py_sign_gcs_v4_iam_url(_async), accept token_cache_capsule on PySyncObjectStore::new and PyAsyncObjectStore::new, and synchronize _storage.pyi.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -26,18 +26,18 @@ tests:
 estimated_loc: 185
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: executor
+claimed_at: "2026-11-08T22:46:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-08T22:54:00Z"
+last_verified_commit: 0e43380e
+verification_evidence: "cargo test -p vertebra-storage (27 passed), mypy.stubtest vertebra._storage (0 issues), pytest test_signing.py (7 passed), cargo clippy -D warnings (0)"
 created_at: "2026-11-08T20:30:00Z"
-updated_at: "2026-11-08T20:30:00Z"
-commit: null
+updated_at: "2026-11-08T22:54:00Z"
+commit: 0e43380e
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:30:00Z"
@@ -117,8 +117,8 @@ uv run --no-sync pytest src/py/tests/unit/storage/test_signing.py -q
 
 ## Acceptance Criteria
 
-- [ ] `signing.rs` reuses `LazyLock<reqwest::Client>` pools and attaches `x-goog-user-project` on IAM `signBlob` (R1.3).
-- [ ] `GcsSignConfig`, `py_sign_gcs_v4_iam_url`, `py_sign_gcs_v4_iam_url_async`, and `PySyncObjectStore::new` / `PyAsyncObjectStore::new` match `_storage.pyi` (`mypy.stubtest vertebra._storage` exits `0`) (R1.2, R1.3).
+- [x] `signing.rs` reuses `LazyLock<reqwest::Client>` pools and attaches `x-goog-user-project` on IAM `signBlob` (R1.3).
+- [x] `GcsSignConfig`, `py_sign_gcs_v4_iam_url`, `py_sign_gcs_v4_iam_url_async`, and `PySyncObjectStore::new` / `PyAsyncObjectStore::new` match `_storage.pyi` (`mypy.stubtest vertebra._storage` exits `0`) (R1.2, R1.3).
 
 ## Notes & Discoveries
 
