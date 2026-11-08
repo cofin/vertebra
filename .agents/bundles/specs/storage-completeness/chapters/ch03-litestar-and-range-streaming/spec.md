@@ -10,11 +10,11 @@ planning_status: complete
 depends_on_chapters:
   - ch01-native-engine-and-auth
 replan_trigger: null
-current_task: "storage-completeness:ch03:t02"
+current_task: null
 plan_revision: 8
 plan_commit: 222cbf99
-state_revision: 0
-last_verified_checkpoint: null
+state_revision: 1
+last_verified_checkpoint: 99317bed609e62a73d8b0036d444c1268ac2eb1d
 last_reviewed_commit: null
 created_at: "2026-11-07T04:15:00Z"
 updated_at: "2026-11-08T02:25:35Z"
@@ -74,7 +74,7 @@ Parent roadmap: [spec.md](../../spec.md); depends on [ch01-native-engine-and-aut
 - **R7.2 (`ch03:t02`)**: Add `ObjectStoreLitestarStore(_StoreBase)` (`set`, `get`, `delete`, `delete_all`, `exists`, `expires_in`, `with_namespace`) and `ObjectStoreFileSystemAdapter` (`info`, `open`) over `AsyncObjectStore` in `src/py/vertebra/extensions/litestar/store.py` and export both in `src/py/vertebra/extensions/litestar/__init__.py`.
 
 
-The Store uses the fixed private `vertebra-store/` prefix, hierarchical validated namespace segments, and one UTF-8 hex-encoded segment per logical key. Parent bulk deletion includes descendants and preserves sibling prefixes and unrelated objects. Every write carries the versioned TTL envelope; malformed/unsupported envelopes raise `ValueError`. Renewal rewrites only live expiring entries; missing, expired, and immortal entries return `None` from `expires_in`, while live entries return nonnegative whole seconds.
+The Store uses the fixed private `vertebra-store/` prefix, hierarchical validated namespace segments, and one UTF-8 hex-encoded segment per logical key. Parent bulk deletion includes descendants and preserves sibling prefixes and unrelated objects. Native listed paths and continuation cursors are unquoted before reuse so escaped `%7E` retains logical `~` key identity across deletion pages. Every write carries the versioned TTL envelope; malformed/unsupported envelopes raise `ValueError`. Renewal rewrites only live expiring entries; missing, expired, and immortal entries return `None` from `expires_in`, while live entries return nonnegative whole seconds.
 
 Mount the filesystem adapter with `create_static_files_router(path="/assets", directories=["/"], file_system=adapter, resolve_symlinks=False)`. It maps virtual-root paths beneath its configured base prefix, rejects parent segments, resolves directories via bounded listing, and reuses `AsyncObjectStore.open_reader` (async read/context manager, synchronous seek/tell). Static GET/HEAD acceptance is separate from Range acceptance: a test handler wraps t01 `aiter_chunks()` in Litestar `Stream`, preserving response status and headers and explicitly converting chunks to bytes. Both adapters export through TYPE_CHECKING imports, `__all__`, and `_EXPORT_MAP`; no new response bridge API is added.
 
@@ -96,7 +96,7 @@ Mount the filesystem adapter with `create_static_files_router(path="/assets", di
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/0 files documented in ch03]` (documented in `ch04:t03` across `docs/usage/storage.md` and `.agents/bundles/knowledge/domains/storage/object-storage.md`).
+Progress: `[2/2 files documented in ch03]`. `.agents/bundles/knowledge/domains/extensions/litestar.md` documents the implemented Store, virtual filesystem, lazy exports, and explicit Litestar Stream response boundary. `.agents/bundles/knowledge/domains/storage/object-storage.md` documents the completed Range/native streaming and object-store consumer contracts. The storage knowledge target is already included in the root documentation manifest. Consumer guides remain owned by `ch05:t02`.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -108,14 +108,14 @@ Progress: `[0/0 files documented in ch03]` (documented in `ch04:t03` across `doc
 ## 5. Implementation Plan
 
 - [x] [a0888371a54253624c77c4b817875f9878f54b28] storage-completeness:ch03:t01 — Implement RFC 9110 Range/206/416 StreamingStorageResponse and async chunk/fastpath delivery (tasks/t01-range-streaming-response.md)
-- [ ] storage-completeness:ch03:t02 — Implement ObjectStoreLitestarStore and ObjectStoreFileSystemAdapter in extensions.litestar (tasks/t02-litestar-store-and-static-adapter.md)
+- [x] [99317bed609e62a73d8b0036d444c1268ac2eb1d] storage-completeness:ch03:t02 — Implement ObjectStoreLitestarStore and ObjectStoreFileSystemAdapter in extensions.litestar (tasks/t02-litestar-store-and-static-adapter.md)
 
 **Chapter Recovery Checkpoint:** `uv run --no-sync pytest src/py/tests/unit/server/test_zero_copy_buffer.py src/py/tests/unit/extensions/test_litestar_plugin.py -q && uv run --no-sync ruff check src/py/vertebra/storage/_streaming.py src/py/vertebra/extensions/litestar` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Checkpoint**: Range streaming and explicit native FastPath consumption pass 51 canonical storage/buffer tests, storage Mypy, and focused Ruff at `a0888371a54253624c77c4b817875f9878f54b28`; chapter state is `active`.
-- **Remaining Tasks in Chapter**: `t02` (`1/2` pending).
+- **Verified Checkpoint**: Range/FastPath consumers pass 51 canonical cases at `a0888371`; Litestar source `99317bed609e62a73d8b0036d444c1268ac2eb1d` passes 21 canonical and 634 extension/storage cases, focused MyPy, Ruff, and format checks. Chapter state is `active` pending reviews.
+- **Remaining Tasks in Chapter**: None (`2/2` tasks complete). Chapter remains `active` until independent correctness review and fresh quality review pass at the implemented source checkpoint.
 - **Active Invariants**: Zero blocking `SyncObjectStore` I/O inside async Litestar handlers; `StorageBuffer` views preserved end-to-end.
 
 [^streaming-py]: `src/py/vertebra/storage/_streaming.py::StreamingStorageResponse` — Zero-copy storage HTTP response builder.

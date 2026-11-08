@@ -16,7 +16,7 @@ chapters:
 - ch04-arrow-shm-and-docs
 - ch05-sqlspec-arrow-and-docs
 current_chapter: ch03-litestar-and-range-streaming
-current_task: "storage-completeness:ch03:t02"
+current_task: null
 parent_prd: native-data-platform
 research:
 - ../native-data-platform/research/gap-analysis_20261103.md
@@ -178,11 +178,12 @@ flowchart LR
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[2/4 files documented]`. Storage knowledge covers the native engine and implemented ORM/SQL adapters; the technology matrix covers Django typing. Both user guides remain planned in `storage-completeness:ch05:t02`.
+Progress: `[3/5 files documented]`. Storage knowledge covers native storage and implemented adapters; the Litestar knowledge chapter covers Store/static/Range consumers; the technology matrix covers Django typing. Both user guides remain planned in `storage-completeness:ch05:t02`.
 
 * `docs/usage/storage.md` — Document `get_stream`, `put_stream`, conditional `put`, `list_page`, `list_with_delimiter`, `rename`, fail-closed construction, `ObjectStoreLitestarStore`, `ObjectStoreFileSystemAdapter`, and RFC 9110 `Range` / `416` streaming.
 * `docs/usage/storage-auth-and-signing.md` — Document unified `vertebra._vertebra.{SyncGcpTokenCache, AsyncGcpTokenCache, GcpTokenSnapshot}` usage and GCS V4, IAM `signBlob`, S3 SigV4, Azure SAS, and OCI PAR presigning.
-* `.agents/bundles/knowledge/domains/storage/object-storage.md` — Documents native streaming, signing, unified GCP caches, fail-closed construction, SQLSpec protocol/extensions, Advanced Alchemy registry/FileObject behavior, and Django Storage/File contracts. Litestar and Arrow/Parquet additions remain planned in `ch05:t02`.
+* `.agents/bundles/knowledge/domains/storage/object-storage.md` — Documents native streaming, signing, unified GCP caches, fail-closed construction, SQLSpec protocol/extensions, Advanced Alchemy registry/FileObject behavior, and Django Storage/File contracts. Litestar/Range contracts are documented at the implemented source checkpoint; Arrow/Parquet additions remain planned in `ch05:t02`.
+* `.agents/bundles/knowledge/domains/extensions/litestar.md` — Documents persistent object-store TTL envelopes, hierarchical namespaces, virtual static GET/HEAD serving, lazy exports, and the explicit Range Stream bridge.
 * `.agents/bundles/product/tech-stack.md` — Documents `django-stubs>=6.1.2` as a lint development dependency for the real Django base and `File[bytes]` typing.
 
 ## 4. Requirement-to-Task Traceability Matrix
@@ -209,10 +210,10 @@ Progress: `[2/4 files documented]`. Storage knowledge covers the native engine a
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Current State**: Chapters `ch01` and `ch02` are reviewed and complete; `ch03` is active with Range task `t01` complete at `a0888371` and Litestar task `t02` pending.
-- **Full Plan**: `2/5` chapters and `8/14` tasks are complete. Remaining: one Litestar task, three strict Arrow/storage tasks in `ch04`, and two SQLSpec/documentation tasks in `ch05`.
+- **Current State**: Chapters `ch01` and `ch02` are reviewed and complete; `ch03` is active with both tasks complete at Range checkpoint `a0888371` and Litestar checkpoint `99317bed`, awaiting independent correctness and fresh quality reviews.
+- **Full Plan**: `2/5` chapters and `9/14` tasks are complete. Five tasks remain: three strict Arrow/storage tasks in `ch04`, and two SQLSpec/documentation tasks in `ch05`.
 - **Plan Identity**: Active `ch03` owns revision `8`; revised `ch04`/`ch05` own revision `9` at `222cbf99`. Completed chapters retain their verified owned revisions.
-- **Documentation**: `[2/4 files documented]`; both consumer guides remain scheduled in `ch05:t02`.
+- **Documentation**: `[3/5 files documented]`; both consumer guides remain scheduled in `ch05:t02`.
 - **Invariants**: Native async I/O remains on the caller loop; PyArrow codecs use bounded SyncPool steps; default Parquet batch prefetch is disabled, with explicit caller opt-in documented.
 
 [^rs-storage-engine]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — Native Rust storage engine over `object_store`.

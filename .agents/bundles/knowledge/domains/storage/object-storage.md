@@ -13,20 +13,8 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:docs-okf-specialist
-    at: "2026-11-08T15:15:39Z"
-    commit: 10f7b825
-  - by: agent:docs-okf-specialist
-    at: "2026-11-08T14:48:48Z"
-    commit: 749e2a18
-  - by: agent:code-reviewer
-    at: "2026-11-07T19:05:09Z"
-    commit: dc2c2053
-  - by: agent:flow-setup
-    at: "2026-11-07T03:55:00Z"
-    commit: cdb978d3
-  - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+    at: "2026-11-08T16:09:37Z"
+    commit: 99317bed
 sources:
   - id: src-vertebra-core-src-gcp-auth-rs
     resource: src/rs/vertebra-core/src/gcp_auth.rs
@@ -70,9 +58,11 @@ sources:
   - id: src-storage-store-py
     resource: src/py/vertebra/storage/_store.py
     title: "Fail-closed SyncObjectStore and AsyncObjectStore facade (src/py/vertebra/storage/_store.py)"
-  - id: src-storage-streaming-py
-    resource: src/py/vertebra/storage/_streaming.py
-    title: "StreamingStorageResponse FastPath descriptor (src/py/vertebra/storage/_streaming.py)"
+  - {id: src-storage-streaming-py, resource: src/py/vertebra/storage/_streaming.py, title: "StreamingStorageResponse FastPath descriptor (src/py/vertebra/storage/_streaming.py)"}
+  - {id: src-extensions-litestar-store-py, resource: src/py/vertebra/extensions/litestar/store.py, title: "Persistent Litestar Store and confined async filesystem"}
+  - {id: src-tests-storage-store-py, resource: src/py/tests/unit/storage/test_storage_store.py, title: "Range parsing, async ownership, and storage response contracts"}
+  - {id: src-tests-zero-copy-buffer-py, resource: src/py/tests/unit/server/test_zero_copy_buffer.py, title: "Native async storage handler buffer submission"}
+  - {id: src-tests-litestar-plugin-py, resource: src/py/tests/unit/extensions/test_litestar_plugin.py, title: "Persistent TTL, namespaces, static GET/HEAD, and explicit Range handler"}
   - id: src-extensions-alchemy-storage-py
     resource: src/py/vertebra/extensions/alchemy/storage.py
     title: "Advanced Alchemy StorageBackend adapter (src/py/vertebra/extensions/alchemy/storage.py)"
@@ -139,10 +129,22 @@ Provider configs are `msgspec.Struct(frozen=True, gc=False, kw_only=True)` imple
 | Symbol | Source | Responsibility |
 |---|---|---|
 | [`SyncReadableFile` / `AsyncReadableFile`](../../../../../src/py/vertebra/storage/_store.py) | `_store.py` | Seekable read-only streams (`io.RawIOBase` on sync) streaming from offset `0` via `get_stream` in `__iter__`/`__aiter__` and serving random-access `read` / cursor-preserving `read_at` via `get_range` for PyArrow and Polars Parquet footers. |
-| [`StreamingStorageResponse`](../../../../../src/py/vertebra/storage/_streaming.py)[^src-storage-streaming-py] | `_streaming.py` | Frozen `msgspec.Struct` descriptor for streaming objects, HTTP `206 Partial Content` byte ranges, and `307 Temporary Redirect` presigned URL handoffs through `FastPath`. |
+| [`StreamingStorageResponse`](../../../../../src/py/vertebra/storage/_streaming.py)[^src-storage-streaming-py] | `_streaming.py` | Frozen `msgspec.Struct` descriptor with metadata-resolved HTTP `200`/`206`/`416`, sync/async chunks and FastPath tuples, and `307` presigned URL handoffs. |
 | [`ObjectStoreBackend`](../../../../../src/py/vertebra/extensions/alchemy/storage.py)[^src-extensions-alchemy-storage-py] | `extensions/alchemy/storage.py` | Concrete Advanced Alchemy `StorageBackend` with real registry registration, native `FileObject` operations, and bounded streaming uploads through paired stores. |
 | [`ObjectStoreBackend`](../../../../../src/py/vertebra/extensions/sqlspec/storage.py)[^src-extensions-sqlspec-storage-py] | `extensions/sqlspec/storage.py` | Exact SQLSpec `ObjectStoreProtocol` `*_sync` / `*_async` methods plus native buffer-stream, paginated-listing, and seekable-reader extensions over paired stores. |
 | [`DjangoStorage`](../../../../../src/py/vertebra/extensions/django/storage.py)[^src-extensions-django-storage-py] | `extensions/django/storage.py` | Deconstructible Django `Storage` subclass returning real seekable `File` handles, with native sync/async persistence, naming, URL, directory, local-path, and modification-time contracts. |
+
+### HTTP Range and Native Response Consumers
+
+`ByteRange(start, end_exclusive, total_size)` and `parse_byte_range` resolve one closed, open-ended, or suffix byte range, clamp its end, and ignore unknown units. Malformed, multiple, zero-suffix, or unsatisfiable byte ranges raise `RangeNotSatisfiableError`. `from_sync_store` / awaited `from_async_store` perform one native HEAD and produce `200`, `206`, or empty `416` (`Content-Range: bytes */<size>`), with authoritative length, ETag, content type, and `Accept-Ranges: bytes`.[^src-storage-streaming-py][^src-tests-storage-store-py]
+
+For async stores, explicitly await `to_async_fastpath_tuple()` in the handler: it returns `(status, list[tuple[bytes, bytes]], memoryview | bytes)` through native async `get_view` or `get_range`, with no synchronous store calls. Full reads retain the `StorageBuffer` owner through a memoryview; ranges return bytes. Pass the resolved body and byte header pairs to native `Response.from_buffer`; decode header pairs with Latin-1 at the `submit_raw_response` helper's string-header boundary. Async stores reject synchronous `to_fastpath_tuple()`. `aiter_chunks()` uses native full-object streams or bounded range reads.[^src-storage-streaming-py][^src-tests-zero-copy-buffer-py]
+
+### Litestar Store and Static Files
+
+`ObjectStoreLitestarStore` accepts an explicit async store, config, or URI. Each object contains a versioned `VTBSTORE\x01` MessagePack envelope holding the wall-clock millisecond deadline and bytes, so TTL survives store reconstruction even when backend attributes disappear. Expired entries are deleted on read; renewal applies only to expiring entries. Logical keys are UTF-8 hex encoded; `with_namespace` composes validated child prefixes, and paginated `delete_all` removes that namespace and descendants while preserving siblings.[^src-extensions-litestar-store-py][^src-tests-litestar-plugin-py]
+
+`ObjectStoreFileSystemAdapter(store, base_path="public")` exposes a confined virtual `/`, async metadata, and native `AsyncReadableFile` handles with async reads and synchronous seek/tell. Configure `create_static_files_router(path="/assets", directories=["/"], file_system=adapter, resolve_symlinks=False)` for static GET/HEAD. Explicit Range handling uses a separate route: build `StreamingStorageResponse.from_async_store(..., range_header=request.headers.get("range"))`, then return Litestar `Stream` over byte-converted `aiter_chunks()`, forwarding status, headers, content range, and media type.[^src-extensions-litestar-store-py][^src-tests-litestar-plugin-py]
 
 ### SQLSpec Protocol and Native Extensions
 
@@ -192,3 +194,7 @@ Both reader factories are synchronous. `open_sync(size=None)` resolves metadata 
 [^src-tests-data-storage-integrations-py]: `src/py/tests/unit/extensions/test_data_storage_integrations.py` — SQLSpec and Advanced Alchemy native consumer behavior.
 [^src-tests-django-plugin-py]: `src/py/tests/unit/extensions/test_django_plugin.py` — Django Storage consumer behavior and annotation introspection.
 [^src-tests-integration-storage-conftest-py]: `src/py/tests/integration/storage/conftest.py` — Floci emulator integration fixtures (src/py/tests/integration/storage/conftest.py).
+[^src-extensions-litestar-store-py]: `src/py/vertebra/extensions/litestar/store.py` — Persistent Litestar Store and confined async filesystem.
+[^src-tests-storage-store-py]: `src/py/tests/unit/storage/test_storage_store.py` — Range parsing, async ownership, and storage response contracts.
+[^src-tests-zero-copy-buffer-py]: `src/py/tests/unit/server/test_zero_copy_buffer.py` — Native async storage handler buffer submission.
+[^src-tests-litestar-plugin-py]: `src/py/tests/unit/extensions/test_litestar_plugin.py` — Persistent TTL, namespaces, static GET/HEAD, and explicit Range handler.

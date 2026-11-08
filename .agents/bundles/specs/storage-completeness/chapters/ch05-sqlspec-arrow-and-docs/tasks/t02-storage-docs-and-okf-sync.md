@@ -112,7 +112,7 @@ Bring user-facing storage documentation (`docs/usage/storage.md`, `docs/usage/st
 
 ## Notes & Discoveries
 
-- [2026-11-08 00:00] When closing ch05:t02, set the three-file manifests in chapters/ch04-arrow-shm-and-docs/spec.md and chapters/ch05-sqlspec-arrow-and-docs/spec.md to `[3/3 files documented]`; set the root four-file manifest to `[4/4 files documented]`, preserving its already documented product/tech-stack.md target.
+- [2026-11-08 00:00] When closing ch05:t02, set the three-file manifests in chapters/ch04-arrow-shm-and-docs/spec.md and chapters/ch05-sqlspec-arrow-and-docs/spec.md to `[3/3 files documented]`; set the root five-file manifest to `[5/5 files documented]`, preserving its already documented product/tech-stack.md and knowledge/domains/extensions/litestar.md targets.
 
 [^docs-storage]: `docs/usage/storage.md` — Storage usage documentation.
 [^docs-storage-auth]: `docs/usage/storage-auth-and-signing.md` — Storage authentication and presigned URL guide.

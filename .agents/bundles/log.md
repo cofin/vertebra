@@ -1,5 +1,11 @@
 # Bundle Activity Log
 
+
+## [2026-11-08] flow-implement | Record storage ch03 Litestar consumers
+
+- Source `99317bed` implements public object-store Store/static adapters with persistent TTL envelopes, hierarchical namespace deletion, and native escaped-path/cursor reuse. Seven Red cases lead to 21 canonical and 634 extension/storage Green cases; focused MyPy, Ruff, and format checks pass.
+- Chapter `ch03` has two completed tasks and remains active pending independent correctness and fresh quality reviews. Root progress is `9/14` tasks and `3/5` documentation targets; five Arrow/storage/SQLSpec/documentation tasks remain across `ch04` and `ch05`. Source commits remain local.
+
 ## [2026-11-08] revise | Ground remaining storage streaming contracts
 
 - Range source `29d8ac79` and native consumer proof `a0888371` pass 51 canonical cases, Ruff, and storage MyPy. Active task advances to Litestar integration with persistent TTL envelopes and installed filesystem contracts.

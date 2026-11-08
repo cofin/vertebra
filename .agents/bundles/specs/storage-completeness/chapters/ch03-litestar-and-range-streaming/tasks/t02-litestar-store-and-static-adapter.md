@@ -5,7 +5,7 @@ chapter_id: ch03-litestar-and-range-streaming
 title: Implement ObjectStoreLitestarStore and ObjectStoreFileSystemAdapter in extensions.litestar
 description: Add an AsyncObjectStore-backed Litestar Store (ObjectStoreLitestarStore) with persistent TTL envelopes and an async static-files adapter (ObjectStoreFileSystemAdapter) in vertebra.extensions.litestar.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -25,18 +25,39 @@ tests:
 estimated_loc: 250
 plan_revision: 8
 plan_commit: 222cbf99
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-08T16:07:37Z"
+last_verified_commit: 99317bed609e62a73d8b0036d444c1268ac2eb1d
+verification_evidence:
+  red:
+    command: 'UV_NO_SYNC=1 uv run --no-sync pytest src/py/tests/unit/extensions/test_litestar_plugin.py -k "object_store or static" -q'
+    exit_code: 1
+    result: "7 cases fail before adapter implementation"
+  green:
+    command: "UV_NO_SYNC=1 uv run --no-sync pytest src/py/tests/unit/extensions/test_litestar_plugin.py -q"
+    exit_code: 0
+    result: "21 passed against native Memory and Local storage and real Litestar consumers"
+  regression:
+    command: "UV_NO_SYNC=1 uv run --no-sync pytest src/py/tests/unit/extensions src/py/tests/unit/storage src/py/tests/unit/server/test_zero_copy_buffer.py -q --disable-warnings"
+    exit_code: 0
+    result: "634 passed"
+  lint:
+    command: "UV_NO_SYNC=1 uv run --no-sync ruff check src/py/vertebra/extensions/litestar src/py/tests/unit/extensions/test_litestar_plugin.py"
+    exit_code: 0
+  typing:
+    command: "UV_NO_SYNC=1 uv run --no-sync mypy src/py/vertebra/extensions/litestar"
+    exit_code: 0
+  format:
+    command: "UV_NO_SYNC=1 uv run --no-sync ruff format --check src/py/vertebra/extensions/litestar/store.py src/py/vertebra/extensions/litestar/__init__.py src/py/tests/unit/extensions/test_litestar_plugin.py"
+    exit_code: 0
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-08T02:25:35Z"
-commit: null
+updated_at: "2026-11-08T16:07:37Z"
+commit: 99317bed609e62a73d8b0036d444c1268ac2eb1d
 sources:
   - id: litestar-store-mod
     resource: src/py/vertebra/extensions/litestar/store.py::MemoryStore
@@ -125,11 +146,13 @@ Use Litestar's supported `Stream` response in the test bridge; do not return `St
 
 ## Acceptance Criteria
 
-- [ ] The real Litestar Store contract, restart-safe Local TTL, corruption failures, namespace isolation, and paginated confined deletion pass the matrix (R3, R7).
-- [ ] The real static router serves GET/HEAD through the adapter, while the supported Litestar Stream bridge independently proves t01 200/206/416 responses (R7).
-- [ ] Both public classes resolve through the package lazy export machinery; focused lint, typing, correctness review, and fresh quality review pass.
+- [x] [99317bed609e62a73d8b0036d444c1268ac2eb1d] The real Litestar Store contract, restart-safe Local TTL, corruption failures, namespace isolation, and paginated confined deletion pass the matrix (R3, R7).
+- [x] [99317bed609e62a73d8b0036d444c1268ac2eb1d] The real static router serves GET/HEAD through the adapter, while the supported Litestar Stream bridge independently proves t01 200/206/416 responses (R7).
+- [x] [99317bed609e62a73d8b0036d444c1268ac2eb1d] Both public classes resolve through the package lazy export machinery; focused lint, typing, and format gates pass. Independent correctness and fresh quality reviews remain chapter completion gates.
 
 ## Notes & Discoveries
+
+Native object paths escape `~` as `%7E` in listed metadata and continuation cursors. Namespace deletion unquotes each returned object path and cursor before native reuse; this preserves key identity across all 1000-item pages. Direct object keys still use `~` plus UTF-8 hex. The shared `_resolve_object_store` helper keeps both adapters fail closed without changing existing MemoryStore defaults. Both classes are public through module/package exports. Source and native consumer evidence pass; independent chapter correctness and fresh quality reviews remain pending.
 
 Installed Litestar 2.25.0 renews only existing expirations and consumes async readers with `async with await adapter.open(...)` plus `await file.read(...)`. Native Local writes retry without user attributes, so TTL persistence requires the envelope on every write. These are implementation contracts, not deferred discoveries.
 
