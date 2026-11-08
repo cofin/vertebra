@@ -985,11 +985,38 @@ async fn test_streaming_chunk_read_memory_and_local() {
 
 #[tokio::test]
 async fn test_incremental_r2_uniform_multipart_session() {
+    assert_incremental_uniform_multipart_session("r2").await;
+}
+
+#[tokio::test]
+async fn test_incremental_oci_uniform_multipart_session() {
+    assert_incremental_uniform_multipart_session("oci").await;
+}
+
+#[tokio::test]
+async fn test_incremental_s3_uniform_multipart_session() {
+    assert_incremental_uniform_multipart_session("s3").await;
+}
+
+#[test]
+fn test_s3_and_b2_url_aliases_normalize_to_s3_backend() {
+    let options = HashMap::from([
+        ("access_key_id".to_string(), "test".to_string()),
+        ("secret_access_key".to_string(), "test".to_string()),
+    ]);
+    for scheme in ["s3", "b2"] {
+        let engine = ObjectStoreEngine::from_url(&format!("{scheme}://fixture"), Some(&options))
+            .expect("S3-family backend");
+        assert_eq!(engine.scheme(), "s3");
+    }
+}
+
+async fn assert_incremental_uniform_multipart_session(scheme: &str) {
     use _storage::store::PutConditionalOptions;
     use std::sync::Arc;
 
     let engine =
-        ObjectStoreEngine::with_store(Arc::new(object_store::memory::InMemory::new()), "r2");
+        ObjectStoreEngine::with_store(Arc::new(object_store::memory::InMemory::new()), scheme);
     let mut session = engine
         .create_multipart(
             "blobs/r2_incremental.bin",

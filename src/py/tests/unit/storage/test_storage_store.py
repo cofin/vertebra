@@ -9,6 +9,8 @@ from collections.abc import AsyncIterator, Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import parse_qs, urlsplit
+from xml.etree import ElementTree
 
 import pytest
 
@@ -31,6 +33,118 @@ from vertebra.storage import (
     parse_byte_range,
 )
 from vertebra.typing import ImproperConfigurationError, MissingDependencyError, reset_dependency_cache
+
+
+@contextlib.contextmanager
+def _s3_multipart_completion_server() -> Iterator[tuple[S3Config, dict[int, bytes], list[bytes]]]:
+    """Enforce S3's non-final part minimum on actual native HTTP uploads."""
+    parts: dict[int, bytes] = {}
+    completed: list[bytes] = []
+
+    class CompletionHandler(BaseHTTPRequestHandler):
+        def respond(self, status: int, body: bytes) -> None:
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self) -> None:
+            parsed = urlsplit(self.path)
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            if parsed.path != "/codec-fixture/output":
+                self.send_error(404)
+            elif "uploads" in query:
+                self.respond(
+                    200,
+                    b"<InitiateMultipartUploadResult><Bucket>codec-fixture</Bucket><Key>output</Key>"
+                    b"<UploadId>fixture</UploadId></InitiateMultipartUploadResult>",
+                )
+            elif query.get("uploadId") == ["fixture"]:
+                numbers = [int(part.findtext("PartNumber", "0")) for part in ElementTree.fromstring(body)]
+                if any(len(parts[number]) < 5 * 1024 * 1024 for number in numbers[:-1]):
+                    self.respond(
+                        400, b"<Error><Code>EntityTooSmall</Code><Message>non-final part below 5 MiB</Message></Error>"
+                    )
+                    return
+                completed.append(b"".join(parts[number] for number in numbers))
+                self.respond(
+                    200,
+                    b"<CompleteMultipartUploadResult><Bucket>codec-fixture</Bucket><Key>output</Key>"
+                    b'<ETag>"complete"</ETag></CompleteMultipartUploadResult>',
+                )
+            else:
+                self.send_error(400)
+
+        def do_PUT(self) -> None:
+            query = parse_qs(urlsplit(self.path).query)
+            number = int(query["partNumber"][0])
+            parts[number] = self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.send_header("ETag", f'"part-{number}"')
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_DELETE(self) -> None:
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            _ = (format, args)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), CompletionHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield (
+            S3Config(
+                bucket="codec-fixture",
+                region="us-east-1",
+                endpoint=f"http://127.0.0.1:{server.server_port}",
+                access_key_id="test",
+                secret_access_key="test",
+                allow_http=True,
+            ),
+            parts,
+            completed,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("file_format", ["arrow-ipc", "parquet"])
+@pytest.mark.parametrize("async_write", [False, True])
+@pytest.mark.parametrize("large", [False, True])
+async def test_s3_codec_writers_complete_valid_multipart(file_format: str, async_write: bool, large: bool) -> None:
+    """Native multipart coalescing makes real S3 codec output publish successfully."""
+    pa = pytest.importorskip("pyarrow")
+    table = pa.table({"payload": [b"x" * (9 * 1024 * 1024)]}) if large else pa.table({"id": range(250)})
+    with _s3_multipart_completion_server() as (config, parts, completed):
+        store: Any = AsyncObjectStore(config) if async_write else SyncObjectStore(config)
+        operation = (
+            store.write_parquet("output", table, compression="NONE", row_group_size=100)
+            if file_format == "parquet"
+            else store.write_arrow("output", table, batch_size=100)
+        )
+        result = await operation if async_write else operation
+    assert isinstance(result, PutResult)
+    assert result.path == "output"
+    assert result.etag.strip('"') == "complete"
+    assert len(completed) == 1
+    assert result.size == len(completed[0])
+    sizes = [len(parts[number]) for number in sorted(parts)]
+    assert all(size == 8 * 1024 * 1024 for size in sizes[:-1])
+    assert 0 < sizes[-1] <= 8 * 1024 * 1024
+    assert len(sizes) == (2 if large else 1)
+    decoded = (
+        pa.parquet.read_table(pa.BufferReader(completed[0]))
+        if file_format == "parquet"
+        else pa.ipc.open_stream(pa.BufferReader(completed[0])).read_all()
+    )
+    assert decoded.equals(table)
 
 
 def test_memory_store_sync_crud_and_zero_copy_memoryview() -> None:

@@ -233,9 +233,9 @@ pub struct PutConditionalOptions {
 
 /// Stateful incremental multipart upload session.
 ///
-/// When targeting Cloudflare R2 or OCI Object Storage (`scheme == "r2" | "oci"`), chunks are
-/// normalized through a rolling 8 MiB `UniformPartAccumulator` so every non-trailing part has
-/// identical byte length without buffering the entire payload in memory.
+/// S3, Cloudflare R2, and OCI chunks pass through a rolling 8 MiB `UniformPartAccumulator`.
+/// This satisfies S3's non-trailing 5 MiB minimum and R2/OCI part uniformity without
+/// buffering the entire payload in memory. B2 URLs normalize to the S3 backend.
 pub struct MultipartUploadSession {
     path: String,
     upload: Option<Box<dyn MultipartUpload>>,

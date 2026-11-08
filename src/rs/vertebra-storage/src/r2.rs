@@ -1,13 +1,13 @@
-//! Cloudflare R2 and OCI uniform multipart upload chunking utilities.
+//! Bounded multipart chunking for S3 minimum sizes and R2/OCI uniformity.
 
 use bytes::{Bytes, BytesMut};
 
-/// Uniform 8 MiB multipart chunk size required by Cloudflare R2 and OCI multipart uploads.
+/// Uniform 8 MiB chunks satisfy S3's 5 MiB minimum and R2/OCI part uniformity.
 pub const R2_UNIFORM_PART_SIZE: usize = 8 * 1024 * 1024;
 
-/// Return `true` when the storage backend requires uniform non-trailing multipart part sizes.
+/// Return `true` when the backend uses bounded uniform non-trailing multipart parts.
 pub fn requires_uniform_part_size(scheme: &str) -> bool {
-    matches!(scheme, "r2" | "oci")
+    matches!(scheme, "s3" | "r2" | "oci")
 }
 
 /// Split a payload into uniform `part_size` chunks (all non-trailing chunks have identical byte length).
