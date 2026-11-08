@@ -1,11 +1,11 @@
-//! Google Cloud Storage OAuth2 scopes and `RefreshingGcpCredentialProvider` over `vertebra_core::gcp_auth::GcpTokenCache`.
+//! Google Cloud Storage OAuth2 scopes and `RefreshingGcpCredentialProvider` over `SharedGcpTokenCacheHandle`.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use object_store::CredentialProvider;
 use object_store::gcp::GcpCredential;
-use vertebra_core::gcp_auth::GcpTokenCache;
+use vertebra_core::gcp_auth::{GcpTokenCache, SharedGcpTokenCacheHandle};
 
 pub const GCS_OAUTH_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/devstorage.full_control",
@@ -14,15 +14,21 @@ pub const GCS_OAUTH_SCOPES: &[&str] = &[
 
 #[derive(Debug, Clone)]
 pub struct RefreshingGcpCredentialProvider {
-    cache: Arc<GcpTokenCache>,
+    cache: SharedGcpTokenCacheHandle,
 }
 
 impl RefreshingGcpCredentialProvider {
-    pub fn new(cache: Arc<GcpTokenCache>) -> Self {
+    pub fn new(cache: SharedGcpTokenCacheHandle) -> Self {
         Self { cache }
     }
 
-    pub fn cache(&self) -> &Arc<GcpTokenCache> {
+    pub fn from_arc(cache: Arc<GcpTokenCache>) -> Self {
+        Self {
+            cache: SharedGcpTokenCacheHandle::from_arc(cache),
+        }
+    }
+
+    pub fn cache(&self) -> &SharedGcpTokenCacheHandle {
         &self.cache
     }
 }
@@ -98,8 +104,11 @@ mod tests {
             ProxyPolicy::Direct,
         ));
 
-        let provider = RefreshingGcpCredentialProvider::new(Arc::clone(&cache));
-        assert!(Arc::ptr_eq(provider.cache(), &cache));
+        let provider = RefreshingGcpCredentialProvider::from_arc(Arc::clone(&cache));
+        assert_eq!(
+            provider.cache().quota_project_id().as_deref(),
+            Some("proj-1")
+        );
 
         let cred = provider.get_credential().await.expect("get_credential");
         assert_eq!(cred.bearer, "tok_1");
@@ -146,7 +155,7 @@ mod tests {
             DEFAULT_REFRESH_SKEW_MS,
             ProxyPolicy::Direct,
         ));
-        let provider = RefreshingGcpCredentialProvider::new(cache);
+        let provider = RefreshingGcpCredentialProvider::from_arc(cache);
         let err = provider
             .get_credential()
             .await

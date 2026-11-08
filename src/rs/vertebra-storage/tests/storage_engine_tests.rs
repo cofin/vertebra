@@ -631,8 +631,11 @@ async fn test_refreshing_gcp_credential_provider_over_core_token_cache() {
         DEFAULT_REFRESH_SKEW_MS,
         ProxyPolicy::Direct,
     ));
-    let provider = RefreshingGcpCredentialProvider::new(Arc::clone(&cache));
-    assert!(Arc::ptr_eq(provider.cache(), &cache));
+    let provider = RefreshingGcpCredentialProvider::from_arc(Arc::clone(&cache));
+    assert_eq!(
+        provider.cache().quota_project_id().as_deref(),
+        Some("proj-storage")
+    );
 
     let cred1 = provider.get_credential().await.expect("get_credential 1");
     assert_eq!(cred1.bearer, "tok_1");
@@ -1374,6 +1377,265 @@ async fn test_local_conditional_put_if_none_match_and_traversal_rejection() {
         &local.get("locks/local.txt").await.expect("get local")[..],
         b"v2"
     );
+}
+
+#[tokio::test]
+async fn test_gcs_native_plane_if_match_skip_signature_and_capsule_quota_project() {
+    use _storage::store::{PutConditionalOptions, StorageError};
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use vertebra_core::gcp_auth::{
+        DEFAULT_REFRESH_SKEW_MS, GcpAuthSource, GcpTokenCache, ProxyPolicy,
+        SharedGcpTokenCacheHandle,
+    };
+
+    let gcs_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback gcs");
+    let gcs_addr = gcs_listener.local_addr().expect("gcs addr");
+    let seen_headers: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_srv = Arc::clone(&seen_headers);
+
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = gcs_listener.accept().await {
+            let log = Arc::clone(&seen_srv);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 16384];
+                let mut total = 0;
+                loop {
+                    let n = stream.read(&mut buf[total..]).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    total += n;
+                    if let Some(hdr_end) = buf[..total].windows(4).position(|w| w == b"\r\n\r\n") {
+                        let hdr_str = String::from_utf8_lossy(&buf[..hdr_end]);
+                        let content_len = hdr_str
+                            .lines()
+                            .find_map(|l| {
+                                let (k, v) = l.split_once(':')?;
+                                if k.eq_ignore_ascii_case("content-length") {
+                                    v.trim().parse::<usize>().ok()
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or(0);
+                        if total >= hdr_end + 4 + content_len {
+                            break;
+                        }
+                    }
+                }
+                let req = String::from_utf8_lossy(&buf[..total]).into_owned();
+                let first_line = req.lines().next().unwrap_or_default().to_string();
+                log.lock().expect("lock").push(req.clone());
+
+                let lower = req.to_ascii_lowercase();
+                let resp = if first_line.starts_with("HEAD ")
+                    && (first_line.contains("etag_obj") || first_line.contains("etag%5Fobj"))
+                {
+                    "HTTP/1.1 200 OK\r\nETag: \"etag-77\"\r\nx-goog-generation: 77\r\nLast-Modified: Sat, 07 Nov 2026 00:00:00 GMT\r\nContent-Length: 2\r\nConnection: close\r\n\r\n".to_string()
+                } else if first_line.starts_with("HEAD ")
+                    && (first_line.contains("missing_obj") || first_line.contains("missing%5Fobj"))
+                {
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_string()
+                } else if first_line.starts_with("PUT ")
+                    && lower.contains("x-goog-if-generation-match: 41")
+                {
+                    let body = "{\"error\":{\"code\":412}}";
+                    format!(
+                        "HTTP/1.1 412 Precondition Failed\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                } else if first_line.starts_with("POST ") && first_line.contains("uploads") {
+                    let body = "<InitiateMultipartUploadResult><Bucket>emu-bucket</Bucket><Key>mp.txt</Key><UploadId>up-1</UploadId></InitiateMultipartUploadResult>";
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                } else if first_line.starts_with("POST ") && first_line.contains("uploadId=up-1") {
+                    let body = "<CompleteMultipartUploadResult><Bucket>emu-bucket</Bucket><Key>mp.txt</Key><ETag>\"etag-mp\"</ETag></CompleteMultipartUploadResult>";
+                    format!(
+                        "HTTP/1.1 200 OK\r\nx-goog-generation: 43\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                } else if first_line.starts_with("PUT ") || first_line.starts_with("POST ") {
+                    let body = r#"{"name":"obj.txt","bucket":"emu-bucket","generation":"42","etag":"etag-42","size":"2"}"#;
+                    format!(
+                        "HTTP/1.1 200 OK\r\nETag: \"etag-42\"\r\nx-goog-generation: 42\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                } else if first_line.starts_with("DELETE ") {
+                    "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_string()
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nv1"
+                        .to_string()
+                };
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let emu_opts = HashMap::from([
+        (
+            "endpoint".to_string(),
+            format!("http://127.0.0.1:{}", gcs_addr.port()),
+        ),
+        ("allow_http".to_string(), "true".to_string()),
+        ("skip_signature".to_string(), "true".to_string()),
+    ]);
+    let emu_engine =
+        ObjectStoreEngine::from_url("gs://emu-bucket", Some(&emu_opts)).expect("emu gcs engine");
+    emu_engine
+        .put("obj.txt", Bytes::from_static(b"v1"))
+        .await
+        .expect("emu put without metadata server");
+    let mut mp = emu_engine
+        .create_multipart("mp.txt", PutConditionalOptions::default())
+        .await
+        .expect("emu create_multipart");
+    mp.write_chunk(Bytes::from_static(b"hello"))
+        .await
+        .expect("emu write_chunk");
+    mp.complete().await.expect("emu complete multipart");
+    emu_engine
+        .delete("obj.txt")
+        .await
+        .expect("emu delete without metadata server");
+
+    let gen_ok = emu_engine
+        .put_opts(
+            "obj.txt",
+            Bytes::from_static(b"v2"),
+            PutConditionalOptions {
+                if_match: Some("42".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("numeric generation if_match must succeed in 1 RTT");
+    assert_eq!(gen_ok.size, 2);
+
+    let gen_mismatch = emu_engine
+        .put_opts(
+            "obj.txt",
+            Bytes::from_static(b"v3"),
+            PutConditionalOptions {
+                if_match: Some("41".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("412 generation mismatch must fail");
+    assert!(gen_mismatch.is_precondition());
+
+    let etag_ok = emu_engine
+        .put_opts(
+            "etag_obj",
+            Bytes::from_static(b"v2"),
+            PutConditionalOptions {
+                if_match: Some("\"etag-77\"".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("matching non-numeric ETag on GCS must resolve generation via HEAD");
+    assert_eq!(etag_ok.size, 2);
+
+    let etag_bad = emu_engine
+        .put_opts(
+            "etag_obj",
+            Bytes::from_static(b"v3"),
+            PutConditionalOptions {
+                if_match: Some("\"wrong-etag\"".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("mismatched ETag must return Precondition");
+    assert!(matches!(etag_bad, StorageError::Precondition { .. }));
+
+    let etag_missing = emu_engine
+        .put_opts(
+            "missing_obj",
+            Bytes::from_static(b"v3"),
+            PutConditionalOptions {
+                if_match: Some("\"etag-77\"".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("missing object on ETag if_match must return Precondition");
+    assert!(matches!(etag_missing, StorageError::Precondition { .. }));
+
+    let oauth_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind oauth");
+    let oauth_addr = oauth_listener.local_addr().expect("oauth addr");
+    let oauth_calls = Arc::new(AtomicUsize::new(0));
+    let oauth_calls_srv = Arc::clone(&oauth_calls);
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = oauth_listener.accept().await {
+            let c = Arc::clone(&oauth_calls_srv);
+            tokio::spawn(async move {
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf).await;
+                c.fetch_add(1, Ordering::SeqCst);
+                let body =
+                    r#"{"access_token":"capsule-token-1","expires_in":3600,"token_type":"Bearer"}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let cache = Arc::new(GcpTokenCache::with_proxy_policy(
+        GcpAuthSource::AuthorizedUser {
+            client_id: "cid".to_string(),
+            client_secret: "csec".to_string(),
+            refresh_token: "rtok".to_string(),
+            quota_project_id: Some("billing-proj-99".to_string()),
+            token_uri: format!("http://127.0.0.1:{}/token", oauth_addr.port()),
+        },
+        DEFAULT_REFRESH_SKEW_MS,
+        ProxyPolicy::Direct,
+    ));
+    let handle = SharedGcpTokenCacheHandle::from_arc(cache);
+    let authed_opts = HashMap::from([
+        (
+            "endpoint".to_string(),
+            format!("http://127.0.0.1:{}", gcs_addr.port()),
+        ),
+        ("allow_http".to_string(), "true".to_string()),
+        ("allow_ambient_adc".to_string(), "false".to_string()),
+    ]);
+    seen_headers.lock().expect("lock").clear();
+    let authed_engine =
+        ObjectStoreEngine::from_url_with_cache("gs://emu-bucket", Some(authed_opts), Some(handle))
+            .expect("from_url_with_cache");
+    authed_engine
+        .put("authed.txt", Bytes::from_static(b"ok"))
+        .await
+        .expect("authed put");
+    assert_eq!(oauth_calls.load(Ordering::SeqCst), 1);
+    let logged = seen_headers.lock().expect("lock");
+    let last_req = logged
+        .last()
+        .expect("captured authed request")
+        .to_ascii_lowercase();
+    assert!(last_req.contains("authorization: bearer capsule-token-1"));
+    assert!(last_req.contains("x-goog-user-project: billing-proj-99"));
 }
 
 #[test]

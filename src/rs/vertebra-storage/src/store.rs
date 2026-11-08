@@ -2,24 +2,26 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use object_store::aws::AmazonS3Builder;
 use object_store::azure::MicrosoftAzureBuilder;
-use object_store::gcp::GoogleCloudStorageBuilder;
+use object_store::gcp::{GcpCredential, GoogleCloudStorageBuilder};
 use object_store::http::HttpBuilder;
 use object_store::local::LocalFileSystem;
 use object_store::memory::InMemory;
 use object_store::path::Path as StorePath;
 use object_store::{
-    Attribute, AttributeValue, Attributes, GetOptions, MultipartUpload, ObjectStore,
-    ObjectStoreExt, PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult, UpdateVersion,
+    Attribute, AttributeValue, Attributes, ClientOptions, GetOptions, MultipartUpload, ObjectStore,
+    ObjectStoreExt, PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    StaticCredentialProvider, UpdateVersion,
 };
 use thiserror::Error;
 use url::Url;
-use vertebra_core::gcp_auth::GcpTokenCache;
+use vertebra_core::gcp_auth::{GcpTokenCache, SharedGcpTokenCacheHandle};
 
 use crate::oci::{OciCavageCredentials, OciObjectStore};
 use crate::r2::{R2_UNIFORM_PART_SIZE, UniformPartAccumulator, requires_uniform_part_size};
@@ -341,6 +343,66 @@ impl MultipartUploadSession {
     }
 }
 
+fn is_loopback_endpoint(endpoint: Option<&str>) -> bool {
+    let Some(ep) = endpoint else {
+        return false;
+    };
+    let Ok(parsed) = Url::parse(ep) else {
+        return false;
+    };
+    matches!(
+        parsed.host_str(),
+        Some("127.0.0.1" | "localhost" | "::1" | "[::1]")
+    )
+}
+
+const LOOPBACK_PROXY_EXCLUDES: &str = "127.0.0.1,localhost,::1,metadata.google.internal";
+
+fn ambient_proxy_url() -> Option<String> {
+    for key in [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
+        if let Ok(val) = std::env::var(key) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn build_http_client_options(
+    allow_http: bool,
+    endpoint: Option<&str>,
+    default_headers: Option<http::HeaderMap>,
+) -> ClientOptions {
+    let mut opts = ClientOptions::new()
+        .with_pool_max_idle_per_host(64)
+        .with_pool_idle_timeout(Duration::from_secs(90))
+        .with_connect_timeout(Duration::from_secs(10))
+        .with_timeout(Duration::from_secs(300))
+        .with_http2_keep_alive_interval(Duration::from_secs(30))
+        .with_allow_http(allow_http);
+    if allow_http || is_loopback_endpoint(endpoint) {
+        opts = opts.with_proxy_excludes(LOOPBACK_PROXY_EXCLUDES);
+        if let Some(proxy_url) = ambient_proxy_url() {
+            opts = opts.with_proxy_url(proxy_url);
+        }
+    }
+    if let Some(headers) = default_headers
+        && !headers.is_empty()
+    {
+        opts = opts.with_default_headers(headers);
+    }
+    opts
+}
+
 #[derive(Clone, Debug)]
 pub enum BackendConfig {
     Memory,
@@ -361,16 +423,19 @@ pub enum BackendConfig {
         service_account_key: Option<String>,
         application_credentials_path: Option<String>,
         access_token: Option<String>,
-        credential_cache: Option<Arc<GcpTokenCache>>,
+        credential_cache: Option<SharedGcpTokenCacheHandle>,
+        quota_project_id: Option<String>,
         endpoint: Option<String>,
         allow_http: bool,
         skip_signature: bool,
+        allow_ambient_adc: bool,
     },
     Azure {
         container: String,
         account: Option<String>,
         access_key: Option<String>,
         endpoint: Option<String>,
+        allow_http: bool,
     },
     Oci {
         bucket: String,
@@ -390,6 +455,7 @@ pub enum BackendConfig {
     },
     Http {
         url: String,
+        allow_http: bool,
     },
 }
 
@@ -427,9 +493,11 @@ impl ObjectStoreEngine {
                 endpoint,
                 allow_http,
             } => {
+                let client_opts = build_http_client_options(allow_http, endpoint.as_deref(), None);
                 let mut builder = AmazonS3Builder::new()
                     .with_bucket_name(&bucket)
-                    .with_allow_http(allow_http);
+                    .with_allow_http(allow_http)
+                    .with_client_options(client_opts);
                 if let Some(region_val) = region {
                     builder = builder.with_region(region_val);
                 }
@@ -454,11 +522,47 @@ impl ObjectStoreEngine {
                 application_credentials_path,
                 access_token,
                 credential_cache,
+                quota_project_id,
                 endpoint,
                 allow_http,
                 skip_signature,
+                allow_ambient_adc,
             } => {
-                let mut builder = GoogleCloudStorageBuilder::from_env().with_bucket_name(&bucket);
+                let has_explicit_creds = service_account_path.is_some()
+                    || service_account_key.is_some()
+                    || application_credentials_path.is_some()
+                    || access_token.is_some()
+                    || credential_cache.is_some();
+                let mut builder = if !allow_ambient_adc || skip_signature || has_explicit_creds {
+                    GoogleCloudStorageBuilder::new().with_bucket_name(&bucket)
+                } else {
+                    GoogleCloudStorageBuilder::from_env().with_bucket_name(&bucket)
+                };
+
+                let effective_quota_project = quota_project_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        credential_cache
+                            .as_ref()
+                            .and_then(SharedGcpTokenCacheHandle::quota_project_id)
+                            .filter(|s| !s.trim().is_empty())
+                    });
+                let mut default_headers = http::HeaderMap::new();
+                if let Some(qp) = effective_quota_project {
+                    let header_val = http::HeaderValue::from_str(qp.trim()).map_err(|e| {
+                        StorageError::InvalidInput(format!(
+                            "invalid quota_project_id header value: {e}"
+                        ))
+                    })?;
+                    default_headers.insert(
+                        http::header::HeaderName::from_static("x-goog-user-project"),
+                        header_val,
+                    );
+                }
+
                 if let Some(sa_path) = service_account_path {
                     builder = builder.with_service_account_path(sa_path);
                 }
@@ -474,24 +578,25 @@ impl ObjectStoreEngine {
                         builder = builder.with_application_credentials(adc_path);
                     }
                     if let Some(token) = access_token {
-                        let creds = Arc::new(object_store::StaticCredentialProvider::new(
-                            object_store::gcp::GcpCredential { bearer: token },
-                        ));
+                        let creds = Arc::new(StaticCredentialProvider::new(GcpCredential {
+                            bearer: token,
+                        }));
+                        builder = builder.with_credentials(creds);
+                    } else if skip_signature && !has_explicit_creds {
+                        let creds = Arc::new(StaticCredentialProvider::new(GcpCredential {
+                            bearer: String::new(),
+                        }));
                         builder = builder.with_credentials(creds);
                     }
                 }
                 if let Some(ref ep) = endpoint {
                     builder = builder.with_base_url(ep);
                 }
-                if allow_http {
-                    builder = builder.with_client_options(
-                        object_store::ClientOptions::new()
-                            .with_allow_http(true)
-                            .with_proxy_excludes(
-                                "127.0.0.1,localhost,::1,metadata.google.internal",
-                            ),
-                    );
-                }
+                builder = builder.with_client_options(build_http_client_options(
+                    allow_http,
+                    endpoint.as_deref(),
+                    Some(default_headers),
+                ));
                 if skip_signature {
                     builder = builder.with_skip_signature(true);
                 }
@@ -505,8 +610,13 @@ impl ObjectStoreEngine {
                 account,
                 access_key,
                 endpoint,
+                allow_http,
             } => {
-                let mut builder = MicrosoftAzureBuilder::new().with_container_name(&container);
+                let client_opts = build_http_client_options(allow_http, endpoint.as_deref(), None);
+                let mut builder = MicrosoftAzureBuilder::new()
+                    .with_container_name(&container)
+                    .with_allow_http(allow_http)
+                    .with_client_options(client_opts);
                 if let Some(acc) = account {
                     builder = builder.with_account(acc);
                 }
@@ -553,11 +663,14 @@ impl ObjectStoreEngine {
                     }
                     _ => format!("https://{}.r2.cloudflarestorage.com", account_id),
                 });
+                let client_opts =
+                    build_http_client_options(allow_http, Some(resolved_endpoint.as_str()), None);
                 let mut builder = AmazonS3Builder::new()
                     .with_bucket_name(&bucket)
                     .with_region("auto")
                     .with_endpoint(resolved_endpoint)
-                    .with_allow_http(allow_http);
+                    .with_allow_http(allow_http)
+                    .with_client_options(client_opts);
                 if let Some(key_id) = access_key_id {
                     builder = builder.with_access_key_id(key_id);
                 }
@@ -569,8 +682,12 @@ impl ObjectStoreEngine {
                     scheme: "r2".to_string(),
                 })
             }
-            BackendConfig::Http { url } => {
-                let store = HttpBuilder::new().with_url(url).build()?;
+            BackendConfig::Http { url, allow_http } => {
+                let client_opts = build_http_client_options(allow_http, Some(url.as_str()), None);
+                let store = HttpBuilder::new()
+                    .with_url(url)
+                    .with_client_options(client_opts)
+                    .build()?;
                 Ok(Self {
                     inner: Arc::new(store),
                     scheme: "http".to_string(),
@@ -583,12 +700,20 @@ impl ObjectStoreEngine {
         url_str: &str,
         options: Option<&HashMap<String, String>>,
     ) -> Result<Self, StorageError> {
+        Self::from_url_with_cache(url_str, options.cloned(), None)
+    }
+
+    pub fn from_url_with_cache(
+        url_str: &str,
+        options: Option<HashMap<String, String>>,
+        external_token_cache: Option<SharedGcpTokenCacheHandle>,
+    ) -> Result<Self, StorageError> {
         if url_str == "memory://" || url_str == "memory:" {
             return Self::new(BackendConfig::Memory);
         }
         let parsed = Url::parse(url_str)
             .map_err(|e| StorageError::InvalidUrl(url_str.to_string(), e.to_string()))?;
-        let opts = options.cloned().unwrap_or_default();
+        let opts = options.unwrap_or_default();
 
         match parsed.scheme() {
             "memory" => Self::new(BackendConfig::Memory),
@@ -686,8 +811,18 @@ impl ObjectStoreEngine {
             }
             "gs" | "gcs" => {
                 let bucket = parsed.host_str().unwrap_or_default().to_string();
-                let credential_cache =
-                    GcpTokenCache::from_options(&opts, crate::gcp_auth::GCS_OAUTH_SCOPES);
+                let skip_signature = opts.get("skip_signature").is_some_and(|v| v == "true");
+                let allow_ambient_adc = !opts
+                    .get("allow_ambient_adc")
+                    .is_some_and(|v| v.eq_ignore_ascii_case("false") || v == "0");
+                let credential_cache = external_token_cache.or_else(|| {
+                    if skip_signature {
+                        None
+                    } else {
+                        GcpTokenCache::from_options(&opts, crate::gcp_auth::GCS_OAUTH_SCOPES)
+                            .map(SharedGcpTokenCacheHandle::from_arc)
+                    }
+                });
                 Self::new(BackendConfig::Gcs {
                     bucket,
                     service_account_path: opts.get("service_account_path").cloned(),
@@ -701,25 +836,35 @@ impl ObjectStoreEngine {
                         .or_else(|| opts.get("bearer_token"))
                         .cloned(),
                     credential_cache,
+                    quota_project_id: opts.get("quota_project_id").cloned(),
                     endpoint: opts
                         .get("endpoint")
                         .or_else(|| opts.get("base_url"))
                         .cloned(),
                     allow_http: opts.get("allow_http").is_some_and(|v| v == "true"),
-                    skip_signature: opts.get("skip_signature").is_some_and(|v| v == "true"),
+                    skip_signature,
+                    allow_ambient_adc,
                 })
             }
             "az" | "azure" | "abfs" => {
                 let container = parsed.host_str().unwrap_or_default().to_string();
+                let endpoint = opts.get("endpoint").cloned();
+                let allow_http = opts.get("allow_http").is_some_and(|v| v == "true")
+                    || endpoint
+                        .as_deref()
+                        .is_some_and(|ep| ep.starts_with("http://"));
                 Self::new(BackendConfig::Azure {
                     container,
                     account: opts.get("account").cloned(),
                     access_key: opts.get("access_key").cloned(),
-                    endpoint: opts.get("endpoint").cloned(),
+                    endpoint,
+                    allow_http,
                 })
             }
             "http" | "https" => Self::new(BackendConfig::Http {
                 url: url_str.to_string(),
+                allow_http: parsed.scheme() == "http"
+                    || opts.get("allow_http").is_some_and(|v| v == "true"),
             }),
             other => Err(StorageError::InvalidUrl(
                 url_str.to_string(),
@@ -761,10 +906,51 @@ impl ObjectStoreEngine {
         let mode = if create_only {
             PutMode::Create
         } else if let Some(ref etag) = opts.if_match {
-            PutMode::Update(UpdateVersion {
-                e_tag: Some(etag.clone()),
-                version: None,
-            })
+            if self.scheme == "gs" {
+                let trimmed = etag.trim();
+                if !trimmed.is_empty() && trimmed.bytes().all(|b| b.is_ascii_digit()) {
+                    PutMode::Update(UpdateVersion {
+                        e_tag: None,
+                        version: Some(trimmed.to_string()),
+                    })
+                } else {
+                    match self.inner.head(&location).await {
+                        Ok(existing) if existing.e_tag.as_deref() == Some(etag.as_str()) => {
+                            let Some(ver) = existing.version else {
+                                return Err(StorageError::Precondition {
+                                    path: location.to_string(),
+                                    message: "GCS object has no generation version for conditional update".to_string(),
+                                });
+                            };
+                            PutMode::Update(UpdateVersion {
+                                e_tag: None,
+                                version: Some(ver),
+                            })
+                        }
+                        Ok(existing) => {
+                            return Err(StorageError::Precondition {
+                                path: location.to_string(),
+                                message: format!(
+                                    "ETag mismatch: expected {etag:?}, got {:?}",
+                                    existing.e_tag
+                                ),
+                            });
+                        }
+                        Err(object_store::Error::NotFound { .. }) => {
+                            return Err(StorageError::Precondition {
+                                path: location.to_string(),
+                                message: "object does not exist for if_match update".to_string(),
+                            });
+                        }
+                        Err(err) => return Err(err.into()),
+                    }
+                }
+            } else {
+                PutMode::Update(UpdateVersion {
+                    e_tag: Some(etag.clone()),
+                    version: None,
+                })
+            }
         } else if let Some(ref none_etag) = opts.if_none_match {
             match self.inner.head(&location).await {
                 Ok(existing) if existing.e_tag.as_deref() == Some(none_etag.as_str()) => {
