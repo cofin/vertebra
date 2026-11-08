@@ -58,11 +58,21 @@ sources:
   - id: src-storage-store-py
     resource: src/py/vertebra/storage/_store.py
     title: "Fail-closed SyncObjectStore and AsyncObjectStore facade (src/py/vertebra/storage/_store.py)"
-  - {id: src-storage-streaming-py, resource: src/py/vertebra/storage/_streaming.py, title: "StreamingStorageResponse FastPath descriptor (src/py/vertebra/storage/_streaming.py)"}
-  - {id: src-extensions-litestar-store-py, resource: src/py/vertebra/extensions/litestar/store.py, title: "Persistent Litestar Store and confined async filesystem"}
-  - {id: src-tests-storage-store-py, resource: src/py/tests/unit/storage/test_storage_store.py, title: "Range parsing, async ownership, and storage response contracts"}
-  - {id: src-tests-zero-copy-buffer-py, resource: src/py/tests/unit/server/test_zero_copy_buffer.py, title: "Native async storage handler buffer submission"}
-  - {id: src-tests-litestar-plugin-py, resource: src/py/tests/unit/extensions/test_litestar_plugin.py, title: "Persistent TTL, namespaces, static GET/HEAD, and explicit Range handler"}
+  - id: src-storage-streaming-py
+    resource: src/py/vertebra/storage/_streaming.py
+    title: "StreamingStorageResponse FastPath descriptor (src/py/vertebra/storage/_streaming.py)"
+  - id: src-extensions-litestar-store-py
+    resource: src/py/vertebra/extensions/litestar/store.py
+    title: "Persistent Litestar Store and confined async filesystem"
+  - id: src-tests-storage-store-py
+    resource: src/py/tests/unit/storage/test_storage_store.py
+    title: "Range parsing, async ownership, and storage response contracts"
+  - id: src-tests-zero-copy-buffer-py
+    resource: src/py/tests/unit/server/test_zero_copy_buffer.py
+    title: "Native async storage handler buffer submission"
+  - id: src-tests-litestar-plugin-py
+    resource: src/py/tests/unit/extensions/test_litestar_plugin.py
+    title: "Persistent TTL, namespaces, static GET/HEAD, and explicit Range handler"
   - id: src-extensions-alchemy-storage-py
     resource: src/py/vertebra/extensions/alchemy/storage.py
     title: "Advanced Alchemy StorageBackend adapter (src/py/vertebra/extensions/alchemy/storage.py)"

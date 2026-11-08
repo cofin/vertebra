@@ -116,7 +116,7 @@ Undeclared extras referenced in code: `postgres` (`postgres/driver.py::_ensure_p
 
 ## Sibling Spec Overlap
 
-- `native-postgres-driver` ch27 removes `_in_memory_rows` / `memory://`; ch30 drops `memory://` doc claims; ch14 cites `vertebra_db::postgres::PostgresPool` as a kept helper; ch09 t02 owns the `postgres` extra.
+- `native-postgres-driver` ch08:t02 owns the `postgres` extra; ch14 and ch27 assume `driver-fail-loud` has already removed `vertebra_db::postgres::PostgresPool` and the PostgreSQL `memory://` paths (`_in_memory_rows`); ch30 drops `memory://` doc claims.
 - `native-mysql-driver` and `native-redis-driver` remove `memory://`; `native-redis-driver` describes a hand-built RESP3 client while the PRD selects `redis` 1.8.1.
 - `native-oracle-driver`, `native-mssql-driver`, `native-duckdb-driver` remove the stand-ins / fallback at cutover.
 - `broker-pool-sharing` t01 deletes the unused `*Pool` structs.

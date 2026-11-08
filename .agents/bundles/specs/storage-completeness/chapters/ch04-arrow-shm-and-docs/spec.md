@@ -87,7 +87,7 @@ Progress: `[1/3 files documented]`. The original documentation manifest is prese
 
 ## 5. Implementation Plan
 
-- [ ] storage-completeness:ch04:t01 — Preserve ArrowCursor APIs while enforcing named SHM and real IPC (tasks/t01-strict-shm-and-arrow-ipc-cursor.md)
+- [~] storage-completeness:ch04:t01 — Preserve ArrowCursor APIs while enforcing named SHM and real IPC (tasks/t01-strict-shm-and-arrow-ipc-cursor.md)
 - [ ] storage-completeness:ch04:t02 — Read Arrow and Parquet through a bounded async codec bridge (tasks/t02-streaming-arrow-parquet-storage.md)
 - [ ] storage-completeness:ch04:t03 — Write Arrow and Parquet with bounded multipart codec output (tasks/t03-streaming-arrow-parquet-writes.md)
 

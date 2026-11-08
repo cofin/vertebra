@@ -4,7 +4,7 @@ id: "driver-fail-loud:ch03:t01"
 chapter_id: ch03-remove-memory-fakes
 title: PostgreSQL and MySQL drivers reject memory:// and lose in-memory rows
 description: Delete _in_memory_rows, _tx_snapshot, and every memory branch from the sync and async PostgreSQL and MySQL drivers, raise ImproperConfigurationError for memory:// DSNs and for PostgreSQL pools with no execution method, and retarget tests to injected pool ports.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -24,7 +24,7 @@ tests:
   - src/py/tests/unit/db/test_enterprise_olap_drivers.py
 estimated_loc: 165
 plan_revision: 1
-plan_commit: 0acdf576
+plan_commit: 1e1f028a
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -35,7 +35,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-07T00:00:00Z"
+updated_at: "2026-11-08T00:00:00Z"
 commit: null
 sources:
   - id: pg-driver
@@ -61,7 +61,7 @@ tags:
 
 Make the four PostgreSQL and MySQL driver classes raise `ImproperConfigurationError` when constructed with a `memory://` DSN, delete the `_in_memory_rows` and `_tx_snapshot` state and every `memory://` branch, and replace the PostgreSQL empty-row fallthrough with an `ImproperConfigurationError`.[^pg-driver][^mysql-driver][^improper-config] Retarget the three tests that build a PostgreSQL driver from `memory://` to a `postgresql://` DSN with an injected `pool=` port.
 
-Out of scope: `postgres/config.py` and `mysql/config.py` (configs stay constructible with any DSN); `_ensure_async_pool` returning the `asyncpg` module without assigning it; install-hint changes in `_ensure_pool` / `_ensure_async_pool` (owned by `ch07`); `from __future__ import annotations` removal.
+Out of scope: `postgres/config.py` and `mysql/config.py` (configs stay constructible with any DSN); `_ensure_async_pool` returning the `asyncpg` module without assigning it; install-hint changes in `_ensure_pool` / `_ensure_async_pool` (owned by `ch08-install-hints-and-extras-gate`); `from __future__ import annotations` removal.
 
 ## Bounded Read Manifest
 
@@ -126,14 +126,31 @@ Call-site wiring: `DatabaseRegistry.get_shared_driver(PostgreSQLConfig(dsn="memo
 ## Public-Seam Test Blueprint
 
 - **Canonical test files**: `src/py/tests/unit/db/test_native_db_drivers.py` (new tests), `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py` and `src/py/tests/unit/db/test_enterprise_olap_drivers.py` (retargets). Dependency category: injected in-process ports at the pool boundary.
-- New `test_postgres_and_mysql_drivers_reject_memory_dsn`, parametrized over `(factory, dsn)`:
+- New `test_postgres_and_mysql_drivers_reject_memory_dsn(factory: Callable[[], object])`, parametrized over zero-argument callables so each driver constructs inside `pytest.raises(ImproperConfigurationError, match="memory://")`. Each case is one `pytest.param` line whose config literal is written `dsn="memory://"` (or `dsn="MEMORY://"`), so the `driver-fail-loud:ch04:t01` residue gate filter `rg -v 'dsn="memory://"|reject_memory_dsn'` drops every row:
 
-| Case | Concrete Input | Expected Output / Error |
+```python
+@pytest.mark.parametrize(
+    "factory",
+    [
+        pytest.param(lambda: SyncPostgreSQLDriver(PostgreSQLConfig(dsn="memory://")), id="sync-postgres"),
+        pytest.param(lambda: AsyncPostgreSQLDriver(PostgreSQLConfig(dsn="MEMORY://")), id="async-postgres"),
+        pytest.param(lambda: SyncMySQLDriver(MySQLConfig(dsn="memory://")), id="sync-mysql"),
+        pytest.param(lambda: AsyncMySQLDriver(MySQLConfig(dsn="memory://")), id="async-mysql"),
+    ],
+)
+def test_postgres_and_mysql_drivers_reject_memory_dsn(factory: Callable[[], object]) -> None:
+    with pytest.raises(ImproperConfigurationError, match="memory://"):
+        factory()
+```
+
+| Case id | Concrete Input | Expected Output / Error |
 | --- | --- | --- |
-| Sync PostgreSQL | `SyncPostgreSQLDriver(PostgreSQLConfig(dsn="memory://"))` | `pytest.raises(ImproperConfigurationError, match="memory://")` |
-| Async PostgreSQL uppercase | `AsyncPostgreSQLDriver(PostgreSQLConfig(dsn="MEMORY://"))` | `ImproperConfigurationError` |
-| Sync MySQL | `SyncMySQLDriver(MySQLConfig(dsn="memory://"))` | `ImproperConfigurationError` |
-| Async MySQL | `AsyncMySQLDriver(MySQLConfig(dsn="memory://"))` | `ImproperConfigurationError` |
+| `sync-postgres` | `SyncPostgreSQLDriver(PostgreSQLConfig(dsn="memory://"))` | `ImproperConfigurationError` matching `memory://` |
+| `async-postgres` | `AsyncPostgreSQLDriver(PostgreSQLConfig(dsn="MEMORY://"))` (uppercase scheme) | `ImproperConfigurationError` matching `memory://` |
+| `sync-mysql` | `SyncMySQLDriver(MySQLConfig(dsn="memory://"))` | `ImproperConfigurationError` matching `memory://` |
+| `async-mysql` | `AsyncMySQLDriver(MySQLConfig(dsn="memory://"))` | `ImproperConfigurationError` matching `memory://` |
+
+- `Callable` joins the existing `from collections.abc import ...` line; `ImproperConfigurationError` is imported from `vertebra.typing`. Both guard messages contain the literal `memory://`, so the `match` holds for the uppercase input.
 
 - New `test_postgres_pool_without_execution_surface_raises` (sync) and `test_async_postgres_pool_without_execution_surface_raises` (`@pytest.mark.anyio`):
 

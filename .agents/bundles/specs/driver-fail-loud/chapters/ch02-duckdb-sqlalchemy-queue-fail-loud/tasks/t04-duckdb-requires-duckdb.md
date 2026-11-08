@@ -4,7 +4,7 @@ id: "driver-fail-loud:ch02:t04"
 chapter_id: ch02-duckdb-sqlalchemy-queue-fail-loud
 title: DuckDB driver requires the duckdb package and DuckDB tests skip without it
 description: Resolve duckdb through ensure_module in SyncDuckDBDriver, delete the sqlite3 fallback and every _using_native_duckdb branch, and guard DuckDB-executing tests with pytest.importorskip so free-threaded runs skip them.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -26,7 +26,7 @@ tests:
   - src/py/tests/integration/db/test_driver_conformance.py
 estimated_loc: 190
 plan_revision: 1
-plan_commit: 0acdf576
+plan_commit: 1e1f028a
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -67,7 +67,7 @@ tags:
 
 Every test that constructs `SyncDuckDBDriver` / `AsyncDuckDBDriver` or opens a `duckdb+vtb` connection calls `pytest.importorskip("duckdb", reason=_DUCKDB_SKIP_REASON)` first, so free-threaded interpreters (where t01 installs no `duckdb`) skip those tests and GIL interpreters run them on real DuckDB. A missing-module test and a DuckDB-engine identity test land in `test_enterprise_olap_drivers.py`.
 
-Out of scope: the dependency group and Makefile wiring (t01); `AsyncDuckDBDriver` method bodies (unchanged); `DuckDBConfig`; the `_acquire_duckdb_lease` broker logic; the GCS token cache logic in `_sync_gcs_token_secret` apart from removing its native branch; conformance native-module gating (`ch07-install-hints-and-conformance`); docs (`ch09-docs-and-okf`); a `duckdb` optional-dependency extra (native DuckDB flow).
+Out of scope: the dependency group and Makefile wiring (t01); `AsyncDuckDBDriver` method bodies (unchanged); `DuckDBConfig`; the `_acquire_duckdb_lease` broker logic; the GCS token cache logic in `_sync_gcs_token_secret` apart from removing its native branch; conformance native-module gating (ch09); docs (`ch11-docs-and-okf`); a `duckdb` optional-dependency extra (native DuckDB flow).
 
 ## Bounded Read Manifest
 

@@ -5,7 +5,7 @@ parent_flow: driver-fail-loud
 chapter_id: ch04-redis-valkey-memory-removal
 title: "Chapter 04: Redis and Valkey memory:// Removal"
 description: RedisConfig drops the memory scheme so the registry rejects memory://, conformance cache cases run only against live servers, and Redis and Valkey drivers delete their in-process key store and raise ImproperConfigurationError for memory:// through every store and cache factory.
-status: draft
+status: stable
 state: planned
 planning_status: complete
 depends_on_chapters:
@@ -13,7 +13,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "driver-fail-loud:ch04:t01"
 plan_revision: 1
-plan_commit: 0acdf576
+plan_commit: 1e1f028a
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -85,13 +85,13 @@ tags:
 
 This chapter removes `memory` from the registry, makes conformance cache cases live-only, deletes the driver emulation, and makes both Redis driver constructors raise `ImproperConfigurationError` (a `ValueError` subclass) for `memory://`.[^registry][^conformance-cache][^improper-config] `ValkeyConfig` inherits the behavior without its own scheme change.[^valkey-config] Preserved: queue and object storage `memory://` and `SQLAlchemyCacheBackend.from_url("memory://")`.
 
-**Non-goals**: the `resp3_server` fixture and the consumer test retargets (owned by `ch03-remove-memory-fakes`); Redis queue `_InMemoryRedisStreamClient` fallback in `framework/queues/redis.py` (owned by `ch08-queue-backend-fail-loud`); RESP3 codec removal (owned by `native-redis-driver`); `test_driver_conformance.py::_resolve_live_config` (owned by `driver-fail-loud:ch07:t04`); documentation and OKF edits (owned by `ch09-docs-and-okf`).
+**Non-goals**: the `resp3_server` fixture and the consumer test retargets (owned by `ch03-remove-memory-fakes`); Redis queue `_InMemoryRedisStreamClient` fallback in `framework/queues/redis.py` (owned by `ch10-queue-backend-fail-loud`); RESP3 codec removal (owned by `native-redis-driver`); `test_driver_conformance.py::_resolve_live_config` (owned by `driver-fail-loud:ch09:t01`); documentation and OKF edits (owned by `ch11-docs-and-okf`).
 
 ### 1.2 Upstream Execution Baseline
 
 - Branch `feat/storage-updates` at `0acdf576`; parent roadmap [spec.md](../../spec.md).
 - Runs after `ch03-remove-memory-fakes`, which provides `src/py/tests/unit/conftest.py::resp3_server` with the key-value, pub/sub, shard pub/sub, and scripting surface and leaves no `memory://` Redis or Valkey construction in `test_redis_valkey_driver.py`, `test_alchemy_cache_backend.py`, `test_framework_subdomains.py`, or `test_starlette_plugin.py`.
-- `driver-fail-loud:ch07:t04` edits `test_driver_conformance.py::_resolve_live_config` after `t01` edits the cache helpers in the same file.
+- `driver-fail-loud:ch09:t01` edits `test_driver_conformance.py::_resolve_live_config` after `t01` edits the cache helpers in the same file.
 
 ### 1.3 Code Analysis & Seam Summary
 
@@ -204,7 +204,7 @@ def _resolve_cache_config(cache_spec: CacheConformanceSpec, request: pytest.Fixt
 
 - **Progress**: `[0/0 files documented in ch04]`
 - In-scope docstrings change with code: `RedisConfig.url` and `RedisConfig.from_url` (`t01`), `ValkeyConfig.url` and `SyncRedisDriver.scan` / `AsyncRedisDriver.scan` (`t02`).
-- `ch09-docs-and-okf` owns `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` (URL dispatch bullet lists `redis`/`rediss`/`memory`) and `.agents/bundles/knowledge/testing/polyglot-test-matrix.md` (conformance paragraph states Redis and Valkey default to `memory://`). User-facing `docs/` and `README.md` describe `memory://` only for queues and object storage, which stay valid.
+- `ch11-docs-and-okf` owns `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` (URL dispatch bullet lists `redis`/`rediss`/`memory`) and `.agents/bundles/knowledge/testing/polyglot-test-matrix.md` (conformance paragraph states Redis and Valkey default to `memory://`). User-facing `docs/` and `README.md` describe `memory://` only for queues and object storage, which stay valid.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -223,7 +223,7 @@ def _resolve_cache_config(cache_spec: CacheConformanceSpec, request: pytest.Fixt
 
 - **Verified Baseline**: `HEAD @ 0acdf576`; `state: planned`; depends on `ch03-remove-memory-fakes` for the `resp3_server` fixture and the consumer test retargets.
 - **Remaining Tasks in Chapter**: `t01`, `t02` (`0/2` completed). `t01` precedes `t02` so no test constructs a `memory://` Redis config when its emulation is deleted.
-- **Documentation & OKF Sync**: `[0/0]` in this chapter; two OKF claims handed to `ch09`.
+- **Documentation & OKF Sync**: `[0/0]` in this chapter; two OKF claims handed to `ch11`.
 - **Active Invariants**: queue, object storage, and Advanced Alchemy `from_url("memory://")` local cache unchanged; `test_registry_parse_url_executes_zero_eager_driver_imports` stays green; no inline `#` comments in touched Python.
 
 [^redis-driver]: `src/py/vertebra/db/adapters/redis/driver.py::SyncRedisDriver` — Redis sync and async RESP3 drivers with memory command emulation.

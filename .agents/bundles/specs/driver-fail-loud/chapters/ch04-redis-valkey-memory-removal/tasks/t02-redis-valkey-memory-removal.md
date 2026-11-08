@@ -4,7 +4,7 @@ id: "driver-fail-loud:ch04:t02"
 chapter_id: ch04-redis-valkey-memory-removal
 title: Redis and Valkey drivers delete memory execution and reject memory://
 description: Delete the in-process key store, script cache, memory publish, command emulation, and every memory:// branch from the Redis sync, async, and subscription-stream code, and raise ImproperConfigurationError for memory:// URLs from both driver constructors so Valkey drivers and store factories reject it.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -24,7 +24,7 @@ tests:
   - src/py/tests/unit/db/test_redis_valkey_driver.py
 estimated_loc: 250
 plan_revision: 1
-plan_commit: 0acdf576
+plan_commit: 1e1f028a
 state_revision: 0
 claimed_by: null
 claimed_at: null

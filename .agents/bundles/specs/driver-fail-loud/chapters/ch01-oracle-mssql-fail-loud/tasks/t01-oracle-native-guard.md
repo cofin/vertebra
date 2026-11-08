@@ -4,7 +4,7 @@ id: "driver-fail-loud:ch01:t01"
 chapter_id: ch01-oracle-mssql-fail-loud
 title: Guard Oracle drivers on vertebra._oracle and delete the SQLite stand-in
 description: SyncOracleDriver and AsyncOracleDriver resolve vertebra._oracle in __init__ and every public method, raise MissingDependencyError when it is absent, and carry no sqlite3 connection, normalize_sql helper, piggyback state, or broker lease helpers.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -25,7 +25,7 @@ tests:
   - src/py/tests/integration/db/test_driver_conformance.py
 estimated_loc: 230
 plan_revision: 1
-plan_commit: 0acdf576
+plan_commit: 1e1f028a
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -67,7 +67,7 @@ tags:
 
 Make `SyncOracleDriver` and `AsyncOracleDriver` raise `MissingDependencyError` on construction when `vertebra._oracle` is absent, guard every public method they define with the same resolver, and delete the SQLite stand-in with every helper that exists only to feed it[^oracle-driver][^module-loader]. Delete `OracleCore.normalize_sql` and `_NAMED_PARAM_RE`, whose only caller is the driver[^oracle-core]. Rewrite the driver module and class docstrings to state the native module requirement. Update the three canonical test files so no test depends on Oracle SQLite execution, Oracle tenant tests run against an injected port, and missing-module behaviour is covered at every consumer seam.
 
-Out of scope: MSSQL (t02); docstrings in `oracle/core.py`, `oracle/config.py`, `oracle/__init__.py` (ch05); TNS packet framing and its codec test assertions (ch05); conformance live-fixture policy (ch07); `from __future__ import annotations` removal.
+Out of scope: MSSQL (t02); docstrings in `oracle/core.py`, `oracle/config.py`, `oracle/__init__.py` (ch06); TNS packet framing and its codec test assertions (ch06); conformance live-fixture policy (ch09); `from __future__ import annotations` removal.
 
 ## Bounded Read Manifest
 
@@ -234,7 +234,7 @@ Changes:
 
 - [2026-11-07 00:00] `import_optional` caches a found module in `_module_cache`, so a stub left in the cache leaks into later tests; reset it in `finally`.
 - [2026-11-07 00:00] `OracleSyncDriver` (SQLSpec) stores any object as `native_driver`[^sqlspec-oracle]; `BaseSyncDriver._normalize_params` passes a single mapping through unchanged, so the port receives the dict from `OracleCore.build_session_context_sql`.
-- [2026-11-07 00:00] `integration/conftest.py::vtb_oracle_driver` has no consumers; ch07/t04 deletes it, so this task leaves `integration/conftest.py` untouched.
+- [2026-11-07 00:00] `integration/conftest.py::vtb_oracle_driver` has no consumers; ch09/t01 deletes it, so this task leaves `integration/conftest.py` untouched.
 
 [^oracle-driver]: `src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver` — Oracle sync and async drivers backed by sqlite3.
 [^oracle-core]: `src/py/vertebra/db/adapters/oracle/core.py::OracleCore.normalize_sql` — SQLite-only Oracle placeholder normalizer.

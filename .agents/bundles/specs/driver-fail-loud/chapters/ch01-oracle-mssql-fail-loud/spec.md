@@ -5,14 +5,14 @@ parent_flow: driver-fail-loud
 chapter_id: ch01-oracle-mssql-fail-loud
 title: "Chapter 01: Oracle and MSSQL Fail-Loud Drivers"
 description: Oracle and MSSQL drivers resolve vertebra._oracle / vertebra._mssql on construction and on every public method, raise MissingDependencyError when the module is absent, carry no SQLite execution or SQLite-only helpers, and AsyncMSSQLDriver forwards its dialer to the paired sync driver.
-status: draft
+status: stable
 state: planned
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: "driver-fail-loud:ch01:t01"
 plan_revision: 1
-plan_commit: 0acdf576
+plan_commit: 1e1f028a
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -91,17 +91,17 @@ This chapter makes both drivers resolve their native extension module (`vertebra
 **Non-goals**:
 
 - Native Oracle or SQL Server clients and their connection APIs (owned by `native-oracle-driver` and `native-mssql-driver`).
-- Docstrings in `oracle/core.py`, `oracle/config.py`, `oracle/__init__.py`, `mssql/core.py`, `mssql/config.py`, `mssql/__init__.py` (owned by ch05).
-- Deleting `MSSQLCore.encode_tds_sql_batch`, the `encode_tds_sql_batch` binding, its `_vertebra.pyi` stub, TNS/TDS packet framing, or Python branches probing unexported natives (owned by ch05).
-- `MissingDependencyError` default hint and the extras gate (owned by ch07); this chapter passes `install_package` explicitly.
-- Conformance live-fixture skip/fail policy and `src/py/tests/integration/conftest.py` (owned by ch07). The `vtb_oracle_driver` and `vtb_mssql_driver` fixtures there have no consumers; ch07/t04 deletes them, so ch01 leaves that file untouched.
+- Docstrings in `mssql/core.py`, `mssql/config.py`, `mssql/__init__.py` (owned by ch05) and in `oracle/core.py`, `oracle/config.py`, `oracle/__init__.py` (owned by ch06).
+- Deleting `MSSQLCore.encode_tds_sql_batch`, the `encode_tds_sql_batch` binding, its `_vertebra.pyi` stub, TNS/TDS packet framing, or Python branches probing unexported natives (owned by ch05 for MSSQL and TDS, ch06 for Oracle, TNS, and Redis).
+- `MissingDependencyError` default hint and the extras gate (owned by ch08-install-hints-and-extras-gate); this chapter passes `install_package` explicitly.
+- Conformance live-fixture skip/fail policy and `src/py/tests/integration/conftest.py` (owned by ch09). The `vtb_oracle_driver` and `vtb_mssql_driver` fixtures there have no consumers; ch09/t01 deletes them, so ch01 leaves that file untouched.
 - The SQLAlchemy DB-API parse fallback (owned by ch02); this chapter only drops the `oracle+vtb` / `mssql+vtb` rows from the broker-forwarding test because those URLs now raise.
 - `from __future__ import annotations` in the touched modules; it is used across `src/py/vertebra/db/adapters/**` and its removal is a separate sweep.
 
 ### 1.2 Upstream Execution Baseline
 
 - Branch `feat/storage-updates` at `0acdf576`; parent roadmap [spec.md](../../spec.md); catalog [chapters/index.md](../index.md).
-- `depends_on_chapters: []`; ch02 through ch11 start from this chapter's baseline.
+- `depends_on_chapters: []`; ch02 through ch13 start from this chapter's baseline.
 - Research: [change-surface](../../research/change-surface_20261107.md).
 
 ### 1.3 Code Analysis & Seam Summary
@@ -232,7 +232,7 @@ Deleted symbols: `SyncOracleDriver.{_conn, _in_transaction, _session_context, _p
 
 ## 3. Documentation & OKF Knowledge Plan
 
-- **Progress**: `[0/2 files documented in ch01]` — driver module docstrings only; user docs and OKF chapters are documented in ch09.
+- **Progress**: `[0/2 files documented in ch01]` — driver module docstrings only; user docs and OKF chapters are documented in ch11.
 - `[ ]` `src/py/vertebra/db/adapters/oracle/driver.py` — Module and class docstrings state that the driver requires `vertebra._oracle` from `vertebra-core[oracle]` and raises `MissingDependencyError` without it (`t01`).
 - `[ ]` `src/py/vertebra/db/adapters/mssql/driver.py` — Module and class docstrings state the `vertebra._mssql` requirement; `AsyncMSSQLDriver` documents that its dialer runs on the sync driver (`t02`).
 

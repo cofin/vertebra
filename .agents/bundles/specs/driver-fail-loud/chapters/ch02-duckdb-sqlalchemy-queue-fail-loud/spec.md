@@ -5,7 +5,7 @@ parent_flow: driver-fail-loud
 chapter_id: ch02-duckdb-sqlalchemy-queue-fail-loud
 title: "Chapter 02: DuckDB, SQLAlchemy, and Oracle Queue Fail-Loud Paths"
 description: DuckDB requires the duckdb package, installed through a GIL-only duckdb dependency group with DuckDB tests skipping on free-threaded interpreters, the SQLAlchemy DB-API raises InterfaceError on unparsable URLs, and OracleQueueBackend raises instead of substituting an in-memory executor.
-status: draft
+status: stable
 state: planned
 planning_status: complete
 depends_on_chapters:
@@ -13,7 +13,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "driver-fail-loud:ch02:t01"
 plan_revision: 1
-plan_commit: 0acdf576
+plan_commit: 1e1f028a
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -94,23 +94,23 @@ tags:
 
 This chapter makes all three paths raise: DuckDB raises `MissingDependencyError`, the DB-API raises its PEP 249 `InterfaceError`, and the Oracle queue raises `MissingDependencyError` or `ImproperConfigurationError`. A dedicated `duckdb` dependency group installs the package on GIL interpreters; DuckDB tests run on the real engine there and skip on free-threaded interpreters. Oracle queue tests move to a test-owned executor fake.
 
-### 1.2 Non-Goals
+**Non-goals**:
 
 - The raw `sqlite3` connection (`SyncDBAPIConnection._sqlite_conn`) opened for genuine SQLite URLs and DB-API error mapping beyond the parse fallback (owned by `sqlalchemy-and-django-integration`).
 - A live Oracle queue executor for `OracleQueueBackend` (owned by `queues-tasks-and-channels`, which builds the durable `OracleQueueStore` and `PostgresQueueStore` queue stores).
-- In-memory fallback executors in `framework/queues/postgres.py`, `framework/queues/redis.py`, and `framework/queues/spanner.py` (owned by [ch08-queue-backend-fail-loud](../ch08-queue-backend-fail-loud/spec.md)).
+- In-memory fallback executors in `framework/queues/postgres.py`, `framework/queues/redis.py`, and `framework/queues/spanner.py` (owned by [ch10-queue-backend-fail-loud](../ch10-queue-backend-fail-loud/spec.md)).
 - A cached free-threaded `duckdb` source build (follow-up once DuckDB supports free-threading) and the existing `bench-ft` target, which syncs `--group bench` on a free-threaded interpreter.
 - A native `vertebra._duckdb` engine and the `duckdb` optional-dependency extra (owned by `native-duckdb-driver` / `native-embedded-and-cache-drivers`).
-- Conformance native-module gating (owned by `ch07-install-hints-and-conformance`).
-- User docs and OKF knowledge prose (owned by `ch09-docs-and-okf`; queue docs by `ch10-queue-docs-and-knowledge`).
+- Conformance native-module gating (owned by ch09) and `MissingDependencyError` hints and the extras gate (owned by ch08).
+- User docs and OKF knowledge prose (owned by `ch11-docs-and-okf`; queue docs by `ch12-queue-docs-and-knowledge`; the `duckdb` group in `AGENTS.md` and agent workflow knowledge by `ch13-agent-knowledge-and-embeddings-docs`).
 
-### 1.3 Upstream Execution Baseline
+### 1.2 Upstream Execution Baseline
 
 - Branch `feat/storage-updates` at `0acdf576`; parent flow [`driver-fail-loud`](../../spec.md).
 - Depends on `ch01-oracle-mssql-fail-loud`: both chapters edit `src/py/tests/unit/db/test_enterprise_olap_drivers.py`, whose identifier-rejection and DB-API broker tests parametrize Oracle, MSSQL, and DuckDB together.
 - `uv.lock` already resolves `duckdb` `2.0.0` through the `bench` group; `oracledb` is not in `uv.lock`.
 
-### 1.4 Code Analysis & Seam Summary
+### 1.3 Code Analysis & Seam Summary
 
 | Area | Files Examined (`path/to/file::Symbol`) | Public Seam, Dependency Category & Integration |
 | --- | --- | --- |
@@ -121,7 +121,7 @@ This chapter makes all three paths raise: DuckDB raises `MissingDependencyError`
 | Oracle queue | `framework/queues/oracle.py::OracleQueueBackend`, `_InMemoryOracleQueueExecutor`[^oracle-queue], `base.py::QueueService._build_backend`[^queue-factory] | External boundary (`oracledb`); `OracleQueueExecutor` protocol is the injected seam |
 | Tests | `test_enterprise_olap_drivers.py`, `test_gcs_token_refresh.py`, `test_native_db_drivers.py`, `test_driver_conformance.py`, `test_sqlalchemy_and_sqlspec_vtb.py`, `test_distributed_queues.py`[^queue-tests] | Canonical module test files; no new test modules |
 
-### 1.5 Relevant OKF Knowledge Chapters & Skills
+### 1.4 Relevant OKF Knowledge Chapters & Skills
 
 - [Database drivers and dialers](../../../../knowledge/domains/data/database-drivers-and-dialers.md)
 - [SQLSpec, Advanced Alchemy, and dialects](../../../../knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md)
@@ -195,8 +195,11 @@ class OracleQueueBackend:
 
 ```make
 PY_GIL_DISABLED = $(shell uv run --no-sync python -c "import sysconfig; print(int(bool(sysconfig.get_config_var('Py_GIL_DISABLED'))))" 2>/dev/null)
-PY_TEST_GROUPS = $(if $(filter 1,$(PY_GIL_DISABLED)),,--group duckdb)
+PY_TEST_GROUPS = $(if $(filter 0,$(PY_GIL_DISABLED)),--group duckdb)
+unexport PY_GIL_DISABLED PY_TEST_GROUPS
 ```
+
+`PY_TEST_GROUPS` is `--group duckdb` only when the probe prints exactly `0`; `1`, empty output, or a failed probe yields no group. `unexport` keeps both variables out of recipe environments. Reason: the `Makefile` declares `.EXPORT_ALL_VARIABLES:`, which would otherwise run the probe in every recipe of every target, including `make install` before `setup-env`.[^makefile]
 
 `install` runs `uv sync --all-extras --dev --group doc --group duckdb`; `py-test` and `coverage` run `uv run $(PY_TEST_GROUPS) pytest ...`; `upgrade` syncs with `$(PY_TEST_GROUPS)`. `.github/workflows/ci.yml` is unchanged: its `test-python` job runs `make py-test` on each interpreter.
 
@@ -204,7 +207,7 @@ Test guard in each module with DuckDB-executing tests: `_DUCKDB_SKIP_REASON = "d
 
 ### 2.3 Caller -> Seam -> Collaborator Integration Map
 
-- `make py-test` → `PY_TEST_GROUPS` (empty when `Py_GIL_DISABLED == 1`) → `uv run --group duckdb pytest` → DuckDB tests run; on free-threaded interpreters `pytest.importorskip("duckdb")` → SKIPPED.
+- `make py-test` → `PY_TEST_GROUPS` (empty unless the probe prints `0`) → `uv run --group duckdb pytest` → DuckDB tests run; on free-threaded interpreters `pytest.importorskip("duckdb")` → SKIPPED.
 - `DatabaseRegistry.get_shared_sync_driver(DuckDBConfig)` / SQLSpec `DuckDBSyncConfig.provide_session` → `SyncDuckDBDriver.__init__` → `ensure_module("duckdb")` → `duckdb.connect(config.resolved_path(), read_only=config.read_only)` or `MissingDependencyError`.
 - `AsyncDuckDBDriver.__init__` → `SyncDuckDBDriver.__init__` → same guard.
 - `SyncDBAPIModule.connect(url)` → `SyncDBAPIConnection.__init__` → `DatabaseRegistry.parse_url` → `ValueError` → `InterfaceError` `from` it.
@@ -263,13 +266,13 @@ Test guard in each module with DuckDB-executing tests: `_DUCKDB_SKIP_REASON = "d
 - `[ ]` `src/py/vertebra/db/adapters/duckdb/driver.py` — `SyncDuckDBDriver.__init__` Google docstring with `Raises:` (t04).
 - `[ ]` `src/py/vertebra/extensions/sqlalchemy/dialects.py` — `SyncDBAPIConnection.__init__` / `AsyncDBAPIConnection.__init__` `Raises: InterfaceError` (t02).
 - `[ ]` `src/py/vertebra/framework/queues/oracle.py` — `OracleQueueBackend.__init__` `Raises:` and class docstring naming the required `executor` (t03).
-- User docs and OKF prose (`docs/usage/databases.md` DuckDB requirement, `docs/usage/queues-and-realtime.md` Oracle row, `knowledge/domains/framework/distributed-queues-and-email.md` Oracle executor requirement) are handed to `ch09-docs-and-okf` (DuckDB) and `ch10-queue-docs-and-knowledge` (queues).
+- User docs and OKF prose (`docs/usage/databases.md` DuckDB requirement, `docs/usage/queues-and-realtime.md` Oracle row, `knowledge/domains/framework/distributed-queues-and-email.md` Oracle executor requirement) are handed to `ch11-docs-and-okf` (DuckDB) and `ch12-queue-docs-and-knowledge` (queues).
 
 ## 4. Requirement-to-Task Traceability Matrix
 
 | Requirement / Doc Target | Owning Chapter / Task | Verification Strategy | Canonical Test / Doc Gate |
 | --- | --- | --- | --- |
-| R3 (dependency group, Makefile) | `ch02 / t01` | `refactor_verification` | `uv lock --check`; `make -n py-test PY_GIL_DISABLED=0` and `PY_GIL_DISABLED=1` group checks |
+| R3 (dependency group, Makefile) | `ch02 / t01` | `static_validation` | `uv lock --check`; `make -n py-test PY_GIL_DISABLED=0` and `PY_GIL_DISABLED=1` group checks; `make help` runs the probe zero times |
 | R3, R3.1 | `ch02 / t04` | `behavior_tdd` | `src/py/tests/unit/db/test_enterprise_olap_drivers.py::test_duckdb_drivers_raise_missing_dependency_when_duckdb_absent`, `::test_duckdb_driver_executes_on_duckdb_engine`; `src/py/tests/unit/storage/test_gcs_token_refresh.py::test_duckdb_multi_session_token_generation_secret_rotation` |
 | R4 | `ch02 / t02` | `behavior_tdd` | `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py::test_sync_dbapi_connection_rejects_unparsable_url`, `::test_async_dbapi_connection_rejects_unparsable_url` |
 | R5, R5.1 | `ch02 / t03` | `behavior_tdd` | `src/py/tests/unit/framework/test_distributed_queues.py::test_oracle_queue_backend_requires_oracledb_and_executor` |
@@ -287,7 +290,7 @@ Test guard in each module with DuckDB-executing tests: `_DUCKDB_SKIP_REASON = "d
 - **Verified Baseline (`HEAD`)**: `0acdf576` — chapter planned; `0/4` tasks completed.
 - **Active Task**: `driver-fail-loud:ch02:t01`.
 - **Remaining Plan**: t01, t02, t03, t04; t04 depends on t01; t02 and t03 are independent of t01, t04, and each other.
-- **Documentation & OKF Sync**: `[0/3 files documented]`; user docs and OKF prose go to `ch09-docs-and-okf` and queue docs to `ch10-queue-docs-and-knowledge`.
+- **Documentation & OKF Sync**: `[0/3 files documented]`; user docs and OKF prose go to `ch11-docs-and-okf` and queue docs to `ch12-queue-docs-and-knowledge`.
 - **Active Invariants & Triggers**: registry import stays free of `duckdb` / `oracledb`; the SQLite `_sqlite_conn` path and `MemoryQueueBackend` are untouched; free-threaded interpreters never install `duckdb`.
 
 [^duckdb-driver]: `src/py/vertebra/db/adapters/duckdb/driver.py::SyncDuckDBDriver` — DuckDB driver with sqlite3 fallback and `_using_native_duckdb` branches.

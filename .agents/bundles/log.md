@@ -4,7 +4,6 @@
 
 Correctness and fresh quality reviews pass at `50e9c631` with no unresolved findings. Native FastPath 200/206/416, valid ETags, persistent TTL envelopes, namespace deletion, and actual Litestar static consumers are covered. The broad Python gate passes 654 tests, full MyPy covers 419 source files, and docs build passes. Chapter ch04 starts the strict Arrow SHM worksheet; five storage tasks remain across ch04 and ch05.
 
-
 ## [2026-11-08] review | Repair storage HTTP range metadata and entity tags
 
 - Source `6871b518` preserves direct async range status/Content-Range and formats HTTP entity tags; `598921a6` aligns the existing consumer assertion and collapses a boolean-equivalent provider branch for the lint gate.
@@ -55,6 +54,12 @@ Correctness and fresh quality reviews pass at `50e9c631` with no unresolved find
 ## [2026-11-08] revise | Preserve native storage reader metadata timing
 
 - Storage `ch02` and its three worksheets share revision `4` at plan baseline `1e1f028a`. SQLSpec reader factories retain native eager sync metadata lookup when size is omitted and lazy async reads; this correction requires no native facade changes.
+
+## [2026-11-08] plan | Approved driver-fail-loud at 13 chapters and 38 tasks
+
+- [`driver-fail-loud`](specs/driver-fail-loud/spec.md) is `status: stable`, `state: planned`, `plan_revision: 1`, `plan_commit: 1e1f028a`, with frontmatter-free [`chapters/index.md`](specs/driver-fail-loud/chapters/index.md) listing `ch01`–`ch13` and `38` pending 8-section worksheets (`16` `behavior_tdd`, `13` `static_validation`, `9` `documentation_validation`) and a `[0/33 files documented]` plan.
+- Two zero-context review rounds (six reviewers each) were adjudicated `ADOPT` for every Critical/Important finding; the second round drove the `ch03`/`ch04`, `ch05`/`ch06`, and `ch08`/`ch09` splits to keep every worksheet within `1–3` production files, `read_set <= 6`, and `estimated_loc <= 250`.
+- Promoted research: [`driver-restructure_20261107.md`](specs/driver-fail-loud/research/driver-restructure_20261107.md) and [`change-surface_20261107.md`](specs/driver-fail-loud/research/change-surface_20261107.md). Sibling flows `native-postgres-driver`, `native-mysql-driver`, `native-redis-driver`, `native-oracle-driver`, `native-mssql-driver`, `native-duckdb-driver`, `native-sqlite-driver`, `broker-pool-sharing`, `sqlalchemy-and-django-integration`, `queues-tasks-and-channels`, and `native-data-platform` start from its baseline.
 
 ## [2026-11-08] revise | Align storage integration worksheets with installed framework contracts
 

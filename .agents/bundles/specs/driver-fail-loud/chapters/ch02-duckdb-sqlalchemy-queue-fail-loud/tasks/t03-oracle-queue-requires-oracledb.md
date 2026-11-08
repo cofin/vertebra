@@ -4,7 +4,7 @@ id: "driver-fail-loud:ch02:t03"
 chapter_id: ch02-duckdb-sqlalchemy-queue-fail-loud
 title: OracleQueueBackend requires oracledb and an injected executor
 description: Delete the production in-memory Oracle queue executor, raise MissingDependencyError when oracledb is absent and ImproperConfigurationError when no executor is supplied, and move the executor fake into the queue test module.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -21,7 +21,7 @@ tests:
   - src/py/tests/unit/framework/test_distributed_queues.py
 estimated_loc: 230
 plan_revision: 1
-plan_commit: 0acdf576
+plan_commit: 1e1f028a
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -65,7 +65,9 @@ tags:
 
 `OracleQueueBackend.__init__` binds a supplied `executor` and otherwise raises: `MissingDependencyError` (`package="oracledb"`, `install_package="oracledb"`) when `oracledb` is absent, `ImproperConfigurationError` when it is present.[^oracle-queue][^module-loader][^errors] `_InMemoryOracleQueueExecutor` and `_build_executor` are deleted from `src/py/vertebra/framework/queues/oracle.py`; today `_build_executor` returns the in-memory executor even when `oracledb` is installed, so no live executor exists to fall back to.[^oracle-fake] The executor class moves verbatim into `src/py/tests/unit/framework/test_distributed_queues.py` as `_FakeOracleQueueExecutor`, and `_create_backend_by_url` injects it for `oracle://` URLs.[^queue-tests]
 
-Out of scope: a live Oracle queue executor (owned by `queues-tasks-and-channels`, which builds the durable `OracleQueueStore` and `PostgresQueueStore` queue stores), the `_InMemoryPostgreSQLQueueExecutor`, `_InMemoryRedisStreamClient`, and `_InMemorySpannerQueueExecutor` fallbacks in sibling queue modules (owned by [ch08-queue-backend-fail-loud](../../ch08-queue-backend-fail-loud/spec.md)), `QueueService._build_backend` routing, and queue docs (owned by [ch10-queue-docs-and-knowledge](../../ch10-queue-docs-and-knowledge/spec.md)).
+`estimated_loc: 230` counts net-new lines; `_InMemoryOracleQueueExecutor` (~180 lines) moves verbatim from `framework/queues/oracle.py` into the test module and is not counted.
+
+Out of scope: a live Oracle queue executor (owned by `queues-tasks-and-channels`, which builds the durable `OracleQueueStore` and `PostgresQueueStore` queue stores), the `_InMemoryPostgreSQLQueueExecutor`, `_InMemoryRedisStreamClient`, and `_InMemorySpannerQueueExecutor` fallbacks in sibling queue modules (owned by [ch10-queue-backend-fail-loud](../../ch10-queue-backend-fail-loud/spec.md)), `QueueService._build_backend` routing, and queue docs (owned by [ch12-queue-docs-and-knowledge](../../ch12-queue-docs-and-knowledge/spec.md)).
 
 ## Bounded Read Manifest
 
@@ -143,7 +145,7 @@ self._executor: OracleQueueExecutor = executor
 ## Notes & Discoveries
 
 - [2026-11-07 00:00] `OracleQueueBackend._build_executor` contains `if oracledb is not None: pass` and returns `_InMemoryOracleQueueExecutor()` on both branches; no live `oracledb` executor exists in the repository.
-- [2026-11-07 00:00] `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend._build_executor`, `redis.py::RedisQueueBackend`, and `spanner.py::SpannerQueueBackend` carry the same in-memory fallback pattern; [ch08-queue-backend-fail-loud](../../ch08-queue-backend-fail-loud/spec.md) removes them with the same executor-or-raise contract.
+- [2026-11-07 00:00] `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend._build_executor`, `redis.py::RedisQueueBackend`, and `spanner.py::SpannerQueueBackend` carry the same in-memory fallback pattern; [ch10-queue-backend-fail-loud](../../ch10-queue-backend-fail-loud/spec.md) removes them with the same executor-or-raise contract.
 
 [^oracle-queue]: `src/py/vertebra/framework/queues/oracle.py::OracleQueueBackend` — Oracle queue backend with in-memory executor fallback.
 [^oracle-fake]: `src/py/vertebra/framework/queues/oracle.py::_InMemoryOracleQueueExecutor` — In-memory simulation of the Oracle queue SQL used as the fallback executor.

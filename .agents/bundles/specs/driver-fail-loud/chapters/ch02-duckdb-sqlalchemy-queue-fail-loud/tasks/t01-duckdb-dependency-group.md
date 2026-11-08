@@ -4,10 +4,10 @@ id: "driver-fail-loud:ch02:t01"
 chapter_id: ch02-duckdb-sqlalchemy-queue-fail-loud
 title: DuckDB dependency group installed on GIL interpreters
 description: Add a dedicated duckdb dependency group, install it from make install and from the py-test and coverage targets only when the interpreter has the GIL, and regenerate uv.lock.
-status: draft
+status: stable
 state: pending
 priority: P1
-verification_strategy: refactor_verification
+verification_strategy: static_validation
 depends_on: []
 read_set:
   - pyproject.toml
@@ -21,7 +21,7 @@ files:
 tests: []
 estimated_loc: 30
 plan_revision: 1
-plan_commit: 0acdf576
+plan_commit: 1e1f028a
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -47,6 +47,9 @@ sources:
   - id: make-coverage
     resource: Makefile::coverage
     title: Coverage target running uv run pytest --cov
+  - id: make-export
+    resource: Makefile::.EXPORT_ALL_VARIABLES
+    title: Special target exporting every make variable into each recipe environment
   - id: ci-test-python
     resource: .github/workflows/ci.yml::test-python
     title: CI Python matrix (3.12, 3.13, 3.14, 3.14t, 3.15, 3.15t) running make py-test
@@ -99,9 +102,12 @@ duckdb = [
 ```make
 PY_GIL_DISABLED = $(shell uv run --no-sync python -c "import sysconfig; print(int(bool(sysconfig.get_config_var('Py_GIL_DISABLED'))))" 2>/dev/null)
 PY_TEST_GROUPS = $(if $(filter 0,$(PY_GIL_DISABLED)),--group duckdb)
+unexport PY_GIL_DISABLED PY_TEST_GROUPS
 ```
 
 The probe prints `0` on a GIL build and `1` on a free-threaded build. `PY_TEST_GROUPS` is `--group duckdb` only for the exact word `0`; `1`, empty output (probe failed, stderr discarded), or any other text yields an empty string. Reason: installing `duckdb` on an interpreter of unknown build risks an sdist build on `3.14t` / `3.15t`, while skipping it only makes t04's guards skip DuckDB tests.
+
+The `unexport` line sits directly after the two definitions. Reason: the `Makefile` declares `.EXPORT_ALL_VARIABLES:`, so without it make expands both variables into the environment of every recipe in every target and runs the probe there.[^make-export]
 
 Recipe lines after the change:
 
@@ -117,6 +123,7 @@ Recipe lines after the change:
 - Free-threaded interpreter (`Py_GIL_DISABLED == 1`): `PY_TEST_GROUPS` is empty; `uv run pytest` installs no `duckdb` and t04's guards skip DuckDB tests.
 - `uv run` performs an inexact sync, so a `duckdb` already installed by `make install` stays installed when a later `uv run` omits the group.
 - `py-test` depends on `dev`, and GNU make expands a recipe only after its prerequisites finish, so the probe runs against the environment `dev` built. `coverage` and `upgrade` have no `dev` prerequisite: when the probe cannot run (no `.venv`, no `uv`, or the interpreter fails to start) it prints nothing, `PY_TEST_GROUPS` is empty, and the target runs without `--group duckdb`.
+- Export scope: `.EXPORT_ALL_VARIABLES:` exports every variable, and an exported recursive variable is expanded each time make builds a recipe environment. Without `unexport`, `make help` runs the probe twice and every other target runs it once per recipe environment; during `make install`, `uv run --no-sync` would create `.venv` with whatever interpreter uv resolves, before `setup-env` and the Python 3.12 pin run. With `unexport PY_GIL_DISABLED PY_TEST_GROUPS`, the probe runs only where a recipe line references `$(PY_TEST_GROUPS)` (`py-test`, `coverage`, `upgrade`), and command-line overrides are not exported either.[^make-export]
 - `uv lock` resolves the `duckdb` group universally; the lock records the sdist and abi3 wheels, and installation is gated by the Makefile, not by markers. Reason: no PEP 508 marker distinguishes free-threaded builds in the supported uv versions.
 
 ## Public-Seam Test Blueprint
@@ -134,6 +141,8 @@ Recipe lines after the change:
 | Coverage on GIL | `make -n coverage PY_GIL_DISABLED=0 \| grep -c -- '--group duckdb'` | `1` |
 | Probe unavailable | `make -n coverage PY_GIL_DISABLED= \| grep -c -- '--group duckdb'` | `0` |
 | Upgrade, probe unavailable | `make -n upgrade PY_GIL_DISABLED= \| grep -c -- '--group duckdb'` | `0` |
+| Probe not exported (unrelated target) | `p=$(mktemp); make help "PY_GIL_DISABLED=\$(shell echo probe >> $p)" >/dev/null; wc -l < "$p"` | `0` (without `unexport`: `2`) |
+| Sentinel fires where referenced | `p=$(mktemp); make -n coverage "PY_GIL_DISABLED=\$(shell echo probe >> $p)" >/dev/null; wc -l < "$p"` | `1` |
 
 ## Verification
 
@@ -144,12 +153,15 @@ Recipe lines after the change:
 - `test "$(make -n py-test PY_GIL_DISABLED=1 | grep -c -- '--group duckdb')" = 0`
 - `make -n coverage PY_GIL_DISABLED=0 | grep -E 'uv run --group duckdb pytest src/py/tests --cov'`
 - `test "$(make -n coverage PY_GIL_DISABLED= | grep -c -- '--group duckdb')" = 0`
+- `p=$(mktemp); make help "PY_GIL_DISABLED=\$(shell echo probe >> $p)" >/dev/null; test "$(wc -l < "$p")" = 0; rm -f "$p"` — `help` runs for real (its recipe is a single `awk`); `make -n` builds no recipe environment and cannot detect an exported probe.
+- `p=$(mktemp); make -n coverage "PY_GIL_DISABLED=\$(shell echo probe >> $p)" >/dev/null; test "$(wc -l < "$p")" = 1; rm -f "$p"` — positive control proving the sentinel counts expansions.
 - `uv run --group duckdb python -c "import duckdb; print(duckdb.__version__)"`
 
 ## Acceptance Criteria
 
 - [ ] `pyproject.toml` declares `duckdb = ["duckdb>=1.0"]`; `bench` includes it; `dev` does not (R3).
 - [ ] `make install` syncs `--group duckdb`; `make py-test`, `make coverage`, and `make upgrade` add it only when the probe prints `0`, and add nothing when the probe prints `1` or nothing (R3).
+- [ ] `unexport PY_GIL_DISABLED PY_TEST_GROUPS` follows the definitions, and `make help` runs the probe zero times.
 - [ ] `uv lock --check` exits `0`.
 - [ ] `.github/workflows/ci.yml` is unchanged and its non-free-threaded `test-python` jobs install `duckdb` through `make py-test` (R3).
 
@@ -161,4 +173,5 @@ Recipe lines after the change:
 [^make-install]: `Makefile::install` — Fresh install pinning Python 3.12 and running `uv sync --all-extras --dev --group doc`.
 [^make-py-test]: `Makefile::py-test` — Python test target running stubtest and `uv run pytest`.
 [^make-coverage]: `Makefile::coverage` — Coverage target running `uv run pytest --cov`.
+[^make-export]: `Makefile::.EXPORT_ALL_VARIABLES` — Special target exporting every make variable into each recipe environment.
 [^ci-test-python]: `.github/workflows/ci.yml::test-python` — CI Python matrix (3.12, 3.13, 3.14, 3.14t, 3.15, 3.15t) running `make py-test`.

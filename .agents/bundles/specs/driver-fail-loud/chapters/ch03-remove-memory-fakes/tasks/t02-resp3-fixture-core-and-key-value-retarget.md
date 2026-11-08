@@ -4,10 +4,10 @@ id: "driver-fail-loud:ch03:t02"
 chapter_id: ch03-remove-memory-fakes
 title: Loopback RESP3 fixture core and key-value driver tests over the wire
 description: Add the threaded loopback RESP3 server fixture with its transport, reply encoder, teardown, handshake, key-value, TTL, SCAN, and UNLINK commands to the unit test tree, and move the test_redis_valkey_driver.py tests that need only those commands off memory:// while the driver emulation still exists.
-status: draft
+status: stable
 state: pending
 priority: P1
-verification_strategy: refactor_verification
+verification_strategy: static_validation
 depends_on:
   - "driver-fail-loud:ch03:t01"
 read_set:
@@ -21,7 +21,7 @@ tests:
   - src/py/tests/unit/db/test_redis_valkey_driver.py
 estimated_loc: 215
 plan_revision: 1
-plan_commit: 0acdf576
+plan_commit: 1e1f028a
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -98,6 +98,7 @@ class _Handler(socketserver.BaseRequestHandler):
 class _Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
+    owner: Resp3FakeServer
 
 
 def _encode(value: object) -> bytes: ...
@@ -108,7 +109,7 @@ def resp3_server() -> Iterator[Resp3FakeServer]:
     """Yield a running loopback RESP3 server and stop it after the test."""
 ```
 
-- Transport: `_Server` binds `("127.0.0.1", 0)` and carries a reference to its owning `Resp3FakeServer`; `serve_forever` runs on a daemon `threading.Thread`. A thread-based server serves both the blocking sync driver and the asyncio async driver from the same test.
+- Transport: `_Server` binds `("127.0.0.1", 0)` and declares the class attribute `owner: Resp3FakeServer`, which `Resp3FakeServer.__init__` assigns right after constructing the server; `serve_forever(poll_interval=0.05)` runs on a daemon `threading.Thread`, so `server.shutdown()` returns within one 50 ms poll. `_Handler.handle` reaches its owning server with `assert isinstance(self.server, _Server)` and then reads `self.server.owner`; the `assert` narrows the `socketserver.BaseServer` attribute type for mypy without a `type: ignore` (the repository forbids inline comments). A thread-based server serves both the blocking sync driver and the asyncio async driver from the same test.
 - `redis_url == f"redis://127.0.0.1:{port}/0"`; `valkey_url == f"valkey://127.0.0.1:{port}/0"`.
 - State under one `threading.Lock`: a `set[socket.socket]` of accepted client sockets (added when a handler starts, removed when it ends), `dict[bytes, bytes]` values, and `dict[bytes, float]` monotonic expiry deadlines. Expired keys are removed lazily on every access.
 - `_Handler.handle` loop: `recv` into a buffer, parse every complete frame with `Resp3Parser.parse_frame`, keep a trailing partial frame for the next `recv`, and for each frame acquire the state lock, append the frame to `commands`, call `_dispatch`, and `sendall` the reply before releasing the lock. Every `sendall` runs while holding the state lock, so frames from concurrent handlers never interleave on one socket. An empty `recv` ends the loop.

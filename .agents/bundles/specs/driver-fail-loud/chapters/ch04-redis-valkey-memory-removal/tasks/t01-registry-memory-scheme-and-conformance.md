@@ -4,7 +4,7 @@ id: "driver-fail-loud:ch04:t01"
 chapter_id: ch04-redis-valkey-memory-removal
 title: Registry drops the memory scheme and remaining cache tests use the fixture or live servers
 description: Remove memory from RedisConfig.url_schemes so DatabaseRegistry.parse_url rejects memory://, update RedisConfig docstrings, retarget the RESP3 sync pubsub and native Valkey tests to the loopback fixture, and make conformance cache cases live-only.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -24,7 +24,7 @@ tests:
   - src/py/tests/integration/db/test_driver_conformance.py
 estimated_loc: 110
 plan_revision: 1
-plan_commit: 0acdf576
+plan_commit: 1e1f028a
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -64,7 +64,7 @@ tags:
 
 Set `RedisConfig.url_schemes = ("redis", "rediss")` so `SCHEME_REGISTRY` no longer maps `memory` and `DatabaseRegistry.parse_url("memory://")` raises `ValueError("Unsupported database URL scheme: 'memory'")`.[^redis-config][^registry] Update `RedisConfig.url` and `RedisConfig.from_url` docstrings. Retarget the last unit tests that construct `memory://` cache configs onto the `resp3_server` fixture from `ch03-remove-memory-fakes`, and make the conformance cache cases resolve only live servers.[^conformance-cache][^integration-fixtures]
 
-Out of scope: driver memory branches (`driver-fail-loud:ch04:t02`); `ValkeyConfig` (its `url_schemes` already exclude `memory`; its docstring changes in `driver-fail-loud:ch04:t02`); the `resp3_server` fixture itself (owned by `ch03-remove-memory-fakes`); `_resolve_live_config` (owned by `driver-fail-loud:ch07:t04`).
+Out of scope: driver memory branches (`driver-fail-loud:ch04:t02`); `ValkeyConfig` (its `url_schemes` already exclude `memory`; its docstring changes in `driver-fail-loud:ch04:t02`); the `resp3_server` fixture itself (owned by `ch03-remove-memory-fakes`); `_resolve_live_config` (owned by `driver-fail-loud:ch09:t01`).
 
 ## Bounded Read Manifest
 
@@ -127,7 +127,7 @@ class CacheConformanceSpec(FrozenBaseStruct, frozen=True, gc=False):
 
 - Red: add `test_registry_parse_url_rejects_memory_scheme`, then `uv run --no-sync pytest src/py/tests/unit/db/test_native_db_drivers.py -k rejects_memory_scheme -q` fails (returns `RedisConfig`).
 - Green + lint + typecheck: `uv run --no-sync pytest src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_redis_valkey_resp3.py src/py/tests/integration/db/test_driver_conformance.py -q -rs && uv run --no-sync ruff check src/py/vertebra/db/adapters/redis/config.py src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_redis_valkey_resp3.py src/py/tests/integration/db/test_driver_conformance.py && uv run --no-sync ruff format --check src/py/vertebra/db/adapters/redis/config.py && uv run --no-sync mypy src/py/vertebra/db/adapters/redis/config.py`; the `-rs` summary lists the two cache roundtrip cases per engine as skipped.
-- Residue gate: `rg -n '"memory://"' src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_redis_valkey_resp3.py src/py/tests/integration/db/test_driver_conformance.py src/py/vertebra/db/adapters/redis/config.py | rg -v 'dsn="memory://"'` prints only the `parse_url("memory://")` line of the new rejection test. The `rg -v` filter excludes the `PostgreSQLConfig(dsn="memory://")` and `MySQLConfig(dsn="memory://")` rows of `test_postgres_and_mysql_drivers_reject_memory_dsn` added by `driver-fail-loud:ch03:t01`.
+- Residue gate: `rg -n '"memory://"' src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_redis_valkey_resp3.py src/py/tests/integration/db/test_driver_conformance.py src/py/vertebra/db/adapters/redis/config.py | rg -v 'dsn="memory://"|reject_memory_dsn'` prints only the `parse_url("memory://")` line of the new rejection test. The `rg -v` filter excludes the one-line `pytest.param(lambda: SyncPostgreSQLDriver(PostgreSQLConfig(dsn="memory://")), id="sync-postgres")` rows and the test name of `test_postgres_and_mysql_drivers_reject_memory_dsn`, whose literal shape `driver-fail-loud:ch03:t01` pins.
 
 ## Acceptance Criteria
 
@@ -138,7 +138,7 @@ class CacheConformanceSpec(FrozenBaseStruct, frozen=True, gc=False):
 
 ## Notes & Discoveries
 
-- [2026-11-07 00:00] `driver-fail-loud:ch07:t04` edits `_resolve_live_config` in the same conformance module; this task leaves that function untouched.
+- [2026-11-07 00:00] `driver-fail-loud:ch09:t01` edits `_resolve_live_config` in the same conformance module; this task leaves that function untouched.
 
 [^redis-config]: `src/py/vertebra/db/adapters/redis/config.py::RedisConfig` — Redis config url_schemes and from_url.
 [^registry]: `src/py/vertebra/db/registry.py::DatabaseRegistry.parse_url` — Scheme dispatch over SCHEME_REGISTRY.

@@ -3,7 +3,7 @@ type: Spec
 flow_id: driver-fail-loud
 title: Fail-Loud Database Drivers
 description: Replace the Oracle, MSSQL, and DuckDB SQLite stand-ins, the SQLAlchemy SQLite parse fallback, the in-memory queue executors and clients, and memory:// engine fakes with MissingDependencyError or configuration errors, delete dead vertebra-db pools and superseded codecs, correct install hints behind an extras gate, make conformance outcomes explicit when a native module is absent, and align user docs, agent instructions, and OKF knowledge with the result.
-status: draft
+status: stable
 state: planned
 has_chapters: true
 chapters:
@@ -11,13 +11,15 @@ chapters:
   - ch02-duckdb-sqlalchemy-queue-fail-loud
   - ch03-remove-memory-fakes
   - ch04-redis-valkey-memory-removal
-  - ch05-mssql-oracle-codec-cleanup
-  - ch06-vertebra-db-pools-and-mysql
-  - ch07-install-hints-and-conformance
-  - ch08-queue-backend-fail-loud
-  - ch09-docs-and-okf
-  - ch10-queue-docs-and-knowledge
-  - ch11-agent-knowledge-and-embeddings-docs
+  - ch05-mssql-codec-cleanup
+  - ch06-oracle-codec-cleanup
+  - ch07-vertebra-db-pools-and-mysql
+  - ch08-install-hints-and-extras-gate
+  - ch09-conformance-outcomes
+  - ch10-queue-backend-fail-loud
+  - ch11-docs-and-okf
+  - ch12-queue-docs-and-knowledge
+  - ch13-agent-knowledge-and-embeddings-docs
 current_chapter: ch01-oracle-mssql-fail-loud
 current_task: "driver-fail-loud:ch01:t01"
 parent_prd: native-data-platform
@@ -25,10 +27,14 @@ research:
   - research/driver-restructure_20261107.md
   - research/change-surface_20261107.md
 plan_revision: 1
-plan_commit: 0acdf576
+plan_commit: 1e1f028a
 state_revision: 0
 created_at: "2026-11-07T00:00:00Z"
 updated_at: "2026-11-08T00:00:00Z"
+verified:
+  - by: agent:code-reviewer
+    at: "2026-11-08T00:00:00Z"
+    commit: 1e1f028a
 generated:
   by: flow/0.28.0
   at: "2026-11-07T00:00:00Z"
@@ -122,7 +128,7 @@ This flow makes every unsupported path raise, deletes dead native code, corrects
 - Registry entry-point discovery for optional driver wheels. Owner: a `native-data-platform` follow-up opened with `/flow:plan`.
 - Live PostgreSQL and Oracle queue executors (`PostgresQueueStore`, `OracleQueueStore`). Owner: `queues-tasks-and-channels`.
 - A live Spanner queue executor. Owner: a follow-up opened with `/flow:plan spanner-queue-executor`.
-- `valkey://` / `valkeys://` URL support in the Redis queue backend. Owner: a follow-up spec recorded in `ch08 / t02` Notes.
+- `valkey://` / `valkeys://` URL support in the Redis queue backend. Owner: a follow-up spec recorded in `ch10 / t02` Notes.
 - Pure-Python TDS/TNS framing in `mssql/core.py` / `oracle/core.py`. Owner: `native-mssql-driver` and `native-oracle-driver`.
 - RESP3 codec removal. Owner: `native-redis-driver`.
 - The SQLAlchemy second `sqlite3` connection for genuine SQLite URLs, DB-API error mapping beyond the parse fallback, and the Django `select_to_arrow(rows=)` passthrough. Owner: `sqlalchemy-and-django-integration`.
@@ -165,7 +171,7 @@ Full symbol inventory: [change-surface research](research/change-surface_2026110
 
 - **R1**: Constructing `SyncOracleDriver`, `AsyncOracleDriver`, `SyncMSSQLDriver`, or `AsyncMSSQLDriver` raises `MissingDependencyError` for `vertebra._oracle` / `vertebra._mssql`; no Oracle or MSSQL code path opens `sqlite3`. The public driver members `set_session_attrs`, `last_piggyback_frame`, `last_rewritten_sql`, and `last_tds_batch` are deleted.
 - **R2**: `AsyncMSSQLDriver(config, *, dialer: SyncCloudSQLDialer | None = None, ...)` forwards `dialer` to its `SyncMSSQLDriver`; `MSSQLConfig.build_async_driver` requests `registry.get_dialer(cfg, sync=True)`.
-- **R3**: `SyncDuckDBDriver` / `AsyncDuckDBDriver` raise `MissingDependencyError` when `duckdb` is absent. `duckdb` lives in its own `[dependency-groups].duckdb` group, installed by `make install` and by `make py-test` / `make coverage` on GIL interpreters only (so CI non-free-threaded jobs install it); on free-threaded interpreters DuckDB tests skip through `pytest.importorskip("duckdb", reason=...)`.
+- **R3**: `SyncDuckDBDriver` / `AsyncDuckDBDriver` raise `MissingDependencyError` when `duckdb` is absent. `duckdb` lives in its own `[dependency-groups].duckdb` group, installed unconditionally by `make install` and by `make py-test`, `make coverage`, and `make upgrade` on GIL interpreters only (so CI non-free-threaded jobs install it); on free-threaded interpreters DuckDB tests skip through `pytest.importorskip("duckdb", reason=...)`.
 - **R4**: `SyncDBAPIConnection` and `AsyncDBAPIConnection` raise the DB-API `InterfaceError`, chained from the parse exception, when `DatabaseRegistry.parse_url` fails.
 - **R5**: `OracleQueueBackend` binds an injected `executor=`; without one it calls `ensure_module("oracledb")`, raising `MissingDependencyError` when the package is absent and `ImproperConfigurationError` when it is present. Canonical test: `src/py/tests/unit/framework/test_distributed_queues.py`.
 - **R6**: PostgreSQL and MySQL drivers reject `memory://` DSNs with `ImproperConfigurationError`; `_in_memory_rows` and every memory branch are deleted; a PostgreSQL pool exposing no execution method raises `ImproperConfigurationError`.
@@ -213,19 +219,27 @@ class MissingDependencyError(VertebraError, ImportError):
 
 Default `install_package` becomes `f"vertebra-core[{extra}]"` when `extra` is set, else `package`; `hint` is `f"Install it with: uv add {install_package}"`.
 
-Queue backend constructors keep their signatures; the injected seams are `OracleQueueBackend(config, *, oracle_config=None, executor: OracleQueueExecutor | None = None)`, `PostgreSQLQueueBackend(config, *, executor=None)`, `RedisQueueBackend(config, *, client=None)`, and `SpannerQueueBackend(config, *, executor=None)`; exact signatures live in [ch02](chapters/ch02-duckdb-sqlalchemy-queue-fail-loud/spec.md) and [ch08](chapters/ch08-queue-backend-fail-loud/spec.md).
+Queue backend constructors keep their signatures; the injected seams are `OracleQueueBackend(config, *, oracle_config=None, executor: OracleQueueExecutor | None = None)`, `PostgreSQLQueueBackend(config, *, postgres_config=None, executor=None)`, `RedisQueueBackend(config, *, client=None)`, and `SpannerQueueBackend(config, *, executor=None)`; exact signatures live in [ch02](chapters/ch02-duckdb-sqlalchemy-queue-fail-loud/spec.md) and [ch10](chapters/ch10-queue-backend-fail-loud/spec.md).
 
-`pyproject.toml` declares `duckdb = ["duckdb>=1.0"]`, included by `bench` and not by `dev`.[^dep-groups]
+`pyproject.toml` declares `duckdb = ["duckdb>=1.0"]`, included by `bench` and not by `dev`.[^dep-groups] The `Makefile` selects the group per interpreter:
+
+```make
+PY_GIL_DISABLED = $(shell uv run --no-sync python -c "import sysconfig; print(int(bool(sysconfig.get_config_var('Py_GIL_DISABLED'))))" 2>/dev/null)
+PY_TEST_GROUPS = $(if $(filter 0,$(PY_GIL_DISABLED)),--group duckdb)
+unexport PY_GIL_DISABLED PY_TEST_GROUPS
+```
+
+`PY_TEST_GROUPS` is `--group duckdb` only when the probe prints exactly `0`; `1`, empty output, or a failed probe adds no group. `unexport` keeps both variables out of recipe environments. Reason: the `Makefile` declares `.EXPORT_ALL_VARIABLES:`, which would otherwise run the probe in every recipe. `install` syncs `--group duckdb` unconditionally; `py-test`, `coverage`, and `upgrade` use `$(PY_TEST_GROUPS)`.
 
 ### 2.3 Caller -> Seam -> Collaborator Integration Map
 
-- `DatabaseRegistry.get_shared_driver(config)` → `OracleConfig.build_sync_driver()` → `SyncOracleDriver.__init__` → `_require_oracle_native()` → `ensure_module` → `MissingDependencyError`.
+- `DatabaseRegistry.get_shared_driver(config)` → `DatabaseRegistry._build_async_driver` → `OracleConfig.build_async_driver(registry)` (inherited from `BaseDatabaseConfig`) → `AsyncOracleDriver.__init__` → `SyncOracleDriver.__init__` → `_require_oracle_native()` → `ensure_module` → `MissingDependencyError`. `DatabaseRegistry.get_shared_sync_driver(config)` → `_build_sync_driver` → `OracleConfig.build_sync_driver(registry)` → `SyncOracleDriver.__init__` reaches the same guard.
 - `MSSQLConfig.build_async_driver(registry)` → `registry.get_dialer(cfg, sync=True)` → `AsyncMSSQLDriver(cfg, dialer=...)` → `SyncMSSQLDriver(cfg, dialer=...)` → `_require_mssql_native()`.
 - `extensions/sqlspec/adapters.py` session provider → driver class constructor → same guard; config construction stays import-safe.
 - `SyncDBAPIModule().connect(url)` → `SyncDBAPIConnection.__init__` → `DatabaseRegistry.parse_url` → `ValueError` → `InterfaceError` raised `from` it.
 - `QueueService(QueueConfig(backend_url=...))` → `QueueService._build_backend` → queue backend constructor → injected `executor=` / `client=`, else `ensure_module(...)` → `MissingDependencyError` or `ImproperConfigurationError`.
 - `MemoryStore.from_valkey("memory://")` → `ValkeyConfig(url="memory://")` → `AsyncValkeyDriver.__init__` → `_reject_memory_url` → `ImproperConfigurationError`.
-- `make py-test` → `PY_TEST_GROUPS` (`--group duckdb` unless `Py_GIL_DISABLED`) → `uv run pytest` → DuckDB tests run, or skip via `pytest.importorskip("duckdb")`.
+- `make py-test` → `PY_TEST_GROUPS` (`--group duckdb` only when the probe prints `0`) → `uv run $(PY_TEST_GROUPS) pytest` → DuckDB tests run, or skip via `pytest.importorskip("duckdb")`.
 - `_resolve_live_config(spec, tmp_path, request)` → `_require_native_module(spec)` → `pytest.skip`, or `pytest.fail` when `spec.pending_flow_id is None` and `VERTEBRA_CONFORMANCE_DOCKER == "1"`.
 
 ### 2.4 Non-Functional Constraints & Edge-Case / Failure-Mode Matrix
@@ -274,60 +288,74 @@ Queue backend constructors keep their signatures; the injected seams are `Oracle
 
 ## 3. Documentation & OKF Knowledge Plan
 
-- **Progress**: `[0/25 files documented]`
-- `[ ]` `src/py/vertebra/framework/queues/base.py` — `QueueConfig` class docstring names every queue backend; rendered in `docs/reference/queues.md` (ch08 / t03).
-- `[ ]` `README.md` — Driver list marks Oracle and SQL Server as pending native drivers (ch09 / t01).
-- `[ ]` `docs/usage/databases.md` — Engine table status, DuckDB `duckdb` requirement and free-threaded caveat, `memory://` scope (ch09 / t01).
-- `[ ]` `docs/usage/extensions.md` — Dialect engine claims and `InterfaceError` behavior (ch09 / t01).
-- `[ ]` `docs/reference/db.md` — Adapter descriptions (ch09 / t02).
-- `[ ]` `docs/reference/index.md` — Adapter summary line (ch09 / t02).
-- `[ ]` `docs/usage/analytics-and-cdc.md` — Oracle narrative without stand-in execution (ch09 / t02).
-- `[ ]` `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Adapter table, codec inventory, install hints, conformance outcomes (ch09 / t03).
-- `[ ]` `.agents/bundles/knowledge/testing/polyglot-test-matrix.md` — Conformance outcomes (ch09 / t03); GIL-only DuckDB group, `pytest.importorskip("duckdb")` rule, and `resp3_server` fixture outside the conformance section (ch11 / t02).
-- `[ ]` `.agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md` — Tenancy text without SQLite stand-in (ch09 / t04).
-- `[ ]` `.agents/bundles/product/product.md` — `vertebra-db` component row (ch09 / t04).
-- `[ ]` `.agents/bundles/knowledge/decisions/adr-002-two-tier-shm-database-and-arrow-data-plane.md` — Consequences without TNS/TDS framing (ch09 / t04).
-- `[ ]` `docs/usage/queues-and-realtime.md` — Backend requirements and install packages (ch10 / t01).
-- `[ ]` `docs/reference/queues.md` — Storage Backends row including Spanner (ch10 / t01).
-- `[ ]` `.agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md` — Backend table and executor/client rules (ch10 / t01).
-- `[ ]` `AGENTS.md` — `make install` entry with `--group duckdb` (ch11 / t01).
-- `[ ]` `.agents/bundles/knowledge/workflow.md` — Install, test, and coverage commands with the GIL-only `duckdb` group (ch11 / t01).
-- `[ ]` `.agents/bundles/knowledge/testing/benchmarks-and-free-threaded.md` — `bench` includes the `duckdb` group; free-threaded runs exclude it (ch11 / t01).
-- `[ ]` `.agents/bundles/product/tech-stack.md` — `vertebra-db` dependencies without `sha2` / `rmp-serde`; `duckdb` group (ch11 / t02).
-- `[ ]` `.agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md` — DB-API `InterfaceError`; Oracle and MSSQL sessions raise `MissingDependencyError` (ch11 / t03).
-- `[ ]` `.agents/bundles/knowledge/domains/index.md` — Oracle and MSSQL drivers and `OracleEmbeddingPushdown` marked pending (ch11 / t03).
-- `[ ]` `docs/index.md` — Engine list without a count; Oracle and SQL Server native drivers not yet published (ch11 / t03).
-- `[ ]` `docs/usage/embeddings-and-vectors.md` — `OracleEmbeddingPushdown` requires the pending native Oracle driver (ch11 / t04).
-- `[ ]` `docs/usage/index.md` — Embeddings entry states the Oracle pushdown requirement (ch11 / t04).
-- `[ ]` `.agents/bundles/knowledge/domains/agent/embeddings-and-vectors.md` — Oracle pushdown requirement with refreshed provenance (ch11 / t04).
+- **Progress**: `[0/33 files documented]` — union of the chapter documentation plans; ch03 through ch09 document only in-code docstrings that ship with each production change.
+- `[ ]` `src/py/vertebra/db/adapters/oracle/driver.py` — Module and class docstrings state the `vertebra._oracle` requirement and `MissingDependencyError` (ch01 / t01).
+- `[ ]` `src/py/vertebra/db/adapters/mssql/driver.py` — Module and class docstrings state the `vertebra._mssql` requirement; `AsyncMSSQLDriver` documents its sync dialer (ch01 / t02).
+- `[ ]` `src/py/vertebra/extensions/sqlalchemy/dialects.py` — `SyncDBAPIConnection.__init__` / `AsyncDBAPIConnection.__init__` `Raises: InterfaceError` (ch02 / t02).
+- `[ ]` `src/py/vertebra/framework/queues/oracle.py` — `OracleQueueBackend` class docstring names the required `executor`; `__init__` `Raises:` (ch02 / t03).
+- `[ ]` `src/py/vertebra/db/adapters/duckdb/driver.py` — `SyncDuckDBDriver.__init__` Google docstring with `Raises:` (ch02 / t04).
+- `[ ]` `src/py/vertebra/framework/queues/postgres.py` — `PostgreSQLQueueBackend` class docstring and `__init__` `Args:` / `Raises:` (ch10 / t01).
+- `[ ]` `src/py/vertebra/framework/queues/redis.py` — `RedisQueueBackend.__init__` `Args:` / `Raises:`; `_build_client` summary (ch10 / t02).
+- `[ ]` `src/py/vertebra/framework/queues/spanner.py` — `SpannerQueueBackend.__init__` `Args:` without `driver` and `Raises:` (ch10 / t03).
+- `[ ]` `src/py/vertebra/framework/queues/base.py` — `QueueConfig` class docstring names every queue backend; rendered in `docs/reference/queues.md` (ch10 / t03).
+- `[ ]` `README.md` — Driver list marks Oracle and SQL Server as pending native drivers (ch11 / t01).
+- `[ ]` `docs/usage/databases.md` — Engine table status, DuckDB `duckdb` requirement and free-threaded caveat, `memory://` scope (ch11 / t01).
+- `[ ]` `docs/usage/extensions.md` — Dialect engine claims and `InterfaceError` behavior (ch11 / t01).
+- `[ ]` `docs/reference/db.md` — Adapter descriptions (ch11 / t02).
+- `[ ]` `docs/reference/index.md` — Adapter summary line (ch11 / t02).
+- `[ ]` `docs/usage/analytics-and-cdc.md` — Oracle narrative without stand-in execution (ch11 / t02).
+- `[ ]` `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — Adapter table, codec inventory, install hints, conformance outcomes (ch11 / t03).
+- `[ ]` `.agents/bundles/knowledge/testing/polyglot-test-matrix.md` — "Database driver conformance" section outcomes (ch11 / t03); GIL-only DuckDB group, `pytest.importorskip("duckdb")` rule, and `resp3_server` fixture in the other sections (ch13 / t02).
+- `[ ]` `.agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md` — Tenancy text without SQLite stand-in (ch11 / t04).
+- `[ ]` `.agents/bundles/product/product.md` — `vertebra-db` component row (ch11 / t04).
+- `[ ]` `.agents/bundles/knowledge/decisions/adr-002-two-tier-shm-database-and-arrow-data-plane.md` — Consequences without TNS/TDS framing (ch11 / t04).
+- `[ ]` `docs/usage/queues-and-realtime.md` — Backend requirements and install packages (ch12 / t01).
+- `[ ]` `docs/reference/queues.md` — Storage Backends row and autodoc blocks including Spanner (ch12 / t01).
+- `[ ]` `.agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md` — Backend table and executor/client rules (ch12 / t01).
+- `[ ]` `AGENTS.md` — `make install` entry with `--group duckdb` (ch13 / t01).
+- `[ ]` `.agents/bundles/knowledge/workflow.md` — Install, test, coverage, and upgrade commands with the GIL-only `duckdb` group (ch13 / t01).
+- `[ ]` `.agents/bundles/knowledge/testing/benchmarks-and-free-threaded.md` — `bench` includes the `duckdb` group; free-threaded runs exclude it (ch13 / t01).
+- `[ ]` `.agents/bundles/product/tech-stack.md` — `vertebra-db` dependencies without `sha2` / `rmp-serde`; `duckdb` group (ch13 / t02).
+- `[ ]` `.agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md` — DB-API `InterfaceError`; Oracle and MSSQL sessions raise `MissingDependencyError` (ch13 / t03).
+- `[ ]` `.agents/bundles/knowledge/domains/index.md` — Oracle and MSSQL drivers and `OracleEmbeddingPushdown` marked pending (ch13 / t03).
+- `[ ]` `docs/index.md` — Engine list without a count; Oracle and SQL Server native drivers not yet published (ch13 / t03).
+- `[ ]` `docs/usage/embeddings-and-vectors.md` — `OracleEmbeddingPushdown` requires the pending native Oracle driver (ch13 / t04).
+- `[ ]` `docs/usage/index.md` — Embeddings entry states the Oracle pushdown requirement (ch13 / t04).
+- `[ ]` `.agents/bundles/knowledge/domains/agent/embeddings-and-vectors.md` — Oracle pushdown requirement with refreshed provenance (ch13 / t04).
 
 ## 4. Requirement-to-Task Traceability Matrix
 
 | Requirement | Owning Chapter / Task | Verification Strategy | Canonical Test / Doc Gate |
 | --- | --- | --- | --- |
 | R1 | ch01 / t01, t02 | behavior_tdd | `src/py/tests/unit/db/test_enterprise_olap_drivers.py` |
-| R2 | ch01 / t02 | behavior_tdd | `src/py/tests/unit/db/test_native_db_drivers.py` |
-| R3 | ch02 / t01, t04 | refactor_verification, behavior_tdd | `uv lock --check`; `src/py/tests/unit/db/test_enterprise_olap_drivers.py`, `src/py/tests/unit/storage/test_gcs_token_refresh.py` |
+| R2 | ch01 / t02 | behavior_tdd | `src/py/tests/unit/db/test_enterprise_olap_drivers.py`, `src/py/tests/unit/db/test_native_db_drivers.py` |
+| R3 | ch02 / t01, t04 | static_validation (t01), behavior_tdd (t04) | `uv lock --check`, `make -n py-test` group checks; `src/py/tests/unit/db/test_enterprise_olap_drivers.py`, `src/py/tests/unit/storage/test_gcs_token_refresh.py` |
 | R4 | ch02 / t02 | behavior_tdd | `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py` |
 | R5 | ch02 / t03 | behavior_tdd | `src/py/tests/unit/framework/test_distributed_queues.py` |
 | R6 | ch03 / t01 | behavior_tdd | `src/py/tests/unit/db/test_native_db_drivers.py` |
-| R7a | ch03 / t02, t03 | refactor_verification | `src/py/tests/unit/db/test_redis_valkey_driver.py`, `src/py/tests/unit/extensions/test_alchemy_cache_backend.py` |
+| R7a | ch03 / t02, t03 | static_validation | `src/py/tests/unit/db/test_redis_valkey_driver.py`, `src/py/tests/unit/extensions/test_alchemy_cache_backend.py` |
 | R7b | ch04 / t01 | behavior_tdd | `src/py/tests/unit/db/test_native_db_drivers.py` |
 | R7c | ch04 / t02 | behavior_tdd | `src/py/tests/unit/db/test_redis_valkey_driver.py` |
-| R8 | ch05 / t02, t03; ch06 / t01, t02, t03, t04 | refactor_verification | `make rs-test`, `make lint-all` |
-| R9 | ch05 / t01, t04 | refactor_verification | `mypy.stubtest vertebra._vertebra`, `make py-test` |
-| R10 | ch07 / t01, t02, t03 | behavior_tdd | `src/py/tests/unit/framework/test_typing.py`, `src/py/tests/unit/build/test_packaging_and_pgo.py` |
-| R11 | ch07 / t03 | behavior_tdd | `src/py/tests/unit/build/test_packaging_and_pgo.py` |
-| R12 | ch07 / t04 | behavior_tdd | `src/py/tests/integration/db/test_driver_conformance.py` |
-| R13 | ch09 / t01, t02, t03, t04 | documentation_validation | `make docs`, OKF frontmatter/footnote checks |
-| R14 | ch08 / t01 | behavior_tdd | `src/py/tests/unit/framework/test_distributed_queues.py` |
-| R15 | ch08 / t02 | behavior_tdd | `src/py/tests/unit/framework/test_distributed_queues.py` |
-| R16 | ch08 / t03 | behavior_tdd | `src/py/tests/unit/db/test_spanner_queue_and_cdc.py` |
-| R17 | ch10 / t01 | documentation_validation | `make docs`, `make review-check`, OKF footnote check |
-| R18.1 | ch11 / t01 | documentation_validation | `make review-check`, OKF footnote check |
-| R18.2 | ch11 / t02 | documentation_validation | `make review-check`, OKF footnote check |
-| R18.3 | ch11 / t03 | documentation_validation | `make docs`, `make review-check`, OKF footnote check |
-| R18.4 | ch11 / t04 | documentation_validation | `make docs`, `make review-check`, OKF footnote check |
+| R8.1 (MSSQL Rust) | ch05 / t03 | static_validation | `make rs-test` |
+| R8.2 (Oracle Rust) | ch06 / t01 | static_validation | `make rs-test`, `src/py/tests/unit/db/test_enterprise_olap_drivers.py -k vector_oson` |
+| R8.3 (PostgreSQL and DuckDB pools) | ch07 / t01 | static_validation | `make rs-test` |
+| R8.4 (SQLite pool, `rmp-serde`) | ch07 / t02 | static_validation | `make rs-test`, `cargo check --workspace --locked` |
+| R8.5 (MySQL pool, `OracleWalletMaterial`) | ch07 / t03 | static_validation | `make rs-test` |
+| R8.6 (`mysql` module, `sha2`, crate docs) | ch07 / t04 | static_validation | `make rs-test`, `make lint-all`, `cargo doc -p vertebra-db --no-deps` |
+| R9.1 (MSSQL Python, binding) | ch05 / t01, t02 | static_validation | `mypy.stubtest vertebra._vertebra`, `src/py/tests/unit/db/test_enterprise_olap_drivers.py` |
+| R9.2 (Oracle, Redis, DuckDB Python) | ch06 / t02, t03 | static_validation | `src/py/tests/unit/db/test_enterprise_olap_drivers.py`, `src/py/tests/unit/db/test_redis_valkey_resp3.py` |
+| R10 | ch08 / t01, t02, t03, t04 | behavior_tdd | `src/py/tests/unit/framework/test_typing.py`, `src/py/tests/unit/build/test_packaging_and_pgo.py` |
+| R11 | ch08 / t04 | behavior_tdd | `src/py/tests/unit/build/test_packaging_and_pgo.py` |
+| R12 | ch09 / t01 | behavior_tdd | `src/py/tests/integration/db/test_driver_conformance.py` |
+| R13 | ch11 / t01, t02, t03, t04 | documentation_validation | `make docs`, OKF frontmatter/footnote checks |
+| R14 | ch10 / t01 | behavior_tdd | `src/py/tests/unit/framework/test_distributed_queues.py` |
+| R15 | ch10 / t02 | behavior_tdd | `src/py/tests/unit/framework/test_distributed_queues.py` |
+| R16 | ch10 / t03 | behavior_tdd | `src/py/tests/unit/db/test_spanner_queue_and_cdc.py` |
+| R17 | ch12 / t01 | documentation_validation | `make docs`, `make review-check`, OKF footnote check |
+| R18.1 | ch13 / t01 | documentation_validation | `make review-check`, OKF footnote check |
+| R18.2 | ch13 / t02 | documentation_validation | `make review-check`, OKF footnote check |
+| R18.3 | ch13 / t03 | documentation_validation | `make docs`, `make review-check`, OKF footnote check |
+| R18.4 | ch13 / t04 | documentation_validation | `make docs`, `make review-check`, OKF footnote check |
 
 ## 5. Implementation Plan
 
@@ -335,21 +363,23 @@ Queue backend constructors keep their signatures; the injected seams are `Oracle
 - [ ] ch02-duckdb-sqlalchemy-queue-fail-loud — GIL-only `duckdb` group, DuckDB requires `duckdb`, SQLAlchemy raises `InterfaceError`, Oracle queue requires an executor ([spec](chapters/ch02-duckdb-sqlalchemy-queue-fail-loud/spec.md))
 - [ ] ch03-remove-memory-fakes — PostgreSQL and MySQL drivers reject `memory://`; Redis and Valkey consumer tests move onto the `resp3_server` loopback fixture ([spec](chapters/ch03-remove-memory-fakes/spec.md))
 - [ ] ch04-redis-valkey-memory-removal — `RedisConfig` drops the `memory` scheme; Redis and Valkey drivers and store factories reject `memory://` ([spec](chapters/ch04-redis-valkey-memory-removal/spec.md))
-- [ ] ch05-mssql-oracle-codec-cleanup — `encode_tds_sql_batch`, Rust TDS/TNS framing, MSSQL/Oracle pools, and unexported-native probes removed ([spec](chapters/ch05-mssql-oracle-codec-cleanup/spec.md))
-- [ ] ch06-vertebra-db-pools-and-mysql — Remaining `*Pool` types, the MySQL module, wallet loader, and unused crate dependencies removed; crate docs describe codecs ([spec](chapters/ch06-vertebra-db-pools-and-mysql/spec.md))
-- [ ] ch07-install-hints-and-conformance — Truthful install hints, extras gate, explicit conformance outcomes ([spec](chapters/ch07-install-hints-and-conformance/spec.md))
-- [ ] ch08-queue-backend-fail-loud — PostgreSQL, Redis/Valkey, and Spanner queue backends require a live executor or client ([spec](chapters/ch08-queue-backend-fail-loud/spec.md))
-- [ ] ch09-docs-and-okf — Database user docs and OKF knowledge match the fail-loud baseline ([spec](chapters/ch09-docs-and-okf/spec.md))
-- [ ] ch10-queue-docs-and-knowledge — Queue docs and OKF knowledge state executor-or-raise and client-or-raise rules ([spec](chapters/ch10-queue-docs-and-knowledge/spec.md))
-- [ ] ch11-agent-knowledge-and-embeddings-docs — Agent instructions, tech stack, test matrix, dialect knowledge, landing pages, and Oracle embedding docs match the baseline ([spec](chapters/ch11-agent-knowledge-and-embeddings-docs/spec.md))
-- **Chapter / Phase Recovery Checkpoint**: `make lint && make py-test` (ch05 and ch06 add `make rs-test`; ch09, ch10, and ch11 add `make docs`)
+- [ ] ch05-mssql-codec-cleanup — MSSQL Python batch wrappers, the `encode_tds_sql_batch` binding and stub, Rust TDS framing, `MSSQL_DIALECT_TAG`, and `MssqlPool` removed; the placeholder rewriter stays ([spec](chapters/ch05-mssql-codec-cleanup/spec.md))
+- [ ] ch06-oracle-codec-cleanup — Rust TNS framing, `TnsPacketType`, `ORACLE_DIALECT_TAG`, and `OraclePool` removed; Oracle TNS and Redis hash-slot probes for unexported natives deleted; Oracle and DuckDB docs describe codecs ([spec](chapters/ch06-oracle-codec-cleanup/spec.md))
+- [ ] ch07-vertebra-db-pools-and-mysql — PostgreSQL, DuckDB, SQLite, and MySQL pools and dialect tags, the `OracleWalletMaterial` struct, the `mysql` module, and the `sha2` / `rmp-serde` dependencies removed; crate docs describe codecs ([spec](chapters/ch07-vertebra-db-pools-and-mysql/spec.md))
+- [ ] ch08-install-hints-and-extras-gate — `MissingDependencyError` hints default to `vertebra-core[<extra>]`; undeclared extras and sentence-valued package names are replaced behind an AST extras gate ([spec](chapters/ch08-install-hints-and-extras-gate/spec.md))
+- [ ] ch09-conformance-outcomes — Conformance skips a missing native module, fails under Docker only for non-pending engines, and applies strict `xfail` only when a pending engine's module imports ([spec](chapters/ch09-conformance-outcomes/spec.md))
+- [ ] ch10-queue-backend-fail-loud — PostgreSQL, Redis/Valkey, and Spanner queue backends require a live executor or client ([spec](chapters/ch10-queue-backend-fail-loud/spec.md))
+- [ ] ch11-docs-and-okf — Database user docs and OKF knowledge match the fail-loud baseline ([spec](chapters/ch11-docs-and-okf/spec.md))
+- [ ] ch12-queue-docs-and-knowledge — Queue docs and OKF knowledge state executor-or-raise and client-or-raise rules ([spec](chapters/ch12-queue-docs-and-knowledge/spec.md))
+- [ ] ch13-agent-knowledge-and-embeddings-docs — Agent instructions, tech stack, test matrix, dialect knowledge, landing pages, and Oracle embedding docs match the baseline ([spec](chapters/ch13-agent-knowledge-and-embeddings-docs/spec.md))
+- **Chapter / Phase Recovery Checkpoint**: `make lint && make py-test` (ch05, ch06, and ch07 add `make rs-test`; ch11, ch12, and ch13 add `make docs`)
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `0acdf576` — plan authored; `0/11` chapters and `0/35` tasks completed.
+- **Verified Baseline (`HEAD`)**: `0acdf576` — plan authored; `0/13` chapters and `0/38` tasks completed.
 - **Active Chapter**: `ch01-oracle-mssql-fail-loud` (`0/2` tasks completed).
-- **Remaining Plan**: `ch01` through `ch11`.
-- **Documentation & OKF Sync**: `[0/25 files documented]`.
+- **Remaining Plan**: `ch01` through `ch13`.
+- **Documentation & OKF Sync**: `[0/33 files documented]`.
 - **Active Invariants & Triggers**: registry import stays free of driver imports; `_vertebra.pyi` changes ship with binding changes; `MemoryQueueBackend`, object-storage `memory://`, and SQLite `:memory:` backends are untouched; free-threaded interpreters never install `duckdb`.
 - **Breaking removals for the changelog**: Oracle driver `set_session_attrs` and `last_piggyback_frame`; MSSQL driver `last_rewritten_sql` and `last_tds_batch`; `MSSQLConfig.encode_sql_batch`, `MSSQLCore.encode_tds_sql_batch`, and the `encode_tds_sql_batch` binding and package export; the `AsyncMSSQLDriver` `dialer` parameter now takes `SyncCloudSQLDialer`; `AsyncPostgreSQLDriver` no longer probes `asyncpg` and requires `psycopg_pool`; the Spanner queue backend `driver=` parameter; `memory://` engine URLs for PostgreSQL, MySQL, Redis, and Valkey drivers and the Redis/Valkey store factories; the `RedisConfig` `memory` scheme; the in-memory Oracle, PostgreSQL, and Spanner queue executors and Redis/Valkey stream client, so those queue backends need `executor=` or `client=`.
 

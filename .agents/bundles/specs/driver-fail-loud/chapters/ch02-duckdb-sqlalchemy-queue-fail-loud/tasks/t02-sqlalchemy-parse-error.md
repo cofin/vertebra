@@ -4,7 +4,7 @@ id: "driver-fail-loud:ch02:t02"
 chapter_id: ch02-duckdb-sqlalchemy-queue-fail-loud
 title: SQLAlchemy DB-API connections raise InterfaceError on unparsable URLs
 description: Replace the SQLiteConfig parse fallback in SyncDBAPIConnection and AsyncDBAPIConnection with the PEP 249 InterfaceError chained from the parse ValueError.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -19,7 +19,7 @@ tests:
   - src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
 estimated_loc: 70
 plan_revision: 1
-plan_commit: 0acdf576
+plan_commit: 1e1f028a
 state_revision: 0
 claimed_by: null
 claimed_at: null

@@ -4,7 +4,7 @@ id: "driver-fail-loud:ch01:t02"
 chapter_id: ch01-oracle-mssql-fail-loud
 title: Guard MSSQL drivers on vertebra._mssql, delete the SQLite stand-in, and forward the sync dialer
 description: SyncMSSQLDriver and AsyncMSSQLDriver resolve vertebra._mssql in __init__ and every public method, raise MissingDependencyError when it is absent, carry no sqlite3 connection, normalize_for_sqlite helper, or stand-in inspection state, and AsyncMSSQLDriver forwards a SyncCloudSQLDialer to its sync driver.
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
@@ -27,7 +27,7 @@ tests:
   - src/py/tests/integration/db/test_driver_conformance.py
 estimated_loc: 220
 plan_revision: 1
-plan_commit: 0acdf576
+plan_commit: 1e1f028a
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -70,7 +70,7 @@ tags:
 
 Make `SyncMSSQLDriver` and `AsyncMSSQLDriver` raise `MissingDependencyError` on construction when `vertebra._mssql` is absent and guard every public method they define with `_require_mssql_native()`, mirroring t01[^mssql-driver]. Delete the SQLite stand-in, the `@P\d+` → `?` substitution, `MSSQLCore.normalize_for_sqlite`[^mssql-core], and the stand-in inspection state (`_prepare_and_lease`, `last_rewritten_sql`, `last_tds_batch`). Make `AsyncMSSQLDriver` accept a `SyncCloudSQLDialer`, forward it to its `SyncMSSQLDriver`, and expose it through `self._sync.dialer`; `MSSQLConfig.build_async_driver` requests the sync dialer, because `ThreadOffloadAsyncDatabaseDriver` performs I/O in the sync driver on a worker thread[^offload-base][^mssql-config]. Rewrite the driver module and class docstrings to state the native module requirement.
 
-Out of scope: `MSSQLCore.encode_tds_sql_batch`, `MSSQLConfig.encode_sql_batch`, the `mssql/__init__.py` lazy export, the `encode_tds_sql_batch` Rust binding and stub, and TDS packet framing (ch05); `MSSQLCore.rewrite_placeholders` stays for `native-mssql-driver`; docstrings in `mssql/core.py`, `mssql/config.py`, `mssql/__init__.py` (ch05); conformance live-fixture policy (ch07).
+Out of scope: `MSSQLCore.encode_tds_sql_batch`, `MSSQLConfig.encode_sql_batch`, the `mssql/__init__.py` lazy export, the `encode_tds_sql_batch` Rust binding and stub, and TDS packet framing (ch05); `MSSQLCore.rewrite_placeholders` stays for `native-mssql-driver`; docstrings in `mssql/core.py`, `mssql/config.py`, `mssql/__init__.py` (ch05); conformance live-fixture policy (ch09).
 
 ## Bounded Read Manifest
 

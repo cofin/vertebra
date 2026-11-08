@@ -5,7 +5,7 @@ parent_flow: driver-fail-loud
 chapter_id: ch03-remove-memory-fakes
 title: "Chapter 03: PostgreSQL/MySQL memory:// Removal and RESP3 Loopback Test Fixture"
 description: PostgreSQL and MySQL drivers reject memory:// with ImproperConfigurationError and lose their in-process row fakes, and a threaded loopback RESP3 server fixture replaces every memory:// Redis and Valkey construction in the driver, store, Advanced Alchemy, framework, and Starlette unit tests.
-status: draft
+status: stable
 state: planned
 planning_status: complete
 depends_on_chapters:
@@ -14,7 +14,7 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "driver-fail-loud:ch03:t01"
 plan_revision: 1
-plan_commit: 0acdf576
+plan_commit: 1e1f028a
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -63,7 +63,7 @@ tags:
   - redis
   - valkey
   - testing
-  - fixtures
+
 ---
 
 # Chapter 03: PostgreSQL/MySQL memory:// Removal and RESP3 Loopback Test Fixture
@@ -88,7 +88,7 @@ The Redis and Valkey unit tests construct `memory://` configs and depend on the 
 
 Preserved: the SQLite dialect `memory://` StaticPool alias (`get_pool_class`), SQLite `:memory:`, queue and object storage `memory://`, and `SQLAlchemyCacheBackend.from_url("memory://")`.[^sqlite-dialect][^alchemy-cache]
 
-**Non-goals**: Redis and Valkey driver memory removal, `RedisConfig.url_schemes`, `test_redis_valkey_resp3.py`, `test_native_db_drivers.py` Redis cases, and conformance cache cases (owned by `ch04-redis-valkey-memory-removal`); Redis queue `_InMemoryRedisStreamClient` fallback in `framework/queues/redis.py` (owned by `ch08-queue-backend-fail-loud`); RESP3 codec removal (owned by `native-redis-driver`); removing `from __future__ import annotations` from touched modules (requires quoting `TYPE_CHECKING`-only annotations and is a separate cleanup); documentation and OKF edits (owned by `ch09-docs-and-okf`).
+**Non-goals**: Redis and Valkey driver memory removal, `RedisConfig.url_schemes`, `test_redis_valkey_resp3.py`, `test_native_db_drivers.py` Redis cases, and conformance cache cases (owned by `ch04-redis-valkey-memory-removal`); Redis queue `_InMemoryRedisStreamClient` fallback in `framework/queues/redis.py` (owned by `ch10-queue-backend-fail-loud`); RESP3 codec removal (owned by `native-redis-driver`); removing `from __future__ import annotations` from touched modules (requires quoting `TYPE_CHECKING`-only annotations and is a separate cleanup); documentation and OKF edits (owned by `ch11-docs-and-okf` and `ch13-agent-knowledge-and-embeddings-docs`).
 
 ### 1.2 Upstream Execution Baseline
 
@@ -171,7 +171,7 @@ def resp3_server() -> Iterator[Resp3FakeServer]:
 ```
 
 - `redis_url == f"redis://127.0.0.1:{port}/0"`; `valkey_url == f"valkey://127.0.0.1:{port}/0"`.
-- Module-private helpers: `_Server(socketserver.ThreadingTCPServer)` (`allow_reuse_address = True`, `daemon_threads = True`), `_Handler(socketserver.BaseRequestHandler)`, `_ErrorReply(str)`, `_encode(value: object) -> bytes` (`t02`); `_encode_push(items: Sequence[bytes | int]) -> bytes`, `_script_result(script: str, keys: list[bytes], args: list[bytes], values: dict[bytes, bytes]) -> object` (`t03`).
+- Module-private helpers: `_Server(socketserver.ThreadingTCPServer)` (`allow_reuse_address = True`, `daemon_threads = True`, `owner: Resp3FakeServer`; served by `serve_forever(poll_interval=0.05)`; `_Handler` reaches it through `assert isinstance(self.server, _Server)`), `_Handler(socketserver.BaseRequestHandler)`, `_ErrorReply(str)`, `_encode(value: object) -> bytes` (`t02`); `_encode_push(items: Sequence[bytes | int | None]) -> bytes`, `_script_result(script: str, keys: list[bytes], args: list[bytes], values: dict[bytes, bytes]) -> object` (`t03`).
 - `close()` shuts down and closes every accepted client socket from a `set[socket.socket]` snapshot, then calls `server.shutdown()`, `server.server_close()`, and joins the serve thread.
 
 ### 2.3 Caller -> Seam -> Collaborator Integration Map
@@ -193,6 +193,7 @@ def resp3_server() -> Iterator[Resp3FakeServer]:
 | Pipelined or partial frames | Several frames in one `recv`, or a frame split across two | Replies in arrival order; partial frame waits | Parser offset drives framing |
 | Concurrent handlers | `PUBLISH` from one connection while another connection receives a reply | Each `sendall` runs under the state lock | Frames never interleave on one socket |
 | Shard pub/sub | `SSUBSCRIBE shard:1`, then `PUBLISH shard:1` and `SPUBLISH shard:1` | Only `SPUBLISH` delivers an `smessage` push | Redis 7 shard semantics |
+| Bare unsubscribe | `UNSUBSCRIBE` with no names on a connection holding no `message` subscription | One push `>3 unsubscribe _ 0` (null channel, count `0`) | Matches real Redis, so the driver never waits on a missing reply |
 | Teardown with blocked handler | Test ends while a handler thread waits in `recv` | `close()` shuts client sockets first, then the server, and returns | No leaked thread holds the port |
 | Fixture port unreachable | Vacuity probe points both URLs at port `1` | Retargeted tests fail with `ConnectionRefusedError` / `OSError` | Tests depend on the wire |
 | Alchemy local cache | `SQLAlchemyCacheBackend.from_url("memory://")` | Backend with `sync_driver is None` and `async_driver is None` | Local L1 cache preserved |
@@ -201,7 +202,7 @@ def resp3_server() -> Iterator[Resp3FakeServer]:
 
 - Given `PostgreSQLConfig(dsn="memory://")`, when `SyncPostgreSQLDriver` is constructed, then `ImproperConfigurationError` matching `memory://` is raised.
 - Given a `resp3_server` fixture, when `AsyncRedisDriver(RedisConfig(url=resp3_server.redis_url))` sets `cache:a` with `px=250`, then `0 < await driver.pttl("cache:a") <= 250`.
-- Given a `resp3_server` fixture, when `AsyncRedisDriver` runs `eval_script("return ARGV[1]", args=["hello"])`, then the result is `b"hello"` after an `EVALSHA` → `NOSCRIPT` → `EVAL` round trip.
+- Given a `resp3_server` fixture, when `AsyncRedisDriver` runs `eval_script("return ARGV[1]", args=["hello"])`, then the result is `b"hello"` and `resp3_server.commands` records `EVALSHA` followed by `EVAL` (the `NOSCRIPT` fallback round trip).
 - Given `SQLAlchemyCacheBackend.from_url("memory://")`, when built, then both driver attributes are `None`.
 
 ### 2.6 Alternatives Comparison
@@ -219,15 +220,15 @@ def resp3_server() -> Iterator[Resp3FakeServer]:
 - **Progress**: `[0/0 files documented in ch03]`
 - No user-facing documentation changes: `docs/` and `README.md` describe `memory://` only for queues and object storage, which stay valid. The PostgreSQL and MySQL drivers document no `memory://` DSN in their public docstrings.
 - `src/py/tests/unit/conftest.py` carries Google docstrings for `Resp3FakeServer`, `resp3_server`, and every helper (`t02`, `t03`).
-- `ch09-docs-and-okf` owns `.agents/bundles/knowledge/testing/polyglot-test-matrix.md`, which gains the `resp3_server` fixture as the unit-test seam for Redis and Valkey consumers.
+- `driver-fail-loud:ch13:t02` (`ch13-agent-knowledge-and-embeddings-docs`) owns the `.agents/bundles/knowledge/testing/polyglot-test-matrix.md` entry that names the `resp3_server` fixture as the unit-test seam for Redis and Valkey consumers.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
 | Requirement | Owning Task | Verification Strategy | Canonical Test Gate |
 | --- | --- | --- | --- |
 | R6 | [t01](tasks/t01-postgres-mysql-memory-removal.md) | `behavior_tdd` | `src/py/tests/unit/db/test_native_db_drivers.py::test_postgres_and_mysql_drivers_reject_memory_dsn` |
-| R7a (fixture core and key-value retargets) | [t02](tasks/t02-resp3-fixture-core-and-key-value-retarget.md) | `refactor_verification` | `src/py/tests/unit/db/test_redis_valkey_driver.py::test_redis_driver_scan_unlink_and_px` |
-| R7a (pub/sub, scripting, and consumer retargets) | [t03](tasks/t03-resp3-pubsub-scripting-and-consumer-retarget.md) | `refactor_verification` | `src/py/tests/unit/db/test_redis_valkey_driver.py::test_async_redis_driver_store_operations`, `src/py/tests/unit/extensions/test_alchemy_cache_backend.py::test_alchemy_cache_memory_url_stays_local` |
+| R7a (fixture core and key-value retargets) | [t02](tasks/t02-resp3-fixture-core-and-key-value-retarget.md) | `static_validation` | `src/py/tests/unit/db/test_redis_valkey_driver.py::test_redis_driver_scan_unlink_and_px` |
+| R7a (pub/sub, scripting, and consumer retargets) | [t03](tasks/t03-resp3-pubsub-scripting-and-consumer-retarget.md) | `static_validation` | `src/py/tests/unit/db/test_redis_valkey_driver.py::test_async_redis_driver_store_operations`, `src/py/tests/unit/extensions/test_alchemy_cache_backend.py::test_alchemy_cache_memory_url_stays_local` |
 
 ## 5. Implementation Plan
 
@@ -241,7 +242,7 @@ def resp3_server() -> Iterator[Resp3FakeServer]:
 - **Verified Baseline**: `HEAD @ 0acdf576`; `state: planned`; depends on `ch01` and `ch02` for shared test files.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`0/3` completed). `t03` extends the fixture module `t02` creates.
 - **Downstream**: `ch04-redis-valkey-memory-removal` starts after `t03`, when no consumer unit test depends on the Redis memory emulation.
-- **Documentation & OKF Sync**: `[0/0]` in this chapter; the fixture entry in the testing OKF chapter is handed to `ch09`.
+- **Documentation & OKF Sync**: `[0/0]` in this chapter; the `resp3_server` entry in `polyglot-test-matrix.md` is owned by `driver-fail-loud:ch13:t02`.
 - **Active Invariants**: queue, object storage, Advanced Alchemy `from_url("memory://")` local cache, the SQLite dialect `memory://` StaticPool alias (`get_pool_class`), and SQLite `:memory:` paths unchanged; Redis production code unchanged; no inline `#` comments in touched Python.
 
 [^pg-driver]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — PostgreSQL sync and async drivers with _in_memory_rows branches.

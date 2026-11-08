@@ -4,10 +4,10 @@ id: "driver-fail-loud:ch03:t03"
 chapter_id: ch03-remove-memory-fakes
 title: Loopback RESP3 pub/sub and scripting surface and consumer tests over the wire
 description: Extend the loopback RESP3 fixture with subscribe, publish, shard publish, and EVAL/EVALSHA handling, then move the remaining memory:// constructions in the Redis driver, Advanced Alchemy, framework, and Starlette unit tests onto it and assert that SQLAlchemyCacheBackend.from_url("memory://") stays local.
-status: draft
+status: stable
 state: pending
 priority: P1
-verification_strategy: refactor_verification
+verification_strategy: static_validation
 depends_on:
   - "driver-fail-loud:ch03:t02"
 read_set:
@@ -26,7 +26,7 @@ tests:
   - src/py/tests/unit/extensions/test_starlette_plugin.py
 estimated_loc: 125
 plan_revision: 1
-plan_commit: 0acdf576
+plan_commit: 1e1f028a
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -64,7 +64,7 @@ Out of scope: the transport, encoder, teardown, handshake, and key-value command
 
 ## Bounded Read Manifest
 
-- `src/py/tests/unit/conftest.py` — `Resp3FakeServer`, `_dispatch`, `_Handler.handle`, `_encode`, `_ErrorReply`, and the state lock from `driver-fail-loud:ch03:t02`.
+- `src/py/tests/unit/conftest.py` — `Resp3FakeServer`, `commands`, `_dispatch`, `_Handler.handle`, `_encode`, `_ErrorReply`, and the state lock from `driver-fail-loud:ch03:t02`.
 - `src/py/vertebra/db/adapters/redis/driver.py` — pub/sub and scripting wire commands: `PUBLISH`, `SPUBLISH` (through `execute_command`), `SUBSCRIBE`, `PSUBSCRIBE`, `SSUBSCRIBE`, `UNSUBSCRIBE`, `EVALSHA`, `EVAL`; `eval_script` sends `EVALSHA` and falls back to `EVAL` when the error text contains `NOSCRIPT`; `publish` returns `int(res)`.[^redis-driver]
 - `src/py/tests/unit/db/test_redis_valkey_driver.py::test_sync_redis_driver_memory_store_operations`, `::test_async_redis_driver_memory_store_operations`.
 - `src/py/tests/unit/extensions/test_alchemy_cache_backend.py::test_alchemy_cache_clear_removes_only_its_prefix`, `::test_alchemy_cache_sends_sub_second_ttl_as_milliseconds`.
@@ -80,7 +80,7 @@ class Resp3FakeServer:
     """Threaded loopback RESP3 server holding keys, expiries, scripts, and subscriptions in process."""
 
 
-def _encode_push(items: Sequence[bytes | int]) -> bytes: ...
+def _encode_push(items: Sequence[bytes | int | None]) -> bytes: ...
 
 
 def _script_result(script: str, keys: list[bytes], args: list[bytes], values: dict[bytes, bytes]) -> object: ...
@@ -88,7 +88,7 @@ def _script_result(script: str, keys: list[bytes], args: list[bytes], values: di
 
 - The class docstring above replaces the `driver-fail-loud:ch03:t02` docstring; the public surface (`port`, `redis_url`, `valkey_url`, `commands`, `close`, `resp3_server`) is unchanged.
 - State added under the existing `threading.Lock`: `dict[str, str]` scripts by SHA1 hex and `dict[socket.socket, set[tuple[str, bytes]]]` subscriptions keyed by connection with `(kind, name)` where kind is `message`, `pmessage`, or `smessage`. `_Handler.handle` removes the connection's subscription entry when its loop ends, in the same locked block that removes the socket from the accepted set.
-- `_encode_push`: `><n>\r\n` followed by each item encoded as a bulk string (`bytes`) or integer (`int`).
+- `_encode_push`: `><n>\r\n` followed by each item encoded as a bulk string (`bytes`), integer (`int`), or null (`None` → `_\r\n`); its signature is `_encode_push(items: Sequence[bytes | int | None]) -> bytes`.
 - Every push frame written to another subscribed connection is sent with `sendall` inside `_dispatch`, which already runs while holding the state lock, so push frames and replies never interleave on one socket.
 
 | Command | Reply |
@@ -96,7 +96,7 @@ def _script_result(script: str, keys: list[bytes], args: list[bytes], values: di
 | `EVALSHA sha n keys... args...` | `-NOSCRIPT No matching script. Please use EVAL.` when unknown, else the script result |
 | `EVAL script n keys... args...` | stores the SHA1, returns the script result |
 | `SUBSCRIBE` / `PSUBSCRIBE` / `SSUBSCRIBE` names... | one push per name: `>3` of `subscribe`/`psubscribe`/`ssubscribe`, name, subscription count; registers `(message, name)`, `(pmessage, name)`, or `(smessage, name)` |
-| `UNSUBSCRIBE [names...]` | removes the named (or all) `message` subscriptions; one `>3` `unsubscribe` push per name |
+| `UNSUBSCRIBE [names...]` | removes the named (or all) `message` subscriptions; one `>3` `unsubscribe` push per removed name carrying the remaining subscription count; with no names and no `message` subscriptions, one push `>3 unsubscribe _ 0` (null channel, count `0`), as real Redis replies |
 | `PUBLISH ch payload` | writes `>3 message ch payload` to each connection with `(message, ch)` and `>4 pmessage pattern ch payload` to each connection with a matching `(pmessage, pattern)` (`fnmatch.fnmatchcase`) first, then integer delivery count to the publisher; `smessage` subscriptions never receive `PUBLISH` traffic |
 | `SPUBLISH ch payload` | writes `>3 smessage ch payload` to each connection with `(smessage, ch)` first, then integer delivery count to the publisher (Redis 7 shard pub/sub) |
 
@@ -108,7 +108,7 @@ Script result rule (`_script_result`): when the script text contains `KEYS[1]` a
 - `SSUBSCRIBE` subscribers receive `smessage` frames only from `SPUBLISH`; the driver has no `spublish` helper, so tests send `driver.execute_command("SPUBLISH", channel, payload)`.
 - A client closing its socket drops its subscriptions, so a later `PUBLISH` does not write to a closed socket.
 - `EVALSHA` for an unknown SHA replies `NOSCRIPT`, which drives the driver's `EVAL` fallback; a second `eval_script` with the same text hits the stored SHA.
-- `UNSUBSCRIBE` with no names removes every `message` subscription of that connection and leaves `pmessage` and `smessage` entries in place.
+- `UNSUBSCRIBE` with no names removes every `message` subscription of that connection and leaves `pmessage` and `smessage` entries in place; when that connection holds no `message` subscription, the reply is the single push `>3\r\n$11\r\nunsubscribe\r\n_\r\n:0\r\n`.
 
 ## Public-Seam Test Blueprint
 
@@ -119,7 +119,7 @@ Script result rule (`_script_result`): when the script text contains `KEYS[1]` a
 | Test (new name when renamed) | Concrete Change | Expected Output |
 | --- | --- | --- |
 | `test_redis_valkey_driver.py::test_sync_redis_driver_memory_store_operations` → `test_sync_redis_driver_store_operations(resp3_server)` | `SyncRedisDriver(RedisConfig(url=resp3_server.redis_url))` | `execute_pipeline([("SET","k2","v2"),("GET","k2"),("DEL","k1")]) == ["OK", b"v2", 1]`; `eval_script("return redis.call('get', KEYS[1])", keys=["k2"]) == b"v2"`; after `flushdb()`, `pttl("k2") == -2` |
-| `test_redis_valkey_driver.py::test_async_redis_driver_memory_store_operations` → `test_async_redis_driver_store_operations(resp3_server)` | `AsyncRedisDriver(RedisConfig(url=resp3_server.redis_url))` | `await driver.publish("news", "headline") == 0`; `await driver.eval_script("return ARGV[1]", args=["hello"]) == b"hello"` |
+| `test_redis_valkey_driver.py::test_async_redis_driver_memory_store_operations` → `test_async_redis_driver_store_operations(resp3_server)` | `AsyncRedisDriver(RedisConfig(url=resp3_server.redis_url))` | `await driver.publish("news", "headline") == 0`; `await driver.eval_script("return ARGV[1]", args=["hello"]) == b"hello"`; `[c[0] for c in resp3_server.commands if c[0] in (b"EVALSHA", b"EVAL")] == [b"EVALSHA", b"EVAL"]` (the `NOSCRIPT` fallback round trip reached the wire) |
 | `test_alchemy_cache_backend.py::test_alchemy_cache_clear_removes_only_its_prefix(resp3_server)` | both drivers on `resp3_server.redis_url` | `sync_driver.get("other:keep") == b"1"`; `await backend_b.get_async("user:9") == {"id": 9}` |
 | `test_alchemy_cache_backend.py::test_alchemy_cache_sends_sub_second_ttl_as_milliseconds(resp3_server)` | fixture URL | `1 <= sync_driver.pttl("vtb:aa:ephemeral") <= 250` |
 | new `test_alchemy_cache_backend.py::test_alchemy_cache_memory_url_stays_local` | `SQLAlchemyCacheBackend.from_url("memory://")` | `backend.sync_driver is None and backend.async_driver is None` |
@@ -131,7 +131,7 @@ Script result rule (`_script_result`): when the script text contains `KEYS[1]` a
 - Baseline: `uv run --no-sync pytest src/py/tests/unit/db/test_redis_valkey_driver.py src/py/tests/unit/db/test_redis_valkey_resp3.py src/py/tests/unit/extensions/test_alchemy_cache_backend.py src/py/tests/unit/framework/test_framework_subdomains.py src/py/tests/unit/extensions/test_starlette_plugin.py -q` passes on `HEAD`.
 - Coverage snapshot before edits: `uv run --no-sync coverage run --branch -m pytest src/py/tests/unit/db/test_redis_valkey_driver.py src/py/tests/unit/db/test_redis_valkey_resp3.py src/py/tests/unit/extensions/test_alchemy_cache_backend.py src/py/tests/unit/framework/test_framework_subdomains.py src/py/tests/unit/extensions/test_starlette_plugin.py -q && uv run --no-sync coverage json -o /tmp/ch03-t03-before.json --include="src/py/vertebra/db/adapters/redis/*"`; repeat after edits into `/tmp/ch03-t03-after.json`. Lines that lose coverage lie only inside `SyncRedisDriver._publish_memory`, `_execute_memory_command`, `_eval_memory_script`, and `memory://` branches.
 - Vacuity probe: temporarily make both `redis_url` and `valkey_url` return port `1`, rerun the six retargeted fixture tests, confirm they fail with `ConnectionRefusedError` / `OSError`, then restore.
-- Green + lint: rerun the baseline command, then `uv run --no-sync ruff check src/py/tests/unit/conftest.py src/py/tests/unit/db/test_redis_valkey_driver.py src/py/tests/unit/extensions/test_alchemy_cache_backend.py src/py/tests/unit/framework/test_framework_subdomains.py src/py/tests/unit/extensions/test_starlette_plugin.py && uv run --no-sync ruff format --check src/py/tests/unit/conftest.py && uv run --no-sync mypy src/py/tests/unit/conftest.py`.
+- Green + lint: rerun the baseline command, then `uv run --no-sync ruff check src/py/tests/unit/conftest.py src/py/tests/unit/db/test_redis_valkey_driver.py src/py/tests/unit/extensions/test_alchemy_cache_backend.py src/py/tests/unit/framework/test_framework_subdomains.py src/py/tests/unit/extensions/test_starlette_plugin.py && uv run --no-sync ruff format --check src/py/tests/unit/conftest.py src/py/tests/unit/db/test_redis_valkey_driver.py src/py/tests/unit/extensions/test_alchemy_cache_backend.py src/py/tests/unit/framework/test_framework_subdomains.py src/py/tests/unit/extensions/test_starlette_plugin.py && uv run --no-sync mypy src/py/tests/unit/conftest.py`.
 - Residue gate: `rg -n 'url="memory://"|from_valkey\("memory://"\)' src/py/tests/unit/db/test_redis_valkey_driver.py src/py/tests/unit/extensions/test_alchemy_cache_backend.py src/py/tests/unit/framework/test_framework_subdomains.py src/py/tests/unit/extensions/test_starlette_plugin.py` prints nothing.
 
 ## Acceptance Criteria
