@@ -5,7 +5,7 @@ chapter_id: ch03-scram-and-channel-binding
 title: Enforce SCRAM-SHA-256-PLUS channel-binding policies and GS2 downgrade protection
 description: Select and verify SCRAM-SHA-256-PLUS across Disable, Prefer, and Require channel-binding policies, emitting RFC 5802 GS2 y,, on bound TLS plain-only offers and rejecting downgrade or replay.
 status: stable
-state: pending
+state: blocked
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -30,14 +30,14 @@ plan_commit: 1c75af65
 state_revision: 0
 claimed_by: null
 claimed_at: null
-blocked_reason: null
-unblock_condition: null
-next_step: null
+blocked_reason: "The six-file bounded read manifest omits both owned canonical auth and TLS test fixtures."
+unblock_condition: "The reviewed six-file manifest includes both owned canonical test files and required config/auth/session/contracts seams."
+next_step: "/flow:revise native-postgres-driver ch03-scram-and-channel-binding"
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T23:59:30Z"
+updated_at: "2026-11-08T00:30:35Z"
 commit: null
 sources:
   - id: pg-contracts

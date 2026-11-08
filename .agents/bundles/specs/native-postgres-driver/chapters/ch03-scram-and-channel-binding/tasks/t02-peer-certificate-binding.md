@@ -5,7 +5,7 @@ chapter_id: ch03-scram-and-channel-binding
 title: Derive RFC 5929 tls-server-end-point digests from negotiated peer certificates
 description: Implement binding::tls_server_end_point using x509-parser 0.18.1 and sha2 across RSA, ECDSA, DSA, RSA-PSS, SHA-1/MD5 substitution, and EdDSA unavailable-binding rules, and capture peer leaf digests in tls::connect.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -26,13 +26,13 @@ estimated_loc: 225
 plan_revision: 7
 plan_commit: 1c75af65
 state_revision: 0
-claimed_by: agent:ch03-t02-binding
-claimed_at: "2026-11-08T00:23:12Z"
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-08T00:28:08Z"
-last_verified_commit: null
+last_verified_commit: 2db27cd1
 verification_evidence:
   red:
     command: 'UV_NO_SYNC=1 PYO3_PYTHON=${PWD}/.venv/bin/python CARGO_TARGET_DIR=/tmp/vtb-cargo-target cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked --test postgres_tls_wire_tests certificate_binding_live_tls_digest'
@@ -59,8 +59,8 @@ verification_evidence:
     command: 'git diff --check'
     exit_code: 0
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-08T00:28:08Z"
-commit: null
+updated_at: "2026-11-08T00:30:35Z"
+commit: 2db27cd1
 sources:
   - id: proto-research
     resource: .agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md
