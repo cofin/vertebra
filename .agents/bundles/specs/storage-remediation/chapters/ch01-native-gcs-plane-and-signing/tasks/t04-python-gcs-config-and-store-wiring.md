@@ -5,7 +5,7 @@ chapter_id: ch01-native-gcs-plane-and-signing
 title: Wire Python GCSConfig, SyncObjectStore, and AsyncObjectStore to token_cache._capsule() and custom GCS signing endpoint without blocking I/O
 description: Remove blocking resolve_adc_token(), eager_impersonation, and NO_PROXY env mutation from GCSConfig.to_url_and_options, pass resolved_cache._capsule() into native SyncObjectStore/AsyncObjectStore, and forward SigningConfig.endpoint to GCS V4 presigning.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -22,18 +22,18 @@ tests:
 estimated_loc: 120
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-08T23:02:35Z"
+last_verified_commit: cb50c08e
+verification_evidence: "ruff check + mypy + pytest test_gcs_token_refresh.py test_signing.py test_multicloud_storage.py (39 passed)"
 created_at: "2026-11-08T20:30:00Z"
-updated_at: "2026-11-08T20:30:00Z"
-commit: null
+updated_at: "2026-11-08T23:03:20Z"
+commit: cb50c08e
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:30:00Z"
@@ -98,8 +98,8 @@ uv run --no-sync pytest src/py/tests/unit/storage/test_gcs_token_refresh.py src/
 
 ## Acceptance Criteria
 
-- [ ] `SyncObjectStore` and `AsyncObjectStore` share `token_cache=` across native GCS data-plane operations and IAM `signBlob` (R1.1, R1.3).
-- [ ] `GCSConfig.to_url_and_options()` is non-blocking and leaves `os.environ` untouched, and `SigningConfig.endpoint` is honored by `store.sign` (R1.3).
+- [x] `SyncObjectStore` and `AsyncObjectStore` share `token_cache=` across native GCS data-plane operations and IAM `signBlob` (R1.1, R1.3).
+- [x] `GCSConfig.to_url_and_options()` is non-blocking and leaves `os.environ` untouched, and `SigningConfig.endpoint` is honored by `store.sign` (R1.3).
 
 ## Notes & Discoveries
 
