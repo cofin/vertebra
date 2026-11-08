@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## Verified SQLSpec optional row-group compatibility
+
+Source `5faea756` preserves installed PyArrow row-group defaults for omitted and None options across sync/async Table and cursor writes, while invalid sizes still fail. Eight Red failures lead to 102 canonical passes with actual metadata assertions. Full lint-all exits0; refreshed Python suite exits0: 2604 passed, 74 skipped, 170 xfailed, 17 warnings in 71.51s (0:01:11). Catalog counts are synchronized; final correctness and fresh quality reviews precede finish/archive.
+
 ## Completed storage documentation and durable synthesis
 
 Source `56c514dd` completes both user guides and source-backed native/storage/framework knowledge, including ADR-005 for persistent TTL envelopes. Documentation review/build gates and 29 tooling/viewport cases pass; offline native/provider/framework examples pass. Full Python exits 0 with 2592 passed, 74 skipped, 170 xfailed; full lint and locked native workspace gates pass. All 15 implementation tasks and 5 documentation targets are complete; chapter 5 independent reviews precede finish/archive. No live GCS ADC/IAM calls are executed.

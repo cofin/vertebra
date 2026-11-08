@@ -25,14 +25,14 @@ tests:
 estimated_loc: 210
 plan_revision: 10
 plan_commit: '78293774'
-state_revision: 2
-claimed_by: agent:sqlspec-arrow-executor
-claimed_at: '2026-11-08T18:01:58.609035Z'
+state_revision: 4
+claimed_by: agent:sqlspec-rowgroup-executor
+claimed_at: '2026-11-08T18:35:14.486574Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: '2026-11-08T18:17:27.526464Z'
-last_verified_commit: bf5a4cf3
+last_verified_at: '2026-11-08T18:42:41.383277Z'
+last_verified_commit: 5faea756
 verification_evidence:
   red:
     exit_code: 1
@@ -49,9 +49,21 @@ verification_evidence:
     result: Storage and SQLSpec adapter MyPy5 files pass
   ruff_format_diff:
     exit_code: 0
+  correctness_repair:
+    red_exit_code: 1
+    red_result: '8 failed,4 passed: omitted/None defaults versus explicit invalid-size
+      guards.'
+    green_exit_code: 0
+    green_result: 102 canonical cases; actual Parquet groups[1048576,1] and values
+      preserved for sync/async Table/raw IPC cursor.
+    typing_lint_format_diff_exit_code: 0
+  aggregate_refresh:
+    python_exit_code: 0
+    python_result: 2604 passed, 74 skipped, 170 xfailed, 17 warnings in 71.51s (0:01:11)
+    lint_all_exit_code: 0
 created_at: '2026-11-08T00:00:00Z'
-updated_at: '2026-11-08T18:17:27.526464Z'
-commit: bf5a4cf3
+updated_at: '2026-11-08T18:42:41.383277Z'
+commit: 5faea756
 sources:
 - id: sql
   resource: src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend

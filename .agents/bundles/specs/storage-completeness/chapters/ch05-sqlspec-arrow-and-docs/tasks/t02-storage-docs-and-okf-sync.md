@@ -49,7 +49,7 @@ verification_evidence:
     limits: Live GCS ADC/IAM calls are not executed.
   full_checkpoint:
     python_exit_code: 0
-    python_result: 2592 passed, 74 skipped, 170 xfailed
+    python_result: 2604 passed, 74 skipped, 170 xfailed
     lint_all_exit_code: 0
     native_workspace_exit_code: 0
     native_note: Native source unchanged since validated3f3958e3; all5extensions rebuilt
