@@ -6,6 +6,7 @@ import gc
 
 import pytest
 
+from vertebra._storage import StorageBuffer
 from vertebra._vertebra import (
     ArrowCursor as RustArrowCursor,
 )
@@ -22,6 +23,7 @@ from vertebra.server._fastpath import (
     ARROW_STREAM_MEDIA_TYPE,
     serialize_fastpath_special_result,
 )
+from vertebra.storage import AsyncObjectStore, StreamingStorageResponse
 
 
 def test_request_body_view_returns_readonly_memoryview() -> None:
@@ -191,3 +193,48 @@ def test_serialize_fastpath_special_result_returns_zero_copy_arrow_memoryview() 
             return memoryview(b"impostor")
 
     assert serialize_fastpath_special_result(ImpostorArrowCursor()) is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("range_header", "status", "content_range", "expected"),
+    [
+        (None, 200, None, bytes(range(100))),
+        ("items=0-5", 200, None, bytes(range(100))),
+        ("bytes=0-15", 206, "bytes 0-15/100", bytes(range(16))),
+        ("bytes=80-", 206, "bytes 80-99/100", bytes(range(80, 100))),
+        ("bytes=-12", 206, "bytes 88-99/100", bytes(range(88, 100))),
+        ("bytes=60-999", 206, "bytes 60-99/100", bytes(range(60, 100))),
+        ("bytes=-999", 206, "bytes 0-99/100", bytes(range(100))),
+        ("bytes=100-110", 416, "bytes */100", b""),
+        ("bytes=40-10", 416, "bytes */100", b""),
+        ("bytes=-0", 416, "bytes */100", b""),
+        ("bytes=0-2,4-6", 416, "bytes */100", b""),
+        ("bytes=wat", 416, "bytes */100", b""),
+    ],
+)
+async def test_storage_response_async_ranges(
+    range_header: str | None, status: int, content_range: str | None, expected: bytes
+) -> None:
+    """Native memory storage produces exact HTTP range bodies through both async seams."""
+    store = AsyncObjectStore("memory://")
+    await store.put("video.mp4", bytes(range(100)), content_type="video/mp4")
+    response = await StreamingStorageResponse.from_async_store(
+        store, "video.mp4", range_header=range_header, chunk_size=7
+    )
+    chunks = [chunk async for chunk in response.aiter_chunks()]
+    assert b"".join(bytes(chunk) for chunk in chunks) == expected
+    if status == 200:
+        assert all(isinstance(chunk, StorageBuffer) for chunk in chunks)
+    assert all(len(chunk) <= 7 for chunk in chunks)
+    resolved_status, header_pairs, body = await response.to_async_fastpath_tuple()
+    headers = dict(header_pairs)
+    assert resolved_status == status
+    assert bytes(body) == expected
+    assert headers[b"accept-ranges"] == b"bytes"
+    assert headers[b"content-length"] == str(len(expected)).encode()
+    assert headers[b"content-type"] == b"video/mp4"
+    assert headers.get(b"content-range") == (content_range.encode() if content_range else None)
+    etag = (await store.head("video.mp4")).etag
+    assert etag is not None
+    assert headers[b"etag"] == etag.encode()

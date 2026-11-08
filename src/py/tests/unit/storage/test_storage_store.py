@@ -20,9 +20,12 @@ from vertebra.storage import (
     MemoryConfig,
     ObjectMeta,
     PutResult,
+    RangeNotSatisfiableError,
     SigningConfig,
+    StreamingStorageResponse,
     SyncObjectStore,
     SyncReadableFile,
+    parse_byte_range,
 )
 from vertebra.typing import ImproperConfigurationError, MissingDependencyError, reset_dependency_cache
 
@@ -456,3 +459,72 @@ async def test_explicit_memory_config_and_to_async_share_rust_in_memory_backend(
 
     roundtrip_sync = async_store.to_sync()
     assert roundtrip_sync.get("k2") == b"v2"
+
+
+@pytest.mark.parametrize("range_header", [None, "bytes=2-5", "bytes=9-", "bytes=-0"])
+def test_storage_response_sync_local_ranges(tmp_path: Path, range_header: str | None) -> None:
+    """Local storage exposes consistent range bodies through sync iteration and fastpath."""
+    store = SyncObjectStore(LocalConfig(root=tmp_path))
+    store.put("payload.bin", b"0123456789")
+    response = StreamingStorageResponse.from_sync_store(store, "payload.bin", range_header=range_header)
+    status, headers, body = response.to_fastpath_tuple()
+    expected = {None: b"0123456789", "bytes=2-5": b"2345", "bytes=9-": b"9", "bytes=-0": b""}[range_header]
+    assert status == (200 if range_header is None else 416 if range_header == "bytes=-0" else 206)
+    assert body == expected
+    assert b"".join(response.iter_chunks()) == expected
+    assert dict(headers)[b"content-length"] == str(len(expected)).encode()
+
+
+@pytest.mark.anyio
+async def test_storage_response_empty_missing_and_invalid_chunks() -> None:
+    """Empty ranges produce 416; missing objects and invalid chunk sizes fail explicitly."""
+    store = AsyncObjectStore("memory://")
+    await store.put("empty", b"")
+    response = await StreamingStorageResponse.from_async_store(store, "empty", range_header="bytes=0-")
+    assert (await response.to_async_fastpath_tuple())[0] == 416
+    assert [chunk async for chunk in response.aiter_chunks()] == []
+    with pytest.raises(FileNotFoundError):
+        await StreamingStorageResponse.from_async_store(store, "missing")
+    with pytest.raises(ValueError, match="chunk_size"):
+        await StreamingStorageResponse.from_async_store(store, "empty", chunk_size=0)
+    response = await StreamingStorageResponse.from_async_store(store, "empty")
+    with pytest.raises(TypeError, match="AsyncObjectStore"):
+        response.to_fastpath_tuple()
+
+
+@pytest.mark.parametrize("header", ["bytes=", "bytes=-", "bytes=+1-2", "bytes=1- 2", "bytes=١-2", "bytes"])
+def test_parse_byte_range_rejects_invalid_byte_syntax(header: str) -> None:
+    """Malformed byte specifications fail with the representation size attached."""
+    with pytest.raises(RangeNotSatisfiableError) as exc_info:
+        parse_byte_range(header, 100)
+    assert exc_info.value.total_size == 100
+
+
+@pytest.mark.anyio
+async def test_storage_response_async_native_owner_and_read_failure(tmp_path: Path) -> None:
+    """Async full fastpath preserves the native buffer and propagates backend read failures."""
+    store = AsyncObjectStore(LocalConfig(root=tmp_path))
+    await store.put("body", b"native payload")
+    response = await StreamingStorageResponse.from_async_store(
+        store, "body", headers={"CONTENT-LENGTH": "999", "Content-Range": "bad", "X-Trace": "yes"}
+    )
+    status, headers, body = await response.to_async_fastpath_tuple()
+    assert status == 200
+    assert isinstance(body, memoryview)
+    assert isinstance(body.obj, StorageBuffer)
+    assert bytes(body) == b"native payload"
+    assert dict(headers)[b"content-length"] == b"14"
+    assert dict(headers)[b"x-trace"] == b"yes"
+    assert b"content-range" not in dict(headers)
+    await store.delete("body")
+    with pytest.raises(FileNotFoundError):
+        await response.to_async_fastpath_tuple()
+
+
+@pytest.mark.anyio
+async def test_storage_response_explicit_async_range_without_metadata() -> None:
+    """Existing direct descriptors resolve an open-ended range without a supplied size."""
+    store = AsyncObjectStore("memory://")
+    await store.put("body", b"0123456789")
+    response = StreamingStorageResponse(store=store, key="body", range_start=3, chunk_size=2)
+    assert b"".join([bytes(chunk) async for chunk in response.aiter_chunks()]) == b"3456789"

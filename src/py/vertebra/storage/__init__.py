@@ -21,13 +21,14 @@ from vertebra.storage._store import (
     SyncObjectStore,
     SyncReadableFile,
 )
-from vertebra.storage._streaming import StreamingStorageResponse
+from vertebra.storage._streaming import ByteRange, RangeNotSatisfiableError, StreamingStorageResponse, parse_byte_range
 
 __all__ = (
     "AsyncGcpTokenCache",
     "AsyncObjectStore",
     "AsyncReadableFile",
     "AzureConfig",
+    "ByteRange",
     "GCSConfig",
     "GcpTokenSnapshot",
     "HTTPConfig",
@@ -37,6 +38,7 @@ __all__ = (
     "ObjectMeta",
     "PutResult",
     "R2Config",
+    "RangeNotSatisfiableError",
     "S3Config",
     "SigningConfig",
     "StorageConfig",
@@ -44,4 +46,5 @@ __all__ = (
     "SyncGcpTokenCache",
     "SyncObjectStore",
     "SyncReadableFile",
+    "parse_byte_range",
 )
