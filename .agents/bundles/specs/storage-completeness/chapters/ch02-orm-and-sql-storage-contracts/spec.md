@@ -11,9 +11,9 @@ depends_on_chapters:
   - ch01-native-engine-and-auth
 replan_trigger: null
 current_task: "storage-completeness:ch02:t03"
-plan_revision: 4
-plan_commit: 1e1f028a
-state_revision: 2
+plan_revision: 6
+plan_commit: 0155d9dc
+state_revision: 3
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-07T04:15:00Z"
@@ -68,6 +68,8 @@ Parent roadmap: [spec.md](../../spec.md); depends on [ch01-native-engine-and-aut
 
 The execution baseline is SQLSpec `0.71.1`, Advanced Alchemy `1.12.0`, and Django `6.1.3` from the installed `.venv` sources cited in each worksheet. Constructors keep omission-callable defaults so missing targets raise the declared `ImproperConfigurationError` rather than Python argument `TypeError`. Native metadata is `ObjectMeta`; SQLSpec uses exact `_sync` / `_async` protocol methods, and Advanced Alchemy's concrete class remains `ObjectStoreBackend`.
 
+Django's `Storage` base is checked through the `django-stubs` lint dependency; its lockfile is part of `ch02:t03`.
+
 ## 2. Requirements, Concrete Contracts & Architecture
 
 ### 2.1 Chapter Requirements
@@ -77,6 +79,8 @@ The execution baseline is SQLSpec `0.71.1`, Advanced Alchemy `1.12.0`, and Djang
 - **R6 (`ch02:t03`)**: Refactor `vertebra.extensions.django.storage.DjangoStorage` into a `@deconstructible` subclass of `django.core.files.storage.Storage` (raising `MissingDependencyError` when `django` is absent and `ImproperConfigurationError` when `config` and `store` are omitted), returning `django.core.files.base.File` over `SyncReadableFile` from `_open`/`open`/`aopen` (async open awaits metadata before creating its synchronous Django File handle) and implementing `_save`, `save`, `asave`, `delete`, `adelete`, `exists`, `aexists`, `size`, `asize`, `listdir`, `url`, `aurl`, `path`, `get_available_name`, `generate_filename`, `get_valid_name`, `get_accessed_time`, `get_created_time`, `get_modified_time`, and `get_alternative_name`.
 
 Reader factories retain native metadata timing: `open_sync(size=None)` fetches object metadata immediately; an explicit size avoids that lookup. `open_async` returns a lazy async reader.
+
+Django exposes native modification time as an aware UTC datetime. `get_created_time` and `get_accessed_time` raise `NotImplementedError`; `ObjectMeta` contains neither timestamp.
 
 ### 2.2 Edge-Case & Failure-Mode Matrix
 
@@ -108,14 +112,14 @@ Progress: `[0/0 files documented in ch02]` (documented in `ch04:t03` across `doc
 
 - [x] [7e13257bd58739520c11ca7a2c3e012867f660d9] storage-completeness:ch02:t01 — Complete fail-closed SQLSpec ObjectStoreProtocol over SyncObjectStore and AsyncObjectStore (tasks/t01-sqlspec-object-store-protocol.md)
 - [x] [0e579db6dc31bdf120b3a3c1fae84c1a2b4e6c6a] storage-completeness:ch02:t02 — Remove storages.get monkeypatch and harden Advanced Alchemy ObjectStoreBackend (tasks/t02-advanced-alchemy-storage-backend.md)
-- [ ] storage-completeness:ch02:t03 — Subclass Django Storage (@deconstructible) with File handles and full metadata contract (tasks/t03-django-deconstructible-storage.md)
+- [~] storage-completeness:ch02:t03 — Subclass Django Storage (@deconstructible) with File handles and full metadata contract (tasks/t03-django-deconstructible-storage.md)
 
 **Chapter Recovery Checkpoint:** `uv run --no-sync pytest src/py/tests/unit/extensions/test_data_storage_integrations.py src/py/tests/unit/extensions/test_django_plugin.py -q && uv run --no-sync ruff check src/py/vertebra/extensions/{sqlspec,alchemy,django}/storage.py src/py/tests/unit/extensions/test_data_storage_integrations.py src/py/tests/unit/extensions/test_django_plugin.py && uv run --no-sync mypy src/py/vertebra/extensions/sqlspec/storage.py src/py/vertebra/extensions/alchemy/storage.py src/py/vertebra/extensions/django/storage.py` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `1e1f028a`; `depends_on_chapters: [ch01-native-engine-and-auth]`, `state: active`.
-- **Remaining Tasks in Chapter**: `t03` (`1/3` pending); `t01` is completed at `7e13257b` and `t02` at `0e579db6`; both await chapter review.
+- **Verified Plan Baseline**: `0155d9dc`; `depends_on_chapters: [ch01-native-engine-and-auth]`, `state: active`.
+- **Remaining Tasks in Chapter**: `t03` (`1/3` in progress); `t01` is completed at `7e13257b` and `t02` at `0e579db6`; both await chapter review.
 - **Active Invariants**: Zero `asyncio.to_thread` in `extensions/alchemy/storage.py`; zero `storages.get` monkeypatching; exact installed SQLSpec `_sync` / `_async` names and Advanced Alchemy `ObjectStoreBackend.get_content[_async]`; `build_duckdb_gcs_secret_sql` preserved intact.
 
 [^sqlspec-storage]: `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` — SQLSpec object storage adapter.

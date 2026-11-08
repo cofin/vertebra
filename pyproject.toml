@@ -219,6 +219,7 @@ test = [
 lint = [
     "ruff",
     "mypy",
+    "django-stubs>=6.1.2",
 ]
 build = [
     "bump-my-version>=0.31.1",

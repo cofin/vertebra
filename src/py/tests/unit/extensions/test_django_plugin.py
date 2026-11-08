@@ -3,14 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
 import threading
+import time
+from importlib import import_module
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
+from urllib.parse import parse_qs, urlparse
 
 import msgspec
 import pyarrow as pa
 import pydantic
 import pytest
+from django.core.exceptions import SuspiciousFileOperation
+from django.core.files.base import ContentFile, File
+from django.core.files.storage import Storage
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope, Request, WsgiEnviron, run_wsgi_callable
 from vertebra.agent.mcp.models import MCPConfig as CanonicalMCPConfig
@@ -61,6 +70,8 @@ from vertebra.extensions.django.db.backends.sqlite3 import (
 from vertebra.extensions.django.templatetags.vertebra_vite import vite_asset, vite_hmr_client
 from vertebra.extensions.sqlalchemy.dialects import SyncDBAPIConnection
 from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncConfig, SQLiteSyncConfig
+from vertebra.storage import LocalConfig, SigningConfig
+from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import decode_json
 
 if TYPE_CHECKING:
@@ -390,11 +401,13 @@ async def test_django_cache_storage_mail_channels_queues_security_and_templates(
     assert isinstance(storage.async_store, AsyncObjectStore)
     saved_name = storage.save("avatars/a.txt", b"avatar-bytes")
     assert storage.exists(saved_name) is True
-    assert storage.open(saved_name) == b"avatar-bytes"
+    with storage.open(saved_name) as handle:
+        assert handle.read() == b"avatar-bytes"
     assert storage.size(saved_name) == 12
     assert storage.url(saved_name) == "/media/avatars/a.txt"
     await storage.asave("avatars/b.txt", b"async-avatar")
-    assert await storage.aopen("avatars/b.txt") == b"async-avatar"
+    with await storage.aopen("avatars/b.txt") as handle:
+        assert handle.read() == b"async-avatar"
     assert await storage.aexists("avatars/b.txt") is True
     assert await storage.asize("avatars/b.txt") == 12
     assert await storage.aurl("avatars/b.txt") == "/media/avatars/b.txt"
@@ -698,3 +711,195 @@ def test_django_mcp_shares_wsgi_mcp_app_and_reuses_persistent_portal() -> None:
 
     assert len(observed_loops) == 2
     assert observed_loops[0] == observed_loops[1]
+
+
+def test_django_storage_deconstructs_and_requires_configuration(tmp_path: Path) -> None:
+    """Django storage reconstructs through its public migration constructor."""
+    with pytest.raises(ImproperConfigurationError):
+        DjangoStorage()
+    storage = DjangoStorage(LocalConfig(root=tmp_path), base_url="/media/")
+    assert isinstance(storage, Storage)
+    path, args, kwargs = storage.deconstruct()
+    module, _, name = path.rpartition(".")
+    restored = getattr(import_module(module), name)(*args, **kwargs)
+    saved = restored.save("readme.txt", ContentFile(b"hello"))
+    with restored.open(saved) as handle:
+        assert isinstance(handle, File)
+        assert handle.read() == b"hello"
+
+
+@pytest.mark.parametrize("config", [None, "", "   "])
+def test_django_storage_rejects_empty_configuration(config: str | None) -> None:
+    """Missing or blank configuration never creates an implicit memory store."""
+    with pytest.raises(ImproperConfigurationError):
+        DjangoStorage(config)
+
+
+@pytest.mark.parametrize("target", ["uri", "sync", "async", "async_keyword", "precedence"])
+def test_django_storage_explicit_targets_share_native_data(tmp_path: Path, target: str) -> None:
+    """URI and explicit handle constructor forms use the selected native engine."""
+    native = SyncObjectStore.from_local(tmp_path)
+    if target == "uri":
+        storage = DjangoStorage(native.url)
+    elif target == "sync":
+        storage = DjangoStorage(native)
+    elif target == "async":
+        storage = DjangoStorage(native.to_async())
+    elif target == "async_keyword":
+        storage = DjangoStorage(async_store=native.to_async())
+    else:
+        storage = DjangoStorage("", store=native, async_store=SyncObjectStore("memory://").to_async())
+    assert storage.save("empty.bin", b"") == "empty.bin"
+    assert native.exists("empty.bin")
+    with storage.open("empty.bin") as handle:
+        assert handle.read() == b""
+
+
+def test_django_storage_named_text_content_file() -> None:
+    """Django text files retain named-content saving and UTF-8 payloads."""
+    storage = DjangoStorage(MemoryConfig())
+    name = storage.save(None, ContentFile("héllo", name="named.txt"))
+    assert name == "named.txt"
+    with storage.open(name) as handle:
+        assert handle.read() == "héllo".encode()
+
+
+def test_django_storage_naming_files_and_metadata(tmp_path: Path) -> None:
+    """Native-backed files honor Django collision, namespace, and metadata contracts."""
+    storage = DjangoStorage(LocalConfig(root=tmp_path), location="uploads", base_url="/media/")
+    first = storage.save("sub/readme.txt", ContentFile(b"hello"))
+    second = storage.save("sub/readme.txt", b"another")
+    assert first != second
+    with storage.open(first) as handle:
+        assert isinstance(handle, File)
+        assert handle.size == 5
+        assert handle.read(2) == b"he"
+        assert handle.seek(0) == 0
+        assert handle.read() == b"hello"
+    storage.save("root.txt", ContentFile(b"root"))
+    storage.store.put("uploads-neighbor/outside.txt", b"outside")
+    assert storage.listdir("") == (["sub"], ["root.txt"])
+    assert storage.listdir("sub")[0] == []
+    assert sorted(storage.listdir("sub")[1]) == sorted([Path(first).name, Path(second).name])
+    assert storage.path("root.txt") == str(tmp_path / "uploads" / "root.txt")
+    modified = storage.get_modified_time("root.txt")
+    assert modified.tzinfo is not None
+    assert modified.utcoffset().total_seconds() == 0
+    with pytest.raises(NotImplementedError):
+        storage.get_created_time("root.txt")
+    with pytest.raises(NotImplementedError):
+        storage.get_accessed_time("root.txt")
+    assert storage.url("a b.txt") == "/media/uploads/a%20b.txt"
+    short = storage.save("a-very-long-filename.txt", b"short", max_length=18)
+    assert len(short) <= 18
+    with pytest.raises(SuspiciousFileOperation):
+        storage.save("long.txt", b"short", max_length=2)
+    overwrite = DjangoStorage(store=storage.store, location="uploads", file_overwrite=True)
+    assert overwrite.save(first, ContentFile(b"new")) == first
+    with overwrite.open(first) as handle:
+        assert handle.read() == b"new"
+    with pytest.raises(ValueError):
+        storage.open(first, "wb")
+    with pytest.raises(NotImplementedError):
+        DjangoStorage(MemoryConfig()).path("root.txt")
+    with pytest.raises(ValueError):
+        DjangoStorage(MemoryConfig()).url("root.txt")
+
+
+@pytest.mark.parametrize("name", ["../outside.txt", "sub/../../outside.txt", "/absolute.txt", r"..\outside.txt"])
+@pytest.mark.parametrize("operation", ["open", "save", "delete", "exists", "size", "url", "path", "listdir"])
+def test_django_storage_rejects_namespace_escape(tmp_path: Path, name: str, operation: str) -> None:
+    """Every public file operation rejects traversal before adding its location."""
+    storage = DjangoStorage(LocalConfig(root=tmp_path), location="uploads", base_url="/media/")
+    args = (name, b"payload") if operation == "save" else (name,)
+    with pytest.raises(SuspiciousFileOperation):
+        getattr(storage, operation)(*args)
+
+
+@pytest.mark.anyio
+async def test_django_storage_async_files_collisions_streams_and_urls(tmp_path: Path) -> None:
+    """Async operations preserve native writes and return seekable Django handles."""
+    storage = DjangoStorage(LocalConfig(root=tmp_path), location="uploads", base_url="/media/")
+    first = await storage.asave("async.bin", ContentFile(b"xyz"))
+    second = await storage.asave("async.bin", b"second")
+    assert first != second
+    with await storage.aopen(first) as handle:
+        assert isinstance(handle, File)
+        assert handle.read() == b"xyz"
+    assert await storage.aexists(first)
+    assert await storage.asize(first) == 3
+    assert await storage.aurl("a b.txt") == "/media/uploads/a%20b.txt"
+    await storage.adelete(first)
+    assert not await storage.aexists(first)
+    short = await storage.asave("very-long-filename.txt", b"short", max_length=18)
+    assert len(short) <= 18
+    with pytest.raises(SuspiciousFileOperation):
+        await storage.asave("long.txt", b"short", max_length=2)
+    with pytest.raises(SuspiciousFileOperation):
+        await storage.asave("../outside", b"bad")
+    with pytest.raises(ValueError):
+        await storage.aopen(second, "wb")
+
+    async def chunks() -> Any:
+        yield b"one"
+        yield b"two"
+
+    streamed = await storage.asave("stream.bin", chunks())
+    with storage.open(streamed) as handle:
+        assert handle.read() == b"onetwo"
+    overwrite = DjangoStorage(async_store=storage.async_store, location="uploads", file_overwrite=True)
+    assert await overwrite.asave(second, b"replaced") == second
+    with await overwrite.aopen(second) as handle:
+        assert handle.read() == b"replaced"
+    text_name = await storage.asave(None, ContentFile("héllo", name="named.txt"))
+    with await storage.aopen(text_name) as handle:
+        assert handle.read() == "héllo".encode()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("operation", ["aopen", "asave", "adelete", "aexists", "asize", "aurl"])
+async def test_django_storage_async_rejects_namespace_escape(operation: str) -> None:
+    """Async file operations reject traversal without uploading or probing it."""
+    storage = DjangoStorage(MemoryConfig(), location="uploads", base_url="/media/")
+    args = ("../outside", b"bad") if operation == "asave" else ("../outside",)
+    with pytest.raises(SuspiciousFileOperation):
+        await getattr(storage, operation)(*args)
+
+
+@pytest.mark.anyio
+async def test_django_storage_signs_qualified_keys() -> None:
+    """Configured native signing takes precedence and honors URL expiry."""
+    store = SyncObjectStore(
+        "memory://", signing=SigningConfig(hmac_secret="django-secret", endpoint="https://files.test")
+    )
+    storage = DjangoStorage(store=store, location="uploads", expires_in=37)
+    before = int(time.time())
+    signed = storage.url("a b.txt")
+    assert store.verify_presigned_url(signed)
+    assert "/uploads/a%20b.txt" in signed
+    expiry = int(parse_qs(urlparse(signed).query)["X-Vtb-Expires"][0])
+    assert before + 37 <= expiry <= int(time.time()) + 37
+    before = int(time.time())
+    async_signed = await storage.aurl("a b.txt", expire=71)
+    assert store.verify_presigned_url(async_signed)
+    expiry = int(parse_qs(urlparse(async_signed).query)["X-Vtb-Expires"][0])
+    assert before + 71 <= expiry <= int(time.time()) + 71
+    assert signed != async_signed
+
+
+def test_django_storage_import_without_optional_django() -> None:
+    """A missing optional Django dependency fails only when constructing storage."""
+    script = """
+import sys
+sys.modules['django'] = None
+from vertebra.extensions.django.storage import DjangoStorage
+from vertebra.typing import MissingDependencyError
+try:
+    DjangoStorage('memory://')
+except MissingDependencyError as exc:
+    assert 'django' in str(exc)
+else:
+    raise AssertionError('missing Django accepted')
+"""
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr

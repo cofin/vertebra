@@ -17,8 +17,8 @@ parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/gap-analysis_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
-plan_revision: 4
-plan_commit: 1e1f028a
+plan_revision: 6
+plan_commit: 0155d9dc
 state_revision: 8
 last_verified_checkpoint: dc2c2053
 last_reviewed_chapter: ch01-native-engine-and-auth
@@ -99,6 +99,10 @@ Anchored at `HEAD @ cdb978d3` above `main @ 077a3fe9` (incorporating `db-layout-
 - Project-local skills: [pyo3-bridge](../../../skills/pyo3-bridge/SKILL.md), [runtime-ipc](../../../skills/runtime-ipc/SKILL.md), [python-framework](../../../skills/python-framework/SKILL.md) (plus external Litestar plugin skills for `sqlspec`, `advanced-alchemy`, and `litestar`).
 
 The active storage-integration contract baseline is SQLSpec `0.71.1`, Advanced Alchemy `1.12.0`, and Django `6.1.3`. SQLSpec reader factories retain native sync metadata lookup and lazy async read timing. Chapter `ch02` worksheets cite their installed protocol/base-class sources, preserve concrete public adapter names, and declare callable omission/error semantics. `ObjectMeta` is the native metadata type.
+
+Django modification time comes from native `ObjectMeta.last_modified`. Creation/access timestamps are unavailable and their Django hooks raise `NotImplementedError`.
+
+Django's `Storage` base is checked through the `django-stubs` lint dependency; its lockfile is part of `ch02:t03`.
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
@@ -190,9 +194,9 @@ Progress: `[1/3 files documented]` (`object-storage.md` updated in `ch01`; user 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `1e1f028a` on `feat/storage-updates` above `main @ 077a3fe9`; `plan_revision: 4`, `state: active`; `ch01-native-engine-and-auth` closed and approved by `@code-reviewer` and `@quality-reviewer` across `1bb622a7..dc2c2053`.
-- **Plan Identity**: `ch02` and its three worksheets share revision `4` anchored to plan baseline `1e1f028a`; completed `ch01` and unchanged downstream chapters retain their owned revisions and review evidence.
-- **Active Chapter & Next Task**: `ch02-orm-and-sql-storage-contracts`, next task `storage-completeness:ch02:t02` (`ch02` active, `ch03`–`ch04` pending, `7/12` tasks remaining).
+- **Verified Plan Baseline**: `0155d9dc` on `feat/storage-updates` above `main @ 077a3fe9`; `plan_revision: 6`, `state: active`; `ch01-native-engine-and-auth` closed and approved by `@code-reviewer` and `@quality-reviewer` across `1bb622a7..dc2c2053`.
+- **Plan Identity**: Active `ch02` and in-progress `t03` share revision `6` at `0155d9dc`; completed tasks retain their verified plan and commit evidence.
+- **Active Chapter & Next Task**: `ch02-orm-and-sql-storage-contracts`, current task `storage-completeness:ch02:t03` (`ch02` active, `ch03`–`ch04` pending, `6/12` tasks remaining).
 - **Documentation & OKF Status**: `[1/3 files documented]` (`object-storage.md` synchronized in `ch01`; user guides scheduled in `storage-completeness:ch04:t03`).
 - **Active Invariants**: Zero `asyncio.to_thread` in `src/py/vertebra/storage/_store.py`; lazy `import_optional("vertebra._storage")` at construction time; `mypy.stubtest vertebra._storage` green after every FFI change.
 
