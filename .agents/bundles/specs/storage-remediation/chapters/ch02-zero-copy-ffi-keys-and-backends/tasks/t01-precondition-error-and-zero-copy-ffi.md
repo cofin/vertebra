@@ -5,7 +5,7 @@ chapter_id: ch02-zero-copy-ffi-keys-and-backends
 title: Define PreconditionError in vertebra.typing, map 412 preconditions in to_py_err, and use zero-copy PyBackedBytes for immutable PyBytes
 description: Add PreconditionError(VertebraError, OSError) to vertebra._typing and vertebra.typing, map StorageError::Precondition and object_store::Error::Precondition to PreconditionError in vertebra-storage, and wrap immutable PyBytes zero-copy via PyBackedBytes while copying mutable buffers synchronously.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -23,18 +23,18 @@ tests:
 estimated_loc: 110
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: agent:executor
+claimed_at: "2026-11-08T23:21:40Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-08T23:24:49Z"
+last_verified_commit: d889b958
+verification_evidence: "maturin develop + ruff check + mypy + pytest test_storage_store.py (124 passed) + cargo test test_pyo3_sync_and_async_streaming_multipart_conditional_pagination_and_rename"
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-08T20:55:00Z"
-commit: null
+updated_at: "2026-11-08T23:25:15Z"
+commit: d889b958
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
@@ -109,8 +109,8 @@ uv run --no-sync pytest src/py/tests/unit/storage/test_storage_store.py -q
 
 ## Acceptance Criteria
 
-- [ ] `PreconditionError` is exported from `vertebra.typing` and raised on native `412` precondition failures (R2.1).
-- [ ] `extract_buffer_bytes` wraps `PyBytes` in `PyBackedBytes` zero-copy and copies mutable `PyBuffer<u8>` inputs synchronously before dropping the buffer view (R2.1).
+- [x] `PreconditionError` is exported from `vertebra.typing` and raised on native `412` precondition failures (R2.1).
+- [x] `extract_buffer_bytes` wraps `PyBytes` in `PyBackedBytes` zero-copy and copies mutable `PyBuffer<u8>` inputs synchronously before dropping the buffer view (R2.1).
 
 ## Notes & Discoveries
 
