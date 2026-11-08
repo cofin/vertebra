@@ -98,7 +98,7 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 ## 5. Implementation Plan
 
 - [x] [8c808beb] storage-completeness:ch11:t01 — Add persistent OS locks per physical parent directory (tasks/t01-physical-target-locks.md)
-- [ ] storage-completeness:ch11:t02 — Manage SDK-private same-parent staging artifacts (tasks/t02-same-fs-stage.md)
+- [~] storage-completeness:ch11:t02 — Manage SDK-private same-parent staging artifacts (tasks/t02-same-fs-stage.md)
 - [ ] storage-completeness:ch11:t03 — Guard every local mutation and publish with native atomic operations (tasks/t03-local-mutations-and-publish.md)
 - [ ] storage-completeness:ch11:t04 — Prove local CAS across processes, roots and cleanup boundaries (tasks/t04-local-subprocess-acceptance.md)
 

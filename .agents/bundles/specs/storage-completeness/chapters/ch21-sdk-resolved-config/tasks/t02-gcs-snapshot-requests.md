@@ -5,7 +5,7 @@ chapter_id: ch21-sdk-resolved-config
 title: Capture and fence GCS data and metadata snapshots
 description: Implement the real private XML request boundary for opaque ETag predicates
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: integration_acceptance
 depends_on:
@@ -32,12 +32,16 @@ claimed_at: '2026-11-08T00:45:50Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-08T00:51:54Z'
+last_verified_commit: 533adc68
+verification_evidence: >-
+  Real configured SDK/HTTP baseline passes before primitive activation (1 test);
+  actual GCS request acceptance passes (8 tests); cargo fmt --all --check, normal
+  storage --lib check, storage --all-targets Clippy -D warnings and git diff --check
+  all exit 0. Verified source is signed at533adc68; chapter correctness and fresh quality review remain.
 created_at: '2026-11-07T12:00:00Z'
 updated_at: '2026-11-07T12:00:00Z'
-commit: null
+commit: 533adc68
 sources:
 - id: implementation
   resource: src/rs/vertebra-storage/src/gcs_request.rs
@@ -106,14 +110,22 @@ Run the real private library target, format check, normal compilation and all-ta
 
 ## Acceptance Criteria
 
-- [ ] Actual private SDK/HTTP tests prove snapshot tuple, paired fences, exact receipts and error identity.
-- [ ] Registration remains test-only until ch14:t01; no premature public engine claim.
-- [ ] Only two production files change; read_set <=6 and implementation <=250 LOC.
-- [ ] Signed source/evidence recorded; durable docs belong to ch09:t03/ch04:t03 after native acceptance.
+- [x] Actual private SDK/HTTP tests prove snapshot tuple, paired fences, exact receipts and error identity.
+- [x] Registration remains test-only until ch14:t01; no premature public engine claim.
+- [x] Only two production files change; read_set <=6 and implementation <=250 LOC.
+- [x] Signed source/evidence recorded; durable docs belong to ch09:t03/ch04:t03 after native acceptance.
 
 ## Notes & Discoveries
 
-The impacted frontier is independently approved at `c737ffeb`. A provider/API contradiction routes through bounded Flow revision before production edits.
+The impacted frontier is independently approved at `c737ffeb`. The implementation uses the owned constructor record behind `Arc<GcsStageConfig>` and the same concrete SDK store. Production contains `235` nonblank lines in `gcs_request.rs` plus the two-line test-only registration (`237` total); inline tests are excluded. Only the six declared read-set files inform production changes, with pinned SDK implementation and primary provider documentation used as collaborator evidence.
+
+The `integration_acceptance` strategy establishes the configured SDK baseline before introducing the primitive: a real SDK GET reaches the private responder with captured headers, proxy exclusions, SDK-owned credentials and raw-key encoding. The baseline passes (`1` test, exit `0`). It characterizes the SDK's whole-object path-segment encoding; initial fixture compilation and assertion corrections are not behavioral Red evidence.
+
+The complete primitive acceptance target passes (`8` tests, exit `0`): quoted XML ETag with positive generation/metageneration; HEAD/PUT/fenced-HEAD for literal `%2F`, `%252F`, Unicode and reserved keys; successful exact receipts and explicit `404`/`412` failures; metadata-only competitor preservation through paired predicates; create-only segmented payloads with every supported SDK attribute; caller and configured suffix content types; credential refresh, skip-signature, empty bearer and capability-session behavior; typed permission/authentication versus precondition failures; and redacted transport, credential and provider diagnostics. Extensions move intact into the actual HTTP request. No SDK UpdateVersion fallback, public hook or caller payload collection is introduced.
+
+Fresh gates all exit `0`: `cargo fmt --manifest-path src/rs/Cargo.toml --all --check`, `cargo check --manifest-path src/rs/Cargo.toml -p vertebra-storage --lib`, `cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets -- -D warnings`, and `git diff --check`. Cargo operations hold `/tmp/vertebra-flow-storage-cargo.lock` outermost; tests additionally hold `/tmp/vertebra-flow-shm-tests.lock`, use `uv run --no-sync`, `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target"` and `PYO3_PYTHON="$PWD/.venv/bin/python3.12"`.
+
+Source is signed at `533adc68` and its task receipt is completed. Correctness and fresh quality chapter reviews remain open. Durable documentation remains assigned to ch09:t03/ch04:t03 after native acceptance.
 
 [^implementation]: `src/rs/vertebra-storage/src/gcs_request.rs` — Actual private request implementation introduced by this task.
 [^research]: `.agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md` — SDK and primary HTTP evidence.
