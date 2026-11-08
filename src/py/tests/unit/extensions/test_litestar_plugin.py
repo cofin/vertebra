@@ -703,13 +703,27 @@ def test_litestar_cli_run_tls_cert_and_key_validation(
 
 
 @pytest.mark.parametrize("config", [None, ""])
-def test_object_store_requires_explicit_config(config: Any) -> None:
+@pytest.mark.parametrize("adapter_name", ["ObjectStoreLitestarStore", "ObjectStoreFileSystemAdapter"])
+def test_object_store_requires_explicit_config(config: Any, adapter_name: str) -> None:
     """Both public adapters fail closed without an explicit storage configuration."""
     from vertebra.extensions.litestar import ObjectStoreFileSystemAdapter, ObjectStoreLitestarStore
 
-    for adapter in (ObjectStoreLitestarStore, ObjectStoreFileSystemAdapter):
-        with pytest.raises(ImproperConfigurationError):
-            adapter(config)
+    adapter = {
+        "ObjectStoreLitestarStore": ObjectStoreLitestarStore,
+        "ObjectStoreFileSystemAdapter": ObjectStoreFileSystemAdapter,
+    }[adapter_name]
+    with pytest.raises(ImproperConfigurationError):
+        adapter(config)
+
+
+@pytest.mark.parametrize("namespace", ["", "..", "a/b", "a\\b", "a.b", "équipe"])
+def test_object_store_rejects_invalid_namespace(namespace: str) -> None:
+    """Each invalid namespace is rejected independently using a real native store."""
+    from vertebra.extensions.litestar import ObjectStoreLitestarStore
+
+    root = ObjectStoreLitestarStore(AsyncObjectStore(MemoryConfig()))
+    with pytest.raises(ValueError):
+        root.with_namespace(namespace)
 
 
 @pytest.mark.anyio
@@ -722,9 +736,6 @@ async def test_object_store_crud_and_namespace_deletion() -> None:
     child = root.with_namespace("s1")
     sibling = root.with_namespace("s10")
     descendant = child.with_namespace("child")
-    for namespace in ("", "..", "a/b", "a\\b", "a.b", "équipe"):
-        with pytest.raises(ValueError):
-            root.with_namespace(namespace)
     for key, value in (("", b""), ("../child/ü", b"\xff\x00"), ("text", "héllo")):
         await child.set(key, value)
         assert await child.get(key) == (value.encode() if isinstance(value, str) else value)
@@ -782,9 +793,6 @@ async def test_object_store_local_ttl_survives_reconstruction(tmp_path: Path, mo
     clock[0] += 100
     assert await ObjectStoreLitestarStore(config).get("overwrite") == b"new"
     assert await cache.expires_in("overwrite") is None
-    for ttl in (0, -1, timedelta(microseconds=-1)):
-        await cache.set("immediate", b"expired", expires_in=ttl)
-        assert await cache.get("immediate") is None
     await cache.set("fraction", b"rounded", expires_in=timedelta(microseconds=1))
     assert await cache.get("fraction") == b"rounded"
     clock[0] += 0.001
@@ -792,8 +800,8 @@ async def test_object_store_local_ttl_survives_reconstruction(tmp_path: Path, mo
 
 
 @pytest.mark.anyio
-async def test_object_store_metadata_and_invalid_envelopes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Persistent metadata is inspectable and corrupt envelopes fail explicitly."""
+async def test_object_store_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Persistent metadata and the authoritative envelope are inspectable."""
     from vertebra.extensions.litestar import ObjectStoreLitestarStore
 
     monkeypatch.setattr(litestar_store_mod.time, "time", lambda: 1000.0)
@@ -804,10 +812,49 @@ async def test_object_store_metadata_and_invalid_envelopes(monkeypatch: pytest.M
     metadata = await storage.head(object_key)
     assert metadata.attributes["vertebra-expires-at-ms"] == "1002000"
     assert await storage.get(object_key) == b"VTBSTORE\x01" + encode_msgpack_bytes((1002000, b"payload"))
-    for corrupt in (b"raw", b"VTBSTORE\x02", b"VTBSTORE\x01\xc1", b"VTBSTORE\x01" + encode_msgpack_bytes(("wrong", 1))):
-        await storage.put(object_key, corrupt)
-        with pytest.raises(ValueError):
-            await cache.get("ttl")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("ttl", [0, -1, timedelta(microseconds=-1)])
+async def test_object_store_immediate_expiry(tmp_path: Path, ttl: int | timedelta) -> None:
+    """Each nonpositive duration immediately expires on the real Local backend."""
+    from vertebra.extensions.litestar import ObjectStoreLitestarStore
+
+    cache = ObjectStoreLitestarStore(LocalConfig(root=tmp_path))
+    await cache.set("immediate", b"expired", expires_in=ttl)
+    assert await cache.get("immediate") is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "corrupt",
+    [b"raw", b"VTBSTORE\x02", b"VTBSTORE\x01\xc1", b"VTBSTORE\x01" + encode_msgpack_bytes(("wrong", 1))],
+    ids=["wrong-magic", "unsupported-version", "malformed-msgpack", "invalid-envelope-types"],
+)
+async def test_object_store_invalid_envelopes(corrupt: bytes) -> None:
+    """Each malformed native payload fails explicitly at the public Store seam."""
+    from vertebra.extensions.litestar import ObjectStoreLitestarStore
+
+    storage = AsyncObjectStore(MemoryConfig())
+    cache = ObjectStoreLitestarStore(storage)
+    await storage.put("vertebra-store/~74746c", corrupt)
+    with pytest.raises(ValueError):
+        await cache.get("ttl")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("path", ["/../secret", "/nested/../../secret", "/../publicity/secret"])
+@pytest.mark.parametrize("operation", ["info", "open"])
+async def test_static_object_store_rejects_traversal(path: str, operation: str) -> None:
+    """Each path and operation independently rejects escape from the virtual root."""
+    from vertebra.extensions.litestar import ObjectStoreFileSystemAdapter
+
+    storage = AsyncObjectStore(MemoryConfig())
+    await storage.put("public/app.js", b"public")
+    await storage.put("publicity/secret", b"secret")
+    adapter = ObjectStoreFileSystemAdapter(storage, base_path="public")
+    with pytest.raises(FileNotFoundError):
+        await getattr(adapter, operation)(path)
 
 
 @pytest.mark.anyio
@@ -836,11 +883,6 @@ async def test_static_object_store_reader_and_routes() -> None:
         reader.seek(0)
         assert await reader.read() == payload
     assert reader.closed
-    for path in ("/../secret", "/nested/../../secret", "/../publicity/secret"):
-        with pytest.raises(FileNotFoundError):
-            await adapter.info(path)
-        with pytest.raises(FileNotFoundError):
-            await adapter.open(path)
     with pytest.raises(ValueError):
         await adapter.open("app.js", "w")
     with pytest.raises(ValueError):
