@@ -528,3 +528,47 @@ async def test_storage_response_explicit_async_range_without_metadata() -> None:
     await store.put("body", b"0123456789")
     response = StreamingStorageResponse(store=store, key="body", range_start=3, chunk_size=2)
     assert b"".join([bytes(chunk) async for chunk in response.aiter_chunks()]) == b"3456789"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("end", [5, None])
+async def test_direct_async_storage_range_fastpath_matches_sync(end: int | None) -> None:
+    """Direct descriptors retain HTTP range metadata when async storage resolves the body."""
+    store = SyncObjectStore("memory://")
+    store.put("body", b"0123456789")
+    sync_response = StreamingStorageResponse(store=store, key="body", range_start=3, range_end=end)
+    async_response = StreamingStorageResponse(store=store.to_async(), key="body", range_start=3, range_end=end)
+    sync_status, sync_headers, sync_body = sync_response.to_fastpath_tuple()
+    status, headers, body = await async_response.to_async_fastpath_tuple()
+    assert status == sync_status == 206
+    assert dict(headers)[b"content-range"] == dict(sync_headers)[b"content-range"]
+    assert bytes(body) == sync_body
+    assert dict(headers)[b"content-length"] == str(len(body)).encode()
+
+
+@pytest.mark.parametrize(
+    ("etag", "expected"),
+    [("0", b'"0"'), ('"quoted"', b'"quoted"'), ('W/"weak"', b'W/"weak"'), ("tagé", b'"tag\xe9"')],
+)
+@pytest.mark.parametrize("in_headers", [False, True])
+def test_storage_response_formats_http_entity_tags(etag: str, expected: bytes, in_headers: bool) -> None:
+    """Raw native tokens become valid entity tags while valid strong and weak tags survive."""
+    response = (
+        StreamingStorageResponse(data=b"body", headers={"ETag": etag})
+        if in_headers
+        else StreamingStorageResponse(data=b"body", etag=etag)
+    )
+    assert dict(response.to_fastpath_tuple()[1])[b"etag"] == expected
+
+
+@pytest.mark.parametrize("etag", ['bad"quote', '"unterminated', "bad\r\ninjected: yes", "has space", "☃"])
+@pytest.mark.parametrize("in_headers", [False, True])
+def test_storage_response_rejects_malformed_entity_tags(etag: str, in_headers: bool) -> None:
+    """Invalid opaque tags fail before emitting an invalid or injected HTTP header."""
+    with pytest.raises(ValueError, match="ETag"):
+        response = (
+            StreamingStorageResponse(data=b"body", headers={"ETag": etag})
+            if in_headers
+            else StreamingStorageResponse(data=b"body", etag=etag)
+        )
+        response.to_fastpath_tuple()

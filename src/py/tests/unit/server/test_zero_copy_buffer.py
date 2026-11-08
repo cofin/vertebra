@@ -237,7 +237,7 @@ async def test_storage_response_async_ranges(
     assert headers.get(b"content-range") == (content_range.encode() if content_range else None)
     etag = (await store.head("video.mp4")).etag
     assert etag is not None
-    assert headers[b"etag"] == etag.encode()
+    assert headers[b"etag"] == f'"{etag}"'.encode()
 
 
 @pytest.mark.anyio

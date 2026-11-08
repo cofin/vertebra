@@ -185,20 +185,22 @@ class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
 
     async def to_async_fastpath_tuple(self) -> tuple[int, list[tuple[bytes, bytes]], memoryview | bytes]:
         """Resolve async storage without calling synchronous store methods."""
+        content_range = self.content_range
         if self.status_code == 416:
             payload: memoryview | bytes = b""
         elif isinstance(self.store, AsyncObjectStore) and self.data is None:
             if self.range_start is not None or self.range_end is not None:
                 start = max(0, self.range_start or 0)
-                end = self.range_end + 1 if self.range_end is not None else self.total_size
-                if self.range_end is None and not self.total_size:
-                    end = (await self.store.head(self.key)).size
+                total_size = self.total_size or (await self.store.head(self.key)).size
+                end = min(self.range_end + 1, total_size) if self.range_end is not None else total_size
                 payload = await self.store.get_range(self.key, start, end - start)
+                if content_range is None:
+                    content_range = ByteRange(start, end, total_size).content_range_header
             else:
                 payload = await self.store.get_view(self.key)
         else:
             return self.to_fastpath_tuple()
-        descriptor = msgspec.structs.replace(self, store=None, data=b"")
+        descriptor = msgspec.structs.replace(self, store=None, data=b"", content_range=content_range)
         status, headers, _ = descriptor.to_fastpath_tuple()
         headers = [(key, value) for key, value in headers if key != b"content-length"]
         headers.append((b"content-length", str(len(payload)).encode("ascii")))
@@ -217,7 +219,7 @@ class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
             (b"content-type", resolved_ct.encode("latin-1")),
         ]
         if self.etag is not None:
-            encoded_headers.append((b"etag", self.etag.encode("latin-1")))
+            encoded_headers.append((b"etag", self._format_etag(self.etag).encode("latin-1")))
         resolved_range = self.content_range
         if self.status_code == 416:
             payload = b""
@@ -244,7 +246,9 @@ class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
             encoded_headers.append((b"location", url_bytes))
             encoded_headers.append((b"x-vertebra-signed-url", url_bytes))
         for hdr_key, hdr_val in self.headers.items():
-            encoded_headers.append((str(hdr_key).lower().encode("latin-1"), str(hdr_val).encode("latin-1")))
+            name = str(hdr_key).lower()
+            value = self._format_etag(str(hdr_val)) if name == "etag" else str(hdr_val)
+            encoded_headers.append((name.encode("latin-1"), value.encode("latin-1")))
 
         if not any(k == b"content-length" for k, _ in encoded_headers):
             encoded_headers.append((b"content-length", str(len(payload)).encode("ascii")))
@@ -297,9 +301,19 @@ class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
             chunk_size=chunk_size,
             status_code=status,
             content_type=content_type or meta.content_type,
-            etag=meta.etag,
+            etag=cls._format_etag(meta.etag) if meta.etag is not None else None,
             content_range=content_range,
             range_start=selected.start if selected is not None else None,
             range_end=selected.end_exclusive - 1 if selected is not None else None,
             headers=response_headers,
         )
+
+    @staticmethod
+    def _format_etag(value: str) -> str:
+        """Quote raw backend tokens and reject invalid RFC 9110 opaque tags."""
+        opaque = value[2:] if value.startswith('W/"') else value
+        quoted = opaque.startswith('"') and opaque.endswith('"') and len(opaque) >= 2
+        token = opaque[1:-1] if quoted else opaque
+        if any(not (ord(char) == 0x21 or 0x23 <= ord(char) <= 0x7E or 0x80 <= ord(char) <= 0xFF) for char in token):
+            raise ValueError("ETag contains invalid opaque tag characters")
+        return value if quoted else f'"{value}"'
