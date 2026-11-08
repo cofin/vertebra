@@ -5,6 +5,8 @@ mod cloud_request;
 mod conditional;
 pub mod gcp_auth;
 #[cfg(test)]
+mod gcs_request;
+#[cfg(test)]
 mod local_publication;
 pub mod oci;
 pub mod signing;
