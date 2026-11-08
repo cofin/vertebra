@@ -23,8 +23,8 @@ files:
   - .agents/skills/review-core/references/areas.toml
 tests: []
 estimated_loc: 85
-plan_revision: 4
-plan_commit: e8901de4
+plan_revision: 5
+plan_commit: fd571e3a
 state_revision: 0
 claimed_by: null
 claimed_at: null

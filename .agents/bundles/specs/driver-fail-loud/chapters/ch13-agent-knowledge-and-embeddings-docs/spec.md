@@ -13,8 +13,8 @@ depends_on_chapters:
   - ch12-queue-docs-and-knowledge
 replan_trigger: null
 current_task: "driver-fail-loud:ch13:t01"
-plan_revision: 1
-plan_commit: 1e1f028a
+plan_revision: 2
+plan_commit: fd571e3a
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null

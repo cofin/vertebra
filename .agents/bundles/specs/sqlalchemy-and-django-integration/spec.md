@@ -10,16 +10,15 @@ parent_prd: integration-remediation
 depends_on_flows:
   - driver-fail-loud
   - broker-pool-sharing
-  - storage-completeness
 research:
   - ../integration-remediation/research/audit-findings_20261103.md
-plan_revision: 2
+plan_revision: 3
 plan_commit: null
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
 created_at: "2026-11-03T03:30:00Z"
-updated_at: "2026-11-07T18:00:00Z"
+updated_at: "2026-11-08T20:15:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
@@ -95,7 +94,7 @@ SQLAlchemy and Advanced Alchemy are the primary user path. Vertebra's `Sync<Engi
 
 ## Dependencies
 
-`native-data-platform` `db-layout-and-contract` (`main @ 21c99f95`), `broker-pool-sharing`, and `storage-completeness`; `integration-remediation` `db-engine-primitives` (`main @ 80ff8a65`); and [`driver-fail-loud`](../driver-fail-loud/spec.md), which removes the DB-API SQLite parse fallback.
+`native-data-platform` `db-layout-and-contract` (`main @ 21c99f95`), `broker-pool-sharing`, and completed object-storage contracts ([object-storage.md](../../knowledge/domains/storage/object-storage.md)); `integration-remediation` `db-engine-primitives` (`main @ 80ff8a65`); and [`driver-fail-loud`](../driver-fail-loud/spec.md), which removes the DB-API SQLite parse fallback.
 
 ## Acceptance Boundary
 

@@ -24,8 +24,8 @@ files:
 tests:
   - src/rs/vertebra-postgres/tests/postgres_pgoutput_tests.rs
 estimated_loc: 240
-plan_revision: 4
-plan_commit: e8901de4
+plan_revision: 5
+plan_commit: fd571e3a
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -38,6 +38,13 @@ verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"
 commit: null
+generated:
+  by: flow-revise
+  at: "2026-11-07T05:00:00Z"
+verified:
+  - by: agent:plan-generator
+    at: "2026-11-07T05:00:00Z"
+    commit: e8901de4
 sources:
   - id: npd-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -92,7 +99,7 @@ Implement `PgOutputDecoder` in `src/rs/vertebra-postgres/src/replication/pgoutpu
 
 ## Edge Cases & Error Semantics
 
-- `Relation` (`'R'`) update for an existing `relation_oid` replaces the map entry with a fresh `Arc<PgOutputRelationSchema>` so previously decoded events keep their captured schema snapshot immutable; inserting a `4097`th distinct relation into a `4096`-cap cache fails explicitly with `OperationalError`.
+- `Relation` (`'R'`) update for an existing `relation_oid` replaces the map entry with a fresh `Arc<PgOutputRelationSchema>` so already decoded events keep their captured schema snapshot immutable; inserting a `4097`th distinct relation into a `4096`-cap cache fails explicitly with `OperationalError`.
 - `Type` (`'Y'`) frame records `(type_oid, namespace, name)` and invalidates any stale `TypeCatalog` entry for `type_oid`; unknown OIDs in `'t'` tuple cells remain lossless tagged text (`PgValue` text + column `type_oid`) rather than failing or issuing mid-stream SQL.
 - `TupleData` strictly distinguishes missing/dropped columns (absent from `Relation` column list), `'n'` (`PgOutputTupleValue::Null`), `'u'` (`PgOutputTupleValue::UnchangedToast`), `'t'` (UTF-8 text decoded via shared codec for `type_oid`/`type_modifier`), and `'b'` (binary payload decoded via shared binary codec even though `binary='false'` was requested).
 - Unknown `TupleData` column tag, column count mismatch against `PgOutputRelationSchema.columns.len()`, unknown `relation_oid`, invalid UTF-8 in `cstring` / `'t'`, invalid `replica_identity` (`not in b"dfni"`), or truncated trailing bytes on clean `CopyDone` returns `ProtocolError`.
@@ -106,7 +113,7 @@ Implement `PgOutputDecoder` in `src/rs/vertebra-postgres/src/replication/pgoutpu
 | --- | --- | --- |
 | Four-state `TupleData` fidelity | Golden `'R'` (`public.accounts`, `replident = b'd'`, cols `id int8 key`, `bio text`, `meta jsonb`, `amount numeric`) + tuple with `'t'("42")`, `'u'` (TOAST), `'n'` (`NULL`), `'b'` (binary numeric `1.2300`) | Decodes `id = 42`, `bio = UnchangedToast`, `meta = Null`, `amount = Decimal("1.2300")` with exact scale preserved; missing dropped attribute omitted. |
 | Arbitrary byte-split & coalesced frames | Concatenate `'Y'` + `'R'` + tuple frame (`N` bytes) and feed `push()` at every `1`-byte split `0..N` as well as in one coalesced slice | Identical decoded frames in both single-slice and `1`-byte incremental feeds; buffer empty afterward (`finish_clean_eof().is_ok()`). |
-| Atomic `Relation` schema evolution | Emit `'R'` (`rel_oid = 16384`, 2 cols), capture `Arc<PgOutputRelationSchema>`, then emit updated `'R'` (`rel_oid = 16384`, 3 cols) | Previously captured `Arc` still has `2` columns; subsequent tuples require `3` columns (`2`-col tuple after update fails `ProtocolError`). |
+| Atomic `Relation` schema evolution | Emit `'R'` (`rel_oid = 16384`, 2 cols), capture `Arc<PgOutputRelationSchema>`, then emit updated `'R'` (`rel_oid = 16384`, 3 cols) | Earlier captured `Arc` still has `2` columns; subsequent tuples require `3` columns (`2`-col tuple after update fails `ProtocolError`). |
 | `RelationCache` cap & unknown relation | Insert `4096` relations then `4097`th `'R'`; separately feed tuple referencing unregistered `rel_oid = 99999` | `4097`th relation returns resource-limit `OperationalError`; unregistered `rel_oid` returns `ProtocolError`. |
 | Clean `CopyDone` truncation vs transport drop | Push partial `'R'` prefix (`5` bytes), call `finish_clean_eof()` vs `reset_on_disconnect()` | `finish_clean_eof()` returns `ProtocolError`; `reset_on_disconnect()` clears partial buffer cleanly so next full `'R'` succeeds. |
 

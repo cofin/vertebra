@@ -46,8 +46,8 @@ depends_on_flows:
 research:
   - research/protocol-and-execution_20261105.md
   - research/cloud-material_20261105.md
-plan_revision: 4
-plan_commit: e8901de4
+plan_revision: 5
+plan_commit: fd571e3a
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_chapter: null
@@ -110,7 +110,7 @@ tags:
 - **Standalone Optional Wheel**: `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owns live PostgreSQL Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`) without linking database clients into `vertebra-core` [^pg-conn-rs] [^pg-core-rs].
 - **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB Admin discovery + mTLS + IAM), lossless codecs, statement caching, single-`Sync` `pipeline()`, binary `COPY`, native `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, and `pgoutput` v1 logical replication ship together with full `psycopg`/`asyncpg` removal [^py-async-rs] [^arrow-shm-rs] [^pg-driver-py] [^sqlspec-py].
 - **Fail-Loud Baseline**: `driver-fail-loud` lands first and deletes `_in_memory_rows`, every PostgreSQL `memory://` branch, and `vertebra_db::postgres::PostgresPool`; this flow starts from that baseline and adds no memory or SHM-admission pool paths [^fail-loud-baseline].
-- **Nested Chapter Roadmap (`plan_revision: 4`)**: Decomposed into `31` dependency-ordered chapters (`ch01`–`ch31`, `111` vertical-slice tasks, each owning `<= 3` production files) anchored at `plan_commit: e8901de4` with `current_chapter: ch01-wheel-scaffold-and-config` (`native-postgres-driver:ch01:t01`).
+- **Nested Chapter Roadmap (`plan_revision: 5`)**: Decomposed into `31` dependency-ordered chapters (`ch01`–`ch31`, `111` vertical-slice tasks, each owning `<= 3` production files) anchored at `plan_commit: fd571e3a` with `current_chapter: ch01-wheel-scaffold-and-config` (`native-postgres-driver:ch01:t01`).
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance

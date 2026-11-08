@@ -23,8 +23,8 @@ tests:
   - src/py/tests/unit/framework/test_typing.py
   - src/py/tests/unit/framework/test_framework_subdomains.py
 estimated_loc: 60
-plan_revision: 1
-plan_commit: 1e1f028a
+plan_revision: 2
+plan_commit: fd571e3a
 state_revision: 0
 claimed_by: null
 claimed_at: null

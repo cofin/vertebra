@@ -23,8 +23,8 @@ tests:
   - src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
   - src/py/tests/unit/db/test_enterprise_olap_drivers.py
 estimated_loc: 165
-plan_revision: 1
-plan_commit: 1e1f028a
+plan_revision: 2
+plan_commit: fd571e3a
 state_revision: 0
 claimed_by: null
 claimed_at: null

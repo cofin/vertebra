@@ -24,8 +24,8 @@ tests:
   - src/rs/vertebra-db/tests/postgres_vector_tests.rs
   - src/rs/vertebra-postgres/tests/vector_codecs.rs
 estimated_loc: 240
-plan_revision: 4
-plan_commit: e8901de4
+plan_revision: 5
+plan_commit: fd571e3a
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -95,10 +95,10 @@ Reproduce and fix the rounding, finite-overflow, `1..=16000` dimension, and `bit
 ## Edge Cases & Error Semantics
 
 - **Existing defects captured in initial RED (`regression_tdd`)**:
-  1. `encode_pgvector_f16(&[1.00048828125_f32])` (`1.0 + 2^-11`, midpoint with even LSB `0x3c00`) previously produced `0x3c01` instead of IEEE ties-to-even `0x3c00`.
-  2. `encode_pgvector_f16(&[65520.0_f32])` previously succeeded with `0x7c00` (`+Inf`) instead of failing on finite-to-half overflow.
-  3. `encode_pgvector_f32(&vec![0.0; 16_001])` and `decode_pgvector_f32(&[0, 0, 0, 0])` (`dim = 0`) previously succeeded instead of enforcing `1..=16_000`.
-  4. `encode_pgvector_bit(b"", 0)` / `decode_pgvector_bit(&[0, 0, 0, 0])` previously failed on valid `0`-length `varbit`, while `encode_pgvector_bit(b"\xa8", 3)` / `decode_pgvector_bit(&[0, 0, 0, 3, 0xa8])` previously accepted nonzero low padding bit `0x08`.
+  1. `encode_pgvector_f16(&[1.00048828125_f32])` (`1.0 + 2^-11`, midpoint with even LSB `0x3c00`) currently produces `0x3c01` instead of IEEE ties-to-even `0x3c00`.
+  2. `encode_pgvector_f16(&[65520.0_f32])` currently succeeds with `0x7c00` (`+Inf`) instead of failing on finite-to-half overflow.
+  3. `encode_pgvector_f32(&vec![0.0; 16_001])` and `decode_pgvector_f32(&[0, 0, 0, 0])` (`dim = 0`) currently succeed instead of enforcing `1..=16_000`.
+  4. `encode_pgvector_bit(b"", 0)` / `decode_pgvector_bit(&[0, 0, 0, 0])` currently fail on valid `0`-length `varbit`, while `encode_pgvector_bit(b"\xa8", 3)` / `decode_pgvector_bit(&[0, 0, 0, 3, 0xa8])` currently accept nonzero low padding bit `0x08`.
 - **Signed zero, subnormals, & wrapper-kind mismatch**: `-0.0_f32` (`0x8000` in `f16`, `0x8000_0000` in `f32`), smallest positive `f16` subnormal `2^-24` (`5.9604645e-8_f32` -> `0x0001`), and largest finite `f16` `65504.0_f32` (`0x7bff`) round-trip bit-exactly; binding `VectorKind::HalfVec` against dynamic `vector` OID `42001` fails with `PostgresError::Data`.
 
 ## Public-Seam Test Blueprint

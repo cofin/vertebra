@@ -12,7 +12,7 @@ generated:
 verified:
   - by: agent:plan-generator
     at: "2026-11-07T16:40:00Z"
-    commit: dd432f18
+    commit: e8901de4
   - by: agent:flow-setup
     at: "2026-11-07T04:15:00Z"
     commit: cdb978d3
@@ -35,7 +35,7 @@ tags:
 # Planning review
 
 <!-- truth: start -->
-- **Adjudicated Plan Baseline**: All planning and zero-context specification review findings are adopted across `spec.md`, `contracts.md`, and `31` nested chapters (`ch01`–`ch31`, `111` vertical-slice worksheets) at `state: planned`, `has_chapters: true`, `plan_revision: 4`, and `plan_commit: dd432f18` [^pg-core-rs] [^pg-driver-py].
+- **Adjudicated Plan Baseline**: All planning and zero-context specification review findings are adopted across `spec.md`, `contracts.md`, and `31` nested chapters (`ch01`–`ch31`, `111` vertical-slice worksheets) at `state: planned`, `has_chapters: true`, `plan_revision: 5`, and `plan_commit: fd571e3a` [^pg-core-rs] [^pg-driver-py].
 - **Scope of Evidence**: Planning review validates contracts, chapter/task dependency order, `<= 3`-file worksheet ownership bounds, cross-chapter `depends_on` edges, and OKF v0.2 schema compliance; runtime, live-service, wheel, and benchmark evidence are produced during `/flow:implement native-postgres-driver`.
 <!-- truth: end -->
 
@@ -77,10 +77,10 @@ All findings below are ADOPT. No product decision remains escalated.
 
 - Core correctness review: three bounded rounds; all original and follow-up Important findings and signature/reference issues are resolved across the normalized contracts and worksheets.
 - Data and acceptance correctness review: two rounds; all seven original Important findings and lexer/activation-reference corrections are resolved.
-- Zero-context chaptered specification review (`plan_revision: 4`, `plan_commit: dd432f18`): all `ADOPT` findings across Cargo/lockfile ownership, `DialedCloudTransport` keepalives, `PostgresConfig`/`ServerError`/`TransactionStatus` stability, `query_with_row_sink` Arrow streaming, `session.rs` command deadlines, `vertebra.db.adapters.postgres.change_stream` barrel/docs alignment, `PostgresNotificationSource` `ch21:t03` parity, cross-chapter `depends_on` edges, `ch08` 4-task packaging split, `[tool.mypy]` benchmark overrides, `ch27:t01` `tools.docs` docstring scan, and `11`-file `DOC-04`/`DOC-08` coverage are integrated across `31` planned chapters (`ch01`–`ch31`, `111` pending vertical-slice worksheets), `27` traced requirements (`R1`–`R27`), and `[0/11 files documented]` in `ch30`.
+- Zero-context chaptered specification review (`plan_revision: 4`, `plan_commit: e8901de4`): all `ADOPT` findings across Cargo/lockfile ownership, `DialedCloudTransport` keepalives, `PostgresConfig`/`ServerError`/`TransactionStatus` stability, `query_with_row_sink` Arrow streaming, `session.rs` command deadlines, `vertebra.db.adapters.postgres.change_stream` barrel/docs alignment, `PostgresNotificationSource` `ch21:t03` parity, cross-chapter `depends_on` edges, `ch08` 4-task packaging split, `[tool.mypy]` benchmark overrides, `ch27:t01` `tools.docs` docstring scan, and `11`-file `DOC-04`/`DOC-08` coverage are integrated across `31` planned chapters (`ch01`–`ch31`, `111` pending vertical-slice worksheets), `27` traced requirements (`R1`–`R27`), and `[0/11 files documented]` in `ch30`.
 - Repository `make review-check` validates review capabilities, multi-line YAML frontmatter, source-to-footnote parity, clickable relative Bounded Read Manifest links, and privacy rules; runtime implementation acceptance remains pending (`ch31:t01`).
 
-Plan state is `planned` at `plan_revision: 4` and `plan_commit: dd432f18` (`has_chapters: true`). The next canonical command is `/flow:implement native-postgres-driver`, starting with [ch01-wheel-scaffold-and-config](chapters/ch01-wheel-scaffold-and-config/spec.md) (`native-postgres-driver:ch01:t01`). This document claims no production build, native/live service, installed-wheel, free-threaded, or performance acceptance prior to implementation.
+Plan state is `planned` at `plan_revision: 5` and `plan_commit: fd571e3a` (`has_chapters: true`, `depends_on_flows: [driver-fail-loud]`). Once `storage-remediation` and `driver-fail-loud` complete, the next canonical command for this flow is `/flow:implement native-postgres-driver`, starting with [ch01-wheel-scaffold-and-config](chapters/ch01-wheel-scaffold-and-config/spec.md) (`native-postgres-driver:ch01:t01`). This document claims no production build, native/live service, installed-wheel, free-threaded, or performance acceptance prior to implementation.
 
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` — Shared PostgreSQL wire frame helpers in `vertebra-db`.
 [^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that deletes PostgreSQL `memory://` paths and `vertebra_db::postgres::PostgresPool`.

@@ -11,8 +11,8 @@ depends_on_chapters:
   - ch21-live-notifications
 replan_trigger: null
 current_task: "native-postgres-driver:ch22:t01"
-plan_revision: 4
-plan_commit: e8901de4
+plan_revision: 5
+plan_commit: fd571e3a
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -107,7 +107,7 @@ Parent roadmap: [spec.md](../../spec.md) and [contracts.md](../../contracts.md).
 | Requested `start_lsn < restart_lsn` or `start_lsn < confirmed_flush_lsn` | Fail closed with `OperationalError` (`wal_unavailable` / invalid resume) before streaming. |
 | `CopyBothResponse` (`'W'`) with `format != 0` or `num_columns != 0` | Reject boundedly as `ProtocolError` and close dedicated socket. |
 | `TupleData` with `'u'` (unchanged TOAST) vs `'n'` (SQL `NULL`) vs dropped column | Emit `PgOutputTupleValue::UnchangedToast` (`PgUnchangedToast`), `Null` (`None`), and omit dropped attributes respectively; reject `PgUnchangedToast` if passed as a SQL query bind. |
-| `Relation` (`'R'`) schema update mid-stream or `> 4096` relations | Atomically swap new `Arc<PgOutputRelationSchema>` without mutating previously emitted records; fail explicitly with resource-limit `OperationalError` above `4096`. |
+| `Relation` (`'R'`) schema update mid-stream or `> 4096` relations | Atomically swap new `Arc<PgOutputRelationSchema>` without mutating already emitted records; fail explicitly with resource-limit `OperationalError` above `4096`. |
 | DML outside `Begin`..`Commit`, nested `Begin`, or v2+ streaming/two-phase tags | Fail immediately with `ProtocolError` without advancing LSN feedback. |
 | Clean `CopyDone` with partial buffered record vs transport EOF mid-transaction | Clean `CopyDone` with trailing bytes raises `ProtocolError`; transport EOF calls `reset_on_disconnect()` discarding partial record/transaction state for reconnect replay. |
 

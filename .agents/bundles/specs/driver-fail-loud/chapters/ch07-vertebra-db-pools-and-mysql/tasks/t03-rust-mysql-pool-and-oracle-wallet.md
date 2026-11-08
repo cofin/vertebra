@@ -22,8 +22,8 @@ tests:
   - src/rs/vertebra-db/src/mysql/mod.rs
   - src/rs/vertebra-db/src/oracle/tns.rs
 estimated_loc: 215
-plan_revision: 1
-plan_commit: 1e1f028a
+plan_revision: 2
+plan_commit: fd571e3a
 state_revision: 0
 claimed_by: null
 claimed_at: null

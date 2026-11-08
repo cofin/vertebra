@@ -11,8 +11,8 @@ depends_on_chapters:
   - ch10-temporal-interval-and-json-codecs
 replan_trigger: null
 current_task: "native-postgres-driver:ch11:t01"
-plan_revision: 4
-plan_commit: e8901de4
+plan_revision: 5
+plan_commit: fd571e3a
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
@@ -55,7 +55,7 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-PostgreSQL assigns dynamic OIDs per database to extension types (`vector`, `halfvec`), user-defined domains, custom arrays, and named composites, while encoding multidimensional arrays with explicit per-axis lower bounds (`[lower:upper]=`), type-specific delimiters (`pg_type.typdelim`), and distinct array vs composite text `NULL` grammars [^pg-contracts] [^pg-research]. Furthermore, executing a simple `Query` against `pg_catalog` destroys the backend's unnamed prepared statement and cannot run safely mid-stream or inside a single-`Sync` pipeline [^pg-research]. Chapter 11 implements session-local `TypeCatalog` discovery and format negotiation (`t01`), dimensioned binary arrays (`t02`), escaped multidimensional text arrays with a shared bounded container scanner (`t03`), and ordered binary/text composite codecs (`t04`).
+PostgreSQL assigns dynamic OIDs per database to extension types (`vector`, `halfvec`), user-defined domains, custom arrays, and named composites, while encoding multidimensional arrays with explicit per-axis lower bounds (`[lower:upper]=`), type-specific delimiters (`pg_type.typdelim`), and distinct array vs composite text `NULL` grammars [^pg-contracts] [^pg-research]. Executing a simple `Query` against `pg_catalog` destroys the backend's unnamed prepared statement and cannot run safely mid-stream or inside a single-`Sync` pipeline [^pg-research]. Chapter 11 implements session-local `TypeCatalog` discovery and format negotiation (`t01`), dimensioned binary arrays (`t02`), escaped multidimensional text arrays with a shared bounded container scanner (`t03`), and ordered binary/text composite codecs (`t04`).
 
 ### 1.2 Non-Goals
 

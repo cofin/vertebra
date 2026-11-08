@@ -23,8 +23,8 @@ files:
 tests:
   - src/rs/vertebra-postgres/tests/postgres_arrow_tests.rs
 estimated_loc: 215
-plan_revision: 4
-plan_commit: e8901de4
+plan_revision: 5
+plan_commit: fd571e3a
 state_revision: 0
 claimed_by: null
 claimed_at: null

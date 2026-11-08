@@ -34,52 +34,52 @@ Remaining storage work: none. Delivery/push is owned by the root coordinator.
 
 ## [2026-11-08T18:53:48.034303Z] flow-finish | storage-completeness
 
-All5 chapters and15 tasks are complete; correctness and fresh quality reviews pass at `a2af5066` with no unresolved findings. Full lint, locked Rust workspace, Python(2608 passed,74 skipped,170 xfailed), all-five rebuild/stubtest and docs gates pass. Native and extensions synthesis plus ADR-005 are committed before archive; no implementation remains. Live cloud credential calls are outside local validation. Changes remain on the signed feature branch for root delivery.
+All 5 chapters and 15 tasks are complete; correctness and fresh quality reviews pass at `a2af5066` with no unresolved findings. Full lint, locked Rust workspace, Python (`2608` passed, `74` skipped, `170` xfailed), all-five rebuild/stubtest, and docs gates pass. Native and extensions synthesis plus ADR-005 are committed before archive; no implementation remains. Live cloud credential calls are outside local validation. Changes remain on the signed feature branch for root delivery.
 
-## Verified PyArrow sentinel parity
+## [2026-11-08] flow-implement | Verified PyArrow sentinel parity (`42cbff73`)
 
-Source `42cbff73` preserves omitted, None, and -1 row-group defaults using installed PyArrow as the test oracle across sync/async Table and cursor writers. Invalid 0/-2 values remain rejected. The canonical suite passes 106 cases; full lint exits 0 and Python exits 0: 2608 passed, 74 skipped, 170 xfailed, 17 warnings in 72.79s (0:01:12). Correctness recheck passes; fresh quality review precedes finish/archive.
+- Source `42cbff73` preserves omitted, `None`, and `-1` row-group defaults using installed PyArrow as the test oracle across sync/async Table and cursor writers. Invalid `0`/`-2` values remain rejected. The canonical suite passes `106` cases; full lint exits `0` and Python exits `0` (`2608` passed, `74` skipped, `170` xfailed, `17` warnings in `72.79s`). Correctness recheck passes; fresh quality review precedes finish/archive.
 
-## Verified SQLSpec optional row-group compatibility
+## [2026-11-08] flow-implement | Verified SQLSpec optional row-group compatibility (`5faea756`)
 
-Source `5faea756` preserves installed PyArrow row-group defaults for omitted and None options across sync/async Table and cursor writes, while invalid sizes still fail. Eight Red failures lead to 102 canonical passes with actual metadata assertions. Full lint-all exits0; refreshed Python suite exits0: 2604 passed, 74 skipped, 170 xfailed, 17 warnings in 71.51s (0:01:11). Catalog counts are synchronized; final correctness and fresh quality reviews precede finish/archive.
+- Source `5faea756` preserves installed PyArrow row-group defaults for omitted and `None` options across sync/async Table and cursor writes, while invalid sizes still fail. Eight Red failures lead to `102` canonical passes with actual metadata assertions. Full `lint-all` exits `0`; refreshed Python suite exits `0` (`2604` passed, `74` skipped, `170` xfailed, `17` warnings in `71.51s`). Catalog counts are synchronized; final correctness and fresh quality reviews precede finish/archive.
 
-## Completed storage documentation and durable synthesis
+## [2026-11-08] flow-implement | Completed storage documentation and durable synthesis (`56c514dd`)
 
-Source `56c514dd` completes both user guides and source-backed native/storage/framework knowledge, including ADR-005 for persistent TTL envelopes. Documentation review/build gates and 29 tooling/viewport cases pass; offline native/provider/framework examples pass. Full Python exits 0 with 2592 passed, 74 skipped, 170 xfailed; full lint and locked native workspace gates pass. All 15 implementation tasks and 5 documentation targets are complete; chapter 5 independent reviews precede finish/archive. No live GCS ADC/IAM calls are executed.
+- Source `56c514dd` completes both user guides and source-backed native/storage/framework knowledge, including ADR-005 for persistent TTL envelopes. Documentation review/build gates and `29` tooling/viewport cases pass; offline native/provider/framework examples pass. Full Python exits `0` with `2592` passed, `74` skipped, `170` xfailed; full lint and locked native workspace gates pass. All `15` implementation tasks and `5` documentation targets are complete; chapter 5 independent reviews precede finish/archive. No live GCS ADC/IAM calls are executed.
 
-## Verified SQLSpec bounded Arrow consumers
+## [2026-11-08] flow-implement | Verified SQLSpec bounded Arrow consumers (`bf5a4cf3`)
 
-Source `bf5a4cf3` preserves public Table/None/iterator contracts while using bounded native async codecs, async pattern matching, raw IPC buffers, format options and owned inner iterator cleanup. Four Red failures lead to90 canonical integration passes, including 25 new public cases. Storage/adapter MyPy,Ruff,format and diff checks pass. Only the final storage/auth documentation task remains.
+- Source `bf5a4cf3` preserves public `Table`/`None`/iterator contracts while using bounded native async codecs, async pattern matching, raw IPC buffers, format options, and owned inner iterator cleanup. Four Red failures lead to `90` canonical integration passes, including `25` new public cases. Storage/adapter Mypy, Ruff, format, and diff checks pass. Only the final storage/auth documentation task remains.
 
-## Completed strict Arrow and bounded storage chapter
+## [2026-11-08] chapter-reviewed | Completed strict Arrow and bounded storage chapter (`e663c51f`)
 
-Correctness and fresh quality reviews pass at `e663c51f` with no unresolved findings. All four chapter tasks are complete, including real S3 minimum-part completion and repeated-cancellation ownership. Full lint, locked Rust workspace, Python (2567 passed, 74 skipped, 170 xfailed), and documentation gates pass. Chapter ch05 starts SQLSpec delegation; its final two tasks complete the original documentation scope.
+- Correctness and fresh quality reviews pass at `e663c51f` with no unresolved findings. All four chapter tasks are complete, including real S3 minimum-part completion and repeated-cancellation ownership. Full lint, locked Rust workspace, Python (`2567` passed, `74` skipped, `170` xfailed), and documentation gates pass. Chapter `ch05` starts SQLSpec delegation; its final two tasks complete the original documentation scope.
 
-## Verified repeated-cancellation codec ownership
+## [2026-11-08] flow-implement | Verified repeated-cancellation codec ownership (`71cb322b`)
 
-Source `71cb322b` retains worker and loop-task ownership through repeated task cancellation. Four Red failures lead to 123 canonical store passes, including six real producer-barrier cases across both formats. Focused quality gates pass. Full lint-all exits 0; the refreshed Python suite exits 0: 2567 passed, 74 skipped, 170 xfailed, 17 warnings in 74.13s (0:01:14). Native and documentation gates remain valid. Python correctness recheck precedes fresh quality review.
+- Source `71cb322b` retains worker and loop-task ownership through repeated task cancellation. Four Red failures lead to `123` canonical store passes, including six real producer-barrier cases across both formats. Focused quality gates pass. Full `lint-all` exits `0`; the refreshed Python suite exits `0` (`2567` passed, `74` skipped, `170` xfailed, `17` warnings in `74.13s`). Native and documentation gates remain valid. Python correctness recheck precedes fresh quality review.
 
-## Verified native S3 minimum-part completion
+## [2026-11-08] flow-implement | Verified native S3 minimum-part completion (`3f3958e3`)
 
-Source `3f3958e3` repairs 8 real S3 Complete failures by applying the existing 8 MiB native accumulator to normalized S3/B2. Locked native 3 unit + 22 integration tests,119 canonical Python store cases, all-five rebuild/stubtest and focused quality gates pass; lockfiles are unchanged. Full locked Rust workspace exits 0; full Python passes 2563 cases with 74 skips and 170 xfails; docs exits 0. Chapter ch04 has 4 completed tasks awaiting correctness and fresh quality review. Two SQLSpec/documentation tasks remain.
+- Source `3f3958e3` repairs `8` real S3 Complete failures by applying the existing `8 MiB` native accumulator to normalized S3/B2. Locked native `3` unit + `22` integration tests, `119` canonical Python store cases, all-five rebuild/stubtest, and focused quality gates pass; lockfiles are unchanged. Full locked Rust workspace exits `0`; full Python passes `2563` cases with `74` skips and `170` xfails; docs exits `0`. Chapter `ch04` has `4` completed tasks awaiting correctness and fresh quality review. Two SQLSpec/documentation tasks remain.
 
 ## [2026-11-08] flow-implement | Synchronize bounded storage codecs
 
-- Source `78293774` implements bounded sync/async IPC and Parquet writers. Two public-format Red failures lead to 111 passing canonical storage cases, including 44 writer cases, real native S3 PUT cancellation/abort barriers for both formats, and worker-exit ownership checks. Storage MyPy (4 files), focused Ruff, format, and whitespace gates pass.
-- Storage knowledge documents strict named allocation, real IPC, bounded demand, caller-loop native I/O, per-step SyncPool codecs, cancellation ownership, and explicit Parquet prefetch opt-in. Chapter ch04 has 3/4 tasks complete and is active on a source-grounded S3 minimum-part worksheet. Root progress is 12/15 tasks; native S3 compliance and two SQLSpec/documentation tasks remain. Consumer-guide progress remains 3/5.
+- Source `78293774` implements bounded sync/async IPC and Parquet writers. Two public-format Red failures lead to `111` passing canonical storage cases, including `44` writer cases, real native S3 PUT cancellation/abort barriers for both formats, and worker-exit ownership checks. Storage Mypy (`4` files), focused Ruff, format, and whitespace gates pass.
+- Storage knowledge documents strict named allocation, real IPC, bounded demand, caller-loop native I/O, per-step `SyncPool` codecs, cancellation ownership, and explicit Parquet prefetch opt-in. Chapter `ch04` has `3/4` tasks complete and is active on a source-grounded S3 minimum-part worksheet. Root progress is `12/15` tasks; native S3 compliance and two SQLSpec/documentation tasks remain. Consumer-guide progress remains `3/5`.
 
-## Verified bounded Arrow and Parquet readers
+## [2026-11-08] flow-implement | Verified bounded Arrow and Parquet readers (`ee35d9d4`)
 
-Source `ee35d9d4` adds native sync/async batch readers and schema-preserving full-Table helpers, including IPC-file fallback. Four Red cases lead to67 passing canonical store cases with18 new codec cases and4 real native S3 HTTP cancellation/responsiveness barriers. Focused MyPy,Ruff,format,diff gates pass. Chapter ch04 executes its writer worksheet; three tasks remain across ch04/ch05.
+- Source `ee35d9d4` adds native sync/async batch readers and schema-preserving full-`Table` helpers, including IPC-file fallback. Four Red cases lead to `67` passing canonical store cases with `18` new codec cases and `4` real native S3 HTTP cancellation/responsiveness barriers. Focused Mypy, Ruff, format, and diff gates pass. Chapter `ch04` executes its writer worksheet; three tasks remain across `ch04`/`ch05`.
 
-## Verified strict named Arrow SHM allocation
+## [2026-11-08] flow-implement | Verified strict named Arrow SHM allocation (`2e60f224`)
 
-Source `2e60f224` removes native/Python anonymous allocation fallback and JSON pseudo-IPC from threshold-selected ArrowCursor construction. Red reproduces native invalid-name success and three Python failures. Locked Rust37unit+2stream tests and Clippy pass; all five extensions rebuild,114 Python cases pass with5 existing psycopg skips, and five-extension stubtest passes. Cargo.lock remains unchanged. Chapter ch04 now executes bounded batch readers; four tasks remain.
+- Source `2e60f224` removes native/Python anonymous allocation fallback and JSON pseudo-IPC from threshold-selected `ArrowCursor` construction. Red reproduces native invalid-name success and three Python failures. Locked Rust `37` unit + `2` stream tests and Clippy pass; all five extensions rebuild, `114` Python cases pass with `5` existing `psycopg` skips, and five-extension stubtest passes. `Cargo.lock` remains unchanged. Chapter `ch04` now executes bounded batch readers; four tasks remain.
 
-## Completed storage HTTP and Litestar chapter
+## [2026-11-08] chapter-reviewed | Completed storage HTTP and Litestar chapter (`50e9c631`)
 
-Correctness and fresh quality reviews pass at `50e9c631` with no unresolved findings. Native FastPath 200/206/416, valid ETags, persistent TTL envelopes, namespace deletion, and actual Litestar static consumers are covered. The broad Python gate passes 654 tests, full MyPy covers 419 source files, and docs build passes. Chapter ch04 starts the strict Arrow SHM worksheet; five storage tasks remain across ch04 and ch05.
+- Correctness and fresh quality reviews pass at `50e9c631` with no unresolved findings. Native FastPath `200`/`206`/`416`, valid ETags, persistent TTL envelopes, namespace deletion, and actual Litestar static consumers are covered. The broad Python gate passes `654` tests, full Mypy covers `419` source files, and docs build passes. Chapter `ch04` starts the strict Arrow SHM worksheet; five storage tasks remain across `ch04` and `ch05`.
 
 ## [2026-11-08] review | Repair storage HTTP range metadata and entity tags
 

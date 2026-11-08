@@ -26,8 +26,8 @@ parent_prd: native-data-platform
 research:
   - research/driver-restructure_20261107.md
   - research/change-surface_20261107.md
-plan_revision: 1
-plan_commit: 1e1f028a
+plan_revision: 2
+plan_commit: fd571e3a
 state_revision: 0
 created_at: "2026-11-07T00:00:00Z"
 updated_at: "2026-11-08T00:00:00Z"
@@ -138,7 +138,7 @@ This flow makes every unsupported path raise, deletes dead native code, corrects
 
 ### 1.2 Upstream Execution Baseline
 
-- Branch `feat/storage-updates` at `0acdf576`; parent PRD [`native-data-platform`](../native-data-platform/spec.md).
+- Branch `feat/storage-updates` at `fd571e3a` (stacked immediately after [`storage-remediation`](../storage-remediation/spec.md)); parent PRD [`native-data-platform`](../native-data-platform/spec.md).
 - Runs ahead of `native-postgres-driver`, `broker-pool-sharing`, and the per-engine driver flows, which consume its baseline.
 
 ### 1.3 Code Analysis & Seam Summary
@@ -376,7 +376,7 @@ unexport PY_GIL_DISABLED PY_TEST_GROUPS
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `0acdf576` — plan authored; `0/13` chapters and `0/38` tasks completed.
+- **Verified Baseline (`HEAD`)**: `fd571e3a` — plan authored; `0/13` chapters and `0/38` tasks completed.
 - **Active Chapter**: `ch01-oracle-mssql-fail-loud` (`0/2` tasks completed).
 - **Remaining Plan**: `ch01` through `ch13`.
 - **Documentation & OKF Sync**: `[0/33 files documented]`.

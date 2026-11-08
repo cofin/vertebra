@@ -23,8 +23,8 @@ tests:
   - src/py/tests/unit/db/test_postgres_native_adapters.py
   - src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
 estimated_loc: 200
-plan_revision: 4
-plan_commit: e8901de4
+plan_revision: 5
+plan_commit: fd571e3a
 state_revision: 0
 claimed_by: null
 claimed_at: null

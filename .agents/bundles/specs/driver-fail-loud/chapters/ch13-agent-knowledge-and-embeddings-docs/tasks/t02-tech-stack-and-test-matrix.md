@@ -21,8 +21,8 @@ files:
   - .agents/bundles/knowledge/testing/polyglot-test-matrix.md
 tests: []
 estimated_loc: 45
-plan_revision: 1
-plan_commit: 1e1f028a
+plan_revision: 2
+plan_commit: fd571e3a
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -49,8 +49,8 @@ sources:
     resource: src/rs/vertebra-db/Cargo.toml
     title: vertebra-db crate dependencies
   - id: unit-conftest
-    resource: src/py/tests/unit/conftest.py::resp3_server
-    title: Loopback RESP3 server fixture for Redis and Valkey unit tests
+    resource: .agents/bundles/specs/driver-fail-loud/chapters/ch03-remove-memory-fakes/tasks/t02-resp3-fixture-core-and-key-value-retarget.md
+    title: Loopback RESP3 server fixture contract for Redis and Valkey unit tests
   - id: duckdb-tests
     resource: src/py/tests/unit/db/test_enterprise_olap_drivers.py
     title: DuckDB tests guarded by pytest.importorskip
@@ -218,5 +218,5 @@ make review-check
 [^okf-test-matrix]: `.agents/bundles/knowledge/testing/polyglot-test-matrix.md` — OKF polyglot test matrix.
 [^pyproject]: `pyproject.toml` — duckdb and bench dependency groups.
 [^db-cargo]: `src/rs/vertebra-db/Cargo.toml` — vertebra-db crate dependencies.
-[^unit-conftest]: `src/py/tests/unit/conftest.py::resp3_server` — Loopback RESP3 server fixture for Redis and Valkey unit tests.
+[^unit-conftest]: `.agents/bundles/specs/driver-fail-loud/chapters/ch03-remove-memory-fakes/tasks/t02-resp3-fixture-core-and-key-value-retarget.md` — Loopback RESP3 server fixture contract for Redis and Valkey unit tests.
 [^duckdb-tests]: `src/py/tests/unit/db/test_enterprise_olap_drivers.py` — DuckDB tests guarded by pytest.importorskip.

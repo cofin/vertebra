@@ -21,8 +21,8 @@ files:
   - .agents/bundles/knowledge/testing/benchmarks-and-free-threaded.md
 tests: []
 estimated_loc: 40
-plan_revision: 1
-plan_commit: 1e1f028a
+plan_revision: 2
+plan_commit: fd571e3a
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -153,7 +153,7 @@ grep -n 'uv sync --all-extras --dev --group doc --group duckdb' AGENTS.md .agent
 grep -n 'PY_TEST_GROUPS' .agents/bundles/knowledge/workflow.md .agents/bundles/knowledge/testing/benchmarks-and-free-threaded.md
 grep -n 'dependency-groups\].duckdb' .agents/bundles/knowledge/workflow.md .agents/bundles/knowledge/testing/benchmarks-and-free-threaded.md
 grep -n 'importorskip' .agents/bundles/knowledge/testing/benchmarks-and-free-threaded.md
-test "$(git diff --numstat AGENTS.md | cut -f1,2)" = "$(printf '1\t1')"
+test "$(git diff HEAD --numstat AGENTS.md | cut -f1,2)" = "$(printf '1\t1')" || test "$(git show --numstat --format='' HEAD -- AGENTS.md | cut -f1,2)" = "$(printf '1\t1')"
 for f in .agents/bundles/knowledge/workflow.md .agents/bundles/knowledge/testing/benchmarks-and-free-threaded.md; do sed -n '/^verified:/{n;p;q}' "$f" | grep -q 'agent:flow-executor' || echo "first verified entry is not agent:flow-executor: $f"; done | (! grep .)
 uv run --no-sync python -I - .agents/bundles/knowledge/workflow.md .agents/bundles/knowledge/testing/benchmarks-and-free-threaded.md <<'PY'
 import pathlib, re, sys

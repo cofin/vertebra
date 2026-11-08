@@ -18,12 +18,11 @@ files:
   - src/rs/vertebra-db/src/mysql/mod.rs
   - src/rs/vertebra-db/src/lib.rs
   - src/rs/vertebra-db/Cargo.toml
-  - src/rs/Cargo.lock
 tests:
   - src/rs/vertebra-db/src/lib.rs
 estimated_loc: 185
-plan_revision: 1
-plan_commit: 1e1f028a
+plan_revision: 2
+plan_commit: fd571e3a
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -61,7 +60,7 @@ tags:
 
 Delete `src/rs/vertebra-db/src/mysql/mod.rs`, `pub mod mysql;`, and `pub use mysql::{...}` from `lib.rs`, and `sha2 = { workspace = true }` from `vertebra-db/Cargo.toml`; let Cargo rewrite `Cargo.lock` (the `vertebra-db` entry loses `sha2`; the `sha2` package stays for `vertebra-core` and `vertebra-storage`). Rewrite the crate doc header and Cargo `description` so the crate describes codecs, dialers, transport, and shared-memory Arrow framing.[^mysql-rs][^db-lib][^db-cargo]
 
-Production files exceed 3 only through `src/rs/Cargo.lock`, whose entries `cargo check` regenerates from the manifest change; it is not hand-edited. The hand-edited files are `mysql/mod.rs` (deleted), `lib.rs`, and `vertebra-db/Cargo.toml`.
+The hand-edited files are `mysql/mod.rs` (deleted), `lib.rs`, and `vertebra-db/Cargo.toml`; `src/rs/Cargo.lock` is regenerated automatically by `cargo check` and committed with the manifest change.
 
 Out of scope: the workspace `sha2 = "0.10"` entry (still used); `rsa` with its `sha2` feature (dialer dependency); other possibly unused dependencies (see Notes).
 
