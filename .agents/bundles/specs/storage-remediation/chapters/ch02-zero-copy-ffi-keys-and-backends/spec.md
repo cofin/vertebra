@@ -11,14 +11,14 @@ planning_status: complete
 depends_on_chapters:
   - ch01-native-gcs-plane-and-signing
 replan_trigger: null
-current_task: "storage-remediation:ch02:t02"
+current_task: "storage-remediation:ch02:t03"
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 2
-last_verified_checkpoint: d889b958
+state_revision: 3
+last_verified_checkpoint: fb8dde11
 last_reviewed_commit: null
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-08T23:25:15Z"
+updated_at: "2026-11-08T23:39:45Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
@@ -147,15 +147,15 @@ tags:
 ## 5. Implementation Plan
 
 - [x] [d889b958] storage-remediation:ch02:t01 — Define `PreconditionError` in `vertebra.typing`, map `412` preconditions in `to_py_err`, and use zero-copy `PyBackedBytes` for immutable `PyBytes` (tasks/t01-precondition-error-and-zero-copy-ffi.md)
-- [ ] storage-remediation:ch02:t02 — Check `get_range` bounds, preserve raw keys with `StorePath::parse`, preserve `file://` conditional metadata, and wire S3/HTTP options in Rust (tasks/t02-checked-ranges-raw-keys-and-backend-builders.md)
+- [x] [fb8dde11] storage-remediation:ch02:t02 — Check `get_range` bounds, preserve raw keys with `StorePath::parse`, preserve `file://` conditional metadata, and wire S3/HTTP options in Rust (tasks/t02-checked-ranges-raw-keys-and-backend-builders.md)
 - [ ] storage-remediation:ch02:t03 — Wire S3 `virtual_hosted_style` PyO3 bindings and stubs and remove Litestar key `unquote` workaround (tasks/t03-s3-virtual-hosted-bindings-and-litestar-keys.md)
 - [ ] storage-remediation:ch02:t04 — Upgrade `OciObjectStore` to stream `get_opts`, honor conditional/copy headers, and paginate `list` and `list_with_delimiter` (tasks/t04-streaming-conditional-paginated-oci.md)
 - **Chapter / Phase Recovery Checkpoint**: `PATH="$PWD/.venv/bin:$PATH" PYO3_PYTHON="$PWD/.venv/bin/python" CARGO_TARGET_DIR=/tmp/vtb-cargo-target cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage && uv run --no-sync pytest src/py/tests/unit/storage/test_storage_store.py src/py/tests/unit/storage/test_signing.py src/py/tests/unit/extensions/test_litestar_plugin.py -q`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `d889b958` — `1/4` tasks completed in `ch02`.
-- **Remaining Tasks in Chapter**: `t02`, `t03`, `t04`.
+- **Verified Baseline (`HEAD`)**: `fb8dde11` — `2/4` tasks completed in `ch02`.
+- **Remaining Tasks in Chapter**: `t03`, `t04`.
 - **Remaining Chapters**: `ch02`–`ch06`.
 
 [^py-typing]: `src/py/vertebra/_typing.py::VertebraError` — Internal exception and typing definitions re-exported by `vertebra.typing`.

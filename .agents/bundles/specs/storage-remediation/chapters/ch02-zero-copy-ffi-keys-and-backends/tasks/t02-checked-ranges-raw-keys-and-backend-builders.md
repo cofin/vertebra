@@ -5,7 +5,7 @@ chapter_id: ch02-zero-copy-ffi-keys-and-backends
 title: Check get_range bounds, preserve raw keys with StorePath::parse, preserve file:// conditional metadata, and wire S3/HTTP options in Rust
 description: Replace StorePath::from with StorePath::parse in store.rs, guard get_range overflow and zero-length reads, preserve content_type and attributes on file:// conditional puts, forward S3 session_token/virtual_hosted_style and Http headers, and add virtual_hosted_style to S3SignConfig.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -18,23 +18,24 @@ read_set:
 files:
   - src/rs/vertebra-storage/src/store.rs
   - src/rs/vertebra-storage/src/signing.rs
+  - src/rs/vertebra-storage/src/lib.rs
 tests:
   - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 180
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: executor
+claimed_at: "2026-11-08T23:30:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-08T23:39:30Z"
+last_verified_commit: fb8dde11
+verification_evidence: "cargo test -p vertebra-storage (28 passed) && cargo clippy -p vertebra-storage --all-targets -- -D warnings && make review-check"
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-08T20:55:00Z"
-commit: null
+updated_at: "2026-11-08T23:39:45Z"
+commit: fb8dde11
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
@@ -103,8 +104,8 @@ PATH="$PWD/.venv/bin:$PATH" PYO3_PYTHON="$PWD/.venv/bin/python" CARGO_TARGET_DIR
 
 ## Acceptance Criteria
 
-- [ ] `get_range` guards `u64` overflow and `length == 0`, and `StorePath::parse` preserves `~` and `%` keys without double-encoding (R2.2).
-- [ ] `S3` `session_token` + `virtual_hosted_style` (engine + `S3SignConfig`) and `Http` custom `headers` pass loopback HTTP tests (R2.2).
+- [x] `get_range` guards `u64` overflow and `length == 0`, and `StorePath::parse` preserves `~` and `%` keys without double-encoding (R2.2).
+- [x] `S3` `session_token` + `virtual_hosted_style` (engine + `S3SignConfig`) and `Http` custom `headers` pass loopback HTTP tests (R2.2).
 
 ## Notes & Discoveries
 

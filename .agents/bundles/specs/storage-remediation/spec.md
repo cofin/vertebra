@@ -14,17 +14,17 @@ chapters:
   - ch05-framework-adapters-and-test-hygiene
   - ch06-docs-okf-and-plan-sync
 current_chapter: ch02-zero-copy-ffi-keys-and-backends
-current_task: "storage-remediation:ch02:t02"
+current_task: "storage-remediation:ch02:t03"
 parent_prd: native-data-platform
 research: []
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 5
-last_verified_checkpoint: d889b958
+state_revision: 6
+last_verified_checkpoint: fb8dde11
 last_reviewed_chapter: ch01-native-gcs-plane-and-signing
 last_reviewed_commit: 4b81d314
 created_at: "2026-11-08T20:30:00Z"
-updated_at: "2026-11-08T23:25:15Z"
+updated_at: "2026-11-08T23:39:45Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
@@ -260,8 +260,8 @@ Zero-context code and quality reviews of `feat/storage-updates` (`077a3fe9..fd57
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `d889b958` — `1/6` chapters completed (`ch01`).
-- **Active Chapter**: `ch02-zero-copy-ffi-keys-and-backends` (`1/4` tasks completed).
+- **Verified Baseline (`HEAD`)**: `fb8dde11` — `1/6` chapters completed (`ch01`).
+- **Active Chapter**: `ch02-zero-copy-ffi-keys-and-backends` (`2/4` tasks completed).
 - **Remaining Plan**: `ch02-zero-copy-ffi-keys-and-backends`, `ch03-bulk-file-io-compose-and-streams`, `ch04-streaming-arrow-parquet-and-shm`, `ch05-framework-adapters-and-test-hygiene`, `ch06-docs-okf-and-plan-sync`.
 - **Documentation & OKF Sync**: `[0/6 files documented]`.
 - **Active Invariants & Triggers**: Zero `planning_status: empirical_dependent` chapters; every chapter is decision-complete (`planning_status: complete`).
