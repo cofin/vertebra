@@ -283,6 +283,48 @@ async def test_sqlspec_arrow_parquet_preserves_codec_defaults(asynchronous: bool
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("cursor_input", [False, True])
+@pytest.mark.parametrize("explicit_none", [False, True])
+async def test_sqlspec_parquet_default_row_groups(asynchronous: bool, cursor_input: bool, explicit_none: bool) -> None:
+    """Omitted and None row-group options retain PyArrow's million-row maximum."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-rowgroup-default"))
+    table = pa.table({"id": range(1_048_577)})
+    source: Any = table
+    if cursor_input:
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+        source = sink.getvalue()
+    options = {"row_group_size": None} if explicit_none else {}
+    if asynchronous:
+        write = backend.write_arrow_cursor_async if cursor_input else backend.write_arrow_async
+        assert await write("data.parquet", source, **options) is None
+        raw = await backend.read_bytes_async("data.parquet")
+    else:
+        write = backend.write_arrow_cursor_sync if cursor_input else backend.write_arrow_sync
+        assert write("data.parquet", source, **options) is None
+        raw = backend.read_bytes_sync("data.parquet")
+    actual = pq.ParquetFile(BytesIO(raw))
+    assert [actual.metadata.row_group(i).num_rows for i in range(actual.num_row_groups)] == [1_048_576, 1]
+    assert actual.read().equals(table)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("row_group_size", [0, -1])
+async def test_sqlspec_parquet_invalid_row_group_size(asynchronous: bool, row_group_size: int) -> None:
+    """Nonpositive explicit sizes remain errors instead of becoming default sizes."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-rowgroup-invalid"))
+    with pytest.raises(ValueError, match="batch_size"):
+        if asynchronous:
+            await backend.write_arrow_async("invalid.parquet", pa.table({"id": [1]}), row_group_size=row_group_size)
+        else:
+            backend.write_arrow_sync("invalid.parquet", pa.table({"id": [1]}), row_group_size=row_group_size)
+    assert not await backend.exists_async("invalid.parquet")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
 async def test_sqlspec_arrow_ipc_invalid_options_abort(asynchronous: bool) -> None:
     """Invalid codec keywords retain PyArrow errors and leave no completed native object."""
     backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-arrow-invalid-options"))

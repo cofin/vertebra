@@ -330,11 +330,13 @@ class ObjectStoreBackend:
     def write_arrow_sync(self, path: str | Path, table: ArrowTable, **kwargs: Any) -> None:
         """Write a Table through bounded native multipart codec output."""
         file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
+        self._normalize_arrow_write_options(file_format, kwargs)
         write_batches_sync(self._sync_store, self._qualify(path), table, file_format=file_format, options=kwargs)
 
     def write_arrow_cursor_sync(self, path: str | Path, cursor: ArrowCursor | Any, **kwargs: Any) -> None:
         """Write IPC cursor buffers through a persistent batch codec reader."""
         file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
+        self._normalize_arrow_write_options(file_format, kwargs)
         source = cursor if hasattr(cursor, "buffer_view") else _IPCBuffer(cursor)
         write_batches_sync(self._sync_store, self._qualify(path), source, file_format=file_format, options=kwargs)
 
@@ -510,6 +512,7 @@ class ObjectStoreBackend:
     async def write_arrow_async(self, path: str | Path, table: ArrowTable, **kwargs: Any) -> None:
         """Encode off-loop and upload incrementally using native asynchronous I/O."""
         file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
+        self._normalize_arrow_write_options(file_format, kwargs)
         await write_batches_async(
             self._async_store, self._qualify(path), table, file_format=file_format, options=kwargs
         )
@@ -517,6 +520,7 @@ class ObjectStoreBackend:
     async def write_arrow_cursor_async(self, path: str | Path, cursor: ArrowCursor | Any, **kwargs: Any) -> None:
         """Write cursor or buffer IPC through the shared off-loop batch encoder."""
         file_format = str(kwargs.pop("file_format", "") or self._infer_arrow_format(path))
+        self._normalize_arrow_write_options(file_format, kwargs)
         source = cursor if hasattr(cursor, "buffer_view") else _IPCBuffer(cursor)
         await write_batches_async(
             self._async_store, self._qualify(path), source, file_format=file_format, options=kwargs
@@ -739,6 +743,12 @@ class ObjectStoreBackend:
             if "/" not in remainder:
                 filtered.append(item)
         return filtered
+
+    @staticmethod
+    def _normalize_arrow_write_options(file_format: str, options: dict[str, Any]) -> None:
+        """Preserve PyArrow's default Parquet row-group maximum for omitted or None sizes."""
+        if file_format == "parquet" and options.get("row_group_size") is None:
+            options["row_group_size"] = 1024 * 1024
 
     @staticmethod
     def _infer_arrow_format(path: str | Path) -> str:
