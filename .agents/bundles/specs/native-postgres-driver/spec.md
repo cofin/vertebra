@@ -330,10 +330,10 @@ Every worksheet (`111` total across `31` chapters) executes within its bounded o
 
 - **Verified Baseline**: Source `2db27cd1` passes all 71 Rust tests, locked all-target Clippy, formatting, and bundle validation; flow `state: active`, `plan_revision: 8`, `plan_commit: 8c540809`.
 - **Progress**: `2/31` chapters are complete and reviewed; `10/111` tasks are complete. Chapter 02 receipts bind to `a00c3248`, `81791de2`, `ad8be7b6`, and `c5173f1b`.
-- **Current Chapter**: `ch03-scram-and-channel-binding`, with `current_task: native-postgres-driver:ch03:t03`; SCRAM is complete, peer-certificate binding is verified at `2db27cd1`; policy task `t03` is ready after cold review of its corrected six-file manifest, and channel-binding policy remains pending.
+- **Current Chapter**: `ch03-scram-and-channel-binding`, with `current_task: native-postgres-driver:ch03:t03`; ordered SCRAM and peer-certificate binding are complete, and channel-binding policy is in progress.
 - **Remaining Plan**: Chapters 03–31 retain complete blueprints.
 - **Documentation**: `[0/11 files documented]`; full guides and domain knowledge remain assigned to chapter 30.
-- **Next Action**: Cold-review chapter 03 task 03's corrected six-file manifest, then continue `/flow:implement native-postgres-driver` with channel-binding policy enforcement and the full remaining plan.
+- **Next Action**: Continue `/flow:implement native-postgres-driver` with certificate-bound SCRAM policy enforcement, then the full remaining plan.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` — Shared PostgreSQL wire frame helpers and SHM admission metadata in `vertebra-db`.
