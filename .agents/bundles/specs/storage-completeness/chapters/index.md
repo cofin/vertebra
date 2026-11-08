@@ -24,4 +24,4 @@
 
 * [ch20 — Ordinary and Memory Multipart Negative Predicate CAS](ch20-ordinary-negative-cas/spec.md) — [planned] Fence ordinary negative puts and Memory negative multipart with one cheap PutPayload CAS helper, preserve Local/GCS dispatch truth, and repair actual OCI ordinary conditions before native acceptance.
 
-* [ch21 — SDK-Resolved GCS Configuration and Snapshots](ch21-sdk-resolved-config/spec.md) — [planned] Capture exact SDK endpoint/ClientOptions beside one concrete GCS Arc and private paired snapshot requests; ch14:t01 owns first production activation before staged publication.
+* [ch21 — SDK-Resolved GCS Configuration and Snapshots](ch21-sdk-resolved-config/spec.md) — [active] Constructor capture is signed at `fe992ae3`; capture exact SDK endpoint/ClientOptions beside one concrete GCS Arc and private paired snapshot requests; ch14:t01 owns first production activation before staged publication.

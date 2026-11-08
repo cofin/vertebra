@@ -5,7 +5,7 @@ chapter_id: ch21-sdk-resolved-config
 title: Retain SDK-resolved GCS endpoint and transport configuration
 description: Retain SDK-resolved GCS endpoint and transport configuration
 status: draft
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: characterization
 depends_on:
@@ -24,14 +24,14 @@ estimated_loc: 120
 plan_revision: 8
 plan_commit: null
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:sdk_config_capture
+claimed_at: '2026-11-08T00:36:39Z'
 blocked_reason: null
 unblock_condition: null
-next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+next_step: Complete receipt rebinding after the impacted revision8 plan review.
+last_verified_at: '2026-11-08T00:36:39Z'
+last_verified_commit: fe992ae3
+verification_evidence: "Frozen approved revision7 constructor contract: SDK baseline3Green; final14lib+28canonical plus normalcheck/Clippy/fmt/diff0. Signed isolated844cd4a8 imported asfe992ae3; combined15lib+39canonical0. Independent correctness at844cd4a8 findings[]. New revision8 paired-snapshot plan review and receipt rebinding remain."
 created_at: '2026-11-07T12:00:00Z'
 updated_at: '2026-11-07T12:00:00Z'
 commit: null
@@ -109,3 +109,5 @@ The actual ch10 core already occupies 216 added implementation LOC; connector/co
 
 [^implementation]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine::new` — Actual GCS construction seam.
 [^research]: `.agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md` — Accepted SDK configuration and connector evidence.
+
+The constructor-capture source is signed at `fe992ae3`, imported from independently verified `844cd4a8`. Its bounded implementation has 119 added production lines and shares `Arc<GcsStageConfig>` without cloning large configuration into the publication enum. The real SDK baseline passes before capture; actual configured reads and final capture pass afterward. Independent correctness review reports no verified findings. This task remains in progress only for revision8 receipt rebinding; the newly added snapshot-request task retains its separate acceptance.

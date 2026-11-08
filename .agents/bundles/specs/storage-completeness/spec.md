@@ -273,7 +273,7 @@ Progress: `[9/13 files documented]` for final repair/HTTP/Arrow acceptance. Exis
 - [ ] ch18-arrow-async-bridge — Bounded PyArrow Worker and Native Async I/O Bridge (chapters/ch18-arrow-async-bridge/spec.md)
 - [ ] ch19-sqlspec-arrow-streaming — SQLSpec Lazy Arrow and Parquet Integration (chapters/ch19-sqlspec-arrow-streaming/spec.md)
 - [ ] ch20-ordinary-negative-cas — Ordinary and Memory Multipart Negative Predicate CAS (chapters/ch20-ordinary-negative-cas/spec.md)
-- [ ] ch21-sdk-resolved-config — SDK-Resolved GCS Configuration and Snapshots (chapters/ch21-sdk-resolved-config/spec.md)
+- [~] ch21-sdk-resolved-config — SDK-Resolved GCS Configuration and Snapshots (chapters/ch21-sdk-resolved-config/spec.md)
 
 **Flow Recovery Checkpoint:** `/flow:implement storage-completeness` follows the current task pointer and approved ready worksheet. Repair tasks use baseline artifacts without requiring reopened ch01 completion. Native acceptance and reviews reclose ch01, then ch02/HTTP and Arrow acceptance proceeds. The final gate is `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock make lint-all rs-test py-test ts-test docs`; it precedes finish/archive and protects shared SHM from concurrent flow suites.
 

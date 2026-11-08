@@ -9,7 +9,7 @@ state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: storage-completeness:ch10:t04
+current_task: null
 plan_revision: 7
 plan_commit: 5f64d1a8
 state_revision: 0
@@ -105,9 +105,9 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 
 | Requirement | Task | Strategy | Verification |
 | --- | --- | --- | --- |
-| R1 | [ch10:t01](tasks/t01-publication-dispatch.md) | regression_tdd | Canonical public S3 HTTP framing tests plus inline store.rs actual private-session count-limit test |
-| R2 | [ch10:t02](tasks/t02-sdk-http-transport.md) | behavior_tdd | Real inline `cloud_request::tests`; runtime activation and provider acceptance by ch12:t01/ch13:t01–t02. |
-| R3 | [ch10:t03](tasks/t03-session-cleanup.md) | regression_tdd | Canonical public S3 HTTP framing tests plus inline store.rs actual private-session count-limit test |
+| R1 | [ch10:t01](tasks/t01-publication-dispatch.md) | regression_tdd | Canonical Memory Create/Match multipart races and concrete provider dispatch |
+| R2 | [ch10:t02](tasks/t02-sdk-http-transport.md) | characterization | Real inline `cloud_request::tests`; runtime activation and provider acceptance by ch12:t01/ch13:t01–t02. |
+| R3 | [ch10:t03](tasks/t03-session-cleanup.md) | regression_tdd | Canonical completion-error, cancellation and abandoned-session abort regressions |
 
 | R4 | [ch10:t04](tasks/t04-minimum-cloud-part-framing.md) | regression_tdd | Canonical public S3 HTTP framing tests plus inline store.rs actual private-session count-limit test |
 
@@ -117,14 +117,14 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 - [x] [2bc92864] storage-completeness:ch10:t02 — Reuse SDK HTTP transport and credential authorizers (tasks/t02-sdk-http-transport.md)
 - [x] [673cb696] storage-completeness:ch10:t03 — Retain multipart abort ownership across completion errors and cancellation (tasks/t03-session-cleanup.md)
 
-- [~] storage-completeness:ch10:t04 — Frame S3 producer chunks and preserve bounded backend policies (tasks/t04-minimum-cloud-part-framing.md)
+- [x] [85ed9f36] storage-completeness:ch10:t04 — Frame S3 producer chunks and preserve bounded backend policies (tasks/t04-minimum-cloud-part-framing.md)
 
 **Chapter Recovery Checkpoint:** run every task's focused verification, then correctness review and a fresh quality review before closing this chapter. `/flow:implement storage-completeness ch10-publication-boundary-and-lifecycle` executes its ready worksheet.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Baseline: `5fe477fa`; implementation is pending and cold plan review is required.
-- Remaining: all 4 tasks above; dependent tasks remain ordered by depends_on.
+- Concrete provider identity/Memory Create-Match, real test-only SDK request transport and multipart cleanup ownership are signed at `d50cf6a2`, `2bc92864` and `673cb696`. Memory negative publication remains explicitly unsupported until ch20:t01; cloud transport runtime activation belongs to ch12:t01.
+- S3 bounded part framing is signed at `85ed9f36`. The combined source checkpoint `fe992ae3` passes 15 library and 39 canonical tests; correctness and fresh quality reviews follow documentation synchronization.
 - Documentation: `[0/1 files documented]`, owned by the explicit consolidation tasks.
 - Reclosure of ch01 and downstream acceptance waits for native repair gates; this chapter never depends on that reclosure.
 

@@ -5,11 +5,11 @@ chapter_id: ch21-sdk-resolved-config
 title: GCS Configuration and Snapshot Requests
 description: Preserve the actual GCS SDK endpoint and transport beside its concrete store
 status: draft
-state: planned
+state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: null
+current_task: storage-completeness:ch21:t01
 plan_revision: 8
 plan_commit: null
 state_revision: 0
@@ -86,7 +86,7 @@ Progress: `[0/1 files documented]`. ch09:t03 records only accepted source-backed
 
 ## 5. Implementation Plan
 
-- [ ] storage-completeness:ch21:t01 — Retain SDK-resolved GCS endpoint and transport configuration (tasks/t01-sdk-resolved-config.md)
+- [~] storage-completeness:ch21:t01 — Retain SDK-resolved GCS endpoint and transport configuration (tasks/t01-sdk-resolved-config.md)
 - [ ] storage-completeness:ch21:t02 — Capture and fence GCS data and metadata snapshots (tasks/t02-gcs-snapshot-requests.md)
 
 **Chapter Recovery Checkpoint:** focused library tests, normal non-test compilation and all-target Clippy precede correctness and fresh quality review. ch14:t02 depends on this task; full read-versus-publication comparison belongs to ch14:t04.

@@ -5,7 +5,7 @@ chapter_id: ch10-publication-boundary-and-lifecycle
 title: Frame S3 producer chunks and preserve bounded backend policies
 description: Frame S3 producer chunks and preserve bounded backend policies
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -27,16 +27,19 @@ plan_revision: 7
 plan_commit: 5f64d1a8
 state_revision: 0
 claimed_by: agent:minimum_part_framing
-claimed_at: '2026-11-08T00:00:00Z'
+claimed_at: '2026-11-08T00:29:50Z'
 blocked_reason: null
 unblock_condition: null
-next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+next_step: Coordinator signs the verified source and binds its receipt.
+last_verified_at: '2026-11-08T00:36:39Z'
+last_verified_commit: fe992ae3
+verification_evidence: |
+  Public S3 responder regressions: before framing 3 failed and 1 passed (exit 101): EntityTooSmall on tiny chunks, early tail transmission, and sub-frame producer blocked on premature upload. The private real-session count regression also failed without count guards (exit 101).
+  Green: canonical storage_engine_tests 39 passed (exit 0); full native --lib 10 passed (exit 0); exact --lib store::tests 1 passed (exit 0). Real HTTP captures show 8388608/8388608/3 and 8388608/8388608/17-byte framing, upload backpressure, preserved content type, empty/tail semantics, failed and cancelled part abort ownership, and zero disallowed frame/tail requests at injected count 10000.
+  cargo fmt --all --check and cargo clippy -p vertebra-storage --all-targets -- -D warnings exit 0. Cargo cache lock is outer; SHM test lock is inner. No Python installed-native acceptance is claimed by this private native slice.
 created_at: '2026-11-07T12:00:00Z'
-updated_at: '2026-11-07T12:00:00Z'
-commit: null
+updated_at: '2026-11-08T00:34:55Z'
+commit: 85ed9f36
 sources:
 - id: implementation
   resource: src/rs/vertebra-storage/src/store.rs
@@ -97,14 +100,16 @@ Record exact part sizes, backpressure/cancellation barriers and exit statuses. N
 
 ## Acceptance Criteria
 
-- [ ] Every matrix row passes at its public seam with existing behavior preserved.
-- [ ] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
-- [ ] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
-- [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
+- [x] Every matrix row passes at its public seam with existing behavior preserved.
+- [x] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
+- [x] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
+- [x] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
 
-The executable transport staging and provider acceptance contracts are independently approved at 5f64d1a8. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+S3 framing uses segmented PutPayloadMut views and awaits each 8 MiB flush before slicing additional caller input. The existing OCI accumulator and other backend policies remain unchanged. The count fixture constructs the actual S3 session, seeds only its private completed-part count, then exercises real frame/tail calls and HTTP abort; no public counter hook or large stream is required. Count limits prevent provider requests before publication. Error and cancellation tests retain the same abortable upload handle.
+
+The executable transport staging and provider acceptance contracts are independently approved at 5f64d1a8. The bounded inline count-fixture clarification retains that identity.
 
 [^implementation]: `src/rs/vertebra-storage/src/store.rs` — Current repository source for this task.
 
