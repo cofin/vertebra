@@ -1,5 +1,15 @@
 # Bundle Activity Log
 
+## [2026-11-08] flow-implement | Bind Django file reopening and migration serialization to native storage
+
+- Correctness review identified two Django consumer failures. Source fix `04be780b` binds closed-file reopening to the configured native store/key and registers public migration serializers only for the eight owned `StorageConfig` types, preserving public constructors and every field. Real `FieldFile` consumers and async-opened handles retain native content despite colliding local filenames; `MigrationWriter` round trips local/memory storage and provider configuration options.
+- Task receipt `10f7b825` records the completed repair under revision `7` at `a51ebcb6`. Fresh verification passes `136` canonical tests, `592` extension/storage tests, full configured MyPy (`419` files), Ruff checks/format, and the documentation build. Independent correctness recheck passes the original reproductions and canonical tests; the coordinator's focused reproduction gate passes `11` tests.
+- Storage knowledge and root/ch02 snapshots reflect the repaired contracts. Documentation coverage remains root `[2/4 files documented]` and chapter `[2/2 files documented in ch02]`; the chapter stays active for final correctness and fresh quality review.
+
+## [2026-11-08] review | Repair Django file reuse and migration serialization
+
+- Correctness review of `1e1f028a..a51ebcb6` reproduces two Important Django consumer gaps: plain File reopening can resolve a process-local filename, and captured provider config objects fail MigrationWriter serialization. Revision `7` reopens `ch02:t03` at `a51ebcb6` for native-backed reopen and supported serialization of owned config types, with real consumer regressions.
+
 ## [2026-11-08] flow-implement | Completed storage-completeness Chapter 02 task implementation
 
 - SQLSpec `ObjectStoreBackend` (`7e13257b`) implements exact protocol methods, native buffer streaming, conditional writes, opaque pagination, seekable readers, shared handles, and traversal refusal. Advanced Alchemy `ObjectStoreBackend` (`0e579db6`) uses real registry registration and bounded native `FileObject` uploads without monkeypatching or implicit memory targets.

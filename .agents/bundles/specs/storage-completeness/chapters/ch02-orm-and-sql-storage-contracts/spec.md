@@ -13,11 +13,11 @@ replan_trigger: null
 current_task: null
 plan_revision: 7
 plan_commit: a51ebcb6
-state_revision: 6
-last_verified_checkpoint: 749e2a18
+state_revision: 7
+last_verified_checkpoint: 10f7b825
 last_reviewed_commit: null
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-08T15:13:53Z"
+updated_at: "2026-11-08T15:15:39Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
@@ -79,6 +79,8 @@ Django File handles reopen through the native store, including real `FieldFile` 
 - **R4 (`ch02:t01`)**: Require explicit targets in `vertebra.extensions.sqlspec.storage.ObjectStoreBackend`; expose sync and async `ObjectStoreProtocol` methods (SQLSpec `*_sync` / `*_async` byte/text/CRUD/list/metadata/signing methods plus explicit native stream/page/reader extensions) delegating to `SyncObjectStore` / `AsyncObjectStore`; retain `build_duckdb_gcs_secret_sql`.
 - **R5 (`ch02:t02`)**: `ObjectStoreBackend` and `register_storage_backend` require an explicit target and use `StorageRegistry.register_backend` / `get_backend` without mutating `storages.get`. Native sync/async save, content, delete, and signing methods retain upstream signatures; file readers stream bounded chunks without `asyncio.to_thread`.[^alchemy-storage]
 - **R6 (`ch02:t03`)**: `vertebra.extensions.django.storage.DjangoStorage` is a `@deconstructible` subclass of `django.core.files.storage.Storage` (raising `MissingDependencyError` when `django` is absent and `ImproperConfigurationError` when `config` and `store` are omitted), returning `django.core.files.base.File` over `SyncReadableFile` from `_open`/`open`/`aopen` (async open awaits metadata before creating its synchronous Django File handle) and implementing `_save`, `save`, `asave`, `delete`, `adelete`, `exists`, `aexists`, `size`, `asize`, `listdir`, `url`, `aurl`, `path`, `get_available_name`, `generate_filename`, `get_valid_name`, `get_accessed_time`, `get_created_time`, `get_modified_time`, and `get_alternative_name`.
+
+Django file handles reopen through their configured native store and qualified key, including real `FieldFile` consumers. The public migration serializer registry serializes only the eight owned `StorageConfig` types, preserving their public constructors and every field.[^django-storage]
 
 Reader factories retain native metadata timing: `open_sync(size=None)` fetches object metadata immediately; an explicit size avoids that lookup. `open_async` returns a lazy async reader.
 

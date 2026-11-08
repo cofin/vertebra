@@ -13,6 +13,9 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:docs-okf-specialist
+    at: "2026-11-08T15:15:39Z"
+    commit: 10f7b825
+  - by: agent:docs-okf-specialist
     at: "2026-11-08T14:48:48Z"
     commit: 749e2a18
   - by: agent:code-reviewer
@@ -153,7 +156,7 @@ Both reader factories are synchronous. `open_sync(size=None)` resolves metadata 
 
 ### Django Storage and File Handles
 
-`DjangoStorage` subclasses Django's real `Storage` and uses its deconstructible constructor for migration reconstruction. `_open` / inherited `open` return `File` over `SyncReadableFile`; `aopen` awaits native metadata and supplies its size before constructing the synchronous Django handle. Subsequent handle reads follow Django's synchronous interface. Runtime return-annotation introspection resolves to Django's concrete `File`, while static typing uses `File[bytes]`.[^src-extensions-django-storage-py]
+`DjangoStorage` subclasses Django's real `Storage` and uses its deconstructible constructor for migration reconstruction. Django's public `MigrationWriter` serializer registry handles only Vertebra's eight `StorageConfig` types, preserving every field through public configuration constructors and recursive field serialization. `_open` / inherited `open` return a `File` subclass over `SyncReadableFile`; reopening resets or recreates the reader through the same native store and qualified key, including `FieldFile` consumers. `aopen` awaits native metadata and supplies its size before constructing the synchronous Django handle. Subsequent reads and reopening follow Django's synchronous interface. Runtime return-annotation introspection resolves to Django's concrete `File`, while static typing uses `File[bytes]`.[^src-extensions-django-storage-py]
 
 `save` follows Django validation and available-name allocation, and `asave` applies equivalent collision/max-length rules with native async existence checks. `ContentFile` chunks and async iterables upload incrementally; text chunks encode as UTF-8. Names reject traversal before `location` qualification. `listdir` returns sorted direct children; `path` resolves under an explicit local root and raises `NotImplementedError` on remote or memory stores. `url` / `aurl` sign qualified keys or quote them under `base_url`. `get_modified_time` returns an aware UTC datetime from `ObjectMeta.last_modified`; creation/access hooks raise `NotImplementedError` because native metadata supplies neither timestamp.[^src-extensions-django-storage-py]
 

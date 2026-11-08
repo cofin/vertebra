@@ -19,12 +19,12 @@ research:
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 7
 plan_commit: a51ebcb6
-state_revision: 11
-last_verified_checkpoint: 04be780b7901e76ea3a487dfa5ba519061a14a8c
+state_revision: 12
+last_verified_checkpoint: 10f7b825
 last_reviewed_chapter: ch01-native-engine-and-auth
 last_reviewed_commit: dc2c2053
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-08T15:13:53Z"
+updated_at: "2026-11-08T15:15:39Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
