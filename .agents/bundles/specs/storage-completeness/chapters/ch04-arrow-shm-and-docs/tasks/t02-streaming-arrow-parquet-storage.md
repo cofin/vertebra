@@ -25,16 +25,16 @@ files:
 tests:
 - src/py/tests/unit/storage/test_storage_store.py
 estimated_loc: 240
-plan_revision: 9
-plan_commit: 222cbf99
+plan_revision: 10
+plan_commit: 78293774
 state_revision: 2
-claimed_by: agent:arrow-reader-executor
-claimed_at: '2026-11-08T16:55:18.904122Z'
+claimed_by: agent:codec-cancellation-executor
+claimed_at: '2026-11-08T17:44:37.365956Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: '2026-11-08T17:06:25.072586Z'
-last_verified_commit: ee35d9d4
+last_verified_at: '2026-11-08T17:53:10.387331Z'
+last_verified_commit: 71cb322b
 verification_evidence:
   red:
     exit_code: 1
@@ -53,9 +53,22 @@ verification_evidence:
   lint_format_diff:
     exit_code: 0
     result: Focused Ruff,format,diff checks pass
+  review_repair:
+    finding: Repeated cancellation released codec worker ownership before actual exit.
+    red_exit_code: 1
+    red_result: 4 failed,2 passed across single/double/triple cancellation and both
+      formats.
+    green_exit_code: 0
+    green_result: 123 canonical store cases, including6 repeated-cancellation barrier
+      cases.
+    lint_typing_format_exit_code: 0
+  aggregate_refresh:
+    python_exit_code: 0
+    python_result: 2567 passed, 74 skipped, 170 xfailed, 17 warnings in 74.13s (0:01:14)
+    lint_all_exit_code: 0
 created_at: '2026-11-08T00:00:00Z'
-updated_at: '2026-11-08T17:06:25.072586Z'
-commit: ee35d9d4
+updated_at: '2026-11-08T17:53:10.387331Z'
+commit: 71cb322b
 sources:
 - id: store
   resource: src/py/vertebra/storage/_store.py::AsyncReadableFile
@@ -94,7 +107,7 @@ The implementation uses src/py/vertebra/utils/sync_tools.py::SyncPool [^pool].
 - Caller -> async iterator -> `SyncPool.default().submit(fn, ...)` -> one PyArrow initialize/next/close operation at a time. Await its concurrent future with asyncio.wrap_future. Return `(done, batch)` from next operations; never deliver StopIteration through a Future.
 - Capture the running caller loop. Worker-only file `read(n)` calls `asyncio.run_coroutine_threadsafe(reader.read(n), loop).result()`; seek/tell and known size delegate the serialized AsyncReadableFile state. Resolve size by awaiting store.head before ParquetFile creation. Arrow stream callbacks consume the native async get_stream iterator and hold only a chunk remainder; PyArrow open_stream retains schema/dictionary memo across batches.
 - Sync helpers use SyncReadableFile for Parquet and a sequential get_stream adapter for IPC. No full get/get_view, temporary file staging, list(all_batches), or table.to_pylist.
-- Adapter tracks a closed flag and its one pending cross-thread I/O future under a lock. Consumer cancellation/close marks closed, cancels pending I/O, awaits the active worker without synchronous join, then closes codec/source. Reader/writer ownership is released only after worker exit. Early break is supported via explicit async generator aclose/contextlib.aclosing.
+- Adapter tracks a closed flag and its one pending cross-thread I/O future under a lock. Consumer cancellation/close marks closed, cancels pending I/O, and retains worker/loop-task ownership through repeated task cancellation until both actually exit, then closes codec/source without synchronous join. Reader/writer ownership is released only after worker exit. Early break is supported via explicit async generator aclose/contextlib.aclosing.
 - Async I/O never uses SyncObjectStore or asyncio.to_thread. SyncPool is codec execution; the RustTaskAwaitable I/O executes on the original loop. Memory is bounded by decoder requests/current batch or rowgroup plus footer/dictionary metadata, not total dataset.
 
 - Private bridge entry points are `iter_batches_sync(store: SyncObjectStore, key: str, *, file_format: str, batch_size: int = 65536, columns: Sequence[str] | None = None, options: Mapping[str, Any] | None = None) -> Iterator[Any]`, matching async `iter_batches_async(...) -> AsyncIterator[Any]`, and `read_table_sync(...) -> Any` / `async read_table_async(...) -> Any` with the same key/format/options parameters. Public storage methods delegate these helpers with empty options; SQLSpec calls these helpers for accepted codec options. Forward options to their original PyArrow recipient (ParquetFile/iter_batches or read_table); unsupported keywords retain PyArrow TypeError.

@@ -18,10 +18,10 @@ current_task: null
 plan_revision: 10
 plan_commit: '78293774'
 state_revision: 5
-last_verified_checkpoint: 3f3958e3
+last_verified_checkpoint: 71cb322b
 last_reviewed_commit: null
 created_at: '2026-11-08T00:00:00Z'
-updated_at: '2026-11-08T17:39:10.695721Z'
+updated_at: '2026-11-08T17:53:10.387331Z'
 sources:
 - id: store
   resource: src/py/vertebra/storage/_store.py::AsyncObjectStore
@@ -89,7 +89,7 @@ Progress: `[1/1 files documented in ch04]`. `.agents/bundles/knowledge/domains/s
 ## 5. Implementation Plan
 
 - [x] [2e60f224] storage-completeness:ch04:t01 — Preserve ArrowCursor APIs while enforcing named SHM and real IPC (tasks/t01-strict-shm-and-arrow-ipc-cursor.md)
-- [x] [ee35d9d4] storage-completeness:ch04:t02 — Read Arrow and Parquet through a bounded async codec bridge (tasks/t02-streaming-arrow-parquet-storage.md)
+- [x] [71cb322b] storage-completeness:ch04:t02 — Read Arrow and Parquet through a bounded async codec bridge (tasks/t02-streaming-arrow-parquet-storage.md)
 - [x] [78293774] storage-completeness:ch04:t03 — Write Arrow and Parquet with bounded multipart codec output (tasks/t03-streaming-arrow-parquet-writes.md)
 - [x] [3f3958e3] storage-completeness:ch04:t04 — Coalesce native S3 multipart chunks into valid bounded parts (tasks/t04-s3-multipart-minimum-parts.md)
 
@@ -97,8 +97,8 @@ Progress: `[1/1 files documented in ch04]`. `.agents/bundles/knowledge/domains/s
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- All four tasks are complete; strict SHM, bounded codecs, and native S3 minimum-part compliance pass their declared gates.
-- Full locked Rust workspace tests and documentation gates exit0. The full Python suite passes 2563 cases with 74 skips and 170 expected failures. Aggregate lint passes; independent correctness and fresh quality reviews remain required.
+- All four tasks are complete; the shared codec lifecycle retains worker and loop-task ownership through repeated cancellation.
+- Full locked Rust workspace tests and documentation gates exit0. The full Python suite passes 2567 cases with 74 skips and 170 expected failures. Aggregate lint passes; independent correctness and fresh quality reviews remain required.
 - Both consumer guides and SQLSpec codec delegation remain owned by ch05. Documentation progress is 1/1 chapter knowledge target.
 
 [^store]: `src/py/vertebra/storage/_store.py::AsyncObjectStore` — Native storage facade.

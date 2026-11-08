@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## Verified repeated-cancellation codec ownership
+
+Source `71cb322b` retains worker and loop-task ownership through repeated task cancellation. Four Red failures lead to 123 canonical store passes, including six real producer-barrier cases across both formats. Focused quality gates pass. Full lint-all exits 0; the refreshed Python suite exits 0: 2567 passed, 74 skipped, 170 xfailed, 17 warnings in 74.13s (0:01:14). Native and documentation gates remain valid. Python correctness recheck precedes fresh quality review.
+
 ## Verified native S3 minimum-part completion
 
 Source `3f3958e3` repairs 8 real S3 Complete failures by applying the existing 8 MiB native accumulator to normalized S3/B2. Locked native 3 unit + 22 integration tests,119 canonical Python store cases, all-five rebuild/stubtest and focused quality gates pass; lockfiles are unchanged. Full locked Rust workspace exits0; full Python passes 2563 cases with 74 skips and 170 xfails; docs exits0. Chapter ch04 has 4 completed tasks awaiting correctness and fresh quality review. Two SQLSpec/documentation tasks remain.

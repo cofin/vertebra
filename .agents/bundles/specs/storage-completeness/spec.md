@@ -24,11 +24,11 @@ research:
 plan_revision: 10
 plan_commit: '78293774'
 state_revision: 18
-last_verified_checkpoint: 50e9c631
+last_verified_checkpoint: 71cb322b
 last_reviewed_chapter: ch03-litestar-and-range-streaming
 last_reviewed_commit: 50e9c631
 created_at: '2026-11-03T04:05:00Z'
-updated_at: '2026-11-08T17:39:10.695721Z'
+updated_at: '2026-11-08T17:53:10.387331Z'
 generated:
   by: flow-setup
   at: '2026-11-07T04:15:00Z'
