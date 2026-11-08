@@ -12,14 +12,14 @@ chapters:
   - ch03-litestar-and-range-streaming
   - ch04-arrow-shm-and-docs
 current_chapter: ch02-orm-and-sql-storage-contracts
-current_task: "storage-completeness:ch02:t01"
+current_task: "storage-completeness:ch02:t02"
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/gap-analysis_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
-plan_revision: 3
-plan_commit: e8901de4
-state_revision: 6
+plan_revision: 4
+plan_commit: 1e1f028a
+state_revision: 8
 last_verified_checkpoint: dc2c2053
 last_reviewed_chapter: ch01-native-engine-and-auth
 last_reviewed_commit: dc2c2053
@@ -98,7 +98,7 @@ Anchored at `HEAD @ cdb978d3` above `main @ 077a3fe9` (incorporating `db-layout-
 - Knowledge: [object-storage.md](../../knowledge/domains/storage/object-storage.md), [sqlspec-alchemy-and-dialects.md](../../knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md), [litestar.md](../../knowledge/domains/extensions/litestar.md), [adr-004-optional-driver-wheels-and-shm-ownership.md](../../knowledge/decisions/adr-004-optional-driver-wheels-and-shm-ownership.md), [ffi-and-gil-discipline.md](../../knowledge/patterns/rust/ffi-and-gil-discipline.md).
 - Project-local skills: [pyo3-bridge](../../../skills/pyo3-bridge/SKILL.md), [runtime-ipc](../../../skills/runtime-ipc/SKILL.md), [python-framework](../../../skills/python-framework/SKILL.md) (plus external Litestar plugin skills for `sqlspec`, `advanced-alchemy`, and `litestar`).
 
-The active storage-integration contract baseline is SQLSpec `0.71.1`, Advanced Alchemy `1.12.0`, and Django `6.1.3`. Chapter `ch02` worksheets cite their installed protocol/base-class sources, preserve concrete public adapter names, and declare callable omission/error semantics. `ObjectMeta` is the native metadata type.
+The active storage-integration contract baseline is SQLSpec `0.71.1`, Advanced Alchemy `1.12.0`, and Django `6.1.3`. SQLSpec reader factories retain native sync metadata lookup and lazy async read timing. Chapter `ch02` worksheets cite their installed protocol/base-class sources, preserve concrete public adapter names, and declare callable omission/error semantics. `ObjectMeta` is the native metadata type.
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
@@ -182,7 +182,7 @@ Progress: `[1/3 files documented]` (`object-storage.md` updated in `ch01`; user 
 ## 5. Implementation Plan
 
 - [x] [dc2c2053] ch01-native-engine-and-auth — Native Rust Storage Engine, GCP Auth Unification, and Fail-Closed Facade (chapters/ch01-native-engine-and-auth/spec.md)
-- [ ] ch02-orm-and-sql-storage-contracts — SQLSpec, Advanced Alchemy, and Django Storage Contracts (chapters/ch02-orm-and-sql-storage-contracts/spec.md)
+- [~] ch02-orm-and-sql-storage-contracts — SQLSpec, Advanced Alchemy, and Django Storage Contracts (chapters/ch02-orm-and-sql-storage-contracts/spec.md)
 - [ ] ch03-litestar-and-range-streaming — HTTP Range Streaming and Litestar Store/Static Integration (chapters/ch03-litestar-and-range-streaming/spec.md)
 - [ ] ch04-arrow-shm-and-docs — Strict Arrow SHM Allocation, Parquet Streaming, and OKF Sync (chapters/ch04-arrow-shm-and-docs/spec.md)
 
@@ -190,9 +190,9 @@ Progress: `[1/3 files documented]` (`object-storage.md` updated in `ch01`; user 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `e8901de4` on `feat/storage-updates` above `main @ 077a3fe9`; `plan_revision: 3`, `state: active`; `ch01-native-engine-and-auth` closed and approved by `@code-reviewer` and `@quality-reviewer` across `1bb622a7..dc2c2053`.
-- **Plan Identity**: `ch02` and its three worksheets share revision `3` anchored to plan baseline `e8901de4`; completed `ch01` and unchanged downstream chapters retain their owned revisions and review evidence.
-- **Active Chapter & Next Task**: `ch02-orm-and-sql-storage-contracts`, next task `storage-completeness:ch02:t01` (`ch02`–`ch04` pending, `8/12` tasks remaining).
+- **Verified Plan Baseline**: `1e1f028a` on `feat/storage-updates` above `main @ 077a3fe9`; `plan_revision: 4`, `state: active`; `ch01-native-engine-and-auth` closed and approved by `@code-reviewer` and `@quality-reviewer` across `1bb622a7..dc2c2053`.
+- **Plan Identity**: `ch02` and its three worksheets share revision `4` anchored to plan baseline `1e1f028a`; completed `ch01` and unchanged downstream chapters retain their owned revisions and review evidence.
+- **Active Chapter & Next Task**: `ch02-orm-and-sql-storage-contracts`, next task `storage-completeness:ch02:t02` (`ch02` active, `ch03`–`ch04` pending, `7/12` tasks remaining).
 - **Documentation & OKF Status**: `[1/3 files documented]` (`object-storage.md` synchronized in `ch01`; user guides scheduled in `storage-completeness:ch04:t03`).
 - **Active Invariants**: Zero `asyncio.to_thread` in `src/py/vertebra/storage/_store.py`; lazy `import_optional("vertebra._storage")` at construction time; `mypy.stubtest vertebra._storage` green after every FFI change.
 

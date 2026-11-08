@@ -5,7 +5,7 @@ chapter_id: ch02-orm-and-sql-storage-contracts
 title: Complete fail-closed SQLSpec ObjectStoreProtocol over SyncObjectStore and AsyncObjectStore
 description: Remove implicit memory:// defaults in vertebra.extensions.sqlspec.storage.ObjectStoreBackend and implement full sync/async SQLSpec ObjectStoreProtocol streaming, pagination, rename, and presigning methods.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -20,20 +20,23 @@ files:
 tests:
   - src/py/tests/unit/extensions/test_data_storage_integrations.py
 estimated_loc: 170
-plan_revision: 3
-plan_commit: e8901de4
-state_revision: 0
-claimed_by: null
-claimed_at: null
+plan_revision: 4
+plan_commit: 1e1f028a
+state_revision: 1
+claimed_by: agent:sqlspec_storage
+claimed_at: "2026-11-08T02:25:35.891222+00:00"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-08T02:37:24.610413+00:00"
+last_verified_commit: 7e13257bd58739520c11ca7a2c3e012867f660d9
+verification_evidence:
+  red: "uv run --no-sync pytest src/py/tests/unit/extensions/test_data_storage_integrations.py -k sqlspec -q: exit 1; omitted-target regression fails (1 failed, 5 passed)."
+  green: "uv run --no-sync ruff check src/py/vertebra/extensions/sqlspec/storage.py src/py/tests/unit/extensions/test_data_storage_integrations.py && uv run --no-sync mypy src/py/vertebra/extensions/sqlspec/storage.py && uv run --no-sync pytest src/py/tests/unit/extensions/test_data_storage_integrations.py -q: exit 0; 49 passed."
+  format: "uv run --no-sync ruff format src/py/vertebra/extensions/sqlspec/storage.py src/py/tests/unit/extensions/test_data_storage_integrations.py: exit 0."
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-08T02:09:14Z"
-commit: null
+updated_at: "2026-11-08T02:37:24.610413+00:00"
+commit: 7e13257bd58739520c11ca7a2c3e012867f660d9
 sources:
   - id: sqlspec-storage-mod
     resource: src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend
@@ -72,7 +75,7 @@ Make `ObjectStoreBackend` reject omitted/empty targets, retain SQLSpec's exact `
 - Add `get_stream_sync(path: str | Path, *, chunk_size: int | None = None) -> Iterator[StorageBuffer]` and `get_stream_async(...) -> AsyncIterator[StorageBuffer]` as iterator factories delegating to native `get_stream`. `StorageBuffer` is a type-only import from `vertebra._storage`. Keep SQLSpec `stream_read_sync(...) -> Iterator[bytes]` and `async def stream_read_async(...) -> AsyncIterator[bytes]`; callers await the latter before iterating and receive byte chunks. No full-object buffering.
 - Add `put_stream_sync(path: str | Path, chunks: Iterable[Buffer], **kwargs: Any) -> PutResult` and `async def put_stream_async(path: str | Path, chunks: AsyncIterable[Buffer] | Iterable[Buffer], **kwargs: Any) -> PutResult`, forwarding the same conditional/metadata write options to paired `put_stream`.
 - Add `list_page_sync(prefix: str = "", *, cursor: str | None = None, limit: int = 1000) -> tuple[list[str], str | None]` and the async counterpart. Qualify the prefix, unqualify each returned `ObjectMeta.path`, preserve the native cursor opaquely, and retain native `limit >= 1` validation.
-- Add `open_sync(path: str | Path, *, size: int | None = None, chunk_size: int = 65536) -> SyncReadableFile` and `open_async(...) -> AsyncReadableFile` as reader factories using the paired stores' `open_reader`; reader factories are synchronous and perform no I/O until reading.
+- Add `open_sync(path: str | Path, *, size: int | None = None, chunk_size: int = 65536) -> SyncReadableFile` and `open_async(...) -> AsyncReadableFile` as reader factories using the paired stores' `open_reader`; both factories are synchronous. The sync reader fetches native metadata immediately when `size=None`; supplying a size avoids that lookup. The async reader remains lazy until reading. Missing-object errors propagate at the native lookup/read boundary.
 - Caller wiring: SQLSpec `SyncStoragePipeline` / `AsyncStoragePipeline` → exact protocol methods → the shared paired native store; adapter extensions → native streaming/listing/reader seams. All key-bearing operations reject `..` segments before namespace qualification.
 
 ## Edge Cases & Error Semantics
@@ -103,13 +106,18 @@ Make `ObjectStoreBackend` reject omitted/empty targets, retain SQLSpec's exact `
 
 ## Acceptance Criteria
 
-- [ ] Omitted/blank storage configuration raises `ImproperConfigurationError`; real SQLSpec protocol and pipeline behavior remains conformant (R3, R4).
-- [ ] Streaming, pagination, readers, conditional metadata writes, and rename delegate to one shared native engine without full-object buffering (R1, R4).
-- [ ] Namespace traversal is rejected; configured and unsupported signing retain their public contracts (R4).
-- [ ] Arrow methods and `build_duckdb_gcs_secret_sql` remain intact for their owning downstream flows (R4).
-- [ ] Touched Python passes lint/type checks with zero inline comments.
+- [x] Omitted/blank storage configuration raises `ImproperConfigurationError`; real SQLSpec protocol and pipeline behavior remains conformant (R3, R4).
+- [x] Streaming, pagination, readers, conditional metadata writes, and rename delegate to one shared native engine without full-object buffering (R1, R4).
+- [x] Namespace traversal is rejected; configured and unsupported signing retain their public contracts (R4).
+- [x] Arrow methods and `build_duckdb_gcs_secret_sql` remain intact for their owning downstream flows (R4).
+- [x] Touched Python passes lint/type checks with zero inline comments.
 
 ## Notes & Discoveries
+
+- Native `SyncReadableFile.__init__` performs `store.head(key)` for omitted size; explicit size avoids the lookup. `AsyncReadableFile` defers metadata until reading. The adapter preserves both native behaviors under approved plan revision 4.
+- Real local and memory stores verify shared sync/async handles, byte and text write conditions, metadata, stream options, failed-source upload abort, opaque cursor continuation, seek/read/close, traversal refusal, and unsupported signing. Existing SQLSpec pipelines, Arrow, HMAC signing, and DuckDB-secret assertions pass unchanged.
+- Explicit stores retain their canonical address when the separate URI is omitted or blank; blank URI strings no longer override `store.url`.
+- Focused Red commands for `sqlspec_shared_store or sqlspec_write_metadata`, `sqlspec_native_streams`, `sqlspec_seekable`, `sqlspec and traversal`, and `sqlspec_explicit_store` each expose the corresponding missing behavior before its repair. The final gate runs against implementation commit `7e13257b`.
 
 - Installed contract baseline: SQLSpec `0.71.1`; metadata is `ObjectMeta`. Sync protocol names have `_sync`; native iterator/page/reader helpers are explicit adapter extensions.
 

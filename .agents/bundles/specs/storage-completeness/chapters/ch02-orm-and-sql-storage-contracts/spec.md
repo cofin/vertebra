@@ -5,15 +5,15 @@ chapter_id: ch02-orm-and-sql-storage-contracts
 title: "Chapter 02: SQLSpec, Advanced Alchemy, and Django Storage Contracts"
 description: Implement fail-closed SQLSpec ObjectStoreProtocol, Advanced Alchemy StorageBackend registration without monkeypatching, and @deconstructible Django Storage subclass over SyncObjectStore and AsyncObjectStore.
 status: stable
-state: planned
+state: active
 planning_status: complete
 depends_on_chapters:
   - ch01-native-engine-and-auth
 replan_trigger: null
-current_task: "storage-completeness:ch02:t01"
-plan_revision: 3
-plan_commit: e8901de4
-state_revision: 0
+current_task: "storage-completeness:ch02:t02"
+plan_revision: 4
+plan_commit: 1e1f028a
+state_revision: 1
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-07T04:15:00Z"
@@ -76,6 +76,8 @@ The execution baseline is SQLSpec `0.71.1`, Advanced Alchemy `1.12.0`, and Djang
 - **R5 (`ch02:t02`)**: Delete `setattr(storages, _storage_get_attr, storages.get_backend)` and `"memory://"` fallbacks from `vertebra.extensions.alchemy.storage`; require an explicit store/config/URI target in `ObjectStoreBackend` and its existing `register_storage_backend` forms; implement `save_object`, `save_object_async`, `get_content`, `get_content_async`, `delete_object`, `delete_object_async`, `sign`, and `sign_async` without `asyncio.to_thread`.
 - **R6 (`ch02:t03`)**: Refactor `vertebra.extensions.django.storage.DjangoStorage` into a `@deconstructible` subclass of `django.core.files.storage.Storage` (raising `MissingDependencyError` when `django` is absent and `ImproperConfigurationError` when `config` and `store` are omitted), returning `django.core.files.base.File` over `SyncReadableFile` from `_open`/`open`/`aopen` (async open awaits metadata before creating its synchronous Django File handle) and implementing `_save`, `save`, `asave`, `delete`, `adelete`, `exists`, `aexists`, `size`, `asize`, `listdir`, `url`, `aurl`, `path`, `get_available_name`, `generate_filename`, `get_valid_name`, `get_accessed_time`, `get_created_time`, `get_modified_time`, and `get_alternative_name`.
 
+Reader factories retain native metadata timing: `open_sync(size=None)` fetches object metadata immediately; an explicit size avoids that lookup. `open_async` returns a lazy async reader.
+
 ### 2.2 Edge-Case & Failure-Mode Matrix
 
 | Boundary | Deterministic Behavior |
@@ -104,7 +106,7 @@ Progress: `[0/0 files documented in ch02]` (documented in `ch04:t03` across `doc
 
 ## 5. Implementation Plan
 
-- [ ] storage-completeness:ch02:t01 — Complete fail-closed SQLSpec ObjectStoreProtocol over SyncObjectStore and AsyncObjectStore (tasks/t01-sqlspec-object-store-protocol.md)
+- [x] [7e13257bd58739520c11ca7a2c3e012867f660d9] storage-completeness:ch02:t01 — Complete fail-closed SQLSpec ObjectStoreProtocol over SyncObjectStore and AsyncObjectStore (tasks/t01-sqlspec-object-store-protocol.md)
 - [ ] storage-completeness:ch02:t02 — Remove storages.get monkeypatch and harden Advanced Alchemy ObjectStoreBackend (tasks/t02-advanced-alchemy-storage-backend.md)
 - [ ] storage-completeness:ch02:t03 — Subclass Django Storage (@deconstructible) with File handles and full metadata contract (tasks/t03-django-deconstructible-storage.md)
 
@@ -112,8 +114,8 @@ Progress: `[0/0 files documented in ch02]` (documented in `ch04:t03` across `doc
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `e8901de4`; `depends_on_chapters: [ch01-native-engine-and-auth]`, `state: planned`.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
+- **Verified Plan Baseline**: `1e1f028a`; `depends_on_chapters: [ch01-native-engine-and-auth]`, `state: active`.
+- **Remaining Tasks in Chapter**: `t02`, `t03` (`2/3` pending); `t01` is completed at `7e13257b` and awaits chapter review.
 - **Active Invariants**: Zero `asyncio.to_thread` in `extensions/alchemy/storage.py`; zero `storages.get` monkeypatching; exact installed SQLSpec `_sync` / `_async` names and Advanced Alchemy `ObjectStoreBackend.get_content[_async]`; `build_duckdb_gcs_secret_sql` preserved intact.
 
 [^sqlspec-storage]: `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` — SQLSpec object storage adapter.
