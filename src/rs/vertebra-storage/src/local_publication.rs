@@ -262,6 +262,7 @@ impl LocalPublication {
         &self,
         from: &StorePath,
         to: &StorePath,
+        if_not_exists: bool,
     ) -> Result<(), StorageError> {
         let source = self.store.path_to_filesystem(from)?;
         let destination = self.store.path_to_filesystem(to)?;
@@ -273,7 +274,21 @@ impl LocalPublication {
         let _guards = self
             .lock_parents(&[source.clone(), destination.clone()])
             .await?;
-        std::fs::rename(source, destination)?;
+        if if_not_exists {
+            std::fs::hard_link(&source, &destination).map_err(|error| {
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    StorageError::AlreadyExists {
+                        path: to.to_string(),
+                        message: error.to_string(),
+                    }
+                } else {
+                    error.into()
+                }
+            })?;
+            std::fs::remove_file(source)?;
+        } else {
+            std::fs::rename(source, destination)?;
+        }
         Ok(())
     }
 
@@ -337,6 +352,169 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     const LOCK_NAME: &str = ".vtb-cas-lock#0";
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sdk_create_only_rename_partial_failure_characterization() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalFileSystem::new_with_prefix(root.path()).unwrap();
+        let source = StorePath::from("readonly/source");
+        let destination = StorePath::from("writable/destination");
+        store
+            .put(&source, Bytes::from_static(b"source payload").into())
+            .await
+            .unwrap();
+        std::fs::create_dir(root.path().join("writable")).unwrap();
+        let parent = root.path().join("readonly");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = store.rename_if_not_exists(&source, &destination).await;
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(result.is_err());
+        for key in [&source, &destination] {
+            assert_eq!(
+                store.get(key).await.unwrap().bytes().await.unwrap(),
+                b"source payload"[..]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn create_only_rename_preserves_conflicts_and_waits_for_parent_guards() {
+        let root = tempfile::tempdir().unwrap();
+        let publication = publication(root.path());
+        let source = StorePath::from("from/source");
+        let destination = StorePath::from("to/destination");
+        publication
+            .store
+            .put(&source, Bytes::from_static(b"source").into())
+            .await
+            .unwrap();
+        publication
+            .store
+            .put(&destination, Bytes::from_static(b"before").into())
+            .await
+            .unwrap();
+        let held = open_lock(&root.path().join("from"));
+        held.try_lock().unwrap();
+        let mut waiting = Box::pin(publication.rename(&source, &destination, true));
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        publication
+            .store
+            .put(
+                &destination,
+                Bytes::from_static(b"competing destination").into(),
+            )
+            .await
+            .unwrap();
+        drop(held);
+        assert!(waiting.await.unwrap_err().is_already_exists());
+        assert_eq!(
+            publication
+                .store
+                .get(&source)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            b"source"[..]
+        );
+        assert_eq!(
+            publication
+                .store
+                .get(&destination)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            b"competing destination"[..]
+        );
+        publication.delete(&destination).await.unwrap();
+        publication
+            .rename(&source, &destination, true)
+            .await
+            .unwrap();
+        assert!(matches!(
+            publication.store.head(&source).await,
+            Err(object_store::Error::NotFound { .. })
+        ));
+        assert_eq!(
+            publication
+                .store
+                .get(&destination)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            b"source"[..]
+        );
+        publication
+            .store
+            .put(&source, Bytes::from_static(b"overwrite").into())
+            .await
+            .unwrap();
+        publication
+            .rename(&source, &destination, false)
+            .await
+            .unwrap();
+        assert!(matches!(
+            publication.store.head(&source).await,
+            Err(object_store::Error::NotFound { .. })
+        ));
+        assert_eq!(
+            publication
+                .store
+                .get(&destination)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            b"overwrite"[..]
+        );
+        assert!(root.path().join("from").join(LOCK_NAME).exists());
+        assert!(root.path().join("to").join(LOCK_NAME).exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_only_rename_reports_source_removal_failure_without_rollback() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let publication = publication(root.path());
+        let source = StorePath::from("readonly/source");
+        let destination = StorePath::from("writable/destination");
+        publication
+            .store
+            .put(&source, Bytes::from_static(b"source payload").into())
+            .await
+            .unwrap();
+        let parent = root.path().join("readonly");
+        drop(open_lock(&parent));
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = publication.rename(&source, &destination, true).await;
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            matches!(result, Err(StorageError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied)
+        );
+        for key in [&source, &destination] {
+            assert_eq!(
+                publication
+                    .store
+                    .get(key)
+                    .await
+                    .unwrap()
+                    .bytes()
+                    .await
+                    .unwrap(),
+                b"source payload"[..]
+            );
+        }
+        assert!(parent.join(LOCK_NAME).exists());
+    }
 
     #[tokio::test]
     async fn stages_are_private_and_cleanup_only_owned_artifacts() {
@@ -621,7 +799,7 @@ mod tests {
         let copied = StorePath::from("other/copy");
         publication.copy(&key, &copied).await.unwrap();
         let moved = StorePath::from("third/moved");
-        publication.rename(&copied, &moved).await.unwrap();
+        publication.rename(&copied, &moved, false).await.unwrap();
         assert!(publication.store.head(&copied).await.is_err());
         assert_eq!(
             publication
