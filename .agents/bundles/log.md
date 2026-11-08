@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## Verified bounded Arrow and Parquet readers
+
+Source `ee35d9d4` adds native sync/async batch readers and schema-preserving full-Table helpers, including IPC-file fallback. Four Red cases lead to67 passing canonical store cases with18 new codec cases and4 real native S3 HTTP cancellation/responsiveness barriers. Focused MyPy,Ruff,format,diff gates pass. Chapter ch04 executes its writer worksheet; three tasks remain across ch04/ch05.
+
 ## Verified strict named Arrow SHM allocation
 
 Source `2e60f224` removes native/Python anonymous allocation fallback and JSON pseudo-IPC from threshold-selected ArrowCursor construction. Red reproduces native invalid-name success and three Python failures. Locked Rust37unit+2stream tests and Clippy pass; all five extensions rebuild,114 Python cases pass with5 existing psycopg skips, and five-extension stubtest passes. Cargo.lock remains unchanged. Chapter ch04 now executes bounded batch readers; four tasks remain.

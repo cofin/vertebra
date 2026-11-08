@@ -7,7 +7,7 @@ description: Add sync/async batch readers using native stream/range reads and ex
   SyncPool codec execution. Preserve backpressure, dictionary state, projection, caller-loop
   responsiveness, and deterministic cancellation cleanup.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -27,18 +27,35 @@ tests:
 estimated_loc: 240
 plan_revision: 9
 plan_commit: 222cbf99
-state_revision: 1
+state_revision: 2
 claimed_by: agent:arrow-reader-executor
 claimed_at: '2026-11-08T16:55:18.904122Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-08T17:06:25.072586Z'
+last_verified_commit: ee35d9d4
+verification_evidence:
+  red:
+    exit_code: 1
+    result: Four cases fail for missing public batch methods and private full-Table
+      helpers.
+  green:
+    command: UV_NO_SYNC=1 uv run --no-sync pytest src/py/tests/unit/storage/test_storage_store.py
+      -q
+    exit_code: 0
+    result: 67 passed, including18 new Arrow/Parquet cases and4 real native S3 HTTP
+      cancellation/responsiveness barriers.
+  typing:
+    command: UV_NO_SYNC=1 uv run --no-sync mypy src/py/vertebra/storage
+    exit_code: 0
+    result: 4 source files pass
+  lint_format_diff:
+    exit_code: 0
+    result: Focused Ruff,format,diff checks pass
 created_at: '2026-11-08T00:00:00Z'
-updated_at: '2026-11-08T16:55:18.904122Z'
-commit: null
+updated_at: '2026-11-08T17:06:25.072586Z'
+commit: ee35d9d4
 sources:
 - id: store
   resource: src/py/vertebra/storage/_store.py::AsyncReadableFile
@@ -110,8 +127,8 @@ Red: `uv run --no-sync pytest src/py/tests/unit/storage/test_storage_store.py -k
 
 ## Acceptance Criteria
 
-- [ ] R8 sync/async public iterators yield real batches lazily through bounded native reads.
-- [ ] R8 codec execution stays off-loop and cancellation releases source and worker without full-file materialization.
+- [x] R8 sync/async public iterators yield real batches lazily through bounded native reads.
+- [x] R8 codec execution stays off-loop and cancellation releases source and worker without full-file materialization.
 
 ## Notes & Discoveries
 

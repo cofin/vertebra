@@ -16,19 +16,19 @@ chapters:
 - ch04-arrow-shm-and-docs
 - ch05-sqlspec-arrow-and-docs
 current_chapter: ch04-arrow-shm-and-docs
-current_task: storage-completeness:ch04:t02
+current_task: storage-completeness:ch04:t03
 parent_prd: native-data-platform
 research:
 - ../native-data-platform/research/gap-analysis_20261103.md
 - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 9
 plan_commit: 222cbf99
-state_revision: 15
+state_revision: 16
 last_verified_checkpoint: 50e9c631
 last_reviewed_chapter: ch03-litestar-and-range-streaming
 last_reviewed_commit: 50e9c631
 created_at: '2026-11-03T04:05:00Z'
-updated_at: '2026-11-08T16:55:18.904122Z'
+updated_at: '2026-11-08T17:06:25.072586Z'
 generated:
   by: flow-setup
   at: '2026-11-07T04:15:00Z'
@@ -211,7 +211,7 @@ Progress: `[3/5 files documented]`. Storage knowledge covers native storage and 
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Current State**: Chapters `ch01` through `ch03` are reviewed and complete at their recorded checkpoints; `ch04` is active on strict Arrow SHM allocation and real IPC.
-- **Full Plan**: `3/5` chapters and `10/14` tasks are complete. Four tasks remain: two bounded Arrow/storage codec tasks in `ch04`, and two SQLSpec/documentation tasks in `ch05`.
+- **Full Plan**: `3/5` chapters and `11/14` tasks are complete. Three tasks remain: bounded Arrow/storage writers in `ch04`, and two SQLSpec/documentation tasks in `ch05`.
 - **Plan Identity**: Completed `ch03` owns revision `8`; active `ch04` and planned `ch05` own revision `9` at `222cbf99`. Completed chapters retain their verified owned revisions.
 - **Documentation**: `[3/5 files documented]`; both consumer guides remain scheduled in `ch05:t02`.
 - **Invariants**: Native async I/O remains on the caller loop; PyArrow codecs use bounded SyncPool steps; default Parquet batch prefetch is disabled, with explicit caller opt-in documented.
