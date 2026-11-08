@@ -26,7 +26,7 @@ tests:
   - src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
   - src/py/tests/unit/db/test_postgres_event_hooks.py
 estimated_loc: 210
-plan_revision: 3
+plan_revision: 4
 plan_commit: dd432f18
 state_revision: 0
 claimed_by: null
@@ -38,7 +38,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T16:45:00Z"
+updated_at: "2026-11-07T18:00:00Z"
 commit: null
 sources:
   - id: pg-notify-mod

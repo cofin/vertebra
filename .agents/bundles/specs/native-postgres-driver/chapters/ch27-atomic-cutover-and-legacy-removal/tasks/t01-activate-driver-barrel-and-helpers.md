@@ -28,7 +28,7 @@ tests:
   - src/py/tests/unit/db/test_postgres_native_adapter_pipeline.py
   - src/py/tests/unit/db/test_postgres_native_adapter_arrow.py
 estimated_loc: 230
-plan_revision: 3
+plan_revision: 4
 plan_commit: dd432f18
 state_revision: 0
 claimed_by: null
@@ -40,7 +40,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T16:45:00Z"
+updated_at: "2026-11-07T18:00:00Z"
 commit: null
 sources:
   - id: pg-driver-py
@@ -76,7 +76,7 @@ Out of scope: `extensions/sqlspec/adapters.py` and `extensions/sqlalchemy/dialec
 - [src/py/vertebra/db/adapters/postgres/__init__.py](../../../../../../../src/py/vertebra/db/adapters/postgres/__init__.py) — `__all__`, `__lazy_modules__`, and `_EXPORT_MAP` package exports [^pg-init-py].
 - [src/py/vertebra/db/adapters/postgres/embeddings.py](../../../../../../../src/py/vertebra/db/adapters/postgres/embeddings.py) — `PostgresEmbeddingPushdown.embed_documents`, `similarity_search`, and `_uses_dollar_binds` [^pg-embeddings-py].
 - [src/py/vertebra/db/adapters/postgres/config.py](../../../../../../../src/py/vertebra/db/adapters/postgres/config.py) — `PostgreSQLConfig`, `DatabaseRegistry` resolution, and native primitive option projection.
-- [src/py/tests/unit/db/test_postgres_driver.py](../../../../../../../src/py/tests/unit/db/test_postgres_driver.py) — Existing legacy port tests (`_SQLiteAsyncPGPool`, `MockConnectionPool`, `memory://`, `executor=...`) to migrate to shared native ports.
+- [src/py/tests/unit/db/test_postgres_driver.py](../../../../../../../src/py/tests/unit/db/test_postgres_driver.py) — Existing legacy port tests (`_SQLiteAsyncPGPool`, `MockConnectionPool`, `executor=...`) to migrate to shared native ports; `driver-fail-loud` already replaces its `memory://` cases.
 - [.agents/bundles/specs/native-postgres-driver/contracts.md](../../../contracts.md) — Final activation, value record, and constructor invariants [^pg-contracts].
 
 ## Symbol & Signature Contracts
@@ -98,7 +98,7 @@ Out of scope: `extensions/sqlspec/adapters.py` and `extensions/sqlalchemy/dialec
 
 - Between `ch27:t01` and `ch27:t02`, pre-`t02` SQLSpec/SQLAlchemy sync callers that still emit `%s` pyformat placeholders continue passing because `SyncPostgreSQLDriver._prepare_native_query` lowers `%s` to `$N` via `PostgreSQLCore.prepare_native_query`.
 - Calling `SyncPostgreSQLDriver` or `AsyncPostgreSQLDriver` when `vertebra._postgres` is uninstalled raises `MissingDependencyError` naming `vertebra-core[postgres]` (`extra="postgres"`).
-- Legacy test-only constructor kwargs (`executor=...`, `async_executor=...`) raise `TypeError`, and `PostgreSQLConfig(dsn="memory://")` fails closed with `ImproperConfigurationError`.
+- Legacy test-only constructor kwargs (`executor=...`, `async_executor=...`) raise `TypeError`, and `PostgreSQLConfig(dsn="memory://")` keeps failing closed with `ImproperConfigurationError` (the `driver-fail-loud` guard) on the permanent drivers.
 - `PostgresEmbeddingPushdown.embed_documents` raises `DataError` when the returned row count disagrees with `len(texts)` and `ValueError` on empty `texts` or nonpositive `dimensions`.
 
 ## Public-Seam Test Blueprint

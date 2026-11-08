@@ -11,13 +11,13 @@ depends_on_chapters:
   - ch21-live-notifications
 replan_trigger: null
 current_task: "native-postgres-driver:ch22:t01"
-plan_revision: 3
+plan_revision: 4
 plan_commit: dd432f18
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T05:00:00Z"
+updated_at: "2026-11-07T18:00:00Z"
 generated:
   by: flow-revise
   at: "2026-11-07T05:00:00Z"
@@ -33,7 +33,7 @@ sources:
     resource: .agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md
     title: PostgreSQL Protocol 3.0 CopyBoth and pgoutput v1 wire constraints
   - id: pg-core-rs
-    resource: src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool
+    resource: src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame
     title: Shared PostgreSQL wire framing substrate in vertebra-db
   - id: cdc-domain
     resource: .agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md
@@ -141,11 +141,11 @@ Progress: `[0/0 files documented in ch22]` (user guides and OKF domain chapters 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dd432f18`; chapter `state: planned`, `planning_status: complete`.
+- **Verified Baseline**: `HEAD @ dd432f18`; chapter `state: planned`, `planning_status: complete`, `plan_revision: 4`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
 - **Downstream Dependents**: Unblocks `ch23-replication-feedback-resume-and-bridge` and `ch24-change-source-and-checkpoints`.
 
 [^npd-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Native PostgreSQL public contracts for CDC, values, and dedicated sessions.
 [^npd-proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — PostgreSQL Protocol 3.0 CopyBoth and pgoutput v1 wire constraints.
-[^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` — Shared PostgreSQL wire framing substrate in vertebra-db.
+[^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` — Shared stateless PostgreSQL wire framing helpers in vertebra-db (the module holds no pool type after `driver-fail-loud`).
 [^cdc-domain]: `.agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md` — Adapter-owned CDC envelopes, unchanged TOAST invariants, and int64 event IDs.

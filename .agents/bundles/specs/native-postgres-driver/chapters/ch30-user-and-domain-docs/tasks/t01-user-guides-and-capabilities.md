@@ -23,7 +23,7 @@ files:
   - docs/reference/database-capabilities.md
 tests: []
 estimated_loc: 225
-plan_revision: 3
+plan_revision: 4
 plan_commit: dd432f18
 state_revision: 0
 claimed_by: null
@@ -35,7 +35,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T16:45:00Z"
+updated_at: "2026-11-07T18:00:00Z"
 commit: null
 sources:
   - id: doc-databases
@@ -70,7 +70,7 @@ tags:
 
 Update public user documentation in `docs/usage/databases.md`, `docs/usage/analytics-and-cdc.md`, and `docs/reference/database-capabilities.md` to match the completed `vertebra-postgres` native driver and `vertebra.db.adapters.postgres.change_stream` contracts [^doc-databases] [^doc-cdc] [^doc-capabilities] [^pg-config] [^pg-notify] [^pg-contracts]:
 1. `docs/usage/databases.md`:
-   - Add `vertebra-core[postgres]` (`vertebra-postgres`) to `Optional Engine Extras` (`uv`, `pip`, `pdm`, `poetry`), remove any PostgreSQL `psycopg`/`asyncpg`/`memory://` fallback wording (preserving `sqlite:///:memory:` and other engine examples), and document clean-break constructor and supplied-pool ownership (`share_pool`, `validate_configuration`).
+   - Add `vertebra-core[postgres]` (`vertebra-postgres`) to `Optional Engine Extras` (`uv`, `pip`, `pdm`, `poetry`), remove any PostgreSQL `psycopg`/`asyncpg` fallback wording (PostgreSQL `memory://` is absent from the `driver-fail-loud` baseline; preserve `sqlite:///:memory:` and other engine examples), and document clean-break constructor and supplied-pool ownership (`share_pool`, `validate_configuration`).
    - Document native `$N` passthrough vs lexer-aware raw `%s`/`%(name)s` emulation (rejecting ambiguous ordinary backslash-quote strings in favor of explicit `E'...'`), SQLSpec default `ParameterStyle.NUMERIC` (preserving explicit caller `StatementConfig` identity), SQLAlchemy `+vtb` `numeric_dollar` compilation, single-statement extended `execute` vs explicit parameterless `query_multi(sql)` returning ordered `PostgresQueryResult` records (`42601` on multi-SQL `execute`), and optional per-command `timeout`.
    - Document transaction/savepoint-scoped single-`Sync` `pipeline()` (`pipe.select` / `pipe.execute` returning `None`, `pipe.results()` flushing once without early commit, rollback on caller hydration/cardinality error, cancellation/retirement rules), cold text vs warm binary OID negotiation, lossless `PgInterval`, `PgArray`, `PgComposite`, `PgTemporal` (`wire_text` rebind refusal), `PgJson`, `PgBitString`, and `PgVector` (`1..16000`), binary `COPY` & `VTBARROW` `ArrowCursor` resource closure, `PgBouncer` `pooler_mode` vs `protocol_level_pooler_cache`, exact `PGUSER`/`PGDATABASE` DSN precedence, and explicit `sslmode="disable"` only for non-TLS local test fixtures.
 2. `docs/usage/analytics-and-cdc.md`:

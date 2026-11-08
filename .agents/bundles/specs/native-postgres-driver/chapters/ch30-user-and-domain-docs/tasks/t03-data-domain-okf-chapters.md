@@ -21,7 +21,7 @@ files:
   - .agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md
 tests: []
 estimated_loc: 185
-plan_revision: 3
+plan_revision: 4
 plan_commit: dd432f18
 state_revision: 0
 claimed_by: null
@@ -33,7 +33,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T16:45:00Z"
+updated_at: "2026-11-07T18:00:00Z"
 commit: null
 sources:
   - id: okf-drivers
@@ -64,7 +64,7 @@ tags:
 
 Synchronize `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` and `.agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md` in strict present tense (`<= 200` lines each per `DOC-08`) to reflect the completed `vertebra-postgres` architecture and `vertebra.db.adapters.postgres.change_stream` contracts [^okf-drivers] [^okf-cdc] [^pg-driver] [^sqlspec-adapters] [^pg-contracts]:
 1. `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` (`<= 200` lines):
-   - Update the bounded truth block (`<= 40` lines) and PostgreSQL adapter row/prose to document `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owning live Protocol 3.0 sockets (`SyncPostgresClient`, `AsyncPostgresClient`), physical connection pools (`SyncPostgresPool`, `AsyncPostgresPool`), `SCRAM-SHA-256`/`SCRAM-SHA-256-PLUS`, automatic Cloud SQL and AlloyDB Admin discovery + scoped IAM/mTLS caches, lossless `Pg*` value records, binary `COPY`, and native `VTBARROW` `ShmCapsule` production, while `vertebra-db/src/postgres/mod.rs` retains shared SHM admission metadata and CPU wire helpers.
+   - Update the bounded truth block (`<= 40` lines) and PostgreSQL adapter row/prose to document `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owning live Protocol 3.0 sockets (`SyncPostgresClient`, `AsyncPostgresClient`), physical connection pools (`SyncPostgresPool`, `AsyncPostgresPool`), `SCRAM-SHA-256`/`SCRAM-SHA-256-PLUS`, automatic Cloud SQL and AlloyDB Admin discovery + scoped IAM/mTLS caches, lossless `Pg*` value records, binary `COPY`, and native `VTBARROW` `ShmCapsule` production, while `vertebra-db/src/postgres/mod.rs` retains only stateless CPU wire and codec helpers (`driver-fail-loud` deletes the SHM-admission `PostgresPool`).
    - Add attested `sources:` entries and matching provenance footnotes for the live `src/rs/vertebra-postgres/` and `src/py/vertebra/db/adapters/postgres/` modules present on the branch at `ch30:t03` execution time, and prepend a fresh `verified:` entry.
 2. `.agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md` (`<= 200` lines):
    - Replace stale pre-cutover claims (`PostgreSQL sync uses positional pyformat and async uses numeric binds` and `sync uses psycopg %s, async uses asyncpg $N`) with present-tense unified `ParameterStyle.NUMERIC` (`$N`) compilation across both `PostgreSQLSyncDriver` and `PostgreSQLAsyncDriver` (and lexer-aware `%s`/`%(name)s` lowering on raw driver calls).

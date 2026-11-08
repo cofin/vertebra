@@ -7,16 +7,19 @@ status: draft
 state: draft
 has_chapters: false
 parent_prd: native-data-platform
+depends_on_flows:
+  - driver-fail-loud
+  - native-postgres-driver
 research:
   - ../native-data-platform/research/gap-analysis_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
-plan_revision: 1
+plan_revision: 2
 plan_commit: null
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+updated_at: "2026-11-07T18:00:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
@@ -34,6 +37,9 @@ sources:
   - id: sqlspec-proxy
     resource: src/py/vertebra/extensions/sqlspec/proxy.py
     title: ProxySyncDriver and ProxyAsyncDriver upstream SQLSpec wrappers
+  - id: fail-loud-baseline
+    resource: .agents/bundles/specs/driver-fail-loud/spec.md
+    title: Upstream flow that deletes the unused admission-only *Pool structs from vertebra-db
 tags:
   - broker
   - shm
@@ -60,7 +66,7 @@ Users keep existing configurations such as `sqlspec.adapters.asyncpg.AsyncpgConf
 1. **Broker-owned pools & `dbrpc` transport.**
    - Create `vertebra-core/src/dbrpc/` defining versioned `msgspec` `array_like=True` RPC frames (`execute`, `execute_many`, `begin`, `commit`, `rollback`, `savepoint`, `fetch_chunk`, `cancel`, `close`) over `vertebra-core/src/transport/ring_pair.rs` plus a dynamic `BrokerEngineBackend` registration trait in `vertebra-db` so installed `vertebra-<engine>` wheels register native Rust pools at startup.
    - Partition `vertebra-core/src/broker.rs::ShmLeaseTable` per `BaseDatabaseConfig.pool_key()` using deterministic cross-process hashing (`xxh3`/FNV, never seeded Python `hash()`), lease heartbeats instead of blind 30s TTL reaping, and standalone broker daemon startup for external `uvicorn`/`granian` workers alongside `vertebra-http` supervisor spawning.
-   - Delete `SyncInMemoryBrokerTransport`, `AsyncInMemoryBrokerTransport`, `BrokerPlugin(use_shm=False)`, `extensions/alchemy/broker.py::StatementCache`, and unused admission-only `*Pool` structs in `vertebra-db` (`SyncSHMBrokerTransport` and `AsyncSHMBrokerTransport` over `SyncSHMSessionBroker` / `AsyncSHMSessionBroker` and `SyncConnectionLease` / `AsyncConnectionLease` run locally on Linux and macOS via `ShmRegion`/`memfd` without external services).
+   - Delete `SyncInMemoryBrokerTransport`, `AsyncInMemoryBrokerTransport`, `BrokerPlugin(use_shm=False)`, and `extensions/alchemy/broker.py::StatementCache` (`SyncSHMBrokerTransport` and `AsyncSHMBrokerTransport` over `SyncSHMSessionBroker` / `AsyncSHMSessionBroker` and `SyncConnectionLease` / `AsyncConnectionLease` run locally on Linux and macOS via `ShmRegion`/`memfd` without external services). `driver-fail-loud` deletes the unused admission-only `*Pool` structs in `vertebra-db`; native Rust pools register through `BrokerEngineBackend` on that baseline [^fail-loud-baseline].
 2. **Data path & session affinity.**
    - Stream result sets back to workers as `VTBARROW` SHM frames (`ArrowCursor`) or compact row frames, supporting chunked cursor iteration and `cancel()` propagation across `SyncSHMBrokerTransport` and `AsyncSHMBrokerTransport`.
    - Pin leased connections (`SyncConnectionLease` / `AsyncConnectionLease`) across transactions, temporary tables, prepared statements, and session GUCs (`SET LOCAL` / RLS context).
@@ -81,7 +87,7 @@ Users keep existing configurations such as `sqlspec.adapters.asyncpg.AsyncpgConf
 
 ## Dependencies
 
-`db-layout-and-contract` (`main @ 21c99f95`), `integration-remediation/db-engine-primitives` (`main @ 80ff8a65`), and `native-postgres-driver` (first native Rust pool hosted by the broker).
+`db-layout-and-contract` (`main @ 21c99f95`), `integration-remediation/db-engine-primitives` (`main @ 80ff8a65`), [`driver-fail-loud`](../driver-fail-loud/spec.md) (deletes the admission-only `*Pool` structs in `vertebra-db`; this flow starts from that baseline), and `native-postgres-driver` (first native Rust pool hosted by the broker).
 
 ## Acceptance Boundary
 
@@ -102,7 +108,7 @@ These are planning research gaps, not runtime acceptance evidence. Resolve them 
 
 ## Draft Task Outline
 
-- t01 Per-`pool_key` `ShmLeaseTable` partitions, deterministic hashing, lease heartbeats, and dead `*Pool`/`SyncInMemoryBrokerTransport`/`AsyncInMemoryBrokerTransport`/`StatementCache` cleanup.
+- t01 Per-`pool_key` `ShmLeaseTable` partitions, deterministic hashing, lease heartbeats, and dead `SyncInMemoryBrokerTransport`/`AsyncInMemoryBrokerTransport`/`StatementCache` cleanup.
 - t02 `vertebra-core/src/dbrpc/` ring RPC protocol + `BrokerEngineBackend` dynamic pool registration + `VTBARROW` streaming + cancellation.
 - t03 Session/transaction affinity (`SyncConnectionLease` / `AsyncConnectionLease`) and standalone + supervisor broker host lifecycle.
 - t04 `ProxySyncConfig`/`ProxyAsyncConfig` and `ProxySyncDriver`/`ProxyAsyncDriver` on `SyncDriverAdapterBase`/`AsyncDriverAdapterBase`.
@@ -113,3 +119,4 @@ These are planning research gaps, not runtime acceptance evidence. Resolve them 
 [^core-broker]: `src/rs/vertebra-core/src/broker.rs` — Shared-memory ring broker lease table and pool partitioning.
 [^broker-transport]: `src/py/vertebra/extensions/broker/transport.py` — SyncSHMBrokerTransport and AsyncSHMBrokerTransport worker transports.
 [^sqlspec-proxy]: `src/py/vertebra/extensions/sqlspec/proxy.py` — ProxySyncDriver and ProxyAsyncDriver upstream SQLSpec wrappers.
+[^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that deletes the unused admission-only `*Pool` structs from vertebra-db.

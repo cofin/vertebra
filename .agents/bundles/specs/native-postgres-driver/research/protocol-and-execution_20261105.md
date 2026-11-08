@@ -7,7 +7,7 @@ status: stable
 state: promoted
 promoted_to: native-postgres-driver
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+updated_at: "2026-11-07T18:00:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
@@ -112,7 +112,7 @@ postgres-native-tls forwards native_tls::TlsStream::tls_server_end_point, but in
 
 **pgvector.** Existing local broad framing is correct, but dimensions allow u16::MAX versus upstream signed16-bit/max16000; decoders allow zero/nonfinite data; local half conversion rounds midpoints upward rather than ties-to-even and may turn finite overflow into Inf. Compare golden bytes against real server send/recv, including midpoint/subnormal/overflow/dimension cases. [vector codec](https://raw.githubusercontent.com/pgvector/pgvector/master/src/vector.c), [half codec](https://raw.githubusercontent.com/pgvector/pgvector/master/src/halfvec.c), [half conversion](https://raw.githubusercontent.com/pgvector/pgvector/master/src/halfutils.h), [vector limit](https://raw.githubusercontent.com/pgvector/pgvector/master/src/vector.h), [half limit](https://raw.githubusercontent.com/pgvector/pgvector/master/src/halfvec.h).
 
-**PgBouncer.** Transaction-mode named protocol statements work when max_prepared_statements>0; SQL PREPARE/EXECUTE are different. Local capacity helper has a capability override, but PostgresPool construction ignores it. Specify mode plus verified/configured capability and reset/reconnect invalidation. PgBouncer1.26 adds ParameterStatus pgbouncer.version, pgbouncer.pool_mode, pgbouncer.max_prepared_statements; older servers need configured fallback. Test transaction mode with support both enabled and disabled. [Configuration](https://www.pgbouncer.org/config.html#max_prepared_statements), [changelog](https://www.pgbouncer.org/changelog.html).
+**PgBouncer.** Transaction-mode named protocol statements work when max_prepared_statements>0; SQL PREPARE/EXECUTE are different. The native pool owns the capability override (vertebra-db has no PostgreSQL pool helper after driver-fail-loud). Specify mode plus verified/configured capability and reset/reconnect invalidation. PgBouncer1.26 adds ParameterStatus pgbouncer.version, pgbouncer.pool_mode, pgbouncer.max_prepared_statements; older servers need configured fallback. Test transaction mode with support both enabled and disabled. [Configuration](https://www.pgbouncer.org/config.html#max_prepared_statements), [changelog](https://www.pgbouncer.org/changelog.html).
 
 **Replication.** Separate from NOTIFY: replication=database, simple-query START_REPLICATION, CopyBothResponse, CopyData WAL/keepalive and standby-status feedback with persisted acknowledged LSN. Pinned backend Message lacks CopyBothResponse; add framing explicitly. [Replication protocol](https://www.postgresql.org/docs/18/protocol-replication.html).
 
@@ -235,7 +235,8 @@ scopes. Unknown/expired/inside-skew lifetime or missing grant fails before passw
 transmission; the provider constructs a cache with the actual expiry. Existing
 unscoped consumers retain their legacy behavior.
 
-Repository substrate facts: shared PostgresPool is SHM admission without sockets;
+Repository substrate facts: vertebra-db carries no PostgreSQL pool type
+(driver-fail-loud deletes the SHM-admission PostgresPool);
 Connection is a lifecycle trait; shared task abort alone sends no CancelRequest;
 ShmArrowStreamWriter accepts encoded IPC and pads append calls. The native engine
 supplies real pool/session ownership and exact IPC framing. Optional extensions

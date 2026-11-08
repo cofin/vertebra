@@ -16,7 +16,6 @@ read_set:
   - src/rs/vertebra-postgres/src/config.rs
   - src/rs/vertebra-postgres/src/session.rs
   - src/rs/vertebra-postgres/src/statements.rs
-  - src/rs/vertebra-db/src/postgres/mod.rs
 files:
   - src/rs/vertebra-postgres/src/pool.rs
   - src/rs/vertebra-postgres/src/config.rs
@@ -24,7 +23,7 @@ files:
 tests:
   - src/rs/vertebra-postgres/tests/physical_pool.rs
 estimated_loc: 235
-plan_revision: 3
+plan_revision: 4
 plan_commit: dd432f18
 state_revision: 0
 claimed_by: null
@@ -36,15 +35,15 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T05:00:00Z"
+updated_at: "2026-11-07T18:00:00Z"
 commit: null
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
     title: Frozen native PostgreSQL pool bounds, timeouts, and configuration identity contracts
-  - id: pg-shm-pool
-    resource: src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool
-    title: Existing SHM admission counter kept distinct from physical socket pooling
+  - id: fail-loud-baseline
+    resource: .agents/bundles/specs/driver-fail-loud/spec.md
+    title: Upstream flow that deletes vertebra_db::postgres::PostgresPool
   - id: pg-conn-rs
     resource: src/rs/vertebra-db/src/connection.rs::TransportStream
     title: Shared transport stream and deadline primitives
@@ -59,7 +58,7 @@ tags:
 
 ## Objective & Scope Boundary
 
-Own real authenticated `PostgresConnection` sockets inside a concrete Rust `PostgresPool` (`vertebra-postgres` `rlib`) with bounded lease permits, lazy `min_size` warmup on first acquisition, and canonical full-configuration comparison [^pg-contracts] [^pg-shm-pool]. Full rollback/`DISCARD ALL` reset and draining shutdown (`ch14:t02`) and Python `SyncPostgresPool` / `AsyncPostgresPool` classes (`ch15:t01`) are out of scope.
+Own real authenticated `PostgresConnection` sockets inside a concrete Rust `PostgresPool` (`vertebra-postgres` `rlib`) with bounded lease permits, lazy `min_size` warmup on first acquisition, and canonical full-configuration comparison [^pg-contracts]. `vertebra-db` carries no PostgreSQL pool type (`driver-fail-loud` deletes `vertebra_db::postgres::PostgresPool`), so this pool is the sole PostgreSQL lease owner above `TransportStream` sessions [^fail-loud-baseline] [^pg-conn-rs]. Full rollback/`DISCARD ALL` reset and draining shutdown (`ch14:t02`) and Python `SyncPostgresPool` / `AsyncPostgresPool` classes (`ch15:t01`) are out of scope.
 
 ## Bounded Read Manifest
 
@@ -68,7 +67,6 @@ Own real authenticated `PostgresConnection` sockets inside a concrete Rust `Post
 - `src/rs/vertebra-postgres/src/config.rs` — Validated `PostgresConfig` (credentials, Unix/TCP, TLS/PEM, channel binding, GUCs, keepalive, Cloud SQL/AlloyDB, Admin/IAM identity).
 - `src/rs/vertebra-postgres/src/session.rs` — `PostgresConnection` connect/startup lifecycle and `BackendKeyData` PID tracking.
 - `src/rs/vertebra-postgres/src/statements.rs` (`crate::session::statements`) — `PoolerMode`, `PoolerCapabilities`, and `StatementCache` from `ch13:t03`.
-- `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` — Existing SHM-only admission helper; live sockets remain strictly inside `vertebra_postgres::PostgresPool` [^pg-shm-pool] [^pg-conn-rs].
 
 ## Symbol & Signature Contracts
 
@@ -142,5 +140,5 @@ Own real authenticated `PostgresConnection` sockets inside a concrete Rust `Post
 None.
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Frozen pool bounds, timeouts, and configuration identity invariants.
-[^pg-shm-pool]: `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` — Shared-memory slot admission counter distinct from physical socket pooling.
+[^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that deletes `vertebra_db::postgres::PostgresPool`.
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Underlying TCP, Unix, and TLS stream primitives.

@@ -7,15 +7,19 @@ status: draft
 state: draft
 has_chapters: false
 parent_prd: integration-remediation
+depends_on_flows:
+  - driver-fail-loud
+  - broker-pool-sharing
+  - storage-completeness
 research:
   - ../integration-remediation/research/audit-findings_20261103.md
-plan_revision: 1
+plan_revision: 2
 plan_commit: null
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
 created_at: "2026-11-03T03:30:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+updated_at: "2026-11-07T18:00:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
@@ -33,6 +37,9 @@ sources:
   - id: django-backends
     resource: src/py/vertebra/extensions/django/db/backends/__init__.py
     title: Django database backend wrapper mixin
+  - id: fail-loud-baseline
+    resource: .agents/bundles/specs/driver-fail-loud/spec.md
+    title: Upstream flow that makes the DB-API raise InterfaceError on URL parse failure
 tags:
   - sqlalchemy
   - advanced-alchemy
@@ -58,7 +65,7 @@ SQLAlchemy and Advanced Alchemy are the primary user path. Vertebra's `Sync<Engi
 1. **Shared DB-API ownership and hardening (`db/dbapi/`).**
    - Harden the PEP 249 implementation extracted directly into `db/dbapi/{__init__,_sync,_async,_errors}.py` by `broker-pool-sharing`, exporting `SyncDBAPIModule`, `AsyncDBAPIModule`, `SyncDBAPIConnection`, `AsyncDBAPIConnection`, `SyncDBAPICursor`, and `AsyncDBAPICursor`. `_sync.py` and `_async.py` own their respective connection, cursor, and module implementations; `_errors.py` owns PEP 249 exception adaptation over the canonical `vertebra.db.driver.DatabaseError` hierarchy. Consume this final package location without a second extraction or relocation; `broker-pool-sharing` owns removal of the original implementation and establishment of `extensions/sqlalchemy/async_adapter.py`.
    - The shared package depends on generic `DatabaseRegistry`, `BaseDatabaseConfig`, and synchronous/asynchronous driver contracts. It imports no `vertebra.extensions`, `vertebra.framework`, `vertebra.agent`, SQLAlchemy, Django, or engine-specific adapter modules, directly or through engine-specific helpers. URL parsing remains `DatabaseRegistry`'s responsibility; the declarative registry/config registration remains the composition boundary.
-   - `SyncDBAPIConnection` / `AsyncDBAPIConnection` raise `InterfaceError` / `ProgrammingError` on invalid URLs and arguments. They never substitute SQLite, open a second Python `sqlite3` connection, parse vendor DSNs themselves, or select behavior by engine names, URL schemes, or `isinstance` checks against concrete engine config classes.
+   - `driver-fail-loud` makes `SyncDBAPIConnection` / `AsyncDBAPIConnection` raise `InterfaceError`, chained from the parse exception, when `DatabaseRegistry.parse_url` fails, so no SQLite substitution remains; this flow starts from that baseline [^fail-loud-baseline]. This flow owns the broader error mapping: both connections raise `InterfaceError` / `ProgrammingError` on invalid arguments and map native driver errors through `_errors.py`. They never open a second Python `sqlite3` connection for genuine SQLite URLs (this flow removes the current `_sqlite_conn`), parse vendor DSNs themselves, or select behavior by engine names, URL schemes, or `isinstance` checks against concrete engine config classes.
    - Native driver/config implementations own engine transaction and autocommit behavior. Reuse existing generic contract/config metadata where it expresses required PEP 249 behavior; when an observed DB-API requirement needs metadata, declare only that engine-neutral requirement on the shared contract and provide its value on the owning adapter. The DB-API consumes the same contract for every engine. Do not add an engine capability registry, policy class hierarchy, or speculative flags. Preserve explicit failures for unsupported transaction modes.
    - Harden the SQLAlchemy `await_only`, greenlet, and SQLAlchemy adapted connection/cursor integration established by `broker-pool-sharing` in `extensions/sqlalchemy/async_adapter.py`. It wraps the shared async DB-API without introducing SQLAlchemy imports or SQLAlchemy-specific behavior into `db/dbapi/`. Django synchronous backends consume `vertebra.db.dbapi` directly and never import the SQLAlchemy extension.
 2. **SQLAlchemy dialects & Alembic.**
@@ -88,7 +95,7 @@ SQLAlchemy and Advanced Alchemy are the primary user path. Vertebra's `Sync<Engi
 
 ## Dependencies
 
-`native-data-platform` `db-layout-and-contract` (`main @ 21c99f95`), `broker-pool-sharing`, and `storage-completeness`; `integration-remediation` `db-engine-primitives` (`main @ 80ff8a65`).
+`native-data-platform` `db-layout-and-contract` (`main @ 21c99f95`), `broker-pool-sharing`, and `storage-completeness`; `integration-remediation` `db-engine-primitives` (`main @ 80ff8a65`); and [`driver-fail-loud`](../driver-fail-loud/spec.md), which removes the DB-API SQLite parse fallback.
 
 ## Acceptance Boundary
 
@@ -101,7 +108,7 @@ SQLAlchemy and Advanced Alchemy are the primary user path. Vertebra's `Sync<Engi
 
 ## Draft Task Outline
 
-- t01 Harden `broker-pool-sharing`'s shared `db/dbapi/{__init__,_sync,_async,_errors}.py` (`SyncDBAPI*` / `AsyncDBAPI*`, generic registry/driver contracts, canonical errors, strict URL handling, engine-owned transaction behavior) and its SQLAlchemy-only `extensions/sqlalchemy/async_adapter.py` across supported native engines and Django cursor requirements; preserve their established package ownership.
+- t01 Harden `broker-pool-sharing`'s shared `db/dbapi/{__init__,_sync,_async,_errors}.py` (`SyncDBAPI*` / `AsyncDBAPI*`, generic registry/driver contracts, canonical error mapping beyond the `driver-fail-loud` parse-failure `InterfaceError`, removal of the second `sqlite3` connection, engine-owned transaction behavior) and its SQLAlchemy-only `extensions/sqlalchemy/async_adapter.py` across supported native engines and Django cursor requirements; preserve their established package ownership.
 - t02 Split relational `Sync<Engine>Dialect` / `Async<Engine>Dialect` modules onto SQLAlchemy built-in dialect bases.
 - t03 Rebase `SyncBigQueryDialect`/`AsyncBigQueryDialect`, `SyncSpannerDialect`/`AsyncSpannerDialect`/`SyncSpangresDialect`/`AsyncSpangresDialect`, and `SyncDuckDBDialect`/`AsyncDuckDBDialect` onto official SQLAlchemy dialect bases.
 - t04 Split per-dialect Alembic `DefaultImpl` modules.
@@ -113,3 +120,4 @@ SQLAlchemy and Advanced Alchemy are the primary user path. Vertebra's `Sync<Engi
 [^sa-dialects]: `src/py/vertebra/extensions/sqlalchemy/dialects.py` — Current multi-engine SQLAlchemy dialect module slated for per-engine split.
 [^aa-cache]: `src/py/vertebra/extensions/alchemy/cache.py` — Advanced Alchemy cache integration slated for dogpile.cache backend.
 [^django-backends]: `src/py/vertebra/extensions/django/db/backends/__init__.py` — Django database backend wrapper mixin.
+[^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that makes the DB-API raise `InterfaceError` on URL parse failure.

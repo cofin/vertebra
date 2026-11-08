@@ -11,13 +11,13 @@ depends_on_chapters:
   - ch13-transactions-portals-and-statement-cache
 replan_trigger: null
 current_task: "native-postgres-driver:ch14:t01"
-plan_revision: 3
+plan_revision: 4
 plan_commit: dd432f18
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T05:00:00Z"
+updated_at: "2026-11-07T18:00:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T05:00:00Z"
@@ -29,9 +29,9 @@ sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
     title: Frozen native PostgreSQL pool, value record, and query result contracts
-  - id: pg-shm-pool
-    resource: src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool
-    title: Existing SHM-only PostgreSQL admission counter distinct from physical socket pooling
+  - id: fail-loud-baseline
+    resource: .agents/bundles/specs/driver-fail-loud/spec.md
+    title: Upstream flow that deletes vertebra_db::postgres::PostgresPool
   - id: py-async-rs
     resource: src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr
     title: Shared Tokio database runtime and per-extension AsyncCompletionQueue drainer
@@ -49,7 +49,7 @@ tags:
 # Chapter 14: Physical Rust Connection Pools, Reset Draining, and Typed Python Query Facades
 
 <!-- truth: start -->
-- **Physical Socket Leases (`PostgresPool` / `PooledConnection`)**: `vertebra-postgres` pools real authenticated `PostgresConnection` sockets (never SHM-only admission counters [^pg-shm-pool]), enforcing no-I/O construction, lazy `min_size` warmup on first `acquire`, bounded `opening + idle + borrowed <= max_size` reservations, and canonical full-config + preparation-policy comparison without caller-supplied pool keys [^pg-contracts].
+- **Physical Socket Leases (`PostgresPool` / `PooledConnection`)**: `vertebra-postgres` pools real authenticated `PostgresConnection` sockets (`vertebra-db` carries no PostgreSQL pool type once `driver-fail-loud` deletes `vertebra_db::postgres::PostgresPool` [^fail-loud-baseline]), enforcing no-I/O construction, lazy `min_size` warmup on first `acquire`, bounded `opening + idle + borrowed <= max_size` reservations, and canonical full-config + preparation-policy comparison without caller-supplied pool keys [^pg-contracts].
 - **Conservative Reset & Bounded Drain**: Returning a lease drains bounded responses, rolls back `T`/`E`, closes portals, runs `DISCARD ALL` after `I` (in `direct`/`session` modes), restores configured `session_gucs`, and invalidates `StatementCache`/`TypeCatalog` generations; uncertain or failed resets retire the socket and release its permit once [^pg-contracts].
 - **Lossless Python Value Bridge & Query Facades**: `python_values.rs` extracts owned Rust parameters while attached and projects `QueryResult` into frozen `msgspec` adapter records (`PostgresQueryResult`, `PostgresColumn`, `PgInterval`, `PgArray`, `PgComposite`, `PgTemporal`, `PgJson`, `PgBitString`, `PgVector`) outside session locks, powering `SyncPostgresClient` and `AsyncPostgresClient` (`query`, `query_multi`, `begin`/`commit`/`rollback`/savepoints) with canonical `vertebra._vertebra` SQLSTATE exceptions and `.completed_result` diagnostics [^pg-contracts] [^py-async-rs] [^db-errors-rs].
 <!-- truth: end -->
@@ -58,7 +58,7 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-`vertebra_db::postgres::PostgresPool` tracks shared-memory admission permits without owning sockets [^pg-shm-pool], and `SyncPostgresClient` / `AsyncPostgresClient` from Chapter 07 establish raw physical sessions without typed query execution or pool lease management. Chapter 14 builds the concrete Rust `PostgresPool` and `PooledConnection` (`ch14:t01`), implements rollback/`DISCARD ALL` session reset and deadline-bounded draining shutdown (`ch14:t02`), bridges the complete lossless `PgValue` / `QueryResult` model and canonical SQLSTATE/`AfterCompletion` exception mapper to Python (`ch14:t03`), and exposes typed `query`, `query_multi`, and transaction/savepoint methods on `SyncPostgresClient` and `AsyncPostgresClient` (`ch14:t04`) [^pg-contracts] [^py-async-rs].
+`driver-fail-loud` deletes the SHM-admission `vertebra_db::postgres::PostgresPool`, so `vertebra-db` provides no PostgreSQL pool [^fail-loud-baseline], and `SyncPostgresClient` / `AsyncPostgresClient` from Chapter 07 establish raw physical sessions without typed query execution or pool lease management. Chapter 14 builds the concrete Rust `PostgresPool` and `PooledConnection` (`ch14:t01`), implements rollback/`DISCARD ALL` session reset and deadline-bounded draining shutdown (`ch14:t02`), bridges the complete lossless `PgValue` / `QueryResult` model and canonical SQLSTATE/`AfterCompletion` exception mapper to Python (`ch14:t03`), and exposes typed `query`, `query_multi`, and transaction/savepoint methods on `SyncPostgresClient` and `AsyncPostgresClient` (`ch14:t04`) [^pg-contracts] [^py-async-rs].
 
 ### 1.2 Non-Goals
 
@@ -74,7 +74,7 @@ Parent roadmap: [spec.md](../../spec.md) and frozen contracts: [contracts.md](..
 
 ### 2.1 Chapter Requirements
 
-- **R14 (`ch14:t01`)**: Implement `pool.rs::{PostgresPool, PostgresPoolOptions, PooledConnection, PoolStats}` over `PostgresConfig` with no-I/O construction, lazy `min_size` startup on first `acquire`, `opening + idle + borrowed` capacity accounting, independent `acquire_timeout` vs `connect_timeout` enforcement, canonical full-configuration comparison (`validate_configuration`), idle/lifetime/broken eviction, and concrete `rlib` exports without trait-object ABI across extensions [^pg-contracts] [^pg-shm-pool].
+- **R14 (`ch14:t01`)**: Implement `pool.rs::{PostgresPool, PostgresPoolOptions, PooledConnection, PoolStats}` over `PostgresConfig` with no-I/O construction, lazy `min_size` startup on first `acquire`, `opening + idle + borrowed` capacity accounting, independent `acquire_timeout` vs `connect_timeout` enforcement, canonical full-configuration comparison (`validate_configuration`), idle/lifetime/broken eviction, and concrete `rlib` exports without trait-object ABI across extensions [^pg-contracts] [^fail-loud-baseline].
 - **R14 (`ch14:t02`)**: Implement `PooledConnection::release`, `Drop` return scheduling, `SessionHandle::from_pooled(PooledConnection)`, conservative reset (`ROLLBACK` -> close portals -> `DISCARD ALL` at `I` -> restore `session_gucs` -> invalidate `StatementCache`/`TypeCatalog` generations), single-permit socket retirement on any uncertain/failed cleanup, and `PostgresPool::close(deadline)` draining [^pg-contracts].
 - **R6, R7, R11 (`ch14:t03`)**: Implement `python_values.rs::{extract_parameters, extract_pg_value, pg_value_to_python, query_result_to_python}` and `errors.rs::postgres_error_to_py` (`PyOnceLock`-cached adapter `msgspec.Struct` records and `vertebra._vertebra` exception classes, exact `Decimal` tuple extraction, `PgJson(None)` vs `None`, `PgTemporal` `wire_text` `DataError` refusal on typed bind, and `AfterCompletion.completed_result` attachment) [^pg-contracts] [^db-errors-rs].
 - **R6, R7, R12, R13 (`ch14:t04`)**: Extend `SyncPostgresClient` and `AsyncPostgresClient` (`sync_client.rs`, `async_client.rs`, `src/py/vertebra/_postgres.pyi`) with `query`, `query_multi`, `begin`, `commit`, `rollback`, `savepoint`, `release_savepoint`, and `rollback_to_savepoint` using detached `block_on_db` and guarded `spawn_rust_db_task_with_attr` completion delivery [^pg-contracts] [^py-async-rs].
@@ -132,11 +132,11 @@ Progress: `[0/1 files documented in ch14]` (`src/py/vertebra/_postgres.pyi` type
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dd432f18`; chapter `state: planned`, `planning_status: complete`.
+- **Verified Baseline**: `HEAD @ dd432f18`; chapter `state: planned`, `planning_status: complete`, `plan_revision: 4`; upstream `driver-fail-loud` removes `vertebra_db::postgres::PostgresPool` before this chapter runs.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
 - **Downstream Dependents**: Unblocks `ch15-pool-facades-and-single-sync-pipeline` (`SyncPostgresPool` / `AsyncPostgresPool` and single-`Sync` pipelines), `ch16`–`ch17` (pipeline contexts, cancellation, deadlines, portals), and `ch18`–`ch26` (COPY, Arrow, and permanent Python drivers).
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Frozen pool options, `PostgresQueryResult`, lossless `Pg*` value records, and error diagnostics.
-[^pg-shm-pool]: `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` — Existing SHM slot admission counter kept separate from physical socket ownership.
+[^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that deletes `vertebra_db::postgres::PostgresPool`.
 [^py-async-rs]: `src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr` — Shared Tokio runtime and independent event-loop completion queue.
 [^db-errors-rs]: `src/rs/vertebra-py/src/errors.rs::DbExceptionTypes` — Canonical `vertebra._vertebra` database exception hierarchy.

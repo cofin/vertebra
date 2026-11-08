@@ -7,16 +7,18 @@ status: draft
 state: draft
 has_chapters: false
 parent_prd: native-data-platform
+depends_on_flows:
+  - driver-fail-loud
 research:
   - ../native-data-platform/research/rust-driver-crates_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
-plan_revision: 1
+plan_revision: 2
 plan_commit: null
 state_revision: 0
 current_task: null
 last_verified_checkpoint: null
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+updated_at: "2026-11-07T18:00:00Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
@@ -26,8 +28,11 @@ verified:
     commit: cdb978d3
 sources:
   - id: sqlite-rs
-    resource: src/rs/vertebra-db/src/sqlite/mod.rs
-    title: SQLite pragma and codec helpers in vertebra-db
+    resource: src/rs/vertebra-db/src/sqlite/mod.rs::SqliteConfig
+    title: SQLite configuration and initialization pragma helpers in vertebra-db
+  - id: fail-loud-baseline
+    resource: .agents/bundles/specs/driver-fail-loud/spec.md
+    title: Upstream flow that deletes SqlitePool and its msgpack row codecs from vertebra-db
   - id: sqlite-py
     resource: src/py/vertebra/db/adapters/sqlite/driver.py
     title: Python SyncSQLiteDriver and AsyncSQLiteDriver target cutover module
@@ -53,6 +58,8 @@ tags:
 
 See [crate research](../native-data-platform/research/rust-driver-crates_20261103.md).
 
+- **Fail-loud baseline.** [`driver-fail-loud`](../driver-fail-loud/spec.md) deletes `SqlitePool` (with `encode_msgpack_rows` / `decode_msgpack_rows` and the `rmp-serde` dependency) from `vertebra-db`; `SqliteConfig::initialization_pragmas` stays as the shared pragma source this crate consumes [^fail-loud-baseline] [^sqlite-rs].
+
 - **SQLite (`src/rs/vertebra-sqlite/` -> `vertebra._sqlite` + `vertebra-core[sqlite]`).** Build a standalone workspace PyO3 `cdylib` + `rlib` crate on `rusqlite` `0.41.1` (`bundled`, `hooks`, `serialize`, `blob`, `column_decltype`) with `#[pymodule(gil_used = false)]`, `src/py/vertebra/_sqlite.pyi` verified by `mypy.stubtest`, `[project.optional-dependencies].sqlite`, wheel isolation `exclude` globs, `uv.lock`, and `areas.toml` registration.
 - **Explicit `Sync*` / `Async*` clients & Arrow SHM transfer.** Run each pooled connection on a dedicated Rust worker thread bridged through `SyncCompletionQueue` (`SyncSQLiteClient`) and `AsyncCompletionQueue` + `Notifier` (`AsyncSQLiteClient` via `vertebra_db::py_async` with `"_vertebra_sqlite_completion_drainer"`), `sqlite3_interrupt()` out-of-band cancellation, and direct `sqlite3_column_*` -> `VTBARROW` `ShmCapsule` `ArrowCursor` building safe for free-threaded `3.14t`/`3.15t`.
 
@@ -71,7 +78,7 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 
 ## Dependencies
 
-`db-layout-and-contract` (`main @ 21c99f95`) and `integration-remediation/db-engine-primitives` (`main @ 80ff8a65`).
+`db-layout-and-contract` (`main @ 21c99f95`), `integration-remediation/db-engine-primitives` (`main @ 80ff8a65`), and [`driver-fail-loud`](../driver-fail-loud/spec.md), which deletes `SqlitePool`; this flow starts from that baseline.
 
 ## Acceptance Boundary
 
@@ -86,6 +93,7 @@ See [crate research](../native-data-platform/research/rust-driver-crates_2026110
 - t02 SQLite prepared statement cache, `DatabaseError` extended-code mapping, `VTBARROW` `ShmCapsule` builder/importer, and `BrokerEngineBackend` registration.
 - t03 Python `SyncSQLiteDriver` / `AsyncSQLiteDriver` cutover, stdlib `sqlite3` removal, conformance verification, and docs/OKF update.
 
-[^sqlite-rs]: `src/rs/vertebra-db/src/sqlite/mod.rs` — SQLite pragma and codec helpers in vertebra-db.
+[^sqlite-rs]: `src/rs/vertebra-db/src/sqlite/mod.rs::SqliteConfig` — SQLite configuration and initialization pragma helpers in vertebra-db.
+[^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that deletes `SqlitePool` and its msgpack row codecs from vertebra-db.
 [^sqlite-py]: `src/py/vertebra/db/adapters/sqlite/driver.py` — Python SyncSQLiteDriver and AsyncSQLiteDriver target cutover module.
 [^py-async-rs]: `src/rs/vertebra-db/src/py_async.rs` — Shared AsyncCompletionQueue + Notifier PyO3 bridge.

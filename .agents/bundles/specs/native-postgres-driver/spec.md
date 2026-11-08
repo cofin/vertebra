@@ -41,17 +41,19 @@ chapters:
 current_chapter: ch01-wheel-scaffold-and-config
 current_task: "native-postgres-driver:ch01:t01"
 parent_prd: native-data-platform
+depends_on_flows:
+  - driver-fail-loud
 research:
   - research/protocol-and-execution_20261105.md
   - research/cloud-material_20261105.md
-plan_revision: 3
+plan_revision: 4
 plan_commit: dd432f18
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_chapter: null
 last_reviewed_commit: null
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-07T16:40:00Z"
+updated_at: "2026-11-07T18:00:00Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:40:00Z"
@@ -64,8 +66,11 @@ sources:
     resource: src/rs/vertebra-db/src/connection.rs::TransportStream
     title: Shared TCP, Unix, TLS, and cloud mTLS stream primitives
   - id: pg-core-rs
-    resource: src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool
-    title: Shared PostgreSQL wire frame helpers and SHM admission metadata in vertebra-db
+    resource: src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame
+    title: Shared stateless PostgreSQL wire frame and codec helpers in vertebra-db
+  - id: fail-loud-baseline
+    resource: .agents/bundles/specs/driver-fail-loud/spec.md
+    title: Upstream flow that deletes PostgreSQL memory:// paths and vertebra_db::postgres::PostgresPool
   - id: py-async-rs
     resource: src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr
     title: Shared AsyncCompletionQueue and independent event-loop drainer
@@ -104,7 +109,8 @@ tags:
 <!-- truth: start -->
 - **Standalone Optional Wheel**: `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owns live PostgreSQL Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`) without linking database clients into `vertebra-core` [^pg-conn-rs] [^pg-core-rs].
 - **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB Admin discovery + mTLS + IAM), lossless codecs, statement caching, single-`Sync` `pipeline()`, binary `COPY`, native `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, and `pgoutput` v1 logical replication ship together with full `psycopg`/`asyncpg` removal [^py-async-rs] [^arrow-shm-rs] [^pg-driver-py] [^sqlspec-py].
-- **Nested Chapter Roadmap (`plan_revision: 3`)**: Decomposed into `31` dependency-ordered chapters (`ch01`–`ch31`, `111` vertical-slice tasks, each owning `<= 3` production files) anchored at `plan_commit: dd432f18` with `current_chapter: ch01-wheel-scaffold-and-config` (`native-postgres-driver:ch01:t01`).
+- **Fail-Loud Baseline**: `driver-fail-loud` lands first and deletes `_in_memory_rows`, every PostgreSQL `memory://` branch, and `vertebra_db::postgres::PostgresPool`; this flow starts from that baseline and adds no memory or SHM-admission pool paths [^fail-loud-baseline].
+- **Nested Chapter Roadmap (`plan_revision: 4`)**: Decomposed into `31` dependency-ordered chapters (`ch01`–`ch31`, `111` vertical-slice tasks, each owning `<= 3` production files) anchored at `plan_commit: dd432f18` with `current_chapter: ch01-wheel-scaffold-and-config` (`native-postgres-driver:ch01:t01`).
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -115,9 +121,11 @@ The governing scope rule is: **“Keep the complete driver in one PR.”** All `
 
 The complete charter decomposes into `31` nested chapters ([chapters/index.md](chapters/index.md)) so every worksheet remains bounded (`<= 3` production files, `<= 250` estimated LOC) and produces one signed local conventional commit without splitting delivery across partial PRs. No chapter constitutes a partial release; atomic Python adapter cutover (`ch27`), strict PG14–18 and live-service conformance (`ch28`), outside-checkout wheel and benchmark gates (`ch29`), user and OKF documentation synchronization (`ch30`), and routed correctness plus fresh quality reviews (`ch31`) are required before `/flow:finish`. No production implementation begins while `plan_commit` is null, and hosted writes require separate explicit user permission.
 
+This flow depends on [`driver-fail-loud`](../driver-fail-loud/spec.md), which deletes `_in_memory_rows` and every `memory://` branch from `src/py/vertebra/db/adapters/postgres/driver.py` (a `memory://` DSN raises `ImproperConfigurationError`) and deletes `vertebra_db::postgres::PostgresPool` with its re-exports [^fail-loud-baseline]. Chapters `ch14`, `ch22`, `ch27`, and `ch30` start from that baseline; the `postgres` extra stays owned by `ch08:t02`.
+
 ### 1.2 Non-Goals
 
-- Splitting transport, query, `COPY`/Arrow, replication, or adapter cutover across multiple pull requests or leaving `psycopg`/`asyncpg`/`memory://` fallbacks behind feature flags.
+- Splitting transport, query, `COPY`/Arrow, replication, or adapter cutover across multiple pull requests or leaving `psycopg`/`asyncpg` fallbacks behind feature flags.
 - Negotiating PostgreSQL wire protocol `3.2` (Protocol `3.0` governs the entire PostgreSQL `14`–`18` support matrix).
 - Implicitly creating or dropping PostgreSQL replication slots/publications, performing automatic initial table snapshot backfills, or advancing WAL `confirmed_flush_lsn` on stream yield before durable checkpoint persistence.
 - Adding engine-specific PostgreSQL imports, SQL strings, or class branches to generic `src/py/vertebra/db/*.py` or `src/py/vertebra/db/driver/*.py` modules.
@@ -129,10 +137,10 @@ The complete charter decomposes into `31` nested chapters ([chapters/index.md](c
 | --- | --- |
 | `src/rs/vertebra-db/src/connection.rs::TransportStream` [^pg-conn-rs] | Reuse transport/TLS. Direct PostgreSQL sends `SSLRequest` before upgrade; cloud proxy endpoints negotiate immediate mTLS. |
 | `src/rs/vertebra-db/src/connection.rs::{Connection,CancelHandle}` [^pg-conn-rs] | Lifecycle traits require real ping/cancel/close implementations. No placeholder success. |
-| `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` [^pg-core-rs] | SHM admission and compiled-plan metadata do not own live connections or server prepared statements. |
+| `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` [^pg-core-rs] | Stateless frame, `JSONB`, `PGCOPY`, and vector helpers only; `vertebra-db` holds no PostgreSQL pool type after `driver-fail-loud` [^fail-loud-baseline], so live connections and server prepared statements belong to `vertebra-postgres`. |
 | `src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr` [^py-async-rs] | Reuse completion queues and independent drainer. Add abort ownership across fallible setup before using it for sessions. |
 | `src/rs/vertebra-db/src/arrow_shm.rs::ShmArrowStreamWriter` [^arrow-shm-rs] | Accepts serialized IPC; does not build columns. Its padding API cannot receive arbitrary encoder fragments. |
-| `src/py/vertebra/db/adapters/postgres/driver.py::{SyncPostgreSQLDriver,AsyncPostgreSQLDriver}` [^pg-driver-py] | Replace Python-client, duck-typed, and memory execution with real native pool leases. Preserve count/tuple/description/hydration contracts. |
+| `src/py/vertebra/db/adapters/postgres/driver.py::{SyncPostgreSQLDriver,AsyncPostgreSQLDriver}` [^pg-driver-py] | Replace Python-client and duck-typed execution with real native pool leases (memory execution is absent from the `driver-fail-loud` baseline [^fail-loud-baseline]). Preserve count/tuple/description/hydration contracts. |
 | `src/py/vertebra/extensions/sqlspec/adapters.py::{BaseSyncDriver.execute_stack,BaseAsyncDriver.execute_stack}` [^sqlspec-py] | Caller conversion and strict result validation occur inside pipeline context; results cannot commit early. |
 | `src/py/vertebra/db/arrow.py::ArrowCursor` [^db-arrow-py] | Public cursor wraps native SHM output; inline IPC needs explicit native row-count metadata without Python rows. |
 | `src/py/tests/integration/db/test_driver_conformance.py::ENGINE_SPECS` [^conformance-py] | PostgreSQL needs native type DDL, enabled pipeline acceptance, and removal of pending-flow xfail after cutover. |
@@ -317,13 +325,15 @@ Every worksheet (`111` total across `31` chapters) executes in one bounded invoc
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dd432f18` above `main @ 077a3fe9`; `state: planned`, `has_chapters: true`, `plan_revision: 3`, `plan_commit: dd432f18`.
+- **Verified Baseline**: `HEAD @ dd432f18` above `main @ 077a3fe9`; `state: planned`, `has_chapters: true`, `plan_revision: 4`, `plan_commit: dd432f18`.
+- **Upstream Flow Dependency**: [`driver-fail-loud`](../driver-fail-loud/spec.md) completes before `ch01` starts; it removes PostgreSQL `memory://` execution and `vertebra_db::postgres::PostgresPool` [^fail-loud-baseline].
 - **Active Chapter & Next Task**: [ch01-wheel-scaffold-and-config](chapters/ch01-wheel-scaffold-and-config/spec.md) (`native-postgres-driver:ch01:t01`); all `31` chapters (`111` vertical-slice tasks) have `planning_status: complete` and `state: planned` (`0/111` completed).
 - **Documentation & OKF Status**: `[0/11 files documented]`, scheduled in [ch30-user-and-domain-docs](chapters/ch30-user-and-domain-docs/spec.md) (`ch30:t01`–`ch30:t04`), followed by final complete-driver review and acceptance in [ch31-final-review-and-release-gate](chapters/ch31-final-review-and-release-gate/spec.md) (`ch31:t01`).
 - **Delivery & Next Action**: Complete single-PR delivery on `feat/native-postgres-driver`; intermediate chapters never trigger early `/flow:finish` or `/flow:archive`. Next canonical command: `/flow:implement native-postgres-driver`.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
-[^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` — Shared PostgreSQL wire frame helpers and SHM admission metadata in `vertebra-db`.
+[^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` — Shared stateless PostgreSQL wire frame and codec helpers in `vertebra-db`.
+[^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that deletes PostgreSQL `memory://` paths and `vertebra_db::postgres::PostgresPool`.
 [^py-async-rs]: `src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr` — Shared `AsyncCompletionQueue` and independent event-loop drainer.
 [^arrow-shm-rs]: `src/rs/vertebra-db/src/arrow_shm.rs::ShmArrowStreamWriter` — Shared-memory Arrow IPC stream writer for `VTBARROW` capsules.
 [^pg-driver-py]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — Python `SyncPostgreSQLDriver` and `AsyncPostgreSQLDriver` target cutover module.

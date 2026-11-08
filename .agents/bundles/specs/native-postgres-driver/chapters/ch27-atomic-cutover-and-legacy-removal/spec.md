@@ -11,13 +11,13 @@ depends_on_chapters:
   - ch26-compiler-pipeline-arrow-and-event-hooks
 replan_trigger: null
 current_task: "native-postgres-driver:ch27:t01"
-plan_revision: 3
+plan_revision: 4
 plan_commit: dd432f18
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T16:45:00Z"
+updated_at: "2026-11-07T18:00:00Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:45:00Z"
@@ -44,6 +44,9 @@ sources:
   - id: sa-dialects
     resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
     title: SQLAlchemy +vertebra and +vtb sync and async PostgreSQL dialects
+  - id: fail-loud-baseline
+    resource: .agents/bundles/specs/driver-fail-loud/spec.md
+    title: Upstream flow that deletes PostgreSQL memory:// paths and vertebra_db::postgres::PostgresPool
 tags:
   - postgres
   - cutover
@@ -55,7 +58,7 @@ tags:
 # Chapter 27: Atomic Native Driver Cutover and Legacy Removal
 
 <!-- truth: start -->
-- **Canonical Barrel & Package Cutover**: `src/py/vertebra/db/adapters/postgres/driver.py` re-exports the permanent `SyncPostgreSQLDriver` (`._sync`) and `AsyncPostgreSQLDriver` (`._async`) classes together without runtime flags, `psycopg`/`asyncpg` imports, or `memory://` execution paths, while `postgres/__init__.py` maps `PostgresArrowResult` and `PostgresReplicationIdentity` to `types` and CDC/checkpoint contracts to `change_stream` [^pg-driver-barrel] [^pg-pkg-init].
+- **Canonical Barrel & Package Cutover**: `src/py/vertebra/db/adapters/postgres/driver.py` re-exports the permanent `SyncPostgreSQLDriver` (`._sync`) and `AsyncPostgreSQLDriver` (`._async`) classes together without runtime flags or `psycopg`/`asyncpg` imports (the `driver-fail-loud` baseline already carries no `memory://` execution paths [^fail-loud-baseline]), while `postgres/__init__.py` maps `PostgresArrowResult` and `PostgresReplicationIdentity` to `types` and CDC/checkpoint contracts to `change_stream` [^pg-driver-barrel] [^pg-pkg-init].
 - **Numeric Consumer Compilation & Public Event Verification**: `PostgresEmbeddingPushdown`, `PostgreSQLSyncDriver` / `PostgreSQLAsyncDriver` (`ParameterStyle.NUMERIC`), and `SyncPostgreSQLDialect` / `AsyncPostgreSQLDialect` (`paramstyle = "numeric_dollar"`) emit `$N` positional binds while `PostgresNotificationSource` (rewritten in `ch21:t03` with `queue_capacity: int = 1024, reconnect: bool = False`) is verified over canonical public drivers [^pg-embeddings] [^pg-notify] [^sqlspec-adapters] [^sa-dialects].
 - **Clean Dead-Code Deletion**: Unreachable `_LegacyAsyncPostgreSQLDriver` (`t03`) and `_LegacySyncPostgreSQLDriver` (`t04`) are deleted in dedicated characterization commits while preserving `core.py` and `vertebra._vertebra` CPU helpers.
 <!-- truth: end -->
@@ -75,7 +78,8 @@ This chapter executes the public cutover and cleanup across four bounded commits
 
 - Live Docker PG14–18 conformance, `pgoutput` logical replication containers, `pgvector` 0.8.1 containers, and `PgBouncer` containers (owned by [ch28-live-conformance-and-service-acceptance](../ch28-live-conformance-and-service-acceptance/spec.md)).
 - Rewriting `src/py/vertebra/db/adapters/postgres/notify.py` (already completed in `ch21:t03` with `PostgresNotificationDriver`, `queue_capacity: int = 1024`, and `reconnect: bool = False`).
-- Removing shared `PostgreSQLCore` CPU helpers (`strip_jsonb_header`, `encode_jsonb`, `encode_pgcopy_rows`, `decode_pgcopy_rows`) or `vertebra-db` / `vertebra._vertebra` broker SHM metadata (`PostgresPool`) and vector CPU views (`decode_pgvector_f32`).
+- Removing shared `PostgreSQLCore` CPU helpers (`strip_jsonb_header`, `encode_jsonb`, `encode_pgcopy_rows`, `decode_pgcopy_rows`) or `vertebra._vertebra` vector CPU views (`decode_pgvector_f32`).
+- Removing `_in_memory_rows`, PostgreSQL `memory://` branches, or `vertebra_db::postgres::PostgresPool`: `driver-fail-loud` deletes them, and this chapter starts from that baseline [^fail-loud-baseline].
 
 ### 1.3 Upstream Baseline & Code Analysis
 
@@ -83,7 +87,7 @@ Parent roadmap: [spec.md](../../spec.md); frozen contracts: [contracts.md](../..
 
 | Seam | Pre-Cutover State (`after ch26`) | Chapter 27 Target State |
 | --- | --- | --- |
-| `src/py/vertebra/db/adapters/postgres/driver.py` [^pg-driver-barrel] | Defines legacy `psycopg_pool` / `asyncpg` / `_in_memory_rows` classes directly. | Pure public barrel importing `AsyncPostgreSQLDriver` from `._async` and `SyncPostgreSQLDriver` from `._sync` with Google-style docstrings and zero legacy bodies after `t04`. |
+| `src/py/vertebra/db/adapters/postgres/driver.py` [^pg-driver-barrel] | Defines legacy `psycopg_pool` / `asyncpg` classes directly; `memory://` DSNs already raise `ImproperConfigurationError` from the `driver-fail-loud` baseline. | Pure public barrel importing `AsyncPostgreSQLDriver` from `._async` and `SyncPostgreSQLDriver` from `._sync` with Google-style docstrings and zero legacy bodies after `t04`. |
 | `src/py/vertebra/db/adapters/postgres/__init__.py` [^pg-pkg-init] | Lazily exports `driver`, `config`, `core`, `embeddings`, `notify`, `arrow`, `types`, `events`, and `change_stream` symbols. | Preserves canonical lazy driver targets while mapping `PostgresArrowResult` and `PostgresReplicationIdentity` to `types` and `PostgresChange*` / `PostgresCheckpoint*` / `PostgresReplicationGapError` to `change_stream`. |
 | `src/py/vertebra/db/adapters/postgres/embeddings.py` [^pg-embeddings] | Branches between `("$1", "$2")` and `("%s", "%s")` via `_uses_dollar_binds()`. | Emits `("$1", "$2")` unconditionally across both permanent native drivers, removes `_uses_dollar_binds()`, and passes `tools.docs` docstring scanning. |
 | `src/py/vertebra/db/adapters/postgres/notify.py` [^pg-notify] | Rewritten in `ch21:t03` to accept `PostgresNotificationDriver` (`queue_capacity: int = 1024, reconnect: bool = False`) and await `_publish_notification`. | Untouched in `ch27` production files; `test_postgres_event_hooks.py` switches from private `_sync`/`_async` imports to canonical public drivers in `t02`. |
@@ -103,8 +107,6 @@ Parent roadmap: [spec.md](../../spec.md); frozen contracts: [contracts.md](../..
 
 ```python
 """Synchronous and asynchronous native PostgreSQL drivers."""
-
-from __future__ import annotations
 
 from vertebra.db.adapters.postgres._async import AsyncPostgreSQLDriver
 from vertebra.db.adapters.postgres._sync import SyncPostgreSQLDriver
@@ -129,14 +131,15 @@ __all__ = (
 | Missing `vertebra._postgres` optional wheel at runtime | `SyncPostgreSQLDriver` / `AsyncPostgreSQLDriver` pool initialization raises `MissingDependencyError` naming `vertebra-core[postgres]` (`extra="postgres"`), never `asyncpg` or `psycopg_pool`. |
 | Explicit caller `StatementConfig` with `?` placeholders and non-idempotent statement transformer | Original `StatementConfig` and `?` SQL provenance remain untouched; the native transport copy compiles to `$1..$N` without invoking statement transformers a second time. |
 | `PostgresNotificationSource.publish` inside active `SyncPostgreSQLDriver.transaction()` | `_publish_notification` raises `InterfaceError` before `asyncio.to_thread` or network I/O; inside `AsyncPostgreSQLDriver.transaction()`, `publish` joins the ambient transaction and suppresses delivery on rollback. |
-| Legacy constructor kwargs (`executor=...`, `async_executor=...`, `dsn="memory://"`) | Rejected (`TypeError` for removed kwargs; `ImproperConfigurationError` for `memory://` scheme on PostgreSQL). |
+| Legacy constructor kwargs (`executor=...`, `async_executor=...`) | Rejected with `TypeError`. |
+| `PostgreSQLConfig(dsn="memory://")` on the permanent drivers | `ImproperConfigurationError`, preserving the `driver-fail-loud` guard across the cutover [^fail-loud-baseline]. |
 
 ### 2.4 Alternatives Comparison
 
 | Decision | Chosen Seam | Rejected Alternative & Why Rejected |
 | --- | --- | --- |
 | Cutover & legacy deletion sequencing | Activate barrel + helpers (`t01`), activate consumers (`t02`), then delete `_LegacyAsync*` (`t03`) and `_LegacySync*` (`t04`) in small characterization commits | Deleting 800+ legacy lines in the same commit as consumer/test migration — exceeds bounded task review budgets and mixes behavioral cutover with dead-code removal. |
-| Runtime fallback policy | Hard cutover to `._sync` and `._async` with `MissingDependencyError("vertebra._postgres", ...)` | Retaining `psycopg`/`asyncpg` or `memory://` fallback when `_postgres` is uninstalled — violates R24 clean-break native ownership. |
+| Runtime fallback policy | Hard cutover to `._sync` and `._async` with `MissingDependencyError("vertebra._postgres", ...)` | Retaining a `psycopg`/`asyncpg` fallback when `_postgres` is uninstalled — violates R24 clean-break native ownership. |
 
 ## 3. Documentation & OKF Knowledge Plan
 
@@ -162,9 +165,9 @@ Progress: `[0/0 files documented in this chapter]` (flow-wide user docs and OKF 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dd432f18`; `depends_on_chapters: [ch26-compiler-pipeline-arrow-and-event-hooks]`, `state: planned`, `plan_revision: 3`.
+- **Verified Baseline**: `HEAD @ dd432f18`; `depends_on_chapters: [ch26-compiler-pipeline-arrow-and-event-hooks]`, `state: planned`, `plan_revision: 4`; upstream `driver-fail-loud` removes PostgreSQL `memory://` paths before this chapter runs.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
-- **Active Invariants**: Zero `psycopg`, `psycopg_pool`, `asyncpg`, `_executor`, or `_in_memory_rows` paths survive in `src/py/vertebra/db/adapters/postgres/driver.py` after `t04`; `core.py` and `vertebra._vertebra` CPU helpers remain intact.
+- **Active Invariants**: Zero `psycopg`, `psycopg_pool`, `asyncpg`, or `_executor` paths survive in `src/py/vertebra/db/adapters/postgres/driver.py` after `t04`; `core.py` and `vertebra._vertebra` CPU helpers remain intact; `_in_memory_rows` and `memory://` stay absent.
 
 [^pg-driver-barrel]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — Canonical PostgreSQL driver export module targeted for atomic cutover.
 [^pg-pkg-init]: `src/py/vertebra/db/adapters/postgres/__init__.py` — Lazy package export map for `vertebra.db.adapters.postgres`.
@@ -172,3 +175,4 @@ Progress: `[0/0 files documented in this chapter]` (flow-wide user docs and OKF 
 [^pg-notify]: `src/py/vertebra/db/adapters/postgres/notify.py::PostgresNotificationSource` — PostgreSQL notification publisher and streaming source rewritten in `ch21:t03`.
 [^sqlspec-adapters]: `src/py/vertebra/extensions/sqlspec/adapters.py::PostgreSQLSyncDriver` — SQLSpec PostgreSQL sync and async adapter parameter profiles.
 [^sa-dialects]: `src/py/vertebra/extensions/sqlalchemy/dialects.py` — SQLAlchemy `+vertebra` and `+vtb` sync and async PostgreSQL dialects.
+[^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that deletes PostgreSQL `memory://` paths and `vertebra_db::postgres::PostgresPool`.

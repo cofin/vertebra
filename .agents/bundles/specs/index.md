@@ -15,6 +15,7 @@ The completed database foundation is documented in [driver contracts and adapter
 
 ## 3. Planned Feature Specifications (`state: planned`)
 
+- [`driver-fail-loud`](driver-fail-loud/spec.md) — Oracle/MSSQL guards, DuckDB requires `duckdb`, SQLAlchemy `InterfaceError` on unparsable URLs, `memory://` engine fakes removed, dead `vertebra-db` pools and codecs deleted, install hints behind an extras gate, explicit conformance outcomes, queue backends require a live executor or client, and database, queue, and agent docs and knowledge follow; prerequisite to `native-postgres-driver` and the per-engine driver flows ([`chapters/ch01`–`ch11`](driver-fail-loud/chapters/index.md), `11` chapters, `35` tasks).
 - [`native-postgres-driver`](native-postgres-driver/spec.md) — Standalone Rust PostgreSQL wheel (`vertebra-postgres`) covering wire authentication, cloud mTLS/IAM, pools, single-Sync pipelines, binary COPY, SHM Arrow, notifications, logical replication, and native adapter cutover ([`chapters/ch01`–`ch31`](native-postgres-driver/chapters/index.md), `111` tasks).
 
 ## 4. Draft Child Flow Charters (`state: draft`)

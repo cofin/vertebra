@@ -11,13 +11,13 @@ depends_on_chapters:
   - ch29-wheel-ci-and-benchmarks
 replan_trigger: null
 current_task: "native-postgres-driver:ch30:t01"
-plan_revision: 3
+plan_revision: 4
 plan_commit: dd432f18
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T16:45:00Z"
+updated_at: "2026-11-07T18:00:00Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:45:00Z"
@@ -101,7 +101,7 @@ Parent roadmap: [spec.md](../../spec.md); frozen contracts: [contracts.md](../..
 | --- | --- |
 | `workflow.md` (currently `192` lines) or other OKF `knowledge/` files growing past `200` lines (`DOC-08`) | Edit concisely in-place (consolidating repetitive command descriptions) so every `.agents/bundles/knowledge/**/*.md` stays strictly `<= 200` lines and `AGENTS.md` stays strictly `<= 100` lines. |
 | Broken mkdocstrings `:::` target in `docs/reference/database-capabilities.md` | Every change-stream target resolves exclusively from `vertebra.db.adapters.postgres.change_stream.<Symbol>`, verified by `make docs` Griffe resolution. |
-| Stale `psycopg`/`asyncpg` runtime claims vs bench-only group | Runtime driver docs/OKF remove all `psycopg`/`asyncpg`/`memory://` PostgreSQL claims while `benchmarks-and-free-threaded.md` and `tech-stack.md` accurately scope `psycopg[binary]==3.2.13` and `asyncpg==0.31.0` to `[dependency-groups].bench`. |
+| Stale `psycopg`/`asyncpg` runtime claims vs bench-only group | Runtime driver docs/OKF remove all `psycopg`/`asyncpg` PostgreSQL claims (the `driver-fail-loud` baseline documents no PostgreSQL `memory://` mode) while `benchmarks-and-free-threaded.md` and `tech-stack.md` accurately scope `psycopg[binary]==3.2.13` and `asyncpg==0.31.0` to `[dependency-groups].bench`. |
 
 ### 2.4 Alternatives Comparison
 
@@ -146,7 +146,7 @@ Progress: `[0/11 files documented]`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dd432f18`; `depends_on_chapters: [ch29-wheel-ci-and-benchmarks]`, `state: planned`, `plan_revision: 3`.
+- **Verified Baseline**: `HEAD @ dd432f18`; `depends_on_chapters: [ch29-wheel-ci-and-benchmarks]`, `state: planned`, `plan_revision: 4`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending); `[0/11 files documented]`.
 - **Downstream Dependents**: Unblocks [ch31-final-review-and-release-gate](../ch31-final-review-and-release-gate/spec.md) (`ch31:t01`) for final routed correctness review, fresh quality review, and complete-driver sign-off.
 

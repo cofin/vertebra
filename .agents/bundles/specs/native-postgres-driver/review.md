@@ -5,7 +5,7 @@ title: Native PostgreSQL planning review
 description: Adjudication and validation of the nested 31-chapter complete-driver implementation plan.
 status: stable
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T16:40:00Z"
+updated_at: "2026-11-07T18:00:00Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:40:00Z"
@@ -18,8 +18,11 @@ verified:
     commit: cdb978d3
 sources:
   - id: pg-core-rs
-    resource: src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool
+    resource: src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame
     title: Shared PostgreSQL wire frame helpers in vertebra-db
+  - id: fail-loud-baseline
+    resource: .agents/bundles/specs/driver-fail-loud/spec.md
+    title: Upstream flow that deletes PostgreSQL memory:// paths and vertebra_db::postgres::PostgresPool
   - id: pg-driver-py
     resource: src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver
     title: Python PostgreSQL driver target cutover seam
@@ -32,7 +35,7 @@ tags:
 # Planning review
 
 <!-- truth: start -->
-- **Adjudicated Plan Baseline**: All planning and zero-context specification review findings are adopted across `spec.md`, `contracts.md`, and `31` nested chapters (`ch01`–`ch31`, `111` vertical-slice worksheets) at `state: planned`, `has_chapters: true`, `plan_revision: 3`, and `plan_commit: dd432f18` [^pg-core-rs] [^pg-driver-py].
+- **Adjudicated Plan Baseline**: All planning and zero-context specification review findings are adopted across `spec.md`, `contracts.md`, and `31` nested chapters (`ch01`–`ch31`, `111` vertical-slice worksheets) at `state: planned`, `has_chapters: true`, `plan_revision: 4`, and `plan_commit: dd432f18` [^pg-core-rs] [^pg-driver-py].
 - **Scope of Evidence**: Planning review validates contracts, chapter/task dependency order, `<= 3`-file worksheet ownership bounds, cross-chapter `depends_on` edges, and OKF v0.2 schema compliance; runtime, live-service, wheel, and benchmark evidence are produced during `/flow:implement native-postgres-driver`.
 <!-- truth: end -->
 
@@ -67,16 +70,18 @@ All findings below are ADOPT. No product decision remains escalated.
 | Cargo lockfile, `PostgresError::Data`/`ServerError`/`TransactionStatus`, Arrow sink, & `session.rs` deadlines | Lock `vertebra-postgres` and `vertebra-db` Cargo pins upfront (`ch01:t01`–`t02`), keep `PostgresConfig`, `PostgresError::Data`, `ServerError`, canonical SQLSTATE subclass mapping (`ch05:t02`), and `TransactionStatus` shapes stable from `ch01:t04`–`ch05`, stream Arrow batches directly via `query_with_row_sink` (`ch19`–`ch20`), and anchor command deadlines in `session.rs` (`ch17:t01`–`t02`). |
 | Packaging split, wheel script ownership, & cross-chapter DAG edges | Split root `[postgres]` extra, `areas.toml`, and all four sibling wheel `_postgres.pyi` exclusions into `ch08` (`4` tasks), create `tools/scripts/verify_postgres_wheel.py` cleanly in `ch29:t01`, and populate explicit cross-chapter entry `depends_on` edges across `ch02`–`ch31`. |
 | Unresolved temporal display text was unsafe to rebind | Preserve output text/context (`PgTemporal(special="wire_text")`); reject typed unresolved binds before submission (`ch17:t04`). |
+| Overlap with `driver-fail-loud` | `driver-fail-loud` deletes `_in_memory_rows`, PostgreSQL `memory://` branches, and `vertebra_db::postgres::PostgresPool` before `ch01`; `ch27` and `ch30` assume them absent, and `ch14` and `ch22` cite only surviving `vertebra-db` frame and codec helpers [^fail-loud-baseline]. |
 | `11`-file `DOC-04`/`DOC-08` documentation & OKF synchronization | Expand documentation and OKF synchronization to all `11` invalidated user, workflow, agent, domain, extension, benchmark, and tech-stack files in `ch30-user-and-domain-docs` (`ch30:t01`–`t04`) within `DOC-08` line budgets (`AGENTS.md <= 100`, `knowledge/** <= 200`), followed by final complete-driver reviews in `ch31-final-review-and-release-gate` (`ch31:t01`). |
 
 ## Review and validation evidence
 
 - Core correctness review: three bounded rounds; all original and follow-up Important findings and signature/reference issues are resolved across the normalized contracts and worksheets.
 - Data and acceptance correctness review: two rounds; all seven original Important findings and lexer/activation-reference corrections are resolved.
-- Zero-context chaptered specification review (`plan_revision: 3`, `plan_commit: dd432f18`): all `ADOPT` findings across Cargo/lockfile ownership, `DialedCloudTransport` keepalives, `PostgresConfig`/`ServerError`/`TransactionStatus` stability, `query_with_row_sink` Arrow streaming, `session.rs` command deadlines, `vertebra.db.adapters.postgres.change_stream` barrel/docs alignment, `PostgresNotificationSource` `ch21:t03` parity, cross-chapter `depends_on` edges, `ch08` 4-task packaging split, `[tool.mypy]` benchmark overrides, `ch27:t01` `tools.docs` docstring scan, and `11`-file `DOC-04`/`DOC-08` coverage are integrated across `31` planned chapters (`ch01`–`ch31`, `111` pending vertical-slice worksheets), `27` traced requirements (`R1`–`R27`), and `[0/11 files documented]` in `ch30`.
+- Zero-context chaptered specification review (`plan_revision: 4`, `plan_commit: dd432f18`): all `ADOPT` findings across Cargo/lockfile ownership, `DialedCloudTransport` keepalives, `PostgresConfig`/`ServerError`/`TransactionStatus` stability, `query_with_row_sink` Arrow streaming, `session.rs` command deadlines, `vertebra.db.adapters.postgres.change_stream` barrel/docs alignment, `PostgresNotificationSource` `ch21:t03` parity, cross-chapter `depends_on` edges, `ch08` 4-task packaging split, `[tool.mypy]` benchmark overrides, `ch27:t01` `tools.docs` docstring scan, and `11`-file `DOC-04`/`DOC-08` coverage are integrated across `31` planned chapters (`ch01`–`ch31`, `111` pending vertical-slice worksheets), `27` traced requirements (`R1`–`R27`), and `[0/11 files documented]` in `ch30`.
 - Repository `make review-check` validates review capabilities, multi-line YAML frontmatter, source-to-footnote parity, clickable relative Bounded Read Manifest links, and privacy rules; runtime implementation acceptance remains pending (`ch31:t01`).
 
-Plan state is `planned` at `plan_revision: 3` and `plan_commit: dd432f18` (`has_chapters: true`). The next canonical command is `/flow:implement native-postgres-driver`, starting with [ch01-wheel-scaffold-and-config](chapters/ch01-wheel-scaffold-and-config/spec.md) (`native-postgres-driver:ch01:t01`). This document claims no production build, native/live service, installed-wheel, free-threaded, or performance acceptance prior to implementation.
+Plan state is `planned` at `plan_revision: 4` and `plan_commit: dd432f18` (`has_chapters: true`). The next canonical command is `/flow:implement native-postgres-driver`, starting with [ch01-wheel-scaffold-and-config](chapters/ch01-wheel-scaffold-and-config/spec.md) (`native-postgres-driver:ch01:t01`). This document claims no production build, native/live service, installed-wheel, free-threaded, or performance acceptance prior to implementation.
 
-[^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` — Shared PostgreSQL wire frame helpers in `vertebra-db`.
+[^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` — Shared PostgreSQL wire frame helpers in `vertebra-db`.
+[^fail-loud-baseline]: `.agents/bundles/specs/driver-fail-loud/spec.md` — Upstream flow that deletes PostgreSQL `memory://` paths and `vertebra_db::postgres::PostgresPool`.
 [^pg-driver-py]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — Python PostgreSQL driver target cutover seam.
