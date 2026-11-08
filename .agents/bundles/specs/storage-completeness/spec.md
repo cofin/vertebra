@@ -11,24 +11,30 @@ chapters:
   - ch02-orm-and-sql-storage-contracts
   - ch03-litestar-and-range-streaming
   - ch04-arrow-shm-and-docs
-current_chapter: ch02-orm-and-sql-storage-contracts
-current_task: null
+current_chapter: ch03-litestar-and-range-streaming
+current_task: "storage-completeness:ch03:t01"
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/gap-analysis_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 7
 plan_commit: a51ebcb6
-state_revision: 12
-last_verified_checkpoint: 10f7b825
-last_reviewed_chapter: ch01-native-engine-and-auth
-last_reviewed_commit: dc2c2053
+state_revision: 13
+last_verified_checkpoint: 62b19c5c
+last_reviewed_chapter: ch02-orm-and-sql-storage-contracts
+last_reviewed_commit: 62b19c5c
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-08T15:15:39Z"
+updated_at: "2026-11-08T15:23:04.650445Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
 verified:
+  - by: agent:code-reviewer
+    at: "2026-11-08T15:23:04.650445Z"
+    commit: 62b19c5c
+  - by: agent:quality-reviewer
+    at: "2026-11-08T15:23:04.650445Z"
+    commit: 62b19c5c
   - by: agent:code-reviewer
     at: "2026-11-07T19:05:09Z"
     commit: dc2c2053
@@ -190,7 +196,7 @@ Progress: `[2/4 files documented]`. Storage knowledge covers the native engine a
 ## 5. Implementation Plan
 
 - [x] [dc2c2053] ch01-native-engine-and-auth — Native Rust Storage Engine, GCP Auth Unification, and Fail-Closed Facade (chapters/ch01-native-engine-and-auth/spec.md)
-- [~] ch02-orm-and-sql-storage-contracts — SQLSpec, Advanced Alchemy, and Django Storage Contracts (chapters/ch02-orm-and-sql-storage-contracts/spec.md)
+- [x] [62b19c5c] ch02-orm-and-sql-storage-contracts — SQLSpec, Advanced Alchemy, and Django Storage Contracts (chapters/ch02-orm-and-sql-storage-contracts/spec.md)
 - [ ] ch03-litestar-and-range-streaming — HTTP Range Streaming and Litestar Store/Static Integration (chapters/ch03-litestar-and-range-streaming/spec.md)
 - [ ] ch04-arrow-shm-and-docs — Strict Arrow SHM Allocation, Parquet Streaming, and OKF Sync (chapters/ch04-arrow-shm-and-docs/spec.md)
 
@@ -198,12 +204,13 @@ Progress: `[2/4 files documented]`. Storage knowledge covers the native engine a
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `a51ebcb6` on `feat/storage-updates`; `plan_revision: 7`, `state: active`. `ch01-native-engine-and-auth` is completed with review stamp `dc2c2053`.
-- **Plan Identity**: Active `ch02` and completed `t03` share revision `7` at `a51ebcb6`; `t01` and `t02` retain their verified plan identities and evidence.
-- **Active Chapter**: `ch02-orm-and-sql-storage-contracts`, `current_task: null`; all `3/3` tasks are completed. Source commits are `7e13257b`, `0e579db6`, and `04be780b7901e76ea3a487dfa5ba519061a14a8c`. The chapter awaits correctness recheck and fresh quality review.
-- **Remaining Plan**: `7/12` tasks are completed; `ch03` has `2` pending tasks and `ch04` has `3`. Their states remain planned.
-- **Documentation & OKF Status**: `[2/4 files documented]`; storage knowledge and the technology matrix are synchronized. The two user guides remain planned in `ch04:t03`.
-- **Active Invariants**: Native paired stores, explicit configuration, exact upstream adapter contracts, and no Advanced Alchemy registry monkeypatching. SQLSpec Arrow/Parquet batch-streaming work remains in `ch04:t02`.
+- **Verified Baseline**: Reviewed `62b19c5c` on `feat/storage-updates`; native adapter source checkpoint `04be780b`.
+- **Chapter Progress**: `2/4` completed (`ch01`, `ch02`); `7/12` tasks completed and `5` pending.
+- **Active Chapter & Next Task**: `ch03-litestar-and-range-streaming`, `storage-completeness:ch03:t01` (Range responses and Litestar integration).
+- **Remaining Plan**: `ch03` has `2` pending tasks; `ch04-arrow-shm-and-docs` has `3` pending tasks.
+- **Documentation & OKF Status**: `[2/4 files documented]`; storage knowledge and product typing are current, with both user guides scheduled in `ch04:t03`.
+- **Last Reviewed Chapter**: `ch02-orm-and-sql-storage-contracts` at `62b19c5c`; correctness and fresh quality reviews have no unresolved findings.
+- **Active Invariants**: Native storage construction fails closed; sync/async handles share the engine; Django file reuse stays on its native key and provider configs serialize through supported Django APIs.
 
 [^rs-storage-engine]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — Native Rust storage engine over `object_store`.
 [^py-storage-facade]: `src/py/vertebra/storage/_store.py::SyncObjectStore` — Python sync/async object store facade and backend configs.

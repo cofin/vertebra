@@ -5,7 +5,7 @@ chapter_id: ch02-orm-and-sql-storage-contracts
 title: "Chapter 02: SQLSpec, Advanced Alchemy, and Django Storage Contracts"
 description: Implement fail-closed SQLSpec ObjectStoreProtocol, Advanced Alchemy StorageBackend registration without monkeypatching, and @deconstructible Django Storage subclass over SyncObjectStore and AsyncObjectStore.
 status: stable
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch01-native-engine-and-auth
@@ -13,15 +13,21 @@ replan_trigger: null
 current_task: null
 plan_revision: 7
 plan_commit: a51ebcb6
-state_revision: 7
-last_verified_checkpoint: 10f7b825
-last_reviewed_commit: null
+state_revision: 8
+last_verified_checkpoint: 62b19c5c
+last_reviewed_commit: 62b19c5c
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-08T15:15:39Z"
+updated_at: "2026-11-08T15:23:04.650445Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
 verified:
+  - by: agent:code-reviewer
+    at: "2026-11-08T15:23:04.650445Z"
+    commit: 62b19c5c
+  - by: agent:quality-reviewer
+    at: "2026-11-08T15:23:04.650445Z"
+    commit: 62b19c5c
   - by: agent:flow-setup
     at: "2026-11-07T04:15:00Z"
     commit: cdb978d3
@@ -127,11 +133,12 @@ User-guide expansion remains planned in `ch04:t03`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `a51ebcb6`; revision `7`, dependency `ch01-native-engine-and-auth` completed, `state: active`, `current_task: null`.
-- **Task State**: All `3/3` tasks are completed; the chapter awaits correctness recheck and fresh quality review. Django consumer fixes are verified at `04be780b7901e76ea3a487dfa5ba519061a14a8c`.
-- **Recovery Checkpoint**: Canonical modules pass `136` tests; extension/storage suites pass `592` tests. Full configured MyPy passes `419` files, Ruff/format and lock checks pass, and documentation artifacts build successfully at `04be780b7901e76ea3a487dfa5ba519061a14a8c`.
-- **Documentation & OKF Status**: `[2/2 files documented in ch02]`; user guides and Litestar/Arrow additions remain in the downstream plan.
-- **Active Invariants**: Exact SQLSpec protocol methods, native buffer streams/pages/readers, explicit targets, no Advanced Alchemy registry monkeypatching or thread offload, and Django modification-only UTC timestamps. `build_duckdb_gcs_secret_sql` remains intact.
+- **Verified Baseline**: Reviewed `62b19c5c`; implemented native adapter source checkpoint `04be780b`.
+- **Current State**: `completed`; all three task worksheets are completed with verified source commits and matching checklist markers.
+- **Verification**: `136` canonical and `592` extension/storage tests pass, full MyPy checks `419` files, Ruff/format and lock validation pass, and documentation builds and verifies.
+- **Documentation & OKF Status**: `[2/2 files documented]`; storage knowledge and product typing match the adapter contracts.
+- **Review State**: Correctness and fresh quality reviews pass with no unresolved findings.
+- **Remaining Flow**: Chapters `ch03` and `ch04` contain five pending tasks; this chapter adds no Range, Litestar static-store, or Arrow/Parquet implementation.
 
 [^sqlspec-storage]: `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` — SQLSpec object storage adapter.
 [^alchemy-storage]: `src/py/vertebra/extensions/alchemy/storage.py::ObjectStoreBackend` — Advanced Alchemy storage backend and registry integration.

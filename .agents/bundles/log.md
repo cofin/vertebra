@@ -1,5 +1,11 @@
 # Bundle Activity Log
 
+## [2026-11-08] chapter-reviewed | Close storage-completeness ch02 at 62b19c5c
+
+- All three storage integration tasks are complete. Correctness and fresh quality reviews pass at `62b19c5c` after native-key file reopening, provider-config migration serialization, and worksheet-note cleanup.
+- Verification passes: `136` canonical tests, `592` extension/storage tests, full MyPy (`419` files), Ruff/format, lock validation, documentation build/artifacts, and all five native extension imports.
+- The active pointer advances to `ch03-litestar-and-range-streaming` (`storage-completeness:ch03:t01`); `ch03` and `ch04` retain five pending tasks. Commits remain local.
+
 ## [2026-11-08] flow-implement | Bind Django file reopening and migration serialization to native storage
 
 - Correctness review identified two Django consumer failures. Source fix `04be780b` binds closed-file reopening to the configured native store/key and registers public migration serializers only for the eight owned `StorageConfig` types, preserving public constructors and every field. Real `FieldFile` consumers and async-opened handles retain native content despite colliding local filenames; `MigrationWriter` round trips local/memory storage and provider configuration options.
