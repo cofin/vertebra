@@ -10,7 +10,7 @@ import time
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, get_type_hints
 from urllib.parse import parse_qs, urlparse
 
 import msgspec
@@ -726,6 +726,12 @@ def test_django_storage_deconstructs_and_requires_configuration(tmp_path: Path) 
     with restored.open(saved) as handle:
         assert isinstance(handle, File)
         assert handle.read() == b"hello"
+
+
+@pytest.mark.parametrize("method", [DjangoStorage.aopen, DjangoStorage._open])
+def test_django_storage_file_annotations_support_runtime_introspection(method: Any) -> None:
+    """Runtime annotation resolution uses Django's concrete unsubscriptable File."""
+    assert get_type_hints(method)["return"] is File
 
 
 @pytest.mark.parametrize("config", [None, "", "   "])

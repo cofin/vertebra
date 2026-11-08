@@ -30,10 +30,13 @@ _exceptions_module = import_optional("django.core.exceptions")
 if TYPE_CHECKING:
     from django.core.files.base import ContentFile, File
     from django.core.files.storage import Storage as _StorageBase
+
+    _ReadableFile = File[bytes]
 else:
     _StorageBase = _storage_module.Storage if _storage_module is not None else object
     File = _file_module.File if _file_module is not None else None
     ContentFile = _file_module.ContentFile if _file_module is not None else None
+    _ReadableFile = File
 
 _deconstructible = _deconstruct_module.deconstructible if _deconstruct_module is not None else lambda cls: cls
 _validate_file_name = _utils_module.validate_file_name if _utils_module is not None else None
@@ -134,7 +137,7 @@ class DjangoStorage(_StorageBase):
         """Return the asynchronous handle sharing the native storage engine."""
         return self._async_store
 
-    async def aopen(self, name: str, mode: str = "rb") -> File[bytes]:
+    async def aopen(self, name: str, mode: str = "rb") -> _ReadableFile:
         """Await metadata before constructing a synchronous Django file handle."""
         self._validate_mode(mode)
         key = self._qualified_name(name)
@@ -252,7 +255,7 @@ class DjangoStorage(_StorageBase):
         msg = "The storage backend does not expose access timestamps"
         raise NotImplementedError(msg)
 
-    def _open(self, name: str, mode: str = "rb") -> File[bytes]:
+    def _open(self, name: str, mode: str = "rb") -> _ReadableFile:
         """Return a seekable Django file over the native synchronous reader."""
         self._validate_mode(mode)
         return File(cast("BinaryIO", self._store.open_reader(self._qualified_name(name))), name=name)
