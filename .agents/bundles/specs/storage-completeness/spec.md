@@ -12,7 +12,7 @@ chapters:
   - ch03-litestar-and-range-streaming
   - ch04-arrow-shm-and-docs
 current_chapter: ch02-orm-and-sql-storage-contracts
-current_task: "storage-completeness:ch02:t02"
+current_task: "storage-completeness:ch02:t03"
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/gap-analysis_20261103.md

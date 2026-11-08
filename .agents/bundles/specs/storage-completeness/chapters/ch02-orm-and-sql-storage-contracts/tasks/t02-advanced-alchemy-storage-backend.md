@@ -5,7 +5,7 @@ chapter_id: ch02-orm-and-sql-storage-contracts
 title: Remove storages.get monkeypatch and harden Advanced Alchemy ObjectStoreBackend
 description: Delete import-time storages.get monkeypatching and memory:// fallbacks in vertebra.extensions.alchemy.storage and register ObjectStoreBackend strictly via Advanced Alchemy StorageRegistry.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -20,20 +20,20 @@ files:
 tests:
   - src/py/tests/unit/extensions/test_data_storage_integrations.py
 estimated_loc: 160
-plan_revision: 3
-plan_commit: e8901de4
-state_revision: 0
+plan_revision: 4
+plan_commit: 1e1f028a
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-08T02:44:34Z"
+last_verified_commit: 0e579db6dc31bdf120b3a3c1fae84c1a2b4e6c6a
+verification_evidence: "Public-seam Red: import mutation 1 failed, fail-closed targets 3 failed, prefix traversal 3 failed, bounded reads 3 failed; final focused Ruff and Mypy exit 0; canonical pytest 65 passed, exit 0."
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-08T02:09:14Z"
-commit: null
+updated_at: "2026-11-08T02:44:34Z"
+commit: 0e579db6dc31bdf120b3a3c1fae84c1a2b4e6c6a
 sources:
   - id: alchemy-storage-mod
     resource: src/py/vertebra/extensions/alchemy/storage.py::ObjectStoreBackend
@@ -100,13 +100,25 @@ Remove both `storages.get` monkeypatches and implicit memory targets from the ex
 
 ## Acceptance Criteria
 
-- [ ] Both registry monkeypatches and implicit `memory://` fallbacks are removed; public concrete `ObjectStoreBackend` and explicit registration forms remain usable (R3, R5).
-- [ ] Real `FileObject` / `StorageRegistry` lifecycle, metadata, streaming, and signing pass through paired native stores without `asyncio.to_thread` (R1, R5).
-- [ ] Invalid configuration and traversal are rejected before native or registry effects; touched Python passes lint/type checks (R3, R5).
+- [x] Both registry monkeypatches and implicit `memory://` fallbacks are removed; public concrete `ObjectStoreBackend` and explicit registration forms remain usable (R3, R5).
+- [x] Real `FileObject` / `StorageRegistry` lifecycle, metadata, streaming, and signing pass through paired native stores without `asyncio.to_thread` (R1, R5).
+- [x] Invalid configuration and traversal are rejected before native or registry effects; touched Python passes lint/type checks (R3, R5).
 
 ## Notes & Discoveries
 
 - Installed contract baseline: Advanced Alchemy `1.12.0`; concrete Vertebra class is `ObjectStoreBackend`, abstract upstream base is `StorageBackend`, and read operations are `get_content[_async]`. Canonical tests contain no `test_storage_and_alchemy_zero_to_thread` test.
+
+- Native `put_stream` consumes iterator and bounded file reads incrementally and preserves original source exceptions and cancellation; native abort leaves no partial object. `Path` uploads retain `put_file`, and explicit `MemoryConfig()` remains supported.
+- The canonical integration module contains 65 passing tests, including existing `FileObject`, `StoredObject`, range/list/copy/signing, no-argument async-reader, and session-tracker behavior.
+
+## Execution Verification
+
+- Red: `uv run --no-sync pytest src/py/tests/unit/extensions/test_data_storage_integrations.py -k alchemy -q` exits `1` with `1 failed, 1 passed, 48 deselected` for the import registry mutation.
+- Additional focused Red: `-k alchemy_requires`, `-k alchemy_rejects`, and `-k alchemy_file_upload` each report `3 failed` before their production changes.
+- Green: `uv run --no-sync ruff format src/py/vertebra/extensions/alchemy/storage.py src/py/tests/unit/extensions/test_data_storage_integrations.py` exits `0`.
+- Green: `uv run --no-sync ruff check src/py/vertebra/extensions/alchemy/storage.py src/py/tests/unit/extensions/test_data_storage_integrations.py` exits `0`.
+- Green: `uv run --no-sync mypy src/py/vertebra/extensions/alchemy/storage.py` exits `0` with no issues.
+- Green: `uv run --no-sync pytest src/py/tests/unit/extensions/test_data_storage_integrations.py -q` exits `0` with `65 passed, 12 warnings`; warnings are upstream SQLAlchemy deprecations.
 
 [^alchemy-storage-mod]: `src/py/vertebra/extensions/alchemy/storage.py::ObjectStoreBackend` — Concrete backend and explicit registration forms.
 [^store-zero-thread]: `src/py/vertebra/storage/_store.py::AsyncObjectStore` — Native asynchronous streaming and shared-engine conversion.
