@@ -15,6 +15,15 @@ pub enum ChannelBindingPolicy {
 }
 
 impl ChannelBindingPolicy {
+    /// Return the documented constructor spelling.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Disable => "disable",
+            Self::Prefer => "prefer",
+            Self::Require => "require",
+        }
+    }
+
     /// Parse an exact documented spelling without normalizing caller input.
     pub fn parse(raw: &str) -> Result<Self, PostgresError> {
         match raw {

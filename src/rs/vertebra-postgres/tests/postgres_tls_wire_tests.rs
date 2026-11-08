@@ -2,10 +2,12 @@ use std::{sync::Arc, time::Duration};
 
 use _postgres::{
     binding::tls_server_end_point,
-    config::PostgresConfig,
+    config::{ChannelBindingPolicy, PostgresConfig},
     errors::PostgresError,
     session::{BeginConnect, PendingSession, SessionHandle},
 };
+use base64::{Engine, engine::general_purpose::STANDARD};
+use hmac::{Hmac, Mac};
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose, date_time_ymd,
@@ -24,6 +26,272 @@ use x509_parser::asn1_rs::{Any, FromDer};
 mod support;
 
 const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 4, 210, 22, 47];
+
+fn plus_auth(code: i32, data: &[u8]) -> Vec<u8> {
+    support::frame(b'R', &[code.to_be_bytes().as_slice(), data].concat())
+}
+
+async fn plus_password<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Vec<u8> {
+    assert_eq!(stream.read_u8().await.unwrap(), b'p');
+    let len = stream.read_i32().await.unwrap();
+    assert!((4..=16_384).contains(&len));
+    let mut body = vec![0; len as usize - 4];
+    stream.read_exact(&mut body).await.unwrap();
+    body
+}
+
+async fn plus_eof<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) {
+    let mut byte = [0];
+    match timeout(Duration::from_secs(30), stream.read(&mut byte))
+        .await
+        .unwrap()
+    {
+        Ok(0) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+            ) => {}
+        result => panic!("unexpected credential or retry bytes: {result:?} {byte:?}"),
+    }
+}
+
+fn plus_hmac(key: &[u8], bytes: &[u8]) -> [u8; 32] {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
+    mac.update(bytes);
+    mac.finalize().into_bytes().into()
+}
+
+async fn plus_exchange<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    stream: &mut S,
+    mechanism: &str,
+    gs2: &str,
+    binding: &[u8],
+    outcome: &str,
+) {
+    let initial = plus_password(stream).await;
+    let end = initial.iter().position(|byte| *byte == 0).unwrap();
+    assert_eq!(&initial[..end], mechanism.as_bytes());
+    let length = i32::from_be_bytes(initial[end + 1..end + 5].try_into().unwrap());
+    let first = std::str::from_utf8(&initial[end + 5..]).unwrap();
+    assert_eq!(length as usize, first.len());
+    assert!(first.starts_with(&format!("{gs2}n=,r=")));
+    let first = &first[gs2.len()..];
+    let nonce = first.strip_prefix("n=,r=").unwrap();
+    assert!(!nonce.is_empty());
+    let server = format!("r={nonce}server,s=dnRiLXRlc3Qtc2FsdA==,i=4096");
+    support::send(stream, &plus_auth(11, server.as_bytes())).await;
+    let response = plus_password(stream).await;
+    let response = std::str::from_utf8(&response).unwrap();
+    let (bare, proof) = response.rsplit_once(",p=").unwrap();
+    let (encoded, final_nonce) = bare.strip_prefix("c=").unwrap().split_once(",r=").unwrap();
+    let expected_binding = [gs2.as_bytes(), binding].concat();
+    assert_eq!(STANDARD.decode(encoded).unwrap(), expected_binding);
+    assert_eq!(final_nonce, format!("{nonce}server"));
+    let salted =
+        hex::decode("2482c2af90bd00962845709770664bb70a090bcbd937e9d1fa1f855044d513bb").unwrap();
+    let client_key = plus_hmac(&salted, b"Client Key");
+    let stored_key = Sha256::digest(client_key);
+    let auth = format!("{first},{server},{bare}");
+    let signature = plus_hmac(&stored_key, auth.as_bytes());
+    let expected_proof: Vec<_> = client_key
+        .iter()
+        .zip(signature)
+        .map(|(key, mac)| key ^ mac)
+        .collect();
+    assert_eq!(STANDARD.decode(proof).unwrap(), expected_proof);
+    let final_message = match outcome {
+        "downgrade" => "e=server-does-support-channel-binding".into(),
+        "wrong-leaf" => {
+            let other = Pki::new("localhost", false);
+            let other_digest = Sha256::digest(other.server_cert.as_ref());
+            assert_ne!(binding, &other_digest[..]);
+            let wrong_c = STANDARD.encode([gs2.as_bytes(), &other_digest[..]].concat());
+            let wrong_auth = format!("{first},{server},c={wrong_c},r={nonce}server");
+            let wrong_signature = plus_hmac(&stored_key, wrong_auth.as_bytes());
+            let wrong_proof: Vec<_> = client_key
+                .iter()
+                .zip(wrong_signature)
+                .map(|(key, mac)| key ^ mac)
+                .collect();
+            assert_ne!(STANDARD.decode(proof).unwrap(), wrong_proof);
+            "e=channel-bindings-dont-match".into()
+        }
+        "wrong-proof" => format!("v={}", STANDARD.encode([0; 32])),
+        "success" => format!(
+            "v={}",
+            STANDARD.encode(plus_hmac(
+                &plus_hmac(&salted, b"Server Key"),
+                auth.as_bytes()
+            ))
+        ),
+        _ => unreachable!(),
+    };
+    let mut frames = plus_auth(12, final_message.as_bytes());
+    if outcome == "success" {
+        frames.extend(support::trust());
+    }
+    support::send(stream, &frames).await;
+}
+
+async fn plus_tls_case(
+    policy: ChannelBindingPolicy,
+    ed25519: bool,
+    offer: usize,
+    outcome: &'static str,
+) {
+    let mut pki = Pki::new("localhost", false);
+    if ed25519 {
+        let params = CertificateParams::new(vec!["localhost".into()]).unwrap();
+        let key = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        pki.ca_pem = cert.pem().into_bytes();
+        pki.server_cert = cert.der().clone();
+        pki.server_key = key.serialize_der();
+    }
+    let (listener, mut config) = support::listener().await;
+    config.sslmode = TlsMode::VerifyFull;
+    config.server_name = Some("localhost".into());
+    config.ca_pem = Some(pki.ca_pem.clone());
+    config.channel_binding = policy;
+    config.password = Some("secret".into());
+    config.connect_timeout = Duration::from_secs(30);
+    let digest = Sha256::digest(pki.server_cert.as_ref()).to_vec();
+    let acceptor = pki.acceptor(false);
+    let use_plus = !ed25519 && policy != ChannelBindingPolicy::Disable && offer <= 1;
+    let unavailable = policy == ChannelBindingPolicy::Require && ed25519;
+    let refused = unavailable
+        || (policy == ChannelBindingPolicy::Require && offer >= 2)
+        || (offer == 1 && !use_plus);
+    let success = !refused && outcome == "success";
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let peer = tokio::spawn(async move {
+        let mut raw = ssl_request(&listener).await;
+        raw.write_all(b"S").await.unwrap();
+        let mut tls = acceptor.accept(raw).await.unwrap();
+        if unavailable {
+            plus_eof(&mut tls).await;
+        } else {
+            support::startup(&mut tls).await;
+            let frame = match offer {
+                0 => plus_auth(10, b"SCRAM-SHA-256-PLUS\0SCRAM-SHA-256\0\0"),
+                1 => plus_auth(10, b"SCRAM-SHA-256-PLUS\0\0"),
+                2 => plus_auth(10, b"SCRAM-SHA-256\0\0"),
+                3 => support::trust(),
+                4 => plus_auth(3, b""),
+                5 => plus_auth(5, &[1, 2, 3, 4]),
+                _ => unreachable!(),
+            };
+            support::send(&mut tls, &frame).await;
+            if !refused {
+                if offer <= 2 {
+                    let (mechanism, gs2, binding) = if use_plus {
+                        (
+                            "SCRAM-SHA-256-PLUS",
+                            "p=tls-server-end-point,,",
+                            digest.as_slice(),
+                        )
+                    } else {
+                        (
+                            "SCRAM-SHA-256",
+                            if !ed25519 && policy == ChannelBindingPolicy::Prefer {
+                                "y,,"
+                            } else {
+                                "n,,"
+                            },
+                            &[][..],
+                        )
+                    };
+                    plus_exchange(&mut tls, mechanism, gs2, binding, outcome).await;
+                } else if offer >= 4 {
+                    let password = plus_password(&mut tls).await;
+                    let expected = if offer == 4 {
+                        "secret".to_owned()
+                    } else {
+                        postgres_protocol::authentication::md5_hash(b"app", b"secret", [1, 2, 3, 4])
+                    };
+                    assert_eq!(password, [expected.as_bytes(), b"\0"].concat());
+                    support::send(&mut tls, &support::trust()).await;
+                }
+            }
+            plus_eof(&mut tls).await;
+        }
+        done_rx.await.unwrap();
+        let mut connections = 1;
+        let listener = listener.into_std().unwrap();
+        while listener.accept().is_ok() {
+            connections += 1;
+        }
+        assert_eq!(connections, 1, "authentication reconnected");
+    });
+    let handle = SessionHandle::new(config);
+    let BeginConnect::Attempt(attempt) = handle.begin_connect().unwrap() else {
+        panic!()
+    };
+    let result = timeout(Duration::from_secs(30), attempt.run())
+        .await
+        .unwrap();
+    if success {
+        let pending = result.unwrap();
+        assert_eq!(
+            pending.connection().tls_server_end_point().is_some(),
+            !ed25519
+        );
+        pending.commit().unwrap();
+        assert!(!handle.is_closed());
+    } else {
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("unexpected authentication success"),
+        };
+        if refused {
+            assert!(matches!(error, PostgresError::UnsupportedAuth(_)));
+        } else {
+            assert!(matches!(error, PostgresError::Protocol(_)));
+        }
+        assert!(handle.is_closed());
+        assert!(handle.parameters().is_empty());
+        assert!(handle.begin_connect().is_err());
+    }
+    drop(handle);
+    done_tx.send(()).unwrap();
+    timeout(Duration::from_secs(30), peer)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn scram_plus_policy_matrix_tls() {
+    for policy in [
+        ChannelBindingPolicy::Disable,
+        ChannelBindingPolicy::Prefer,
+        ChannelBindingPolicy::Require,
+    ] {
+        for ed25519 in [false, true] {
+            for offer in 0..6 {
+                plus_tls_case(policy, ed25519, offer, "success").await;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn scram_plus_tls_leaf_bound_success_and_mismatch() {
+    for outcome in ["success", "wrong-leaf", "wrong-proof"] {
+        plus_tls_case(ChannelBindingPolicy::Require, false, 0, outcome).await;
+    }
+}
+
+#[tokio::test]
+async fn scram_plus_plain_offer_gs2_y() {
+    plus_tls_case(ChannelBindingPolicy::Prefer, false, 2, "success").await;
+}
+
+#[tokio::test]
+async fn scram_plus_downgrade_rejected() {
+    plus_tls_case(ChannelBindingPolicy::Prefer, false, 2, "downgrade").await;
+}
 
 struct Pki {
     ca_pem: Vec<u8>,

@@ -1,6 +1,7 @@
 mod support;
 
 use _postgres::{
+    config::ChannelBindingPolicy,
     errors::PostgresError,
     session::{BeginConnect, SessionHandle},
 };
@@ -27,6 +28,111 @@ fn challenge(code: i32) -> Vec<u8> {
         body.extend_from_slice(&[1, 2, 3, 4]);
     }
     support::frame(b'R', &body)
+}
+
+#[tokio::test]
+async fn scram_plus_policy_matrix_plaintext() {
+    for policy in [
+        ChannelBindingPolicy::Disable,
+        ChannelBindingPolicy::Prefer,
+        ChannelBindingPolicy::Require,
+    ] {
+        for offer in 0..6 {
+            let (listener, mut config) = support::listener().await;
+            config.channel_binding = policy;
+            config.password = Some("secret".into());
+            config.connect_timeout = Duration::from_secs(30);
+            let rejected_policy = policy == ChannelBindingPolicy::Require || offer == 1;
+            let (done_tx, done_rx) = oneshot::channel();
+            let peer = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                if policy == ChannelBindingPolicy::Require {
+                    let mut byte = [0];
+                    assert_eq!(
+                        tokio::time::timeout(Duration::from_secs(30), stream.read(&mut byte))
+                            .await
+                            .unwrap()
+                            .unwrap(),
+                        0,
+                        "credential bytes on closed session"
+                    );
+                } else {
+                    support::startup(&mut stream).await;
+                    let frame = match offer {
+                        0 => scram_offer(true),
+                        1 => sasl(10, b"SCRAM-SHA-256-PLUS\0\0"),
+                        2 => scram_offer(false),
+                        3 => support::trust(),
+                        4 => challenge(3),
+                        5 => challenge(5),
+                        _ => unreachable!(),
+                    };
+                    support::send(&mut stream, &frame).await;
+                    match offer {
+                        0 | 2 => {
+                            let first = scram_initial(&mut stream).await;
+                            let server = server_first(&first, 4096);
+                            support::send(&mut stream, &sasl(11, server.as_bytes())).await;
+                            let proof = scram_response(&mut stream, &first, &server, 4096).await;
+                            support::send(
+                                &mut stream,
+                                &[sasl(12, proof.as_bytes()), support::trust()].concat(),
+                            )
+                            .await;
+                        }
+                        4 | 5 => {
+                            let expected = if offer == 4 {
+                                b"secret".to_vec()
+                            } else {
+                                postgres_protocol::authentication::md5_hash(
+                                    b"app",
+                                    b"secret",
+                                    [1, 2, 3, 4],
+                                )
+                                .into_bytes()
+                            };
+                            let response = password_frame(&mut stream).await;
+                            assert_eq!(&response[5..response.len() - 1], expected);
+                            support::send(&mut stream, &support::trust()).await;
+                        }
+                        _ => {}
+                    }
+                    let mut byte = [0];
+                    assert_eq!(
+                        tokio::time::timeout(Duration::from_secs(30), stream.read(&mut byte))
+                            .await
+                            .unwrap()
+                            .unwrap(),
+                        0,
+                        "credential bytes on closed session"
+                    );
+                }
+                done_rx.await.unwrap();
+                assert!(
+                    matches!(listener.into_std().unwrap().accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+                );
+            });
+            let handle = SessionHandle::new(config);
+            let result = tokio::time::timeout(Duration::from_secs(30), connect(&handle))
+                .await
+                .unwrap();
+            if rejected_policy {
+                assert!(matches!(
+                    rejected(result, &handle),
+                    PostgresError::UnsupportedAuth(_)
+                ));
+            } else {
+                result.unwrap().commit().unwrap();
+                assert!(!handle.is_closed());
+            }
+            drop(handle);
+            done_tx.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(30), peer)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
 }
 
 async fn password_frame(stream: &mut TcpStream) -> Vec<u8> {

@@ -4,7 +4,7 @@ use bytes::BytesMut;
 use postgres_protocol::{
     authentication::{
         md5_hash,
-        sasl::{ChannelBinding, SCRAM_SHA_256, ScramSha256},
+        sasl::{ChannelBinding, SCRAM_SHA_256, SCRAM_SHA_256_PLUS, ScramSha256},
     },
     message::{
         backend::Message,
@@ -12,7 +12,10 @@ use postgres_protocol::{
     },
 };
 
-use crate::{config::PostgresConfig, errors::PostgresError};
+use crate::{
+    config::{ChannelBindingPolicy, PostgresConfig},
+    errors::PostgresError,
+};
 
 enum AuthPhase {
     Initial,
@@ -58,8 +61,23 @@ impl Authentication {
         &mut self,
         msg: &Message,
         config: &PostgresConfig,
+        tls_server_end_point: Option<&[u8]>,
         out: &mut BytesMut,
     ) -> Result<bool, PostgresError> {
+        if config.channel_binding == ChannelBindingPolicy::Require
+            && (tls_server_end_point.is_none()
+                || (matches!(self.phase, AuthPhase::Initial)
+                    && matches!(
+                        msg,
+                        Message::AuthenticationOk
+                            | Message::AuthenticationCleartextPassword
+                            | Message::AuthenticationMd5Password(_)
+                    )))
+        {
+            return Err(PostgresError::UnsupportedAuth(
+                "server authentication requires channel binding".into(),
+            ));
+        }
         match msg {
             Message::AuthenticationOk => {
                 if !matches!(
@@ -105,6 +123,7 @@ impl Authentication {
                 use fallible_iterator::FallibleIterator;
                 let mut mechanisms = body.mechanisms();
                 let mut has_plain = false;
+                let mut has_plus = false;
                 let mut has_mechanism = false;
                 while let Some(mechanism) = mechanisms
                     .next()
@@ -112,19 +131,38 @@ impl Authentication {
                 {
                     has_mechanism = true;
                     has_plain |= mechanism == SCRAM_SHA_256;
+                    has_plus |= mechanism == SCRAM_SHA_256_PLUS;
                 }
                 if !has_mechanism {
                     return Err(PostgresError::Protocol("empty SASL mechanism list".into()));
                 }
-                if !has_plain {
-                    return Err(PostgresError::UnsupportedAuth(
-                        "server SASL mechanism is unavailable".into(),
-                    ));
-                }
+                let (mechanism, binding) = match (config.channel_binding, tls_server_end_point) {
+                    (
+                        ChannelBindingPolicy::Prefer | ChannelBindingPolicy::Require,
+                        Some(digest),
+                    ) if has_plus => (
+                        SCRAM_SHA_256_PLUS,
+                        ChannelBinding::tls_server_end_point(digest.to_vec()),
+                    ),
+                    (ChannelBindingPolicy::Prefer, Some(_)) if has_plain => {
+                        (SCRAM_SHA_256, ChannelBinding::unrequested())
+                    }
+                    (ChannelBindingPolicy::Disable | ChannelBindingPolicy::Prefer, _)
+                        if has_plain =>
+                    {
+                        (SCRAM_SHA_256, ChannelBinding::unsupported())
+                    }
+                    _ => {
+                        return Err(PostgresError::UnsupportedAuth(
+                            "server SASL mechanism is unavailable for channel binding policy"
+                                .into(),
+                        ));
+                    }
+                };
                 let password = config.password.as_deref().ok_or_else(|| {
                     PostgresError::Config("password required by server authentication".into())
                 })?;
-                let scram = ScramSha256::new(password.as_bytes(), ChannelBinding::unsupported());
+                let scram = ScramSha256::new(password.as_bytes(), binding);
                 let client_nonce = std::str::from_utf8(scram.message())
                     .ok()
                     .and_then(|message| message.rsplit_once(",r="))
@@ -132,7 +170,7 @@ impl Authentication {
                     .ok_or_else(|| {
                         PostgresError::Protocol("invalid initial SCRAM message".into())
                     })?;
-                sasl_initial_response(SCRAM_SHA_256, scram.message(), out)
+                sasl_initial_response(mechanism, scram.message(), out)
                     .map_err(|error| PostgresError::Protocol(error.to_string()))?;
                 self.phase = AuthPhase::ScramStarted {
                     scram,

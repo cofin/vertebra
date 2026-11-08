@@ -33,11 +33,43 @@ claimed_at: "2026-11-08T00:34:33Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
+last_verified_at: "2026-11-08T00:40:03Z"
 last_verified_commit: null
-verification_evidence: null
+verification_evidence:
+  red_tls:
+    command: 'UV_NO_SYNC=1 PYO3_PYTHON=${PWD}/.venv/bin/python CARGO_TARGET_DIR=/tmp/vtb-cargo-target cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked --test postgres_tls_wire_tests scram_plus_plain_offer_gs2_y'
+    exit_code: 101
+    result: 'Before production changes, trusted bound TLS with a plain-only offer emits n,, rather than the required y,,; the wire assertion fails.'
+  red_plaintext:
+    command: 'UV_NO_SYNC=1 PYO3_PYTHON=${PWD}/.venv/bin/python CARGO_TARGET_DIR=/tmp/vtb-cargo-target cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked --test postgres_auth_wire_tests scram_plus_'
+    exit_code: 101
+    result: 'Final canonical tests against baseline production source reject Require plaintext startup bytes: peer reads one byte instead of terminal EOF; client also lacks the required UnsupportedAuth refusal. Source restoration exits 0 and restored-source focused Green passes.'
+  focused_auth:
+    command: 'UV_NO_SYNC=1 PYO3_PYTHON=${PWD}/.venv/bin/python CARGO_TARGET_DIR=/tmp/vtb-cargo-target cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked --test postgres_auth_wire_tests scram_plus_'
+    exit_code: 0
+    result: '1 test passes, executing all 18 plaintext policy/offer combinations with complete successful SCRAM/password exchanges and terminal pre-startup Require refusal.'
+  focused_tls:
+    command: 'UV_NO_SYNC=1 PYO3_PYTHON=${PWD}/.venv/bin/python CARGO_TARGET_DIR=/tmp/vtb-cargo-target cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked --test postgres_tls_wire_tests scram_plus_'
+    exit_code: 0
+    result: '4 tests pass: 36 real trusted TLS matrix combinations across ECDSA and Ed25519; full bound PLUS success, different-leaf and server-proof refusals, successful plain y,, and terminal stripped-offer downgrade rejection. Decoded c= and independent server proofs are verified; EOF and a completion barrier prove no extra credential frames or second connection.'
+  aggregate:
+    command: 'UV_NO_SYNC=1 PYO3_PYTHON=${PWD}/.venv/bin/python CARGO_TARGET_DIR=/tmp/vtb-cargo-target flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked'
+    exit_code: 0
+    result: '76 tests pass: 9 codec, 24 auth, 21 TLS, 22 wire/config/error. All 71 prior tests remain unchanged and pass; zero ignored or failed.'
+  clippy:
+    command: 'UV_NO_SYNC=1 PYO3_PYTHON=${PWD}/.venv/bin/python CARGO_TARGET_DIR=/tmp/vtb-cargo-target cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings'
+    exit_code: 0
+  formatting:
+    command: 'cargo fmt --manifest-path src/rs/Cargo.toml -p vertebra-postgres --check'
+    exit_code: 0
+  review_setup:
+    command: 'UV_NO_SYNC=1 .venv/bin/python -m tools.scripts.review_setup validate'
+    exit_code: 0
+  diff:
+    command: 'git diff --check'
+    exit_code: 0
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-08T00:34:33Z"
+updated_at: "2026-11-08T00:40:03Z"
 commit: null
 sources:
   - id: pg-contracts
@@ -122,13 +154,16 @@ Commit as `feat(postgres): authenticate certificate-bound SCRAM sessions`.
 
 ## Acceptance Criteria
 
-- [ ] `Disable`, `Prefer`, and `Require` select `ChannelBinding::{unsupported, unrequested, tls_server_end_point}` strictly per `contracts.md` and RFC 5802 Section 6 without custom SCRAM crypto (R5).
-- [ ] `scram_plus_plain_offer_gs2_y` verifies wire-level `"y,,"` in both client-first and base64-decoded `c=` when bound TLS receives a plain-only offer, while `Disable` and unbound transports emit `"n,,"` (R5).
-- [ ] `scram_plus_downgrade_rejected` and `Require` negative cases fail terminally without credential leakage, mechanism fallback, or reconnect replay (R4, R5).
+- [x] `Disable`, `Prefer`, and `Require` select `ChannelBinding::{unsupported, unrequested, tls_server_end_point}` strictly per `contracts.md` and RFC 5802 Section 6 without custom SCRAM crypto (R5).
+- [x] `scram_plus_plain_offer_gs2_y` verifies wire-level `"y,,"` in both client-first and base64-decoded `c=` when bound TLS receives a plain-only offer, while `Disable` and unbound transports emit `"n,,"` (R5).
+- [x] `scram_plus_downgrade_rejected` and `Require` negative cases fail terminally without credential leakage, mechanism fallback, or reconnect replay (R4, R5).
 
 ## Notes & Discoveries
 
 - Testing `e=server-does-support-channel-binding` inside `AuthenticationSaslFinal` verifies real RFC 5802 wire downgrade signaling through `postgres_protocol::authentication::sasl::ScramSha256::finish` rather than stopping at client-first selection.
+- The complete 54-case matrix executes 18 plaintext cases in the auth test file and 36 real trusted TLS cases in the TLS test file. Unbound `Require` fails immediately after transport negotiation with zero startup or credential bytes; bound `Require` accepts `AuthenticationOk` only after successful PLUS verification.
+- Production changes remain inside `config.rs`, `auth.rs`, and `session.rs`; `as_str(&self)` is added because the constructor spelling contract has no existing implementation. Existing nonce, iteration, reservation-deadline, ordering, and credential-redaction tests remain intact. Only server-side test helpers calculate proofs; client crypto remains upstream `ScramSha256`.
+- Verification is complete; task state and commit fields remain unbound for the coordinator's signed atomic task commit and chapter review.
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — `channel_binding` policy defaults and failure categories.
 [^proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — `ChannelBinding` APIs and `GS2` `y,,` downgrade semantics.

@@ -1,6 +1,11 @@
 //! Owned, cancellation-safe PostgreSQL session startup and publication.
 
-use crate::{auth::Authentication, config::PostgresConfig, errors::PostgresError, protocol, tls};
+use crate::{
+    auth::Authentication,
+    config::{ChannelBindingPolicy, PostgresConfig},
+    errors::PostgresError,
+    protocol, tls,
+};
 use bytes::BytesMut;
 use postgres_protocol::message::backend::Message;
 use std::{
@@ -280,6 +285,11 @@ async fn startup(
         mut stream,
         tls_server_end_point,
     } = tls::connect(config, deadline).await?;
+    if config.channel_binding == ChannelBindingPolicy::Require && tls_server_end_point.is_none() {
+        return Err(PostgresError::UnsupportedAuth(
+            "TLS channel binding is unavailable".into(),
+        ));
+    }
     stream
         .write_all(&protocol::encode_startup_frame(config)?)
         .await
@@ -299,7 +309,12 @@ async fn startup(
     let mut out = BytesMut::new();
     loop {
         let message = protocol::read_message(&mut conn.stream).await?;
-        if auth.handle_message(&message, config, &mut out)? {
+        if auth.handle_message(
+            &message,
+            config,
+            conn.tls_server_end_point.as_deref(),
+            &mut out,
+        )? {
             if Instant::now() >= deadline {
                 return Err(PostgresError::Transport(
                     "connection deadline elapsed during authentication".into(),
