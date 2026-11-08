@@ -5,7 +5,7 @@ chapter_id: ch01-native-gcs-plane-and-signing
 title: Wire SharedGcpTokenCacheHandle into vertebra-storage and harden GCS if_match, skip_signature, ambient ADC, quota project, and HTTP pooling
 description: Adopt SharedGcpTokenCacheHandle in RefreshingGcpCredentialProvider and SyncObjectStore/AsyncObjectStore, fix GCS PutMode::Update version generation handling, attach StaticCredentialProvider on skip_signature=true, isolate GoogleCloudStorageBuilder::new() on allow_ambient_adc=false, forward x-goog-user-project, and apply pooled ClientOptions across HTTP backends.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -24,18 +24,25 @@ tests:
 estimated_loc: 235
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: agent:executor
+claimed_at: "2026-11-08T22:32:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-08T22:41:28Z"
+last_verified_commit: 585e5dda
+verification_evidence:
+  red:
+    exit_code: 101
+    summary: "error[E0599]: no associated function or constant named `from_url_with_cache` found for struct `ObjectStoreEngine`"
+  green:
+    cargo_test_exit_code: 0
+    cargo_test_summary: "3 unit + 23 integration passed"
+    clippy_exit_code: 0
 created_at: "2026-11-08T20:30:00Z"
-updated_at: "2026-11-08T20:30:00Z"
-commit: null
+updated_at: "2026-11-08T22:42:00Z"
+commit: 585e5dda
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:30:00Z"
@@ -107,9 +114,9 @@ PATH="$PWD/.venv/bin:$PATH" PYO3_PYTHON="$PWD/.venv/bin/python" CARGO_TARGET_DIR
 
 ## Acceptance Criteria
 
-- [ ] `ObjectStoreEngine::from_url_with_cache` and `RefreshingGcpCredentialProvider` adopt `SharedGcpTokenCacheHandle` (R1.2).
-- [ ] GCS `if_match` succeeds for numeric generations (`1` RTT) and ETag strings, and returns `StorageError::Precondition` on mismatch (R1.2).
-- [ ] `skip_signature=true` completes `put`, `multipart`, and `delete` without dialing GCE metadata, `allow_ambient_adc=false` isolates env vars, `x-goog-user-project` is sent, and pooled `ClientOptions` are configured across HTTP builders (R1.2).
+- [x] `ObjectStoreEngine::from_url_with_cache` and `RefreshingGcpCredentialProvider` adopt `SharedGcpTokenCacheHandle` (R1.2).
+- [x] GCS `if_match` succeeds for numeric generations (`1` RTT) and ETag strings, and returns `StorageError::Precondition` on mismatch (R1.2).
+- [x] `skip_signature=true` completes `put`, `multipart`, and `delete` without dialing GCE metadata, `allow_ambient_adc=false` isolates env vars, `x-goog-user-project` is sent, and pooled `ClientOptions` are configured across HTTP builders (R1.2).
 
 ## Notes & Discoveries
 

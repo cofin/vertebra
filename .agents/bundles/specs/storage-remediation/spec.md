@@ -14,17 +14,17 @@ chapters:
   - ch05-framework-adapters-and-test-hygiene
   - ch06-docs-okf-and-plan-sync
 current_chapter: ch01-native-gcs-plane-and-signing
-current_task: "storage-remediation:ch01:t02"
+current_task: "storage-remediation:ch01:t03"
 parent_prd: native-data-platform
 research: []
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 1
-last_verified_checkpoint: f38d895b
+state_revision: 2
+last_verified_checkpoint: 585e5dda
 last_reviewed_chapter: null
 last_reviewed_commit: null
 created_at: "2026-11-08T20:30:00Z"
-updated_at: "2026-11-08T22:30:30Z"
+updated_at: "2026-11-08T22:42:00Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"

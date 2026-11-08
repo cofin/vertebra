@@ -10,14 +10,14 @@ state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: "storage-remediation:ch01:t02"
+current_task: "storage-remediation:ch01:t03"
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 1
-last_verified_checkpoint: f38d895b
+state_revision: 2
+last_verified_checkpoint: 585e5dda
 last_reviewed_commit: null
 created_at: "2026-11-08T20:30:00Z"
-updated_at: "2026-11-08T22:30:30Z"
+updated_at: "2026-11-08T22:42:00Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:30:00Z"
@@ -139,15 +139,15 @@ tags:
 ## 5. Implementation Plan
 
 - [x] [f38d895b] storage-remediation:ch01:t01 — Add C-ABI `GcpTokenCacheCapsule` and `SharedGcpTokenCacheHandle` in `vertebra-core` and `_capsule()` on `_vertebra` token caches (tasks/t01-gcp-token-cache-capsule.md)
-- [ ] storage-remediation:ch01:t02 — Wire `SharedGcpTokenCacheHandle` into `vertebra-storage` and harden GCS `if_match`, `skip_signature`, `allow_ambient_adc`, `x-goog-user-project`, and HTTP pooling (tasks/t02-native-gcs-data-plane-and-pooling.md)
+- [x] [585e5dda] storage-remediation:ch01:t02 — Wire `SharedGcpTokenCacheHandle` into `vertebra-storage` and harden GCS `if_match`, `skip_signature`, `allow_ambient_adc`, `x-goog-user-project`, and HTTP pooling (tasks/t02-native-gcs-data-plane-and-pooling.md)
 - [ ] storage-remediation:ch01:t03 — Pool IAM `signBlob` HTTP clients, add custom GCS `endpoint` presigning, and wire PyO3 `_storage` bindings and `_storage.pyi` (tasks/t03-gcs-presigning-and-python-config-wiring.md)
 - [ ] storage-remediation:ch01:t04 — Wire Python `GCSConfig`, `SyncObjectStore`, and `AsyncObjectStore` to `token_cache._capsule()` and custom GCS signing `endpoint` without blocking I/O (tasks/t04-python-gcs-config-and-store-wiring.md)
 - **Chapter / Phase Recovery Checkpoint**: `PATH="$PWD/.venv/bin:$PATH" PYO3_PYTHON="$PWD/.venv/bin/python" CARGO_TARGET_DIR=/tmp/vtb-cargo-target cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-storage && uv run --no-sync pytest src/py/tests/unit/storage/test_gcs_token_refresh.py src/py/tests/unit/storage/test_signing.py -q`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `f38d895b` — `1/4` tasks completed in `ch01`.
-- **Remaining Tasks in Chapter**: `t02`, `t03`, `t04`.
+- **Verified Baseline (`HEAD`)**: `585e5dda` — `2/4` tasks completed in `ch01`.
+- **Remaining Tasks in Chapter**: `t03`, `t04`.
 - **Remaining Chapters**: `ch01`–`ch06`.
 
 [^core-gcp-auth]: `src/rs/vertebra-core/src/gcp_auth.rs::GcpTokenCache` — Core GCP OAuth2 token cache shared across PyO3 extensions.
