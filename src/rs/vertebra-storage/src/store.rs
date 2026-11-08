@@ -294,7 +294,7 @@ impl MultipartUploadSession {
     }
 
     pub async fn complete(&mut self) -> Result<PutResult, ObjectStoreError> {
-        let mut upload = self.upload.take().ok_or_else(|| {
+        let upload = self.upload.as_mut().ok_or_else(|| {
             StorageError::InvalidInput("multipart upload session is already closed".to_string())
         })?;
         if let Some(ref mut acc) = self.accumulator
@@ -303,7 +303,6 @@ impl MultipartUploadSession {
             let tail_len = tail.len();
             if let Err(err) = upload.put_part(PutPayload::from(tail)).await {
                 self.had_error = true;
-                self.upload = Some(upload);
                 return Err(err.into());
             }
             self.flushed_part_sizes.push(tail_len);
@@ -311,13 +310,15 @@ impl MultipartUploadSession {
         if self.flushed_part_sizes.is_empty() {
             if let Err(err) = upload.put_part(PutPayload::new()).await {
                 self.had_error = true;
-                self.upload = Some(upload);
                 return Err(err.into());
             }
             self.flushed_part_sizes.push(0);
         }
         match upload.complete().await {
-            Ok(result) => Ok(result),
+            Ok(result) => {
+                self.upload = None;
+                Ok(result)
+            }
             Err(err) => {
                 self.had_error = true;
                 Err(err.into())
@@ -342,14 +343,27 @@ impl MultipartUploadSession {
         if let Some(ref mut acc) = self.accumulator {
             acc.clear();
         }
-        let Some(mut upload) = self.upload.take() else {
+        let Some(upload) = self.upload.as_mut() else {
             return Ok(());
         };
         match upload.abort().await {
-            Ok(()) => Ok(()),
-            Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Ok(()) | Err(object_store::Error::NotFound { .. }) => {
+                self.upload = None;
+                Ok(())
+            }
             Err(_) if self.had_error => Ok(()),
             Err(err) => Err(err.into()),
+        }
+    }
+}
+
+impl Drop for MultipartUploadSession {
+    fn drop(&mut self) {
+        if let Some(mut upload) = self.upload.take() {
+            STORAGE_RUNTIME.spawn(async move {
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_secs(30), upload.abort()).await;
+            });
         }
     }
 }

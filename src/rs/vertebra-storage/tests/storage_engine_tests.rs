@@ -2087,3 +2087,299 @@ async fn test_oci_list_preserves_raw_names_and_rejects_invalid_foreign_paths() {
     assert!(engine.list(None).await.is_err());
     server.await.unwrap();
 }
+
+mod multipart_lifecycle {
+    use super::*;
+    use _storage::store::PutConditionalOptions;
+    use async_trait::async_trait;
+    use futures::stream::BoxStream;
+    use object_store::path::Path;
+    use object_store::{
+        CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+        PutMultipartOptions, PutOptions, PutPayload, PutResult, UploadPart,
+    };
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tokio::sync::Notify;
+
+    #[derive(Debug, Default)]
+    struct UploadState {
+        active: Mutex<HashSet<usize>>,
+        aborted: Mutex<Vec<usize>>,
+        next_id: AtomicUsize,
+        fail_complete: AtomicBool,
+        fail_abort: AtomicBool,
+        pause_complete: AtomicBool,
+        pause_abort: AtomicBool,
+        complete_entered: Notify,
+        abort_entered: Notify,
+        release: Notify,
+        cleaned: Notify,
+    }
+
+    #[derive(Debug, Default)]
+    struct UploadPort {
+        objects: Arc<object_store::memory::InMemory>,
+        state: Arc<UploadState>,
+    }
+
+    impl std::fmt::Display for UploadPort {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("multipart lifecycle port")
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for UploadPort {
+        async fn put_opts(
+            &self,
+            p: &Path,
+            data: PutPayload,
+            opts: PutOptions,
+        ) -> object_store::Result<PutResult> {
+            self.objects.put_opts(p, data, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            p: &Path,
+            _: PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn MultipartUpload>> {
+            let id = self.state.next_id.fetch_add(1, Ordering::SeqCst);
+            self.state.active.lock().unwrap().insert(id);
+            Ok(Box::new(OwnedUpload {
+                port: self.objects.clone(),
+                state: self.state.clone(),
+                id,
+                path: p.clone(),
+                parts: Vec::new(),
+            }))
+        }
+
+        async fn get_opts(&self, p: &Path, opts: GetOptions) -> object_store::Result<GetResult> {
+            self.objects.get_opts(p, opts).await
+        }
+
+        fn delete_stream(
+            &self,
+            paths: BoxStream<'static, object_store::Result<Path>>,
+        ) -> BoxStream<'static, object_store::Result<Path>> {
+            self.objects.delete_stream(paths)
+        }
+
+        fn list(&self, p: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.objects.list(p)
+        }
+
+        async fn list_with_delimiter(&self, p: Option<&Path>) -> object_store::Result<ListResult> {
+            self.objects.list_with_delimiter(p).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            opts: CopyOptions,
+        ) -> object_store::Result<()> {
+            self.objects.copy_opts(from, to, opts).await
+        }
+    }
+
+    #[derive(Debug)]
+    struct OwnedUpload {
+        port: Arc<object_store::memory::InMemory>,
+        state: Arc<UploadState>,
+        id: usize,
+        path: Path,
+        parts: Vec<PutPayload>,
+    }
+
+    fn provider_error(message: &'static str) -> object_store::Error {
+        object_store::Error::Generic {
+            store: "lifecycle-port",
+            source: std::io::Error::other(message).into(),
+        }
+    }
+
+    #[async_trait]
+    impl MultipartUpload for OwnedUpload {
+        fn put_part(&mut self, part: PutPayload) -> UploadPart {
+            self.parts.push(part);
+            Box::pin(async { Ok(()) })
+        }
+
+        async fn complete(&mut self) -> object_store::Result<PutResult> {
+            self.state.complete_entered.notify_one();
+            if self.state.pause_complete.load(Ordering::SeqCst) {
+                self.state.release.notified().await;
+            }
+            if self.state.fail_complete.load(Ordering::SeqCst) {
+                return Err(provider_error("original completion failure"));
+            }
+            let payload = self
+                .parts
+                .iter()
+                .flat_map(|part| part.iter().cloned())
+                .collect();
+            let result = self
+                .port
+                .put_opts(&self.path, payload, PutOptions::default())
+                .await?;
+            self.state.active.lock().unwrap().remove(&self.id);
+            Ok(result)
+        }
+
+        async fn abort(&mut self) -> object_store::Result<()> {
+            self.state.abort_entered.notify_one();
+            if self.state.pause_abort.load(Ordering::SeqCst) {
+                self.state.release.notified().await;
+            }
+            if self.state.fail_abort.swap(false, Ordering::SeqCst) {
+                return Err(provider_error("cleanup failure"));
+            }
+            assert!(self.state.active.lock().unwrap().remove(&self.id));
+            self.state.aborted.lock().unwrap().push(self.id);
+            self.state.cleaned.notify_one();
+            Ok(())
+        }
+    }
+
+    async fn setup() -> (ObjectStoreEngine, Arc<UploadState>) {
+        let port = Arc::new(UploadPort::default());
+        let state = port.state.clone();
+        let engine = ObjectStoreEngine::with_store(port, "memory");
+        engine
+            .put("winner", Bytes::from_static(b"winning object"))
+            .await
+            .unwrap();
+        (engine, state)
+    }
+
+    async fn begin(engine: &ObjectStoreEngine) -> _storage::store::MultipartUploadSession {
+        let mut upload = engine
+            .create_multipart("winner", PutConditionalOptions::default())
+            .await
+            .unwrap();
+        upload
+            .write_chunk(Bytes::from_static(b"replacement"))
+            .await
+            .unwrap();
+        upload
+    }
+
+    async fn notified(notify: &Notify) {
+        tokio::time::timeout(Duration::from_secs(3), notify.notified())
+            .await
+            .expect("provider event");
+    }
+
+    #[tokio::test]
+    async fn failed_complete_keeps_exact_upload_abortable() {
+        let (engine, state) = setup().await;
+        state.fail_complete.store(true, Ordering::SeqCst);
+        let mut upload = begin(&engine).await;
+        let error = upload.complete().await.unwrap_err();
+        assert!(error.to_string().contains("original completion failure"));
+        upload.abort().await.unwrap();
+        upload.abort().await.unwrap();
+        assert_eq!(*state.aborted.lock().unwrap(), vec![0]);
+        assert!(state.active.lock().unwrap().is_empty());
+        assert_eq!(engine.get("winner").await.unwrap(), b"winning object"[..]);
+    }
+
+    #[tokio::test]
+    async fn cancelled_complete_keeps_exact_upload_abortable() {
+        let (engine, state) = setup().await;
+        state.pause_complete.store(true, Ordering::SeqCst);
+        let mut upload = begin(&engine).await;
+        {
+            let complete = upload.complete();
+            tokio::pin!(complete);
+            tokio::select! {
+                result = &mut complete => panic!("completion passed barrier: {result:?}"),
+                () = notified(&state.complete_entered) => {}
+            }
+        }
+        upload.abort().await.unwrap();
+        upload.abort().await.unwrap();
+        assert_eq!(*state.aborted.lock().unwrap(), vec![0]);
+        assert!(state.active.lock().unwrap().is_empty());
+        assert_eq!(engine.get("winner").await.unwrap(), b"winning object"[..]);
+    }
+
+    #[tokio::test]
+    async fn cancelled_publication_drop_cleans_owned_upload_only() {
+        let (engine, state) = setup().await;
+        state.pause_complete.store(true, Ordering::SeqCst);
+        state.pause_abort.store(true, Ordering::SeqCst);
+        let mut survivor = begin(&engine).await;
+        let upload = begin(&engine).await;
+        let completion = tokio::spawn(async move {
+            let mut upload = upload;
+            upload.complete().await
+        });
+        notified(&state.complete_entered).await;
+        completion.abort();
+        assert!(completion.await.unwrap_err().is_cancelled());
+        notified(&state.abort_entered).await;
+        assert_eq!(*state.active.lock().unwrap(), HashSet::from([0, 1]));
+        state.pause_abort.store(false, Ordering::SeqCst);
+        state.release.notify_one();
+        notified(&state.cleaned).await;
+        assert_eq!(*state.aborted.lock().unwrap(), vec![1]);
+        assert_eq!(*state.active.lock().unwrap(), HashSet::from([0]));
+        assert_eq!(engine.get("winner").await.unwrap(), b"winning object"[..]);
+        survivor.abort().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_abort_retains_ownership_and_original_error() {
+        let (engine, state) = setup().await;
+        state.fail_complete.store(true, Ordering::SeqCst);
+        state.fail_abort.store(true, Ordering::SeqCst);
+        let mut upload = begin(&engine).await;
+        let error = upload.complete().await.unwrap_err();
+        upload.abort().await.unwrap();
+        assert_eq!(*state.active.lock().unwrap(), HashSet::from([0]));
+        assert!(error.to_string().contains("original completion failure"));
+        upload.abort().await.unwrap();
+        assert_eq!(*state.aborted.lock().unwrap(), vec![0]);
+        assert_eq!(engine.get("winner").await.unwrap(), b"winning object"[..]);
+    }
+
+    #[tokio::test]
+    async fn cancelled_abort_keeps_exact_upload_abortable() {
+        let (engine, state) = setup().await;
+        state.pause_abort.store(true, Ordering::SeqCst);
+        let mut upload = begin(&engine).await;
+        {
+            let abort = upload.abort();
+            tokio::pin!(abort);
+            tokio::select! {
+                result = &mut abort => panic!("abort passed barrier: {result:?}"),
+                () = notified(&state.abort_entered) => {}
+            }
+        }
+        state.pause_abort.store(false, Ordering::SeqCst);
+        upload.abort().await.unwrap();
+        upload.abort().await.unwrap();
+        assert_eq!(*state.aborted.lock().unwrap(), vec![0]);
+        assert_eq!(engine.get("winner").await.unwrap(), b"winning object"[..]);
+    }
+
+    #[tokio::test]
+    async fn successful_complete_releases_cleanup_and_abort_is_idempotent() {
+        let (engine, state) = setup().await;
+        let mut upload = begin(&engine).await;
+        let result = upload.complete().await.unwrap();
+        assert!(result.e_tag.is_some());
+        upload.abort().await.unwrap();
+        upload.abort().await.unwrap();
+        drop(upload);
+        assert!(state.aborted.lock().unwrap().is_empty());
+        assert!(state.active.lock().unwrap().is_empty());
+        assert_eq!(engine.get("winner").await.unwrap(), b"replacement"[..]);
+    }
+}
