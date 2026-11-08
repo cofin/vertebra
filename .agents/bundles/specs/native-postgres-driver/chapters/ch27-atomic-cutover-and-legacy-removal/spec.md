@@ -12,12 +12,12 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch27:t01"
 plan_revision: 4
-plan_commit: dd432f18
+plan_commit: e8901de4
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T18:00:00Z"
+updated_at: "2026-11-08T02:05:22Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:45:00Z"
@@ -165,7 +165,7 @@ Progress: `[0/0 files documented in this chapter]` (flow-wide user docs and OKF 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dd432f18`; `depends_on_chapters: [ch26-compiler-pipeline-arrow-and-event-hooks]`, `state: planned`, `plan_revision: 4`; upstream `driver-fail-loud` removes PostgreSQL `memory://` paths before this chapter runs.
+- **Verified Plan Baseline**: `e8901de4`; `depends_on_chapters: [ch26-compiler-pipeline-arrow-and-event-hooks]`, `state: planned`, `plan_revision: 4`; upstream `driver-fail-loud` removes PostgreSQL `memory://` paths before this chapter runs.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
 - **Active Invariants**: Zero `psycopg`, `psycopg_pool`, `asyncpg`, or `_executor` paths survive in `src/py/vertebra/db/adapters/postgres/driver.py` after `t04`; `core.py` and `vertebra._vertebra` CPU helpers remain intact; `_in_memory_rows` and `memory://` stay absent.
 

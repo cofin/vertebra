@@ -11,13 +11,13 @@ depends_on_chapters:
   - ch03-scram-and-channel-binding
 replan_trigger: null
 current_task: "native-postgres-driver:ch04:t01"
-plan_revision: 3
-plan_commit: dd432f18
+plan_revision: 4
+plan_commit: e8901de4
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T16:40:00Z"
+updated_at: "2026-11-08T02:05:22Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:40:00Z"
@@ -157,7 +157,7 @@ Progress: `[0/0 files documented in ch04]`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dd432f18`; chapter `state: planned`, `planning_status: complete`, depends on `ch03-scram-and-channel-binding`.
+- **Verified Plan Baseline**: `e8901de4`; chapter `state: planned`, `planning_status: complete`, depends on `ch03-scram-and-channel-binding`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending), awaiting `native-postgres-driver:ch03:t03`.
 - **Documentation & OKF Status**: `[0/0 files documented in ch04]`; Cloud SQL `v1beta4` and AlloyDB `v1alpha` OKF curation scheduled in `ch30:t02`.
 - **Downstream Dependents**: Unblocks `ch05-cloud-tls-and-scoped-iam` (`ch05:t01`–`ch05:t04`).

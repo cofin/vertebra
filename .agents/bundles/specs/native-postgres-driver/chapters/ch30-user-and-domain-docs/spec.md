@@ -12,12 +12,12 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch30:t01"
 plan_revision: 4
-plan_commit: dd432f18
+plan_commit: e8901de4
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T18:00:00Z"
+updated_at: "2026-11-08T02:05:22Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:45:00Z"
@@ -146,7 +146,7 @@ Progress: `[0/11 files documented]`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dd432f18`; `depends_on_chapters: [ch29-wheel-ci-and-benchmarks]`, `state: planned`, `plan_revision: 4`.
+- **Verified Plan Baseline**: `e8901de4`; `depends_on_chapters: [ch29-wheel-ci-and-benchmarks]`, `state: planned`, `plan_revision: 4`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending); `[0/11 files documented]`.
 - **Downstream Dependents**: Unblocks [ch31-final-review-and-release-gate](../ch31-final-review-and-release-gate/spec.md) (`ch31:t01`) for final routed correctness review, fresh quality review, and complete-driver sign-off.
 

@@ -11,13 +11,13 @@ depends_on_chapters:
   - ch07-async-bridge-and-client-sessions
 replan_trigger: null
 current_task: "native-postgres-driver:ch08:t01"
-plan_revision: 3
-plan_commit: dd432f18
+plan_revision: 4
+plan_commit: e8901de4
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T16:55:00Z"
+updated_at: "2026-11-08T02:05:22Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:55:00Z"
@@ -145,7 +145,7 @@ Progress: `[1/1 stub file finalized for Phase 1 in ch08]` (`src/py/vertebra/_pos
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dd432f18`; chapter `state: planned`, `planning_status: complete`.
+- **Verified Plan Baseline**: `e8901de4`; chapter `state: planned`, `planning_status: complete`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
 - **Downstream Dependents**: Completes Phase 1 transport, cloud, auth, packaging, and session foundations and unblocks `ch09-owned-results-and-numeric-codecs` (`ch09:t01` depends on `ch08:t04`).
 

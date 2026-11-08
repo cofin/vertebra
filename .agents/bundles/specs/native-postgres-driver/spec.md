@@ -47,13 +47,13 @@ research:
   - research/protocol-and-execution_20261105.md
   - research/cloud-material_20261105.md
 plan_revision: 4
-plan_commit: dd432f18
+plan_commit: e8901de4
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_chapter: null
 last_reviewed_commit: null
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-07T18:00:00Z"
+updated_at: "2026-11-08T02:05:22Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:40:00Z"
@@ -110,7 +110,7 @@ tags:
 - **Standalone Optional Wheel**: `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owns live PostgreSQL Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`) without linking database clients into `vertebra-core` [^pg-conn-rs] [^pg-core-rs].
 - **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB Admin discovery + mTLS + IAM), lossless codecs, statement caching, single-`Sync` `pipeline()`, binary `COPY`, native `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, and `pgoutput` v1 logical replication ship together with full `psycopg`/`asyncpg` removal [^py-async-rs] [^arrow-shm-rs] [^pg-driver-py] [^sqlspec-py].
 - **Fail-Loud Baseline**: `driver-fail-loud` lands first and deletes `_in_memory_rows`, every PostgreSQL `memory://` branch, and `vertebra_db::postgres::PostgresPool`; this flow starts from that baseline and adds no memory or SHM-admission pool paths [^fail-loud-baseline].
-- **Nested Chapter Roadmap (`plan_revision: 4`)**: Decomposed into `31` dependency-ordered chapters (`ch01`–`ch31`, `111` vertical-slice tasks, each owning `<= 3` production files) anchored at `plan_commit: dd432f18` with `current_chapter: ch01-wheel-scaffold-and-config` (`native-postgres-driver:ch01:t01`).
+- **Nested Chapter Roadmap (`plan_revision: 4`)**: Decomposed into `31` dependency-ordered chapters (`ch01`–`ch31`, `111` vertical-slice tasks, each owning `<= 3` production files) anchored at `plan_commit: e8901de4` with `current_chapter: ch01-wheel-scaffold-and-config` (`native-postgres-driver:ch01:t01`).
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -325,11 +325,11 @@ Every worksheet (`111` total across `31` chapters) executes in one bounded invoc
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dd432f18` above `main @ 077a3fe9`; `state: planned`, `has_chapters: true`, `plan_revision: 4`, `plan_commit: dd432f18`.
+- **Verified Plan Baseline**: `e8901de4` above `main @ 077a3fe9`; `state: planned`, `has_chapters: true`, `plan_revision: 4`, `plan_commit: e8901de4`.
 - **Upstream Flow Dependency**: [`driver-fail-loud`](../driver-fail-loud/spec.md) completes before `ch01` starts; it removes PostgreSQL `memory://` execution and `vertebra_db::postgres::PostgresPool` [^fail-loud-baseline].
 - **Active Chapter & Next Task**: [ch01-wheel-scaffold-and-config](chapters/ch01-wheel-scaffold-and-config/spec.md) (`native-postgres-driver:ch01:t01`); all `31` chapters (`111` vertical-slice tasks) have `planning_status: complete` and `state: planned` (`0/111` completed).
 - **Documentation & OKF Status**: `[0/11 files documented]`, scheduled in [ch30-user-and-domain-docs](chapters/ch30-user-and-domain-docs/spec.md) (`ch30:t01`–`ch30:t04`), followed by final complete-driver review and acceptance in [ch31-final-review-and-release-gate](chapters/ch31-final-review-and-release-gate/spec.md) (`ch31:t01`).
-- **Delivery & Next Action**: Complete single-PR delivery on `feat/native-postgres-driver`; intermediate chapters never trigger early `/flow:finish` or `/flow:archive`. Next canonical command: `/flow:implement native-postgres-driver`.
+- **Delivery & Next Action**: Complete single-PR delivery on `feat/native-postgres-driver`; intermediate chapters never trigger early `/flow:finish` or `/flow:archive`. Next prerequisite command: `/flow:implement driver-fail-loud`; `/flow:implement native-postgres-driver` starts only after that flow completes.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::encode_query_frame` — Shared stateless PostgreSQL wire frame and codec helpers in `vertebra-db`.

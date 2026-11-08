@@ -12,12 +12,12 @@ depends_on_chapters:
 replan_trigger: null
 current_task: "native-postgres-driver:ch22:t01"
 plan_revision: 4
-plan_commit: dd432f18
+plan_commit: e8901de4
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T18:00:00Z"
+updated_at: "2026-11-08T02:05:22Z"
 generated:
   by: flow-revise
   at: "2026-11-07T05:00:00Z"
@@ -141,7 +141,7 @@ Progress: `[0/0 files documented in ch22]` (user guides and OKF domain chapters 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dd432f18`; chapter `state: planned`, `planning_status: complete`, `plan_revision: 4`.
+- **Verified Plan Baseline**: `e8901de4`; chapter `state: planned`, `planning_status: complete`, `plan_revision: 4`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
 - **Downstream Dependents**: Unblocks `ch23-replication-feedback-resume-and-bridge` and `ch24-change-source-and-checkpoints`.
 

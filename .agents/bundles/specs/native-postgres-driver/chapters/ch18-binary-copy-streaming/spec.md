@@ -11,13 +11,13 @@ depends_on_chapters:
   - ch17-command-deadlines-portals-and-tz-fallback
 replan_trigger: null
 current_task: "native-postgres-driver:ch18:t01"
-plan_revision: 3
-plan_commit: dd432f18
+plan_revision: 4
+plan_commit: e8901de4
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T05:00:00Z"
+updated_at: "2026-11-08T02:05:22Z"
 generated:
   by: flow-setup
   at: "2026-11-07T05:00:00Z"
@@ -148,7 +148,7 @@ Progress: `[0/0 files documented in ch18]` (user-facing `COPY` documentation in 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `plan_commit: dd432f18`; chapter `state: planned`, `planning_status: complete`.
+- **Verified Baseline**: `plan_commit: e8901de4`; chapter `state: planned`, `planning_status: complete`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
 - **Downstream Dependents**: Unblocks `ch19-native-arrow-batches-and-shm` and `ch20-arrow-copy-import-and-portals` (which wires Arrow `COPY` plans and PyO3 `copy_to` / `copy_from` / `copy_from_arrow` handles).
 

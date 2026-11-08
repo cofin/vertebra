@@ -11,13 +11,13 @@ depends_on_chapters:
   - ch27-atomic-cutover-and-legacy-removal
 replan_trigger: null
 current_task: "native-postgres-driver:ch28:t01"
-plan_revision: 3
-plan_commit: dd432f18
+plan_revision: 4
+plan_commit: e8901de4
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T16:45:00Z"
+updated_at: "2026-11-08T02:05:22Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:45:00Z"
@@ -136,7 +136,7 @@ Progress: `[0/0 files documented in this chapter]` (live server capabilities and
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dd432f18`; `depends_on_chapters: [ch27-atomic-cutover-and-legacy-removal]`, `state: planned`, `plan_revision: 3`.
+- **Verified Plan Baseline**: `e8901de4`; `depends_on_chapters: [ch27-atomic-cutover-and-legacy-removal]`, `state: planned`, `plan_revision: 4`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
 - **Active Invariants**: All local Docker PostgreSQL fixtures pass `sslmode="disable"` explicitly; every test-created schema, database, replication slot, publication, and container is cleaned up deterministically in `finally` / fixture teardown.
 

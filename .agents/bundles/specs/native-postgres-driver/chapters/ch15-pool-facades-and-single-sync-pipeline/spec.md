@@ -11,13 +11,13 @@ depends_on_chapters:
   - ch14-physical-pools-and-query-facades
 replan_trigger: null
 current_task: "native-postgres-driver:ch15:t01"
-plan_revision: 3
-plan_commit: dd432f18
+plan_revision: 4
+plan_commit: e8901de4
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T05:00:00Z"
+updated_at: "2026-11-08T02:05:22Z"
 generated:
   by: flow-setup
   at: "2026-11-07T05:00:00Z"
@@ -127,7 +127,7 @@ Progress: `[0/2 files documented in ch15]` (`src/py/vertebra/_postgres.pyi` and 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dd432f18`; chapter `state: planned`, `planning_status: complete`.
+- **Verified Plan Baseline**: `e8901de4`; chapter `state: planned`, `planning_status: complete`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`, `t04` (`4/4` pending).
 - **Downstream Dependents**: Unblocks `ch16-pipeline-scope-and-cancellation` (retained pipeline transaction scopes, `SyncPostgresPipeline` / `AsyncPostgresPipeline`, and protocol cancellation).
 

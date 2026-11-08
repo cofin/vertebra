@@ -11,13 +11,13 @@ depends_on_chapters:
   - ch28-live-conformance-and-service-acceptance
 replan_trigger: null
 current_task: "native-postgres-driver:ch29:t01"
-plan_revision: 3
-plan_commit: dd432f18
+plan_revision: 4
+plan_commit: e8901de4
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T16:45:00Z"
+updated_at: "2026-11-08T02:05:22Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:45:00Z"
@@ -131,7 +131,7 @@ Progress: `[0/0 files documented in this chapter]` (canonical `make postgres-tes
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ dd432f18`; `depends_on_chapters: [ch28-live-conformance-and-service-acceptance]`, `state: planned`, `plan_revision: 3`.
+- **Verified Plan Baseline**: `e8901de4`; `depends_on_chapters: [ch28-live-conformance-and-service-acceptance]`, `state: planned`, `plan_revision: 4`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
 - **Active Invariants**: `psycopg` and `asyncpg` remain confined to `[dependency-groups] bench` with `[tool.mypy]` `ignore_missing_imports` overrides; `VERTEBRA_POSTGRES_BENCH_DSN` is never echoed or persisted in JSON artifacts; no hosted workflow dispatch, push, or tag mutation occurs during execution.
 

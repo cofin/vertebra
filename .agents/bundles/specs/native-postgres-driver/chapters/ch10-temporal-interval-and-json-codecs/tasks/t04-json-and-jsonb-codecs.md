@@ -22,8 +22,8 @@ files:
 tests:
   - src/rs/vertebra-postgres/tests/json_codecs.rs
 estimated_loc: 205
-plan_revision: 3
-plan_commit: dd432f18
+plan_revision: 4
+plan_commit: e8901de4
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -34,7 +34,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T05:00:00Z"
+updated_at: "2026-11-08T02:05:22Z"
 commit: null
 generated:
   by: flow-revise
