@@ -49,6 +49,7 @@ __all__ = (
     "MissingDependencyError",
     "NumpyArray",
     "OptionalDependency",
+    "PreconditionError",
     "RawHeaders",
     "Struct",
     "ToolPolicyError",
@@ -137,6 +138,10 @@ class MissingDependencyError(VertebraError, ImportError):
 
 class ImproperConfigurationError(VertebraError, ValueError):
     """Raised when configuration is invalid."""
+
+
+class PreconditionError(VertebraError, OSError):
+    """Raised when a conditional storage or resource precondition fails."""
 
 
 class UnsupportedBackendError(VertebraError):

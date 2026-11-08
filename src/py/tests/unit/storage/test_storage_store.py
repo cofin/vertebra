@@ -14,6 +14,7 @@ from xml.etree import ElementTree
 
 import pytest
 
+import vertebra._storage as native_st
 import vertebra.storage as storage
 from vertebra._storage import StorageBuffer
 from vertebra.storage import (
@@ -32,7 +33,13 @@ from vertebra.storage import (
     SyncReadableFile,
     parse_byte_range,
 )
-from vertebra.typing import ImproperConfigurationError, MissingDependencyError, reset_dependency_cache
+from vertebra.typing import (
+    ImproperConfigurationError,
+    MissingDependencyError,
+    PreconditionError,
+    VertebraError,
+    reset_dependency_cache,
+)
 
 
 @contextlib.contextmanager
@@ -401,8 +408,11 @@ async def test_conditional_put_and_metadata_roundtrip() -> None:
     with pytest.raises(FileExistsError):
         store.put("cfg.json", b'{"v":2}', if_not_exists=True)
 
-    with pytest.raises(PermissionError):
+    with pytest.raises(PreconditionError) as sync_prec_exc:
         store.put("cfg.json", b'{"v":2}', if_match="non-matching-etag")
+    assert isinstance(sync_prec_exc.value, VertebraError)
+    assert isinstance(sync_prec_exc.value, OSError)
+    assert not isinstance(sync_prec_exc.value, PermissionError)
 
     async_store = AsyncObjectStore(MemoryConfig(namespace="cond-async"))
     async_meta = await async_store.put(
@@ -418,6 +428,48 @@ async def test_conditional_put_and_metadata_roundtrip() -> None:
 
     with pytest.raises(FileExistsError):
         await async_store.put("cfg.json", b'{"v":2}', if_not_exists=True)
+
+    with pytest.raises(PreconditionError) as async_prec_exc:
+        await async_store.put("cfg.json", b'{"v":2}', if_match="non-matching-etag")
+    assert isinstance(async_prec_exc.value, VertebraError)
+    assert isinstance(async_prec_exc.value, OSError)
+    assert not isinstance(async_prec_exc.value, PermissionError)
+
+
+@pytest.mark.anyio
+async def test_native_ffi_zero_copy_bytes_mutable_bytearray_copy_and_strided_rejection() -> None:
+    """Native _storage wraps immutable bytes zero-copy, copies mutable bytearray synchronously, and rejects strided views."""
+    sync_native = native_st.SyncObjectStore("memory://ffi-sync")
+    sync_native.put("imm.bin", b"immutable-payload")
+    assert bytes(sync_native.get("imm.bin")) == b"immutable-payload"
+
+    mutable = bytearray(b"hello-world")
+    sync_native.put("mut.bin", mutable)
+    mutable.clear()
+    assert mutable == bytearray()
+    assert bytes(sync_native.get("mut.bin")) == b"hello-world"
+
+    mp = sync_native.create_multipart("mp-mut.bin")
+    part_buf = bytearray(b"part-one")
+    mp.write_part(part_buf)
+    part_buf.clear()
+    assert part_buf == bytearray()
+    mp.complete()
+    assert bytes(sync_native.get("mp-mut.bin")) == b"part-one"
+
+    with pytest.raises(BufferError, match="C-contiguous"):
+        sync_native.put("strided.bin", memoryview(b"abcdef")[::2])
+
+    async_native = sync_native.to_async()
+    async_buf = bytearray(b"async-payload")
+    put_awaitable = async_native.put("async-mut.bin", async_buf)
+    async_buf.clear()
+    assert async_buf == bytearray()
+    await put_awaitable
+    assert bytes(await async_native.get("async-mut.bin")) == b"async-payload"
+
+    with pytest.raises(BufferError, match="C-contiguous"):
+        async_native.put("async-strided.bin", memoryview(b"abcdef")[::2])
 
 
 @pytest.mark.anyio

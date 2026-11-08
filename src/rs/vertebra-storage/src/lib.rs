@@ -17,10 +17,11 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{
-    PyBufferError, PyFileExistsError, PyFileNotFoundError, PyPermissionError, PyRuntimeError,
-    PyStopAsyncIteration, PyStopIteration, PyValueError,
+    PyBufferError, PyFileExistsError, PyFileNotFoundError, PyOSError, PyPermissionError,
+    PyRuntimeError, PyStopAsyncIteration, PyStopIteration, PyValueError,
 };
 use pyo3::prelude::*;
+use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::{PyBytes, PyCapsule, PyType, PyWeakref, PyWeakrefMethods, PyWeakrefReference};
 use tokio::task::AbortHandle;
 use vertebra_core::gcp_auth::{
@@ -40,6 +41,18 @@ use crate::store::{
     StoredObjectMeta, block_on_storage, runtime_handle,
 };
 
+fn make_precondition_err(message: String) -> PyErr {
+    Python::attach(|py| {
+        if let Ok(typing_mod) = py.import("vertebra.typing")
+            && let Ok(exc_attr) = typing_mod.getattr("PreconditionError")
+            && let Ok(exc_ty) = exc_attr.cast_into::<PyType>()
+        {
+            return PyErr::from_type(exc_ty, (message,));
+        }
+        PyOSError::new_err(message)
+    })
+}
+
 fn to_py_err(err: StorageError) -> PyErr {
     match err {
         StorageError::InvalidUrl(u, msg) => PyValueError::new_err(format!("{u}: {msg}")),
@@ -48,7 +61,7 @@ fn to_py_err(err: StorageError) -> PyErr {
             PyFileExistsError::new_err(format!("Object already exists at '{path}': {message}"))
         }
         StorageError::Precondition { path, message } => {
-            PyPermissionError::new_err(format!("Precondition failed for '{path}': {message}"))
+            make_precondition_err(format!("Precondition failed for '{path}': {message}"))
         }
         StorageError::ObjectStore(object_store::Error::NotFound { path, source }) => {
             PyFileNotFoundError::new_err(format!("Object not found: {path} ({source})"))
@@ -57,7 +70,7 @@ fn to_py_err(err: StorageError) -> PyErr {
             PyFileExistsError::new_err(format!("Object already exists at '{path}': {source}"))
         }
         StorageError::ObjectStore(object_store::Error::Precondition { path, source }) => {
-            PyPermissionError::new_err(format!("Precondition failed for '{path}': {source}"))
+            make_precondition_err(format!("Precondition failed for '{path}': {source}"))
         }
         StorageError::Io(io_err) => match io_err.kind() {
             std::io::ErrorKind::NotFound => PyFileNotFoundError::new_err(io_err.to_string()),
@@ -143,13 +156,17 @@ fn extract_buffer_bytes(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Byt
         return Ok(storage_buf.borrow().data.clone());
     }
     if let Ok(py_bytes) = data.cast::<PyBytes>() {
-        return Ok(Bytes::copy_from_slice(py_bytes.as_bytes()));
+        return Ok(Bytes::from_owner(PyBackedBytes::from(py_bytes.clone())));
     }
     let buf = PyBuffer::<u8>::get(data)?;
     if !buf.is_c_contiguous() {
-        return Err(PyValueError::new_err("buffer must be C-contiguous"));
+        return Err(PyBufferError::new_err(
+            "storage input buffer must be C-contiguous",
+        ));
     }
-    Ok(Bytes::from(buf.to_vec(py)?))
+    let copied = buf.to_vec(py)?;
+    drop(buf);
+    Ok(Bytes::from(copied))
 }
 
 /// Zero-copy read-only Python buffer wrapping Rust `bytes::Bytes`.

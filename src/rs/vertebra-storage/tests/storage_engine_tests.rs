@@ -1807,11 +1807,11 @@ fn test_pyo3_sync_and_async_streaming_multipart_conditional_pagination_and_renam
     Python::attach(|py| {
         let storage_mod = PyModule::new(py, "_storage").expect("create _storage module");
         _storage::_storage(&storage_mod).expect("populate _storage module");
-        let sys_modules = py
-            .import("sys")
-            .expect("import sys")
-            .getattr("modules")
-            .expect("sys.modules");
+        let sys_mod = py.import("sys").expect("import sys");
+        let sys_path = sys_mod.getattr("path").expect("sys.path");
+        let py_src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../py");
+        let _ = sys_path.call_method1("insert", (0, py_src_dir));
+        let sys_modules = sys_mod.getattr("modules").expect("sys.modules");
         sys_modules
             .set_item("vertebra._storage", &storage_mod)
             .expect("register vertebra._storage");
@@ -1821,6 +1821,7 @@ fn test_pyo3_sync_and_async_streaming_multipart_conditional_pagination_and_renam
                 r#"
 import asyncio
 import vertebra._storage as st
+from vertebra.typing import PreconditionError
 
 sync_store = st.SyncObjectStore("memory://")
 m1 = sync_store.put(
@@ -1843,8 +1844,8 @@ except FileExistsError:
 
 try:
     sync_store.put("locks/item.txt", b"stale", if_match="bad-etag")
-    raise AssertionError("expected PermissionError")
-except PermissionError:
+    raise AssertionError("expected PreconditionError")
+except PreconditionError:
     pass
 
 sync_store.put("locks/item.txt", b"updated", if_match=m1.etag)
