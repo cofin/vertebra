@@ -152,12 +152,9 @@ Commit as `feat(postgres): derive certificate endpoint channel binding`.
 
 ## Notes & Discoveries
 
-- Preflight verifies revision `7` / plan `1c75af65`, completed SCRAM dependency source `9b94bff8`, and completed/reviewed chapter 02 at `27b5a9e5`; the five-file read manifest and public peer-certificate accessor match the worksheet.
 - The public `rlib` binding seam dispatches explicit DSA-SHA2 OIDs before PSS classification. Public ASN.1 DER parsers exhaust the present PSS SEQUENCE, ordered explicit wrappers, nested hash/MGF1 identifiers, NULL parameters, and integer fields before the pinned PSS accessor selects the signature hash.
 - Twenty inline OpenSSL 3.5.5 signed DER vectors cover RSA, ECDSA, DSA, SHA-1/MD5 substitution, default/explicit PSS hashes, and divergent MGF1. Fixed expected digest literals come from independent Python `hashlib`; OpenSSL independently verifies all twenty self-signatures with `-check_ss_sig -auth_level 0`. Synthetic refusal certificates explicitly carry invalid signatures and never enter TLS.
 - The real TLS chain presents an ECDSA-P384/SHA-384 leaf plus an intermediate signed using RSA/SHA-256. Its fixed 48-byte leaf digest differs from both the SPKI and concatenated chain digest. A real Ed25519 TLS handshake succeeds with unavailable binding; existing plaintext and TLS trust-policy tests pass.
-- Source and worksheet remain uncommitted for the coordinator's signed source commit and verification receipt; `state`, `commit`, and `last_verified_commit` retain the active task contract.
-
 - Exposing `pub mod binding` on the Rust `rlib` seam allows `postgres_tls_wire_tests` to test DSA, MD5/SHA-1, RSA-PSS MGF1-divergent, and Ed448 X.509 DER vectors directly alongside live `tokio-rustls` TLS 1.3 leaf extraction tests without relaxing `rustls` signature verification.
 
 [^proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — `x509-parser` `0.18.1` PSS parameter and RFC 5929 / RFC 9266 analysis.

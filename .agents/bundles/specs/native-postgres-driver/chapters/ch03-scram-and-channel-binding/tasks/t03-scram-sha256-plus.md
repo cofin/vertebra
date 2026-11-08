@@ -5,7 +5,7 @@ chapter_id: ch03-scram-and-channel-binding
 title: Enforce SCRAM-SHA-256-PLUS channel-binding policies and GS2 downgrade protection
 description: Select and verify SCRAM-SHA-256-PLUS across Disable, Prefer, and Require channel-binding policies, emitting RFC 5802 GS2 y,, on bound TLS plain-only offers and rejecting downgrade or replay.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -28,13 +28,13 @@ estimated_loc: 245
 plan_revision: 8
 plan_commit: 8c540809
 state_revision: 0
-claimed_by: agent:ch03-t03-policy
-claimed_at: "2026-11-08T00:34:33Z"
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-08T00:40:03Z"
-last_verified_commit: null
+last_verified_commit: aa538f9a
 verification_evidence:
   red_tls:
     command: 'UV_NO_SYNC=1 PYO3_PYTHON=${PWD}/.venv/bin/python CARGO_TARGET_DIR=/tmp/vtb-cargo-target cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked --test postgres_tls_wire_tests scram_plus_plain_offer_gs2_y'
@@ -70,7 +70,7 @@ verification_evidence:
     exit_code: 0
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T00:40:03Z"
-commit: null
+commit: aa538f9a
 sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -135,7 +135,7 @@ Complete `ChannelBindingPolicy` (`Disable`, `Prefer`, `Require`) selection and `
 
 | Case | Input | Expected Output / Error |
 | --- | --- | --- |
-| `scram_plus_policy_matrix` | Full cartesian matrix of `(Disable, Prefer, Require)` x `(bound TLS, Ed25519 TLS, plaintext)` x `(PLUS+plain, PLUS-only, plain-only, trust/cleartext/MD5)` | Matches exact policy contract: `Disable` -> plain `"n,,"`; `Prefer` bound TLS -> `PLUS` (`p=tls-server-end-point,,`) or plain `"y,,"`; `Prefer` unbound -> plain `"n,,"` (fails `PLUS`-only); `Require` -> `PLUS` on bound TLS only, rejecting trust/cleartext/MD5/plain-only/unbound before credentials. |
+| `scram_plus_policy_matrix` | Full 54-case cartesian matrix of `(Disable, Prefer, Require)` x `(bound TLS, Ed25519 TLS, plaintext)` x `(PLUS+plain, PLUS-only, plain-only, trust, cleartext, MD5)` | Matches exact policy contract: `Disable` -> plain `"n,,"`; `Prefer` bound TLS -> `PLUS` (`p=tls-server-end-point,,`) or plain `"y,,"`; `Prefer` unbound -> plain `"n,,"` (fails `PLUS`-only); `Require` -> `PLUS` on bound TLS only, rejecting trust/cleartext/MD5/plain-only/unbound before credentials. |
 | `scram_plus_tls_leaf_bound_success_and_mismatch` | Live `tokio-rustls` server (`ECDSA P-256 SHA-256` leaf) offering `["SCRAM-SHA-256-PLUS", "SCRAM-SHA-256"]`: (a) matching leaf digest, (b) server computes `c=` against different cert DER, (c) corrupted server `v=` | (a) client-final `c=` base64-decodes to `b"p=tls-server-end-point,," ++ Sha256(leaf_der)` and commits `Ready`; (b) and (c) fail terminally and close socket. |
 | `scram_plus_plain_offer_gs2_y` | Trusted TLS with usable `Sha256(leaf_der)` binding (`channel_binding = "prefer"`), server advertises ONLY `["SCRAM-SHA-256"]` and genuinely does not support PLUS | Client-first message begins with `"y,,"` and client-final `c=` attribute base64-decodes to exact `b"y,,"`; valid plain server proof completes `Ready`. |
 | `scram_plus_downgrade_rejected` | Trusted TLS with usable binding (`channel_binding = "prefer"`), stripped advertisement `["SCRAM-SHA-256"]`, server receives `"y,,"`, runs `Continue`/client-final, and sends `SASLFinal` `b"e=server-does-support-channel-binding"` | `ScramSha256::finish` returns error (`PostgresError::Protocol`), `SessionHandle` transitions to `Closed`, listener count stays `1`, and zero `"n,,"` or retry frames are transmitted. |
@@ -162,8 +162,8 @@ Commit as `feat(postgres): authenticate certificate-bound SCRAM sessions`.
 
 - Testing `e=server-does-support-channel-binding` inside `AuthenticationSaslFinal` verifies real RFC 5802 wire downgrade signaling through `postgres_protocol::authentication::sasl::ScramSha256::finish` rather than stopping at client-first selection.
 - The complete 54-case matrix executes 18 plaintext cases in the auth test file and 36 real trusted TLS cases in the TLS test file. Unbound `Require` fails immediately after transport negotiation with zero startup or credential bytes; bound `Require` accepts `AuthenticationOk` only after successful PLUS verification.
-- Production changes remain inside `config.rs`, `auth.rs`, and `session.rs`; `as_str(&self)` is added because the constructor spelling contract has no existing implementation. Existing nonce, iteration, reservation-deadline, ordering, and credential-redaction tests remain intact. Only server-side test helpers calculate proofs; client crypto remains upstream `ScramSha256`.
-- Verification is complete; task state and commit fields remain unbound for the coordinator's signed atomic task commit and chapter review.
+- `ChannelBindingPolicy::as_str(&self)` exposes the constructor spellings from `config.rs`; policy selection lives in `auth.rs`, and the pre-startup binding check lives in `session.rs`. Nonce, iteration, reservation-deadline, ordering, and credential-redaction tests remain intact. Only server-side test helpers calculate proofs; client crypto remains upstream `ScramSha256`.
+- The original reservation deadline covers authentication work and publication. `startup` rechecks it after `Authentication::handle_message` and before flushing credentials; unavailable required binding is rejected before the startup frame.
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — `channel_binding` policy defaults and failure categories.
 [^proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — `ChannelBinding` APIs and `GS2` `y,,` downgrade semantics.

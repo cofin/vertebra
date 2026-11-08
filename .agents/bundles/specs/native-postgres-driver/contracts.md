@@ -121,17 +121,28 @@ and includes dial, SSLRequest, TLS, authentication, and `PendingSession::commit(
 Dropping an armed attempt or pending result closes the socket and handle.
 `PendingSession::connection()` exposes read-only prepublication metadata; committed
 parameter snapshots survive close. Backend cancellation keys remain Rust-only.
-The TLS-binding getter returns `None` until chapter 03 extracts the peer digest.
+`PostgresConnection::tls_server_end_point() -> Option<&[u8]>` exposes the negotiated
+leaf certificate digest, or `None` for plaintext and unsupported signature hashes.
+`binding::tls_server_end_point` hashes the full leaf DER using its signature hash:
+RSA/ECDSA SHA-224/256/384/512 and DSA SHA-224/256 are explicit OID cases. MD5/SHA-1
+use SHA-256; RSA-PSS uses its signature hash independently of MGF1 and requires a
+fully consumed present parameters SEQUENCE (omitted hashAlgorithm defaults to
+SHA-1). MD2, Ed25519/Ed448, unknown OIDs, and invalid PSS parameters make binding
+unavailable. Malformed or trailing certificate DER returns `Protocol`.
 
 Direct TCP TLS uses SSLRequest before `TransportStream::upgrade_tls` and never
 retries in plaintext after an `S` response. Only `Prefer` accepts `N` on the same
 socket. `Require`/`Prefer` without `ca_pem` provide encryption-only TLS; with
 `ca_pem` they verify the certificate chain and validity. `VerifyCa` verifies the
 chain and validity; `VerifyFull` also verifies the hostname, using `server_name`
-when supplied. Startup accepts trust, cleartext password, and MD5 with strict
-authentication completion before parameters/backend key/idle ReadyForQuery.
-The pinned `postgres-protocol = "=0.6.12"` encoders and `md5_hash` own password
-framing and hashing; SCRAM and channel binding belong to chapter 03.
+when supplied. Startup accepts trust, cleartext password, MD5, and policy-selected
+SCRAM/PLUS with strict authentication completion before parameters/backend key/idle
+ReadyForQuery. Pinned `postgres-protocol = "=0.6.12"` owns password framing,
+`md5_hash`, SASLprep, PBKDF2, and SCRAM proof verification. Local SCRAM phases require
+iterations `1..=100_000`, strict server-nonce extension, and verified SASL Final
+before AuthenticationOk; `message()` is never called after `finish()`. Startup
+rechecks the original reservation deadline after authentication handling and before
+flushing credentials; publication retains its original deadline check.
 
 The codec validates bounded frame/parser envelopes; startup session consumers
 exhaust lazy notice/error fields and validate UTF8 before discarding notices or
@@ -221,10 +232,15 @@ be acknowledged. Consumers own durable application and initial snapshot alignmen
 
 ## Authentication and lexical defaults
 
-With usable TLS binding, Prefer selects PLUS if advertised and uses GS2 y
-(ChannelBinding::unrequested) for plain-only advertisement. Disable or genuinely
-unavailable binding uses n (unsupported). Require fails before credentials when
-PLUS/binding is absent; no failed exchange is replayed as a weaker mode.
+With usable TLS binding, Prefer selects PLUS with GS2 `p=tls-server-end-point,,`
+if advertised and uses GS2 `y,,` (`ChannelBinding::unrequested`) for plain-only
+advertisement. Disable selects plain SCRAM with `n,,`; Prefer with unavailable
+binding also uses `n,,` when plain SCRAM is offered. Both reject PLUS-only offers
+when binding is disabled or unavailable. Require rejects unavailable binding before
+the startup frame, and rejects trust/password/MD5/plain-only authentication before
+credentials. Bound Require accepts AuthenticationOk only after verified PLUS.
+Leaf/proof mismatch or `e=server-does-support-channel-binding` terminates the
+exchange; no failed exchange replays credentials, falls back, or reconnects.
 
 Designated static iam_auth_options require access_token (or bearer_token), actual
 expires_at_unix_ms as canonical unsigned decimal milliseconds, and declared scopes

@@ -10,11 +10,11 @@ planning_status: complete
 depends_on_chapters:
   - ch02-wire-codec-and-session-startup
 replan_trigger: null
-current_task: "native-postgres-driver:ch03:t03"
+current_task: null
 plan_revision: 8
 plan_commit: 8c540809
 state_revision: 0
-last_verified_checkpoint: 2db27cd1
+last_verified_checkpoint: aa538f9a
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-08T00:32:06Z"
@@ -82,10 +82,22 @@ Applicable repository guidance: [database-drivers-and-dialers.md](../../../../kn
 pub fn tls_server_end_point(der: &[u8]) -> Result<Vec<u8>, PostgresError>;
 
 // src/rs/vertebra-postgres/src/auth.rs
-pub(crate) struct Authentication { /* Initial | PasswordSent | ScramStarted(ScramSha256) | ScramFinalSent(ScramSha256) | ScramVerifiedAwaitingOk | Complete */ }
+enum AuthPhase {
+    Initial,
+    PasswordSent,
+    ScramStarted { scram: ScramSha256, client_nonce: String },
+    ScramFinalSent(ScramSha256),
+    ScramVerifiedAwaitingOk,
+    Complete,
+}
+pub(crate) struct Authentication {
+    phase: AuthPhase,
+    md5_response: Option<String>,
+}
 impl Authentication {
     pub(crate) fn new() -> Self;
     pub(crate) fn is_complete(&self) -> bool;
+    pub(crate) fn redact_server_text(&self, text: &str, config: &PostgresConfig) -> String;
     pub(crate) fn handle_message(
         &mut self,
         msg: &postgres_protocol::message::backend::Message,
@@ -110,7 +122,7 @@ impl Authentication {
 | Premature or out-of-order SASL frames | `AuthenticationOk` in `ScramStarted`/`ScramFinalSent`, or duplicate `AuthenticationSaslContinue`/`AuthenticationSaslFinal` | Fail with `PostgresError::Protocol`; only `ScramVerifiedAwaitingOk` transitions to `Complete` on `AuthenticationOk`. |
 | Certificate signature hash selection | RSA/ECDSA SHA-224/256/384/512, DSA SHA-224/256, SHA-1/MD5, RSA-PSS explicit or omitted `hashAlgorithm` in a present parameters SEQUENCE (default SHA-1), MD2, Ed25519/Ed448 | Hash full leaf DER; substitute SHA-256 for SHA-1/MD5/default-PSS; return `Err` (binding unavailable) for unsupported MD2, Ed25519/Ed448, unknown OIDs, malformed PSS parameters, or trailing DER. |
 | Plain-only offer over bound TLS under `Prefer` | Usable `tls_server_end_point` + server offers `["SCRAM-SHA-256"]` only | Construct `ScramSha256` with `ChannelBinding::unrequested()` emitting `GS2` `"y,,"`; if stripped PLUS server replies `e=server-does-support-channel-binding`, fail terminally without `"n,,"` retry. |
-| `ChannelBindingPolicy::Require` | Trust, cleartext, MD5, plain-only SCRAM, plaintext transport, or Ed25519 unavailable binding | Fail locally with `PostgresError::UnsupportedAuth` / `Transport` before transmitting any credential bytes. |
+| `ChannelBindingPolicy::Require` | Trust, cleartext, MD5, plain-only SCRAM, plaintext transport, or Ed25519 unavailable binding | Missing binding returns `PostgresError::UnsupportedAuth` before the startup frame; bound TLS rejects weaker authentication before credential bytes. TLS negotiation errors retain `Transport`. |
 
 ### Alternatives Comparison
 
@@ -123,7 +135,7 @@ impl Authentication {
 
 Progress: `[0/0 files documented in ch03]`
 
-- Knowledge updates are deferred to Chapter 30 (`ch30:t02`), which records the RFC 5929 RSA-PSS / EdDSA channel-binding rules and `GS2` `y,,` downgrade invariants in `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md`.
+- Chapter 30 (`ch30:t03`) owns durable data-domain OKF consolidation, including the RFC 5929 RSA-PSS / EdDSA channel-binding rules and `GS2` `y,,` downgrade invariants in `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md`.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -136,16 +148,17 @@ Progress: `[0/0 files documented in ch03]`
 
 - [x] [9b94bff8] native-postgres-driver:ch03:t01 — Authenticate ordered SCRAM-SHA-256 SASL exchanges (tasks/t01-scram-sha256.md)
 - [x] [2db27cd1] native-postgres-driver:ch03:t02 — Derive RFC 5929 tls-server-end-point digests from negotiated peer certificates (tasks/t02-peer-certificate-binding.md)
-- [~] native-postgres-driver:ch03:t03 — Enforce SCRAM-SHA-256-PLUS channel-binding policies and GS2 downgrade protection (tasks/t03-scram-sha256-plus.md)
+- [x] [aa538f9a] native-postgres-driver:ch03:t03 — Enforce SCRAM-SHA-256-PLUS channel-binding policies and GS2 downgrade protection (tasks/t03-scram-sha256-plus.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: Source `2db27cd1` passes all 71 native tests, locked all-target Clippy, formatting, and bundle validation. Chapter 02 remains reviewed at `27b5a9e5`; plan revision 8 at `8c540809` awaits cold manifest review.
-- **Remaining Tasks in Chapter**: Tasks `t01` and `t02` are complete; channel-binding policy task `t03` is in progress under its cold-reviewed six-file manifest (`330ab230`).
-- **Documentation & OKF Status**: `[0/0 files documented in ch03]`; RFC 5929 channel-binding OKF curation scheduled in `ch30:t02`.
-- **Downstream Dependents**: Unblocks `ch04-cloud-material-and-admin-discovery` (`ch04:t01` depends on `ch03:t03`).
+- **Verified Baseline**: Source `aa538f9a` passes all 76 native tests (`9` codec, `24` auth, `21` TLS, `22` wire/config/error) and locked all-target Clippy with `-D warnings`. Chapter 02 remains reviewed at `27b5a9e5`; plan revision 8 remains anchored at `8c540809`.
+- **Remaining Tasks in Chapter**: All three tasks are complete at `9b94bff8`, `2db27cd1`, and `aa538f9a`; `current_task` and `last_reviewed_commit` are null pending correctness and fresh quality review of code and synchronized Markdown.
+- **Verified Policy Coverage**: The full 54-case matrix covers all three policies, plaintext/bound TLS/Ed25519 TLS, and six authentication offers; independent proofs, leaf mismatch, bad verifier, GS2 `y,,` downgrade refusal, and no-replay barriers cover terminal outcomes.
+- **Documentation & OKF Status**: `[0/0 files documented in ch03]`; full user guides and durable OKF consolidation belong to chapter 30, with data-domain curation in `ch30:t03`.
+- **Downstream Dependents**: Chapter 04 (`ch04:t01` depends on `ch03:t03`) waits for chapter 03 review and closure.
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — `channel_binding` constructor policy and startup error contracts.
 [^proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — `postgres-protocol` SASL SCRAM and `x509-parser` signature algorithm research.

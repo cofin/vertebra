@@ -39,7 +39,7 @@ chapters:
   - ch30-user-and-domain-docs
   - ch31-final-review-and-release-gate
 current_chapter: ch03-scram-and-channel-binding
-current_task: "native-postgres-driver:ch03:t03"
+current_task: null
 parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
@@ -47,7 +47,7 @@ research:
 plan_revision: 8
 plan_commit: 8c540809
 state_revision: 4
-last_verified_checkpoint: 2db27cd1
+last_verified_checkpoint: aa538f9a
 last_reviewed_chapter: ch02-wire-codec-and-session-startup
 last_reviewed_commit: 27b5a9e5
 created_at: "2026-11-03T04:05:00Z"
@@ -107,7 +107,7 @@ tags:
 <!-- truth: start -->
 - **Standalone Optional Wheel**: `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owns live PostgreSQL Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`) without linking database clients into `vertebra-core` [^pg-conn-rs] [^pg-core-rs].
 - **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB Admin discovery + mTLS + IAM), lossless codecs, statement caching, single-`Sync` `pipeline()`, binary `COPY`, native `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, and `pgoutput` v1 logical replication ship together with full `psycopg`/`asyncpg` removal [^py-async-rs] [^arrow-shm-rs] [^pg-driver-py] [^sqlspec-py].
-- **Nested Chapter Roadmap (`plan_revision: 8`)**: All 31 chapters and 111 tasks retain their scope at `plan_commit: 8c540809`; chapters 01–02 are complete and reviewed, most recently at `27b5a9e5`. Chapter 03 is active: ordered SCRAM is verified and peer-certificate binding is verified at `2db27cd1`; policy task `t03` is ready after cold review of its corrected six-file manifest.
+- **Nested Chapter Roadmap (`plan_revision: 8`)**: All 31 chapters and 111 tasks retain their scope at `plan_commit: 8c540809`; chapters 01–02 are complete and reviewed, most recently at `27b5a9e5`. Chapter 03 has all three tasks complete at `9b94bff8`, `2db27cd1`, and `aa538f9a`; the chapter remains active pending correctness and fresh quality review of code and synchronized Markdown.
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -151,9 +151,11 @@ Read [database-drivers-and-dialers.md](../../knowledge/domains/data/database-dri
 
 The crate-private codec has real session startup and close callers without dead-code allowances or expectations; all-target Clippy remains mandatory with `-D warnings`.
 
-Read-only `PendingSession::connection()` supports Rust metadata adoption; `PostgresConnection::tls_server_end_point()` reserves the channel-binding seam and returns `None` until chapter 03 adds the peer digest. Backend keys stay outside Python. The direct `fallible-iterator = "=0.2.0"` dependency supports pinned diagnostic traversal.
+Read-only `PendingSession::connection()` supports Rust metadata adoption; `PostgresConnection::tls_server_end_point() -> Option<&[u8]>` exposes the negotiated leaf certificate digest when available. `binding::tls_server_end_point` hashes full leaf DER using explicit signature OIDs and fully consumed RSA-PSS parameters, substitutes SHA-256 only for MD5/SHA-1, and marks unsupported MD2/EdDSA unavailable. Backend keys stay outside Python. The direct `fallible-iterator = "=0.2.0"` dependency supports pinned diagnostic traversal.
 
 The connection-publication seam uses owned `Arc<PostgresConfig>` and `Arc<std::sync::Mutex<SessionState>>` shared by cloneable `SessionHandle` values. `BeginConnect`, `ConnectAttempt`, and `PendingSession` have no lifetime parameters; attempts, their `run()` futures, and pending results are `Send + 'static` for the asynchronous completion bridge, with armed rollback on drop and publication only in `commit()`.
+
+Ordered SCRAM enforces iterations `1..=100_000`, strict server-nonce extension, and verified `AuthenticationSaslFinal` before `AuthenticationOk`; upstream `ScramSha256` owns cryptography. Startup rechecks the original reservation deadline after authentication handling and before credential flush. `Disable`, `Prefer`, and `Require` select GS2 `n,,`, `y,,`, or `p=tls-server-end-point,,` according to transport binding and mechanism offers; missing required binding fails before the startup frame, and failed exchanges never replay credentials or reconnect in a weaker mode.
 
 The codec validates the bounded frame/parser envelope; session consumers exhaust lazy `NoticeResponse` and `ErrorResponse` fields with checked UTF8. Startup error free text masks the non-empty configured password and actual submitted MD5 token before ownership. Structured `S`/`V`/`C`/`P`/`p`/`L` fields remain exact even when they coincide with low-entropy password characters; empty secrets leave text unchanged and credential storage has no `Debug` implementation.
 
@@ -328,12 +330,12 @@ Every worksheet (`111` total across `31` chapters) executes within its bounded o
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: Source `2db27cd1` passes all 71 Rust tests, locked all-target Clippy, formatting, and bundle validation; flow `state: active`, `plan_revision: 8`, `plan_commit: 8c540809`.
-- **Progress**: `2/31` chapters are complete and reviewed; `10/111` tasks are complete. Chapter 02 receipts bind to `a00c3248`, `81791de2`, `ad8be7b6`, and `c5173f1b`.
-- **Current Chapter**: `ch03-scram-and-channel-binding`, with `current_task: native-postgres-driver:ch03:t03`; ordered SCRAM and peer-certificate binding are complete, and channel-binding policy is in progress.
-- **Remaining Plan**: Chapters 03–31 retain complete blueprints.
+- **Verified Baseline**: Source `aa538f9a` passes all 76 native Rust tests (`9` codec, `24` auth, `21` TLS, `22` wire/config/error) and locked all-target Clippy with `-D warnings`; flow `state: active`, `plan_revision: 8`, `plan_commit: 8c540809`.
+- **Progress**: `2/31` chapters are complete and reviewed; `11/111` tasks are complete. Chapter 01 remains reviewed at `3d68c853` and chapter 02 at `27b5a9e5`.
+- **Current Chapter**: `ch03-scram-and-channel-binding`, with `current_task: null`; ordered SCRAM, peer-certificate binding, and channel-binding policy tasks are complete at `9b94bff8`, `2db27cd1`, and `aa538f9a`. Chapter review remains pending.
+- **Remaining Plan**: Chapter 03 requires correctness and fresh quality review; chapters 04–31 retain complete blueprints.
 - **Documentation**: `[0/11 files documented]`; full guides and domain knowledge remain assigned to chapter 30.
-- **Next Action**: Continue `/flow:implement native-postgres-driver` with certificate-bound SCRAM policy enforcement, then the full remaining plan.
+- **Next Action**: Run `/flow:review native-postgres-driver` for chapter 03 code and synchronized Markdown before advancing to chapter 04.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` — Shared PostgreSQL wire frame helpers and SHM admission metadata in `vertebra-db`.

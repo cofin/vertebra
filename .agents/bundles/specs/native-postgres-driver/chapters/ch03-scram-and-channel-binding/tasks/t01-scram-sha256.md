@@ -150,7 +150,7 @@ Commit as `feat(postgres): validate SCRAM startup authentication`.
 
 - `postgres-protocol` `0.6.12` rejects iterations above `100_000` before PBKDF2, but accepts zero and checks only the nonce prefix. Local validation enforces the explicit `1..=100_000` policy and strict nonce extension before `scram.update`; upstream retains all cryptography and full SCRAM grammar checks.
 - The independent `tokio-postgres` oracle validates the same core SCRAM peer exchange with plain and combined mechanism offers; native-only coverage adds notices at every authentication phase because the oracle rejects notices during authentication.
-- The public deadline fixture registers a fresh read waker while the peer withholds Continue, observes its wake before any clock advance, and resumes the unspawned client only after expiry. Its guard-removal failure proves zero outbound credentials rather than merely observing an outer timeout.
+- The public deadline fixture registers a fresh read waker while the peer withholds Continue, observes its wake before any clock advance, and resumes the unspawned client only after expiry. Assert zero outbound credentials to verify the post-handle/preflush guard independently of the outer timeout.
 
 [^proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — `postgres-protocol` `0.6.12` SASL SCRAM audit findings.
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Startup SASL authentication and timeout invariants.

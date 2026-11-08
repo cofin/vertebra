@@ -1,5 +1,12 @@
 # Bundle Activity Log
 
+## [2026-11-08] flow-docs-sync | Native PostgreSQL SCRAM chapter checkpoint
+
+- Bind chapter 03 task receipts to `t01=9b94bff8`, `t02=2db27cd1`, and `t03=aa538f9a`. Exact coordinator checkpoint `aa538f9a` passes all 76 native tests (`9` codec, `24` auth, `21` TLS, `22` wire/config/error) under the shared SHM lock and locked all-target Clippy with `-D warnings`.
+- Preserve worker TDD evidence: task 01's post-handle/preflush guard removal produces Red (`101`), restoration passes 20/20 runs; task 02's real TLS getter is Red before implementation and twenty OpenSSL-signed DER vectors independently verify digest selection; task 03's bound-TLS plain offer emits incorrect `n,,` before policy changes and plaintext Require exposes startup bytes before its pre-startup refusal.
+- Synchronize current root/chapter contracts, catalogs, indexes, and worksheet Notes before correctness and fresh independent quality review. Ordered SCRAM bounds, full-leaf DER/OID/PSS digests, the full 54-case Disable/Prefer/Require matrix, GS2 `p`/`y`/`n`, terminal proof/downgrade refusal, and exact structured-field credential privacy remain current contracts.
+- Chapter 03 remains active with null current task and review stamp. Progress is `11/111` completed tasks and `2/31` reviewed chapters; chapter 01 review `3d68c853`, chapter 02 review `27b5a9e5`, and revision 8 / anchor `8c540809` remain unchanged. Documentation manifests remain `[0/0 files documented in ch03]` and `[0/11 files documented]`; chapter 30 owns full user guides and durable OKF consolidation.
+
 ## [2026-11-08] flow-revise | Native PostgreSQL PLUS fixture read manifest
 
 - Revision 8 anchors all 143 specification/task identities to `8c540809`. Replace only the two unmodified binding/TLS source reads in task 03 with its owned canonical auth/TLS test fixtures; config, auth, session, and contracts retain the other four read slots. Behavior, ownership, acceptance criteria, and the 31-chapter/111-task scope remain unchanged.
