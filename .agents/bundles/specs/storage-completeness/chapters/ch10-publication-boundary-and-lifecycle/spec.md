@@ -5,7 +5,7 @@ chapter_id: ch10-publication-boundary-and-lifecycle
 title: Native Publication Boundary and Cleanup Ownership
 description: Native Publication Boundary and Cleanup Ownership
 status: stable
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
@@ -14,7 +14,7 @@ plan_revision: 7
 plan_commit: 5f64d1a8
 state_revision: 0
 last_verified_checkpoint: fe992ae3
-last_reviewed_commit: null
+last_reviewed_commit: 1388109d
 created_at: '2026-11-07T12:00:00Z'
 updated_at: '2026-11-07T12:00:00Z'
 generated:
@@ -125,7 +125,7 @@ Progress: `[1/1 files documented]` for this implemented publication core. [Objec
 
 - [x] [85ed9f36] storage-completeness:ch10:t04 — Frame S3 producer chunks and preserve bounded backend policies (tasks/t04-minimum-cloud-part-framing.md)
 
-**Chapter Recovery Checkpoint:** the combined source checkpoint `fe992ae3` passes 15 library tests, 39 canonical engine tests, formatting, all-target Clippy and diff checks. All four task worksheets are completed and bound to the signed commits above. Correctness review and a fresh quality review over `4867dfb9..HEAD`, including synchronized Markdown, remain required before chapter closure.
+**Chapter Recovery Checkpoint:** the combined source checkpoint `fe992ae3` passes 15 library tests, 39 canonical engine tests, formatting, all-target Clippy and diff checks. All four task worksheets are completed and bound to the signed commits above. Correctness and fresh quality reviews approve the chapter source and synchronized Markdown through `1388109d`; all adopted metadata findings are resolved.
 
 ## 6. Current State & Remaining Plan Snapshot
 
@@ -133,7 +133,7 @@ Progress: `[1/1 files documented]` for this implemented publication core. [Objec
 - S3 bounded 8 MiB framing, short-tail/empty behavior, producer backpressure, abort ownership and the 10000-part guard are signed at `85ed9f36`. OCI's private policy retains its existing behavior.
 - The combined source checkpoint `fe992ae3` passes 15 library and 39 canonical tests, formatting, all-target Clippy and diff checks. The GCS constructor and snapshot request boundaries have their own implementation and review receipts in [ch21](../ch21-sdk-resolved-config/spec.md). Installed Python extensions remain at the native R2-withdrawal checkpoint.
 - Scoped knowledge is synchronized at `[1/1 files documented]`; final provider/consumer consolidation and root `[9/13 files documented]` acceptance remain with ch09:t03/ch04:t03.
-- The chapter is active, `current_task` and `last_reviewed_commit` are null, and final review metadata re-verification remains before closure. Local/cloud publication, ch20 negative CAS and original ch01/ch02 native acceptance/reclosure remain open.
+- The chapter is completed with `current_task: null` and `last_reviewed_commit: 1388109d` after correctness and fresh quality review. Local/cloud publication, ch20 negative CAS and original ch01/ch02 native acceptance/reclosure remain open.
 
 [^source]: `src/rs/vertebra-storage/src/store.rs` — Verified repository implementation seam.
 

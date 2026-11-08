@@ -4,8 +4,8 @@ id: storage-completeness:ch11:t02
 chapter_id: ch11-local-atomic-publication
 title: Manage SDK-private same-parent staging artifacts
 description: Manage SDK-private same-parent staging artifacts
-status: stable
-state: completed
+status: draft
+state: pending
 priority: P1
 verification_strategy: characterization
 depends_on:
@@ -21,11 +21,11 @@ files:
 tests:
 - src/rs/vertebra-storage/src/local_publication.rs
 estimated_loc: 210
-plan_revision: 5
-plan_commit: bdc7799a
+plan_revision: 6
+plan_commit: null
 state_revision: 0
-claimed_by: agent:runtime-ipc-specialist
-claimed_at: '2026-11-08T00:56:39.799148+00:00'
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -92,7 +92,7 @@ Manage SDK-private same-parent staging artifacts. Execute one bounded worksheet 
 
 The module remains test-only until t03. Implement the complete private staging/publication primitive API consumed by t03 without adding engine routing here: `async fn stage(&self, destination: &StorePath) -> Result<LocalStage, StorageError>`; `LocalStage` has `async fn write_chunk(&mut self, chunk: Bytes) -> Result<(), StorageError>` asynchronously appends only this chunk; `async fn publish(&self, stage: &mut LocalStage, destination: &StorePath, condition: &PublishCondition) -> Result<PutResult, StorageError>` obtains ordered parent guards, checks the predicate, atomically publishes and collects the exact SDK destination metadata under the guard. `async fn abort(&mut self) -> Result<(), StorageError>` is idempotent. The owning `LocalStage` retains file/path ownership across returned errors and cancellation; successful publication clears ownership only after its actual receipt is captured. Drop removes only its owned stage, never the persistent lockfile. Complete stage writes and flush outside the lock before publication; native file write/flush/metadata errors remain visible.
 
-Supply private `delete`, `rename` and `copy` mutation methods with StorePath operands and Result<(), StorageError>, retaining ordered guards through only their final mutation. Copy first opens a stable source snapshot and streams it into a same-parent destination stage outside publication locks, then publishes that stage with deduplicated source/destination parent guards. Ordinary puts use the same staging/publish primitives. Under a guard, Create uses native no-replace hard-link/create semantics; Match/NotMatch/Overwrite uses same-filesystem atomic rename only after evaluating actual current SDK metadata. Never fall back from unsupported LocalFileSystem PutMode::Update to an unchecked write. t03 wires these exact primitives into every public mutation and owns no changes to local_publication.rs.
+Supply private `delete`, `rename(from: &StorePath, to: &StorePath, if_not_exists: bool)` and `copy` mutation methods with StorePath operands and Result<(), StorageError>, retaining ordered guards through only their final mutation. Copy first opens a stable source snapshot and streams it into a same-parent destination stage outside publication locks, then publishes that stage with deduplicated source/destination parent guards. Ordinary puts use the same staging/publish primitives. Under a guard, Create uses native no-replace hard-link/create semantics; Match/NotMatch/Overwrite uses same-filesystem atomic rename only after evaluating actual current SDK metadata. Never fall back from unsupported LocalFileSystem PutMode::Update to an unchecked write. For create-only rename, preserve the existing SDK semantics under the same ordered guards: hard-link the source to the absent destination without replacement, then remove the source. An existing destination returns typed AlreadyExists before source removal and preserves both byte sequences. Ordinary rename uses native rename. Keep mutation steps synchronous while guards are held; no orphaned mutation job may escape after cancellation. Partial failures retain honest native outcomes and never delete an existing competing destination. t03 wires these exact primitives into every public mutation and owns no changes to local_publication.rs.
 
 Grounded contract evidence: [^research].
 
@@ -113,6 +113,7 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 | Artifact isolation primitive | Create/write a real LocalStage while listing via actual LocalFileSystem from narrow and broader roots | Both SDK listing APIs hide the existing-illegal lock/stage grammar; legal keep#suffix remains visible. |
 | Stage cleanup primitive | Cancel a staged primitive operation and repeat abort | Only its owned file disappears; destination and persistent lockfile remain. |
 | Same-filesystem publish primitive | Stage and publish in a real destination directory distinct from OS temp | Atomic native rename/link succeeds; actual destination receipt matches SDK head while guarded. |
+| Create-only rename | Existing source and destination, plus a missing destination and native failure | Existing destination and source both survive with AlreadyExists; absent destination receives exact source without payload copying; native partial failure is reported honestly. |
 | Predicate primitive | Existing target and Create/Match/NotMatch with a controlled competing real filesystem/native-SDK write | Rejected predicate preserves exact target; successful guarded publication returns its own ETag/version. |
 
 ## Verification
@@ -127,16 +128,16 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Acceptance Criteria
 
-- [x] Every matrix row passes at its public seam with existing behavior preserved.
+- [ ] Every matrix row passes at its public seam with existing behavior preserved.
 - [x] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
 - [x] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
-- [x] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
+- [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
 
 Native hard-link publication keeps two names for one inode until owned stage cleanup. Native rename between those same two inode names is a no-op, so the characterization recreates a distinct replacement stage before testing overwrite. SDK path_to_filesystem preserves raw percent and Unicode keys; empty SDK StorePath is not a valid filesystem object path.
 
-Revision 5 is independently approved at bdc7799a; production execution follows the declared task dependencies. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+The existing primitive source is `61a948df`. Revision6 reopens this task solely to preserve the public engine create-only rename flag through the private primitive; root readiness adjudication adopts the guarded SDK-equivalent link/remove contract. Independent bounded plan review precedes the repair. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `src/rs/vertebra-storage/src/local_publication.rs` — Current repository source for this task.
 

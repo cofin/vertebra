@@ -4,8 +4,8 @@ id: storage-completeness:ch11:t03
 chapter_id: ch11-local-atomic-publication
 title: Guard every local mutation and publish with native atomic operations
 description: Guard every local mutation and publish with native atomic operations
-status: stable
-state: pending
+status: draft
+state: blocked
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -25,19 +25,32 @@ files:
 tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 240
-plan_revision: 5
-plan_commit: bdc7799a
+plan_revision: 6
+plan_commit: null
 state_revision: 0
-claimed_by: null
-claimed_at: null
-blocked_reason: null
-unblock_condition: null
-next_step: null
+claimed_by: agent:runtime-ipc-specialist
+claimed_at: '2026-11-08T01:03:13.386388+00:00'
+blocked_reason: "Public store.rs:1069 rename(src, dst, if_not_exists) requires create-only semantics; completed local_publication.rs:261 rename(from, to) exposes unconditional rename only. Existing test_atomic_rename_and_conflict proves Local create-only rename and typed conflict with intact source. Production routing cannot preserve that contract within t03 ownership."
+unblock_condition: "Completed, verified prerequisite primitive accepts if_not_exists and performs guarded SDK-equivalent no-replace publication with intact source on conflict; revised t02/t03 contracts synchronize."
+next_step: "/flow:revise storage-completeness ch11-local-atomic-publication"
 last_verified_at: null
 last_verified_commit: null
-verification_evidence: null
+verification_evidence: |
+  Linux native checkpoint 1388109d; no production edits or module activation.
+  Actual regression Red: CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target"
+  PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock
+  /tmp/vertebra-flow-storage-cargo.lock flock /tmp/vertebra-flow-shm-tests.lock
+  uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p
+  vertebra-storage --test storage_engine_tests local_publication_routing -- --nocapture
+  exits 101: 1 child harness passes, 3 public regressions fail. Ordinary put
+  completes while the physical parent OS lock is held; Local Create/Match
+  multipart returns NotSupported before staging. Independent child processes,
+  explicit stdin/stdout readiness barriers and native File locks exercise real
+  public ObjectStoreEngine calls; no production hook or mocked SUT is used.
+  No Green, library activation, aggregate or cross-platform claim is made.
+  Pending code/tests remain task-owned and uncommitted for coordinator handoff.
 created_at: '2026-11-07T12:00:00Z'
-updated_at: '2026-11-07T12:00:00Z'
+updated_at: '2026-11-08T01:04:45.795293+00:00'
 commit: null
 sources:
 - id: implementation
@@ -74,7 +87,7 @@ Activate `mod local_publication;` in lib.rs by removing the exact test-only gate
 
 Grounded contract evidence: [^research].
 
-Route ordinary put/put_opts/put_file/delete/copy/rename and multipart final publication through per-physical-parent DirectoryGuards. Stage payload outside locks. Acquire source/destination physical parent directory guards in t01's deduplicated deterministic order for two-directory mutations; same-directory operations acquire only once. Under the held guard evaluate Create/Match/NotMatch against actual current target metadata and perform native atomic publication. Create uses native no-replace hard-link/create semantics; Match/NotMatch/Overwrite use same-filesystem atomic rename under the guard. Obtain actual resulting metadata/ETag before releasing the guard so returned results cannot describe a competing later object. Delete/rename/copy publication also participates; no ordinary write bypasses the guard. Never invoke unsupported LocalFileSystem PutMode::Update then fall back to unconditional overwrite. Preserve original target until successful publication and retain abort/stage ownership on error. Local SDK's actual content_type/attribute capability is documented honestly rather than fabricating persistence. Direct noncooperating OS writers are outside the guarantee. Lock acquisition executes off async runtime worker threads when it can block; no Python/global process lock or process mutex fallback.
+Forward the public `rename(src, dst, if_not_exists)` selector unchanged to the private `LocalPublication::rename(from, to, if_not_exists)` primitive. Route ordinary put/put_opts/put_file/delete/copy/rename and multipart final publication through per-physical-parent DirectoryGuards. Stage payload outside locks. Acquire source/destination physical parent directory guards in t01's deduplicated deterministic order for two-directory mutations; same-directory operations acquire only once. Under the held guard evaluate Create/Match/NotMatch against actual current target metadata and perform native atomic publication. Create uses native no-replace hard-link/create semantics; Match/NotMatch/Overwrite use same-filesystem atomic rename under the guard. Obtain actual resulting metadata/ETag before releasing the guard so returned results cannot describe a competing later object. Delete/rename/copy publication also participates; no ordinary write bypasses the guard. Never invoke unsupported LocalFileSystem PutMode::Update then fall back to unconditional overwrite. Preserve original target until successful publication and retain abort/stage ownership on error. Local SDK's actual content_type/attribute capability is documented honestly rather than fabricating persistence. Direct noncooperating OS writers are outside the guarantee. Lock acquisition executes off async runtime worker threads when it can block; no Python/global process lock or process mutex fallback.
 
 ## Edge Cases & Error Semantics
 
@@ -110,6 +123,16 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 - [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
+
+Public create-only rename is an existing contract, exercised by
+`test_atomic_rename_and_conflict` for both Memory and Local. The completed
+primitive has no conditional operand and performs unconditional native rename.
+Routing the public true selector to it loses no-replace behavior; routing around
+it duplicates policy or bypasses physical guards. The coordinator adopts this
+prerequisite gap and routes a bounded t02 reopen before dependent implementation.
+All production files remain unchanged. Canonical pending tests capture actual
+public Red and are ready for resumption after the primitive repair.
+
 
 Revision 5 is independently approved at bdc7799a; production execution follows the declared task dependencies. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 

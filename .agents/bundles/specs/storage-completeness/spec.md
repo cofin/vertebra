@@ -30,8 +30,8 @@ chapters:
 - ch19-sqlspec-arrow-streaming
 - ch20-ordinary-negative-cas
 - ch21-sdk-resolved-config
-current_chapter: ch10-publication-boundary-and-lifecycle
-current_task: null
+current_chapter: ch11-local-atomic-publication
+current_task: storage-completeness:ch11:t02
 parent_prd: native-data-platform
 research:
 - ../native-data-platform/research/gap-analysis_20261103.md
@@ -42,8 +42,8 @@ plan_revision: 7
 plan_commit: 5fe477fa4f6e08bab9278dba3906e7c556ceb3a4
 state_revision: 7
 last_verified_checkpoint: 5fe477fa
-last_reviewed_chapter: ch07-remove-r2-python
-last_reviewed_commit: eb76724f
+last_reviewed_chapter: ch10-publication-boundary-and-lifecycle
+last_reviewed_commit: 1388109d
 created_at: '2026-11-03T04:05:00Z'
 updated_at: '2026-11-07T22:33:17Z'
 generated:
@@ -262,7 +262,7 @@ Progress: `[9/13 files documented]` for final repair/HTTP/Arrow acceptance. Scop
 - [x] [eb76724f] ch07-remove-r2-python — Withdraw First-Class R2 Python APIs (chapters/ch07-remove-r2-python/spec.md)
 - [x] [43654f61] ch08-remove-r2-native — Move OCI Chunk Ownership and Remove Native R2 (chapters/ch08-remove-r2-native/spec.md)
 - [~] ch09-r2-docs-and-knowledge — Synchronize Supported Providers and Native Guarantees (chapters/ch09-r2-docs-and-knowledge/spec.md)
-- [~] ch10-publication-boundary-and-lifecycle — Native Publication Boundary and Cleanup Ownership (chapters/ch10-publication-boundary-and-lifecycle/spec.md)
+- [x] [1388109d] ch10-publication-boundary-and-lifecycle — Native Publication Boundary and Cleanup Ownership (chapters/ch10-publication-boundary-and-lifecycle/spec.md)
 - [~] ch11-local-atomic-publication — Local Cross-Process Conditional Publication (chapters/ch11-local-atomic-publication/spec.md)
 - [~] ch12-s3-conditional-multipart — S3 Metadata Multipart and Conditional Completion (chapters/ch12-s3-conditional-multipart/spec.md)
 - [ ] ch13-azure-conditional-block-list — Azure Conditional Multipart Block Commit (chapters/ch13-azure-conditional-block-list/spec.md)
@@ -288,10 +288,10 @@ Progress: `[9/13 files documented]` for final repair/HTTP/Arrow acceptance. Scop
 - All four ch07 Python withdrawal tasks are signed, including logical-URI rejection at `a7036538`; fresh correctness checks pass 186 tests with five existing optional-driver skips. Correctness and fresh quality reviews have no unresolved findings; ch07 is completed and reviewed at `eb76724f`. Native R2 withdrawal is reviewed and complete at `43654f61`.
 - ch08 is completed and reviewed at `43654f61`. Its three signed native tasks retain OCI accumulation ownership at `2e343bc3`, native R2 constructor/module/helper/stub withdrawal at `4614213f`, and dead-module/provenance deletion at `c7868b02`. All 25 native engine cases, formatting and all-target Clippy pass; all five native extensions build and pass stubtest. Native conditional-publication and Arrow acceptance remain open.
 - The complete roadmap contains 21 chapters and 60 tasks. The S3/Azure frontiers are independently approved at `e3e344b5`; the ch10 core is independently approved at `5f64d1a8`. Revision-8 GCS configuration/snapshot, publication and shared-negative-CAS contracts are independently approved at `c737ffeb`. Their declared execution dependencies remain.
-- All four ch10 tasks are completed and signed at `d50cf6a2`, `2bc92864`, `673cb696` and `85ed9f36`. Concrete SDK identity, native Memory Create/Match, test-only SDK transport, retained completion/abort ownership and S3 8 MiB framing/10000-part guards are verified. Memory NotMatch still fails at BEGIN before consumption until ch20:t01. ch10 stays active with a null task pointer and review stamp pending final metadata re-verification after correctness and fresh quality source/test checks over `4867dfb9..HEAD`.
+- All four ch10 tasks are completed and signed at `d50cf6a2`, `2bc92864`, `673cb696` and `85ed9f36`. Concrete SDK identity, native Memory Create/Match, test-only SDK transport, retained completion/abort ownership and S3 8 MiB framing/10000-part guards are verified. Memory NotMatch still fails at BEGIN before consumption until ch20:t01. ch10 is completed and reviewed at `1388109d` after correctness, fresh quality review and resolution of all adopted metadata findings.
 - ch12 is active: native protocol dependencies are completed at `35a4f784` in ch12:t04; t01–t03 remain pending. CloudRequestClient stays under its library-test gate until ch12:t01 activates the first S3 initiation caller. Final S3 metadata/conditional completion and Azure provider acceptance remain open.
 - Both ch21 tasks are completed under `c737ffeb`: SDK-resolved constructor capture at `fe992ae3` and private XML ETag/generation/metageneration requests at `533adc68`. The constructor returns owned configuration that the caller wraps in Arc; requests share that record and the same SDK credential owner. Snapshot, conditional PUT and exact receipt HEAD preserve quoted ETags, raw-key encoding and paired generation/metageneration fences, with refreshed credentials and typed/redacted failures. The request module remains test-only. ch21 stays active with null task/review pointers pending cold correctness then fresh quality review over both tasks and synchronized Markdown. ch14:t01 owns first production activation; ch14:t02–t04 retain staged publication and final configuration/receipt acceptance. ch20:t01 owns the common ordinary negative-ETag/Memory negative multipart CAS and actual OCI ordinary headers; native acceptance/reclosure depends on it.
-- Local/cloud conditional publication acceptance remains pending in ch11–ch15. ch11 is active: t01 physical-parent OS locks are completed at `8c808beb` with seven Linux filesystem/subprocess tests, formatting and Clippy passing. Same-filesystem staging primitives are completed at `61a948df` with thirteen focused Linux tests; public mutation routing and acceptance remain open. The Local plan uses persistent SDK-illegal .vtb-cas-lock#0 per physical parent directory and same-parent numeric-# stage names, with physical-directory-ID lock ordering and payload staging outside locks.
+- Local/cloud conditional publication acceptance remains pending in ch11–ch15. ch11 is active: t01 physical-parent OS locks are completed at `8c808beb` with seven Linux filesystem/subprocess tests, formatting and Clippy passing. The staging/publication source checkpoint `61a948df` passes thirteen focused Linux tests. Task t02 is reopened solely to forward the existing public create-only rename selector; t03 routing is blocked until that prerequisite repair is signed, and public acceptance remains open. The Local plan uses persistent SDK-illegal .vtb-cas-lock#0 per physical parent directory and same-parent numeric-# stage names, with physical-directory-ID lock ordering and payload staging outside locks.
 - S3 direct completion returns honest typed 409 conflict/abort; GCS source-generation-pinned rewrite is backend-specific staging.
 - Original Arrow/SHM and user guides remain full scope. ch17–ch19 provide bounded sync codecs, typed per-batch PyArrow worker/native async I/O bridge and lazy SQLSpec integration; original ch04:t02 retains integration acceptance.
 - Scoped ch10 and ch21 knowledge are each synchronized at `[1/1 files documented]`. Final docs/OKF acceptance remains `[9/13 files documented]`; ch09 owns eleven provider/knowledge pages and ch04 owns two storage guides. Correctness review then fresh quality review is mandatory before finish/archive.
