@@ -5,9 +5,9 @@ chapter_id: ch10-publication-boundary-and-lifecycle
 title: Reuse SDK HTTP transport and credential authorizers
 description: Reuse SDK HTTP transport and credential authorizers
 status: stable
-state: pending
+state: completed
 priority: P1
-verification_strategy: behavior_tdd
+verification_strategy: characterization
 depends_on:
 - storage-completeness:ch10:t01
 read_set:
@@ -27,17 +27,27 @@ estimated_loc: 210
 plan_revision: 7
 plan_commit: 5f64d1a8
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:publication_transport
+claimed_at: '2026-11-08T00:03:53Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-08T00:09:03Z'
+last_verified_commit: 2bc92864
+verification_evidence:
+  strategy: characterization
+  baseline: Real SDK connector and AwsAuthorizer; 3 actual local HTTP tests pass before wrapper implementation; exit 0.
+  focused: Real CloudRequestClient; 5 actual transport, status, refresh and redaction tests pass after implementation; exit 0.
+  fmt: cargo fmt --manifest-path src/rs/Cargo.toml --all --check; exit 0.
+  clippy: cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets -- -D warnings; exit 0.
+  diff: git diff --check; exit 0.
+  native_checkpoint: e2fb84f1 plus owned cloud_request.rs and lib.rs edits; parent binds final signed commit.
+  runtime_activation: Test-only module; ch12:t01 activates the first runtime S3 caller and checks normal compilation.
+  rebuild_limit: No Python API changes or pytest; installed native artifacts remain intact. No five-extension rebuild required.
+  platform: Linux local loopback HTTP; TLS, live provider publication and provider-specific response parsing remain with their owning tasks.
 created_at: '2026-11-07T12:00:00Z'
-updated_at: '2026-11-07T12:00:00Z'
-commit: null
+updated_at: '2026-11-08T00:03:53Z'
+commit: 2bc92864
 sources:
 - id: implementation
   resource: src/rs/vertebra-storage/src/cloud_request.rs
@@ -101,7 +111,9 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 
 ## Verification
 
-Record the failing real transport behavior before implementation and the passing result after. The test target is the library module, not a provider publication integration target that depends on later tasks. Execute each command below in this worktree; the storage target directory is reserved and shared SHM tests use the host lock.
+Characterize the real configured SDK connector and authorizer against the local HTTP responder before adding the private client. Record that Green baseline, then run the actual wrapper transport, status, refresh and redaction tests after implementation. The new private boundary has no pre-existing callable SUT: do not manufacture a Red result with wrong SDK defaults, unsigned requests, placeholders or compile errors.
+
+Record the real SDK Green baseline and the passing wrapper behavior after implementation. The test target is the library module, not a provider publication integration target that depends on later tasks. Execute each command below in this worktree; the storage target directory is reserved and shared SHM tests use the host lock.
 
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo fmt --manifest-path src/rs/Cargo.toml --all --check`
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --lib cloud_request::tests`
@@ -111,14 +123,21 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Acceptance Criteria
 
-- [ ] Every matrix row passes through the real private external-request seam; runtime provider publication is not claimed before ch12:t01 activation.
-- [ ] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
-- [ ] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
-- [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
+- [x] Every matrix row passes through the real private external-request seam; runtime provider publication is not claimed before ch12:t01 activation.
+- [x] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
+- [x] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
+- [x] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
 
 The executable transport staging and provider acceptance contracts are independently approved at 5f64d1a8. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+
+- The approved characterization strategy records three real SDK baseline HTTP cases before implementation and five actual wrapper cases afterward. No Red result is claimed; the first baseline compile attempt exposes unavailable SDK http primitive reexports and is corrected before the Green baseline.
+- `CloudRequestClient::new` delegates the supplied `ClientOptions` to `ReqwestConnector::connect`. `execute` retains HTTP statuses and bodies for the caller; `execute_aws` fetches credentials on each explicit call and uses the SDK authorizer. Transport errors retain only static operation context and `HttpErrorKind`; configuration and credential errors retain only static context and the SDK error variant.
+- Real loopback tests observe allow_http, configured default headers, proxy exclusions, raw encoded path, payload, 503 then 200 authorization with credential A then B, unchanged 403 and 412 bodies, connection closure privacy, and credential-supplier error privacy. Only the external credential provider is substituted.
+- Verification commands use `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12"`. The focused command is `flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --lib cloud_request::tests`; baseline: 3 passed, final: 5 passed, exit 0. The listed formatting and Clippy commands and `git diff --check` also exit 0.
+- Owned implementation is 79 lines in `cloud_request.rs` plus two `lib.rs` registration lines. Canonical inline test/fixture code is separate from that implementation bound. `conditional.rs` needs no change. The module remains exactly gated by `#[cfg(test)]`; no public API, broad unused-code allowance, runtime provider publication or future GCS helper is introduced.
+- The parent owns the signed atomic commit and final task/checklist SHA binding. This worksheet stays `in_progress` until that binding completes; no Git write or hosted action occurs in this executor.
 
 [^implementation]: `src/rs/vertebra-storage/src/cloud_request.rs` — Current repository source for this task.
 

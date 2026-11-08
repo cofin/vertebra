@@ -30,8 +30,8 @@ chapters:
 - ch19-sqlspec-arrow-streaming
 - ch20-ordinary-negative-cas
 - ch21-sdk-resolved-config
-current_chapter: ch07-remove-r2-python
-current_task: null
+current_chapter: ch10-publication-boundary-and-lifecycle
+current_task: storage-completeness:ch10:t03
 parent_prd: native-data-platform
 research:
 - ../native-data-platform/research/gap-analysis_20261103.md

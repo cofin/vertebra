@@ -127,8 +127,6 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Notes & Discoveries
 
-Revision 4 is independently approved by the fresh consolidated ch07/ch08 plan review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
-
-The facade removes R2Config, from_r2, uniform chunk convenience, signing inference and exports without introducing an alias or endpoint restriction. Existing unsupported-scheme validation rejects r2 before native construction; its ImproperConfigurationError is a ValueError subclass. The t01 framework regression now exercises removed URI rejection, and generic custom S3 endpoints retain SigV4 signing. The unused R2 emulator fixture has no consumers. The native helper and stub stay owned by ch08. Implementation and verification are complete; the coordinator owns the signed local commit and final state/checklist synchronization.
+R2Config, from_r2 and first-class facade signing/URI support are absent. Generic S3 custom endpoints and SigV4 remain verified. Native dispatch, helper exports and the dead source module are also withdrawn by the completed native chapter. Signed source and verification fields are complete.
 
 [^implementation]: `src/py/vertebra/storage/_store.py` — Current repository source for this task.

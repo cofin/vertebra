@@ -159,8 +159,6 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Notes & Discoveries
 
-Revision 5 is independently approved at bdc7799a against plan anchor 69a77955. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
-
-Staging validates removed schemes in both destinations and explicit URI store configuration before upstream query execution. Explicit native/backend qualification checks compare protocol aliases and remote authority before dropping qualification; native Memory logical namespaces and native file path mapping retain their existing nonremote semantics, while declared SQLSpec authorities remain checked; matching SQLSpec URIs retain their raw root and key spelling. Real local HTTP responders prove both BigQuery export paths make zero connections on rejection. The exact rooted native keys remain scope/literal%2F and scope/literal%252F with distinct bytes and rows. No internal staging, storage, native client or export method is mocked. The coordinator owns the signed local commit and final task/checklist synchronization.
+Staging validates removed schemes and explicit remote qualification before path resolution, query execution or object effects. Matching rooted aliases, literal percent keys, native Memory namespaces and native local file authorities retain their verified mappings. Resolved logical backend URI handling is covered by completed t04. Signed source and verification fields are complete.
 
 [^implementation]: `src/py/vertebra/db/_staging.py` — Current repository source for this task.

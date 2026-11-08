@@ -9,7 +9,7 @@ state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: storage-completeness:ch10:t02
+current_task: storage-completeness:ch10:t03
 plan_revision: 7
 plan_commit: 5f64d1a8
 state_revision: 0
@@ -114,7 +114,7 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 ## 5. Implementation Plan
 
 - [x] [d50cf6a2] storage-completeness:ch10:t01 — Retain concrete providers behind a private publication boundary (tasks/t01-publication-dispatch.md)
-- [ ] storage-completeness:ch10:t02 — Reuse SDK HTTP transport and credential authorizers (tasks/t02-sdk-http-transport.md)
+- [x] [2bc92864] storage-completeness:ch10:t02 — Reuse SDK HTTP transport and credential authorizers (tasks/t02-sdk-http-transport.md)
 - [ ] storage-completeness:ch10:t03 — Retain multipart abort ownership across completion errors and cancellation (tasks/t03-session-cleanup.md)
 
 - [ ] storage-completeness:ch10:t04 — Frame S3 producer chunks and preserve bounded backend policies (tasks/t04-minimum-cloud-part-framing.md)

@@ -109,8 +109,6 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Notes & Discoveries
 
-The four public classifier calls reject the still-public `R2Config` before store construction, retaining SQLSpec's `ImproperConfigurationError` and the existing `TypeError` contracts elsewhere. All four corresponding APIs accept an explicit generic S3 custom endpoint and retain native SigV4 presigning. Successor ch07:t02 removes the core class and migrates its canonical regression; URI rejection remains with ch07:t02/t03. Production scope is exactly the three approved adapter modules, with the five-file bounded read manifest unchanged. The coordinator owns the signed local task commit and final task/chapter marker binding.
-
-Revision 4 is independently approved by the fresh consolidated ch07/ch08 plan review. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+Alchemy, SQLSpec and Starlette use the supported configuration types and preserve generic S3 endpoint behavior. The current canonical tests exercise URI rejection after public R2 configuration withdrawal; the temporary classifier case is represented by its recorded Red/Green receipt. Signed source and verification fields are complete.
 
 [^implementation]: `src/py/vertebra/extensions/alchemy/storage.py` — Current repository source for this task.
