@@ -2183,3 +2183,398 @@ async fn test_checked_get_range_raw_keys_local_metadata_and_s3_http_options() {
         "expected x-trace-id header, got: {http_req}"
     );
 }
+
+#[tokio::test]
+async fn test_oci_streaming_get_opts_conditional_put_copy_and_paginated_list() {
+    use _storage::oci::OciObjectStore;
+    use futures::TryStreamExt;
+    use object_store::path::Path as StorePath;
+    use object_store::{
+        Attribute, AttributeValue, Attributes, CopyMode, CopyOptions, GetOptions, GetRange,
+        ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion,
+    };
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback oci");
+    let addr = listener.local_addr().expect("oci addr");
+    let captured_reqs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_srv = Arc::clone(&captured_reqs);
+
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let log = Arc::clone(&captured_srv);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let mut total = 0usize;
+                loop {
+                    let n = socket.read(&mut buf[total..]).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    total += n;
+                    if let Some(hdr_end) = buf[..total].windows(4).position(|w| w == b"\r\n\r\n") {
+                        let hdr_str = String::from_utf8_lossy(&buf[..hdr_end]);
+                        let expected_cl = hdr_str
+                            .lines()
+                            .find_map(|l| {
+                                let (k, v) = l.split_once(':')?;
+                                k.trim()
+                                    .eq_ignore_ascii_case("content-length")
+                                    .then(|| v.trim().parse::<usize>().ok())?
+                            })
+                            .unwrap_or(0);
+                        if total >= hdr_end + 4 + expected_cl {
+                            break;
+                        }
+                    }
+                }
+                let req = String::from_utf8_lossy(&buf[..total]).into_owned();
+                let req_lower = req.to_ascii_lowercase();
+                let first_line = req.lines().next().unwrap_or("");
+                log.lock().expect("lock").push(req.clone());
+
+                if first_line.starts_with("PUT /n/ns1/b/bkt1/o/") {
+                    if req_lower.contains("if-none-match: *") && first_line.contains("existing") {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 412 Precondition Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                        return;
+                    }
+                    if req_lower.contains("if-match: stale-etag") {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 412 Precondition Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                        return;
+                    }
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\netag: \"oci-etag-1\"\r\nopc-version-id: v-101\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                    return;
+                }
+
+                if first_line.starts_with("POST /n/ns1/b/bkt1/actions/copyObject ") {
+                    if req.contains("\"destinationObjectIfNoneMatchETag\":\"*\"")
+                        && req.contains("\"destinationObjectName\":\"dup.bin\"")
+                    {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 412 Precondition Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                        return;
+                    }
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                        )
+                        .await;
+                    return;
+                }
+
+                if first_line.starts_with("HEAD /n/ns1/b/bkt1/o/") {
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nContent-Type: application/json\r\nopc-meta-owner: team-a\r\netag: \"oci-etag-1\"\r\nopc-version-id: v-101\r\nLast-Modified: Wed, 06 Nov 2026 12:00:00 GMT\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                    return;
+                }
+
+                if first_line.starts_with("GET /n/ns1/b/bkt1/o/stream.bin ") {
+                    if req_lower.contains("if-none-match: \"oci-etag-1\"") {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 304 Not Modified\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                        return;
+                    }
+                    if req_lower.contains("if-match: \"wrong\"") {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 412 Precondition Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                        return;
+                    }
+                    if req_lower.contains("range: bytes=2-5") {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 2-5/10\r\nContent-Length: 4\r\netag: \"oci-etag-1\"\r\nConnection: close\r\n\r\n2345",
+                            )
+                            .await;
+                        return;
+                    }
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: application/octet-stream\r\nopc-meta-stage: raw\r\netag: \"oci-etag-1\"\r\nConnection: close\r\n\r\n5\r\n01234\r\n5\r\n56789\r\n0\r\n\r\n",
+                        )
+                        .await;
+                    return;
+                }
+
+                if first_line.starts_with("GET /n/ns1/b/bkt1/o?") {
+                    let body = if first_line.contains("delimiter=%2F")
+                        || first_line.contains("delimiter=/")
+                    {
+                        if first_line.contains("start=dir%2Fk2") {
+                            r#"{"objects":[{"name":"dir/k2~raw%25.parquet","size":12,"etag":"e2","timeCreated":"2026-11-06T12:00:00Z"}],"prefixes":["dir/sub2/","dir/sub1/"]}"#
+                        } else {
+                            r#"{"objects":[{"name":"dir/k1~raw%25.parquet","size":8,"etag":"e1","timeCreated":"2026-11-06T12:00:00Z"}],"prefixes":["dir/sub1/"],"nextStartWith":"dir/k2"}"#
+                        }
+                    } else if first_line.contains("start=p2") {
+                        r#"{"objects":[{"name":"p2/item~2%25.bin","size":20,"etag":"e2"}]}"#
+                    } else {
+                        r#"{"objects":[{"name":"p1/item~1%25.bin","size":10,"etag":"e1"}],"nextStartWith":"p2"}"#
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    return;
+                }
+
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+            });
+        }
+    });
+
+    let oci = OciObjectStore::new(
+        "ns1".to_string(),
+        "bkt1".to_string(),
+        "us-ashburn-1".to_string(),
+        Some(format!("http://127.0.0.1:{}", addr.port())),
+        None,
+    )
+    .expect("build oci store");
+
+    let mut put_attrs = Attributes::new();
+    put_attrs.insert(
+        Attribute::ContentType,
+        AttributeValue::from("application/json"),
+    );
+    put_attrs.insert(
+        Attribute::Metadata("owner".into()),
+        AttributeValue::from("team-a"),
+    );
+    let create_res = oci
+        .put_opts(
+            &StorePath::parse("new~1%25.json").expect("parse"),
+            PutPayload::from_static(b"{}"),
+            PutOptions {
+                mode: PutMode::Create,
+                attributes: put_attrs,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("oci PutMode::Create");
+    assert_eq!(create_res.e_tag.as_deref(), Some("\"oci-etag-1\""));
+    assert_eq!(create_res.version.as_deref(), Some("v-101"));
+
+    let dup_err = oci
+        .put_opts(
+            &StorePath::parse("existing.json").expect("parse"),
+            PutPayload::from_static(b"{}"),
+            PutOptions {
+                mode: PutMode::Create,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("PutMode::Create 412 must map to AlreadyExists");
+    assert!(matches!(dup_err, object_store::Error::AlreadyExists { .. }));
+
+    let stale_err = oci
+        .put_opts(
+            &StorePath::parse("existing.json").expect("parse"),
+            PutPayload::from_static(b"{}"),
+            PutOptions {
+                mode: PutMode::Update(UpdateVersion {
+                    e_tag: Some("stale-etag".to_string()),
+                    version: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("PutMode::Update 412 must map to Precondition");
+    assert!(matches!(
+        stale_err,
+        object_store::Error::Precondition { .. }
+    ));
+
+    let empty_uv_err = oci
+        .put_opts(
+            &StorePath::parse("existing.json").expect("parse"),
+            PutPayload::from_static(b"{}"),
+            PutOptions {
+                mode: PutMode::Update(UpdateVersion {
+                    e_tag: None,
+                    version: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("empty UpdateVersion must fail");
+    assert!(matches!(
+        empty_uv_err,
+        object_store::Error::Precondition { .. } | object_store::Error::NotImplemented { .. }
+    ));
+
+    let stream_loc = StorePath::parse("stream.bin").expect("parse");
+    let streamed = oci
+        .get_opts(&stream_loc, GetOptions::default())
+        .await
+        .expect("streamed get_opts");
+    assert_eq!(
+        streamed
+            .attributes
+            .get(&Attribute::Metadata("stage".into())),
+        Some(&AttributeValue::from("raw"))
+    );
+    let chunks: Vec<Bytes> = streamed
+        .into_stream()
+        .try_collect()
+        .await
+        .expect("collect chunks");
+    let combined: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
+    assert_eq!(combined, b"0123456789");
+
+    let ranged = oci
+        .get_opts(
+            &stream_loc,
+            GetOptions {
+                range: Some(GetRange::Bounded(2..6)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("ranged get_opts");
+    assert_eq!(ranged.range, 2..6);
+    assert_eq!(ranged.meta.size, 10);
+    assert_eq!(&ranged.bytes().await.expect("ranged bytes")[..], b"2345");
+
+    let not_mod = oci
+        .get_opts(
+            &stream_loc,
+            GetOptions {
+                if_none_match: Some("\"oci-etag-1\"".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("304 must map to NotModified");
+    assert!(matches!(not_mod, object_store::Error::NotModified { .. }));
+
+    let precond_get = oci
+        .get_opts(
+            &stream_loc,
+            GetOptions {
+                if_match: Some("\"wrong\"".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("412 on GET must map to Precondition");
+    assert!(matches!(
+        precond_get,
+        object_store::Error::Precondition { .. }
+    ));
+
+    let head_res = oci
+        .get_opts(
+            &stream_loc,
+            GetOptions {
+                head: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("head get_opts");
+    assert_eq!(head_res.meta.size, 10);
+    assert_eq!(
+        head_res.attributes.get(&Attribute::ContentType),
+        Some(&AttributeValue::from("application/json"))
+    );
+    assert_eq!(
+        head_res
+            .attributes
+            .get(&Attribute::Metadata("owner".into())),
+        Some(&AttributeValue::from("team-a"))
+    );
+
+    oci.copy_opts(
+        &stream_loc,
+        &StorePath::parse("copied.bin").expect("parse"),
+        CopyOptions {
+            mode: CopyMode::Create,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("copy_if_not_exists ok");
+
+    let copy_dup = oci
+        .copy_opts(
+            &stream_loc,
+            &StorePath::parse("dup.bin").expect("parse"),
+            CopyOptions {
+                mode: CopyMode::Create,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("copy Create 412 must map to AlreadyExists");
+    assert!(matches!(
+        copy_dup,
+        object_store::Error::AlreadyExists { .. }
+    ));
+
+    let all_items: Vec<_> = oci.list(None).try_collect().await.expect("paginated list");
+    let all_paths: Vec<String> = all_items.iter().map(|m| m.location.to_string()).collect();
+    assert_eq!(all_paths, vec!["p1/item~1%25.bin", "p2/item~2%25.bin"]);
+
+    let delim_res = oci
+        .list_with_delimiter(Some(&StorePath::parse("dir").expect("parse")))
+        .await
+        .expect("paginated list_with_delimiter");
+    let delim_paths: Vec<String> = delim_res
+        .objects
+        .iter()
+        .map(|m| m.location.to_string())
+        .collect();
+    let delim_prefixes: Vec<String> = delim_res
+        .common_prefixes
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        delim_paths,
+        vec!["dir/k1~raw%25.parquet", "dir/k2~raw%25.parquet"]
+    );
+    assert_eq!(delim_prefixes, vec!["dir/sub1", "dir/sub2"]);
+
+    let reqs = captured_reqs.lock().expect("lock");
+    let put_req = reqs[0].to_ascii_lowercase();
+    assert!(put_req.contains("if-none-match: *"));
+    assert!(put_req.contains("content-type: application/json"));
+    assert!(put_req.contains("opc-meta-owner: team-a"));
+}
