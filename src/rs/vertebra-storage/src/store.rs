@@ -15,7 +15,7 @@ use object_store::memory::InMemory;
 use object_store::path::Path as StorePath;
 use object_store::{
     Attribute, AttributeValue, Attributes, GetOptions, MultipartUpload, ObjectStore,
-    ObjectStoreExt, PutMode, PutOptions, PutPayload, PutResult, UpdateVersion,
+    ObjectStoreExt, PutMode, PutOptions, PutPayload, PutPayloadMut, PutResult, UpdateVersion,
 };
 use thiserror::Error;
 use url::Url;
@@ -246,13 +246,14 @@ pub struct PutConditionalOptions {
 
 /// Stateful incremental multipart upload session.
 ///
-/// When targeting OCI Object Storage (`scheme == "oci"`), chunks are
+/// S3 chunks use bounded 8 MiB segmented frames. When targeting OCI, chunks are
 /// normalized through a rolling 8 MiB `UniformPartAccumulator` so every non-trailing part has
 /// identical byte length without buffering the entire payload in memory.
 pub struct MultipartUploadSession {
     path: String,
     upload: Option<Box<dyn MultipartUpload>>,
     accumulator: Option<UniformPartAccumulator>,
+    s3_pending: Option<PutPayloadMut>,
     total_bytes: u64,
     flushed_part_sizes: Vec<usize>,
     content_type: Option<String>,
@@ -265,7 +266,7 @@ impl MultipartUploadSession {
         &self.flushed_part_sizes
     }
 
-    pub async fn write_chunk(&mut self, chunk: Bytes) -> Result<(), ObjectStoreError> {
+    pub async fn write_chunk(&mut self, mut chunk: Bytes) -> Result<(), ObjectStoreError> {
         let upload = self.upload.as_mut().ok_or_else(|| {
             StorageError::InvalidInput("multipart upload session is already closed".to_string())
         })?;
@@ -273,7 +274,26 @@ impl MultipartUploadSession {
             return Ok(());
         }
         self.total_bytes += chunk.len() as u64;
-        if let Some(ref mut acc) = self.accumulator {
+        if let Some(ref mut pending) = self.s3_pending {
+            while !chunk.is_empty() {
+                let length = (8 * 1024 * 1024 - pending.content_length()).min(chunk.len());
+                pending.push(chunk.split_to(length));
+                if pending.content_length() == 8 * 1024 * 1024 {
+                    if self.flushed_part_sizes.len() >= 10_000 {
+                        self.had_error = true;
+                        return Err(StorageError::InvalidInput(
+                            "S3 multipart exceeds 10000 parts".into(),
+                        ));
+                    }
+                    let payload = std::mem::take(pending).freeze();
+                    if let Err(err) = upload.put_part(payload).await {
+                        self.had_error = true;
+                        return Err(err.into());
+                    }
+                    self.flushed_part_sizes.push(8 * 1024 * 1024);
+                }
+            }
+        } else if let Some(ref mut acc) = self.accumulator {
             for part in acc.push(chunk) {
                 let part_len = part.len();
                 if let Err(err) = upload.put_part(PutPayload::from(part)).await {
@@ -297,6 +317,23 @@ impl MultipartUploadSession {
         let upload = self.upload.as_mut().ok_or_else(|| {
             StorageError::InvalidInput("multipart upload session is already closed".to_string())
         })?;
+        if let Some(ref mut pending) = self.s3_pending
+            && !pending.is_empty()
+        {
+            if self.flushed_part_sizes.len() >= 10_000 {
+                self.had_error = true;
+                return Err(StorageError::InvalidInput(
+                    "S3 multipart exceeds 10000 parts".into(),
+                ));
+            }
+            let payload = std::mem::take(pending).freeze();
+            let length = payload.content_length();
+            if let Err(err) = upload.put_part(payload).await {
+                self.had_error = true;
+                return Err(err.into());
+            }
+            self.flushed_part_sizes.push(length);
+        }
         if let Some(ref mut acc) = self.accumulator
             && let Some(tail) = acc.finish()
         {
@@ -340,6 +377,9 @@ impl MultipartUploadSession {
     }
 
     pub async fn abort(&mut self) -> Result<(), ObjectStoreError> {
+        if let Some(ref mut pending) = self.s3_pending {
+            *pending = PutPayloadMut::new();
+        }
         if let Some(ref mut acc) = self.accumulator {
             acc.clear();
         }
@@ -853,6 +893,7 @@ impl ObjectStoreEngine {
             path: location.to_string(),
             upload: Some(upload),
             accumulator,
+            s3_pending: (self.scheme == "s3").then(PutPayloadMut::new),
             total_bytes: 0,
             flushed_part_sizes: Vec::new(),
             content_type: opts.content_type,
@@ -1044,5 +1085,101 @@ impl ObjectStoreEngine {
         prefixes.sort();
         prefixes.dedup();
         Ok((objects, prefixes))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn disallowed_frame_and_tail_keep_real_upload_abortable() {
+        for length in [8 * 1024 * 1024, 1] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let mut parts = 0;
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut bytes = Vec::new();
+                    let boundary = loop {
+                        if let Some(index) = bytes.windows(4).position(|p| p == b"\r\n\r\n") {
+                            break index + 4;
+                        }
+                        let mut buffer = [0; 4096];
+                        let size = socket.read(&mut buffer).await.unwrap();
+                        assert_ne!(size, 0);
+                        bytes.extend_from_slice(&buffer[..size]);
+                    };
+                    let headers = String::from_utf8(bytes[..boundary].to_vec()).unwrap();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.split_once(':')
+                                .filter(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+                                .map(|(_, value)| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    while bytes.len() - boundary < length {
+                        let mut buffer = [0; 65536];
+                        let size = socket.read(&mut buffer).await.unwrap();
+                        assert_ne!(size, 0);
+                        bytes.extend_from_slice(&buffer[..size]);
+                    }
+                    let line = headers.lines().next().unwrap();
+                    let done = line.starts_with("DELETE ");
+                    let (status, body) = if done {
+                        (204, "")
+                    } else if line.starts_with("POST ") {
+                        (
+                            200,
+                            "<InitiateMultipartUploadResult><UploadId>count-limit</UploadId></InitiateMultipartUploadResult>",
+                        )
+                    } else {
+                        parts += 1;
+                        (400, "<Error><Code>TooManyParts</Code></Error>")
+                    };
+                    socket.write_all(format!("HTTP/1.1 {status} response\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                    if done {
+                        return parts;
+                    }
+                }
+            });
+            let engine = ObjectStoreEngine::new(BackendConfig::S3 {
+                bucket: "unit".into(),
+                region: Some("us-east-1".into()),
+                access_key_id: Some("test".into()),
+                secret_access_key: Some("test".into()),
+                endpoint: Some(format!("http://{address}")),
+                allow_http: true,
+            })
+            .unwrap();
+            let mut session = engine
+                .create_multipart("limit", Default::default())
+                .await
+                .unwrap();
+            session.flushed_part_sizes = vec![8 * 1024 * 1024; 10_000];
+            let error = if length == 1 {
+                session.write_chunk(Bytes::from_static(b"x")).await.unwrap();
+                session.complete().await.unwrap_err()
+            } else {
+                session
+                    .write_chunk(Bytes::from(vec![0; length]))
+                    .await
+                    .unwrap_err()
+            };
+            session.abort().await.unwrap();
+            assert!(
+                matches!(error, StorageError::InvalidInput(ref message) if message.contains("10000"))
+            );
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(5), server)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                0
+            );
+        }
     }
 }

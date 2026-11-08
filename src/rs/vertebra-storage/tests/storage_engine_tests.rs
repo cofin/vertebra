@@ -2383,3 +2383,308 @@ mod multipart_lifecycle {
         assert_eq!(engine.get("winner").await.unwrap(), b"replacement"[..]);
     }
 }
+
+mod s3_part_framing {
+    use super::*;
+    use _storage::store::PutConditionalOptions;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::Notify;
+
+    const FRAME: usize = 8 * 1024 * 1024;
+
+    #[derive(Default)]
+    struct State {
+        parts: Mutex<Vec<Vec<u8>>>,
+        initiation: Mutex<String>,
+        aborted: Notify,
+        part_entered: Notify,
+        release: Notify,
+        pause: bool,
+        fail_part: bool,
+    }
+
+    async fn setup(
+        pause: bool,
+        fail_part: bool,
+    ) -> (ObjectStoreEngine, Arc<State>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let state = Arc::new(State {
+            pause,
+            fail_part,
+            ..Default::default()
+        });
+        let captured = state.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let boundary = loop {
+                    if let Some(index) = bytes.windows(4).position(|p| p == b"\r\n\r\n") {
+                        break index + 4;
+                    }
+                    let mut buffer = [0; 4096];
+                    let n = socket.read(&mut buffer).await.unwrap();
+                    assert_ne!(n, 0);
+                    bytes.extend_from_slice(&buffer[..n]);
+                    assert!(bytes.len() < 65536);
+                };
+                let headers = String::from_utf8(bytes[..boundary].to_vec()).unwrap();
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':')
+                            .filter(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+                            .map(|(_, value)| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                while bytes.len() - boundary < length {
+                    let mut buffer = [0; 65536];
+                    let n = socket.read(&mut buffer).await.unwrap();
+                    assert_ne!(n, 0);
+                    bytes.extend_from_slice(&buffer[..n]);
+                }
+                let line = headers.lines().next().unwrap();
+                let (status, body, done) = if line.starts_with("DELETE ") {
+                    captured.aborted.notify_one();
+                    (204, String::new(), true)
+                } else if line.starts_with("PUT ") {
+                    assert!(line.contains("partNumber="));
+                    captured.part_entered.notify_one();
+                    if captured.pause {
+                        captured.release.notified().await;
+                    }
+                    if captured.fail_part {
+                        (400, "<Error><Code>InvalidPart</Code></Error>".into(), false)
+                    } else {
+                        captured
+                            .parts
+                            .lock()
+                            .unwrap()
+                            .push(bytes[boundary..boundary + length].to_vec());
+                        (200, String::new(), false)
+                    }
+                } else if line.contains("uploadId=") {
+                    let valid = captured
+                        .parts
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .rev()
+                        .skip(1)
+                        .all(|p| p.len() >= 5 * 1024 * 1024);
+                    if valid {
+                        (200, "<CompleteMultipartUploadResult><ETag>\"result\"</ETag></CompleteMultipartUploadResult>".into(), true)
+                    } else {
+                        (
+                            400,
+                            "<Error><Code>EntityTooSmall</Code></Error>".into(),
+                            false,
+                        )
+                    }
+                } else {
+                    assert!(line.starts_with("POST ") && line.contains("uploads"));
+                    *captured.initiation.lock().unwrap() = headers;
+                    (200, "<InitiateMultipartUploadResult><UploadId>framing-upload</UploadId></InitiateMultipartUploadResult>".into(), false)
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} response\r\nContent-Length: {}\r\nETag: \"part\"\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                if done {
+                    break;
+                }
+            }
+        });
+        let engine = ObjectStoreEngine::new(BackendConfig::S3 {
+            bucket: "unit".into(),
+            region: Some("us-east-1".into()),
+            access_key_id: Some("test-key".into()),
+            secret_access_key: Some("test-secret".into()),
+            endpoint: Some(format!("http://{address}")),
+            allow_http: true,
+        })
+        .unwrap();
+        (engine, state, server)
+    }
+
+    async fn joined(server: tokio::task::JoinHandle<()>) {
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn tiny_chunks_form_service_sized_parts() {
+        let (engine, state, server) = setup(false, false).await;
+        let mut session = engine
+            .create_multipart(
+                "tiny",
+                PutConditionalOptions {
+                    content_type: Some("application/example".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        for _ in 0..256 {
+            session
+                .write_chunk(Bytes::from(vec![7; 65536]))
+                .await
+                .unwrap();
+        }
+        session
+            .write_chunk(Bytes::from_static(b"end"))
+            .await
+            .unwrap();
+        let result = session.complete_with_meta().await;
+        if result.is_err() {
+            session.abort().await.unwrap();
+        }
+        let metadata = result.expect("S3 accepts framed tiny producer chunks");
+        assert_eq!(metadata.size, (2 * FRAME + 3) as u64);
+        assert_eq!(
+            metadata.content_type.as_deref(),
+            Some("application/example")
+        );
+        {
+            let parts = state.parts.lock().unwrap();
+            assert_eq!(
+                parts.iter().map(Vec::len).collect::<Vec<_>>(),
+                [FRAME, FRAME, 3]
+            );
+            assert!(parts[..2].iter().flatten().all(|byte| *byte == 7));
+            assert_eq!(parts[2], b"end");
+            assert!(
+                state
+                    .initiation
+                    .lock()
+                    .unwrap()
+                    .to_ascii_lowercase()
+                    .contains("content-type: application/example")
+            );
+        }
+        joined(server).await;
+    }
+
+    #[tokio::test]
+    async fn irregular_chunks_wait_for_upload_before_advancing() {
+        let (engine, state, server) = setup(true, false).await;
+        let mut session = engine
+            .create_multipart("irregular", Default::default())
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            session.write_chunk(Bytes::from(vec![1; 3 * 1024 * 1024])),
+        )
+        .await
+        .expect("sub-frame chunk must not start a service upload")
+        .unwrap();
+        assert!(state.parts.lock().unwrap().is_empty());
+        {
+            let writing = session.write_chunk(Bytes::from(vec![2; 13 * 1024 * 1024]));
+            tokio::pin!(writing);
+            for _ in 0..2 {
+                tokio::select! {
+                    result = &mut writing => panic!("write passed provider backpressure: {result:?}"),
+                    () = state.part_entered.notified() => {}
+                }
+                state.release.notify_one();
+            }
+            writing.await.unwrap();
+        }
+        session
+            .write_chunk(Bytes::from_static(b"seventeen bytes!!"))
+            .await
+            .unwrap();
+        let release = state.clone();
+        let complete = tokio::spawn(async move {
+            release.part_entered.notified().await;
+            release.release.notify_one();
+        });
+        session.complete().await.unwrap();
+        complete.await.unwrap();
+        {
+            let parts = state.parts.lock().unwrap();
+            assert_eq!(
+                parts.iter().map(Vec::len).collect::<Vec<_>>(),
+                [FRAME, FRAME, 17]
+            );
+            assert!(parts[0][..3 * 1024 * 1024].iter().all(|byte| *byte == 1));
+            assert!(
+                parts[0][3 * 1024 * 1024..]
+                    .iter()
+                    .chain(parts[1].iter())
+                    .all(|byte| *byte == 2)
+            );
+            assert_eq!(parts[2], b"seventeen bytes!!");
+        }
+        joined(server).await;
+    }
+
+    #[tokio::test]
+    async fn empty_and_short_tail_are_final_parts() {
+        for payload in [b"".as_slice(), b"tail".as_slice()] {
+            let (engine, state, server) = setup(false, false).await;
+            let mut session = engine
+                .create_multipart("small", Default::default())
+                .await
+                .unwrap();
+            session
+                .write_chunk(Bytes::copy_from_slice(payload))
+                .await
+                .unwrap();
+            assert!(state.parts.lock().unwrap().is_empty());
+            session.complete().await.unwrap();
+            assert_eq!(*state.parts.lock().unwrap(), vec![payload.to_vec()]);
+            joined(server).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_part_keeps_upload_abortable() {
+        let (engine, state, server) = setup(true, false).await;
+        let mut session = engine
+            .create_multipart("cancelled", Default::default())
+            .await
+            .unwrap();
+        {
+            let writing = session.write_chunk(Bytes::from(vec![1; FRAME]));
+            tokio::pin!(writing);
+            tokio::select! {
+                result = &mut writing => panic!("upload passed cancellation barrier: {result:?}"),
+                () = state.part_entered.notified() => {}
+            }
+        }
+        state.release.notify_one();
+        session.abort().await.unwrap();
+        state.aborted.notified().await;
+        session.abort().await.unwrap();
+        joined(server).await;
+    }
+
+    #[tokio::test]
+    async fn failed_part_retains_abortable_upload() {
+        let (engine, state, server) = setup(false, true).await;
+        let mut session = engine
+            .create_multipart("failure", Default::default())
+            .await
+            .unwrap();
+        assert!(
+            session
+                .write_chunk(Bytes::from(vec![1; FRAME]))
+                .await
+                .is_err()
+        );
+        session.abort().await.unwrap();
+        state.aborted.notified().await;
+        session.abort().await.unwrap();
+        assert!(state.parts.lock().unwrap().is_empty());
+        joined(server).await;
+    }
+}
