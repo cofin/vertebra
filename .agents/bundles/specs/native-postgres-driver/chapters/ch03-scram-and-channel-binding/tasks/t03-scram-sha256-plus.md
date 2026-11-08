@@ -5,15 +5,15 @@ chapter_id: ch03-scram-and-channel-binding
 title: Enforce SCRAM-SHA-256-PLUS channel-binding policies and GS2 downgrade protection
 description: Select and verify SCRAM-SHA-256-PLUS across Disable, Prefer, and Require channel-binding policies, emitting RFC 5802 GS2 y,, on bound TLS plain-only offers and rejecting downgrade or replay.
 status: stable
-state: blocked
+state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
   - "native-postgres-driver:ch03:t02"
 read_set:
   - src/rs/vertebra-postgres/src/config.rs
-  - src/rs/vertebra-postgres/src/binding.rs
-  - src/rs/vertebra-postgres/src/tls.rs
+  - src/rs/vertebra-postgres/tests/postgres_auth_wire_tests.rs
+  - src/rs/vertebra-postgres/tests/postgres_tls_wire_tests.rs
   - src/rs/vertebra-postgres/src/auth.rs
   - src/rs/vertebra-postgres/src/session.rs
   - .agents/bundles/specs/native-postgres-driver/contracts.md
@@ -25,19 +25,19 @@ tests:
   - src/rs/vertebra-postgres/tests/postgres_auth_wire_tests.rs
   - src/rs/vertebra-postgres/tests/postgres_tls_wire_tests.rs
 estimated_loc: 245
-plan_revision: 7
-plan_commit: 1c75af65
+plan_revision: 8
+plan_commit: 8c540809
 state_revision: 0
 claimed_by: null
 claimed_at: null
-blocked_reason: "The six-file bounded read manifest omits both owned canonical auth and TLS test fixtures."
-unblock_condition: "The reviewed six-file manifest includes both owned canonical test files and required config/auth/session/contracts seams."
-next_step: "/flow:revise native-postgres-driver ch03-scram-and-channel-binding"
+blocked_reason: null
+unblock_condition: null
+next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-08T00:30:35Z"
+updated_at: "2026-11-08T00:32:06Z"
 commit: null
 sources:
   - id: pg-contracts
@@ -62,8 +62,8 @@ Complete `ChannelBindingPolicy` (`Disable`, `Prefer`, `Require`) selection and `
 ## Bounded Read Manifest
 
 - `src/rs/vertebra-postgres/src/config.rs` — `ChannelBindingPolicy` (`Disable`, `Prefer` default, `Require`) and `PostgresConfig.channel_binding`.
-- `src/rs/vertebra-postgres/src/binding.rs` — `tls_server_end_point` and peer binding availability from `ch03:t02`.
-- `src/rs/vertebra-postgres/src/tls.rs` — `DialedTransport` carrying negotiated peer binding state from `ch03:t02`.
+- `src/rs/vertebra-postgres/tests/postgres_auth_wire_tests.rs` — Canonical SCRAM server fixtures and wire assertions from `ch03:t01`.
+- `src/rs/vertebra-postgres/tests/postgres_tls_wire_tests.rs` — Canonical TLS certificate and endpoint-binding fixtures from `ch03:t02`, and the destination for SCRAM-PLUS wire cases.
 - `src/rs/vertebra-postgres/src/auth.rs` — `Authentication` SASL state machine from `ch03:t01`.
 - `src/rs/vertebra-postgres/src/session.rs` — `ConnectAttempt::run` passing transport binding into `Authentication::handle_message`.
 - `.agents/bundles/specs/native-postgres-driver/contracts.md` — `channel_binding = "prefer"` constructor contract ([../../../contracts.md](../../../contracts.md)).

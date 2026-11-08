@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-08] flow-revise | Native PostgreSQL PLUS fixture read manifest
+
+- Revision 8 anchors all 143 specification/task identities to `8c540809`. Replace only the two unmodified binding/TLS source reads in task 03 with its owned canonical auth/TLS test fixtures; config, auth, session, and contracts retain the other four read slots. Behavior, ownership, acceptance criteria, and the 31-chapter/111-task scope remain unchanged.
+- Unblock task 03 to pending after the manifest correction, with execution gated by cold manifest review. Tasks 01/02 remain complete at `9b94bff8`/`2db27cd1`; source `2db27cd1` passes all 71 native tests and locked Clippy. Progress remains 10/111 tasks and 2/31 reviewed chapters.
+
 ## [2026-11-08] plan-research | Native PostgreSQL deterministic SCRAM deadline fixture
 
 - Adopt cold plan review's missing deadline-regression finding within unapproved revision 7 at anchor `1c75af65`; retain all 31 chapters, 111 tasks, task ownership, source receipts, and completed review stamps.

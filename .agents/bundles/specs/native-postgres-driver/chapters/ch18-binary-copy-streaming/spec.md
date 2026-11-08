@@ -11,8 +11,8 @@ depends_on_chapters:
   - ch17-command-deadlines-portals-and-tz-fallback
 replan_trigger: null
 current_task: "native-postgres-driver:ch18:t01"
-plan_revision: 7
-plan_commit: 1c75af65
+plan_revision: 8
+plan_commit: 8c540809
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null

@@ -21,8 +21,8 @@ files:
 tests:
   - src/py/tests/integration/db/test_postgres_features.py
 estimated_loc: 245
-plan_revision: 7
-plan_commit: 1c75af65
+plan_revision: 8
+plan_commit: 8c540809
 state_revision: 0
 claimed_by: null
 claimed_at: null

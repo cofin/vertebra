@@ -11,13 +11,13 @@ depends_on_chapters:
   - ch02-wire-codec-and-session-startup
 replan_trigger: null
 current_task: "native-postgres-driver:ch03:t03"
-plan_revision: 7
-plan_commit: 1c75af65
+plan_revision: 8
+plan_commit: 8c540809
 state_revision: 0
-last_verified_checkpoint: 9b94bff8
+last_verified_checkpoint: 2db27cd1
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-08T00:11:49Z"
+updated_at: "2026-11-08T00:32:06Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:40:00Z"
@@ -136,14 +136,14 @@ Progress: `[0/0 files documented in ch03]`
 
 - [x] [9b94bff8] native-postgres-driver:ch03:t01 — Authenticate ordered SCRAM-SHA-256 SASL exchanges (tasks/t01-scram-sha256.md)
 - [x] [2db27cd1] native-postgres-driver:ch03:t02 — Derive RFC 5929 tls-server-end-point digests from negotiated peer certificates (tasks/t02-peer-certificate-binding.md)
-- [!] native-postgres-driver:ch03:t03 — Enforce SCRAM-SHA-256-PLUS channel-binding policies and GS2 downgrade protection (tasks/t03-scram-sha256-plus.md)
+- [ ] native-postgres-driver:ch03:t03 — Enforce SCRAM-SHA-256-PLUS channel-binding policies and GS2 downgrade protection (tasks/t03-scram-sha256-plus.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: Chapter 02 is reviewed at `27b5a9e5`; cold plan review approves revision 7 at `76e82a96`. SCRAM task `t01` is verified at `9b94bff8` with all 64 tests and locked all-target Clippy passing.
-- **Remaining Tasks in Chapter**: Tasks `t01` and `t02` are complete at `9b94bff8` and `2db27cd1`; policy task `t03` is blocked pending its bounded read-manifest correction.
+- **Verified Baseline**: Source `2db27cd1` passes all 71 native tests, locked all-target Clippy, formatting, and bundle validation. Chapter 02 remains reviewed at `27b5a9e5`; plan revision 8 at `8c540809` awaits cold manifest review.
+- **Remaining Tasks in Chapter**: Tasks `t01` and `t02` are complete at `9b94bff8` and `2db27cd1`; policy task `t03` is pending with its six-file read manifest corrected; source execution follows cold manifest review.
 - **Documentation & OKF Status**: `[0/0 files documented in ch03]`; RFC 5929 channel-binding OKF curation scheduled in `ch30:t02`.
 - **Downstream Dependents**: Unblocks `ch04-cloud-material-and-admin-discovery` (`ch04:t01` depends on `ch03:t03`).
 
