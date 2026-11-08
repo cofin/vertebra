@@ -12,18 +12,22 @@ depends_on:
 - storage-completeness:ch20:t01
 - storage-completeness:ch10:t01
 - storage-completeness:ch13:t02
+- storage-completeness:ch21:t02
 read_set:
 - src/rs/vertebra-storage/src/store.rs
 - src/rs/vertebra-storage/src/conditional.rs
+- src/rs/vertebra-storage/src/lib.rs
+- src/rs/vertebra-storage/src/gcs_request.rs
+- src/rs/vertebra-storage/src/cloud_request.rs
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
-- .agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md
 files:
 - src/rs/vertebra-storage/src/store.rs
 - src/rs/vertebra-storage/src/conditional.rs
+- src/rs/vertebra-storage/src/lib.rs
 tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
-estimated_loc: 140
-plan_revision: 7
+estimated_loc: 210
+plan_revision: 8
 plan_commit: null
 state_revision: 0
 claimed_by: null
@@ -57,21 +61,20 @@ Resolve GCS ETag predicates into generation CAS for ordinary puts. Execute one b
 
 ## Bounded Read Manifest
 
-- `src/rs/vertebra-storage/src/store.rs` — owned implementation or canonical regression surface.
-- `src/rs/vertebra-storage/src/conditional.rs` — owned implementation or canonical regression surface.
-- `src/rs/vertebra-storage/tests/storage_engine_tests.rs` — owned implementation or canonical regression surface.
-
-- `.agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md` — Grounded SDK/protocol and ownership evidence.
+- `src/rs/vertebra-storage/src/store.rs`
+- `src/rs/vertebra-storage/src/conditional.rs`
+- `src/rs/vertebra-storage/src/lib.rs`
+- `src/rs/vertebra-storage/src/gcs_request.rs`
+- `src/rs/vertebra-storage/src/cloud_request.rs`
+- `src/rs/vertebra-storage/tests/storage_engine_tests.rs`
 
 ## Symbol & Signature Contracts
 
-Grounded contract evidence: [^research].
+Activate `mod gcs_request;` by removing its exact test-only gate. The completed private request primitive is immutable in this task; own only store.rs, conditional.rs and lib.rs activation/routing. Construct and retain one shared GcsRequestClient per concrete GCS backend from the same SDK/config pair; do not rebuild credentials or an HTTP client per chunk/request. Remove exact future-config dead-code expectations when these fields gain their first real production consumer.
 
-For GCS `put_opts(if_match=etag)`, HEAD once to obtain both opaque ETag and generation, verify expected ETag, then PutMode::Update(UpdateVersion { e_tag: Some(actual_etag), version: Some(generation) }). Never pass ETag in place of generation and never use HEAD→Overwrite. Shared ordinary negative if_none_match resolution and eight-attempt CAS-only retries are implemented by prerequisite ch20:t01. This task owns GCS positive if_match translation and validates that the shared negative path passes the same HEAD generation and canonical XML ETag into UpdateVersion, never a second independent retry loop or Overwrite fallback. `if_none_match="*"` uses Create directly. Preserve content_type/attributes and actual PutResult from successful atomic put.
+Implement the shared ConditionalWrite trait for GcsRequestClient with Snapshot=GcsObjectSnapshot, using its real snapshot/put_snapshot methods. Ordinary positive Match and negative NotMatch route through the SAME bounded logical-predicate CAS loop introduced by ch20; no GCS-only retry loop. Snapshot uses canonical quoted XML ETag plus generation/metageneration. Present writes fence both versions. Missing Match fails before PUT; missing NotMatch uses Create generation-match0. On a 412, capture a new tuple and re-evaluate the original ETag predicate, bounded to eight attempts; a metadata change that leaves the ETag unchanged may safely retry. An exhausted budget has truthful typed conflict context. Preserve metadata and actual mutation PutResult.
 
-Caller predicates use the SDK XML HEAD ETag and its same-snapshot generation. This task handles ordinary puts only. Multipart rewrite, multi-token completion and generation-pinned XML publication receipts belong to t04 after the resumable stage primitives exist.
-
-Caller → seam → collaborator: public sync/async object-store or adapter operation → owned symbols above → existing native engine/provider or upstream framework contract. Preserve public APIs outside this task.
+The generic SDK UpdateVersion path is forbidden for GCS ETag predicates because it ignores e_tag and cannot fence metadata-only changes. Overwrite and simple Create retain their supported native behavior. Public Python signatures and version/ETag namespaces remain unchanged. Rewrite and final receipt tests belong to t04 after the stage exists.
 
 ## Edge Cases & Error Semantics
 
@@ -83,9 +86,10 @@ Use the listed canonical test files and actual public store/framework calls. Do 
 
 | Case | Input | Observable result |
 | --- | --- | --- |
-| GCS ETag/generation distinct | HEAD ETag abc, generation 1729; if_match abc | UpdateVersion uses generation 1729; caller ETag checked exactly |
-| Negative race | Forbidden ETag old; HEAD sees allowed new1; competitor publishes forbidden old before PUT | CAS fails, re-evaluation rejects; forbidden value never overwritten |
-| Absent negative | HEAD missing then competitor creates before Create | Create conflict triggers safe predicate re-evaluation or explicit failure, no overwrite |
+| Positive metadata race | HEAD ETag A/G1729/M4; metadata changes to F/M5 at unchanged G | PUT carries paired G/M conditions, no unsafe success; predicate is re-evaluated within the shared budget. |
+| Negative metadata race | if_none_match F; HEAD allowed A/G1729/M4, competitor installs F/M5 | Paired condition fails, fresh snapshot rejects F and competitor bytes/metadata survive. |
+| Missing predicates | Missing Match; missing NotMatch with and without competing creation | Match rejects without PUT; NotMatch uses generation-match0 and never falls back to Overwrite. |
+| Stable logical predicate | Metadata version changes but ETag remains the allowed value | Shared bounded CAS may retry the new paired snapshot; successful receipt is the actual PUT result. |
 
 ## Verification
 
@@ -94,6 +98,8 @@ Record the failing public regression before implementation and the passing resul
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo fmt --manifest-path src/rs/Cargo.toml --all --check`
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --test storage_engine_tests`
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets -- -D warnings`
+
+- `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo check --manifest-path src/rs/Cargo.toml -p vertebra-storage --lib`
 
 Record exact exit statuses, native build checkpoint and any platform limitation in verification_evidence. Review closure uses these results, never planning-only structural validation.
 

@@ -7,7 +7,7 @@ description: Create generation-fenced GCS resumable stages
 status: draft
 state: pending
 priority: P1
-verification_strategy: behavior_tdd
+verification_strategy: integration_acceptance
 depends_on:
 - storage-completeness:ch10:t02
 - storage-completeness:ch10:t03
@@ -16,7 +16,7 @@ depends_on:
 read_set:
 - src/rs/vertebra-storage/src/gcs_stage.rs
 - src/rs/vertebra-storage/src/lib.rs
-- src/rs/vertebra-storage/src/cloud_request.rs
+- src/rs/vertebra-storage/src/gcs_request.rs
 - src/rs/vertebra-storage/src/conditional.rs
 - .agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md
 files:
@@ -25,7 +25,7 @@ files:
 tests:
 - src/rs/vertebra-storage/src/gcs_stage.rs
 estimated_loc: 230
-plan_revision: 7
+plan_revision: 8
 plan_commit: null
 state_revision: 0
 claimed_by: null
@@ -61,17 +61,17 @@ Implement this bounded native contract after its listed predecessors. Own only t
 
 - `src/rs/vertebra-storage/src/gcs_stage.rs`
 - `src/rs/vertebra-storage/src/lib.rs`
-- `src/rs/vertebra-storage/src/cloud_request.rs`
+- `src/rs/vertebra-storage/src/gcs_request.rs`
 - `src/rs/vertebra-storage/src/conditional.rs`
 - `.agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md`
 
 ## Symbol & Signature Contracts
 
-Add the real private `gcs_stage.rs` under exactly `#[cfg(test)] mod gcs_stage;` until t04 activates its first production caller. No public test API, broad dead-code allowance or fake stage implementation is introduced. Inline `gcs_stage::tests` exercise actual CloudRequestClient/SDK HTTP and credential-provider collaborators against a local responder.
+Add the real private `gcs_stage.rs` under exactly `#[cfg(test)] mod gcs_stage;` until t04 activates its first production caller. No public test API, broad dead-code allowance or fake stage implementation is introduced. Inline `gcs_stage::tests` exercise actual GcsRequestClient/SDK HTTP and credential-provider collaborators against a local responder.
 
-`GcsResumableStage` retains the concrete `Arc<GoogleCloudStorage>`, exact resolved GCS configuration, `Arc<CloudRequestClient>` and shared native async session state. `GcsStageConfig` carries `base: Url`, `bucket: String`, `client_options: ClientOptions`, and `skip_signature: bool` captured by ch21:t01. `StageReceipt { key: StorePath, generation: String, size: u64 }` identifies only the stage object. Stage methods `begin`, `write_chunk(Bytes)`, `finish() -> Result<StageReceipt, StorageError>` and `abort() -> Result<(), StorageError>` retain Active/Finalized ownership; t03 completes recovery/cleanup before runtime activation. Store pending data and the request offset in retained async state BEFORE sending, so dropping a future cannot lose them.
+`GcsResumableStage` retains the shared real `Arc<GcsRequestClient>` and cancellation-safe native async session state; that client already owns the concrete SDK/configuration/transport. `async fn begin(requests: Arc<GcsRequestClient>, destination: StorePath, options: PutConditionalOptions) -> object_store::Result<Self>` creates the stage; write_chunk/finish/probe/abort return object_store::Result as well, preserving SDK error classes. `GcsStageConfig` carries `base: Url`, `bucket: String`, `client_options: ClientOptions`, and `skip_signature: bool` captured by ch21:t01. `StageReceipt { key: StorePath, generation: String, size: u64 }` identifies only the stage object. Stage methods `begin`, `write_chunk(Bytes)`, `finish() -> object_store::Result<StageReceipt>` and `abort() -> object_store::Result<()>` retain Active/Finalized ownership; t03 completes recovery/cleanup before runtime activation. Store pending data and the request offset in retained async state BEFORE sending, so dropping a future cannot lose them.
 
-Initiate `POST {base}/upload/storage/v1/b/{bucket}/o?uploadType=resumable&name={stage}&ifGenerationMatch=0` with JSON contentType/metadata and exact body length, omitting X-Upload-Content-Length when total size is unknown. Use an unpredictable UUID key beside the destination's parent without reserving a legal user prefix. Encode opaque bucket/key segments exactly once. The zero-generation predicate is part of session initiation, never an unsupported XML MPU completion option. Retry a definitive initiation collision with a fresh UUID only before producer consumption. A late 412 fails safely without changing names or replaying consumed input.
+Resolve default content type using the ORIGINAL destination path and captured ClientOptions before generating a UUID stage name; stage suffixes must not change configured MIME inference. Initiate `POST {base}/upload/storage/v1/b/{bucket}/o?uploadType=resumable&name={stage}&ifGenerationMatch=0` with JSON contentType/metadata and exact body length, omitting X-Upload-Content-Length when total size is unknown. Use an unpredictable UUID key beside the destination's parent without reserving a legal user prefix. Encode opaque bucket/key segments exactly once. The zero-generation predicate is part of session initiation, never an unsupported XML MPU completion option. Retry a definitive initiation collision with a fresh UUID only before producer consumption. A late 412 fails safely without changing names or replaying consumed input.
 
 Obtain the initiating bearer from the concrete SDK provider on each authenticated request; skip lookup entirely when skip_signature is true and omit Authorization for an empty bearer, matching the SDK. Use the configured SDK transport. Retain Location as an opaque authentication capability, resolve relative Location against the configured endpoint, and reject unexpected origin or an insecure downgrade before sending configured headers. Session requests need no OAuth bearer; never log the capability URI.
 
@@ -92,7 +92,7 @@ Retain session, pending frame and exact generation ownership across errors and c
 
 ## Verification
 
-Record the failing behavioral regression and passing native result at this task's actual boundary. Test-only private primitives use real SDK transport and local HTTP responders; they make no premature public-engine publication claim.
+Run the focused configured SDK/request baseline, then verify the real new resumable-stage composition and refusal paths. Do not fabricate a behavioral Red for a private stage interface that does not exist yet. Test-only private primitives use real SDK transport and local HTTP responders; they make no premature public-engine publication claim.
 
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo fmt --manifest-path src/rs/Cargo.toml --all --check`
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --lib gcs_stage::tests`

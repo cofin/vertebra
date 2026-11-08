@@ -1,6 +1,6 @@
 # Chapters: Feature-Complete Storage
 
-21 chapters and 59 tasks retain the complete storage scope.
+21 chapters and 60 tasks retain the complete storage scope.
 
 * [ch01 — Chapter 01: Native Rust Storage Engine, GCP Auth Unification, and Fail-Closed Facade](ch01-native-engine-and-auth/spec.md) — [active] Add zero-copy streaming reads, incremental multipart uploads, conditional puts, paginated listing, rename, OCI PAR presigning, unified GCP token caches, and fail-closed construction across vertebra-storage and vertebra.storage.
 * [ch02 — Chapter 02: SQLSpec, Advanced Alchemy, and Django Storage Contracts](ch02-orm-and-sql-storage-contracts/spec.md) — [active] Implement fail-closed SQLSpec ObjectStoreProtocol, Advanced Alchemy StorageBackend registration without monkeypatching, and @deconstructible Django Storage subclass over SyncObjectStore and AsyncObjectStore.
@@ -8,7 +8,7 @@
 * [ch04 — Chapter 04: Strict Arrow SHM Allocation, Parquet Streaming, and OKF Sync](ch04-arrow-shm-and-docs/spec.md) — [planned] Enforce fail-loud named ShmRegion allocation, eliminate JSON pseudo-Arrow fallback in ArrowCursor.from_rows, wire streaming Arrow/Parquet ObjectStore helpers, and synchronize storage documentation and OKF chapters.
 * [ch05 — Raw Object Identity and Typed Conditional Conflicts](ch05-key-identity-and-preconditions/spec.md) — [completed] Raw key identity, adapter qualification and lazy typed conflicts are verified; correctness and fresh quality reviews report no findings through `0bce1806`. Native publication acceptance remains separate.
 * [ch06 — Django Collision Length and SQLSpec Signing Errors](ch06-adapter-correctness/spec.md) — [completed] Per-call filename limits, consumed-source recovery and configured signing errors are verified and reviewed through `115ab8f5`. Native multipart publication acceptance remains separate.
-* [ch07 — Withdraw First-Class R2 Python APIs](ch07-remove-r2-python/spec.md) — [active] All four withdrawal and qualification tasks are signed and verified; final metadata re-verification and fresh quality review remain.
+* [ch07 — Withdraw First-Class R2 Python APIs](ch07-remove-r2-python/spec.md) — [completed] All four withdrawal and qualification tasks are signed, verified and independently reviewed at `eb76724f`.
 * [ch08 — Move OCI Chunk Ownership and Remove Native R2](ch08-remove-r2-native/spec.md) — [completed] OCI accumulation ownership, native R2 constructor/helper/stub withdrawal and dead-module deletion are signed through `c7868b02`; knowledge is synchronized. Correctness and fresh quality reviews remain pending.
 * [ch09 — Synchronize Supported Providers and Native Guarantees](ch09-r2-docs-and-knowledge/spec.md) — [active] Synchronize Supported Providers and Native Guarantees
 * [ch10 — Native Publication Boundary and Cleanup Ownership](ch10-publication-boundary-and-lifecycle/spec.md) — [active] Real request transport is verified in library tests; ch12:t01 owns runtime activation. Concrete identity/Memory Create-Match dispatch stays bounded in ch10:t01; ch21 owns resolved GCS configuration and ch20 closes Memory negative multipart support.
@@ -24,4 +24,4 @@
 
 * [ch20 — Ordinary and Memory Multipart Negative Predicate CAS](ch20-ordinary-negative-cas/spec.md) — [planned] Fence ordinary negative puts and Memory negative multipart with one cheap PutPayload CAS helper, preserve Local/GCS dispatch truth, and repair actual OCI ordinary conditions before native acceptance.
 
-* [ch21 — SDK-Resolved GCS Configuration](ch21-sdk-resolved-config/spec.md) — [planned] Capture exact SDK endpoint/ClientOptions beside one concrete GCS Arc; constructor/read/config acceptance precedes ch14 staging and final publication comparison.
+* [ch21 — SDK-Resolved GCS Configuration and Snapshots](ch21-sdk-resolved-config/spec.md) — [planned] Capture exact SDK endpoint/ClientOptions beside one concrete GCS Arc and private paired snapshot requests; ch14:t01 owns first production activation before staged publication.

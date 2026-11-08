@@ -5,7 +5,7 @@ chapter_id: ch10-publication-boundary-and-lifecycle
 title: Frame S3 producer chunks and preserve bounded backend policies
 description: Frame S3 producer chunks and preserve bounded backend policies
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -21,12 +21,13 @@ files:
 - src/rs/vertebra-storage/src/conditional.rs
 tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
+- src/rs/vertebra-storage/src/store.rs
 estimated_loc: 150
 plan_revision: 7
 plan_commit: 5f64d1a8
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:minimum_part_framing
+claimed_at: '2026-11-08T00:00:00Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -74,7 +75,7 @@ The matrix below specifies observable failure behavior. Preserve the original er
 
 ## Public-Seam Test Blueprint
 
-Use the listed canonical test files and actual public store/framework calls. Do not assert source text or merely duplicate a helper implementation.
+Use the canonical integration target and actual public ObjectStoreEngine/MultipartUploadSession calls with a real S3 HTTP responder. The count-limit fixture is an inline store.rs test that constructs the actual private session counter at 10000 and sends the next part through the same live session path; its real upload/HTTP collaborator proves no disallowed request or publication. No public counter hook, 80 GiB fixture, mocked session or source-text assertion is introduced.
 
 | Case | Input | Observable result |
 | --- | --- | --- |
@@ -89,6 +90,8 @@ Record failing service-sized-part regressions before the fix, then run:
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo fmt --manifest-path src/rs/Cargo.toml --all --check`
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --test storage_engine_tests`
 - `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets -- -D warnings`
+
+Also run the private count-limit regression with `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" PYO3_PYTHON="$PWD/.venv/bin/python3.12" flock /tmp/vertebra-flow-storage-cargo.lock flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage --lib store::tests`.
 
 Record exact part sizes, backpressure/cancellation barriers and exit statuses. No large payload allocation is needed for injected count-limit tests.
 

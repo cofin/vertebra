@@ -5,7 +5,7 @@ chapter_id: ch07-remove-r2-python
 title: Withdraw First-Class R2 Python APIs
 description: Remove R2 configuration, classifiers, logical URI overrides and staging declarations while preserving supported native stores.
 status: stable
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
@@ -14,7 +14,7 @@ plan_revision: 6
 plan_commit: 43c2e3fe
 state_revision: 0
 last_verified_checkpoint: a7036538
-last_reviewed_commit: null
+last_reviewed_commit: eb76724f
 created_at: '2026-11-07T12:00:00Z'
 updated_at: '2026-11-07T23:24:00Z'
 generated:
@@ -46,7 +46,7 @@ tags:
 - Framework classifiers and public R2 config/convenience exports are removed; direct facade `r2://` construction rejects the removed scheme. [^facade]
 - Destination and explicit string-store staging rejection, qualification matching and native Memory/local compatibility are implemented at `38757809`. [^staging]
 - SQLSpec rejects R2 logical URI overrides even with a supported explicit native store. Staging checks the resolved declared store URI before returning for relative destinations; both guards use a scheme-only diagnostic. [^sqlspec] [^staging]
-- All four tasks are completed; 162 canonical tests pass with five existing optional-driver skips. Correctness re-review and fresh quality review remain open. [^regression]
+- All four tasks are completed and independently reviewed; 186 canonical tests pass with five existing optional-driver skips. Correctness and fresh quality reviews have no unresolved findings. [^regression]
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -114,14 +114,14 @@ Progress: `[1/1 files documented]` for the verified Python withdrawal, logical o
 - [x] [38757809] storage-completeness:ch07:t03 — Reject removed R2 URIs before staging local-path resolution (tasks/t03-staging-reject-r2.md)
 - [x] [a7036538] storage-completeness:ch07:t04 — Reject removed SQLSpec logical URI overrides before staging (tasks/t04-reject-removed-logical-uri.md)
 
-**Chapter Recovery Checkpoint:** all four task receipts are completed and scoped knowledge is synchronized. `/flow:review storage-completeness` routes the required correctness re-review and subsequent fresh quality review before chapter closure.
+**Chapter Recovery Checkpoint:** all four task receipts are completed and scoped knowledge is synchronized. Correctness review and fresh quality review are complete at `eb76724f`; native publication acceptance remains with its repair chapters.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- All four tasks are completed at `4486f6fe`, `75f18e3b`, `38757809` and `a7036538`. Canonical acceptance passes 162 tests with five existing optional-driver skips; focused Mypy, Ruff, storage stubtest and whitespace checks pass.
+- All four tasks are completed at `4486f6fe`, `75f18e3b`, `38757809` and `a7036538`. Canonical acceptance passes 186 tests with five existing optional-driver skips; focused Mypy, Ruff, storage stubtest and whitespace checks pass.
 - t04 records 22 failing public regressions before its six-added/five-removed-line production repair. Its final regressions verify exact scheme-only errors, retained native bytes/keys, supported rooted S3/GCS metadata and real sync/async BigQuery exports with zero query connections.
 - The Python repair uses the rebuilt native withdrawal extensions at `c7868b02`. The newer Memory publication source checkpoint `d50cf6a2` has Rust acceptance only; its Python rebuild/acceptance and other provider publication repairs remain open.
-- The chapter remains active with `last_reviewed_commit: null`. Correctness re-review and fresh quality review remain required; native publication acceptance and other chapters retain their independent ownership.
+- The chapter is completed with `last_reviewed_commit: eb76724f`. Correctness and fresh quality reviews have no unresolved findings; native publication acceptance and other chapters retain their independent ownership.
 - Scoped documentation is synchronized: `[1/1 files documented]`. Final native guarantee consolidation remains ch09:t03 and final user guides remain ch04:t03.
 
 [^sqlspec]: `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` — Classifiers, explicit native-store logical override, metadata and public operations.

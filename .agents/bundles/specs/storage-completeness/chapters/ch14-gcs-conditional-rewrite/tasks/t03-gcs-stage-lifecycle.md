@@ -20,7 +20,7 @@ files:
 tests:
 - src/rs/vertebra-storage/src/gcs_stage.rs
 estimated_loc: 235
-plan_revision: 7
+plan_revision: 8
 plan_commit: null
 state_revision: 0
 claimed_by: null

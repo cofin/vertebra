@@ -87,15 +87,15 @@ S3 completion accepts If-Match or If-None-Match `*`. An HTTP200 can contain an E
 
 Azure PutBlockList accepts conditional commit headers and object metadata. Its response supplies ETag. The public SDK block identifiers and credentials can be reused while privately issuing only the missing conditional commit request. Uncommitted block cleanup must respect Azure's actual lifecycle rather than deleting a competing committed blob. [^azure]
 
-GCS JSON rewrite supports pinned source generation and destination ifGenerationMatch, including 0 for absence. Repeated requests carry rewriteToken until done; final resource contains the published object metadata. Ordinary ETag updates must resolve the current generation and use UpdateVersion with that generation. An arbitrary negative ETag requires predicate re-evaluation in a Create/Update CAS loop. [^gcs] [^gcs-preconditions]
+GCS JSON rewrite supports pinned source generation and destination ifGenerationMatch, including 0 for absence. Repeated requests carry rewriteToken until done; final resource contains the published object metadata. Ordinary opaque ETag updates capture generation AND metageneration and issue a paired-fence XML PUT through the private SDK-backed request boundary. An arbitrary negative ETag requires predicate re-evaluation in an atomic provider CAS loop; GCS opaque XML ETags require both generation and metageneration, not SDK UpdateVersion alone. [^gcs] [^gcs-preconditions]
 
 OCI CommitMultipartUpload supports If-Match and If-None-Match `*`; arbitrary negative ETags must use current-ETag compare-and-commit, not unsupported arbitrary If-None-Match. The owned OCI transport retains signing and abort ownership. OCI uniform parts remain 8 MiB with an explicit 10000-part limit; this does not imply a 5 TiB supported upload promise. [^oci]
 
-GCS XML and JSON ETags are not interchangeable. Existing public native tags remain XML ETags; generation fences translate predicates and publication receipts without cross-API string comparison. The pinned SDK `GetOptions { head: true, version: Some(generation), .. }` emits an XML HEAD with `generation` query and returns that generation's metadata. A successful JSON rewrite supplies the generation for this pinned receipt lookup; a successor must never be reported through an unfenced HEAD. Verify distinct XML/JSON values and a writer arriving immediately after rewrite. [^sdk] [^gcs-preconditions]
+GCS XML and JSON ETags are not interchangeable. Public native tags remain quoted XML ETags. Snapshot HEAD captures that ETag and both generation/metageneration. A successful JSON rewrite supplies both versions for a conditional XML receipt HEAD with generation query plus G/M match headers. SDK GetOptions.version alone cannot protect opaque ETags against metadata-only changes; missing/changed snapshots fail explicitly rather than report successor metadata. [^sdk] [^gcs-preconditions]
 
 ## Ordinary Negative-Predicate Ownership
 
-`ObjectStoreEngine::put_opts` currently HEAD-checks an arbitrary negative ETag and chooses Overwrite when it differs or is absent; multipart completion wrappers do not repair that ordinary entry point. ch20:t01 owns a bounded eight-attempt HEAD→UpdateVersion(actual ETag and version) or absent→Create loop, re-evaluating only native CAS failures and preserving the original logical predicate, metadata and actual successful receipt. Caller-owned ordinary Bytes may be cloned as views; no producer replay or full-stream buffer is introduced. Local stays behind the physical-parent guard, GCS negative updates carry generation, and positive GCS if_match remains ch14:t01. [^sdk]
+`ObjectStoreEngine::put_opts`'s generic HEAD→Overwrite path cannot implement negative ETags. ch20:t01 owns one bounded logical CAS algorithm shared with Memory multipart and later GCS integration: SDK backends use real ETag-only Update or absent→Create, while the distinct GCS request backend supplies complete data/metadata snapshots and paired conditional PUT. Only CAS conflicts trigger predicate re-evaluation. Caller payload views and metadata are retained without producer replay. Local stays behind the physical-parent guard; GCS opaque predicates remain explicitly unavailable until ch14:t01 activates the paired-fence backend. [^sdk]
 
 The owned OCI ordinary backend currently ignores PutOptions. OCI PutObject supports matching/create conditions and caller content type/metadata; ch20:t01 repairs its real If-Match/If-None-Match:* request behavior and opc-meta- headers before the shared loop relies on its Update/Create primitive. Native acceptance requires these ordinary barriers as well as multipart completion races; support is never inferred from a trait method that ignores its options. [^oci-put]
 
@@ -140,3 +140,17 @@ Primary protocol sources:
 - [Session URI security and lifecycle](https://docs.cloud.google.com/storage/docs/resumable-uploads).
 - [Object generation-specific deletion](https://docs.cloud.google.com/storage/docs/json_api/v1/objects/delete).
 - [Google resumable-media framing implementation](https://github.com/googleapis/google-resumable-media-python/blob/main/google/resumable_media/_upload.py) and its [empty/exact-boundary tests](https://github.com/googleapis/google-resumable-media-python/blob/main/tests/unit/test__upload.py).
+
+## GCS Opaque ETag Snapshot Fences
+
+XML HEAD returns ETag, x-goog-generation and x-goog-metageneration together. Opaque XML ETags can change on metadata-only updates without changing the data generation. Pinned gcp/client.rs ignores UpdateVersion.e_tag and sends only its version as x-goog-if-generation-match; that path cannot implement arbitrary opaque ETag predicates.
+
+Capture `(quoted XML ETag,G,M)` in one real HEAD. Ordinary XML PUT pairs x-goog-if-generation-match:G with x-goog-if-metageneration-match:M; either failed predicate returns412. JSON rewrite pairs destination ifGenerationMatch with ifMetagenerationMatch on every token request. Absent NotMatch uses generation-match0 and no metageneration; absent Match is a typed conflict. Re-evaluate logical ETag predicates through the same bounded CAS algorithm after races, never an unconditional update.
+
+A rewrite's final resource supplies both generation and metageneration. Its canonical receipt is XML HEAD with generation query plus both G/M conditional headers. Metadata-only changes or disappearance before that lookup produce an explicit receipt failure; a successor ETag or JSON resource.etag never substitutes. Quoted XML ETag bytes remain exactly HeaderValue::to_str().to_owned().
+
+- [XML HEAD object response and conditions](https://docs.cloud.google.com/storage/docs/xml-api/head-object).
+- [XML paired precondition headers](https://docs.cloud.google.com/storage/docs/xml-api/reference-headers#xgoogifmetagenerationmatch).
+- [GCS ETag metadata semantics](https://docs.cloud.google.com/storage/docs/metadata#etags).
+- [XML object PUT common headers](https://docs.cloud.google.com/storage/docs/xml-api/put-object-upload).
+- [JSON rewrite destination conditions](https://docs.cloud.google.com/storage/docs/json_api/v1/objects/rewrite).

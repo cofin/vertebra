@@ -10,7 +10,7 @@ planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
-plan_revision: 7
+plan_revision: 8
 plan_commit: null
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
@@ -36,9 +36,9 @@ tags:
 # GCS Generation-Fenced Staging and Rewrite
 
 <!-- truth: start -->
-Caller ETags use the existing SDK XML namespace and same-snapshot generation fences.
+Caller ETags use the existing quoted XML namespace and same-snapshot generation/metageneration fences.
 Private cloud stages use JSON resumable insertion with ifGenerationMatch=0.
-Publication uses generation-pinned JSON rewrite and returns the exact generation-pinned XML receipt.
+Publication pins source data and destination data/metadata versions, then obtains an XML receipt fenced by both versions.
 Native implementation requires correctness review followed by fresh independent quality review.
 <!-- truth: end -->
 
@@ -50,7 +50,7 @@ Preserve native storage conditional writes, bounded streaming, opaque keys, meta
 
 ### R1: Fence ordinary GCS predicates with the same HEAD generation
 
-Caller ETag comparison uses SDK XML HEAD metadata. Positive Match forwards that same snapshot's generation through UpdateVersion; shared ordinary negative CAS uses prerequisite ch20:t01. Create remains native Create. Rewrite receipt tests belong to t04 after publication exists.
+Caller ETag comparison uses SDK XML HEAD metadata. Positive Match and negative NotMatch use the shared bounded logical CAS loop with a real private GCS snapshot/request backend. SDK UpdateVersion ignores e_tag and cannot protect metadata-only changes. Create remains native Create. Rewrite receipt tests belong to t04 after publication exists.
 
 ### R2: Create bounded private stages atomically
 
@@ -62,7 +62,7 @@ Keep the pending frame before sending and recover acknowledgement via session st
 
 ### R4: Publish exact staged generations and return canonical XML tokens
 
-The production wrapper starts only after both private stage tasks pass. JSON rewrite pins source generation and destination conditions across every rewriteToken continuation. Caller ETags are compared only with XML SDK metadata. After completion, SDK generation-specific HEAD returns the published generation's XML ETag/version. Missing generation receipts fail explicitly; current HEAD or JSON resource.etag never substitutes for our result. Caller metadata persists and cleanup targets only the owned stage generation. Temporary cloud stages may be visible in provider listings. t04 compares actual configured SDK reads with actual public resumable/rewrite requests, covering explicit and singleton service-account endpoint resolution, headers and shared credentials. On activation it removes every exact temporary config-field expectation introduced by ch21:t01 in conditional.rs.
+The production wrapper starts only after both private stage tasks pass. JSON rewrite pins source generation and BOTH destination generation/metageneration conditions across every rewriteToken continuation. Absent NotMatch uses generation-match0; absent Match fails before mutation. Caller ETags are compared only with XML SDK metadata. After completion, private XML HEAD pins the returned generation AND metageneration and returns that exact XML snapshot; a metadata-only change produces explicit receipt failure. Missing generation receipts fail explicitly; current HEAD or JSON resource.etag never substitutes for our result. Caller metadata persists and cleanup targets only the owned stage generation. Temporary cloud stages may be visible in provider listings. t04 inline real-wrapper tests compare configured SDK reads with actual resumable/rewrite requests, including custom headers and rotating external credentials. Canonical public-engine tests use only exposed configuration options. t01 removes exact config-field expectations when it activates the first production request consumer.
 
 ## 3. Documentation & OKF Knowledge Plan
 
@@ -73,7 +73,7 @@ Progress: `[0/1 files documented]`. ch09:t03 documents evidence-backed storage b
 | Requirement | Task | Strategy | Boundary |
 | --- | --- | --- | --- |
 | R1 | [ch14:t01](tasks/t01-gcs-ordinary-cas.md) | regression_tdd | Actual native ordinary puts and GCS HTTP generation headers |
-| R2 | [ch14:t02](tasks/t02-gcs-stage-protocol.md) | behavior_tdd | Real private SDK/HTTP resumable stage |
+| R2 | [ch14:t02](tasks/t02-gcs-stage-protocol.md) | integration_acceptance | Real private SDK/HTTP resumable stage |
 | R3 | [ch14:t03](tasks/t03-gcs-stage-lifecycle.md) | regression_tdd | Real private HTTP recovery/cancellation/cleanup |
 | R4 | [ch14:t04](tasks/t04-gcs-rewrite-publication.md) | regression_tdd | Public native multipart publication |
 
@@ -86,7 +86,7 @@ Progress: `[0/1 files documented]`. ch09:t03 documents evidence-backed storage b
 
 ## 6. Current State & Remaining Plan Snapshot
 
-All four tasks remain pending at the verified R2-removal baseline. The revised frontier awaits independent executable-plan review. t02/t03 provide test-gated real primitives; t04 activates normal production routing and runs non-test compilation. ch16 acceptance depends on t04, never the incomplete staging predecessor.
+All four tasks remain pending at the verified R2-removal baseline. The revised frontier awaits independent executable-plan review. ch21:t02 provides test-gated snapshot primitives activated by t01; t02/t03 provide test-gated resumable primitives activated by t04 and runs non-test compilation. ch16 acceptance depends on t04, never the incomplete staging predecessor.
 
 [^source]: `src/rs/vertebra-storage/src/gcs_stage.rs` — Owned staging implementation introduced by this chapter.
 

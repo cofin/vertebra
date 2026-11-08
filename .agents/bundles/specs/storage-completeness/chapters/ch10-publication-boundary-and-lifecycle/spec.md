@@ -105,11 +105,11 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 
 | Requirement | Task | Strategy | Verification |
 | --- | --- | --- | --- |
-| R1 | [ch10:t01](tasks/t01-publication-dispatch.md) | regression_tdd | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
+| R1 | [ch10:t01](tasks/t01-publication-dispatch.md) | regression_tdd | Canonical public S3 HTTP framing tests plus inline store.rs actual private-session count-limit test |
 | R2 | [ch10:t02](tasks/t02-sdk-http-transport.md) | behavior_tdd | Real inline `cloud_request::tests`; runtime activation and provider acceptance by ch12:t01/ch13:t01–t02. |
-| R3 | [ch10:t03](tasks/t03-session-cleanup.md) | regression_tdd | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
+| R3 | [ch10:t03](tasks/t03-session-cleanup.md) | regression_tdd | Canonical public S3 HTTP framing tests plus inline store.rs actual private-session count-limit test |
 
-| R4 | [ch10:t04](tasks/t04-minimum-cloud-part-framing.md) | regression_tdd | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
+| R4 | [ch10:t04](tasks/t04-minimum-cloud-part-framing.md) | regression_tdd | Canonical public S3 HTTP framing tests plus inline store.rs actual private-session count-limit test |
 
 ## 5. Implementation Plan
 
@@ -117,7 +117,7 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 - [x] [2bc92864] storage-completeness:ch10:t02 — Reuse SDK HTTP transport and credential authorizers (tasks/t02-sdk-http-transport.md)
 - [x] [673cb696] storage-completeness:ch10:t03 — Retain multipart abort ownership across completion errors and cancellation (tasks/t03-session-cleanup.md)
 
-- [ ] storage-completeness:ch10:t04 — Frame S3 producer chunks and preserve bounded backend policies (tasks/t04-minimum-cloud-part-framing.md)
+- [~] storage-completeness:ch10:t04 — Frame S3 producer chunks and preserve bounded backend policies (tasks/t04-minimum-cloud-part-framing.md)
 
 **Chapter Recovery Checkpoint:** run every task's focused verification, then correctness review and a fresh quality review before closing this chapter. `/flow:implement storage-completeness ch10-publication-boundary-and-lifecycle` executes its ready worksheet.
 
