@@ -14,7 +14,7 @@ generated:
 verified:
   - by: agent:docs-okf-specialist
     at: "2026-11-08T16:09:37Z"
-    commit: 99317bed
+    commit: 598921a6
 sources:
   - id: src-vertebra-core-src-gcp-auth-rs
     resource: src/rs/vertebra-core/src/gcp_auth.rs
@@ -150,7 +150,7 @@ For async stores, explicitly await `to_async_fastpath_tuple()` in the handler: i
 
 `ObjectStoreBackend` implements SQLSpec's byte/text, CRUD, listing, metadata, and signing methods with their exact `*_sync` / `*_async` names. Native extensions expose `get_stream_sync` / `get_stream_async` as `StorageBuffer` iterators, `put_stream_*` as incremental uploads returning `PutResult`, `list_page_*` as relative-key pages with opaque native cursors, and `open_sync` / `open_async` as seekable-reader factories. SQLSpec `stream_read_sync` yields `bytes`; callers await `stream_read_async` before iterating its byte chunks. Conditional and metadata write options reach native `put` / `put_stream`, and moves use native `rename`.[^src-extensions-sqlspec-storage-py]
 
-Both reader factories are synchronous. `open_sync(size=None)` resolves metadata immediately; supplying `size` avoids that lookup. `open_async` defers metadata until reading. Keys and configured namespaces reject parent traversal. Arrow/Parquet helpers and `build_duckdb_gcs_secret_sql` retain their existing contracts.[^src-extensions-sqlspec-storage-py]
+HTTP response metadata quotes opaque ETag tokens and preserves valid strong/weak tags. Direct async range descriptors resolve status and Content-Range before tuple serialization. Both reader factories are synchronous. `open_sync(size=None)` resolves metadata immediately; supplying `size` avoids that lookup. `open_async` defers metadata until reading. Keys and configured namespaces reject parent traversal. Arrow/Parquet helpers and `build_duckdb_gcs_secret_sql` retain their existing contracts.[^src-extensions-sqlspec-storage-py]
 
 ### Advanced Alchemy Registry and File Objects
 

@@ -107,14 +107,14 @@ Progress: `[2/2 files documented in ch03]`. `.agents/bundles/knowledge/domains/e
 
 ## 5. Implementation Plan
 
-- [x] [a0888371a54253624c77c4b817875f9878f54b28] storage-completeness:ch03:t01 — Implement RFC 9110 Range/206/416 StreamingStorageResponse and async chunk/fastpath delivery (tasks/t01-range-streaming-response.md)
+- [x] [6871b518] storage-completeness:ch03:t01 — Implement RFC 9110 Range/206/416 StreamingStorageResponse and async chunk/fastpath delivery (tasks/t01-range-streaming-response.md)
 - [x] [99317bed609e62a73d8b0036d444c1268ac2eb1d] storage-completeness:ch03:t02 — Implement ObjectStoreLitestarStore and ObjectStoreFileSystemAdapter in extensions.litestar (tasks/t02-litestar-store-and-static-adapter.md)
 
 **Chapter Recovery Checkpoint:** `uv run --no-sync pytest src/py/tests/unit/server/test_zero_copy_buffer.py src/py/tests/unit/extensions/test_litestar_plugin.py -q && uv run --no-sync ruff check src/py/vertebra/storage/_streaming.py src/py/vertebra/extensions/litestar` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Checkpoint**: Range/FastPath consumers pass 51 canonical cases at `a0888371`; Litestar source `99317bed609e62a73d8b0036d444c1268ac2eb1d` passes 21 canonical and 634 extension/storage cases, focused MyPy, Ruff, and format checks. Chapter state is `active` pending reviews.
+- **Verified Checkpoint**: Range/FastPath consumers pass 51 canonical cases at `a0888371`; Litestar source `99317bed609e62a73d8b0036d444c1268ac2eb1d` passes 21 canonical and 654 extension/storage cases, focused MyPy, Ruff, and format checks. Chapter state is `active` pending reviews.
 - **Remaining Tasks in Chapter**: None (`2/2` tasks complete). Chapter remains `active` until independent correctness review and fresh quality review pass at the implemented source checkpoint.
 - **Active Invariants**: Zero blocking `SyncObjectStore` I/O inside async Litestar handlers; `StorageBuffer` views preserved end-to-end.
 

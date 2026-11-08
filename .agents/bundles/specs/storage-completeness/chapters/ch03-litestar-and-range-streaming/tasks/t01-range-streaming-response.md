@@ -31,33 +31,17 @@ claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: "2026-11-08T15:50:08Z"
-last_verified_commit: a0888371a54253624c77c4b817875f9878f54b28
+last_verified_at: "2026-11-08T16:27:39.885962+00:00"
+last_verified_commit: 598921a6
 verification_evidence:
-  red:
-    command: "UV_NO_SYNC=1 uv run --no-sync pytest src/py/tests/unit/server/test_zero_copy_buffer.py -q"
-    exit_code: 1
-    result: "12 range cases fail on missing from_async_store; 7 existing tests pass"
-  regression_red:
-    command: "UV_NO_SYNC=1 uv run --no-sync pytest src/py/tests/unit/storage/test_storage_store.py -q -k explicit_async_range"
-    exit_code: 1
-    result: "Direct open-ended async descriptor incorrectly yields empty body"
-  green:
-    command: "UV_NO_SYNC=1 uv run --no-sync pytest src/py/tests/unit/server/test_zero_copy_buffer.py src/py/tests/unit/storage/test_storage_store.py -q"
-    exit_code: 0
-    result: "51 passed; real native Memory and Local stores, explicit async handler and native buffer/wire consumers"
-  lint:
-    command: "UV_NO_SYNC=1 uv run --no-sync ruff check src/py/vertebra/storage src/py/tests/unit/server/test_zero_copy_buffer.py src/py/tests/unit/storage/test_storage_store.py"
-    exit_code: 0
-  typing:
-    command: "UV_NO_SYNC=1 uv run --no-sync mypy src/py/vertebra/storage"
-    exit_code: 0
-    result: "3 source files pass"
-  hooks:
-    result: "Signed local implementation and consumer-test commits pass normal pre-commit and commit-msg hooks"
+  red: 'Direct async descriptor and ETag regressions: 9 failures before repair'
+  canonical: 71 tests pass in zero_copy_buffer.py and test_storage_store.py
+  broad: '654 tests pass: extensions, storage, server/test_zero_copy_buffer.py'
+  typing: 'Full configured MyPy: 419 files, exit 0'
+  lint: 'Touched storage/consumer paths and provider SIM102 repair: Ruff exit 0'
 created_at: "2026-11-07T04:15:00Z"
 updated_at: "2026-11-08T02:25:35Z"
-commit: a0888371a54253624c77c4b817875f9878f54b28
+commit: 6871b518
 sources:
   - id: streaming-resp
     resource: src/py/vertebra/storage/_streaming.py::StreamingStorageResponse

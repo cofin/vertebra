@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-08] review | Repair storage HTTP range metadata and entity tags
+
+- Source `6871b518` preserves direct async range status/Content-Range and formats HTTP entity tags; `598921a6` aligns the existing consumer assertion and collapses a boolean-equivalent provider branch for the lint gate.
+- Fresh verification passes: 71 Range/storage canonical tests, 654 extension/storage/server cases, full MyPy 419 files, and touched-path Ruff. Chapter correctness recheck and fresh quality review follow this synchronized evidence.
+
 
 ## [2026-11-08] flow-implement | Record storage ch03 Litestar consumers
 
