@@ -13,18 +13,18 @@ chapters:
   - ch04-streaming-arrow-parquet-and-shm
   - ch05-framework-adapters-and-test-hygiene
   - ch06-docs-okf-and-plan-sync
-current_chapter: ch01-native-gcs-plane-and-signing
-current_task: "storage-remediation:ch01:t04"
+current_chapter: ch02-zero-copy-ffi-keys-and-backends
+current_task: "storage-remediation:ch02:t01"
 parent_prd: native-data-platform
 research: []
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 3
-last_verified_checkpoint: 0e43380e
-last_reviewed_chapter: null
-last_reviewed_commit: null
+state_revision: 4
+last_verified_checkpoint: 4b81d314
+last_reviewed_chapter: ch01-native-gcs-plane-and-signing
+last_reviewed_commit: 4b81d314
 created_at: "2026-11-08T20:30:00Z"
-updated_at: "2026-11-08T22:54:00Z"
+updated_at: "2026-11-08T23:19:50Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
@@ -250,8 +250,8 @@ Zero-context code and quality reviews of `feat/storage-updates` (`077a3fe9..fd57
 
 ## 5. Implementation Plan
 
-- [~] ch01-native-gcs-plane-and-signing — Cross-extension `GcpTokenCacheCapsule`, native GCS conditional/emulator/pooling fixes, pooled IAM `signBlob`, custom GCS endpoint presigning, and non-blocking `GCSConfig` (chapters/ch01-native-gcs-plane-and-signing/spec.md)
-- [ ] ch02-zero-copy-ffi-keys-and-backends — Zero-copy `PyBackedBytes` FFI, checked `get_range`, raw `StorePath::parse` keys, `PreconditionError`, S3/R2/HTTP backend options, Litestar raw keys, and streaming/paginated `OciObjectStore` (chapters/ch02-zero-copy-ffi-keys-and-backends/spec.md)
+- [x] [4b81d314] ch01-native-gcs-plane-and-signing — Cross-extension `GcpTokenCacheCapsule`, native GCS conditional/emulator/pooling fixes, pooled IAM `signBlob`, custom GCS endpoint presigning, and non-blocking `GCSConfig` (chapters/ch01-native-gcs-plane-and-signing/spec.md)
+- [~] ch02-zero-copy-ffi-keys-and-backends — Zero-copy `PyBackedBytes` FFI, checked `get_range`, raw `StorePath::parse` keys, `PreconditionError`, S3/R2/HTTP backend options, Litestar raw keys, and streaming/paginated `OciObjectStore` (chapters/ch02-zero-copy-ffi-keys-and-backends/spec.md)
 - [ ] ch03-bulk-file-io-compose-and-streams — Streaming `put_file`/`get_file`, bounded-concurrency `download_many`/`upload_many`/`staged_download`, conditional `copy`, `glob`, server-side GCS `compose`, read-ahead `open_reader`, and streaming `open_writer` (chapters/ch03-bulk-file-io-compose-and-streams/spec.md)
 - [ ] ch04-streaming-arrow-parquet-and-shm — True streaming `StreamingStorageResponse`, bounded `_arrow.py` layout/readinto/pre-buffer + Parquet dictionary/encoding options, and zero-copy `read_arrow_shm` + columnar Arrow hydration (chapters/ch04-streaming-arrow-parquet-and-shm/spec.md)
 - [ ] ch05-framework-adapters-and-test-hygiene — SQLSpec, Advanced Alchemy, and Django storage adapter cleanups, `_store.py` alias removal, and pytest top-level import / parameterization hygiene (chapters/ch05-framework-adapters-and-test-hygiene/spec.md)
@@ -260,9 +260,9 @@ Zero-context code and quality reviews of `feat/storage-updates` (`077a3fe9..fd57
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `fd571e3a` — 6-chapter, 20-task plan authored on `feat/storage-updates`; `0/6` chapters completed.
-- **Active Chapter**: `ch01-native-gcs-plane-and-signing` (`0/4` tasks completed).
-- **Remaining Plan**: `ch01-native-gcs-plane-and-signing`, `ch02-zero-copy-ffi-keys-and-backends`, `ch03-bulk-file-io-compose-and-streams`, `ch04-streaming-arrow-parquet-and-shm`, `ch05-framework-adapters-and-test-hygiene`, `ch06-docs-okf-and-plan-sync`.
+- **Verified Baseline (`HEAD`)**: `4b81d314` — `1/6` chapters completed (`ch01`).
+- **Active Chapter**: `ch02-zero-copy-ffi-keys-and-backends` (`0/4` tasks completed).
+- **Remaining Plan**: `ch02-zero-copy-ffi-keys-and-backends`, `ch03-bulk-file-io-compose-and-streams`, `ch04-streaming-arrow-parquet-and-shm`, `ch05-framework-adapters-and-test-hygiene`, `ch06-docs-okf-and-plan-sync`.
 - **Documentation & OKF Sync**: `[0/6 files documented]`.
 - **Active Invariants & Triggers**: Zero `planning_status: empirical_dependent` chapters; every chapter is decision-complete (`planning_status: complete`).
 

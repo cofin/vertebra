@@ -6,22 +6,25 @@ chapter_id: ch01-native-gcs-plane-and-signing
 title: "Chapter 01: Native GCS Data Plane, Token Capsule, and Signing"
 description: Share SyncGcpTokenCache and AsyncGcpTokenCache across vertebra._vertebra and vertebra._storage via a C-ABI PyCapsule, harden native GCS conditional generation updates, skip_signature emulator static-bearer bypass, ambient ADC isolation, x-goog-user-project headers, and pooled HTTP/IAM clients, support custom-endpoint GCS V4 presigning, and remove blocking Python GCSConfig setup.
 status: stable
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: null
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 5
-last_verified_checkpoint: cb50c08e
-last_reviewed_commit: null
+state_revision: 6
+last_verified_checkpoint: 4b81d314
+last_reviewed_commit: 4b81d314
 created_at: "2026-11-08T20:30:00Z"
-updated_at: "2026-11-08T22:54:00Z"
+updated_at: "2026-11-08T23:19:50Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:30:00Z"
-verified: []
+verified:
+  - by: agent:code-reviewer
+    at: "2026-11-08T23:19:50Z"
+    commit: 4b81d314
 sources:
   - id: core-gcp-auth
     resource: src/rs/vertebra-core/src/gcp_auth.rs::GcpTokenCache
@@ -89,7 +92,7 @@ tags:
 - **R1.1 (`t01`)**: Implement `GCP_TOKEN_CACHE_CAPSULE_NAME`, `#[repr(C)] pub struct GcpTokenCacheCapsule` (with producer-runtime non-blocking async `refresh_async_fn` + `oneshot` completion callback so consumer Tokio worker threads never block), `SharedGcpTokenCacheHandle`, and `GcpTokenCache::quota_project_id(&self) -> Option<&str>` in `vertebra-core/src/gcp_auth.rs`, and expose `_capsule(self) -> object` on `PySyncGcpTokenCache` (`SyncGcpTokenCache`) and `PyAsyncGcpTokenCache` (`AsyncGcpTokenCache`) in `vertebra-py/src/gcp_auth.rs` and `src/py/vertebra/_vertebra.pyi`.
 - **R1.2 (`t02`)**: Back `RefreshingGcpCredentialProvider` with `SharedGcpTokenCacheHandle`, fix GCS `PutMode::Update` (`version` generation + ETag `head` fallback returning `StorageError::Precondition { path, message }`), attach `StaticCredentialProvider` on `skip_signature=true`, honor `allow_ambient_adc=false` via `GoogleCloudStorageBuilder::new()`, forward `x-goog-user-project`, and apply shared pooled `ClientOptions` (`pool_max_idle_per_host(64)`, `pool_idle_timeout(90s)`, `connect_timeout(10s)`, `timeout(300s)`, `http2_keep_alive_interval(30s)`, loopback proxy excludes).
 - **R1.3 (`t03`)**: Pool `reqwest::Client` in `signing.rs` via `LazyLock`, forward `x-goog-user-project` on IAM `signBlob`, add `endpoint: Option<String>` to `GcsSignConfig`, `build_gcs_v4_canonical_request`, `py_sign_gcs_v4_iam_url`, and `py_sign_gcs_v4_iam_url_async` (+ `token_cache_capsule: object | None = None` on `py_sign_gcs_v4_iam_url(_async)` and `PySyncObjectStore::new` / `PyAsyncObjectStore::new`) and synchronize `_storage.pyi`.
-- **R1.4 (`t04`)**: Remove `eager_impersonation`, blocking `resolve_adc_token()`, and `os.environ["NO_PROXY"]` mutation from `GCSConfig.to_url_and_options()`, preserve `quota_project_id` and `target_service_account` on `_build_signing_adc_helper`, auto-share one `GcpTokenCache` across data-plane requests and IAM `signBlob` presigning when dynamic OAuth2 credentials are configured, and wire `token_cache._capsule()` + signing `endpoint` in `_store.py`.
+- **R1.4 (`t04`)**: Remove `eager_impersonation`, blocking `resolve_adc_token()`, and `os.environ["NO_PROXY"]` mutation from `GCSConfig.to_url_and_options()`, preserve `quota_project_id` and `refresh_skew_seconds` on source-credential `_build_signing_adc_helper` (excluding `target_service_account` so IAM `:signBlob` authenticates directly with source credentials), validate `token_cache=` types up front with `ImproperConfigurationError`, auto-share one `GcpTokenCache` across data-plane requests and IAM `signBlob` presigning when dynamic OAuth2 credentials are configured without `target_service_account`, and wire `token_cache._capsule()` + signing `endpoint` in `_store.py`.
 
 ### 2.2 Full Public Type, Struct, Schema & Signature Contracts
 
@@ -141,14 +144,14 @@ tags:
 - [x] [f38d895b] storage-remediation:ch01:t01 — Add C-ABI `GcpTokenCacheCapsule` and `SharedGcpTokenCacheHandle` in `vertebra-core` and `_capsule()` on `_vertebra` token caches (tasks/t01-gcp-token-cache-capsule.md)
 - [x] [585e5dda] storage-remediation:ch01:t02 — Wire `SharedGcpTokenCacheHandle` into `vertebra-storage` and harden GCS `if_match`, `skip_signature`, `allow_ambient_adc`, `x-goog-user-project`, and HTTP pooling (tasks/t02-native-gcs-data-plane-and-pooling.md)
 - [x] [0e43380e] storage-remediation:ch01:t03 — Pool IAM `signBlob` HTTP clients, add custom GCS `endpoint` presigning, and wire PyO3 `_storage` bindings and `_storage.pyi` (tasks/t03-gcs-presigning-and-python-config-wiring.md)
-- [x] [cb50c08e] storage-remediation:ch01:t04 — Wire Python `GCSConfig`, `SyncObjectStore`, and `AsyncObjectStore` to `token_cache._capsule()` and custom GCS signing `endpoint` without blocking I/O (tasks/t04-python-gcs-config-and-store-wiring.md)
+- [x] [4b81d314] storage-remediation:ch01:t04 — Wire Python `GCSConfig`, `SyncObjectStore`, and `AsyncObjectStore` to `token_cache._capsule()` and custom GCS signing `endpoint` without blocking I/O (tasks/t04-python-gcs-config-and-store-wiring.md)
 - **Chapter / Phase Recovery Checkpoint**: `PATH="$PWD/.venv/bin:$PATH" PYO3_PYTHON="$PWD/.venv/bin/python" CARGO_TARGET_DIR=/tmp/vtb-cargo-target cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core -p vertebra-storage && uv run --no-sync pytest src/py/tests/unit/storage/test_gcs_token_refresh.py src/py/tests/unit/storage/test_signing.py -q`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `cb50c08e` — `4/4` tasks completed in `ch01`.
+- **Verified Baseline (`HEAD`)**: `4b81d314` — `4/4` tasks completed in `ch01`.
 - **Remaining Tasks in Chapter**: None.
-- **Remaining Chapters**: `ch01`–`ch06`.
+- **Remaining Chapters**: `ch02`–`ch06`.
 
 [^core-gcp-auth]: `src/rs/vertebra-core/src/gcp_auth.rs::GcpTokenCache` — Core GCP OAuth2 token cache shared across PyO3 extensions.
 [^py-gcp-auth]: `src/rs/vertebra-py/src/gcp_auth.rs::PySyncGcpTokenCache` — PyO3 `SyncGcpTokenCache` and `AsyncGcpTokenCache` bindings on `vertebra._vertebra`.

@@ -22,18 +22,18 @@ tests:
 estimated_loc: 120
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 2
-claimed_by: null
-claimed_at: null
+state_revision: 3
+claimed_by: agent:executor
+claimed_at: "2026-11-08T23:00:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: "2026-11-08T23:02:35Z"
-last_verified_commit: cb50c08e
-verification_evidence: "ruff check + mypy + pytest test_gcs_token_refresh.py test_signing.py test_multicloud_storage.py (39 passed)"
+last_verified_at: "2026-11-08T23:18:47Z"
+last_verified_commit: 4b81d314
+verification_evidence: "cargo test -p vertebra-storage + ruff check + mypy + pytest test_gcs_token_refresh.py test_signing.py test_multicloud_storage.py (39 passed)"
 created_at: "2026-11-08T20:30:00Z"
-updated_at: "2026-11-08T23:03:20Z"
-commit: cb50c08e
+updated_at: "2026-11-08T23:19:50Z"
+commit: 4b81d314
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:30:00Z"
@@ -55,8 +55,8 @@ tags:
 
 Update `src/py/vertebra/storage/_store.py` [^py-store] (`1` production file):
 1. Remove `eager_impersonation` and the blocking `self.resolve_adc_token()` call from `GCSConfig.to_url_and_options(self) -> tuple[str, dict[str, str]]`, and delete global `os.environ["NO_PROXY"]` / `os.environ["no_proxy"]` mutation.
-2. When constructing `SyncObjectStore` or `AsyncObjectStore` over a `gs://` / `gcs://` store with dynamic OAuth2 credentials (`token_cache is None`, `skip_signature != "true"`, and no static `access_token`), auto-construct a shared `SyncGcpTokenCache` / `AsyncGcpTokenCache` when `GcpTokenCache` can be configured from options, and pass `resolved_cache._capsule() if resolved_cache is not None else None` to `native_mod.SyncObjectStore` and `native_mod.AsyncObjectStore`.
-3. Preserve `quota_project_id` and `target_service_account` on `_build_signing_adc_helper`, and forward `self._signing.endpoint` plus `token_cache_capsule` (`cache._capsule()`) into `py_sign_gcs_v4_iam_url` and `py_sign_gcs_v4_iam_url_async` so Rust IAM `signBlob` shares single-flight refresh, `401` invalidation, and `x-goog-user-project` directly with the native GCS data plane.
+2. Validate `token_cache=` up front (`ImproperConfigurationError` when non-`None` and not `SyncGcpTokenCache | AsyncGcpTokenCache`). When constructing `SyncObjectStore` or `AsyncObjectStore` over a `gs://` / `gcs://` store with dynamic OAuth2 credentials (`token_cache is None`, `skip_signature != "true"`, no static `access_token`, and no `target_service_account` impersonation split), auto-construct a shared `SyncGcpTokenCache` / `AsyncGcpTokenCache` honoring `allow_ambient_adc`, and pass `resolved_cache._capsule() if resolved_cache is not None else None` to `native_mod.SyncObjectStore` and `native_mod.AsyncObjectStore`.
+3. Preserve `quota_project_id` and `refresh_skew_seconds` on source-credential `_build_signing_adc_helper` (excluding `target_service_account` so IAM `:signBlob` authenticates directly with source credentials while honoring `allow_ambient_adc`), and forward `self._signing.endpoint` plus `token_cache_capsule` (`cache._capsule()`) into `py_sign_gcs_v4_iam_url` and `py_sign_gcs_v4_iam_url_async` so Rust IAM `signBlob` shares single-flight refresh, `401` invalidation, and `x-goog-user-project` directly with the native GCS data plane.
 
 Out of scope: `_store.py` `open_readable_file` and `_get_native_module` removal (`ch05:t02`).
 

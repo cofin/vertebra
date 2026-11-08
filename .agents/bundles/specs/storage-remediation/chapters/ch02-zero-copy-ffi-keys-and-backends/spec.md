@@ -6,7 +6,7 @@ chapter_id: ch02-zero-copy-ffi-keys-and-backends
 title: "Chapter 02: Zero-Copy FFI, Raw Object Keys, and Cloud/OCI Backends"
 description: Define PreconditionError and map conditional failures, wrap immutable PyBytes zero-copy via PyBackedBytes while copying mutable buffers synchronously, check get_range overflow and zero-length bounds, preserve raw object keys via StorePath::parse, wire S3 virtual_hosted_style, R2 custom_domain, HTTP headers, file:// conditional metadata, and Litestar raw keys, and upgrade OciObjectStore to stream, conditionally write, and paginate.
 status: stable
-state: planned
+state: active
 planning_status: complete
 depends_on_chapters:
   - ch01-native-gcs-plane-and-signing
@@ -14,11 +14,11 @@ replan_trigger: null
 current_task: "storage-remediation:ch02:t01"
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 0
-last_verified_checkpoint: null
+state_revision: 1
+last_verified_checkpoint: 4b81d314
 last_reviewed_commit: null
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-08T20:55:00Z"
+updated_at: "2026-11-08T23:19:50Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
