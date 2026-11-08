@@ -31,7 +31,7 @@ chapters:
 - ch20-ordinary-negative-cas
 - ch21-sdk-resolved-config
 current_chapter: ch10-publication-boundary-and-lifecycle
-current_task: storage-completeness:ch10:t03
+current_task: storage-completeness:ch10:t04
 parent_prd: native-data-platform
 research:
 - ../native-data-platform/research/gap-analysis_20261103.md

@@ -5,7 +5,7 @@ chapter_id: ch10-publication-boundary-and-lifecycle
 title: Retain multipart abort ownership across completion errors and cancellation
 description: Retain multipart abort ownership across completion errors and cancellation
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -25,17 +25,33 @@ estimated_loc: 160
 plan_revision: 7
 plan_commit: 5f64d1a8
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: multipart_lifecycle
+claimed_at: '2026-11-08T00:00:00Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-08T00:18:10Z'
+last_verified_commit: 673cb696
+verification_evidence: >-
+  Native source against eb76724f: initial public lifecycle Red exits 101 (one
+  success baseline passes; five ownership/cleanup regressions fail). Final
+  canonical storage_engine_tests exits 0 with 34 passed, including six external
+  MultipartUpload-port/public native session lifecycle cases. The cancellation
+  Drop case pauses provider abort and proves cancelled-session release precedes
+  cleanup, removes only upload ID 1, and preserves upload ID 0 and winning bytes.
+  Reserved-target cargo fmt --all --check, storage all-target Clippy -D warnings,
+  and git diff --check exit 0. Commands use CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target"
+  and PYO3_PYTHON="$PWD/.venv/bin/python3.12"; the runtime suite runs through
+  flock /tmp/vertebra-flow-shm-tests.lock uv run --no-sync cargo test. Production
+  additions are 21 LOC in store.rs; lib.rs wrappers need no change. Receipt logs:
+  /tmp/vertebra-t03-red.log, /tmp/vertebra-t03-green-full.log,
+  /tmp/vertebra-t03-fmt.log, /tmp/vertebra-t03-clippy.log. The coordinator binds
+  the final source commit and completes state after its signed task commit.
+  Installed extensions are unchanged; native tests compile and execute real
+  PyO3 bindings but do not establish live cloud/provider acceptance.
 created_at: '2026-11-07T12:00:00Z'
-updated_at: '2026-11-07T12:00:00Z'
-commit: null
+updated_at: '2026-11-08T00:18:10Z'
+commit: 673cb696
 sources:
 - id: implementation
   resource: src/rs/vertebra-storage/src/store.rs
@@ -98,12 +114,24 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Acceptance Criteria
 
-- [ ] Every matrix row passes at its public seam with existing behavior preserved.
-- [ ] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
-- [ ] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
-- [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
+- [x] Every matrix row passes at its public seam with existing behavior preserved.
+- [x] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
+- [x] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
+- [x] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
+
+Completion and abort retain the external upload handle through pending futures.
+Only successful completion or successful/NotFound abort clears it. Abort errors
+following an earlier operation failure stay suppressed without discarding the
+handle, allowing a later abort or Drop cleanup attempt. Session Drop transfers
+ownership to a single async abort attempt on STORAGE_RUNTIME with a 30-second
+timeout; it never blocks the caller, and provider errors/timeouts remain
+best-effort cleanup limits rather than success guarantees. Python put_stream
+already catches producer failure/cancellation and attempts abort; _store.py is
+unchanged and no Python facade/provider-specific cleanup acceptance is claimed.
+The existing sync/async PyO3 wrappers retain the same session and inherit the
+native ownership repair without signature or lib.rs changes.
 
 The executable transport staging and provider acceptance contracts are independently approved at 5f64d1a8. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
