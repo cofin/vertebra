@@ -1,17 +1,28 @@
-//! Ordered trust, cleartext, and MD5 startup authentication.
+//! Ordered trust, password, and SCRAM startup authentication.
 
 use bytes::BytesMut;
 use postgres_protocol::{
-    authentication::md5_hash,
-    message::{backend::Message, frontend::password_message},
+    authentication::{
+        md5_hash,
+        sasl::{ChannelBinding, SCRAM_SHA_256, ScramSha256},
+    },
+    message::{
+        backend::Message,
+        frontend::{password_message, sasl_initial_response, sasl_response},
+    },
 };
 
 use crate::{config::PostgresConfig, errors::PostgresError};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AuthPhase {
     Initial,
     PasswordSent,
+    ScramStarted {
+        scram: ScramSha256,
+        client_nonce: String,
+    },
+    ScramFinalSent(ScramSha256),
+    ScramVerifiedAwaitingOk,
     Complete,
 }
 
@@ -29,7 +40,7 @@ impl Authentication {
     }
 
     pub(crate) fn is_complete(&self) -> bool {
-        self.phase == AuthPhase::Complete
+        matches!(self.phase, AuthPhase::Complete)
     }
 
     pub(crate) fn redact_server_text(&self, text: &str, config: &PostgresConfig) -> String {
@@ -51,15 +62,20 @@ impl Authentication {
     ) -> Result<bool, PostgresError> {
         match msg {
             Message::AuthenticationOk => {
-                if self.is_complete() {
+                if !matches!(
+                    self.phase,
+                    AuthPhase::Initial
+                        | AuthPhase::PasswordSent
+                        | AuthPhase::ScramVerifiedAwaitingOk
+                ) {
                     return Err(PostgresError::Protocol(
-                        "duplicate authentication completion".into(),
+                        "unexpected authentication completion".into(),
                     ));
                 }
                 self.phase = AuthPhase::Complete;
             }
             Message::AuthenticationCleartextPassword | Message::AuthenticationMd5Password(_) => {
-                if self.phase != AuthPhase::Initial {
+                if !matches!(self.phase, AuthPhase::Initial) {
                     return Err(PostgresError::Protocol(
                         "unexpected authentication challenge order".into(),
                     ));
@@ -80,19 +96,112 @@ impl Authentication {
                 }
                 self.phase = AuthPhase::PasswordSent;
             }
+            Message::AuthenticationSasl(body) => {
+                if !matches!(self.phase, AuthPhase::Initial) {
+                    return Err(PostgresError::Protocol(
+                        "unexpected SASL challenge order".into(),
+                    ));
+                }
+                use fallible_iterator::FallibleIterator;
+                let mut mechanisms = body.mechanisms();
+                let mut has_plain = false;
+                let mut has_mechanism = false;
+                while let Some(mechanism) = mechanisms
+                    .next()
+                    .map_err(|error| PostgresError::Protocol(error.to_string()))?
+                {
+                    has_mechanism = true;
+                    has_plain |= mechanism == SCRAM_SHA_256;
+                }
+                if !has_mechanism {
+                    return Err(PostgresError::Protocol("empty SASL mechanism list".into()));
+                }
+                if !has_plain {
+                    return Err(PostgresError::UnsupportedAuth(
+                        "server SASL mechanism is unavailable".into(),
+                    ));
+                }
+                let password = config.password.as_deref().ok_or_else(|| {
+                    PostgresError::Config("password required by server authentication".into())
+                })?;
+                let scram = ScramSha256::new(password.as_bytes(), ChannelBinding::unsupported());
+                let client_nonce = std::str::from_utf8(scram.message())
+                    .ok()
+                    .and_then(|message| message.rsplit_once(",r="))
+                    .map(|(_, nonce)| nonce.to_owned())
+                    .ok_or_else(|| {
+                        PostgresError::Protocol("invalid initial SCRAM message".into())
+                    })?;
+                sasl_initial_response(SCRAM_SHA_256, scram.message(), out)
+                    .map_err(|error| PostgresError::Protocol(error.to_string()))?;
+                self.phase = AuthPhase::ScramStarted {
+                    scram,
+                    client_nonce,
+                };
+            }
+            Message::AuthenticationSaslContinue(body) => {
+                let AuthPhase::ScramStarted {
+                    mut scram,
+                    client_nonce,
+                } = std::mem::replace(&mut self.phase, AuthPhase::Complete)
+                else {
+                    return Err(PostgresError::Protocol(
+                        "unexpected SASL continuation order".into(),
+                    ));
+                };
+                let message = std::str::from_utf8(body.data())
+                    .map_err(|error| PostgresError::Protocol(error.to_string()))?;
+                let mut counts = message
+                    .split(',')
+                    .filter_map(|attribute| attribute.strip_prefix("i="));
+                let count = counts
+                    .next()
+                    .filter(|value| {
+                        !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+                    .and_then(|value| value.parse::<u32>().ok());
+                if !count.is_some_and(|value| (1..=100_000).contains(&value))
+                    || counts.next().is_some()
+                {
+                    return Err(PostgresError::Protocol(
+                        "invalid SCRAM iteration count".into(),
+                    ));
+                }
+                let nonce = message
+                    .split(',')
+                    .find_map(|attribute| attribute.strip_prefix("r="));
+                if !nonce.is_some_and(|nonce| {
+                    nonce.len() > client_nonce.len() && nonce.starts_with(&client_nonce)
+                }) {
+                    return Err(PostgresError::Protocol("invalid SCRAM server nonce".into()));
+                }
+                scram
+                    .update(body.data())
+                    .map_err(|error| PostgresError::Protocol(error.to_string()))?;
+                sasl_response(scram.message(), out)
+                    .map_err(|error| PostgresError::Protocol(error.to_string()))?;
+                self.phase = AuthPhase::ScramFinalSent(scram);
+            }
+            Message::AuthenticationSaslFinal(body) => {
+                let AuthPhase::ScramFinalSent(mut scram) =
+                    std::mem::replace(&mut self.phase, AuthPhase::Complete)
+                else {
+                    return Err(PostgresError::Protocol(
+                        "unexpected SASL final order".into(),
+                    ));
+                };
+                scram
+                    .finish(body.data())
+                    .map_err(|error| PostgresError::Protocol(error.to_string()))?;
+                self.phase = AuthPhase::ScramVerifiedAwaitingOk;
+            }
             Message::AuthenticationKerberosV5
             | Message::AuthenticationScmCredential
             | Message::AuthenticationGss
             | Message::AuthenticationSspi
-            | Message::AuthenticationGssContinue(_)
-            | Message::AuthenticationSasl(_) => {
+            | Message::AuthenticationGssContinue(_) => {
                 return Err(PostgresError::UnsupportedAuth(
                     "server authentication mechanism is unavailable".into(),
-                ));
-            }
-            Message::AuthenticationSaslContinue(_) | Message::AuthenticationSaslFinal(_) => {
-                return Err(PostgresError::Protocol(
-                    "unexpected SASL authentication continuation".into(),
                 ));
             }
             _ => return Ok(false),

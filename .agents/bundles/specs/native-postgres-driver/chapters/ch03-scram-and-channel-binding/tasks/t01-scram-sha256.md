@@ -24,17 +24,23 @@ tests:
 estimated_loc: 235
 plan_revision: 7
 plan_commit: 1c75af65
-state_revision: 0
+state_revision: 1
 claimed_by: agent:ch03-t01-scram
 claimed_at: "2026-11-08T00:13:42Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
+last_verified_at: "2026-11-08T00:21:07Z"
 last_verified_commit: null
-verification_evidence: null
+verification_evidence: |
+  Preflight: chapter 02 completed/reviewed at 27b5a9e5; root/chapter/task plan revision 7 and anchor 1c75af65 match; declared source/test symbols exist.
+  Red: the independent tokio-postgres golden handshake succeeds, then the unchanged native client rejects SCRAM with UnsupportedAuth; focused cargo test exits 101.
+  Green: all 10 scram_* groups pass, including the literal PBKDF2 golden, plain/both mechanism offers, independent tokio-postgres oracle, iteration boundaries 1/100000, malformed lists/counts/nonces, phase/verifier refusal, missing password, and interleaved native notices.
+  Deadline mutation: removing only the explicit post-handle/preflush guard makes scram_deadline_expired_before_ready_continue fail with transmitted SASLResponse (exit 101); restoring the guard passes (exit 0). The restored deterministic case passes 20/20 consecutive runs.
+  UV_NO_SYNC=1 PYO3_PYTHON=${PWD}/.venv/bin/python CARGO_TARGET_DIR=/tmp/vtb-cargo-target flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked: exit 0, 64 tests (9 codec, 23 auth, 10 TLS, 22 wire/config/error), no skips.
+  Locked all-target Clippy with -D warnings, package rustfmt --check, no-sync review_setup validation, and git diff --check pass. No Python exports or bindings change.
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-08T00:13:42Z"
+updated_at: "2026-11-08T00:21:07Z"
 commit: null
 sources:
   - id: proto-research
@@ -136,13 +142,15 @@ Commit as `feat(postgres): validate SCRAM startup authentication`.
 
 ## Acceptance Criteria
 
-- [ ] `auth::Authentication` drives `ScramStarted -> ScramFinalSent -> ScramVerifiedAwaitingOk -> Complete` via `postgres-protocol` `ScramSha256` without custom client crypto or calling `message()` after `finish()` (R5).
-- [ ] Pre-update validation enforces `i in 1..=100_000` (single decimal attribute) and strict server nonce extension (`len > client_nonce.len()`), and `AuthenticationOk` is rejected unless `ScramVerifiedAwaitingOk` was reached (R5).
-- [ ] `session.rs` rechecks the original connection deadline after bounded PBKDF2 before flushing or publishing `Ready`; the deterministic parked-future/real-TCP test proves terminal failure with zero `SASLResponse` bytes and turns Red when only that explicit check is removed (R3, R5).
+- [x] `auth::Authentication` drives `ScramStarted -> ScramFinalSent -> ScramVerifiedAwaitingOk -> Complete` via `postgres-protocol` `ScramSha256` without custom client crypto or calling `message()` after `finish()` (R5).
+- [x] Pre-update validation enforces `i in 1..=100_000` (single decimal attribute) and strict server nonce extension (`len > client_nonce.len()`), and `AuthenticationOk` is rejected unless `ScramVerifiedAwaitingOk` was reached (R5).
+- [x] `session.rs` rechecks the original connection deadline after bounded PBKDF2 before flushing or publishing `Ready`; the deterministic parked-future/real-TCP test proves terminal failure with zero `SASLResponse` bytes and turns Red when only that explicit check is removed (R3, R5).
 
 ## Notes & Discoveries
 
 - `postgres-protocol` `0.6.12` rejects iterations above `100_000` before PBKDF2, but accepts zero and checks only the nonce prefix. Local validation enforces the explicit `1..=100_000` policy and strict nonce extension before `scram.update`; upstream retains all cryptography and full SCRAM grammar checks.
+- The independent `tokio-postgres` oracle validates the same core SCRAM peer exchange with plain and combined mechanism offers; native-only coverage adds notices at every authentication phase because the oracle rejects notices during authentication.
+- The public deadline fixture registers a fresh read waker while the peer withholds Continue, observes its wake before any clock advance, and resumes the unspawned client only after expiry. Its guard-removal failure proves zero outbound credentials rather than merely observing an outer timeout.
 
 [^proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — `postgres-protocol` `0.6.12` SASL SCRAM audit findings.
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Startup SASL authentication and timeout invariants.

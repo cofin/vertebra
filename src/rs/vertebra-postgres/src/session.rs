@@ -300,6 +300,11 @@ async fn startup(
     loop {
         let message = protocol::read_message(&mut conn.stream).await?;
         if auth.handle_message(&message, config, &mut out)? {
+            if Instant::now() >= deadline {
+                return Err(PostgresError::Transport(
+                    "connection deadline elapsed during authentication".into(),
+                ));
+            }
             if !out.is_empty() {
                 conn.stream
                     .write_all(&out)
