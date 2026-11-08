@@ -11,7 +11,6 @@ The completed database foundation is documented in [driver contracts and adapter
 
 ## 2. Active Feature Specifications (`state: active`)
 
-- [`storage-completeness`](storage-completeness/spec.md) — Complete `SyncObjectStore` and `AsyncObjectStore` (`vertebra-storage`), unified GCP token caches, fail-closed construction, and SQLSpec, Advanced Alchemy, Django, Litestar, and `VTBARROW` storage contracts ([`chapters/ch01`–`ch05`](storage-completeness/chapters/index.md), `15` tasks).
 
 ## 3. Planned Feature Specifications (`state: planned`)
 

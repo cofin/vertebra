@@ -1,5 +1,41 @@
 # Bundle Activity Log
 
+## [2026-11-08T18:55:28.220570Z] flow-archive | storage-completeness
+
+Completed 5 chapters and 15 tasks on the feature branch; final correctness and fresh quality review `a2af5066` have no unresolved findings. Source range `cdb978d3..a2af5066` is preserved in Git. Full lint, locked Rust workspace, Python (2608 passed, 74 skipped, 170 xfailed), all-five native rebuild/stubtest, and documentation gates pass. Offline native/framework/provider examples and 29 documentation checks pass; live cloud credential calls are not executed.
+
+Durable synthesis is committed in `56c514dd` across storage/framework domains, FFI architecture, codec patterns, test recipes, ADR-004, and ADR-005 before spec deletion.
+
+Reviewed chapter checkpoints:
+- `ch01-native-engine-and-auth`: `dc2c2053`.
+- `ch02-orm-and-sql-storage-contracts`: `62b19c5c`.
+- `ch03-litestar-and-range-streaming`: `50e9c631`.
+- `ch04-arrow-shm-and-docs`: `e663c51f`.
+- `ch05-sqlspec-arrow-and-docs`: `a2af5066`.
+
+Functional task commits:
+- `storage-completeness:ch01:t01`: `beb6a972`.
+- `storage-completeness:ch01:t02`: `cb6b0647`.
+- `storage-completeness:ch01:t03`: `494ad92b`.
+- `storage-completeness:ch01:t04`: `dc2c2053`.
+- `storage-completeness:ch02:t01`: `7e13257bd58739520c11ca7a2c3e012867f660d9`.
+- `storage-completeness:ch02:t02`: `0e579db6dc31bdf120b3a3c1fae84c1a2b4e6c6a`.
+- `storage-completeness:ch02:t03`: `04be780b7901e76ea3a487dfa5ba519061a14a8c`.
+- `storage-completeness:ch03:t01`: `6871b518`.
+- `storage-completeness:ch03:t02`: `99317bed609e62a73d8b0036d444c1268ac2eb1d`.
+- `storage-completeness:ch04:t01`: `2e60f224`.
+- `storage-completeness:ch04:t02`: `71cb322b`.
+- `storage-completeness:ch04:t03`: `78293774`.
+- `storage-completeness:ch04:t04`: `3f3958e3`.
+- `storage-completeness:ch05:t01`: `42cbff73`.
+- `storage-completeness:ch05:t02`: `56c514dd`.
+
+Remaining storage work: none. Delivery/push is owned by the root coordinator.
+
+## [2026-11-08T18:53:48.034303Z] flow-finish | storage-completeness
+
+All5 chapters and15 tasks are complete; correctness and fresh quality reviews pass at `a2af5066` with no unresolved findings. Full lint, locked Rust workspace, Python(2608 passed,74 skipped,170 xfailed), all-five rebuild/stubtest and docs gates pass. Native and extensions synthesis plus ADR-005 are committed before archive; no implementation remains. Live cloud credential calls are outside local validation. Changes remain on the signed feature branch for root delivery.
+
 ## Verified PyArrow sentinel parity
 
 Source `42cbff73` preserves omitted, None, and -1 row-group defaults using installed PyArrow as the test oracle across sync/async Table and cursor writers. Invalid 0/-2 values remain rejected. The canonical suite passes 106 cases; full lint exits 0 and Python exits 0: 2608 passed, 74 skipped, 170 xfailed, 17 warnings in 72.79s (0:01:12). Correctness recheck passes; fresh quality review precedes finish/archive.
@@ -104,7 +140,7 @@ Correctness and fresh quality reviews pass at `50e9c631` with no unresolved find
 
 ## [2026-11-08] revise | Align storage integration worksheets with installed framework contracts
 
-- [`storage-completeness`](specs/storage-completeness/spec.md), `ch02-orm-and-sql-storage-contracts`, and its three pending worksheets share revision `3` anchored at `e8901de4`. The completed `ch01` review stamp `dc2c2053` and all four task commits remain unchanged and ancestry-verified.
+- [`storage-completeness`](knowledge/domains/storage/object-storage.md), `ch02-orm-and-sql-storage-contracts`, and its three pending worksheets share revision `3` anchored at `e8901de4`. The completed `ch01` review stamp `dc2c2053` and all four task commits remain unchanged and ancestry-verified.
 - Installed source evidence establishes SQLSpec `0.71.1` exact `_sync` / `_async` protocol names, Advanced Alchemy `1.12.0` concrete `ObjectStoreBackend` / upstream `get_content` methods, and Django `6.1.3` `Storage.save` / `File` contracts. The blueprints declare explicit native adapter extensions, callable omission errors, public registry registration, and non-blocking async adapter entry points.
 - Baseline collection covers `15` canonical storage/Django tests; the coordinator's fresh extension-suite baseline passes `421` tests. This revision changes planning Markdown only and records no implementation acceptance.
 

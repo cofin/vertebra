@@ -190,12 +190,12 @@ The global constraints from [integration-remediation](../integration-remediation
 - [ ] native-sqlite-driver — Rust SQLite client ([spec.md](../native-sqlite-driver/spec.md))
 - [ ] native-duckdb-driver — Rust DuckDB client ([spec.md](../native-duckdb-driver/spec.md))
 - [ ] native-redis-driver — Rust Redis and Valkey client ([spec.md](../native-redis-driver/spec.md))
-- [ ] storage-completeness — Feature-complete storage ([spec.md](../storage-completeness/spec.md))
+- [x] [a2af5066] storage-completeness — Feature-complete storage ([knowledge](../../knowledge/domains/storage/object-storage.md))
 
 ## Continuity Snapshot
 
 - **Flow ID:** `native-data-platform` (`state: planned`, `plan_revision: 8`, `plan_commit: cdb978d3`, `last_verified_checkpoint: 077a3fe9`)
-- **Active Focus:** `db-layout-and-contract` (`21c99f95`), `db-engine-primitives` (`80ff8a65`), `runtime-structure-and-throughput` (`d2fa5072`), and `mcp-webmcp-core` (`077a3fe9`) are merged on `main @ 077a3fe9` (`HEAD @ cdb978d3`). `storage-completeness` is active; `driver-fail-loud` is planned and runs before `native-postgres-driver` and the per-engine driver flows, each delivered as its own standalone PR.
+- **Active Focus:** `db-layout-and-contract` (`21c99f95`), `db-engine-primitives` (`80ff8a65`), `runtime-structure-and-throughput` (`d2fa5072`), and `mcp-webmcp-core` (`077a3fe9`) are merged on `main @ 077a3fe9` (`HEAD @ cdb978d3`). `storage-completeness` is complete and archived into durable knowledge on the working branch; `driver-fail-loud` is planned and runs before `native-postgres-driver` and the per-engine driver flows, each delivered as its own standalone PR.
 - **Key decisions** *(user, 2026-11-03 – 2026-11-04)*:
   - Shared broker pools for Advanced Alchemy / SQLSpec configs and native Rust drivers across all engines remain required acceptance targets for their owning child flows.
   - Layout: `vertebra/db/adapters/<engine>/` for Python engine code, `vertebra/db/*` for engine-agnostic code, shared `vertebra-db` (`rlib`) for Rust primitives/codecs, and standalone PyO3 extension crates `src/rs/vertebra-<engine>` (`vertebra._<engine>`) + `[project.optional-dependencies].<engine>` per database engine.
