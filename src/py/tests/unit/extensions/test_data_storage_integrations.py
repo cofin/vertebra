@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from asyncio import CancelledError
 from collections.abc import AsyncIterator, Iterator
+from io import BytesIO
 from pathlib import Path
 
 import pyarrow as pa
@@ -31,6 +35,7 @@ from vertebra.extensions.sqlspec.storage import ObjectStoreBackend as SQLSpecObj
 from vertebra.storage import (
     AsyncGcpTokenCache,
     GCSConfig,
+    LocalConfig,
     MemoryConfig,
     SigningConfig,
     SyncGcpTokenCache,
@@ -49,6 +54,200 @@ def test_duplicated_storage_shims_removed_from_extension_modules() -> None:
     assert not hasattr(alchemy_storage_mod, "StoredObject")
     assert not hasattr(sqlspec_storage_mod, "SQLSpecStore")
     assert not hasattr(sqlspec_storage_mod, "SqlSpecStorageBridge")
+
+
+def test_alchemy_import_preserves_registry_api() -> None:
+    """Importing the adapter preserves Advanced Alchemy's registry API."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from advanced_alchemy.types.file_object import storages; "
+            "before = hasattr(storages, 'get'); "
+            "import vertebra.extensions.alchemy.storage; "
+            "assert hasattr(storages, 'get') == before",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("target", [None, "", "  "])
+def test_alchemy_requires_explicit_target(target: str | None) -> None:
+    """Missing targets fail before changing the singleton registry or its default."""
+    registry = AlchemyStorageRegistry()
+    registered = registry.registered_backends()
+    default = registry.default_backend
+    with pytest.raises(ImproperConfigurationError):
+        AlchemyObjectStoreBackend(fs=target)
+    with pytest.raises(ImproperConfigurationError):
+        register_storage_backend("alchemy_missing_target", store=target, set_default=True)
+    with pytest.raises(ImproperConfigurationError):
+        AlchemyObjectStoreBackend()
+    assert registry.registered_backends() == registered
+    assert registry.default_backend == default
+
+
+@pytest.mark.parametrize("path", ["../escape.bin", "folder/../escape.bin", "folder\\..\\escape.bin"])
+def test_alchemy_rejects_traversal_in_keys_and_prefixes(tmp_path: Path, path: str) -> None:
+    """Namespaces reject traversal before storage or registry changes."""
+    store = SyncObjectStore.from_local(tmp_path)
+    backend = AlchemyObjectStoreBackend(fs=store, prefix="uploads")
+    with pytest.raises(ValueError):
+        backend.get_content(path)
+    registry = AlchemyStorageRegistry()
+    registered = registry.registered_backends()
+    default = registry.default_backend
+    with pytest.raises(ValueError, match="traversal"):
+        register_storage_backend(store, key="alchemy_bad_prefix", prefix=path, set_default=True)
+    assert registry.registered_backends() == registered
+    assert registry.default_backend == default
+    assert store.list() == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync", "async", "async-reader"])
+async def test_alchemy_file_upload_reads_bounded_chunks(tmp_path: Path, mode: str) -> None:
+    """File-like uploads request bounded chunks and populate actual native metadata."""
+    reads: list[int] = []
+
+    class BoundedReader(BytesIO):
+        def read(self, size: int = -1) -> bytes:
+            assert size == 4
+            reads.append(size)
+            return super().read(size)
+
+    reader = BoundedReader(b"chunk1-chunk2")
+
+    class AsyncReader:
+        async def read(self, size: int = -1) -> bytes:
+            return reader.read(size)
+
+    backend = AlchemyObjectStoreBackend(fs=SyncObjectStore.from_local(tmp_path), prefix="uploads")
+    obj = FileObject(backend=backend, filename="chunks.bin")
+    if mode == "sync":
+        assert obj.save(reader, use_multipart=True, chunk_size=4) is obj
+    else:
+        assert (
+            await obj.save_async(AsyncReader() if mode == "async-reader" else reader, use_multipart=True, chunk_size=4)
+            is obj
+        )
+    assert reads == [4, 4, 4, 4, 4]
+    assert obj.size == 13
+    assert obj.etag is not None
+    assert obj.get_content() == b"chunk1-chunk2"
+    assert await obj.get_content_async() == b"chunk1-chunk2"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("chunk_size", [0, -1])
+async def test_alchemy_invalid_chunk_size_preserves_source(tmp_path: Path, chunk_size: int) -> None:
+    """Invalid sizes fail before consuming either upload source."""
+    backend = AlchemyObjectStoreBackend(fs=SyncObjectStore.from_local(tmp_path))
+    reader = BytesIO(b"unread")
+    obj = FileObject(backend=backend, filename="invalid.bin")
+    with pytest.raises(ValueError, match="chunk_size"):
+        obj.save(reader, chunk_size=chunk_size)
+    with pytest.raises(ValueError, match="chunk_size"):
+        await obj.save_async(reader, chunk_size=chunk_size)
+    assert reader.tell() == 0
+    assert not backend.exists("invalid.bin")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("async_handle", [False, True])
+async def test_alchemy_explicit_registration_and_shared_handles(tmp_path: Path, async_handle: bool) -> None:
+    """Explicit forms resolve real registry keys and share one native engine."""
+    registry = AlchemyStorageRegistry()
+    default = registry.default_backend
+    sync_store = SyncObjectStore.from_local(tmp_path)
+    store = sync_store.to_async() if async_handle else sync_store
+    try:
+        backend = register_storage_backend("alchemy_explicit", store=store, prefix="uploads", set_default=True)
+        assert registry.get_backend("alchemy_explicit") is backend
+        assert registry.default_backend == "vertebra.extensions.alchemy.storage.ObjectStoreBackend"
+        obj = FileObject(backend="alchemy_explicit", filename="uploads/one.bin")
+        assert obj.save(b"one") is obj
+        assert sync_store.get("uploads/one.bin") == b"one"
+        await obj.save_async(b"two2")
+        assert obj.size == 4
+        assert obj.get_content() == b"two2"
+        configured = register_storage_backend(LocalConfig(root=tmp_path), key="alchemy_config")
+        assert registry.get_backend("alchemy_config") is configured
+        assert configured.get_content("uploads/one.bin") == b"two2"
+        assert AlchemyObjectStoreBackend(fs="", store=store).store.get("uploads/one.bin") == b"two2"
+        memory = AlchemyObjectStoreBackend(fs=MemoryConfig())
+        FileObject(backend=memory, filename="explicit.bin").save(b"explicit")
+        assert await memory.get_content_async("explicit.bin") == b"explicit"
+        await backend.delete_object_async("one.bin")
+        assert not sync_store.exists("uploads/one.bin")
+    finally:
+        registry.unregister_backend("alchemy_explicit")
+        registry.unregister_backend("alchemy_config")
+        registry.set_default_backend(default)
+
+
+@pytest.mark.anyio
+async def test_alchemy_stream_sources_and_failure_cleanup(tmp_path: Path) -> None:
+    """Iterable sources stream to native storage and failures leave no partial objects."""
+    backend = AlchemyObjectStoreBackend(fs=LocalConfig(root=tmp_path), prefix="uploads")
+
+    def chunks() -> Iterator[bytes]:
+        yield b"chunk1-"
+        yield b"chunk2"
+
+    async def async_chunks() -> AsyncIterator[bytes]:
+        yield b"chunk1-"
+        yield b"chunk2"
+
+    sync_obj = FileObject(backend=backend, filename="sync.bin")
+    sync_obj.save(chunks(), use_multipart=True, chunk_size=4)
+    assert sync_obj.size == 13
+    assert sync_obj.get_content() == b"chunk1-chunk2"
+    async_obj = FileObject(backend=backend, filename="async.bin")
+    await async_obj.save_async(async_chunks(), use_multipart=True, chunk_size=4)
+    assert async_obj.size == 13
+    assert await async_obj.get_content_async() == b"chunk1-chunk2"
+    await async_obj.save_async(chunks())
+    assert await async_obj.get_content_async() == b"chunk1-chunk2"
+    failure = RuntimeError("source failed")
+
+    def failed_chunks() -> Iterator[bytes]:
+        yield b"partial"
+        raise failure
+
+    async def failed_async_chunks() -> AsyncIterator[bytes]:
+        yield b"partial"
+        raise failure
+
+    with pytest.raises(RuntimeError) as sync_error:
+        FileObject(backend=backend, filename="failed-sync.bin").save(failed_chunks())
+    with pytest.raises(RuntimeError) as async_error:
+        await FileObject(backend=backend, filename="failed-async.bin").save_async(failed_async_chunks())
+    assert sync_error.value is failure
+    assert async_error.value is failure
+    assert not backend.exists("failed-sync.bin")
+    assert not await backend.exists_async("failed-async.bin")
+
+    async def cancelled_chunks() -> AsyncIterator[bytes]:
+        yield b"partial"
+        raise CancelledError
+
+    with pytest.raises(CancelledError):
+        await FileObject(backend=backend, filename="cancelled.bin").save_async(cancelled_chunks())
+    assert not await backend.exists_async("cancelled.bin")
+
+
+@pytest.mark.anyio
+async def test_alchemy_unconfigured_signing() -> None:
+    """Unsupported native signing retains the upstream backend error contract."""
+    backend = AlchemyObjectStoreBackend(fs=MemoryConfig())
+    with pytest.raises(NotImplementedError):
+        backend.sign("one.bin")
+    with pytest.raises(NotImplementedError):
+        await backend.sign_async(["one.bin"], for_upload=True)
 
 
 @pytest.mark.parametrize("target", [None, "", "  "])

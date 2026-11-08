@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import builtins
-import contextlib
 import datetime as dt
 import inspect
 import os
-from collections.abc import Buffer, Sequence
+from collections.abc import AsyncIterable, AsyncIterator, Buffer, Iterable, Iterator, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from vertebra.storage import (
     AsyncObjectStore,
@@ -25,21 +24,17 @@ from vertebra.storage import (
     StorageConfig,
     SyncObjectStore,
 )
-from vertebra.typing import MissingDependencyError
+from vertebra.typing import ImproperConfigurationError, MissingDependencyError
 
 try:
-    from advanced_alchemy.types.file_object import StorageBackend, storages
+    from advanced_alchemy.types.file_object import StorageBackend as AAStorageBackend
+    from advanced_alchemy.types.file_object import storages
 except ImportError as exc:
     raise MissingDependencyError(
         "advanced-alchemy",
         install_package="advanced-alchemy",
         extra="alchemy",
     ) from exc
-
-_storage_get_attr = "get"
-if not hasattr(storages, _storage_get_attr):
-    with contextlib.suppress(AttributeError, TypeError):
-        setattr(storages, _storage_get_attr, storages.get_backend)
 
 if TYPE_CHECKING:
     from advanced_alchemy.types.file_object.base import AsyncDataLike, DataLike, PathLike
@@ -54,7 +49,7 @@ __all__ = (
 _STORAGE_CONFIGS = (LocalConfig, S3Config, GCSConfig, AzureConfig, OCIConfig, R2Config, HTTPConfig, MemoryConfig)
 
 
-class ObjectStoreBackend(StorageBackend):
+class ObjectStoreBackend(AAStorageBackend):
     """Advanced Alchemy StorageBackend delegating zero-copy and async I/O to ObjectStore instances."""
 
     driver = "vertebra"
@@ -82,6 +77,10 @@ class ObjectStoreBackend(StorageBackend):
             str(k): str(v) for k, v in kwargs.items() if isinstance(v, (str, int, float, bool))
         }
         target = store if store is not None else fs
+        self._prefix = self._clean_key(prefix).strip("/")
+        if target is None or isinstance(target, str) and not target.strip():
+            msg = "An explicit object store, storage config, or URI is required"
+            raise ImproperConfigurationError(msg)
 
         sync_store: SyncObjectStore
         async_store: AsyncObjectStore
@@ -98,9 +97,6 @@ class ObjectStoreBackend(StorageBackend):
         elif isinstance(target, str):
             sync_store = SyncObjectStore(target, options=string_options or None, signing=signing)
             async_store = sync_store.to_async()
-        elif target is None:
-            sync_store = SyncObjectStore("memory://", options=string_options or None, signing=signing)
-            async_store = sync_store.to_async()
         else:
             msg = f"Expected SyncObjectStore, AsyncObjectStore, or URI string, got {type(target)!r}"
             raise TypeError(msg)
@@ -108,7 +104,6 @@ class ObjectStoreBackend(StorageBackend):
         super().__init__(key=key, fs=sync_store, **kwargs)
         self._sync_store = sync_store
         self._async_store = async_store
-        self._prefix = prefix.strip("/")
         self.protocol = self._normalize_protocol(sync_store.scheme)
 
     @property
@@ -178,17 +173,16 @@ class ObjectStoreBackend(StorageBackend):
     ) -> FileObject:
         """Persist a FileObject payload synchronously and populate size, etag, and last_modified."""
         _ = max_concurrency
+        if chunk_size < 1:
+            msg = "chunk_size must be >= 1"
+            raise ValueError(msg)
         qualified = self._qualify(file_object.path)
         if isinstance(data, Path):
             put_res = self._sync_store.put_file(qualified, data)
+        elif isinstance(data, Buffer) and not use_multipart:
+            put_res = self._sync_store.put(qualified, data)
         else:
-            raw = self._resolve_sync_data(data)
-            view = memoryview(raw).cast("B")
-            if use_multipart and chunk_size > 0:
-                parts = [view[idx : idx + chunk_size] for idx in range(0, len(view), chunk_size)] or [memoryview(b"")]
-                put_res = self._sync_store.put_multipart(qualified, parts)
-            else:
-                put_res = self._sync_store.put(qualified, view)
+            put_res = self._sync_store.put_stream(qualified, self._iter_sync_data(data, chunk_size))
         self._apply_put_metadata(file_object, put_res.size, put_res.etag)
         return file_object
 
@@ -203,17 +197,16 @@ class ObjectStoreBackend(StorageBackend):
     ) -> FileObject:
         """Persist a FileObject payload asynchronously and populate size, etag, and last_modified."""
         _ = max_concurrency
+        if chunk_size < 1:
+            msg = "chunk_size must be >= 1"
+            raise ValueError(msg)
         qualified = self._qualify(file_object.path)
         if isinstance(data, Path):
             put_res = await self._async_store.put_file(qualified, data)
+        elif isinstance(data, Buffer) and not use_multipart:
+            put_res = await self._async_store.put(qualified, data)
         else:
-            raw = await self._resolve_async_data(data)
-            view = memoryview(raw).cast("B")
-            if use_multipart and chunk_size > 0:
-                parts = [view[idx : idx + chunk_size] for idx in range(0, len(view), chunk_size)] or [memoryview(b"")]
-                put_res = await self._async_store.put_multipart(qualified, parts)
-            else:
-                put_res = await self._async_store.put(qualified, view)
+            put_res = await self._async_store.put_stream(qualified, self._iter_async_data(data, chunk_size))
         self._apply_put_metadata(file_object, put_res.size, put_res.etag)
         return file_object
 
@@ -299,11 +292,21 @@ class ObjectStoreBackend(StorageBackend):
 
     def _qualify(self, path: PathLike) -> str:
         """Normalize a PathLike key and prepend any configured namespace prefix."""
-        raw_path = Path(path).as_posix() if isinstance(path, (Path, os.PathLike)) else str(path)
-        cleaned = raw_path.strip().lstrip("/")
+        cleaned = self._clean_key(path)
         if not self._prefix:
             return cleaned
+        if cleaned == self._prefix or cleaned.startswith(f"{self._prefix}/"):
+            return cleaned
         return f"{self._prefix}/{cleaned}" if cleaned else self._prefix
+
+    @staticmethod
+    def _clean_key(path: PathLike) -> str:
+        """Reject parent traversal before a key reaches native storage."""
+        cleaned = os.fspath(path).replace("\\", "/").strip().lstrip("/")
+        if ".." in cleaned.split("/"):
+            msg = f"Parent traversal is not permitted in storage keys: {path}"
+            raise ValueError(msg)
+        return cleaned
 
     @staticmethod
     def _normalize_protocol(scheme: str) -> str:
@@ -323,59 +326,63 @@ class ObjectStoreBackend(StorageBackend):
         if etag:
             file_object.etag = etag
 
-    @staticmethod
-    def _resolve_sync_data(data: DataLike) -> Buffer:
-        """Materialize synchronous DataLike inputs into a contiguous Buffer."""
+    @classmethod
+    def _iter_sync_data(cls, data: DataLike, chunk_size: int) -> Iterator[Buffer]:
+        """Yield buffers or bounded file reads without collecting the source."""
         if isinstance(data, Buffer):
-            return data
-        if isinstance(data, Path):
-            return data.read_bytes()
-        if hasattr(data, "read"):
-            return bytes(data.read())
-        file_attr = getattr(data, "file", None)
-        if file_attr is not None and hasattr(file_attr, "read"):
-            return bytes(file_attr.read())
-        stream_attr = getattr(data, "stream", None)
-        if stream_attr is not None and hasattr(stream_attr, "read"):
-            return bytes(stream_attr.read())
-        return b"".join(bytes(chunk) for chunk in data)
+            view = memoryview(data).cast("B")
+            for start in range(0, len(view), chunk_size):
+                yield view[start : start + chunk_size]
+        elif (reader := cls._get_reader(data)) is not None:
+            while chunk := reader(chunk_size):
+                yield chunk
+        else:
+            yield from cast("Iterable[Buffer]", data)
+
+    @classmethod
+    async def _iter_async_data(cls, data: AsyncDataLike, chunk_size: int) -> AsyncIterator[Buffer]:
+        """Yield async chunks and bounded reads, retaining legacy one-read objects."""
+        if isinstance(data, Buffer):
+            for chunk in cls._iter_sync_data(data, chunk_size):
+                yield chunk
+        elif (reader := cls._get_reader(data)) is not None:
+            bounded = True
+            try:
+                inspect.signature(reader).bind(chunk_size)
+            except TypeError:
+                bounded = False
+            except ValueError:
+                pass
+            while True:
+                result = reader(chunk_size) if bounded else reader()
+                chunk = await result if inspect.isawaitable(result) else result
+                if not chunk:
+                    break
+                yield chunk
+                if not bounded:
+                    break
+        elif isinstance(data, AsyncIterable):
+            async for chunk in data:
+                yield chunk
+        else:
+            for chunk in cast("Iterable[Buffer]", data):
+                yield chunk
 
     @staticmethod
-    async def _resolve_async_data(data: AsyncDataLike) -> Buffer:
-        """Materialize synchronous or asynchronous DataLike inputs into a contiguous Buffer."""
-        if isinstance(data, Buffer):
-            return data
-        if isinstance(data, Path):
-            return data.read_bytes()
-        if hasattr(data, "read"):
-            result = data.read()
-            if inspect.isawaitable(result):
-                result = await result
-            return result if isinstance(result, Buffer) else bytes(result)
-        file_attr = getattr(data, "file", None)
-        if file_attr is not None and hasattr(file_attr, "read"):
-            result = file_attr.read()
-            if inspect.isawaitable(result):
-                result = await result
-            return result if isinstance(result, Buffer) else bytes(result)
-        stream_attr = getattr(data, "stream", None)
-        if stream_attr is not None and hasattr(stream_attr, "read"):
-            result = stream_attr.read()
-            if inspect.isawaitable(result):
-                result = await result
-            return result if isinstance(result, Buffer) else bytes(result)
-        if hasattr(data, "__aiter__"):
-            chunks: list[bytes] = []
-            async for chunk in data:
-                chunks.append(bytes(chunk))
-            return b"".join(chunks)
-        return b"".join(bytes(chunk) for chunk in data)
+    def _get_reader(data: Any) -> Any:
+        """Resolve direct and upload-wrapper file readers."""
+        if callable(reader := getattr(data, "read", None)):
+            return reader
+        for attr in ("file", "stream"):
+            if callable(reader := getattr(getattr(data, attr, None), "read", None)):
+                return reader
+        return None
 
 
 def register_storage_backend(
-    store_or_key: SyncObjectStore | AsyncObjectStore | str,
+    store_or_key: SyncObjectStore | AsyncObjectStore | str | StorageConfig,
     *,
-    store: SyncObjectStore | AsyncObjectStore | str | None = None,
+    store: SyncObjectStore | AsyncObjectStore | str | StorageConfig | None = None,
     key: str = "default",
     prefix: str = "",
     set_default: bool = False,
@@ -395,20 +402,18 @@ def register_storage_backend(
         The registered `ObjectStoreBackend` instance.
     """
     target_registry = storages if registry is None else registry
-    if set_default:
-        target_registry.set_default_backend("vertebra.extensions.alchemy.storage.ObjectStoreBackend")
     if store is not None:
         resolved_key = str(store_or_key) if key == "default" else key
         resolved_store = store
     elif isinstance(store_or_key, str) and ("://" not in store_or_key and not store_or_key.startswith("/")):
         resolved_key = store_or_key
-        resolved_store = "memory://"
+        msg = "A backend key requires an explicit object store, storage config, or URI"
+        raise ImproperConfigurationError(msg)
     else:
         resolved_key = key
         resolved_store = store_or_key
     backend = ObjectStoreBackend(key=resolved_key, fs=resolved_store, prefix=prefix)
     target_registry.register_backend(backend)
-    if not hasattr(target_registry, _storage_get_attr):
-        with contextlib.suppress(AttributeError, TypeError):
-            setattr(target_registry, _storage_get_attr, target_registry.get_backend)
+    if set_default:
+        target_registry.set_default_backend("vertebra.extensions.alchemy.storage.ObjectStoreBackend")
     return backend
