@@ -51,7 +51,7 @@ last_verified_checkpoint: ad8be7b6
 last_reviewed_chapter: ch02-wire-codec-and-session-startup
 last_reviewed_commit: 27b5a9e5
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-07T23:59:30Z"
+updated_at: "2026-11-08T00:11:49Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:40:00Z"
@@ -330,7 +330,7 @@ Every worksheet (`111` total across `31` chapters) executes within its bounded o
 
 - **Verified Baseline**: Checkpoint `ad8be7b6` passes all 54 Rust tests (`9` codec, `13` auth, `10` TLS, `22` wire/config/error) under the shared SHM test lock and locked all-target Clippy with `-D warnings`; flow `state: active`, `plan_revision: 7`, `plan_commit: 1c75af65`.
 - **Progress**: `2/31` chapters are complete and reviewed; `8/111` tasks are complete. Chapter 02 receipts bind to `a00c3248`, `81791de2`, `ad8be7b6`, and `c5173f1b`.
-- **Current Chapter**: `ch03-scram-and-channel-binding`, with `current_task: native-postgres-driver:ch03:t01`; revision 7 defines the pinned SCRAM iteration policy, complete PSS parsing, and RFC 5929 digest selection; cold chapter-plan review precedes execution.
+- **Current Chapter**: `ch03-scram-and-channel-binding`, with `current_task: native-postgres-driver:ch03:t01`; revision 7 defines the pinned SCRAM iteration policy, a deterministic parked-future deadline regression, complete PSS parsing, and RFC 5929 digest selection; cold chapter-plan review precedes execution.
 - **Remaining Plan**: Chapters 03–31 retain complete blueprints.
 - **Documentation**: `[0/11 files documented]`; full guides and domain knowledge remain assigned to chapter 30.
 - **Next Action**: Cold-review chapter 03's revision 7 blueprints, then continue `/flow:implement native-postgres-driver` through the full remaining plan.

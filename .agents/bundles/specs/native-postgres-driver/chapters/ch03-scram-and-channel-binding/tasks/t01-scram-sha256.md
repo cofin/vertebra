@@ -34,7 +34,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T23:59:30Z"
+updated_at: "2026-11-08T00:11:49Z"
 commit: null
 sources:
   - id: proto-research
@@ -43,6 +43,9 @@ sources:
   - id: pg-contracts
     resource: .agents/bundles/specs/native-postgres-driver/contracts.md
     title: Startup SASL error classification and connection deadline invariants
+  - id: tokio-timeout
+    resource: https://raw.githubusercontent.com/tokio-rs/tokio/tokio-1.54.1/tokio/src/time/timeout.rs
+    title: Pinned Tokio Timeout polls its inner future before the deadline timer
 tags:
   - postgres
   - scram
@@ -104,12 +107,27 @@ Extend `src/rs/vertebra-postgres/src/auth.rs` and `session.rs` to authenticate o
 | `scram_nonce_strict_extension` | Server echoes exact `r=<client_nonce>` (zero appended bytes) or `r=wrongprefix<server>` | Returns `Err(PostgresError::Protocol(_))` before sending `SASLResponse` and closes socket. |
 | `scram_wrong_server_verifier` | Server sends `AuthenticationSaslFinal` with `v=` computed from wrong password or flipped byte | `ScramSha256::finish` rejects verifier with `Err(PostgresError::Protocol(_))` and closes socket without `Ready`. |
 | `scram_phase_order_violations` | Duplicate `AuthenticationSaslContinue`, duplicate `AuthenticationSaslFinal`, or premature `AuthenticationOk` immediately after `SASLInitialResponse` / `SASLResponse` (skipping `SASLFinal`) | Each returns `Err(PostgresError::Protocol(_))` and transitions `SessionHandle` to `Closed`. |
+| `scram_deadline_expired_before_ready_continue` | Paused Tokio clock, one-second reservation, valid `i=4096` server-first message queued after the peer reads `SASLInitialResponse`; the public client future remains unpolled until a fresh counting waker proves socket readiness, then the clock advances to reservation + `1001 ms` | Resuming the client performs bounded SCRAM work but returns `Transport` before flushing `SASLResponse`; the handle is terminal `Closed`, reconnection is refused, and the peer reaches EOF with zero response bytes. Removing only the explicit post-authentication/preflush deadline check makes this same test fail on nonempty outbound bytes. |
+
+
+### Deterministic Deadline Fixture
+
+The canonical auth test uses only the public `SessionHandle` / `ConnectAttempt::run` seam, real loopback TCP, `std::task::{Wake, Waker, Context}`, and existing Tokio test utilities. The locked Tokio `1.54.1` timeout polls its inner future before checking the expired timer; an outer timeout alone can therefore permit an already-ready inner operation to write after expiry [^tokio-timeout]. The test parks the client rather than timing PBKDF2 on the host:
+
+1. Use `#[tokio::test(start_paused = true)]`, `sslmode = Disable`, password `"secret"`, and `connect_timeout = 1 s`. Capture `reserved_at = Instant::now()` immediately before `begin_connect()`, and keep `let mut client = Box::pin(attempt.run())` local to the test. Never spawn the client future.
+2. The peer reads startup, offers plain SCRAM, reads `SASLInitialResponse`, extracts its live client nonce, and acknowledges that read through a oneshot. It then waits on a separate `send_continue` oneshot before sending anything else. The test manually polls the pinned client with a counting `Wake` implementation while polling this peer-stage acknowledgement with `try_recv`; it yields between polls. Each stage has an independent generous `std::time::Instant` watchdog (30 seconds), so the test stays runnable, Tokio does not automatically advance its paused clock, and broken fixture I/O cannot spin forever.
+3. After the initial-response acknowledgement, create a **fresh** `Arc<CountingWake>` with zero wakes and poll the client exactly once using a `Context` built from its `Waker`. Require `Poll::Pending`, wake count zero, and `Instant::now() == reserved_at < reserved_at + 1 s`. The peer still withholds Continue, so this registers a new socket-read waker while the reservation timer is in the future. No test code manually wakes this waker.
+4. Release `send_continue`. The peer sends and flushes one complete valid Continue frame with `r=<client_nonce>server`, `s=dnRiLXRlc3Qtc2FsdA==`, and `i=4096`, then acknowledges the completed write through another oneshot and waits to collect subsequent client bytes until EOF. The test leaves `client` completely unpolled and busy-yields with the same independent watchdog until both the write acknowledgement and the **fresh waker's nonzero count** are observed. Assert Tokio time is still exactly `reserved_at`; the future timer cannot have caused this wake. This public reactor-readiness barrier establishes that the queued frame is ready before the expired client is resumed. A peer write acknowledgement alone is insufficient.
+5. With the client still unpolled, call `tokio::time::advance(Duration::from_millis(1001)).await`. Assert the clock is beyond the original reservation deadline, then await the pinned client. Its inner startup future can consume the ready Continue and run the valid bounded SCRAM update; the explicit post-work/preflush check must return `PostgresError::Transport` before any response is written.
+6. Assert terminal `handle.is_closed()`, empty parameter metadata, and refusal of another `begin_connect()`. Resume Tokio time only after the client result is observed, then await the peer under the existing EOF watchdog and require its collected bytes to be empty. No server-final, `AuthenticationOk`, or `ReadyForQuery` is sent in this case.
+7. After the implemented test is Green, temporarily remove **only** the explicit post-`Authentication::handle_message` / preflush deadline check from `startup(config, deadline)` and rerun this exact case. It must turn Red because the peer receives `SASLResponse` bytes even though the outer timeout may still return `Transport`. Restore the check and require Green again; record both exit codes before committing. The production clock, auth state machine, and socket are never mocked or exposed through a test-only API.
 
 ## Verification
 
-Write the `scram_*` tests and `tokio-postgres` fixture check in `src/rs/vertebra-postgres/tests/postgres_auth_wire_tests.rs` first (confirming Red), implement `auth.rs` and `session.rs` updates, and verify exit `0`:
+Write the `scram_*` tests and `tokio-postgres` fixture check in `src/rs/vertebra-postgres/tests/postgres_auth_wire_tests.rs` first (confirming Red), implement `auth.rs` and `session.rs` updates, prove the focused deadline test fails when only its explicit preflush guard is removed, restore that guard, and verify exit `0`:
 
 ```bash
+cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_auth_wire_tests scram_deadline_expired_before_ready_continue
 cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test postgres_auth_wire_tests scram_
 cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres
 ```
@@ -120,7 +138,7 @@ Commit as `feat(postgres): validate SCRAM startup authentication`.
 
 - [ ] `auth::Authentication` drives `ScramStarted -> ScramFinalSent -> ScramVerifiedAwaitingOk -> Complete` via `postgres-protocol` `ScramSha256` without custom client crypto or calling `message()` after `finish()` (R5).
 - [ ] Pre-update validation enforces `i in 1..=100_000` (single decimal attribute) and strict server nonce extension (`len > client_nonce.len()`), and `AuthenticationOk` is rejected unless `ScramVerifiedAwaitingOk` was reached (R5).
-- [ ] `session.rs` rechecks the original connection deadline after bounded PBKDF2 before flushing or publishing `Ready` (R3, R5).
+- [ ] `session.rs` rechecks the original connection deadline after bounded PBKDF2 before flushing or publishing `Ready`; the deterministic parked-future/real-TCP test proves terminal failure with zero `SASLResponse` bytes and turns Red when only that explicit check is removed (R3, R5).
 
 ## Notes & Discoveries
 
@@ -128,3 +146,5 @@ Commit as `feat(postgres): validate SCRAM startup authentication`.
 
 [^proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — `postgres-protocol` `0.6.12` SASL SCRAM audit findings.
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — Startup SASL authentication and timeout invariants.
+
+[^tokio-timeout]: `https://raw.githubusercontent.com/tokio-rs/tokio/tokio-1.54.1/tokio/src/time/timeout.rs` — `Timeout::poll` polls the inner future before its deadline timer.

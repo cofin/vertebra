@@ -17,7 +17,7 @@ state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-07T23:59:30Z"
+updated_at: "2026-11-08T00:11:49Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:40:00Z"
@@ -106,6 +106,7 @@ impl Authentication {
 | Scenario | Input / Wire Condition | Required Behavior |
 | --- | --- | --- |
 | Malformed SASL iteration or nonce | `AuthenticationSaslContinue` with `i=0`, `i=100001`, non-decimal/duplicate `i=`, or `r=` equal to / not prefixed by client nonce | Reject before `ScramSha256::update` with `PostgresError::Protocol`, close socket, never emit `SASLResponse`. |
+| Expired reservation with ready SASL Continue | Public client future parked after its initial response, valid Continue queued behind a fresh reactor-waker barrier, clock advanced past the original deadline | Post-work/preflush check returns `Transport`, closes terminally, and emits no response; removing that check makes the same public-seam test fail on outbound bytes. |
 | Premature or out-of-order SASL frames | `AuthenticationOk` in `ScramStarted`/`ScramFinalSent`, or duplicate `AuthenticationSaslContinue`/`AuthenticationSaslFinal` | Fail with `PostgresError::Protocol`; only `ScramVerifiedAwaitingOk` transitions to `Complete` on `AuthenticationOk`. |
 | Certificate signature hash selection | RSA/ECDSA SHA-224/256/384/512, DSA SHA-224/256, SHA-1/MD5, RSA-PSS explicit or omitted `hashAlgorithm` in a present parameters SEQUENCE (default SHA-1), MD2, Ed25519/Ed448 | Hash full leaf DER; substitute SHA-256 for SHA-1/MD5/default-PSS; return `Err` (binding unavailable) for unsupported MD2, Ed25519/Ed448, unknown OIDs, malformed PSS parameters, or trailing DER. |
 | Plain-only offer over bound TLS under `Prefer` | Usable `tls_server_end_point` + server offers `["SCRAM-SHA-256"]` only | Construct `ScramSha256` with `ChannelBinding::unrequested()` emitting `GS2` `"y,,"`; if stripped PLUS server replies `e=server-does-support-channel-binding`, fail terminally without `"n,,"` retry. |

@@ -1,5 +1,11 @@
 # Bundle Activity Log
 
+## [2026-11-08] plan-research | Native PostgreSQL deterministic SCRAM deadline fixture
+
+- Adopt cold plan review's missing deadline-regression finding within unapproved revision 7 at anchor `1c75af65`; retain all 31 chapters, 111 tasks, task ownership, source receipts, and completed review stamps.
+- A throwaway `.agents/scratch/ch03-deadline-probe` exercises the actual public `SessionHandle` with real TCP and current cleartext authentication as the preflush analog. With the client future parked locally, a fresh counting waker proves I/O readiness while paused Tokio time remains unchanged; resuming after virtual expiry returns `Transport`/`Closed` but transmits the exact password frame without an explicit inner guard. The observation passes 20/20 runs; asserting zero bytes is Red (`101`).
+- Specify the corresponding SASL Continue fixture in task 01 and require an actual guard-removal Red/restore-Green proof during implementation. No canonical production, test, or dependency files change; no SCRAM runtime acceptance is claimed by the analog.
+
 ## [2026-11-07] flow-revise | Native PostgreSQL SCRAM and certificate-binding contracts
 
 - Revision 7 anchors all 143 specification/task identities to `1c75af65` while retaining 31 chapters, 111 tasks, 8 completed tasks, and completed chapter 01/02 review stamps. No production, test, manifest, or dependency files change.
