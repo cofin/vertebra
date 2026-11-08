@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-08] flow-implement | Synchronize bounded storage codecs
+
+- Source `78293774` implements bounded sync/async IPC and Parquet writers. Two public-format Red failures lead to 111 passing canonical storage cases, including 44 writer cases, real native S3 PUT cancellation/abort barriers for both formats, and worker-exit ownership checks. Storage MyPy (4 files), focused Ruff, format, and whitespace gates pass.
+- Storage knowledge documents strict named allocation, real IPC, bounded demand, caller-loop native I/O, per-step SyncPool codecs, cancellation ownership, and explicit Parquet prefetch opt-in. Chapter ch04 has 3/4 tasks complete and is active on a source-grounded S3 minimum-part worksheet. Root progress is 12/15 tasks; native S3 compliance and two SQLSpec/documentation tasks remain. Consumer-guide progress remains 3/5.
+
 ## Verified bounded Arrow and Parquet readers
 
 Source `ee35d9d4` adds native sync/async batch readers and schema-preserving full-Table helpers, including IPC-file fallback. Four Red cases lead to67 passing canonical store cases with18 new codec cases and4 real native S3 HTTP cancellation/responsiveness barriers. Focused MyPy,Ruff,format,diff gates pass. Chapter ch04 executes its writer worksheet; three tasks remain across ch04/ch05.

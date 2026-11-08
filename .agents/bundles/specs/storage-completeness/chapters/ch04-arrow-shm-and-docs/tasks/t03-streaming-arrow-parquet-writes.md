@@ -3,11 +3,9 @@ type: Task
 id: storage-completeness:ch04:t03
 chapter_id: ch04-arrow-shm-and-docs
 title: Write Arrow and Parquet with bounded multipart codec output
-description: Add bounded sync/async Arrow IPC and Parquet writers using the reader
-  bridge lifecycle primitives and native put_stream. Keep encoded output incremental
-  and native multipart abort semantics intact.
+description: Add bounded sync/async Arrow IPC and Parquet writers using the reader bridge lifecycle primitives and native put_stream. Keep encoded output incremental and native multipart abort semantics intact.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -26,18 +24,35 @@ tests:
 estimated_loc: 220
 plan_revision: 9
 plan_commit: 222cbf99
-state_revision: 1
+state_revision: 2
 claimed_by: agent:arrow-writer-executor
 claimed_at: '2026-11-08T17:06:25.072586Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-08T17:20:39.168001Z'
+last_verified_commit: '78293774'
+verification_evidence:
+  red:
+    exit_code: 1
+    result: Both public format roundtrips fail because write_arrow and write_parquet are absent.
+  green:
+    command: UV_NO_SYNC=1 uv run --no-sync pytest src/py/tests/unit/storage/test_storage_store.py -q
+    exit_code: 0
+    result: 111 passed, including 44 writer cases and real native S3 PUT cancellation barriers for both formats.
+  typing:
+    command: UV_NO_SYNC=1 uv run --no-sync mypy src/py/vertebra/storage
+    exit_code: 0
+    result: 4 source files pass.
+  lint:
+    command: UV_NO_SYNC=1 uv run --no-sync ruff check src/py/vertebra/storage/_arrow.py src/py/vertebra/storage/_store.py src/py/tests/unit/storage/test_storage_store.py
+    exit_code: 0
+  format_diff:
+    exit_code: 0
+    result: Focused Ruff format and git diff whitespace checks pass.
 created_at: '2026-11-08T00:00:00Z'
-updated_at: '2026-11-08T17:06:25.072586Z'
-commit: null
+updated_at: '2026-11-08T17:20:39.168001Z'
+commit: '78293774'
 sources:
 - id: store
   resource: src/py/vertebra/storage/_store.py::AsyncObjectStore.put_stream
@@ -101,8 +116,8 @@ Red: `uv run --no-sync pytest src/py/tests/unit/storage/test_storage_store.py -k
 
 ## Acceptance Criteria
 
-- [ ] R8 writers emit batch-bounded IPC/Parquet through native put_stream and return PutResult.
-- [ ] R8 cancellation/failure aborts multipart and closes codec/input without whole-file buffering.
+- [x] R8 writers emit batch-bounded IPC/Parquet through native put_stream and return PutResult.
+- [x] R8 cancellation/failure aborts multipart and closes codec/input without whole-file buffering.
 
 ## Notes & Discoveries
 
