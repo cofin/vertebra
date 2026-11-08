@@ -25,14 +25,14 @@ tests:
 estimated_loc: 210
 plan_revision: 10
 plan_commit: '78293774'
-state_revision: 4
+state_revision: 6
 claimed_by: agent:sqlspec-rowgroup-executor
 claimed_at: '2026-11-08T18:35:14.486574Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: '2026-11-08T18:42:41.383277Z'
-last_verified_commit: 5faea756
+last_verified_commit: 42cbff73
 verification_evidence:
   red:
     exit_code: 1
@@ -59,11 +59,18 @@ verification_evidence:
     typing_lint_format_diff_exit_code: 0
   aggregate_refresh:
     python_exit_code: 0
-    python_result: 2604 passed, 74 skipped, 170 xfailed, 17 warnings in 71.51s (0:01:11)
+    python_result: 2608 passed, 74 skipped, 170 xfailed, 17 warnings in 72.79s (0:01:12)
     lint_all_exit_code: 0
+  sdk_sentinel_repair:
+    red_exit_code: 1
+    red_result: 4 failed,12 passed before normalizing -1.
+    green_exit_code: 0
+    green_result: 106 canonical cases. Omitted/None/-1 defaults compare to installed
+      pq.write_table across sync/async Table/cursor;0/-2 rejection uses SDK oracle.
+    typing_lint_format_diff_exit_code: 0
 created_at: '2026-11-08T00:00:00Z'
 updated_at: '2026-11-08T18:42:41.383277Z'
-commit: 5faea756
+commit: 42cbff73
 sources:
 - id: sql
   resource: src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend

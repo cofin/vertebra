@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## Verified PyArrow sentinel parity
+
+Source `42cbff73` preserves omitted, None, and -1 row-group defaults using installed PyArrow as the test oracle across sync/async Table and cursor writers. Invalid 0/-2 values remain rejected. The canonical suite passes 106 cases; full lint exits 0 and Python exits 0: 2608 passed, 74 skipped, 170 xfailed, 17 warnings in 72.79s (0:01:12). Correctness recheck passes; fresh quality review precedes finish/archive.
+
 ## Verified SQLSpec optional row-group compatibility
 
 Source `5faea756` preserves installed PyArrow row-group defaults for omitted and None options across sync/async Table and cursor writes, while invalid sizes still fail. Eight Red failures lead to 102 canonical passes with actual metadata assertions. Full lint-all exits0; refreshed Python suite exits0: 2604 passed, 74 skipped, 170 xfailed, 17 warnings in 71.51s (0:01:11). Catalog counts are synchronized; final correctness and fresh quality reviews precede finish/archive.

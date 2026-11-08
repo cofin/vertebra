@@ -23,8 +23,8 @@ research:
 - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 10
 plan_commit: '78293774'
-state_revision: 25
-last_verified_checkpoint: 5faea756
+state_revision: 26
+last_verified_checkpoint: 42cbff73
 last_reviewed_chapter: ch04-arrow-shm-and-docs
 last_reviewed_commit: e663c51f
 created_at: '2026-11-03T04:05:00Z'
@@ -213,7 +213,7 @@ Progress: `[5/5 files documented]`. Storage knowledge covers native storage and 
 
 - Chapters ch01 through ch04 are reviewed and complete; ch05 has both tasks complete and awaits final correctness and fresh quality review.
 - Progress is 4/5 chapters and 15/15 tasks complete. No implementation task remains; all 5/5 documentation targets are complete.
-- Full lint, locked Rust workspace, Python (2604 passed, 74 skipped, 170 xfailed), and documentation gates pass. Live cloud credentials are outside local validation.
+- Full lint, locked Rust workspace, Python (2608 passed, 74 skipped, 170 xfailed), and documentation gates pass. Live cloud credentials are outside local validation.
 - Durable knowledge covers native completion/GCP ownership, strict SHM/IPC, bounded codecs and cancellation, real S3 completion, framework consumers, and the persistent TTL envelope ADR.
 
 [^rs-storage-engine]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — Native Rust storage engine over `object_store`.

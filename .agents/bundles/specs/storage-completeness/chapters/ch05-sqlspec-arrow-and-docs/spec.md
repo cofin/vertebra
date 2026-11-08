@@ -16,8 +16,8 @@ replan_trigger: null
 current_task: null
 plan_revision: 10
 plan_commit: '78293774'
-state_revision: 5
-last_verified_checkpoint: 5faea756
+state_revision: 6
+last_verified_checkpoint: 42cbff73
 last_reviewed_commit: null
 created_at: '2026-11-08T00:00:00Z'
 updated_at: '2026-11-08T18:42:41.383277Z'
@@ -85,7 +85,7 @@ Progress: `[3/3 files documented]`. ch05:t02 owns docs/usage/storage.md, docs/us
 
 ## 5. Implementation Plan
 
-- [x] [5faea756] storage-completeness:ch05:t01 — Integrate bounded batches with SQLSpec public storage methods (tasks/t01-sqlspec-arrow-stream-integration.md)
+- [x] [42cbff73] storage-completeness:ch05:t01 — Integrate bounded batches with SQLSpec public storage methods (tasks/t01-sqlspec-arrow-stream-integration.md)
 - [x] [56c514dd] storage-completeness:ch05:t02 — Synchronize storage usage guides and OKF object-storage knowledge chapter (tasks/t02-storage-docs-and-okf-sync.md)
 
 **Chapter Recovery Checkpoint:** `make lint-all && make rs-test && make py-test && make docs` exits 0; correctness review precedes fresh quality review.
@@ -93,7 +93,7 @@ Progress: `[3/3 files documented]`. ch05:t02 owns docs/usage/storage.md, docs/us
 ## 6. Current State & Remaining Plan Snapshot
 
 - Both tasks are complete; SQLSpec preserves accepted optional Parquet row-group arguments and documentation matches shipped APIs.
-- Documentation progress is 3/3 chapter targets and 5/5 root targets. Full lint, locked native workspace, Python (2604 passed, 74 skipped, 170 xfailed), and documentation gates pass.
+- Documentation progress is 3/3 chapter targets and 5/5 root targets. Full lint, locked native workspace, Python (2608 passed, 74 skipped, 170 xfailed), and documentation gates pass.
 - Durable native/storage/extensions knowledge and the persistent-TTL ADR are synthesized before review. Independent correctness and fresh quality reviews remain required; no implementation task remains.
 
 [^store]: `src/py/vertebra/storage/_store.py::AsyncObjectStore` — Native storage facade.
