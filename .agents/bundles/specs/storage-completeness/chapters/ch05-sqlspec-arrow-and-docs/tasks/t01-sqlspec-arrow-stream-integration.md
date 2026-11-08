@@ -7,7 +7,7 @@ description: Delegate SQLSpec Arrow reads/writes/streaming to completed public s
   helpers while preserving protocol signatures, format selection, namespaced URI/glob
   patterns, ArrowCursor handling, and kwargs.
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -25,9 +25,9 @@ tests:
 estimated_loc: 210
 plan_revision: 10
 plan_commit: '78293774'
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: agent:sqlspec-arrow-executor
+claimed_at: '2026-11-08T18:01:58.609035Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -35,7 +35,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: '2026-11-08T00:00:00Z'
-updated_at: '2026-11-08T17:39:10.695721Z'
+updated_at: '2026-11-08T18:01:58.609035Z'
 commit: null
 sources:
 - id: sql

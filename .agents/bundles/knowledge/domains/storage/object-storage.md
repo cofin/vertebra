@@ -1,7 +1,8 @@
 ---
 type: Guide
 title: Object Storage, Streaming & Presigning
-description: Native multicloud streaming, signing, framework storage contracts, and bounded Arrow/Parquet codecs with strict named SHM allocation.
+description: Native multicloud streaming, signing, framework storage contracts, and
+  bounded Arrow/Parquet codecs with strict named SHM allocation.
 status: stable
 tags:
 - domains
@@ -9,6 +10,12 @@ tags:
 - object-store
 - signing
 verified:
+- by: agent:code-reviewer
+  at: '2026-11-08T18:01:58.609035Z'
+  commit: e663c51f
+- by: agent:quality-reviewer
+  at: '2026-11-08T18:01:58.609035Z'
+  commit: e663c51f
 - by: agent:docs-okf-specialist
   at: '2026-11-08T17:20:39.168001Z'
   commit: '78293774'

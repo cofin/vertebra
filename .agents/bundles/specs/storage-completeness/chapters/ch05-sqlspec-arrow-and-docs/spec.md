@@ -8,7 +8,7 @@ description: R4/R8 integrate completed batch helpers into installed SQLSpec publ
   SQLSpec full-Table reads retain their public return contract; streaming consumers
   remain incremental.
 status: stable
-state: planned
+state: active
 planning_status: complete
 depends_on_chapters:
 - ch04-arrow-shm-and-docs
@@ -16,11 +16,11 @@ replan_trigger: null
 current_task: storage-completeness:ch05:t01
 plan_revision: 10
 plan_commit: '78293774'
-state_revision: 0
+state_revision: 1
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: '2026-11-08T00:00:00Z'
-updated_at: '2026-11-08T17:39:10.695721Z'
+updated_at: '2026-11-08T18:01:58.609035Z'
 sources:
 - id: store
   resource: src/py/vertebra/storage/_store.py::AsyncObjectStore

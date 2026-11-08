@@ -7,7 +7,7 @@ description: R8 hardens named SHM allocation and ArrowCursor IPC, adds bounded s
   read/write codecs, and enforces S3 multipart minimum parts. Four tasks own allocation,
   reads, writes, and S3 completion.
 status: stable
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters:
 - ch01-native-engine-and-auth
@@ -17,11 +17,11 @@ replan_trigger: null
 current_task: null
 plan_revision: 10
 plan_commit: '78293774'
-state_revision: 5
+state_revision: 8
 last_verified_checkpoint: 71cb322b
-last_reviewed_commit: null
+last_reviewed_commit: e663c51f
 created_at: '2026-11-08T00:00:00Z'
-updated_at: '2026-11-08T17:53:10.387331Z'
+updated_at: '2026-11-08T18:01:58.609035Z'
 sources:
 - id: store
   resource: src/py/vertebra/storage/_store.py::AsyncObjectStore
@@ -35,6 +35,13 @@ sources:
 tags:
 - storage
 - arrow
+verified:
+- by: agent:code-reviewer
+  at: '2026-11-08T18:01:58.609035Z'
+  commit: e663c51f
+- by: agent:quality-reviewer
+  at: '2026-11-08T18:01:58.609035Z'
+  commit: e663c51f
 ---
 # Chapter 04: Strict Arrow SHM and Bounded Storage Codecs
 
@@ -98,7 +105,7 @@ Progress: `[1/1 files documented in ch04]`. `.agents/bundles/knowledge/domains/s
 ## 6. Current State & Remaining Plan Snapshot
 
 - All four tasks are complete; the shared codec lifecycle retains worker and loop-task ownership through repeated cancellation.
-- Full locked Rust workspace tests and documentation gates exit0. The full Python suite passes 2567 cases with 74 skips and 170 expected failures. Aggregate lint passes; independent correctness and fresh quality reviews remain required.
+- Full locked Rust workspace tests and documentation gates exit0. The full Python suite passes 2567 cases with 74 skips and 170 expected failures. Aggregate lint passes; independent correctness and fresh quality reviews pass with no unresolved findings.
 - Both consumer guides and SQLSpec codec delegation remain owned by ch05. Documentation progress is 1/1 chapter knowledge target.
 
 [^store]: `src/py/vertebra/storage/_store.py::AsyncObjectStore` — Native storage facade.

@@ -15,10 +15,10 @@ depends_on:
 read_set:
 - docs/usage/storage.md
 - docs/usage/storage-auth-and-signing.md
-- docs/usage/storage-parquet-and-orm.md
 - .agents/bundles/knowledge/domains/storage/object-storage.md
-- src/py/vertebra/_storage.pyi
-- src/py/tests/unit/tools/test_docs_tooling.py
+- src/py/vertebra/storage/_store.py
+- src/py/vertebra/storage/_streaming.py
+- src/py/vertebra/extensions/litestar/store.py
 files:
 - docs/usage/storage.md
 - docs/usage/storage-auth-and-signing.md
@@ -38,7 +38,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: '2026-11-07T04:15:00Z'
-updated_at: '2026-11-08T17:39:10.695721Z'
+updated_at: '2026-11-08T18:01:58.609035Z'
 commit: null
 sources:
 - id: docs-storage
@@ -50,6 +50,15 @@ sources:
 - id: okf-object-storage
   resource: .agents/bundles/knowledge/domains/storage/object-storage.md
   title: OKF v0.2 domain knowledge chapter for object storage
+- id: facade-contract
+  resource: src/py/vertebra/storage/_store.py::SyncObjectStore
+  title: Public Python storage and signing contracts
+- id: http-contract
+  resource: src/py/vertebra/storage/_streaming.py::StreamingStorageResponse
+  title: Async HTTP Range response contract
+- id: litestar-contract
+  resource: src/py/vertebra/extensions/litestar/store.py::ObjectStoreLitestarStore
+  title: Litestar Store and filesystem contracts
 tags:
 - storage
 - docs
@@ -64,12 +73,12 @@ Bring user-facing storage documentation (`docs/usage/storage.md`, `docs/usage/st
 
 ## Bounded Read Manifest
 
-- `docs/usage/storage.md` — Core `SyncObjectStore` / `AsyncObjectStore`, streaming, Litestar, and framework adapter examples [^docs-storage].
-- `docs/usage/storage-auth-and-signing.md` — GCP token caches and multi-cloud presigned URL examples [^docs-storage-auth].
-- `docs/usage/storage-parquet-and-orm.md` — Cross-links with Parquet and ORM docs.
-- `.agents/bundles/knowledge/domains/storage/object-storage.md` — OKF truth block, architecture, `sources:`, and gotchas [^okf-object-storage].
-- `src/py/vertebra/_storage.pyi` — Authoritative public PyO3 symbols on `vertebra._storage`.
-- `src/py/tests/unit/tools/test_docs_tooling.py` — Docs build and link validation test gate.
+- `docs/usage/storage.md` — owned documentation or implemented public contract.
+- `docs/usage/storage-auth-and-signing.md` — owned documentation or implemented public contract.
+- `.agents/bundles/knowledge/domains/storage/object-storage.md` — owned documentation or implemented public contract.
+- `src/py/vertebra/storage/_store.py` — owned documentation or implemented public contract.
+- `src/py/vertebra/storage/_streaming.py` — owned documentation or implemented public contract.
+- `src/py/vertebra/extensions/litestar/store.py` — owned documentation or implemented public contract.
 
 ## Symbol & Signature Contracts
 
@@ -112,8 +121,14 @@ Bring user-facing storage documentation (`docs/usage/storage.md`, `docs/usage/st
 
 ## Notes & Discoveries
 
-- [2026-11-08 00:00] When closing ch05:t02, set the three-file manifests in chapters/ch04-arrow-shm-and-docs/spec.md and chapters/ch05-sqlspec-arrow-and-docs/spec.md to `[3/3 files documented]`; set the root five-file manifest to `[5/5 files documented]`, preserving its already documented product/tech-stack.md and knowledge/domains/extensions/litestar.md targets.
+- [2026-11-08 00:00] When closing ch05:t02, retain the completed ch04 `[1/1 files documented in ch04]` manifest and set the ch05 three-file manifest to `[3/3 files documented]`; set the root five-file manifest to `[5/5 files documented]`, preserving its already documented product/tech-stack.md and knowledge/domains/extensions/litestar.md targets.
 
 [^docs-storage]: `docs/usage/storage.md` — Storage usage documentation.
 [^docs-storage-auth]: `docs/usage/storage-auth-and-signing.md` — Storage authentication and presigned URL guide.
 [^okf-object-storage]: `.agents/bundles/knowledge/domains/storage/object-storage.md` — OKF domain chapter for object storage.
+
+The implemented facade, response and Litestar signatures anchor runnable examples [^facade-contract] [^http-contract] [^litestar-contract].
+
+[^facade-contract]: `src/py/vertebra/storage/_store.py::SyncObjectStore` — Public Python storage and signing contracts.
+[^http-contract]: `src/py/vertebra/storage/_streaming.py::StreamingStorageResponse` — Async HTTP Range response contract.
+[^litestar-contract]: `src/py/vertebra/extensions/litestar/store.py::ObjectStoreLitestarStore` — Litestar Store and filesystem contracts.

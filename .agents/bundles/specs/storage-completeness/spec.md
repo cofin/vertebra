@@ -15,20 +15,20 @@ chapters:
 - ch03-litestar-and-range-streaming
 - ch04-arrow-shm-and-docs
 - ch05-sqlspec-arrow-and-docs
-current_chapter: ch04-arrow-shm-and-docs
-current_task: null
+current_chapter: ch05-sqlspec-arrow-and-docs
+current_task: storage-completeness:ch05:t01
 parent_prd: native-data-platform
 research:
 - ../native-data-platform/research/gap-analysis_20261103.md
 - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 10
 plan_commit: '78293774'
-state_revision: 18
+state_revision: 21
 last_verified_checkpoint: 71cb322b
-last_reviewed_chapter: ch03-litestar-and-range-streaming
-last_reviewed_commit: 50e9c631
+last_reviewed_chapter: ch04-arrow-shm-and-docs
+last_reviewed_commit: e663c51f
 created_at: '2026-11-03T04:05:00Z'
-updated_at: '2026-11-08T17:53:10.387331Z'
+updated_at: '2026-11-08T18:01:58.609035Z'
 generated:
   by: flow-setup
   at: '2026-11-07T04:15:00Z'
@@ -203,15 +203,15 @@ Progress: `[3/5 files documented]`. Storage knowledge covers native storage and 
 - [x] [dc2c2053] ch01-native-engine-and-auth — Native Rust Storage Engine, GCP Auth Unification, and Fail-Closed Facade (chapters/ch01-native-engine-and-auth/spec.md)
 - [x] [62b19c5c] ch02-orm-and-sql-storage-contracts — SQLSpec, Advanced Alchemy, and Django Storage Contracts (chapters/ch02-orm-and-sql-storage-contracts/spec.md)
 - [x] [50e9c631] ch03-litestar-and-range-streaming — HTTP Range Streaming and Litestar Store/Static Integration (chapters/ch03-litestar-and-range-streaming/spec.md)
-- [~] ch04-arrow-shm-and-docs — Strict Arrow SHM and Bounded Storage Codecs (chapters/ch04-arrow-shm-and-docs/spec.md)
-- [ ] ch05-sqlspec-arrow-and-docs — SQLSpec Batch Consumers and Storage Documentation (chapters/ch05-sqlspec-arrow-and-docs/spec.md)
+- [x] [e663c51f] ch04-arrow-shm-and-docs — Strict Arrow SHM and Bounded Storage Codecs (chapters/ch04-arrow-shm-and-docs/spec.md)
+- [~] ch05-sqlspec-arrow-and-docs — SQLSpec Batch Consumers and Storage Documentation (chapters/ch05-sqlspec-arrow-and-docs/spec.md)
 
 **Flow Recovery Checkpoint:** `make lint-all && make rs-test && make py-test && make docs` exits `0`, followed by independent `@code-reviewer` and `@quality-reviewer` passes on `feat/storage-updates` before `/flow:finish`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Chapters ch01 through ch03 are reviewed and complete; ch04 has four completed tasks and awaits independent correctness and fresh quality reviews.
-- Progress is 3/5 chapters and 13/15 tasks complete. Two tasks remain in ch05: SQLSpec Arrow delegation and storage/auth documentation.
+- Chapters ch01 through ch04 are reviewed and complete; ch05 is active on SQLSpec Arrow delegation.
+- Progress is 4/5 chapters and 13/15 tasks complete. Two tasks remain in ch05: SQLSpec Arrow delegation and storage/auth documentation.
 - Active ch04 and planned ch05 own revision 10 at `78293774`; completed earlier chapters/tasks retain their recorded owned revisions.
 - Documentation is 3/5 targets complete; both consumer guides remain scheduled in ch05:t02.
 - Native async I/O stays on the caller loop, codecs use bounded SyncPool operations, and S3/B2 multipart parts coalesce incrementally to 8 MiB.

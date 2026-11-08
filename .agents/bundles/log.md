@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## Completed strict Arrow and bounded storage chapter
+
+Correctness and fresh quality reviews pass at `e663c51f` with no unresolved findings. All four chapter tasks are complete, including real S3 minimum-part completion and repeated-cancellation ownership. Full lint, locked Rust workspace, Python (2567 passed,74 skipped,170 xfailed), and documentation gates pass. Chapter ch05 starts SQLSpec delegation; its final two tasks complete the original documentation scope.
+
 ## Verified repeated-cancellation codec ownership
 
 Source `71cb322b` retains worker and loop-task ownership through repeated task cancellation. Four Red failures lead to 123 canonical store passes, including six real producer-barrier cases across both formats. Focused quality gates pass. Full lint-all exits 0; the refreshed Python suite exits 0: 2567 passed, 74 skipped, 170 xfailed, 17 warnings in 74.13s (0:01:14). Native and documentation gates remain valid. Python correctness recheck precedes fresh quality review.
