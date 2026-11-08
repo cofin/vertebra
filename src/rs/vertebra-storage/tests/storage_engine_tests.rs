@@ -114,6 +114,7 @@ fn test_hmac_and_s3_v4_signing_and_verification() {
         access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
         secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
         endpoint: Some("https://s3.us-east-1.amazonaws.com".to_string()),
+        virtual_hosted_style: false,
     };
     let presigned = sign_s3_v4_url(
         &s3_cfg,
@@ -774,6 +775,7 @@ fn test_multicloud_presigning_parity_rfc3986_oci_par_and_expiry_bounds() {
         access_key_id: "r2-access-key".to_string(),
         secret_access_key: "r2-secret-key".to_string(),
         endpoint: Some("https://acct.r2.cloudflarestorage.com".to_string()),
+        virtual_hosted_style: false,
     };
     let r2_url =
         sign_s3_v4_url(&r2_cfg, "GET", "img/logo.png", 3600, fixed_ts).expect("R2 SigV4 sign");
@@ -1933,4 +1935,251 @@ asyncio.run(run_async_checks())
         )
         .expect("run Python sync + asyncio verification");
     });
+}
+
+#[tokio::test]
+async fn test_checked_get_range_raw_keys_local_metadata_and_s3_http_options() {
+    use _storage::store::{ObjectStoreError, PutConditionalOptions, StorageError};
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let engine = ObjectStoreEngine::new(BackendConfig::Memory).expect("memory engine");
+    engine
+        .put("exists.bin", Bytes::from_static(b"0123456789"))
+        .await
+        .expect("put exists.bin");
+
+    let overflow_err = engine
+        .get_range("exists.bin", 5, u64::MAX)
+        .await
+        .expect_err("offset + length overflow must fail");
+    assert!(matches!(overflow_err, StorageError::InvalidInput(_)));
+
+    let zero_ok = engine
+        .get_range("exists.bin", 5, 0)
+        .await
+        .expect("zero-length range on existing key must succeed");
+    assert!(zero_ok.is_empty());
+
+    let zero_missing = engine
+        .get_range("missing.bin", 0, 0)
+        .await
+        .expect_err("zero-length range on missing key must return NotFound");
+    assert!(matches!(
+        zero_missing,
+        ObjectStoreError::ObjectStore(object_store::Error::NotFound { .. })
+    ));
+
+    let raw_key = "a~b/c%25d.txt";
+    engine
+        .put(raw_key, Bytes::from_static(b"verbatim"))
+        .await
+        .expect("put raw key");
+    let listed = engine.list(Some("a~b")).await.expect("list raw prefix");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].path, raw_key);
+    assert_eq!(
+        &engine.get(raw_key).await.expect("get raw key")[..],
+        b"verbatim"
+    );
+
+    let tmp = TempDir::new().expect("tempdir");
+    let local_url = format!("file://{}", tmp.path().display());
+    let local = ObjectStoreEngine::from_url(&local_url, None).expect("local engine");
+    let attrs = HashMap::from([("owner".to_string(), "worker-7".to_string())]);
+    let local_meta = local
+        .put_opts(
+            "meta~dir/item%251.txt",
+            Bytes::from_static(b"payload-1"),
+            PutConditionalOptions {
+                if_not_exists: true,
+                content_type: Some("application/json".to_string()),
+                attributes: attrs.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("local conditional put with metadata");
+    assert_eq!(local_meta.path, "meta~dir/item%251.txt");
+    assert_eq!(local_meta.content_type.as_deref(), Some("application/json"));
+    assert_eq!(local_meta.attributes, attrs);
+
+    let local_head = local
+        .head("meta~dir/item%251.txt")
+        .await
+        .expect("local head preserves metadata");
+    assert_eq!(local_head.content_type.as_deref(), Some("application/json"));
+    assert_eq!(local_head.attributes, attrs);
+
+    local
+        .copy("meta~dir/item%251.txt", "meta~dir/copied.txt")
+        .await
+        .expect("local copy");
+    let copied_head = local
+        .head("meta~dir/copied.txt")
+        .await
+        .expect("copied local head");
+    assert_eq!(
+        copied_head.content_type.as_deref(),
+        Some("application/json")
+    );
+    assert_eq!(copied_head.attributes, attrs);
+
+    local
+        .rename("meta~dir/copied.txt", "meta~dir/renamed.txt", true)
+        .await
+        .expect("local rename");
+    let renamed_head = local
+        .head("meta~dir/renamed.txt")
+        .await
+        .expect("renamed local head");
+    assert_eq!(
+        renamed_head.content_type.as_deref(),
+        Some("application/json")
+    );
+    assert_eq!(renamed_head.attributes, attrs);
+
+    let vhost_default = S3SignConfig {
+        bucket: "assets".to_string(),
+        region: "us-east-1".to_string(),
+        access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+        secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+        endpoint: None,
+        virtual_hosted_style: true,
+    };
+    let signed_vhost = sign_s3_v4_url(
+        &vhost_default,
+        "GET",
+        "dir/report 1.parquet",
+        900,
+        1_700_000_000,
+    )
+    .expect("sign default vhost");
+    assert!(
+        signed_vhost
+            .starts_with("https://assets.s3.us-east-1.amazonaws.com/dir/report%201.parquet?"),
+        "unexpected signed_vhost: {signed_vhost}"
+    );
+    assert!(
+        verify_s3_v4_url(&vhost_default, "GET", &signed_vhost, 1_700_000_100)
+            .expect("verify default vhost")
+    );
+
+    let vhost_custom = S3SignConfig {
+        bucket: "assets".to_string(),
+        region: "us-east-1".to_string(),
+        access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+        secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+        endpoint: Some("https://s3.example.com:9000/v1".to_string()),
+        virtual_hosted_style: true,
+    };
+    let signed_custom = sign_s3_v4_url(&vhost_custom, "PUT", "k/obj.bin", 900, 1_700_000_000)
+        .expect("sign custom vhost");
+    assert!(
+        signed_custom.starts_with("https://assets.s3.example.com:9000/v1/k/obj.bin?"),
+        "unexpected signed_custom: {signed_custom}"
+    );
+    assert!(
+        verify_s3_v4_url(&vhost_custom, "PUT", &signed_custom, 1_700_000_100)
+            .expect("verify custom vhost")
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback server");
+    let addr = listener.local_addr().expect("addr");
+    let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_srv = Arc::clone(&captured);
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let log = Arc::clone(&captured_srv);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                log.lock().expect("lock").push(req);
+                let resp = "HTTP/1.1 200 OK\r\nETag: \"etag-1\"\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+                let _ = socket.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let proxy_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback http proxy");
+    let proxy_addr = proxy_listener.local_addr().expect("proxy addr");
+    let captured_proxy = Arc::clone(&captured);
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = proxy_listener.accept().await {
+            let log = Arc::clone(&captured_proxy);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                log.lock().expect("lock").push(req);
+                let resp = "HTTP/1.1 200 OK\r\nETag: \"etag-1\"\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+                let _ = socket.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let s3_opts = HashMap::from([
+        ("region".to_string(), "us-east-1".to_string()),
+        ("access_key_id".to_string(), "ak".to_string()),
+        ("secret_access_key".to_string(), "sk".to_string()),
+        ("session_token".to_string(), "sts-tok-123".to_string()),
+        ("virtual_hosted_style".to_string(), "true".to_string()),
+        (
+            "endpoint".to_string(),
+            "http://s3.example.test:9000".to_string(),
+        ),
+        (
+            "proxy_url".to_string(),
+            format!("http://127.0.0.1:{}", proxy_addr.port()),
+        ),
+        ("allow_http".to_string(), "true".to_string()),
+    ]);
+    let s3_engine =
+        ObjectStoreEngine::from_url("s3://bkt", Some(&s3_opts)).expect("s3 engine with sts+vhost");
+    let s3_bytes = s3_engine.get("item.txt").await.expect("s3 get");
+    assert_eq!(&s3_bytes[..], b"ok");
+
+    let http_opts = HashMap::from([
+        ("X-Api-Key".to_string(), "secret-api-key".to_string()),
+        ("header.X-Trace-Id".to_string(), "trace-42".to_string()),
+    ]);
+    let http_engine = ObjectStoreEngine::from_url(
+        &format!("http://127.0.0.1:{}", addr.port()),
+        Some(&http_opts),
+    )
+    .expect("http engine with headers");
+    let http_bytes = http_engine.get("doc.txt").await.expect("http get");
+    assert_eq!(&http_bytes[..], b"ok");
+
+    let logs = captured.lock().expect("lock");
+    assert!(logs.len() >= 2);
+    let s3_req = logs[0].to_ascii_lowercase();
+    assert!(
+        s3_req.starts_with("get http://bkt.s3.example.test:9000/item.txt http/1.1\r\n")
+            || s3_req.starts_with("get /item.txt http/1.1\r\n"),
+        "expected virtual-hosted S3 request line, got: {s3_req}"
+    );
+    assert!(
+        s3_req.contains("host: bkt.s3.example.test:9000"),
+        "expected virtual-hosted Host header, got: {s3_req}"
+    );
+    assert!(
+        s3_req.contains("x-amz-security-token: sts-tok-123"),
+        "expected x-amz-security-token header, got: {s3_req}"
+    );
+    let http_req = logs[1].to_ascii_lowercase();
+    assert!(
+        http_req.contains("x-api-key: secret-api-key"),
+        "expected x-api-key header, got: {http_req}"
+    );
+    assert!(
+        http_req.contains("x-trace-id: trace-42"),
+        "expected x-trace-id header, got: {http_req}"
+    );
 }

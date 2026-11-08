@@ -1,7 +1,7 @@
 //! Multi-backend `ObjectStoreEngine` wrapping Apache `object_store`.
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, RwLock};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -137,7 +137,8 @@ fn validate_object_path(path: &str) -> Result<StorePath, StorageError> {
             "object path must not be empty".to_string(),
         ));
     }
-    Ok(StorePath::from(trimmed))
+    StorePath::parse(trimmed)
+        .map_err(|e| StorageError::InvalidInput(format!("invalid object path '{path}': {e}")))
 }
 
 fn validate_optional_prefix(prefix: Option<&str>) -> Result<Option<StorePath>, StorageError> {
@@ -149,11 +150,16 @@ fn validate_optional_prefix(prefix: Option<&str>) -> Result<Option<StorePath>, S
             if trimmed.is_empty() {
                 Ok(None)
             } else {
-                Ok(Some(StorePath::from(trimmed)))
+                StorePath::parse(trimmed)
+                    .map(Some)
+                    .map_err(|e| StorageError::InvalidInput(format!("invalid prefix '{p}': {e}")))
             }
         }
     }
 }
+
+type LocalMetadataEntry = (Option<String>, HashMap<String, String>);
+type LocalMetadataRegistry = Arc<RwLock<HashMap<String, LocalMetadataEntry>>>;
 
 fn build_store_attributes(
     content_type: Option<&str>,
@@ -246,6 +252,7 @@ pub struct MultipartUploadSession {
     flushed_part_sizes: Vec<usize>,
     content_type: Option<String>,
     attributes: HashMap<String, String>,
+    local_metadata: Option<LocalMetadataRegistry>,
     had_error: bool,
 }
 
@@ -306,7 +313,20 @@ impl MultipartUploadSession {
             self.flushed_part_sizes.push(0);
         }
         match upload.complete().await {
-            Ok(result) => Ok(result),
+            Ok(result) => {
+                if let Some(ref registry) = self.local_metadata {
+                    let mut guard = registry.write().unwrap_or_else(|e| e.into_inner());
+                    if self.content_type.is_some() || !self.attributes.is_empty() {
+                        guard.insert(
+                            self.path.clone(),
+                            (self.content_type.clone(), self.attributes.clone()),
+                        );
+                    } else {
+                        guard.remove(&self.path);
+                    }
+                }
+                Ok(result)
+            }
             Err(err) => {
                 self.had_error = true;
                 Err(err.into())
@@ -343,6 +363,31 @@ impl MultipartUploadSession {
     }
 }
 
+fn resolve_s3_endpoint(
+    endpoint: Option<String>,
+    bucket: &str,
+    virtual_hosted_style: bool,
+) -> Result<Option<String>, StorageError> {
+    let Some(raw) = endpoint else {
+        return Ok(None);
+    };
+    if !virtual_hosted_style {
+        return Ok(Some(raw));
+    }
+    let mut parsed = Url::parse(&raw)
+        .map_err(|e| StorageError::InvalidUrl(raw.clone(), format!("invalid S3 endpoint: {e}")))?;
+    if let Some(url::Host::Domain(domain)) = parsed.host() {
+        let bucket_dot = format!("{bucket}.");
+        if !domain.starts_with(&bucket_dot) {
+            let new_host = format!("{bucket}.{domain}");
+            parsed.set_host(Some(&new_host)).map_err(|e| {
+                StorageError::InvalidUrl(raw, format!("invalid virtual-hosted S3 host: {e}"))
+            })?;
+        }
+    }
+    Ok(Some(parsed.to_string().trim_end_matches('/').to_string()))
+}
+
 fn is_loopback_endpoint(endpoint: Option<&str>) -> bool {
     let Some(ep) = endpoint else {
         return false;
@@ -350,13 +395,13 @@ fn is_loopback_endpoint(endpoint: Option<&str>) -> bool {
     let Ok(parsed) = Url::parse(ep) else {
         return false;
     };
-    matches!(
-        parsed.host_str(),
-        Some("127.0.0.1" | "localhost" | "::1" | "[::1]")
-    )
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]") || host.ends_with(".localhost")
 }
 
-const LOOPBACK_PROXY_EXCLUDES: &str = "127.0.0.1,localhost,::1,metadata.google.internal";
+const LOOPBACK_PROXY_EXCLUDES: &str = "127.0.0.1,localhost,.localhost,::1,metadata.google.internal";
 
 fn ambient_proxy_url() -> Option<String> {
     for key in [
@@ -393,6 +438,7 @@ fn build_http_client_options(
     allow_http: bool,
     endpoint: Option<&str>,
     default_headers: Option<http::HeaderMap>,
+    explicit_proxy_url: Option<&str>,
 ) -> ClientOptions {
     let mut opts = ClientOptions::new()
         .with_pool_max_idle_per_host(64)
@@ -401,7 +447,9 @@ fn build_http_client_options(
         .with_timeout(Duration::from_secs(300))
         .with_http2_keep_alive_interval(Duration::from_secs(30))
         .with_allow_http(allow_http);
-    if is_loopback_endpoint(endpoint) {
+    if let Some(proxy_url) = explicit_proxy_url.map(str::trim).filter(|s| !s.is_empty()) {
+        opts = opts.with_proxy_url(proxy_url);
+    } else if is_loopback_endpoint(endpoint) {
         opts = opts.with_proxy_excludes(merged_loopback_proxy_excludes());
         if let Some(proxy_url) = ambient_proxy_url() {
             opts = opts.with_proxy_url(proxy_url);
@@ -426,7 +474,10 @@ pub enum BackendConfig {
         region: Option<String>,
         access_key_id: Option<String>,
         secret_access_key: Option<String>,
+        session_token: Option<String>,
+        virtual_hosted_style: bool,
         endpoint: Option<String>,
+        proxy_url: Option<String>,
         allow_http: bool,
     },
     Gcs {
@@ -468,13 +519,40 @@ pub enum BackendConfig {
     Http {
         url: String,
         allow_http: bool,
+        headers: HashMap<String, String>,
     },
+}
+
+fn parse_http_headers_from_options(
+    opts: &HashMap<String, String>,
+) -> Result<HashMap<String, String>, StorageError> {
+    let mut headers = HashMap::new();
+    if let Some(raw_json) = opts.get("headers") {
+        let parsed: HashMap<String, String> = serde_json::from_str(raw_json).map_err(|e| {
+            StorageError::InvalidInput(format!("invalid Http headers JSON `{raw_json}`: {e}"))
+        })?;
+        headers.extend(parsed);
+    }
+    for (k, v) in opts {
+        if k == "allow_http" || k == "headers" {
+            continue;
+        }
+        let header_name = k
+            .strip_prefix("header.")
+            .or_else(|| k.strip_prefix("http_header."))
+            .unwrap_or(k.as_str());
+        if !header_name.trim().is_empty() {
+            headers.insert(header_name.trim().to_string(), v.clone());
+        }
+    }
+    Ok(headers)
 }
 
 #[derive(Clone)]
 pub struct ObjectStoreEngine {
     inner: Arc<dyn ObjectStore>,
     scheme: String,
+    local_metadata: Option<LocalMetadataRegistry>,
 }
 
 impl ObjectStoreEngine {
@@ -483,6 +561,7 @@ impl ObjectStoreEngine {
             BackendConfig::Memory => Ok(Self {
                 inner: Arc::new(InMemory::new()),
                 scheme: "memory".to_string(),
+                local_metadata: None,
             }),
             BackendConfig::Local { root } => {
                 std::fs::create_dir_all(&root).map_err(|e| {
@@ -495,6 +574,7 @@ impl ObjectStoreEngine {
                 Ok(Self {
                     inner: Arc::new(store),
                     scheme: "file".to_string(),
+                    local_metadata: Some(Arc::new(RwLock::new(HashMap::new()))),
                 })
             }
             BackendConfig::S3 {
@@ -502,10 +582,20 @@ impl ObjectStoreEngine {
                 region,
                 access_key_id,
                 secret_access_key,
+                session_token,
+                virtual_hosted_style,
                 endpoint,
+                proxy_url,
                 allow_http,
             } => {
-                let client_opts = build_http_client_options(allow_http, endpoint.as_deref(), None);
+                let resolved_endpoint =
+                    resolve_s3_endpoint(endpoint, &bucket, virtual_hosted_style)?;
+                let client_opts = build_http_client_options(
+                    allow_http,
+                    resolved_endpoint.as_deref(),
+                    None,
+                    proxy_url.as_deref(),
+                );
                 let mut builder = AmazonS3Builder::new()
                     .with_bucket_name(&bucket)
                     .with_allow_http(allow_http)
@@ -519,12 +609,21 @@ impl ObjectStoreEngine {
                 if let Some(secret) = secret_access_key {
                     builder = builder.with_secret_access_key(secret);
                 }
-                if let Some(ep) = endpoint {
+                if let Some(tok) = session_token
+                    && !tok.trim().is_empty()
+                {
+                    builder = builder.with_token(tok);
+                }
+                if virtual_hosted_style {
+                    builder = builder.with_virtual_hosted_style_request(true);
+                }
+                if let Some(ep) = resolved_endpoint {
                     builder = builder.with_endpoint(ep);
                 }
                 Ok(Self {
                     inner: Arc::new(builder.build()?),
                     scheme: "s3".to_string(),
+                    local_metadata: None,
                 })
             }
             BackendConfig::Gcs {
@@ -608,6 +707,7 @@ impl ObjectStoreEngine {
                     allow_http,
                     endpoint.as_deref(),
                     Some(default_headers),
+                    None,
                 ));
                 if skip_signature {
                     builder = builder.with_skip_signature(true);
@@ -615,6 +715,7 @@ impl ObjectStoreEngine {
                 Ok(Self {
                     inner: Arc::new(builder.build()?),
                     scheme: "gs".to_string(),
+                    local_metadata: None,
                 })
             }
             BackendConfig::Azure {
@@ -624,7 +725,8 @@ impl ObjectStoreEngine {
                 endpoint,
                 allow_http,
             } => {
-                let client_opts = build_http_client_options(allow_http, endpoint.as_deref(), None);
+                let client_opts =
+                    build_http_client_options(allow_http, endpoint.as_deref(), None, None);
                 let mut builder = MicrosoftAzureBuilder::new()
                     .with_container_name(&container)
                     .with_allow_http(allow_http)
@@ -641,6 +743,7 @@ impl ObjectStoreEngine {
                 Ok(Self {
                     inner: Arc::new(builder.build()?),
                     scheme: "az".to_string(),
+                    local_metadata: None,
                 })
             }
             BackendConfig::Oci {
@@ -654,6 +757,7 @@ impl ObjectStoreEngine {
                 Ok(Self {
                     inner: Arc::new(store),
                     scheme: "oci".to_string(),
+                    local_metadata: None,
                 })
             }
             BackendConfig::R2 {
@@ -675,8 +779,12 @@ impl ObjectStoreEngine {
                     }
                     _ => format!("https://{}.r2.cloudflarestorage.com", account_id),
                 });
-                let client_opts =
-                    build_http_client_options(allow_http, Some(resolved_endpoint.as_str()), None);
+                let client_opts = build_http_client_options(
+                    allow_http,
+                    Some(resolved_endpoint.as_str()),
+                    None,
+                    None,
+                );
                 let mut builder = AmazonS3Builder::new()
                     .with_bucket_name(&bucket)
                     .with_region("auto")
@@ -692,10 +800,35 @@ impl ObjectStoreEngine {
                 Ok(Self {
                     inner: Arc::new(builder.build()?),
                     scheme: "r2".to_string(),
+                    local_metadata: None,
                 })
             }
-            BackendConfig::Http { url, allow_http } => {
-                let client_opts = build_http_client_options(allow_http, Some(url.as_str()), None);
+            BackendConfig::Http {
+                url,
+                allow_http,
+                headers,
+            } => {
+                let mut header_map = http::HeaderMap::new();
+                for (name, val) in headers {
+                    let hdr_name = http::header::HeaderName::from_bytes(name.trim().as_bytes())
+                        .map_err(|e| {
+                            StorageError::InvalidInput(format!(
+                                "invalid HTTP header name `{name}`: {e}"
+                            ))
+                        })?;
+                    let hdr_val = http::HeaderValue::from_str(&val).map_err(|e| {
+                        StorageError::InvalidInput(format!(
+                            "invalid HTTP header value for `{name}`: {e}"
+                        ))
+                    })?;
+                    header_map.insert(hdr_name, hdr_val);
+                }
+                let client_opts = build_http_client_options(
+                    allow_http,
+                    Some(url.as_str()),
+                    Some(header_map),
+                    None,
+                );
                 let store = HttpBuilder::new()
                     .with_url(url)
                     .with_client_options(client_opts)
@@ -703,6 +836,7 @@ impl ObjectStoreEngine {
                 Ok(Self {
                     inner: Arc::new(store),
                     scheme: "http".to_string(),
+                    local_metadata: None,
                 })
             }
         }
@@ -763,7 +897,15 @@ impl ObjectStoreEngine {
                         .or_else(|| Some("us-east-1".to_string())),
                     access_key_id: opts.get("access_key_id").cloned(),
                     secret_access_key: opts.get("secret_access_key").cloned(),
+                    session_token: opts
+                        .get("session_token")
+                        .or_else(|| opts.get("token"))
+                        .cloned(),
+                    virtual_hosted_style: opts
+                        .get("virtual_hosted_style")
+                        .is_some_and(|v| v.eq_ignore_ascii_case("true") || v == "1"),
                     endpoint,
+                    proxy_url: opts.get("proxy_url").cloned(),
                     allow_http: opts.get("allow_http").is_some_and(|v| v == "true"),
                 })
             }
@@ -877,6 +1019,7 @@ impl ObjectStoreEngine {
                 url: url_str.to_string(),
                 allow_http: parsed.scheme() == "http"
                     || opts.get("allow_http").is_some_and(|v| v == "true"),
+                headers: parse_http_headers_from_options(&opts)?,
             }),
             other => Err(StorageError::InvalidUrl(
                 url_str.to_string(),
@@ -886,9 +1029,16 @@ impl ObjectStoreEngine {
     }
 
     pub fn with_store(inner: Arc<dyn ObjectStore>, scheme: impl Into<String>) -> Self {
+        let scheme = scheme.into();
+        let local_metadata = if scheme == "file" {
+            Some(Arc::new(RwLock::new(HashMap::new())))
+        } else {
+            None
+        };
         Self {
             inner,
-            scheme: scheme.into(),
+            scheme,
+            local_metadata,
         }
     }
 
@@ -1031,6 +1181,18 @@ impl ObjectStoreEngine {
             Err(err) => return Err(err.into()),
         };
 
+        if let Some(ref registry) = self.local_metadata {
+            let mut guard = registry.write().unwrap_or_else(|e| e.into_inner());
+            if opts.content_type.is_some() || !opts.attributes.is_empty() {
+                guard.insert(
+                    location.to_string(),
+                    (opts.content_type.clone(), opts.attributes.clone()),
+                );
+            } else {
+                guard.remove(location.as_ref());
+            }
+        }
+
         Ok(StoredObjectMeta {
             path: location.to_string(),
             size,
@@ -1131,6 +1293,7 @@ impl ObjectStoreEngine {
             flushed_part_sizes: Vec::new(),
             content_type: opts.content_type,
             attributes: opts.attributes,
+            local_metadata: self.local_metadata.clone(),
             had_error: false,
         })
     }
@@ -1173,10 +1336,15 @@ impl ObjectStoreEngine {
         offset: u64,
         length: u64,
     ) -> Result<Bytes, StorageError> {
+        let end = offset.checked_add(length).ok_or_else(|| {
+            StorageError::InvalidInput("byte range offset + length overflow".to_string())
+        })?;
+        if length == 0 {
+            let _ = self.head(path).await?;
+            return Ok(Bytes::new());
+        }
         let location = validate_object_path(path)?;
-        let start = offset;
-        let end = offset + length;
-        Ok(self.inner.get_range(&location, start..end).await?)
+        Ok(self.inner.get_range(&location, offset..end).await?)
     }
 
     pub async fn head(&self, path: &str) -> Result<StoredObjectMeta, StorageError> {
@@ -1191,10 +1359,22 @@ impl ObjectStoreEngine {
                 },
             )
             .await?;
-        Ok(StoredObjectMeta::from_meta_and_attributes(
-            result.meta,
-            &result.attributes,
-        ))
+        let mut meta = StoredObjectMeta::from_meta_and_attributes(result.meta, &result.attributes);
+        if let Some(ref registry) = self.local_metadata
+            && let Some((ct, attrs)) = registry
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(location.as_ref())
+                .cloned()
+        {
+            if meta.content_type.is_none() {
+                meta.content_type = ct;
+            }
+            if meta.attributes.is_empty() {
+                meta.attributes = attrs;
+            }
+        }
+        Ok(meta)
     }
 
     pub async fn exists(&self, path: &str) -> Result<bool, StorageError> {
@@ -1209,6 +1389,12 @@ impl ObjectStoreEngine {
     pub async fn delete(&self, path: &str) -> Result<(), StorageError> {
         let location = validate_object_path(path)?;
         self.inner.delete(&location).await?;
+        if let Some(ref registry) = self.local_metadata {
+            registry
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(location.as_ref());
+        }
         Ok(())
     }
 
@@ -1216,6 +1402,14 @@ impl ObjectStoreEngine {
         let from = validate_object_path(src)?;
         let to = validate_object_path(dst)?;
         self.inner.copy(&from, &to).await?;
+        if let Some(ref registry) = self.local_metadata {
+            let mut guard = registry.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = guard.get(from.as_ref()).cloned() {
+                guard.insert(to.to_string(), entry);
+            } else {
+                guard.remove(to.as_ref());
+            }
+        }
         Ok(())
     }
 
@@ -1231,6 +1425,14 @@ impl ObjectStoreEngine {
             self.inner.rename_if_not_exists(&from, &to).await?;
         } else {
             self.inner.rename(&from, &to).await?;
+        }
+        if let Some(ref registry) = self.local_metadata {
+            let mut guard = registry.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = guard.remove(from.as_ref()) {
+                guard.insert(to.to_string(), entry);
+            } else if from != to {
+                guard.remove(to.as_ref());
+            }
         }
         Ok(())
     }

@@ -252,6 +252,7 @@ pub struct S3SignConfig {
     pub access_key_id: String,
     pub secret_access_key: String,
     pub endpoint: Option<String>,
+    pub virtual_hosted_style: bool,
 }
 
 impl S3SignConfig {
@@ -304,20 +305,41 @@ impl S3SignConfig {
         let host_only = base_url
             .host_str()
             .ok_or_else(|| SigningError::InvalidInput("missing S3 host".to_string()))?;
+
+        let endpoint_prefix = base_url.path().trim_matches('/');
+        let encoded_bucket = rfc3986_encode(bucket, true);
+        let encoded_object = rfc3986_encode(trimmed_path, false);
+
+        let effective_host_only = if self.virtual_hosted_style {
+            let bucket_dot = format!("{encoded_bucket}.");
+            if host_only.starts_with(&bucket_dot) {
+                host_only.to_string()
+            } else {
+                format!("{encoded_bucket}.{host_only}")
+            }
+        } else {
+            host_only.to_string()
+        };
         let host = match base_url.port() {
             Some(port)
                 if (base_url.scheme() == "http" && port != 80)
                     || (base_url.scheme() == "https" && port != 443) =>
             {
-                format!("{host_only}:{port}")
+                format!("{effective_host_only}:{port}")
             }
-            _ => host_only.to_string(),
+            _ => effective_host_only,
         };
 
-        let endpoint_prefix = base_url.path().trim_matches('/');
-        let encoded_bucket = rfc3986_encode(bucket, true);
-        let encoded_object = rfc3986_encode(trimmed_path, false);
-        let canonical_uri = if endpoint_prefix.is_empty() {
+        let canonical_uri = if self.virtual_hosted_style {
+            if endpoint_prefix.is_empty() {
+                format!("/{encoded_object}")
+            } else {
+                format!(
+                    "/{}/{encoded_object}",
+                    rfc3986_encode(endpoint_prefix, false)
+                )
+            }
+        } else if endpoint_prefix.is_empty() {
             format!("/{encoded_bucket}/{encoded_object}")
         } else {
             format!(
@@ -420,7 +442,13 @@ impl S3SignConfig {
             .and_then(|ep| Url::parse(ep.trim()).ok())
             .map(|u| u.path().trim_matches('/').to_string())
             .unwrap_or_default();
-        let bucket_prefix = if endpoint_prefix.is_empty() {
+        let path_prefix = if self.virtual_hosted_style {
+            if endpoint_prefix.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{}/", rfc3986_encode(&endpoint_prefix, false))
+            }
+        } else if endpoint_prefix.is_empty() {
             format!("/{encoded_bucket}/")
         } else {
             format!(
@@ -428,16 +456,25 @@ impl S3SignConfig {
                 rfc3986_encode(&endpoint_prefix, false)
             )
         };
-        let raw_encoded_key = parsed
-            .path()
-            .strip_prefix(&bucket_prefix)
-            .unwrap_or(parsed.path().trim_start_matches('/'));
+        let Some(raw_encoded_key) = parsed.path().strip_prefix(&path_prefix) else {
+            return Ok(false);
+        };
+        if raw_encoded_key.is_empty() {
+            return Ok(false);
+        }
         let decoded_key = percent_decode_utf8(raw_encoded_key)?;
 
         let regenerated = self.sign_v4_url(method, &decoded_key, expires_secs, signed_unix)?;
         let regen_parsed = Url::parse(&regenerated).map_err(|e| {
             SigningError::InvalidInput(format!("invalid regenerated URL `{regenerated}`: {e}"))
         })?;
+        if parsed.scheme() != regen_parsed.scheme()
+            || parsed.host_str() != regen_parsed.host_str()
+            || parsed.port_or_known_default() != regen_parsed.port_or_known_default()
+            || parsed.path() != regen_parsed.path()
+        {
+            return Ok(false);
+        }
         let expected_sig = regen_parsed
             .query_pairs()
             .find(|(k, _)| k == "X-Amz-Signature")

@@ -1365,6 +1365,7 @@ fn py_sign_s3_v4_url(
             access_key_id: access_key_id.to_string(),
             secret_access_key: secret_access_key.to_string(),
             endpoint,
+            virtual_hosted_style: false,
         };
         sign_s3_v4_url(&cfg, method, object_path, expires_in_secs, timestamp)
     })
@@ -1392,6 +1393,7 @@ fn py_verify_s3_v4_url(
             access_key_id: access_key_id.to_string(),
             secret_access_key: secret_access_key.to_string(),
             endpoint,
+            virtual_hosted_style: false,
         };
         verify_s3_v4_url(&cfg, method, signed_url, timestamp)
     })
