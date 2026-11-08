@@ -4,8 +4,8 @@ id: storage-completeness:ch21:t01
 chapter_id: ch21-sdk-resolved-config
 title: Retain SDK-resolved GCS endpoint and transport configuration
 description: Retain SDK-resolved GCS endpoint and transport configuration
-status: stable
-state: completed
+status: draft
+state: pending
 priority: P1
 verification_strategy: characterization
 depends_on:
@@ -13,16 +13,19 @@ depends_on:
 read_set:
 - src/rs/vertebra-storage/src/store.rs
 - src/rs/vertebra-storage/src/conditional.rs
+- src/rs/vertebra-storage/src/gcs_request.rs
 - .agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md
 files:
 - src/rs/vertebra-storage/src/store.rs
 - src/rs/vertebra-storage/src/conditional.rs
+- src/rs/vertebra-storage/src/gcs_request.rs
 tests:
 - src/rs/vertebra-storage/src/store.rs
 - src/rs/vertebra-storage/src/conditional.rs
-estimated_loc: 120
-plan_revision: 8
-plan_commit: c737ffeb
+- src/rs/vertebra-storage/src/gcs_request.rs
+estimated_loc: 140
+plan_revision: 9
+plan_commit: null
 state_revision: 0
 claimed_by: agent:sdk_config_capture
 claimed_at: '2026-11-08T00:36:39Z'
@@ -51,19 +54,22 @@ tags:
 
 ## Objective & Scope Boundary
 
-Retain the exact resolved SDK endpoint and ClientOptions beside the existing concrete GCS Arc after ch10:t01. Own only store.rs and conditional.rs with inline actual SDK/local-HTTP tests. Constructor tests cover reads and configuration capture; full publication HTTP comparison belongs to ch14:t04. No future protocol implementation is included. [^implementation] [^research]
+Retain the exact resolved SDK endpoint and ClientOptions beside the existing concrete GCS Arc after ch10:t01. Own store.rs, conditional.rs and the existing gcs_request.rs consumer with inline actual SDK/local-HTTP tests. Constructor tests cover reads and configuration capture; full publication HTTP comparison belongs to ch14:t04. No future protocol implementation is included. [^implementation] [^research]
 
 ## Bounded Read Manifest
 
 - `src/rs/vertebra-storage/src/store.rs` — ObjectStoreEngine::new GCS builder, credentials and ordinary reads.
 - `src/rs/vertebra-storage/src/conditional.rs` — existing GCS publication variant and private configuration record.
+- `src/rs/vertebra-storage/src/gcs_request.rs` — owned endpoint consumer and comparative real-SDK HTTP regression.
 - `.agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md` — pinned object_store 0.13.2 resolution and connector API evidence.
 
 ## Symbol & Signature Contracts
 
-Add private `GcsStageConfig { base: Url, bucket: String, client_options: ClientOptions, skip_signature: bool }` beside the existing concrete GCS publication handle. In store.rs, the private delegating public HttpConnector implements `connect(&ClientOptions) -> object_store::Result<HttpClient>` by cloning the supplied options into shared capture, then invoking `ReqwestConnector.connect(options)` unchanged. Apply it via `GoogleCloudStorageBuilder::with_http_connector`. Build the actual SDK store ONCE, then take the final captured options, which belong to the object-store client after any credential/metadata connectors. Clone the one resulting Arc into ordinary and publication fields; authentication and refresh stay in that SDK's credential provider.
+Add private `GcsStageConfig { base: String, bucket: String, client_options: ClientOptions, skip_signature: bool }` beside the existing concrete GCS publication handle. In store.rs, the private delegating public HttpConnector implements `connect(&ClientOptions) -> object_store::Result<HttpClient>` by cloning the supplied options into shared capture, then invoking `ReqwestConnector.connect(options)` unchanged. Apply it via `GoogleCloudStorageBuilder::with_http_connector`. Build the actual SDK store ONCE, then take the final captured options, which belong to the object-store client after any credential/metadata connectors. Clone the one resulting Arc into ordinary and publication fields; authentication and refresh stay in that SDK's credential provider.
 
 The actual construction path is `pub(crate) fn build_gcs_store(builder: GoogleCloudStorageBuilder) -> Result<(Arc<GoogleCloudStorage>, GcsStageConfig), StorageError>`, called by ObjectStoreEngine::new after applying its existing configuration; inline tests invoke that same production helper with real custom ClientOptions. Before consuming the configured builder, retrieve effective bucket/BaseUrl/skip-signature and singleton service-account path/key. Effective explicit/environment BaseUrl wins, followed by accepted singleton service-account JSON `gcs_base_url`, followed by `https://storage.googleapis.com`. A narrow serde endpoint-only struct may read metadata from that singleton source; never reconstruct or log credentials. When both path and inline key exist, preserve the SDK's own rejection by passing the unchanged builder to build; do not choose a source or silently ignore invalid configuration. Preserve SDK error classification and redact credential-bearing context. Builder getters alone do not include the service-account fallback.
+
+Retain the resolved base as the exact SDK string. Bare origin and explicit root slash are distinct; neither Url canonicalization nor pop_if_empty may erase that distinction. Build the actual request through the pinned SDK-equivalent lexical format of base/bucket/encoded-key, then parse that complete string into the request URL. Preserve the pinned SDK object-key encoding exactly once. Compare actual SDK reads and private HEAD/PUT/receipt requests for bare origin, explicit root slash, prefix and prefix with trailing slash. Do not fix only one side through endpoint normalization. GcsRequestClient still receives Arc<GcsStageConfig>; only the private base field representation changes.
 
 Capture final allow_http, proxy/exclusions, TLS, timeouts and default headers. Constructor does not probe endpoints or rebuild the store. Do not add public APIs, fake uses, broad allows or a test-only copy of production logic. For an otherwise unused future `GcsStageConfig` or GCS variant field, only if non-test compilation requires it, place exact field-local `#[cfg_attr(not(test), expect(dead_code, reason = "consumed by ch14:t01 GCS requests"))]`; ch14:t01 owns mandatory removal in conditional.rs when its real wrapper consumes these fields. Inline tests actually read captured config, so an unconditional expect would be unfulfilled in test builds.
 
@@ -77,6 +83,7 @@ No endpoint network request occurs during construction. Test singleton path and 
 
 | Case | Input | Observable result |
 | --- | --- | --- |
+| Lexical endpoint identity | Bare origin, explicit root slash, prefix and prefix with trailing slash | Actual SDK and private request paths match exactly for the same configuration, bucket and encoded key; no unilateral slash normalization. |
 | Explicit override | BaseUrl A, singleton service account gcs_base_url B, allow_http true | Actual SDK read reaches local A; retained base is A and B receives no request. |
 | True singleton fallback | Separate path-only and inline-key-only fixtures with local gcs_base_url B and disable_oauth true | Actual SDK reads reach B; retained base/bucket/skip_signature and empty-bearer behavior match SDK configuration. |
 | Dual source rejection | Both accepted service-account path and key configured | Actual constructor returns SDK configuration failure; responder count is zero and no source is silently selected. |
@@ -97,9 +104,9 @@ Record exact statuses, constructor request count, tested singleton sources and f
 
 ## Acceptance Criteria
 
-- [x] All matrix rows exercise the real SDK/configuration path and preserve exact final transport and endpoint behavior.
+- [ ] All matrix rows exercise the real SDK/configuration path and preserve exact final transport and endpoint behavior.
 - [x] SDK construction occurs once; concrete Arc, credentials and refresh identity are shared with ordinary reads.
-- [x] Only two production files change; read_set <=6 and estimated implementation <=120 LOC.
+- [ ] Only three production files change; read_set <=6 and estimated implementation <=140 LOC.
 - [x] Any exact field expectation is temporary and ch14:t01 removes it upon actual production use.
 - [ ] Signed local conventional commit, exact verification evidence, correctness and fresh quality reviews are recorded; docs remain assigned to ch09:t03/ch04:t03.
 
@@ -110,4 +117,4 @@ Connector/configuration capture has 119 added implementation lines across two ow
 [^implementation]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine::new` — Actual GCS construction seam.
 [^research]: `.agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md` — Accepted SDK configuration and connector evidence.
 
-The constructor-capture source is signed at `fe992ae3`, imported from independently verified `844cd4a8`. Its bounded implementation has 119 added production lines and shares `Arc<GcsStageConfig>` without cloning large configuration into the publication enum. The real SDK baseline passes before capture; actual configured reads and final capture pass afterward. Independent correctness review reports no verified findings. The revision8 impacted frontier is independently approved at `c737ffeb`; this completed receipt is bound to the imported source. The newly added snapshot-request task retains its separate acceptance.
+The constructor-capture source is signed at `fe992ae3`, imported from independently verified `844cd4a8`. Its bounded implementation has 119 added production lines and shares `Arc<GcsStageConfig>` without cloning large configuration into the publication enum. The real SDK baseline passes before capture; actual configured reads and final capture pass afterward. Independent correctness review reports no verified findings. The prior verified source remains available at `fe992ae3`. Revision9 reopens this owner for the independently verified SDK/private lexical endpoint mismatch; production repair follows bounded readiness approval. The newly added snapshot-request task retains its separate acceptance.

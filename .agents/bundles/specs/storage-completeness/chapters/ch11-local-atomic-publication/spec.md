@@ -9,7 +9,7 @@ state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: storage-completeness:ch11:t02
+current_task: storage-completeness:ch11:t03
 plan_revision: 6
 plan_commit: 9ead0d1d
 state_revision: 0
@@ -98,17 +98,17 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 ## 5. Implementation Plan
 
 - [x] [8c808beb] storage-completeness:ch11:t01 — Add persistent OS locks per physical parent directory (tasks/t01-physical-target-locks.md)
-- [ ] storage-completeness:ch11:t02 — Manage SDK-private same-parent staging artifacts (tasks/t02-same-fs-stage.md)
-- [!] storage-completeness:ch11:t03 — Guard every local mutation and publish with native atomic operations (tasks/t03-local-mutations-and-publish.md)
+- [x] [4dac250b] storage-completeness:ch11:t02 — Manage SDK-private same-parent staging artifacts (tasks/t02-same-fs-stage.md)
+- [ ] storage-completeness:ch11:t03 — Guard every local mutation and publish with native atomic operations (tasks/t03-local-mutations-and-publish.md)
 - [ ] storage-completeness:ch11:t04 — Prove local CAS across processes, roots and cleanup boundaries (tasks/t04-local-subprocess-acceptance.md)
 
 **Chapter Recovery Checkpoint:** run every task's focused verification, then correctness review and a fresh quality review before closing this chapter. `/flow:implement storage-completeness ch11-local-atomic-publication` executes its ready worksheet.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- The stable revision5 frontier is independently approved at `bdc7799a`. Physical-parent OS locks are completed at `8c808beb`. Staging/publication source remains at `61a948df`; t02 is reopened to preserve create-only rename before t03 routing. The module remains test-only.
+- The stable revision5 frontier is independently approved at `bdc7799a`. Physical-parent OS locks are completed at `8c808beb`. Staging/publication and create-only rename are completed at `4dac250b` with sixteen focused Linux tests. The module remains test-only.
 - Thirteen focused Linux filesystem/subprocess tests, formatting, all-target Clippy and diff checks pass. macOS/Windows runtime evidence is unavailable on this host.
-- Public mutation routing/production activation in t03 is blocked until the create-only rename primitive repair is signed; t04 remains pending. Revision6 is independently approved at `9ead0d1d`, and the chapter has no correctness or quality review stamp.
+- Public mutation routing/production activation in t03 is ready; t04 remains pending. Revision6 is independently approved at `9ead0d1d`, and the chapter has no correctness or quality review stamp.
 - Documentation: `[0/1 files documented]`, owned by the explicit consolidation tasks.
 - Reclosure of ch01 and downstream acceptance waits for native repair gates; this chapter never depends on that reclosure.
 

@@ -4,14 +4,14 @@ parent_flow: storage-completeness
 chapter_id: ch21-sdk-resolved-config
 title: GCS Configuration and Snapshot Requests
 description: Preserve the actual GCS SDK endpoint and transport beside its concrete store
-status: stable
+status: draft
 state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: null
-plan_revision: 8
-plan_commit: c737ffeb
+current_task: storage-completeness:ch21:t01
+plan_revision: 9
+plan_commit: null
 state_revision: 0
 last_verified_checkpoint: 533adc68
 last_reviewed_commit: null
@@ -54,7 +54,7 @@ GCS staging needs resolved configuration that the built SDK does not expose. Thi
 
 ### R1: Retain exact SDK-resolved configuration with one SDK build
 
-Private `GcsStageConfig { base: Url, bucket: String, client_options: ClientOptions, skip_signature: bool }` in conditional.rs is shared behind Arc beside `PublicationBackend::Gcs`'s `Arc<GoogleCloudStorage>`. ObjectStoreEngine construction resolves this record without changing public BackendConfig or authentication. BaseUrl comes from the fully configured builder first, then accepted singleton service-account `gcs_base_url`, then `https://storage.googleapis.com`. Simultaneous path and inline key sources retain the SDK rejection. Endpoint-only deserialization leaves credentials and refresh with the SDK. `store.rs::CapturingConnector` implements the public `HttpConnector::connect(&ClientOptions) -> object_store::Result<HttpClient>`, clones options into shared capture and delegates unchanged to `ReqwestConnector`. The final capture follows one actual `builder.build()` and retains the object-store options after metadata/auth connector calls. Reads and publication identity share the same built Arc. [^source]
+Private `GcsStageConfig { base: String, bucket: String, client_options: ClientOptions, skip_signature: bool }` in conditional.rs is shared behind Arc beside `PublicationBackend::Gcs`'s `Arc<GoogleCloudStorage>`. ObjectStoreEngine construction resolves this record without changing public BackendConfig or authentication. BaseUrl comes from the fully configured builder first, then accepted singleton service-account `gcs_base_url`, then `https://storage.googleapis.com`. Simultaneous path and inline key sources retain the SDK rejection. Endpoint-only deserialization leaves credentials and refresh with the SDK. `store.rs::CapturingConnector` implements the public `HttpConnector::connect(&ClientOptions) -> object_store::Result<HttpClient>`, clones options into shared capture and delegates unchanged to `ReqwestConnector`. The final capture follows one actual `builder.build()` and retains the object-store options after metadata/auth connector calls. Reads and publication identity share the same built Arc. [^source]
 
 `pub(crate) fn build_gcs_store(builder: GoogleCloudStorageBuilder) -> Result<(Arc<GoogleCloudStorage>, GcsStageConfig), StorageError>` is the actual ObjectStoreEngine construction path. The caller wraps the owned configuration in Arc; inline tests configure real ClientOptions through this same path. The record preserves validated skip_signature, HTTP allowance, proxies/exclusions, TLS, timeouts and default headers. Construction performs no network probe or second SDK build. The private request client uses the same SDK credential owner; ch14 retains acceptance through the actual production wrapper. [^source] [^gcs-request]
 
@@ -85,23 +85,23 @@ Progress: `[1/1 files documented]` for scoped SDK configuration and private snap
 
 | Requirement | Task | Strategy | Verification |
 | --- | --- | --- | --- |
-| R1 | [ch21:t01](tasks/t01-sdk-resolved-config.md) | characterization | Inline actual SDK/local-HTTP construction, read and captured-config tests in store.rs/conditional.rs. |
+| R1 | [ch21:t01](tasks/t01-sdk-resolved-config.md) | characterization | Inline actual SDK/local-HTTP construction, capture and comparative lexical endpoint tests in store.rs/conditional.rs/gcs_request.rs. |
 | R2 | [ch21:t02](tasks/t02-gcs-snapshot-requests.md) | integration_acceptance | Inline real XML snapshot/PUT/receipt HTTP tests, metadata-only races and exact configuration. |
 
 ## 5. Implementation Plan
 
-- [x] [fe992ae3] storage-completeness:ch21:t01 — Retain SDK-resolved GCS endpoint and transport configuration (tasks/t01-sdk-resolved-config.md)
-- [x] [533adc68] storage-completeness:ch21:t02 — Capture and fence GCS data and metadata snapshots (tasks/t02-gcs-snapshot-requests.md)
+- [ ] storage-completeness:ch21:t01 — Retain SDK-resolved GCS endpoint and transport configuration (tasks/t01-sdk-resolved-config.md)
+- [!] storage-completeness:ch21:t02 — Capture and fence GCS data and metadata snapshots (tasks/t02-gcs-snapshot-requests.md)
 
 **Chapter Recovery Checkpoint:** focused library tests, normal non-test compilation and all-target Clippy precede correctness and fresh quality review. ch14 consumers retain their declared configuration/snapshot dependencies; full read-versus-publication comparison belongs to ch14:t04.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Both bounded tasks are completed: SDK configuration capture is signed at `fe992ae3`, and private snapshot requests are signed at `533adc68` under the independently approved revision-8 frontier `c737ffeb`. Each task retains at most two production files, six reads and 250 implementation LOC. The constructor returns owned configuration; the engine and request client share it through Arc beside the same concrete SDK credential owner.
+Configuration and snapshot artifacts remain signed at `fe992ae3` and `533adc68`. Correctness review of `85ed9f36..1388109d` identifies a verified lexical endpoint mismatch: a configured prefix with trailing slash produces different actual SDK and private request paths. Revision9 reopens t01 for one atomic three-file capture/request repair, and t02 is blocked until that signed prerequisite. The bounded repair preserves at most three production files, six reads and 250 implementation LOC. The constructor returns owned configuration; the engine and request client share it through Arc beside the same concrete SDK credential owner.
 
 Constructor characterization records three baseline tests, then 14 library and 28 canonical tests with normal compilation, Clippy, formatting and diff checks passing. The combined pre-snapshot checkpoint passes 15 library and 39 canonical tests. Snapshot acceptance records one actual configured SDK/HTTP baseline before the primitive, then eight real request tests; formatting, normal library compilation, all-target Clippy and diff checks exit 0. These source receipts do not establish installed Python acceptance: extensions remain at `c7868b02`.
 
-Scoped knowledge is synchronized at `[1/1 files documented]`. The chapter remains active with `current_task: null` and `last_reviewed_commit: null` while cold correctness and fresh quality reviews cover both tasks and this Markdown sync. ch10's independent core review remains open. ch14 retains first production activation and final publication/configuration/receipt acceptance; ch09:t03/ch04:t03 retain final provider documentation and user guides.
+Scoped knowledge is synchronized at `[1/1 files documented]`. The chapter remains active with `current_task: storage-completeness:ch21:t01` and `last_reviewed_commit: null`; correctness recheck and fresh quality review follow the repair and refreshed Markdown. ch10 is independently completed and reviewed at `1388109d`. ch14 retains first production activation and final publication/configuration/receipt acceptance; ch09:t03/ch04:t03 retain final provider documentation and user guides.
 
 [^source]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine::new` — Actual configured GCS builder and credential precedence.
 [^research]: `.agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md` — Pinned SDK builder, endpoint and transport evidence.

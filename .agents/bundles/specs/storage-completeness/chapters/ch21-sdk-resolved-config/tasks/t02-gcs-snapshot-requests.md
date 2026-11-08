@@ -4,8 +4,8 @@ id: storage-completeness:ch21:t02
 chapter_id: ch21-sdk-resolved-config
 title: Capture and fence GCS data and metadata snapshots
 description: Implement the real private XML request boundary for opaque ETag predicates
-status: stable
-state: completed
+status: draft
+state: blocked
 priority: P1
 verification_strategy: integration_acceptance
 depends_on:
@@ -24,13 +24,13 @@ files:
 tests:
 - src/rs/vertebra-storage/src/gcs_request.rs
 estimated_loc: 230
-plan_revision: 8
-plan_commit: c737ffeb
+plan_revision: 9
+plan_commit: null
 state_revision: 0
 claimed_by: agent:gcs_snapshot_requests
 claimed_at: '2026-11-08T00:45:50Z'
-blocked_reason: null
-unblock_condition: null
+blocked_reason: "SDK and private requests normalize configured trailing slashes differently; revision9 t01 preserves exact lexical endpoint identity."
+unblock_condition: "The three-file endpoint capture/request repair is signed and verified against actual SDK requests for all four endpoint forms."
 next_step: null
 last_verified_at: '2026-11-08T00:51:54Z'
 last_verified_commit: 533adc68
@@ -125,7 +125,7 @@ The complete primitive acceptance target passes (`8` tests, exit `0`): quoted XM
 
 Fresh gates all exit `0`: `cargo fmt --manifest-path src/rs/Cargo.toml --all --check`, `cargo check --manifest-path src/rs/Cargo.toml -p vertebra-storage --lib`, `cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets -- -D warnings`, and `git diff --check`. Cargo operations hold `/tmp/vertebra-flow-storage-cargo.lock` outermost; tests additionally hold `/tmp/vertebra-flow-shm-tests.lock`, use `uv run --no-sync`, `CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target"` and `PYO3_PYTHON="$PWD/.venv/bin/python3.12"`.
 
-Source is signed at `533adc68` and its task receipt is completed. Correctness and fresh quality chapter reviews remain open. Durable documentation remains assigned to ch09:t03/ch04:t03 after native acceptance.
+The source artifact remains signed at `533adc68`. This task is blocked until the shared lexical endpoint identity repair in t01 is signed; correctness recheck and fresh quality chapter reviews follow. Durable documentation remains assigned to ch09:t03/ch04:t03 after native acceptance.
 
 [^implementation]: `src/rs/vertebra-storage/src/gcs_request.rs` — Actual private request implementation introduced by this task.
 [^research]: `.agents/bundles/specs/storage-completeness/research/conditional-publication_20261107.md` — SDK and primary HTTP evidence.

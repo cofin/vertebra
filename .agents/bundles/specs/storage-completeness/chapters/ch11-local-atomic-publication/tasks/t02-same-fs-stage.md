@@ -5,7 +5,7 @@ chapter_id: ch11-local-atomic-publication
 title: Manage SDK-private same-parent staging artifacts
 description: Manage SDK-private same-parent staging artifacts
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: characterization
 depends_on:
@@ -24,43 +24,51 @@ estimated_loc: 210
 plan_revision: 6
 plan_commit: 9ead0d1d
 state_revision: 0
-claimed_by: null
-claimed_at: null
+claimed_by: agent:runtime-ipc-specialist
+claimed_at: '2026-11-08T01:09:07.470905+00:00'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: '2026-11-08T00:59:02.565672+00:00'
-last_verified_commit: 61a948df
+last_verified_at: '2026-11-08T01:11:34.291734+00:00'
+last_verified_commit: 4dac250b
 verification_evidence: |
-  Linux x86_64 native source checkpoint: 61a948df.
+  Linux x86_64 verified repair source checkpoint: 4dac250b. Approved plan identity is revision6 / 9ead0d1d.
   All Cargo commands acquire /tmp/vertebra-flow-storage-cargo.lock first and set
   CARGO_TARGET_DIR="$PWD/../vertebra/src/rs/target" and
   PYO3_PYTHON="$PWD/.venv/bin/python3.12". Runtime commands additionally acquire
   /tmp/vertebra-flow-shm-tests.lock before uv run --no-sync cargo.
-  Before primitive implementation: cargo test --manifest-path src/rs/Cargo.toml
-  -p vertebra-storage --lib local_publication::tests::same_parent_filesystem_and_sdk_characterization:
-  exit 0, 1 actual-filesystem/SDK characterization test. It covers hidden artifacts
-  through overlapping roots, both SDK listing APIs, legal keep#suffix, raw percent
-  and Unicode paths, native hard-link no-replace and same-parent atomic rename.
+  Before rename repair: cargo test --manifest-path src/rs/Cargo.toml -p
+  vertebra-storage --test storage_engine_tests test_atomic_rename_and_conflict
+  -- --exact: exit 0, 1 canonical public SDK-backed Memory/Local test.
+  Before rename repair: cargo test --manifest-path src/rs/Cargo.toml -p
+  vertebra-storage --lib
+  local_publication::tests::sdk_create_only_rename_partial_failure_characterization
+  -- --exact: exit 0, 1 real SDK/native permission characterization. Successful
+  destination link followed by denied source removal reports an error and retains
+  both source and destination payloads.
   Final focused gate: cargo test --manifest-path src/rs/Cargo.toml -p
-  vertebra-storage --lib local_publication: exit 0, 13 tests. This includes retained
-  abort ownership after cancellation/error, idempotent abort, owned-only drop
-  cleanup, real permission failure, typed predicates against a controlled competing
-  native SDK write, actual SDK publication receipts, and copy/rename/delete behavior.
+  vertebra-storage --lib local_publication: exit 0, 16 tests. New acceptance proves
+  create-only conflict preserves both exact byte sequences after a controlled
+  native SDK competitor writes during guard contention; absent-target rename
+  removes the source; ordinary rename overwrites; native source-removal failure
+  leaves both names and reports PermissionDenied. Existing stage/predicate/receipt,
+  cancellation, owned cleanup, alias/order and permission tests remain green.
+  cargo check --manifest-path src/rs/Cargo.toml -p vertebra-storage: exit 0.
   cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-storage --all-targets
   -- -D warnings: exit 0. cargo fmt --manifest-path src/rs/Cargo.toml --all --check:
   exit 0. git diff --check: exit 0.
-  The task adds 192 physical implementation lines and 389 inline test lines in
-  one production file. The module remains test-only; t03 owns runtime activation
-  and public engine mutation routing. No installed Python acceptance is claimed.
-  macOS and Windows runtime/build evidence is unavailable on this Linux host.
-  Native final link/rename/remove occurs synchronously under retained guards;
-  no detached final-mutation job can outlive cancellation of those guards.
-  Coordinator owns signed source commit and final state/SHA synchronization.
+  Total t02 implementation adds 207 physical lines over t01, including 15 repair
+  lines; it remains below 250 in one production file. Inline tests are separate.
+  The module remains test-only; t03 owns runtime activation/public engine routing.
+  Canonical t03 test WIP is preserved unchanged. No installed Python acceptance or
+  macOS/Windows runtime/build evidence is claimed on this Linux host.
+  Native link/remove/rename remain synchronous under retained ordered guards.
+  No detached mutation job, payload copying, rollback deletion or fallback exists.
+  Coordinator owns signed commit and final state/SHA synchronization.
   All task-owned writes and build/test sessions are quiescent for commit.
 created_at: '2026-11-07T12:00:00Z'
-updated_at: '2026-11-08T00:59:02.565672+00:00'
-commit: 61a948df
+updated_at: '2026-11-08T01:11:34.291734+00:00'
+commit: 4dac250b
 sources:
 - id: implementation
   resource: src/rs/vertebra-storage/src/local_publication.rs
@@ -128,14 +136,16 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 ## Acceptance Criteria
 
-- [ ] Every matrix row passes at its public seam with existing behavior preserved.
+- [x] Every matrix row passes at its public seam with existing behavior preserved.
 - [x] Only owned files change; bounds stay at read_set <= 6, production files <= 3 and estimated implementation LOC <= 250.
 - [x] User-facing usage and native guarantees are documented by ch04:t03 and ch09; this task records its observable contract in the canonical regression tests.
-- [ ] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
+- [x] A signed local conventional commit and verification evidence are recorded; no hosted action is performed.
 
 ## Notes & Discoveries
 
 Native hard-link publication keeps two names for one inode until owned stage cleanup. Native rename between those same two inode names is a no-op, so the characterization recreates a distinct replacement stage before testing overwrite. SDK path_to_filesystem preserves raw percent and Unicode keys; empty SDK StorePath is not a valid filesystem object path.
+
+Create-only rename uses native hard-link then source removal under ordered parent guards. Real source-directory permission denial proves a partial failure retains both names without rollback deletion.
 
 The existing primitive source is `61a948df`. Revision6 reopens this task solely to preserve the public engine create-only rename flag through the private primitive; root readiness adjudication adopts the guarded SDK-equivalent link/remove contract. Independent bounded plan review approves revision6 at `9ead0d1d`; the repair executes against that identity. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 

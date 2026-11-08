@@ -5,7 +5,7 @@ chapter_id: ch11-local-atomic-publication
 title: Guard every local mutation and publish with native atomic operations
 description: Guard every local mutation and publish with native atomic operations
 status: stable
-state: blocked
+state: pending
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -30,9 +30,9 @@ plan_commit: 9ead0d1d
 state_revision: 0
 claimed_by: agent:runtime-ipc-specialist
 claimed_at: '2026-11-08T01:03:13.386388+00:00'
-blocked_reason: "Public store.rs:1069 rename(src, dst, if_not_exists) requires create-only semantics; completed local_publication.rs:261 rename(from, to) exposes unconditional rename only. Existing test_atomic_rename_and_conflict proves Local create-only rename and typed conflict with intact source. Production routing cannot preserve that contract within t03 ownership."
-unblock_condition: "Completed, verified prerequisite primitive accepts if_not_exists and performs guarded SDK-equivalent no-replace publication with intact source on conflict; revised t02/t03 contracts synchronize."
-next_step: "/flow:revise storage-completeness ch11-local-atomic-publication"
+blocked_reason: null
+unblock_condition: null
+next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: |
