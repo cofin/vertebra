@@ -1,18 +1,43 @@
 //! PyO3 bindings for `vertebra_core::gcp_auth` (`GcpTokenCache` and `GcpTokenSnapshot`).
 
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::sync::Arc;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyCapsule};
 use vertebra_core::gcp_auth::{
-    GcpTokenCache as NativeGcpTokenCache, GcpTokenSnapshot as NativeGcpTokenSnapshot,
-    current_unix_ms, gcp_http2_post as native_gcp_http2_post,
+    GCP_TOKEN_CACHE_CAPSULE_NAME, GcpRefreshCompleteFn, GcpTokenCache as NativeGcpTokenCache,
+    GcpTokenCacheCapsule, GcpTokenSnapshot as NativeGcpTokenSnapshot, current_unix_ms,
+    gcp_http2_post as native_gcp_http2_post, invoke_capsule_refresh_on_runtime,
 };
 
-use crate::async_bridge::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task};
+use crate::async_bridge::{
+    RustDbTaskAwaitable, block_on_db, db_runtime_handle, spawn_rust_db_task,
+};
 use crate::errors::auth_error_to_py;
+
+unsafe extern "C" fn refresh_token_cache_on_db_runtime(
+    ctx: *const c_void,
+    force_refresh: bool,
+    out_ctx: *mut c_void,
+    complete_cb: GcpRefreshCompleteFn,
+) {
+    let runtime = db_runtime_handle();
+    // SAFETY: `ctx` and `complete_cb` originate from `GcpTokenCacheCapsule` and `SharedGcpTokenCacheHandle`.
+    unsafe {
+        invoke_capsule_refresh_on_runtime(runtime, ctx, force_refresh, out_ctx, complete_cb);
+    }
+}
+
+fn build_token_cache_pycapsule(
+    py: Python<'_>,
+    cache: &Arc<NativeGcpTokenCache>,
+) -> PyResult<Py<PyCapsule>> {
+    let capsule = GcpTokenCacheCapsule::new(Arc::clone(cache), refresh_token_cache_on_db_runtime);
+    Ok(PyCapsule::new_with_value(py, capsule, GCP_TOKEN_CACHE_CAPSULE_NAME)?.unbind())
+}
 
 /// Immutable snapshot of a cached Google Cloud OAuth2 bearer token.
 #[pyclass(name = "GcpTokenSnapshot", frozen, immutable_type, from_py_object)]
@@ -118,6 +143,10 @@ impl PySyncGcpTokenCache {
         }
     }
 
+    fn _capsule(&self, py: Python<'_>) -> PyResult<Py<PyCapsule>> {
+        build_token_cache_pycapsule(py, &self.inner)
+    }
+
     #[getter]
     fn generation(&self) -> u64 {
         self.inner.generation()
@@ -200,6 +229,10 @@ impl PyAsyncGcpTokenCache {
         PySyncGcpTokenCache {
             inner: Arc::clone(&self.inner),
         }
+    }
+
+    fn _capsule(&self, py: Python<'_>) -> PyResult<Py<PyCapsule>> {
+        build_token_cache_pycapsule(py, &self.inner)
     }
 
     #[getter]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import base64
+import ctypes
 import json
 import subprocess
 import threading
@@ -761,3 +762,22 @@ def test_gcs_config_resolve_adc_token_catches_google_cloud_auth_error(
     assert cfg.resolve_adc_token() is None
     assert asyncio.run(cfg.resolve_adc_token_async()) is None
     assert token_server.oauth_calls == 3
+
+
+def test_gcp_token_cache_capsule_export_parity() -> None:
+    """Verify SyncGcpTokenCache._capsule() and AsyncGcpTokenCache._capsule() return named PyCapsules."""
+    ctypes.pythonapi.PyCapsule_GetName.argtypes = [ctypes.py_object]
+    ctypes.pythonapi.PyCapsule_GetName.restype = ctypes.c_char_p
+
+    sync_cache = SyncGcpTokenCache(
+        {"access_token": "static-tok", "quota_project_id": "qp-1"},
+        allow_ambient_adc=False,
+    )
+    sync_capsule = sync_cache._capsule()
+    assert type(sync_capsule).__name__ == "PyCapsule"
+    assert ctypes.pythonapi.PyCapsule_GetName(sync_capsule) == b"vertebra.GcpTokenCacheCapsule"
+
+    async_cache = sync_cache.to_async()
+    async_capsule = async_cache._capsule()
+    assert type(async_capsule).__name__ == "PyCapsule"
+    assert ctypes.pythonapi.PyCapsule_GetName(async_capsule) == b"vertebra.GcpTokenCacheCapsule"
