@@ -5,7 +5,7 @@ chapter_id: ch03-scram-and-channel-binding
 title: Authenticate ordered SCRAM-SHA-256 SASL exchanges
 description: Extend auth::Authentication with ordered SCRAM-SHA-256 SASL phases over postgres-protocol 0.6.12, enforcing 1..=100_000 iteration bounds, strict server nonce extension, and post-PBKDF2 deadline checks.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -25,13 +25,13 @@ estimated_loc: 235
 plan_revision: 7
 plan_commit: 1c75af65
 state_revision: 1
-claimed_by: agent:ch03-t01-scram
-claimed_at: "2026-11-08T00:13:42Z"
+claimed_by: null
+claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
 last_verified_at: "2026-11-08T00:21:07Z"
-last_verified_commit: null
+last_verified_commit: 9b94bff8
 verification_evidence: |
   Preflight: chapter 02 completed/reviewed at 27b5a9e5; root/chapter/task plan revision 7 and anchor 1c75af65 match; declared source/test symbols exist.
   Red: the independent tokio-postgres golden handshake succeeds, then the unchanged native client rejects SCRAM with UnsupportedAuth; focused cargo test exits 101.
@@ -40,8 +40,8 @@ verification_evidence: |
   UV_NO_SYNC=1 PYO3_PYTHON=${PWD}/.venv/bin/python CARGO_TARGET_DIR=/tmp/vtb-cargo-target flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked: exit 0, 64 tests (9 codec, 23 auth, 10 TLS, 22 wire/config/error), no skips.
   Locked all-target Clippy with -D warnings, package rustfmt --check, no-sync review_setup validation, and git diff --check pass. No Python exports or bindings change.
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-08T00:21:07Z"
-commit: null
+updated_at: "2026-11-08T00:23:12Z"
+commit: 9b94bff8
 sources:
   - id: proto-research
     resource: .agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md

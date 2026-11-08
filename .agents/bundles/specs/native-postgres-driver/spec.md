@@ -39,7 +39,7 @@ chapters:
   - ch30-user-and-domain-docs
   - ch31-final-review-and-release-gate
 current_chapter: ch03-scram-and-channel-binding
-current_task: "native-postgres-driver:ch03:t01"
+current_task: "native-postgres-driver:ch03:t02"
 parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
@@ -329,8 +329,8 @@ Every worksheet (`111` total across `31` chapters) executes within its bounded o
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Baseline**: Checkpoint `ad8be7b6` passes all 54 Rust tests (`9` codec, `13` auth, `10` TLS, `22` wire/config/error) under the shared SHM test lock and locked all-target Clippy with `-D warnings`; flow `state: active`, `plan_revision: 7`, `plan_commit: 1c75af65`.
-- **Progress**: `2/31` chapters are complete and reviewed; `8/111` tasks are complete. Chapter 02 receipts bind to `a00c3248`, `81791de2`, `ad8be7b6`, and `c5173f1b`.
-- **Current Chapter**: `ch03-scram-and-channel-binding`, with `current_task: native-postgres-driver:ch03:t01`; revision 7 defines the pinned SCRAM iteration policy, a deterministic parked-future deadline regression, complete PSS parsing, and RFC 5929 digest selection; cold chapter-plan review precedes execution.
+- **Progress**: `2/31` chapters are complete and reviewed; `9/111` tasks are complete. Chapter 02 receipts bind to `a00c3248`, `81791de2`, `ad8be7b6`, and `c5173f1b`.
+- **Current Chapter**: `ch03-scram-and-channel-binding`, with `current_task: native-postgres-driver:ch03:t02`; revision 7 defines the pinned SCRAM iteration policy, a deterministic parked-future deadline regression, complete PSS parsing, and RFC 5929 digest selection; cold chapter-plan review precedes execution.
 - **Remaining Plan**: Chapters 03–31 retain complete blueprints.
 - **Documentation**: `[0/11 files documented]`; full guides and domain knowledge remain assigned to chapter 30.
 - **Next Action**: Continue `/flow:implement native-postgres-driver` with chapter 03 ordered SCRAM authentication, then the full remaining plan.
