@@ -11,13 +11,13 @@ depends_on_chapters:
   - ch01-native-engine-and-auth
 replan_trigger: null
 current_task: "storage-completeness:ch03:t01"
-plan_revision: 2
-plan_commit: cdb978d3
+plan_revision: 3
+plan_commit: e8901de4
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+updated_at: "2026-11-08T02:25:35Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
@@ -109,7 +109,7 @@ Progress: `[0/0 files documented in ch03]` (documented in `ch04:t03` across `doc
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ cdb978d3`; `depends_on_chapters: [ch01-native-engine-and-auth]`, `state: planned`.
+- **Verified Baseline**: `Plan baseline @ e8901de4`; `depends_on_chapters: [ch01-native-engine-and-auth]`, `state: planned`.
 - **Remaining Tasks in Chapter**: `t01`, `t02` (`2/2` pending).
 - **Active Invariants**: Zero blocking `SyncObjectStore` I/O inside async Litestar handlers; `StorageBuffer` views preserved end-to-end.
 

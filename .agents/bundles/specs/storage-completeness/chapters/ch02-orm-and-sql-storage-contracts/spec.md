@@ -13,11 +13,11 @@ replan_trigger: null
 current_task: null
 plan_revision: 6
 plan_commit: 0155d9dc
-state_revision: 4
-last_verified_checkpoint: null
+state_revision: 5
+last_verified_checkpoint: 749e2a18
 last_reviewed_commit: null
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-08T14:40:17Z"
+updated_at: "2026-11-08T14:48:21Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
@@ -55,7 +55,7 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-Across Vertebra's ORM and SQL extensions, `sqlspec/storage.py::ObjectStoreBackend` defaults omitted `uri` to `"memory://"` and lacks streaming/paginated protocol parity [^sqlspec-storage]; `alchemy/storage.py` monkeypatches `setattr(storages, "get", storages.get_backend)` at import time and falls back to `SyncObjectStore("memory://")` [^alchemy-storage]; and `django/storage.py::DjangoStorage` does not subclass `django.core.files.storage.Storage` (`@deconstructible`) and returns raw `bytes` from `open()` [^django-storage]. Chapter 02 aligns all three adapters with their upstream framework contracts on top of Chapter 01's `SyncObjectStore` and `AsyncObjectStore`.
+SQLSpec `ObjectStoreBackend` implements the exact protocol and native stream/page/reader extensions; Advanced Alchemy's concrete `ObjectStoreBackend` registers through the real registry API; Django `DjangoStorage` is a deconstructible `Storage` subclass returning seekable `File` handles. All three require an explicit storage target and share Chapter 01's native sync/async engine handles.[^sqlspec-storage][^alchemy-storage][^django-storage]
 
 ### 1.2 Non-Goals
 
@@ -74,9 +74,9 @@ Django's `Storage` base is checked through the `django-stubs` lint dependency; i
 
 ### 2.1 Chapter Requirements
 
-- **R4 (`ch02:t01`)**: Remove implicit `"memory://"` fallback in `vertebra.extensions.sqlspec.storage.ObjectStoreBackend`; implement sync and async `ObjectStoreProtocol` methods (SQLSpec `*_sync` / `*_async` byte/text/CRUD/list/metadata/signing methods plus explicit native stream/page/reader extensions) delegating to `SyncObjectStore` / `AsyncObjectStore`; preserve `build_duckdb_gcs_secret_sql`.
-- **R5 (`ch02:t02`)**: Delete `setattr(storages, _storage_get_attr, storages.get_backend)` and `"memory://"` fallbacks from `vertebra.extensions.alchemy.storage`; require an explicit store/config/URI target in `ObjectStoreBackend` and its existing `register_storage_backend` forms; implement `save_object`, `save_object_async`, `get_content`, `get_content_async`, `delete_object`, `delete_object_async`, `sign`, and `sign_async` without `asyncio.to_thread`.
-- **R6 (`ch02:t03`)**: Refactor `vertebra.extensions.django.storage.DjangoStorage` into a `@deconstructible` subclass of `django.core.files.storage.Storage` (raising `MissingDependencyError` when `django` is absent and `ImproperConfigurationError` when `config` and `store` are omitted), returning `django.core.files.base.File` over `SyncReadableFile` from `_open`/`open`/`aopen` (async open awaits metadata before creating its synchronous Django File handle) and implementing `_save`, `save`, `asave`, `delete`, `adelete`, `exists`, `aexists`, `size`, `asize`, `listdir`, `url`, `aurl`, `path`, `get_available_name`, `generate_filename`, `get_valid_name`, `get_accessed_time`, `get_created_time`, `get_modified_time`, and `get_alternative_name`.
+- **R4 (`ch02:t01`)**: Require explicit targets in `vertebra.extensions.sqlspec.storage.ObjectStoreBackend`; expose sync and async `ObjectStoreProtocol` methods (SQLSpec `*_sync` / `*_async` byte/text/CRUD/list/metadata/signing methods plus explicit native stream/page/reader extensions) delegating to `SyncObjectStore` / `AsyncObjectStore`; retain `build_duckdb_gcs_secret_sql`.
+- **R5 (`ch02:t02`)**: `ObjectStoreBackend` and `register_storage_backend` require an explicit target and use `StorageRegistry.register_backend` / `get_backend` without mutating `storages.get`. Native sync/async save, content, delete, and signing methods retain upstream signatures; file readers stream bounded chunks without `asyncio.to_thread`.[^alchemy-storage]
+- **R6 (`ch02:t03`)**: `vertebra.extensions.django.storage.DjangoStorage` is a `@deconstructible` subclass of `django.core.files.storage.Storage` (raising `MissingDependencyError` when `django` is absent and `ImproperConfigurationError` when `config` and `store` are omitted), returning `django.core.files.base.File` over `SyncReadableFile` from `_open`/`open`/`aopen` (async open awaits metadata before creating its synchronous Django File handle) and implementing `_save`, `save`, `asave`, `delete`, `adelete`, `exists`, `aexists`, `size`, `asize`, `listdir`, `url`, `aurl`, `path`, `get_available_name`, `generate_filename`, `get_valid_name`, `get_accessed_time`, `get_created_time`, `get_modified_time`, and `get_alternative_name`.
 
 Reader factories retain native metadata timing: `open_sync(size=None)` fetches object metadata immediately; an explicit size avoids that lookup. `open_async` returns a lazy async reader.
 
@@ -98,7 +98,12 @@ Django exposes native modification time as an aware UTC datetime. `get_created_t
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[0/0 files documented in ch02]` (documented in `ch04:t03` across `docs/usage/storage.md` and `.agents/bundles/knowledge/domains/storage/object-storage.md`).
+Progress: `[2/2 files documented in ch02]`.
+
+* [Object storage knowledge](../../../../knowledge/domains/storage/object-storage.md) — SQLSpec protocol/native extensions, Advanced Alchemy registry and bounded FileObject uploads, and Django Storage/File, naming, async, URL, and timestamp contracts.
+* [Technology stack](../../../../product/tech-stack.md) — `django-stubs>=6.1.2` in the lint dependency group for the real Django base and `File[bytes]` typing.
+
+User-guide expansion remains planned in `ch04:t03`.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -118,9 +123,11 @@ Progress: `[0/0 files documented in ch02]` (documented in `ch04:t03` across `doc
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `0155d9dc`; `depends_on_chapters: [ch01-native-engine-and-auth]`, `state: active`.
-- **Remaining Tasks in Chapter**: None (`0/3` pending); `t01` is completed at `7e13257b`, `t02` at `0e579db6`, and `t03` at `6ed9661be17a6da446d436cbe056381784c8a475`. The chapter awaits correctness review and fresh quality review.
-- **Active Invariants**: Zero `asyncio.to_thread` in `extensions/alchemy/storage.py`; zero `storages.get` monkeypatching; exact installed SQLSpec `_sync` / `_async` names and Advanced Alchemy `ObjectStoreBackend.get_content[_async]`; `build_duckdb_gcs_secret_sql` preserved intact.
+- **Verified Plan Baseline**: `0155d9dc`; revision `6`, dependency `ch01-native-engine-and-auth` completed, `state: active`, `current_task: null`.
+- **Task State**: `3/3` completed at source commits `7e13257b`, `0e579db6`, and `6ed9661b`. Receipt/checkpoint `749e2a18` is ready for correctness and fresh quality review; no chapter review stamp is assigned.
+- **Recovery Checkpoint**: Extension/storage suites pass `581` tests; touched-file Ruff checks/format, full configured MyPy (`419` files), lock validation, native imports, runtime Django File annotation introspection, and documentation build all pass.
+- **Documentation & OKF Status**: `[2/2 files documented in ch02]`; user guides and Litestar/Arrow additions remain in the downstream plan.
+- **Active Invariants**: Exact SQLSpec protocol methods, native buffer streams/pages/readers, explicit targets, no Advanced Alchemy registry monkeypatching or thread offload, and Django modification-only UTC timestamps. `build_duckdb_gcs_secret_sql` remains intact.
 
 [^sqlspec-storage]: `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` — SQLSpec object storage adapter.
 [^alchemy-storage]: `src/py/vertebra/extensions/alchemy/storage.py::ObjectStoreBackend` — Advanced Alchemy storage backend and registry integration.

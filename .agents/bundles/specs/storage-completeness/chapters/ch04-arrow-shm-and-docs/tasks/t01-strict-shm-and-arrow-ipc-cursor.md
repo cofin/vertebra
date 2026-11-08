@@ -22,8 +22,8 @@ tests:
   - src/rs/vertebra-db/src/arrow_shm.rs
   - src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
 estimated_loc: 160
-plan_revision: 2
-plan_commit: cdb978d3
+plan_revision: 3
+plan_commit: e8901de4
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -34,7 +34,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+updated_at: "2026-11-08T02:25:35Z"
 commit: null
 sources:
   - id: arrow-shm-rs

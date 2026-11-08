@@ -13,13 +13,13 @@ depends_on_chapters:
   - ch03-litestar-and-range-streaming
 replan_trigger: null
 current_task: "storage-completeness:ch04:t01"
-plan_revision: 2
-plan_commit: cdb978d3
+plan_revision: 3
+plan_commit: e8901de4
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+updated_at: "2026-11-08T02:25:35Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
@@ -92,11 +92,11 @@ Parent roadmap: [spec.md](../../spec.md); depends on Chapters 01, 02, and 03. Sk
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[1/3 files documented]` (`object-storage.md` documents `ch01`; `storage-completeness:ch04:t03` completes user guides and extends `object-storage.md` for `ch02`–`ch04`):
+Progress: `[1/3 files documented]` (`object-storage.md` documents the native engine and ORM/SQL adapters; `storage-completeness:ch04:t03` completes user guides and extends `object-storage.md` for `ch02`–`ch04`):
 
 * `docs/usage/storage.md` — Streaming `get_stream`/`put_stream`, conditional `put`, pagination, `rename`, fail-closed config, Litestar `Store`/static/Range streaming, and Arrow/Parquet helpers.
 * `docs/usage/storage-auth-and-signing.md` — Unified `vertebra._vertebra.{SyncGcpTokenCache, AsyncGcpTokenCache}` and GCS/S3/Azure/OCI presigning.
-* `.agents/bundles/knowledge/domains/storage/object-storage.md` — Extend existing `ch01` chapter with `ch02`–`ch04` SQLSpec/Alchemy/Django/Litestar contracts and Arrow/Parquet batch streaming.
+* `.agents/bundles/knowledge/domains/storage/object-storage.md` — Extend existing native and ORM/SQL knowledge with Litestar contracts and Arrow/Parquet batch streaming.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -116,9 +116,9 @@ Progress: `[1/3 files documented]` (`object-storage.md` documents `ch01`; `stora
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ cdb978d3`; `depends_on_chapters: [ch01, ch02, ch03]`, `state: planned`.
+- **Verified Baseline**: `Plan baseline @ e8901de4`; `depends_on_chapters: [ch01, ch02, ch03]`, `state: planned`.
 - **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
-- **Documentation & OKF Status**: `[1/3 files documented]` (`object-storage.md` updated for `ch01`; remaining `2` user guides + `ch02`–`ch04` OKF extensions completed in `t03` prior to final flow review).
+- **Documentation & OKF Status**: `[1/3 files documented]` (`object-storage.md` covers native and ORM/SQL contracts; the two user guides and Litestar/Arrow knowledge extensions remain planned in `t03`).
 
 [^arrow-shm]: `src/rs/vertebra-db/src/arrow_shm.rs::allocate_shm_region` — Named shared-memory segment allocator for Arrow IPC frames.
 [^db-arrow]: `src/py/vertebra/db/arrow.py::ArrowCursor` — Python Arrow IPC result wrapper.

@@ -19,12 +19,12 @@ research:
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 6
 plan_commit: 0155d9dc
-state_revision: 9
-last_verified_checkpoint: dc2c2053
+state_revision: 10
+last_verified_checkpoint: 749e2a18
 last_reviewed_chapter: ch01-native-engine-and-auth
 last_reviewed_commit: dc2c2053
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-08T14:40:17Z"
+updated_at: "2026-11-08T14:48:21Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
@@ -71,7 +71,7 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-`vertebra-storage` compiles as a standalone optional PyO3 extension (`vertebra._storage`) with `AbortHandle` and `TaskPanicError` completion delivery, incremental streaming/multipart sessions, unified `vertebra._vertebra` GCP token caches, and fail-closed `SyncObjectStore` / `AsyncObjectStore` facades [^rs-storage-engine] [^py-storage-facade] [^core-gcp-auth], while its framework adapters and Arrow shared-memory data plane still require completion across `sqlspec`, `advanced_alchemy`, `django`, `litestar`, and `vertebra-db` [^arrow-shm-alloc]. This flow completes zero-copy sync and async object storage across all four framework integrations and hardens the Arrow/Parquet and `VTBARROW` shared-memory data plane.
+`vertebra-storage` compiles as a standalone optional PyO3 extension (`vertebra._storage`) with `AbortHandle` and `TaskPanicError` completion delivery, incremental streaming/multipart sessions, unified `vertebra._vertebra` GCP token caches, and fail-closed `SyncObjectStore` / `AsyncObjectStore` facades [^rs-storage-engine] [^py-storage-facade] [^core-gcp-auth], and its SQLSpec, Advanced Alchemy, and Django adapters implement their upstream storage contracts over paired native stores. Litestar HTTP/static integration and the Arrow shared-memory data plane remain planned in `ch03`–`ch04` [^arrow-shm-alloc]. This flow completes zero-copy sync and async object storage across all four framework integrations and hardens the Arrow/Parquet and `VTBARROW` shared-memory data plane.
 
 ### 1.2 Non-Goals
 
@@ -90,7 +90,8 @@ Anchored at `HEAD @ cdb978d3` above `main @ 077a3fe9` (incorporating `db-layout-
 | `src/rs/vertebra-storage/src/{lib.rs,store.rs,r2.rs}` [^rs-storage-engine] | Provides incremental `MultipartUploadSession` (uniform `8 MiB` R2/OCI parts), `PySyncStreamReader` / `PyAsyncStreamReader` (`get_stream`), conditional `put_opts`, `list_page`, `list_with_delimiter`, and `rename`. |
 | `src/rs/vertebra-storage/src/{lib.rs,gcp_auth.rs,signing.rs,oci.rs}` [^core-gcp-auth] | Consumes `vertebra_core::gcp_auth::GcpTokenCache` via `vertebra._vertebra.{SyncGcpTokenCache, AsyncGcpTokenCache, GcpTokenSnapshot}`, with `RefreshingGcpCredentialProvider` and native `sign_oci_par_url` / GCS V4 IAM / S3 SigV4 / Azure SAS / HMAC signing. |
 | `src/py/vertebra/storage/_store.py` [^py-storage-facade] | Enforces fail-closed `MissingDependencyError` / `ImproperConfigurationError` construction, zero `self._memory` fallback dicts or Python `urllib` OAuth fetchers, and shared `.to_async()` / `.to_sync()` engine and token-cache handles. |
-| `src/py/vertebra/extensions/{sqlspec,alchemy,django,litestar}/` | Pending `ch02` & `ch03`: `alchemy/storage.py` still monkeypatches `storages.get` and defaults to `memory://`; `django/storage.py::DjangoStorage` does not yet subclass `django.core.files.storage.Storage` (`@deconstructible`) or return `File` handles; Litestar lacks `ObjectStoreLitestarStore`, an async static-files adapter, and RFC 9110 `Range` / `416` streaming. |
+| `src/py/vertebra/extensions/{sqlspec,alchemy,django}/storage.py` | SQLSpec exposes exact protocol methods plus native stream/page/reader extensions; Advanced Alchemy registers the concrete `ObjectStoreBackend` without registry monkeypatches; Django provides deconstructible `Storage` with seekable `File` handles. All require explicit targets and share paired native stores. |
+| `src/py/vertebra/extensions/litestar/` | Planned `ch03`: `ObjectStoreLitestarStore`, async static-files integration, and RFC 9110 `Range` / `416` streaming. |
 | `src/rs/vertebra-db/src/arrow_shm.rs` & `src/py/vertebra/db/arrow.py` [^arrow-shm-alloc] | Pending `ch04`: `allocate_shm_region` still falls back to anonymous `ShmRegion::create` when `ShmRegion::create_named` fails; `ArrowCursor.from_rows` still falls back to JSON bytes when `pyarrow` is absent. |
 
 ### 1.5 Relevant OKF Knowledge Chapters & Skills
@@ -124,7 +125,7 @@ flowchart LR
     CoreAuth["vertebra-core GcpTokenCache (_vertebra)"] --> RsStore["vertebra-storage ObjectStoreEngine (_storage)"]
     RsStore --> PyStore["vertebra.storage SyncObjectStore / AsyncObjectStore"]
     PyStore --> SQLSpec["extensions.sqlspec.storage.ObjectStoreBackend"]
-    PyStore --> Alchemy["extensions.alchemy.storage.StorageBackend"]
+    PyStore --> Alchemy["extensions.alchemy.storage.ObjectStoreBackend"]
     PyStore --> Django["extensions.django.storage.DjangoStorage"]
     PyStore --> Litestar["storage._streaming + extensions.litestar.store"]
     PyStore --> ArrowPlane["db.arrow + arrow_shm.rs"]
@@ -165,11 +166,12 @@ flowchart LR
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[1/3 files documented]` (`object-storage.md` updated in `ch01`; user guides executed in `ch04-arrow-shm-and-docs` task `storage-completeness:ch04:t03`).
+Progress: `[2/4 files documented]`. Storage knowledge covers the native engine and implemented ORM/SQL adapters; the technology matrix covers Django typing. Both user guides remain planned in `storage-completeness:ch04:t03`.
 
 * `docs/usage/storage.md` — Document `get_stream`, `put_stream`, conditional `put`, `list_page`, `list_with_delimiter`, `rename`, fail-closed construction, `ObjectStoreLitestarStore`, `ObjectStoreFileSystemAdapter`, and RFC 9110 `Range` / `416` streaming.
 * `docs/usage/storage-auth-and-signing.md` — Document unified `vertebra._vertebra.{SyncGcpTokenCache, AsyncGcpTokenCache, GcpTokenSnapshot}` usage and GCS V4, IAM `signBlob`, S3 SigV4, Azure SAS, and OCI PAR presigning.
-* `.agents/bundles/knowledge/domains/storage/object-storage.md` — Documents `RustTaskAwaitable` + `src/rs/vertebra-core/src/notify.rs` provenance, streaming/conditional/multipart engine tables, unified `vertebra._vertebra` token caches, and fail-closed invariants; extended in `ch04:t03` once `ch02`–`ch04` land.
+* `.agents/bundles/knowledge/domains/storage/object-storage.md` — Documents native streaming, signing, unified GCP caches, fail-closed construction, SQLSpec protocol/extensions, Advanced Alchemy registry/FileObject behavior, and Django Storage/File contracts. Litestar and Arrow/Parquet additions remain planned in `ch04:t03`.
+* `.agents/bundles/product/tech-stack.md` — Documents `django-stubs>=6.1.2` as a lint development dependency for the real Django base and `File[bytes]` typing.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -194,11 +196,12 @@ Progress: `[1/3 files documented]` (`object-storage.md` updated in `ch01`; user 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `0155d9dc` on `feat/storage-updates` above `main @ 077a3fe9`; `plan_revision: 6`, `state: active`; `ch01-native-engine-and-auth` closed and approved by `@code-reviewer` and `@quality-reviewer` across `1bb622a7..dc2c2053`.
-- **Plan Identity**: Active `ch02` and completed `t03` share revision `6` at `0155d9dc`; completed tasks retain their verified plan and commit evidence.
-- **Active Chapter & Next Task**: `ch02-orm-and-sql-storage-contracts` awaits correctness review and fresh quality review. No next task starts (`ch03`–`ch04` pending, `5/12` tasks remaining).
-- **Documentation & OKF Status**: `[1/3 files documented]` (`object-storage.md` synchronized in `ch01`; user guides scheduled in `storage-completeness:ch04:t03`).
-- **Active Invariants**: Zero `asyncio.to_thread` in `src/py/vertebra/storage/_store.py`; lazy `import_optional("vertebra._storage")` at construction time; `mypy.stubtest vertebra._storage` green after every FFI change.
+- **Verified Plan Baseline**: `0155d9dc` on `feat/storage-updates`; `plan_revision: 6`, `state: active`. `ch01-native-engine-and-auth` is completed with review stamp `dc2c2053`.
+- **Plan Identity**: Active `ch02` and completed `t03` share revision `6` at `0155d9dc`; `t01` and `t02` retain their verified plan identities and evidence.
+- **Active Chapter**: `ch02-orm-and-sql-storage-contracts`, `current_task: null`; all `3/3` tasks are completed. Source commits are `7e13257b`, `0e579db6`, and `6ed9661b`; receipt/checkpoint `749e2a18` awaits correctness and fresh quality review. The chapter remains active until both reviews pass.
+- **Remaining Plan**: `7/12` tasks are completed; `ch03` has `2` pending tasks and `ch04` has `3`. Their states remain planned.
+- **Documentation & OKF Status**: `[2/4 files documented]`; storage knowledge and the technology matrix are synchronized. The two user guides remain planned in `ch04:t03`.
+- **Active Invariants**: Native paired stores, explicit configuration, exact upstream adapter contracts, and no Advanced Alchemy registry monkeypatching. SQLSpec Arrow/Parquet batch-streaming work remains in `ch04:t02`.
 
 [^rs-storage-engine]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — Native Rust storage engine over `object_store`.
 [^py-storage-facade]: `src/py/vertebra/storage/_store.py::SyncObjectStore` — Python sync/async object store facade and backend configs.

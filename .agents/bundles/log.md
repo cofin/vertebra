@@ -1,5 +1,24 @@
 # Bundle Activity Log
 
+## [2026-11-08] flow-implement | Completed storage-completeness Chapter 02 task implementation
+
+- SQLSpec `ObjectStoreBackend` (`7e13257b`) implements exact protocol methods, native buffer streaming, conditional writes, opaque pagination, seekable readers, shared handles, and traversal refusal. Advanced Alchemy `ObjectStoreBackend` (`0e579db6`) uses real registry registration and bounded native `FileObject` uploads without monkeypatching or implicit memory targets.
+- Django `DjangoStorage` (`09a44f88`, runtime annotation fix `6ed9661b`, task receipt `749e2a18`) subclasses deconstructible Django `Storage`, returns seekable `File` handles, implements sync/async persistence, Django naming/collisions, directory/path/URL contracts, and aware UTC modification time; unsupported creation/access timestamps raise `NotImplementedError`. `django-stubs>=6.1.2` is a lint development dependency.
+- Fresh coordinator verification against final source `6ed9661b`: `UV_NO_SYNC=1 uv run --no-sync pytest src/py/tests/unit/extensions src/py/tests/unit/storage -q --disable-warnings` passes `581` tests (`17` warnings); touched-file Ruff check/format, full configured MyPy (`419` files), `uv lock --check`, whitespace checks, all five native extension imports, and Django runtime annotation introspection pass. `UV_NO_SYNC=1 make docs` passes docstring hygiene, CLI reference verification, Zensical build, postbuild, and artifact checks.
+- Storage knowledge and the technology matrix are synchronized (`ch02` `[2/2 files documented]`, root `[2/4 files documented]`). Root/chapter/catalog snapshots show `7/12` tasks completed and `5` planned downstream tasks. Chapter `ch02` remains active pending correctness and fresh quality review; its pointer and review stamp remain unchanged.
+
+## [2026-11-08] revise | Type-check Django storage against upstream stubs
+
+- Active storage `ch02` and `t03` share revision `6` at `0155d9dc`. Task `t03` owns its adapter plus `pyproject.toml` and `uv.lock`, adding `django-stubs` to lint dependencies so MyPy checks the real Django base. Its bounded source manifest remains six files.
+
+## [2026-11-08] revise | Report only available Django storage timestamps
+
+- Storage `ch02` and pending task `t03` share revision `5` at `0155d9dc`. Native `ObjectMeta` exposes modification time only; Django creation/access hooks raise `NotImplementedError` rather than substituting modification time. Completed task evidence remains unchanged.
+
+## [2026-11-08] revise | Preserve native storage reader metadata timing
+
+- Storage `ch02` and its three worksheets share revision `4` at plan baseline `1e1f028a`. SQLSpec reader factories retain native eager sync metadata lookup when size is omitted and lazy async reads; this correction requires no native facade changes.
+
 ## [2026-11-08] revise | Align storage integration worksheets with installed framework contracts
 
 - [`storage-completeness`](specs/storage-completeness/spec.md), `ch02-orm-and-sql-storage-contracts`, and its three pending worksheets share revision `3` anchored at `e8901de4`. The completed `ch01` review stamp `dc2c2053` and all four task commits remain unchanged and ancestry-verified.

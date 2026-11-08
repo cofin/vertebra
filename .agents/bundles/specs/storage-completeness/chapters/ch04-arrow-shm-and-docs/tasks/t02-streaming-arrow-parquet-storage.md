@@ -23,8 +23,8 @@ tests:
   - src/py/tests/unit/storage/test_storage_store.py
   - src/py/tests/unit/extensions/test_data_storage_integrations.py
 estimated_loc: 195
-plan_revision: 2
-plan_commit: cdb978d3
+plan_revision: 3
+plan_commit: e8901de4
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -35,7 +35,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+updated_at: "2026-11-08T02:25:35Z"
 commit: null
 sources:
   - id: store-arrow-helpers
@@ -73,9 +73,9 @@ Add batch-streaming Arrow IPC and Parquet read/write helpers on `SyncObjectStore
 
 - `src/py/vertebra/storage/_store.py`:
   - `SyncObjectStore` & `AsyncObjectStore`:
-    - `write_arrow(self, key: str, data: ArrowCursor | Any, *, batch_size: int = 65536) -> ObjectMetadata` (streams Arrow IPC chunks via `put_stream` with `content_type="application/vnd.apache.arrow.stream"`)
+    - `write_arrow(self, key: str, data: ArrowCursor | Any, *, batch_size: int = 65536) -> ObjectMeta` (streams Arrow IPC chunks via `put_stream` with `content_type="application/vnd.apache.arrow.stream"`)
     - `iter_arrow_batches(self, key: str) -> Iterator[Any]` / `AsyncIterator[Any]` (reads Arrow IPC stream incrementally into `pyarrow.RecordBatch` items)
-    - `write_parquet(self, key: str, batches: Any, *, schema: Any = None, compression: str = "zstd", row_group_size: int = 65536) -> ObjectMetadata` (streams encoded Parquet row-group buffers through a chunked sink writer into `put_stream` with `content_type="application/vnd.apache.parquet"`)
+    - `write_parquet(self, key: str, batches: Any, *, schema: Any = None, compression: str = "zstd", row_group_size: int = 65536) -> ObjectMeta` (streams encoded Parquet row-group buffers through a chunked sink writer into `put_stream` with `content_type="application/vnd.apache.parquet"`)
     - `iter_parquet_batches(self, key: str, *, batch_size: int = 65536, columns: Sequence[str] | None = None) -> Iterator[Any]` / `AsyncIterator[Any]` (uses `SyncReadableFile` / range-fetched row groups over `AsyncObjectStore` to yield `pyarrow.RecordBatch` items incrementally)
 - `src/py/vertebra/extensions/sqlspec/storage.py`:
   - Wire `ObjectStoreBackend._iter_arrow_async` (and sync `_iter_arrow` / `write_arrow_async` where defined by SQLSpec `ObjectStoreProtocol`) to delegate directly to `AsyncObjectStore.iter_parquet_batches` / `iter_arrow_batches` (detecting `.parquet` vs `.arrow`/`.ipc` format) without materializing all batches into a `list` first.

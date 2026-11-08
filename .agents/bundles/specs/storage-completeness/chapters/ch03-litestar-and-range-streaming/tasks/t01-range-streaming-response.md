@@ -22,8 +22,8 @@ tests:
   - src/py/tests/unit/server/test_zero_copy_buffer.py
   - src/py/tests/unit/storage/test_storage_store.py
 estimated_loc: 180
-plan_revision: 2
-plan_commit: cdb978d3
+plan_revision: 3
+plan_commit: e8901de4
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -34,7 +34,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-07T04:15:00Z"
+updated_at: "2026-11-08T02:25:35Z"
 commit: null
 sources:
   - id: streaming-resp
@@ -60,7 +60,7 @@ Upgrade `src/py/vertebra/storage/_streaming.py::StreamingStorageResponse` (and p
 
 - `src/py/vertebra/storage/_streaming.py` — Current `StreamingStorageResponse`, `aiter_chunks`, `iter_chunks`, and `to_fastpath_tuple` [^streaming-resp].
 - `src/py/vertebra/storage/__init__.py` — Public symbols exported from `vertebra.storage` [^storage-pkg-init].
-- `src/py/vertebra/storage/_store.py` — `SyncObjectStore`, `AsyncObjectStore`, `ObjectMetadata`, and `StorageBuffer`.
+- `src/py/vertebra/storage/_store.py` — `SyncObjectStore`, `AsyncObjectStore`, `ObjectMeta`, and `StorageBuffer`.
 - `src/py/tests/unit/server/test_zero_copy_buffer.py` — Zero-copy `StorageBuffer` and fastpath response tests.
 - `.agents/skills/python-framework/SKILL.md` — `msgspec.Struct`, typing, and docstring conventions.
 
