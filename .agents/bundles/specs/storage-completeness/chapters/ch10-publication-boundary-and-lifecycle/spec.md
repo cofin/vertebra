@@ -49,7 +49,7 @@ The chapter stays active with no review stamp until correctness review and fresh
 
 ## 1. Specification, Context & Provenance
 
-The publication core retains concrete provider identity, enforces the implemented Memory predicates, and preserves multipart cleanup ownership. Each completed worksheet records its signed source commit and native verification evidence. Reopened ch01 acceptance remains independent; provider publication and installed Python acceptance remain downstream obligations. The source/Markdown review range starts at `34113093` and includes all four task commits plus this documentation synchronization.
+The publication core retains concrete provider identity, enforces the implemented Memory predicates, and preserves multipart cleanup ownership. Each completed worksheet records its signed source commit and native verification evidence. Reopened ch01 acceptance remains independent; provider publication and installed Python acceptance remain downstream obligations. The source/Markdown review range starts at `4867dfb9` and includes all four task commits plus this documentation synchronization.
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
@@ -125,15 +125,15 @@ Progress: `[1/1 files documented]` for this implemented publication core. [Objec
 
 - [x] [85ed9f36] storage-completeness:ch10:t04 — Frame S3 producer chunks and preserve bounded backend policies (tasks/t04-minimum-cloud-part-framing.md)
 
-**Chapter Recovery Checkpoint:** the combined source checkpoint `fe992ae3` passes 15 library tests, 39 canonical engine tests, formatting, all-target Clippy and diff checks. All four task worksheets are completed and bound to the signed commits above. Correctness review and a fresh quality review over `34113093..HEAD`, including synchronized Markdown, remain required before chapter closure.
+**Chapter Recovery Checkpoint:** the combined source checkpoint `fe992ae3` passes 15 library tests, 39 canonical engine tests, formatting, all-target Clippy and diff checks. All four task worksheets are completed and bound to the signed commits above. Correctness review and a fresh quality review over `4867dfb9..HEAD`, including synchronized Markdown, remain required before chapter closure.
 
 ## 6. Current State & Remaining Plan Snapshot
 
 - Concrete provider identity/Memory Create-Match, real test-only SDK request transport and multipart cleanup ownership are signed at `d50cf6a2`, `2bc92864` and `673cb696`. Memory NotMatch fails at BEGIN before input consumption until ch20:t01; cloud transport runtime activation belongs to ch12:t01.
 - S3 bounded 8 MiB framing, short-tail/empty behavior, producer backpressure, abort ownership and the 10000-part guard are signed at `85ed9f36`. OCI's private policy retains its existing behavior.
-- The combined source checkpoint `fe992ae3` passes 15 library and 39 canonical tests, formatting, all-target Clippy and diff checks. Its additional GCS constructor capture is completed in ch21:t01; ch21:t02 remains pending and ready under revision 8 approved at `c737ffeb`. Installed Python extensions remain at the native R2-withdrawal checkpoint.
+- The combined source checkpoint `fe992ae3` passes 15 library and 39 canonical tests, formatting, all-target Clippy and diff checks. The GCS constructor and snapshot request boundaries have their own implementation and review receipts in [ch21](../ch21-sdk-resolved-config/spec.md). Installed Python extensions remain at the native R2-withdrawal checkpoint.
 - Scoped knowledge is synchronized at `[1/1 files documented]`; final provider/consumer consolidation and root `[9/13 files documented]` acceptance remain with ch09:t03/ch04:t03.
-- The chapter is active, `current_task` and `last_reviewed_commit` are null, and cold correctness then fresh quality review remain pending. Local/cloud publication, ch20 negative CAS and original ch01/ch02 native acceptance/reclosure remain open.
+- The chapter is active, `current_task` and `last_reviewed_commit` are null, and final review metadata re-verification remains before closure. Local/cloud publication, ch20 negative CAS and original ch01/ch02 native acceptance/reclosure remain open.
 
 [^source]: `src/rs/vertebra-storage/src/store.rs` — Verified repository implementation seam.
 

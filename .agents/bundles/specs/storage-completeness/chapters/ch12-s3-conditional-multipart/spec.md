@@ -111,8 +111,9 @@ Dependency order is t04 XML dependency, then t01 initiation, t02 completion and 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Shared ordinary negative-CAS prerequisite ch20:t01 is explicit; this provider frontier remains draft pending independent cold review of the complete ownership map.
-- Remaining: all 4 tasks above; dependent tasks remain ordered by depends_on.
+- The stable revision6 provider frontier is independently approved at `e3e344b5`. Shared ordinary negative-CAS and Local acceptance remain explicit prerequisites for provider activation.
+- Native protocol/filesystem dependency edges are completed at `35a4f784`; all 572 locked package identities, versions, sources and checksums are preserved.
+- Initiation, conditional completion and conflict cleanup remain pending in t01–t03. No S3 publication acceptance or chapter review stamp is claimed.
 - Documentation: `[0/1 files documented]`, owned by the explicit consolidation tasks.
 - Reclosure of ch01 and downstream acceptance waits for native repair gates; this chapter never depends on that reclosure.
 

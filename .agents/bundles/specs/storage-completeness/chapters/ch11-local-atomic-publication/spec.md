@@ -9,7 +9,7 @@ state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: storage-completeness:ch11:t02
+current_task: storage-completeness:ch11:t03
 plan_revision: 5
 plan_commit: bdc7799a
 state_revision: 0
@@ -90,15 +90,15 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 
 | Requirement | Task | Strategy | Verification |
 | --- | --- | --- | --- |
-| R1 | [ch11:t01](tasks/t01-physical-target-locks.md) | characterization | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
-| R2 | [ch11:t02](tasks/t02-same-fs-stage.md) | characterization | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
+| R1 | [ch11:t01](tasks/t01-physical-target-locks.md) | characterization | Actual inline `local_publication::tests` filesystem and subprocess primitives |
+| R2 | [ch11:t02](tasks/t02-same-fs-stage.md) | characterization | Actual inline `local_publication::tests` filesystem and subprocess primitives |
 | R3 | [ch11:t03](tasks/t03-local-mutations-and-publish.md) | regression_tdd | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
 | R4 | [ch11:t04](tasks/t04-local-subprocess-acceptance.md) | integration_acceptance | `src/rs/vertebra-storage/tests/storage_engine_tests.rs` |
 
 ## 5. Implementation Plan
 
 - [x] [8c808beb] storage-completeness:ch11:t01 — Add persistent OS locks per physical parent directory (tasks/t01-physical-target-locks.md)
-- [~] storage-completeness:ch11:t02 — Manage SDK-private same-parent staging artifacts (tasks/t02-same-fs-stage.md)
+- [x] [61a948df] storage-completeness:ch11:t02 — Manage SDK-private same-parent staging artifacts (tasks/t02-same-fs-stage.md)
 - [ ] storage-completeness:ch11:t03 — Guard every local mutation and publish with native atomic operations (tasks/t03-local-mutations-and-publish.md)
 - [ ] storage-completeness:ch11:t04 — Prove local CAS across processes, roots and cleanup boundaries (tasks/t04-local-subprocess-acceptance.md)
 
@@ -106,8 +106,9 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Baseline: `5fe477fa`; implementation is pending and cold plan review is required.
-- Remaining: all 4 tasks above; dependent tasks remain ordered by depends_on.
+- The stable revision5 frontier is independently approved at `bdc7799a`. Physical-parent OS locks and same-filesystem staging/publication primitives are completed at `8c808beb` and `61a948df`; the module remains test-only.
+- Thirteen focused Linux filesystem/subprocess tests, formatting, all-target Clippy and diff checks pass. macOS/Windows runtime evidence is unavailable on this host.
+- Public mutation routing/production activation in t03 and independent-process public acceptance in t04 remain pending; this chapter has no correctness or quality review stamp.
 - Documentation: `[0/1 files documented]`, owned by the explicit consolidation tasks.
 - Reclosure of ch01 and downstream acceptance waits for native repair gates; this chapter never depends on that reclosure.
 
