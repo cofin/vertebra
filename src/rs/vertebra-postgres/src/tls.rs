@@ -74,8 +74,26 @@ pub(crate) async fn connect(
         .await
         .map_err(|_| PostgresError::Transport("connection deadline elapsed".into()))??;
     }
+    let tls_server_end_point = match &stream {
+        TransportStream::TlsTcp(tls) => {
+            match tls
+                .get_ref()
+                .1
+                .peer_certificates()
+                .and_then(|certs| certs.first())
+            {
+                Some(leaf) => match crate::binding::tls_server_end_point(leaf.as_ref()) {
+                    Ok(bytes) => Some(bytes),
+                    Err(PostgresError::UnsupportedAuth(_)) => None,
+                    Err(error) => return Err(error),
+                },
+                None => None,
+            }
+        }
+        _ => None,
+    };
     Ok(DialedTransport {
         stream,
-        tls_server_end_point: None,
+        tls_server_end_point,
     })
 }

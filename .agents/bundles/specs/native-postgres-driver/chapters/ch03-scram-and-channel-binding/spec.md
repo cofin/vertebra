@@ -14,7 +14,7 @@ current_task: "native-postgres-driver:ch03:t02"
 plan_revision: 7
 plan_commit: 1c75af65
 state_revision: 0
-last_verified_checkpoint: null
+last_verified_checkpoint: 9b94bff8
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-08T00:11:49Z"
@@ -142,8 +142,8 @@ Progress: `[0/0 files documented in ch03]`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: Plan anchor `1c75af65`; upstream chapter 02 is complete and reviewed at `27b5a9e5` with 54 native tests and locked all-target Clippy passing. Chapter `state: planned` and `planning_status: complete` retain three bounded tasks.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending). The upstream dependency is complete; after cold review of the corrected blueprints, `/flow:implement native-postgres-driver` executes the three tasks in their declared order.
+- **Verified Baseline**: Chapter 02 is reviewed at `27b5a9e5`; cold plan review approves revision 7 at `76e82a96`. SCRAM task `t01` is verified at `9b94bff8` with all 64 tests and locked all-target Clippy passing.
+- **Remaining Tasks in Chapter**: Task `t01` is complete; peer-certificate task `t02` is in progress and policy task `t03` is pending.
 - **Documentation & OKF Status**: `[0/0 files documented in ch03]`; RFC 5929 channel-binding OKF curation scheduled in `ch30:t02`.
 - **Downstream Dependents**: Unblocks `ch04-cloud-material-and-admin-discovery` (`ch04:t01` depends on `ch03:t03`).
 

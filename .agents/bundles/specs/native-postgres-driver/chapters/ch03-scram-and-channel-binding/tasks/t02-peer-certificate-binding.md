@@ -31,11 +31,35 @@ claimed_at: "2026-11-08T00:23:12Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
+last_verified_at: "2026-11-08T00:28:08Z"
 last_verified_commit: null
-verification_evidence: null
+verification_evidence:
+  red:
+    command: 'UV_NO_SYNC=1 PYO3_PYTHON=${PWD}/.venv/bin/python CARGO_TARGET_DIR=/tmp/vtb-cargo-target cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked --test postgres_tls_wire_tests certificate_binding_live_tls_digest'
+    exit_code: 101
+    result: 'Real TLS startup succeeds; public connection getter returns None instead of the independently computed SHA-256 leaf digest.'
+  focused_green:
+    command: 'UV_NO_SYNC=1 PYO3_PYTHON=${PWD}/.venv/bin/python CARGO_TARGET_DIR=/tmp/vtb-cargo-target cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked --test postgres_tls_wire_tests certificate_binding_'
+    exit_code: 0
+    result: '7 tests pass: 20 signed fixed DER/digest vectors, malformed/refused algorithms and PSS parameters, and real TLS leaf/chain plus Ed25519 sessions.'
+  aggregate:
+    command: 'UV_NO_SYNC=1 PYO3_PYTHON=${PWD}/.venv/bin/python CARGO_TARGET_DIR=/tmp/vtb-cargo-target flock /tmp/vertebra-flow-shm-tests.lock cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --locked'
+    exit_code: 0
+    result: '71 tests pass: 9 codec, 23 auth, 17 TLS, 22 wire/config/error; zero ignored or failed.'
+  clippy:
+    command: 'UV_NO_SYNC=1 PYO3_PYTHON=${PWD}/.venv/bin/python CARGO_TARGET_DIR=/tmp/vtb-cargo-target cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets --locked -- -D warnings'
+    exit_code: 0
+  formatting:
+    command: 'cargo fmt --manifest-path src/rs/Cargo.toml -p vertebra-postgres --check'
+    exit_code: 0
+  review_setup:
+    command: 'UV_NO_SYNC=1 .venv/bin/python -m tools.scripts.review_setup validate'
+    exit_code: 0
+  diff:
+    command: 'git diff --check'
+    exit_code: 0
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-08T00:23:12Z"
+updated_at: "2026-11-08T00:28:08Z"
 commit: null
 sources:
   - id: proto-research
@@ -122,11 +146,17 @@ Commit as `feat(postgres): derive certificate endpoint channel binding`.
 
 ## Acceptance Criteria
 
-- [ ] `binding::tls_server_end_point` hashes full leaf X.509 DER via `x509-parser = "=0.18.1"` across RSA PKCS#1, ECDSA, DSA, RSA-PSS (explicit and default SHA-1), and SHA-1/MD5 -> SHA-256 substitution without inspecting MGF1 as the signature digest (R4, R5).
-- [ ] Unsupported MD2, Ed25519, Ed448, unknown signature OIDs, and absent/malformed/incompletely consumed PSS parameters return unavailable-binding errors; trailing/malformed certificate DER fails with `PostgresError::Protocol`. Only MD5/SHA-1 receive SHA-256 substitution (R4, R5).
-- [ ] `tls::connect` extracts only the leaf (`certs[0]`) from `TransportStream::TlsTcp` after successful `rustls` handshakes under the selected TLS verification policy while leaving plaintext sessions unbound (R4).
+- [x] `binding::tls_server_end_point` hashes full leaf X.509 DER via `x509-parser = "=0.18.1"` across RSA PKCS#1, ECDSA, DSA, RSA-PSS (explicit and default SHA-1), and SHA-1/MD5 -> SHA-256 substitution without inspecting MGF1 as the signature digest (R4, R5).
+- [x] Unsupported MD2, Ed25519, Ed448, unknown signature OIDs, and absent/malformed/incompletely consumed PSS parameters return unavailable-binding errors; trailing/malformed certificate DER fails with `PostgresError::Protocol`. Only MD5/SHA-1 receive SHA-256 substitution (R4, R5).
+- [x] `tls::connect` extracts only the leaf (`certs[0]`) from `TransportStream::TlsTcp` after successful `rustls` handshakes under the selected TLS verification policy while leaving plaintext sessions unbound (R4).
 
 ## Notes & Discoveries
+
+- Preflight verifies revision `7` / plan `1c75af65`, completed SCRAM dependency source `9b94bff8`, and completed/reviewed chapter 02 at `27b5a9e5`; the five-file read manifest and public peer-certificate accessor match the worksheet.
+- The public `rlib` binding seam dispatches explicit DSA-SHA2 OIDs before PSS classification. Public ASN.1 DER parsers exhaust the present PSS SEQUENCE, ordered explicit wrappers, nested hash/MGF1 identifiers, NULL parameters, and integer fields before the pinned PSS accessor selects the signature hash.
+- Twenty inline OpenSSL 3.5.5 signed DER vectors cover RSA, ECDSA, DSA, SHA-1/MD5 substitution, default/explicit PSS hashes, and divergent MGF1. Fixed expected digest literals come from independent Python `hashlib`; OpenSSL independently verifies all twenty self-signatures with `-check_ss_sig -auth_level 0`. Synthetic refusal certificates explicitly carry invalid signatures and never enter TLS.
+- The real TLS chain presents an ECDSA-P384/SHA-384 leaf plus an intermediate signed using RSA/SHA-256. Its fixed 48-byte leaf digest differs from both the SPKI and concatenated chain digest. A real Ed25519 TLS handshake succeeds with unavailable binding; existing plaintext and TLS trust-policy tests pass.
+- Source and worksheet remain uncommitted for the coordinator's signed source commit and verification receipt; `state`, `commit`, and `last_verified_commit` retain the active task contract.
 
 - Exposing `pub mod binding` on the Rust `rlib` seam allows `postgres_tls_wire_tests` to test DSA, MD5/SHA-1, RSA-PSS MGF1-divergent, and Ed448 X.509 DER vectors directly alongside live `tokio-rustls` TLS 1.3 leaf extraction tests without relaxing `rustls` signature verification.
 
