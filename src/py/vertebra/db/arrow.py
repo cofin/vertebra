@@ -9,6 +9,7 @@ import threading
 from collections.abc import Buffer, Mapping, Sequence
 from typing import Any, Final, Self
 
+from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.schema import to_schema
 from vertebra.utils.serializers import (
@@ -164,11 +165,6 @@ class ArrowCursor:
                 res: list[dict[str, Any]] = tbl.to_pylist()
                 if res or not self._rows:
                     return res
-        if not self._rows and len(view) > 0:
-            with contextlib.suppress(TypeError, ValueError):
-                decoded = decode_json(bytes(view))
-                if isinstance(decoded, list):
-                    return decoded
         cols = self._columns or tuple(f"col_{i}" for i in range(len(self._rows[0]) if self._rows else 0))
         return [{col: (r[idx] if idx < len(r) else None) for idx, col in enumerate(cols)} for r in self._rows]
 
@@ -211,47 +207,31 @@ class ArrowCursor:
                 cols = ()
 
         pa = import_optional("pyarrow")
-        ipc_bytes = b""
-        if pa is not None:
-            pydict: dict[str, list[Any]] = {
-                col: [r[idx] if idx < len(r) else None for r in tuple_rows] for idx, col in enumerate(cols)
-            }
-            table = pa.Table.from_pydict(pydict)
-            sink = pa.BufferOutputStream()
-            with pa.ipc.new_stream(sink, table.schema) as writer:
-                writer.write_table(table)
-            ipc_bytes = sink.getvalue().to_pybytes()
-        else:
-            dict_list = [{col: (r[idx] if idx < len(r) else None) for idx, col in enumerate(cols)} for r in tuple_rows]
-            ipc_bytes = encode_json_bytes(dict_list)
+        if pa is None:
+            raise MissingDependencyError("pyarrow", install_package="pyarrow", extra="arrow")
+        pydict: dict[str, list[Any]] = {
+            col: [r[idx] if idx < len(r) else None for r in tuple_rows] for idx, col in enumerate(cols)
+        }
+        table = pa.Table.from_pydict(pydict)
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+        ipc_bytes = sink.getvalue().to_pybytes()
 
         use_shm = len(tuple_rows) >= threshold_rows or len(ipc_bytes) >= 65_536
-        mmap_region: mmap.mmap | None = None
         shm_cursor_obj: Any = None
-        if use_shm and len(ipc_bytes) > 0:
+        if use_shm:
             native_mod = import_optional("vertebra._vertebra")
             native_arrow_cls = getattr(native_mod, "ArrowCursor", None) if native_mod is not None else None
-            if native_arrow_cls is not None and hasattr(native_arrow_cls, "write_ipc_to_shm"):
-                with contextlib.suppress(TypeError, ValueError, OSError, RuntimeError):
-                    shm_cursor_obj = native_arrow_cls.write_ipc_to_shm(
-                        cls._next_shm_segment_name(),
-                        ipc_bytes,
-                        len(tuple_rows),
-                    )
-            if shm_cursor_obj is None:
-                native_cursor_cls = getattr(native_mod, "NativeShmCursor", None) if native_mod is not None else None
-                if native_cursor_cls is not None:
-                    with contextlib.suppress(TypeError, ValueError, OSError, RuntimeError):
-                        shm_cursor_obj = native_cursor_cls(ipc_bytes)
-                mmap_region = mmap.mmap(-1, max(4096, len(ipc_bytes)))
-                mmap_region[: len(ipc_bytes)] = ipc_bytes
+            if native_arrow_cls is None or not hasattr(native_arrow_cls, "write_ipc_to_shm"):
+                raise MissingDependencyError("vertebra._vertebra.ArrowCursor", install_package="vertebra-core")
+            shm_cursor_obj = native_arrow_cls.write_ipc_to_shm(cls._next_shm_segment_name(), ipc_bytes, len(tuple_rows))
 
         return cls(
             ipc_bytes,
             rows=tuple_rows,
             columns=cols,
             used_shm=use_shm,
-            mmap_obj=mmap_region,
             shm_cursor=shm_cursor_obj,
         )
 

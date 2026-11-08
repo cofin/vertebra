@@ -87,11 +87,8 @@ fn page_align(size: usize) -> Result<usize, String> {
 fn allocate_shm_region(norm_name: &str, alloc_size: usize) -> Result<ShmRegion, String> {
     #[cfg(unix)]
     {
-        match ShmRegion::create_named(norm_name, alloc_size) {
-            Ok(r) => Ok(r),
-            Err(_) => ShmRegion::create(alloc_size)
-                .map_err(|e| format!("failed to create Arrow ShmRegion `{norm_name}`: {e}")),
-        }
+        ShmRegion::create_named(norm_name, alloc_size)
+            .map_err(|e| format!("failed to create Arrow ShmRegion `{norm_name}`: {e}"))
     }
     #[cfg(not(unix))]
     {
@@ -438,6 +435,20 @@ impl ShmArrowStreamWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_named_allocation_fails_without_registry_entry() {
+        for name in ["/bad/nested/seg", "/"] {
+            let result = write_shm_arrow_frame(name, b"payload");
+            if result.is_ok() {
+                release_shm_arrow_frame(name);
+            }
+            let error = result.expect_err("invalid names must not allocate anonymous SHM");
+            assert!(error.contains(name), "missing segment name: {error}");
+            assert!(!ACTIVE_ARROW_SHM_REGIONS.contains_key(name));
+        }
+    }
 
     #[test]
     fn u64_max_byte_len_header_returns_error_without_overflow() {

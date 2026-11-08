@@ -346,3 +346,57 @@ async def test_postgres_sync_primitives_bind_with_real_psycopg_converter(operati
             assert connection.calls[0][0].count("%s") == 2
     finally:
         driver.close()
+
+
+@pytest.mark.parametrize("threshold_rows", [1, 256])
+@pytest.mark.parametrize(
+    "rows,columns,expected",
+    [
+        ([(1, "a")], ["id", "name"], [{"id": 1, "name": "a"}]),
+        ([(1, "a")], None, [{"col_0": 1, "col_1": "a"}]),
+        ([{"id": 1}], None, [{"id": 1}]),
+        ([], None, []),
+        ([], ["id"], []),
+    ],
+)
+def test_arrow_cursor_rows_are_real_ipc(
+    rows: list[Any], columns: list[str] | None, expected: list[dict[str, Any]], threshold_rows: int
+) -> None:
+    """Threshold selection preserves real IPC, values, schema and retained views."""
+    cursor = ArrowCursor.from_rows(rows, columns, threshold_rows=threshold_rows)
+    view = cursor.buffer_view()
+    try:
+        table = pa.ipc.open_stream(view).read_all()
+        assert table.to_pylist() == expected
+        assert cursor.to_pylist() == expected
+        assert cursor.to_arrow_table().equals(table)
+        assert cursor.num_rows == len(rows)
+        assert cursor.used_shm is (len(rows) >= threshold_rows)
+        if columns is not None:
+            assert table.column_names == columns
+        cursor.release()
+        assert pa.ipc.open_stream(view).read_all().equals(table)
+        assert cursor.release() is False
+        del table
+    finally:
+        cursor.close()
+        view.release()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX named allocation contract")
+def test_arrow_cursor_propagates_real_named_allocation_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Required SHM cannot silently become an anonymous mapping after native failure."""
+    monkeypatch.setattr(ArrowCursor, "_next_shm_segment_name", staticmethod(lambda: "/bad/nested/seg"))
+    with pytest.raises(RuntimeError, match="/bad/nested/seg"):
+        ArrowCursor.from_rows([{"id": 1}], threshold_rows=1)
+
+
+@pytest.mark.parametrize("missing", ["pyarrow", "vertebra._vertebra"])
+def test_arrow_cursor_requires_optional_dependencies(missing: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """IPC requires its codec and threshold-selected SHM requires the native cursor."""
+    from vertebra.db import arrow as arrow_module
+
+    original = arrow_module.import_optional
+    monkeypatch.setattr(arrow_module, "import_optional", lambda name: None if name == missing else original(name))
+    with pytest.raises(MissingDependencyError, match=missing):
+        ArrowCursor.from_rows([{"id": 1}], threshold_rows=1)
