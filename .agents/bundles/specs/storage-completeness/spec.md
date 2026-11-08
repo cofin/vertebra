@@ -12,19 +12,19 @@ chapters:
   - ch03-litestar-and-range-streaming
   - ch04-arrow-shm-and-docs
 current_chapter: ch02-orm-and-sql-storage-contracts
-current_task: "storage-completeness:ch02:t03"
+current_task: null
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/gap-analysis_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 6
 plan_commit: 0155d9dc
-state_revision: 8
+state_revision: 9
 last_verified_checkpoint: dc2c2053
 last_reviewed_chapter: ch01-native-engine-and-auth
 last_reviewed_commit: dc2c2053
 created_at: "2026-11-03T04:05:00Z"
-updated_at: "2026-11-08T02:09:14Z"
+updated_at: "2026-11-08T14:40:17Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
@@ -195,8 +195,8 @@ Progress: `[1/3 files documented]` (`object-storage.md` updated in `ch01`; user 
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Plan Baseline**: `0155d9dc` on `feat/storage-updates` above `main @ 077a3fe9`; `plan_revision: 6`, `state: active`; `ch01-native-engine-and-auth` closed and approved by `@code-reviewer` and `@quality-reviewer` across `1bb622a7..dc2c2053`.
-- **Plan Identity**: Active `ch02` and in-progress `t03` share revision `6` at `0155d9dc`; completed tasks retain their verified plan and commit evidence.
-- **Active Chapter & Next Task**: `ch02-orm-and-sql-storage-contracts`, current task `storage-completeness:ch02:t03` (`ch02` active, `ch03`–`ch04` pending, `6/12` tasks remaining).
+- **Plan Identity**: Active `ch02` and completed `t03` share revision `6` at `0155d9dc`; completed tasks retain their verified plan and commit evidence.
+- **Active Chapter & Next Task**: `ch02-orm-and-sql-storage-contracts` awaits correctness review and fresh quality review. No next task starts (`ch03`–`ch04` pending, `5/12` tasks remaining).
 - **Documentation & OKF Status**: `[1/3 files documented]` (`object-storage.md` synchronized in `ch01`; user guides scheduled in `storage-completeness:ch04:t03`).
 - **Active Invariants**: Zero `asyncio.to_thread` in `src/py/vertebra/storage/_store.py`; lazy `import_optional("vertebra._storage")` at construction time; `mypy.stubtest vertebra._storage` green after every FFI change.
 

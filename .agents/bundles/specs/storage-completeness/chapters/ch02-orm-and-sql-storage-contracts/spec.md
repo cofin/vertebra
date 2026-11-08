@@ -10,14 +10,14 @@ planning_status: complete
 depends_on_chapters:
   - ch01-native-engine-and-auth
 replan_trigger: null
-current_task: "storage-completeness:ch02:t03"
+current_task: null
 plan_revision: 6
 plan_commit: 0155d9dc
-state_revision: 3
+state_revision: 4
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-08T02:44:34Z"
+updated_at: "2026-11-08T14:40:17Z"
 generated:
   by: flow-setup
   at: "2026-11-07T04:15:00Z"
@@ -112,14 +112,14 @@ Progress: `[0/0 files documented in ch02]` (documented in `ch04:t03` across `doc
 
 - [x] [7e13257bd58739520c11ca7a2c3e012867f660d9] storage-completeness:ch02:t01 — Complete fail-closed SQLSpec ObjectStoreProtocol over SyncObjectStore and AsyncObjectStore (tasks/t01-sqlspec-object-store-protocol.md)
 - [x] [0e579db6dc31bdf120b3a3c1fae84c1a2b4e6c6a] storage-completeness:ch02:t02 — Remove storages.get monkeypatch and harden Advanced Alchemy ObjectStoreBackend (tasks/t02-advanced-alchemy-storage-backend.md)
-- [~] storage-completeness:ch02:t03 — Subclass Django Storage (@deconstructible) with File handles and full metadata contract (tasks/t03-django-deconstructible-storage.md)
+- [x] [6ed9661be17a6da446d436cbe056381784c8a475] storage-completeness:ch02:t03 — Subclass Django Storage (@deconstructible) with File handles and full metadata contract (tasks/t03-django-deconstructible-storage.md)
 
 **Chapter Recovery Checkpoint:** `uv run --no-sync pytest src/py/tests/unit/extensions/test_data_storage_integrations.py src/py/tests/unit/extensions/test_django_plugin.py -q && uv run --no-sync ruff check src/py/vertebra/extensions/{sqlspec,alchemy,django}/storage.py src/py/tests/unit/extensions/test_data_storage_integrations.py src/py/tests/unit/extensions/test_django_plugin.py && uv run --no-sync mypy src/py/vertebra/extensions/sqlspec/storage.py src/py/vertebra/extensions/alchemy/storage.py src/py/vertebra/extensions/django/storage.py` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Plan Baseline**: `0155d9dc`; `depends_on_chapters: [ch01-native-engine-and-auth]`, `state: active`.
-- **Remaining Tasks in Chapter**: `t03` (`1/3` in progress); `t01` is completed at `7e13257b` and `t02` at `0e579db6`; both await chapter review.
+- **Remaining Tasks in Chapter**: None (`0/3` pending); `t01` is completed at `7e13257b`, `t02` at `0e579db6`, and `t03` at `6ed9661be17a6da446d436cbe056381784c8a475`. The chapter awaits correctness review and fresh quality review.
 - **Active Invariants**: Zero `asyncio.to_thread` in `extensions/alchemy/storage.py`; zero `storages.get` monkeypatching; exact installed SQLSpec `_sync` / `_async` names and Advanced Alchemy `ObjectStoreBackend.get_content[_async]`; `build_duckdb_gcs_secret_sql` preserved intact.
 
 [^sqlspec-storage]: `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` — SQLSpec object storage adapter.

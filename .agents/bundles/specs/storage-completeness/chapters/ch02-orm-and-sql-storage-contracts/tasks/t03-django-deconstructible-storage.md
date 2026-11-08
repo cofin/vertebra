@@ -5,7 +5,7 @@ chapter_id: ch02-orm-and-sql-storage-contracts
 title: Subclass Django Storage (@deconstructible) with File handles and full metadata contract
 description: Refactor vertebra.extensions.django.storage.DjangoStorage into a fail-closed @deconstructible subclass of django.core.files.storage.Storage returning Django File objects and implementing all sync/async storage and metadata methods.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -26,18 +26,24 @@ tests:
 estimated_loc: 210
 plan_revision: 6
 plan_commit: 0155d9dc
-state_revision: 1
+state_revision: 2
 claimed_by: agent:python-framework-specialist
 claimed_at: "2026-11-08T14:32:16Z"
 blocked_reason: null
 unblock_condition: null
-next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+next_step: "Chapter correctness review, then fresh quality review"
+last_verified_at: "2026-11-08T14:40:17Z"
+last_verified_commit: 6ed9661be17a6da446d436cbe056381784c8a475
+verification_evidence:
+  red: "uv run --no-sync pytest src/py/tests/unit/extensions/test_django_plugin.py src/py/tests/unit/extensions/test_data_storage_integrations.py -k django -q: exit 1, missing configuration regression fails"
+  reflection_red: "UV_NO_SYNC=1 uv run --no-sync pytest src/py/tests/unit/extensions/test_django_plugin.py -k file_annotations -q --disable-warnings: exit 1, 2 failed with File not subscriptable"
+  green: "UV_NO_SYNC=1 uv run --no-sync ruff check src/py/vertebra/extensions/django/storage.py src/py/tests/unit/extensions/test_django_plugin.py src/py/tests/unit/extensions/test_data_storage_integrations.py && UV_NO_SYNC=1 uv run --no-sync mypy src/py/vertebra/extensions/django/storage.py && UV_NO_SYNC=1 uv run --no-sync pytest src/py/tests/unit/extensions/test_django_plugin.py src/py/tests/unit/extensions/test_data_storage_integrations.py -q: exit 0, 125 passed"
+  full_mypy: "UV_NO_SYNC=1 uv run --no-sync mypy: exit 0, 419 source files"
+  format: "UV_NO_SYNC=1 uv run --no-sync ruff format --check src/py/vertebra/extensions/django/storage.py src/py/tests/unit/extensions/test_django_plugin.py src/py/tests/unit/extensions/test_data_storage_integrations.py: exit 0"
+  lock: "uv lock --check: exit 0"
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-08T14:32:16Z"
-commit: null
+updated_at: "2026-11-08T14:40:17Z"
+commit: 6ed9661be17a6da446d436cbe056381784c8a475
 sources:
   - id: django-storage-mod
     resource: src/py/vertebra/extensions/django/storage.py::DjangoStorage
@@ -117,19 +123,22 @@ Dependency verification: `uv lock --check` and the repository-wide configured My
 
 ## Acceptance Criteria
 
-- [ ] Real deconstructible Django `Storage` subclass refuses absent configuration and supports migration reconstruction (R3, R6).
-- [ ] `open` / `aopen` return real seekable `File` handles; sync/async save, naming/collisions, directory, URL, local path, and timestamp contracts pass public tests (R6).
-- [ ] Both registries stay public; no private `_memory` access, no inline Python comments, and lint/type checks pass (R6).
+- [x] Real deconstructible Django `Storage` subclass refuses absent configuration and supports migration reconstruction (R3, R6).
+- [x] `open` / `aopen` return real seekable `File` handles; sync/async save, naming/collisions, directory, URL, local path, and timestamp contracts pass public tests (R6).
+- [x] Both registries stay public; no private `_memory` access, no inline Python comments, and lint/type checks pass (R6).
 
-- [ ] Django storage subclasses the real upstream typed base with `django-stubs` in the lint group; lock validation and full configured MyPy pass.
+- [x] Django storage subclasses the real upstream typed base with `django-stubs` in the lint group; lock validation and full configured MyPy pass.
 
 ## Notes & Discoveries
+
+- Django's runtime `File` class is not generic despite its published stubs. A private type-only specialization resolves to the concrete `File` at runtime so `get_type_hints` succeeds without mutating Django.
+- Commit hooks invoking `uv run` require `UV_NO_SYNC=1` after dependency manifest changes to retain installed optional extras and native editable artifacts.
 
 - Native metadata exposes modification time only; creation/access hooks raise `NotImplementedError`.
 - Django `File` accepts binary readers; `aopen` awaits metadata and supplies its size so constructing the synchronous reader performs no storage I/O.
 - `ContentFile(str)` emits text chunks; uploads encode each chunk as UTF-8 without buffering the complete file.
 - `django-stubs` `6.1.2` checks the real optional base and `File[bytes]`; full configured MyPy passes for 419 files with unchanged typing configuration.
-- The focused initial regression fails because omitted configuration previously created a memory store. Both canonical modules pass 123 tests after implementation; Ruff, format, and lock validation pass.
+- The focused initial regression fails because omitted configuration previously created a memory store. Both canonical modules pass 125 tests after implementation; Ruff, format, and lock validation pass.
 
 - Installed contract baseline: Django `6.1.3`; Django `save` owns validation/name allocation and `_save` owns persistence. Native metadata type is `ObjectMeta`, with one RFC 3339 modification timestamp.
 
