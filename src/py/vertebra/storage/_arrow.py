@@ -72,9 +72,9 @@ class _CodecBridge:
             future.cancel()
         if self._worker is not None:
             with contextlib.suppress(BaseException):
-                await asyncio.shield(self._worker)
+                await self._wait_for_exit(self._worker)
         if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+            await self._wait_for_exit(asyncio.gather(*self._tasks, return_exceptions=True))
 
     async def _invoke_io[T](self, fn: Callable[..., Awaitable[T]], args: tuple[Any, ...]) -> T:
         task = asyncio.current_task()
@@ -87,6 +87,14 @@ class _CodecBridge:
             return await fn(*args)
         finally:
             self._tasks.discard(task)
+
+    @staticmethod
+    async def _wait_for_exit(future: asyncio.Future[Any]) -> None:
+        """Keep cleanup ownership through further cancellation until work exits."""
+        while not future.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(future)
+        future.result()
 
 
 class _RangeFile(io.RawIOBase):

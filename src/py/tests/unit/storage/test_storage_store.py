@@ -1408,7 +1408,8 @@ async def test_storage_arrow_writer_dictionary_state(file_format: str) -> None:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("file_format", ["arrow-ipc", "parquet"])
-async def test_storage_arrow_writer_waits_for_cancelled_codec_worker(file_format: str) -> None:
+@pytest.mark.parametrize("cancellations", [1, 2, 3])
+async def test_storage_arrow_writer_waits_for_cancelled_codec_worker(file_format: str, cancellations: int) -> None:
     """Cancellation retains the sink and producer until the active codec step exits."""
     pa = pytest.importorskip("pyarrow")
     batch = pa.record_batch({"id": [1]})
@@ -1440,8 +1441,10 @@ async def test_storage_arrow_writer_waits_for_cancelled_codec_worker(file_format
                 if task.done():
                     await task
                 await asyncio.sleep(0.001)
-        task.cancel()
-        await asyncio.sleep(0)
+        for _ in range(cancellations):
+            task.cancel()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
         assert not task.done()
         assert closed == []
         release.set()
