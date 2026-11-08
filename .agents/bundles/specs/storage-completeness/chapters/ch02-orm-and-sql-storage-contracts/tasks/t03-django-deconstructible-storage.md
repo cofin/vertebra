@@ -144,7 +144,6 @@ Review regression verification: real `FieldFile` open/read/close/reopen returns 
 
 ## Notes & Discoveries
 
-- Prior source evidence remains at `09a44f88baa87178271436a0228acf9fb3ddd5a5` and `6ed9661be17a6da446d436cbe056381784c8a475`, with 125 canonical tests before the consumer review cases.
 - Django `FieldFile.open` delegates reopening to its cached `File`; plain `File.open` can read a same-named working-directory file after close. The storage-bound file reopens only its qualified native key and refreshes the cached size.
 - Django's public `MigrationWriter.register_serializer` supports a `BaseSerializer` for each of the eight Vertebra configuration types. Every config field serializes recursively into public `vertebra.storage` constructors; LocalConfig, MemoryConfig namespace, and S3 provider options round-trip without cloud calls.
 - Live native store handles remain nonportable migration constructor inputs; Django reports their unsupported serialization explicitly.
@@ -156,7 +155,6 @@ Review regression verification: real `FieldFile` open/read/close/reopen returns 
 - Django `File` accepts binary readers; `aopen` awaits metadata and supplies its size so constructing the synchronous reader performs no storage I/O.
 - `ContentFile(str)` emits text chunks; uploads encode each chunk as UTF-8 without buffering the complete file.
 - `django-stubs` `6.1.2` checks the real optional base and `File[bytes]`; full configured MyPy passes for 419 files with unchanged typing configuration.
-- The focused initial regression fails because omitted configuration previously created a memory store. Both canonical modules pass 136 tests after implementation; Ruff, format, and lock validation pass.
 
 - Installed contract baseline: Django `6.1.3`; Django `save` owns validation/name allocation and `_save` owns persistence. Native metadata type is `ObjectMeta`, with one RFC 3339 modification timestamp.
 
