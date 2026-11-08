@@ -5,7 +5,7 @@ chapter_id: ch03-litestar-and-range-streaming
 title: Implement RFC 9110 Range/206/416 StreamingStorageResponse and async chunk/fastpath delivery
 description: Add RFC 9110 single-range parsing (200, 206 Partial Content, 416 Range Not Satisfiable) and non-blocking AsyncObjectStore streaming/fastpath delivery to vertebra.storage._streaming.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -14,7 +14,8 @@ read_set:
   - src/py/vertebra/storage/__init__.py
   - src/py/vertebra/storage/_store.py
   - src/py/tests/unit/server/test_zero_copy_buffer.py
-  - .agents/skills/python-framework/SKILL.md
+  - src/py/tests/unit/storage/test_storage_store.py
+  - src/py/vertebra/server/_fastpath.py
 files:
   - src/py/vertebra/storage/_streaming.py
   - src/py/vertebra/storage/__init__.py
@@ -22,20 +23,41 @@ tests:
   - src/py/tests/unit/server/test_zero_copy_buffer.py
   - src/py/tests/unit/storage/test_storage_store.py
 estimated_loc: 180
-plan_revision: 3
-plan_commit: e8901de4
-state_revision: 0
+plan_revision: 8
+plan_commit: 222cbf99
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-08T15:50:08Z"
+last_verified_commit: a0888371a54253624c77c4b817875f9878f54b28
+verification_evidence:
+  red:
+    command: "UV_NO_SYNC=1 uv run --no-sync pytest src/py/tests/unit/server/test_zero_copy_buffer.py -q"
+    exit_code: 1
+    result: "12 range cases fail on missing from_async_store; 7 existing tests pass"
+  regression_red:
+    command: "UV_NO_SYNC=1 uv run --no-sync pytest src/py/tests/unit/storage/test_storage_store.py -q -k explicit_async_range"
+    exit_code: 1
+    result: "Direct open-ended async descriptor incorrectly yields empty body"
+  green:
+    command: "UV_NO_SYNC=1 uv run --no-sync pytest src/py/tests/unit/server/test_zero_copy_buffer.py src/py/tests/unit/storage/test_storage_store.py -q"
+    exit_code: 0
+    result: "51 passed; real native Memory and Local stores, explicit async handler and native buffer/wire consumers"
+  lint:
+    command: "UV_NO_SYNC=1 uv run --no-sync ruff check src/py/vertebra/storage src/py/tests/unit/server/test_zero_copy_buffer.py src/py/tests/unit/storage/test_storage_store.py"
+    exit_code: 0
+  typing:
+    command: "UV_NO_SYNC=1 uv run --no-sync mypy src/py/vertebra/storage"
+    exit_code: 0
+    result: "3 source files pass"
+  hooks:
+    result: "Signed local implementation and consumer-test commits pass normal pre-commit and commit-msg hooks"
 created_at: "2026-11-07T04:15:00Z"
 updated_at: "2026-11-08T02:25:35Z"
-commit: null
+commit: a0888371a54253624c77c4b817875f9878f54b28
 sources:
   - id: streaming-resp
     resource: src/py/vertebra/storage/_streaming.py::StreamingStorageResponse
@@ -62,7 +84,10 @@ Upgrade `src/py/vertebra/storage/_streaming.py::StreamingStorageResponse` (and p
 - `src/py/vertebra/storage/__init__.py` — Public symbols exported from `vertebra.storage` [^storage-pkg-init].
 - `src/py/vertebra/storage/_store.py` — `SyncObjectStore`, `AsyncObjectStore`, `ObjectMeta`, and `StorageBuffer`.
 - `src/py/tests/unit/server/test_zero_copy_buffer.py` — Zero-copy `StorageBuffer` and fastpath response tests.
-- `.agents/skills/python-framework/SKILL.md` — `msgspec.Struct`, typing, and docstring conventions.
+- `src/py/tests/unit/storage/test_storage_store.py` — Native Local and Memory storage response/error integration.
+- `src/py/vertebra/server/_fastpath.py` — FastPath byte-header and native buffer consumer contract.
+
+Referenced `.agents/skills/python-framework/SKILL.md` guidance loads outside the bounded source manifest.
 
 ## Symbol & Signature Contracts
 
@@ -72,8 +97,10 @@ Upgrade `src/py/vertebra/storage/_streaming.py::StreamingStorageResponse` (and p
   - `StreamingStorageResponse`:
     - `classmethod async def from_async_store(cls, store: AsyncObjectStore, key: str, *, range_header: str | None = None, content_type: str | None = None, headers: Mapping[str, str] | None = None, chunk_size: int = 65536) -> StreamingStorageResponse` (calls `await store.head(key)` once, resolves `200` / `206` / `416`, populates `Accept-Ranges: bytes`, `ETag`, `Content-Length`, and `Content-Range`).
     - `classmethod def from_sync_store(cls, store: SyncObjectStore, key: str, *, range_header: str | None = None, content_type: str | None = None, headers: Mapping[str, str] | None = None, chunk_size: int = 65536) -> StreamingStorageResponse`.
-    - `async def aiter_chunks(self) -> AsyncIterator[StorageBuffer | bytes]`: yields `b""` (zero chunks) on `416`, single/chunked `await store.get_range(...)` on `206`, and `store.get_stream(key)` on `200` over `AsyncObjectStore` without blocking.
-    - `async def to_async_fastpath_tuple(self) -> tuple[int, list[tuple[str, str]], StorageBuffer | bytes]` alongside sync `to_fastpath_tuple(self)` (which raises `TypeError` if called synchronously on an `AsyncObjectStore` without pre-fetched buffer rather than blocking).
+    - `async def aiter_chunks(self) -> AsyncIterator[StorageBuffer | bytes | memoryview]`: yields `b""` (zero chunks) on `416`, single/chunked `await store.get_range(...)` on `206`, and `store.get_stream(key)` on `200` over `AsyncObjectStore` without blocking.
+    - `async def to_async_fastpath_tuple(self) -> tuple[int, list[tuple[bytes, bytes]], memoryview | bytes]` alongside sync `to_fastpath_tuple(self)` (which raises `TypeError` if called synchronously on an `AsyncObjectStore` without pre-fetched buffer rather than blocking).
+
+Native contracts: full streams preserve `StorageBuffer`; public range reads return `bytes`; async fastpath uses public `get_view` and returns an owner-preserving `memoryview`. Both fastpath methods retain byte-pair headers. Referenced Python framework guidance loads outside the bounded source manifest.
 
 ## Edge Cases & Error Semantics
 
@@ -93,7 +120,9 @@ Upgrade `src/py/vertebra/storage/_streaming.py::StreamingStorageResponse` (and p
 | Full `200 OK` async stream | 100-byte object `"video.mp4"`, `range_header=None` via `from_async_store` | Status `200`, `Accept-Ranges: bytes`, `Content-Length: 100`, `aiter_chunks` yields `StorageBuffer` chunks totaling 100 bytes. |
 | Bounded, open-ended, & suffix `206` | `bytes=0-15`, `bytes=80-`, `bytes=-12` on 100-byte object | Status `206`, `Content-Range` = `bytes 0-15/100`, `bytes 80-99/100`, `bytes 88-99/100` with matching slice payloads. |
 | Out-of-bounds / inverted / multi-range `416` | `bytes=100-110`, `bytes=40-10`, `bytes=0-2,4-6` on 100-byte object | Status `416`, `Content-Range: bytes */100`, `Content-Length: 0`, `b"".join([bytes(c) async for c in resp.aiter_chunks()]) == b""`. |
-| Non-blocking `to_async_fastpath_tuple` | `await resp.to_async_fastpath_tuple()` on `206` range `0-31` | Returns `(206, headers, StorageBuffer)` with `len(buf) == 32` and zero `SyncObjectStore` calls. |
+| Non-blocking `to_async_fastpath_tuple` | `await resp.to_async_fastpath_tuple()` on `206` range `0-31` | Returns `(206, headers, bytes)` with `len(buf) == 32` and zero `SyncObjectStore` calls. |
+
+- **Native consumer proof**: An explicit async handler awaits `from_async_store` and `to_async_fastpath_tuple` before passing the resolved body and headers to native `Response.from_buffer` and `submit_raw_response`. Parameterized 200/206/416 cases assert native response data and decoded wire frames; full 200 bodies retain a native `StorageBuffer` owner.
 
 ## Verification
 
@@ -102,12 +131,16 @@ Upgrade `src/py/vertebra/storage/_streaming.py::StreamingStorageResponse` (and p
 
 ## Acceptance Criteria
 
-- [ ] `StreamingStorageResponse` supports RFC 9110 single-range `200`, `206`, and `416` responses with exact `Content-Range`, `Accept-Ranges`, and `Content-Length` headers (R7).
-- [ ] Async streaming and fastpath resolution execute entirely on `AsyncObjectStore` without blocking event-loop threads (R7).
+- [x] `StreamingStorageResponse` supports RFC 9110 single-range `200`, `206`, and `416` responses with exact `Content-Range`, `Accept-Ranges`, and `Content-Length` headers (R7).
+- [x] Async streaming and fastpath resolution execute entirely on `AsyncObjectStore` without blocking event-loop threads (R7).
 
 ## Notes & Discoveries
 
-- [2026-11-07 04:15] Export `ByteRange` and `RangeNotSatisfiableError` (if public) in `vertebra/storage/__init__.py` `__all__` sorted alphabetically.
+- Full async streams yield native `StorageBuffer`; public range reads yield `bytes`; full async fastpath bodies are `memoryview` instances retaining a native `StorageBuffer` owner.
+- Existing direct-data and sync-store async iteration preserve `memoryview` chunks. Direct open-ended async descriptors obtain metadata when `total_size` is absent.
+- Fastpath descriptors retain byte-pair headers. Native `Response.from_buffer` accepts those headers; the diagnostic `submit_raw_response` helper requires Latin-1 decoded string pairs.
+- Reserved range and length headers derive from object metadata. Missing objects and backend read failures propagate; invalid chunk sizes raise `ValueError`; async stores reject synchronous fastpath resolution with `TypeError`.
+- Implementation commit: `29d8ac792208f47f12052762f7f3d26bb1105373`. Native consumer proof and verification checkpoint: `a0888371a54253624c77c4b817875f9878f54b28`.
 
 [^streaming-resp]: `src/py/vertebra/storage/_streaming.py::StreamingStorageResponse` — Storage HTTP streaming response.
 [^storage-pkg-init]: `src/py/vertebra/storage/__init__.py` — Public storage package exports.

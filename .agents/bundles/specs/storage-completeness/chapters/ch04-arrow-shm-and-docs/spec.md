@@ -2,124 +2,103 @@
 type: Spec
 parent_flow: storage-completeness
 chapter_id: ch04-arrow-shm-and-docs
-title: "Chapter 04: Strict Arrow SHM Allocation, Parquet Streaming, and OKF Sync"
-description: Enforce fail-loud named ShmRegion allocation, eliminate JSON pseudo-Arrow fallback in ArrowCursor.from_rows, wire streaming Arrow/Parquet ObjectStore helpers, and synchronize storage documentation and OKF chapters.
+title: 'Chapter 04: Strict Arrow SHM and Bounded Storage Codecs'
+description: R8 hardens named SHM allocation and ArrowCursor IPC, then implements
+  bounded read and write codec bridges on public sync/async storage helpers. The three
+  tasks separately own strict allocation, read lifecycle, and write lifecycle.
 status: stable
 state: planned
 planning_status: complete
 depends_on_chapters:
-  - ch01-native-engine-and-auth
-  - ch02-orm-and-sql-storage-contracts
-  - ch03-litestar-and-range-streaming
+- ch01-native-engine-and-auth
+- ch02-orm-and-sql-storage-contracts
+- ch03-litestar-and-range-streaming
 replan_trigger: null
-current_task: "storage-completeness:ch04:t01"
-plan_revision: 3
-plan_commit: e8901de4
+current_task: storage-completeness:ch04:t01
+plan_revision: 9
+plan_commit: 222cbf99
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
-created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-08T02:25:35Z"
-generated:
-  by: flow-setup
-  at: "2026-11-07T04:15:00Z"
-verified:
-  - by: agent:flow-setup
-    at: "2026-11-07T04:15:00Z"
-    commit: cdb978d3
+created_at: '2026-11-08T00:00:00Z'
+updated_at: '2026-11-08T00:00:00Z'
 sources:
-  - id: arrow-shm
-    resource: src/rs/vertebra-db/src/arrow_shm.rs::allocate_shm_region
-    title: Named ShmRegion allocator for VTBARROW zero-copy frames
-  - id: db-arrow
-    resource: src/py/vertebra/db/arrow.py::ArrowCursor
-    title: Python ArrowCursor IPC wrapper and from_rows constructor
-  - id: okf-storage
-    resource: .agents/bundles/knowledge/domains/storage/object-storage.md
-    title: OKF domain knowledge chapter for Vertebra object storage
+- id: store
+  resource: src/py/vertebra/storage/_store.py::AsyncObjectStore
+  title: Native async storage facade
+- id: pool
+  resource: src/py/vertebra/utils/sync_tools.py::SyncPool
+  title: Codec worker execution
+- id: cursor
+  resource: src/py/vertebra/db/arrow.py::ArrowCursor
+  title: Arrow IPC cursor
 tags:
-  - storage
-  - arrow
-  - parquet
-  - shm
-  - docs
-  - okf
+- storage
+- arrow
 ---
-
-# Chapter 04: Strict Arrow SHM Allocation, Parquet Streaming, and OKF Sync
+# Chapter 04: Strict Arrow SHM and Bounded Storage Codecs
 
 <!-- truth: start -->
-- **Fail-Loud Named SHM Allocation**: On Unix, `vertebra_db::arrow_shm::allocate_shm_region` returns `Err(ArrowShmError)` immediately when `ShmRegion::create_named` fails instead of falling back to an anonymous `ShmRegion::create` segment unreachable by peer workers [^arrow-shm].
-- **Real Arrow IPC Only**: `ArrowCursor.from_rows` always writes valid Arrow IPC stream bytes and raises `MissingDependencyError` when `pyarrow` is unavailable, removing the `encode_json_bytes` pseudo-Arrow fallback [^db-arrow].
-- **Streaming Parquet/Arrow & OKF Parity**: `SyncObjectStore`, `AsyncObjectStore`, and `ObjectStoreBackend._iter_arrow_async` stream Arrow IPC and Parquet record batches over `SyncReadableFile` / `AsyncReadableFile` and `put_stream` without whole-table list materialization, and usage docs plus `object-storage.md` reflect the shipped contracts [^okf-storage].
+- Native asynchronous storage I/O remains on the caller loop; existing SyncPool executes synchronous PyArrow codecs [^pool].
+- Public ArrowCursor methods and native buffer ownership remain stable while required named allocations fail closed [^cursor].
+- Storage batch methods and SQLSpec consumers retain bounded demand by default and deterministic cancellation cleanup [^store].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
-### 1.1 Problem Statement & Objectives
+R8 hardens named SHM allocation and ArrowCursor IPC, then implements bounded read and write codec bridges on public sync/async storage helpers. The three tasks separately own strict allocation, read lifecycle, and write lifecycle.
 
-`src/rs/vertebra-db/src/arrow_shm.rs::allocate_shm_region` silently falls back to `ShmRegion::create` on `ShmRegion::create_named` failure, creating an anonymous region that cross-process `VTBARROW` readers cannot open by name [^arrow-shm]. In Python, `src/py/vertebra/db/arrow.py::ArrowCursor.from_rows` falls back to `encode_json_bytes(dict_list)` when `pyarrow` is absent, corrupting callers expecting Arrow IPC framing [^db-arrow]. Finally, Arrow/Parquet object-storage helpers require batch-streaming integration over `SyncReadableFile` / `AsyncReadableFile` and `put_stream`, and `docs/usage/storage*.md` plus `.agents/bundles/knowledge/domains/storage/object-storage.md` require final synchronization across `ch02`–`ch04` framework and Arrow/Parquet contracts [^okf-storage].
-
-### 1.2 Non-Goals
-
-- Broker cross-worker `VTBARROW` RPC framing for SQLSpec adapters (owned by `broker-pool-sharing` and `sqlspec-adapter-parity`).
-
-### 1.3 Upstream Baseline & Code Analysis
-
-Parent roadmap: [spec.md](../../spec.md); depends on Chapters 01, 02, and 03. Skills: [runtime-ipc](../../../../../skills/runtime-ipc/SKILL.md) and [python-framework](../../../../../skills/python-framework/SKILL.md). Knowledge: [adr-004-optional-driver-wheels-and-shm-ownership.md](../../../../knowledge/decisions/adr-004-optional-driver-wheels-and-shm-ownership.md) and [object-storage.md](../../../../knowledge/domains/storage/object-storage.md).
+Plan baseline is `222cbf99`. This chapter depends on ch01-native-engine-and-auth, ch02-orm-and-sql-storage-contracts, ch03-litestar-and-range-streaming. The native storage facade supplies stream/range I/O and multipart abort; PyArrow 26.0.1 supplies synchronous callbacks, dictionary memo, and codec operations. Sources below anchor the public seams. Skills are local runtime-ipc and pyo3-bridge for allocation/lifetime changes, python-framework for facade contracts, and review-tests for public behavior evidence.
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
-### 2.1 Chapter Requirements
+R8.1 preserves `ArrowCursor.from_rows(rows, columns=None, *, threshold_rows=256)`, buffer_view and to_arrow_table, removes JSON pseudo-IPC, and propagates Unix named-allocation failure without Python anonymous mmap fallback. R8.2 implements public iterators with worker-only synchronous PyArrow callbacks and caller-loop native async I/O. R8.3 adds bounded encoder sinks and native multipart writes. The allocator stays private with normalized-name/aligned-size inputs; public frame writer is write_shm_arrow_frame. VTBARROW headers and retained-view lifetime stay unchanged.
 
-- **R8.1 (`ch04:t01`)**: Introduce `pub type ArrowShmError = String` (or typed `ArrowShmError` implementing `Display` + `Error` convertible to `String`) in `src/rs/vertebra-db/src/arrow_shm.rs` and make `allocate_shm_region` return `Err(...)` whenever `ShmRegion::create_named` fails on `#[cfg(unix)]`; in `src/py/vertebra/db/arrow.py::ArrowCursor.from_rows`, delete the `encode_json_bytes` fallback so `from_rows` emits valid Arrow IPC stream bytes (even for empty `[]` with explicit `schema` or empty struct stream) and raises `MissingDependencyError("pyarrow", install_package="pyarrow", extra="arrow")` when `pyarrow` is uninstalled.
-- **R8.2 (`ch04:t02`)**: Add batch-streaming `write_arrow`, `read_arrow_batches`, `write_parquet`, and `read_parquet_batches` on `SyncObjectStore` and `AsyncObjectStore` (`src/py/vertebra/storage/_store.py`) backed by `put_stream` and `SyncReadableFile` / `AsyncReadableFile`, and wire `ObjectStoreBackend._iter_arrow_async` in `src/py/vertebra/extensions/sqlspec/storage.py` to yield Arrow batches incrementally without buffering whole files in memory.
-- **R8.3 (`ch04:t03`)**: Update `docs/usage/storage.md` and `docs/usage/storage-auth-and-signing.md` and extend `.agents/bundles/knowledge/domains/storage/object-storage.md` (which already documents `ch01` `RustTaskAwaitable`, `notify.rs` provenance, unified `vertebra._vertebra` GCP auth, and fail-closed construction) with `ch02`–`ch04` ORM/Litestar contracts and Arrow/Parquet batch streaming.
+Caller -> public storage method -> private storage/_arrow.py codec adapter -> native asynchronous stream/range/multipart API. The existing SyncPool is a codec scheduler; no synchronous remote store is called by async helpers. The sync API uses native sync store operations. Shared signatures are `iter_arrow_batches(key)`, `iter_parquet_batches(key, *, batch_size=65536, columns=None)`, `write_arrow(key, data, *, batch_size=65536) -> PutResult`, and `write_parquet(key, batches, *, schema=None, compression="zstd", row_group_size=65536) -> PutResult`; async writes are awaitable and async reads return AsyncIterator directly.
 
-### 2.2 Edge-Case & Failure-Mode Matrix
-
-| Boundary | Deterministic Behavior |
+| Failure boundary | Required behavior |
 | --- | --- |
-| Invalid or uncreatable POSIX SHM name in `allocate_shm_region` | Returns `Err` containing normalized segment name and OS error; zero anonymous fallback. |
-| `ArrowCursor.from_rows(rows)` when `pyarrow` is missing | Raises `MissingDependencyError` rather than storing JSON bytes inside `_ipc_bytes`. |
-| `ObjectStoreBackend._iter_arrow_async` over multi-row-group Parquet object | Yields one `pyarrow.RecordBatch` per chunk/row-group via `AsyncReadableFile` range reads without reading entire object into a single `bytes` object when seekable metadata is used. |
+| Missing pyarrow | MissingDependencyError with extra="arrow" before upload/read side effects. |
+| Worker waiting for remote async I/O | Caller loop stays responsive; cancellation cancels pending coroutine and waits for worker cleanup. |
+| Corrupt codec input or producer error | Original exception propagates; sources close and incomplete uploads abort. |
+| Empty data | Schema-bearing output is valid; schema-less empty batch iterable raises ValueError on writes. |
+| Consumer stops early | Explicit close/aclose stops demand and closes backing resources once. |
 
-### 2.3 Alternatives Comparison
+| Alternative | Decision and rationale |
+| --- | --- |
+| Per-demand SyncPool codec adapter | Selected: existing scheduler, native async I/O, persistent codec dictionary state, no producer queue. |
+| Full-file BytesIO/tempfile staging | Rejected: delays first-batch delivery and stages whole datasets. |
+| AsyncReadableFile passed directly to PyArrow | Rejected: synchronous Python callbacks cannot await its coroutine reads. |
+| Custom sparse rowgroup planner/native codec binding | Rejected: adds format/FFI surface unnecessary for the existing PyArrow callback seam. |
 
-| Decision | Chosen Seam | Rejected Alternative |
-| --- | --- | --- |
-| `ArrowCursor.from_rows` without `pyarrow` | Fail closed with `MissingDependencyError` | Encoding JSON bytes into `ArrowCursor` — violates Arrow IPC wire invariant (`ARROW1` / continuation marker) and breaks downstream `to_arrow()` / `VTBARROW` consumers. |
+Parquet batch readers construct `ParquetFile` with `pre_buffer=False` by default, including all new public batch helpers. SQLSpec explicitly supplied `pre_buffer=True` remains honored for API compatibility and opts out of the bounded-prefetch guarantee; do not silently discard it. Fixed-size footer read-ahead is permitted. Full-Table read helpers preserve caller options and intentionally materialize their Table return.
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Progress: `[1/3 files documented]` (`object-storage.md` documents the native engine and ORM/SQL adapters; `storage-completeness:ch04:t03` completes user guides and extends `object-storage.md` for `ch02`–`ch04`):
-
-* `docs/usage/storage.md` — Streaming `get_stream`/`put_stream`, conditional `put`, pagination, `rename`, fail-closed config, Litestar `Store`/static/Range streaming, and Arrow/Parquet helpers.
-* `docs/usage/storage-auth-and-signing.md` — Unified `vertebra._vertebra.{SyncGcpTokenCache, AsyncGcpTokenCache}` and GCS/S3/Azure/OCI presigning.
-* `.agents/bundles/knowledge/domains/storage/object-storage.md` — Extend existing native and ORM/SQL knowledge with Litestar contracts and Arrow/Parquet batch streaming.
+Progress: `[1/3 files documented]`. The original documentation manifest is preserved in ch05:t02: docs/usage/storage.md, docs/usage/storage-auth-and-signing.md, and .agents/bundles/knowledge/domains/storage/object-storage.md. This chapter supplies tested symbols and lifetime behavior for that documentation.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
-| Requirement | Owning Task | Verification Strategy | Canonical Test / Doc Gate |
-| --- | --- | --- | --- |
-| R8.1 | [t01](tasks/t01-strict-shm-and-arrow-ipc-cursor.md) | `behavior_tdd` | `src/rs/vertebra-db/src/arrow_shm.rs`, `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py` |
-| R8.2 | [t02](tasks/t02-streaming-arrow-parquet-storage.md) | `behavior_tdd` | `src/py/tests/unit/storage/test_storage_store.py`, `src/py/tests/unit/extensions/test_data_storage_integrations.py` |
-| R8.3 | [t03](tasks/t03-storage-docs-and-okf-sync.md) | `documentation_validation` | `src/py/tests/unit/tools/test_docs_tooling.py` |
+| Requirement | Task | Verification |
+| --- | --- | --- |
+| R8 | [storage-completeness:ch04:t01](tasks/t01-strict-shm-and-arrow-ipc-cursor.md) | behavior_tdd; `src/rs/vertebra-db/src/arrow_shm.rs`, `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py` |
+| R8 | [storage-completeness:ch04:t02](tasks/t02-streaming-arrow-parquet-storage.md) | behavior_tdd; `src/py/tests/unit/storage/test_storage_store.py` |
+| R8 | [storage-completeness:ch04:t03](tasks/t03-streaming-arrow-parquet-writes.md) | behavior_tdd; `src/py/tests/unit/storage/test_storage_store.py` |
 
 ## 5. Implementation Plan
 
-- [ ] storage-completeness:ch04:t01 — Enforce fail-loud allocate_shm_region and valid Arrow IPC in ArrowCursor.from_rows (tasks/t01-strict-shm-and-arrow-ipc-cursor.md)
-- [ ] storage-completeness:ch04:t02 — Wire batch-streaming Arrow and Parquet helpers across SyncObjectStore, AsyncObjectStore, and SQLSpec (tasks/t02-streaming-arrow-parquet-storage.md)
-- [ ] storage-completeness:ch04:t03 — Synchronize storage usage guides and OKF object-storage knowledge chapter (tasks/t03-storage-docs-and-okf-sync.md)
+- [ ] storage-completeness:ch04:t01 — Preserve ArrowCursor APIs while enforcing named SHM and real IPC (tasks/t01-strict-shm-and-arrow-ipc-cursor.md)
+- [ ] storage-completeness:ch04:t02 — Read Arrow and Parquet through a bounded async codec bridge (tasks/t02-streaming-arrow-parquet-storage.md)
+- [ ] storage-completeness:ch04:t03 — Write Arrow and Parquet with bounded multipart codec output (tasks/t03-streaming-arrow-parquet-writes.md)
 
-**Chapter Recovery Checkpoint:** `make lint-all && make rs-test && make py-test && make docs` exits `0`.
+**Chapter Recovery Checkpoint:** `make lint-all && make rs-test && make py-test && make docs` exits 0; correctness review precedes fresh quality review.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `Plan baseline @ e8901de4`; `depends_on_chapters: [ch01, ch02, ch03]`, `state: planned`.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03` (`3/3` pending).
-- **Documentation & OKF Status**: `[1/3 files documented]` (`object-storage.md` covers native and ORM/SQL contracts; the two user guides and Litestar/Arrow knowledge extensions remain planned in `t03`).
+- Plan baseline: `222cbf99`, revision 9; 3 pending tasks and no completed implementation claimed.
+- Dependency tasks finish before dependent tasks begin; every worksheet owns one isolated execution and atomic commit.
+- Documentation remains explicitly tracked in ch05:t02; no original R8 requirement is deferred.
 
-[^arrow-shm]: `src/rs/vertebra-db/src/arrow_shm.rs::allocate_shm_region` — Named shared-memory segment allocator for Arrow IPC frames.
-[^db-arrow]: `src/py/vertebra/db/arrow.py::ArrowCursor` — Python Arrow IPC result wrapper.
-[^okf-storage]: `.agents/bundles/knowledge/domains/storage/object-storage.md` — OKF storage domain knowledge chapter.
+[^store]: `src/py/vertebra/storage/_store.py::AsyncObjectStore` — Native storage facade.
+[^pool]: `src/py/vertebra/utils/sync_tools.py::SyncPool` — Existing worker execution.
+[^cursor]: `src/py/vertebra/db/arrow.py::ArrowCursor` — IPC cursor and ownership.

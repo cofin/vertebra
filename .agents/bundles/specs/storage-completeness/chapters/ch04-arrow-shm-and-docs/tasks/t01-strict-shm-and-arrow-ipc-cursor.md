@@ -1,29 +1,33 @@
 ---
 type: Task
-id: "storage-completeness:ch04:t01"
+id: storage-completeness:ch04:t01
 chapter_id: ch04-arrow-shm-and-docs
-title: Enforce fail-loud allocate_shm_region and valid Arrow IPC in ArrowCursor.from_rows
-description: Remove the anonymous ShmRegion::create fallback in vertebra_db::arrow_shm::allocate_shm_region and the JSON pseudo-Arrow fallback in vertebra.db.arrow.ArrowCursor.from_rows.
+title: Preserve ArrowCursor APIs while enforcing named SHM and real IPC
+description: Remove anonymous allocation after named SHM failure and JSON pseudo-Arrow
+  from ArrowCursor.from_rows. Preserve public cursor construction, tuple/mapping rows,
+  columns, threshold, and live-view ownership. Unrelated write_arrow_shm input policy
+  remains outside this task.
 status: stable
 state: pending
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
 read_set:
-  - src/rs/vertebra-db/src/arrow_shm.rs
-  - src/py/vertebra/db/arrow.py
-  - src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
-  - .agents/bundles/knowledge/decisions/adr-004-optional-driver-wheels-and-shm-ownership.md
-  - .agents/skills/runtime-ipc/SKILL.md
+- src/rs/vertebra-db/src/arrow_shm.rs
+- src/py/vertebra/db/arrow.py
+- src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
+- src/rs/vertebra-py/src/db.rs
+- src/py/tests/unit/db/test_enterprise_olap_drivers.py
+- .agents/bundles/knowledge/decisions/adr-004-optional-driver-wheels-and-shm-ownership.md
 files:
-  - src/rs/vertebra-db/src/arrow_shm.rs
-  - src/py/vertebra/db/arrow.py
+- src/rs/vertebra-db/src/arrow_shm.rs
+- src/py/vertebra/db/arrow.py
 tests:
-  - src/rs/vertebra-db/src/arrow_shm.rs
-  - src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
-estimated_loc: 160
-plan_revision: 3
-plan_commit: e8901de4
+- src/rs/vertebra-db/src/arrow_shm.rs
+- src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
+estimated_loc: 180
+plan_revision: 9
+plan_commit: 222cbf99
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -33,81 +37,76 @@ next_step: null
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
-created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-08T02:25:35Z"
+created_at: '2026-11-08T00:00:00Z'
+updated_at: '2026-11-08T00:00:00Z'
 commit: null
 sources:
-  - id: arrow-shm-rs
-    resource: src/rs/vertebra-db/src/arrow_shm.rs::allocate_shm_region
-    title: Named shared-memory allocator in vertebra-db
-  - id: db-arrow-py
-    resource: src/py/vertebra/db/arrow.py::ArrowCursor
-    title: Python ArrowCursor IPC stream wrapper
+- id: shm
+  resource: src/rs/vertebra-db/src/arrow_shm.rs::allocate_shm_region
+  title: Named frame allocation
+- id: cursor
+  resource: src/py/vertebra/db/arrow.py::ArrowCursor
+  title: Public cursor
 tags:
-  - storage
-  - arrow
-  - shm
-  - rust
-  - python
+- storage
+- arrow
 ---
-
-# Task t01: Enforce Fail-Loud `allocate_shm_region` and Valid Arrow IPC in `ArrowCursor.from_rows`
+# Task t01: Preserve ArrowCursor APIs while enforcing named SHM and real IPC
 
 ## Objective & Scope Boundary
 
-Eliminate two silent data-plane fallbacks: (1) in `src/rs/vertebra-db/src/arrow_shm.rs::allocate_shm_region`, stop falling back to anonymous `ShmRegion::create(alloc_size)` when `ShmRegion::create_named` fails on Unix and instead return `Err(ArrowShmError)` immediately [^arrow-shm-rs]; and (2) in `src/py/vertebra/db/arrow.py::ArrowCursor.from_rows`, delete the `encode_json_bytes(dict_list)` pseudo-Arrow fallback so `from_rows` always writes valid Arrow IPC stream bytes (or raises `MissingDependencyError` when `pyarrow` is uninstalled) [^db-arrow-py].
+Remove anonymous allocation after named SHM failure and JSON pseudo-Arrow from ArrowCursor.from_rows. Preserve public cursor construction, tuple/mapping rows, columns, threshold, and live-view ownership. Unrelated write_arrow_shm input policy remains outside this task.
+
+The implementation uses src/rs/vertebra-db/src/arrow_shm.rs::allocate_shm_region [^shm].
+
+The implementation uses src/py/vertebra/db/arrow.py::ArrowCursor [^cursor].
 
 ## Bounded Read Manifest
 
-- `src/rs/vertebra-db/src/arrow_shm.rs` — `allocate_shm_region`, `write_arrow_to_shm`, and inline Rust unit tests [^arrow-shm-rs].
-- `src/py/vertebra/db/arrow.py` — `ArrowCursor`, `from_rows`, `to_arrow`, and `to_pylist` [^db-arrow-py].
-- `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py` — Arrow data-plane and `ArrowCursor` unit tests.
-- `.agents/bundles/knowledge/decisions/adr-004-optional-driver-wheels-and-shm-ownership.md` — `VTBARROW` SHM ownership invariants.
-- `.agents/skills/runtime-ipc/SKILL.md` — POSIX SHM naming and lifecycle rules.
+- `src/rs/vertebra-db/src/arrow_shm.rs` — owning implementation, collaborator contract, or canonical verification surface.
+- `src/py/vertebra/db/arrow.py` — owning implementation, collaborator contract, or canonical verification surface.
+- `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py` — owning implementation, collaborator contract, or canonical verification surface.
+- `src/rs/vertebra-py/src/db.rs` — owning implementation, collaborator contract, or canonical verification surface.
+- `src/py/tests/unit/db/test_enterprise_olap_drivers.py` — owning implementation, collaborator contract, or canonical verification surface.
+- `.agents/bundles/knowledge/decisions/adr-004-optional-driver-wheels-and-shm-ownership.md` — owning implementation, collaborator contract, or canonical verification surface.
 
 ## Symbol & Signature Contracts
 
-- `src/rs/vertebra-db/src/arrow_shm.rs`:
-  - Define `pub type ArrowShmError = String;` (or `#[derive(Debug, Clone, PartialEq, Eq)] pub struct ArrowShmError(pub String)` implementing `Display`, `Error`, and `From<ArrowShmError> for String` so existing callers expecting `Result<ShmRegion, ArrowShmError>` compile cleanly).
-  - On `#[cfg(unix)]`, `pub fn allocate_shm_region(shm_name: &str, payload_len: usize) -> Result<ShmRegion, ArrowShmError>`:
-    - Calls `ShmRegion::create_named(norm_name, alloc_size)` and maps `Err(e)` directly to `Err(...)` containing `norm_name` and `e` — zero `ShmRegion::create(alloc_size)` fallback.
-- `src/py/vertebra/db/arrow.py`:
-  - `ArrowCursor.from_rows(cls, rows: Sequence[Mapping[str, Any]], *, schema: Any = None) -> ArrowCursor`:
-    - Requires `pyarrow` via `import_optional("pyarrow")`; if `None`, raises `MissingDependencyError("pyarrow", install_package="pyarrow", extra="arrow")`.
-    - Serializes `pa.Table.from_pylist(list(rows), schema=schema)` into a `pa.BufferOutputStream` via `pa.ipc.new_stream(...)` so `_ipc_bytes` always starts with valid Arrow IPC stream continuation framing (`b"\xff\xff\xff\xff"`), including when `rows == []`.
-  - Remove any JSON-decoding fallback in `ArrowCursor` methods that existed solely to read `encode_json_bytes` payloads from `from_rows`.
+- Keep existing `ArrowShmError = String` and private `fn allocate_shm_region(norm_name: &str, alloc_size: usize) -> Result<ShmRegion, String>`; caller owns normalization, header sizing, and page alignment. Unix `create_named` errors retain normalized name and OS error. Non-Unix existing allocation stays supported.
+- Keep `ArrowCursor.from_rows(cls, rows: Sequence[Any], columns: Sequence[str] | None = None, *, threshold_rows: int = ARROW_SHM_THRESHOLD_ROWS) -> ArrowCursor`. Require `pyarrow` before serialization; produce `pa.ipc.new_stream` bytes for tuple, mapping, and empty rows. Preserve column inference and row-count behavior.
+- Caller -> `from_rows` -> native `ArrowCursor.write_ipc_to_shm(name, payload, row_count)` for threshold-selected SHM. Propagate native allocation RuntimeError; remove suppression followed by NativeShmCursor/anonymous mmap fallback. Missing native module/class on a required SHM path raises the appropriate MissingDependencyError, rather than claiming SHM ownership.
+- Preserve `_buffer`, `buffer_view()`, `to_arrow_table()`, `to_pylist()`, release semantics, and bytes underlying live native views. Remove JSON decoding used solely for from_rows payloads. Public Rust frame writer is `write_shm_arrow_frame`, not write_arrow_to_shm.
 
 ## Edge Cases & Error Semantics
 
-- Passing an invalid POSIX SHM name with embedded interior slashes after leading `/` (e.g., `"/bad/nested/seg"` on Linux `shm_open` returning `EINVAL`/`ENOENT`) or empty name `""` causes `allocate_shm_region` to return `Err(...)` deterministically.
-- `ArrowCursor.from_rows([])` with `pyarrow` installed produces valid empty Arrow IPC stream bytes readable by `pyarrow.ipc.open_stream(cursor.as_bytes()).read_all()` (`num_rows == 0`).
-- Masking `pyarrow` unavailable causes `ArrowCursor.from_rows([{"id": 1}])` to raise `MissingDependencyError`.
+Missing pyarrow raises `MissingDependencyError("pyarrow", install_package="pyarrow", extra="arrow")`. Empty input emits a valid empty schema IPC stream. Invalid `/bad/nested/seg` and empty normalized POSIX names fail without registering an anonymous region. Use unique short names; clean only allocations owned by the test. SHM threshold changes storage backing, never row/column semantics.
 
 ## Public-Seam Test Blueprint
 
-- **Canonical test files**: `src/rs/vertebra-db/src/arrow_shm.rs` (`#[cfg(test)]`) and `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py`.
-- **Worked Test Matrix**:
+Canonical tests: `src/rs/vertebra-db/src/arrow_shm.rs`, `src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py`. Real installed PyArrow and explicit memory/local native stores supply codec and I/O behavior; narrow spies observe requests and cleanup.
 
-| Case | Input | Expected Output / Error |
+| Case | Concrete Input | Expected Output / Error |
 | --- | --- | --- |
-| Named SHM failure fails loud on Unix | `allocate_shm_region("/invalid/nested/shm/path", 4096)` | Returns `Err(err)` containing `"/invalid/nested/shm/path"`; zero anonymous SHM segment allocated. |
-| Valid named SHM round-trip | `write_arrow_to_shm("/vtb-arrow-test-ok", b"ARROW_IPC")` + `ShmRegion::open_named` | Succeeds, reads exact payload, and unlinks cleanly. |
-| `ArrowCursor.from_rows` non-empty & empty | `ArrowCursor.from_rows([{"id": 1, "name": "a"}])` and `ArrowCursor.from_rows([])` | `cursor.as_bytes()[:4] == b"\xff\xff\xff\xff"`; `pa.ipc.open_stream(cursor.as_bytes()).read_all().to_pylist()` equals input rows. |
-| `ArrowCursor.from_rows` without `pyarrow` | Mask `pyarrow` unavailable and call `ArrowCursor.from_rows([{"id": 1}])` | Raises `MissingDependencyError` mentioning `pyarrow`. |
+| Invalid named allocation | `write_shm_arrow_frame("/bad/nested/seg", b"payload")` on Unix | Err contains normalized name; registry has no entry. |
+| Tuple/mapping/empty IPC | `[(1,"a")]` with `["id","name"]`, `[{"id":1}]`, `[]` | `pa.ipc.open_stream(cursor.buffer_view()).read_all()` yields exact values or zero rows. |
+| Native allocation rejection | Patch native writer to raise RuntimeError, `threshold_rows=1` | Exact error propagates; anonymous mmap is never invoked. |
+| Missing optional codec | Mask import_optional for pyarrow | MissingDependencyError mentions pyarrow. |
+| Retained view | Existing native cursor release/unlink test | View decodes after release; release is idempotent. |
 
 ## Verification
 
-- Initial Red baseline: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db arrow_shm && uv run --no-sync pytest src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py -q`
-- Final Green + Clippy + lint gate: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-db --all-targets -- -D warnings && uv run --no-sync ruff check src/py/vertebra/db/arrow.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py && uv run --no-sync mypy src/py/vertebra/db/arrow.py && uv run --no-sync pytest src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py -q`
+Red: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db arrow_shm` and `uv run --no-sync pytest src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py -q`.
+
+Green: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-db --all-targets -- -D warnings`. Rebuild with `make dev` before Python verification. Run `uv run --no-sync pytest src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py src/py/tests/unit/db/test_enterprise_olap_drivers.py -q`, `uv run --no-sync ruff check src/py/vertebra/db/arrow.py src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py`, and `uv run --no-sync mypy src/py/vertebra/db/arrow.py`. Run the five-extension stubtest gate from the pyo3-bridge skill.
 
 ## Acceptance Criteria
 
-- [ ] `allocate_shm_region` returns `Err` when `ShmRegion::create_named` fails without falling back to `ShmRegion::create` (R8).
-- [ ] `ArrowCursor.from_rows` always emits valid Arrow IPC stream bytes and raises `MissingDependencyError` when `pyarrow` is absent (R8).
+- [ ] R8 named allocation failure propagates through native and Python threshold-selected paths without anonymous fallback.
+- [ ] R8 from_rows produces only real IPC and preserves public API and retained-view lifetime.
 
 ## Notes & Discoveries
 
-- [2026-11-07 04:15] Clean up `/dev/shm/*vtb-arrow-test*` in Rust unit tests via `Drop` / explicit unlink so test runs leave `/dev/shm` clean.
+- [2026-11-08 00:00] PyArrow 26.0.1 exposes synchronous Python file callbacks. Async native I/O stays on the caller loop; existing `SyncPool` executes codecs. Documentation targets belong to ch05:t02.
 
-[^arrow-shm-rs]: `src/rs/vertebra-db/src/arrow_shm.rs::allocate_shm_region` — Named SHM allocator for Arrow IPC frames.
-[^db-arrow-py]: `src/py/vertebra/db/arrow.py::ArrowCursor` — Python Arrow IPC result cursor.
+[^shm]: `src/rs/vertebra-db/src/arrow_shm.rs::allocate_shm_region` — Named frame allocation.
+[^cursor]: `src/py/vertebra/db/arrow.py::ArrowCursor` — Public cursor.

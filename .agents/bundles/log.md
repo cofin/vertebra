@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-08] revise | Ground remaining storage streaming contracts
+
+- Range source `29d8ac79` and native consumer proof `a0888371` pass 51 canonical cases, Ruff, and storage MyPy. Active task advances to Litestar integration with persistent TTL envelopes and installed filesystem contracts.
+- Revision `9` splits original Arrow/storage scope into bounded strict-allocation, read-bridge, write-bridge, SQLSpec integration, and documentation tasks across `ch04` and `ch05`; no original deliverable is omitted. PyArrow codec work uses existing SyncPool with native async I/O on the caller loop; default Parquet batch prefetch is disabled.
+
 ## [2026-11-08] chapter-reviewed | Close storage-completeness ch02 at 62b19c5c
 
 - All three storage integration tasks are complete. Correctness and fresh quality reviews pass at `62b19c5c` after native-key file reopening, provider-config migration serialization, and worksheet-note cleanup.
