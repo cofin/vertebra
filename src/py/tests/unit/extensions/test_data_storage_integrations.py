@@ -284,9 +284,13 @@ async def test_sqlspec_arrow_parquet_preserves_codec_defaults(asynchronous: bool
 @pytest.mark.anyio
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("cursor_input", [False, True])
-@pytest.mark.parametrize("explicit_none", [False, True])
-async def test_sqlspec_parquet_default_row_groups(asynchronous: bool, cursor_input: bool, explicit_none: bool) -> None:
-    """Omitted and None row-group options retain PyArrow's million-row maximum."""
+@pytest.mark.parametrize(
+    "options", [{}, {"row_group_size": None}, {"row_group_size": -1}], ids=["omitted", "none", "minus-one"]
+)
+async def test_sqlspec_parquet_default_row_groups(
+    asynchronous: bool, cursor_input: bool, options: dict[str, int | None]
+) -> None:
+    """Default row-group sentinels match the installed PyArrow writer's output."""
     backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-rowgroup-default"))
     table = pa.table({"id": range(1_048_577)})
     source: Any = table
@@ -295,7 +299,6 @@ async def test_sqlspec_parquet_default_row_groups(asynchronous: bool, cursor_inp
         with pa.ipc.new_stream(sink, table.schema) as writer:
             writer.write_table(table)
         source = sink.getvalue()
-    options = {"row_group_size": None} if explicit_none else {}
     if asynchronous:
         write = backend.write_arrow_cursor_async if cursor_input else backend.write_arrow_async
         assert await write("data.parquet", source, **options) is None
@@ -304,16 +307,24 @@ async def test_sqlspec_parquet_default_row_groups(asynchronous: bool, cursor_inp
         write = backend.write_arrow_cursor_sync if cursor_input else backend.write_arrow_sync
         assert write("data.parquet", source, **options) is None
         raw = backend.read_bytes_sync("data.parquet")
+    expected_sink = pa.BufferOutputStream()
+    pq.write_table(table, expected_sink, **options)
+    expected = pq.ParquetFile(expected_sink.getvalue())
+    expected_sizes = [expected.metadata.row_group(i).num_rows for i in range(expected.num_row_groups)]
     actual = pq.ParquetFile(BytesIO(raw))
-    assert [actual.metadata.row_group(i).num_rows for i in range(actual.num_row_groups)] == [1_048_576, 1]
+    assert expected_sizes == [1_048_576, 1]
+    assert [actual.metadata.row_group(i).num_rows for i in range(actual.num_row_groups)] == expected_sizes
     assert actual.read().equals(table)
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("row_group_size", [0, -1])
+@pytest.mark.parametrize("row_group_size", [0, -2])
 async def test_sqlspec_parquet_invalid_row_group_size(asynchronous: bool, row_group_size: int) -> None:
-    """Nonpositive explicit sizes remain errors instead of becoming default sizes."""
+    """Values rejected by the installed PyArrow writer remain errors in the adapter."""
+    table = pa.table({"id": [1]})
+    with pytest.raises((ValueError, pa.ArrowInvalid)):
+        pq.write_table(table, pa.BufferOutputStream(), row_group_size=row_group_size)
     backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace="sqlspec-rowgroup-invalid"))
     with pytest.raises(ValueError, match="batch_size"):
         if asynchronous:

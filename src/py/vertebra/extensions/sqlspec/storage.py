@@ -746,8 +746,8 @@ class ObjectStoreBackend:
 
     @staticmethod
     def _normalize_arrow_write_options(file_format: str, options: dict[str, Any]) -> None:
-        """Preserve PyArrow's default Parquet row-group maximum for omitted or None sizes."""
-        if file_format == "parquet" and options.get("row_group_size") is None:
+        """Preserve PyArrow's default Parquet size for omitted, None, and -1 values."""
+        if file_format == "parquet" and options.get("row_group_size") in (None, -1):
             options["row_group_size"] = 1024 * 1024
 
     @staticmethod
