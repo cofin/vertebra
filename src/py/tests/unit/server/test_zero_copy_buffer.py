@@ -238,3 +238,50 @@ async def test_storage_response_async_ranges(
     etag = (await store.head("video.mp4")).etag
     assert etag is not None
     assert headers[b"etag"] == etag.encode()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("range_header", "expected_status", "expected_body"),
+    [(None, 200, b"0123456789"), ("bytes=2-5", 206, b"2345"), ("bytes=10-", 416, b"")],
+)
+async def test_async_storage_handler_submits_native_fastpath_frames(
+    range_header: str | None, expected_status: int, expected_body: bytes
+) -> None:
+    """An explicit async handler resolves storage before native FastPath buffer submission."""
+    store = AsyncObjectStore("memory://")
+    await store.put("body", b"0123456789")
+
+    async def handler() -> tuple[int, list[tuple[bytes, bytes]], bytes | memoryview]:
+        response = await StreamingStorageResponse.from_async_store(store, "body", range_header=range_header)
+        return await response.to_async_fastpath_tuple()
+
+    status, headers, body = await handler()
+    if expected_status == 200:
+        assert isinstance(body, memoryview)
+        assert isinstance(body.obj, StorageBuffer)
+    native = Response.from_buffer(status, body, headers=headers, request_id=303)
+    assert native.status == expected_status
+    assert native.body == expected_body
+    assert dict(native.headers)[b"content-length"] == str(len(expected_body)).encode()
+    text_headers = [(key.decode("latin-1"), value.decode("latin-1")) for key, value in headers]
+    frames = submit_raw_response(request_id=303, status=status, headers=text_headers, body=body, flags=2)
+    assert len(frames) == 1
+    frame = frames[0]
+    assert int.from_bytes(frame[0:8], "little") == 303
+    assert int.from_bytes(frame[8:10], "little") == expected_status
+    header_count = int.from_bytes(frame[12:14], "little")
+    offset = 16
+    wire_headers: dict[bytes, bytes] = {}
+    for _ in range(header_count):
+        key_length = int.from_bytes(frame[offset : offset + 2], "little")
+        offset += 2
+        key = frame[offset : offset + key_length]
+        offset += key_length
+        value_length = int.from_bytes(frame[offset : offset + 2], "little")
+        offset += 2
+        wire_headers[key] = frame[offset : offset + value_length]
+        offset += value_length
+    body_length = int.from_bytes(frame[offset : offset + 4], "little")
+    assert frame[offset + 4 : offset + 4 + body_length] == expected_body
+    assert wire_headers == dict(headers)
