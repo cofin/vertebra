@@ -1,35 +1,38 @@
 ---
 type: Guide
 title: Project Workflow
-description: Canonical polyglot build, lint, test, and benchmark workflow plus Flow OKF v0.2 state and verification rules for Vertebra.
+description: Canonical polyglot build, lint, test, and benchmark workflow plus Flow
+  OKF v0.2 state and verification rules for Vertebra.
 status: stable
-tags: [workflow, commands, verification, testing, ci]
+tags:
+- workflow
+- commands
+- verification
+- testing
+- ci
 generated:
   by: flow/0.27.0
-  at: "2026-11-06T18:28:00Z"
+  at: '2026-11-06T18:28:00Z'
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-07T03:55:00Z"
-    commit: cdb978d3
-  - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+- by: agent:flow-learn
+  at: '2026-11-08T18:26:31.591504Z'
+  commit: 32c0c240
 sources:
-  - id: src-makefile
-    resource: Makefile
-    title: "Canonical polyglot build, test, lint, docs, and benchmark targets"
-  - id: src-tools-scripts-setup-env-sh
-    resource: tools/scripts/setup-env.sh
-    title: "Repository tooling module (tools/scripts/setup-env.sh)"
-  - id: src-pyproject-toml
-    resource: pyproject.toml
-    title: "Python package metadata, dependencies, and tool configuration"
-  - id: src-cargo-toml
-    resource: src/rs/Cargo.toml
-    title: "Rust crate manifest (src/rs/Cargo.toml)"
-  - id: src-package-json
-    resource: src/ts/vertebra-client/package.json
-    title: "TypeScript package manifest (src/ts/vertebra-client/package.json)"
+- id: src-makefile
+  resource: Makefile
+  title: Canonical polyglot build, test, lint, docs, and benchmark targets
+- id: src-tools-scripts-setup-env-sh
+  resource: tools/scripts/setup-env.sh
+  title: Repository tooling module (tools/scripts/setup-env.sh)
+- id: src-pyproject-toml
+  resource: pyproject.toml
+  title: Python package metadata, dependencies, and tool configuration
+- id: src-cargo-toml
+  resource: src/rs/Cargo.toml
+  title: Rust crate manifest (src/rs/Cargo.toml)
+- id: src-package-json
+  resource: src/ts/vertebra-client/package.json
+  title: TypeScript package manifest (src/ts/vertebra-client/package.json)
 ---
 
 # Project Workflow
@@ -94,10 +97,10 @@ make bench-report                                         # Latest benchmark rep
 
 ## Polyglot Rebuild & Hygiene Rules
 
-1. **Rust to Python FFI Rebuild (`make dev`)**: `uv run pytest` loads the compiled `vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`, `vertebra._bigquery`, and `vertebra._spanner` extensions from `.venv`. After any `.rs` change in `vertebra-core`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`, `vertebra-bigquery`, or `vertebra-spanner`, run `make dev` (or `make py-test`) before `uv run pytest`. `vertebra-http` changes need `make dev` only to rebuild the `vertebra-server` binary.
+1. **Rust to Python FFI Rebuild (`make dev`)**: Preserve installed optional extras with `UV_NO_SYNC=1` when verifying an existing environment. `uv run pytest` loads the compiled `vertebra._vertebra`, `vertebra._bundler`, `vertebra._storage`, `vertebra._bigquery`, and `vertebra._spanner` extensions from `.venv`. After any `.rs` change in `vertebra-core`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`, `vertebra-bigquery`, or `vertebra-spanner`, run `make dev` (or `make py-test`) before `uv run pytest`. `vertebra-http` changes need `make dev` only to rebuild the `vertebra-server` binary.
 2. **PyPI Distribution vs. Import Namespace**: [`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml] sets `[project] name = "vertebra-core"` while `[tool.maturin]` sets `python-packages = ["vertebra"]` and `module-name = "vertebra._vertebra"`. `importlib.metadata.version("vertebra-core")` and `vtb init` reference `vertebra-core`, whereas all Python code imports `vertebra`.
 3. **Codegen & Wheel-Bundled TypeScript Sync**: `make ts-build` compiles all 17 `@vertebra/client` entrypoints (`.` plus `./react`, `./vue`, `./svelte`, `./angular`, `./htmx`, `./vite`, `./store`, `./hmr`, `./live`, `./apex`, `./telemetry`, `./wasm`, `./arrow`, `./router`, `./webmcp`, and `./agent`), emits `.d.ts` declarations, and copies `dist/` into `src/py/vertebra/server/_js/bundle/` for wheel distribution. When modifying route schemas or [`src/py/vertebra/build/codegen/`](../../../src/py/vertebra/build/codegen/__init__.py), run `make py-test` (`src/py/tests/unit/codegen/`) and `make ts-test`.
-4. **Shared-Memory Cleanup**: `make rs-test` and the autouse `_cleanup_shm` fixture in [`src/py/tests/conftest.py`](../../../src/py/tests/conftest.py) remove `/dev/shm/test-*`, `/dev/shm/*vertebra*`, and `/dev/shm/vtb-*`.
+4. **Shared-Memory Cleanup**: `make rs-test` removes `/dev/shm/test-*` and `/dev/shm/*vertebra*`; the autouse `_cleanup_shm` fixture in [`src/py/tests/conftest.py`](../../../src/py/tests/conftest.py) also removes `/dev/shm/vtb-*`. Isolate full-suite SHM cleanup from concurrent workloads. Direct `cargo test --workspace --features tls,compression,gcp --locked` in `src/rs` omits the Make cleanup prelude; new tests clean only their own allocations.
 5. **`--group bench` & `--group doc` Isolation**: Keep `duckdb`, `uvicorn`, `httptools`, `uvloop`, `granian`, and `spikard` inside `[dependency-groups].bench` and `zensical`, `mkdocstrings-python`, and `pymdown-extensions` inside `[dependency-groups].doc` in [`pyproject.toml`](../../../pyproject.toml) so Python `3.14t`/`3.15t` test runs never compile `duckdb` C++ or `zensical` Rust sdist dependencies from source.
 6. **Zensical Documentation & Griffe `msgspec.Struct` Hygiene**: Never enable `navigation.indexes` in [`zensical.toml`](../../../zensical.toml) (it hides section `Overview` links and causes empty primary sidebars on single-page tabs). Keep PEP 257 field docstrings on all documented `msgspec.Struct` and `.pyi` stub classes so custom Griffe templates (`tools/docs/templates/python/material/`) render complete attribute tables.
 7. **Pre-Commit Secret Hygiene**: Never use Google OAuth2 access token prefixes in tests or fixtures; use `"mock-oauth-token"` instead.

@@ -1,95 +1,100 @@
 ---
 type: Pattern
-title: "Serialization & Python Utility Conventions"
-description: "How `vertebra.utils` centralizes JSON and MessagePack encoding and decoding, Rust-accelerated text/humanize/UUID primitives, type dispatch, schema hydration, async/sync bridging, free-threaded worker pools, optional imports, and config lookup."
+title: Serialization & Python Utility Conventions
+description: How `vertebra.utils` centralizes JSON and MessagePack encoding and decoding,
+  Rust-accelerated text/humanize/UUID primitives, type dispatch, schema hydration,
+  async/sync bridging, free-threaded worker pools, optional imports, and config lookup.
 status: stable
 tags:
-  - patterns
-  - python
-  - serialization
-  - concurrency
-  - text
-  - humanize
+- patterns
+- python
+- serialization
+- concurrency
+- text
+- humanize
 generated:
   by: flow/0.26.0
-  at: "2026-11-04T04:33:00Z"
+  at: '2026-11-04T04:33:00Z'
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-07T03:55:00Z"
-    commit: cdb978d3
+- by: agent:flow-learn
+  at: '2026-11-08T18:26:31.591504Z'
+  commit: 32c0c240
 sources:
-  - id: src-vertebra-core-src-text-rs
-    resource: src/rs/vertebra-core/src/text.rs
-    title: "Rust implementation module (src/rs/vertebra-core/src/text.rs)"
-  - id: src-vertebra-core-src-id-rs
-    resource: src/rs/vertebra-core/src/id.rs
-    title: "Rust implementation module (src/rs/vertebra-core/src/id.rs)"
-  - id: src-vertebra-py-src-text-rs
-    resource: src/rs/vertebra-py/src/text.rs
-    title: "Rust implementation module (src/rs/vertebra-py/src/text.rs)"
-  - id: src-utils-init-py
-    resource: src/py/vertebra/utils/__init__.py
-    title: "Python implementation module (src/py/vertebra/utils/__init__.py)"
-  - id: src-utils-text-py
-    resource: src/py/vertebra/utils/text.py
-    title: "Python implementation module (src/py/vertebra/utils/text.py)"
-  - id: src-utils-humanize-py
-    resource: src/py/vertebra/utils/humanize.py
-    title: "Python implementation module (src/py/vertebra/utils/humanize.py)"
-  - id: src-utils-uuids-py
-    resource: src/py/vertebra/utils/uuids.py
-    title: "Python implementation module (src/py/vertebra/utils/uuids.py)"
-  - id: src-utils-dispatch-py
-    resource: src/py/vertebra/utils/dispatch.py
-    title: "Python implementation module (src/py/vertebra/utils/dispatch.py)"
-  - id: src-utils-schema-py
-    resource: src/py/vertebra/utils/schema.py
-    title: "Python implementation module (src/py/vertebra/utils/schema.py)"
-  - id: src-utils-type-converters-py
-    resource: src/py/vertebra/utils/type_converters.py
-    title: "Python implementation module (src/py/vertebra/utils/type_converters.py)"
-  - id: src-utils-type-guards-py
-    resource: src/py/vertebra/utils/type_guards.py
-    title: "Python implementation module (src/py/vertebra/utils/type_guards.py)"
-  - id: src-utils-config-tools-py
-    resource: src/py/vertebra/utils/config_tools.py
-    title: "Python implementation module (src/py/vertebra/utils/config_tools.py)"
-  - id: src-utils-module-loader-py
-    resource: src/py/vertebra/utils/module_loader.py
-    title: "Python implementation module (src/py/vertebra/utils/module_loader.py)"
-  - id: src-utils-deprecation-py
-    resource: src/py/vertebra/utils/deprecation.py
-    title: "Python implementation module (src/py/vertebra/utils/deprecation.py)"
-  - id: src-utils-correlation-py
-    resource: src/py/vertebra/utils/correlation.py
-    title: "Python implementation module (src/py/vertebra/utils/correlation.py)"
-  - id: src-utils-serializers-init-py
-    resource: src/py/vertebra/utils/serializers/__init__.py
-    title: "Python implementation module (src/py/vertebra/utils/serializers/__init__.py)"
-  - id: src-utils-serializers-json-py
-    resource: src/py/vertebra/utils/serializers/_json.py
-    title: "Python implementation module (src/py/vertebra/utils/serializers/_json.py)"
-  - id: src-utils-serializers-msgpack-py
-    resource: src/py/vertebra/utils/serializers/_msgpack.py
-    title: "Python implementation module (src/py/vertebra/utils/serializers/_msgpack.py)"
-  - id: src-utils-serializers-schema-py
-    resource: src/py/vertebra/utils/serializers/_schema.py
-    title: "Python implementation module (src/py/vertebra/utils/serializers/_schema.py)"
-  - id: src-utils-serializers-numpy-py
-    resource: src/py/vertebra/utils/serializers/_numpy.py
-    title: "Python implementation module (src/py/vertebra/utils/serializers/_numpy.py)"
-  - id: src-utils-serializers-zero-copy-py
-    resource: src/py/vertebra/utils/serializers/_zero_copy.py
-    title: "Python implementation module (src/py/vertebra/utils/serializers/_zero_copy.py)"
-  - id: src-utils-sync-tools-py
-    resource: src/py/vertebra/utils/sync_tools.py
-    title: "Python implementation module (src/py/vertebra/utils/sync_tools.py)"
-  - id: src-utils-portal-py
-    resource: src/py/vertebra/utils/portal.py
-    title: "Python implementation module (src/py/vertebra/utils/portal.py)"
-  - id: src-tests-unit-utils-test-sync-tools-py
-    resource: src/py/tests/unit/utils/test_sync_tools.py
-    title: "Python implementation module (src/py/tests/unit/utils/test_sync_tools.py)"
+- id: src-vertebra-core-src-text-rs
+  resource: src/rs/vertebra-core/src/text.rs
+  title: Rust implementation module (src/rs/vertebra-core/src/text.rs)
+- id: src-vertebra-core-src-id-rs
+  resource: src/rs/vertebra-core/src/id.rs
+  title: Rust implementation module (src/rs/vertebra-core/src/id.rs)
+- id: src-vertebra-py-src-text-rs
+  resource: src/rs/vertebra-py/src/text.rs
+  title: Rust implementation module (src/rs/vertebra-py/src/text.rs)
+- id: src-utils-init-py
+  resource: src/py/vertebra/utils/__init__.py
+  title: Python implementation module (src/py/vertebra/utils/__init__.py)
+- id: src-utils-text-py
+  resource: src/py/vertebra/utils/text.py
+  title: Python implementation module (src/py/vertebra/utils/text.py)
+- id: src-utils-humanize-py
+  resource: src/py/vertebra/utils/humanize.py
+  title: Python implementation module (src/py/vertebra/utils/humanize.py)
+- id: src-utils-uuids-py
+  resource: src/py/vertebra/utils/uuids.py
+  title: Python implementation module (src/py/vertebra/utils/uuids.py)
+- id: src-utils-dispatch-py
+  resource: src/py/vertebra/utils/dispatch.py
+  title: Python implementation module (src/py/vertebra/utils/dispatch.py)
+- id: src-utils-schema-py
+  resource: src/py/vertebra/utils/schema.py
+  title: Python implementation module (src/py/vertebra/utils/schema.py)
+- id: src-utils-type-converters-py
+  resource: src/py/vertebra/utils/type_converters.py
+  title: Python implementation module (src/py/vertebra/utils/type_converters.py)
+- id: src-utils-type-guards-py
+  resource: src/py/vertebra/utils/type_guards.py
+  title: Python implementation module (src/py/vertebra/utils/type_guards.py)
+- id: src-utils-config-tools-py
+  resource: src/py/vertebra/utils/config_tools.py
+  title: Python implementation module (src/py/vertebra/utils/config_tools.py)
+- id: src-utils-module-loader-py
+  resource: src/py/vertebra/utils/module_loader.py
+  title: Python implementation module (src/py/vertebra/utils/module_loader.py)
+- id: src-utils-deprecation-py
+  resource: src/py/vertebra/utils/deprecation.py
+  title: Python implementation module (src/py/vertebra/utils/deprecation.py)
+- id: src-utils-correlation-py
+  resource: src/py/vertebra/utils/correlation.py
+  title: Python implementation module (src/py/vertebra/utils/correlation.py)
+- id: src-utils-serializers-init-py
+  resource: src/py/vertebra/utils/serializers/__init__.py
+  title: Python implementation module (src/py/vertebra/utils/serializers/__init__.py)
+- id: src-utils-serializers-json-py
+  resource: src/py/vertebra/utils/serializers/_json.py
+  title: Python implementation module (src/py/vertebra/utils/serializers/_json.py)
+- id: src-utils-serializers-msgpack-py
+  resource: src/py/vertebra/utils/serializers/_msgpack.py
+  title: Python implementation module (src/py/vertebra/utils/serializers/_msgpack.py)
+- id: src-utils-serializers-schema-py
+  resource: src/py/vertebra/utils/serializers/_schema.py
+  title: Python implementation module (src/py/vertebra/utils/serializers/_schema.py)
+- id: src-utils-serializers-numpy-py
+  resource: src/py/vertebra/utils/serializers/_numpy.py
+  title: Python implementation module (src/py/vertebra/utils/serializers/_numpy.py)
+- id: src-utils-serializers-zero-copy-py
+  resource: src/py/vertebra/utils/serializers/_zero_copy.py
+  title: Python implementation module (src/py/vertebra/utils/serializers/_zero_copy.py)
+- id: src-utils-sync-tools-py
+  resource: src/py/vertebra/utils/sync_tools.py
+  title: Python implementation module (src/py/vertebra/utils/sync_tools.py)
+- id: src-utils-portal-py
+  resource: src/py/vertebra/utils/portal.py
+  title: Python implementation module (src/py/vertebra/utils/portal.py)
+- id: src-tests-unit-utils-test-sync-tools-py
+  resource: src/py/tests/unit/utils/test_sync_tools.py
+  title: Python implementation module (src/py/tests/unit/utils/test_sync_tools.py)
+- id: src-storage-codec-ownership
+  resource: src/py/vertebra/storage/_arrow.py::_CodecBridge
+  title: Storage codec scheduling and cancellation ownership
 ---
 
 # Serialization & Python Utility Conventions
@@ -141,7 +146,13 @@ Every JSON or MessagePack encode or decode in `src/py/vertebra` goes through [`v
 | `configure_event_loop_policy()`, `LoopDiagnostics`, `LoopMismatchError` | Event-loop policy installation (uvloop on non-Windows GIL builds unless `VERTEBRA_UVLOOP` disables it) and nested-loop/thread-affinity diagnostics in `sync_tools.py`. |
 | [`PortalProvider` / `Portal` / `PortalManager` / `get_global_portal`](../../../../../src/py/vertebra/utils/portal.py)[^src-utils-portal-py] | A background thread running its own event loop. `PortalManager` is a singleton that restarts the provider after fork or if the thread died, and stops it at exit. |
 
-Outside `vertebra.utils`, `vertebra.extensions.sqlalchemy.dialects` (`SyncPool`) imports `sync_tools`. Tests are in [`test_sync_tools.py`](../../../../../src/py/tests/unit/utils/test_sync_tools.py)[^src-tests-unit-utils-test-sync-tools-py].
+Storage codecs and `vertebra.extensions.sqlalchemy.dialects` also use `SyncPool`. Tests for the utility scheduler are in [`test_sync_tools.py`](../../../../../src/py/tests/unit/utils/test_sync_tools.py)[^src-tests-unit-utils-test-sync-tools-py].
+
+### Storage codec callbacks
+
+Use `SyncPool.submit` and retain its future when cleanup depends on actual worker exit. `_CodecBridge` submits one codec initialization, batch, or close operation at a time, while synchronous file callbacks use `run_coroutine_threadsafe` for native I/O on the caller loop. This keeps remote I/O off synchronous stores and prevents a background producer from decoding ahead of consumer demand.[^src-storage-codec-ownership]
+
+Cancellation marks the bridge stopped, cancels pending cross-thread I/O, and waits for both the worker and actual loop-side tasks before closing the reader, writer, or producer. Shielded waits continue through further cancellation. Reason: cancelling a cross-thread future can finish that future before its coroutine unwinds; releasing the codec or generator sooner races with the still-running operation. Preserve the original cancellation after ownership is released.[^src-storage-codec-ownership]
 
 ## 4. Rust-Accelerated Text, Humanize, UUIDs & Runtime Utilities (`vertebra.utils`)
 
@@ -178,3 +189,5 @@ Provenance sources: [^src-vertebra-py-src-text-rs], [^src-utils-serializers-nump
 [^src-utils-sync-tools-py]: `src/py/vertebra/utils/sync_tools.py` — Python implementation module (src/py/vertebra/utils/sync_tools.py).
 [^src-utils-portal-py]: `src/py/vertebra/utils/portal.py` — Python implementation module (src/py/vertebra/utils/portal.py).
 [^src-tests-unit-utils-test-sync-tools-py]: `src/py/tests/unit/utils/test_sync_tools.py` — Python implementation module (src/py/tests/unit/utils/test_sync_tools.py).
+
+[^src-storage-codec-ownership]: `src/py/vertebra/storage/_arrow.py::_CodecBridge` — Storage codec scheduling and cancellation ownership.

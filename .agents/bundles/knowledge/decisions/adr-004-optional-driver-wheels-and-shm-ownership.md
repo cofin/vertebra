@@ -1,39 +1,46 @@
 ---
 type: Decision
-title: "ADR-004: Optional Driver Wheels and Shared-Memory Ownership"
-description: "Database client dependency isolation and producer-owned Arrow mapping transfer across independently linked PyO3 extensions."
+title: 'ADR-004: Optional Driver Wheels and Shared-Memory Ownership'
+description: Database client dependency isolation and producer-owned Arrow mapping
+  transfer across independently linked PyO3 extensions.
 status: stable
 tags:
-  - decisions
-  - adr
-  - packaging
-  - database
-  - pyo3
-  - shm
-  - ownership
+- decisions
+- adr
+- packaging
+- database
+- pyo3
+- shm
+- ownership
 generated:
   by: flow/0.26.0
-  at: "2026-11-05T00:14:04Z"
+  at: '2026-11-05T00:14:04Z'
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-07T03:55:00Z"
-    commit: cdb978d3
+- by: agent:flow-learn
+  at: '2026-11-08T18:26:31.591504Z'
+  commit: 32c0c240
 sources:
-  - id: src-python-packaging
-    resource: pyproject.toml
-    title: "Core distribution and optional engine dependencies"
-  - id: src-db-manifest
-    resource: src/rs/vertebra-db/Cargo.toml
-    title: "Shared Rust primitives and optional GCP and PyO3 features"
-  - id: src-db-py-async
-    resource: src/rs/vertebra-db/src/py_async.rs
-    title: "Independent completion queues and producer-owned capsule callbacks"
-  - id: src-core-shm
-    resource: src/rs/vertebra-core/src/shm.rs
-    title: "C ABI capsule and shared-memory mapping lifetime"
-  - id: src-py-arrow-cursor
-    resource: src/rs/vertebra-py/src/db.rs
-    title: "Core ArrowCursor adoption of a producer-owned mapping"
+- id: src-python-packaging
+  resource: pyproject.toml
+  title: Core distribution and optional engine dependencies
+- id: src-db-manifest
+  resource: src/rs/vertebra-db/Cargo.toml
+  title: Shared Rust primitives and optional GCP and PyO3 features
+- id: src-db-py-async
+  resource: src/rs/vertebra-db/src/py_async.rs
+  title: Independent completion queues and producer-owned capsule callbacks
+- id: src-core-shm
+  resource: src/rs/vertebra-core/src/shm.rs
+  title: C ABI capsule and shared-memory mapping lifetime
+- id: src-py-arrow-cursor
+  resource: src/rs/vertebra-py/src/db.rs
+  title: Core ArrowCursor adoption of a producer-owned mapping
+- id: src-named-arrow-allocation
+  resource: src/rs/vertebra-db/src/arrow_shm.rs::allocate_shm_region
+  title: Required named Arrow allocation
+- id: src-python-arrow-construction
+  resource: src/py/vertebra/db/arrow.py::ArrowCursor.from_rows
+  title: Real IPC and native SHM construction
 ---
 
 # ADR-004: Optional Driver Wheels and Shared-Memory Ownership
@@ -55,6 +62,8 @@ Ship native database clients in per-driver PyO3 wheels and keep reusable transpo
 
 Keep database exceptions and `ArrowCursor` canonical in `vertebra._vertebra`. Optional extensions import those Python objects and use distinct event-loop drainer attributes. Transfer Arrow mappings with `construct_py_arrow_cursor`: a `vertebra.ShmCapsule` carries the pointer, length, atomic context, and cleanup callbacks. The core cursor claims the context once and invokes the producing extension's callback when its last backing owner drops.[^src-db-py-async][^src-core-shm][^src-py-arrow-cursor]
 
+Required Unix Arrow mappings use `allocate_shm_region` and propagate named-allocation errors with the segment name and OS error. `ArrowCursor.from_rows` emits real PyArrow IPC, requires the optional codec, and uses the native writer when its threshold selects SHM. Required named allocation never becomes anonymous memory after failure. Reason: another process must attach the advertised name, and JSON bytes cannot satisfy the Arrow IPC contract.[^src-named-arrow-allocation][^src-python-arrow-construction]
+
 ## Alternatives Rejected
 
 | Alternative | Trade-off |
@@ -74,3 +83,7 @@ The [extension architecture](../architecture/worker/pyo3-ffi-and-batch-dispatch.
 [^src-db-py-async]: `src/rs/vertebra-db/src/py_async.rs` — Independent completion queues and producer-owned capsule callbacks.
 [^src-core-shm]: `src/rs/vertebra-core/src/shm.rs` — C ABI capsule and shared-memory mapping lifetime.
 [^src-py-arrow-cursor]: `src/rs/vertebra-py/src/db.rs` — Core ArrowCursor adoption of a producer-owned mapping.
+
+[^src-named-arrow-allocation]: `src/rs/vertebra-db/src/arrow_shm.rs::allocate_shm_region` — Required named Arrow allocation.
+
+[^src-python-arrow-construction]: `src/py/vertebra/db/arrow.py::ArrowCursor.from_rows` — Real IPC and native SHM construction.

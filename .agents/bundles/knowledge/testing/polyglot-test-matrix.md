@@ -1,95 +1,109 @@
 ---
 type: Guide
-title: "Polyglot Test Matrix & Environment Setup"
-description: "Rust, Python, and TypeScript test suites, their Makefile and CI entry points, registry auto-setup, extension rebuilds, and /dev/shm cleanup."
+title: Polyglot Test Matrix & Environment Setup
+description: Rust, Python, and TypeScript test suites, their Makefile and CI entry
+  points, registry auto-setup, extension rebuilds, and /dev/shm cleanup.
 status: stable
 tags:
-  - testing
-  - verification
-  - python
-  - rust
-  - typescript
+- testing
+- verification
+- python
+- rust
+- typescript
 generated:
   by: flow/0.26.0
-  at: "2026-11-04T04:33:00Z"
+  at: '2026-11-04T04:33:00Z'
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-07T03:55:00Z"
-    commit: cdb978d3
+- by: agent:flow-learn
+  at: '2026-11-08T18:26:31.591504Z'
+  commit: 32c0c240
 sources:
-  - id: src-stack-regressions
-    resource: src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
-    title: "Native pipeline and fallback statement/result/bind regressions"
-  - id: src-bigquery-stack-regressions
-    resource: src/py/tests/unit/extensions/test_sqlspec_bigquery.py
-    title: "Actual BigQuery driver stack execution over loopback REST"
-  - id: src-spanner-stack-regressions
-    resource: src/py/tests/unit/extensions/test_sqlspec_spanner.py
-    title: "Actual Spanner driver stack execution over external client ports"
-  - id: src-psycopg-bind-regressions
-    resource: src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
-    title: "Optional real psycopg converter acceptance for PostgreSQL primitives"
-  - id: src-provider-regressions
-    resource: src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
-    title: "Native provider ownership, lazy resolution, policy and driver error regressions"
-  - id: src-provider-schema-regressions
-    resource: src/py/tests/unit/agent/test_core_and_observability.py
-    title: "Neutral provider schema and validation boundaries"
-  - id: src-provider-snapshot-regressions
-    resource: src/py/tests/unit/agent/test_runtime_and_workflows.py
-    title: "Approval binding and nested invocation ownership across controlled suspension"
-  - id: src-tests-unit-agent-mcp-conformance-py
-    resource: src/py/tests/unit/agent/test_mcp_conformance.py
-    title: "MCP 2026-07-28 protocol, ToolRegistry provider, WebMCP, and HTTP handler conformance suite"
-  - id: src-agent-mcp-registry-py
-    resource: src/py/vertebra/agent/mcp/registry.py
-    title: "Unified ToolRegistry and MCPRegistry implementation"
-  - id: src-native-driver-tests
-    resource: src/py/tests/unit/db/test_native_db_drivers.py
-    title: "Cancellation and cloud DBAPI regression coverage"
-  - id: src-sqlite-returning-tests
-    resource: src/py/tests/unit/db/test_sqlite_driver.py
-    title: "SQLite statement completion and transaction regressions"
-  - id: src-postgres-transaction-tests
-    resource: src/py/tests/unit/db/test_postgres_driver.py
-    title: "Asyncpg transaction and affected-count regressions"
-  - id: src-tests-unit-server-stage1-hotpath-py
-    resource: src/py/tests/unit/server/test_stage1_hotpath_and_314t.py
-    title: "Server hot-path batch dispatch and free-threaded 3.14t/3.15t unit tests"
-  - id: src-ts-tests-agent-test-ts
-    resource: src/ts/vertebra-client/tests/agent.test.ts
-    title: "TypeScript Vitest suite for agent, router, and WebMCP client modules"
-  - id: src-makefile
-    resource: Makefile
-    title: "Canonical polyglot build, test, lint, docs, and benchmark targets"
-  - id: src-tools-scripts-setup-env-sh
-    resource: tools/scripts/setup-env.sh
-    title: "Repository tooling module (tools/scripts/setup-env.sh)"
-  - id: src-pyproject-toml
-    resource: pyproject.toml
-    title: "Python package metadata, dependencies, and tool configuration"
-  - id: src-cargo-toml
-    resource: src/rs/Cargo.toml
-    title: "Rust crate manifest (src/rs/Cargo.toml)"
-  - id: src-tests-conftest-py
-    resource: src/py/tests/conftest.py
-    title: "Python implementation module (src/py/tests/conftest.py)"
-  - id: src-package-json
-    resource: src/ts/vertebra-client/package.json
-    title: "TypeScript package manifest (src/ts/vertebra-client/package.json)"
-  - id: src-ci-yml
-    resource: .github/workflows/ci.yml
-    title: "GitHub Actions workflow (ci.yml)"
-  - id: src-db-conformance
-    resource: src/py/tests/integration/db/test_driver_conformance.py
-    title: "Parameterized database contract and environment readiness gates"
+- id: src-stack-regressions
+  resource: src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
+  title: Native pipeline and fallback statement/result/bind regressions
+- id: src-bigquery-stack-regressions
+  resource: src/py/tests/unit/extensions/test_sqlspec_bigquery.py
+  title: Actual BigQuery driver stack execution over loopback REST
+- id: src-spanner-stack-regressions
+  resource: src/py/tests/unit/extensions/test_sqlspec_spanner.py
+  title: Actual Spanner driver stack execution over external client ports
+- id: src-psycopg-bind-regressions
+  resource: src/py/tests/unit/db/test_pg_dataplane_and_datafusion.py
+  title: Optional real psycopg converter acceptance for PostgreSQL primitives
+- id: src-provider-regressions
+  resource: src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
+  title: Native provider ownership, lazy resolution, policy and driver error regressions
+- id: src-provider-schema-regressions
+  resource: src/py/tests/unit/agent/test_core_and_observability.py
+  title: Neutral provider schema and validation boundaries
+- id: src-provider-snapshot-regressions
+  resource: src/py/tests/unit/agent/test_runtime_and_workflows.py
+  title: Approval binding and nested invocation ownership across controlled suspension
+- id: src-tests-unit-agent-mcp-conformance-py
+  resource: src/py/tests/unit/agent/test_mcp_conformance.py
+  title: MCP 2026-07-28 protocol, ToolRegistry provider, WebMCP, and HTTP handler
+    conformance suite
+- id: src-agent-mcp-registry-py
+  resource: src/py/vertebra/agent/mcp/registry.py
+  title: Unified ToolRegistry and MCPRegistry implementation
+- id: src-native-driver-tests
+  resource: src/py/tests/unit/db/test_native_db_drivers.py
+  title: Cancellation and cloud DBAPI regression coverage
+- id: src-sqlite-returning-tests
+  resource: src/py/tests/unit/db/test_sqlite_driver.py
+  title: SQLite statement completion and transaction regressions
+- id: src-postgres-transaction-tests
+  resource: src/py/tests/unit/db/test_postgres_driver.py
+  title: Asyncpg transaction and affected-count regressions
+- id: src-tests-unit-server-stage1-hotpath-py
+  resource: src/py/tests/unit/server/test_stage1_hotpath_and_314t.py
+  title: Server hot-path batch dispatch and free-threaded 3.14t/3.15t unit tests
+- id: src-ts-tests-agent-test-ts
+  resource: src/ts/vertebra-client/tests/agent.test.ts
+  title: TypeScript Vitest suite for agent, router, and WebMCP client modules
+- id: src-makefile
+  resource: Makefile
+  title: Canonical polyglot build, test, lint, docs, and benchmark targets
+- id: src-tools-scripts-setup-env-sh
+  resource: tools/scripts/setup-env.sh
+  title: Repository tooling module (tools/scripts/setup-env.sh)
+- id: src-pyproject-toml
+  resource: pyproject.toml
+  title: Python package metadata, dependencies, and tool configuration
+- id: src-cargo-toml
+  resource: src/rs/Cargo.toml
+  title: Rust crate manifest (src/rs/Cargo.toml)
+- id: src-tests-conftest-py
+  resource: src/py/tests/conftest.py
+  title: Python implementation module (src/py/tests/conftest.py)
+- id: src-package-json
+  resource: src/ts/vertebra-client/package.json
+  title: TypeScript package manifest (src/ts/vertebra-client/package.json)
+- id: src-ci-yml
+  resource: .github/workflows/ci.yml
+  title: GitHub Actions workflow (ci.yml)
+- id: src-db-conformance
+  resource: src/py/tests/integration/db/test_driver_conformance.py
+  title: Parameterized database contract and environment readiness gates
+- id: src-storage-public-codec-tests
+  resource: src/py/tests/unit/storage/test_storage_store.py
+  title: Native storage codec demand, completion and cancellation tests
+- id: src-storage-native-tests
+  resource: src/rs/vertebra-storage/tests/storage_engine_tests.rs
+  title: Native streaming and normalized S3/B2 multipart tests
+- id: src-storage-shm-tests
+  resource: src/rs/vertebra-db/src/arrow_shm.rs
+  title: Named Arrow allocation rejection tests
+- id: src-storage-cursor-view-tests
+  resource: src/py/tests/unit/db/test_enterprise_olap_drivers.py
+  title: Retained native cursor views after release
 ---
 
 # Polyglot Test Matrix & Environment Setup
 
 <!-- truth: start -->
 - Verify polyglot changes with `make rs-test`, `make py-test`, `make ts-test`, `make lint-all`, and `make review-check`, running `make dev` after any Rust edit before invoking `pytest`.
-- Purge `/dev/shm/test-*`, `/dev/shm/*vertebra*`, and `/dev/shm/vtb-*` segments between test runs and exercise real local SHM/SQLite/in-memory backends instead of synthetic mocks.
+- Exercise real local SHM/SQLite/in-memory backends with unique allocation names and ownership cleanup; isolate full-suite cleanup from concurrent workloads.
 <!-- truth: end -->
 
 Vertebra runs verification gates in three languages: Rust (`cargo test`), Python (`pytest` with the AnyIO plugin), and TypeScript (`vitest`). The [`Makefile`](../../../../Makefile)[^src-makefile] drives all three locally and in CI.
@@ -146,9 +160,17 @@ CI runs on pushes to `main` and on every pull request. A `changes` job (`dorny/p
 
 ## 5. Async Tests & Shared-Memory Hygiene
 
-[`src/py/tests/conftest.py`](../../../../src/py/tests/conftest.py) pins the `anyio_backend` fixture to `asyncio`; mark async tests with `@pytest.mark.anyio`. Its `shm_name` fixture returns `test-<uuid8>` names, and the autouse `_cleanup_shm` fixture unlinks `/dev/shm/test-*` and `/dev/shm/*vertebra*` after every test. `make rs-test` removes the same globs before `cargo test`.
+[`src/py/tests/conftest.py`](../../../../src/py/tests/conftest.py) pins `anyio_backend` to `asyncio`; mark async tests with `@pytest.mark.anyio`. Its `shm_name` fixture returns unique `test-<uuid8>` names. The autouse `_cleanup_shm` removes `/dev/shm/test-*`, `/dev/shm/vtb-*`, and `/dev/shm/*vertebra*` after each test. `make rs-test` removes only the `test-*` and `*vertebra*` globs before Cargo. These are broad cleanup operations; run full suites in an isolated SHM namespace when other workloads share the host.[^src-tests-conftest-py][^src-makefile]
 
-Runtime segments are named `/vtb-{pid:x}-{seq:x}-{attempt:x}` and match neither glob. Remove leftovers from interrupted server or worker runs with `rm -f /dev/shm/vtb-*`. On Linux most regions are anonymous `memfd_create` descriptors and leave nothing in `/dev/shm`; `shm_open` names apply on macOS and other Unix hosts.
+For shared-workspace Rust verification, run `cargo test --workspace --features tls,compression,gcp --locked` from `src/rs` directly to omit the Make cleanup prelude. New ownership tests unlink only their own named allocations. Linux anonymous `memfd_create` regions leave no `/dev/shm` name; named Arrow mappings still require explicit lifecycle assertions.
+
+### Native storage and Arrow evidence
+
+Rebuild all five extensions before Python acceptance after native changes, then run their stubtest gate. Set `PYO3_PYTHON` to the project interpreter; embedded Python Rust tests also need `src/py` and that interpreter's site-packages on `PYTHONPATH`. Preserve installed optional extras with `UV_NO_SYNC=1` when running existing environments.[^src-makefile]
+
+`test_storage_store.py` exercises real native stores and installed codecs: projected rowgroup demand, dictionary and empty-schema retention, IPC-file fallback, native GET/PUT barriers, producer abort, and repeated-cancellation worker barriers. A passing cancellation case must retain owners until both worker and loop-side I/O exit. S3 success fixtures enforce the 5 MiB minimum for every non-final uploaded part, accept a short final part, complete the actual request, and decode the joined output. Cancellation-only or permissive multipart fixtures cannot establish successful provider publication.[^src-storage-public-codec-tests]
+
+Native tests cover incremental 8 MiB S3/R2/OCI parts and S3/B2 backend normalization. Invalid named allocation must report failure without registering anonymous backing; retained native cursor views must decode after release/unlink. Loopback HTTP fixtures establish these client/wire contracts, not live cloud-service acceptance.[^src-storage-native-tests][^src-storage-shm-tests][^src-storage-cursor-view-tests]
 
 ## Database driver conformance
 
@@ -194,3 +216,11 @@ Provenance sources: [^src-pyproject-toml], [^src-cargo-toml], [^src-package-json
 [^src-provider-regressions]: `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py` — Native provider ownership, lazy resolution, policy and driver error regressions.
 [^src-provider-schema-regressions]: `src/py/tests/unit/agent/test_core_and_observability.py` — Neutral provider schema and validation boundaries.
 [^src-provider-snapshot-regressions]: `src/py/tests/unit/agent/test_runtime_and_workflows.py` — Approval binding and nested invocation ownership across controlled suspension.
+
+[^src-storage-public-codec-tests]: `src/py/tests/unit/storage/test_storage_store.py` — Native storage codec demand, completion and cancellation tests.
+
+[^src-storage-native-tests]: `src/rs/vertebra-storage/tests/storage_engine_tests.rs` — Native streaming and normalized S3/B2 multipart tests.
+
+[^src-storage-shm-tests]: `src/rs/vertebra-db/src/arrow_shm.rs` — Named Arrow allocation rejection tests.
+
+[^src-storage-cursor-view-tests]: `src/py/tests/unit/db/test_enterprise_olap_drivers.py` — Retained native cursor views after release.

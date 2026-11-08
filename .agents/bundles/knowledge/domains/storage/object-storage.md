@@ -10,15 +10,9 @@ tags:
 - object-store
 - signing
 verified:
-- by: agent:code-reviewer
-  at: '2026-11-08T18:01:58.609035Z'
-  commit: e663c51f
-- by: agent:quality-reviewer
-  at: '2026-11-08T18:01:58.609035Z'
-  commit: e663c51f
 - by: agent:docs-okf-specialist
-  at: '2026-11-08T17:20:39.168001Z'
-  commit: '78293774'
+  at: '2026-11-08T18:20:18.754346Z'
+  commit: bf5a4cf3
 sources:
 - id: src-vertebra-core-src-gcp-auth-rs
   resource: src/rs/vertebra-core/src/gcp_auth.rs
@@ -92,13 +86,16 @@ sources:
 - id: src-db-arrow-shm-rs
   resource: src/rs/vertebra-db/src/arrow_shm.rs::allocate_shm_region
   title: Strict Unix named shared-memory allocation
+- id: src-core-notify-rs
+  resource: src/rs/vertebra-core/src/notify.rs
+  title: Native Notifier event-loop completion wakeups
 ---
 
 # Object Storage, Streaming & Presigning
 
 <!-- truth: start -->
-- **Rust Extension, Streaming & GIL-Free Async Execution (`vertebra-storage`, `vertebra.storage`)**: [`vertebra-storage`](../../../../../src/rs/vertebra-storage/src/lib.rs)[^src-vertebra-storage-src-lib-rs] (typed in [`_storage.pyi`](../../../../../src/py/vertebra/_storage.pyi)) builds `vertebra._storage` (`#[pymodule(gil_used = false)]`) over `object_store 0.13`. `SyncObjectStore`, `SyncStreamReader`, and `SyncMultipartUpload` release the GIL via `py.detach()`, while `AsyncObjectStore`, `AsyncStreamReader`, `AsyncMultipartUpload`, and `py_sign_gcs_v4_iam_url_async` return a `RustTaskAwaitable` backed by a per-loop `AsyncCompletionQueue` and [`vertebra_core::notify::Notifier`](../../../../../src/rs/vertebra-core/src/notify.rs) (`eventfd` on Linux, pipe elsewhere) registered via `loop.add_reader`, completing on `STORAGE_RUNTIME` with zero Tokio `Python::attach` calls.
-- **Unified GCP Token Authority, Multi-Cloud Signing & Fail-Closed Facade**: [`vertebra.storage`](../../../../../src/py/vertebra/storage/_store.py)[^src-storage-store-py] re-exports `SyncGcpTokenCache`, `AsyncGcpTokenCache`, and `GcpTokenSnapshot` directly from [`vertebra._vertebra`](../../../../../src/rs/vertebra-py/src/gcp_auth.rs)[^src-vertebra-py-src-gcp-auth-rs] over [`vertebra_core::gcp_auth::GcpTokenCache`](../../../../../src/rs/vertebra-core/src/gcp_auth.rs)[^src-vertebra-core-src-gcp-auth-rs] (with `.to_async()` / `.to_sync()` sharing the underlying `Arc<GcpTokenCache>` and `allow_ambient_adc`), while [`vertebra-storage/src/gcp_auth.rs`](../../../../../src/rs/vertebra-storage/src/gcp_auth.rs)[^src-vertebra-storage-src-gcp-auth-rs] exposes only `RefreshingGcpCredentialProvider` and `GCS_OAUTH_SCOPES`. `SyncObjectStore` and `AsyncObjectStore` fail closed with `MissingDependencyError` (`vertebra-core[storage]`) when `vertebra._storage` is absent and `ImproperConfigurationError` on missing or invalid target URIs/configs, with zero pure-Python `_memory` dict fallbacks or `urllib` OAuth fetchers.
+- **Rust Extension, Streaming & GIL-Free Async Execution (`vertebra-storage`, `vertebra.storage`)**: [`vertebra-storage`](../../../../../src/rs/vertebra-storage/src/lib.rs)[^src-vertebra-storage-src-lib-rs] (typed in [`_storage.pyi`](../../../../../src/py/vertebra/_storage.pyi)) builds `vertebra._storage` (`#[pymodule(gil_used = false)]`) over `object_store 0.13`. `SyncObjectStore`, `SyncStreamReader`, and `SyncMultipartUpload` release the GIL via `py.detach()`, while `AsyncObjectStore`, `AsyncStreamReader`, `AsyncMultipartUpload`, and `py_sign_gcs_v4_iam_url_async` return a `RustTaskAwaitable` backed by a per-loop `AsyncCompletionQueue` and [`vertebra_core::notify::Notifier`](../../../../../src/rs/vertebra-core/src/notify.rs) (`eventfd` on Linux, pipe elsewhere) registered via `loop.add_reader`, completing on `STORAGE_RUNTIME` without Tokio `Python::attach` on the notifier-backed path. When the notifier or `add_reader` is unavailable, `RustCompletionRing::signal_fallback` attaches to Python and calls `loop.call_soon_threadsafe`.[^src-core-notify-rs]
+- **Unified GCP Token Authority, Multi-Cloud Signing & Fail-Closed Facade**: [`vertebra.storage`](../../../../../src/py/vertebra/storage/_store.py)[^src-storage-store-py] re-exports `SyncGcpTokenCache`, `AsyncGcpTokenCache`, and `GcpTokenSnapshot` directly from [`vertebra._vertebra`](../../../../../src/rs/vertebra-py/src/gcp_auth.rs)[^src-vertebra-py-src-gcp-auth-rs] over [`vertebra_core::gcp_auth::GcpTokenCache`](../../../../../src/rs/vertebra-core/src/gcp_auth.rs)[^src-vertebra-core-src-gcp-auth-rs] (with `.to_async()` / `.to_sync()` sharing the underlying `Arc<GcpTokenCache>` and `allow_ambient_adc`), while [`vertebra-storage/src/gcp_auth.rs`](../../../../../src/rs/vertebra-storage/src/gcp_auth.rs)[^src-vertebra-storage-src-gcp-auth-rs] exposes only `RefreshingGcpCredentialProvider` and `GCS_OAUTH_SCOPES`. `SyncObjectStore` and `AsyncObjectStore` fail closed with `MissingDependencyError` (`vertebra-core[storage]`) when `vertebra._storage` is absent and `ImproperConfigurationError` for explicit invalid targets; an omitted constructor argument raises `TypeError`. The facade has no pure-Python `_memory` fallback or `urllib` OAuth fetcher.
 - **Arrow data plane**: Storage batch codecs use native streams/ranges and multipart uploads; async PyArrow operations run in per-demand SyncPool steps while I/O stays on the caller loop. Required Unix named SHM allocation errors propagate, and `ArrowCursor.from_rows` emits real IPC only.[^src-storage-arrow-py][^src-db-arrow-py][^src-db-arrow-shm-rs]
 - Native S3 and B2-normalized uploads share bounded 8 MiB part accumulation with R2/OCI; every non-final S3 part meets the 5 MiB minimum, while the final part may be shorter. [^src-vertebra-storage-src-store-rs]
 <!-- truth: end -->
@@ -109,7 +106,7 @@ sources:
 |---|---|---|
 | [`BackendConfig` / `ObjectStoreEngine`](../../../../../src/rs/vertebra-storage/src/store.rs)[^src-vertebra-storage-src-store-rs] | `store.rs` | Wraps `Arc<dyn object_store::ObjectStore>` across `memory`, `file`, `s3`/`b2`, `r2`, `oci`, `gs`/`gcs`, `az`/`azure`/`abfs`, and `http`/`https`. Exposes `put_opts` (`PutConditionalOptions`: `if_not_exists`, `if_match`, `if_none_match`, `content_type`, `attributes`), `get_stream`, `create_multipart`, `list_page`, `list_with_delimiter`, `rename`, `get_range`, `head`, `exists`, `delete`, `copy`, and `list`. |
 | `PySyncStreamReader` / `PyAsyncStreamReader` (`SyncStreamReader` / `AsyncStreamReader`) | `lib.rs` | Pulls streaming `Bytes` chunks from `ObjectStoreEngine::get_stream` and slices them to optional `chunk_size` bounds as zero-copy `StorageBuffer` views without whole-object buffering. |
-| `MultipartUploadSession` (`PySyncMultipartUpload` / `PyAsyncMultipartUpload`) | `store.rs`, `lib.rs` | Stateful `Box<dyn MultipartUpload>` session (`write_part`, `complete`, `abort`). For `r2` and `oci`, buffers writes into uniform `8 MiB` parts ([`R2_UNIFORM_PART_SIZE`](../../../../../src/rs/vertebra-storage/src/r2.rs)[^src-vertebra-storage-src-r2-rs]) incrementally without concatenating full payloads into `Vec<u8>`. |
+| `MultipartUploadSession` (`PySyncMultipartUpload` / `PyAsyncMultipartUpload`) | `store.rs`, `lib.rs` | Stateful `Box<dyn MultipartUpload>` session (`write_part`, `complete`, `abort`). For normalized `s3`/`b2`, `r2`, and `oci`, buffers writes into `8 MiB` parts ([`R2_UNIFORM_PART_SIZE`](../../../../../src/rs/vertebra-storage/src/r2.rs)[^src-vertebra-storage-src-r2-rs]) incrementally without concatenating full payloads into `Vec<u8>`. |
 | `RefreshingGcpCredentialProvider` | `gcp_auth.rs` | Bridges `Arc<vertebra_core::gcp_auth::GcpTokenCache>` (`GCS_OAUTH_SCOPES`) into `GoogleCloudStorageBuilder::with_credentials(...)` when no static `service_account_path` or `service_account_key` is configured. |
 | [`OciObjectStore`](../../../../../src/rs/vertebra-storage/src/oci.rs)[^src-vertebra-storage-src-oci-rs] | `oci.rs` | Native `ObjectStore` over OCI Object Storage REST v2 (`/n/{ns}/b/{bucket}/o/{name}`, pre-authenticated `par_url`, RSA-SHA256 Cavage request signing, and `OciMultipartUpload`). |
 | `PySyncObjectStore` / `PyAsyncObjectStore` / `RustTaskAwaitable` | `lib.rs` | Frozen PyO3 classes (`SyncObjectStore` / `AsyncObjectStore`) whose `.to_async()` and `.to_sync()` methods clone the shared `ObjectStoreEngine` (`Arc`), keeping `InMemory` namespaces and HTTP pools unified across sync and async callers. |
@@ -141,7 +138,7 @@ Provider configs are `msgspec.Struct(frozen=True, gc=False, kw_only=True)` imple
 
 Both stores expose `iter_arrow_batches(key)`, `iter_parquet_batches(key, *, batch_size=65536, columns=None)`, `write_arrow(key, data, *, batch_size=65536)`, and `write_parquet(key, batches, *, schema=None, compression="zstd", row_group_size=65536)`. Readers yield real RecordBatch objects; writes return native `PutResult`. Table, RecordBatch, ArrowCursor, and synchronous batch iterables retain schema/dictionary state; schema-bearing empty inputs produce valid files, while a schema-less empty iterable raises `ValueError`. Encoders drain each operation into native `put_stream` before advancing input, including final IPC EOS or Parquet footer.[^src-storage-arrow-py][^src-storage-store-py]
 
-The private codec bridge uses one SyncPool operation per initialization, batch, or close. Native async stream/range I/O runs on the caller loop; cancellation waits for loop-side I/O and codec workers before closing sources or sinks. Explicit `close`/`aclose` stops reader demand. Writer failure/cancellation closes its owned producer and aborts multipart upload. Parquet batch readers default to `pre_buffer=False`; private codec options preserve an explicit `True` as an opt-out from bounded prefetch. Full-Table helpers intentionally materialize the decoded Table, preserve empty schemas, and support IPC-file fallback through seekable ranges. SQLSpec delegation to these helpers remains planned.[^src-storage-arrow-py]
+The private codec bridge uses one SyncPool operation per initialization, batch, or close. Native async stream/range I/O runs on the caller loop; repeated cancellation waits for actual loop-side I/O and codec-worker exit before closing sources or sinks. Explicit `close`/`aclose` stops reader demand. Writer failure/cancellation closes its owned producer and aborts multipart upload. Parquet batch readers default to `pre_buffer=False`; private codec options preserve an explicit `True` as an opt-out from bounded prefetch. Full-Table helpers intentionally materialize the decoded Table, preserve empty schemas, and support IPC-file fallback through seekable ranges. SQLSpec delegates its Arrow methods to these helpers, retaining raw IPC buffer inputs, caller options, and PyArrow compression defaults.[^src-storage-arrow-py]
 
 `ArrowCursor.from_rows(rows, columns=None, *, threshold_rows=256)` requires PyArrow and preserves tuple, mapping, inferred-column, and empty-row semantics. Threshold-selected SHM requires the native `write_ipc_to_shm`; missing native support and allocation failures propagate. Unix named allocation errors include the normalized name and OS error. The 16-byte `VTBARROW` frame header and retained-view ownership remain unchanged.[^src-db-arrow-py][^src-db-arrow-shm-rs]
 
@@ -155,13 +152,13 @@ For async stores, explicitly await `to_async_fastpath_tuple()` in the handler: i
 
 `ObjectStoreLitestarStore` accepts an explicit async store, config, or URI. Each object contains a versioned `VTBSTORE\x01` MessagePack envelope holding the wall-clock millisecond deadline and bytes, so TTL survives store reconstruction even when backend attributes disappear. Expired entries are deleted on read; renewal applies only to expiring entries. Logical keys are UTF-8 hex encoded; `with_namespace` composes validated child prefixes, and paginated `delete_all` removes that namespace and descendants while preserving siblings.[^src-extensions-litestar-store-py][^src-tests-litestar-plugin-py]
 
-`ObjectStoreFileSystemAdapter(store, base_path="public")` exposes a confined virtual `/`, async metadata, and native `AsyncReadableFile` handles with async reads and synchronous seek/tell. Configure `create_static_files_router(path="/assets", directories=["/"], file_system=adapter, resolve_symlinks=False)` for static GET/HEAD. Explicit Range handling uses a separate route: build `StreamingStorageResponse.from_async_store(..., range_header=request.headers.get("range"))`, then return Litestar `Stream` over byte-converted `aiter_chunks()`, forwarding status, headers, content range, and media type.[^src-extensions-litestar-store-py][^src-tests-litestar-plugin-py]
+`ObjectStoreFileSystemAdapter(store, base_path="public")` exposes a confined virtual `/`, async metadata, and native `AsyncReadableFile` handles with async reads and synchronous seek/tell. Configure `create_static_files_router(path="/assets", directories=["/"], file_system=adapter, resolve_symlinks=False)` for static GET/HEAD. Explicit Range handling uses a separate route: await `StreamingStorageResponse.from_async_store(..., range_header=request.headers.get("range"))`, then return Litestar `Stream` over byte-converted `aiter_chunks()`, forwarding status, headers, content range, and media type.[^src-extensions-litestar-store-py][^src-tests-litestar-plugin-py]
 
 ### SQLSpec Protocol and Native Extensions
 
 `ObjectStoreBackend` implements SQLSpec's byte/text, CRUD, listing, metadata, and signing methods with their exact `*_sync` / `*_async` names. Native extensions expose `get_stream_sync` / `get_stream_async` as `StorageBuffer` iterators, `put_stream_*` as incremental uploads returning `PutResult`, `list_page_*` as relative-key pages with opaque native cursors, and `open_sync` / `open_async` as seekable-reader factories. SQLSpec `stream_read_sync` yields `bytes`; callers await `stream_read_async` before iterating its byte chunks. Conditional and metadata write options reach native `put` / `put_stream`, and moves use native `rename`.[^src-extensions-sqlspec-storage-py]
 
-Both reader factories are synchronous. `open_sync(size=None)` resolves metadata immediately; supplying `size` avoids that lookup. `open_async` defers metadata until reading. Keys and configured namespaces reject parent traversal. SQLSpec Arrow methods retain their existing implementation until codec delegation is complete; `build_duckdb_gcs_secret_sql` retains its contract.[^src-extensions-sqlspec-storage-py]
+Both reader factories are synchronous. `open_sync(size=None)` resolves metadata immediately; supplying `size` avoids that lookup. `open_async` defers metadata until reading. Keys and configured namespaces reject parent traversal. SQLSpec `read_arrow_*` returns schema-preserving Tables, while `stream_arrow_async` is a normal function returning an async iterator over native async matches and batch reads. Closing or cancelling the outer stream closes its active inner iterator. `write_arrow_*` and `write_arrow_cursor_*` retain `None` returns, format options, raw IPC buffer inputs, and existing Parquet defaults. Explicit `pre_buffer=True` is forwarded as an opt-out from bounded batch prefetch; `build_duckdb_gcs_secret_sql` retains its contract.[^src-extensions-sqlspec-storage-py]
 
 ### Advanced Alchemy Registry and File Objects
 
@@ -179,7 +176,7 @@ Both reader factories are synchronous. `open_sync(size=None)` resolves metadata 
 
 ## 6. Operational Invariants & Gotchas
 
-- **Fail-closed construction**: Omitting or passing an empty/schemeless target raises `ImproperConfigurationError`; missing `vertebra._storage` raises `MissingDependencyError` (`vertebra-core[storage]`). Ephemeral test stores must pass `MemoryConfig()` or `"memory://<namespace>"` explicitly and pair sync/async handles via `.to_async()` / `.to_sync()` so they share the same Rust `InMemory` instance.
+- **Fail-closed construction**: The positional target is required (`TypeError` when omitted); explicit `None`, empty, or schemeless targets raise `ImproperConfigurationError`; missing `vertebra._storage` raises `MissingDependencyError` (`vertebra-core[storage]`). Ephemeral test stores must pass `MemoryConfig()` or `"memory://<namespace>"` explicitly and pair sync/async handles via `.to_async()` / `.to_sync()` so they share the same Rust `InMemory` instance.
 - **Multipart stream cleanup**: `put_stream` aborts the active `MultipartUploadSession` on producer exceptions so uncommitted parts are cleaned up.
 - **Offline verification scope**: `verify_presigned_url` supports `hmac` and `s3` only; `gcs`, `azure`, and `oci` raise `NotImplementedError`.
 
@@ -207,3 +204,5 @@ Both reader factories are synchronous. `open_sync(size=None)` resolves metadata 
 [^src-storage-arrow-py]: `src/py/vertebra/storage/_arrow.py` — Bounded native-I/O codecs and cancellation ownership.
 [^src-db-arrow-py]: `src/py/vertebra/db/arrow.py::ArrowCursor` — Real IPC cursor and native SHM selection.
 [^src-db-arrow-shm-rs]: `src/rs/vertebra-db/src/arrow_shm.rs::allocate_shm_region` — Unix named allocation error propagation.
+
+[^src-core-notify-rs]: `src/rs/vertebra-core/src/notify.rs` — Native event-loop completion wakeups.

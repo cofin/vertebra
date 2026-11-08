@@ -1,29 +1,26 @@
 ---
 type: Guide
-title: "SQLSpec, Advanced Alchemy & SQLAlchemy Dialect Extensions"
-description: "The `vertebra.extensions.sqlspec`, `vertebra.extensions.alchemy`, and `vertebra.extensions.sqlalchemy` packages providing native SHM adapters (`SyncAdapterConfig`, `AsyncAdapterConfig`), universal SHM broker proxies (`ProxySyncConfig`, `ProxyAsyncConfig`), `+vtb` dialect implementations, column types, and CDC event backends."
+title: SQLSpec, Advanced Alchemy & SQLAlchemy Dialect Extensions
+description: The `vertebra.extensions.sqlspec`, `vertebra.extensions.alchemy`, and
+  `vertebra.extensions.sqlalchemy` packages providing native SHM adapters (`SyncAdapterConfig`,
+  `AsyncAdapterConfig`), universal SHM broker proxies (`ProxySyncConfig`, `ProxyAsyncConfig`),
+  `+vtb` dialect implementations, column types, and CDC event backends.
 status: stable
 tags:
-  - domains
-  - extensions
-  - sqlspec
-  - sqlalchemy
-  - alembic
-  - shm
-  - arrow
+- domains
+- extensions
+- sqlspec
+- sqlalchemy
+- alembic
+- shm
+- arrow
 generated:
   by: flow/0.26.0
-  at: "2026-11-04T04:33:00Z"
+  at: '2026-11-04T04:33:00Z'
 verified:
-  - by: agent:flow-setup
-    at: "2026-11-07T03:55:00Z"
-    commit: cdb978d3
-  - by: agent:codex
-    at: "2026-11-05T06:09:26Z"
-    commit: 80ff8a65e43a2bcef9e48a7763e89a7352118232
-  - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+- by: agent:codex
+  at: '2026-11-08T18:27:30.456016Z'
+  commit: bf5a4cf3
 sources:
 - id: src-extensions-sqlspec-init-py
   resource: src/py/vertebra/extensions/sqlspec/__init__.py
@@ -70,6 +67,9 @@ sources:
 - id: src-pyproject-toml
   resource: pyproject.toml
   title: Python package metadata, dependencies, and tool configuration
+- id: src-storage-arrow-codecs
+  resource: src/py/vertebra/storage/_arrow.py
+  title: Bounded PyArrow codec scheduling and native I/O adapters
 ---
 
 # SQLSpec, Advanced Alchemy & SQLAlchemy Dialect Extensions
@@ -77,6 +77,7 @@ sources:
 <!-- truth: start -->
 - `create_sqlspec_plugin` and `create_alchemy_plugin` return real upstream `SQLSpecPlugin` and `SQLAlchemyPlugin` instances wired to Vertebra `LeaseBroker` (`NullPool` when brokered) and `ObjectStoreBackend`.
 - Native `<Engine>{Sync,Async}Config` adapters, `ProxySyncConfig` / `ProxyAsyncConfig` wrappers, and 36 SQLAlchemy 2.1 `+vertebra`/`+vtb` sync/async dialect entry points share pools via `DatabaseRegistry.default()`.
+- Object-storage adapters preserve upstream method/return contracts while sharing native stores; asynchronous Arrow streams retain demand and cleanup ownership [^src-extensions-sqlspec-storage-py] [^src-extensions-alchemy-storage-py].
 <!-- truth: end -->
 
 These packages provide Vertebra's two-tier shared-memory integration for SQLSpec, Advanced Alchemy, SQLAlchemy 2.1, and Alembic without hard-requiring those libraries at import time. Each module imports `litestar.di`, `litestar.typing`, `sqlalchemy.dialects`, or `alembic.ddl.impl` lazily through [`vertebra.utils.module_loader`](../../../../../src/py/vertebra/utils/module_loader.py) and still works when they are missing. Unit coverage: `test_drop_in_names_and_generics.py`, `test_data_storage_integrations.py`, `test_sqlalchemy_and_sqlspec_vtb.py`, and `test_shm_broker_driver_proxy.py` under `src/py/tests/unit/extensions/`.
@@ -116,7 +117,13 @@ Pool defaults: when a broker is attached to a `+vtb` dialect (`poolclass="NullPo
 
 - [`ObjectStoreBackend`](../../../../../src/py/vertebra/extensions/alchemy/storage.py)[^src-extensions-alchemy-storage-py] (`alchemy/storage.py`) implements `advanced_alchemy.types.file_object.StorageBackend` over `SyncObjectStore` / `AsyncObjectStore` with native sync and async methods (`save_object[_async]`, `get_content[_async]`, `get_range[_async]`, `get_metadata[_async]`, `exists[_async]`, `copy_object[_async]`, `list_objects[_async]`, `delete_object[_async]`, and `sign[_async]`) plus `FileObjectSessionTracker` transaction rollback safety.
 - [`SQLAlchemyCacheBackend`](../../../../../src/py/vertebra/extensions/alchemy/cache.py), [`AsyncCacheManager`](../../../../../src/py/vertebra/extensions/alchemy/cache.py), and [`ZeroCopyServiceMixin`](../../../../../src/py/vertebra/extensions/alchemy/cache.py) (`alchemy/cache.py`) provide two-tier L1 (`ShmRegion` / LRU) + L2 (`SyncRedisDriver` / `AsyncRedisDriver` with Valkey RESP3 `CLIENT TRACKING` invalidation, prefix-scoped `SCAN` + `UNLINK` on `clear()` / `clear_async()` under `key_prefix="vtb:aa:"`, and millisecond `px` TTLs) caching, event-loop-native `CacheManager` async methods (`get_async`, `set_async`, `delete_async`, `get_schema_async` without `asyncio.to_thread`), and C-API vectorcall `to_schema` projection (`orm_to_struct_vectorcall`).
-- [`ObjectStoreBackend`](../../../../../src/py/vertebra/extensions/sqlspec/storage.py)[^src-extensions-sqlspec-storage-py] (`sqlspec/storage.py`) implements `sqlspec.protocols.ObjectStoreProtocol` over `SyncObjectStore` / `AsyncObjectStore` (`read_bytes[_async]`, `write_bytes[_async]`, `read_arrow[_async]`, `write_arrow[_async]`, `stream_arrow[_async]`, `sign[_async]`, `stream_response`, and `ArrowFlightSerializer`).
+- [`ObjectStoreBackend`](../../../../../src/py/vertebra/extensions/sqlspec/storage.py)[^src-extensions-sqlspec-storage-py] (`sqlspec/storage.py`) implements `sqlspec.protocols.ObjectStoreProtocol` with explicit `_sync` / `_async` methods for byte, text, Arrow, listing, metadata, and signing operations. Native stream/page/reader extensions share paired store handles and preserve qualified keys, URI checks, and backend errors.
+
+SQLSpec `read_arrow_sync` / `read_arrow_async` return complete Tables, preserving empty schemas and IPC-file fallback. `write_arrow_*` and `write_arrow_cursor_*` retain `None` returns; cursor writes accept `buffer_view()` objects and raw IPC buffer-protocol inputs. Their private batch codec bridge keeps synchronous PyArrow work in `SyncPool` and native async I/O on the caller loop. Pattern streams open files sequentially and yield batches on demand; closing or cancelling the outer async iterator closes its current inner batch iterator [^src-extensions-sqlspec-storage-py] [^src-storage-arrow-codecs].
+
+Parquet batch readers default to `pre_buffer=False`; explicit `pre_buffer=True` preserves SQLSpec compatibility and permits broader prefetch. Full-Table reads intentionally materialize their return. SQLSpec writer options preserve PyArrow's unspecified compression default; the public storage writer's `zstd` default does not replace it. Constructor and batch options retain their PyArrow recipients and unsupported-option errors [^src-extensions-sqlspec-storage-py] [^src-storage-arrow-codecs].
+
+Advanced Alchemy registers concrete instances through `StorageRegistry.register_backend`: use `register_storage_backend(store, key="assets")` or `register_storage_backend("assets", store=store)`. A key alone fails closed, and `set_default=True` explicitly sets the default backend class. Registry lookup methods remain upstream-owned. `FileObject` / `StoredObject` consumers use `get_content[_async]`; bounded source iterators and native multipart uploads preserve original failures, cancellation, and transaction-tracker cleanup [^src-extensions-alchemy-storage-py].
 
 ## 4. `+vtb` Dialects, Types, Alembic (`sqlalchemy/dialects.py`, `sqlalchemy/alembic.py`, `sqlalchemy/types.py`)
 
@@ -149,3 +156,5 @@ Provenance sources: [^src-extensions-sqlspec-init-py], [^src-extensions-sqlspec-
 [^src-extensions-sqlalchemy-types-py]: `src/py/vertebra/extensions/sqlalchemy/types.py` — Python implementation module (src/py/vertebra/extensions/sqlalchemy/types.py).
 [^src-extensions-sqlalchemy-alembic-py]: `src/py/vertebra/extensions/sqlalchemy/alembic.py` — Python implementation module (src/py/vertebra/extensions/sqlalchemy/alembic.py).
 [^src-pyproject-toml]: `pyproject.toml` — Python package metadata, dependencies, and tool configuration.
+
+[^src-storage-arrow-codecs]: `src/py/vertebra/storage/_arrow.py` — Bounded codecs, format options, and resource ownership.

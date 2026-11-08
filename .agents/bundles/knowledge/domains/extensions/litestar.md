@@ -1,103 +1,99 @@
 ---
 type: Concept
-title: "Framework Extensions: Litestar, Starlette, FastAPI, Flask, and Django"
-description: "First-class framework plugins, matchit 0.9 RouteCompiler, Rust middleware offload specs, FastPathProvider dispatch, and ecosystem bridges across Litestar, Starlette, FastAPI, Flask, and Django."
+title: 'Framework Extensions: Litestar, Starlette, FastAPI, Flask, and Django'
+description: First-class framework plugins, matchit 0.9 RouteCompiler, Rust middleware
+  offload specs, FastPathProvider dispatch, and ecosystem bridges across Litestar,
+  Starlette, FastAPI, Flask, and Django.
 status: stable
 tags:
-  - domains
-  - extensions
-  - litestar
-  - starlette
-  - fastapi
-  - flask
-  - django
-  - fastpath
+- domains
+- extensions
+- litestar
+- starlette
+- fastapi
+- flask
+- django
+- fastpath
 generated:
   by: flow/0.26.0
-  at: "2026-11-04T04:33:00Z"
+  at: '2026-11-04T04:33:00Z'
 verified:
-  - by: agent:codex
-    at: "2026-11-08T16:07:37Z"
-    commit: 99317bed609e62a73d8b0036d444c1268ac2eb1d
-  - by: agent:flow-setup
-    at: "2026-11-07T03:55:00Z"
-    commit: cdb978d3
-  - by: agent:codex
-    at: "2026-11-05T06:09:26Z"
-    commit: 80ff8a65e43a2bcef9e48a7763e89a7352118232
-  - by: agent:flow-setup
-    at: "2026-11-04T04:33:00Z"
-    commit: f741701
+- by: agent:codex
+  at: '2026-11-08T18:27:30.456016Z'
+  commit: bf5a4cf3
 sources:
-  - id: src-extensions-litestar-init-py
-    resource: src/py/vertebra/extensions/litestar/__init__.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/__init__.py)"
-  - id: src-extensions-litestar-config-py
-    resource: src/py/vertebra/extensions/litestar/config.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/config.py)"
-  - id: src-extensions-litestar-plugin-py
-    resource: src/py/vertebra/extensions/litestar/plugin.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/plugin.py)"
-  - id: src-extensions-litestar-router-py
-    resource: src/py/vertebra/extensions/litestar/router.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/router.py)"
-  - id: src-extensions-litestar-offload-py
-    resource: src/py/vertebra/extensions/litestar/offload.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/offload.py)"
-  - id: src-extensions-litestar-fastpath-py
-    resource: src/py/vertebra/extensions/litestar/fastpath.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/fastpath.py)"
-  - id: src-extensions-litestar-channels-py
-    resource: src/py/vertebra/extensions/litestar/channels.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/channels.py)"
-  - id: src-extensions-litestar-store-py
-    resource: src/py/vertebra/extensions/litestar/store.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/store.py)"
-  - id: src-extensions-litestar-openapi-py
-    resource: src/py/vertebra/extensions/litestar/openapi.py
-    title: "Python implementation module (src/py/vertebra/extensions/litestar/openapi.py)"
-  - id: src-extensions-starlette-init-py
-    resource: src/py/vertebra/extensions/starlette/__init__.py
-    title: "Python implementation module (src/py/vertebra/extensions/starlette/__init__.py)"
-  - id: src-extensions-starlette-mcp-py
-    resource: src/py/vertebra/extensions/starlette/mcp.py
-    title: "Python implementation module (src/py/vertebra/extensions/starlette/mcp.py)"
-  - id: src-extensions-fastapi-init-py
-    resource: src/py/vertebra/extensions/fastapi/__init__.py
-    title: "Python implementation module (src/py/vertebra/extensions/fastapi/__init__.py)"
-  - id: src-extensions-flask-init-py
-    resource: src/py/vertebra/extensions/flask/__init__.py
-    title: "Python implementation module (src/py/vertebra/extensions/flask/__init__.py)"
-  - id: src-extensions-flask-mcp-py
-    resource: src/py/vertebra/extensions/flask/mcp.py
-    title: "Python implementation module (src/py/vertebra/extensions/flask/mcp.py)"
-  - id: src-extensions-django-init-py
-    resource: src/py/vertebra/extensions/django/__init__.py
-    title: "Python implementation module (src/py/vertebra/extensions/django/__init__.py)"
-  - id: src-extensions-django-mcp-py
-    resource: src/py/vertebra/extensions/django/mcp.py
-    title: "Python implementation module (src/py/vertebra/extensions/django/mcp.py)"
-  - id: src-agent-mcp-routes-py
-    resource: src/py/vertebra/agent/mcp/routes.py
-    title: "Shared ASGI and WSGI MCP route apps (src/py/vertebra/agent/mcp/routes.py)"
-  - id: src-agent-mcp-service-py
-    resource: src/py/vertebra/agent/mcp/service.py
-    title: "Shared MCP JSON-RPC protocol core (src/py/vertebra/agent/mcp/service.py)"
-  - id: src-agent-mcp-webmcp-py
-    resource: src/py/vertebra/agent/mcp/webmcp.py
-    title: "Browser WebMCP manifest builder (src/py/vertebra/agent/mcp/webmcp.py)"
-  - id: src-server-channels-py
-    resource: src/py/vertebra/server/_channels.py
-    title: "Engine-neutral channel fan-out and capability bridges"
-  - id: src-server-routing-py
-    resource: src/py/vertebra/server/_routing.py
-    title: "Python implementation module (src/py/vertebra/server/_routing.py)"
-  - id: src-server-fastpath-core-py
-    resource: src/py/vertebra/server/_fastpath_core.py
-    title: "Shared FastPathProvider registry and DirectPlan compilation primitives"
-  - id: src-server-fastpath-py
-    resource: src/py/vertebra/server/_fastpath.py
-    title: "Python implementation module (src/py/vertebra/server/_fastpath.py)"
+- id: src-extensions-litestar-init-py
+  resource: src/py/vertebra/extensions/litestar/__init__.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/__init__.py)
+- id: src-extensions-litestar-config-py
+  resource: src/py/vertebra/extensions/litestar/config.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/config.py)
+- id: src-extensions-litestar-plugin-py
+  resource: src/py/vertebra/extensions/litestar/plugin.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/plugin.py)
+- id: src-extensions-litestar-router-py
+  resource: src/py/vertebra/extensions/litestar/router.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/router.py)
+- id: src-extensions-litestar-offload-py
+  resource: src/py/vertebra/extensions/litestar/offload.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/offload.py)
+- id: src-extensions-litestar-fastpath-py
+  resource: src/py/vertebra/extensions/litestar/fastpath.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/fastpath.py)
+- id: src-extensions-litestar-channels-py
+  resource: src/py/vertebra/extensions/litestar/channels.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/channels.py)
+- id: src-extensions-litestar-store-py
+  resource: src/py/vertebra/extensions/litestar/store.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/store.py)
+- id: src-extensions-litestar-openapi-py
+  resource: src/py/vertebra/extensions/litestar/openapi.py
+  title: Python implementation module (src/py/vertebra/extensions/litestar/openapi.py)
+- id: src-extensions-starlette-init-py
+  resource: src/py/vertebra/extensions/starlette/__init__.py
+  title: Python implementation module (src/py/vertebra/extensions/starlette/__init__.py)
+- id: src-extensions-starlette-mcp-py
+  resource: src/py/vertebra/extensions/starlette/mcp.py
+  title: Python implementation module (src/py/vertebra/extensions/starlette/mcp.py)
+- id: src-extensions-fastapi-init-py
+  resource: src/py/vertebra/extensions/fastapi/__init__.py
+  title: Python implementation module (src/py/vertebra/extensions/fastapi/__init__.py)
+- id: src-extensions-flask-init-py
+  resource: src/py/vertebra/extensions/flask/__init__.py
+  title: Python implementation module (src/py/vertebra/extensions/flask/__init__.py)
+- id: src-extensions-flask-mcp-py
+  resource: src/py/vertebra/extensions/flask/mcp.py
+  title: Python implementation module (src/py/vertebra/extensions/flask/mcp.py)
+- id: src-extensions-django-init-py
+  resource: src/py/vertebra/extensions/django/__init__.py
+  title: Python implementation module (src/py/vertebra/extensions/django/__init__.py)
+- id: src-extensions-django-mcp-py
+  resource: src/py/vertebra/extensions/django/mcp.py
+  title: Python implementation module (src/py/vertebra/extensions/django/mcp.py)
+- id: src-agent-mcp-routes-py
+  resource: src/py/vertebra/agent/mcp/routes.py
+  title: Shared ASGI and WSGI MCP route apps (src/py/vertebra/agent/mcp/routes.py)
+- id: src-agent-mcp-service-py
+  resource: src/py/vertebra/agent/mcp/service.py
+  title: Shared MCP JSON-RPC protocol core (src/py/vertebra/agent/mcp/service.py)
+- id: src-agent-mcp-webmcp-py
+  resource: src/py/vertebra/agent/mcp/webmcp.py
+  title: Browser WebMCP manifest builder (src/py/vertebra/agent/mcp/webmcp.py)
+- id: src-server-channels-py
+  resource: src/py/vertebra/server/_channels.py
+  title: Engine-neutral channel fan-out and capability bridges
+- id: src-server-routing-py
+  resource: src/py/vertebra/server/_routing.py
+  title: Python implementation module (src/py/vertebra/server/_routing.py)
+- id: src-server-fastpath-core-py
+  resource: src/py/vertebra/server/_fastpath_core.py
+  title: Shared FastPathProvider registry and DirectPlan compilation primitives
+- id: src-server-fastpath-py
+  resource: src/py/vertebra/server/_fastpath.py
+  title: Python implementation module (src/py/vertebra/server/_fastpath.py)
+- id: src-extensions-django-storage-py
+  resource: src/py/vertebra/extensions/django/storage.py
+  title: Deconstructible storage, storage-bound File, and migration serializers
 ---
 
 # Framework Extensions: Litestar, Starlette, FastAPI, Flask, and Django
@@ -118,7 +114,7 @@ Vertebra provides symmetric, zero-coupling extensions for **Litestar** (`vertebr
 
 `with_namespace` creates hierarchical children beneath `vertebra-store/`; each logical key is a `~`-prefixed UTF-8 hex segment. Paginated `delete_all` removes descendants while preserving sibling prefixes and unrelated objects. Native listed paths/cursors escape `~` to `%7E`; the adapter unquotes them before deletion and continuation reuse. Empty bytes remain present values. Both classes appear in module/package `__all__`, TYPE_CHECKING imports, and `_EXPORT_MAP` [^src-extensions-litestar-store-py].
 
-`ObjectStoreFileSystemAdapter(store, base_path="")` exposes read-only virtual-root paths beneath a validated relative base prefix. Mount it with `create_static_files_router(path="/assets", directories=["/"], file_system=adapter, resolve_symlinks=False)`. `info` resolves metadata or populated directory prefixes and rejects parent/backslash traversal; `open(..., mode="rb")` returns the existing native async reader with async reads/context management and synchronous nonblocking seek/tell. Static GET/HEAD tests verify exact bytes, Content-Length, missing paths, and confinement. Range delivery uses a separate Litestar `Stream` handler around `StreamingStorageResponse.from_async_store` and `aiter_chunks`, copying status/headers and explicitly converting chunks to bytes at this response boundary. Static filesystem integration alone does not implement HTTP Range parsing.
+`ObjectStoreFileSystemAdapter(store, base_path="")` exposes read-only virtual-root paths beneath a validated relative base prefix. Mount it with `create_static_files_router(path="/assets", directories=["/"], file_system=adapter, resolve_symlinks=False)`. `info` resolves metadata or populated directory prefixes and rejects parent/backslash traversal; `open(..., mode="rb")` returns the existing native async reader with async reads/context management and synchronous nonblocking seek/tell. Static GET/HEAD tests verify exact bytes, Content-Length, missing paths, and confinement. Range delivery uses a separate Litestar `Stream` handler that awaits `StreamingStorageResponse.from_async_store` before consuming `aiter_chunks`, copying status/headers and explicitly converting chunks to bytes at this response boundary. Static filesystem integration alone does not implement HTTP Range parsing. The [persistent TTL envelope decision](../../decisions/adr-005-persistent-object-store-ttl-envelopes.md) records the storage format and metadata trade-off.
 
 
 - **[`VertebraPlugin`](../../../../../src/py/vertebra/extensions/litestar/plugin.py)[^src-extensions-litestar-plugin-py] & [`VertebraConfig`](../../../../../src/py/vertebra/extensions/litestar/config.py)[^src-extensions-litestar-config-py]**: Implements `InitPluginProtocol` and `CLIPluginProtocol`. During `on_app_init`, registers `app_config.state["vertebra_plugin"] = self`, clears `app_config.compression_config = None` strictly when running under an active Vertebra Rust ingress (`VERTEBRA_SERVER_ACTIVE=1` or `VERTEBRA_RUST_OFFLOAD=1`) and `offload_middlewares` confirms a supported Rust compression codec (`zstd`, `gzip`, `brotli`), and discovers ecosystem plugins (`LitestarMCP` / `MCPConfig` -> `mcp_endpoint`, `LitestarA2A` / `A2AConfig` -> `a2a_endpoint`, Vite, OpenAPI/Scalar, SQLSpec, Advanced Alchemy, and SAQ/worker lanes) directly into `app_config.state["vertebra_ecosystem_bridges"]`. During `on_cli_init(cli)`, replaces Litestar's `run` command on `LitestarGroup` (`_build_litestar_run_command`) so `litestar run` launches the native Vertebra supervisor with full support for standard `litestar run` flags and Vertebra runtime flags (`--workers`, `--topology`, `--threads`, `--drain-timeout`, `--jit` / `--no-jit`, `--no-banner`).
@@ -138,6 +134,10 @@ Starlette, FastAPI, Flask, and Django MCP adapters delegate protocol dispatch to
 | [`vertebra.extensions.fastapi`](../../../../../src/py/vertebra/extensions/fastapi/__init__.py)[^src-extensions-fastapi-init-py] | `VertebraPlugin`, `VertebraConfig` | `RouteCompiler` (`APIRoute`), `CompiledDependantPlan` (`compile_dependant_plan` topological DAG with `needs_request` tracking and inline `sync_to_thread=False`), `FastPath` (`wrap_asgi_fastpath`, `send_raw_response`, `MsgspecJSONResponse`, lazy `starlette.requests.Request` skipped when `needs_request=False`, `decode_pydantic_json` + `__pydantic_serializer__.to_json` / `decode_msgspec` C-API bypass) | `SyncObjectStore` / `AsyncObjectStore`, `CacheStore`, `ChannelsBackend`, `SHMQueueBackend` / `SHMExecutionBackend`, `JWTAuthBackend`, `RateLimitGuard`, `OpenAPIConfig` (`mount_docs_routes`), `MCPRegistry` (`mount_mcp_routes` over `AsgiMcpApp` and `MCPCore`, `WebMCPConfig`, `build_webmcp_manifest`), `ViteExtension` |
 | [`vertebra.extensions.flask`](../../../../../src/py/vertebra/extensions/flask/__init__.py)[^src-extensions-flask-init-py] | `VertebraPlugin`, `VertebraConfig` | `RouteCompiler` (Werkzeug `app.url_map.iter_rules()` -> `matchit 0.9`), `FastPath` (supports both sync `def` and `async def` views via `step_coro_sync`, `dispatch_async`, `wrap_asgi`, `wrap_wsgi`, and `_WsgiStartResponse.send_raw_response` over `WsgiInput.decode_msgspec` / `decode_pydantic_json`), `offload_middlewares` (`Flask-Compress`, `Flask-CORS`, `static_folder`) | `CacheBackend` / `FlaskCachingBackend`, `SyncObjectStore` / `AsyncObjectStore`, `MailBackend` (`MailConfig`, `MailMessage`), `ChannelsBackend`, `QueueBackend`, `JWTAuthGuard`, `RateLimitGuard`, `ViteAssetBridge` (`ViteConfig`, `attach_vite`), `OpenAPIConfig` (`attach_openapi_docs`), [`MCPConfig` / `MCPRegistry`](../../../../../src/py/vertebra/extensions/flask/mcp.py)[^src-extensions-flask-mcp-py] (`attach_mcp_routes` over `WsgiMcpApp` and `MCPCore`, `WebMCPConfig`, `build_webmcp_manifest`) |
 | [`vertebra.extensions.django`](../../../../../src/py/vertebra/extensions/django/__init__.py)[^src-extensions-django-init-py] | `VertebraPlugin`, `VertebraConfig`, `VertebraAppConfig` | `RouteCompiler` (`URLPattern` / `URLResolver`), `FastPath` (`@vertebra_view`, pre-allocated stateless `MsgspecView` instances, sync `def` and `async def` views across `dispatch`, `dispatch_async`, `dispatch_wsgi` with `send_raw_response`, and `wrap_asgi`), `offload_middlewares` (`GZipMiddleware`, `CorsMiddleware`, `WhiteNoiseMiddleware`, `SecurityMiddleware`), `ORMBridge` (`orm_to_struct_vectorcall`) | Native `vertebra.extensions.django.db.backends.{postgresql,mysql,sqlite3,oracle,mssql,duckdb,bigquery,spanner}` (`DatabaseWrapper` sharing pools and `LeaseBroker` across frameworks via `DatabaseRegistry.default()`, `SyncCloudSQLDialer` / `AsyncCloudSQLDialer`, `SyncAlloyDBDialer` / `AsyncAlloyDBDialer`, PgBouncer `schema_editor()` session switch), `ArrowQuerySet` (`to_arrow`, `to_schema`, `from_arrow`), `CacheBackend`, `DjangoStorage` (`SyncObjectStore` / `AsyncObjectStore`), `EmailBackend`, `ChannelLayer`, `QueuesBackend`, `SecurityBridge` (`JWTAuthGuard`, `RateLimitGuard`), `TemplateBridge`, `ViteBridge` (`{% load vertebra_vite %}`), `OpenAPIConfig`, [`MCPConfig` / `MCPRegistry`](../../../../../src/py/vertebra/extensions/django/mcp.py)[^src-extensions-django-mcp-py] (`attach_mcp_routes`, `dispatch_mcp_request` over `WsgiMcpApp` and `MCPCore`, `WebMCPConfig`, `build_webmcp_manifest`) |
+
+`DjangoStorage` is a deconstructible Django `Storage` backend over an explicitly configured native store. Its storage-bound `File` reopens the qualified object and refreshes its size, including cached `FieldFile` reuse. `aopen` awaits metadata before constructing the synchronous reader so construction performs no synchronous storage I/O. Modification time comes from native metadata; creation/access timestamps raise `NotImplementedError` [^src-extensions-django-storage-py].
+
+Migration serialization uses Django's public `MigrationWriter.register_serializer` for each provider configuration, retaining constructor fields and public `vertebra.storage` names. Live native handles remain nonportable migration inputs. The binary `File` specialization exists only for typing; runtime annotations resolve without modifying Django classes [^src-extensions-django-storage-py].
 
 ## 3. First-Party Litestar Ecosystem Subpackages (`extensions/litestar/*`)
 
@@ -179,3 +179,5 @@ All `litestar-*` ecosystem integrations are nested strictly under [`vertebra.ext
 [^src-server-routing-py]: `src/py/vertebra/server/_routing.py` — Python implementation module (src/py/vertebra/server/_routing.py).
 [^src-server-fastpath-core-py]: `src/py/vertebra/server/_fastpath_core.py` — Shared FastPathProvider registry and DirectPlan compilation primitives.
 [^src-server-fastpath-py]: `src/py/vertebra/server/_fastpath.py` — Python implementation module (src/py/vertebra/server/_fastpath.py).
+
+[^src-extensions-django-storage-py]: `src/py/vertebra/extensions/django/storage.py` — Native Django storage and portable configuration serialization.
