@@ -14,14 +14,14 @@ depends_on_chapters:
 - ch02-orm-and-sql-storage-contracts
 - ch03-litestar-and-range-streaming
 replan_trigger: null
-current_task: storage-completeness:ch04:t01
+current_task: storage-completeness:ch04:t02
 plan_revision: 9
 plan_commit: 222cbf99
-state_revision: 1
-last_verified_checkpoint: null
+state_revision: 2
+last_verified_checkpoint: 2e60f224
 last_reviewed_commit: null
 created_at: '2026-11-08T00:00:00Z'
-updated_at: '2026-11-08T16:38:12.594924Z'
+updated_at: '2026-11-08T16:55:18.904122Z'
 sources:
 - id: store
   resource: src/py/vertebra/storage/_store.py::AsyncObjectStore
@@ -87,15 +87,15 @@ Progress: `[1/3 files documented]`. The original documentation manifest is prese
 
 ## 5. Implementation Plan
 
-- [~] storage-completeness:ch04:t01 — Preserve ArrowCursor APIs while enforcing named SHM and real IPC (tasks/t01-strict-shm-and-arrow-ipc-cursor.md)
-- [ ] storage-completeness:ch04:t02 — Read Arrow and Parquet through a bounded async codec bridge (tasks/t02-streaming-arrow-parquet-storage.md)
+- [x] [2e60f224] storage-completeness:ch04:t01 — Preserve ArrowCursor APIs while enforcing named SHM and real IPC (tasks/t01-strict-shm-and-arrow-ipc-cursor.md)
+- [~] storage-completeness:ch04:t02 — Read Arrow and Parquet through a bounded async codec bridge (tasks/t02-streaming-arrow-parquet-storage.md)
 - [ ] storage-completeness:ch04:t03 — Write Arrow and Parquet with bounded multipart codec output (tasks/t03-streaming-arrow-parquet-writes.md)
 
 **Chapter Recovery Checkpoint:** `make lint-all && make rs-test && make py-test && make docs` exits 0; correctness review precedes fresh quality review.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Plan baseline: `222cbf99`, revision 9; 3 pending tasks and no completed implementation claimed.
+- Plan baseline: `222cbf99`, revision 9; 1 completed task and 2 remaining tasks; strict allocation passes native and rebuilt Python gates.
 - Dependency tasks finish before dependent tasks begin; every worksheet owns one isolated execution and atomic commit.
 - Documentation remains explicitly tracked in ch05:t02; no original R8 requirement is deferred.
 

@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## Verified strict named Arrow SHM allocation
+
+Source `2e60f224` removes native/Python anonymous allocation fallback and JSON pseudo-IPC from threshold-selected ArrowCursor construction. Red reproduces native invalid-name success and three Python failures. Locked Rust37unit+2stream tests and Clippy pass; all five extensions rebuild,114 Python cases pass with5 existing psycopg skips, and five-extension stubtest passes. Cargo.lock remains unchanged. Chapter ch04 now executes bounded batch readers; four tasks remain.
+
 ## Completed storage HTTP and Litestar chapter
 
 Correctness and fresh quality reviews pass at `50e9c631` with no unresolved findings. Native FastPath 200/206/416, valid ETags, persistent TTL envelopes, namespace deletion, and actual Litestar static consumers are covered. The broad Python gate passes 654 tests, full MyPy covers 419 source files, and docs build passes. Chapter ch04 starts the strict Arrow SHM worksheet; five storage tasks remain across ch04 and ch05.

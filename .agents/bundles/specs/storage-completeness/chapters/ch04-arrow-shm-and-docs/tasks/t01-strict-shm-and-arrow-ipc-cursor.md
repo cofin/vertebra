@@ -8,7 +8,7 @@ description: Remove anonymous allocation after named SHM failure and JSON pseudo
   columns, threshold, and live-view ownership. Unrelated write_arrow_shm input policy
   remains outside this task.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -28,18 +28,36 @@ tests:
 estimated_loc: 180
 plan_revision: 9
 plan_commit: 222cbf99
-state_revision: 1
+state_revision: 2
 claimed_by: agent:strict-shm-executor
 claimed_at: '2026-11-08T16:38:12.594924Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-08T16:55:18.904122Z'
+last_verified_commit: 2e60f224
+verification_evidence:
+  red:
+    rust_exit_code: 101
+    python_exit_code: 1
+    result: Invalid named allocation silently succeeded; missing PyArrow and native
+      core fell back. Python 3 failed,50 passed,5 existing skips.
+  green:
+    rust_exit_code: 0
+    rust_result: 37 unit and2 stream tests passed with --locked; all-target Clippy
+      passed.
+    native_rebuild: UV_NO_SYNC=1 CARGO_NET_OFFLINE=true CARGO_TARGET_DIR=src/rs/target
+      make dev
+    native_rebuild_exit_code: 0
+    python_exit_code: 0
+    python_result: 114 passed,5 existing psycopg-dependent skips after rebuilt native
+      extensions
+    stubtest: All five extensions pass; exit0
+    lint_typing_format: Focused Ruff,MyPy,rustfmt,diff checks pass; exit0
+    lockfile: Cargo.lock unchanged
 created_at: '2026-11-08T00:00:00Z'
-updated_at: '2026-11-08T16:38:12.594924Z'
-commit: null
+updated_at: '2026-11-08T16:55:18.904122Z'
+commit: 2e60f224
 sources:
 - id: shm
   resource: src/rs/vertebra-db/src/arrow_shm.rs::allocate_shm_region
@@ -101,8 +119,8 @@ Green: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db && cargo cli
 
 ## Acceptance Criteria
 
-- [ ] R8 named allocation failure propagates through native and Python threshold-selected paths without anonymous fallback.
-- [ ] R8 from_rows produces only real IPC and preserves public API and retained-view lifetime.
+- [x] R8 named allocation failure propagates through native and Python threshold-selected paths without anonymous fallback.
+- [x] R8 from_rows produces only real IPC and preserves public API and retained-view lifetime.
 
 ## Notes & Discoveries
 
@@ -110,3 +128,5 @@ Green: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db && cargo cli
 
 [^shm]: `src/rs/vertebra-db/src/arrow_shm.rs::allocate_shm_region` — Named frame allocation.
 [^cursor]: `src/py/vertebra/db/arrow.py::ArrowCursor` — Public cursor.
+
+Native rebuild uses the repository target on the root filesystem because the default `/tmp` target reaches its quota. Locked dependency fetch and all-five rebuild preserve Cargo.lock.
