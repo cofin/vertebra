@@ -4,7 +4,7 @@ id: storage-completeness:ch11:t03
 chapter_id: ch11-local-atomic-publication
 title: Guard every local mutation and publish with native atomic operations
 description: Guard every local mutation and publish with native atomic operations
-status: draft
+status: stable
 state: blocked
 priority: P1
 verification_strategy: regression_tdd
@@ -26,7 +26,7 @@ tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 240
 plan_revision: 6
-plan_commit: null
+plan_commit: 9ead0d1d
 state_revision: 0
 claimed_by: agent:runtime-ipc-specialist
 claimed_at: '2026-11-08T01:03:13.386388+00:00'

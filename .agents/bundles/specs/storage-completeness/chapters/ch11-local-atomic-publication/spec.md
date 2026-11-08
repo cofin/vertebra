@@ -4,14 +4,14 @@ parent_flow: storage-completeness
 chapter_id: ch11-local-atomic-publication
 title: Local Cross-Process Conditional Publication
 description: Local Cross-Process Conditional Publication
-status: draft
+status: stable
 state: active
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
 current_task: storage-completeness:ch11:t02
 plan_revision: 6
-plan_commit: null
+plan_commit: 9ead0d1d
 state_revision: 0
 last_verified_checkpoint: 5fe477fa
 last_reviewed_commit: null
@@ -108,7 +108,7 @@ Progress: `[0/1 files documented]`. Chapter behavior is recorded in `.agents/bun
 
 - The stable revision5 frontier is independently approved at `bdc7799a`. Physical-parent OS locks are completed at `8c808beb`. Staging/publication source remains at `61a948df`; t02 is reopened to preserve create-only rename before t03 routing. The module remains test-only.
 - Thirteen focused Linux filesystem/subprocess tests, formatting, all-target Clippy and diff checks pass. macOS/Windows runtime evidence is unavailable on this host.
-- Public mutation routing/production activation in t03 is blocked until the create-only rename primitive repair is signed; t04 remains pending. Revision6 is under bounded independent review, and the chapter has no correctness or quality review stamp.
+- Public mutation routing/production activation in t03 is blocked until the create-only rename primitive repair is signed; t04 remains pending. Revision6 is independently approved at `9ead0d1d`, and the chapter has no correctness or quality review stamp.
 - Documentation: `[0/1 files documented]`, owned by the explicit consolidation tasks.
 - Reclosure of ch01 and downstream acceptance waits for native repair gates; this chapter never depends on that reclosure.
 

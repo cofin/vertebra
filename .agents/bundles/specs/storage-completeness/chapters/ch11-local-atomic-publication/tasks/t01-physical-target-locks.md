@@ -4,7 +4,7 @@ id: storage-completeness:ch11:t01
 chapter_id: ch11-local-atomic-publication
 title: Add persistent OS locks per physical parent directory
 description: Add persistent OS locks per physical parent directory
-status: draft
+status: stable
 state: completed
 priority: P1
 verification_strategy: characterization
@@ -26,7 +26,7 @@ tests:
 - src/rs/vertebra-storage/src/local_publication.rs
 estimated_loc: 200
 plan_revision: 6
-plan_commit: null
+plan_commit: 9ead0d1d
 state_revision: 0
 claimed_by: agent:runtime-ipc-specialist
 claimed_at: '2026-11-08T00:43:03+00:00'

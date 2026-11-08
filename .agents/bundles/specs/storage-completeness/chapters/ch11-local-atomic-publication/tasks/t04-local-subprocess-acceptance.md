@@ -4,7 +4,7 @@ id: storage-completeness:ch11:t04
 chapter_id: ch11-local-atomic-publication
 title: Prove local CAS across processes, roots and cleanup boundaries
 description: Prove local CAS across processes, roots and cleanup boundaries
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: integration_acceptance
@@ -22,7 +22,7 @@ tests:
 - src/rs/vertebra-storage/tests/storage_engine_tests.rs
 estimated_loc: 120
 plan_revision: 6
-plan_commit: null
+plan_commit: 9ead0d1d
 state_revision: 0
 claimed_by: null
 claimed_at: null

@@ -4,7 +4,7 @@ id: storage-completeness:ch11:t02
 chapter_id: ch11-local-atomic-publication
 title: Manage SDK-private same-parent staging artifacts
 description: Manage SDK-private same-parent staging artifacts
-status: draft
+status: stable
 state: pending
 priority: P1
 verification_strategy: characterization
@@ -22,7 +22,7 @@ tests:
 - src/rs/vertebra-storage/src/local_publication.rs
 estimated_loc: 210
 plan_revision: 6
-plan_commit: null
+plan_commit: 9ead0d1d
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -137,7 +137,7 @@ Record exact exit statuses, native build checkpoint and any platform limitation 
 
 Native hard-link publication keeps two names for one inode until owned stage cleanup. Native rename between those same two inode names is a no-op, so the characterization recreates a distinct replacement stage before testing overwrite. SDK path_to_filesystem preserves raw percent and Unicode keys; empty SDK StorePath is not a valid filesystem object path.
 
-The existing primitive source is `61a948df`. Revision6 reopens this task solely to preserve the public engine create-only rename flag through the private primitive; root readiness adjudication adopts the guarded SDK-equivalent link/remove contract. Independent bounded plan review precedes the repair. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
+The existing primitive source is `61a948df`. Revision6 reopens this task solely to preserve the public engine create-only rename flag through the private primitive; root readiness adjudication adopts the guarded SDK-equivalent link/remove contract. Independent bounded plan review approves revision6 at `9ead0d1d`; the repair executes against that identity. Any implementation contract contradiction routes through `/flow:revise storage-completeness` before production edits.
 
 [^implementation]: `src/rs/vertebra-storage/src/local_publication.rs` — Current repository source for this task.
 
