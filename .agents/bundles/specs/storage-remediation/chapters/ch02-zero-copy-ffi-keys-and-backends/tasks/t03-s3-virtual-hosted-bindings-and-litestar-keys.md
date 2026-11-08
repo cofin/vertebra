@@ -5,7 +5,7 @@ chapter_id: ch02-zero-copy-ffi-keys-and-backends
 title: Wire S3 virtual_hosted_style PyO3 bindings and stubs and remove Litestar key unquote workaround
 description: Expose virtual_hosted_style on py_sign_s3_v4_url and py_verify_s3_v4_url in lib.rs and _storage.pyi, and remove urllib.parse.unquote from extensions/litestar/store.py now that StorePath::parse preserves raw keys.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -26,22 +26,25 @@ tests:
 estimated_loc: 85
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: executor
+claimed_at: "2026-11-08T23:43:30Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-08T23:48:07Z"
+last_verified_commit: 8eb43fb2
+verification_evidence: "mypy.stubtest vertebra._storage passed; pytest test_signing.py + test_litestar_plugin.py (54 passed); ruff, mypy, clippy, rustfmt, review-check passed"
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-08T20:55:00Z"
-commit: null
+updated_at: "2026-11-08T23:48:07Z"
+commit: 8eb43fb2
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
-verified: []
+verified:
+  - by: executor
+    at: "2026-11-08T23:48:07Z"
+    commit: 8eb43fb2
 sources:
   - id: storage-lib-rs
     resource: src/rs/vertebra-storage/src/lib.rs::py_sign_s3_v4_url
@@ -106,8 +109,8 @@ uv run --no-sync pytest src/py/tests/unit/storage/test_signing.py src/py/tests/u
 
 ## Acceptance Criteria
 
-- [ ] `py_sign_s3_v4_url` and `py_verify_s3_v4_url` support `virtual_hosted_style` and pass `mypy.stubtest vertebra._storage` (R2.3).
-- [ ] `extensions/litestar/store.py` contains zero `unquote` calls and preserves `%25` and `~` keys end-to-end (R2.3).
+- [x] [8eb43fb2] `py_sign_s3_v4_url` and `py_verify_s3_v4_url` support `virtual_hosted_style` and pass `mypy.stubtest vertebra._storage` (R2.3).
+- [x] [8eb43fb2] `extensions/litestar/store.py` contains zero `unquote` calls and preserves `%25` and `~` keys end-to-end (R2.3).
 
 ## Notes & Discoveries
 
