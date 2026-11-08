@@ -210,11 +210,11 @@ Progress: `[3/5 files documented]`. Storage knowledge covers native storage and 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Chapters ch01 through ch03 are reviewed and complete; ch04 has four completed tasks and awaits its aggregate lint checkpoint and independent reviews.
-- Progress is3/5 chapters and13/15 tasks complete. Two tasks remain in ch05: SQLSpec Arrow delegation and storage/auth documentation.
-- Active ch04 and planned ch05 own revision10 at78293774; completed earlier chapters/tasks retain their recorded owned revisions.
-- Documentation is3/5 targets complete; both consumer guides remain scheduled in ch05:t02.
-- Native async I/O stays on the caller loop, codecs use bounded SyncPool operations, and S3/B2 multipart parts coalesce incrementally to8MiB.
+- Chapters ch01 through ch03 are reviewed and complete; ch04 has four completed tasks and awaits independent correctness and fresh quality reviews.
+- Progress is 3/5 chapters and 13/15 tasks complete. Two tasks remain in ch05: SQLSpec Arrow delegation and storage/auth documentation.
+- Active ch04 and planned ch05 own revision 10 at `78293774`; completed earlier chapters/tasks retain their recorded owned revisions.
+- Documentation is 3/5 targets complete; both consumer guides remain scheduled in ch05:t02.
+- Native async I/O stays on the caller loop, codecs use bounded SyncPool operations, and S3/B2 multipart parts coalesce incrementally to 8 MiB.
 
 [^rs-storage-engine]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — Native Rust storage engine over `object_store`.
 [^py-storage-facade]: `src/py/vertebra/storage/_store.py::SyncObjectStore` — Python sync/async object store facade and backend configs.

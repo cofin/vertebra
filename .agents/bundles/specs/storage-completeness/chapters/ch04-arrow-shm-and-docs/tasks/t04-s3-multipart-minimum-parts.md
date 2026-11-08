@@ -40,16 +40,16 @@ last_verified_commit: 3f3958e3
 verification_evidence:
   red:
     exit_code: 1
-    result: 8 actual native S3 successful Complete cases reject non-final parts below5MiB
+    result: 8 actual native S3 successful Complete cases reject non-final parts below 5 MiB
       with EntityTooSmall.
   green:
     rust_exit_code: 0
-    rust_result: 3 unit+22 integration tests; S3/B2 normalization and S3/R2/OCI incremental8MiB
+    rust_result: 3 unit+22 integration tests; S3/B2 normalization and S3/R2/OCI incremental 8 MiB
       demand pass.
     native_rebuild_exit_code: 0
     stubtest_exit_code: 0
     python_exit_code: 0
-    python_result: 119 canonical store tests, including8 min-part-enforcing S3 codec
+    python_result: 119 canonical store tests, including 8 min-part-enforcing S3 codec
       Complete roundtrips.
     lint_typing_format_exit_code: 0
     lockfiles: uv.lock and Cargo.lock unchanged

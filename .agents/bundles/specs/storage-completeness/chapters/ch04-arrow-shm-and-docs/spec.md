@@ -98,8 +98,8 @@ Progress: `[1/1 files documented in ch04]`. `.agents/bundles/knowledge/domains/s
 ## 6. Current State & Remaining Plan Snapshot
 
 - All four tasks are complete; strict SHM, bounded codecs, and native S3 minimum-part compliance pass their declared gates.
-- Full locked Rust workspace tests and documentation gates exit0. The full Python suite passes2563 cases with74 skips and170 expected failures. Aggregate lint is running; independent correctness and fresh quality reviews remain required.
-- Both consumer guides and SQLSpec codec delegation remain owned by ch05. Documentation progress is1/1 chapter knowledge target.
+- Full locked Rust workspace tests and documentation gates exit0. The full Python suite passes 2563 cases with 74 skips and 170 expected failures. Aggregate lint passes; independent correctness and fresh quality reviews remain required.
+- Both consumer guides and SQLSpec codec delegation remain owned by ch05. Documentation progress is 1/1 chapter knowledge target.
 
 [^store]: `src/py/vertebra/storage/_store.py::AsyncObjectStore` — Native storage facade.
 [^pool]: `src/py/vertebra/utils/sync_tools.py::SyncPool` — Existing worker execution.

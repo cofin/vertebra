@@ -2,7 +2,7 @@
 
 ## Verified native S3 minimum-part completion
 
-Source3f3958e3 repairs8 real S3 Complete failures by applying the existing8MiB native accumulator to normalized S3/B2. Locked native3unit+22integration tests,119canonical Python store cases, all-five rebuild/stubtest and focused quality gates pass; lockfiles are unchanged. Full locked Rust workspace exits0; full Python passes2563cases with74skips and170xfails; docs exits0. Chapter ch04 has4completed tasks awaiting aggregate lint and correctness/fresh quality review. Two SQLSpec/documentation tasks remain.
+Source `3f3958e3` repairs 8 real S3 Complete failures by applying the existing 8 MiB native accumulator to normalized S3/B2. Locked native 3 unit + 22 integration tests,119 canonical Python store cases, all-five rebuild/stubtest and focused quality gates pass; lockfiles are unchanged. Full locked Rust workspace exits0; full Python passes 2563 cases with 74 skips and 170 xfails; docs exits0. Chapter ch04 has 4 completed tasks awaiting correctness and fresh quality review. Two SQLSpec/documentation tasks remain.
 
 ## [2026-11-08] flow-implement | Synchronize bounded storage codecs
 
