@@ -5,7 +5,7 @@ chapter_id: ch04-cloud-material-and-admin-discovery
 title: Cache expiring cloud connection material under one total deadline
 description: Implement CloudConnectorConfig, PreparedCloudMaterial, singleflight CloudMaterialCache (240s refresh lead), and bounded 1 MiB reqwest HTTP helpers under a single absolute deadline.
 status: stable
-state: pending
+state: blocked
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -29,14 +29,14 @@ plan_commit: 8c540809
 state_revision: 0
 claimed_by: null
 claimed_at: null
-blocked_reason: null
-unblock_condition: null
-next_step: null
+blocked_reason: "The shared Clock seam does not exist, URI targets lack Hash, and the static token fixture cannot supply its promised actual expiry; fetcher lifetime and failure fan-out are unspecified."
+unblock_condition: "Cold-reviewed local clock/key/fetcher/flight and real-expiry contracts are executable within declared ownership."
+next_step: "/flow:revise native-postgres-driver ch04-cloud-material-and-admin-discovery"
 last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: "2026-11-05T18:25:07Z"
-updated_at: "2026-11-07T16:40:00Z"
+updated_at: "2026-11-08T01:06:11Z"
 commit: null
 sources:
   - id: cloud-research

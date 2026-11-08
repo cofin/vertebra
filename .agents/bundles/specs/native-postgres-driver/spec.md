@@ -38,8 +38,8 @@ chapters:
   - ch29-wheel-ci-and-benchmarks
   - ch30-user-and-domain-docs
   - ch31-final-review-and-release-gate
-current_chapter: ch03-scram-and-channel-binding
-current_task: null
+current_chapter: ch04-cloud-material-and-admin-discovery
+current_task: "native-postgres-driver:ch04:t01"
 parent_prd: native-data-platform
 research:
   - research/protocol-and-execution_20261105.md
@@ -48,8 +48,8 @@ plan_revision: 8
 plan_commit: 8c540809
 state_revision: 4
 last_verified_checkpoint: 1987a327
-last_reviewed_chapter: ch02-wire-codec-and-session-startup
-last_reviewed_commit: 27b5a9e5
+last_reviewed_chapter: ch03-scram-and-channel-binding
+last_reviewed_commit: 8289858e
 created_at: "2026-11-03T04:05:00Z"
 updated_at: "2026-11-08T00:32:06Z"
 generated:
@@ -107,7 +107,7 @@ tags:
 <!-- truth: start -->
 - **Standalone Optional Wheel**: `src/rs/vertebra-postgres` (`vertebra._postgres`, `vertebra-core[postgres]`) owns live PostgreSQL Protocol 3.0 sockets over `postgres-protocol =0.6.12` and `rustls` (`ring`) without linking database clients into `vertebra-core` [^pg-conn-rs] [^pg-core-rs].
 - **Complete Single-PR Delivery**: Authentication (`SCRAM-SHA-256`, `SCRAM-SHA-256-PLUS`, Cloud SQL / AlloyDB Admin discovery + mTLS + IAM), lossless codecs, statement caching, single-`Sync` `pipeline()`, binary `COPY`, native `VTBARROW`, `CancelRequest`, `LISTEN`/`NOTIFY`, and `pgoutput` v1 logical replication ship together with full `psycopg`/`asyncpg` removal [^py-async-rs] [^arrow-shm-rs] [^pg-driver-py] [^sqlspec-py].
-- **Nested Chapter Roadmap (`plan_revision: 8`)**: All 31 chapters and 111 tasks retain their scope at `plan_commit: 8c540809`; chapters 01–02 are complete and reviewed, most recently at `27b5a9e5`. Chapter 03 has all three tasks complete at `1987a327`, `2db27cd1`, and `aa538f9a`; the chapter remains active pending correctness and fresh quality review of code and synchronized Markdown.
+- **Nested Chapter Roadmap (`plan_revision: 8`)**: All 31 chapters and 111 tasks retain their scope at `plan_commit: 8c540809`; chapters 01–03 are complete and reviewed, most recently at `8289858e`. Chapter 04 cloud material contracts are under bounded refinement.
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -296,8 +296,8 @@ Every worksheet (`111` total across `31` chapters) executes within its bounded o
 
 - [x] [3d68c853] ch01-wheel-scaffold-and-config — Standalone Optional Wheel Scaffold, Build Matrix, and Validated Connection Options (chapters/ch01-wheel-scaffold-and-config/spec.md)
 - [x] [27b5a9e5] ch02-wire-codec-and-session-startup — Bounded Protocol Framing, Trust Lifecycle, SSLRequest TLS, and Cleartext/MD5 Startup (chapters/ch02-wire-codec-and-session-startup/spec.md)
-- [~] ch03-scram-and-channel-binding — Ordered SCRAM-SHA-256, Peer Certificate Binding, and SCRAM-SHA-256-PLUS Negotiation (chapters/ch03-scram-and-channel-binding/spec.md)
-- [ ] ch04-cloud-material-and-admin-discovery — Single-Flight Cloud Material Cache, Ephemeral Keys, and Cloud SQL / AlloyDB Admin Discovery (chapters/ch04-cloud-material-and-admin-discovery/spec.md)
+- [x] [8289858e] ch03-scram-and-channel-binding — Ordered SCRAM-SHA-256, Peer Certificate Binding, and SCRAM-SHA-256-PLUS Negotiation (chapters/ch03-scram-and-channel-binding/spec.md)
+- [~] ch04-cloud-material-and-admin-discovery — Single-Flight Cloud Material Cache, Ephemeral Keys, and Cloud SQL / AlloyDB Admin Discovery (chapters/ch04-cloud-material-and-admin-discovery/spec.md)
 - [ ] ch05-cloud-tls-and-scoped-iam — Cloud TLS 1.3 Peer Identities, Static Login Token Contract, Scoped Auth Caches, and Cloud SQL mTLS/IAM (chapters/ch05-cloud-tls-and-scoped-iam/spec.md)
 - [ ] ch06-alloydb-keepalive-unix-and-direct-iam — AlloyDB Metadata Exchange, TCP Keepalives, Unix Socket Projection, and Direct-Host IAM Refresh (chapters/ch06-alloydb-keepalive-unix-and-direct-iam/spec.md)
 - [ ] ch07-async-bridge-and-client-sessions — Setup-Safe Async Worker Bridge and Raw Sync/Async Physical PostgreSQL Client Sessions (chapters/ch07-async-bridge-and-client-sessions/spec.md)
@@ -331,11 +331,11 @@ Every worksheet (`111` total across `31` chapters) executes within its bounded o
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Baseline**: Source `1987a327` passes all 79 native Rust tests (`9` codec, `27` auth, `21` TLS, `22` wire/config/error) and locked all-target Clippy with `-D warnings`; flow `state: active`, `plan_revision: 8`, `plan_commit: 8c540809`.
-- **Progress**: `2/31` chapters are complete and reviewed; `11/111` tasks are complete. Chapter 01 remains reviewed at `3d68c853` and chapter 02 at `27b5a9e5`.
-- **Current Chapter**: `ch03-scram-and-channel-binding`, with `current_task: null`; all three tasks are complete at `1987a327`, `2db27cd1`, and `aa538f9a`, pending correctness recheck and fresh quality review.
-- **Remaining Plan**: Chapter 03 requires correctness and fresh quality review; chapters 04–31 retain complete blueprints.
+- **Progress**: `3/31` chapters are complete and reviewed; `11/111` tasks are complete. Chapter 01 is reviewed at `3d68c853`, chapter 02 at `27b5a9e5`, and chapter 03 at `8289858e`.
+- **Current Chapter**: `ch04-cloud-material-and-admin-discovery`, with `current_task: native-postgres-driver:ch04:t01`; clock, key hashing, fetcher/single-flight, and token-expiry fixture contracts require refinement before source execution.
+- **Remaining Plan**: Chapters 04–31 remain; chapter 04 enters bounded contract refinement before source execution.
 - **Documentation**: `[0/11 files documented]`; full guides and domain knowledge remain assigned to chapter 30.
-- **Next Action**: Run `/flow:review native-postgres-driver` for chapter 03 code and synchronized Markdown before advancing to chapter 04.
+- **Next Action**: Run `/flow:revise native-postgres-driver ch04-cloud-material-and-admin-discovery` for verified source/worksheet mismatches, then continue implementation through all remaining chapters.
 
 [^pg-conn-rs]: `src/rs/vertebra-db/src/connection.rs::TransportStream` — Shared TCP, Unix, TLS, and cloud mTLS stream primitives.
 [^pg-core-rs]: `src/rs/vertebra-db/src/postgres/mod.rs::PostgresPool` — Shared PostgreSQL wire frame helpers and SHM admission metadata in `vertebra-db`.

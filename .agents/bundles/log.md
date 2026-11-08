@@ -1,5 +1,10 @@
 # Bundle Activity Log
 
+## [2026-11-08] chapter-complete | Native PostgreSQL SCRAM and channel binding
+
+- Correctness and fresh independent quality review approve `1c75af65..8289858e` with no remaining findings. All 79 tests, locked all-target Clippy, formatting, full bundle/link/privacy validation, task receipts, and whitespace checks pass.
+- Close chapter 03 at `8289858e` and advance to chapter 04. Bounded preflight verifies absent shared Clock/SystemClock, non-Hash shared URI types, an unattainable static-token expiry fixture, and unspecified fetcher/failure fan-out details; no cloud production edits occur before refinement. Progress is 11/111 tasks and 3/31 reviewed chapters under full-flow authorization.
+
 ## [2026-11-08] review-remediation | Native PostgreSQL SCRAM error privacy
 
 - Correctness review of the chapter 03 checkpoint finds peer-controlled SASL Final `e=` reflected through the upstream error. The adopted repair also masks the actual submitted SCRAM client proof in typed server-error free text using the existing private MD5-or-SCRAM response slot; structured `S`/`V`/`C`/`P`/`p`/`L` identity remains exact.

@@ -5,7 +5,7 @@ chapter_id: ch03-scram-and-channel-binding
 title: "Chapter 03: SCRAM-SHA-256 and Peer Certificate Channel Binding"
 description: Ordered SCRAM-SHA-256 SASL state machine, RFC 5929 X.509 leaf tls-server-end-point digest derivation, and policy-driven SCRAM-SHA-256-PLUS channel binding with downgrade signaling.
 status: stable
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch02-wire-codec-and-session-startup
@@ -15,13 +15,16 @@ plan_revision: 8
 plan_commit: 8c540809
 state_revision: 0
 last_verified_checkpoint: 1987a327
-last_reviewed_commit: null
+last_reviewed_commit: 8289858e
 created_at: "2026-11-05T00:00:00Z"
 updated_at: "2026-11-08T00:32:06Z"
 generated:
   by: flow-revise
   at: "2026-11-07T16:40:00Z"
 verified:
+  - by: agent:postgres-ch03-correctness-and-fresh-quality
+    at: "2026-11-08T01:06:11Z"
+    commit: 8289858e
   - by: agent:plan-generator
     at: "2026-11-07T16:40:00Z"
     commit: dd432f18
@@ -157,10 +160,10 @@ Progress: `[0/0 files documented in ch03]`
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Verified Baseline**: Source `1987a327` passes all 79 native tests (`9` codec, `27` auth, `21` TLS, `22` wire/config/error) and locked all-target Clippy with `-D warnings`. Chapter 02 remains reviewed at `27b5a9e5`; plan revision 8 remains anchored at `8c540809`.
-- **Remaining Tasks in Chapter**: All three tasks are complete at `1987a327`, `2db27cd1`, and `aa538f9a`; `current_task` and `last_reviewed_commit` are null pending correctness and fresh quality review of code and synchronized Markdown.
+- **Remaining Tasks in Chapter**: All three tasks are complete at `1987a327`, `2db27cd1`, and `aa538f9a`; `current_task` is null and correctness plus fresh independent quality review approve `8289858e`.
 - **Verified Policy Coverage**: The full 54-case matrix covers all three policies, plaintext/bound TLS/Ed25519 TLS, and six authentication offers; independent proofs, leaf mismatch, bad verifier, GS2 `y,,` downgrade refusal, and no-replay barriers cover terminal outcomes.
 - **Documentation & OKF Status**: `[0/0 files documented in ch03]`; full user guides and durable OKF consolidation belong to chapter 30, with data-domain curation in `ch30:t03`.
-- **Downstream Dependents**: Chapter 04 (`ch04:t01` depends on `ch03:t03`) waits for chapter 03 review and closure.
+- **Downstream Dependents**: Chapter 04 (`ch04:t01` depends on `ch03:t03`) is unblocked by this reviewed closure and enters its bounded contract refinement.
 
 [^pg-contracts]: `.agents/bundles/specs/native-postgres-driver/contracts.md` — `channel_binding` constructor policy and startup error contracts.
 [^proto-research]: `.agents/bundles/specs/native-postgres-driver/research/protocol-and-execution_20261105.md` — `postgres-protocol` SASL SCRAM and `x509-parser` signature algorithm research.

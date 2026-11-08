@@ -13,7 +13,7 @@ The completed database foundation is documented in [driver contracts and adapter
 
 - [`storage-completeness`](storage-completeness/spec.md) — Complete `SyncObjectStore` and `AsyncObjectStore` (`vertebra-storage`), unified GCP token caches, fail-closed construction, and SQLSpec, Advanced Alchemy, Django, Litestar, and `VTBARROW` storage contracts ([`chapters/ch01`–`ch04`](storage-completeness/chapters/index.md), `12` tasks).
 
-- [`native-postgres-driver`](native-postgres-driver/spec.md) — Standalone Rust PostgreSQL wheel (`vertebra-postgres`) covering wire authentication, cloud mTLS/IAM, pools, single-Sync pipelines, binary COPY, SHM Arrow, notifications, logical replication, and native adapter cutover ([`chapters/ch01`–`ch31`](native-postgres-driver/chapters/index.md), `111` tasks). Progress is `11/111` tasks complete and `2/31` chapters complete and reviewed, most recently chapter 02 at `27b5a9e5`. Chapter 03 has all three tasks complete at `1987a327`, `2db27cd1`, and `aa538f9a`, with 79 native tests and locked all-target Clippy passing at `1987a327`; correctness and fresh quality review remain before chapter closure.
+- [`native-postgres-driver`](native-postgres-driver/spec.md) — Standalone Rust PostgreSQL wheel (`vertebra-postgres`) covering wire authentication, cloud mTLS/IAM, pools, single-Sync pipelines, binary COPY, SHM Arrow, notifications, logical replication, and native adapter cutover ([`chapters/ch01`–`ch31`](native-postgres-driver/chapters/index.md), `111` tasks). Progress is `11/111` tasks complete and `3/31` chapters complete and reviewed, most recently chapter 03 at `8289858e`. Chapter 04 cloud material contracts are under bounded refinement.
 
 ## 3. Draft Child Flow Charters (`state: draft`)
 
