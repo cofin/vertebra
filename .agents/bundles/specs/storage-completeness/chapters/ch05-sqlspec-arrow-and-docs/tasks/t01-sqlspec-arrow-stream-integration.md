@@ -23,8 +23,8 @@ files:
 tests:
 - src/py/tests/unit/extensions/test_data_storage_integrations.py
 estimated_loc: 210
-plan_revision: 9
-plan_commit: 222cbf99
+plan_revision: 10
+plan_commit: '78293774'
 state_revision: 0
 claimed_by: null
 claimed_at: null
@@ -35,7 +35,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: '2026-11-08T00:00:00Z'
-updated_at: '2026-11-08T00:00:00Z'
+updated_at: '2026-11-08T17:39:10.695721Z'
 commit: null
 sources:
 - id: sql
@@ -75,6 +75,10 @@ The implementation uses .venv/lib/python3.12/site-packages/sqlspec/protocols.py:
 - Remove whole-list _iter_arrow_async and asyncio.to_thread codec paths in touched methods. Reuse bridge codec offload; asynchronous pattern listing uses native async listing rather than calling glob_sync in a worker. Do not change build_duckdb_gcs_secret_sql.
 
 - Parquet batch readers construct `ParquetFile` with `pre_buffer=False` by default, including all new public batch helpers. SQLSpec explicitly supplied `pre_buffer=True` remains honored for API compatibility and opts out of the bounded-prefetch guarantee; do not silently discard it. Fixed-size footer read-ahead is permitted. Full-Table read helpers preserve caller options and intentionally materialize their Table return.
+
+- Existing write_arrow_cursor methods also accept raw IPC bytes/memoryview through the buffer protocol. Preserve this by an adapter-owned view wrapper exposing buffer_view to the existing private writer, so persistent IPC decoding remains in its codec worker. Do not iterate raw buffers as integer batches.
+- Preserve unspecified SQLSpec Parquet compression defaults by forwarding unchanged options to private write_batches; the public store writer's explicit zstd default does not replace the adapter's existing PyArrow default.
+- Reuse the private reader's existing constructor/iteration option routing, including explicit pre_buffer=True. Resolve async patterns with glob_async/exists_async and close each inner async batch iterator when the outer pattern iterator closes or cancels.
 
 ## Edge Cases & Error Semantics
 

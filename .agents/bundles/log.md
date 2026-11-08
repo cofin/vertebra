@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## Verified native S3 minimum-part completion
+
+Source3f3958e3 repairs8 real S3 Complete failures by applying the existing8MiB native accumulator to normalized S3/B2. Locked native3unit+22integration tests,119canonical Python store cases, all-five rebuild/stubtest and focused quality gates pass; lockfiles are unchanged. Full locked Rust workspace exits0; full Python passes2563cases with74skips and170xfails; docs exits0. Chapter ch04 has4completed tasks awaiting aggregate lint and correctness/fresh quality review. Two SQLSpec/documentation tasks remain.
+
 ## [2026-11-08] flow-implement | Synchronize bounded storage codecs
 
 - Source `78293774` implements bounded sync/async IPC and Parquet writers. Two public-format Red failures lead to 111 passing canonical storage cases, including 44 writer cases, real native S3 PUT cancellation/abort barriers for both formats, and worker-exit ownership checks. Storage MyPy (4 files), focused Ruff, format, and whitespace gates pass.

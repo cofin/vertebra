@@ -7,7 +7,7 @@ description: Reuse the existing 8 MiB accumulator for native S3 uploads so incre
   codec chunks complete successfully under S3 minimum-part rules, including B2 aliases
   normalized to S3.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -29,18 +29,38 @@ tests:
 estimated_loc: 80
 plan_revision: 10
 plan_commit: '78293774'
-state_revision: 1
+state_revision: 2
 claimed_by: agent:s3-part-executor
 claimed_at: '2026-11-08T17:23:21.915804Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-08T17:39:10.695721Z'
+last_verified_commit: 3f3958e3
+verification_evidence:
+  red:
+    exit_code: 1
+    result: 8 actual native S3 successful Complete cases reject non-final parts below5MiB
+      with EntityTooSmall.
+  green:
+    rust_exit_code: 0
+    rust_result: 3 unit+22 integration tests; S3/B2 normalization and S3/R2/OCI incremental8MiB
+      demand pass.
+    native_rebuild_exit_code: 0
+    stubtest_exit_code: 0
+    python_exit_code: 0
+    python_result: 119 canonical store tests, including8 min-part-enforcing S3 codec
+      Complete roundtrips.
+    lint_typing_format_exit_code: 0
+    lockfiles: uv.lock and Cargo.lock unchanged
+  aggregate:
+    rust_workspace_exit_code: 0
+    python_suite_exit_code: 0
+    python_result: 2563 passed,74 skipped,170 xfailed
+    docs_exit_code: 0
 created_at: '2026-11-08T17:23:21.915804Z'
-updated_at: '2026-11-08T17:23:21.915804Z'
-commit: null
+updated_at: '2026-11-08T17:39:10.695721Z'
+commit: 3f3958e3
 sources:
 - id: accumulator
   resource: src/rs/vertebra-storage/src/r2.rs::requires_uniform_part_size
@@ -94,8 +114,8 @@ Green: locked `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-storage`
 
 ## Acceptance Criteria
 
-- [ ] R1/R8 actual S3 successful multipart completion enforces 5 MiB non-final parts for public codec writers and arbitrary native producer chunks.
-- [ ] Bounded 8 MiB accumulation, B2 normalization, native metadata, incremental demand, and cancellation/abort remain preserved.
+- [x] R1/R8 actual S3 successful multipart completion enforces 5 MiB non-final parts for public codec writers and arbitrary native producer chunks.
+- [x] Bounded 8 MiB accumulation, B2 normalization, native metadata, incremental demand, and cancellation/abort remain preserved.
 
 ## Notes & Discoveries
 

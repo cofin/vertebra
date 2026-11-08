@@ -2,7 +2,10 @@
 type: Spec
 flow_id: storage-completeness
 title: Feature-Complete Storage
-description: Complete vertebra-storage SyncObjectStore and AsyncObjectStore behind SQLSpec, Advanced Alchemy, Django, and Litestar contracts with zero-copy streaming, HTTP Range responses, provider presigning, strict Arrow SHM allocation, and unified GCP token caches.
+description: Complete vertebra-storage SyncObjectStore and AsyncObjectStore behind
+  SQLSpec, Advanced Alchemy, Django, and Litestar contracts with zero-copy streaming,
+  HTTP Range responses, provider presigning, strict Arrow SHM allocation, and unified
+  GCP token caches.
 status: stable
 state: active
 has_chapters: true
@@ -13,7 +16,7 @@ chapters:
 - ch04-arrow-shm-and-docs
 - ch05-sqlspec-arrow-and-docs
 current_chapter: ch04-arrow-shm-and-docs
-current_task: storage-completeness:ch04:t04
+current_task: null
 parent_prd: native-data-platform
 research:
 - ../native-data-platform/research/gap-analysis_20261103.md
@@ -25,7 +28,7 @@ last_verified_checkpoint: 50e9c631
 last_reviewed_chapter: ch03-litestar-and-range-streaming
 last_reviewed_commit: 50e9c631
 created_at: '2026-11-03T04:05:00Z'
-updated_at: '2026-11-08T17:25:49.002660Z'
+updated_at: '2026-11-08T17:39:10.695721Z'
 generated:
   by: flow-setup
   at: '2026-11-07T04:15:00Z'
@@ -207,11 +210,11 @@ Progress: `[3/5 files documented]`. Storage knowledge covers native storage and 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Current State**: Chapters `ch01` through `ch03` are reviewed and complete at their recorded checkpoints; `ch04` has three of four tasks complete and is active on native S3 multipart minimum-part compliance.
-- **Full Plan**: `3/5` chapters and `12/15` tasks are complete. Three tasks remain: S3 multipart compliance in `ch04`, then SQLSpec codec delegation and documentation in `ch05`.
-- **Plan Identity**: Active `ch04` owns revision `10` at `78293774`; completed ch04 tasks t01–t03 and planned `ch05` retain revision `9` at `222cbf99`. Completed chapters retain their verified owned revisions.
-- **Documentation**: `[3/5 files documented]`; both consumer guides remain scheduled in `ch05:t02`.
-- **Invariants**: Native async I/O remains on the caller loop; PyArrow codecs use bounded SyncPool steps; default Parquet batch prefetch is disabled, with explicit caller opt-in documented.
+- Chapters ch01 through ch03 are reviewed and complete; ch04 has four completed tasks and awaits its aggregate lint checkpoint and independent reviews.
+- Progress is3/5 chapters and13/15 tasks complete. Two tasks remain in ch05: SQLSpec Arrow delegation and storage/auth documentation.
+- Active ch04 and planned ch05 own revision10 at78293774; completed earlier chapters/tasks retain their recorded owned revisions.
+- Documentation is3/5 targets complete; both consumer guides remain scheduled in ch05:t02.
+- Native async I/O stays on the caller loop, codecs use bounded SyncPool operations, and S3/B2 multipart parts coalesce incrementally to8MiB.
 
 [^rs-storage-engine]: `src/rs/vertebra-storage/src/store.rs::ObjectStoreEngine` — Native Rust storage engine over `object_store`.
 [^py-storage-facade]: `src/py/vertebra/storage/_store.py::SyncObjectStore` — Python sync/async object store facade and backend configs.

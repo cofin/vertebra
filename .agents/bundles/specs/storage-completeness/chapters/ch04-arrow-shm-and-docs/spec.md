@@ -3,7 +3,9 @@ type: Spec
 parent_flow: storage-completeness
 chapter_id: ch04-arrow-shm-and-docs
 title: 'Chapter 04: Strict Arrow SHM and Bounded Storage Codecs'
-description: R8 hardens named SHM allocation and ArrowCursor IPC, adds bounded storage read/write codecs, and enforces S3 multipart minimum parts. Four tasks own allocation, reads, writes, and S3 completion.
+description: R8 hardens named SHM allocation and ArrowCursor IPC, adds bounded storage
+  read/write codecs, and enforces S3 multipart minimum parts. Four tasks own allocation,
+  reads, writes, and S3 completion.
 status: stable
 state: active
 planning_status: complete
@@ -12,14 +14,14 @@ depends_on_chapters:
 - ch02-orm-and-sql-storage-contracts
 - ch03-litestar-and-range-streaming
 replan_trigger: null
-current_task: storage-completeness:ch04:t04
+current_task: null
 plan_revision: 10
 plan_commit: '78293774'
 state_revision: 5
-last_verified_checkpoint: '78293774'
+last_verified_checkpoint: 3f3958e3
 last_reviewed_commit: null
 created_at: '2026-11-08T00:00:00Z'
-updated_at: '2026-11-08T17:25:49.002660Z'
+updated_at: '2026-11-08T17:39:10.695721Z'
 sources:
 - id: store
   resource: src/py/vertebra/storage/_store.py::AsyncObjectStore
@@ -89,16 +91,15 @@ Progress: `[1/1 files documented in ch04]`. `.agents/bundles/knowledge/domains/s
 - [x] [2e60f224] storage-completeness:ch04:t01 — Preserve ArrowCursor APIs while enforcing named SHM and real IPC (tasks/t01-strict-shm-and-arrow-ipc-cursor.md)
 - [x] [ee35d9d4] storage-completeness:ch04:t02 — Read Arrow and Parquet through a bounded async codec bridge (tasks/t02-streaming-arrow-parquet-storage.md)
 - [x] [78293774] storage-completeness:ch04:t03 — Write Arrow and Parquet with bounded multipart codec output (tasks/t03-streaming-arrow-parquet-writes.md)
-- [~] storage-completeness:ch04:t04 — Coalesce native S3 multipart chunks into valid bounded parts (tasks/t04-s3-multipart-minimum-parts.md)
+- [x] [3f3958e3] storage-completeness:ch04:t04 — Coalesce native S3 multipart chunks into valid bounded parts (tasks/t04-s3-multipart-minimum-parts.md)
 
 **Chapter Recovery Checkpoint:** `make lint-all && make rs-test && make py-test && make docs` exits 0; correctness review precedes fresh quality review.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Three of four tasks are complete at their recorded source commits. Chapter state is `active` on t04, which enforces S3 minimum-part sizes through the existing native accumulator.
-- Strict named allocation and real IPC pass locked Rust tests and Clippy, an all-five-extension rebuild, native Python cursor tests, and five-extension stubtest. The canonical storage suite passes 111 cases, including native HTTP GET/PUT cancellation barriers and worker-exit ownership checks; focused storage MyPy, Ruff, formatting, and whitespace checks pass.
-- S3 successful completion under minimum-part enforcement and the full workspace recovery checkpoint remain unverified. Correctness review and fresh quality review follow t04 and the aggregate checkpoint.
-- Chapter knowledge covers implemented allocation and codec behavior. Three tasks remain in the full plan: S3 multipart compliance in ch04, then SQLSpec codec delegation and the original consumer documentation manifest in ch05.
+- All four tasks are complete; strict SHM, bounded codecs, and native S3 minimum-part compliance pass their declared gates.
+- Full locked Rust workspace tests and documentation gates exit0. The full Python suite passes2563 cases with74 skips and170 expected failures. Aggregate lint is running; independent correctness and fresh quality reviews remain required.
+- Both consumer guides and SQLSpec codec delegation remain owned by ch05. Documentation progress is1/1 chapter knowledge target.
 
 [^store]: `src/py/vertebra/storage/_store.py::AsyncObjectStore` — Native storage facade.
 [^pool]: `src/py/vertebra/utils/sync_tools.py::SyncPool` — Existing worker execution.

@@ -14,13 +14,13 @@ depends_on_chapters:
 - ch04-arrow-shm-and-docs
 replan_trigger: null
 current_task: storage-completeness:ch05:t01
-plan_revision: 9
-plan_commit: 222cbf99
+plan_revision: 10
+plan_commit: '78293774'
 state_revision: 0
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: '2026-11-08T00:00:00Z'
-updated_at: '2026-11-08T00:00:00Z'
+updated_at: '2026-11-08T17:39:10.695721Z'
 sources:
 - id: store
   resource: src/py/vertebra/storage/_store.py::AsyncObjectStore
@@ -47,7 +47,7 @@ tags:
 
 R4/R8 integrate completed batch helpers into installed SQLSpec public protocol methods and synchronize the original storage/auth/OKF documentation manifest. SQLSpec full-Table reads retain their public return contract; streaming consumers remain incremental.
 
-Plan baseline is `222cbf99`. This chapter depends on ch04-arrow-shm-and-docs. The native storage facade supplies stream/range I/O and multipart abort; PyArrow 26.0.1 supplies synchronous callbacks, dictionary memo, and codec operations. Sources below anchor the public seams. Skills are local runtime-ipc and pyo3-bridge for allocation/lifetime changes, python-framework for facade contracts, and review-tests for public behavior evidence.
+Plan baseline is `78293774`. This chapter depends on ch04-arrow-shm-and-docs. The native storage facade supplies stream/range I/O and multipart abort; PyArrow 26.0.1 supplies synchronous callbacks, dictionary memo, and codec operations. Sources below anchor the public seams. Skills are local runtime-ipc and pyo3-bridge for allocation/lifetime changes, python-framework for facade contracts, and review-tests for public behavior evidence.
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
@@ -92,7 +92,7 @@ Progress: `[1/3 files documented]`. ch05:t02 owns docs/usage/storage.md, docs/us
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Plan baseline: `222cbf99`, revision 9; 2 pending tasks and no completed implementation claimed.
+- Plan baseline: `78293774`, revision 10; 2 pending tasks and no completed implementation claimed.
 - Dependency tasks finish before dependent tasks begin; every worksheet owns one isolated execution and atomic commit.
 - Documentation remains explicitly tracked in ch05:t02; no original R8 requirement is deferred.
 
