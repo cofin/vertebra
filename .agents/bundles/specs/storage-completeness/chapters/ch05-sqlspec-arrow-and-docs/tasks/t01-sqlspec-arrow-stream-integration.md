@@ -7,7 +7,7 @@ description: Delegate SQLSpec Arrow reads/writes/streaming to completed public s
   helpers while preserving protocol signatures, format selection, namespaced URI/glob
   patterns, ArrowCursor handling, and kwargs.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -25,18 +25,33 @@ tests:
 estimated_loc: 210
 plan_revision: 10
 plan_commit: '78293774'
-state_revision: 1
+state_revision: 2
 claimed_by: agent:sqlspec-arrow-executor
 claimed_at: '2026-11-08T18:01:58.609035Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: '2026-11-08T18:17:27.526464Z'
+last_verified_commit: bf5a4cf3
+verification_evidence:
+  red:
+    exit_code: 1
+    result: '4 public failures: sync I/O in async Table read, eager pattern streaming,
+      misrouted pre_buffer, whole encoded IPC fetch.'
+  green:
+    command: UV_NO_SYNC=1 uv run --no-sync pytest src/py/tests/unit/extensions/test_data_storage_integrations.py
+      -q
+    exit_code: 0
+    result: 90 passed, including25 new SQLSpec public compatibility and real native
+      HTTP cases.
+  typing:
+    exit_code: 0
+    result: Storage and SQLSpec adapter MyPy5 files pass
+  ruff_format_diff:
+    exit_code: 0
 created_at: '2026-11-08T00:00:00Z'
-updated_at: '2026-11-08T18:01:58.609035Z'
-commit: null
+updated_at: '2026-11-08T18:17:27.526464Z'
+commit: bf5a4cf3
 sources:
 - id: sql
   resource: src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend
@@ -103,8 +118,8 @@ Red: `uv run --no-sync pytest src/py/tests/unit/extensions/test_data_storage_int
 
 ## Acceptance Criteria
 
-- [ ] R4/R8 SQLSpec public streams preserve patterns/protocol and yield lazily through async native storage.
-- [ ] R4/R8 complete-Table consumers and write options retain installed SQLSpec contracts; ch05:t02 documents shipped behavior.
+- [x] R4/R8 SQLSpec public streams preserve patterns/protocol and yield lazily through async native storage.
+- [x] R4/R8 complete-Table consumers and write options retain installed SQLSpec contracts; ch05:t02 documents shipped behavior.
 
 ## Notes & Discoveries
 

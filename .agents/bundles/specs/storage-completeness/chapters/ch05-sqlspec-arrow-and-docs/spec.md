@@ -13,14 +13,14 @@ planning_status: complete
 depends_on_chapters:
 - ch04-arrow-shm-and-docs
 replan_trigger: null
-current_task: storage-completeness:ch05:t01
+current_task: storage-completeness:ch05:t02
 plan_revision: 10
 plan_commit: '78293774'
-state_revision: 1
-last_verified_checkpoint: null
+state_revision: 2
+last_verified_checkpoint: bf5a4cf3
 last_reviewed_commit: null
 created_at: '2026-11-08T00:00:00Z'
-updated_at: '2026-11-08T18:01:58.609035Z'
+updated_at: '2026-11-08T18:17:27.526464Z'
 sources:
 - id: store
   resource: src/py/vertebra/storage/_store.py::AsyncObjectStore
@@ -85,8 +85,8 @@ Progress: `[1/3 files documented]`. ch05:t02 owns docs/usage/storage.md, docs/us
 
 ## 5. Implementation Plan
 
-- [ ] storage-completeness:ch05:t01 — Integrate bounded batches with SQLSpec public storage methods (tasks/t01-sqlspec-arrow-stream-integration.md)
-- [ ] storage-completeness:ch05:t02 — Synchronize storage usage guides and OKF object-storage knowledge chapter (tasks/t02-storage-docs-and-okf-sync.md)
+- [x] [bf5a4cf3] storage-completeness:ch05:t01 — Integrate bounded batches with SQLSpec public storage methods (tasks/t01-sqlspec-arrow-stream-integration.md)
+- [~] storage-completeness:ch05:t02 — Synchronize storage usage guides and OKF object-storage knowledge chapter (tasks/t02-storage-docs-and-okf-sync.md)
 
 **Chapter Recovery Checkpoint:** `make lint-all && make rs-test && make py-test && make docs` exits 0; correctness review precedes fresh quality review.
 

@@ -7,7 +7,7 @@ description: Update docs/usage/storage.md, docs/usage/storage-auth-and-signing.m
   and .agents/bundles/knowledge/domains/storage/object-storage.md to match the shipped
   storage, auth, framework, and Arrow contracts.
 status: stable
-state: pending
+state: in_progress
 priority: P1
 verification_strategy: documentation_validation
 depends_on:
@@ -28,9 +28,9 @@ tests:
 estimated_loc: 180
 plan_revision: 10
 plan_commit: '78293774'
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: agent:final-storage-docs-executor
+claimed_at: '2026-11-08T18:17:27.526464Z'
 blocked_reason: null
 unblock_condition: null
 next_step: null
@@ -38,7 +38,7 @@ last_verified_at: null
 last_verified_commit: null
 verification_evidence: null
 created_at: '2026-11-07T04:15:00Z'
-updated_at: '2026-11-08T18:01:58.609035Z'
+updated_at: '2026-11-08T18:17:27.526464Z'
 commit: null
 sources:
 - id: docs-storage

@@ -16,19 +16,19 @@ chapters:
 - ch04-arrow-shm-and-docs
 - ch05-sqlspec-arrow-and-docs
 current_chapter: ch05-sqlspec-arrow-and-docs
-current_task: storage-completeness:ch05:t01
+current_task: storage-completeness:ch05:t02
 parent_prd: native-data-platform
 research:
 - ../native-data-platform/research/gap-analysis_20261103.md
 - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 10
 plan_commit: '78293774'
-state_revision: 21
+state_revision: 22
 last_verified_checkpoint: 71cb322b
 last_reviewed_chapter: ch04-arrow-shm-and-docs
 last_reviewed_commit: e663c51f
 created_at: '2026-11-03T04:05:00Z'
-updated_at: '2026-11-08T18:01:58.609035Z'
+updated_at: '2026-11-08T18:17:27.526464Z'
 generated:
   by: flow-setup
   at: '2026-11-07T04:15:00Z'
@@ -210,8 +210,8 @@ Progress: `[3/5 files documented]`. Storage knowledge covers native storage and 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- Chapters ch01 through ch04 are reviewed and complete; ch05 is active on SQLSpec Arrow delegation.
-- Progress is 4/5 chapters and 13/15 tasks complete. Two tasks remain in ch05: SQLSpec Arrow delegation and storage/auth documentation.
+- Chapters ch01 through ch04 are reviewed and complete; ch05 is active on storage/auth documentation.
+- Progress is 4/5 chapters and 14/15 tasks complete. One task remains in ch05: storage/auth documentation. SQLSpec Arrow delegation passes90 canonical integration cases.
 - Active ch04 and planned ch05 own revision 10 at `78293774`; completed earlier chapters/tasks retain their recorded owned revisions.
 - Documentation is 3/5 targets complete; both consumer guides remain scheduled in ch05:t02.
 - Native async I/O stays on the caller loop, codecs use bounded SyncPool operations, and S3/B2 multipart parts coalesce incrementally to 8 MiB.

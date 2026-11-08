@@ -1,5 +1,9 @@
 # Bundle Activity Log
 
+## Verified SQLSpec bounded Arrow consumers
+
+Source `bf5a4cf3` preserves public Table/None/iterator contracts while using bounded native async codecs, async pattern matching, raw IPC buffers, format options and owned inner iterator cleanup. Four Red failures lead to90 canonical integration passes, including25 new public cases. Storage/adapter MyPy,Ruff,format and diff checks pass. Only the final storage/auth documentation task remains.
+
 ## Completed strict Arrow and bounded storage chapter
 
 Correctness and fresh quality reviews pass at `e663c51f` with no unresolved findings. All four chapter tasks are complete, including real S3 minimum-part completion and repeated-cancellation ownership. Full lint, locked Rust workspace, Python (2567 passed,74 skipped,170 xfailed), and documentation gates pass. Chapter ch05 starts SQLSpec delegation; its final two tasks complete the original documentation scope.
