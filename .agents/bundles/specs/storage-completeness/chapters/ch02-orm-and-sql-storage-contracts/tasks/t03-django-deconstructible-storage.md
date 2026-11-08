@@ -5,7 +5,7 @@ chapter_id: ch02-orm-and-sql-storage-contracts
 title: Subclass Django Storage (@deconstructible) with File handles and full metadata contract
 description: Refactor vertebra.extensions.django.storage.DjangoStorage into a fail-closed @deconstructible subclass of django.core.files.storage.Storage returning Django File objects and implementing all sync/async storage and metadata methods.
 status: stable
-state: completed
+state: in_progress
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -24,8 +24,8 @@ tests:
   - src/py/tests/unit/extensions/test_django_plugin.py
   - src/py/tests/unit/extensions/test_data_storage_integrations.py
 estimated_loc: 210
-plan_revision: 6
-plan_commit: 0155d9dc
+plan_revision: 7
+plan_commit: a51ebcb6
 state_revision: 2
 claimed_by: agent:python-framework-specialist
 claimed_at: "2026-11-08T14:32:16Z"
@@ -42,8 +42,8 @@ verification_evidence:
   format: "UV_NO_SYNC=1 uv run --no-sync ruff format --check src/py/vertebra/extensions/django/storage.py src/py/tests/unit/extensions/test_django_plugin.py src/py/tests/unit/extensions/test_data_storage_integrations.py: exit 0"
   lock: "uv lock --check: exit 0"
 created_at: "2026-11-07T04:15:00Z"
-updated_at: "2026-11-08T14:40:17Z"
-commit: 6ed9661be17a6da446d436cbe056381784c8a475
+updated_at: "2026-11-08T15:12:28Z"
+commit: null
 sources:
   - id: django-storage-mod
     resource: src/py/vertebra/extensions/django/storage.py::DjangoStorage
@@ -92,6 +92,12 @@ The native store supplies modification time only. `get_modified_time` parses tha
 
 Use the real `django-stubs` type definitions for the Django `Storage` base. No handwritten replacement base or weakened MyPy checks. This is a development typing dependency only.
 
+### Django File Reopen and Migration Serialization
+
+- Both file factories return a Django `File` subclass whose `open(mode=None)` resets or recreates its reader through the configured native store. A stored object key never becomes a process-filesystem path, including after `FieldFile.close()` and `FieldFile.open()`.
+- Configuration objects serialize through Django's documented custom-serializer registry, registered only for Vertebra's own `StorageConfig` types. `BaseSerializer.serialize(self) -> tuple[str, set[str]]` emits the public configuration constructor and recursively serialized field values. Storage constructor arguments and all config fields remain intact; no private state or config options are dropped. No upstream API monkeypatch is introduced.
+- Test the real `MigrationWriter.serialize` output by importing its returned imports and evaluating its expression. `LocalConfig` and `MemoryConfig(namespace="migration-tests")` reconstruct equivalent configuration; include provider options with concrete non-secret fixture values.
+
 ## Edge Cases & Error Semantics
 
 - `DjangoStorage()`, None/blank configuration with no explicit store, and unsupported read modes fail explicitly. Explicit `MemoryConfig()` is supported for tests.
@@ -121,6 +127,8 @@ Use the real `django-stubs` type definitions for the Django `Storage` base. No h
 
 Dependency verification: `uv lock --check` and the repository-wide configured MyPy gate pass with the new stubs installed; retain all existing optional extras in the environment.
 
+Review regression verification: real `FieldFile` open/read/close/reopen returns the stored bytes for ordinary keys and `"pyproject.toml"` through sync/async-created handles. Real `MigrationWriter` round trips provider config constructors with all fields retained. Both cases demonstrate Red before the narrow repair.
+
 ## Acceptance Criteria
 
 - [x] Real deconstructible Django `Storage` subclass refuses absent configuration and supports migration reconstruction (R3, R6).
@@ -129,7 +137,14 @@ Dependency verification: `uv lock --check` and the repository-wide configured My
 
 - [x] Django storage subclasses the real upstream typed base with `django-stubs` in the lint group; lock validation and full configured MyPy pass.
 
+- [ ] FieldFile reopen remains on object storage, and real migration serialization round trips LocalConfig and MemoryConfig/provider options.
+
 ## Notes & Discoveries
+
+- Prior source evidence remains at `09a44f88baa87178271436a0228acf9fb3ddd5a5` and `6ed9661be17a6da446d436cbe056381784c8a475`, with 125 canonical tests before the consumer review cases.
+- Django `FieldFile.open` delegates reopening to its cached `File`; plain `File.open` can read a same-named working-directory file after close. The storage-bound file reopens only its qualified native key and refreshes the cached size.
+- Django's public `MigrationWriter.register_serializer` supports a `BaseSerializer` for each of the eight Vertebra configuration types. Every config field serializes recursively into public `vertebra.storage` constructors; LocalConfig, MemoryConfig namespace, and S3 provider options round-trip without cloud calls.
+- Live native store handles remain nonportable migration constructor inputs; Django reports their unsupported serialization explicitly.
 
 - Django's runtime `File` class is not generic despite its published stubs. A private type-only specialization resolves to the concrete `File` at runtime so `get_type_hints` succeeds without mutating Django.
 - Commit hooks invoking `uv run` require `UV_NO_SYNC=1` after dependency manifest changes to retain installed optional extras and native editable artifacts.
@@ -138,7 +153,7 @@ Dependency verification: `uv lock --check` and the repository-wide configured My
 - Django `File` accepts binary readers; `aopen` awaits metadata and supplies its size so constructing the synchronous reader performs no storage I/O.
 - `ContentFile(str)` emits text chunks; uploads encode each chunk as UTF-8 without buffering the complete file.
 - `django-stubs` `6.1.2` checks the real optional base and `File[bytes]`; full configured MyPy passes for 419 files with unchanged typing configuration.
-- The focused initial regression fails because omitted configuration previously created a memory store. Both canonical modules pass 125 tests after implementation; Ruff, format, and lock validation pass.
+- The focused initial regression fails because omitted configuration previously created a memory store. Both canonical modules pass 136 tests after implementation; Ruff, format, and lock validation pass.
 
 - Installed contract baseline: Django `6.1.3`; Django `save` owns validation/name allocation and `_save` owns persistence. Native metadata type is `ObjectMeta`, with one RFC 3339 modification timestamp.
 

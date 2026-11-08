@@ -12,13 +12,13 @@ chapters:
   - ch03-litestar-and-range-streaming
   - ch04-arrow-shm-and-docs
 current_chapter: ch02-orm-and-sql-storage-contracts
-current_task: null
+current_task: "storage-completeness:ch02:t03"
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/gap-analysis_20261103.md
   - ../integration-remediation/research/audit-findings_20261103.md
-plan_revision: 6
-plan_commit: 0155d9dc
+plan_revision: 7
+plan_commit: a51ebcb6
 state_revision: 10
 last_verified_checkpoint: 749e2a18
 last_reviewed_chapter: ch01-native-engine-and-auth
@@ -104,6 +104,8 @@ The active storage-integration contract baseline is SQLSpec `0.71.1`, Advanced A
 Django modification time comes from native `ObjectMeta.last_modified`. Creation/access timestamps are unavailable and their Django hooks raise `NotImplementedError`.
 
 Django's `Storage` base is checked through the `django-stubs` lint dependency; its lockfile is part of `ch02:t03`.
+
+Django File handles reopen through the native store, including real `FieldFile` reuse. Provider configuration types participate in Django's public migration serializer registry so migration expressions preserve their constructor fields.
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
@@ -196,8 +198,8 @@ Progress: `[2/4 files documented]`. Storage knowledge covers the native engine a
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `0155d9dc` on `feat/storage-updates`; `plan_revision: 6`, `state: active`. `ch01-native-engine-and-auth` is completed with review stamp `dc2c2053`.
-- **Plan Identity**: Active `ch02` and completed `t03` share revision `6` at `0155d9dc`; `t01` and `t02` retain their verified plan identities and evidence.
+- **Verified Plan Baseline**: `0155d9dc` on `feat/storage-updates`; `plan_revision: 7`, `state: active`. `ch01-native-engine-and-auth` is completed with review stamp `dc2c2053`.
+- **Plan Identity**: Active `ch02` and completed `t03` share revision `7` at `0155d9dc`; `t01` and `t02` retain their verified plan identities and evidence.
 - **Active Chapter**: `ch02-orm-and-sql-storage-contracts`, `current_task: null`; all `3/3` tasks are completed. Source commits are `7e13257b`, `0e579db6`, and `6ed9661b`; receipt/checkpoint `749e2a18` awaits correctness and fresh quality review. The chapter remains active until both reviews pass.
 - **Remaining Plan**: `7/12` tasks are completed; `ch03` has `2` pending tasks and `ch04` has `3`. Their states remain planned.
 - **Documentation & OKF Status**: `[2/4 files documented]`; storage knowledge and the technology matrix are synchronized. The two user guides remain planned in `ch04:t03`.

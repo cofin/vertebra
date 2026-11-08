@@ -10,9 +10,9 @@ planning_status: complete
 depends_on_chapters:
   - ch01-native-engine-and-auth
 replan_trigger: null
-current_task: null
-plan_revision: 6
-plan_commit: 0155d9dc
+current_task: "storage-completeness:ch02:t03"
+plan_revision: 7
+plan_commit: a51ebcb6
 state_revision: 5
 last_verified_checkpoint: 749e2a18
 last_reviewed_commit: null
@@ -70,6 +70,8 @@ The execution baseline is SQLSpec `0.71.1`, Advanced Alchemy `1.12.0`, and Djang
 
 Django's `Storage` base is checked through the `django-stubs` lint dependency; its lockfile is part of `ch02:t03`.
 
+Django File handles reopen through the native store, including real `FieldFile` reuse. Provider configuration types participate in Django's public migration serializer registry so migration expressions preserve their constructor fields.
+
 ## 2. Requirements, Concrete Contracts & Architecture
 
 ### 2.1 Chapter Requirements
@@ -117,14 +119,14 @@ User-guide expansion remains planned in `ch04:t03`.
 
 - [x] [7e13257bd58739520c11ca7a2c3e012867f660d9] storage-completeness:ch02:t01 — Complete fail-closed SQLSpec ObjectStoreProtocol over SyncObjectStore and AsyncObjectStore (tasks/t01-sqlspec-object-store-protocol.md)
 - [x] [0e579db6dc31bdf120b3a3c1fae84c1a2b4e6c6a] storage-completeness:ch02:t02 — Remove storages.get monkeypatch and harden Advanced Alchemy ObjectStoreBackend (tasks/t02-advanced-alchemy-storage-backend.md)
-- [x] [6ed9661be17a6da446d436cbe056381784c8a475] storage-completeness:ch02:t03 — Subclass Django Storage (@deconstructible) with File handles and full metadata contract (tasks/t03-django-deconstructible-storage.md)
+- [~] storage-completeness:ch02:t03 — Subclass Django Storage (@deconstructible) with File handles and full metadata contract (tasks/t03-django-deconstructible-storage.md)
 
 **Chapter Recovery Checkpoint:** `uv run --no-sync pytest src/py/tests/unit/extensions/test_data_storage_integrations.py src/py/tests/unit/extensions/test_django_plugin.py -q && uv run --no-sync ruff check src/py/vertebra/extensions/{sqlspec,alchemy,django}/storage.py src/py/tests/unit/extensions/test_data_storage_integrations.py src/py/tests/unit/extensions/test_django_plugin.py && uv run --no-sync mypy src/py/vertebra/extensions/sqlspec/storage.py src/py/vertebra/extensions/alchemy/storage.py src/py/vertebra/extensions/django/storage.py` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Plan Baseline**: `0155d9dc`; revision `6`, dependency `ch01-native-engine-and-auth` completed, `state: active`, `current_task: null`.
-- **Task State**: `3/3` completed at source commits `7e13257b`, `0e579db6`, and `6ed9661b`. Receipt/checkpoint `749e2a18` is ready for correctness and fresh quality review; no chapter review stamp is assigned.
+- **Verified Plan Baseline**: `0155d9dc`; revision `7`, dependency `ch01-native-engine-and-auth` completed, `state: active`, `current_task: null`.
+- **Task State**: `2/3` completed at source commits `7e13257b`, `0e579db6`, and `6ed9661b`. Receipt/checkpoint `749e2a18` is ready for correctness and fresh quality review; no chapter review stamp is assigned.
 - **Recovery Checkpoint**: Extension/storage suites pass `581` tests; touched-file Ruff checks/format, full configured MyPy (`419` files), lock validation, native imports, runtime Django File annotation introspection, and documentation build all pass.
 - **Documentation & OKF Status**: `[2/2 files documented in ch02]`; user guides and Litestar/Arrow additions remain in the downstream plan.
 - **Active Invariants**: Exact SQLSpec protocol methods, native buffer streams/pages/readers, explicit targets, no Advanced Alchemy registry monkeypatching or thread offload, and Django modification-only UTC timestamps. `build_duckdb_gcs_secret_sql` remains intact.

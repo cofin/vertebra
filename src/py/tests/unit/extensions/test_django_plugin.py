@@ -20,6 +20,9 @@ import pytest
 from django.core.exceptions import SuspiciousFileOperation
 from django.core.files.base import ContentFile, File
 from django.core.files.storage import Storage
+from django.db.migrations.writer import MigrationWriter
+from django.db.models import FileField
+from django.db.models.fields.files import FieldFile
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope, Request, WsgiEnviron, run_wsgi_callable
 from vertebra.agent.mcp.models import MCPConfig as CanonicalMCPConfig
@@ -70,7 +73,7 @@ from vertebra.extensions.django.db.backends.sqlite3 import (
 from vertebra.extensions.django.templatetags.vertebra_vite import vite_asset, vite_hmr_client
 from vertebra.extensions.sqlalchemy.dialects import SyncDBAPIConnection
 from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncConfig, SQLiteSyncConfig
-from vertebra.storage import LocalConfig, SigningConfig
+from vertebra.storage import LocalConfig, S3Config, SigningConfig
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import decode_json
 
@@ -732,6 +735,74 @@ def test_django_storage_deconstructs_and_requires_configuration(tmp_path: Path) 
 def test_django_storage_file_annotations_support_runtime_introspection(method: Any) -> None:
     """Runtime annotation resolution uses Django's concrete unsubscriptable File."""
     assert get_type_hints(method)["return"] is File
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("backend", ["memory", "local"])
+@pytest.mark.parametrize("consumer", ["field", "async"])
+@pytest.mark.parametrize("name", ["pyproject.toml", "missing-from-cwd.txt"])
+async def test_django_storage_reopens_through_native_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, consumer: str, name: str
+) -> None:
+    """Closed Django files reopen their native key, including cwd name collisions."""
+    directory = tmp_path / "cwd"
+    directory.mkdir()
+    (directory / "pyproject.toml").write_bytes(b"unrelated local file")
+    monkeypatch.chdir(directory)
+    config = MemoryConfig(namespace="field-reopen") if backend == "memory" else LocalConfig(root=tmp_path / "objects")
+    storage = DjangoStorage(config, location="uploads")
+    storage.save(name, b"native payload")
+    handle = FieldFile(None, FileField(storage=storage), name) if consumer == "field" else await storage.aopen(name)
+    handle.open("rb")
+    assert handle.read() == b"native payload"
+    handle.close()
+    handle.open("rb")
+    assert handle.read() == b"native payload"
+    handle.close()
+
+
+@pytest.mark.parametrize("backend", ["memory", "local"])
+def test_django_storage_migration_writer_round_trips_configuration(tmp_path: Path, backend: str) -> None:
+    """Django's migration serializer preserves config fields and storage options."""
+    config = (
+        MemoryConfig(namespace="migration-namespace")
+        if backend == "memory"
+        else LocalConfig(root=tmp_path, create_dirs=False)
+    )
+    storage = DjangoStorage(config, location="uploads", base_url="/media/", file_overwrite=True, expires_in=71)
+    expression, imports = MigrationWriter.serialize(storage)
+    namespace: dict[str, Any] = {}
+    exec("\n".join(sorted(imports)), namespace)
+    restored = eval(expression, namespace)
+    assert isinstance(restored, Storage)
+    _, args, kwargs = restored.deconstruct()
+    assert args == (config,)
+    assert kwargs == {"location": "uploads", "base_url": "/media/", "file_overwrite": True, "expires_in": 71}
+    assert restored.store.options == storage.store.options
+    saved = restored.save("migration.txt", ContentFile(b"migrated"))
+    with restored.open(saved) as handle:
+        assert handle.read() == b"migrated"
+    assert restored.url(saved) == "/media/uploads/migration.txt"
+
+
+def test_django_storage_migration_writer_preserves_provider_options() -> None:
+    """Public config serialization retains provider options without contacting a cloud."""
+    config = S3Config(
+        bucket="migration-tests",
+        region="eu-west-2",
+        endpoint="http://storage.test:9000",
+        access_key_id="fixture-access-key",
+        secret_access_key="fixture-secret-key",
+        session_token="fixture-session-token",
+        virtual_hosted_style=True,
+        allow_http=True,
+    )
+    expression, imports = MigrationWriter.serialize(config)
+    namespace: dict[str, Any] = {}
+    exec("\n".join(sorted(imports)), namespace)
+    restored = eval(expression, namespace)
+    assert restored == config
+    assert restored.to_url_and_options() == config.to_url_and_options()
 
 
 @pytest.mark.parametrize("config", [None, "", "   "])

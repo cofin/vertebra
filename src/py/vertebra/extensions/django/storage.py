@@ -6,8 +6,10 @@ import posixpath
 from collections.abc import AsyncIterable, Buffer, Iterator
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, BinaryIO, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, Self, cast, get_args
 from urllib.parse import quote, unquote, urlparse
+
+from msgspec.structs import fields
 
 from vertebra.storage import (
     AsyncObjectStore,
@@ -26,17 +28,21 @@ _file_module = import_optional("django.core.files.base")
 _deconstruct_module = import_optional("django.utils.deconstruct")
 _utils_module = import_optional("django.core.files.utils")
 _exceptions_module = import_optional("django.core.exceptions")
+_serializer_module = import_optional("django.db.migrations.serializer")
+_writer_module = import_optional("django.db.migrations.writer")
 
 if TYPE_CHECKING:
     from django.core.files.base import ContentFile, File
     from django.core.files.storage import Storage as _StorageBase
+    from django.db.migrations.serializer import BaseSerializer as _SerializerBase
 
     _ReadableFile = File[bytes]
 else:
     _StorageBase = _storage_module.Storage if _storage_module is not None else object
     File = _file_module.File if _file_module is not None else None
     ContentFile = _file_module.ContentFile if _file_module is not None else None
-    _ReadableFile = File
+    _ReadableFile = File if File is not None else object
+    _SerializerBase = _serializer_module.BaseSerializer if _serializer_module is not None else object
 
 _deconstructible = _deconstruct_module.deconstructible if _deconstruct_module is not None else lambda cls: cls
 _validate_file_name = _utils_module.validate_file_name if _utils_module is not None else None
@@ -142,7 +148,7 @@ class DjangoStorage(_StorageBase):
         self._validate_mode(mode)
         key = self._qualified_name(name)
         metadata = await self._async_store.head(key)
-        return File(cast("BinaryIO", self._store.open_reader(key, size=metadata.size)), name=name)
+        return _StoredFile(self._store, key, name=name, size=metadata.size, mode=mode)
 
     def save(self, name: str | None, content: Any, max_length: int | None = None) -> str:
         """Save content through Django's validation and available-name allocation."""
@@ -258,7 +264,7 @@ class DjangoStorage(_StorageBase):
     def _open(self, name: str, mode: str = "rb") -> _ReadableFile:
         """Return a seekable Django file over the native synchronous reader."""
         self._validate_mode(mode)
-        return File(cast("BinaryIO", self._store.open_reader(self._qualified_name(name))), name=name)
+        return _StoredFile(self._store, self._qualified_name(name), name=name, mode=mode)
 
     def _save(self, name: str, content: Any) -> str:
         """Persist Django's already allocated name through native streaming."""
@@ -321,3 +327,55 @@ class DjangoStorage(_StorageBase):
         if mode not in {"r", "rb"}:
             msg = "Django storage supports read-only file handles"
             raise ValueError(msg)
+
+
+class _StoredFile(_ReadableFile):
+    """Django file whose reopen operation remains bound to its native store."""
+
+    def __init__(
+        self,
+        store: SyncObjectStore,
+        key: str,
+        *,
+        name: str,
+        size: int | None = None,
+        mode: str = "rb",
+    ) -> None:
+        self._store = store
+        self._key = key
+        self.mode = mode
+        super().__init__(cast("BinaryIO", store.open_reader(key, size=size)), name=name)
+
+    def open(self, mode: str | None = None, *args: Any, **kwargs: Any) -> Self:
+        """Reset the reader or reopen the native key after the handle closes."""
+        resolved_mode = mode or self.mode
+        DjangoStorage._validate_mode(resolved_mode)
+        if args or kwargs:
+            msg = "Native storage files do not accept local filesystem open options"
+            raise TypeError(msg)
+        if self.closed:
+            self.file = cast("BinaryIO", self._store.open_reader(self._key))
+            self.__dict__.pop("size", None)
+        else:
+            self.seek(0)
+        self.mode = resolved_mode
+        return self
+
+
+class _StorageConfigSerializer(_SerializerBase):
+    """Serialize Vertebra storage configs through public Django migration hooks."""
+
+    def serialize(self) -> tuple[str, set[str]]:
+        imports = {"import vertebra.storage"}
+        arguments = []
+        assert _writer_module is not None
+        for field in fields(self.value):
+            value, value_imports = _writer_module.MigrationWriter.serialize(getattr(self.value, field.name))
+            imports.update(value_imports)
+            arguments.append(f"{field.name}={value}")
+        return f"vertebra.storage.{type(self.value).__name__}({', '.join(arguments)})", imports
+
+
+if _writer_module is not None:
+    for _config_type in get_args(StorageConfig.__value__):
+        _writer_module.MigrationWriter.register_serializer(_config_type, _StorageConfigSerializer)
