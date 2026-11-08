@@ -5,7 +5,7 @@ chapter_id: ch02-zero-copy-ffi-keys-and-backends
 title: Upgrade OciObjectStore to stream get_opts, honor conditional and copy headers, and paginate list and list_with_delimiter
 description: Stream OCI GET bodies via resp.bytes_stream(), enforce GetOptions, PutOptions, and CopyOptions HTTP headers and 304/412 mappings, parse list keys with StorePath::parse, and paginate list and list_with_delimiter using nextStartWith and delimiter=/.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -20,22 +20,25 @@ tests:
 estimated_loc: 235
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 2
+claimed_by: executor
+claimed_at: "2026-11-08T23:50:15Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-08T23:53:48Z"
+last_verified_commit: 211c3161
+verification_evidence: "cargo test -p vertebra-storage (29 passed including test_oci_streaming_get_opts_conditional_put_copy_and_paginated_list), clippy, rustfmt, review-check passed"
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-08T20:55:00Z"
-commit: null
+updated_at: "2026-11-08T23:53:48Z"
+commit: 211c3161
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
-verified: []
+verified:
+  - by: executor
+    at: "2026-11-08T23:53:48Z"
+    commit: 211c3161
 sources:
   - id: storage-oci-rs
     resource: src/rs/vertebra-storage/src/oci.rs::OciObjectStore
@@ -93,8 +96,8 @@ PATH="$PWD/.venv/bin:$PATH" PYO3_PYTHON="$PWD/.venv/bin/python" CARGO_TARGET_DIR
 
 ## Acceptance Criteria
 
-- [ ] `OciObjectStore` streams `get_opts`, honors `GetOptions`, `PutOptions`, and `CopyOptions`, and maps `304`/`412` accurately (R2.4).
-- [ ] `OciObjectStore::list` and `list_with_delimiter` paginate `nextStartWith` to exhaustion and preserve raw keys via `StorePath::parse` (R2.4).
+- [x] [211c3161] `OciObjectStore` streams `get_opts`, honors `GetOptions`, `PutOptions`, and `CopyOptions`, and maps `304`/`412` accurately (R2.4).
+- [x] [211c3161] `OciObjectStore::list` and `list_with_delimiter` paginate `nextStartWith` to exhaustion and preserve raw keys via `StorePath::parse` (R2.4).
 
 ## Notes & Discoveries
 
