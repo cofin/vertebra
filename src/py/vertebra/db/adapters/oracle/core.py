@@ -1,4 +1,6 @@
-"""Oracle TNS packet helpers, tnsnames.ora parsing, TTC session attributes, and 26ai VECTOR/OSON codecs."""
+"""Oracle Thin TNS/TTC packet framing and 26ai VECTOR/OSON binary codecs."""
+
+from __future__ import annotations
 
 import datetime
 import decimal
@@ -69,13 +71,14 @@ _CERT_DN_RE = re.compile(r'\(\s*SSL_SERVER_CERT_DN\s*=\s*"?([^")]+)"?\s*\)', re.
 _RETRY_COUNT_RE = re.compile(r"\(\s*RETRY_COUNT\s*=\s*(\d+)\s*\)", re.IGNORECASE)
 _RETRY_DELAY_RE = re.compile(r"\(\s*RETRY_DELAY\s*=\s*(\d+)\s*\)", re.IGNORECASE)
 _CONNECT_TIMEOUT_RE = re.compile(r"\(\s*(?:TRANSPORT_)?CONNECT_TIMEOUT\s*=\s*(\d+)\s*\)", re.IGNORECASE)
+_NAMED_PARAM_RE = re.compile(r"(?<!:):([a-zA-Z_][a-zA-Z0-9_]*)")
 
 
 _DEFAULT_TENANT_SCOPE = TenantScopeConfig()
 
 
 class OracleCore:
-    """TNS packet helpers, TTC session attributes, and Oracle 26ai `VECTOR` and `OSON` binary codecs."""
+    """TNS/TTC wire framing and Oracle 26ai `VECTOR` and `OSON` binary codecs."""
 
     ORACLE_VECTOR_MAGIC: Final[bytes] = b"\xdb\x01"
 
@@ -84,15 +87,51 @@ class OracleCore:
         tenant_value: str,
         config: TenantScopeConfig = _DEFAULT_TENANT_SCOPE,
         *,
-        namespace: str = "VERTEBRA_CTX",
+        namespace: str = "USERENV",
+        context_package_proc: str | None = None,
     ) -> tuple[str, dict[str, str]]:
-        """Build the bound `DBMS_SESSION.SET_CONTEXT` call that scopes a session to a tenant value."""
+        """Build bound PL/SQL for setting VPD session context via trusted package or `SET_IDENTIFIER`."""
         attribute = config.setting_name.rsplit(".", 1)[-1]
         validate_identifier(namespace, "namespace", allow_dots=False)
         validate_identifier(attribute, "attribute", allow_dots=False)
+        if context_package_proc is not None:
+            validate_identifier(context_package_proc, "context_package_proc", allow_dots=True)
+            return (
+                f"BEGIN {context_package_proc}(:namespace, :attribute, :value); END;",
+                {"namespace": namespace, "attribute": attribute, "value": tenant_value},
+            )
+        if namespace.upper() == "USERENV":
+            return (
+                "BEGIN DBMS_SESSION.SET_IDENTIFIER(:value); END;",
+                {"value": tenant_value},
+            )
         return (
             "BEGIN DBMS_SESSION.SET_CONTEXT(:namespace, :attribute, :value); END;",
             {"namespace": namespace, "attribute": attribute, "value": tenant_value},
+        )
+
+    @staticmethod
+    def build_clear_context_sql(
+        config: TenantScopeConfig = _DEFAULT_TENANT_SCOPE,
+        *,
+        namespace: str = "USERENV",
+        context_clear_proc: str | None = None,
+    ) -> tuple[str, dict[str, str]]:
+        """Build bound PL/SQL for clearing VPD session context via trusted package or `CLEAR_IDENTIFIER`."""
+        attribute = config.setting_name.rsplit(".", 1)[-1]
+        validate_identifier(namespace, "namespace", allow_dots=False)
+        validate_identifier(attribute, "attribute", allow_dots=False)
+        if context_clear_proc is not None:
+            validate_identifier(context_clear_proc, "context_clear_proc", allow_dots=True)
+            return (
+                f"BEGIN {context_clear_proc}(:namespace, :attribute); END;",
+                {"namespace": namespace, "attribute": attribute},
+            )
+        if namespace.upper() == "USERENV":
+            return ("BEGIN DBMS_SESSION.CLEAR_IDENTIFIER; END;", {})
+        return (
+            "BEGIN DBMS_SESSION.CLEAR_CONTEXT(:namespace, NULL, :attribute); END;",
+            {"namespace": namespace, "attribute": attribute},
         )
 
     @staticmethod
@@ -218,6 +257,9 @@ class OracleCore:
     @staticmethod
     def encode_tns_connect_packet(descriptor: str) -> bytes:
         """Encode an Oracle TNS `Connect` (`type = 1`) packet wrapping a `(DESCRIPTION=...)` descriptor."""
+        native = import_optional("vertebra._vertebra")
+        if native is not None and hasattr(native, "encode_tns_connect_packet"):
+            return bytes(native.encode_tns_connect_packet(descriptor))
         desc_bytes = descriptor.encode("utf-8")
         connect_header_len = 58
         total_len = connect_header_len + len(desc_bytes)
@@ -247,6 +289,9 @@ class OracleCore:
     @staticmethod
     def encode_tns_data_packet(data_flags: int, payload: bytes) -> bytes:
         """Encode an Oracle TNS `Data` (`type = 6`) packet with 2-byte big-endian `data_flags`."""
+        native = import_optional("vertebra._vertebra")
+        if native is not None and hasattr(native, "encode_tns_data_packet"):
+            return bytes(native.encode_tns_data_packet(data_flags, payload))
         total_len = 10 + len(payload)
         header = struct.pack(">HHBBHH", total_len, 0, 6, 0, 0, data_flags & 0xFFFF)
         return header + payload

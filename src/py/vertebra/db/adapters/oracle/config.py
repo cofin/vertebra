@@ -326,6 +326,12 @@ class OracleConfig(BaseDatabaseConfig, frozen=True, gc=False):
     """Initial zero-RTT `V$SESSION.ACTION` tracing attribute."""
     ecid: str | None = None
     """Initial zero-RTT `V$SESSION.ECID` distributed execution context identifier."""
+    context_namespace: str = "USERENV"
+    """Default VPD application context namespace (`"USERENV"` uses `DBMS_SESSION.SET_IDENTIFIER`)."""
+    context_package_proc: str | None = None
+    """Optional trusted PL/SQL procedure (`"<SCHEMA>.<PKG>.<PROC>"` or `"<PKG>.<PROC>"`) setting VPD context."""
+    context_clear_proc: str | None = None
+    """Optional trusted PL/SQL procedure (`"<SCHEMA>.<PKG>.<CLEAR_PROC>"` or `"<PKG>.<CLEAR_PROC>"`) clearing VPD context."""
     pool_min_size: int = 1
     """Minimum number of pooled sessions maintained per worker."""
     pool_max_size: int = 10

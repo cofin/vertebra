@@ -40,11 +40,13 @@ from vertebra.db.driver import (
     DataError,
     IntegrityError,
     InterfaceError,
+    OperationalError,
     PoolExhaustedError,
     ProgrammingError,
     QueryCancelledError,
 )
 from vertebra.db.driver.capabilities import AsyncPipelineCapable, SyncPipelineCapable
+from vertebra.db.rls import AsyncTenantConnectionScope, TenantConnectionScope, TenantScopeConfig
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -1222,6 +1224,149 @@ def test_oracledb_crate_ttc_pipeline_capability_probe() -> None:
     assert _oracle.ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED is False
 
 
+def test_oracle_core_build_session_and_clear_context_set_identifier_default() -> None:
+    """Verify default USERENV namespace builds DBMS_SESSION.SET_IDENTIFIER and CLEAR_IDENTIFIER."""
+    cfg = OracleConfig()
+    assert cfg.context_namespace == "USERENV"
+    assert cfg.context_package_proc is None
+    assert cfg.context_clear_proc is None
+
+    set_sql, set_params = OracleCore.build_session_context_sql("acme-42")
+    assert set_sql == "BEGIN DBMS_SESSION.SET_IDENTIFIER(:value); END;"
+    assert set_params == {"value": "acme-42"}
+
+    clear_sql, clear_params = OracleCore.build_clear_context_sql()
+    assert clear_sql == "BEGIN DBMS_SESSION.CLEAR_IDENTIFIER; END;"
+    assert clear_params == {}
 
 
+def test_oracle_core_build_session_and_clear_context_trusted_package() -> None:
+    """Verify trusted context package procedures and custom namespaces build parameterized PL/SQL blocks."""
+    scope_cfg = TenantScopeConfig(setting_name="app.tenant_id")
+    set_sql, set_params = OracleCore.build_session_context_sql(
+        "acme-42",
+        scope_cfg,
+        namespace="VERTEBRA_CTX",
+        context_package_proc="APP_SEC.CTX_PKG.SET_ATTR",
+    )
+    assert set_sql == "BEGIN APP_SEC.CTX_PKG.SET_ATTR(:namespace, :attribute, :value); END;"
+    assert set_params == {"namespace": "VERTEBRA_CTX", "attribute": "tenant_id", "value": "acme-42"}
+
+    clear_sql, clear_params = OracleCore.build_clear_context_sql(
+        scope_cfg,
+        namespace="VERTEBRA_CTX",
+        context_clear_proc="APP_SEC.CTX_PKG.CLEAR_ATTR",
+    )
+    assert clear_sql == "BEGIN APP_SEC.CTX_PKG.CLEAR_ATTR(:namespace, :attribute); END;"
+    assert clear_params == {"namespace": "VERTEBRA_CTX", "attribute": "tenant_id"}
+
+    direct_sql, direct_params = OracleCore.build_session_context_sql(
+        "acme-42",
+        scope_cfg,
+        namespace="VERTEBRA_CTX",
+    )
+    assert direct_sql == "BEGIN DBMS_SESSION.SET_CONTEXT(:namespace, :attribute, :value); END;"
+    assert direct_params == {"namespace": "VERTEBRA_CTX", "attribute": "tenant_id", "value": "acme-42"}
+
+    direct_clear_sql, direct_clear_params = OracleCore.build_clear_context_sql(
+        scope_cfg,
+        namespace="VERTEBRA_CTX",
+    )
+    assert direct_clear_sql == "BEGIN DBMS_SESSION.CLEAR_CONTEXT(:namespace, NULL, :attribute); END;"
+    assert direct_clear_params == {"namespace": "VERTEBRA_CTX", "attribute": "tenant_id"}
+
+
+@pytest.mark.parametrize(
+    "bad_proc",
+    [
+        "PKG.PROC; DROP USER system",
+        "PKG.PROC()",
+        "PKG.PROC -- comment",
+        "123PKG.PROC",
+    ],
+)
+def test_oracle_core_rejects_malicious_context_package_proc(bad_proc: str) -> None:
+    """Verify PL/SQL injection in context_package_proc or context_clear_proc raises ValueError."""
+    with pytest.raises(ValueError, match="Invalid"):
+        OracleCore.build_session_context_sql("acme-42", context_package_proc=bad_proc)
+    with pytest.raises(ValueError, match="Invalid"):
+        OracleCore.build_clear_context_sql(context_clear_proc=bad_proc)
+
+
+@pytest.mark.anyio
+async def test_tenant_connection_scope_resets_on_rollback_and_evicts_on_reset_error() -> None:
+    """Verify TenantConnectionScope and AsyncTenantConnectionScope reset on rollback and evict on reset failure."""
+
+    class _SyncDriverDouble:
+        def __init__(self, *, fail_reset: bool = False) -> None:
+            self.fail_reset = fail_reset
+            self.events: list[tuple[str, Any]] = []
+            self.evicted = False
+
+        def enter_tenant_scope(self, tenant_value: str, config: TenantScopeConfig) -> None:
+            sql, params = OracleCore.build_session_context_sql(tenant_value, config)
+            self.events.append(("enter", (sql, params)))
+
+        def exit_tenant_scope(self, config: TenantScopeConfig) -> None:
+            sql, params = OracleCore.build_clear_context_sql(config)
+            self.events.append(("exit", (sql, params)))
+            if self.fail_reset:
+                err = OperationalError("ORA-03113: end-of-file on communication channel")
+                err.sqlstate = "08006"
+                err.vendor_code = 3113
+                raise err
+
+        def evict_connection(self) -> None:
+            self.evicted = True
+            self.events.append(("evict", None))
+
+    class _AsyncDriverDouble:
+        def __init__(self, *, fail_reset: bool = False) -> None:
+            self.fail_reset = fail_reset
+            self.events: list[tuple[str, Any]] = []
+            self.evicted = False
+
+        async def enter_tenant_scope(self, tenant_value: str, config: TenantScopeConfig) -> None:
+            sql, params = OracleCore.build_session_context_sql(tenant_value, config)
+            self.events.append(("enter", (sql, params)))
+
+        async def exit_tenant_scope(self, config: TenantScopeConfig) -> None:
+            sql, params = OracleCore.build_clear_context_sql(config)
+            self.events.append(("exit", (sql, params)))
+            if self.fail_reset:
+                err = OperationalError("ORA-03113: end-of-file on communication channel")
+                err.sqlstate = "08006"
+                err.vendor_code = 3113
+                raise err
+
+        async def evict_connection(self) -> None:
+            self.evicted = True
+            self.events.append(("evict", None))
+
+    sync_ok = _SyncDriverDouble(fail_reset=False)
+    with pytest.raises(RuntimeError, match="rolled back body"), TenantConnectionScope(sync_ok, "tenant-a"):
+        raise RuntimeError("rolled back body")
+    assert sync_ok.evicted is False
+    assert [e[0] for e in sync_ok.events] == ["enter", "exit"]
+    assert sync_ok.events[1][1] == ("BEGIN DBMS_SESSION.CLEAR_IDENTIFIER; END;", {})
+
+    sync_bad = _SyncDriverDouble(fail_reset=True)
+    with pytest.raises(OperationalError, match="ORA-03113"), TenantConnectionScope(sync_bad, "tenant-a"):
+        pass
+    assert sync_bad.evicted is True
+    assert [e[0] for e in sync_bad.events] == ["enter", "exit", "evict"]
+
+    async_ok = _AsyncDriverDouble(fail_reset=False)
+    with pytest.raises(RuntimeError, match="async body failure"):
+        async with AsyncTenantConnectionScope(async_ok, "tenant-a"):
+            raise RuntimeError("async body failure")
+    assert async_ok.evicted is False
+    assert [e[0] for e in async_ok.events] == ["enter", "exit"]
+
+    async_bad = _AsyncDriverDouble(fail_reset=True)
+    with pytest.raises(OperationalError, match="ORA-03113"):
+        async with AsyncTenantConnectionScope(async_bad, "tenant-a"):
+            pass
+    assert async_bad.evicted is True
+    assert [e[0] for e in async_bad.events] == ["enter", "exit", "evict"]
 

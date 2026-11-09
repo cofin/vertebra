@@ -5,7 +5,7 @@ chapter_id: ch05-pipelines-tenancy-and-apex
 title: Implement VPD trusted-package and SET_IDENTIFIER tenancy with pool reset-or-evict
 description: Add context_package_proc and context_clear_proc to OracleConfig and OracleCore alongside DBMS_SESSION.SET_IDENTIFIER / CLEAR_IDENTIFIER and enforce mandatory reset or physical connection eviction in TenantConnectionScope / AsyncTenantConnectionScope in src/py/vertebra/db/rls.py.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -132,9 +132,9 @@ Commit as `feat(oracle): add trusted-package VPD tenancy and pool reset-or-evict
 
 ## Acceptance Criteria
 
-- [ ] `OracleConfig` exposes `context_namespace`, `context_package_proc`, and `context_clear_proc` (R10).
-- [ ] `OracleCore.build_session_context_sql` and `OracleCore.build_clear_context_sql` support trusted package procedures, `DBMS_SESSION.SET_IDENTIFIER` / `CLEAR_IDENTIFIER`, and `DBMS_SESSION.SET_CONTEXT` / `CLEAR_CONTEXT` with strict identifier validation (R10).
-- [ ] `TenantConnectionScope` and `AsyncTenantConnectionScope` in `src/py/vertebra/db/rls.py` pass the generic `db/*.py` engine-purity gate, reset tenant state after normal or rolled-back execution, and evict the physical session when reset fails (R10).
+- [x] `OracleConfig` exposes `context_namespace`, `context_package_proc`, and `context_clear_proc` (R10).
+- [x] `OracleCore.build_session_context_sql` and `OracleCore.build_clear_context_sql` support trusted package procedures, `DBMS_SESSION.SET_IDENTIFIER` / `CLEAR_IDENTIFIER`, and `DBMS_SESSION.SET_CONTEXT` / `CLEAR_CONTEXT` with strict identifier validation (R10).
+- [x] `TenantConnectionScope` and `AsyncTenantConnectionScope` in `src/py/vertebra/db/rls.py` pass the generic `db/*.py` engine-purity gate, reset tenant state after normal or rolled-back execution, and evict the physical session when reset fails (R10).
 
 ## Notes & Discoveries
 
