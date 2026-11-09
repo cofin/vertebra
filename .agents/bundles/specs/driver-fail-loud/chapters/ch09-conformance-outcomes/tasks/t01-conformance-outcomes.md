@@ -5,7 +5,7 @@ chapter_id: ch09-conformance-outcomes
 title: Skip or fail conformance explicitly when a native module is missing
 description: Resolve each conformance spec's native module before credential skips, skip the case when it is missing (failing it under VERTEBRA_CONFORMANCE_DOCKER=1 only for non-pending engines), apply strict xfail to pending engines only when their native module imports, drop from __future__ from the integration conftest, and delete its unused vtb_oracle_driver and vtb_mssql_driver fixtures.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -22,18 +22,18 @@ tests:
 estimated_loc: 150
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T00:00:00Z"
+last_verified_commit: cd6e5ae6
+verification_evidence: "pytest test_driver_conformance.py and integration --collect-only passed"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T00:00:00Z"
+commit: cd6e5ae6
 sources:
   - id: conformance
     resource: src/py/tests/integration/db/test_driver_conformance.py::_resolve_live_config
@@ -182,11 +182,11 @@ In `src/py/tests/integration/conftest.py`:
 
 ## Acceptance Criteria
 
-- [ ] `_resolve_live_config` calls `_require_native_module` before any credential skip (R12).
-- [ ] A missing native module skips locally; under `VERTEBRA_CONFORMANCE_DOCKER=1` it fails non-pending engines and still skips pending engines (R12).
-- [ ] Strict `xfail` applies to pending engines only when their native module imports (R12).
-- [ ] `src/py/tests/integration/conftest.py` has no `from __future__ import annotations`, no `vtb_oracle_driver` / `vtb_mssql_driver` fixtures or `SyncOracleDriver` / `SyncMSSQLDriver` imports, and collects cleanly.
-- [ ] Zero inline `#` comments in touched files.
+- [x] `_resolve_live_config` calls `_require_native_module` before any credential skip (R12).
+- [x] A missing native module skips locally; under `VERTEBRA_CONFORMANCE_DOCKER=1` it fails non-pending engines and still skips pending engines (R12).
+- [x] Strict `xfail` applies to pending engines only when their native module imports (R12).
+- [x] `src/py/tests/integration/conftest.py` has no `from __future__ import annotations`, no `vtb_oracle_driver` / `vtb_mssql_driver` fixtures or `SyncOracleDriver` / `SyncMSSQLDriver` imports, and collects cleanly.
+- [x] Zero inline `#` comments in touched files.
 
 ## Notes & Discoveries
 

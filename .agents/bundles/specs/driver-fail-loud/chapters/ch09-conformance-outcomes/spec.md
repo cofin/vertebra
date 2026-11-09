@@ -6,19 +6,19 @@ chapter_id: ch09-conformance-outcomes
 title: "Chapter 09: Conformance Outcomes for Missing Native Modules"
 description: Make driver conformance skip a case whose native module is absent, fail it under Docker conformance only for non-pending engines, apply strict xfail to pending engines only when their module imports, and drop the integration conftest future import and unused Oracle and MSSQL driver fixtures.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch04-redis-valkey-memory-removal
 replan_trigger: null
-current_task: "driver-fail-loud:ch09:t01"
+current_task: null
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-last_verified_checkpoint: null
+state_revision: 1
+last_verified_checkpoint: cd6e5ae6
 last_reviewed_commit: null
 created_at: "2026-11-08T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
+updated_at: "2026-11-09T00:00:00Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T00:00:00Z"
@@ -173,13 +173,13 @@ def _require_native_module(spec: EngineConformanceSpec) -> None:
 
 ## 5. Implementation Plan
 
-- [ ] driver-fail-loud:ch09:t01 — Conformance skips or fails explicitly on a missing native module; integration conftest drops `from __future__` and the unused Oracle / MSSQL driver fixtures (tasks/t01-conformance-outcomes.md)
+- [x] [cd6e5ae6] driver-fail-loud:ch09:t01 — Conformance skips or fails explicitly on a missing native module; integration conftest drops `from __future__` and the unused Oracle / MSSQL driver fixtures (tasks/t01-conformance-outcomes.md)
 - **Chapter Recovery Checkpoint**: `uv run --no-sync ruff check src/py/tests/integration/db/test_driver_conformance.py src/py/tests/integration/conftest.py && uv run --no-sync pytest src/py/tests/integration/db/test_driver_conformance.py -q -rs && uv run --no-sync pytest src/py/tests/integration --collect-only -q` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `0acdf576` — chapter planned; `0/1` tasks completed; waits on `ch04-redis-valkey-memory-removal`.
-- **Remaining Tasks**: `t01`.
+- **Verified Baseline (`HEAD`)**: `cd6e5ae6` — chapter completed; `1/1` tasks completed.
+- **Remaining Tasks**: none.
 - **Documentation & OKF Sync**: none owned; `ch11-docs-and-okf` documents conformance outcomes.
 - **Active Invariants**: strict `xfail` remains for pending engines whose native module imports; pending engines skip a missing module in Docker mode; `test_engine_driver_resolution_and_provide_driver` stays owned by ch01 / ch02.
 

@@ -1,14 +1,12 @@
 """Clientless pytest-databases Docker harnesses for database, cache, and storage integration tests."""
 
-from __future__ import annotations
-
 from typing import TYPE_CHECKING
 
 import pytest
 
-from vertebra.db.adapters.mssql import MSSQLConfig, SyncMSSQLDriver
+from vertebra.db.adapters.mssql import MSSQLConfig
 from vertebra.db.adapters.mysql import MySQLConfig, SyncMySQLDriver
-from vertebra.db.adapters.oracle import OracleConfig, SyncOracleDriver
+from vertebra.db.adapters.oracle import OracleConfig
 from vertebra.db.adapters.postgres import PostgreSQLConfig, SyncPostgreSQLDriver
 from vertebra.db.adapters.redis import RedisConfig, SyncRedisDriver
 from vertebra.db.adapters.valkey import SyncValkeyDriver, ValkeyConfig
@@ -25,7 +23,7 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture
-def vtb_postgres_config(postgres_service: PostgresService) -> PostgreSQLConfig:
+def vtb_postgres_config(postgres_service: "PostgresService") -> PostgreSQLConfig:
     """Return a PostgreSQLConfig wired to the pytest-databases PostgresService container."""
     dsn = (
         f"postgresql://{postgres_service.user}:{postgres_service.password}"
@@ -41,7 +39,7 @@ def vtb_postgres_driver(vtb_postgres_config: PostgreSQLConfig) -> SyncPostgreSQL
 
 
 @pytest.fixture
-def vtb_mysql_config(mysql_service: MySQLService) -> MySQLConfig:
+def vtb_mysql_config(mysql_service: "MySQLService") -> MySQLConfig:
     """Return a MySQLConfig wired to the pytest-databases MySQLService container."""
     return MySQLConfig.from_url(
         f"mysql://{mysql_service.user}:{mysql_service.password}"
@@ -56,7 +54,7 @@ def vtb_mysql_driver(vtb_mysql_config: MySQLConfig) -> SyncMySQLDriver:
 
 
 @pytest.fixture
-def vtb_mariadb_config(mariadb_service: MariaDBService) -> MySQLConfig:
+def vtb_mariadb_config(mariadb_service: "MariaDBService") -> MySQLConfig:
     """Return a MySQLConfig wired to the pytest-databases MariaDBService container."""
     return MySQLConfig.from_url(
         f"mysql://{mariadb_service.user}:{mariadb_service.password}"
@@ -65,7 +63,7 @@ def vtb_mariadb_config(mariadb_service: MariaDBService) -> MySQLConfig:
 
 
 @pytest.fixture
-def vtb_oracle_config(oracle_23ai_service: OracleService) -> OracleConfig:
+def vtb_oracle_config(oracle_23ai_service: "OracleService") -> OracleConfig:
     """Return an OracleConfig wired to the pytest-databases Oracle 23ai Free container."""
     return OracleConfig(
         host=oracle_23ai_service.host,
@@ -77,13 +75,7 @@ def vtb_oracle_config(oracle_23ai_service: OracleService) -> OracleConfig:
 
 
 @pytest.fixture
-def vtb_oracle_driver(vtb_oracle_config: OracleConfig) -> SyncOracleDriver:
-    """Return a native SyncOracleDriver wired to the pytest-databases Oracle 23ai Free container."""
-    return SyncOracleDriver(vtb_oracle_config)
-
-
-@pytest.fixture
-def vtb_mssql_config(mssql_service: MSSQLService) -> MSSQLConfig:
+def vtb_mssql_config(mssql_service: "MSSQLService") -> MSSQLConfig:
     """Return a MSSQLConfig wired to the pytest-databases MSSQLService container."""
     return MSSQLConfig(
         host=mssql_service.host,
@@ -95,13 +87,7 @@ def vtb_mssql_config(mssql_service: MSSQLService) -> MSSQLConfig:
 
 
 @pytest.fixture
-def vtb_mssql_driver(vtb_mssql_config: MSSQLConfig) -> SyncMSSQLDriver:
-    """Return a native SyncMSSQLDriver wired to the pytest-databases MSSQLService container."""
-    return SyncMSSQLDriver(vtb_mssql_config)
-
-
-@pytest.fixture
-def vtb_redis_config(redis_service: RedisService) -> RedisConfig:
+def vtb_redis_config(redis_service: "RedisService") -> RedisConfig:
     """Return a RedisConfig wired to the pytest-databases RedisService container."""
     return RedisConfig.from_url(f"redis://{redis_service.host}:{redis_service.port}/0")
 
@@ -113,7 +99,7 @@ def vtb_redis_driver(vtb_redis_config: RedisConfig) -> SyncRedisDriver:
 
 
 @pytest.fixture
-def vtb_valkey_config(valkey_service: ValkeyService) -> ValkeyConfig:
+def vtb_valkey_config(valkey_service: "ValkeyService") -> ValkeyConfig:
     """Return a ValkeyConfig wired to the pytest-databases ValkeyService container."""
     return ValkeyConfig.from_url(f"valkey://{valkey_service.host}:{valkey_service.port}/0")
 
