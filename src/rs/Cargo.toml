@@ -12,6 +12,7 @@ members = [
     "vertebra-mssql",
     "vertebra-spanner",
     "vertebra-duckdb",
+    "vertebra-oracle",
 ]
 
 [workspace.package]

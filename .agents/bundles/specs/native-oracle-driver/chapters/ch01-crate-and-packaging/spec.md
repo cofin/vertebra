@@ -9,10 +9,10 @@ state: in_progress
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: "native-oracle-driver:ch01:t02"
+current_task: "native-oracle-driver:ch01:t03"
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 1
+state_revision: 2
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
@@ -152,8 +152,8 @@ Progress: `[0/6 files documented]` (`src/py/vertebra/_oracle.pyi` module docstri
 
 ## 5. Implementation Plan
 
-- [x] native-oracle-driver:ch01:t01 — Scaffold vertebra-oracle Cargo manifest, build script, and free-threaded PyO3 module (tasks/t01-crate-and-pymodule-scaffold.md)
-- [ ] native-oracle-driver:ch01:t02 — Register workspace member, Maturin wheel manifest, and _oracle.pyi type stub (tasks/t02-workspace-lock-and-wheel-stub.md)
+- [x] [bcfb9a8c] native-oracle-driver:ch01:t01 — Scaffold vertebra-oracle Cargo manifest, build script, and free-threaded PyO3 module (tasks/t01-crate-and-pymodule-scaffold.md)
+- [x] native-oracle-driver:ch01:t02 — Register workspace member, Maturin wheel manifest, and _oracle.pyi type stub (tasks/t02-workspace-lock-and-wheel-stub.md)
 - [ ] native-oracle-driver:ch01:t03 — Wire root [oracle] extra, Makefile build/test targets, and review area paths (tasks/t03-makefile-extra-and-review-areas.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-oracle --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-oracle --all-targets --locked -- -D warnings && make dev && make oracle-test && make oracle-wheel-check && make review-check && uv run --no-sync python -m mypy.stubtest vertebra._oracle` exits `0`.

@@ -15,7 +15,7 @@ chapters:
   - ch06-notifications-and-embeddings
   - ch07-conformance-and-okf-synthesis
 current_chapter: ch01-crate-and-packaging
-current_task: "native-oracle-driver:ch01:t02"
+current_task: "native-oracle-driver:ch01:t03"
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/rust-driver-crates_20261103.md

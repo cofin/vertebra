@@ -1,0 +1,26 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "vertebra-oracle"
+version = "0.3.0"
+description = "Native Rust Oracle Thin 26ai client and pool extension for Vertebra."
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+[tool.maturin]
+python-source = "../../py"
+module-name = "vertebra._oracle"
+features = ["extension-module"]
+exclude = [
+    "**/py/vertebra/**/*.py",
+    "**/py/vertebra/**/*.so",
+    "**/py/vertebra/**/*.pyd",
+    "**/py/vertebra/py.typed",
+    "**/py/vertebra/_bigquery.pyi",
+    "**/py/vertebra/_bundler.pyi",
+    "**/py/vertebra/_spanner.pyi",
+    "**/py/vertebra/_storage.pyi",
+    "**/py/vertebra/_vertebra.pyi",
+]

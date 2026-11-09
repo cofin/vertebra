@@ -5,7 +5,7 @@ chapter_id: ch01-crate-and-packaging
 title: Register workspace member, Maturin wheel manifest, and _oracle.pyi type stub
 description: Add vertebra-oracle to src/rs/Cargo.toml (resolving src/rs/Cargo.lock), author src/rs/vertebra-oracle/pyproject.toml for the vertebra._oracle namespace wheel, and create src/py/vertebra/_oracle.pyi declaring only the metadata constants exported at ch01:t02.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: static_validation
 depends_on:
@@ -25,18 +25,21 @@ tests: []
 estimated_loc: 75
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T02:51:00Z"
+last_verified_commit: bcfb9a8c
+verification_evidence:
+  command: "cargo check --manifest-path src/rs/Cargo.toml --workspace --locked && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-oracle --all-targets --locked -- -D warnings && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-oracle --locked && python -m mypy.stubtest vertebra._oracle"
+  exit_code: 0
+  summary: "Workspace lockfile, clippy, cargo test, and mypy.stubtest vertebra._oracle passed."
 created_at: "2026-11-09T00:55:00Z"
-updated_at: "2026-11-09T01:28:30Z"
-commit: null
+updated_at: "2026-11-09T02:51:00Z"
+commit: bcfb9a8c
 sources:
   - id: ws-cargo
     resource: src/rs/Cargo.toml
@@ -132,9 +135,9 @@ Commit as `build(oracle): register workspace member, wheel manifest, and _oracle
 
 ## Acceptance Criteria
 
-- [ ] `src/rs/Cargo.toml` includes `"vertebra-oracle"` in `[workspace].members` and `cargo check --manifest-path src/rs/Cargo.toml --workspace --locked` plus `cargo clippy -p vertebra-oracle --locked -- -D warnings` exit `0` (R1).
-- [ ] `src/rs/vertebra-oracle/pyproject.toml` configures Maturin `module-name = "vertebra._oracle"` with namespace file exclusions matching sibling optional wheels (R1).
-- [ ] `src/py/vertebra/_oracle.pyi` declares only `__version__: str`, `FREE_THREADED: bool`, and `GIL_USED: bool` matching `src/lib.rs`, and `uv run --no-sync python -m mypy.stubtest vertebra._oracle` exits `0` (R1).
+- [x] `src/rs/Cargo.toml` includes `"vertebra-oracle"` in `[workspace].members` and `cargo check --manifest-path src/rs/Cargo.toml --workspace --locked` plus `cargo clippy -p vertebra-oracle --locked -- -D warnings` exit `0` (R1).
+- [x] `src/rs/vertebra-oracle/pyproject.toml` configures Maturin `module-name = "vertebra._oracle"` with namespace file exclusions matching sibling optional wheels (R1).
+- [x] `src/py/vertebra/_oracle.pyi` declares only `__version__: str`, `FREE_THREADED: bool`, and `GIL_USED: bool` matching `src/lib.rs`, and `uv run --no-sync python -m mypy.stubtest vertebra._oracle` exits `0` (R1).
 
 ## Notes & Discoveries
 
