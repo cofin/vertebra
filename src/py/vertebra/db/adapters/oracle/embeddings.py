@@ -227,16 +227,14 @@ class OracleEmbeddingPushdown:
         if not rows:
             msg = "Oracle DBMS_VECTOR.UTL_TO_EMBEDDINGS returned no embedding rows"
             raise DataError(msg)
-        if len(rows) == expected_count:
-            return [cls._extract_vector(row, dimensions) for row in rows]
         if len(rows) == 1:
             first_row = rows[0]
             cell = (
-                next(iter(first_row.values()), None)
+                cls._extract_mapping_value(first_row)
                 if isinstance(first_row, Mapping)
                 else first_row[0]
                 if isinstance(first_row, (list, tuple)) and first_row
-                else None
+                else first_row
             )
             if isinstance(cell, str):
                 try:
@@ -246,30 +244,62 @@ class OracleEmbeddingPushdown:
             if (
                 isinstance(cell, (list, tuple))
                 and len(cell) == expected_count
-                and all(isinstance(item, (list, tuple, bytes, bytearray, memoryview, Mapping, str)) for item in cell)
+                and all(
+                    isinstance(
+                        item,
+                        (list, tuple, bytes, bytearray, memoryview, Mapping, str, VectorView),
+                    )
+                    for item in cell
+                )
             ):
                 return [
-                    cls._extract_vector(item if isinstance(item, Mapping) else (item,), dimensions) for item in cell
+                    cls._extract_vector(
+                        item if isinstance(item, (Mapping, VectorView)) else (item,),
+                        dimensions,
+                    )
+                    for item in cell
                 ]
+        if len(rows) == expected_count:
+            return [cls._extract_vector(row, dimensions) for row in rows]
         msg = f"Oracle DBMS_VECTOR.UTL_TO_EMBEDDINGS returned {len(rows)} rows for {expected_count} requested texts"
         raise DataError(msg)
 
     @staticmethod
+    def _extract_mapping_value(mapping: Mapping[str, Any]) -> Any:
+        for key in ("embed_vector", "EMBED_VECTOR", "embed_data", "EMBED_DATA"):
+            if key in mapping:
+                return mapping[key]
+        return next(iter(mapping.values()), None)
+
+    @staticmethod
     def _extract_vector(row: Any, dimensions: int) -> list[float]:
-        cell = (
-            next(iter(row.values()), None)
-            if isinstance(row, Mapping)
-            else row[0]
-            if isinstance(row, (list, tuple)) and row
-            else None
-        )
+        if isinstance(row, VectorView):
+            cell: Any = row.to_list()
+        elif isinstance(row, Mapping):
+            cell = OracleEmbeddingPushdown._extract_mapping_value(row)
+        elif isinstance(row, (list, tuple)) and row:
+            cell = row if isinstance(row[0], (int, float)) and not isinstance(row[0], bool) else row[0]
+        else:
+            cell = row
         try:
-            if isinstance(cell, (bytes, bytearray, memoryview)):
-                cell = decode_oracle_vector_f32(bytes(cell))
-            elif isinstance(cell, str):
-                cell = decode_json(cell)
+            for _ in range(4):
+                if isinstance(cell, VectorView):
+                    cell = cell.to_list()
+                elif isinstance(cell, (bytes, bytearray, memoryview)):
+                    cell = decode_oracle_vector_f32(bytes(cell))
+                elif isinstance(cell, str):
+                    cell = decode_json(cell)
+                elif isinstance(cell, Mapping):
+                    cell = OracleEmbeddingPushdown._extract_mapping_value(cell)
+                else:
+                    break
             if not isinstance(cell, (tuple, list)) or len(cell) < dimensions:
                 raise ValueError("missing vector")
-            return [float(value) for value in cell[:dimensions]]
+            result: list[float] = []
+            for value in cell[:dimensions]:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValueError("invalid vector element")
+                result.append(float(value))
+            return result
         except (TypeError, ValueError) as exc:
             raise DataError("Oracle embedding row has no valid vector") from exc

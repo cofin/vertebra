@@ -19,11 +19,12 @@ from sqlspec import StatementStack
 from sqlspec.core.parameters import ParameterStyle
 
 import vertebra._oracle as _oracle
-from vertebra._vertebra import VectorView
+from vertebra._vertebra import VectorBatchView, VectorView
 from vertebra.db.adapters.oracle import (
     AsyncOracleDriver,
     AsyncOraclePipeline,
     AsyncOraclePool,
+    OracleEmbeddingPushdown,
     SyncOracleDriver,
     SyncOraclePipeline,
     SyncOraclePool,
@@ -480,7 +481,6 @@ def test_oracle_uuid_raw16_feature_toggle() -> None:
     assert raw_passthrough == u.bytes
 
 
-
 class _EmployeeRow(msgspec.Struct, frozen=True, gc=False):
     employee_id: int
     first_name: str
@@ -594,9 +594,7 @@ async def test_oracle_lowercase_column_names_toggle() -> None:
         assert cols == ("employee_id", "first_name")
         assert rows == [(1, "Ada")]
         assert lower_driver.select(query) == [{"employee_id": 1, "first_name": "Ada"}]
-        assert lower_driver.select(query, schema_type=_EmployeeRow) == [
-            _EmployeeRow(employee_id=1, first_name="Ada")
-        ]
+        assert lower_driver.select(query, schema_type=_EmployeeRow) == [_EmployeeRow(employee_id=1, first_name="Ada")]
 
     with SyncOracleDriver(
         OracleConfig(driver_features=OracleDriverFeatures(enable_lowercase_column_names=False))
@@ -1450,10 +1448,7 @@ async def test_sqlspec_oracle_apply_tenant_predicate_uses_trusted_package_or_set
         assert sync_trusted.select_value("SELECT SYS_CONTEXT('APP_CTX', 'TENANT_ID') FROM DUAL") == "t-trusted"
 
         with TenantConnectionScope(sync_trusted, "scoped-trusted"):
-            assert (
-                sync_trusted.select_value("SELECT SYS_CONTEXT('APP_CTX', 'TENANT_ID') FROM DUAL")
-                == "scoped-trusted"
-            )
+            assert sync_trusted.select_value("SELECT SYS_CONTEXT('APP_CTX', 'TENANT_ID') FROM DUAL") == "scoped-trusted"
         assert sync_trusted.select_value("SELECT SYS_CONTEXT('APP_CTX', 'TENANT_ID') FROM DUAL") is None
 
     async with AsyncOracleDriver(trusted_cfg) as async_trusted:
@@ -1461,8 +1456,7 @@ async def test_sqlspec_oracle_apply_tenant_predicate_uses_trusted_package_or_set
         apred = await async_adapter_trusted.apply_tenant_predicate(TenantPredicate(tenant_value="async-trusted"))
         assert apred == "tenant_id = :tenant_id"
         assert (
-            await async_trusted.select_value("SELECT SYS_CONTEXT('APP_CTX', 'TENANT_ID') FROM DUAL")
-            == "async-trusted"
+            await async_trusted.select_value("SELECT SYS_CONTEXT('APP_CTX', 'TENANT_ID') FROM DUAL") == "async-trusted"
         )
         async with AsyncTenantConnectionScope(async_trusted, "async-scoped"):
             assert (
@@ -1683,7 +1677,9 @@ async def test_oracle_notification_source_reconnect_backoff_and_cancellation_cle
             return inst
 
     raw_client = _oracle.AsyncOracleClient(host="memory", user="app", password="secret")
-    async with AsyncOracleDriver(OracleConfig(host="memory"), client=_ClientWithFaultInjectedListener(raw_client)) as driver:
+    async with AsyncOracleDriver(
+        OracleConfig(host="memory"), client=_ClientWithFaultInjectedListener(raw_client)
+    ) as driver:
         source = OracleNotificationSource(
             driver,
             OracleNotifyConfig(
@@ -1705,5 +1701,106 @@ async def test_oracle_notification_source_reconnect_backoff_and_cancellation_cle
         assert all(listener.is_closed and listener.close_calls >= 1 for listener in created_listeners)
 
 
+def test_oracle_embedding_pushdown_extracts_native_vector_view_bytes_and_sequence() -> None:
+    """Verify _extract_vector unwraps VectorView, ORACLE_VECTOR_MAGIC bytes, and tuple rows."""
+    vec_view = VectorBatchView.from_f32_rows([[0.25, -0.5, 1.0]], normalize=False)[0]
+    raw_bytes = OracleCore.encode_vector_f32([0.25, -0.5, 1.0])
+    expected = [0.25, -0.5, 1.0]
+
+    assert OracleEmbeddingPushdown._extract_vector(vec_view, 3) == expected
+    assert OracleEmbeddingPushdown._extract_vector({"vec": vec_view}, 3) == expected
+    assert OracleEmbeddingPushdown._extract_vector({"embed_vector": vec_view}, 3) == expected
+    assert OracleEmbeddingPushdown._extract_vector({"EMBED_VECTOR": raw_bytes}, 3) == expected
+    assert OracleEmbeddingPushdown._extract_vector((raw_bytes,), 3) == expected
+    assert OracleEmbeddingPushdown._extract_vector(([0.25, -0.5, 1.0],), 3) == expected
+
+    with pytest.raises(DataError, match="Oracle embedding row has no valid vector"):
+        OracleEmbeddingPushdown._extract_vector({"vec": [0.25, -0.5]}, 3)
+
+    with pytest.raises(DataError, match="Oracle embedding row has no valid vector"):
+        OracleEmbeddingPushdown._extract_vector({"vec": "not-json"}, 3)
 
 
+@pytest.mark.anyio
+async def test_oracle_embedding_pushdown_batch_vectors_handles_vector_view_and_lowercase_json() -> None:
+    """Verify _extract_batch_vectors and embed_documents unwrap VectorView and lowercase/uppercase JSON."""
+    v1 = VectorBatchView.from_f32_rows([[0.25, -0.5, 1.0]], normalize=False)[0]
+    v2 = VectorBatchView.from_f32_rows([[0.5, 0.25, -0.75]], normalize=False)[0]
+
+    extracted_views = OracleEmbeddingPushdown._extract_batch_vectors(
+        [{"utl_to_embeddings": [v1, v2]}],
+        2,
+        3,
+    )
+    assert extracted_views == [[0.25, -0.5, 1.0], [0.5, 0.25, -0.75]]
+
+    extracted_lowercase_dicts = OracleEmbeddingPushdown._extract_batch_vectors(
+        [
+            {"embed_data": {"embed_vector": [0.25, -0.5, 1.0]}},
+            {"EMBED_DATA": {"EMBED_VECTOR": "[0.5, 0.25, -0.75]"}},
+        ],
+        2,
+        3,
+    )
+    assert extracted_lowercase_dicts == [[0.25, -0.5, 1.0], [0.5, 0.25, -0.75]]
+
+    class _FakeEmbedDriver(AsyncOracleDriver):
+        async def select(
+            self,
+            sql: str,
+            parameters: Any = None,
+            *,
+            schema_type: Any = None,
+            **kwargs: Any,
+        ) -> list[dict[str, Any]]:
+            _ = (sql, parameters, schema_type, kwargs)
+            return [{"utl_to_embeddings": [v1, v2]}]
+
+    async with _FakeEmbedDriver(OracleConfig(host="memory")) as driver:
+        pushdown = OracleEmbeddingPushdown(
+            driver,
+            dimensions=3,
+            provider="custom",
+            normalize=False,
+        )
+        batch = await pushdown.embed_documents(["alpha", "beta"], normalize=False)
+        assert isinstance(batch, VectorBatchView)
+        assert len(batch) == 2
+        assert batch[0].to_list() == [0.25, -0.5, 1.0]
+        assert batch[1].to_list() == [0.5, 0.25, -0.75]
+
+
+@pytest.mark.anyio
+async def test_oracle_embedding_pushdown_similarity_search_accepts_vector_view() -> None:
+    """Verify similarity_search accepts a native VectorView and binds JSON vector values."""
+    captured: list[tuple[str, dict[str, Any]]] = []
+
+    class _FakeSearchDriver(AsyncOracleDriver):
+        async def select(
+            self,
+            sql: str,
+            parameters: Any = None,
+            *,
+            schema_type: Any = None,
+            **kwargs: Any,
+        ) -> list[dict[str, Any]]:
+            _ = (schema_type, kwargs)
+            captured.append((sql, dict(parameters or {})))
+            return [{"id": 1, "distance": 0.05}]
+
+    vec_view = VectorBatchView.from_f32_rows([[0.25, -0.5, 1.0]], normalize=False)[0]
+    async with _FakeSearchDriver(OracleConfig(host="memory")) as driver:
+        pushdown = OracleEmbeddingPushdown(driver, dimensions=3, provider="custom")
+        rows = await pushdown.similarity_search(
+            vec_view,
+            table="docs",
+            embedding_column="embedding",
+            top_k=5,
+            metric="cosine",
+        )
+        assert rows == [{"id": 1, "distance": 0.05}]
+        assert len(captured) == 1
+        sql, bound = captured[0]
+        assert "VECTOR_DISTANCE(embedding, TO_VECTOR(:query_vector), COSINE)" in sql
+        assert bound["top_k"] == 5
+        assert msgspec.json.decode(bound["query_vector"]) == [0.25, -0.5, 1.0]

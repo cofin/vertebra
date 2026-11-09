@@ -6,7 +6,7 @@ chapter_id: ch06-notifications-and-embeddings
 title: "Task 03: Align OracleEmbeddingPushdown with Native VectorView"
 description: Preserve OracleEmbeddingPushdown public method signatures in src/py/vertebra/db/adapters/oracle/embeddings.py while extending _extract_vector and _extract_batch_vectors to unwrap native VectorView, ORACLE_VECTOR_MAGIC bytes, and dict/tuple row shapes returned by _oracle.
 status: stable
-state: pending
+state: completed
 priority: P1
 owner: null
 depends_on:
@@ -25,18 +25,18 @@ verification_strategy: behavior_tdd
 estimated_loc: 120
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: agent:executor
+claimed_at: "2026-11-09T17:33:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T17:36:00Z"
+last_verified_commit: 2f0e7454
+verification_evidence: "pytest src/py/tests/unit/db/test_oracle_adapter.py (84 passed) and ruff/mypy clean"
 created_at: "2026-11-09T00:48:00Z"
-updated_at: "2026-11-09T01:28:30Z"
-completed_at: null
+updated_at: "2026-11-09T17:36:00Z"
+completed_at: "2026-11-09T17:36:00Z"
 commit_sha: null
 commit: null
 generated:
@@ -163,9 +163,9 @@ make lint-all
 
 ## Acceptance Criteria
 
-- [ ] `OracleEmbeddingPushdown` in `src/py/vertebra/db/adapters/oracle/embeddings.py` preserves its `embed_documents`, `embed_batch`, `embed_query`, `similarity_search`, `_extract_batch_vectors`, and `_extract_vector` signatures [^ora-embeddings-py].
-- [ ] `_extract_vector` and `_extract_batch_vectors` unwrap native `VectorView` instances, `ORACLE_VECTOR_MAGIC` `bytes`/`memoryview`, and lowercase/uppercase dict or tuple row shapes returned by `vertebra._oracle`, raising `DataError("Oracle embedding row has no valid vector")` on malformed rows [^ora-contracts] [^ora-rs-vector].
-- [ ] Unit tests in `src/py/tests/unit/db/test_oracle_adapter.py` and `make lint-all` pass with zero errors.
+- [x] `OracleEmbeddingPushdown` in `src/py/vertebra/db/adapters/oracle/embeddings.py` preserves its `embed_documents`, `embed_batch`, `embed_query`, `similarity_search`, `_extract_batch_vectors`, and `_extract_vector` signatures [^ora-embeddings-py].
+- [x] `_extract_vector` and `_extract_batch_vectors` unwrap native `VectorView` instances, `ORACLE_VECTOR_MAGIC` `bytes`/`memoryview`, and lowercase/uppercase dict or tuple row shapes returned by `vertebra._oracle`, raising `DataError("Oracle embedding row has no valid vector")` on malformed rows [^ora-contracts] [^ora-rs-vector].
+- [x] Unit tests in `src/py/tests/unit/db/test_oracle_adapter.py` and `make lint-all` pass with zero errors.
 
 ## Notes & Discoveries
 

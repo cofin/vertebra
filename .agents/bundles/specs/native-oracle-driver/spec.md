@@ -14,20 +14,20 @@ chapters:
   - ch05-pipelines-tenancy-and-apex
   - ch06-notifications-and-embeddings
   - ch07-conformance-and-okf-synthesis
-current_chapter: ch06-notifications-and-embeddings
-current_task: "native-oracle-driver:ch06:t01"
+current_chapter: ch07-conformance-and-okf-synthesis
+current_task: "native-oracle-driver:ch07:t01"
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/rust-driver-crates_20261103.md
   - ../native-data-platform/research/gap-analysis_20261103.md
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 4
-last_verified_checkpoint: 0f100bd2
+state_revision: 5
+last_verified_checkpoint: 2f0e7454
 last_reviewed_chapter: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
-updated_at: "2026-11-09T16:17:00Z"
+updated_at: "2026-11-09T17:36:00Z"
 generated:
   by: flow-plan
   at: "2026-11-09T01:28:30Z"
@@ -214,8 +214,8 @@ Every worksheet (`22` total across `7` chapters) executes in one bounded invocat
 - [x] ch03-types-bind-and-arrow-shm — Type Codecs, Positional/Named Binds, RETURNING, and Arrow 59 SHM Bridge (chapters/ch03-types-bind-and-arrow-shm/spec.md)
 - [x] ch04-pools-drcp-and-session-piggyback — Native Sync/Async Pools, DRCP Purity/Tagging, and TTC Session Piggyback (chapters/ch04-pools-drcp-and-session-piggyback/spec.md)
 - [x] ch05-pipelines-tenancy-and-apex — Transaction/Savepoint Pipelines, VPD Trusted Tenancy, and APEX Session Bridge (chapters/ch05-pipelines-tenancy-and-apex/spec.md)
-- [~] ch06-notifications-and-embeddings — TxEventQ / AQ Notification Stream and Vector Embedding Pushdown (chapters/ch06-notifications-and-embeddings/spec.md)
-- [ ] ch07-conformance-and-okf-synthesis — Live Oracle 26ai Free Conformance Suite, Wheel Isolation Gate, and OKF Synthesis (chapters/ch07-conformance-and-okf-synthesis/spec.md)
+- [x] ch06-notifications-and-embeddings — TxEventQ / AQ Notification Stream and Vector Embedding Pushdown (chapters/ch06-notifications-and-embeddings/spec.md)
+- [~] ch07-conformance-and-okf-synthesis — Live Oracle 26ai Free Conformance Suite, Wheel Isolation Gate, and OKF Synthesis (chapters/ch07-conformance-and-okf-synthesis/spec.md)
 
 **Flow Recovery Checkpoint:** `uv lock --check && make lint-all && make rs-test && make py-test && make oracle-test && make oracle-wheel-check && make docs-check && make review-check && make review-route` exits `0` with zero Oracle skips or xfails, followed by clean correctness and fresh independent quality reviews before `/flow:finish native-oracle-driver` and `/flow:archive native-oracle-driver`.
 
