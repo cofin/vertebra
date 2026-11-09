@@ -1,15 +1,17 @@
 //! Multi-backend `ObjectStoreEngine` wrapping Apache `object_store`.
 
 use std::collections::HashMap;
+use std::path::{Path as FsPath, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use object_store::aws::AmazonS3Builder;
 use object_store::azure::MicrosoftAzureBuilder;
-use object_store::gcp::{GcpCredential, GoogleCloudStorageBuilder};
+use object_store::gcp::{GcpCredential, GcpCredentialProvider, GoogleCloudStorageBuilder};
 use object_store::http::HttpBuilder;
 use object_store::local::LocalFileSystem;
 use object_store::memory::InMemory;
@@ -19,7 +21,9 @@ use object_store::{
     ObjectStoreExt, PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult,
     StaticCredentialProvider, UpdateVersion,
 };
+use serde::Deserialize;
 use thiserror::Error;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
 use vertebra_core::gcp_auth::{GcpTokenCache, SharedGcpTokenCacheHandle};
 
@@ -40,6 +44,37 @@ static STORAGE_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
         .enable_all()
         .build()
         .expect("failed to initialize vertebra-storage Tokio runtime")
+});
+
+/// Files larger than this stream through multipart uploads in chunks of the same size.
+const FILE_TRANSFER_CHUNK_SIZE: usize = 8 * 1024 * 1024;
+
+/// Maximum number of source objects accepted by one GCS JSON `compose` call.
+const GCS_COMPOSE_MAX_SOURCES: usize = 32;
+
+const DEFAULT_GCS_BASE_URL: &str = "https://storage.googleapis.com";
+
+static PART_FILE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+static GCS_LOOPBACK_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .no_proxy()
+        .pool_max_idle_per_host(32)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(300))
+        .build()
+        .unwrap_or_default()
+});
+
+static GCS_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .pool_max_idle_per_host(32)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(300))
+        .build()
+        .unwrap_or_default()
 });
 
 pub fn runtime_handle() -> tokio::runtime::Handle {
@@ -160,6 +195,7 @@ fn validate_optional_prefix(prefix: Option<&str>) -> Result<Option<StorePath>, S
 
 type LocalMetadataEntry = (Option<String>, HashMap<String, String>);
 type LocalMetadataRegistry = Arc<RwLock<HashMap<String, LocalMetadataEntry>>>;
+type BatchOutcome = (String, Option<Result<StoredObjectMeta, StorageError>>);
 
 fn build_store_attributes(
     content_type: Option<&str>,
@@ -553,11 +589,39 @@ fn parse_http_headers_from_options(
     Ok(headers)
 }
 
+/// Connection and credential state for GCS JSON API calls that `object_store` does not expose.
+///
+/// `credential_cache` is preferred because its snapshots carry a generation that can be
+/// invalidated after a `401`; `credentials` is the provider `object_store` resolved for every
+/// other credential source (static token, service account, ADC). `skip_signature` sends no
+/// `Authorization` header.
+#[derive(Clone, Debug)]
+struct GcsComposeContext {
+    bucket: String,
+    base_url: String,
+    credential_cache: Option<SharedGcpTokenCacheHandle>,
+    credentials: Option<GcpCredentialProvider>,
+    quota_project_id: Option<String>,
+    skip_signature: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GcsComposeResponse {
+    name: Option<String>,
+    size: Option<String>,
+    etag: Option<String>,
+    generation: Option<String>,
+    content_type: Option<String>,
+    updated: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct ObjectStoreEngine {
     inner: Arc<dyn ObjectStore>,
     scheme: String,
     local_metadata: Option<LocalMetadataRegistry>,
+    gcs_compose: Option<Arc<GcsComposeContext>>,
 }
 
 impl ObjectStoreEngine {
@@ -567,6 +631,7 @@ impl ObjectStoreEngine {
                 inner: Arc::new(InMemory::new()),
                 scheme: "memory".to_string(),
                 local_metadata: None,
+                gcs_compose: None,
             }),
             BackendConfig::Local { root } => {
                 std::fs::create_dir_all(&root).map_err(|e| {
@@ -580,6 +645,7 @@ impl ObjectStoreEngine {
                     inner: Arc::new(store),
                     scheme: "file".to_string(),
                     local_metadata: Some(Arc::new(RwLock::new(HashMap::new()))),
+                    gcs_compose: None,
                 })
             }
             BackendConfig::S3 {
@@ -629,6 +695,7 @@ impl ObjectStoreEngine {
                     inner: Arc::new(builder.build()?),
                     scheme: "s3".to_string(),
                     local_metadata: None,
+                    gcs_compose: None,
                 })
             }
             BackendConfig::Gcs {
@@ -667,7 +734,7 @@ impl ObjectStoreEngine {
                             .filter(|s| !s.trim().is_empty())
                     });
                 let mut default_headers = http::HeaderMap::new();
-                if let Some(qp) = effective_quota_project {
+                if let Some(ref qp) = effective_quota_project {
                     let header_val = http::HeaderValue::from_str(qp.trim()).map_err(|e| {
                         StorageError::InvalidInput(format!(
                             "invalid quota_project_id header value: {e}"
@@ -679,6 +746,7 @@ impl ObjectStoreEngine {
                     );
                 }
 
+                let compose_cache = credential_cache.clone();
                 if let Some(cache) = credential_cache {
                     let creds =
                         Arc::new(crate::gcp_auth::RefreshingGcpCredentialProvider::new(cache));
@@ -717,10 +785,28 @@ impl ObjectStoreEngine {
                 if skip_signature {
                     builder = builder.with_skip_signature(true);
                 }
+                let store = builder.build()?;
+                let compose = GcsComposeContext {
+                    bucket,
+                    base_url: endpoint
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|ep| !ep.is_empty())
+                        .unwrap_or(DEFAULT_GCS_BASE_URL)
+                        .trim_end_matches('/')
+                        .to_string(),
+                    credential_cache: compose_cache,
+                    credentials: Some(Arc::clone(store.credentials())),
+                    quota_project_id: effective_quota_project
+                        .map(|qp| qp.trim().to_string())
+                        .filter(|qp| !qp.is_empty()),
+                    skip_signature,
+                };
                 Ok(Self {
-                    inner: Arc::new(builder.build()?),
+                    inner: Arc::new(store),
                     scheme: "gs".to_string(),
                     local_metadata: None,
+                    gcs_compose: Some(Arc::new(compose)),
                 })
             }
             BackendConfig::Azure {
@@ -749,6 +835,7 @@ impl ObjectStoreEngine {
                     inner: Arc::new(builder.build()?),
                     scheme: "az".to_string(),
                     local_metadata: None,
+                    gcs_compose: None,
                 })
             }
             BackendConfig::Oci {
@@ -763,6 +850,7 @@ impl ObjectStoreEngine {
                     inner: Arc::new(store),
                     scheme: "oci".to_string(),
                     local_metadata: None,
+                    gcs_compose: None,
                 })
             }
             BackendConfig::R2 {
@@ -806,6 +894,7 @@ impl ObjectStoreEngine {
                     inner: Arc::new(builder.build()?),
                     scheme: "r2".to_string(),
                     local_metadata: None,
+                    gcs_compose: None,
                 })
             }
             BackendConfig::Http {
@@ -842,6 +931,7 @@ impl ObjectStoreEngine {
                     inner: Arc::new(store),
                     scheme: "http".to_string(),
                     local_metadata: None,
+                    gcs_compose: None,
                 })
             }
         }
@@ -1044,6 +1134,7 @@ impl ObjectStoreEngine {
             inner,
             scheme,
             local_metadata,
+            gcs_compose: None,
         }
     }
 
@@ -1209,14 +1300,119 @@ impl ObjectStoreEngine {
         })
     }
 
+    /// Upload a local file, streaming files over [`FILE_TRANSFER_CHUNK_SIZE`] as multipart parts.
+    ///
+    /// Small files take one `put`. Larger files are read in `8 MiB` chunks handed to a
+    /// multipart session without buffering the whole file; any read or upload error aborts the
+    /// session before the error is returned.
     pub async fn put_file(
         &self,
         path: &str,
         file_path: &str,
     ) -> Result<StoredObjectMeta, StorageError> {
         let _ = validate_object_path(path)?;
-        let raw = tokio::fs::read(file_path).await?;
-        self.put(path, Bytes::from(raw)).await
+        let size = tokio::fs::metadata(file_path).await?.len();
+        if size <= FILE_TRANSFER_CHUNK_SIZE as u64 {
+            let raw = tokio::fs::read(file_path).await?;
+            return self.put(path, Bytes::from(raw)).await;
+        }
+        let mut file = tokio::fs::File::open(file_path).await?;
+        let mut session = self
+            .create_multipart(path, PutConditionalOptions::default())
+            .await?;
+        let uploaded = async {
+            Self::stream_file_into_session(&mut file, &mut session).await?;
+            session.complete_with_meta().await
+        }
+        .await;
+        if uploaded.is_err() {
+            let _ = session.abort().await;
+        }
+        uploaded
+    }
+
+    /// Download an object to `file_path` atomically.
+    ///
+    /// Chunks stream into a sibling `.{name}.{pid}.{seq}.part` file that is flushed and renamed
+    /// over `file_path` only after the full payload arrives, so readers never observe a partial
+    /// file. The `.part` file is unlinked on any error. Parent directories are created.
+    pub async fn get_file(
+        &self,
+        path: &str,
+        file_path: &str,
+    ) -> Result<StoredObjectMeta, StorageError> {
+        let location = validate_object_path(path)?;
+        let target = FsPath::new(file_path);
+        let file_name = target.file_name().ok_or_else(|| {
+            StorageError::InvalidInput(format!(
+                "destination file path '{file_path}' has no file name"
+            ))
+        })?;
+        let parent = target
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map_or_else(|| PathBuf::from("."), FsPath::to_path_buf);
+        let result = self.inner.get(&location).await?;
+        let mut meta =
+            StoredObjectMeta::from_meta_and_attributes(result.meta.clone(), &result.attributes);
+        self.merge_local_metadata(&location, &mut meta);
+        tokio::fs::create_dir_all(&parent).await?;
+        let part_path = parent.join(format!(
+            ".{}.{}.{}.part",
+            file_name.to_string_lossy(),
+            std::process::id(),
+            PART_FILE_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let written = async {
+            Self::write_stream_to_file(result.into_stream(), &part_path).await?;
+            tokio::fs::rename(&part_path, target).await?;
+            Ok::<(), StorageError>(())
+        }
+        .await;
+        if let Err(err) = written {
+            let _ = tokio::fs::remove_file(&part_path).await;
+            return Err(err);
+        }
+        Ok(meta)
+    }
+
+    /// Download `(key, file_path)` pairs with at most `concurrency` transfers in flight.
+    ///
+    /// Results follow input order. After the first failure no new transfers start, and every
+    /// destination file written by this call is unlinked before the error is returned.
+    pub async fn get_files(
+        &self,
+        pairs: Vec<(String, String)>,
+        concurrency: usize,
+    ) -> Result<Vec<StoredObjectMeta>, StorageError> {
+        let outcomes = Self::run_file_batch(pairs, concurrency, |key, file_path| async move {
+            self.get_file(&key, &file_path).await
+        })
+        .await?;
+        if outcomes.iter().any(|(_, o)| matches!(o, Some(Err(_)))) {
+            for (file_path, outcome) in &outcomes {
+                if matches!(outcome, Some(Ok(_))) {
+                    let _ = tokio::fs::remove_file(file_path).await;
+                }
+            }
+        }
+        Self::collect_batch_outcomes(outcomes)
+    }
+
+    /// Upload `(key, file_path)` pairs with at most `concurrency` transfers in flight.
+    ///
+    /// Results follow input order. After the first failure no new transfers start and the first
+    /// error in input order is returned.
+    pub async fn put_files(
+        &self,
+        pairs: Vec<(String, String)>,
+        concurrency: usize,
+    ) -> Result<Vec<StoredObjectMeta>, StorageError> {
+        let outcomes = Self::run_file_batch(pairs, concurrency, |key, file_path| async move {
+            self.put_file(&key, &file_path).await
+        })
+        .await?;
+        Self::collect_batch_outcomes(outcomes)
     }
 
     pub async fn create_multipart(
@@ -1365,20 +1561,7 @@ impl ObjectStoreEngine {
             )
             .await?;
         let mut meta = StoredObjectMeta::from_meta_and_attributes(result.meta, &result.attributes);
-        if let Some(ref registry) = self.local_metadata
-            && let Some((ct, attrs)) = registry
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(location.as_ref())
-                .cloned()
-        {
-            if meta.content_type.is_none() {
-                meta.content_type = ct;
-            }
-            if meta.attributes.is_empty() {
-                meta.attributes = attrs;
-            }
-        }
+        self.merge_local_metadata(&location, &mut meta);
         Ok(meta)
     }
 
@@ -1403,10 +1586,39 @@ impl ObjectStoreEngine {
         Ok(())
     }
 
-    pub async fn copy(&self, src: &str, dst: &str) -> Result<(), StorageError> {
+    /// Copy `src` to `dst`; with `if_not_exists`, fail with `AlreadyExists` when `dst` exists.
+    ///
+    /// Stores without native create-only copy on the `file` scheme fall back to an atomic
+    /// create-only put of the source bytes.
+    pub async fn copy(
+        &self,
+        src: &str,
+        dst: &str,
+        if_not_exists: bool,
+    ) -> Result<(), StorageError> {
         let from = validate_object_path(src)?;
         let to = validate_object_path(dst)?;
-        self.inner.copy(&from, &to).await?;
+        if if_not_exists {
+            match self.inner.copy_if_not_exists(&from, &to).await {
+                Ok(()) => {}
+                Err(object_store::Error::NotImplemented { .. }) if self.scheme == "file" => {
+                    let payload = self.inner.get(&from).await?.bytes().await?;
+                    self.inner
+                        .put_opts(
+                            &to,
+                            PutPayload::from(payload),
+                            PutOptions {
+                                mode: PutMode::Create,
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                }
+                Err(err) => return Err(err.into()),
+            }
+        } else {
+            self.inner.copy(&from, &to).await?;
+        }
         if let Some(ref registry) = self.local_metadata {
             let mut guard = registry.write().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = guard.get(from.as_ref()).cloned() {
@@ -1525,5 +1737,355 @@ impl ObjectStoreEngine {
         prefixes.sort();
         prefixes.dedup();
         Ok((objects, prefixes))
+    }
+
+    /// Concatenate `sources` in order into `dst`.
+    ///
+    /// On `gs` stores this uses the GCS JSON `compose` API, folding more than
+    /// [`GCS_COMPOSE_MAX_SOURCES`] inputs in layers through `{dst}.compose-{idx:04}` temporary
+    /// objects that are always deleted afterwards, even when a fold fails. Other stores stream
+    /// each source sequentially into one multipart upload, aborting it on error.
+    pub async fn compose(
+        &self,
+        sources: Vec<String>,
+        dst: &str,
+        content_type: Option<String>,
+    ) -> Result<StoredObjectMeta, StorageError> {
+        if sources.is_empty() {
+            return Err(StorageError::InvalidInput(
+                "compose requires at least one source object".to_string(),
+            ));
+        }
+        let source_keys = sources
+            .iter()
+            .map(|src| validate_object_path(src).map(|p| p.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let dst_key = validate_object_path(dst)?.to_string();
+        match self.gcs_compose.clone() {
+            Some(ctx) => {
+                self.gcs_compose_tree(&ctx, source_keys, &dst_key, content_type)
+                    .await
+            }
+            None => {
+                self.multipart_compose(&source_keys, &dst_key, content_type)
+                    .await
+            }
+        }
+    }
+
+    fn merge_local_metadata(&self, location: &StorePath, meta: &mut StoredObjectMeta) {
+        if let Some(ref registry) = self.local_metadata
+            && let Some((ct, attrs)) = registry
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(location.as_ref())
+                .cloned()
+        {
+            if meta.content_type.is_none() {
+                meta.content_type = ct;
+            }
+            if meta.attributes.is_empty() {
+                meta.attributes = attrs;
+            }
+        }
+    }
+
+    async fn stream_file_into_session(
+        file: &mut tokio::fs::File,
+        session: &mut MultipartUploadSession,
+    ) -> Result<(), StorageError> {
+        let mut buf = BytesMut::with_capacity(FILE_TRANSFER_CHUNK_SIZE);
+        loop {
+            buf.reserve(FILE_TRANSFER_CHUNK_SIZE);
+            while buf.len() < FILE_TRANSFER_CHUNK_SIZE {
+                let remaining = FILE_TRANSFER_CHUNK_SIZE - buf.len();
+                if file.read_buf(&mut (&mut buf).limit(remaining)).await? == 0 {
+                    break;
+                }
+            }
+            if buf.is_empty() {
+                return Ok(());
+            }
+            let full = buf.len() == FILE_TRANSFER_CHUNK_SIZE;
+            session.write_chunk(buf.split().freeze()).await?;
+            if !full {
+                return Ok(());
+            }
+        }
+    }
+
+    async fn write_stream_to_file(
+        mut stream: BoxStream<'static, object_store::Result<Bytes>>,
+        part_path: &FsPath,
+    ) -> Result<(), StorageError> {
+        let file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(part_path)
+            .await?;
+        let mut writer = tokio::io::BufWriter::with_capacity(1024 * 1024, file);
+        while let Some(chunk) = stream.next().await {
+            writer.write_all(&chunk?).await?;
+        }
+        writer.flush().await?;
+        Ok(())
+    }
+
+    /// Run `op` over `pairs` with bounded concurrency, returning outcomes in input order.
+    ///
+    /// Each entry pairs the local file path with `None` when the item was skipped because an
+    /// earlier item had already failed.
+    async fn run_file_batch<F, Fut>(
+        pairs: Vec<(String, String)>,
+        concurrency: usize,
+        op: F,
+    ) -> Result<Vec<BatchOutcome>, StorageError>
+    where
+        F: Fn(String, String) -> Fut,
+        Fut: std::future::Future<Output = Result<StoredObjectMeta, StorageError>>,
+    {
+        if concurrency == 0 {
+            return Err(StorageError::InvalidInput(
+                "concurrency must be >= 1".to_string(),
+            ));
+        }
+        let failed = AtomicBool::new(false);
+        let failed_ref = &failed;
+        let op_ref = &op;
+        let mut outcomes: Vec<(usize, BatchOutcome)> =
+            futures::stream::iter(pairs.into_iter().enumerate())
+                .map(|(idx, (key, file_path))| async move {
+                    if failed_ref.load(Ordering::Acquire) {
+                        return (idx, (file_path, None));
+                    }
+                    let outcome = op_ref(key, file_path.clone()).await;
+                    if outcome.is_err() {
+                        failed_ref.store(true, Ordering::Release);
+                    }
+                    (idx, (file_path, Some(outcome)))
+                })
+                .buffer_unordered(concurrency)
+                .collect()
+                .await;
+        outcomes.sort_unstable_by_key(|(idx, _)| *idx);
+        Ok(outcomes.into_iter().map(|(_, outcome)| outcome).collect())
+    }
+
+    /// Return metadata in input order, or the first error in input order.
+    ///
+    /// Skipped items only exist after a failure, so dropping them never hides a missing result.
+    fn collect_batch_outcomes(
+        outcomes: Vec<BatchOutcome>,
+    ) -> Result<Vec<StoredObjectMeta>, StorageError> {
+        outcomes
+            .into_iter()
+            .filter_map(|(_, outcome)| outcome)
+            .collect()
+    }
+
+    async fn multipart_compose(
+        &self,
+        sources: &[String],
+        dst: &str,
+        content_type: Option<String>,
+    ) -> Result<StoredObjectMeta, StorageError> {
+        let mut session = self
+            .create_multipart(
+                dst,
+                PutConditionalOptions {
+                    content_type,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let composed = async {
+            for src in sources {
+                let mut stream = self.get_stream(src).await?;
+                while let Some(chunk) = stream.next().await {
+                    session.write_chunk(chunk?).await?;
+                }
+            }
+            session.complete_with_meta().await
+        }
+        .await;
+        if composed.is_err() {
+            let _ = session.abort().await;
+        }
+        composed
+    }
+
+    async fn gcs_compose_tree(
+        &self,
+        ctx: &GcsComposeContext,
+        sources: Vec<String>,
+        dst: &str,
+        content_type: Option<String>,
+    ) -> Result<StoredObjectMeta, StorageError> {
+        let mut temporaries: Vec<String> = Vec::new();
+        let composed = async {
+            let mut level = sources;
+            while level.len() > GCS_COMPOSE_MAX_SOURCES {
+                let mut next = Vec::with_capacity(level.len().div_ceil(GCS_COMPOSE_MAX_SOURCES));
+                for group in level.chunks(GCS_COMPOSE_MAX_SOURCES) {
+                    if let [single] = group {
+                        next.push(single.clone());
+                        continue;
+                    }
+                    let temp = format!("{dst}.compose-{:04}", temporaries.len());
+                    temporaries.push(temp.clone());
+                    Self::gcs_compose_call(ctx, group, &temp, None).await?;
+                    next.push(temp);
+                }
+                level = next;
+            }
+            Self::gcs_compose_call(ctx, &level, dst, content_type.as_deref()).await
+        }
+        .await;
+        let deletions = temporaries.iter().map(|temp| async move {
+            if let Ok(location) = StorePath::parse(temp) {
+                let _ = self.inner.delete(&location).await;
+            }
+        });
+        futures::future::join_all(deletions).await;
+        composed
+    }
+
+    async fn gcs_compose_call(
+        ctx: &GcsComposeContext,
+        sources: &[String],
+        dst: &str,
+        content_type: Option<&str>,
+    ) -> Result<StoredObjectMeta, StorageError> {
+        let url = format!(
+            "{}/storage/v1/b/{}/o/{}/compose",
+            ctx.base_url,
+            crate::signing::rfc3986_encode(&ctx.bucket, true),
+            crate::signing::rfc3986_encode(dst, true)
+        );
+        let mut destination = serde_json::Map::new();
+        if let Some(ct) = content_type {
+            destination.insert(
+                "contentType".to_string(),
+                serde_json::Value::String(ct.to_string()),
+            );
+        }
+        let body = serde_json::json!({
+            "sourceObjects": sources
+                .iter()
+                .map(|name| serde_json::json!({ "name": name }))
+                .collect::<Vec<_>>(),
+            "destination": destination,
+        });
+        let client: &reqwest::Client = if is_loopback_endpoint(Some(&ctx.base_url)) {
+            &GCS_LOOPBACK_CLIENT
+        } else {
+            &GCS_HTTP_CLIENT
+        };
+        let send = |bearer: Option<String>, snapshot_project: Option<String>| {
+            let mut req = client.post(&url).json(&body);
+            if let Some(token) = bearer.filter(|t| !t.is_empty()) {
+                req = req.bearer_auth(token);
+            }
+            if let Some(project) = ctx.quota_project_id.clone().or(snapshot_project) {
+                req = req.header("x-goog-user-project", project);
+            }
+            req.send()
+        };
+        let transport_err = |err: reqwest::Error| {
+            Self::gcs_generic_error(format!("GCS compose request for '{dst}' failed: {err}"))
+        };
+
+        let resp = if ctx.skip_signature {
+            send(None, None).await.map_err(transport_err)?
+        } else if let Some(ref cache) = ctx.credential_cache {
+            let snap = cache
+                .get_or_refresh()
+                .await
+                .map_err(Self::gcs_generic_error)?;
+            let first = send(
+                Some(snap.access_token.clone()),
+                snap.quota_project_id.clone(),
+            )
+            .await
+            .map_err(transport_err)?;
+            if first.status() == reqwest::StatusCode::UNAUTHORIZED {
+                cache.invalidate(snap.generation);
+                let refreshed = cache
+                    .get_or_refresh()
+                    .await
+                    .map_err(Self::gcs_generic_error)?;
+                send(
+                    Some(refreshed.access_token.clone()),
+                    refreshed.quota_project_id.clone(),
+                )
+                .await
+                .map_err(transport_err)?
+            } else {
+                first
+            }
+        } else if let Some(ref provider) = ctx.credentials {
+            let credential = provider.get_credential().await?;
+            send(Some(credential.bearer.clone()), None)
+                .await
+                .map_err(transport_err)?
+        } else {
+            send(None, None).await.map_err(transport_err)?
+        };
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(match status {
+                reqwest::StatusCode::NOT_FOUND => {
+                    StorageError::ObjectStore(object_store::Error::NotFound {
+                        path: dst.to_string(),
+                        source: Box::new(std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!("GCS compose source not found: {text}"),
+                        )),
+                    })
+                }
+                reqwest::StatusCode::PRECONDITION_FAILED => StorageError::Precondition {
+                    path: dst.to_string(),
+                    message: text,
+                },
+                other => Self::gcs_generic_error(format!(
+                    "GCS compose for '{dst}' returned HTTP {other}: {text}"
+                )),
+            });
+        }
+        let parsed: GcsComposeResponse = resp.json().await.map_err(|err| {
+            Self::gcs_generic_error(format!("invalid GCS compose response for '{dst}': {err}"))
+        })?;
+        let size = parsed
+            .size
+            .as_deref()
+            .map(|s| {
+                s.parse::<u64>().map_err(|err| {
+                    Self::gcs_generic_error(format!("invalid GCS compose size '{s}': {err}"))
+                })
+            })
+            .transpose()?
+            .unwrap_or(0);
+        Ok(StoredObjectMeta {
+            path: parsed.name.unwrap_or_else(|| dst.to_string()),
+            size,
+            last_modified: parsed
+                .updated
+                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+            etag: parsed.etag,
+            version: parsed.generation,
+            content_type: parsed
+                .content_type
+                .or_else(|| content_type.map(str::to_string)),
+            attributes: HashMap::new(),
+        })
+    }
+
+    fn gcs_generic_error(message: String) -> StorageError {
+        StorageError::ObjectStore(object_store::Error::Generic {
+            store: "GCS",
+            source: message.into(),
+        })
     }
 }

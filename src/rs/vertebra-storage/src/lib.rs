@@ -964,7 +964,7 @@ impl PySyncObjectStore {
 
     fn copy(&self, py: Python<'_>, src: &str, dst: &str) -> PyResult<()> {
         let engine = self.engine.clone();
-        py.detach(|| block_on_storage(async move { engine.copy(src, dst).await }))
+        py.detach(|| block_on_storage(async move { engine.copy(src, dst, false).await }))
             .map_err(to_py_err)
     }
 
@@ -1228,7 +1228,7 @@ impl PyAsyncObjectStore {
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
-            async move { engine.copy(&src, &dst).await },
+            async move { engine.copy(&src, &dst, false).await },
             |py, ()| Ok(py.None()),
         )
     }

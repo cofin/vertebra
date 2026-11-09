@@ -39,7 +39,7 @@ async fn test_memory_backend_crud_range_and_multipart() {
     assert_eq!(head.size, 16);
 
     engine
-        .copy("datasets/events.bin", "datasets/events_copy.bin")
+        .copy("datasets/events.bin", "datasets/events_copy.bin", false)
         .await
         .expect("copy");
 
@@ -2015,7 +2015,7 @@ async fn test_checked_get_range_raw_keys_local_metadata_and_s3_http_options() {
     assert_eq!(local_head.attributes, attrs);
 
     local
-        .copy("meta~dir/item%251.txt", "meta~dir/copied.txt")
+        .copy("meta~dir/item%251.txt", "meta~dir/copied.txt", false)
         .await
         .expect("local copy");
     let copied_head = local
@@ -2949,5 +2949,804 @@ fn test_s3_virtual_hosted_style_rejects_ip_literal_endpoints() {
             ("allow_http".to_string(), "true".to_string()),
         ]);
         assert!(ObjectStoreEngine::from_url("s3://bkt", Some(&path_opts)).is_ok());
+    }
+}
+
+#[derive(Debug)]
+struct CountingStore {
+    inner: object_store::memory::InMemory,
+    put_calls: std::sync::atomic::AtomicUsize,
+    multipart_calls: std::sync::atomic::AtomicUsize,
+    get_in_flight: std::sync::atomic::AtomicUsize,
+    get_max_in_flight: std::sync::atomic::AtomicUsize,
+    get_delay: std::time::Duration,
+}
+
+impl CountingStore {
+    fn new(get_delay: std::time::Duration) -> Self {
+        Self {
+            inner: object_store::memory::InMemory::new(),
+            put_calls: std::sync::atomic::AtomicUsize::new(0),
+            multipart_calls: std::sync::atomic::AtomicUsize::new(0),
+            get_in_flight: std::sync::atomic::AtomicUsize::new(0),
+            get_max_in_flight: std::sync::atomic::AtomicUsize::new(0),
+            get_delay,
+        }
+    }
+}
+
+impl std::fmt::Display for CountingStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CountingStore")
+    }
+}
+
+#[async_trait::async_trait]
+impl object_store::ObjectStore for CountingStore {
+    async fn put_opts(
+        &self,
+        location: &object_store::path::Path,
+        payload: object_store::PutPayload,
+        opts: object_store::PutOptions,
+    ) -> object_store::Result<object_store::PutResult> {
+        self.put_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &object_store::path::Path,
+        opts: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        self.multipart_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.put_multipart_opts(location, opts).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &object_store::path::Path,
+        options: object_store::GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        let now = self
+            .get_in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        self.get_max_in_flight
+            .fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+        if !self.get_delay.is_zero() {
+            tokio::time::sleep(self.get_delay).await;
+        }
+        let result = self.inner.get_opts(location, options).await;
+        self.get_in_flight
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        result
+    }
+
+    fn delete_stream(
+        &self,
+        locations: futures::stream::BoxStream<
+            'static,
+            object_store::Result<object_store::path::Path>,
+        >,
+    ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> object_store::Result<object_store::ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &object_store::path::Path,
+        to: &object_store::path::Path,
+        options: object_store::CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
+
+fn patterned_payload(len: usize, seed: u8) -> Vec<u8> {
+    (0..len)
+        .map(|i| ((i as u64 * 31 + u64::from(seed)) % 251) as u8)
+        .collect()
+}
+
+fn leftover_part_files(dir: &std::path::Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".part"))
+            {
+                found.push(path.display().to_string());
+            }
+        }
+    }
+    found
+}
+
+fn percent_decode_path(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 3 <= bytes.len()
+            && let Ok(v) = u8::from_str_radix(&raw[i + 1..i + 3], 16)
+        {
+            out.push(v);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+async fn read_http_request(stream: &mut tokio::net::TcpStream) -> (String, Vec<u8>) {
+    use tokio::io::AsyncReadExt;
+    let mut buf: Vec<u8> = Vec::with_capacity(8192);
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = stream.read(&mut chunk).await.unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(hdr_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&buf[..hdr_end]).into_owned();
+            let content_len = head
+                .lines()
+                .find_map(|l| {
+                    let (k, v) = l.split_once(':')?;
+                    if k.eq_ignore_ascii_case("content-length") {
+                        v.trim().parse::<usize>().ok()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+            if buf.len() >= hdr_end + 4 + content_len {
+                let body = buf[hdr_end + 4..hdr_end + 4 + content_len].to_vec();
+                return (head, body);
+            }
+        }
+    }
+    (String::from_utf8_lossy(&buf).into_owned(), Vec::new())
+}
+
+fn http_json_response(status: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+type EmuObjects = std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>>;
+
+struct GcsComposeEmulator {
+    port: u16,
+    objects: EmuObjects,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    max_sources_per_call: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+async fn spawn_gcs_compose_emulator(reject_bearer: Option<&'static str>) -> GcsComposeEmulator {
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::AsyncWriteExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind compose emulator");
+    let port = listener.local_addr().expect("emulator addr").port();
+    let objects: EmuObjects = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let max_sources = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let objects_srv = Arc::clone(&objects);
+    let requests_srv = Arc::clone(&requests);
+    let max_sources_srv = Arc::clone(&max_sources);
+
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let objects = Arc::clone(&objects_srv);
+            let requests = Arc::clone(&requests_srv);
+            let max_sources = Arc::clone(&max_sources_srv);
+            tokio::spawn(async move {
+                let (head, body) = read_http_request(&mut stream).await;
+                requests.lock().expect("lock").push(head.clone());
+                let first_line = head.lines().next().unwrap_or_default().to_string();
+                let mut parts = first_line.split_whitespace();
+                let method = parts.next().unwrap_or_default().to_string();
+                let target = parts.next().unwrap_or_default().to_string();
+                let path_only = percent_decode_path(target.split('?').next().unwrap_or_default());
+                let lower = head.to_ascii_lowercase();
+
+                let resp = if let Some(rejected) = reject_bearer
+                    && lower.contains(&format!("authorization: bearer {rejected}"))
+                {
+                    http_json_response("401 Unauthorized", r#"{"error":{"code":401}}"#)
+                } else if method == "POST"
+                    && let Some(rest) = path_only.strip_prefix("/storage/v1/b/emu-bucket/o/")
+                    && let Some(dst) = rest.strip_suffix("/compose")
+                {
+                    let dst = dst.to_string();
+                    let parsed: serde_json::Value =
+                        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+                    let names: Vec<String> = parsed["sourceObjects"]
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|o| o["name"].as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    max_sources.fetch_max(names.len(), Ordering::SeqCst);
+                    let content_type = parsed["destination"]["contentType"]
+                        .as_str()
+                        .unwrap_or("application/octet-stream")
+                        .to_string();
+                    let mut guard = objects.lock().expect("lock");
+                    let mut combined = Vec::new();
+                    let mut missing = None;
+                    for name in &names {
+                        match guard.get(name) {
+                            Some(data) => combined.extend_from_slice(data),
+                            None => {
+                                missing = Some(name.clone());
+                                break;
+                            }
+                        }
+                    }
+                    if names.is_empty() || names.len() > 32 {
+                        http_json_response("400 Bad Request", r#"{"error":{"code":400}}"#)
+                    } else if let Some(name) = missing {
+                        http_json_response(
+                            "404 Not Found",
+                            &format!(
+                                r#"{{"error":{{"code":404,"message":"No such object: {name}"}}}}"#
+                            ),
+                        )
+                    } else {
+                        let size = combined.len();
+                        guard.insert(dst.clone(), combined);
+                        let generation = guard.len();
+                        http_json_response(
+                            "200 OK",
+                            &format!(
+                                r#"{{"kind":"storage#object","name":"{dst}","bucket":"emu-bucket","generation":"{generation}","contentType":"{content_type}","size":"{size}","etag":"etag-{generation}","updated":"2026-11-09T00:00:00.000Z"}}"#
+                            ),
+                        )
+                    }
+                } else if method == "DELETE"
+                    && let Some(key) = path_only.strip_prefix("/emu-bucket/")
+                {
+                    if objects.lock().expect("lock").remove(key).is_some() {
+                        "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_string()
+                    } else {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_string()
+                    }
+                } else {
+                    http_json_response("400 Bad Request", r#"{"error":{"code":400}}"#)
+                };
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    GcsComposeEmulator {
+        port,
+        objects,
+        requests,
+        max_sources_per_call: max_sources,
+    }
+}
+
+#[tokio::test]
+async fn test_put_file_streams_multipart_and_get_file_renames_atomically() {
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let large = patterned_payload(10 * 1024 * 1024, 7);
+    let small = patterned_payload(4096, 3);
+    let large_src = tmp.path().join("large.bin");
+    let small_src = tmp.path().join("small.bin");
+    std::fs::write(&large_src, &large).expect("write large source");
+    std::fs::write(&small_src, &small).expect("write small source");
+
+    let local_root = tmp.path().join("store-root");
+    let local_url = format!("file://{}", local_root.display());
+    let engines = [
+        ObjectStoreEngine::new(BackendConfig::Memory).expect("memory engine"),
+        ObjectStoreEngine::from_url(&local_url, None).expect("local engine"),
+    ];
+
+    for (idx, engine) in engines.iter().enumerate() {
+        let meta = engine
+            .put_file("files/large.bin", large_src.to_str().expect("utf8 path"))
+            .await
+            .expect("put_file large");
+        assert_eq!(meta.size, large.len() as u64);
+        assert_eq!(meta.path, "files/large.bin");
+        let fetched = engine.get("files/large.bin").await.expect("get large");
+        assert_eq!(fetched.len(), large.len());
+        assert!(
+            fetched[..] == large[..],
+            "uploaded large payload must match"
+        );
+
+        let small_meta = engine
+            .put_file("files/small.bin", small_src.to_str().expect("utf8 path"))
+            .await
+            .expect("put_file small");
+        assert_eq!(small_meta.size, small.len() as u64);
+
+        let out_dir = tmp.path().join(format!("out-{idx}"));
+        let target = out_dir.join("nested").join("download.bin");
+        let got = engine
+            .get_file("files/large.bin", target.to_str().expect("utf8 path"))
+            .await
+            .expect("get_file large");
+        assert_eq!(got.size, large.len() as u64);
+        assert_eq!(got.path, "files/large.bin");
+        let on_disk = std::fs::read(&target).expect("read downloaded file");
+        assert!(on_disk == large, "downloaded large payload must match");
+        assert!(leftover_part_files(&out_dir).is_empty());
+
+        let missing_target = out_dir.join("missing.bin");
+        let missing = engine
+            .get_file(
+                "files/absent.bin",
+                missing_target.to_str().expect("utf8 path"),
+            )
+            .await
+            .expect_err("missing key must fail");
+        assert!(matches!(
+            missing,
+            _storage::store::StorageError::ObjectStore(object_store::Error::NotFound { .. })
+        ));
+        assert!(!missing_target.exists());
+        assert!(leftover_part_files(&out_dir).is_empty());
+    }
+
+    let counting = Arc::new(CountingStore::new(std::time::Duration::ZERO));
+    let counted = ObjectStoreEngine::with_store(counting.clone(), "memory");
+    counted
+        .put_file("c/large.bin", large_src.to_str().expect("utf8 path"))
+        .await
+        .expect("counted put_file large");
+    assert_eq!(counting.multipart_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(counting.put_calls.load(Ordering::SeqCst), 0);
+    counted
+        .put_file("c/small.bin", small_src.to_str().expect("utf8 path"))
+        .await
+        .expect("counted put_file small");
+    assert_eq!(counting.multipart_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(counting.put_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        counted.get("c/large.bin").await.expect("get counted").len(),
+        large.len()
+    );
+}
+
+#[tokio::test]
+async fn test_get_files_put_files_bounded_concurrency_order_and_cleanup() {
+    use _storage::store::StorageError;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let counting = Arc::new(CountingStore::new(std::time::Duration::from_millis(25)));
+    let engine = ObjectStoreEngine::with_store(counting.clone(), "memory");
+
+    let mut upload_pairs = Vec::new();
+    for i in 0..8u8 {
+        let src = tmp.path().join(format!("src-{i}.bin"));
+        std::fs::write(&src, patterned_payload(1000 + usize::from(i) * 17, i)).expect("write src");
+        upload_pairs.push((format!("batch/obj-{i}"), src.display().to_string()));
+    }
+    let put_metas = engine
+        .put_files(upload_pairs.clone(), 3)
+        .await
+        .expect("put_files");
+    assert_eq!(put_metas.len(), 8);
+    for (i, meta) in put_metas.iter().enumerate() {
+        assert_eq!(meta.path, format!("batch/obj-{i}"));
+        assert_eq!(meta.size, 1000 + i as u64 * 17);
+        let stored = engine.get(&meta.path).await.expect("get uploaded");
+        assert_eq!(&stored[..], &patterned_payload(1000 + i * 17, i as u8)[..]);
+    }
+
+    counting.get_max_in_flight.store(0, Ordering::SeqCst);
+    let dl_dir = tmp.path().join("dl");
+    let download_pairs: Vec<(String, String)> = (0..8)
+        .map(|i| {
+            (
+                format!("batch/obj-{i}"),
+                dl_dir.join(format!("obj-{i}.bin")).display().to_string(),
+            )
+        })
+        .collect();
+    let got = engine
+        .get_files(download_pairs.clone(), 3)
+        .await
+        .expect("get_files");
+    assert_eq!(got.len(), 8);
+    for (i, meta) in got.iter().enumerate() {
+        assert_eq!(meta.path, format!("batch/obj-{i}"));
+        let on_disk = std::fs::read(&download_pairs[i].1).expect("read downloaded");
+        assert_eq!(on_disk, patterned_payload(1000 + i * 17, i as u8));
+    }
+    let max_in_flight = counting.get_max_in_flight.load(Ordering::SeqCst);
+    assert!(
+        (2..=3).contains(&max_in_flight),
+        "get_files must overlap requests but never exceed concurrency=3 (observed {max_in_flight})"
+    );
+
+    let fail_dir = tmp.path().join("dl-fail");
+    let failing_pairs: Vec<(String, String)> = (0..8)
+        .map(|i| {
+            let key = if i == 5 {
+                "batch/missing".to_string()
+            } else {
+                format!("batch/obj-{i}")
+            };
+            (
+                key,
+                fail_dir.join(format!("obj-{i}.bin")).display().to_string(),
+            )
+        })
+        .collect();
+    let err = engine
+        .get_files(failing_pairs, 3)
+        .await
+        .expect_err("missing item must fail the batch");
+    assert!(matches!(
+        err,
+        StorageError::ObjectStore(object_store::Error::NotFound { .. })
+    ));
+    let leftovers: Vec<_> = std::fs::read_dir(&fail_dir)
+        .map(|rd| rd.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    assert!(
+        leftovers.is_empty(),
+        "failed get_files must unlink files written in that batch: {leftovers:?}"
+    );
+
+    for zero in [
+        engine.get_files(download_pairs.clone(), 0).await,
+        engine.put_files(upload_pairs.clone(), 0).await,
+    ] {
+        match zero {
+            Err(StorageError::InvalidInput(msg)) => {
+                assert!(msg.contains("concurrency must be >= 1"))
+            }
+            other => panic!("concurrency=0 must be rejected, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_copy_if_not_exists_conflict_memory_and_local() {
+    use _storage::store::StorageError;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let local_url = format!("file://{}", tmp.path().display());
+    let engines = [
+        ObjectStoreEngine::new(BackendConfig::Memory).expect("memory engine"),
+        ObjectStoreEngine::from_url(&local_url, None).expect("local engine"),
+    ];
+    for engine in &engines {
+        engine
+            .put("a", Bytes::from_static(b"alpha"))
+            .await
+            .expect("put a");
+        engine
+            .put("b", Bytes::from_static(b"bravo"))
+            .await
+            .expect("put b");
+
+        let err = engine
+            .copy("a", "b", true)
+            .await
+            .expect_err("conditional copy onto existing key must fail");
+        assert!(
+            matches!(err, StorageError::AlreadyExists { .. }),
+            "scheme {} returned {err:?}",
+            engine.scheme()
+        );
+        assert_eq!(&engine.get("b").await.expect("get b")[..], b"bravo");
+
+        engine
+            .copy("a", "c", true)
+            .await
+            .expect("conditional copy onto new key");
+        assert_eq!(&engine.get("c").await.expect("get c")[..], b"alpha");
+
+        engine
+            .copy("a", "b", false)
+            .await
+            .expect("unconditional copy overwrites");
+        assert_eq!(&engine.get("b").await.expect("get b")[..], b"alpha");
+    }
+}
+
+#[tokio::test]
+async fn test_gcs_compose_tree_fold_cleans_temporaries_and_retries_401() {
+    use _storage::store::StorageError;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use vertebra_core::gcp_auth::{
+        DEFAULT_REFRESH_SKEW_MS, GcpAuthSource, GcpTokenCache, ProxyPolicy,
+        SharedGcpTokenCacheHandle,
+    };
+
+    let emu = spawn_gcs_compose_emulator(None).await;
+    let mut expected = Vec::new();
+    let mut shard_names = Vec::new();
+    {
+        let mut guard = emu.objects.lock().expect("lock");
+        for i in 0..70u8 {
+            let name = format!("shards/part-{i:04}.bin");
+            let data = patterned_payload(100 + usize::from(i), i);
+            expected.extend_from_slice(&data);
+            guard.insert(name.clone(), data);
+            shard_names.push(name);
+        }
+    }
+    let opts = HashMap::from([
+        (
+            "endpoint".to_string(),
+            format!("http://127.0.0.1:{}", emu.port),
+        ),
+        ("allow_http".to_string(), "true".to_string()),
+        ("skip_signature".to_string(), "true".to_string()),
+    ]);
+    let engine = ObjectStoreEngine::from_url("gs://emu-bucket", Some(&opts)).expect("gcs engine");
+
+    let meta = engine
+        .compose(
+            shard_names.clone(),
+            "out/combined.bin",
+            Some("application/octet-stream".to_string()),
+        )
+        .await
+        .expect("70-shard compose");
+    assert_eq!(meta.path, "out/combined.bin");
+    assert_eq!(meta.size, expected.len() as u64);
+    assert_eq!(
+        meta.content_type.as_deref(),
+        Some("application/octet-stream")
+    );
+    assert!(meta.version.is_some());
+    assert!(emu.max_sources_per_call.load(Ordering::SeqCst) <= 32);
+    {
+        let guard = emu.objects.lock().expect("lock");
+        assert!(guard.get("out/combined.bin").expect("combined object") == &expected);
+        let temps: Vec<_> = guard.keys().filter(|k| k.contains(".compose-")).collect();
+        assert!(temps.is_empty(), "temporaries must be deleted: {temps:?}");
+    }
+    let compose_calls = emu
+        .requests
+        .lock()
+        .expect("lock")
+        .iter()
+        .filter(|r| r.contains("/compose"))
+        .count();
+    assert_eq!(compose_calls, 4);
+
+    emu.objects
+        .lock()
+        .expect("lock")
+        .remove("shards/part-0050.bin");
+    let err = engine
+        .compose(shard_names.clone(), "out/broken.bin", None)
+        .await
+        .expect_err("missing shard must fail compose");
+    assert!(
+        matches!(
+            err,
+            StorageError::ObjectStore(object_store::Error::NotFound { .. })
+        ),
+        "unexpected compose error: {err:?}"
+    );
+    {
+        let guard = emu.objects.lock().expect("lock");
+        assert!(!guard.contains_key("out/broken.bin"));
+        let temps: Vec<_> = guard.keys().filter(|k| k.contains(".compose-")).collect();
+        assert!(
+            temps.is_empty(),
+            "failed compose must delete temporaries: {temps:?}"
+        );
+    }
+    let deleted_temp = emu.requests.lock().expect("lock").iter().any(|r| {
+        r.starts_with("DELETE ") && percent_decode_path(r).contains("broken.bin.compose-0000")
+    });
+    assert!(
+        deleted_temp,
+        "temporary from the successful first fold must be deleted"
+    );
+
+    let oauth_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind oauth");
+    let oauth_port = oauth_listener.local_addr().expect("oauth addr").port();
+    let oauth_calls = Arc::new(AtomicUsize::new(0));
+    let oauth_calls_srv = Arc::clone(&oauth_calls);
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = oauth_listener.accept().await {
+            let calls = Arc::clone(&oauth_calls_srv);
+            tokio::spawn(async move {
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf).await;
+                let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                let body = format!(
+                    r#"{{"access_token":"tok_{n}","expires_in":3600,"token_type":"Bearer"}}"#
+                );
+                let _ = stream
+                    .write_all(http_json_response("200 OK", &body).as_bytes())
+                    .await;
+            });
+        }
+    });
+    let authed_emu = spawn_gcs_compose_emulator(Some("tok_1")).await;
+    authed_emu.objects.lock().expect("lock").extend([
+        ("x/one".to_string(), b"one-".to_vec()),
+        ("x/two".to_string(), b"two".to_vec()),
+    ]);
+    let cache = Arc::new(GcpTokenCache::with_proxy_policy(
+        GcpAuthSource::AuthorizedUser {
+            client_id: "cid".to_string(),
+            client_secret: "csec".to_string(),
+            refresh_token: "rtok".to_string(),
+            quota_project_id: Some("billing-proj-99".to_string()),
+            token_uri: format!("http://127.0.0.1:{oauth_port}/token"),
+        },
+        DEFAULT_REFRESH_SKEW_MS,
+        ProxyPolicy::Direct,
+    ));
+    let authed_opts = HashMap::from([
+        (
+            "endpoint".to_string(),
+            format!("http://127.0.0.1:{}", authed_emu.port),
+        ),
+        ("allow_http".to_string(), "true".to_string()),
+        ("allow_ambient_adc".to_string(), "false".to_string()),
+    ]);
+    let authed = ObjectStoreEngine::from_url_with_cache(
+        "gs://emu-bucket",
+        Some(authed_opts),
+        Some(SharedGcpTokenCacheHandle::from_arc(cache)),
+    )
+    .expect("authed gcs engine");
+    let single = authed
+        .compose(
+            vec!["x/one".to_string(), "x/two".to_string()],
+            "x/joined",
+            None,
+        )
+        .await
+        .expect("compose retries once after 401 with refreshed token");
+    assert_eq!(single.size, 7);
+    assert_eq!(oauth_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        authed_emu
+            .objects
+            .lock()
+            .expect("lock")
+            .get("x/joined")
+            .map(Vec::as_slice),
+        Some(&b"one-two"[..])
+    );
+    let authed_requests = authed_emu.requests.lock().expect("lock");
+    let last = authed_requests
+        .last()
+        .expect("captured compose request")
+        .to_ascii_lowercase();
+    assert!(last.contains("authorization: bearer tok_2"));
+    assert!(last.contains("x-goog-user-project: billing-proj-99"));
+}
+
+#[tokio::test]
+async fn test_compose_multipart_fallback_and_empty_sources() {
+    use _storage::store::StorageError;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let local_url = format!("file://{}", tmp.path().display());
+    let engines = [
+        ObjectStoreEngine::new(BackendConfig::Memory).expect("memory engine"),
+        ObjectStoreEngine::from_url(&local_url, None).expect("local engine"),
+    ];
+    for engine in &engines {
+        engine
+            .put("parts/a", Bytes::from_static(b"alpha-"))
+            .await
+            .expect("put a");
+        engine
+            .put("parts/b", Bytes::from_static(b"bravo-"))
+            .await
+            .expect("put b");
+        engine
+            .put("parts/c", Bytes::from_static(b"charlie"))
+            .await
+            .expect("put c");
+
+        let meta = engine
+            .compose(
+                vec![
+                    "parts/a".to_string(),
+                    "parts/b".to_string(),
+                    "parts/c".to_string(),
+                ],
+                "joined.txt",
+                Some("text/plain".to_string()),
+            )
+            .await
+            .expect("fallback compose");
+        assert_eq!(meta.size, 19);
+        assert_eq!(meta.content_type.as_deref(), Some("text/plain"));
+        assert_eq!(
+            &engine.get("joined.txt").await.expect("get joined")[..],
+            b"alpha-bravo-charlie"
+        );
+
+        let single = engine
+            .compose(vec!["parts/c".to_string()], "single.txt", None)
+            .await
+            .expect("single-source compose");
+        assert_eq!(single.size, 7);
+
+        match engine.compose(Vec::new(), "empty.txt", None).await {
+            Err(StorageError::InvalidInput(_)) => {}
+            other => panic!("empty sources must be InvalidInput, got {other:?}"),
+        }
+        match engine
+            .compose(vec!["../escape".to_string()], "bad.txt", None)
+            .await
+        {
+            Err(StorageError::InvalidInput(_)) => {}
+            other => panic!("traversal source must be InvalidInput, got {other:?}"),
+        }
+
+        let missing = engine
+            .compose(
+                vec!["parts/a".to_string(), "parts/missing".to_string()],
+                "partial.txt",
+                None,
+            )
+            .await
+            .expect_err("missing source must fail");
+        assert!(matches!(
+            missing,
+            StorageError::ObjectStore(object_store::Error::NotFound { .. })
+        ));
+        assert!(!engine.exists("partial.txt").await.expect("exists partial"));
     }
 }
