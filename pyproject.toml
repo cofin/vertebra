@@ -276,6 +276,16 @@ include = [
     { path = "src/py/vertebra/server/_js/bundle/**/*", format = ["sdist", "wheel"] },
     { path = "src/py/vertebra/framework/assets/*", format = ["sdist", "wheel"] },
 ]
+exclude = [
+    { path = "src/py/vertebra/*.so", format = ["sdist", "wheel"] },
+    { path = "src/py/vertebra/*.pyd", format = ["sdist", "wheel"] },
+    { path = "src/py/vertebra/*.dylib", format = ["sdist", "wheel"] },
+    { path = "src/py/vertebra/_bigquery.pyi", format = "wheel" },
+    { path = "src/py/vertebra/_bundler.pyi", format = "wheel" },
+    { path = "src/py/vertebra/_oracle.pyi", format = "wheel" },
+    { path = "src/py/vertebra/_spanner.pyi", format = "wheel" },
+    { path = "src/py/vertebra/_storage.pyi", format = "wheel" },
+]
 
 [tool.ruff]
 line-length = 120

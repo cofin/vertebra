@@ -45,14 +45,15 @@ pub fn batches_to_arrow_ipc(
 ) -> Result<(Vec<u8>, usize), OracleError> {
     if batches.is_empty() {
         let empty_schema = Arc::new(Schema::empty());
-        let mut writer = StreamWriter::try_new(Vec::new(), &empty_schema)
-            .map_err(|e| OracleError::data_error(format!("Arrow 59 StreamWriter init error: {e}")))?;
-        writer
-            .finish()
-            .map_err(|e| OracleError::data_error(format!("Arrow 59 StreamWriter finish error: {e}")))?;
-        let bytes = writer
-            .into_inner()
-            .map_err(|e| OracleError::data_error(format!("Arrow 59 StreamWriter buffer error: {e}")))?;
+        let mut writer = StreamWriter::try_new(Vec::new(), &empty_schema).map_err(|e| {
+            OracleError::data_error(format!("Arrow 59 StreamWriter init error: {e}"))
+        })?;
+        writer.finish().map_err(|e| {
+            OracleError::data_error(format!("Arrow 59 StreamWriter finish error: {e}"))
+        })?;
+        let bytes = writer.into_inner().map_err(|e| {
+            OracleError::data_error(format!("Arrow 59 StreamWriter buffer error: {e}"))
+        })?;
         return Ok((bytes, 0));
     }
 
@@ -93,7 +94,11 @@ enum ColumnArrowKind {
     Utf8,
 }
 
-fn infer_column_kind(col: &OracleColumn, rows: &[Vec<OracleCellValue>], col_idx: usize) -> ColumnArrowKind {
+fn infer_column_kind(
+    col: &OracleColumn,
+    rows: &[Vec<OracleCellValue>],
+    col_idx: usize,
+) -> ColumnArrowKind {
     for row in rows {
         if let Some(cell) = row.get(col_idx) {
             match cell {
@@ -203,10 +208,14 @@ fn build_record_batch_chunk(
                 for row in chunk {
                     match row.get(col_idx).unwrap_or(&OracleCellValue::Null) {
                         OracleCellValue::Null => b.append_null(),
-                        OracleCellValue::Str(s) | OracleCellValue::DecimalStr(s) => b.append_value(s),
+                        OracleCellValue::Str(s) | OracleCellValue::DecimalStr(s) => {
+                            b.append_value(s)
+                        }
                         OracleCellValue::Int(v) => b.append_value(v.to_string()),
                         OracleCellValue::Float(v) => b.append_value(v.to_string()),
-                        OracleCellValue::Bool(v) => b.append_value(if *v { "true" } else { "false" }),
+                        OracleCellValue::Bool(v) => {
+                            b.append_value(if *v { "true" } else { "false" })
+                        }
                         OracleCellValue::Date { year, month, day } => {
                             b.append_value(format!("{year:04}-{month:02}-{day:02}"));
                         }
@@ -330,12 +339,34 @@ mod tests {
     #[test]
     fn test_rows_to_arrow_ipc_and_schema_lowercase_normalization() {
         let cols = vec![
-            OracleColumn::new("ID".to_owned(), "NUMBER".to_owned(), 2, Some(22), Some(10), Some(0), false),
-            OracleColumn::new("NAME".to_owned(), "VARCHAR2".to_owned(), 1, Some(64), None, None, true),
+            OracleColumn::new(
+                "ID".to_owned(),
+                "NUMBER".to_owned(),
+                2,
+                Some(22),
+                Some(10),
+                Some(0),
+                false,
+            ),
+            OracleColumn::new(
+                "NAME".to_owned(),
+                "VARCHAR2".to_owned(),
+                1,
+                Some(64),
+                None,
+                None,
+                true,
+            ),
         ];
         let rows = vec![
-            vec![OracleCellValue::Int(1), OracleCellValue::Str("Ada".to_owned())],
-            vec![OracleCellValue::Int(2), OracleCellValue::Str("Grace".to_owned())],
+            vec![
+                OracleCellValue::Int(1),
+                OracleCellValue::Str("Ada".to_owned()),
+            ],
+            vec![
+                OracleCellValue::Int(2),
+                OracleCellValue::Str("Grace".to_owned()),
+            ],
         ];
         let (ipc_bytes, row_count) = rows_to_arrow_ipc(&cols, &rows, true).expect("arrow ipc");
         assert_eq!(row_count, 2);

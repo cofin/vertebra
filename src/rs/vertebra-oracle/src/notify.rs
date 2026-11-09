@@ -13,7 +13,7 @@ use vertebra_db::py_async::{RustDbTaskAwaitable, spawn_rust_db_task_with_attr};
 
 use crate::client::{
     BindArgs, ORACLE_COMPLETION_DRAINER_ATTR, OracleBreakHandle, OracleWorkerHandle, OutBindSpec,
-     OutBindsPayload, WorkerCommand, WorkerReply,
+    OutBindsPayload, WorkerCommand, WorkerReply,
 };
 use crate::config::NativeOracleConfig;
 use crate::dialer::connect_oracledb;
@@ -159,6 +159,14 @@ impl ListenerRingBuffer {
 }
 
 type WaiterSender = oneshot::Sender<Result<Option<OracleNotification>, OracleError>>;
+type WaiterReceiver = oneshot::Receiver<Result<Option<OracleNotification>, OracleError>>;
+type AqListenerEntry = (String, Option<String>, Arc<ListenerSharedState>);
+
+enum PollNotification {
+    Ready(Option<OracleNotification>),
+    Wait(WaiterReceiver),
+    Fatal(OracleError),
+}
 
 struct ListenerLockedState {
     ring: ListenerRingBuffer,
@@ -233,46 +241,29 @@ impl ListenerSharedState {
         !was_closed
     }
 
-    fn poll_or_register_waiter(
-        &self,
-    ) -> Result<Option<OracleNotification>, Option<oneshot::Receiver<Result<Option<OracleNotification>, OracleError>>>>
-    {
+    fn poll_or_register_waiter(&self) -> PollNotification {
         if self.is_closed() {
-            return Ok(None);
+            return PollNotification::Ready(None);
         }
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(err) = guard.fatal_error.take() {
-            return Err(None_or_err(err));
+            return PollNotification::Fatal(err);
         }
         if let Some(frame) = guard.ring.pop() {
-            return Ok(Some(frame));
+            return PollNotification::Ready(Some(frame));
         }
         if self.is_closed() {
-            return Ok(None);
+            return PollNotification::Ready(None);
         }
         let (tx, rx) = oneshot::channel();
         guard.waiters.push_back(tx);
-        Err(Some(rx))
-    }
-}
-
-#[allow(non_snake_case)]
-fn None_or_err(
-    _err: OracleError,
-) -> Option<oneshot::Receiver<Result<Option<OracleNotification>, OracleError>>> {
-    None
-}
-
-impl ListenerSharedState {
-    fn take_fatal_error(&self) -> Option<OracleError> {
-        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        guard.fatal_error.take()
+        PollNotification::Wait(rx)
     }
 }
 
 struct InMemoryAqBroker {
     queues: Mutex<HashMap<String, VecDeque<OracleNotification>>>,
-    listeners: Mutex<Vec<(String, Option<String>, Arc<ListenerSharedState>)>>,
+    listeners: Mutex<Vec<AqListenerEntry>>,
 }
 
 impl InMemoryAqBroker {
@@ -315,12 +306,7 @@ impl InMemoryAqBroker {
         l_guard.push((q_upper, c_upper, state));
     }
 
-    fn publish(
-        &self,
-        queue_name: &str,
-        consumer_name: Option<&str>,
-        payload: &[u8],
-    ) -> Vec<u8> {
+    fn publish(&self, queue_name: &str, consumer_name: Option<&str>, payload: &[u8]) -> Vec<u8> {
         let seq = NEXT_AQ_MSG_SEQ.fetch_add(1, Ordering::Relaxed);
         let msg_id = format!("VTB{:013X}", seq).into_bytes();
         let now_ms = SystemTime::now()
@@ -630,11 +616,9 @@ impl AsyncOracleListener {
             py,
             async move {
                 match state.poll_or_register_waiter() {
-                    Ok(frame_opt) => Ok(frame_opt),
-                    Err(None) => Err(state.take_fatal_error().unwrap_or_else(|| {
-                        OracleError::operational("Oracle AQ listener failed")
-                    })),
-                    Err(Some(rx)) => {
+                    PollNotification::Ready(frame_opt) => Ok(frame_opt),
+                    PollNotification::Fatal(err) => Err(err),
+                    PollNotification::Wait(rx) => {
                         if let Some(dur) = timeout_dur {
                             match tokio::time::timeout(dur, rx).await {
                                 Ok(Ok(res)) => res,

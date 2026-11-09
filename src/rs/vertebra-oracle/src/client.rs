@@ -854,11 +854,11 @@ fn extract_column_alias_or_name(expr: &str) -> String {
 fn strip_leading_sql_comments(sql: &str) -> &str {
     let mut s = sql.trim();
     loop {
-        if s.starts_with("/*") {
-            if let Some(end) = s.find("*/") {
-                s = s[end + 2..].trim();
-                continue;
-            }
+        if s.starts_with("/*")
+            && let Some(end) = s.find("*/")
+        {
+            s = s[end + 2..].trim();
+            continue;
         }
         if s.starts_with("--") {
             if let Some(nl) = s.find('\n') {
@@ -1289,7 +1289,6 @@ impl InMemoryOracleStore {
         if upper.starts_with("ALTER ") || upper.starts_with("TRUNCATE ") {
             if upper.starts_with("TRUNCATE TABLE") {
                 let tbl_name = clean_sql["TRUNCATE TABLE".len()..]
-                    .trim()
                     .split_whitespace()
                     .next()
                     .unwrap_or("")
@@ -1673,7 +1672,7 @@ impl InMemoryOracleStore {
         let tbl = self.tables.get_mut(&tbl_name).unwrap();
         let mut new_row = vec![OracleCellValue::Null; tbl.columns.len()];
         if let Some(cols) = explicit_cols {
-            for (cname, val) in cols.into_iter().zip(eval_vals.into_iter()) {
+            for (cname, val) in cols.into_iter().zip(eval_vals) {
                 if let Some(cidx) = tbl.find_col_idx(&cname) {
                     new_row[cidx] = val;
                 } else {
@@ -1784,7 +1783,6 @@ impl InMemoryOracleStore {
                 message: "ORA-00971: missing SET keyword".to_owned(),
             })?;
         let tbl_name = stmt["UPDATE".len()..set_idx]
-            .trim()
             .split_whitespace()
             .next()
             .unwrap_or("")
@@ -1897,7 +1895,6 @@ impl InMemoryOracleStore {
                 (after_del, "")
             };
         let tbl_name = tbl_part
-            .trim()
             .split_whitespace()
             .next()
             .unwrap_or("")
@@ -2057,7 +2054,6 @@ impl InMemoryOracleStore {
             .min()
             .unwrap_or(after_from.len());
         let tbl_name = after_from[..tbl_end]
-            .trim()
             .split_whitespace()
             .next()
             .unwrap_or("")
@@ -2069,7 +2065,6 @@ impl InMemoryOracleStore {
             let cb_tail = &after_from_up[cb_pos..];
             if let Some(le_idx) = cb_tail.find("<=") {
                 let num_part = cb_tail[le_idx + 2..]
-                    .trim()
                     .split_whitespace()
                     .next()
                     .unwrap_or("1");

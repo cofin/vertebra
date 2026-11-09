@@ -39,16 +39,10 @@ pub enum OracleError {
     Interface(String),
     /// Socket, TLS, wallet, or listener transport failure.
     #[error("{message}")]
-    Transport {
-        code: Option<i32>,
-        message: String,
-    },
+    Transport { code: Option<i32>, message: String },
     /// Oracle server or TNS error carrying a numeric `ORA-xxxxx` code.
     #[error("{message}")]
-    Server {
-        code: i32,
-        message: String,
-    },
+    Server { code: i32, message: String },
     /// Statement cancelled via out-of-band `break_execution()` or future cancellation.
     #[error("{0}")]
     Cancelled(String),
@@ -86,10 +80,7 @@ pub fn extract_ora_code(message: &str) -> Option<i32> {
 
 /// Classify an Oracle vendor code or message into a canonical `DbExceptionTypes` kind, SQLSTATE, and transience flag.
 #[must_use]
-pub fn classify_oracle_error(
-    vendor_code: Option<i32>,
-    message: &str,
-) -> OracleErrorClassification {
+pub fn classify_oracle_error(vendor_code: Option<i32>, message: &str) -> OracleErrorClassification {
     let resolved_code = vendor_code.or_else(|| extract_ora_code(message));
     match resolved_code {
         Some(1) => OracleErrorClassification {
@@ -236,7 +227,13 @@ fn build_stand_in_types(py: Python<'_>) -> PyResult<CachedOracleExceptionTypes> 
     let not_found = new_stand_in_class(
         py,
         "NotFoundError",
-        &PyTuple::new(py, [data.bind(py), &py.get_type::<pyo3::exceptions::PyValueError>()])?,
+        &PyTuple::new(
+            py,
+            [
+                data.bind(py),
+                &py.get_type::<pyo3::exceptions::PyValueError>(),
+            ],
+        )?,
     )?;
     let operational = new_stand_in_class(py, "OperationalError", &PyTuple::new(py, [db_bound])?)?;
     let op_bound = operational.bind(py);
@@ -305,10 +302,7 @@ fn resolve_exception_types(py: Python<'_>) -> PyResult<&'static CachedOracleExce
     })
 }
 
-fn select_type_for_kind(
-    types: &CachedOracleExceptionTypes,
-    kind: OracleErrorKind,
-) -> &Py<PyType> {
+fn select_type_for_kind(types: &CachedOracleExceptionTypes, kind: OracleErrorKind) -> &Py<PyType> {
     match kind {
         OracleErrorKind::Integrity => &types.integrity,
         OracleErrorKind::SerializationFailure => &types.serialization_failure,
@@ -435,9 +429,7 @@ impl OracleError {
 mod tests {
     use pyo3::prelude::*;
 
-    use super::{
-        OracleError, OracleErrorKind, classify_oracle_error, extract_ora_code,
-    };
+    use super::{OracleError, OracleErrorKind, classify_oracle_error, extract_ora_code};
 
     #[test]
     fn extract_ora_code_parses_standard_messages() {
@@ -509,10 +501,7 @@ mod tests {
             }
             .to_py_err(py);
             let dup_val = dup.value(py);
-            assert_eq!(
-                dup_val.get_type().name().expect("name"),
-                "IntegrityError"
-            );
+            assert_eq!(dup_val.get_type().name().expect("name"), "IntegrityError");
             assert_eq!(
                 dup_val
                     .getattr("sqlstate")

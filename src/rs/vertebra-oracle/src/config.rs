@@ -197,9 +197,15 @@ impl fmt::Debug for RawOracleOptions {
             .field("ssl_server_dn_match", &self.ssl_server_dn_match)
             .field("ssl_server_cert_dn", &self.ssl_server_cert_dn)
             .field("wallet_location", &self.wallet_location)
-            .field("wallet_password", &redact_opt(self.wallet_password.as_ref()))
+            .field(
+                "wallet_password",
+                &redact_opt(self.wallet_password.as_ref()),
+            )
             .field("pem_cert_data", &redact_opt(self.pem_cert_data.as_ref()))
-            .field("cwallet_sso_data", &redact_opt(self.cwallet_sso_data.as_ref()))
+            .field(
+                "cwallet_sso_data",
+                &redact_opt(self.cwallet_sso_data.as_ref()),
+            )
             .field("auth_mode", &self.auth_mode)
             .field("access_token", &redact_opt(self.access_token.as_ref()))
             .field(
@@ -454,9 +460,15 @@ impl fmt::Debug for NativeOracleConfig {
             .field("ssl_server_dn_match", &self.ssl_server_dn_match)
             .field("ssl_server_cert_dn", &self.ssl_server_cert_dn)
             .field("wallet_location", &self.wallet_location)
-            .field("wallet_password", &redact_opt(self.wallet_password.as_ref()))
+            .field(
+                "wallet_password",
+                &redact_opt(self.wallet_password.as_ref()),
+            )
             .field("pem_cert_data", &redact_opt(self.pem_cert_data.as_ref()))
-            .field("cwallet_sso_data", &redact_opt(self.cwallet_sso_data.as_ref()))
+            .field(
+                "cwallet_sso_data",
+                &redact_opt(self.cwallet_sso_data.as_ref()),
+            )
             .field("auth_mode", &self.auth_mode)
             .field("access_token", &redact_opt(self.access_token.as_ref()))
             .field(
@@ -487,9 +499,7 @@ impl fmt::Debug for NativeOracleConfig {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{
-        DrcpPurity, NativeOracleConfig, OracleAuthMode, OracleProtocol, RawOracleOptions,
-    };
+    use super::{DrcpPurity, NativeOracleConfig, OracleAuthMode, OracleProtocol, RawOracleOptions};
     use crate::errors::OracleError;
 
     #[test]

@@ -6,7 +6,7 @@ chapter_id: ch07-conformance-and-okf-synthesis
 title: "Task 02: Implement Standalone Wheel Isolation and Free-Threaded Gate"
 description: Implement tools/scripts/verify_oracle_wheel.py (make oracle-wheel-check), wire vertebra-oracle across build_wheels, build_sdist, and test_wheels in .github/workflows/release.yaml, and add vertebra._oracle (GIL_USED == False) to src/py/tests/unit/test_freethreaded_gil.py.
 status: stable
-state: pending
+state: completed
 priority: P1
 owner: null
 depends_on:
@@ -27,18 +27,18 @@ verification_strategy: regression_tdd
 estimated_loc: 185
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T18:22:17Z"
+last_verified_commit: 1e0fc5b5
+verification_evidence: "verify_oracle_wheel.py passed, pytest test_freethreaded_gil.py + test_packaging_and_pgo.py + test_oracle_adapter.py (154 passed), cargo clippy -D warnings, cargo test (16 passed), stubtest, ruff, and mypy (410 files) passed"
 created_at: "2026-11-09T00:48:00Z"
-updated_at: "2026-11-09T01:28:30Z"
-completed_at: null
+updated_at: "2026-11-09T18:22:17Z"
+completed_at: "2026-11-09T18:22:17Z"
 commit_sha: null
 commit: null
 generated:
@@ -157,13 +157,13 @@ make lint-all
 
 ## Acceptance Criteria
 
-- [ ] `tools/scripts/verify_oracle_wheel.py` (`make oracle-wheel-check`) passes and verifies wheel contents, sibling `_oracle.pyi` exclusion, zero Instant Client linkage, and outside-checkout `MissingDependencyError` / installed import behavior [^ora-contracts].
-- [ ] `.github/workflows/release.yaml` includes `oracle` (`src/rs/vertebra-oracle`) in `build_wheels`, `build_sdist`, and `test_wheels` [^release-yaml].
-- [ ] `src/py/tests/unit/test_freethreaded_gil.py` verifies `vertebra._oracle` (`GIL_USED == False`) and all exported PyO3 classes [^freethreaded-py].
+- [x] `tools/scripts/verify_oracle_wheel.py` (`make oracle-wheel-check`) passes and verifies wheel contents, sibling `_oracle.pyi` exclusion, zero Instant Client linkage, and outside-checkout `MissingDependencyError` / installed import behavior [^ora-contracts].
+- [x] `.github/workflows/release.yaml` includes `oracle` (`src/rs/vertebra-oracle`) in `build_wheels`, `build_sdist`, and `test_wheels` [^release-yaml].
+- [x] `src/py/tests/unit/test_freethreaded_gil.py` verifies `vertebra._oracle` (`GIL_USED == False`) and all exported PyO3 classes [^freethreaded-py].
 
 ## Notes & Discoveries
 
-None yet.
+Aligned `_oracle.pyi` wheel exclusion lists across `vertebra-core`, `vertebra-bigquery`, `vertebra-bundler`, `vertebra-oracle`, `vertebra-spanner`, and `vertebra-storage`, registered `_ORACLE_EXT_MANIFEST` in `pgo.py` and `tools/pgo/rust_pgo.py`, and fixed fatal-error preservation in `AsyncOracleListener` waiter polling.
 
 [^ora-contracts]: `.agents/bundles/specs/native-oracle-driver/contracts.md` — Native `vertebra._oracle` module exports and wheel isolation contracts.
 [^freethreaded-py]: `src/py/tests/unit/test_freethreaded_gil.py::test_native_modules_declare_gil_used_false` — Free-threaded Python `3.14t`/`3.15t` `GIL_USED == False` verification suite.

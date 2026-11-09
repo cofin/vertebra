@@ -474,7 +474,9 @@ impl OraclePoolCore {
                     )
                 })
                 .await
-                .map_err(|e| OracleError::Interface(format!("pool checkout task panicked: {e}")))??;
+                .map_err(|e| {
+                    OracleError::Interface(format!("pool checkout task panicked: {e}"))
+                })??;
 
                 if let Some(worker) = finalized {
                     return Ok(worker);
@@ -489,7 +491,8 @@ impl OraclePoolCore {
                 ));
             }
             let remaining = deadline.saturating_duration_since(now);
-            if tokio::time::timeout(remaining, notified).await.is_err() && Instant::now() >= deadline
+            if tokio::time::timeout(remaining, notified).await.is_err()
+                && Instant::now() >= deadline
             {
                 return Err(OracleError::PoolExhausted(
                     "Oracle connection pool exhausted before acquire_timeout".to_owned(),
@@ -681,10 +684,7 @@ fn build_pool_options_from_py(
     )
 }
 
-fn build_stats_dict(
-    py: Python<'_>,
-    core: &OraclePoolCore,
-) -> PyResult<Py<PyDict>> {
+fn build_stats_dict(py: Python<'_>, core: &OraclePoolCore) -> PyResult<Py<PyDict>> {
     let (min_size, max_size, size, idle, borrowed, opening, closed) = core.stats_snapshot();
     let dict = PyDict::new(py);
     dict.set_item("min_size", min_size)?;
@@ -1310,7 +1310,11 @@ impl AsyncOraclePool {
         self.release(py, client, connection_tag, discard)
     }
 
-    pub fn evict(&self, py: Python<'_>, client: &AsyncOracleClient) -> PyResult<RustDbTaskAwaitable> {
+    pub fn evict(
+        &self,
+        py: Python<'_>,
+        client: &AsyncOracleClient,
+    ) -> PyResult<RustDbTaskAwaitable> {
         let inner = Arc::clone(&self.inner);
         let worker = Arc::clone(client.worker());
         spawn_rust_db_task_with_attr(

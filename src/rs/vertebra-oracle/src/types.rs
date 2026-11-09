@@ -460,13 +460,16 @@ impl OracleCellValue {
                 }
             }
             Self::DecimalStr(s) => {
-                if !fetch_decimals && !s.contains('.') && !s.contains('e') && !s.contains('E') {
-                    if let Ok(iv) = s.parse::<i64>() {
-                        return iv
-                            .into_pyobject(py)
-                            .map(Bound::into_any)
-                            .map_err(|e| OracleError::data_error(e.to_string()));
-                    }
+                if !fetch_decimals
+                    && !s.contains('.')
+                    && !s.contains('e')
+                    && !s.contains('E')
+                    && let Ok(iv) = s.parse::<i64>()
+                {
+                    return iv
+                        .into_pyobject(py)
+                        .map(Bound::into_any)
+                        .map_err(|e| OracleError::data_error(e.to_string()));
                 }
                 let dec_cls = py
                     .import("decimal")
@@ -587,8 +590,8 @@ pub fn extract_bind_value(obj: &Bound<'_, PyAny>) -> Result<OracleCellValue, Ora
                     ));
                 }
                 let mut vals = Vec::with_capacity(dims);
-                for chunk in raw_bytes.chunks_exact(4) {
-                    vals.push(f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                for &chunk in raw_bytes.as_chunks::<4>().0 {
+                    vals.push(f32::from_ne_bytes(chunk));
                 }
                 OracleVectorData::Float32(vals)
             }
@@ -599,11 +602,8 @@ pub fn extract_bind_value(obj: &Bound<'_, PyAny>) -> Result<OracleCellValue, Ora
                     ));
                 }
                 let mut vals = Vec::with_capacity(dims);
-                for chunk in raw_bytes.chunks_exact(8) {
-                    vals.push(f64::from_ne_bytes([
-                        chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
-                        chunk[7],
-                    ]));
+                for &chunk in raw_bytes.as_chunks::<8>().0 {
+                    vals.push(f64::from_ne_bytes(chunk));
                 }
                 OracleVectorData::Float64(vals)
             }

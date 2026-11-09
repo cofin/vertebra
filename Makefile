@@ -272,13 +272,10 @@ oracle-test:                                        ## Run Oracle Rust unit test
 	@echo "${OK} Oracle tests passed"
 
 .PHONY: oracle-wheel-check
-oracle-wheel-check:                                 ## Build vertebra-oracle wheel and sdist and verify isolated contents
+oracle-wheel-check:                                 ## Build vertebra-core and vertebra-oracle wheels and verify isolated fail-loud contract
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@rm -rf /tmp/vertebra-oracle-wheel-check
-	@uv build src/rs/vertebra-oracle --wheel --no-build-isolation --python "$(PYO3_PYTHON)" --out-dir /tmp/vertebra-oracle-wheel-check
-	@uv build src/rs/vertebra-oracle --sdist --no-build-isolation --python "$(PYO3_PYTHON)" --out-dir /tmp/vertebra-oracle-wheel-check
-	@PYTHONPATH="src/py:." uv run --no-sync python -c 'import glob, tarfile, zipfile; whls = glob.glob("/tmp/vertebra-oracle-wheel-check/*.whl"); assert len(whls) == 1, whls; zf = zipfile.ZipFile(whls[0]); vtb_entries = sorted(n for n in zf.namelist() if n.startswith("vertebra/")); assert len(vtb_entries) == 2, vtb_entries; assert "vertebra/_oracle.pyi" in vtb_entries, vtb_entries; assert any(n.startswith("vertebra/_oracle.") and not n.endswith(".pyi") for n in vtb_entries), vtb_entries; assert not any(n.endswith(".py") for n in vtb_entries), vtb_entries; sdists = glob.glob("/tmp/vertebra-oracle-wheel-check/*.tar.gz"); assert len(sdists) == 1, sdists; tf = tarfile.open(sdists[0]); names = tf.getnames(); assert any(n.endswith("Cargo.toml") for n in names), names; assert any(n.endswith("build.rs") for n in names), names; assert any(n.endswith("src/lib.rs") for n in names), names'
-	@echo "${OK} Oracle wheel and sdist verified"
+	@PYTHONPATH="src/py:." uv run --no-sync python tools/scripts/verify_oracle_wheel.py
+	@echo "${OK} Oracle wheel isolation verified"
 
 .PHONY: test
 test: rs-test py-test ts-test                       ## Run all tests (Rust, Python, TypeScript)

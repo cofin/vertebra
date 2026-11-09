@@ -39,8 +39,8 @@ verification_evidence: "pytest test_driver_conformance.py -k oracle (36 passed),
 created_at: "2026-11-09T00:48:00Z"
 updated_at: "2026-11-09T18:02:44Z"
 completed_at: "2026-11-09T18:02:44Z"
-commit_sha: null
-commit: null
+commit_sha: 1e0fc5b5
+commit: 1e0fc5b5
 generated:
   by: flow-plan
   at: "2026-11-09T01:15:00Z"

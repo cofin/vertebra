@@ -116,9 +116,8 @@ impl OracleWalletMaterial {
     /// Extract [`OracleWalletMaterial`] in memory from an Autonomous Database `.zip` archive without writing temporary files.
     pub fn from_zip_bytes(zip_bytes: &[u8]) -> Result<Self, OracleError> {
         let cursor = Cursor::new(zip_bytes);
-        let mut archive = zip::ZipArchive::new(cursor).map_err(|e| {
-            OracleError::Config(format!("invalid Oracle wallet .zip archive: {e}"))
-        })?;
+        let mut archive = zip::ZipArchive::new(cursor)
+            .map_err(|e| OracleError::Config(format!("invalid Oracle wallet .zip archive: {e}")))?;
         let mut tnsnames_ora = String::new();
         let mut sqlnet_ora = String::new();
         let mut ewallet_pem = Vec::new();
@@ -326,7 +325,12 @@ fn resolve_bearer_token(cfg: &NativeOracleConfig) -> Result<Option<String>, Orac
     if cfg.auth_mode == OracleAuthMode::Password {
         return Ok(None);
     }
-    if let Some(tok) = cfg.access_token.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    if let Some(tok) = cfg
+        .access_token
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         return Ok(Some(tok.to_owned()));
     }
     if let Some(ref opts_btree) = cfg.token_auth_options {
@@ -417,14 +421,13 @@ pub fn resolve_endpoint(cfg: &NativeOracleConfig) -> Result<ResolvedOracleEndpoi
         && (dsn != DEFAULT_ORACLE_DSN || !has_non_default_endpoint)
     {
         if looks_like_alias(dsn) {
-            let resolved =
-                lookup_alias_in_sources(dsn, wallet.as_ref(), cfg.tns_admin.as_deref())?
-                    .ok_or_else(|| OracleError::Server {
-                        code: 12154,
-                        message: format!(
-                            "ORA-12154: TNS:could not resolve the connect identifier specified: {dsn}"
-                        ),
-                    })?;
+            let resolved = lookup_alias_in_sources(dsn, wallet.as_ref(), cfg.tns_admin.as_deref())?
+                .ok_or_else(|| OracleError::Server {
+                    code: 12154,
+                    message: format!(
+                        "ORA-12154: TNS:could not resolve the connect identifier specified: {dsn}"
+                    ),
+                })?;
             if resolved.security_cert_dn.is_some() || resolved.port == 1522 {
                 effective_protocol = OracleProtocol::Tcps;
             }
@@ -450,7 +453,11 @@ pub fn resolve_endpoint(cfg: &NativeOracleConfig) -> Result<ResolvedOracleEndpoi
             effective_cert_dn = resolved.security_cert_dn.clone();
         }
         resolved.to_tns_descriptor()
-    } else if wallet.is_some() && cfg.dsn.is_none() && cfg.connect_descriptor.is_none() && !w_has_empty_aliases(wallet.as_ref()) {
+    } else if wallet.is_some()
+        && cfg.dsn.is_none()
+        && cfg.connect_descriptor.is_none()
+        && !w_has_empty_aliases(wallet.as_ref())
+    {
         return Err(OracleError::Server {
             code: 12154,
             message: format!(
@@ -617,10 +624,8 @@ lM2nO3pQ4rS5tU6v\n\
 
     #[test]
     fn resolve_endpoint_handles_wallet_alias_and_ora_12154_on_unknown_alias() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "vtb-ora-wallet-test-{}",
-            std::process::id()
-        ));
+        let temp_dir =
+            std::env::temp_dir().join(format!("vtb-ora-wallet-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).expect("create tempdir");
         let zip_path = temp_dir.join("Wallet_MYDB.zip");

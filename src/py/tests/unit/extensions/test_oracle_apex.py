@@ -520,4 +520,3 @@ async def test_oracle_session_manager_trusted_package_and_evict_on_failed_detach
     assert bad_pool.conn.evicted is True
     assert bad_pool.conn.client_identifier is None
     assert bad_pool.conn.ecid is None
-
