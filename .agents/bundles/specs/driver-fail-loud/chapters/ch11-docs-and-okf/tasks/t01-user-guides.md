@@ -5,7 +5,7 @@ chapter_id: ch11-docs-and-okf
 title: State engine status, DuckDB requirement, memory:// scope, and the vertebra-db role in README and usage guides
 description: Rewrite the README driver list and the databases and extensions usage guides so Oracle and SQL Server read as pending native drivers, DuckDB requires duckdb, which free-threaded interpreters do not install, engine drivers reject memory://, vertebra-db reads as codecs and transport, and unparsable +vtb URLs raise InterfaceError.
 status: stable
-state: pending
+state: completed
 priority: P2
 verification_strategy: documentation_validation
 depends_on: []
@@ -24,18 +24,18 @@ tests: []
 estimated_loc: 75
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: agent:flow-executor
+claimed_at: "2026-11-09T15:05:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T15:11:12Z"
+last_verified_commit: f2b328dc
+verification_evidence: "stale-claim grep, relative-link check, make docs, and pytest src/py/tests/unit/tools/test_docs_tooling.py -q (28 passed)"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T15:11:12Z"
+commit: f2b328dc
 sources:
   - id: readme
     resource: README.md
@@ -170,12 +170,12 @@ If any fenced code block changed, save it to a scratch file and run `uv run --no
 
 ## Acceptance Criteria
 
-- [ ] README and `docs/usage/databases.md` mark Oracle and SQL Server as pending native drivers raising `MissingDependencyError`, state that their native packages are not yet published, and quote no `vertebra-core[oracle]` / `[mssql]` command (R13, R1).
-- [ ] `docs/usage/databases.md` intro and mermaid describe `vertebra-db` as shared codecs, dialers, and transport (R13, R8).
-- [ ] `docs/usage/databases.md` states the `duckdb` package requirement and that DuckDB publishes no free-threaded wheel, so `duckdb` is not installed on `3.14t` / `3.15t` and DuckDB drivers raise `MissingDependencyError` there (R13, R3).
-- [ ] `docs/usage/databases.md` states that PostgreSQL/MySQL/Redis/Valkey drivers and the Redis/Valkey store factories raise `ImproperConfigurationError` for `memory://`, that `parse_url("memory://")` raises `ValueError`, and that queue, object-storage, and `SQLAlchemyCacheBackend.from_url` `memory://` stay (R6, R7).
-- [ ] `docs/usage/extensions.md` dialect and SQLSpec claims are accurate, including `InterfaceError` for unparsable URLs and the `duckdb` requirement for `duckdb+vtb://` (R3, R4, R13).
-- [ ] Every Verification command exits `0`.
+- [x] README and `docs/usage/databases.md` mark Oracle and SQL Server as pending native drivers raising `MissingDependencyError`, state that their native packages are not yet published, and quote no `vertebra-core[oracle]` / `[mssql]` command (R13, R1).
+- [x] `docs/usage/databases.md` intro and mermaid describe `vertebra-db` as shared codecs, dialers, and transport (R13, R8).
+- [x] `docs/usage/databases.md` states the `duckdb` package requirement and that DuckDB publishes no free-threaded wheel, so `duckdb` is not installed on `3.14t` / `3.15t` and DuckDB drivers raise `MissingDependencyError` there (R13, R3).
+- [x] `docs/usage/databases.md` states that PostgreSQL/MySQL/Redis/Valkey drivers and the Redis/Valkey store factories raise `ImproperConfigurationError` for `memory://`, that `parse_url("memory://")` raises `ValueError`, and that queue, object-storage, and `SQLAlchemyCacheBackend.from_url` `memory://` stay (R6, R7).
+- [x] `docs/usage/extensions.md` dialect and SQLSpec claims are accurate, including `InterfaceError` for unparsable URLs and the `duckdb` requirement for `duckdb+vtb://` (R3, R4, R13).
+- [x] Every Verification command exits `0`.
 
 ## Notes & Discoveries
 

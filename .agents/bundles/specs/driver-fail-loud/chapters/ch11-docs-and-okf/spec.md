@@ -6,7 +6,7 @@ chapter_id: ch11-docs-and-okf
 title: "Chapter 11: Documentation and OKF Sync"
 description: Align README, usage and reference docs, and the OKF data-domain, testing, decision, and product chapters with the fail-loud driver baseline delivered by chapters 01 through 09.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch01-oracle-mssql-fail-loud
@@ -19,14 +19,14 @@ depends_on_chapters:
   - ch08-install-hints-and-extras-gate
   - ch09-conformance-outcomes
 replan_trigger: null
-current_task: "driver-fail-loud:ch11:t01"
+current_task: null
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-last_verified_checkpoint: null
+state_revision: 1
+last_verified_checkpoint: f2b328dc
 last_reviewed_commit: null
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
+updated_at: "2026-11-09T15:11:12Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-07T00:00:00Z"
@@ -197,18 +197,18 @@ Install-hint contract quoted in OKF only: `MissingDependencyError(package, *, in
 
 ## 3. Documentation & OKF Knowledge Plan
 
-- **Progress**: `[0/11 files documented]`
-- `[ ]` `README.md` — t01
-- `[ ]` `docs/usage/databases.md` — t01
-- `[ ]` `docs/usage/extensions.md` — t01
-- `[ ]` `docs/reference/db.md` — t02
-- `[ ]` `docs/reference/index.md` — t02
-- `[ ]` `docs/usage/analytics-and-cdc.md` — t02
-- `[ ]` `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — t03
-- `[ ]` `.agents/bundles/knowledge/testing/polyglot-test-matrix.md` — t03
-- `[ ]` `.agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md` — t04
-- `[ ]` `.agents/bundles/product/product.md` — t04
-- `[ ]` `.agents/bundles/knowledge/decisions/adr-002-two-tier-shm-database-and-arrow-data-plane.md` — t04
+- **Progress**: `[11/11 files documented]`
+- `[x]` `README.md` — t01
+- `[x]` `docs/usage/databases.md` — t01
+- `[x]` `docs/usage/extensions.md` — t01
+- `[x]` `docs/reference/db.md` — t02
+- `[x]` `docs/reference/index.md` — t02
+- `[x]` `docs/usage/analytics-and-cdc.md` — t02
+- `[x]` `.agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md` — t03
+- `[x]` `.agents/bundles/knowledge/testing/polyglot-test-matrix.md` — t03
+- `[x]` `.agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md` — t04
+- `[x]` `.agents/bundles/product/product.md` — t04
+- `[x]` `.agents/bundles/knowledge/decisions/adr-002-two-tier-shm-database-and-arrow-data-plane.md` — t04
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -221,17 +221,17 @@ Install-hint contract quoted in OKF only: `MissingDependencyError(package, *, in
 
 ## 5. Implementation Plan
 
-- [ ] driver-fail-loud:ch11:t01 — README, databases guide, and extensions guide state engine status, DuckDB requirement, and memory:// scope (tasks/t01-user-guides.md)
-- [ ] driver-fail-loud:ch11:t02 — Reference pages and analytics guide drop stand-in and TDS claims (tasks/t02-reference-and-analytics-docs.md)
-- [ ] driver-fail-loud:ch11:t03 — OKF drivers chapter and test matrix describe status, codecs, install hints, and conformance outcomes (tasks/t03-driver-and-conformance-knowledge.md)
-- [ ] driver-fail-loud:ch11:t04 — OKF tenancy, product, and ADR-002 chapters drop stand-in and deleted exports (tasks/t04-tenancy-product-and-adr-knowledge.md)
+- [x] [f2b328dc] driver-fail-loud:ch11:t01 — README, databases guide, and extensions guide state engine status, DuckDB requirement, and memory:// scope (tasks/t01-user-guides.md)
+- [x] [f2b328dc] driver-fail-loud:ch11:t02 — Reference pages and analytics guide drop stand-in and TDS claims (tasks/t02-reference-and-analytics-docs.md)
+- [x] [f2b328dc] driver-fail-loud:ch11:t03 — OKF drivers chapter and test matrix describe status, codecs, install hints, and conformance outcomes (tasks/t03-driver-and-conformance-knowledge.md)
+- [x] [f2b328dc] driver-fail-loud:ch11:t04 — OKF tenancy, product, and ADR-002 chapters drop stand-in and deleted exports (tasks/t04-tenancy-product-and-adr-knowledge.md)
 - **Chapter / Phase Recovery Checkpoint**: `make review-check && make docs-check && uv run --no-sync pytest src/py/tests/unit/tools/test_docs_tooling.py -q`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `0acdf576` — chapter authored; blocked on `ch01`–`ch09`.
-- **Remaining Tasks**: `t01`, `t02`, `t03`, `t04` (`0/4` completed).
-- **Documentation & OKF Sync**: `[0/11 files documented]`.
+- **Verified Baseline (`HEAD`)**: `f2b328dc` — chapter completed and verified (`4/4` tasks completed).
+- **Remaining Tasks**: None (`4/4` completed).
+- **Documentation & OKF Sync**: `[11/11 files documented]`.
 - **Active Invariants**: queue, object-storage, and Alchemy L1 cache `memory://` docs unchanged; changelog untouched; no internal identifiers in user docs; no planned-extra install command in user docs.
 
 [^readme]: `README.md` — Repository README driver list.

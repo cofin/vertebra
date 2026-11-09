@@ -73,7 +73,7 @@ app = Litestar(
 
 ## SQLSpec Integration, Statement Stacks & SHM Proxy (`vertebra.extensions.sqlspec`)
 
-Vertebra provides first-class support for `sqlspec` (`>=0.69.0`) across 8 database engines, native statement pipelining, and shared-memory connection pooling:
+Vertebra provides first-class support for `sqlspec` (`>=0.69.0`) across 8 database engines (Oracle and SQL Server configs construct, while session acquisition raises `MissingDependencyError` because their native driver packages are not yet published), native statement pipelining, and shared-memory connection pooling:
 
 - **Native Drivers**: Typed sync and async database configs across relational, analytical, and cloud-native engines (`PostgreSQLSyncConfig`, `PostgreSQLAsyncConfig`, `MySQLSyncConfig`, `MySQLAsyncConfig`, `SQLiteSyncConfig`, `SQLiteAsyncConfig`, `OracleSyncConfig`, `OracleAsyncConfig`, `MSSQLSyncConfig`, `MSSQLAsyncConfig`, `DuckDBSyncConfig`, `DuckDBAsyncConfig`, `BigQuerySyncConfig`, `BigQueryAsyncConfig`, `SpannerSyncConfig`, `SpannerAsyncConfig`).
 - **Shared-Memory Proxy**: `ProxySyncConfig` and `ProxyAsyncConfig` (`ProxySyncDriver`, `ProxyAsyncDriver`) lease pooled connections over shared memory from the parent process so multi-worker deployments never multiply connection counts.
@@ -98,7 +98,7 @@ sqlspec_plugin = create_sqlspec_plugin(config)
 
 `vertebra.extensions.alchemy` and `vertebra.extensions.sqlalchemy` provide drop-in SQLAlchemy 2.1 and Advanced Alchemy 1.12 support backed by Vertebra's native drivers and connection leasing:
 
-- **Dialects**: Registers `+vertebra`, `+vtb`, `+vertebra_async`, and `+vtb_async` URL schemes across all 8 engines (`postgresql+vtb://`, `postgresql+vtb_async://`, `mysql+vtb://`, `sqlite+vtb://`, `oracle+vtb://`, `mssql+vtb://`, `duckdb+vtb://`, `bigquery+vtb://`, `spanner+vtb://`, `spangres+vtb://`) with automatic `NullPool` wiring and Cloud SQL / AlloyDB dialers.
+- **Dialects**: Registers `+vertebra`, `+vtb`, `+vertebra_async`, and `+vtb_async` URL schemes (`postgresql+vtb://`, `postgresql+vtb_async://`, `mysql+vtb://`, `sqlite+vtb://`, `oracle+vtb://`, `mssql+vtb://`, `duckdb+vtb://`, `bigquery+vtb://`, `spanner+vtb://`, `spangres+vtb://`) with automatic `NullPool` wiring and Cloud SQL / AlloyDB dialers. `oracle+vtb://` and `mssql+vtb://` connections raise `MissingDependencyError` because their native driver packages are not yet published, `duckdb+vtb://` requires the `duckdb` package, and any URL that `DatabaseRegistry.parse_url` cannot parse raises the DB-API `InterfaceError`.
 - **Type System**: Native `Vector(dimensions)` for vector embeddings and `BinaryJSON` for PostgreSQL `JSONB` and Oracle `OSON`.
 - **Object Storage Attachments**: `ObjectStoreBackend` implements Advanced Alchemy's `advanced_alchemy.types.file_object.StorageBackend`, enabling transactional file attachments on models via `FileObject` and `StoredObject`.
 - **Alembic Custom Operations**: Autogenerates vector index and view DDL operations (`CreateVectorIndexOp`, `CreateViewOp`, `DropViewOp`).

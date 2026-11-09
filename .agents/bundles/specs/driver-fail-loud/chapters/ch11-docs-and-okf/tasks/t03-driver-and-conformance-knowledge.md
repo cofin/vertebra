@@ -5,7 +5,7 @@ chapter_id: ch11-docs-and-okf
 title: Sync the OKF drivers chapter and test matrix with adapter status, codecs, install hints, and conformance outcomes
 description: Rewrite database-drivers-and-dialers.md and the polyglot-test-matrix conformance section in present tense with matching sources, footnotes, and refreshed verified entries.
 status: stable
-state: pending
+state: completed
 priority: P2
 verification_strategy: documentation_validation
 depends_on: []
@@ -23,18 +23,18 @@ tests: []
 estimated_loc: 130
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: agent:flow-executor
+claimed_at: "2026-11-09T15:08:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T15:11:12Z"
+last_verified_commit: f2b328dc
+verification_evidence: "OKF provenance pairing check, stale-claim grep, relative-link check, and tools.scripts.review_setup validate"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T15:11:12Z"
+commit: f2b328dc
 sources:
   - id: okf-drivers
     resource: .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
@@ -202,12 +202,12 @@ make review-check
 
 ## Acceptance Criteria
 
-- [ ] Adapter table states Oracle/MSSQL pending status, the DuckDB requirement and free-threaded caveat, and `memory://` rejection (R1, R3, R6, R7, R13).
-- [ ] Wallet parsing is attributed to Python `OracleWallet`, `tns.rs` to `tnsnames.ora` / descriptor parsing, and async MySQL to `asyncmy` (R8, R13).
-- [ ] Codec inventory matches post-ch07 `lib.rs`: kept `tnsnames.ora` parsing, `VECTOR`, `pgvector`, OSON, session attrs, `rewrite_mssql_placeholders` `@P1` rewriter, SQLite pragmas, DuckDB bootstrap, RESP3; no `*Pool`, `OracleWalletMaterial` struct, MySQL module, or TDS/TNS framing (R8, R9).
-- [ ] Install-hint contract and extras gate are documented with provenance (R10, R11).
-- [ ] Conformance outcomes (skip on a missing module, Docker-mode failure only for non-pending engines, strict `xfail` only when a pending module imports, Redis/Valkey live-only through `_resolve_cache_config`) replace the unconditional strict `xfail` and `memory://` defaults in both files, and reporting keeps passed, skipped, and expected-failure cases separate (R7, R12).
-- [ ] Every Verification command exits `0`.
+- [x] Adapter table states Oracle/MSSQL pending status, the DuckDB requirement and free-threaded caveat, and `memory://` rejection (R1, R3, R6, R7, R13).
+- [x] Wallet parsing is attributed to Python `OracleWallet`, `tns.rs` to `tnsnames.ora` / descriptor parsing, and async MySQL to `asyncmy` (R8, R13).
+- [x] Codec inventory matches post-ch07 `lib.rs`: kept `tnsnames.ora` parsing, `VECTOR`, `pgvector`, OSON, session attrs, `rewrite_mssql_placeholders` `@P1` rewriter, SQLite pragmas, DuckDB bootstrap, RESP3; no `*Pool`, `OracleWalletMaterial` struct, MySQL module, or TDS/TNS framing (R8, R9).
+- [x] Install-hint contract and extras gate are documented with provenance (R10, R11).
+- [x] Conformance outcomes (skip on a missing module, Docker-mode failure only for non-pending engines, strict `xfail` only when a pending module imports, Redis/Valkey live-only through `_resolve_cache_config`) replace the unconditional strict `xfail` and `memory://` defaults in both files, and reporting keeps passed, skipped, and expected-failure cases separate (R7, R12).
+- [x] Every Verification command exits `0`.
 
 ## Notes & Discoveries
 

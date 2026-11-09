@@ -49,11 +49,11 @@ Setter failures propagate unchanged. Other base SQLSpec adapters raise
 their existing query, script, Arrow, batch, and snapshot behavior.
 
 `OracleCore.build_session_context_sql()` validates the namespace and final segment
-of `setting_name`, then returns named context binds. The current Oracle driver
-records these values in its SQLite stand-in. This verifies helper and emulation
-behavior only. Live `DBMS_SESSION.SET_CONTEXT` requires a trusted package associated
-with `CREATE CONTEXT`; trusted-package provisioning, session reset, and live Oracle
-acceptance belong to the native Oracle driver work. See the
+of `setting_name`, then returns named context binds. Oracle drivers raise
+`MissingDependencyError` because the native Oracle driver package is not yet
+published, so no Vertebra session executes the block. Live
+`DBMS_SESSION.SET_CONTEXT` requires a trusted package associated with
+`CREATE CONTEXT`. See the
 [Oracle DBMS_SESSION documentation](https://docs.oracle.com/en/database/oracle/oracle-database/26/arpls/DBMS_SESSION.html).
 Vertebra does not provision database RLS or VPD policies.
 
@@ -95,7 +95,7 @@ method accepts no required arguments and satisfies `SyncChangeSource` or
 
 ## Zero-Copy Arrow SHM (`ArrowCursor`), DuckDB & DataFusion
 
-Result sets exceeding `ARROW_SHM_THRESHOLD_ROWS` (`256` rows or `64 KiB`) bypass per-row Python tuple allocation and stream directly as Apache Arrow IPC buffers inside POSIX shared memory (`ArrowCursor`) via `driver.select_to_arrow(...)`:
+Result sets exceeding `ARROW_SHM_THRESHOLD_ROWS` (`256` rows or `64 KiB`) bypass per-row Python tuple allocation and stream directly as Apache Arrow IPC buffers inside POSIX shared memory (`ArrowCursor`) via `driver.select_to_arrow(...)`. DuckDB execution requires the `duckdb` package and raises `MissingDependencyError` without it:
 
 ```python
 from vertebra.db.adapters.datafusion import DataFusionConfig, DataFusionEngine

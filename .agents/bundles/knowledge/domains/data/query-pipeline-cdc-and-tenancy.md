@@ -13,6 +13,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-09T15:06:00Z"
+    commit: f2b328dc
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 9af810f5
@@ -29,6 +32,9 @@ sources:
 - id: src-oracle-tenant-core
   resource: src/py/vertebra/db/adapters/oracle/core.py
   title: Oracle context SQL builder
+- id: src-oracle-driver
+  resource: src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver
+  title: Oracle driver native-module guard
 - id: src-tenant-native-tests
   resource: src/py/tests/unit/db/test_native_db_drivers.py
   title: Generic engine-purity positive and negative probes
@@ -125,7 +131,7 @@ Single-operation stacks, non-pipeline drivers, stacks containing `execute_many`,
 
 BigQuery and Spanner's eight SQLSpec config/driver constructors reject a non-None `tenant_predicate` as their first executable statement, before base initialization, core access, config resolution, broker allocation, or native side effects. Unsupported isolation sessions cannot be constructed; unconfigured sessions retain query, script, Arrow, batch, and snapshot behavior.[^src-tenant-enterprise-tests]
 
-The Python Oracle adapter records context values in its in-process SQLite stand-in. Live Oracle `DBMS_SESSION.SET_CONTEXT` execution requires a trusted package associated with `CREATE CONTEXT` in the call stack, and no helper provisions RLS or VPD policies ([Oracle DBMS_SESSION reference](https://docs.oracle.com/en/database/oracle/oracle-database/26/arpls/DBMS_SESSION.html)).
+Oracle drivers raise `MissingDependencyError` until `vertebra._oracle` is installed, so `OracleCore.build_session_context_sql` output is verified as SQL text and binds only[^src-oracle-driver]. Live Oracle `DBMS_SESSION.SET_CONTEXT` execution requires a trusted package associated with `CREATE CONTEXT` in the call stack, and no helper provisions RLS or VPD policies ([Oracle DBMS_SESSION reference](https://docs.oracle.com/en/database/oracle/oracle-database/26/arpls/DBMS_SESSION.html)).
 
 ### Generic Database Engine Purity
 
@@ -184,5 +190,6 @@ Provenance sources: [^src-tests-unit-db-test-pg-dataplane-and-datafusion-py], [^
 [^src-extensions-sqlspec-spanner-py]: `src/py/vertebra/extensions/sqlspec/spanner.py` — Spanner SQLSpec parser and native parameter defaults.
 [^src-postgres-tenant-core]: `src/py/vertebra/db/adapters/postgres/core.py` — PostgreSQL tenant and session SQL builders.
 [^src-oracle-tenant-core]: `src/py/vertebra/db/adapters/oracle/core.py` — Oracle context SQL builder.
+[^src-oracle-driver]: `src/py/vertebra/db/adapters/oracle/driver.py::SyncOracleDriver` — Oracle driver native-module guard.
 [^src-tenant-native-tests]: `src/py/tests/unit/db/test_native_db_drivers.py` — Generic engine-purity positive and negative probes.
 [^src-tenant-enterprise-tests]: `src/py/tests/unit/db/test_enterprise_olap_drivers.py` — Session bind and failure identity acceptance.

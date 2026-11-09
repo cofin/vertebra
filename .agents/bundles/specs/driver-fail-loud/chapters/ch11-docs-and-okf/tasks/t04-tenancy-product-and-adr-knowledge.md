@@ -5,7 +5,7 @@ chapter_id: ch11-docs-and-okf
 title: Remove the SQLite stand-in, TNS/TDS framing, and deleted vertebra-db exports from tenancy, product, and ADR-002 chapters
 description: Rewrite the OKF tenancy chapter Oracle paragraph, the product overview data-access bullet, tenant paragraph, and vertebra-db component row, and the ADR-002 consequences in present tense with matching provenance.
 status: stable
-state: pending
+state: completed
 priority: P2
 verification_strategy: documentation_validation
 depends_on:
@@ -25,18 +25,18 @@ tests: []
 estimated_loc: 50
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: agent:flow-executor
+claimed_at: "2026-11-09T15:09:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T15:11:12Z"
+last_verified_commit: f2b328dc
+verification_evidence: "OKF provenance pairing check, stale-claim grep, relative-link check, and tools.scripts.review_setup validate"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T15:11:12Z"
+commit: f2b328dc
 sources:
   - id: okf-tenancy
     resource: .agents/bundles/knowledge/domains/data/query-pipeline-cdc-and-tenancy.md
@@ -173,10 +173,10 @@ make review-check
 
 ## Acceptance Criteria
 
-- [ ] Tenancy chapter and product.md describe Oracle context as builder-verified with drivers raising `MissingDependencyError` (R1, R13).
-- [ ] product.md Data Access bullet and component row match post-ch07 `lib.rs` and state Oracle/SQL Server/DuckDB status (R3, R8, R13).
-- [ ] ADR-002 Consequences carry no Thin TNS/TTC or TDS framing claim (R8, R13).
-- [ ] Every Verification command exits `0`.
+- [x] Tenancy chapter and product.md describe Oracle context as builder-verified with drivers raising `MissingDependencyError` (R1, R13).
+- [x] product.md Data Access bullet and component row match post-ch07 `lib.rs` and state Oracle/SQL Server/DuckDB status (R3, R8, R13).
+- [x] ADR-002 Consequences carry no Thin TNS/TTC or TDS framing claim (R8, R13).
+- [x] Every Verification command exits `0`.
 
 ## Notes & Discoveries
 

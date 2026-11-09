@@ -14,6 +14,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-09T15:06:00Z"
+    commit: f2b328dc
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 9af810f5
@@ -101,7 +104,7 @@ The registry's declarative config registration and annotation-only driver import
 
 ## Consequences
 
-- `vertebra-db` implements pure-Rust protocol codecs and cloud dialers (`CloudSqlDialer` `:3307`, `AlloyDbDialer` `:5433`, Oracle Thin TNS/TTC + Wallet, TDS `@P1` rewriting, RESP3 client tracking) with zero external C client libraries required at runtime; `vertebra-bigquery` and `vertebra-spanner` execute over native Rust clients in standalone PyO3 wheels, while non-GCP Python driver adapters execute through Python client bindings or the shared-memory broker proxy.
+- `vertebra-db` implements pure-Rust protocol codecs and cloud dialers (`CloudSqlDialer` `:3307`, `AlloyDbDialer` `:5433`, Oracle wallet/`tnsnames.ora` parsing and 26ai `VECTOR`/OSON codecs, SQL Server `@P1` rewriting, RESP3 client tracking) with zero external C client libraries required at runtime; `vertebra-bigquery` and `vertebra-spanner` execute over native Rust clients in standalone PyO3 wheels, while PostgreSQL, MySQL, SQLite, DuckDB, Redis, and Valkey adapters execute through Python client bindings or the shared-memory broker proxy, and Oracle and SQL Server drivers raise `MissingDependencyError` until their native modules ship.
 - `vertebra.extensions.sqlspec`, `vertebra.extensions.alchemy`, and `vertebra.extensions.sqlalchemy` expose drop-in adapter configs and `+vtb` dialects backed by `LeaseBroker`, `StatementCache`, and `hydrate_rows_vectorcall`.
 
 Provenance sources: [^src-vertebra-core-src-broker-rs], [^src-vertebra-db-src-lib-rs], [^src-db-init-py], [^src-extensions-sqlspec-init-py], [^src-extensions-alchemy-init-py], [^src-extensions-sqlalchemy-dialects-py].

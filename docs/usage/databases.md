@@ -1,13 +1,13 @@
 # Databases & Native Drivers
 
-Vertebra integrates first-class **SQLSpec** adapters (`vertebra.extensions.sqlspec`) with native Rust shared-memory database drivers (`vertebra.db` / `vertebra-db`). Each engine lives in its own adapter package under `vertebra.db.adapters.<engine>`, keeping `import vertebra.db` lightweight until a concrete driver is requested. See the focused guides for [Cloud SQL & AlloyDB Dialers](cloud-dialers.md), [RLS, CDC & Arrow Analytics](analytics-and-cdc.md), and [SQLSpec & SQLAlchemy Extensions](extensions.md).
+Vertebra integrates first-class **SQLSpec** adapters (`vertebra.extensions.sqlspec`) on top of `vertebra.db` engine drivers; each engine lives in its own adapter package under `vertebra.db.adapters.<engine>`, keeping `import vertebra.db` lightweight until a concrete driver is requested. BigQuery and Spanner run on their own native wheels, the other engines use their Python client packages, and the Rust `vertebra-db` crate supplies shared wire codecs, Cloud SQL / AlloyDB dialers, and shared-memory Arrow transport. See the focused guides for [Cloud SQL & AlloyDB Dialers](cloud-dialers.md), [RLS, CDC & Arrow Analytics](analytics-and-cdc.md), and [SQLSpec & SQLAlchemy Extensions](extensions.md).
 
 ```mermaid
 flowchart LR
     A["Route Handlers"] --> B["SQLSpec Plugin & provide_driver"]
     B --> C["DatabaseRegistry & Adapter Configs"]
-    C --> D["Vertebra Native Drivers (Rust SHM)"]
-    D --> E[("PostgreSQL / Oracle / MySQL / MSSQL / SQLite / DuckDB / BigQuery / Spanner")]
+    C --> D["Engine Drivers & vertebra-db Codecs"]
+    D --> E[("PostgreSQL / MySQL / SQLite / DuckDB / BigQuery / Spanner")]
 ```
 
 ## Optional Engine Extras
@@ -41,6 +41,10 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
     poetry add "vertebra-core[bigquery]"
     poetry add "vertebra-core[spanner]"
     ```
+
+DuckDB requires the `duckdb` package (`uv add duckdb`); without it `SyncDuckDBDriver` and `AsyncDuckDBDriver` raise `MissingDependencyError`. DuckDB publishes no free-threaded wheel, so `duckdb` is not installed on Python `3.14t` / `3.15t` and DuckDB drivers raise `MissingDependencyError` there.
+
+The native Oracle and SQL Server driver packages are not yet published. `OracleConfig` and `MSSQLConfig` import and parse URLs; constructing `SyncOracleDriver`, `AsyncOracleDriver`, `SyncMSSQLDriver`, or `AsyncMSSQLDriver` raises `MissingDependencyError`.
 
 ## Unified Driver Contract & `provide_driver`
 
@@ -113,21 +117,23 @@ app = Litestar(
 
 ## Native Database Drivers & Adapters Matrix
 
-`vertebra.db.adapters` and `vertebra.extensions.sqlspec` provide synchronous and asynchronous drivers across 11 relational, analytical, cloud-native, and key-value engines:
+`vertebra.db.adapters` and `vertebra.extensions.sqlspec` provide synchronous and asynchronous drivers across 11 relational, analytical, cloud-native, and key-value engines (the Oracle 26ai and SQL Server rows describe configuration and codecs only):
 
 | Engine | SQLSpec Adapter Config | Native Config Class | Sync / Async Drivers | Key Capabilities |
 | --- | --- | --- | --- | --- |
 | **PostgreSQL** | `PostgreSQLAsyncConfig`, `PostgreSQLSyncConfig` | `PostgreSQLConfig` | `SyncPostgreSQLDriver`, `AsyncPostgreSQLDriver` | Binary `PGCOPY`, binary `pgvector` (`vector`/`halfvec`/`bit`), zero-copy `JSONB`, PgBouncer/PgCat/pgdog pooler modes, direct `:5432` IAM OAuth2 password or `:5433` AlloyDB / `:3307` Cloud SQL dialers |
 | **MySQL / MariaDB** | `MySQLAsyncConfig`, `MySQLSyncConfig` | `MySQLConfig` | `SyncMySQLDriver`, `AsyncMySQLDriver` | Bounded connection pools, binary prepared statements, direct `:3306` IAM OAuth2 password or Cloud SQL `:3307` dialer integration |
 | **SQLite / libSQL** | `SQLiteAsyncConfig`, `SQLiteSyncConfig` | `SQLiteConfig` | `SyncSQLiteDriver`, `AsyncSQLiteDriver` | WAL mode, `mmap_size`, SQLite 3.45+ binary `JSONB`, SHM single-writer/multi-reader leasing |
-| **Oracle 26ai** | `OracleAsyncConfig`, `OracleSyncConfig` | `OracleConfig` | `SyncOracleDriver`, `AsyncOracleDriver` | Pure-Rust Thin TNS/TTC wire framing, zero-copy `PyBuffer` 26ai `VECTOR` (`0xDB`), `OSON` binary JSON, `OracleWallet` |
-| **SQL Server** | `MSSQLAsyncConfig`, `MSSQLSyncConfig` | `MSSQLConfig` | `SyncMSSQLDriver`, `AsyncMSSQLDriver` | TDS 7.4/8.0 framing, `?` / `$1` to `@P1` parameter rewriter, `ArrowCursor` |
-| **DuckDB** | `DuckDBAsyncConfig`, `DuckDBSyncConfig` | `DuckDBConfig` | `SyncDuckDBDriver`, `AsyncDuckDBDriver` | Single-writer/multi-reader OLAP, active ADC `httpfs` secret rotation, zero-copy Arrow SHM |
+| **Oracle 26ai** | `OracleAsyncConfig`, `OracleSyncConfig` | `OracleConfig` | `SyncOracleDriver`, `AsyncOracleDriver` | Native driver pending (drivers raise `MissingDependencyError`); Autonomous Database wallet and `tnsnames.ora` parsing, 26ai `VECTOR` and `OSON` codecs |
+| **SQL Server** | `MSSQLAsyncConfig`, `MSSQLSyncConfig` | `MSSQLConfig` | `SyncMSSQLDriver`, `AsyncMSSQLDriver` | Native driver pending (drivers raise `MissingDependencyError`); `?` / `$1` / `:name` to `@P1` parameter rewriting |
+| **DuckDB** | `DuckDBAsyncConfig`, `DuckDBSyncConfig` | `DuckDBConfig` | `SyncDuckDBDriver`, `AsyncDuckDBDriver` | Requires the `duckdb` package (not installed on `3.14t` / `3.15t`, where DuckDB publishes no free-threaded wheel and the drivers raise `MissingDependencyError`); single-writer/multi-reader OLAP, active ADC `httpfs` secret rotation, zero-copy Arrow SHM |
 | **Google BigQuery** | `BigQueryAsyncConfig`, `BigQuerySyncConfig` | `BigQueryConfig` | `SyncBigQueryDriver`, `AsyncBigQueryDriver` | Pure-Rust REST v2 + Storage Read/Write v1 (`VTBARROW` zero-copy Arrow SHM via `select_to_arrow` / `load_from_arrow`), `ObjectTableConfig` (`ObjectRef`), `dry_run` cost ceiling, ADK/Litestar/Events/Artifact stores |
 | **Google Cloud Spanner** | `SpannerAsyncConfig`, `SpannerSyncConfig` | `SpannerConfig` | `SyncSpannerDriver`, `AsyncSpannerDriver` | Pure-Rust GoogleSQL + `Spangres`, cached `multiplexed = true` sessions, wound-wait `Aborted` retry, `BatchWrite`, Data Boost `PartitionQuery` (`select_to_arrow`), `SyncSpannerChangeStreamSource` / `AsyncSpannerChangeStreamSource` |
 | **Redis** | — | `RedisConfig` | `SyncRedisDriver`, `AsyncRedisDriver` | RESP3 (`HELLO 3`), `CLIENT TRACKING` local cache invalidation, Sentinel, Cluster (`CRC16-XMODEM`) |
 | **Valkey** | — | `ValkeyConfig` | `SyncValkeyDriver`, `AsyncValkeyDriver` | Valkey 8.0+/9.0+ RESP3 client-side caching, Cluster/Sentinel, GCP Memorystore IAM auth |
 | **DataFusion** | — | `DataFusionConfig` | `DataFusionEngine` | Federated SQL across PostgreSQL, MySQL, SQLite, DuckDB, BigQuery, Cloud Spanner, and Parquet/CSV object storage |
+
+`memory://` is not an engine URL. PostgreSQL, MySQL, Redis, and Valkey configs still construct from it, but their drivers raise `ImproperConfigurationError`, and so do the `from_valkey` / `from_redis` factories of `KeyValueStore`, the Litestar `MemoryStore`, the Starlette `CacheStore`, and `SQLAlchemyCacheBackend`. `DatabaseRegistry.parse_url("memory://")` raises `ValueError`. `QueueConfig(backend_url="memory://")`, `SyncObjectStore("memory://")`, and `SQLAlchemyCacheBackend.from_url("memory://")` keep their in-process backends.
 
 ### Google Cloud Spanner and BigQuery
 

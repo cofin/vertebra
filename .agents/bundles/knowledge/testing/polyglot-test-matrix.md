@@ -14,6 +14,9 @@ generated:
   by: flow/0.26.0
   at: '2026-11-04T04:33:00Z'
 verified:
+- by: agent:flow-executor
+  at: '2026-11-09T15:06:00Z'
+  commit: f2b328dc
 - by: agent:flow-learn
   at: '2026-11-08T18:26:31.591504Z'
   commit: cda502a4
@@ -174,7 +177,7 @@ Native tests cover incremental 8 MiB S3/R2/OCI parts and S3/B2 backend normaliza
 
 ## Database driver conformance
 
-`src/py/tests/integration/db/test_driver_conformance.py` parameterizes the shared sync and async SQL contract across eight adapters, checking scalar conversion, execution return values, empty results versus SQL `NULL`, transaction commit and rollback, typed errors, Arrow round trips, idle cancellation, and advertised sync/async pipelining capabilities. SQLite runs locally, while `EngineConformanceSpec` entries declaring `native_extension_module` fail strictly (`strict=True` `xfail`) when that extension module is absent so a missing-extension `xfail` never masquerades as live server behavior. BigQuery requires `VERTEBRA_CONFORMANCE_BIGQUERY_DSN` and Spanner requires `VERTEBRA_CONFORMANCE_SPANNER_DSN` or `SPANNER_EMULATOR_HOST` (skipping when unconfigured); Redis and Valkey default to `memory://` (`VERTEBRA_CONFORMANCE_DOCKER=1` selects `pytest-databases` fixtures); and DataFusion cases cover registry resolution, Arrow normalization, and missing-dependency refusal. Report passed, skipped, and expected-failure cases separately, require live engine evidence when accepting a native driver, and verify built companion wheels outside the source tree so editable imports never mask distribution isolation issues.[^src-db-conformance]
+`src/py/tests/integration/db/test_driver_conformance.py` parameterizes the shared sync and async SQL contract across eight adapters, checking scalar conversion, execution return values, empty results versus SQL `NULL`, transaction commit and rollback, typed errors, Arrow round trips, idle cancellation, and advertised sync/async pipelining capabilities. SQLite runs locally; for `EngineConformanceSpec` entries declaring `native_extension_module`, the native module resolves before credential skips: a spec whose `native_extension_module` is missing skips by default, under `VERTEBRA_CONFORMANCE_DOCKER=1` a missing module fails a non-pending spec (`bigquery`, `spanner`) and still skips a pending spec, and strict `xfail` (`Owned by <pending_flow_id>`) applies only when a pending engine's native module imports. BigQuery requires `VERTEBRA_CONFORMANCE_BIGQUERY_DSN` and Spanner requires `VERTEBRA_CONFORMANCE_SPANNER_DSN` or `SPANNER_EMULATOR_HOST` (skipping when unconfigured); Redis and Valkey cases use `VERTEBRA_CONFORMANCE_<ENGINE>_DSN` (`VERTEBRA_CONFORMANCE_REDIS_DSN`, `VERTEBRA_CONFORMANCE_VALKEY_DSN`) or, under `VERTEBRA_CONFORMANCE_DOCKER=1`, the `pytest-databases` fixtures, and skip otherwise; and DataFusion cases cover registry resolution, Arrow normalization, and missing-dependency refusal. Report passed, skipped, and expected-failure (pending engine with its native module present) cases separately, require live engine evidence when accepting a native driver, and verify built companion wheels outside the source tree so editable imports never mask distribution isolation issues.[^src-db-conformance]
 
 ## Driver regression boundaries
 

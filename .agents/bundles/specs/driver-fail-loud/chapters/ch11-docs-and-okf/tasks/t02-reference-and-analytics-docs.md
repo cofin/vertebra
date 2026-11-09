@@ -5,7 +5,7 @@ chapter_id: ch11-docs-and-okf
 title: Remove stand-in and TDS claims from reference pages and the analytics guide
 description: Rewrite the vertebra.db reference overview and tenant paragraph, the API reference databases summary, and the analytics guide tenant and DuckDB sections to match the fail-loud driver baseline.
 status: stable
-state: pending
+state: completed
 priority: P2
 verification_strategy: documentation_validation
 depends_on:
@@ -25,18 +25,18 @@ tests: []
 estimated_loc: 40
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: agent:flow-executor
+claimed_at: "2026-11-09T15:06:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T15:11:12Z"
+last_verified_commit: f2b328dc
+verification_evidence: "stale-claim grep, relative-link check, make docs, and pytest src/py/tests/unit/tools/test_docs_tooling.py -q (28 passed)"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T15:11:12Z"
+commit: f2b328dc
 sources:
   - id: docs-reference-db
     resource: docs/reference/db.md
@@ -145,11 +145,11 @@ uv run --no-sync pytest src/py/tests/unit/tools/test_docs_tooling.py -q
 
 ## Acceptance Criteria
 
-- [ ] `docs/reference/db.md` and `docs/usage/analytics-and-cdc.md` contain no SQLite stand-in or emulation claims (R1, R13).
-- [ ] `docs/reference/db.md` contains no TDS framing claim and states Oracle/SQL Server status (R8, R13).
-- [ ] `docs/reference/index.md` marks Oracle 26ai and SQL Server native drivers pending (R13).
-- [ ] `docs/usage/analytics-and-cdc.md` states the `duckdb` requirement (R3, R13).
-- [ ] Every Verification command exits `0`.
+- [x] `docs/reference/db.md` and `docs/usage/analytics-and-cdc.md` contain no SQLite stand-in or emulation claims (R1, R13).
+- [x] `docs/reference/db.md` contains no TDS framing claim and states Oracle/SQL Server status (R8, R13).
+- [x] `docs/reference/index.md` marks Oracle 26ai and SQL Server native drivers pending (R13).
+- [x] `docs/usage/analytics-and-cdc.md` states the `duckdb` requirement (R3, R13).
+- [x] Every Verification command exits `0`.
 
 ## Notes & Discoveries
 
