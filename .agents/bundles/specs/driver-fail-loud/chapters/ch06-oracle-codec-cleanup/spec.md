@@ -6,19 +6,19 @@ chapter_id: ch06-oracle-codec-cleanup
 title: "Chapter 06: Oracle Codec Cleanup"
 description: Delete Rust TNS framing, TnsPacketType, ORACLE_DIALECT_TAG, and OraclePool, remove the Oracle TNS and Redis hash-slot probes for natives that vertebra._vertebra never exports, and rewrite Oracle and DuckDB module and adapter docs to describe codecs.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch05-mssql-codec-cleanup
 replan_trigger: null
-current_task: "driver-fail-loud:ch06:t01"
+current_task: null
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-last_verified_checkpoint: null
+state_revision: 1
+last_verified_checkpoint: 63e91e84
 last_reviewed_commit: null
 created_at: "2026-11-08T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
+updated_at: "2026-11-09T14:32:00Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T00:00:00Z"
@@ -210,15 +210,15 @@ class RedisCore:
 
 ## 5. Implementation Plan
 
-- [ ] driver-fail-loud:ch06:t01 — Reduce the Rust oracle module to TTC, VECTOR, and OSON codecs (tasks/t01-rust-oracle-codecs-only.md)
-- [ ] driver-fail-loud:ch06:t02 — Remove Oracle TNS probes and rewrite Oracle adapter docstrings (tasks/t02-oracle-python-cleanup.md)
-- [ ] driver-fail-loud:ch06:t03 — Remove the redis_hash_slot_native probe and rewrite the DuckDB package docstring (tasks/t03-redis-probe-and-duckdb-docstring.md)
+- [x] [63e91e84] driver-fail-loud:ch06:t01 — Reduce the Rust oracle module to TTC, VECTOR, and OSON codecs (tasks/t01-rust-oracle-codecs-only.md)
+- [x] [63e91e84] driver-fail-loud:ch06:t02 — Remove Oracle TNS probes and rewrite Oracle adapter docstrings (tasks/t02-oracle-python-cleanup.md)
+- [x] [63e91e84] driver-fail-loud:ch06:t03 — Remove the redis_hash_slot_native probe and rewrite the DuckDB package docstring (tasks/t03-redis-probe-and-duckdb-docstring.md)
 - **Chapter Recovery Checkpoint**: `make lint-all && make rs-test && make py-test` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ 0acdf576`; `depends_on_chapters: [ch05-mssql-codec-cleanup]` (transitively ch01 through ch04); `state: planned`.
-- **Remaining Tasks in Chapter**: `t01` through `t03` (`0/3` completed). The three tasks touch disjoint files and have no task dependency; they run in listed order.
+- **Verified Baseline**: `HEAD @ 63e91e84`; `depends_on_chapters: [ch05-mssql-codec-cleanup]` (transitively ch01 through ch04); `state: completed`.
+- **Remaining Tasks in Chapter**: `0/3` remaining (`3/3` completed).
 - **Downstream**: [ch07-vertebra-db-pools-and-mysql](../ch07-vertebra-db-pools-and-mysql/spec.md) depends on this chapter, edits the same `lib.rs`, and deletes `OracleWalletMaterial` from `oracle/tns.rs`.
 - **Open Doc/OKF Items**: none in this chapter; ch11 owns user docs and OKF.
 - **Active Invariants**: every commit builds the workspace and passes `make rs-test`; RESP3, TNS parsing, VECTOR/OSON, TTC session attributes, and pure-Python TNS framing stay.

@@ -5,7 +5,7 @@ chapter_id: ch06-oracle-codec-cleanup
 title: Remove Oracle TNS probes and rewrite Oracle adapter docstrings
 description: Delete the encode_tns_connect_packet and encode_tns_data_packet native probes, rewrite Oracle module and class docstrings that claim a native Thin driver, and drop the future import from the three Oracle modules with five self-referencing annotations string-quoted.
 status: stable
-state: pending
+state: completed
 priority: P2
 verification_strategy: static_validation
 depends_on: []
@@ -23,18 +23,18 @@ tests:
 estimated_loc: 35
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T14:32:00Z"
+last_verified_commit: 63e91e84
+verification_evidence: "pytest test_enterprise_olap_drivers.py, ruff, mypy"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T14:32:00Z"
+commit: 63e91e84
 sources:
   - id: oracle-core
     resource: src/py/vertebra/db/adapters/oracle/core.py::OracleCore
@@ -119,10 +119,10 @@ Grep-only verification: `grep -rn "hasattr(native, \"encode_tns" src/py` lists o
 
 ## Acceptance Criteria
 
-- [ ] No Python branch probes `encode_tns_connect_packet` or `encode_tns_data_packet` (R9.2).
-- [ ] Oracle module and class docstrings describe helpers and codecs and name the native `vertebra._oracle` requirement (R9.2).
-- [ ] No future import remains in the three Oracle modules; the five self-referencing return annotations in `oracle/config.py`, including `OracleConfig.derive_pool`, are string-quoted (R9.2).
-- [ ] Oracle codec and TNS descriptor tests pass unchanged; `make rs-test` exits 0.
+- [x] No Python branch probes `encode_tns_connect_packet` or `encode_tns_data_packet` (R9.2).
+- [x] Oracle module and class docstrings describe helpers and codecs and name the native `vertebra._oracle` requirement (R9.2).
+- [x] No future import remains in the three Oracle modules; the five self-referencing return annotations in `oracle/config.py`, including `OracleConfig.derive_pool`, are string-quoted (R9.2).
+- [x] Oracle codec and TNS descriptor tests pass unchanged; `make rs-test` exits 0.
 
 ## Notes & Discoveries
 

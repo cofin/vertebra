@@ -1,20 +1,9 @@
-//! Pure-Rust Oracle Thin TNS/TTC wire protocol, 26ai `VECTOR`/`OSON` binary codecs, and SHM pool.
+//! Oracle TTC piggybacked session attributes and 26ai `VECTOR` and `OSON` binary codecs.
 
 pub mod tns;
 
-use std::sync::Arc;
-use std::time::Duration;
-
 use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
-use vertebra_core::broker::{
-    LeaseGrant, LeaseTableStats, ShmLeaseTable, ShmStatementCache, StatementCacheStats,
-    StatementPlanEntry,
-};
-use vertebra_core::shm::ShmRegion;
-
-/// Oracle dialect tag for `ShmStatementCache`.
-pub const ORACLE_DIALECT_TAG: u8 = 4;
 
 /// Oracle 26ai binary `OSON` magic header (`\xffJZ`).
 pub const OSON_MAGIC: &[u8; 3] = b"\xff\x4a\x5a";
@@ -24,120 +13,6 @@ pub const ORACLE_VECTOR_MAGIC: u8 = 0xDB;
 
 /// Oracle 26ai binary `VECTOR` wire version (`0x01`).
 pub const ORACLE_VECTOR_VERSION: u8 = 0x01;
-
-/// Oracle TNS wire packet type codes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[repr(u8)]
-pub enum TnsPacketType {
-    Connect = 1,
-    Accept = 2,
-    Ack = 3,
-    Refuse = 4,
-    Redirect = 5,
-    Data = 6,
-    Marker = 12,
-}
-
-impl TnsPacketType {
-    /// Convert a raw TNS packet type byte into `TnsPacketType`.
-    pub const fn from_u8(val: u8) -> Option<Self> {
-        match val {
-            1 => Some(Self::Connect),
-            2 => Some(Self::Accept),
-            3 => Some(Self::Ack),
-            4 => Some(Self::Refuse),
-            5 => Some(Self::Redirect),
-            6 => Some(Self::Data),
-            12 => Some(Self::Marker),
-            _ => None,
-        }
-    }
-}
-
-/// Encode an Oracle TNS `Connect` (`type = 1`) packet wrapping a `(DESCRIPTION=...)` connect descriptor.
-pub fn encode_tns_connect_packet(descriptor: &str) -> Bytes {
-    let desc_bytes = descriptor.as_bytes();
-    let connect_header_len = 58usize;
-    let total_len = connect_header_len + desc_bytes.len();
-    let mut buf = BytesMut::with_capacity(total_len);
-
-    // 8-byte TNS packet header
-    buf.put_u16(total_len as u16);
-    buf.put_u16(0); // packet checksum
-    buf.put_u8(TnsPacketType::Connect as u8);
-    buf.put_u8(0); // reserved
-    buf.put_u16(0); // header checksum
-
-    // TNS Connect body (bytes 8..58)
-    buf.put_u16(318); // TNS version (19c/23ai/26ai)
-    buf.put_u16(300); // minimum compatible version
-    buf.put_u16(0); // service options
-    buf.put_u16(8192); // session data unit (SDU)
-    buf.put_u16(65535); // maximum transmission data unit (TDU)
-    buf.put_u16(0x4f98); // NT protocol characteristics
-    buf.put_u16(0); // line turnaround
-    buf.put_u16(1); // value of 1 in hardware
-    buf.put_u16(desc_bytes.len() as u16); // connect data length
-    buf.put_u16(connect_header_len as u16); // offset to connect data
-    buf.put_u32(0); // max receivable connect data
-    buf.put_u8(0x41); // connect flags 0
-    buf.put_u8(0x41); // connect flags 1
-    // Fill remaining 24 bytes of the 58-byte connect header with zeros
-    buf.put_bytes(0, 24);
-
-    buf.extend_from_slice(desc_bytes);
-    buf.freeze()
-}
-
-/// Encode an Oracle TNS `Data` (`type = 6`) packet with 2-byte big-endian `data_flags`.
-pub fn encode_tns_data_packet(data_flags: u16, payload: &[u8]) -> Bytes {
-    let total_len = 10 + payload.len();
-    let mut buf = BytesMut::with_capacity(total_len);
-    buf.put_u16(total_len as u16);
-    buf.put_u16(0);
-    buf.put_u8(TnsPacketType::Data as u8);
-    buf.put_u8(0);
-    buf.put_u16(0);
-    buf.put_u16(data_flags);
-    buf.extend_from_slice(payload);
-    buf.freeze()
-}
-
-/// Decode an Oracle TNS packet, returning `(packet_type, data_flags, payload_slice)`.
-pub fn decode_tns_packet(buf: &[u8]) -> Result<(TnsPacketType, u16, &[u8]), String> {
-    if buf.len() < 8 {
-        return Err("buffer too short for 8-byte TNS packet header".to_string());
-    }
-    let total_len = u16::from_be_bytes([buf[0], buf[1]]) as usize;
-    if total_len < 8 {
-        return Err(format!("invalid TNS packet length {total_len} (< 8)"));
-    }
-    if buf.len() < total_len {
-        return Err(format!(
-            "truncated TNS packet: header specifies {total_len} bytes, got {}",
-            buf.len()
-        ));
-    }
-    let pkt_type = TnsPacketType::from_u8(buf[4])
-        .ok_or_else(|| format!("unknown TNS packet type byte: {}", buf[4]))?;
-
-    if pkt_type == TnsPacketType::Data {
-        if total_len < 10 {
-            return Err("TNS Data packet too short for 2-byte data flags".to_string());
-        }
-        let flags = u16::from_be_bytes([buf[8], buf[9]]);
-        Ok((pkt_type, flags, &buf[10..total_len]))
-    } else if pkt_type == TnsPacketType::Connect && total_len >= 58 {
-        let offset = u16::from_be_bytes([buf[26], buf[27]]) as usize;
-        if offset <= total_len {
-            Ok((pkt_type, 0, &buf[offset..total_len]))
-        } else {
-            Ok((pkt_type, 0, &buf[8..total_len]))
-        }
-    } else {
-        Ok((pkt_type, 0, &buf[8..total_len]))
-    }
-}
 
 /// Zero-RTT piggybacked Two-Task Common (TTC) end-to-end tracing and session attributes.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -355,107 +230,9 @@ pub fn decode_oson_payload(buf: &[u8]) -> Result<&[u8], String> {
     Ok(&buf[8..8 + payload_len])
 }
 
-/// Shared-memory coordinated Oracle Thin connection pool and statement cache.
-#[derive(Clone)]
-pub struct OraclePool {
-    pub descriptor: String,
-    lease_table: Arc<ShmLeaseTable>,
-    stmt_cache: Arc<ShmStatementCache>,
-}
-
-impl OraclePool {
-    /// Initialize a new SHM-backed `OraclePool`.
-    pub fn new(
-        descriptor: String,
-        pool_size: u32,
-        max_overflow: u32,
-        stmt_cache_capacity: u32,
-    ) -> Result<Self, String> {
-        let lease_size = ShmLeaseTable::required_size(pool_size, max_overflow);
-        let lease_region = ShmRegion::create(lease_size)
-            .map_err(|e| format!("failed to allocate Oracle lease ShmRegion: {e}"))?;
-        let lease_table = ShmLeaseTable::init_in_region(lease_region, pool_size, max_overflow)
-            .map_err(|e| format!("failed to init Oracle ShmLeaseTable: {e}"))?;
-
-        let cap = stmt_cache_capacity.max(4);
-        let cache_size = ShmStatementCache::required_size(cap);
-        let cache_region = ShmRegion::create(cache_size)
-            .map_err(|e| format!("failed to allocate Oracle stmt cache ShmRegion: {e}"))?;
-        let stmt_cache = ShmStatementCache::init_in_region(cache_region, cap)
-            .map_err(|e| format!("failed to init Oracle ShmStatementCache: {e}"))?;
-
-        Ok(Self {
-            descriptor,
-            lease_table: Arc::new(lease_table),
-            stmt_cache: Arc::new(stmt_cache),
-        })
-    }
-
-    /// Acquire a connection lease from the shared-memory lease table.
-    pub fn acquire_lease(
-        &self,
-        worker_pid: u32,
-        ttl_ns: u64,
-        timeout: Duration,
-    ) -> Result<LeaseGrant, String> {
-        self.lease_table
-            .acquire(worker_pid, ttl_ns, timeout, 0)
-            .map_err(|e| e.to_string())
-    }
-
-    /// Release a previously acquired connection lease.
-    pub fn release_lease(&self, slot_index: u32, generation: u64) -> Result<(), String> {
-        self.lease_table
-            .release(slot_index, generation)
-            .map_err(|e| e.to_string())
-    }
-
-    /// Look up or insert a statement cursor plan in the shared-memory statement cache.
-    pub fn lookup_or_insert_statement(
-        &self,
-        sql: &str,
-        cursor_id: u16,
-        param_count: u16,
-    ) -> Option<StatementPlanEntry> {
-        if let Some(entry) = self.stmt_cache.lookup(ORACLE_DIALECT_TAG, sql.as_bytes()) {
-            return Some(entry);
-        }
-        let cursor_bytes = cursor_id.to_be_bytes();
-        self.stmt_cache.insert(
-            ORACLE_DIALECT_TAG,
-            sql.as_bytes(),
-            param_count,
-            sql.as_bytes(),
-            &cursor_bytes,
-        );
-        self.stmt_cache.lookup(ORACLE_DIALECT_TAG, sql.as_bytes())
-    }
-
-    /// Return current lease table and statement cache telemetry.
-    pub fn stats(&self) -> (LeaseTableStats, StatementCacheStats) {
-        (self.lease_table.stats(), self.stmt_cache.stats())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_tns_connect_and_data_framing() {
-        let desc = "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=localhost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=FREEPDB1)))";
-        let connect_pkt = encode_tns_connect_packet(desc);
-        let (pkt_type, flags, payload) = decode_tns_packet(&connect_pkt).unwrap();
-        assert_eq!(pkt_type, TnsPacketType::Connect);
-        assert_eq!(flags, 0);
-        assert_eq!(payload, desc.as_bytes());
-
-        let data_pkt = encode_tns_data_packet(0x0040, b"TTC_PAYLOAD");
-        let (d_type, d_flags, d_payload) = decode_tns_packet(&data_pkt).unwrap();
-        assert_eq!(d_type, TnsPacketType::Data);
-        assert_eq!(d_flags, 0x0040);
-        assert_eq!(d_payload, b"TTC_PAYLOAD");
-    }
 
     #[test]
     fn test_ttc_piggyback_session_attrs() {

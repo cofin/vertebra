@@ -5,7 +5,7 @@ chapter_id: ch06-oracle-codec-cleanup
 title: Remove the redis_hash_slot_native probe and rewrite the DuckDB package docstring
 description: Delete the redis_hash_slot_native fallback probe from RedisCore.hash_slot, and rewrite the DuckDB package docstring to describe the duckdb-package driver without the future import.
 status: stable
-state: pending
+state: completed
 priority: P2
 verification_strategy: static_validation
 depends_on: []
@@ -23,18 +23,18 @@ tests:
 estimated_loc: 5
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T14:32:00Z"
+last_verified_commit: 63e91e84
+verification_evidence: "pytest test_redis_valkey_resp3.py test_enterprise_olap_drivers.py, ruff, mypy"
 created_at: "2026-11-08T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T14:32:00Z"
+commit: 63e91e84
 sources:
   - id: redis-core
     resource: src/py/vertebra/db/adapters/redis/core.py::RedisCore.hash_slot
@@ -103,9 +103,9 @@ Grep-only verification: `grep -rn "redis_hash_slot_native" src/py` lists only th
 
 ## Acceptance Criteria
 
-- [ ] `RedisCore.hash_slot` probes only `redis_hash_slot` (R9.2).
-- [ ] The DuckDB package docstring describes the `duckdb`-package driver and carries no SHM-brokered claim; no future import remains in `duckdb/__init__.py` (R9.2).
-- [ ] Redis hash-slot and DuckDB tests pass unchanged; `make rs-test` exits 0.
+- [x] `RedisCore.hash_slot` probes only `redis_hash_slot` (R9.2).
+- [x] The DuckDB package docstring describes the `duckdb`-package driver and carries no SHM-brokered claim; no future import remains in `duckdb/__init__.py` (R9.2).
+- [x] Redis hash-slot and DuckDB tests pass unchanged; `make rs-test` exits 0.
 
 ## Notes & Discoveries
 

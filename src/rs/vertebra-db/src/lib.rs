@@ -9,9 +9,8 @@
 //!   codecs (`mysql`).
 //! - Native SQLite 3.45+ WAL / `mmap_size` / `busy_timeout` initialization pragmas and single-writer /
 //!   multi-reader SHM pool (`sqlite`).
-//! - Pure-Rust Oracle `tnsnames.ora` / `sqlnet.ora` / Autonomous Database Wallet parser (`oracle::tns`) and
-//!   TNS/TTC wire framing, zero-RTT piggybacked session attributes, 26ai `VECTOR` (`FLOAT32`, `FLOAT64`,
-//!   `INT8`, `BINARY`), and `OSON` binary codecs (`oracle`).
+//! - Oracle `tnsnames.ora` parser and alias resolver (`oracle::tns`), TTC piggybacked session
+//!   attributes, and 26ai `VECTOR` (`FLOAT32`, `FLOAT64`, `INT8`, `BINARY`) and `OSON` codecs (`oracle`).
 //! - SQL Server single-pass `@P1` placeholder rewriter (`mssql`).
 //! - SHM-brokered single-writer DuckDB analytical engine, DuckDB 2.0-safe `SET` bootstrap statements,
 //!   and `ShmRegion` Arrow IPC framing (`duckdb`).
@@ -62,11 +61,10 @@ pub use mysql::{
     encode_com_query, encode_com_stmt_close, encode_com_stmt_prepare, encode_mysql_packet,
 };
 pub use oracle::{
-    OSON_MAGIC, OraclePool, OracleSessionAttrs, OracleVectorFormat, TnsPacketType,
-    decode_oracle_vector_binary, decode_oracle_vector_f32, decode_oracle_vector_f64,
-    decode_oracle_vector_i8, decode_oson_payload, decode_tns_packet, encode_oracle_vector_binary,
-    encode_oracle_vector_f32, encode_oracle_vector_f64, encode_oracle_vector_i8,
-    encode_oson_payload, encode_tns_connect_packet, encode_tns_data_packet,
+    OSON_MAGIC, OracleSessionAttrs, OracleVectorFormat, decode_oracle_vector_binary,
+    decode_oracle_vector_f32, decode_oracle_vector_f64, decode_oracle_vector_i8,
+    decode_oson_payload, encode_oracle_vector_binary, encode_oracle_vector_f32,
+    encode_oracle_vector_f64, encode_oracle_vector_i8, encode_oson_payload,
 };
 pub use postgres::{
     PGCOPY_SIGNATURE, PoolerMode, PostgresPool, PostgresPoolConfig, compute_worker_pool_budget,
