@@ -10,7 +10,7 @@ generated:
 verified:
   - by: agent:docs-okf-specialist
     at: "2026-11-09T02:24:00Z"
-    commit: 7139b40b
+    commit: c8c8998a
 sources:
   - id: src-vertebra-bigquery-lib-rs
     resource: src/rs/vertebra-bigquery/src/lib.rs

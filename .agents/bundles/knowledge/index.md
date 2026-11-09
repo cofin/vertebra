@@ -92,3 +92,4 @@ Curated current-state engineering documentation for **Vertebra** (`src/py/verteb
   - [ADR-002: Shared-Memory Database Broker and Arrow IPC Data Plane](decisions/adr-002-two-tier-shm-database-and-arrow-data-plane.md)
   - [ADR-003: PyPI `vertebra-core` Distribution and Wheel-Bundled TypeScript Client](decisions/adr-003-pypi-vertebra-core-distribution-and-wheel-bundled-client.md)
   - [ADR-004: Optional Driver Wheels and Shared-Memory Ownership](decisions/adr-004-optional-driver-wheels-and-shm-ownership.md)
+  - [ADR-005: Persistent Object-Store TTL Envelopes](decisions/adr-005-persistent-object-store-ttl-envelopes.md)

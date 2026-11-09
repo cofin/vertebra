@@ -20,7 +20,7 @@ generated:
 verified:
 - by: agent:codex
   at: '2026-11-08T18:27:30.456016Z'
-  commit: bf5a4cf3
+  commit: a1ee9042
 sources:
 - id: src-extensions-litestar-init-py
   resource: src/py/vertebra/extensions/litestar/__init__.py

@@ -18,7 +18,7 @@ generated:
 verified:
 - by: agent:flow-learn
   at: '2026-11-08T18:26:31.591504Z'
-  commit: 32c0c240
+  commit: cda502a4
 sources:
 - id: src-vertebra-core-src-text-rs
   resource: src/rs/vertebra-core/src/text.rs

@@ -10,10 +10,10 @@ generated:
 verified:
   - by: agent:docs-okf-specialist
     at: "2026-11-08T14:48:48Z"
-    commit: 749e2a18
+    commit: 43a61a56
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
-    commit: cdb978d3
+    commit: 9af810f5
 sources:
   - id: src-pyproject-toml
     resource: pyproject.toml

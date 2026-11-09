@@ -16,7 +16,7 @@ generated:
 verified:
 - by: agent:flow-learn
   at: '2026-11-08T18:26:31.591504Z'
-  commit: 32c0c240
+  commit: cda502a4
 sources:
 - id: src-makefile
   resource: Makefile

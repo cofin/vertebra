@@ -15,7 +15,7 @@ generated:
 verified:
 - by: agent:flow-implement
   at: "2026-11-09T02:24:00Z"
-  commit: 7139b40b
+  commit: c8c8998a
 sources:
 - id: py-store
   resource: src/py/vertebra/storage/_store.py::SyncObjectStore

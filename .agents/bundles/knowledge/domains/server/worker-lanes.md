@@ -15,7 +15,7 @@ generated:
 verified:
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
-    commit: cdb978d3
+    commit: 9af810f5
 sources:
   - id: src-server-lanes-py
     resource: src/py/vertebra/server/lanes.py

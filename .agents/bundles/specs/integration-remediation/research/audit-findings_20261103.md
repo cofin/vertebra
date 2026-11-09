@@ -14,7 +14,7 @@ generated:
 verified:
   - by: agent:flow-setup
     at: "2026-11-07T04:15:00Z"
-    commit: cdb978d3
+    commit: 9af810f5
 sources:
   - id: db-registry
     resource: src/py/vertebra/db/registry.py
