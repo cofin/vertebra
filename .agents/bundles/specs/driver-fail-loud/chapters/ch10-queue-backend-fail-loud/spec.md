@@ -6,20 +6,20 @@ chapter_id: ch10-queue-backend-fail-loud
 title: "Chapter 10: PostgreSQL, Redis, and Spanner Queue Backend Fail-Loud Paths"
 description: PostgreSQLQueueBackend, RedisQueueBackend / ValkeyQueueBackend, and SpannerQueueBackend raise MissingDependencyError or ImproperConfigurationError instead of substituting in-memory executors or clients, and the fakes move into the queue test modules as injected doubles.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch02-duckdb-sqlalchemy-queue-fail-loud
   - ch08-install-hints-and-extras-gate
 replan_trigger: null
-current_task: "driver-fail-loud:ch10:t01"
+current_task: null
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-last_verified_checkpoint: null
+state_revision: 1
+last_verified_checkpoint: f4d9361d
 last_reviewed_commit: null
 created_at: "2026-11-08T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
+updated_at: "2026-11-09T15:00:30Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T00:00:00Z"
@@ -276,11 +276,11 @@ Accepted Spanner schemes: `""`, `spanner`, `spanner+googlesql`, `spangres`, `spa
 
 ## 3. Documentation & OKF Knowledge Plan
 
-- **Progress**: `[0/4 files documented]`
-- `[ ]` `src/py/vertebra/framework/queues/postgres.py` — `PostgreSQLQueueBackend` class docstring and `__init__` Google docstring with `Args:` and `Raises:` (t01).
-- `[ ]` `src/py/vertebra/framework/queues/redis.py` — `RedisQueueBackend.__init__` Google docstring with `Args:` and `Raises:`; `_build_client` summary (t02).
-- `[ ]` `src/py/vertebra/framework/queues/spanner.py` — `SpannerQueueBackend.__init__` `Args:` without `driver` and `Raises:` (t03).
-- `[ ]` `src/py/vertebra/framework/queues/base.py` — `QueueConfig` class docstring `"""Configuration for QueueService across memory, Redis, Valkey, PostgreSQL, Oracle, and Spanner backends."""`, rendered in `docs/reference/queues.md` through `::: vertebra.framework.queues.base.QueueConfig` (t03).
+- **Progress**: `[4/4 files documented]`
+- `[x]` `src/py/vertebra/framework/queues/postgres.py` — `PostgreSQLQueueBackend` class docstring and `__init__` Google docstring with `Args:` and `Raises:` (t01).
+- `[x]` `src/py/vertebra/framework/queues/redis.py` — `RedisQueueBackend.__init__` Google docstring with `Args:` and `Raises:`; `_build_client` summary (t02).
+- `[x]` `src/py/vertebra/framework/queues/spanner.py` — `SpannerQueueBackend.__init__` `Args:` without `driver` and `Raises:` (t03).
+- `[x]` `src/py/vertebra/framework/queues/base.py` — `QueueConfig` class docstring `"""Configuration for QueueService across memory, Redis, Valkey, PostgreSQL, Oracle, and Spanner backends."""`, rendered in `docs/reference/queues.md` through `::: vertebra.framework.queues.base.QueueConfig` (t03).
 - Handed to [ch12-queue-docs-and-knowledge](../ch12-queue-docs-and-knowledge/spec.md) (not edited in this chapter):
   - `docs/usage/queues-and-realtime.md` — PostgreSQL row (requires `executor=`; `psycopg[binary,pool]`), Redis and Valkey rows (require the `redis` package and a `redis://host` URL, or `client=`), Cloud Spanner row (requires `executor=`; `vertebra-core[spanner]`; the "wound-wait claim transactions" claim describes no shipped executor).[^queue-docs]
   - `docs/reference/queues.md` — Storage Backends row lists four network backends without Spanner and without the executor or client requirement (the rendered `QueueConfig` docstring is updated by `t03`).
@@ -297,18 +297,18 @@ Accepted Spanner schemes: `""`, `spanner`, `spanner+googlesql`, `spangres`, `spa
 
 ## 5. Implementation Plan
 
-- [ ] driver-fail-loud:ch10:t01 — `PostgreSQLQueueBackend` requires `psycopg` and an injected executor (tasks/t01-postgres-queue-requires-executor.md)
-- [ ] driver-fail-loud:ch10:t02 — `RedisQueueBackend` binds a live `redis.asyncio` client or raises (tasks/t02-redis-queue-requires-live-client.md)
-- [ ] driver-fail-loud:ch10:t03 — `SpannerQueueBackend` requires the Spanner extension and an injected executor; `QueueConfig` docstring names every backend (tasks/t03-spanner-queue-requires-executor.md)
+- [x] [f4d9361d] driver-fail-loud:ch10:t01 — `PostgreSQLQueueBackend` requires `psycopg` and an injected executor (tasks/t01-postgres-queue-requires-executor.md)
+- [x] [f4d9361d] driver-fail-loud:ch10:t02 — `RedisQueueBackend` binds a live `redis.asyncio` client or raises (tasks/t02-redis-queue-requires-live-client.md)
+- [x] [f4d9361d] driver-fail-loud:ch10:t03 — `SpannerQueueBackend` requires the Spanner extension and an injected executor; `QueueConfig` docstring names every backend (tasks/t03-spanner-queue-requires-executor.md)
 - **Size counting rule**: `estimated_loc` on every task in this chapter counts net-new lines only. Each fake class (`_InMemoryPostgreSQLQueueExecutor`, `_InMemoryRedisStreamClient`, `_InMemorySpannerQueueExecutor`, roughly 210–220 lines each) moves verbatim from its production module into the queue test module and is not counted; the moved body keeps its methods unchanged and takes a test-side name and docstring.
 - **Chapter / Phase Recovery Checkpoint**: `uv run ruff check src/py/vertebra/framework/queues/ src/py/tests/unit/framework/test_distributed_queues.py src/py/tests/unit/framework/test_email_providers.py src/py/tests/unit/db/test_spanner_queue_and_cdc.py && uv run mypy src/py/vertebra/framework/queues/postgres.py src/py/vertebra/framework/queues/redis.py src/py/vertebra/framework/queues/spanner.py src/py/vertebra/framework/queues/base.py && make py-test`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `0acdf576` — chapter planned; `0/3` tasks completed.
-- **Active Task**: `driver-fail-loud:ch10:t01`, after `ch02-duckdb-sqlalchemy-queue-fail-loud` and `ch08-install-hints-and-extras-gate` complete.
-- **Remaining Plan**: t01, t02, t03; t02 depends on t01 (both edit `test_distributed_queues.py`); t03 is independent.
-- **Documentation & OKF Sync**: `[0/4 files documented]`; user docs and OKF rows go to `ch12-queue-docs-and-knowledge`.
+- **Verified Baseline (`HEAD`)**: `f4d9361d` — chapter completed; `3/3` tasks completed.
+- **Active Task**: `null`
+- **Remaining Plan**: none (`3/3` tasks completed).
+- **Documentation & OKF Sync**: `[4/4 files documented]`; user docs and OKF rows go to `ch12-queue-docs-and-knowledge`.
 - **Active Invariants & Triggers**: `MemoryQueueBackend` and `memory://` routing are untouched; no queue module imports `psycopg`, `redis`, or `vertebra._spanner` at module level; no new `extra=` literal other than the declared `spanner`.
 
 [^pg-queue]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` — PostgreSQL queue backend whose `_build_executor` always returns the in-memory executor.

@@ -5,7 +5,7 @@ chapter_id: ch10-queue-backend-fail-loud
 title: RedisQueueBackend binds a live redis.asyncio client or raises
 description: Delete the production in-memory Redis Streams client, raise MissingDependencyError when redis.asyncio is absent and ImproperConfigurationError when backend_url has no host, keep the redis.asyncio.from_url path, and move the client fake into the queue test module for the contract and email tests.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -25,18 +25,18 @@ tests:
 estimated_loc: 250
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T15:00:30Z"
+last_verified_commit: f4d9361d
+verification_evidence: "pytest src/py/tests/unit/framework/test_distributed_queues.py src/py/tests/unit/framework/test_email_providers.py -q passed; ruff and mypy clean"
 created_at: "2026-11-08T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T15:00:30Z"
+commit: f4d9361d
 sources:
   - id: redis-queue
     resource: src/py/vertebra/framework/queues/redis.py::RedisQueueBackend._build_client
@@ -177,10 +177,10 @@ q_service = (
 
 ## Acceptance Criteria
 
-- [ ] `RedisQueueBackend` and `ValkeyQueueBackend` without `client` raise `MissingDependencyError` naming `redis` with hint `uv add redis` when `redis.asyncio` is absent (R15).
-- [ ] With `redis.asyncio` present and no `client`, a hostless `backend_url` raises `ImproperConfigurationError` and a hosted `backend_url` binds `redis.asyncio.from_url(backend_url)` (R15.1).
-- [ ] `_InMemoryRedisStreamClient` is absent from `src/py/vertebra`; `FakeRedisStreamClient` lives in `test_distributed_queues.py`, every `redis://` / `valkey://` contract case passes, and the email test's `redis://` case passes through the injected client (R15.1).
-- [ ] `RedisQueueBackend.__init__` has a Google docstring with `Raises:`; no inline `#` comments in touched Python files.
+- [x] `RedisQueueBackend` and `ValkeyQueueBackend` without `client` raise `MissingDependencyError` naming `redis` with hint `uv add redis` when `redis.asyncio` is absent (R15).
+- [x] With `redis.asyncio` present and no `client`, a hostless `backend_url` raises `ImproperConfigurationError` and a hosted `backend_url` binds `redis.asyncio.from_url(backend_url)` (R15.1).
+- [x] `_InMemoryRedisStreamClient` is absent from `src/py/vertebra`; `FakeRedisStreamClient` lives in `test_distributed_queues.py`, every `redis://` / `valkey://` contract case passes, and the email test's `redis://` case passes through the injected client (R15.1).
+- [x] `RedisQueueBackend.__init__` has a Google docstring with `Raises:`; no inline `#` comments in touched Python files.
 
 ## Notes & Discoveries
 

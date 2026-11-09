@@ -5,7 +5,7 @@ chapter_id: ch10-queue-backend-fail-loud
 title: SpannerQueueBackend requires the Spanner extension and an injected executor
 description: Delete the production in-memory and driver-wrapped Spanner queue executors, the driver= parameter, and the memory scheme allowance, raise MissingDependencyError when vertebra._spanner is absent and ImproperConfigurationError when no executor is supplied, and move the executor fake into the Spanner queue test module.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -23,18 +23,18 @@ tests:
 estimated_loc: 240
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T15:00:30Z"
+last_verified_commit: f4d9361d
+verification_evidence: "pytest src/py/tests/unit/db/test_spanner_queue_and_cdc.py -q passed; ruff and mypy clean"
 created_at: "2026-11-08T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T15:00:30Z"
+commit: f4d9361d
 sources:
   - id: spanner-queue
     resource: src/py/vertebra/framework/queues/spanner.py::SpannerQueueBackend
@@ -170,11 +170,11 @@ self._executor: SpannerQueueExecutor = executor
 
 ## Acceptance Criteria
 
-- [ ] `SpannerQueueBackend` without `executor` raises `MissingDependencyError` naming `vertebra-core[spanner]` when `vertebra._spanner` is absent (R16).
-- [ ] `SpannerQueueBackend` without `executor` raises `ImproperConfigurationError` when `vertebra._spanner` is present, and rejects `memory://` URLs (R16.1).
-- [ ] `_InMemorySpannerQueueExecutor`, `_DriverSpannerQueueExecutor`, `driver=`, and `_driver` are absent from `src/py/vertebra`; `_FakeSpannerQueueExecutor` lives in `test_spanner_queue_and_cdc.py` and the lifecycle test passes on it (R16.1).
-- [ ] `QueueConfig`'s docstring names memory, Redis, Valkey, PostgreSQL, Oracle, and Spanner backends.
-- [ ] `SpannerQueueBackend.__init__` has a Google docstring with `Raises:`; no inline `#` comments in touched Python files.
+- [x] `SpannerQueueBackend` without `executor` raises `MissingDependencyError` naming `vertebra-core[spanner]` when `vertebra._spanner` is absent (R16).
+- [x] `SpannerQueueBackend` without `executor` raises `ImproperConfigurationError` when `vertebra._spanner` is present, and rejects `memory://` URLs (R16.1).
+- [x] `_InMemorySpannerQueueExecutor`, `_DriverSpannerQueueExecutor`, `driver=`, and `_driver` are absent from `src/py/vertebra`; `_FakeSpannerQueueExecutor` lives in `test_spanner_queue_and_cdc.py` and the lifecycle test passes on it (R16.1).
+- [x] `QueueConfig`'s docstring names memory, Redis, Valkey, PostgreSQL, Oracle, and Spanner backends.
+- [x] `SpannerQueueBackend.__init__` has a Google docstring with `Raises:`; no inline `#` comments in touched Python files.
 
 ## Notes & Discoveries
 

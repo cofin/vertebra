@@ -5,7 +5,7 @@ chapter_id: ch10-queue-backend-fail-loud
 title: PostgreSQLQueueBackend requires psycopg and an injected executor
 description: Delete the production in-memory PostgreSQL queue executor, raise MissingDependencyError when psycopg is absent and ImproperConfigurationError when no executor is supplied, and move the executor fake into the queue test module.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -22,18 +22,18 @@ tests:
 estimated_loc: 230
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T15:00:30Z"
+last_verified_commit: f4d9361d
+verification_evidence: "pytest src/py/tests/unit/framework/test_distributed_queues.py -q passed; ruff and mypy clean"
 created_at: "2026-11-08T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T15:00:30Z"
+commit: f4d9361d
 sources:
   - id: pg-queue
     resource: src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend
@@ -147,10 +147,10 @@ self._executor: PostgreSQLQueueExecutor = executor
 
 ## Acceptance Criteria
 
-- [ ] `PostgreSQLQueueBackend` without `executor` raises `MissingDependencyError` naming `psycopg` with hint `uv add psycopg[binary,pool]` when it is absent (R14).
-- [ ] `PostgreSQLQueueBackend` without `executor` raises `ImproperConfigurationError` when `psycopg` is present (R14.1).
-- [ ] `_InMemoryPostgreSQLQueueExecutor` and `_build_executor` are absent from `src/py/vertebra`; `_FakePostgreSQLQueueExecutor` lives in `test_distributed_queues.py` and every `postgresql://` contract case plus the LISTEN/NOTIFY test pass (R14.1).
-- [ ] `PostgreSQLQueueBackend.__init__` has a Google docstring with `Raises:`; no inline `#` comments in touched Python files.
+- [x] `PostgreSQLQueueBackend` without `executor` raises `MissingDependencyError` naming `psycopg` with hint `uv add psycopg[binary,pool]` when it is absent (R14).
+- [x] `PostgreSQLQueueBackend` without `executor` raises `ImproperConfigurationError` when `psycopg` is present (R14.1).
+- [x] `_InMemoryPostgreSQLQueueExecutor` and `_build_executor` are absent from `src/py/vertebra`; `_FakePostgreSQLQueueExecutor` lives in `test_distributed_queues.py` and every `postgresql://` contract case plus the LISTEN/NOTIFY test pass (R14.1).
+- [x] `PostgreSQLQueueBackend.__init__` has a Google docstring with `Raises:`; no inline `#` comments in touched Python files.
 
 ## Notes & Discoveries
 

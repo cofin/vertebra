@@ -13,6 +13,7 @@ from typing import Any, cast
 
 import pytest
 
+from tests.unit.framework.test_distributed_queues import FakeRedisStreamClient
 from vertebra.framework.email import (
     EmailAttachment,
     EmailConfig,
@@ -28,7 +29,7 @@ from vertebra.framework.email import (
     SmtpEmailTransport,
     WebhookVerifier,
 )
-from vertebra.framework.queues import QueueConfig, QueueService
+from vertebra.framework.queues import QueueConfig, QueueService, RedisQueueBackend
 from vertebra.utils.serializers import decode_json
 
 
@@ -536,7 +537,11 @@ async def test_ses_transport_rust_sigv4_headers_simple_and_raw_mime() -> None:
 async def test_email_service_enqueue_and_enqueue_batch_via_queue_service(backend_url: str) -> None:
     """Test EmailService integrates with QueueService for async background delivery."""
     q_config = QueueConfig(backend_url=backend_url)
-    q_service = QueueService(q_config)
+    q_service = (
+        QueueService(q_config, backend=RedisQueueBackend(q_config, client=FakeRedisStreamClient()))
+        if backend_url.startswith("redis")
+        else QueueService(q_config)
+    )
 
     email_config = EmailConfig(backend="memory", default_from="service@example.com")
     email_service = EmailService(email_config, queue_service=q_service)

@@ -116,7 +116,7 @@ class CronLease(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
 
 class QueueConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
-    """Configuration for QueueService across memory, Valkey, Redis, Postgres, and Oracle."""
+    """Configuration for QueueService across memory, Redis, Valkey, PostgreSQL, Oracle, and Spanner backends."""
 
     backend_url: str = "memory://"
     default_lane: TaskLane = "io"

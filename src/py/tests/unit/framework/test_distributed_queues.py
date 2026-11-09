@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import sys
 import time
 import types
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+import msgspec
 import pytest
 
 from vertebra.db.adapters.postgres import PostgreSQLConfig
@@ -19,9 +21,11 @@ from vertebra.framework.queues import (
     OracleQueueBackend,
     OracleQueueExecutor,
     PostgreSQLQueueBackend,
+    PostgreSQLQueueExecutor,
     QueueConfig,
     QueueService,
     RedisQueueBackend,
+    RedisStreamClient,
     TaskEnvelope,
     TaskRetryPolicy,
     ValkeyQueueBackend,
@@ -36,6 +40,10 @@ from vertebra.typing import (
     MissingDependencyError,
     reset_dependency_cache,
 )
+from vertebra.utils.serializers import decode_json
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class _FakeOracleQueueExecutor:
@@ -219,8 +227,440 @@ class _FakeOracleQueueExecutor:
             self._leases.clear()
 
 
+class _FakePostgreSQLQueueExecutor:
+    """In-memory PostgreSQL queue executor simulating SKIP LOCKED claims and LISTEN/NOTIFY."""
+
+    __slots__ = ("_dlq", "_jobs", "_leases", "_lock", "_waiters")
+
+    def __init__(self) -> None:
+        self._jobs: dict[str, dict[str, Any]] = {}
+        self._dlq: dict[str, dict[str, Any]] = {}
+        self._leases: dict[str, dict[str, Any]] = {}
+        self._waiters: dict[str, list[asyncio.Event]] = collections.defaultdict(list)
+        self._lock = asyncio.Lock()
+
+    async def execute(self, query: str, *params: Any) -> int:
+        """Execute mock query."""
+        async with self._lock:
+            q = query.strip().upper()
+            if "INSERT INTO VERTEBRA_QUEUE_JOBS" in q:
+                (
+                    task_id,
+                    task_name,
+                    lane,
+                    payload,
+                    attempt,
+                    max_retries,
+                    status,
+                    enq,
+                    sched,
+                    locked,
+                    cname,
+                    handle,
+                    ikey,
+                    tp,
+                ) = params
+                if ikey and any(j.get("idempotency_key") == ikey for j in self._jobs.values()):
+                    return 0
+                self._jobs[task_id] = {
+                    "task_id": task_id,
+                    "task_name": task_name,
+                    "lane": lane,
+                    "payload": payload,
+                    "attempt": attempt,
+                    "max_retries": max_retries,
+                    "status": status,
+                    "enqueued_at": enq,
+                    "scheduled_at": sched,
+                    "locked_until": locked,
+                    "consumer_name": cname,
+                    "receipt_handle": handle,
+                    "idempotency_key": ikey,
+                    "traceparent": tp,
+                }
+                return 1
+
+            if "DELETE FROM VERTEBRA_QUEUE_JOBS" in q:
+                task_id = params[0]
+                if task_id in self._jobs:
+                    del self._jobs[task_id]
+                    return 1
+                return 0
+
+            if "INSERT INTO VERTEBRA_QUEUE_DLQ" in q:
+                dlq_id, task_id, task_name, lane, payload, error_type, error_msg, failed_at = params
+                self._dlq[dlq_id] = {
+                    "dlq_id": dlq_id,
+                    "task_id": task_id,
+                    "task_name": task_name,
+                    "lane": lane,
+                    "payload": payload,
+                    "error_type": error_type,
+                    "error_message": error_msg,
+                    "failed_at": failed_at,
+                }
+                return 1
+
+            if "SET SCHEDULED_AT = NULL" in q:
+                current_time = params[0]
+                promoted = 0
+                for job in self._jobs.values():
+                    if (
+                        job.get("status") == "pending"
+                        and job.get("scheduled_at") is not None
+                        and job["scheduled_at"] <= current_time
+                    ):
+                        job["scheduled_at"] = None
+                        promoted += 1
+                return promoted
+
+            if "UPDATE VERTEBRA_QUEUE_JOBS" in q:
+                status, attempt, sched, locked, handle, task_id = params
+                if task_id in self._jobs:
+                    self._jobs[task_id].update(
+                        {
+                            "status": status,
+                            "attempt": attempt,
+                            "scheduled_at": sched,
+                            "locked_until": locked,
+                            "receipt_handle": handle,
+                        }
+                    )
+                    return 1
+                return 0
+
+            return 0
+
+    async def fetch_all(self, query: str, *params: Any) -> list[dict[str, Any]]:
+        """Fetch all matching rows."""
+        async with self._lock:
+            q = query.strip().upper()
+            if "WITH CLAIMED AS" in q or "FOR UPDATE SKIP LOCKED" in q:
+                lanes, now_ts, limit, locked_until, consumer_name, receipt_handle = params
+                target_lanes = set(lanes)
+                matched: list[dict[str, Any]] = []
+                sorted_jobs = sorted(
+                    self._jobs.values(),
+                    key=lambda j: (j.get("scheduled_at") or j.get("enqueued_at") or 0.0, j.get("enqueued_at") or 0.0),
+                )
+                for job in sorted_jobs:
+                    if len(matched) >= limit:
+                        break
+                    if job.get("lane") not in target_lanes:
+                        continue
+                    status = job.get("status")
+                    sched = job.get("scheduled_at")
+                    locked = job.get("locked_until")
+                    is_ready_pending = status == "pending" and (sched is None or sched <= now_ts)
+                    is_expired_running = status == "running" and locked is not None and locked <= now_ts
+                    if is_ready_pending or is_expired_running:
+                        job_handle = receipt_handle or uuid.uuid4().hex
+                        job["status"] = "running"
+                        job["locked_until"] = locked_until
+                        job["consumer_name"] = consumer_name
+                        job["receipt_handle"] = job_handle
+                        if is_expired_running:
+                            job["attempt"] = int(job.get("attempt", 1)) + 1
+                        matched.append(dict(job))
+                return matched
+
+            if "SELECT * FROM VERTEBRA_QUEUE_DLQ" in q:
+                limit = params[0] if params else 100
+                return [dict(e) for e in list(self._dlq.values())[:limit]]
+
+            return []
+
+    async def fetch_one(self, query: str, *params: Any) -> dict[str, Any] | None:
+        """Fetch a single matching row."""
+        async with self._lock:
+            q = query.strip().upper()
+            if "SELECT MIN(SCHEDULED_AT)" in q:
+                lanes, now_ts = params
+                target_lanes = set(lanes)
+                min_sched: float | None = None
+                for job in self._jobs.values():
+                    if job.get("lane") in target_lanes and job.get("status") == "pending":
+                        sched = job.get("scheduled_at")
+                        if sched is not None and sched > now_ts and (min_sched is None or sched < min_sched):
+                            min_sched = sched
+                return {"min_scheduled": min_sched}
+
+            if "INSERT INTO VERTEBRA_QUEUE_LEASES" in q:
+                lease_key, owner_id, expires_at, last_slot, check_now = params
+                existing = self._leases.get(lease_key)
+                if existing is None or existing["expires_at"] <= check_now or existing["owner_id"] == owner_id:
+                    new_slot = last_slot or (existing.get("last_slot") if existing else None)
+                    record = {
+                        "lease_key": lease_key,
+                        "owner_id": owner_id,
+                        "expires_at": expires_at,
+                        "last_slot": new_slot,
+                    }
+                    self._leases[lease_key] = record
+                    return dict(record)
+                return None
+
+            if "SELECT * FROM VERTEBRA_QUEUE_DLQ WHERE DLQ_ID" in q:
+                dlq_id = params[0]
+                if dlq_id in self._dlq:
+                    return dict(self._dlq[dlq_id])
+                return None
+
+            return None
+
+    async def notify(self, channel: str, payload: str) -> None:
+        """Wake up any tasks waiting on channel."""
+        async with self._lock:
+            waiters = self._waiters.get(channel, [])
+            for evt in waiters:
+                evt.set()
+
+    async def wait_for_notify(self, channel: str, timeout_seconds: float) -> bool:
+        """Wait for notification on channel until timeout."""
+        evt = asyncio.Event()
+        async with self._lock:
+            self._waiters[channel].append(evt)
+        try:
+            await asyncio.wait_for(evt.wait(), timeout=timeout_seconds)
+            return True
+        except TimeoutError:
+            return False
+        finally:
+            async with self._lock:
+                if evt in self._waiters[channel]:
+                    self._waiters[channel].remove(evt)
+
+    async def close(self) -> None:
+        """Clear state."""
+        async with self._lock:
+            self._jobs.clear()
+            self._dlq.clear()
+            self._leases.clear()
+            self._waiters.clear()
+
+
+class FakeRedisStreamClient:
+    """In-memory Redis Streams client emulating consumer groups, sorted sets, and the queue Lua scripts."""
+
+    __slots__ = ("_groups", "_kv", "_pel", "_streams", "_zsets")
+
+    def __init__(self) -> None:
+        self._streams: dict[str, list[tuple[str, dict[str, Any]]]] = collections.defaultdict(list)
+        self._groups: dict[str, set[str]] = collections.defaultdict(set)
+        self._pel: dict[str, dict[str, tuple[str, float, dict[str, Any]]]] = collections.defaultdict(dict)
+        self._zsets: dict[str, dict[str, float]] = collections.defaultdict(dict)
+        self._kv: dict[str, tuple[str, float | None]] = {}
+
+    async def xgroup_create(
+        self,
+        stream: str,
+        group: str,
+        id: str = "$",
+        mkstream: bool = False,
+    ) -> bool:
+        """Register consumer group for stream."""
+        if mkstream and stream not in self._streams:
+            self._streams[stream] = []
+        self._groups[stream].add(group)
+        return True
+
+    async def xadd(
+        self,
+        stream: str,
+        fields: Mapping[str, Any],
+        id: str = "*",
+        maxlen: int | None = None,
+        approximate: bool = True,
+    ) -> str:
+        """Append stream message."""
+        entry_id = f"{int(time.time() * 1000)}-{len(self._streams[stream])}"
+        converted = {str(k): (v.decode("utf-8") if isinstance(v, bytes) else str(v)) for k, v in fields.items()}
+        self._streams[stream].append((entry_id, converted))
+        if maxlen and len(self._streams[stream]) > maxlen:
+            trim_count = len(self._streams[stream]) - maxlen
+            del self._streams[stream][:trim_count]
+        return entry_id
+
+    async def xreadgroup(
+        self,
+        group: str,
+        consumer: str,
+        streams: Mapping[str, str],
+        count: int | None = None,
+        block: int | None = None,
+    ) -> list[Any]:
+        """Read unclaimed entries for consumer group."""
+        limit = count or 10
+        results: list[tuple[str, list[tuple[str, dict[str, Any]]]]] = []
+        now = time.time()
+        for stream_name, _ in streams.items():
+            pel_key = f"{stream_name}:{group}"
+            stream_entries = self._streams.get(stream_name, [])
+            claimed_in_pel = set(self._pel[pel_key].keys())
+            matched: list[tuple[str, dict[str, Any]]] = []
+            for entry_id, fields in stream_entries:
+                if entry_id not in claimed_in_pel:
+                    self._pel[pel_key][entry_id] = (consumer, now, fields)
+                    matched.append((entry_id, fields))
+                    if len(matched) >= limit:
+                        break
+            if matched:
+                results.append((stream_name, matched))
+        return results
+
+    async def xack(self, stream: str, group: str, *ids: str) -> int:
+        """Remove entries from group PEL."""
+        pel_key = f"{stream}:{group}"
+        acked = 0
+        for entry_id in ids:
+            if entry_id in self._pel[pel_key]:
+                del self._pel[pel_key][entry_id]
+                acked += 1
+        return acked
+
+    async def xautoclaim(
+        self,
+        stream: str,
+        group: str,
+        consumer: str,
+        min_idle_time: int,
+        start_id: str = "0-0",
+        count: int | None = None,
+    ) -> tuple[str, list[tuple[str, dict[str, Any]]], list[str]]:
+        """Reclaim pending entries older than min_idle_time milliseconds."""
+        limit = count or 10
+        pel_key = f"{stream}:{group}"
+        now = time.time()
+        idle_threshold_s = min_idle_time / 1000.0
+        reclaimed: list[tuple[str, dict[str, Any]]] = []
+        for entry_id, (_, last_delivered, fields) in list(self._pel[pel_key].items()):
+            if now - last_delivered >= idle_threshold_s:
+                self._pel[pel_key][entry_id] = (consumer, now, fields)
+                reclaimed.append((entry_id, fields))
+                if len(reclaimed) >= limit:
+                    break
+        return ("0-0", reclaimed, [])
+
+    async def xrange(
+        self,
+        stream: str,
+        min: str = "-",
+        max: str = "+",
+        count: int | None = None,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """List stream entries in FIFO order."""
+        entries = self._streams.get(stream, [])
+        return entries[:count] if count else entries
+
+    async def xdel(self, stream: str, *ids: str) -> int:
+        """Remove matching entries from stream."""
+        id_set = set(ids)
+        before = len(self._streams.get(stream, []))
+        self._streams[stream] = [item for item in self._streams.get(stream, []) if item[0] not in id_set]
+        return before - len(self._streams[stream])
+
+    async def zadd(self, key: str, mapping: Mapping[str, float]) -> int:
+        """Add elements to simulated sorted set."""
+        added = 0
+        for member, score in mapping.items():
+            if member not in self._zsets[key]:
+                added += 1
+            self._zsets[key][member] = float(score)
+        return added
+
+    async def eval(self, script: str, numkeys: int, *keys_and_args: Any) -> Any:
+        """Simulate execution of queue promotion and lease renewal scripts."""
+        if "ZRANGEBYSCORE" in script:
+            scheduled_key = str(keys_and_args[0])
+            now_ts = float(keys_and_args[1])
+            prefix = str(keys_and_args[2])
+            limit = int(keys_and_args[3])
+            zset = self._zsets[scheduled_key]
+            eligible = [
+                (member, score) for member, score in sorted(zset.items(), key=lambda pair: pair[1]) if score <= now_ts
+            ][:limit]
+            promoted = 0
+            for raw_json, _ in eligible:
+                raw_bytes = raw_json.encode("utf-8") if isinstance(raw_json, str) else raw_json
+                env = msgspec.convert(decode_json(raw_bytes), type=TaskEnvelope)
+                lane = env.lane
+                stream_key = f"{prefix}:lane:{lane}"
+                await self.xadd(
+                    stream_key,
+                    {
+                        "payload": raw_json,
+                        "lane": lane,
+                        "task_name": env.task_name,
+                    },
+                )
+                zset.pop(raw_json, None)
+                promoted += 1
+            return promoted
+
+        if "current_owner == owner_id" in script:
+            lease_key = str(keys_and_args[0])
+            owner_id = str(keys_and_args[1])
+            ttl_ms = float(keys_and_args[2])
+            new_slot = str(keys_and_args[3]) if len(keys_and_args) > 3 else ""
+            existing_tuple = self._kv.get(lease_key)
+            if existing_tuple:
+                current_val, exp = existing_tuple
+                now = time.time()
+                if exp is None or exp > now:
+                    parts = current_val.split(":", 1)
+                    current_owner = parts[0]
+                    if current_owner == owner_id:
+                        slot_to_save = new_slot if new_slot else (parts[1] if len(parts) > 1 else "")
+                        val_to_save = f"{owner_id}:{slot_to_save}" if slot_to_save else owner_id
+                        self._kv[lease_key] = (val_to_save, now + (ttl_ms / 1000.0))
+                        return 1
+            return 0
+
+        return None
+
+    async def set(
+        self,
+        key: str,
+        value: str,
+        nx: bool = False,
+        px: int | None = None,
+    ) -> bool:
+        """Store key value pair."""
+        now = time.time()
+        existing = self._kv.get(key)
+        if existing:
+            _, exp = existing
+            if exp is not None and exp <= now:
+                self._kv.pop(key, None)
+                existing = None
+        if nx and existing is not None:
+            return False
+        expires_at = now + (px / 1000.0) if px else None
+        self._kv[key] = (value, expires_at)
+        return True
+
+    async def get(self, key: str) -> str | None:
+        """Fetch value if not expired."""
+        existing = self._kv.get(key)
+        if not existing:
+            return None
+        val, exp = existing
+        if exp is not None and exp <= time.time():
+            self._kv.pop(key, None)
+            return None
+        return val
+
+    async def aclose(self) -> None:
+        """Clear memory structures."""
+        self._streams.clear()
+        self._groups.clear()
+        self._pel.clear()
+        self._zsets.clear()
+        self._kv.clear()
+
+
 def _create_backend_by_url(url: str, config: QueueConfig) -> Any:
-    """Instantiate queue backends, injecting the Oracle executor fake."""
+    """Instantiate queue backends, injecting the Redis client and the Oracle and PostgreSQL executor fakes."""
     cfg = QueueConfig(
         backend_url=url,
         visibility_timeout_seconds=config.visibility_timeout_seconds,
@@ -232,11 +672,11 @@ def _create_backend_by_url(url: str, config: QueueConfig) -> Any:
     if url.startswith("memory"):
         return MemoryQueueBackend(cfg)
     if url.startswith("redis"):
-        return RedisQueueBackend(cfg)
+        return RedisQueueBackend(cfg, client=FakeRedisStreamClient())
     if url.startswith("valkey"):
-        return ValkeyQueueBackend(cfg)
+        return ValkeyQueueBackend(cfg, client=FakeRedisStreamClient())
     if url.startswith("postgres"):
-        return PostgreSQLQueueBackend(cfg)
+        return PostgreSQLQueueBackend(cfg, executor=_FakePostgreSQLQueueExecutor())
     if url.startswith("oracle"):
         return OracleQueueBackend(cfg, executor=_FakeOracleQueueExecutor())
     msg = f"Unknown backend url: {url}"
@@ -513,7 +953,7 @@ async def test_postgres_listen_notify_zero_poll_wakeup_uses_direct_dsn() -> None
         direct_dsn="postgresql://primary:5432/db",
         pooler_mode="transaction",
     )
-    backend = PostgreSQLQueueBackend(postgres_config=pg_config)
+    backend = PostgreSQLQueueBackend(postgres_config=pg_config, executor=_FakePostgreSQLQueueExecutor())
     assert backend.direct_dsn == "postgresql://primary:5432/db"
 
     dequeued_result: list[TaskEnvelope] = []
@@ -667,3 +1107,86 @@ def test_oracle_queue_backend_requires_oracledb_and_executor(
             OracleQueueBackend(QueueConfig())
     finally:
         reset_dependency_cache("oracledb")
+
+
+def test_postgres_queue_backend_requires_psycopg_and_executor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PostgreSQLQueueBackend raises MissingDependencyError when psycopg is absent and ImproperConfigurationError without executor."""
+    monkeypatch.setitem(sys.modules, "psycopg", None)
+    reset_dependency_cache("psycopg")
+    try:
+        with pytest.raises(MissingDependencyError) as exc_info:
+            PostgreSQLQueueBackend(QueueConfig(backend_url="postgresql://localhost:5432/vtb"))
+        assert exc_info.value.package == "psycopg"
+        assert exc_info.value.install_package == "psycopg[binary,pool]"
+        assert exc_info.value.hint == "Install it with: uv add psycopg[binary,pool]"
+
+        with pytest.raises(MissingDependencyError) as svc_exc:
+            QueueService(QueueConfig(backend_url="postgres://localhost:5432/vtb"))
+        assert svc_exc.value.package == "psycopg"
+
+        fake = _FakePostgreSQLQueueExecutor()
+        assert isinstance(fake, PostgreSQLQueueExecutor)
+        pg_config = PostgreSQLConfig(
+            dsn="postgresql://pooler:6432/db",
+            direct_dsn="postgresql://primary:5432/db",
+        )
+        backend = PostgreSQLQueueBackend(postgres_config=pg_config, executor=fake)
+        assert backend.direct_dsn == "postgresql://primary:5432/db"
+        assert backend._executor is fake
+
+        monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+        reset_dependency_cache("psycopg")
+        with pytest.raises(ImproperConfigurationError, match="requires a PostgreSQLQueueExecutor"):
+            PostgreSQLQueueBackend(QueueConfig(backend_url="postgresql://localhost:5432/vtb"))
+    finally:
+        reset_dependency_cache("psycopg")
+
+
+def test_redis_queue_backend_requires_redis_and_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RedisQueueBackend and ValkeyQueueBackend require redis.asyncio and a hosted URL unless client is injected."""
+    monkeypatch.setitem(sys.modules, "redis.asyncio", None)
+    reset_dependency_cache("redis.asyncio")
+    try:
+        with pytest.raises(MissingDependencyError) as exc_info:
+            RedisQueueBackend(QueueConfig(backend_url="redis://localhost:6379/0"))
+        assert exc_info.value.package == "redis"
+        assert exc_info.value.install_package == "redis"
+        assert exc_info.value.hint == "Install it with: uv add redis"
+
+        with pytest.raises(MissingDependencyError) as svc_exc:
+            QueueService(QueueConfig(backend_url="valkey://localhost:6379/0"))
+        assert svc_exc.value.package == "redis"
+
+        fake = FakeRedisStreamClient()
+        assert isinstance(fake, RedisStreamClient)
+        injected = ValkeyQueueBackend(client=fake)
+        assert injected.client is fake
+
+        captured: list[str] = []
+        live = FakeRedisStreamClient()
+
+        def _from_url(url: str) -> FakeRedisStreamClient:
+            captured.append(url)
+            return live
+
+        stub = types.ModuleType("redis.asyncio")
+        monkeypatch.setattr(stub, "from_url", _from_url, raising=False)
+        monkeypatch.setitem(sys.modules, "redis.asyncio", stub)
+        reset_dependency_cache("redis.asyncio")
+
+        backend = RedisQueueBackend(QueueConfig(backend_url="redis://cache.internal:6380/2"))
+        assert backend.client is live
+        assert captured == ["redis://cache.internal:6380/2"]
+
+        with pytest.raises(ImproperConfigurationError, match="has no host"):
+            RedisQueueBackend(QueueConfig(backend_url="redis:///0"))
+        assert captured == ["redis://cache.internal:6380/2"]
+
+        with pytest.raises(ImproperConfigurationError, match="has no host"):
+            ValkeyQueueBackend()
+    finally:
+        reset_dependency_cache("redis.asyncio")
