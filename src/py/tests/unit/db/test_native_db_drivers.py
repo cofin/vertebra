@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Self, cast
+from typing import TYPE_CHECKING, Any, Self, cast
 
 import pytest
 from anyio import Event, create_task_group
@@ -103,6 +103,9 @@ from vertebra.utils.serializers import (
     encode_msgpack_bytes,
 )
 from vertebra.utils.sync_tools import SyncPool
+
+if TYPE_CHECKING:
+    from tests.unit.conftest import Resp3FakeServer
 
 _DUCKDB_SKIP_REASON = "duckdb publishes no free-threaded wheel; DuckDB tests run on GIL interpreters"
 
@@ -536,7 +539,7 @@ async def test_sqlite_plain_tuple_fetching_for_sqlalchemy_21() -> None:
 
 
 @pytest.mark.anyio
-async def test_valkey_resp3_client_tracking_and_litestar_integration() -> None:
+async def test_valkey_resp3_client_tracking_and_litestar_integration(resp3_server: Resp3FakeServer) -> None:
     """Verify Valkey RESP3 handshake, client-side cache invalidation push, and Litestar Store/Channels."""
     vcfg = ValkeyConfig(
         url="valkeys://cache.internal:6379/0",
@@ -551,7 +554,7 @@ async def test_valkey_resp3_client_tracking_and_litestar_integration() -> None:
     assert b"BCAST" in cmds[1]
 
     mem_vcfg = ValkeyConfig(
-        url="memory://",
+        url=resp3_server.valkey_url,
         enable_client_side_caching=True,
         client_tracking_prefixes=("user:", "session:"),
     )
@@ -562,10 +565,13 @@ async def test_valkey_resp3_client_tracking_and_litestar_integration() -> None:
     evicted = vdriver.handle_invalidation_push(["user:1"])
     assert evicted == 1
     assert not vdriver.cached_keys
+    await vdriver.close()
 
-    store = MemoryStore.from_valkey("memory://")
+    store = MemoryStore.from_valkey(resp3_server.valkey_url)
     await store.set("k1", "v1", expires_in=60)
     assert await store.get("k1") == b"v1"
+    if store.driver is not None:
+        await store.driver.close()
 
     channels = ChannelsBackend(history=5)
     await channels.on_startup()
@@ -2305,7 +2311,6 @@ _TEMPORARY_UPWARD_IMPORT_ALLOWLIST: frozenset[str] = frozenset()
         ("spangres+vertebra://projects/p/instances/i/databases/d", SpannerConfig),
         ("redis://localhost:6379/0", RedisConfig),
         ("rediss://localhost:6379/0", RedisConfig),
-        ("memory://", RedisConfig),
         ("valkey://localhost:6379/0", ValkeyConfig),
         ("valkeys://localhost:6379/0", ValkeyConfig),
         ("datafusion://embedded?target_partitions=4", DataFusionConfig),
@@ -2318,6 +2323,12 @@ def test_polymorphic_registry_parse_url_roundtrip(url: str, expected_cls: type[A
     parsed = DatabaseRegistry.parse_url(url)
     assert isinstance(parsed, expected_cls)
     assert parsed == expected_cls.from_url(url)
+
+
+def test_registry_parse_url_rejects_memory_scheme() -> None:
+    """DatabaseRegistry.parse_url rejects the memory:// scheme."""
+    with pytest.raises(ValueError, match="Unsupported database URL scheme: 'memory'"):
+        DatabaseRegistry.parse_url("memory://")
 
 
 def test_registry_parse_url_executes_zero_eager_driver_imports() -> None:

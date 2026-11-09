@@ -27,13 +27,13 @@ class RedisConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
 
     dialect: ClassVar[str] = "redis"
     dialect_tag: ClassVar[int] = REDIS_DIALECT_TAG
-    url_schemes: ClassVar[tuple[str, ...]] = ("redis", "rediss", "memory")
+    url_schemes: ClassVar[tuple[str, ...]] = ("redis", "rediss")
     driver_module: ClassVar[str] = "vertebra.db.adapters.redis.driver"
     sync_driver_name: ClassVar[str] = "SyncRedisDriver"
     async_driver_name: ClassVar[str] = "AsyncRedisDriver"
 
     url: str = "redis://localhost:6379/0"
-    """Redis connection URI (`redis://`, `rediss://`, or `memory://`)."""
+    """Redis connection URI (`redis://` or `rediss://`)."""
     username: str | None = None
     """Optional Redis 6+ ACL username passed to `HELLO 3 AUTH`."""
     password: str | None = None
@@ -161,7 +161,7 @@ class RedisConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
 
     @classmethod
     def from_url(cls, url: str, **overrides: Any) -> Self:
-        """Construct a `RedisConfig` from a `redis://`, `rediss://`, or `memory://` URI."""
+        """Construct a `RedisConfig` from a `redis://` or `rediss://` URI."""
         return cls(url=url, **overrides)
 
     def pool_key(self) -> tuple[Any, ...]:

@@ -21,7 +21,7 @@ class ValkeyConfig(RedisConfig, frozen=True, gc=False, kw_only=True):
     async_driver_name: ClassVar[str] = "AsyncValkeyDriver"
 
     url: str = "valkey://localhost:6379/0"
-    """Valkey connection URI (`valkey://`, `valkeys://`, `redis://`, `rediss://`, or `memory://`)."""
+    """Valkey connection URI (`valkey://`, `valkeys://`, `redis://`, or `rediss://`)."""
     client_name: str = "vertebra-valkey"
     """Connection name registered via `HELLO 3 ... SETNAME`."""
     enable_client_side_caching: bool = True

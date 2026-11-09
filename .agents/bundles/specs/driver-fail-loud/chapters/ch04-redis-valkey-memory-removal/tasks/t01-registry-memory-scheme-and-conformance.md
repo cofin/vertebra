@@ -5,7 +5,7 @@ chapter_id: ch04-redis-valkey-memory-removal
 title: Registry drops the memory scheme and remaining cache tests use the fixture or live servers
 description: Remove memory from RedisConfig.url_schemes so DatabaseRegistry.parse_url rejects memory://, update RedisConfig docstrings, retarget the RESP3 sync pubsub and native Valkey tests to the loopback fixture, and make conformance cache cases live-only.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -25,18 +25,18 @@ tests:
 estimated_loc: 110
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: agent:executor
+claimed_at: "2026-11-09T03:20:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T03:27:00Z"
+last_verified_commit: 20c535e3
+verification_evidence: "pytest test_native_db_drivers.py test_redis_valkey_resp3.py test_driver_conformance.py passed; ruff and mypy exited 0"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T03:27:00Z"
+commit: 20c535e3
 sources:
   - id: redis-config
     resource: src/py/vertebra/db/adapters/redis/config.py::RedisConfig
@@ -131,10 +131,10 @@ class CacheConformanceSpec(FrozenBaseStruct, frozen=True, gc=False):
 
 ## Acceptance Criteria
 
-- [ ] `RedisConfig.url_schemes == ("redis", "rediss")` and `parse_url("memory://")` raises `ValueError` (R7b).
-- [ ] No unit test in the three files constructs a `memory://` cache config (R7b).
-- [ ] Conformance cache cases run only against env DSN or docker servers and skip otherwise (R7b).
-- [ ] Zero inline `#` comments in touched Python files.
+- [x] `RedisConfig.url_schemes == ("redis", "rediss")` and `parse_url("memory://")` raises `ValueError` (R7b).
+- [x] No unit test in the three files constructs a `memory://` cache config (R7b).
+- [x] Conformance cache cases run only against env DSN or docker servers and skip otherwise (R7b).
+- [x] Zero inline `#` comments in touched Python files.
 
 ## Notes & Discoveries
 

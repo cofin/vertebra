@@ -286,6 +286,8 @@ class CacheConformanceSpec(FrozenBaseStruct, frozen=True, gc=False):
     """Asynchronous RESP3 driver class."""
     tcp_url: str
     """Canonical TCP URL used to verify URL parsing and shared pool keys."""
+    env_dsn_vars: tuple[str, ...] = ()
+    """Environment variables holding a live server URL, checked in order."""
     container_fixture: str | None = None
     """Optional `pytest-databases` configuration fixture in `conftest.py` used when `VERTEBRA_CONFORMANCE_DOCKER=1`."""
 
@@ -510,6 +512,7 @@ CACHE_ENGINE_SPECS: tuple[CacheConformanceSpec, ...] = (
         sync_driver_cls=SyncRedisDriver,
         async_driver_cls=AsyncRedisDriver,
         tcp_url="redis://127.0.0.1:6379/2",
+        env_dsn_vars=("VERTEBRA_CONFORMANCE_REDIS_DSN",),
         container_fixture="vtb_redis_config",
     ),
     CacheConformanceSpec(
@@ -518,6 +521,7 @@ CACHE_ENGINE_SPECS: tuple[CacheConformanceSpec, ...] = (
         sync_driver_cls=SyncValkeyDriver,
         async_driver_cls=AsyncValkeyDriver,
         tcp_url="valkey://127.0.0.1:6379/2",
+        env_dsn_vars=("VERTEBRA_CONFORMANCE_VALKEY_DSN",),
         container_fixture="vtb_valkey_config",
     ),
 )
@@ -1295,13 +1299,10 @@ async def test_cache_config_url_pool_key_and_provide_driver(cache_spec: CacheCon
     assert key == (cache_spec.engine, cache_spec.tcp_url)
     assert parsed.resolve_driver_classes() == (cache_spec.sync_driver_cls, cache_spec.async_driver_cls)
 
-    mem_cfg = cache_spec.config_cls(url="memory://")
-    assert mem_cfg.pool_key() == (cache_spec.engine, "memory://")
-
     registry = DatabaseRegistry()
-    sync_first = provide_driver(mem_cfg, sync=True, registry=registry)
-    sync_second = provide_driver(mem_cfg, sync=True, registry=registry)
-    async_driver = provide_driver(mem_cfg, sync=False, registry=registry)
+    sync_first = provide_driver(parsed, sync=True, registry=registry)
+    sync_second = provide_driver(parsed, sync=True, registry=registry)
+    async_driver = provide_driver(parsed, sync=False, registry=registry)
     try:
         assert isinstance(sync_first, cache_spec.sync_driver_cls)
         assert isinstance(async_driver, cache_spec.async_driver_cls)
@@ -1315,16 +1316,22 @@ def _resolve_cache_config(
     cache_spec: CacheConformanceSpec,
     request: pytest.FixtureRequest,
 ) -> RedisConfig:
-    """Resolve a `RedisConfig` or `ValkeyConfig`, using `pytest-databases` containers when `VERTEBRA_CONFORMANCE_DOCKER=1`."""
+    """Resolve a live `RedisConfig` or `ValkeyConfig` from an env DSN or `pytest-databases` container, skipping otherwise."""
+    for env_key in cache_spec.env_dsn_vars:
+        value = os.environ.get(env_key, "").strip()
+        if value:
+            return cache_spec.config_cls.from_url(value)
     if cache_spec.container_fixture is not None and os.environ.get("VERTEBRA_CONFORMANCE_DOCKER") == "1":
         fixture_cfg = request.getfixturevalue(cache_spec.container_fixture)
         assert isinstance(fixture_cfg, cache_spec.config_cls)
         return fixture_cfg
-    return cache_spec.config_cls(url="memory://")
+    pytest.skip(
+        f"{cache_spec.engine} conformance requires {' or '.join(cache_spec.env_dsn_vars)} or VERTEBRA_CONFORMANCE_DOCKER=1"
+    )
 
 
 @pytest.mark.parametrize("cache_spec", CACHE_ENGINE_SPECS, ids=[s.engine for s in CACHE_ENGINE_SPECS])
-def test_sync_cache_memory_roundtrip_and_pipeline(
+def test_sync_cache_roundtrip_and_pipeline(
     cache_spec: CacheConformanceSpec,
     request: pytest.FixtureRequest,
 ) -> None:
@@ -1360,7 +1367,7 @@ def test_sync_cache_memory_roundtrip_and_pipeline(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("cache_spec", CACHE_ENGINE_SPECS, ids=[s.engine for s in CACHE_ENGINE_SPECS])
-async def test_async_cache_memory_roundtrip_and_pipeline(
+async def test_async_cache_roundtrip_and_pipeline(
     cache_spec: CacheConformanceSpec,
     request: pytest.FixtureRequest,
 ) -> None:

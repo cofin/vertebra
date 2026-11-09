@@ -5,7 +5,7 @@ chapter_id: ch04-redis-valkey-memory-removal
 title: Redis and Valkey drivers delete memory execution and reject memory://
 description: Delete the in-process key store, script cache, memory publish, command emulation, and every memory:// branch from the Redis sync, async, and subscription-stream code, and raise ImproperConfigurationError for memory:// URLs from both driver constructors so Valkey drivers and store factories reject it.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -25,18 +25,18 @@ tests:
 estimated_loc: 250
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: agent:executor
+claimed_at: "2026-11-09T03:20:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T03:27:00Z"
+last_verified_commit: 20c535e3
+verification_evidence: "pytest test_redis_valkey_driver.py passed; ruff, mypy, and residue checks exited 0"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T03:27:00Z"
+commit: 20c535e3
 sources:
   - id: redis-driver
     resource: src/py/vertebra/db/adapters/redis/driver.py::SyncRedisDriver
@@ -154,11 +154,11 @@ Call-site wiring: `MemoryStore.from_valkey("memory://")` → `ValkeyConfig(url="
 
 ## Acceptance Criteria
 
-- [ ] Both Redis driver constructors raise `ImproperConfigurationError` for `memory://`, and all eight store and cache factories surface it (R7c).
-- [ ] No in-process key, TTL, script, or publish emulation remains in the Redis driver (R7c).
-- [ ] `ValkeyConfig.url` docstring lists only network schemes.
-- [ ] Every Redis/Valkey consumer unit test passes over the `resp3_server` fixture.
-- [ ] Zero inline `#` comments in touched Python files.
+- [x] Both Redis driver constructors raise `ImproperConfigurationError` for `memory://`, and all eight store and cache factories surface it (R7c).
+- [x] No in-process key, TTL, script, or publish emulation remains in the Redis driver (R7c).
+- [x] `ValkeyConfig.url` docstring lists only network schemes.
+- [x] Every Redis/Valkey consumer unit test passes over the `resp3_server` fixture.
+- [x] Zero inline `#` comments in touched Python files.
 
 ## Notes & Discoveries
 

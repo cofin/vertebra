@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -22,8 +23,11 @@ from vertebra.db.adapters.valkey import (
     SyncValkeyDriver,
     ValkeyConfig,
 )
+from vertebra.extensions.alchemy.cache import SQLAlchemyCacheBackend
 from vertebra.extensions.litestar.store import MemoryStore
+from vertebra.extensions.starlette.store import CacheStore
 from vertebra.framework.stores import KeyValueStore
+from vertebra.typing import ImproperConfigurationError
 
 if TYPE_CHECKING:
     from tests.unit.conftest import Resp3FakeServer
@@ -632,3 +636,26 @@ async def test_redis_and_valkey_build_drivers_propagate_broker(
     finally:
         sync_exp.close()
         await async_exp.close()
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        pytest.param(lambda: SyncRedisDriver(RedisConfig(url="memory://")), id="sync-redis"),
+        pytest.param(lambda: AsyncRedisDriver(RedisConfig(url="MEMORY://")), id="async-redis"),
+        pytest.param(lambda: SyncValkeyDriver(ValkeyConfig(url="memory://")), id="sync-valkey"),
+        pytest.param(lambda: AsyncValkeyDriver(ValkeyConfig(url="memory://")), id="async-valkey"),
+        pytest.param(lambda: KeyValueStore.from_valkey("memory://"), id="kv-valkey"),
+        pytest.param(lambda: KeyValueStore.from_redis("memory://"), id="kv-redis"),
+        pytest.param(lambda: MemoryStore.from_valkey("memory://"), id="litestar-valkey"),
+        pytest.param(lambda: MemoryStore.from_redis("memory://"), id="litestar-redis"),
+        pytest.param(lambda: CacheStore.from_valkey("memory://"), id="starlette-valkey"),
+        pytest.param(lambda: CacheStore.from_redis("memory://"), id="starlette-redis"),
+        pytest.param(lambda: SQLAlchemyCacheBackend.from_valkey("memory://"), id="alchemy-valkey"),
+        pytest.param(lambda: SQLAlchemyCacheBackend.from_redis("memory://"), id="alchemy-redis"),
+    ],
+)
+def test_redis_drivers_and_store_factories_reject_memory_url(factory: Callable[[], object]) -> None:
+    """Redis and Valkey drivers and store/cache factories reject memory:// URLs with ImproperConfigurationError."""
+    with pytest.raises(ImproperConfigurationError, match="memory://"):
+        factory()

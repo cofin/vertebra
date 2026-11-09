@@ -20,17 +20,17 @@ chapters:
   - ch11-docs-and-okf
   - ch12-queue-docs-and-knowledge
   - ch13-agent-knowledge-and-embeddings-docs
-current_chapter: ch04-redis-valkey-memory-removal
-current_task: "driver-fail-loud:ch04:t01"
+current_chapter: ch05-mssql-codec-cleanup
+current_task: "driver-fail-loud:ch05:t01"
 parent_prd: native-data-platform
 research:
   - research/driver-restructure_20261107.md
   - research/change-surface_20261107.md
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 3
+state_revision: 4
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-09T03:21:00Z"
+updated_at: "2026-11-09T03:29:00Z"
 verified:
   - by: agent:code-reviewer
     at: "2026-11-08T00:00:00Z"
@@ -362,7 +362,7 @@ unexport PY_GIL_DISABLED PY_TEST_GROUPS
 - [x] [d7a629b1] ch01-oracle-mssql-fail-loud — Oracle and MSSQL drivers raise `MissingDependencyError` with no SQLite path; `AsyncMSSQLDriver` forwards `dialer` ([spec](chapters/ch01-oracle-mssql-fail-loud/spec.md))
 - [x] [af67511d] ch02-duckdb-sqlalchemy-queue-fail-loud — GIL-only `duckdb` group, DuckDB requires `duckdb`, SQLAlchemy raises `InterfaceError`, Oracle queue requires an executor ([spec](chapters/ch02-duckdb-sqlalchemy-queue-fail-loud/spec.md))
 - [x] [ea07cb21] ch03-remove-memory-fakes — PostgreSQL and MySQL drivers reject `memory://`; Redis and Valkey consumer tests move onto the `resp3_server` loopback fixture ([spec](chapters/ch03-remove-memory-fakes/spec.md))
-- [ ] ch04-redis-valkey-memory-removal — `RedisConfig` drops the `memory` scheme; Redis and Valkey drivers and store factories reject `memory://` ([spec](chapters/ch04-redis-valkey-memory-removal/spec.md))
+- [x] [20c535e3] ch04-redis-valkey-memory-removal — `RedisConfig` drops the `memory` scheme; Redis and Valkey drivers and store factories reject `memory://` ([spec](chapters/ch04-redis-valkey-memory-removal/spec.md))
 - [ ] ch05-mssql-codec-cleanup — MSSQL Python batch wrappers, the `encode_tds_sql_batch` binding and stub, Rust TDS framing, `MSSQL_DIALECT_TAG`, and `MssqlPool` removed; the placeholder rewriter stays ([spec](chapters/ch05-mssql-codec-cleanup/spec.md))
 - [ ] ch06-oracle-codec-cleanup — Rust TNS framing, `TnsPacketType`, `ORACLE_DIALECT_TAG`, and `OraclePool` removed; Oracle TNS and Redis hash-slot probes for unexported natives deleted; Oracle and DuckDB docs describe codecs ([spec](chapters/ch06-oracle-codec-cleanup/spec.md))
 - [ ] ch07-vertebra-db-pools-and-mysql — PostgreSQL, DuckDB, SQLite, and MySQL pools and dialect tags, the `OracleWalletMaterial` struct, the `mysql` module, and the `sha2` / `rmp-serde` dependencies removed; crate docs describe codecs ([spec](chapters/ch07-vertebra-db-pools-and-mysql/spec.md))
