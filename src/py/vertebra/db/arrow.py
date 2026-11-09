@@ -39,15 +39,16 @@ class ArrowCursor:
     """Zero-copy shared-memory Arrow IPC cursor for bulk analytical result sets.
 
     `_shm_anchor` pins the source region and memoryviews backing `_buffer` so Arrow buffers
-    decoded over the payload never outlive the mapping, and `_row_count_cache` memoizes the
-    batch row total counted lazily from the IPC stream.
+    decoded over the payload never outlive the mapping, and `_ipc_table_cache` memoizes the
+    `pyarrow.Table` decoded from the IPC stream so `len()`, `to_arrow_table()`, `to_pylist()`,
+    and column-wise row extraction decode the stream at most once.
     """
 
     __slots__ = (
         "_buffer",
         "_columns",
+        "_ipc_table_cache",
         "_mmap",
-        "_row_count_cache",
         "_rows",
         "_shm_anchor",
         "_shm_cursor",
@@ -80,7 +81,7 @@ class ArrowCursor:
         self._mmap = mmap_obj
         self._shm_cursor = shm_cursor
         self._shm_anchor = shm_anchor
-        self._row_count_cache: int | None = None
+        self._ipc_table_cache: Any = None
 
     def __len__(self) -> int:
         """Return the number of rows in the cursor without materializing row tuples."""
@@ -90,9 +91,8 @@ class ArrowCursor:
             rc = int(self._shm_cursor.row_count)
             if rc > 0:
                 return rc
-        if self._row_count_cache is None:
-            self._row_count_cache = self._count_ipc_rows()
-        return self._row_count_cache
+        ipc_table = self._ipc_table()
+        return 0 if ipc_table is None else int(ipc_table.num_rows)
 
     def __buffer__(self, flags: int, /) -> memoryview:
         """Return a PEP 688 zero-copy memoryview over the serialized Arrow IPC payload."""
@@ -185,7 +185,11 @@ class ArrowCursor:
         return [{col: (r[idx] if idx < len(r) else None) for idx, col in enumerate(cols)} for r in self._rows]
 
     def release(self) -> bool:
-        """Release any underlying native shared-memory region or anonymous mmap."""
+        """Release any underlying native shared-memory region or anonymous mmap.
+
+        The cached decoded table is dropped first so its buffers no longer export the mapping.
+        """
+        self._ipc_table_cache = None
         released = False
         if self._shm_cursor is not None and hasattr(self._shm_cursor, "release"):
             with contextlib.suppress(Exception):
@@ -278,6 +282,15 @@ class ArrowCursor:
         return None
 
     def _ipc_table(self) -> Any:
+        """Return the memoized `pyarrow.Table` for the native SHM cursor or IPC buffer.
+
+        Returns `None` when the payload is not Arrow IPC; only successful decodes are cached.
+        """
+        if self._ipc_table_cache is None:
+            self._ipc_table_cache = self._decode_ipc_table()
+        return self._ipc_table_cache
+
+    def _decode_ipc_table(self) -> Any:
         """Decode the native SHM cursor or IPC buffer into a `pyarrow.Table`, or return `None` when not Arrow IPC."""
         if self._shm_cursor is not None and hasattr(self._shm_cursor, "to_arrow_table"):
             with contextlib.suppress(TypeError, ValueError, OSError, RuntimeError):
@@ -285,24 +298,12 @@ class ArrowCursor:
         pa = import_optional("pyarrow")
         if pa is None:
             return None
-        view = self.buffer_view()
-        if len(view) == 0:
-            return None
-        with contextlib.suppress(TypeError, ValueError, OSError):
-            return pa.ipc.open_stream(pa.py_buffer(view)).read_all()
-        return None
-
-    def _count_ipc_rows(self) -> int:
-        """Sum `RecordBatch.num_rows` across the IPC stream without decoding rows into Python objects."""
-        pa = import_optional("pyarrow")
-        if pa is None:
-            return 0
         with contextlib.suppress(TypeError, ValueError, OSError, RuntimeError, BufferError):
             view = self.buffer_view()
             if len(view) == 0:
-                return 0
-            return sum(batch.num_rows for batch in pa.ipc.open_stream(pa.py_buffer(view)))
-        return 0
+                return None
+            return pa.ipc.open_stream(pa.py_buffer(view)).read_all()
+        return None
 
 
 def write_arrow_shm(table: Any) -> memoryview:
@@ -348,6 +349,10 @@ def read_arrow_shm(region: Any, length: int | None = None) -> ArrowCursor:
     payload length, payload). Arrow buffers are decoded lazily over `pa.py_buffer(payload_view)`, and
     the cursor anchors `(region, raw_view, payload_view)` so they never outlive the mapping. Non-IPC
     payloads fall back to JSON row decoding.
+
+    The returned cursor holds a buffer export of the caller's region. Closing an `mmap` region,
+    or leaving a `with mmap.mmap(...)` block, while the cursor (or a table decoded from it) is
+    alive raises `BufferError`; release the cursor and drop decoded tables first.
 
     Raises:
         ValueError: When a `VTBARROW` header is shorter than `16` bytes or declares a payload
@@ -426,16 +431,18 @@ def _table_to_rows_and_cols(
 
     Arrow tables, record batches, and IPC-backed cursors are transposed column-wise (one
     `to_pylist()` per selected column zipped into row tuples) instead of allocating a dictionary
-    per row; requested columns absent from the schema yield `None` values.
+    per row; requested columns absent from the schema yield `None` values. Duplicate field names
+    (for example from SQL joins) collapse to one column whose values come from the last field
+    with that name, matching `pyarrow.Table.to_pylist()` dictionaries.
     """
     table = ArrowCursor._columnar_source(data)
     if table is not None:
-        cols = tuple(columns) if columns is not None else tuple(table.column_names)
+        index = {name: position for position, name in enumerate(table.column_names)}
+        cols = tuple(columns) if columns is not None else tuple(index)
         num_rows = table.num_rows
         if num_rows == 0 or not cols:
             return [], cols
-        present = set(table.column_names)
-        column_values = (table.column(c).to_pylist() if c in present else [None] * num_rows for c in cols)
+        column_values = (table.column(index[c]).to_pylist() if c in index else [None] * num_rows for c in cols)
         return list(zip(*column_values, strict=True)), cols
     if isinstance(data, ArrowCursor) or hasattr(data, "to_pylist") and callable(data.to_pylist):
         pylist = data.to_pylist()

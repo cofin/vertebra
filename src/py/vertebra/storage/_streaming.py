@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import msgspec
 
@@ -16,6 +16,9 @@ if TYPE_CHECKING:
     from vertebra._storage import StorageBuffer
 
 __all__ = ("ByteRange", "RangeNotSatisfiableError", "StreamingStorageResponse", "parse_byte_range")
+
+RANGE_WINDOW_BYTES: Final[int] = 4 * 1024 * 1024
+"""Minimum byte length fetched per `get_range` call while streaming a `206` body."""
 
 
 class ByteRange(msgspec.Struct, frozen=True, gc=False):
@@ -146,7 +149,9 @@ class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
         """Yield zero-copy memoryview chunks of at most `chunk_size` bytes.
 
         Full responses stream through `SyncObjectStore.get_stream`; byte-range responses read
-        bounded `SyncObjectStore.get_range` windows, so the full object is never materialized.
+        `SyncObjectStore.get_range` windows of `max(chunk_size, RANGE_WINDOW_BYTES)` bytes and
+        slice them into chunks, so memory stays bounded by one window. A direct descriptor without
+        `total_size` resolves the object size with one HEAD; unsatisfiable ranges yield nothing.
 
         Args:
             chunk_size: Maximum bytes per chunk; defaults to the descriptor's `chunk_size`.
@@ -169,18 +174,27 @@ class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
             msg = "AsyncObjectStore cannot be used with synchronous iter_chunks; use aiter_chunks or SyncObjectStore"
             raise ImproperConfigurationError(msg)
         if self.range_start is not None or self.range_end is not None:
-            selected = self._resolve_sync_range(self.store)
-            for offset in range(selected.start, selected.end_exclusive, step):
-                length = min(step, selected.end_exclusive - offset)
-                yield memoryview(self.store.get_range(self.key, offset, length))
+            try:
+                selected = self._select_range(self.total_size or self.store.head(self.key).size)
+            except RangeNotSatisfiableError:
+                return
+            window = max(step, RANGE_WINDOW_BYTES)
+            for offset in range(selected.start, selected.end_exclusive, window):
+                length = min(window, selected.end_exclusive - offset)
+                yield from self._slice_view(memoryview(self.store.get_range(self.key, offset, length)), step)
             return
-        if self.total_size == 0:
+        if (self.total_size or self.store.head(self.key).size) == 0:
             return
         for buffer in self.store.get_stream(self.key, chunk_size=step):
             yield from self._slice_view(memoryview(buffer), step)
 
     async def aiter_chunks(self) -> AsyncIterator[StorageBuffer | bytes | memoryview]:
-        """Yield native async chunks or bounded async range reads."""
+        """Yield native async chunks or bounded async range reads.
+
+        Byte-range responses await `AsyncObjectStore.get_range` windows of
+        `max(chunk_size, RANGE_WINDOW_BYTES)` bytes and yield `chunk_size` memoryview slices;
+        unsatisfiable ranges yield nothing.
+        """
         if self.status_code == 416:
             return
         if not isinstance(self.store, AsyncObjectStore) or self.data is not None:
@@ -188,34 +202,50 @@ class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
                 yield chunk
             return
         if self.range_start is not None or self.range_end is not None:
-            start = max(0, self.range_start or 0)
-            end = self.range_end + 1 if self.range_end is not None else self.total_size
-            if self.range_end is None and not self.total_size:
-                end = (await self.store.head(self.key)).size
-            for offset in range(start, end, self.chunk_size):
-                yield await self.store.get_range(self.key, offset, min(self.chunk_size, end - offset))
+            try:
+                selected = self._select_range(self.total_size or (await self.store.head(self.key)).size)
+            except RangeNotSatisfiableError:
+                return
+            window = max(self.chunk_size, RANGE_WINDOW_BYTES)
+            for offset in range(selected.start, selected.end_exclusive, window):
+                length = min(window, selected.end_exclusive - offset)
+                for chunk in self._slice_view(
+                    memoryview(await self.store.get_range(self.key, offset, length)), self.chunk_size
+                ):
+                    yield chunk
             return
         async for native_chunk in self.store.get_stream(self.key, chunk_size=self.chunk_size):
             yield native_chunk
 
     async def to_async_fastpath_tuple(self) -> tuple[int, list[tuple[bytes, bytes]], memoryview | bytes]:
-        """Resolve async storage without calling synchronous store methods."""
+        """Resolve async storage without calling synchronous store methods.
+
+        Unsatisfiable direct-descriptor ranges return `416` with `content-range: bytes */{size}`
+        without reading the object body.
+        """
         content_range = self.content_range
-        if self.status_code == 416:
+        status_code = self.status_code
+        if status_code == 416:
             payload: memoryview | bytes = b""
         elif isinstance(self.store, AsyncObjectStore) and self.data is None:
             if self.range_start is not None or self.range_end is not None:
-                start = max(0, self.range_start or 0)
-                total_size = self.total_size or (await self.store.head(self.key)).size
-                end = min(self.range_end + 1, total_size) if self.range_end is not None else total_size
-                payload = await self.store.get_range(self.key, start, end - start)
-                if content_range is None:
-                    content_range = ByteRange(start, end, total_size).content_range_header
+                try:
+                    selected = self._select_range(self.total_size or (await self.store.head(self.key)).size)
+                except RangeNotSatisfiableError as exc:
+                    status_code = 416
+                    content_range = f"bytes */{exc.total_size}"
+                    payload = b""
+                else:
+                    payload = await self.store.get_range(self.key, selected.start, selected.content_length)
+                    if content_range is None:
+                        content_range = selected.content_range_header
             else:
                 payload = await self.store.get_view(self.key)
         else:
             return self.to_fastpath_tuple()
-        descriptor = msgspec.structs.replace(self, store=None, data=b"", content_range=content_range)
+        descriptor = msgspec.structs.replace(
+            self, store=None, data=b"", content_range=content_range, status_code=status_code
+        )
         status, headers, _ = descriptor.to_fastpath_tuple()
         headers = [(key, value) for key, value in headers if key != b"content-length"]
         headers.append((b"content-length", str(len(payload)).encode("ascii")))
@@ -225,7 +255,9 @@ class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
         """Serialize into a `(status_code, headers, body)` tuple for FastPath dispatch.
 
         Byte-range bodies are fetched with one `SyncObjectStore.get_range` call covering only the
-        selected bytes; full bodies are returned as a zero-copy view over the native buffer.
+        selected bytes; full bodies are returned as a zero-copy view over the native buffer. A direct
+        descriptor without `total_size` resolves the object size with one HEAD, and an unsatisfiable
+        range returns `416` with `content-range: bytes */{size}` without reading the body.
         """
         if self.store is not None and isinstance(self.store, AsyncObjectStore) and self.data is None and self.key:
             msg = (
@@ -240,24 +272,23 @@ class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
         if self.etag is not None:
             encoded_headers.append((b"etag", self._format_etag(self.etag).encode("latin-1")))
         resolved_range = self.content_range
-        payload: bytes | memoryview
-        if self.status_code == 416:
-            payload = b""
-        elif self.data is not None:
+        resolved_status = self.status_code
+        payload: bytes | memoryview = b""
+        if resolved_status != 416 and self.data is not None:
             payload = self.data
-        elif isinstance(self.store, SyncObjectStore) and self.key:
+        elif resolved_status != 416 and isinstance(self.store, SyncObjectStore) and self.key:
             if self.range_start is not None or self.range_end is not None:
-                selected = self._resolve_sync_range(self.store)
-                payload = self.store.get_range(self.key, selected.start, selected.content_length)
-                if resolved_range is None:
-                    last = max(selected.start, selected.end_exclusive - 1)
-                    resolved_range = f"bytes {selected.start}-{last}/{selected.total_size}"
-            elif self.total_size == 0:
-                payload = b""
-            else:
+                try:
+                    selected = self._select_range(self.total_size or self.store.head(self.key).size)
+                except RangeNotSatisfiableError as exc:
+                    resolved_status = 416
+                    resolved_range = f"bytes */{exc.total_size}"
+                else:
+                    payload = self.store.get_range(self.key, selected.start, selected.content_length)
+                    if resolved_range is None:
+                        resolved_range = selected.content_range_header
+            elif (self.total_size or self.store.head(self.key).size) > 0:
                 payload = self.store.get_view(self.key)
-        else:
-            payload = b""
 
         if resolved_range is not None:
             encoded_headers.append((b"content-range", resolved_range.encode("latin-1")))
@@ -273,7 +304,6 @@ class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
         if not any(k == b"content-length" for k, _ in encoded_headers):
             encoded_headers.append((b"content-length", str(len(payload)).encode("ascii")))
 
-        resolved_status = self.status_code
         if resolved_status == 200:
             if self.signed_url is not None and self.data is None and not self.key:
                 resolved_status = 307
@@ -344,9 +374,15 @@ class StreamingStorageResponse(msgspec.Struct, frozen=True, gc=False):
         for offset in range(0, len(view), step):
             yield view[offset : offset + step]
 
-    def _resolve_sync_range(self, store: SyncObjectStore) -> ByteRange:
-        """Clamp the descriptor's inclusive range to the object size, issuing a HEAD only when the size is unknown."""
-        total_size = self.total_size or store.head(self.key).size
+    def _select_range(self, total_size: int) -> ByteRange:
+        """Clamp the descriptor's inclusive range to `total_size` for sync and async readers.
+
+        Raises:
+            RangeNotSatisfiableError: The clamped range selects no bytes (empty object, start at or
+                past the end, or an end before the start).
+        """
         start = max(0, self.range_start or 0)
         end = min(self.range_end + 1, total_size) if self.range_end is not None else total_size
-        return ByteRange(start, max(start, end), total_size)
+        if start >= end:
+            raise RangeNotSatisfiableError(total_size=total_size)
+        return ByteRange(start, end, total_size)

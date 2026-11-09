@@ -784,7 +784,7 @@ def test_storage_response_range_reads_only_requested_windows(
     assert bytes(body) == payload[10:26]
     assert dict(headers)[b"content-range"] == b"bytes 10-25/64"
     assert dict(headers)[b"content-length"] == b"16"
-    assert storage_read_spy == {"get_range": [(10, 6), (16, 6), (22, 4), (10, 16)], "get_stream": []}
+    assert storage_read_spy == {"get_range": [(10, 16), (10, 16)], "get_stream": []}
 
 
 @pytest.mark.anyio
@@ -796,7 +796,125 @@ async def test_storage_response_async_iteration_over_sync_store_streams_ranges(
     store.put("range.bin", b"0123456789")
     response = StreamingStorageResponse.from_sync_store(store, "range.bin", range_header="bytes=2-8", chunk_size=4)
     assert [bytes(chunk) async for chunk in response.aiter_chunks()] == [b"2345", b"678"]
-    assert storage_read_spy == {"get_range": [(2, 4), (6, 3)], "get_stream": []}
+    assert storage_read_spy == {"get_range": [(2, 7)], "get_stream": []}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_storage_response_multi_mib_range_reads_bounded_windows(
+    asynchronous: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A multi-MiB `206` body issues one `get_range` per 4 MiB window while chunks stay within `chunk_size`."""
+    store = SyncObjectStore("memory://")
+    payload = os.urandom(9 * 1024 * 1024 + 4096)
+    store.put("big.bin", payload)
+    calls: list[tuple[int, int]] = []
+    if asynchronous:
+        original_async = AsyncObjectStore.get_range
+
+        async def spy_async(self: AsyncObjectStore, path: str, offset: int, length: int) -> bytes:
+            calls.append((offset, length))
+            return await original_async(self, path, offset, length)
+
+        monkeypatch.setattr(AsyncObjectStore, "get_range", spy_async)
+        response = await StreamingStorageResponse.from_async_store(
+            store.to_async(), "big.bin", range_header=f"bytes=100-{len(payload) - 1}", chunk_size=65536
+        )
+        chunks = [bytes(chunk) async for chunk in response.aiter_chunks()]
+    else:
+        original_sync = SyncObjectStore.get_range
+
+        def spy_sync(self: SyncObjectStore, path: str, offset: int, length: int) -> bytes:
+            calls.append((offset, length))
+            return original_sync(self, path, offset, length)
+
+        monkeypatch.setattr(SyncObjectStore, "get_range", spy_sync)
+        response = StreamingStorageResponse.from_sync_store(
+            store, "big.bin", range_header=f"bytes=100-{len(payload) - 1}", chunk_size=65536
+        )
+        chunks = [bytes(chunk) for chunk in response.iter_chunks()]
+    selected = len(payload) - 100
+    window = 4 * 1024 * 1024
+    assert len(calls) == -(-selected // window) == 3
+    assert calls == [(100, window), (100 + window, window), (100 + 2 * window, selected - 2 * window)]
+    assert max(len(chunk) for chunk in chunks) == 65536
+    assert b"".join(chunks) == payload[100:]
+
+
+def test_storage_response_sync_direct_descriptor_resolves_unknown_size() -> None:
+    """A direct sync descriptor without `total_size` resolves the size with HEAD and returns the full body."""
+    store = SyncObjectStore("memory://")
+    store.put("body.bin", b"0123456789")
+    response = StreamingStorageResponse(store=store, key="body.bin", chunk_size=4)
+    assert [bytes(chunk) for chunk in response.iter_chunks()] == [b"0123", b"4567", b"89"]
+    status, headers, body = response.to_fastpath_tuple()
+    assert status == 200
+    assert bytes(body) == b"0123456789"
+    assert dict(headers)[b"content-length"] == b"10"
+    assert b"content-range" not in dict(headers)
+
+
+@pytest.mark.parametrize(
+    ("payload", "range_start", "range_end"),
+    [(b"0123456789", 10, None), (b"0123456789", 99, 120), (b"0123456789", 6, 3), (b"", 0, None)],
+    ids=["start-at-end", "start-past-end", "end-before-start", "empty-object"],
+)
+def test_storage_response_sync_direct_unsatisfiable_range_returns_416(
+    storage_read_spy: dict[str, list[tuple[int, int | None]]],
+    payload: bytes,
+    range_start: int,
+    range_end: int | None,
+) -> None:
+    """Direct sync descriptors with unsatisfiable ranges return `416` without reading the body."""
+    store = SyncObjectStore("memory://")
+    store.put("object.bin", payload)
+    response = StreamingStorageResponse(store=store, key="object.bin", range_start=range_start, range_end=range_end)
+    assert list(response.iter_chunks()) == []
+    status, headers, body = response.to_fastpath_tuple()
+    assert status == 416
+    assert body == b""
+    assert dict(headers)[b"content-range"] == f"bytes */{len(payload)}".encode()
+    assert dict(headers)[b"content-length"] == b"0"
+    assert storage_read_spy == {"get_range": [], "get_stream": []}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("payload", "range_start", "range_end"),
+    [(b"0123456789", 10, None), (b"0123456789", 99, 120), (b"0123456789", 6, 3), (b"", 0, None)],
+    ids=["start-at-end", "start-past-end", "end-before-start", "empty-object"],
+)
+async def test_storage_response_async_direct_unsatisfiable_range_returns_416(
+    payload: bytes, range_start: int, range_end: int | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Direct async descriptors with unsatisfiable ranges return `416` without awaiting a range read."""
+    store = AsyncObjectStore("memory://")
+    await store.put("object.bin", payload)
+
+    async def forbidden(self: AsyncObjectStore, path: str, offset: int, length: int) -> bytes:
+        raise AssertionError(f"range read of {path} at {offset}+{length}")
+
+    monkeypatch.setattr(AsyncObjectStore, "get_range", forbidden)
+    response = StreamingStorageResponse(store=store, key="object.bin", range_start=range_start, range_end=range_end)
+    assert [chunk async for chunk in response.aiter_chunks()] == []
+    status, headers, body = await response.to_async_fastpath_tuple()
+    assert status == 416
+    assert body == b""
+    assert dict(headers)[b"content-range"] == f"bytes */{len(payload)}".encode()
+    assert dict(headers)[b"content-length"] == b"0"
+
+
+@pytest.mark.anyio
+async def test_storage_response_async_direct_range_clamps_end_to_object_size() -> None:
+    """Async iteration clamps an inclusive `range_end` past the object end to the object size."""
+    store = AsyncObjectStore("memory://")
+    await store.put("body", b"0123456789")
+    response = StreamingStorageResponse(store=store, key="body", range_start=3, range_end=99, chunk_size=3)
+    assert [bytes(chunk) async for chunk in response.aiter_chunks()] == [b"345", b"678", b"9"]
+    status, headers, body = await response.to_async_fastpath_tuple()
+    assert status == 206
+    assert bytes(body) == b"3456789"
+    assert dict(headers)[b"content-range"] == b"bytes 3-9/10"
 
 
 @pytest.mark.parametrize(
@@ -1048,13 +1166,16 @@ def _parquet_column_encodings(store: SyncObjectStore, key: str) -> dict[str, set
     [
         (False, ["metric"], set(), {"metric"}),
         (["tag"], False, {"tag"}, set()),
+        ("tag", False, {"tag"}, set()),
+        (False, "metric", set(), {"metric"}),
         (True, True, {"id", "tag", "metric"}, set()),
     ],
+    ids=["split-list", "dictionary-list", "dictionary-str", "split-str", "all-columns"],
 )
 async def test_storage_parquet_encoding_options_reach_column_metadata(
     asynchronous: bool,
-    use_dictionary: bool | list[str],
-    use_byte_stream_split: bool | list[str],
+    use_dictionary: bool | str | list[str],
+    use_byte_stream_split: bool | str | list[str],
     dictionary_columns: set[str],
     split_columns: set[str],
 ) -> None:
@@ -1225,31 +1346,59 @@ async def test_storage_parquet_table_reads_default_to_pre_buffer(
     assert seen == [expected, expected]
 
 
-@pytest.mark.parametrize(
-    ("chunks", "capacity", "expected"),
-    [
-        ([b"abc", b"defg", b"hi"], 6, [b"abcdef", b"ghi", b""]),
-        ([b"abcdefghij"], 4, [b"abcd", b"efgh", b"ij", b""]),
-        ([], 3, [b""]),
-    ],
-)
-def test_storage_stream_file_readinto_fills_caller_buffer(
-    chunks: list[bytes], capacity: int, expected: list[bytes], monkeypatch: pytest.MonkeyPatch
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_storage_arrow_stream_batches_decode_bodies_through_read_buffer(
+    asynchronous: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Stream readinto copies native chunks straight into the caller buffer and tracks position."""
+    """Arrow IPC batch iteration decodes message bodies via `read_buffer`, leaving `read` for length prefixes."""
+    pa = pytest.importorskip("pyarrow")
+    table = pa.table({"id": pa.array(range(4096), type=pa.int64()), "tag": [f"t{i % 9}" for i in range(4096)]})
+    store = SyncObjectStore("memory://")
+    store.write_arrow("stream.arrow", table, batch_size=512)
+    read_sizes: list[int] = []
+    buffer_sizes: list[int] = []
+    original_read = _arrow._StreamFile.read
+    original_read_buffer = _arrow._StreamFile.read_buffer
 
-    def reject_read(*args: Any, **kwargs: Any) -> bytes:
-        pytest.fail("readinto must not materialize an intermediate bytes object through read()")
+    def observe_read(self: Any, size: int | None = -1) -> bytes:
+        read_sizes.append(-1 if size is None else size)
+        return original_read(self, size)
 
-    monkeypatch.setattr(_arrow._StreamFile, "read", reject_read)
+    def observe_read_buffer(self: Any, nbytes: int) -> memoryview | bytes:
+        buffer_sizes.append(nbytes)
+        return original_read_buffer(self, nbytes)
+
+    monkeypatch.setattr(_arrow._StreamFile, "read", observe_read)
+    monkeypatch.setattr(_arrow._StreamFile, "read_buffer", observe_read_buffer)
+    if asynchronous:
+        batches = [batch async for batch in store.to_async().iter_arrow_batches("stream.arrow", batch_size=512)]
+    else:
+        batches = list(store.iter_arrow_batches("stream.arrow", batch_size=512))
+    assert pa.Table.from_batches(batches).equals(table)
+    assert sum(buffer_sizes) >= table.nbytes
+    assert read_sizes
+    assert max(read_sizes) <= 8
+
+
+@pytest.mark.parametrize(
+    ("chunks", "requests", "expected", "zero_copy"),
+    [
+        ([b"abcdefgh"], [3, 3, 3], [b"abc", b"def", b"gh"], [True, True, True]),
+        ([b"abc", b"defg", b"hi"], [5, 4, 1], [b"abcde", b"fghi", b""], [False, False, False]),
+        ([], [4], [b""], [False]),
+    ],
+    ids=["within-chunk", "spanning-chunks", "empty-stream"],
+)
+def test_storage_stream_file_read_buffer_slices_pending_chunk(
+    chunks: list[bytes], requests: list[int], expected: list[bytes], zero_copy: list[bool]
+) -> None:
+    """`read_buffer` returns a view over the pending native chunk when it fits and one copy when it spans chunks."""
     pending = iter(chunks)
     stream = _arrow._StreamFile(lambda: next(pending, None))
-    target = array.array("B", bytes(capacity))
-    observed: list[bytes] = []
-    for _ in expected:
-        count = stream.readinto(target)
-        observed.append(target.tobytes()[:count])
-    assert observed == expected
+    results = [stream.read_buffer(size) for size in requests]
+    assert [bytes(result) for result in results] == expected
+    assert [isinstance(result, memoryview) for result in results] == zero_copy
     assert stream.tell() == sum(len(chunk) for chunk in chunks)
 
 
@@ -1271,15 +1420,17 @@ def test_storage_arrow_module_layout_exports_public_codecs_first() -> None:
     )
     assert sorted(public) == list(_arrow.__all__)
     assert definitions[: len(public)] == public
-    helpers = (
-        _arrow._CodecBridge,
-        _arrow._RangeFile,
-        _arrow._StreamFile,
-        _arrow._BatchReader,
-        _arrow._OutputSink,
-        _arrow._BatchWriter,
-    )
-    assert all("__slots__" in vars(helper) for helper in helpers)
+    plain_helpers = (_arrow._CodecBridge, _arrow._BatchReader, _arrow._BatchWriter)
+    io_helpers = (_arrow._RangeFile, _arrow._StreamFile, _arrow._OutputSink)
+    assert all("__slots__" in vars(helper) for helper in (*plain_helpers, *io_helpers))
+    assert not hasattr(_arrow._BatchReader(), "__dict__")
+    assert not hasattr(_arrow._BatchWriter(), "__dict__")
+
+
+@pytest.mark.anyio
+async def test_storage_arrow_codec_bridge_instances_have_no_instance_dict() -> None:
+    """The loop-bound codec bridge stores state only in declared slots."""
+    assert not hasattr(_arrow._CodecBridge(), "__dict__")
 
 
 @pytest.mark.anyio

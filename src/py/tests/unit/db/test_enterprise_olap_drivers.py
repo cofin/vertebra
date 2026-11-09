@@ -864,6 +864,36 @@ def test_table_to_rows_and_cols_reads_ipc_cursor_without_row_dicts(monkeypatch: 
     assert db_arrow_mod._table_to_rows_and_cols(cursor) == ([(1, "a"), (2, "b"), (3, "c")], ("id", "name"))
 
 
+def test_table_to_rows_and_cols_collapses_duplicate_join_columns_to_last_field() -> None:
+    """Duplicate field names from SQL joins resolve to the last field, matching `Table.to_pylist()` dictionaries."""
+    table = pa.Table.from_arrays(
+        [pa.array([1, 2]), pa.array(["a", "b"]), pa.array([10, 20])], names=["id", "name", "id"]
+    )
+    rows, cols = db_arrow_mod._table_to_rows_and_cols(table)
+    assert (rows, cols) == ([(10, "a"), (20, "b")], ("id", "name"))
+    assert [dict(zip(cols, row, strict=True)) for row in rows] == table.to_pylist()
+    assert db_arrow_mod._table_to_rows_and_cols(table, ("name", "id")) == ([("a", 10), ("b", 20)], ("name", "id"))
+
+
+def test_arrow_cursor_decodes_ipc_stream_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`len()`, `to_arrow_table()`, `to_pylist()`, and row extraction share one decoded IPC table."""
+    table = pa.Table.from_pydict({"id": [1, 2, 3], "name": ["a", "b", "c"]})
+    cursor = read_arrow_shm(_arrow_ipc_stream_bytes(table))
+    opened: list[Any] = []
+    original_open_stream = pa.ipc.open_stream
+
+    def counting_open_stream(source: Any, *args: Any, **kwargs: Any) -> Any:
+        opened.append(source)
+        return original_open_stream(source, *args, **kwargs)
+
+    monkeypatch.setattr(pa.ipc, "open_stream", counting_open_stream)
+    assert len(cursor) == 3
+    assert cursor.to_arrow_table().equals(table)
+    assert cursor.to_pylist() == table.to_pylist()
+    assert db_arrow_mod._table_to_rows_and_cols(cursor) == ([(1, "a"), (2, "b"), (3, "c")], ("id", "name"))
+    assert len(opened) == 1
+
+
 def test_sync_tenant_predicate_raises_when_guc_set_fails() -> None:
     """A failing tenant GUC SET propagates instead of returning an unenforced predicate."""
     config = SQLiteSyncConfig(path=":memory:")

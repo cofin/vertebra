@@ -1500,13 +1500,18 @@ class _BaseObjectStore:
         use_byte_stream_split: bool | Sequence[str],
         options: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
-        """Merge explicit Parquet encoding keywords with caller `ParquetWriter` options, letting `options` win."""
+        """Merge explicit Parquet encoding keywords with caller `ParquetWriter` options, letting `options` win.
+
+        A single column name passed as `str` selects that one column rather than its characters.
+        """
+
+        encodings = {"use_dictionary": use_dictionary, "use_byte_stream_split": use_byte_stream_split}
         return {
             "compression": compression,
-            "use_dictionary": use_dictionary if isinstance(use_dictionary, bool) else list(use_dictionary),
-            "use_byte_stream_split": (
-                use_byte_stream_split if isinstance(use_byte_stream_split, bool) else list(use_byte_stream_split)
-            ),
+            **{
+                name: value if isinstance(value, bool) else [value] if isinstance(value, str) else list(value)
+                for name, value in encodings.items()
+            },
             **(options or {}),
         }
 

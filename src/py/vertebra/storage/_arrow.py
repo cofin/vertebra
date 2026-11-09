@@ -336,7 +336,11 @@ class _RangeFile(io.RawIOBase):
 
 
 class _StreamFile(io.RawIOBase):
-    """Read exact codec requests with at most one unfinished native stream chunk."""
+    """Read exact codec requests with at most one unfinished native stream chunk.
+
+    Arrow's Python file adapter decodes message bodies through ``read_buffer`` and reads
+    only small length prefixes through ``read``; it never calls ``readinto``.
+    """
 
     __slots__ = ("_next_chunk", "_pos", "_remaining")
 
@@ -352,17 +356,18 @@ class _StreamFile(io.RawIOBase):
         return self._pos
 
     def read(self, size: int | None = -1) -> bytes:
-        if size is None or size < 0:
-            raise io.UnsupportedOperation("Arrow streaming requires a bounded read size")
-        result = bytearray()
-        while len(result) < size:
-            if not self._next_ready():
-                break
-            count = min(size - len(result), len(self._remaining))
-            result.extend(self._remaining[:count])
-            self._remaining = self._remaining[count:]
-        self._pos += len(result)
-        return bytes(result)
+        """Return up to ``size`` bytes, copying pending chunk slices once into the result."""
+        return b"".join(self._take(size))
+
+    def read_buffer(self, nbytes: int) -> memoryview | bytes:
+        """Return up to ``nbytes`` bytes for Arrow's ``ReadBuffer`` path.
+
+        A request that fits in the pending native chunk returns a zero-copy memoryview slice
+        that keeps the chunk alive for as long as Arrow holds the buffer; a request spanning
+        chunks is copied once into a new ``bytes`` object.
+        """
+        pieces = self._take(nbytes)
+        return pieces[0] if len(pieces) == 1 else b"".join(pieces)
 
     def readinto(self, buffer: Buffer) -> int:
         """Copy pending native chunks straight into ``buffer`` without intermediate bytes."""
@@ -377,6 +382,20 @@ class _StreamFile(io.RawIOBase):
             filled += count
         self._pos += filled
         return filled
+
+    def _take(self, size: int | None) -> list[memoryview]:
+        """Detach zero-copy slices totalling up to ``size`` bytes from pending native chunks."""
+        if size is None or size < 0:
+            raise io.UnsupportedOperation("Arrow streaming requires a bounded read size")
+        pieces: list[memoryview] = []
+        needed = size
+        while needed and self._next_ready():
+            count = min(needed, len(self._remaining))
+            pieces.append(self._remaining[:count])
+            self._remaining = self._remaining[count:]
+            needed -= count
+        self._pos += size - needed
+        return pieces
 
     def _next_ready(self) -> bool:
         """Ensure an unread chunk is pending, returning ``False`` at end of stream."""
