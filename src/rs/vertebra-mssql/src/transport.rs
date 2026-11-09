@@ -387,6 +387,12 @@ impl MssqlSession {
         .await
     }
 
+    /// Validate a named transaction savepoint for release (T-SQL releases savepoints on transaction completion).
+    pub async fn release_savepoint(&mut self, name: &str) -> Result<(), MssqlError> {
+        validate_savepoint_identifier(name)?;
+        Ok(())
+    }
+
     /// Stream Arrow [`RecordBatch`]es into `table` via TDS `0x07` `BulkLoadRequest`.
     pub async fn bulk_load_batches(
         &mut self,

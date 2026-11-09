@@ -141,8 +141,10 @@ pub const fn classify_tds_error_code(code: u32, class: u8) -> (MssqlErrorKind, &
         547 => (MssqlErrorKind::Integrity, "23503", false),
         // Cannot insert NULL into column
         515 => (MssqlErrorKind::Integrity, "23502", false),
-        // Deadlock victim (1205), lock request time out (1222), snapshot update conflict (3960)
-        1205 | 1222 | 3960 => (MssqlErrorKind::SerializationFailure, "40001", true),
+        // Deadlock victim (1205), snapshot update conflict (3960)
+        1205 | 3960 => (MssqlErrorKind::SerializationFailure, "40001", true),
+        // Lock request time out (1222), user-cancelled query (3617), query memory grant timeout (8645)
+        1222 | 3617 | 8645 => (MssqlErrorKind::QueryCancelled, "57014", true),
         // Login failed for user / password expired
         18456 | 18487 | 18488 => (MssqlErrorKind::ConnectionFailure, "28000", false),
         // Cannot open database requested by the login

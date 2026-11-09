@@ -587,6 +587,12 @@ impl PySyncMSSQLClient {
             .map_err(|e| mssql_error_to_py(py, e))
     }
 
+    fn release_savepoint(&self, py: Python<'_>, name: String) -> PyResult<()> {
+        let client = Arc::clone(&self.inner);
+        run_sync_with_completion_queue(py, async move { client.release_savepoint(name).await })
+            .map_err(|e| mssql_error_to_py(py, e))
+    }
+
     #[pyo3(signature = (sql, parameters=None))]
     fn select_to_arrow(
         &self,
@@ -1081,6 +1087,17 @@ impl PyAsyncMSSQLClient {
         spawn_rust_db_task_with_attr(
             py,
             async move { client.rollback_to_savepoint(name).await },
+            |py, ()| Ok(py.None()),
+            mssql_error_to_py,
+            MSSQL_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    fn release_savepoint(&self, py: Python<'_>, name: String) -> PyResult<RustDbTaskAwaitable> {
+        let client = Arc::clone(&self.inner);
+        spawn_rust_db_task_with_attr(
+            py,
+            async move { client.release_savepoint(name).await },
             |py, ()| Ok(py.None()),
             mssql_error_to_py,
             MSSQL_COMPLETION_DRAINER_ATTR,

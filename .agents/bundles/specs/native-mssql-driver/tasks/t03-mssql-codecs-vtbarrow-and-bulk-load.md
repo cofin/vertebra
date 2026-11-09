@@ -5,17 +5,17 @@ flow_id: native-mssql-driver
 title: "Implement MSSQL codecs, VTBARROW ShmCapsule export, BulkLoad load_from_arrow, and BrokerEngineBackend registration"
 description: "Implement rich MSSQL column/parameter codecs (numeric/decimal/money, datetime/datetime2/datetimeoffset/date/time, uniqueidentifier, PLP varchar(max)/nvarchar(max)/varbinary(max), xml, json), VTBARROW ShmCapsule (select_to_arrow, stream_arrow_batches), BulkLoadRequest load_from_arrow, and BrokerEngineBackend."
 status: stable
-state: pending
+state: in_progress
 verification_strategy: tdd
 depends_on:
   - t02
 plan_revision: 1
-state_revision: 0
+state_revision: 1
 commit_sha: null
-claimed_at: null
+claimed_at: "2026-11-09T15:10:00Z"
 completed_at: null
 created_at: "2026-11-09T03:20:00Z"
-updated_at: "2026-11-09T03:20:00Z"
+updated_at: "2026-11-09T15:10:00Z"
 reads:
   - src/rs/vertebra-db/src/arrow_shm.rs
   - src/rs/vertebra-core/src/broker.rs

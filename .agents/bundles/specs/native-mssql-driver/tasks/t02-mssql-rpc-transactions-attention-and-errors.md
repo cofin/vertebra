@@ -5,17 +5,17 @@ flow_id: native-mssql-driver
 title: "Implement MSSQL SQL batch, sp_executesql RPC, transactions, ATTENTION cancellation, and DatabaseError mapping"
 description: "Implement SQL batch and sp_executesql RPC execution with @P1 parameter rewriting, execute/execute_many/fetch_all/fetch_one/fetch_optional/select_value, transaction lifecycle and savepoints, out-of-band ATTENTION cancellation, and TDS error number to DatabaseError hierarchy mapping."
 status: stable
-state: in_progress
+state: completed
 verification_strategy: tdd
 depends_on:
   - t01
 plan_revision: 1
-state_revision: 1
+state_revision: 2
 commit_sha: null
 claimed_at: "2026-11-09T14:58:00Z"
-completed_at: null
+completed_at: "2026-11-09T15:10:00Z"
 created_at: "2026-11-09T03:20:00Z"
-updated_at: "2026-11-09T14:58:00Z"
+updated_at: "2026-11-09T15:10:00Z"
 reads:
   - src/rs/vertebra-mssql/src/lib.rs
   - src/rs/vertebra-mssql/src/client.rs
@@ -75,9 +75,9 @@ Builds on the `t01` `vertebra-mssql` scaffold to implement the full query execut
 
 ## Acceptance Criteria
 
-- [ ] `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-mssql --locked` passes including TDS loopback tests for `PRELOGIN`/`LOGIN7`, `sp_executesql` RPC `@P1` binding, transactions, `ATTENTION` cancellation, and error mapping.
-- [ ] `cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-mssql --all-targets --locked -- -D warnings` passes.
-- [ ] `mypy.stubtest vertebra._mssql` passes.
+- [x] `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-mssql --locked` passes including TDS loopback tests for `PRELOGIN`/`LOGIN7`, `sp_executesql` RPC `@P1` binding, transactions, `ATTENTION` cancellation, and error mapping.
+- [x] `cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-mssql --all-targets --locked -- -D warnings` passes.
+- [x] `mypy.stubtest vertebra._mssql` passes.
 
 [^mssql-rs]: `src/rs/vertebra-db/src/mssql/mod.rs::rewrite_mssql_placeholders` — Surviving `@P1` placeholder rewrite helper in vertebra-db.
 [^py-errors]: `src/rs/vertebra-py/src/errors.rs` — Python DatabaseError exception hierarchy in vertebra._vertebra.

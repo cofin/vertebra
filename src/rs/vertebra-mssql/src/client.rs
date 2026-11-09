@@ -279,6 +279,12 @@ impl MssqlClient {
             .await
     }
 
+    /// Release a named savepoint (validates savepoint identifier; T-SQL releases savepoints on commit/rollback).
+    pub async fn release_savepoint(&self, name: String) -> Result<(), MssqlError> {
+        self.with_session(|sess| Box::pin(async move { sess.release_savepoint(&name).await }))
+            .await
+    }
+
     /// Execute a query and materialize the result into a `VTBARROW` POSIX shared-memory [`ShmRegion`].
     pub async fn select_to_arrow(
         &self,
