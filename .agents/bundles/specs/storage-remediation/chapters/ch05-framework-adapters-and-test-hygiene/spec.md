@@ -6,12 +6,12 @@ chapter_id: ch05-framework-adapters-and-test-hygiene
 title: "Chapter 05: Framework Storage Adapters and Pytest Hygiene"
 description: Clean up SQLSpec, Advanced Alchemy, and Django storage adapters (remove _IPCBuffer and duplicate re-exports, enforce public-before-private method ordering, raise ImproperConfigurationError on missing DuckDB GCS tokens, check supports_signing, forward signing and token_cache on StorageConfig, and avoid extra bytes copies in DjangoStorage.save), drop open_readable_file and _get_native_module shims in _store.py, and enforce pytest top-level imports, parametrize, and anyio across storage/extension/db tests.
 status: stable
-state: planned
+state: active
 planning_status: complete
 depends_on_chapters:
   - ch04-streaming-arrow-parquet-and-shm
 replan_trigger: null
-current_task: "storage-remediation:ch05:t01"
+current_task: "storage-remediation:ch05:t02"
 plan_revision: 1
 plan_commit: fd571e3a
 state_revision: 0

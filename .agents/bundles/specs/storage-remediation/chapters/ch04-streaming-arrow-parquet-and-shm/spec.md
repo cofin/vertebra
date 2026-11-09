@@ -6,7 +6,7 @@ chapter_id: ch04-streaming-arrow-parquet-and-shm
 title: "Chapter 04: Streaming HTTP, Parquet/Arrow Options, and Zero-Copy SHM Arrow"
 description: Stream StreamingStorageResponse.iter_chunks() and range-slice to_fastpath_tuple(), enforce storage/_arrow.py module layout, __slots__, zero-copy readinto, Buffer IPC writer support, and Parquet/Arrow encoding option passthrough (use_dictionary, use_byte_stream_split, options), and make read_arrow_shm zero-copy over memoryview with lazy ArrowCursor.__len__ and columnar _table_to_rows_and_cols.
 status: stable
-state: active
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch03-bulk-file-io-compose-and-streams
@@ -14,15 +14,18 @@ replan_trigger: null
 current_task: null
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 0
-last_verified_checkpoint: null
-last_reviewed_commit: null
+state_revision: 1
+last_verified_checkpoint: 85bff05a
+last_reviewed_commit: 85bff05a
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-08T20:55:00Z"
+updated_at: "2026-11-09T01:19:00Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
-verified: []
+verified:
+  - by: agent:code-reviewer
+    at: "2026-11-09T01:19:00Z"
+    commit: 85bff05a
 sources:
   - id: py-streaming
     resource: src/py/vertebra/storage/_streaming.py::StreamingStorageResponse
@@ -141,8 +144,8 @@ Three hot-path serialization and streaming modules still copy or buffer full pay
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `f4606043` — `3/3` tasks implemented and verified (`2789bb63`, `f4606043`, `113d25a5`); zero-context review findings (unknown-size direct descriptors, 4 MiB range windows, Arrow `read_buffer` zero-copy path, string Parquet column options, duplicate column names, cached IPC table, `416` direct ranges, SHM export contract) are being remediated.
-- **Remaining Tasks in Chapter**: None; chapter closes after review remediation.
+- **Verified Baseline (`HEAD`)**: `85bff05a` — `3/3` tasks completed and the zero-context review findings remediated: unknown-size direct descriptors resolve via `head()`, `4 MiB` range windows re-sliced into `<= step` chunks, `416` for unsatisfiable direct ranges, Arrow IPC decoding through zero-copy `read_buffer`, string Parquet column options, duplicate column names, and a cached decoded SHM IPC table.
+- **Remaining Tasks in Chapter**: None.
 - **Remaining Chapters**: `ch05`–`ch06`.
 
 [^py-streaming]: `src/py/vertebra/storage/_streaming.py::StreamingStorageResponse` — HTTP `200`/`206`/`416` streaming storage response.
