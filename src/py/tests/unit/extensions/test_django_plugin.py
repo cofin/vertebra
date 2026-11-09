@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import subprocess
 import sys
 import threading
@@ -20,6 +21,7 @@ import pytest
 from django.core.exceptions import SuspiciousFileOperation
 from django.core.files.base import ContentFile, File
 from django.core.files.storage import Storage
+from django.core.files.uploadedfile import UploadedFile
 from django.db.migrations.writer import MigrationWriter
 from django.db.models import FileField
 from django.db.models.fields.files import FieldFile
@@ -32,7 +34,6 @@ from vertebra.extensions.django import (
     ArrowManager,
     ArrowQuerySet,
     AsyncAPIDocsConfig,
-    AsyncObjectStore,
     AsyncStorageRegistry,
     CacheBackend,
     ChannelLayer,
@@ -40,7 +41,6 @@ from vertebra.extensions.django import (
     EmailBackend,
     FastPath,
     MCPConfig,
-    MemoryConfig,
     MsgspecView,
     OpenAPIConfig,
     ORMBridge,
@@ -48,7 +48,6 @@ from vertebra.extensions.django import (
     RouteCompiler,
     SecurityBridge,
     SwaggerDocsConfig,
-    SyncObjectStore,
     SyncStorageRegistry,
     TemplateBridge,
     VertebraAppConfig,
@@ -73,12 +72,39 @@ from vertebra.extensions.django.db.backends.sqlite3 import (
 from vertebra.extensions.django.templatetags.vertebra_vite import vite_asset, vite_hmr_client
 from vertebra.extensions.sqlalchemy.dialects import SyncDBAPIConnection
 from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncConfig, SQLiteSyncConfig
-from vertebra.storage import LocalConfig, S3Config, SigningConfig
+from vertebra.storage import (
+    AsyncObjectStore,
+    LocalConfig,
+    MemoryConfig,
+    S3Config,
+    SigningConfig,
+    SyncObjectStore,
+)
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import decode_json
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
+
+_VERTEBRA_STORAGE_NAMES = frozenset(
+    {"AsyncObjectStore", "GCSConfig", "LocalConfig", "MemoryConfig", "S3Config", "SyncObjectStore"}
+)
+
+
+class _ChunkRecordingUpload(UploadedFile):
+    """Uploaded file with a tiny chunk size that records every chunk handed to storage."""
+
+    DEFAULT_CHUNK_SIZE = 4
+
+    def __init__(self, payload: bytes) -> None:
+        super().__init__(io.BytesIO(payload), name="upload.bin", size=len(payload))
+        self.consumed: list[bytes] = []
+
+    def chunks(self, chunk_size: int | None = None) -> Iterator[bytes]:
+        """Yield the parent chunks while recording each one."""
+        for chunk in super().chunks(chunk_size):
+            self.consumed.append(chunk)
+            yield chunk
 
 
 class OrderInput(msgspec.Struct, frozen=True, gc=False):
@@ -839,6 +865,63 @@ def test_django_storage_named_text_content_file() -> None:
     assert name == "named.txt"
     with storage.open(name) as handle:
         assert handle.read() == "héllo".encode()
+
+
+@pytest.mark.parametrize("module_name", ["vertebra.extensions.django", "vertebra.extensions.django.storage"])
+def test_django_storage_exports_exclude_vertebra_storage_duplicates(module_name: str) -> None:
+    """Django extension modules export the storage adapter without duplicating ``vertebra.storage`` names."""
+    exported = set(import_module(module_name).__all__)
+    assert {"DjangoStorage", "SyncStorageRegistry", "AsyncStorageRegistry"} <= exported
+    assert exported.isdisjoint(_VERTEBRA_STORAGE_NAMES)
+
+
+@pytest.mark.parametrize("name", sorted(_VERTEBRA_STORAGE_NAMES))
+def test_django_package_does_not_lazily_resolve_storage_names(name: str) -> None:
+    """The Django package rejects ``vertebra.storage`` names instead of aliasing them."""
+    package = import_module("vertebra.extensions.django")
+    with pytest.raises(AttributeError):
+        getattr(package, name)
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        (b"raw-bytes", b"raw-bytes"),
+        (bytearray(b"mutable-buffer"), b"mutable-buffer"),
+        (memoryview(b"zero-copy-view"), b"zero-copy-view"),
+        ("text-é", "text-é".encode()),
+    ],
+    ids=["bytes", "bytearray", "memoryview", "str"],
+)
+def test_django_storage_save_writes_buffers_and_text_directly(content: Any, expected: bytes) -> None:
+    """Buffer and text payloads allocate a Django name and land in the store byte-for-byte."""
+    storage = DjangoStorage(MemoryConfig(), location="uploads")
+    first = storage.save("payload.bin", content)
+    second = storage.save("payload.bin", content)
+    assert first == "payload.bin"
+    assert second != first
+    assert storage.store.get("uploads/payload.bin") == expected
+    with storage.open(second) as handle:
+        assert handle.read() == expected
+
+
+def test_django_storage_save_requires_name_for_buffer_payloads() -> None:
+    """Anonymous buffer payloads fail before touching the store."""
+    storage = DjangoStorage(MemoryConfig())
+    with pytest.raises(ValueError, match="file name is required"):
+        storage.save(None, b"anonymous")
+
+
+def test_django_storage_save_streams_multi_chunk_uploads() -> None:
+    """Multi-chunk uploads stream chunk by chunk and read back the exact concatenated bytes."""
+    upload = _ChunkRecordingUpload(b"abcdefghijkl")
+    assert upload.multiple_chunks() is True
+    storage = DjangoStorage(MemoryConfig(), location="uploads")
+    name = storage.save(None, upload)
+    assert name == "upload.bin"
+    assert upload.consumed == [b"abcd", b"efgh", b"ijkl"]
+    with storage.open(name) as handle:
+        assert handle.read() == b"abcdefghijkl"
 
 
 def test_django_storage_naming_files_and_metadata(tmp_path: Path) -> None:

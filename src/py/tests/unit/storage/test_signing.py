@@ -34,51 +34,48 @@ from vertebra.storage import (
 def test_signing_functions_default_to_current_utc_timestamp() -> None:
     """Verify signing functions default to current UTC timestamp rather than a static epoch."""
     before_ts = int(time.time())
-    native_mod = SyncObjectStore._get_native_module()
+    hmac_url = native_storage_mod.py_sign_hmac_url(
+        "https://cdn.example.com/assets/file.bin",
+        "test-hmac-secret-key-32-bytes-ok",
+        "GET",
+        600,
+    )
+    hmac_params = parse_qs(urlparse(hmac_url).query)
+    hmac_expires = int(hmac_params["X-Vtb-Expires"][0])
+    assert hmac_expires >= before_ts + 600
+    assert native_storage_mod.py_verify_hmac_url(
+        hmac_url,
+        "test-hmac-secret-key-32-bytes-ok",
+        "GET",
+        before_ts + 10,
+    )
 
-    if native_mod is not None:
-        hmac_url = native_mod.py_sign_hmac_url(
-            "https://cdn.example.com/assets/file.bin",
-            "test-hmac-secret-key-32-bytes-ok",
-            "GET",
-            600,
-        )
-        hmac_params = parse_qs(urlparse(hmac_url).query)
-        hmac_expires = int(hmac_params["X-Vtb-Expires"][0])
-        assert hmac_expires >= before_ts + 600
-        assert native_mod.py_verify_hmac_url(
-            hmac_url,
-            "test-hmac-secret-key-32-bytes-ok",
-            "GET",
-            before_ts + 10,
-        )
+    s3_url = native_storage_mod.py_sign_s3_v4_url(
+        "artifacts",
+        "us-east-1",
+        "AKIAIOSFODNN7EXAMPLE",
+        "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        "GET",
+        "models/weights.bin",
+        900,
+    )
+    s3_params = parse_qs(urlparse(s3_url).query)
+    amz_date = s3_params["X-Amz-Date"][0]
+    s3_signed_ts = int(calendar.timegm(time.strptime(amz_date, "%Y%m%dT%H%M%SZ")))
+    assert s3_signed_ts >= before_ts - 2
 
-        s3_url = native_mod.py_sign_s3_v4_url(
-            "artifacts",
-            "us-east-1",
-            "AKIAIOSFODNN7EXAMPLE",
-            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-            "GET",
-            "models/weights.bin",
-            900,
-        )
-        s3_params = parse_qs(urlparse(s3_url).query)
-        amz_date = s3_params["X-Amz-Date"][0]
-        s3_signed_ts = int(calendar.timegm(time.strptime(amz_date, "%Y%m%dT%H%M%SZ")))
-        assert s3_signed_ts >= before_ts - 2
-
-        azure_key = base64.b64encode(b"0123456789abcdef0123456789abcdef").decode("ascii")
-        sas_url = native_mod.py_sign_azure_sas_url(
-            "devstoreaccount1",
-            "datasets",
-            azure_key,
-            "GET",
-            "table.parquet",
-            1200,
-        )
-        sas_params = parse_qs(urlparse(sas_url).query)
-        sas_expiry_ts = int(calendar.timegm(time.strptime(sas_params["se"][0], "%Y-%m-%dT%H:%M:%SZ")))
-        assert sas_expiry_ts >= before_ts + 1198
+    azure_key = base64.b64encode(b"0123456789abcdef0123456789abcdef").decode("ascii")
+    sas_url = native_storage_mod.py_sign_azure_sas_url(
+        "devstoreaccount1",
+        "datasets",
+        azure_key,
+        "GET",
+        "table.parquet",
+        1200,
+    )
+    sas_params = parse_qs(urlparse(sas_url).query)
+    sas_expiry_ts = int(calendar.timegm(time.strptime(sas_params["se"][0], "%Y-%m-%dT%H:%M:%SZ")))
+    assert sas_expiry_ts >= before_ts + 1198
 
     store = SyncObjectStore(
         "memory://",
@@ -246,13 +243,10 @@ def test_gcs_keyless_presign_reuses_object_store_token_cache(
 
 def test_signing_expiry_bounds_invalid_keys_and_rfc3986_paths() -> None:
     """Verify out-of-bounds expiry and malformed keys raise ValueError and paths follow RFC 3986."""
-    native_mod = SyncObjectStore._get_native_module()
-    assert native_mod is not None
-
     azure_key = base64.b64encode(b"0123456789abcdef0123456789abcdef").decode("ascii")
     for bad_expiry in (0, 604_801):
         with pytest.raises(ValueError, match="expires_in_secs"):
-            native_mod.py_sign_s3_v4_url(
+            native_storage_mod.py_sign_s3_v4_url(
                 "assets",
                 "auto",
                 "r2-ak",
@@ -264,7 +258,7 @@ def test_signing_expiry_bounds_invalid_keys_and_rfc3986_paths() -> None:
                 "https://acct.r2.cloudflarestorage.com",
             )
         with pytest.raises(ValueError, match="expires_in_secs"):
-            native_mod.py_sign_azure_sas_url(
+            native_storage_mod.py_sign_azure_sas_url(
                 "acct1",
                 "container",
                 azure_key,
@@ -274,7 +268,7 @@ def test_signing_expiry_bounds_invalid_keys_and_rfc3986_paths() -> None:
                 1_794_009_600,
             )
         with pytest.raises(ValueError, match="expires_in_secs"):
-            native_mod.py_sign_hmac_url(
+            native_storage_mod.py_sign_hmac_url(
                 "https://cdn.example.com/assets/file.bin",
                 "test-hmac-secret-key-32-bytes-ok",
                 "GET",
@@ -283,7 +277,7 @@ def test_signing_expiry_bounds_invalid_keys_and_rfc3986_paths() -> None:
             )
 
     with pytest.raises(ValueError, match="base64"):
-        native_mod.py_sign_azure_sas_url(
+        native_storage_mod.py_sign_azure_sas_url(
             "acct1",
             "container",
             "%%%not-valid-base64%%%",
@@ -293,7 +287,7 @@ def test_signing_expiry_bounds_invalid_keys_and_rfc3986_paths() -> None:
             1_794_009_600,
         )
 
-    r2_url = native_mod.py_sign_s3_v4_url(
+    r2_url = native_storage_mod.py_sign_s3_v4_url(
         "assets",
         "auto",
         "r2-ak",
@@ -306,7 +300,7 @@ def test_signing_expiry_bounds_invalid_keys_and_rfc3986_paths() -> None:
     )
     assert r2_url.startswith("https://acct.r2.cloudflarestorage.com/assets/reports/2026%20Q4/summary%2Bfinal.parquet?")
     assert "X-Amz-Credential=r2-ak%2F20261107%2Fauto%2Fs3%2Faws4_request" in r2_url
-    assert native_mod.py_verify_s3_v4_url(
+    assert native_storage_mod.py_verify_s3_v4_url(
         "assets",
         "auto",
         "r2-ak",

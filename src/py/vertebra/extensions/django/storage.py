@@ -11,15 +11,7 @@ from urllib.parse import quote, unquote, urlparse
 
 from msgspec.structs import fields
 
-from vertebra.storage import (
-    AsyncObjectStore,
-    GCSConfig,
-    LocalConfig,
-    MemoryConfig,
-    S3Config,
-    StorageConfig,
-    SyncObjectStore,
-)
+from vertebra.storage import AsyncObjectStore, StorageConfig, SyncObjectStore
 from vertebra.typing import ImproperConfigurationError, MissingDependencyError
 from vertebra.utils.module_loader import import_optional
 
@@ -32,7 +24,7 @@ _serializer_module = import_optional("django.db.migrations.serializer")
 _writer_module = import_optional("django.db.migrations.writer")
 
 if TYPE_CHECKING:
-    from django.core.files.base import ContentFile, File
+    from django.core.files.base import File
     from django.core.files.storage import Storage as _StorageBase
     from django.db.migrations.serializer import BaseSerializer as _SerializerBase
 
@@ -40,7 +32,6 @@ if TYPE_CHECKING:
 else:
     _StorageBase = _storage_module.Storage if _storage_module is not None else object
     File = _file_module.File if _file_module is not None else None
-    ContentFile = _file_module.ContentFile if _file_module is not None else None
     _ReadableFile = File if File is not None else object
     _SerializerBase = _serializer_module.BaseSerializer if _serializer_module is not None else object
 
@@ -49,14 +40,8 @@ _validate_file_name = _utils_module.validate_file_name if _utils_module is not N
 _SuspiciousFileOperation = _exceptions_module.SuspiciousFileOperation if _exceptions_module is not None else ValueError
 
 __all__ = (
-    "AsyncObjectStore",
     "AsyncStorageRegistry",
     "DjangoStorage",
-    "GCSConfig",
-    "LocalConfig",
-    "MemoryConfig",
-    "S3Config",
-    "SyncObjectStore",
     "SyncStorageRegistry",
 )
 
@@ -151,18 +136,30 @@ class DjangoStorage(_StorageBase):
         return _StoredFile(self._store, key, name=name, size=metadata.size, mode=mode)
 
     def save(self, name: str | None, content: Any, max_length: int | None = None) -> str:
-        """Save content through Django's validation and available-name allocation."""
-        if isinstance(content, (bytes, bytearray, memoryview)):
-            content = ContentFile(bytes(content))
-        return super().save(name, content, max_length=max_length)
+        """Save content through Django's validation and available-name allocation.
+
+        Buffer and text payloads skip Django's ``File`` wrapping and write directly through ``put``
+        without an intermediate ``bytes`` copy; file objects stream through ``_save``.
+
+        Raises:
+            ValueError: If ``name`` is ``None`` for a buffer or text payload.
+        """
+        if not isinstance(content, (Buffer, str)):
+            return super().save(name, content, max_length=max_length)
+        if name is None:
+            msg = "A file name is required"
+            raise ValueError(msg)
+        name = self.get_available_name(self._validate_name(name), max_length=max_length)
+        self._store.put(self._qualified_name(name), self._encode_payload(content))
+        return name
 
     async def asave(self, name: str | None, content: Any, max_length: int | None = None) -> str:
         """Allocate a Django filename and stream content through the async store."""
         name = self._validate_name(name if name is not None else content.name)
         name = await self._aget_available_name(name, max_length)
         key = self._qualified_name(name)
-        if isinstance(content, (bytes, bytearray, memoryview)):
-            await self._async_store.put(key, content)
+        if isinstance(content, (Buffer, str)):
+            await self._async_store.put(key, self._encode_payload(content))
         elif isinstance(content, AsyncIterable):
             await self._async_store.put_stream(key, content)
         else:
@@ -267,13 +264,8 @@ class DjangoStorage(_StorageBase):
         return _StoredFile(self._store, self._qualified_name(name), name=name, mode=mode)
 
     def _save(self, name: str, content: Any) -> str:
-        """Persist Django's already allocated name through native streaming."""
-        key = self._qualified_name(name)
-        if isinstance(content, (bytes, bytearray, memoryview)):
-            self._store.put(key, content)
-        else:
-            file = content if hasattr(content, "chunks") else File(content, name=name)
-            self._store.put_stream(key, self._file_chunks(file))
+        """Stream Django's already allocated file chunk by chunk into a native multipart upload."""
+        self._store.put_stream(self._qualified_name(name), self._file_chunks(content))
         return name
 
     async def _aget_available_name(self, name: str, max_length: int | None) -> str:
@@ -306,6 +298,11 @@ class DjangoStorage(_StorageBase):
             msg = "A base URL or signing configuration is required"
             raise ValueError(msg)
         return self._base_url + quote(key, safe="/")
+
+    @staticmethod
+    def _encode_payload(content: Buffer | str) -> Buffer:
+        """Encode text as UTF-8 and pass buffers through without copying."""
+        return content.encode("utf-8") if isinstance(content, str) else content
 
     @staticmethod
     def _file_chunks(file: Any) -> Iterator[Buffer]:

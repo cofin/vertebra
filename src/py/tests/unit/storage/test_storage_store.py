@@ -300,8 +300,8 @@ def test_gcs_v4_keyless_iam_presigning_via_object_store() -> None:
     assert "X-Goog-Signature=646561646265656663616665" in signed
 
 
-def test_object_store_open_readable_file(tmp_path: Path) -> None:
-    """SyncObjectStore.open_readable_file returns a seekable SyncReadableFile and wrappers are removed."""
+def test_object_store_open_reader(tmp_path: Path) -> None:
+    """SyncObjectStore.open_reader returns a seekable SyncReadableFile and wrappers are removed."""
     assert not hasattr(storage, "SyncStore")
     assert not hasattr(storage, "AsyncStore")
     assert not hasattr(storage, "StorageRegistry")
@@ -310,13 +310,21 @@ def test_object_store_open_readable_file(tmp_path: Path) -> None:
     store = SyncObjectStore.from_local(tmp_path)
     store.put("data.parquet", b"PAR1-parquet-content-PAR1")
 
-    with store.open_readable_file("data.parquet") as f:
+    with store.open_reader("data.parquet") as f:
         assert isinstance(f, SyncReadableFile)
         assert f.size == 25
         assert f.read(4) == b"PAR1"
         assert f.tell() == 4
         f.seek(-4, 2)
         assert f.read(4) == b"PAR1"
+
+
+@pytest.mark.parametrize("store_type", [SyncObjectStore, AsyncObjectStore])
+@pytest.mark.parametrize("attribute", ["open_readable_file", "_get_native_module"])
+def test_object_stores_expose_no_reader_or_native_module_shims(store_type: type[Any], attribute: str) -> None:
+    """Both stores expose ``open_reader`` exclusively and resolve the native module without a shim."""
+    assert hasattr(store_type, "open_reader")
+    assert not hasattr(store_type, attribute)
 
 
 @pytest.mark.anyio
@@ -549,7 +557,7 @@ async def test_readable_file_streaming_iterators_and_zero_length_read() -> None:
     async with AsyncReadableFile(async_store, "missing.bin") as af_unseeded:
         assert await af_unseeded.read(0) == b""
 
-    async with async_store.open_readable_file("payload.bin", chunk_size=16) as af:
+    async with async_store.open_reader("payload.bin", chunk_size=16) as af:
         assert await af.read(0) == b""
         chunks = [chunk async for chunk in af]
         assert len(chunks) == 8

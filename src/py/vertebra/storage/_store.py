@@ -1450,12 +1450,8 @@ class _BaseObjectStore:
         return resolved
 
     @classmethod
-    def _get_native_module(cls) -> Any:
-        return import_optional("vertebra._storage")
-
-    @classmethod
     def _ensure_native_module(cls) -> Any:
-        native_mod = cls._get_native_module()
+        native_mod = import_optional("vertebra._storage")
         if native_mod is None:
             raise MissingDependencyError(
                 "vertebra._storage",
@@ -2081,21 +2077,6 @@ class SyncObjectStore(_BaseObjectStore):
             if_none_match=if_none_match,
         )
 
-    def open_readable_file(
-        self,
-        path: str,
-        *,
-        size: int | None = None,
-        chunk_size: int = 65536,
-        read_ahead: int = 4_194_304,
-    ) -> SyncReadableFile:
-        """Open a seekable read-only SyncReadableFile stream over the given object key.
-
-        Reads shorter than ``read_ahead`` are served from one cached ``read_ahead``-byte range window;
-        ``read_ahead=0`` issues one range request per read.
-        """
-        return SyncReadableFile(self, path, size=size, chunk_size=chunk_size, read_ahead=read_ahead)
-
     def sign(
         self,
         key: str,
@@ -2618,21 +2599,6 @@ class AsyncObjectStore(_BaseObjectStore):
             if_match=if_match,
             if_none_match=if_none_match,
         )
-
-    def open_readable_file(
-        self,
-        path: str,
-        *,
-        size: int | None = None,
-        chunk_size: int = 65536,
-        read_ahead: int = 4_194_304,
-    ) -> AsyncReadableFile:
-        """Open a seekable read-only AsyncReadableFile stream over the given object key.
-
-        Reads shorter than ``read_ahead`` are served from one cached ``read_ahead``-byte range window;
-        ``read_ahead=0`` issues one range request per read.
-        """
-        return AsyncReadableFile(self, path, size=size, chunk_size=chunk_size, read_ahead=read_ahead)
 
     async def sign(
         self,
