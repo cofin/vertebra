@@ -1,6 +1,4 @@
-"""Pure-Rust-backed SQL Server (TDS 7.4) driver, `@P1` parameter rewriter, and Arrow cursor support."""
-
-from __future__ import annotations
+"""SQL Server configuration, TDS packet helpers, and `@P1` placeholder rewriter; the driver requires the native `vertebra._mssql` module."""
 
 from typing import TYPE_CHECKING
 
@@ -21,7 +19,6 @@ if TYPE_CHECKING:
         MSSQLCore,
         decode_tds_packet,
         encode_tds_packet,
-        encode_tds_sql_batch,
         rewrite_mssql_placeholders,
     )
     from vertebra.db.adapters.mssql.driver import AsyncMSSQLDriver, SyncMSSQLDriver
@@ -44,7 +41,6 @@ __all__ = (
     "SyncMSSQLDriver",
     "decode_tds_packet",
     "encode_tds_packet",
-    "encode_tds_sql_batch",
     "rewrite_mssql_placeholders",
 )
 
@@ -72,7 +68,6 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "SyncMSSQLDriver": ("vertebra.db.adapters.mssql.driver", "SyncMSSQLDriver"),
     "decode_tds_packet": ("vertebra.db.adapters.mssql.core", "decode_tds_packet"),
     "encode_tds_packet": ("vertebra.db.adapters.mssql.core", "encode_tds_packet"),
-    "encode_tds_sql_batch": ("vertebra.db.adapters.mssql.core", "encode_tds_sql_batch"),
     "rewrite_mssql_placeholders": ("vertebra.db.adapters.mssql.core", "rewrite_mssql_placeholders"),
 }
 

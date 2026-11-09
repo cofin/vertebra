@@ -47,13 +47,11 @@ from vertebra.db.adapters.duckdb import (
 )
 from vertebra.db.adapters.mssql import (
     TDS_PKT_PRE_LOGIN,
-    TDS_PKT_SQL_BATCH,
     AsyncMSSQLDriver,
     MSSQLConfig,
     SyncMSSQLDriver,
     decode_tds_packet,
     encode_tds_packet,
-    encode_tds_sql_batch,
     rewrite_mssql_placeholders,
 )
 from vertebra.db.adapters.mysql import (
@@ -461,21 +459,13 @@ def test_oracle_26ai_vector_oson_and_ttc_piggyback_codecs() -> None:
 
 
 def test_mssql_tds_framing_and_placeholder_rewriter() -> None:
-    """Verify TDS 7.4 packet framing, SQLBatch ALL_HEADERS encoding, and single-pass @P1 placeholder rewriting."""
+    """Verify TDS packet framing and single-pass @P1 placeholder rewriting."""
     pkt = encode_tds_packet(TDS_PKT_PRE_LOGIN, 1, True, b"\x00\x00\x1a\x00\x06\x04")
     pkt_type, is_eom, pkt_id, payload = decode_tds_packet(pkt)
     assert pkt_type == TDS_PKT_PRE_LOGIN
     assert is_eom is True
     assert pkt_id == 1
     assert payload == b"\x00\x00\x1a\x00\x06\x04"
-
-    batch = encode_tds_sql_batch("SELECT 1", 0x1122_3344_5566_7788)
-    b_type, b_eom, _, b_payload = decode_tds_packet(batch)
-    assert b_type == TDS_PKT_SQL_BATCH
-    assert b_eom is True
-    assert struct.unpack("<I", b_payload[0:4])[0] == 22
-    assert struct.unpack("<Q", b_payload[10:18])[0] == 0x1122_3344_5566_7788
-    assert b_payload[22:].decode("utf-16-le") == "SELECT 1"
 
     sql = (
         "SELECT 'a?b''$1', \"col?name\", [col$2?], * FROM t "

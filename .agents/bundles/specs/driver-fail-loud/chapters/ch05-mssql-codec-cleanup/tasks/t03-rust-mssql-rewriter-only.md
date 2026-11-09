@@ -5,7 +5,7 @@ chapter_id: ch05-mssql-codec-cleanup
 title: Reduce the Rust mssql module to the placeholder rewriter
 description: Delete TDS packet and SQLBatch framing, TdsPacketType, MSSQL_DIALECT_TAG, MssqlPool, and the framing test from vertebra-db, leaving rewrite_mssql_placeholders and its test.
 status: stable
-state: pending
+state: completed
 priority: P2
 verification_strategy: static_validation
 depends_on:
@@ -22,18 +22,18 @@ tests:
 estimated_loc: 225
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T03:35:00Z"
+last_verified_commit: c87687c0
+verification_evidence: "cargo test -p vertebra-db --lib mssql:: (1 passed)"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T03:35:00Z"
+commit: c87687c0
 sources:
   - id: mssql-rs
     resource: src/rs/vertebra-db/src/mssql/mod.rs::rewrite_mssql_placeholders
@@ -103,10 +103,10 @@ Grep-only verification: `grep -rnE "MssqlPool|TdsPacketType|encode_tds_packet|de
 
 ## Acceptance Criteria
 
-- [ ] `mssql/mod.rs` contains only the module doc, `rewrite_mssql_placeholders`, and its test (R8.1).
-- [ ] `MSSQL_DIALECT_TAG`, `TdsPacketType`, TDS framing, and `MssqlPool` are gone from the workspace (R8.1).
-- [ ] `lib.rs` re-exports only `rewrite_mssql_placeholders` from `mssql` and its doc bullet names the rewriter only (R8.1).
-- [ ] `make rs-test` and workspace clippy exit 0.
+- [x] `mssql/mod.rs` contains only the module doc, `rewrite_mssql_placeholders`, and its test (R8.1).
+- [x] `MSSQL_DIALECT_TAG`, `TdsPacketType`, TDS framing, and `MssqlPool` are gone from the workspace (R8.1).
+- [x] `lib.rs` re-exports only `rewrite_mssql_placeholders` from `mssql` and its doc bullet names the rewriter only (R8.1).
+- [x] `make rs-test` and workspace clippy exit 0.
 
 ## Notes & Discoveries
 

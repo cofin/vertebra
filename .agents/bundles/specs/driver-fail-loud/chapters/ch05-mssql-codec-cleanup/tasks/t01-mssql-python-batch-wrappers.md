@@ -5,7 +5,7 @@ chapter_id: ch05-mssql-codec-cleanup
 title: Remove the MSSQL Python batch wrappers and encode_tds_packet probe
 description: Delete MSSQLCore.encode_tds_sql_batch, its module alias and package export, MSSQLConfig.encode_sql_batch, and the encode_tds_packet native probe, and rewrite MSSQL adapter docstrings without the future import.
 status: stable
-state: pending
+state: completed
 priority: P2
 verification_strategy: static_validation
 depends_on: []
@@ -23,18 +23,18 @@ tests:
 estimated_loc: 55
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T03:35:00Z"
+last_verified_commit: c87687c0
+verification_evidence: "pytest test_enterprise_olap_drivers.py (90 passed), ruff, mypy, stubtest"
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T03:35:00Z"
+commit: c87687c0
 sources:
   - id: mssql-core
     resource: src/py/vertebra/db/adapters/mssql/core.py::MSSQLCore
@@ -121,11 +121,11 @@ Grep-only verification (no full read): `grep -rn "encode_tds_sql_batch\|encode_s
 
 ## Acceptance Criteria
 
-- [ ] `MSSQLCore.encode_tds_sql_batch`, its alias, its package export, and `MSSQLConfig.encode_sql_batch` are deleted (R9.1).
-- [ ] `MSSQLCore.encode_tds_packet` has no native probe and returns the bytes in the matrix (R9.1).
-- [ ] MSSQL module and class docstrings name helpers and the native `vertebra._mssql` requirement; no `from __future__ import annotations` remains in the three files (R9.1).
-- [ ] `test_mssql_tds_framing_and_placeholder_rewriter` passes without the batch block and imports neither `encode_tds_sql_batch` nor `TDS_PKT_SQL_BATCH`.
-- [ ] stubtest and `make rs-test` exit 0.
+- [x] `MSSQLCore.encode_tds_sql_batch`, its alias, its package export, and `MSSQLConfig.encode_sql_batch` are deleted (R9.1).
+- [x] `MSSQLCore.encode_tds_packet` has no native probe and returns the bytes in the matrix (R9.1).
+- [x] MSSQL module and class docstrings name helpers and the native `vertebra._mssql` requirement; no `from __future__ import annotations` remains in the three files (R9.1).
+- [x] `test_mssql_tds_framing_and_placeholder_rewriter` passes without the batch block and imports neither `encode_tds_sql_batch` nor `TDS_PKT_SQL_BATCH`.
+- [x] stubtest and `make rs-test` exit 0.
 
 ## Notes & Discoveries
 

@@ -6,19 +6,19 @@ chapter_id: ch05-mssql-codec-cleanup
 title: "Chapter 05: MSSQL Codec Cleanup"
 description: Delete the MSSQL Python batch wrappers, the encode_tds_sql_batch binding and stub, and Rust TDS framing, MSSQL_DIALECT_TAG, and MssqlPool, leaving the placeholder rewriter and Python TDS packet helpers with docs that describe codecs.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch04-redis-valkey-memory-removal
 replan_trigger: null
-current_task: "driver-fail-loud:ch05:t01"
+current_task: null
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-last_verified_checkpoint: null
+state_revision: 1
+last_verified_checkpoint: c87687c0
 last_reviewed_commit: null
 created_at: "2026-11-07T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
+updated_at: "2026-11-09T03:35:00Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-07T00:00:00Z"
@@ -193,15 +193,15 @@ class MSSQLCore:
 
 ## 5. Implementation Plan
 
-- [ ] driver-fail-loud:ch05:t01 — Remove the MSSQL Python batch wrappers and encode_tds_packet probe (tasks/t01-mssql-python-batch-wrappers.md)
-- [ ] driver-fail-loud:ch05:t02 — Remove the encode_tds_sql_batch binding and stub (tasks/t02-tds-batch-binding-and-stub.md)
-- [ ] driver-fail-loud:ch05:t03 — Reduce the Rust mssql module to the placeholder rewriter (tasks/t03-rust-mssql-rewriter-only.md)
+- [x] [c87687c0] driver-fail-loud:ch05:t01 — Remove the MSSQL Python batch wrappers and encode_tds_packet probe (tasks/t01-mssql-python-batch-wrappers.md)
+- [x] [c87687c0] driver-fail-loud:ch05:t02 — Remove the encode_tds_sql_batch binding and stub (tasks/t02-tds-batch-binding-and-stub.md)
+- [x] [c87687c0] driver-fail-loud:ch05:t03 — Reduce the Rust mssql module to the placeholder rewriter (tasks/t03-rust-mssql-rewriter-only.md)
 - **Chapter Recovery Checkpoint**: `make lint-all && make rs-test && make py-test` exits `0`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline**: `HEAD @ 0acdf576`; `depends_on_chapters: [ch04-redis-valkey-memory-removal]` (transitively ch01, ch02, ch03); `state: planned`.
-- **Remaining Tasks in Chapter**: `t01` through `t03` (`0/3` completed). t02 requires t01 (Python stops reaching the binding first); t03 requires t02 (`db.rs` stops importing `vertebra_db::mssql::encode_tds_sql_batch` first).
+- **Verified Baseline**: `HEAD @ c87687c0`; `depends_on_chapters: [ch04-redis-valkey-memory-removal]` (transitively ch01, ch02, ch03); `state: completed`.
+- **Remaining Tasks in Chapter**: `0/3` remaining (`3/3` completed).
 - **Downstream**: [ch06-oracle-codec-cleanup](../ch06-oracle-codec-cleanup/spec.md) depends on this chapter and edits the same `lib.rs`; [ch07-vertebra-db-pools-and-mysql](../ch07-vertebra-db-pools-and-mysql/spec.md) follows ch06.
 - **Open Doc/OKF Items**: none in this chapter; ch11 owns user docs and OKF.
 - **Active Invariants**: every commit builds the workspace and passes `make rs-test`; `_vertebra.pyi` changes ship with binding changes; `rewrite_mssql_placeholders` and the pure-Python TDS packet helpers stay.

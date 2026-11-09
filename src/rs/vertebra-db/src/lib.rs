@@ -12,8 +12,7 @@
 //! - Pure-Rust Oracle `tnsnames.ora` / `sqlnet.ora` / Autonomous Database Wallet parser (`oracle::tns`) and
 //!   TNS/TTC wire framing, zero-RTT piggybacked session attributes, 26ai `VECTOR` (`FLOAT32`, `FLOAT64`,
 //!   `INT8`, `BINARY`), and `OSON` binary codecs (`oracle`).
-//! - Pure-Rust SQL Server Tabular Data Stream (TDS 7.4) packet/batch framing and single-pass `@P1`
-//!   placeholder rewriter (`mssql`).
+//! - SQL Server single-pass `@P1` placeholder rewriter (`mssql`).
 //! - SHM-brokered single-writer DuckDB analytical engine, DuckDB 2.0-safe `SET` bootstrap statements,
 //!   and `ShmRegion` Arrow IPC framing (`duckdb`).
 //! - Pure-Rust Redis 7.2+/8.0+ and Valkey 8.0+/9.0+ RESP3 wire framing, recursive parser, `invalidate`
@@ -57,10 +56,7 @@ pub use gcp::{
     GcpErrorInfo, GcpTokenCredentials, code_name, code_number, gax_error_info, http_code,
     official_credentials,
 };
-pub use mssql::{
-    MssqlPool, TdsPacketType, decode_tds_packet, encode_tds_packet, encode_tds_sql_batch,
-    rewrite_mssql_placeholders,
-};
+pub use mssql::rewrite_mssql_placeholders;
 pub use mysql::{
     MysqlPool, MysqlPoolConfig, compute_caching_sha2_scramble, decode_mysql_packet,
     encode_com_query, encode_com_stmt_close, encode_com_stmt_prepare, encode_mysql_packet,

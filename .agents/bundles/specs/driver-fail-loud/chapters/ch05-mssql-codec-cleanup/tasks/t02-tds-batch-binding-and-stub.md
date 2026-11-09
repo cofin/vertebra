@@ -5,7 +5,7 @@ chapter_id: ch05-mssql-codec-cleanup
 title: Remove the encode_tds_sql_batch binding and stub
 description: Delete the encode_tds_sql_batch pyfunction, its registration, and its vertebra_db import from vertebra-py, and the matching _vertebra.pyi definition and __all__ entry, in one commit.
 status: stable
-state: pending
+state: completed
 priority: P2
 verification_strategy: static_validation
 depends_on:
@@ -21,18 +21,18 @@ tests:
 estimated_loc: 20
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T03:35:00Z"
+last_verified_commit: c87687c0
+verification_evidence: "mypy.stubtest vertebra._vertebra (exit 0), cargo build -p vertebra-py"
 created_at: "2026-11-08T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T03:35:00Z"
+commit: c87687c0
 sources:
   - id: db-bindings
     resource: src/rs/vertebra-py/src/db.rs::encode_tds_sql_batch
@@ -100,9 +100,9 @@ Grep-only verification: `grep -rn "encode_tds_sql_batch" src/py src/rs/vertebra-
 
 ## Acceptance Criteria
 
-- [ ] `encode_tds_sql_batch` is absent from `register_db_bindings`, `db.rs`, and `_vertebra.pyi` (R9.1).
-- [ ] stubtest across all five extensions exits 0 (R9.1).
-- [ ] `make rs-test` and `vertebra-py` clippy exit 0.
+- [x] `encode_tds_sql_batch` is absent from `register_db_bindings`, `db.rs`, and `_vertebra.pyi` (R9.1).
+- [x] stubtest across all five extensions exits 0 (R9.1).
+- [x] `make rs-test` and `vertebra-py` clippy exit 0.
 
 ## Notes & Discoveries
 

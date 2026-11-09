@@ -1,6 +1,4 @@
-"""SQL Server (TDS 7.4) wire packet codecs and `@P1` placeholder rewriter."""
-
-from __future__ import annotations
+"""SQL Server TDS packet helpers and `@P1` placeholder rewriter."""
 
 import struct
 
@@ -21,7 +19,6 @@ __all__ = (
     "MSSQLCore",
     "decode_tds_packet",
     "encode_tds_packet",
-    "encode_tds_sql_batch",
     "rewrite_mssql_placeholders",
 )
 
@@ -59,9 +56,6 @@ class MSSQLCore:
         payload: bytes,
     ) -> bytes:
         """Encode an 8-byte TDS packet header (`[type, status, len_be_u16, spid_be_u16, packet_id, window]`) + payload."""
-        native = import_optional("vertebra._vertebra")
-        if native is not None and hasattr(native, "encode_tds_packet"):
-            return bytes(native.encode_tds_packet(packet_type, packet_id, is_eom, payload))
         total_len = 8 + len(payload)
         status = 0x01 if is_eom else 0x00
         header = struct.pack(">BBHHBB", packet_type & 0xFF, status, total_len & 0xFFFF, 0, packet_id & 0xFF, 0)
@@ -80,17 +74,6 @@ class MSSQLCore:
             raise VertebraError(f"Invalid or truncated TDS packet length: expected {total_len}, got {len(raw)}")
         is_eom = (status & 0x01) != 0
         return (pkt_type, is_eom, packet_id, raw[8:total_len])
-
-    @staticmethod
-    def encode_tds_sql_batch(sql: str, transaction_descriptor: int = 0) -> bytes:
-        """Encode a TDS 7.4 `SQLBatch` packet with 22-byte `ALL_HEADERS` `TransactionDescriptor` and UTF-16LE SQL."""
-        native = import_optional("vertebra._vertebra")
-        if native is not None and hasattr(native, "encode_tds_sql_batch"):
-            return bytes(native.encode_tds_sql_batch(sql, transaction_descriptor))
-
-        all_headers = struct.pack("<IIHQI", 22, 18, 0x0002, transaction_descriptor & 0xFFFFFFFFFFFFFFFF, 1)
-        utf16_sql = sql.encode("utf-16-le")
-        return MSSQLCore.encode_tds_packet(TDS_PKT_SQL_BATCH, 1, True, all_headers + utf16_sql)
 
     @staticmethod
     def rewrite_placeholders(sql: str) -> tuple[str, int]:
@@ -199,5 +182,4 @@ class MSSQLCore:
 
 encode_tds_packet = MSSQLCore.encode_tds_packet
 decode_tds_packet = MSSQLCore.decode_tds_packet
-encode_tds_sql_batch = MSSQLCore.encode_tds_sql_batch
 rewrite_mssql_placeholders = MSSQLCore.rewrite_placeholders
