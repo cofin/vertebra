@@ -5,7 +5,7 @@ chapter_id: ch13-agent-knowledge-and-embeddings-docs
 title: State vertebra-db dependencies, the DuckDB group, the importorskip rule, and resp3_server in the tech stack and test matrix
 description: Drop sha2 and rmp-serde from the tech-stack vertebra-db bullet, list the duckdb dependency group and the install command, and add the GIL-only DuckDB group, the pytest.importorskip("duckdb") rule, and the resp3_server loopback fixture to the polyglot test matrix outside its conformance section.
 status: stable
-state: pending
+state: completed
 priority: P2
 verification_strategy: documentation_validation
 depends_on: []
@@ -23,18 +23,18 @@ tests: []
 estimated_loc: 45
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T15:25:00Z"
+last_verified_commit: 5dac3083
+verification_evidence: "grepok, conformance diff 0, okf provenance ok, relative-links ok, review_setup validate ok"
 created_at: "2026-11-08T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T15:25:00Z"
+commit: 5dac3083
 sources:
   - id: okf-tech-stack
     resource: .agents/bundles/product/tech-stack.md
@@ -203,11 +203,11 @@ make review-check
 
 ## Acceptance Criteria
 
-- [ ] `tech-stack.md` lists no `sha2` or `rmp-serde` for `vertebra-db`, keeps `sha2` for `vertebra-core` and `vertebra-storage`, and lists the `duckdb` group, `bench`'s inclusion, and the install command (R18.2, R3, R8).
-- [ ] `polyglot-test-matrix.md` sections 2–4 and "Driver regression boundaries" describe `PY_TEST_GROUPS`, free-threaded DuckDB skips, the `importorskip` rule, and `resp3_server` (R18.2, R3, R7).
-- [ ] The "Database driver conformance" section is unchanged by this task.
-- [ ] Both files keep 1:1 provenance with a prepended `agent:flow-executor` `verified:` entry.
-- [ ] Every Verification command exits `0`.
+- [x] `tech-stack.md` lists no `sha2` or `rmp-serde` for `vertebra-db`, keeps `sha2` for `vertebra-core` and `vertebra-storage`, and lists the `duckdb` group, `bench`'s inclusion, and the install command (R18.2, R3, R8).
+- [x] `polyglot-test-matrix.md` sections 2–4 and "Driver regression boundaries" describe `PY_TEST_GROUPS`, free-threaded DuckDB skips, the `importorskip` rule, and `resp3_server` (R18.2, R3, R7).
+- [x] The "Database driver conformance" section is unchanged by this task.
+- [x] Both files keep 1:1 provenance with a prepended `agent:flow-executor` `verified:` entry.
+- [x] Every Verification command exits `0`.
 
 ## Notes & Discoveries
 

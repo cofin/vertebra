@@ -5,7 +5,7 @@ chapter_id: ch13-agent-knowledge-and-embeddings-docs
 title: State the DB-API InterfaceError and pending Oracle and SQL Server drivers in dialect knowledge, the domain index, and the docs home page
 description: Rewrite the SQLSpec/SQLAlchemy dialect chapter's adapter and DB-API rows, the domain index driver and embeddings entries, and the docs home page database row so unparsable +vtb URLs raise InterfaceError, Oracle and MSSQL sessions raise MissingDependencyError, and no engine count is advertised.
 status: stable
-state: pending
+state: completed
 priority: P2
 verification_strategy: documentation_validation
 depends_on: []
@@ -24,18 +24,18 @@ tests: []
 estimated_loc: 30
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T15:25:00Z"
+last_verified_commit: 5dac3083
+verification_evidence: "grepok, okf provenance ok, relative-links ok, make docs ok, review_setup validate ok, pytest test_docs_tooling.py 28 passed"
 created_at: "2026-11-08T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T15:25:00Z"
+commit: 5dac3083
 sources:
   - id: okf-dialects
     resource: .agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md
@@ -189,11 +189,11 @@ uv run --no-sync pytest src/py/tests/unit/tools/test_docs_tooling.py -q
 
 ## Acceptance Criteria
 
-- [ ] The dialect chapter states the DB-API `InterfaceError` for unparsable URLs, Oracle/MSSQL `MissingDependencyError`, and the `duckdb` requirement for `duckdb+vtb`, with no `UnsupportedBackendError` claim (R18.3, R1, R3, R4).
-- [ ] The domain index marks Oracle and MSSQL drivers and `OracleEmbeddingPushdown` as pending and stays frontmatter-free (R18.3).
-- [ ] `docs/index.md` lists engines without a count and marks native Oracle and SQL Server drivers as not yet published (R18.3, R13).
-- [ ] The dialect chapter keeps 1:1 provenance with a prepended `agent:flow-executor` `verified:` entry.
-- [ ] Every Verification command exits `0`.
+- [x] The dialect chapter states the DB-API `InterfaceError` for unparsable URLs, Oracle/MSSQL `MissingDependencyError`, and the `duckdb` requirement for `duckdb+vtb`, with no `UnsupportedBackendError` claim (R18.3, R1, R3, R4).
+- [x] The domain index marks Oracle and MSSQL drivers and `OracleEmbeddingPushdown` as pending and stays frontmatter-free (R18.3).
+- [x] `docs/index.md` lists engines without a count and marks native Oracle and SQL Server drivers as not yet published (R18.3, R13).
+- [x] The dialect chapter keeps 1:1 provenance with a prepended `agent:flow-executor` `verified:` entry.
+- [x] Every Verification command exits `0`.
 
 ## Notes & Discoveries
 

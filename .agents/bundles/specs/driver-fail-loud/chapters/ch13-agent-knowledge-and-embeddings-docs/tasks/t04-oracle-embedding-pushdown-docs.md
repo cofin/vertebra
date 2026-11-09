@@ -5,7 +5,7 @@ chapter_id: ch13-agent-knowledge-and-embeddings-docs
 title: State the Oracle embedding pushdown requirement in the embeddings guide, usage index, and OKF embeddings chapter
 description: Rewrite the embeddings guide selection matrix and pushdown section, the usage index embeddings row, and the OKF embeddings truth block and embedder table so OracleEmbeddingPushdown reads as requiring the pending native Oracle driver, whose construction raises MissingDependencyError.
 status: stable
-state: pending
+state: completed
 priority: P2
 verification_strategy: documentation_validation
 depends_on: []
@@ -24,18 +24,18 @@ tests: []
 estimated_loc: 25
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T15:25:00Z"
+last_verified_commit: 5dac3083
+verification_evidence: "grepok, okf provenance ok, relative-links ok, make docs ok, review_setup validate ok, pytest test_docs_tooling.py 28 passed"
 created_at: "2026-11-08T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T15:25:00Z"
+commit: 5dac3083
 sources:
   - id: docs-embeddings
     resource: docs/usage/embeddings-and-vectors.md
@@ -185,10 +185,10 @@ uv run --no-sync pytest src/py/tests/unit/tools/test_docs_tooling.py -q
 
 ## Acceptance Criteria
 
-- [ ] The embeddings guide matrix and pushdown section state that `OracleEmbeddingPushdown` needs the native Oracle driver, which is not yet published, and that Oracle drivers raise `MissingDependencyError`, without quoting an install command (R18.4, R1, R13).
-- [ ] `docs/usage/index.md` embeddings row marks the Oracle pushdown as requiring the unpublished native driver (R18.4).
-- [ ] The OKF embeddings truth bullet and section 4 row state the requirement with 1:1 provenance and a prepended `agent:flow-executor` `verified:` entry (R18.4).
-- [ ] Every Verification command exits `0`.
+- [x] The embeddings guide matrix and pushdown section state that `OracleEmbeddingPushdown` needs the native Oracle driver, which is not yet published, and that Oracle drivers raise `MissingDependencyError`, without quoting an install command (R18.4, R1, R13).
+- [x] `docs/usage/index.md` embeddings row marks the Oracle pushdown as requiring the unpublished native driver (R18.4).
+- [x] The OKF embeddings truth bullet and section 4 row state the requirement with 1:1 provenance and a prepended `agent:flow-executor` `verified:` entry (R18.4).
+- [x] Every Verification command exits `0`.
 
 ## Notes & Discoveries
 

@@ -5,7 +5,7 @@ chapter_id: ch13-agent-knowledge-and-embeddings-docs
 title: State the GIL-only DuckDB dependency group in AGENTS.md, workflow, and benchmark knowledge
 description: Update the AGENTS.md make install line, the workflow command block and hygiene rule, and the benchmark chapter's dependency-group section so they describe the dedicated duckdb group, its GIL-only Makefile wiring, and bench's inclusion of it.
 status: stable
-state: pending
+state: completed
 priority: P2
 verification_strategy: documentation_validation
 depends_on: []
@@ -23,18 +23,18 @@ tests: []
 estimated_loc: 40
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T15:25:00Z"
+last_verified_commit: 5dac3083
+verification_evidence: "grepok, okf provenance ok, relative-links ok, review_setup validate ok"
 created_at: "2026-11-08T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
-commit: null
+updated_at: "2026-11-09T15:25:00Z"
+commit: 5dac3083
 sources:
   - id: agents-md
     resource: AGENTS.md
@@ -196,11 +196,11 @@ make review-check
 
 ## Acceptance Criteria
 
-- [ ] `AGENTS.md` `make install` line shows `--group duckdb`; no other `AGENTS.md` line changes (R18.1, R3).
-- [ ] `workflow.md` command block and rule 5 describe the dedicated GIL-only `duckdb` group, `bench`'s inclusion, and `PY_TEST_GROUPS` (R18.1, R3).
-- [ ] `benchmarks-and-free-threaded.md` truth block and section 5 describe the same layout and the free-threaded `importorskip` skip (R18.1, R3).
-- [ ] Both OKF files keep 1:1 provenance with a prepended `agent:flow-executor` `verified:` entry.
-- [ ] Every Verification command exits `0`.
+- [x] `AGENTS.md` `make install` line shows `--group duckdb`; no other `AGENTS.md` line changes (R18.1, R3).
+- [x] `workflow.md` command block and rule 5 describe the dedicated GIL-only `duckdb` group, `bench`'s inclusion, and `PY_TEST_GROUPS` (R18.1, R3).
+- [x] `benchmarks-and-free-threaded.md` truth block and section 5 describe the same layout and the free-threaded `importorskip` skip (R18.1, R3).
+- [x] Both OKF files keep 1:1 provenance with a prepended `agent:flow-executor` `verified:` entry.
+- [x] Every Verification command exits `0`.
 
 ## Notes & Discoveries
 

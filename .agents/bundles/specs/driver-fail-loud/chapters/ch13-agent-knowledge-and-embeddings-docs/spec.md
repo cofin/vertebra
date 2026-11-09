@@ -6,20 +6,20 @@ chapter_id: ch13-agent-knowledge-and-embeddings-docs
 title: "Chapter 13: Agent Knowledge, Dependency Groups, and Embeddings Docs"
 description: Align the agent instructions, workflow, benchmark, tech-stack, test-matrix, SQLAlchemy-dialect, domain-index, embeddings, and landing-page docs with the DuckDB dependency group, the vertebra-db dependency cleanup, the DB-API InterfaceError, the resp3_server fixture, and the pending native Oracle driver.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch11-docs-and-okf
   - ch12-queue-docs-and-knowledge
 replan_trigger: null
-current_task: "driver-fail-loud:ch13:t01"
+current_task: null
 plan_revision: 2
 plan_commit: fd571e3a
-state_revision: 0
-last_verified_checkpoint: null
+state_revision: 1
+last_verified_checkpoint: 5dac3083
 last_reviewed_commit: null
 created_at: "2026-11-08T00:00:00Z"
-updated_at: "2026-11-08T00:00:00Z"
+updated_at: "2026-11-09T15:25:00Z"
 generated:
   by: flow/0.28.0
   at: "2026-11-08T00:00:00Z"
@@ -229,18 +229,18 @@ Facts used across all files (executors adapt sentence structure, not facts):
 
 ## 3. Documentation & OKF Knowledge Plan
 
-- **Progress**: `[0/11 files documented]`
-- `[ ]` `AGENTS.md` — t01
-- `[ ]` `.agents/bundles/knowledge/workflow.md` — t01
-- `[ ]` `.agents/bundles/knowledge/testing/benchmarks-and-free-threaded.md` — t01
-- `[ ]` `.agents/bundles/product/tech-stack.md` — t02
-- `[ ]` `.agents/bundles/knowledge/testing/polyglot-test-matrix.md` — t02 (sections outside "Database driver conformance")
-- `[ ]` `.agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md` — t03
-- `[ ]` `.agents/bundles/knowledge/domains/index.md` — t03
-- `[ ]` `docs/index.md` — t03
-- `[ ]` `docs/usage/embeddings-and-vectors.md` — t04
-- `[ ]` `docs/usage/index.md` — t04
-- `[ ]` `.agents/bundles/knowledge/domains/agent/embeddings-and-vectors.md` — t04
+- **Progress**: `[11/11 files documented]`
+- `[x]` `AGENTS.md` — t01
+- `[x]` `.agents/bundles/knowledge/workflow.md` — t01
+- `[x]` `.agents/bundles/knowledge/testing/benchmarks-and-free-threaded.md` — t01
+- `[x]` `.agents/bundles/product/tech-stack.md` — t02
+- `[x]` `.agents/bundles/knowledge/testing/polyglot-test-matrix.md` — t02 (sections outside "Database driver conformance")
+- `[x]` `.agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md` — t03
+- `[x]` `.agents/bundles/knowledge/domains/index.md` — t03
+- `[x]` `docs/index.md` — t03
+- `[x]` `docs/usage/embeddings-and-vectors.md` — t04
+- `[x]` `docs/usage/index.md` — t04
+- `[x]` `.agents/bundles/knowledge/domains/agent/embeddings-and-vectors.md` — t04
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -253,17 +253,17 @@ Facts used across all files (executors adapt sentence structure, not facts):
 
 ## 5. Implementation Plan
 
-- [ ] driver-fail-loud:ch13:t01 — AGENTS.md, workflow, and benchmark knowledge state the GIL-only DuckDB group and install command (tasks/t01-duckdb-group-agent-workflow.md)
-- [ ] driver-fail-loud:ch13:t02 — Tech stack and test matrix state vertebra-db deps, the DuckDB group, the importorskip rule, and resp3_server (tasks/t02-tech-stack-and-test-matrix.md)
-- [ ] driver-fail-loud:ch13:t03 — Dialect knowledge, domain index, and home page state InterfaceError and pending Oracle/SQL Server drivers (tasks/t03-dialect-knowledge-and-landing-pages.md)
-- [ ] driver-fail-loud:ch13:t04 — Embeddings guide, usage index, and OKF embeddings chapter state the Oracle pushdown requirement (tasks/t04-oracle-embedding-pushdown-docs.md)
+- [x] [5dac3083] driver-fail-loud:ch13:t01 — AGENTS.md, workflow, and benchmark knowledge state the GIL-only DuckDB group and install command (tasks/t01-duckdb-group-agent-workflow.md)
+- [x] [5dac3083] driver-fail-loud:ch13:t02 — Tech stack and test matrix state vertebra-db deps, the DuckDB group, the importorskip rule, and resp3_server (tasks/t02-tech-stack-and-test-matrix.md)
+- [x] [5dac3083] driver-fail-loud:ch13:t03 — Dialect knowledge, domain index, and home page state InterfaceError and pending Oracle/SQL Server drivers (tasks/t03-dialect-knowledge-and-landing-pages.md)
+- [x] [5dac3083] driver-fail-loud:ch13:t04 — Embeddings guide, usage index, and OKF embeddings chapter state the Oracle pushdown requirement (tasks/t04-oracle-embedding-pushdown-docs.md)
 - **Chapter / Phase Recovery Checkpoint**: `make review-check && make docs && uv run --no-sync pytest src/py/tests/unit/tools/test_docs_tooling.py -q`
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `0acdf576` — chapter authored; blocked on `ch11` and `ch12`.
-- **Remaining Tasks**: `t01`, `t02`, `t03`, `t04` (`0/4` completed).
-- **Documentation & OKF Sync**: `[0/11 files documented]`.
+- **Verified Baseline (`HEAD`)**: `5dac3083` — chapter completed (`4/4` tasks completed).
+- **Remaining Tasks**: None (`4/4` completed).
+- **Documentation & OKF Sync**: `[11/11 files documented]`.
 - **Active Invariants**: `AGENTS.md` changes only on the `make install` line; the `polyglot-test-matrix.md` conformance section stays as ch11 leaves it; changelog untouched; no internal identifiers or planned-extra commands in user docs.
 
 [^agents-md]: `AGENTS.md` — Agent instructions Quick Verification Commands block.
