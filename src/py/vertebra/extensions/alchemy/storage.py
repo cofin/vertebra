@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from vertebra.storage import (
+    AsyncGcpTokenCache,
     AsyncObjectStore,
     AzureConfig,
     GCSConfig,
@@ -21,7 +22,9 @@ from vertebra.storage import (
     OCIConfig,
     R2Config,
     S3Config,
+    SigningConfig,
     StorageConfig,
+    SyncGcpTokenCache,
     SyncObjectStore,
 )
 from vertebra.typing import ImproperConfigurationError, MissingDependencyError
@@ -61,18 +64,26 @@ class ObjectStoreBackend(AAStorageBackend):
         *,
         store: SyncObjectStore | AsyncObjectStore | str | StorageConfig | None = None,
         prefix: str = "",
+        signing: SigningConfig | None = None,
+        token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the storage backend for Advanced Alchemy FileObject and StoredObject columns.
 
         Args:
             key: Logical storage backend key registered in Advanced Alchemy's `storages` registry.
-            fs: Either an `ObjectStore` instance or a storage URI string (`memory://`, `file://`, `s3://`, `gs://`, `az://`, `oci://`, `r2://`).
-            store: Explicit `ObjectStore` keyword alias when constructing directly.
+            fs: Either an `ObjectStore` instance, a `StorageConfig`, or a storage URI string (`memory://`, `file://`, `s3://`, `gs://`, `az://`, `oci://`, `r2://`).
+            store: Explicit `ObjectStore`, `StorageConfig`, or URI keyword taking precedence over `fs`.
             prefix: Optional key namespace prefix prepended to all stored object paths.
-            **kwargs: Optional string options or signing configuration when fs is a URI string.
+            signing: Optional `SigningConfig` for presigned GET/PUT URLs when building a store from a config or URI.
+            token_cache: Optional shared GCS OAuth2 token cache when building a store from a config or URI.
+            **kwargs: Optional scalar string options applied when the target is a URI string.
+
+        Raises:
+            ImproperConfigurationError: When no target is supplied, or `signing` / `token_cache` accompany a
+                prebuilt object store whose authentication is already fixed.
+            TypeError: When the target is not an object store, storage config, or URI string.
         """
-        signing = kwargs.pop("signing", None)
         string_options: dict[str, str] = {
             str(k): str(v) for k, v in kwargs.items() if isinstance(v, (str, int, float, bool))
         }
@@ -80,6 +91,9 @@ class ObjectStoreBackend(AAStorageBackend):
         self._prefix = self._clean_key(prefix).strip("/")
         if target is None or isinstance(target, str) and not target.strip():
             msg = "An explicit object store, storage config, or URI is required"
+            raise ImproperConfigurationError(msg)
+        if isinstance(target, (SyncObjectStore, AsyncObjectStore)) and (signing is not None or token_cache is not None):
+            msg = "signing and token_cache apply only when building a store from a StorageConfig or URI"
             raise ImproperConfigurationError(msg)
 
         sync_store: SyncObjectStore
@@ -92,13 +106,15 @@ class ObjectStoreBackend(AAStorageBackend):
             async_store = target
             sync_store = target.to_sync()
         elif isinstance(target, _STORAGE_CONFIGS):
-            sync_store = SyncObjectStore.from_config(target)
+            sync_store = SyncObjectStore(target, signing=signing, token_cache=token_cache)
             async_store = sync_store.to_async()
         elif isinstance(target, str):
-            sync_store = SyncObjectStore(target, options=string_options or None, signing=signing)
+            sync_store = SyncObjectStore(
+                target, options=string_options or None, signing=signing, token_cache=token_cache
+            )
             async_store = sync_store.to_async()
         else:
-            msg = f"Expected SyncObjectStore, AsyncObjectStore, or URI string, got {type(target)!r}"
+            msg = f"Expected SyncObjectStore, AsyncObjectStore, StorageConfig, or URI string, got {type(target)!r}"
             raise TypeError(msg)
 
         super().__init__(key=key, fs=sync_store, **kwargs)
@@ -125,6 +141,11 @@ class ObjectStoreBackend(AAStorageBackend):
     def prefix(self) -> str:
         """Return the configured object key prefix."""
         return self._prefix
+
+    @property
+    def supports_signing(self) -> bool:
+        """Return True when presigned URL generation is configured on the underlying store."""
+        return self._sync_store.supports_signing
 
     def get_content(self, path: PathLike, *, options: dict[str, Any] | None = None) -> bytes:
         """Read full object bytes synchronously."""
@@ -247,7 +268,11 @@ class ObjectStoreBackend(AAStorageBackend):
         expires_in: int | None = None,
         for_upload: bool = False,
     ) -> str | list[str]:
-        """Generate presigned GET or PUT URLs for one or more object paths."""
+        """Generate presigned GET or PUT URLs for one or more object paths.
+
+        Raises:
+            NotImplementedError: When the underlying store has no `SigningConfig` or native signing fails.
+        """
         ttl = 3600 if expires_in is None else expires_in
         if isinstance(paths, (str, Path, os.PathLike)):
             return self._sign_one(paths, expires_in=ttl, for_upload=for_upload)
@@ -260,15 +285,26 @@ class ObjectStoreBackend(AAStorageBackend):
         expires_in: int | None = None,
         for_upload: bool = False,
     ) -> str | list[str]:
-        """Generate presigned GET or PUT URLs asynchronously."""
+        """Generate presigned GET or PUT URLs asynchronously.
+
+        Raises:
+            NotImplementedError: When the underlying store has no `SigningConfig` or native signing fails.
+        """
         ttl = 3600 if expires_in is None else expires_in
         if isinstance(paths, (str, Path, os.PathLike)):
             return await self._sign_one_async(paths, expires_in=ttl, for_upload=for_upload)
         return [await self._sign_one_async(item, expires_in=ttl, for_upload=for_upload) for item in paths]
 
+    def _require_signing(self) -> None:
+        """Reject signing requests when the underlying store has no `SigningConfig`."""
+        if not self.supports_signing:
+            msg = f"URL signing is not configured for backend {self.key!r}: no SigningConfig is attached"
+            raise NotImplementedError(msg)
+
     def _sign_one(self, path: PathLike, *, expires_in: int, for_upload: bool) -> str:
         """Sign a single path using the underlying SyncObjectStore presigner."""
         qualified = self._qualify(path)
+        self._require_signing()
         try:
             if for_upload:
                 return self._sync_store.presign_put(qualified, expires_in_secs=expires_in)
@@ -280,6 +316,7 @@ class ObjectStoreBackend(AAStorageBackend):
     async def _sign_one_async(self, path: PathLike, *, expires_in: int, for_upload: bool) -> str:
         """Sign a single path using the underlying AsyncObjectStore presigner."""
         qualified = self._qualify(path)
+        self._require_signing()
         try:
             if for_upload:
                 res = self._async_store.presign_put(qualified, expires_in_secs=expires_in)
@@ -387,6 +424,8 @@ def register_storage_backend(
     prefix: str = "",
     set_default: bool = False,
     registry: StorageRegistry | None = None,
+    signing: SigningConfig | None = None,
+    token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
 ) -> ObjectStoreBackend:
     """Register an ObjectStoreBackend into Advanced Alchemy's `storages` registry.
 
@@ -397,6 +436,8 @@ def register_storage_backend(
         prefix: Optional object key prefix applied to all operations on this backend.
         set_default: When True, configure `ObjectStoreBackend` as the registry's default URI backend class.
         registry: Optional custom StorageRegistry instance (defaults to advanced_alchemy.types.file_object.storages).
+        signing: Optional `SigningConfig` forwarded when the store is built from a config or URI.
+        token_cache: Optional shared GCS OAuth2 token cache forwarded when the store is built from a config or URI.
 
     Returns:
         The registered `ObjectStoreBackend` instance.
@@ -412,7 +453,9 @@ def register_storage_backend(
     else:
         resolved_key = key
         resolved_store = store_or_key
-    backend = ObjectStoreBackend(key=resolved_key, fs=resolved_store, prefix=prefix)
+    backend = ObjectStoreBackend(
+        key=resolved_key, fs=resolved_store, prefix=prefix, signing=signing, token_cache=token_cache
+    )
     target_registry.register_backend(backend)
     if set_default:
         target_registry.set_default_backend("vertebra.extensions.alchemy.storage.ObjectStoreBackend")

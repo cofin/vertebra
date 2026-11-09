@@ -633,11 +633,12 @@ async def test_alchemy_stream_sources_and_failure_cleanup(tmp_path: Path) -> Non
 
 @pytest.mark.anyio
 async def test_alchemy_unconfigured_signing() -> None:
-    """Unsupported native signing retains the upstream backend error contract."""
+    """Unsupported native signing reports the capability and retains the upstream backend error contract."""
     backend = AlchemyObjectStoreBackend(fs=MemoryConfig())
-    with pytest.raises(NotImplementedError):
+    assert backend.supports_signing is False
+    with pytest.raises(NotImplementedError, match="not configured"):
         backend.sign("one.bin")
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(NotImplementedError, match="not configured"):
         await backend.sign_async(["one.bin"], for_upload=True)
 
 
@@ -841,6 +842,7 @@ async def test_sqlspec_stream_options_and_failed_uploads() -> None:
 async def test_sqlspec_unsupported_signing_preserves_adapter_error() -> None:
     """Unconfigured native signing is reported using SQLSpec's adapter contract."""
     backend = SQLSpecObjectStoreBackend(MemoryConfig())
+    assert backend.supports_signing is False
     with pytest.raises(NotImplementedError, match="signing not supported"):
         backend.sign_sync("object.bin")
     with pytest.raises(NotImplementedError, match="signing not supported"):
@@ -979,6 +981,88 @@ def test_duckdb_gcs_secret_sql_builder() -> None:
 
     with pytest.raises(ValueError, match="Invalid SQL identifier"):
         build_duckdb_gcs_secret_sql("bad-name;DROP TABLE x", cfg)
+
+
+@pytest.mark.parametrize(
+    "token_kwargs",
+    [{}, {"bearer_token": ""}, {"bearer_token": "   "}, {"config": GCSConfig(bucket="lakehouse"), "bearer_token": " "}],
+    ids=["no-token", "empty-token", "blank-token", "blank-token-with-config"],
+)
+def test_duckdb_gcs_secret_sql_requires_bearer_token(token_kwargs: dict[str, Any]) -> None:
+    """Missing or blank bearer tokens fail loudly instead of emitting a broken DuckDB secret."""
+    with pytest.raises(ImproperConfigurationError, match="bearer token"):
+        build_duckdb_gcs_secret_sql("my_secret", **token_kwargs)
+
+
+def test_duckdb_gcs_secret_sql_parameterizes_quoted_tokens() -> None:
+    """Quotes inside an explicit bearer token travel as a bound parameter, never as SQL text."""
+    sql, params = build_duckdb_gcs_secret_sql("gcs_lake", bearer_token="tok'en")
+    assert "tok'en" not in sql
+    assert params == ("tok'en",)
+
+
+@pytest.mark.parametrize("target", [GCSConfig(bucket="lakehouse"), "gs://lakehouse"], ids=["config", "uri"])
+@pytest.mark.parametrize("via_registry", [False, True], ids=["direct", "registered"])
+@pytest.mark.anyio
+async def test_alchemy_forwards_signing_and_token_cache(target: GCSConfig | str, via_registry: bool) -> None:
+    """StorageConfig and URI targets build both stores with the forwarded SigningConfig and token cache."""
+    signing = SigningConfig(provider="hmac", hmac_secret="alchemy-forward", endpoint="https://signed.example.com")
+    token_cache = SyncGcpTokenCache({"access_token": "forwarded-token"}, allow_ambient_adc=False)
+    registry = AlchemyStorageRegistry()
+    if via_registry:
+        backend = register_storage_backend(
+            target, key="alchemy_forwarded", signing=signing, token_cache=token_cache, registry=registry
+        )
+    else:
+        backend = AlchemyObjectStoreBackend("alchemy_forwarded", target, signing=signing, token_cache=token_cache)
+    try:
+        assert backend.sync_store.token_cache is token_cache
+        assert isinstance(backend.async_store.token_cache, AsyncGcpTokenCache)
+        assert backend.supports_signing is True
+        assert backend.sync_store.supports_signing is True
+        assert backend.async_store.supports_signing is True
+        sync_url = backend.sign("one.bin")
+        async_urls = await backend.sign_async(["one.bin"], for_upload=True)
+        assert isinstance(sync_url, str)
+        assert sync_url.startswith("https://signed.example.com/one.bin?")
+        assert isinstance(async_urls, list)
+        assert async_urls[0].startswith("https://signed.example.com/one.bin?")
+    finally:
+        if via_registry:
+            registry.unregister_backend("alchemy_forwarded")
+
+
+@pytest.mark.parametrize("async_handle", [False, True])
+@pytest.mark.parametrize(
+    "auth_kwargs",
+    [
+        {"signing": SigningConfig(provider="hmac", hmac_secret="ignored", endpoint="https://ignored.example.com")},
+        {"token_cache": SyncGcpTokenCache({"access_token": "ignored"}, allow_ambient_adc=False)},
+    ],
+    ids=["signing", "token-cache"],
+)
+def test_alchemy_rejects_auth_options_with_prebuilt_store(async_handle: bool, auth_kwargs: dict[str, Any]) -> None:
+    """Auth options for a prebuilt store fail loudly instead of being silently discarded."""
+    sync_store = SyncObjectStore("memory://")
+    store = sync_store.to_async() if async_handle else sync_store
+    with pytest.raises(ImproperConfigurationError, match="StorageConfig or URI"):
+        AlchemyObjectStoreBackend(fs=store, **auth_kwargs)
+
+
+def test_sqlspec_storage_module_drops_ipc_buffer_wrapper() -> None:
+    """Raw IPC buffers flow directly to the shared batch codec without a wrapper type."""
+    assert not hasattr(sqlspec_storage_mod, "_IPCBuffer")
+
+
+def test_sqlspec_public_methods_precede_private_helpers() -> None:
+    """ObjectStoreBackend groups public sync methods, then public async methods, then private helpers."""
+    names = [name for name in vars(SQLSpecObjectStoreBackend) if not name.startswith("__")]
+    callables = [name for name in names if callable(getattr(SQLSpecObjectStoreBackend, name, None))]
+    private_start = next(index for index, name in enumerate(callables) if name.startswith("_"))
+    assert all(name.startswith("_") for name in callables[private_start:])
+    public = callables[:private_start]
+    first_async = next(index for index, name in enumerate(public) if name.endswith("_async"))
+    assert all(name.endswith("_async") for name in public[first_async:])
 
 
 @pytest.mark.anyio
