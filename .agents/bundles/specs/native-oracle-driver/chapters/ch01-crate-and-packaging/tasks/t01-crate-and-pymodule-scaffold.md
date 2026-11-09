@@ -5,7 +5,7 @@ chapter_id: ch01-crate-and-packaging
 title: Scaffold vertebra-oracle Cargo manifest, build script, and free-threaded PyO3 module
 description: Create src/rs/vertebra-oracle/Cargo.toml with oracledb =26.0.0-beta.5 (arrow feature), crate-local arrow-* =59, and zip =2 pins, build.rs with PyO3 cfg/rpath setup, and src/lib.rs exporting gil_used=false vertebra._oracle metadata constants prior to workspace registration.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: static_validation
 depends_on: []
@@ -24,18 +24,21 @@ tests: []
 estimated_loc: 110
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T02:47:00Z"
+last_verified_commit: d7a629b1
+verification_evidence:
+  command: "uv run --no-sync python -c '...' && rustfmt --edition 2024 --check src/rs/vertebra-oracle/build.rs src/rs/vertebra-oracle/src/lib.rs && cargo check --manifest-path src/rs/Cargo.toml --workspace --locked"
+  exit_code: 0
+  summary: "Manifest pins, rustfmt 2024 check, and locked workspace check passed."
 created_at: "2026-11-09T00:55:00Z"
-updated_at: "2026-11-09T01:28:30Z"
-commit: null
+updated_at: "2026-11-09T02:47:00Z"
+commit: d7a629b1
 sources:
   - id: ws-cargo
     resource: src/rs/Cargo.toml
@@ -154,9 +157,9 @@ Commit as `build(oracle): scaffold vertebra-oracle crate and pymodule`.
 
 ## Acceptance Criteria
 
-- [ ] `src/rs/vertebra-oracle/Cargo.toml` declares `_oracle` (`cdylib` + `rlib`), `oracledb = { version = "=26.0.0-beta.5", features = ["arrow"] }`, crate-local `arrow-{array,buffer,ipc,schema} = { version = "59", default-features = false }`, `zip = { version = "2", default-features = false, features = ["deflate"] }`, and `vertebra-db = { path = "../vertebra-db", features = ["pyo3"] }` (R1).
-- [ ] `src/rs/vertebra-oracle/build.rs` and `src/rs/vertebra-oracle/src/lib.rs` (`#[pymodule(gil_used = false)] fn _oracle` exporting `FREE_THREADED`, `GIL_USED`, `__version__`) pass `rustfmt --edition 2024 --check` (R1).
-- [ ] Existing workspace passes `cargo check --manifest-path src/rs/Cargo.toml --workspace --locked` with zero dirty lockfile changes (R1).
+- [x] `src/rs/vertebra-oracle/Cargo.toml` declares `_oracle` (`cdylib` + `rlib`), `oracledb = { version = "=26.0.0-beta.5", features = ["arrow"] }`, crate-local `arrow-{array,buffer,ipc,schema} = { version = "59", default-features = false }`, `zip = { version = "2", default-features = false, features = ["deflate"] }`, and `vertebra-db = { path = "../vertebra-db", features = ["pyo3"] }` (R1).
+- [x] `src/rs/vertebra-oracle/build.rs` and `src/rs/vertebra-oracle/src/lib.rs` (`#[pymodule(gil_used = false)] fn _oracle` exporting `FREE_THREADED`, `GIL_USED`, `__version__`) pass `rustfmt --edition 2024 --check` (R1).
+- [x] Existing workspace passes `cargo check --manifest-path src/rs/Cargo.toml --workspace --locked` with zero dirty lockfile changes (R1).
 
 ## Notes & Discoveries
 

@@ -5,14 +5,14 @@ chapter_id: ch01-crate-and-packaging
 title: "Chapter 01: Rust Crate Scaffold, Build Matrix, and Optional Wheel Wiring"
 description: Scaffold the standalone src/rs/vertebra-oracle PyO3 crate wrapping official pure-Rust oracledb =26.0.0-beta.5 and crate-local arrow 59, register the workspace member and vertebra._oracle wheel/stub, and wire root optional dependencies, Makefile targets, and review area manifests.
 status: stable
-state: planned
+state: in_progress
 planning_status: complete
 depends_on_chapters: []
 replan_trigger: null
-current_task: "native-oracle-driver:ch01:t01"
+current_task: "native-oracle-driver:ch01:t02"
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
+state_revision: 1
 last_verified_checkpoint: null
 last_reviewed_commit: null
 created_at: "2026-11-05T00:00:00Z"
@@ -152,7 +152,7 @@ Progress: `[0/6 files documented]` (`src/py/vertebra/_oracle.pyi` module docstri
 
 ## 5. Implementation Plan
 
-- [ ] native-oracle-driver:ch01:t01 — Scaffold vertebra-oracle Cargo manifest, build script, and free-threaded PyO3 module (tasks/t01-crate-and-pymodule-scaffold.md)
+- [x] native-oracle-driver:ch01:t01 — Scaffold vertebra-oracle Cargo manifest, build script, and free-threaded PyO3 module (tasks/t01-crate-and-pymodule-scaffold.md)
 - [ ] native-oracle-driver:ch01:t02 — Register workspace member, Maturin wheel manifest, and _oracle.pyi type stub (tasks/t02-workspace-lock-and-wheel-stub.md)
 - [ ] native-oracle-driver:ch01:t03 — Wire root [oracle] extra, Makefile build/test targets, and review area paths (tasks/t03-makefile-extra-and-review-areas.md)
 

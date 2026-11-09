@@ -4,7 +4,7 @@ flow_id: native-oracle-driver
 title: Complete Standalone Native Oracle Thin Driver
 description: Standalone Rust PyO3 wheel (vertebra-oracle / vertebra._oracle) built on official pure-Rust oracledb =26.0.0-beta.5 with Autonomous Wallet mTLS, 26ai VECTOR and OSON codecs, crate-local Arrow 59 SHM bridge, native pools, delayed-commit pipelines, VPD reset-or-evict tenancy, TxEventQ notifications, and live Oracle 26ai Free conformance.
 status: stable
-state: planned
+state: in_progress
 has_chapters: true
 chapters:
   - ch01-crate-and-packaging
@@ -15,7 +15,7 @@ chapters:
   - ch06-notifications-and-embeddings
   - ch07-conformance-and-okf-synthesis
 current_chapter: ch01-crate-and-packaging
-current_task: "native-oracle-driver:ch01:t01"
+current_task: "native-oracle-driver:ch01:t02"
 parent_prd: native-data-platform
 research:
   - ../native-data-platform/research/rust-driver-crates_20261103.md
@@ -209,7 +209,7 @@ Progress: `[0/6 files documented]` (owned by [ch07-conformance-and-okf-synthesis
 
 Every worksheet (`22` total across `7` chapters) executes in one bounded invocation and produces one signed local conventional commit (`<= 3` production files, `read_set <= 6`, `estimated_loc <= 250`).
 
-- [ ] ch01-crate-and-packaging — Rust Crate Scaffold, Build Matrix, and Optional Wheel Wiring (chapters/ch01-crate-and-packaging/spec.md)
+- [~] ch01-crate-and-packaging — Rust Crate Scaffold, Build Matrix, and Optional Wheel Wiring (chapters/ch01-crate-and-packaging/spec.md)
 - [ ] ch02-connect-auth-and-error-hierarchy — TNS/Wallet/Token Dialer, Worker Bridge, and SQLSTATE Error Mapping (chapters/ch02-connect-auth-and-error-hierarchy/spec.md)
 - [ ] ch03-types-bind-and-arrow-shm — Type Codecs, Positional/Named Binds, RETURNING, and Arrow 59 SHM Bridge (chapters/ch03-types-bind-and-arrow-shm/spec.md)
 - [ ] ch04-pools-drcp-and-session-piggyback — Native Sync/Async Pools, DRCP Purity/Tagging, and TTC Session Piggyback (chapters/ch04-pools-drcp-and-session-piggyback/spec.md)
