@@ -12,6 +12,7 @@ import zipfile
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+import msgspec
 import pytest
 
 import vertebra._oracle as _oracle
@@ -26,6 +27,7 @@ from vertebra.db.adapters.oracle.config import (
     OracleWallet,
 )
 from vertebra.db.adapters.oracle.core import OracleCore
+from vertebra.db.adapters.oracle.driver import AsyncOracleDriver, SyncOracleDriver
 from vertebra.db.driver import (
     DataError,
     InterfaceError,
@@ -289,7 +291,9 @@ async def test_async_oracle_client_drainer_cancel_and_lifecycle() -> None:
     with pytest.raises(asyncio.CancelledError):
         await fut
 
-    assert await client.execute("SELECT 1 FROM DUAL") == 0
+    exec_res = await client.execute("SELECT 1 FROM DUAL")
+    assert isinstance(exec_res, _oracle.OracleQueryResult)
+    assert exec_res.rowcount == 1
     await client.close()
     assert client.closed is True
     with pytest.raises(InterfaceError, match="closed"):
@@ -454,3 +458,135 @@ def test_oracle_uuid_raw16_feature_toggle() -> None:
     assert raw_passthrough == u.bytes
 
 
+
+class _EmployeeRow(msgspec.Struct, frozen=True, gc=False):
+    employee_id: int
+    first_name: str
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("sql", "params"),
+    [
+        (
+            "SELECT :1 AS id, :2 AS name, :3 AS uid_raw, :4 AS doc, :5 AS emb FROM DUAL",
+            (
+                42,
+                "Ada",
+                uuid.UUID("12345678-1234-5678-1234-567812345678"),
+                {"role": "admin"},
+                VectorView.from_f32([1.0, 2.0], False),
+            ),
+        ),
+        (
+            "SELECT :id AS id, :name AS name, :uid_raw AS uid_raw, :doc AS doc, :emb AS emb FROM DUAL",
+            {
+                "id": 42,
+                ":name": "Ada",
+                ":uid_raw": uuid.UUID("12345678-1234-5678-1234-567812345678"),
+                "doc": {"role": "admin"},
+                "emb": VectorView.from_f32([1.0, 2.0], False),
+            },
+        ),
+    ],
+)
+async def test_oracle_positional_and_named_bind_lowering(
+    sql: str,
+    params: Any,
+) -> None:
+    """Verify positional (:1..:n) and named (:name / id) bind lowering across SyncOracleDriver and AsyncOracleDriver."""
+    expected_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
+    vv_cfg = OracleConfig(driver_features=OracleDriverFeatures(vector_return_format="vector_view"))
+    with SyncOracleDriver(vv_cfg) as sync_driver:
+        rows = sync_driver.select(sql, params)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["id"] == 42
+        assert row["name"] == "Ada"
+        assert row["uid_raw"] == expected_uuid
+        assert row["doc"] == {"role": "admin"}
+        assert isinstance(row["emb"], VectorView)
+        assert row["emb"].to_list() == [1.0, 2.0]
+
+    async with AsyncOracleDriver(vv_cfg) as async_driver:
+        async_rows = await async_driver.select(sql, params)
+        assert len(async_rows) == 1
+        arow = async_rows[0]
+        assert arow["id"] == 42
+        assert arow["name"] == "Ada"
+        assert arow["uid_raw"] == expected_uuid
+        assert arow["doc"] == {"role": "admin"}
+        assert isinstance(arow["emb"], VectorView)
+        assert arow["emb"].to_list() == [1.0, 2.0]
+
+
+@pytest.mark.anyio
+async def test_oracle_dml_returning_into_single_round_trip() -> None:
+    """Verify DML ... RETURNING ... INTO captures out_binds and projects rows in a single round-trip."""
+    dml_sql = "INSERT INTO items (name) VALUES (:name) RETURNING id, name INTO :out_id, :out_name"
+    with SyncOracleDriver() as sync_driver:
+        first = sync_driver.select_one(dml_sql, {"name": "widget"})
+        assert first == {"id": 101, "name": "widget"}
+        tuples = sync_driver.execute_tuples(dml_sql, {"name": "gadget"})
+        assert tuples == [(102, "gadget")]
+        raw_res = sync_driver.client.execute(dml_sql, {"name": "sprocket"})
+        assert raw_res.out_binds == {"out_id": 103, "out_name": "sprocket"}
+
+    async with AsyncOracleDriver() as async_driver:
+        async_first = await async_driver.select_one(dml_sql, {"name": "widget"})
+        assert async_first == {"id": 101, "name": "widget"}
+        ret_rows = await async_driver.exec_returning_async(dml_sql, {"name": "gadget"})
+        assert ret_rows == [{"id": 102, "name": "gadget"}]
+
+
+@pytest.mark.anyio
+async def test_oracle_execute_many_batches_and_empty_short_circuit() -> None:
+    """Verify execute_many batches rows on the worker and short-circuits empty sequences."""
+    batch = [(1, "a"), (2, "b"), (3, "c")]
+    with SyncOracleDriver() as sync_driver:
+        sync_driver.execute("CREATE TABLE items (id NUMBER PRIMARY KEY, name VARCHAR2(64))")
+        assert sync_driver.execute_many("INSERT INTO items (id, name) VALUES (:1, :2)", []) == 0
+        affected = sync_driver.execute_many("INSERT INTO items (id, name) VALUES (:1, :2)", batch)
+        assert affected == 3
+        assert sync_driver.select_value("SELECT COUNT(*) FROM items") == 3
+
+    async with AsyncOracleDriver() as async_driver:
+        await async_driver.execute("CREATE TABLE items (id NUMBER PRIMARY KEY, name VARCHAR2(64))")
+        assert await async_driver.execute_many("INSERT INTO items (id, name) VALUES (:1, :2)", []) == 0
+        async_affected = await async_driver.execute_many(
+            "INSERT INTO items (id, name) VALUES (:1, :2)",
+            batch,
+        )
+        assert async_affected == 3
+        assert await async_driver.select_value("SELECT COUNT(*) FROM items") == 3
+
+
+@pytest.mark.anyio
+async def test_oracle_lowercase_column_names_toggle() -> None:
+    """Verify enable_lowercase_column_names=True (default) vs False across description, dicts, and structs."""
+    query = "SELECT 1 AS EMPLOYEE_ID, 'Ada' AS FIRST_NAME FROM DUAL"
+    with SyncOracleDriver(
+        OracleConfig(driver_features=OracleDriverFeatures(enable_lowercase_column_names=True))
+    ) as lower_driver:
+        rows, cols = lower_driver.execute_with_description(query)
+        assert cols == ("employee_id", "first_name")
+        assert rows == [(1, "Ada")]
+        assert lower_driver.select(query) == [{"employee_id": 1, "first_name": "Ada"}]
+        assert lower_driver.select(query, schema_type=_EmployeeRow) == [
+            _EmployeeRow(employee_id=1, first_name="Ada")
+        ]
+
+    with SyncOracleDriver(
+        OracleConfig(driver_features=OracleDriverFeatures(enable_lowercase_column_names=False))
+    ) as upper_driver:
+        rows_u, cols_u = upper_driver.execute_with_description(query)
+        assert cols_u == ("EMPLOYEE_ID", "FIRST_NAME")
+        assert rows_u == [(1, "Ada")]
+        assert upper_driver.select(query) == [{"EMPLOYEE_ID": 1, "FIRST_NAME": "Ada"}]
+
+    async with AsyncOracleDriver(
+        OracleConfig(driver_features=OracleDriverFeatures(enable_lowercase_column_names=False))
+    ) as async_upper:
+        _, acols_u = await async_upper.execute_with_description(query)
+        assert acols_u == ("EMPLOYEE_ID", "FIRST_NAME")
+        assert await async_upper.select(query) == [{"EMPLOYEE_ID": 1, "FIRST_NAME": "Ada"}]

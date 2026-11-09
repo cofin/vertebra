@@ -6,7 +6,7 @@ id: "native-oracle-driver:ch03:t02"
 title: "Implement positional and named bind lowering, DML RETURNING out-binds, execute_many, and lowercase column normalization"
 description: "Wire OracleColumn and OracleQueryResult into SyncOracleClient and AsyncOracleClient (execute, execute_many, query, query_one, query_arrow) and _oracle.pyi, implement positional (:1..:n) and named (:name) bind lowering, single-round-trip DML RETURNING INTO out-bind capture, and enable_lowercase_column_names (True default) normalization."
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -26,11 +26,11 @@ tests:
 estimated_loc: 235
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
-commit_sha: null
-completed_at: null
+state_revision: 1
+commit_sha: pending
+completed_at: "2026-11-09T15:36:30Z"
 created_at: "2026-11-09T00:56:00Z"
-updated_at: "2026-11-09T01:28:30Z"
+updated_at: "2026-11-09T15:36:30Z"
 generated:
   by: flow-plan
   at: "2026-11-09T01:15:00Z"
@@ -272,10 +272,10 @@ uv run --no-sync pytest src/py/tests/unit/db/test_oracle_adapter.py -k "bind or 
 
 ## 7. Acceptance Criteria
 
-- [ ] `SyncOracleClient` and `AsyncOracleClient` expose `query`, `query_one`, `execute`, `execute_many`, and `query_arrow` accepting both positional sequences and named mappings (`from collections.abc import Mapping, Sequence`).
-- [ ] `DML ... RETURNING ... INTO` populates `OracleQueryResult.out_binds` and projects rows into `execute_tuples`, `select*`, and `exec_returning_async` in a single round-trip.
-- [ ] `enable_lowercase_column_names=True` (default) normalizes column names to lowercase across `OracleColumn.name`, `OracleQueryResult.to_dicts()`, `execute_with_description()`, and `select()` dict/struct hydration.
-- [ ] `uv run --no-sync python -m mypy.stubtest vertebra._oracle` and `ruff` / `mypy` checks pass with zero allowlist overrides.
+- [x] `SyncOracleClient` and `AsyncOracleClient` expose `query`, `query_one`, `execute`, `execute_many`, and `query_arrow` accepting both positional sequences and named mappings (`from collections.abc import Mapping, Sequence`).
+- [x] `DML ... RETURNING ... INTO` populates `OracleQueryResult.out_binds` and projects rows into `execute_tuples`, `select*`, and `exec_returning_async` in a single round-trip.
+- [x] `enable_lowercase_column_names=True` (default) normalizes column names to lowercase across `OracleColumn.name`, `OracleQueryResult.to_dicts()`, `execute_with_description()`, and `select()` dict/struct hydration.
+- [x] `uv run --no-sync python -m mypy.stubtest vertebra._oracle` and `ruff` / `mypy` checks pass with zero allowlist overrides.
 
 ## 8. Notes & Discoveries
 

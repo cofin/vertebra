@@ -3,6 +3,8 @@
 from collections.abc import Awaitable, Mapping, Sequence
 from typing import Any, final
 
+from vertebra.db.arrow import ArrowCursor
+
 __version__: str
 FREE_THREADED: bool
 GIL_USED: bool
@@ -47,13 +49,13 @@ class OracleQueryResult:
     @property
     def lastrowid(self) -> str | None: ...
     @property
-    def out_binds(self) -> Any: ...
+    def out_binds(self) -> tuple[Any, ...] | dict[str, Any] | None: ...
     def __new__(
         cls,
         columns: Sequence[OracleColumn],
         rows: Sequence[tuple[Any, ...]],
         rowcount: int = 0,
-        out_binds: Any = None,
+        out_binds: tuple[Any, ...] | dict[str, Any] | None = None,
         lastrowid: str | None = None,
     ) -> OracleQueryResult: ...
     def to_dicts(self) -> list[dict[str, Any]]: ...
@@ -111,7 +113,46 @@ class SyncOracleClient:
     def rollback(self) -> None: ...
     def savepoint(self, name: str) -> None: ...
     def rollback_to_savepoint(self, name: str) -> None: ...
-    def execute(self, sql: str) -> int: ...
+    def query(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        out_binds: Sequence[str] | Mapping[str, str] | None = None,
+        fetch_decimals: bool = False,
+        enable_lowercase_column_names: bool | None = None,
+    ) -> OracleQueryResult: ...
+    def query_one(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        fetch_decimals: bool = False,
+        enable_lowercase_column_names: bool | None = None,
+    ) -> tuple[Any, ...] | None: ...
+    def execute(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        out_binds: Sequence[str] | Mapping[str, str] | None = None,
+        fetch_decimals: bool = False,
+        enable_lowercase_column_names: bool | None = None,
+    ) -> OracleQueryResult: ...
+    def execute_many(
+        self,
+        sql: str,
+        params_seq: Sequence[Sequence[Any] | Mapping[str, Any]],
+    ) -> int: ...
+    def query_arrow(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        batch_size: int = 8192,
+        force_shm: bool | None = None,
+        enable_lowercase_column_names: bool | None = None,
+    ) -> ArrowCursor: ...
 
 @final
 class AsyncOracleClient:
@@ -164,7 +205,46 @@ class AsyncOracleClient:
     def rollback(self) -> Awaitable[None]: ...
     def savepoint(self, name: str) -> Awaitable[None]: ...
     def rollback_to_savepoint(self, name: str) -> Awaitable[None]: ...
-    def execute(self, sql: str) -> Awaitable[int]: ...
+    def query(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        out_binds: Sequence[str] | Mapping[str, str] | None = None,
+        fetch_decimals: bool = False,
+        enable_lowercase_column_names: bool | None = None,
+    ) -> Awaitable[OracleQueryResult]: ...
+    def query_one(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        fetch_decimals: bool = False,
+        enable_lowercase_column_names: bool | None = None,
+    ) -> Awaitable[tuple[Any, ...] | None]: ...
+    def execute(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        out_binds: Sequence[str] | Mapping[str, str] | None = None,
+        fetch_decimals: bool = False,
+        enable_lowercase_column_names: bool | None = None,
+    ) -> Awaitable[OracleQueryResult]: ...
+    def execute_many(
+        self,
+        sql: str,
+        params_seq: Sequence[Sequence[Any] | Mapping[str, Any]],
+    ) -> Awaitable[int]: ...
+    def query_arrow(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        batch_size: int = 8192,
+        force_shm: bool | None = None,
+        enable_lowercase_column_names: bool | None = None,
+    ) -> Awaitable[ArrowCursor]: ...
 
 __all__ = [
     "AsyncOracleClient",
