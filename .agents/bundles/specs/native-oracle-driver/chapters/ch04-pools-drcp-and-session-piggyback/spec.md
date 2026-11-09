@@ -5,19 +5,19 @@ chapter_id: ch04-pools-drcp-and-session-piggyback
 title: "Chapter 04: Native Sync/Async Pools, DRCP Purity/Tagging, and TTC Session Piggyback"
 description: "Implement native Rust SyncOraclePool and AsyncOraclePool, DRCP cclass/purity/connection_tag state tracking, zero-extra-round-trip TTC session attribute piggyback, and Python pool and transaction-pinned driver lease facades."
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch03-types-bind-and-arrow-shm
 replan_trigger: null
-current_task: "native-oracle-driver:ch04:t01"
+current_task: null
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
-last_verified_checkpoint: null
+state_revision: 3
+last_verified_checkpoint: 0f100bd2
 last_reviewed_commit: null
 created_at: "2026-11-09T00:58:00Z"
-updated_at: "2026-11-09T01:28:30Z"
+updated_at: "2026-11-09T16:17:00Z"
 generated:
   by: flow-plan
   at: "2026-11-09T01:15:00Z"
@@ -240,9 +240,9 @@ Progress: `[0/6 files documented]` (all user documentation and OKF v0.2 knowledg
 
 ## 5. Implementation Plan
 
-- [ ] native-oracle-driver:ch04:t01 — Implement native Rust SyncOraclePool and AsyncOraclePool in src/rs/vertebra-oracle/src/pool.rs, register them in lib.rs, and update _oracle.pyi (tasks/t01-rust-physical-connection-pool.md)
-- [ ] native-oracle-driver:ch04:t02 — Implement DRCP cclass, purity (SELF vs NEW), and connection_tag tracking plus zero-extra-round-trip TTC piggyback (OracleSessionAttrs) in pool.rs, client.rs, and _oracle.pyi (tasks/t02-drcp-purity-tagging-and-ttc-piggyback.md)
-- [ ] native-oracle-driver:ch04:t03 — Wire Python SyncOraclePool, AsyncOraclePool, SyncOracleDriver, and AsyncOracleDriver lease management, native set_session_attrs/last_piggyback_frame, ContextVar transaction pinning, and savepoint methods (tasks/t03-python-pool-and-driver-lease-facades.md)
+- [x] [efe63ae5] native-oracle-driver:ch04:t01 — Implement native Rust SyncOraclePool and AsyncOraclePool in src/rs/vertebra-oracle/src/pool.rs, register them in lib.rs, and update _oracle.pyi (tasks/t01-rust-physical-connection-pool.md)
+- [x] [0f100bd2] native-oracle-driver:ch04:t02 — Implement DRCP cclass, purity (SELF vs NEW), and connection_tag tracking plus zero-extra-round-trip TTC piggyback (OracleSessionAttrs) in pool.rs, client.rs, and _oracle.pyi (tasks/t02-drcp-purity-tagging-and-ttc-piggyback.md)
+- [x] [pending] native-oracle-driver:ch04:t03 — Wire Python SyncOraclePool, AsyncOraclePool, SyncOracleDriver, and AsyncOracleDriver lease management, native set_session_attrs/last_piggyback_frame, ContextVar transaction pinning, and savepoint methods (tasks/t03-python-pool-and-driver-lease-facades.md)
 
 **Chapter Recovery Checkpoint:**
 ```bash
@@ -254,9 +254,9 @@ uv run --no-sync pytest src/py/tests/unit/db/test_oracle_adapter.py -k "pool or 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Completed Tasks**: None (`0/3`).
-- **Active Frontier**: [t01](tasks/t01-rust-physical-connection-pool.md) (`native-oracle-driver:ch04:t01`, waiting on `ch03-types-bind-and-arrow-shm`).
-- **Remaining Tasks**: [t01](tasks/t01-rust-physical-connection-pool.md), [t02](tasks/t02-drcp-purity-tagging-and-ttc-piggyback.md), and [t03](tasks/t03-python-pool-and-driver-lease-facades.md).
+- **Completed Tasks**: [t01](tasks/t01-rust-physical-connection-pool.md) (`efe63ae5`), [t02](tasks/t02-drcp-purity-tagging-and-ttc-piggyback.md) (`0f100bd2`), and [t03](tasks/t03-python-pool-and-driver-lease-facades.md) (`3/3`).
+- **Active Frontier**: None (`ch04-pools-drcp-and-session-piggyback` complete; next chapter is `ch05-pipelines-tenancy-and-apex`).
+- **Remaining Tasks**: None (`0/3`).
 - **Documentation & OKF Status**: `[0/6 files documented]`, scheduled in [ch07-conformance-and-okf-synthesis](../ch07-conformance-and-okf-synthesis/spec.md) (`ch07:t03`–`t04`).
 
 [^ora-contracts]: `.agents/bundles/specs/native-oracle-driver/contracts.md` — Public interface, FFI, type, pooling, tenancy, and ownership contracts.

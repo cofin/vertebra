@@ -18,6 +18,12 @@ import pytest
 
 import vertebra._oracle as _oracle
 from vertebra._vertebra import VectorView
+from vertebra.db.adapters.oracle import (
+    AsyncOracleDriver,
+    AsyncOraclePool,
+    SyncOracleDriver,
+    SyncOraclePool,
+)
 from vertebra.db.adapters.oracle.config import (
     DEFAULT_ORACLE_DSN,
     OracleConfig,
@@ -28,7 +34,6 @@ from vertebra.db.adapters.oracle.config import (
     OracleWallet,
 )
 from vertebra.db.adapters.oracle.core import OracleCore
-from vertebra.db.adapters.oracle.driver import AsyncOracleDriver, SyncOracleDriver
 from vertebra.db.driver import (
     DataError,
     InterfaceError,
@@ -928,6 +933,116 @@ def test_oracle_multiple_set_session_attrs_coalesce_before_statement() -> None:
     assert client.last_piggyback_frame is not None
     assert client.last_piggyback_frame.startswith(b"\x11\x6e\x03")
     client.close()
+
+
+@pytest.mark.anyio
+async def test_python_oracle_pool_lease_and_driver_piggyback() -> None:
+    """Verify SyncOraclePool and AsyncOraclePool lease() checkout and driver last_piggyback_frame."""
+    with SyncOraclePool(min_size=0, max_size=2) as pool:
+        assert pool.min_size == 0
+        assert pool.max_size == 2
+        assert pool.closed is False
+        assert pool.is_closed is False
+        with pool.lease() as drv:
+            assert pool.borrowed_size == 1
+            drv.set_session_attrs(client_identifier="t-1", module="api")
+            val = drv.select_value("SELECT 1 FROM DUAL")
+            assert val == 1
+            frame = drv.last_piggyback_frame
+            assert frame is not None
+            assert frame.startswith(b"\x11\x6e")
+        assert pool.borrowed_size == 0
+        assert pool.idle_size == 1
+    assert pool.closed is True
+    assert pool.is_closed is True
+
+    async with AsyncOraclePool(min_size=0, max_size=2) as apool:
+        async with apool.lease() as adrv:
+            assert apool.borrowed_size == 1
+            adrv.set_session_attrs(client_identifier="t-async", module="worker")
+            aval = await adrv.select_value("SELECT 1 FROM DUAL")
+            assert aval == 1
+            aframe = adrv.last_piggyback_frame
+            assert aframe is not None
+            assert aframe.startswith(b"\x11\x6e")
+        assert apool.borrowed_size == 0
+        assert apool.idle_size == 1
+    assert apool.closed is True
+
+
+@pytest.mark.anyio
+async def test_oracle_driver_transaction_pins_lease_and_guards_child_tasks() -> None:
+    """Verify AsyncOracleDriver transaction() pins a dedicated lease and isolates spawned child tasks."""
+    async with AsyncOraclePool(min_size=0, max_size=2) as apool:
+        driver = AsyncOracleDriver(pool=apool)
+        assert driver.in_transaction is False
+
+        async with driver.transaction():
+            assert driver.in_transaction is True
+            assert apool.borrowed_size == 1
+            pinned_client = driver.client
+            await driver.execute("CREATE TABLE tx_guard (id NUMBER PRIMARY KEY, name VARCHAR2(32))")
+            await driver.execute("INSERT INTO tx_guard (id, name) VALUES (1, 'parent')")
+            assert driver.client is pinned_client
+
+            async def _child_query() -> tuple[bool, int, Any, list[dict[str, Any]]]:
+                in_tx = driver.in_transaction
+                rows = await driver.select("SELECT 1 AS ok FROM DUAL")
+                return in_tx, apool.size, driver.client, rows
+
+            child_in_tx, total_size, child_default_client, child_rows = await asyncio.create_task(_child_query())
+            assert child_in_tx is False
+            assert child_rows == [{"ok": 1}]
+            assert total_size == 2
+            assert child_default_client is not pinned_client
+            assert apool.borrowed_size == 1
+            assert apool.idle_size == 1
+
+            count = await driver.select_value("SELECT COUNT(*) FROM tx_guard")
+            assert count == 1
+
+        assert driver.in_transaction is False
+        assert apool.borrowed_size == 0
+        assert apool.idle_size == 2
+
+
+@pytest.mark.anyio
+async def test_oracle_driver_savepoint_and_rollback_to_savepoint() -> None:
+    """Verify savepoint, rollback_to_savepoint, release_savepoint, and identifier validation."""
+    with SyncOracleDriver() as sync_driver, sync_driver.transaction():
+        sync_driver.execute("CREATE TABLE sp_items (id NUMBER PRIMARY KEY, name VARCHAR2(32))")
+        sync_driver.execute("INSERT INTO sp_items (id, name) VALUES (1, 'keep')")
+        sync_driver.savepoint("sp_1")
+        sync_driver.execute("INSERT INTO sp_items (id, name) VALUES (2, 'discard')")
+        assert sync_driver.select_value("SELECT COUNT(*) FROM sp_items") == 2
+        sync_driver.rollback_to_savepoint("sp_1")
+        assert sync_driver.select_value("SELECT COUNT(*) FROM sp_items") == 1
+        sync_driver.release_savepoint("sp_1")
+
+        with pytest.raises(ValueError, match="savepoint"):
+            sync_driver.savepoint("bad;name")
+        with pytest.raises(ValueError, match="savepoint"):
+            sync_driver.rollback_to_savepoint("bad;name")
+        with pytest.raises(ValueError, match="savepoint"):
+            sync_driver.release_savepoint("bad;name")
+
+    async with AsyncOracleDriver() as async_driver, async_driver.transaction():
+        await async_driver.execute("CREATE TABLE sp_items (id NUMBER PRIMARY KEY, name VARCHAR2(32))")
+        await async_driver.execute("INSERT INTO sp_items (id, name) VALUES (1, 'keep')")
+        await async_driver.savepoint("sp_1")
+        await async_driver.execute("INSERT INTO sp_items (id, name) VALUES (2, 'discard')")
+        assert await async_driver.select_value("SELECT COUNT(*) FROM sp_items") == 2
+        await async_driver.rollback_to_savepoint("sp_1")
+        assert await async_driver.select_value("SELECT COUNT(*) FROM sp_items") == 1
+        await async_driver.release_savepoint("sp_1")
+
+        with pytest.raises(ValueError, match="savepoint"):
+            await async_driver.savepoint("bad;name")
+        with pytest.raises(ValueError, match="savepoint"):
+            await async_driver.rollback_to_savepoint("bad;name")
+        with pytest.raises(ValueError, match="savepoint"):
+            await async_driver.release_savepoint("bad;name")
+
 
 
 

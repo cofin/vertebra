@@ -6,7 +6,7 @@ id: "native-oracle-driver:ch04:t03"
 title: "Wire Python SyncOraclePool, AsyncOraclePool, SyncOracleDriver, and AsyncOracleDriver lease and transaction facades"
 description: "Wire Python SyncOraclePool, AsyncOraclePool, SyncOracleDriver, and AsyncOracleDriver in src/py/vertebra/db/adapters/oracle/driver.py and __init__.py to acquire/release native pool leases (acquire_from_pool / release_to_pool), re-introduce native set_session_attrs and last_piggyback_frame on the drivers, and guard ContextVar transaction pinning and savepoints."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -26,11 +26,11 @@ tests:
 estimated_loc: 235
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
-commit_sha: null
-completed_at: null
+state_revision: 1
+commit_sha: pending
+completed_at: "2026-11-09T16:17:00Z"
 created_at: "2026-11-09T00:58:00Z"
-updated_at: "2026-11-09T01:28:30Z"
+updated_at: "2026-11-09T16:17:00Z"
 generated:
   by: flow-plan
   at: "2026-11-09T01:15:00Z"
@@ -254,10 +254,10 @@ uv run --no-sync mypy src/py/vertebra/db/adapters/oracle/
 
 ## 7. Acceptance Criteria
 
-- [ ] `SyncOraclePool` and `AsyncOraclePool` are implemented in `src/py/vertebra/db/adapters/oracle/driver.py` and exported in `src/py/vertebra/db/adapters/oracle/__init__.py`.
-- [ ] `SyncOracleDriver` and `AsyncOracleDriver` re-introduce `set_session_attrs` and `last_piggyback_frame` backed by the native `_oracle` client, acquire/release pool leases (`acquire_from_pool` / `release_to_pool`) for standalone queries, and pin leases across explicit transactions with `(thread_id, task_id)` identity guards.
-- [ ] `savepoint`, `release_savepoint`, and `rollback_to_savepoint` validate identifiers and execute on the pinned transaction lease.
-- [ ] All unit tests, `ruff`, and `mypy` checks pass.
+- [x] `SyncOraclePool` and `AsyncOraclePool` are implemented in `src/py/vertebra/db/adapters/oracle/driver.py` and exported in `src/py/vertebra/db/adapters/oracle/__init__.py`.
+- [x] `SyncOracleDriver` and `AsyncOracleDriver` re-introduce `set_session_attrs` and `last_piggyback_frame` backed by the native `_oracle` client, acquire/release pool leases (`acquire_from_pool` / `release_to_pool`) for standalone queries, and pin leases across explicit transactions with `(thread_id, task_id)` identity guards.
+- [x] `savepoint`, `release_savepoint`, and `rollback_to_savepoint` validate identifiers and execute on the pinned transaction lease.
+- [x] All unit tests, `ruff`, and `mypy` checks pass.
 
 ## 8. Notes & Discoveries
 

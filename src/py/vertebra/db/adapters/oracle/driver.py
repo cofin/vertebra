@@ -1,11 +1,17 @@
-"""Synchronous and asynchronous native Oracle 26ai Thin drivers."""
+"""Synchronous and asynchronous native Oracle 26ai Thin drivers and connection pools."""
 
 from __future__ import annotations
 
+import asyncio
 import os
+import threading
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+from contextlib import asynccontextmanager, contextmanager, suppress
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, ClassVar, Self
+
+import msgspec
 
 from vertebra.db.adapters.oracle.config import (
     DEFAULT_ORACLE_DSN,
@@ -25,8 +31,38 @@ from vertebra.utils.text import validate_identifier
 
 __all__ = (
     "AsyncOracleDriver",
+    "AsyncOraclePool",
     "SyncOracleDriver",
+    "SyncOraclePool",
 )
+
+_SYNC_PINNED_TX: ContextVar[dict[int, tuple[int, int | None, Any, bool]] | None] = ContextVar(
+    "_SYNC_PINNED_TX",
+    default=None,
+)
+_ASYNC_PINNED_TX: ContextVar[dict[int, tuple[int, int | None, Any, bool]] | None] = ContextVar(
+    "_ASYNC_PINNED_TX",
+    default=None,
+)
+
+
+def _current_execution_identity() -> tuple[int, int | None]:
+    """Return `(thread_ident, current_asyncio_task_id)` for ContextVar transaction isolation."""
+    thread_id = threading.get_ident()
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        task = None
+    return (thread_id, id(task) if task is not None else None)
+
+
+def _is_fatal_transport_error(exc: BaseException) -> bool:
+    """Return `True` when `exc` indicates a broken transport session (`08006` or fatal ORA codes)."""
+    sqlstate = getattr(exc, "sqlstate", None)
+    if sqlstate == "08006":
+        return True
+    vendor_code = getattr(exc, "vendor_code", None)
+    return vendor_code in (3113, 3114, 3135, 12537)
 
 
 def _load_oracle_module() -> Any:
@@ -106,6 +142,45 @@ def _build_client_kwargs(config: OracleConfig) -> dict[str, Any]:
     }
 
 
+def _resolve_pool_config_and_kwargs(
+    config: OracleConfig | None,
+    overrides: Mapping[str, Any],
+) -> tuple[OracleConfig, dict[str, Any]]:
+    """Resolve `OracleConfig` and native `_oracle` pool constructor keyword arguments."""
+    config_fields = set(OracleConfig.__struct_fields__)
+    cfg_overrides: dict[str, Any] = {k: v for k, v in overrides.items() if k in config_fields}
+    if "min_size" in overrides and "pool_min_size" not in cfg_overrides:
+        cfg_overrides["pool_min_size"] = int(overrides["min_size"])
+    if "max_size" in overrides and "pool_max_size" not in cfg_overrides:
+        cfg_overrides["pool_max_size"] = int(overrides["max_size"])
+    if config is None:
+        resolved_cfg = OracleConfig(**cfg_overrides)
+    elif cfg_overrides:
+        resolved_cfg = msgspec.structs.replace(config, **cfg_overrides)
+    else:
+        resolved_cfg = config
+
+    kw = _build_client_kwargs(resolved_cfg)
+    kw.update(
+        {
+            "min_size": int(resolved_cfg.pool_min_size),
+            "max_size": int(resolved_cfg.pool_max_size),
+            "acquire_timeout": 30.0,
+            "reset_timeout": 10.0,
+            "close_timeout": 30.0,
+            "max_lifetime_seconds": 3600.0,
+            "idle_timeout_seconds": 600.0,
+            "health_check_interval_seconds": 30.0,
+        }
+    )
+    for k, v in overrides.items():
+        if k in kw:
+            kw[k] = v
+    if "min_size" not in overrides and "max_size" in overrides and int(kw["max_size"]) >= 1:
+        kw["min_size"] = min(int(kw["min_size"]), int(kw["max_size"]))
+    return resolved_cfg, kw
+
+
 def _is_dml_or_plsql(sql: str) -> bool:
     """Return `True` when `sql` begins with a DML, DDL, or PL/SQL keyword rather than `SELECT`/`WITH`."""
     trimmed = sql.lstrip()
@@ -116,6 +191,342 @@ def _is_dml_or_plsql(sql: str) -> bool:
         trimmed = trimmed[end + 2 :].lstrip()
     upper = trimmed.upper()
     return not (upper.startswith("SELECT") or upper.startswith("WITH"))
+
+
+class SyncOraclePool:
+    """Synchronous physical Oracle connection pool backed by `vertebra._oracle.SyncOraclePool`."""
+
+    def __init__(
+        self,
+        config: OracleConfig | None = None,
+        *,
+        native_pool: Any | None = None,
+        **kwargs: Any,
+    ) -> None:
+        resolved_cfg, pool_kwargs = _resolve_pool_config_and_kwargs(config, kwargs)
+        self._config: OracleConfig = resolved_cfg
+        if native_pool is not None:
+            self._pool = native_pool
+        else:
+            mod = _load_oracle_module()
+            self._pool = mod.SyncOraclePool(**pool_kwargs)
+
+    @property
+    def config(self) -> OracleConfig:
+        """Return the `OracleConfig` governing this connection pool."""
+        return self._config
+
+    @property
+    def native_pool(self) -> Any:
+        """Return the underlying `vertebra._oracle.SyncOraclePool` instance."""
+        return self._pool
+
+    @property
+    def min_size(self) -> int:
+        """Minimum number of pooled physical connections."""
+        return int(self._pool.min_size)
+
+    @property
+    def max_size(self) -> int:
+        """Maximum number of pooled physical connections."""
+        return int(self._pool.max_size)
+
+    @property
+    def size(self) -> int:
+        """Current total number of open + opening connections in the pool."""
+        return int(self._pool.size)
+
+    @property
+    def idle_size(self) -> int:
+        """Current number of idle connections available for checkout."""
+        return int(self._pool.idle_size)
+
+    @property
+    def borrowed_size(self) -> int:
+        """Current number of borrowed connections checked out by callers."""
+        return int(self._pool.borrowed_size)
+
+    @property
+    def closed(self) -> bool:
+        """Return `True` when the pool has been closed."""
+        return bool(self._pool.closed)
+
+    @property
+    def is_closed(self) -> bool:
+        """Return `True` when the pool has been closed."""
+        return bool(self._pool.closed)
+
+    def acquire(
+        self,
+        *,
+        timeout: float | None = None,
+        connection_tag: str | None = None,
+        purity: str | None = None,
+        client_identifier: str | None = None,
+        module: str | None = None,
+        action: str | None = None,
+        ecid: str | None = None,
+    ) -> Any:
+        """Acquire a `SyncOracleClient` lease from the pool."""
+        return self._pool.acquire(
+            timeout=timeout,
+            connection_tag=connection_tag,
+            purity=purity,
+            client_identifier=client_identifier,
+            module=module,
+            action=action,
+            ecid=ecid,
+        )
+
+    def acquire_from_pool(self, **kwargs: Any) -> Any:
+        """Acquire a `SyncOracleClient` lease from the pool with DRCP tag and TTC piggyback options."""
+        if hasattr(self._pool, "acquire_from_pool"):
+            return self._pool.acquire_from_pool(**kwargs)
+        return self._pool.acquire(**kwargs)
+
+    def release(
+        self,
+        client: Any,
+        *,
+        connection_tag: str | None = None,
+        discard: bool = False,
+    ) -> None:
+        """Release a borrowed `SyncOracleClient` lease back to the pool."""
+        self._pool.release(client, connection_tag=connection_tag, discard=discard)
+
+    def release_to_pool(self, client: Any, **kwargs: Any) -> None:
+        """Release a borrowed `SyncOracleClient` lease back to the pool with tag or discard flags."""
+        if hasattr(self._pool, "release_to_pool"):
+            self._pool.release_to_pool(client, **kwargs)
+        else:
+            self._pool.release(client, **kwargs)
+
+    def evict(self, client: Any) -> None:
+        """Permanently evict and close a broken or poisoned `SyncOracleClient`."""
+        self._pool.evict(client)
+
+    def stats(self) -> dict[str, int]:
+        """Return a snapshot dictionary of pool metrics."""
+        return dict(self._pool.stats())
+
+    @contextmanager
+    def lease(
+        self,
+        *,
+        timeout: float | None = None,
+        connection_tag: str | None = None,
+        purity: str | None = None,
+        client_identifier: str | None = None,
+        module: str | None = None,
+        action: str | None = None,
+        ecid: str | None = None,
+    ) -> Iterator[SyncOracleDriver]:
+        """Check out a pooled connection wrapped in a `SyncOracleDriver` and release on exit."""
+        client = self.acquire_from_pool(
+            timeout=timeout,
+            connection_tag=connection_tag,
+            purity=purity,
+            client_identifier=client_identifier,
+            module=module,
+            action=action,
+            ecid=ecid,
+        )
+        drv = SyncOracleDriver(self._config, client=client)
+        if any((client_identifier, module, action, ecid)):
+            drv._pending_session_attrs = None
+        discard = False
+        try:
+            yield drv
+        except BaseException as exc:
+            discard = bool(getattr(client, "closed", False)) or _is_fatal_transport_error(exc)
+            raise
+        finally:
+            effective_tag = getattr(client, "connection_tag", None) or connection_tag
+            self.release_to_pool(
+                client,
+                connection_tag=effective_tag,
+                discard=discard or bool(getattr(client, "closed", False)),
+            )
+
+    def close(self) -> None:
+        """Close the pool and all idle physical sessions."""
+        self._pool.close()
+
+    def __enter__(self) -> Self:
+        """Enter the synchronous pool context."""
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Close the synchronous pool on context exit."""
+        self.close()
+
+
+class AsyncOraclePool:
+    """Asynchronous physical Oracle connection pool backed by `vertebra._oracle.AsyncOraclePool`."""
+
+    def __init__(
+        self,
+        config: OracleConfig | None = None,
+        *,
+        native_pool: Any | None = None,
+        **kwargs: Any,
+    ) -> None:
+        resolved_cfg, pool_kwargs = _resolve_pool_config_and_kwargs(config, kwargs)
+        self._config: OracleConfig = resolved_cfg
+        if native_pool is not None:
+            self._pool = native_pool
+        else:
+            mod = _load_oracle_module()
+            self._pool = mod.AsyncOraclePool(**pool_kwargs)
+
+    @property
+    def config(self) -> OracleConfig:
+        """Return the `OracleConfig` governing this connection pool."""
+        return self._config
+
+    @property
+    def native_pool(self) -> Any:
+        """Return the underlying `vertebra._oracle.AsyncOraclePool` instance."""
+        return self._pool
+
+    @property
+    def min_size(self) -> int:
+        """Minimum number of pooled physical connections."""
+        return int(self._pool.min_size)
+
+    @property
+    def max_size(self) -> int:
+        """Maximum number of pooled physical connections."""
+        return int(self._pool.max_size)
+
+    @property
+    def size(self) -> int:
+        """Current total number of open + opening connections in the pool."""
+        return int(self._pool.size)
+
+    @property
+    def idle_size(self) -> int:
+        """Current number of idle connections available for checkout."""
+        return int(self._pool.idle_size)
+
+    @property
+    def borrowed_size(self) -> int:
+        """Current number of borrowed connections checked out by callers."""
+        return int(self._pool.borrowed_size)
+
+    @property
+    def closed(self) -> bool:
+        """Return `True` when the pool has been closed."""
+        return bool(self._pool.closed)
+
+    @property
+    def is_closed(self) -> bool:
+        """Return `True` when the pool has been closed."""
+        return bool(self._pool.closed)
+
+    async def acquire(
+        self,
+        *,
+        timeout: float | None = None,
+        connection_tag: str | None = None,
+        purity: str | None = None,
+        client_identifier: str | None = None,
+        module: str | None = None,
+        action: str | None = None,
+        ecid: str | None = None,
+    ) -> Any:
+        """Acquire an `AsyncOracleClient` lease from the pool asynchronously."""
+        return await self._pool.acquire(
+            timeout=timeout,
+            connection_tag=connection_tag,
+            purity=purity,
+            client_identifier=client_identifier,
+            module=module,
+            action=action,
+            ecid=ecid,
+        )
+
+    async def acquire_from_pool(self, **kwargs: Any) -> Any:
+        """Acquire an `AsyncOracleClient` lease from the pool with DRCP tag and TTC piggyback options."""
+        if hasattr(self._pool, "acquire_from_pool"):
+            return await self._pool.acquire_from_pool(**kwargs)
+        return await self._pool.acquire(**kwargs)
+
+    async def release(
+        self,
+        client: Any,
+        *,
+        connection_tag: str | None = None,
+        discard: bool = False,
+    ) -> None:
+        """Release a borrowed `AsyncOracleClient` lease back to the pool asynchronously."""
+        await self._pool.release(client, connection_tag=connection_tag, discard=discard)
+
+    async def release_to_pool(self, client: Any, **kwargs: Any) -> None:
+        """Release a borrowed `AsyncOracleClient` lease back to the pool with tag or discard flags."""
+        if hasattr(self._pool, "release_to_pool"):
+            await self._pool.release_to_pool(client, **kwargs)
+        else:
+            await self._pool.release(client, **kwargs)
+
+    async def evict(self, client: Any) -> None:
+        """Permanently evict and close a broken or poisoned `AsyncOracleClient`."""
+        await self._pool.evict(client)
+
+    def stats(self) -> dict[str, int]:
+        """Return a snapshot dictionary of pool metrics."""
+        return dict(self._pool.stats())
+
+    @asynccontextmanager
+    async def lease(
+        self,
+        *,
+        timeout: float | None = None,
+        connection_tag: str | None = None,
+        purity: str | None = None,
+        client_identifier: str | None = None,
+        module: str | None = None,
+        action: str | None = None,
+        ecid: str | None = None,
+    ) -> AsyncIterator[AsyncOracleDriver]:
+        """Check out a pooled connection wrapped in an `AsyncOracleDriver` and release on exit."""
+        client = await self.acquire_from_pool(
+            timeout=timeout,
+            connection_tag=connection_tag,
+            purity=purity,
+            client_identifier=client_identifier,
+            module=module,
+            action=action,
+            ecid=ecid,
+        )
+        drv = AsyncOracleDriver(self._config, client=client)
+        if any((client_identifier, module, action, ecid)):
+            drv._pending_session_attrs = None
+        discard = False
+        try:
+            yield drv
+        except BaseException as exc:
+            discard = bool(getattr(client, "closed", False)) or _is_fatal_transport_error(exc)
+            raise
+        finally:
+            effective_tag = getattr(client, "connection_tag", None) or connection_tag
+            await self.release_to_pool(
+                client,
+                connection_tag=effective_tag,
+                discard=discard or bool(getattr(client, "closed", False)),
+            )
+
+    async def close(self) -> None:
+        """Close the pool and all idle physical sessions asynchronously."""
+        await self._pool.close()
+
+    async def __aenter__(self) -> Self:
+        """Enter the asynchronous pool context."""
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Close the asynchronous pool on context exit."""
+        await self.close()
 
 
 class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
@@ -130,9 +541,11 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         *,
         broker: Any = None,
         client: Any = None,
+        pool: SyncOraclePool | Any | None = None,
     ) -> None:
         resolved = config or OracleConfig()
         super().__init__(resolved, broker=broker)
+        self._pool: SyncOraclePool | Any | None = pool
         if client is not None:
             self._client = client
         else:
@@ -140,22 +553,43 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
             self._client = mod.SyncOracleClient(**_build_client_kwargs(resolved))
         self._in_transaction: bool = False
         self._session_context: dict[tuple[str, str], str] = {}
-        self._pending_session_attrs: OracleSessionAttrs | None = self.config.session_attrs()
-        self._last_piggyback_frame: bytes = b""
+        initial_attrs = self.config.session_attrs()
+        self._pending_session_attrs: OracleSessionAttrs | None = (
+            initial_attrs
+            if any((initial_attrs.client_identifier, initial_attrs.module, initial_attrs.action, initial_attrs.ecid))
+            else None
+        )
+        self._last_piggyback_frame: bytes | None = None
+
+    @property
+    def pool(self) -> SyncOraclePool | Any | None:
+        """Return the optional `SyncOraclePool` attached to this driver."""
+        return self._pool
 
     @property
     def client(self) -> Any:
-        """Return the underlying `SyncOracleClient` instance."""
-        return self._client
+        """Return the pinned transaction `SyncOracleClient` or the default underlying client."""
+        pinned = self._get_pinned_lease()
+        return pinned if pinned is not None else self._client
 
     @property
     def in_transaction(self) -> bool:
-        """Return `True` when an explicit transaction is active on this driver."""
+        """Return `True` when an explicit transaction is pinned in the current thread/task."""
+        pinned = self._get_pinned_lease()
+        if pinned is not None:
+            return True
+        if self._pool is not None:
+            return False
         return bool(getattr(self._client, "in_transaction", self._in_transaction))
 
     @property
-    def last_piggyback_frame(self) -> bytes:
+    def last_piggyback_frame(self) -> bytes | None:
         """Return the most recently piggybacked TTC `0x11` session attribute frame."""
+        active = self._get_pinned_lease() or (self._client if self._pool is None else None)
+        if active is not None:
+            native_frame = getattr(active, "last_piggyback_frame", None)
+            if native_frame is not None:
+                return bytes(native_frame)
         return self._last_piggyback_frame
 
     def set_session_attrs(
@@ -167,61 +601,145 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         ecid: str | None = None,
     ) -> None:
         """Queue updated session tracing attributes to be piggybacked onto the next SQL round-trip."""
-        self._pending_session_attrs = OracleSessionAttrs(
-            client_identifier=client_identifier,
-            module=module,
-            action=action,
-            ecid=ecid,
+        prev = self._pending_session_attrs
+        merged = OracleSessionAttrs(
+            client_identifier=client_identifier if client_identifier is not None else (prev.client_identifier if prev else None),
+            module=module if module is not None else (prev.module if prev else None),
+            action=action if action is not None else (prev.action if prev else None),
+            ecid=ecid if ecid is not None else (prev.ecid if prev else None),
         )
+        self._pending_session_attrs = merged
+        active = self._get_pinned_lease() or (self._client if self._pool is None else None)
+        if active is not None and hasattr(active, "set_session_attrs"):
+            active.set_session_attrs(
+                client_identifier=client_identifier,
+                module=module,
+                action=action,
+                ecid=ecid,
+            )
 
     def connect(self) -> Self:
         """Establish or validate the underlying Oracle session."""
-        self._client.connect()
+        if self._pool is None:
+            self._client.connect()
         self._closed = False
         return self
 
     def ping(self) -> None:
         """Verify liveness of the underlying Oracle session."""
-        self._client.ping()
+        with self._checkout_client() as active_client:
+            active_client.ping()
 
     def begin(self) -> None:
-        """Begin an explicit Oracle transaction."""
+        """Begin an explicit Oracle transaction and pin the connection lease in a guarded `ContextVar`."""
+        pinned = self._get_pinned_lease()
+        if pinned is not None:
+            pinned.begin()
+            self._in_transaction = True
+            return
+
+        if self._pool is not None:
+            lease = self._acquire_pool_client()
+            try:
+                self._apply_pending_session_attrs(lease)
+                lease.begin()
+            except BaseException as exc:
+                self._release_pool_client(
+                    lease,
+                    discard=bool(getattr(lease, "closed", False)) or _is_fatal_transport_error(exc),
+                )
+                raise
+            self._set_pinned_lease(lease, from_pool=True)
+            self._in_transaction = True
+            return
+
+        self._apply_pending_session_attrs(self._client)
         self._client.begin()
+        self._set_pinned_lease(self._client, from_pool=False)
         self._in_transaction = True
 
     def commit(self) -> None:
-        """Commit the active Oracle transaction."""
-        try:
-            self._client.commit()
-        finally:
-            self._in_transaction = False
+        """Commit the active Oracle transaction and release any pinned pool lease."""
+        entry = self._pop_pinned_entry()
+        self._in_transaction = False
+        if entry is not None:
+            _, _, active_client, from_pool = entry
+            discard = False
+            try:
+                active_client.commit()
+            except BaseException as exc:
+                discard = bool(getattr(active_client, "closed", False)) or _is_fatal_transport_error(exc)
+                raise
+            finally:
+                self._capture_piggyback(active_client)
+                if from_pool and self._pool is not None:
+                    self._release_pool_client(active_client, discard=discard)
+            return
+
+        if self._pool is None:
+            try:
+                self._client.commit()
+            finally:
+                self._capture_piggyback(self._client)
 
     def rollback(self) -> None:
-        """Roll back the active Oracle transaction."""
-        try:
-            self._client.rollback()
-        finally:
-            self._in_transaction = False
+        """Roll back the active Oracle transaction and release any pinned pool lease."""
+        entry = self._pop_pinned_entry()
+        self._in_transaction = False
+        if entry is not None:
+            _, _, active_client, from_pool = entry
+            discard = False
+            try:
+                active_client.rollback()
+            except BaseException:
+                discard = True
+                raise
+            finally:
+                self._capture_piggyback(active_client)
+                if from_pool and self._pool is not None:
+                    self._release_pool_client(active_client, discard=discard)
+            return
 
-    def savepoint(self, name: str) -> None:
+        if self._pool is None:
+            try:
+                self._client.rollback()
+            finally:
+                self._capture_piggyback(self._client)
+
+    def savepoint(self, name: str = "sp") -> None:
         """Create a transaction savepoint with identifier validation."""
-        self._client.savepoint(name)
+        validate_identifier(name, "savepoint")
+        active_client = self._get_pinned_lease() or self._client
+        active_client.savepoint(name)
         self._in_transaction = True
 
-    def rollback_to_savepoint(self, name: str) -> None:
-        """Roll back to a previously established savepoint."""
-        self._client.rollback_to_savepoint(name)
+    def release_savepoint(self, name: str = "sp") -> None:
+        """Validate savepoint identifier (`RELEASE SAVEPOINT` is a validated no-op in Oracle SQL)."""
+        validate_identifier(name, "savepoint")
+
+    def rollback_to_savepoint(self, name: str = "sp") -> None:
+        """Roll back to a previously established savepoint with identifier validation."""
+        validate_identifier(name, "savepoint")
+        active_client = self._get_pinned_lease() or self._client
+        active_client.rollback_to_savepoint(name)
         self._in_transaction = True
 
     def cancel(self) -> None:
         """Trigger an out-of-band `break_execution()` on any in-flight command."""
         if not self._closed:
-            self._client.cancel()
+            active_client = self._get_pinned_lease() or self._client
+            active_client.cancel()
 
     def close(self) -> None:
-        """Close the underlying native Oracle client and release worker resources."""
+        """Close the underlying native Oracle client and release any pinned lease."""
         self._closed = True
         self._in_transaction = False
+        entry = self._pop_pinned_entry()
+        if entry is not None:
+            _, _, active_client, from_pool = entry
+            if from_pool and self._pool is not None:
+                with suppress(Exception):
+                    self._release_pool_client(active_client, discard=False)
         self._client.close()
 
     def execute(
@@ -236,18 +754,18 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         param_count = len(coerced) if coerced is not None else 0
         grant = self._acquire_oracle_broker_lease(sql, param_count)
         try:
-            self._consume_piggyback()
-            self._track_session_context_sql(sql, parameters)
-            result = self._client.execute(
-                sql,
-                coerced,
-                out_binds=out_binds,
-                fetch_decimals=self.config.driver_features.fetch_decimals,
-                enable_lowercase_column_names=self.config.driver_features.enable_lowercase_column_names,
-            )
-            if isinstance(result, int):
-                return max(result, 0)
-            return max(int(result.rowcount), 0)
+            with self._checkout_client() as active_client:
+                self._track_session_context_sql(sql, parameters)
+                result = active_client.execute(
+                    sql,
+                    coerced,
+                    out_binds=out_binds,
+                    fetch_decimals=self.config.driver_features.fetch_decimals,
+                    enable_lowercase_column_names=self.config.driver_features.enable_lowercase_column_names,
+                )
+                if isinstance(result, int):
+                    return max(result, 0)
+                return max(int(result.rowcount), 0)
         finally:
             self._release_oracle_broker_lease(grant)
 
@@ -265,8 +783,8 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         first_len = len(coerced_seq[0]) if coerced_seq else 0
         grant = self._acquire_oracle_broker_lease(sql, first_len)
         try:
-            self._consume_piggyback()
-            return int(self._client.execute_many(sql, coerced_seq))
+            with self._checkout_client() as active_client:
+                return int(active_client.execute_many(sql, coerced_seq))
         finally:
             self._release_oracle_broker_lease(grant)
 
@@ -292,27 +810,27 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         param_count = len(coerced) if coerced is not None else 0
         grant = self._acquire_oracle_broker_lease(sql, param_count)
         try:
-            self._consume_piggyback()
-            self._track_session_context_sql(sql, parameters)
-            lowercase = self.config.driver_features.enable_lowercase_column_names
-            fetch_decimals = self.config.driver_features.fetch_decimals
-            if _is_dml_or_plsql(sql):
-                result = self._client.execute(
-                    sql,
-                    coerced,
-                    out_binds=out_binds,
-                    fetch_decimals=fetch_decimals,
-                    enable_lowercase_column_names=lowercase,
-                )
-            else:
-                result = self._client.query(
-                    sql,
-                    coerced,
-                    out_binds=out_binds,
-                    fetch_decimals=fetch_decimals,
-                    enable_lowercase_column_names=lowercase,
-                )
-            return self._coerce_result_rows_and_cols(result)
+            with self._checkout_client() as active_client:
+                self._track_session_context_sql(sql, parameters)
+                lowercase = self.config.driver_features.enable_lowercase_column_names
+                fetch_decimals = self.config.driver_features.fetch_decimals
+                if _is_dml_or_plsql(sql):
+                    result = active_client.execute(
+                        sql,
+                        coerced,
+                        out_binds=out_binds,
+                        fetch_decimals=fetch_decimals,
+                        enable_lowercase_column_names=lowercase,
+                    )
+                else:
+                    result = active_client.query(
+                        sql,
+                        coerced,
+                        out_binds=out_binds,
+                        fetch_decimals=fetch_decimals,
+                        enable_lowercase_column_names=lowercase,
+                    )
+                return self._coerce_result_rows_and_cols(result)
         finally:
             self._release_oracle_broker_lease(grant)
 
@@ -348,17 +866,17 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
             param_count = len(coerced) if coerced is not None else 0
             grant = self._acquire_oracle_broker_lease(sql, param_count)
             try:
-                self._consume_piggyback()
-                self._track_session_context_sql(sql, parameters)
-                effective_batch = int(batch_size) if batch_size is not None and batch_size > 0 else 8192
-                cursor: ArrowCursor = self._client.query_arrow(
-                    sql,
-                    coerced,
-                    batch_size=effective_batch,
-                    force_shm=force_shm,
-                    enable_lowercase_column_names=self.config.driver_features.enable_lowercase_column_names,
-                )
-                return cursor
+                with self._checkout_client() as active_client:
+                    self._track_session_context_sql(sql, parameters)
+                    effective_batch = int(batch_size) if batch_size is not None and batch_size > 0 else 8192
+                    cursor: ArrowCursor = active_client.query_arrow(
+                        sql,
+                        coerced,
+                        batch_size=effective_batch,
+                        force_shm=force_shm,
+                        enable_lowercase_column_names=self.config.driver_features.enable_lowercase_column_names,
+                    )
+                    return cursor
             finally:
                 self._release_oracle_broker_lease(grant)
         rows, raw_cols = self.execute_with_description(sql, parameters, **kwargs)
@@ -410,6 +928,119 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         sql = f"INSERT {hint}INTO {table_name} ({col_list}) VALUES ({placeholders})"
         return self.execute_many(sql, rows)
 
+    def _get_pinned_lease(self) -> Any | None:
+        mapping = _SYNC_PINNED_TX.get()
+        if not mapping:
+            return None
+        entry = mapping.get(id(self))
+        if entry is None:
+            return None
+        stored_thread, stored_task, lease, _ = entry
+        curr_thread, curr_task = _current_execution_identity()
+        if stored_thread != curr_thread or stored_task != curr_task:
+            return None
+        return lease
+
+    def _set_pinned_lease(self, lease: Any, *, from_pool: bool) -> None:
+        curr_thread, curr_task = _current_execution_identity()
+        existing = _SYNC_PINNED_TX.get()
+        updated = dict(existing) if existing is not None else {}
+        updated[id(self)] = (curr_thread, curr_task, lease, from_pool)
+        _SYNC_PINNED_TX.set(updated)
+
+    def _pop_pinned_entry(self) -> tuple[int, int | None, Any, bool] | None:
+        mapping = _SYNC_PINNED_TX.get()
+        if not mapping:
+            return None
+        entry = mapping.get(id(self))
+        if entry is None:
+            return None
+        stored_thread, stored_task, _, _ = entry
+        curr_thread, curr_task = _current_execution_identity()
+        if stored_thread != curr_thread or stored_task != curr_task:
+            return None
+        updated = dict(mapping)
+        updated.pop(id(self), None)
+        _SYNC_PINNED_TX.set(updated or None)
+        return entry
+
+    def _acquire_pool_client(self) -> Any:
+        assert self._pool is not None
+        attrs = self._pending_session_attrs
+        self._pending_session_attrs = None
+        acquire_kwargs: dict[str, Any] = {}
+        if attrs is not None:
+            if attrs.client_identifier is not None:
+                acquire_kwargs["client_identifier"] = attrs.client_identifier
+            if attrs.module is not None:
+                acquire_kwargs["module"] = attrs.module
+            if attrs.action is not None:
+                acquire_kwargs["action"] = attrs.action
+            if attrs.ecid is not None:
+                acquire_kwargs["ecid"] = attrs.ecid
+        if hasattr(self._pool, "acquire_from_pool"):
+            return self._pool.acquire_from_pool(**acquire_kwargs)
+        return self._pool.acquire(**acquire_kwargs)
+
+    def _release_pool_client(self, lease: Any, *, discard: bool = False) -> None:
+        if self._pool is None:
+            return
+        if hasattr(self._pool, "release_to_pool"):
+            self._pool.release_to_pool(lease, discard=discard)
+        else:
+            self._pool.release(lease, discard=discard)
+
+    @contextmanager
+    def _checkout_client(self) -> Iterator[Any]:
+        pinned = self._get_pinned_lease()
+        if pinned is not None:
+            self._apply_pending_session_attrs(pinned)
+            try:
+                yield pinned
+            finally:
+                self._capture_piggyback(pinned)
+            return
+
+        if self._pool is None:
+            self._apply_pending_session_attrs(self._client)
+            try:
+                yield self._client
+            finally:
+                self._capture_piggyback(self._client)
+            return
+
+        lease = self._acquire_pool_client()
+        discard = False
+        try:
+            yield lease
+        except BaseException as exc:
+            discard = bool(getattr(lease, "closed", False)) or _is_fatal_transport_error(exc)
+            raise
+        finally:
+            self._capture_piggyback(lease)
+            self._release_pool_client(lease, discard=discard)
+
+    def _apply_pending_session_attrs(self, client: Any) -> None:
+        if self._pending_session_attrs is None:
+            return
+        attrs = self._pending_session_attrs
+        self._pending_session_attrs = None
+        if any((attrs.client_identifier, attrs.module, attrs.action, attrs.ecid)):
+            if hasattr(client, "set_session_attrs"):
+                client.set_session_attrs(
+                    client_identifier=attrs.client_identifier,
+                    module=attrs.module,
+                    action=attrs.action,
+                    ecid=attrs.ecid,
+                )
+            else:
+                self._last_piggyback_frame = attrs.encode_ttc_piggyback()
+
+    def _capture_piggyback(self, client: Any) -> None:
+        frame = getattr(client, "last_piggyback_frame", None)
+        if frame is not None:
+            self._last_piggyback_frame = bytes(frame)
+
     def _coerce_parameters(
         self,
         parameters: Sequence[Any] | Mapping[str, Any] | None,
@@ -541,13 +1172,6 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
             elif hasattr(self._broker, "release") and hasattr(grant, "slot_index"):
                 self._broker.release(grant.slot_index, grant.generation)
 
-    def _consume_piggyback(self) -> None:
-        if self._pending_session_attrs is not None:
-            attrs = self._pending_session_attrs
-            if any((attrs.client_identifier, attrs.module, attrs.action, attrs.ecid)):
-                self._last_piggyback_frame = attrs.encode_ttc_piggyback()
-            self._pending_session_attrs = None
-
 
 class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
     """Asynchronous Oracle 26ai Thin driver backed by `vertebra._oracle.AsyncOracleClient`."""
@@ -561,9 +1185,11 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         *,
         broker: Any = None,
         client: Any = None,
+        pool: AsyncOraclePool | Any | None = None,
     ) -> None:
         resolved = config or OracleConfig()
         super().__init__(resolved, broker=broker)
+        self._pool: AsyncOraclePool | Any | None = pool
         if client is not None:
             self._client = client
         else:
@@ -571,22 +1197,43 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
             self._client = mod.AsyncOracleClient(**_build_client_kwargs(resolved))
         self._in_transaction: bool = False
         self._session_context: dict[tuple[str, str], str] = {}
-        self._pending_session_attrs: OracleSessionAttrs | None = self.config.session_attrs()
-        self._last_piggyback_frame: bytes = b""
+        initial_attrs = self.config.session_attrs()
+        self._pending_session_attrs: OracleSessionAttrs | None = (
+            initial_attrs
+            if any((initial_attrs.client_identifier, initial_attrs.module, initial_attrs.action, initial_attrs.ecid))
+            else None
+        )
+        self._last_piggyback_frame: bytes | None = None
+
+    @property
+    def pool(self) -> AsyncOraclePool | Any | None:
+        """Return the optional `AsyncOraclePool` attached to this driver."""
+        return self._pool
 
     @property
     def client(self) -> Any:
-        """Return the underlying `AsyncOracleClient` instance."""
-        return self._client
+        """Return the pinned transaction `AsyncOracleClient` or the default underlying client."""
+        pinned = self._get_pinned_lease()
+        return pinned if pinned is not None else self._client
 
     @property
     def in_transaction(self) -> bool:
-        """Return `True` when an explicit transaction is active on this driver."""
+        """Return `True` when an explicit transaction is pinned in the current thread/task."""
+        pinned = self._get_pinned_lease()
+        if pinned is not None:
+            return True
+        if self._pool is not None:
+            return False
         return bool(getattr(self._client, "in_transaction", self._in_transaction))
 
     @property
-    def last_piggyback_frame(self) -> bytes:
+    def last_piggyback_frame(self) -> bytes | None:
         """Return the most recently piggybacked TTC `0x11` session attribute frame."""
+        active = self._get_pinned_lease() or (self._client if self._pool is None else None)
+        if active is not None:
+            native_frame = getattr(active, "last_piggyback_frame", None)
+            if native_frame is not None:
+                return bytes(native_frame)
         return self._last_piggyback_frame
 
     def set_session_attrs(
@@ -598,61 +1245,145 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         ecid: str | None = None,
     ) -> None:
         """Queue updated session tracing attributes for the next SQL round-trip."""
-        self._pending_session_attrs = OracleSessionAttrs(
-            client_identifier=client_identifier,
-            module=module,
-            action=action,
-            ecid=ecid,
+        prev = self._pending_session_attrs
+        merged = OracleSessionAttrs(
+            client_identifier=client_identifier if client_identifier is not None else (prev.client_identifier if prev else None),
+            module=module if module is not None else (prev.module if prev else None),
+            action=action if action is not None else (prev.action if prev else None),
+            ecid=ecid if ecid is not None else (prev.ecid if prev else None),
         )
+        self._pending_session_attrs = merged
+        active = self._get_pinned_lease() or (self._client if self._pool is None else None)
+        if active is not None and hasattr(active, "set_session_attrs"):
+            active.set_session_attrs(
+                client_identifier=client_identifier,
+                module=module,
+                action=action,
+                ecid=ecid,
+            )
 
     async def connect(self) -> Self:
         """Establish or validate the underlying asynchronous Oracle session."""
-        await self._client.connect()
+        if self._pool is None:
+            await self._client.connect()
         self._closed = False
         return self
 
     async def ping(self) -> None:
         """Verify liveness of the underlying asynchronous Oracle session."""
-        await self._client.ping()
+        async with self._checkout_client() as active_client:
+            await active_client.ping()
 
     async def begin(self) -> None:
-        """Begin an explicit asynchronous Oracle transaction."""
+        """Begin an explicit asynchronous Oracle transaction and pin the connection lease in a guarded `ContextVar`."""
+        pinned = self._get_pinned_lease()
+        if pinned is not None:
+            await pinned.begin()
+            self._in_transaction = True
+            return
+
+        if self._pool is not None:
+            lease = await self._acquire_pool_client()
+            try:
+                self._apply_pending_session_attrs(lease)
+                await lease.begin()
+            except BaseException as exc:
+                await self._release_pool_client(
+                    lease,
+                    discard=bool(getattr(lease, "closed", False)) or _is_fatal_transport_error(exc),
+                )
+                raise
+            self._set_pinned_lease(lease, from_pool=True)
+            self._in_transaction = True
+            return
+
+        self._apply_pending_session_attrs(self._client)
         await self._client.begin()
+        self._set_pinned_lease(self._client, from_pool=False)
         self._in_transaction = True
 
     async def commit(self) -> None:
-        """Commit the active asynchronous Oracle transaction."""
-        try:
-            await self._client.commit()
-        finally:
-            self._in_transaction = False
+        """Commit the active asynchronous Oracle transaction and release any pinned pool lease."""
+        entry = self._pop_pinned_entry()
+        self._in_transaction = False
+        if entry is not None:
+            _, _, active_client, from_pool = entry
+            discard = False
+            try:
+                await active_client.commit()
+            except BaseException as exc:
+                discard = bool(getattr(active_client, "closed", False)) or _is_fatal_transport_error(exc)
+                raise
+            finally:
+                self._capture_piggyback(active_client)
+                if from_pool and self._pool is not None:
+                    await self._release_pool_client(active_client, discard=discard)
+            return
+
+        if self._pool is None:
+            try:
+                await self._client.commit()
+            finally:
+                self._capture_piggyback(self._client)
 
     async def rollback(self) -> None:
-        """Roll back the active asynchronous Oracle transaction."""
-        try:
-            await self._client.rollback()
-        finally:
-            self._in_transaction = False
+        """Roll back the active asynchronous Oracle transaction and release any pinned pool lease."""
+        entry = self._pop_pinned_entry()
+        self._in_transaction = False
+        if entry is not None:
+            _, _, active_client, from_pool = entry
+            discard = False
+            try:
+                await active_client.rollback()
+            except BaseException:
+                discard = True
+                raise
+            finally:
+                self._capture_piggyback(active_client)
+                if from_pool and self._pool is not None:
+                    await self._release_pool_client(active_client, discard=discard)
+            return
 
-    async def savepoint(self, name: str) -> None:
-        """Create a transaction savepoint asynchronously."""
-        await self._client.savepoint(name)
+        if self._pool is None:
+            try:
+                await self._client.rollback()
+            finally:
+                self._capture_piggyback(self._client)
+
+    async def savepoint(self, name: str = "sp") -> None:
+        """Create a transaction savepoint asynchronously with identifier validation."""
+        validate_identifier(name, "savepoint")
+        active_client = self._get_pinned_lease() or self._client
+        await active_client.savepoint(name)
         self._in_transaction = True
 
-    async def rollback_to_savepoint(self, name: str) -> None:
-        """Roll back to a previously established savepoint asynchronously."""
-        await self._client.rollback_to_savepoint(name)
+    async def release_savepoint(self, name: str = "sp") -> None:
+        """Validate savepoint identifier asynchronously (`RELEASE SAVEPOINT` is a validated no-op in Oracle SQL)."""
+        validate_identifier(name, "savepoint")
+
+    async def rollback_to_savepoint(self, name: str = "sp") -> None:
+        """Roll back to a previously established savepoint asynchronously with identifier validation."""
+        validate_identifier(name, "savepoint")
+        active_client = self._get_pinned_lease() or self._client
+        await active_client.rollback_to_savepoint(name)
         self._in_transaction = True
 
     async def cancel(self) -> None:
         """Trigger an out-of-band `break_execution()` on any in-flight command."""
         if not self._closed:
-            self._client.cancel()
+            active_client = self._get_pinned_lease() or self._client
+            active_client.cancel()
 
     async def close(self) -> None:
-        """Close the underlying native asynchronous Oracle client."""
+        """Close the underlying native asynchronous Oracle client and release any pinned lease."""
         self._closed = True
         self._in_transaction = False
+        entry = self._pop_pinned_entry()
+        if entry is not None:
+            _, _, active_client, from_pool = entry
+            if from_pool and self._pool is not None:
+                with suppress(Exception):
+                    await self._release_pool_client(active_client, discard=False)
         await self._client.close()
 
     async def execute(
@@ -667,18 +1398,18 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         param_count = len(coerced) if coerced is not None else 0
         grant = self._acquire_oracle_broker_lease(sql, param_count)
         try:
-            self._consume_piggyback()
-            self._track_session_context_sql(sql, parameters)
-            result = await self._client.execute(
-                sql,
-                coerced,
-                out_binds=out_binds,
-                fetch_decimals=self.config.driver_features.fetch_decimals,
-                enable_lowercase_column_names=self.config.driver_features.enable_lowercase_column_names,
-            )
-            if isinstance(result, int):
-                return max(result, 0)
-            return max(int(result.rowcount), 0)
+            async with self._checkout_client() as active_client:
+                self._track_session_context_sql(sql, parameters)
+                result = await active_client.execute(
+                    sql,
+                    coerced,
+                    out_binds=out_binds,
+                    fetch_decimals=self.config.driver_features.fetch_decimals,
+                    enable_lowercase_column_names=self.config.driver_features.enable_lowercase_column_names,
+                )
+                if isinstance(result, int):
+                    return max(result, 0)
+                return max(int(result.rowcount), 0)
         finally:
             self._release_oracle_broker_lease(grant)
 
@@ -696,8 +1427,8 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         first_len = len(coerced_seq[0]) if coerced_seq else 0
         grant = self._acquire_oracle_broker_lease(sql, first_len)
         try:
-            self._consume_piggyback()
-            return int(await self._client.execute_many(sql, coerced_seq))
+            async with self._checkout_client() as active_client:
+                return int(await active_client.execute_many(sql, coerced_seq))
         finally:
             self._release_oracle_broker_lease(grant)
 
@@ -723,27 +1454,27 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         param_count = len(coerced) if coerced is not None else 0
         grant = self._acquire_oracle_broker_lease(sql, param_count)
         try:
-            self._consume_piggyback()
-            self._track_session_context_sql(sql, parameters)
-            lowercase = self.config.driver_features.enable_lowercase_column_names
-            fetch_decimals = self.config.driver_features.fetch_decimals
-            if _is_dml_or_plsql(sql):
-                result = await self._client.execute(
-                    sql,
-                    coerced,
-                    out_binds=out_binds,
-                    fetch_decimals=fetch_decimals,
-                    enable_lowercase_column_names=lowercase,
-                )
-            else:
-                result = await self._client.query(
-                    sql,
-                    coerced,
-                    out_binds=out_binds,
-                    fetch_decimals=fetch_decimals,
-                    enable_lowercase_column_names=lowercase,
-                )
-            return self._coerce_result_rows_and_cols(result)
+            async with self._checkout_client() as active_client:
+                self._track_session_context_sql(sql, parameters)
+                lowercase = self.config.driver_features.enable_lowercase_column_names
+                fetch_decimals = self.config.driver_features.fetch_decimals
+                if _is_dml_or_plsql(sql):
+                    result = await active_client.execute(
+                        sql,
+                        coerced,
+                        out_binds=out_binds,
+                        fetch_decimals=fetch_decimals,
+                        enable_lowercase_column_names=lowercase,
+                    )
+                else:
+                    result = await active_client.query(
+                        sql,
+                        coerced,
+                        out_binds=out_binds,
+                        fetch_decimals=fetch_decimals,
+                        enable_lowercase_column_names=lowercase,
+                    )
+                return self._coerce_result_rows_and_cols(result)
         finally:
             self._release_oracle_broker_lease(grant)
 
@@ -790,17 +1521,17 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
             param_count = len(coerced) if coerced is not None else 0
             grant = self._acquire_oracle_broker_lease(sql, param_count)
             try:
-                self._consume_piggyback()
-                self._track_session_context_sql(sql, parameters)
-                effective_batch = int(batch_size) if batch_size is not None and batch_size > 0 else 8192
-                cursor: ArrowCursor = await self._client.query_arrow(
-                    sql,
-                    coerced,
-                    batch_size=effective_batch,
-                    force_shm=force_shm,
-                    enable_lowercase_column_names=self.config.driver_features.enable_lowercase_column_names,
-                )
-                return cursor
+                async with self._checkout_client() as active_client:
+                    self._track_session_context_sql(sql, parameters)
+                    effective_batch = int(batch_size) if batch_size is not None and batch_size > 0 else 8192
+                    cursor: ArrowCursor = await active_client.query_arrow(
+                        sql,
+                        coerced,
+                        batch_size=effective_batch,
+                        force_shm=force_shm,
+                        enable_lowercase_column_names=self.config.driver_features.enable_lowercase_column_names,
+                    )
+                    return cursor
             finally:
                 self._release_oracle_broker_lease(grant)
         rows, raw_cols = await self.execute_with_description(sql, parameters, **kwargs)
@@ -852,6 +1583,119 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         sql = f"INSERT {hint}INTO {table_name} ({col_list}) VALUES ({placeholders})"
         return await self.execute_many(sql, rows)
 
+    def _get_pinned_lease(self) -> Any | None:
+        mapping = _ASYNC_PINNED_TX.get()
+        if not mapping:
+            return None
+        entry = mapping.get(id(self))
+        if entry is None:
+            return None
+        stored_thread, stored_task, lease, _ = entry
+        curr_thread, curr_task = _current_execution_identity()
+        if stored_thread != curr_thread or stored_task != curr_task:
+            return None
+        return lease
+
+    def _set_pinned_lease(self, lease: Any, *, from_pool: bool) -> None:
+        curr_thread, curr_task = _current_execution_identity()
+        existing = _ASYNC_PINNED_TX.get()
+        updated = dict(existing) if existing is not None else {}
+        updated[id(self)] = (curr_thread, curr_task, lease, from_pool)
+        _ASYNC_PINNED_TX.set(updated)
+
+    def _pop_pinned_entry(self) -> tuple[int, int | None, Any, bool] | None:
+        mapping = _ASYNC_PINNED_TX.get()
+        if not mapping:
+            return None
+        entry = mapping.get(id(self))
+        if entry is None:
+            return None
+        stored_thread, stored_task, _, _ = entry
+        curr_thread, curr_task = _current_execution_identity()
+        if stored_thread != curr_thread or stored_task != curr_task:
+            return None
+        updated = dict(mapping)
+        updated.pop(id(self), None)
+        _ASYNC_PINNED_TX.set(updated or None)
+        return entry
+
+    async def _acquire_pool_client(self) -> Any:
+        assert self._pool is not None
+        attrs = self._pending_session_attrs
+        self._pending_session_attrs = None
+        acquire_kwargs: dict[str, Any] = {}
+        if attrs is not None:
+            if attrs.client_identifier is not None:
+                acquire_kwargs["client_identifier"] = attrs.client_identifier
+            if attrs.module is not None:
+                acquire_kwargs["module"] = attrs.module
+            if attrs.action is not None:
+                acquire_kwargs["action"] = attrs.action
+            if attrs.ecid is not None:
+                acquire_kwargs["ecid"] = attrs.ecid
+        if hasattr(self._pool, "acquire_from_pool"):
+            return await self._pool.acquire_from_pool(**acquire_kwargs)
+        return await self._pool.acquire(**acquire_kwargs)
+
+    async def _release_pool_client(self, lease: Any, *, discard: bool = False) -> None:
+        if self._pool is None:
+            return
+        if hasattr(self._pool, "release_to_pool"):
+            await self._pool.release_to_pool(lease, discard=discard)
+        else:
+            await self._pool.release(lease, discard=discard)
+
+    @asynccontextmanager
+    async def _checkout_client(self) -> AsyncIterator[Any]:
+        pinned = self._get_pinned_lease()
+        if pinned is not None:
+            self._apply_pending_session_attrs(pinned)
+            try:
+                yield pinned
+            finally:
+                self._capture_piggyback(pinned)
+            return
+
+        if self._pool is None:
+            self._apply_pending_session_attrs(self._client)
+            try:
+                yield self._client
+            finally:
+                self._capture_piggyback(self._client)
+            return
+
+        lease = await self._acquire_pool_client()
+        discard = False
+        try:
+            yield lease
+        except BaseException as exc:
+            discard = bool(getattr(lease, "closed", False)) or _is_fatal_transport_error(exc)
+            raise
+        finally:
+            self._capture_piggyback(lease)
+            await self._release_pool_client(lease, discard=discard)
+
+    def _apply_pending_session_attrs(self, client: Any) -> None:
+        if self._pending_session_attrs is None:
+            return
+        attrs = self._pending_session_attrs
+        self._pending_session_attrs = None
+        if any((attrs.client_identifier, attrs.module, attrs.action, attrs.ecid)):
+            if hasattr(client, "set_session_attrs"):
+                client.set_session_attrs(
+                    client_identifier=attrs.client_identifier,
+                    module=attrs.module,
+                    action=attrs.action,
+                    ecid=attrs.ecid,
+                )
+            else:
+                self._last_piggyback_frame = attrs.encode_ttc_piggyback()
+
+    def _capture_piggyback(self, client: Any) -> None:
+        frame = getattr(client, "last_piggyback_frame", None)
+        if frame is not None:
+            self._last_piggyback_frame = bytes(frame)
+
     def _coerce_parameters(
         self,
         parameters: Sequence[Any] | Mapping[str, Any] | None,
@@ -982,10 +1826,3 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
                 self._broker.lease_table.release(grant.slot_index, grant.generation)
             elif hasattr(self._broker, "release") and hasattr(grant, "slot_index"):
                 self._broker.release(grant.slot_index, grant.generation)
-
-    def _consume_piggyback(self) -> None:
-        if self._pending_session_attrs is not None:
-            attrs = self._pending_session_attrs
-            if any((attrs.client_identifier, attrs.module, attrs.action, attrs.ecid)):
-                self._last_piggyback_frame = attrs.encode_ttc_piggyback()
-            self._pending_session_attrs = None
