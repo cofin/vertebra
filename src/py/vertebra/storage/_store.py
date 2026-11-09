@@ -1493,6 +1493,23 @@ class _BaseObjectStore:
         """Filter listed objects with case-sensitive `fnmatch`, skipping trailing-`/` directory placeholders."""
         return [meta for meta in items if not meta.path.endswith("/") and fnmatch.fnmatchcase(meta.path, key_pattern)]
 
+    @staticmethod
+    def _parquet_writer_options(
+        compression: str,
+        use_dictionary: bool | Sequence[str],
+        use_byte_stream_split: bool | Sequence[str],
+        options: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Merge explicit Parquet encoding keywords with caller `ParquetWriter` options, letting `options` win."""
+        return {
+            "compression": compression,
+            "use_dictionary": use_dictionary if isinstance(use_dictionary, bool) else list(use_dictionary),
+            "use_byte_stream_split": (
+                use_byte_stream_split if isinstance(use_byte_stream_split, bool) else list(use_byte_stream_split)
+            ),
+            **(options or {}),
+        }
+
     def _download_targets(self, keys: Sequence[str]) -> list[tuple[str, str]]:
         """Return `(key, file_name)` pairs, rejecting keys without a basename or with duplicate basenames.
 
@@ -1952,14 +1969,35 @@ class SyncObjectStore(_BaseObjectStore):
             if not norm_prefix or str(item.path).startswith(norm_prefix)
         ]
 
-    def write_arrow(self, key: str, data: Any, *, batch_size: int = 65536) -> PutResult:
-        """Write batch-bounded Arrow IPC through native multipart upload."""
-        return _arrow.write_batches_sync(self, key, data, file_format="arrow-ipc", batch_size=batch_size)
+    def write_arrow(
+        self, key: str, data: Any, *, batch_size: int = 65536, options: Mapping[str, Any] | None = None
+    ) -> PutResult:
+        """Write batch-bounded Arrow IPC through native multipart upload.
+
+        ``options`` keys such as ``compression`` build ``pyarrow.ipc.IpcWriteOptions``;
+        a prebuilt ``options`` entry passes through unchanged.
+        """
+        return _arrow.write_batches_sync(
+            self, key, data, file_format="arrow-ipc", batch_size=batch_size, options=options
+        )
 
     def write_parquet(
-        self, key: str, batches: Any, *, schema: Any = None, compression: str = "zstd", row_group_size: int = 65536
+        self,
+        key: str,
+        batches: Any,
+        *,
+        schema: Any = None,
+        compression: str = "zstd",
+        row_group_size: int = 65536,
+        use_dictionary: bool | Sequence[str] = True,
+        use_byte_stream_split: bool | Sequence[str] = False,
+        options: Mapping[str, Any] | None = None,
     ) -> PutResult:
-        """Write batch-bounded Parquet rowgroups through native multipart upload."""
+        """Write batch-bounded Parquet rowgroups through native multipart upload.
+
+        ``options`` is forwarded to ``pyarrow.parquet.ParquetWriter`` and overrides
+        ``compression``, ``row_group_size``, ``use_dictionary``, and ``use_byte_stream_split``.
+        """
         return _arrow.write_batches_sync(
             self,
             key,
@@ -1967,18 +2005,34 @@ class SyncObjectStore(_BaseObjectStore):
             file_format="parquet",
             batch_size=row_group_size,
             schema=schema,
-            options={"compression": compression},
+            options=self._parquet_writer_options(compression, use_dictionary, use_byte_stream_split, options),
         )
 
-    def iter_arrow_batches(self, key: str) -> Iterator[Any]:
-        """Yield Arrow IPC RecordBatch objects through native streaming reads."""
-        return _arrow.iter_batches_sync(self, key, file_format="arrow-ipc")
+    def iter_arrow_batches(
+        self, key: str, *, batch_size: int = 65536, options: Mapping[str, Any] | None = None
+    ) -> Iterator[Any]:
+        """Yield Arrow IPC RecordBatch objects through native streaming reads.
+
+        ``options`` keys such as ``use_threads`` build ``pyarrow.ipc.IpcReadOptions``.
+        """
+        return _arrow.iter_batches_sync(self, key, file_format="arrow-ipc", batch_size=batch_size, options=options)
 
     def iter_parquet_batches(
-        self, key: str, *, batch_size: int = 65536, columns: Sequence[str] | None = None
+        self,
+        key: str,
+        *,
+        batch_size: int = 65536,
+        columns: Sequence[str] | None = None,
+        options: Mapping[str, Any] | None = None,
     ) -> Iterator[Any]:
-        """Yield projected Parquet batches through bounded native range reads."""
-        return _arrow.iter_batches_sync(self, key, file_format="parquet", batch_size=batch_size, columns=columns)
+        """Yield projected Parquet batches through bounded native range reads.
+
+        ``options`` is forwarded to ``pyarrow.parquet.ParquetFile``, except ``row_groups``
+        and ``use_threads``, which select and decode rowgroups in ``iter_batches``.
+        """
+        return _arrow.iter_batches_sync(
+            self, key, file_format="parquet", batch_size=batch_size, columns=columns, options=options
+        )
 
     def open_reader(
         self,
@@ -2453,14 +2507,35 @@ class AsyncObjectStore(_BaseObjectStore):
             if not norm_prefix or str(item.path).startswith(norm_prefix)
         ]
 
-    async def write_arrow(self, key: str, data: Any, *, batch_size: int = 65536) -> PutResult:
-        """Write batch-bounded Arrow IPC through native multipart upload."""
-        return await _arrow.write_batches_async(self, key, data, file_format="arrow-ipc", batch_size=batch_size)
+    async def write_arrow(
+        self, key: str, data: Any, *, batch_size: int = 65536, options: Mapping[str, Any] | None = None
+    ) -> PutResult:
+        """Write batch-bounded Arrow IPC through native multipart upload.
+
+        ``options`` keys such as ``compression`` build ``pyarrow.ipc.IpcWriteOptions``;
+        a prebuilt ``options`` entry passes through unchanged.
+        """
+        return await _arrow.write_batches_async(
+            self, key, data, file_format="arrow-ipc", batch_size=batch_size, options=options
+        )
 
     async def write_parquet(
-        self, key: str, batches: Any, *, schema: Any = None, compression: str = "zstd", row_group_size: int = 65536
+        self,
+        key: str,
+        batches: Any,
+        *,
+        schema: Any = None,
+        compression: str = "zstd",
+        row_group_size: int = 65536,
+        use_dictionary: bool | Sequence[str] = True,
+        use_byte_stream_split: bool | Sequence[str] = False,
+        options: Mapping[str, Any] | None = None,
     ) -> PutResult:
-        """Write batch-bounded Parquet rowgroups through native multipart upload."""
+        """Write batch-bounded Parquet rowgroups through native multipart upload.
+
+        ``options`` is forwarded to ``pyarrow.parquet.ParquetWriter`` and overrides
+        ``compression``, ``row_group_size``, ``use_dictionary``, and ``use_byte_stream_split``.
+        """
         return await _arrow.write_batches_async(
             self,
             key,
@@ -2468,18 +2543,34 @@ class AsyncObjectStore(_BaseObjectStore):
             file_format="parquet",
             batch_size=row_group_size,
             schema=schema,
-            options={"compression": compression},
+            options=self._parquet_writer_options(compression, use_dictionary, use_byte_stream_split, options),
         )
 
-    def iter_arrow_batches(self, key: str) -> AsyncIterator[Any]:
-        """Yield Arrow IPC RecordBatch objects through native asynchronous streaming reads."""
-        return _arrow.iter_batches_async(self, key, file_format="arrow-ipc")
+    def iter_arrow_batches(
+        self, key: str, *, batch_size: int = 65536, options: Mapping[str, Any] | None = None
+    ) -> AsyncIterator[Any]:
+        """Yield Arrow IPC RecordBatch objects through native asynchronous streaming reads.
+
+        ``options`` keys such as ``use_threads`` build ``pyarrow.ipc.IpcReadOptions``.
+        """
+        return _arrow.iter_batches_async(self, key, file_format="arrow-ipc", batch_size=batch_size, options=options)
 
     def iter_parquet_batches(
-        self, key: str, *, batch_size: int = 65536, columns: Sequence[str] | None = None
+        self,
+        key: str,
+        *,
+        batch_size: int = 65536,
+        columns: Sequence[str] | None = None,
+        options: Mapping[str, Any] | None = None,
     ) -> AsyncIterator[Any]:
-        """Yield projected Parquet batches through bounded native range reads."""
-        return _arrow.iter_batches_async(self, key, file_format="parquet", batch_size=batch_size, columns=columns)
+        """Yield projected Parquet batches through bounded native range reads.
+
+        ``options`` is forwarded to ``pyarrow.parquet.ParquetFile``, except ``row_groups``
+        and ``use_threads``, which select and decode rowgroups in ``iter_batches``.
+        """
+        return _arrow.iter_batches_async(
+            self, key, file_format="parquet", batch_size=batch_size, columns=columns, options=options
+        )
 
     def open_reader(
         self,

@@ -26,9 +26,218 @@ from vertebra.utils.sync_tools import SyncPool
 if TYPE_CHECKING:
     from vertebra.storage._store import AsyncObjectStore, AsyncReadableFile, PutResult, SyncObjectStore
 
+__all__ = (
+    "iter_batches_async",
+    "iter_batches_sync",
+    "read_table_async",
+    "read_table_sync",
+    "write_batches_async",
+    "write_batches_sync",
+)
+
+
+def iter_batches_sync(
+    store: SyncObjectStore,
+    key: str,
+    *,
+    file_format: str,
+    batch_size: int = 65536,
+    columns: Sequence[str] | None = None,
+    options: Mapping[str, Any] | None = None,
+) -> Iterator[Any]:
+    """Decode batches on demand using native synchronous streams or ranges.
+
+    Parquet sources open with ``read_ahead=0`` and ``pre_buffer=False`` so each
+    rowgroup is fetched only when the consumer requests its batches.
+    """
+    _validate_batch_size(batch_size)
+    stream = None if file_format == "parquet" else store.get_stream(key)
+    source = store.open_reader(key, read_ahead=0) if stream is None else _StreamFile(lambda: next(stream, None))
+    reader = _BatchReader()
+    try:
+        reader.open(source, file_format, batch_size, columns, options)
+        while True:
+            done, batch = reader.next()
+            if done:
+                break
+            yield batch
+    finally:
+        try:
+            reader.close()
+        finally:
+            source.close()
+            if stream is not None:
+                cast("Generator[Any, None, None]", stream).close()
+
+
+async def iter_batches_async(
+    store: AsyncObjectStore,
+    key: str,
+    *,
+    file_format: str,
+    batch_size: int = 65536,
+    columns: Sequence[str] | None = None,
+    options: Mapping[str, Any] | None = None,
+) -> AsyncIterator[Any]:
+    """Decode one batch per demand while native asynchronous I/O stays on-loop.
+
+    Parquet sources open with ``read_ahead=0`` and ``pre_buffer=False`` so each
+    rowgroup is fetched only when the consumer requests its batches.
+    """
+    _validate_batch_size(batch_size)
+    bridge = _CodecBridge()
+    stream = None if file_format == "parquet" else store.get_stream(key)
+    backing = store.open_reader(key, size=(await store.head(key)).size, read_ahead=0) if stream is None else None
+    source = _RangeFile(backing, bridge) if backing is not None else _StreamFile(lambda: bridge.io(anext, stream, None))
+    reader = _BatchReader()
+    try:
+        await bridge.run(reader.open, source, file_format, batch_size, columns, options)
+        while True:
+            done, batch = await bridge.run(reader.next)
+            if done:
+                break
+            yield batch
+    finally:
+        await bridge.stop()
+        try:
+            await bridge.run(reader.close)
+        finally:
+            source.close()
+            if backing is not None:
+                backing.close()
+            if stream is not None:
+                await cast("AsyncGenerator[Any, None]", stream).aclose()
+
+
+def read_table_sync(
+    store: SyncObjectStore,
+    key: str,
+    *,
+    file_format: str,
+    options: Mapping[str, Any] | None = None,
+) -> Any:
+    """Read a materialized Table through seekable native ranges, retaining its schema.
+
+    Parquet reads default to ``pre_buffer=True`` so column chunk ranges coalesce;
+    ``options`` may override it.
+    """
+    ensure_module("pyarrow", package="pyarrow", extra="arrow")
+    with store.open_reader(key) as source:
+        return _read_table(source, file_format, options)
+
+
+async def read_table_async(
+    store: AsyncObjectStore,
+    key: str,
+    *,
+    file_format: str,
+    options: Mapping[str, Any] | None = None,
+) -> Any:
+    """Read a Table off-loop while native range I/O remains on the caller loop.
+
+    Parquet reads default to ``pre_buffer=True`` so column chunk ranges coalesce;
+    ``options`` may override it.
+    """
+    ensure_module("pyarrow", package="pyarrow", extra="arrow")
+    backing = store.open_reader(key, size=(await store.head(key)).size)
+    bridge = _CodecBridge()
+    source = _RangeFile(backing, bridge)
+    try:
+        return await bridge.run(_read_table, source, file_format, options)
+    finally:
+        await bridge.stop()
+        source.close()
+        backing.close()
+
+
+def write_batches_sync(
+    store: SyncObjectStore,
+    key: str,
+    data: Any,
+    *,
+    file_format: str,
+    batch_size: int = 65536,
+    schema: Any = None,
+    options: Mapping[str, Any] | None = None,
+) -> PutResult:
+    """Upload incremental codec output through the native synchronous multipart path.
+
+    ``data`` may be a Table, RecordBatch, batch iterable, or a serialized Arrow IPC
+    stream exposed through the buffer protocol.
+    """
+    kwargs = dict(options or {})
+    if file_format == "parquet":
+        batch_size = kwargs.pop("row_group_size", batch_size)
+    _validate_batch_size(batch_size)
+    writer = _BatchWriter()
+
+    def chunks() -> Generator[bytes, None, None]:
+        try:
+            yield from writer.open(data, file_format, batch_size, schema, kwargs)
+            while True:
+                done, output = writer.next()
+                yield from output
+                if done:
+                    break
+        finally:
+            writer.close()
+            writer.sink.close()
+
+    output = chunks()
+    try:
+        return store.put_stream(key, output, content_type=_media_type(file_format))
+    finally:
+        output.close()
+
+
+async def write_batches_async(
+    store: AsyncObjectStore,
+    key: str,
+    data: Any,
+    *,
+    file_format: str,
+    batch_size: int = 65536,
+    schema: Any = None,
+    options: Mapping[str, Any] | None = None,
+) -> PutResult:
+    """Encode batch-sized steps off-loop and await each native multipart write.
+
+    ``data`` may be a Table, RecordBatch, batch iterable, or a serialized Arrow IPC
+    stream exposed through the buffer protocol.
+    """
+    kwargs = dict(options or {})
+    if file_format == "parquet":
+        batch_size = kwargs.pop("row_group_size", batch_size)
+    _validate_batch_size(batch_size)
+    bridge = _CodecBridge()
+    writer = _BatchWriter()
+
+    async def chunks() -> AsyncGenerator[bytes, None]:
+        try:
+            for chunk in await bridge.run(writer.open, data, file_format, batch_size, schema, kwargs):
+                yield chunk
+            while True:
+                done, output = await bridge.run(writer.next)
+                for chunk in output:
+                    yield chunk
+                if done:
+                    break
+        finally:
+            await bridge.stop()
+            await bridge.run(writer.close)
+            writer.sink.close()
+
+    output = chunks()
+    try:
+        return await store.put_stream(key, output, content_type=_media_type(file_format))
+    finally:
+        await output.aclose()
+
 
 class _CodecBridge:
     """Run codec steps off-loop while retaining ownership until native I/O unwinds."""
+
+    __slots__ = ("_lock", "_loop", "_pending", "_stopped", "_tasks", "_worker")
 
     def __init__(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -100,6 +309,8 @@ class _CodecBridge:
 class _RangeFile(io.RawIOBase):
     """Expose an asynchronous native range reader to synchronous codec callbacks."""
 
+    __slots__ = ("_bridge", "_reader")
+
     def __init__(self, reader: AsyncReadableFile, bridge: _CodecBridge) -> None:
         self._reader = reader
         self._bridge = bridge
@@ -119,14 +330,15 @@ class _RangeFile(io.RawIOBase):
     def read(self, size: int | None = -1) -> bytes:
         return self._bridge.io(self._reader.read, size)
 
-    def readinto(self, buffer: Any) -> int:
-        data = self.read(len(buffer))
-        memoryview(buffer).cast("B")[: len(data)] = data
-        return len(data)
+    def readinto(self, buffer: Buffer) -> int:
+        """Fill ``buffer`` through the native reader's own ``readinto`` on the caller loop."""
+        return self._bridge.io(self._reader.readinto, buffer)
 
 
 class _StreamFile(io.RawIOBase):
     """Read exact codec requests with at most one unfinished native stream chunk."""
+
+    __slots__ = ("_next_chunk", "_pos", "_remaining")
 
     def __init__(self, next_chunk: Callable[[], Any]) -> None:
         self._next_chunk = next_chunk
@@ -144,25 +356,42 @@ class _StreamFile(io.RawIOBase):
             raise io.UnsupportedOperation("Arrow streaming requires a bounded read size")
         result = bytearray()
         while len(result) < size:
-            if not self._remaining:
-                chunk = self._next_chunk()
-                if chunk is None:
-                    break
-                self._remaining = memoryview(chunk).cast("B")
+            if not self._next_ready():
+                break
             count = min(size - len(result), len(self._remaining))
             result.extend(self._remaining[:count])
             self._remaining = self._remaining[count:]
         self._pos += len(result)
         return bytes(result)
 
-    def readinto(self, buffer: Any) -> int:
-        data = self.read(len(buffer))
-        memoryview(buffer).cast("B")[: len(data)] = data
-        return len(data)
+    def readinto(self, buffer: Buffer) -> int:
+        """Copy pending native chunks straight into ``buffer`` without intermediate bytes."""
+        target = memoryview(buffer).cast("B")
+        filled = 0
+        while filled < len(target):
+            if not self._next_ready():
+                break
+            count = min(len(target) - filled, len(self._remaining))
+            target[filled : filled + count] = self._remaining[:count]
+            self._remaining = self._remaining[count:]
+            filled += count
+        self._pos += filled
+        return filled
+
+    def _next_ready(self) -> bool:
+        """Ensure an unread chunk is pending, returning ``False`` at end of stream."""
+        while not self._remaining:
+            chunk = self._next_chunk()
+            if chunk is None:
+                return False
+            self._remaining = memoryview(chunk).cast("B")
+        return True
 
 
 class _BatchReader:
     """Retain one decoder and its schema/dictionary state across batch requests."""
+
+    __slots__ = ("_batches", "reader")
 
     def __init__(self) -> None:
         self.reader: Any = None
@@ -186,7 +415,7 @@ class _BatchReader:
             self._batches = self.reader.iter_batches(batch_size=batch_size, columns=columns, **batch_options)
         else:
             ipc = ensure_module("pyarrow.ipc", package="pyarrow", extra="arrow")
-            self.reader = ipc.open_stream(source, **kwargs)
+            self.reader = ipc.open_stream(source, **_ipc_options(kwargs, ipc.IpcReadOptions))
             self._batches = (
                 batch.slice(offset, batch_size)
                 for batch in self.reader
@@ -202,127 +431,10 @@ class _BatchReader:
             self.reader.close()
 
 
-def iter_batches_sync(
-    store: SyncObjectStore,
-    key: str,
-    *,
-    file_format: str,
-    batch_size: int = 65536,
-    columns: Sequence[str] | None = None,
-    options: Mapping[str, Any] | None = None,
-) -> Iterator[Any]:
-    """Decode batches on demand using native synchronous streams or ranges."""
-    _validate_batch_size(batch_size)
-    stream = None if file_format == "parquet" else store.get_stream(key)
-    source = store.open_reader(key, read_ahead=0) if stream is None else _StreamFile(lambda: next(stream, None))
-    reader = _BatchReader()
-    try:
-        reader.open(source, file_format, batch_size, columns, options)
-        while True:
-            done, batch = reader.next()
-            if done:
-                break
-            yield batch
-    finally:
-        try:
-            reader.close()
-        finally:
-            source.close()
-            if stream is not None:
-                cast("Generator[Any, None, None]", stream).close()
-
-
-async def iter_batches_async(
-    store: AsyncObjectStore,
-    key: str,
-    *,
-    file_format: str,
-    batch_size: int = 65536,
-    columns: Sequence[str] | None = None,
-    options: Mapping[str, Any] | None = None,
-) -> AsyncIterator[Any]:
-    """Decode one batch per demand while native asynchronous I/O stays on-loop."""
-    _validate_batch_size(batch_size)
-    bridge = _CodecBridge()
-    stream = None if file_format == "parquet" else store.get_stream(key)
-    backing = store.open_reader(key, size=(await store.head(key)).size, read_ahead=0) if stream is None else None
-    source = _RangeFile(backing, bridge) if backing is not None else _StreamFile(lambda: bridge.io(anext, stream, None))
-    reader = _BatchReader()
-    try:
-        await bridge.run(reader.open, source, file_format, batch_size, columns, options)
-        while True:
-            done, batch = await bridge.run(reader.next)
-            if done:
-                break
-            yield batch
-    finally:
-        await bridge.stop()
-        try:
-            await bridge.run(reader.close)
-        finally:
-            source.close()
-            if backing is not None:
-                backing.close()
-            if stream is not None:
-                await cast("AsyncGenerator[Any, None]", stream).aclose()
-
-
-def read_table_sync(
-    store: SyncObjectStore,
-    key: str,
-    *,
-    file_format: str,
-    options: Mapping[str, Any] | None = None,
-) -> Any:
-    """Read a materialized Table through seekable native ranges, retaining its schema."""
-    ensure_module("pyarrow", package="pyarrow", extra="arrow")
-    with store.open_reader(key) as source:
-        return _read_table(source, file_format, options)
-
-
-async def read_table_async(
-    store: AsyncObjectStore,
-    key: str,
-    *,
-    file_format: str,
-    options: Mapping[str, Any] | None = None,
-) -> Any:
-    """Read a Table off-loop while native range I/O remains on the caller loop."""
-    ensure_module("pyarrow", package="pyarrow", extra="arrow")
-    backing = store.open_reader(key, size=(await store.head(key)).size)
-    bridge = _CodecBridge()
-    source = _RangeFile(backing, bridge)
-    try:
-        return await bridge.run(_read_table, source, file_format, options)
-    finally:
-        await bridge.stop()
-        source.close()
-        backing.close()
-
-
-def _validate_batch_size(batch_size: int) -> None:
-    ensure_module("pyarrow", package="pyarrow", extra="arrow")
-    if batch_size < 1:
-        msg = "batch_size must be >= 1"
-        raise ValueError(msg)
-
-
-def _read_table(source: Any, file_format: str, options: Mapping[str, Any] | None) -> Any:
-    if file_format == "parquet":
-        pq = ensure_module("pyarrow.parquet", package="pyarrow", extra="arrow")
-        return pq.read_table(source, **dict(options or {}))
-    pa = ensure_module("pyarrow", package="pyarrow", extra="arrow")
-    try:
-        reader = pa.ipc.open_stream(source, **dict(options or {}))
-    except pa.ArrowInvalid:
-        source.seek(0)
-        reader = pa.ipc.open_file(source, **dict(options or {}))
-    with reader:
-        return reader.read_all()
-
-
 class _OutputSink(io.RawIOBase):
     """Retain only the current codec operation's output and absolute position."""
+
+    __slots__ = ("_chunks", "_position")
 
     def __init__(self) -> None:
         self._chunks: list[bytes] = []
@@ -350,6 +462,8 @@ class _OutputSink(io.RawIOBase):
 class _BatchWriter:
     """Encode one input batch at a time with persistent dictionary and footer state."""
 
+    __slots__ = ("_batch_size", "_batches", "_parquet", "_source", "_writer", "sink")
+
     def __init__(self) -> None:
         self.sink = _OutputSink()
         self._writer: Any = None
@@ -361,6 +475,11 @@ class _BatchWriter:
     def open(
         self, data: Any, file_format: str, batch_size: int, schema: Any, options: Mapping[str, Any] | None
     ) -> list[bytes]:
+        """Open the input source and encoder, returning any header output.
+
+        Serialized IPC streams given as ``pyarrow.Buffer`` or any buffer-protocol
+        object decode through ``pyarrow.py_buffer`` without copying the payload.
+        """
         pa = ensure_module("pyarrow", package="pyarrow", extra="arrow")
         self._batch_size = batch_size
         self._parquet = file_format == "parquet"
@@ -370,8 +489,9 @@ class _BatchWriter:
         elif isinstance(data, pa.RecordBatch):
             schema = schema if schema is not None else data.schema
             self._source = iter((data,))
-        elif hasattr(data, "buffer_view"):
-            self._source = pa.ipc.open_stream(pa.py_buffer(data.buffer_view()))
+        elif isinstance(data, Buffer) or hasattr(data, "buffer_view"):
+            payload = data if isinstance(data, Buffer) else data.buffer_view()
+            self._source = pa.ipc.open_stream(payload if isinstance(payload, pa.Buffer) else pa.py_buffer(payload))
             schema = schema if schema is not None else self._source.schema
         else:
             self._source = iter(data)
@@ -390,7 +510,7 @@ class _BatchWriter:
             pq = ensure_module("pyarrow.parquet", package="pyarrow", extra="arrow")
             self._writer = pq.ParquetWriter(self.sink, schema, **kwargs)
         else:
-            self._writer = pa.ipc.new_stream(self.sink, schema, **kwargs)
+            self._writer = pa.ipc.new_stream(self.sink, schema, **_ipc_options(kwargs, pa.ipc.IpcWriteOptions))
         return self.sink.drain()
 
     def next(self) -> tuple[bool, list[bytes]]:
@@ -428,83 +548,48 @@ class _BatchWriter:
             batch = next(self._source, None)
 
 
-def write_batches_sync(
-    store: SyncObjectStore,
-    key: str,
-    data: Any,
-    *,
-    file_format: str,
-    batch_size: int = 65536,
-    schema: Any = None,
-    options: Mapping[str, Any] | None = None,
-) -> PutResult:
-    """Upload incremental codec output through the native synchronous multipart path."""
+def _validate_batch_size(batch_size: int) -> None:
+    ensure_module("pyarrow", package="pyarrow", extra="arrow")
+    if batch_size < 1:
+        msg = "batch_size must be >= 1"
+        raise ValueError(msg)
+
+
+def _media_type(file_format: str) -> str:
+    return "application/vnd.apache.parquet" if file_format == "parquet" else "application/vnd.apache.arrow.stream"
+
+
+def _ipc_options(kwargs: dict[str, Any], options_type: Any) -> dict[str, Any]:
+    """Fold loose IPC option keys into one ``IpcReadOptions``/``IpcWriteOptions``.
+
+    ``memory_pool``, ``use_legacy_format``, and a prebuilt ``options`` object pass
+    through to the stream factory unchanged; every other key constructs
+    ``options_type``. Combining a prebuilt ``options`` object with loose keys is
+    rejected because neither can be merged into the other without guessing.
+    """
+    passthrough: dict[str, Any] = {
+        key: kwargs.pop(key) for key in ("memory_pool", "options", "use_legacy_format") if key in kwargs
+    }
+    if not kwargs:
+        return passthrough
+    if "options" in passthrough:
+        msg = f"Pass IPC settings either as a prebuilt {options_type.__name__} or as option keys, not both"
+        raise ValueError(msg)
+    return {**passthrough, "options": options_type(**kwargs)}
+
+
+def _read_table(source: Any, file_format: str, options: Mapping[str, Any] | None) -> Any:
     kwargs = dict(options or {})
     if file_format == "parquet":
-        batch_size = kwargs.pop("row_group_size", batch_size)
-    _validate_batch_size(batch_size)
-    writer = _BatchWriter()
-
-    def chunks() -> Generator[bytes, None, None]:
-        try:
-            yield from writer.open(data, file_format, batch_size, schema, kwargs)
-            while True:
-                done, output = writer.next()
-                yield from output
-                if done:
-                    break
-        finally:
-            writer.close()
-            writer.sink.close()
-
-    output = chunks()
+        pq = ensure_module("pyarrow.parquet", package="pyarrow", extra="arrow")
+        kwargs.setdefault("pre_buffer", True)
+        return pq.read_table(source, **kwargs)
+    pa = ensure_module("pyarrow", package="pyarrow", extra="arrow")
+    ipc_kwargs = _ipc_options(kwargs, pa.ipc.IpcReadOptions)
     try:
-        media_type = (
-            "application/vnd.apache.parquet" if file_format == "parquet" else "application/vnd.apache.arrow.stream"
-        )
-        return store.put_stream(key, output, content_type=media_type)
-    finally:
-        output.close()
-
-
-async def write_batches_async(
-    store: AsyncObjectStore,
-    key: str,
-    data: Any,
-    *,
-    file_format: str,
-    batch_size: int = 65536,
-    schema: Any = None,
-    options: Mapping[str, Any] | None = None,
-) -> PutResult:
-    """Encode batch-sized steps off-loop and await each native multipart write."""
-    kwargs = dict(options or {})
-    if file_format == "parquet":
-        batch_size = kwargs.pop("row_group_size", batch_size)
-    _validate_batch_size(batch_size)
-    bridge = _CodecBridge()
-    writer = _BatchWriter()
-
-    async def chunks() -> AsyncGenerator[bytes, None]:
-        try:
-            for chunk in await bridge.run(writer.open, data, file_format, batch_size, schema, kwargs):
-                yield chunk
-            while True:
-                done, output = await bridge.run(writer.next)
-                for chunk in output:
-                    yield chunk
-                if done:
-                    break
-        finally:
-            await bridge.stop()
-            await bridge.run(writer.close)
-            writer.sink.close()
-
-    output = chunks()
-    try:
-        media_type = (
-            "application/vnd.apache.parquet" if file_format == "parquet" else "application/vnd.apache.arrow.stream"
-        )
-        return await store.put_stream(key, output, content_type=media_type)
-    finally:
-        await output.aclose()
+        reader = pa.ipc.open_stream(source, **ipc_kwargs)
+    except pa.ArrowInvalid:
+        source.seek(0)
+        reader = pa.ipc.open_file(source, **ipc_kwargs)
+    with reader:
+        return reader.read_all()

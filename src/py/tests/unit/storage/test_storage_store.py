@@ -40,6 +40,7 @@ from vertebra.storage import (
     SyncObjectStore,
     SyncReadableFile,
     SyncWritableFile,
+    _arrow,
     parse_byte_range,
 )
 from vertebra.typing import (
@@ -1027,6 +1028,258 @@ async def test_storage_parquet_rejects_batch_size_before_io(batch_size: int) -> 
         next(store.iter_parquet_batches("missing", batch_size=batch_size))
     with pytest.raises(ValueError, match="batch_size"):
         await anext(store.to_async().iter_parquet_batches("missing", batch_size=batch_size))
+
+
+def _parquet_column_encodings(store: SyncObjectStore, key: str) -> dict[str, set[str]]:
+    """Return the encodings recorded for each column of the first row group."""
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    row_group = pq.ParquetFile(pa.BufferReader(store.get(key))).metadata.row_group(0)
+    return {
+        row_group.column(index).path_in_schema: set(row_group.column(index).encodings)
+        for index in range(row_group.num_columns)
+    }
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(
+    ("use_dictionary", "use_byte_stream_split", "dictionary_columns", "split_columns"),
+    [
+        (False, ["metric"], set(), {"metric"}),
+        (["tag"], False, {"tag"}, set()),
+        (True, True, {"id", "tag", "metric"}, set()),
+    ],
+)
+async def test_storage_parquet_encoding_options_reach_column_metadata(
+    asynchronous: bool,
+    use_dictionary: bool | list[str],
+    use_byte_stream_split: bool | list[str],
+    dictionary_columns: set[str],
+    split_columns: set[str],
+) -> None:
+    """Dictionary and byte-stream-split choices are recorded per column in the written footer."""
+    pa = pytest.importorskip("pyarrow")
+    table = pa.table(
+        {
+            "id": pa.array(range(64), type=pa.int64()),
+            "tag": [f"tag-{index % 4}" for index in range(64)],
+            "metric": [index / 7 for index in range(64)],
+        }
+    )
+    store = SyncObjectStore("memory://")
+    if asynchronous:
+        await store.to_async().write_parquet(
+            "t.parquet", table, use_dictionary=use_dictionary, use_byte_stream_split=use_byte_stream_split
+        )
+        batches = [batch async for batch in store.to_async().iter_parquet_batches("t.parquet")]
+    else:
+        store.write_parquet(
+            "t.parquet", table, use_dictionary=use_dictionary, use_byte_stream_split=use_byte_stream_split
+        )
+        batches = list(store.iter_parquet_batches("t.parquet"))
+    encodings = _parquet_column_encodings(store, "t.parquet")
+    assert {name for name, values in encodings.items() if "RLE_DICTIONARY" in values} == dictionary_columns
+    assert {name for name, values in encodings.items() if "BYTE_STREAM_SPLIT" in values} == split_columns
+    assert pa.Table.from_batches(batches).equals(table)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_storage_parquet_options_override_explicit_keywords(asynchronous: bool) -> None:
+    """Writer options replace compression and rowgroup defaults without duplicate keyword errors."""
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    table = pa.table({"id": pa.array(range(10), type=pa.int64())})
+    store = SyncObjectStore("memory://")
+    options = {"compression": "snappy", "row_group_size": 4, "use_dictionary": False}
+    if asynchronous:
+        await store.to_async().write_parquet("o.parquet", table, compression="zstd", options=options)
+    else:
+        store.write_parquet("o.parquet", table, compression="zstd", options=options)
+    metadata = pq.ParquetFile(pa.BufferReader(store.get("o.parquet"))).metadata
+    assert metadata.num_row_groups == 3
+    assert metadata.row_group(0).column(0).compression == "SNAPPY"
+    assert "RLE_DICTIONARY" not in metadata.row_group(0).column(0).encodings
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_storage_parquet_reader_options_select_row_groups(asynchronous: bool) -> None:
+    """Reader options forward rowgroup selection to demand-paged Parquet iteration."""
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    table = pa.table({"id": pa.array(range(30), type=pa.int64())})
+    sink = pa.BufferOutputStream()
+    pq.write_table(table, sink, row_group_size=10)
+    store = SyncObjectStore("memory://")
+    store.put("groups.parquet", sink.getvalue())
+    options = {"row_groups": [1], "use_threads": False}
+    if asynchronous:
+        batches = [batch async for batch in store.to_async().iter_parquet_batches("groups.parquet", options=options)]
+    else:
+        batches = list(store.iter_parquet_batches("groups.parquet", options=options))
+    assert pa.Table.from_batches(batches).equals(table.slice(10, 10))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_storage_arrow_ipc_compression_options_round_trip(asynchronous: bool) -> None:
+    """IPC write options compress record batch bodies and read options decode them in bounded slices."""
+    pa = pytest.importorskip("pyarrow")
+    table = pa.table({"id": pa.array([7] * 20_000, type=pa.int64())})
+    store = SyncObjectStore("memory://")
+    read_options = {"use_threads": False}
+    if asynchronous:
+        async_store = store.to_async()
+        await async_store.write_arrow("plain.arrow", table)
+        await async_store.write_arrow("t.arrow", table, options={"compression": "zstd"})
+        batches = [
+            batch async for batch in async_store.iter_arrow_batches("t.arrow", batch_size=8_000, options=read_options)
+        ]
+    else:
+        store.write_arrow("plain.arrow", table)
+        store.write_arrow("t.arrow", table, options={"compression": "zstd"})
+        batches = list(store.iter_arrow_batches("t.arrow", batch_size=8_000, options=read_options))
+    assert store.head("t.arrow").size * 10 < store.head("plain.arrow").size
+    assert [batch.num_rows for batch in batches] == [8_000, 8_000, 4_000]
+    assert pa.Table.from_batches(batches).equals(table)
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.anyio
+async def test_storage_arrow_ipc_options_reject_conflicting_write_options(asynchronous: bool) -> None:
+    """A prebuilt IpcWriteOptions cannot be combined with loose IPC option keys."""
+    pa = pytest.importorskip("pyarrow")
+    table = pa.table({"id": [1]})
+    store = SyncObjectStore("memory://")
+    options = {"options": pa.ipc.IpcWriteOptions(), "compression": "zstd"}
+    with pytest.raises(ValueError, match="IpcWriteOptions"):
+        if asynchronous:
+            await store.to_async().write_arrow("conflict.arrow", table, options=options)
+        else:
+            store.write_arrow("conflict.arrow", table, options=options)
+    assert not store.exists("conflict.arrow")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("file_format", ["arrow-ipc", "parquet"])
+@pytest.mark.parametrize("wrapper", ["pyarrow-buffer", "memoryview", "bytes", "bytearray"])
+async def test_storage_writers_accept_raw_ipc_buffers(asynchronous: bool, file_format: str, wrapper: str) -> None:
+    """Serialized IPC streams passed as raw buffers decode directly without a buffer_view wrapper."""
+    pa = pytest.importorskip("pyarrow")
+    table = pa.table({"id": pa.array([1, 2, 3], type=pa.int64()), "tag": ["a", "b", "c"]})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    ipc_buffer = sink.getvalue()
+    payload: Any = {
+        "pyarrow-buffer": ipc_buffer,
+        "memoryview": memoryview(ipc_buffer),
+        "bytes": ipc_buffer.to_pybytes(),
+        "bytearray": bytearray(ipc_buffer.to_pybytes()),
+    }[wrapper]
+    store = SyncObjectStore("memory://")
+    async_store = store.to_async()
+    if file_format == "parquet":
+        if asynchronous:
+            await async_store.write_parquet("from_buf", payload)
+        else:
+            store.write_parquet("from_buf", payload)
+        batches = list(store.iter_parquet_batches("from_buf"))
+    else:
+        if asynchronous:
+            await async_store.write_arrow("from_buf", payload)
+        else:
+            store.write_arrow("from_buf", payload)
+        batches = list(store.iter_arrow_batches("from_buf"))
+    assert pa.Table.from_batches(batches).equals(table)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("options", "expected"), [(None, True), ({"pre_buffer": False}, False)])
+async def test_storage_parquet_table_reads_default_to_pre_buffer(
+    options: dict[str, Any] | None, expected: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Materialized Parquet reads coalesce ranges by default while honoring an explicit override."""
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    table = pa.table({"id": [1, 2]})
+    sink = pa.BufferOutputStream()
+    pq.write_table(table, sink)
+    store = SyncObjectStore("memory://")
+    store.put("table.parquet", sink.getvalue())
+    seen: list[bool] = []
+    original = pq.read_table
+
+    def observe_read(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs["pre_buffer"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pq, "read_table", observe_read)
+    assert _arrow.read_table_sync(store, "table.parquet", file_format="parquet", options=options).equals(table)
+    assert (
+        await _arrow.read_table_async(store.to_async(), "table.parquet", file_format="parquet", options=options)
+    ).equals(table)
+    assert seen == [expected, expected]
+
+
+@pytest.mark.parametrize(
+    ("chunks", "capacity", "expected"),
+    [
+        ([b"abc", b"defg", b"hi"], 6, [b"abcdef", b"ghi", b""]),
+        ([b"abcdefghij"], 4, [b"abcd", b"efgh", b"ij", b""]),
+        ([], 3, [b""]),
+    ],
+)
+def test_storage_stream_file_readinto_fills_caller_buffer(
+    chunks: list[bytes], capacity: int, expected: list[bytes], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stream readinto copies native chunks straight into the caller buffer and tracks position."""
+
+    def reject_read(*args: Any, **kwargs: Any) -> bytes:
+        pytest.fail("readinto must not materialize an intermediate bytes object through read()")
+
+    monkeypatch.setattr(_arrow._StreamFile, "read", reject_read)
+    pending = iter(chunks)
+    stream = _arrow._StreamFile(lambda: next(pending, None))
+    target = array.array("B", bytes(capacity))
+    observed: list[bytes] = []
+    for _ in expected:
+        count = stream.readinto(target)
+        observed.append(target.tobytes()[:count])
+    assert observed == expected
+    assert stream.tell() == sum(len(chunk) for chunk in chunks)
+
+
+def test_storage_arrow_module_layout_exports_public_codecs_first() -> None:
+    """The codec module exports only its public seams, defines them first, and slots its helpers."""
+    module_file = Path(_arrow.__file__)
+    tree = ast.parse(module_file.read_text(encoding="utf-8"), filename=str(module_file))
+    definitions = [
+        node.name for node in tree.body if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
+    ]
+    public = [name for name in definitions if not name.startswith("_")]
+    assert _arrow.__all__ == (
+        "iter_batches_async",
+        "iter_batches_sync",
+        "read_table_async",
+        "read_table_sync",
+        "write_batches_async",
+        "write_batches_sync",
+    )
+    assert sorted(public) == list(_arrow.__all__)
+    assert definitions[: len(public)] == public
+    helpers = (
+        _arrow._CodecBridge,
+        _arrow._RangeFile,
+        _arrow._StreamFile,
+        _arrow._BatchReader,
+        _arrow._OutputSink,
+        _arrow._BatchWriter,
+    )
+    assert all("__slots__" in vars(helper) for helper in helpers)
 
 
 @pytest.mark.anyio
