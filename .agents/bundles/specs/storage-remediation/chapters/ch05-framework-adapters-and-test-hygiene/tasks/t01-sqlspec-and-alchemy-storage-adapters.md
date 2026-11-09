@@ -5,7 +5,7 @@ chapter_id: ch05-framework-adapters-and-test-hygiene
 title: Clean up SQLSpec and Advanced Alchemy ObjectStoreBackend method ordering, DuckDB token validation, and StorageConfig forwarding
 description: Delete _IPCBuffer, place public methods strictly above private helpers, check supports_signing, and fail loud on missing DuckDB GCS tokens in extensions/sqlspec/storage.py, and forward signing and token_cache on StorageConfig in extensions/alchemy/storage.py.
 status: stable
-state: in_progress
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -21,22 +21,25 @@ tests:
 estimated_loc: 140
 plan_revision: 1
 plan_commit: fd571e3a
-state_revision: 1
+state_revision: 2
 claimed_by: executor
 claimed_at: "2026-11-09T01:04:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T01:10:40Z"
+last_verified_commit: 3b24b0af
+verification_evidence: "pytest src/py/tests/unit/extensions (628 passed); ruff check/format and mypy clean"
 created_at: "2026-11-08T20:55:00Z"
-updated_at: "2026-11-09T01:04:00Z"
-commit: null
+updated_at: "2026-11-09T01:10:40Z"
+commit: 3b24b0af
 generated:
   by: flow/0.28.0
   at: "2026-11-08T20:55:00Z"
-verified: []
+verified:
+  - by: executor
+    at: "2026-11-09T01:10:40Z"
+    commit: 3b24b0af
 sources:
   - id: py-sqlspec-storage
     resource: src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend
@@ -98,11 +101,12 @@ uv run --no-sync pytest src/py/tests/unit/extensions/test_data_storage_integrati
 
 ## Acceptance Criteria
 
-- [ ] `sqlspec/storage.py` has zero `_IPCBuffer`, places all `_...` methods after public methods, uses `supports_signing`, and raises `ImproperConfigurationError` on missing DuckDB GCS tokens (R5.1).
-- [ ] `alchemy/storage.py` forwards `signing` and `token_cache` when given a `StorageConfig` (R5.1).
+- [x] [3b24b0af] `sqlspec/storage.py` has zero `_IPCBuffer`, places all `_...` methods after public methods, uses `supports_signing`, and raises `ImproperConfigurationError` on missing DuckDB GCS tokens (R5.1).
+- [x] [3b24b0af] `alchemy/storage.py` forwards `signing` and `token_cache` when given a `StorageConfig` (R5.1).
 
 ## Notes & Discoveries
 
+- [2026-11-09 01:10] `build_duckdb_gcs_secret_sql` keeps its existing `(secret_name, config, *, bearer_token) -> (sql, params)` seam with the token bound as a parameter (quote-safe) and raises `ImproperConfigurationError` on a missing/blank token. The Alchemy `ObjectStoreBackend` raises `ImproperConfigurationError` when `signing`/`token_cache` accompany a prebuilt store instead of silently dropping them, and exposes `supports_signing` like the SQLSpec backend.
 - [2026-11-08 20:55] Import `ImproperConfigurationError` from `vertebra.typing` (`PY-08`).
 
 [^py-sqlspec-storage]: `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` — SQLSpec `ObjectStoreBackend` and DuckDB GCS secret builder.

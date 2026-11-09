@@ -84,7 +84,7 @@ Three hot-path serialization and streaming modules still copy or buffer full pay
 
 ### 2.1 Functional Requirements
 
-- **R4.1 (`t01`)**: Update `StreamingStorageResponse.iter_chunks(self, chunk_size: int | None = None) -> Iterator[memoryview]` to stream `200` responses via `self.store.get_stream(self.key, chunk_size=step)` and `206` responses via bounded `self.store.get_range` windows (`<= step`), and update `to_fastpath_tuple()` (`tuple[int, list[tuple[bytes, bytes]], bytes | memoryview]`) to call `self.store.get_range(self.key, start, end - start)` on `206` responses.
+- **R4.1 (`t01`)**: Update `StreamingStorageResponse.iter_chunks(self, chunk_size: int | None = None) -> Iterator[memoryview]` to stream `200` responses via `self.store.get_stream(self.key, chunk_size=step)` and `206` responses via bounded `self.store.get_range` windows of `max(step, 4 MiB)` re-sliced into `<= step` `memoryview` chunks, resolve unknown sizes (`total_size == 0`) via `head()`, return `416` for unsatisfiable explicit ranges, and update `to_fastpath_tuple()` (`tuple[int, list[tuple[bytes, bytes]], bytes | memoryview]`) to call `self.store.get_range(self.key, start, end - start)` on `206` responses.
 - **R4.2 (`t02`)**: Reorganize `src/py/vertebra/storage/_arrow.py` (`__all__`, public functions above private `_...` classes/helpers, `__slots__`, zero-copy `_StreamFile.readinto` over `memoryview(buffer).cast("B")`, `pre_buffer=False` preserved on streaming `iter_batches_*` and `pre_buffer=True` defaulted on materialized `read_table_*`, raw `Buffer` IPC support in `_BatchWriter.open`), and wire `use_dictionary: bool | Sequence[str] = True`, `use_byte_stream_split: bool | Sequence[str] = False`, and `options: Mapping[str, Any] | None = None` on `write_parquet` plus `options: Mapping[str, Any] | None = None` on `iter_parquet_batches`, `write_arrow`, and `iter_arrow_batches` in `_store.py`.
 - **R4.3 (`t03`)**: Update `src/py/vertebra/db/arrow.py` so `read_arrow_shm(region: Any, length: int | None = None) -> ArrowCursor` auto-detects `VTBARROW` vs raw IPC over `pa.py_buffer(payload_view)` with an `_shm_anchor` slot and zero `bytes(...)` copy, `ArrowCursor.__len__` computes row count lazily without populating `_rows`, and `_table_to_rows_and_cols` converts Arrow `to_pydict()` columns directly to `(list[tuple[Any, ...]], tuple[str, ...])`.
 
@@ -113,7 +113,7 @@ Three hot-path serialization and streaming modules still copy or buffer full pay
 ### 2.5 Acceptance Scenarios (Given / When / Then)
 
 1. **Given** a `StreamingStorageResponse` for `Range: bytes=100-199` on a `10 MiB` object, **When** `list(resp.iter_chunks(chunk_size=64))` and `resp.to_fastpath_tuple()` execute, **Then** `store.get_view` is never called and only `100` bytes are fetched via `get_range`.
-2. **Given** a `pyarrow.Table` with float and string columns, **When** `store.write_parquet("t.parquet", table, use_dictionary=False, use_byte_stream_split=["val"])` runs, **Then** `pq.read_metadata` confirms `BYTE_STREAM_SPLIT` encoding and disabled dictionary encoding, and `iter_parquet_batches` streams batches on demand over the `4 MiB` read-ahead `open_reader`.
+2. **Given** a `pyarrow.Table` with float and string columns, **When** `store.write_parquet("t.parquet", table, use_dictionary=False, use_byte_stream_split=["val"])` runs, **Then** `pq.read_metadata` confirms `BYTE_STREAM_SPLIT` encoding and disabled dictionary encoding, and `iter_parquet_batches` streams batches on demand over `open_reader(..., read_ahead=0)` so row-group range demand stays bounded.
 
 ### 2.6 Alternatives Considered
 
@@ -141,9 +141,9 @@ Three hot-path serialization and streaming modules still copy or buffer full pay
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `fd571e3a` — `0/3` tasks completed in `ch04`.
-- **Remaining Tasks in Chapter**: `t01`, `t02`, `t03`.
-- **Remaining Chapters**: `ch01`–`ch06`.
+- **Verified Baseline (`HEAD`)**: `f4606043` — `3/3` tasks implemented and verified (`2789bb63`, `f4606043`, `113d25a5`); zero-context review findings (unknown-size direct descriptors, 4 MiB range windows, Arrow `read_buffer` zero-copy path, string Parquet column options, duplicate column names, cached IPC table, `416` direct ranges, SHM export contract) are being remediated.
+- **Remaining Tasks in Chapter**: None; chapter closes after review remediation.
+- **Remaining Chapters**: `ch05`–`ch06`.
 
 [^py-streaming]: `src/py/vertebra/storage/_streaming.py::StreamingStorageResponse` — HTTP `200`/`206`/`416` streaming storage response.
 [^py-storage-arrow]: `src/py/vertebra/storage/_arrow.py::iter_batches_sync` — Bounded Arrow IPC and Parquet storage readers and writers.

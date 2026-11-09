@@ -134,7 +134,7 @@ Zero-context code and quality reviews flagged adapter drift and test-hygiene vio
 
 ## 5. Implementation Plan
 
-- [~] storage-remediation:ch05:t01 — Clean up SQLSpec and Advanced Alchemy `ObjectStoreBackend` method ordering, DuckDB token validation, and `StorageConfig` forwarding (tasks/t01-sqlspec-and-alchemy-storage-adapters.md)
+- [x] [3b24b0af] storage-remediation:ch05:t01 — Clean up SQLSpec and Advanced Alchemy `ObjectStoreBackend` method ordering, DuckDB token validation, and `StorageConfig` forwarding (tasks/t01-sqlspec-and-alchemy-storage-adapters.md)
 - [ ] storage-remediation:ch05:t02 — Enforce clean-break `vertebra.extensions.django` storage exports, stream `DjangoStorage.save`, and remove `_store.py` shims (tasks/t02-django-storage-and-store-alias-cleanup.md)
 - [ ] storage-remediation:ch05:t03 — Hoist nested imports and convert subcase `for` loops and `asyncio.run` to `@pytest.mark.parametrize` and `@pytest.mark.anyio` (tasks/t03-pytest-imports-and-parametrize-hygiene.md)
 - **Chapter / Phase Recovery Checkpoint**: `uv run --no-sync ruff check src/py/vertebra src/py/tests && uv run --no-sync mypy src/py/vertebra && uv run --no-sync pytest src/py/tests/unit/storage src/py/tests/unit/extensions src/py/tests/unit/db -q`

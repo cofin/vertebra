@@ -3,7 +3,7 @@ type: Task
 id: "storage-remediation:ch04:t03"
 chapter_id: ch04-streaming-arrow-parquet-and-shm
 title: Make read_arrow_shm zero-copy over memoryview, keep ArrowCursor.__len__ lazy, and transpose _table_to_rows_and_cols column-wise
-description: Retain memoryview slices via pyarrow.py_buffer in read_arrow_shm without bytes() copying, return self._table.num_rows from ArrowCursor.__len__ without materializing tuples, and convert Arrow tables to row tuples via columnar to_pydict() transposition.
+description: Retain memoryview slices via pyarrow.py_buffer in read_arrow_shm without bytes() copying, compute ArrowCursor.__len__ from the cached decoded IPC table without materializing tuples, and convert Arrow tables to row tuples via columnar to_pydict() transposition.
 status: stable
 state: completed
 priority: P1
@@ -103,6 +103,7 @@ uv run --no-sync pytest src/py/tests/unit/db/test_enterprise_olap_drivers.py -k 
 
 ## Notes & Discoveries
 
+- [2026-11-09 01:10] `_table_to_rows_and_cols` returns schema column names for 0-row Arrow inputs, so `load_from_arrow` validates identifiers even on empty loads (fail-loud, consistent with non-empty input). `read_arrow_shm` cursors hold a buffer export of the caller's region; close the cursor before closing the `mmap`.
 - [2026-11-08 20:55] Keep `_shm_anchor` typed cleanly on `ArrowCursor` so `mypy` passes in strict mode.
 
 [^py-db-arrow]: `src/py/vertebra/db/arrow.py::read_arrow_shm` — Shared-memory `VTBARROW` cursor hydration and columnar helpers.
