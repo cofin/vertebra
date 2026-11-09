@@ -112,7 +112,7 @@ Zero-context code and quality reviews flagged adapter drift and test-hygiene vio
 | DuckDB GCS secret with no token | `build_duckdb_gcs_secret_sql("gcs_sec")` with `config=None, bearer_token=None` | Raises `ImproperConfigurationError` | Fail-loud credential validation. |
 | Auth options with a prebuilt store | `ObjectStoreBackend(SyncObjectStore(...), signing=..., token_cache=...)` (SQLSpec or Alchemy) | Raises `ImproperConfigurationError` without mutating the caller's store | No silently ignored credentials. |
 | `ObjectStoreBackend(GCSConfig(...), signing=..., token_cache=...)` | Alchemy `ObjectStoreBackend` initialized with `StorageConfig` | Both sync and async stores receive `signing` and `token_cache` | Consistent auth/signing across ORM attachments. |
-| Deprecated aliases accessed | `hasattr(SyncObjectStore, "open_readable_file")` or `from vertebra.extensions.django import S3Config` | `False` / `ImportError` | Clean-break `PY-07` surface. |
+| Removed duplicate surfaces | `open_readable_file`, `_get_native_module`, and Django re-exports of `vertebra.storage` types | Absent from the public API; callers use `open_reader` and import stores/configs from `vertebra.storage` | Clean-break `PY-07` surface without history-only absence tests. |
 
 ### 2.5 Acceptance Scenarios (Given / When / Then)
 
@@ -145,7 +145,7 @@ Zero-context code and quality reviews flagged adapter drift and test-hygiene vio
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `41d6d8c1` — `3/3` tasks completed (`3b24b0af`, `a04970be`, `cd7f66bf`) and the zero-context review findings remediated: native signing errors propagate, auth options with prebuilt stores raise `ImproperConfigurationError` in both adapters, `build_duckdb_gcs_secret_sql` renders a quote-escaped literal, Litestar tests run against real Litestar primitives, and optional dependencies are resolved at module level.
+- **Verified Baseline (`HEAD`)**: `41d6d8c1` — `3/3` tasks completed (`3b24b0af`, `a04970be`, `cd7f66bf`) with these verified invariants: native signing errors propagate, auth options with prebuilt stores raise `ImproperConfigurationError` in both adapters, `build_duckdb_gcs_secret_sql` renders a quote-escaped literal, Litestar tests run against real Litestar primitives, and optional dependencies are resolved at module level.
 - **Remaining Tasks in Chapter**: None.
 - **Remaining Chapters**: `ch06`.
 

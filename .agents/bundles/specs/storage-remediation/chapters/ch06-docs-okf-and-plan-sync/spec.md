@@ -63,7 +63,7 @@ tags:
 
 ### 1.1 Problem Statement & Objectives
 
-Zero-context reviews (`CR-09`, `QUAL-009`..`QUAL-012`) plus the expanded storage API surface require full user-guide, API-reference, and OKF synchronization:
+The expanded storage API surface requires full user-guide, API-reference, and OKF synchronization:
 1. `docs/usage/storage.md`, `docs/usage/storage-auth-and-signing.md`, and `docs/usage/storage-parquet-and-orm.md` still contain stale `SyncObjectStore("memory://")` / `SyncObjectStore.from_memory(...)` calls, state `pre_buffer=False` instead of `pre_buffer=True`, and omit `PreconditionError`, `get_file`, `download_many`, `upload_many`, `staged_download`, `open_reader(..., read_ahead=...)`, `open_writer`, `copy(..., overwrite=False)`, `glob`, `compose`, Parquet `use_dictionary` / `use_byte_stream_split` / `options`, custom GCS presigning endpoints, and `multiprocessing` `spawn` worker guidance [^doc-usage-storage] [^doc-usage-auth] [^doc-usage-parquet].
 2. `docs/reference/storage.md` restricts `SyncObjectStore` and `AsyncObjectStore` `members:` to 10 basic methods, hiding streaming, bulk file I/O, writable handles, `glob`, `compose`, Arrow/Parquet codecs, and `PreconditionError` from generated API docs [^doc-ref-storage].
 3. `.agents/bundles/product/product.md` embeds `##` headings inside `<!-- truth: start -->` and attributes `SyncGcpTokenCache`, `AsyncGcpTokenCache`, and `GcpTokenSnapshot` to `vertebra._storage` instead of `vertebra._vertebra`, while `.agents/bundles/knowledge/domains/storage/object-storage.md` (`208` lines) exceeds the `<= 200`-line domain chapter target and predates `GcpTokenCacheCapsule`, GCS conditional `version` / emulator / `compose` behavior, zero-copy `PyBackedBytes`, and bulk transfer contracts [^okf-product] [^okf-object-storage].
@@ -123,13 +123,13 @@ Zero-context reviews (`CR-09`, `QUAL-009`..`QUAL-012`) plus the expanded storage
 
 ## 3. Documentation & OKF Knowledge Plan
 
-- **Progress**: `[0/6 files documented]`
-- `[ ]` `docs/usage/storage.md` (`t01`)
-- `[ ]` `docs/usage/storage-auth-and-signing.md` (`t01`)
-- `[ ]` `docs/usage/storage-parquet-and-orm.md` (`t01`)
-- `[ ]` `docs/reference/storage.md` (`t02`)
-- `[ ]` `.agents/bundles/product/product.md` (`t02`)
-- `[ ]` `.agents/bundles/knowledge/domains/storage/object-storage.md` (`t02`)
+- **Progress**: `[6/6 files documented]`
+- `[x]` [ac8532d3] `docs/usage/storage.md` (`t01`)
+- `[x]` [ac8532d3] `docs/usage/storage-auth-and-signing.md` (`t01`)
+- `[x]` [ac8532d3] `docs/usage/storage-parquet-and-orm.md` (`t01`)
+- `[x]` [5d2fc5d7] `docs/reference/storage.md` (`t02`)
+- `[x]` [5d2fc5d7] `.agents/bundles/product/product.md` (`t02`)
+- `[x]` [5d2fc5d7] `.agents/bundles/knowledge/domains/storage/object-storage.md` (`t02`)
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -146,7 +146,7 @@ Zero-context reviews (`CR-09`, `QUAL-009`..`QUAL-012`) plus the expanded storage
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `465a1a72` — `2/2` tasks completed (`ac8532d3`, `5d2fc5d7`) and the zero-context docs review findings remediated: memory namespaces documented as labels, accurate defaults, `if_none_match="*"` create-only semantics, compose temporary cleanup on success/failure/cancellation, and no duplication of `object-storage-limitations.md`.
+- **Verified Baseline (`HEAD`)**: `465a1a72` — `2/2` tasks completed (`ac8532d3`, `5d2fc5d7`) with these verified invariants: memory namespaces documented as labels, accurate defaults, `if_none_match="*"` create-only semantics, compose temporary cleanup on success/failure/cancellation, and no duplication of `object-storage-limitations.md`.
 - **Remaining Tasks in Chapter**: None.
 - **Remaining Chapters**: None; flow proceeds to final verification, dual review, and archive.
 

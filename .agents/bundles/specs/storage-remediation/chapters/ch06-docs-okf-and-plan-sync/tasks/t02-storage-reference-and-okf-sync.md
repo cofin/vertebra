@@ -111,7 +111,7 @@ make review-check
 
 ## Notes & Discoveries
 
-- [2026-11-09 01:42] `tools/docs/verify_docs_artifacts.py` caps the reference page at 120,000 bytes and 14 TOC items, so factories, properties, token-cache classes, and range helpers are described in prose rather than autodoc and non-store classes render at h4; the built page is 118,996 bytes, so future reference growth requires splitting the page via `zensical.toml` nav.
+- [2026-11-09 01:42] `tools/docs/verify_docs_artifacts.py` caps the reference page at 120,000 bytes and 14 TOC items, so factories, properties, token-cache classes, and range helpers are described in prose rather than autodoc and non-store classes render at h4; the built page is 118,996 bytes, so future reference growth requires splitting the page via `zensical.toml` nav. `ByteRange`, `parse_byte_range`, and `RangeNotSatisfiableError` therefore stay documented in prose rather than `:::` directives until that split lands.
 - [2026-11-08 20:55] Stamp `verified.commit` with an ancestor commit SHA of `HEAD` so `ReviewSetupValidator._check_bundles` passes.
 
 [^doc-ref-storage]: `docs/reference/storage.md` — Zensical `vertebra.storage` API reference.

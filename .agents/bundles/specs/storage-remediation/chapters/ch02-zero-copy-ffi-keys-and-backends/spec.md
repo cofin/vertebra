@@ -157,7 +157,7 @@ tags:
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `09970202` — `4/4` tasks completed and the zero-context chapter review findings (async OCI copy confirmation, synchronous `renameObject`, `206`-required ranges, `e_tag`-required updates, IP-literal virtual-host rejection, signed-request coverage) are remediated.
+- **Verified Baseline (`HEAD`)**: `09970202` — `4/4` tasks completed with these verified invariants: async OCI copy confirmation, synchronous `renameObject`, `206`-required ranges, `e_tag`-required updates, IP-literal virtual-host rejection, and signed-request coverage.
 - **Remaining Tasks in Chapter**: None.
 - **Remaining Chapters**: `ch03`–`ch06`.
 

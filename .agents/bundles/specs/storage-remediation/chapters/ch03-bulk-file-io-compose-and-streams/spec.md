@@ -160,7 +160,7 @@ Analytical and pipeline workloads transferring multi-hundred-megabyte Parquet sh
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `46d39d95` — `4/4` tasks completed and the zero-context review findings remediated (`081d0163` Python, `46d39d95` Rust): cancellation-safe `.part`/multipart/compose cleanup, failed-part writer abort, 8 MiB framed compose fallback, unique compose temporaries, XML-consistent compose metadata, scoped batch cleanup, and writer finalizers.
+- **Verified Baseline (`HEAD`)**: `46d39d95` — `4/4` tasks completed with these verified invariants: cancellation-safe `.part`/multipart/compose cleanup, failed-part writer abort, 8 MiB framed compose fallback, unique compose temporaries, XML-consistent compose metadata, scoped batch cleanup, and writer finalizers.
 - **Remaining Tasks in Chapter**: None.
 - **Remaining Chapters**: `ch04`–`ch06`.
 

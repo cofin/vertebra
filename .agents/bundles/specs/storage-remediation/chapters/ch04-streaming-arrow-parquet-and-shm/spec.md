@@ -144,7 +144,7 @@ Three hot-path serialization and streaming modules still copy or buffer full pay
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Verified Baseline (`HEAD`)**: `85bff05a` — `3/3` tasks completed and the zero-context review findings remediated: unknown-size direct descriptors resolve via `head()`, `4 MiB` range windows re-sliced into `<= step` chunks, `416` for unsatisfiable direct ranges, Arrow IPC decoding through zero-copy `read_buffer`, string Parquet column options, duplicate column names, and a cached decoded SHM IPC table.
+- **Verified Baseline (`HEAD`)**: `85bff05a` — `3/3` tasks completed with these verified invariants: unknown-size direct descriptors resolve via `head()`, `4 MiB` range windows re-sliced into `<= step` chunks, `416` for unsatisfiable direct ranges, Arrow IPC decoding through zero-copy `read_buffer`, string Parquet column options, duplicate column names, and a cached decoded SHM IPC table.
 - **Remaining Tasks in Chapter**: None.
 - **Remaining Chapters**: `ch05`–`ch06`.
 
