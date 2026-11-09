@@ -1,5 +1,41 @@
 # Bundle Activity Log
 
+## [2026-11-09T02:25:00Z] flow-archive | storage-remediation
+
+Completed 6 chapters and 20 tasks on the feature branch; final correctness and fresh quality review `7139b40b` have no unresolved findings. Source range `077a3fe9..7139b40b` is preserved in Git. Full lint, locked Rust workspace, Python (2795 passed, 7 skipped), all-five native rebuild/stubtest, and documentation gates pass.
+
+Durable synthesis is committed in `object-storage.md`, `object-storage-limitations.md`, and `product.md` before spec deletion.
+
+Reviewed chapter checkpoints:
+- `ch01-native-gcs-plane-and-signing`: `4b81d314`.
+- `ch02-zero-copy-ffi-keys-and-backends`: `09970202`.
+- `ch03-bulk-file-io-compose-and-streams`: `46d39d95`.
+- `ch04-streaming-arrow-parquet-and-shm`: `85bff05a`.
+- `ch05-framework-adapters-and-test-hygiene`: `41d6d8c1`.
+- `ch06-docs-okf-and-plan-sync`: `7139b40b`.
+
+Functional task commits:
+- `storage-remediation:ch01:t01`: `f38d895b`.
+- `storage-remediation:ch01:t02`: `585e5dda`.
+- `storage-remediation:ch01:t03`: `0e43380e`.
+- `storage-remediation:ch01:t04`: `cb50c08e`.
+- `storage-remediation:ch02:t01`: `d889b958`.
+- `storage-remediation:ch02:t02`: `fb8dde11`.
+- `storage-remediation:ch02:t03`: `8eb43fb2`.
+- `storage-remediation:ch02:t04`: `211c3161`.
+- `storage-remediation:ch03:t01`: `f8bf065c`.
+- `storage-remediation:ch03:t02`: `62deb8c3`.
+- `storage-remediation:ch03:t03`: `70c23f63`.
+- `storage-remediation:ch03:t04`: `19dac0d8`.
+- `storage-remediation:ch04:t01`: `2789bb63`.
+- `storage-remediation:ch04:t02`: `f4606043`.
+- `storage-remediation:ch04:t03`: `113d25a5`.
+- `storage-remediation:ch05:t01`: `3b24b0af`.
+- `storage-remediation:ch05:t02`: `a04970be`.
+- `storage-remediation:ch05:t03`: `cd7f66bf`.
+- `storage-remediation:ch06:t01`: `ac8532d3`.
+- `storage-remediation:ch06:t02`: `5d2fc5d7`.
+
 ## [2026-11-08T18:55:28.220570Z] flow-archive | storage-completeness
 
 Completed 5 chapters and 15 tasks on the feature branch; final correctness and fresh quality review `a2af5066` have no unresolved findings. Source range `cdb978d3..a2af5066` is preserved in Git. Full lint, locked Rust workspace, Python (2608 passed, 74 skipped, 170 xfailed), all-five native rebuild/stubtest, and documentation gates pass. Offline native/framework/provider examples and 29 documentation checks pass; live cloud credential calls are not executed.

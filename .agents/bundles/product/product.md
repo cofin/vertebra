@@ -9,8 +9,8 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:docs-okf-specialist
-    at: "2026-11-09T01:40:00Z"
-    commit: ee1e7693
+    at: "2026-11-09T02:24:00Z"
+    commit: 7139b40b
 sources:
   - id: src-vertebra-bigquery-lib-rs
     resource: src/rs/vertebra-bigquery/src/lib.rs

@@ -10,8 +10,8 @@ tags:
 - signing
 verified:
 - by: agent:docs-okf-specialist
-  at: '2026-11-09T01:40:00Z'
-  commit: ee1e7693
+  at: '2026-11-09T02:24:00Z'
+  commit: 7139b40b
 sources:
 - id: core-gcp-auth
   resource: src/rs/vertebra-core/src/gcp_auth.rs
@@ -92,13 +92,13 @@ sources:
 - HTTP clients are pooled: `object_store` clients keep 64 idle connections per host, the GCS compose and IAM `reqwest` clients keep 32, all with 10 s connect and 300 s total timeouts [^storage-store] [^storage-signing].
 - GCS presigning forwards `GCSConfig.endpoint` as the URL origin, and S3 presigning honors `virtual_hosted_style` [^py-store] [^storage-signing].
 - `extract_buffer_bytes` keeps `StorageBuffer` and `bytes` zero-copy (`PyBackedBytes`) and copies any other C-contiguous `u8` buffer synchronously before releasing the GIL, so callers may mutate `bytearray` sources afterwards [^storage-lib].
-- Object keys pass `StorePath::parse` after trimming `/`, so spaces, `%`, and non-ASCII characters are stored verbatim; empty, `.`, and `..` segments raise `ValueError` [^storage-store] [^py-store].
+- Object keys collapse empty `/` and `.` segments in Python before passing `StorePath::parse`, so spaces, `%`, `~`, and non-ASCII characters are stored verbatim while `..` segments raise `ValueError` [^storage-store] [^py-store].
 - `get_range` rejects `offset + length` overflow with `ValueError` and answers `length == 0` with a `head` check and empty bytes [^storage-store].
 - `StorageError::Precondition` maps to `vertebra.typing.PreconditionError` (an `OSError`); `AlreadyExists` maps to `FileExistsError`, so `if_not_exists=True`, `copy(..., overwrite=False)`, and `rename(..., overwrite=False)` raise `FileExistsError` while `if_match` / `if_none_match` failures raise `PreconditionError` [^storage-lib] [^py-typing].
 - GCS `if_match` accepts a numeric generation directly or resolves a matching ETag to the object generation before a conditional `PutMode::Update` [^storage-store].
 - `OciObjectStore` streams GET bodies (`bytes_stream`) instead of buffering whole objects [^storage-oci].
 - `put_file` / `get_file` stream files over 8 MiB in parts; `get_file` writes a `.part` sibling and renames it into place; `get_files` / `put_files` run with bounded `buffer_unordered(concurrency)` and keep results in input order [^storage-store].
-- Python adds `download_many`, `upload_many`, and `staged_download` (unique directory under writable `/dev/shm`, else the temp dir), rejecting duplicate basenames or keys before any transfer [^py-store].
+- Python adds `download_many`, `upload_many`, and `staged_download` (unique directory under writable `/dev/shm`, else the temp dir; caller-owned `destination` preserves pre-existing files), rejecting duplicate basenames or keys before any transfer [^py-store].
 - `glob` matches full keys, so `*` and `?` also match `/`; `compose` uses the GCS compose API with 32-source folds whose temporaries are deleted on success, failure, or cancellation, and multipart concatenation elsewhere [^py-store] [^storage-store].
 - `open_reader(..., read_ahead=4_194_304)` serves short reads from one cached range window; `open_writer(..., part_size=8_388_608)` returns `SyncWritableFile` (`io.RawIOBase`) or `AsyncWritableFile`, whose `aclose()` returns `PutResult | None` [^py-store].
 - Parquet batch readers open with `read_ahead=0` and `pre_buffer=False`; whole-table reads default to `pre_buffer=True`; `write_parquet` exposes `use_dictionary`, `use_byte_stream_split`, and `options` forwarded to `ParquetWriter` [^py-arrow] [^py-store].
@@ -110,7 +110,7 @@ Known caveats (R2 custom domains, `fsync`, cancellation windows, request timeout
 
 ## Rust Engine
 
-`ObjectStoreEngine` wraps `Arc<dyn object_store::ObjectStore>` across `memory`, `file`, `s3`/`b2`, `r2`, `oci`, `gs`/`gcs`, `az`/`azure`/`abfs`, and `http`/`https`, and adds conditional `put_opts`, multipart sessions, file transfers, paging, `rename`, and GCS `compose` [^storage-store]. `MultipartUploadSession` buffers normalized S3/B2, R2, and OCI writes into 8 MiB parts so every non-final part meets the 5 MiB minimum [^storage-r2]. `SyncStreamReader` / `AsyncStreamReader` slice streamed `Bytes` to an optional `chunk_size` as zero-copy `StorageBuffer` views [^storage-lib]. `.to_async()` and `.to_sync()` clone the shared engine `Arc`, so in-memory data and HTTP pools are shared across handles [^storage-lib].
+`ObjectStoreEngine` wraps `Arc<dyn object_store::ObjectStore>` across `memory`, `file`, `s3`/`b2`, `r2`, `oci`, `gs`/`gcs`, `az`/`azure`/`abfs`, and `http`/`https`, and adds conditional `put_opts`, multipart sessions, file transfers, paging, `rename`, and GCS `compose` [^storage-store]. `MultipartUploadSession` buffers normalized S3/B2, R2, GCS, and OCI writes into 8 MiB parts so every non-final part meets the 5 MiB minimum [^storage-r2]. `SyncStreamReader` / `AsyncStreamReader` slice streamed `Bytes` to an optional `chunk_size` as zero-copy `StorageBuffer` views [^storage-lib]. `.to_async()` and `.to_sync()` clone the shared engine `Arc`, so in-memory data and HTTP pools are shared across handles [^storage-lib].
 
 ## Signing
 
