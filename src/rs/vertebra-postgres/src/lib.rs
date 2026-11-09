@@ -12,14 +12,21 @@ pub mod credentials;
 pub mod errors;
 pub mod extended;
 pub mod metadata;
+pub mod pool;
+pub mod portal;
 pub mod protocol;
+pub mod python_values;
 pub mod query;
 pub mod result;
 pub mod session;
 pub mod sync_client;
 pub mod tls;
+pub mod transaction;
 pub mod types;
 
+pub use crate::session::statements::{
+    CachedStatement, PoolerCapabilities, PoolerMode, StatementCache, StatementKey,
+};
 pub use codecs::{
     CodecContext, decode_value, decode_value_with_catalog, encode_value, encode_value_with_catalog,
     format_for_oid, format_for_oid_with_catalog,
@@ -29,9 +36,18 @@ pub use metadata::{
     OwnedTextField, OwnedTextResult, ParameterCandidate, ResolvedParameters,
     normalize_materialized_result, resolve_parameter_metadata,
 };
+pub use pool::{PoolStats, PooledConnection, PostgresPool, PostgresPoolOptions};
+pub use portal::{Portal, PortalEvent};
+pub use python_values::{
+    extract_parameters, extract_pg_value, pg_value_to_python, query_result_to_python,
+};
 pub use query::SimpleQueryCollector;
 pub use result::{
     Column, Format, PgNumeric, PgValue, QueryResult, TemporalKind, TransactionStatus, VectorKind,
+};
+pub use transaction::{
+    TransactionDisposition, TransactionOwner, TransactionScope, TransactionScopeKind,
+    TransactionState,
 };
 pub use types::{CompositeField, TypeCatalog, TypeInfo, TypeKind};
 
@@ -46,7 +62,7 @@ fn _postgres(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("FREE_THREADED", FREE_THREADED)?;
     m.add("GIL_USED", GIL_USED)?;
-    m.add_class::<sync_client::PySyncPostgresClient>()?;
-    m.add_class::<async_client::PyAsyncPostgresClient>()?;
+    sync_client::PySyncPostgresClient::register(m)?;
+    async_client::PyAsyncPostgresClient::register(m)?;
     Ok(())
 }

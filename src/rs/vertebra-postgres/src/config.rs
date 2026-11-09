@@ -9,6 +9,7 @@ use vertebra_db::dialer::{AlloyDbClusterUri, CloudSqlInstanceUri};
 
 use crate::credentials::{CLOUDSQL_LOGIN_SCOPE, extract_explicit_scopes, has_static_token_key};
 use crate::errors::PostgresError;
+use crate::session::statements::PoolerMode;
 
 /// SCRAM channel-binding negotiation policy (`disable`, `prefer`, `require`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -85,6 +86,9 @@ pub struct RawPostgresOptions {
     pub enable_iam_auth: bool,
     pub cloud_auth_options: HashMap<String, String>,
     pub iam_auth_options: HashMap<String, String>,
+    pub pooler_mode: String,
+    pub protocol_level_pooler_cache: bool,
+    pub statement_cache_size: i64,
 }
 
 impl RawPostgresOptions {
@@ -132,6 +136,9 @@ impl Default for RawPostgresOptions {
             enable_iam_auth: false,
             cloud_auth_options: HashMap::new(),
             iam_auth_options: HashMap::new(),
+            pooler_mode: "direct".to_string(),
+            protocol_level_pooler_cache: false,
+            statement_cache_size: 256,
         }
     }
 }
@@ -204,6 +211,9 @@ pub struct PostgresConfig {
     pub enable_iam_auth: bool,
     pub cloud_auth_options: HashMap<String, String>,
     pub iam_auth_options: HashMap<String, String>,
+    pub pooler_mode: PoolerMode,
+    pub protocol_level_pooler_cache: bool,
+    pub statement_cache_size: usize,
 }
 
 impl PostgresConfig {
@@ -389,6 +399,17 @@ impl PostgresConfig {
             ));
         }
 
+        let pooler_mode = PoolerMode::parse(&raw.pooler_mode)?;
+        if raw.statement_cache_size < 0 {
+            return Err(PostgresError::Config(format!(
+                "statement_cache_size must be >= 0, got {}",
+                raw.statement_cache_size
+            )));
+        }
+        let statement_cache_size = usize::try_from(raw.statement_cache_size).map_err(|_| {
+            PostgresError::Config("statement_cache_size overflowed usize".to_string())
+        })?;
+
         Ok(Self {
             user: raw.user,
             database: raw.database,
@@ -416,6 +437,9 @@ impl PostgresConfig {
             enable_iam_auth: raw.enable_iam_auth,
             cloud_auth_options: raw.cloud_auth_options,
             iam_auth_options: raw.iam_auth_options,
+            pooler_mode,
+            protocol_level_pooler_cache: raw.protocol_level_pooler_cache,
+            statement_cache_size,
         })
     }
 

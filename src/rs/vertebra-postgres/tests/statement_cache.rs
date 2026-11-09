@@ -1,0 +1,282 @@
+//! Integration tests for bounded LRU prepared-statement cache, lazy `Close('S')`
+//! piggybacking, `0A000`/`XX000` invalidation, and transaction/statement pooler auto-detection (`ch13:t03`).
+
+extern crate _postgres as vertebra_postgres;
+
+use std::collections::BTreeMap;
+
+use bytes::{BufMut, BytesMut};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use vertebra_postgres::codecs::INT4_OID;
+use vertebra_postgres::config::RawPostgresOptions;
+use vertebra_postgres::extended::Parameter;
+use vertebra_postgres::result::PgValue;
+use vertebra_postgres::session::{
+    SessionHandle,
+    statements::{
+        PoolerCapabilities, PoolerMode, StatementCache, StatementKey, is_pooler_banner_parameter,
+        is_statement_invalidation_sqlstate,
+    },
+};
+
+fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(5 + body.len());
+    out.push(tag);
+    out.extend_from_slice(&((body.len() + 4) as i32).to_be_bytes());
+    out.extend_from_slice(body);
+    out
+}
+
+fn auth_ok_and_ready(extra_params: &[(&str, &str)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&frame(b'R', &0i32.to_be_bytes()));
+    out.extend_from_slice(&frame(b'S', b"client_encoding\0UTF8\0"));
+    out.extend_from_slice(&frame(b'S', b"DateStyle\0ISO, MDY\0"));
+    out.extend_from_slice(&frame(b'S', b"TimeZone\0UTC\0"));
+    for (k, v) in extra_params {
+        let mut p = Vec::new();
+        p.extend_from_slice(k.as_bytes());
+        p.push(0);
+        p.extend_from_slice(v.as_bytes());
+        p.push(0);
+        out.extend_from_slice(&frame(b'S', &p));
+    }
+    out.extend_from_slice(&frame(b'K', &[0, 0, 0, 1, 0, 0, 0, 2]));
+    out.extend_from_slice(&frame(b'Z', b"I"));
+    out
+}
+
+fn param_desc(oids: &[u32]) -> Vec<u8> {
+    let mut body = BytesMut::new();
+    body.put_i16(oids.len() as i16);
+    for &oid in oids {
+        body.put_u32(oid);
+    }
+    frame(b't', &body)
+}
+
+fn row_desc(cols: &[(&str, u32, i16)]) -> Vec<u8> {
+    let mut body = BytesMut::new();
+    body.put_i16(cols.len() as i16);
+    for &(name, oid, fmt) in cols {
+        body.put_slice(name.as_bytes());
+        body.put_u8(0);
+        body.put_u32(0);
+        body.put_i16(0);
+        body.put_u32(oid);
+        body.put_i16(4);
+        body.put_i32(-1);
+        body.put_i16(fmt);
+    }
+    frame(b'T', &body)
+}
+
+fn data_row_text(val: &str) -> Vec<u8> {
+    let mut body = BytesMut::new();
+    body.put_i16(1);
+    body.put_i32(val.len() as i32);
+    body.put_slice(val.as_bytes());
+    frame(b'D', &body)
+}
+
+fn data_row_int4_bin(val: i32) -> Vec<u8> {
+    let mut body = BytesMut::new();
+    body.put_i16(1);
+    body.put_i32(4);
+    body.put_i32(val);
+    frame(b'D', &body)
+}
+
+fn cmd_complete(tag: &str) -> Vec<u8> {
+    let mut body = Vec::with_capacity(tag.len() + 1);
+    body.extend_from_slice(tag.as_bytes());
+    body.push(0);
+    frame(b'C', &body)
+}
+
+async fn read_startup(sock: &mut tokio::net::TcpStream) {
+    let mut len_buf = [0u8; 4];
+    sock.read_exact(&mut len_buf).await.unwrap();
+    let len = i32::from_be_bytes(len_buf) as usize;
+    let mut body = vec![0u8; len - 4];
+    sock.read_exact(&mut body).await.unwrap();
+}
+
+async fn read_until_sync(sock: &mut tokio::net::TcpStream) -> Vec<(u8, Vec<u8>)> {
+    let mut frames = Vec::new();
+    loop {
+        let mut hdr = [0u8; 5];
+        sock.read_exact(&mut hdr).await.unwrap();
+        let tag = hdr[0];
+        let len = i32::from_be_bytes([hdr[1], hdr[2], hdr[3], hdr[4]]) as usize;
+        let mut body = vec![0u8; len - 4];
+        sock.read_exact(&mut body).await.unwrap();
+        frames.push((tag, body));
+        if tag == b'S' {
+            break;
+        }
+    }
+    frames
+}
+
+fn loopback_handle(port: u16, capacity: usize, pooler_mode: &str) -> SessionHandle {
+    let mut raw = RawPostgresOptions::new("127.0.0.1", "postgres", "appdb");
+    raw.port = i64::from(port);
+    raw.sslmode = "disable".to_string();
+    raw.statement_cache_size = capacity as i64;
+    raw.pooler_mode = pooler_mode.to_string();
+    SessionHandle::new(raw).unwrap()
+}
+
+#[test]
+fn lru_eviction_pooler_detection_and_sqlstate_invalidation_unit() {
+    assert!(is_pooler_banner_parameter("pgbouncer.version"));
+    assert!(is_pooler_banner_parameter("pgbouncer.pool_mode"));
+    assert!(is_pooler_banner_parameter(
+        "pgbouncer.max_prepared_statements"
+    ));
+    assert!(!is_pooler_banner_parameter("server_version"));
+
+    assert!(is_statement_invalidation_sqlstate("0A000"));
+    assert!(is_statement_invalidation_sqlstate("26000"));
+    assert!(is_statement_invalidation_sqlstate("XX000"));
+    assert!(!is_statement_invalidation_sqlstate("23505"));
+
+    let empty_params = BTreeMap::new();
+    let caps_tx = PoolerCapabilities::resolve(PoolerMode::Transaction, 128, false, &empty_params);
+    assert_eq!(caps_tx.effective_capacity, 0);
+    assert!(caps_tx.supports_scoped_state());
+
+    let caps_stmt = PoolerCapabilities::resolve(PoolerMode::Statement, 128, true, &empty_params);
+    assert_eq!(caps_stmt.effective_capacity, 0);
+    assert!(!caps_stmt.supports_scoped_state());
+
+    let mut bouncer_params = BTreeMap::new();
+    bouncer_params.insert("pgbouncer.pool_mode".to_string(), "transaction".to_string());
+    let caps_auto = PoolerCapabilities::resolve(PoolerMode::Auto, 128, false, &bouncer_params);
+    assert_eq!(caps_auto.effective_mode, PoolerMode::Transaction);
+    assert_eq!(caps_auto.effective_capacity, 0);
+
+    let cache = StatementCache::new(2);
+    assert_eq!(cache.capacity(), 2);
+    let k1 = StatementKey::new("SELECT $1", vec![INT4_OID], 0);
+    let k2 = StatementKey::new("SELECT $1", vec![25], 0);
+    assert_ne!(k1, k2);
+}
+
+#[tokio::test]
+async fn named_statement_cache_hit_skips_parse_and_evicts_lru_with_close_frame() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        read_startup(&mut sock).await;
+        sock.write_all(&auth_ok_and_ready(&[])).await.unwrap();
+
+        // 1. Cold query 1 ("SELECT $1::int4") -> Parse("vtb_s_1") + Describe(S) + Bind + Describe(P) + Execute + Close(P) + Sync
+        let f1 = read_until_sync(&mut sock).await;
+        let tags1: Vec<u8> = f1.iter().map(|f| f.0).collect();
+        assert_eq!(tags1, vec![b'P', b'D', b'B', b'D', b'E', b'C', b'S']);
+        assert!(f1[0].1.starts_with(b"vtb_s_1\0"));
+        let mut r1 = Vec::new();
+        r1.extend_from_slice(&frame(b'1', &[]));
+        r1.extend_from_slice(&param_desc(&[INT4_OID]));
+        r1.extend_from_slice(&row_desc(&[("v", INT4_OID, 0)]));
+        r1.extend_from_slice(&frame(b'2', &[]));
+        r1.extend_from_slice(&row_desc(&[("v", INT4_OID, 0)]));
+        r1.extend_from_slice(&data_row_text("7"));
+        r1.extend_from_slice(&cmd_complete("SELECT 1"));
+        r1.extend_from_slice(&frame(b'3', &[]));
+        r1.extend_from_slice(&frame(b'Z', b"I"));
+        sock.write_all(&r1).await.unwrap();
+
+        // 2. Warm query 1 -> Bind("vtb_s_1") + Describe(P) + Execute + Close(P) + Sync (NO Parse!)
+        let f2 = read_until_sync(&mut sock).await;
+        let tags2: Vec<u8> = f2.iter().map(|f| f.0).collect();
+        assert_eq!(tags2, vec![b'B', b'D', b'E', b'C', b'S']);
+        let mut r2 = Vec::new();
+        r2.extend_from_slice(&frame(b'2', &[]));
+        r2.extend_from_slice(&row_desc(&[("v", INT4_OID, 1)]));
+        r2.extend_from_slice(&data_row_int4_bin(42));
+        r2.extend_from_slice(&cmd_complete("SELECT 1"));
+        r2.extend_from_slice(&frame(b'3', &[]));
+        r2.extend_from_slice(&frame(b'Z', b"I"));
+        sock.write_all(&r2).await.unwrap();
+
+        // 3. Cold query 2 ("SELECT $1::int4 + 1") with capacity=1:
+        // Parse("vtb_s_2") inserts and evicts "vtb_s_1" for the FOLLOWING query!
+        let f3 = read_until_sync(&mut sock).await;
+        let tags3: Vec<u8> = f3.iter().map(|f| f.0).collect();
+        assert_eq!(tags3, vec![b'P', b'D', b'B', b'D', b'E', b'C', b'S']);
+        assert!(f3[0].1.starts_with(b"vtb_s_2\0"));
+        let mut r3 = Vec::new();
+        r3.extend_from_slice(&frame(b'1', &[]));
+        r3.extend_from_slice(&param_desc(&[INT4_OID]));
+        r3.extend_from_slice(&row_desc(&[("v", INT4_OID, 0)]));
+        r3.extend_from_slice(&frame(b'2', &[]));
+        r3.extend_from_slice(&row_desc(&[("v", INT4_OID, 0)]));
+        r3.extend_from_slice(&data_row_text("99"));
+        r3.extend_from_slice(&cmd_complete("SELECT 1"));
+        r3.extend_from_slice(&frame(b'3', &[]));
+        r3.extend_from_slice(&frame(b'Z', b"I"));
+        sock.write_all(&r3).await.unwrap();
+
+        // 4. Warm query 2 piggybacks Close('S', "vtb_s_1") before Bind("vtb_s_2")!
+        let f4 = read_until_sync(&mut sock).await;
+        let tags4: Vec<u8> = f4.iter().map(|f| f.0).collect();
+        assert_eq!(tags4, vec![b'C', b'B', b'D', b'E', b'C', b'S']);
+        assert_eq!(&f4[0].1, b"Svtb_s_1\0");
+        let mut r4 = Vec::new();
+        r4.extend_from_slice(&frame(b'3', &[]));
+        r4.extend_from_slice(&frame(b'2', &[]));
+        r4.extend_from_slice(&row_desc(&[("v", INT4_OID, 1)]));
+        r4.extend_from_slice(&data_row_int4_bin(100));
+        r4.extend_from_slice(&cmd_complete("SELECT 1"));
+        r4.extend_from_slice(&frame(b'3', &[]));
+        r4.extend_from_slice(&frame(b'Z', b"I"));
+        sock.write_all(&r4).await.unwrap();
+    });
+
+    let mut handle = loopback_handle(port, 1, "session");
+    handle.connect().await.unwrap();
+
+    let res1 = handle
+        .query_shared("SELECT $1::int4", &[Parameter::new(PgValue::Int4(7))], None)
+        .await
+        .unwrap();
+    assert_eq!(res1.rows[0][0], PgValue::Int4(7));
+
+    let res2 = handle
+        .query_shared(
+            "SELECT $1::int4",
+            &[Parameter::new(PgValue::Int4(42))],
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(res2.rows[0][0], PgValue::Int4(42));
+
+    let res3 = handle
+        .query_shared(
+            "SELECT $1::int4 + 1",
+            &[Parameter::new(PgValue::Int4(98))],
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(res3.rows[0][0], PgValue::Int4(99));
+
+    let res4 = handle
+        .query_shared(
+            "SELECT $1::int4 + 1",
+            &[Parameter::new(PgValue::Int4(99))],
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(res4.rows[0][0], PgValue::Int4(100));
+
+    server.await.unwrap();
+}

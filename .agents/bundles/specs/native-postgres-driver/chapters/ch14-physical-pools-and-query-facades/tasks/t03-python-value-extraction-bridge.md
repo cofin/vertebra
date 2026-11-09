@@ -5,7 +5,7 @@ chapter_id: ch14-physical-pools-and-query-facades
 title: "Bridge lossless native PostgreSQL values and SQLSTATE errors to Python"
 description: "Convert owned Rust PgValue and QueryResult records to/from frozen Python msgspec records and map PostgresError (including AfterCompletion.completed_result) to canonical vertebra._vertebra exceptions."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:

@@ -5,7 +5,7 @@ chapter_id: ch13-transactions-portals-and-statement-cache
 title: "Stream bounded results through session-retaining portals"
 description: "Expose a concrete Rust Portal with row-limited Execute, incremental PortalEvent resumption, pinned TransactionScope ownership, and nonblocking Drop cleanup."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:

@@ -132,6 +132,7 @@ pub struct TypeCatalog {
     types: HashMap<u32, TypeInfo>,
     builtin_oids: HashSet<u32>,
     extension_oids: HashMap<String, u32>,
+    generation: u64,
 }
 
 impl Default for TypeCatalog {
@@ -245,7 +246,13 @@ impl TypeCatalog {
             types,
             builtin_oids,
             extension_oids: HashMap::new(),
+            generation: 0,
         }
+    }
+
+    /// Return the current catalog invalidation generation (`0` initially).
+    pub const fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Look up a [`TypeInfo`] entry by PostgreSQL `oid`.
@@ -313,6 +320,12 @@ impl TypeCatalog {
     pub fn invalidate(&mut self) {
         self.types.retain(|oid, _| self.builtin_oids.contains(oid));
         self.extension_oids.clear();
+        self.generation = self.generation.saturating_add(1);
+    }
+
+    /// Alias for [`TypeCatalog::invalidate`] that clears discovered types and increments [`TypeCatalog::generation`].
+    pub fn invalidate_all(&mut self) {
+        self.invalidate();
     }
 
     /// Remove a single dynamically discovered custom `oid` (no-op for built-ins).
@@ -320,12 +333,14 @@ impl TypeCatalog {
         if !self.builtin_oids.contains(&oid) {
             self.types.remove(&oid);
             self.extension_oids.retain(|_, &mut v| v != oid);
+            self.generation = self.generation.saturating_add(1);
         }
     }
 
     /// Clear unqualified extension type bindings when session `search_path` changes while preserving verified OIDs.
     pub fn invalidate_extension_names(&mut self) {
         self.extension_oids.retain(|k, _| k.contains('.'));
+        self.generation = self.generation.saturating_add(1);
     }
 
     /// Validate a composite schema against the catalog and invalidate the stale OID on mismatch.

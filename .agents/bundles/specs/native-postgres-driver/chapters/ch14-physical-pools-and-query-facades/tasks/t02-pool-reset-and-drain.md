@@ -5,7 +5,7 @@ chapter_id: ch14-physical-pools-and-query-facades
 title: "Implement rollback/DISCARD ALL pool reset and draining shutdown"
 description: "Release pooled sessions only after bounded drain, rollback, DISCARD ALL, GUC restoration, and cache invalidation, retiring uncertain sockets and draining pool shutdown under a deadline."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:

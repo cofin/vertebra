@@ -5,7 +5,7 @@ chapter_id: ch13-transactions-portals-and-statement-cache
 title: "Enforce pinned transaction and numeric savepoint command state"
 description: "Track actual server I/T/E transaction state, numeric savepoint identifiers, command-tag transitions, and lock-free logical owner pinning in vertebra-postgres."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:

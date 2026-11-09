@@ -5,7 +5,7 @@ chapter_id: ch13-transactions-portals-and-statement-cache
 title: "Cache server prepared statements with pooler capability attestation"
 description: "Implement per-session LRU prepared statement caching in vertebra-postgres with PgBouncer/PgCat ParameterStatus capability detection, safe eviction, and zero-replay invalidation."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:

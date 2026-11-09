@@ -5,12 +5,12 @@ chapter_id: ch13-transactions-portals-and-statement-cache
 title: "Chapter 13: Transaction Ownership, Bounded Portals, and Pooler-Safe Statement Caching"
 description: Enforce server-verified transaction and savepoint ownership, stream bounded named portals under retained transaction scopes, and cache server prepared statements safely across direct and PgBouncer/PgCat pooler modes.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch12-pgvector-and-extended-query
 replan_trigger: null
-current_task: "native-postgres-driver:ch13:t01"
+current_task: null
 plan_revision: 5
 plan_commit: fd571e3a
 state_revision: 0
@@ -124,9 +124,9 @@ Progress: `[0/0 files documented in ch13]` (public Python `.pyi` stubs and user/
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch13:t01 — Enforce pinned transaction and numeric savepoint command state (tasks/t01-transaction-and-savepoint-state.md)
-- [ ] native-postgres-driver:ch13:t02 — Stream bounded results through session-retaining portals (tasks/t02-bounded-portal-streaming.md)
-- [ ] native-postgres-driver:ch13:t03 — Cache server prepared statements with pooler capability attestation (tasks/t03-prepared-statement-cache-and-poolers.md)
+- [x] native-postgres-driver:ch13:t01 — Enforce pinned transaction and numeric savepoint command state (tasks/t01-transaction-and-savepoint-state.md)
+- [x] native-postgres-driver:ch13:t02 — Stream bounded results through session-retaining portals (tasks/t02-bounded-portal-streaming.md)
+- [x] native-postgres-driver:ch13:t03 — Cache server prepared statements with pooler capability attestation (tasks/t03-prepared-statement-cache-and-poolers.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test transaction_state --test portal_protocol --test statement_cache && cargo clippy --manifest-path src/rs/Cargo.toml -p vertebra-postgres --all-targets -- -D warnings` exits `0`.
 

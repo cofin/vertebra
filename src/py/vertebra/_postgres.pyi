@@ -1,7 +1,13 @@
 """Type stubs for the vertebra._postgres native extension module."""
 
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Mapping, Sequence
 from typing import final
+
+from vertebra.db.adapters.postgres.types import (
+    PgParameter,
+    PostgresQueryResult,
+    PostgresValue,
+)
 
 __version__: str
 FREE_THREADED: bool
@@ -50,6 +56,44 @@ class SyncPostgresClient:
 
     def close(self) -> None:
         """Close the physical PostgreSQL session idempotently."""
+        ...
+
+    def query(
+        self,
+        sql: str,
+        parameters: Sequence[PostgresValue | PgParameter] | None = None,
+        *,
+        parameter_oids: Sequence[int] | None = None,
+    ) -> PostgresQueryResult:
+        """Execute a single-statement PostgreSQL Protocol 3.0 extended query."""
+        ...
+
+    def query_multi(self, sql: str) -> tuple[PostgresQueryResult, ...]:
+        """Execute a multi-statement PostgreSQL Protocol 3.0 simple query ('Q')."""
+        ...
+
+    def begin(self) -> None:
+        """Start an explicit transaction ('BEGIN')."""
+        ...
+
+    def commit(self) -> None:
+        """Commit the current transaction ('COMMIT')."""
+        ...
+
+    def rollback(self) -> None:
+        """Roll back the current transaction ('ROLLBACK')."""
+        ...
+
+    def savepoint(self, token: int) -> None:
+        """Create a numeric savepoint ('SAVEPOINT vtb_sp_<token>')."""
+        ...
+
+    def release_savepoint(self, token: int) -> None:
+        """Release an active numeric savepoint ('RELEASE SAVEPOINT vtb_sp_<token>')."""
+        ...
+
+    def rollback_to_savepoint(self, token: int) -> None:
+        """Roll back to an active numeric savepoint ('ROLLBACK TO SAVEPOINT vtb_sp_<token>')."""
         ...
 
     @property
@@ -105,6 +149,44 @@ class AsyncPostgresClient:
 
     def close(self) -> Awaitable[None]:
         """Mark the session closed and schedule asynchronous Terminate shutdown."""
+        ...
+
+    def query(
+        self,
+        sql: str,
+        parameters: Sequence[PostgresValue | PgParameter] | None = None,
+        *,
+        parameter_oids: Sequence[int] | None = None,
+    ) -> Awaitable[PostgresQueryResult]:
+        """Execute a single-statement PostgreSQL Protocol 3.0 extended query asynchronously."""
+        ...
+
+    def query_multi(self, sql: str) -> Awaitable[tuple[PostgresQueryResult, ...]]:
+        """Execute a multi-statement PostgreSQL Protocol 3.0 simple query ('Q') asynchronously."""
+        ...
+
+    def begin(self) -> Awaitable[None]:
+        """Start an explicit transaction ('BEGIN') asynchronously."""
+        ...
+
+    def commit(self) -> Awaitable[None]:
+        """Commit the current transaction ('COMMIT') asynchronously."""
+        ...
+
+    def rollback(self) -> Awaitable[None]:
+        """Roll back the current transaction ('ROLLBACK') asynchronously."""
+        ...
+
+    def savepoint(self, token: int) -> Awaitable[None]:
+        """Create a numeric savepoint ('SAVEPOINT vtb_sp_<token>') asynchronously."""
+        ...
+
+    def release_savepoint(self, token: int) -> Awaitable[None]:
+        """Release an active numeric savepoint ('RELEASE SAVEPOINT vtb_sp_<token>') asynchronously."""
+        ...
+
+    def rollback_to_savepoint(self, token: int) -> Awaitable[None]:
+        """Roll back to an active numeric savepoint ('ROLLBACK TO SAVEPOINT vtb_sp_<token>') asynchronously."""
         ...
 
     @property

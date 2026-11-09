@@ -5,7 +5,7 @@ chapter_id: ch14-physical-pools-and-query-facades
 title: "Expose typed sync and async query and transaction client facades"
 description: "Extend SyncPostgresClient and AsyncPostgresClient with typed query, query_multi, transaction, and savepoint methods plus _postgres.pyi stubs."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:

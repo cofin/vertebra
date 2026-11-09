@@ -9,8 +9,9 @@ use pyo3::types::{PyBool, PyDict, PyString, PyTuple};
 use vertebra_db::py_async::block_on_db;
 
 use crate::config::{PostgresConfig, RawPostgresOptions};
-use crate::errors::postgres_error_to_py;
-use crate::session::{ClientBeginConnect, ClientSession};
+use crate::errors::{PostgresError, postgres_error_to_py};
+use crate::python_values::{extract_parameters, query_result_to_python};
+use crate::session::{ClientBeginConnect, SessionHandle};
 
 /// Extract a `Mapping[str, str]` snapshot while attached to the Python runtime.
 pub(crate) fn extract_string_map(
@@ -60,6 +61,27 @@ pub(crate) fn extract_strict_i64(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
     }
     obj.extract::<i64>()
         .map_err(|_| PyTypeError::new_err("expected int"))
+}
+
+pub(crate) fn extract_strict_u64(obj: &Bound<'_, PyAny>) -> PyResult<u64> {
+    if obj.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err("expected int, not bool"));
+    }
+    let val = obj
+        .extract::<i128>()
+        .map_err(|_| PyTypeError::new_err("expected int"))?;
+    if val < 0 {
+        return Err(postgres_error_to_py(
+            obj.py(),
+            PostgresError::Interface("savepoint token must be >= 0".to_string()),
+        ));
+    }
+    u64::try_from(val).map_err(|_| {
+        postgres_error_to_py(
+            obj.py(),
+            PostgresError::Interface("savepoint token overflowed u64".to_string()),
+        )
+    })
 }
 
 pub(crate) fn extract_strict_opt_i64(obj: &Bound<'_, PyAny>) -> PyResult<Option<i64>> {
@@ -153,6 +175,7 @@ pub(crate) fn build_validated_config(
         enable_iam_auth,
         cloud_auth_options: cloud_auth_options.unwrap_or_default(),
         iam_auth_options: iam_auth_options.unwrap_or_default(),
+        ..RawPostgresOptions::default()
     };
 
     PostgresConfig::validate(raw).map_err(|e| postgres_error_to_py(py, e))
@@ -179,7 +202,19 @@ pub(crate) fn build_validated_config(
     )
 )]
 pub struct PySyncPostgresClient {
-    pub(crate) session: Arc<ClientSession>,
+    pub(crate) session: Arc<SessionHandle>,
+}
+
+impl PySyncPostgresClient {
+    /// Wrap an existing [`SessionHandle`] (such as a checked-out pool lease).
+    pub fn from_session(session: Arc<SessionHandle>) -> Self {
+        Self { session }
+    }
+
+    /// Register `SyncPostgresClient` on the `vertebra._postgres` module.
+    pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+        m.add_class::<Self>()
+    }
 }
 
 #[pymethods]
@@ -278,7 +313,7 @@ impl PySyncPostgresClient {
             iam_auth_options,
         )?;
         Ok(Self {
-            session: Arc::new(ClientSession::new(cfg)),
+            session: Arc::new(SessionHandle::from_config(cfg)),
         })
     }
 
@@ -286,7 +321,7 @@ impl PySyncPostgresClient {
     pub fn connect(&self, py: Python<'_>) -> PyResult<()> {
         match self
             .session
-            .begin_connect()
+            .begin_client_connect()
             .map_err(|e| postgres_error_to_py(py, e))?
         {
             ClientBeginConnect::AlreadyReady => Ok(()),
@@ -299,23 +334,156 @@ impl PySyncPostgresClient {
         }
     }
 
-    /// Close the physical PostgreSQL session idempotently, sending `Terminate` (`'X'`) once if `Ready`.
+    /// Close the physical PostgreSQL session idempotently, sending `Terminate` (`'X'`) once if direct or releasing if pooled.
     pub fn close(&self, py: Python<'_>) -> PyResult<()> {
-        let maybe_conn = self
+        let maybe_backing = self
             .session
             .begin_close()
             .map_err(|e| postgres_error_to_py(py, e))?;
-        if let Some(mut conn) = maybe_conn {
-            py.detach(|| block_on_db(async move { conn.close().await }))
+        if let Some(backing) = maybe_backing {
+            py.detach(|| block_on_db(async move { backing.close().await }))
                 .map_err(|e| postgres_error_to_py(py, e))?;
         }
         Ok(())
     }
 
+    /// Execute a single-statement PostgreSQL Protocol 3.0 extended query, returning `PostgresQueryResult`.
+    #[pyo3(signature = (sql, parameters = None, *, parameter_oids = None))]
+    pub fn query(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+        parameter_oids: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let none_bound = py.None().into_bound(py);
+        let params_ref = parameters.unwrap_or(&none_bound);
+        let (params, oids) = extract_parameters(py, params_ref, parameter_oids)
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        let session = Arc::clone(&self.session);
+        let sql_owned = sql.to_owned();
+        let res = py
+            .detach(move || {
+                block_on_db(async move {
+                    session
+                        .query_shared(&sql_owned, &params, oids.as_deref())
+                        .await
+                })
+            })
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        query_result_to_python(py, &res)
+    }
+
+    /// Execute a multi-statement PostgreSQL Protocol 3.0 simple query (`'Q'`), returning `tuple[PostgresQueryResult, ...]`.
+    pub fn query_multi(&self, py: Python<'_>, sql: &str) -> PyResult<Py<PyAny>> {
+        let session = Arc::clone(&self.session);
+        let sql_owned = sql.to_owned();
+        let results = py
+            .detach(move || {
+                block_on_db(async move { session.simple_query_shared(&sql_owned).await })
+            })
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        let mut py_results = Vec::with_capacity(results.len());
+        for res in &results {
+            py_results.push(query_result_to_python(py, res)?);
+        }
+        Ok(PyTuple::new(py, py_results)?.into_any().unbind())
+    }
+
+    /// Start an explicit transaction (`BEGIN`).
+    pub fn begin(&self, py: Python<'_>) -> PyResult<()> {
+        let session = Arc::clone(&self.session);
+        py.detach(move || {
+            block_on_db(async move {
+                let mut op = session.acquire_operation().await?;
+                op.connection_mut().begin().await?;
+                Ok::<(), PostgresError>(())
+            })
+        })
+        .map_err(|e| postgres_error_to_py(py, e))
+    }
+
+    /// Commit the current transaction (`COMMIT`).
+    pub fn commit(&self, py: Python<'_>) -> PyResult<()> {
+        let session = Arc::clone(&self.session);
+        py.detach(move || {
+            block_on_db(async move {
+                let mut op = session.acquire_operation().await?;
+                op.connection_mut().commit().await?;
+                Ok::<(), PostgresError>(())
+            })
+        })
+        .map_err(|e| postgres_error_to_py(py, e))
+    }
+
+    /// Roll back the current transaction (`ROLLBACK`).
+    pub fn rollback(&self, py: Python<'_>) -> PyResult<()> {
+        let session = Arc::clone(&self.session);
+        py.detach(move || {
+            block_on_db(async move {
+                let mut op = session.acquire_operation().await?;
+                op.connection_mut().rollback().await?;
+                Ok::<(), PostgresError>(())
+            })
+        })
+        .map_err(|e| postgres_error_to_py(py, e))
+    }
+
+    /// Create a numeric savepoint (`SAVEPOINT vtb_sp_<token>`).
+    pub fn savepoint(
+        &self,
+        py: Python<'_>,
+        #[pyo3(from_py_with = extract_strict_u64)] token: u64,
+    ) -> PyResult<()> {
+        let session = Arc::clone(&self.session);
+        py.detach(move || {
+            block_on_db(async move {
+                let mut op = session.acquire_operation().await?;
+                op.connection_mut().savepoint(token).await?;
+                Ok::<(), PostgresError>(())
+            })
+        })
+        .map_err(|e| postgres_error_to_py(py, e))
+    }
+
+    /// Release an active numeric savepoint (`RELEASE SAVEPOINT vtb_sp_<token>`).
+    pub fn release_savepoint(
+        &self,
+        py: Python<'_>,
+        #[pyo3(from_py_with = extract_strict_u64)] token: u64,
+    ) -> PyResult<()> {
+        let session = Arc::clone(&self.session);
+        py.detach(move || {
+            block_on_db(async move {
+                let mut op = session.acquire_operation().await?;
+                op.connection_mut().release_savepoint(token).await?;
+                Ok::<(), PostgresError>(())
+            })
+        })
+        .map_err(|e| postgres_error_to_py(py, e))
+    }
+
+    /// Roll back to an active numeric savepoint (`ROLLBACK TO SAVEPOINT vtb_sp_<token>`).
+    pub fn rollback_to_savepoint(
+        &self,
+        py: Python<'_>,
+        #[pyo3(from_py_with = extract_strict_u64)] token: u64,
+    ) -> PyResult<()> {
+        let session = Arc::clone(&self.session);
+        py.detach(move || {
+            block_on_db(async move {
+                let mut op = session.acquire_operation().await?;
+                op.connection_mut().rollback_to_savepoint(token).await?;
+                Ok::<(), PostgresError>(())
+            })
+        })
+        .map_err(|e| postgres_error_to_py(py, e))
+    }
+
     /// Return `True` unless an authenticated session has reached `ReadyForQuery(Idle)` and has not been closed.
     #[getter]
     pub fn closed(&self) -> bool {
-        self.session.is_closed()
+        self.session.is_client_closed()
     }
 
     /// Return a newly allocated dictionary copy of the session's `ParameterStatus` values.
@@ -335,7 +503,7 @@ impl PySyncPostgresClient {
             self.session.config().port,
             self.session.config().database,
             self.session.config().user,
-            self.session.is_closed(),
+            self.session.is_client_closed(),
         )
     }
 }

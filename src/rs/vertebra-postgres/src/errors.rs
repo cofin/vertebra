@@ -16,6 +16,15 @@ pub struct ServerError {
     pub diagnostics: Vec<(u8, String)>,
 }
 
+impl ServerError {
+    /// Look up a specific PostgreSQL `ErrorResponse` field byte (e.g. `b'D'` for detail, `b'n'` for constraint).
+    pub fn diagnostic(&self, tag: u8) -> Option<&str> {
+        self.diagnostics
+            .iter()
+            .find_map(|(k, v)| (*k == tag).then_some(v.as_str()))
+    }
+}
+
 impl fmt::Display for ServerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} ({}): {}", self.severity, self.sqlstate, self.message)
@@ -31,6 +40,10 @@ pub enum PostgresError {
     Interface(String),
     #[error("PostgreSQL data error: {0}")]
     Data(String),
+    #[error("PostgreSQL operational error: {0}")]
+    Operational(String),
+    #[error("PostgreSQL connection pool exhausted: {0}")]
+    PoolExhausted(String),
     #[error("PostgreSQL authentication error: {0}")]
     Auth(String),
     #[error("unsupported PostgreSQL authentication: {0}")]
@@ -81,14 +94,14 @@ impl PostgresError {
         }
     }
 
-    /// Return `true` when this error represents a transient transport or server condition.
+    /// Return `true` when this error represents a transient transport, pool, or server condition.
     pub fn is_transient(&self) -> bool {
         match self {
-            Self::Transport(_) => true,
+            Self::Transport(_) | Self::PoolExhausted(_) => true,
             Self::Server(err) => {
                 err.sqlstate == "40001"
                     || err.sqlstate == "40P01"
-                    || err.sqlstate.starts_with("08")
+                    || (err.sqlstate.starts_with("08") && err.sqlstate != "08P01")
                     || err.sqlstate == "53300"
                     || err.sqlstate.starts_with("57P")
             }
@@ -102,6 +115,8 @@ struct PostgresPyExceptionTypes {
     database: Py<PyType>,
     interface: Py<PyType>,
     data: Py<PyType>,
+    operational: Py<PyType>,
+    pool_exhausted: Py<PyType>,
     integrity: Py<PyType>,
     programming: Py<PyType>,
     not_supported: Py<PyType>,
@@ -123,6 +138,8 @@ fn resolve_py_exceptions(py: Python<'_>) -> PyResult<&'static PostgresPyExceptio
             database: get_ty("DatabaseError")?,
             interface: get_ty("InterfaceError")?,
             data: get_ty("DataError")?,
+            operational: get_ty("OperationalError")?,
+            pool_exhausted: get_ty("PoolExhaustedError")?,
             integrity: get_ty("IntegrityError")?,
             programming: get_ty("ProgrammingError")?,
             not_supported: get_ty("NotSupportedError")?,
@@ -139,17 +156,50 @@ fn instantiate_exc(
     ty: &Py<PyType>,
     message: &str,
     sqlstate: Option<&str>,
+    is_transient: bool,
 ) -> PyErr {
     match ty.bind(py).call1((message,)) {
         Ok(inst) => {
             if let Some(code) = sqlstate {
                 let _ = inst.setattr("sqlstate", code);
+                let _ = inst.setattr("vendor_code", code);
             } else {
                 let _ = inst.setattr("sqlstate", py.None());
+                let _ = inst.setattr("vendor_code", py.None());
             }
+            let _ = inst.setattr("is_transient", is_transient);
+            let _ = inst.setattr("completed_result", py.None());
             PyErr::from_value(inst)
         }
         Err(err) => err,
+    }
+}
+
+fn attach_server_diagnostics(py: Python<'_>, inst: &Bound<'_, PyAny>, srv: &ServerError) {
+    let _ = inst.setattr("severity", srv.severity.as_str());
+    let set_opt = |attr: &str, tag: u8| {
+        if let Some(val) = srv.diagnostic(tag) {
+            let _ = inst.setattr(attr, val);
+        } else {
+            let _ = inst.setattr(attr, py.None());
+        }
+    };
+    set_opt("detail", b'D');
+    set_opt("hint", b'H');
+    set_opt("schema_name", b's');
+    set_opt("table_name", b't');
+    set_opt("column_name", b'c');
+    set_opt("datatype_name", b'd');
+    set_opt("constraint_name", b'n');
+    set_opt("where_context", b'W');
+    if let Some(pos_str) = srv.diagnostic(b'P') {
+        if let Ok(pos_int) = pos_str.parse::<i32>() {
+            let _ = inst.setattr("position", pos_int);
+        } else {
+            let _ = inst.setattr("position", pos_str);
+        }
+    } else {
+        let _ = inst.setattr("position", py.None());
     }
 }
 
@@ -162,18 +212,27 @@ pub fn postgres_error_to_py(py: Python<'_>, err: PostgresError) -> PyErr {
         Ok(types) => types,
         Err(import_err) => return import_err,
     };
+    let transient = err.is_transient();
     match err {
         PostgresError::Config(msg) => PyValueError::new_err(msg),
-        PostgresError::Interface(msg) => instantiate_exc(py, &types.interface, &msg, None),
-        PostgresError::Data(msg) => instantiate_exc(py, &types.data, &msg, None),
+        PostgresError::Interface(msg) => {
+            instantiate_exc(py, &types.interface, &msg, None, transient)
+        }
+        PostgresError::Data(msg) => instantiate_exc(py, &types.data, &msg, None, transient),
+        PostgresError::Operational(msg) => {
+            instantiate_exc(py, &types.operational, &msg, None, transient)
+        }
+        PostgresError::PoolExhausted(msg) => {
+            instantiate_exc(py, &types.pool_exhausted, &msg, None, true)
+        }
         PostgresError::UnsupportedAuth(msg) | PostgresError::UnsupportedFeature(msg) => {
-            instantiate_exc(py, &types.not_supported, &msg, None)
+            instantiate_exc(py, &types.not_supported, &msg, None, transient)
         }
         PostgresError::Transport(msg) | PostgresError::Protocol(msg) => {
-            instantiate_exc(py, &types.connection_failure, &msg, None)
+            instantiate_exc(py, &types.connection_failure, &msg, None, true)
         }
         PostgresError::Auth(msg) => {
-            let py_err = instantiate_exc(py, &types.google_cloud_auth, &msg, None);
+            let py_err = instantiate_exc(py, &types.google_cloud_auth, &msg, None, transient);
             let _ = py_err.value(py).setattr("message", msg);
             py_err
         }
@@ -183,14 +242,29 @@ pub fn postgres_error_to_py(py: Python<'_>, err: PostgresError) -> PyErr {
                 "40001" | "40P01" => &types.serialization_failure,
                 "57014" => &types.query_cancelled,
                 "28000" | "28P01" => &types.database,
+                "08P01" | "26000" => &types.programming,
+                c if c.starts_with("0A") => &types.not_supported,
                 c if c.starts_with("08") => &types.connection_failure,
                 c if c.starts_with("22") => &types.data,
                 c if c.starts_with("23") => &types.integrity,
                 c if c.starts_with("42") => &types.programming,
+                c if c.starts_with("53") || c.starts_with("57P") => &types.operational,
                 _ => &types.database,
             };
-            instantiate_exc(py, target_ty, &srv.message, Some(code))
+            let py_err = instantiate_exc(py, target_ty, &srv.message, Some(code), transient);
+            attach_server_diagnostics(py, py_err.value(py), &srv);
+            py_err
         }
-        PostgresError::AfterCompletion { source, .. } => postgres_error_to_py(py, *source),
+        PostgresError::AfterCompletion {
+            source,
+            completed_result,
+        } => {
+            let py_err = postgres_error_to_py(py, *source);
+            if let Ok(py_res) = crate::python_values::query_result_to_python(py, &completed_result)
+            {
+                let _ = py_err.value(py).setattr("completed_result", py_res);
+            }
+            py_err
+        }
     }
 }

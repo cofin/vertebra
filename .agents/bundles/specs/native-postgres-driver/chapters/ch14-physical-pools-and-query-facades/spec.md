@@ -5,12 +5,12 @@ chapter_id: ch14-physical-pools-and-query-facades
 title: "Chapter 14: Physical Rust Connection Pools, Reset Draining, and Typed Python Query Facades"
 description: Pool real authenticated PostgreSQL sockets with bounded leases, conservative DISCARD ALL reset and draining shutdown, lossless Python value extraction/projection, and typed sync/async query and transaction client facades.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch13-transactions-portals-and-statement-cache
 replan_trigger: null
-current_task: "native-postgres-driver:ch14:t01"
+current_task: null
 plan_revision: 5
 plan_commit: fd571e3a
 state_revision: 0
@@ -123,10 +123,10 @@ Progress: `[0/1 files documented in ch14]` (`src/py/vertebra/_postgres.pyi` type
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch14:t01 — Implement concrete Rust physical connection pool and bounded leases (tasks/t01-rust-physical-pool.md)
-- [ ] native-postgres-driver:ch14:t02 — Implement rollback/DISCARD ALL pool reset and draining shutdown (tasks/t02-pool-reset-and-drain.md)
-- [ ] native-postgres-driver:ch14:t03 — Bridge lossless native PostgreSQL values and SQLSTATE errors to Python (tasks/t03-python-value-extraction-bridge.md)
-- [ ] native-postgres-driver:ch14:t04 — Expose typed sync and async query and transaction client facades (tasks/t04-python-query-and-transaction-facades.md)
+- [x] native-postgres-driver:ch14:t01 — Implement concrete Rust physical connection pool and bounded leases (tasks/t01-rust-physical-pool.md)
+- [x] native-postgres-driver:ch14:t02 — Implement rollback/DISCARD ALL pool reset and draining shutdown (tasks/t02-pool-reset-and-drain.md)
+- [x] native-postgres-driver:ch14:t03 — Bridge lossless native PostgreSQL values and SQLSTATE errors to Python (tasks/t03-python-value-extraction-bridge.md)
+- [x] native-postgres-driver:ch14:t04 — Expose typed sync and async query and transaction client facades (tasks/t04-python-query-and-transaction-facades.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test physical_pool --test pool_reset --test python_value_contract && make dev && uv run --no-sync pytest src/py/tests/unit/db/test_postgres_native_queries.py -q && uv run --no-sync python -m mypy.stubtest vertebra._postgres` exits `0`.
 

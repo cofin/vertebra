@@ -5,7 +5,7 @@ chapter_id: ch14-physical-pools-and-query-facades
 title: "Implement concrete Rust physical connection pool and bounded leases"
 description: "Own authenticated physical PostgreSQL sockets in a reusable Rust rlib PostgresPool with bounded leases, lazy min_size initialization, and canonical configuration comparison."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
