@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
+import sysconfig
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -47,6 +49,7 @@ def test_native_modules_declare_gil_used_false() -> None:
         "vertebra._mysql",
         "vertebra._bigquery",
         "vertebra._mssql",
+        "vertebra._postgres",
         "vertebra._spanner",
         "vertebra._duckdb",
     ):
@@ -57,6 +60,8 @@ def test_native_modules_declare_gil_used_false() -> None:
                 assert ext_mod.GIL_USED is False
         else:
             assert getattr(ext_mod, "GIL_USED", None) is False
+        if mod_name == "vertebra._postgres":
+            assert isinstance(getattr(ext_mod, "FREE_THREADED", None), bool)
 
     oracle_mod = pytest.importorskip("vertebra._oracle")
     assert oracle_mod.GIL_USED is False
@@ -187,8 +192,12 @@ def test_native_pyclasses_enforce_immutable_type() -> None:
     storage_mod = pytest.importorskip("vertebra._storage")
     mysql_mod = pytest.importorskip("vertebra._mysql")
     bigquery_mod = pytest.importorskip("vertebra._bigquery")
+<<<<<<< HEAD
     mssql_mod = pytest.importorskip("vertebra._mssql")
     oracle_mod = pytest.importorskip("vertebra._oracle")
+=======
+    postgres_mod = pytest.importorskip("vertebra._postgres")
+>>>>>>> 4b1870c (feat(postgres): expose native sync and async clients with constructor parity and wheel isolation)
     spanner_mod = pytest.importorskip("vertebra._spanner")
     duckdb_mod = pytest.importorskip("vertebra._duckdb")
 
@@ -216,6 +225,7 @@ def test_native_pyclasses_enforce_immutable_type() -> None:
         mysql_mod.MySQLWireTestServer,
         bigquery_mod.SyncBigQueryClient,
         bigquery_mod.AsyncBigQueryClient,
+<<<<<<< HEAD
         mssql_mod.SyncMSSQLClient,
         mssql_mod.AsyncMSSQLClient,
         oracle_mod.SyncOracleClient,
@@ -227,6 +237,10 @@ def test_native_pyclasses_enforce_immutable_type() -> None:
         oracle_mod.OraclePipelineOutcome,
         oracle_mod.OracleNotification,
         oracle_mod.AsyncOracleListener,
+=======
+        postgres_mod.SyncPostgresClient,
+        postgres_mod.AsyncPostgresClient,
+>>>>>>> 4b1870c (feat(postgres): expose native sync and async clients with constructor parity and wheel isolation)
         spanner_mod.SyncSpannerClient,
         spanner_mod.AsyncSpannerClient,
         duckdb_mod.SyncDuckDBClient,
@@ -259,3 +273,30 @@ def test_arrow_cursor_from_shm_capsule_concurrent_single_winner() -> None:
 
     assert outcomes.count("winner") == 1
     assert outcomes.count("value_error") == 7
+
+
+def test_postgres_import_preserves_disabled_gil_in_child() -> None:
+    """Verify importing vertebra._postgres in an isolated free-threaded child preserves disabled GIL."""
+    if not bool(sysconfig.get_config_var("Py_GIL_DISABLED")):
+        pytest.skip("Free-threaded CPython build required (Py_GIL_DISABLED != 1)")
+
+    env = dict(os.environ)
+    env.pop("PYTHON_GIL", None)
+    script = (
+        "import sys\n"
+        "assert hasattr(sys, '_is_gil_enabled')\n"
+        "assert sys._is_gil_enabled() is False\n"
+        "import vertebra._postgres as pg\n"
+        "assert sys._is_gil_enabled() is False\n"
+        "assert pg.FREE_THREADED is True\n"
+        "assert pg.GIL_USED is False\n"
+        "assert pg.SyncPostgresClient(user='u', database='d').closed is True\n"
+    )
+    subprocess.run(
+        [sys.executable, "-c", script],
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )

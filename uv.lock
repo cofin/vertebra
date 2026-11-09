@@ -3454,6 +3454,7 @@ all = [
     { name = "vertebra-mssql" },
     { name = "vertebra-mysql" },
     { name = "vertebra-oracle" },
+    { name = "vertebra-postgres" },
     { name = "vertebra-spanner" },
     { name = "vertebra-storage" },
 ]
@@ -3514,6 +3515,9 @@ oracle = [
 ]
 polars = [
     { name = "polars" },
+]
+postgres = [
+    { name = "vertebra-postgres" },
 ]
 pydantic = [
     { name = "pydantic" },
@@ -3707,13 +3711,15 @@ requires-dist = [
     { name = "vertebra-mysql", marker = "extra == 'mysql'", editable = "src/rs/vertebra-mysql" },
     { name = "vertebra-oracle", marker = "extra == 'all'", editable = "src/rs/vertebra-oracle" },
     { name = "vertebra-oracle", marker = "extra == 'oracle'", editable = "src/rs/vertebra-oracle" },
+    { name = "vertebra-postgres", marker = "extra == 'all'", editable = "src/rs/vertebra-postgres" },
+    { name = "vertebra-postgres", marker = "extra == 'postgres'", editable = "src/rs/vertebra-postgres" },
     { name = "vertebra-spanner", marker = "extra == 'all'", editable = "src/rs/vertebra-spanner" },
     { name = "vertebra-spanner", marker = "extra == 'spanner'", editable = "src/rs/vertebra-spanner" },
     { name = "vertebra-storage", marker = "extra == 'all'", editable = "src/rs/vertebra-storage" },
     { name = "vertebra-storage", marker = "extra == 'storage'", editable = "src/rs/vertebra-storage" },
     { name = "winloop", marker = "sys_platform == 'win32'", specifier = ">=0.8.1" },
 ]
-provides-extras = ["sqlspec", "alchemy", "arrow", "pydantic", "attrs", "polars", "litestar", "starlette", "fastapi", "flask", "django", "queues", "security", "autowire", "email", "mcp", "vite", "asyncapi", "htmx", "saq", "embeddings", "bigquery", "bundler", "duckdb", "mssql", "mysql", "oracle", "spanner", "storage", "rloop", "all"]
+provides-extras = ["sqlspec", "alchemy", "arrow", "pydantic", "attrs", "polars", "litestar", "starlette", "fastapi", "flask", "django", "queues", "security", "autowire", "email", "mcp", "vite", "asyncapi", "htmx", "saq", "embeddings", "bigquery", "bundler", "duckdb", "mssql", "mysql", "oracle", "postgres", "spanner", "storage", "rloop", "all"]
 
 [package.metadata.requires-dev]
 bench = [
@@ -3825,6 +3831,11 @@ source = { editable = "src/rs/vertebra-mysql" }
 name = "vertebra-oracle"
 version = "0.3.0"
 source = { editable = "src/rs/vertebra-oracle" }
+
+[[package]]
+name = "vertebra-postgres"
+version = "0.3.0"
+source = { editable = "src/rs/vertebra-postgres" }
 
 [[package]]
 name = "vertebra-spanner"

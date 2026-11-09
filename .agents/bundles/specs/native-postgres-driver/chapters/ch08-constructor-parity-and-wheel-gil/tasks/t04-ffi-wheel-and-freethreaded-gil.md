@@ -5,7 +5,7 @@ chapter_id: ch08-constructor-parity-and-wheel-gil
 title: Exclude _postgres.pyi from storage wheel, wire release.yaml, and verify isolated free-threaded imports
 description: Exclude _postgres.pyi from vertebra-storage, register postgres with exact release.yaml matrix keys and Windows MSVC cargo check, preserve GIL_USED and FREE_THREADED stubtest checks, and verify Python 3.14t/3.15t disabled-GIL subprocess imports plus standalone /tmp wheel installation.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -133,9 +133,9 @@ Complete companion wheel stub isolation by adding `"**/py/vertebra/_postgres.pyi
 
 ## Acceptance Criteria
 
-- [ ] `src/rs/vertebra-storage/pyproject.toml` excludes `"**/py/vertebra/_postgres.pyi"` so all four companion wheels omit `_postgres.pyi` (R1).
-- [ ] `.github/workflows/release.yaml` registers `postgres` with exact `name`/`path`/`module`/`exports` matrix keys, Windows MSVC `cargo check -p vertebra-db -p vertebra-postgres --all-targets`, `build_sdist`, and `test_wheels` namespace/version/pure-constructor checks (R1, R26).
-- [ ] `test_postgres_import_preserves_disabled_gil_in_child` (gated solely on `sysconfig.get_config_var("Py_GIL_DISABLED")`) and `GIL_USED`/`FREE_THREADED`/`immutable_type` checks pass on `3.14t`, `3.15t`, and `3.12`, standalone `/tmp` wheel installation + `mypy.stubtest` pass outside the checkout, and commit `test(postgres): verify wheel stubs and free-threaded import isolation` completes Phase 1 (R1, R6, R7, R26).
+- [x] `src/rs/vertebra-storage/pyproject.toml` excludes `"**/py/vertebra/_postgres.pyi"` so all four companion wheels omit `_postgres.pyi` (R1).
+- [x] `.github/workflows/release.yaml` registers `postgres` with exact `name`/`path`/`module`/`exports` matrix keys, Windows MSVC `cargo check -p vertebra-db -p vertebra-postgres --all-targets`, `build_sdist`, and `test_wheels` namespace/version/pure-constructor checks (R1, R26).
+- [x] `test_postgres_import_preserves_disabled_gil_in_child` (gated solely on `sysconfig.get_config_var("Py_GIL_DISABLED")`) and `GIL_USED`/`FREE_THREADED`/`immutable_type` checks pass on `3.14t`, `3.15t`, and `3.12`, standalone `/tmp` wheel installation + `mypy.stubtest` pass outside the checkout, and commit `test(postgres): verify wheel stubs and free-threaded import isolation` completes Phase 1 (R1, R6, R7, R26).
 
 ## Notes & Discoveries
 

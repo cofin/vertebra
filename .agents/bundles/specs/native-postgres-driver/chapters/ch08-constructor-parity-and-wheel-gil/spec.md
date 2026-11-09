@@ -5,12 +5,12 @@ chapter_id: ch08-constructor-parity-and-wheel-gil
 title: "Chapter 08: Complete Constructor Parity, Wheel Packaging, and Free-Threaded GIL Verification"
 description: Lock complete 25-parameter constructor parity across SyncPostgresClient and AsyncPostgresClient, wire root vertebra-core[postgres] packaging and review areas, exclude _postgres.pyi from all four companion wheels, and verify release.yaml schema plus isolated Python 3.14t/3.15t disabled-GIL imports.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch07-async-bridge-and-client-sessions
 replan_trigger: null
-current_task: "native-postgres-driver:ch08:t01"
+current_task: null
 plan_revision: 5
 plan_commit: fd571e3a
 state_revision: 0
@@ -136,10 +136,10 @@ Progress: `[1/1 stub file finalized for Phase 1 in ch08]` (`src/py/vertebra/_pos
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch08:t01 — Characterize and lock complete sync and async constructor parity (tasks/t01-constructor-parity.md)
-- [ ] native-postgres-driver:ch08:t02 — Register root postgres extra, uv.lock, and review area paths (tasks/t02-root-extra-and-review-areas.md)
-- [ ] native-postgres-driver:ch08:t03 — Exclude _postgres.pyi from bigquery, bundler, and spanner wheels (tasks/t03-sibling-wheel-stub-exclusions.md)
-- [ ] native-postgres-driver:ch08:t04 — Exclude _postgres.pyi from storage wheel, wire release.yaml, and verify isolated free-threaded imports (tasks/t04-ffi-wheel-and-freethreaded-gil.md)
+- [x] native-postgres-driver:ch08:t01 — Characterize and lock complete sync and async constructor parity (tasks/t01-constructor-parity.md)
+- [x] native-postgres-driver:ch08:t02 — Register root postgres extra, uv.lock, and review area paths (tasks/t02-root-extra-and-review-areas.md)
+- [x] native-postgres-driver:ch08:t03 — Exclude _postgres.pyi from bigquery, bundler, and spanner wheels (tasks/t03-sibling-wheel-stub-exclusions.md)
+- [x] native-postgres-driver:ch08:t04 — Exclude _postgres.pyi from storage wheel, wire release.yaml, and verify isolated free-threaded imports (tasks/t04-ffi-wheel-and-freethreaded-gil.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres && make dev && uv lock --check && make review-check && uv run --no-sync python -m mypy.stubtest vertebra._postgres && uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_driver.py -k native_ -q && uv run --no-sync python -m pytest src/py/tests/unit/test_freethreaded_gil.py -q` exits `0`.
 

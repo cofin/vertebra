@@ -5,7 +5,7 @@ chapter_id: ch08-constructor-parity-and-wheel-gil
 title: Exclude _postgres.pyi from bigquery, bundler, and spanner wheels
 description: Add "**/py/vertebra/_postgres.pyi" to [tool.maturin].exclude in vertebra-bigquery, vertebra-bundler, and vertebra-spanner pyproject.toml manifests and verify zero stub leakage across built wheel archives.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: static_validation
 depends_on:
@@ -120,8 +120,8 @@ Commit as `build(postgres): exclude _postgres.pyi from bigquery, bundler, and sp
 
 ## Acceptance Criteria
 
-- [ ] `src/rs/vertebra-bigquery/pyproject.toml`, `src/rs/vertebra-bundler/pyproject.toml`, and `src/rs/vertebra-spanner/pyproject.toml` each include `"**/py/vertebra/_postgres.pyi"` in `[tool.maturin].exclude` (R1).
-- [ ] Built wheel archives for `vertebra-bigquery`, `vertebra-bundler`, and `vertebra-spanner` contain zero `vertebra/_postgres.pyi` entries and strictly two `vertebra/` files each (R1).
+- [x] `src/rs/vertebra-bigquery/pyproject.toml`, `src/rs/vertebra-bundler/pyproject.toml`, and `src/rs/vertebra-spanner/pyproject.toml` each include `"**/py/vertebra/_postgres.pyi"` in `[tool.maturin].exclude` (R1).
+- [x] Built wheel archives for `vertebra-bigquery`, `vertebra-bundler`, and `vertebra-spanner` contain zero `vertebra/_postgres.pyi` entries and strictly two `vertebra/` files each (R1).
 
 ## Notes & Discoveries
 

@@ -5,7 +5,7 @@ chapter_id: ch08-constructor-parity-and-wheel-gil
 title: Register root postgres extra, uv.lock, and review area paths
 description: Add the vertebra-core[postgres] optional extra, all-extra entry, editable uv source, and bumpversion rules to root pyproject.toml, synchronize uv.lock, and register vertebra-postgres and _postgres.pyi in areas.toml.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: static_validation
 depends_on:
@@ -134,9 +134,9 @@ Commit as `build(postgres): register root postgres extra, uv.lock, and review ar
 
 ## Acceptance Criteria
 
-- [ ] Root `pyproject.toml` defines `[project.optional-dependencies].postgres`, includes `vertebra-postgres` in `all`, configures `[tool.uv.sources].vertebra-postgres`, and registers bumpversion rules for both `pyproject.toml` and `src/rs/vertebra-postgres/pyproject.toml` (R1).
-- [ ] `uv.lock` is updated cleanly without unrelated upgrades and `uv lock --check` exits `0` (R1).
-- [ ] `.agents/skills/review-core/references/areas.toml` routes `src/rs/vertebra-postgres/**` and `src/py/vertebra/_postgres.pyi` explicitly and `make review-check` exits `0` (R1).
+- [x] Root `pyproject.toml` defines `[project.optional-dependencies].postgres`, includes `vertebra-postgres` in `all`, configures `[tool.uv.sources].vertebra-postgres`, and registers bumpversion rules for both `pyproject.toml` and `src/rs/vertebra-postgres/pyproject.toml` (R1).
+- [x] `uv.lock` is updated cleanly without unrelated upgrades and `uv lock --check` exits `0` (R1).
+- [x] `.agents/skills/review-core/references/areas.toml` routes `src/rs/vertebra-postgres/**` and `src/py/vertebra/_postgres.pyi` explicitly and `make review-check` exits `0` (R1).
 
 ## Notes & Discoveries
 

@@ -5,7 +5,7 @@ chapter_id: ch07-async-bridge-and-client-sessions
 title: Abort shared database workers when Python completion setup fails
 description: Replace manual abort branches in spawn_rust_db_task_with_attr with a single armed RAII abort-on-drop worker guard that owns the JoinHandle until the completion monitor joins.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -104,9 +104,9 @@ Harden `src/rs/vertebra-db/src/py_async.rs::spawn_rust_db_task_with_attr` by rep
 
 ## Acceptance Criteria
 
-- [ ] `spawn_rust_db_task_with_attr` uses a single armed RAII abort-on-drop worker guard across all fallible Python setup steps and disarms only after the completion monitor joins the worker (R7).
-- [ ] `callback_registration_failure_aborts_worker` proves original `PyErr` preservation, zero `map_ok` invocations, and deterministic captured-resource drop via `py.detach` channel synchronization without sleeps (R7).
-- [ ] All existing `py_async::tests` pass unchanged and commit `fix(db): abort workers on completion setup errors` passes Clippy (R7).
+- [x] `spawn_rust_db_task_with_attr` uses a single armed RAII abort-on-drop worker guard across all fallible Python setup steps and disarms only after the completion monitor joins the worker (R7).
+- [x] `callback_registration_failure_aborts_worker` proves original `PyErr` preservation, zero `map_ok` invocations, and deterministic captured-resource drop via `py.detach` channel synchronization without sleeps (R7).
+- [x] All existing `py_async::tests` pass unchanged and commit `fix(db): abort workers on completion setup errors` passes Clippy (R7).
 
 ## Notes & Discoveries
 

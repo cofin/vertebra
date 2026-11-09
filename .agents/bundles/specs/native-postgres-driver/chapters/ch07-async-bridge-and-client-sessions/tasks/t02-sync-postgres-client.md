@@ -5,7 +5,7 @@ chapter_id: ch07-async-bridge-and-client-sessions
 title: Expose physical synchronous native PostgreSQL sessions
 description: Implement PySyncPostgresClient (SyncPostgresClient in vertebra._postgres) and _postgres.pyi stubs with the complete 25-parameter constructor, GIL-detached connect/close lifecycle, copied parameter snapshots, and canonical core exception mapping.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -134,9 +134,9 @@ Implement `PySyncPostgresClient` (`SyncPostgresClient` in `vertebra._postgres`) 
 
 ## Acceptance Criteria
 
-- [ ] `SyncPostgresClient` is exported from `vertebra._postgres` (`frozen`, `immutable_type`, conditional `freelist`) with the exact 25-parameter keyword-only signature in `_postgres.pyi` passing `mypy.stubtest` (R6).
-- [ ] `connect()` and `close()` release the GIL during blocking runtime waits, enforce `Configured -> Connecting -> Ready -> Closed` lifecycle rules, copy `parameters` without exposing backend keys, and map errors to exact `vertebra._vertebra` exception classes (R6).
-- [ ] Commit `feat(postgres): expose synchronous physical connection client` passes `pytest -k native_sync`, `stubtest`, and `cargo test` (R6).
+- [x] `SyncPostgresClient` is exported from `vertebra._postgres` (`frozen`, `immutable_type`, conditional `freelist`) with the exact 25-parameter keyword-only signature in `_postgres.pyi` passing `mypy.stubtest` (R6).
+- [x] `connect()` and `close()` release the GIL during blocking runtime waits, enforce `Configured -> Connecting -> Ready -> Closed` lifecycle rules, copy `parameters` without exposing backend keys, and map errors to exact `vertebra._vertebra` exception classes (R6).
+- [x] Commit `feat(postgres): expose synchronous physical connection client` passes `pytest -k native_sync`, `stubtest`, and `cargo test` (R6).
 
 ## Notes & Discoveries
 

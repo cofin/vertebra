@@ -354,198 +354,454 @@ impl<'a> ConnectAttempt<'a> {
         let clock = pending.clock();
         let generation = pending.generation;
 
-        let (mut stream, tls_negotiated, tls_server_end_point, login_snapshot) =
-            if config.cloud_sql_instance.is_some() {
-                let dialed = cloud::dial_cloudsql(&config, &connector, deadline).await?;
-                (
-                    dialed.stream,
-                    true,
-                    dialed.tls_server_end_point,
-                    dialed.login_snapshot,
+        let conn = establish_postgres_connection(
+            &config,
+            &connector,
+            &token_provider,
+            clock.as_ref(),
+            generation,
+            deadline,
+        )
+        .await?;
+        Ok(pending.commit(conn))
+    }
+}
+
+pub(crate) async fn establish_postgres_connection(
+    config: &PostgresConfig,
+    connector: &CloudConnector,
+    token_provider: &ScopedTokenProvider,
+    clock: &dyn Clock,
+    generation: u64,
+    deadline: Instant,
+) -> Result<PostgresConnection, PostgresError> {
+    let (mut stream, tls_negotiated, tls_server_end_point, login_snapshot) =
+        if config.cloud_sql_instance.is_some() {
+            let dialed = cloud::dial_cloudsql(config, connector, deadline).await?;
+            (
+                dialed.stream,
+                true,
+                dialed.tls_server_end_point,
+                dialed.login_snapshot,
+            )
+        } else if config.alloydb_instance_uri.is_some() {
+            let dialed = cloud::dial_alloydb(config, connector, deadline).await?;
+            (
+                dialed.stream,
+                true,
+                dialed.tls_server_end_point,
+                dialed.login_snapshot,
+            )
+        } else if let Some(ref unix_path) = config.unix_socket {
+            let direct_login = if config.enable_iam_auth {
+                let scopes = config.direct_iam_default_scopes();
+                Some(
+                    token_provider
+                        .resolve_direct_login(&scopes, deadline)
+                        .await?,
                 )
-            } else if config.alloydb_instance_uri.is_some() {
-                let dialed = cloud::dial_alloydb(&config, &connector, deadline).await?;
-                (
-                    dialed.stream,
-                    true,
-                    dialed.tls_server_end_point,
-                    dialed.login_snapshot,
-                )
-            } else if let Some(ref unix_path) = config.unix_socket {
-                let direct_login = if config.enable_iam_auth {
-                    let scopes = config.direct_iam_default_scopes();
-                    Some(
-                        token_provider
-                            .resolve_direct_login(&scopes, deadline)
-                            .await?,
-                    )
-                } else {
-                    None
-                };
-                let stream = dial_unix_socket(unix_path, deadline).await?;
-                (stream, false, None, direct_login)
             } else {
-                let direct_login = if config.enable_iam_auth {
-                    let scopes = config.direct_iam_default_scopes();
-                    Some(
-                        token_provider
-                            .resolve_direct_login(&scopes, deadline)
-                            .await?,
-                    )
-                } else {
-                    None
-                };
-                let dialed = tls::connect(&config, deadline).await?;
-                (
-                    dialed.stream,
-                    dialed.tls_negotiated,
-                    dialed.tls_server_end_point,
-                    direct_login,
-                )
+                None
             };
+            let stream = dial_unix_socket(unix_path, deadline).await?;
+            (stream, false, None, direct_login)
+        } else {
+            let direct_login = if config.enable_iam_auth {
+                let scopes = config.direct_iam_default_scopes();
+                Some(
+                    token_provider
+                        .resolve_direct_login(&scopes, deadline)
+                        .await?,
+                )
+            } else {
+                None
+            };
+            let dialed = tls::connect(config, deadline).await?;
+            (
+                dialed.stream,
+                dialed.tls_negotiated,
+                dialed.tls_server_end_point,
+                direct_login,
+            )
+        };
 
-        if !matches!(stream, TransportStream::Unix(_)) {
-            stream
-                .set_tcp_keepalive(config.tcp_keepalive())
-                .map_err(|e| PostgresError::Transport(e.to_string()))?;
-        }
+    if !matches!(stream, TransportStream::Unix(_)) {
+        stream
+            .set_tcp_keepalive(config.tcp_keepalive())
+            .map_err(|e| PostgresError::Transport(e.to_string()))?;
+    }
 
-        let mut read_buf = BytesMut::with_capacity(8192);
-        let mut write_buf = BytesMut::with_capacity(1024);
-        encode_startup_frame(&config, &mut write_buf)?;
+    let mut read_buf = BytesMut::with_capacity(8192);
+    let mut write_buf = BytesMut::with_capacity(1024);
+    encode_startup_frame(config, &mut write_buf)?;
 
-        tokio::time::timeout_at(deadline, async {
-            stream.write_all(&write_buf).await?;
-            stream.flush().await
-        })
-        .await
-        .map_err(|_| PostgresError::Transport("StartupMessage write timed out".to_string()))?
-        .map_err(|e| PostgresError::Transport(format!("StartupMessage write failed: {e}")))?;
-        write_buf.clear();
+    tokio::time::timeout_at(deadline, async {
+        stream.write_all(&write_buf).await?;
+        stream.flush().await
+    })
+    .await
+    .map_err(|_| PostgresError::Transport("StartupMessage write timed out".to_string()))?
+    .map_err(|e| PostgresError::Transport(format!("StartupMessage write failed: {e}")))?;
+    write_buf.clear();
 
-        let mut auth = Authentication::new();
-        let mut parameters = BTreeMap::new();
-        let mut backend_key = None;
+    let mut auth = Authentication::new();
+    let mut parameters = BTreeMap::new();
+    let mut backend_key = None;
 
-        loop {
-            let msg = read_message(&mut stream, &mut read_buf, Some(deadline)).await?;
-            match msg {
-                Message::ErrorResponse(body) => {
-                    let err = parse_error_fields(body.fields())?;
-                    if let PostgresError::Server(ref srv) = err
-                        && srv.sqlstate.starts_with("28")
-                        && let Some(ref snap) = login_snapshot
-                    {
-                        snap.invalidate_generation();
-                    }
-                    return Err(redact_session_error(
-                        err,
-                        config.password.as_deref(),
-                        login_snapshot.as_ref(),
+    loop {
+        let msg = read_message(&mut stream, &mut read_buf, Some(deadline)).await?;
+        match msg {
+            Message::ErrorResponse(body) => {
+                let err = parse_error_fields(body.fields())?;
+                if let PostgresError::Server(ref srv) = err
+                    && srv.sqlstate.starts_with("28")
+                    && let Some(ref snap) = login_snapshot
+                {
+                    snap.invalidate_generation();
+                }
+                return Err(redact_session_error(
+                    err,
+                    config.password.as_deref(),
+                    login_snapshot.as_ref(),
+                ));
+            }
+            Message::NoticeResponse(_) => {}
+            Message::ParameterStatus(body) => {
+                if !auth.is_complete() {
+                    return Err(PostgresError::Protocol(
+                        "received ParameterStatus before AuthenticationOk".to_string(),
                     ));
                 }
-                Message::NoticeResponse(_) => {}
-                Message::ParameterStatus(body) => {
-                    if !auth.is_complete() {
-                        return Err(PostgresError::Protocol(
-                            "received ParameterStatus before AuthenticationOk".to_string(),
-                        ));
-                    }
-                    let name = body
-                        .name()
-                        .map_err(|e| {
-                            PostgresError::Protocol(format!("invalid ParameterStatus name: {e}"))
-                        })?
-                        .to_string();
-                    let val = body
-                        .value()
-                        .map_err(|e| {
-                            PostgresError::Protocol(format!("invalid ParameterStatus value: {e}"))
-                        })?
-                        .to_string();
-                    parameters.insert(name, val);
+                let name = body
+                    .name()
+                    .map_err(|e| {
+                        PostgresError::Protocol(format!("invalid ParameterStatus name: {e}"))
+                    })?
+                    .to_string();
+                let val = body
+                    .value()
+                    .map_err(|e| {
+                        PostgresError::Protocol(format!("invalid ParameterStatus value: {e}"))
+                    })?
+                    .to_string();
+                parameters.insert(name, val);
+            }
+            Message::BackendKeyData(body) => {
+                if !auth.is_complete() {
+                    return Err(PostgresError::Protocol(
+                        "received BackendKeyData before AuthenticationOk".to_string(),
+                    ));
                 }
-                Message::BackendKeyData(body) => {
-                    if !auth.is_complete() {
-                        return Err(PostgresError::Protocol(
-                            "received BackendKeyData before AuthenticationOk".to_string(),
-                        ));
-                    }
-                    backend_key = Some(BackendKey {
-                        process_id: body.process_id(),
-                        secret_key: body.secret_key(),
-                    });
+                backend_key = Some(BackendKey {
+                    process_id: body.process_id(),
+                    secret_key: body.secret_key(),
+                });
+            }
+            Message::ReadyForQuery(body) => {
+                if !auth.is_complete() {
+                    return Err(PostgresError::Protocol(
+                        "received ReadyForQuery before AuthenticationOk".to_string(),
+                    ));
                 }
-                Message::ReadyForQuery(body) => {
-                    if !auth.is_complete() {
-                        return Err(PostgresError::Protocol(
-                            "received ReadyForQuery before AuthenticationOk".to_string(),
-                        ));
-                    }
-                    let status = TransactionStatus::from_wire_tag(body.status())?;
-                    if status != TransactionStatus::Idle {
-                        return Err(PostgresError::Protocol(format!(
-                            "startup ReadyForQuery reported non-Idle status {status:?}"
-                        )));
-                    }
-                    let conn = PostgresConnection {
-                        stream,
-                        read_buf,
-                        write_buf,
-                        parameters,
-                        backend_key,
-                        transaction_status: status,
-                        generation,
-                        tls_negotiated,
-                        tls_server_end_point,
-                        closed: false,
-                    };
-                    return Ok(pending.commit(conn));
+                let status = TransactionStatus::from_wire_tag(body.status())?;
+                if status != TransactionStatus::Idle {
+                    return Err(PostgresError::Protocol(format!(
+                        "startup ReadyForQuery reported non-Idle status {status:?}"
+                    )));
                 }
-                other => {
-                    let completed = auth
-                        .handle_message_with_login(
-                            &other,
-                            &config,
-                            tls_server_end_point.as_deref(),
+                return Ok(PostgresConnection {
+                    stream,
+                    read_buf,
+                    write_buf,
+                    parameters,
+                    backend_key,
+                    transaction_status: status,
+                    generation,
+                    tls_negotiated,
+                    tls_server_end_point,
+                    closed: false,
+                });
+            }
+            other => {
+                let completed = auth
+                    .handle_message_with_login(
+                        &other,
+                        config,
+                        tls_server_end_point.as_deref(),
+                        login_snapshot.as_ref(),
+                        clock,
+                        &mut write_buf,
+                    )
+                    .map_err(|e| {
+                        redact_session_error(
+                            e,
+                            config.password.as_deref(),
                             login_snapshot.as_ref(),
-                            clock.as_ref(),
-                            &mut write_buf,
                         )
-                        .map_err(|e| {
-                            redact_session_error(
-                                e,
-                                config.password.as_deref(),
-                                login_snapshot.as_ref(),
-                            )
-                        })?;
-                    if !write_buf.is_empty() {
-                        if Instant::now() >= deadline {
-                            return Err(PostgresError::Transport(
-                                "authentication deadline exceeded before response flush"
-                                    .to_string(),
-                            ));
-                        }
-                        tokio::time::timeout_at(deadline, async {
-                            stream.write_all(&write_buf).await?;
-                            stream.flush().await
-                        })
-                        .await
-                        .map_err(|_| {
-                            PostgresError::Transport(
-                                "authentication response write timed out".to_string(),
-                            )
-                        })?
-                        .map_err(|e| {
-                            PostgresError::Transport(format!(
-                                "authentication response write failed: {e}"
-                            ))
-                        })?;
-                        write_buf.clear();
+                    })?;
+                if !write_buf.is_empty() {
+                    if Instant::now() >= deadline {
+                        return Err(PostgresError::Transport(
+                            "authentication deadline exceeded before response flush".to_string(),
+                        ));
                     }
-                    let _ = completed;
+                    tokio::time::timeout_at(deadline, async {
+                        stream.write_all(&write_buf).await?;
+                        stream.flush().await
+                    })
+                    .await
+                    .map_err(|_| {
+                        PostgresError::Transport(
+                            "authentication response write timed out".to_string(),
+                        )
+                    })?
+                    .map_err(|e| {
+                        PostgresError::Transport(format!(
+                            "authentication response write failed: {e}"
+                        ))
+                    })?;
+                    write_buf.clear();
+                }
+                let _ = completed;
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ClientSessionState {
+    Configured,
+    Connecting { generation: u64 },
+    Ready(PostgresConnection),
+    Closed { generation: u64 },
+}
+
+#[derive(Debug)]
+struct ClientSessionInner {
+    state: ClientSessionState,
+    next_generation: u64,
+    parameters: BTreeMap<String, String>,
+}
+
+/// Thread-safe physical session handle shared by `SyncPostgresClient` and `AsyncPostgresClient`.
+pub struct ClientSession {
+    config: PostgresConfig,
+    cloud_connector: Arc<CloudConnector>,
+    token_provider: ScopedTokenProvider,
+    clock: Arc<dyn Clock>,
+    inner: std::sync::Mutex<ClientSessionInner>,
+}
+
+impl std::fmt::Debug for ClientSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientSession")
+            .field("config", &self.config)
+            .field("closed", &self.is_closed())
+            .finish()
+    }
+}
+
+/// Outcome of reserving a physical connection start on [`ClientSession`].
+pub enum ClientBeginConnect {
+    Attempt(ClientConnectAttempt),
+    AlreadyReady,
+}
+
+impl ClientSession {
+    /// Construct a disconnected [`ClientSession`] in `Configured` state (`closed == true`, `parameters == {}`).
+    pub fn new(config: PostgresConfig) -> Self {
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let cloud_connector = Arc::new(CloudConnector::with_clock(Arc::clone(&clock)));
+        let token_provider = ScopedTokenProvider::new(
+            Some(config.cloud_auth_options.clone()),
+            (!config.iam_auth_options.is_empty()).then(|| config.iam_auth_options.clone()),
+            Arc::clone(&clock),
+        );
+        Self {
+            config,
+            cloud_connector,
+            token_provider,
+            clock,
+            inner: std::sync::Mutex::new(ClientSessionInner {
+                state: ClientSessionState::Configured,
+                next_generation: 0,
+                parameters: BTreeMap::new(),
+            }),
+        }
+    }
+
+    /// Borrow the validated [`PostgresConfig`].
+    pub const fn config(&self) -> &PostgresConfig {
+        &self.config
+    }
+
+    /// Return `false` only when the session has published an authenticated `Ready` connection.
+    pub fn is_closed(&self) -> bool {
+        let guard = self.inner.lock().expect("ClientSession lock poisoned");
+        !matches!(guard.state, ClientSessionState::Ready(_))
+    }
+
+    /// Return the current or most recent connection generation (`0` before the first connect attempt).
+    pub fn generation(&self) -> u64 {
+        let guard = self.inner.lock().expect("ClientSession lock poisoned");
+        match &guard.state {
+            ClientSessionState::Configured => guard.next_generation,
+            ClientSessionState::Connecting { generation }
+            | ClientSessionState::Closed { generation } => *generation,
+            ClientSessionState::Ready(conn) => conn.generation(),
+        }
+    }
+
+    /// Return a cloned snapshot of retained `ParameterStatus` entries.
+    pub fn parameters(&self) -> BTreeMap<String, String> {
+        let guard = self.inner.lock().expect("ClientSession lock poisoned");
+        guard.parameters.clone()
+    }
+
+    /// Reserve a startup transition (`Configured -> Connecting`), return `AlreadyReady` if `Ready`, or reject `Connecting`/`Closed`.
+    pub fn begin_connect(self: &Arc<Self>) -> Result<ClientBeginConnect, PostgresError> {
+        let mut guard = self.inner.lock().expect("ClientSession lock poisoned");
+        match guard.state {
+            ClientSessionState::Configured => {
+                guard.next_generation = guard.next_generation.saturating_add(1);
+                let generation = guard.next_generation;
+                guard.state = ClientSessionState::Connecting { generation };
+                let deadline = Instant::now() + self.config.connect_timeout;
+                Ok(ClientBeginConnect::Attempt(ClientConnectAttempt {
+                    session: Some(Arc::clone(self)),
+                    generation,
+                    deadline,
+                }))
+            }
+            ClientSessionState::Ready(_) => Ok(ClientBeginConnect::AlreadyReady),
+            ClientSessionState::Connecting { .. } => Err(PostgresError::Interface(
+                "connection attempt is already in progress".to_string(),
+            )),
+            ClientSessionState::Closed { .. } => Err(PostgresError::Interface(
+                "cannot connect a closed client".to_string(),
+            )),
+        }
+    }
+
+    /// Synchronously transition to `Closed` and extract any live [`PostgresConnection`] for `Terminate` shutdown.
+    pub fn begin_close(&self) -> Result<Option<PostgresConnection>, PostgresError> {
+        let mut guard = self.inner.lock().expect("ClientSession lock poisoned");
+        match guard.state {
+            ClientSessionState::Connecting { .. } => Err(PostgresError::Interface(
+                "cannot close client while connect is in progress".to_string(),
+            )),
+            ClientSessionState::Configured => {
+                let generation = guard.next_generation;
+                guard.state = ClientSessionState::Closed { generation };
+                Ok(None)
+            }
+            ClientSessionState::Closed { .. } => Ok(None),
+            ClientSessionState::Ready(_) => {
+                let next_gen = guard.next_generation;
+                let prev = std::mem::replace(
+                    &mut guard.state,
+                    ClientSessionState::Closed {
+                        generation: next_gen,
+                    },
+                );
+                if let ClientSessionState::Ready(conn) = prev {
+                    guard.state = ClientSessionState::Closed {
+                        generation: conn.generation(),
+                    };
+                    Ok(Some(conn))
+                } else {
+                    unreachable!("checked Ready")
                 }
             }
+        }
+    }
+
+    fn rollback_connecting(&self, generation: u64) {
+        let mut guard = self.inner.lock().expect("ClientSession lock poisoned");
+        if matches!(
+            guard.state,
+            ClientSessionState::Connecting { generation: g } if g == generation
+        ) {
+            guard.state = ClientSessionState::Closed { generation };
+        }
+    }
+}
+
+/// Owned, `'static`-compatible startup attempt that rolls back [`ClientSession`] to `Closed` on drop.
+pub struct ClientConnectAttempt {
+    session: Option<Arc<ClientSession>>,
+    generation: u64,
+    deadline: Instant,
+}
+
+impl Drop for ClientConnectAttempt {
+    fn drop(&mut self) {
+        if let Some(session) = self.session.take() {
+            session.rollback_connecting(self.generation);
+        }
+    }
+}
+
+impl ClientConnectAttempt {
+    /// Execute startup and return an uncommitted [`ClientPendingSession`] guard.
+    pub async fn run(mut self) -> Result<ClientPendingSession, PostgresError> {
+        let session = self.session.take().expect("ClientConnectAttempt armed");
+        let generation = self.generation;
+        let deadline = self.deadline;
+        let mut guard = ClientConnectAttempt {
+            session: Some(Arc::clone(&session)),
+            generation,
+            deadline,
+        };
+        let conn = establish_postgres_connection(
+            &session.config,
+            &session.cloud_connector,
+            &session.token_provider,
+            session.clock.as_ref(),
+            generation,
+            deadline,
+        )
+        .await?;
+        let session = guard.session.take().expect("guard armed");
+        Ok(ClientPendingSession {
+            session: Some(session),
+            conn: Some(conn),
+            generation,
+        })
+    }
+}
+
+/// Cancellation-safe publication guard holding an authenticated [`PostgresConnection`] until [`ClientPendingSession::commit`] runs on the caller thread.
+pub struct ClientPendingSession {
+    session: Option<Arc<ClientSession>>,
+    conn: Option<PostgresConnection>,
+    generation: u64,
+}
+
+impl ClientPendingSession {
+    /// Publish the authenticated [`PostgresConnection`] into [`ClientSession`] (`Connecting -> Ready`).
+    pub fn commit(mut self) -> Result<(), PostgresError> {
+        let session = self.session.take().expect("ClientPendingSession armed");
+        let conn = self.conn.take().expect("ClientPendingSession connection");
+        let mut guard = session.inner.lock().expect("ClientSession lock poisoned");
+        match guard.state {
+            ClientSessionState::Connecting { generation } if generation == self.generation => {
+                guard.parameters = conn.parameters.clone();
+                guard.state = ClientSessionState::Ready(conn);
+                Ok(())
+            }
+            _ => Err(PostgresError::Interface(
+                "client was closed before connection completed".to_string(),
+            )),
+        }
+    }
+}
+
+impl Drop for ClientPendingSession {
+    fn drop(&mut self) {
+        let _ = self.conn.take();
+        if let Some(session) = self.session.take() {
+            session.rollback_connecting(self.generation);
         }
     }
 }

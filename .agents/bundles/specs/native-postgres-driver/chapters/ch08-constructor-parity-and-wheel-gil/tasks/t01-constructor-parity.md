@@ -5,7 +5,7 @@ chapter_id: ch08-constructor-parity-and-wheel-gil
 title: Characterize and lock complete sync and async constructor parity
 description: Enforce exact runtime inspect.signature, bool-free integer extraction, mapping snapshot isolation, and _postgres.pyi docstring parity across SyncPostgresClient and AsyncPostgresClient, verifying all 25 constructor parameters from Python.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: characterization
 depends_on:
@@ -110,9 +110,9 @@ Verify and lock complete 25-parameter constructor parity across `src/rs/vertebra
 
 ## Acceptance Criteria
 
-- [ ] `SyncPostgresClient`, `AsyncPostgresClient`, and `src/py/vertebra/_postgres.pyi` expose identical 25-parameter keyword-only signatures, defaults, and `TypeError`/`ValueError` boundaries matching `contracts.md` and `mypy.stubtest` (R2, R6, R7).
-- [ ] Pure zero-I/O construction, `Mapping[str, str]` snapshot isolation, secret redaction, `channel_binding="require"` (`SCRAM-SHA-256-PLUS`), and Unix `sslmode="disable"` + `session_gucs` startup are proven for both sync and async clients (R2, R6, R7).
-- [ ] Commit `test(postgres): preserve complete constructor parity` passes `pytest -k native_constructor`, `stubtest`, and `clippy` (R2, R6, R7).
+- [x] `SyncPostgresClient`, `AsyncPostgresClient`, and `src/py/vertebra/_postgres.pyi` expose identical 25-parameter keyword-only signatures, defaults, and `TypeError`/`ValueError` boundaries matching `contracts.md` and `mypy.stubtest` (R2, R6, R7).
+- [x] Pure zero-I/O construction, `Mapping[str, str]` snapshot isolation, secret redaction, `channel_binding="require"` (`SCRAM-SHA-256-PLUS`), and Unix `sslmode="disable"` + `session_gucs` startup are proven for both sync and async clients (R2, R6, R7).
+- [x] Commit `test(postgres): preserve complete constructor parity` passes `pytest -k native_constructor`, `stubtest`, and `clippy` (R2, R6, R7).
 
 ## Notes & Discoveries
 

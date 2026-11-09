@@ -5,7 +5,7 @@ chapter_id: ch07-async-bridge-and-client-sessions
 title: Expose async physical sessions with cancellation-safe publication
 description: Implement PyAsyncPostgresClient (AsyncPostgresClient in vertebra._postgres) using _vertebra_postgres_completion_drainer with synchronous connect reservation, map_ok PendingSession publication, and cancellation-race cleanup.
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -120,9 +120,9 @@ Implement `PyAsyncPostgresClient` (`AsyncPostgresClient` in `vertebra._postgres`
 
 ## Acceptance Criteria
 
-- [ ] `AsyncPostgresClient` is exported from `vertebra._postgres` with `_vertebra_postgres_completion_drainer` isolation and exact `_postgres.pyi` `Awaitable[None]` signatures passing `mypy.stubtest` (R7).
-- [ ] `PendingSession` commits exclusively inside `map_ok`; in-flight cancellation, queued-completion cancellation races, and `add_done_callback` setup failures drop `PendingSession`, close the socket, and transition to `Closed` without sleeps or production test hooks (R7).
-- [ ] Cancelling an already-`Ready` `connect()` no-op preserves the live session, cancelling `close()` never restores `Ready`, and commit `feat(postgres): expose async physical connection client` passes all verification gates (R7).
+- [x] `AsyncPostgresClient` is exported from `vertebra._postgres` with `_vertebra_postgres_completion_drainer` isolation and exact `_postgres.pyi` `Awaitable[None]` signatures passing `mypy.stubtest` (R7).
+- [x] `PendingSession` commits exclusively inside `map_ok`; in-flight cancellation, queued-completion cancellation races, and `add_done_callback` setup failures drop `PendingSession`, close the socket, and transition to `Closed` without sleeps or production test hooks (R7).
+- [x] Cancelling an already-`Ready` `connect()` no-op preserves the live session, cancelling `close()` never restores `Ready`, and commit `feat(postgres): expose async physical connection client` passes all verification gates (R7).
 
 ## Notes & Discoveries
 

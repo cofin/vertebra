@@ -2,6 +2,7 @@
 
 use pyo3::prelude::*;
 
+pub mod async_client;
 pub mod auth;
 pub mod binding;
 pub mod cloud;
@@ -10,6 +11,7 @@ pub mod credentials;
 pub mod errors;
 pub mod protocol;
 pub mod session;
+pub mod sync_client;
 pub mod tls;
 
 /// Whether this build targets free-threaded CPython (`Py_GIL_DISABLED`).
@@ -23,5 +25,7 @@ fn _postgres(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("FREE_THREADED", FREE_THREADED)?;
     m.add("GIL_USED", GIL_USED)?;
+    m.add_class::<sync_client::PySyncPostgresClient>()?;
+    m.add_class::<async_client::PyAsyncPostgresClient>()?;
     Ok(())
 }

@@ -5,12 +5,12 @@ chapter_id: ch07-async-bridge-and-client-sessions
 title: "Chapter 07: Async Completion Setup-Abort Guard and Physical Native PostgreSQL Clients"
 description: Add armed RAII worker-abort ownership across fallible Python completion setup in vertebra-db and expose SyncPostgresClient and AsyncPostgresClient physical sessions in vertebra._postgres with GIL-detached sync I/O and cancellation-safe async publication.
 status: stable
-state: planned
+state: completed
 planning_status: complete
 depends_on_chapters:
   - ch06-alloydb-keepalive-unix-and-direct-iam
 replan_trigger: null
-current_task: "native-postgres-driver:ch07:t01"
+current_task: null
 plan_revision: 5
 plan_commit: fd571e3a
 state_revision: 0
@@ -120,9 +120,9 @@ Progress: `[1/1 file stubbed in ch07]` (`src/py/vertebra/_postgres.pyi` updated 
 
 ## 5. Implementation Plan
 
-- [ ] native-postgres-driver:ch07:t01 — Abort shared database workers when Python completion setup fails (tasks/t01-async-bridge-setup-abort.md)
-- [ ] native-postgres-driver:ch07:t02 — Expose physical synchronous native PostgreSQL sessions (tasks/t02-sync-postgres-client.md)
-- [ ] native-postgres-driver:ch07:t03 — Expose async physical sessions with cancellation-safe publication (tasks/t03-async-postgres-client.md)
+- [x] native-postgres-driver:ch07:t01 — Abort shared database workers when Python completion setup fails (tasks/t01-async-bridge-setup-abort.md)
+- [x] native-postgres-driver:ch07:t02 — Expose physical synchronous native PostgreSQL sessions (tasks/t02-sync-postgres-client.md)
+- [x] native-postgres-driver:ch07:t03 — Expose async physical sessions with cancellation-safe publication (tasks/t03-async-postgres-client.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db --features pyo3 --lib py_async::tests && make dev && uv run --no-sync python -m pytest src/py/tests/unit/db/test_postgres_driver.py -k native_ -q && uv run --no-sync python -m mypy.stubtest vertebra._postgres` exits `0`.
 

@@ -3,16 +3,28 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import socket
 import sqlite3
 import struct
 import sys
+import tempfile
+import threading
 import types
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, NoReturn
 
 import pytest
 
+from vertebra._postgres import AsyncPostgresClient, SyncPostgresClient
+from vertebra._vertebra import (
+    ConnectionFailure,
+    DatabaseError,
+    GoogleCloudAuthError,
+    InterfaceError,
+)
 from vertebra.db import (
     AsyncAlloyDBDialer,
     AsyncCloudSQLDialer,
@@ -282,12 +294,13 @@ def test_sync_postgres_driver_pool_gucs_and_prepared_statements() -> None:
     )
     assert budget == 10
 
+    bad_kwargs: dict[str, Any] = {"reserved_super_connections": 10}
     with pytest.raises(TypeError):
         PostgreSQLConfig.compute_worker_pool_budget(
             100,
             replica_count=3,
             workers_per_replica=3,
-            reserved_super_connections=10,
+            **bad_kwargs,
         )
 
     cfg = PostgreSQLConfig(
@@ -451,3 +464,644 @@ def test_database_registry_attaches_cloudsql_and_alloydb_dialers_to_postgres_dri
     assert isinstance(alloy_sync, SyncPostgreSQLDriver)
     assert isinstance(alloy_sync.dialer, SyncAlloyDBDialer)
     assert alloy_sync.config.build_session_gucs().get("alloydb.enable_columnar_engine") == "on"
+
+
+def _pg_frame(tag: bytes, payload: bytes) -> bytes:
+    """Build a length-prefixed PostgreSQL wire frame."""
+    return tag + struct.pack(">i", len(payload) + 4) + payload
+
+
+def _pg_trust_greeting_frames(server_version: str = "17.2") -> bytes:
+    """Build AuthenticationOk + ParameterStatus + BackendKeyData + ReadyForQuery(Idle) frames."""
+    auth_ok = _pg_frame(b"R", struct.pack(">i", 0))
+    ps_enc = _pg_frame(b"S", b"client_encoding\x00UTF8\x00")
+    ps_ver = _pg_frame(b"S", b"server_version\x00" + server_version.encode("utf-8") + b"\x00")
+    key_data = _pg_frame(b"K", struct.pack(">ii", 4242, 987654))
+    ready = _pg_frame(b"Z", b"I")
+    return auth_ok + ps_enc + ps_ver + key_data + ready
+
+
+def _pg_error_frame(sqlstate: str, message: str) -> bytes:
+    """Build a PostgreSQL ErrorResponse wire frame."""
+    body = (
+        b"SERROR\x00VERROR\x00C"
+        + sqlstate.encode("ascii")
+        + b"\x00M"
+        + message.encode("utf-8")
+        + b"\x00\x00"
+    )
+    return _pg_frame(b"E", body)
+
+
+def _recv_exact(conn: socket.socket, count: int) -> bytes:
+    """Read an exact byte count from a blocking socket."""
+    chunks = bytearray()
+    while len(chunks) < count:
+        part = conn.recv(count - len(chunks))
+        if not part:
+            msg = "unexpected EOF while reading startup packet"
+            raise EOFError(msg)
+        chunks.extend(part)
+    return bytes(chunks)
+
+
+def _read_startup_map(conn: socket.socket) -> dict[str, str]:
+    """Read a PostgreSQL Protocol 3.0 StartupMessage and return its key-value map."""
+    total_len = struct.unpack(">i", _recv_exact(conn, 4))[0]
+    body = _recv_exact(conn, total_len - 4)
+    proto = struct.unpack(">i", body[:4])[0]
+    assert proto == 196608
+    raw_items = body[4:].rstrip(b"\x00").split(b"\x00")
+    keys = [raw_items[idx].decode("utf-8") for idx in range(0, len(raw_items), 2)]
+    vals = [raw_items[idx + 1].decode("utf-8") for idx in range(0, len(raw_items), 2)]
+    return dict(zip(keys, vals, strict=True))
+
+
+def test_native_sync_lifecycle_and_parameter_copy_isolation() -> None:
+    """Verify SyncPostgresClient pure construction, Ready idempotence, parameter copying, and close."""
+    accept_count = 0
+    terminate_count = 0
+    startup_seen: dict[str, str] = {}
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(4)
+        port = srv.getsockname()[1]
+
+        def _server() -> None:
+            nonlocal accept_count, terminate_count, startup_seen
+            conn, _ = srv.accept()
+            accept_count += 1
+            with conn:
+                startup_seen = _read_startup_map(conn)
+                conn.sendall(_pg_trust_greeting_frames("17.2"))
+                rest = conn.recv(16)
+                if rest == b"X\x00\x00\x00\x04":
+                    terminate_count += 1
+
+        worker = threading.Thread(target=_server, daemon=True)
+        worker.start()
+
+        client = SyncPostgresClient(
+            user="alice",
+            database="appdb",
+            host="127.0.0.1",
+            port=port,
+            sslmode="disable",
+        )
+        assert client.closed is True
+        assert client.parameters == {}
+        assert accept_count == 0
+        assert not hasattr(client, "backend_key")
+        assert not hasattr(client, "secret_key")
+
+        client.connect()
+        assert client.closed is False
+        assert accept_count == 1
+        assert startup_seen["user"] == "alice"
+        assert startup_seen["database"] == "appdb"
+        assert client.parameters["server_version"] == "17.2"
+        assert client.parameters["client_encoding"] == "UTF8"
+
+        mutated = client.parameters
+        mutated["server_version"] = "0.0"
+        assert client.parameters["server_version"] == "17.2"
+
+        client.connect()
+        assert accept_count == 1
+
+        client.close()
+        assert client.closed is True
+        assert client.parameters["server_version"] == "17.2"
+        client.close()
+        worker.join(timeout=2.0)
+        assert terminate_count == 1
+
+        with pytest.raises(InterfaceError):
+            client.connect()
+
+
+def test_native_sync_releases_gil() -> None:
+    """Verify SyncPostgresClient.connect releases the GIL so concurrent Python threads make progress."""
+    gate = threading.Event()
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(2)
+        port = srv.getsockname()[1]
+        accepted = threading.Event()
+
+        def _server() -> None:
+            conn, _ = srv.accept()
+            with conn:
+                _ = _read_startup_map(conn)
+                accepted.set()
+                gate.wait(timeout=5.0)
+                conn.sendall(_pg_trust_greeting_frames("16.4"))
+                _ = conn.recv(16)
+
+        srv_thread = threading.Thread(target=_server, daemon=True)
+        srv_thread.start()
+
+        client = SyncPostgresClient(
+            user="alice",
+            database="appdb",
+            host="127.0.0.1",
+            port=port,
+            sslmode="disable",
+        )
+
+        def _unblock() -> None:
+            assert accepted.wait(timeout=5.0)
+            gate.set()
+
+        helper = threading.Thread(target=_unblock, daemon=True)
+        helper.start()
+        client.connect()
+        assert client.closed is False
+        client.close()
+        helper.join(timeout=2.0)
+        srv_thread.join(timeout=2.0)
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_exc", "expected_sqlstate"),
+    [
+        ("28P01", DatabaseError, "28P01"),
+        ("eof", ConnectionFailure, None),
+        ("iam_expired", GoogleCloudAuthError, None),
+    ],
+)
+def test_native_sync_core_exception_identity(
+    mode: str,
+    expected_exc: type[Exception],
+    expected_sqlstate: str | None,
+) -> None:
+    """Verify SyncPostgresClient maps wire errors and auth failures to exact vertebra._vertebra exceptions."""
+    if mode == "iam_expired":
+        client = SyncPostgresClient(
+            user="iam-user",
+            database="appdb",
+            host="127.0.0.1",
+            sslmode="disable",
+            enable_iam_auth=True,
+            iam_auth_options={
+                "access_token": "tok",
+                "expires_at_unix_ms": "1000",
+                "scopes": "https://www.googleapis.com/auth/sqlservice.login",
+            },
+        )
+        with pytest.raises(expected_exc) as exc_info:
+            client.connect()
+        assert getattr(exc_info.value, "sqlstate", None) is None
+        assert client.closed is True
+        return
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(2)
+        port = srv.getsockname()[1]
+
+        def _server() -> None:
+            conn, _ = srv.accept()
+            with conn:
+                _ = _read_startup_map(conn)
+                if mode == "28P01":
+                    conn.sendall(_pg_error_frame("28P01", "invalid password"))
+
+        worker = threading.Thread(target=_server, daemon=True)
+        worker.start()
+
+        client = SyncPostgresClient(
+            user="alice",
+            database="appdb",
+            host="127.0.0.1",
+            port=port,
+            sslmode="disable",
+        )
+        with pytest.raises(expected_exc) as exc_info:
+            client.connect()
+        assert getattr(exc_info.value, "sqlstate", None) == expected_sqlstate
+        assert client.closed is True
+        worker.join(timeout=2.0)
+
+
+@pytest.mark.anyio
+async def test_native_async_lifecycle_and_concurrent_progress() -> None:
+    """Verify 8 concurrent AsyncPostgresClient connects allow background event-loop progress and reject overlap."""
+    gate = asyncio.Event()
+    accepted_count = 0
+    all_accepted = asyncio.Event()
+
+    async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal accepted_count
+        raw_len = await reader.readexactly(4)
+        total_len = struct.unpack(">i", raw_len)[0]
+        _ = await reader.readexactly(total_len - 4)
+        accepted_count += 1
+        if accepted_count == 8:
+            all_accepted.set()
+        await gate.wait()
+        writer.write(_pg_trust_greeting_frames(f"17.{accepted_count}"))
+        await writer.drain()
+        _ = await reader.read(16)
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(_handle_client, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    ticks = 0
+
+    async def _ticker() -> None:
+        nonlocal ticks
+        while not gate.is_set():
+            ticks += 1
+            await asyncio.sleep(0.002)
+
+    async with server:
+        clients = [
+            AsyncPostgresClient(
+                user=f"u{idx}",
+                database="appdb",
+                host="127.0.0.1",
+                port=port,
+                sslmode="disable",
+            )
+            for idx in range(8)
+        ]
+        async def _connect_client(c: AsyncPostgresClient) -> None:
+            await c.connect()
+
+        ticker_task = asyncio.create_task(_ticker())
+        connect_tasks = [asyncio.create_task(_connect_client(c)) for c in clients]
+        await asyncio.wait_for(all_accepted.wait(), timeout=5.0)
+
+        with pytest.raises(InterfaceError):
+            await clients[0].connect()
+
+        await asyncio.sleep(0.01)
+        gate.set()
+        await asyncio.gather(*connect_tasks)
+        await ticker_task
+
+        assert ticks > 0
+        assert all(not c.closed for c in clients)
+        assert all(c.parameters.get("client_encoding") == "UTF8" for c in clients)
+        await asyncio.gather(*(c.close() for c in clients))
+        assert all(c.closed for c in clients)
+
+
+@pytest.mark.anyio
+async def test_native_async_ready_noop_cancel_and_callback_setup_failure() -> None:
+    """Verify cancelling an already-Ready connect preserves the session and callback setup failure aborts the worker."""
+    eof_observed = asyncio.Event()
+
+    async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        raw_len = await reader.readexactly(4)
+        total_len = struct.unpack(">i", raw_len)[0]
+        _ = await reader.readexactly(total_len - 4)
+        writer.write(_pg_trust_greeting_frames("17.2"))
+        await writer.drain()
+        data = await reader.read(16)
+        if not data or data == b"X\x00\x00\x00\x04":
+            eof_observed.set()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(_handle_client, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+
+    async with server:
+        client = AsyncPostgresClient(
+            user="alice",
+            database="appdb",
+            host="127.0.0.1",
+            port=port,
+            sslmode="disable",
+        )
+        await client.connect()
+        assert client.closed is False
+
+        async def _connect_ready() -> None:
+            await client.connect()
+
+        noop_task = asyncio.create_task(_connect_ready())
+        noop_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await noop_task
+        assert client.closed is False
+        assert not eof_observed.is_set()
+
+        await client.close()
+        assert client.closed is True
+        await asyncio.wait_for(eof_observed.wait(), timeout=2.0)
+
+        client_fail = AsyncPostgresClient(
+            user="alice",
+            database="appdb",
+            host="127.0.0.1",
+            port=port,
+            sslmode="disable",
+        )
+        loop = asyncio.get_running_loop()
+        orig_create_future = loop.create_future
+
+        class _BrokenFuture:
+            def add_done_callback(self, _cb: object) -> None:
+                msg = "cb-fail"
+                raise RuntimeError(msg)
+
+        object.__setattr__(loop, "create_future", _BrokenFuture)
+        try:
+            with pytest.raises(RuntimeError, match="cb-fail"):
+                client_fail.connect()
+        finally:
+            object.__setattr__(loop, "create_future", orig_create_future)
+
+        assert client_fail.closed is True
+        with pytest.raises(InterfaceError, match="closed"):
+            await client_fail.connect()
+
+
+@pytest.mark.anyio
+async def test_native_async_cancel_inflight_and_queued_completion_race() -> None:
+    """Verify in-flight cancellation and queued-completion cancellation race both leave client closed and close socket."""
+    accepted_inflight = asyncio.Event()
+    eof_inflight = asyncio.Event()
+    hold_inflight = asyncio.Event()
+
+    async def _inflight_server(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        raw_len = await reader.readexactly(4)
+        total_len = struct.unpack(">i", raw_len)[0]
+        _ = await reader.readexactly(total_len - 4)
+        accepted_inflight.set()
+        try:
+            await hold_inflight.wait()
+        finally:
+            _ = await reader.read(16)
+            eof_inflight.set()
+            writer.close()
+
+    srv1 = await asyncio.start_server(_inflight_server, "127.0.0.1", 0)
+    port1 = srv1.sockets[0].getsockname()[1]
+
+    async def _connect_coro(c: AsyncPostgresClient) -> None:
+        await c.connect()
+
+    async with srv1:
+        c1 = AsyncPostgresClient(
+            user="alice",
+            database="appdb",
+            host="127.0.0.1",
+            port=port1,
+            sslmode="disable",
+        )
+        t1 = asyncio.create_task(_connect_coro(c1))
+        await asyncio.wait_for(accepted_inflight.wait(), timeout=5.0)
+        t1.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t1
+        hold_inflight.set()
+        await asyncio.wait_for(eof_inflight.wait(), timeout=2.0)
+        assert c1.closed is True
+
+    eof_queued = asyncio.Event()
+
+    async def _queued_server(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        raw_len = await reader.readexactly(4)
+        total_len = struct.unpack(">i", raw_len)[0]
+        _ = await reader.readexactly(total_len - 4)
+        writer.write(_pg_trust_greeting_frames("17.2"))
+        await writer.drain()
+        _ = await reader.read(16)
+        eof_queued.set()
+        writer.close()
+
+    srv2 = await asyncio.start_server(_queued_server, "127.0.0.1", 0)
+    port2 = srv2.sockets[0].getsockname()[1]
+
+    async with srv2:
+        loop = asyncio.get_running_loop()
+        saved_drainer = getattr(loop, "_vertebra_postgres_completion_drainer", None)
+        if saved_drainer is not None:
+            delattr(loop, "_vertebra_postgres_completion_drainer")
+
+        orig_add_reader = loop.add_reader
+        orig_call_soon_ts = loop.call_soon_threadsafe
+        held_callbacks: list[Callable[[], object]] = []
+        queued_event = threading.Event()
+
+        def _reject_drainer_reader(fd: Any, callback: Callable[..., Any], *args: Any) -> Any:
+            if type(callback).__name__ == "_DbCompletionDrainer":
+                raise NotImplementedError
+            return orig_add_reader(fd, callback, *args)
+
+        def _hold_drainer_wakeup(callback: Callable[..., Any], *args: Any) -> Any:
+            if type(callback).__name__ == "_DbCompletionDrainer":
+                held_callbacks.append(lambda: callback(*args))
+                queued_event.set()
+                return None
+            return orig_call_soon_ts(callback, *args)
+
+        object.__setattr__(loop, "add_reader", _reject_drainer_reader)
+        object.__setattr__(loop, "call_soon_threadsafe", _hold_drainer_wakeup)
+        try:
+            c2 = AsyncPostgresClient(
+                user="alice",
+                database="appdb",
+                host="127.0.0.1",
+                port=port2,
+                sslmode="disable",
+            )
+            t2 = asyncio.create_task(_connect_coro(c2))
+            await asyncio.to_thread(queued_event.wait, 5.0)
+            assert queued_event.is_set()
+            assert c2.closed is True
+
+            t2.cancel()
+            for cb in held_callbacks:
+                cb()
+            with pytest.raises(asyncio.CancelledError):
+                await t2
+            await asyncio.wait_for(eof_queued.wait(), timeout=2.0)
+            assert c2.closed is True
+        finally:
+            object.__setattr__(loop, "add_reader", orig_add_reader)
+            object.__setattr__(loop, "call_soon_threadsafe", orig_call_soon_ts)
+            if hasattr(loop, "_vertebra_postgres_completion_drainer"):
+                delattr(loop, "_vertebra_postgres_completion_drainer")
+            if saved_drainer is not None:
+                object.__setattr__(loop, "_vertebra_postgres_completion_drainer", saved_drainer)
+
+
+@pytest.mark.parametrize("client_cls", [SyncPostgresClient, AsyncPostgresClient])
+def test_native_constructor_signature_parity(client_cls: type[Any]) -> None:
+    """Verify SyncPostgresClient and AsyncPostgresClient expose identical 25-parameter keyword-only signatures."""
+    sig = inspect.signature(client_cls)
+    expected: list[tuple[str, Any]] = [
+        ("user", inspect.Parameter.empty),
+        ("database", inspect.Parameter.empty),
+        ("host", "localhost"),
+        ("port", 5432),
+        ("password", None),
+        ("unix_socket", None),
+        ("sslmode", "verify-full"),
+        ("ca_pem", None),
+        ("client_cert_pem", None),
+        ("client_key_pem", None),
+        ("server_name", None),
+        ("channel_binding", "prefer"),
+        ("connect_timeout", 10.0),
+        ("application_name", "vertebra"),
+        ("session_gucs", None),
+        ("keepalives", True),
+        ("keepalives_idle", None),
+        ("keepalives_interval", None),
+        ("keepalives_count", None),
+        ("cloud_sql_instance", None),
+        ("cloud_sql_ip_type", "PRIVATE"),
+        ("alloydb_instance_uri", None),
+        ("alloydb_ip_type", "PRIVATE"),
+        ("enable_iam_auth", False),
+        ("cloud_auth_options", None),
+        ("iam_auth_options", None),
+    ]
+    actual = [(p.name, p.default) for p in sig.parameters.values()]
+    assert actual == expected
+    assert all(p.kind == inspect.Parameter.KEYWORD_ONLY for p in sig.parameters.values())
+
+    with pytest.raises(TypeError):
+        client_cls("alice", "appdb")
+
+    with pytest.raises(TypeError):
+        client_cls(user="alice", database="appdb", extra=1)
+
+
+@pytest.mark.parametrize("client_cls", [SyncPostgresClient, AsyncPostgresClient])
+@pytest.mark.parametrize(
+    ("bad_kwargs", "expected_exc", "forbidden_secret"),
+    [
+        ({"session_gucs": {"k": 1}}, TypeError, None),
+        ({"iam_auth_options": {1: "v"}}, TypeError, None),
+        ({"port": True}, TypeError, None),
+        ({"keepalives_idle": False}, TypeError, None),
+        ({"connect_timeout": True}, TypeError, None),
+        ({"keepalives": 1}, TypeError, None),
+        ({"enable_iam_auth": 0}, TypeError, None),
+        ({"port": 70000}, ValueError, None),
+        ({"sslmode": "bogus"}, ValueError, None),
+        ({"password": "s3cr3t\x00bad"}, ValueError, "s3cr3t"),
+        ({"client_key_pem": b"PRIVATE-KEY-SECRET"}, ValueError, "PRIVATE-KEY-SECRET"),
+    ],
+)
+def test_native_constructor_type_vs_value_errors_and_redaction(
+    client_cls: type[Any],
+    bad_kwargs: dict[str, Any],
+    expected_exc: type[Exception],
+    forbidden_secret: str | None,
+) -> None:
+    """Verify TypeError vs ValueError boundaries and secret redaction across both constructors."""
+    base: dict[str, Any] = {"user": "alice", "database": "appdb"}
+    base.update(bad_kwargs)
+    with pytest.raises(expected_exc) as exc_info:
+        client_cls(**base)
+    if forbidden_secret is not None:
+        assert forbidden_secret not in str(exc_info.value)
+
+
+def test_native_constructor_zero_io_and_guc_snapshot_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify constructors perform zero DNS/network I/O and snapshot session_gucs at construction time."""
+    dns_calls = 0
+    orig_getaddrinfo = socket.getaddrinfo
+
+    def _spy_getaddrinfo(*args: Any, **kwargs: Any) -> Any:
+        nonlocal dns_calls
+        dns_calls += 1
+        return orig_getaddrinfo(*args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", _spy_getaddrinfo)
+
+    _ = SyncPostgresClient(
+        user="alice",
+        database="appdb",
+        cloud_sql_instance="proj:us-central1:inst",
+    )
+    _ = AsyncPostgresClient(
+        user="alice",
+        database="appdb",
+        alloydb_instance_uri="projects/p/locations/r/clusters/c/instances/i",
+    )
+    assert dns_calls == 0
+
+    monkeypatch.setattr(socket, "getaddrinfo", orig_getaddrinfo)
+
+    startup_seen: dict[str, str] = {}
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(2)
+        port = srv.getsockname()[1]
+
+        def _server() -> None:
+            nonlocal startup_seen
+            conn, _ = srv.accept()
+            with conn:
+                startup_seen = _read_startup_map(conn)
+                conn.sendall(_pg_trust_greeting_frames("17.2"))
+                _ = conn.recv(16)
+
+        worker = threading.Thread(target=_server, daemon=True)
+        worker.start()
+
+        gucs = {"app.tag": "initial"}
+        client = SyncPostgresClient(
+            user="alice",
+            database="appdb",
+            host="127.0.0.1",
+            port=port,
+            sslmode="disable",
+            session_gucs=gucs,
+        )
+        gucs["app.tag"] = "mutated"
+        client.connect()
+        assert startup_seen["app.tag"] == "initial"
+        client.close()
+        worker.join(timeout=2.0)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix domain sockets require POSIX")
+def test_native_constructor_unix_socket_reachability() -> None:
+    """Verify SyncPostgresClient connects over a Unix domain socket with sslmode='disable' and session_gucs."""
+    startup_seen: dict[str, str] = {}
+    with tempfile.TemporaryDirectory(prefix="vtb-pg-") as tmp_dir:
+        sock_path = Path(tmp_dir) / ".s.PGSQL.5432"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as srv:
+            srv.bind(str(sock_path))
+            srv.listen(2)
+
+            def _server() -> None:
+                nonlocal startup_seen
+                conn, _ = srv.accept()
+                with conn:
+                    startup_seen = _read_startup_map(conn)
+                    conn.sendall(_pg_trust_greeting_frames("17.2"))
+                    _ = conn.recv(16)
+
+            worker = threading.Thread(target=_server, daemon=True)
+            worker.start()
+
+            client = SyncPostgresClient(
+                user="alice",
+                database="appdb",
+                unix_socket=str(sock_path),
+                sslmode="disable",
+                session_gucs={"application_name": "unix-override", "app.env": "ci"},
+            )
+            client.connect()
+            assert startup_seen["application_name"] == "unix-override"
+            assert startup_seen["app.env"] == "ci"
+            client.close()
+            worker.join(timeout=2.0)

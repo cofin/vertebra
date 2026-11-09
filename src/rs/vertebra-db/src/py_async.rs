@@ -260,6 +260,32 @@ impl RustDbTaskAwaitable {
     }
 }
 
+struct ArmedWorkerGuard {
+    abort: tokio::task::AbortHandle,
+    disarmed: bool,
+}
+
+impl ArmedWorkerGuard {
+    fn new(abort: tokio::task::AbortHandle) -> Self {
+        Self {
+            abort,
+            disarmed: false,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for ArmedWorkerGuard {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            self.abort.abort();
+        }
+    }
+}
+
 /// Spawn a background Tokio task and resolve its Python `asyncio.Future` via an `attr_name`-keyed
 /// `AsyncCompletionQueue` drainer attached to the running event loop.
 pub fn spawn_rust_db_task_with_attr<F, T, E, M, EMap>(
@@ -283,23 +309,11 @@ where
     let fut_for_cb = py_fut.clone().unbind();
     let worker = db_runtime_handle().spawn(fut);
     let abort = worker.abort_handle();
-    let canceller = match Py::new(
-        py,
-        DbTaskCanceller {
-            abort: abort.clone(),
-        },
-    ) {
-        Ok(cb) => cb,
-        Err(err) => {
-            abort.abort();
-            return Err(err);
-        }
-    };
-    if let Err(err) = py_fut.call_method1("add_done_callback", (canceller,)) {
-        abort.abort();
-        return Err(err);
-    }
+    let mut guard = ArmedWorkerGuard::new(abort.clone());
+    let canceller = Py::new(py, DbTaskCanceller { abort })?;
+    py_fut.call_method1("add_done_callback", (canceller,))?;
     let fut_for_await = py_fut.unbind();
+    guard.disarm();
 
     db_runtime_handle().spawn(async move {
         let produce: DbOutcomeProducer = match worker.await {
@@ -669,5 +683,67 @@ mod tests {
             ring.signal_fallback();
             assert!(ring.fallback_wakeup.lock().unwrap().is_none());
         });
+    }
+
+    #[test]
+    fn callback_registration_failure_aborts_worker() {
+        Python::initialize();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let dropped_clone = Arc::clone(&dropped);
+
+        Python::attach(|py| {
+            let spawn =
+                PyCFunction::new_closure(py, None, None, move |args: &Bound<'_, PyTuple>, _| {
+                    let flag = Arc::clone(&dropped_clone);
+                    spawn_rust_db_task_with_attr(
+                        args.py(),
+                        async move {
+                            let _guard = DropFlag(flag);
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            Ok::<i64, String>(1)
+                        },
+                        |py, v| Ok(v.into_pyobject(py)?.into_any().unbind()),
+                        |_, e| pyo3::exceptions::PyRuntimeError::new_err(e),
+                        "_test_drainer_cb_fail",
+                    )
+                })
+                .expect("spawn");
+            let globals = PyDict::new(py);
+            globals.set_item("spawn", spawn).unwrap();
+            let script = CString::new(concat!(
+                "import asyncio\n",
+                "class BrokenFuture:\n",
+                "    def add_done_callback(self, cb):\n",
+                "        raise RuntimeError('callback registration failed')\n",
+                "async def main():\n",
+                "    loop = asyncio.get_running_loop()\n",
+                "    orig = loop.create_future\n",
+                "    loop.create_future = lambda: BrokenFuture()\n",
+                "    try:\n",
+                "        spawn()\n",
+                "    except RuntimeError as exc:\n",
+                "        return str(exc)\n",
+                "    finally:\n",
+                "        loop.create_future = orig\n",
+                "result = asyncio.run(main())\n",
+            ))
+            .unwrap();
+            py.run(&script, Some(&globals), None).unwrap();
+            let msg: String = globals
+                .get_item("result")
+                .unwrap()
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(msg, "callback registration failed");
+            py.detach(|| {
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while !dropped.load(Ordering::SeqCst) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            });
+        });
+
+        assert!(dropped.load(Ordering::SeqCst));
     }
 }

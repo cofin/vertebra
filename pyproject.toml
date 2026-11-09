@@ -144,6 +144,9 @@ mysql = [
 oracle = [
     "vertebra-oracle==0.3.0",
 ]
+postgres = [
+    "vertebra-postgres==0.3.0",
+]
 spanner = [
     "vertebra-spanner==0.3.0",
 ]
@@ -183,6 +186,7 @@ all = [
     "vertebra-mssql==0.3.0",
     "vertebra-mysql==0.3.0",
     "vertebra-oracle==0.3.0",
+    "vertebra-postgres==0.3.0",
     "vertebra-spanner==0.3.0",
     "vertebra-storage==0.3.0",
     "rloop>=0.5.0; sys_platform != 'win32'",
@@ -260,6 +264,7 @@ vertebra-duckdb = { path = "src/rs/vertebra-duckdb", editable = true }
 vertebra-mssql = { path = "src/rs/vertebra-mssql", editable = true }
 vertebra-mysql = { path = "src/rs/vertebra-mysql", editable = true }
 vertebra-oracle = { path = "src/rs/vertebra-oracle", editable = true }
+vertebra-postgres = { path = "src/rs/vertebra-postgres", editable = true }
 vertebra-spanner = { path = "src/rs/vertebra-spanner", editable = true }
 vertebra-storage = { path = "src/rs/vertebra-storage", editable = true }
 
