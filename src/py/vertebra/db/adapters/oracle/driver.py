@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
 from types import TracebackType
-from typing import Any, ClassVar, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Self
 
 import msgspec
 
@@ -20,16 +20,24 @@ from vertebra.db.adapters.oracle.config import (
     OracleSessionAttrs,
 )
 from vertebra.db.adapters.oracle.core import ORACLE_DIALECT_TAG, OracleCore
+from vertebra.db.adapters.oracle.notify import (
+    OracleNotificationSource,
+    OracleNotifyConfig,
+    validate_oracle_channel_name,
+)
 from vertebra.db.arrow import (
     ARROW_SHM_THRESHOLD_ROWS,
     ArrowCursor,
     _hydrate_rows_with_schema,
     _table_to_rows_and_cols,
 )
-from vertebra.db.driver import AsyncDatabaseDriver, InterfaceError, SyncDatabaseDriver
+from vertebra.db.driver import AsyncDatabaseDriver, InterfaceError, NotificationEvent, SyncDatabaseDriver
 from vertebra.db.rls import TenantScopeConfig
 from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.text import validate_identifier
+
+if TYPE_CHECKING:
+    from vertebra.db.cdc import ChangeFeed
 
 _DEFAULT_TENANT_SCOPE = TenantScopeConfig()
 
@@ -1280,6 +1288,27 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         sql = f"INSERT {hint}INTO {table_name} ({col_list}) VALUES ({placeholders})"
         return self.execute_many(sql, rows)
 
+    def publish_notification(
+        self,
+        channel: str,
+        payload: bytes | str,
+        *,
+        queue_prefix: str = "VTB_AQ_",
+        consumer_name: str | None = None,
+        correlation_id: str | None = None,
+    ) -> str:
+        """Enqueue an AQ / TxEventQ notification synchronously and return its message ID."""
+        queue_name = validate_oracle_channel_name(channel, queue_prefix=queue_prefix)
+        raw_bytes = payload.encode("utf-8") if isinstance(payload, str) else bytes(payload)
+        with self._checkout_client() as active_client:
+            msg_id_bytes: bytes = active_client.enqueue_notification(
+                queue_name=queue_name,
+                payload=raw_bytes,
+                consumer_name=consumer_name,
+                correlation_id=correlation_id,
+            )
+            return bytes(msg_id_bytes).decode("ascii", errors="replace")
+
     def _get_pinned_lease(self) -> Any | None:
         mapping = _SYNC_PINNED_TX.get()
         if not mapping:
@@ -2029,6 +2058,51 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         col_list = ", ".join(str(col) for col in cols)
         sql = f"INSERT {hint}INTO {table_name} ({col_list}) VALUES ({placeholders})"
         return await self.execute_many(sql, rows)
+
+    def notification_source(
+        self,
+        config: OracleNotifyConfig | None = None,
+        *,
+        change_feed: ChangeFeed | None = None,
+    ) -> OracleNotificationSource:
+        """Construct an `OracleNotificationSource` bound to this asynchronous driver."""
+        return OracleNotificationSource(self, config, change_feed=change_feed)
+
+    async def publish_notification(
+        self,
+        channel: str,
+        payload: bytes | str,
+        *,
+        queue_prefix: str = "VTB_AQ_",
+        consumer_name: str | None = None,
+        correlation_id: str | None = None,
+    ) -> str:
+        """Enqueue an AQ / TxEventQ notification asynchronously and return its message ID."""
+        queue_name = validate_oracle_channel_name(channel, queue_prefix=queue_prefix)
+        raw_bytes = payload.encode("utf-8") if isinstance(payload, str) else bytes(payload)
+        async with self._checkout_client() as active_client:
+            msg_id_bytes: bytes = await active_client.enqueue_notification(
+                queue_name=queue_name,
+                payload=raw_bytes,
+                consumer_name=consumer_name,
+                correlation_id=correlation_id,
+            )
+            return bytes(msg_id_bytes).decode("ascii", errors="replace")
+
+    async def listen_notifications(
+        self,
+        channels: Sequence[str],
+        *,
+        config: OracleNotifyConfig | None = None,
+    ) -> AsyncIterator[NotificationEvent]:
+        """Subscribe to `channels` and yield `NotificationEvent` frames with automatic cleanup."""
+        source = OracleNotificationSource(self, config)
+        await source.subscribe(channels)
+        try:
+            async for event in source.listen():
+                yield event
+        finally:
+            await source.close()
 
     def _get_pinned_lease(self) -> Any | None:
         mapping = _ASYNC_PINNED_TX.get()

@@ -38,6 +38,12 @@ from vertebra.db.adapters.oracle.config import (
     OracleWallet,
 )
 from vertebra.db.adapters.oracle.core import OracleCore
+from vertebra.db.adapters.oracle.notify import (
+    OracleNotificationSource,
+    OracleNotifyConfig,
+    validate_oracle_channel_name,
+)
+from vertebra.db.cdc import ChangeFeed
 from vertebra.db.driver import (
     DataError,
     IntegrityError,
@@ -47,7 +53,7 @@ from vertebra.db.driver import (
     ProgrammingError,
     QueryCancelledError,
 )
-from vertebra.db.driver.capabilities import AsyncPipelineCapable, SyncPipelineCapable
+from vertebra.db.driver.capabilities import AsyncPipelineCapable, NotificationSource, SyncPipelineCapable
 from vertebra.db.rls import AsyncTenantConnectionScope, TenantConnectionScope, TenantPredicate, TenantScopeConfig
 from vertebra.extensions.sqlspec.adapters import OracleAsyncDriver, OracleSyncDriver
 
@@ -1527,6 +1533,177 @@ async def test_oracle_notification_and_listener_exports_and_stub_parity() -> Non
         assert await listener.next_notification(timeout=0.05) is None
     finally:
         await client.close()
+
+
+@pytest.mark.parametrize(
+    ("raw_channel", "expected_queue"),
+    [
+        ("orders", "VTB_AQ_ORDERS"),
+        ("  VTB_AQ_BILLING  ", "VTB_AQ_BILLING"),
+        ("_events$1#", "VTB_AQ__EVENTS$1#"),
+    ],
+)
+def test_validate_oracle_channel_name_resolves_valid_identifiers(
+    raw_channel: str,
+    expected_queue: str,
+) -> None:
+    """Verify valid channel names resolve to uppercase prefixed AQ identifiers."""
+    assert validate_oracle_channel_name(raw_channel) == expected_queue
+
+
+@pytest.mark.parametrize(
+    "invalid_channel",
+    [
+        "",
+        "   ",
+        "1leading_digit",
+        "orders; DROP TABLE users",
+        "orders with spaces",
+        "schema.orders",
+        "A" * 129,
+    ],
+)
+def test_validate_oracle_channel_name_rejects_invalid_identifiers(
+    invalid_channel: str,
+) -> None:
+    """Verify invalid channel names raise ProgrammingError with sqlstate 42602."""
+    with pytest.raises(ProgrammingError) as exc_info:
+        validate_oracle_channel_name(invalid_channel)
+    assert exc_info.value.sqlstate == "42602"
+
+
+@pytest.mark.anyio
+async def test_oracle_notification_source_protocol_publish_subscribe_listen_and_change_feed() -> None:
+    """Verify NotificationSource protocol compliance, publish/subscribe/listen, and ChangeFeed envelopes."""
+    async with AsyncOracleDriver(OracleConfig(host="memory")) as driver:
+        source = driver.notification_source(
+            OracleNotifyConfig(queue_prefix="VTB_AQ_", poll_timeout=0.05),
+        )
+        assert isinstance(source, NotificationSource)
+
+        with pytest.raises(ProgrammingError) as exc_info:
+            async for _ in source.listen():
+                break
+        assert exc_info.value.sqlstate == "42602"
+
+        await source.subscribe(["orders"])
+        await source.publish("orders", b"raw-order-payload")
+        received_events = []
+        async for evt in source.listen():
+            received_events.append(evt)
+            break
+
+        assert len(received_events) == 1
+        assert received_events[0].channel == "orders"
+        assert received_events[0].payload == b"raw-order-payload"
+        assert received_events[0].metadata["queue_name"] == "VTB_AQ_ORDERS"
+
+        feed = ChangeFeed()
+        cf_source = driver.notification_source(
+            OracleNotifyConfig(queue_prefix="VTB_AQ_", poll_timeout=0.05),
+            change_feed=feed,
+        )
+        assert cf_source.change_feed is feed
+        await cf_source.subscribe(["invoices"])
+        await cf_source.publish("invoices", "invoice-99")
+        cf_events = []
+        async for evt in cf_source.listen():
+            cf_events.append(evt)
+            break
+
+        assert len(cf_events) == 1
+        assert cf_events[0].channel == "invoices"
+        assert cf_events[0].payload == b"invoice-99"
+        assert cf_events[0].metadata["change_event_id"] == 1
+        assert cf_events[0].metadata["spilled"] is False
+        assert len(feed.replay_since(0)) == 1
+
+
+@pytest.mark.anyio
+async def test_oracle_notification_source_reconnect_backoff_and_cancellation_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify exponential reconnect backoff on transient OperationalError and listener cleanup on exit."""
+    recorded_delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        recorded_delays.append(delay)
+
+    monkeypatch.setattr("vertebra.db.adapters.oracle.notify.asyncio.sleep", fake_sleep)
+
+    class _FaultInjectedListener:
+        def __init__(self, fail_mode: str | None) -> None:
+            self._fail_mode = fail_mode
+            self.is_closed = False
+            self.close_calls = 0
+
+        async def next_notification(self, timeout: float | None = None) -> Any:
+            _ = timeout
+            if self._fail_mode == "transient":
+                err = OperationalError("ORA-03113: end-of-file on communication channel")
+                err.vendor_code = 3113
+                err.is_transient = True
+                raise err
+            return _oracle.OracleNotification(
+                "VTB_AQ_RECOVER",
+                b"msg-recovered",
+                b"recovered-ok",
+                None,
+                1700000000123,
+            )
+
+        async def close(self) -> None:
+            self.is_closed = True
+            self.close_calls += 1
+
+    created_listeners: list[_FaultInjectedListener] = []
+    modes = ["transient", "transient", None]
+
+    class _ClientWithFaultInjectedListener:
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        async def connect(self) -> None:
+            await self._inner.connect()
+
+        async def close(self) -> None:
+            await self._inner.close()
+
+        async def open_listener(
+            self,
+            *,
+            queue_name: str,
+            consumer_name: str | None = None,
+            wait_timeout_seconds: int = 5,
+        ) -> _FaultInjectedListener:
+            _ = (queue_name, consumer_name, wait_timeout_seconds)
+            mode = modes.pop(0) if modes else None
+            inst = _FaultInjectedListener(mode)
+            created_listeners.append(inst)
+            return inst
+
+    raw_client = _oracle.AsyncOracleClient(host="memory", user="app", password="secret")
+    async with AsyncOracleDriver(OracleConfig(host="memory"), client=_ClientWithFaultInjectedListener(raw_client)) as driver:
+        source = OracleNotificationSource(
+            driver,
+            OracleNotifyConfig(
+                reconnect_initial_delay=0.25,
+                reconnect_max_delay=15.0,
+                max_reconnect_attempts=5,
+                poll_timeout=0.05,
+            ),
+        )
+        await source.subscribe(["recover"])
+        async for evt in source.listen():
+            assert evt.channel == "recover"
+            assert evt.payload == b"recovered-ok"
+            await source.close()
+            break
+
+        assert recorded_delays == [0.25, 0.5]
+        assert len(created_listeners) == 3
+        assert all(listener.is_closed and listener.close_calls >= 1 for listener in created_listeners)
+
 
 
 

@@ -6,7 +6,7 @@ chapter_id: ch06-notifications-and-embeddings
 title: "Task 02: Implement OracleNotificationSource and Reconnect Backoff"
 description: Implement OracleNotifyConfig and runtime_checkable NotificationSource-compliant OracleNotificationSource in src/py/vertebra/db/adapters/oracle/notify.py and wire notification hooks on SyncOracleDriver and AsyncOracleDriver with ChangeFeed integration and exponential reconnect backoff.
 status: stable
-state: pending
+state: completed
 priority: P1
 owner: null
 depends_on:
@@ -27,18 +27,18 @@ verification_strategy: behavior_tdd
 estimated_loc: 210
 plan_revision: 3
 plan_commit: 769302bc
-state_revision: 0
-claimed_by: null
-claimed_at: null
+state_revision: 1
+claimed_by: agent:executor
+claimed_at: "2026-11-09T17:20:00Z"
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T17:30:00Z"
+last_verified_commit: 1232f10d
+verification_evidence: "pytest src/py/tests/unit/db/test_oracle_adapter.py -k 'notify or notification_source or channel_name' (12 passed) and ruff/mypy clean"
 created_at: "2026-11-09T00:48:00Z"
-updated_at: "2026-11-09T01:28:30Z"
-completed_at: null
+updated_at: "2026-11-09T17:30:00Z"
+completed_at: "2026-11-09T17:30:00Z"
 commit_sha: null
 commit: null
 generated:
@@ -208,9 +208,9 @@ make lint-all
 
 ## Acceptance Criteria
 
-- [ ] `src/py/vertebra/db/adapters/oracle/notify.py` implements `OracleNotifyConfig`, `validate_oracle_channel_name`, and `@runtime_checkable NotificationSource`-compliant `OracleNotificationSource` (`publish`, `subscribe`, `unsubscribe`, `listen`, `subscribe_aq`, `publish_aq`, `listen_aq`, `close`) using `ChangeFeed` from `vertebra.db.cdc` and `decode_json`/`encode_json` from `vertebra.utils.serializers` with zero inline `#` comments [^ora-contracts] [^notify-cap-py] [^db-cdc-py].
-- [ ] `SyncOracleDriver` and `AsyncOracleDriver` expose `publish_notification`, `notification_source`, and `listen_notifications` hooks in `src/py/vertebra/db/adapters/oracle/driver.py` [^ora-driver-py].
-- [ ] Unit tests in `src/py/tests/unit/db/test_oracle_adapter.py` and `make lint-all` pass with zero errors.
+- [x] `src/py/vertebra/db/adapters/oracle/notify.py` implements `OracleNotifyConfig`, `validate_oracle_channel_name`, and `@runtime_checkable NotificationSource`-compliant `OracleNotificationSource` (`publish`, `subscribe`, `unsubscribe`, `listen`, `subscribe_aq`, `publish_aq`, `listen_aq`, `close`) using `ChangeFeed` from `vertebra.db.cdc` and `decode_json`/`encode_json` from `vertebra.utils.serializers` with zero inline `#` comments [^ora-contracts] [^notify-cap-py] [^db-cdc-py].
+- [x] `SyncOracleDriver` and `AsyncOracleDriver` expose `publish_notification`, `notification_source`, and `listen_notifications` hooks in `src/py/vertebra/db/adapters/oracle/driver.py` [^ora-driver-py].
+- [x] Unit tests in `src/py/tests/unit/db/test_oracle_adapter.py` and `make lint-all` pass with zero errors.
 
 ## Notes & Discoveries
 
