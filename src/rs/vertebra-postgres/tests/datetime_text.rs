@@ -136,9 +136,20 @@ fn postgres_and_sql_timestamptz_resolve_numeric_and_utc_while_tagging_abbreviati
     .unwrap();
     assert_eq!(
         with_abbrev,
+        PgValue::TimestampTz(expected_days * 86_400_000_000 + 4 * 3_600_000_000)
+    );
+
+    let mismatched_abbrev = decode_timestamp_text(
+        "Wed Jul 01 12:00:00 2026 EDT",
+        TemporalKind::TimestampTz,
+        &pg_ctx,
+    )
+    .unwrap();
+    assert_eq!(
+        mismatched_abbrev,
         PgValue::TemporalText {
             kind: TemporalKind::TimestampTz,
-            wire_text: "Wed Jul 01 12:00:00 2026 CST".to_string(),
+            wire_text: "Wed Jul 01 12:00:00 2026 EDT".to_string(),
             date_style: "Postgres, MDY".to_string(),
             time_zone: "Asia/Shanghai".to_string(),
         }
@@ -153,12 +164,7 @@ fn postgres_and_sql_timestamptz_resolve_numeric_and_utc_while_tagging_abbreviati
     .unwrap();
     assert_eq!(
         dmy_bst,
-        PgValue::TemporalText {
-            kind: TemporalKind::TimestampTz,
-            wire_text: "Wed 01 Jul 12:00:00 2026 BST".to_string(),
-            date_style: "Postgres, DMY".to_string(),
-            time_zone: "Europe/London".to_string(),
-        }
+        PgValue::TimestampTz(expected_days * 86_400_000_000 + 11 * 3_600_000_000)
     );
 }
 

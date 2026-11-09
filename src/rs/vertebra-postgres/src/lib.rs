@@ -27,9 +27,12 @@ pub mod tls;
 pub mod transaction;
 pub mod types;
 
+pub use crate::async_client::PyAsyncPostgresPortal;
 pub use crate::session::statements::{
     CachedStatement, PoolerCapabilities, PoolerMode, StatementCache, StatementKey,
 };
+pub use crate::session::{CommandBudget, CommandDeadlineGuard};
+pub use crate::sync_client::PySyncPostgresPortal;
 pub use codecs::{
     CodecContext, decode_value, decode_value_with_catalog, encode_value, encode_value_with_catalog,
     format_for_oid, format_for_oid_with_catalog,

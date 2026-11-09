@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
@@ -11,15 +12,17 @@ use vertebra_db::py_async::{
 };
 
 use crate::errors::{PostgresError, postgres_error_to_py};
+use crate::portal::Portal;
 use crate::python_values::{extract_parameters, query_result_to_python};
 use crate::session::cancel::OperationGeneration;
 use crate::session::pipeline_scope::{
     PipelineScopeToken, extract_pipeline_batch, outcomes_to_python, pipeline_error_to_py,
 };
-use crate::session::{ClientBeginConnect, CloseAction, SessionHandle};
+use crate::session::{ClientBeginConnect, CloseAction, CommandBudget, SessionHandle};
 use crate::sync_client::{
-    build_validated_config, extract_cloud_auth_options, extract_iam_auth_options, extract_scope_id,
-    extract_session_gucs, extract_strict_bool, extract_strict_f64, extract_strict_i64,
+    build_validated_config, extract_batch_size, extract_cloud_auth_options,
+    extract_iam_auth_options, extract_max_rows, extract_scope_id, extract_session_gucs,
+    extract_strict_bool, extract_strict_f64, extract_strict_i64, extract_strict_opt_f64,
     extract_strict_opt_i64, extract_strict_u64,
 };
 
@@ -89,9 +92,97 @@ impl PyAsyncPostgresClient {
         Self { session }
     }
 
-    /// Register `AsyncPostgresClient` on the `vertebra._postgres` module.
+    /// Register `AsyncPostgresClient` and `AsyncPostgresPortal` on the `vertebra._postgres` module.
     pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-        m.add_class::<Self>()
+        m.add_class::<Self>()?;
+        m.add_class::<PyAsyncPostgresPortal>()
+    }
+}
+
+/// Session-pinned asynchronous PostgreSQL Protocol 3.0 portal (`vertebra._postgres.AsyncPostgresPortal`).
+#[pyclass(
+    name = "AsyncPostgresPortal",
+    module = "vertebra._postgres",
+    frozen,
+    immutable_type
+)]
+pub struct PyAsyncPostgresPortal {
+    portal: Arc<tokio::sync::Mutex<Portal>>,
+    session: Arc<SessionHandle>,
+    exhausted_flag: Arc<AtomicBool>,
+    closed_flag: Arc<AtomicBool>,
+}
+
+impl PyAsyncPostgresPortal {
+    pub(crate) fn from_portal(portal: Portal) -> Self {
+        let (exhausted_flag, closed_flag) = portal.status_flags();
+        let session = Arc::clone(portal.session());
+        Self {
+            portal: Arc::new(tokio::sync::Mutex::new(portal)),
+            session,
+            exhausted_flag,
+            closed_flag,
+        }
+    }
+}
+
+#[pymethods]
+impl PyAsyncPostgresPortal {
+    /// Fetch up to `max_rows` rows (`>= 1`) asynchronously from the suspended server portal as a `PostgresQueryResult`.
+    pub fn fetch<'py>(
+        &self,
+        py: Python<'py>,
+        #[pyo3(from_py_with = extract_max_rows)] max_rows: i32,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let portal = Arc::clone(&self.portal);
+        let op_gen = self.session.reserve_operation_generation();
+        spawn_cancellable_op(
+            py,
+            &self.session,
+            op_gen,
+            async move {
+                let mut guard = portal.lock().await;
+                guard.fetch_with_generation(op_gen, max_rows).await
+            },
+            |py, res| query_result_to_python(py, &res),
+            postgres_error_to_py,
+        )
+    }
+
+    /// Close the portal idempotently and complete/roll back its pinned `TransactionScope` asynchronously.
+    pub fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let portal = Arc::clone(&self.portal);
+        let awaitable = spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                let mut guard = portal.lock().await;
+                guard.close().await
+            },
+            |py, ()| Ok(py.None()),
+            postgres_error_to_py,
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )?;
+        Bound::new(py, awaitable)
+    }
+
+    /// Return `True` once the server portal has reached `CommandComplete` or `EmptyQueryResponse`.
+    #[getter]
+    pub fn exhausted(&self) -> bool {
+        self.exhausted_flag.load(Ordering::Acquire)
+    }
+
+    /// Return `True` once the portal has been closed or exhausted.
+    #[getter]
+    pub fn closed(&self) -> bool {
+        self.closed_flag.load(Ordering::Acquire)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "AsyncPostgresPortal(exhausted={}, closed={})",
+            self.exhausted(),
+            self.closed()
+        )
     }
 }
 
@@ -266,14 +357,113 @@ impl PyAsyncPostgresClient {
     }
 
     /// Execute a single-statement PostgreSQL Protocol 3.0 extended query asynchronously, resolving to `PostgresQueryResult`.
-    #[pyo3(signature = (sql, parameters = None, *, parameter_oids = None))]
+    #[pyo3(signature = (sql, parameters = None, *, parameter_oids = None, timeout = None))]
     pub fn query<'py>(
         &self,
         py: Python<'py>,
         sql: &str,
         parameters: Option<&Bound<'py, PyAny>>,
         parameter_oids: Option<&Bound<'py, PyAny>>,
+        timeout: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let timeout_secs = extract_strict_opt_f64(timeout)?;
+        let timeout_dur = CommandBudget::validate_optional_seconds(timeout_secs)
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        self.session
+            .ensure_ordinary_reservable()
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        let none_bound = py.None().into_bound(py);
+        let params_ref = parameters.unwrap_or(&none_bound);
+        let (params, oids) = extract_parameters(py, params_ref, parameter_oids)
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        let session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
+        let budget = match CommandBudget::start_from_duration(timeout_dur) {
+            Ok(b) => b,
+            Err(err) => {
+                session.unreserve_operation_generation(op_gen);
+                return Err(postgres_error_to_py(py, err));
+            }
+        };
+        let sql_owned = sql.to_owned();
+        spawn_cancellable_op(
+            py,
+            &self.session,
+            op_gen,
+            async move {
+                session
+                    .query_as_with_generation_and_budget(
+                        op_gen,
+                        None,
+                        &sql_owned,
+                        &params,
+                        oids.as_deref(),
+                        budget,
+                    )
+                    .await
+            },
+            |py, res| query_result_to_python(py, &res),
+            postgres_error_to_py,
+        )
+    }
+
+    /// Execute a multi-statement PostgreSQL Protocol 3.0 simple query (`'Q'`) asynchronously, resolving to `tuple[PostgresQueryResult, ...]`.
+    #[pyo3(signature = (sql, *, timeout = None))]
+    pub fn query_multi<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+        timeout: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        let timeout_secs = extract_strict_opt_f64(timeout)?;
+        let timeout_dur = CommandBudget::validate_optional_seconds(timeout_secs)
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        self.session
+            .ensure_ordinary_reservable()
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        let session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
+        let budget = match CommandBudget::start_from_duration(timeout_dur) {
+            Ok(b) => b,
+            Err(err) => {
+                session.unreserve_operation_generation(op_gen);
+                return Err(postgres_error_to_py(py, err));
+            }
+        };
+        let sql_owned = sql.to_owned();
+        spawn_cancellable_op(
+            py,
+            &self.session,
+            op_gen,
+            async move {
+                session
+                    .simple_query_with_generation_and_budget(op_gen, &sql_owned, budget)
+                    .await
+            },
+            |py, results| {
+                let mut py_results = Vec::with_capacity(results.len());
+                for res in &results {
+                    py_results.push(query_result_to_python(py, res)?);
+                }
+                Ok(PyTuple::new(py, py_results)?.into_any().unbind())
+            },
+            postgres_error_to_py,
+        )
+    }
+
+    /// Open a session-pinned PostgreSQL portal inside an explicit transaction or nested savepoint scope asynchronously.
+    #[pyo3(signature = (sql, parameters = None, *, parameter_oids = None, batch_size = 65536))]
+    pub fn open_portal<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+        parameters: Option<&Bound<'py, PyAny>>,
+        parameter_oids: Option<&Bound<'py, PyAny>>,
+        #[pyo3(from_py_with = extract_batch_size)] batch_size: i32,
+    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
+        self.session
+            .ensure_ordinary_reservable()
+            .map_err(|e| postgres_error_to_py(py, e))?;
         let none_bound = py.None().into_bound(py);
         let params_ref = parameters.unwrap_or(&none_bound);
         let (params, oids) = extract_parameters(py, params_ref, parameter_oids)
@@ -287,39 +477,16 @@ impl PyAsyncPostgresClient {
             op_gen,
             async move {
                 session
-                    .query_as_with_generation(op_gen, None, &sql_owned, &params, oids.as_deref())
+                    .open_portal_with_generation(
+                        op_gen,
+                        &sql_owned,
+                        &params,
+                        oids.as_deref(),
+                        batch_size,
+                    )
                     .await
             },
-            |py, res| query_result_to_python(py, &res),
-            postgres_error_to_py,
-        )
-    }
-
-    /// Execute a multi-statement PostgreSQL Protocol 3.0 simple query (`'Q'`) asynchronously, resolving to `tuple[PostgresQueryResult, ...]`.
-    pub fn query_multi<'py>(
-        &self,
-        py: Python<'py>,
-        sql: &str,
-    ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
-        let session = Arc::clone(&self.session);
-        let op_gen = session.reserve_operation_generation();
-        let sql_owned = sql.to_owned();
-        spawn_cancellable_op(
-            py,
-            &self.session,
-            op_gen,
-            async move {
-                session
-                    .simple_query_with_generation(op_gen, &sql_owned)
-                    .await
-            },
-            |py, results| {
-                let mut py_results = Vec::with_capacity(results.len());
-                for res in &results {
-                    py_results.push(query_result_to_python(py, res)?);
-                }
-                Ok(PyTuple::new(py, py_results)?.into_any().unbind())
-            },
+            |py, portal| Ok(Py::new(py, PyAsyncPostgresPortal::from_portal(portal))?.into_any()),
             postgres_error_to_py,
         )
     }

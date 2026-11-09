@@ -121,10 +121,10 @@ Progress: `[2/2 files documented in ch16]` (`src/py/vertebra/db/adapters/postgre
 
 ## 5. Implementation Plan
 
-- [x] native-postgres-driver:ch16:t01 — Implement retained pipeline transaction scope and Python pipeline context classes (tasks/t01-pipeline-transaction-scope.md)
-- [x] native-postgres-driver:ch16:t02 — Wire PyO3 client pipeline scope methods and end-to-end transactional pipeline tests (tasks/t02-python-pipeline-contexts.md)
-- [x] native-postgres-driver:ch16:t03 — Implement protocol CancelRequest engine, connection retirement, and non-aborting async cancel callback (tasks/t03-cancel-engine-and-retirement.md)
-- [x] native-postgres-driver:ch16:t04 — Expose explicit and asyncio client cancellation with independent native cleanup (tasks/t04-python-and-asyncio-cancellation.md)
+- [x] [c87ca833] native-postgres-driver:ch16:t01 — Implement retained pipeline transaction scope and Python pipeline context classes (tasks/t01-pipeline-transaction-scope.md)
+- [x] [c87ca833] native-postgres-driver:ch16:t02 — Wire PyO3 client pipeline scope methods and end-to-end transactional pipeline tests (tasks/t02-python-pipeline-contexts.md)
+- [x] [c87ca833] native-postgres-driver:ch16:t03 — Implement protocol CancelRequest engine, connection retirement, and non-aborting async cancel callback (tasks/t03-cancel-engine-and-retirement.md)
+- [x] [c87ca833] native-postgres-driver:ch16:t04 — Expose explicit and asyncio client cancellation with independent native cleanup (tasks/t04-python-and-asyncio-cancellation.md)
 
 **Chapter Recovery Checkpoint:** `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db --features pyo3 --lib py_async::tests && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-postgres --test pipeline_scope --test cancellation_protocol && make dev && uv run --no-sync pytest src/py/tests/unit/db/test_postgres_native_pipeline.py src/py/tests/unit/db/test_postgres_native_cancel.py -q && uv run --no-sync python -m mypy.stubtest vertebra._postgres` exits `0`.
 

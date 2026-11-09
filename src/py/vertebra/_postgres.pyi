@@ -70,12 +70,39 @@ class SyncPostgresClient:
         parameters: Sequence[PostgresValue | PgParameter] | None = None,
         *,
         parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
     ) -> PostgresQueryResult:
-        """Execute a single-statement PostgreSQL Protocol 3.0 extended query."""
+        """Execute a single-statement PostgreSQL Protocol 3.0 extended query.
+
+        When timeout is provided, it specifies a single positive I/O budget in seconds
+        started at native operation reservation covering parameter discovery, wire frames,
+        and active metadata enrichment without preempting CPU decode or Python projection.
+        """
         ...
 
-    def query_multi(self, sql: str) -> tuple[PostgresQueryResult, ...]:
-        """Execute a multi-statement PostgreSQL Protocol 3.0 simple query ('Q')."""
+    def query_multi(
+        self,
+        sql: str,
+        *,
+        timeout: float | None = None,
+    ) -> tuple[PostgresQueryResult, ...]:
+        """Execute a multi-statement PostgreSQL Protocol 3.0 simple query ('Q').
+
+        When timeout is provided, one non-renewing I/O budget in seconds started at
+        native operation reservation covers the full multi-statement command without
+        preempting CPU decode or Python projection.
+        """
+        ...
+
+    def open_portal(
+        self,
+        sql: str,
+        parameters: Sequence[PostgresValue | PgParameter] | None = None,
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        batch_size: int = 65536,
+    ) -> SyncPostgresPortal:
+        """Open a session-pinned row-limited PostgreSQL portal over sql."""
         ...
 
     def pipeline_begin(self) -> int:
@@ -183,12 +210,39 @@ class AsyncPostgresClient:
         parameters: Sequence[PostgresValue | PgParameter] | None = None,
         *,
         parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
     ) -> Awaitable[PostgresQueryResult]:
-        """Execute a single-statement PostgreSQL Protocol 3.0 extended query asynchronously."""
+        """Execute a single-statement PostgreSQL Protocol 3.0 extended query asynchronously.
+
+        When timeout is provided, it specifies a single positive I/O budget in seconds
+        started at native operation reservation before async worker scheduling without
+        preempting CPU decode or Python projection.
+        """
         ...
 
-    def query_multi(self, sql: str) -> Awaitable[tuple[PostgresQueryResult, ...]]:
-        """Execute a multi-statement PostgreSQL Protocol 3.0 simple query ('Q') asynchronously."""
+    def query_multi(
+        self,
+        sql: str,
+        *,
+        timeout: float | None = None,
+    ) -> Awaitable[tuple[PostgresQueryResult, ...]]:
+        """Execute a multi-statement PostgreSQL Protocol 3.0 simple query ('Q') asynchronously.
+
+        When timeout is provided, one non-renewing I/O budget in seconds started at
+        native operation reservation covers the full multi-statement command without
+        preempting CPU decode or Python projection.
+        """
+        ...
+
+    def open_portal(
+        self,
+        sql: str,
+        parameters: Sequence[PostgresValue | PgParameter] | None = None,
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        batch_size: int = 65536,
+    ) -> Awaitable[AsyncPostgresPortal]:
+        """Open a session-pinned row-limited PostgreSQL portal asynchronously over sql."""
         ...
 
     def pipeline_begin(self) -> Awaitable[int]:
@@ -439,12 +493,58 @@ class AsyncPostgresPool:
         """Return True if the pool has been closed or is draining."""
         ...
 
+@final
+class SyncPostgresPortal:
+    """Session-pinned synchronous PostgreSQL Protocol 3.0 portal."""
+
+    def fetch(self, max_rows: int) -> PostgresQueryResult:
+        """Fetch up to max_rows rows (>= 1) from the suspended portal."""
+        ...
+
+    def close(self) -> None:
+        """Close the portal idempotently and finish its pinned transaction scope."""
+        ...
+
+    @property
+    def exhausted(self) -> bool:
+        """Return True once the server portal has reached completion."""
+        ...
+
+    @property
+    def closed(self) -> bool:
+        """Return True once the portal has been closed or exhausted."""
+        ...
+
+@final
+class AsyncPostgresPortal:
+    """Session-pinned asynchronous PostgreSQL Protocol 3.0 portal."""
+
+    def fetch(self, max_rows: int) -> Awaitable[PostgresQueryResult]:
+        """Fetch up to max_rows rows (>= 1) asynchronously from the suspended portal."""
+        ...
+
+    def close(self) -> Awaitable[None]:
+        """Close the portal idempotently and finish its pinned transaction scope asynchronously."""
+        ...
+
+    @property
+    def exhausted(self) -> bool:
+        """Return True once the server portal has reached completion."""
+        ...
+
+    @property
+    def closed(self) -> bool:
+        """Return True once the portal has been closed or exhausted."""
+        ...
+
 __all__ = [
     "FREE_THREADED",
     "GIL_USED",
     "AsyncPostgresClient",
     "AsyncPostgresPool",
+    "AsyncPostgresPortal",
     "SyncPostgresClient",
     "SyncPostgresPool",
+    "SyncPostgresPortal",
     "__version__",
 ]

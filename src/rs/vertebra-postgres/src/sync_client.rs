@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
@@ -10,11 +11,12 @@ use vertebra_db::py_async::block_on_db;
 
 use crate::config::{PostgresConfig, RawPostgresOptions};
 use crate::errors::{PostgresError, postgres_error_to_py};
+use crate::portal::Portal;
 use crate::python_values::{extract_parameters, query_result_to_python};
 use crate::session::pipeline_scope::{
     PipelineScopeToken, extract_pipeline_batch, outcomes_to_python, pipeline_error_to_py,
 };
-use crate::session::{ClientBeginConnect, CloseAction, SessionHandle};
+use crate::session::{ClientBeginConnect, CloseAction, CommandBudget, SessionHandle};
 
 /// Extract a `Mapping[str, str]` snapshot while attached to the Python runtime.
 pub(crate) fn extract_string_map(
@@ -100,6 +102,44 @@ pub(crate) fn extract_strict_f64(obj: &Bound<'_, PyAny>) -> PyResult<f64> {
     }
     obj.extract::<f64>()
         .map_err(|_| PyTypeError::new_err("expected float or int"))
+}
+
+pub(crate) fn extract_strict_opt_f64(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<f64>> {
+    let Some(val) = obj.filter(|v| !v.is_none()) else {
+        return Ok(None);
+    };
+    extract_strict_f64(val).map(Some)
+}
+
+pub(crate) fn extract_positive_i32(obj: &Bound<'_, PyAny>, field_name: &str) -> PyResult<i32> {
+    if obj.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(format!(
+            "expected int {field_name}, not bool"
+        )));
+    }
+    let val = obj
+        .extract::<i128>()
+        .map_err(|_| PyTypeError::new_err(format!("expected int {field_name}")))?;
+    if val <= 0 {
+        return Err(postgres_error_to_py(
+            obj.py(),
+            PostgresError::Interface(format!("{field_name} must be >= 1, got {val}")),
+        ));
+    }
+    i32::try_from(val).map_err(|_| {
+        postgres_error_to_py(
+            obj.py(),
+            PostgresError::Interface(format!("{field_name} {val} exceeds i32::MAX")),
+        )
+    })
+}
+
+pub(crate) fn extract_max_rows(obj: &Bound<'_, PyAny>) -> PyResult<i32> {
+    extract_positive_i32(obj, "max_rows")
+}
+
+pub(crate) fn extract_batch_size(obj: &Bound<'_, PyAny>) -> PyResult<i32> {
+    extract_positive_i32(obj, "batch_size")
 }
 
 pub(crate) fn extract_strict_bool(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
@@ -243,9 +283,85 @@ impl PySyncPostgresClient {
         Self { session }
     }
 
-    /// Register `SyncPostgresClient` on the `vertebra._postgres` module.
+    /// Register `SyncPostgresClient` and `SyncPostgresPortal` on the `vertebra._postgres` module.
     pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-        m.add_class::<Self>()
+        m.add_class::<Self>()?;
+        m.add_class::<PySyncPostgresPortal>()
+    }
+}
+
+/// Session-pinned synchronous PostgreSQL Protocol 3.0 portal (`vertebra._postgres.SyncPostgresPortal`).
+#[pyclass(
+    name = "SyncPostgresPortal",
+    module = "vertebra._postgres",
+    frozen,
+    immutable_type
+)]
+pub struct PySyncPostgresPortal {
+    portal: tokio::sync::Mutex<Portal>,
+    exhausted_flag: Arc<AtomicBool>,
+    closed_flag: Arc<AtomicBool>,
+}
+
+impl PySyncPostgresPortal {
+    pub(crate) fn from_portal(portal: Portal) -> Self {
+        let (exhausted_flag, closed_flag) = portal.status_flags();
+        Self {
+            portal: tokio::sync::Mutex::new(portal),
+            exhausted_flag,
+            closed_flag,
+        }
+    }
+}
+
+#[pymethods]
+impl PySyncPostgresPortal {
+    /// Fetch up to `max_rows` rows (`>= 1`) from the suspended server portal as a `PostgresQueryResult`.
+    pub fn fetch(
+        &self,
+        py: Python<'_>,
+        #[pyo3(from_py_with = extract_max_rows)] max_rows: i32,
+    ) -> PyResult<Py<PyAny>> {
+        let res = py
+            .detach(|| {
+                block_on_db(async {
+                    let mut guard = self.portal.lock().await;
+                    guard.fetch(max_rows).await
+                })
+            })
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        query_result_to_python(py, &res)
+    }
+
+    /// Close the portal idempotently and complete/roll back its pinned `TransactionScope`.
+    pub fn close(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| {
+            block_on_db(async {
+                let mut guard = self.portal.lock().await;
+                guard.close().await
+            })
+        })
+        .map_err(|e| postgres_error_to_py(py, e))
+    }
+
+    /// Return `True` once the server portal has reached `CommandComplete` or `EmptyQueryResponse`.
+    #[getter]
+    pub fn exhausted(&self) -> bool {
+        self.exhausted_flag.load(Ordering::Acquire)
+    }
+
+    /// Return `True` once the portal has been closed or exhausted.
+    #[getter]
+    pub fn closed(&self) -> bool {
+        self.closed_flag.load(Ordering::Acquire)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SyncPostgresPortal(exhausted={}, closed={})",
+            self.exhausted(),
+            self.closed()
+        )
     }
 }
 
@@ -401,25 +517,47 @@ impl PySyncPostgresClient {
     }
 
     /// Execute a single-statement PostgreSQL Protocol 3.0 extended query, returning `PostgresQueryResult`.
-    #[pyo3(signature = (sql, parameters = None, *, parameter_oids = None))]
+    #[pyo3(signature = (sql, parameters = None, *, parameter_oids = None, timeout = None))]
     pub fn query(
         &self,
         py: Python<'_>,
         sql: &str,
         parameters: Option<&Bound<'_, PyAny>>,
         parameter_oids: Option<&Bound<'_, PyAny>>,
+        timeout: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let timeout_secs = extract_strict_opt_f64(timeout)?;
+        let timeout_dur = CommandBudget::validate_optional_seconds(timeout_secs)
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        self.session
+            .ensure_ordinary_reservable()
+            .map_err(|e| postgres_error_to_py(py, e))?;
         let none_bound = py.None().into_bound(py);
         let params_ref = parameters.unwrap_or(&none_bound);
         let (params, oids) = extract_parameters(py, params_ref, parameter_oids)
             .map_err(|e| postgres_error_to_py(py, e))?;
         let session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
+        let budget = match CommandBudget::start_from_duration(timeout_dur) {
+            Ok(b) => b,
+            Err(err) => {
+                session.unreserve_operation_generation(op_gen);
+                return Err(postgres_error_to_py(py, err));
+            }
+        };
         let sql_owned = sql.to_owned();
         let res = py
             .detach(move || {
                 block_on_db(async move {
                     session
-                        .query_shared(&sql_owned, &params, oids.as_deref())
+                        .query_as_with_generation_and_budget(
+                            op_gen,
+                            None,
+                            &sql_owned,
+                            &params,
+                            oids.as_deref(),
+                            budget,
+                        )
                         .await
                 })
             })
@@ -428,12 +566,36 @@ impl PySyncPostgresClient {
     }
 
     /// Execute a multi-statement PostgreSQL Protocol 3.0 simple query (`'Q'`), returning `tuple[PostgresQueryResult, ...]`.
-    pub fn query_multi(&self, py: Python<'_>, sql: &str) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (sql, *, timeout = None))]
+    pub fn query_multi(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        timeout: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let timeout_secs = extract_strict_opt_f64(timeout)?;
+        let timeout_dur = CommandBudget::validate_optional_seconds(timeout_secs)
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        self.session
+            .ensure_ordinary_reservable()
+            .map_err(|e| postgres_error_to_py(py, e))?;
         let session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
+        let budget = match CommandBudget::start_from_duration(timeout_dur) {
+            Ok(b) => b,
+            Err(err) => {
+                session.unreserve_operation_generation(op_gen);
+                return Err(postgres_error_to_py(py, err));
+            }
+        };
         let sql_owned = sql.to_owned();
         let results = py
             .detach(move || {
-                block_on_db(async move { session.simple_query_shared(&sql_owned).await })
+                block_on_db(async move {
+                    session
+                        .simple_query_with_generation_and_budget(op_gen, &sql_owned, budget)
+                        .await
+                })
             })
             .map_err(|e| postgres_error_to_py(py, e))?;
         let mut py_results = Vec::with_capacity(results.len());
@@ -441,6 +603,44 @@ impl PySyncPostgresClient {
             py_results.push(query_result_to_python(py, res)?);
         }
         Ok(PyTuple::new(py, py_results)?.into_any().unbind())
+    }
+
+    /// Open a session-pinned PostgreSQL portal inside an explicit transaction or nested savepoint scope.
+    #[pyo3(signature = (sql, parameters = None, *, parameter_oids = None, batch_size = 65536))]
+    pub fn open_portal(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+        parameter_oids: Option<&Bound<'_, PyAny>>,
+        #[pyo3(from_py_with = extract_batch_size)] batch_size: i32,
+    ) -> PyResult<PySyncPostgresPortal> {
+        self.session
+            .ensure_ordinary_reservable()
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        let none_bound = py.None().into_bound(py);
+        let params_ref = parameters.unwrap_or(&none_bound);
+        let (params, oids) = extract_parameters(py, params_ref, parameter_oids)
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        let session = Arc::clone(&self.session);
+        let op_gen = session.reserve_operation_generation();
+        let sql_owned = sql.to_owned();
+        let portal = py
+            .detach(move || {
+                block_on_db(async move {
+                    session
+                        .open_portal_with_generation(
+                            op_gen,
+                            &sql_owned,
+                            &params,
+                            oids.as_deref(),
+                            batch_size,
+                        )
+                        .await
+                })
+            })
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        Ok(PySyncPostgresPortal::from_portal(portal))
     }
 
     /// Open a retained pipeline transaction (`BEGIN` at `'I'`) or savepoint (`SAVEPOINT` at `'T'`) and return its integer scope identifier.

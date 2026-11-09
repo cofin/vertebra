@@ -3,13 +3,138 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
-use postgres_protocol::message::backend::{DataRowBody, ErrorResponseBody, RowDescriptionBody};
+use postgres_protocol::message::backend::{
+    DataRowBody, ErrorResponseBody, Message, RowDescriptionBody,
+};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::time::Instant;
 
 use crate::codecs::{CodecContext, ParameterMap, TypeCatalog, decode_value_with_catalog};
 use crate::errors::{PostgresError, ServerError};
-use crate::protocol::parse_error_fields;
+use crate::protocol::{MAX_BACKEND_FRAME_LENGTH, parse_error_fields};
 use crate::result::{Column, Format, PgValue, QueryResult, TransactionStatus};
+
+/// Canonical `OperationalError` primary message emitted when a non-renewing client command I/O deadline expires.
+pub const COMMAND_IO_DEADLINE_EXCEEDED_MSG: &str = "command I/O deadline exceeded";
+
+/// Error outcome distinguishing client command-deadline expiry from ordinary wire/protocol errors.
+#[derive(Debug)]
+pub(crate) enum CommandIoOutcome {
+    DeadlineExceeded,
+    Other(PostgresError),
+}
+
+/// Write and flush an encoded frontend command buffer under an optional single non-renewing `deadline`.
+///
+/// Sets `*wire_started = true` immediately before writing bytes to `stream`. If `deadline` has already
+/// expired before writing begins, returns `DeadlineExceeded` without emitting any partial frame.
+pub(crate) async fn write_command_buffer<S>(
+    stream: &mut S,
+    write_buf: &mut BytesMut,
+    deadline: Option<Instant>,
+    wire_started: &mut bool,
+    op_label: &str,
+) -> Result<bool, CommandIoOutcome>
+where
+    S: AsyncWrite + Unpin,
+{
+    if let Some(dl) = deadline
+        && Instant::now() >= dl
+    {
+        write_buf.clear();
+        return Err(CommandIoOutcome::DeadlineExceeded);
+    }
+    *wire_started = true;
+    let res = match deadline {
+        Some(dl) => match tokio::time::timeout_at(dl, async {
+            stream.write_all(write_buf).await?;
+            stream.flush().await
+        })
+        .await
+        {
+            Ok(io_res) => io_res,
+            Err(_) => {
+                write_buf.clear();
+                return Err(CommandIoOutcome::DeadlineExceeded);
+            }
+        },
+        None => match stream.write_all(write_buf).await {
+            Ok(()) => stream.flush().await,
+            Err(e) => Err(e),
+        },
+    };
+    write_buf.clear();
+    match res {
+        Ok(()) => Ok(true),
+        Err(err) => Err(CommandIoOutcome::Other(PostgresError::Transport(format!(
+            "{op_label} failed: {err}"
+        )))),
+    }
+}
+
+/// Read one bounded backend [`Message`] using the sole protocol parser under an optional non-renewing `deadline`.
+///
+/// Cancellation-safe on `deadline` expiry: already-received bytes remain intact in `buf` so a subsequent
+/// bounded `CancelRequest` drain can resume reading to `ReadyForQuery` without frame corruption.
+pub(crate) async fn read_command_message<S>(
+    stream: &mut S,
+    buf: &mut BytesMut,
+    deadline: Option<Instant>,
+) -> Result<Message, CommandIoOutcome>
+where
+    S: AsyncRead + Unpin,
+{
+    loop {
+        if buf.len() >= 5 {
+            let raw_len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+            if !(4..=MAX_BACKEND_FRAME_LENGTH).contains(&raw_len) {
+                return Err(CommandIoOutcome::Other(PostgresError::Protocol(format!(
+                    "backend frame length {raw_len} is outside valid bounds 4..={MAX_BACKEND_FRAME_LENGTH}"
+                ))));
+            }
+            let total_frame_bytes = 1 + raw_len;
+            if buf.len() >= total_frame_bytes {
+                return match Message::parse(buf) {
+                    Ok(Some(msg)) => Ok(msg),
+                    Ok(None) => Err(CommandIoOutcome::Other(PostgresError::Protocol(
+                        "backend frame header matched buffered length but Message::parse returned None"
+                            .to_string(),
+                    ))),
+                    Err(err) => Err(CommandIoOutcome::Other(PostgresError::Protocol(format!(
+                        "malformed backend frame: {err}"
+                    )))),
+                };
+            }
+            let missing = total_frame_bytes - buf.len();
+            buf.reserve(missing.min(64 * 1024));
+        } else {
+            buf.reserve(4096);
+        }
+
+        let read_res = match deadline {
+            Some(dl) => {
+                if Instant::now() >= dl {
+                    return Err(CommandIoOutcome::DeadlineExceeded);
+                }
+                tokio::time::timeout_at(dl, stream.read_buf(buf))
+                    .await
+                    .map_err(|_| CommandIoOutcome::DeadlineExceeded)?
+            }
+            None => stream.read_buf(buf).await,
+        };
+
+        let n = read_res.map_err(|e| {
+            CommandIoOutcome::Other(PostgresError::Transport(format!("socket read error: {e}")))
+        })?;
+        if n == 0 {
+            return Err(CommandIoOutcome::Other(PostgresError::Transport(
+                "unexpected EOF from PostgreSQL backend".to_string(),
+            )));
+        }
+    }
+}
 
 /// Parse a `CommandComplete` tag and extract its checked `u64` affected row count.
 ///

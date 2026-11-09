@@ -5,7 +5,7 @@ chapter_id: ch17-command-deadlines-portals-and-tz-fallback
 title: "Expose session-pinned SyncPostgresPortal and AsyncPostgresPortal facades"
 description: "Expose immutable SyncPostgresPortal and AsyncPostgresPortal PyO3 classes and open_portal on SyncPostgresClient and AsyncPostgresClient while retaining streaming transaction and lease ownership."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -26,15 +26,15 @@ tests:
 estimated_loc: 235
 plan_revision: 5
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T20:21:59Z"
+last_verified_commit: c87ca833
+verification_evidence: "pytest test_postgres_native_portals.py (9 passed), mypy.stubtest vertebra._postgres, ruff, mypy, and clippy passed"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"
 commit: null
@@ -127,10 +127,10 @@ Expose immutable `SyncPostgresPortal` and `AsyncPostgresPortal` PyO3 classes and
 
 ## Acceptance Criteria
 
-- [ ] `SyncPostgresClient.open_portal` and `AsyncPostgresClient.open_portal` return immutable `SyncPostgresPortal` and `AsyncPostgresPortal` handles with `fetch`, `close`, `exhausted`, and `closed` matching `_postgres.pyi` (R6, R7, R16).
-- [ ] Active portals pin their `SessionHandle` / `PooledConnection` lease and `TransactionScope`, blocking competing client operations and early lease release until exhaustion, explicit `close()`, or native drop/cancel retirement completes (R7, R16).
-- [ ] Concrete Rust `Portal` remains directly accessible in `vertebra-postgres` for Arrow batch streaming (`ch20:t03`–`t04`) without Python row materialization (R16).
-- [ ] `test_postgres_native_portals.py`, `mypy.stubtest vertebra._postgres`, Ruff, Clippy `-D warnings`, and `git diff --check` pass with zero warnings or diff hygiene errors.
+- [x] `SyncPostgresClient.open_portal` and `AsyncPostgresClient.open_portal` return immutable `SyncPostgresPortal` and `AsyncPostgresPortal` handles with `fetch`, `close`, `exhausted`, and `closed` matching `_postgres.pyi` (R6, R7, R16).
+- [x] Active portals pin their `SessionHandle` / `PooledConnection` lease and `TransactionScope`, blocking competing client operations and early lease release until exhaustion, explicit `close()`, or native drop/cancel retirement completes (R7, R16).
+- [x] Concrete Rust `Portal` remains directly accessible in `vertebra-postgres` for Arrow batch streaming (`ch20:t03`–`t04`) without Python row materialization (R16).
+- [x] `test_postgres_native_portals.py`, `mypy.stubtest vertebra._postgres`, Ruff, Clippy `-D warnings`, and `git diff --check` pass with zero warnings or diff hygiene errors.
 
 ## Notes & Discoveries
 

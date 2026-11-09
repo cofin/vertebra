@@ -399,6 +399,198 @@ fn split_attached_offset(time_with_tz: &str) -> Result<(&str, ParsedTz<'_>), Pos
 
 const VALID_DOW: [&str; 7] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 
+/// PostgreSQL epoch (`2000-01-01T00:00:00Z`) measured in microseconds since the Unix epoch (`1970-01-01T00:00:00Z`).
+const PG_UNIX_EPOCH_OFFSET_MICROS: i128 = 946_684_800_000_000;
+
+/// Parsed local civil fields and raw timezone display token from a non-special PostgreSQL timestamp string.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParsedTimestampFields {
+    /// Astronomical proleptic Gregorian year (`1 AD == 1`, `1 BC == 0`, `44 BC == -43`).
+    pub year_astro: i32,
+    /// Calendar month (`1..=12`).
+    pub month: u8,
+    /// Calendar day of month (`1..=31`).
+    pub day: u8,
+    /// Days relative to PostgreSQL epoch `2000-01-01`.
+    pub pg_days: i32,
+    /// Microseconds since midnight (`0..=86_400_000_000`, where `86_400_000_000` is `24:00:00`).
+    pub time_micros: i64,
+    /// Raw non-numeric timezone abbreviation token when present on the wire (e.g. `"EDT"`, `"EST"`, `"CST"`, `"LMT"`).
+    pub tz_abbrev: Option<String>,
+    /// Exact original PostgreSQL wire text preserved verbatim on ambiguity or out-of-range fallback.
+    pub wire_text: String,
+}
+
+/// Direct namespace re-exporting vetted `jiff`-backed timezone abbreviation resolution.
+pub mod timezone_text {
+    pub use super::{ParsedTimestampFields, resolve_or_capture_temporal};
+}
+
+fn parse_session_jiff_timezone(time_zone: &str) -> Option<jiff::tz::TimeZone> {
+    let trimmed = time_zone.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(tz) = jiff::tz::db().get(trimmed) {
+        return Some(tz);
+    }
+    if trimmed.eq_ignore_ascii_case("utc") || trimmed.eq_ignore_ascii_case("gmt") {
+        return Some(jiff::tz::TimeZone::UTC);
+    }
+    if (trimmed.starts_with('+') || trimmed.starts_with('-'))
+        && let Ok(offset_micros) = parse_numeric_offset_micros(trimmed)
+        && offset_micros % 1_000_000 == 0
+        && let Ok(secs) = i32::try_from(offset_micros / 1_000_000)
+        && let Ok(offset) = jiff::tz::Offset::from_seconds(secs)
+    {
+        return Some(jiff::tz::TimeZone::fixed(offset));
+    }
+    jiff::tz::TimeZone::posix(trimmed).ok()
+}
+
+fn jiff_timestamp_to_pg_timestamptz(ts: jiff::Timestamp) -> Option<PgValue> {
+    if ts <= jiff::Timestamp::MIN || ts >= jiff::Timestamp::MAX {
+        return None;
+    }
+    let pg_micros_i128 =
+        i128::from(ts.as_microsecond()).checked_sub(PG_UNIX_EPOCH_OFFSET_MICROS)?;
+    let pg_micros = i64::try_from(pg_micros_i128).ok()?;
+    if pg_micros == PG_TS_POS_INF || pg_micros == PG_TS_NEG_INF {
+        return None;
+    }
+    validate_timestamp_micros(pg_micros).ok()?;
+    Some(PgValue::TimestampTz(pg_micros))
+}
+
+/// Resolve an abbreviation-bearing `TIMESTAMPTZ` display value via bundled IANA `tzdb` (`jiff`)
+/// when `(parsed, time_zone)` uniquely identifies a single in-range instant, or preserve
+/// lossless [`PgValue::TemporalText`] (`PgTemporal(special="wire_text")`) without guessing.
+pub fn resolve_or_capture_temporal(
+    parsed: &ParsedTimestampFields,
+    date_style: &str,
+    time_zone: &str,
+) -> Result<PgValue, PostgresError> {
+    let fallback = || PgValue::TemporalText {
+        kind: TemporalKind::TimestampTz,
+        wire_text: parsed.wire_text.clone(),
+        date_style: date_style.to_string(),
+        time_zone: time_zone.to_string(),
+    };
+
+    let Some(abbrev) = parsed.tz_abbrev.as_deref().filter(|s| !s.is_empty()) else {
+        return Ok(fallback());
+    };
+
+    if abbrev.eq_ignore_ascii_case("lmt") {
+        return Ok(fallback());
+    }
+
+    if !(1..=9999).contains(&parsed.year_astro) {
+        return Ok(fallback());
+    }
+
+    let (eff_year, eff_month, eff_day, eff_micros) = if parsed.time_micros == PG_TIME_MAX_MICROS {
+        let Some(next_days) = parsed.pg_days.checked_add(1) else {
+            return Ok(fallback());
+        };
+        let (ny, nm, nd) = pg_days_to_ymd(next_days);
+        if !(1..=9999).contains(&ny) {
+            return Ok(fallback());
+        }
+        (ny, nm, nd, 0_i64)
+    } else if (0..PG_TIME_MAX_MICROS).contains(&parsed.time_micros) {
+        (
+            parsed.year_astro,
+            parsed.month,
+            parsed.day,
+            parsed.time_micros,
+        )
+    } else {
+        return Ok(fallback());
+    };
+
+    let Ok(year_i16) = i16::try_from(eff_year) else {
+        return Ok(fallback());
+    };
+    let Ok(month_i8) = i8::try_from(eff_month) else {
+        return Ok(fallback());
+    };
+    let Ok(day_i8) = i8::try_from(eff_day) else {
+        return Ok(fallback());
+    };
+    let total_secs = eff_micros / 1_000_000;
+    let rem_micros = eff_micros % 1_000_000;
+    let Ok(hour_i8) = i8::try_from(total_secs / 3600) else {
+        return Ok(fallback());
+    };
+    let Ok(min_i8) = i8::try_from((total_secs % 3600) / 60) else {
+        return Ok(fallback());
+    };
+    let Ok(sec_i8) = i8::try_from(total_secs % 60) else {
+        return Ok(fallback());
+    };
+    let Ok(subsec_nanos) = i32::try_from(rem_micros * 1_000) else {
+        return Ok(fallback());
+    };
+
+    let Ok(civil_dt) = jiff::civil::DateTime::new(
+        year_i16,
+        month_i8,
+        day_i8,
+        hour_i8,
+        min_i8,
+        sec_i8,
+        subsec_nanos,
+    ) else {
+        return Ok(fallback());
+    };
+
+    let Some(tz) = parse_session_jiff_timezone(time_zone) else {
+        return Ok(fallback());
+    };
+
+    let amb = tz.to_ambiguous_zoned(civil_dt);
+    let resolved_ts = match amb.offset() {
+        jiff::tz::AmbiguousOffset::Unambiguous { .. } => {
+            if let Ok(zdt) = amb.unambiguous() {
+                let info = tz.to_offset_info(zdt.timestamp());
+                if info.abbreviation() == abbrev && !info.abbreviation().eq_ignore_ascii_case("lmt")
+                {
+                    Some(zdt.timestamp())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        jiff::tz::AmbiguousOffset::Fold { .. } => match (amb.clone().earlier(), amb.later()) {
+            (Ok(before), Ok(after)) => {
+                let info_before = tz.to_offset_info(before.timestamp());
+                let info_after = tz.to_offset_info(after.timestamp());
+                let abbr_before = info_before.abbreviation();
+                let abbr_after = info_after.abbreviation();
+                if abbr_before == abbr_after {
+                    None
+                } else if abbrev == abbr_before && !abbr_before.eq_ignore_ascii_case("lmt") {
+                    Some(before.timestamp())
+                } else if abbrev == abbr_after && !abbr_after.eq_ignore_ascii_case("lmt") {
+                    Some(after.timestamp())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        },
+        jiff::tz::AmbiguousOffset::Gap { .. } => None,
+    };
+
+    match resolved_ts.and_then(jiff_timestamp_to_pg_timestamptz) {
+        Some(pg_val) => Ok(pg_val),
+        None => Ok(fallback()),
+    }
+}
+
 /// Decode a PostgreSQL `TIMESTAMP` (`OID 1114`) or `TIMESTAMPTZ` (`OID 1184`) text representation.
 pub fn decode_timestamp_text(
     text: &str,
@@ -447,7 +639,7 @@ pub fn decode_timestamp_text(
         )));
     }
 
-    let (pg_days, time_micros, tz) =
+    let (year_astro, month, day, pg_days, time_micros, tz) =
         if tokens.len() >= 4 && VALID_DOW.contains(&tokens[0].to_ascii_lowercase().as_str()) {
             let (month, day, time_str, year_str) = if matches!(order, DateOrder::Dmy) {
                 let d: u8 = tokens[1]
@@ -478,7 +670,7 @@ pub fn decode_timestamp_text(
             } else {
                 ParsedTz::None
             };
-            (days, t_micros, parsed_tz)
+            (year_astro, month, day, days, t_micros, parsed_tz)
         } else if tokens.len() == 1 {
             let (date_str, time_and_tz) = tokens[0].split_once(['T', 't']).ok_or_else(|| {
                 PostgresError::Data(format!("invalid TIMESTAMP literal {text:?}"))
@@ -487,7 +679,7 @@ pub fn decode_timestamp_text(
             let days = ymd_to_pg_days(year_astro, month, day)?;
             let (time_str, parsed_tz) = split_attached_offset(time_and_tz)?;
             let t_micros = decode_time_text(time_str)?;
-            (days, t_micros, parsed_tz)
+            (year_astro, month, day, days, t_micros, parsed_tz)
         } else if tokens.len() == 2 || tokens.len() == 3 {
             let (year_astro, month, day) = parse_date_triple(tokens[0], style, order, is_bc)?;
             let days = ymd_to_pg_days(year_astro, month, day)?;
@@ -503,7 +695,7 @@ pub fn decode_timestamp_text(
             } else {
                 attached_tz
             };
-            (days, t_micros, parsed_tz)
+            (year_astro, month, day, days, t_micros, parsed_tz)
         } else {
             return Err(PostgresError::Data(format!(
                 "invalid TIMESTAMP literal {text:?}"
@@ -528,12 +720,30 @@ pub fn decode_timestamp_text(
                 validate_timestamp_micros(utc_micros)?;
                 Ok(PgValue::TimestampTz(utc_micros))
             }
-            ParsedTz::Abbrev(_) | ParsedTz::None => Ok(PgValue::TemporalText {
-                kind: TemporalKind::TimestampTz,
-                wire_text: text.to_string(),
-                date_style: ctx.date_style.clone(),
-                time_zone: ctx.time_zone.clone(),
-            }),
+            ParsedTz::Abbrev(abbr) => {
+                let fields = ParsedTimestampFields {
+                    year_astro,
+                    month,
+                    day,
+                    pg_days,
+                    time_micros,
+                    tz_abbrev: Some(abbr.to_string()),
+                    wire_text: text.to_string(),
+                };
+                resolve_or_capture_temporal(&fields, &ctx.date_style, &ctx.time_zone)
+            }
+            ParsedTz::None => {
+                let fields = ParsedTimestampFields {
+                    year_astro,
+                    month,
+                    day,
+                    pg_days,
+                    time_micros,
+                    tz_abbrev: None,
+                    wire_text: text.to_string(),
+                };
+                resolve_or_capture_temporal(&fields, &ctx.date_style, &ctx.time_zone)
+            }
         },
         _ => Err(PostgresError::Data(
             "invalid temporal kind for timestamp decoder".to_string(),

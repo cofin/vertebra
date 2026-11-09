@@ -466,3 +466,76 @@ impl ExtendedQueryCollector {
         QueryResult::try_new(cols, self.rows, self.affected_rows, tag, final_status)
     }
 }
+
+/// Materialize an already-completed [`crate::metadata::OwnedTextResult`] without issuing optional
+/// post-`ReadyForQuery` catalog discovery I/O when the caller's command deadline is exhausted.
+///
+/// Known built-in and cached custom OIDs decode via `catalog` + captured `codec_context`; uncached
+/// custom OIDs preserve exact owned UTF-8 text and column `type_oid` metadata.
+pub(crate) fn decode_completed_text_result_without_enrichment(
+    raw: crate::metadata::OwnedTextResult,
+    catalog: &TypeCatalog,
+) -> Result<QueryResult, PostgresError> {
+    if !raw.exchange_completed {
+        return Err(PostgresError::Interface(
+            "cannot decode OwnedTextResult before exchange_completed is true".to_string(),
+        ));
+    }
+    let crate::metadata::OwnedTextResult {
+        columns,
+        rows,
+        affected_rows,
+        command_tag,
+        transaction_status,
+        codec_context,
+        ..
+    } = raw;
+    let mut decoded_rows = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut out_row = Vec::with_capacity(columns.len());
+        for (col, cell) in columns.iter().zip(row) {
+            match cell.bytes {
+                None => out_row.push(PgValue::Null),
+                Some(bytes) => {
+                    if catalog.type_info(col.type_oid).is_some() {
+                        let val = decode_value_with_catalog(
+                            col.type_oid,
+                            Format::Text,
+                            Some(&bytes),
+                            &codec_context,
+                            catalog,
+                        )?;
+                        out_row.push(val);
+                    } else {
+                        match decode_value_with_catalog(
+                            col.type_oid,
+                            Format::Text,
+                            Some(&bytes),
+                            &codec_context,
+                            catalog,
+                        ) {
+                            Ok(v) => out_row.push(v),
+                            Err(_) => {
+                                let text = std::str::from_utf8(&bytes).map_err(|e| {
+                                    PostgresError::Data(format!(
+                                        "invalid UTF-8 in fallback text column `{}` (OID {}): {e}",
+                                        col.name, col.type_oid
+                                    ))
+                                })?;
+                                out_row.push(PgValue::Text(text.to_owned()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        decoded_rows.push(out_row);
+    }
+    QueryResult::try_new(
+        columns,
+        decoded_rows,
+        affected_rows,
+        command_tag,
+        transaction_status,
+    )
+}

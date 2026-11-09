@@ -5,7 +5,7 @@ chapter_id: ch17-command-deadlines-portals-and-tz-fallback
 title: "Resolve vetted jiff timezone text and enforce output-only ambiguous temporal fallback"
 description: "Pin jiff =0.2.39 with bundled tzdb in vertebra-postgres to resolve unique in-range session timezone instants, capture ambiguous/out-of-range outputs as TemporalText, and reject wire_text typed rebinds with DataError."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -27,15 +27,15 @@ tests:
 estimated_loc: 230
 plan_revision: 5
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T20:21:59Z"
+last_verified_commit: c87ca833
+verification_evidence: "cargo test -p vertebra-postgres --test timezone_text --test datetime_text --locked (10 passed), pytest test_postgres_native_queries.py (2 passed), and cargo check --locked passed"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"
 commit: null
@@ -126,10 +126,10 @@ Pin `jiff = "=0.2.39"` (`std`, `tzdb-bundle-always`) in `vertebra-postgres` and 
 
 ## Acceptance Criteria
 
-- [ ] `jiff = "=0.2.39"` (`std`, `tzdb-bundle-always`) is pinned in `vertebra-postgres/Cargo.toml` and `src/rs/Cargo.lock`, passing `cargo check --locked` (R11).
-- [ ] `resolve_or_capture_temporal` resolves non-ISO `timestamptz` abbreviation outputs strictly within `jiff`'s range only when local fields + abbreviation identify a unique instant, capturing ambiguous folds/gaps, LMT, mismatched abbreviations, and out-of-range years as `TemporalText` / `PgTemporal(special="wire_text")` without global abbreviation guessing (R11).
-- [ ] Every `TemporalText` / `PgTemporal(special="wire_text")` typed bind raises `DataError` before submission across text, binary, pipeline (including op `0`), and COPY paths, even when `DateStyle` and `TimeZone` match (R11).
-- [ ] `timezone_text`, `datetime_text`, `test_postgres_native_queries.py`, `mypy.stubtest vertebra._postgres`, Clippy `-D warnings`, and `git diff --check` pass with zero warnings or diff hygiene errors.
+- [x] `jiff = "=0.2.39"` (`std`, `tzdb-bundle-always`) is pinned in `vertebra-postgres/Cargo.toml` and `src/rs/Cargo.lock`, passing `cargo check --locked` (R11).
+- [x] `resolve_or_capture_temporal` resolves non-ISO `timestamptz` abbreviation outputs strictly within `jiff`'s range only when local fields + abbreviation identify a unique instant, capturing ambiguous folds/gaps, LMT, mismatched abbreviations, and out-of-range years as `TemporalText` / `PgTemporal(special="wire_text")` without global abbreviation guessing (R11).
+- [x] Every `TemporalText` / `PgTemporal(special="wire_text")` typed bind raises `DataError` before submission across text, binary, pipeline (including op `0`), and COPY paths, even when `DateStyle` and `TimeZone` match (R11).
+- [x] `timezone_text`, `datetime_text`, `test_postgres_native_queries.py`, `mypy.stubtest vertebra._postgres`, Clippy `-D warnings`, and `git diff --check` pass with zero warnings or diff hygiene errors.
 
 ## Notes & Discoveries
 

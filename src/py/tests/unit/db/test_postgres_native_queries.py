@@ -6,12 +6,15 @@ import asyncio
 import socket
 import struct
 import threading
+from datetime import UTC, datetime
 
 import pytest
 
 from vertebra._postgres import AsyncPostgresClient, SyncPostgresClient
-from vertebra._vertebra import InterfaceError
+from vertebra._vertebra import DataError, InterfaceError
 from vertebra.db.adapters.postgres.types import (
+    PgTemporal,
+    PostgresPipelineOperation,
     PostgresQueryResult,
     _project_public_row,
 )
@@ -40,8 +43,7 @@ def _row_desc(cols: tuple[tuple[str, int, int], ...]) -> bytes:
     """Build a RowDescription ('T') frame."""
     parts = [struct.pack("!h", len(cols))]
     parts.extend(
-        name.encode("utf-8") + b"\x00" + struct.pack("!ihihih", 0, 0, oid, 4, -1, fmt)
-        for name, oid, fmt in cols
+        name.encode("utf-8") + b"\x00" + struct.pack("!ihihih", 0, 0, oid, 4, -1, fmt) for name, oid, fmt in cols
     )
     return _frame(b"T", b"".join(parts))
 
@@ -49,9 +51,7 @@ def _row_desc(cols: tuple[tuple[str, int, int], ...]) -> bytes:
 def _data_row_text(cells: tuple[bytes | None, ...]) -> bytes:
     """Build a DataRow ('D') frame."""
     parts = [struct.pack("!h", len(cells))]
-    parts.extend(
-        struct.pack("!i", -1) if c is None else struct.pack("!i", len(c)) + c for c in cells
-    )
+    parts.extend(struct.pack("!i", -1) if c is None else struct.pack("!i", len(c)) + c for c in cells)
     return _frame(b"D", b"".join(parts))
 
 
@@ -225,4 +225,124 @@ def test_sync_and_async_query_and_transaction_facades() -> None:
             await aclient.close()
 
     asyncio.run(_run_async())
+    bg.join(timeout=5.0)
+
+
+def test_jiff_session_timezone_fold_resolution_and_wire_text_rebind_refusal() -> None:
+    """Verify America/New_York EDT/EST fold resolution and DataError refusal on wire_text rebind."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    query_frames_received: list[bytes] = []
+
+    def _serve() -> None:
+        conn, _ = srv.accept()
+        with conn:
+            _read_startup(conn)
+            conn.sendall(
+                b"".join(
+                    (
+                        _frame(b"R", struct.pack("!i", 0)),
+                        _frame(b"S", b"client_encoding\x00UTF8\x00"),
+                        _frame(b"S", b"DateStyle\x00Postgres, MDY\x00"),
+                        _frame(b"S", b"TimeZone\x00America/New_York\x00"),
+                        _frame(b"S", b"timezone_abbreviations\x00India\x00"),
+                        _frame(b"K", struct.pack("!ii", 701, 702)),
+                        _frame(b"Z", b"I"),
+                    )
+                )
+            )
+
+            g1 = _read_until_sync_or_query(conn)
+            query_frames_received.append(g1[0][0])
+            cols = (("edt", 1184, 0), ("est", 1184, 0), ("amb", 1184, 0), ("far", 1184, 0))
+            conn.sendall(
+                b"".join(
+                    (
+                        _frame(b"1", b""),
+                        _frame(b"t", struct.pack("!h", 0)),
+                        _row_desc(cols),
+                        _frame(b"2", b""),
+                        _row_desc(cols),
+                        _data_row_text(
+                            (
+                                b"Sun Nov 01 01:30:00 2026 EDT",
+                                b"Sun Nov 01 01:30:00 2026 EST",
+                                b"Wed Jul 09 07:30:00 2026 CST",
+                                b"Wed Jul 09 07:30:00 12000 EDT",
+                            )
+                        ),
+                        _frame(b"C", b"SELECT 1\x00"),
+                        _frame(b"3", b""),
+                        _frame(b"Z", b"I"),
+                    )
+                )
+            )
+
+            g_begin = _read_until_sync_or_query(conn)
+            assert g_begin[0] == (b"Q", b"BEGIN\x00")
+            conn.sendall(_frame(b"C", b"BEGIN\x00") + _frame(b"Z", b"T"))
+
+            g_rb = _read_until_sync_or_query(conn)
+            assert g_rb[0] == (b"Q", b"ROLLBACK\x00")
+            conn.sendall(_frame(b"C", b"ROLLBACK\x00") + _frame(b"Z", b"I"))
+
+            g_end = _read_until_sync_or_query(conn)
+            assert g_end[0][0] == b"X"
+        srv.close()
+
+    bg = threading.Thread(target=_serve, daemon=True)
+    bg.start()
+
+    client = SyncPostgresClient(
+        host="127.0.0.1",
+        port=port,
+        user="postgres",
+        database="appdb",
+        sslmode="disable",
+        channel_binding="disable",
+    )
+    client.connect()
+    try:
+        res = client.query("SELECT edt, est, amb, far")
+        edt_val, est_val, amb_val, far_val = res.rows[0]
+        assert edt_val == datetime(2026, 11, 1, 5, 30, tzinfo=UTC)
+        assert est_val == datetime(2026, 11, 1, 6, 30, tzinfo=UTC)
+        assert amb_val == PgTemporal(
+            kind="timestamptz",
+            value=None,
+            special="wire_text",
+            wire_text="Wed Jul 09 07:30:00 2026 CST",
+            date_style="Postgres, MDY",
+            time_zone="America/New_York",
+        )
+        assert far_val == PgTemporal(
+            kind="timestamptz",
+            value=None,
+            special="wire_text",
+            wire_text="Wed Jul 09 07:30:00 12000 EDT",
+            date_style="Postgres, MDY",
+            time_zone="America/New_York",
+        )
+
+        with pytest.raises(DataError):
+            client.query("SELECT $1::timestamptz", [amb_val])
+
+        scope_id = client.pipeline_begin()
+        try:
+            with pytest.raises(DataError):
+                client.pipeline_results(
+                    scope_id,
+                    [PostgresPipelineOperation(sql="SELECT $1::timestamptz", parameters=(amb_val,))],
+                )
+        finally:
+            client.pipeline_finish(scope_id, False)
+
+        assert query_frames_received == [b"P"]
+        assert isinstance(amb_val, PgTemporal)
+        assert isinstance(amb_val.wire_text, str)
+    finally:
+        client.close()
     bg.join(timeout=5.0)

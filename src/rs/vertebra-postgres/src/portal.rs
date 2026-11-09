@@ -13,6 +13,7 @@ use crate::errors::PostgresError;
 use crate::protocol::read_message;
 use crate::query::{parse_command_tag_affected_rows, parse_error_response};
 use crate::result::{Column, PgValue, QueryResult, TransactionStatus};
+use crate::session::cancel::OperationGeneration;
 use crate::session::{ExchangeState, PostgresConnection, SessionHandle};
 use crate::transaction::{TransactionScope, TransactionScopeKind};
 
@@ -448,6 +449,129 @@ impl Portal {
         )
     }
 
+    /// Fetch up to `max_rows` rows under a fenced [`OperationGeneration`] so Python `asyncio`
+    /// cancellation emits `CancelRequest`, drains/retires the physical socket boundedly under
+    /// `connect_timeout`, and marks the portal closed without prematurely releasing any pool slot.
+    pub(crate) async fn fetch_with_generation(
+        &mut self,
+        op_gen: OperationGeneration,
+        max_rows: i32,
+    ) -> Result<QueryResult, PostgresError> {
+        if max_rows <= 0 {
+            self.session.unreserve_operation_generation(op_gen);
+            return Err(PostgresError::Interface(
+                "Portal::fetch requires max_rows >= 1 (max_rows <= 0 is forbidden)".to_string(),
+            ));
+        }
+        if self.is_closed() {
+            self.session.unreserve_operation_generation(op_gen);
+            return Err(PostgresError::Interface(
+                "cannot fetch from a closed Portal".to_string(),
+            ));
+        }
+        if self.is_exhausted() {
+            self.session.unreserve_operation_generation(op_gen);
+            return Err(PostgresError::Interface(
+                "cannot fetch from an exhausted Portal".to_string(),
+            ));
+        }
+        if self.in_flight_execute {
+            self.session.unreserve_operation_generation(op_gen);
+            return Err(PostgresError::Interface(
+                "Portal already has an in-flight Execute".to_string(),
+            ));
+        }
+
+        let portal_name = self.portal_name.clone();
+        let owner = self.scope.owner;
+        let had_caller_ambient = matches!(
+            self.scope.kind,
+            TransactionScopeKind::NestedSavepoint { .. }
+        );
+        let (mut guard, cancel_notify) = self
+            .session
+            .acquire_portal_operation_with_generation(
+                Some(op_gen),
+                owner,
+                &portal_name,
+                had_caller_ambient,
+            )
+            .await?;
+
+        let connect_timeout = self.session.config().connect_timeout;
+        let columns = self.columns.clone();
+        let codec_context = Arc::clone(&self.codec_context);
+        let type_catalog = self.type_catalog.clone();
+        let max_result_bytes = self.max_result_bytes;
+        let scope = self.scope.clone();
+
+        let timed_res = {
+            let conn = guard.connection_mut();
+            let batch_fut = execute_portal_batch_on_conn(
+                conn,
+                &portal_name,
+                max_rows,
+                &columns,
+                &codec_context,
+                &type_catalog,
+                max_result_bytes,
+                &scope,
+            );
+            tokio::pin!(batch_fut);
+            let cancel_drain_timeout = async {
+                cancel_notify.notified().await;
+                tokio::time::sleep(connect_timeout).await;
+            };
+            tokio::pin!(cancel_drain_timeout);
+            tokio::select! {
+                biased;
+                res = &mut batch_fut => Ok(res),
+                () = &mut cancel_drain_timeout => Err(()),
+            }
+        };
+
+        let cancelled = self.session.did_op_claim_cancel(op_gen);
+        match timed_res {
+            Err(()) => {
+                guard.connection_mut().mark_closed();
+                guard.retire_socket_bounded().await;
+                drop(guard);
+                self.mark_closed_and_unpin();
+                Err(PostgresError::Operational(
+                    "cancelled Portal::fetch timed out while draining wire response".to_string(),
+                ))
+            }
+            Ok(Ok((rows, completed, command_tag, affected_rows))) => {
+                if cancelled {
+                    guard.connection_mut().mark_closed();
+                    guard.retire_socket_bounded().await;
+                    if completed {
+                        self.exhausted.store(true, Ordering::Release);
+                    }
+                    drop(guard);
+                    self.mark_closed_and_unpin();
+                } else if completed {
+                    self.exhausted.store(true, Ordering::Release);
+                    drop(guard);
+                    self.mark_closed_and_unpin();
+                } else {
+                    drop(guard);
+                }
+                let status = self.session.transaction_status();
+                QueryResult::try_new(columns, rows, affected_rows, command_tag, status)
+            }
+            Ok(Err(err)) => {
+                if cancelled {
+                    guard.connection_mut().mark_closed();
+                    guard.retire_socket_bounded().await;
+                }
+                drop(guard);
+                self.mark_closed_and_unpin();
+                Err(err)
+            }
+        }
+    }
+
     /// Close the portal idempotently, draining any in-flight `Execute`, sending `Close(b'P', portal_name)`, and rolling back early-abandoned scopes.
     pub async fn close(&mut self) -> Result<(), PostgresError> {
         if self.is_closed() {
@@ -499,31 +623,214 @@ impl Drop for Portal {
         let portal_name = self.portal_name.clone();
         let scope = self.scope.clone();
         let in_flight = self.in_flight_execute;
+        session.begin_portal_drop_cleanup(&portal_name, scope.owner);
         let cleanup = async move {
+            let connect_timeout = session.config().connect_timeout;
             if let Ok(mut guard) = session
                 .acquire_portal_operation(scope.owner, &portal_name)
                 .await
             {
-                let conn = guard.connection_mut();
-                if in_flight && drain_until_ready_for_query(conn).await.is_err() {
-                    conn.mark_closed();
-                    drop(guard);
-                    session.unpin_portal(&portal_name, scope.owner);
-                    return;
-                }
-                if close_and_rollback_portal_on_conn(conn, &portal_name, &scope, true)
-                    .await
-                    .is_err()
-                {
-                    conn.mark_closed();
+                let cleanup_dl = tokio::time::Instant::now() + connect_timeout;
+                let cleanup_res = tokio::time::timeout_at(cleanup_dl, async {
+                    let conn = guard.connection_mut();
+                    if in_flight {
+                        drain_until_ready_for_query(conn).await?;
+                    }
+                    close_and_rollback_portal_on_conn(conn, &portal_name, &scope, true).await
+                })
+                .await;
+                if !matches!(cleanup_res, Ok(Ok(()))) {
+                    guard.connection_mut().mark_closed();
+                    guard.retire_socket_bounded().await;
                 }
             }
-            session.unpin_portal(&portal_name, scope.owner);
+            session
+                .finish_portal_drop_cleanup(&portal_name, scope.owner)
+                .await;
         };
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(cleanup);
         } else {
             vertebra_db::py_async::db_runtime_handle().spawn(cleanup);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_portal_batch_on_conn(
+    conn: &mut PostgresConnection,
+    portal_name: &str,
+    max_rows: i32,
+    columns: &[Column],
+    codec_context: &Arc<CodecContext>,
+    type_catalog: &TypeCatalog,
+    max_result_bytes: usize,
+    scope: &TransactionScope,
+) -> Result<(Vec<Vec<PgValue>>, bool, String, u64), PostgresError> {
+    conn.write_buf.clear();
+    frontend::execute(portal_name, max_rows, &mut conn.write_buf)
+        .map_err(|e| PostgresError::Protocol(format!("failed to encode Execute frame: {e}")))?;
+    frontend::sync(&mut conn.write_buf);
+
+    conn.set_exchange_state(ExchangeState::InExtendedExchange);
+    if let Err(err) = conn.stream.write_all(&conn.write_buf).await {
+        conn.write_buf.clear();
+        conn.mark_closed();
+        return Err(PostgresError::Transport(format!(
+            "Portal Execute write failed: {err}"
+        )));
+    }
+    conn.write_buf.clear();
+    if let Err(err) = conn.stream.flush().await {
+        conn.mark_closed();
+        return Err(PostgresError::Transport(format!(
+            "Portal Execute flush failed: {err}"
+        )));
+    }
+
+    let mut rows = Vec::new();
+    let mut approx_bytes = 0usize;
+
+    loop {
+        let msg = match read_message(&mut conn.stream, &mut conn.read_buf, None).await {
+            Ok(m) => m,
+            Err(err) => {
+                conn.exchange_state = ExchangeState::Idle;
+                conn.mark_closed();
+                return Err(err);
+            }
+        };
+
+        match msg {
+            Message::DataRow(body) => {
+                let buffer = body.buffer();
+                let mut ranges = body.ranges();
+                let mut row = Vec::with_capacity(columns.len());
+                let mut idx = 0usize;
+                let mut decode_failure: Option<PostgresError> = None;
+
+                loop {
+                    let range_opt = match ranges.next() {
+                        Ok(Some(r)) => r,
+                        Ok(None) => break,
+                        Err(e) => {
+                            conn.exchange_state = ExchangeState::Idle;
+                            conn.mark_closed();
+                            return Err(PostgresError::Protocol(format!(
+                                "malformed Portal DataRow range: {e}"
+                            )));
+                        }
+                    };
+                    let Some(col) = columns.get(idx) else {
+                        conn.exchange_state = ExchangeState::Idle;
+                        conn.mark_closed();
+                        return Err(PostgresError::Protocol(format!(
+                            "Portal DataRow field count exceeds column count {}",
+                            columns.len()
+                        )));
+                    };
+                    let raw_slice = range_opt.map(|r| &buffer[r]);
+                    match decode_value_with_catalog(
+                        col.type_oid,
+                        col.format,
+                        raw_slice,
+                        codec_context,
+                        type_catalog,
+                    ) {
+                        Ok(val) => row.push(val),
+                        Err(err) => {
+                            decode_failure = Some(err);
+                            break;
+                        }
+                    }
+                    idx += 1;
+                }
+
+                if let Some(err) = decode_failure {
+                    let _ = drain_until_ready_for_query(conn).await;
+                    let _ = close_and_rollback_portal_on_conn(conn, portal_name, scope, true).await;
+                    return Err(err);
+                }
+
+                if idx != columns.len() {
+                    conn.exchange_state = ExchangeState::Idle;
+                    conn.mark_closed();
+                    return Err(PostgresError::Protocol(format!(
+                        "Portal DataRow field count {idx} does not match column count {}",
+                        columns.len()
+                    )));
+                }
+
+                approx_bytes = approx_bytes.saturating_add(estimate_row_bytes(&row));
+                if approx_bytes > max_result_bytes {
+                    let _ = drain_until_ready_for_query(conn).await;
+                    let _ = close_and_rollback_portal_on_conn(conn, portal_name, scope, true).await;
+                    return Err(PostgresError::Data(format!(
+                        "Portal::fetch batch size {approx_bytes} bytes exceeds max_result_bytes ({max_result_bytes})"
+                    )));
+                }
+                rows.push(row);
+            }
+            Message::PortalSuspended => {
+                drain_until_ready_for_query(conn).await?;
+                return Ok((rows, false, String::new(), 0));
+            }
+            Message::CommandComplete(body) => {
+                let tag = match body.tag() {
+                    Ok(t) => t.to_owned(),
+                    Err(e) => {
+                        conn.exchange_state = ExchangeState::Idle;
+                        conn.mark_closed();
+                        return Err(PostgresError::Protocol(format!(
+                            "invalid Portal CommandComplete tag UTF-8: {e}"
+                        )));
+                    }
+                };
+                let affected_rows = match parse_command_tag_affected_rows(&tag) {
+                    Ok(n) => n,
+                    Err(err) => {
+                        conn.exchange_state = ExchangeState::Idle;
+                        conn.mark_closed();
+                        return Err(err);
+                    }
+                };
+                drain_until_ready_for_query(conn).await?;
+                finish_completed_portal_on_conn(conn, portal_name, scope).await?;
+                return Ok((rows, true, tag, affected_rows));
+            }
+            Message::EmptyQueryResponse => {
+                drain_until_ready_for_query(conn).await?;
+                finish_completed_portal_on_conn(conn, portal_name, scope).await?;
+                return Ok((rows, true, String::new(), 0));
+            }
+            Message::ErrorResponse(body) => {
+                let server_err = match parse_error_response(&body) {
+                    Ok(s) => PostgresError::Server(s),
+                    Err(err) => {
+                        conn.exchange_state = ExchangeState::Idle;
+                        conn.mark_closed();
+                        return Err(err);
+                    }
+                };
+                let _ = drain_until_ready_for_query(conn).await;
+                let _ = close_and_rollback_portal_on_conn(conn, portal_name, scope, false).await;
+                return Err(server_err);
+            }
+            Message::NoticeResponse(_) => {}
+            Message::ParameterStatus(body) => {
+                conn.handle_parameter_status_frame(&body)?;
+            }
+            Message::NotificationResponse(body) => {
+                conn.handle_notification_frame(&body)?;
+            }
+            other => {
+                conn.exchange_state = ExchangeState::Idle;
+                conn.mark_closed();
+                return Err(PostgresError::Protocol(format!(
+                    "unexpected backend frame during Portal Execute: {}",
+                    message_debug_name(&other)
+                )));
+            }
         }
     }
 }

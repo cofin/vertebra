@@ -5,7 +5,7 @@ chapter_id: ch17-command-deadlines-portals-and-tz-fallback
 title: "Forward Python query and query_multi command deadlines and verify live SQLSTATE precedence"
 description: "Add keyword-only timeout: float | None = None to SyncPostgresClient and AsyncPostgresClient query and query_multi, update _postgres.pyi, and verify against live PostgreSQL."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -26,15 +26,15 @@ tests:
 estimated_loc: 215
 plan_revision: 5
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T20:22:04Z"
+last_verified_commit: c87ca833
+verification_evidence: "pytest test_postgres_command_deadlines.py (12 passed), mypy.stubtest vertebra._postgres, ruff, mypy, and clippy passed"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"
 commit: null
@@ -123,10 +123,10 @@ Extend `query` and `query_multi` on `SyncPostgresClient` and `AsyncPostgresClien
 
 ## Acceptance Criteria
 
-- [ ] `SyncPostgresClient` and `AsyncPostgresClient` `query` and `query_multi` accept keyword-only `timeout: float | None = None`, validate inputs before reservation/I/O, and start one absolute `CommandBudget` at reservation (R6, R7, R12).
-- [ ] Live `postgres_service` tests verify `OperationalError(sqlstate=None)` + fresh backend PID replacement on client deadline expiry and `QueryCancelledError(sqlstate="57014")` when `statement_timeout` fires first (R10, R18).
-- [ ] `_postgres.pyi` matches the compiled extension (`mypy.stubtest vertebra._postgres`) and documents the I/O-only non-preemptive budget contract (R6, R7).
-- [ ] `test_postgres_command_deadlines.py`, `mypy.stubtest vertebra._postgres`, Ruff, Clippy `-D warnings`, and `git diff --check` pass with zero warnings or diff hygiene errors.
+- [x] `SyncPostgresClient` and `AsyncPostgresClient` `query` and `query_multi` accept keyword-only `timeout: float | None = None`, validate inputs before reservation/I/O, and start one absolute `CommandBudget` at reservation (R6, R7, R12).
+- [x] Live `postgres_service` tests verify `OperationalError(sqlstate=None)` + fresh backend PID replacement on client deadline expiry and `QueryCancelledError(sqlstate="57014")` when `statement_timeout` fires first (R10, R18).
+- [x] `_postgres.pyi` matches the compiled extension (`mypy.stubtest vertebra._postgres`) and documents the I/O-only non-preemptive budget contract (R6, R7).
+- [x] `test_postgres_command_deadlines.py`, `mypy.stubtest vertebra._postgres`, Ruff, Clippy `-D warnings`, and `git diff --check` pass with zero warnings or diff hygiene errors.
 
 ## Notes & Discoveries
 

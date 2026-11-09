@@ -5,7 +5,7 @@ chapter_id: ch17-command-deadlines-portals-and-tz-fallback
 title: "Implement absolute Rust command I/O deadlines and bounded cancel retirement"
 description: "Bound SessionHandle and PostgresConnection timed queries via an RAII active_deadline on PostgresConnection with OperationalError precedence, automatic AfterCompletion preservation, and connect_timeout-capped cancel cleanup."
 status: stable
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -26,15 +26,15 @@ tests:
 estimated_loc: 245
 plan_revision: 5
 plan_commit: fd571e3a
-state_revision: 0
+state_revision: 1
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: "2026-11-09T20:20:06Z"
+last_verified_commit: c87ca833
+verification_evidence: "cargo test -p vertebra-postgres --test command_deadlines --test cancellation_protocol --locked (12 passed) and cargo clippy --all-targets -- -D warnings passed"
 created_at: "2026-11-05T18:25:07Z"
 updated_at: "2026-11-08T02:05:22Z"
 commit: null
@@ -124,10 +124,10 @@ Implement `CommandBudget`, RAII-scoped `active_deadline: Option<tokio::time::Ins
 
 ## Acceptance Criteria
 
-- [ ] `SessionHandle::{query_with_deadline, simple_query_with_deadline}` and RAII `PostgresConnection::with_command_deadline` (`active_deadline`) bound parameter discovery, writes/flush, all result frames, and metadata enrichment under one non-renewing `Option<tokio::time::Instant>` while `query` / `simple_query` delegate with `CommandBudget::untimed()` (R10, R12).
-- [ ] Client deadline expiry claims `OperationGeneration`, preserves `Operational` (`sqlstate = None`) over cleanup `57014` (while keeping earlier server `57014` intact), bounds `crate::session::cancel` cleanup + retirement by `connect_timeout`, and never replays SQL (R10, R18).
-- [ ] Post-`ReadyForQuery` optional enrichment skips I/O on exhausted budgets using exact owned text/OID fallback and automatically preserves `AfterCompletion.completed_result` through `normalize_materialized_result` on fatal active enrichment (R12).
-- [ ] `command_deadlines` and `cancellation_protocol` tests, Clippy `-D warnings`, and `git diff --check` pass with zero warnings or diff hygiene errors.
+- [x] `SessionHandle::{query_with_deadline, simple_query_with_deadline}` and RAII `PostgresConnection::with_command_deadline` (`active_deadline`) bound parameter discovery, writes/flush, all result frames, and metadata enrichment under one non-renewing `Option<tokio::time::Instant>` while `query` / `simple_query` delegate with `CommandBudget::untimed()` (R10, R12).
+- [x] Client deadline expiry claims `OperationGeneration`, preserves `Operational` (`sqlstate = None`) over cleanup `57014` (while keeping earlier server `57014` intact), bounds `crate::session::cancel` cleanup + retirement by `connect_timeout`, and never replays SQL (R10, R18).
+- [x] Post-`ReadyForQuery` optional enrichment skips I/O on exhausted budgets using exact owned text/OID fallback and automatically preserves `AfterCompletion.completed_result` through `normalize_materialized_result` on fatal active enrichment (R12).
+- [x] `command_deadlines` and `cancellation_protocol` tests, Clippy `-D warnings`, and `git diff --check` pass with zero warnings or diff hygiene errors.
 
 ## Notes & Discoveries
 

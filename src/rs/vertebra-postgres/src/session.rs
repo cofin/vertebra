@@ -53,6 +53,120 @@ use self::statements::{PoolerCapabilities, PoolerMode, StatementCache, Statement
 /// Default maximum materialized result / portal chunk byte budget (`64 MiB`).
 pub const DEFAULT_MAX_RESULT_BYTES: usize = 64 * 1024 * 1024;
 
+/// Non-renewing single-`Instant` command I/O budget computed at native operation reservation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CommandBudget(Option<Instant>);
+
+impl CommandBudget {
+    /// Construct an untimed [`CommandBudget`] (`None`).
+    pub const fn untimed() -> Self {
+        Self(None)
+    }
+
+    /// Wrap an explicit optional absolute [`Instant`].
+    pub const fn from_deadline(deadline: Option<Instant>) -> Self {
+        Self(deadline)
+    }
+
+    /// Validate an optional timeout in seconds before reserving session state or emitting wire bytes.
+    ///
+    /// Rejects `<= 0.0`, `NaN`, `+-infinity`, sub-nanosecond values that round to zero, and values
+    /// overflowing [`Duration`] or [`Instant::checked_add`] with [`PostgresError::Interface`].
+    pub fn validate_optional_seconds(
+        timeout: Option<f64>,
+    ) -> Result<Option<Duration>, PostgresError> {
+        let Some(secs) = timeout else {
+            return Ok(None);
+        };
+        if !secs.is_finite() || secs <= 0.0 {
+            return Err(PostgresError::Interface(format!(
+                "timeout must be a finite positive float (> 0.0), got {secs}"
+            )));
+        }
+        let duration = Duration::try_from_secs_f64(secs).map_err(|_| {
+            PostgresError::Interface(format!("timeout {secs} overflowed Duration bounds"))
+        })?;
+        if duration.is_zero() {
+            return Err(PostgresError::Interface(format!(
+                "timeout {secs} rounded down to a zero Duration"
+            )));
+        }
+        if Instant::now().checked_add(duration).is_none() {
+            return Err(PostgresError::Interface(format!(
+                "timeout {secs} overflowed Instant deadline bounds"
+            )));
+        }
+        Ok(Some(duration))
+    }
+
+    /// Compute one absolute non-renewing [`Instant`] once native operation reservation succeeds.
+    pub fn start_from_duration(duration: Option<Duration>) -> Result<Self, PostgresError> {
+        match duration {
+            None => Ok(Self(None)),
+            Some(dur) => Instant::now()
+                .checked_add(dur)
+                .map(|dl| Self(Some(dl)))
+                .ok_or_else(|| {
+                    PostgresError::Interface("timeout overflowed Instant deadline bounds".into())
+                }),
+        }
+    }
+
+    /// Return the underlying optional absolute [`Instant`].
+    pub const fn deadline(&self) -> Option<Instant> {
+        self.0
+    }
+
+    /// Return `true` when an explicit deadline was set and `Instant::now() >= deadline`.
+    pub fn is_expired(&self) -> bool {
+        self.0.is_some_and(|dl| Instant::now() >= dl)
+    }
+}
+
+/// RAII guard scoping `PostgresConnection::active_deadline` to a single timed command and clearing
+/// it automatically on return, error, panic, or task drop so subsequent calls and cancel cleanup
+/// never inherit a stale deadline.
+pub struct CommandDeadlineGuard<'a> {
+    conn: &'a mut PostgresConnection,
+    prev_deadline: Option<Instant>,
+    prev_defer_read_close: bool,
+}
+
+impl CommandDeadlineGuard<'_> {
+    pub(crate) const fn wire_started(&self) -> bool {
+        self.conn.deadline_wire_started
+    }
+
+    pub(crate) const fn timed_out(&self) -> bool {
+        self.conn.deadline_timed_out
+    }
+
+    pub(crate) const fn write_uncertain(&self) -> bool {
+        self.conn.deadline_write_uncertain
+    }
+}
+
+impl Deref for CommandDeadlineGuard<'_> {
+    type Target = PostgresConnection;
+
+    fn deref(&self) -> &Self::Target {
+        self.conn
+    }
+}
+
+impl DerefMut for CommandDeadlineGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.conn
+    }
+}
+
+impl Drop for CommandDeadlineGuard<'_> {
+    fn drop(&mut self) {
+        self.conn.active_deadline = self.prev_deadline;
+        self.conn.defer_deadline_read_close = self.prev_defer_read_close;
+    }
+}
+
 /// Backend transaction status indicator reported by `ReadyForQuery` (`'Z'`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TransactionStatus {
@@ -209,6 +323,11 @@ pub struct PostgresConnection {
     pub(crate) next_portal_id: u64,
     pub(crate) open_portals: Vec<String>,
     pub(crate) notifications: Vec<NotificationEvent>,
+    pub(crate) active_deadline: Option<Instant>,
+    pub(crate) deadline_wire_started: bool,
+    pub(crate) deadline_timed_out: bool,
+    pub(crate) deadline_write_uncertain: bool,
+    pub(crate) defer_deadline_read_close: bool,
     pub(crate) closed: bool,
 }
 
@@ -295,7 +414,163 @@ impl PostgresConnection {
             next_portal_id: 0,
             open_portals: Vec::new(),
             notifications: Vec::new(),
+            active_deadline: None,
+            deadline_wire_started: false,
+            deadline_timed_out: false,
+            deadline_write_uncertain: false,
+            defer_deadline_read_close: false,
             closed: false,
+        }
+    }
+
+    /// Return the currently active per-command I/O deadline (`None` for untimed operations).
+    pub const fn active_deadline(&self) -> Option<Instant> {
+        self.active_deadline
+    }
+
+    /// Install an RAII-scoped command deadline (`active_deadline`) on this connection.
+    pub fn enter_command_deadline(
+        &mut self,
+        deadline: Option<Instant>,
+    ) -> CommandDeadlineGuard<'_> {
+        let prev_deadline = self.active_deadline;
+        let prev_defer_read_close = self.defer_deadline_read_close;
+        self.active_deadline = deadline;
+        self.deadline_wire_started = false;
+        self.deadline_timed_out = false;
+        self.deadline_write_uncertain = false;
+        self.defer_deadline_read_close = false;
+        CommandDeadlineGuard {
+            conn: self,
+            prev_deadline,
+            prev_defer_read_close,
+        }
+    }
+
+    pub(crate) fn enter_session_command_deadline(
+        &mut self,
+        deadline: Option<Instant>,
+    ) -> CommandDeadlineGuard<'_> {
+        let prev_deadline = self.active_deadline;
+        let prev_defer_read_close = self.defer_deadline_read_close;
+        self.active_deadline = deadline;
+        self.deadline_wire_started = false;
+        self.deadline_timed_out = false;
+        self.deadline_write_uncertain = false;
+        self.defer_deadline_read_close = deadline.is_some();
+        CommandDeadlineGuard {
+            conn: self,
+            prev_deadline,
+            prev_defer_read_close,
+        }
+    }
+
+    /// Execute `f` with `active_deadline` installed via RAII [`CommandDeadlineGuard`], ensuring
+    /// `active_deadline` resets to its previous value on return, error, or cancellation.
+    pub async fn with_command_deadline<F, T>(
+        &mut self,
+        deadline: Option<Instant>,
+        f: F,
+    ) -> Result<T, PostgresError>
+    where
+        F: for<'c> FnOnce(
+            &'c mut PostgresConnection,
+        )
+            -> vertebra_db::connection::BoxFuture<'c, Result<T, PostgresError>>,
+    {
+        let mut guard = self.enter_command_deadline(deadline);
+        f(&mut guard).await
+    }
+
+    /// Execute an extended query under an RAII [`CommandBudget`].
+    pub async fn query_with_deadline(
+        &mut self,
+        sql: &str,
+        parameters: &[crate::extended::Parameter],
+        parameter_oids: Option<&[u32]>,
+        budget: CommandBudget,
+    ) -> Result<crate::result::QueryResult, PostgresError> {
+        let mut guard = self.enter_command_deadline(budget.deadline());
+        guard.query(sql, parameters, parameter_oids).await
+    }
+
+    /// Execute a simple query (`'Q'`) under an RAII [`CommandBudget`].
+    pub async fn simple_query_with_deadline(
+        &mut self,
+        sql: &str,
+        budget: CommandBudget,
+    ) -> Result<Vec<crate::result::QueryResult>, PostgresError> {
+        let mut guard = self.enter_command_deadline(budget.deadline());
+        guard.simple_query(sql).await
+    }
+
+    async fn write_command_buf(
+        &mut self,
+        op_label: &str,
+        was_unnamed_pre_marked: bool,
+    ) -> Result<(), PostgresError> {
+        let mut started_now = false;
+        let res = crate::query::write_command_buffer(
+            &mut self.stream,
+            &mut self.write_buf,
+            self.active_deadline,
+            &mut started_now,
+            op_label,
+        )
+        .await;
+        if started_now {
+            self.deadline_wire_started = true;
+        }
+        match res {
+            Ok(_) => Ok(()),
+            Err(crate::query::CommandIoOutcome::DeadlineExceeded) => {
+                self.deadline_timed_out = true;
+                if started_now {
+                    self.deadline_write_uncertain = true;
+                    self.mark_closed();
+                } else {
+                    if was_unnamed_pre_marked {
+                        self.unnamed_statement_valid = false;
+                    }
+                    self.set_exchange_state(ExchangeState::Idle);
+                    self.standalone_cancel
+                        .in_exchange
+                        .store(false, std::sync::atomic::Ordering::Release);
+                }
+                Err(PostgresError::Operational(
+                    crate::query::COMMAND_IO_DEADLINE_EXCEEDED_MSG.to_string(),
+                ))
+            }
+            Err(crate::query::CommandIoOutcome::Other(err)) => {
+                self.mark_closed();
+                Err(err)
+            }
+        }
+    }
+
+    async fn read_command_frame(&mut self) -> Result<Message, PostgresError> {
+        self.deadline_wire_started = true;
+        match crate::query::read_command_message(
+            &mut self.stream,
+            &mut self.read_buf,
+            self.active_deadline,
+        )
+        .await
+        {
+            Ok(msg) => Ok(msg),
+            Err(crate::query::CommandIoOutcome::DeadlineExceeded) => {
+                self.deadline_timed_out = true;
+                if !self.defer_deadline_read_close {
+                    self.mark_closed();
+                }
+                Err(PostgresError::Operational(
+                    crate::query::COMMAND_IO_DEADLINE_EXCEEDED_MSG.to_string(),
+                ))
+            }
+            Err(crate::query::CommandIoOutcome::Other(err)) => {
+                self.mark_closed();
+                Err(err)
+            }
         }
     }
 
@@ -801,8 +1076,15 @@ impl PostgresConnection {
     }
 
     pub(crate) async fn drain_to_ready_for_query(&mut self) -> Result<(), PostgresError> {
+        self.drain_to_ready_for_query_until(None).await
+    }
+
+    pub(crate) async fn drain_to_ready_for_query_until(
+        &mut self,
+        deadline: Option<Instant>,
+    ) -> Result<(), PostgresError> {
         loop {
-            let msg = match read_message(&mut self.stream, &mut self.read_buf, None).await {
+            let msg = match read_message(&mut self.stream, &mut self.read_buf, deadline).await {
                 Ok(m) => m,
                 Err(err) => {
                     self.mark_closed();
@@ -873,6 +1155,7 @@ impl PostgresConnection {
             ));
         }
 
+        let prev_unnamed = self.unnamed_statement_valid;
         self.unnamed_statement_valid = false;
         self.write_buf.clear();
         postgres_protocol::message::frontend::query(sql, &mut self.write_buf).map_err(|e| {
@@ -882,32 +1165,18 @@ impl PostgresConnection {
         self.standalone_cancel
             .in_exchange
             .store(true, std::sync::atomic::Ordering::Release);
-        if let Err(err) = self.stream.write_all(&self.write_buf).await {
-            self.write_buf.clear();
-            self.mark_closed();
-            return Err(PostgresError::Transport(format!(
-                "simple_query write failed: {err}"
-            )));
-        }
-        self.write_buf.clear();
-        if let Err(err) = self.stream.flush().await {
-            self.mark_closed();
-            return Err(PostgresError::Transport(format!(
-                "simple_query flush failed: {err}"
-            )));
+        if let Err(err) = self.write_command_buf("simple_query", false).await {
+            if !self.deadline_write_uncertain && !self.closed {
+                self.unnamed_statement_valid = prev_unnamed;
+            }
+            return Err(err);
         }
 
         let mut collector = crate::query::SimpleQueryCollector::with_catalog(
             self.type_catalog.snapshot_for_batch(),
         );
         loop {
-            let msg = match read_message(&mut self.stream, &mut self.read_buf, None).await {
-                Ok(m) => m,
-                Err(err) => {
-                    self.mark_closed();
-                    return Err(err);
-                }
-            };
+            let msg = self.read_command_frame().await?;
 
             match msg {
                 Message::RowDescription(body) => {
@@ -1086,23 +1355,11 @@ impl PostgresConnection {
             .map_err(|e| PostgresError::Protocol(format!("failed to encode Close(P): {e}")))?;
         postgres_protocol::message::frontend::sync(&mut self.write_buf);
 
+        let prev_unnamed = self.unnamed_statement_valid;
         self.unnamed_statement_valid = true;
         self.set_exchange_state(ExchangeState::InExtendedExchange);
-
-        if let Err(err) = self.stream.write_all(&self.write_buf).await {
-            self.write_buf.clear();
-            self.mark_closed();
-            return Err(PostgresError::Transport(format!(
-                "extended query write failed: {err}"
-            )));
-        }
-        self.write_buf.clear();
-        if let Err(err) = self.stream.flush().await {
-            self.mark_closed();
-            return Err(PostgresError::Transport(format!(
-                "extended query flush failed: {err}"
-            )));
-        }
+        self.write_command_buf("extended query", !prev_unnamed)
+            .await?;
 
         let mut collector = crate::extended::ExtendedQueryCollector::new(
             resolved.parameters.len(),
@@ -1114,13 +1371,7 @@ impl PostgresConnection {
         let mut command_tag: Option<String> = None;
 
         loop {
-            let msg = match read_message(&mut self.stream, &mut self.read_buf, None).await {
-                Ok(m) => m,
-                Err(err) => {
-                    self.mark_closed();
-                    return Err(err);
-                }
-            };
+            let msg = self.read_command_frame().await?;
 
             match msg {
                 Message::ParseComplete => {
@@ -1300,6 +1551,7 @@ impl PostgresConnection {
                 .await;
         }
 
+        let prev_unnamed = self.unnamed_statement_valid;
         let stmt_name = if cache_enabled {
             self.statement_cache.next_statement_name()
         } else {
@@ -1349,21 +1601,8 @@ impl PostgresConnection {
         frontend::sync(&mut self.write_buf);
 
         self.set_exchange_state(ExchangeState::InExtendedExchange);
-
-        if let Err(err) = self.stream.write_all(&self.write_buf).await {
-            self.write_buf.clear();
-            self.mark_closed();
-            return Err(PostgresError::Transport(format!(
-                "extended query write failed: {err}"
-            )));
-        }
-        self.write_buf.clear();
-        if let Err(err) = self.stream.flush().await {
-            self.mark_closed();
-            return Err(PostgresError::Transport(format!(
-                "extended query flush failed: {err}"
-            )));
-        }
+        self.write_command_buf("extended query", !cache_enabled && !prev_unnamed)
+            .await?;
 
         let mut collector = crate::extended::ExtendedQueryCollector::new(
             resolved.parameters.len(),
@@ -1377,13 +1616,7 @@ impl PostgresConnection {
         let mut affected_rows = 0u64;
 
         loop {
-            let msg = match read_message(&mut self.stream, &mut self.read_buf, None).await {
-                Ok(m) => m,
-                Err(err) => {
-                    self.mark_closed();
-                    return Err(err);
-                }
-            };
+            let msg = self.read_command_frame().await?;
 
             match msg {
                 Message::ParseComplete => {
@@ -1546,8 +1779,25 @@ impl PostgresConnection {
                                 row_ctx,
                             );
                             owned.mark_completed(status);
-                            return crate::metadata::normalize_materialized_result(self, owned)
-                                .await;
+                            self.deadline_wire_started = false;
+                            if self.active_deadline.is_some_and(|dl| Instant::now() >= dl) {
+                                return crate::extended::decode_completed_text_result_without_enrichment(
+                                    owned,
+                                    &self.type_catalog,
+                                );
+                            }
+                            return match crate::metadata::normalize_materialized_result(self, owned)
+                                .await
+                            {
+                                Err(PostgresError::AfterCompletion {
+                                    completed_result, ..
+                                }) if self.deadline_timed_out && !self.deadline_wire_started => {
+                                    self.closed = false;
+                                    self.deadline_timed_out = false;
+                                    Ok(completed_result)
+                                }
+                                other => other,
+                            };
                         }
                         Err(err) => {
                             if matches!(
@@ -1632,21 +1882,8 @@ impl PostgresConnection {
         frontend::sync(&mut self.write_buf);
 
         self.set_exchange_state(ExchangeState::InExtendedExchange);
-
-        if let Err(err) = self.stream.write_all(&self.write_buf).await {
-            self.write_buf.clear();
-            self.mark_closed();
-            return Err(PostgresError::Transport(format!(
-                "cached extended query write failed: {err}"
-            )));
-        }
-        self.write_buf.clear();
-        if let Err(err) = self.stream.flush().await {
-            self.mark_closed();
-            return Err(PostgresError::Transport(format!(
-                "cached extended query flush failed: {err}"
-            )));
-        }
+        self.write_command_buf("cached extended query", false)
+            .await?;
 
         let mut collector = crate::extended::ExtendedQueryCollector::new(
             resolved.parameters.len(),
@@ -1657,13 +1894,7 @@ impl PostgresConnection {
         let mut row_ctx = ctx;
 
         loop {
-            let msg = match read_message(&mut self.stream, &mut self.read_buf, None).await {
-                Ok(m) => m,
-                Err(err) => {
-                    self.mark_closed();
-                    return Err(err);
-                }
-            };
+            let msg = self.read_command_frame().await?;
 
             match msg {
                 Message::BindComplete => {
@@ -1862,23 +2093,11 @@ impl PostgresConnection {
             .map_err(|e| PostgresError::Protocol(format!("failed to encode Close(P): {e}")))?;
         postgres_protocol::message::frontend::sync(&mut self.write_buf);
 
+        let prev_unnamed = self.unnamed_statement_valid;
         self.unnamed_statement_valid = true;
         self.set_exchange_state(ExchangeState::InExtendedExchange);
-
-        if let Err(err) = self.stream.write_all(&self.write_buf).await {
-            self.write_buf.clear();
-            self.mark_closed();
-            return Err(PostgresError::Transport(format!(
-                "warm extended query write failed: {err}"
-            )));
-        }
-        self.write_buf.clear();
-        if let Err(err) = self.stream.flush().await {
-            self.mark_closed();
-            return Err(PostgresError::Transport(format!(
-                "warm extended query flush failed: {err}"
-            )));
-        }
+        self.write_command_buf("warm extended query", !prev_unnamed)
+            .await?;
 
         let mut collector = crate::extended::ExtendedQueryCollector::new(
             resolved.parameters.len(),
@@ -1889,13 +2108,7 @@ impl PostgresConnection {
         let mut row_ctx = ctx;
 
         loop {
-            let msg = match read_message(&mut self.stream, &mut self.read_buf, None).await {
-                Ok(m) => m,
-                Err(err) => {
-                    self.mark_closed();
-                    return Err(err);
-                }
-            };
+            let msg = self.read_command_frame().await?;
 
             match msg {
                 Message::ParseComplete => {
@@ -2130,8 +2343,10 @@ pub(crate) struct OperationMeta {
     pub(crate) retire_pending: bool,
     pub(crate) ambient_cancel_failed: bool,
     pub(crate) force_retire_now: bool,
+    pub(crate) cleanup_deadline: Option<Instant>,
     pub(crate) clear_ambient_cancel_failed: bool,
     pub(crate) pin_owner_on_ok: Option<TransactionOwner>,
+    pub(crate) install_portal_on_ok: Option<(TransactionOwner, String)>,
 }
 
 #[derive(Debug)]
@@ -2144,6 +2359,7 @@ pub(crate) struct SessionInner {
     active_op: Option<ActiveOpState>,
     closing_inflight: bool,
     close_after_inflight: bool,
+    portal_cleanup_inflight: bool,
     parameters: BTreeMap<String, String>,
     last_transaction_status: TransactionStatus,
     pinned_owner: Option<TransactionOwner>,
@@ -2165,6 +2381,7 @@ impl SessionInner {
             active_op: None,
             closing_inflight: false,
             close_after_inflight: false,
+            portal_cleanup_inflight: false,
             parameters: BTreeMap::new(),
             last_transaction_status: TransactionStatus::Idle,
             pinned_owner: None,
@@ -2189,6 +2406,7 @@ impl SessionInner {
             active_op: None,
             closing_inflight: false,
             close_after_inflight: false,
+            portal_cleanup_inflight: false,
             parameters,
             last_transaction_status: status,
             pinned_owner: None,
@@ -2319,6 +2537,16 @@ impl SessionOperationGuard<'_> {
     pub fn connection_mut(&mut self) -> &mut PostgresConnection {
         self.backing.as_mut().expect("SessionOperationGuard active")
     }
+
+    /// Retire the checked-out physical socket boundedly by `connect_timeout` while keeping any
+    /// pooled lease slot owned by the session until the client closes.
+    pub(crate) async fn retire_socket_bounded(&mut self) {
+        if let Some(ref mut backing) = self.backing {
+            backing.mark_retire();
+            let timeout = self.handle.shared.config.connect_timeout;
+            let _ = tokio::time::timeout(timeout, backing.retire_physical_socket()).await;
+        }
+    }
 }
 
 impl Drop for SessionOperationGuard<'_> {
@@ -2338,8 +2566,10 @@ impl Drop for SessionOperationGuard<'_> {
                 .expect("SessionHandle lock poisoned");
             guard.active_op = None;
             guard.closing_inflight = false;
-            let close_requested = guard.close_after_inflight;
-            guard.close_after_inflight = false;
+            let close_requested = guard.close_after_inflight && !guard.portal_cleanup_inflight;
+            if close_requested {
+                guard.close_after_inflight = false;
+            }
             guard.parameters = backing.parameters.clone();
             guard.last_transaction_status = backing.transaction_status();
             if backing.transaction_status() == TransactionStatus::Idle
@@ -2353,6 +2583,9 @@ impl Drop for SessionOperationGuard<'_> {
                 backing.mark_retire();
             }
             if close_requested {
+                guard.active_portal = None;
+                guard.pinned_owner = None;
+                guard.ambient_cancel_failed = false;
                 guard.state = SessionState::Closed {
                     generation: backing.generation(),
                 };
@@ -2376,7 +2609,14 @@ impl Drop for SessionOperationGuard<'_> {
             } else {
                 vertebra_db::py_async::db_runtime_handle().spawn(task);
             }
-        } else {
+        } else if !self
+            .handle
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned")
+            .portal_cleanup_inflight
+        {
             self.handle.shared.inflight_done_notify.notify_waiters();
         }
     }
@@ -2608,6 +2848,96 @@ impl SessionHandle {
         }
     }
 
+    pub(crate) fn claim_deadline_cancel_on_shared(
+        shared: &Arc<SessionShared>,
+        op_gen: OperationGeneration,
+        wire_started: bool,
+    ) -> self::cancel::SessionCancelClaim {
+        let hook = shared
+            .cancel_dial_hook
+            .lock()
+            .expect("cancel_dial_hook poisoned")
+            .clone();
+        let mut guard = shared.inner.lock().expect("SessionHandle lock poisoned");
+        let Some(ref mut active) = guard.active_op else {
+            return self::cancel::SessionCancelClaim::IdleNoOp;
+        };
+        if active.op_gen != op_gen || active.cancel_claimed {
+            return self::cancel::SessionCancelClaim::IdleNoOp;
+        }
+        active.cancel_claimed = true;
+        if !wire_started {
+            return self::cancel::SessionCancelClaim::CancelledBeforeSend;
+        }
+        active.retire_on_finish = true;
+        let had_ambient = active.had_ambient_tx;
+        let key_opt = active.key.clone();
+        guard.retire_pending = true;
+        if had_ambient {
+            guard.ambient_cancel_failed = true;
+        }
+        match key_opt {
+            Some(key) => self::cancel::SessionCancelClaim::Send { key, hook },
+            None => self::cancel::SessionCancelClaim::MissingBackendKey,
+        }
+    }
+
+    pub(crate) fn did_op_claim_cancel(&self, op_gen: OperationGeneration) -> bool {
+        let guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
+        guard
+            .active_op
+            .as_ref()
+            .is_some_and(|op| op.op_gen == op_gen && op.cancel_claimed)
+    }
+
+    async fn wait_portal_drop_cleanup_if_needed(&self) {
+        let wait_fut = {
+            let notify_arc = Arc::clone(&self.shared.inflight_done_notify);
+            let guard = self
+                .shared
+                .inner
+                .lock()
+                .expect("SessionHandle lock poisoned");
+            if !guard.portal_cleanup_inflight {
+                None
+            } else {
+                let notified = notify_arc.notified_owned();
+                let mut pinned = Box::pin(notified);
+                pinned.as_mut().enable();
+                Some(pinned)
+            }
+        };
+        if let Some(pinned) = wait_fut {
+            let _ = tokio::time::timeout(self.shared.config.connect_timeout, pinned).await;
+        }
+    }
+
+    /// Synchronously validate that ordinary operation reservation can proceed without an active
+    /// portal or pipeline scope (used to reject invalid arguments before starting reservation state).
+    pub fn ensure_ordinary_reservable(&self) -> Result<(), PostgresError> {
+        let guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
+        if guard.active_portal.is_some() && !guard.portal_cleanup_inflight {
+            return Err(PostgresError::Interface(
+                "cannot execute operation while a Portal is active on this session".to_string(),
+            ));
+        }
+        if guard.active_pipeline.is_some() {
+            return Err(PostgresError::Interface(
+                "cannot execute ordinary session operation while a pipeline scope is active"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Synchronously claim `op_gen` inside a Python `asyncio.Future` cancellation callback and spawn
     /// a fresh-socket `CancelRequest` only when `op_gen` is currently in flight on the wire.
     pub fn trigger_async_cancel(&self, op_gen: OperationGeneration) {
@@ -2815,7 +3145,14 @@ impl SessionHandle {
             .inner
             .lock()
             .expect("SessionHandle lock poisoned");
-        if guard.active_portal.is_some() {
+        if guard.portal_cleanup_inflight {
+            guard.close_after_inflight = true;
+            let notified = notify_arc.notified_owned();
+            let mut pinned = Box::pin(notified);
+            pinned.as_mut().enable();
+            return Ok(CloseAction::WaitInFlight(pinned));
+        }
+        if guard.active_portal.is_some() && !guard.retire_pending {
             return Err(PostgresError::Interface(
                 "cannot close session while a Portal is active".to_string(),
             ));
@@ -2978,6 +3315,7 @@ impl SessionHandle {
         )
             -> vertebra_db::connection::BoxFuture<'c, Result<T, PostgresError>>,
     {
+        self.wait_portal_drop_cleanup_if_needed().await;
         let (backing, mut meta, cancel_notify) = {
             let mut guard = self
                 .shared
@@ -3099,11 +3437,13 @@ impl SessionHandle {
                         retire_pending: guard.retire_pending,
                         ambient_cancel_failed: guard.ambient_cancel_failed,
                         force_retire_now: false,
+                        cleanup_deadline: None,
                         clear_ambient_cancel_failed: matches!(
                             access,
                             SessionAccess::RollbackAllowed
                         ),
                         pin_owner_on_ok: None,
+                        install_portal_on_ok: None,
                     };
                     let cancel_notify = Arc::new(tokio::sync::Notify::new());
                     guard.active_op = Some(ActiveOpState {
@@ -3234,6 +3574,15 @@ impl SessionHandle {
             }
 
             if result.is_ok()
+                && let Some((portal_owner, portal_name)) = meta.install_portal_on_ok.take()
+            {
+                if !op_cancel_claimed && !guard.retire_pending {
+                    guard.active_portal = Some((portal_owner, portal_name));
+                    if guard.pinned_owner.is_none() {
+                        guard.pinned_owner = Some(portal_owner);
+                    }
+                }
+            } else if result.is_ok()
                 && let Some(pin) = meta.pin_owner_on_ok
             {
                 guard.pinned_owner = Some(pin);
@@ -3253,7 +3602,11 @@ impl SessionHandle {
 
             let still_in_pipeline = guard.active_pipeline.is_some();
             let still_ambient_failed = guard.ambient_cancel_failed;
-            let retire_socket_now = retire_requested && !still_in_pipeline && !still_ambient_failed;
+            let retire_socket_now = retire_requested
+                && !still_in_pipeline
+                && (!still_ambient_failed
+                    || backing.is_closed()
+                    || meta.cleanup_deadline.is_some());
 
             if retire_socket_now || guard.close_after_inflight {
                 guard.closing_inflight = true;
@@ -3262,7 +3615,21 @@ impl SessionHandle {
         };
 
         if retire_socket_now {
-            let _ = tokio::time::timeout(connect_timeout, backing.retire_physical_socket()).await;
+            if let Some(cleanup_dl) = meta.cleanup_deadline {
+                if Instant::now() < cleanup_dl {
+                    let _ =
+                        tokio::time::timeout_at(cleanup_dl, backing.retire_physical_socket()).await;
+                } else {
+                    let _ = tokio::time::timeout(
+                        Duration::from_millis(5),
+                        backing.retire_physical_socket(),
+                    )
+                    .await;
+                }
+            } else {
+                let _ =
+                    tokio::time::timeout(connect_timeout, backing.retire_physical_socket()).await;
+            }
         }
 
         let close_lease_now = close_after_first || {
@@ -3341,6 +3708,7 @@ impl SessionHandle {
         &self,
         owner: Option<TransactionOwner>,
     ) -> Result<SessionOperationGuard<'_>, PostgresError> {
+        self.wait_portal_drop_cleanup_if_needed().await;
         let mut guard = self
             .shared
             .inner
@@ -3412,12 +3780,32 @@ impl SessionHandle {
         owner: TransactionOwner,
         portal_name: &str,
     ) -> Result<SessionOperationGuard<'_>, PostgresError> {
+        self.acquire_portal_operation_with_generation(None, owner, portal_name, false)
+            .await
+            .map(|(g, _)| g)
+    }
+
+    pub(crate) async fn acquire_portal_operation_with_generation(
+        &self,
+        fenced_op_gen: Option<OperationGeneration>,
+        owner: TransactionOwner,
+        portal_name: &str,
+        had_caller_ambient_tx: bool,
+    ) -> Result<(SessionOperationGuard<'_>, Arc<tokio::sync::Notify>), PostgresError> {
         let _access = SessionAccess::Portal;
         let mut guard = self
             .shared
             .inner
             .lock()
             .expect("SessionHandle lock poisoned");
+        if let Some(op_gen) = fenced_op_gen {
+            guard.reserved_generations.remove(&op_gen.0);
+            if guard.pre_cancelled_generations.remove(&op_gen.0) {
+                return Err(PostgresError::Interface(
+                    "portal operation was cancelled before wire submission".to_string(),
+                ));
+            }
+        }
         if guard.active_pipeline.is_some() {
             return Err(PostgresError::Interface(
                 "cannot execute portal operation while a pipeline scope is active".to_string(),
@@ -3450,25 +3838,33 @@ impl SessionHandle {
                             "session connection is closed".to_string(),
                         ));
                     }
-                    guard.next_op_generation = guard.next_op_generation.saturating_add(1);
-                    let op_gen = OperationGeneration(guard.next_op_generation);
-                    let had_ambient = backing.transaction_status() != TransactionStatus::Idle;
+                    let op_gen = match fenced_op_gen {
+                        Some(g) => g,
+                        None => {
+                            guard.next_op_generation = guard.next_op_generation.saturating_add(1);
+                            OperationGeneration(guard.next_op_generation)
+                        }
+                    };
+                    let notify = Arc::new(tokio::sync::Notify::new());
                     guard.active_op = Some(ActiveOpState {
                         op_gen,
                         key: backing.cancel_key.clone(),
-                        had_ambient_tx: had_ambient,
+                        had_ambient_tx: had_ambient_for_portal(had_caller_ambient_tx),
                         cancel_claimed: false,
                         retire_on_finish: guard.retire_pending,
-                        cancel_notify: Arc::new(tokio::sync::Notify::new()),
+                        cancel_notify: Arc::clone(&notify),
                     });
                     guard.state = SessionState::InFlight {
                         generation: backing.generation(),
                     };
-                    Ok(SessionOperationGuard {
-                        handle: self,
-                        backing: Some(backing),
-                        portal_mode: true,
-                    })
+                    Ok((
+                        SessionOperationGuard {
+                            handle: self,
+                            backing: Some(backing),
+                            portal_mode: true,
+                        },
+                        notify,
+                    ))
                 } else {
                     unreachable!("checked Ready")
                 }
@@ -3480,6 +3876,83 @@ impl SessionHandle {
                 "session is not connected".to_string(),
             )),
         }
+    }
+
+    pub(crate) fn begin_portal_drop_cleanup(&self, portal_name: &str, owner: TransactionOwner) {
+        let mut guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
+        if matches!(
+            &guard.active_portal,
+            Some((active_owner, active_name)) if *active_owner == owner && active_name == portal_name
+        ) {
+            guard.portal_cleanup_inflight = true;
+        }
+    }
+
+    pub(crate) async fn finish_portal_drop_cleanup(
+        &self,
+        portal_name: &str,
+        owner: TransactionOwner,
+    ) {
+        let close_backing = {
+            let mut guard = self
+                .shared
+                .inner
+                .lock()
+                .expect("SessionHandle lock poisoned");
+            if let SessionState::Ready(ref mut backing) = guard.state {
+                backing.unregister_portal_name(portal_name);
+                guard.last_transaction_status = backing.transaction_status();
+            }
+            if matches!(
+                &guard.active_portal,
+                Some((active_owner, active_name)) if *active_owner == owner && active_name == portal_name
+            ) {
+                guard.active_portal = None;
+                if guard.last_transaction_status == TransactionStatus::Idle
+                    && !guard.ambient_cancel_failed
+                {
+                    guard.pinned_owner = None;
+                } else if let Some(pinned) = guard.pinned_owner
+                    && pinned == owner
+                {
+                    guard.pinned_owner = None;
+                }
+            }
+            guard.portal_cleanup_inflight = false;
+            if guard.close_after_inflight {
+                guard.close_after_inflight = false;
+                let next_gen = guard.next_generation;
+                let prev = std::mem::replace(
+                    &mut guard.state,
+                    SessionState::Closed {
+                        generation: next_gen,
+                    },
+                );
+                if let SessionState::Ready(mut backing) = prev {
+                    if guard.retire_pending {
+                        backing.mark_retire();
+                    }
+                    guard.pinned_owner = None;
+                    guard.ambient_cancel_failed = false;
+                    guard.state = SessionState::Closed {
+                        generation: backing.generation(),
+                    };
+                    Some(backing)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        if let Some(b) = close_backing {
+            let _ = tokio::time::timeout(self.shared.config.connect_timeout, b.close()).await;
+        }
+        self.shared.inflight_done_notify.notify_waiters();
     }
 
     /// Unpin an active [`Portal`] when it completes or closes.
@@ -3697,6 +4170,75 @@ impl SessionHandle {
         .await
     }
 
+    async fn cleanup_deadline_expired_command(
+        shared: &Arc<SessionShared>,
+        op_gen: OperationGeneration,
+        wire_started: bool,
+        write_uncertain: bool,
+        conn: &mut PostgresConnection,
+        meta: &mut OperationMeta,
+    ) {
+        let claim = Self::claim_deadline_cancel_on_shared(shared, op_gen, wire_started);
+        if !wire_started {
+            return;
+        }
+        let cleanup_dl = Instant::now() + shared.config.connect_timeout;
+        meta.force_retire_now = true;
+        meta.cleanup_deadline = Some(cleanup_dl);
+
+        if let self::cancel::SessionCancelClaim::Send { key, hook } = claim {
+            let _ = self::cancel::send_cancel_request_until(
+                &shared.config,
+                &shared.cloud_connector,
+                &key,
+                cleanup_dl,
+                hook,
+            )
+            .await;
+        }
+
+        if write_uncertain {
+            conn.mark_closed();
+            return;
+        }
+
+        if Instant::now() < cleanup_dl {
+            let _ = conn.drain_to_ready_for_query_until(Some(cleanup_dl)).await;
+        }
+        conn.mark_closed();
+    }
+
+    /// Execute an untimed extended query (`CommandBudget::untimed()`).
+    pub async fn query(
+        &self,
+        sql: &str,
+        parameters: &[crate::extended::Parameter],
+        parameter_oids: Option<&[u32]>,
+    ) -> Result<crate::result::QueryResult, PostgresError> {
+        self.query_with_deadline(sql, parameters, parameter_oids, CommandBudget::untimed())
+            .await
+    }
+
+    /// Execute an extended query bounded by one non-renewing [`CommandBudget`].
+    pub async fn query_with_deadline(
+        &self,
+        sql: &str,
+        parameters: &[crate::extended::Parameter],
+        parameter_oids: Option<&[u32]>,
+        budget: CommandBudget,
+    ) -> Result<crate::result::QueryResult, PostgresError> {
+        let op_gen = self.reserve_operation_generation();
+        self.query_as_with_generation_and_budget(
+            op_gen,
+            None,
+            sql,
+            parameters,
+            parameter_oids,
+            budget,
+        )
+        .await
+    }
+
     /// Execute an extended query under `owner`.
     pub async fn query_as(
         &self,
@@ -3718,20 +4260,58 @@ impl SessionHandle {
         parameters: &[crate::extended::Parameter],
         parameter_oids: Option<&[u32]>,
     ) -> Result<crate::result::QueryResult, PostgresError> {
+        self.query_as_with_generation_and_budget(
+            op_gen,
+            owner,
+            sql,
+            parameters,
+            parameter_oids,
+            CommandBudget::untimed(),
+        )
+        .await
+    }
+
+    pub(crate) async fn query_as_with_generation_and_budget(
+        &self,
+        op_gen: OperationGeneration,
+        owner: Option<TransactionOwner>,
+        sql: &str,
+        parameters: &[crate::extended::Parameter],
+        parameter_oids: Option<&[u32]>,
+        budget: CommandBudget,
+    ) -> Result<crate::result::QueryResult, PostgresError> {
         let sql_owned = sql.to_owned();
         let params_owned = parameters.to_vec();
         let oids_owned = parameter_oids.map(ToOwned::to_owned);
-        self.run_cancellable_operation(
-            op_gen,
-            SessionAccess::Ordinary,
-            owner,
-            move |conn, _meta| {
-                Box::pin(async move {
-                    conn.query(&sql_owned, &params_owned, oids_owned.as_deref())
-                        .await
-                })
-            },
-        )
+        let shared = Arc::clone(&self.shared);
+        self.run_cancellable_operation(op_gen, SessionAccess::Ordinary, owner, move |conn, meta| {
+            Box::pin(async move {
+                let (res, timed_out, wire_started, write_uncertain) = {
+                    let mut dl_guard = conn.enter_session_command_deadline(budget.deadline());
+                    let res = dl_guard
+                        .query(&sql_owned, &params_owned, oids_owned.as_deref())
+                        .await;
+                    (
+                        res,
+                        dl_guard.timed_out(),
+                        dl_guard.wire_started(),
+                        dl_guard.write_uncertain(),
+                    )
+                };
+                if timed_out {
+                    Self::cleanup_deadline_expired_command(
+                        &shared,
+                        op_gen,
+                        wire_started,
+                        write_uncertain,
+                        conn,
+                        meta,
+                    )
+                    .await;
+                }
+                res
+            })
+        })
         .await
     }
 
@@ -3742,7 +4322,28 @@ impl SessionHandle {
         parameters: &[crate::extended::Parameter],
         parameter_oids: Option<&[u32]>,
     ) -> Result<crate::result::QueryResult, PostgresError> {
-        self.query_as(None, sql, parameters, parameter_oids).await
+        self.query_with_deadline(sql, parameters, parameter_oids, CommandBudget::untimed())
+            .await
+    }
+
+    /// Execute an untimed simple query (`'Q'`, `CommandBudget::untimed()`).
+    pub async fn simple_query(
+        &self,
+        sql: &str,
+    ) -> Result<Vec<crate::result::QueryResult>, PostgresError> {
+        self.simple_query_with_deadline(sql, CommandBudget::untimed())
+            .await
+    }
+
+    /// Execute a simple query (`'Q'`) bounded by one non-renewing [`CommandBudget`].
+    pub async fn simple_query_with_deadline(
+        &self,
+        sql: &str,
+        budget: CommandBudget,
+    ) -> Result<Vec<crate::result::QueryResult>, PostgresError> {
+        let op_gen = self.reserve_operation_generation();
+        self.simple_query_with_generation_and_budget(op_gen, sql, budget)
+            .await
     }
 
     /// Execute a simple query (`'Q'`) on the shared session without holding a `Mutex` across `.await`.
@@ -3750,18 +4351,43 @@ impl SessionHandle {
         &self,
         sql: &str,
     ) -> Result<Vec<crate::result::QueryResult>, PostgresError> {
-        let op_gen = self.reserve_operation_generation();
-        self.simple_query_with_generation(op_gen, sql).await
+        self.simple_query_with_deadline(sql, CommandBudget::untimed())
+            .await
     }
 
-    pub(crate) async fn simple_query_with_generation(
+    pub(crate) async fn simple_query_with_generation_and_budget(
         &self,
         op_gen: OperationGeneration,
         sql: &str,
+        budget: CommandBudget,
     ) -> Result<Vec<crate::result::QueryResult>, PostgresError> {
         let sql_owned = sql.to_owned();
-        self.run_cancellable_operation(op_gen, SessionAccess::Ordinary, None, move |conn, _meta| {
-            Box::pin(async move { conn.simple_query(&sql_owned).await })
+        let shared = Arc::clone(&self.shared);
+        self.run_cancellable_operation(op_gen, SessionAccess::Ordinary, None, move |conn, meta| {
+            Box::pin(async move {
+                let (res, timed_out, wire_started, write_uncertain) = {
+                    let mut dl_guard = conn.enter_session_command_deadline(budget.deadline());
+                    let res = dl_guard.simple_query(&sql_owned).await;
+                    (
+                        res,
+                        dl_guard.timed_out(),
+                        dl_guard.wire_started(),
+                        dl_guard.write_uncertain(),
+                    )
+                };
+                if timed_out {
+                    Self::cleanup_deadline_expired_command(
+                        &shared,
+                        op_gen,
+                        wire_started,
+                        write_uncertain,
+                        conn,
+                        meta,
+                    )
+                    .await;
+                }
+                res
+            })
         })
         .await
     }
@@ -3784,85 +4410,120 @@ impl SessionHandle {
                 "SQL query string cannot contain embedded NUL byte".to_string(),
             ));
         }
+        let op_gen = self.reserve_operation_generation();
+        self.open_portal_with_generation(op_gen, sql, parameters, parameter_oids, batch_size)
+            .await
+    }
 
-        let mut op = self.acquire_operation().await?;
-        let conn = op.connection_mut();
-        if !conn.pooler_capabilities.supports_scoped_state() {
+    pub(crate) async fn open_portal_with_generation(
+        self: &Arc<Self>,
+        op_gen: OperationGeneration,
+        sql: &str,
+        parameters: &[crate::extended::Parameter],
+        parameter_oids: Option<&[u32]>,
+        batch_size: i32,
+    ) -> Result<Portal, PostgresError> {
+        if batch_size <= 0 {
+            self.unreserve_operation_generation(op_gen);
             return Err(PostgresError::Interface(
-                "cannot open_portal in PoolerMode::Statement".to_string(),
+                "open_portal requires batch_size >= 1 (batch_size <= 0 is forbidden)".to_string(),
             ));
         }
-        if conn.transaction_status() == TransactionStatus::Failed {
-            return Err(PostgresError::Interface(
-                "cannot open_portal while transaction is aborted ('E')".to_string(),
+        if sql.as_bytes().contains(&0) {
+            self.unreserve_operation_generation(op_gen);
+            return Err(PostgresError::Data(
+                "SQL query string cannot contain embedded NUL byte".to_string(),
             ));
         }
+        let sql_owned = sql.to_owned();
+        let params_owned = parameters.to_vec();
+        let oids_owned = parameter_oids.map(ToOwned::to_owned);
+        let session_arc = Arc::clone(self);
+        let _ = batch_size;
+        self.run_cancellable_operation(op_gen, SessionAccess::Ordinary, None, move |conn, meta| {
+            Box::pin(async move {
+                if !conn.pooler_capabilities.supports_scoped_state() {
+                    return Err(PostgresError::Interface(
+                        "cannot open_portal in PoolerMode::Statement".to_string(),
+                    ));
+                }
+                if conn.transaction_status() == TransactionStatus::Failed {
+                    return Err(PostgresError::Interface(
+                        "cannot open_portal while transaction is aborted ('E')".to_string(),
+                    ));
+                }
 
-        let resolved =
-            crate::metadata::resolve_parameter_metadata(conn, parameters, parameter_oids).await?;
+                let resolved = crate::metadata::resolve_parameter_metadata(
+                    conn,
+                    &params_owned,
+                    oids_owned.as_deref(),
+                )
+                .await?;
 
-        let portal_name = conn.next_portal_name();
-        let owner = TransactionOwner::new(
-            0x8000_0000_0000_0000 | conn.next_portal_id,
-            conn.generation(),
-        );
-        let scope = match conn.transaction_status() {
-            TransactionStatus::Idle => {
-                conn.begin().await?;
-                TransactionScope::new(owner, TransactionScopeKind::ExplicitTransaction)
-            }
-            TransactionStatus::InTransaction => {
-                let token = conn.next_savepoint_token();
-                conn.savepoint(token).await?;
-                TransactionScope::new(owner, TransactionScopeKind::NestedSavepoint { token })
-            }
-            TransactionStatus::Failed => {
-                conn.unregister_portal_name(&portal_name);
-                return Err(PostgresError::Interface(
-                    "cannot open_portal while transaction is aborted ('E')".to_string(),
-                ));
-            }
-        };
+                let portal_name = conn.next_portal_name();
+                let owner = TransactionOwner::new(
+                    0x8000_0000_0000_0000 | conn.next_portal_id,
+                    conn.generation(),
+                );
+                let scope = match conn.transaction_status() {
+                    TransactionStatus::Idle => {
+                        if let Err(err) = conn.begin().await {
+                            conn.unregister_portal_name(&portal_name);
+                            return Err(err);
+                        }
+                        TransactionScope::new(owner, TransactionScopeKind::ExplicitTransaction)
+                    }
+                    TransactionStatus::InTransaction => {
+                        let token = conn.next_savepoint_token();
+                        if let Err(err) = conn.savepoint(token).await {
+                            conn.unregister_portal_name(&portal_name);
+                            return Err(err);
+                        }
+                        TransactionScope::new(
+                            owner,
+                            TransactionScopeKind::NestedSavepoint { token },
+                        )
+                    }
+                    TransactionStatus::Failed => {
+                        conn.unregister_portal_name(&portal_name);
+                        return Err(PostgresError::Interface(
+                            "cannot open_portal while transaction is aborted ('E')".to_string(),
+                        ));
+                    }
+                };
 
-        let setup_res = setup_named_portal_on_conn(conn, &portal_name, sql, &resolved).await;
-        match setup_res {
-            Ok((columns, codec_ctx, catalog_snapshot)) => {
-                let generation = conn.generation();
-                drop(op);
-                {
-                    let mut guard = self
-                        .shared
-                        .inner
-                        .lock()
-                        .expect("SessionHandle lock poisoned");
-                    guard.active_portal = Some((owner, portal_name.clone()));
-                    if guard.pinned_owner.is_none() {
-                        guard.pinned_owner = Some(owner);
+                let setup_res =
+                    setup_named_portal_on_conn(conn, &portal_name, &sql_owned, &resolved).await;
+                match setup_res {
+                    Ok((columns, codec_ctx, catalog_snapshot)) => {
+                        let generation = conn.generation();
+                        meta.install_portal_on_ok = Some((owner, portal_name.clone()));
+                        Ok(Portal::new(
+                            session_arc,
+                            portal_name,
+                            generation,
+                            scope,
+                            columns,
+                            codec_ctx,
+                            catalog_snapshot,
+                            DEFAULT_MAX_RESULT_BYTES,
+                        ))
+                    }
+                    Err(err) => {
+                        conn.unregister_portal_name(&portal_name);
+                        let _ = crate::portal::close_and_rollback_portal_on_conn(
+                            conn,
+                            &portal_name,
+                            &scope,
+                            false,
+                        )
+                        .await;
+                        Err(err)
                     }
                 }
-                Ok(Portal::new(
-                    Arc::clone(self),
-                    portal_name,
-                    generation,
-                    scope,
-                    columns,
-                    codec_ctx,
-                    catalog_snapshot,
-                    DEFAULT_MAX_RESULT_BYTES,
-                ))
-            }
-            Err(err) => {
-                conn.unregister_portal_name(&portal_name);
-                let _ = crate::portal::close_and_rollback_portal_on_conn(
-                    conn,
-                    &portal_name,
-                    &scope,
-                    false,
-                )
-                .await;
-                Err(err)
-            }
-        }
+            })
+        })
+        .await
     }
 
     fn rollback_connecting(&self, generation: u64) {
@@ -4358,6 +5019,11 @@ pub(crate) async fn establish_postgres_connection(
                     next_portal_id: 0,
                     open_portals: Vec::new(),
                     notifications: Vec::new(),
+                    active_deadline: None,
+                    deadline_wire_started: false,
+                    deadline_timed_out: false,
+                    deadline_write_uncertain: false,
+                    defer_deadline_read_close: false,
                     closed: false,
                 });
             }
@@ -4488,6 +5154,10 @@ impl Drop for ClientPendingSession {
             session.rollback_connecting(self.generation);
         }
     }
+}
+
+const fn had_ambient_for_portal(had_caller_ambient_tx: bool) -> bool {
+    had_caller_ambient_tx
 }
 
 fn format_set_guc_sql(key: &str, value: &str) -> String {
