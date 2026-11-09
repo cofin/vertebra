@@ -293,6 +293,27 @@ const fn redact_opt<T>(opt: Option<&T>) -> Option<&'static str> {
     }
 }
 
+fn reject_synthetic_memory_dsn(field_name: &str, value: &str) -> Result<(), OracleError> {
+    let trimmed = value.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let is_memory = lower == ":memory:"
+        || lower == "memory"
+        || lower.starts_with("memory://")
+        || lower.contains("://:memory:")
+        || lower == "oracle://memory"
+        || lower.starts_with("oracle://memory/")
+        || lower.starts_with("oracle://memory:")
+        || lower == "oracle+thin://memory"
+        || lower.starts_with("oracle+thin://memory/")
+        || lower.starts_with("oracle+thin://memory:");
+    if is_memory {
+        return Err(OracleError::Config(format!(
+            "Oracle {field_name} {trimmed:?} is unsupported; configure a real Oracle TNS/EZConnect endpoint"
+        )));
+    }
+    Ok(())
+}
+
 impl NativeOracleConfig {
     /// Validate raw constructor options purely in memory without DNS, filesystem, or socket I/O.
     pub fn validate(raw: RawOracleOptions) -> Result<Self, OracleError> {
@@ -335,7 +356,22 @@ impl NativeOracleConfig {
                 ))
             })?;
 
-        if raw.dsn.is_none() && raw.connect_descriptor.is_none() && raw.host.trim().is_empty() {
+        let host_trimmed = raw.host.trim();
+        if host_trimmed.eq_ignore_ascii_case("memory")
+            || host_trimmed.eq_ignore_ascii_case(":memory:")
+        {
+            return Err(OracleError::Config(format!(
+                "Oracle host {host_trimmed:?} is unsupported; configure a real Oracle listener hostname"
+            )));
+        }
+        if let Some(dsn) = raw.dsn.as_deref() {
+            reject_synthetic_memory_dsn("dsn", dsn)?;
+        }
+        if let Some(desc) = raw.connect_descriptor.as_deref() {
+            reject_synthetic_memory_dsn("connect_descriptor", desc)?;
+        }
+
+        if raw.dsn.is_none() && raw.connect_descriptor.is_none() && host_trimmed.is_empty() {
             return Err(OracleError::Config(
                 "Oracle host must not be empty when dsn and connect_descriptor are unset"
                     .to_owned(),
@@ -608,6 +644,34 @@ mod tests {
             NativeOracleConfig::validate(bad_stmtcache),
             Err(OracleError::Config(_))
         ));
+
+        for memory_host in ["memory", "MEMORY", ":memory:"] {
+            let bad_host = RawOracleOptions {
+                host: memory_host.to_owned(),
+                ..Default::default()
+            };
+            assert!(matches!(
+                NativeOracleConfig::validate(bad_host),
+                Err(OracleError::Config(_))
+            ));
+        }
+
+        for memory_dsn in [
+            ":memory:",
+            "memory://",
+            "oracle://:memory:",
+            "oracle://memory/FREEPDB1",
+            "oracle+thin://memory:1521/FREEPDB1",
+        ] {
+            let bad_dsn = RawOracleOptions {
+                dsn: Some(memory_dsn.to_owned()),
+                ..Default::default()
+            };
+            assert!(matches!(
+                NativeOracleConfig::validate(bad_dsn),
+                Err(OracleError::Config(_))
+            ));
+        }
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! Native Oracle AQ / TxEventQ notification listener and publisher (`vertebra._oracle`).
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -19,8 +19,6 @@ use crate::config::NativeOracleConfig;
 use crate::dialer::connect_oracledb;
 use crate::errors::{OracleError, extract_ora_code};
 use crate::types::OracleCellValue;
-
-static NEXT_AQ_MSG_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Validate an Oracle AQ queue or consumer identifier against `^[A-Za-z_][A-Za-z0-9_$#]{0,127}$`.
 pub fn validate_aq_identifier(name: &str, kind: &str) -> Result<(), OracleError> {
@@ -160,7 +158,6 @@ impl ListenerRingBuffer {
 
 type WaiterSender = oneshot::Sender<Result<Option<OracleNotification>, OracleError>>;
 type WaiterReceiver = oneshot::Receiver<Result<Option<OracleNotification>, OracleError>>;
-type AqListenerEntry = (String, Option<String>, Arc<ListenerSharedState>);
 
 enum PollNotification {
     Ready(Option<OracleNotification>),
@@ -261,98 +258,6 @@ impl ListenerSharedState {
     }
 }
 
-struct InMemoryAqBroker {
-    queues: Mutex<HashMap<String, VecDeque<OracleNotification>>>,
-    listeners: Mutex<Vec<AqListenerEntry>>,
-}
-
-impl InMemoryAqBroker {
-    fn global() -> &'static Self {
-        static BROKER: OnceLock<InMemoryAqBroker> = OnceLock::new();
-        BROKER.get_or_init(|| Self {
-            queues: Mutex::new(HashMap::new()),
-            listeners: Mutex::new(Vec::new()),
-        })
-    }
-
-    fn register_listener(
-        &self,
-        queue_name: &str,
-        consumer_name: Option<&str>,
-        state: Arc<ListenerSharedState>,
-    ) {
-        let q_upper = queue_name.to_ascii_uppercase();
-        let c_upper = consumer_name.map(str::to_ascii_uppercase);
-        {
-            let mut q_guard = self.queues.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(backlog) = q_guard.get_mut(&q_upper) {
-                let mut remaining = VecDeque::new();
-                while let Some(frame) = backlog.pop_front() {
-                    let matches = match (&c_upper, &frame.consumer_name) {
-                        (Some(want), Some(have)) => want.eq_ignore_ascii_case(have),
-                        _ => true,
-                    };
-                    if matches {
-                        state.deliver_frame(frame);
-                    } else {
-                        remaining.push_back(frame);
-                    }
-                }
-                *backlog = remaining;
-            }
-        }
-        let mut l_guard = self.listeners.lock().unwrap_or_else(|e| e.into_inner());
-        l_guard.retain(|(_, _, s)| !s.is_closed());
-        l_guard.push((q_upper, c_upper, state));
-    }
-
-    fn publish(&self, queue_name: &str, consumer_name: Option<&str>, payload: &[u8]) -> Vec<u8> {
-        let seq = NEXT_AQ_MSG_SEQ.fetch_add(1, Ordering::Relaxed);
-        let msg_id = format!("VTB{:013X}", seq).into_bytes();
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .and_then(|d| i64::try_from(d.as_millis()).ok());
-        let q_upper = queue_name.to_ascii_uppercase();
-        let c_upper = consumer_name.map(str::to_ascii_uppercase);
-        let frame = OracleNotification {
-            queue_name: q_upper.clone(),
-            consumer_name: consumer_name.map(str::to_owned),
-            msg_id_bytes: msg_id.clone(),
-            payload_bytes: payload.to_vec(),
-            enqueued_at_epoch_ms: now_ms,
-        };
-
-        let mut delivered = false;
-        {
-            let mut l_guard = self.listeners.lock().unwrap_or_else(|e| e.into_inner());
-            l_guard.retain(|(_, _, s)| !s.is_closed());
-            for (l_queue, l_consumer, state) in l_guard.iter() {
-                if l_queue == &q_upper {
-                    let consumer_matches = match (l_consumer, &c_upper) {
-                        (Some(want), Some(have)) => want == have,
-                        _ => true,
-                    };
-                    if consumer_matches {
-                        state.deliver_frame(frame.clone());
-                        state.wake_cvar.notify_all();
-                        delivered = true;
-                    }
-                }
-            }
-        }
-        if !delivered {
-            let mut q_guard = self.queues.lock().unwrap_or_else(|e| e.into_inner());
-            let entry = q_guard.entry(q_upper).or_default();
-            if entry.len() >= 1024 {
-                let _ = entry.pop_front();
-            }
-            entry.push_back(frame);
-        }
-        msg_id
-    }
-}
-
 fn dequeue_plsql_sql() -> &'static str {
     concat!(
         "DECLARE ",
@@ -375,7 +280,7 @@ fn dequeue_plsql_sql() -> &'static str {
         "  ); ",
         "  COMMIT; ",
         "  :out_msgid := RAWTOHEX(l_msgid); ",
-        "  :out_payload := UTL_RAW.CAST_TO_VARCHAR2(l_payload); ",
+        "  :out_payload := l_payload; ",
         "END;"
     )
 }
@@ -411,7 +316,7 @@ fn run_live_aq_worker(
     state: Arc<ListenerSharedState>,
     break_handle: Arc<OracleBreakHandle>,
 ) {
-    let conn = match connect_oracledb(&config) {
+    let mut conn = match connect_oracledb(&config) {
         Ok(c) => c,
         Err(err) => {
             if !state.is_closed() {
@@ -420,16 +325,19 @@ fn run_live_aq_worker(
             return;
         }
     };
-    let _ = conn.set_call_timeout(Some(Duration::from_secs(
-        u64::from(wait_timeout_seconds.max(1)) + 2,
-    )));
+
     let state_for_break = Arc::clone(&state);
     break_handle.set_callback(Some(Arc::new(move || {
         state_for_break.wake_cvar.notify_all();
     })));
 
-    let wait_sec = i64::from(wait_timeout_seconds.max(1));
-    let consumer_str = consumer_name.clone().unwrap_or_default();
+    // Slice server-blocking DBMS_AQ.DEQUEUE waits into 1-second kernel waits:
+    // enqueued messages wake immediately (<1ms), ORA-25228 loops while open,
+    // and close()/Drop exits cleanly in <=1s without cancelling SYS.DBMS_AQ.DEQUEUE
+    // (which triggers an upstream `todo!()` in `oracledb` 26.0.0-beta.5 ErrorInfo).
+    let _ = wait_timeout_seconds.max(1);
+    let wait_sec = 1_i64;
+    let out_payload_buf = vec![0u8; 32767];
     let sql = dequeue_plsql_sql();
 
     while !state.is_closed() {
@@ -438,24 +346,45 @@ fn run_live_aq_worker(
             sql,
             &[
                 ("wait_sec", &wait_sec as &dyn oracledb::ToDbValue),
-                ("consumer", &consumer_str as &dyn oracledb::ToDbValue),
+                ("consumer", &consumer_name as &dyn oracledb::ToDbValue),
                 ("queue_name", &queue_name as &dyn oracledb::ToDbValue),
+                (
+                    "out_msgid",
+                    &oracledb::DB_TYPE_VARCHAR as &dyn oracledb::ToDbValue,
+                ),
+                ("out_payload", &out_payload_buf as &dyn oracledb::ToDbValue),
             ],
         );
         break_handle.end_operation();
 
         match res {
-            Ok(_) => {
+            Ok(mut exec_res) => {
+                if state.is_closed() {
+                    break;
+                }
+                let out_row = exec_res.out_bind_data();
+                let mut msg_id_bytes = Vec::new();
+                let mut payload_bytes = Vec::new();
+                for (idx, meta) in out_row.columns().to_vec().iter().enumerate() {
+                    if meta.name().eq_ignore_ascii_case("out_msgid") {
+                        if let Ok(Some(s)) = out_row.get::<Option<String>>(idx) {
+                            msg_id_bytes = s.into_bytes();
+                        }
+                    } else if meta.name().eq_ignore_ascii_case("out_payload")
+                        && let Ok(Some(raw)) = out_row.get::<Option<Vec<u8>>>(idx)
+                    {
+                        payload_bytes = raw;
+                    }
+                }
                 let now_ms = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .ok()
                     .and_then(|d| i64::try_from(d.as_millis()).ok());
-                let seq = NEXT_AQ_MSG_SEQ.fetch_add(1, Ordering::Relaxed);
                 state.deliver_frame(OracleNotification {
                     queue_name: queue_name.clone(),
                     consumer_name: consumer_name.clone(),
-                    msg_id_bytes: format!("VTB{:013X}", seq).into_bytes(),
-                    payload_bytes: Vec::new(),
+                    msg_id_bytes,
+                    payload_bytes,
                     enqueued_at_epoch_ms: now_ms,
                 });
             }
@@ -467,36 +396,13 @@ fn run_live_aq_worker(
                 if is_idle_dequeue_timeout(&ora_err) {
                     continue;
                 }
-                if matches!(ora_err, OracleError::Cancelled(_)) && state.is_closed() {
-                    break;
-                }
                 state.record_fatal_error(ora_err);
                 break;
             }
         }
     }
     break_handle.set_callback(None);
-}
-
-fn run_memory_aq_worker(
-    queue_name: String,
-    consumer_name: Option<String>,
-    wait_timeout_seconds: u32,
-    state: Arc<ListenerSharedState>,
-) {
-    InMemoryAqBroker::global().register_listener(
-        &queue_name,
-        consumer_name.as_deref(),
-        Arc::clone(&state),
-    );
-    let poll_dur = Duration::from_secs(u64::from(wait_timeout_seconds.max(1)));
-    while !state.is_closed() {
-        let guard = state.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if state.is_closed() {
-            break;
-        }
-        let _ = state.wake_cvar.wait_timeout(guard, poll_dur);
-    }
+    let _ = conn.close();
 }
 
 /// Dedicated AQ / TxEventQ listener owning an isolated worker thread and bounded 1024-frame ring buffer.
@@ -545,18 +451,14 @@ impl AsyncOracleListener {
         let join_handle = thread::Builder::new()
             .name("vtb-ora-aq".to_owned())
             .spawn(move || {
-                if config.host.eq_ignore_ascii_case("memory") {
-                    run_memory_aq_worker(q_clone, c_clone, wait_timeout_seconds, state_clone);
-                } else {
-                    run_live_aq_worker(
-                        config,
-                        q_clone,
-                        c_clone,
-                        wait_timeout_seconds,
-                        state_clone,
-                        break_clone,
-                    );
-                }
+                run_live_aq_worker(
+                    config,
+                    q_clone,
+                    c_clone,
+                    wait_timeout_seconds,
+                    state_clone,
+                    break_clone,
+                );
             })
             .map_err(|e| {
                 OracleError::Interface(format!("failed to spawn Oracle AQ listener thread: {e}"))
@@ -686,7 +588,7 @@ impl Drop for AsyncOracleListener {
     }
 }
 
-/// Synchronously enqueue an AQ notification on `worker` (or via the in-memory broker when `host == "memory"`).
+/// Synchronously enqueue an AQ / TxEventQ notification on `worker`.
 pub(crate) fn enqueue_notification_sync(
     worker: &OracleWorkerHandle,
     queue_name: &str,
@@ -700,10 +602,6 @@ pub(crate) fn enqueue_notification_sync(
     }
     if worker.is_closed() {
         return Err(OracleError::Interface("Oracle client is closed".to_owned()));
-    }
-    if worker.config().host.eq_ignore_ascii_case("memory") {
-        let _ = correlation_id;
-        return Ok(InMemoryAqBroker::global().publish(queue_name, consumer_name, payload));
     }
 
     let sql = enqueue_plsql_sql().to_owned();
@@ -746,8 +644,7 @@ pub(crate) fn enqueue_notification_sync(
             }
         }
     }
-    let seq = NEXT_AQ_MSG_SEQ.fetch_add(1, Ordering::Relaxed);
-    Ok(format!("VTB{:013X}", seq).into_bytes())
+    Ok(Vec::new())
 }
 
 #[cfg(test)]

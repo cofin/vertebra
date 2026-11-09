@@ -342,6 +342,35 @@ class OracleConfig(BaseDatabaseConfig, frozen=True, gc=False):
     broker: Any = None
     """Optional shared-memory `DatabaseBroker` coordinating cross-worker connection and statement leases."""
 
+    def __post_init__(self) -> None:
+        """Reject synthetic in-memory hostnames and DSNs at configuration time."""
+        host_norm = self.host.strip().lower()
+        if host_norm in ("memory", ":memory:"):
+            raise ImproperConfigurationError(
+                f"Oracle host {self.host!r} is unsupported; configure a real Oracle listener hostname."
+            )
+        for field_name, raw_val in (("dsn", self.dsn), ("connect_descriptor_str", self.connect_descriptor_str)):
+            if not raw_val:
+                continue
+            trimmed = raw_val.strip()
+            lower = trimmed.lower()
+            if (
+                lower in (":memory:", "memory", "oracle://memory", "oracle+thin://memory")
+                or lower.startswith(
+                    (
+                        "memory://",
+                        "oracle://memory/",
+                        "oracle://memory:",
+                        "oracle+thin://memory/",
+                        "oracle+thin://memory:",
+                    )
+                )
+                or "://:memory:" in lower
+            ):
+                raise ImproperConfigurationError(
+                    f"Oracle {field_name} {trimmed!r} is unsupported; configure a real Oracle TNS or EZConnect endpoint."
+                )
+
     def connect_descriptor(self) -> OracleConnectDescriptor:
         """Resolve the effective `OracleConnectDescriptor` in strict 4-tier priority order."""
         if self.connect_descriptor_str:

@@ -717,7 +717,7 @@ def _resolve_live_config(
         request.addfinalizer(loopback_server.close)
         return MySQLConfig.from_url(loopback_server.dsn)
     if spec.engine == "oracle":
-        return OracleConfig(host="memory", service_name=f"vtb_conf_{tmp_path.name}")
+        pytest.skip("Oracle conformance requires VERTEBRA_CONFORMANCE_ORACLE_DSN or VERTEBRA_CONFORMANCE_DOCKER=1")
     return spec.config_cls.from_url(spec.sample_url)
 
 

@@ -1,10 +1,11 @@
-"""Live and deterministic Oracle 26ai native driver integration suite."""
+"""Live Oracle 26ai native driver integration suite."""
 
 from __future__ import annotations
 
 import os
 import threading
-from pathlib import Path
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import msgspec
@@ -19,14 +20,15 @@ from vertebra.db.adapters.oracle.driver import (
     SyncOraclePool,
 )
 from vertebra.db.adapters.oracle.embeddings import OracleEmbeddingPushdown
+from vertebra.db.adapters.oracle.notify import OracleNotificationSource, OracleNotifyConfig
 from vertebra.db.arrow import ARROW_SHM_THRESHOLD_ROWS
 from vertebra.db.driver import NotFoundError, QueryCancelledError
 from vertebra.db.rls import AsyncTenantConnectionScope, TenantConnectionScope
 from vertebra.utils.module_loader import ensure_module
 
 
-def _resolve_oracle_config(tmp_path: Path, request: pytest.FixtureRequest) -> OracleConfig:
-    """Resolve an `OracleConfig` from `VERTEBRA_CONFORMANCE_ORACLE_DSN`, Docker fixture, or native memory store."""
+def _resolve_oracle_config(request: pytest.FixtureRequest) -> OracleConfig:
+    """Resolve a live `OracleConfig` from `VERTEBRA_CONFORMANCE_ORACLE_DSN` or the Docker fixture."""
     ensure_module(
         "vertebra._oracle",
         package="vertebra._oracle",
@@ -40,13 +42,15 @@ def _resolve_oracle_config(tmp_path: Path, request: pytest.FixtureRequest) -> Or
         fixture_cfg = request.getfixturevalue("vtb_oracle_config")
         assert isinstance(fixture_cfg, OracleConfig)
         return fixture_cfg
-    return OracleConfig(host="memory", service_name=f"vtb_ora_native_{tmp_path.name}")
+    pytest.skip(
+        "Oracle 26ai integration tests require VERTEBRA_CONFORMANCE_ORACLE_DSN or VERTEBRA_CONFORMANCE_DOCKER=1"
+    )
 
 
 @pytest.fixture
-def oracle_config(tmp_path: Path, request: pytest.FixtureRequest) -> OracleConfig:
-    """Return the resolved `OracleConfig` for native Oracle 26ai integration tests."""
-    return _resolve_oracle_config(tmp_path, request)
+def oracle_config(request: pytest.FixtureRequest) -> OracleConfig:
+    """Return the resolved live `OracleConfig` for native Oracle 26ai integration tests."""
+    return _resolve_oracle_config(request)
 
 
 @pytest.mark.anyio
@@ -105,15 +109,9 @@ async def test_oracle_26ai_oson_and_vector_roundtrip_and_similarity_search(
             assert rows[1]["id"] == 2
             assert rows[1]["doc_json"] == ["decaf", {"origin": "colombia"}]
 
-            if oracle_config.host != "memory":
-                list_rows = await list_driver.select(
-                    "SELECT id, embedding, vec_i8 FROM vtb_ora_native_vec ORDER BY id ASC"
-                )
-                assert list_rows[0]["embedding"] == pytest.approx([1.0, 0.0, 0.0])
-                assert list_rows[0]["vec_i8"] == [10, -5, 3]
-            else:
-                default_list = OracleDriverFeatures()
-                assert default_list.vector_return_format == "list"
+            list_rows = await list_driver.select("SELECT id, embedding, vec_i8 FROM vtb_ora_native_vec ORDER BY id ASC")
+            assert list_rows[0]["embedding"] == pytest.approx([1.0, 0.0, 0.0])
+            assert list_rows[0]["vec_i8"] == [10, -5, 3]
 
             pushdown = OracleEmbeddingPushdown(
                 driver,
@@ -274,42 +272,68 @@ async def test_oracle_26ai_vpd_client_identifier_reset_across_rollback(
     )
     with SyncOraclePool(pooled_cfg) as sync_pool:
         with sync_pool.lease() as leased_drv, TenantConnectionScope(leased_drv, "tenant-alpha"):
-            active_cid = leased_drv.select_value("SELECT SYS_CONTEXT('USERENV', 'CLIENT_IDENTIFIER') AS cid FROM DUAL")
-            assert active_cid == "tenant-alpha"
+            leased_drv._client.set_session_attrs(module="vtb-order-svc", action="sync-checkout")
+            ctx_row = leased_drv.select_one(
+                "SELECT SYS_CONTEXT('USERENV', 'CLIENT_IDENTIFIER') AS cid, "
+                "SYS_CONTEXT('USERENV', 'MODULE') AS mod_name, "
+                "SYS_CONTEXT('USERENV', 'ACTION') AS act_name FROM DUAL"
+            )
+            assert ctx_row["cid"] == "tenant-alpha"
+            assert ctx_row["mod_name"] == "vtb-order-svc"
+            assert ctx_row["act_name"] == "sync-checkout"
             leased_drv.begin()
             leased_drv.rollback()
 
         with sync_pool.lease() as next_drv:
-            cleared_cid = next_drv.select_value("SELECT SYS_CONTEXT('USERENV', 'CLIENT_IDENTIFIER') AS cid FROM DUAL")
-            assert cleared_cid is None
+            cleared_row = next_drv.select_one(
+                "SELECT SYS_CONTEXT('USERENV', 'CLIENT_IDENTIFIER') AS cid, "
+                "SYS_CONTEXT('USERENV', 'MODULE') AS mod_name, "
+                "SYS_CONTEXT('USERENV', 'ACTION') AS act_name FROM DUAL"
+            )
+            assert cleared_row["cid"] is None
+            assert cleared_row["mod_name"] is None
+            assert cleared_row["act_name"] is None
 
     async with AsyncOraclePool(pooled_cfg) as async_pool:
         async with async_pool.lease() as async_drv, AsyncTenantConnectionScope(async_drv, "tenant-beta"):
-            active_async_cid = await async_drv.select_value(
-                "SELECT SYS_CONTEXT('USERENV', 'CLIENT_IDENTIFIER') AS cid FROM DUAL"
+            async_drv._client.set_session_attrs(module="vtb-async-svc", action="async-checkout")
+            active_async_row = await async_drv.select_one(
+                "SELECT SYS_CONTEXT('USERENV', 'CLIENT_IDENTIFIER') AS cid, "
+                "SYS_CONTEXT('USERENV', 'MODULE') AS mod_name, "
+                "SYS_CONTEXT('USERENV', 'ACTION') AS act_name FROM DUAL"
             )
-            assert active_async_cid == "tenant-beta"
+            assert active_async_row["cid"] == "tenant-beta"
+            assert active_async_row["mod_name"] == "vtb-async-svc"
+            assert active_async_row["act_name"] == "async-checkout"
             await async_drv.begin()
             await async_drv.rollback()
 
         async with async_pool.lease() as next_async_drv:
-            cleared_async_cid = await next_async_drv.select_value(
-                "SELECT SYS_CONTEXT('USERENV', 'CLIENT_IDENTIFIER') AS cid FROM DUAL"
+            cleared_async_row = await next_async_drv.select_one(
+                "SELECT SYS_CONTEXT('USERENV', 'CLIENT_IDENTIFIER') AS cid, "
+                "SYS_CONTEXT('USERENV', 'MODULE') AS mod_name, "
+                "SYS_CONTEXT('USERENV', 'ACTION') AS act_name FROM DUAL"
             )
-            assert cleared_async_cid is None
+            assert cleared_async_row["cid"] is None
+            assert cleared_async_row["mod_name"] is None
+            assert cleared_async_row["act_name"] is None
 
 
 @pytest.mark.anyio
 async def test_oracle_26ai_out_of_band_cancel_aborts_sleep(
     oracle_config: OracleConfig,
 ) -> None:
-    """Verify out-of-band `cancel()` aborts an in-flight `DBMS_SESSION.SLEEP(5)` with `ORA-01013` and reuses cleanly."""
+    """Verify out-of-band `cancel()` aborts an in-flight `DBMS_SESSION.SLEEP(10)` with `ORA-01013` under 4s."""
     with SyncOracleDriver(oracle_config) as sync_driver:
-        timer = threading.Timer(0.05, sync_driver._client.cancel)
+        assert int(sync_driver.select_value("SELECT 1 AS ok FROM DUAL")) == 1
+        start_sync = time.monotonic()
+        timer = threading.Timer(0.25, sync_driver._client.cancel)
         timer.start()
         try:
             with pytest.raises(QueryCancelledError) as exc_info:
-                sync_driver.execute("BEGIN DBMS_SESSION.SLEEP(5); END;")
+                sync_driver.execute("BEGIN DBMS_SESSION.SLEEP(10); END;")
+            elapsed_sync = time.monotonic() - start_sync
+            assert elapsed_sync < 4.0
             assert exc_info.value.sqlstate == "57014"
             assert exc_info.value.vendor_code == 1013
         finally:
@@ -319,11 +343,15 @@ async def test_oracle_26ai_out_of_band_cancel_aborts_sleep(
         assert int(probe_val) == 1
 
     async with AsyncOracleDriver(oracle_config) as async_driver:
-        async_timer = threading.Timer(0.05, async_driver._client.cancel)
+        assert int(await async_driver.select_value("SELECT 1 AS ok FROM DUAL")) == 1
+        start_async = time.monotonic()
+        async_timer = threading.Timer(0.25, async_driver._client.cancel)
         async_timer.start()
         try:
             with pytest.raises(QueryCancelledError) as async_exc_info:
-                await async_driver.execute("BEGIN DBMS_SESSION.SLEEP(5); END;")
+                await async_driver.execute("BEGIN DBMS_SESSION.SLEEP(10); END;")
+            elapsed_async = time.monotonic() - start_async
+            assert elapsed_async < 4.0
             assert async_exc_info.value.sqlstate == "57014"
             assert async_exc_info.value.vendor_code == 1013
         finally:
@@ -331,3 +359,93 @@ async def test_oracle_26ai_out_of_band_cancel_aborts_sleep(
 
         async_probe_val: Any = await async_driver.select_value("SELECT 1 AS ok FROM DUAL")
         assert int(async_probe_val) == 1
+
+
+@pytest.mark.anyio
+async def test_oracle_26ai_plsql_out_binds_and_subhour_tz_roundtrip(
+    oracle_config: OracleConfig,
+) -> None:
+    """Verify PL/SQL `OUT` binds and negative sub-hour `TIMESTAMP WITH TIME ZONE` roundtrips."""
+    async with AsyncOracleDriver(oracle_config) as driver:
+        plsql_res = await driver._client.execute(
+            "BEGIN :out_total := :lhs + :rhs; :out_label := UPPER(:tag); END;",
+            {"lhs": 19, "rhs": 23, "tag": "vertebra"},
+            out_binds={"out_total": "NUMBER", "out_label": "VARCHAR2"},
+        )
+        assert plsql_res.out_binds == {"out_total": 42, "out_label": "VERTEBRA"}
+
+        await driver.execute("DROP TABLE IF EXISTS vtb_ora_native_tstz PURGE")
+        await driver.execute(
+            "CREATE TABLE vtb_ora_native_tstz (id NUMBER(19) PRIMARY KEY, ts TIMESTAMP WITH TIME ZONE)"
+        )
+        try:
+            neg_half_hour = timezone(timedelta(minutes=-30))
+            sample = datetime(2026, 1, 1, 0, 15, 30, 125000, tzinfo=neg_half_hour)
+            await driver.execute("INSERT INTO vtb_ora_native_tstz (id, ts) VALUES (:1, :2)", (1, sample))
+            fetched = await driver.select_value("SELECT ts FROM vtb_ora_native_tstz WHERE id = :1", (1,))
+            assert isinstance(fetched, datetime)
+            assert fetched.tzinfo is not None
+            assert fetched == sample
+        finally:
+            await driver.execute("DROP TABLE IF EXISTS vtb_ora_native_tstz PURGE")
+
+
+@pytest.mark.anyio
+async def test_oracle_26ai_aq_raw_binary_notification_and_clean_close(
+    oracle_config: OracleConfig,
+) -> None:
+    """Verify live `DBMS_AQ` raw binary notification enqueue/dequeue and prompt listener cancellation on `close()`."""
+    qtable = "VTB_AQ_NATIVE_QT"
+    qname = "VTB_AQ_NATIVE_Q"
+    cleanup_plsql = (
+        "BEGIN "
+        f"  BEGIN DBMS_AQADM.STOP_QUEUE(queue_name => '{qname}'); EXCEPTION WHEN OTHERS THEN NULL; END; "
+        f"  BEGIN DBMS_AQADM.DROP_QUEUE(queue_name => '{qname}'); EXCEPTION WHEN OTHERS THEN NULL; END; "
+        f"  BEGIN DBMS_AQADM.DROP_QUEUE_TABLE(queue_table => '{qtable}', force => TRUE); EXCEPTION WHEN OTHERS THEN NULL; END; "
+        "END;"
+    )
+    setup_plsql = (
+        "BEGIN "
+        f"  DBMS_AQADM.CREATE_QUEUE_TABLE(queue_table => '{qtable}', queue_payload_type => 'RAW'); "
+        f"  DBMS_AQADM.CREATE_QUEUE(queue_name => '{qname}', queue_table => '{qtable}'); "
+        f"  DBMS_AQADM.START_QUEUE(queue_name => '{qname}'); "
+        "END;"
+    )
+    binary_payload = b"\x00\xff\xfevtb-aq-binary\x00\x80"
+
+    async with AsyncOracleDriver(oracle_config) as driver:
+        await driver.execute(cleanup_plsql)
+        await driver.execute(setup_plsql)
+        notify_cfg = OracleNotifyConfig(wait_timeout_seconds=30, poll_timeout=0.5)
+        source = OracleNotificationSource(driver, notify_cfg)
+        try:
+            msg_id = await source.publish_aq(qname, binary_payload)
+            assert len(msg_id) == 32
+
+            stream = driver.listen_notifications([qname], config=notify_cfg)
+            try:
+                event = await anext(stream)
+                assert event.channel == qname
+                assert event.payload == binary_payload
+                assert event.sender_id == msg_id
+            finally:
+                close_start = time.monotonic()
+                await stream.aclose()
+                assert (time.monotonic() - close_start) < 4.0
+
+            second_payload = b"\xff\x00vtb-aq-second\x7f"
+            msg_id_2 = await source.publish_aq(qname, second_payload)
+            aq_stream = source.listen_aq(qname)
+            try:
+                event_2 = await anext(aq_stream)
+                assert event_2.channel == qname
+                assert event_2.payload == second_payload
+                assert event_2.sender_id == msg_id_2
+            finally:
+                source_close_start = time.monotonic()
+                await source.close()
+                await aq_stream.aclose()
+                assert (time.monotonic() - source_close_start) < 4.0
+        finally:
+            await source.close()
+            await driver.execute(cleanup_plsql)

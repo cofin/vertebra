@@ -24,6 +24,7 @@ from vertebra._vertebra import (
     RsgiScope,
     WsgiEnviron,
 )
+from vertebra.db.driver import InterfaceError
 
 NATIVE_MODULES: tuple[str, ...] = (
     "vertebra._vertebra",
@@ -88,22 +89,50 @@ def test_oracle_native_clients_concurrent_construction() -> None:
     was_disabled = bool(checker is not None and not checker())
     barrier = threading.Barrier(8)
 
-    def _build(worker_id: int) -> tuple[bool, bool]:
+    def _build(worker_id: int) -> tuple[bool, bool, bool]:
         barrier.wait(timeout=5.0)
-        sync_client = oracle_mod.SyncOracleClient(host="memory", service_name=f"ft_{worker_id}")
-        async_client = oracle_mod.AsyncOracleClient(host="memory", service_name=f"ft_async_{worker_id}")
+        rejected_memory = False
         try:
-            res = sync_client.query("SELECT :1 AS id FROM DUAL", (worker_id,))
-            ok_sync = res.rowcount == 1 and res.rows[0][0] == worker_id
+            oracle_mod.SyncOracleClient(host="memory", service_name=f"ft_{worker_id}")
+        except InterfaceError:
+            rejected_memory = True
+
+        sync_client = oracle_mod.SyncOracleClient(
+            host="127.0.0.1",
+            port=1521,
+            service_name=f"ft_{worker_id}",
+        )
+        async_client = oracle_mod.AsyncOracleClient(
+            host="127.0.0.1",
+            port=1521,
+            service_name=f"ft_async_{worker_id}",
+        )
+        sync_pool = oracle_mod.SyncOraclePool(
+            host="127.0.0.1",
+            port=1521,
+            service_name=f"ft_pool_{worker_id}",
+            min_size=0,
+            max_size=2,
+        )
+        try:
+            sync_client.begin()
+            sync_client.set_session_attrs(module=f"ft_mod_{worker_id}")
+            sync_client.rollback()
+            ok_sync = (
+                sync_client.in_transaction is False
+                and sync_client.execute_many("INSERT INTO t VALUES (:1)", []) == 0
+                and sync_pool.stats()["max_size"] == 2
+            )
             ok_async = not async_client.closed
-            return (ok_sync, ok_async)
+            return (rejected_memory, ok_sync, ok_async)
         finally:
+            sync_pool.close()
             sync_client.close()
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         outcomes = list(pool.map(_build, range(8)))
 
-    assert outcomes == [(True, True)] * 8
+    assert outcomes == [(True, True, True)] * 8
     if was_disabled and checker is not None:
         assert checker() is False
 

@@ -542,6 +542,9 @@ impl OraclePoolCore {
 
         if let Some(tag) = connection_tag {
             worker.set_connection_tag(Some(tag));
+        } else {
+            worker.set_connection_tag(None);
+            worker.reset_untagged_session_attrs();
         }
         worker.set_tag_matched(false);
         worker.touch_last_used();

@@ -92,39 +92,31 @@ def _load_oracle_module() -> Any:
 def _build_client_kwargs(config: OracleConfig) -> dict[str, Any]:
     """Build keyword arguments for `SyncOracleClient` and `AsyncOracleClient` from `OracleConfig`."""
     desc = config.connect_descriptor()
-    is_memory_dsn = config.dsn in (":memory:", "oracle://:memory:") or config.host.lower() == "memory"
-    is_unconfigured_default = (
-        config.dsn == DEFAULT_ORACLE_DSN
-        and config.host == "localhost"
-        and config.port == 1521
-        and config.service_name == "FREEPDB1"
-        and config.sid is None
-        and config.user in ("system", None, "")
-        and config.password in ("", None)
-        and config.access_token is None
-        and config.wallet_zip is None
-        and config.wallet_path is None
-        and config.connect_descriptor_str is None
-        and config.topology is None
-    )
-    host = "memory" if (is_memory_dsn or is_unconfigured_default) else desc.host
     service_name = desc.service_name or config.service_name or "FREEPDB1"
-    connect_descriptor: str | None = None
-    if not (is_memory_dsn or is_unconfigured_default) and (
-        config.connect_descriptor_str is not None or config.topology is not None or config.tns_alias is not None
-    ):
-        connect_descriptor = desc.to_tns_descriptor()
     wallet_location: str | None = str(config.wallet_path) if config.wallet_path is not None else None
     if wallet_location is None and isinstance(config.wallet_zip, (str, Path)):
         wallet_location = str(config.wallet_zip)
+    connect_descriptor: str | None = None
+    if (
+        config.connect_descriptor_str is not None
+        or config.topology is not None
+        or (config.tns_alias is not None and wallet_location is None)
+        or isinstance(config.wallet_zip, (bytes, bytearray))
+    ):
+        connect_descriptor = desc.to_tns_descriptor()
+    dsn_arg: str | None = None
+    if wallet_location is not None and config.tns_alias is not None:
+        dsn_arg = config.tns_alias
+    elif connect_descriptor is None and config.dsn and config.dsn != DEFAULT_ORACLE_DSN:
+        dsn_arg = config.dsn
     token_opts = dict(config.token_auth_options) if config.token_auth_options is not None else None
     connect_timeout = float(desc.transport_connect_timeout) if desc.transport_connect_timeout > 0 else 10.0
     stmtcachesize = max(0, int(config.statement_cache_size))
     return {
         "user": config.user or None,
         "password": config.password or None,
-        "dsn": None if (is_memory_dsn or is_unconfigured_default) else config.dsn,
-        "host": host,
+        "dsn": dsn_arg,
+        "host": desc.host,
         "port": desc.port,
         "service_name": service_name,
         "sid": desc.sid,

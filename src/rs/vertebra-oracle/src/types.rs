@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::str::FromStr;
 
+use chrono::{Datelike, Timelike};
 use pyo3::prelude::*;
 use pyo3::types::{
     PyAny, PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple,
@@ -95,6 +96,19 @@ impl OracleColumn {
     }
 }
 
+fn canonical_oracle_type_name(raw_name: &str) -> String {
+    let stripped = raw_name.strip_prefix("DB_TYPE_").unwrap_or(raw_name);
+    match stripped {
+        "VARCHAR" => "VARCHAR2".to_owned(),
+        "NVARCHAR" => "NVARCHAR2".to_owned(),
+        "TIMESTAMP_TZ" => "TIMESTAMP WITH TIME ZONE".to_owned(),
+        "TIMESTAMP_LTZ" => "TIMESTAMP WITH LOCAL TIME ZONE".to_owned(),
+        "INTERVAL_DS" => "INTERVAL DAY TO SECOND".to_owned(),
+        "INTERVAL_YM" => "INTERVAL YEAR TO MONTH".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
 impl OracleColumn {
     /// Construct an [`OracleColumn`] from an `oracledb::Metadata` descriptor.
     pub fn from_metadata(meta: &oracledb::Metadata, lowercase_column_names: bool) -> Self {
@@ -105,7 +119,7 @@ impl OracleColumn {
         };
         let db_type = meta.db_type();
         let type_code = db_type.num();
-        let type_name = db_type.name().to_owned();
+        let type_name = canonical_oracle_type_name(db_type.name());
         let db_size = if meta.max_size() > 0 {
             Some(meta.max_size() as usize)
         } else {
@@ -412,8 +426,7 @@ pub enum OracleCellValue {
         minute: u8,
         second: u8,
         nanosecond: u32,
-        tz_hour_offset: Option<i8>,
-        tz_minute_offset: Option<i8>,
+        tz_offset_seconds: Option<i32>,
     },
     Oson(Vec<u8>),
     Vector(OracleVectorData),
@@ -498,15 +511,13 @@ impl OracleCellValue {
                 minute,
                 second,
                 nanosecond,
-                tz_hour_offset,
-                tz_minute_offset,
+                tz_offset_seconds,
             } => {
                 let dt_mod = py
                     .import("datetime")
                     .map_err(|e| OracleError::data_error(e.to_string()))?;
                 let microsecond = nanosecond / 1000;
-                if let (Some(tz_h), Some(tz_m)) = (tz_hour_offset, tz_minute_offset) {
-                    let total_seconds = (i32::from(tz_h) * 3600) + (i32::from(tz_m) * 60);
+                if let Some(total_seconds) = tz_offset_seconds {
                     let td = dt_mod
                         .getattr("timedelta")
                         .and_then(|cls| cls.call1((0, total_seconds)))
@@ -648,17 +659,14 @@ pub fn extract_bind_value(obj: &Bound<'_, PyAny>) -> Result<OracleCellValue, Ora
             .and_then(|v| v.extract())
             .map_err(|e| OracleError::data_error(e.to_string()))?;
 
-        let mut tz_hour_offset = None;
-        let mut tz_minute_offset = None;
+        let mut tz_offset_seconds = None;
         if let Ok(offset_obj) = obj.call_method0("utcoffset")
             && !offset_obj.is_none()
             && let Ok(total_secs_f) = offset_obj
                 .call_method0("total_seconds")
                 .and_then(|s| s.extract::<f64>())
         {
-            let total_secs = total_secs_f.round() as i32;
-            tz_hour_offset = Some((total_secs / 3600) as i8);
-            tz_minute_offset = Some(((total_secs % 3600) / 60) as i8);
+            tz_offset_seconds = Some(total_secs_f.round() as i32);
         }
         return Ok(OracleCellValue::Timestamp {
             year,
@@ -668,8 +676,7 @@ pub fn extract_bind_value(obj: &Bound<'_, PyAny>) -> Result<OracleCellValue, Ora
             minute,
             second,
             nanosecond: microsecond * 1000,
-            tz_hour_offset,
-            tz_minute_offset,
+            tz_offset_seconds,
         });
     }
 
@@ -924,8 +931,7 @@ pub fn decode_oracledb_row(
                             minute: ts.minute(),
                             second: ts.second(),
                             nanosecond: ts.nanoseconds(),
-                            tz_hour_offset: None,
-                            tz_minute_offset: None,
+                            tz_offset_seconds: None,
                         }
                     }
                 }
@@ -937,10 +943,10 @@ pub fn decode_oracledb_row(
                 .map_err(|e| OracleError::from_oracledb(&e))?
             {
                 Some(ts) => {
-                    let (tz_h, tz_m) = if ts.is_utc() || type_upper.contains("TIME ZONE") {
-                        (Some(0), Some(0))
+                    let tz_offset_seconds = if ts.is_utc() || type_upper.contains("TIME ZONE") {
+                        Some(0)
                     } else {
-                        (None, None)
+                        None
                     };
                     OracleCellValue::Timestamp {
                         year: i32::from(ts.year()),
@@ -950,8 +956,7 @@ pub fn decode_oracledb_row(
                         minute: ts.minute(),
                         second: ts.second(),
                         nanosecond: ts.nanoseconds(),
-                        tz_hour_offset: tz_h,
-                        tz_minute_offset: tz_m,
+                        tz_offset_seconds,
                     }
                 }
                 None => OracleCellValue::Null,
@@ -1036,6 +1041,40 @@ pub fn decode_oracledb_row(
     Ok(out)
 }
 
+fn serde_json_to_oracledb_json(val: serde_json::Value) -> Result<oracledb::JsonValue, OracleError> {
+    match val {
+        serde_json::Value::Null => Ok(oracledb::JsonValue::Null),
+        serde_json::Value::Bool(b) => Ok(oracledb::JsonValue::Boolean(b)),
+        serde_json::Value::Number(n) => {
+            let text = n.to_string();
+            if let Ok(ora_num) = oracledb::OracleNumber::from_str(&text) {
+                Ok(oracledb::JsonValue::Number(ora_num))
+            } else if let Some(fv) = n.as_f64() {
+                Ok(oracledb::JsonValue::BinaryDouble(fv))
+            } else {
+                Err(OracleError::data_error(format!(
+                    "Unsupported JSON numeric literal: {text}"
+                )))
+            }
+        }
+        serde_json::Value::String(s) => Ok(oracledb::JsonValue::String(s)),
+        serde_json::Value::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(serde_json_to_oracledb_json(item)?);
+            }
+            Ok(oracledb::JsonValue::JsonArray(out))
+        }
+        serde_json::Value::Object(map) => {
+            let mut out = HashMap::with_capacity(map.len());
+            for (k, v) in map {
+                out.insert(k, serde_json_to_oracledb_json(v)?);
+            }
+            Ok(oracledb::JsonValue::JsonObject(out))
+        }
+    }
+}
+
 /// Convert an [`OracleCellValue`] into a boxed `oracledb::ToDbValue` for query/execute binding.
 pub fn cell_to_oracledb_bind(
     cell: &OracleCellValue,
@@ -1063,18 +1102,31 @@ pub fn cell_to_oracledb_bind(
             minute,
             second,
             nanosecond,
-            tz_hour_offset,
-            ..
+            tz_offset_seconds,
         } => {
-            let ts = if tz_hour_offset.is_some() {
+            let ts = if let Some(offset_secs) = tz_offset_seconds {
+                let date =
+                    chrono::NaiveDate::from_ymd_opt(*year, u32::from(*month), u32::from(*day))
+                        .ok_or_else(|| {
+                            OracleError::data_error("Invalid timestamp date components")
+                        })?;
+                let dt = date
+                    .and_hms_nano_opt(
+                        u32::from(*hour),
+                        u32::from(*minute),
+                        u32::from(*second),
+                        *nanosecond,
+                    )
+                    .ok_or_else(|| OracleError::data_error("Invalid timestamp time components"))?;
+                let utc_dt = dt - chrono::Duration::seconds(i64::from(*offset_secs));
                 oracledb::OracleTimestamp::new_utc_timestamp(
-                    *year as i16,
-                    *month,
-                    *day,
-                    *hour,
-                    *minute,
-                    *second,
-                    *nanosecond,
+                    utc_dt.year() as i16,
+                    utc_dt.month() as u8,
+                    utc_dt.day() as u8,
+                    utc_dt.hour() as u8,
+                    utc_dt.minute() as u8,
+                    utc_dt.second() as u8,
+                    utc_dt.nanosecond(),
                 )
             } else {
                 oracledb::OracleTimestamp::new_timestamp(
@@ -1091,9 +1143,10 @@ pub fn cell_to_oracledb_bind(
         }
         OracleCellValue::Oson(oson_bytes) => {
             let json_slice = decode_oson_payload(oson_bytes).map_err(OracleError::data_error)?;
-            let text = std::str::from_utf8(json_slice)
+            let parsed: serde_json::Value = serde_json::from_slice(json_slice)
                 .map_err(|e| OracleError::data_error(e.to_string()))?;
-            Ok(Box::new(oracledb::JsonValue::String(text.to_owned())))
+            let ora_json = serde_json_to_oracledb_json(parsed)?;
+            Ok(Box::new(ora_json))
         }
         OracleCellValue::Vector(vec_data) => Ok(Box::new(vec_data.to_oracledb_vector())),
     }
@@ -1102,8 +1155,14 @@ pub fn cell_to_oracledb_bind(
 /// Build an output bind placeholder value for `DML RETURNING INTO` or PL/SQL `OUT` binds.
 pub fn out_bind_type_placeholder(type_hint: &str) -> Box<dyn oracledb::ToDbValue + Send + Sync> {
     let upper = type_hint.trim().to_ascii_uppercase();
-    if upper.contains("NUMBER") || upper.contains("INT") {
+    if upper.contains("NUMBER")
+        || upper.contains("INT")
+        || upper.contains("FLOAT")
+        || upper.contains("DECIMAL")
+    {
         Box::new(oracledb::DB_TYPE_NUMBER)
+    } else if upper == "RAW_MAX" || upper.contains("BLOB") {
+        Box::new(vec![0u8; 32767])
     } else if upper.contains("RAW") || upper.contains("BYTES") {
         Box::new(oracledb::DB_TYPE_RAW)
     } else if upper.contains("DATE") {
@@ -1116,8 +1175,10 @@ pub fn out_bind_type_placeholder(type_hint: &str) -> Box<dyn oracledb::ToDbValue
         Box::new(oracledb::DB_TYPE_JSON)
     } else if upper.contains("VECTOR") {
         Box::new(oracledb::DB_TYPE_VECTOR)
+    } else if upper == "VARCHAR2_MAX" || upper.contains("CLOB") {
+        Box::new(" ".repeat(32767))
     } else {
-        Box::new(" ".repeat(256))
+        Box::new(oracledb::DB_TYPE_VARCHAR)
     }
 }
 

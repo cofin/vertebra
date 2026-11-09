@@ -10,7 +10,9 @@ use std::sync::Arc;
 use arrow_array::builder::{
     BinaryBuilder, BooleanBuilder, Float64Builder, Int64Builder, StringBuilder,
 };
-use arrow_array::{ArrayRef, RecordBatch};
+use arrow_array::{
+    Array, ArrayRef, Decimal128Array, Float64Array, Int8Array, Int16Array, Int32Array, RecordBatch,
+};
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::{DataType, Field, Schema};
 
@@ -330,6 +332,146 @@ pub fn rows_to_arrow_ipc_chunked(
     }
 
     batches_to_arrow_ipc(&batches, lowercase_column_names)
+}
+
+fn try_promote_column_to_int64(field: &Field, col: &ArrayRef) -> Option<(Field, ArrayRef)> {
+    let len = col.len();
+    match field.data_type() {
+        DataType::Int8 => {
+            let arr = col.as_any().downcast_ref::<Int8Array>()?;
+            let mut b = Int64Builder::with_capacity(len);
+            for i in 0..len {
+                if arr.is_null(i) {
+                    b.append_null();
+                } else {
+                    b.append_value(i64::from(arr.value(i)));
+                }
+            }
+            let new_field = Field::new(field.name(), DataType::Int64, field.is_nullable())
+                .with_metadata(field.metadata().clone());
+            Some((new_field, Arc::new(b.finish())))
+        }
+        DataType::Int16 => {
+            let arr = col.as_any().downcast_ref::<Int16Array>()?;
+            let mut b = Int64Builder::with_capacity(len);
+            for i in 0..len {
+                if arr.is_null(i) {
+                    b.append_null();
+                } else {
+                    b.append_value(i64::from(arr.value(i)));
+                }
+            }
+            let new_field = Field::new(field.name(), DataType::Int64, field.is_nullable())
+                .with_metadata(field.metadata().clone());
+            Some((new_field, Arc::new(b.finish())))
+        }
+        DataType::Int32 => {
+            let arr = col.as_any().downcast_ref::<Int32Array>()?;
+            let mut b = Int64Builder::with_capacity(len);
+            for i in 0..len {
+                if arr.is_null(i) {
+                    b.append_null();
+                } else {
+                    b.append_value(i64::from(arr.value(i)));
+                }
+            }
+            let new_field = Field::new(field.name(), DataType::Int64, field.is_nullable())
+                .with_metadata(field.metadata().clone());
+            Some((new_field, Arc::new(b.finish())))
+        }
+        DataType::Decimal128(_, 0) => {
+            let arr = col.as_any().downcast_ref::<Decimal128Array>()?;
+            let mut b = Int64Builder::with_capacity(len);
+            for i in 0..len {
+                if arr.is_null(i) {
+                    b.append_null();
+                } else {
+                    let v = i64::try_from(arr.value(i)).ok()?;
+                    b.append_value(v);
+                }
+            }
+            let new_field = Field::new(field.name(), DataType::Int64, field.is_nullable())
+                .with_metadata(field.metadata().clone());
+            Some((new_field, Arc::new(b.finish())))
+        }
+        DataType::Float64
+            if field
+                .metadata()
+                .get("oracle.type-name")
+                .is_some_and(|t| t.eq_ignore_ascii_case("NUMBER")) =>
+        {
+            const MAX_SAFE_F64_INT: f64 = 9_007_199_254_740_992.0;
+            let arr = col.as_any().downcast_ref::<Float64Array>()?;
+            if len == 0 || arr.null_count() == len {
+                return None;
+            }
+            let mut b = Int64Builder::with_capacity(len);
+            for i in 0..len {
+                if arr.is_null(i) {
+                    b.append_null();
+                } else {
+                    let v = arr.value(i);
+                    if !v.is_finite() || v.fract() != 0.0 || v.abs() > MAX_SAFE_F64_INT {
+                        return None;
+                    }
+                    b.append_value(v as i64);
+                }
+            }
+            let new_field = Field::new(field.name(), DataType::Int64, field.is_nullable())
+                .with_metadata(field.metadata().clone());
+            Some((new_field, Arc::new(b.finish())))
+        }
+        _ => None,
+    }
+}
+
+/// Normalize a native `oracledb` Arrow 59 [`RecordBatch`] and serialize into chunked Arrow IPC bytes.
+pub fn oracledb_batch_to_arrow_ipc_chunked(
+    batch: &RecordBatch,
+    lowercase_column_names: bool,
+    batch_size: usize,
+) -> Result<(Vec<u8>, usize), OracleError> {
+    let orig_schema = batch.schema();
+    if orig_schema.fields().is_empty() && batch.num_rows() == 0 {
+        return batches_to_arrow_ipc(&[], lowercase_column_names);
+    }
+
+    let mut fields = Vec::with_capacity(orig_schema.fields().len());
+    let mut columns = Vec::with_capacity(batch.num_columns());
+    for (idx, field_arc) in orig_schema.fields().iter().enumerate() {
+        let col = batch.column(idx);
+        if let Some((new_field, new_col)) = try_promote_column_to_int64(field_arc.as_ref(), col) {
+            fields.push(new_field);
+            columns.push(new_col);
+        } else {
+            fields.push(field_arc.as_ref().clone());
+            columns.push(Arc::clone(col));
+        }
+    }
+
+    let norm_schema = Arc::new(Schema::new_with_metadata(
+        fields,
+        orig_schema.metadata().clone(),
+    ));
+    let norm_batch = RecordBatch::try_new(norm_schema, columns).map_err(|e| {
+        OracleError::data_error(format!("Arrow 59 RecordBatch normalize error: {e}"))
+    })?;
+
+    let chunk_len = batch_size.max(1);
+    let total_rows = norm_batch.num_rows();
+    let mut slices = Vec::new();
+    if total_rows == 0 {
+        slices.push(norm_batch);
+    } else {
+        let mut offset = 0usize;
+        while offset < total_rows {
+            let len = (total_rows - offset).min(chunk_len);
+            slices.push(norm_batch.slice(offset, len));
+            offset += len;
+        }
+    }
+
+    batches_to_arrow_ipc(&slices, lowercase_column_names)
 }
 
 #[cfg(test)]
